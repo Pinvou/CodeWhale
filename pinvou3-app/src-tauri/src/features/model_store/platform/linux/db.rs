@@ -1172,11 +1172,26 @@ pub struct LibraryRow {
 
 pub fn list_store_models_light() -> rusqlite::Result<Vec<LibraryRow>> {
     let conn = connect()?;
+    // 不用 SELECT * + EXCLUDE——那是 DuckDB 语法，SQLite 直接报
+    // "near EXCLUDE": syntax error（曾带着这个错发到设备，一开商店就弹
+    // 「本地模型库加载失败」）。显式列出全部列，两个 MB 级正文列用 NULL
+    // 占位：from_row 按列名取值，占位让它拿到 None 而不是报错。json_each
+    // 子查询仍在库内跑，正文一个字节不出 FFI 边界。
     let mut stmt = conn.prepare(
-        "SELECT * EXCLUDE (scripts_content_json, assets_content_json),
+        "SELECT m.card_id, m.model_name, m.card_name, m.org, m.description,
+                m.engine_name, m.engine_version, m.size_bytes, m.quantization,
+                m.source_repo_id, m.source_filename, m.status, m.running,
+                m.script_install_engine, m.script_deploy, m.script_download_model,
+                m.script_enable, m.script_stop, m.script_uninstall,
+                m.downloaded_at, m.weights_ready_at, m.deployed_at, m.container_name,
+                m.endpoint_url, m.endpoint_model, m.profiles_json, m.active_profile_id,
+                NULL AS scripts_content_json,
+                m.scripts_fetched_at, m.deployed_script_sha256, m.deploy_topology,
+                NULL AS assets_content_json,
+                m.resource_requirements_json, m.auto_start,
                 COALESCE((SELECT json_group_object(j.key, json_extract(j.value, '$.sha256'))
                           FROM json_each(m.scripts_content_json) j), '{}') AS script_hashes_json
-         FROM store_models m ORDER BY downloaded_at DESC",
+         FROM store_models m ORDER BY m.downloaded_at DESC",
     )?;
     let rows = stmt
         .query_map([], |row| {
@@ -1333,6 +1348,48 @@ mod tests {
             );
         }
         drop(conn);
+    }
+
+    /// 列表轻量查询必须真的能在 SQLite 上执行。这条测试是防回归的：曾把
+    /// DuckDB 的 `SELECT * EXCLUDE` 写进 SQL，三平台 CI 全绿（Windows/macOS
+    /// 走 stub 根本不编译这个模块，Linux 只跑了别的测试），结果设备上一开
+    /// 商店就「本地模型库加载失败: near "EXCLUDE": syntax error」。SQL 语法
+    /// 错误只有真跑一遍才拦得住。
+    #[test]
+    fn list_store_models_light_executes_and_strips_payloads() {
+        let _ctx = setup_temp_db();
+        let conn = connect().unwrap();
+        conn.execute(
+            "INSERT INTO store_models
+                 (card_id, model_name, card_name, engine_name, downloaded_at,
+                  scripts_content_json, assets_content_json)
+             VALUES ('card-light', 'qwen-light', 'Qwen Light', 'tachyon', '2026-10-23T00:00:00Z',
+                     '{\"enable\":{\"content\":\"echo hi\",\"sha256\":\"aa11bb22\"}}',
+                     '{\"logo.png\":{\"content\":\"x\",\"sha256\":\"cc33\"}}')",
+            [],
+        )
+        .unwrap();
+
+        let rows = list_store_models_light()
+            .unwrap_or_else(|e| panic!("轻量列表查询执行失败（SQL 语法错误会在这里暴露）：{e}"));
+        assert_eq!(rows.len(), 1);
+
+        // 每脚本 sha256 摘要由 json_each 在库内提取，键名与固化正文的键一致。
+        assert_eq!(
+            rows[0].script_hashes.get("enable").map(String::as_str),
+            Some("aa11bb22"),
+            "脚本哈希提取失败：{:?}",
+            rows[0].script_hashes
+        );
+
+        // 两个 MB 级正文字段绝不能从这条路径漏出去。
+        assert!(rows[0].record.scripts_content.is_empty(), "scripts 正文泄漏");
+        assert!(rows[0].record.assets_content.is_empty(), "assets 正文泄漏");
+
+        // 常规字段照常可读（顺带覆盖显式列清单没有漏列）。
+        assert_eq!(rows[0].record.card_id, "card-light");
+        assert!(!rows[0].record.running);
+        assert!(rows[0].record.auto_start, "存量行 auto_start 默认应为开");
     }
 
     #[test]
