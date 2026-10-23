@@ -54,6 +54,16 @@ tree, not in one-off manual runs:
     and a declaration line hosting more same-name declarations than the
     `#[path]` run can wire is refused (ambiguous identity) instead of
     the keyed exclusion silencing the plain twin's probe;
+  - round-20 review: hand-packed (rustfmt::skip) layouts the run parser
+    cannot bind token-wise — a path run closing on the declaration's own
+    line, a path value wrapped in `#[cfg_attr(...)]`, a path head
+    mid-line after code, and a mod keyword whose name/terminator wraps —
+    fail closed instead of letting a conventional same-name file
+    fabricate the pin's attribution (each was a silent green: the run
+    parser advanced past the packed declaration, no wired entry existed,
+    so the round-19 refusal and the per-declaration exclusion never
+    engaged); spacing between `#` and `[` and a leading UTF-8 BOM are
+    modelled as ordinary wiring instead of silently dropping it;
   - main()'s duplicate-#[test] detection — the guard's original purpose —
     is pinned against a mocked `cargo test --list` registry.
 
@@ -2543,6 +2553,170 @@ class Round19DeclLineAmbiguityTests(GuardFixture):
         )
         self.assertEqual(code, 0)
         self.assertNotIn("is #[ignore]d", err)
+
+
+class Round20PackedWiringTests(GuardFixture):
+    """Round-20 review (head 8b7945154c, 2026-10-23): the run parser
+    advanced past a `#[path]` entry whose line also carries the `mod`
+    declaration, leaving no wired entry — the round-19 refusal (keyed on
+    wired entries) and the round-18 per-declaration exclusion never
+    engaged, and a same-named conventional file stood in for the wired
+    source (maintainer control: packed 0/1/0/1 vs split 1/0/0/1). The
+    same substitution defeated every unbindable packed layout, so all of
+    them now fail closed; the two legal forms the old probes silently
+    dropped — whitespace between `#` and `[`, a leading UTF-8 BOM — are
+    modelled as ordinary wiring instead."""
+
+    _PIN = "app::commands::tests::critical_pin"
+    _run_main = DuplicateRegistrationTests._run_main
+
+    _PACKED = '#[path = "real.rs"] mod commands;\n'
+    _PACKED_SKIP = (
+        "#[rustfmt::skip]\n"
+        "mod wrapper { #[path = \"real.rs\"] mod commands; }\n"
+    )
+    _CFG_ATTR = '#[cfg_attr(unix, path = "real.rs")]\nmod commands;\n'
+    _MID_LINE = 'mod app { #[path = "real.rs"] mod commands; }\n'
+    _SPLIT_KEYWORD = "mod app {\n#[path = \"real.rs\"]\nmod\ncommands;\n}\n"
+    _HASH_SPACE = 'mod app {\n# [path = "real.rs"]\nmod commands;\n}\n'
+    _BOM = "mod app {\n#[path = \"real.rs\"]\nmod commands;\n}\n"
+
+    def _files(self, real, decoy):
+        return {"app/real.rs": real, "app/commands.rs": decoy}
+
+    def test_packed_same_line_fails_closed(self):
+        # The refusal is about the unbindable layout, not the pin state:
+        # it must fire with the wired source ignored (decoy live — the
+        # silent green the maintainer reproduced) and with everything
+        # live, because the wiring is dropped either way.
+        for real, decoy in ((_IGNORED_PIN, _LIVE_PIN), (_LIVE_PIN, _LIVE_PIN)):
+            with self.assertRaises(SystemExit) as ctx:
+                self._run_main(
+                    [self._PIN],
+                    source=self._PACKED,
+                    required=[self._PIN],
+                    files=self._files(real, decoy),
+                )
+            message = str(ctx.exception)
+            self.assertIn("shares that line with a module declaration", message)
+            self.assertIn("lib.rs:1", message)
+            self.assertIn("put the mod on its own line", message)
+
+    def test_rustfmt_skip_wrapper_packed_fails_closed(self):
+        # The maintainer's control shape, as rustfmt lays it out:
+        # `#[rustfmt::skip]` on its own line keeps the run branch off the
+        # packed line, so the mid-line head refusal is the net that fires
+        # (a packed run on the wrapper's own line hits the shared-line
+        # refusal instead — both are fail-closed).
+        with self.assertRaises(SystemExit) as ctx:
+            self._run_main(
+                [self._PIN],
+                source=self._PACKED_SKIP,
+                required=[self._PIN],
+                files=self._files(_IGNORED_PIN, _LIVE_PIN),
+            )
+        message = str(ctx.exception)
+        self.assertIn("appears mid-line after code", message)
+        self.assertIn("lib.rs:2", message)
+
+    def test_cfg_attr_wrapped_path_fails_closed(self):
+        # The predicate cannot be decided statically, and which branch
+        # (attribute target vs conventional spot) loads is exactly the
+        # attribution the scan needs — refuse instead of guessing.
+        for real, decoy in ((_IGNORED_PIN, _LIVE_PIN), (_LIVE_PIN, _IGNORED_PIN)):
+            with self.assertRaises(SystemExit) as ctx:
+                self._run_main(
+                    [self._PIN],
+                    source=self._CFG_ATTR,
+                    required=[self._PIN],
+                    files=self._files(real, decoy),
+                )
+            message = str(ctx.exception)
+            self.assertIn("wrapped in cfg_attr", message)
+            self.assertIn("lib.rs:1", message)
+
+    def test_mid_line_path_head_fails_closed(self):
+        # A path head after code on the same line is never rustfmt output
+        # and cannot be bound to its declaration token-wise.
+        with self.assertRaises(SystemExit) as ctx:
+            self._run_main(
+                [self._PIN],
+                source=self._MID_LINE,
+                required=[self._PIN],
+                files=self._files(_IGNORED_PIN, _LIVE_PIN),
+            )
+        message = str(ctx.exception)
+        self.assertIn("appears mid-line after code", message)
+        self.assertIn("lib.rs:1", message)
+
+    def test_split_keyword_fails_closed(self):
+        # `mod` alone on the run's next line (name/terminator wrapped):
+        # the binding cannot be vouched for, so refuse instead of letting
+        # the conventional candidate answer.
+        with self.assertRaises(SystemExit) as ctx:
+            self._run_main(
+                [self._PIN],
+                source=self._SPLIT_KEYWORD,
+                required=[self._PIN],
+                files=self._files(_IGNORED_PIN, _LIVE_PIN),
+            )
+        message = str(ctx.exception)
+        self.assertIn("does not share the keyword's line", message)
+        self.assertIn("lib.rs:3", message)
+
+    def test_hash_space_form_is_wired(self):
+        # Positive/negative controls for the spacing-tolerant head: the
+        # wired target is the module's only source, a same-named decoy at
+        # the conventional spot never substitutes (round-17 exclusion),
+        # and an #[ignore] in the wired source is red at its own line.
+        code, err = self._run_main(
+            [self._PIN],
+            source=self._HASH_SPACE,
+            required=[self._PIN],
+            files=self._files(_IGNORED_PIN, _LIVE_PIN),
+        )
+        self.assertEqual(code, 1)
+        self.assertIn(f"required pin {self._PIN} is #[ignore]d at", err)
+        self.assertIn(str(Path("app") / "real.rs") + ":4", err)
+
+        code, err = self._run_main(
+            [self._PIN],
+            source=self._HASH_SPACE,
+            required=[self._PIN],
+            files=self._files(_LIVE_PIN, _IGNORED_PIN),
+        )
+        self.assertEqual(code, 0)
+        self.assertNotIn("is #[ignore]d", err)
+
+        code, err = self._run_main(
+            [self._PIN],
+            source=self._HASH_SPACE,
+            required=[self._PIN],
+            files=self._files(_LIVE_PIN, _LIVE_PIN),
+        )
+        self.assertEqual(code, 0)
+
+    def test_bom_prefix_keeps_top_level_wiring(self):
+        # rustc accepts a leading BOM; the old read left it on line 1 and
+        # the attribute probe silently dropped top-of-file wiring. The BOM
+        # sits directly on the wiring line here: the wired source is
+        # scanned, its #[ignore] red at its own line, and a live source
+        # green.
+        top_pin = "commands::tests::critical_pin"
+        bom_lib = '\ufeff#[path = "real.rs"]\nmod commands;\n'
+        files = {"real.rs": _IGNORED_PIN, "commands.rs": _LIVE_PIN}
+        code, err = self._run_main(
+            [top_pin], source=bom_lib, required=[top_pin], files=files,
+        )
+        self.assertEqual(code, 1)
+        self.assertIn(f"required pin {top_pin} is #[ignore]d at", err)
+        self.assertIn("real.rs:4", err)
+
+        files = {"real.rs": _LIVE_PIN, "commands.rs": _LIVE_PIN}
+        code, err = self._run_main(
+            [top_pin], source=bom_lib, required=[top_pin], files=files,
+        )
+        self.assertEqual(code, 0)
 
 
 if __name__ == "__main__":

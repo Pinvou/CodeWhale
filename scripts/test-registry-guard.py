@@ -44,6 +44,19 @@ Still unmodelled (a REQUIRED_PIN there hits the fail-closed net, not a
 silent skip): `#[ignore]` written on the same line as its inline-module
 opener.
 
+Round-20 review (head 8b7945154c) closed the packed-layout half of that
+promise: a `#[path]` entry whose line also carries the `mod` declaration
+(rustfmt::skip hand-packing), a path value wrapped in `#[cfg_attr(...)]`
+(the predicate cannot be decided statically and the plain-resolution spot
+would silently stand in for the wired source), a `#[path = "..."]`
+attribute head appearing mid-line after code, and a `mod` declaration
+split across lines behind a pending wiring are all refused outright —
+each previously let a same-named conventional file fabricate the pin's
+attribution. Forms that need no refusal are now modelled instead:
+`#` and `[` separated by spaces (`# [path = "x.rs"]`) and a leading UTF-8
+BOM (rustc accepts both; the old head regex/line-start probe silently
+dropped the wiring).
+
 Run it from anywhere (paths are anchored to this script's repo location);
 it reuses cargo's artifacts, and CI wires it into the linux rust-test leg
 right after `cargo test --lib --no-run`.
@@ -239,7 +252,14 @@ def _fn_after(lines, idx):
 _MOD_TOKEN_RE = re.compile(
     r"\bmod\s+([A-Za-z_][A-Za-z0-9_]*)\s*(\{)?|\{|\}"
 )
-_PATH_ATTR_HEAD_RE = re.compile(r"#\[\s*path\s*=")
+# `#` and `[` may legally carry whitespace between them (rustc tokenizes
+# them separately), so the head/run-start probes accept `# [path = ...]`
+# — round-20 review: the old `#\[` prefix check silently dropped the
+# wiring and the module resolved to its conventional candidate instead.
+_PATH_ATTR_HEAD_RE = re.compile(r"#\s*\[\s*path\s*=")
+_ATTR_RUN_START_RE = re.compile(r"#\s*\[")
+_CFG_ATTR_PATH_RE = re.compile(r"\bcfg_attr\b")
+_PATH_EQ_RE = re.compile(r"\bpath\s*=")
 
 
 def _string_value_after(lines, li, col):
@@ -639,6 +659,15 @@ def _path_wired_mods(stripped, lines, stacks, path, plain_file, child_dir, file_
     consumes the pending stem while a same-named `#[path]` twin clears
     it, so the recorded value is the (physical base, directory) pair
     `_record_inline_decl` compares.
+    Round-20 review closed the packed-layout family the run parser could
+    not bind: a run closing on a line that also carries a `mod` token, a
+    path value inside `#[cfg_attr(...)]`, a path-attribute head mid-line
+    after code, and a mod keyword whose name/terminator wraps to another
+    line all raise instead of leaving the conventional candidate to answer
+    for the wired source (each shape was a same-name-substitution
+    silent-green); `# [` spacing between `#` and `[` is now accepted as an
+    ordinary entry, and run/entry detection uses that same spacing-tolerant
+    probe.
     Returns ([(mod_name, path_value, inline_module_stack, decl_line)],
     {(enclosing_stack, mod_name): directory})."""
     wired = []
@@ -648,7 +677,20 @@ def _path_wired_mods(stripped, lines, stacks, path, plain_file, child_dir, file_
     i = 0
     n = len(stripped)
     while i < n:
-        if not stripped[i].lstrip().startswith("#["):
+        if not _ATTR_RUN_START_RE.match(stripped[i].lstrip()):
+            # A path-attribute head outside a run-start position (after
+            # inline-module opener braces, `}`, or any other code on the
+            # line) is rustfmt::skip hand-packing this lexer cannot bind to
+            # its declaration — refuse instead of letting the conventional
+            # candidate stand in for the wired source (round-20 review).
+            if _PATH_ATTR_HEAD_RE.search(stripped[i]) is not None:
+                raise SystemExit(
+                    "test-registry-guard: #[path] attribute head at "
+                    f"{path}:{i + 1} appears mid-line after code, so the "
+                    "run-to-declaration binding cannot be told apart from "
+                    "same-line siblings — put the attribute and its mod on "
+                    "their own lines"
+                )
             if pending_value is not None:
                 # the run ended on a non-attribute item without a `mod`
                 # declaration: rustc would attach the path attribute to
@@ -697,23 +739,51 @@ def _path_wired_mods(stripped, lines, stacks, path, plain_file, child_dir, file_
                     "wired module"
                 )
             pending_value = value
+        # Round-20 review: a pending path value whose run closes on a line
+        # that also carries a `mod` token cannot be bound token-wise here —
+        # the old parser advanced to the next line, dropped (or mis-paired)
+        # the wiring, and a same-named conventional file silently stood in
+        # for the wired source while its pin passed as attributable.
+        # rustfmt puts each declaration on its own line, so only hand-packed
+        # (rustfmt::skip) layouts trip this.
+        if (
+            pending_value is not None
+            and _MOD_TOKEN_RE.search(stripped[end - 1]) is not None
+        ):
+            raise SystemExit(
+                "test-registry-guard: #[path] wiring closing at "
+                f"{path}:{end} shares that line with a module declaration — "
+                "the run-to-declaration binding cannot be told apart from "
+                "same-line siblings and a conventional same-name file would "
+                "silently substitute for the wired source; put the mod on "
+                "its own line"
+            )
+        # Round-20 review: a path value inside `#[cfg_attr(...)]` depends on
+        # a predicate this guard cannot decide (and which cfg branch loads
+        # the conventional candidate vs the attribute target is exactly the
+        # attribution the scan needs) — refuse instead of resolving the
+        # module to whichever candidate the plain probe finds.
+        if _CFG_ATTR_PATH_RE.search(joined) and _PATH_EQ_RE.search(joined):
+            raise SystemExit(
+                "test-registry-guard: #[path] value wrapped in cfg_attr at "
+                f"{path}:{i + 1} — the guard cannot decide the predicate, "
+                "so neither the attribute target nor the conventional spot "
+                "can be trusted as the module's source; inline the path "
+                "attribute per cfg branch"
+            )
         j = end
         while j < n and not stripped[j].strip():
             j += 1
         if j >= n:
             break
-        if stripped[j].lstrip().startswith("#["):
+        if _ATTR_RUN_START_RE.match(stripped[j].lstrip()):
             # another attribute entry in the same run: keep any pending
             # path value and pair it with the declaration after it
             i = j
             continue
         decl = stripped[j]
         tok = _MOD_TOKEN_RE.search(decl)
-        if (
-            pending_value is not None
-            and tok is not None
-            and tok.group(1) is not None
-        ):
+        if pending_value is not None and tok is not None and tok.group(1) is not None:
             if not tok.group(2) and decl[tok.end() :].strip().startswith(";"):
                 wired.append(
                     (tok.group(1), pending_value, tuple(stacks[j]), j)
@@ -742,6 +812,19 @@ def _path_wired_mods(stripped, lines, stacks, path, plain_file, child_dir, file_
                 pending_value = None
                 i = j + 1
                 continue
+        # Round-20 review: a pending wiring attaching to a mod keyword whose
+        # name or terminator sits on a later line (`mod` alone, or
+        # `mod <name>` with `;`/`{` wrapped) is a binding this lexer cannot
+        # vouch for — rustfmt always emits `mod <name>;` on one line, so
+        # anything else is hand-packed layout and gets refused instead of
+        # letting the conventional candidate answer for the wired source.
+        if pending_value is not None and re.search(r"\bmod\b", decl):
+            raise SystemExit(
+                "test-registry-guard: #[path] wiring at "
+                f"{path}:{j + 1} attaches to a mod declaration whose name "
+                "or terminator does not share the keyword's line — the "
+                "binding cannot be trusted; put `mod <name>;` on one line"
+            )
         pending_value = None
         i = end
     return wired, inline_dirs
@@ -917,7 +1000,12 @@ def _scan_graph():
             queue.append((candidate, child_base, crate_root, loaded, chain))
 
         try:
-            with open(path, encoding="utf-8", errors="replace") as fh:
+            # utf-8-sig: a leading BOM is legal to rustc but the old read
+            # left it on line 1, whose `lstrip()` then failed the attribute
+            # startswith probe and silently dropped top-of-file wiring
+            # (round-20 review); utf-8-sig strips it if present and is a
+            # no-op otherwise.
+            with open(path, encoding="utf-8-sig", errors="replace") as fh:
                 lines = fh.read().splitlines()
         except OSError as err:
             raise SystemExit(
@@ -927,7 +1015,7 @@ def _scan_graph():
         i = 0
         n = len(stripped)
         while i < n:
-            if not stripped[i].lstrip().startswith("#["):
+            if not _ATTR_RUN_START_RE.match(stripped[i].lstrip()):
                 i += 1
                 continue
             run = []
@@ -940,7 +1028,7 @@ def _scan_graph():
                     # transparent within the run — rustc attachment semantics
                     j += 1
                     continue
-                if not lexed.startswith("#["):
+                if not _ATTR_RUN_START_RE.match(lexed):
                     break
                 j, ignore_line = _parse_attribute(stripped, j)
                 entries += 1
