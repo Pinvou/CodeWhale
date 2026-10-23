@@ -320,6 +320,43 @@ mod tests {
     use super::*;
 
     #[test]
+    fn forkguard_web_fields_description_matches_parser() {
+        use crate::tools::handle::query_jsonpath;
+        use crate::tools::spec::ToolSpec;
+        use serde_json::json;
+
+        let schema = crate::tools::web_tool::WebTool::new("Web").input_schema();
+        let description = schema["properties"]["fields"]["description"]
+            .as_str()
+            .expect("Web must describe its JSONPath fields");
+        let root = json!({"items": [{"name": "first"}, {"name": "second"}], "odd.key": 7});
+        // The schema's advertised selectors must produce these actual matches;
+        // this is a parser contract, not just a fingerprint of a prose sentence.
+        for (advertised, path, expected) in [
+            ("$", "$", vec![root.clone()]),
+            (".field", "$.items", vec![root["items"].clone()]),
+            ("[index]", "$.items[0].name", vec![json!("first")]),
+            (
+                "[*]",
+                "$.items[*].name",
+                vec![json!("first"), json!("second")],
+            ),
+            ("['field']", "$['odd.key']", vec![json!(7)]),
+        ] {
+            assert!(
+                description.contains(advertised),
+                "missing {advertised}: {description}"
+            );
+            assert_eq!(query_jsonpath(&root, path).expect(path), expected, "{path}");
+        }
+        assert!(description.contains("$.items[*].name"));
+        assert!(description.contains("Recursive descent (..) and filters are not supported"));
+        for unsupported in ["$..name", "$.items[?(@.name)]"] {
+            assert!(query_jsonpath(&root, unsupported).is_err(), "{unsupported}");
+        }
+    }
+
+    #[test]
     fn retrieval_defaults_are_coherent_across_search_and_fetch() {
         use super::super::fetch::{DEFAULT_TIMEOUT, HARD_MAX_TIMEOUT};
         use crate::tools::spec::ToolSpec;
