@@ -1606,7 +1606,10 @@ mod tests {
         let legacy = redact_session_metadata_for_web(legacy_input);
         assert!(legacy.workspace_roots.is_empty());
         assert!(
-            serde_json::to_value(&legacy).unwrap().get("workspace_roots").is_none(),
+            serde_json::to_value(&legacy)
+                .unwrap()
+                .get("workspace_roots")
+                .is_none(),
             "serialized legacy metadata must omit the empty roots key"
         );
     }
