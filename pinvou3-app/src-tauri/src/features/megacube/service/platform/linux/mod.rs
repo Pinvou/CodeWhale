@@ -402,7 +402,13 @@ pub fn submit(
             archived.error = job.error;
             archived.finished_at = Some(now());
             save_job(&archived)?;
-            if !["rollback", "restore", "start", "resume", "rescue_stop"].contains(&action) {
+            // A hard kill before the first persistence leaves no service record
+            // behind the receipt: there is nothing to recover, so a fresh
+            // install must not stay gated behind recovery forever.
+            let first_install_without_record = action == "install" && saved_record()?.is_none();
+            if !["rollback", "restore", "start", "resume", "rescue_stop"].contains(&action)
+                && !first_install_without_record
+            {
                 return Err("component_recovery_required".into());
             }
         }
