@@ -97,6 +97,9 @@ struct App {
     interface: Interface,
     cards: Arc<Mutex<HashMap<String, SharedCard>>>,
     stop: watch::Receiver<bool>,
+    /// route 存活性检查的共享去重缓存（card -> 上次实查时刻）。监督循环按流
+    /// 各起一个，K 条流不该变成 K 次/秒的 docker inspect——同秒内复用结论。
+    route_checks: Arc<std::sync::Mutex<HashMap<String, std::time::Instant>>>,
 }
 
 impl Gateway {
@@ -186,11 +189,17 @@ impl Gateway {
                     .into_iter()
                     .find(|i| i.address == ip)
                     .ok_or("lan_address_changed")?;
+                // r5 评审 P2-2：route+verify_model 最坏 ~6s（docker inspect + 上游
+                // GET），此前全程持 session 锁——前端 3s 一轮的 status 轮询被卡住，
+                // 启用/停用按钮看起来"死"了。慢验证在锁外做；锁内只留快校验与
+                // 状态提交（下方第二段重新拿锁）。
+                drop(session);
                 let route = store.route(&card).await?;
                 let client = local_client()?;
                 verify_model(&client, &route)
                     .await
                     .map_err(|_| "lan_model_unavailable")?;
+                let mut session = self.session.lock().await;
                 if session
                     .as_ref()
                     .is_some_and(|s| *s.stop.borrow() || s.task.is_finished())
@@ -225,6 +234,7 @@ impl Gateway {
                         interface: interface.clone(),
                         cards: cards.clone(),
                         stop: receiver.clone(),
+                        route_checks: Arc::new(std::sync::Mutex::new(HashMap::new())),
                     };
                     let task = tokio::spawn(serve(listener, app, receiver, stop.clone()));
                     *session = Some(Session {
@@ -502,6 +512,28 @@ async fn cancelled(mut signal: watch::Receiver<Option<ApiError>>) -> ApiError {
 /// Request-owned supervision starts before body upload and survives HTTP
 /// backpressure. Key and route clocks are independent: a slow route lookup must
 /// not delay key revocation, nor may fast chunks restart either clock.
+/// route 存活检查的共享去重（评审 P2-2）：1s 内已有任一流实查过这张卡，
+/// 其余流直接认定仍存活。实查失败时**不写缓存**（失败结论立即广播给所有流）。
+async fn route_check_fresh(app: &App, card: &str) -> bool {
+    const FRESH_FOR: Duration = Duration::from_secs(1);
+    {
+        let cache = app.route_checks.lock().unwrap();
+        if let Some(last) = cache.get(card) {
+            if last.elapsed() < FRESH_FOR {
+                return true;
+            }
+        }
+    }
+    if app.store.route(card).await.is_err() {
+        return false;
+    }
+    app.route_checks
+        .lock()
+        .unwrap()
+        .insert(card.to_string(), std::time::Instant::now());
+    true
+}
+
 fn supervise(
     app: App,
     key: String,
@@ -510,6 +542,12 @@ fn supervise(
 ) -> (AbortOnDrop, watch::Receiver<Option<ApiError>>) {
     let (signal, receiver) = watch::channel(None);
     let task = tokio::spawn(async move {
+        // r5 评审 P2-2：监督按流各起一个循环，K 条卡住的流 = K 次/秒的 docker
+        // inspect（route）+ SQLite 连接（key），可饿坏共享 spawn_blocking 池。
+        // 不能简单放宽间隔——撤销亚秒生效是 PR 正文承诺且有 3s 收敛测试钉住。
+        // 修法：key 重检保持 1s（本地 SQLite 开销极小）；route 重检加**共享 1s
+        // 去重缓存**——同一秒内已由任一流检查过的卡，其余流直接复用结论，
+        // K 条流的合计成本从 K 次/秒降为 1 次/秒。
         let keys = async {
             let mut tick = tokio::time::interval(Duration::from_secs(1));
             tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
@@ -525,7 +563,7 @@ fn supervise(
             tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
             loop {
                 tick.tick().await;
-                if app.store.route(&card).await.is_err() {
+                if !route_check_fresh(&app, &card).await {
                     return rejection(
                         StatusCode::SERVICE_UNAVAILABLE,
                         "model_unavailable",
