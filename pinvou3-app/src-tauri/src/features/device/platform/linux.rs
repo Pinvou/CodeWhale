@@ -416,8 +416,9 @@ mod tests {
         std::fs::create_dir_all(&link_dir).expect("create link dir");
         let smuggled = link_dir.join("weights");
         std::os::unix::fs::symlink(&blobs, &smuggled).expect("create symlink");
-        let error = weights_deletion_guard(&home, None, Some(&decoy_root), &smuggled)
-            .expect_err("canonical blob layout must be re-checked");
+        let error =
+            weights_deletion_guard(&home, None, std::slice::from_ref(&decoy_root), &smuggled)
+                .expect_err("canonical blob layout must be re-checked");
         assert!(error.contains("blob"), "unexpected error: {error}");
         // 对照：同一形状、指向普通目录的符号链接照常放行（签名复查不误伤；
         // canonical 目标自身仍须过深度臂，故给足 3 层）。
@@ -426,18 +427,20 @@ mod tests {
         let plain_link = link_dir.join("plain");
         std::os::unix::fs::symlink(&plain, &plain_link).expect("create plain symlink");
         assert!(
-            weights_deletion_guard(&home, None, Some(&decoy_root), &plain_link).is_ok(),
+            weights_deletion_guard(&home, None, std::slice::from_ref(&decoy_root), &plain_link)
+                .is_ok(),
             "plain symlinked weights must still pass"
         );
         let _ = std::fs::remove_dir_all(&home);
     }
 
-    // 登记端 canonical 签名复查（十九轮评审 P1）：原始路径无 blobs 分量、
-    // 末分量指向 blob 存储的符号链接必须命中；不存在的路径按 false（登记
-    // 容许先登记后建目录，移除端守卫兜底）。
+    // 登记端 canonical 签名复查（十九轮评审 P1；第二十轮评审 P2 扩展
+    // manifests）：原始路径无 daemon 布局分量、末分量指向 blob/manifests 存储
+    // 的符号链接必须命中；不存在的路径按 false（登记容许先登记后建目录，
+    // 移除端守卫兜底）。
     #[test]
-    fn canonicalized_has_blob_layout_follows_the_final_symlink() {
-        use crate::features::device::external_models::canonicalized_has_blob_layout;
+    fn canonicalized_has_ollama_layout_follows_the_final_symlink() {
+        use crate::features::device::external_models::canonicalized_has_ollama_layout;
         let home =
             std::env::temp_dir().join(format!("register-canon-blobs-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&home);
@@ -445,10 +448,17 @@ mod tests {
         std::fs::create_dir_all(&blobs).expect("create blobs");
         let smuggled = home.join("weights-link");
         std::os::unix::fs::symlink(&blobs, &smuggled).expect("create symlink");
-        assert!(canonicalized_has_blob_layout(
+        assert!(canonicalized_has_ollama_layout(
             smuggled.to_string_lossy().as_ref()
         ));
-        assert!(!canonicalized_has_blob_layout(
+        let manifests = home.join("migrated2").join("models").join("manifests");
+        std::fs::create_dir_all(&manifests).expect("create manifests");
+        let smuggled_manifests = home.join("manifests-link");
+        std::os::unix::fs::symlink(&manifests, &smuggled_manifests).expect("create symlink");
+        assert!(canonicalized_has_ollama_layout(
+            smuggled_manifests.to_string_lossy().as_ref()
+        ));
+        assert!(!canonicalized_has_ollama_layout(
             home.join("not-created-yet").to_string_lossy().as_ref()
         ));
         let _ = std::fs::remove_dir_all(&home);
