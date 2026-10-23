@@ -17,7 +17,7 @@ import { fileURLToPath } from 'node:url';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const chatBridge = readFileSync(
-  path.join(here, '..', 'src', 'platform', 'tauri', 'bridge', 'chat.js'),
+  path.join(here, '..', 'src', 'shared', 'bridge-shared-helpers.js'),
   'utf8',
 );
 const sessionsBridge = readFileSync(
@@ -26,9 +26,11 @@ const sessionsBridge = readFileSync(
 );
 
 // 只检查 sendMessageToSession 函数体（起点到下一个同级函数声明），避免文件里
-// 其他 sessions.some 用法稀释断言。
+// 其他 sessions.some 用法稀释断言。函数正文自 FE14 wave 5 起收敛在
+// shared/bridge-shared-helpers.js（web+tauriChat 共享），lane 侧只剩薄包装；
+// sessionStates 在共享正文里是 cell 依赖（.value）。
 const start = chatBridge.indexOf('async function sendMessageToSession');
-assert.ok(start >= 0, 'sendMessageToSession not found in chat.js');
+assert.ok(start >= 0, 'sendMessageToSession not found in shared/bridge-shared-helpers.js');
 let next = chatBridge.indexOf('\n  async function ', start + 10);
 if (next === -1) next = chatBridge.length;
 const sendBody = chatBridge.slice(start, next);
@@ -36,7 +38,7 @@ const sendBody = chatBridge.slice(start, next);
 assert.match(sendBody, /state\.sessions\.some\(/, 'ruler 1: backend list hit');
 assert.match(
   sendBody,
-  /Object\.prototype\.hasOwnProperty\.call\(sessionStates, sid\)/,
+  /Object\.prototype\.hasOwnProperty\.call\(sessionStates\.value, sid\)/,
   'ruler 2: local buffer (own-property check, prototype-safe)',
 );
 

@@ -101,7 +101,7 @@ test('projects domain is fully wired (feature -> slice -> app)', () => {
 
 test('device domain is fully wired (feature -> slice -> app)', () => {
   const feature = read('platform/tauri/bridge/device.js');
-  const sliceFields = parseSliceFields(read('platform/tauri/bridge.js'));
+  const sliceFields = parseSliceFields(read('shared/bridge-shared-helpers.js'));
   const appDomains = parseAppDomains(read('app/main.jsx'));
 
   assert.ok(
