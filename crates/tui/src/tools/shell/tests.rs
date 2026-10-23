@@ -210,6 +210,113 @@ async fn lowercase_bash_returns_one_ordered_stream() {
     assert_eq!(result.content, "out-1err-2out-3");
 }
 
+#[cfg(windows)]
+fn windows_python_stdio_fixture() -> (tempfile::TempDir, String) {
+    assert!(
+        crate::shell_dispatcher::global_dispatcher()
+            .kind()
+            .is_powershell(),
+        "requires a PowerShell dispatcher; run from PowerShell or cmd with SHELL unset"
+    );
+    let workspace = tempdir().expect("workspace");
+    let program = std::env::var_os("CODEWHALE_TEST_PYTHON")
+        .unwrap_or_else(|| std::ffi::OsString::from("python"));
+    let mut probe = std::process::Command::new(program);
+    crate::utils::suppress_console_window(&mut probe);
+    let resolved = probe
+        .args(["-c", "import sys; print(sys.executable)"])
+        .env("PYTHONIOENCODING", "utf-8")
+        .output()
+        .expect("native Python on PATH for this opt-in regression");
+    assert!(
+        resolved.status.success(),
+        "Python resolution failed: {resolved:?}"
+    );
+    let python = PathBuf::from(
+        String::from_utf8(resolved.stdout)
+            .expect("UTF-8 Python path")
+            .trim(),
+    );
+    let script = workspace.path().join("verify.py");
+    std::fs::write(
+        &script,
+        concat!(
+            "import sys\n",
+            "sys.stdout.write('x' * 65536 + '\\n')\n",
+            "print('STDOUT-\\u5927\\u5c0f\\u4e0d\\u5339\\u914d: 0 []', flush=True)\n",
+            "print('STDERR-\\u6821\\u9a8c\\u901a\\u8fc7: 0 GB', file=sys.stderr, flush=True)\n",
+        ),
+    )
+    .expect("write Python output fixture");
+    let quote = |path: &Path| path.to_string_lossy().replace('\'', "''");
+    let command = format!(
+        "& '{}' '{}'; Write-Output 'PowerShell-中文正常'",
+        quote(&python),
+        quote(&script)
+    );
+    (workspace, command)
+}
+
+#[cfg(windows)]
+fn assert_windows_python_stdio(output: &str) {
+    assert!(
+        output.contains("STDOUT-大小不匹配: 0 []"),
+        "Python stdout missing or garbled: {output}"
+    );
+    assert!(
+        output.contains("STDERR-校验通过: 0 GB"),
+        "Python stderr missing or garbled: {output}"
+    );
+    assert!(
+        output.contains("PowerShell-中文正常"),
+        "PowerShell output missing or garbled: {output}"
+    );
+    assert!(
+        !output.contains('\u{fffd}'),
+        "output contains replacement characters"
+    );
+}
+
+#[cfg(windows)]
+#[tokio::test]
+#[ignore = "requires native Windows Python on PATH and PowerShell"]
+async fn forkguard_windows_python_stdio_lowercase_bash() {
+    let _lock = crate::test_support::lock_test_env();
+    let _legacy_python = crate::test_support::EnvVarGuard::set("PYTHONIOENCODING", "gbk");
+    let (workspace, command) = windows_python_stdio_fixture();
+    let _home = crate::test_support::EnvVarGuard::set("CODEWHALE_HOME", workspace.path());
+    let context = ToolContext::new(workspace.path());
+    let result = LowercaseBashTool
+        .execute(json!({"command": command}), &context)
+        .await
+        .expect("execute actual lowercase bash tool");
+    assert!(result.success, "{}", result.content);
+    assert_windows_python_stdio(&result.content);
+}
+
+#[cfg(windows)]
+#[test]
+#[ignore = "requires native Windows Python on PATH and PowerShell"]
+fn forkguard_windows_python_stdio_background_shell() {
+    let _lock = crate::test_support::lock_test_env();
+    let _legacy_python = crate::test_support::EnvVarGuard::set("PYTHONIOENCODING", "gbk");
+    let (workspace, command) = windows_python_stdio_fixture();
+    let _home = crate::test_support::EnvVarGuard::set("CODEWHALE_HOME", workspace.path());
+    for extra_env in [
+        HashMap::new(),
+        HashMap::from([("ENCODING_HOOK_PROBE".to_string(), "present".to_string())]),
+    ] {
+        let mut manager = ShellManager::new(workspace.path().to_path_buf());
+        let started = manager
+            .execute_with_options_env(&command, None, 30_000, true, None, false, None, extra_env)
+            .expect("start real background shell");
+        let task_id = started.task_id.expect("background task id");
+        let result = wait_for_completed_shell(&mut manager, &task_id);
+        assert_eq!(result.status, ShellStatus::Completed, "{result:?}");
+        assert_windows_python_stdio(&format!("{}\n{}", result.stdout, result.stderr));
+    }
+}
+
 #[cfg(unix)]
 #[tokio::test]
 async fn lowercase_bash_keeps_raw_command_under_readonly_policy() {

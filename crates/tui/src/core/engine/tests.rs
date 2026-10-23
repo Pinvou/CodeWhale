@@ -28822,6 +28822,76 @@ fn synthetic_toolbox_outcome(
     }
 }
 
+#[tokio::test]
+async fn forkguard_tool_failure_flag_survives_recording_and_round_trip() {
+    let workspace = tempdir().expect("workspace");
+    let (mut engine, _handle) = Engine::new(
+        EngineConfig {
+            workspace: workspace.path().to_path_buf(),
+            ..EngineConfig::default()
+        },
+        &Config::default(),
+    );
+    let cases = [
+        (
+            "http-failure",
+            Ok(ToolResult::error(r#"{"status":401,"content":"denied"}"#)),
+            true,
+            "denied",
+        ),
+        (
+            "success",
+            Ok(ToolResult::success("answer")),
+            false,
+            "answer",
+        ),
+        (
+            "execution-error",
+            Err(ToolError::execution_failed("execution refused")),
+            true,
+            "execution refused",
+        ),
+        (
+            "schema-loaded",
+            Ok(
+                ToolResult::success("not executed; retry with the loaded schema")
+                    .with_metadata(json!({"executed": false})),
+            ),
+            false,
+            "not executed",
+        ),
+    ];
+    for (id, result, expected_error, expected_text) in cases {
+        engine
+            .process_tool_results(
+                vec![Some(synthetic_toolbox_outcome(id, "test_tool", result))],
+                &mut Vec::new(),
+                &mut HashSet::new(),
+                &HashMap::new(),
+                &permissive_turn_policy(),
+            )
+            .await;
+        let messages: Vec<_> = engine.session.messages.iter().cloned().collect();
+        let saved = serde_json::to_string(&messages).expect("serialize history");
+        let restored: Vec<Message> = serde_json::from_str(&saved).expect("restore history");
+        let (content, is_error) = restored
+            .iter()
+            .flat_map(|message| &message.content)
+            .find_map(|block| match block {
+                ContentBlock::ToolResult {
+                    tool_use_id,
+                    content,
+                    is_error,
+                    ..
+                } if tool_use_id == id => Some((content, is_error)),
+                _ => None,
+            })
+            .expect("result must survive the session round trip");
+        assert_eq!(is_error.unwrap_or(false), expected_error, "{id}");
+        assert!(content.contains(expected_text), "{id}: {content}");
+    }
+}
+
 fn heavy_deferred_tool(name: &str, description_bytes: usize) -> crate::models::Tool {
     crate::models::Tool {
         tool_type: None,
