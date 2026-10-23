@@ -305,7 +305,9 @@ function settleTask(id, outcome) {
   }
   const message = outcome.error ? String(outcome.error) : '';
   // 失败的任务留在面板上并自动展开日志,用户可以看清原因再手动关掉。
-  patch(id, () => ({ status: 'error', error: message, prompt: null, expanded: true }));
+  patch(id, () => ({ status: 'error', error: message,
+    ...(outcome.errorTruncated ? { errorTruncated: true } : {}),
+    prompt: null, expanded: true }));
   const result = { ok: false, error: message,
     ...(outcome.errorTruncated ? { errorTruncated: true } : {}) };
   notifySettled(task, result);

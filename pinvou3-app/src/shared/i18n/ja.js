@@ -547,7 +547,7 @@ megacube:'MegaCube'
           copy:'コピー', copied:'クリップボードにコピーしました', copyFailed:'コピーに失敗しました。手動で選択してコピーしてください',
           notRunningHint:'このモデルは現在有効ではないため、エージェントから呼び出すと「モデルが有効ではありません」が返ります。',
           tasksTitle:'実行中', taskRunning:'実行中…', taskCancelling:'キャンセル中…', taskCancelled: 'キャンセル済み', taskWaitingInput:'入力を待っています…',
-          taskCancel:'キャンセル', taskClose:'閉じる', taskExpand:'ログを表示', taskCollapse:'ログを閉じる', taskNoOutput:'（出力はありません）',
+          taskCancel:'キャンセル', taskClose:'閉じる', taskExpand:'ログを表示', taskCollapse:'ログを閉じる', taskNoOutput:'（出力はありません）', taskErrorSummarized:'一部のエラー説明を要約しました。完全な原因は下のログを参照してください。',
           taskProgress:(done,total)=>`${done} / ${total}`, taskSpeed:s=>`${s}/s`, taskEta:d=>`残り約 ${d}`,
           etaSec:n=>`${n} 秒`, etaMin:n=>`${n} 分`, etaHour:(h,m)=>`${h} 時間 ${m} 分`,
           promptTitle:'いくつか入力が必要です', promptSubmit:'OK', promptCancel:'キャンセル', promptYes:'はい', promptNo:'いいえ',

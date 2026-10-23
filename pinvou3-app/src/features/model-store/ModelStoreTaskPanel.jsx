@@ -207,7 +207,12 @@ function ModelStoreTaskCard({ task, copy, onCancel, onDismiss, onToggle, onAnswe
         <div className="min-w-0 flex-1">
           <div className={`truncate text-[13px] font-medium ${TEXT_PRIMARY}`}>{task.title}</div>
           {isError ? (
-            <div data-testid="model-store-task-error" className={`mt-0.5 line-clamp-2 text-[11px] ${TEXT_DANGER}`}>{errorText.split('\n')[0]}</div>
+            <>
+              <div data-testid="model-store-task-error" className={`mt-0.5 line-clamp-2 text-[11px] ${TEXT_DANGER}`}>{errorText.split('\n')[0]}</div>
+              {task.errorTruncated ? (
+                <div className={`mt-0.5 text-[11px] ${TEXT_SECONDARY}`}>{copy.taskErrorSummarized}</div>
+              ) : null}
+            </>
           ) : (
             <div className={`mt-0.5 truncate text-[11px] ${TEXT_SECONDARY}`}>{taskSubtitle(task, copy)}</div>
           )}
@@ -255,7 +260,7 @@ function ModelStoreTaskCard({ task, copy, onCancel, onDismiss, onToggle, onAnswe
           data-testid="model-store-task-log"
           className="mx-4 mt-2 h-40 overflow-auto whitespace-pre-wrap break-all rounded-[12px] bg-[#202124] p-2.5 text-[11px] leading-4 text-[#E3E3E3] dark:bg-[#131314]"
         >
-          {(isError ? [...task.lines, '', errorText] : task.lines).join('\n') || copy.taskNoOutput}
+          {[...(task.historyTruncated ? [copy.taskLogRetained] : []), ...(isError ? [...task.lines, '', errorText] : task.lines)].join('\n') || copy.taskNoOutput}
         </pre>
       ) : null}
 
