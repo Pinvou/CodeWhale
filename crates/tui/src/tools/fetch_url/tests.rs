@@ -132,3 +132,170 @@ async fn fetched_pdf_missing_helper_is_a_failed_typed_outcome() {
         crate::tools::spec::ToolTerminalStatus::Failed
     );
 }
+
+fn fetched_text(
+    body: &str,
+    status: u16,
+    extra_header: &str,
+) -> super::super::web::fetch::FetchedPayload {
+    super::super::web::fetch::FetchedPayload {
+        url: "https://example.com/retained-response".to_string(),
+        status,
+        headers: BTreeMap::from([("x-response-evidence".to_string(), extra_header.to_string())]),
+        content_type: "text/plain; charset=utf-8".to_string(),
+        bytes: std::sync::Arc::new(body.as_bytes().to_vec()),
+        truncated: false,
+        cache_hit: false,
+        retries: 1,
+        redirects: 2,
+    }
+}
+
+#[test]
+fn forkguard_fetch_url_full_envelope_round_trips_before_context_cut() {
+    use base64::Engine as _;
+
+    let _workshop = crate::tools::large_output_router::active_workshop_test_guard();
+    let _lock = crate::artifacts::TEST_ARTIFACT_SESSIONS_GUARD
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
+    let temporary = tempfile::tempdir().unwrap();
+    let sessions = temporary.path().join("sessions");
+    let prior = crate::artifacts::set_test_artifact_sessions_root(Some(sessions.clone()));
+    let _restore = ArtifactRootRestore(prior);
+    let window = crate::route_budget::route_context_window_tokens(
+        crate::config::ApiProvider::Deepseek,
+        "deepseek-v3.2-128k",
+        None,
+    );
+    let budget = crate::route_budget::route_inline_char_budget(Some(window));
+    let large_body = format!("BODY-START\n{}\nBODY-END 中文", "界".repeat(budget + 1_024));
+    let large_header = format!("HEADER-START{}HEADER-END", "h".repeat(budget + 1_024));
+
+    runtime().block_on(async {
+        for (index, (body, status, header)) in [
+            (large_body.as_str(), 200, "header evidence"),
+            (large_body.as_str(), 404, "error response evidence"),
+            ("tiny body", 200, large_header.as_str()),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let session = format!("fetch-full-{index}");
+            let context = ToolContext::new(".")
+                .with_state_namespace(&session)
+                .with_route_context_window(window);
+            // Exercise the actual post-network producer pipeline. Transport,
+            // SSRF and HTTP byte-limit behavior are unchanged and not mocked
+            // into a claim of network execution by this deterministic test.
+            let mut result = render_fetched_response(
+                fetched_text(body, status, header),
+                Format::Raw,
+                &[],
+                &context,
+            )
+            .await
+            .expect("render actual fetched payload");
+            let full: Value =
+                serde_json::from_str(&result.content).expect("in-process JSON contract");
+            assert_eq!(full["content"], body);
+            assert_eq!(full["headers"]["x-response-evidence"], header);
+            assert_eq!(full["status"], status);
+            assert_eq!(
+                full["receipt"],
+                json!({"cache_hit": false, "retries": 1, "redirects": 2})
+            );
+            assert_eq!(full["truncated"], false);
+            assert_eq!(result.success, status == 200);
+            assert!(result.content.chars().count() > budget);
+            assert!(!sessions.join(&session).join("artifacts").exists());
+            let original = result.content.clone();
+
+            assert!(
+                crate::tools::truncate::preserve_full_output_for_model_context(
+                    &mut result,
+                    &format!("fetch-{index}"),
+                    "fetch_url",
+                    &session,
+                )
+            );
+            let reference = result.metadata.as_ref().unwrap()["artifact_id"]
+                .as_str()
+                .expect("full-envelope ref");
+            let view = crate::core::engine::compact_tool_result_for_route(
+                crate::config::ApiProvider::Deepseek,
+                "deepseek-v3.2-128k",
+                None,
+                "fetch_url",
+                &result,
+            );
+            assert!(view.chars().count() <= budget);
+            assert!(view.contains(&format!("ref=\"{reference}\"")));
+            let mut restored = Vec::new();
+            while restored.len() < original.len() {
+                let retrieved = crate::tools::tool_result_retrieval::RetrieveToolResultTool
+                    .execute(
+                        json!({"ref": reference, "mode": "bytes", "offset": restored.len(),
+                            "length": (original.len() - restored.len()).min(131_072),
+                            "max_bytes": 131_072}),
+                        &context,
+                    )
+                    .await
+                    .expect("one-hop full-envelope retrieval");
+                let payload: Value = serde_json::from_str(&retrieved.content).unwrap();
+                let bytes = base64::engine::general_purpose::STANDARD
+                    .decode(payload["data"].as_str().unwrap())
+                    .unwrap();
+                assert!(!bytes.is_empty());
+                restored.extend(bytes);
+            }
+            assert_eq!(restored, original.as_bytes());
+            let recovered: Value = serde_json::from_slice(&restored).unwrap();
+            assert_eq!(recovered["content"], body);
+            assert_eq!(recovered["headers"]["x-response-evidence"], header);
+            assert_eq!(
+                std::fs::read_dir(sessions.join(&session).join("artifacts"))
+                    .unwrap()
+                    .count(),
+                1
+            );
+        }
+    });
+}
+
+#[test]
+fn forkguard_fetch_url_small_envelope_stays_parseable_and_artifact_free() {
+    let _workshop = crate::tools::large_output_router::active_workshop_test_guard();
+    let _lock = crate::artifacts::TEST_ARTIFACT_SESSIONS_GUARD
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
+    let temporary = tempfile::tempdir().unwrap();
+    let sessions = temporary.path().join("sessions");
+    let prior = crate::artifacts::set_test_artifact_sessions_root(Some(sessions.clone()));
+    let _restore = ArtifactRootRestore(prior);
+    let context = ToolContext::new(".")
+        .with_state_namespace("fetch-small")
+        .with_route_context_window(128_000);
+    let body = "short quoted \"正文\"\n";
+    let result = runtime()
+        .block_on(render_fetched_response(
+            fetched_text(body, 200, "small"),
+            Format::Raw,
+            &[],
+            &context,
+        ))
+        .unwrap();
+    let payload: Value =
+        serde_json::from_str(&result.content).expect("RLM still receives valid JSON");
+    assert_eq!(payload["content"], body);
+    assert!(result.metadata.is_none());
+    let view = crate::core::engine::compact_tool_result_for_route(
+        crate::config::ApiProvider::Deepseek,
+        "deepseek-v3.2-128k",
+        None,
+        "fetch_url",
+        &result,
+    );
+    assert_eq!(view, result.content);
+    assert!(!sessions.join("fetch-small").join("artifacts").exists());
+}
