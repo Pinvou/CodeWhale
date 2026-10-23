@@ -24,6 +24,19 @@ enable_linger() {
   loginctl enable-linger "$uowner" 2>/dev/null || true
 }
 
+# 服务单元随包落在 /usr/lib/systemd/user/ 后还要「enable」才进开机链。装机时
+# 用户的 session dbus 未必在线（systemctl --user 需要），直接做等价的文件操作：
+# default.target.wants 软链——与 systemctl --user enable 落盘结果一致。
+link_autostart() {
+  uhome="$1"; uowner="$2"
+  UNIT=/usr/lib/systemd/user/pinvou3-model-store-autostart.service
+  [ -f "$UNIT" ] || return 0
+  wants="$uhome/.config/systemd/user/default.target.wants"
+  mkdir -p "$wants" 2>/dev/null || return 0
+  chown -R "$uowner" "$uhome/.config/systemd" 2>/dev/null || true
+  ln -sfn "$UNIT" "$wants/pinvou3-model-store-autostart.service" 2>/dev/null || true
+}
+
 drop_to_desktop() {
   uhome="$1"; uowner="$2"
   [ -d "$uhome" ] || return 0
@@ -58,6 +71,7 @@ for uhome in /home/*; do
   [ -n "$uowner" ] && [ "$uowner" != "UNKNOWN" ] || continue
   drop_to_desktop "$uhome" "$uowner"
   enable_linger "$uhome" "$uowner"
+  link_autostart "$uhome" "$uowner"
 done
 
 exit 0
