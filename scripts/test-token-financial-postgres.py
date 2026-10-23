@@ -62,7 +62,7 @@ TOKEN_PACKAGE = "github.com/Pinvou/pinvou3/account-platform/internal/token"
 TOKEN_CHILD_REQUIRED = {"TestUsageWaiverCoordinatorRecoveryPostgres"}
 BILLING_PACKAGE = "github.com/Pinvou/pinvou3/account-platform/internal/billing"
 SCHEMA_PACKAGE = "github.com/Pinvou/pinvou3/account-platform/internal/billingschema"
-SCHEMA_REQUIRED = {"TestF09EntitlementPackageIndexPublicMigration", "TestTokenWalletReceiptSchemaPostgres", "TestLegacyEntitlementUpgradeAdmissionPostgres", "TestUsageWaiverHistoricalSchemaPostgres", "TestBillingOrdinaryReplayOriginalMigrationPostgres", "TestUnknownProviderEntryPublicMigrationPostgres"}
+SCHEMA_REQUIRED = {"TestF09EntitlementPackageIndexPublicMigration", "TestTokenWalletReceiptSchemaPostgres", "TestLegacyEntitlementUpgradeAdmissionPostgres", "TestUsageWaiverHistoricalSchemaPostgres", "TestBillingOrdinaryReplayOriginalMigrationPostgres", "TestUnknownProviderEntryPublicMigrationPostgres", "TestLegacyExpiry025UpgradePreservesOriginalLedgerPostgres"}
 OWNER_REQUIRED = {
     "TestF06OrganizationWalletRequiresLifecycleEvidence",
     "TestTokenWalletReceiptSignedClientRecoveryPostgres",
@@ -76,6 +76,12 @@ OWNER_REQUIRED = {
 }
 PROVISIONING_REQUIRED = {"TestTokenWalletSupplierActualProvisioningConsumerPostgres"}
 REFUND_REQUIRED = {
+    "TestRefundRejectsPlanBeforeFinancialWritesPostgres",
+    "TestRefundSuspendedMemberAdmissionWithoutEarlierBlockerPostgres",
+    "TestRefundStalePreflightCannotReclaimUnknownDispatchPostgres",
+    "TestPaymentSharedProviderTransactionRejectsOtherOrderAndRepairPostgres",
+    "TestRefundExceptionDisprovedHistoryPostgres",
+    "TestRefundExceptionHistoryWithoutChargebackRepairFacilityPostgres",
     "TestRefundPersistedSuccessReferenceUsesPublishedCanonicalIdentityPostgres",
     "TestReviewRefundReconcileRequiresTerminalProviderEvidence",
     "TestReviewRefundReconcileRejectsMismatchedEvidence",
@@ -110,6 +116,11 @@ RETAINED_REQUIRED = {
 # These exact roots are named leaves. Every other retained root must still
 # produce completed child-case evidence, not just a parent PASS.
 BILLING_LEAF_REQUIRED = {
+    "TestRefundRejectsPlanBeforeFinancialWritesPostgres",
+    "TestRefundSuspendedMemberAdmissionWithoutEarlierBlockerPostgres",
+    "TestRefundStalePreflightCannotReclaimUnknownDispatchPostgres",
+    "TestPaymentSharedProviderTransactionRejectsOtherOrderAndRepairPostgres",
+    "TestRefundExceptionHistoryWithoutChargebackRepairFacilityPostgres",
     "TestF05ExpiredHoldRenewalIsConflictAndUnprovenFundsStayReserved",
     "TestRefundRepairRetainsZeroHistoricalCorrectionSourcePostgres",
     "TestRefundOriginalSuccessQueryRetainsCompetingFinancialFreezePostgres",

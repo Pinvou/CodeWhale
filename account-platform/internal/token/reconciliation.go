@@ -584,10 +584,18 @@ func (r *UsageReconciler) commit(ctx context.Context, item ReconciliationItem, u
 	}
 	settlementSnapshot := map[string]any{"usage": usage, "actual_microcredits": actual, "reconciled": true}
 	var previous struct {
-		BillingNotice *billingNotice `json:"billing_notice"`
+		BillingNotice         *billingNotice  `json:"billing_notice"`
+		AdditionalReservation json.RawMessage `json:"additional_reservation"`
 	}
-	if json.Unmarshal(item.UsageSnapshot, &previous) == nil && previous.BillingNotice != nil {
-		settlementSnapshot["billing_notice"] = previous.BillingNotice
+	if json.Unmarshal(item.UsageSnapshot, &previous) == nil {
+		if previous.BillingNotice != nil {
+			settlementSnapshot["billing_notice"] = previous.BillingNotice
+		}
+		// Keep the original ACK evidence when MarkCommitted replaces both
+		// durable snapshots. This is evidence only, never a pricing input.
+		if len(previous.AdditionalReservation) > 0 && string(previous.AdditionalReservation) != "null" {
+			settlementSnapshot["additional_reservation"] = previous.AdditionalReservation
+		}
 	}
 	return r.store.MarkCommitted(ctx, item.ID, actual, settlementSnapshot)
 }

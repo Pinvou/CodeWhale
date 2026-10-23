@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"slices"
@@ -634,6 +635,33 @@ func TestProxyStreamReportsSettlementPendingWhenCommitFails(t *testing.T) {
 		t.Fatalf("pending settlement state = repository=%#v billing=%#v", repository, billing)
 	}
 	assertSavedSettlementCanReconcile(t, repository.savedResult)
+	if evidence, ok := repository.savedResult.SettlementSnapshot["additional_reservation"].(map[string]any); !ok || evidence["status"] != "ACK_UNKNOWN" {
+		t.Fatal("unknown extension facts were lost before settlement recovery")
+	}
+}
+
+func TestProxyStreamRetainsUnknownExtensionEvidenceAfterSuccessfulCommit(t *testing.T) {
+	repository := &streamRepositoryFake{}
+	billing := &streamBillingFake{extendErr: errors.New("controlled unknown extension ACK")}
+	service := &Service{repository: repository, executionBilling: billing, executionUpstream: NewHTTPUpstreamClient()}
+	recorder := httptest.NewRecorder()
+	request := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil)
+	request.Header.Set(clientCapabilitiesHeader, billingNoticeCapability)
+	stream := strings.NewReader("data: {\"choices\":[],\"usage\":{\"prompt_tokens\":0,\"completion_tokens\":10}}\n\ndata: [DONE]\n\n")
+	service.proxyStream(recorder, request, uuid.New(), uuid.New(), PriceVersion{OutputPerMillion: 1_000_000}, stream, make(chan struct{}), 1)
+	if !repository.committed || billing.commitCalls != 1 || billing.extendCalls != 1 {
+		t.Fatal("trusted usage settlement policy changed")
+	}
+	evidence, ok := repository.commitSnapshot["additional_reservation"].(map[string]any)
+	if !ok || evidence["status"] != "ACK_UNKNOWN" || evidence["previous_maximum_microcredits"] != int64(1) || evidence["actual_microcredits"] != int64(10) {
+		t.Fatal("committed usage lost the uncertain extension facts")
+	}
+	if _, exists := repository.commitSnapshot["billing_notice"]; exists || strings.Contains(recorder.Body.String(), "event: billing_notice") {
+		t.Fatal("transport failure was misrepresented as insufficient funds")
+	}
+	if !strings.Contains(recorder.Body.String(), "data: [DONE]") {
+		t.Fatal("settled trusted output was discarded")
+	}
 }
 
 func TestProxyStreamReplayFailureLeavesNoSplitResponseState(t *testing.T) {
@@ -791,6 +819,16 @@ func assertSavedSettlementCanReconcile(t *testing.T, result ReplayResult) {
 	if billing.committedActual != *result.ActualMicrocredits || store.committedActual != *result.ActualMicrocredits {
 		t.Fatalf("saved settlement converged with wrong actual: billing=%#v store=%#v", billing, store)
 	}
+	if evidence, exists := result.SettlementSnapshot["additional_reservation"]; exists {
+		want, err := json.Marshal(evidence)
+		if err != nil {
+			t.Fatal(err)
+		}
+		got, err := json.Marshal(store.committedSnapshot["additional_reservation"])
+		if err != nil || string(got) != string(want) {
+			t.Fatalf("reconciliation replaced original ACK evidence: got=%s want=%s err=%v", got, want, err)
+		}
+	}
 }
 
 func TestProxyStreamRoutesDefinitiveCommitConflictToReview(t *testing.T) {
@@ -831,5 +869,51 @@ func TestProxyStreamAuthorizesAdditionalUsageBeforeDone(t *testing.T) {
 	}
 	if !repository.responseSaved || !repository.resultSaved || !repository.committed || billing.commitCalls != 1 {
 		t.Fatalf("authorized stream was not settled: repository=%#v billing=%#v", repository, billing)
+	}
+}
+
+func TestNonStreamingUnknownExtensionACKRetainsEvidence(t *testing.T) {
+	for _, commitFails := range []bool{false, true} {
+		t.Run(fmt.Sprint(commitFails), func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				w.Header().Set("Content-Type", "application/json")
+				_, _ = w.Write([]byte(`{"choices":[],"usage":{"prompt_tokens":0,"completion_tokens":10}}`))
+			}))
+			defer server.Close()
+			repository := &streamRepositoryFake{}
+			billing := &streamBillingFake{extendErr: errors.New("controlled extension ACK unknown")}
+			if commitFails {
+				billing.commitErr = errors.New("controlled commit unavailable")
+			}
+			service := &Service{repository: repository, executionBilling: billing, executionUpstream: NewHTTPUpstreamClient(), breaker: resilience.NewBreaker()}
+			holdID, usageID := uuid.New(), uuid.New()
+			request := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil)
+			request.Header.Set(clientCapabilitiesHeader, billingNoticeCapability)
+			recorder := httptest.NewRecorder()
+			service.dispatchUsage(recorder, request, UsageRequest{ID: usageID, HoldID: &holdID, RequestSnapshot: json.RawMessage(`{"provider_id":"test","adapter_version":"openai-compatible-v1"}`)}, DispatchEnvelope{leaseOwner: "controlled-worker", BaseURL: server.URL, Provider: "test", AdapterVersion: "openai-compatible-v1", Credential: []byte("controlled-fixture"), RequestBody: []byte(`{"model":"test"}`), Price: PriceVersion{OutputPerMillion: 1_000_000}, MaximumCost: 1, ContextType: "PERSONAL"})
+			evidence, ok := repository.savedResult.SettlementSnapshot["additional_reservation"].(map[string]any)
+			if !ok || evidence["status"] != "ACK_UNKNOWN" || evidence["previous_maximum_microcredits"] != int64(1) || evidence["actual_microcredits"] != int64(10) || evidence["settlement_rule"] != "TRUSTED_FINAL_USAGE" {
+				t.Fatalf("JSON durable ACK evidence missing: %#v", evidence)
+			}
+			if billing.extendCalls != 1 || billing.commitCalls != 1 || repository.ensureCalls != 0 {
+				t.Fatal("changed extension/commit policy or falsely confirmed maximum")
+			}
+			if _, exists := repository.savedResult.SettlementSnapshot["billing_notice"]; exists {
+				t.Fatal("unknown ACK classified as insufficient funds")
+			}
+			if recorder.Header().Get("X-Pinvou-Billing-Code") != "" || strings.Contains(recorder.Body.String(), "WALLET_INSUFFICIENT") {
+				t.Fatal("untrue wallet notice escaped")
+			}
+			if commitFails {
+				if recorder.Code != http.StatusServiceUnavailable || repository.committed || repository.reviewReason != "settlement_pending" {
+					t.Fatal("commit failure falsely settled")
+				}
+				assertSavedSettlementCanReconcile(t, repository.savedResult)
+			} else {
+				if recorder.Code != http.StatusOK || !repository.committed || repository.commitSnapshot["additional_reservation"] == nil {
+					t.Fatal("successful commit dropped ACK evidence")
+				}
+			}
+		})
 	}
 }

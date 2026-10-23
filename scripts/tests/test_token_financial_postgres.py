@@ -15,6 +15,26 @@ SPEC.loader.exec_module(RUNNER)
 
 
 class FinancialPostgresRunnerTests(unittest.TestCase):
+    def test_review_regression_roots_are_required_on_real_postgres(self):
+        billing = {
+            "TestRefundRejectsPlanBeforeFinancialWritesPostgres",
+            "TestRefundSuspendedMemberAdmissionWithoutEarlierBlockerPostgres",
+            "TestRefundStalePreflightCannotReclaimUnknownDispatchPostgres",
+            "TestPaymentSharedProviderTransactionRejectsOtherOrderAndRepairPostgres",
+            "TestRefundExceptionDisprovedHistoryPostgres",
+            "TestRefundExceptionHistoryWithoutChargebackRepairFacilityPostgres",
+        }
+        self.assertTrue(billing <= RUNNER.RETAINED_REQUIRED)
+        schema = "TestLegacyExpiry025UpgradePreservesOriginalLedgerPostgres"
+        self.assertIn(schema, RUNNER.SCHEMA_REQUIRED)
+        for required, package in [(RUNNER.RETAINED_REQUIRED, RUNNER.BILLING_PACKAGE),
+                                  (RUNNER.SCHEMA_REQUIRED, RUNNER.SCHEMA_PACKAGE)]:
+            events = self.events(required=required, package=package, children=True)
+            RUNNER.verify_results(events, required, package=package)
+            for missing in (billing if package == RUNNER.BILLING_PACKAGE else {schema}):
+                with self.subTest(missing=missing), self.assertRaises(RuntimeError):
+                    RUNNER.verify_results([event for event in events if not event.get("Test", "").startswith(missing)], required, package=package)
+
     def test_disposable_loopback_url(self):
         raw = "postgres://postgres@127.0.0.1:5433/postgres?sslmode=disable"
         self.assertEqual(RUNNER.local_database_url(raw), raw)
@@ -268,7 +288,7 @@ class FinancialPostgresRunnerTests(unittest.TestCase):
     def test_package_index_schema_contract_is_selected_and_cannot_skip(self):
         self.run_main_fixture()
         roots, package = RUNNER.SCHEMA_REQUIRED, RUNNER.SCHEMA_PACKAGE
-        self.assertEqual(roots, {"TestF09EntitlementPackageIndexPublicMigration", "TestTokenWalletReceiptSchemaPostgres", "TestLegacyEntitlementUpgradeAdmissionPostgres", "TestUsageWaiverHistoricalSchemaPostgres", "TestBillingOrdinaryReplayOriginalMigrationPostgres", "TestUnknownProviderEntryPublicMigrationPostgres"})
+        self.assertEqual(roots, {"TestF09EntitlementPackageIndexPublicMigration", "TestTokenWalletReceiptSchemaPostgres", "TestLegacyEntitlementUpgradeAdmissionPostgres", "TestUsageWaiverHistoricalSchemaPostgres", "TestBillingOrdinaryReplayOriginalMigrationPostgres", "TestUnknownProviderEntryPublicMigrationPostgres", "TestLegacyExpiry025UpgradePreservesOriginalLedgerPostgres"})
         command = self.fixture_commands[self.fixture_phases.index("owner-schema")]
         selection = command[command.index("-run") + 1]
         self.assertIn("TestF09EntitlementPackageIndexPublicMigration", selection)
@@ -618,6 +638,11 @@ class FinancialPostgresRunnerTests(unittest.TestCase):
 
     def test_only_explicit_original_and_refund_leaves_can_omit_children(self):
         leaves = {
+            "TestRefundRejectsPlanBeforeFinancialWritesPostgres",
+            "TestRefundSuspendedMemberAdmissionWithoutEarlierBlockerPostgres",
+            "TestRefundStalePreflightCannotReclaimUnknownDispatchPostgres",
+            "TestPaymentSharedProviderTransactionRejectsOtherOrderAndRepairPostgres",
+            "TestRefundExceptionHistoryWithoutChargebackRepairFacilityPostgres",
             "TestF05ExpiredHoldRenewalIsConflictAndUnprovenFundsStayReserved",
             "TestRefundRepairRetainsZeroHistoricalCorrectionSourcePostgres",
             "TestRefundOriginalSuccessQueryRetainsCompetingFinancialFreezePostgres",
@@ -644,6 +669,12 @@ class FinancialPostgresRunnerTests(unittest.TestCase):
 
     def test_all_refund_fund_paths_are_selected_and_each_missing_or_skipped_root_is_rejected(self):
         expected = {
+            "TestRefundRejectsPlanBeforeFinancialWritesPostgres",
+            "TestRefundSuspendedMemberAdmissionWithoutEarlierBlockerPostgres",
+            "TestRefundStalePreflightCannotReclaimUnknownDispatchPostgres",
+            "TestPaymentSharedProviderTransactionRejectsOtherOrderAndRepairPostgres",
+            "TestRefundExceptionHistoryWithoutChargebackRepairFacilityPostgres",
+            "TestRefundExceptionDisprovedHistoryPostgres",
             "TestRefundPersistedSuccessReferenceUsesPublishedCanonicalIdentityPostgres",
             "TestReviewRefundReconcileRequiresTerminalProviderEvidence",
             "TestReviewRefundReconcileRejectsMismatchedEvidence",
@@ -662,7 +693,7 @@ class FinancialPostgresRunnerTests(unittest.TestCase):
         }
         self.assertEqual(RUNNER.REFUND_REQUIRED, expected)
         self.assertTrue(expected <= RUNNER.RETAINED_REQUIRED)
-        self.assertEqual(len(RUNNER.RETAINED_REQUIRED), 27)
+        self.assertEqual(len(RUNNER.RETAINED_REQUIRED), 33)
         valid = self.events(RUNNER.RETAINED_REQUIRED, RUNNER.BILLING_PACKAGE, children=True)
         options = {"package": RUNNER.BILLING_PACKAGE, "require_children": True, "exact_roots": True,
                    "children_required": RUNNER.BILLING_CHILD_REQUIRED}

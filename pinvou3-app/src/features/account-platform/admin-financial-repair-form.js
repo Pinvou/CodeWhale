@@ -106,6 +106,22 @@ export function financialRepairProjectionRows(projection) {
   };
 }
 
+// A valid owner projection must also describe the operator's exact request.
+// Structural validation alone cannot detect a different valid posting/amount.
+export function ledgerRepairProjectionMatchesInput(projection, request) {
+  const closed = financialRepairPrecheck(projection);
+  if (!closed || !request || request.command_type !== 'LEDGER_REPAIR' ||
+    projection.command_type !== request.command_type || projection.target_resource_id !== request.target_resource_id) return false;
+  const expected = {
+    target_posting_id: request.target_resource_id,
+    target_journal_entry_id: request.target_journal_entry_id,
+    wrong_ledger_account_id: request.wrong_ledger_account_id,
+    correct_ledger_account_id: request.correct_ledger_account_id,
+    amount_microcredits: request.amount_microcredits,
+  };
+  return Object.entries(expected).every(([key, value]) => String(closed.normalized[key]) === value);
+}
+
 // financialRepairDraftFromProjection is the only draft the page may submit. It
 // refuses an unusable projection or a reason/key outside the closed bounds.
 export function financialRepairDraftFromProjection(projection, operatorReason, requestKey) {

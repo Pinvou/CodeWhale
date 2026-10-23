@@ -47,6 +47,36 @@ func TestPhaseMigrationCLIPinsBeforeDown(t *testing.T) {
 	if err != nil {
 		t.Fatal("parse isolated CLI fixture")
 	}
+	var createdRoles []string
+	for _, role := range []string{"billing_service", "billing_schema_owner", "billing_migrator"} {
+		var exists bool
+		if err := control.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM pg_roles WHERE rolname=$1)`, role).Scan(&exists); err != nil {
+			t.Fatal("inspect owned CLI fixture identities")
+		}
+		if !exists {
+			createdRoles = append(createdRoles, role)
+		}
+	}
+	// Child databases are cleaned by each subtest before parent cleanup. Never
+	// drop borrowed identities, force-disconnect clients, or DROP OWNED objects.
+	t.Cleanup(func() {
+		if len(createdRoles) == 0 {
+			return
+		}
+		clean, stop := context.WithTimeout(context.Background(), 10*time.Second)
+		defer stop()
+		c, err := pgx.ConnectConfig(clean, config)
+		if err != nil {
+			t.Error("connect CLI fixture identity cleanup")
+			return
+		}
+		defer c.Close(context.Background())
+		for i := len(createdRoles) - 1; i >= 0; i-- {
+			if _, err := c.Exec(clean, "DROP ROLE "+pgx.Identifier{createdRoles[i]}.Sanitize()); err != nil {
+				t.Error("nonforce CLI fixture identity cleanup failed")
+			}
+		}
+	})
 	for _, fixture := range []struct{ domain, alias string }{{"billing", "billing"}, {"payment-simulator", "payment-simulator"}, {"billing", "owned-renamed-domain"}, {"payment-simulator", "owned-renamed-domain"}, {"billing", "owned-renamed-source"}, {"payment-simulator", "owned-renamed-source"}} {
 		t.Run(fixture.domain+"/"+fixture.alias, func(t *testing.T) {
 			domain := fixture.domain
@@ -80,6 +110,29 @@ func TestPhaseMigrationCLIPinsBeforeDown(t *testing.T) {
 			}
 			selected := loaded
 			if domain == "billing" {
+				// Use the real deployment identity bootstrap. Calling Billing Up
+				// as a DBA with a DBA-owned ledger is not a production-shaped
+				// fixture: the separate ledger owner then cannot record history.
+				psql := os.Getenv("PINVOU_TEST_PSQL")
+				if psql == "" {
+					psql, err = exec.LookPath("psql")
+					if err != nil {
+						t.Fatal("owned CLI fixture requires psql")
+					}
+				}
+				bootstrapURL, err := url.Parse(raw)
+				if err != nil {
+					t.Fatal("parse owned CLI bootstrap URL")
+				}
+				bootstrapURL.Path = "/" + name
+				bootstrap := exec.CommandContext(ctx, psql, "-X", "--dbname", bootstrapURL.String(), "-v", "ON_ERROR_STOP=1", "-v", "billing_database="+name, "-f", "../../deploy/postgres/billing-roles.sql")
+				bootstrap.Env = append(os.Environ(), "PGCLIENTENCODING=UTF8")
+				if err := bootstrap.Run(); err != nil {
+					t.Fatal("real Billing identity bootstrap failed")
+				}
+				if _, err := connection.Exec(ctx, "SET ROLE billing_service"); err != nil {
+					t.Fatal("select owned Billing fixture runtime role")
+				}
 				selected = nil
 				for _, m := range loaded {
 					if m.Version == 1 || m.Version == 6 || m.Version == 900001 {

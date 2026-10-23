@@ -219,6 +219,7 @@ func TestReconciliationErrorCodeDoesNotPersistProviderMessage(t *testing.T) {
 }
 
 type reconciliationStoreFake struct {
+	committedSnapshot     map[string]any
 	committedID           uuid.UUID
 	committedActual       int64
 	releasedID            uuid.UUID
@@ -258,8 +259,9 @@ func (s *reconciliationStoreFake) StopReconciliation(_ context.Context, id uuid.
 	s.stoppedID, s.stoppedReason = id, reason
 	return nil
 }
-func (s *reconciliationStoreFake) MarkCommitted(_ context.Context, id uuid.UUID, actual int64, _ map[string]any) error {
+func (s *reconciliationStoreFake) MarkCommitted(_ context.Context, id uuid.UUID, actual int64, snapshot map[string]any) error {
 	s.committedID, s.committedActual = id, actual
+	s.committedSnapshot = snapshot
 	return nil
 }
 func (s *reconciliationStoreFake) MarkReleased(_ context.Context, id uuid.UUID, reason string) error {

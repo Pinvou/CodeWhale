@@ -29,6 +29,8 @@ BILLING_ROOTS = {
     "TestF08ReclaimBlocksPendingFinancialAnomalyPostgres",
 }
 CONTRACTS = [
+    ("migration-cli", "./cmd/migrate",
+     {"TestAccountClosureLegacyRollbackCLI", "TestPhaseMigrationCLIPinsBeforeDown"}, {}),
     ("closure-combination", "./internal/billingschema", {"TestClosurePrivatePublicCombination"},
      {"": {"TestClosureClaimACKOrder"}}),
     ("membership-closure-event", "./internal/billingschema",

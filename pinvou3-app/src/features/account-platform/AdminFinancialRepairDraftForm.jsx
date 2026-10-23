@@ -4,6 +4,7 @@ import React, { useEffect, useRef, useState } from 'react';
 import {
   financialRepairInputs, financialRepairPrecheckBody,
   financialRepairProjectionRows, financialRepairDraftFromProjection,
+  ledgerRepairProjectionMatchesInput,
 } from './admin-financial-repair-form.js';
 
 import { AdminChargebackFinancialRepairForm } from './AdminChargebackFinancialRepairForm.jsx';
@@ -111,6 +112,7 @@ function LedgerRepairDraftForm({ client, copy, owner, onCreated }) {
     const revision = ++factsRevision.current;
     const live = () => mounted.current && factsRevision.current === revision && currentClient.current === client;
     setBusy('facts');
+    setNeedsAuthentication(false);
     setFailure('');
     setCreated('');
     try {
@@ -118,12 +120,16 @@ function LedgerRepairDraftForm({ client, copy, owner, onCreated }) {
       if (!live()) return;
       const rendered = financialRepairProjectionRows(answer);
       if (!rendered) throw Object.assign(new Error('unusable projection'), { code: 'FINANCIAL_REPAIR_PRECHECK_INVALID' });
+      if (!ledgerRepairProjectionMatchesInput(answer, prepared.body)) {
+        throw Object.assign(new Error('owner projection changed the ledger intent'), { code: 'FINANCIAL_REPAIR_PRECHECK_INVALID' });
+      }
       setProjection(answer);
       setFacts(rendered);
     } catch (error) {
       if (!live()) return;
       setProjection(null);
       setFacts(null);
+      if (error?.code === 'RECENT_AUTHENTICATION_REQUIRED' || error?.status === 401) setNeedsAuthentication(true);
       setFailure(error?.code === 'APPROVAL_PRECHECK_UNAVAILABLE' ? copy.factsUnavailable : copy.factsFailed);
     } finally {
       if (live()) setBusy('');
@@ -139,13 +145,14 @@ function LedgerRepairDraftForm({ client, copy, owner, onCreated }) {
     const revision = factsRevision.current;
     const live = () => mounted.current && factsRevision.current === revision && currentClient.current === client;
     setFailure('');
+    setNeedsAuthentication(false);
     const id = await operation.mutate(frozen, async (current, key) => {
       const draft = financialRepairDraftFromProjection(current.projection, current.reason, key);
       if (draft.error) throw Object.assign(new Error('invalid frozen draft'), { status: 400 });
       let id;
       try { id = requireFinanceID(await client.createGovernedApprovalDraft(draft.draft)); }
       catch (error) {
-        if (live() && error.code === 'RECENT_AUTHENTICATION_REQUIRED') setNeedsAuthentication(true);
+        if (live() && (error?.code === 'RECENT_AUTHENTICATION_REQUIRED' || error?.status === 401)) setNeedsAuthentication(true);
         throw error;
       }
       const saved = readLedgerIntent(owner.split(':')[0], 'ledger-repair-draft');

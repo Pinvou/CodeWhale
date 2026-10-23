@@ -23,10 +23,11 @@ import (
 )
 
 const (
-	logicalTurnHeader        = "X-Pinvou-Logical-Turn-ID"
-	clientCapabilitiesHeader = "X-Pinvou-Client-Capabilities"
-	billingNoticeCapability  = "billing-notice-v1"
-	billingNoticeEvent       = "BILLING_NOTICE"
+	logicalTurnHeader                = "X-Pinvou-Logical-Turn-ID"
+	clientCapabilitiesHeader         = "X-Pinvou-Client-Capabilities"
+	billingNoticeCapability          = "billing-notice-v1"
+	billingNoticeEvent               = "BILLING_NOTICE"
+	additionalReservationUnconfirmed = "ADDITIONAL_RESERVATION_UNCONFIRMED"
 )
 
 type billingNotice struct {
@@ -523,7 +524,7 @@ func (s *Service) dispatchUsage(w http.ResponseWriter, r *http.Request, usageReq
 		return
 	}
 	var notice *billingNotice
-	if insufficientCode != "" {
+	if insufficientCode != "" && insufficientCode != additionalReservationUnconfirmed {
 		value := newInsufficientNotice(insufficientCode, "ADDITIONAL_RESERVATION", "COMPLETED", "SETTLED", envelope.ContextType, envelope.OrganizationID, envelope.CanPurchaseOrganizationEntitlements, usageRequest.ID)
 		notice = &value
 	}
@@ -533,6 +534,7 @@ func (s *Service) dispatchUsage(w http.ResponseWriter, r *http.Request, usageReq
 		api.WriteError(w, http.StatusServiceUnavailable, "SETTLEMENT_REVIEW_REQUIRED", settlementMessage("SETTLEMENT_REVIEW_REQUIRED"), httpserver.RequestID(r.Context()))
 		return
 	}
+	retainAdditionalReservationEvidence(settlementSnapshot, insufficientCode, envelope.MaximumCost, actual)
 	if err := s.repository.SaveReplayResult(background, usageRequest.ID, ReplayResult{Kind: "JSON", HTTPStatus: response.StatusCode, ContentType: contentType, Payload: payload, ResponseReceived: true, ResponseDisposition: responseDispositionTrustedUsage, FinalUsage: &usage, ActualMicrocredits: &actual, SettlementSnapshot: settlementSnapshot}); err != nil {
 		_ = s.repository.MarkReview(background, usageRequest.ID, "result_persistence_failed", settlementSnapshot)
 		api.WriteError(w, http.StatusServiceUnavailable, "RESULT_PERSISTENCE_FAILED", "the model result could not be persisted", httpserver.RequestID(r.Context()))
@@ -1248,7 +1250,7 @@ func (s *Service) proxyStream(w http.ResponseWriter, r *http.Request, usageID, h
 	var noticePayload []byte
 	var noticeSequence int64
 	var persistedNotice *billingNotice
-	if insufficientCode != "" {
+	if insufficientCode != "" && insufficientCode != additionalReservationUnconfirmed {
 		context := billingNoticeContextValue(contexts)
 		value := newInsufficientNotice(insufficientCode, "ADDITIONAL_RESERVATION", "COMPLETED", "SETTLED", context.ContextType, context.OrganizationID, context.CanPurchaseOrganizationEntitlements, usageID)
 		persistedNotice = &value
@@ -1276,6 +1278,7 @@ func (s *Service) proxyStream(w http.ResponseWriter, r *http.Request, usageID, h
 		_ = s.repository.MarkReview(background, usageID, "usage_invalid", map[string]any{"usage": usage})
 		return
 	}
+	retainAdditionalReservationEvidence(settlementSnapshot, insufficientCode, authorizedMaximum, actual)
 	aggregatePayload, err := aggregate.result(usage, lastSequence)
 	if err != nil || s.repository.SaveReplayResult(background, usageID, ReplayResult{Kind: "STREAM_AGGREGATE", HTTPStatus: http.StatusOK, ContentType: "application/json", Payload: aggregatePayload, ResponseReceived: true, ResponseDisposition: responseDispositionTrustedUsage, FinalUsage: &usage, ActualMicrocredits: &actual, SettlementSnapshot: settlementSnapshot, LastSequence: lastSequence}) != nil {
 		_ = s.repository.MarkReview(background, usageID, "result_persistence_failed", map[string]any{"last_sequence": lastSequence})
@@ -1389,6 +1392,19 @@ func settlementRecord(price PriceVersion, usage Usage, notice *billingNotice) (i
 	return actual, snapshot, nil
 }
 
+// An unknown extension ACK is not proof of an insufficient wallet, nor proof
+// that no reservation was made. Preserve the bounded facts for reconciliation
+// in the same durable replay/settlement snapshot without changing money policy.
+func retainAdditionalReservationEvidence(snapshot map[string]any, code string, previousMaximum, actual int64) {
+	if code == additionalReservationUnconfirmed {
+		snapshot["additional_reservation"] = map[string]any{
+			"status": "ACK_UNKNOWN", "stage": "ADDITIONAL_RESERVATION",
+			"previous_maximum_microcredits": previousMaximum,
+			"actual_microcredits":           actual, "settlement_rule": "TRUSTED_FINAL_USAGE",
+		}
+	}
+}
+
 func (s *Service) settlePrepared(ctx context.Context, usageID, holdID uuid.UUID, actual int64, usage Usage, snapshot map[string]any) string {
 	if store, ok := s.repository.(missingReferenceDeadlineStore); ok {
 		if fenced, err := store.PreserveMissingReferenceLateUsage(ctx, usageID, usage); err != nil || fenced {
@@ -1461,7 +1477,7 @@ func (s *Service) authorizeAdditional(ctx context.Context, usageID, holdID uuid.
 		if memberQuotaInsufficient(err) {
 			return actual, "MEMBER_QUOTA_INSUFFICIENT", true
 		}
-		return actual, "", true
+		return actual, additionalReservationUnconfirmed, true
 	}
 	if repository, ok := s.repository.(interface {
 		EnsureMaximumAtLeast(context.Context, uuid.UUID, int64) error

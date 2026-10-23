@@ -161,6 +161,6 @@ export function AccountLogin({ client, copy, onAuthenticated, reauthentication =
       {mode !== 'password' && <><button type="button" disabled={busy || cooldown > 0 || !mobile.trim()} onClick={openCaptcha}>{cooldown > 0 ? copy.resendCountdown(cooldown) : copy.sendCode}</button><label>{copy.smsCode}<input value={code} required autoComplete="one-time-code" inputMode="numeric" disabled={busy} onChange={event => setCode(event.target.value)} /></label></>}
       <button disabled={busy || mode !== 'password' && !challenge}>{busy ? copy.signingIn : mode === 'register' ? copy.register : mode === 'forgot' ? copy.resetPassword : copy.login}</button>
     </form>}
-    {captcha && <div className="ap-captcha-backdrop" role="dialog" aria-modal="true" aria-label={copy.captchaTitle}><ProfileCaptcha challenge={captcha} offset={offset} busy={busy} copy={copy} onOffset={setOffset} onConfirm={sendCode} onRefresh={openCaptcha} onClose={() => { if (!busy) setCaptcha(null); }} /></div>}
+    {captcha && <div className="ap-captcha-backdrop" role="dialog" aria-modal="true" aria-label={copy.captchaTitle}><ProfileCaptcha challenge={captcha} offset={offset} busy={busy} error={error} copy={copy} onOffset={setOffset} onConfirm={sendCode} onRefresh={openCaptcha} onClose={() => { if (!busy) setCaptcha(null); }} /></div>}
   </section>;
 }

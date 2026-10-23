@@ -23,6 +23,14 @@ def stream(*events):
 
 
 class ClosurePostgresResults(unittest.TestCase):
+    def test_real_migration_cli_roots_cannot_silently_drop(self):
+        expected = {"TestAccountClosureLegacyRollbackCLI", "TestPhaseMigrationCLIPinsBeforeDown"}
+        selected = [row for row in runner.CONTRACTS if row[0] == "migration-cli"]
+        self.assertEqual(selected, [("migration-cli", "./cmd/migrate", expected, {})])
+        for missing in expected:
+            with self.subTest(missing=missing), self.assertRaises(RuntimeError):
+                runner.verify_results(stream(*({"Action": "pass", "Test": name} for name in sorted(expected - {missing}))), expected)
+
     def test_current_membership_and_assessment_roots_cannot_silently_drop(self):
         original = {"TestClosedGrantPublishedOwnerEffects", "TestAccountClosureIsolationPreservesPriorAuditFacts",
                     "TestAccountClosureIsolationScrubsContactWithoutFinancialMutation",

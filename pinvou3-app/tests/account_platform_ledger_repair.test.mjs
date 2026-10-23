@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { financialRepairPrecheckBody, financialRepairCommandTypes } from '../src/features/account-platform/admin-financial-repair-form.js';
+import { financialRepairPrecheckBody, financialRepairCommandTypes, ledgerRepairProjectionMatchesInput } from '../src/features/account-platform/admin-financial-repair-form.js';
 import { financialRepairApprovalDraft } from '../src/features/account-platform/admin-financial-repair-drafts.js';
 import { AdminPlatformClient } from '../src/features/account-platform/admin-client.js';
 import { currentApprovalEditDraft } from '../src/features/account-platform/admin-finance.js';
@@ -13,6 +13,25 @@ const projection = () => ({ command_type: 'LEDGER_REPAIR', policy_version: 1, sn
   normalized_command: { target_posting_id: id(1), target_journal_entry_id: id(2), wrong_ledger_account_id: id(3), correct_ledger_account_id: id(4), amount_microcredits: values.amount_microcredits, reason_code: 'ATTRIBUTION_TO_WRONG_PLATFORM_ACCOUNT' },
   critical_resource_versions: { policy_version: 1, posting_set_digest: 'a'.repeat(64) },
   financial_snapshot: { amount_microcredits: values.amount_microcredits, wallet_id: null } });
+
+test('Ledger precheck rejects another valid intent, not just malformed projections', () => {
+  const request = financialRepairPrecheckBody('LEDGER_REPAIR', values).body;
+  assert.equal(ledgerRepairProjectionMatchesInput(projection(), request), true);
+  const otherPosting = projection();
+  otherPosting.target_resource_id = id(6);
+  otherPosting.normalized_command.target_posting_id = id(6);
+  assert.equal(ledgerRepairProjectionMatchesInput(otherPosting, request), false);
+  for (const field of ['target_journal_entry_id', 'wrong_ledger_account_id', 'correct_ledger_account_id']) {
+    const changed = projection();
+    changed.normalized_command[field] = id(7);
+    assert.equal(ledgerRepairProjectionMatchesInput(changed, request), false, field);
+  }
+  const otherAmount = projection();
+  otherAmount.normalized_command.amount_microcredits = '9223372036854775806';
+  otherAmount.financial_snapshot.amount_microcredits = '9223372036854775806';
+  assert.equal(ledgerRepairProjectionMatchesInput(otherAmount, request), false);
+  assert.equal(ledgerRepairProjectionMatchesInput(null, request), false);
+});
 
 test('Ledger durable invocation preserves operator key, exact facts and actor across reload', () => {
   const memory = new Map();
