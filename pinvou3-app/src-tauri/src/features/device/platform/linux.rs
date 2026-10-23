@@ -387,7 +387,7 @@ mod tests {
         let link = home.join("a");
         std::os::unix::fs::symlink(&outside, &link).expect("create symlink");
         let smuggled = link.join("b").join("c");
-        let result = weights_deletion_guard(&home, None, None, &smuggled);
+        let result = weights_deletion_guard(&home, None, &[], &smuggled);
         let _ = std::fs::remove_dir_all(&home);
         let _ = std::fs::remove_dir_all(&outside);
         assert!(
