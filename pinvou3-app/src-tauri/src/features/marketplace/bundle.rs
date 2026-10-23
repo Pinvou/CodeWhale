@@ -745,80 +745,68 @@ fn parse_credential_target(target: &str) -> CredentialTarget {
 /// secret_env/secret_headers 按 target 映射（env/bearer），required 语义保留。
 /// `pub(crate)`：存储层 `store::legacy_mcp_records` 复用同一推导取凭据 key。
 pub(crate) fn tool_credentials(tool: &super::ToolManifest) -> Vec<CredentialSpec> {
-    let mut out: Vec<CredentialSpec> = Vec::new();
-    // 同一 key 允许在 config_fields 与 secret_env/secret_headers 重复声明（UI 字段 +
-    // 占位符解析双用途），此处按 (key,target) 去重一次，与 secrets 层口径对齐。
-    let push =
-        |out: &mut Vec<CredentialSpec>, key: String, target: CredentialTarget, required: bool| {
-            if !out.iter().any(|c| c.key == key && c.target == target) {
-                out.push(CredentialSpec {
-                    key,
-                    target,
-                    required,
-                });
-            }
-        };
-    for f in &tool.config_fields {
-        let target = parse_credential_target(&f.target);
-        push(&mut out, f.key.clone(), target, f.required);
-    }
-    for s in &tool.secret_env {
-        push(&mut out, s.key.clone(), CredentialTarget::Env, s.required);
-    }
-    for s in &tool.secret_headers {
-        push(
-            &mut out,
-            s.source_key.clone(),
-            CredentialTarget::Bearer,
-            s.required,
-        );
-    }
-    out
+    dedup_credential_declarations(tool, |key, target, required, _| CredentialSpec {
+        key,
+        target,
+        required,
+    })
 }
 
 /// 配置弹窗字段功能事实（V4 下沉；label/placeholder/helpText 属 i18n 展示资产留前端）。
+/// Deduplicated under the same policy as tool_credentials: when the same key is declared in both config_fields and
+/// secret_env/secret_headers, only one dialog field is emitted, otherwise the frontend would render duplicate inputs.
 fn tool_config_fields(tool: &super::ToolManifest) -> Vec<ConfigFieldSpec> {
-    let mut out: Vec<ConfigFieldSpec> = Vec::new();
-    // 与 tool_credentials 同口径按 (key,target) 去重：同一 key 在 config_fields 与
-    // secret_env/secret_headers 重复声明时只出一个弹窗字段，否则前端会渲染重复输入框。
-    let push = |out: &mut Vec<ConfigFieldSpec>,
-                key: String,
-                required: bool,
-                target: CredentialTarget,
-                secret: bool| {
-        if !out.iter().any(|f| f.key == key && f.target == target) {
-            out.push(ConfigFieldSpec {
-                key,
-                required,
-                target,
-                secret,
-            });
+    dedup_credential_declarations(tool, |key, target, required, secret| ConfigFieldSpec {
+        key,
+        required,
+        target,
+        secret,
+    })
+}
+
+/// Three-source dedup traversal shared by tool_credentials / tool_config_fields (fix plan 1/V4):
+/// projects in declaration order config_fields → secret_env → secret_headers; the same key may be declared
+/// repeatedly across sources (dual use: UI field + placeholder parsing), deduplicated once by `(key, target)`,
+/// first declaration wins. The `secret` flag follows config_fields' explicit declaration (not overridden by the
+/// implicit true of secret_env/secret_headers); the latter two are sensitive declarations themselves, so secret is always true.
+///
+/// Legacy sensitive `manifest.env` keys are deliberately NOT projected here.
+/// On the remote channel they follow an existential "any one resolving key
+/// serves the entry" doctrine (the builder wires only the first), which
+/// cannot map onto this per-key required filter without false
+/// missing_credentials signals — a two-key manifest with one key stored
+/// works fine. A reconcile-disabled legacy-env entry therefore shows no
+/// Configure fix on its card; the startup reconcile note carries the why
+/// and the fix instead.
+fn dedup_credential_declarations<T>(
+    tool: &super::ToolManifest,
+    build: impl Fn(String, CredentialTarget, bool, bool) -> T,
+) -> Vec<T> {
+    let mut out: Vec<T> = Vec::new();
+    let mut seen: Vec<(String, CredentialTarget)> = Vec::new();
+    let mut push = |key: String, target: CredentialTarget, required: bool, secret: bool| {
+        if seen.iter().any(|(k, t)| *k == key && *t == target) {
+            return;
         }
+        seen.push((key.clone(), target));
+        out.push(build(key, target, required, secret));
     };
     for f in &tool.config_fields {
         push(
-            &mut out,
             f.key.clone(),
-            f.required,
             parse_credential_target(&f.target),
+            f.required,
             f.secret,
         );
     }
     for s in &tool.secret_env {
-        push(
-            &mut out,
-            s.key.clone(),
-            s.required,
-            CredentialTarget::Env,
-            true,
-        );
+        push(s.key.clone(), CredentialTarget::Env, s.required, true);
     }
     for s in &tool.secret_headers {
         push(
-            &mut out,
             s.source_key.clone(),
-            s.required,
             CredentialTarget::Bearer,
+            s.required,
             true,
         );
     }
