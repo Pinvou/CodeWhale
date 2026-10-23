@@ -44,7 +44,7 @@ const TOOL_OUTPUT_INLINE_OPT_IN_MAX_CHARS: usize = 2 * 1024 * 1024;
 ///
 /// Every tool result is measured against this number: 3% of the route's
 /// context window (at about 4 characters per token), capped at 100,000
-/// characters, or the full cap when the window is unknown. An opt-in
+/// characters, or the full cap when the window is unknown.
 /// The historical `tool_result_max_bytes` workshop key raises this character
 /// budget, up to 2,097,152 Unicode scalar values, not a UTF-8 byte ceiling.
 /// Byte-based tool/read limits retain their own semantics. A compatibility

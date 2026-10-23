@@ -746,6 +746,8 @@ fn compact_task_gate_run_result_for_context(raw: &str) -> Option<ContextSummary>
     }
     if let Some(log_path) = json_text(gate, "log_path") {
         lines.push(format!("log_path: {log_path}"));
+    } else {
+        lines.push("No command log saved; returned stream summaries are producer-capped at 900 characters each. Recovery preserves this returned result, not discarded command-stream tails.".to_string());
     }
     Some(ContextSummary {
         text: lines.join("\n"),
@@ -902,7 +904,7 @@ fn summary_view(
     let retrieval_ref = recovery.and_then(|recovery| recovery.artifact_id);
     let footer = match recovery_path {
         Some(path) => format!(
-            "[full output at {path}; {}]",
+            "[complete returned tool result at {path}; {}]",
             crate::tools::truncate::spillover_recovery_instruction(retrieval_ref)
         ),
         None => format!(

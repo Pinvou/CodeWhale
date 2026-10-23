@@ -377,7 +377,9 @@ pub(crate) fn spillover_recovery_instruction(retrieval_ref: Option<&str>) -> Str
         Some(reference) => format!(
             "{SPILLOVER_RECOVERY_HINT} call retrieve_tool_result with ref=\"{reference}\" \
              (mode=\"tail\" for the end, mode=\"lines\" with lines=\"120-160\" for a range, \
-             mode=\"query\" with query=\"…\" to search it)"
+             mode=\"query\" with query=\"…\" to search it). \
+             If retrieve_tool_result is absent, activate it via tool_search first; if neither \
+             route is available, use a narrower rerun"
         ),
         None => format!(
             "{SPILLOVER_RECOVERY_HINT} full copy kept out of context; read it back with \
