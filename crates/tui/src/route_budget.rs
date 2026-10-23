@@ -45,7 +45,10 @@ const TOOL_OUTPUT_INLINE_OPT_IN_MAX_CHARS: usize = 2 * 1024 * 1024;
 /// Every tool result is measured against this number: 3% of the route's
 /// context window (at about 4 characters per token), capped at 100,000
 /// characters, or the full cap when the window is unknown. An opt-in
-/// `tool_result_max_bytes` workshop setting may raise it, up to 2 MiB.
+/// The historical `tool_result_max_bytes` workshop key raises this character
+/// budget, up to 2,097,152 Unicode scalar values, not a UTF-8 byte ceiling.
+/// Byte-based tool/read limits retain their own semantics. A compatibility
+/// migration of the historical key is tracked separately in Pinvou #770.
 /// Anything past it is cut only after the raw output has been saved as a
 /// session artifact that `retrieve_tool_result` can read back.
 #[must_use]
@@ -70,7 +73,7 @@ fn route_inline_char_budget_with_raise(window_tokens: Option<u32>, raise: Option
         .unwrap_or(TOOL_OUTPUT_INLINE_MAX_CHARS)
         .clamp(1, TOOL_OUTPUT_INLINE_MAX_CHARS);
     match raise {
-        Some(bytes) if bytes > base => bytes.min(TOOL_OUTPUT_INLINE_OPT_IN_MAX_CHARS),
+        Some(chars) if chars > base => chars.min(TOOL_OUTPUT_INLINE_OPT_IN_MAX_CHARS),
         _ => base,
     }
 }

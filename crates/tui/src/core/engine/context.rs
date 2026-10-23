@@ -587,7 +587,7 @@ fn compact_run_tests_result_for_context(
     if let Some(summary) = metadata.and_then(|metadata| json_text(metadata, "summary")) {
         lines.push(format!(
             "failure summary: {}",
-            summarize_text(summary, TOOL_RESULT_METADATA_SUMMARY_CHARS)
+            keep_text(summary, TOOL_RESULT_METADATA_SUMMARY_CHARS, &mut lossy)
         ));
     }
     let header_chars: usize = lines.iter().map(|line| line.chars().count() + 1).sum();

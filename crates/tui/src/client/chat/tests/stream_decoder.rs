@@ -1174,6 +1174,7 @@ fn cache_inspect_reports_turn_meta_dedup_metadata() {
 
 #[test]
 fn request_builder_truncates_large_tool_result_for_wire() {
+    let _workshop = crate::tools::large_output_router::active_workshop_test_guard();
     let long_output = format!("{}{}", "A".repeat(70_000), "Z".repeat(70_000));
     let messages = vec![
         tool_use_message(

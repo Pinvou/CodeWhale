@@ -19377,6 +19377,7 @@ fn session_artifact_files(home: &Path) -> Vec<PathBuf> {
 
 #[test]
 fn under_budget_results_pass_through_whole_for_every_tool() {
+    let _workshop = crate::tools::large_output_router::active_workshop_test_guard();
     // #6508: one budget, sized by the route, decides what the model sees.
     // There is no per-tool-name soft limit: a web answer or a shell log that
     // fits the budget reaches the model byte for byte.
@@ -19402,6 +19403,7 @@ fn under_budget_results_pass_through_whole_for_every_tool() {
 
 #[test]
 fn forkguard_web_body_and_json_fields_survive_header_padding() {
+    let _workshop = crate::tools::large_output_router::active_workshop_test_guard();
     let raw = serde_json::to_string_pretty(&json!({
         "url": "https://example.com/data.json",
         "status": 200,
@@ -19421,6 +19423,7 @@ fn forkguard_web_body_and_json_fields_survive_header_padding() {
 
 #[test]
 fn forkguard_web_body_artifact_does_not_cover_the_response_envelope() {
+    let _workshop = crate::tools::large_output_router::active_workshop_test_guard();
     let output = ToolResult::success("response envelope".repeat(4_000)).with_metadata(json!({
         "evidence_available": true,
         "spillover_path": "/body-only/fetch_response.txt",
@@ -19433,6 +19436,7 @@ fn forkguard_web_body_artifact_does_not_cover_the_response_envelope() {
 
 #[test]
 fn over_budget_result_without_a_saved_copy_says_so_and_asks_for_one() {
+    let _workshop = crate::tools::large_output_router::active_workshop_test_guard();
     // The view never writes. Without a saved copy it asks the engine for
     // one, and until then it promises no ref it cannot honour.
     let raw = "shell line\n".repeat(4_000);
@@ -19448,6 +19452,7 @@ fn over_budget_result_without_a_saved_copy_says_so_and_asks_for_one() {
 
 #[test]
 fn over_budget_result_writes_the_full_output_and_names_its_ref() {
+    let _workshop = crate::tools::large_output_router::active_workshop_test_guard();
     with_artifact_home(|home| {
         let raw = format!("FIRST LINE\n{}LAST LINE", "shell line\n".repeat(4_000));
         let mut output = ToolResult::success(raw.clone());
@@ -19512,6 +19517,7 @@ fn over_budget_result_writes_the_full_output_and_names_its_ref() {
 
 #[test]
 fn spilled_preview_is_refit_not_recut() {
+    let _workshop = crate::tools::large_output_router::active_workshop_test_guard();
     // Spillover already saved the full output and left a ~40 KB preview. The
     // model view re-fits that preview to the budget with the same ref, and no
     // second artifact (which could only hold the preview) is written.
@@ -19553,6 +19559,7 @@ fn spilled_preview_is_refit_not_recut() {
 
 #[test]
 fn legacy_spill_without_ref_keeps_the_ownership_retrieval_hint() {
+    let _workshop = crate::tools::large_output_router::active_workshop_test_guard();
     let head = "h".repeat(32 * 1024);
     let tail = "t".repeat(8 * 1024);
     let preview = format!("{head}\n\n… footer …\n\n…\n{tail}");
@@ -19574,6 +19581,7 @@ fn legacy_spill_without_ref_keeps_the_ownership_retrieval_hint() {
 
 #[test]
 fn structured_run_tests_summary_is_recoverable_and_leads_with_failures() {
+    let _workshop = crate::tools::large_output_router::active_workshop_test_guard();
     with_artifact_home(|home| {
         let stdout = format!(
             "{}test result: FAILED. 1 failed",
@@ -19793,7 +19801,32 @@ fn forkguard_structured_recovery_footer_is_single_and_route_bounded() {
 }
 
 #[test]
+fn forkguard_run_tests_metadata_summary_cut_requests_recovery() {
+    let _workshop = crate::tools::large_output_router::active_workshop_test_guard();
+    let raw = json!({
+        "success": false, "exit_code": 101, "command": "cargo test",
+        "stdout": "short failure output", "stderr": ""
+    })
+    .to_string();
+    for (summary, cut) in [
+        ("short failure".to_string(), false),
+        ("failed case ".repeat(80), true),
+    ] {
+        assert!(summary.chars().count() <= 1_200);
+        assert!(raw.chars().count() + summary.chars().count() < budget_128k());
+        let output = ToolResult::success(raw.clone()).with_metadata(json!({"summary": summary}));
+        let view = view_128k("run_tests", &output);
+        assert_eq!(view.needs_full_output_artifact, cut);
+        assert_eq!(
+            view.text.contains("the full output could not be saved"),
+            cut
+        );
+    }
+}
+
+#[test]
 fn structured_run_tests_summary_bounds_metadata_and_scales_both_streams() {
+    let _workshop = crate::tools::large_output_router::active_workshop_test_guard();
     let raw = json!({
         "success": false,
         "exit_code": 101,
@@ -19839,6 +19872,7 @@ fn structured_run_tests_summary_bounds_metadata_and_scales_both_streams() {
 
 #[test]
 fn display_compaction_never_writes_artifacts() {
+    let _workshop = crate::tools::large_output_router::active_workshop_test_guard();
     // The TUI builds its API-message copy with the same pure view.
     with_artifact_home(|home| {
         let output = ToolResult::success("x".repeat(60_000));
@@ -19856,6 +19890,7 @@ fn display_compaction_never_writes_artifacts() {
 
 #[test]
 fn evidence_bounded_preview_is_not_recompacted() {
+    let _workshop = crate::tools::large_output_router::active_workshop_test_guard();
     // The adaptive evidence envelope already produced an honest bounded
     // preview (head + footer with the recovery path + tail). The context
     // compactor must pass it through untouched when it fits the route,
@@ -19879,6 +19914,7 @@ fn evidence_bounded_preview_is_not_recompacted() {
 
 #[test]
 fn budgeted_read_result_is_not_truncated_a_second_time_by_the_context_compactor() {
+    let _workshop = crate::tools::large_output_router::active_workshop_test_guard();
     // `read` bounds itself to a per-call byte budget and ends a
     // budget-limited result with a footer naming the exact offset to
     // continue from. The 12K context hard limit used to re-truncate that
@@ -19913,6 +19949,7 @@ fn budgeted_read_result_is_not_truncated_a_second_time_by_the_context_compactor(
 
 #[test]
 fn codex_tool_retention_uses_oauth_route_window_not_asmall_contract_model_window() {
+    let _workshop = crate::tools::large_output_router::active_workshop_test_guard();
     let content = "route-effective context\n".repeat(900);
     let output = ToolResult::success(content.clone());
     let limits = codewhale_config::route::RouteLimits {

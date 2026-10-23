@@ -11377,6 +11377,48 @@ fn stamp_subagent_summary_appends_note_when_short() {
 }
 
 #[test]
+fn forkguard_subagent_report_artifact_keeps_exact_bytes() {
+    let home = tempdir().expect("artifact home");
+    with_spillover_root(home.path(), || {
+        let session = "report-owner";
+        let mut result = make_snapshot(SubAgentStatus::Completed);
+        result.result = Some("short report".to_string());
+        assert!(spill_subagent_final_report(session, &result).is_none());
+
+        let report = "first\n报告 detail\n".repeat(1_100);
+        assert!(report.chars().count() > SUBAGENT_SUMMARY_CHAR_BUDGET);
+        result.result = Some(report.clone());
+        let reference = spill_subagent_final_report(session, &result).expect("report retained");
+        assert_eq!(reference, format!("art_sa_{}_report", result.agent_id));
+        let path = crate::artifacts::session_artifact_absolute_path(
+            session,
+            &crate::artifacts::session_artifact_relative_path(&reference),
+        )
+        .expect("session-owned artifact");
+        assert_eq!(
+            std::fs::read(&path).expect("report bytes"),
+            report.as_bytes()
+        );
+        assert_eq!(
+            spill_subagent_final_report(session, &result),
+            Some(reference.clone())
+        );
+        assert_eq!(std::fs::read(&path).unwrap(), report.as_bytes());
+
+        result.agent_id = "second-child".to_string();
+        let second = spill_subagent_final_report(session, &result).expect("second report");
+        assert_ne!(reference, second);
+        let blocked_session = "blocked-report-owner";
+        std::fs::write(
+            home.path().join("sessions").join(blocked_session),
+            "blocked",
+        )
+        .expect("write failure fixture");
+        assert!(spill_subagent_final_report(blocked_session, &result).is_none());
+    });
+}
+
+#[test]
 fn stamp_subagent_summary_truncates_when_over_budget() {
     // issue #2652: a summary exceeding the budget is head+tail truncated using
     // the existing [Output truncated ...] vocabulary, honestly noting there is
