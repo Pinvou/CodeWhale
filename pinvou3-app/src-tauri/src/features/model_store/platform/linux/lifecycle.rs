@@ -227,15 +227,20 @@ pub fn suggest_model_name(card: &StoreCardDetail) -> String {
         base = format!("{base}-{q}");
     }
     let name = normalize_model_name(&base);
-    if name.is_empty() {
-        // 兜底（原名归一为空）同样必须过清洗（第九轮评审 P2）：card id 是商店
-        // /手写自由文本，可能带冒号；商店 `model_name` 永无冒号是移除守卫去
-        // tag 兜底（split(':').next()）的前提——冒号名会让守卫把 store 名切成
-        // 半截、不再等于商店名，别名记录就能对商店部署的模型执行真 DELETE。
-        normalize_model_name(&card.summary.id)
-    } else {
-        name
+    if !name.is_empty() {
+        return name;
     }
+    // 兜底（原名归一为空）同样必须过清洗（第九轮评审 P2）：card id 是商店
+    // /手写自由文本，可能带冒号；商店 `model_name` 永无冒号是移除守卫去
+    // tag 兜底（split(':').next()）的前提——冒号名会让守卫把 store 名切成
+    // 半截、不再等于商店名，别名记录就能对商店部署的模型执行真 DELETE。
+    let name = normalize_model_name(&card.summary.id);
+    if !name.is_empty() {
+        return name;
+    }
+    // 终态兜底（第二十轮评审 P3）：id 也全是非法字符（如 ":::"）时归一仍为空，
+    // 空名会流入按名记录/守卫链——回退固定字面量，保证建议名永非空。
+    "model".to_string()
 }
 
 /// 脚本来源。两种形态：
@@ -2699,6 +2704,16 @@ mod tests {
         assert!(
             !name.contains(':'),
             "model_name must stay colon-free: {name}"
+        );
+        // id 也全是非法字符时归一仍为空——终态兜底回固定字面量，建议名永非空
+        // （第二十轮评审 P3；此前返回空串流入按名记录/守卫链）。
+        let mut degenerate = make_card(":::", None);
+        degenerate.summary.id = ":::".into();
+        let name = suggest_model_name(&degenerate);
+        assert_eq!(name, "model");
+        assert!(
+            !name.is_empty() && !name.contains(':'),
+            "model_name must stay non-empty and colon-free: {name}"
         );
         // 归一对已干净的名字幂等（含此前对拍产物的形态）。
         for raw in ["simple", "qwen3.8-27b-nvfp4-native-mtp--nvfp4", "a-b_c.d"] {
