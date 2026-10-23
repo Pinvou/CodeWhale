@@ -30,8 +30,8 @@ func legacyExpiryInput(t *testing.T, through int64) []migrations.Migration {
 	return input
 }
 
-// Existing test runners provision these three limited deployment actors. Each
-// subtest creates only its own UUID database and never drops an unknown object.
+// The root test owns the deployment actors through newStageFixture. Each
+// subtest owns only its UUID database and never drops an unknown object.
 func legacyExpiryDatabase(t *testing.T, ctx context.Context) *pgx.Conn {
 	t.Helper()
 	raw := os.Getenv("PINVOU_TEST_SCHEMA_DATABASE_URL")
@@ -119,6 +119,12 @@ func seedLegacyExpiry(t *testing.T, ctx context.Context, c *pgx.Conn) {
 }
 
 func TestLegacyExpiry025UpgradePreservesOriginalLedgerPostgres(t *testing.T) {
+	// This root runs in the owner-schema phase, before the retained runner
+	// provisions any Billing actors. Reuse the absent-actor fixture's identity
+	// checks and nonforce cleanup; never borrow a developer's preinstalled roles.
+	actorContext, stopActors := context.WithTimeout(context.Background(), 20*time.Minute)
+	defer stopActors()
+	newStageFixture(t, actorContext, os.Getenv("PINVOU_TEST_SCHEMA_DATABASE_URL"))
 	for through := int64(16); through <= 24; through++ {
 		for _, old := range []bool{false, true} {
 			t.Run(fmt.Sprintf("original%03d/EXPIRE=%v", through, old), func(t *testing.T) {
