@@ -64,6 +64,7 @@ assertContainsTranslationKeys(dict.zh, dict.en, 'en');
 assertContainsTranslationKeys(dict.zh, dict.ja, 'ja');
 
 for (const language of ['zh', 'en', 'ja']) {
+  assert.equal(typeof dict[language].uiScheduled.targetSession, 'string', `${language}: target-session label is required`);
   for (const section of [
     'uiRemote',
     'uiMonitor',
