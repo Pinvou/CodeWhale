@@ -1383,7 +1383,10 @@ mod tests {
         );
 
         // 两个 MB 级正文字段绝不能从这条路径漏出去。
-        assert!(rows[0].record.scripts_content.is_empty(), "scripts 正文泄漏");
+        assert!(
+            rows[0].record.scripts_content.is_empty(),
+            "scripts 正文泄漏"
+        );
         assert!(rows[0].record.assets_content.is_empty(), "assets 正文泄漏");
 
         // 常规字段照常可读（顺带覆盖显式列清单没有漏列）。

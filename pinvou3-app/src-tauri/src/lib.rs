@@ -909,6 +909,14 @@ pub fn run_model_store_autostart() {
 }
 
 pub fn run() {
+    // 模型商店开机自启恢复器（systemd user 服务调用的 headless 入口）：
+    // 不启 GUI，拉起后直接退出。跨平台分发（非 Linux 走 stub 空实现），
+    // main.rs 不持任何 target cfg（架构闸门：cfg 只许在适配层）。
+    let args: Vec<String> = std::env::args().collect();
+    if args.len() == 2 && args[1] == "model-store-autostart" {
+        run_model_store_autostart();
+        return;
+    }
     // WebKitGTK reads its RemoteInspector endpoint while constructing the first
     // WebContext, so the browser feature must reserve it before Tauri starts.
     features::browser::prepare_process_environment();
