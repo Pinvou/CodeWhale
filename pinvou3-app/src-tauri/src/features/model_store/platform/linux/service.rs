@@ -1090,6 +1090,16 @@ pub async fn autostart_pending(_service: Arc<ModelStoreService>) -> Value {
     json!({ "ok": failed == 0, "failed": failed, "results": results })
 }
 
+/// GUI 启动时取走自启报告（一次性：读后删除，下次打开不再弹）。
+/// 恢复器落盘的结构化结果（autostart_pending 的 JSON）——按结果弹窗是
+/// 产品要求②：任何问题都有解决方法提示。
+pub fn take_autostart_report() -> Result<Value, String> {
+    let path = super::config::data_dir().join("autostart-report.json");
+    let raw = std::fs::read_to_string(&path).map_err(|e| format!("读取自启报告失败：{e}"))?;
+    let _ = std::fs::remove_file(&path);
+    serde_json::from_str(&raw).map_err(|e| format!("自启报告格式错误：{e}"))
+}
+
 pub fn cancel_run(service: &Arc<ModelStoreService>, run_id: String) -> Result<Value, String> {
     service.registry.cancel(&run_id);
     Ok(json!({ "ok": true }))

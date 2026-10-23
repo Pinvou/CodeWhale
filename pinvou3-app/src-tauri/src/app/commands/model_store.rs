@@ -271,6 +271,11 @@ pub fn model_store_set_auto_start(card_id: String, enabled: bool) -> Result<Valu
 }
 
 #[tauri::command]
+pub fn model_store_take_autostart_report() -> Result<Value, String> {
+    model_store::take_autostart_report()
+}
+
+#[tauri::command]
 pub fn model_store_storage_settings() -> Result<Value, String> {
     model_store::storage_settings()
 }

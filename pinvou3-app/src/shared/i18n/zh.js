@@ -461,6 +461,7 @@ export const dictZh = {
           libraryEmpty:'还没有下载任何模型，去模型市场看看吧',
           statusRunning:'运行中', statusDeployed:'已部署', statusPending:'待部署', statusDownloaded:'已下载，待部署', statusIncomplete:'需继续下载', statusCleanupRequired:'需继续清理',
           autoStartLabel:'开机自动启动',
+          autostartFailTitle:'部分模型开机自启失败', autostartFailCard:name => '「'+name+'」自启失败：', autostartOkAll:'所有模型已自动恢复运行。',
           deploy:'部署', deploying:'部署中…', redeploy:'重新部署', resumeDownload:'继续下载', resumingDownload:'继续下载中…',
           enable:'启用', enabling:'启用中…', stop:'停用', stopping:'停用中…', uninstall:'卸载', uninstalling:'卸载中…', continueCleanup:'继续清理', cleaningUp:'清理中…',
           taskDeploy:n=>`部署「${n}」`, taskEnable:n=>`启用「${n}」`, taskStop:n=>`停用「${n}」`, taskUninstall:n=>`卸载「${n}」`,

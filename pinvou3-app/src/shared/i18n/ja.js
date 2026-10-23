@@ -446,6 +446,7 @@ const jaBase = {
           libraryEmpty:'まだモデルをダウンロードしていません。モデルマーケットを見てみましょう',
           statusRunning:'実行中', statusDeployed:'デプロイ済み', statusPending:'未デプロイ', statusDownloaded:'ダウンロード済み・デプロイ待ち', statusIncomplete:'ダウンロードを続行', statusCleanupRequired:'クリーンアップが必要',
           autoStartLabel:'起動時に自動開始',
+          autostartFailTitle:'一部のモデルの自動起動に失敗', autostartFailCard:name => '「'+name+'」の起動に失敗：', autostartOkAll:'すべてのモデルが自動復帰しました。',
           deploy:'デプロイ', deploying:'デプロイ中…', redeploy:'再デプロイ', resumeDownload:'ダウンロードを続行', resumingDownload:'ダウンロードを続行中…',
           enable:'有効化', enabling:'有効化中…', stop:'停止', stopping:'停止中…', uninstall:'アンインストール', uninstalling:'アンインストール中…', continueCleanup:'クリーンアップを続行', cleaningUp:'クリーンアップ中…',
           taskDeploy:n=>`「${n}」をデプロイ`, taskEnable:n=>`「${n}」を有効化`, taskStop:n=>`「${n}」を停止`, taskUninstall:n=>`「${n}」をアンインストール`,
