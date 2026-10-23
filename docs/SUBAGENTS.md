@@ -431,13 +431,21 @@ inherited authority.
 ### Session names and parallel read-only fan-outs
 
 A `name` passed to `action=start` is reserved only while its holder is live:
-running, or interrupted (parked). Once the child settles (completed, failed,
-cancelled, budget-exhausted) the name is free, so a cancel-and-retry under
-the same name succeeds. If a settled and a live child share a name, the name
-resolves to the live one; among settled-only holders it resolves to the most
-recent spawn. A record hydrated from an older boot is history for resolution
-too — it never outranks the current boot's child — so the bare-name
-"ambiguous" refusal only guards state spawn cannot produce; use the
+running, or interrupted (parked; only some interrupts leave a checkpoint
+`followup` can wake). Once the child settles (completed, failed, cancelled,
+budget-exhausted) the name is free, so a cancel-and-retry under the same name
+succeeds. If a settled and a live child share a name, the name resolves to
+the live one; among settled-only holders it resolves to the most recent
+spawn. The held-name refusal says what the holder's status can actually do: a
+running child can be waited out or cancelled; an interrupted one is already
+terminal (its completion event has fired and `cancel` only touches Running
+children), so the advice is `action=followup` if its checkpoint still allows,
+or a different name. A ref that is no child's session name still reaches its
+record by exact `agent_id`; when the string is also a session name — unnamed
+children take `session_name = id`, and `name` accepts id-shaped strings —
+the name rules above win. A record hydrated from an older boot is history for
+resolution too — it never outranks the current boot's child — so the
+bare-name "ambiguous" refusal only guards state spawn cannot produce; use the
 `agent_id` if you ever meet it.
 
 `type=general` and `type=implement` are write-capable and claim the whole

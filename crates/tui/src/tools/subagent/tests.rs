@@ -5617,6 +5617,12 @@ fn wait_bound_constants_agree_across_both_wait_faces() {
         "the agent broadcast face and the agents/wait face must advertise the \
          same maximum timeout"
     );
+    assert_eq!(
+        super::SUBAGENT_WAIT_MIN_TIMEOUT_SECS,
+        super::coord::COORD_WAIT_MIN_TIMEOUT_SECS,
+        "the agent broadcast face and the agents/wait face must advertise the \
+         same minimum timeout"
+    );
 }
 
 #[test]
@@ -9971,6 +9977,70 @@ fn session_name_resolution_ignores_prior_boot_interrupted_ghost() {
     );
 }
 
+#[tokio::test]
+async fn id_shaped_session_name_resolves_by_the_name_rules_not_the_settled_id() {
+    // `validate_session_name` accepts id-shaped names and an unnamed child
+    // takes `session_name = id`, so a retry can legitimately hold a settled
+    // sibling's agent id as its session name. The exact-id fast path must
+    // not let the settled record shadow the child the name now means.
+    let tmp = tempdir().expect("tempdir");
+    let manager = new_shared_subagent_manager(tmp.path().to_path_buf(), 5);
+    let settled_id = seed_named_same_session_agent(
+        &manager,
+        tmp.path(),
+        "agent_7e2950c4",
+        "agent_7e2950c4",
+        SubAgentStatus::Completed,
+    )
+    .await;
+    let live_id = seed_named_same_session_agent(
+        &manager,
+        tmp.path(),
+        "agent_9f83d2a1",
+        "agent_7e2950c4",
+        SubAgentStatus::Running,
+    )
+    .await;
+    // Backdate the settled record so "newest settled" is deterministic.
+    {
+        let mut guard = manager.write().await;
+        guard
+            .agents
+            .get_mut(&settled_id)
+            .expect("settled")
+            .started_at = Instant::now() - Duration::from_secs(300);
+    }
+
+    // While the retry runs, the id string is its session name: status/
+    // interrupt/cancel by that ref must reach the live child, not the
+    // settled id-holder.
+    assert_eq!(
+        manager
+            .read()
+            .await
+            .resolve_agent_ref("agent_7e2950c4")
+            .expect("the live holder owns the id-shaped name"),
+        live_id,
+        "a settled id must not shadow the live name holder"
+    );
+
+    // After the retry settles too, the name rules still govern — the
+    // newest settled holder (the retry the parent just waited on) wins
+    // over the older id-holder.
+    {
+        let mut guard = manager.write().await;
+        guard.agents.get_mut(&live_id).expect("live").status = SubAgentStatus::Completed;
+    }
+    assert_eq!(
+        manager
+            .read()
+            .await
+            .resolve_agent_ref("agent_7e2950c4")
+            .expect("newest settled holder wins"),
+        live_id
+    );
+}
+
 #[test]
 fn spawn_contention_error_names_the_read_only_path() {
     // The ledger text is written for writers. The refusal seen in the
@@ -9984,7 +10054,7 @@ fn spawn_contention_error_names_the_read_only_path() {
         guided.contains("Read-only children never contend"),
         "{guided}"
     );
-    for role in ["explore", "planner", "reviewer", "advisor"] {
+    for role in ["explore", "planner", "reviewer", "test", "advisor"] {
         assert!(guided.contains(role), "guidance must name {role}: {guided}");
     }
     assert!(

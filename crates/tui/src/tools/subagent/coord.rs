@@ -24,7 +24,7 @@ use crate::tools::spec::{
 /// session deaf to typed input, and settled children already report back as
 /// `<codewhale:subagent.done>` sentinels that start a fresh turn (#4097).
 pub(crate) const COORD_WAIT_DEFAULT_TIMEOUT_SECS: u64 = 30;
-const COORD_WAIT_MIN_TIMEOUT_SECS: u64 = 1;
+pub(crate) const COORD_WAIT_MIN_TIMEOUT_SECS: u64 = 1;
 pub(crate) const COORD_WAIT_MAX_TIMEOUT_SECS: u64 = 120;
 const COORD_WAIT_CHECK_INTERVAL: Duration = Duration::from_millis(250);
 const RECENT_PROGRESS_LIMIT: usize = 8;
@@ -714,10 +714,7 @@ async fn wait_for_all_children(
     manager: SharedSubAgentManager,
     context: &ToolContext,
 ) -> Result<ToolResult, ToolError> {
-    let timeout_secs = input
-        .get("timeout_secs")
-        .or_else(|| input.get("timeout"))
-        .and_then(Value::as_u64)
+    let timeout_secs = super::wait_timeout_secs(input)?
         .unwrap_or(COORD_WAIT_DEFAULT_TIMEOUT_SECS)
         .clamp(COORD_WAIT_MIN_TIMEOUT_SECS, COORD_WAIT_MAX_TIMEOUT_SECS);
     let timeout = Duration::from_secs(timeout_secs);
@@ -871,10 +868,7 @@ async fn wait_for_activity(
     manager: SharedSubAgentManager,
     context: &ToolContext,
 ) -> Result<ToolResult, ToolError> {
-    let timeout_secs = input
-        .get("timeout_secs")
-        .or_else(|| input.get("timeout"))
-        .and_then(Value::as_u64)
+    let timeout_secs = super::wait_timeout_secs(input)?
         .unwrap_or(COORD_WAIT_DEFAULT_TIMEOUT_SECS)
         .clamp(COORD_WAIT_MIN_TIMEOUT_SECS, COORD_WAIT_MAX_TIMEOUT_SECS);
     let timeout = Duration::from_secs(timeout_secs);
@@ -2155,6 +2149,31 @@ mod tests {
             error.contains("Agent not found in the active session"),
             "{error}"
         );
+    }
+
+    #[tokio::test]
+    async fn wait_rejects_a_malformed_timeout_on_every_face_like_completion() {
+        // `timeout_secs` is advertised as an integer and all three faces
+        // share one read, so a wrong-typed value must be a hard error
+        // everywhere — never the silent 30s default the `all`/`activity`
+        // arms used before the read was unified, which hid a mis-sized
+        // bound from the parent.
+        let tmp = tempdir().unwrap();
+        let manager = empty_manager(tmp.path());
+        for until in ["all", "activity"] {
+            let error = dispatch_wait(
+                &json!({ "until": until, "timeout_secs": "90" }),
+                Arc::clone(&manager),
+                &ToolContext::new(tmp.path()),
+            )
+            .await
+            .expect_err("a string timeout must be a hard error, not a silent 30s default")
+            .to_string();
+            assert!(
+                error.contains("field 'timeout_secs' must be a non-negative integer"),
+                "{error}"
+            );
+        }
     }
 
     #[tokio::test]

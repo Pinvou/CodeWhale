@@ -7004,13 +7004,6 @@ impl SubAgentManager {
         active_session_id: Option<&str>,
     ) -> Result<String> {
         let agent_ref = agent_ref.trim();
-        if let Some(agent) = self.agents.get(agent_ref)
-            && active_session_id
-                .is_none_or(|session_id| self.agent_is_owned_by_session(agent, session_id))
-        {
-            return Ok(agent.id.clone());
-        }
-
         let matches = self
             .agents
             .values()
@@ -7030,15 +7023,32 @@ impl SubAgentManager {
         // interrupted record hydrated from a previous boot is terminal
         // history, not the name's live holder, so it can never outrank this
         // boot's child.
-        let mut live = matches
+        let live = matches
             .iter()
-            .filter(|agent| self.is_live_session_name_holder(agent));
-        if let Some(agent) = live.next() {
-            if live.next().is_some() {
+            .filter(|agent| self.is_live_session_name_holder(agent))
+            .collect::<Vec<_>>();
+        match live.as_slice() {
+            [agent] => return Ok(agent.id.clone()),
+            [_, _, ..] => {
                 return Err(anyhow!(
                     "Agent session name '{agent_ref}' is ambiguous; use an agent_id"
                 ));
             }
+            _ => {}
+        }
+
+        // The exact-id fast path only applies when the ref is not any
+        // child's session name: `validate_session_name` accepts id-shaped
+        // names and an unnamed child takes `session_name = id`, so an id
+        // string that is also a name must follow the name rules above — a
+        // settled record must not shadow the child that name now means,
+        // live or newest-settled. A ref that names no child still reaches
+        // its own record by id (a named child stays reachable by its id).
+        if matches.is_empty()
+            && let Some(agent) = self.agents.get(agent_ref)
+            && active_session_id
+                .is_none_or(|session_id| self.agent_is_owned_by_session(agent, session_id))
+        {
             return Ok(agent.id.clone());
         }
         matches
@@ -9284,12 +9294,14 @@ const SUBAGENT_WAIT_CHECK_INTERVAL: Duration = Duration::from_millis(250);
 /// engine turn's cancel token interrupts the block, and no lock is held
 /// across an await.
 ///
-/// The wait bound as the `until=completion` face reads it: the advertised
-/// `timeout_secs` plus its parse-accepted `timeout` alias. The alias is a
-/// documented compat contract (docs/SUBAGENTS.md), so the read lives in this
-/// one function and the alias pin test calls it directly — dropping the
-/// alias must fail loudly there instead of silently defaulting saved
-/// transcripts to 30s.
+/// The one wait-bound read shared by every wait face (`until=completion`,
+/// `until=all`, `until=activity`): the advertised `timeout_secs` plus its
+/// parse-accepted `timeout` alias. The alias is a documented compat contract
+/// (docs/SUBAGENTS.md), so the read lives in this one function — every face
+/// rejects a malformed value identically instead of silently falling back to
+/// the 30s default — and the alias pin test calls it directly, so dropping
+/// the alias fails loudly there instead of silently defaulting saved
+/// transcripts.
 fn wait_timeout_secs(input: &Value) -> Result<Option<u64>, ToolError> {
     parse_optional_u64(input, &["timeout_secs", "timeout"])
 }
@@ -9888,7 +9900,7 @@ fn spawn_claim_error_with_guidance(error: String) -> String {
     }
     format!(
         "{error}. Read-only children never contend: for research or inspection launch a \
-         read-only type (explore, planner, reviewer, advisor) or a prompt-only start; \
+         read-only type (explore, planner, reviewer, test, advisor) or a prompt-only start; \
          parallel writers need disjoint write_roots or worktree=true."
     )
 }
