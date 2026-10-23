@@ -65,6 +65,51 @@ fn existing_owned_directory(path: &Path) -> Result<bool, ModelManagerError> {
     Ok(path.canonicalize().map_err(|e| fail(e.to_string()))? == path)
 }
 
+/// Resolve existing prefixes without creating missing directories. Resolve each
+/// prefix before `..`, so a symlink followed by `..` keeps filesystem semantics.
+/// Only a positively missing component may remain lexical; unreadable paths,
+/// dangling links and non-directories cannot prove that two resources are apart.
+fn planned_directory(path: &Path) -> Result<PathBuf, ModelManagerError> {
+    let absolute = if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        std::env::current_dir()
+            .map_err(|e| fail(e.to_string()))?
+            .join(path)
+    };
+    let mut resolved = PathBuf::new();
+    for component in absolute.components() {
+        match component {
+            std::path::Component::CurDir => {}
+            std::path::Component::ParentDir => {
+                resolved.pop();
+            }
+            _ => {
+                resolved.push(component.as_os_str());
+                match resolved.canonicalize() {
+                    Ok(canonical) => {
+                        if !fs::metadata(&canonical)
+                            .map_err(|e| fail(e.to_string()))?
+                            .is_dir()
+                        {
+                            return Err(fail("权重资源路径不是目录，已保留现有记录和文件。"));
+                        }
+                        resolved = canonical;
+                    }
+                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                        match resolved.symlink_metadata() {
+                            Err(missing) if missing.kind() == std::io::ErrorKind::NotFound => {}
+                            _ => return Err(fail(error.to_string())),
+                        }
+                    }
+                    Err(error) => return Err(fail(error.to_string())),
+                }
+            }
+        }
+    }
+    Ok(resolved)
+}
+
 /// Path::exists treats permission errors and dangling links as absence. A
 /// record-only cleanup needs a positive NotFound result without linked parents.
 fn resource_presence(path: &Path) -> Result<bool, ModelManagerError> {
@@ -196,6 +241,19 @@ fn find_weight(root: &Path, name: &str) -> Result<PathBuf, ModelManagerError> {
     locate_weight(root, name)?.ok_or_else(|| fail("无法唯一确认隔离目录中的权重文件，未切换部署。"))
 }
 
+fn declared_resource_dir(rec: &db::StoreModelRecord) -> Result<Option<PathBuf>, ModelManagerError> {
+    let path = runtime_path(rec)?.join(".deploy-env");
+    match fs::read_to_string(path) {
+        Ok(env) => Ok(env.lines().find_map(|line| {
+            line.strip_prefix("MODEL_DIR=\"")
+                .and_then(|value| value.strip_suffix('"'))
+                .map(PathBuf::from)
+        })),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(fail(error.to_string())),
+    }
+}
+
 pub(super) fn legacy_resource_dir(
     rec: &db::StoreModelRecord,
     configured_root: &Path,
@@ -207,17 +265,10 @@ pub(super) fn legacy_resource_dir(
         .unwrap_or(configured_root)
         .canonicalize()
         .ok()?;
-    if let Some(runtime) = runtime_path(rec).ok() {
-        if let Ok(env) = fs::read_to_string(runtime.join(".deploy-env")) {
-            if let Some(value) = env
-                .lines()
-                .find_map(|line| line.strip_prefix("MODEL_DIR=\"")?.strip_suffix('"'))
-            {
-                if let Ok(path) = PathBuf::from(value).canonicalize() {
-                    if path != allowed && path.starts_with(&allowed) {
-                        return Some(path);
-                    }
-                }
+    if let Some(value) = declared_resource_dir(rec).ok().flatten() {
+        if let Ok(path) = value.canonicalize() {
+            if path != allowed && path.starts_with(&allowed) {
+                return Some(path);
             }
         }
     }
@@ -779,13 +830,95 @@ impl ModelManager {
         if !assessment.can_stage {
             return Err(fail("此卡片不支持当前版本的隔离升级，现有部署已保留。"));
         }
-        if legacy_resource_dir(&current, &self.settings.models_path()).is_none() {
+        if legacy_resource_dir(&current, Path::new(&self.settings.models_dir)).is_none() {
             return Err(fail(
                 "无法确认旧版部署的权重目录，请先修复旧版部署，确保可回退后再升级。",
             ));
         }
         let pkg = self.fetch_and_store_scripts(&card, Some(&control))?;
         self.stage_verified(&current, &card, revision, pkg, on_progress, control)
+    }
+
+    /// Called under the quota admission lock, with the production caller also
+    /// retaining its shared resource lock. Only this exact retry owns its row;
+    /// the same card's active and other generations remain protected references.
+    fn ensure_stage_target_disjoint(
+        &self,
+        target: &Path,
+        card_id: &str,
+        revision: &str,
+    ) -> Result<(), ModelManagerError> {
+        // Settings::models_path creates its directory even when only reading
+        // the path. Admission must not use it before disjointness is proven.
+        let configured_root = Path::new(&self.settings.models_dir);
+        let target = planned_directory(target)?;
+        let check = |resource: &Path| -> Result<(), ModelManagerError> {
+            // Deletion also protects the exact registered spelling. A linked
+            // resource may resolve elsewhere yet still make this candidate
+            // uncleanable under that unchanged conservative protection.
+            if target.starts_with(resource) || resource.starts_with(&target) {
+                return Err(fail(
+                    "新版下载目录与已登记权重目录重叠，已保留现有记录和文件。新建版本请改用独立目录。",
+                ));
+            }
+            let resource = planned_directory(resource)?;
+            if target.starts_with(&resource) || resource.starts_with(&target) {
+                return Err(fail(
+                    "新版下载目录与已登记权重目录重叠，已保留现有记录和文件。新建版本请改用独立目录。",
+                ));
+            }
+            Ok(())
+        };
+        for active in db::list_store_models().map_err(|e| fail(e.to_string()))? {
+            if managed_storage(&active)? {
+                // Managed generations own their whole root, including files
+                // beside the .deploy-env weight subdirectory.
+                let root = active
+                    .models_root
+                    .as_deref()
+                    .ok_or_else(|| fail("已登记隔离版本缺少权重目录，未创建或登记新版。"))?;
+                check(Path::new(root))?;
+            } else if let Some(root) = legacy_resource_dir(&active, configured_root) {
+                // A legacy models_root may be shared; protect its actual
+                // deployment resource, allowing normal .versions siblings.
+                check(&root)?;
+            } else if let Some(root) = active
+                .runtime_card_id
+                .as_ref()
+                .and(active.models_root.as_deref())
+            {
+                // Restored legacy rows also carry runtime_card_id. If their
+                // fixed root reappears, the existing resolver may fall back to
+                // that whole root even without a resolvable deployment marker.
+                check(Path::new(root))?;
+            } else if let Some(declared) = declared_resource_dir(&active)? {
+                // A missing legacy directory is still an explicit reference:
+                // creating our candidate could make it resolvable again and
+                // cause the unchanged deletion guard to retain the candidate.
+                let allowed = planned_directory(
+                    active
+                        .models_root
+                        .as_deref()
+                        .map(Path::new)
+                        .unwrap_or(configured_root),
+                )?;
+                let root = planned_directory(&declared)?;
+                if root != allowed && root.starts_with(&allowed) {
+                    check(&root)?;
+                }
+            }
+        }
+        for version in version_store::list(None).map_err(fail)? {
+            if version.card_id == card_id && version.version_id == revision {
+                continue;
+            }
+            let root = version
+                .resource_dir
+                .as_deref()
+                .ok_or_else(|| fail("已登记历史版本缺少权重目录，未创建或登记新版。"))?;
+            check(Path::new(root))?;
+        }
+        Ok(())
     }
 
     fn stage_verified(
@@ -839,6 +972,7 @@ impl ModelManager {
         }
         let storage_id = format!("{safe}--{}", &revision[..32]);
         let marker = serde_json::json!({"card_id":card_id,"version_id":revision}).to_string();
+        let configured_root = Path::new(&self.settings.models_dir);
         let (models_root, required, quota_growth) = if let Some(v) = &existing {
             let root = PathBuf::from(
                 v.models_root
@@ -855,6 +989,7 @@ impl ModelManager {
             {
                 return Err(fail("失败版本目录归属不符，已保留原记录和资源。"));
             }
+            self.ensure_stage_target_disjoint(&root, card_id, revision)?;
             // Scripts own their output layout, including HF cache directories.
             // Existing bytes remain charged, but neither a matching basename
             // nor an etag proves those bytes will be reused by this attempt.
@@ -862,25 +997,27 @@ impl ModelManager {
             // resume and retain any required configuration side effects.
             (root, card.summary.size_bytes, card.summary.size_bytes)
         } else {
+            let target =
+                planned_directory(&configured_root.join(".versions").join(&safe).join(revision))?;
+            // Even the space check creates directories. Reject overlaps before
+            // it, ownership markers, runtime directories or version registration.
+            self.ensure_stage_target_disjoint(&target, card_id, revision)?;
             // Preserve the normal download path's ability to create a newly
             // configured target root before owned_directory canonicalizes it.
             let initial_space = self.check_can_download_increment_with_retained(
                 card.summary.size_bytes,
                 card.summary.size_bytes,
-                &self.settings.models_path(),
+                configured_root,
                 retained,
             );
             if !initial_space.ok {
                 return Err(fail(initial_space.reason));
             }
-            (
-                owned_directory(
-                    &self.settings.models_path(),
-                    &[".versions", &safe, revision],
-                )?,
-                card.summary.size_bytes,
-                card.summary.size_bytes,
-            )
+            let root = owned_directory(configured_root, &[".versions", &safe, revision])?;
+            if root != target {
+                return Err(fail("下载目录在检查后发生变化，未登记或下载新版。"));
+            }
+            (root, card.summary.size_bytes, card.summary.size_bytes)
         };
         let actual = version_store::quota_dir_size_bytes(&models_root).map_err(fail)?;
         let marker_bytes = if models_root.join(".pinvou-version.json").exists() {

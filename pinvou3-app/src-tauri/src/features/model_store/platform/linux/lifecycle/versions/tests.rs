@@ -120,6 +120,112 @@ fn fixture() -> (
 }
 
 #[test]
+fn stage_target_inside_active_weights_is_rejected_before_writes_and_sibling_is_cleanable() {
+    let (_temp, mut mgr, current, card, pkg, id) = fixture();
+    let original_root = mgr.settings.models_path();
+    db::connect()
+        .unwrap()
+        .execute(
+            "UPDATE store_models SET models_root=?1 WHERE card_id=?2",
+            rusqlite::params![original_root.to_string_lossy(), current.card_id],
+        )
+        .unwrap();
+    let current = db::get_store_model(&current.card_id).unwrap().unwrap();
+    let old_resource = original_root.join("legacy");
+    mgr.settings.models_dir = old_resource.to_string_lossy().into_owned();
+    let before = serde_json::to_value(&current).unwrap();
+    let runtime = config::data_dir().join("cards");
+    let runtime_entries = fs::read_dir(&runtime).unwrap().count();
+
+    let error = mgr
+        .stage_verified(
+            &current,
+            &card,
+            &id,
+            pkg.clone(),
+            &mut |_| {},
+            Default::default(),
+        )
+        .unwrap_err();
+    assert!(error.to_string().contains("重叠"), "{error}");
+    assert!(!old_resource.join(".versions").exists());
+    assert_eq!(fs::read_dir(&runtime).unwrap().count(), runtime_entries);
+    assert!(version_store::list(None).unwrap().is_empty());
+    assert!(!version_store::has_history(&current.card_id).unwrap());
+    assert_eq!(
+        serde_json::to_value(db::get_store_model(&current.card_id).unwrap().unwrap()).unwrap(),
+        before
+    );
+    assert_eq!(
+        fs::read(old_resource.join("old.tachyon")).unwrap(),
+        b"old-weights"
+    );
+
+    // A common parent and a similar directory name do not make siblings shared.
+    // Exercise the actual shell download, SQLite registration and cleanup path.
+    let sibling = original_root.join("legacy-sibling/new-root");
+    mgr.settings.models_dir = sibling.to_string_lossy().into_owned();
+    mgr.stage_verified(&current, &card, &id, pkg, &mut |_| {}, Default::default())
+        .unwrap();
+    let staged = version_store::get(&current.card_id, &id).unwrap().unwrap();
+    let resource = PathBuf::from(staged.resource_dir.unwrap());
+    assert_eq!(
+        fs::read(resource.join("new/new.tachyon")).unwrap(),
+        b"new-weights"
+    );
+    mgr.delete_version(&current.card_id, &id, &mut |_| {}, Default::default())
+        .unwrap();
+    assert!(!resource.exists());
+    assert!(!version_store::has_history(&current.card_id).unwrap());
+    assert_eq!(
+        fs::read(old_resource.join("old.tachyon")).unwrap(),
+        b"old-weights"
+    );
+    mgr.uninstall(&current.card_id, false, &mut |_| {}, Default::default())
+        .unwrap();
+}
+
+#[test]
+fn stage_target_allows_shared_legacy_root_after_rollback() {
+    let (_temp, mgr, current, mut card, pkg, id) = fixture();
+    mgr.stage_verified(
+        &current,
+        &card,
+        &id,
+        pkg.clone(),
+        &mut |_| {},
+        Default::default(),
+    )
+    .unwrap();
+    mgr.switch_version(&current.card_id, &id, &mut |_| {}, Default::default())
+        .unwrap();
+    let old_id = version_store::active_id(&current);
+    mgr.switch_version(&current.card_id, &old_id, &mut |_| {}, Default::default())
+        .unwrap();
+    let restored = db::get_store_model(&current.card_id).unwrap().unwrap();
+    assert!(restored.runtime_card_id.is_none());
+    assert!(!managed_storage(&restored).unwrap());
+    card.summary.engine_version = Some("third".into());
+    let next_id = card_update::revision(&card_update::remote_manifest(&card));
+    assert_ne!(next_id, id);
+    mgr.stage_verified(
+        &restored,
+        &card,
+        &next_id,
+        pkg,
+        &mut |_| {},
+        Default::default(),
+    )
+    .unwrap();
+    mgr.delete_version(&current.card_id, &next_id, &mut |_| {}, Default::default())
+        .unwrap();
+    assert_eq!(
+        fs::read(mgr.settings.models_path().join("legacy/old.tachyon")).unwrap(),
+        b"old-weights"
+    );
+}
+
+#[test]
 fn prepare_switch_rollback_and_cleanup_preserve_credentials_and_old_weights() {
     let (_temp, mgr, current, card, pkg, id) = fixture();
     let key = db::add_api_key(&current.card_id, Some("stable credential")).unwrap();
@@ -3049,4 +3155,835 @@ fn relocated_hf_cache_backup_cannot_reduce_full_retry_reservation() {
     assert_eq!(fs::read(root.join("attempts")).unwrap(), b"ran");
     assert!(!root.join("new/.cache").exists());
     assert!(!root.join("new/new.tachyon").exists());
+}
+
+#[test]
+fn stage_target_rejects_every_registered_version_state_and_overlap_direction_before_writes() {
+    for state in [
+        "current",
+        "history",
+        "ready",
+        "failed",
+        "downloading",
+        "deleting",
+    ] {
+        for same_card in [false, true] {
+            for relation in ["ancestor", "equal", "descendant"] {
+                for missing in [false, true] {
+                    let (temp, mut mgr, current, card, pkg, id) = fixture();
+                    let original_root = mgr.settings.models_path();
+                    db::connect()
+                        .unwrap()
+                        .execute(
+                            "UPDATE store_models SET models_root=?1 WHERE card_id=?2",
+                            rusqlite::params![original_root.to_string_lossy(), current.card_id],
+                        )
+                        .unwrap();
+                    let current = db::get_store_model(&current.card_id).unwrap().unwrap();
+                    let configured = temp.path().join("next-default");
+                    let target = configured
+                        .join(".versions")
+                        .join(&current.card_id)
+                        .join(&id);
+                    let resource = match relation {
+                        "ancestor" => target.parent().unwrap().to_path_buf(),
+                        "equal" => target.clone(),
+                        _ => target.join("retained-child"),
+                    };
+                    if !missing {
+                        fs::create_dir_all(&resource).unwrap();
+                        fs::write(resource.join("retained.weight"), b"retained").unwrap();
+                    }
+                    let mut record = current.clone();
+                    record.card_id = if same_card {
+                        current.card_id.clone()
+                    } else {
+                        "other-card".into()
+                    };
+                    record.models_root = Some(resource.to_string_lossy().into_owned());
+                    let protected = Version {
+                        card_id: record.card_id.clone(),
+                        version_id: "d".repeat(64),
+                        state: state.into(),
+                        record: Some(record),
+                        models_root: Some(resource.to_string_lossy().into_owned()),
+                        resource_dir: Some(resource.to_string_lossy().into_owned()),
+                        runtime_card_id: "retained-runtime".into(),
+                        managed: true,
+                        created_at: now(),
+                        error: None,
+                        planned_bytes: 0,
+                    };
+                    assert_ne!(protected.version_id, id);
+                    version_store::put(&protected).unwrap();
+                    let before_versions =
+                        serde_json::to_value(version_store::list(None).unwrap()).unwrap();
+                    let before_active = serde_json::to_value(&current).unwrap();
+                    let target_existed = target.exists();
+                    let configured_existed = configured.exists();
+                    let cards = config::data_dir().join("cards");
+                    let runtime_count = fs::read_dir(&cards).unwrap().count();
+                    mgr.settings.models_dir = configured.to_string_lossy().into_owned();
+                    let error = mgr
+                        .stage_verified(&current, &card, &id, pkg, &mut |_| {}, Default::default())
+                        .unwrap_err();
+                    assert!(
+                        error.to_string().contains("重叠"),
+                        "{state}/{same_card}/{relation}/{missing}: {error}"
+                    );
+                    assert_eq!(
+                        serde_json::to_value(version_store::list(None).unwrap()).unwrap(),
+                        before_versions
+                    );
+                    assert_eq!(
+                        serde_json::to_value(
+                            db::get_store_model(&current.card_id).unwrap().unwrap()
+                        )
+                        .unwrap(),
+                        before_active
+                    );
+                    assert_eq!(target.exists(), target_existed);
+                    assert_eq!(configured.exists(), configured_existed);
+                    assert!(!target.join(".pinvou-version.json").exists());
+                    assert_eq!(fs::read_dir(&cards).unwrap().count(), runtime_count);
+                    assert!(version_store::get(&current.card_id, &id).unwrap().is_none());
+                    if missing {
+                        assert!(!resource.exists());
+                    } else {
+                        assert_eq!(
+                            fs::read(resource.join("retained.weight")).unwrap(),
+                            b"retained"
+                        );
+                    }
+                    assert_eq!(
+                        fs::read(original_root.join("legacy/old.tachyon")).unwrap(),
+                        b"old-weights"
+                    );
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn stage_target_resolves_alias_parent_semantics_and_rejects_unresolvable_paths_without_writes() {
+    use std::os::unix::fs::symlink;
+    for spelling in [
+        "alias",
+        "alias-parent",
+        "missing-descendant",
+        "dangling",
+        "not-directory",
+    ] {
+        let (temp, mut mgr, current, card, pkg, id) = fixture();
+        let original_root = mgr.settings.models_path();
+        db::connect()
+            .unwrap()
+            .execute(
+                "UPDATE store_models SET models_root=?1 WHERE card_id=?2",
+                rusqlite::params![original_root.to_string_lossy(), current.card_id],
+            )
+            .unwrap();
+        let current = db::get_store_model(&current.card_id).unwrap().unwrap();
+        let old_resource = original_root.join("legacy");
+        let alias = temp.path().join("alias");
+        let configured = match spelling {
+            "alias" => {
+                symlink(&old_resource, &alias).unwrap();
+                alias.join("missing/deep")
+            }
+            "alias-parent" => {
+                let child = old_resource.join("existing-child");
+                fs::create_dir(&child).unwrap();
+                symlink(&child, &alias).unwrap();
+                // Lexically collapsing alias/.. would escape the protected
+                // directory; actual filesystem resolution remains inside it.
+                alias.join("..").join("missing/deep")
+            }
+            "missing-descendant" => old_resource.join("missing/deep"),
+            "dangling" => {
+                symlink(temp.path().join("absent-target"), &alias).unwrap();
+                alias.join("missing/deep")
+            }
+            _ => {
+                fs::write(&alias, b"not a directory").unwrap();
+                alias.join("missing/deep")
+            }
+        };
+        let before_versions = serde_json::to_value(version_store::list(None).unwrap()).unwrap();
+        let before_active = serde_json::to_value(&current).unwrap();
+        let runtime_count = fs::read_dir(config::data_dir().join("cards"))
+            .unwrap()
+            .count();
+        mgr.settings.models_dir = configured.to_string_lossy().into_owned();
+        let error = mgr
+            .stage_verified(
+                &current,
+                &card,
+                &id,
+                pkg.clone(),
+                &mut |_| {},
+                Default::default(),
+            )
+            .unwrap_err();
+        if ["alias", "alias-parent", "missing-descendant"].contains(&spelling) {
+            assert!(error.to_string().contains("重叠"), "{spelling}: {error}");
+        }
+        assert_eq!(
+            serde_json::to_value(version_store::list(None).unwrap()).unwrap(),
+            before_versions
+        );
+        assert_eq!(
+            serde_json::to_value(db::get_store_model(&current.card_id).unwrap().unwrap()).unwrap(),
+            before_active
+        );
+        assert_eq!(
+            fs::read_dir(config::data_dir().join("cards"))
+                .unwrap()
+                .count(),
+            runtime_count
+        );
+        assert!(!old_resource.join("missing").exists());
+        assert!(!temp.path().join("missing").exists());
+        assert!(!temp.path().join("absent-target").exists());
+        assert_eq!(
+            fs::read(old_resource.join("old.tachyon")).unwrap(),
+            b"old-weights"
+        );
+        // Missing components alone remain supported when the new root is
+        // genuinely separate. Exercise registration, the shell and cleanup.
+        let safe = temp.path().join("independent/missing/deep");
+        mgr.settings.models_dir = safe.to_string_lossy().into_owned();
+        mgr.stage_verified(&current, &card, &id, pkg, &mut |_| {}, Default::default())
+            .unwrap();
+        let ready = version_store::get(&current.card_id, &id).unwrap().unwrap();
+        let root = PathBuf::from(ready.models_root.unwrap());
+        assert!(root.starts_with(&safe));
+        assert_eq!(
+            fs::read(root.join("new/new.tachyon")).unwrap(),
+            b"new-weights"
+        );
+        mgr.delete_version(&current.card_id, &id, &mut |_| {}, Default::default())
+            .unwrap();
+        assert!(!root.exists());
+    }
+}
+
+#[test]
+fn stage_retry_excludes_only_its_own_row_and_preserves_fixed_root_after_overlap_refusal() {
+    for state in ["failed", "downloading"] {
+        let (temp, mut mgr, current, card, pkg, id) = fixture();
+        let original_root = mgr.settings.models_path();
+        db::connect()
+            .unwrap()
+            .execute(
+                "UPDATE store_models SET models_root=?1 WHERE card_id=?2",
+                rusqlite::params![original_root.to_string_lossy(), current.card_id],
+            )
+            .unwrap();
+        let current = db::get_store_model(&current.card_id).unwrap().unwrap();
+        let mut failed_pkg = pkg.clone();
+        failed_pkg.scripts.insert("download_model".into(), blob(
+            "#!/bin/bash\nset -e\nmkdir -p \"$LMM_MODELS_DIR/new\"\nprintf new-w > \"$LMM_MODELS_DIR/new/new.tachyon\"\necho '完整性校验失败' >&2\nexit 1\n",
+        ));
+        assert!(
+            mgr.stage_verified(
+                &current,
+                &card,
+                &id,
+                failed_pkg,
+                &mut |_| {},
+                Default::default()
+            )
+            .is_err()
+        );
+        let mut candidate = version_store::get(&current.card_id, &id).unwrap().unwrap();
+        candidate.state = state.into();
+        candidate.planned_bytes = if state == "downloading" { 1234 } else { 0 };
+        version_store::put(&candidate).unwrap();
+        let root = PathBuf::from(candidate.models_root.as_deref().unwrap());
+        let marker_before = fs::read(root.join(".pinvou-version.json")).unwrap();
+        let mut conflict = candidate.clone();
+        conflict.version_id = "c".repeat(64);
+        assert_ne!(conflict.version_id, id);
+        conflict.state = "history".into();
+        conflict.resource_dir = Some(
+            root.join("another-generation")
+                .to_string_lossy()
+                .into_owned(),
+        );
+        conflict.models_root = conflict.resource_dir.clone();
+        conflict.runtime_card_id = "another-generation-runtime".into();
+        version_store::put(&conflict).unwrap();
+        let versions_before = serde_json::to_value(version_store::list(None).unwrap()).unwrap();
+        let before_active = serde_json::to_value(&current).unwrap();
+        let changed_default = temp.path().join("uncreated-default");
+        mgr.settings.models_dir = changed_default.to_string_lossy().into_owned();
+        let error = mgr
+            .stage_verified(
+                &current,
+                &card,
+                &id,
+                pkg.clone(),
+                &mut |_| {},
+                Default::default(),
+            )
+            .unwrap_err();
+        assert!(error.to_string().contains("重叠"), "{state}: {error}");
+        assert_eq!(
+            serde_json::to_value(version_store::list(None).unwrap()).unwrap(),
+            versions_before
+        );
+        assert_eq!(
+            serde_json::to_value(db::get_store_model(&current.card_id).unwrap().unwrap()).unwrap(),
+            before_active
+        );
+        assert_eq!(fs::read(root.join("new/new.tachyon")).unwrap(), b"new-w");
+        assert_eq!(
+            fs::read(root.join(".pinvou-version.json")).unwrap(),
+            marker_before
+        );
+        assert!(!root.join("another-generation").exists());
+        assert!(!changed_default.exists());
+        version_store::remove(&conflict.card_id, &conflict.version_id).unwrap();
+        mgr.stage_verified(&current, &card, &id, pkg, &mut |_| {}, Default::default())
+            .unwrap();
+        let ready = version_store::get(&current.card_id, &id).unwrap().unwrap();
+        assert_eq!(ready.models_root, candidate.models_root);
+        assert_eq!(ready.resource_dir, candidate.resource_dir);
+        assert_eq!(ready.runtime_card_id, candidate.runtime_card_id);
+        assert_eq!(ready.created_at, candidate.created_at);
+        assert_eq!(ready.state, "ready");
+        assert_eq!(
+            fs::read(root.join("new/new.tachyon")).unwrap(),
+            b"new-weights"
+        );
+        // Accepted script setup may create the configured default root, but
+        // the candidate and all its bytes must stay in the registered root.
+        assert!(!changed_default.join(".versions").exists());
+        mgr.delete_version(&current.card_id, &id, &mut |_| {}, Default::default())
+            .unwrap();
+        assert!(!root.exists());
+        assert!(version_store::get(&current.card_id, &id).unwrap().is_none());
+        assert_eq!(
+            fs::read(original_root.join("legacy/old.tachyon")).unwrap(),
+            b"old-weights"
+        );
+    }
+}
+
+#[test]
+fn stage_target_protects_the_entire_current_managed_root_beyond_its_weight_subdirectory() {
+    let (_temp, mut mgr, current, card, pkg, id) = fixture();
+    mgr.stage_verified(
+        &current,
+        &card,
+        &id,
+        pkg.clone(),
+        &mut |_| {},
+        Default::default(),
+    )
+    .unwrap();
+    mgr.switch_version(&current.card_id, &id, &mut |_| {}, Default::default())
+        .unwrap();
+    let active = db::get_store_model(&current.card_id).unwrap().unwrap();
+    let root = PathBuf::from(active.models_root.as_deref().unwrap());
+    assert_eq!(
+        legacy_resource_dir(&active, &mgr.settings.models_path()).unwrap(),
+        root.join("new")
+    );
+    let configured = root.join("beside-the-weights");
+    mgr.settings.models_dir = configured.to_string_lossy().into_owned();
+    let versions_before = serde_json::to_value(version_store::list(None).unwrap()).unwrap();
+    let before_active = serde_json::to_value(&active).unwrap();
+    let next_id = "a".repeat(64);
+    assert_ne!(next_id, id);
+    let error = mgr
+        .stage_verified(
+            &active,
+            &card,
+            &next_id,
+            pkg,
+            &mut |_| {},
+            Default::default(),
+        )
+        .unwrap_err();
+    assert!(error.to_string().contains("重叠"), "{error}");
+    assert!(!configured.exists());
+    assert_eq!(
+        serde_json::to_value(version_store::list(None).unwrap()).unwrap(),
+        versions_before
+    );
+    assert_eq!(
+        serde_json::to_value(db::get_store_model(&current.card_id).unwrap().unwrap()).unwrap(),
+        before_active
+    );
+    assert_eq!(
+        fs::read(root.join("new/new.tachyon")).unwrap(),
+        b"new-weights"
+    );
+    assert!(root.join(".pinvou-version.json").is_file());
+}
+
+#[test]
+fn stage_target_protects_another_legacy_cards_explicit_missing_resource_before_creation() {
+    let (_temp, mgr, current, card, pkg, id) = fixture();
+    let models = mgr.settings.models_path();
+    let other = db::add_store_model_with_root(
+        db::AddStoreModelParams {
+            card_id: "missing-legacy-owner",
+            model_name: "missing-legacy-model",
+            card_name: "Temporarily missing legacy deployment",
+            org: current.org.as_deref(),
+            description: current.description.as_deref(),
+            engine_name: &current.engine_name,
+            engine_version: current.engine_version.as_deref(),
+            size_bytes: current.size_bytes,
+            quantization: current.quantization.as_deref(),
+            source_repo_id: current.source_repo_id.as_deref(),
+            source_filename: current.source_filename.as_deref(),
+            scripts: &Default::default(),
+            status: "deployed",
+            profiles: &[],
+            deploy_topology: DeployTopology::Single,
+            card_source: "store",
+        },
+        models.to_str().unwrap(),
+    )
+    .unwrap();
+    let other_runtime = runtime_path(&other).unwrap();
+    fs::create_dir_all(&other_runtime).unwrap();
+    let declared = models.join(".versions").join(&current.card_id);
+    let declaration = format!("MODEL_DIR=\"{}\"\n", declared.display());
+    fs::write(other_runtime.join(".deploy-env"), &declaration).unwrap();
+    assert!(!declared.exists());
+    assert!(legacy_resource_dir(&other, &models).is_none());
+    let before_current = serde_json::to_value(&current).unwrap();
+    let before_other = serde_json::to_value(&other).unwrap();
+    let before_versions = serde_json::to_value(version_store::list(None).unwrap()).unwrap();
+    let runtime_count = fs::read_dir(config::data_dir().join("cards"))
+        .unwrap()
+        .count();
+    let error = mgr
+        .stage_verified(
+            &current,
+            &card,
+            &id,
+            pkg.clone(),
+            &mut |_| {},
+            Default::default(),
+        )
+        .unwrap_err();
+    assert!(error.to_string().contains("重叠"), "{error}");
+    assert!(!models.join(".versions").exists());
+    assert_eq!(
+        serde_json::to_value(version_store::list(None).unwrap()).unwrap(),
+        before_versions
+    );
+    assert_eq!(
+        serde_json::to_value(db::get_store_model(&current.card_id).unwrap().unwrap()).unwrap(),
+        before_current
+    );
+    assert_eq!(
+        serde_json::to_value(db::get_store_model(&other.card_id).unwrap().unwrap()).unwrap(),
+        before_other
+    );
+    assert_eq!(
+        fs::read_to_string(other_runtime.join(".deploy-env")).unwrap(),
+        declaration
+    );
+    assert_eq!(
+        fs::read_dir(config::data_dir().join("cards"))
+            .unwrap()
+            .count(),
+        runtime_count
+    );
+    assert_eq!(
+        fs::read(models.join("legacy/old.tachyon")).unwrap(),
+        b"old-weights"
+    );
+
+    // The declaration is the conflict. A real, separate legacy resource does
+    // not turn its shared download parent into an exclusive reservation.
+    let sibling = models.join("other-legacy-weights");
+    fs::create_dir(&sibling).unwrap();
+    fs::write(sibling.join("old.tachyon"), b"other-weights").unwrap();
+    let sibling_declaration = format!("MODEL_DIR=\"{}\"\n", sibling.display());
+    fs::write(other_runtime.join(".deploy-env"), &sibling_declaration).unwrap();
+    mgr.stage_verified(&current, &card, &id, pkg, &mut |_| {}, Default::default())
+        .unwrap();
+    let prepared = version_store::get(&current.card_id, &id).unwrap().unwrap();
+    let resource = PathBuf::from(prepared.models_root.unwrap());
+    assert_eq!(
+        fs::read(resource.join("new/new.tachyon")).unwrap(),
+        b"new-weights"
+    );
+    mgr.delete_version(&current.card_id, &id, &mut |_| {}, Default::default())
+        .unwrap();
+    assert!(!resource.exists());
+    assert_eq!(
+        serde_json::to_value(db::get_store_model(&current.card_id).unwrap().unwrap()).unwrap(),
+        before_current
+    );
+    assert_eq!(
+        serde_json::to_value(db::get_store_model(&other.card_id).unwrap().unwrap()).unwrap(),
+        before_other
+    );
+    assert_eq!(
+        fs::read_to_string(other_runtime.join(".deploy-env")).unwrap(),
+        sibling_declaration
+    );
+    assert_eq!(
+        fs::read(sibling.join("old.tachyon")).unwrap(),
+        b"other-weights"
+    );
+    assert_eq!(
+        fs::read(models.join("legacy/old.tachyon")).unwrap(),
+        b"old-weights"
+    );
+}
+
+#[test]
+fn stage_target_protects_a_missing_legacy_fallback_root_until_its_layout_is_resolved() {
+    for keep_deployment_marker in [false, true] {
+        let (temp, mgr, current, card, pkg, id) = fixture();
+        // Persist a supported legacy fallback identity. Ordinary legacy rows
+        // have None; a real switch/rollback preserves the supplied identity
+        // rather than inventing one. Exercise both compatibility shapes.
+        db::connect()
+            .unwrap()
+            .execute(
+                "UPDATE store_models SET runtime_card_id=card_id WHERE card_id=?1",
+                [&current.card_id],
+            )
+            .unwrap();
+        let current = db::get_store_model(&current.card_id).unwrap().unwrap();
+        mgr.stage_verified(
+            &current,
+            &card,
+            &id,
+            pkg.clone(),
+            &mut |_| {},
+            Default::default(),
+        )
+        .unwrap();
+        mgr.switch_version(&current.card_id, &id, &mut |_| {}, Default::default())
+            .unwrap();
+        let old_id = version_store::active_id(&current);
+        mgr.switch_version(&current.card_id, &old_id, &mut |_| {}, Default::default())
+            .unwrap();
+        let restored = db::get_store_model(&current.card_id).unwrap().unwrap();
+        assert!(restored.runtime_card_id.is_some());
+        assert!(!managed_storage(&restored).unwrap());
+        let fixed_root = PathBuf::from(restored.models_root.as_deref().unwrap());
+        let restored_runtime = runtime_path(&restored).unwrap();
+        let original_declaration = fs::read(restored_runtime.join(".deploy-env")).unwrap();
+        let backup = temp.path().join("temporarily-relocated-models");
+        fs::rename(&fixed_root, &backup).unwrap();
+        if !keep_deployment_marker {
+            fs::remove_file(restored_runtime.join(".deploy-env")).unwrap();
+        }
+        assert!(!fixed_root.exists());
+        assert!(legacy_resource_dir(&restored, &fixed_root).is_none());
+        let declaration_before = fs::read(restored_runtime.join(".deploy-env")).ok();
+        let marker_in_backup = backup
+            .join(".versions")
+            .join(&current.card_id)
+            .join(&id)
+            .join(".pinvou-version.json");
+        let ownership_before = fs::read(&marker_in_backup).unwrap();
+
+        let other_root = temp.path().join("independent-legacy-models");
+        fs::create_dir_all(other_root.join("legacy")).unwrap();
+        fs::write(other_root.join("legacy/old.tachyon"), b"old-weights").unwrap();
+        let other = db::add_store_model_with_root(
+            db::AddStoreModelParams {
+                card_id: "independent-stage-card",
+                model_name: "independent-stage-model",
+                card_name: "Independent legacy model",
+                org: current.org.as_deref(),
+                description: current.description.as_deref(),
+                engine_name: &current.engine_name,
+                engine_version: current.engine_version.as_deref(),
+                size_bytes: current.size_bytes,
+                quantization: current.quantization.as_deref(),
+                source_repo_id: current.source_repo_id.as_deref(),
+                source_filename: current.source_filename.as_deref(),
+                scripts: &Default::default(),
+                status: "deployed",
+                profiles: &[],
+                deploy_topology: DeployTopology::Single,
+                card_source: "store",
+            },
+            other_root.to_str().unwrap(),
+        )
+        .unwrap();
+        db::set_scripts_content(
+            &other.card_id,
+            &current.scripts_content,
+            &current.assets_content,
+        )
+        .unwrap();
+        let other = db::get_store_model(&other.card_id).unwrap().unwrap();
+        let other_runtime = runtime_path(&other).unwrap();
+        fs::create_dir_all(&other_runtime).unwrap();
+        let other_declaration = format!("MODEL_DIR=\"{}\"\n", other_root.join("legacy").display());
+        fs::write(other_runtime.join(".deploy-env"), &other_declaration).unwrap();
+        let mut other_card = card.clone();
+        other_card.summary.id = other.card_id.clone();
+        let other_id = card_update::revision(&card_update::remote_manifest(&other_card));
+        let mut settings = mgr.settings.clone();
+        settings.models_dir = fixed_root.to_string_lossy().into_owned();
+        let relocated = ModelManager::new(Some(settings), None);
+        assert!(!fixed_root.exists());
+        let before_restored = serde_json::to_value(&restored).unwrap();
+        let before_other = serde_json::to_value(&other).unwrap();
+        let before_versions = serde_json::to_value(version_store::list(None).unwrap()).unwrap();
+        let runtime_count = fs::read_dir(config::data_dir().join("cards"))
+            .unwrap()
+            .count();
+        let error = relocated
+            .stage_verified(
+                &other,
+                &other_card,
+                &other_id,
+                pkg.clone(),
+                &mut |_| {},
+                Default::default(),
+            )
+            .unwrap_err();
+        assert!(
+            error.to_string().contains("重叠"),
+            "deployment marker retained={keep_deployment_marker}: {error}"
+        );
+        assert!(!fixed_root.exists());
+        assert!(
+            version_store::get(&other.card_id, &other_id)
+                .unwrap()
+                .is_none()
+        );
+        assert_eq!(
+            serde_json::to_value(version_store::list(None).unwrap()).unwrap(),
+            before_versions
+        );
+        assert_eq!(
+            serde_json::to_value(db::get_store_model(&restored.card_id).unwrap().unwrap()).unwrap(),
+            before_restored
+        );
+        assert_eq!(
+            serde_json::to_value(db::get_store_model(&other.card_id).unwrap().unwrap()).unwrap(),
+            before_other
+        );
+        assert_eq!(
+            fs::read_dir(config::data_dir().join("cards"))
+                .unwrap()
+                .count(),
+            runtime_count
+        );
+        assert_eq!(
+            fs::read(restored_runtime.join(".deploy-env")).ok(),
+            declaration_before
+        );
+        assert_eq!(
+            fs::read_to_string(other_runtime.join(".deploy-env")).unwrap(),
+            other_declaration
+        );
+        assert_eq!(fs::read(&marker_in_backup).unwrap(), ownership_before);
+        assert_eq!(
+            fs::read(backup.join("legacy/old.tachyon")).unwrap(),
+            b"old-weights"
+        );
+        assert_eq!(
+            fs::read(other_root.join("legacy/old.tachyon")).unwrap(),
+            b"old-weights"
+        );
+
+        // Restoring the real old layout and marker makes its actual resource
+        // identifiable again. The shared parent can then host a cleanable
+        // candidate for the other card without taking ownership of that parent.
+        fs::rename(&backup, &fixed_root).unwrap();
+        fs::write(restored_runtime.join(".deploy-env"), &original_declaration).unwrap();
+        assert_eq!(
+            legacy_resource_dir(&restored, &fixed_root).unwrap(),
+            fixed_root.join("legacy")
+        );
+        relocated
+            .stage_verified(
+                &other,
+                &other_card,
+                &other_id,
+                pkg,
+                &mut |_| {},
+                Default::default(),
+            )
+            .unwrap();
+        let ready = version_store::get(&other.card_id, &other_id)
+            .unwrap()
+            .unwrap();
+        let target = PathBuf::from(ready.models_root.unwrap());
+        assert!(target.starts_with(&fixed_root));
+        assert_eq!(
+            fs::read(target.join("new/new.tachyon")).unwrap(),
+            b"new-weights"
+        );
+        relocated
+            .delete_version(&other.card_id, &other_id, &mut |_| {}, Default::default())
+            .unwrap();
+        assert!(!target.exists());
+        assert_eq!(
+            serde_json::to_value(version_store::list(None).unwrap()).unwrap(),
+            before_versions
+        );
+        assert_eq!(
+            serde_json::to_value(db::get_store_model(&restored.card_id).unwrap().unwrap()).unwrap(),
+            before_restored
+        );
+        assert_eq!(
+            serde_json::to_value(db::get_store_model(&other.card_id).unwrap().unwrap()).unwrap(),
+            before_other
+        );
+        assert_eq!(
+            fs::read(fixed_root.join("legacy/old.tachyon")).unwrap(),
+            b"old-weights"
+        );
+        assert_eq!(
+            fs::read(other_root.join("legacy/old.tachyon")).unwrap(),
+            b"old-weights"
+        );
+        assert_eq!(
+            fs::read_to_string(other_runtime.join(".deploy-env")).unwrap(),
+            other_declaration
+        );
+        assert_eq!(
+            fs::read(
+                fixed_root
+                    .join(".versions")
+                    .join(&current.card_id)
+                    .join(&id)
+                    .join(".pinvou-version.json")
+            )
+            .unwrap(),
+            ownership_before
+        );
+    }
+}
+
+#[test]
+fn stage_target_preserves_registered_overlap_when_a_nested_resource_becomes_an_external_symlink() {
+    use std::os::unix::fs::symlink;
+    let (temp, mut mgr, current, card, pkg, id) = fixture();
+    let models = mgr.settings.models_path();
+    db::connect()
+        .unwrap()
+        .execute(
+            "UPDATE store_models SET models_root=?1 WHERE card_id=?2",
+            rusqlite::params![models.to_string_lossy(), current.card_id],
+        )
+        .unwrap();
+    let current = db::get_store_model(&current.card_id).unwrap().unwrap();
+    let target = owned_directory(&models, &[".versions", &current.card_id, &id]).unwrap();
+    let registered_resource = target.join("foreign-root");
+    fs::create_dir(&registered_resource).unwrap();
+    fs::write(registered_resource.join("old.tachyon"), b"old-weights").unwrap();
+    let mut historical_record = current.clone();
+    historical_record.card_id = "registered-legacy-owner".into();
+    let protected = Version {
+        card_id: historical_record.card_id.clone(),
+        version_id: "b".repeat(64),
+        state: "history".into(),
+        record: Some(historical_record),
+        models_root: Some(models.to_string_lossy().into_owned()),
+        runtime_card_id: "registered-legacy-runtime".into(),
+        resource_dir: Some(registered_resource.to_string_lossy().into_owned()),
+        managed: false,
+        created_at: now(),
+        error: None,
+        planned_bytes: 0,
+    };
+    version_store::put(&protected).unwrap();
+    let external = temp.path().join("relocated-legacy-resource");
+    fs::rename(&registered_resource, &external).unwrap();
+    symlink(&external, &registered_resource).unwrap();
+    assert_eq!(registered_resource.canonicalize().unwrap(), external);
+    assert!(!external.starts_with(&target));
+    let before_versions = serde_json::to_value(version_store::list(None).unwrap()).unwrap();
+    let before_current = serde_json::to_value(&current).unwrap();
+    let runtime_count = fs::read_dir(config::data_dir().join("cards"))
+        .unwrap()
+        .count();
+    let error = mgr
+        .stage_verified(
+            &current,
+            &card,
+            &id,
+            pkg.clone(),
+            &mut |_| {},
+            Default::default(),
+        )
+        .unwrap_err();
+    assert!(error.to_string().contains("重叠"), "{error}");
+    assert!(version_store::get(&current.card_id, &id).unwrap().is_none());
+    assert_eq!(
+        serde_json::to_value(version_store::list(None).unwrap()).unwrap(),
+        before_versions
+    );
+    assert_eq!(
+        serde_json::to_value(db::get_store_model(&current.card_id).unwrap().unwrap()).unwrap(),
+        before_current
+    );
+    assert!(!target.join(".pinvou-version.json").exists());
+    assert!(!target.join("new").exists());
+    assert_eq!(
+        fs::read_dir(config::data_dir().join("cards"))
+            .unwrap()
+            .count(),
+        runtime_count
+    );
+    assert_eq!(fs::read_link(&registered_resource).unwrap(), external);
+    assert_eq!(
+        fs::read(external.join("old.tachyon")).unwrap(),
+        b"old-weights"
+    );
+    assert_eq!(
+        fs::read(models.join("legacy/old.tachyon")).unwrap(),
+        b"old-weights"
+    );
+
+    // This protects a registered lexical reference, rather than banning all
+    // user-selected root aliases. A separate symlinked root still supports the
+    // real download, SQLite registration and guarded cleanup lifecycle.
+    let independent = temp.path().join("independent-real-root");
+    fs::create_dir(&independent).unwrap();
+    let alias = temp.path().join("independent-root-alias");
+    symlink(&independent, &alias).unwrap();
+    mgr.settings.models_dir = alias.to_string_lossy().into_owned();
+    mgr.stage_verified(&current, &card, &id, pkg, &mut |_| {}, Default::default())
+        .unwrap();
+    let ready = version_store::get(&current.card_id, &id).unwrap().unwrap();
+    let cleanable = PathBuf::from(ready.models_root.unwrap());
+    assert!(cleanable.starts_with(&independent));
+    assert_eq!(
+        fs::read(cleanable.join("new/new.tachyon")).unwrap(),
+        b"new-weights"
+    );
+    mgr.delete_version(&current.card_id, &id, &mut |_| {}, Default::default())
+        .unwrap();
+    assert!(!cleanable.exists());
+    assert_eq!(
+        serde_json::to_value(version_store::list(None).unwrap()).unwrap(),
+        before_versions
+    );
+    assert_eq!(
+        serde_json::to_value(db::get_store_model(&current.card_id).unwrap().unwrap()).unwrap(),
+        before_current
+    );
+    assert_eq!(fs::read_link(&registered_resource).unwrap(), external);
+    assert_eq!(
+        fs::read(external.join("old.tachyon")).unwrap(),
+        b"old-weights"
+    );
+    assert_eq!(
+        fs::read(models.join("legacy/old.tachyon")).unwrap(),
+        b"old-weights"
+    );
 }
