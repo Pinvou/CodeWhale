@@ -498,6 +498,7 @@ export const dictEn = {
           libraryEmpty:'No models downloaded yet — take a look at the marketplace',
           statusRunning:'Running', statusDeployed:'Deployed', statusPending:'Not deployed', statusDownloaded:'Downloaded, ready to deploy', statusIncomplete:'Download incomplete', statusCleanupRequired:'Cleanup required',
           autoStartLabel:'Start on boot',
+          autostartFailTitle:'Some models failed to auto-start', autostartFailCard:name => '"'+name+'" failed: ', autostartOkAll:'All models restored automatically.',
           deploy:'Deploy', deploying:'Deploying…', redeploy:'Redeploy', resumeDownload:'Resume download', resumingDownload:'Resuming download…',
           enable:'Enable', enabling:'Enabling…', stop:'Stop', stopping:'Stopping…', uninstall:'Uninstall', uninstalling:'Uninstalling…', continueCleanup:'Continue cleanup', cleaningUp:'Cleaning…',
           versionRemaining:"These directories or other files remain. Only verified files belonging to the selected version were removed.",
