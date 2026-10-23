@@ -38,6 +38,9 @@ const CHROME = process.env.CHROME || [
   'C:\\Program Files (x86)\\Google\\Chrome\\Application\\chrome.exe',
   'C:\\Program Files\\Microsoft\\Edge\\Application\\msedge.exe',
   'C:\\Program Files (x86)\\Microsoft\\Edge\\Application\\msedge.exe',
+  '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome',
+  '/Applications/Microsoft Edge.app/Contents/MacOS/Microsoft Edge',
+  '/Applications/Chromium.app/Contents/MacOS/Chromium',
   '/snap/bin/chromium',
   '/usr/bin/chromium',
   '/usr/bin/chromium-browser',
@@ -257,7 +260,9 @@ function injectSource() {
           // ④-c 场景开关：compute_processes null = 查询失败（round-16 契约）。
           if (window.__DEVICE_MGR_TEST__.nullGpuCompute) smokeSnapshot.gpu_ext.compute_processes = null;
           return Promise.resolve(smokeSnapshot);
-        case 'get_device_services': return Promise.resolve([{ key: 'ollama', running: false, detail: 'probe timeout' }, { key: 'docker', running: true, detail: null }]);
+        case 'get_device_services':
+          if (window.__DEVICE_MGR_TEST__.failServices) return Promise.reject(new Error('services down (smoke)'));
+          return Promise.resolve([{ key: 'ollama', running: false, detail: 'probe timeout' }, { key: 'docker', running: true, detail: null }]);
         case 'get_external_models':
           if (window.__DEVICE_MGR_TEST__.failExternalModels) return Promise.reject(new Error('external models down (smoke)'));
           if (window.__DEVICE_MGR_TEST__.emptyExternalModels) return Promise.resolve({ models: [], warnings: [] });
@@ -289,6 +294,7 @@ function injectSource() {
       emit: emit,
       // 场景开关：读取失败横幅/重试与发送失败路径此前零覆盖（第四轮评审）。
       nullGpuCompute: false,
+      failServices: false,
       setRemoveOutcome: function (next) { removeOutcome = next; },
     };
     window.__TAURI__ = {
@@ -475,12 +481,13 @@ async function clickTestId(page, testId) {
   await page.waitForFunction(() => !!document.querySelector('[data-testid="device-manager-proc-gpu-unavailable"]')
     && !document.querySelector('[data-testid="device-manager-proc-gpu"]'), { timeout: 8000 });
   const gpuUnavailableShown = await page.evaluate(() =>
-    (document.querySelector('[data-testid="device-manager-proc-gpu-unavailable"]')?.innerText || '').length > 0);
+    (document.querySelector('[data-testid="device-manager-proc-gpu-unavailable"]')?.innerText || ''));
   await page.evaluate(() => { window.__DEVICE_MGR_TEST__.nullGpuCompute = false; });
   await page.waitForFunction(() => !document.querySelector('[data-testid="device-manager-proc-gpu-unavailable"]')
     && !!document.querySelector('[data-testid="device-manager-proc-gpu"]'), { timeout: 8000 });
+  // 文案钉（round-19 P3）：此前只断 innerText 非空，空占位 div 也绿。
   rec('④-c GPU 计算进程查询失败出“查询不可用”提示、恢复后列表回归',
-    gpuUnavailableShown, JSON.stringify({ gpuUnavailableShown }));
+    gpuUnavailableShown.includes('查询暂不可用'), JSON.stringify({ gpuUnavailableShown }));
 
   // ⑤ 模型管理：商店行锁定（由模型商店管理 + 禁用按钮 + 前往模型商店），
   //    外部模型行显示类别/登记/状态徽标与接入按钮。
@@ -508,12 +515,13 @@ async function clickTestId(page, testId) {
         return !!link && link.disabled;
       })(),
       // 服务探测 chips 真渲染（stub 返回停止的 ollama + 运行的 docker）。
+      // 运行态用读屏 aria-label 断言而非实现细节 CSS 类（round-19 P3）。
       serviceChips: (() => {
         const chips = [...document.querySelectorAll('[data-testid="device-manager-service-chip"]')];
         return chips.length === 2
           && (chips[0].innerText || '').includes('Ollama')
           && (chips[1].innerText || '').includes('Docker')
-          && chips[1].querySelector('.bg-\\[\\#34C759\\]') != null;
+          && chips[1].querySelector('[aria-label="运行中"]') != null;
       })(),
       // 远端端点行：接入被禁用并带说明（回环尺子，第三轮评审 P1）。
       remoteLinkBlocked: (() => {
@@ -809,15 +817,17 @@ async function clickTestId(page, testId) {
   await page.waitForFunction(() => !!document.querySelector('[data-testid="device-manager-store-error"]'), { timeout: 8000 });
   const storeErrorState = await page.evaluate(() => {
     const row = document.querySelector('[data-testid="device-manager-store-error"]');
-    const buttons = [...(row?.querySelectorAll('button') || [])];
     return {
       text: row?.innerText || '',
-      retryButton: buttons.length >= 2,
-      gotoStore: buttons.some(button => (button.innerText || '').includes('前往模型商店')),
+      retryButton: !!document.querySelector('[data-testid="device-manager-store-retry"]'),
+      gotoStore: !!row && [...(row.querySelectorAll('button') || [])]
+        .some(button => (button.innerText || '').includes('前往模型商店')),
     };
   });
   await page.evaluate(() => { window.__DEVICE_MGR_TEST__.failStoreLibrary = false; });
-  await page.evaluate(() => document.querySelector('[data-testid="device-manager-store-error"] button')?.click());
+  // 重试点击按 testid 定位（round-19 P3）：原先取行内第一个 button，依赖
+  // DOM 序（重试/前往商店换位即误红）。
+  await page.evaluate(() => document.querySelector('[data-testid="device-manager-store-retry"]')?.click());
   await page.waitForFunction(() => !!document.querySelector('[data-testid="device-manager-store-row"]'), { timeout: 8000 });
   rec('⑩-b 商店库读取失败出错误行+前往商店入口+重试恢复',
     storeErrorState.text.includes('加载失败') && storeErrorState.retryButton && storeErrorState.gotoStore,
@@ -838,7 +848,7 @@ async function clickTestId(page, testId) {
   const externalErrorShown = await page.evaluate(() =>
     (document.querySelector('[data-testid="device-manager-external-error"]')?.innerText || '').includes('刷新失败'));
   await page.evaluate(() => { window.__DEVICE_MGR_TEST__.failExternalModels = false; });
-  await page.evaluate(() => document.querySelector('[data-testid="device-manager-external-error"] button')?.click());
+  await page.evaluate(() => document.querySelector('[data-testid="device-manager-external-retry"]')?.click());
   await page.waitForFunction(() => !document.querySelector('[data-testid="device-manager-external-error"]'), { timeout: 8000 });
   rec('⑩-c 外部模型读取失败常驻错误行+重试恢复', externalErrorShown,
     JSON.stringify({ externalErrorShown }));
@@ -852,6 +862,24 @@ async function clickTestId(page, testId) {
   await page.waitForFunction(() => !!document.querySelector('[data-testid="device-manager-external-row"]'), { timeout: 8000 });
   await sleep(300);
   rec('⑩ 后半窗无运行时报错（⑩-b/⑩-c/刷新路径，⑨ 预期噪音除外）', errors.length === 0, errors.slice(0, 3).join(' | '));
+
+  // ⑩-d servicesStale 陈旧旗：有基线后连续 3 拍（10s 慢轮询，≈30s）探测失败
+  // 立「状态可能过期」旗、旧 chips 保留；恢复拍旗退（第六轮 P2 特性，此前
+  // smoke 零触达——旗位接错/与 failed 互换时套件照绿，round-19 P2 补钉）。
+  // 注入的失败只 console.warn，不影响 ⑩ 的 errors 收集（已先行断言完毕）。
+  await page.evaluate(() => { window.__DEVICE_MGR_TEST__.failServices = true; });
+  const staleShown = await page.waitForFunction(
+    () => !!document.querySelector('[data-testid="device-manager-services-stale"]')
+      && !!document.querySelector('[data-testid="device-manager-service-chip"]'),
+    { timeout: 45000 },
+  ).then(() => true).catch(() => false);
+  await page.evaluate(() => { window.__DEVICE_MGR_TEST__.failServices = false; });
+  const staleRecovered = await page.waitForFunction(
+    () => !document.querySelector('[data-testid="device-manager-services-stale"]'),
+    { timeout: 20000 },
+  ).then(() => true).catch(() => false);
+  rec('⑩-d 服务探测连续失败立陈旧旗且旧行保留、恢复后旗退',
+    staleShown && staleRecovered, JSON.stringify({ staleShown, staleRecovered }));
 
   // ⑪ 非 MegaCube 负控：megacubeDevice=false 整页重载后，侧栏回到「运行状态」、
   // 无「设备管理」入口，点击后是旧 MonitorView 而非设备管理页（十二轮评审 P2：
@@ -874,12 +902,19 @@ async function clickTestId(page, testId) {
     plainState.monitorEntry && plainState.deviceEntryAbsent, JSON.stringify(plainState));
   await clickNavByLabel(page, '运行状态');
   await page.waitForFunction(() => document.querySelector('[data-testid="app-root"]')?.getAttribute('data-current-view') === 'monitor', { timeout: 8000 });
-  await sleep(300);
+  // 正向证据（round-19 P2）：switch 位就绪 ≠ 视图本体挂载——慢机上懒 chunk 未
+  // 加载时「什么都没挂载」也会让下面的 absence 断言假绿。等 MonitorView 的
+  // 真实内容（应用名 + stub 快照的 CPU 型号）出现后再断设备管理视图缺席。
+  const monitorRendered = await page.waitForFunction(() => {
+    const text = document.body.innerText || '';
+    return text.includes('pinvou3-app') && text.includes('NVIDIA GB10');
+  }, { timeout: 15000 }).then(() => true).catch(() => false);
   const monitorOnly = await page.evaluate(() => ({
     deviceViewAbsent: !document.querySelector('[data-testid="device-manager-view"]'),
   }));
-  rec('⑪-b 非 MegaCube 平台运行状态页不渲染设备管理视图', monitorOnly.deviceViewAbsent,
-    JSON.stringify(monitorOnly));
+  rec('⑪-b 非 MegaCube 平台运行状态页渲染旧 MonitorView 且不渲染设备管理视图',
+    monitorRendered && monitorOnly.deviceViewAbsent,
+    JSON.stringify({ monitorRendered, ...monitorOnly }));
 
   await browser.close();
 

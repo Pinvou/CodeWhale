@@ -255,6 +255,18 @@ for (const language of ['zh', 'en', 'ja']) {
       106,
       `${language}.uiDeviceMgr must hold exactly the 106 pinned keys`,
     );
+    // Single-language whole-section loss guard（十九轮评审 P2）：dictJa 以
+    // `...dictEn` 铺底，整段删掉 `jaBase.uiDeviceMgr` / `jaBase.deviceMgr` 时
+    // 上面的逐键存在/计数/typeof 钉全部照绿（回落英文），而 ja 用户看到整页
+    // 英文。kbEmbedOn 的 notEqual 先例补两枚 ja≠en 探针。
+    assert.notEqual(
+      dict.ja.uiDeviceMgr.loading, dict.en.uiDeviceMgr.loading,
+      'ja.uiDeviceMgr must not silently fall back to the en section',
+    );
+    assert.notEqual(
+      dict.ja.deviceMgr, dict.en.deviceMgr,
+      'ja.deviceMgr must not silently fall back to the en nav key',
+    );
     // Interpolation keys must stay functions in all three languages (round-7
     // review P3): a fn→string flip in one language passes the existence and
     // count loops while rendering literal text at the call site — the typed

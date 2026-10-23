@@ -593,6 +593,41 @@ assert.doesNotMatch(
   assert.equal(env.notifyCount(), 2);
 }
 
+// ── services 连续失败阈值与计数清零（round-19 P2 补钉）──────────
+{
+  const env = loadDeviceFeature();
+  env.setRespond(async command => (command === 'get_device_services'
+    ? [{ key: 'ollama', running: true, detail: null }]
+    : null));
+  await env.api.pollDeviceServices();
+  assert.equal(env.state.deviceServicesError, null);
+  // 连续 3 拍失败（有基线）：前 2 拍静默（瞬时抖动），第 3 拍立错误旗、旧 chips 保留。
+  const fail = async command => {
+    if (command === 'get_device_services') throw new Error('probe down');
+    return null;
+  };
+  env.setRespond(fail);
+  await env.api.pollDeviceServices();
+  await env.api.pollDeviceServices();
+  assert.equal(env.state.deviceServicesError, null, 'two consecutive failures must stay silent');
+  await env.api.pollDeviceServices();
+  assert.equal(env.state.deviceServicesError, 'probe down', 'third consecutive failure must surface the stale flag');
+  assert.equal(env.state.deviceServices.length, 1, 'stale flag keeps the last known chips');
+  // 恢复拍清旗且**计数清零**：之后再连续失败 2 拍必须仍静默——成功拍若不清零，
+  // 残余计数 1+2=3 会在第 2 拍提前立旗（清零行此前无断言触达，删掉它本套件照绿）。
+  env.setRespond(async command => (command === 'get_device_services'
+    ? [{ key: 'ollama', running: true, detail: null }]
+    : null));
+  await env.api.pollDeviceServices();
+  assert.equal(env.state.deviceServicesError, null, 'recovery must clear the flag');
+  env.setRespond(fail);
+  await env.api.pollDeviceServices();
+  await env.api.pollDeviceServices();
+  assert.equal(env.state.deviceServicesError, null, 'counter must reset on success: two fresh failures stay silent');
+  await env.api.pollDeviceServices();
+  assert.equal(env.state.deviceServicesError, 'probe down', 'third fresh failure resurfaces the flag');
+}
+
 {
   const env = loadDeviceFeature();
   const modelsView = {

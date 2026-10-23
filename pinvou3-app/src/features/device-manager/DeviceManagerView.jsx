@@ -52,9 +52,11 @@ const CONFIRM_GATE_MS = 400;
 // Slow-cadence probe for model services (ollama/vllm/lmstudio/docker); the
 // bridge documents the same 10s rhythm next to pollDeviceServices.
 const SERVICES_POLL_MS = 10000;
-// Ollama rows listed straight from the local service (not yet in the registry)
-// carry no base_url, but the daemon is fixed on the loopback: linking can
-// assume the canonical /v1 address (same one the registry examples document).
+// Historical fallback only: since the round-9 review the backend backfills
+// base_url on EVERY ollama row (registry and daemon alike) from the settings
+// daemon address, so the `row.base_url ||` arm below always wins in practice.
+// Kept as a guard against a legacy payload shape, not a live path (round-19
+// review P3: the old comment claimed daemon rows carry no base_url).
 const OLLAMA_LINK_BASE_URL = 'http://127.0.0.1:11434/v1';
 // Disk usage thresholds: >=85% amber, >=95% red (same family as the sensor
 // near-critical bands the bridge computes).
@@ -401,13 +403,15 @@ const ServiceChip = ({ label, running, detail, stateText }) => (
   </span>
 );
 
-// Effective link identity of an external-model row. Registry rows carry their
-// own base_url/model; Ollama rows listed straight from the service have
-// neither, so fall back to the fixed loopback daemon address and the listing
-// name (which is exactly the model id the daemon serves). Keyed on `kind`, not
-// `source`: the backend flips source to "registry" on registration (round-8
-// review P2) while ollama is the only kind whose registrations may legally omit
-// base_url — keying on source stranded those rows with no link control.
+// Effective link identity of an external-model row. Since the round-9 review
+// the backend backfills base_url on every ollama row and the registry carries
+// its own base_url/model, so the fixed loopback address below is a dead
+// fallback kept for a legacy payload without base_url (round-19 review P3:
+// the old comment claimed daemon rows have neither field). Keyed on `kind`,
+// not `source`: the backend flips source to "registry" on registration
+// (round-8 review P2) while ollama is the only kind whose registrations may
+// legally omit base_url — keying on source stranded those rows with no link
+// control.
 const linkTargetOf = (row) => ({
   model: row.model || (row.kind === 'ollama' ? row.name : null),
   baseUrl: row.base_url || (row.kind === 'ollama' ? OLLAMA_LINK_BASE_URL : null),
@@ -943,8 +947,11 @@ const DeviceManagerView = ({ theme, t, bs, onOpenChat, onOpenModelStore }) => {
               <div className={`${CARD_CLASS} p-6 text-center text-[13px] ${MUTED_TEXT}`}>{copy.sensorEmpty}</div>
             ) : (
               <div className="grid grid-cols-1 gap-4 md:grid-cols-2 xl:grid-cols-3">
-                {deviceFmt.sensors.map((group) => (
-                  <SensorGroupCard key={group.chip} group={group} copy={copy} />
+                {deviceFmt.sensors.map((group, index) => (
+                  // Index tiebreaker like the other rows: two chips can share a
+                  // label, and a collision would remount both cards per poll
+                  // (round-19 review P3; backend order is deterministic).
+                  <SensorGroupCard key={`${group.chip}:${index}`} group={group} copy={copy} />
                 ))}
               </div>
             )}
@@ -1116,7 +1123,7 @@ const DeviceManagerView = ({ theme, t, bs, onOpenChat, onOpenModelStore }) => {
                     {t.uiModelStore.storeLoadFailed(storeError || '')}
                   </span>
                   <span className="flex shrink-0 items-center gap-2">
-                    <MsButton tone="ghost" onClick={() => setStoreReloadKey((key) => key + 1)}>
+                    <MsButton tone="ghost" onClick={() => setStoreReloadKey((key) => key + 1)} data-testid="device-manager-store-retry">
                       {copy.retry}
                     </MsButton>
                     <MsButton tone="ghost" onClick={onOpenModelStore}>{copy.gotoModelStore}</MsButton>
@@ -1206,7 +1213,17 @@ const DeviceManagerView = ({ theme, t, bs, onOpenChat, onOpenModelStore }) => {
                     // pre-disable case variants the backend would happily remove.
                     const managedByStore = storeRows.some((record) => {
                       const storeName = String(record.model_name || '');
-                      if (row.kind !== 'ollama') return storeName === row.name;
+                      if (row.kind !== 'ollama') {
+                        // Backend `store_model_name_checked` re-queries the
+                        // tag-less form when the direct name misses (store
+                        // names never carry ':' while registry rows can, e.g.
+                        // `foo:latest` for a hand-written alias): mirror that
+                        // fallback so the row pre-disables instead of arming
+                        // into a guaranteed rejection (round-19 review P3).
+                        // Same-case compare, like the backend re-query.
+                        const tagless = String(row.name || '').split(':')[0];
+                        return storeName === row.name || storeName === tagless;
+                      }
                       // Backend effective deletion name: model, falling back to name.
                       const effectiveName = row.model || row.name;
                       return stripModelTag(storeName) === stripModelTag(effectiveName);
@@ -1362,7 +1379,7 @@ const DeviceManagerView = ({ theme, t, bs, onOpenChat, onOpenModelStore }) => {
                     className="flex flex-wrap items-center justify-center gap-2 py-4 text-center text-[13px] text-[#A15C07] dark:text-[#FDD663]"
                   >
                     <span className="min-w-0 break-words">{copy.refreshFailed(externalFetchError)}</span>
-                    <MsButton tone="ghost" onClick={refreshExternal}>{copy.retry}</MsButton>
+                    <MsButton tone="ghost" onClick={refreshExternal} data-testid="device-manager-external-retry">{copy.retry}</MsButton>
                   </div>
                 ) : (
                   <div
@@ -1382,7 +1399,7 @@ const DeviceManagerView = ({ theme, t, bs, onOpenChat, onOpenModelStore }) => {
                   className="flex flex-wrap items-center justify-center gap-2 py-3 text-center text-[13px] text-[#A15C07] dark:text-[#FDD663]"
                 >
                   <span className="min-w-0 break-words">{copy.refreshFailed(externalFetchError)}</span>
-                  <MsButton tone="ghost" onClick={refreshExternal}>{copy.retry}</MsButton>
+                  <MsButton tone="ghost" onClick={refreshExternal} data-testid="device-manager-external-retry">{copy.retry}</MsButton>
                 </div>
               )}
             </div>

@@ -347,7 +347,7 @@ export const dictEn = {
         uiMonitor: { bridgeNotReady:'Bridge not ready', readFailed:'Read failed', reading:'Loading', configError:'Configuration error', unverified:'Unverified', authFailed:'Authentication failed', bridgeError:'Monitor bridge is not ready. Open this page in the Tauri app window.', activity:'Activity' },
         uiDeviceMgr: {
           loading:'Reading device info…', bridgeNotReady:'Device bridge not ready', errorBanner:'Failed to read device status', retry:'Retry', updatedAtLabel:time=>`Updated at ${time}`,
-          chipDisk:'System disk', chipMemory:'Memory', chipMaxTemp:'Top sensor temp', chipDriver:'Driver', chipCuda:'CUDA',
+          chipDisk:'System disk', chipMemory:'Memory', chipMaxTemp:'Peak sensor temp', chipDriver:'Driver', chipCuda:'CUDA',
           sectionOverview:'Overview', sectionSensors:'Sensors', sectionStorage:'Storage', sectionNetwork:'Network', sectionProcesses:'Processes', sectionModels:'Models', sectionDoctor:'Troubleshoot',
           sensorEmpty:'No sensors detected (many desktop PCs simply have none)', chipNvme:'SSD', chipWifi:'Wi-Fi adapter', chipFan:'Fan', chipBoard:'Board temp', chipPower:'Power',
           sensorWarnAdvice:'Close to its critical temperature. Check cooling and load.', sensorCritAdvice:'Critical temperature reached. Reduce the load now and check cooling.', critLimit:v=>`Crit ${v}`, peakLabel:v=>`Peak ${v}`,
@@ -359,7 +359,7 @@ export const dictEn = {
           storeManaged:'Managed by Model Store', gotoModelStore:'Open Model Store', statusRunning:'Running', statusDeployed:'Deployed', statusPending:'Not deployed',
           kindOllama:'Ollama', kindEndpoint:'Endpoint', kindWeights:'Local weights', kindOther:'Other',
           registeredBadge:'Registered', statusAvailable:'Available', statusUnreachable:'Unreachable',
-          linked:'Linked', link:'Use in PINVOU', linkDone:'Connected to PINVOU and set as the default for new chats.',
+          linked:'Linked', link:'Link to PINVOU', linkDone:'Connected to PINVOU and set as the default for new chats.',
           linkDisabledRemote:'Remote service endpoints cannot be linked here: linking would point the default model for new chats at them, and the saved configuration could not be cleaned up automatically on removal. Configure the endpoint manually in Settings.',
           localSourceHint:'This external-model list comes from the configured Ollama service and registered model endpoints; any local process can impersonate these services.',
           servicesFailed:e=>`Model service probe failed: ${e}`,
