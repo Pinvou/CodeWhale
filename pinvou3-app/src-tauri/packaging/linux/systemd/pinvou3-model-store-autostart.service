@@ -1,0 +1,24 @@
+# 模型商店开机自启恢复器（systemd user 服务，2026-10-23）。
+# 由 deb 打包安装到 /usr/lib/systemd/user/；postinst 已 enable-linger，
+# 设备重启后无需用户登录即触发。拉起逻辑在应用内（autostart_pending），
+# 复用与 GUI 完全一致的身份协议/内存准入/容器登记。
+[Unit]
+Description=Pinvou Model Store autostart (restore running models after reboot)
+After=network-online.target docker.service
+Wants=network-online.target
+# docker 就绪是 docker 卡的前提；但 tachyon 原生卡不依赖 docker，不硬性 Require
+After=docker.service
+
+[Service]
+Type=oneshot
+# 品悟主二进制 headless 子命令（不启 GUI）
+ExecStart=/usr/bin/pinvou3-tauri model-store-autostart
+RemainAfterExit=yes
+# 失败不无限重试：结构化结果已落库，GUI 打开后按结果弹窗（要求②）
+Restart=no
+TimeoutStartSec=1800
+# 大模型加载动辄几分钟，给足时间
+Nice=5
+
+[Install]
+WantedBy=default.target

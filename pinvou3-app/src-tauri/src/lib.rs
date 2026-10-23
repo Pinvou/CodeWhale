@@ -877,6 +877,37 @@ pub(crate) fn remove_agents_index_entry(
     }
 }
 
+/// 模型商店开机自启恢复器的 headless 入口（systemd user 服务 ExecStart）。
+/// 不启 GUI：拉起上次运行中且用户未关闭自启的已部署卡（autostart_pending），
+/// 结构化结果落 JSON 到卡片库旁（GUI 启动后读取并按结果弹窗——要求②：
+/// 任何问题都有解决方法提示）。
+pub fn run_model_store_autostart() {
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(2)
+        .enable_all()
+        .build()
+        .expect("autostart: tokio runtime");
+    let report = runtime.block_on(async {
+        let service = std::sync::Arc::new(features::model_store::ModelStoreService::new());
+        features::model_store::autostart_pending(service).await
+    });
+    let path = features::model_store::autostart_report_path();
+    let _ = std::fs::write(
+        &path,
+        serde_json::to_string_pretty(&report).unwrap_or_default(),
+    );
+    println!(
+        "pinvou3 model-store autostart: {} failed / {} total (report: {})",
+        report.get("failed").and_then(|v| v.as_i64()).unwrap_or(-1),
+        report
+            .get("results")
+            .and_then(|v| v.as_array())
+            .map(|a| a.len())
+            .unwrap_or(0),
+        path.display()
+    );
+}
+
 pub fn run() {
     // WebKitGTK reads its RemoteInspector endpoint while constructing the first
     // WebContext, so the browser feature must reserve it before Tauri starts.

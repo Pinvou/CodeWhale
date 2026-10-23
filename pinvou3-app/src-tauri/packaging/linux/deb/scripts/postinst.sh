@@ -15,6 +15,15 @@ command -v gtk-update-icon-cache >/dev/null 2>&1 && \
 # ── 2) 桌面快捷方式 ──────────────────────────────────────────
 [ -f "$APP_DESKTOP" ] || exit 0
 
+# 模型商店开机自启（2026-10-23）：systemd user 服务要在用户未登录时也能跑，
+# 需要 loginctl enable-linger。best-effort：失败不阻塞安装，只影响自启时机
+# （用户登录后 GUI 启动时仍会托管拉起，见 service.rs autostart_pending）。
+enable_linger() {
+  uhome="$1"; uowner="$2"
+  command -v loginctl >/dev/null 2>&1 || return 0
+  loginctl enable-linger "$uowner" 2>/dev/null || true
+}
+
 drop_to_desktop() {
   uhome="$1"; uowner="$2"
   [ -d "$uhome" ] || return 0
@@ -48,6 +57,7 @@ for uhome in /home/*; do
   uowner=$(stat -c %U "$uhome" 2>/dev/null) || continue
   [ -n "$uowner" ] && [ "$uowner" != "UNKNOWN" ] || continue
   drop_to_desktop "$uhome" "$uowner"
+  enable_linger "$uhome" "$uowner"
 done
 
 exit 0
