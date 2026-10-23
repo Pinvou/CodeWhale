@@ -29,6 +29,33 @@ const MAX_APPROVAL_INTENT_SUMMARY_CHARS: usize = 2_000;
 /// with headroom.
 const MAX_TOOL_RESULT_IMAGES: usize = 2;
 
+fn preserve_tool_output_for_context(
+    provider: ApiProvider,
+    model: &str,
+    route_limits: Option<codewhale_config::route::RouteLimits>,
+    session_id: &str,
+    tool_id: &str,
+    tool_name: &str,
+    result: &mut RichToolResult,
+) {
+    if super::context::tool_result_context_view(
+        provider,
+        model,
+        route_limits,
+        tool_name,
+        &result.result,
+    )
+    .needs_full_output_artifact
+    {
+        crate::tools::truncate::preserve_full_output_for_model_context(
+            &mut result.result,
+            tool_id,
+            tool_name,
+            session_id,
+        );
+    }
+}
+
 /// Build the content blocks for the user message carrying a tool result.
 ///
 /// A tool can hand image artifacts (e.g. computer-use screenshots) to the
@@ -4592,6 +4619,9 @@ impl Engine {
                     let cancel_token = self.cancel_token.clone();
                     let turn_tool_security = self.active_turn_tool_security.clone();
                     let restricted_audit = turn_tool_security.is_some();
+                    let provider = self.api_provider;
+                    let model = self.session.model.clone();
+                    let route_limits = self.active_route_limits;
 
                     tool_tasks.push(async move {
                         let _shell_permit =
@@ -4640,6 +4670,17 @@ impl Engine {
                             );
                         }
 
+                        if let Ok(tool_result) = result.as_mut() {
+                            preserve_tool_output_for_context(
+                                provider,
+                                &model,
+                                route_limits,
+                                &session_id,
+                                &plan.id,
+                                &plan.name,
+                                tool_result,
+                            );
+                        }
                         let content_blocks = result
                             .as_ref()
                             .map(|result| result.content_blocks.clone())
@@ -4778,10 +4819,41 @@ impl Engine {
                                 tool_exec_lock.clone(),
                                 tool_context_for_call(batch_tool_context.clone(), &tool_id),
                             ) => match result {
-                                Ok(rich) => (
-                                    ToolExecutionOutcome::from_legacy(Ok(rich.result)),
-                                    rich.content_blocks,
-                                ),
+                                Ok(mut rich) => {
+                                    // The combined envelope can exceed the route
+                                    // budget even when every child stays inline.
+                                    // Preserve it before completion/outcome fan-out,
+                                    // just like ordinary serial and parallel calls.
+                                    if let Some(path) = crate::tools::truncate::apply_spillover_with_artifact(
+                                        &mut rich.result,
+                                        &tool_id,
+                                        &tool_name,
+                                        &self.session.id,
+                                    ) {
+                                        emit_tool_audit_for_policy(
+                                            self.active_turn_tool_security.is_some(),
+                                            json!({
+                                                "event": "tool.spillover",
+                                                "tool_id": tool_id.clone(),
+                                                "tool_name": tool_name.clone(),
+                                                "path": path.display().to_string(),
+                                            }),
+                                        );
+                                    }
+                                    preserve_tool_output_for_context(
+                                        self.api_provider,
+                                        &self.session.model,
+                                        self.active_route_limits,
+                                        &self.session.id,
+                                        &tool_id,
+                                        &tool_name,
+                                        &mut rich,
+                                    );
+                                    (
+                                        ToolExecutionOutcome::from_legacy(Ok(rich.result)),
+                                        rich.content_blocks,
+                                    )
+                                },
                                 Err(err) => (
                                     ToolExecutionOutcome::from_legacy(Err(err)),
                                     Vec::new(),
@@ -5170,6 +5242,24 @@ impl Engine {
                                 "tool_name": tool_name.clone(),
                                 "path": path.display().to_string(),
                             }),
+                        );
+                    }
+
+                    // #6508: the model sees at most the route's inline budget
+                    // of any result. When its view would leave bytes out and
+                    // spillover saved nothing, save the full output now,
+                    // before the result fans out, so the view names a ref
+                    // `retrieve_tool_result` reads the rest back with and the
+                    // UI registers the artifact.
+                    if let Ok(tool_result) = result.as_mut() {
+                        preserve_tool_output_for_context(
+                            self.api_provider,
+                            &self.session.model,
+                            self.active_route_limits,
+                            &self.session.id,
+                            &tool_id,
+                            &tool_name,
+                            tool_result,
                         );
                     }
 

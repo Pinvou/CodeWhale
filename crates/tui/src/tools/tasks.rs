@@ -1188,6 +1188,98 @@ mod tests {
 
     #[cfg(unix)]
     #[tokio::test]
+    async fn forkguard_gate_without_active_task_keeps_both_streams_recoverable() {
+        let workspace = tempfile::tempdir().expect("workspace");
+        let mut context = ToolContext::new(workspace.path().to_path_buf());
+        context.auto_approve = true;
+        assert!(context.runtime.active_task_id.is_none());
+        let result = TasksTool::new("tasks")
+            .execute(
+                json!({
+                    "action": "gate_run", "gate": "custom", "timeout_ms": 5_000,
+                    "command": "printf GATE_STDOUT_SENTINEL; printf GATE_STDERR_SENTINEL >&2"
+                }),
+                &context,
+            )
+            .await
+            .expect("real gate DTO");
+        let payload: Value = serde_json::from_str(&result.content).expect("gate payload");
+        assert!(payload["gate"]["log_path"].is_null());
+        assert_eq!(payload["gate"]["summary"], "GATE_STDERR_SENTINEL");
+        assert_eq!(payload["stdout_summary"], "GATE_STDOUT_SENTINEL");
+        let view = crate::core::engine::compact_tool_result_for_route(
+            crate::config::ApiProvider::Deepseek,
+            "deepseek-v3.2-128k",
+            None,
+            "tasks",
+            &result,
+        );
+        assert!(
+            view.contains("GATE_STDOUT_SENTINEL") && view.contains("GATE_STDERR_SENTINEL"),
+            "no active task/log must not silently lose stdout: {view}"
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn forkguard_taskless_gate_recovery_names_returned_summaries() {
+        let _workshop = crate::tools::large_output_router::active_workshop_test_guard();
+        let workspace = tempfile::tempdir().expect("workspace");
+        let mut context = ToolContext::new(workspace.path().to_path_buf());
+        context.auto_approve = true;
+        assert!(context.runtime.active_task_id.is_none());
+        let result = TasksTool::new("tasks")
+            .execute(
+                json!({
+                    "action": "gate_run", "gate": "custom", "timeout_ms": 5_000,
+                    "command": "printf '%12000s' '' | tr ' ' X; printf '%12000s' '' | tr ' ' Y >&2"
+                }),
+                &context,
+            )
+            .await
+            .expect("real long-stream gate DTO");
+        let payload: Value = serde_json::from_str(&result.content).expect("gate payload");
+        assert_eq!(payload["gate"]["exit_code"], 0);
+        assert!(payload["gate"]["log_path"].is_null());
+        for (field, character) in [("stdout_summary", 'X'), ("stderr_summary", 'Y')] {
+            let summary = payload[field].as_str().expect("stream summary");
+            assert_eq!(summary.chars().count(), MAX_SUMMARY_CHARS);
+            assert!(summary.starts_with(&character.to_string().repeat(800)));
+            assert!(!summary.contains(&character.to_string().repeat(901)));
+        }
+        // Model the metadata attached after engine preservation. This tests
+        // the rendered contract, not storage/retrieval or a full command log.
+        let result = result.with_metadata(json!({
+            "artifact_id": "art_taskless_gate", "artifact_path": "/saved-gate-dto.txt"
+        }));
+        let view = crate::core::engine::compact_tool_result_for_route(
+            crate::config::ApiProvider::Deepseek,
+            "deepseek-v3.2-128k",
+            None,
+            "tasks",
+            &result,
+        );
+        assert!(
+            view.contains("producer-capped at 900 characters each"),
+            "{view}"
+        );
+        assert!(
+            view.contains("not discarded command-stream tails"),
+            "{view}"
+        );
+        assert!(
+            view.contains("complete returned tool result at /saved-gate-dto.txt"),
+            "{view}"
+        );
+        assert!(!view.contains("full output at"), "{view}");
+        assert!(
+            view.contains("tool_search") && view.contains("narrower rerun"),
+            "{view}"
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
     async fn gate_timeout_kills_the_child_instead_of_orphaning_it() {
         // The gate used to run under `timeout(cmd.output())` + kill_on_drop:
         // the kill targeted the direct child only, so a command the shell

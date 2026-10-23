@@ -16,9 +16,6 @@ use super::web::extract::{DocumentKind, ExtractedDocument, decode_response_body}
 use super::web::fetch::{
     DEFAULT_MAX_BYTES, DEFAULT_TIMEOUT, FetchOptions, HARD_MAX_BYTES, HARD_MAX_TIMEOUT, fetch,
 };
-use super::web::overflow::bound_text as bound_web_text;
-#[cfg(test)]
-use super::web::overflow::inline_char_budget;
 use async_trait::async_trait;
 use serde::Serialize;
 use serde_json::{Value, json};
@@ -172,90 +169,99 @@ impl ToolSpec for FetchUrlTool {
             "fetch_url",
         )
         .await?;
-        let is_success = (200..300).contains(&fetched.status);
-        let body_text = if requested_fields.is_empty() {
-            None
-        } else {
-            // JSON is never allowed to discover an encoding from body markup.
-            Some(decode_response_body(
-                &fetched.bytes,
-                Some(&fetched.content_type),
-                false,
-            )?)
-        };
-        let fields = match body_text.as_deref() {
-            Some(body) => project_json_fields(body, &fetched.content_type, &requested_fields)?,
-            None => None,
-        };
-        let extracted = extract_fetched_document(
-            format,
-            &fetched.url,
-            &fetched.content_type,
-            &fetched.bytes,
-            is_success,
-            body_text.as_deref(),
-            PdfTextCommand::system(context.cancel_token.as_ref()),
-        )
-        .await?;
-
-        let citation_title = extracted.title.clone();
-        let (processed, artifact_write) = render_extracted(
-            &fetched.url,
-            &fetched.content_type,
-            format,
-            extracted,
-            &fetched.bytes,
-            context,
-        )?;
-        let artifact = artifact_write
-            .as_ref()
-            .map(|write| crate::artifacts::format_artifact_relative_path(&write.relative_path));
-
-        let citation = super::web::citations::register(
-            &context.state_namespace,
-            &fetched.url,
-            citation_title.as_deref(),
-        )
-        .ok_or_else(|| ToolError::execution_failed("fetched URL could not be registered"))?;
-        let response = FetchResponse {
-            ref_id: citation.ref_id,
-            url: citation.url,
-            status: fetched.status,
-            headers: fetched.headers,
-            content_type: fetched.content_type,
-            content: processed,
-            truncated: fetched.truncated,
-            receipt: FetchReceipt {
-                cache_hit: fetched.cache_hit,
-                retries: fetched.retries,
-                redirects: fetched.redirects,
-            },
-            artifact,
-            fields,
-        };
-
-        let content = serde_json::to_string_pretty(&response).map_err(|error| {
-            ToolError::execution_failed(format!("failed to serialize response: {error}"))
-        })?;
-        let metadata = artifact_write.map(artifact_metadata);
-
-        if !is_success {
-            // Don't `Err` on 4xx/5xx — the caller often wants to see the body
-            // (e.g. a JSON error envelope). Mark the result as a failure so the
-            // engine renders it as such.
-            return Ok(ToolResult {
-                content,
-                success: false,
-                metadata,
-            });
-        }
-
-        Ok(ToolResult {
-            content,
-            success: true,
-            metadata,
-        })
+        render_fetched_response(fetched, format, &requested_fields, context).await
     }
+}
+
+async fn render_fetched_response(
+    fetched: super::web::fetch::FetchedPayload,
+    format: Format,
+    requested_fields: &[String],
+    context: &ToolContext,
+) -> Result<ToolResult, ToolError> {
+    let is_success = (200..300).contains(&fetched.status);
+    let body_text = if requested_fields.is_empty() {
+        None
+    } else {
+        // JSON is never allowed to discover an encoding from body markup.
+        Some(decode_response_body(
+            &fetched.bytes,
+            Some(&fetched.content_type),
+            false,
+        )?)
+    };
+    let fields = match body_text.as_deref() {
+        Some(body) => project_json_fields(body, &fetched.content_type, requested_fields)?,
+        None => None,
+    };
+    let extracted = extract_fetched_document(
+        format,
+        &fetched.url,
+        &fetched.content_type,
+        &fetched.bytes,
+        is_success,
+        body_text.as_deref(),
+        PdfTextCommand::system(context.cancel_token.as_ref()),
+    )
+    .await?;
+
+    let citation_title = extracted.title.clone();
+    let (processed, artifact_write) = render_extracted(
+        &fetched.url,
+        &fetched.content_type,
+        format,
+        extracted,
+        &fetched.bytes,
+        context,
+    )?;
+    let artifact = artifact_write
+        .as_ref()
+        .map(|write| crate::artifacts::format_artifact_relative_path(&write.relative_path));
+
+    let citation = super::web::citations::register(
+        &context.state_namespace,
+        &fetched.url,
+        citation_title.as_deref(),
+    )
+    .ok_or_else(|| ToolError::execution_failed("fetched URL could not be registered"))?;
+    let response = FetchResponse {
+        ref_id: citation.ref_id,
+        url: citation.url,
+        status: fetched.status,
+        headers: fetched.headers,
+        content_type: fetched.content_type,
+        content: processed,
+        truncated: fetched.truncated,
+        receipt: FetchReceipt {
+            cache_hit: fetched.cache_hit,
+            retries: fetched.retries,
+            redirects: fetched.redirects,
+        },
+        artifact,
+        fields,
+    };
+
+    let content = serde_json::to_string_pretty(&response).map_err(|error| {
+        ToolError::execution_failed(format!("failed to serialize response: {error}"))
+    })?;
+    let metadata = artifact_write.map(artifact_metadata);
+
+    if !is_success {
+        // Don't `Err` on 4xx/5xx — the caller often wants to see the body
+        // (e.g. a JSON error envelope). Mark the result as a failure so the
+        // engine renders it as such.
+        return Ok(ToolResult {
+            content,
+            success: false,
+            metadata,
+        });
+    }
+
+    Ok(ToolResult {
+        content,
+        success: true,
+        metadata,
+    })
 }
 
 async fn extract_fetched_document(
@@ -355,7 +361,7 @@ fn render_extracted(
             Format::Markdown => document.markdown,
             Format::Raw => unreachable!("raw PDF handled below"),
         };
-        return bound_text(url, extracted, context);
+        return Ok((extracted, None));
     }
 
     if document.kind == DocumentKind::Media || document.kind == DocumentKind::Pdf {
@@ -387,28 +393,10 @@ fn render_extracted(
         Format::Text => document.text,
         Format::Markdown => document.markdown,
     };
-    bound_text(url, content, context)
-}
-
-fn bound_text(
-    url: &str,
-    content: String,
-    context: &ToolContext,
-) -> Result<(String, Option<ArtifactWrite>), ToolError> {
-    let bounded = bound_web_text(
-        content,
-        context,
-        |body| fetch_artifact_id(url, body.as_bytes()),
-        "page",
-    )?;
-    let artifact = bounded.artifact.map(|artifact| ArtifactWrite {
-        session_id: artifact.session_id,
-        absolute_path: artifact.absolute_path,
-        relative_path: artifact.relative_path,
-        byte_size: artifact.byte_size,
-        preview: artifact.preview,
-    });
-    Ok((bounded.content, artifact))
+    // Preserve the complete JSON payload for in-process consumers such as RLM.
+    // The engine saves the full envelope before applying the route-sized view;
+    // bounding the body here would make that later recovery artifact lossy.
+    Ok((content, None))
 }
 
 fn write_binary_artifact(
@@ -522,14 +510,6 @@ mod tests {
     use crate::tools::spec::ToolContext;
     use std::path::PathBuf;
 
-    struct ArtifactRootRestore(Option<PathBuf>);
-
-    impl Drop for ArtifactRootRestore {
-        fn drop(&mut self) {
-            crate::artifacts::set_test_artifact_sessions_root(self.0.take());
-        }
-    }
-
     fn ctx() -> ToolContext {
         ToolContext::new(PathBuf::from("."))
     }
@@ -586,41 +566,6 @@ mod tests {
         assert!(is_declared_html("TEXT/HTML; charset=gbk"));
         assert!(!is_declared_html("text/plain; note=text/html"));
         assert!(!is_declared_textual("application/octet-stream"));
-    }
-
-    #[test]
-    fn route_budget_overflow_round_trips_through_session_artifact() {
-        let _lock = crate::artifacts::TEST_ARTIFACT_SESSIONS_GUARD
-            .lock()
-            .unwrap_or_else(|error| error.into_inner());
-        let tmp = tempfile::tempdir().unwrap();
-        let prior =
-            crate::artifacts::set_test_artifact_sessions_root(Some(tmp.path().join("sessions")));
-        let _restore = ArtifactRootRestore(prior);
-        let context = ToolContext::new(".")
-            .with_state_namespace("fetch-overflow")
-            .with_route_context_window(10_000);
-        let full = "Whale content. ".repeat(200);
-
-        let (inline, artifact) =
-            bound_text("https://example.com/large", full.clone(), &context).unwrap();
-        let artifact = artifact.expect("overflow artifact");
-
-        assert!(inline.contains("retrieve_tool_result"));
-        assert!(inline.chars().count() <= inline_char_budget(&context));
-        assert_eq!(
-            std::fs::read_to_string(&artifact.absolute_path).unwrap(),
-            full
-        );
-        // The footer names `retrieve_tool_result` as the recovery path; the
-        // evidence flag is what makes the engine auto-activate that tool on
-        // the next turn, so the named tool is actually present.
-        let metadata = artifact_metadata(artifact);
-        assert_eq!(
-            metadata.get("evidence_available"),
-            Some(&json!(true)),
-            "artifact metadata must flag retrievable evidence:\n{metadata}"
-        );
     }
 
     #[test]
