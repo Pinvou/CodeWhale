@@ -187,13 +187,14 @@ fn query_key_is_secret(key: &str) -> bool {
 ///
 /// `--header` / `-H` 是**两段式**取值（`名字: 值` 可能拆成两个词），它们不走
 /// `redact_next` 的"整词抹掉"，走 [`HeaderExpect`] 的名字保留/取值抹掉。
-const SECRET_FLAGS: [&str; 7] = [
+const SECRET_FLAGS: [&str; 8] = [
     "--token",
     "--password",
     "--passwd",
     "--secret",
     "--api-key",
     "--apikey",
+    "--hf-token",
     "--header",
 ];
 
@@ -221,17 +222,42 @@ fn word_is_secret(word: &str) -> bool {
     if trimmed.len() < MIN_LITERAL_SECRET_LEN {
         return false;
     }
-    SECRET_PREFIXES
+    if SECRET_PREFIXES
         .iter()
         .any(|prefix| trimmed.starts_with(prefix))
+    {
+        return true;
+    }
+    // 紧凑 JSON（r5 评审 P2-3 实测泄漏）："api_key":"sk-xxx" 整体是一个词，
+    // `sk-` 不在词首——把常见值定界符（冒号/逗号/引号）后的段也按前缀查一遍。
+    // 只切这几个 ASCII 定界符，不切 CJK（前缀表全是 ASCII 开头，切中文白费）。
+    for segment in trimmed.split([':', ',', '"']) {
+        let segment = segment.trim_matches(['\'', '{', '}', '[', ']']);
+        if segment.len() >= MIN_LITERAL_SECRET_LEN
+            && SECRET_PREFIXES
+                .iter()
+                .any(|prefix| segment.starts_with(prefix))
+        {
+            return true;
+        }
+    }
+    false
 }
 
 /// `KEY=VALUE` 里的 KEY 是不是机密名。大小写不敏感：脚本里两种写法都见过。
+/// SigV4 全家（`Credential=AKIA…/…`、`Signature=…`、`X-Amz-Credential=` 等）按
+/// 前缀+整名收——签名材料持久化落盘等于把凭证落盘（r5 评审 P2-3 实测）。
 fn key_is_secret(key: &str) -> bool {
     let key = key.trim_matches(|c: char| matches!(c, '"' | '\'' | '$' | '{' | '}'));
+    let lowered = key.to_ascii_lowercase();
     SECRET_ENV_KEYS
         .iter()
         .any(|known| key.eq_ignore_ascii_case(known))
+        || lowered.starts_with("x-amz-")
+        || matches!(
+            lowered.as_str(),
+            "credential" | "signature" | "security-token"
+        )
 }
 
 /// 把 URL 里的 userinfo（`https://user:pass@host`）和机密 query 参数抹掉。
@@ -349,10 +375,19 @@ pub fn sanitize_for_disk(line: &str) -> String {
                     out.push(':');
                     header_expect = Some(HeaderExpect::Value);
                 }
-                None => {
-                    out.push_str(trimmed);
-                    header_expect = Some(HeaderExpect::Value);
-                }
+                None => match trimmed.split_once('=') {
+                    // `-H X-Amz-Signature=值`：KEY=VALUE 形态的 header（r5 P2-3）。
+                    // 机密键的值抹掉；普通键原样，且不再等下一个词当值。
+                    Some((name, value)) if !value.is_empty() && key_is_secret(name) => {
+                        out.push_str(name);
+                        out.push('=');
+                        out.push_str(REDACTED);
+                    }
+                    _ => {
+                        out.push_str(trimmed);
+                        header_expect = Some(HeaderExpect::Value);
+                    }
+                },
             }
             continue;
         }
@@ -801,6 +836,34 @@ mod tests {
         // 太短的不登记：会把正常文本打成筛子。
         register_secret("abc");
         assert_eq!(sanitize_for_disk("abc def"), "abc def");
+    }
+
+    /// r5 评审 P2-3 对抗性盲区：--hf-token / 紧凑 JSON / SigV4 头与裸键值。
+    #[test]
+    fn sanitiser_covers_r5_adversarial_gaps() {
+        for line in [
+            "hf download --hf-token shortsecret123 repo",
+            "hf download --HF-TOKEN shortsecret123 repo",
+        ] {
+            let cleaned = sanitize_for_disk(line);
+            assert!(!cleaned.contains("shortsecret123"), "{line} -> {cleaned}");
+        }
+        let cleaned = sanitize_for_disk("cfg = {\"api_key\":\"sk-shortabc123xyz\"}");
+        assert!(
+            !cleaned.contains("sk-shortabc123xyz"),
+            "紧凑 JSON 值泄漏：{cleaned}"
+        );
+        for line in [
+            "Authorization: AWS4-HMAC-SHA256 Credential=AKIAIOSFODNN7EXAMPLE/20261022/s3/aws4_request",
+            "curl -H X-Amz-Signature=abcdef0123456789abcdef0123456789abcdef01 https://s3",
+        ] {
+            let cleaned = sanitize_for_disk(line);
+            assert!(
+                !cleaned.contains("AKIAIOSFODNN7EXAMPLE")
+                    && !cleaned.contains("abcdef0123456789abcdef0123456789abcdef01"),
+                "{line} -> {cleaned}"
+            );
+        }
     }
 
     /// 2026-10-21 评审 P2 脱敏长尾四形态：
