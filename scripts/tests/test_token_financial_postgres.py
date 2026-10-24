@@ -153,6 +153,24 @@ class FinancialPostgresRunnerTests(unittest.TestCase):
                 RUNNER.verify_results(invalid, {root}, **options)
 
 
+    def test_product_admission_retirement_binding_root_and_children_cannot_skip(self):
+        name = "TestProductAdmissionRetirementBindingPostgres"
+        self.assertIn(name, RUNNER.RETAINED_REQUIRED)
+        self.assertIn(name, RUNNER.BILLING_CHILD_REQUIRED)
+        events = self.events(required={name}, package=RUNNER.BILLING_PACKAGE, children=True)
+        options = {"package": RUNNER.BILLING_PACKAGE, "require_children": True,
+                   "exact_roots": True, "children_required": {name}}
+        RUNNER.verify_results(events, {name}, **options)
+        for invalid in ([],
+                        [event for event in events if event.get("Test") != name],
+                        [event for event in events if not event.get("Test", "").startswith(name + "/")],
+                        events + [{"Action": "skip", "Package": RUNNER.BILLING_PACKAGE, "Test": name}],
+                        events + [{"Action": "skip", "Package": RUNNER.BILLING_PACKAGE, "Test": name + "/actual"}],
+                        events + [{"Action": "fail", "Package": RUNNER.BILLING_PACKAGE, "Test": name + "/actual"}]):
+            with self.subTest(events=invalid), self.assertRaises(RuntimeError):
+                RUNNER.verify_results(invalid, {name}, **options)
+
+
     def test_disposable_loopback_url(self):
         raw = "postgres://postgres@127.0.0.1:5433/postgres?sslmode=disable"
         self.assertEqual(RUNNER.local_database_url(raw), raw)
@@ -854,7 +872,7 @@ class FinancialPostgresRunnerTests(unittest.TestCase):
         }
         self.assertEqual(RUNNER.REFUND_REQUIRED, expected)
         self.assertTrue(expected <= RUNNER.RETAINED_REQUIRED)
-        self.assertEqual(len(RUNNER.RETAINED_REQUIRED), 39)
+        self.assertEqual(len(RUNNER.RETAINED_REQUIRED), 40)
         valid = self.events(RUNNER.RETAINED_REQUIRED, RUNNER.BILLING_PACKAGE, children=True)
         options = {"package": RUNNER.BILLING_PACKAGE, "require_children": True, "exact_roots": True,
                    "children_required": RUNNER.BILLING_CHILD_REQUIRED}

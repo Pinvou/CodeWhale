@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"math"
+	"sort"
 	"strings"
 	"time"
 
@@ -869,6 +870,9 @@ func (r *PostgresRepository) CompleteProductAdmissionVerification(ctx context.Co
 	}
 	if err == nil && targetMappingID != nil {
 		if _, err = tx.Exec(ctx, `SELECT catalog_item_id FROM recharge_product_catalog_items WHERE catalog_item_id=$1 FOR UPDATE`, catalogID); err == nil {
+			err = r.retireInvalidProductAdmissionBeforeRenewal(ctx, tx, catalogID, now)
+		}
+		if err == nil {
 			_, err = tx.Exec(ctx, `UPDATE product_admission_bindings SET effective_to=$2 WHERE catalog_item_id=$1 AND effective_to IS NULL`, catalogID, now)
 		}
 		var admissionVersion int64
@@ -1032,23 +1036,8 @@ func (r *PostgresRepository) revokeProductAdmission(ctx context.Context, tx pgx.
 	if err != nil {
 		return err
 	}
-	_, err = tx.Exec(ctx, `UPDATE product_admission_bindings SET effective_to=$2 WHERE catalog_item_id=$1 AND evidence_id=$3 AND effective_to IS NULL`, catalogID, now, evidenceID)
-	if err != nil {
-		return err
-	}
-	_, err = tx.Exec(ctx, `INSERT INTO payment_product_controls(provider_id,provider_version,product_id,new_orders_enabled,reason_code,reason,version,updated_at)
-SELECT draft.provider_id,draft.provider_version,item.product_id,FALSE,'MANUAL_SAFETY_PAUSE',$2,1,$3
-FROM recharge_product_catalog_items item JOIN recharge_product_mapping_drafts draft USING(catalog_item_id)
-WHERE item.catalog_item_id=$1
-ON CONFLICT(provider_id,provider_version,product_id) DO UPDATE SET new_orders_enabled=FALSE,reason_code='MANUAL_SAFETY_PAUSE',reason=EXCLUDED.reason,version=payment_product_controls.version+1,updated_at=EXCLUDED.updated_at`, catalogID, reason, now)
-	if err != nil {
-		return err
-	}
-	_, err = tx.Exec(ctx, `UPDATE recharge_product_catalog_items SET admission_version=admission_version+1,updated_at=$2 WHERE catalog_item_id=$1`, catalogID, now)
-	if err != nil {
-		return err
-	}
-	return nil
+	_, err = r.retireCurrentProductAdmission(ctx, tx, catalogID, evidenceID, "MANUAL_SAFETY_PAUSE", reason, now)
+	return err
 }
 
 func (r *PostgresRepository) ExpireProductAdmissions(ctx context.Context, limit int) (int, error) {
@@ -1060,48 +1049,87 @@ func (r *PostgresRepository) ExpireProductAdmissions(ctx context.Context, limit 
 		return 0, err
 	}
 	defer tx.Rollback(ctx)
-	rows, err := tx.Query(ctx, `SELECT binding.catalog_item_id,evidence.evidence_id
-FROM product_admission_bindings binding
-JOIN product_admission_evidence evidence USING(evidence_id)
+	// Discovery is not authority. Use bounded keyset pages so a busy first
+	// candidate cannot hide later expired products from this worker's limit.
+	type expired struct {
+		catalogID, evidenceID uuid.UUID
+		expiresAt             time.Time
+	}
+	var afterExpiry *time.Time
+	var afterCatalog uuid.UUID
+	retired := 0
+	for retired < limit {
+		rows, queryErr := tx.Query(ctx, `SELECT binding.catalog_item_id,evidence.evidence_id,evidence.expires_at
+FROM product_admission_bindings binding JOIN product_admission_evidence evidence USING(evidence_id)
 WHERE binding.effective_to IS NULL AND evidence.expires_at<=now()
-ORDER BY evidence.expires_at,binding.catalog_item_id FOR UPDATE OF binding SKIP LOCKED LIMIT $1`, limit)
-	if err != nil {
-		return 0, err
+ AND ($2::timestamptz IS NULL OR (evidence.expires_at,binding.catalog_item_id)>($2,$3::uuid))
+ORDER BY evidence.expires_at,binding.catalog_item_id LIMIT $1`, limit, afterExpiry, afterCatalog)
+		if queryErr != nil {
+			return 0, queryErr
+		}
+		items := make([]expired, 0, limit)
+		for rows.Next() {
+			var item expired
+			if err = rows.Scan(&item.catalogID, &item.evidenceID, &item.expiresAt); err != nil {
+				rows.Close()
+				return 0, err
+			}
+			items = append(items, item)
+		}
+		rows.Close()
+		if err = rows.Err(); err != nil {
+			return 0, err
+		}
+		if len(items) == 0 {
+			break
+		}
+		last := items[len(items)-1]
+		afterExpiry = &last.expiresAt
+		afterCatalog = last.catalogID
+		sort.Slice(items, func(i, j int) bool { return items[i].catalogID.String() < items[j].catalogID.String() })
+		for _, item := range items {
+			// Match renewal/revocation: admission before catalogue before
+			// binding. Skip either busy lock rather than reversing that order.
+			var acquired bool
+			key := fmt.Sprintf("%d:%s%s", len("catalog.admission"), "catalog.admission", item.catalogID.String())
+			if err = tx.QueryRow(ctx, `SELECT pg_try_advisory_xact_lock(hashtextextended($1,0))`, key).Scan(&acquired); err != nil {
+				return 0, err
+			}
+			if !acquired {
+				continue
+			}
+			var id uuid.UUID
+			err = tx.QueryRow(ctx, `SELECT catalog_item_id FROM recharge_product_catalog_items WHERE catalog_item_id=$1 FOR UPDATE SKIP LOCKED`, item.catalogID).Scan(&id)
+			if errors.Is(err, pgx.ErrNoRows) {
+				continue
+			}
+			if err != nil {
+				return 0, err
+			}
+			var stillExpired bool
+			if err = tx.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM product_admission_bindings binding JOIN product_admission_evidence evidence USING(evidence_id) WHERE binding.catalog_item_id=$1 AND binding.evidence_id=$2 AND binding.effective_to IS NULL AND evidence.expires_at<=now())`, item.catalogID, item.evidenceID).Scan(&stillExpired); err != nil {
+				return 0, err
+			}
+			if !stillExpired {
+				continue
+			}
+			changed, retireErr := r.retireCurrentProductAdmission(ctx, tx, item.catalogID, item.evidenceID, "AUTOMATIC_STOP_LOSS", "PRODUCT_ADMISSION_EXPIRED", r.now())
+			if retireErr != nil {
+				return 0, retireErr
+			}
+			if changed {
+				retired++
+			}
+			if retired == limit {
+				break
+			}
+		}
 	}
-	type expired struct{ catalogID, evidenceID uuid.UUID }
-	items := make([]expired, 0)
-	for rows.Next() {
-		var item expired
-		if err := rows.Scan(&item.catalogID, &item.evidenceID); err != nil {
-			rows.Close()
-			return 0, err
-		}
-		items = append(items, item)
-	}
-	rows.Close()
-	now := r.now()
-	for _, item := range items {
-		_, err = tx.Exec(ctx, `UPDATE product_admission_bindings SET effective_to=$2 WHERE catalog_item_id=$1 AND evidence_id=$3 AND effective_to IS NULL`, item.catalogID, now, item.evidenceID)
-		if err != nil {
-			return 0, err
-		}
-		_, err = tx.Exec(ctx, `INSERT INTO payment_product_controls(provider_id,provider_version,product_id,new_orders_enabled,reason_code,reason,version,updated_at)
-SELECT draft.provider_id,draft.provider_version,catalog.product_id,FALSE,'AUTOMATIC_STOP_LOSS','PRODUCT_ADMISSION_EXPIRED',1,$2
-FROM recharge_product_catalog_items catalog JOIN recharge_product_mapping_drafts draft USING(catalog_item_id)
-WHERE catalog.catalog_item_id=$1
-ON CONFLICT(provider_id,provider_version,product_id) DO UPDATE SET new_orders_enabled=FALSE,reason_code='AUTOMATIC_STOP_LOSS',reason='PRODUCT_ADMISSION_EXPIRED',version=payment_product_controls.version+1,updated_at=EXCLUDED.updated_at`, item.catalogID, now)
-		if err != nil {
-			return 0, err
-		}
-		_, err = tx.Exec(ctx, `UPDATE recharge_product_catalog_items SET admission_version=admission_version+1,updated_at=$2 WHERE catalog_item_id=$1`, item.catalogID, now)
-		if err != nil {
-			return 0, err
-		}
-	}
+
 	if err = tx.Commit(ctx); err != nil {
 		return 0, err
 	}
-	return len(items), nil
+	return retired, nil
 }
 
 type ProductAdmissionExpiryWorker struct {

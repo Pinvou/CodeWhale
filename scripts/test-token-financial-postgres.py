@@ -114,6 +114,7 @@ REFUND_REQUIRED = {
     "TestRefundOriginalUnknownSuccessQueriesAndSettlesOrdinaryGrantsPostgres",
 }
 RETAINED_REQUIRED = {
+    "TestProductAdmissionRetirementBindingPostgres",
     "TestNegativeAdjustmentMemberBucketConservationPostgres",
     "TestRechargeProductCommandAtomicityPostgres",
     "TestOrganizationChargebackDeletionEvidencePostgres",

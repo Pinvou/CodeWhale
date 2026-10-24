@@ -562,6 +562,15 @@ func (r *PostgresRepository) executeProductResume(ctx context.Context, expected 
 		return ProductResumeResult{}, err
 	}
 	defer tx.Rollback(ctx)
+	// All admission writers take the catalogue lock before product controls.
+	// Recovery must join that order before it can hold either control row.
+	if err := lockTransactionKey(ctx, tx, "catalog.admission", expected.CatalogItemID.String()); err != nil {
+		return ProductResumeResult{}, err
+	}
+	var lockedCatalogID uuid.UUID
+	if err := tx.QueryRow(ctx, `SELECT catalog_item_id FROM recharge_product_catalog_items WHERE catalog_item_id=$1 FOR UPDATE`, expected.CatalogItemID).Scan(&lockedCatalogID); err != nil {
+		return ProductResumeResult{}, ErrApprovalSnapshotMismatch
+	}
 	if err := lockTransactionKey(ctx, tx, "payment-provider.resume", expected.ProviderID+":"+expected.ProviderVersion); err != nil {
 		return ProductResumeResult{}, err
 	}
@@ -575,7 +584,7 @@ func (r *PostgresRepository) executeProductResume(ctx context.Context, expected 
 	}
 	var catalogItemID, mappingID uuid.UUID
 	var catalogVersion, admissionVersion, mappingVersion int64
-	if err := tx.QueryRow(ctx, `SELECT item.catalog_item_id,item.version,item.admission_version,mapping.id,mapping.mapping_version FROM recharge_product_catalog_items item JOIN product_admission_bindings binding ON binding.catalog_item_id=item.catalog_item_id AND binding.effective_to IS NULL JOIN product_admission_evidence evidence ON evidence.evidence_id=binding.evidence_id JOIN payment_product_mappings mapping ON mapping.id=binding.mapping_id WHERE item.product_id=$1 AND item.lifecycle_status='ON_SALE' AND mapping.provider_id=$2 AND mapping.provider_version=$3 AND mapping.status='FROZEN' AND mapping.effective_from<=now() AND (mapping.effective_to IS NULL OR mapping.effective_to>now()) AND evidence.expires_at>now() AND NOT EXISTS(SELECT 1 FROM product_admission_revocations revocation WHERE revocation.evidence_id=evidence.evidence_id) FOR UPDATE OF item`, expected.ProductID, expected.ProviderID, expected.ProviderVersion).Scan(&catalogItemID, &catalogVersion, &admissionVersion, &mappingID, &mappingVersion); err != nil || catalogItemID != expected.CatalogItemID || catalogVersion != expected.CatalogVersion || admissionVersion != expected.AdmissionVersion || mappingID != expected.MappingID || mappingVersion != expected.MappingVersion {
+	if err := tx.QueryRow(ctx, `SELECT item.catalog_item_id,item.version,item.admission_version,mapping.id,mapping.mapping_version FROM recharge_product_catalog_items item JOIN product_admission_bindings binding ON binding.catalog_item_id=item.catalog_item_id AND binding.effective_to IS NULL JOIN product_admission_evidence evidence ON evidence.evidence_id=binding.evidence_id JOIN payment_product_mappings mapping ON mapping.id=binding.mapping_id WHERE item.product_id=$1 AND item.lifecycle_status='ON_SALE' AND mapping.provider_id=$2 AND mapping.provider_version=$3 AND mapping.status='FROZEN' AND mapping.effective_from<=clock_timestamp() AND (mapping.effective_to IS NULL OR mapping.effective_to>clock_timestamp()) AND evidence.expires_at>clock_timestamp() AND NOT EXISTS(SELECT 1 FROM product_admission_revocations revocation WHERE revocation.evidence_id=evidence.evidence_id) FOR UPDATE OF item`, expected.ProductID, expected.ProviderID, expected.ProviderVersion).Scan(&catalogItemID, &catalogVersion, &admissionVersion, &mappingID, &mappingVersion); err != nil || catalogItemID != expected.CatalogItemID || catalogVersion != expected.CatalogVersion || admissionVersion != expected.AdmissionVersion || mappingID != expected.MappingID || mappingVersion != expected.MappingVersion {
 		return ProductResumeResult{}, ErrApprovalSnapshotMismatch
 	}
 	evaluation, err := latestEvaluationHighWatermark(ctx, tx, expected.ProviderID, expected.ProviderVersion, expected.ProductID)
