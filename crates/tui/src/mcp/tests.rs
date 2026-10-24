@@ -6098,6 +6098,9 @@ struct OAuthMcpMock {
     /// the previously accepted bearer and `/token` rejects every refresh
     /// with `invalid_grant` — a mid-session revocation.
     revoked: Arc<std::sync::atomic::AtomicBool>,
+    /// When set, the authorization-server metadata omits `issuer` — the
+    /// non-RFC-8414 shape real servers still publish (rust-sdk#1047).
+    omit_issuer: Arc<std::sync::atomic::AtomicBool>,
     task: tokio::task::JoinHandle<()>,
 }
 
@@ -6108,6 +6111,10 @@ impl OAuthMcpMock {
 
     fn revoke_all_grants(&self) {
         self.revoked.store(true, AtomicOrdering::SeqCst);
+    }
+
+    fn omit_metadata_issuer(&self) {
+        self.omit_issuer.store(true, AtomicOrdering::SeqCst);
     }
 
     async fn spawn() -> Self {
@@ -6181,7 +6188,9 @@ impl OAuthMcpMock {
         let token_requests = Arc::new(AtomicUsize::new(0));
         let server_token_requests = Arc::clone(&token_requests);
         let revoked = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let omit_issuer = Arc::new(std::sync::atomic::AtomicBool::new(false));
         let server_revoked = Arc::clone(&revoked);
+        let server_omit_issuer = Arc::clone(&omit_issuer);
         let task = tokio::spawn(async move {
             loop {
                 let Ok((mut socket, _)) = listener.accept().await else {
@@ -6189,6 +6198,7 @@ impl OAuthMcpMock {
                 };
                 let token_requests = Arc::clone(&server_token_requests);
                 let revoked = Arc::clone(&server_revoked);
+                let omit_issuer = Arc::clone(&server_omit_issuer);
                 tokio::spawn(async move {
                     let request = read_request(&mut socket).await;
                     let first_line = request.lines().next().unwrap_or("").to_string();
@@ -6206,13 +6216,17 @@ impl OAuthMcpMock {
                     if method == "GET"
                         && path_only.starts_with("/.well-known/oauth-authorization-server")
                     {
-                        let metadata = serde_json::json!({
-                            "issuer": format!("http://{addr}"),
+                        // A missing `issuer` is invalid RFC 8414 but still
+                        // published in the wild; the tui must keep accepting it.
+                        let mut metadata = serde_json::json!({
                             "authorization_endpoint": format!("http://{addr}/authorize"),
                             "token_endpoint": format!("http://{addr}/token"),
                             "registration_endpoint": format!("http://{addr}/register"),
                             "response_types_supported": ["code"],
                         });
+                        if !omit_issuer.load(AtomicOrdering::SeqCst) {
+                            metadata["issuer"] = serde_json::json!(format!("http://{addr}"));
+                        }
                         write_json(&mut socket, "200 OK", &metadata.to_string()).await;
                     } else if method == "GET"
                         && path_only.starts_with("/.well-known/oauth-protected-resource")
@@ -6303,6 +6317,7 @@ impl OAuthMcpMock {
             addr,
             token_requests,
             revoked,
+            omit_issuer,
             task,
         }
     }
@@ -6554,6 +6569,52 @@ async fn dead_refresh_grant_flips_server_to_auth_required_and_offers_login_tool(
         mock.token_requests.load(AtomicOrdering::SeqCst),
         1,
         "one rejected refresh; no retry against an unchanged store"
+    );
+
+    mock.task.abort();
+}
+
+#[tokio::test]
+async fn stored_tokens_still_load_when_the_authorization_server_omits_issuer() {
+    let _env = crate::test_support::lock_test_env();
+    let dir = tempfile::tempdir().unwrap();
+    let _home = crate::test_support::EnvVarGuard::set("CODEWHALE_HOME", dir.path());
+    let _backend = crate::test_support::EnvVarGuard::set("CODEWHALE_SECRET_BACKEND", "file");
+    let _loopback = lock_mcp_loopback_tests().await;
+
+    let mock = OAuthMcpMock::spawn().await;
+    mock.omit_metadata_issuer();
+    let url = mock.url();
+    let config = mock_oauth_server_config(mock.addr);
+
+    // rmcp 3 resolves metadata while installing stored credentials and, by
+    // default, rejects metadata without `issuer`. The rmcp 2.2 build accepted
+    // such servers (rust-sdk#1047), so a working login must survive the
+    // upgrade instead of flipping to needs-auth with a login tool that cannot
+    // succeed either.
+    seed_oauth_tokens("wikiserver", &url, "cw-test-access", "rt-live", None);
+
+    let mut mcp_config = McpConfig::default();
+    mcp_config.servers.insert("wikiserver".to_string(), config);
+    let mut pool = McpPool::new(mcp_config);
+    let errors = pool.connect_all().await;
+    assert!(
+        errors.iter().all(|(name, _)| name != "wikiserver"),
+        "issuer-less metadata must not break the stored-token path: {errors:?}"
+    );
+    assert!(!pool.server_needs_auth("wikiserver"));
+    let catalog = pool.to_api_tools();
+    assert!(
+        catalog
+            .iter()
+            .any(|tool| tool.name == "mcp_wikiserver_wiki_lookup"),
+        "{catalog:?}"
+    );
+    assert!(
+        catalog
+            .iter()
+            .all(|tool| tool.name != "mcp_wikiserver_authenticate"),
+        "{catalog:?}"
     );
 
     mock.task.abort();
