@@ -4,6 +4,7 @@ import test from 'node:test';
 import YAML from 'yaml';
 import Ajv from 'ajv';
 import addFormats from 'ajv-formats';
+import { checkComposeNATS } from '../../../scripts/account-platform-nats-compose-check.mjs';
 import { checkGovernedComposeConfiguration, checkGovernedHelmResources, matchesPodSelector } from '../../../scripts/account-platform-model-token-deployment-check.mjs';
 
 const read = name => readFile(new URL(`../../${name}`, import.meta.url), 'utf8');
@@ -15,11 +16,10 @@ function credentialEnv() {
 }
 function composeFixture() {
   const services = {};
-  for (const name of ['account-service', 'billing-service', 'token-gateway', 'account-event-relay', 'billing-event-relay', 'token-event-relay', 'token-command-executor']) {
+  for (const name of ['account-service', 'billing-service', 'token-gateway', 'account-event-relay', 'billing-event-relay', 'token-command-executor']) {
     services[name] = { environment: { NATS_URL: 'tls://event.example.invalid:4222', NATS_CREDENTIALS_FILE: '/nats/client.creds' } };
   }
   services['token-gateway'].environment.DATABASE_URL = 'postgresql://gateway_release@db/token';
-  services['token-event-relay'].environment.DATABASE_URL = services['token-gateway'].environment.DATABASE_URL;
   services['token-credential-portal'] = { environment: { ...credentialEnv(), DATABASE_URL: 'postgresql://credential_release@db/token' }, ports: [{ host_ip: '127.0.0.1', published: '18108', target: 8080, protocol: 'tcp' }] };
   for (const name of ['token-command-executor', 'token-credential-portal']) {
     Object.assign(services[name], { read_only: true, healthcheck: { test: ['CMD', '/healthcheck'] }, networks: { control: {} },
@@ -34,14 +34,14 @@ function composeFixture() {
   return { services };
 }
 function helmFixture() {
-  const names = ['account-service', 'billing-service', 'token-gateway', 'account-event-relay', 'billing-event-relay', 'token-event-relay', 'token-command-executor', 'token-credential-portal'];
+  const names = ['account-service', 'billing-service', 'token-gateway', 'account-event-relay', 'billing-event-relay', 'token-command-executor', 'token-credential-portal'];
   const resources = names.map(name => ({ kind: 'Deployment', metadata: { name }, spec: { template: { metadata: { labels: { 'app.kubernetes.io/name': 'test', 'app.kubernetes.io/instance': 'test', 'app.kubernetes.io/component': name } }, spec: {
     automountServiceAccountToken: false, containers: [{ name, env: [{ name: 'NATS_URL', value: 'tls://event.example.invalid:4222' }, { name: 'NATS_CREDENTIALS_FILE', value: '/nats/creds' }],
       readinessProbe: { httpGet: { path: '/health/ready' } }, livenessProbe: { httpGet: { path: '/health/live' } } }],
     volumes: [{ projected: { sources: [{ serviceAccountToken: { audience: 'internal' } }] } }],
   } } } }));
   const setEnv = (name, values) => { resources.find(item => item.metadata.name === name).spec.template.spec.containers[0].env.push(...Object.entries(values).map(([key, value]) => typeof value === 'string' ? { name: key, value } : { name: key, valueFrom: value })); };
-  for (const name of ['token-gateway', 'token-event-relay']) setEnv(name, { DATABASE_URL: { secretKeyRef: { name: 'gateway-release', key: 'database' } } });
+  for (const name of ['token-gateway']) setEnv(name, { DATABASE_URL: { secretKeyRef: { name: 'gateway-release', key: 'database' } } });
   setEnv('token-credential-portal', { ...credentialEnv(), DATABASE_URL: { secretKeyRef: { name: 'credential-release', key: 'database' } } });
   for (const name of ['token-command-executor', 'token-credential-portal']) {
     resources.find(item => item.metadata.name === name).spec.template.metadata.labels['pinvou.io/restricted-token-control'] = 'true';
@@ -53,7 +53,7 @@ function helmFixture() {
   return resources;
 }
 
-const nativeNATSConsumers = ['billing-service', 'account-event-relay', 'billing-event-relay', 'token-event-relay', 'token-command-executor'];
+const nativeNATSConsumers = ['billing-service', 'account-event-relay', 'billing-event-relay', 'token-command-executor'];
 function nativeNATSFixture(operator = false) {
   const config = composeFixture();
   for (const [name, service] of Object.entries(config.services)) {
@@ -111,7 +111,7 @@ test('workload and NATS checkers reject unsafe binds from both real Compose enco
   }
 });
 
-test('native NKey Compose uses only five real broker clients and optional explicit resource tool', () => {
+test('native NKey Compose uses only four real broker clients and optional explicit resource tool', () => {
   for (const operator of [false, true]) {
     const config = nativeNATSFixture(operator);
     assert.equal(checkGovernedComposeConfiguration(config).deployment_status, 'NOT_DEPLOYED');
@@ -350,10 +350,10 @@ test('read-only control execution rejects alternate entrypoints, shell wrappers 
   }
 });
 
-test('Compose render checker rejects shared port, old relay login, split NATS, development and unsafe origin', () => {
+test('Compose render checker rejects shared port, retired relay runtime, split NATS, development and unsafe origin', () => {
   assert.equal(checkGovernedComposeConfiguration(composeFixture()).deployment_status, 'NOT_DEPLOYED');
   for (const mutate of [s => { s['token-credential-portal'].ports[0].published = '18105'; },
-    s => { s['token-event-relay'].environment.DATABASE_URL = 'postgresql://retired@db/token'; },
+    s => { s['token-event-relay'] = { environment: { EVENT_SOURCE: 'token' } }; },
     s => { s['account-event-relay'].environment.NATS_URL = 'tls://other.example.invalid:4222'; },
     s => { s['token-credential-portal'].environment.OIDC_ISSUER = 'http://identity.example.invalid/realms/pinvou'; },
     s => { s['token-credential-portal'].environment.PORTAL_PUBLIC_URL = 'https://account.pinvou.com'; },
@@ -383,7 +383,7 @@ test('new Helm settings and gates are closed typed inputs and default off', asyn
   const roles = structuredClone(values); roles.tokenCredentialPortal.egressCidrs = ['0.0.0.0/0']; assert.equal(valid(roles), false);
 });
 
-test('Helm declarations retain image pull credentials, isolated control Job and same-generation Token Relay', async () => {
+test('Helm declarations retain image pull credentials, isolated control Job and two ordinary relay sources', async () => {
   const workloads = await read('deploy/helm/account-platform/templates/token-governed-workloads.yaml');
   const network = await read('deploy/helm/account-platform/templates/networkpolicies.yaml');
   const helpers = await read('deploy/helm/account-platform/templates/_token-governance.tpl');
@@ -397,7 +397,9 @@ test('Helm declarations retain image pull credentials, isolated control Job and 
   assert.match(helpers, /ne \$issuer.scheme "https"/);
   assert.match(helpers, /or .Values.nats.enabled \(not \(hasPrefix "tls:\/\/" .Values.dependencies.natsUrl\)\)/);
   assert.match(helpers, /Credential Portal origin does not match/);
-  assert.match(relay, /tokenGateway.runtimeSecret[\s\S]*token-gateway-database-url/);
+  assert.match(relay, /range \$source := list "account" "billing"/);
+  assert.match(relay, /key: \{\{ printf "%s-service-database-url" \$source/);
+  assert.doesNotMatch(relay, /tokenGateway\.runtimeSecret|token-gateway-database-url/);
 });
 
 test('Compose overlay uses one event cluster, per-service rotated credentials and no default new workers', async () => {
@@ -411,7 +413,7 @@ test('Compose overlay uses one event cluster, per-service rotated credentials an
   assert.equal(overlay.services['token-command-executor'].environment.DATABASE_URL, undefined);
   assert.equal(overlay.services['token-credential-portal'].environment.NATS_URL, '');
   assert.equal(overlay.services['token-credential-portal'].ports[0], '127.0.0.1:${CREDENTIAL_PORTAL_BIND_PORT:-18108}:8080');
-  for (const name of ['account-service', 'billing-service', 'token-gateway', 'account-event-relay', 'billing-event-relay', 'token-event-relay', 'token-command-executor']) {
+  for (const name of ['account-service', 'billing-service', 'token-gateway', 'account-event-relay', 'billing-event-relay', 'token-command-executor']) {
     assert.equal(overlay.services[name].environment.NATS_URL, '${MODEL_TOKEN_NATS_URL:?set the single authenticated event cluster}');
     assert.equal(overlay.services[name].environment.NATS_CREDENTIALS_FILE, '/var/run/secrets/pinvou/nats/client.creds');
   }
@@ -514,4 +516,21 @@ test('Billing Compose and real Helm template preserve exact least-privilege work
     assert.throws(() => assertBillingWorkloadPermissions(changed));
   }
   assert.throws(() => billingRulesFromHelmTemplate(source.replace('"service" "account-service" "permissions" (list "internal.billing.wallet.ensure"', '"service" "token-portal" "permissions" (list "internal.billing.wallet.ensure"')));
+});
+
+test('normalized deployment and NATS checks reject a retired ordinary Token relay without relaxing live identities', () => {
+  const resources = helmFixture();
+  assert.equal(checkGovernedHelmResources(resources).deployment_status, 'NOT_DEPLOYED');
+  const retired = structuredClone(resources.find(item => item.kind === 'Deployment' && item.metadata.name === 'account-event-relay'));
+  retired.metadata.name = 'token-event-relay';
+  retired.spec.template.metadata.labels['app.kubernetes.io/component'] = 'token-event-relay';
+  resources.push(retired);
+  assert.throws(() => checkGovernedHelmResources(resources), /retired_ordinary_relay/);
+  for (const config of [composeFixture(), nativeNATSFixture()]) {
+    assert.equal(checkGovernedComposeConfiguration(config).deployment_status, 'NOT_DEPLOYED');
+    config.services['token-event-relay'] = structuredClone(config.services['account-event-relay']);
+    config.services['token-event-relay'].environment.EVENT_SOURCE = 'token';
+    assert.throws(() => checkGovernedComposeConfiguration(config), /retired_ordinary_relay/);
+    assert.throws(() => checkComposeNATS(config), /retired_ordinary_relay/);
+  }
 });

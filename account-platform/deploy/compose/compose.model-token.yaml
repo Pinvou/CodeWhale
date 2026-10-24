@@ -163,18 +163,6 @@ services:
         read_only: true
         bind: { create_host_path: false }
 
-  token-event-relay:
-    environment:
-      DATABASE_URL: ${TOKEN_GATEWAY_RELEASE_DATABASE_URL:?set new release-scoped gateway database URL}
-      NATS_URL: ${MODEL_TOKEN_NATS_URL:?set the single authenticated event cluster}
-      NATS_CREDENTIALS_FILE: /var/run/secrets/pinvou/nats/client.creds
-    volumes:
-      - type: bind
-        source: ${NATS_CREDENTIAL_DIRECTORY:?set rotated per-service NATS directories}/token-event-relay
-        target: /var/run/secrets/pinvou/nats
-        read_only: true
-        bind: { create_host_path: false }
-
   token-credential-portal:
     <<: *governed-service
     profiles: [model-token]

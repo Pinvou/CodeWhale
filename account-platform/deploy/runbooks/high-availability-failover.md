@@ -1,6 +1,6 @@
 # 高可用与故障切换验收
 
-本流程只适用于 `production-new` Helm 形态。单机 Compose 永远不是高可用环境。Chart 在生产模式强制 Account、Billing、Gateway、Portal、三类 Relay、Keycloak 和 New API 至少双副本，跨至少两个故障域调度，采用零不可用滚动更新和 PodDisruptionBudget；内置单副本 Redis/NATS 必须关闭并替换为 TLS 连接的外部高可用服务。
+本流程只适用于 `production-new` Helm 形态。单机 Compose 永远不是高可用环境。Chart 在生产模式强制 Account、Billing、Gateway、Portal、Account/Billing 两个普通 Relay、Keycloak 和 New API 至少双副本，跨至少两个故障域调度，采用零不可用滚动更新和 PodDisruptionBudget；内置单副本 Redis/NATS 必须关闭并替换为 TLS 连接的外部高可用服务。
 
 Identity Adapter 暂维持单副本，因为注册/改密的短期明文密码引用只属于受控进程内存，不能复制到普通缓存。Keycloak 承担核心登录高可用；Identity Adapter Pod 丢失时旧短期引用安全失效，由持久 Saga 补偿并要求重新预检。演练必须证明其在非关键能力时限内自动替换，不能通过复制明文密码实现多副本。
 

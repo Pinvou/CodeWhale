@@ -239,9 +239,13 @@ the former unrestricted creation privileges.
 `tokenGovernanceCheck.enabled` default to false. No additional lifecycle or
 account-provisioning worker Deployment is created: those remain supervised by
 the gateway. New workloads require NetworkPolicy and separate runtime Secret
-references. The Token Relay uses the same release-scoped gateway database Secret
-and must be stopped/fenced/restarted with that writer generation. Account and
-Billing Relay identity and event behavior are unchanged.
+references. The current gateway uses its release-scoped database Secret; the
+credential portal uses a separate release Secret and the executor receives no
+database URL. No ordinary Token Relay is deployed or restarted. Historical Token
+Relay instances that shared an old gateway writer identity must remain in the
+retired-writer inventory, NOLOGIN/session fence and old-process shutdown; removing
+the current workload must not remove or revive those identities. Account and
+Billing ordinary Relay identity and event behavior are unchanged.
 
 The gateway release Secret contains `token-gateway-database-url` and
 `token-gateway.creds`; the credential Secret contains `database-url`,

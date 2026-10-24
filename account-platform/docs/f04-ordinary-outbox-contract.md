@@ -20,3 +20,5 @@ SELECT pg_total_relation_size('public.outbox_events'::regclass) AS bytes;
 ```
 
 如果日后交付普通 Token 消息能力，须单独确定资源身份、主题、消费者、幂等交付、重放和留存契约并完成审核。不能自动发送现存历史事件、解除既有资源限制，或以删除审计记录代替这项交付。
+
+交付清单只启动 `EVENT_SOURCE=account` 和 `EVENT_SOURCE=billing` 的普通 Relay；Compose、Helm、Portal 必需探针、HA/PDB/运行 ServiceAccount 和缺失来源告警均按这两个来源对齐。Token Gateway、Token 命令执行器和 Account 单独授权通道继续沿原契约运行。Token 历史 Outbox、stream subjects、不可变资源与权限登记仍保留，不以重新启用 Token 普通 Relay 作为历史事件的处理方案。基线匿名 NATS／TLS 接线为独立部署边界，本项收敛不代表整栈可直接启动或生产验收通过。

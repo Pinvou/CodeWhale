@@ -217,7 +217,7 @@ docker run --rm \
 docker compose <compose> up -d --wait nats
 ```
 
-恢复后核对 stream、consumer、ack floor、pending 和 redelivery；随后才能启动三个 Relay。原 NATS 尚在运行时禁止把同一 consumer 身份连接到新旧两套环境。
+恢复后核对 stream、consumer、ack floor、pending 和 redelivery；随后才能启动 Account/Billing 两个普通 Relay。原 NATS 尚在运行时禁止把同一 consumer 身份连接到新旧两套环境。
 
 ### 6.3 Redis
 
@@ -257,7 +257,7 @@ docker compose <compose> build \
   --build-arg VERSION="$RELEASE_VERSION" \
   --build-arg COMMIT="$SOURCE_COMMIT" \
   account-service identity-service billing-service token-gateway \
-  account-event-relay billing-event-relay token-event-relay \
+  account-event-relay billing-event-relay \
   account-migrate billing-migrate token-migrate
 ```
 
@@ -276,7 +276,7 @@ docker compose <compose> exec keycloak \
 # 再启动业务、事件和 Portal
 docker compose <compose> up -d --no-deps --wait \
   identity-service account-service billing-service token-gateway \
-  account-event-relay billing-event-relay token-event-relay token-portal
+  account-event-relay billing-event-relay token-portal
 ```
 
 平台管理员登录身份和 Account 业务角色是两层事实。恢复 Keycloak 数据库后应保留原身份；`EMPTY_BOOTSTRAP` 才使用 `provision-platform-admin.sh` 建立首个登录身份，所需 Account 平台角色映射由授权 DBA/安全负责人按 [原 RBAC 映射的当前边界](account-rbac-migration.md) 独立核验；登录身份不等于业务授权，当前缺平台角色公开管理入口时保持未完成，不能自动赋权或以组织角色接口替代。禁止把 Keycloak Realm Role 自动提升为平台超级管理员。
@@ -328,7 +328,7 @@ docker compose <compose> up -d --no-deps --wait \
 
 ### 9.5 事件与可观测性
 
-- 三个 Relay 健康，Outbox、Inbox、NATS consumer 和死信数量有解释。
+- Account/Billing 两个普通 Relay 健康，Outbox、Inbox、NATS consumer 和死信数量有解释。
 - 没有因空 NATS 或错误 consumer 位置造成全量重复投递。
 - 日志不含密码、验证码、Token、Cookie、Provider Secret 或完整模型正文。
 - 告警覆盖健康、账本、支付尾单、Hold、Outbox、磁盘、证书和模型 Provider。

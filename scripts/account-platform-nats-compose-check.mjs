@@ -2,7 +2,7 @@
 import path from 'node:path';
 import { isReadOnlyDirectoryBind } from './account-platform-compose-bind.mjs';
 
-const consumers = ['billing-service', 'account-event-relay', 'billing-event-relay', 'token-event-relay', 'token-command-executor'];
+const consumers = ['billing-service', 'account-event-relay', 'billing-event-relay', 'token-command-executor'];
 const legacyConsumers = ['account-service', 'token-gateway', ...consumers];
 const seedTarget = '/var/run/secrets/pinvou/nats';
 const caTarget = '/var/run/secrets/pinvou/nats-ca';
@@ -79,6 +79,7 @@ function checkOperator(services) {
 
 export function checkComposeNATS(config) {
   const services = config.services || {};
+  check(!Object.hasOwn(services, 'token-event-relay'), 'retired_ordinary_relay');
   const native = Object.values(services).some(service => Object.hasOwn(service.environment || {}, 'NATS_NKEY_SEED_FILE'));
   if (!native) {
     const endpoint = services['token-command-executor']?.environment?.NATS_URL;

@@ -28,7 +28,7 @@
 
 1. 冻结发布和配置变更，记录支付订单、模型执行、Outbox、NATS consumer 与模型网关的观察边界；正常业务可以继续时使用在线/PITR能力，不得为备份直接释放 Hold 或改终态。
 2. 为 PostgreSQL 创建 globals/角色清单和四库自定义格式 dump，启动/完成时间、WAL 位点、工具版本和文件摘要写入恢复清单。备份命令只能从受控脚本或短生命周期运维 Job 运行，凭据使用 `PGPASSFILE`/工作负载身份，不写命令行。
-3. 使用 NATS 官方管理工具导出所有受管 stream 和 consumer；无法在线导出时，在批准维护窗口停止三个 Relay 和 NATS，创建文件系统一致的 JetStream 卷归档，然后原样恢复服务。备份必须包含恢复工具版本和 stream/consumer 清单。
+3. 使用 NATS 官方管理工具导出所有受管 stream 和 consumer；无法在线导出时，在批准维护窗口停止 Account/Billing 两个普通 Relay 和 NATS，创建文件系统一致的 JetStream 卷归档，然后原样恢复服务。备份必须包含恢复工具版本和 stream/consumer 清单。
 4. 调用模型网关自己的备份流程，保存数据库和挂载数据、镜像 digest、配置版本以及 `/api/status`、模型目录和日志查询验证结果。账号平台备份脚本不得假定模型网关由同一 Compose 管理。
 5. 从 Secret 管理系统导出加密站点配置或记录可恢复的不可变 Secret 版本；解密密钥保存在独立 KMS/Vault，不能与密文同介质。
 6. 由边缘所有者导出脱敏反向代理、证书清单和网络持久化配置；明确应用主机、边缘主机和公开域名之间的逻辑关系，不记录 SSH 私钥或真实 Secret。
@@ -100,7 +100,7 @@ node scripts/account-platform-migration-manifest.mjs check
 4. 依次恢复 Keycloak、Billing、Account、Token。多库不是分布式快照；恢复后必须以支付渠道证据和不可变账本收敛。
 5. 对每库运行当前迁移器；已执行迁移校验和不同或文件缺失时立即停止，禁止修改历史脚本“适配”恢复库。
 6. 执行站点受控只读领域审计，完整核对 Account 权限/余额、Billing 账本/支付、Token 用量及 Outbox/Inbox；任一异常先调查。这四个历史审计 SQL 文件当前不在仓库，不能按虚构路径执行；缺实际审计载体或记录时保持恢复未完成，见 [运维证据](operational-evidence.md)。
-7. 恢复并核对 NATS stream、consumer、ack floor、pending 和 redelivery 后才启动三个 Relay。NATS 不可恢复时进入受审计事件核对流程，不得用空实例直接承接写流量。
+7. 恢复并核对 NATS stream、consumer、ack floor、pending 和 redelivery 后才启动 Account/Billing 两个普通 Relay。NATS 不可恢复时进入受审计事件核对流程，不得用空实例直接承接写流量。
 8. Redis 使用空实例启动，明确撤销全部旧 Session、验证码挑战和短期登录事务；不得尝试从日志恢复它们。
 9. 在业务 Deployment 与 Ingress 仍关闭时启动依赖和服务，检查 Readiness、Outbox、Inbox 与死信。Inbox 依赖 `event_id` 去重，不得清空后重放。
 10. 对过期 Hold 先审阅。`UPSTREAM_ACTIVE`、`SETTLEMENT_PENDING`、`REVIEW` 不得按超时直接释放；只使用已存在的 `account-platform/cmd/hold-recovery`，在受控 Billing 运行身份下先核原证据，执行 `go run ./cmd/hold-recovery --confirm --limit=100`（工作目录 `account-platform`，凭据由受控环境注入、不写 argv）；使用同后台 worker 的持久恢复 intent 和可信 Token dispatch fence 处理到期候选（包括既有 MANUAL_REVIEW 的重试）；未知或 in-flight 保持 MANUAL_REVIEW，不按超时直接释放。必须注入现有映射为 `billing-service`、具备 `internal.token.hold-expiry.prove` 权限的短期 workload JWT，以及显式 HTTPS `TOKEN_HOLD_EXPIRY_URL` 和受控 `WORKLOAD_IDENTITY_CA_FILE`；本地 job context 不授予远端权限，`expired_hold_recovery_pass_completed` 仅表示扫描完成，不等于 Hold 已释放。
