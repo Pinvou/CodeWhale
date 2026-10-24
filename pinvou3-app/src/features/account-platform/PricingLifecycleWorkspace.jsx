@@ -47,6 +47,16 @@ export function PricingLifecycleWorkspace({ copy, client, permissions, owner, co
   const [prices, setPrices] = useState([]);
   const [units, setUnits] = useState([]);
   const [protocols, setProtocols] = useState(() => contextual ? { protocols: [], formulas: [contextFormula] } : { protocols: [], formulas: [] });
+  const [formulaQuery, setFormulaQuery] = useState('');
+  const [activeFormulaQuery, setActiveFormulaQuery] = useState('');
+  const [formulaPage, setFormulaPage] = useState({ mode: null, has_more: null, next_cursor: null });
+  const [formulaPageExpired, setFormulaPageExpired] = useState(false);
+  const [formulaAccessDenied, setFormulaAccessDenied] = useState(false);
+  // A current denial retires preparing writes synchronously, including after
+  // a later successful read. Dispatched/unknown recovery keeps its original key.
+  const formulaAuthority = useRef({ denied: false, generation: 0 });
+  const [selectedFormula, setSelectedFormula] = useState(null);
+  const formulaAttempt = useRef({});
   const [models, setModels] = useState(() => contextual ? [contextModel] : []);
   const [loading, setLoading] = useState({});
   const [errors, setErrors] = useState({});
@@ -69,9 +79,12 @@ export function PricingLifecycleWorkspace({ copy, client, permissions, owner, co
     for (const controller of transientControllers.current.values()) controller.abort();
     transientControllers.current.clear();
   }, []);
-  const formulas = useMemo(() => publishedPricingFormulas(protocols), [protocols]);
+  const formulas = useMemo(() => {
+    const page = publishedPricingFormulas(protocols);
+    return selectedFormula && !page.some(item => item.formula_version_id === selectedFormula.formula_version_id) ? [...page, selectedFormula] : page;
+  }, [protocols, selectedFormula]);
   const latestFacts = useRef({ canManage, canReadModels, models, formulas });
-  latestFacts.current = { canManage, canReadModels, models, formulas };
+  latestFacts.current = { canManage, canReadModels, models, formulas, unknownMutation };
   useEffect(() => () => {
     mounted.current = false;
     for (const controller of preflights.current) controller.abort();
@@ -84,27 +97,30 @@ export function PricingLifecycleWorkspace({ copy, client, permissions, owner, co
   const editorFormula = formulas.find((item) => item.formula_version_id === editor?.formula_version_id);
   const compatibleModels = models.filter((item) => item.protocol_code === editorFormula?.protocol_code);
 
-  const loadResource = useCallback(async (key, request, apply, message) => {
+  // One resource generation owns every presenter of that resource. The first
+  // state key is pending; siblings are retired when a different intent starts.
+  const loadResource = useCallback(async (key, request, apply, message, stateKeys = [key]) => {
+    const stateKey = stateKeys[0];
     const generation = (generations.current[key] || 0) + 1;
     generations.current[key] = generation;
     sourceControllers.current.get(key)?.abort();
     const controller = new globalThis.AbortController();
     sourceControllers.current.set(key, controller);
-    setLoading((current) => ({ ...current, [key]: true }));
+    setLoading((current) => ({ ...current, ...Object.fromEntries(stateKeys.map(name => [name, name === stateKey])) }));
     try {
       const payload = await request(controller.signal);
-      if (generations.current[key] !== generation) throw Object.assign(new Error('STALE_RESOURCE_RESPONSE'), { code: 'STALE_RESOURCE_RESPONSE' });
+      if (!mounted.current || controller.signal.aborted || generations.current[key] !== generation) throw Object.assign(new Error('STALE_RESOURCE_RESPONSE'), { name: 'AbortError', code: 'STALE_RESOURCE_RESPONSE' });
       apply(payload);
       setUpdatedAt((current) => ({ ...current, [key]: new Date() }));
-      setErrors((current) => { const next = { ...current }; delete next[key]; return next; });
+      setErrors((current) => { const next = { ...current }; for (const name of stateKeys) delete next[name]; return next; });
       return payload;
     } catch (error) {
-      if (generations.current[key] === generation && error?.name !== 'AbortError') setErrors((current) => ({ ...current, [key]: message }));
+      if (mounted.current && generations.current[key] === generation && error?.name !== 'AbortError') setErrors((current) => ({ ...current, [stateKey]: message }));
       throw error;
     } finally {
-      if (generations.current[key] === generation) {
+      if (mounted.current && generations.current[key] === generation) {
         sourceControllers.current.delete(key);
-        setLoading((current) => ({ ...current, [key]: false }));
+        setLoading((current) => ({ ...current, [stateKey]: false }));
       }
     }
   }, []);
@@ -128,16 +144,38 @@ export function PricingLifecycleWorkspace({ copy, client, permissions, owner, co
     ? client.managedPriceSpace({ scope_type: 'MODEL', scope_id: contextModel.model_id, protocol_code: contextFormula.protocol_code, formula_version_id: contextFormula.formula_version_id, credit_unit: 'MICROCREDIT' }, signal)
     : client.managedPrices(signal), (payload) => setPrices(payload.items || []), labels.loadPricesFailed), [client, contextFormula, contextModel, contextual, labels.loadPricesFailed, loadResource]);
   const loadUnits = useCallback(() => loadResource('units', (signal) => client.meteringUnits(signal), (payload) => setUnits(payload.items || []), labels.loadUnitsFailed), [client, labels.loadUnitsFailed, loadResource]);
-  const loadProtocols = useCallback(() => {
+  const loadProtocols = useCallback((filters = {}) => {
     if (contextual) {
       generations.current.formulas += 1;
+      sourceControllers.current.get('formulas')?.abort();
+      sourceControllers.current.delete('formulas');
       setProtocols({ protocols: [], formulas: [contextFormula] });
-      setLoading((current) => ({ ...current, formulas: false }));
+      setLoading((current) => ({ ...current, formulas: false, formulaSelection: false }));
       setErrors((current) => { const next = { ...current }; delete next.formulas; return next; });
       return Promise.resolve({ protocols: [], formulas: [contextFormula] });
     }
-    return loadResource('formulas', (signal) => client.pricingProtocols(signal), (payload) => setProtocols(payload || { protocols: [], formulas: [] }), labels.loadFormulasFailed);
-  }, [client, contextFormula, contextual, labels.loadFormulasFailed, loadResource]);
+    const attempted = { q: String(filters.q || '').trim(), cursor: String(filters.cursor || '').trim() };
+    formulaAttempt.current = attempted;
+    const generation = generations.current.formulas + 1;
+    return loadResource('formulas', (signal) => client.pricingProtocols(attempted, signal), (payload) => {
+      setProtocols(payload);
+      setSelectedFormula(current => {
+        const refreshed = payload.formulas.find(item => item.formula_version_id === current?.formula_version_id);
+        return refreshed ? (refreshed.status === 'PUBLISHED' ? refreshed : null) : current;
+      });
+      setFormulaPage(payload.formula_page || { mode: 'aggregate', has_more: false, next_cursor: null });
+      setActiveFormulaQuery(attempted.q);
+      setFormulaPageExpired(false);
+      formulaAuthority.current.denied = false;
+      setFormulaAccessDenied(false);
+    }, labels.formulaPageFailed, ['formulas', 'formulaSelection']).catch(error => {
+      if (mounted.current && generations.current.formulas === generation && error?.name !== 'AbortError') {
+        if (error.status === 410) setFormulaPageExpired(true);
+        if ([401, 403].includes(error.status)) { formulaAuthority.current = { denied: true, generation: formulaAuthority.current.generation + 1 }; setFormulaAccessDenied(true); setSelectedFormula(null); if (!latestFacts.current.unknownMutation) setEditor(null); }
+      }
+      throw error;
+    });
+  }, [client, contextFormula, contextual, labels.formulaPageFailed, loadResource]);
   const loadModels = useCallback(() => {
     if (contextual) {
       generations.current.models += 1;
@@ -158,7 +196,7 @@ export function PricingLifecycleWorkspace({ copy, client, permissions, owner, co
 
   useEffect(() => { void loadPrices().catch(() => {}); void loadUnits().catch(() => {}); void loadProtocols().catch(() => {}); void loadModels().catch(() => {}); }, [loadModels, loadPrices, loadProtocols, loadUnits]);
   useEffect(() => {
-    if (!canManage) abortTransientReads();
+    if (!canManage) { abortTransientReads(); setSelectedFormula(null); }
     if (!canManage && !unknownMutation) {
       setEditor(null);
       setUnitForm(null);
@@ -176,6 +214,7 @@ export function PricingLifecycleWorkspace({ copy, client, permissions, owner, co
     form.scope_type = contextual ? 'MODEL' : compatibleModels.length ? 'MODEL' : 'GLOBAL';
     form.scope_id = contextual ? contextModel.model_id : compatibleModels[0]?.model_id || '';
     if (formula) {
+      setSelectedFormula(formula);
       form.formula_version_id = formula.formula_version_id;
       form.protocol_code = formula.protocol_code;
       form.units = Object.fromEntries(Object.values(formula.required_unit_versions || {}).map((id) => [id, { config_type: 'FIXED_PRICE', fixed_price_per_denominator: '' }]));
@@ -184,15 +223,53 @@ export function PricingLifecycleWorkspace({ copy, client, permissions, owner, co
     setEditor(form);
   };
 
-  const openEdit = (item) => {
-    setEditorErrors({});
-    setEditor(priceDraftForm(item));
+  const openEdit = async (item) => {
+    if (!canManage || formulaAccessDenied || loading.formulaSelection || unknownMutation) return;
+    const generation = generations.current.formulas + 1;
+    let locatedPage = null;
+    try {
+      // Cached selection and exact lookup share the page read's generation and
+      // AbortController. Only the latest formula intent may commit authority.
+      await loadResource('formulas', async signal => {
+        const cached = latestFacts.current.formulas.find(value => value.formula_version_id === item.formula_version_id);
+        if (cached || contextual) return cached;
+        locatedPage = await client.pricingProtocols({ q: item.formula_version_id }, signal);
+        const matches = publishedPricingFormulas(locatedPage).filter(value => value.formula_version_id === item.formula_version_id);
+        if (locatedPage.formula_page?.has_more || matches.length !== 1) throw new Error('FORMULA_SELECTION_UNAVAILABLE');
+        return matches[0];
+      }, formula => {
+        if (!formula || formula.status !== 'PUBLISHED' || formula.protocol_code !== item.protocol_code
+          || !/^[1-9]\d*$/.test(String(formula.version)) || !Object.keys(formula.required_unit_versions || {}).length
+          || !Object.values(formula.required_unit_versions).every(stableUUID)) throw new Error('FORMULA_SELECTION_UNAVAILABLE');
+        if (!latestFacts.current.canManage || latestFacts.current.unknownMutation) {
+          throw Object.assign(new Error('FORMULA_SELECTION_RETIRED'), { name: 'AbortError' });
+        }
+        if (locatedPage) {
+          // A new same-resource snapshot replaces the previous cursor.
+          setProtocols(locatedPage);
+          setFormulaPage(locatedPage.formula_page);
+          setActiveFormulaQuery(item.formula_version_id);
+          setFormulaQuery(item.formula_version_id);
+          formulaAttempt.current = { q: item.formula_version_id, cursor: '' };
+          setFormulaPageExpired(false);
+        }
+        setSelectedFormula(formula);
+        setEditorErrors({});
+        setEditor(priceDraftForm(item));
+      }, labels.formulaSelectionFailed, ['formulaSelection', 'formulas']);
+    } catch (error) {
+      if (mounted.current && generations.current.formulas === generation && error?.name !== 'AbortError') {
+        if ([401, 403].includes(error.status)) { formulaAuthority.current = { denied: true, generation: formulaAuthority.current.generation + 1 }; setFormulaAccessDenied(true); setSelectedFormula(null); if (!latestFacts.current.unknownMutation) setEditor(null); }
+        if (locatedPage?.formula_page?.mode === 'snapshot') setFormulaPageExpired(true);
+      }
+    }
   };
 
   const changeFormula = (formulaID) => {
     if (contextual) return;
     const formula = formulas.find((item) => item.formula_version_id === formulaID);
     const compatibleModels = models.filter((item) => item.protocol_code === formula?.protocol_code);
+    setSelectedFormula(formula || null);
     setEditor((current) => ({
       ...current,
       formula_version_id: formulaID,
@@ -204,7 +281,8 @@ export function PricingLifecycleWorkspace({ copy, client, permissions, owner, co
 
   const submitDraft = async (event) => {
     event.preventDefault();
-    if (!editor || loading.mutation || unknownMutation || !pricingLifecycleMutationLock.tryAcquire()) return;
+    if (!editor || formulaAuthority.current.denied || loading.formulaSelection || loading.mutation || unknownMutation || !pricingLifecycleMutationLock.tryAcquire()) return;
+    const formulaAuthorizationGeneration = formulaAuthority.current.generation;
     retainUnknown({ phase: 'PREPARING', kind: editor.price_version_id ? 'DRAFT_UPDATE' : 'DRAFT_CREATE' });
     if (!canManage) { setEditorErrors({ form: labels.permissionLost }); retainUnknown(null); pricingLifecycleMutationLock.release(); return; }
     setLoading((current) => ({ ...current, mutation: true }));
@@ -244,7 +322,7 @@ export function PricingLifecycleWorkspace({ copy, client, permissions, owner, co
     }
     const currentFacts = latestFacts.current;
     const currentFormula = currentFacts.formulas.find((item) => item.formula_version_id === editor.formula_version_id);
-    if (!mounted.current || !currentFacts.canManage || !currentFormula || !newModelPriceAllowed(editor, currentFacts.canReadModels, currentFacts.models, currentFormula)) {
+    if (!mounted.current || formulaAuthority.current.denied || formulaAuthority.current.generation !== formulaAuthorizationGeneration || !currentFacts.canManage || !currentFormula || !newModelPriceAllowed(editor, currentFacts.canReadModels, currentFacts.models, currentFormula)) {
       if (mounted.current) { setEditorErrors({ form: currentFacts.canManage ? labels.modelSelectionInvalid : labels.permissionLost }); setLoading((current) => ({ ...current, mutation: false })); }
       retainUnknown(null);
       pricingLifecycleMutationLock.release();
@@ -429,19 +507,33 @@ export function PricingLifecycleWorkspace({ copy, client, permissions, owner, co
       <div className="adm-section-tools">
         <span>{contextual ? labels.modelContextBoundary(contextModel.display_name) : labels.lifecycleBoundary}</span>
         <div className="adm-row-actions">
-          {canManage && <button type="button" onClick={openCreate} disabled={loading.mutation || unknownMutation || !formulas.length}>{labels.createDraft}</button>}
+          {canManage && <button type="button" onClick={openCreate} disabled={loading.formulaSelection || loading.mutation || unknownMutation || formulaAccessDenied || !formulas.length}>{labels.createDraft}</button>}
           {onExit && <button type="button" onClick={onExit}>{labels.readOnlySummary}</button>}
-          <button type="button" onClick={() => { void loadPrices().catch(() => {}); void loadUnits().catch(() => {}); void loadProtocols().catch(() => {}); void loadModels().catch(() => {}); }} disabled={Boolean(loading.recovery || loading.prices || loading.units || loading.formulas || loading.models)}>{copy.refresh}</button>
+          <button type="button" onClick={() => { void loadPrices().catch(() => {}); void loadUnits().catch(() => {}); void loadProtocols({ q: activeFormulaQuery }).catch(() => {}); void loadModels().catch(() => {}); }} disabled={Boolean(loading.recovery || loading.prices || loading.units || loading.formulas || loading.models)}>{copy.refresh}</button>
         </div>
       </div>
       {unknownMutation && <div className="adm-inline-message error" role="alert">{labels.resultUnknown}<button type="button" onClick={() => void verifyUnknown()} disabled={loading.recovery}>{loading.recovery ? labels.verifying : labels.verifyResult}</button></div>}
       {notice && <div className="adm-inline-message ok" role="status">{notice}</div>}
       {Object.entries(errors).map(([key, error]) => <div key={key} className="adm-inline-message error" role="alert">{error}</div>)}
-      {!formulas.length && !errors.formulas && <div className="adm-inline-message">{labels.noPublishedFormula}</div>}
+      {!contextual && formulaPage.mode !== 'aggregate' && <section className="adm-finance-subpanel" aria-label={labels.formulaDirectory}>
+        <p>{labels.formulaActiveFilter}: {activeFormulaQuery || labels.formulaAll}</p>
+        <form onSubmit={event => { event.preventDefault(); void loadProtocols({ q: formulaQuery }).catch(() => {}); }}>
+          <label>{labels.formulaSearch}<input maxLength="160" value={formulaQuery} disabled={Boolean(loading.formulas || unknownMutation)} onChange={event => setFormulaQuery(event.target.value)} /></label>
+          <button type="submit" disabled={Boolean(loading.formulas || unknownMutation)}>{labels.formulaSearchAction}</button>
+        </form>
+        {formulaPage.has_more !== null && !errors.formulas && <p>{formulaPage.has_more ? labels.formulaPageMore : labels.formulaPageEnd}</p>}
+        {formulaPageExpired && <p role="alert">{labels.formulaPageExpired}</p>}
+        <div className="adm-row-actions">
+          <button type="button" disabled={!formulaPage.has_more || Boolean(loading.formulas || errors.formulas || formulaPageExpired || unknownMutation)} onClick={() => void loadProtocols({ q: activeFormulaQuery, cursor: formulaPage.next_cursor }).catch(() => {})}>{labels.formulaNext}</button>
+          {errors.formulas && !formulaPageExpired && <button type="button" disabled={Boolean(loading.formulas || unknownMutation)} onClick={() => void loadProtocols(formulaAttempt.current).catch(() => {})}>{labels.formulaRetry}</button>}
+          <button type="button" disabled={Boolean(loading.formulas || unknownMutation)} onClick={() => void loadProtocols({ q: activeFormulaQuery }).catch(() => {})}>{labels.formulaRestart}</button>
+        </div>
+      </section>}
+      {!publishedPricingFormulas(protocols).length && !loading.formulas && !errors.formulas && (contextual || formulaPage.has_more === false) && <div className="adm-inline-message">{activeFormulaQuery ? labels.formulaSearchEmpty : labels.noPublishedFormula}</div>}
 
       {editor && (
         <form className="adm-pricing-editor" onSubmit={submitDraft} noValidate>
-          <fieldset className="adm-pricing-fieldset" disabled={Boolean(loading.mutation || unknownMutation || !canManage)}>
+          <fieldset className="adm-pricing-fieldset" disabled={Boolean(loading.formulaSelection || loading.mutation || unknownMutation || !canManage || formulaAccessDenied)}>
           <header><div><strong>{editor.price_version_id ? labels.editDraft : labels.createDraft}</strong><small>{labels.draftContract}</small></div><button type="button" disabled={Boolean(unknownMutation)} onClick={() => setEditor(null)}>{labels.cancel}</button></header>
           {editorErrors.form && <div className="adm-inline-message error" role="alert">{editorErrors.form}</div>}
           <div className="adm-pricing-fields">
@@ -469,7 +561,7 @@ export function PricingLifecycleWorkspace({ copy, client, permissions, owner, co
         <header className="adm-pricing-panel-head"><div><h3>{labels.priceVersions}</h3><p>{contextual ? labels.modelPriceVersionsLead : labels.priceVersionsLead}</p></div><div className="adm-row-actions"><span>{labels.returnedCount(prices.length)}</span>{updatedAt.prices && <small>{labels.lastUpdated} {updatedAt.prices.toLocaleString()}</small>}<button type="button" onClick={() => void loadPrices().catch(() => {})} disabled={loading.prices || loading.recovery}>{copy.refresh}</button></div></header>
         {/* biome-ignore lint/a11y/noNoninteractiveTabindex: This named overflow region needs keyboard focus for native table scrolling. */}
         <div className="adm-table-wrap" tabIndex="0" role="region" aria-label={labels.priceVersions}><table className="adm-table"><thead><tr><th>{labels.scope}</th><th>{labels.protocolFormula}</th><th>{labels.version}</th><th>{copy.accounts.status}</th><th>{labels.effectivity}</th><th>{labels.etag}</th><th>{copy.accounts.actions}</th></tr></thead><tbody>
-          {prices.map((item) => <tr key={item.price_version_id}><td><strong>{item.scope_type}</strong><br />{onOpenModel && item.scope_type === 'MODEL' && stableUUID(item.scope_id) ? <button type="button" className="adm-name-link" onClick={() => onOpenModel(item.scope_id)}>{item.scope_id}</button> : <small>{item.scope_id || labels.global}</small>}</td><td>{item.protocol_code}<br /><code title={item.formula_version_id}>{shortID(item.formula_version_id)}</code></td><td>v{item.version}</td><td><PricingStatus value={item.derived_status} /></td><td>{formatDate(item.effective_from)}<br /><small>{item.effective_to ? formatDate(item.effective_to) : labels.openEnded}</small></td><td>{item.lifecycle_status === 'DRAFT' ? item.space_etag : item.current_space_etag || item.space_etag}</td><td><div className="adm-row-actions"><button type="button" onClick={() => void showPreview(item)} disabled={loading.preview}>{labels.preview}</button>{canManage && item.lifecycle_status === 'DRAFT' && <button type="button" onClick={() => openEdit(item)} disabled={loading.mutation || unknownMutation}>{labels.editDraft}</button>}{canManage && item.lifecycle_status === 'DRAFT' && <button type="button" onClick={() => openPublish(item)} disabled={loading.mutation || unknownMutation}>{labels.publish}</button>}{canManage && ['PUBLISHED', 'ACTIVE'].includes(item.derived_status) && <button type="button" className={item.derived_status === 'ACTIVE' ? 'danger' : ''} onClick={() => void openTransition(item)} disabled={loading.mutation || unknownMutation}>{item.derived_status === 'PUBLISHED' ? labels.cancelFuture : labels.endActive}</button>}</div></td></tr>)}
+          {prices.map((item) => <tr key={item.price_version_id}><td><strong>{item.scope_type}</strong><br />{onOpenModel && item.scope_type === 'MODEL' && stableUUID(item.scope_id) ? <button type="button" className="adm-name-link" onClick={() => onOpenModel(item.scope_id)}>{item.scope_id}</button> : <small>{item.scope_id || labels.global}</small>}</td><td>{item.protocol_code}<br /><code title={item.formula_version_id}>{shortID(item.formula_version_id)}</code></td><td>v{item.version}</td><td><PricingStatus value={item.derived_status} /></td><td>{formatDate(item.effective_from)}<br /><small>{item.effective_to ? formatDate(item.effective_to) : labels.openEnded}</small></td><td>{item.lifecycle_status === 'DRAFT' ? item.space_etag : item.current_space_etag || item.space_etag}</td><td><div className="adm-row-actions"><button type="button" onClick={() => void showPreview(item)} disabled={loading.preview}>{labels.preview}</button>{canManage && item.lifecycle_status === 'DRAFT' && <button type="button" onClick={() => void openEdit(item)} disabled={loading.mutation || unknownMutation || formulaAccessDenied || loading.formulaSelection}>{labels.editDraft}</button>}{canManage && item.lifecycle_status === 'DRAFT' && <button type="button" onClick={() => openPublish(item)} disabled={loading.mutation || unknownMutation}>{labels.publish}</button>}{canManage && ['PUBLISHED', 'ACTIVE'].includes(item.derived_status) && <button type="button" className={item.derived_status === 'ACTIVE' ? 'danger' : ''} onClick={() => void openTransition(item)} disabled={loading.mutation || unknownMutation}>{item.derived_status === 'PUBLISHED' ? labels.cancelFuture : labels.endActive}</button>}</div></td></tr>)}
           {!prices.length && !loading.prices && <tr><td colSpan="7" className="adm-empty">{contextual ? labels.noModelPrices : labels.noPrices}</td></tr>}
         </tbody></table></div>
       </section>

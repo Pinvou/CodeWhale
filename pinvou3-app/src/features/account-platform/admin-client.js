@@ -832,8 +832,37 @@ meteringUnits(signal) {
     return this.request('billing', '/admin/v1/metering-units', signal);
   }
 
-pricingProtocols(signal) {
-    return this.request('token', '/admin/v1/protocols', signal);
+async pricingProtocols(filters = {}, signal) {
+    if (isAbortSignal(filters)) { signal = filters; filters = {}; }
+    const sessionEpoch = this.financeSessionEpoch;
+    const q = String(filters.q || '').trim();
+    const cursor = String(filters.cursor || '').trim();
+    // The currently delivered pagination-disabled server still returns its
+    // aggregate here. A continuation already identifies the split-page mode;
+    // do not create another protocol snapshot for every formula page.
+    if (!cursor) {
+      const initial = await this.request('token', '/admin/v1/protocols', signal);
+      this.requireCurrentSession(sessionEpoch, signal);
+      if (Array.isArray(initial?.protocols) && Array.isArray(initial?.formulas)) {
+        return { ...initial,
+          formula_page: { mode: 'aggregate', has_more: false, next_cursor: null },
+        };
+      }
+      if (!Array.isArray(initial?.items) || typeof initial.has_more !== 'boolean') {
+        throw Object.assign(new Error('invalid pricing formula source'), { code: 'INVALID_PRICING_FORMULAS_RESPONSE' });
+      }
+    }
+    const page = await this.formulas({ q, status: 'PUBLISHED', cursor }, signal);
+    this.requireCurrentSession(sessionEpoch, signal);
+    if (!Array.isArray(page?.items) || typeof page.has_more !== 'boolean'
+      || page.has_more && (typeof page.next_cursor !== 'string' || !page.next_cursor.trim() || page.next_cursor === cursor)
+      || !page.has_more && page.next_cursor != null && page.next_cursor !== '') {
+      throw Object.assign(new Error('invalid pricing formula page'), { code: 'INVALID_PRICING_FORMULAS_RESPONSE' });
+    }
+    // This is explicitly one page, never a complete synthetic aggregate.
+    return { protocols: [], formulas: page.items,
+      formula_page: { mode: 'snapshot', has_more: page.has_more, next_cursor: page.next_cursor || null },
+    };
   }
 
 async createMeteringUnit(input, idempotencyKey) {
