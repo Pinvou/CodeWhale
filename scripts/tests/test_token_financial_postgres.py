@@ -71,6 +71,29 @@ class FinancialPostgresRunnerTests(unittest.TestCase):
                     RUNNER.verify_results(invalid, required, **options)
 
 
+    def test_payment_instruction_projection_requires_actual_root_and_children(self):
+        root = "TestPaymentInstructionProjectionPostgres"
+        self.assertIn(root, RUNNER.RETAINED_REQUIRED)
+        self.assertIn(root, RUNNER.BILLING_CHILD_REQUIRED)
+        self.run_main_fixture()
+        command = self.fixture_commands[self.fixture_phases.index("retained-billing")]
+        self.assertIn(root, command[command.index("-run") + 1])
+        valid = self.events(RUNNER.RETAINED_REQUIRED, RUNNER.BILLING_PACKAGE, children=True)
+        options = {"package": RUNNER.BILLING_PACKAGE, "require_children": True, "exact_roots": True,
+                   "children_required": RUNNER.BILLING_CHILD_REQUIRED}
+        RUNNER.verify_results(valid, RUNNER.RETAINED_REQUIRED, **options)
+        for invalid in (
+            [],
+            [event for event in valid if event.get("Test", "").split("/", 1)[0] != root],
+            [event for event in valid if not event.get("Test", "").startswith(root + "/")],
+            valid + [{"Action": "skip", "Package": RUNNER.BILLING_PACKAGE, "Test": root}],
+            valid + [{"Action": "skip", "Package": RUNNER.BILLING_PACKAGE, "Test": root + "/actual"}],
+            valid + [{"Action": "fail", "Package": RUNNER.BILLING_PACKAGE, "Test": root + "/actual"}],
+        ):
+            with self.subTest(events=len(invalid)), self.assertRaises(RuntimeError):
+                RUNNER.verify_results(invalid, RUNNER.RETAINED_REQUIRED, **options)
+
+
     def test_disposable_loopback_url(self):
         raw = "postgres://postgres@127.0.0.1:5433/postgres?sslmode=disable"
         self.assertEqual(RUNNER.local_database_url(raw), raw)
@@ -772,7 +795,7 @@ class FinancialPostgresRunnerTests(unittest.TestCase):
         }
         self.assertEqual(RUNNER.REFUND_REQUIRED, expected)
         self.assertTrue(expected <= RUNNER.RETAINED_REQUIRED)
-        self.assertEqual(len(RUNNER.RETAINED_REQUIRED), 35)
+        self.assertEqual(len(RUNNER.RETAINED_REQUIRED), 36)
         valid = self.events(RUNNER.RETAINED_REQUIRED, RUNNER.BILLING_PACKAGE, children=True)
         options = {"package": RUNNER.BILLING_PACKAGE, "require_children": True, "exact_roots": True,
                    "children_required": RUNNER.BILLING_CHILD_REQUIRED}

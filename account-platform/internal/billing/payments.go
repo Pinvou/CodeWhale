@@ -317,6 +317,15 @@ func (p *PaymentCoordinator) CreateOrganizationMobileOrder(ctx context.Context, 
 }
 
 func (p *PaymentCoordinator) createOrder(ctx context.Context, requesterID, walletID uuid.UUID, beneficiaryOrganizationID *uuid.UUID, productID, channel, mobile, idempotencyKey string) (PaymentOrder, bool, error) {
+	order, created, err := p.createOrderCommand(ctx, requesterID, walletID, beneficiaryOrganizationID, productID, channel, mobile, idempotencyKey)
+	if err != nil {
+		return order, created, err
+	}
+	order, err = p.currentPaymentOrderProjection(ctx, order)
+	return order, created, err
+}
+
+func (p *PaymentCoordinator) createOrderCommand(ctx context.Context, requesterID, walletID uuid.UUID, beneficiaryOrganizationID *uuid.UUID, productID, channel, mobile, idempotencyKey string) (PaymentOrder, bool, error) {
 	if p.Capabilities().TestOnly && !p.allowTestOnlyCollection {
 		return PaymentOrder{}, false, ErrConflict
 	}
@@ -559,14 +568,28 @@ func (p *PaymentCoordinator) dispatchCreatedOrder(ctx context.Context, order Pay
 	if err != nil {
 		return PaymentOrder{}, false, err
 	}
+	// Freeze the actual deadline from the first validated Create response. A
+	// receipt replay or recovery query cannot extend it by repeating Create.
+	if claimed.RowsAffected() == 1 {
+		if err = p.freezeCreatedPaymentDeadline(ctx, resultTx, order, providerOrder, p.now()); err != nil {
+			return PaymentOrder{}, false, err
+		}
+	}
+	// Create may recover through a provider query, including a closed result.
+	// Keep that observation's external bound even when it cannot freeze a new
+	// user payment window or authorize a local terminal transition.
+	if err = p.observeQueriedPaymentDeadline(ctx, resultTx, order, providerOrder, p.now()); err != nil {
+		return PaymentOrder{}, false, err
+	}
+	providerPayable := providerOrder.Status == "CREATED" || providerOrder.Status == "PENDING"
 	// A successful payment may arrive before the external create call returns.
 	// Keep the locked row's authoritative state and use it for the replay receipt.
 	_, err = resultTx.Exec(ctx, `UPDATE payment_orders
 SET status=CASE WHEN status IN ('CREATED','PENDING') THEN 'PENDING' ELSE status END,
     provider_call_status='COMPLETED',
-    payment_url=CASE WHEN status IN ('CREATED','PENDING') AND close_status='OPEN' THEN NULLIF($2,'') END,
-    qr_data=CASE WHEN status IN ('CREATED','PENDING') AND close_status='OPEN' THEN NULLIF($3,'') END,
-    updated_at=$4 WHERE id=$1`, order.ID, providerOrder.PaymentURL, providerOrder.QRData, p.now())
+    payment_url=CASE WHEN $5 AND status IN ('CREATED','PENDING') AND close_status='OPEN' AND expires_at>$4 THEN NULLIF($2,'') END,
+    qr_data=CASE WHEN $5 AND status IN ('CREATED','PENDING') AND close_status='OPEN' AND expires_at>$4 THEN NULLIF($3,'') END,
+    updated_at=$4 WHERE id=$1`, order.ID, providerOrder.PaymentURL, providerOrder.QRData, p.now(), providerPayable)
 	if err != nil {
 		return PaymentOrder{}, false, err
 	}
@@ -585,6 +608,7 @@ SET status=CASE WHEN status IN ('CREATED','PENDING') THEN 'PENDING' ELSE status 
 	if err != nil {
 		return PaymentOrder{}, false, err
 	}
+	maskClosedPaymentInstructions(&order, p.now())
 	responseBody, _ := json.Marshal(order)
 	now := p.now()
 	receipt, err := resultTx.Exec(ctx, `INSERT INTO idempotency_records(scope,idempotency_key,request_hash,response_status,response_body,created_at,expires_at) VALUES ('payment.create',$1,$2,201,$3,$4,$5) ON CONFLICT(scope,idempotency_key) DO NOTHING`, idempotencyKey, requestHash, responseBody, now, now.Add(24*time.Hour))

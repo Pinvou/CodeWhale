@@ -204,11 +204,19 @@ func truncatePaymentReconciliationError(value string) string {
 }
 
 func (p *PaymentCoordinator) SyncOrder(ctx context.Context, orderID uuid.UUID) (PaymentOrder, error) {
-	return p.syncOrder(ctx, orderID, false)
+	order, err := p.syncOrder(ctx, orderID, false)
+	if err != nil {
+		return order, err
+	}
+	return p.currentPaymentOrderProjection(ctx, order)
 }
 
 func (p *PaymentCoordinator) SyncReviewedOrder(ctx context.Context, orderID uuid.UUID) (PaymentOrder, error) {
-	return p.syncOrder(ctx, orderID, true)
+	order, err := p.syncOrder(ctx, orderID, true)
+	if err != nil {
+		return order, err
+	}
+	return p.currentPaymentOrderProjection(ctx, order)
 }
 
 func providerFailureMatchesOrder(provider ProviderOrder, order PaymentOrder) bool {
@@ -275,31 +283,12 @@ func (p *PaymentCoordinator) syncOrder(ctx context.Context, orderID uuid.UUID, r
 	if err != nil {
 		return PaymentOrder{}, errors.Join(ErrPaymentProvider, err)
 	}
-	if _, err := p.repository.pool.Exec(ctx, `UPDATE payment_orders SET last_successful_query_at=$2,last_authoritative_unpaid_at=CASE WHEN $3 AND $4 IN ('CLOSED','FAILED') THEN $2 ELSE last_authoritative_unpaid_at END,updated_at=$2 WHERE id=$1`, order.ID, p.now(), p.Capabilities().AuthoritativeUnpaidTerminal, providerOrder.Status); err != nil {
+	order, err = p.persistQueriedPaymentProjection(ctx, order.ID, providerOrder)
+	if err != nil {
 		return PaymentOrder{}, err
 	}
-	if deadline := providerPaymentDeadline(providerOrder); deadline != nil && order.CloseStatus == "OPEN" {
-		finalArchiveEligibleAt := deadline.Add(time.Duration(p.Capabilities().MaximumLateConfirmationSeconds)*time.Second + 7*24*time.Hour)
-		command, err := p.repository.pool.Exec(ctx, `UPDATE payment_orders SET expires_at=$2,provider_payable_until=$2,final_archive_eligible_at=$3,updated_at=$4 WHERE id=$1 AND close_status='OPEN'`, order.ID, *deadline, finalArchiveEligibleAt, p.now())
-		if err != nil {
-			return PaymentOrder{}, err
-		}
-		if command.RowsAffected() == 1 {
-			order.ExpiresAt = *deadline
-			order.ProviderPayableUntil = *deadline
-			order.FinalArchiveEligibleAt = finalArchiveEligibleAt
-		}
-	}
-	if _, err := p.repository.pool.Exec(ctx, `UPDATE payment_orders SET payment_url=CASE WHEN close_status='OPEN' THEN NULLIF($2,'') END,qr_data=CASE WHEN close_status='OPEN' THEN NULLIF($3,'') END,provider_status=NULLIF($4,''),provider_trace_id=NULLIF($5,''),updated_at=$6 WHERE id=$1`, order.ID, providerOrder.PaymentURL, providerOrder.QRData, providerOrder.ProviderStatus, providerOrder.ProviderTraceID, p.now()); err != nil {
-		return PaymentOrder{}, err
-	}
-	order.PaymentURL, order.QRData = providerOrder.PaymentURL, providerOrder.QRData
-	maskClosedPaymentInstructions(&order)
 	if providerOrder.Status == "SUCCESS" {
 		return p.applyQueriedPayment(ctx, order.ID, providerOrder, reviewed)
-	}
-	if err := p.recordProviderObservation(ctx, order.ID, "QUERY", providerOrder); err != nil {
-		return PaymentOrder{}, err
 	}
 	if providerOrder.Status == "PARTIALLY_REFUNDED" || providerOrder.Status == "REFUNDED" {
 		return p.applyProviderReviewStatus(ctx, order, providerOrder.Status)
@@ -416,7 +405,7 @@ func (p *PaymentCoordinator) markExpiredOrderLocallyClosed(ctx context.Context, 
 	if err != nil {
 		return PaymentOrder{}, err
 	}
-	maskClosedPaymentInstructions(&updated)
+	maskClosedPaymentInstructions(&updated, p.now())
 	return updated, tx.Commit(ctx)
 }
 

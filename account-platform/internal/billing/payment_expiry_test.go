@@ -176,7 +176,7 @@ func TestExpiredPendingPaymentRequiresLocalCloseAtDeadline(t *testing.T) {
 
 func TestExpiredOrderNeverReturnsPaymentInstructions(t *testing.T) {
 	order := PaymentOrder{Status: "EXPIRED", CloseStatus: "OPEN", PaymentURL: "https://provider.invalid/pay", QRData: "provider-qr"}
-	maskClosedPaymentInstructions(&order)
+	maskClosedPaymentInstructions(&order, time.Now().UTC())
 	if order.PaymentURL != "" || order.QRData != "" {
 		t.Fatalf("expired order retained payment instructions: %#v", order)
 	}
