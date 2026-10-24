@@ -15,6 +15,19 @@ SPEC.loader.exec_module(RUNNER)
 
 
 class FinancialPostgresRunnerTests(unittest.TestCase):
+    def test_forced_refund_member_terminal_root_and_children_are_mandatory(self):
+        name = "TestForcedRefundMemberGrantTerminalStatePostgres"
+        self.assertIn(name, RUNNER.RETAINED_REQUIRED)
+        self.assertIn(name, RUNNER.BILLING_CHILD_REQUIRED)
+        events = self.events(required={name}, package=RUNNER.BILLING_PACKAGE, children=True)
+        RUNNER.verify_results(events, {name}, package=RUNNER.BILLING_PACKAGE, require_children=True)
+        for rejected in ([x for x in events if x.get("Test") != name],
+                         [x for x in events if "/" not in x.get("Test", "")],
+                         [dict(x, Action="skip") if "/" in x.get("Test", "") and x.get("Action") == "pass" else x for x in events],
+                         [dict(x, Action="fail") if "/" in x.get("Test", "") and x.get("Action") == "pass" else x for x in events]):
+            with self.subTest(events=rejected), self.assertRaises(RuntimeError):
+                RUNNER.verify_results(rejected, {name}, package=RUNNER.BILLING_PACKAGE, require_children=True)
+
     def test_review_regression_roots_are_required_on_real_postgres(self):
         billing = {
             "TestRefundRejectsPlanBeforeFinancialWritesPostgres",
@@ -733,7 +746,7 @@ class FinancialPostgresRunnerTests(unittest.TestCase):
         }
         self.assertEqual(RUNNER.REFUND_REQUIRED, expected)
         self.assertTrue(expected <= RUNNER.RETAINED_REQUIRED)
-        self.assertEqual(len(RUNNER.RETAINED_REQUIRED), 33)
+        self.assertEqual(len(RUNNER.RETAINED_REQUIRED), 34)
         valid = self.events(RUNNER.RETAINED_REQUIRED, RUNNER.BILLING_PACKAGE, children=True)
         options = {"package": RUNNER.BILLING_PACKAGE, "require_children": True, "exact_roots": True,
                    "children_required": RUNNER.BILLING_CHILD_REQUIRED}

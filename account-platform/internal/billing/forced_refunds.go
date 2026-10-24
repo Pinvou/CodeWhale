@@ -341,7 +341,7 @@ func (r *PostgresRepository) ApplyReviewedForcedRefund(ctx context.Context, case
 				if amount > member_grant.available {
 					amount = member_grant.available
 				}
-				if _, err := tx.Exec(ctx, `UPDATE member_quota_grants SET available_microcredits=available_microcredits-$2,revoked_microcredits=revoked_microcredits+$2,status=CASE WHEN available_microcredits=$2 THEN 'REVOKED' ELSE status END,allocation_version=allocation_version+1,updated_at=$3 WHERE id=$1`, member_grant.id, amount, now); err != nil {
+				if _, err := tx.Exec(ctx, `UPDATE member_quota_grants SET available_microcredits=available_microcredits-$2,revoked_microcredits=revoked_microcredits+$2,status=CASE WHEN available_microcredits=$2 THEN 'REVOKED' ELSE status END,suspension_reason=CASE WHEN available_microcredits=$2 THEN NULL ELSE suspension_reason END,allocation_version=allocation_version+1,updated_at=$3 WHERE id=$1`, member_grant.id, amount, now); err != nil {
 					return ForcedRefundCase{}, err
 				}
 				remainingGrantRevoke -= amount
