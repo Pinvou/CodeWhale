@@ -25,12 +25,11 @@ ignore = [
 [bans]
 # Duplicate-version ratchet (Epic #5249, issue #5248): keep the gate in
 # warn/dry-run until Hunter approves enforcement. Each entry below is a
-# duplicate that survives the 0.9.5 shrink and is blocked on an upstream
+# duplicate that survives the round-3 shrink and is blocked on an upstream
 # crate that has not yet released a compatible version. Adding a new
 # duplicate without extending this list will surface as a new `cargo deny`
 # warning, so the ratchet is warm but not yet blocking CI.
-# Surviving duplicates after the 708 -> 679 shrink (see PR body):
-# - reqwest 0.12 vs 0.13 — blocked on oauth2 5.0.0 which still depends on reqwest 0.12
+# Surviving duplicates after the 688 -> 669 shrink (see PR body):
 # - sha2 0.10 vs 0.11 — blocked on oauth2 (0.10) vs the workspace (0.11)
 # - thiserror 1 vs 2 — blocked on portable-pty 0.9 via filedescriptor 0.8 (v1) vs workspace v2
 # - toml 0.8 vs 1.1 + toml_edit 0.22 vs 0.25 + winnow 0.7 vs 1.0 — blocked on rust-i18n 4.2 (0.8 stack) vs workspace 1.1
@@ -48,13 +47,20 @@ skip = [
     { name = "toml_edit", version = "0.22.27" },
     { name = "winnow", version = "0.7.14" },
     { name = "serde_spanned", version = "0.6.9" },
-    # dirs 6 stays for shellexpand 3's tilde expansion (tui); the workspace is on 7.
+    # dirs 6 stays for shellexpand 3's tilde expansion and teletypewriter
+    # 0.5.28 (rio-vt's optional pty chain), both in the tui; the workspace is on 7.
     { name = "dirs", version = "6.0.0" },
     { name = "fancy-regex", version = "0.16.2" },
     { name = "itertools", version = "0.13.0" },
     # miniz_oxide 0.8 stays for png 0.18 (via image/arboard); flate2 1.1.10 moved to 0.9.
     { name = "miniz_oxide", version = "0.8.9" },
-    # windows-sys 0.42 survives via rio-vt's corcovado chain (dev-only, Windows).
+    # windows-sys 0.42 survives via rio-vt's corcovado chain (dev-only,
+    # Windows) and drags its own windows_* 0.42.2 import libraries alongside
+    # the workspace's 0.52.6 set. Those windows_* duplicates are deliberately
+    # NOT skipped: on the ubuntu-only deny lane they resolve to a single
+    # version, so any skip here trips unnecessary-skip/unmatched-skip and
+    # breaks the warn-only ratchet. Windows hosts will see the duplicate
+    # warnings locally — that is the accepted, host-dependent trade-off.
     { name = "windows-sys" },
 ]
 # For crates where the version is not the discriminator, use skip-tree to
