@@ -282,9 +282,9 @@ docker buildx build --platform linux/amd64,linux/arm64 -t codewhale .
 
 The repository includes a [`.devcontainer/devcontainer.json`](../.devcontainer/devcontainer.json)
 configuration for VS Code / GitHub Codespaces. It builds a dedicated development
-image with the Rust toolchain, Git, `pkg-config`, and the DBus development headers
-required by the workspace. The first open runs `cargo build --locked` and installs
-rust-analyzer and the other editor extensions.
+image with the Rust toolchain, Git, and `pkg-config`. The first open runs
+`cargo build --locked` and installs rust-analyzer and the other editor
+extensions.
 
 The source checkout remains mounted from the host. Codewhale state and Cargo build
 artifacts use Docker named volumes instead, so the configuration works when VS Code
