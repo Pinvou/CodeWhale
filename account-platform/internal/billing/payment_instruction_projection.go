@@ -2,6 +2,7 @@ package billing
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"time"
 
@@ -39,6 +40,14 @@ func (p *PaymentCoordinator) persistQueriedPaymentProjection(ctx context.Context
 	}
 	now := p.now()
 	providerPending := provider.Status == "CREATED" || provider.Status == "PENDING"
+	// SUCCESS is applied in a subsequent transaction. Retain its verified
+	// deadline observation here too, so a still-outstanding Create cannot erase
+	// the committed bound between this projection and the financial merge.
+	if provider.Status == "SUCCESS" && order.ArchiveStatus == "ACTIVE" && order.Status != "PAID" && order.Status != "PAID_LATE" && order.FulfillmentStatus != "CREDITED" && providerMatchesOrder(provider, order) && providerPaymentDeadline(provider) != nil {
+		if _, err = p.insertPaymentEvidence(ctx, tx, order, nil, "QUERY", providerEvidenceKey("QUERY", provider)+"|deadline", "RECORDED", provider, nil, now); err != nil {
+			return PaymentOrder{}, err
+		}
+	}
 	if err = p.observeQueriedPaymentDeadline(ctx, tx, order, provider, now); err != nil {
 		return PaymentOrder{}, err
 	}
@@ -76,9 +85,43 @@ func (p *PaymentCoordinator) freezeCreatedPaymentDeadline(ctx context.Context, t
 		(order.Status != "CREATED" && order.Status != "PENDING") || order.CloseStatus != "OPEN" || order.ArchiveStatus != "ACTIVE" {
 		return nil
 	}
-	finalArchiveEligibleAt := deadline.Add(time.Duration(p.Capabilities().MaximumLateConfirmationSeconds)*time.Second + 7*24*time.Hour)
-	_, err := tx.Exec(ctx, `UPDATE payment_orders SET expires_at=$2,provider_payable_until=$2,final_archive_eligible_at=$3,updated_at=$4 WHERE id=$1`, order.ID, *deadline, finalArchiveEligibleAt, now)
+	// The row starts with an estimated window. Preserve prior *observed*
+	// deadlines, not that estimate: an ordinary early Create must still replace
+	// it exactly. Both observation evidence and its projection commit under the
+	// same wallet/order locks held here, including same-key recovery queries.
+	payableUntil, err := p.observedQueriedPaymentDeadline(ctx, tx, order, *deadline)
+	if err != nil {
+		return err
+	}
+	finalArchiveEligibleAt := payableUntil.Add(time.Duration(p.Capabilities().MaximumLateConfirmationSeconds)*time.Second + latePaymentReviewGrace)
+	_, err = tx.Exec(ctx, `UPDATE payment_orders SET expires_at=$2,provider_payable_until=$3,final_archive_eligible_at=$4,updated_at=$5 WHERE id=$1`, order.ID, *deadline, payableUntil, finalArchiveEligibleAt, now)
 	return err
+}
+
+// Only the existing immutable, accepted QUERY evidence can distinguish a real
+// observed deadline from a pre-seeded estimate. Native/legacy payloads without
+// the normalized identity/deadline fields do not establish a new bound. No old
+// evidence, receipt or row is rewritten to manufacture those missing facts.
+func (p *PaymentCoordinator) observedQueriedPaymentDeadline(ctx context.Context, tx pgx.Tx, order PaymentOrder, deadline time.Time) (time.Time, error) {
+	rows, err := tx.Query(ctx, `SELECT payload_snapshot FROM payment_evidence WHERE payment_order_id=$1 AND provider_id=$2 AND provider_version=$3 AND merchant_order_no=$4 AND amount_fen=$5 AND currency=$6 AND evidence_type='QUERY' AND merge_result='RECORDED'`, order.ID, order.ProviderID, order.ProviderVersion, order.MerchantOrderNo, order.AmountFen, order.Currency)
+	if err != nil {
+		return time.Time{}, err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var payload []byte
+		if err := rows.Scan(&payload); err != nil {
+			return time.Time{}, err
+		}
+		var observation ProviderOrder
+		if json.Unmarshal(payload, &observation) != nil || !providerMatchesOrder(observation, order) {
+			continue
+		}
+		if observed := providerPaymentDeadline(observation); observed != nil && observed.After(deadline) {
+			deadline = *observed
+		}
+	}
+	return deadline, rows.Err()
 }
 
 // The user deadline is frozen by Create. A subsequent channel observation may

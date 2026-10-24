@@ -21,6 +21,7 @@ import (
 // order projection and ledger. Provider timing/facts are controlled, not a live
 // supplier or payment-channel acceptance test.
 func TestPaymentInstructionProjectionPostgres(t *testing.T) {
+	t.Run("inflight_create_bounds", instructionInflightCreateBounds)
 	instructionCreateRecoveryProjection(t)
 	t.Run("frozen_create_deadline_survives_delayed_later_query", instructionFrozenCreateDeadline)
 	t.Run("external_observation_keeps_archive_upper_bound", instructionExternalArchiveBoundary)
@@ -781,6 +782,23 @@ func instructionFirstTerminalDeadline(t *testing.T, status string, authoritative
 	}
 	if _, err = c.SyncOrder(ctx, first.ID); err != nil {
 		t.Fatal(err)
+	}
+	if authoritative && status == "CLOSED" {
+		foreign := provider.result
+		foreign.Status, foreign.ExternalCustomerKey = "SUCCESS", uuid.NewString()
+		foreignTransaction := uuid.NewString()
+		foreign.ChannelTransactionID, foreign.PaidAt = &foreignTransaction, &clock
+		tx, beginErr := r.pool.Begin(ctx)
+		if beginErr != nil {
+			t.Fatal(beginErr)
+		}
+		defer tx.Rollback(ctx)
+		if _, err = c.insertPaymentEvidence(ctx, tx, first, nil, "QUERY", "foreign-success|deadline", "RECORDED", foreign, nil, clock); err != nil {
+			t.Fatal(err)
+		}
+		if err = tx.Commit(ctx); err != nil {
+			t.Fatal(err)
+		}
 	}
 	archived, err = r.ArchiveLatePaymentReview(ctx, item.ID, actor)
 	if authoritative {

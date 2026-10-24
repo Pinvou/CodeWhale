@@ -605,6 +605,13 @@ SET status=CASE WHEN status IN ('CREATED','PENDING') THEN 'PENDING' ELSE status 
 			order, err = getPaymentOrderByID(ctx, resultTx, order.ID, false)
 		}
 	}
+	if err == nil && claimed.RowsAffected() == 0 && providerPayable {
+		// A real recovery Get can commit before the claimed Create returns.
+		// Store its already-validated facts without adding another transition,
+		// status/trace projection or financial merge. A receipt alone cannot
+		// distinguish an observed deadline from the initial estimate.
+		_, err = p.insertPaymentEvidence(ctx, resultTx, order, nil, "QUERY", providerEvidenceKey("QUERY", providerOrder), "RECORDED", providerOrder, nil, p.now())
+	}
 	if err != nil {
 		return PaymentOrder{}, false, err
 	}

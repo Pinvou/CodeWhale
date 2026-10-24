@@ -441,7 +441,18 @@ func (r *PostgresRepository) ArchiveLatePaymentReview(ctx context.Context, caseI
 	err = tx.QueryRow(ctx, `SELECT final_archive_eligible_at,
 		$2>=final_archive_eligible_at AND last_successful_query_at>=final_archive_eligible_at AND last_authoritative_unpaid_at>=final_archive_eligible_at
 		AND NOT EXISTS(SELECT 1 FROM payment_transactions WHERE payment_order_id=payment.id AND status IN ('PAID','LATE_PAID','REVIEW_REQUIRED'))
-		AND NOT EXISTS(SELECT 1 FROM payment_evidence WHERE payment_order_id=payment.id AND merge_result='REVIEW_REQUIRED')
+		AND NOT EXISTS(SELECT 1 FROM payment_evidence evidence WHERE evidence.payment_order_id=payment.id AND
+            (evidence.merge_result='REVIEW_REQUIRED' OR
+             (evidence.evidence_type='QUERY' AND evidence.merge_result='RECORDED' AND evidence.evidence_key LIKE '%|deadline'
+              AND evidence.provider_id=payment.provider_id AND evidence.provider_version=payment.provider_version
+              AND evidence.merchant_order_no=payment.merchant_order_no AND evidence.amount_fen=payment.amount_fen AND evidence.currency=payment.currency
+              AND evidence.payload_snapshot->>'status'='SUCCESS'
+              AND evidence.payload_snapshot->>'merchant_order_no'=payment.merchant_order_no
+              AND evidence.payload_snapshot->>'external_customer_key'=payment.requester_id::text
+              AND evidence.payload_snapshot->>'external_sku'=payment.provider_sku
+              AND evidence.payload_snapshot->>'channel'=payment.channel
+              AND evidence.payload_snapshot->'amount_fen'=to_jsonb(payment.amount_fen)
+              AND evidence.payload_snapshot->>'currency'=payment.currency)))
 		AND NOT EXISTS(SELECT 1 FROM late_payment_review_evidence claim WHERE claim.case_id=$1 AND claim.evidence_type='USER_PAYMENT_CLAIM' AND NOT EXISTS(SELECT 1 FROM late_payment_review_evidence query WHERE query.case_id=claim.case_id AND query.evidence_type IN ('MANUAL_QUERY','ARCHIVE_QUERY') AND query.created_at>claim.created_at AND query.payload_snapshot->>'query_succeeded'='true' AND payment.last_authoritative_unpaid_at>claim.created_at))
 		FROM payment_orders payment WHERE id=$3 FOR UPDATE`, caseID, now, item.PaymentOrderID).Scan(&eligibleAt, &valid)
 	if err != nil || !valid {
