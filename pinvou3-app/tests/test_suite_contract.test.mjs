@@ -17,6 +17,7 @@ const helperFiles = new Set([
   "account_platform_recharge_polling_server.mjs",
   "behavior_telemetry_source.mjs",
   "bridge_domain_contract.mjs",
+  "organization_unit_scope_cases.mjs",
   "ui_test_server.js",
 ]);
 const platformRuntimeSmokes = new Set([
