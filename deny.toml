@@ -42,6 +42,8 @@ skip = [
     { name = "winnow", version = "0.7.14" },
     { name = "serde_spanned", version = "0.6.9" },
     { name = "core-foundation", version = "0.9.4" },
+    # dirs 6 stays for shellexpand 3's tilde expansion (tui); the workspace is on 7.
+    { name = "dirs", version = "6.0.0" },
     { name = "fancy-regex", version = "0.16.2" },
     { name = "itertools", version = "0.13.0" },
     { name = "security-framework", version = "2.11.1" },
