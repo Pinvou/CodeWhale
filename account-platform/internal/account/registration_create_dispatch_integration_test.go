@@ -232,23 +232,12 @@ func TestRegistrationCreateDispatchRuntimePostgres(t *testing.T) {
 		if first, _, err := r.MarkRegistrationCreateAttempted(ctx, id); err != nil || first {
 			t.Fatal("old ambiguous state became first", first, err)
 		}
-		cfg := r.pool.Config().ConnConfig.Copy()
-		cfg.User = "account_migrator"
-		c, err := pgx.ConnectConfig(ctx, cfg)
-		if err != nil {
-			t.Fatal(err)
-		}
-		defer c.Close(ctx)
-		if _, err = c.Exec(ctx, `SET ROLE account_service`); err != nil {
-			t.Fatal(err)
-		}
 		installed, err := migrations.Load("../../migrations/account")
 		if err != nil {
 			t.Fatal(err)
 		}
-		if err = accountschema.DownOne(ctx, c, installed); err == nil {
-			t.Fatal("dispatch facts rolled back")
-		}
+		assertHistoricalForwardOnlyMigration(t, r, installed, 900008,
+			"registration dispatch evidence is forward-only")
 		var present bool
 		if err = r.pool.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM information_schema.columns WHERE table_schema='public' AND table_name='registration_operations' AND column_name='identity_create_attempted_at') AND EXISTS(SELECT 1 FROM schema_migrations WHERE version=900008)`).Scan(&present); err != nil || !present {
 			t.Fatal("failed down discarded evidence", present, err)

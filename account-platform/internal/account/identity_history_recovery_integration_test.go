@@ -16,6 +16,7 @@ import (
 	"github.com/Pinvou/pinvou3/account-platform/internal/platform/migrations"
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 )
 
 func historyClaimSnapshot(t *testing.T, r *PostgresRepository, table string, id uuid.UUID) string {
@@ -302,19 +303,8 @@ func TestIdentityRecoveryClaimsRuntimePostgres(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		ordered, err := accountschema.Ordered(installed)
-		if err != nil {
-			t.Fatal(err)
-		}
-		connection, err := r.pool.Acquire(f.ctx)
-		if err != nil {
-			t.Fatal(err)
-		}
-		downErr := migrations.DownOne(f.ctx, connection.Conn(), ordered)
-		connection.Release()
-		if downErr == nil || !strings.Contains(downErr.Error(), "forward-only") {
-			t.Fatal("new claim/dispatch facts were rollbackable", downErr)
-		}
+		assertHistoricalForwardOnlyMigration(t, r, installed, 900007,
+			"identity recovery generations and profile dispatch facts are forward-only")
 		var afterDown string
 		if err = r.pool.QueryRow(f.ctx, `SELECT jsonb_agg(to_jsonb(m) ORDER BY version)::text FROM schema_migrations m WHERE version<>900007`).Scan(&afterDown); err != nil || afterDown != previousLedger {
 			t.Fatal("failed down changed history", err)
@@ -545,4 +535,60 @@ func TestProfileSessionRevocationRecoveryRuntimePostgres(t *testing.T) {
 	})
 
 	historyProfileAuditLockOrder(t, f)
+}
+
+// A newer forward-only migration must not hide the historical guard under test.
+// Invoke the exact published DownSQL in the same owner identity and transaction
+// used by the migrator; this is not a claim that DownOne can target old versions.
+func assertHistoricalForwardOnlyMigration(t *testing.T, r *PostgresRepository, installed []migrations.Migration, version int64, message string) {
+	t.Helper()
+	var downSQL string
+	for _, migration := range installed {
+		if migration.Version == version {
+			downSQL = migration.DownSQL
+		}
+	}
+	if strings.TrimSpace(downSQL) == "" {
+		t.Fatal("historical rollback SQL missing", version)
+	}
+	ctx := context.Background()
+	cfg := r.pool.Config().ConnConfig.Copy()
+	cfg.User = "account_migrator"
+	cfg.Password = ""
+	conn, err := pgx.ConnectConfig(ctx, cfg)
+	if err != nil {
+		t.Fatal("open historical rollback migrator", err)
+	}
+	defer conn.Close(ctx)
+	if _, err = conn.Exec(ctx, "SET ROLE account_service"); err != nil {
+		t.Fatal(err)
+	}
+	var actor, session string
+	if err = conn.QueryRow(ctx, "SELECT current_user,session_user").Scan(&actor, &session); err != nil || actor != "account_service" || session != "account_migrator" {
+		t.Fatal("historical rollback identity mismatch", err)
+	}
+	var before, after string
+	ledgerSQL := "SELECT jsonb_agg(to_jsonb(m) ORDER BY version)::text FROM schema_migrations m"
+	if err = conn.QueryRow(ctx, ledgerSQL).Scan(&before); err != nil {
+		t.Fatal(err)
+	}
+	tx, err := conn.Begin(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, downErr := tx.Exec(ctx, downSQL)
+	rollbackErr := tx.Rollback(ctx)
+	var refusal *pgconn.PgError
+	if !errors.As(downErr, &refusal) || refusal.Code != "55000" || refusal.Message != message {
+		t.Fatal("exact historical rollback guard missing", version, downErr)
+	}
+	if rollbackErr != nil {
+		t.Fatal("historical rollback transaction cleanup", rollbackErr)
+	}
+	if err = conn.QueryRow(ctx, ledgerSQL).Scan(&after); err != nil || before != after {
+		t.Fatal("historical rollback changed migration ledger", err)
+	}
+	if _, err = migrations.VerifyApplied(ctx, conn, installed); err != nil {
+		t.Fatal("historical rollback changed migration identity", err)
+	}
 }
