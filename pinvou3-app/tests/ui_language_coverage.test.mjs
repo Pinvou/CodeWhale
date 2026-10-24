@@ -246,14 +246,20 @@ for (const language of ['zh', 'en', 'ja']) {
       'doctorPackages', 'doctorPackagesDesc', 'doctorDependencies', 'doctorDependenciesDesc',
       'doctorCuda', 'doctorCudaDesc', 'doctorServices', 'doctorServicesDesc',
       'doctorHogs', 'doctorHogsDesc', 'doctorCustomPlaceholder', 'doctorCharCounter', 'doctorSend',
+      // round-21: 快照陈旧旗 / 无模型标识的接入占位 / 服务失败原因码（后端
+      // ServiceStatus.reason 的机器码 → 三语文案，替代中文 detail 直出 tooltip）。
+      'dataStale', 'linkDisabledNoModel',
+      'svcReasonTimeout', 'svcReasonRefused', 'svcReasonNetwork', 'svcReasonClientInit',
+      'svcReasonHttp', 'svcReasonNotDetected', 'svcReasonDockerExit', 'svcReasonDockerUnavailable',
+      'svcReasonDockerTaskFailed',
     ]) {
       assert.ok(dict[language].uiDeviceMgr[key], `${language}.uiDeviceMgr.${key} must exist`);
     }
     // Count guard：清单看不到新增——加键必须同步更新计数（见 uiAuxChat round-36 同款）。
     assert.equal(
       Object.keys(dict[language].uiDeviceMgr).length,
-      106,
-      `${language}.uiDeviceMgr must hold exactly the 106 pinned keys`,
+      117,
+      `${language}.uiDeviceMgr must hold exactly the 117 pinned keys`,
     );
     // Single-language whole-section loss guard（十九轮评审 P2）：dictJa 以
     // `...dictEn` 铺底，整段删掉 `jaBase.uiDeviceMgr` / `jaBase.deviceMgr` 时
@@ -275,12 +281,35 @@ for (const language of ['zh', 'en', 'ja']) {
       'updatedAtLabel', 'critLimit', 'peakLabel', 'servicesFailed', 'removeConfirmIntro',
       'removeWeightsPath', 'linkFailed', 'doctorFailed', 'refreshFailed', 'linkRowStale',
       'linkRowRecycled', 'removeDone', 'removeFailed', 'warn', 'doctorCharCounter',
+      'svcReasonHttp', 'svcReasonDockerExit',
     ]) {
       assert.equal(
         typeof dict[language].uiDeviceMgr[key],
         'function',
         `${language}.uiDeviceMgr.${key} must be an interpolation function`,
       );
+    }
+    // Value-language + arity guard (round-21 review P3 mutation evidence: an en
+    // value flipped to Chinese used to pass every check). en string leaves must
+    // carry no Han characters — ja is exempt because Japanese legitimately uses
+    // kanji; the ja-vs-en non-fallback probes above cover ja's direction. Every
+    // interpolation fn must have the same arity as zh (the interpolation contract
+    // is keyed, so a fn/1 vs fn/2 drift in one language breaks the call site
+    // silently).
+    for (const [key, value] of Object.entries(dict[language].uiDeviceMgr)) {
+      if (language === 'en' && typeof value === 'string') {
+        assert.ok(
+          !/\p{Script=Han}/u.test(value),
+          `en.uiDeviceMgr.${key} must not contain Han characters`,
+        );
+      }
+      if (typeof value === 'function') {
+        assert.equal(
+          value.length,
+          dict.zh.uiDeviceMgr[key].length,
+          `${language}.uiDeviceMgr.${key} arity must match zh`,
+        );
+      }
     }
     // Nav key pin: uiDeviceMgr pins cannot see the sibling nav key — deleting
     // `deviceMgr` from all three dicts would render an undefined entry label.

@@ -18,8 +18,12 @@
   // 字节人性化：≥1 GiB 用 GiB、其余 MiB（均 1 位小数），空值回退 "—"。
   // 单位后缀一律 ASCII；可本地化的词（SSD/风扇/接口类型等）由视图层负责，
   // 与 monitor 同口径（bridge 不放中文文案）。GB/MB 标签 = 二进制换算——与
-  // shared/format-utils 的 fmtMiB 及内嵌运行状态卡一致，同一屏不再出现
-  // "1.5 GiB" 与 "7.2 GB" 两套口径（round-5 review P3）。
+  // shared/format-utils 的 fmtMiB 及内嵌运行状态卡同一**口径**，同一屏不再
+  // 出现 "1.5 GiB" 与 "7.2 GB" 两套标签（round-5 review P3）。**不复用**
+  // fmtMiB（round-21 review P3 复核结论）：它的 MB 臂直接输出原值
+  // （`mib + " MB"`，非整 MiB 会带出多位小数、整 MiB 丢掉 ".0"），与本文件的
+  // 一位小数口径不同——同口径不等于可互换，device_bridge_format 的字面量
+  // 断言钉住的就是这里的一位小数显示契约。
   function fmtBytes(bytes) {
     if (bytes == null || typeof bytes !== "number" || !isFinite(bytes)) return "—";
     if (bytes >= 1024 * 1024 * 1024) return (bytes / (1024 * 1024 * 1024)).toFixed(1) + " GB";
@@ -27,7 +31,10 @@
   }
 
   // 速率人性化：十进制 KB/s / MB/s / GB/s（1 位小数），负值/非法值按 0 处理。
-  // 入参是后端的 *_bytes_per_sec（字节/秒，字段名不用 "bps" 正是为避免按 bit 误读）。
+  // 入参是后端的 *_bytes_per_sec（字节/秒，字段名不用 "bps" 正是为避免按 bit
+  // 误读）。刻意与 fmtBytes 的二进制口径不同（速率用 SI 十进制是网速惯例，
+  // monitor 的 fmtRate 同款）：同一网卡卡上两行的 "GB" 基数不同是有意的取舍，
+  // 单位标签区分在 "/s" 后缀（round-21 review P3 记录在案）。
   function fmtRate(bytesPerSec) {
     var v = typeof bytesPerSec === "number" && isFinite(bytesPerSec) && bytesPerSec > 0 ? bytesPerSec : 0;
     if (v >= 1e9) return (v / 1e9).toFixed(1) + " GB/s";
@@ -361,10 +368,11 @@
     // never settles, pollDevice's finally never runs, and every later tick
     // would no-op — the page freezes on stale data with no error banner.
     // Restart paths (mount/retry) are the recovery point, so clear the flag
-    // here (round-8 review P3). 复位同时 bump 两个通道的世代号：任何在飞旧拍
-    // 随之作废——不能再发布、不能清 in-flight 旗、也不会压制新拍；否则慢而
-    // 未死的旧拍会在新拍在飞时二次清旗（双发），旧错误还会在恢复后重新点亮
-    // 横幅（round-9 review P2/P3）。
+    // here (round-8 review P3). 复位同时 bump 两个通道的世代号作双保险：作废
+    // 的主机制是重启后新拍自己的 ++seq（见 pollDevice/pollDeviceServices），
+    // 这里的显式 bump 只是把"复活瞬间的任何旧拍"也一并作废——单一机制已经
+    // 足够（删掉这两行测试照绿，round-21 review P3），保留只为纵深，别把
+    // 不变量归因到这一行。
     devicePollInFlight = false;
     devicePollSeq += 1;
     deviceServicesInFlight = false;
@@ -422,13 +430,16 @@
       // 必须立即可见——null 悬着只会让视图的"探测中"无限驻留；有基线后连续
       // SERVICES_STALE_FAILURES 拍失败也要把错误旗立起来（旧 chips 保留显示，
       // 视图同时给出"状态可能过期"提示），探测死了不再静默冒充在线。
-      console.warn("[pinvou3][device] services poll failed", e);
       deviceServicesFailures += 1;
       var surfaced =
         !state.deviceServices || deviceServicesFailures >= SERVICES_STALE_FAILURES;
       if (surfaced) {
         var message = e && e.message ? e.message : String(e || "services probe failed");
         if (state.deviceServicesError !== message) {
+          // Same-message guard doubles as log throttling (matches the snapshot
+          // channel above): a down daemon must not re-log every 10s tick
+          // (round-21 review P3).
+          console.warn("[pinvou3][device] services poll failed", e);
           state.deviceServicesError = message;
           notify();
         }

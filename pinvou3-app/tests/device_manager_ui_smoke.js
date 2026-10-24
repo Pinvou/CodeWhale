@@ -216,6 +216,7 @@ function injectSource() {
         case 'get_effective_model_config': return Promise.resolve({ model: 'deepseek-v4-flash', base_url: 'https://api.deepseek.com', preset: 'deepseek', api_key_set: true });
         case 'list_models': return Promise.resolve({ models: models.slice(), active_model_id: activeModelId });
         case 'save_model':
+          if (window.__DEVICE_MGR_TEST__.failSaveModel) return Promise.reject(new Error('save down (smoke)'));
           var saved = Object.assign({}, args.model, { has_secret: !!args.model.api_key, credential_state: 'configured' });
           models = models.filter(function (m) { return m.id !== saved.id; }).concat(saved);
           return Promise.resolve(null);
@@ -295,6 +296,8 @@ function injectSource() {
       // 场景开关：读取失败横幅/重试与发送失败路径此前零覆盖（第四轮评审）。
       nullGpuCompute: false,
       failServices: false,
+      // 接入主动作的失败面（round-21 review P3）：此前只有读取面有 fail 开关。
+      failSaveModel: false,
       setRemoveOutcome: function (next) { removeOutcome = next; },
     };
     window.__TAURI__ = {
@@ -547,6 +550,28 @@ async function clickTestId(page, testId) {
   });
   rec('⑤ 商店行锁定态与外部模型行徽标齐全', Object.values(modelSection).every(Boolean), JSON.stringify(modelSection));
 
+  // ⑤-c 接入失败面（round-21 review P3）：save_model 拒绝必须出失败 toast、
+  // busy 槽释放（其他行按钮恢复可点），重试成功后回"已接入"。
+  await page.evaluate(() => { window.__DEVICE_MGR_TEST__.failSaveModel = true; });
+  await page.evaluate(() => {
+    const row = document.querySelector('[data-testid="device-manager-external-row"]');
+    row?.querySelector('[data-testid="device-manager-link"]')?.click();
+  });
+  await page.waitForFunction(() => {
+    const toast = document.querySelector('[data-testid="model-store-toast"]');
+    return !!toast && toast.innerText.includes('接入失败');
+  }, { timeout: 8000 });
+  await page.waitForFunction(() => {
+    const link = document.querySelector('[data-testid="device-manager-external-row"] [data-testid="device-manager-link"]');
+    return !!link && !link.disabled;
+  }, { timeout: 8000 });
+  await page.waitForFunction(() => {
+    const link = document.querySelector('[data-testid="device-manager-external-row"] [data-testid="device-manager-link"]');
+    return !!link && !link.disabled;
+  }, { timeout: 8000 });
+  await page.evaluate(() => { window.__DEVICE_MGR_TEST__.failSaveModel = false; });
+  rec('⑤-c 接入失败出 toast 且 busy 槽释放（重试交给 ⑤-b 的下一次点击）', true, 'save_model fail cycle');
+
   // ⑤-b 接入品悟 happy path（页面的主动作，此前零覆盖）：未登记 Ollama 行用
   // 回环回退地址 save_model，随后把新模型设为新建会话默认（set_active_model）。
   await page.evaluate(() => {
@@ -554,11 +579,12 @@ async function clickTestId(page, testId) {
     row?.querySelector('[data-testid="device-manager-link"]')?.click();
   });
   await page.waitForFunction(() => window.__DEVICE_MGR_TEST__.callsOf('save_model').length > 0, { timeout: 8000 });
+  // ⑤-c 的失败尝试也会 record 进 calls：取最后一次（本次成功的接入）。
   const linkCalls = await page.evaluate(() => {
-    const saved = window.__DEVICE_MGR_TEST__.callsOf('save_model')[0]?.args?.model || null;
+    const saved = window.__DEVICE_MGR_TEST__.callsOf('save_model').slice(-1)[0]?.args?.model || null;
     return {
       saved,
-      activated: window.__DEVICE_MGR_TEST__.callsOf('set_active_model')[0]?.args || null,
+      activated: window.__DEVICE_MGR_TEST__.callsOf('set_active_model').slice(-1)[0]?.args || null,
     };
   });
   rec('⑤-b 接入品悟写入回环地址与模型并设为默认',

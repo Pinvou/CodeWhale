@@ -3031,6 +3031,10 @@ const App = () => {
       // 发送，不经过 scheduledTaskPendingGuide/restrictTools。transition 选项与
       // handleNewChat/handleSwitchSession 同款（hideMode/sessionTarget 第四轮
       // 评审补齐）。失败不打断用户：设备管理页上的按钮各自有 loading 态。
+      // 排查直达发送失败时记住已物化的会话 sid：materializeSession 每次都会
+      // 新建一个空会话并登记进侧栏历史，连续失败会留下 N 个空会话（round-21
+      // review P3）。重试直接补发到同一会话；成功后清空。
+      const lastFailedDoctorSidRef = useRef(null);
       const openDeviceDoctorChat = useCallback(async (prompt) => {
         // 返回值契约（设备管理页依赖）：true=提示词已送达新会话（发送成功后无
         // 论视图切换是否被更新的会话转换取代，都按已送达计）；false=没发出去
@@ -3038,9 +3042,13 @@ const App = () => {
         // 提示重试，不再静默吞掉失败（评审 P3：失败仅 console、输入被无声清空）。
         if (!bridge.available || !prompt) return false;
         if (!bridge.chat?.sendMessageToSession) return false;
+        let usedSid = null;
         try {
-          const sid = await bridge.sessions.materializeSession();
+          const sid = lastFailedDoctorSidRef.current
+            || (await bridge.sessions.materializeSession());
+          lastFailedDoctorSidRef.current = null;
           if (!sid) return false;
+          usedSid = sid;
           const sent = await runBrowserUiTransition(async ({ isCurrent }) => {
             if (!isCurrent()) return false;
             // 先发送再跳转：发送失败时用户还留在设备管理页，「请重试」的
@@ -3084,8 +3092,12 @@ const App = () => {
             // the draft observation is ours, not an external divergence.
             sessionBaseline: null,
           });
+          if (sent !== true) lastFailedDoctorSidRef.current = sid;
           return sent === true;
         } catch (error) {
+          // 发送链路抛错（桥/物化/转换异常）：已物化的会话记住待重试，避免
+          // 下一次重试再物化一个新的空会话。
+          if (usedSid) lastFailedDoctorSidRef.current = usedSid;
           console.warn('[device-manager] doctor chat failed', error);
           return false;
         }

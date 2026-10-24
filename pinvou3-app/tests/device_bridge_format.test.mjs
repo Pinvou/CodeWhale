@@ -82,6 +82,10 @@ const fixtureSnapshot = () => ({
       // 是红线，必须 crit——此前 fixture 没有该形态的正例，删掉 max 臂实现
       // 套件照绿（round-6 review P2 变异存活项）。
       { kind: 'voltage', name: 'in2', value: 12.6, critical: null, max: 12.1 },
+      // 恰好等于 max 的常态读数：等值边界也算"越过红线"（v >= max）——此前
+      // 没有任何 value === max 的非温度用例，把 >= 改成 > 套件照绿（round-21
+      // review P2 变异存活项）。
+      { kind: 'voltage', name: 'in3', value: 12.1, critical: null, max: 12.1 },
       { kind: 'current', name: 'curr1', value: 3.2, critical: null, max: null },
       { kind: 'power', name: 'power1', value: 28.46, critical: null, max: null },
     ] },
@@ -196,10 +200,13 @@ const flush = () => new Promise(resolve => setImmediate(resolve));
   // 非温度类越过 max（未到 critical，此臂无 critical）必须 crit（round-6 P2）。
   assert.equal(power.entries[2].valueText, '12.6 V');
   assert.equal(power.entries[2].level, 'crit');
-  assert.equal(power.entries[3].valueText, '3.2 A');
-  assert.equal(power.entries[3].level, 'ok');
-  assert.equal(power.entries[4].valueText, '28.5 W');
+  // 等值边界：value === max 也必须 crit（round-21 P2）。
+  assert.equal(power.entries[3].valueText, '12.1 V');
+  assert.equal(power.entries[3].level, 'crit');
+  assert.equal(power.entries[4].valueText, '3.2 A');
   assert.equal(power.entries[4].level, 'ok');
+  assert.equal(power.entries[5].valueText, '28.5 W');
+  assert.equal(power.entries[5].level, 'ok');
 
   // 网络：typeKey 白名单校验、累计与速率文本；非法/负速率按 0。
   assert.equal(fmt.network[0].typeKey, 'loopback');
@@ -838,7 +845,6 @@ assert.doesNotMatch(
   env.api.stopDevicePolling();
 }
 
-console.log('device bridge _fmt formatting, display-equality suppression and polling contract passed');
 
 // ── 温度档位：历史峰值只用于展示，升/降温序列不翻转（十轮评审 P2）──
 {

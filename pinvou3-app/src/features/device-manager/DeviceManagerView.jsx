@@ -52,6 +52,13 @@ const CONFIRM_GATE_MS = 400;
 // Slow-cadence probe for model services (ollama/vllm/lmstudio/docker); the
 // bridge documents the same 10s rhythm next to pollDeviceServices.
 const SERVICES_POLL_MS = 10000;
+// Snapshot staleness: if a backend sample hangs (the classic case is statvfs on
+// a stale FUSE/network mount — sysinfo 0.36.1 filters nfs/cifs/autofs but keeps
+// fuse.*), the bridge's in-flight guard wedges and the page would keep showing
+// the frozen "updated at" frame as if it were live. The services channel has a
+// three-tick stale flag; the snapshot channel gets this age badge (round-21
+// review P2). 10s = five missed 2s ticks.
+const STALE_AFTER_MS = 10000;
 // Historical fallback only: since the round-9 review the backend backfills
 // base_url on EVERY ollama row (registry and daemon alike) from the settings
 // daemon address, so the `row.base_url ||` arm below always wins in practice.
@@ -383,8 +390,33 @@ const ProcList = ({ title, rows, metricKey, testId, placeholder = null }) => (
   </div>
 );
 
+// Tooltip text for a service chip. The backend pairs the Chinese `detail` with
+// a stable machine `reason` code; the code maps to a localized sentence so
+// en/ja users no longer get raw Chinese in the tooltip (round-21 review P2,
+// AGENTS §4). `detail` stays as the fallback for an unknown code and as the
+// docker version when running.
+const SERVICE_REASON_KEYS = {
+  timeout: 'svcReasonTimeout',
+  connection_refused: 'svcReasonRefused',
+  network_error: 'svcReasonNetwork',
+  client_init_failed: 'svcReasonClientInit',
+  http_status: 'svcReasonHttp',
+  not_detected: 'svcReasonNotDetected',
+  docker_exit: 'svcReasonDockerExit',
+  docker_unavailable: 'svcReasonDockerUnavailable',
+  docker_task_failed: 'svcReasonDockerTaskFailed',
+};
+const serviceTooltipText = (copy, service) => {
+  if (!service) return null;
+  if (service.running) return service.detail || null;
+  const entry = SERVICE_REASON_KEYS[service.reason] ? copy[SERVICE_REASON_KEYS[service.reason]] : null;
+  if (typeof entry === 'function') return entry(service.code == null ? '' : service.code);
+  if (typeof entry === 'string') return entry;
+  return service.detail || null;
+};
+
 // One muted chip per model service in the models section header: green dot
-// while the probe answers, gray otherwise, detail as the title tooltip.
+// while the probe answers, gray otherwise, localized reason as the tooltip.
 const ServiceChip = ({ label, running, detail, stateText }) => (
   <span
     data-testid="device-manager-service-chip"
@@ -460,6 +492,7 @@ const DeviceManagerView = ({ theme, t, bs, onOpenChat, onOpenModelStore }) => {
     copyRef.current = copy;
   }, [copy]);
   useEffect(() => {
+    let alive = true;
     const liveBridge = bridge;
     const dev = liveBridge?.device;
     if (!dev || typeof dev.startDevicePolling !== 'function') {
@@ -477,16 +510,23 @@ const DeviceManagerView = ({ theme, t, bs, onOpenChat, onOpenModelStore }) => {
     const servicesTimer = setInterval(pollServices, SERVICES_POLL_MS);
     // The first fetch failing silently would land the models area on the
     // "nothing installed" hint, which reads as a fact instead of the read
-    // failure it is (same surface rule as the manual Refresh button).
+    // failure it is (same surface rule as the manual Refresh button). The
+    // alive guard matches the store effect: a slow reply after unmount must not
+    // setState or re-toast (round-21 review P3).
     if (typeof dev.fetchExternalModels === 'function') {
       dev.fetchExternalModels()
-        .then(() => setExternalFetchError(null))
+        .then(() => {
+          if (alive) setExternalFetchError(null);
+        })
         .catch((error) => {
-          setExternalFetchError(String(error?.message || error));
-          showToast(copyRef.current.refreshFailed(String(error?.message || error)));
+          if (!alive) return;
+          const message = String(error?.message || error);
+          setExternalFetchError(message);
+          showToast(copyRef.current.refreshFailed(message));
         });
     }
     return () => {
+      alive = false;
       clearInterval(servicesTimer);
       // Same reject-style-stub defense as startDevicePolling above (round-6
       // review: the comment claimed "every other call has one" — this one
@@ -499,6 +539,11 @@ const DeviceManagerView = ({ theme, t, bs, onOpenChat, onOpenModelStore }) => {
 
   // Read-failure retry: stop+start makes the facade poll immediately (the raw
   // pollDevice stays feature-internal), then refresh the slow services probe.
+  // Unmount guard for the async callbacks outside the mount effect
+  // (refreshExternal): same contract as the effect-local `alive` above.
+  const mountedRef = useRef(true);
+  useEffect(() => () => { mountedRef.current = false; }, []);
+
   const retryPoll = useCallback(() => {
     const dev = bridge?.device;
     if (!dev) return;
@@ -516,10 +561,14 @@ const DeviceManagerView = ({ theme, t, bs, onOpenChat, onOpenModelStore }) => {
     if (!dev?.fetchExternalModels) return;
     // Swallowing the rejection makes Refresh look dead: surface a human-readable failure.
     dev.fetchExternalModels()
-      .then(() => setExternalFetchError(null))
+      .then(() => {
+        if (mountedRef.current) setExternalFetchError(null);
+      })
       .catch((error) => {
-        setExternalFetchError(String(error?.message || error));
-        showToast(copy.refreshFailed(String(error?.message || error)));
+        if (!mountedRef.current) return;
+        const message = String(error?.message || error);
+        setExternalFetchError(message);
+        showToast(copy.refreshFailed(message));
       });
   }, [copy, showToast]);
 
@@ -578,17 +627,25 @@ const DeviceManagerView = ({ theme, t, bs, onOpenChat, onOpenModelStore }) => {
   // (round-4 review P3).
   const [externalFetchError, setExternalFetchError] = useState(null);
 
-  // armed/busy/list identity: kind+name (round-20 review P3). The quiet
-  // re-register flips a daemon row's source (ollama listing -> registry) while
-  // confirmRemove runs, and the previous source-qualified identity let the
-  // armed panel collapse mid-confirmation and orphaned the busyKey CAS clear.
-  // Kind+name is collision-free across the merged list: daemon rows always
-  // carry `:tag`, and push_ollama_daemon_rows drops daemon rows whose effective
-  // identity matches a registry row; the kind qualifier keeps two registry rows
-  // that share a name across kinds separate (the registry does not enforce
-  // name uniqueness — round-4/5 review P3). Kind never changes for a row, so
-  // the identity also survives the quiet re-register id swap (round-3 P2).
-  const rowIdentity = (row) => `${row.kind || ''}:${row.name}`;
+  // armed/busy/list identity: kind + effective model identity (round-21 review
+  // P2, external-review P2). The old kind+name key collided on two real routes:
+  // two registry rows sharing a name across ports (two inference services both
+  // named "qwen3") and an alias registry row {name:"foo:latest", model:"bar"}
+  // next to a daemon row named "foo:latest" — one arm click used to open two
+  // armed panels sharing one deleteWeights checkbox. The effective identity
+  // (`model || name`, ollama folded to `:latest` lowercase like the backend's
+  // registry_identity) is collision-free: the flip pair (daemon row for model M
+  // <-> its registry row) shares it, so the round-3 flip-stability survives the
+  // quiet re-register id swap, while alias rows key on their actual model. The
+  // backend register now rejects same-(kind, identity) records and read_registry
+  // warns on handwritten duplicates, which keeps the key unique.
+  const rowIdentity = (row) => {
+    const kind = row.kind || '';
+    const effective = String(row.model || row.name || '');
+    if (kind !== 'ollama') return `${kind}:${effective}`;
+    const lower = effective.toLowerCase();
+    return `${kind}:${lower.includes(':') ? lower : `${lower}:latest`}`;
+  };
 
   // Endpoint-precise button state (round-10 review P2): two inference
   // services on one machine can serve the same model name, so "linked" only
@@ -619,6 +676,14 @@ const DeviceManagerView = ({ theme, t, bs, onOpenChat, onOpenModelStore }) => {
     // otherRowBusy disable — keeps a stale-closure click from overwriting
     // the busy slot while another row's saveModel/remove is still in flight.
     if (busyKey) return;
+    // Button `disabled` is the first line of defense; re-check here because a
+    // refresh that lands between click dispatch and this callback can flip the
+    // row to unreachable — and linking also makes it the default model
+    // (round-21 review P3).
+    if (row.status === 'unreachable') {
+      showToast(copy.linkDisabledUnreachable);
+      return;
+    }
     setBusyKey(`link:${rowIdentity(row)}`);
     try {
       // findLinkedRowsForEndpoint takes (...names): pass both the registry
@@ -802,8 +867,10 @@ const DeviceManagerView = ({ theme, t, bs, onOpenChat, onOpenModelStore }) => {
     }
     // Entry guard mirroring busyKey/linkExternal: the disabled buttons are the
     // first line of defense, this keeps a stale-closure double click from
-    // building two doctor prompts / two sessions (round-7 review P3).
-    if (doctorBusy) return;
+    // building two doctor prompts / two sessions (round-7 review P3). The
+    // busyKey half was claimed but missing — a row operation in flight must
+    // also hold the doctor back (round-21 review P3).
+    if (doctorBusy || busyKey) return;
     setDoctorBusy(kind);
     try {
       const prompt = await dev.buildDoctorPrompt(kind, questionText);
@@ -842,6 +909,18 @@ const DeviceManagerView = ({ theme, t, bs, onOpenChat, onOpenModelStore }) => {
   // updatedAt is when the data last changed (frozen under display-equivalence
   // suppression) — exactly what the label should say. No more 10s tick that
   // re-renders the whole tree without changing a single displayed value.
+  // 1s tick only while a snapshot exists: re-evaluates the snapshot age for the
+  // staleness badge and self-clears once a fresh snapshot lands.
+  const [nowTick, setNowTick] = useState(() => Date.now());
+  const hasSnapshot = Boolean(deviceFmt);
+  useEffect(() => {
+    if (!hasSnapshot) return undefined;
+    const timer = setInterval(() => setNowTick(Date.now()), 1000);
+    return () => clearInterval(timer);
+  }, [hasSnapshot]);
+  const deviceStale = Boolean(
+    deviceFmt && Number.isFinite(deviceFmt.updatedAt) && nowTick - deviceFmt.updatedAt > STALE_AFTER_MS,
+  );
   const updatedAtText = deviceFmt && Number.isFinite(deviceFmt.updatedAt)
     ? new Date(deviceFmt.updatedAt).toLocaleTimeString(locale, { hour12: false })
     : null;
@@ -899,6 +978,14 @@ const DeviceManagerView = ({ theme, t, bs, onOpenChat, onOpenModelStore }) => {
               )}
               {updatedAtText && (
                 <span className={`text-[11px] ${MUTED_TEXT}`}>{copy.updatedAtLabel(updatedAtText)}</span>
+              )}
+              {deviceStale && (
+                <span
+                  data-testid="device-manager-stale"
+                  className="inline-flex items-center rounded-full bg-amber-100 px-2 py-0.5 text-[11px] font-semibold text-amber-800 dark:bg-amber-500/15 dark:text-amber-300"
+                >
+                  {copy.dataStale}
+                </span>
               )}
             </div>
           </header>
@@ -1099,7 +1186,7 @@ const DeviceManagerView = ({ theme, t, bs, onOpenChat, onOpenModelStore }) => {
                       key={service.key}
                       label={copy[SERVICE_LABEL_KEYS[service.key]] || service.key}
                       running={!!service.running}
-                      detail={service.detail}
+                      detail={serviceTooltipText(copy, service)}
                       stateText={service.running ? copy.statusRunning : copy.statusUnreachable}
                     />
                   ))}
@@ -1188,6 +1275,11 @@ const DeviceManagerView = ({ theme, t, bs, onOpenChat, onOpenModelStore }) => {
                     const target = linkTargetOf(row);
                     const linkable = !!(target.model && target.baseUrl && isLocalGatewayUrl(target.baseUrl));
                     const remoteOnly = !!(target.model && target.baseUrl && !isLocalGatewayUrl(target.baseUrl));
+                    // Endpoint rows registered without a model id (legal for
+                    // openai_endpoint/vllm/llamacpp): nothing to link, but a
+                    // silently missing button is a dead corner for the
+                    // zero-background target user — show why (round-21 review P3).
+                    const noModelId = !!(target.baseUrl && !target.model);
                     const identity = rowIdentity(row);
                     const armed = armedRemoveId === identity;
                     const kindLabel = copy[KIND_LABEL_KEYS[row.kind] || 'kindOther'];
@@ -1279,6 +1371,15 @@ const DeviceManagerView = ({ theme, t, bs, onOpenChat, onOpenModelStore }) => {
                             >
                               {copy.link}
                             </MsButton>
+                          ) : noModelId ? (
+                            <MsButton
+                              tone="ghost"
+                              disabled
+                              title={copy.linkDisabledNoModel}
+                              data-testid="device-manager-link-no-model"
+                            >
+                              {copy.link}
+                            </MsButton>
                           ) : (linkable && (
                             <MsButton
                               tone="ghost"
@@ -1342,8 +1443,13 @@ const DeviceManagerView = ({ theme, t, bs, onOpenChat, onOpenModelStore }) => {
                               >
                                 {copy.removeArmed}
                               </MsButton>
+                              {/* The armed cluster replaces the Remove button in
+                                  place, so keyboard focus would otherwise drop to
+                                  body; land it on the safe action (round-21
+                                  review P3, a11y). */}
                               <MsButton
                                 tone="ghost"
+                                autoFocus
                                 disabled={rowBusy}
                                 onClick={cancelRemove}
                                 data-testid="device-manager-remove-cancel"
@@ -1381,10 +1487,12 @@ const DeviceManagerView = ({ theme, t, bs, onOpenChat, onOpenModelStore }) => {
               {/* Empty guidance: nothing installed anywhere. A failed read must
                   not degrade into the "nothing installed" fact — show the real
                   failure with a retry (round-4 review P3). */}
+              {/* externalFetchError is checked BEFORE !external: state only
+                  lands on success, so after a failed first fetch `external` is
+                  still null and the old order rendered the plain loading line
+                  forever — no error, no retry (round-21 review P2). */}
               {storeRows.length === 0 && externalModels.length === 0 && (
-                !external ? (
-                  <div className={`py-4 text-center text-[13px] ${MUTED_TEXT}`}>{copy.loading}</div>
-                ) : externalFetchError ? (
+                externalFetchError ? (
                   <div
                     data-testid="device-manager-models-error"
                     className="flex flex-wrap items-center justify-center gap-2 py-4 text-center text-[13px] text-[#A15C07] dark:text-[#FDD663]"
@@ -1392,6 +1500,8 @@ const DeviceManagerView = ({ theme, t, bs, onOpenChat, onOpenModelStore }) => {
                     <span className="min-w-0 break-words">{copy.refreshFailed(externalFetchError)}</span>
                     <MsButton tone="ghost" onClick={refreshExternal} data-testid="device-manager-external-retry">{copy.retry}</MsButton>
                   </div>
+                ) : !external ? (
+                  <div className={`py-4 text-center text-[13px] ${MUTED_TEXT}`}>{copy.loading}</div>
                 ) : (
                   <div
                     data-testid="device-manager-models-empty"
