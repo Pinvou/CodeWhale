@@ -6214,6 +6214,17 @@ impl OAuthMcpMock {
                             "response_types_supported": ["code"],
                         });
                         write_json(&mut socket, "200 OK", &metadata.to_string()).await;
+                    } else if method == "GET"
+                        && path_only.starts_with("/.well-known/oauth-protected-resource")
+                    {
+                        // rmcp 3 validates the authorization server's metadata
+                        // issuer against the AS URL named here, so the mock
+                        // must advertise the resource -> AS link explicitly.
+                        let metadata = serde_json::json!({
+                            "resource": format!("http://{addr}/mcp"),
+                            "authorization_servers": [format!("http://{addr}")],
+                        });
+                        write_json(&mut socket, "200 OK", &metadata.to_string()).await;
                     } else if method == "GET" && path_only.starts_with("/.well-known/") {
                         write_empty(&mut socket, "404 Not Found").await;
                     } else if method == "POST" && path_only == "/register" {
