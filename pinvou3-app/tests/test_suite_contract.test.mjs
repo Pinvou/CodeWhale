@@ -15,6 +15,7 @@ const packageJson = JSON.parse(
 
 const helperFiles = new Set([
   "account_platform_recharge_polling_server.mjs",
+  "account_platform_sms_conflict_cases.mjs",
   "behavior_telemetry_source.mjs",
   "bridge_domain_contract.mjs",
   "organization_unit_scope_cases.mjs",

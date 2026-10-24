@@ -22,37 +22,58 @@ export function SettingsWorkspace({ copy, language, onLanguageChange, client, pe
   const permissionSet = useMemo(() => new Set(permissions || []), [permissions]);
   const canReadSMS = permissionSet.has('platform.sms-config.read');
   const canManageSMS = permissionSet.has('platform.sms-config.manage');
-  const owner = useAccountOwner(client);
+  const epoch = client.financeSessionEpoch || 0;
+  const authority = JSON.stringify([client.authorizationVersions?.context_version || 0, client.authorizationVersions?.platform_authorization_version || 0]);
+  const identity = useMemo(() => ({ client, epoch, authority, canReadSMS, canManageSMS }), [client, epoch, authority, canReadSMS, canManageSMS]);
+  const owner = useAccountOwner(identity);
+  const current = useCallback(token => owner.current(token) && (identity.client.financeSessionEpoch || 0) === identity.epoch && JSON.stringify([identity.client.authorizationVersions?.context_version || 0, identity.client.authorizationVersions?.platform_authorization_version || 0]) === identity.authority, [owner, identity]);
+  const readGeneration = useRef(0);
+  const readController = useRef(null);
+  const smsSource = useRef(null);
   const intent = useRef(null);
   const loadFailed = useRef(copy.settings.sms.loadFailed);
   loadFailed.current = copy.settings.sms.loadFailed;
+  const conflictMessage = useRef(copy.settings.sms.conflict);
+  conflictMessage.current = copy.settings.sms.conflict;
   const [sms, setSMS] = useState(null);
   const [smsForm, setSMSForm] = useState(() => smsConfigurationForm());
   const [smsState, setSMSState] = useState({ loading: canReadSMS, saving: false, error: '', notice: '' });
 
-  const loadSMSConfiguration = useCallback(async (signal) => {
+  const loadSMSConfiguration = useCallback(async () => {
     if (!canReadSMS) return;
-    const token = owner.capture();
+    readController.current?.abort();
+    const controller = new globalThis.AbortController(), signal = controller.signal;
+    readController.current = controller;
+    const token = owner.capture(), request = ++readGeneration.current, pending = intent.current;
     setSMSState((value) => ({ ...value, loading: true, error: '', notice: '' }));
     try {
       const result = await client.smsConfiguration(signal);
-      if (!owner.current(token)) return;
+      if (!current(token) || signal?.aborted || request !== readGeneration.current) return;
+      if (!Number.isSafeInteger(result?.revision) || result.revision < 0) throw new Error('INVALID_SMS_REVISION');
+      // Only a read started after a definite no-write CAS conflict can retire it.
+      // Unknown outcomes keep their original command/key even after a refresh.
+      if (pending?.conflicted && intent.current === pending && result.revision > pending.command.expected_revision) intent.current = null;
+      smsSource.current = token;
       setSMS(result);
       setSMSForm(smsConfigurationForm(result));
-      setSMSState({ loading: false, saving: false, error: '', notice: '' });
+      setSMSState({ loading: false, saving: false, error: pending?.conflicted && intent.current === pending ? conflictMessage.current : '', notice: '' });
     } catch (error) {
-      if (owner.current(token) && error?.name !== 'AbortError') setSMSState({ loading: false, saving: false, error: loadFailed.current, notice: '' });
+      if (current(token) && !signal?.aborted && request === readGeneration.current && error?.name !== 'AbortError') setSMSState({ loading: false, saving: false, error: loadFailed.current, notice: '' });
     }
-  }, [canReadSMS, client, owner]);
+  }, [canReadSMS, client, owner, current]);
 
   useEffect(() => {
-    setSMS(null);
-    const controller = new globalThis.AbortController();
-    void loadSMSConfiguration(controller.signal);
-    return () => controller.abort();
+    intent.current = null; smsSource.current = null; setSMS(null);
+    void loadSMSConfiguration();
+    return () => { readGeneration.current++; readController.current?.abort(); };
   }, [loadSMSConfiguration]);
 
-  useEffect(() => { intent.current = null; }, [client]);
+  useEffect(() => client.onAuthorizationVersion?.(() => {
+    if ((client.financeSessionEpoch || 0) !== epoch || JSON.stringify([client.authorizationVersions?.context_version || 0, client.authorizationVersions?.platform_authorization_version || 0]) !== authority) {
+      owner.invalidate(); readGeneration.current++; readController.current?.abort(); intent.current = null; smsSource.current = null;
+      setSMS(null); setSMSState({ loading: false, saving: false, error: loadFailed.current, notice: '' });
+    }
+  }), [client, owner, epoch, authority]);
 
   const chooseSMSProvider = (providerID) => {
     setSMSForm((value) => ({
@@ -66,8 +87,10 @@ export function SettingsWorkspace({ copy, language, onLanguageChange, client, pe
 
   const saveSMSConfiguration = async (event) => {
     event.preventDefault();
-    if (!canManageSMS || !sms) return;
+    if (!canManageSMS || !sms || smsState.loading || smsState.saving || !smsSource.current || !current(smsSource.current) || intent.current?.conflicted) return;
     const token = owner.capture();
+    readGeneration.current++;
+    let attempt;
     setSMSState((value) => ({ ...value, saving: true, error: '', notice: '' }));
     try {
       const command = {
@@ -81,17 +104,22 @@ export function SettingsWorkspace({ copy, language, onLanguageChange, client, pe
       };
       if (!Number.isSafeInteger(command.expected_revision) || command.expected_revision < 0) throw new Error('INVALID_SMS_REVISION');
       const fingerprint = JSON.stringify({ ...command, expected_revision: undefined });
-      if (!intent.current || intent.current.fingerprint !== fingerprint) intent.current = { fingerprint, command, key: `sms-configuration-${secureRequestID()}` };
-      const attempt = intent.current;
+      if (!intent.current || (!intent.current.unknown && intent.current.fingerprint !== fingerprint)) intent.current = { fingerprint, command, key: `sms-configuration-${secureRequestID()}` };
+      attempt = intent.current;
       const result = await client.updateSMSConfiguration(attempt.command, attempt.key);
-      if (!owner.current(token)) return;
+      if (!current(token)) return;
       if (!result || result.revision !== attempt.command.expected_revision + 1 || result.provider_id !== attempt.command.provider_id || result.credential_profile !== attempt.command.credential_profile || result.enabled !== attempt.command.enabled || Object.keys(emptySMSTemplates()).some(key => result.templates?.[key] !== attempt.command.templates[key]) || (result.sign_name || '') !== attempt.command.sign_name) throw new Error('INVALID_SMS_ACK');
       if (intent.current === attempt) intent.current = null;
+      smsSource.current = token;
       setSMS(result);
       setSMSForm(smsConfigurationForm(result));
       setSMSState({ loading: false, saving: false, error: '', notice: copy.settings.sms.saved });
     } catch (error) {
-      if (!owner.current(token)) return;
+      if (!current(token)) return;
+      if (attempt && intent.current === attempt) {
+        if (error?.status === 409 && error?.code === 'SMS_CONFIGURATION_CONFLICT') attempt.conflicted = true;
+        else if (!error?.status || error.status >= 500) attempt.unknown = true;
+      }
       const message = error?.code === 'SMS_CONFIGURATION_CONFLICT'
         ? copy.settings.sms.conflict
         : error?.code === 'SMS_PROVIDER_PROFILE_UNAVAILABLE'
@@ -151,7 +179,7 @@ export function SettingsWorkspace({ copy, language, onLanguageChange, client, pe
               </div>
               {!selectedProfile?.configured && smsForm.enabled && <div className="adm-inline-message error" role="alert">{copy.settings.sms.profileUnavailable}</div>}
               {!canManageSMS && <div className="adm-inline-message info" role="status">{copy.settings.sms.readOnly}</div>}
-              {canManageSMS && <button type="submit" className="adm-primary-button" disabled={smsState.saving || !formValid}>{smsState.saving ? copy.settings.sms.saving : copy.settings.sms.save}</button>}
+              {canManageSMS && <button type="submit" className="adm-primary-button" disabled={smsState.saving || !formValid || Boolean(intent.current?.conflicted)}>{smsState.saving ? copy.settings.sms.saving : copy.settings.sms.save}</button>}
             </form>
           )}
         </section>

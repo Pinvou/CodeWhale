@@ -1,3 +1,4 @@
+import { runSMSConflictCases } from './account_platform_sms_conflict_cases.mjs';
 import { registrationRepairCopy } from '../src/shared/i18n.js';
 import fs from 'node:fs';
 import os from 'node:os';
@@ -137,6 +138,7 @@ try {
     await page.waitForFunction(() => document.querySelector('input[autocomplete=username]')?.value === 'account-b');
     assert(duplicateKeys.length === 0, `duplicate workspace React keys: ${duplicateKeys.length}`);
   });
+  passed += await runSMSConflictCases(page, `http://127.0.0.1:${vite.httpServer.address().port}`);
   console.log(`RESULT ${passed} PASS 0 FAIL 0 SKIP`);
  } catch (error) {
   console.error(`FAIL after ${passed} PASS: ${error.message}`);
