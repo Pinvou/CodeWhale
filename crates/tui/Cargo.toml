@@ -122,8 +122,19 @@ cucumber = "0.23.0"
 jsonschema.workspace = true
 wiremock = "0.6"
 tiny_http = "0.12"
-pretty_assertions = "1.4"
 rio-vt = "0.5.1"
+
+# rio-vt is imported only by the long-running-tests PTY harness
+# (tests/cucumber/main.rs -> qa_harness/frame.rs) and the files below are
+# linked via include!/#path, none of which cargo-shear's default analysis
+# compiles — keep them out of the unused/unlinked reports.
+[package.metadata.cargo-shear]
+ignored = ["rio-vt"]
+ignored-paths = [
+    "src/tui/views/fleet_roster_capability_tests.rs",
+    "tests/support/llm_client.rs",
+    "tests/support/qa_harness/mod.rs",
+]
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
