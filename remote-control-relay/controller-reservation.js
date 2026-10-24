@@ -83,10 +83,18 @@ function consume(buckets, key, limit, windowMs, now, maxBuckets) {
   if (!bucket || now - bucket.started_at >= windowMs) {
     if (!bucket && buckets.size >= maxBuckets) {
       let scanned = 0;
+      const scanLimit = Math.min(64, buckets.size);
       for (const [candidate, value] of buckets) {
         if (now - value.started_at >= windowMs) buckets.delete(candidate);
+        else {
+          // Rotate live buckets without renewing their window or allowance.
+          // The next bounded sweep starts beyond this prefix, even if busy
+          // keys keep renewing while expired buckets remain near the tail.
+          buckets.delete(candidate);
+          buckets.set(candidate, value);
+        }
         scanned += 1;
-        if (scanned >= 64) break;
+        if (scanned >= scanLimit) break;
       }
       if (buckets.size >= maxBuckets) return false;
     }
