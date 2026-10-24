@@ -224,10 +224,12 @@ qrcode = { version = "0.14", default-features = false, features = ["svg"] }
 tokio-tungstenite = { version = "0.30", default-features = false, features = ["connect", "rustls-tls-webpki-roots"] }
 futures-util = "0.3"
 rand = "0.10"
-# Keep 0.22: age/codewhale-tui/hyper-util still require 0.22; a solo 0.23 bump would only add a second copy. Revisit once upstreams align.
+# Keep 0.22: codewhale-tui/hyper-util still require 0.22; a solo 0.23 bump would only add a second copy. Revisit once upstreams align.
 base64 = "0.22"
 tempfile = "3"
-age = { version = "=0.12.1", default-features = false }
+# Maintained 0.11.5 shares the 0.12.1 parser fixes and retains our X25519 backup wire/key format.
+# 0.12 unconditionally adds HPKE/P-256 with affected crypto-bigint; revisit after an upstream fixed release.
+age = { version = "=0.11.5", default-features = false }
 
 # Computer Use capability foundation (features/computer_use): screen capture via
 # xcap (0.9.8, reusing its re-exported image 0.25 for PNG encoding/scaling, no direct

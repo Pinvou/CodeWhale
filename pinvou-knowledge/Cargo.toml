@@ -59,7 +59,9 @@ url = "2"
 
 axum = { version = "0.8", features = ["multipart"], optional = true }
 axum-server = { version = "=0.8.0", default-features = false, features = ["tls-rustls"], optional = true }
-age = { version = "=0.12.1", default-features = false, optional = true }
+# Maintained 0.11.5 shares the 0.12.1 parser fixes and retains our X25519 backup wire/key format.
+# 0.12 unconditionally adds HPKE/P-256 with affected crypto-bigint; revisit after an upstream fixed release.
+age = { version = "=0.11.5", default-features = false, optional = true }
 clap = { version = "4", features = ["derive", "env"], optional = true }
 flate2 = { version = "1", optional = true }
 futures-util = { version = "0.3", optional = true }
