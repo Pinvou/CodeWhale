@@ -17,6 +17,8 @@ func f01PermissionAllowed(permission string) bool {
 		return true
 	case "platform.usage.read", "platform.usage.reconcile.retry", "platform.billing.reconciliation.read", "platform.billing.reconciliation.run", "platform.billing.reconciliation.manage":
 		return true
+	case "platform.registration-bonus.read", "platform.registration-bonus.manage", "platform.billing.holds.release":
+		return true
 	case "personal.models.read", "personal.model.invoke", "personal.usage.read", "personal.usage.cancel":
 		return true
 	case "personal.recharge.create", "personal.recharge.manage":

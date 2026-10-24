@@ -368,17 +368,18 @@ class FinancialPostgresRunnerTests(unittest.TestCase):
             "TestPlatformRoleManagementRuntimePostgres",
             "TestUserCodeLookupRuntimePostgres",
             "TestAuditSearchOriginalMigrationRuntimePostgres",
+            "TestDeliveredPlatformPermissionsPostgres",
         })
         for name in RUNNER.ACCOUNT_REQUIRED:
             with self.subTest(name=name), self.assertRaises(RuntimeError):
                 RUNNER.verify_results([e for e in self.events(RUNNER.ACCOUNT_REQUIRED, RUNNER.ACCOUNT_PACKAGE, True) if e.get("Test", "").split("/")[0] != name], RUNNER.ACCOUNT_REQUIRED, package=RUNNER.ACCOUNT_PACKAGE, require_children=True, exact_roots=True)
 
-    def test_user_code_and_original_audit_roots_are_selected_with_real_children(self):
+    def test_account_projection_lookup_and_audit_roots_are_selected_with_real_children(self):
         self.run_main_fixture()
         roots, package = RUNNER.ACCOUNT_REQUIRED, RUNNER.ACCOUNT_PACKAGE
         command = self.fixture_commands[self.fixture_phases.index("owner-account")]
         valid = self.events(roots, package, children=True)
-        for root in ("TestUserCodeLookupRuntimePostgres", "TestAuditSearchOriginalMigrationRuntimePostgres"):
+        for root in ("TestUserCodeLookupRuntimePostgres", "TestAuditSearchOriginalMigrationRuntimePostgres", "TestDeliveredPlatformPermissionsPostgres"):
             with self.subTest(root=root):
                 self.assertIn(root, roots)
                 self.assertIn(root, command[command.index("-run") + 1])
