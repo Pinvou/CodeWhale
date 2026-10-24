@@ -44,6 +44,7 @@ import {
   isLocalGatewayUrl,
 } from '../model-store/pinvou-model-link.js';
 import { MsButton, MsPill, MsToast } from '../model-store/model-store-ui.jsx';
+import { externalRowIdentity } from './externalRowIdentity.js';
 
 const TOAST_MS = 3200;
 // Two-step confirmation dead-zone (ms): long enough to absorb a double-click's
@@ -627,25 +628,11 @@ const DeviceManagerView = ({ theme, t, bs, onOpenChat, onOpenModelStore }) => {
   // (round-4 review P3).
   const [externalFetchError, setExternalFetchError] = useState(null);
 
-  // armed/busy/list identity: kind + effective model identity (round-21 review
-  // P2, external-review P2). The old kind+name key collided on two real routes:
-  // two registry rows sharing a name across ports (two inference services both
-  // named "qwen3") and an alias registry row {name:"foo:latest", model:"bar"}
-  // next to a daemon row named "foo:latest" — one arm click used to open two
-  // armed panels sharing one deleteWeights checkbox. The effective identity
-  // (`model || name`, ollama folded to `:latest` lowercase like the backend's
-  // registry_identity) is collision-free: the flip pair (daemon row for model M
-  // <-> its registry row) shares it, so the round-3 flip-stability survives the
-  // quiet re-register id swap, while alias rows key on their actual model. The
-  // backend register now rejects same-(kind, identity) records and read_registry
-  // warns on handwritten duplicates, which keeps the key unique.
-  const rowIdentity = (row) => {
-    const kind = row.kind || '';
-    const effective = String(row.model || row.name || '');
-    if (kind !== 'ollama') return `${kind}:${effective}`;
-    const lower = effective.toLowerCase();
-    return `${kind}:${lower.includes(':') ? lower : `${lower}:latest`}`;
-  };
+  // armed/busy/list identity: kind + effective model + (non-ollama) endpoint,
+  // shared with the backend's registry_identity ruler. Full contract and the
+  // collision routes it closes live on externalRowIdentity (pure module, tests
+  // direct-hit it there).
+  const rowIdentity = externalRowIdentity;
 
   // Endpoint-precise button state (round-10 review P2): two inference
   // services on one machine can serve the same model name, so "linked" only

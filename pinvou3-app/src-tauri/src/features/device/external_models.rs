@@ -254,52 +254,83 @@ fn ollama_name_matches(record_name: &str, daemon_name: &str) -> bool {
     ollama_canonical_name(record_name).eq_ignore_ascii_case(&ollama_canonical_name(daemon_name))
 }
 
-/// 列表/登记两侧共用的"业务身份"：同一类别下，记录代表的模型是什么。Ollama
-/// 记录的身份是有效删除名（`model` 优先，裸名补 `:latest`、大小写折叠——与
-/// daemon 去重同一把尺子）；其余类别以 `model`（端点上的模型标识）回退 `name`。
+/// 列表/登记两侧共用的"业务身份"：同一类别下，记录代表的是哪个服务上的哪个
+/// 模型。Ollama 记录的身份是有效删除名（`model` 优先，裸名补 `:latest`、大小写
+/// 折叠——与 daemon 去重同一把尺子），端点不参与：列表/删除都走同一配置守护
+/// 进程，且未登记 daemon 行 ↔ 其注册行的"翻转对"必须共享身份，armed/busy 才能
+/// 穿越静默登记的 id 交换（二十一轮评审 P2）。其余类别以 `model`（端点上的
+/// 模型标识）回退 `name`，并把 `base_url` 纳入身份第二元：不同端点上的同名同
+/// 模型是设计文档定义的两个独立服务，登记查重、读取告警与前端 armed/busy 键
+/// 都按端点区分，不再靠拒绝登记收窄合法配置（二十三轮评审 P2；外部评审同指）。
 /// 登记端按它查重、读取端按它告警、前端 `rowIdentity` 按它做 armed/busy 键：
-/// 同 kind + 同 name 的两条记录（两个端口各登记一个 "qwen3"）或"别名记录 +
-/// daemon 同名行"此前会共享前端身份，一次 arm 同时打开两个确认面板（二十一轮
-/// 评审 P2；外部评审同指）。
-fn registry_identity(kind: &str, name: &str, model: Option<&str>) -> String {
+/// "别名记录 + daemon 同名行"此前会共享前端身份，一次 arm 同时打开两个确认
+/// 面板（二十一轮评审 P2；外部评审同指）。
+fn registry_identity(
+    kind: &str,
+    name: &str,
+    model: Option<&str>,
+    base_url: Option<&str>,
+) -> (String, String) {
     let effective = model.unwrap_or(name);
     if kind == "ollama" {
-        ollama_canonical_name(effective).to_ascii_lowercase()
+        (
+            ollama_canonical_name(effective).to_ascii_lowercase(),
+            String::new(),
+        )
     } else {
-        effective.to_string()
+        (
+            effective.to_string(),
+            base_url.unwrap_or_default().to_string(),
+        )
     }
 }
 
-/// 登记查重（纯函数，测试直打）：已有记录与新记录同 kind 且业务身份相同即冲突。
+/// 登记查重（纯函数，测试直打）：已有记录与新记录同 kind 且业务身份（非
+/// Ollama 含端点）相同即冲突。
 fn find_identity_conflict<'a>(
     existing: &'a [ExternalModel],
     kind: &str,
     name: &str,
     model: Option<&str>,
+    base_url: Option<&str>,
 ) -> Option<&'a ExternalModel> {
-    let identity = registry_identity(kind, name, model);
+    let identity = registry_identity(kind, name, model, base_url);
     existing.iter().find(|record| {
         record.registered
             && record.kind == kind
-            && registry_identity(&record.kind, &record.name, record.model.as_deref()) == identity
+            && registry_identity(
+                &record.kind,
+                &record.name,
+                record.model.as_deref(),
+                record.base_url.as_deref(),
+            ) == identity
     })
 }
 
-/// 读取端对手写/AI 产出的重复身份（不同 id、同 kind 同模型）只告警不吞：移除按
-/// id 直取仍各自可删，但用户要知道为什么列表里"同一个模型出现两次"。
+/// 读取端对手写/AI 产出的重复身份（不同 id、同 kind、同模型且非 Ollama 同
+/// 端点）只告警不吞：移除按 id 直取仍各自可删，但用户要知道为什么列表里
+/// "同一个模型出现两次"。端点独立的同名同模型记录是合法配置，不告警。
 fn warn_duplicate_identities(models: &[ExternalModel], warnings: &mut Vec<String>) {
-    let mut seen: Vec<(String, String, &str)> = Vec::new();
+    let mut seen: Vec<(String, (String, String), &str)> = Vec::new();
     for model in models.iter().filter(|model| model.registered) {
-        let identity = registry_identity(&model.kind, &model.name, model.model.as_deref());
-        if let Some((_, _, first_id)) = seen
+        let identity = registry_identity(
+            &model.kind,
+            &model.name,
+            model.model.as_deref(),
+            model.base_url.as_deref(),
+        );
+        if let Some((kind, _, first_id)) = seen
             .iter()
             .find(|(kind, seen_identity, _)| *kind == model.kind && *seen_identity == identity)
         {
+            let endpoint = if identity.1.is_empty() {
+                String::new()
+            } else {
+                format!("，服务地址 {}", truncate_echo(&identity.1))
+            };
             warnings.push(format!(
-                "注册表存在同类别同模型的重复记录（{}：{}，id {} 与 {}），建议移除多余的一条",
-                model.kind,
-                truncate_echo(&identity),
-                first_id,
+                "注册表存在同类别同模型的重复记录（{kind}：{}{endpoint}，id {first_id} 与 {}），建议移除多余的一条",
+                truncate_echo(&identity.0),
                 model.id
             ));
         } else {
@@ -599,15 +630,20 @@ pub async fn register_external_model(
             // 数量上限在写入处也生效：此前只在读取侧截断，目录塞满后新登记仍会
             // 成功、并把排序靠后的既有记录挤出可见范围（第七轮评审 P3）。
             ensure_registry_has_capacity(&dir)?;
-            // 同 kind 同模型身份查重（二十一轮评审 P2）：注册表不强制 name 唯一，
-            // 两条同身份记录会让前端 armed/busy 键碰撞（一次 arm 打开两个确认
-            // 面板）；读取端对存量重复只告警不吞，这里对新登记直接拒绝。
+            // 同 kind 同业务身份查重（二十一轮评审 P2；二十三轮评审 P2 纳入
+            // 端点）：注册表不强制 name 唯一，两条同身份记录会让前端 armed/busy
+            // 键碰撞（一次 arm 打开两个确认面板）；不同端点的同名同模型是独立
+            // 服务，合法共存。读取端对存量重复只告警不吞，这里对新登记直接拒绝。
             let (existing_models, _) = read_registry(&dir);
-            if let Some(conflict) =
-                find_identity_conflict(&existing_models, &kind, &name, model.as_deref())
-            {
+            if let Some(conflict) = find_identity_conflict(
+                &existing_models,
+                &kind,
+                &name,
+                model.as_deref(),
+                base_url.as_deref(),
+            ) {
                 return Err(format!(
-                    "已存在同类别同模型的外部模型记录（{}，id {}），请先移除它或改用其他名字/模型标识",
+                    "已存在同类别同模型且同服务地址的外部模型记录（{}，id {}），请先移除它，或改用其他名字/模型标识/服务地址",
                     truncate_echo(&conflict.name),
                     conflict.id
                 ));
@@ -2022,35 +2058,85 @@ mod tests {
     fn registry_identity_folds_ollama_tags_and_case_but_keeps_other_kinds_exact() {
         // Ollama：有效删除名（model 优先）、裸名补 :latest、大小写折叠——与
         // daemon 去重同一把尺子；别名记录 {name:foo:latest, model:bar} 的身份是 bar。
-        assert_eq!(registry_identity("ollama", "qwen3", None), "qwen3:latest");
         assert_eq!(
-            registry_identity("ollama", "Qwen3:Latest", None),
+            registry_identity("ollama", "qwen3", None, None),
+            ("qwen3:latest".to_string(), String::new())
+        );
+        assert_eq!(
+            registry_identity("ollama", "Qwen3:Latest", None, None).0,
             "qwen3:latest"
         );
         assert_eq!(
-            registry_identity("ollama", "foo:latest", Some("bar")),
+            registry_identity("ollama", "foo:latest", Some("bar"), None).0,
             "bar:latest"
         );
-        // 其余类别：model 回退 name，原样（端点模型标识大小写有意义）。
-        assert_eq!(registry_identity("openai_endpoint", "qwen3", None), "qwen3");
+        // 端点不参与 Ollama 身份（翻转对连续性）：第二元恒空。
         assert_eq!(
-            registry_identity("openai_endpoint", "qwen3", Some("Qwen3-8B")),
+            registry_identity("ollama", "qwen3", None, Some("http://127.0.0.1:11434/v1")).1,
+            ""
+        );
+        // 其余类别：model 回退 name，原样（端点模型标识大小写有意义），端点
+        // 参与身份。
+        assert_eq!(
+            registry_identity(
+                "openai_endpoint",
+                "qwen3",
+                None,
+                Some("http://127.0.0.1:8000/v1")
+            ),
+            ("qwen3".to_string(), "http://127.0.0.1:8000/v1".to_string())
+        );
+        assert_eq!(
+            registry_identity("openai_endpoint", "qwen3", Some("Qwen3-8B"), None).0,
             "Qwen3-8B"
         );
         assert_ne!(
-            registry_identity("other", "Qwen3", None),
-            registry_identity("other", "qwen3", None)
+            registry_identity("other", "Qwen3", None, None),
+            registry_identity("other", "qwen3", None, None)
+        );
+        // 同名同模型、不同端点是两个身份（设计文档：独立服务）。
+        assert_ne!(
+            registry_identity(
+                "openai_endpoint",
+                "qwen3",
+                None,
+                Some("http://127.0.0.1:8000/v1")
+            ),
+            registry_identity(
+                "openai_endpoint",
+                "qwen3",
+                None,
+                Some("http://127.0.0.1:8001/v1")
+            )
+        );
+        // 端点参与身份用原串精确比较（登记端已 trim）：毗邻删除守卫的身份链
+        // 取"宁分勿合"——`http://host:80` 与 `http://host` 至多产出两条可独立
+        // 移除的记录，不会误合；前端 findLinkedRowsForEndpoint 的 WHATWG 尺子
+        // 折叠默认端口是品悟配置行清理域的既有契约，两把尺子用途不同不互借。
+        assert_ne!(
+            registry_identity(
+                "openai_endpoint",
+                "qwen3",
+                None,
+                Some("http://127.0.0.1:8000")
+            ),
+            registry_identity("openai_endpoint", "qwen3", None, Some("http://127.0.0.1"))
         );
     }
 
     #[test]
     fn identity_conflict_detection_matches_same_kind_only_and_skips_daemon_rows() {
-        let make = |id: &str, kind: &str, name: &str, model: Option<&str>, registered: bool| {
+        let make = |id: &str,
+                    kind: &str,
+                    name: &str,
+                    model: Option<&str>,
+                    base_url: Option<&str>,
+                    registered: bool| {
             ExternalModel {
                 id: id.to_string(),
                 name: name.to_string(),
                 kind: kind.to_string(),
-                base_url: None,
+                base_url: base_url.map(str::to_string),
                 model: model.map(str::to_string),
                 weights_path: None,
                 status: "unreachable".to_string(),
@@ -2059,26 +2145,85 @@ mod tests {
             }
         };
         let existing = vec![
-            make("m-1", "openai_endpoint", "qwen3", None, true),
-            make("m-2", "ollama", "foo:latest", Some("bar"), true),
-            make("ollama-baz:latest", "ollama", "baz:latest", None, false),
+            make(
+                "m-1",
+                "openai_endpoint",
+                "qwen3",
+                None,
+                Some("http://127.0.0.1:8000/v1"),
+                true,
+            ),
+            make("m-2", "ollama", "foo:latest", Some("bar"), None, true),
+            make(
+                "ollama-baz:latest",
+                "ollama",
+                "baz:latest",
+                None,
+                None,
+                false,
+            ),
         ];
-        // 两个端口各登记一个 "qwen3"（外部评审路由 1）→ 冲突。
-        let hit = find_identity_conflict(&existing, "openai_endpoint", "qwen3", None)
-            .expect("same kind + same name must conflict");
+        // 同 kind + 同模型 + 同端点 → 冲突。
+        let hit = find_identity_conflict(
+            &existing,
+            "openai_endpoint",
+            "qwen3",
+            None,
+            Some("http://127.0.0.1:8000/v1"),
+        )
+        .expect("same kind + model + endpoint must conflict");
         assert_eq!(hit.id, "m-1");
-        // 同名不同类别不冲突；同名不同 model（不同端点模型）不冲突。
-        assert!(find_identity_conflict(&existing, "other", "qwen3", None).is_none());
+        // 同 kind 同模型、不同端点是设计文档定义的两个独立服务 → 不冲突
+        // （二十三轮评审 P2：不能靠拒绝登记收窄合法配置）。
         assert!(
-            find_identity_conflict(&existing, "openai_endpoint", "qwen3", Some("qwen3-8b"))
-                .is_none()
+            find_identity_conflict(
+                &existing,
+                "openai_endpoint",
+                "qwen3",
+                None,
+                Some("http://127.0.0.1:8001/v1")
+            )
+            .is_none()
         );
-        // Ollama 按有效删除名：登记 "BAR" 与别名记录的 model bar 冲突，登记
-        // "foo:latest"（身份 foo:latest）与别名记录（身份 bar）不冲突。
-        assert!(find_identity_conflict(&existing, "ollama", "BAR", None).is_some());
-        assert!(find_identity_conflict(&existing, "ollama", "foo:latest", None).is_none());
+        // 端点带 query 的第三种身份，谁也不匹配（与前端 query 参与身份同口径）。
+        assert!(
+            find_identity_conflict(
+                &existing,
+                "openai_endpoint",
+                "qwen3",
+                None,
+                Some("http://127.0.0.1:8000/v1?tenant=a")
+            )
+            .is_none()
+        );
+        // 同名不同类别不冲突；同名不同 model（不同端点模型）不冲突。
+        assert!(find_identity_conflict(&existing, "other", "qwen3", None, None).is_none());
+        assert!(
+            find_identity_conflict(
+                &existing,
+                "openai_endpoint",
+                "qwen3",
+                Some("qwen3-8b"),
+                Some("http://127.0.0.1:8000/v1")
+            )
+            .is_none()
+        );
+        // Ollama 按有效删除名，端点不参与：登记 "BAR" 与别名记录的 model bar
+        // 冲突（传入任何端点都一样）；登记 "foo:latest"（身份 foo:latest）与
+        // 别名记录（身份 bar）不冲突。
+        assert!(
+            find_identity_conflict(
+                &existing,
+                "ollama",
+                "BAR",
+                None,
+                Some("http://elsewhere:11434/v1")
+            )
+            .is_some()
+        );
+        assert!(find_identity_conflict(&existing, "ollama", "foo:latest", None, None).is_none());
         // daemon 行不是注册表记录，登记它（静默登记路径）不算冲突。
-        assert!(find_identity_conflict(&existing, "ollama", "baz", None).is_none());
+        assert!(find_identity_conflict(&existing, "ollama", "baz", None, None).is_none());
     }
 
     #[test]
@@ -2099,16 +2244,29 @@ mod tests {
             r#"{"id": "m-c", "name": "qwen3", "kind": "other"}"#,
         )
         .expect("write c");
+        // 与 m-a 同名同模型且同端点的手写重复（m-d）。
+        std::fs::write(
+            dir.path().join("m-d.json"),
+            r#"{"id": "m-d", "name": "qwen3", "kind": "openai_endpoint", "base_url": "http://127.0.0.1:8000/v1"}"#,
+        )
+        .expect("write d");
         let (models, warnings) = read_registry(dir.path());
-        // 两条都保留（移除按 id 直取各自可删），只告警一次（第二条重复），不同类别不算。
-        assert_eq!(models.len(), 3);
+        // 四条都保留（移除按 id 直取各自可删）。m-b 与 m-a 端点独立（设计文档：
+        // 独立服务）是合法配置不告警；m-d 与 m-a 同端点同模型只告警一次；不同
+        // 类别（m-c）不算。
+        assert_eq!(models.len(), 4);
         assert_eq!(warnings.len(), 1, "unexpected warnings: {warnings:?}");
         assert!(
-            warnings[0].contains("m-a") && warnings[0].contains("m-b"),
+            warnings[0].contains("m-a") && warnings[0].contains("m-d"),
             "{}",
             warnings[0]
         );
         assert!(warnings[0].contains("openai_endpoint"));
+        assert!(
+            warnings[0].contains("8000"),
+            "端点重复的告警应回显服务地址: {}",
+            warnings[0]
+        );
     }
 
     #[test]
