@@ -166,6 +166,26 @@ fn runtime_model_limits(body: serde_json::Value, model_id: &str) -> Result<Runti
     })
 }
 
+/// Only the engine host may supply a task-profile catalog reference. Resolving
+/// a mutable session selection is lazy, so it cannot replace that frozen fact.
+fn runtime_catalog_reference<F>(
+    request: &RuntimeModelRequest,
+    session_reference: F,
+) -> Result<String>
+where
+    F: FnOnce() -> Result<String>,
+{
+    if let Some(reference) = request.scheduled_model_ref.as_ref() {
+        return Ok(reference.clone());
+    }
+    if request.scheduled_unattended {
+        anyhow::bail!(
+            "model_catalog_selection_required: scheduled platform model binding is missing"
+        );
+    }
+    session_reference()
+}
+
 /// Runtime provider for the only platform-managed model path.
 ///
 /// Local and user-configured third-party models pass through unchanged. The
@@ -209,8 +229,9 @@ impl RuntimeModelProvider for AccountPlatformRuntimeModelProvider {
 
         let timing_owner = self.model_proxy.capture_timing_owner(&request.session_id);
         super::client_migration::runtime_ready().map_err(|error| anyhow!(error))?;
-        // The wire model is a property of the conversation, not of the current
-        // global default.  Reading the immutable session snapshot here prevents
+        // A task-profile reference is frozen before preparation; only ordinary
+        // interactive selection reads the mutable session. The wire model is
+        // a property of the conversation, not of the global default. This prevents
         // a later catalog selection from silently rewriting historical chats.
         // A removed model can therefore only continue through the explicit
         // replacement-branch command, whose new session records the replacement
@@ -219,18 +240,20 @@ impl RuntimeModelProvider for AccountPlatformRuntimeModelProvider {
             .app
             .try_state::<SessionStore>()
             .context("session store is not initialized")?;
-        let session_model_ref = match store.session_model_ref(&request.session_id) {
-            Some(ModelSelectionRef::AccountPlatform { model_id }) => model_id,
-            _ => {
-                store
-                    .load(&request.session_id)
-                    .with_context(|| {
-                        format!("load model binding for session {}", request.session_id)
-                    })?
-                    .metadata
-                    .model
-            }
-        };
+        let session_model_ref = runtime_catalog_reference(&request, || {
+            Ok(match store.session_model_ref(&request.session_id) {
+                Some(ModelSelectionRef::AccountPlatform { model_id }) => model_id,
+                _ => {
+                    store
+                        .load(&request.session_id)
+                        .with_context(|| {
+                            format!("load model binding for session {}", request.session_id)
+                        })?
+                        .metadata
+                        .model
+                }
+            })
+        })?;
         let session_model_ref = session_model_ref.trim();
         if session_model_ref.is_empty() {
             return Err(anyhow!(
@@ -336,12 +359,67 @@ impl RuntimeModelProvider for AccountPlatformRuntimeModelProvider {
 mod tests {
     use serde_json::json;
 
-    use super::runtime_model_limits;
+    use super::{runtime_catalog_reference, runtime_model_limits};
     use crate::features::assistant::runtime_model::{
         ModelCredentialMode, RuntimeModelProvider, RuntimeModelRequest,
     };
     use crate::platform::credential_store::{CredentialEditAction, CredentialState};
     use crate::platform::prefs::{ModelPreset, SavedModel};
+
+    #[test]
+    fn scheduled_catalog_reference_is_frozen_before_mutable_session_lookup() {
+        const ORIGINAL: &str = "0199a100-0001-7000-8000-000000000106";
+        for scheduled_unattended in [true, false] {
+            let request = RuntimeModelRequest {
+                session_id: "task-session".into(),
+                model: SavedModel::builtin_account_platform(),
+                scheduled_unattended,
+                scheduled_model_ref: Some(ORIGINAL.into()),
+            };
+            let reference = runtime_catalog_reference(&request, || {
+                panic!("a later override or Engine alias must not replace the pinned profile")
+            })
+            .expect("frozen task reference");
+            assert_eq!(reference, ORIGINAL);
+        }
+    }
+
+    #[test]
+    fn interactive_explicit_selection_still_uses_current_session_reference() {
+        let request = RuntimeModelRequest {
+            session_id: "manual-task-session".into(),
+            model: SavedModel::builtin_account_platform(),
+            scheduled_unattended: false,
+            scheduled_model_ref: None,
+        };
+        let reference = runtime_catalog_reference(&request, || {
+            Ok("0199a100-0001-7000-8000-000000000107".into())
+        })
+        .expect("explicit interactive selection");
+        assert_eq!(reference, "0199a100-0001-7000-8000-000000000107");
+        assert!(
+            runtime_catalog_reference(&request, || anyhow::bail!("session unavailable")).is_err()
+        );
+    }
+
+    #[test]
+    fn unattended_platform_without_frozen_reference_fails_closed() {
+        let request = RuntimeModelRequest {
+            session_id: "unbound-task-session".into(),
+            model: SavedModel::builtin_account_platform(),
+            scheduled_unattended: true,
+            scheduled_model_ref: None,
+        };
+        let error = runtime_catalog_reference(&request, || {
+            panic!("unattended task must not fall back to a mutable session")
+        })
+        .unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .starts_with("model_catalog_selection_required:")
+        );
+    }
 
     #[test]
     fn runtime_protocol_is_independent_of_display_name() {
@@ -718,6 +796,7 @@ mod tests {
                 session_id: "session-1".to_string(),
                 model: ordinary_model(),
                 scheduled_unattended: false,
+                scheduled_model_ref: None,
             })
             .await
             .expect("ordinary model passthrough");

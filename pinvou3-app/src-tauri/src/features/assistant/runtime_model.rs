@@ -33,6 +33,9 @@ pub struct RuntimeModelRequest {
     pub session_id: String,
     pub model: SavedModel,
     pub scheduled_unattended: bool,
+    /// App-owned catalog reference frozen when the task profile selected the
+    /// platform model. It is never inferred from an Engine protocol alias.
+    pub(crate) scheduled_model_ref: Option<String>,
 }
 
 /// 运行时提供器准备的敏感模型凭据。
@@ -200,6 +203,7 @@ mod tests {
                 session_id: "session-1".to_string(),
                 model: model(),
                 scheduled_unattended: false,
+                scheduled_model_ref: None,
             })
             .await
             .expect("prepare model");

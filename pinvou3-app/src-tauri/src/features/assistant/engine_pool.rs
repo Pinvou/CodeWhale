@@ -2645,6 +2645,7 @@ impl EnginePool {
             }
             None => (explicit_model_override, explicit_credential),
         };
+        let mut scheduled_model_ref = None;
         bridge.session_model = resolve_runtime_model_override(explicit_model_override, || {
             // Explicit evaluation snapshots already select a model and must not
             // depend on the interactive default. Only normal resolution needs it.
@@ -2655,12 +2656,16 @@ impl EnginePool {
             {
                 bail!("model_selection_required: choose a model before sending");
             }
-            resolve_spawn_model(
+            let model = resolve_spawn_model(
                 &bridge.prefs.advanced.saved_models,
                 scheduled_profile.as_ref(),
                 interactive_model_override.as_deref(),
                 scheduled_unattended,
-            )
+            )?;
+            scheduled_model_ref = model.as_ref().and_then(|selected| {
+                pinned_scheduled_catalog_reference(selected, pins_scheduled_model)
+            });
+            Ok(model)
         })?;
         // Community 默认准备路径固定 passthrough：模型原样保留，不注入运行时
         // 凭据/revision；凭据照常走环境变量与本地凭据库（bridge.api_key()）。
@@ -2673,6 +2678,7 @@ impl EnginePool {
             &mut bridge,
             RuntimeModelRequest {
                 session_id: session_id.to_string(),
+                scheduled_model_ref,
                 model: selected,
                 scheduled_unattended,
             },
@@ -5809,6 +5815,13 @@ where
     }
 }
 
+fn pinned_scheduled_catalog_reference(
+    model: &SavedModel,
+    pins_scheduled_model: bool,
+) -> Option<String> {
+    (pins_scheduled_model && model.is_builtin_account_platform()).then(|| model.model.clone())
+}
+
 fn resolve_scheduled_model(
     models: &[SavedModel],
     profile: &ScheduledRunProfile,
@@ -5820,6 +5833,14 @@ fn resolve_scheduled_model(
             .with_context(|| {
                 format!("此任务绑定的 AI 模型配置已失效，请重新选择 AI 模型并保存任务。缺失配置：{model_id}")
             })?;
+        if selected.is_builtin_account_platform() {
+            // The built-in record is a mutable carrier for the global default.
+            // A scheduled run keeps its persisted catalog reference; the runtime
+            // provider still validates that reference against the current catalog.
+            let mut bound = selected.clone();
+            bound.model = profile.model.clone();
+            return Ok(bound);
+        }
         if selected.model != profile.model {
             bail!(
                 "此任务绑定的 AI 模型配置已变更，请重新选择 AI 模型并保存任务。配置 {model_id} 从 '{}' 变为 '{}'",
@@ -5924,6 +5945,7 @@ async fn prepare_draft_runtime_model(
             session_id: String::new(),
             model,
             scheduled_unattended: false,
+            scheduled_model_ref: None,
         })
         .await?;
     if prepared.model.id != selected_id {
@@ -7490,6 +7512,7 @@ mod scheduled_model_tests {
                 session_id: "session-managed".to_owned(),
                 model: selected,
                 scheduled_unattended: false,
+                scheduled_model_ref: None,
             },
             None,
             false,
@@ -7535,6 +7558,7 @@ mod scheduled_model_tests {
                     session_id: session_id.to_owned(),
                     model: selected,
                     scheduled_unattended,
+                    scheduled_model_ref: None,
                 },
                 None,
                 false,
@@ -7558,6 +7582,7 @@ mod scheduled_model_tests {
                 session_id: "ordinary-failure".to_owned(),
                 model: selected,
                 scheduled_unattended: false,
+                scheduled_model_ref: None,
             },
             None,
             false,
@@ -7795,6 +7820,113 @@ mod scheduled_model_tests {
         let selected = resolve_scheduled_model(&models, &profile(Some("wanted"), "wire-model"))
             .expect("configured model");
         assert_eq!(selected.id, "wanted");
+    }
+
+    #[test]
+    fn scheduled_catalog_reference_requires_a_pinned_builtin_carrier() {
+        let mut platform = SavedModel::builtin_account_platform();
+        platform.model = "0199a100-0001-7000-8000-000000000106".into();
+        assert_eq!(
+            super::pinned_scheduled_catalog_reference(&platform, true).as_deref(),
+            Some("0199a100-0001-7000-8000-000000000106")
+        );
+        assert_eq!(
+            super::pinned_scheduled_catalog_reference(&platform, false),
+            None
+        );
+        let mut local = model("local", &platform.model);
+        local.name = platform.name;
+        assert_eq!(
+            super::pinned_scheduled_catalog_reference(&local, true),
+            None
+        );
+    }
+
+    #[test]
+    fn scheduled_platform_binding_survives_changing_global_default() {
+        const ORIGINAL: &str = "0199a100-0001-7000-8000-000000000106";
+        const LATER_DEFAULT: &str = "0199a100-0001-7000-8000-000000000107";
+        let mut prefs = crate::platform::prefs::UserPrefs::default();
+        prefs.advanced.saved_models = vec![SavedModel::builtin_account_platform()];
+        prefs
+            .set_default_model_ref(crate::platform::prefs::ModelSelectionRef::account_platform(
+                ORIGINAL,
+            ))
+            .expect("original platform default");
+        let carrier_id = prefs.advanced.saved_models[0].id.clone();
+        let saved = serde_json::to_string(&profile(Some(&carrier_id), ORIGINAL))
+            .expect("persisted scheduled profile");
+        prefs
+            .set_default_model_ref(crate::platform::prefs::ModelSelectionRef::account_platform(
+                LATER_DEFAULT,
+            ))
+            .expect("new conversation default");
+        let restored: ScheduledRunProfile =
+            serde_json::from_str(&saved).expect("restore original task binding");
+        let selected =
+            resolve_spawn_model(&prefs.advanced.saved_models, Some(&restored), None, true)
+                .expect("the saved task is independent of the new default")
+                .expect("bound platform model");
+        assert!(selected.is_builtin_account_platform());
+        assert_eq!(selected.model, ORIGINAL);
+        assert_eq!(restored.model, ORIGINAL);
+        assert_eq!(prefs.advanced.saved_models[0].model, LATER_DEFAULT);
+        assert_eq!(
+            prefs.advanced.default_model_ref,
+            Some(crate::platform::prefs::ModelSelectionRef::account_platform(
+                LATER_DEFAULT
+            ))
+        );
+    }
+
+    #[test]
+    fn scheduled_platform_manual_continuation_keeps_profile_unless_reselected() {
+        let mut carrier = SavedModel::builtin_account_platform();
+        carrier.model = "0199a100-0001-7000-8000-000000000107".into();
+        let task = profile(Some(&carrier.id), "0199a100-0001-7000-8000-000000000106");
+        let models = vec![carrier.clone()];
+        let pinned = resolve_spawn_model(&models, Some(&task), None, false)
+            .expect("manual continuation")
+            .expect("task model");
+        assert_eq!(pinned.model, task.model);
+        let explicit = resolve_spawn_model(&models, Some(&task), Some(&carrier.id), false)
+            .expect("explicit manual reselect")
+            .expect("selected carrier");
+        assert_eq!(explicit.model, carrier.model);
+        assert_eq!(
+            super::pinned_scheduled_catalog_reference(&explicit, false),
+            None
+        );
+        let automatic = resolve_spawn_model(&models, Some(&task), Some(&carrier.id), true)
+            .expect("automatic run ignores manual reselect")
+            .expect("task model");
+        assert_eq!(automatic.model, task.model);
+    }
+
+    #[test]
+    fn scheduled_platform_binding_never_maps_a_legacy_name_to_the_default() {
+        let mut carrier = SavedModel::builtin_account_platform();
+        carrier.model = "0199a100-0001-7000-8000-000000000107".to_string();
+        let saved = profile(Some(&carrier.id), "deepseek-v4-flash");
+        let selected = resolve_scheduled_model(&[carrier], &saved)
+            .expect("retain the original reference for runtime catalog validation");
+        assert_eq!(selected.model, "deepseek-v4-flash");
+        assert_eq!(saved.model, "deepseek-v4-flash");
+        assert!(resolve_scheduled_model(&[], &saved).is_err());
+    }
+
+    #[test]
+    fn scheduled_local_configuration_cannot_claim_platform_binding_by_name() {
+        let mut local = model("saved-local", "changed-wire-model");
+        local.name = SavedModel::builtin_account_platform().name;
+        assert!(!local.is_builtin_account_platform());
+        assert!(
+            resolve_scheduled_model(
+                &[local],
+                &profile(Some("saved-local"), "original-wire-model")
+            )
+            .is_err()
+        );
     }
 
     #[test]

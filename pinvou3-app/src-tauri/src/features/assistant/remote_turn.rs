@@ -1284,6 +1284,7 @@ mod tests {
                     session_id: session_id.to_owned(),
                     model: selected,
                     scheduled_unattended: false,
+                    scheduled_model_ref: None,
                 },
                 None,
                 false,
