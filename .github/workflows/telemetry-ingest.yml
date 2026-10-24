@@ -12,14 +12,14 @@ name: Telemetry Ingest
 
 on:
   push:
-    branches: [master, main]
+    branches: [master, main, pinvou3-clean]
     paths:
       - 'telemetry-ingest/**'
       - 'docs/TELEMETRY.md'
       - 'crates/telemetry/**'
       - '.github/workflows/telemetry-ingest.yml'
   pull_request:
-    branches: [master, main]
+    branches: [master, main, pinvou3-clean]
     paths:
       - 'telemetry-ingest/**'
       - 'docs/TELEMETRY.md'
