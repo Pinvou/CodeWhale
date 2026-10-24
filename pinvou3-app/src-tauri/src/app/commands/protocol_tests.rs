@@ -250,21 +250,33 @@ fn device_commands_are_registered_in_the_handler() {
     }
 }
 
+/// 命令体切分（纯函数，测试直打）：先把 CRLF 归一成 LF 再按独占一行的属性
+/// 切分——.gitattributes 未固定 Rust 文件换行，CRLF 检出下源码里的
+/// `\r\n#[tauri::command]\r\n` 不匹配精确 LF 针，会切出 0 条命令使契约假红
+/// （二十三轮评审 P2）。属性独占一行才算命令（文件头注释里的反引号
+/// `#[tauri::command]` 不算）。
+fn command_bodies(source: &str) -> Vec<String> {
+    source
+        .replace("\r\n", "\n")
+        .split("\n#[tauri::command]\n")
+        .skip(1)
+        .map(str::to_string)
+        .collect()
+}
+
 /// 六条设备命令必须**每条**先过 `ensure_device_supported()` 能力门禁（第二十轮
 /// 评审 P2 的破坏面收口）：从任一命令删掉门禁调用，Rust/JS 全部测试照绿
 /// （二十一轮评审变异实证）。与上一测试同一弱文本锚定模式：每个
 /// `#[tauri::command]` 之后、下一条命令之前的函数体必须含门禁调用。
 #[test]
 fn every_device_command_calls_the_capability_gate() {
-    let source = include_str!("device.rs");
-    // 属性独占一行才算命令（文件头注释里的反引号 `#[tauri::command]` 不算）。
-    let bodies: Vec<&str> = source.split("\n#[tauri::command]\n").skip(1).collect();
+    let bodies = command_bodies(include_str!("device.rs"));
     assert_eq!(
         bodies.len(),
         6,
         "device.rs 命令数量变了，请同步本测试与协议清单"
     );
-    for body in bodies {
+    for body in &bodies {
         let signature_end = body.find('{').expect("command body");
         let name = body[..signature_end]
             .split("fn ")
@@ -276,6 +288,17 @@ fn every_device_command_calls_the_capability_gate() {
             "device 命令 {name} 没有调用 ensure_device_supported() 能力门禁"
         );
     }
+}
+
+#[test]
+fn command_body_split_is_line_ending_agnostic() {
+    let lf = "header\n#[tauri::command]\nfn a() { ensure_device_supported()?; }\n#[tauri::command]\nfn b() { ensure_device_supported()?; }\n";
+    let crlf = lf.replace('\n', "\r\n");
+    assert_eq!(command_bodies(lf).len(), 2);
+    assert_eq!(command_bodies(&crlf).len(), 2, "CRLF 检出不得把命令切丢");
+    assert_eq!(command_bodies(lf), command_bodies(&crlf));
+    // 文件头注释里的反引号属性不是命令（既有口径，归一后仍保持）。
+    assert_eq!(command_bodies("see `#[tauri::command]` docs\n").len(), 0);
 }
 
 /// doctor 上下文的命令路径必须经由带脱敏的组合函数（round-22 评审 P2）：

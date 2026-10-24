@@ -1536,9 +1536,12 @@ mod tests {
                 .and_then(|value| value.driver_version.as_deref()),
             Some("580.02")
         );
-        // 下一拍（2s 轮询）：距完成时刻仅 0.5s，TTL 仍有效——旧锚定下
-        // sampled_at=start，此刻已过期并会重拉。
-        let cached = refresh_gpu_ext_cache(&mut cache, start + Duration::from_secs(2), || {
+        // 下一拍观测窗必须落在「旧锚定已过期、完成锚定仍有效」的判别区间
+        // (start+3s, start+4.5s)：观测早于 start+3s 时旧的进入时刻锚定同样
+        // 未过期，测试区分不了两种锚定（二十三轮评审建议）。取 start+4s：
+        // 完成时刻 start+1.5s，完成锚定余 2.5s 有效——正确实现返回缓存值，
+        // 旧锚定此时已过期、会触发采样函数 panic。
+        let cached = refresh_gpu_ext_cache(&mut cache, start + Duration::from_secs(4), || {
             panic!("TTL anchored at completion must not re-sample within the window")
         });
         assert_eq!(
