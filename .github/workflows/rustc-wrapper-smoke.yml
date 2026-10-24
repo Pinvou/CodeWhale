@@ -251,6 +251,9 @@ jobs:
               for arg in &args {
                   println!("chain_probe_arg=[{}]", arg);
               }
+              if let Ok(code) = std::env::var("CHAIN_PROBE_EXIT") {
+                  std::process::exit(code.parse().expect("CHAIN_PROBE_EXIT must be an integer"));
+              }
           }
           EOF
           rustc -O chain-probe.rs -o chain-probe.exe
@@ -270,3 +273,9 @@ jobs:
           printf '%s\n' "$out" | grep -Fqx 'chain_probe_arg=[rustc]'
           printf '%s\n' "$out" | grep -Fqx 'chain_probe_arg=[--version]'
           printf '%s\n' "$out" | grep -Fqx 'chain_probe_arg=[--verbose]'
+          # 退出码透传(round-23):链上命令的非零退出必须原样穿过 wrapper
+          # (sh 走 exec 天然传播;rs 显式传播 status.code())。此前探针恒退出 0,
+          # 该半边契约在 CI 零断言。信号死亡的 rs 折叠系已披露边界,此处只钉退出码。
+          chain_status=0
+          CHAIN_PROBE_EXIT=42 RUSTC_WRAPPER_CHAIN="$PWD/chain-probe.exe" "$wrapper" rustc --version --verbose >/dev/null || chain_status=$?
+          test "$chain_status" -eq 42

@@ -460,6 +460,75 @@ class ValidateCommitRangeTests(unittest.TestCase):
             self.assertEqual(validate_commit_msg.validate_range("base", "head"), [])
 
 
+class ShallowCloneEndToEndTests(unittest.TestCase):
+    """Real depth-1 clones with the shallow probe UNmocked (the range
+    suite above forces `_in_shallow_clone` False in setUp for hermeticity,
+    so it can never exercise the armed path)."""
+
+    def test_depth_one_clone_end_to_end_exempts_merge_and_validates_plain_head(self) -> None:
+        # Round-23: closes the disclosed test-debt — the two shallow-path unit
+        # tests patch BOTH `_in_shallow_clone` and `_raw_parents`, so the real
+        # `.git/shallow` probe and the raw-object parent read never ran under
+        # test (a `return False` mutation of the probe killed nothing). Build
+        # a real repo, depth-1 clone it, and drive validate_range through the
+        # armed path: a merge head at the graft boundary is exempt, a plain
+        # head with a forged body `parent` line is still validated.
+        def git(cwd: Path, *args: str) -> str:
+            out = subprocess.run(
+                ("git", *args), cwd=cwd, check=True, capture_output=True, text=True,
+            )
+            return out.stdout.strip()
+
+        def seed(repo: Path) -> None:
+            repo.mkdir()
+            git(repo, "init", "-q", "-b", "main")
+            git(repo, "config", "user.name", "Test User")
+            git(repo, "config", "user.email", "test@example.com")
+            git(repo, "config", "commit.gpgsign", "false")
+            Path(repo, "f.txt").write_text("one\n", encoding="utf-8")
+            git(repo, "add", ".")
+            git(
+                repo, "commit", "-q", "-m",
+                "fix: 合法主题\n\nSigned-off-by: Test User <test@example.com>",
+            )
+
+        absent_base = "0" * 40
+        with tempfile.TemporaryDirectory() as td:
+            merge_src = Path(td, "merge-src")
+            seed(merge_src)
+            git(merge_src, "checkout", "-q", "-b", "side")
+            git(merge_src, "commit", "-q", "--allow-empty", "-m", "fix: side")
+            git(merge_src, "checkout", "-q", "main")
+            git(merge_src, "merge", "-q", "--no-ff", "-m", "Merge branch 'side'", "side")
+            merge_clone = Path(td, "merge-clone")
+            git(Path(td), "clone", "-q", "--depth", "1", merge_src.as_uri(), str(merge_clone))
+            with contextlib.chdir(merge_clone):
+                self.assertTrue(validate_commit_msg._in_shallow_clone())
+                head = git(merge_clone, "rev-parse", "HEAD")
+                # %P is grafted empty at the boundary; only the raw object
+                # reveals the two parents that make this head exempt
+                self.assertEqual(len(validate_commit_msg._raw_parents(head)), 2)
+                self.assertEqual(
+                    validate_commit_msg.validate_range(absent_base, head), []
+                )
+
+            plain_src = Path(td, "plain-src")
+            seed(plain_src)
+            git(
+                plain_src, "commit", "-q", "--allow-empty", "-m",
+                "not-a-type: 伪造豁免\n\nparent "
+                "1234567890123456789012345678901234567890",
+            )
+            plain_clone = Path(td, "plain-clone")
+            git(Path(td), "clone", "-q", "--depth", "1", plain_src.as_uri(), str(plain_clone))
+            with contextlib.chdir(plain_clone):
+                self.assertTrue(validate_commit_msg._in_shallow_clone())
+                head = git(plain_clone, "rev-parse", "HEAD")
+                errors = validate_commit_msg.validate_range(absent_base, head)
+                self.assertTrue(errors, "forged-parent plain head must still be validated")
+                self.assertTrue(any("not-a-type" in e or "主题" in e or "subject" in e.lower() for e in errors), errors)
+
+
 class HistoricalSquashSignoffTests(unittest.TestCase):
     def setUp(self) -> None:
         # Round-13: same hermetic rule as ValidateCommitRangeTests — these

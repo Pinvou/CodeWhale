@@ -112,6 +112,19 @@ def iter_lock_files():
                 yield os.path.join(root, name)
 
 
+def _targets_linux(os_field):
+    """True when a package's `os` field names linux. npm writes a list of
+    lowercase platform names, but the guard normalizes anyway (round-23:
+    the old `== ["linux"]` equality let `["linux", "darwin"]`, a bare
+    "linux" string, or a capitalized name slip past the libc strip
+    signature)."""
+    if isinstance(os_field, str):
+        os_field = [os_field]
+    if not isinstance(os_field, list):
+        return False
+    return any(isinstance(name, str) and name.strip().lower() == "linux" for name in os_field)
+
+
 def main():
     failures = []
     lock_files = sorted(iter_lock_files())
@@ -149,15 +162,25 @@ def main():
                 "over nothing; regenerate the lock with npm (the root "
                 '"" entry must exist)'
             )
-        mirror_urls = sorted(
-            f"{pkg}: {entry.get('resolved')}"
-            for pkg, entry in lock.get("packages", {}).items()
-            if isinstance(entry, dict)
-            and any(
-                marker in (entry.get("resolved") or "").lower()
-                for marker in MIRROR_HOST_MARKERS
-            )
-        )
+        mirror_urls = []
+        for pkg, entry in lock.get("packages", {}).items():
+            if not isinstance(entry, dict):
+                continue
+            resolved = entry.get("resolved")
+            if resolved is None:
+                continue
+            if not isinstance(resolved, str):
+                # round-23: a non-string `resolved` used to crash the scan
+                # with a traceback (still non-zero, but unreadable) — npm
+                # never writes one, so report it as corruption instead.
+                failures.append(
+                    f"{rel}: {pkg}: `resolved` is not a string "
+                    f"({type(resolved).__name__}) — corrupt lock entry"
+                )
+                continue
+            if any(marker in resolved.lower() for marker in MIRROR_HOST_MARKERS):
+                mirror_urls.append(f"{pkg}: {resolved}")
+        mirror_urls.sort()
         if mirror_urls:
             failures.append(
                 f"{rel}: {len(mirror_urls)} resolved URLs point at a "
@@ -174,10 +197,21 @@ def main():
                 marker = pkg.find("@img/")
                 if marker < 0:
                     continue
+                table_key = pkg[marker:]
                 if "libc" in entry:
-                    hub_libc[pkg[marker:]] = entry["libc"]
-                elif entry.get("os") == ["linux"]:
-                    hub_linux_without_libc.append(pkg[marker:])
+                    if table_key in hub_libc and hub_libc[table_key] != entry["libc"]:
+                        # round-23: duplicate table entries (a nested
+                        # node_modules copy) disagreeing on libc used to be
+                        # last-write-wins — the wrong-ABI copy could hide
+                        failures.append(
+                            f"team-relay-hub/package-lock.json: {pkg} carries "
+                            f"libc={entry['libc']} but another copy of "
+                            f"{table_key} carries libc={hub_libc[table_key]} "
+                            f"— duplicate entries must agree"
+                        )
+                    hub_libc.setdefault(table_key, entry["libc"])
+                elif _targets_linux(entry.get("os")):
+                    hub_linux_without_libc.append((pkg, table_key))
     if hub_libc is None:
         # Round-13 review: distinguish "absent" from "present but
         # unreadable" — the unreadable path above already reported the
@@ -212,13 +246,24 @@ def main():
         # this catches the strip on a linux platform package the table has
         # never heard of (a sharp bump that adds one), where the set
         # difference alone stays silent.
-        for pkg in sorted(set(hub_linux_without_libc) - set(expected)):
+        # Round-23: keyed by the FULL package path — a nested duplicate
+        # (`node_modules/sharp/node_modules/@img/...`) stripped of libc used
+        # to be shadowed by its top-level copy and skipped silently. A table
+        # package whose EVERY copy lost libc is already reported as
+        # "stripped" above; everything else lands here.
+        for pkg, table_key in sorted(hub_linux_without_libc):
+            if table_key in expected and table_key not in hub_libc:
+                continue
             failures.append(
                 f"team-relay-hub/package-lock.json: linux @img/* package {pkg} "
-                f"carries no libc field (os=[\"linux\"] without libc is the "
+                f"carries no libc field (a linux os entry without libc is the "
                 f"npm < 11.11 strip signature) — regenerate with npm >= 11.11 "
-                f"or restore the field, then add the package to "
-                f"EXPECTED_TEAM_RELAY_HUB_LIBC"
+                f"or restore the field"
+                + (
+                    ""
+                    if table_key in expected
+                    else ", then add the package to EXPECTED_TEAM_RELAY_HUB_LIBC"
+                )
             )
         for pkg in sorted(set(expected) & set(hub_libc)):
             if hub_libc[pkg] != expected[pkg]:

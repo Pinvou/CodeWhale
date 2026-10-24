@@ -1435,15 +1435,18 @@ jobs:
           submodules: false
 
       # benchmark-hooks all-targets 编译会显著放大 target 目录;与 rust-test /
-      # cli-test 同款磁盘清理(同样先清盘再扩 swap:swap 落盘会先吃掉 8-16GiB
-      # 磁盘),避免 clippy/check 阶段 No space left on device。Draft 只跑 fmt
-      # 快检,不产生编译放大,跳过本 step 省下每次 draft push 约 1-3 分钟。
+      # 同款磁盘清理(同样先清盘再扩 swap:swap 落盘会先吃掉 8-16GiB 磁盘),
+      # 避免 clippy/check 阶段 No space left on device。余量门与 rust-test 腿
+      # 对齐为 24 GiB(round-23:本腿 all-targets clippy ×2 + doc 的 target
+      # 体量接近 rust-test,而 swap 先占 8-16GiB,12 GiB 默认门在 zram 退化
+      # 跑上可能在缓存恢复时 ENOSPC)。Draft 只跑 fmt 快检,不产生编译放大,
+      # 跳过本 step 省下每次 draft push 约 1-3 分钟。
       - name: Prepare Rust disk capacity
         if: ${{ env.RUN_HEAVY_RUST_CHECKS == 'true' }}
         run: |
           sudo env GITHUB_WORKSPACE="$GITHUB_WORKSPACE" \
             RUNNER_ENVIRONMENT="$RUNNER_ENVIRONMENT" \
-            python3 scripts/ci-rust-disk.py
+            python3 scripts/ci-rust-disk.py --min-free-gib 24
 
       - name: Set up zram and swap
         # 内存扩容为尽力而为:超时/失败只告警不阻断(回退 runner 默认内存)。

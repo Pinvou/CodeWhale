@@ -344,6 +344,32 @@ def _extract_job_level_if(job_block):
     return "\n".join(folded)
 
 
+def _step_if_value(step_text):
+    """Value of a step-level `if:` (8-space key) with whitespace normalized
+    to single spaces — a single-line `${{ ... }}` and a folded `>-`/`>`
+    block compare equal. Round-23: the deny-step routing pins compared the
+    raw single-line text, so a semantics-preserving fold of the condition
+    (the shape main adopted for its job-level ifs in #745) false-redded
+    them. Returns None when the step carries no `if:`."""
+    lines = step_text.splitlines()
+    for index, line in enumerate(lines):
+        match = re.match(r"^        if:(.*)$", line)
+        if match is None:
+            continue
+        value = match.group(1).strip()
+        if value in (">-", ">", "|", "|-"):
+            folded = []
+            for following in lines[index + 1 :]:
+                if not following.strip():
+                    break
+                if len(following) - len(following.lstrip(" ")) <= 8:
+                    break
+                folded.append(following.strip())
+            value = " ".join(folded)
+        return " ".join(value.split())
+    return None
+
+
 _STEP_NAME = re.compile(r"^      - name: (.*)$")
 
 
@@ -1586,7 +1612,7 @@ class CiGatePolicyTests(unittest.TestCase):
         self.assertNotIn("continue-on-error", step)
         self.assertNotIn(
             "if:",
-            step,
+            _without_yaml_comments(step),
             "the lock-guard step must run unconditionally in fast-gate",
         )
         # Round-11 review: also pin its POSITION before the submodule
@@ -1618,6 +1644,19 @@ class CiGatePolicyTests(unittest.TestCase):
             rust_test.find(guard_step),
             "test-registry guard must run after the PR-leg build step "
             "(artifact reuse); moving it earlier silently recompiles",
+        )
+        # Round-23: pin the other side of the window too — the reclaim step
+        # deletes the pinvou3_lib-* test binaries the guard's `--list`
+        # consumes; moving the guard below it stayed green while silently
+        # paying the documented ~4-minute relink on every PR.
+        reclaim_step = "- name: 回收已完成的主测试产物"
+        self.assertIn(reclaim_step, rust_test)
+        self.assertLess(
+            rust_test.find(guard_step),
+            rust_test.find(reclaim_step),
+            "test-registry guard must run before the artifact-reclaim step "
+            "(it lists the test binary that step deletes); moving it later "
+            "silently relinks",
         )
         step = rust_test.split(
             "- name: test-registry guard (duplicates + required pins)", maxsplit=1
@@ -1683,7 +1722,7 @@ class CiGatePolicyTests(unittest.TestCase):
         # registry, test-registry guard) ban explicitly.
         self.assertNotIn(
             "if:",
-            step,
+            _without_yaml_comments(step),
             "the manifest contract step must run unconditionally on its leg",
         )
 
@@ -1737,9 +1776,9 @@ class CiGatePolicyTests(unittest.TestCase):
                     "advisory-ignore routing and unused-ignored-advisory "
                     "semantics are version-sensitive)",
                 )
-                self.assertIn(
-                    f"if: ${{{{ {route_condition} }}}}",
-                    install_code,
+                self.assertEqual(
+                    _step_if_value(install_code),
+                    " ".join(f"${{{{ {route_condition} }}}}".split()),
                     f"{job}: the deny install step's routing condition "
                     "drifted — the gate must run exactly when the shared "
                     "deny.toml's inputs change",
@@ -1760,9 +1799,9 @@ class CiGatePolicyTests(unittest.TestCase):
                     f"{job}: the check must target the shared src-tauri "
                     "deny.toml (explicitly or via working-directory)",
                 )
-                self.assertIn(
-                    f"if: ${{{{ {route_condition} }}}}",
-                    code,
+                self.assertEqual(
+                    _step_if_value(code),
+                    " ".join(f"${{{{ {route_condition} }}}}".split()),
                     f"{job}: the deny check step's `if:` drifted — flipping "
                     "it (to `false` or a weaker condition) would silently "
                     "disarm the advisories/yanked hard gate",
@@ -1785,18 +1824,20 @@ class CiGatePolicyTests(unittest.TestCase):
             for line in deny_toml.splitlines()
             if not line.lstrip().startswith("#")
         )
-        self.assertIn(
-            'yanked = "deny"',
-            deny_code,
-            "deny.toml must keep yanked = \"deny\" on an executable line — "
-            "a silent downgrade to warn reopens the ecosystem-drift hole",
-        )
-        self.assertNotIn(
-            'yanked =',
-            deny_code.replace('yanked = "deny"', ""),
-            "the yanked setting must appear exactly once and as \"deny\" — "
-            "a second executable yanked line (e.g. a warn fallback) would "
-            "silently override the strict value",
+        # Round-23: match whole executable LINES — a substring check could
+        # be satisfied by the literal text inside a TOML string elsewhere
+        # while the real key was absent.
+        yanked_lines = [
+            line.split("#", 1)[0].strip()
+            for line in deny_code.splitlines()
+            if line.split("#", 1)[0].strip().startswith("yanked")
+        ]
+        self.assertEqual(
+            yanked_lines,
+            ['yanked = "deny"'],
+            "deny.toml must carry exactly one executable `yanked = \"deny\"` "
+            "line — a silent downgrade to warn, a second yanked line, or a "
+            "removed key reopens the ecosystem-drift hole",
         )
 
     def test_deny_toml_unused_ignore_self_enforcement_pinned(self):
@@ -1816,12 +1857,19 @@ class CiGatePolicyTests(unittest.TestCase):
             for line in deny_toml.splitlines()
             if not line.lstrip().startswith("#")
         )
-        self.assertIn(
-            'unused-ignored-advisory = "deny"',
-            deny_code,
-            "deny.toml must keep unused-ignored-advisory = \"deny\" on an "
-            "executable line — without it an advisory ignore outliving its "
-            "advisory is silent instead of failing the deny gate",
+        unused_lines = [
+            line.split("#", 1)[0].strip()
+            for line in deny_code.splitlines()
+            if line.split("#", 1)[0].strip().startswith("unused-ignored-advisory")
+        ]
+        self.assertEqual(
+            unused_lines,
+            ['unused-ignored-advisory = "deny"'],
+            "deny.toml must carry exactly one executable "
+            "`unused-ignored-advisory = \"deny\"` line — without it an "
+            "advisory ignore outliving its advisory is silent instead of "
+            "failing the deny gate (round-23: line-anchored and unique, like "
+            "the yanked pin)",
         )
 
     def test_deny_toml_bans_the_crypto_bigint_vulnerable_window(self):
@@ -1925,7 +1973,11 @@ class CiGatePolicyTests(unittest.TestCase):
         # Round-20 review: only the command's existence was pinned, not its
         # arguments — appending `--min-free-gib 1` (ENOSPC gate at an
         # empty-disk level) kept every gate-policy test green. Pin the
-        # exact recipe the way the rust-test sibling steps do.
+        # exact recipe the way the rust-test sibling steps do. Round-23:
+        # the floor is the rust-test value (24 GiB) — swap lands on disk
+        # first (8-16 GiB) and this leg's all-targets clippy/doc target is
+        # rust-test-sized, so the 12 GiB default could ENOSPC at cache
+        # restore on a zram-degraded runner.
         body = "\n".join(
             line
             for line in disk_step.splitlines()
@@ -1935,20 +1987,19 @@ class CiGatePolicyTests(unittest.TestCase):
             "run: |\n"
             '          sudo env GITHUB_WORKSPACE="$GITHUB_WORKSPACE" \\\n'
             '            RUNNER_ENVIRONMENT="$RUNNER_ENVIRONMENT" \\\n'
-            "            python3 scripts/ci-rust-disk.py",
+            "            python3 scripts/ci-rust-disk.py --min-free-gib 24",
             body,
             "rust-lint's disk step must keep the sibling recipe shape "
-            "(sudo env prefix, script with no flags)",
+            "(sudo env prefix, 24 GiB floor like rust-test)",
         )
         for line in body.splitlines():
             if "ci-rust-disk.py" in line:
                 self.assertEqual(
                     line.strip(),
-                    "python3 scripts/ci-rust-disk.py",
-                    "the disk-clean command must stay argument-free — an "
-                    "argument (e.g. --min-free-gib) retunes the ENOSPC gate "
-                    "with no other test noticing; change it here and in the "
-                    "rust-test recipe together",
+                    "python3 scripts/ci-rust-disk.py --min-free-gib 24",
+                    "the disk-clean command must keep the exact 24 GiB floor "
+                    "— retuning the ENOSPC gate (lower, or argument-free "
+                    "12 GiB default) must land as a deliberate change here",
                 )
         self.assertNotIn("|| true", disk_step)
 
@@ -5179,6 +5230,10 @@ class CiGatePolicyTests(unittest.TestCase):
             "printf '%s\\n' \"$out\" | grep -Fqx 'chain_probe_arg=[rustc]'",
             "printf '%s\\n' \"$out\" | grep -Fqx 'chain_probe_arg=[--version]'",
             "printf '%s\\n' \"$out\" | grep -Fqx 'chain_probe_arg=[--verbose]'",
+            # round-23: exit-code half of the delegation contract
+            'CHAIN_PROBE_EXIT=42 RUSTC_WRAPPER_CHAIN="$PWD/chain-probe.exe" '
+            '"$wrapper" rustc --version --verbose >/dev/null || chain_status=$?',
+            'test "$chain_status" -eq 42',
         ):
             self.assertIn(
                 assertion_line,

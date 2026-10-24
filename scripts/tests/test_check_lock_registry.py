@@ -165,6 +165,53 @@ class LockRegistryGuardTests(unittest.TestCase):
         self.assertIn("no libc field", err)
         self.assertIn("sharp-linux-loong64", err)
 
+    def test_nested_duplicate_table_package_without_libc_fails(self):
+        # Round-23: a nested copy (`node_modules/sharp/node_modules/@img/...`)
+        # stripped of libc shared the sliced table key with its healthy
+        # top-level copy, so neither the "stripped" set difference nor the
+        # structural rule (which subtracted the whole table) saw it.
+        lock = _lock()
+        first = next(iter(guard.EXPECTED_TEAM_RELAY_HUB_LIBC))
+        name = first[len("@img/") :]
+        lock["packages"]["node_modules/sharp/node_modules/" + first] = {
+            "resolved": f"https://registry.npmjs.org/@img/{name}/-/{name}-0.35.5.tgz",
+            "os": ["linux"],
+        }
+        code, err = self._run({"team-relay-hub/package-lock.json": json.dumps(lock)})
+        self.assertEqual(code, 1)
+        self.assertIn("node_modules/sharp/node_modules/" + first, err)
+        self.assertIn("no libc field", err)
+        self.assertNotIn("libc field stripped", err)
+
+    def test_os_field_variants_still_trigger_the_strip_signature(self):
+        # Round-23: the structural rule compared `os == ["linux"]` exactly, so
+        # a multi-platform list, a bare string, or a capitalized name slipped
+        # past it with the libc missing.
+        for os_field in (["linux", "darwin"], "linux", ["Linux"]):
+            with self.subTest(os=os_field):
+                bumped = _lock()
+                bumped["packages"]["node_modules/@img/sharp-linux-loong64"] = {
+                    "resolved": "https://registry.npmjs.org/@img/sharp-linux-loong64/-/sharp-linux-loong64-0.36.0.tgz",
+                    "os": os_field,
+                }
+                code, err = self._run(
+                    {"team-relay-hub/package-lock.json": json.dumps(bumped)}
+                )
+                self.assertEqual(code, 1)
+                self.assertIn("sharp-linux-loong64", err)
+                self.assertIn("no libc field", err)
+
+    def test_non_string_resolved_is_reported_not_crashed(self):
+        # Round-23: `resolved: 12345` raised AttributeError (traceback exit,
+        # not a structured failure) — npm never writes it, so it is lock
+        # corruption and must be named as such.
+        lock = _lock()
+        lock["packages"]["node_modules/left-pad"]["resolved"] = 12345
+        code, err = self._run({"team-relay-hub/package-lock.json": json.dumps(lock)})
+        self.assertEqual(code, 1)
+        self.assertIn("`resolved` is not a string", err)
+        self.assertNotIn("Traceback", err)
+
     def test_new_linux_img_package_with_libc_is_reported_as_unexpected(self):
         # Same bump, healthy lock: not the strip signature — it stays on the
         # "unexpected package" path that asks for a table update instead.
