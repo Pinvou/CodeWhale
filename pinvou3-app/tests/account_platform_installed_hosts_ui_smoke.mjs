@@ -10,6 +10,43 @@ const server=await createServer({root,configFile:false,plugins:[react()],cacheDi
 const browser=await puppeteer.launch({executablePath:browserPath,headless:true,args:['--disable-gpu']});
 let pass=0,fail=0;const results=[];
 async function run(name,query,action){const page=await browser.newPage();page.setDefaultTimeout(5000);const errors=[];page.on('pageerror',e=>errors.push(e.message));try{await page.goto(server.resolvedUrls.local[0]+'tests/fixtures/f10-installed-hosts.html?'+query);await page.waitForFunction(()=>window.installed&&document.querySelector('main'));await action(page);assert.deepEqual(errors,[]);pass++;results.push({name,pass:true});}catch(e){fail++;results.push({name,pass:false,error:e.message,diagnostic:await page.evaluate(()=>({text:document.body.innerText,calls:window.installed?.calls})).catch(()=>null)});}finally{await page.close();}}
+async function openFinanceCorrection(page) {
+  await page.waitForFunction(() => document.querySelector('.adm-panel') && [...document.querySelectorAll('.adm-panel nav button')].some(button => button.textContent === window.installed.entitlementCorrectionCopy.zh.title));
+  await page.evaluate(() => [...document.querySelectorAll('.adm-panel nav button')].find(button => button.textContent === window.installed.entitlementCorrectionCopy.zh.title).click());
+  await page.waitForSelector('section form input');
+}
+async function prepareFinanceCorrection(page) {
+  await page.evaluate(() => {
+    const inputs = [...document.querySelectorAll('section form input')];
+    const set = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value').set;
+    for (const [index, value] of [window.installed.id(5), window.installed.id(6), 'PRODUCT_SPLIT_CORRECTION'].entries()) {
+      set.call(inputs[index], value); inputs[index].dispatchEvent(new Event('input', { bubbles: true }));
+    }
+  });
+  await page.evaluate(() => [...document.querySelectorAll('button')].find(button => button.textContent === window.installed.entitlementCorrectionCopy.zh.precheck).click());
+  await page.waitForSelector('textarea');
+  await page.evaluate(() => {
+    const input = document.querySelector('textarea');
+    Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, 'value').set.call(input, 'Verified payment product split evidence');
+    input.dispatchEvent(new Event('input', { bubbles: true }));
+  });
+}
+async function submitFinanceCorrection(page) {
+  await page.waitForFunction(() => [...document.querySelectorAll('button')].some(button => button.textContent === window.installed.entitlementCorrectionCopy.zh.submit && !button.disabled));
+  await page.evaluate(() => [...document.querySelectorAll('button')].find(button => button.textContent === window.installed.entitlementCorrectionCopy.zh.submit).click());
+}
+async function waitCorrectionUnknown(page) {
+  await page.waitForFunction(() => document.body.textContent.includes(window.installed.entitlementCorrectionCopy.zh.recoveryPending) && [...document.querySelectorAll('button')].some(button => button.textContent === window.installed.financeCopy.zh.retry && !button.disabled));
+}
+async function retireFinanceVersion(page) {
+  const priorForm = await page.$('section form');
+  const reads = await page.evaluate(() => window.installed.calls.filter(call => call.url === '/api/account/v1/account/bootstrap').length);
+  await page.evaluate(() => { window.installed.platformVersion++; window.dispatchEvent(new Event('focus')); });
+  await page.waitForFunction(count => window.installed.calls.filter(call => call.url === '/api/account/v1/account/bootstrap').length > count, {}, reads);
+  await page.waitForFunction(form => !form.isConnected, {}, priorForm);
+  await priorForm.dispose();
+  await waitCorrectionUnknown(page);
+}
 try{
  for(const language of ['zh','en','ja']) {
   await run('personal closure host and real BFF write '+language,'mode=personal&language='+language,async page=>{await page.waitForFunction(()=>[...document.querySelectorAll('button')].some(b=>b.textContent===window.installed.accountClosureCopy[window.installed.language].start));await page.evaluate(()=>[...document.querySelectorAll('button')].find(b=>b.textContent===window.installed.accountClosureCopy[window.installed.language].start).click());await page.waitForSelector('form[role="alertdialog"] input');await page.type('form[role="alertdialog"] input','CLOSE_MY_ACCOUNT');await page.$eval('form[role="alertdialog"]',form=>form.requestSubmit());await page.waitForFunction(()=>document.body.textContent.includes(window.installed.accountClosureCopy[window.installed.language].stages.CLOSURE_REQUESTED));assert.ok(await page.evaluate(()=>window.installed.calls.some(c=>c.method==='POST'&&c.headers['Idempotency-Key']&&c.headers['X-CSRF-Token']==='controlled-csrf'&&JSON.parse(c.body).confirmation==='CLOSE_MY_ACCOUNT')));});
@@ -71,6 +108,79 @@ try{
   await page.evaluate(()=>[...document.querySelectorAll('button')].find(b=>b.textContent===window.installed.entitlementCorrectionCopy.zh.precheck).click());
   await page.waitForSelector('[role="alert"]');assert.equal(await page.$('textarea'),null);
   assert.equal(await page.evaluate(()=>window.installed.calls.some(c=>c.url==='/api/admin/approvals/requests'&&c.method==='POST')),false);
+ });
+ await run('ENT Finance composite owner completes precheck, draft and submit','mode=ent&section=finance',async page=>{
+  await openFinanceCorrection(page); await prepareFinanceCorrection(page); await submitFinanceCorrection(page);
+  await page.waitForSelector('section article');
+  const result = await page.evaluate(() => ({ calls:window.installed.calls, status:window.installed.ent.status, effects:window.installed.ent.effects, intent:window.installed.entitlementIntent() }));
+  assert.equal(result.status,'SUBMITTED'); assert.equal(result.effects,1); assert.equal(result.intent,null);
+  assert.equal(result.calls.filter(call=>call.url.endsWith('approval-command-prechecks')).length,1);
+  const writes = result.calls.filter(call=>call.url==='/api/admin/approvals/requests'&&call.method==='POST');
+  assert.equal(writes.length,1); assert.match(writes[0].body, /"wallet_version":9007199254740993/);
+  assert.ok(result.calls.some(call=>call.url.endsWith('/actions/submit')&&call.method==='POST'));
+ });
+ await run('ENT Finance UNKNOWN keeps original actor, edit CAS, facts and key after version retirement','mode=ent&section=finance&lose-entitlement-edit',async page=>{
+  await openFinanceCorrection(page);
+  await page.evaluate(()=>{window.installed.ent.created=true;window.installed.ent.version=7;});
+  await prepareFinanceCorrection(page); await submitFinanceCorrection(page); await waitCorrectionUnknown(page);
+  const frozen = await page.evaluate(()=>window.installed.entitlementIntent());
+  assert.equal(frozen.actor,'00000000-0000-4000-8000-000000000001'); assert.equal(frozen.editReference.existing.version,7);
+  assert.equal(frozen.editReference.existing.approval_request_id,'00000000-0000-4000-8000-000000000009');
+  await page.evaluate(()=>{window.installed.ent.facts.critical_resource_versions.wallet_version='9223372036854775807';});
+  await retireFinanceVersion(page);
+  assert.deepEqual(await page.evaluate(()=>window.installed.entitlementIntent()),frozen);
+  assert.equal(await page.$('section article'),null);
+  assert.equal(await page.evaluate(()=>window.installed.calls.filter(call=>call.method==='PUT').length),1);
+  await page.evaluate(()=>[...document.querySelectorAll('button')].find(button=>button.textContent===window.installed.financeCopy.zh.retry).click());
+  await page.waitForSelector('section article');
+  const result = await page.evaluate(()=>({ calls:window.installed.calls, status:window.installed.ent.status, intent:window.installed.entitlementIntent() }));
+  const updates = result.calls.filter(call=>call.method==='PUT');
+  assert.equal(updates.length,2); assert.equal(updates[1].body,updates[0].body);
+  assert.equal(JSON.parse(updates[1].body).expected_version,7);
+  assert.equal(JSON.parse(updates[1].body).idempotency_key,'approval:'+frozen.key);
+  assert.match(updates[1].body,/"wallet_version":9007199254740993/);
+  assert.equal(result.calls.filter(call=>call.url==='/api/admin/approvals/requests'&&call.method==='POST').length,0);
+  assert.equal(result.status,'SUBMITTED'); assert.equal(result.intent,null);
+ });
+ await run('ENT Finance retired version ignores late success and explicitly recovers only the same invocation','mode=ent&section=finance&hold-entitlement-create',async page=>{
+  await openFinanceCorrection(page); await prepareFinanceCorrection(page); await submitFinanceCorrection(page);
+  await page.waitForFunction(()=>typeof window.installed.releaseEntitlementCreate==='function');
+  const frozen = await page.evaluate(()=>window.installed.entitlementIntent());
+  await retireFinanceVersion(page);
+  assert.deepEqual(await page.evaluate(()=>window.installed.entitlementIntent()),frozen);
+  assert.equal(await page.evaluate(()=>window.installed.calls.filter(call=>call.url==='/api/admin/approvals/requests'&&call.method==='POST').length),1);
+  await page.evaluate(()=>window.installed.releaseEntitlementCreate());
+  await page.waitForFunction(()=>window.installed.ent.status==='SUBMITTED'&&window.installed.calls.filter(call=>call.url.endsWith('/00000000-0000-4000-8000-000000000009')&&call.method==='GET').length>=2);
+  await page.evaluate(()=>new Promise(resolve=>requestAnimationFrame(()=>requestAnimationFrame(resolve))));
+  assert.equal(await page.$('section article'),null,'retired completion cannot display a receipt in the current version');
+  await waitCorrectionUnknown(page);
+  await page.evaluate(()=>[...document.querySelectorAll('button')].find(button=>button.textContent===window.installed.financeCopy.zh.retry).click());
+  await page.waitForSelector('section article');
+  const result = await page.evaluate(()=>({ calls:window.installed.calls, effects:window.installed.ent.effects, intent:window.installed.entitlementIntent() }));
+  const creates = result.calls.filter(call=>call.url==='/api/admin/approvals/requests'&&call.method==='POST');
+  assert.equal(creates.length,3); assert.ok(creates.every(call=>call.body===creates[0].body));
+  assert.equal(JSON.parse(creates[0].body).idempotency_key,'approval:'+frozen.key);
+  assert.equal(result.effects,1); assert.equal(result.intent,null);
+ });
+ await run('ENT Finance another actor cannot adopt the prior UNKNOWN proof','mode=ent&section=finance&lose-entitlement-create',async page=>{
+  await openFinanceCorrection(page); await prepareFinanceCorrection(page); await submitFinanceCorrection(page); await waitCorrectionUnknown(page);
+  const frozen = await page.evaluate(()=>window.installed.entitlementIntent());
+  await page.evaluate(()=>window.installed.switchUser());
+  await openFinanceCorrection(page);
+  assert.equal(await page.evaluate(()=>window.installed.entitlementIntent()),null);
+  assert.equal(await page.$('textarea'),null);
+  assert.equal(await page.evaluate(()=>window.installed.calls.filter(call=>call.url==='/api/admin/approvals/requests'&&call.method==='POST').length),1);
+  assert.deepEqual(await page.evaluate(actor=>JSON.parse(sessionStorage.getItem('pinvou.entitlement-correction.intent.v1:'+actor)),frozen.actor),frozen);
+ });
+ await run('ENT Finance storage denial blocks dispatch before history or draft writes','mode=ent&section=finance',async page=>{
+  await openFinanceCorrection(page); await prepareFinanceCorrection(page);
+  await page.evaluate(()=>{
+    const original = Storage.prototype.setItem;
+    Storage.prototype.setItem=function(key,value){if(key.startsWith('pinvou.entitlement-correction.intent.v1:'))throw new Error('Controlled entitlement storage denial');return original.call(this,key,value);};
+  });
+  await submitFinanceCorrection(page);
+  await page.waitForFunction(()=>document.querySelector('[role="alert"]')?.textContent===window.installed.entitlementCorrectionCopy.zh.recoveryUnavailable);
+  assert.equal(await page.evaluate(()=>window.installed.calls.some(call=>call.url.startsWith('/api/admin/approvals/requests'))),false);
  });
  await run('missing closure grants hide both entry and API read','mode=personal&deny',async page=>{await page.waitForFunction(()=>window.installed.calls.some(c=>c.url==='/api/account/v1/me/organizations'));assert.equal(await page.evaluate(()=>document.body.textContent.includes(window.installed.accountClosureCopy.zh.title)),false);assert.equal(await page.evaluate(()=>window.installed.calls.some(c=>c.url.includes('account-closure'))),false);});
  await run('closure authoritative read failure cannot enable mutation','mode=personal&error',async page=>{await page.waitForFunction(()=>document.body.textContent.includes(window.installed.accountClosureCopy.zh.queryFailed));assert.equal(await page.evaluate(()=>[...document.querySelectorAll('button')].some(b=>b.textContent===window.installed.accountClosureCopy.zh.start)),false);});

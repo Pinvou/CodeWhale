@@ -7,6 +7,7 @@ import { entitlementIntentStorage, entitlementEditReferences } from './entitleme
 
 export function AdminEntitlementCorrectionWorkspace({ client, copy, language, permissions, owner }) {
   const text = entitlementCorrectionCopy[language];
+  const actor = owner.split(':')[0];
   const [packageID, setPackageID] = useState(''), [orderID, setOrderID] = useState('');
   const [reasonCode, setReasonCode] = useState(''), [reason, setReason] = useState('');
   const [precheck, setPrecheck] = useState(null), [receipt, setReceipt] = useState(null);
@@ -48,7 +49,7 @@ export function AdminEntitlementCorrectionWorkspace({ client, copy, language, pe
     const stamp = generation.current;
     const result = await operation.mutate(facts, async (current, key) => {
       setNeedsAuthentication(false);
-      try { return await createAndSubmitFreshGovernedApproval(client, entitlementCorrectionApprovalDraft(current.precheck, current.reasonCode, current.reason, key), undefined, '', entitlementEditReferences(owner, key)); }
+      try { return await createAndSubmitFreshGovernedApproval(client, entitlementCorrectionApprovalDraft(current.precheck, current.reasonCode, current.reason, key), undefined, '', entitlementEditReferences(actor, key)); }
       catch (error) {
         if (stamp === generation.current && error.code === 'RECENT_AUTHENTICATION_REQUIRED') setNeedsAuthentication(true);
         // A later read/submit rejection cannot undo an earlier draft write.
