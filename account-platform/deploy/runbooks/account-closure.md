@@ -28,6 +28,8 @@ Account 028 的原 Down 会移除清理证明、生命周期围栏和保留记�
 
 生产 Account 接注销 worker，复用动态 workload token。精确接收权限：Account→Identity `internal.identity.user.delete`；Account→Billing `internal.billing.account-closure.assess/isolate`；Account→Token `internal.token.account-closure.assess/replay-clear`；Billing→Account `internal.account.closure.read`；Token→Billing `internal.billing.closed-grant.reclaim`。保留原内部 HTTP 服务网络隔离、外部 HTTPS 和 JWT/JWKS/CA 合同；测试静态 Bearer 不是生产身份。先正式迁移及更新接收规则，再发布同源服务镜像和 Portal 产物。前序 F07 HMAC、资格 backfill 和 readiness 必须保持，不能由旧钱包 worker 激活 EVALUATE 请求。
 
+受控 model-token Compose 与 Helm 的接收规则使用 `internal.account.closure.read`、`internal.billing.account-closure.assess/isolate` 和 `internal.billing.closed-grant.reclaim` 四个精确权限，将它们分别授予 Account、Billing、Token 的对应调用主体。Helm 的主体还绑定实际发布名称和命名空间。回收接口继续验证人类委托的 `org.grants.reclaim_closed`；服务权限配置不替代该检查。渲染验证只证明这部分交付接线，不能代替真实部署、注销资金清账或其它 owner 权威端点的验收。
+
 最后叠加 `compose.closure.yaml` 时，原 `account-migrate`、`billing-migrate`、`token-migrate` 均使用 `MIGRATE_IMAGE`。该镜像必须与五个 `*_CLOSURE_IMAGE` 对应同一已审核 F08 源码；不能只更新运行镜像而沿用前序迁移镜像。沿用既有项目、私有环境文件和部署角色执行三域正式迁移及校验，再启动同源运行服务和 Portal。此处是镜像选择前提与配置接线，不代表已核验线上镜像或执行部署。
 
 Account 027/028、赠额 087、钱包索引 093 和前序 Token 硬化 SQL 保持原字节。F08 Token 清理围栏使用独立 900004 身份，避免与已发布 900001 硬化碰撞。正式 Ordered/Up/Verify 保持原角色边界；永久事实的 forward-only Down 拒绝回滚。

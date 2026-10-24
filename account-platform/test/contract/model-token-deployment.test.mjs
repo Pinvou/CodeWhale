@@ -451,8 +451,8 @@ test('workload roles preserve existing permissions and narrowly register credent
 
 const billingWorkloadPermissions = {
   'account-service': [
-    'internal.billing.wallet.ensure', 'internal.billing.registration-bonus.provision', 'internal.billing.account-closure-assessment.read',
-    'internal.billing.account-closure-grants.isolate', 'internal.billing.organization.lifecycle',
+    'internal.billing.wallet.ensure', 'internal.billing.registration-bonus.provision', 'internal.billing.account-closure.assess',
+    'internal.billing.account-closure.isolate', 'internal.billing.organization.lifecycle',
     'internal.billing.organization-unit.lifecycle', 'internal.billing.organization-member.lifecycle',
     'internal.billing.approval-activation.read', 'internal.billing.approval-proof.read', 'internal.billing.approval-effect.read', 'internal.billing.approval-result.read',
   ],
@@ -460,7 +460,7 @@ const billingWorkloadPermissions = {
   'token-gateway': [
     'internal.billing.wallet.ensure', 'internal.billing.wallet.read', 'internal.billing.entitlement.read',
     'internal.billing.hold.reserve', 'internal.billing.hold.extend', 'internal.billing.hold.commit',
-    'internal.billing.hold.release', 'internal.billing.account-closed-grant.reclaim',
+    'internal.billing.hold.release', 'internal.billing.closed-grant.reclaim',
     'internal.billing.pricing.read', 'internal.billing.pricing.bind', 'internal.billing.quota.read',
     'internal.billing.quota.allocate', 'internal.billing.quota.revoke', 'internal.billing.product.read',
     'internal.billing.payment-capability.read', 'internal.billing.recharge-order.create',
