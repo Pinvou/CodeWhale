@@ -23,8 +23,19 @@ var errPortalPrivateCA = errors.New("portal private CA configuration is invalid"
 // Portal client only. It lets server-side OIDC and health calls use private TLS
 // without changing trust for browser-facing/public HTTPS integrations.
 func newPortalHTTPClient(caFile string) (*http.Client, error) {
+	return newPortalHTTPClientPolicy(caFile, false)
+}
+
+func newPortalAuditHTTPClient(caFile string) (*http.Client, error) {
+	return newPortalHTTPClientPolicy(caFile, true)
+}
+
+func newPortalHTTPClientPolicy(caFile string, auditDownload bool) (*http.Client, error) {
 	caFile = strings.TrimSpace(caFile)
 	if caFile == "" {
+		if auditDownload {
+			return portalClientForTransport(http.DefaultTransport.(*http.Transport).Clone(), true), nil
+		}
 		return observability.NewHTTPClient(15 * time.Second), nil
 	}
 	body, err := readPortalCAFile(caFile)
@@ -68,13 +79,23 @@ func newPortalHTTPClient(caFile string) (*http.Client, error) {
 	transport := http.DefaultTransport.(*http.Transport).Clone()
 	transport.Proxy = nil
 	transport.TLSClientConfig = &tls.Config{MinVersion: tls.VersionTLS12, RootCAs: pool}
+	return portalClientForTransport(transport, auditDownload), nil
+}
+
+func portalClientForTransport(transport *http.Transport, auditDownload bool) *http.Client {
+	timeout := 15 * time.Second
+	if auditDownload {
+		// The caller retains the original finite setup budget through headers.
+		// Body progress and stalls are governed by AuditDownloadStream instead.
+		timeout = 0
+	}
 	return &http.Client{
-		Timeout:   15 * time.Second,
+		Timeout:   timeout,
 		Transport: observability.NewHTTPTransport(transport),
 		CheckRedirect: func(*http.Request, []*http.Request) error {
 			return http.ErrUseLastResponse
 		},
-	}, nil
+	}
 }
 
 func readPortalCAFile(filename string) ([]byte, error) {

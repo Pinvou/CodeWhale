@@ -48,7 +48,7 @@ func TestF17AuditPortalOpaqueDownloadAndAuthority(t *testing.T) {
 		r := financeBrowserRequest(service, session, "GET", "/api/admin/account/admin/v1/audit-exports/"+id+"/download", "")
 		r.Header.Set("Authorization", "Bearer browser-untrusted")
 		r.Header.Set("X-Pinvou-Download-Token", "controlled-one-use-proof")
-		w := httptest.NewRecorder()
+		w := newAuditDeadlineRecorder()
 		service.Handler(nil).ServeHTTP(w, r)
 		if w.Code != 200 || w.Body.String() != payload || w.Header().Get("Cache-Control") != "no-store" || w.Header().Get("Content-Disposition") != `attachment; filename="controlled.pae"` {
 			t.Fatalf("opaque download changed: %d", w.Code)
@@ -57,7 +57,7 @@ func TestF17AuditPortalOpaqueDownloadAndAuthority(t *testing.T) {
 	t.Run("read strips proof", func(t *testing.T) {
 		r := financeBrowserRequest(service, session, "GET", "/api/admin/account/admin/v1/audit-logs", "")
 		r.Header.Set("X-Pinvou-Download-Token", "must-not-leak")
-		w := httptest.NewRecorder()
+		w := newAuditDeadlineRecorder()
 		service.Handler(nil).ServeHTTP(w, r)
 		if w.Code != 200 {
 			t.Fatal(w.Code)
@@ -66,7 +66,7 @@ func TestF17AuditPortalOpaqueDownloadAndAuthority(t *testing.T) {
 	t.Run("HEAD cannot consume", func(t *testing.T) {
 		before := calls.Load()
 		r := financeBrowserRequest(service, session, "HEAD", "/api/admin/account/admin/v1/audit-exports/"+id+"/download", "")
-		w := httptest.NewRecorder()
+		w := newAuditDeadlineRecorder()
 		service.Handler(nil).ServeHTTP(w, r)
 		if w.Code != 404 || calls.Load() != before {
 			t.Fatal("HEAD reached owner")
@@ -76,7 +76,7 @@ func TestF17AuditPortalOpaqueDownloadAndAuthority(t *testing.T) {
 		before := calls.Load()
 		r := financeBrowserRequest(service, session, "POST", "/api/admin/account/admin/v1/audit-exports", `{}`)
 		r.Header.Set("X-CSRF-Token", "wrong")
-		w := httptest.NewRecorder()
+		w := newAuditDeadlineRecorder()
 		service.Handler(nil).ServeHTTP(w, r)
 		if w.Code != 403 || calls.Load() != before {
 			t.Fatal("CSRF reached owner")
@@ -110,7 +110,7 @@ func TestF17AuditDownloadStreamsBeyondOrdinaryAPILimit(t *testing.T) {
 	t.Run("whole one-use payload", func(t *testing.T) {
 		r := financeBrowserRequest(service, session, "GET", "/api/admin/account/admin/v1/audit-exports/"+id+"/download", "")
 		r.Header.Set("X-Pinvou-Download-Token", "single-use-proof")
-		w := httptest.NewRecorder()
+		w := newAuditDeadlineRecorder()
 		service.Handler(nil).ServeHTTP(w, r)
 		if w.Code != http.StatusOK || !bytes.Equal(w.Body.Bytes(), payload) || w.Header().Get("Content-Length") != strconv.Itoa(len(payload)) || w.Header().Get("Content-Disposition") != `attachment; filename="large.pae"` || w.Header().Get("Cache-Control") != "no-store" {
 			t.Fatal("one-use payload or download metadata was truncated")
@@ -118,7 +118,7 @@ func TestF17AuditDownloadStreamsBeyondOrdinaryAPILimit(t *testing.T) {
 	})
 	t.Run("ordinary API limit unchanged", func(t *testing.T) {
 		r := financeBrowserRequest(service, session, "GET", "/api/admin/account/admin/v1/users", "")
-		w := httptest.NewRecorder()
+		w := newAuditDeadlineRecorder()
 		service.Handler(nil).ServeHTTP(w, r)
 		if w.Code != http.StatusOK || w.Body.Len() != 32<<20 || w.Header().Get("Content-Disposition") != "" || w.Header().Get("Content-Length") != "" {
 			t.Fatal("audit download exception escaped its exact route")
@@ -160,7 +160,7 @@ func TestF17AuditPortalSixConcreteTransportPaths(t *testing.T) {
 			request := financeBrowserRequest(service, session, tc.method, "/api/admin/account"+tc.path, `{}`)
 			request.Header.Set("Authorization", "Bearer browser-untrusted")
 			request.Header.Set("X-Pinvou-Download-Token", "controlled-one-use-proof")
-			response := httptest.NewRecorder()
+			response := newAuditDeadlineRecorder()
 			service.Handler(nil).ServeHTTP(response, request)
 			if response.Code != 200 {
 				t.Fatal("actual BFF route rejected", response.Code)

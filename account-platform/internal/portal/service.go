@@ -60,6 +60,7 @@ type Service struct {
 	config          Config
 	store           Store
 	client          *http.Client
+	auditClient     *http.Client
 	now             func() time.Time
 	verifier        *oidc.IDTokenVerifier
 	trustedProxyIPs map[netip.Addr]struct{}
@@ -144,6 +145,10 @@ func NewService(config Config, store Store) (*Service, error) {
 	if err != nil {
 		return nil, err
 	}
+	auditClient, err := newPortalAuditHTTPClient(config.PrivateCAFile)
+	if err != nil {
+		return nil, err
+	}
 	probeClient := client
 	if strings.TrimSpace(config.SystemProbeCAFile) != "" {
 		probeClient, err = newPortalHTTPClient(config.SystemProbeCAFile)
@@ -153,7 +158,7 @@ func NewService(config Config, store Store) (*Service, error) {
 	}
 	keyContext := oidc.ClientContext(context.Background(), client)
 	verifier := oidc.NewVerifier(strings.TrimRight(config.IssuerURL.String(), "/"), oidc.NewRemoteKeySet(keyContext, config.JWKSURL.String()), &oidc.Config{ClientID: config.ClientID})
-	return &Service{config: config, store: store, client: client, probeClient: probeClient, verifier: verifier, trustedProxyIPs: trustedProxies, now: func() time.Time { return time.Now().UTC() }}, nil
+	return &Service{config: config, store: store, client: client, auditClient: auditClient, probeClient: probeClient, verifier: verifier, trustedProxyIPs: trustedProxies, now: func() time.Time { return time.Now().UTC() }}, nil
 }
 func (s *Service) Handler(static http.Handler) http.Handler {
 	router := httpserver.NewRouter()
@@ -883,6 +888,18 @@ func (s *Service) proxy(w http.ResponseWriter, r *http.Request, upstream *url.UR
 	s.forward(w, r, upstream, resource, session, true)
 }
 func (s *Service) forward(w http.ResponseWriter, r *http.Request, upstream *url.URL, resource string, session Session, authenticated bool) {
+	auditDownload := upstream == s.config.AccountURL && auditExportDownloadPath(r.Method, resource)
+	var download *httpserver.AuditDownloadStream
+	if auditDownload {
+		var err error
+		download, err = httpserver.NewAuditDownloadStream(w, r)
+		if err != nil {
+			api.WriteError(w, http.StatusServiceUnavailable, "AUDIT_DOWNLOAD_UNAVAILABLE", "audit download transport is unavailable", httpserver.RequestID(r.Context()))
+			return
+		}
+		defer download.Close()
+		r = r.WithContext(download.Context())
+	}
 	limit := int64(4 << 20)
 	if authenticated && upstream == s.config.BillingURL && r.Method == http.MethodPost && resource == "/admin/v1/reconciliation-imports" {
 		if !s.allowReconciliationImport(w, r, session) {
@@ -950,7 +967,17 @@ func (s *Service) forward(w http.ResponseWriter, r *http.Request, upstream *url.
 			return
 		}
 	}
-	response, err := s.client.Do(request)
+	client := s.client
+	var setup *time.Timer
+	if auditDownload {
+		client = s.auditClient
+		setup = time.AfterFunc(15*time.Second, func() { download.Cancel(context.DeadlineExceeded) })
+		defer setup.Stop()
+	}
+	response, err := client.Do(request)
+	if setup != nil {
+		setup.Stop()
+	}
 	if err != nil {
 		api.WriteError(w, http.StatusBadGateway, "UPSTREAM_UNAVAILABLE", "the account platform is unavailable", httpserver.RequestID(r.Context()))
 		return
@@ -962,17 +989,21 @@ func (s *Service) forward(w http.ResponseWriter, r *http.Request, upstream *url.
 		}
 	}
 	w.Header().Set("Cache-Control", "no-store")
-	if upstream == s.config.AccountURL && auditExportDownloadPath(r.Method, resource) {
+	if auditDownload {
 		for _, name := range []string{"Content-Disposition", "Content-Length"} {
 			if value := response.Header.Get(name); value != "" {
 				w.Header().Set(name, value)
 			}
 		}
-		w.WriteHeader(response.StatusCode)
+		if err := download.Start(response.StatusCode); err != nil {
+			panic(http.ErrAbortHandler)
+		}
 		// Account bounds the encrypted envelope to 500 MiB before storing it.
 		// Stream it whole: applying the ordinary API limit would destroy a
 		// one-use payload after Account has already committed its consumption.
-		_, _ = io.Copy(w, response.Body)
+		if err := download.CopyFrom(response.Body); err != nil {
+			panic(http.ErrAbortHandler)
+		}
 		return
 	}
 	w.WriteHeader(response.StatusCode)

@@ -344,9 +344,9 @@ func TestAuditExportPersistedBoundaries(t *testing.T) {
 						r := httptest.NewRequest(method, "/admin/v1/audit-exports/"+id.String()+suffix, nil)
 						r.Header.Set("Authorization", "Bearer owned-pii-boundary")
 						r.Header.Set("X-Pinvou-Download-Token", token)
-						w := httptest.NewRecorder()
+						w := newAuditDeadlineRecorder()
 						handler.ServeHTTP(w, r)
-						return w
+						return w.ResponseRecorder
 					}
 					type jobState struct {
 						row           string
@@ -462,7 +462,7 @@ func TestAuditExportPersistedBoundaries(t *testing.T) {
 			}
 			request := httptest.NewRequest(http.MethodPost, "/admin/v1/audit-exports", bytes.NewReader(payload))
 			request.Header.Set("Authorization", "Bearer controlled")
-			response := httptest.NewRecorder()
+			response := newAuditDeadlineRecorder()
 			handler.ServeHTTP(response, request)
 			return response.Code
 		}

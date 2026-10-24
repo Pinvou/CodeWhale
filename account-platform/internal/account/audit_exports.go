@@ -14,6 +14,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"strings"
 	"time"
@@ -149,17 +150,27 @@ func (s *Service) downloadAuditExport(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	download, err := s.auditExports.Download(r.Context(), mustPrincipal(r.Context()), exportID, r.Header.Get("X-Pinvou-Download-Token"))
+	stream, err := httpserver.NewAuditDownloadStream(w, r)
+	if err != nil {
+		api.WriteError(w, http.StatusServiceUnavailable, "AUDIT_DOWNLOAD_UNAVAILABLE", "audit download transport is unavailable", httpserver.RequestID(r.Context()))
+		return
+	}
+	defer stream.Close()
+	download, err := s.auditExports.Download(stream.Context(), mustPrincipal(r.Context()), exportID, r.Header.Get("X-Pinvou-Download-Token"))
 	if err != nil {
 		s.writeError(w, r, err)
 		return
 	}
+	defer clear(download.Payload)
 	w.Header().Set("Cache-Control", "no-store")
 	w.Header().Set("Content-Type", "application/vnd.pinvou.audit-envelope+json")
 	w.Header().Set("Content-Disposition", fmt.Sprintf("attachment; filename=\"%s\"", download.Filename))
-	w.WriteHeader(http.StatusOK)
-	_, _ = w.Write(download.Payload)
-	clear(download.Payload)
+	if err := stream.Start(http.StatusOK); err != nil {
+		panic(http.ErrAbortHandler)
+	}
+	if err := stream.CopyFrom(io.NopCloser(bytes.NewReader(download.Payload))); err != nil {
+		panic(http.ErrAbortHandler)
+	}
 }
 
 func NewAuditExportService(repository *PostgresRepository, masterKey []byte, environment string) (*AuditExportService, error) {

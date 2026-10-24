@@ -24,6 +24,14 @@ import (
 )
 
 func TestPrivateCAExtendsOnlyPortalClientAndRejectsRedirect(t *testing.T) {
+	testPortalPrivateCAClient(t, newPortalHTTPClient)
+}
+
+func TestAuditDownloadPrivateCAExtendsOnlyPortalClientAndRejectsRedirect(t *testing.T) {
+	testPortalPrivateCAClient(t, newPortalAuditHTTPClient)
+}
+
+func testPortalPrivateCAClient(t *testing.T, factory func(string) (*http.Client, error)) {
 	caKey, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
 	if err != nil {
 		t.Fatal(err)
@@ -59,7 +67,7 @@ func TestPrivateCAExtendsOnlyPortalClientAndRejectsRedirect(t *testing.T) {
 	if err := os.WriteFile(certFile, pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: caDER}), 0600); err != nil {
 		t.Fatal(err)
 	}
-	client, err := newPortalHTTPClient(certFile)
+	client, err := factory(certFile)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -93,7 +101,7 @@ func TestPrivateCAExtendsOnlyPortalClientAndRejectsRedirect(t *testing.T) {
 		if err := os.WriteFile(path, body, 0600); err != nil {
 			t.Fatal(err)
 		}
-		if _, err := newPortalHTTPClient(path); err == nil {
+		if _, err := factory(path); err == nil {
 			t.Fatal("invalid/private/non-CA material accepted")
 		}
 	}
