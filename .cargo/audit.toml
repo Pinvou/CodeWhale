@@ -1,21 +1,34 @@
 # cargo-audit configuration (read by `cargo audit`).
 #
 # The advisories below are all "unmaintained" warnings — NOT security
-# vulnerabilities. Each crate is pulled in transitively only by the `starlark`
-# 0.13.0 family (starlark / starlark_syntax / starlark_map), which crates/tui
-# depends on directly for Starlark execpolicy files.
-# `cargo tree -i <crate>` confirms starlark is the sole path for each.
+# vulnerabilities. Two accepted clusters:
 #
-# There is no fix available without an upstream `starlark` release that drops
-# these deps, and none is exploitable here. They are accepted for now and
-# tracked in this file so `cargo audit` stays clean for genuinely new advisories.
-# Remove an entry once a starlark upgrade/removal drops the transitive dep
-# (re-check with `cargo tree -i derivative` and `cargo audit`).
+# 1. Pulled in transitively only by the `starlark` 0.13.0 family
+#    (starlark / starlark_syntax / starlark_map), which crates/tui depends
+#    on directly for Starlark execpolicy files. `cargo tree -i <crate>`
+#    confirms starlark is the sole path for each. Remove an entry once a
+#    starlark upgrade/removal drops the transitive dep (re-check with
+#    `cargo tree -i derivative` and `cargo audit`).
+#    Audit #11, scratchpad/bug-audit-2026-06-24.md.
 #
-# Audit #11, scratchpad/bug-audit-2026-06-24.md.
+# 2. The zbus 5 family, which arrived with keyring 4's Secret Service store
+#    (secret-service 5 -> zbus 5). The standalone crates are unmaintained —
+#    merged into zbus 6 as modules — and there is no safe upgrade until
+#    secret-service adopts zbus 6. Tracked identically in deny.toml.
+#
+# 3. Pulled in transitively only by the `syntect` 5.x family, tracked
+#    identically in deny.toml.
+#
+# Entries are accepted so `cargo audit` stays clean for genuinely new
+# advisories; none is exploitable here.
 [advisories]
 ignore = [
     "RUSTSEC-2024-0388", # derivative 2.2.0 unmaintained — transitive via starlark 0.13.0
     "RUSTSEC-2025-0057", # fxhash 0.2.1 unmaintained — transitive via starlark_map 0.13.0
     "RUSTSEC-2024-0436", # paste 1.0.15 unmaintained — transitive via starlark 0.13.0
+    "RUSTSEC-2026-0370", # zvariant unmaintained — via secret-service 5 -> zbus 5; clears with zbus 6
+    "RUSTSEC-2026-0371", # zbus_names unmaintained — via secret-service 5 -> zbus 5; clears with zbus 6
+    "RUSTSEC-2026-0372", # zvariant_derive unmaintained — via secret-service 5 -> zbus 5; clears with zbus 6
+    "RUSTSEC-2025-0141", # bincode unmaintained — transitive via syntect, no safe upgrade
+    "RUSTSEC-2024-0320", # yaml-rust unmaintained — transitive via syntect, no safe upgrade
 ]
