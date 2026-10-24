@@ -2579,7 +2579,6 @@ class Round20PackedWiringTests(GuardFixture):
     _MID_LINE = 'mod app { #[path = "real.rs"] mod commands; }\n'
     _SPLIT_KEYWORD = "mod app {\n#[path = \"real.rs\"]\nmod\ncommands;\n}\n"
     _HASH_SPACE = 'mod app {\n# [path = "real.rs"]\nmod commands;\n}\n'
-    _BOM = "mod app {\n#[path = \"real.rs\"]\nmod commands;\n}\n"
 
     def _files(self, real, decoy):
         return {"app/real.rs": real, "app/commands.rs": decoy}
@@ -2776,6 +2775,125 @@ class Round21TerseParseContractTests(unittest.TestCase):
         # attribution fail-closed net instead of matching a stripped key).
         paths, _ = self._list("r4::r#async::t: test\n")
         self.assertEqual(paths, ["r4::r#async::t"])
+
+
+class Round22MidLineIgnoreTests(GuardFixture):
+    """Round-22 review (head 1e24a129f4, 2026-10-24): the run scanner only
+    starts attribute runs at line starts, so an `#[ignore]` head placed
+    mid-line — behind the inline-module opener under `#[rustfmt::skip]`
+    (the layout the skip attribute exists to protect; rustfmt --check
+    keeps it stable) or behind any code on its line — was never seen,
+    while the fn's own next-line `#[test]` kept the pin attributable, so
+    neither the ignore detection nor the source-attribution fail-closed
+    net fired (review lanes exited 0 on a REQUIRED_PIN whose ignore is
+    real). Mid-line heads opening an `ignore`-carrying entry are now
+    refused at both silent-skip points (the outer run gate and the inner
+    run break). The refusal is ignore-scoped: the round-19 mid-line
+    `#[cfg]` twin fixture keeps reaching its ambiguity refusal, and
+    string-literal decoys stay lexically invisible."""
+
+    _PIN = "app::commands::tests::critical_pin"
+    _run_main = DuplicateRegistrationTests._run_main
+
+    _OPENER_PACKED = (
+        "#[cfg(test)]\n"
+        "#[rustfmt::skip]\n"
+        "mod app { mod commands { mod tests { #[ignore]\n"
+        "    #[test]\n"
+        "    fn critical_pin() {}\n"
+        "} } }\n"
+    )
+    _TAIL = (
+        "#[cfg(test)]\n"
+        "mod app { mod commands { mod tests {\n"
+        "    fn other() {} #[ignore]\n"
+        "    #[test]\n"
+        "    fn critical_pin() {}\n"
+        "} } }\n"
+    )
+    _MULTILINE_CFG_ATTR = (
+        "#[cfg(test)]\n"
+        "#[rustfmt::skip]\n"
+        "mod app { mod commands { mod tests { #[cfg_attr(unix,\n"
+        "    ignore)]\n"
+        "    #[test]\n"
+        "    fn critical_pin() {}\n"
+        "} } }\n"
+    )
+    _OWN_LINE_IGNORE = (
+        "#[cfg(test)]\n"
+        "mod app { mod commands { mod tests {\n"
+        "    #[test]\n"
+        "    #[ignore]\n"
+        "    fn critical_pin() {}\n"
+        "} } }\n"
+    )
+    _DECOY_STRING = (
+        "#[cfg(test)]\n"
+        "mod app { mod commands { mod tests {\n"
+        '    const Q: &str = "mod tests { #[ignore]";\n'
+        "    #[test]\n"
+        "    fn critical_pin() {}\n"
+        "} } }\n"
+    )
+
+    def test_mid_line_ignore_heads_fail_closed(self):
+        # The refusal is about the unscannable layout, not the pin state —
+        # every shape here hides a real #[ignore] behind code on its line
+        # while the fn's own #[test] keeps it attributable.
+        for source in (self._OPENER_PACKED, self._TAIL, self._MULTILINE_CFG_ATTR):
+            with self.subTest(shape=source.splitlines()[2][:34]):
+                with self.assertRaises(SystemExit) as ctx:
+                    self._run_main(
+                        [self._PIN],
+                        source=source,
+                        required=[self._PIN],
+                    )
+                message = str(ctx.exception)
+                self.assertIn("appears mid-line after code", message)
+                self.assertIn("put the attribute on its own line", message)
+
+    def test_own_line_ignore_still_reported_at_its_line(self):
+        # Positive control: the ordinary layout keeps the precise
+        # "is #[ignore]d at" report with the ignore's own line.
+        code, err = self._run_main(
+            [self._PIN], source=self._OWN_LINE_IGNORE, required=[self._PIN]
+        )
+        self.assertEqual(code, 1)
+        self.assertIn("is #[ignore]d at", err)
+        self.assertIn("lib.rs:4", err)
+
+    def test_string_literal_decoy_head_stays_green(self):
+        # Negative control: a `#[ignore]`-shaped head inside a string
+        # literal is blanked by the lexer, so the refusal must not fire
+        # and the live pin stays green.
+        code, err = self._run_main(
+            [self._PIN], source=self._DECOY_STRING, required=[self._PIN]
+        )
+        self.assertEqual(code, 0, err)
+
+    def test_mid_line_plain_cfg_twin_keeps_ambiguity_path(self):
+        # Non-regression: the round-19 same-line twin fixture carries a
+        # mid-line `#[cfg(windows)]` head that bears no ignore token — the
+        # new refusal must not preempt the ambiguity failure.
+        source = (
+            "#[rustfmt::skip]\n"
+            "mod wrapper {\n"
+            '#[cfg(unix)] #[path = "unix.rs"]\n'
+            "mod shared; #[cfg(windows)] mod shared;\n"
+            "}\n"
+        )
+        with self.assertRaises(SystemExit) as ctx:
+            self._run_main(
+                [self._PIN],
+                source=source,
+                required=[self._PIN],
+                files={
+                    "wrapper/unix.rs": _LIVE_PIN,
+                    "wrapper/shared.rs": _IGNORED_PIN,
+                },
+            )
+        self.assertIn("ambiguous mod declarations", str(ctx.exception))
 
 
 if __name__ == "__main__":

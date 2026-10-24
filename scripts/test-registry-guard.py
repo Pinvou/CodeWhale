@@ -40,9 +40,13 @@ plus the inline-module components inside one), so both legal wirings are
 scanned, and `main` fails CLOSED on a registered pin whose source it
 cannot attribute (unmodelled wiring, macro-generated test, or
 raw-identifier `mod r#type;`) instead of trusting the registry entry.
-Still unmodelled (a REQUIRED_PIN there hits the fail-closed net, not a
-silent skip): `#[ignore]` written on the same line as its inline-module
-opener.
+An `#[ignore]` attribute head written mid-line — behind the inline-module
+opener (`rustfmt::skip` hand-packing) or behind any code on its line —
+is refused outright (round-22 review): the run scanner only starts runs
+at line starts, so the entry would be invisible while the fn's own
+next-line `#[test]` keeps it attributable — the exact false-green shape
+the fail-closed net cannot see (the net only fires when NOTHING
+attributes to the fn).
 
 Round-20 review (head 8b7945154c) closed the packed-layout half of that
 promise: a `#[path]` entry whose line also carries the `mod` declaration
@@ -330,6 +334,21 @@ def _string_value_after(lines, li, col):
         # the outer loop would re-scan the same line forever
         li += 1
     return None
+
+
+def _mid_line_ignore_head(line, following):
+    """True when a `#[...]` attribute head sits mid-line on `line` (code
+    precedes it) and the entry it opens carries an `ignore` token. Such an
+    entry is invisible to the run scanner (it only starts runs at line
+    starts), so a same-line `#[test]` on a later line would attribute the
+    fn without the ignore — the exact false-green shape; rustfmt output
+    never places an attribute behind code on the line, so this is
+    hand-packed (rustfmt::skip) layout and gets refused."""
+    m = _ATTR_RUN_START_RE.search(line)
+    if m is None:
+        return False
+    entry = [line[m.start():]] + list(following)
+    return _parse_attribute(entry, 0)[1] is not None
 
 
 def _strip_code(line, state):
@@ -1016,6 +1035,14 @@ def _scan_graph():
         n = len(stripped)
         while i < n:
             if not _ATTR_RUN_START_RE.match(stripped[i].lstrip()):
+                if _mid_line_ignore_head(stripped[i], stripped[i + 1:]):
+                    raise SystemExit(
+                        "test-registry-guard: #[ignore] attribute head at "
+                        f"{path}:{i + 1} appears mid-line after code, so the "
+                        "run scanner cannot see it and the fn's next-line "
+                        "#[test] would attribute it as live — put the "
+                        "attribute on its own line"
+                    )
                 i += 1
                 continue
             run = []
@@ -1029,6 +1056,13 @@ def _scan_graph():
                     j += 1
                     continue
                 if not _ATTR_RUN_START_RE.match(lexed):
+                    if _mid_line_ignore_head(stripped[j], stripped[j + 1:]):
+                        raise SystemExit(
+                            "test-registry-guard: #[ignore] attribute head at "
+                            f"{path}:{j + 1} appears mid-line after code, so "
+                            "the run scanner cannot see it — put the "
+                            "attribute on its own line"
+                        )
                     break
                 j, ignore_line = _parse_attribute(stripped, j)
                 entries += 1
