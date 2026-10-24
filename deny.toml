@@ -4,12 +4,26 @@
 [graph]
 # Scan all workspace members with all features
 all-features = true
-# Pin the graph to linux-gnu so every host (and the ubuntu deny lane, whose
-# musl toolchain would otherwise resolve a smaller graph) evaluates the same
-# dependency set: the target-gated zbus 5 family enters the graph, keeping
-# the zbus-family advisory ignores below exercised, while windows-gated
-# crates stay out so the windows_* lock duplicates never warn here.
-targets = ["x86_64-unknown-linux-gnu"]
+# Resolve the union of every target this repo ships or validates, so every
+# host — including the ubuntu deny lane, whose musl toolchain would otherwise
+# resolve a smaller graph — evaluates the same dependency set. The set is the
+# release/nightly prebuilt matrices plus the CI-validated OHOS and FreeBSD
+# source-build targets. The linux-gnu triples pull in the target-gated zbus 5
+# family (keyring's Secret Service store), keeping the zbus-family advisory
+# ignores below exercised, while the darwin/windows triples keep the
+# platform-gated crates under the licenses/bans/sources checks.
+targets = [
+    "x86_64-unknown-linux-gnu",
+    "x86_64-unknown-linux-musl",
+    "aarch64-unknown-linux-musl",
+    "aarch64-linux-android",
+    "x86_64-apple-darwin",
+    "aarch64-apple-darwin",
+    "x86_64-pc-windows-msvc",
+    "aarch64-pc-windows-msvc",
+    "aarch64-unknown-linux-ohos",
+    "x86_64-unknown-freebsd",
+]
 
 [advisories]
 # Deny unmaintained and unsound crates
@@ -40,10 +54,13 @@ ignore = [
 # - thiserror 1 vs 2 — blocked on portable-pty 0.9 via filedescriptor 0.8 (v1) vs workspace v2
 # - toml 0.8 vs 1.1 + toml_edit 0.22 vs 0.25 + winnow 0.7 vs 1.0 — blocked on rust-i18n 4.2 (0.8 stack) vs workspace 1.1
 # - getrandom 0.3 vs 0.4 — blocked on ahash 0.8 and wezterm-blob-leases (0.3) vs the workspace (0.4)
-# The graph is pinned in [graph], so it is host-independent: the windows-gated
-# windows-sys/windows_* lock duplicates never enter it and need no skips (a
-# skip for a crate outside the graph trips unmatched-skip, and a skip for a
-# single-version crate trips unnecessary-skip).
+# The graph is the union of shipped targets ([graph]), so it is
+# host-independent: every target-gated lock duplicate that the union reaches
+# is visible on every host and gets a versioned skip below (a skip for a
+# crate outside the graph trips unmatched-skip, and a skip for a
+# single-version crate trips unnecessary-skip). The windows_* DLL and
+# windows-sys 0.42/0.61 lock entries stay unreachable from the union and
+# need no skips.
 multiple-versions = "warn"
 wildcards = "deny"
 # Explicitly allow the surviving duplicates so `cargo deny` does not warn
@@ -67,6 +84,16 @@ skip = [
     { name = "getrandom", version = "0.3.4" },
     # miniz_oxide 0.8 stays for png 0.18 (via image/arboard); flate2 1.1.10 moved to 0.9.
     { name = "miniz_oxide", version = "0.8.9" },
+    # windows-sys 0.52 stays for ring 0.17's windows-gated slice; fd-lock and
+    # teletypewriter 0.5.28 hold 0.59.
+    { name = "windows-sys", version = "0.52.0" },
+    # bindgen ^0.72 — the build toolchain of rquickjs-sys 0.12 — pins
+    # itertools 0.13, nom 7 (via cexpr 0.6) and shlex 1.3 against the
+    # workspace versions; blocked on the rquickjs 0.14 bump (its sys crate
+    # still build-depends on bindgen ^0.72).
+    { name = "itertools", version = "0.13.0" },
+    { name = "nom", version = "7.1.3" },
+    { name = "shlex", version = "1.3.0" },
 ]
 # For crates where the version is not the discriminator, use skip-tree to
 # allow the duplicate tree regardless of version.
