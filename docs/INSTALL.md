@@ -372,22 +372,22 @@ codewhale --version
 ```
 
 > **Linux: install build-time dependencies first.** `cargo install` compiles
-> from source, and on Linux the `codewhale-cli` crate links against
-> `libdbus-1` (used by the D-Bus secret-service backend for credential
-> storage). Install the required system packages before running `cargo install`:
+> from source. The D-Bus secret-service backend for credential storage is
+> pure Rust (zbus), so no system D-Bus library is needed — a C toolchain and
+> `pkg-config` are enough. Install the required system packages before
+> running `cargo install`:
 >
 > ```bash
 > # Debian / Ubuntu
-> sudo apt-get install -y build-essential pkg-config libdbus-1-dev
+> sudo apt-get install -y build-essential pkg-config
 >
 > # Fedora / RHEL
-> sudo dnf install -y gcc make pkgconf-pkg-config dbus-devel
+> sudo dnf install -y gcc make pkgconf-pkg-config
 > ```
 >
 > If you use the npm wrapper or download GitHub Release binaries, these
-> build-time packages are **not** required — the prebuilt binary only
-> needs the runtime library (`libdbus-1`), which is already present on
-> most desktop Linux installs.
+> build-time packages are **not** required, and releases built from this
+> version onward have no `libdbus` runtime dependency either.
 
 ### China / mirror-friendly install
 
@@ -720,9 +720,9 @@ build before source builds are expected to work.
 - **Rust** 1.88 or later — install with [rustup](https://rustup.rs).
 - **Linux build-time deps** (Debian/Ubuntu/openEuler/Kylin):
   ```bash
-  sudo apt-get install -y build-essential pkg-config libdbus-1-dev
+  sudo apt-get install -y build-essential pkg-config
   # openEuler / RHEL family:
-  # sudo dnf install -y gcc make pkgconf-pkg-config dbus-devel
+  # sudo dnf install -y gcc make pkgconf-pkg-config
   ```
 - A working `cmake` is **not** required.
 
@@ -1039,19 +1039,20 @@ Afterward, `which cargo` should point to `~/.cargo/bin/cargo`, not
 Install the C toolchain:
 
 ```bash
-sudo apt-get install -y build-essential pkg-config libdbus-1-dev
+sudo apt-get install -y build-essential pkg-config
 ```
 
 ### WSL2 / Ubuntu: `dbus-1` or `pkg-config` not found while building
 
-WSL2 uses the same Linux source-build path as Ubuntu. If `cargo install
-codewhale-cli --locked` fails while compiling the keyring or D-Bus secret
-storage crates, install the Linux build dependencies inside the WSL distro,
+WSL2 uses the same Linux source-build path as Ubuntu. Current builds use the
+pure-Rust zbus D-Bus backend and no longer link `libdbus-1`; if `cargo install
+codewhale-cli --locked` fails on a `dbus`/`pkg-config` error you are on an
+older checkout — install the Linux build dependencies inside the WSL distro,
 then rerun the one Cargo package install command. It installs `codewhale`:
 
 ```bash
 sudo apt-get update
-sudo apt-get install -y build-essential pkg-config libdbus-1-dev
+sudo apt-get install -y build-essential pkg-config
 cargo install codewhale-cli --locked   # installs `codewhale`
 ```
 

@@ -4,6 +4,12 @@
 [graph]
 # Scan all workspace members with all features
 all-features = true
+# Pin the graph to linux-gnu so every host (and the ubuntu deny lane, whose
+# musl toolchain would otherwise resolve a smaller graph) evaluates the same
+# dependency set: the target-gated zbus 5 family enters the graph, keeping
+# the zbus-family advisory ignores below exercised, while windows-gated
+# crates stay out so the windows_* lock duplicates never warn here.
+targets = ["x86_64-unknown-linux-gnu"]
 
 [advisories]
 # Deny unmaintained and unsound crates
@@ -13,26 +19,37 @@ unsound = "all"
 ignore = [
     "RUSTSEC-2025-0141",  # bincode unmaintained - transitive via syntect, no safe upgrade (syntect 5.3.0 is latest)
     "RUSTSEC-2024-0320",  # yaml-rust unmaintained - transitive via syntect, no safe upgrade (syntect 5.3.0 is latest)
+    # zvariant / zbus_names / zvariant_derive unmaintained as standalone crates
+    # (merged into zbus 6 as modules). Arrive via secret-service 5 -> zbus 5,
+    # needed for keyring 4's zbus Secret Service store; no safe upgrade until
+    # secret-service depends on zbus 6.
+    "RUSTSEC-2026-0370",
+    "RUSTSEC-2026-0371",
+    "RUSTSEC-2026-0372",
 ]
 
 [bans]
 # Duplicate-version ratchet (Epic #5249, issue #5248): keep the gate in
 # warn/dry-run until Hunter approves enforcement. Each entry below is a
-# duplicate that survives the 0.9.5 shrink and is blocked on an upstream
+# duplicate that survives the round-3 shrink and is blocked on an upstream
 # crate that has not yet released a compatible version. Adding a new
 # duplicate without extending this list will surface as a new `cargo deny`
 # warning, so the ratchet is warm but not yet blocking CI.
-# Surviving duplicates after the 708 -> 679 shrink (see PR body):
-# - reqwest 0.12 vs 0.13 — blocked on oauth2 5.0.0 which still depends on reqwest 0.12
+# Surviving duplicates after the 688 -> 669 shrink (see PR body):
 # - sha2 0.10 vs 0.11 — blocked on oauth2 (0.10) vs the workspace (0.11)
 # - thiserror 1 vs 2 — blocked on portable-pty 0.9 via filedescriptor 0.8 (v1) vs workspace v2
 # - toml 0.8 vs 1.1 + toml_edit 0.22 vs 0.25 + winnow 0.7 vs 1.0 — blocked on rust-i18n 4.2 (0.8 stack) vs workspace 1.1
+# - getrandom 0.3 vs 0.4 — blocked on ahash 0.8 and wezterm-blob-leases (0.3) vs the workspace (0.4)
+# The graph is pinned in [graph], so it is host-independent: the windows-gated
+# windows-sys/windows_* lock duplicates never enter it and need no skips (a
+# skip for a crate outside the graph trips unmatched-skip, and a skip for a
+# single-version crate trips unnecessary-skip).
 multiple-versions = "warn"
 wildcards = "deny"
 # Explicitly allow the surviving duplicates so `cargo deny` does not warn
 # on them again, but will warn on any *new* duplicate crate.
 skip = [
-    { name = "reqwest", version = "0.12.28" },
+    # sha2 0.10 survives via oauth2 5.0.0 (requires it non-optionally).
     { name = "sha2", version = "0.10.9" },
     { name = "thiserror", version = "1.0.69" },
     { name = "thiserror-impl", version = "1.0.69" },
@@ -41,19 +58,15 @@ skip = [
     { name = "toml_edit", version = "0.22.27" },
     { name = "winnow", version = "0.7.14" },
     { name = "serde_spanned", version = "0.6.9" },
-    { name = "core-foundation", version = "0.9.4" },
+    # dirs 6 stays for shellexpand 3's tilde expansion and teletypewriter
+    # 0.5.28 (rio-vt's pty chain), both in the tui; the workspace is on 7.
+    { name = "dirs", version = "6.0.0" },
     { name = "fancy-regex", version = "0.16.2" },
-    { name = "itertools", version = "0.13.0" },
-    { name = "security-framework", version = "2.11.1" },
-    { name = "windows-sys" },
-    { name = "windows-targets" },
-    { name = "windows_aarch64_gnullvm" },
-    { name = "windows_aarch64_msvc" },
-    { name = "windows_i686_gnu" },
-    { name = "windows_i686_msvc" },
-    { name = "windows_x86_64_gnu" },
-    { name = "windows_x86_64_gnullvm" },
-    { name = "windows_x86_64_msvc" },
+    # getrandom 0.3 stays for ahash 0.8 (tui) and wezterm-blob-leases
+    # (termwiz chain); the workspace's tempfile/uuid/secret-service are on 0.4.
+    { name = "getrandom", version = "0.3.4" },
+    # miniz_oxide 0.8 stays for png 0.18 (via image/arboard); flate2 1.1.10 moved to 0.9.
+    { name = "miniz_oxide", version = "0.8.9" },
 ]
 # For crates where the version is not the discriminator, use skip-tree to
 # allow the duplicate tree regardless of version.

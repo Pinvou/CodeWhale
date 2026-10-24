@@ -238,17 +238,17 @@ cargo install codewhale-cli --locked   # 安装 codewhale
 codewhale --version
 ```
 
-> **Linux：先安装构建时依赖。** `cargo install` 从源码编译，在 Linux 上 `codewhale-cli` crate 会链接 `libdbus-1`（D-Bus secret-service 后端用它存储凭据）。运行 `cargo install` 之前请先安装所需的系统包：
+> **Linux：先安装构建时依赖。** `cargo install` 从源码编译。用于存储凭据的 D-Bus secret-service 后端是纯 Rust 实现（zbus），不需要系统 D-Bus 库——有 C 工具链和 `pkg-config` 即可。运行 `cargo install` 之前请先安装所需的系统包：
 >
 > ```bash
 > # Debian / Ubuntu
-> sudo apt-get install -y build-essential pkg-config libdbus-1-dev
+> sudo apt-get install -y build-essential pkg-config
 >
 > # Fedora / RHEL
-> sudo dnf install -y gcc make pkgconf-pkg-config dbus-devel
+> sudo dnf install -y gcc make pkgconf-pkg-config
 > ```
 >
-> 如果你使用 npm 包装器或下载 GitHub Release 二进制，这些构建时包就**不需要**了——预编译二进制只需要运行时库（`libdbus-1`），而大多数桌面 Linux 安装里已经自带。
+> 如果你使用 npm 包装器或下载 GitHub Release 二进制，这些构建时包就**不需要**了；从本版本起构建的发布二进制在运行时也不再依赖 `libdbus`。
 
 ### 中国/镜像友好安装
 
@@ -521,9 +521,9 @@ makensis /DVERSION=<version> codewhale.nsi
 - **Rust** 1.88 或更高版本——用 [rustup](https://rustup.rs) 安装。
 - **Linux 构建期依赖**（Debian/Ubuntu/openEuler/Kylin）：
   ```bash
-  sudo apt-get install -y build-essential pkg-config libdbus-1-dev
+  sudo apt-get install -y build-essential pkg-config
   # openEuler / RHEL 系列：
-  # sudo dnf install -y gcc make pkgconf-pkg-config dbus-devel
+  # sudo dnf install -y gcc make pkgconf-pkg-config
   ```
 - 不需要 `cmake`。
 
@@ -781,16 +781,16 @@ cargo install codewhale-cli --locked   # 安装 codewhale
 安装 C 工具链：
 
 ```bash
-sudo apt-get install -y build-essential pkg-config libdbus-1-dev
+sudo apt-get install -y build-essential pkg-config
 ```
 
 ### WSL2 / Ubuntu：构建时找不到 `dbus-1` 或 `pkg-config`
 
-WSL2 与 Ubuntu 使用相同的 Linux 源码构建路径。如果 `cargo install codewhale-cli --locked` 在编译 keyring 或 D-Bus 密钥存储 crate 时失败，请在 WSL 发行版内安装 Linux 构建依赖，然后重新运行那条 Cargo 包安装命令。它会安装 `codewhale`：
+WSL2 与 Ubuntu 使用相同的 Linux 源码构建路径。当前版本使用纯 Rust 的 zbus D-Bus 后端，不再链接 `libdbus-1`；如果 `cargo install codewhale-cli --locked` 因 `dbus`/`pkg-config` 报错失败，说明你在旧的检出上——请在 WSL 发行版内安装 Linux 构建依赖，然后重新运行那条 Cargo 包安装命令。它会安装 `codewhale`：
 
 ```bash
 sudo apt-get update
-sudo apt-get install -y build-essential pkg-config libdbus-1-dev
+sudo apt-get install -y build-essential pkg-config
 cargo install codewhale-cli --locked   # 安装 codewhale
 ```
 

@@ -102,7 +102,7 @@ cargo install codewhale-cli --locked
 
 Persyaratan sistem:
 - Rust toolchain (versi stable terbaru)
-- Dependensi `libdbus-1-dev` atau `pkg-config` pada Linux untuk integrasi keyring OS.
+- Dependensi build pada Linux: C toolchain (`build-essential`) dan `pkg-config`. Backend keyring OS memakai zbus (pure Rust) dan tidak membutuhkan paket sistem `libdbus`.
 
 ---
 
