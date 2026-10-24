@@ -46,7 +46,14 @@ is refused outright (round-22 review): the run scanner only starts runs
 at line starts, so the entry would be invisible while the fn's own
 next-line `#[test]` keeps it attributable — the exact false-green shape
 the fail-closed net cannot see (the net only fires when NOTHING
-attributes to the fn).
+attributes to the fn). Round-23 closed the matching ENTRY holes on the
+wiring side: a mid-line `#[cfg_attr(pred, path = "...")]` head is refused
+like the direct form (the run-level cfg_attr refusal never ran for a
+non-run-start line), a `#` / `[` attribute head split across lines is
+re-joined before lexing so path wiring and `#[ignore]` written that way
+enter the scan, and a plain inline opener sharing a run's closing line
+(`#[cfg(windows)] mod outer {`) is recorded so a cfg-mutex `#[path]` twin
+cannot silently redirect its children.
 
 Round-20 review (head 8b7945154c) closed the packed-layout half of that
 promise: a `#[path]` entry whose line also carries the `mod` declaration
@@ -349,6 +356,61 @@ def _mid_line_ignore_head(line, following):
         return False
     entry = [line[m.start():]] + list(following)
     return _parse_attribute(entry, 0)[1] is not None
+
+
+def _mid_line_path_head(line, following):
+    """True when a `#[...]` attribute head sits mid-line on `line` (code
+    precedes it) and the entry it opens carries a `path =` key — directly
+    (`#[path = "x.rs"]`) or wrapped (`#[cfg_attr(pred, path = "x.rs")]`).
+    The run parser only starts runs at line starts, so such a wiring is
+    neither modelled nor caught by the run-level cfg_attr refusal, and the
+    conventional same-name candidate silently answers for the wired source
+    (maintainer four-control 0/1/0/1 across rounds 20–22 — the old probe
+    matched only the direct `#[path =` head and let the cfg_attr form
+    through)."""
+    m = _ATTR_RUN_START_RE.search(line)
+    if m is None:
+        return False
+    entry = [line[m.start():]] + list(following)
+    end, _ = _parse_attribute(entry, 0)
+    return _PATH_EQ_RE.search("\n".join(entry[:end])) is not None
+
+
+def _join_split_attribute_heads(lines, stripped):
+    """rustc tokenizes `#` and `[` separately, so an attribute head may be
+    split across lines (`#` at the end of one line, `[path = "x.rs"]` or
+    `[ignore]` starting the next). Every per-line head probe here matches
+    `#\\s*\\[` within ONE line and silently dropped that form — the wiring
+    (or the ignore) fell out of the scan and the conventional candidate
+    answered for the module (maintainer finding, rounds 20–22). Detect the
+    split on the lexed text (so a `#` inside a comment or string never
+    counts), and return a copy of the raw `lines` with the `#` moved onto
+    the `[` line — re-lexing that copy makes every probe see an ordinary
+    head at the `[` line; positions stay self-consistent because both the
+    raw and the lexed text come from the same rewritten lines. Returns
+    None when nothing is split."""
+    joined = None
+    n = len(stripped)
+    for i in range(n - 1):
+        tail = stripped[i].rstrip()
+        if not tail.endswith("#"):
+            continue
+        before = tail[-2:-1]
+        if before and (before.isalnum() or before in "_\"#"):
+            # `r#ident` / raw-string closers / `##` are not a bare head
+            continue
+        j = i + 1
+        while j < n and not stripped[j].strip():
+            j += 1
+        if j >= n or not stripped[j].lstrip().startswith("["):
+            continue
+        if joined is None:
+            joined = list(lines)
+        hash_col = len(tail) - 1
+        joined[i] = joined[i][:hash_col] + " " + joined[i][hash_col + 1 :]
+        bracket_col = len(stripped[j]) - len(stripped[j].lstrip())
+        joined[j] = joined[j][:bracket_col] + "#" + joined[j][bracket_col:]
+    return joined
 
 
 def _strip_code(line, state):
@@ -697,18 +759,23 @@ def _path_wired_mods(stripped, lines, stacks, path, plain_file, child_dir, file_
     n = len(stripped)
     while i < n:
         if not _ATTR_RUN_START_RE.match(stripped[i].lstrip()):
-            # A path-attribute head outside a run-start position (after
-            # inline-module opener braces, `}`, or any other code on the
-            # line) is rustfmt::skip hand-packing this lexer cannot bind to
-            # its declaration — refuse instead of letting the conventional
-            # candidate stand in for the wired source (round-20 review).
-            if _PATH_ATTR_HEAD_RE.search(stripped[i]) is not None:
+            # A path-bearing attribute head outside a run-start position
+            # (after inline-module opener braces, `}`, or any other code on
+            # the line) is rustfmt::skip hand-packing this lexer cannot bind
+            # to its declaration — refuse instead of letting the
+            # conventional candidate stand in for the wired source
+            # (round-20 review). Round-23: the probe covers the
+            # `#[cfg_attr(pred, path = "...")]` wrapper too — the run-level
+            # cfg_attr refusal below never ran for a mid-line head, so that
+            # form slipped through to the same substitution (maintainer
+            # four-control 0/1/0/1, rounds 20–22).
+            if _mid_line_path_head(stripped[i], stripped[i + 1 :]):
                 raise SystemExit(
-                    "test-registry-guard: #[path] attribute head at "
-                    f"{path}:{i + 1} appears mid-line after code, so the "
-                    "run-to-declaration binding cannot be told apart from "
-                    "same-line siblings — put the attribute and its mod on "
-                    "their own lines"
+                    "test-registry-guard: #[path] attribute head (direct or "
+                    f"cfg_attr-wrapped) at {path}:{i + 1} appears mid-line "
+                    "after code, so the run-to-declaration binding cannot be "
+                    "told apart from same-line siblings — put the attribute "
+                    "and its mod on their own lines"
                 )
             if pending_value is not None:
                 # the run ended on a non-attribute item without a `mod`
@@ -790,6 +857,32 @@ def _path_wired_mods(stripped, lines, stacks, path, plain_file, child_dir, file_
                 "can be trusted as the module's source; inline the path "
                 "attribute per cfg branch"
             )
+        # Round-23 review: a plain inline opener sharing the run's closing
+        # line (`#[cfg(windows)] mod outer {`, no pending path) was never
+        # recorded — the non-run branch only sees lines that start no run,
+        # and this loop resumes at `end` (past the opener). A cfg-mutex
+        # `#[path = "dir"]` twin then held the (stack, name) override alone
+        # and silently redirected THIS branch's children too: the real
+        # source directory (rustc's choice on the other host) fell out of
+        # the scan and an `#[ignore]` there passed. Record it exactly like
+        # the non-run branch so the twin conflict fails closed.
+        if pending_value is None:
+            tok_close = _MOD_TOKEN_RE.search(stripped[end - 1])
+            if (
+                tok_close is not None
+                and tok_close.group(1) is not None
+                and tok_close.group(2)
+            ):
+                estack_c = tuple(stacks[end - 1])
+                base = child_dir if plain_file and not estack_c else file_dir
+                _record_inline_decl(
+                    inline_decls,
+                    path,
+                    estack_c,
+                    tok_close.group(1),
+                    (base, tok_close.group(1)),
+                    end - 1,
+                )
         j = end
         while j < n and not stripped[j].strip():
             j += 1
@@ -1031,6 +1124,15 @@ def _scan_graph():
                 f"test-registry-guard: cannot read lib source {path}: {err}"
             )
         stacks, externals, clean, stripped = _module_stacks(lines)
+        # Round-23 review: a `#` / `[` attribute head split across lines
+        # (legal — rustc tokenizes them separately) matched none of the
+        # per-line head probes and silently fell out of the scan; move the
+        # `#` onto the `[` line and re-lex so every probe sees an ordinary
+        # head there (see _join_split_attribute_heads).
+        joined = _join_split_attribute_heads(lines, stripped)
+        if joined is not None:
+            lines = joined
+            stacks, externals, clean, stripped = _module_stacks(lines)
         i = 0
         n = len(stripped)
         while i < n:

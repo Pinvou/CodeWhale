@@ -220,6 +220,11 @@ class PinAttributionTests(GuardFixture):
             guard._pin_ignored_locations(_PIN, by_path, unattributable),
             [],
         )
+        # Round-23: also assert the scan produced NO ignored hits anywhere
+        # (not merely none for this pin) — a fabricated hit under an
+        # unrelated path would otherwise pass this control.
+        self.assertEqual(by_path, {})
+        self.assertEqual(unattributable, {})
 
     def test_unparseable_file_hits_fail_closed_on_leaf_match(self):
         # A file the lexer cannot trust (unbalanced brace) has its hits
@@ -2894,6 +2899,133 @@ class Round22MidLineIgnoreTests(GuardFixture):
                 },
             )
         self.assertIn("ambiguous mod declarations", str(ctx.exception))
+
+
+
+class Round23WiringEntryTests(GuardFixture):
+    """Round-23 (maintainer P2s open since round 20, plus one adjacent hole
+    found while closing them): three ways a wired or ignored source failed
+    to ENTER the scan while a conventional same-name candidate answered for
+    it. (1) A mid-line `#[cfg_attr(pred, path = "x.rs")]` head — the old
+    mid-line probe matched only the direct `#[path =` head and the run-level
+    cfg_attr refusal never ran for a non-run-start line (four-control
+    0/1/0/1). (2) A `#` / `[` attribute head split across lines — legal
+    rustc tokenization that no per-line head probe matched, for both path
+    wiring and `#[ignore]`. (3) A plain inline opener sharing a run's
+    closing line (`#[cfg(windows)] mod outer {`) was never recorded, so a
+    cfg-mutex `#[path]` twin's directory override silently redirected this
+    branch's children as well."""
+
+    _run_main = DuplicateRegistrationTests._run_main
+
+    _MID_LINE_CFG_ATTR = (
+        "#[rustfmt::skip]\n"
+        'mod outer { #[cfg_attr(all(), path = "real.rs")] mod shared; }\n'
+    )
+    _SPLIT_PATH = '#\n[path = "real.rs"]\nmod shared;\n'
+    _SPLIT_IGNORE = (
+        "#[cfg(test)]\n"
+        "mod tests {\n"
+        "    #\n"
+        "    [ignore]\n"
+        "    #[test]\n"
+        "    fn critical_pin() {}\n"
+        "}\n"
+    )
+    _SPLIT_TEST_LIVE = (
+        "#[cfg(test)]\n"
+        "mod tests {\n"
+        "    #\n"
+        "    [test]\n"
+        "    fn critical_pin() {}\n"
+        "}\n"
+    )
+    _OPENER_ON_RUN_LINE = (
+        "#[cfg(unix)]\n"
+        '#[path = "unix_dir"]\n'
+        "mod outer { mod routed; }\n"
+        "#[cfg(windows)] mod outer {\n"
+        "    mod routed;\n"
+        "}\n"
+    )
+    _OPENER_TWINS_SAME_DIR = (
+        "#[cfg(unix)] mod outer {\n"
+        "    mod routed;\n"
+        "}\n"
+        "#[cfg(windows)] mod outer {\n"
+        "    mod routed;\n"
+        "}\n"
+    )
+
+    def test_mid_line_cfg_attr_path_fails_closed(self):
+        # The maintainer's four-control: wired source ignored + decoy live
+        # returned 0. The layout is unbindable in both pin states.
+        pin = "outer::shared::tests::critical_pin"
+        for files in (
+            {"outer/real.rs": _IGNORED_PIN, "outer/shared.rs": _LIVE_PIN},
+            {"outer/real.rs": _LIVE_PIN, "outer/shared.rs": _LIVE_PIN},
+        ):
+            with self.assertRaises(SystemExit) as ctx:
+                self._run_main(
+                    [pin], source=self._MID_LINE_CFG_ATTR, required=[pin], files=files
+                )
+            message = str(ctx.exception)
+            self.assertIn("direct or cfg_attr-wrapped", message)
+            self.assertIn("lib.rs:2", message)
+
+    def test_split_head_path_wiring_enters_the_scan(self):
+        # `#` on one line, `[path = "real.rs"]` on the next: the wiring must
+        # be modelled — the ignored wired source is red at ITS location, and
+        # a live wired source with an ignored unwired decoy stays green.
+        pin = "shared::tests::critical_pin"
+        code, err = self._run_main(
+            [pin],
+            source=self._SPLIT_PATH,
+            required=[pin],
+            files={"real.rs": _IGNORED_PIN, "shared.rs": _LIVE_PIN},
+        )
+        self.assertEqual(code, 1)
+        self.assertIn(f"required pin {pin} is #[ignore]d at", err)
+        self.assertIn(str(Path("real.rs")) + ":4", err)
+        code, err = self._run_main(
+            [pin],
+            source=self._SPLIT_PATH,
+            required=[pin],
+            files={"real.rs": _LIVE_PIN, "shared.rs": _IGNORED_PIN},
+        )
+        self.assertEqual(code, 0, err)
+
+    def test_split_head_ignore_is_detected_and_split_test_is_not_false_red(self):
+        pin = "tests::critical_pin"
+        code, err = self._run_main([pin], source=self._SPLIT_IGNORE, required=[pin])
+        self.assertEqual(code, 1)
+        self.assertIn("is #[ignore]d at", err)
+        self.assertIn("lib.rs:4", err)
+        code, err = self._run_main([pin], source=self._SPLIT_TEST_LIVE, required=[pin])
+        self.assertEqual(code, 0, err)
+
+    def test_plain_opener_on_run_closing_line_joins_twin_conflict(self):
+        # Before the fix the unix `#[path = "unix_dir"]` override redirected
+        # the windows branch's `mod routed;` too, so outer/routed.rs (the
+        # source rustc loads on Windows) left the scan and its #[ignore]
+        # passed: 0. The twin conflict must fail closed like round-15.
+        pin = "outer::routed::tests::critical_pin"
+        with self.assertRaises(SystemExit) as ctx:
+            self._run_main(
+                [pin],
+                source=self._OPENER_ON_RUN_LINE,
+                required=[pin],
+                files={"unix_dir/routed.rs": _LIVE_PIN, "outer/routed.rs": _IGNORED_PIN},
+            )
+        self.assertIn("ambiguous inline module", str(ctx.exception))
+        # positive control: same-directory plain twins stay legal
+        code, err = self._run_main(
+            [pin],
+            source=self._OPENER_TWINS_SAME_DIR,
+            required=[pin],
+            files={"outer/routed.rs": _LIVE_PIN},
+        )
+        self.assertEqual(code, 0, err)
 
 
 if __name__ == "__main__":
