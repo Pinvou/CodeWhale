@@ -57,7 +57,10 @@ encoding_rs.workspace = true
 fd-lock = "4.0.4"
 dirs.workspace = true
 futures-util = "0.3.31"
-oauth2 = "5"
+# default-features = false drops oauth2's bundled reqwest 0.12 client: the tui
+# only uses the TokenResponse trait (src/mcp/oauth.rs + mcp tests) and performs
+# all HTTP through its own reqwest 0.13 client, so reqwest converges on 0.13.
+oauth2 = { version = "5", default-features = false }
 # No ratatui-core pin: ColorCompatBackend answers `get_cursor_position()`
 # from tracked state (ratatui#2640's recommended workaround), so the CPR query
 # inside `Terminal::clear()` no longer races the input loop. See
