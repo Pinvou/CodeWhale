@@ -143,6 +143,7 @@ class FinancialPostgresRunnerTests(unittest.TestCase):
                 else:
                     self.assertNotIn("PINVOU_TEST_SCHEMA_DATABASE_URL", kwargs["env"])
                 self.assertIn("-race", argv)
+                self.assertEqual(kwargs["env"]["GOFLAGS"], "-trimpath -race -tags=nomsgpack -mod=readonly")
                 if phase == "owner-account":
                     self.assertEqual(kwargs["env"]["PINVOU_TEST_ACCOUNT_DATABASE_URL"], "postgres://postgres@127.0.0.1:5433/postgres?sslmode=disable")
                     self.assertNotIn("PINVOU_TEST_BILLING_DATABASE_URL", kwargs["env"])
@@ -219,6 +220,7 @@ class FinancialPostgresRunnerTests(unittest.TestCase):
         with patch.dict(RUNNER.os.environ, {
             "PINVOU_ACCOUNT_FINANCIAL_TEST_DATABASE_URL": "postgres://postgres@127.0.0.1:5433/postgres?sslmode=disable",
             "PINVOU_TEST_SCHEMA_DATABASE_URL": "must-not-reach-tests",
+            "GOFLAGS": "-trimpath",
         }, clear=True), patch.object(RUNNER.subprocess, "run", side_effect=run), contextlib.redirect_stdout(io.StringIO()):
             try:
                 RUNNER.main()
@@ -288,7 +290,7 @@ class FinancialPostgresRunnerTests(unittest.TestCase):
     def test_package_index_schema_contract_is_selected_and_cannot_skip(self):
         self.run_main_fixture()
         roots, package = RUNNER.SCHEMA_REQUIRED, RUNNER.SCHEMA_PACKAGE
-        self.assertEqual(roots, {"TestF09EntitlementPackageIndexPublicMigration", "TestTokenWalletReceiptSchemaPostgres", "TestLegacyEntitlementUpgradeAdmissionPostgres", "TestUsageWaiverHistoricalSchemaPostgres", "TestBillingOrdinaryReplayOriginalMigrationPostgres", "TestUnknownProviderEntryPublicMigrationPostgres", "TestLegacyExpiry025UpgradePreservesOriginalLedgerPostgres"})
+        self.assertEqual(roots, {"TestF09EntitlementPackageIndexPublicMigration", "TestTokenWalletReceiptSchemaPostgres", "TestLegacyEntitlementUpgradeAdmissionPostgres", "TestUsageWaiverHistoricalSchemaPostgres", "TestBillingOrdinaryReplayOriginalMigrationPostgres", "TestUnknownProviderEntryPublicMigrationPostgres", "TestLegacyExpiry025UpgradePreservesOriginalLedgerPostgres", "TestF04PublicTokenUserOwnerAuthorityAndDirectory"})
         command = self.fixture_commands[self.fixture_phases.index("owner-schema")]
         selection = command[command.index("-run") + 1]
         self.assertIn("TestF09EntitlementPackageIndexPublicMigration", selection)
@@ -296,8 +298,18 @@ class FinancialPostgresRunnerTests(unittest.TestCase):
         self.assertIn("TestLegacyEntitlementUpgradeAdmissionPostgres", selection)
         self.assertIn("TestUsageWaiverHistoricalSchemaPostgres", selection)
         self.assertIn("TestBillingOrdinaryReplayOriginalMigrationPostgres", selection)
+        self.assertIn("TestF04PublicTokenUserOwnerAuthorityAndDirectory", selection)
         valid = self.events(roots, package, children=True)
         self.assertGreater(RUNNER.verify_results(valid, roots, package=package, require_children=True, exact_roots=True), 0)
+        owner_root = "TestF04PublicTokenUserOwnerAuthorityAndDirectory"
+        for invalid in (
+            [event for event in valid if event.get("Test", "").split("/", 1)[0] != owner_root],
+            [event for event in valid if not event.get("Test", "").startswith(owner_root + "/")],
+            valid + [{"Action": "skip", "Package": package, "Test": owner_root}],
+            valid + [{"Action": "skip", "Package": package, "Test": owner_root + "/actual"}],
+        ):
+            with self.subTest(owner_root=owner_root, invalid=invalid), self.assertRaises(RuntimeError):
+                RUNNER.verify_results(invalid, roots, package=package, require_children=True, exact_roots=True)
         for invalid in (
             [event for event in valid if "/" not in event.get("Test", "")],
             [event for event in valid if event.get("Test")],
@@ -371,6 +383,7 @@ class FinancialPostgresRunnerTests(unittest.TestCase):
             "TestDeliveredPlatformPermissionsPostgres",
             "TestTokenApprovalRecentAuthenticationPostgres",
             "TestTokenApprovalRecentAuthenticationLegacyWriterPostgres",
+            "TestOwnerCombinedActualHTTPPostgres",
         })
         for name in RUNNER.ACCOUNT_REQUIRED:
             with self.subTest(name=name), self.assertRaises(RuntimeError):
@@ -387,6 +400,7 @@ class FinancialPostgresRunnerTests(unittest.TestCase):
             "TestDeliveredPlatformPermissionsPostgres",
             "TestTokenApprovalRecentAuthenticationPostgres",
             "TestTokenApprovalRecentAuthenticationLegacyWriterPostgres",
+            "TestOwnerCombinedActualHTTPPostgres",
         ):
             with self.subTest(root=root):
                 self.assertIn(root, roots)

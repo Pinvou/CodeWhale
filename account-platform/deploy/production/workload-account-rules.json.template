@@ -14,7 +14,7 @@
     "permissions": [
       "internal.authorization.check",
       "internal.authorization.delegate",
-      "internal.token-owner-authority.read",
+      "internal.account.token-owner-authority.check",
       "internal.token-owner-candidates.read",
       "internal.client-compatibility.read"
     ]

@@ -501,6 +501,13 @@ func (r *PostgresRepository) AdminSetOrganizationStatus(ctx context.Context, pri
 	if _, err := tx.Exec(ctx, `UPDATE organizations SET status=$2,version=version+1,updated_at=$3 WHERE id=$1`, organizationID, status, now); err != nil {
 		return err
 	}
+	// An otherwise ACTIVE unit's effective owner status changes with its parent.
+	// Advance the stored lifecycle evidence in this same transaction so a Token
+	// recheck can distinguish a new authoritative denial from a stale response.
+	// Exact organization-status replays return above and never advance it twice.
+	if _, err := tx.Exec(ctx, `UPDATE organization_units SET version=version+1,updated_at=$2 WHERE organization_id=$1 AND status='ACTIVE'`, organizationID, now); err != nil {
+		return err
+	}
 	fromMembershipStatus, toMembershipStatus := "SUSPENDED", "ACTIVE"
 	if status == "DISABLED" {
 		fromMembershipStatus, toMembershipStatus = "ACTIVE", "SUSPENDED"

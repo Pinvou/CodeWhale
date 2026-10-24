@@ -3,35 +3,39 @@ package billingschema
 import (
 	"bytes"
 	"context"
+	"crypto/rand"
+	"crypto/rsa"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"encoding/pem"
 	"errors"
+	"net/http"
+	"net/http/httptest"
+	"os"
+	"path/filepath"
+	"strconv"
+	"strings"
+	"testing"
+	"time"
+
 	"github.com/Pinvou/pinvou3/account-platform/internal/account"
 	"github.com/Pinvou/pinvou3/account-platform/internal/accountschema"
 	"github.com/Pinvou/pinvou3/account-platform/internal/platform/identity"
 	"github.com/Pinvou/pinvou3/account-platform/internal/platform/migrations"
 	"github.com/Pinvou/pinvou3/account-platform/internal/platform/tokenauthority"
+	"github.com/go-jose/go-jose/v4"
 	"github.com/google/uuid"
-	"net/http"
-	"net/http/httptest"
-	"os"
-	"strconv"
-	"strings"
-	"testing"
-	"time"
 )
 
 // Public Account migrations, genuine migrator/service actors and actual
-// authority/directory HTTP handlers; controlled development workload identity.
+// authority/directory HTTP handlers; a signed, configured Token workload identity.
 func TestF04PublicTokenUserOwnerAuthorityAndDirectory(t *testing.T) {
 	raw := os.Getenv("PINVOU_TEST_SCHEMA_DATABASE_URL")
 	if raw == "" {
 		t.Skip("explicit isolated PostgreSQL fixture required")
 	}
-	t.Setenv("APP_ENV", "test")
-	t.Setenv("WORKLOAD_IDENTITY_ISSUER", "")
-	t.Setenv("WORKLOAD_IDENTITY_CA_FILE", "")
+	workloadToken := retainedTokenOwnerWorkloadJWT(t)
 	ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
 	defer cancel()
 	f := newStageFixture(t, ctx, raw)
@@ -80,12 +84,12 @@ func TestF04PublicTokenUserOwnerAuthorityAndDirectory(t *testing.T) {
 	if _, err = c.Exec(ctx, `INSERT INTO role_assignments(id,user_id,role_code,source,starts_at,created_at) VALUES($1,$2,'PLATFORM_MODEL_ADMIN','ACCOUNT',now()-interval '1 minute',now())`, binding, actorID); err != nil {
 		t.Fatal(err)
 	}
-	service := account.NewService(r, nil).WithServiceToken("controlled-service").WithTokenOwnerCandidateCursorKey(bytes.Repeat([]byte{7}, 32))
+	service := account.NewService(r, nil).WithTokenOwnerCandidateCursorKey(bytes.Repeat([]byte{7}, 32))
 	handler := service.Handler(func(context.Context, string) (identity.Principal, error) { return actor, nil })
 	send := func(method, path string, body []byte) *httptest.ResponseRecorder {
 		t.Helper()
 		req := httptest.NewRequest(method, path, bytes.NewReader(body))
-		req.Header.Set("Authorization", "Bearer controlled-service")
+		req.Header.Set("Authorization", "Bearer "+workloadToken)
 		if body != nil {
 			req.Header.Set("Content-Type", "application/json")
 		}
@@ -100,7 +104,7 @@ func TestF04PublicTokenUserOwnerAuthorityAndDirectory(t *testing.T) {
 	request := func(input tokenauthority.Request) *httptest.ResponseRecorder {
 		input.AuthorityRequestSHA256 = input.Digest()
 		body, _ := json.Marshal(input)
-		return send(http.MethodPost, "/internal/v1/token-owner-authority", body)
+		return send(http.MethodPost, "/internal/v1/token-account-authority/snapshot", body)
 	}
 	var allowed tokenauthority.Response
 	t.Run("live-user-authority", func(t *testing.T) {
@@ -134,15 +138,15 @@ func TestF04PublicTokenUserOwnerAuthorityAndDirectory(t *testing.T) {
 			t.Fatal(err)
 		}
 	})
-	t.Run("future-organization-owner-rejected", func(t *testing.T) {
+	t.Run("unknown-owner-rejected", func(t *testing.T) {
 		input := base
-		input.OwnerType = sref("ORGANIZATION")
+		input.OwnerType = sref("UNKNOWN")
 		if w := request(input); w.Code != 400 {
-			t.Fatalf("future owner accepted %d", w.Code)
+			t.Fatalf("unknown owner accepted %d", w.Code)
 		}
 	})
 	t.Run("malformed-authority-rejected", func(t *testing.T) {
-		if w := send(http.MethodPost, "/internal/v1/token-owner-authority", []byte("{")); w.Code != 400 {
+		if w := send(http.MethodPost, "/internal/v1/token-account-authority/snapshot", []byte("{")); w.Code != 400 {
 			t.Fatalf("malformed input returned %d", w.Code)
 		}
 	})
@@ -177,9 +181,44 @@ func TestF04PublicTokenUserOwnerAuthorityAndDirectory(t *testing.T) {
 			t.Fatal("real users not enumerated")
 		}
 	})
-	t.Run("future-directory-filter-rejected", func(t *testing.T) {
-		if w := send(http.MethodGet, strings.Replace(directoryPath, "owner_type=USER", "owner_type=ORGANIZATION", 1), nil); w.Code != 400 {
-			t.Fatalf("future directory accepted %d", w.Code)
+	t.Run("unknown-directory-filter-rejected", func(t *testing.T) {
+		if w := send(http.MethodGet, strings.Replace(directoryPath, "owner_type=USER", "owner_type=UNKNOWN", 1), nil); w.Code != 400 {
+			t.Fatalf("unknown directory accepted %d", w.Code)
+		}
+	})
+	t.Run("supported-organization-missing-empty-and-live", func(t *testing.T) {
+		organizationID := uuid.New()
+		input := base
+		input.OwnerType, input.OwnerID = sref("ORGANIZATION"), sref(organizationID.String())
+		if w := request(input); w.Code != 503 || !strings.Contains(w.Body.String(), "OWNER_AUTHORITY_UNAVAILABLE") {
+			t.Fatalf("physical organization miss must be unavailable: %d %s", w.Code, w.Body.String())
+		}
+		path := strings.Replace(directoryPath, "owner_type=USER", "owner_type=ORGANIZATION", 1)
+		w := send(http.MethodGet, path, nil)
+		var empty account.TokenOwnerCandidatePage
+		if w.Code != 200 || json.Unmarshal(w.Body.Bytes(), &empty) != nil || len(empty.Items) != 0 || empty.HasMore || empty.NextCursor != nil || empty.AuthorizationVersion < 1 {
+			t.Fatalf("supported empty organization directory: %d %s", w.Code, w.Body.String())
+		}
+		creator := identity.Principal{Issuer: issuer, Subject: uuid.NewString(), SessionID: uuid.NewString(), AuthenticatedAt: time.Now()}
+		creatorID := bootstrap(creator)
+		if _, err := c.Exec(ctx, `INSERT INTO role_assignments(id,user_id,role_code,source,starts_at,created_at) VALUES($1,$2,'PLATFORM_ORGANIZATION_ADMIN','ACCOUNT',now()-interval '1 minute',now())`, uuid.New(), creatorID); err != nil {
+			t.Fatal(err)
+		}
+		organization, err := r.AdminCreateOrganization(ctx, creator, ownerID, "Owned organization authority", uuid.NewString())
+		if err != nil {
+			t.Fatal(err)
+		}
+		organizationID = organization.ID
+		input.OwnerID = sref(organizationID.String())
+		w = request(input)
+		var result tokenauthority.Response
+		if w.Code != 200 || json.Unmarshal(w.Body.Bytes(), &result) != nil || result.Decision != "ALLOW" || result.OwnerOrganizationID == nil || *result.OwnerOrganizationID != organizationID.String() || result.ObservedOwnerVersion == nil || *result.ObservedOwnerVersion != "1" || result.OwnerStatus == nil || *result.OwnerStatus != "ACTIVE" || result.OwnerIdentityDigest == nil || *result.OwnerIdentityDigest != tokenauthority.OwnerIdentityDigest("ORGANIZATION", organizationID, "ACTIVE", 1) {
+			t.Fatalf("live organization authority: %d %s", w.Code, w.Body.String())
+		}
+		w = send(http.MethodGet, path, nil)
+		var live account.TokenOwnerCandidatePage
+		if w.Code != 200 || json.Unmarshal(w.Body.Bytes(), &live) != nil || len(live.Items) != 1 || live.Items[0].ID != organizationID || live.Items[0].Type != "ORGANIZATION" || live.Items[0].Status != "ACTIVE" || live.OwnerVersions[organizationID.String()] != 1 {
+			t.Fatalf("live organization directory: %d %s", w.Code, w.Body.String())
 		}
 	})
 	t.Run("revoked-actor-authority-denied", func(t *testing.T) {
@@ -385,4 +424,43 @@ func TestF04PublicTokenUserOwnerAuthorityAndDirectory(t *testing.T) {
 		}
 	})
 
+}
+
+func retainedTokenOwnerWorkloadJWT(t *testing.T) string {
+	t.Helper()
+	key, err := rsa.GenerateKey(rand.Reader, 2048)
+	if err != nil {
+		t.Fatal(err)
+	}
+	jwks := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_ = json.NewEncoder(w).Encode(jose.JSONWebKeySet{Keys: []jose.JSONWebKey{{Key: &key.PublicKey, KeyID: "owned-token", Algorithm: "RS256", Use: "sig"}}})
+	}))
+	t.Cleanup(jwks.Close)
+	ca := filepath.Join(t.TempDir(), "ca.pem")
+	if err := os.WriteFile(ca, pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: jwks.Certificate().Raw}), 0600); err != nil {
+		t.Fatal(err)
+	}
+	issuer := jwks.URL + "/workload"
+	subject := "pinvou:service:token-gateway"
+	t.Setenv("APP_ENV", "production")
+	t.Setenv("WORKLOAD_IDENTITY_ISSUER", issuer)
+	t.Setenv("WORKLOAD_IDENTITY_JWKS_URL", jwks.URL)
+	t.Setenv("WORKLOAD_IDENTITY_CA_FILE", ca)
+	t.Setenv("WORKLOAD_IDENTITY_AUDIENCE", "owned-token-authority")
+	rules, _ := json.Marshal([]map[string]any{{"subject": subject, "service": "token-gateway", "permissions": []string{"internal.account.token-owner-authority.check", "internal.token-owner-candidates.read"}}})
+	t.Setenv("WORKLOAD_IDENTITY_RULES_JSON", string(rules))
+	signer, err := jose.NewSigner(jose.SigningKey{Algorithm: jose.RS256, Key: key}, (&jose.SignerOptions{}).WithHeader("kid", "owned-token"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	claims, _ := json.Marshal(map[string]any{"iss": issuer, "aud": "owned-token-authority", "sub": subject, "iat": time.Now().Unix(), "exp": time.Now().Add(5 * time.Minute).Unix()})
+	signed, err := signer.Sign(claims)
+	if err != nil {
+		t.Fatal(err)
+	}
+	raw, err := signed.CompactSerialize()
+	if err != nil {
+		t.Fatal(err)
+	}
+	return raw
 }

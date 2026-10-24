@@ -3,15 +3,17 @@ package account
 import (
 	"context"
 	"errors"
+	"slices"
+	"strings"
+	"time"
+
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 	"golang.org/x/text/unicode/norm"
-	"strings"
-	"time"
 )
 
 func (r *PostgresRepository) TokenOwnerCandidates(ctx context.Context, actor TokenOwnerCandidateActor, filter TokenOwnerCandidateFilter) (TokenOwnerCandidatePage, error) {
-	if filter.OwnerType != "" && filter.OwnerType != "USER" || filter.OrganizationID != nil {
+	if !slices.Contains([]string{"", "USER", "ORGANIZATION", "UNIT"}, filter.OwnerType) || filter.OrganizationID != nil && (filter.OwnerType != "UNIT" || *filter.OrganizationID == uuid.Nil) {
 		return TokenOwnerCandidatePage{}, ErrInvalidTokenOwnerCandidateFilter
 	}
 	if strings.TrimSpace(actor.Issuer) == "" || strings.TrimSpace(actor.Subject) == "" || strings.TrimSpace(actor.CallerService) == "" || strings.TrimSpace(actor.CallerSubject) == "" || len(actor.CallerService) > 128 || len(actor.CallerSubject) > 512 || filter.Limit < 1 || filter.Limit > 50000 {
@@ -145,12 +147,22 @@ FROM (
          account_user.status,account_user.version AS owner_version,account_user.created_at
   FROM users account_user
   WHERE account_user.status IN ('ACTIVE','DISABLED','PROVISIONING')
+  UNION ALL
+  SELECT organization.id,'ORGANIZATION',organization.name,organization.status,organization.version,organization.created_at
+  FROM organizations organization
+  WHERE organization.status IN ('ACTIVE','DISABLED')
+  UNION ALL
+  SELECT unit.id,'UNIT',unit.name,`+tokenOwnerUnitStatusSQL+`,unit.version,unit.created_at
+  FROM organization_units unit
+  JOIN organizations organization ON organization.id=unit.organization_id
+  WHERE unit.status IN ('ACTIVE','DISABLED') AND organization.status IN ('ACTIVE','DISABLED')
+    AND ($6::uuid IS NULL OR unit.organization_id=$6)
 ) candidate
 WHERE ($1='' OR candidate.owner_type=$1)
   AND candidate.created_at<=$2
   AND ($3='' OR (candidate.owner_type,candidate.owner_id)>($3,$4))
 ORDER BY candidate.owner_type,candidate.owner_id
-LIMIT $5`, filter.OwnerType, highWater, cursorType, cursorID, filter.Limit+1)
+LIMIT $5`, filter.OwnerType, highWater, cursorType, cursorID, filter.Limit+1, filter.OrganizationID)
 	if err != nil {
 		return TokenOwnerCandidatePage{}, err
 	}

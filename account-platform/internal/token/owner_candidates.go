@@ -152,9 +152,9 @@ func normalizeOwnerCandidateLabel(value string) string {
 }
 
 func (s *Service) ownerCandidateSnapshotSource(r *http.Request, filter adminQueryFilter) (AdminSnapshotMemberSource, error) {
-	// Account does not authorize organization-filtered owner discovery. Reject
-	// this unsupported filter before contacting that authority.
-	if strings.TrimSpace(filter.values["organization_id"]) != "" {
+	// Only a unit's parent is an authorized owner filter. User membership
+	// discovery remains unavailable under the minimal owner-candidate permission.
+	if strings.TrimSpace(filter.values["organization_id"]) != "" && strings.TrimSpace(filter.values["owner_type"]) != "UNIT" {
 		return nil, ErrAdminQueryInvalidFilter
 	}
 	if s.ownerCandidates == nil {

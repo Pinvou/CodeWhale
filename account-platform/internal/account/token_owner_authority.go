@@ -1,13 +1,18 @@
 package account
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
+	"io"
 	"net/http"
 	"strconv"
+	"strings"
 
 	"github.com/Pinvou/pinvou3/account-platform/internal/platform/api"
 	"github.com/Pinvou/pinvou3/account-platform/internal/platform/httpserver"
+	"github.com/Pinvou/pinvou3/account-platform/internal/platform/serviceauth"
 	"github.com/Pinvou/pinvou3/account-platform/internal/platform/tokenauthority"
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
@@ -25,12 +30,17 @@ func normalizedAuthorityStatus(status string) string {
 }
 
 func (s *Service) internalTokenOwnerAuthority(w http.ResponseWriter, r *http.Request) {
+	workload, trusted := serviceauth.FromContext(r.Context())
+	if !trusted || workload.ActorType != "SERVICE" || workload.Service != "token-gateway" || strings.TrimSpace(workload.Subject) == "" || workload.Permission != "internal.account.token-owner-authority.check" {
+		api.WriteError(w, http.StatusForbidden, "SERVICE_AUTH_FORBIDDEN", "trusted Token workload identity is required", httpserver.RequestID(r.Context()))
+		return
+	}
 	var body tokenauthority.Request
-	if api.DecodeJSON(w, r, &body) != nil {
+	if decodeTokenOwnerAuthorityRequest(w, r, &body) != nil {
 		api.WriteError(w, http.StatusBadRequest, "AUTHORITY_REQUEST_INVALID", "authority request is invalid", httpserver.RequestID(r.Context()))
 		return
 	}
-	if err := body.Validate(); err != nil || body.OwnerType != nil && *body.OwnerType != "USER" {
+	if err := body.Validate(); err != nil {
 		api.WriteError(w, http.StatusBadRequest, "AUTHORITY_REQUEST_INVALID", "authority request is invalid", httpserver.RequestID(r.Context()))
 		return
 	}
@@ -51,9 +61,6 @@ func (s *Service) internalTokenOwnerAuthority(w http.ResponseWriter, r *http.Req
 func (r *PostgresRepository) tokenOwnerAuthority(ctx context.Context, input tokenauthority.Request) (tokenauthority.Response, error) {
 	if err := input.Validate(); err != nil {
 		return tokenauthority.Response{}, err
-	}
-	if input.OwnerType != nil && *input.OwnerType != "USER" {
-		return tokenauthority.Response{}, ErrForbidden
 	}
 	tx, err := r.pool.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.RepeatableRead, AccessMode: pgx.ReadOnly})
 	if err != nil {
@@ -111,6 +118,15 @@ func (r *PostgresRepository) tokenOwnerAuthority(ctx context.Context, input toke
 		switch *input.OwnerType {
 		case "USER":
 			err = tx.QueryRow(ctx, `SELECT status,version FROM users WHERE id=$1`, ownerID).Scan(&ownerStatus, &ownerVersion)
+		case "ORGANIZATION":
+			err = tx.QueryRow(ctx, `SELECT status,version FROM organizations WHERE id=$1`, ownerID).Scan(&ownerStatus, &ownerVersion)
+			response.OwnerOrganizationID = authorityString(ownerID.String())
+		case "ORG_UNIT":
+			var organizationID uuid.UUID
+			err = tx.QueryRow(ctx, `SELECT `+tokenOwnerUnitStatusSQL+`,unit.version,unit.organization_id FROM organization_units unit JOIN organizations organization ON organization.id=unit.organization_id WHERE unit.id=$1`, ownerID).Scan(&ownerStatus, &ownerVersion, &organizationID)
+			if err == nil {
+				response.OwnerOrganizationID = authorityString(organizationID.String())
+			}
 		default:
 			return tokenauthority.Response{}, errors.New("invalid owner type")
 		}
@@ -122,6 +138,9 @@ func (r *PostgresRepository) tokenOwnerAuthority(ctx context.Context, input toke
 		}
 		ownerStatus = normalizedAuthorityStatus(ownerStatus)
 		ownerDigest := tokenauthority.OwnerIdentityDigest(*input.OwnerType, ownerID, ownerStatus, ownerVersion)
+		if *input.OwnerType == "ORG_UNIT" {
+			ownerDigest = tokenauthority.UnitOwnerIdentityDigest(ownerID, uuid.MustParse(*response.OwnerOrganizationID), ownerStatus, ownerVersion)
+		}
 
 		response.ObservedOwnerVersion = authorityString(strconv.FormatInt(ownerVersion, 10))
 		response.OwnerStatus = authorityString(ownerStatus)
@@ -180,3 +199,42 @@ SELECT account_user.status,account_user.version,
   FROM users account_user WHERE account_user.id=$1`
 
 func authorityString(value string) *string { return &value }
+
+// decodeTokenOwnerAuthorityRequest preserves the existing one-MiB API bound,
+// while rejecting duplicate or omitted fields in this closed authority transport.
+func decodeTokenOwnerAuthorityRequest(w http.ResponseWriter, r *http.Request, result *tokenauthority.Request) error {
+	raw, err := io.ReadAll(http.MaxBytesReader(w, r.Body, 1<<20))
+	if err != nil {
+		return err
+	}
+	decoder := json.NewDecoder(bytes.NewReader(raw))
+	token, err := decoder.Token()
+	if err != nil || token != json.Delim('{') {
+		return errors.New("authority request must be an object")
+	}
+	seen := map[string]bool{}
+	for decoder.More() {
+		token, err := decoder.Token()
+		key, ok := token.(string)
+		if err != nil || !ok || seen[key] {
+			return errors.New("duplicate authority field")
+		}
+		switch key {
+		case "authority_schema_version", "mode", "identity_issuer", "identity_subject", "identity_subject_sha256", "actor_user_id", "owner_type", "owner_id", "required_permissions", "command_reference", "command_request_digest", "expected_platform_authorization_version", "expected_actor_version", "expected_owner_version", "expected_actor_identity_digest", "expected_owner_identity_digest", "authority_request_sha256":
+		default:
+			return errors.New("unknown authority field")
+		}
+		seen[key] = true
+		var value json.RawMessage
+		if decoder.Decode(&value) != nil {
+			return errors.New("invalid authority field")
+		}
+	}
+	token, err = decoder.Token()
+	if err != nil || token != json.Delim('}') || decoder.Decode(new(any)) != io.EOF || len(seen) != 17 {
+		return errors.New("incomplete authority request")
+	}
+	decoder = json.NewDecoder(bytes.NewReader(raw))
+	decoder.DisallowUnknownFields()
+	return decoder.Decode(result)
+}

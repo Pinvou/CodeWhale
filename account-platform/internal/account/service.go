@@ -85,7 +85,7 @@ func (s *Service) Handler(verify identity.VerifyFunc) http.Handler {
 	internal.GET("/users/:user_id/account-closure-state", serviceauth.Require("internal.account.closure.read"), httpserver.AdaptFunc(s.internalAccountClosureState))
 	internal.GET("/client-compatibility", serviceauth.Require("internal.client-compatibility.read"), httpserver.AdaptFunc(s.internalClientCompatibility))
 	internal.GET("/registration-bonus-eligibility/readiness", serviceauth.Require("internal.registration-bonus-eligibility.read"), httpserver.AdaptFunc(s.internalRegistrationBonusEligibilityReadiness))
-	internal.POST("/token-owner-authority", serviceauth.Require("internal.token-owner-authority.read"), httpserver.AdaptFunc(s.internalTokenOwnerAuthority))
+	internal.POST("/token-account-authority/snapshot", serviceauth.Require("internal.account.token-owner-authority.check"), httpserver.AdaptFunc(s.internalTokenOwnerAuthority))
 	internal.GET("/token-owner-candidates", serviceauth.Require("internal.token-owner-candidates.read"), httpserver.AdaptFunc(s.internalTokenOwnerCandidates))
 	internal.POST("/authorization/check", serviceauth.Require("internal.authorization.check"), httpserver.AdaptFunc(s.checkPermission))
 	internal.POST("/authorization/human-delegations", serviceauth.Require("internal.authorization.delegate"), httpserver.AdaptFunc(s.createHumanDelegation))

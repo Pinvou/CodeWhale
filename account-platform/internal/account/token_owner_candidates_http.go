@@ -93,11 +93,16 @@ func parseTokenOwnerCandidateFilter(r *http.Request) (TokenOwnerCandidateFilter,
 		OwnerType: strings.ToUpper(strings.TrimSpace(query.Get("owner_type"))),
 		Limit:     20000,
 	}
-	if filter.OwnerType != "" && filter.OwnerType != "USER" {
+	if !slices.Contains([]string{"", "USER", "ORGANIZATION", "UNIT"}, filter.OwnerType) {
 		return TokenOwnerCandidateFilter{}, ErrInvalidTokenOwnerCandidateFilter
 	}
-	if query.Get("organization_id") != "" {
-		return TokenOwnerCandidateFilter{}, ErrInvalidTokenOwnerCandidateFilter
+	if value := query.Get("organization_id"); value != "" {
+		// Parent filtering is only for selecting a unit, never a membership directory.
+		id, err := uuid.Parse(value)
+		if filter.OwnerType != "UNIT" || err != nil || id == uuid.Nil || value != id.String() {
+			return TokenOwnerCandidateFilter{}, ErrInvalidTokenOwnerCandidateFilter
+		}
+		filter.OrganizationID = &id
 	}
 
 	if rawLimit := strings.TrimSpace(query.Get("limit")); rawLimit != "" {

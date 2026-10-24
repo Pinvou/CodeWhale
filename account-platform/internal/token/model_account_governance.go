@@ -138,7 +138,7 @@ func parseGovernedAccountCreate(target string, raw json.RawMessage) (governedAcc
 	command.ShareScope = strings.ToUpper(strings.TrimSpace(command.ShareScope))
 	command.Name = strings.TrimSpace(command.Name)
 	request := command.createRequest(uuid.Nil, uuid.New())
-	if command.OwnerType != "USER" || command.ShareScope != "OWNER_UNIT_ONLY" || command.OwnerID != ownerID || !validOwner(request) || !validShareScope(command.ShareScope) || command.Name == "" || len(command.Name) > 120 || command.DefaultPriority < 0 || command.DefaultPriority > 10000 {
+	if command.OwnerID != ownerID || !validOwner(request) || !validShareScope(command.ShareScope) || command.Name == "" || len(command.Name) > 120 || command.DefaultPriority < 0 || command.DefaultPriority > 10000 {
 		return command, ErrTokenCommandInvalid
 	}
 	return command, nil
