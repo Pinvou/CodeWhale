@@ -450,7 +450,11 @@ export const lazyChunkContracts = {
   toolWelcome: ['features/tools/ToolWelcomeCard.jsx', 'ToolWelcomeCard'],
 };
 
-export function assertLazyChunks(bundle, contracts = lazyChunkContracts) {
+export const lazyToolChunkContracts = {
+  scheduledTaskCard: ['features/tools/scheduled-task-card.jsx', 'ScheduledTaskToolCard'],
+};
+
+export function assertLazyChunks(bundle, contracts = { ...lazyChunkContracts, ...lazyToolChunkContracts }) {
   for (const [modulePath, label] of Object.values(contracts)) {
     const chunks = Object.values(bundle).filter(output => output.type === 'chunk'
       && Object.keys(output.modules).some(moduleId => moduleId.replaceAll('\\', '/')

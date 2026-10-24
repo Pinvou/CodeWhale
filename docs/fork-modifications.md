@@ -85,7 +85,9 @@
 
 - 父仓适配（沿用既有登记）：v0.9.12 EngineConfig、Agent/Plan 模式、逐轮 reasoning/安全、ExtraTools、owner 事件隔离、Automation v3/v4 数据兼容、rusqlite 0.40.2、Shell 任务来源对账；消费方 PR #396（execpolicy）、#408（轮次取消）、#444（蜂群）、#468（computer-use）、#472（一键导出）依赖已登记底座能力
 
-- #115 保留 shell 默认环境并合并叠加，Windows 显式变量名按大小写不敏感覆盖；#116 将返回的失败结果标志写入实际历史并验证会话往返。原有执行错误、成功和 schema 加载边界保持原实现。两项均在 T2 内，不增加主题。
+- #115 保留 shell 默认环境并合并叠加，Windows 显式变量名按大小写不敏感覆盖；#116 已以 [`e9a7f48da1`](https://github.com/Pinvou/CodeWhale/commit/e9a7f48da1) 合入，将返回的失败结果标志写入实际历史并验证会话往返。两项均在 T2 内，不增加主题。
+- #116 选择性前移上游 `2ae7460e4` 的 `is_error` 映射；该映射不在 v0.9.12 基线内，上游同一提交的取消 metadata 与 shell receipt 改动未纳入。成功返回但 `success=false` 的结果以及中断且未执行的标记记为失败，正文保留；原有执行错误、成功及 schema 加载但未执行的成功语义不变。
+- 影响面为持久化历史的 `is_error`、恢复后 Anthropic 请求中的失败标志、CLI failure 计数、会话选择器预览、runtime API 会话 JSON/工具回执，以及 Pinvou 应用恢复工具卡片时由 `!is_error` 回填的成功状态（`bridge-shared-helpers.js`）。实时工具卡片与 ACP Failed 状态原已依据 `ToolResult.success`，不因这次历史标志映射而改变；CodeWhale TUI 恢复历史的渲染器不生成 ToolResult 卡片。子 Agent 记录器（`tools/subagent/mod.rs`）与 TUI `SyncSession` 镜像（`tui/ui/event_loop.rs`）原有的标志丢失仍是后续项，不声称 #116 已覆盖。
 - 指纹同时登记 Windows 默认值/构造器/显式覆盖/原生工具测试及 `forkguard_tool_failure_flag_survives_recording_and_round_trip`。底座合入不等于客户环境或发布验证通过。
 
 ### 轮次绑定取消：宿主 stop 按轮身份分派（父仓适配，本 PR）
@@ -189,8 +191,11 @@
 | `0bc868ff0` | T4 修复 | drain-cap 测试的四个名字改为显式导入、不再经 tests mod 的 unix 门控 glob（#77 同形）解析：测试本身平台无关（tokio duplex），Windows lib test 编译此前 7 处 E0425/E0433（#95） |
 | `44921cf02` | T2 修复 | 浮动 stable 工具链（1.99.0，2026-10-01 滚出）编译与 lint 复绿：`mark_taken` 的 `Atomic::fetch_update` 已更名 `try_update` 并弃用，MSRV 1.88 无新名，唯一调用点 `#[allow(deprecated)]` 并注明缘由（对旧工具链惰性）；顺带清掉 1.99 clippy 对存量代码的三处新发现（`agent_plugin` 单元素 `for key in ["args"]` 循环展开、错误串逐字节不变；`workflow_panel` 两处非捕获 Copy 闭包的多余 `&bounded` 借用）；首证于父仓 windows-rust-test `codewhale-tui` 编译红（#80） |
 | `f27672935` | T1 修复 | 同 wire model/protocol 的 model-aware 请求及 subagent/fleet rebind 保留宿主冻结 route limits，避免无宿主 overrides 的静态重解析将声明输出额度降回未知模型 8192 默认钳制；跨模型/协议继续重建（#107，公开提交未含 DCO trailer） |
+| `7d2636993` | T2 fix | Preserve shell defaults when task environment overlays are merged; explicit Windows names override case-insensitively. CodeWhale#115 adds generic overlay and Windows foreground/background Python stdio regressions; child-env sanitization and public signatures are unchanged. |
+| `e9a7f48da` | T2 fix | Preserve failed tool results as `is_error:true` during history recording. Existing upstream round-trip regression covers HTTP/tool errors, success and schema-loaded non-execution. CodeWhale#116; no public signature/dependency change. |
+| `ea9fdc90f` | T2 help/contract | Document the already supported Web JSONPath subset; one schema-description string changes, with a resultful parser-contract regression. No execution/parser/API/dependency change (CodeWhale#117). |
 
-除 #107 squash `f27672935`（其合并提交信息未保留 sign-off 尾部，已留言知会上游维护者，见 CodeWhale#107）外，所有提交都含 DCO `Signed-off-by`。`b4c02616b` 包含大部分跨主题收口，历史粒度确实不利于 bisect；分支公开进入评审后没有为历史美化 force-push，而是追加带 sign-off 的提交修复评审和发布门禁问题，并用本表、指纹和行为测试弥补审计粒度。不可变 tag 已创建，后续不得重写。
+除 #116 squash `e9a7f48da` 与 #107 squash `f27672935`（其合并提交信息未保留 sign-off 尾部，已留言知会上游维护者，见 CodeWhale#107）外，所有提交都含 DCO `Signed-off-by`。`b4c02616b` 包含大部分跨主题收口，历史粒度确实不利于 bisect；分支公开进入评审后没有为历史美化 force-push，而是追加带 sign-off 的提交修复评审和发布门禁问题，并用本表、指纹和行为测试弥补审计粒度。不可变 tag 已创建，后续不得重写。
 
 ## 4. T1 — 宿主嵌入与路由边界
 
@@ -245,6 +250,7 @@
 
 ### 关键测试
 
+- `forkguard_tool_failure_flag_survives_recording_and_round_trip`
 - `forkguard_exact_dispatch_rejects_forged_backends`
 - `forkguard_read_only_turn_rejects_write_at_final_dispatch`
 - `forkguard_restricted_tool_audit_redacts_private_payload`
@@ -505,6 +511,24 @@ domain adapter；桌面 terminal 测试提取实际生产函数并使用受控�
 - M1/M3/M4/M5 补登记随本 PR 落 §12（分歧 5-8）；分歧 3 同 PR 改写退役。M6 以最小存在性门禁落地：`scripts/fork-guard.sh` APP 指纹层补 F-A1/F-A2/F-A3/F-B1/F-B2/F-B3/F-B4/F-C1 及裁决①②保留面的 grep -F 存在性钉（--fast 层即生效）。
 - voice harness 重铺实测：上游 `voice_operation_lifecycle.test.mjs` 直驱官方语音 lane = 2/29（红全部为 harness 级：官方 lane 保留 completeVoiceSubmission/trackVoiceTerminal 遥测调用点、双受理冻结、本地 clearVoiceInput 覆盖等 F 面，上游 harness 以上游语音结构切片）——官方 83/83 版本保持，结论登记为"上游 harness 依赖上游语音结构，官方语义等价保留"，非失败项。
 - 测试结果：全量 `npm run test:node` 1890 tests / 1871 pass / 0 fail / 19 skipped（与 T4b 前 HEAD 基线 1871/0/19 持平，无新增失败）；build:ui 后 ui_smoke 58/58、kb_smoke 55/55；biome 改动文件 0 error；architecture-guard passed。
+
+## 2026-10-23 consumed baseline: Python stdio environment defaults (T2)
+
+CI public-baseline verification detected maintenance head `7d2636993` replacing `083cebfd9`. This parent consumes the already merged CodeWhale#115; it does not create another foundation patch or behavior topic. `CommandSpec::with_env` now merges through `with_env_var` so shell defaults survive empty/nonempty task overlays. On Windows, explicit environment names override earlier spellings case-insensitively; child environment sanitization still applies. Public signatures and dependency files are unchanged, so no app API adapter is needed.
+
+Existing upstream regressions cover generic overlays, Windows shell defaults and both Python execution lanes. Fingerprints pin those tests. Native Windows execution belongs to the corresponding upstream/parent CI; local Linux checks do not claim to exercise those cfg(windows) tests. The immutable r3 closure tag remains `61cb769be`. Recount:77 registered commits /76 commits with a signoff (the historical #107 exception is unchanged).
+
+## 2026-10-23 consumed baseline: failed tool result flags (T2)
+
+The live maintenance head advanced again to `e9a7f48da` (CodeWhale#116) while #115 validation was running. The only production change passes `(!output.success).then_some(true)` into the existing history-content builder instead of discarding the failure flag. The added upstream regression persists/restores HTTP failures, execution errors, success and schema-loaded non-execution. Public signatures, stored schema and dependencies are unchanged; no app adapter or new fork patch is needed. The existing T2 tool-result boundary owns this fix.
+
+Recount at this head:78 registered commits,76 with a signoff; #116's squash message introduces a second missing-footer exception alongside historical #107. This inventory records the public commit as observed; it does not claim an upstream report or rewrite. The parent repository's own commits remain signed. The immutable closure tag is unchanged.
+
+## 2026-10-23 consumed help-only baseline: JSONPath subset (T2)
+
+The public verifier advanced to `ea9fdc90f` (CodeWhale#117) between the parent and child pushes. The entire production delta from `e9a7f48da` is one Web `fields.description` string; execution, parsing, public signatures, dependencies and persisted schema are unchanged. The added resultful test drives advertised selectors through the real parser and verifies unsupported recursive descent/filters. The new fingerprint is under existing T2; no new fork patch/topic is introduced. Recount79 registered/77 signed commits; #107/#116 remain the only missing-footer exceptions.
+
+The preceding e9 execution regressions are retained as such. This help-only update is checked through current consumer compilation, Clippy and the current foundation schema/fork contracts; retained prior full-suite counts must not be presented as fresh runs at this documentation-only head.
 ### 2026-10-23 主线 #2076 T2 与 Account 桥接组合
 
 本次组合同时保留上面的 Account 模型引用、权威目录快照、typed selection、草稿导航及 compactNow 公共面，与 14.4 的工具卡重放索引。共享顶层函数计数为 315（本分支 314 + 私有 applyToolItemResult；main 为 314），新结果写入器只依赖参数，Map 仅属于单次重放，不改变各 lane 的 deps/forwarders/导出。

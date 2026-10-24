@@ -67,6 +67,34 @@ def _without_yaml_comments(block):
     )
 
 
+def _without_inline_comments(block):
+    """整行与行尾 `#` 注释都剥掉(引号内的 `#` 保留)。
+
+    Round-4 review R3 of PR #745: `_without_yaml_comments` 只剥整行注释,
+    一个从 node --test 列表里删掉、却仍被某条活行行尾注提及的套件
+    (`... a.test.mjs # still runs b.test.mjs`)能让成员/全集 pin 继续假绿。
+    剥掉行尾注释后,注释里的路径进不了任何提取结果;良性尾注只是被剥掉,
+    不会造成假红。
+    """
+    stripped_lines = []
+    for line in block.splitlines():
+        if line.lstrip().startswith("#"):
+            continue
+        quote = None
+        cut = len(line)
+        for index, char in enumerate(line):
+            if quote is not None:
+                if char == quote:
+                    quote = None
+            elif char in ("'", '"'):
+                quote = char
+            elif char == "#" and index > 0 and line[index - 1] in (" ", "\t"):
+                cut = index
+                break
+        stripped_lines.append(line[:cut].rstrip())
+    return "\n".join(stripped_lines)
+
+
 def _is_covered_by_trigger(entry, trigger_paths):
     """entry 被 trigger path 覆盖:完全相同,或 trigger 是其上层 `/**` 目录 glob。
 
@@ -516,17 +544,44 @@ GATE_JOB_LEVEL_IFS = {
         "(github.event_name != 'pull_request' || "
         "github.event.pull_request.draft == false) }}"
     ),
+    # knowledge-rust/cli-test share the push-unconditional shape since
+    # 2026-10: main push refreshes the cache namespace even on
+    # non-knowledge merges (PRs never save; a paths-gated writer ages out).
+    # Drafts skip like every other heavy leg.
     "knowledge-rust": (
-        "${{ !cancelled() && github.event.action != 'closed' && "
-        "needs.changes.outputs.pure_release_backflow != 'true' && "
-        "(needs.changes.outputs.knowledge_rust == 'true' || "
-        "needs.changes.outputs.knowledge_dependencies == 'true') }}"
+        # knowledge-rust gains the push-unconditional arm on the Official tree's
+        # existing guard (pure_release_backflow): main push refreshes the
+        # knowledge-rust-v2 namespace even on non-knowledge merges (PRs never
+        # save; a paths-gated writer ages out). PR/Queue routing stays
+        # paths-driven and Official's existing draft behavior is unchanged.
+        "${{\n"
+        "!cancelled() &&\n"
+        "github.event.action != 'closed' &&\n"
+        "needs.changes.outputs.pure_release_backflow != 'true' &&\n"
+        "(\n"
+        "github.event_name == 'push' ||\n"
+        "needs.changes.outputs.knowledge_rust == 'true' ||\n"
+        "needs.changes.outputs.knowledge_dependencies == 'true'\n"
+        ")\n"
+        "}}"
     ),
+    # rust-lint got the same main-push refresh, but keeps its draft
+    # fmt-only fast pass: no draft clause here (RUN_HEAVY_RUST_CHECKS
+    # degrades drafts instead).
     "rust-lint": (
-        "${{ !cancelled() && github.event.action != 'closed' && "
-        "needs.changes.outputs.pure_release_backflow != 'true' && "
-        "(needs.changes.outputs.rust_code == 'true' || "
-        "needs.changes.outputs.rust_dependencies == 'true') }}"
+        # rust-lint gains the same main-push refresh while keeping Official's
+        # guard; the draft fmt + bounded-regression fast pass is unchanged
+        # (RUN_HEAVY_RUST_CHECKS degrades drafts, no draft clause here).
+        "${{\n"
+        "!cancelled() &&\n"
+        "github.event.action != 'closed' &&\n"
+        "needs.changes.outputs.pure_release_backflow != 'true' &&\n"
+        "(\n"
+        "github.event_name == 'push' ||\n"
+        "needs.changes.outputs.rust_code == 'true' ||\n"
+        "needs.changes.outputs.rust_dependencies == 'true'\n"
+        ")\n"
+        "}}"
     ),
     "rust-test": (
         "${{\n"
@@ -833,6 +888,152 @@ class CiGatePolicyTests(unittest.TestCase):
                 frontend_paths,
                 f"静态门禁配置 {path} 不在 frontend filter 中,config-only PR 会静默跳过 frontend-test",
             )
+
+    def test_webui_wrapper_routes_to_frontend_test_with_suite_wired(self):
+        # run-webui-smoke.mjs is consumed only inside frontend-test (the
+        # diff-selected test:webui entry), and its behavior suite
+        # scripts/tests/run-webui-smoke.test.mjs is executed by
+        # version-consistency from an explicit file list. Miss either
+        # registration and a wrapper-only PR loses every gate over the file
+        # it changed (round-2 review of PR #745 found both holes: the
+        # selector branch existed but the filter never routed the path, and
+        # the suite only ever ran locally).
+        changes = _without_yaml_comments(_changes_block(self.pr_workflow))
+        # Extracted entries, not raw substrings: a trailing-comment decoy
+        # ("- 'other' # was 'run-webui-smoke.mjs'") must not satisfy this
+        # pin (round-42 extractor discipline; unrecognized entry shapes
+        # fail closed). Round-3 review of PR #745.
+        frontend_paths = _extract_quoted_paths(_frontend_filter_paths(changes))
+        self.assertIn(
+            "pinvou3-app/scripts/run-webui-smoke.mjs",
+            frontend_paths,
+            "webui wrapper 不在 frontend filter 中,wrapper-only PR 会静默跳过 frontend-test",
+        )
+        # Inline-stripped (round-4 review R3 of PR #745): whole-line
+        # stripping alone lets a suite that was removed from the live list
+        # survive as a trailing comment on another list line, keeping this
+        # membership pin green while version-consistency never runs it.
+        version_consistency = _without_inline_comments(
+            self.pr_workflow.split(
+                "\n  version-consistency:", maxsplit=1
+            )[1].split("\n  changes:", maxsplit=1)[0]
+        )
+        self.assertIn(
+            "scripts/tests/run-webui-smoke.test.mjs",
+            version_consistency,
+            "wrapper 套件未接入 version-consistency 的显式 node --test 列表,CI 永不执行",
+        )
+
+    def test_node_suites_under_scripts_tests_are_all_wired(self):
+        # Nothing auto-discovers scripts/tests/*.test.mjs. Most suites use
+        # version-consistency; the Account contracts also have dedicated
+        # jobs with their own runtime dependencies and path routing.
+        # Pin their live commands and filters before including those suites.
+        # Pin both directions so the class stays closed:
+        # every suite on disk must be listed (a forgotten new suite
+        # silently never runs), and every listed scripts/tests entry must
+        # exist (a renamed suite must not leave a dead entry green).
+        # Inline-stripped (round-4 review R3 of PR #745): a trailing
+        # comment on a live list line must not count a removed suite as
+        # "listed" — whole-line stripping alone left that hole open.
+        version_consistency = _without_inline_comments(
+            self.pr_workflow.split("\n  version-consistency:", maxsplit=1)[1].split(
+                "\n  changes:", maxsplit=1
+            )[0]
+        )
+        listed = set(
+            re.findall(
+                r"scripts/tests/[A-Za-z0-9_./-]+\.test\.mjs", version_consistency
+            )
+        )
+        dedicated = {
+            "token-management-authorization-coverage.test.mjs": (
+                "account-platform-test", "account_platform",
+                "Verify Token management authorization contracts",
+            ),
+            "token-management-phase-coverage.test.mjs": (
+                "account-platform-test", "account_platform",
+                "Verify Token management authorization contracts",
+            ),
+            "account-platform-authorization-coverage.test.mjs": (
+                "account-platform-test", "account_platform",
+                "Verify Account Platform authorization contracts",
+            ),
+            "account-platform-invocation-environment.test.mjs": (
+                "frontend-test", "frontend",
+                "Verify Account invocation environment contracts",
+            ),
+        }
+        changes = _changes_block(self.pr_workflow)
+        for filename, (job_name, group, step_name) in dedicated.items():
+            path = f"scripts/tests/{filename}"
+            job = _without_inline_comments(_extract_job_block(self.pr_workflow, job_name))
+            step = _step_named(job, step_name)
+            command_path = f"../{path}" if job_name == "frontend-test" else path
+            self.assertRegex(
+                step, rf"(?m)^\s+(?:run:\s*)?node --test {re.escape(command_path)}\s*$",
+                f"{path} must have a live node --test command in {job_name}",
+            )
+            self.assertNotRegex(step, r"(?m)^        (?:if|continue-on-error):")
+            entries = _extract_quoted_paths(_dorny_filter_group(changes, group))
+            self.assertIn(path, entries, f"{path} must trigger its {job_name} runner")
+            self.assertTrue(_matches_paths_filter(path, entries), f"{path} must not be excluded")
+            self.assertIn('node-version: "24"', job)
+            if job_name == "frontend-test":
+                self.assertIn("working-directory: pinvou3-app", job)
+                install = _step_named(job, "安装前端依赖")
+                self.assertIn("run: npm ci --prefer-offline --no-audit", install)
+                self.assertNotRegex(install, r"(?m)^        (?:if|continue-on-error):")
+                self.assertLess(job.index(install), job.index(step))
+                for name in ("personal", "models", "invocation"):
+                    source = f"account-platform/deploy/production/compose.{name}.yaml"
+                    self.assertIn(source, entries)
+                    self.assertTrue(_matches_paths_filter(source, entries))
+            self.assertNotIn(path, listed, f"{path} must not be redundantly run twice")
+            listed.add(path)
+        on_disk = {
+            f"scripts/tests/{path.name}"
+            for path in (ROOT / "scripts" / "tests").glob("*.test.mjs")
+        }
+        self.assertEqual(
+            listed,
+            on_disk,
+            "scripts/tests node 套件与已核验的 CI runner 集合不一致"
+            "(缺失=永不执行;多余=死条目)",
+        )
+
+    def test_dedicated_node_suite_wiring_rejects_missing_or_commented_commands(self):
+        original = self.pr_workflow
+        try:
+            for name in (
+                "token-management-authorization-coverage",
+                "token-management-phase-coverage",
+                "account-platform-authorization-coverage",
+                "account-platform-invocation-environment",
+            ):
+                path = f"scripts/tests/{name}.test.mjs"
+                command = f"node --test {'../' if 'invocation' in name else ''}{path}"
+                for replacement in ("echo controlled-command-removed", "# " + command):
+                    with self.subTest(suite=name, replacement=replacement):
+                        self.assertEqual(original.count(command), 1)
+                        self.pr_workflow = original.replace(command, replacement, 1)
+                        with self.assertRaises(AssertionError):
+                            self.test_node_suites_under_scripts_tests_are_all_wired()
+                with self.subTest(suite=name, missing_filter=True):
+                    entry = f"              - '{path}'\n"
+                    self.assertEqual(original.count(entry), 1)
+                    self.pr_workflow = original.replace(entry, "", 1)
+                    with self.assertRaises(AssertionError):
+                        self.test_node_suites_under_scripts_tests_are_all_wired()
+            for name in ("personal", "models", "invocation"):
+                with self.subTest(missing_compose_filter=name):
+                    entry = f"              - 'account-platform/deploy/production/compose.{name}.yaml'\n"
+                    self.assertEqual(original.count(entry), 1)
+                    self.pr_workflow = original.replace(entry, "", 1)
+                    with self.assertRaises(AssertionError):
+                        self.test_node_suites_under_scripts_tests_are_all_wired()
+        finally:
+            self.pr_workflow = original
 
     def test_approval_center_browser_regression_is_registered(self):
         package = json.loads((ROOT / "pinvou3-app/package.json").read_text(encoding="utf-8"))
@@ -4333,6 +4534,13 @@ class CiGatePolicyTests(unittest.TestCase):
             # "one failed main push drops the namespace fully cold" reason
             # as its siblings; pin it so it cannot rot the same way.
             ("cli-lint", "\n  windows-rust-test:"),
+            # 2026-10 audit followups (PR #745): knowledge-rust/rust-lint/
+            # cli-test joined the flag when their main-push unconditional
+            # runs landed — same "one failed main push drops the namespace
+            # fully cold" exposure; pin them so they cannot rot the same way.
+            ("knowledge-rust", "\n  rust-lint:"),
+            ("rust-lint", "\n  rust-test:"),
+            ("cli-test", "\n  cli-lint:"),
         ):
             job = self.pr_workflow.split(
                 f"\n  {job_name}:", maxsplit=1
@@ -4366,6 +4574,111 @@ class CiGatePolicyTests(unittest.TestCase):
         # (rust-cache's default keeps target artifacts). Comments stripped:
         # the decision record above mentions the old value historically.
         self.assertNotIn("cache-targets:", rust_test_cache)
+
+    def test_dev_profile_o0_guard_stays_on_all_three_heavy_legs(self):
+        # rust-test's codewhale-tui dev-O0 memory guard defuses the
+        # documented ~7 GB single-rustc dev thin-LTO OOM; the 2026-10 audit
+        # followups (PR #745) ported it to the 7 GB no-swap macOS runner
+        # beside the existing Windows twin. The override is a silent policy
+        # knob — dropping a leg's step or gutting the TOML section
+        # resurfaces the cold-run OOM with no runtime error — so pin the
+        # shared payload in every leg. Windows speaks pwsh (Add-Content
+        # here-string), the others a bash heredoc; the TOML section is the
+        # contract they share. Judged on comment-stripped text: commenting
+        # the TOML section out is inert in the written config.toml and must
+        # red this pin exactly like deletion (round-3 review of PR #745).
+        for job_name, end_marker in (
+            ("rust-test", "\n  cli-test:"),
+            ("windows-rust-test", "\n  macos-rust-check:"),
+            ("macos-rust-check", "\n  windows-codex-runtime-test:"),
+        ):
+            job = _without_yaml_comments(
+                self.pr_workflow.split(f"\n  {job_name}:", maxsplit=1)[1].split(
+                    end_marker, maxsplit=1
+                )[0]
+            )
+            self.assertIn("codewhale-tui O0", job, job_name)
+            self.assertIn("[profile.dev.package.codewhale-tui]", job, job_name)
+            self.assertIn("opt-level = 0", job, job_name)
+        # The bash twins append to the cargo-home config; rust-cache's
+        # cachePaths never include config.toml, so warm runs cannot
+        # accumulate duplicate TOML tables.
+        for job_name, end_marker in (
+            ("rust-test", "\n  cli-test:"),
+            ("macos-rust-check", "\n  windows-codex-runtime-test:"),
+        ):
+            job = _without_yaml_comments(
+                self.pr_workflow.split(f"\n  {job_name}:", maxsplit=1)[1].split(
+                    end_marker, maxsplit=1
+                )[0]
+            )
+            self.assertIn(
+                'config="${CARGO_HOME:-$HOME/.cargo}/config.toml"',
+                job,
+                job_name,
+            )
+
+    def test_frontend_test_webui_smoke_reuses_the_prebuilt_dist(self):
+        # frontend-test builds the web dist unconditionally (the web index
+        # contract test only covers it when it exists), so the diff-selected
+        # test:webui smoke must reuse that dist via PINVOU_WEBUI_SKIP_BUILD=1
+        # instead of paying a second identical vite build. Both smoke steps —
+        # the PR-selected and the merge-group one — must keep the env: a
+        # dropped step silently reintroduces the duplicate build.
+        # Comment-stripped: commenting one of the two live lines must not
+        # keep the count at 2 (round-3 review of PR #745).
+        frontend = _without_yaml_comments(
+            self.pr_workflow.split("\n  frontend-test:", maxsplit=1)[1].split(
+                "\n  relay-test:", maxsplit=1
+            )[0]
+        )
+        self.assertEqual(
+            frontend.count('PINVOU_WEBUI_SKIP_BUILD: "1"'),
+            2,
+            "both webui smoke steps must set PINVOU_WEBUI_SKIP_BUILD=1",
+        )
+
+    def test_release_checkouts_never_persist_credentials(self):
+        # release-packages 的 header 承诺 checkout 后不保留凭据。构建 job 的
+        # 子模块在 checkout 内部用 token 初始化,之后的运行时仓库按锁定
+        # gitlink 匿名拉取(Windows 先行验证);PR #745 补齐其余四腿,这里把
+        # 每个 checkout(含 gate 的纯文件级比对)钉住,凭据策略不得回退。
+        workflow = (ROOT / ".github/workflows/release-packages.yml").read_text(
+            encoding="utf-8"
+        )
+        for job_name, end_marker in (
+            ("check-version-bump", "\n  build-linux-x64:"),
+            ("build-linux-x64", "\n  build-linux-arm64:"),
+            ("build-linux-arm64", "\n  build-linux-loongarch64:"),
+            ("build-linux-loongarch64", "\n  build-windows-x64:"),
+            ("build-windows-x64", "\n  build-macos-universal:"),
+            ("build-macos-universal", None),
+        ):
+            job = workflow.split(f"\n  {job_name}:", maxsplit=1)[1]
+            if end_marker is not None:
+                job = job.split(end_marker, maxsplit=1)[0]
+            checkout = job.split("uses: actions/checkout@v7", maxsplit=1)[1].split(
+                "\n      - name:", maxsplit=1
+            )[0]
+            # Comment-stripped: a commented-out live line must not satisfy
+            # the pin (same live-config rule as _without_yaml_comments users
+            # elsewhere in this file).
+            self.assertIn(
+                "persist-credentials: false",
+                _without_yaml_comments(checkout),
+                job_name,
+            )
+        # The gate compares VERSION files only: no submodules, depth 1 — a
+        # future git-history-reading step must not silently need depth 0.
+        gate = workflow.split("\n  check-version-bump:", maxsplit=1)[1].split(
+            "\n  build-linux-x64:", maxsplit=1
+        )[0]
+        gate_checkout = gate.split("uses: actions/checkout@v7", maxsplit=1)[1].split(
+            "\n      - name:", maxsplit=1
+        )[0]
+        live_gate_checkout = _without_yaml_comments(gate_checkout)
+        self.assertIn("\n          fetch-depth: 1\n", live_gate_checkout)
+        self.assertNotIn("submodules:", live_gate_checkout)
 
     def test_quota_and_toolchain_hardening_stays_pinned(self):
         # 2026-10 audit hardening. Each item is a silent policy change (quota
