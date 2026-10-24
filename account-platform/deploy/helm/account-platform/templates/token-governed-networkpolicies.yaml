@@ -86,7 +86,7 @@ spec:
     matchExpressions:
       - key: app.kubernetes.io/component
         operator: In
-        values: [account-service, billing-service, token-gateway, account-event-relay, billing-event-relay, token-event-relay]
+        values: [account-service, billing-service, token-gateway, account-event-relay, billing-event-relay]
   policyTypes: [Egress]
   egress:
     {{- range $cidr := .Values.tokenCommandExecutor.natsCidrs }}

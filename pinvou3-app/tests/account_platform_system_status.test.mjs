@@ -10,7 +10,7 @@ test('actual client uses same-origin readonly status route, preserves raw int64 
   const calls = [];
   globalThis.fetch = async (url, options) => {
     calls.push({ url, options });
-    return new Response('{"services":[{"key":"portal","status":"HEALTHY","latency_ms":9223372036854775807}],"relays":[{"key":"token-event-relay","status":"DEGRADED","pending_events":9007199254740993,"dead_lettered_events":0,"oldest_pending_seconds":1.25}],"reconciliation":{"pending":9223372036854775807,"stopped":0},"recent_errors":[]}');
+    return new Response('{"services":[{"key":"portal","status":"HEALTHY","latency_ms":9223372036854775807}],"relays":[{"key":"billing-event-relay","status":"DEGRADED","pending_events":9007199254740993,"dead_lettered_events":0,"oldest_pending_seconds":1.25}],"reconciliation":{"pending":9223372036854775807,"stopped":0},"recent_errors":[]}');
   };
   try {
     const payload = requireSystemStatus(await new AdminPlatformClient().systemStatus());
@@ -63,7 +63,7 @@ test('malformed optional display values are rejected before React rendering', ()
   const valid = { services: [], relays: [], reconciliation: {}, recent_errors: [] };
   for (const patch of [
     { services: [{ key: 'portal', status: 'HEALTHY', message: {} }] },
-    { relays: [{ key: 'token-event-relay', status: 'HEALTHY', message: [] }] },
+    { relays: [{ key: 'billing-event-relay', status: 'HEALTHY', message: [] }] },
     { reconciliation: [] },
     { recent_errors: [{ source: 'token', message: 'controlled', resource: {} }] },
     { recent_errors: [{ source: 'token', message: 'controlled', updated_at: 1 }] },

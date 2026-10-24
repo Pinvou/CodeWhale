@@ -164,9 +164,8 @@ export function checkGovernedHelmResources(items) {
     check((spec.volumes || []).some(volume => volume.projected?.sources?.some(source => source.serviceAccountToken?.audience)), 'workload_identity_missing');
     checkNetworkPolicies(items, item);
   }
-  const tokenRelay = get('token-event-relay');
-  check(secret(env(tokenRelay.spec.template.spec.containers[0]).DATABASE_URL) === secret(genv.DATABASE_URL), 'relay_retired_identity');
-  const nats = [get('account-service'), get('billing-service'), gateway, get('account-event-relay'), get('billing-event-relay'), tokenRelay, executor].map(item => env(item.spec.template.spec.containers[0]));
+  check(!deployments.some(item => component(item) === 'token-event-relay'), 'retired_ordinary_relay');
+  const nats = [get('account-service'), get('billing-service'), gateway, get('account-event-relay'), get('billing-event-relay'), executor].map(item => env(item.spec.template.spec.containers[0]));
   check(/^tls:\/\//.test(eenv.NATS_URL) && nats.every(value => value.NATS_URL && value.NATS_URL === eenv.NATS_URL && value.NATS_CREDENTIALS_FILE), 'event_cluster_or_credentials_mismatch');
   const jobs = items.filter(item => item?.kind === 'Job' && component(item) === 'token-governance-check');
   check(jobs.length === 1, 'governance_job_missing');
@@ -199,7 +198,7 @@ export function checkGovernedComposeConfiguration(config) {
   verifyCredentialEndpoints(credential.environment);
   check(!('DATABASE_URL' in executor.environment) && !('TOKEN_SECRET_PROVIDER_TOKEN' in executor.environment), 'executor_secret_scope');
   check(credential.environment.DATABASE_URL && credential.environment.DATABASE_URL !== gateway.environment.DATABASE_URL, 'runtime_secret_not_separate');
-  check(services['token-event-relay']?.environment?.DATABASE_URL === gateway.environment.DATABASE_URL, 'relay_retired_identity');
+  check(!Object.hasOwn(services, 'token-event-relay'), 'retired_ordinary_relay');
   checkComposeNATS(config);
   const entrypointSafe = control.entrypoint == null || control.entrypoint === '/service'
     || Array.isArray(control.entrypoint) && control.entrypoint.length === 1 && control.entrypoint[0] === '/service';
