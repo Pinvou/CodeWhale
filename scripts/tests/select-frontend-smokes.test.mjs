@@ -222,6 +222,13 @@ test("team relay changes select its action smoke", () => {
   );
 });
 
+test("device-manager changes select its action smoke", () => {
+  assert.deepEqual(
+    labels(selectFrontendSmokes(["pinvou3-app/src/features/device-manager/DeviceManagerView.jsx"])),
+    ["npm:test:ui-smoke", "npm:test:device-manager-ui"],
+  );
+});
+
 test("wrapper-only changes select the web UI smoke plus the core smoke", () => {
   assert.deepEqual(
     labels(selectFrontendSmokes(["pinvou3-app/scripts/run-webui-smoke.mjs"])),
@@ -292,9 +299,10 @@ test("restored Account and Admin real-entry browsers run once for feature and sh
   assert.equal(fullLabels.filter(value => value === target).length, 1);
 });
 
-test("device-manager changes select its action smoke", () => {
+
+test("wrapper-only changes select the web UI smoke plus the core smoke", () => {
   assert.deepEqual(
-    labels(selectFrontendSmokes(["pinvou3-app/src/features/device-manager/DeviceManagerView.jsx"])),
-    ["npm:test:ui-smoke", "npm:test:device-manager-ui"],
+    labels(selectFrontendSmokes(["pinvou3-app/scripts/run-webui-smoke.mjs"])),
+    ["npm:test:ui-smoke", "npm:test:webui"],
   );
 });
