@@ -384,6 +384,8 @@ class FinancialPostgresRunnerTests(unittest.TestCase):
             "TestTokenApprovalRecentAuthenticationPostgres",
             "TestTokenApprovalRecentAuthenticationLegacyWriterPostgres",
             "TestOwnerCombinedActualHTTPPostgres",
+            "TestApprovalRecoveryQueryAllRegisteredCommandsPostgres",
+            "TestApprovalRecoveryQueryForwardMigrationPostgres",
         })
         for name in RUNNER.ACCOUNT_REQUIRED:
             with self.subTest(name=name), self.assertRaises(RuntimeError):
@@ -401,6 +403,8 @@ class FinancialPostgresRunnerTests(unittest.TestCase):
             "TestTokenApprovalRecentAuthenticationPostgres",
             "TestTokenApprovalRecentAuthenticationLegacyWriterPostgres",
             "TestOwnerCombinedActualHTTPPostgres",
+            "TestApprovalRecoveryQueryAllRegisteredCommandsPostgres",
+            "TestApprovalRecoveryQueryForwardMigrationPostgres",
         ):
             with self.subTest(root=root):
                 self.assertIn(root, roots)
