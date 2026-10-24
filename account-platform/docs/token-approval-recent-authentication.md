@@ -16,3 +16,8 @@ ADM-64 的模型生命周期变更、模型目录回滚和凭据撤销三类审�
 
 认证年龄检查不等同于数据库锁等待后的全部授权、申请和 proof 时效
 围栏；后者是另行审核的边界，不能据此宣称整个审批链验收通过。
+
+两项真实数据库回归 `TestTokenApprovalRecentAuthenticationPostgres` 和
+`TestTokenApprovalRecentAuthenticationLegacyWriterPostgres` 纳入隔离财务
+PostgreSQL 门禁的显式 Account 执行列表；必须有根及子用例的实际通过记录，
+缺失、跳过或错包的结果均不能核销本项回归。
