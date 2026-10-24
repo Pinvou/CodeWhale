@@ -101,7 +101,8 @@ export class AdminPlatformClient {
     return () => this.authorizationVersionListeners.delete(listener);
   }
 
-  observeAuthorizationVersions(headers) {
+  observeAuthorizationVersions(headers, sessionEpoch = this.financeSessionEpoch) {
+    if (sessionEpoch !== this.financeSessionEpoch) return;
     const next = mergeObservedVersions(this.authorizationVersions, {
       context_version: headers.get('X-Context-Version'),
       personal_authorization_version: headers.get('X-Personal-Authorization-Version'),
@@ -113,18 +114,35 @@ export class AdminPlatformClient {
     for (const listener of this.authorizationVersionListeners) listener({ ...next });
   }
 
+  retireSession(csrfToken = '') {
+    this.financeSessionEpoch++;
+    this.csrfToken = csrfToken;
+    this.authorizationVersions = {};
+    const retired = [...this.inflightReads.values()];
+    this.inflightReads.clear();
+    for (const entry of retired) entry.controller.abort();
+    this.invalidateApprovalControl();
+  }
+
+  requireCurrentSession(sessionEpoch, signal) {
+    if (sessionEpoch !== this.financeSessionEpoch || signal?.aborted) throw abortRequestError();
+  }
+
   async session(signal) {
+    const sessionEpoch = this.financeSessionEpoch;
     const response = await fetch(`${this.baseURL}/api/session`, {
       credentials: 'same-origin',
       cache: 'no-store',
       signal,
     });
-    if (response.status === 401) { if (this.csrfToken) this.financeSessionEpoch++; this.csrfToken = ''; this.invalidateApprovalControl(); return { authenticated: false }; }
+    this.requireCurrentSession(sessionEpoch, signal);
+    if (response.status === 401) { this.retireSession(); return { authenticated: false }; }
     if (!response.ok) throw errorFromResponse(response, await response.json().catch(() => ({})));
     const payload = await response.json();
     const current = requireSession(payload);
-    if (this.csrfToken !== current.csrf_token) { this.financeSessionEpoch++; this.invalidateApprovalControl(); }
-    this.csrfToken = current.csrf_token;
+    this.requireCurrentSession(sessionEpoch, signal);
+    const csrfToken = current.authenticated ? current.csrf_token : '';
+    if (!current.authenticated || this.csrfToken !== csrfToken) this.retireSession(csrfToken);
     return current;
   }
 
@@ -137,6 +155,7 @@ export class AdminPlatformClient {
     const url = `${this.baseURL}/api/admin/${area}${resource}`;
     let entry = this.inflightReads.get(url);
     if (!entry) {
+      const sessionEpoch = this.financeSessionEpoch;
       entry = { controller: new globalThis.AbortController(), consumers: 0, settled: false, promise: null, abandon: null };
       entry.abandon = () => {
         if (this.inflightReads.get(url) === entry) this.inflightReads.delete(url);
@@ -148,8 +167,10 @@ export class AdminPlatformClient {
           cache: 'no-store',
           signal: entry.controller.signal,
         });
-        this.observeAuthorizationVersions(response.headers);
+        this.requireCurrentSession(sessionEpoch, entry.controller.signal);
         const payload = response.ok && decode ? decode(await response.text()) : area === 'billing' && response.ok ? parseFinanceJSON(await response.text()) : await response.json().catch(() => ({}));
+        this.requireCurrentSession(sessionEpoch, entry.controller.signal);
+        this.observeAuthorizationVersions(response.headers, sessionEpoch);
         if (!response.ok) throw errorFromResponse(response, payload);
         return payload;
       })();
@@ -192,6 +213,7 @@ export class AdminPlatformClient {
   }
 
   async mutate(area, resource, method, body, idempotencyKey = '', signal, expectedStatus = 0, codec = null) {
+    const sessionEpoch = this.financeSessionEpoch;
     const headers = {
       Accept: 'application/json',
       'Content-Type': 'application/json',
@@ -210,7 +232,7 @@ export class AdminPlatformClient {
       signal,
     };
     const response = await fetch(`${this.baseURL}/api/admin/${area}${resource}`, options);
-    this.observeAuthorizationVersions(response.headers);
+    this.observeAuthorizationVersions(response.headers, sessionEpoch);
     const payload = response.status === 204 ? null : response.ok && codec ? codec.decode(await response.text()) : area === 'billing' && response.ok ? parseFinanceJSON(await response.text()) : await response.json().catch(() => ({}));
     if (!response.ok) throw errorFromResponse(response, payload);
     if (expectedStatus && !(Array.isArray(expectedStatus) ? expectedStatus.includes(response.status) : response.status === expectedStatus)) throw new Error('INVALID_MUTATION_ACK');
@@ -226,6 +248,7 @@ export class AdminPlatformClient {
 
 
   async authorization(signal) {
+    const sessionEpoch = this.financeSessionEpoch;
     const response = await fetch(`${this.baseURL}/api/account/v1/account/bootstrap`, {
       method: 'POST',
       headers: {
@@ -238,8 +261,9 @@ export class AdminPlatformClient {
       cache: 'no-store',
       signal,
     });
-    this.observeAuthorizationVersions(response.headers);
     const payload = await response.json().catch(() => ({}));
+    this.requireCurrentSession(sessionEpoch, signal);
+    this.observeAuthorizationVersions(response.headers, sessionEpoch);
     if (!response.ok) throw errorFromResponse(response, payload);
     return payload;
   }
@@ -293,13 +317,14 @@ export class AdminPlatformClient {
   }
 
   async downloadAuditExport(exportID, token, signal) {
+    const sessionEpoch = this.financeSessionEpoch;
     requireFinanceID(exportID);
     if (typeof token !== 'string' || !/^[A-Za-z0-9_-]{43}$/.test(token)) throw new Error('INVALID_AUDIT_EXPORT_TICKET_ACK');
     const response = await fetch(`${this.baseURL}/api/admin/account/admin/v1/audit-exports/${exportID}/download`, {
       headers: { Accept: 'application/vnd.pinvou.audit-envelope+json', 'X-Pinvou-Download-Token': token },
       credentials: 'same-origin', cache: 'no-store', redirect: 'error', signal,
     });
-    this.observeAuthorizationVersions(response.headers);
+    this.observeAuthorizationVersions(response.headers, sessionEpoch);
     if (!response.ok) throw errorFromResponse(response, await response.json().catch(() => ({})));
     const length = response.headers.get('Content-Length');
     const maxBytes = 500 * 1024 * 1024;
@@ -764,6 +789,7 @@ export class AdminPlatformClient {
   }
 
   async logout() {
+    const sessionEpoch = this.financeSessionEpoch;
     const response = await fetch(`${this.baseURL}/api/logout`, {
       method: 'POST',
       headers: { 'X-CSRF-Token': this.csrfToken },
@@ -773,16 +799,12 @@ export class AdminPlatformClient {
     if (response.status === 403 && payload?.code === 'CSRF_REJECTED') {
       const confirmation = await fetch(`${this.baseURL}/api/session`, { credentials: 'same-origin', cache: 'no-store' });
       if (confirmation.status === 401) {
-        this.csrfToken = '';
-        this.financeSessionEpoch++;
-        this.invalidateApprovalControl();
+        if (sessionEpoch === this.financeSessionEpoch) this.retireSession();
         return null;
       }
     }
     if (!response.ok) throw errorFromResponse(response, payload);
-    this.csrfToken = '';
-    this.financeSessionEpoch++;
-    this.invalidateApprovalControl();
+    if (sessionEpoch === this.financeSessionEpoch) this.retireSession();
     return payload;
   }
 
