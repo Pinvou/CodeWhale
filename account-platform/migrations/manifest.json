@@ -1022,6 +1022,16 @@
         "file": "900008_registration_create_dispatch.up.sql",
         "version": 900008,
         "sha256": "016367fffffcb4b994ab4ac64840813fa19e99c45ef209e938d85024e4bb5ff9"
+      },
+      {
+        "file": "900009_approval_recovery_query_billing_commands.down.sql",
+        "version": 900009,
+        "sha256": "5b7e97124eef15bacf3d54bfd13047d6cb9810dce4b33af021729ff988643467"
+      },
+      {
+        "file": "900009_approval_recovery_query_billing_commands.up.sql",
+        "version": 900009,
+        "sha256": "72182376ed586e4442f3d1090f360975cc37bf67640de20526336b28e1e47cf4"
       }
     ],
     "billing": [
