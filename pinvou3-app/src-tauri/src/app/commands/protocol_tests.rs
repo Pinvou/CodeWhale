@@ -249,6 +249,34 @@ fn device_commands_are_registered_in_the_handler() {
         );
     }
 }
+
+/// 六条设备命令必须**每条**先过 `ensure_device_supported()` 能力门禁（第二十轮
+/// 评审 P2 的破坏面收口）：从任一命令删掉门禁调用，Rust/JS 全部测试照绿
+/// （二十一轮评审变异实证）。与上一测试同一弱文本锚定模式：每个
+/// `#[tauri::command]` 之后、下一条命令之前的函数体必须含门禁调用。
+#[test]
+fn every_device_command_calls_the_capability_gate() {
+    let source = include_str!("device.rs");
+    // 属性独占一行才算命令（文件头注释里的反引号 `#[tauri::command]` 不算）。
+    let bodies: Vec<&str> = source.split("\n#[tauri::command]\n").skip(1).collect();
+    assert_eq!(
+        bodies.len(),
+        6,
+        "device.rs 命令数量变了，请同步本测试与协议清单"
+    );
+    for body in bodies {
+        let signature_end = body.find('{').expect("command body");
+        let name = body[..signature_end]
+            .split("fn ")
+            .nth(1)
+            .and_then(|rest| rest.split('(').next())
+            .unwrap_or("<unknown>");
+        assert!(
+            body.contains("ensure_device_supported()?;"),
+            "device 命令 {name} 没有调用 ensure_device_supported() 能力门禁"
+        );
+    }
+}
 command_protocol!(
     files_protocol,
     "files.rs",

@@ -6,8 +6,9 @@
 //! 聚合口径还不同——两处单边修改候选表就会漂移（第三轮评审 P2）。这里收敛为
 //! 一份字段清单 + 一个读取函数，两个消费方各自在此之上做聚合。
 //!
-//! 非 Linux 平台这些 sysfs 路径不存在，读取自然失败返回 None——与
-//! `is_megacube_device` 先用运行时 OS 判断短路同款 fail-closed 语义，无需 cfg。
+//! 非 Linux 平台这些 sysfs 路径不存在，读取自然失败返回 None（进程级 OnceLock
+//! 缓存后只付一次 3 个 stat 的成本）；`is_megacube_device` 的判定函数再以运行时
+//! OS 判断兜底恒 false——两层都是 fail-closed，无需 cfg。
 
 /// DMI id 字段候选（`/sys/class/dmi/id/<field>`），顺序即优先级。
 const DMI_ID_FIELDS: &[&str] = &["product_name", "product_family", "board_name"];
@@ -19,7 +20,31 @@ const DMI_ID_FIELDS: &[&str] = &["product_name", "product_family", "board_name"]
 pub(crate) fn dmi_field(field: &str) -> Option<String> {
     let text = std::fs::read_to_string(format!("/sys/class/dmi/id/{field}")).ok()?;
     let trimmed = text.trim();
-    (!trimmed.is_empty()).then(|| cap_dmi_text(trimmed))
+    (!trimmed.is_empty() && !is_dmi_placeholder(trimmed)).then(|| cap_dmi_text(trimmed))
+}
+
+/// 固件占位值（纯函数，测试直打）：通用板卡常把 product_name 留成
+/// "To Be Filled By O.E.M." / "Default string" / "System Product Name" 之类——
+/// 它们不是型号，原样进设备页头部与 doctor 云端上下文只会误导（二十一轮评审
+/// P3）。按小写精确匹配一张小表，再加 "to be filled" 子串臂兜固件各式变体。
+fn is_dmi_placeholder(value: &str) -> bool {
+    const PLACEHOLDERS: &[&str] = &[
+        "default string",
+        "system product name",
+        "system version",
+        "system manufacturer",
+        "base board product name",
+        "not specified",
+        "not applicable",
+        "n/a",
+        "none",
+        "unknown",
+        "o.e.m.",
+        "oem",
+        "xxxxxx",
+    ];
+    let lower = value.trim().to_ascii_lowercase();
+    lower.contains("to be filled") || PLACEHOLDERS.contains(&lower.as_str())
 }
 
 /// 限长口径（纯函数，测试直打）：生产路径 [`dmi_field`] 的唯一出口。
@@ -58,6 +83,35 @@ fn any_value_contains(values: &[Option<String>], needle: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn placeholder_values_are_dropped_but_real_models_kept() {
+        for placeholder in [
+            "To Be Filled By O.E.M.",
+            "to be filled by o.e.m",
+            "Default string",
+            "System Product Name",
+            "None",
+            "N/A",
+            "Not Specified",
+        ] {
+            assert!(
+                is_dmi_placeholder(placeholder),
+                "{placeholder} must be a placeholder"
+            );
+        }
+        for real in [
+            "MegaCube GB10",
+            "ThinkPad X1",
+            "NUC13ANHi7",
+            "Standard PC (Q35 + ICH9, 2009)",
+        ] {
+            assert!(
+                !is_dmi_placeholder(real),
+                "{real} must not be treated as a placeholder"
+            );
+        }
+    }
 
     /// 聚合口径直打（与生产同一条路径；any_value_contains 同款拆法——此前
     /// 本测试把迭代表达式抄了一遍，生产口径改坏照样全绿，十二轮评审 P3）。

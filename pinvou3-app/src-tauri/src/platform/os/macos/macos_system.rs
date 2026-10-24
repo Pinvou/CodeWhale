@@ -174,6 +174,11 @@ pub fn nvidia_smi_candidates() -> Vec<&'static str> {
     Vec::new()
 }
 
+/// 设备管理只在 MegaCube（Linux）启用；这里只保证接口完整，裸名即可。
+pub fn docker_candidates() -> Vec<&'static str> {
+    vec!["docker"]
+}
+
 /// `command_exists` is spawn-faithful here even though it also scans
 /// `extra_lookup_dirs()`: `lib.rs` `ensure_release_env` prepends every one of those
 /// dirs (Homebrew bin + the cask app's MacOS dir) to the *process* PATH during

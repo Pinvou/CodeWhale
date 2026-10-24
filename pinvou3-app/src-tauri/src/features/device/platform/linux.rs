@@ -397,6 +397,54 @@ mod tests {
         );
     }
 
+    // 二十一轮评审 P2（变异实证的缺口）：read_registry 扫描时对**符号链接条目**
+    // 跳过权限收敛（十九轮评审 P2 修复）——harden 的 set_permissions 会跟随链接把
+    // 用户自己的目标文件 chmod 成 0600。此前该臂零覆盖：改成无条件收敛全套照绿。
+    // 符号链接 + PermissionsExt 是 unix 专属，故与其它 symlink 用例同住本文件。
+    #[test]
+    fn read_registry_hardens_regular_records_but_never_chmods_symlink_targets() {
+        use crate::features::device::external_models::read_registry;
+        use std::os::unix::fs::PermissionsExt;
+        let base = std::env::temp_dir().join(format!("registry-symlink-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        let dir = base.join("registry");
+        let outside = base.join("outside");
+        std::fs::create_dir_all(&dir).expect("create registry dir");
+        std::fs::create_dir_all(&outside).expect("create outside dir");
+        let regular = dir.join("m-a.json");
+        std::fs::write(&regular, r#"{"id": "m-a", "name": "a", "kind": "other"}"#)
+            .expect("write regular record");
+        std::fs::set_permissions(&regular, std::fs::Permissions::from_mode(0o644))
+            .expect("loosen regular record");
+        let target = outside.join("user-file.json");
+        std::fs::write(&target, r#"{"id": "m-b", "name": "b", "kind": "other"}"#)
+            .expect("write symlink target");
+        std::fs::set_permissions(&target, std::fs::Permissions::from_mode(0o644))
+            .expect("loosen symlink target");
+        std::os::unix::fs::symlink(&target, dir.join("m-b.json")).expect("create symlink record");
+        let (models, _warnings) = read_registry(&dir);
+        let regular_mode = std::fs::metadata(&regular)
+            .expect("regular metadata")
+            .permissions()
+            .mode()
+            & 0o777;
+        let target_mode = std::fs::metadata(&target)
+            .expect("target metadata")
+            .permissions()
+            .mode()
+            & 0o777;
+        let _ = std::fs::remove_dir_all(&base);
+        assert_eq!(models.len(), 2, "symlinked record must still be readable");
+        assert_eq!(
+            regular_mode, 0o600,
+            "regular record must be hardened to 0600"
+        );
+        assert_eq!(
+            target_mode, 0o644,
+            "symlink target (user file) must not be chmod'ed"
+        );
+    }
+
     // 十九轮评审 P1：原始分量不含 blobs、末分量指向 daemon blob 存储的符号
     // 链接——canonical 目标才露出 blobs 布局，而环境臂对 systemd
     // OLLAMA_MODELS 迁移根（此处 decoy_root 是应用推导出的、与 daemon 真身

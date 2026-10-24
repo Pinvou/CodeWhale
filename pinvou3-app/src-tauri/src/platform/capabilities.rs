@@ -252,6 +252,7 @@ fn megacube_device_decision(os: &str, dmi_matches: bool, env_override: Option<&s
     os == "linux" && dmi_matches
 }
 
+#[cfg(test)]
 fn forced_megacube_device_override() -> Option<bool> {
     parse_megacube_env_override(std::env::var("PINVOU3_MEGACUBE_DEVICE").ok().as_deref())
 }

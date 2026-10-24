@@ -112,18 +112,31 @@ async fn build_doctor_context(device: &DeviceState, monitor: &MonitorState) -> V
         device::probe_services(),
     );
     let active_model = monitor_snapshot.vllm.as_ref().map(active_model_projection);
-    let mut context = assemble_doctor_context(
+    finish_doctor_context(
         &device_snapshot,
         monitor_snapshot.gpu.as_ref(),
         monitor_snapshot.cpu.as_ref(),
         monitor_snapshot.ram.as_ref(),
         &services,
         active_model,
-    );
-    mask_context_privacy(
-        &mut context,
         &crate::platform::paths::user_home_dir().to_string_lossy(),
-    );
+    )
+}
+
+/// 拼装 + 脱敏的组合（纯函数，测试直打）。两个零件各有直打测试，但"拼装之后
+/// 必须脱敏"这条接线此前零覆盖——删掉脱敏调用全套测试照绿，MAC/家目录/用户名
+/// 会静默外发云端模型（二十一轮评审 P2 变异实证）。命令路径只许经由本函数。
+fn finish_doctor_context(
+    device: &DeviceSnapshot,
+    gpu: Option<&GpuSnapshot>,
+    cpu: Option<&CpuSnapshot>,
+    ram: Option<&RamSnapshot>,
+    services: &[ServiceStatus],
+    active_model: Option<Value>,
+    home: &str,
+) -> Value {
+    let mut context = assemble_doctor_context(device, gpu, cpu, ram, services, active_model);
+    mask_context_privacy(&mut context, home);
     context
 }
 
@@ -506,6 +519,8 @@ mod tests {
                 key: "ollama".into(),
                 running: false,
                 detail: Some("连接被拒绝".into()),
+                reason: Some("connection_refused"),
+                code: None,
             }],
             Some(json!({"model_id": "m", "health_status": "healthy"})),
         );
@@ -651,6 +666,25 @@ mod tests {
         }
         assert_eq!(projection["health_status"], "verified");
         assert_eq!(projection["max_model_len"], 32768);
+    }
+
+    #[test]
+    fn finish_doctor_context_masks_through_the_real_command_path() {
+        // 走命令真实走的组合路径（拼装 → 脱敏），而不是对自造 JSON 直打脱敏：
+        // 家目录前缀改写、GPU 进程完整路径改写、MAC 结构性不在白名单内。
+        let context =
+            finish_doctor_context(&fixture_snapshot(), None, None, None, &[], None, "/home/u");
+        let disks = context["device"]["disks"].as_array().expect("disks");
+        assert_eq!(disks[0]["mount_point"], "~/data");
+        let procs = context["device"]["gpu_ext"]["compute_processes"]
+            .as_array()
+            .expect("compute processes");
+        assert_eq!(procs[0]["name"], "~/bin/python3");
+        let network = context["device"]["network"].as_array().expect("network");
+        assert!(network.iter().all(|iface| iface.get("mac").is_none()));
+        // 序列化后的整份文本里不得再出现家目录原文。
+        let text = serde_json::to_string(&context).expect("serialize");
+        assert!(!text.contains("/home/u/"), "home prefix leaked: {text}");
     }
 
     #[test]

@@ -156,9 +156,39 @@ pub struct ServiceStatus {
     /// ollama | vllm | lmstudio | docker
     pub key: String,
     pub running: bool,
-    /// 人话补充：running=false 时是失败原因（超时/拒绝连接/命令不存在）；
-    /// docker running 时是版本号。
+    /// 人话补充（中文，进 doctor 上下文与日志）：running=false 时是失败原因
+    /// （超时/拒绝连接/命令不存在）；docker running 时是版本号。
     pub detail: Option<String>,
+    /// 失败原因的稳定机器码（running=false 时有值）：`timeout` /
+    /// `connection_refused` / `network_error` / `client_init_failed` /
+    /// `http_status` / `not_detected` / `docker_exit` / `docker_unavailable` /
+    /// `docker_task_failed`。前端据此映射三语 tooltip——此前只有中文 `detail`
+    /// 直出，en/ja 用户在服务芯片上读到中文（二十一轮评审 P2，§4 三语公约）。
+    pub reason: Option<&'static str>,
+    /// 与 `reason` 配套的数字（`http_status` 的状态码 / `docker_exit` 的退出码）。
+    pub code: Option<i64>,
+}
+
+impl ServiceStatus {
+    fn running(key: &str, detail: Option<String>) -> Self {
+        Self {
+            key: key.to_string(),
+            running: true,
+            detail,
+            reason: None,
+            code: None,
+        }
+    }
+
+    fn down(key: &str, detail: String, reason: &'static str, code: Option<i64>) -> Self {
+        Self {
+            key: key.to_string(),
+            running: false,
+            detail: Some(detail),
+            reason: Some(reason),
+            code,
+        }
+    }
 }
 
 // ---------------------------------------------------------------- DeviceState
@@ -603,18 +633,30 @@ fn truncate_name(raw: &str) -> String {
 fn gpu_ext_cached() -> Option<GpuExtSnapshot> {
     static SAMPLER: OnceLock<Mutex<GpuExtCache>> = OnceLock::new();
     static LAST: OnceLock<RwLock<Option<GpuExtSnapshot>>> = OnceLock::new();
-    let last = LAST.get_or_init(|| RwLock::new(None));
-    match SAMPLER
-        .get_or_init(|| Mutex::new(GpuExtCache::default()))
-        .try_lock()
-    {
+    gpu_ext_cached_with(
+        SAMPLER.get_or_init(|| Mutex::new(GpuExtCache::default())),
+        LAST.get_or_init(|| RwLock::new(None)),
+        gpu_ext_snapshot,
+    )
+}
+
+/// 并发口径的可测形态（锁与最后已知值由调用方持有）：抢到探测锁走缓存刷新并
+/// 发布到 `last`；抢不到（上一轮探测在飞）立即返回 `last`，**不排队、不采样**。
+/// 此前整段锁在函数级 static 后面，"不排队返回最后已知值"这条核心并发契约把
+/// 失败臂改成 `None => None` 全套测试照绿（二十一轮评审 P2 变异实证）。
+fn gpu_ext_cached_with(
+    sampler: &Mutex<GpuExtCache>,
+    last: &RwLock<Option<GpuExtSnapshot>>,
+    sample: impl Fn() -> Option<GpuExtSnapshot>,
+) -> Option<GpuExtSnapshot> {
+    match sampler.try_lock() {
         Some(mut guard) => {
             // TTL 锚定在采样**完成**时刻（与 monitor TtlSnapshotCache 同口径，
             // 第二十轮评审 P2）：锚在开始时刻时，nvidia-smi 探测落入 ≥1s 的慢带
             // 会让 3s TTL 在下一拍（2s 轮询）恒判过期、每拍重拉子进程，缓存
             // "不必每拍都拉 nvidia-smi"的设计目的在该耗时带完全落空。
             let value = refresh_gpu_ext_cache(&mut guard, Instant::now(), || {
-                let value = gpu_ext_snapshot();
+                let value = sample();
                 (value, Instant::now())
             });
             *last.write() = value.clone();
@@ -797,10 +839,13 @@ pub async fn probe_services() -> Vec<ServiceStatus> {
         probe_openai_ports("vllm", &[8000, 8001, 8002],),
         probe_openai_ports("lmstudio", &[1234]),
         async {
-            docker_task.await.unwrap_or_else(|_| ServiceStatus {
-                key: "docker".to_string(),
-                running: false,
-                detail: Some("docker 探测任务失败".to_string()),
+            docker_task.await.unwrap_or_else(|_| {
+                ServiceStatus::down(
+                    "docker",
+                    "docker 探测任务失败".to_string(),
+                    "docker_task_failed",
+                    None,
+                )
             })
         },
     );
@@ -813,16 +858,11 @@ pub async fn probe_services() -> Vec<ServiceStatus> {
 async fn probe_ollama_service() -> ServiceStatus {
     let base = ollama_base().await;
     match http_get_success(&format!("{base}/api/tags")).await {
-        Ok(()) => ServiceStatus {
-            key: "ollama".to_string(),
-            running: true,
-            detail: None,
-        },
-        Err(reason) => ServiceStatus {
-            key: "ollama".to_string(),
-            running: false,
-            detail: Some(reason.message()),
-        },
+        Ok(()) => ServiceStatus::running("ollama", None),
+        Err(failure) => {
+            let (reason, code) = failure.reason_code();
+            ServiceStatus::down("ollama", failure.message(), reason, code)
+        }
     }
 }
 
@@ -850,28 +890,27 @@ fn fold_openai_port_probes(
     ports: &[u16],
     probes: Vec<Result<(), ProbeFailure>>,
 ) -> ServiceStatus {
-    let mut http_error: Option<String> = None;
+    let mut http_error: Option<u16> = None;
     for result in probes {
         match result {
-            Ok(()) => {
-                return ServiceStatus {
-                    key: key.to_string(),
-                    running: true,
-                    detail: None,
-                };
-            }
+            Ok(()) => return ServiceStatus::running(key, None),
             Err(ProbeFailure::HttpStatus(status)) => {
                 if http_error.is_none() {
-                    http_error = Some(ProbeFailure::HttpStatus(status).message());
+                    http_error = Some(status);
                 }
             }
             Err(ProbeFailure::Transport(_)) => {}
         }
     }
-    ServiceStatus {
-        key: key.to_string(),
-        running: false,
-        detail: Some(http_error.unwrap_or_else(|| {
+    match http_error {
+        Some(status) => ServiceStatus::down(
+            key,
+            ProbeFailure::HttpStatus(status).message(),
+            "http_status",
+            Some(i64::from(status)),
+        ),
+        None => ServiceStatus::down(
+            key,
             format!(
                 "未在端口 {} 探测到服务（连接被拒绝或超时）",
                 ports
@@ -879,54 +918,66 @@ fn fold_openai_port_probes(
                     .map(|port| port.to_string())
                     .collect::<Vec<_>>()
                     .join("/")
-            )
-        })),
+            ),
+            "not_detected",
+            None,
+        ),
     }
 }
 
 /// docker → `docker info --format {{.ServerVersion}}`（3s 超时，失败即 not running）。
+/// 候选路径与 nvidia-smi 同一模式（`platform::os::docker_candidates`）：桌面入口
+/// 启动的应用 PATH 可能不含 docker，裸名探测会把"装了但不在 PATH"误报成"守护
+/// 进程未运行"（二十一轮评审 P3）。候选按序尝试，首个能拉起的进程决定结果；
+/// 全部拉不起时报最后一个候选的错误。
 fn probe_docker_service() -> ServiceStatus {
-    let mut command = crate::platform::process::HiddenCommand::new("docker");
-    command.args(["info", "--format", "{{.ServerVersion}}"]);
-    match crate::platform::process::output_with_timeout(command, Duration::from_secs(3)) {
-        Ok(output) if output.status.success() => {
-            // stdout 全量进 detail 有整段涌入上下文/UI 的通道，截到 64 字符足够装版本号。
-            let version: String = String::from_utf8_lossy(&output.stdout)
-                .trim()
-                .chars()
-                .take(64)
-                .collect();
-            let detail = if version.is_empty() {
-                None
-            } else {
-                Some(version)
-            };
-            ServiceStatus {
-                key: "docker".to_string(),
-                running: true,
-                detail,
+    let mut last_error: Option<String> = None;
+    for candidate in crate::platform::os::docker_candidates() {
+        let mut command = crate::platform::process::HiddenCommand::new(candidate);
+        command.args(["info", "--format", "{{.ServerVersion}}"]);
+        match crate::platform::process::output_with_timeout(command, Duration::from_secs(3)) {
+            Ok(output) if output.status.success() => {
+                // stdout 全量进 detail 有整段涌入上下文/UI 的通道，截到 64 字符足够装版本号。
+                let version: String = String::from_utf8_lossy(&output.stdout)
+                    .trim()
+                    .chars()
+                    .take(64)
+                    .collect();
+                let detail = if version.is_empty() {
+                    None
+                } else {
+                    Some(version)
+                };
+                return ServiceStatus::running("docker", detail);
             }
-        }
-        Ok(output) => ServiceStatus {
-            key: "docker".to_string(),
-            running: false,
-            detail: Some(format!(
-                "docker 命令返回异常（exit {}），守护进程可能未运行",
-                output.status.code().unwrap_or(-1)
-            )),
-        },
-        Err(error) => {
-            // detail 会进 UI tooltip 与 doctor 上下文：platform 层的超时/超限
-            // 错误串内嵌截断到 4000 字符的子进程输出，与成功臂版本号同一 64
-            // 字符纪律限长（十九轮评审 P3）。
-            let reason: String = error.to_string().chars().take(64).collect();
-            ServiceStatus {
-                key: "docker".to_string(),
-                running: false,
-                detail: Some(format!("docker 命令不可用：{reason}")),
+            Ok(output) => {
+                // 命令拉起了但返回非零：守护进程未运行等，不再试其它候选（同一
+                // 个 docker 二进制换路径不会改变结论）。
+                let exit = output.status.code().unwrap_or(-1);
+                return ServiceStatus::down(
+                    "docker",
+                    format!("docker 命令返回异常（exit {exit}），守护进程可能未运行"),
+                    "docker_exit",
+                    Some(i64::from(exit)),
+                );
+            }
+            Err(error) => {
+                // detail 会进 UI tooltip 与 doctor 上下文：platform 层的超时/超限
+                // 错误串内嵌截断到 4000 字符的子进程输出，与成功臂版本号同一 64
+                // 字符纪律限长（十九轮评审 P3）。
+                last_error = Some(error.to_string().chars().take(64).collect());
             }
         }
     }
+    ServiceStatus::down(
+        "docker",
+        format!(
+            "docker 命令不可用：{}",
+            last_error.unwrap_or_else(|| "无候选路径".to_string())
+        ),
+        "docker_unavailable",
+        None,
+    )
 }
 
 // ---------------------------------------------------------------- 共用探针
@@ -967,29 +1018,66 @@ pub(crate) fn probe_client() -> Option<&'static reqwest::Client> {
 pub(crate) enum ProbeFailure {
     /// 服务有响应但状态码非 2xx。
     HttpStatus(u16),
-    /// 连接失败/超时/客户端初始化失败（附带人话原因）。
-    Transport(String),
+    /// 连接失败/超时/客户端初始化失败（可判别原因，字符串化延迟到展示层）。
+    Transport(TransportReason),
 }
 
 impl ProbeFailure {
     pub(crate) fn message(&self) -> String {
         match self {
             ProbeFailure::HttpStatus(status) => format!("服务响应异常（HTTP {status}）"),
-            ProbeFailure::Transport(reason) => reason.clone(),
+            ProbeFailure::Transport(reason) => reason.message().to_string(),
+        }
+    }
+
+    /// 稳定机器码（`ServiceStatus.reason` / `.code`），供前端三语映射。
+    pub(crate) fn reason_code(&self) -> (&'static str, Option<i64>) {
+        match self {
+            ProbeFailure::HttpStatus(status) => ("http_status", Some(i64::from(*status))),
+            ProbeFailure::Transport(reason) => (reason.code(), None),
+        }
+    }
+}
+
+/// 传输层失败的可判别原因。`message()` 是进 doctor 上下文/日志的中文人话，
+/// `code()` 是前端 i18n 映射用的机器码——两者同源，措辞改动不会击穿判别。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum TransportReason {
+    Timeout,
+    ConnectionRefused,
+    Network,
+    ClientInit,
+}
+
+impl TransportReason {
+    pub(crate) fn code(self) -> &'static str {
+        match self {
+            TransportReason::Timeout => "timeout",
+            TransportReason::ConnectionRefused => "connection_refused",
+            TransportReason::Network => "network_error",
+            TransportReason::ClientInit => "client_init_failed",
+        }
+    }
+
+    pub(crate) fn message(self) -> &'static str {
+        match self {
+            TransportReason::Timeout => "请求超时",
+            TransportReason::ConnectionRefused => "连接被拒绝（服务可能未启动）",
+            TransportReason::Network => "网络异常，无法访问服务",
+            TransportReason::ClientInit => "HTTP 客户端初始化失败",
         }
     }
 }
 
 /// GET 一个 URL，2xx 即 Ok；非 2xx / 连接失败 / 超时 → 可判别的 [`ProbeFailure`]。
 pub(crate) async fn http_get_success(url: &str) -> Result<(), ProbeFailure> {
-    let client = probe_client()
-        .ok_or_else(|| ProbeFailure::Transport("HTTP 客户端初始化失败".to_string()))?;
+    let client = probe_client().ok_or(ProbeFailure::Transport(TransportReason::ClientInit))?;
     let response = client
         .get(url)
         .timeout(PROBE_TIMEOUT)
         .send()
         .await
-        .map_err(|error| ProbeFailure::Transport(human_probe_error(error)))?;
+        .map_err(|error| ProbeFailure::Transport(probe_transport_reason(&error)))?;
     if response.status().is_success() {
         Ok(())
     } else {
@@ -997,19 +1085,24 @@ pub(crate) async fn http_get_success(url: &str) -> Result<(), ProbeFailure> {
     }
 }
 
-/// reqwest 错误 → 人话原因（超时 / 拒绝连接 / 其他）。第三臂**不得**串化原始
-/// 错误：reqwest 的 Display 会追加 " for url (<完整 URL>)"，而 URL 来自用户
-/// 可配置的 ollama_host（可能带 userinfo/内网主机名），detail 会进排查提示词
-/// 上下文送往（可能是云端的）模型——doctor 契约是"上下文刻意不含端点地址"
-/// （doctor.rs TASK_SERVICES），第四轮评审 P2 堵住这条旁路。
-pub(crate) fn human_probe_error(error: reqwest::Error) -> String {
+/// reqwest 错误 → 可判别原因（超时 / 拒绝连接 / 其他）。**不得**串化原始错误：
+/// reqwest 的 Display 会追加 " for url (<完整 URL>)"，而 URL 来自用户可配置的
+/// ollama_host（可能带 userinfo/内网主机名），detail 会进排查提示词上下文送往
+/// （可能是云端的）模型——doctor 契约是"上下文刻意不含端点地址"（doctor.rs
+/// TASK_SERVICES），第四轮评审 P2 堵住这条旁路。
+pub(crate) fn probe_transport_reason(error: &reqwest::Error) -> TransportReason {
     if error.is_timeout() {
-        "请求超时".to_string()
+        TransportReason::Timeout
     } else if error.is_connect() {
-        "连接被拒绝（服务可能未启动）".to_string()
+        TransportReason::ConnectionRefused
     } else {
-        "网络异常，无法访问服务".to_string()
+        TransportReason::Network
     }
+}
+
+/// reqwest 错误 → 人话原因（external_models 的 Err 字串口径）。
+pub(crate) fn human_probe_error(error: reqwest::Error) -> String {
+    probe_transport_reason(&error).message().to_string()
 }
 
 fn now_ms() -> u64 {
@@ -1029,10 +1122,14 @@ mod tests {
         let ok = fold_openai_port_probes(
             "vllm",
             &[8000, 8001],
-            vec![Err(ProbeFailure::Transport("超时".into())), Ok(())],
+            vec![
+                Err(ProbeFailure::Transport(TransportReason::Timeout)),
+                Ok(()),
+            ],
         );
         assert!(ok.running);
         assert_eq!(ok.detail, None);
+        assert_eq!((ok.reason, ok.code), (None, None));
         // 多端口并发后仍按**端口序**取首个 HTTP 状态错误（旧串行首见语义）：
         // 8000 的 404 优先于 8001 的 503。
         let both_http = fold_openai_port_probes(
@@ -1048,14 +1145,19 @@ mod tests {
             both_http.detail.as_deref(),
             Some("服务响应异常（HTTP 404）")
         );
+        // 机器码与数字随首个状态错误（前端三语 tooltip 据此映射，二十一轮评审 P2）。
+        assert_eq!(
+            (both_http.reason, both_http.code),
+            (Some("http_status"), Some(404))
+        );
         // 首端口传输层失败不吞掉后面端口的 HTTP 状态。
         let mixed = fold_openai_port_probes(
             "vllm",
             &[8000, 8001, 8002],
             vec![
-                Err(ProbeFailure::Transport("连接被拒绝".into())),
+                Err(ProbeFailure::Transport(TransportReason::ConnectionRefused)),
                 Err(ProbeFailure::HttpStatus(403)),
-                Err(ProbeFailure::Transport("超时".into())),
+                Err(ProbeFailure::Transport(TransportReason::Timeout)),
             ],
         );
         assert!(!mixed.running);
@@ -1065,15 +1167,54 @@ mod tests {
             "vllm",
             &[8000, 8001, 8002],
             vec![
-                Err(ProbeFailure::Transport("a".into())),
-                Err(ProbeFailure::Transport("b".into())),
-                Err(ProbeFailure::Transport("c".into())),
+                Err(ProbeFailure::Transport(TransportReason::Network)),
+                Err(ProbeFailure::Transport(TransportReason::Timeout)),
+                Err(ProbeFailure::Transport(TransportReason::ConnectionRefused)),
             ],
         );
         assert!(!transports.running);
         assert_eq!(
             transports.detail.as_deref(),
             Some("未在端口 8000/8001/8002 探测到服务（连接被拒绝或超时）")
+        );
+        assert_eq!(
+            (transports.reason, transports.code),
+            (Some("not_detected"), None)
+        );
+    }
+
+    #[test]
+    fn probe_failure_reason_codes_are_stable_and_distinct() {
+        // 机器码是前端 i18n 映射的契约面：每个传输层原因各有一码，与中文人话同源。
+        let codes: Vec<&str> = [
+            TransportReason::Timeout,
+            TransportReason::ConnectionRefused,
+            TransportReason::Network,
+            TransportReason::ClientInit,
+        ]
+        .into_iter()
+        .map(TransportReason::code)
+        .collect();
+        assert_eq!(
+            codes,
+            vec![
+                "timeout",
+                "connection_refused",
+                "network_error",
+                "client_init_failed"
+            ]
+        );
+        assert_eq!(
+            ProbeFailure::Transport(TransportReason::Timeout).reason_code(),
+            ("timeout", None)
+        );
+        assert_eq!(
+            ProbeFailure::HttpStatus(503).reason_code(),
+            ("http_status", Some(503))
+        );
+        assert_eq!(
+            ProbeFailure::Transport(TransportReason::ConnectionRefused).message(),
+            "连接被拒绝（服务可能未启动）"
         );
     }
 
@@ -1248,6 +1389,51 @@ mod tests {
     }
 
     #[test]
+    fn gpu_ext_cached_returns_last_known_value_without_queueing_while_probe_in_flight() {
+        // 并发口径（第五轮评审）的直打：探测锁被别人持有时，调用方立即拿到
+        // `last` 的最后已知值，**既不排队也不采样**——采样闭包里 panic 作负控。
+        let sampler = Mutex::new(GpuExtCache::default());
+        let last = RwLock::new(Some(GpuExtSnapshot {
+            driver_version: Some("580.02".to_string()),
+            cuda_version: None,
+            compute_processes: Some(Vec::new()),
+        }));
+        let held = sampler.lock();
+        let value = gpu_ext_cached_with(&sampler, &last, || {
+            panic!("must not sample while the probe lock is held")
+        });
+        assert_eq!(
+            value
+                .as_ref()
+                .and_then(|value| value.driver_version.as_deref()),
+            Some("580.02"),
+            "contended call must return the last known value"
+        );
+        drop(held);
+        // 锁释放后抢到锁的一路正常采样并发布到 last。
+        let value = gpu_ext_cached_with(&sampler, &last, || {
+            Some(GpuExtSnapshot {
+                driver_version: Some("590.00".to_string()),
+                cuda_version: None,
+                compute_processes: None,
+            })
+        });
+        assert_eq!(
+            value
+                .as_ref()
+                .and_then(|value| value.driver_version.as_deref()),
+            Some("590.00")
+        );
+        assert_eq!(
+            last.read()
+                .as_ref()
+                .and_then(|value| value.driver_version.as_deref()),
+            Some("590.00"),
+            "a successful sample must be published as the new last-known value"
+        );
+    }
+
+    #[test]
     fn gpu_ext_cache_keeps_old_value_on_failed_refresh_and_honors_ttl() {
         use std::cell::Cell;
         let make_value = |driver: &str| {
@@ -1410,6 +1596,10 @@ mod tests {
         assert_eq!(info.pid, 1234);
         assert_eq!(info.name, "/usr/bin/my,proc");
         assert_eq!(info.used_mib, 4096);
+        // nvidia-smi 对含逗号字段的标准 CSV 引号包裹形态：剥引号后名字不带引号
+        // （此前剥引号分支零覆盖，删掉 trim_matches 全绿——二十一轮评审变异实证）。
+        let info = parse_compute_app_line("1234, \"/usr/bin/my,proc\", 4096").expect("quoted name");
+        assert_eq!(info.name, "/usr/bin/my,proc");
         assert!(parse_compute_app_line("not,a,line").is_none());
         assert!(parse_compute_app_line("").is_none());
     }

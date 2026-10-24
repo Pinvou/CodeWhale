@@ -17,6 +17,10 @@ use serde_json::Value;
 use std::time::Duration;
 
 use super::{PROBE_TIMEOUT, human_probe_error, probe_client};
+// 裸名补 `:latest` 的尺子与引擎预算/监控展示共用一份（features→core 是公约允许
+// 的依赖方向）：模型身份判定全仓只能有一个口径，此前这里的私有副本按整串判
+// `:`、core 按末段判，`host:port/ns/model` 形状会分叉（二十一轮评审 P3）。
+use crate::core::model_endpoint::ollama_canonical_name;
 
 /// 允许登记的模型类别（与注册表 schema 一致）。
 const MODEL_KINDS: &[&str] = &["ollama", "openai_endpoint", "llamacpp", "vllm", "other"];
@@ -250,11 +254,57 @@ fn ollama_name_matches(record_name: &str, daemon_name: &str) -> bool {
     ollama_canonical_name(record_name).eq_ignore_ascii_case(&ollama_canonical_name(daemon_name))
 }
 
-fn ollama_canonical_name(name: &str) -> String {
-    if name.contains(':') {
-        name.to_string()
+/// 列表/登记两侧共用的"业务身份"：同一类别下，记录代表的模型是什么。Ollama
+/// 记录的身份是有效删除名（`model` 优先，裸名补 `:latest`、大小写折叠——与
+/// daemon 去重同一把尺子）；其余类别以 `model`（端点上的模型标识）回退 `name`。
+/// 登记端按它查重、读取端按它告警、前端 `rowIdentity` 按它做 armed/busy 键：
+/// 同 kind + 同 name 的两条记录（两个端口各登记一个 "qwen3"）或"别名记录 +
+/// daemon 同名行"此前会共享前端身份，一次 arm 同时打开两个确认面板（二十一轮
+/// 评审 P2；外部评审同指）。
+fn registry_identity(kind: &str, name: &str, model: Option<&str>) -> String {
+    let effective = model.unwrap_or(name);
+    if kind == "ollama" {
+        ollama_canonical_name(effective).to_ascii_lowercase()
     } else {
-        format!("{name}:latest")
+        effective.to_string()
+    }
+}
+
+/// 登记查重（纯函数，测试直打）：已有记录与新记录同 kind 且业务身份相同即冲突。
+fn find_identity_conflict<'a>(
+    existing: &'a [ExternalModel],
+    kind: &str,
+    name: &str,
+    model: Option<&str>,
+) -> Option<&'a ExternalModel> {
+    let identity = registry_identity(kind, name, model);
+    existing.iter().find(|record| {
+        record.registered
+            && record.kind == kind
+            && registry_identity(&record.kind, &record.name, record.model.as_deref()) == identity
+    })
+}
+
+/// 读取端对手写/AI 产出的重复身份（不同 id、同 kind 同模型）只告警不吞：移除按
+/// id 直取仍各自可删，但用户要知道为什么列表里"同一个模型出现两次"。
+fn warn_duplicate_identities(models: &[ExternalModel], warnings: &mut Vec<String>) {
+    let mut seen: Vec<(String, String, &str)> = Vec::new();
+    for model in models.iter().filter(|model| model.registered) {
+        let identity = registry_identity(&model.kind, &model.name, model.model.as_deref());
+        if let Some((_, _, first_id)) = seen
+            .iter()
+            .find(|(kind, seen_identity, _)| *kind == model.kind && *seen_identity == identity)
+        {
+            warnings.push(format!(
+                "注册表存在同类别同模型的重复记录（{}：{}，id {} 与 {}），建议移除多余的一条",
+                model.kind,
+                truncate_echo(&identity),
+                first_id,
+                model.id
+            ));
+        } else {
+            seen.push((model.kind.clone(), identity, model.id.as_str()));
+        }
     }
 }
 
@@ -387,6 +437,17 @@ pub async fn register_external_model(
     ] {
         if value.is_some_and(|value| value.chars().count() > 4096) {
             return Err(format!("{label}过长（最多 4096 字符）"));
+        }
+    }
+    // 权重路径必须是绝对路径（与移除守卫第一臂、model_store 权重根同一把尺子）：
+    // 相对路径此前能登记成功，之后勾"删除权重"的移除必整单失败；且状态探测与
+    // 商店边界都按进程 CWD 解析，同一输入随启动目录得到不同判定（二十一轮评审 P2）。
+    if let Some(weights) = weights_path.as_deref() {
+        if !Path::new(weights).is_absolute() {
+            return Err(format!(
+                "权重路径必须是绝对路径（收到：{}）",
+                truncate_path_echo(weights)
+            ));
         }
     }
     // Ollama 的权重字节全部由本机守护进程管理（默认 ~/.ollama，受 OLLAMA_MODELS
@@ -533,6 +594,19 @@ pub async fn register_external_model(
             if existing >= MAX_REGISTRY_FILES {
                 return Err(format!(
                     "注册表已满（上限 {MAX_REGISTRY_FILES} 条），请先移除不需要的模型"
+                ));
+            }
+            // 同 kind 同模型身份查重（二十一轮评审 P2）：注册表不强制 name 唯一，
+            // 两条同身份记录会让前端 armed/busy 键碰撞（一次 arm 打开两个确认
+            // 面板）；读取端对存量重复只告警不吞，这里对新登记直接拒绝。
+            let (existing_models, _) = read_registry(&dir);
+            if let Some(conflict) =
+                find_identity_conflict(&existing_models, &kind, &name, model.as_deref())
+            {
+                return Err(format!(
+                    "已存在同类别同模型的外部模型记录（{}，id {}），请先移除它或改用其他名字/模型标识",
+                    truncate_echo(&conflict.name),
+                    conflict.id
                 ));
             }
             let id = persist_new_record(&dir, random_record_id, |id| RegistryRecord {
@@ -708,7 +782,12 @@ pub async fn remove_external_model(
     // （登记错最多产生一条之后删不掉的记录，移除错会真删商店模型）。
     let boundary = tokio::task::spawn_blocking({
         let record_name = record.name.clone();
-        let weights_path = record.weights_path.clone();
+        // Ollama 记录的权重从不由这里删除（守卫 3 对 ollama 一律跳过目录删除），
+        // 存量手写记录恰把 weights_path 写在商店根之下时，路径臂仍整单拒绝会让
+        // 这条记录永远移除不掉、错误还指向管不到注册表的商店（二十一轮评审 P3）。
+        let weights_path = (record.kind != "ollama")
+            .then(|| record.weights_path.clone())
+            .flatten();
         let ollama_model_name = ollama_model_name.clone();
         move || {
             let name_hit =
@@ -877,6 +956,13 @@ pub async fn remove_external_model(
     .await
     {
         Ok(Ok(())) => true,
+        // 并发双通道（设备页 + AI 技能）对同一 id 各发一次移除时，后到者的
+        // remove_file 得 NotFound——文件确实已不在，终态正确，与权重臂/ollama
+        // 404 同口径按"已删除"收敛，不再误报"删除失败"（二十一轮评审 P3）。
+        Ok(Err(error)) if error.kind() == std::io::ErrorKind::NotFound => {
+            warnings.push("注册表文件已不存在（可能已被另一次移除删掉），按已删除处理".to_string());
+            true
+        }
         Ok(Err(error)) => {
             warnings.push(format!("注册表文件删除失败：{error}"));
             false
@@ -917,21 +1003,26 @@ fn removal_boundary_error(
     }
     if let Some(store_name) = store_name_hit {
         return Err(format!(
-            "“{store_name}”由模型商店管理，请在模型商店中操作，不能从这里移除"
+            "“{store_name}”由模型商店管理，请在模型商店中操作，不能从这里移除{STORE_BOUNDARY_ESCAPE_HINT}"
         ));
     }
     if let Some(store_name) = ollama_model_store_hit {
         return Err(format!(
-            "该记录的 Ollama 模型“{store_name}”由模型商店管理，请在模型商店中操作，不能从这里移除"
+            "该记录的 Ollama 模型“{store_name}”由模型商店管理，请在模型商店中操作，不能从这里移除{STORE_BOUNDARY_ESCAPE_HINT}"
         ));
     }
     if weights_in_store {
-        return Err(
-            "该模型的权重位于模型商店目录之下，由模型商店管理，请在模型商店中操作".to_string(),
-        );
+        return Err(format!(
+            "该模型的权重位于模型商店目录之下，由模型商店管理，请在模型商店中操作{STORE_BOUNDARY_ESCAPE_HINT}"
+        ));
     }
     Ok(())
 }
+
+/// 商店边界拒绝的出路提示：商店管不到注册表目录，被拒的记录（登记后商店恰好部署
+/// 了同名模型、手写记录把权重放进商店根等）此前是死胡同——与"记录损坏"分支给
+/// 手工删除出路同一口径（二十一轮评审 P3）。
+const STORE_BOUNDARY_ESCAPE_HINT: &str = "；若确认该登记记录本身不应由商店管理，可手工删除 ~/.pinvou3/device/external-models.d/<id>.json";
 
 /// 权重删除守卫（纯函数，测试矩阵直打）。全部通过时返回**规范化后**的目标目录，
 /// 调用方只对该返回值执行 `remove_dir_all`——绝不删除入参原样路径。
@@ -1219,7 +1310,7 @@ fn parse_record(text: &str) -> Result<RegistryRecord, String> {
     Ok(record)
 }
 
-fn read_registry(dir: &Path) -> (Vec<ExternalModel>, Vec<String>) {
+pub(crate) fn read_registry(dir: &Path) -> (Vec<ExternalModel>, Vec<String>) {
     let mut warnings = Vec::new();
     let entries = match std::fs::read_dir(dir) {
         Ok(entries) => entries,
@@ -1315,6 +1406,7 @@ fn read_registry(dir: &Path) -> (Vec<ExternalModel>, Vec<String>) {
         }
     }
     let models = resolve_duplicate_ids(loaded, &mut warnings);
+    warn_duplicate_identities(&models, &mut warnings);
     (models, warnings)
 }
 
@@ -1405,18 +1497,26 @@ pub(crate) async fn fetch_ollama_model_names() -> Result<Vec<String>, String> {
             // 评审 P3）。
             .map_err(|_| "Ollama 返回内容无法读取".to_string())?;
         let Some(chunk) = chunk else { break };
-        if body.len() + chunk.len() > MAX_TAGS_BYTES {
-            return Err(format!(
-                "Ollama 响应过大（超过 {MAX_TAGS_BYTES} 字节），拒绝解析"
-            ));
-        }
-        body.extend_from_slice(&chunk);
+        append_chunk_bounded(&mut body, &chunk, MAX_TAGS_BYTES)?;
     }
     let text =
         String::from_utf8(body).map_err(|_| "Ollama 返回内容无法解析（非 UTF-8）".to_string())?;
     let value: Value =
         serde_json::from_str(&text).map_err(|error| format!("Ollama 返回内容无法解析：{error}"))?;
     Ok(parse_ollama_tag_names(&value))
+}
+
+/// 分块聚合的有界读（纯函数，测试直打）：累计超过上限即拒绝，不把这一块追加进
+/// 去。此前内联在读取循环里，死端口 e2e 连接层就失败、永不进入循环，把比较改成
+/// `if false` 全套测试照绿（二十一轮评审 P2 变异实证）。
+fn append_chunk_bounded(body: &mut Vec<u8>, chunk: &[u8], max_bytes: usize) -> Result<(), String> {
+    if body.len() + chunk.len() > max_bytes {
+        return Err(format!(
+            "Ollama 响应过大（超过 {max_bytes} 字节），拒绝解析"
+        ));
+    }
+    body.extend_from_slice(chunk);
+    Ok(())
 }
 
 /// 从已解析的 /api/tags JSON 里取模型名。字节数有 1MB 上界但**条目数**没有——
@@ -1449,9 +1549,11 @@ fn parse_ollama_tag_names(value: &Value) -> Vec<String> {
 const OLLAMA_DELETE_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// Ollama 删除状态码的纯逻辑（测试直打，第二十轮评审 P3）：2xx 与 404 按成功
-/// 处理，其余非 2xx 报"服务响应异常"。
+/// 处理，其余（含无法再跟随的终态 3xx，如 304）报"服务响应异常"——此前
+/// `status < 400` 把 1xx/3xx 也当成功，与本注释自相矛盾（二十一轮评审 P2，外部
+/// 评审同指）。
 fn interpret_ollama_delete_status(status: u16) -> Result<(), String> {
-    if status < 400 {
+    if (200..300).contains(&status) {
         return Ok(());
     }
     if status == reqwest::StatusCode::NOT_FOUND.as_u16() {
@@ -1852,6 +1954,116 @@ mod tests {
         assert_eq!(warnings.len(), 1);
         assert!(warnings[0].contains("m-bad.json"));
     }
+
+    #[test]
+    fn registry_identity_folds_ollama_tags_and_case_but_keeps_other_kinds_exact() {
+        // Ollama：有效删除名（model 优先）、裸名补 :latest、大小写折叠——与
+        // daemon 去重同一把尺子；别名记录 {name:foo:latest, model:bar} 的身份是 bar。
+        assert_eq!(registry_identity("ollama", "qwen3", None), "qwen3:latest");
+        assert_eq!(
+            registry_identity("ollama", "Qwen3:Latest", None),
+            "qwen3:latest"
+        );
+        assert_eq!(
+            registry_identity("ollama", "foo:latest", Some("bar")),
+            "bar:latest"
+        );
+        // 其余类别：model 回退 name，原样（端点模型标识大小写有意义）。
+        assert_eq!(registry_identity("openai_endpoint", "qwen3", None), "qwen3");
+        assert_eq!(
+            registry_identity("openai_endpoint", "qwen3", Some("Qwen3-8B")),
+            "Qwen3-8B"
+        );
+        assert_ne!(
+            registry_identity("other", "Qwen3", None),
+            registry_identity("other", "qwen3", None)
+        );
+    }
+
+    #[test]
+    fn identity_conflict_detection_matches_same_kind_only_and_skips_daemon_rows() {
+        let make = |id: &str, kind: &str, name: &str, model: Option<&str>, registered: bool| {
+            ExternalModel {
+                id: id.to_string(),
+                name: name.to_string(),
+                kind: kind.to_string(),
+                base_url: None,
+                model: model.map(str::to_string),
+                weights_path: None,
+                status: "unreachable".to_string(),
+                registered,
+                source: if registered { "registry" } else { "ollama" }.to_string(),
+            }
+        };
+        let existing = vec![
+            make("m-1", "openai_endpoint", "qwen3", None, true),
+            make("m-2", "ollama", "foo:latest", Some("bar"), true),
+            make("ollama-baz:latest", "ollama", "baz:latest", None, false),
+        ];
+        // 两个端口各登记一个 "qwen3"（外部评审路由 1）→ 冲突。
+        let hit = find_identity_conflict(&existing, "openai_endpoint", "qwen3", None)
+            .expect("same kind + same name must conflict");
+        assert_eq!(hit.id, "m-1");
+        // 同名不同类别不冲突；同名不同 model（不同端点模型）不冲突。
+        assert!(find_identity_conflict(&existing, "other", "qwen3", None).is_none());
+        assert!(
+            find_identity_conflict(&existing, "openai_endpoint", "qwen3", Some("qwen3-8b"))
+                .is_none()
+        );
+        // Ollama 按有效删除名：登记 "BAR" 与别名记录的 model bar 冲突，登记
+        // "foo:latest"（身份 foo:latest）与别名记录（身份 bar）不冲突。
+        assert!(find_identity_conflict(&existing, "ollama", "BAR", None).is_some());
+        assert!(find_identity_conflict(&existing, "ollama", "foo:latest", None).is_none());
+        // daemon 行不是注册表记录，登记它（静默登记路径）不算冲突。
+        assert!(find_identity_conflict(&existing, "ollama", "baz", None).is_none());
+    }
+
+    #[test]
+    fn read_registry_warns_on_duplicate_identity_but_keeps_both_records() {
+        let dir = TempDir::new("registry-dup-identity");
+        std::fs::write(
+            dir.path().join("m-a.json"),
+            r#"{"id": "m-a", "name": "qwen3", "kind": "openai_endpoint", "base_url": "http://127.0.0.1:8000/v1"}"#,
+        )
+        .expect("write a");
+        std::fs::write(
+            dir.path().join("m-b.json"),
+            r#"{"id": "m-b", "name": "qwen3", "kind": "openai_endpoint", "base_url": "http://127.0.0.1:8001/v1"}"#,
+        )
+        .expect("write b");
+        std::fs::write(
+            dir.path().join("m-c.json"),
+            r#"{"id": "m-c", "name": "qwen3", "kind": "other"}"#,
+        )
+        .expect("write c");
+        let (models, warnings) = read_registry(dir.path());
+        // 两条都保留（移除按 id 直取各自可删），只告警一次（第二条重复），不同类别不算。
+        assert_eq!(models.len(), 3);
+        assert_eq!(warnings.len(), 1, "unexpected warnings: {warnings:?}");
+        assert!(
+            warnings[0].contains("m-a") && warnings[0].contains("m-b"),
+            "{}",
+            warnings[0]
+        );
+        assert!(warnings[0].contains("openai_endpoint"));
+    }
+
+    #[test]
+    fn append_chunk_bounded_rejects_overflow_without_appending() {
+        let mut body = Vec::new();
+        assert!(append_chunk_bounded(&mut body, &[1, 2, 3], 5).is_ok());
+        // 恰到上限放行。
+        assert!(append_chunk_bounded(&mut body, &[4, 5], 5).is_ok());
+        assert_eq!(body, vec![1, 2, 3, 4, 5]);
+        // 再多一字节即拒绝，且被拒的块不追加。
+        let error = append_chunk_bounded(&mut body, &[6], 5).unwrap_err();
+        assert!(error.contains("响应过大"), "unexpected error: {error}");
+        assert_eq!(body.len(), 5);
+        // 单块超限同样拒绝。
+        let mut fresh = Vec::new();
+        assert!(append_chunk_bounded(&mut fresh, &[0; 6], 5).is_err());
+        assert!(fresh.is_empty());
+    }
     #[test]
     fn removal_boundary_rejects_confirm_mismatch_store_names_and_store_weights() {
         // 双侧都 trim：存量记录名带空白时确认输入 trim 后仍应匹配（Ok 而非 Err）。
@@ -2227,6 +2439,27 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn register_rejects_relative_weights_path_before_touching_the_store() {
+        // 与移除守卫第一臂同一把尺子：相对路径登记成功后勾"删除权重"必整单失败，
+        // 且探测/边界按进程 CWD 解析（二十一轮评审 P2）。校验在商店边界之前，
+        // 不需要临时 HOME。
+        let error = register_external_model(
+            "rel".to_string(),
+            "other".to_string(),
+            None,
+            None,
+            Some("relative/dir".to_string()),
+        )
+        .await
+        .expect_err("relative weights_path must be rejected");
+        assert!(error.contains("绝对路径"), "unexpected error: {error}");
+        assert!(
+            error.contains("relative/dir"),
+            "echo must name the path: {error}"
+        );
+    }
+
     #[test]
     fn parse_ollama_tag_names_caps_entries_and_skips_nameless() {
         let many: Vec<String> = (0..1300).map(|index| format!("m{index}")).collect();
@@ -2349,7 +2582,14 @@ mod tests {
         // 404→Err 时本测试必红。连接层失败走 human_probe_error，不会落到这里。
         assert!(interpret_ollama_delete_status(200).is_ok());
         assert!(interpret_ollama_delete_status(201).is_ok());
+        assert!(interpret_ollama_delete_status(204).is_ok());
         assert!(interpret_ollama_delete_status(404).is_ok());
+        // 终态 3xx（跟随不了的 304 / 无 Location 的 301）不是"已删除"：此前
+        // `< 400` 把它们当成功会产生假完成提示（二十一轮评审 P2）。
+        let error = interpret_ollama_delete_status(304).unwrap_err();
+        assert!(error.contains("HTTP 304"), "unexpected error: {error}");
+        assert!(interpret_ollama_delete_status(301).is_err());
+        assert!(interpret_ollama_delete_status(100).is_err());
         let error = interpret_ollama_delete_status(400).unwrap_err();
         assert!(error.contains("HTTP 400"), "unexpected error: {error}");
         assert!(interpret_ollama_delete_status(500).is_err());
