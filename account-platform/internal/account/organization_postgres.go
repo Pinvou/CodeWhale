@@ -173,6 +173,9 @@ func (r *PostgresRepository) CreateUnit(ctx context.Context, principal identity.
 			return UnitMutationResult{}, ErrInvalidHierarchy
 		}
 	}
+	if err := requireOrganizationMutationPermission(ctx, tx, userID, organizationID, parentID, PermissionOrganizationUnitsManage); err != nil {
+		return UnitMutationResult{}, err
+	}
 	now := r.now()
 	unit := Unit{ID: uuid.Must(uuid.NewV7()), OrganizationID: organizationID, ParentID: parentID, Name: name, Status: "ACTIVE", Version: 1}
 	if _, err := tx.Exec(ctx, `INSERT INTO organization_units(id, organization_id, parent_id, name, status, created_at, updated_at) VALUES ($1, $2, $3, $4, 'ACTIVE', $5, $5)`, unit.ID, organizationID, parentID, name, now); err != nil {
@@ -271,6 +274,20 @@ func (r *PostgresRepository) MoveUnit(ctx context.Context, principal identity.Pr
 		if !parentActive {
 			return UnitMutationResult{}, ErrInvalidHierarchy
 		}
+	}
+	if err := requireOrganizationMutationPermission(ctx, tx, userID, organizationID, &unitID, PermissionOrganizationUnitsManage); err != nil {
+		return UnitMutationResult{}, err
+	}
+	if err := requireOrganizationMutationPermission(ctx, tx, userID, organizationID, newParentID, PermissionOrganizationUnitsManage); err != nil {
+		return UnitMutationResult{}, err
+	}
+	// Both scope lock sets are now held. A wait in the destination fence can
+	// cross the source binding's expiry; recheck both after that last wait.
+	if err := requireOrganizationPermission(ctx, tx, userID, organizationID, &unitID, PermissionOrganizationUnitsManage); err != nil {
+		return UnitMutationResult{}, err
+	}
+	if err := requireOrganizationPermission(ctx, tx, userID, organizationID, newParentID, PermissionOrganizationUnitsManage); err != nil {
+		return UnitMutationResult{}, err
 	}
 	if (unit.ParentID == nil && newParentID == nil) || (unit.ParentID != nil && newParentID != nil && *unit.ParentID == *newParentID) {
 		result := UnitMutationResult{Unit: unit, StructureVersion: structureVersion}

@@ -338,7 +338,27 @@ func TestApprovalRecoveryQueryForwardMigrationPostgres(t *testing.T) {
 		if e := accountschema.Up(ctx, migrator, allMigrations); e != nil {
 			t.Fatal("exact migration replay", e)
 		}
-		if e := accountschema.DownOne(ctx, migrator, allMigrations); e == nil || !strings.Contains(e.Error(), "ACCOUNT_APPROVAL_RECOVERY_QUERY_MATRIX_FORWARD_ONLY") {
+		// Verify this migration's exact refusal even after later additive
+		// migrations exist. DownOne intentionally targets the latest version;
+		// its current highest-version contract is covered by that migration.
+		var downSQL string
+		for _, migration := range allMigrations {
+			if migration.Version == 900009 {
+				downSQL = migration.DownSQL
+			}
+		}
+		if downSQL == "" {
+			t.Fatal("original recovery query Down SQL missing")
+		}
+		down, e := migrator.Begin(ctx)
+		if e != nil {
+			t.Fatal(e)
+		}
+		_, e = down.Exec(ctx, downSQL)
+		if rollbackErr := down.Rollback(ctx); rollbackErr != nil {
+			t.Fatal(rollbackErr)
+		}
+		if e == nil || !strings.Contains(e.Error(), "ACCOUNT_APPROVAL_RECOVERY_QUERY_MATRIX_FORWARD_ONLY") {
 			t.Fatal("unsafe recovery rollback accepted", e)
 		}
 		if _, e := migrations.VerifyApplied(ctx, migrator, allMigrations); e != nil {

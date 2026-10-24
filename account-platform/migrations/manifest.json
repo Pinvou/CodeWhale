@@ -1032,6 +1032,16 @@
         "file": "900009_approval_recovery_query_billing_commands.up.sql",
         "version": 900009,
         "sha256": "72182376ed586e4442f3d1090f360975cc37bf67640de20526336b28e1e47cf4"
+      },
+      {
+        "file": "900010_approval_authorization_wall_clock.down.sql",
+        "version": 900010,
+        "sha256": "9f04388e990ba00ef42a734590796db026e2eb0bdbe8402aec7395d24986e899"
+      },
+      {
+        "file": "900010_approval_authorization_wall_clock.up.sql",
+        "version": 900010,
+        "sha256": "00b16dc894e5e1d21c13e056d590b3e60667f8de9cccd7dfba81ef5a774199da"
       }
     ],
     "billing": [

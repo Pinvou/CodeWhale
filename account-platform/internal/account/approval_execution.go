@@ -120,20 +120,33 @@ WHERE e.approval_request_id=$1 AND e.command_type=$2`, requestID, item.CommandTy
 		}
 		return ApprovalExecution{}, ErrApprovalInvalidated
 	}
-	requesterBinding, requesterVersion, _, err := strongPlatformAuthorization(ctx, tx, item.RequesterUserID, policy.RequesterPermission)
-	if err != nil && !errors.Is(err, ErrForbidden) {
-		return invalidateExecutionAuthorization(ctx, tx, item, executorIdentity, "AUTHORIZATION_UNAVAILABLE", now)
-	}
-	if err != nil || requesterBinding != item.RequesterBindingID || requesterVersion != item.RequesterAuthorizationVersion {
-		return invalidateExecutionAuthorization(ctx, tx, item, executorIdentity, "REQUESTER_AUTH_CHANGED", now)
-	}
 	var approverID, approverBinding uuid.UUID
 	var approverVersion int64
 	var decisionReason string
 	if err := tx.QueryRow(ctx, `SELECT approver_user_id,approver_binding_id,approver_authorization_version,reason FROM approval_decisions WHERE approval_request_id=$1 AND decision='APPROVED'`, requestID).Scan(&approverID, &approverBinding, &approverVersion, &decisionReason); err != nil {
 		return ApprovalExecution{}, ErrApprovalInvalidated
 	}
-	currentApproverBinding, currentApproverVersion, _, err := strongPlatformAuthorization(ctx, tx, approverID, policy.ApproverPermission)
+	locks, err := lockPlatformAuthorizationFacts(ctx, tx,
+		platformAuthorizationRequirement{UserID: item.RequesterUserID, Permission: policy.RequesterPermission},
+		platformAuthorizationRequirement{UserID: approverID, Permission: policy.ApproverPermission})
+	if err != nil {
+		return invalidateExecutionAuthorization(ctx, tx, item, executorIdentity, "AUTHORIZATION_UNAVAILABLE", now)
+	}
+	now, err = approvalDatabaseTime(ctx, tx)
+	if err != nil {
+		return ApprovalExecution{}, err
+	}
+	if item.ExecutionDeadline == nil || !item.ExecutionDeadline.After(now) {
+		return invalidateExecutionAuthorization(ctx, tx, item, executorIdentity, "EXECUTION_WINDOW_EXPIRED", now)
+	}
+	requesterBinding, requesterVersion, _, err := platformAuthorizationAt(ctx, tx, locks[0], now)
+	if err != nil && !errors.Is(err, ErrForbidden) {
+		return invalidateExecutionAuthorization(ctx, tx, item, executorIdentity, "AUTHORIZATION_UNAVAILABLE", now)
+	}
+	if err != nil || requesterBinding != item.RequesterBindingID || requesterVersion != item.RequesterAuthorizationVersion {
+		return invalidateExecutionAuthorization(ctx, tx, item, executorIdentity, "REQUESTER_AUTH_CHANGED", now)
+	}
+	currentApproverBinding, currentApproverVersion, _, err := platformAuthorizationAt(ctx, tx, locks[1], now)
 	if err != nil && !errors.Is(err, ErrForbidden) {
 		return invalidateExecutionAuthorization(ctx, tx, item, executorIdentity, "AUTHORIZATION_UNAVAILABLE", now)
 	}

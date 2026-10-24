@@ -220,6 +220,13 @@ func (r *PostgresRepository) CreateApprovalDraft(ctx context.Context, principal 
 	if err := requireTokenApprovalRecentAuthentication(principal, policy.CommandType, now); err != nil {
 		return ApprovalRequest{}, err
 	}
+	bindingID, authorizationVersion, validUntil, now, err = finalPlatformAuthorization(ctx, tx, *actorID, policy.RequesterPermission)
+	if err != nil {
+		return ApprovalRequest{}, err
+	}
+	if err := requireTokenApprovalRecentAuthentication(principal, policy.CommandType, now); err != nil {
+		return ApprovalRequest{}, err
+	}
 	id := uuid.Must(uuid.NewV7())
 	expiresAt := now.Add(policy.ExpiresAfter)
 	policySnapshot, _ := json.Marshal(map[string]any{"policy_version": policy.PolicyVersion, "requester_permission": policy.RequesterPermission, "approver_permission": policy.ApproverPermission, "approval_count": policy.ApprovalCount, "executor_identity": policy.ExecutorIdentity, "valid_until": validUntil})
@@ -340,6 +347,13 @@ func (r *PostgresRepository) UpdateApprovalDraft(ctx context.Context, principal 
 		return ApprovalRequest{}, ErrConflict
 	}
 	now := r.now()
+	if err := requireTokenApprovalRecentAuthentication(principal, policy.CommandType, now); err != nil {
+		return ApprovalRequest{}, err
+	}
+	_, _, _, now, err = finalPlatformAuthorization(ctx, tx, *actorID, policy.RequesterPermission)
+	if err != nil {
+		return ApprovalRequest{}, err
+	}
 	if err := requireTokenApprovalRecentAuthentication(principal, policy.CommandType, now); err != nil {
 		return ApprovalRequest{}, err
 	}
@@ -489,6 +503,14 @@ func (r *PostgresRepository) transitionOwnApproval(ctx context.Context, principa
 				return ApprovalRequest{}, err
 			}
 		}
+		finalBinding, finalVersion, _, finalTime, finalErr := finalPlatformAuthorization(ctx, tx, *actorID, policy.RequesterPermission)
+		if finalErr != nil || finalBinding != item.RequesterBindingID || finalVersion != item.RequesterAuthorizationVersion {
+			return ApprovalRequest{}, ErrApprovalInvalidated
+		}
+		now = finalTime
+		if err := requireTokenApprovalRecentAuthentication(principal, item.CommandType, now); err != nil {
+			return ApprovalRequest{}, err
+		}
 		submittedExpiresAt = now.Add(policy.ExpiresAfter)
 	}
 	command, err := tx.Exec(ctx, `UPDATE approval_requests SET status=$4,submitted_at=CASE WHEN $4='SUBMITTED' THEN $5 ELSE submitted_at END,expires_at=CASE WHEN $4='SUBMITTED' THEN $7 ELSE expires_at END,version=version+1,updated_at=$5 WHERE id=$1 AND requester_user_id=$2 AND status=$3 AND version=$6`, requestID, *actorID, from, to, now, expectedVersion, submittedExpiresAt)
@@ -603,9 +625,18 @@ func (r *PostgresRepository) decideApprovalRequestWithoutAuthorization(ctx conte
 		}
 		return ApprovalRequest{}, err
 	}
+	bindingID, authorizationVersion, validUntil, now, err = finalPlatformAuthorization(ctx, tx, *actorID, policy.ApproverPermission)
+	if err != nil {
+		return ApprovalRequest{}, err
+	}
+	if !item.ExpiresAt.After(now) {
+		return r.invalidateApproval(ctx, tx, item, *actorID, "EXPIRED", "REQUEST_EXPIRED", map[string]any{}, now, ErrApprovalExpired)
+	}
 	authSnapshot, _ := json.Marshal(map[string]any{"user_id": actorID, "binding_id": bindingID, "authorization_version": authorizationVersion, "valid_until": validUntil})
 	if approvalTokenNeedsRecentAuthentication(item.CommandType) {
-		now = r.now()
+		if err := requireTokenApprovalRecentAuthentication(principal, item.CommandType, r.now()); err != nil {
+			return ApprovalRequest{}, err
+		}
 		if err := requireTokenApprovalRecentAuthentication(principal, item.CommandType, now); err != nil {
 			return ApprovalRequest{}, err
 		}
@@ -757,7 +788,7 @@ func (r *PostgresRepository) approveApprovalRequestAttempt(
 		return rollback(ApprovalRequest{}, ErrApprovalRequestChanged)
 	}
 	var now time.Time
-	if err := tx.QueryRow(ctx, `SELECT transaction_timestamp()`).Scan(&now); err != nil {
+	if err := tx.QueryRow(ctx, `SELECT clock_timestamp()`).Scan(&now); err != nil {
 		return rollback(ApprovalRequest{}, err)
 	}
 	actorID, err := adminActorID(ctx, tx, principal)
@@ -886,6 +917,46 @@ func (r *PostgresRepository) approveApprovalRequestAttempt(
 			return ApprovalRequest{}, committed, rolledBack, commitErr
 		}
 		return invalidated, true, false, ErrApprovalInvalidated
+	}
+	// The legacy activation read above may wait even after authority locks.
+	// Establish the decision time only after it has returned. This is a DB
+	// wall clock; transaction_timestamp and a test clock are not admission facts.
+	bindingID, authorizationVersion, validUntil, err = strongApprovalWriterAuthorization(ctx, tx, *actorID, policy.ApproverPermission)
+	if err != nil {
+		if errors.Is(err, ErrForbidden) {
+			return rollback(ApprovalRequest{}, ErrApprovalRequestNotFound)
+		}
+		return rollback(ApprovalRequest{}, err)
+	}
+	now, err = approvalDatabaseTime(ctx, tx)
+	if err != nil {
+		return rollback(ApprovalRequest{}, err)
+	}
+	if validUntil != nil && !validUntil.After(now) {
+		return rollback(ApprovalRequest{}, ErrApprovalRequestNotFound)
+	}
+	if !item.ExpiresAt.After(now) {
+		invalidated, invalidationErr := r.invalidateApprovalInTransaction(ctx, tx, item, *actorID, "EXPIRED", "REQUEST_EXPIRED", map[string]any{}, now, stateEventID)
+		if invalidationErr != nil {
+			return rollback(ApprovalRequest{}, invalidationErr)
+		}
+		invalidated, committed, rolledBack, commitErr := r.commitApprovalWriterTerminal(ctx, tx, invalidated, stateEventID, "REQUEST_EXPIRED")
+		if commitErr != nil {
+			return ApprovalRequest{}, committed, rolledBack, commitErr
+		}
+		return invalidated, true, false, ErrApprovalExpired
+	}
+	if err := requireTokenApprovalRecentAuthentication(principal, item.CommandType, now); err != nil {
+		return rollback(ApprovalRequest{}, err)
+	}
+	if checkpoint != nil {
+		if bindingID != checkpoint.BindingID || authorizationVersion != checkpoint.AuthorizationVersion ||
+			approvalProofNeedsRecentAuthentication(item.CommandType) && !recentlyAuthenticated(principal.AuthenticatedAt, now) {
+			return rollback(ApprovalRequest{}, ErrApprovalRequestChanged)
+		}
+		if !approvalencoding.ProofResponseFresh(proofResult.Response, now.UTC()) {
+			return rollback(ApprovalRequest{}, ErrApprovalProofInvalid)
+		}
 	}
 	executionDeadline := now.Add(policy.ExecutionWindow)
 	authSnapshot, _ := json.Marshal(map[string]any{"user_id": actorID, "binding_id": bindingID, "authorization_version": authorizationVersion, "valid_until": validUntil})
@@ -1499,22 +1570,8 @@ func containsSecretField(value any) bool {
 }
 
 func strongPlatformAuthorization(ctx context.Context, database queryable, userID uuid.UUID, permission string) (uuid.UUID, int64, *time.Time, error) {
-	var bindingID uuid.UUID
-	var validUntil *time.Time
-	err := database.QueryRow(ctx, `SELECT ra.id,ra.expires_at FROM users u JOIN role_assignments ra ON ra.user_id=u.id AND ra.organization_id IS NULL JOIN role_permissions rp ON rp.role_code=ra.role_code AND rp.permission_code=$2 WHERE u.id=$1 AND u.status='ACTIVE' AND ra.revoked_at IS NULL AND ra.starts_at<=now() AND (ra.expires_at IS NULL OR ra.expires_at>now()) ORDER BY ra.expires_at NULLS LAST,ra.id LIMIT 1 FOR SHARE OF u,ra`, userID, permission).Scan(&bindingID, &validUntil)
-	if errors.Is(err, pgx.ErrNoRows) {
-		return uuid.Nil, 0, nil, ErrForbidden
-	}
-	if err != nil {
-		return uuid.Nil, 0, nil, err
-	}
-	var version int64
-	if err := database.QueryRow(ctx, `SELECT version FROM authorization_versions WHERE user_id=$1 AND scope='PLATFORM' AND scope_id='00000000-0000-0000-0000-000000000000'::uuid FOR SHARE`, userID).Scan(&version); errors.Is(err, pgx.ErrNoRows) {
-		version = 1
-	} else if err != nil {
-		return uuid.Nil, 0, nil, err
-	}
-	return bindingID, version, validUntil, nil
+	binding, version, until, _, err := finalPlatformAuthorization(ctx, database, userID, permission)
+	return binding, version, until, err
 }
 
 // strongApprovalWriterAuthorization preserves the existing authorization-row
