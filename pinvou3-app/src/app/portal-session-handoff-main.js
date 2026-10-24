@@ -1,12 +1,12 @@
 import '../shared/legacy-polyfills.js';
 import { accountPlatformCopy } from '../shared/i18n.js';
-import { portalHTMLLanguage } from '../features/account-platform/portal-language.js';
+import { optionalPortalLanguageStorage, portalHTMLLanguage } from '../features/account-platform/portal-language.js';
 import { portalSessionHandoffLanguage, takePortalSessionHandoffTicket } from '../features/account-platform/portal-session-handoff-url.js';
 import { consumePortalSessionHandoff } from '../features/account-platform/portal-session-handoff.js';
 
 const requestedLocale = new URLSearchParams(location.search).get('locale');
 const ticket = takePortalSessionHandoffTicket(location.href, history.replaceState.bind(history));
-const locale = portalSessionHandoffLanguage(requestedLocale, navigator.language, localStorage);
+const locale = portalSessionHandoffLanguage(requestedLocale, navigator.language, optionalPortalLanguageStorage());
 const copy = accountPlatformCopy[locale];
 const main = document.querySelector('main');
 document.documentElement.lang = portalHTMLLanguage(locale);
