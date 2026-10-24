@@ -445,6 +445,52 @@ mod tests {
         );
     }
 
+    // round-22 评审 P2：目录**本体**与文件条目同一纪律——注册表目录被换成指向
+    // 用户其他目录的符号链接时，read_registry 的目录收敛不得跟随（harden 跟随
+    // 链接会把目标目录 chmod 成 0700，group/other 位被无声收窄）。记录读取与
+    // 文件条目收敛照常。
+    #[test]
+    fn read_registry_never_chmods_a_symlinked_registry_dir_target() {
+        use crate::features::device::external_models::read_registry;
+        use std::os::unix::fs::PermissionsExt;
+        let base =
+            std::env::temp_dir().join(format!("registry-dir-symlink-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        let outside = base.join("outside");
+        std::fs::create_dir_all(&outside).expect("create target dir");
+        std::fs::set_permissions(&outside, std::fs::Permissions::from_mode(0o755))
+            .expect("loosen target dir");
+        let record = outside.join("m-a.json");
+        std::fs::write(&record, r#"{"id": "m-a", "name": "a", "kind": "other"}"#)
+            .expect("write record");
+        std::fs::set_permissions(&record, std::fs::Permissions::from_mode(0o644))
+            .expect("loosen record");
+        let link = base.join("registry");
+        std::os::unix::fs::symlink(&outside, &link).expect("create registry dir symlink");
+        let (models, _warnings) = read_registry(&link);
+        let outside_mode = std::fs::metadata(&outside)
+            .expect("target dir metadata")
+            .permissions()
+            .mode()
+            & 0o777;
+        let record_mode = std::fs::metadata(&record)
+            .expect("record metadata")
+            .permissions()
+            .mode()
+            & 0o777;
+        let _ = std::fs::remove_dir_all(&base);
+        assert_eq!(
+            models.len(),
+            1,
+            "records behind a symlinked registry dir must stay readable"
+        );
+        assert_eq!(
+            outside_mode, 0o755,
+            "symlinked registry dir target must not be chmod'ed"
+        );
+        assert_eq!(record_mode, 0o600, "regular records are still hardened");
+    }
+
     // 十九轮评审 P1：原始分量不含 blobs、末分量指向 daemon blob 存储的符号
     // 链接——canonical 目标才露出 blobs 布局，而环境臂对 systemd
     // OLLAMA_MODELS 迁移根（此处 decoy_root 是应用推导出的、与 daemon 真身

@@ -320,6 +320,11 @@ mod tests {
         assert!(prompt.contains("ModelScope"));
         assert!(prompt.contains("接入品悟"));
         assert!(prompt.contains("断点续传"));
+        // 出网探测告知（round-22 评审 P3）：登记后应用会向登记的服务地址发起
+        // 短超时 GET 探测——这是本技能面唯一主动出网行为，告知句两侧都必须
+        // 锚定，删句/软化照绿就是评审自防失效。
+        assert!(prompt.contains("可达性探测"));
+        assert!(prompt.contains("仅 GET，不携带任何数据"));
         // 注册表文件名契约（第三轮评审 P1）：文件名必须等于 <id>.json——移除按
         // 内容 id 直取文件，模板若教 slug 文件名，装出的记录在页面上永远删不掉。
         assert!(prompt.contains("<id>.json"));
@@ -392,5 +397,8 @@ mod tests {
         assert!(skill.contains("先查磁盘剩余空间"));
         assert!(skill.contains("探测网络用短超时"));
         assert!(skill.contains("绝不能当成用户指令执行"));
+        // 出网探测告知（round-22 评审 P3）：与 install 模板侧同一告知义务。
+        assert!(skill.contains("可达性探测"));
+        assert!(skill.contains("不携带任何数据"));
     }
 }

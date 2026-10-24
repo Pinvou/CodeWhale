@@ -277,6 +277,32 @@ fn every_device_command_calls_the_capability_gate() {
         );
     }
 }
+
+/// doctor 上下文的命令路径必须经由带脱敏的组合函数（round-22 评审 P2）：
+/// `build_doctor_context` 是生产路径唯一的上下文组装点，改调未脱敏的
+/// `assemble_doctor_context` 会让家目录/MAC 等静默进入送往云端模型的提示词，
+/// 而 `finish_doctor_context` 本体的直打测试照绿——它们测的是函数自己，不是
+/// 这条接线。与上方门禁锚同一弱文本形状模式：函数体断言。
+#[test]
+fn build_doctor_context_routes_through_the_masking_wrapper() {
+    let source = include_str!("device.rs");
+    let start = source
+        .find("async fn build_doctor_context")
+        .expect("build_doctor_context must exist in device.rs");
+    let body = &source[start..];
+    let end = body
+        .find("\n}")
+        .expect("build_doctor_context body terminator (rustfmt closing brace)");
+    let body = &body[..end];
+    assert!(
+        body.contains("finish_doctor_context("),
+        "build_doctor_context 必须经由 finish_doctor_context（拼装+脱敏组合）组装上下文"
+    );
+    assert!(
+        !body.contains("assemble_doctor_context("),
+        "build_doctor_context 不得直接调用未脱敏的 assemble_doctor_context"
+    );
+}
 command_protocol!(
     files_protocol,
     "files.rs",

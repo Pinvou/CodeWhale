@@ -592,10 +592,13 @@ impl Pinvou3Bundle {
     /// 「内置释放目录收敛」）会当残旧收敛掉，故必须并入自愈豁免集。
     pub(crate) const CONNECTOR_CLI_BIN_DIRS: &[&str] = &["eip", "zhidao"];
 
-    /// 自愈对账的豁免集 = 内置释放技能（[`Self::BUILTIN_RELEASED_SKILL_DIRS`]）
-    /// ∪ IT 内部 CLI 连接器目录（[`Self::CONNECTOR_CLI_BIN_DIRS`]）。由两处
-    /// 真相源动态组合成单一豁免清单，扩充任一侧无须记得改这里（评审 P3：
-    /// 避免第二份硬编码清单漂移导致新增内置技能被自愈误删）。
+    /// 自愈对账的豁免集 = **按能力位过滤后**的内置释放技能
+    /// （[`Self::released_builtin_skill_dirs`]）∪ IT 内部 CLI 连接器目录
+    /// （[`Self::CONNECTOR_CLI_BIN_DIRS`]）。由两处真相源动态组合成单一豁免
+    /// 清单，扩充任一侧无须记得改这里（评审 P3：避免第二份硬编码清单漂移导致
+    /// 新增内置技能被自愈误删）。注意真相源是过滤后的函数而非
+    /// [`Self::BUILTIN_RELEASED_SKILL_DIRS`] 常量——非 MegaCube 上豁免集不含
+    /// device-doctor（round-22 评审 P3 注释勘正）。
     pub(crate) fn self_heal_protected_dirs(megacube: bool) -> Vec<&'static str> {
         Self::released_builtin_skill_dirs(megacube)
             .iter()

@@ -435,8 +435,14 @@ pub async fn register_external_model(
         ("模型标识", model.as_deref()),
         ("权重路径", weights_path.as_deref()),
     ] {
-        if value.is_some_and(|value| value.chars().count() > 4096) {
+        let Some(value) = value else { continue };
+        if value.chars().count() > 4096 {
             return Err(format!("{label}过长（最多 4096 字符）"));
+        }
+        // 控制字符与 name 同一纪律（round-22 review P3）：换行的 model 标识会
+        // 流进身份查重告警与 UI 行展示，URL/路径里的控制字符只会制造后续失败。
+        if value.chars().any(char::is_control) {
+            return Err(format!("{label}包含控制字符或换行，请改用普通文本"));
         }
     }
     // 权重路径必须是绝对路径（与移除守卫第一臂、model_store 权重根同一把尺子）：
@@ -581,21 +587,18 @@ pub async fn register_external_model(
                 .map_err(|error| format!("注册表目录创建失败：{error}"))?;
             // 注册表记录含 base_url/weights_path，目录只留 owner 权限（对齐
             // model_store 的私密纪律；unix 专属实现收在 platform 适配层）。
-            super::platform::harden_dir_owner_only(&dir);
+            // 目录被换成符号链接时不收敛：harden 跟随链接会把目标目录 chmod
+            // 成 0700（与 read_registry 扫描同一纪律，round-22 review P2）。
+            // 记录文件本身由 create_private_file_once 直接按 0600 落盘。
+            let dir_is_regular = std::fs::symlink_metadata(&dir)
+                .map(|meta| !meta.file_type().is_symlink())
+                .unwrap_or(false);
+            if dir_is_regular {
+                super::platform::harden_dir_owner_only(&dir);
+            }
             // 数量上限在写入处也生效：此前只在读取侧截断，目录塞满后新登记仍会
             // 成功、并把排序靠后的既有记录挤出可见范围（第七轮评审 P3）。
-            let existing = std::fs::read_dir(&dir)
-                .map_err(|error| format!("注册表目录读取失败：{error}"))?
-                .filter_map(|entry| entry.ok())
-                .filter(|entry| {
-                    entry.path().extension().and_then(|ext| ext.to_str()) == Some("json")
-                })
-                .count();
-            if existing >= MAX_REGISTRY_FILES {
-                return Err(format!(
-                    "注册表已满（上限 {MAX_REGISTRY_FILES} 条），请先移除不需要的模型"
-                ));
-            }
+            ensure_registry_has_capacity(&dir)?;
             // 同 kind 同模型身份查重（二十一轮评审 P2）：注册表不强制 name 唯一，
             // 两条同身份记录会让前端 armed/busy 键碰撞（一次 arm 打开两个确认
             // 面板）；读取端对存量重复只告警不吞，这里对新登记直接拒绝。
@@ -702,6 +705,23 @@ fn validate_http_url(raw: &str) -> Result<(), String> {
 fn random_record_id() -> String {
     let uuid = uuid::Uuid::new_v4().simple().to_string();
     format!("m-{}", &uuid[..8])
+}
+
+/// 写入侧数量上限（纯 IO，测试直打，round-22 评审 P3 补钉）：目录塞满后新登记
+/// 必须在写入口拒绝——此前该臂零覆盖，删掉比较或放行超额登记全套测试照绿，
+/// 第 257 条会登记成功却在读取侧被截断成 UI 不可见的隐形记录。
+fn ensure_registry_has_capacity(dir: &Path) -> Result<(), String> {
+    let existing = std::fs::read_dir(dir)
+        .map_err(|error| format!("注册表目录读取失败：{error}"))?
+        .filter_map(|entry| entry.ok())
+        .filter(|entry| entry.path().extension().and_then(|ext| ext.to_str()) == Some("json"))
+        .count();
+    if existing >= MAX_REGISTRY_FILES {
+        return Err(format!(
+            "注册表已满（上限 {MAX_REGISTRY_FILES} 条），请先移除不需要的模型"
+        ));
+    }
+    Ok(())
 }
 
 /// 落盘一条新注册记录：生成 id → 序列化 → **不覆盖式发布，id 撞车换新 id 重试
@@ -815,7 +835,10 @@ pub async fn remove_external_model(
     .await
     .map_err(|error| format!("商店边界查询失败：{error}"))?
     .map_err(|error: String| {
-        format!("{error}；为防误删商店管理的模型，本次移除已被拒绝，请稍后重试")
+        // 商店库查询失败（含永久损坏）在"请稍后重试"之外同样给手工删除出路
+        // （round-22 review P3，与命中商店名单的拒绝同一句尾）：永久损坏时
+        // "稍后重试"是死路，记录会从 UI 永远删不掉。
+        format!("{error}；为防误删商店管理的模型，本次移除已被拒绝，请稍后重试{STORE_BOUNDARY_ESCAPE_HINT}")
     })?;
     let (name_hit, ollama_model_hit, weights_hit) = boundary;
     removal_boundary_error(
@@ -1069,7 +1092,7 @@ pub(crate) fn weights_deletion_guard(
     if !target.is_dir() {
         return Err(format!(
             "拒绝删除：权重路径不是目录（{}）",
-            target.display()
+            truncate_path_echo(&target.to_string_lossy())
         ));
     }
     // 签名复查（十九轮评审 P1）：上面的签名臂按**原始**路径分量判定，而
@@ -1160,12 +1183,21 @@ fn load_record_for_removal(
     let direct = dir.join(format!("{id}.json"));
     // 直取命中损坏文件时把原样 Err 往上抛会让用户面对一句 JSON 报错而不知所措
     // ——fail-closed 是对的（无法核对确认名/权重路径就绝不能删），但报错要给出
-    // 可执行的出路（第七轮评审 P3）。
+    // 可执行的出路（第七轮评审 P3）。IO 读取失败（EACCES 等）≠ 内容损坏：
+    // 一律称"损坏"会把用户引向检查 JSON 的死路（round-22 review P3），按成因
+    // 分叉措辞，出路相同（手工删除该文件）。
     let direct_record = read_record(&direct).map_err(|error| {
-        format!(
-            "注册表记录损坏，为防误删已拒绝移除（{}）：{error}；请确认后手工删除该文件",
-            direct.display()
-        )
+        if error.starts_with("文件读取失败") {
+            format!(
+                "注册表记录无法读取（权限异常？），为防误删已拒绝移除（{}）：{error}；请恢复可读后重试，或手工删除该文件",
+                direct.display()
+            )
+        } else {
+            format!(
+                "注册表记录损坏，为防误删已拒绝移除（{}）：{error}；请确认后手工删除该文件",
+                direct.display()
+            )
+        }
     })?;
     if let Some(record) = direct_record {
         // 直取也要求内容 id 对得上（容忍存量空 id）：`a.json` 内容 id 是 `m-2`
@@ -1175,8 +1207,18 @@ fn load_record_for_removal(
             return Ok(Some((record, direct)));
         }
     }
-    let Ok(entries) = std::fs::read_dir(dir) else {
-        return Ok(None);
+    let entries = match std::fs::read_dir(dir) {
+        Ok(entries) => entries,
+        // 目录读不了（权限/挂载异常）≠ 记录不存在：折叠成 Ok(None) 会报"可能
+        // 已经被移除，请刷新后重试"，把用户引向无解的重试死路（round-22 review
+        // P3）。fail-closed 不变——无法核对确认名/权重路径就绝不能删——但成因
+        // 如实、出路给出。
+        Err(error) => {
+            return Err(format!(
+                "注册表目录无法读取，为防误删已拒绝移除（{}）：{error}；请恢复目录可读后重试，或手工删除该记录文件",
+                dir.display()
+            ));
+        }
     };
     let mut paths: Vec<PathBuf> = entries
         .filter_map(|entry| entry.ok())
@@ -1339,7 +1381,16 @@ pub(crate) fn read_registry(dir: &Path) -> (Vec<ExternalModel>, Vec<String>) {
     // 权限调用失败也不影响读取本身。硬收敛必须排在截断**之前**、覆盖全部发现
     // 的 .json 文件（第九轮评审 P3：原先只收敛截断后保留的条目，被
     // MAX_REGISTRY_FILES 挤出的文件永远得不到收敛）。
-    super::platform::harden_dir_owner_only(dir);
+    // 目录本身与下方文件条目同一纪律（round-22 review P2）：harden 的
+    // set_permissions 跟随符号链接，注册表目录被换成指向用户其他目录的链接时，
+    // 每次扫描都会把**目标目录** chmod 成 0700（group/other 位被无声收窄）。
+    // symlink_metadata 不跟随——是链接就跳过收敛（记录读取照常跟随）。
+    let dir_is_regular = std::fs::symlink_metadata(dir)
+        .map(|meta| !meta.file_type().is_symlink())
+        .unwrap_or(false);
+    if dir_is_regular {
+        super::platform::harden_dir_owner_only(dir);
+    }
     for path in &paths {
         // 符号链接条目跳过收敛：harden 的 set_permissions 跟随链接，会把链接
         // **目标**（用户自己的任意文件/目录）chmod 成 0600——目录目标会因此
@@ -1566,14 +1617,26 @@ fn interpret_ollama_delete_status(status: u16) -> Result<(), String> {
     Err(format!("服务响应异常（HTTP {status}）"))
 }
 
+/// 删除请求的构造（纯函数，测试直打，round-22 评审 P3）：此前 DELETE 方法、
+/// `/api/delete` 路径、`{"name": model}` 请求体与 30s 预算全部零覆盖——改方法、
+/// 改端点、把预算退回探测的 1.5s 都会让全套测试照绿，删除失败只会以"可手动
+/// 处理"的警告收场而不惊动任何人。
+fn ollama_delete_request(
+    client: &reqwest::Client,
+    base: &str,
+    model: &str,
+) -> reqwest::RequestBuilder {
+    client
+        .delete(format!("{base}/api/delete"))
+        .json(&serde_json::json!({ "name": model }))
+        .timeout(OLLAMA_DELETE_TIMEOUT)
+}
+
 /// Ollama 删除：`DELETE /api/delete {"name": model}`。
 async fn ollama_delete(model: &str) -> Result<(), String> {
     let base = super::ollama_base().await;
     let client = probe_client().ok_or_else(|| "HTTP 客户端初始化失败".to_string())?;
-    let response = client
-        .delete(format!("{base}/api/delete"))
-        .json(&serde_json::json!({ "name": model }))
-        .timeout(OLLAMA_DELETE_TIMEOUT)
+    let response = ollama_delete_request(&client, &base, model)
         .send()
         .await
         .map_err(human_probe_error)?;
@@ -2418,6 +2481,37 @@ mod tests {
         assert!(error.contains("过长"), "unexpected error: {error}");
     }
 
+    // round-22 评审 P3：控制字符校验此前只覆盖 name——换行的 model 标识会流进
+    // 身份查重告警与 UI 行展示。校验发生在商店查询 spawn 之前，无需临时 HOME。
+    // base_url 臂不再单测：trim + WHATWG 解析会先剥掉 \t\n\r，同一拒绝臂保留作
+    // 纵深（其余控制字符大多被 validate_http_url 先行拒绝）。
+    #[tokio::test]
+    async fn register_rejects_control_chars_in_optional_fields() {
+        let base = "http://127.0.0.1:8080/v1".to_string();
+        let error = register_external_model(
+            "ctrl-test".to_string(),
+            "openai_endpoint".to_string(),
+            Some(base.clone()),
+            Some("qwen3\n:8b".to_string()),
+            None,
+        )
+        .await
+        .expect_err("model control chars must be rejected");
+        assert!(error.contains("控制字符"), "unexpected error: {error}");
+        let error = register_external_model(
+            "ctrl-test".to_string(),
+            "llamacpp".to_string(),
+            Some(base),
+            None,
+            // 首尾控制字符会被 normalize_optional 的 trim 先剥掉：用内嵌换行
+            // 直打控制字符臂本身。
+            Some("/home/u/we\nights/xx".to_string()),
+        )
+        .await
+        .expect_err("weights_path control chars must be rejected");
+        assert!(error.contains("控制字符"), "unexpected error: {error}");
+    }
+
     #[tokio::test]
     async fn register_rejects_ollama_records_with_weights_path() {
         // Ollama 权重由守护进程统一管理（~/.ollama 不在任何保护根内，blobs 目录
@@ -2846,5 +2940,51 @@ mod tests {
         let error = removal_boundary_error(&long_name, "mismatch", false, None, None).unwrap_err();
         assert!(error.contains(&"长".repeat(32)));
         assert!(!error.contains(&"长".repeat(33)), "echo must be truncated");
+    }
+
+    // round-22 评审 P3：64 字节边界无钉——`<= 64` 放宽成 `<= 65` 全套照绿。
+    #[test]
+    fn is_safe_id_boundary_at_64_bytes() {
+        assert!(is_safe_id(&"a".repeat(64)), "64 bytes must stay valid");
+        assert!(!is_safe_id(&"a".repeat(65)), "65 bytes must be rejected");
+        assert!(!is_safe_id(""));
+    }
+
+    // round-22 评审 P3：写入侧数量上限此前零覆盖（读侧截断有钉，写侧拒绝臂
+    // 没有）——删掉比较或放行超额登记全套照绿，第 257 条会成为读取侧不可见的
+    // 隐形记录。恰好 256 拒、255 放，钉死等值边界。
+    #[test]
+    fn ensure_registry_has_capacity_rejects_at_the_cap() {
+        let dir = TempDir::new("capacity");
+        for index in 0..255 {
+            std::fs::write(dir.path().join(format!("m-fill{index:03}.json")), "{}")
+                .expect("write filler record");
+        }
+        ensure_registry_has_capacity(dir.path()).expect("255 records must leave room");
+        std::fs::write(dir.path().join("m-full.json"), "{}").expect("write 256th record");
+        let error = ensure_registry_has_capacity(dir.path()).unwrap_err();
+        assert!(error.contains("注册表已满"), "unexpected error: {error}");
+    }
+
+    // round-22 评审 P3：删除接线（方法/路径/请求体/预算）此前零覆盖。
+    #[test]
+    fn ollama_delete_request_pins_method_path_body_and_budget() {
+        let client = reqwest::Client::new();
+        let request = ollama_delete_request(&client, "http://127.0.0.1:11434", "qwen3:8b")
+            .build()
+            .expect("build request");
+        assert_eq!(request.method(), reqwest::Method::DELETE);
+        assert_eq!(request.url().as_str(), "http://127.0.0.1:11434/api/delete");
+        let body = request
+            .body()
+            .and_then(reqwest::Body::as_bytes)
+            .expect("json body");
+        let parsed: serde_json::Value = serde_json::from_slice(body).expect("parse body");
+        assert_eq!(parsed, serde_json::json!({ "name": "qwen3:8b" }));
+        assert_eq!(
+            request.timeout(),
+            Some(&OLLAMA_DELETE_TIMEOUT),
+            "delete must keep its dedicated 30s budget"
+        );
     }
 }

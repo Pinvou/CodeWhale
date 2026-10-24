@@ -174,10 +174,10 @@ pub fn nvidia_smi_candidates() -> Vec<&'static str> {
     Vec::new()
 }
 
-/// 设备管理只在 MegaCube（Linux）启用；这里只保证接口完整，裸名即可。
-pub fn docker_candidates() -> Vec<&'static str> {
-    vec!["docker"]
-}
+// docker_candidates 不在本文件定义：macos/mod.rs 的 `pub use super::unsupported::*`
+// glob 继承 unsupported 桩（同为裸名 "docker"）。此前这里有一份逐字相同的副本但
+// 未入 macos/mod.rs 的显式清单——死代码，且与 loongarch 轮暴露的"新增 platform/os
+// 接口漏再导出"是同一形态的隐患（round-22 评审 P3），删副本保单一来源。
 
 /// `command_exists` is spawn-faithful here even though it also scans
 /// `extra_lookup_dirs()`: `lib.rs` `ensure_release_env` prepends every one of those
