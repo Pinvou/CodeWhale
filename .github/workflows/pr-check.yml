@@ -239,6 +239,9 @@ jobs:
             rust_code:
               - '**/*.rs'
               - 'pinvou3-app/src-tauri/src/features/updater/platform/windows_handoff.cs'
+              # Shared Linux memory preparation must reach real dependency
+              # installation and compilation when edited on its own.
+              - 'scripts/ci-memory-setup.sh'
               - '**/Cargo.toml'
               - '**/Cargo.lock'
               - '**/build.rs'
@@ -259,6 +262,7 @@ jobs:
             # isolated leaf-feature boundaries are explicitly low risk; changes
             # to their registration or app command surface still run full tests.
             rust_full:
+              - 'scripts/ci-memory-setup.sh'
               # Round-1 fix wave (PR #715 review): the loong64 cross-pipeline
               # scripts are build inputs of the rust legs — the pr-check
               # rust-loongarch64-check leg executes the toolchain/sysroot
@@ -308,6 +312,7 @@ jobs:
               - '!pinvou3-app/src-tauri/src/features/personas/**'
               - '!pinvou3-app/src-tauri/src/features/pet/**'
             cli_rust:
+              - 'scripts/ci-memory-setup.sh'
               - 'pinvou-cli/**/*.rs'
               - 'pinvou-cli/**/Cargo.toml'
               - 'pinvou-cli/**/Cargo.lock'

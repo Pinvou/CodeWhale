@@ -143,7 +143,11 @@ layers: zram (on by default, sized to 2x RAM with a zstd compressor, pool
 capped at 70% of RAM), a mandatory 8 GiB `/mnt/swapfile` as the unbounded
 overflow (on the shared single disk this costs 8 GiB of build disk; it is
 skipped only when /mnt is RAM-backed or has too little free space), then
-zswap and the image swap as fallbacks.
+zswap and the image swap as fallbacks. Only image-provided zram modules are
+loaded; if the module is missing or cannot load, the disk-swap target rises
+to 16 GiB (subject to the same free-space cap). Memory setup never installs
+kernel packages: its hard timeout must not interrupt dpkg and break later
+required system-dependency installation.
 All Linux jobs pin the release runner image (`ubuntu-22.04` /
 `ubuntu-22.04-arm`): release binaries link the build machine's glibc, so
 tests must run on the same system. The image is upgraded repo-wide in one
