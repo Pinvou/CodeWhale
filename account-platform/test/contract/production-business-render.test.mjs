@@ -173,7 +173,16 @@ test('actual current models Compose keeps migrator credentials out of runtime mo
 test('actual production Helm migration hooks bind resolved Secret keys and backup evidence', helm, async t => {
   await fixtureCase(t, 'helm', 'models', 'all current workloads and three original hooks validated', f => {
     currentWaiverBindings(f);
-    assert.equal(checkProductionBusiness(f.render, f.inventory).workloads_checked, 15);
+    // Ordinary Token events are retired. Keep the two remaining relays and
+    // every runtime, trust preparation, TLS sidecar and migration container.
+    const expectedContainers = ['account-service', 'billing-service', 'identity-service',
+      'token-gateway', 'token-portal', 'new-api', 'newapi-tls-data', 'newapi-tls-status-only',
+      'prepare-keycloak-secret', 'event-relay', 'event-relay', 'migrate', 'migrate', 'migrate'];
+    const rendered = workloads(f.render, f.render.secrets);
+    assert.deepEqual(rendered.map(w => w.service.name).sort(), expectedContainers.slice().sort());
+    assert.deepEqual(rendered.filter(w => w.service.name === 'event-relay').map(w =>
+      w.id.match(/-([a-z]+)-event-relay\/container\/event-relay$/)?.[1]).sort(), ['account', 'billing']);
+    assert.equal(checkProductionBusiness(f.render, f.inventory).workloads_checked, expectedContainers.length);
     assert.equal(checkBusinessMigrations(f.render, f.inventory).domains_checked, 3);
   });
   for (const [label, value] of [['missing', undefined], ['empty', '']])
