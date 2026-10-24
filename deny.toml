@@ -13,6 +13,13 @@ unsound = "all"
 ignore = [
     "RUSTSEC-2025-0141",  # bincode unmaintained - transitive via syntect, no safe upgrade (syntect 5.3.0 is latest)
     "RUSTSEC-2024-0320",  # yaml-rust unmaintained - transitive via syntect, no safe upgrade (syntect 5.3.0 is latest)
+    # zvariant / zbus_names / zvariant_derive unmaintained as standalone crates
+    # (merged into zbus 6 as modules). Arrive via secret-service 5 -> zbus 5,
+    # needed for keyring 4's zbus Secret Service store; no safe upgrade until
+    # secret-service depends on zbus 6.
+    "RUSTSEC-2026-0370",
+    "RUSTSEC-2026-0371",
+    "RUSTSEC-2026-0372",
 ]
 
 [bans]
@@ -32,7 +39,7 @@ wildcards = "deny"
 # Explicitly allow the surviving duplicates so `cargo deny` does not warn
 # on them again, but will warn on any *new* duplicate crate.
 skip = [
-    { name = "reqwest", version = "0.12.28" },
+    # sha2 0.10 survives via oauth2 5.0.0 (requires it non-optionally).
     { name = "sha2", version = "0.10.9" },
     { name = "thiserror", version = "1.0.69" },
     { name = "thiserror-impl", version = "1.0.69" },
@@ -41,21 +48,14 @@ skip = [
     { name = "toml_edit", version = "0.22.27" },
     { name = "winnow", version = "0.7.14" },
     { name = "serde_spanned", version = "0.6.9" },
-    { name = "core-foundation", version = "0.9.4" },
     # dirs 6 stays for shellexpand 3's tilde expansion (tui); the workspace is on 7.
     { name = "dirs", version = "6.0.0" },
     { name = "fancy-regex", version = "0.16.2" },
     { name = "itertools", version = "0.13.0" },
-    { name = "security-framework", version = "2.11.1" },
+    # miniz_oxide 0.8 stays for png 0.18 (via image/arboard); flate2 1.1.10 moved to 0.9.
+    { name = "miniz_oxide", version = "0.8.9" },
+    # windows-sys 0.42 survives via rio-vt's corcovado chain (dev-only, Windows).
     { name = "windows-sys" },
-    { name = "windows-targets" },
-    { name = "windows_aarch64_gnullvm" },
-    { name = "windows_aarch64_msvc" },
-    { name = "windows_i686_gnu" },
-    { name = "windows_i686_msvc" },
-    { name = "windows_x86_64_gnu" },
-    { name = "windows_x86_64_gnullvm" },
-    { name = "windows_x86_64_msvc" },
 ]
 # For crates where the version is not the discriminator, use skip-tree to
 # allow the duplicate tree regardless of version.
