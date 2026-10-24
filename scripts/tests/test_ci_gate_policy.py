@@ -1680,11 +1680,11 @@ class CiGatePolicyTests(unittest.TestCase):
 
     def test_cargo_deny_gate_steps_are_pinned(self):
         # Round-12 review: the deny gate (advisories/yanked) is the leg most
-        # exposed to ecosystem drift (zip yank + RUSTSEC-2026-0367/0368/0369
+        # exposed to ecosystem drift (the 2026-10 zip yank + RUSTSEC wave
         # landed the day after this branch's last green run), yet its four
         # steps carried no pins — a version drift or a deleted check step
         # would pass every gate-policy test. Pin both legs' install (fixed
-        # 0.20.2: the PackageSpec/id ignore routing and
+        # 0.20.2: the advisory-ignore routing and
         # unused-ignored-advisory semantics are version-sensitive) and the
         # check command (must keep `advisories` and target the shared
         # deny.toml), on executable lines only.
@@ -1763,10 +1763,9 @@ class CiGatePolicyTests(unittest.TestCase):
 
     def test_deny_toml_keeps_strict_yanked_deny(self):
         # Round-13 review: the whole zip yank episode (rounds 8-12) made
-        # `yanked = "deny"` load-bearing — the round-9 PackageSpec exception
-        # is gone, so ANY future yank of the pinned 8.6.0 (or anything else)
-        # must fail CI. Nothing machine-checked the value: downgrading to
-        # "warn" passed every gate-policy test, the guard suites, and
+        # `yanked = "deny"` load-bearing — ANY future yank of any pinned
+        # crate must fail CI. Nothing machine-checked the value: downgrading
+        # to "warn" passed every gate-policy test, the guard suites, and
         # cargo-deny itself. Pin it as a non-comment line of the shared
         # config.
         deny_toml = (
@@ -1781,8 +1780,7 @@ class CiGatePolicyTests(unittest.TestCase):
             'yanked = "deny"',
             deny_code,
             "deny.toml must keep yanked = \"deny\" on an executable line — "
-            "the zip 8.6.0 story only works with the strict value, and a "
-            "silent downgrade to warn reopens the ecosystem-drift hole",
+            "a silent downgrade to warn reopens the ecosystem-drift hole",
         )
         self.assertNotIn(
             'yanked =',
@@ -1794,12 +1792,13 @@ class CiGatePolicyTests(unittest.TestCase):
 
     def test_deny_toml_unused_ignore_self_enforcement_pinned(self):
         # Round-20 review: `unused-ignored-advisory = "deny"` is the field
-        # that makes an expired exception LOUD — once upstream resolves the
-        # advisories the three id-level ignores cover, cargo-deny itself
-        # fails until they are removed. Dropping the field passed every
-        # gate-policy test (only comments mentioned it), so a future
-        # expired exception would sit green forever. Pin it on an
-        # executable line next to the yanked value.
+        # that makes an expired exception LOUD — once the graph no longer
+        # matches an id-level ignore (e.g. the RUSTSEC-2026-0387
+        # crypto-bigint exception after an elliptic-curve ecosystem bump),
+        # cargo-deny itself fails until the stale entry is removed.
+        # Dropping the field passed every gate-policy test (only comments
+        # mentioned it), so a future expired exception would sit green
+        # forever. Pin it on an executable line next to the yanked value.
         deny_toml = (
             ROOT / "pinvou3-app/src-tauri/deny.toml"
         ).read_text(encoding="utf-8")
@@ -1817,13 +1816,14 @@ class CiGatePolicyTests(unittest.TestCase):
         )
 
     def test_zip_lockfiles_sit_inside_the_assessed_advisory_window(self):
-        # Round-20 review: the RUSTSEC id-level ignores in deny.toml have no
-        # version dimension — they silence those advisories for ANY zip
-        # version, so an in-band lock drift (8.6.0 → 8.7.0, or a downgrade)
-        # passes cargo-deny without the "Reassess on bump" the ignore
-        # reasons promise. Pin every repo lock's zip to the exact assessed
-        # version: any bump fails HERE first and forces the reassessment
-        # and the ignore update to land in the same change.
+        # Round-20 review, re-baselined in round-22: deny.toml retired the
+        # zip id-level advisory ignores on the premise that the graph
+        # converged on a single zip 9.0.5 (calamine 0.37) — a downgrade
+        # below zip 9 would re-arm RUSTSEC-2026-0367/0368/0369, and any
+        # other in-band drift must be reassessed against the deny posture
+        # in the same change. Nothing else pins the version: pin every repo
+        # lock's zip to the exact assessed baseline so a bump fails HERE
+        # first.
         zip_locks = []
         for lock in sorted(ROOT.glob("**/Cargo.lock")):
             if "CodeWhale" in str(lock):
@@ -1837,18 +1837,18 @@ class CiGatePolicyTests(unittest.TestCase):
         self.assertTrue(
             zip_locks,
             "expected at least one repo lock to carry zip — if the "
-            "dependency is gone, remove the advisory ignores and this pin "
-            "together",
+            "dependency is gone, remove this pin",
         )
         for lock, versions in zip_locks:
             for version in versions:
                 self.assertEqual(
                     version,
-                    "8.6.0",
-                    f"{lock}: zip {version} is outside the assessed 8.6.0 "
-                    "window — the deny.toml advisory ignores have no "
-                    "version dimension, so reassess them for the new "
-                    "version and update this pin in the same change",
+                    "9.0.5",
+                    f"{lock}: zip {version} is outside the assessed 9.0.5 "
+                    "baseline — deny.toml retired the zip advisory ignores "
+                    "on the single-zip-9.0.5 premise, so reassess the deny "
+                    "posture for the new version and update this pin in the "
+                    "same change",
                 )
 
     def test_rust_lint_disk_step_is_draft_gated_and_precedes_zram(self):
