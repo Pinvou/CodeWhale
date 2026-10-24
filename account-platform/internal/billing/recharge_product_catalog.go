@@ -175,6 +175,9 @@ type RechargeProductCatalogRepository interface {
 	EvidenceIDForVerification(context.Context, uuid.UUID, uuid.UUID) (uuid.UUID, error)
 	CompleteProductAdmissionVerification(context.Context, uuid.UUID, string, string, string, time.Time) (uuid.UUID, error)
 	TransitionRechargeProduct(context.Context, uuid.UUID, int64, string, *uuid.UUID) (RechargeProductCatalogItem, error)
+	ExecuteRechargeProductTransition(context.Context, RechargeProductTransitionCommand) (RechargeProductCatalogItem, error)
+	ExecuteProductAdmissionVerification(context.Context, RechargeProductAdmissionCommand) (ProductAdmissionVerification, error)
+	ExecuteProductAdmissionRevoke(context.Context, RechargeProductAdmissionCommand) (RechargeProductAdmissionRevokeResult, error)
 	ExecuteRechargeProductDraftUpdate(context.Context, RechargeProductDraftCommand) (RechargeProductCatalogItem, error)
 	ExecuteRechargeProductDisplayNamesUpdate(context.Context, RechargeProductDisplayNamesCommand) (RechargeProductCatalogItem, error)
 	RevokeProductAdmission(context.Context, uuid.UUID, string, string, string) error
@@ -758,7 +761,18 @@ func (r *PostgresRepository) StartProductAdmissionVerification(ctx context.Conte
 		return ProductAdmissionVerification{}, false, err
 	}
 	defer tx.Rollback(ctx)
-	if err = lockTransactionKey(ctx, tx, "catalog.admission", catalogItemID.String()); err != nil {
+	item, created, err := r.startProductAdmissionVerification(ctx, tx, catalogItemID, requestedBy, retryOf)
+	if err != nil {
+		return ProductAdmissionVerification{}, false, err
+	}
+	if err = tx.Commit(ctx); err != nil {
+		return ProductAdmissionVerification{}, false, err
+	}
+	return item, created, nil
+}
+
+func (r *PostgresRepository) startProductAdmissionVerification(ctx context.Context, tx pgx.Tx, catalogItemID, requestedBy uuid.UUID, retryOf *uuid.UUID) (ProductAdmissionVerification, bool, error) {
+	if err := lockTransactionKey(ctx, tx, "catalog.admission", catalogItemID.String()); err != nil {
 		return ProductAdmissionVerification{}, false, err
 	}
 	item, err := rechargeProductCatalogItem(ctx, tx, catalogItemID)
@@ -775,7 +789,7 @@ func (r *PostgresRepository) StartProductAdmissionVerification(ctx context.Conte
 	err = tx.QueryRow(ctx, `SELECT verification_id,catalog_item_id,retry_of,publish_fingerprint,status,failure_code,requested_at,completed_at FROM product_admission_verifications WHERE catalog_item_id=$1 AND publish_fingerprint=$2 AND status='PENDING'`, catalogItemID, fingerprint).Scan(&existing.VerificationID, &existing.CatalogItemID, &existing.RetryOf, &existing.PublishFingerprint, &existing.Status, &existing.FailureCode, &existing.RequestedAt, &existing.CompletedAt)
 	if err == nil {
 		existing.Current = true
-		return existing, false, tx.Commit(ctx)
+		return existing, false, nil
 	}
 	if !errors.Is(err, pgx.ErrNoRows) {
 		return existing, false, err
@@ -798,7 +812,7 @@ func (r *PostgresRepository) StartProductAdmissionVerification(ctx context.Conte
 	if err != nil {
 		return ProductAdmissionVerification{}, false, err
 	}
-	return verification, true, tx.Commit(ctx)
+	return verification, true, nil
 }
 
 func (r *PostgresRepository) CompleteProductAdmissionVerification(ctx context.Context, verificationID uuid.UUID, issuer, method, source string, expiresAt time.Time) (uuid.UUID, error) {
@@ -872,12 +886,25 @@ func (r *PostgresRepository) CompleteProductAdmissionVerification(ctx context.Co
 }
 
 func (r *PostgresRepository) TransitionRechargeProduct(ctx context.Context, catalogItemID uuid.UUID, expectedVersion int64, target string, evidenceID *uuid.UUID) (RechargeProductCatalogItem, error) {
-	target = strings.ToUpper(strings.TrimSpace(target))
 	tx, err := r.pool.Begin(ctx)
 	if err != nil {
 		return RechargeProductCatalogItem{}, err
 	}
 	defer tx.Rollback(ctx)
+	item, err := r.transitionRechargeProduct(ctx, tx, catalogItemID, expectedVersion, target, evidenceID)
+	if err != nil {
+		return RechargeProductCatalogItem{}, err
+	}
+	if err = tx.Commit(ctx); err != nil {
+		return RechargeProductCatalogItem{}, err
+	}
+	return item, nil
+}
+
+// transitionRechargeProduct performs the existing lifecycle/admission work in
+// its caller's transaction. HTTP commands commit it with their receipt/audit.
+func (r *PostgresRepository) transitionRechargeProduct(ctx context.Context, tx pgx.Tx, catalogItemID uuid.UUID, expectedVersion int64, target string, evidenceID *uuid.UUID) (RechargeProductCatalogItem, error) {
+	target = strings.ToUpper(strings.TrimSpace(target))
 	if target == "ON_SALE" {
 		// Serialize admission checks with revocation before taking the catalog
 		// row lock, matching the revoker's lock order.
@@ -888,7 +915,7 @@ func (r *PostgresRepository) TransitionRechargeProduct(ctx context.Context, cata
 	var productID, current string
 	var version int64
 	var everPublished bool
-	err = tx.QueryRow(ctx, `SELECT product_id,lifecycle_status,version,ever_published FROM recharge_product_catalog_items WHERE catalog_item_id=$1 FOR UPDATE`, catalogItemID).Scan(&productID, &current, &version, &everPublished)
+	err := tx.QueryRow(ctx, `SELECT product_id,lifecycle_status,version,ever_published FROM recharge_product_catalog_items WHERE catalog_item_id=$1 FOR UPDATE`, catalogItemID).Scan(&productID, &current, &version, &everPublished)
 	if err != nil {
 		return RechargeProductCatalogItem{}, err
 	}
@@ -907,12 +934,12 @@ func (r *PostgresRepository) TransitionRechargeProduct(ctx context.Context, cata
 		if err != nil || !unexpired {
 			return RechargeProductCatalogItem{}, ErrConflict
 		}
-		item, loadErr := r.RechargeProductCatalogItem(ctx, catalogItemID)
+		item, loadErr := rechargeProductCatalogItem(ctx, tx, catalogItemID)
 		if loadErr != nil {
 			return RechargeProductCatalogItem{}, loadErr
 		}
 		var product Product
-		loadErr = r.pool.QueryRow(ctx, `SELECT product_id,base_points,bonus_points,validity_days,invoice_product_name FROM recharge_products WHERE product_id=$1`, productID).Scan(&product.ProductID, &product.BasePoints, &product.BonusPoints, &product.ValidityDays, &product.InvoiceProductName)
+		loadErr = tx.QueryRow(ctx, `SELECT product_id,base_points,bonus_points,validity_days,invoice_product_name FROM recharge_products WHERE product_id=$1`, productID).Scan(&product.ProductID, &product.BasePoints, &product.BonusPoints, &product.ValidityDays, &product.InvoiceProductName)
 		if loadErr != nil || catalogFingerprint(item, product) != fingerprint {
 			return RechargeProductCatalogItem{}, ErrConflict
 		}
@@ -927,7 +954,9 @@ func (r *PostgresRepository) TransitionRechargeProduct(ctx context.Context, cata
 		if err != nil {
 			return RechargeProductCatalogItem{}, err
 		}
-		_, _ = tx.Exec(ctx, `UPDATE product_admission_bindings SET effective_to=$2 WHERE catalog_item_id=$1 AND effective_to IS NULL`, catalogItemID, now)
+		if _, err = tx.Exec(ctx, `UPDATE product_admission_bindings SET effective_to=$2 WHERE catalog_item_id=$1 AND effective_to IS NULL`, catalogItemID, now); err != nil {
+			return RechargeProductCatalogItem{}, err
+		}
 		var admissionVersion int64
 		err = tx.QueryRow(ctx, `UPDATE recharge_product_catalog_items SET admission_version=admission_version+1 WHERE catalog_item_id=$1 RETURNING admission_version`, catalogItemID).Scan(&admissionVersion)
 		if err != nil {
@@ -959,16 +988,11 @@ func (r *PostgresRepository) TransitionRechargeProduct(ctx context.Context, cata
 	if err != nil {
 		return RechargeProductCatalogItem{}, fmt.Errorf("transition recharge product: %w", err)
 	}
-	if err = tx.Commit(ctx); err != nil {
-		return RechargeProductCatalogItem{}, err
-	}
-	return r.RechargeProductCatalogItem(ctx, catalogItemID)
+	return rechargeProductCatalogItem(ctx, tx, catalogItemID)
 }
 
 func (r *PostgresRepository) RevokeProductAdmission(ctx context.Context, evidenceID uuid.UUID, sourceType, actor, reason string) error {
-	sourceType = strings.ToUpper(strings.TrimSpace(sourceType))
-	actor = strings.TrimSpace(actor)
-	reason = strings.TrimSpace(reason)
+	sourceType, actor, reason = strings.ToUpper(strings.TrimSpace(sourceType)), strings.TrimSpace(actor), strings.TrimSpace(reason)
 	if (sourceType != "HUMAN" && sourceType != "PROVIDER") || actor == "" || reason == "" {
 		return ErrConflict
 	}
@@ -977,8 +1001,21 @@ func (r *PostgresRepository) RevokeProductAdmission(ctx context.Context, evidenc
 		return err
 	}
 	defer tx.Rollback(ctx)
+	if err = r.revokeProductAdmission(ctx, tx, evidenceID, sourceType, actor, reason); err != nil {
+		return err
+	}
+	return tx.Commit(ctx)
+}
+
+func (r *PostgresRepository) revokeProductAdmission(ctx context.Context, tx pgx.Tx, evidenceID uuid.UUID, sourceType, actor, reason string) error {
+	sourceType = strings.ToUpper(strings.TrimSpace(sourceType))
+	actor = strings.TrimSpace(actor)
+	reason = strings.TrimSpace(reason)
+	if (sourceType != "HUMAN" && sourceType != "PROVIDER") || actor == "" || reason == "" {
+		return ErrConflict
+	}
 	var catalogID uuid.UUID
-	err = tx.QueryRow(ctx, `SELECT catalog_item_id FROM product_admission_evidence WHERE evidence_id=$1`, evidenceID).Scan(&catalogID)
+	err := tx.QueryRow(ctx, `SELECT catalog_item_id FROM product_admission_evidence WHERE evidence_id=$1`, evidenceID).Scan(&catalogID)
 	if err != nil {
 		return err
 	}
@@ -1011,7 +1048,7 @@ ON CONFLICT(provider_id,provider_version,product_id) DO UPDATE SET new_orders_en
 	if err != nil {
 		return err
 	}
-	return tx.Commit(ctx)
+	return nil
 }
 
 func (r *PostgresRepository) ExpireProductAdmissions(ctx context.Context, limit int) (int, error) {

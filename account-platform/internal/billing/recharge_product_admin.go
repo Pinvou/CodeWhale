@@ -70,11 +70,6 @@ func (s *Service) replayCatalogCommand(w http.ResponseWriter, r *http.Request, h
 	return true, err
 }
 
-func (s *Service) saveCatalogCommand(r *http.Request, command, hash, actor, reason string, catalogID *uuid.UUID, expected int64, before, after *int64, status int, response any) error {
-	body, _ := json.Marshal(response)
-	return s.catalog.RecordRechargeProductCommand(r.Context(), strings.TrimSpace(r.Header.Get("Idempotency-Key")), command, hash, catalogID, actor, reason, expected, before, after, status, body)
-}
-
 func parseCatalogCursor(value string) (*time.Time, *uuid.UUID, error) {
 	if strings.TrimSpace(value) == "" {
 		return nil, nil, nil
@@ -372,14 +367,11 @@ func (s *Service) runCatalogTransition(w http.ResponseWriter, r *http.Request, t
 		}
 		return
 	}
-	before := body.ExpectedVersion
-	item, err := s.catalog.TransitionRechargeProduct(r.Context(), catalogID, body.ExpectedVersion, target, body.EvidenceID)
+	item, err := s.catalog.ExecuteRechargeProductTransition(r.Context(), RechargeProductTransitionCommand{
+		CatalogItemID: catalogID, ExpectedVersion: body.ExpectedVersion, Target: target, EvidenceID: body.EvidenceID,
+		IdempotencyKey: strings.TrimSpace(r.Header.Get("Idempotency-Key")), RequestHash: hash, Actor: principal.Subject, Reason: body.Reason,
+	})
 	if err != nil {
-		s.writeError(w, r, err)
-		return
-	}
-	after := item.Version
-	if err = s.saveCatalogCommand(r, command, hash, principal.Subject, body.Reason, &catalogID, body.ExpectedVersion, &before, &after, http.StatusOK, item); err != nil {
 		s.writeError(w, r, err)
 		return
 	}
@@ -470,13 +462,8 @@ func (s *Service) startProductAdmissionVerification(w http.ResponseWriter, r *ht
 		s.writeError(w, r, ErrConflict)
 		return
 	}
-	principal, userID, ok := catalogActor(r)
+	principal, _, ok := catalogActor(r)
 	if !ok {
-		s.writeError(w, r, ErrConflict)
-		return
-	}
-	item, err := s.catalog.RechargeProductCatalogItem(r.Context(), catalogID)
-	if err != nil || item.Version != body.ExpectedVersion {
 		s.writeError(w, r, ErrConflict)
 		return
 	}
@@ -490,13 +477,11 @@ func (s *Service) startProductAdmissionVerification(w http.ResponseWriter, r *ht
 		}
 		return
 	}
-	verification, _, err := s.catalog.StartProductAdmissionVerification(r.Context(), catalogID, userID, body.RetryOf)
+	verification, err := s.catalog.ExecuteProductAdmissionVerification(r.Context(), RechargeProductAdmissionCommand{
+		CatalogItemID: catalogID, ExpectedVersion: body.ExpectedVersion, RetryOf: body.RetryOf,
+		IdempotencyKey: strings.TrimSpace(r.Header.Get("Idempotency-Key")), RequestHash: hash, Actor: principal.Subject, Reason: body.Reason,
+	})
 	if err != nil {
-		s.writeError(w, r, err)
-		return
-	}
-	before, after := item.Version, item.Version
-	if err = s.saveCatalogCommand(r, "BILLING_RECHARGE_PRODUCT_ADMISSION_VERIFY", hash, principal.Subject, body.Reason, &catalogID, body.ExpectedVersion, &before, &after, http.StatusAccepted, verification); err != nil {
 		s.writeError(w, r, err)
 		return
 	}
@@ -528,16 +513,6 @@ func (s *Service) adminRevokeProductAdmission(w http.ResponseWriter, r *http.Req
 		s.writeError(w, r, ErrConflict)
 		return
 	}
-	item, err := s.catalog.RechargeProductCatalogItem(r.Context(), catalogID)
-	if err != nil || item.Version != body.ExpectedVersion {
-		s.writeError(w, r, ErrConflict)
-		return
-	}
-	evidenceID, err := s.catalog.EvidenceIDForVerification(r.Context(), catalogID, verificationID)
-	if err != nil {
-		s.writeError(w, r, err)
-		return
-	}
 	hash := catalogResourceRequestHash("BILLING_RECHARGE_PRODUCT_ADMISSION_REVOKE", catalogID, struct {
 		VerificationID uuid.UUID                `json:"verification_id"`
 		Request        catalogTransitionRequest `json:"request"`
@@ -548,13 +523,11 @@ func (s *Service) adminRevokeProductAdmission(w http.ResponseWriter, r *http.Req
 		}
 		return
 	}
-	if err = s.catalog.RevokeProductAdmission(r.Context(), evidenceID, "HUMAN", principal.Subject, body.Reason); err != nil {
-		s.writeError(w, r, err)
-		return
-	}
-	before, after := item.Version, item.Version
-	response := map[string]any{"status": "REVOKED", "evidence_id": evidenceID}
-	if err = s.saveCatalogCommand(r, "BILLING_RECHARGE_PRODUCT_ADMISSION_REVOKE", hash, principal.Subject, body.Reason, &catalogID, body.ExpectedVersion, &before, &after, http.StatusOK, response); err != nil {
+	response, err := s.catalog.ExecuteProductAdmissionRevoke(r.Context(), RechargeProductAdmissionCommand{
+		CatalogItemID: catalogID, ExpectedVersion: body.ExpectedVersion, VerificationID: verificationID,
+		IdempotencyKey: strings.TrimSpace(r.Header.Get("Idempotency-Key")), RequestHash: hash, Actor: principal.Subject, Reason: body.Reason,
+	})
+	if err != nil {
 		s.writeError(w, r, err)
 		return
 	}
