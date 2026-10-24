@@ -39,7 +39,7 @@ const TONE_CLASSES = {
   ready: 'bg-[#007AFF]/10 text-[#0066D6] dark:text-[#64A8FF]',
   progress: 'bg-[#5856D6]/10 text-[#4D4BC4] dark:text-[#9B99FF]',
   success: 'bg-[#34C759]/10 text-[#248A3D] dark:text-[#5DD879]',
-  warning: 'bg-[#FF9F0A]/12 text-[#A65F00] dark:text-[#FFB340]',
+  warning: 'bg-[#FF9F0A]/[0.12] text-[#A65F00] dark:text-[#FFB340]',
   danger: 'bg-[#FF3B30]/10 text-[#C9342C] dark:text-[#FF6961]',
 };
 
