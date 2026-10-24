@@ -65,4 +65,10 @@ state.client=makeClient();
 state.render=()=>root.render(['admin','ent'].includes(mode) ? <AdminPlatformView client={state.client} copy={adminPlatformCopy[language]} language={language} onLanguageChange={()=>{}} /> : <AccountPlatformView client={state.client} copy={accountPlatformCopy[language]} language={language} onLanguageChange={()=>{}} portal />);
 state.switchUser=()=>{state.user=id(8);state.client=makeClient();state.render();};
 state.entitlementIntent=()=>readEntitlementIntent(state.user,'entitlement-correction');
+// These browser-only probes execute in the page fixture, not the Node harness.
+state.entitlementIntentFor=actor=>JSON.parse(sessionStorage.getItem('pinvou.entitlement-correction.intent.v1:'+actor));
+state.denyEntitlementIntentStorage=()=>{
+  const original = Storage.prototype.setItem;
+  Storage.prototype.setItem=function(key,value){if(key.startsWith('pinvou.entitlement-correction.intent.v1:'))throw new Error('Controlled entitlement storage denial');return original.call(this,key,value);};
+};
 state.render();

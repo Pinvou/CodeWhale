@@ -170,14 +170,11 @@ try{
   assert.equal(await page.evaluate(()=>window.installed.entitlementIntent()),null);
   assert.equal(await page.$('textarea'),null);
   assert.equal(await page.evaluate(()=>window.installed.calls.filter(call=>call.url==='/api/admin/approvals/requests'&&call.method==='POST').length),1);
-  assert.deepEqual(await page.evaluate(actor=>JSON.parse(sessionStorage.getItem('pinvou.entitlement-correction.intent.v1:'+actor)),frozen.actor),frozen);
+  assert.deepEqual(await page.evaluate(actor=>window.installed.entitlementIntentFor(actor),frozen.actor),frozen);
  });
  await run('ENT Finance storage denial blocks dispatch before history or draft writes','mode=ent&section=finance',async page=>{
   await openFinanceCorrection(page); await prepareFinanceCorrection(page);
-  await page.evaluate(()=>{
-    const original = Storage.prototype.setItem;
-    Storage.prototype.setItem=function(key,value){if(key.startsWith('pinvou.entitlement-correction.intent.v1:'))throw new Error('Controlled entitlement storage denial');return original.call(this,key,value);};
-  });
+  await page.evaluate(()=>window.installed.denyEntitlementIntentStorage());
   await submitFinanceCorrection(page);
   await page.waitForFunction(()=>document.querySelector('[role="alert"]')?.textContent===window.installed.entitlementCorrectionCopy.zh.recoveryUnavailable);
   assert.equal(await page.evaluate(()=>window.installed.calls.some(call=>call.url.startsWith('/api/admin/approvals/requests'))),false);
