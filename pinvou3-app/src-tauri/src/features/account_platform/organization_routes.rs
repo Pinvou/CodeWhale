@@ -67,6 +67,13 @@ pub(super) fn allowed(area: &str, method: &Method, path: &str, query: Option<&st
                 return query.is_none_or(member_page_query);
             }
         }
+        // Unit Admin directory reads retain their explicit server-owned subtree.
+        // Admit only the existing canonical UUID query on this exact GET route.
+        if let ["", "v1", "organizations", org, "units"] = p.as_slice() {
+            if id(org) && *method == Method::GET {
+                return query.is_none_or(|q| q.strip_prefix("root_unit_id=").is_some_and(id));
+            }
+        }
         if query.is_some() {
             return false;
         }
@@ -318,6 +325,50 @@ mod tests {
                 "{path}"
             );
         }
+    }
+
+    #[test]
+    fn unit_subtree_query_keeps_exact_existing_read_route() {
+        let org = "11111111-1111-4111-8111-111111111111";
+        let unit = "abcdefab-cdef-4abc-8abc-abcdefabcdef";
+        let path = format!("/v1/organizations/{org}/units");
+        let query = format!("root_unit_id={unit}");
+        assert!(allowed("account", &Method::GET, &path, None));
+        assert!(allowed("account", &Method::GET, &path, Some(&query)));
+        assert!(!keyed("account", &Method::GET, &path));
+        for bad in [
+            "".to_string(),
+            "root_unit_id".to_string(),
+            "root_unit_id=".to_string(),
+            "root_unit_id=00000000-0000-0000-0000-000000000000".to_string(),
+            "root_unit_id=invalid".to_string(),
+            format!("root_unit_id={}", unit.to_uppercase()),
+            format!("root_unit_id={}&", unit),
+            format!("root_unit_id={unit}&root_unit_id={unit}"),
+            format!("root_unit_id={unit}&limit=50"),
+            format!("unit_id={unit}"),
+            format!("%72oot_unit_id={unit}"),
+            format!("root_unit_id=%61{}", &unit[1..]),
+        ] {
+            assert!(
+                !allowed("account", &Method::GET, &path, Some(&bad)),
+                "{bad}"
+            );
+        }
+        for method in [Method::POST, Method::PUT, Method::PATCH, Method::DELETE] {
+            assert!(!allowed("account", &method, &path, Some(&query)));
+        }
+        for other in [
+            format!("/v1/organizations/{org}/role-bindings"),
+            format!("/v1/organizations/{org}/members"),
+            format!("/v1/organizations/{org}/units/{unit}/parent"),
+            "/v1/organizations/00000000-0000-0000-0000-000000000000/units".to_string(),
+            "/v1/organizations/ABCDEFAB-CDEF-4ABC-8ABC-ABCDEFABCDEF/units".to_string(),
+        ] {
+            assert!(!allowed("account", &Method::GET, &other, Some(&query)));
+        }
+        assert!(!allowed("token", &Method::GET, &path, Some(&query)));
+        assert!(!allowed("admin", &Method::GET, &path, Some(&query)));
     }
 
     #[test]

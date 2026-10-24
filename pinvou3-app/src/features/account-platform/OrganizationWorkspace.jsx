@@ -5,6 +5,7 @@ import { hasPermission } from './authorization-ui.js';
 import { OrganizationClient, organizationID, organizationUnitIDs, organizationVersion } from './organization-client.js';
 import { useOrganizationMemberPages } from './useOrganizationMemberPages.js';
 import { OrganizationActionForm } from './OrganizationActionForm.jsx';
+import { OrganizationUnitWorkspace } from './OrganizationUnitWorkspace.jsx';
 import { OrganizationFinanceWorkspace } from './OrganizationFinanceWorkspace.jsx';
 import { OrganizationClosedGrantsWorkspace } from './OrganizationClosedGrantsWorkspace.jsx';
 import { OrganizationModelPolicyWorkspace } from './OrganizationModelPolicyWorkspace.jsx';
@@ -49,6 +50,7 @@ export function OrganizationWorkspace({ client, me, language, onChanged }) {
   {can('org.roles.read') && <section><h3>{copy.bindings}</h3><ul>{data.bindings.map(binding => <li key={binding.binding_id}>{binding.user_id} · {organizationLabel(copy, 'Role', binding.role_code)} · {binding.unit_id || copy.root} · {organizationLabel(copy, 'Status', binding.status)} · {binding.expires_at || '—'}{can('org.roles.assign') && ['ACTIVE', 'SCHEDULED'].includes(binding.status) && binding.role_code !== 'OWNER' && action(`revoke-role:${binding.binding_id}`, copy.revoke, [], () => ({ id: binding.binding_id }), (facts, key) => api.revokeRole(org, facts.id, key), true, undefined, `${binding.user_id} · ${binding.role_code} · ${binding.binding_id}`)}</li>)}</ul></section>}
   {can('org.roles.assign') && action('grant-role', copy.grantRole, [{ name: 'user', options: members }, { name: 'role', options: grantRoleOptions }, { name: 'unit', optional: true, options: units }, { name: 'starts', type: 'datetime-local', optional: true }, { name: 'expires', type: 'datetime-local', optional: true }, { name: 'reason' }], values => { if ((values.role === 'UNIT_ADMIN') !== Boolean(values.unit)) throw new Error('INVALID_ORGANIZATION_INPUT'); return { user_id: organizationID(values.user), role_code: text(values.role), unit_id: optionalID(values.unit), starts_at: time(values.starts), expires_at: time(values.expires), reason: text(values.reason) }; }, (facts, key) => api.grantRole(org, facts, key))}
   {can('org.owner.transfer') && action('transfer-owner', copy.transfer, [{ name: 'user', label: 'newOwner', options: members }], values => ({ user: organizationID(values.user) }), (facts, key) => api.transfer(org, facts.user, key), true)}
+  {(!can('org.units.manage') || !can('org.members.manage')) && <OrganizationUnitWorkspace api={api} me={me} owner={owner} language={language} onChanged={onChanged} />}
   <OrganizationFinanceWorkspace client={client} me={me} language={language} />
   <OrganizationClosedGrantsWorkspace key={owner} client={client} me={me} language={language} />
   <OrganizationModelPolicyWorkspace client={client} me={me} language={language} />

@@ -181,3 +181,25 @@ export const organizationCopy = {
 Object.assign(organizationCopy.zh, { cancelConfirmation: '取消', confirmAction: '确认执行', confirmationTarget: '操作对象' });
 Object.assign(organizationCopy.en, { cancelConfirmation: 'Cancel', confirmAction: 'Confirm operation', confirmationTarget: 'Action target' });
 Object.assign(organizationCopy.ja, { cancelConfirmation: 'キャンセル', confirmAction: '実行を確認', confirmationTarget: '操作対象' });
+
+Object.assign(organizationCopy.zh, {
+ unitScopeTitle: '节点授权工作区', unitScope: '授权节点子树', unitScopeRoot: '当前授权子树根节点',
+ unitScopeHint: '节点授权仅用于所选子树。全组织读取与管理权限保持独立。',
+ unitScopeMembersHint: '仅列出全部归属都在此子树内的成员；跨范围成员不能在此替换归属或移除。',
+ unitScopeInvitationHint: '此邀请仅授予普通成员身份及所选子树归属。撤销邀请需要组织级成员管理权限。',
+});
+Object.assign(organizationCopy.en, {
+ unitScopeTitle: 'Unit scope workspace', unitScope: 'Authorized unit subtree', unitScopeRoot: 'Selected authorized subtree root',
+ unitScopeHint: 'Unit grants apply only to the selected subtree. Organization-wide read and management grants remain separate.',
+ unitScopeMembersHint: 'Only members whose complete unit membership is inside this subtree are listed. Members spanning other scopes cannot be reassigned or removed here.',
+ unitScopeInvitationHint: 'This invitation grants only ordinary membership in the selected subtree. Revoking invitations requires organization-wide member management.',
+});
+Object.assign(organizationCopy.ja, {
+ unitScopeTitle: '単位権限のワークスペース', unitScope: '許可された単位のサブツリー', unitScopeRoot: '選択した許可範囲のルート単位',
+ unitScopeHint: '単位の権限は選択したサブツリーにのみ適用されます。組織全体の参照・管理権限とは独立しています。',
+ unitScopeMembersHint: 'すべての所属単位がこのサブツリー内にあるメンバーのみ表示します。範囲外にも所属するメンバーの所属変更や削除はできません。',
+ unitScopeInvitationHint: 'この招待では、選択したサブツリーの通常メンバー資格のみを付与します。招待の取消には組織全体のメンバー管理権限が必要です。',
+});
+Object.assign(organizationCopy.zh, { unitScopeInviteUnitsHint: '至少选择一个当前子树内的归属节点。', unitScopeAssignmentHint: '只能选择当前子树内的节点；清空后成员将不再属于此范围。' });
+Object.assign(organizationCopy.en, { unitScopeInviteUnitsHint: 'Select at least one unit inside this subtree.', unitScopeAssignmentHint: 'Select only units in this subtree. Clearing all units removes the member from this scope.' });
+Object.assign(organizationCopy.ja, { unitScopeInviteUnitsHint: 'このサブツリー内の所属単位を1つ以上選択してください。', unitScopeAssignmentHint: 'このサブツリー内の単位のみ選択できます。すべて解除すると、この範囲の所属から外れます。' });

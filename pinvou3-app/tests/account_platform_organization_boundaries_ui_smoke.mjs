@@ -6,6 +6,7 @@ import { fileURLToPath } from 'node:url';
 import react from '@vitejs/plugin-react';
 import * as puppeteer from 'puppeteer-core';
 import { createServer } from 'vite';
+import { runOrganizationUnitScopeCases } from './organization_unit_scope_cases.mjs';
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const chrome = process.env.CHROME || ['C:/Program Files/Google/Chrome/Application/chrome.exe', 'C:/Program Files (x86)/Microsoft/Edge/Application/msedge.exe', '/usr/bin/chromium', '/usr/bin/google-chrome', '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome'].find(fs.existsSync);
 assert.ok(chrome, 'Browser unavailable; no organization boundary validation performed');
@@ -112,6 +113,7 @@ try {
     assert.deepEqual(await page.evaluate(() => window.f06.passiveObserved), { before: 1, after: 1 }, 'after-effect callback must not combine old facts with a new identity/key');
     assert.equal((await writes()).length, 1); assert.equal(await page.$('[role=alertdialog]'), null);
   });
+  results.push(...await runOrganizationUnitScopeCases(page, `http://127.0.0.1:${vite.httpServer.address().port}`));
 } finally { if (browser) await browser.close(); if (vite) await vite.close(); fs.rmSync(profile, { recursive: true, force: true }); }
 console.log(JSON.stringify({ results, passed: results.filter(item => item.pass).length, failed: results.filter(item => !item.pass).length }));
 if (results.some(item => !item.pass)) process.exitCode = 1;
