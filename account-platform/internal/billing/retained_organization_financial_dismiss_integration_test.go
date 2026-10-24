@@ -500,17 +500,43 @@ func retainedOrganizationFinancialDownFence(t *testing.T, r *PostgresRepository,
 	if err = connection.QueryRow(ctx, `SELECT suspension_reason FROM member_quota_grants WHERE id=$1`, grantID).Scan(&reason); err != nil || reason != "CHARGEBACK_REVIEW" {
 		t.Fatal("real chargeback producer did not persist mature reason", reason, err)
 	}
-	if err = connection.QueryRow(ctx, `SELECT jsonb_agg(jsonb_build_array(version,checksum) ORDER BY version)::text FROM schema_migrations`).Scan(&ledger); err != nil {
+	if err = connection.QueryRow(ctx, `SELECT jsonb_agg(to_jsonb(m) ORDER BY version)::text FROM schema_migrations m`).Scan(&ledger); err != nil {
 		t.Fatal(err)
 	}
 	facts := retainedOrganizationDismissFacts(t, r, ctx, grantID)
-	err = migrations.DownOne(ctx, connection, full)
+	// Probe the exact published historical reason guard. DownOne selects the
+	// latest migration and cannot prove an older guard still protects this data.
+	var downSQL string
+	for _, migration := range full {
+		if migration.Version == 900012 {
+			downSQL = migration.DownSQL
+		}
+	}
+	if downSQL == "" {
+		t.Fatal("historical financial review reason DownSQL missing")
+	}
+	var actor, session string
+	if err = connection.QueryRow(ctx, `SELECT current_user,session_user`).Scan(&actor, &session); err != nil || actor != "billing_service" || session != "billing_migrator" {
+		t.Fatal("historical rollback identity mismatch", actor, session, err)
+	}
+	tx, err := connection.Begin(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, downErr := tx.Exec(ctx, downSQL)
+	rollbackErr := tx.Rollback(ctx)
 	var pgerr *pgconn.PgError
-	if !errors.As(err, &pgerr) || pgerr.Code != "55000" {
-		t.Fatal("public highest Down failed to preserve mature reason", err)
+	if !errors.As(downErr, &pgerr) || pgerr.Code != "55000" || pgerr.Message != "financial review reason migration is forward-only" {
+		t.Fatal("historical financial reason guard missing", downErr)
+	}
+	if rollbackErr != nil {
+		t.Fatal("historical rollback transaction cleanup", rollbackErr)
+	}
+	if _, err = migrations.VerifyApplied(ctx, connection, full); err != nil {
+		t.Fatal("historical rollback changed migration identity", err)
 	}
 	var after string
-	if err = connection.QueryRow(ctx, `SELECT jsonb_agg(jsonb_build_array(version,checksum) ORDER BY version)::text FROM schema_migrations`).Scan(&after); err != nil || ledger != after {
+	if err = connection.QueryRow(ctx, `SELECT jsonb_agg(to_jsonb(m) ORDER BY version)::text FROM schema_migrations m`).Scan(&after); err != nil || ledger != after {
 		t.Fatal("rejected rollback changed ledger", err)
 	}
 	if facts != retainedOrganizationDismissFacts(t, r, ctx, grantID) {
