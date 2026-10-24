@@ -69,6 +69,7 @@ pub static COMMAND_ARITY: &[(&str, u8)] = &[
     ("git remote", 2),
     ("git reset", 2),
     ("git restore", 2),
+    ("git rev-parse", 2),
     ("git revert", 2),
     ("git rm", 2),
     ("git show", 2),
@@ -366,6 +367,7 @@ const PARALLEL_READONLY_PREFIXES: &[&str] = &[
     "git ls-files",
     "git blame",
     "git grep",
+    "git rev-parse",
     "ls",
     "pwd",
     "cat",
@@ -804,17 +806,111 @@ fn is_agent_readonly_git(tokens: &[String]) -> bool {
     let Some(subcommand) = rest.first().map(String::as_str) else {
         return false;
     };
-    if !matches!(
-        subcommand,
-        "status" | "log" | "diff" | "show" | "ls-files" | "blame" | "grep"
-    ) {
-        return false;
+    match subcommand {
+        // Plain allowlisted subcommands: re-enter the option table below.
+        "status" | "log" | "diff" | "show" | "ls-files" | "blame" | "grep" | "rev-parse" => {}
+        // `branch` and `worktree` take positional operands that create or
+        // move things (`git branch name`, `git worktree add <path>`), so the
+        // bare positional pass-through the table relies on would admit
+        // mutations. Each admits only its listing verb.
+        "branch" => return is_agent_readonly_git_branch(&rest[1..]),
+        "worktree" => return is_agent_readonly_git_worktree(&rest[1..]),
+        _ => return false,
     }
     // Re-enter the parallel option tables with the preamble stripped so
     // `git -C dir log --oneline -n 5` is judged as `git log --oneline -n 5`.
     let mut reduced = vec![tokens[0].clone()];
     reduced.extend(rest.iter().cloned());
     readonly_tokens_admitted(&reduced.join(" "))
+}
+
+/// `git branch` in listing form only: `--show-current` with nothing else, or
+/// `--list`/`-l` (then every positional is a match pattern, not a new
+/// branch). A bare `git branch <name>` stays refused.
+fn is_agent_readonly_git_branch(args: &[String]) -> bool {
+    if args.len() == 1 && args[0] == "--show-current" {
+        return true;
+    }
+    let switches: &[&str] = &[
+        "-a",
+        "-r",
+        "-l",
+        "--all",
+        "--remotes",
+        "--list",
+        "-v",
+        "-vv",
+        "-q",
+        "--quiet",
+        "--no-color",
+        "--color",
+        "--show-current",
+    ];
+    let value_flags: &[&str] = &[
+        "--format",
+        "--sort",
+        "--points-at",
+        "--contains",
+        "--no-contains",
+        "--merged",
+        "--no-merged",
+        "--column",
+    ];
+    if !args.iter().any(|token| token == "--list" || token == "-l") {
+        return false;
+    }
+    let mut index = 0;
+    while index < args.len() {
+        let token = args[index].as_str();
+        if token.starts_with('-') {
+            if switches.contains(&token) {
+                index += 1;
+                continue;
+            }
+            if value_flags.contains(&token) {
+                index += 2;
+                if index > args.len() {
+                    return false;
+                }
+                continue;
+            }
+            return false;
+        }
+        // A pattern after `--list`/`-l` — read-only.
+        index += 1;
+    }
+    true
+}
+
+/// `git worktree list` only; every other verb (`add`, `remove`, `move`,
+/// `lock`, `prune`, …) mutates the repository or its checkout graph.
+fn is_agent_readonly_git_worktree(args: &[String]) -> bool {
+    if args.first().map(String::as_str) != Some("list") {
+        return false;
+    }
+    let switches: &[&str] = &["-v", "-z", "--porcelain", "--verbose"];
+    let value_flags: &[&str] = &["--expire"];
+    let mut index = 1;
+    while index < args.len() {
+        let token = args[index].as_str();
+        if !token.starts_with('-') {
+            // `list` takes no operands.
+            return false;
+        }
+        if switches.contains(&token) {
+            index += 1;
+            continue;
+        }
+        if value_flags.contains(&token) {
+            index += 2;
+            if index > args.len() {
+                return false;
+            }
+            continue;
+        }
+        return false;
+    }
+    true
 }
 
 fn is_agent_readonly_find(tokens: &[String]) -> bool {
@@ -902,6 +998,7 @@ fn readonly_options_are_allowed(canonical: &str, tokens: &[&str]) -> bool {
         "git ls-files" => (2, "-c --cached -d --deleted -m --modified -o --others -i --ignored --stage --unmerged --killed --exclude-standard --deduplicate", "--exclude --exclude-from"),
         "git blame" => (2, "-w --line-porcelain --porcelain --show-stats --show-name --show-number --reverse --first-parent", "-L --since"),
         "git grep" => (2, "-n --line-number -i --ignore-case -I -l --files-with-matches -L --files-without-match -w --word-regexp -F --fixed-strings -E --extended-regexp --cached --untracked --exclude-standard", "-e --max-depth"),
+        "git rev-parse" => (2, "--show-toplevel --show-cdup --show-prefix --git-dir --absolute-git-dir --git-common-dir --is-inside-work-tree --is-inside-git-dir --is-bare-repository --is-shallow-repository --abbrev-ref --short --symbolic --symbolic-full-name --verify -q --quiet", "--abbrev"),
         "ls" => (1, "-a -A -l -la -al -h -lh -hl -lah -alh -R -d -1 --all --almost-all --long --human-readable --recursive --directory", ""),
         "pwd" => (1, "-L -P --logical --physical", ""),
         "cat" => (1, "-n -b -s -v -E -T --number --number-nonblank --squeeze-blank --show-ends --show-tabs", ""),
@@ -2091,6 +2188,18 @@ mod tests {
             "npm view codewhale version",
             "sort deps.txt | uniq -c",
             "ls -la *.md",
+            // Repository-location probes a worktree child needs to orient
+            // itself (live session 2026-10-24: all three were refused while
+            // `git status`/`git log` passed).
+            "git rev-parse --show-toplevel",
+            "git rev-parse --git-dir",
+            "git rev-parse --abbrev-ref HEAD",
+            "git -C crates/tui rev-parse --short HEAD",
+            "git branch --show-current",
+            "git branch --list",
+            "git branch -a --list codex/*",
+            "git worktree list",
+            "git worktree list --porcelain",
         ] {
             assert!(
                 is_agent_readonly_shell_command(command),
@@ -2150,6 +2259,17 @@ mod tests {
             "git push origin main",
             "awk BEGIN{system(rm)} file",
             "python3 -c print(1)",
+            // The listing-only git verbs must not open their mutating forms.
+            "git branch feature/x",
+            "git branch -d feature/x",
+            "git branch -m old new",
+            "git branch --show-current extra",
+            "git worktree add ../wt",
+            "git worktree remove ../wt",
+            "git worktree prune",
+            "git worktree list extra",
+            "git rev-parse --git-path hooks",
+            "git rev-parse --resolve-git-dir /tmp/x",
         ] {
             assert!(
                 !is_agent_readonly_shell_command(command),

@@ -187,6 +187,13 @@ A writer narrows its scope with at least one normalized repo-relative
 parent workspace root. Active overlapping shared claims fail before mutation;
 a real isolated worktree may proceed in parallel.
 
+A child that a worktree child spawns without its own `worktree`/`cwd` request
+runs inside that same worktree, and its claim is registered on the same
+isolated footing (worktree-relative roots) rather than against the shared
+coordination root. An interrupted child holds no live claim: its loop is gone
+and a resume runs under a new id with its own claim, so later writers — and the
+resume itself — are not gated by it.
+
 Optional fields:
 
 - `worktree_branch`: exact branch to create.

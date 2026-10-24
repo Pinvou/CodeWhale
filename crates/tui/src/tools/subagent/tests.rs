@@ -3492,6 +3492,75 @@ fn declared_write_scope_is_normalized_and_rejects_traversal() {
     );
 }
 
+/// A scoped child that spells its target as an absolute path inside its own
+/// workspace is writing the same file the relative spelling names (live
+/// session, 2026-10-24: `write` of `<workspace>/fixture/calc/inside.txt`
+/// was refused as "must be repo-relative" while `fixture/calc/inside.txt`
+/// succeeded). Absolute paths outside the workspace and `..` traversal stay
+/// refused.
+#[test]
+fn scoped_mutation_paths_accept_absolute_targets_inside_the_workspace() {
+    let tmp = tempdir().expect("tempdir");
+    let workspace = tmp.path().join("workspace");
+    std::fs::create_dir_all(workspace.join("fixture/calc")).expect("workspace tree");
+    let canonical = workspace.canonicalize().expect("canonical workspace");
+
+    // Existing target, canonical spelling.
+    std::fs::write(workspace.join("fixture/calc/existing.txt"), "x").expect("seed");
+    let paths = mutation_paths(
+        "write",
+        &json!({ "path": canonical.join("fixture/calc/existing.txt").to_string_lossy() }),
+        &workspace,
+    )
+    .expect("absolute in-workspace path is admitted");
+    assert_eq!(paths, vec!["fixture/calc/existing.txt".to_string()]);
+
+    // Not-yet-existing target (the write creates it), spelled through the
+    // un-canonicalized workspace path.
+    let paths = mutation_paths(
+        "write",
+        &json!({ "path": workspace.join("fixture/calc/new.txt").to_string_lossy() }),
+        &workspace,
+    )
+    .expect("absolute path to a file the write will create is admitted");
+    assert_eq!(paths, vec!["fixture/calc/new.txt".to_string()]);
+
+    // Relative spelling is unchanged.
+    let paths = mutation_paths(
+        "write",
+        &json!({ "path": "fixture/calc/new.txt" }),
+        &workspace,
+    )
+    .expect("relative path");
+    assert_eq!(paths, vec!["fixture/calc/new.txt".to_string()]);
+
+    // Outside the workspace: refused as before.
+    let err = mutation_paths(
+        "write",
+        &json!({ "path": tmp.path().join("escape.txt").to_string_lossy() }),
+        &workspace,
+    )
+    .expect_err("absolute path outside the workspace is refused")
+    .to_string();
+    assert!(err.contains("repo-relative"), "{err}");
+
+    // Traversal: refused as before, relative or absolute.
+    for path in ["../escape.txt", "fixture/../../escape.txt"] {
+        let err = mutation_paths("write", &json!({ "path": path }), &workspace)
+            .expect_err("traversal is refused")
+            .to_string();
+        assert!(err.contains("traversal"), "{path}: {err}");
+    }
+    let err = mutation_paths(
+        "write",
+        &json!({ "path": workspace.join("fixture/../../escape.txt").to_string_lossy() }),
+        &workspace,
+    )
+    .expect_err("absolute traversal out of the workspace is refused")
+    .to_string();
+    assert!(err.contains("repo-relative"), "{err}");
+}
+
 #[test]
 fn shared_child_cwd_claims_use_one_root_namespace_for_collisions_and_mutations() {
     let repo = tempdir().expect("repo");
@@ -11585,6 +11654,61 @@ fn create_isolated_worktree_rejects_ambiguous_nested_repos() {
     );
 }
 
+/// Discovery may adopt a nested checkout only at the anchor itself. A session
+/// workspace that is not a repository used to walk up to `$HOME` and scan
+/// *its* children (live session, 2026-10-24: "Multiple git repositories found
+/// under /Users/asto. Specify cwd to disambiguate: /Users/asto/flutter,
+/// /Users/asto/Spec2017-iOS") — leaking unrelated project names and, with a
+/// single sibling, silently adopting a stranger's repository.
+#[test]
+fn worktree_discovery_never_adopts_or_enumerates_an_ancestors_sibling_repos() {
+    let home = tempdir().expect("home");
+    for name in ["flutter", "Spec2017-iOS"] {
+        let sibling = home.path().join(name);
+        std::fs::create_dir_all(&sibling).expect("sibling dir");
+        init_git_repo_at(&sibling);
+    }
+    // `<home>/.pinvou3/sessions/<sid>/workspace`: not a repository, with the
+    // sibling repositories two levels up.
+    let workspace = home
+        .path()
+        .join(".pinvou3")
+        .join("sessions")
+        .join("sid")
+        .join("workspace");
+    std::fs::create_dir_all(&workspace).expect("workspace");
+    let worktree_home = tempdir().expect("worktree home");
+    let request = SubAgentWorktreeRequest {
+        branch: Some("codex/agent-session".to_string()),
+        path: Some(worktree_home.path().join("isolated")),
+        base_ref: None,
+    };
+
+    let message = create_isolated_worktree(&workspace, &request, None, &FleetRole::Worker)
+        .expect_err("a workspace outside any repository must not borrow an ancestor's sibling")
+        .to_string();
+    assert!(
+        message.contains("requires a git repository"),
+        "expected the no-repository diagnostic, got: {message}"
+    );
+    assert!(
+        !message.contains("Multiple git repositories")
+            && !message.contains("flutter")
+            && !message.contains("Spec2017-iOS"),
+        "ancestor siblings must not be scanned or named: {message}"
+    );
+
+    // A single sibling must not be adopted silently either.
+    std::fs::remove_dir_all(home.path().join("Spec2017-iOS")).expect("drop one sibling");
+    let message = create_isolated_worktree(&workspace, &request, None, &FleetRole::Worker)
+        .expect_err("one sibling repository is still not the workspace's repository")
+        .to_string();
+    assert!(
+        message.contains("requires a git repository"),
+        "expected the no-repository diagnostic, got: {message}"
+    );
+}
+
 #[test]
 fn build_subagent_system_prompt_appends_role_when_set() {
     let assignment = SubAgentAssignment::new("p".to_string(), Some("worker".to_string()));
@@ -13175,7 +13299,9 @@ async fn panicked_child_task_terminalizes_and_stops_gating_peers() {
 /// reaches `WaitingForUser` can never be answered — nothing will resume or
 /// finalize it — so it must not count as a live coordination owner, and the
 /// `agents/coordinate action=release` remediation the gate names must be able
-/// to clear its claim. A *paired* child waiting on the user is untouched.
+/// to clear its claim. A *paired* child follows its agent's status: parked on
+/// an approval prompt (still `Running`) it keeps its claim; interrupted, it
+/// does not — see `interrupted_child_stops_gating_later_writers`.
 #[test]
 fn waiting_for_user_headless_worker_is_not_a_live_coordination_owner() {
     let tmp = tempdir().expect("tempdir");
@@ -13214,14 +13340,10 @@ fn waiting_for_user_headless_worker_is_not_a_live_coordination_owner() {
         "the remediation the gate names must actually clear the leaked claim"
     );
 
-    // The interactive case is preserved: a paired child waiting on the user
-    // keeps its claim — the user can still answer and the child will write.
+    // The interactive case is preserved: a paired child parked on an
+    // approval prompt is still Running and keeps its claim — the user can
+    // still answer and the same loop will write again.
     let paired = manager.insert_test_running_agent("paired", &workspace);
-    manager
-        .agents
-        .get_mut(&paired)
-        .expect("paired agent")
-        .status = SubAgentStatus::Interrupted("awaiting user input".to_string());
     manager
         .worker_records
         .get_mut(&paired)
@@ -13229,7 +13351,366 @@ fn waiting_for_user_headless_worker_is_not_a_live_coordination_owner() {
         .status = AgentWorkerStatus::WaitingForUser;
     assert!(
         manager.is_live_coordination_owner(&paired),
-        "an interactive child waiting on the user stays live"
+        "a Running child waiting on an approval stays live"
+    );
+
+    // An interrupted child also parks its record in WaitingForUser, but its
+    // loop is gone and a resume runs under a new id: nothing can write
+    // under this id again, so it must not gate later writers.
+    manager
+        .agents
+        .get_mut(&paired)
+        .expect("paired agent")
+        .status = SubAgentStatus::Interrupted("interrupted by parent".to_string());
+    assert!(
+        !manager.is_live_coordination_owner(&paired),
+        "an interrupted child must not stay live through its parked worker record"
+    );
+}
+
+/// Reproduces a live session (2026-10-24): a `general` child claiming the
+/// whole workspace (`["."]`) was interrupted by its parent. Its worker record
+/// parked in `WaitingForUser`, the liveness predicate kept counting it as a
+/// live writer, and every later write-capable spawn in the session —
+/// including a claim narrowed to a subdirectory — was refused with
+/// "write-scope contention with <the interrupted child>". `cancel` on the
+/// interrupted child was a no-op (it only touches Running children), so the
+/// session's write delegation stayed locked until restart.
+#[tokio::test]
+async fn interrupted_child_stops_gating_later_writers() {
+    let tmp = tempdir().expect("tempdir");
+    let manager = new_shared_subagent_manager(tmp.path().to_path_buf(), 4);
+    let mut runtime = stub_runtime();
+    runtime.manager = Arc::clone(&manager);
+    runtime.context = ToolContext::new(tmp.path());
+    let claim = |roots: &[&str]| WriteScopeClaim {
+        owner: String::new(),
+        roots: roots.iter().map(|root| (*root).to_string()).collect(),
+        exact_files: vec![],
+        contracts: vec![],
+    };
+
+    let mut guard = manager.write().await;
+    let first = guard
+        .spawn_background_with_assignment_options(
+            Arc::clone(&manager),
+            runtime.clone(),
+            FleetRole::Builder,
+            "edit the workspace".into(),
+            make_assignment(),
+            Some(vec![]),
+            SubAgentSpawnOptions {
+                name: Some("writer-a".into()),
+                write_claim: Some(claim(&["."])),
+                ..Default::default()
+            },
+        )
+        .expect("first writer admitted");
+    assert!(guard.is_live_coordination_owner(&first.agent_id));
+
+    // A real interrupted loop leaves a continuable checkpoint with content;
+    // that is what parks the worker record in WaitingForUser instead of the
+    // terminal Interrupted status, and what kept the claim live.
+    guard
+        .agents
+        .get_mut(&first.agent_id)
+        .expect("agent")
+        .checkpoint = Some(build_subagent_checkpoint(
+        &first.agent_id,
+        "parent_interrupt",
+        &[Message {
+            role: Role::User,
+            content: vec![ContentBlock::Text {
+                text: "prior work".to_string(),
+                cache_control: None,
+            }],
+        }],
+        1,
+        true,
+    ));
+    let (_, interrupted) = guard
+        .interrupt_child(&first.agent_id, None, "interrupted by parent".into())
+        .expect("interrupt");
+    assert!(matches!(interrupted.status, SubAgentStatus::Interrupted(_)));
+    assert_eq!(
+        guard
+            .get_worker_record(&first.agent_id)
+            .expect("worker record")
+            .status,
+        AgentWorkerStatus::WaitingForUser,
+        "an interrupted child with a continuable checkpoint parks in WaitingForUser"
+    );
+    assert!(
+        !guard.is_live_coordination_owner(&first.agent_id),
+        "an interrupted child cannot write again under its own id"
+    );
+
+    // A narrowed claim under the parked `["."]` claim must be admitted, and
+    // a repeated cancel must not be needed to get there.
+    let second = guard
+        .spawn_background_with_assignment_options(
+            Arc::clone(&manager),
+            runtime,
+            FleetRole::Builder,
+            "edit tmp".into(),
+            make_assignment(),
+            Some(vec![]),
+            SubAgentSpawnOptions {
+                name: Some("writer-b".into()),
+                write_claim: Some(claim(&["tmp"])),
+                ..Default::default()
+            },
+        )
+        .expect("a later writer must be admitted once the earlier one is interrupted");
+    assert_ne!(second.agent_id, first.agent_id);
+    let snapshot = guard.coordination_snapshot();
+    assert!(
+        snapshot
+            .write_claims
+            .iter()
+            .any(|record| record.claim.owner == second.agent_id),
+        "the later writer's claim is registered"
+    );
+    assert!(
+        snapshot
+            .write_claims
+            .iter()
+            .any(|record| record.claim.owner == first.agent_id),
+        "the interrupted child's claim stays on the ledger as history; it is inactive, not erased"
+    );
+}
+
+/// The resume path is the same scenario from the other side: `followup` on
+/// an interrupted child re-dispatches its checkpoint under a NEW id and
+/// restores the old claim for that id. With the predecessor counted live,
+/// the resume contended with itself ("write-scope contention with
+/// <predecessor>") and the child could never be continued.
+#[tokio::test]
+async fn interrupted_child_resume_does_not_contend_with_its_own_parked_claim() {
+    let tmp = tempdir().expect("tempdir");
+    let manager = new_shared_subagent_manager(tmp.path().to_path_buf(), 4);
+    let mut runtime = stub_runtime();
+    runtime.manager = Arc::clone(&manager);
+    runtime.context = ToolContext::new(tmp.path());
+
+    let mut guard = manager.write().await;
+    let first = guard
+        .spawn_background_with_assignment_options(
+            Arc::clone(&manager),
+            runtime.clone(),
+            FleetRole::Builder,
+            "edit the workspace".into(),
+            make_assignment(),
+            Some(vec![]),
+            SubAgentSpawnOptions {
+                name: Some("writer-a".into()),
+                write_claim: Some(WriteScopeClaim {
+                    owner: String::new(),
+                    roots: vec![".".into()],
+                    exact_files: vec![],
+                    contracts: vec![],
+                }),
+                ..Default::default()
+            },
+        )
+        .expect("writer admitted");
+    // Give the child a continuable checkpoint with content, as a real
+    // interrupted loop leaves behind, so the resume has something to seed.
+    guard
+        .agents
+        .get_mut(&first.agent_id)
+        .expect("agent")
+        .checkpoint = Some(build_subagent_checkpoint(
+        &first.agent_id,
+        "parent_interrupt",
+        &[Message {
+            role: Role::User,
+            content: vec![ContentBlock::Text {
+                text: "prior work".to_string(),
+                cache_control: None,
+            }],
+        }],
+        1,
+        true,
+    ));
+    guard
+        .interrupt_child(&first.agent_id, None, "interrupted by parent".into())
+        .expect("interrupt");
+
+    let resumed = guard
+        .resume_from_checkpoint(Arc::clone(&manager), runtime, &first.agent_id, "continue")
+        .expect("resume must not contend with the interrupted predecessor's own claim");
+    assert_ne!(
+        resumed.agent_id, first.agent_id,
+        "resume runs under a new id"
+    );
+    let snapshot = guard.coordination_snapshot();
+    let resumed_claim = snapshot
+        .write_claims
+        .iter()
+        .find(|record| record.claim.owner == resumed.agent_id)
+        .expect("the resumed child holds the restored claim under its own id");
+    assert_eq!(resumed_claim.claim.roots, vec![".".to_string()]);
+    assert!(guard.is_live_coordination_owner(&resumed.agent_id));
+    assert!(!guard.is_live_coordination_owner(&first.agent_id));
+}
+
+/// Reproduces a live session (2026-10-24): a `general` child running in an
+/// isolated worktree asked for a write-capable child of its own (no worktree
+/// request, so the grandchild keeps the worktree as its workspace). Worktrees
+/// are created as siblings of the checkout, so namespacing the grandchild's
+/// claim against the shared coordination root failed:
+/// "shared writer workspace '<worktree>' must remain inside coordination
+/// root '<workspace>'". A read-only grandchild from the same worktree was
+/// fine, which is how the refusal was pinned to claim registration.
+#[tokio::test]
+async fn write_capable_grandchild_of_a_worktree_child_inherits_isolation() {
+    let tmp = tempdir().expect("tempdir");
+    let coordination_root = tmp.path().join("workspace");
+    let worktree = tmp
+        .path()
+        .join(".codewhale-worktrees")
+        .join("workspace")
+        .join("codex-agent-parent");
+    for dir in [&coordination_root, &worktree] {
+        std::fs::create_dir_all(dir).expect("mkdir");
+    }
+    let manager = new_shared_subagent_manager(coordination_root.clone(), 4);
+    let claim = || WriteScopeClaim {
+        owner: String::new(),
+        roots: vec![".".into()],
+        exact_files: vec![],
+        contracts: vec![],
+    };
+
+    let mut guard = manager.write().await;
+    // The worktree child itself: spawned with isolation, workspace rebased
+    // to the worktree (as the agent-tool seam does after creating it).
+    let mut parent_runtime = stub_runtime();
+    parent_runtime.manager = Arc::clone(&manager);
+    parent_runtime.context = ToolContext::new(&worktree);
+    let parent = guard
+        .spawn_background_with_assignment_options(
+            Arc::clone(&manager),
+            parent_runtime,
+            FleetRole::Builder,
+            "work in the worktree".into(),
+            make_assignment(),
+            Some(vec![]),
+            SubAgentSpawnOptions {
+                name: Some("worktree-parent".into()),
+                write_claim: Some(claim()),
+                isolated_worktree: true,
+                ..Default::default()
+            },
+        )
+        .expect("worktree child admitted");
+
+    // Its grandchild: issued from inside the worktree with no worktree/cwd
+    // request of its own, so the runtime carries the worktree as workspace
+    // and the parent's id.
+    let mut child_runtime = stub_runtime();
+    child_runtime.manager = Arc::clone(&manager);
+    child_runtime.context = ToolContext::new(&worktree);
+    child_runtime.parent_agent_id = Some(parent.agent_id.clone());
+    let grandchild = guard
+        .spawn_background_with_assignment_options(
+            Arc::clone(&manager),
+            child_runtime,
+            FleetRole::Builder,
+            "edit inside the worktree".into(),
+            make_assignment(),
+            Some(vec![]),
+            SubAgentSpawnOptions {
+                name: Some("worktree-grandchild".into()),
+                write_claim: Some(claim()),
+                ..Default::default()
+            },
+        )
+        .expect("a write-capable grandchild of a worktree child must be admitted");
+
+    let snapshot = guard.coordination_snapshot();
+    let record = snapshot
+        .write_claims
+        .iter()
+        .find(|record| record.claim.owner == grandchild.agent_id)
+        .expect("grandchild claim registered");
+    assert!(
+        record.isolated_worktree,
+        "the grandchild's claim stands on the parent's isolated footing"
+    );
+    assert_eq!(
+        record.claim.roots,
+        vec![".".to_string()],
+        "an isolated claim is worktree-relative, not namespaced against the coordination root"
+    );
+    let manifest = guard
+        .get_worker_record(&grandchild.agent_id)
+        .expect("worker record")
+        .spec
+        .launch_manifest
+        .clone()
+        .expect("launch manifest");
+    assert!(
+        manifest.worktree,
+        "the durable manifest records the inherited isolation for resume"
+    );
+    assert!(
+        manifest
+            .prompt
+            .contains("Write scope (enforced; worktree-relative)"),
+        "an isolated claim is described to the child as worktree-relative: {}",
+        manifest.prompt
+    );
+
+    // A write-capable child of a *shared* parent keeps the old rule: its
+    // workspace must sit inside the coordination root.
+    let mut shared_runtime = stub_runtime();
+    shared_runtime.manager = Arc::clone(&manager);
+    shared_runtime.context = ToolContext::new(&coordination_root);
+    let shared_parent = guard
+        .spawn_background_with_assignment_options(
+            Arc::clone(&manager),
+            shared_runtime,
+            FleetRole::Builder,
+            "work in the checkout".into(),
+            make_assignment(),
+            Some(vec![]),
+            SubAgentSpawnOptions {
+                name: Some("shared-parent".into()),
+                write_claim: Some(WriteScopeClaim {
+                    owner: String::new(),
+                    roots: vec!["docs".into()],
+                    exact_files: vec![],
+                    contracts: vec![],
+                }),
+                ..Default::default()
+            },
+        )
+        .expect("shared writer admitted");
+    let mut stray_runtime = stub_runtime();
+    stray_runtime.manager = Arc::clone(&manager);
+    stray_runtime.context = ToolContext::new(&worktree);
+    stray_runtime.parent_agent_id = Some(shared_parent.agent_id.clone());
+    let error = guard
+        .spawn_background_with_assignment_options(
+            Arc::clone(&manager),
+            stray_runtime,
+            FleetRole::Builder,
+            "escape".into(),
+            make_assignment(),
+            Some(vec![]),
+            SubAgentSpawnOptions {
+                name: Some("stray".into()),
+                write_claim: Some(claim()),
+                ..Default::default()
+            },
+        )
+        .expect_err("a shared parent does not confer isolation on an out-of-root workspace")
+        .to_string();
+    assert!(
+        error.contains("must remain inside coordination root"),
+        "{error}"
     );
 }
 

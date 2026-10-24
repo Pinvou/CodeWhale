@@ -237,12 +237,7 @@ pub(super) fn format_tool_error_with_schema(
         ToolError::NotAvailable { .. } => ("tool_not_available", Some("tool_name")),
         _ => return message,
     };
-    let valid_shape = input_schema.cloned().unwrap_or_else(|| {
-        serde_json::json!({
-            "type": "object",
-            "guidance": format!("Use the advertised input schema for '{tool_name}'")
-        })
-    });
+    let valid_shape = bounded_valid_shape(tool_name, input_schema);
     let feedback = serde_json::json!({
         "category": category,
         "bad_field": bad_field,
@@ -251,6 +246,47 @@ pub(super) fn format_tool_error_with_schema(
         "side_effect_status": "not_started"
     });
     format!("{message}\nTool validation feedback: {feedback}")
+}
+
+/// Largest input schema echoed verbatim into a validation receipt. The
+/// `agent` tool's schema alone is several kilobytes of prose; replaying it on
+/// every semantic refusal (unknown agent id, write-scope contention, unknown
+/// profile) buried the one-line cause and cost the parent that much context
+/// per retry. Above the budget the receipt keeps the field inventory — which
+/// is what a shape repair needs — and points back at the advertised schema.
+const VALID_SHAPE_BUDGET_BYTES: usize = 2048;
+
+fn bounded_valid_shape(
+    tool_name: &str,
+    input_schema: Option<&serde_json::Value>,
+) -> serde_json::Value {
+    let Some(schema) = input_schema else {
+        return serde_json::json!({
+            "type": "object",
+            "guidance": format!("Use the advertised input schema for '{tool_name}'")
+        });
+    };
+    let serialized_len = schema.to_string().len();
+    if serialized_len <= VALID_SHAPE_BUDGET_BYTES {
+        return schema.clone();
+    }
+    let properties = schema
+        .get("properties")
+        .and_then(serde_json::Value::as_object)
+        .map(|properties| properties.keys().cloned().collect::<Vec<_>>())
+        .unwrap_or_default();
+    let required = schema
+        .get("required")
+        .cloned()
+        .unwrap_or_else(|| serde_json::json!([]));
+    serde_json::json!({
+        "type": "object",
+        "properties": properties,
+        "required": required,
+        "guidance": format!(
+            "Full schema for '{tool_name}' ({serialized_len} bytes) omitted from this receipt; it is the advertised input schema already in your tool list. Fix the cause named above rather than the shape."
+        )
+    })
 }
 
 // === Streaming-buffer parsing =========================================

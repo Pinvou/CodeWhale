@@ -84,21 +84,27 @@ impl ImageAnalyzeTool {
 
     fn resolve_image_path(workspace: &Path, image_path: &str) -> Result<PathBuf, ToolError> {
         let image_path_buf = Path::new(image_path);
-        if image_path_buf.components().any(|c| {
-            matches!(
-                c,
-                Component::Prefix(_) | Component::RootDir | Component::ParentDir
-            )
-        }) {
-            return Err(ToolError::execution_failed(
-                "image_path must be a relative path within the workspace and cannot escape it.",
-            ));
-        }
-
         let workspace = workspace.canonicalize().map_err(|e| {
             ToolError::execution_failed(format!("Failed to resolve workspace path: {e}"))
         })?;
-        let candidate = workspace.join(image_path_buf);
+        // An absolute spelling is admitted on the same terms as a relative
+        // one: it must canonicalize to a location inside the workspace (the
+        // containment check below). Screenshot and attachment receipts hand
+        // the model absolute paths, and refusing those outright sent it
+        // through a failed call to learn the relative form.
+        let candidate = if image_path_buf.is_absolute() {
+            image_path_buf.to_path_buf()
+        } else {
+            if image_path_buf
+                .components()
+                .any(|c| matches!(c, Component::Prefix(_) | Component::ParentDir))
+            {
+                return Err(ToolError::execution_failed(
+                    "image_path must be a relative path within the workspace and cannot escape it.",
+                ));
+            }
+            workspace.join(image_path_buf)
+        };
         let resolved = candidate.canonicalize().map_err(|e| {
             ToolError::execution_failed(format!("Failed to resolve image file: {e}"))
         })?;
@@ -554,8 +560,8 @@ mod tests {
     #[tokio::test]
     async fn execute_rejects_absolute_path() {
         // Trust-boundary pin: image_path must stay inside the workspace
-        // — an absolute path or a `..`-traversing path must reject
-        // before any base64 / API call.
+        // — an absolute path outside it or a `..`-traversing path must
+        // reject before any base64 / API call.
         let tmp = tempdir().expect("tempdir");
         let ctx = ToolContext::new(tmp.path().to_path_buf());
         let tool = ImageAnalyzeTool::new(fake_config());
@@ -567,12 +573,49 @@ mod tests {
         let err = tool
             .execute(json!({"image_path": outside_workspace}), &ctx)
             .await
-            .expect_err("absolute path must reject");
+            .expect_err("absolute path outside the workspace must reject");
         assert!(
-            err.to_string()
-                .contains("relative path within the workspace"),
+            err.to_string().contains("within the workspace"),
             "error must call out the workspace boundary; got {err}"
         );
+    }
+
+    /// Screenshot and attachment receipts hand the model absolute paths
+    /// (live session 2026-10-24: `computer_use` saved
+    /// `<workspace>/attachments/computer_use/….png` and the first
+    /// `image_analyze` call with that exact path was refused). An absolute
+    /// spelling that resolves inside the workspace is the same file as its
+    /// relative form and is admitted on the same containment terms.
+    #[test]
+    fn resolve_image_path_accepts_absolute_paths_inside_the_workspace() {
+        let tmp = tempdir().expect("tempdir");
+        let attachments = tmp.path().join("attachments").join("computer_use");
+        std::fs::create_dir_all(&attachments).expect("attachments dir");
+        let image = attachments.join("shot.png");
+        std::fs::write(&image, b"not a real png").expect("fixture");
+        let canonical_workspace = tmp.path().canonicalize().expect("canonical workspace");
+
+        let via_absolute =
+            ImageAnalyzeTool::resolve_image_path(tmp.path(), &image.to_string_lossy())
+                .expect("absolute in-workspace path resolves");
+        let via_relative =
+            ImageAnalyzeTool::resolve_image_path(tmp.path(), "attachments/computer_use/shot.png")
+                .expect("relative path resolves");
+        assert_eq!(via_absolute, via_relative);
+        assert!(via_absolute.starts_with(&canonical_workspace));
+
+        // A real file outside the workspace, reached by `..` traversal.
+        let outside = tempdir().expect("outside tempdir");
+        let outside_image = outside.path().join("outside.png");
+        std::fs::write(&outside_image, b"not a real png").expect("fixture");
+        let traversed = tmp
+            .path()
+            .join("..")
+            .join(outside.path().file_name().expect("named tempdir"))
+            .join("outside.png");
+        let err = ImageAnalyzeTool::resolve_image_path(tmp.path(), &traversed.to_string_lossy())
+            .expect_err("absolute traversal out of the workspace is refused");
+        assert!(err.to_string().contains("within the workspace"), "{err}");
     }
 
     #[tokio::test]

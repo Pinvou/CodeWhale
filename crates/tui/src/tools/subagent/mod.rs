@@ -4942,19 +4942,31 @@ impl SubAgentManager {
     /// persist forever and cascade-lock other agents"). A claim cannot contend
     /// for an owner that cannot write.
     fn is_live_coordination_owner(&self, id: &str) -> bool {
-        self.agents.get(id).is_some_and(|agent| {
-            agent.status == SubAgentStatus::Running && !self.is_from_prior_session(agent)
-        }) || self.worker_records.get(id).is_some_and(|record| {
-            let paired_agent = self.agents.get(id);
-            !record.status.is_terminal()
-                // A headless worker (no paired agent entry) that reaches
-                // WaitingForUser can never be answered: no user path will
-                // resume or finalize it, so counting it live leaks its claim
-                // as a permanent gate on every later writer. A *paired*
-                // waiting child keeps its claim — the user can still answer
-                // and the child will write again.
-                && (record.status != AgentWorkerStatus::WaitingForUser || paired_agent.is_some())
-                && paired_agent.is_none_or(|agent| !self.is_from_prior_session(agent))
+        if let Some(agent) = self.agents.get(id) {
+            // A paired record follows its agent: only a Running agent from
+            // this boot can still write under this id. Every other status is
+            // a terminal receipt whose loop has been aborted. That includes
+            // `Interrupted`, even though its worker record parks in
+            // `WaitingForUser` (the checkpoint is continuable): a resume
+            // re-dispatches a fresh loop under a NEW id (`resume_from_checkpoint`)
+            // and registers that id's own claim, so the parked claim can
+            // never be exercised again. Counting it live gated every later
+            // writer — including the child's own resume, which contended
+            // with its predecessor — and `cancel` could not release it
+            // (cancel only touches Running children).
+            //
+            // The interactive case this used to protect is unaffected: a
+            // child parked on an approval prompt is still `Running` and its
+            // record is `WaitingForUser`; it keeps its claim and writes again
+            // once the user answers.
+            return agent.status == SubAgentStatus::Running && !self.is_from_prior_session(agent);
+        }
+        self.worker_records.get(id).is_some_and(|record| {
+            // A headless worker (no paired agent entry) that reaches
+            // WaitingForUser can never be answered: no user path will
+            // resume or finalize it, so counting it live leaks its claim
+            // as a permanent gate on every later writer.
+            !record.status.is_terminal() && record.status != AgentWorkerStatus::WaitingForUser
         })
     }
 
@@ -4968,6 +4980,27 @@ impl SubAgentManager {
             .filter(|id| self.is_live_coordination_owner(id))
             .cloned()
             .collect()
+    }
+
+    /// Whether `parent_id` is a child running in an isolated worktree, so a
+    /// spawn it issues lands inside that worktree rather than the shared
+    /// coordination root. Same precedence as the resume path: the parent's
+    /// live claim carries the freshest flag; the launch manifest covers a
+    /// released or never-registered claim. The root session has neither and
+    /// is never isolated.
+    fn parent_runs_in_isolated_worktree(&self, parent_id: &str) -> bool {
+        if let Some(record) = self
+            .coordination
+            .write_claims
+            .iter()
+            .find(|record| record.claim.owner == parent_id)
+        {
+            return record.isolated_worktree;
+        }
+        self.worker_records
+            .get(parent_id)
+            .and_then(|record| record.spec.launch_manifest.as_ref())
+            .is_some_and(|manifest| manifest.worktree)
     }
 
     fn namespace_write_claim(
@@ -6610,11 +6643,27 @@ impl SubAgentManager {
                 profile
             }
         };
+        // A child spawned from inside an isolated worktree without its own
+        // `worktree`/`cwd` request keeps that worktree (or a path inside it)
+        // as its workspace, so its writes are confined there exactly like its
+        // parent's. Its claim must go on the same isolated footing: namespacing
+        // it against the shared coordination root fails by construction —
+        // worktrees are created as siblings of the checkout
+        // (`resolve_worktree_path` forbids nesting) — so every write-capable
+        // grandchild of a worktree child was refused with "shared writer
+        // workspace ... must remain inside coordination root". Isolation truth
+        // uses the resume path's precedence: the parent's live claim flag,
+        // falling back to its durable launch manifest.
+        let isolated_worktree = options.isolated_worktree
+            || runtime
+                .parent_agent_id
+                .as_deref()
+                .is_some_and(|parent| self.parent_runs_in_isolated_worktree(parent));
         let write_capable = runtime_profile.permissions.write;
         if write_capable {
             // Isolated-worktree children mutate their own checkout, so they
             // do not contend for the shared-workspace process lock (#5036).
-            if !options.isolated_worktree {
+            if !isolated_worktree {
                 self.ensure_coordination_process_lock()
                     .map_err(anyhow::Error::msg)?;
             }
@@ -6635,15 +6684,11 @@ impl SubAgentManager {
                     let claim = if options.claim_pre_namespaced {
                         claim
                     } else {
-                        self.namespace_write_claim(
-                            &agent.workspace,
-                            options.isolated_worktree,
-                            claim,
-                        )?
+                        self.namespace_write_claim(&agent.workspace, isolated_worktree, claim)?
                     };
                     let active_owners = self.active_coordination_owners();
                     self.coordination
-                        .register_claim(claim, options.isolated_worktree, |owner| {
+                        .register_claim(claim, isolated_worktree, |owner| {
                             active_owners.contains(owner)
                         })
                 })
@@ -6690,8 +6735,15 @@ impl SubAgentManager {
             agent.prompt = prompt.clone();
         }
         if let Some(claim) = persisted_claim.as_ref().map(|record| &record.claim) {
+            // An isolated claim's roots are worktree-relative; the ledger
+            // never namespaces them against the coordination root.
+            let anchor = if isolated_worktree {
+                "worktree-relative"
+            } else {
+                "coordination-root-relative"
+            };
             prompt.push_str(&format!(
-                "\n\nWrite scope (enforced; coordination-root-relative): roots={:?}; exact_files={:?}; contracts={:?}. Expand it with agent action=claim before mutating anything outside this scope.",
+                "\n\nWrite scope (enforced; {anchor}): roots={:?}; exact_files={:?}; contracts={:?}. Expand it with agent action=claim before mutating anything outside this scope.",
                 claim.roots, claim.exact_files, claim.contracts
             ));
             agent.prompt = prompt.clone();
@@ -6736,7 +6788,7 @@ impl SubAgentManager {
                 profile: runtime_profile,
                 prompt: prompt.clone(),
                 cwd: Some(agent.workspace.display().to_string()),
-                worktree: options.isolated_worktree,
+                worktree: isolated_worktree,
                 writable_roots: persisted_claim
                     .as_ref()
                     .map(|record| record.claim.roots.clone())
@@ -15720,7 +15772,7 @@ impl SubAgentToolRegistry {
         if !self.posture_permits_tool(name, Some(&input)) {
             if self.allows_bounded_readonly_bash(name) {
                 return Err(anyhow!(
-                    "[shell.readonly.command] Tool {name} input did not match the bounded read-only shell grammar for Fleet role `{role}`. Use read-only inspection commands, or an `implement`/`general` role for mutation or arbitrary execution.",
+                    "[shell.readonly.command] Tool {name} input did not match the bounded read-only shell grammar for Fleet role `{role}`. Admitted: a single read-only command or a pipe of them — git status/log/diff/show/ls-files/blame/grep/rev-parse, git branch --show-current|--list, git worktree list, ls, pwd, cat, head, tail, wc, stat, file, du, df, which, grep, rg, fd, find (no -delete/-exec), sed -n <range>p, sort, uniq, cut, tr, npm view. Not admitted: cd, &&, ;, redirects, $(...), env prefixes, interpreters (python3/node/...), sleep, test. Do not retry variations of a refused shape; use `read`/`file_search` instead, or an `implement`/`general` role for mutation or arbitrary execution.",
                     role = self.agent_type.as_str()
                 ));
             }
@@ -15838,7 +15890,7 @@ impl SubAgentToolRegistry {
                 .is_some_and(|action| matches!(action, "write" | "edit" | "patch")))
             || (name == "pandoc_convert" && input.get("output_path").is_some());
         if scope_aware_write && self.enforce_write_claim {
-            let paths = mutation_paths(name, &input)?;
+            let paths = mutation_paths(name, &input, &self.registry.context().workspace)?;
             if paths.is_empty() {
                 return Err(anyhow!(
                     "Write tool {name} did not expose a bounded repo-relative target for coordination"
@@ -16206,7 +16258,7 @@ fn raw_mutation_target_paths(name: &str, input: &Value) -> Vec<String> {
         .unwrap_or_default()
 }
 
-fn mutation_paths(name: &str, input: &Value) -> Result<Vec<String>> {
+fn mutation_paths(name: &str, input: &Value, workspace: &Path) -> Result<Vec<String>> {
     let raw_paths = if name == "apply_patch"
         || (name == "File" && input.get("action").and_then(Value::as_str) == Some("patch"))
     {
@@ -16228,8 +16280,54 @@ fn mutation_paths(name: &str, input: &Value) -> Result<Vec<String>> {
     };
     raw_paths
         .into_iter()
-        .map(|path| normalize_claim_path(&path).map_err(anyhow::Error::msg))
+        .map(|path| {
+            let path = workspace_relative_mutation_path(workspace, &path);
+            normalize_claim_path(&path).map_err(anyhow::Error::msg)
+        })
         .collect()
+}
+
+/// An absolute target inside the child's workspace names the same file as
+/// its relative form, and that is what the write tool would resolve it to;
+/// the claim ledger speaks repo-relative paths, so strip the workspace
+/// prefix before scope validation instead of refusing the spelling. A target
+/// outside the workspace is handed to the validator untouched and refused
+/// there, as before.
+fn workspace_relative_mutation_path(workspace: &Path, path: &str) -> String {
+    let candidate = Path::new(path.trim());
+    if !candidate.is_absolute() {
+        return path.to_string();
+    }
+    let workspace = normalize_subagent_workspace(workspace);
+    match resolve_absolute_target(candidate).strip_prefix(&workspace) {
+        Ok(relative) => relative.to_string_lossy().into_owned(),
+        Err(_) => path.to_string(),
+    }
+}
+
+/// Canonicalize the deepest existing ancestor of `candidate` (so a symlinked
+/// workspace such as macOS `/var` → `/private/var` compares equal to its
+/// canonical form) and re-append the not-yet-existing tail lexically — a
+/// write may be creating the file.
+fn resolve_absolute_target(candidate: &Path) -> PathBuf {
+    let mut existing = candidate;
+    let mut missing_tail = Vec::new();
+    while !existing.exists() {
+        match (existing.parent(), existing.file_name()) {
+            (Some(parent), Some(name)) => {
+                missing_tail.push(name.to_os_string());
+                existing = parent;
+            }
+            _ => return normalize_path_components(candidate),
+        }
+    }
+    let mut resolved = existing
+        .canonicalize()
+        .unwrap_or_else(|_| normalize_path_components(existing));
+    for name in missing_tail.into_iter().rev() {
+        resolved.push(name);
+    }
+    resolved
 }
 
 fn reject_subagent_terminal_takeover(name: &str, input: &Value) -> Result<()> {

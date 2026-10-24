@@ -12418,6 +12418,68 @@ fn tool_error_messages_include_actionable_hints() {
     );
 }
 
+/// A validation receipt echoes the input schema so the model can repair a
+/// malformed call, but a kilobytes-long schema replayed on every semantic
+/// refusal (live session 2026-10-24: the `agent` schema, ~4.5KB, appended to
+/// eight "agent not found"/contention errors) drowns the one-line cause. Large
+/// schemas are reduced to their field inventory; small ones stay verbatim.
+#[test]
+fn tool_validation_feedback_bounds_oversized_schemas_to_their_field_inventory() {
+    let error = ToolError::invalid_input("Agent not found in the active session");
+    let big_schema = json!({
+        "type": "object",
+        "properties": {
+            "action": {"type": "string", "description": "x".repeat(3000)},
+            "agent_id": {"type": "string"},
+            "prompt": {"type": "string"}
+        },
+        "required": ["action"]
+    });
+    let formatted = format_tool_error_with_schema(&error, "agent", Some(&big_schema));
+    assert!(
+        formatted.len() < big_schema.to_string().len() / 2,
+        "an oversized schema must not be echoed verbatim ({} bytes)",
+        formatted.len()
+    );
+    assert!(
+        formatted
+            .starts_with("Invalid input for tool 'agent': Agent not found in the active session"),
+        "the cause stays first: {formatted}"
+    );
+    assert!(formatted.contains("\"category\":\"invalid_input\""));
+    for field in [
+        "\"action\"",
+        "\"agent_id\"",
+        "\"prompt\"",
+        "\"required\":[\"action\"]",
+    ] {
+        assert!(
+            formatted.contains(field),
+            "field inventory must survive: {formatted}"
+        );
+    }
+    assert!(
+        formatted.contains("omitted from this receipt"),
+        "{formatted}"
+    );
+    assert!(
+        !formatted.contains(&"x".repeat(100)),
+        "schema prose must be dropped"
+    );
+
+    let small_schema = json!({
+        "type": "object",
+        "properties": {"path": {"type": "string", "description": "workspace-relative"}},
+        "required": ["path"]
+    });
+    let formatted = format_tool_error_with_schema(&error, "read", Some(&small_schema));
+    assert!(
+        formatted.contains("workspace-relative"),
+        "small schemas stay verbatim: {formatted}"
+    );
+    assert!(!formatted.contains("omitted"), "{formatted}");
+}
+
 #[test]
 fn execution_failures_are_returned_without_strategy_coaching() {
     let search_error = ToolError::execution_failed("Web search request failed: timeout");
