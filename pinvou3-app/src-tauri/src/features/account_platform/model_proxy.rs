@@ -2071,7 +2071,7 @@ mod cancellation_integration_tests {
         )
     }
     #[tokio::test]
-    async fn real_proxy_abort_and_reclaim_cancel_frozen_usage_and_drop_late_delivery() {
+    async fn real_proxy_explicit_stop_cancels_but_reclaim_only_drops_late_delivery() {
         for reclaim in [false, true] {
             let f = Fixture {
                 id: uuid::Uuid::new_v4(),
@@ -2132,21 +2132,183 @@ mod cancellation_integration_tests {
                 late.is_none() || late.is_some_and(|chunk| chunk.is_err()),
                 "late results escaped cancellation"
             );
-            tokio::time::timeout(Duration::from_secs(3), async {
-                loop {
-                    if *f.reads.lock().unwrap() > 0 {
-                        break;
+            if reclaim {
+                sleep(Duration::from_millis(50)).await;
+                assert_eq!(*f.reads.lock().unwrap(), 0);
+                assert!(f.posts.lock().unwrap().is_empty());
+            } else {
+                tokio::time::timeout(Duration::from_secs(3), async {
+                    while *f.reads.lock().unwrap() == 0 {
+                        sleep(Duration::from_millis(10)).await;
                     }
-                    sleep(Duration::from_millis(10)).await
-                }
-            })
-            .await
-            .unwrap();
-            let keys = f.posts.lock().unwrap();
-            assert_eq!(keys.len(), 2);
-            assert_eq!(keys[0], keys[1]);
+                })
+                .await
+                .unwrap();
+                let keys = f.posts.lock().unwrap();
+                assert_eq!(keys.len(), 2);
+                assert_eq!(keys[0], keys[1]);
+            }
             // Unsupported provider cancellation preserves server PENDING funds;
             // the client only stops delivery and queries the authoritative state.
+            task.abort();
+        }
+    }
+
+    #[tokio::test]
+    async fn real_proxy_transport_loss_and_sse_completion_do_not_request_cancel() {
+        #[derive(Clone)]
+        struct DeliveryFixture {
+            id: uuid::Uuid,
+            mode: &'static str,
+            release: Arc<tokio::sync::Notify>,
+            posts: Arc<Mutex<usize>>,
+            models: Arc<Mutex<Vec<String>>>,
+        }
+        async fn deliver(
+            State(f): State<DeliveryFixture>,
+            headers: axum::http::HeaderMap,
+        ) -> Response<Body> {
+            assert_eq!(headers[header::AUTHORIZATION], "Bearer frozen-user");
+            let key = headers["idempotency-key"].to_str().unwrap().to_owned();
+            assert_eq!(key, "original-transport-operation-key");
+            f.models.lock().unwrap().push(key);
+            let id = f.id;
+            let body = stream::unfold((f, 0), |(f, stage)| async move {
+                if stage == 0 {
+                    let first = if matches!(f.mode, "complete" | "done-marker-drop") {
+                        Bytes::from_static(b"data: [DONE]\n\n")
+                    } else {
+                        Bytes::from_static(b"data: {\"text\":\"partial\"}\n\n")
+                    };
+                    return Some((Ok::<_, io::Error>(first), (f, 1)));
+                }
+                if stage != 1 || f.mode == "complete" {
+                    return None;
+                }
+                f.release.notified().await;
+                match f.mode {
+                    "read-error" => Some((
+                        Err(io::Error::other("controlled upstream read failure")),
+                        (f, 2),
+                    )),
+                    "missing-final" => None,
+                    _ => Some((Ok(Bytes::from_static(b"data: [DONE]\n\n")), (f, 2))),
+                }
+            });
+            Response::builder()
+                .status(StatusCode::OK)
+                .header(header::CONTENT_TYPE, "text/event-stream")
+                .header("X-Pinvou-Usage-Request-ID", id.to_string())
+                .body(Body::from_stream(body))
+                .unwrap()
+        }
+        async fn unwanted_cancel(
+            State(f): State<DeliveryFixture>,
+            Path(id): Path<String>,
+        ) -> Json<serde_json::Value> {
+            assert_eq!(id, f.id.to_string());
+            *f.posts.lock().unwrap() += 1;
+            Json(json!({"usage_request_id": f.id, "cancel_status": "LOCAL_CONFIRMED"}))
+        }
+        async fn observed_usage(State(f): State<DeliveryFixture>) -> Json<serde_json::Value> {
+            Json(
+                json!({"usage_request_id": f.id, "cancel_status": "LOCAL_CONFIRMED", "settlement_status": "PENDING"}),
+            )
+        }
+        for mode in [
+            "read-error",
+            "missing-final",
+            "consumer-drop",
+            "done-marker-drop",
+            "complete",
+        ] {
+            let f = DeliveryFixture {
+                id: uuid::Uuid::new_v4(),
+                mode,
+                release: Arc::new(tokio::sync::Notify::new()),
+                posts: Arc::new(Mutex::new(0)),
+                models: Arc::new(Mutex::new(Vec::new())),
+            };
+            let router = Router::new()
+                .route("/v1/chat/completions", post(deliver))
+                .route("/v1/usage-requests/{id}/cancel", post(unwanted_cancel))
+                .route("/v1/usage-requests/by-idempotency-key", get(observed_usage))
+                .with_state(f.clone());
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let origin = format!("http://{}/v1", listener.local_addr().unwrap());
+            let task = tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
+            let proxy = ModelGatewayProxy::default();
+            let authority = Arc::new(TestTurnAuthority::default());
+            authority.set(Some(11));
+            proxy.bind_turn_authority(authority).unwrap();
+            let base = proxy
+                .register_session("transport-session", &origin, "public-model-id", 128)
+                .await
+                .unwrap();
+            let response = reqwest::Client::new()
+                .post(format!("{base}/chat/completions"))
+                .bearer_auth("frozen-user")
+                .header("Idempotency-Key", "original-transport-operation-key")
+                .json(&json!({"model":"engine-visible-model", "messages":[], "stream":true}))
+                .send()
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::OK);
+            let mut source = response.bytes_stream();
+            let first = source.next().await.unwrap().unwrap();
+            assert!(first.starts_with(b"data:"));
+            if matches!(mode, "consumer-drop" | "done-marker-drop") {
+                drop(source); // A real HTTP consumer disconnect, not a Stop command.
+            } else {
+                f.release.notify_one();
+                let rest = source.collect::<Vec<_>>().await;
+                if mode == "complete" {
+                    assert!(rest.iter().all(Result::is_ok));
+                } else {
+                    assert!(
+                        rest.iter().any(Result::is_err),
+                        "{mode} must actually fail delivery"
+                    );
+                }
+            }
+            sleep(Duration::from_millis(200)).await;
+            assert_eq!(
+                *f.posts.lock().unwrap(),
+                0,
+                "{mode} created a TOK-38 command"
+            );
+            assert_eq!(
+                *f.models.lock().unwrap(),
+                vec!["original-transport-operation-key"]
+            );
+            if mode == "consumer-drop" {
+                // The actual HTTP Delivery is already gone. Explicit Stop in
+                // the transparent retry gap must still address the original.
+                proxy.cancel_turn("transport-session", 11);
+                tokio::time::timeout(Duration::from_secs(3), async {
+                    while *f.posts.lock().unwrap() == 0 {
+                        sleep(Duration::from_millis(10)).await;
+                    }
+                })
+                .await
+                .unwrap();
+                assert_eq!(*f.posts.lock().unwrap(), 1);
+                let retry = reqwest::Client::new()
+                    .post(format!("{base}/chat/completions"))
+                    .bearer_auth("frozen-user")
+                    .header("Idempotency-Key", "original-transport-operation-key")
+                    .json(&json!({"model":"engine-visible-model", "messages":[], "stream":true}))
+                    .send()
+                    .await
+                    .unwrap();
+                assert_eq!(retry.status(), StatusCode::CONFLICT);
+                assert_eq!(
+                    f.models.lock().unwrap().len(),
+                    1,
+                    "Stop must fence model redispatch"
+                );
+            }
+            f.release.notify_one();
             task.abort();
         }
     }
@@ -2284,14 +2446,19 @@ mod cancellation_integration_tests {
                     .windows(6)
                     .any(|part| part == b"[DONE]")
             }));
-            tokio::time::timeout(Duration::from_secs(3), async {
-                while old.posts.lock().unwrap().len() < 2 {
-                    sleep(Duration::from_millis(10)).await;
-                }
-            })
-            .await
-            .unwrap();
-            assert_eq!(old.posts.lock().unwrap().len(), 2);
+            if pre_cancel {
+                tokio::time::timeout(Duration::from_secs(3), async {
+                    while old.posts.lock().unwrap().len() < 2 {
+                        sleep(Duration::from_millis(10)).await;
+                    }
+                })
+                .await
+                .unwrap();
+                assert_eq!(old.posts.lock().unwrap().len(), 2);
+            } else {
+                assert!(old.posts.lock().unwrap().is_empty());
+                assert_eq!(*old.reads.lock().unwrap(), 0);
+            }
             assert!(new.posts.lock().unwrap().is_empty());
             old_task.abort();
             new_task.abort();
