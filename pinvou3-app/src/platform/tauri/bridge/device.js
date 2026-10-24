@@ -301,11 +301,33 @@
   // 作废：不能再发布、不能清旗、也不会压制新拍（round-9 review P2）。
   var devicePollSeq = 0;
 
+  // 陈旧旗（round-22 review P2）：语义 =「最近一次**成功**采样已超过
+  // DEVICE_STALE_AFTER_MS」。必须在桥内持有，不能由视图从 state.device 的
+  // updatedAt 推导——显示等价抑制会把 state.device（连同 updatedAt）冻结在
+  // 最后一次**显示级变化**的时刻（updatedAt 只作"更新于"标签，见
+  // deviceFmtEqual 上方注释），拿冻结时间戳推新鲜度会让空闲机器在轮询完全
+  // 健康时永久亮陈旧旗。边缘触发：只在状态翻转的那一拍 notify（进陈旧一次、
+  // 恢复一次），健康稳态零发布，抑制的全部收益保留。挂死首拍（尚无成功基线）
+  // 退化为按在飞时长计——经典楔死路径（FUSE statvfs）invoke 永不决算，恰好
+  // 是这面旗的原始目标（round-21 review P2）。
+  var DEVICE_STALE_AFTER_MS = 10000; // 五个 2s 拍。
+  var deviceLastSettledAt = 0; // 最近一次成功拍时刻；0 = 本轮尚无成功。
+  var deviceLastAttemptAt = 0; // 最近一次发起 invoke 时刻（首拍挂死时的参照）。
+  function checkDeviceStale(nowMs) {
+    var reference = deviceLastSettledAt || deviceLastAttemptAt;
+    var stale = reference !== 0 && nowMs - reference > DEVICE_STALE_AFTER_MS;
+    if (stale !== !!state.deviceStale) {
+      state.deviceStale = stale;
+      notify();
+    }
+  }
+
   // eslint-disable-next-line sonarjs/cognitive-complexity -- legacy bridge; refactor tracked separately
   async function pollDevice() {
     if (devicePollInFlight) return;
     devicePollInFlight = true;
     var seq = ++devicePollSeq;
+    deviceLastAttemptAt = Date.now();
     try {
       var snap = await invoke("get_device_snapshot");
       // 世代已前进（重启过）→ 本拍整体作废：不发布、不动 state；下面的
@@ -314,7 +336,13 @@
       // The previous round errored → this round must notify once so the
       // "read failed" banner switches back to the normal panel.
       var hadDeviceError = !!state.deviceError;
+      // A stale-flagged round that succeeds must notify once to clear the
+      // badge, even when the payload is display-equivalent (edge-triggered
+      // recovery; see checkDeviceStale above).
+      var wasStale = !!state.deviceStale;
       state.deviceError = null;
+      state.deviceStale = false;
+      deviceLastSettledAt = Date.now();
       var os = snap.os || {};
       snap._fmt = {
         osProductName: os.product_name ? String(os.product_name) : null,
@@ -333,9 +361,10 @@
           ? snap.generated_at_ms : Date.now(),
       };
       // Display-equivalent snapshots neither overwrite state.device nor
-      // notify (must send on the first frame or after an errored round).
+      // notify (must send on the first frame, after an errored round, or to
+      // clear the stale flag).
       var prevFmt = state.device && state.device._fmt;
-      if (hadDeviceError || !prevFmt || !deviceFmtEqual(prevFmt, snap._fmt)) {
+      if (hadDeviceError || wasStale || !prevFmt || !deviceFmtEqual(prevFmt, snap._fmt)) {
         state.device = snap;
         // 主线 #727 收敛为单快照发布,精确域通道已不存在;真正的限频是上面的
         // 结构比较——无变化不下发,变了才走全域 notify。
@@ -362,6 +391,7 @@
     }
   }
 
+  var deviceStaleIntervalId = null;
   function startDevicePolling() {
     if (deviceIntervalId) return;
     // A backend panic can leave devicePollInFlight stuck: the invoke promise
@@ -377,13 +407,28 @@
     devicePollSeq += 1;
     deviceServicesInFlight = false;
     deviceServicesPollSeq += 1;
+    // 陈旧旗计时基线随重启归零：楔死后用户点 Retry，上一轮的旧成功时刻不得
+    // 把新一轮立刻判成陈旧（新 attempt 时刻自带 10s 宽限）。flag 本体由
+    // stopDevicePolling 边缘撤旗。
+    deviceLastSettledAt = 0;
     pollDevice();
     deviceIntervalId = setInterval(pollDevice, 2000);
+    deviceStaleIntervalId = setInterval(function () { checkDeviceStale(Date.now()); }, 1000);
   }
   function stopDevicePolling() {
     if (deviceIntervalId) {
       clearInterval(deviceIntervalId);
       deviceIntervalId = null;
+    }
+    if (deviceStaleIntervalId) {
+      clearInterval(deviceStaleIntervalId);
+      deviceStaleIntervalId = null;
+    }
+    // 离页/重试即边缘撤旗：若带着陈旧旗离开，一次 notify 让视图同步（否则
+    // 重试路径上旗会一直挂到下一拍成功，而等价抑制的成功拍不发布）。
+    if (state.deviceStale) {
+      state.deviceStale = false;
+      notify();
     }
   }
 
@@ -506,7 +551,9 @@
       registerExternalModel: registerExternalModel,
       removeExternalModel: removeExternalModel,
       buildDoctorPrompt: buildDoctorPrompt,
-      deviceFmtEqual: deviceFmtEqual
+      deviceFmtEqual: deviceFmtEqual,
+      // 仅供测试：以注入时钟驱动陈旧旗翻转（device_bridge_format 钉语义）。
+      checkDeviceStale: checkDeviceStale
     };
   };
 })(window);

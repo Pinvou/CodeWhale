@@ -19,8 +19,11 @@ const source = fs.readFileSync(
 // 经 window.__PINVOU_TAURI_BRIDGE_FEATURES__ 注册工厂，直接以受控 context 调用。
 function loadDeviceFeature() {
   const windowObject = { __PINVOU_TAURI_BRIDGE_FEATURES__: {} };
-  let intervalFn = null;
-  let intervalMs = 0;
+  // 可注入时钟：device.js 的 Date.now()（陈旧旗计时、快照世代回退）全部走它，
+  // 陈旧旗语义测试因此可以确定性地"快进"（round-22 review P2）。
+  const clock = { now: 1_700_000_000_000 };
+  const intervals = [];
+  let intervalSeq = 0;
   let startedCount = 0;
   let clearedCount = 0;
   vm.runInNewContext(source, {
@@ -28,10 +31,14 @@ function loadDeviceFeature() {
     console,
     setTimeout,
     clearTimeout,
-    setInterval(fn, ms) { intervalFn = fn; intervalMs = ms; startedCount += 1; return 42; },
-    clearInterval(id) { if (id === 42) clearedCount += 1; intervalFn = null; },
+    Date: { now: () => clock.now },
+    setInterval(fn, ms) { const id = ++intervalSeq; intervals.push({ id, fn, ms }); startedCount += 1; return id; },
+    clearInterval(id) {
+      const index = intervals.findIndex((entry) => entry.id === id);
+      if (index !== -1) { intervals.splice(index, 1); clearedCount += 1; }
+    },
   });
-  const state = { device: null, deviceError: null, deviceServices: null, deviceServicesError: null, externalModels: null };
+  const state = { device: null, deviceStale: false, deviceError: null, deviceServices: null, deviceServicesError: null, externalModels: null };
   let notifyCount = 0;
   const invokes = [];
   let respond = async () => null;
@@ -48,10 +55,13 @@ function loadDeviceFeature() {
     invoke,
   });
   return {
-    api, state, invokes,
+    api, state, invokes, clock,
     setRespond(fn) { respond = fn; },
     notifyCount: () => notifyCount,
-    interval: () => ({ fn: intervalFn, ms: intervalMs, started: startedCount, cleared: clearedCount }),
+    interval: () => ({ started: startedCount, cleared: clearedCount }),
+    // 快照轮询专用的 2s 通道（陈旧旗 checker 是独立的 1s 通道）。
+    pollInterval: () => intervals.find((entry) => entry.ms === 2000),
+    staleInterval: () => intervals.find((entry) => entry.ms === 1000),
   };
 }
 
@@ -480,8 +490,9 @@ assert.doesNotMatch(
   env.setRespond(async () => fixtureSnapshot());
   const before = env.invokes.length;
   env.api.startDevicePolling();
-  assert.equal(env.interval().started, 1);
-  assert.equal(env.interval().ms, 2000, 'device polling must run on the 2s cadence');
+  assert.equal(env.interval().started, 2, 'poll + stale checker run side by side');
+  assert.equal(env.pollInterval().ms, 2000, 'device polling must run on the 2s cadence');
+  assert.equal(env.staleInterval().ms, 1000, 'the stale checker runs on a 1s cadence');
   await flush();
   assert.equal(env.invokes.length, before + 1, 'startDevicePolling must poll immediately');
 
@@ -491,13 +502,70 @@ assert.doesNotMatch(
   assert.equal(env.invokes.length, before + 1);
 
   env.api.stopDevicePolling();
-  assert.equal(env.interval().cleared, 1);
+  assert.equal(env.interval().cleared, 2, 'both intervals must be cleared');
   env.api.stopDevicePolling();
-  assert.equal(env.interval().cleared, 1, 'double stop must stay a no-op');
+  assert.equal(env.interval().cleared, 2, 'double stop must stay a no-op');
   env.api.startDevicePolling();
   await flush();
   assert.equal(env.invokes.length, before + 2, 'restart must resume immediate polling');
   env.api.stopDevicePolling();
+}
+
+// ── 快照陈旧旗（round-22 review P2）：桥内持有、边缘触发 ──────────
+// 语义 =「最近一次成功采样已超过 10s」：健康稳态（2s 一拍持续落地）零发布，
+// 拍停/楔死越线立旗一次，恢复拍（哪怕显示等价）翻旗清零再发布一次。视图从
+// state.device 的 updatedAt 推导会让空闲机器永久亮旗——updatedAt 在抑制下
+// 冻结，只作"更新于"标签。
+{
+  const env = loadDeviceFeature();
+  env.setRespond(async () => fixtureSnapshot());
+  await env.api.pollDevice();
+  assert.equal(env.state.deviceStale, false);
+  const quiet = env.notifyCount();
+  // 健康稳态：checker 在成功拍之间持续触发，永不立旗、零发布。
+  for (let beat = 0; beat < 10; beat += 1) {
+    env.clock.now += 1000;
+    env.api.checkDeviceStale(env.clock.now);
+    env.clock.now += 1000;
+    await env.api.pollDevice();
+  }
+  assert.equal(env.state.deviceStale, false);
+  assert.equal(env.notifyCount(), quiet, 'healthy cadence must stay fully suppressed');
+
+  // 拍停：9s 时仍未越线；越线那一拍立旗且只发布一次；持续陈旧不重复发布。
+  env.clock.now += 9000;
+  env.api.checkDeviceStale(env.clock.now);
+  assert.equal(env.state.deviceStale, false);
+  env.clock.now += 1500;
+  env.api.checkDeviceStale(env.clock.now);
+  assert.equal(env.state.deviceStale, true);
+  assert.equal(env.notifyCount(), quiet + 1, 'entering stale must notify exactly once');
+  env.clock.now += 10_000;
+  env.api.checkDeviceStale(env.clock.now);
+  assert.equal(env.notifyCount(), quiet + 1, 'stale must be edge-triggered');
+
+  // 恢复拍：显示等价的快照也要翻旗清零并发布一次（badge 消失靠它）。
+  await env.api.pollDevice();
+  assert.equal(env.state.deviceStale, false);
+  assert.equal(env.notifyCount(), quiet + 2);
+}
+
+// 首拍即楔死（invoke 永不决算）：无成功基线时按在飞时长计；stop（Retry 路径）
+// 边缘撤旗并发布，让重试前的视图同步。
+{
+  const env = loadDeviceFeature();
+  env.setRespond(() => new Promise(() => {}));
+  void env.api.pollDevice(); // 未决：invoke 永不决算
+  env.clock.now += 9000;
+  env.api.checkDeviceStale(env.clock.now);
+  assert.equal(env.state.deviceStale, false, 'within the grace window nothing flags');
+  env.clock.now += 1500;
+  env.api.checkDeviceStale(env.clock.now);
+  assert.equal(env.state.deviceStale, true, 'wedged first beat must flag on the attempt clock');
+  assert.equal(env.notifyCount(), 1);
+  env.api.stopDevicePolling();
+  assert.equal(env.state.deviceStale, false);
+  assert.equal(env.notifyCount(), 2, 'stop must edge-clear the flag with one notify');
 }
 
 // ── 服务探测 / 外部模型 / 故障排查提示词 ─────────────────────────
@@ -755,10 +823,10 @@ assert.doesNotMatch(
     ? new Promise((resolve, reject) => { deferred.push({ resolve, reject }); })
     : null);
   env.api.startDevicePolling();               // P1 未决（立即拍 + 定时器）
-  assert.equal(env.interval().started, 1);
+  assert.equal(env.interval().started, 2);
   env.api.stopDevicePolling();
   env.api.startDevicePolling();               // 重启：复位卡死旗 + bump 世代 → P2
-  assert.equal(env.interval().started, 2, 'restart must re-establish the interval');
+  assert.equal(env.interval().started, 4, 'restart must re-establish both intervals');
   // 旧拍带着快照晚到：不得发布、不得 notify。
   deferred[0].resolve(fixtureSnapshot());
   await flush();
@@ -767,7 +835,7 @@ assert.doesNotMatch(
   assert.equal(env.notifyCount(), 0, 'stale poll must not notify');
   // 旧拍的 finally 不得清 in-flight 旗：新拍未决期间的重入 tick 必须被吞。
   const invokesBeforeTick = env.invokes.length;
-  await env.interval().fn();
+  await env.pollInterval().fn();
   assert.equal(env.invokes.length, invokesBeforeTick, 'in-flight flag must stay owned by the fresh poll');
   // 新拍正常发布。
   deferred[1].resolve(fixtureSnapshot());
@@ -776,7 +844,7 @@ assert.doesNotMatch(
   assert.equal(env.notifyCount(), 1);
   // 错误路径同理：慢旧拍的错误晚到，不得在恢复后重新点亮横幅。
   // 在拍未决：fire-and-forget，await 会挂住测试（轮询 promise 要到决算才 settle）。
-  void env.interval().fn();                   // P3 未决
+  void env.pollInterval().fn();               // P3 未决
   env.api.stopDevicePolling();
   env.api.startDevicePolling();               // P4；bump → P3 作废
   deferred[2].reject(new Error('stale poll error'));

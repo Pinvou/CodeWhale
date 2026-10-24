@@ -223,6 +223,18 @@ function injectSource() {
         case 'set_active_model': activeModelId = args.id; return Promise.resolve(null);
         case 'list_sessions': return Promise.resolve([]);
         case 'create_session':
+          // ⑥-e 互斥场景开关：挂住物化，让 doctorBusy 跨过一个可观察窗口；
+          // 放行时必须以真实会话对象 resolve（否则 ensureSession 拿到
+          // undefined、静默走 "没发出去" 分支）。
+          if (window.__DEVICE_MGR_TEST__.hangCreateSession) {
+            return new Promise((resolve) => {
+              window.__DEVICE_MGR_TEST__.resolveCreateSession = () => resolve({
+                id: 's-doctor', title: '新对话',
+                created_at: new Date().toISOString(), updated_at: new Date().toISOString(),
+                message_count: 0,
+              });
+            });
+          }
           return Promise.resolve({ id: 's-doctor', title: '新对话', created_at: new Date().toISOString(), updated_at: new Date().toISOString(), message_count: 0 });
         case 'load_session': return Promise.resolve({ metadata: { id: (args && args.id) || 's-doctor' }, messages: [] });
         case 'get_session_persona_events': return Promise.resolve([]);
@@ -231,8 +243,8 @@ function injectSource() {
         case 'get_active_persona': return Promise.resolve(null);
         case 'list_personas': return Promise.resolve([]);
         case 'get_backend_status': return Promise.resolve({ online: true, ok: true, status: 'online' });
-        case 'get_app_version': return Promise.resolve('0.10.6');
-        case 'check_for_update': return Promise.resolve({ available: false, current_version: '0.10.6', latest_version: '0.10.6', notes: '', platform: 'linux' });
+        case 'get_app_version': return Promise.resolve('0.0.0-test');
+        case 'check_for_update': return Promise.resolve({ available: false, current_version: '0.0.0-test', latest_version: '0.0.0-test', notes: '', platform: 'linux' });
         case 'find_resumable_run': return Promise.resolve(null);
         case 'list_scheduled_tasks': return Promise.resolve([]);
         case 'list_scheduled_task_recent_runs': return Promise.resolve([]);
@@ -252,7 +264,7 @@ function injectSource() {
           cpu: { name: 'NVIDIA GB10', total_usage_pct: 12 },
           ram: { total_kib: ${MONITOR_RAM_TOTAL_KIB}, used_kib: ${MONITOR_RAM_USED_KIB}, swap_total_kib: 0, swap_used_kib: 0 },
           gpu: null, vllm: null, self_perf: null,
-          app: { pinvou3_version: '0.10.6', deepseek_tui_version: '0.0.0', session_uptime_secs: 60 },
+          app: { pinvou3_version: '0.0.0-test', deepseek_tui_version: '0.0.0', session_uptime_secs: 60 },
         });
         // ── MegaCube 设备管理命令 ──
         case 'get_device_snapshot':
@@ -565,10 +577,6 @@ async function clickTestId(page, testId) {
     const link = document.querySelector('[data-testid="device-manager-external-row"] [data-testid="device-manager-link"]');
     return !!link && !link.disabled;
   }, { timeout: 8000 });
-  await page.waitForFunction(() => {
-    const link = document.querySelector('[data-testid="device-manager-external-row"] [data-testid="device-manager-link"]');
-    return !!link && !link.disabled;
-  }, { timeout: 8000 });
   await page.evaluate(() => { window.__DEVICE_MGR_TEST__.failSaveModel = false; });
   rec('⑤-c 接入失败出 toast 且 busy 槽释放（重试交给 ⑤-b 的下一次点击）', true, 'save_model fail cycle');
 
@@ -745,6 +753,66 @@ async function clickTestId(page, testId) {
   rec('⑥-c 取消移除收起 armed 面板且不发起删除命令',
     cancelOutcome.armedClosed && cancelOutcome.removeCallsStillOne,
     JSON.stringify({ cancelOutcome }));
+
+  // ⑥-e armed 确认 × doctor 互斥（round-22 review P2）：doctor 一轮在飞（这里
+  // 用挂住的 create_session 制造可观察窗口）必须把 armed 确认按钮/勾选框按住
+  // ——此前 doctorBusy 窗口内确认可点，移除会与排查并发执行。挂住点选在
+  // materializeSession：它发生在 runBrowserUiTransition 之前，页面不会跳走。
+  await page.evaluate(() => {
+    document.querySelector('[data-testid="device-manager-remove"]')?.click();
+  });
+  // 等 400ms 死区过去、确认按钮真正可点（证明随后翻 disabled 是 doctorBusy 臂）。
+  await page.waitForFunction(() => {
+    const confirm = document.querySelector('[data-testid="device-manager-remove-confirm"]');
+    return !!confirm && !confirm.disabled;
+  }, { timeout: 8000 });
+  await page.evaluate(() => { window.__DEVICE_MGR_TEST__.hangCreateSession = true; });
+  await clickTestId(page, 'device-manager-doctor-packages');
+  const mutexHeld = await page.waitForFunction(() => {
+    const confirm = document.querySelector('[data-testid="device-manager-remove-confirm"]');
+    return !!confirm && confirm.disabled;
+  }, { timeout: 8000 }).then(() => true, () => false);
+  // waitForFunction 返回 JSHandle（JSON.stringify 成 {}）：状态一律回 evaluate 取。
+  const mutexState = await page.evaluate(() => ({
+    confirmDisabled: !!document.querySelector('[data-testid="device-manager-remove-confirm"]')?.disabled,
+    checkboxDisabled: (() => {
+      const checkbox = document.querySelector('[data-testid="device-manager-delete-weights"]');
+      return !checkbox || checkbox.disabled;
+    })(),
+    createCalls: window.__DEVICE_MGR_TEST__.callsOf('create_session').length,
+    hasResolver: typeof window.__DEVICE_MGR_TEST__.resolveCreateSession === 'function',
+    view: document.querySelector('[data-testid="app-root"]')?.getAttribute('data-current-view'),
+  }));
+  rec('⑥-e doctor 在飞时 armed 确认与勾选框被按住',
+    mutexHeld && mutexState.confirmDisabled && mutexState.checkboxDisabled,
+    JSON.stringify(mutexState));
+  // 放行后必须照常走完 doctor 流程跳到聊天页（互斥不得卡死排查本身）。
+  await page.evaluate(() => { window.__DEVICE_MGR_TEST__.hangCreateSession = false; });
+  await page.evaluate(() => { window.__DEVICE_MGR_TEST__.resolveCreateSession?.(); });
+  const chatArrived = await page.waitForFunction(
+    () => document.querySelector('[data-testid="app-root"]')?.getAttribute('data-current-view') === 'chat',
+    { timeout: 15000 },
+  ).then(() => true, () => false);
+  if (!chatArrived) {
+    const diag = await page.evaluate(() => ({
+      view: document.querySelector('[data-testid="app-root"]')?.getAttribute('data-current-view'),
+      toast: document.querySelector('[data-testid="model-store-toast"]')?.innerText || null,
+      doctorCardBusy: !!document.querySelector('[data-testid="device-manager-doctor-packages"] .animate-spin'),
+      createCalls: window.__DEVICE_MGR_TEST__.callsOf('create_session').length,
+      chatCalls: window.__DEVICE_MGR_TEST__.callsOf('chat').length,
+      lastCalls: window.__DEVICE_MGR_TEST__.calls.slice(-6).map(c => c.cmd),
+    }));
+    console.error('[smoke][⑥-e diag]', JSON.stringify(diag));
+  }
+  rec('⑥-e 放行后 doctor 照常直达聊天页（互斥不卡死排查）', chatArrived,
+    JSON.stringify({ chatArrived }));
+  // 回到设备页：⑦ 从设备页发起自己的 doctor 点击。
+  await clickNavByLabel(page, '设备管理');
+  await page.waitForFunction(() => document.querySelector('[data-testid="app-root"]')?.getAttribute('data-current-view') === 'monitor', { timeout: 8000 });
+  await page.waitForFunction(() => !!document.querySelector('[data-testid="device-manager-view"]'), { timeout: 8000 });
+  await clickNavByLabel(page, '设备管理');
+  await page.waitForFunction(() => document.querySelector('[data-testid="app-root"]')?.getAttribute('data-current-view') === 'monitor', { timeout: 8000 });
+  await page.waitForFunction(() => !!document.querySelector('[data-testid="device-manager-view"]'), { timeout: 8000 });
 
   // ⑦ 故障排查快捷卡 → device_doctor_prompt + 新建普通会话 + chat 携带提示词。
   const beforeDoctor = await page.evaluate(() => window.__DEVICE_MGR_TEST__.calls.length);

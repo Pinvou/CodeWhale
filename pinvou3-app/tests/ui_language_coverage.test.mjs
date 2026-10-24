@@ -216,7 +216,7 @@ for (const language of ['zh', 'en', 'ja']) {
     23,
     `${language}.uiAuxChat must hold exactly the 23 pinned keys`,
   );
-    // All 106 uiDeviceMgr keys are pinned (PR #1661 评审跟进：三语**同时**删掉一个
+    // All 117 uiDeviceMgr keys are pinned (PR #1661 评审跟进：三语**同时**删掉一个
     // key 时 parity 检查全绿、视图渲染 undefined——uiAuxChat round-14 事故的同款
     // 洞；chipGpuTemp→chipMaxTemp 与评审新增键（servicesStale 随 round-6；
     // peakLabel/linkReasonBridge/linkReasonUnknown/registerNoId 随 round-7）随本

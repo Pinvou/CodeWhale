@@ -3044,8 +3044,19 @@ const App = () => {
         if (!bridge.chat?.sendMessageToSession) return false;
         let usedSid = null;
         try {
-          const sid = lastFailedDoctorSidRef.current
-            || (await bridge.sessions.materializeSession());
+          // 复用前先确认失败会话仍存在（round-22 review P2）：用户可能在两次
+          // 重试之间把那个空会话删掉，死 sid 原样复用会让 sendMessageToSession
+          // 永远撞 targetSessionMissing、catch 再原样塞回 ref——此后每次重试
+          // 必失败直到重启，「请重试」成为死路。会话不在当前列表就清空 ref、
+          // 重新物化（回到上一轮修复前的行为，但仅此一次，不会连环堆积）。
+          let reused = lastFailedDoctorSidRef.current;
+          if (reused && !(bsRef.current?.sessions || []).some(
+            (session) => String(session.id) === reused,
+          )) {
+            lastFailedDoctorSidRef.current = null;
+            reused = null;
+          }
+          const sid = reused || (await bridge.sessions.materializeSession());
           lastFailedDoctorSidRef.current = null;
           if (!sid) return false;
           usedSid = sid;
@@ -3088,8 +3099,12 @@ const App = () => {
             hideMode: 'workspace',
             serialize: true,
             sessionTarget: sid,
-            // materializeSession already left the bridge in the null draft;
-            // the draft observation is ours, not an external divergence.
+            // Baseline null (round-22 review P3 wording fix): materializeSession
+            // actually leaves the bridge's ACTIVE session pointing at the new
+            // sid (ensureSession → switchActiveTo). What we must absorb is the
+            // late-flushed DRAFT render from enterDraft observing the null
+            // draft — without the null baseline that observation classifies as
+            // external and supersedes this transition (round-20 review P2).
             sessionBaseline: null,
           });
           if (sent !== true) lastFailedDoctorSidRef.current = sid;

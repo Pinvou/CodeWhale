@@ -56,9 +56,9 @@ const SERVICES_POLL_MS = 10000;
 // a stale FUSE/network mount — sysinfo 0.36.1 filters nfs/cifs/autofs but keeps
 // fuse.*), the bridge's in-flight guard wedges and the page would keep showing
 // the frozen "updated at" frame as if it were live. The services channel has a
-// three-tick stale flag; the snapshot channel gets this age badge (round-21
-// review P2). 10s = five missed 2s ticks.
-const STALE_AFTER_MS = 10000;
+// three-tick stale flag; the snapshot channel's flag lives in the bridge
+// (`bs.deviceStale`, bridge/device.js checkDeviceStale — introduced round-21,
+// moved out of this component in the round-22 review, see below).
 // Historical fallback only: since the round-9 review the backend backfills
 // base_url on EVERY ollama row (registry and daemon alike) from the settings
 // daemon address, so the `row.base_url ||` arm below always wins in practice.
@@ -749,8 +749,11 @@ const DeviceManagerView = ({ theme, t, bs, onOpenChat, onOpenModelStore }) => {
       showToast(t.uiModelStore.linkBridgeMissing);
       return;
     }
-    // Cross-row mutex entry guard (round-6 review P2): see linkExternal.
-    if (busyKey) return;
+    // Cross-row mutex entry guard (round-6 review P2): see linkExternal. The
+    // doctorBusy half (round-22 review P2): a doctor round in flight spans the
+    // whole LLM completion, and confirmRemove used to slip through that window
+    // (the confirm button below carries the same guard for the click path).
+    if (busyKey || doctorBusy) return;
     setBusyKey(`remove:${rowIdentity(row)}`);
     try {
       let id = row.id;
@@ -907,20 +910,14 @@ const DeviceManagerView = ({ theme, t, bs, onOpenChat, onOpenModelStore }) => {
   const topTemp = maxSensorTemperature(deviceFmt?.sensors);
   const locale = MONITOR_CLOCK_LOCALE[t.langTag] || 'zh-CN';
   // updatedAt is when the data last changed (frozen under display-equivalence
-  // suppression) — exactly what the label should say. No more 10s tick that
-  // re-renders the whole tree without changing a single displayed value.
-  // 1s tick only while a snapshot exists: re-evaluates the snapshot age for the
-  // staleness badge and self-clears once a fresh snapshot lands.
-  const [nowTick, setNowTick] = useState(() => Date.now());
-  const hasSnapshot = Boolean(deviceFmt);
-  useEffect(() => {
-    if (!hasSnapshot) return undefined;
-    const timer = setInterval(() => setNowTick(Date.now()), 1000);
-    return () => clearInterval(timer);
-  }, [hasSnapshot]);
-  const deviceStale = Boolean(
-    deviceFmt && Number.isFinite(deviceFmt.updatedAt) && nowTick - deviceFmt.updatedAt > STALE_AFTER_MS,
-  );
+  // suppression) — exactly what the label should say.
+  // The staleness flag is owned by the bridge (`bs.deviceStale`, bridge/device.js
+  // checkDeviceStale): "no successful sample for >10s", edge-triggered so the
+  // page re-renders only on the flip. The previous view-side derivation read the
+  // frozen updatedAt with a 1s nowTick, which (a) made healthy idle machines
+  // show a permanent "stale" badge and (b) re-rendered this whole tree every
+  // second for a 2-state badge (both round-22 review P2).
+  const deviceStale = Boolean(bs.deviceStale);
   const updatedAtText = deviceFmt && Number.isFinite(deviceFmt.updatedAt)
     ? new Date(deviceFmt.updatedAt).toLocaleTimeString(locale, { hour12: false })
     : null;
@@ -1423,7 +1420,9 @@ const DeviceManagerView = ({ theme, t, bs, onOpenChat, onOpenModelStore }) => {
                                     // button in place, so a double-click's second
                                     // click landing on the checkbox coordinates must
                                     // not silently pre-arm deletion (round-5 review P3).
-                                    disabled={!confirmGateReady}
+                                    // rowBusy/doctorBusy keep the checkbox stable while a
+                                    // removal or a doctor round is in flight (round-22 P2/P3).
+                                    disabled={!confirmGateReady || rowBusy || !!doctorBusy}
                                     onChange={(event) => setDeleteWeights(event.target.checked)}
                                   />
                                   {copy.deleteWeights}
@@ -1437,7 +1436,7 @@ const DeviceManagerView = ({ theme, t, bs, onOpenChat, onOpenModelStore }) => {
                               <MsButton
                                 tone="danger"
                                 busy={busyKey === `remove:${identity}`}
-                                disabled={rowBusy || otherRowBusy || !confirmGateReady}
+                                disabled={rowBusy || otherRowBusy || !confirmGateReady || !!doctorBusy}
                                 onClick={() => confirmRemove(row)}
                                 data-testid="device-manager-remove-confirm"
                               >

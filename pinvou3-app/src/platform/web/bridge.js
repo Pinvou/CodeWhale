@@ -195,6 +195,7 @@ function pinvouSharedweb() {
     // MegaCube 设备管理切片（桌面专属）：Web 恒无 MegaCube，只播种静态空默认
     // 保证 device 域切片逐键有定义（与桌面 STATE_SLICE_FIELDS 同形）。
     device: null,
+    deviceStale: false,
     deviceError: null,
     deviceServices: null,
     deviceServicesError: null,

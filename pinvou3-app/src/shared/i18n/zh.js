@@ -348,7 +348,7 @@ export const dictZh = {
         uiMonitor: { bridgeNotReady:'桥接未就绪', readFailed:'读取失败', reading:'正在读取', configError:'配置异常', unverified:'未验证', authFailed:'鉴权失败', bridgeError:'监控桥接未就绪：请确认打开的是 Tauri 应用窗口', activity:'运行活动' },
         uiDeviceMgr: {
           loading:'正在读取设备信息…', bridgeNotReady:'设备桥接未就绪', errorBanner:'设备状态读取失败', retry:'重试', updatedAtLabel:time=>`更新于 ${time}`,
-           dataStale:'数据可能已过期，正在重试', linkDisabledNoModel:'该记录未登记模型标识，无法接入品悟；请在注册表补上 model 字段', svcReasonTimeout:'请求超时（服务可能未启动）', svcReasonRefused:'连接被拒绝（服务可能未启动）', svcReasonNetwork:'网络异常，无法访问服务', svcReasonClientInit:'HTTP 客户端初始化失败', svcReasonHttp:code=>`服务响应异常（HTTP ${code}）`, svcReasonNotDetected:'未在候选端口探测到服务（连接被拒绝或超时）', svcReasonDockerExit:code=>`docker 命令返回异常（exit ${code}），守护进程可能未运行`, svcReasonDockerUnavailable:'docker 命令不可用（未安装或不在 PATH）', svcReasonDockerTaskFailed:'docker 探测任务失败',
+           dataStale:'数据可能已过期', linkDisabledNoModel:'该记录未登记模型标识，无法接入品悟；请在注册表补上 model 字段', svcReasonTimeout:'请求超时（服务可能未启动）', svcReasonRefused:'连接被拒绝（服务可能未启动）', svcReasonNetwork:'网络异常，无法访问服务', svcReasonClientInit:'HTTP 客户端初始化失败', svcReasonHttp:code=>`服务响应异常（HTTP ${code}）`, svcReasonNotDetected:'未在候选端口探测到服务（连接被拒绝或超时）', svcReasonDockerExit:code=>`docker 命令返回异常（exit ${code}），守护进程可能未运行`, svcReasonDockerUnavailable:'docker 命令不可用（未安装或不在 PATH）', svcReasonDockerTaskFailed:'docker 探测任务失败',
           chipDisk:'系统盘', chipMemory:'内存', chipMaxTemp:'最高温度', chipDriver:'驱动', chipCuda:'CUDA',
           sectionOverview:'运行概览', sectionSensors:'传感器', sectionStorage:'存储', sectionNetwork:'网络', sectionProcesses:'进程', sectionModels:'模型管理', sectionDoctor:'故障排查',
           sensorEmpty:'未读到传感器（普通台式机可能没有）', chipNvme:'固态硬盘', chipWifi:'无线网卡', chipFan:'风扇', chipBoard:'主板温度', chipPower:'电源/功率',

@@ -284,6 +284,20 @@ test('normalizeLoopbackEndpoint：规范化形态稳定', () => {
   assert.equal(normalizeLoopbackEndpoint('http://LOCALHOST:11434/v1'), 'http://localhost:11434/v1');
   assert.equal(normalizeLoopbackEndpoint('http://[::1]:11434/v1'), 'http://[::1]:11434/v1');
   assert.equal(normalizeLoopbackEndpoint('http://127.0.0.1:8000'), 'http://127.0.0.1:8000');
+  // 显式默认端口与省略形态同身份（round-22 评审 P3 补钉）：WHATWG URL 序列化
+  // 本来就会剥掉 scheme 默认端口，这里钉住，防止未来换手工解析时悄悄分叉。
+  assert.equal(
+    normalizeLoopbackEndpoint('http://127.0.0.1:80/v1'),
+    normalizeLoopbackEndpoint('http://127.0.0.1/v1')
+  );
+  assert.deepEqual(
+    findLinkedRowsForEndpoint(
+      [{ id: 'default-port', model: 'qwen3', base_url: 'http://127.0.0.1:80/v1' }],
+      'http://127.0.0.1/v1',
+      'qwen3',
+    ).map((r) => r.id),
+    ['default-port']
+  );
   // query 原样参与身份（十一轮评审 P2）；fragment 不发往服务端，不参与。
   assert.equal(
     normalizeLoopbackEndpoint('http://127.0.0.1:8000/v1?tenant=a'),

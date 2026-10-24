@@ -245,6 +245,9 @@ function renderMarkdown(text) { return pinvouSharedtauriMain().renderMarkdown(te
     monitor: null,
     // MegaCube 设备管理快照（bridge/device.js 轮询组装 _fmt）；非 MegaCube 平台恒 null。
     device: null,
+    // 陈旧旗由 bridge 持有（checkDeviceStale，「最近一次成功采样超 10s」，
+    // 边缘触发 notify）；与显示等价抑制解耦（round-22 review P2）。
+    deviceStale: false,
     deviceError: null,
     deviceServices: null,
     deviceServicesError: null,

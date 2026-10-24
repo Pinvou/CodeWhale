@@ -55,3 +55,22 @@ const purgeStart = sessionsBridge.indexOf('function purgeSessionBuffer');
 assert.ok(purgeStart >= 0, 'purgeSessionBuffer not found in sessions.js');
 const purgeBody = sessionsBridge.slice(purgeStart, purgeStart + 400);
 assert.match(purgeBody, /delete sessionStates\[/, 'real deletion must drop the buffer');
+
+// 真删除路径的 purge 调用点（round-22 评审 P2 补钉）：上一版只钉了
+// purgeSessionBuffer 的函数体——把 applyDeletedSession 里的调用删掉、
+// "已删除会话不得被第 2 把尺子放行"的快失败语义就只剩后端拒绝兜底，本文件
+// 照绿。函数体形状钉：purge 必须先于 sessions 过滤（先清 buffer 再摘列表，
+// 否则中途读取会看到"列表已删、buffer 还在"的放行窗口）。
+const applyStart = chatBridge.indexOf('function applyDeletedSession');
+assert.ok(applyStart >= 0, 'applyDeletedSession not found in shared/bridge-shared-helpers.js');
+let applyNext = chatBridge.indexOf('\n  function ', applyStart + 10);
+if (applyNext === -1) applyNext = chatBridge.length;
+const applyBody = chatBridge.slice(applyStart, applyNext);
+const purgeCallAt = applyBody.indexOf('purgeSessionBuffer(id)');
+const listFilterAt = applyBody.indexOf('state.sessions = state.sessions.filter');
+assert.ok(purgeCallAt !== -1, 'applyDeletedSession must purge the deleted session buffer');
+assert.ok(listFilterAt !== -1, 'applyDeletedSession must filter the session list');
+assert.ok(
+  purgeCallAt < listFilterAt,
+  'the buffer purge must run before the session list is filtered',
+);
