@@ -74,6 +74,56 @@ function completeTokenManagementCopy(translations) {
       },
     },
   };
+  const formulaSelectionCopy = {
+    "zh": {
+      "formulaDirectory": "已发布公式选择",
+      "formulaActiveFilter": "当前结果筛选",
+      "formulaAll": "全部已发布公式",
+      "formulaSearch": "协议代码或公式 UUID（精确匹配）",
+      "formulaSearchAction": "筛选公式",
+      "formulaPageMore": "当前仅显示一页公式，还有下一页；已选公式仍保留。",
+      "formulaPageEnd": "已到当前筛选的最后一页。",
+      "formulaNext": "下一页公式",
+      "formulaRetry": "重试原公式页",
+      "formulaRestart": "重新开始当前筛选",
+      "formulaPageExpired": "公式页已过期，请重新开始当前筛选；已选公式不会自动替换。",
+      "formulaPageFailed": "此公式页未能加载，保留已显示事实；请重试原页或重新筛选。",
+      "formulaSelectionFailed": "无法确认此草稿引用的已发布公式，编辑请求尚未发送。",
+      "formulaSearchEmpty": "当前筛选没有已发布公式。"
+    },
+    "en": {
+      "formulaDirectory": "Published formula selection",
+      "formulaActiveFilter": "Current result filter",
+      "formulaAll": "All published formulas",
+      "formulaSearch": "Protocol code or formula UUID (exact match)",
+      "formulaSearchAction": "Filter formulas",
+      "formulaPageMore": "One formula page is shown; another page is available. The selected formula is retained.",
+      "formulaPageEnd": "This is the last page for the current filter.",
+      "formulaNext": "Next formula page",
+      "formulaRetry": "Retry the same formula page",
+      "formulaRestart": "Restart the current filter",
+      "formulaPageExpired": "The formula page expired. Restart this filter; the selected formula is not replaced automatically.",
+      "formulaPageFailed": "This formula page could not load. Displayed facts are retained; retry the same page or filter again.",
+      "formulaSelectionFailed": "The published formula referenced by this draft could not be confirmed. No edit request was sent.",
+      "formulaSearchEmpty": "No published formula matches this filter."
+    },
+    "ja": {
+      "formulaDirectory": "公開済み式の選択",
+      "formulaActiveFilter": "現在の結果条件",
+      "formulaAll": "すべての公開済み式",
+      "formulaSearch": "プロトコルコードまたは式 UUID（完全一致）",
+      "formulaSearchAction": "式を絞り込む",
+      "formulaPageMore": "式の1ページを表示しています。次のページがあります。選択済みの式は保持されます。",
+      "formulaPageEnd": "現在の条件の最終ページです。",
+      "formulaNext": "式の次のページ",
+      "formulaRetry": "同じ式ページを再試行",
+      "formulaRestart": "現在の条件で最初から読み込む",
+      "formulaPageExpired": "式ページの期限が切れました。現在の条件で再開してください。選択済みの式は自動変更されません。",
+      "formulaPageFailed": "この式ページを読み込めません。表示済みの情報は保持されます。同じページを再試行するか条件を変更してください。",
+      "formulaSelectionFailed": "ドラフトが参照する公開済みの式を確認できません。編集リクエストは送信されていません。",
+      "formulaSearchEmpty": "現在の条件に一致する公開済みの式はありません。"
+    }
+  };
   for (const language of ['zh', 'en', 'ja']) {
     const copy = translations[language].modelToken;
     const provisioningCopy = {
@@ -86,7 +136,7 @@ function completeTokenManagementCopy(translations) {
     copy.pageOverviews.unavailable.modelOperations = provisioningCopy.unavailable;
 
     const { pricingControls, ...modelAdditions } = additions[language];
-    Object.assign(translations[language].pricingLifecycle, pricingControls);
+    Object.assign(translations[language].pricingLifecycle, pricingControls, formulaSelectionCopy[language]);
     Object.assign(copy, modelAdditions, { enumLabels: { ...copy.enumLabels, ...additions[language].enumLabels }, commandErrors: { ...copy.commandErrors, ...additions[language].commandErrors } });
   }
   return translations;
