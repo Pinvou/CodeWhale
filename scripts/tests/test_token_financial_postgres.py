@@ -48,6 +48,29 @@ class FinancialPostgresRunnerTests(unittest.TestCase):
                 with self.subTest(missing=missing), self.assertRaises(RuntimeError):
                     RUNNER.verify_results([event for event in events if not event.get("Test", "").startswith(missing)], required, package=package)
 
+    def test_zero_budget_release_and_cancellation_roots_are_selected_and_fail_closed(self):
+        for root, required, package, children in [
+            ("TestPersonalZeroBudgetHoldReleasePostgres", RUNNER.RETAINED_REQUIRED,
+             RUNNER.BILLING_PACKAGE, RUNNER.BILLING_CHILD_REQUIRED),
+            ("TestPersonalZeroBudgetCancellationAndExpiryPostgres", RUNNER.REQUIRED,
+             RUNNER.TOKEN_PACKAGE, RUNNER.TOKEN_CHILD_REQUIRED),
+        ]:
+            self.assertIn(root, required)
+            self.assertIn(root, children)
+            events = self.events(required, package, children=True)
+            options = {"package": package, "exact_roots": True,
+                       "require_children": True, "children_required": children}
+            RUNNER.verify_results(events, required, **options)
+            for invalid in [
+                [event for event in events if event.get("Test", "").split("/", 1)[0] != root],
+                [event for event in events if not event.get("Test", "").startswith(root + "/")],
+                events + [{"Action": "skip", "Package": package, "Test": root}],
+                events + [{"Action": "skip", "Package": package, "Test": root + "/actual"}],
+            ]:
+                with self.subTest(root=root), self.assertRaises(RuntimeError):
+                    RUNNER.verify_results(invalid, required, **options)
+
+
     def test_disposable_loopback_url(self):
         raw = "postgres://postgres@127.0.0.1:5433/postgres?sslmode=disable"
         self.assertEqual(RUNNER.local_database_url(raw), raw)
@@ -464,7 +487,10 @@ class FinancialPostgresRunnerTests(unittest.TestCase):
                         RUNNER.verify_results(missing, roots, package=package, require_children=True, exact_roots=True)
 
     def test_actual_main_requires_token_waiver_children(self):
-        self.assertEqual(RUNNER.TOKEN_CHILD_REQUIRED, {"TestUsageWaiverCoordinatorRecoveryPostgres"})
+        self.assertEqual(
+            RUNNER.TOKEN_CHILD_REQUIRED,
+            {"TestUsageWaiverCoordinatorRecoveryPostgres", "TestPersonalZeroBudgetCancellationAndExpiryPostgres"},
+        )
         with self.assertRaisesRegex(RuntimeError, "no completed child"):
             self.run_main_fixture(missing_token_children=True)
         self.assertEqual(self.fixture_phases[-1], "retained-token")
@@ -746,7 +772,7 @@ class FinancialPostgresRunnerTests(unittest.TestCase):
         }
         self.assertEqual(RUNNER.REFUND_REQUIRED, expected)
         self.assertTrue(expected <= RUNNER.RETAINED_REQUIRED)
-        self.assertEqual(len(RUNNER.RETAINED_REQUIRED), 34)
+        self.assertEqual(len(RUNNER.RETAINED_REQUIRED), 35)
         valid = self.events(RUNNER.RETAINED_REQUIRED, RUNNER.BILLING_PACKAGE, children=True)
         options = {"package": RUNNER.BILLING_PACKAGE, "require_children": True, "exact_roots": True,
                    "children_required": RUNNER.BILLING_CHILD_REQUIRED}

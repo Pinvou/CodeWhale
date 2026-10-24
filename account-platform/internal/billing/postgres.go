@@ -314,6 +314,25 @@ func releasePackageAllocations(ctx context.Context, tx pgx.Tx, holdID uuid.UUID,
 	if err != nil {
 		return err
 	}
+	// A personal free request legitimately reserves no allocation buckets.
+	// Check all rows, not just unreleased ones: historical/corrupt allocations
+	// must not be mistaken for the empty reservation created by Reserve(0).
+	if !memberScoped {
+		var personalZero, allocationFree bool
+		err := tx.QueryRow(ctx, `SELECT w.owner_type='PERSONAL' AND h.max_microcredits=0,
+NOT EXISTS(SELECT 1 FROM usage_hold_allocations WHERE hold_id=h.id)
+AND NOT EXISTS(SELECT 1 FROM member_quota_hold_allocations WHERE hold_id=h.id)
+FROM usage_holds h JOIN wallets w ON w.id=h.wallet_id WHERE h.id=$1`, holdID).Scan(&personalZero, &allocationFree)
+		if err != nil {
+			return err
+		}
+		if personalZero {
+			if !allocationFree {
+				return ErrConflict
+			}
+			return nil
+		}
+	}
 	var memberCount int64
 	if err := tx.QueryRow(ctx, `SELECT count(*) FROM member_quota_hold_allocations WHERE hold_id=$1 AND settled_microcredits=0 AND released_microcredits=0`, holdID).Scan(&memberCount); err != nil {
 		return err
