@@ -487,6 +487,9 @@ func (s *Service) refreshSession(ctx context.Context, session Session) (Session,
 		return Session{}, err
 	}
 	for {
+		if err := waitCtx.Err(); err != nil {
+			return Session{}, err
+		}
 		locked, err := s.store.TryRefreshLock(waitCtx, session.ID, owner)
 		if err != nil {
 			return Session{}, err
@@ -497,7 +500,13 @@ func (s *Service) refreshSession(ctx context.Context, session Session) (Session,
 				defer cancel()
 				_ = s.store.ReleaseRefreshLock(releaseCtx, session.ID, owner)
 			}()
-			ctx, cancel := context.WithTimeout(ctx, 20*time.Second)
+			if err := waitCtx.Err(); err != nil {
+				return Session{}, err
+			}
+			// Once admitted, finish rotation and persistence within the existing budget:
+			// disconnecting the browser must not discard a single-use refresh token.
+			// Store owner/CAS and logout fences still decide whether it may be saved.
+			ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 20*time.Second)
 			defer cancel()
 			latest, err := s.store.GetSession(ctx, session.ID)
 			if err != nil || latest.AccessExpiresAt.After(s.now().Add(30*time.Second)) {
