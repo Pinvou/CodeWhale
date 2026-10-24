@@ -21,7 +21,8 @@ const chatSource = readFileSync(new URL('../src/features/chat/ChatView.jsx', imp
 test('startup gates remain active in desktop and web production builds', () => {
   // Official's measured budget (see vite.config.mjs history): the #484 backflow
   // keeps the current ceiling; a raise requires fresh desktop + web
-  // measurements on the merged tree per policy.
+  // measurements on the merged tree per policy. The #773 backflow was measured
+  // under this ceiling and needed no raise (see the config comment).
   assert.equal(MAIN_ENTRY_BUDGET_BYTES, 496_000);
   for (const mode of ['production', 'web']) {
     const config = createViteConfig({ command: 'build', mode });

@@ -106,7 +106,11 @@ const expectedProtocolHashes = {
   // the domain bodies live in this module and the hash was recomputed for the
   // self-contained Official-lane file.
   auxChat: '559070c284d5738a8fb60664487eb1ce96e766b92fcd786e8baa9dc7a8d461a8',
-  multiAgent: '6896409bb406f1ba54ca496dd78c04549cc78ff5490ae771d9cf60586368a8a8',
+  multiAgent: 'bebb01cb6a970146dd5b6a52679e35dce2d6ed9542171817fc1feadb12bb5561',
+  // Recomputed for the subagent status flicker fix (community #773): the
+  // agent_progress listen forwards the structured worker_status token (same
+  // vocabulary as the worker ledger) alongside the legacy free-text phrase —
+  // no new invoke or listen entries, payload-internal edit only.
   // Recomputed for the rebind wave (community #463): bridge.js's wholesale
   // artifact save now rewrites SavedSession.artifacts[].storage_path along
   // the workspace_rebound mark's segment chain (rebaseArtifactPathsForRebind,
