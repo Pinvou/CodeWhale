@@ -203,7 +203,19 @@ function remoteProxySystemBody(item) {
 
 function remoteActionFailureCode(failure) {
   const candidate = failure?.code || failure?.message || failure;
-  return String(candidate || '') === 'result_unknown' ? 'result_unknown' : 'errorGeneric';
+  const code = String(candidate || '');
+  return remoteActionFailureCopyKey(code) !== 'actionFailed' ? code : 'errorGeneric';
+}
+
+function remoteActionFailureCopyKey(code) {
+  switch (code) {
+    case 'result_unknown': return 'actionResultUnknown';
+    case 'remote_attachment_count_invalid': return 'attachmentCountInvalid';
+    case 'remote_attachment_size_invalid': return 'attachmentSizeInvalid';
+    case 'remote_attachment_total_size_invalid': return 'attachmentTotalSizeInvalid';
+    case 'remote_attachment_metadata_invalid': return 'attachmentMetadataInvalid';
+    default: return 'actionFailed';
+  }
 }
 
 function constrainDialogFocus(event, dialog) {
@@ -1087,7 +1099,9 @@ const openChatExternalUrl = (url) => {
       const remoteCapabilityRequesterRef = useRef(null);
       const [remoteSendError, setRemoteSendError] = useState(null);
       const [remoteDispatchRevision, setRemoteDispatchRevision] = useState(0);
-      const [remoteDispatchAction, setRemoteDispatchAction] = useState(null);
+      const [remoteDispatchOperation, setRemoteDispatchOperation] = useState(null);
+      const [remoteActionGuard] = useState(createRemoteTransferGuard);
+      const remoteActionOwnerRef = useRef(null);
       const [remoteDispatchActionError, setRemoteDispatchActionError] = useState(null);
       const [remoteFiles, setRemoteFiles] = useState([]);
       const [remoteMode, setRemoteMode] = useState('chat');
@@ -1124,6 +1138,23 @@ const openChatExternalUrl = (url) => {
       const remoteComposerIdentityRef = useRef(remoteComposerIdentity);
       // eslint-disable-next-line react-hooks/refs -- failed sends restore only the current draft owner
       remoteComposerIdentityRef.current = remoteComposerIdentity;
+      const remoteDispatchAction = remoteDispatchOperation?.identity === remoteSendIdentity
+        ? remoteDispatchOperation : null;
+      useEffect(() => {
+        // A lease/revision change retires UI ownership, not the durable task.
+        // A new operation may already own the slot when this effect runs.
+        if (remoteActionOwnerRef.current?.identity !== remoteSendIdentity) {
+          remoteActionGuard.invalidate();
+          remoteActionOwnerRef.current = null;
+        }
+        setRemoteDispatchOperation(current => current?.identity === remoteSendIdentity ? current : null);
+        setRemoteDispatchActionError(current => current?.identity === remoteSendIdentity ? current : null);
+        setRemoteTransfer(current => current?.owner?.identity === remoteSendIdentity ? current : null);
+      }, [remoteSendIdentity, remoteActionGuard]);
+      useEffect(() => () => {
+        remoteActionGuard.invalidate();
+        remoteActionOwnerRef.current = null;
+      }, [remoteActionGuard]);
       useEffect(() => {
         setRemoteSendError(current => (
           current && current.identity !== remoteSendIdentity ? null : current
@@ -1479,6 +1510,12 @@ const openChatExternalUrl = (url) => {
         : (controlledChatActive
           ? (localBusy || controlledCapabilityBusy || !controlledCapabilityBound)
           : localBusy);
+      const controlledDispatchReady = controlledLinkReady && controlledCapabilityBound && !controlledCapabilityBusy;
+      useEffect(() => {
+        if (!controlledDispatchReady) return;
+        setRemoteSendError(current => current?.identity === remoteSendIdentity
+          && current.code === 'remote_capability_not_ready' ? null : current);
+      }, [controlledDispatchReady, remoteSendIdentity]);
       // Capability refresh/readiness may block sending without representing an
       // active turn. A follows its authenticated remote task; B follows only
       // the actual local generation state so completed turns stay done.
@@ -2772,7 +2809,10 @@ const openChatExternalUrl = (url) => {
         if (!bridge.available) return false;
         const outgoing = String(text || '').trim();
         if (controlledChatActive && !remoteChatActive) {
-          if (!controlledLinkReady || !controlledCapabilityBound || controlledCapabilityBusy) return false;
+          if (!controlledDispatchReady) {
+            setRemoteSendError({ identity: remoteSendIdentity, code: 'remote_capability_not_ready' });
+            return false;
+          }
           const sendIdentity = remoteSendIdentity;
           const readyAttachments = attachments.filter(attachment => (
             attachment?.status === 'ready' && attachment.result
@@ -3121,18 +3161,38 @@ const openChatExternalUrl = (url) => {
       const currentRemoteSendError = remoteSendError?.identity === remoteSendIdentity
         ? remoteSendError.code
         : null;
-      const activeRemoteDispatchError = remoteDispatchActionError?.localSessionId === activeSessionId
+      const activeRemoteDispatchError = remoteDispatchActionError?.identity === remoteSendIdentity
         ? remoteDispatchActionError.code : null;
+      function beginRemoteAction() {
+        if (!remoteSendIdentity || remoteSendIdentity !== remoteSendIdentityRef.current
+          || remoteActionGuard.isCurrent(remoteActionOwnerRef.current, remoteSendIdentity)) return null;
+        const operation = remoteActionGuard.start(remoteSendIdentity);
+        remoteActionOwnerRef.current = operation;
+        setRemoteDispatchOperation(operation);
+        return operation;
+      }
+      function isCurrentRemoteAction(operation) {
+        return remoteActionGuard.isCurrent(operation, remoteSendIdentityRef.current);
+      }
+      function finishRemoteAction(operation) {
+        remoteActionGuard.finish(operation);
+        if (remoteActionOwnerRef.current === operation) remoteActionOwnerRef.current = null;
+        // Retired transfer guards may no longer finish, but their UI slot must
+        // still be released. Object identity never clears a successor's slot.
+        setRemoteDispatchOperation(current => current === operation ? null : current);
+      }
       async function commitPreparedRemoteTask(item) {
         if (item.origin !== 'process' || item.state !== 'prepared_not_sent'
           || !item.handle || !remoteDispatchReady || !remoteBinding
           || item.localSessionId !== remoteBinding.localSessionId
           || item.remoteRef !== remoteBinding.remoteRef
           || item.identity !== remoteSendIdentity) return;
-        setRemoteDispatchAction(item.taskId);
+        const operation = beginRemoteAction();
+        if (!operation) return;
         setRemoteDispatchActionError(null);
         const transferAttempt = remoteTransferGuard.start(item.identity);
-        const currentTransfer = () => remoteTransferGuard.isCurrent(transferAttempt, remoteSendIdentityRef.current);
+        const currentTransfer = () => remoteTransferGuard.isCurrent(transferAttempt, remoteSendIdentityRef.current)
+          && isCurrentRemoteAction(operation);
         try {
           const preparedFiles = remotePreparedFiles?.taskId === item.taskId ? remotePreparedFiles : null;
           let attachmentIds = preparedFiles?.attachmentIds || [];
@@ -3157,23 +3217,24 @@ const openChatExternalUrl = (url) => {
           recordRemoteDispatch(item.localSessionId, item.remoteRef, item.identity, item.text,
             sameHandle ? report : { state: 'outcome_unknown', retryHandle: item.handle },
             remoteProxyHistory);
-          if (currentTransfer()) {
+          if (currentTransfer() && isCurrentRemoteAction(operation)) {
             setRemotePreparedFiles(null);
             setRemoteFiles(current => current === remoteFiles ? [] : current);
           }
           setRemoteDispatchRevision(value => value + 1);
         } catch (failure) {
-          if (currentTransfer()) setRemoteDispatchActionError({ localSessionId: item.localSessionId, code: String(failure?.code || 'errorGeneric') });
+          if (isCurrentRemoteAction(operation)) setRemoteDispatchActionError({ identity: operation.identity, code: String(failure?.code || 'errorGeneric') });
         } finally {
           if (remoteTransferGuard.finish(transferAttempt)) {
             setRemoteTransfer(current => current?.owner === transferAttempt ? null : current);
-            setRemoteDispatchAction(current => current === item.taskId ? null : current);
           }
+          finishRemoteAction(operation);
         }
       }
       async function abandonRemoteTask(item) {
         if (item.state !== 'prepared_not_sent' || !item.handle) return;
-        setRemoteDispatchAction(item.taskId);
+        const operation = beginRemoteAction();
+        if (!operation) return;
         setRemoteDispatchActionError(null);
         try {
           await bridge.desktopRemoteControl.abandonRemoteTask(
@@ -3184,20 +3245,25 @@ const openChatExternalUrl = (url) => {
             bridge.chat.restoreTaskDraft(item.text, { sessionId: item.localSessionId, restored: false });
           }
           setRemoteDispatchRevision(value => value + 1);
-          setRemotePreparedFiles(current => current?.taskId === item.taskId ? null : current);
+          if (isCurrentRemoteAction(operation)) {
+            setRemotePreparedFiles(current => current?.taskId === item.taskId ? null : current);
+          }
           void bridge.desktopRemoteControl.readRemoteProxyHistory(item.localSessionId).catch(() => {});
         } catch (failure) {
           markRemoteDispatchPayloadLost(item.localSessionId, item.taskId);
           await bridge.desktopRemoteControl.readRemoteProxyHistory(item.localSessionId).catch(() => null);
           setRemoteDispatchRevision(value => value + 1);
-          setRemoteDispatchActionError({ localSessionId: item.localSessionId, code: String(failure?.code || 'errorGeneric') });
+          if (isCurrentRemoteAction(operation)) {
+            setRemoteDispatchActionError({ identity: operation.identity, code: String(failure?.code || 'errorGeneric') });
+          }
         } finally {
-          setRemoteDispatchAction(null);
+          finishRemoteAction(operation);
         }
       }
       async function cancelCurrentRemoteTask() {
         if (!remoteBinding || !currentRemoteTaskId || remoteDispatchAction) return;
-        setRemoteDispatchAction(currentRemoteTaskId);
+        const operation = beginRemoteAction();
+        if (!operation) return;
         setRemoteDispatchActionError(null);
         try {
           await bridge.desktopRemoteControl.cancelRemoteTask(
@@ -3205,9 +3271,11 @@ const openChatExternalUrl = (url) => {
           );
           await bridge.desktopRemoteControl.readRemoteProxyHistory(remoteBinding.localSessionId).catch(() => null);
         } catch (failure) {
-          setRemoteDispatchActionError({ localSessionId: remoteBinding.localSessionId, code: String(failure?.code || 'errorGeneric') });
+          if (isCurrentRemoteAction(operation)) {
+            setRemoteDispatchActionError({ identity: operation.identity, code: String(failure?.code || 'errorGeneric') });
+          }
         } finally {
-          setRemoteDispatchAction(null);
+          finishRemoteAction(operation);
         }
       }
       function selectRemoteFiles(event) {
@@ -3215,41 +3283,47 @@ const openChatExternalUrl = (url) => {
           setRemoteFiles(validateRemoteFiles(event.target.files));
           setRemoteActionError(null);
         } catch (failure) {
-          setRemoteActionError(String(failure?.message || 'remote_attachment_invalid'));
+          setRemoteActionError(remoteActionFailureCode(failure));
         } finally {
           event.target.value = '';
         }
       }
       async function decideRemotePermission(permission, decision) {
         if (!remoteBinding || permission.state !== 'pending') return;
-        setRemoteDispatchAction(permission.permissionRequestId);
+        const operation = beginRemoteAction();
+        if (!operation) return;
         setRemoteActionError(null);
         try {
           await bridge.desktopRemoteControl.permissionDecide(
             remoteBinding.localSessionId, remoteBinding.remoteRef, permission.taskId,
             permission.permissionRequestId, decision,
           );
-          setRemotePermissions(current => current.filter(item => item.permissionRequestId !== permission.permissionRequestId));
+          if (isCurrentRemoteAction(operation)) {
+            setRemotePermissions(current => current.filter(item => item.permissionRequestId !== permission.permissionRequestId));
+          }
         } catch (failure) {
-          setRemoteActionError(remoteActionFailureCode(failure));
+          if (isCurrentRemoteAction(operation)) setRemoteActionError(remoteActionFailureCode(failure));
         } finally {
-          setRemoteDispatchAction(null);
+          finishRemoteAction(operation);
         }
       }
       async function previewRemoteArtifact(artifact) {
         if (!remoteBinding) return;
         remoteArtifactPreviewTriggerRef.current = document.activeElement;
-        setRemoteDispatchAction(artifact.artifactId);
+        const operation = beginRemoteAction();
+        if (!operation) return;
         setRemoteActionError(null);
         try {
           const preview = await bridge.desktopRemoteControl.artifactPreview(
             remoteBinding.localSessionId, remoteBinding.remoteRef, artifact.artifactId,
           );
-          setRemoteArtifactPreview({ ...preview, displayName: artifact.displayName });
+          if (isCurrentRemoteAction(operation)) {
+            setRemoteArtifactPreview({ ...preview, displayName: artifact.displayName });
+          }
         } catch (failure) {
-          setRemoteActionError(remoteActionFailureCode(failure));
+          if (isCurrentRemoteAction(operation)) setRemoteActionError(remoteActionFailureCode(failure));
         } finally {
-          setRemoteDispatchAction(null);
+          finishRemoteAction(operation);
         }
       }
       function closeRemoteArtifactPreview() {
@@ -3257,19 +3331,24 @@ const openChatExternalUrl = (url) => {
       }
       async function saveRemoteArtifact(artifact) {
         if (!remoteBinding) return;
-        setRemoteDispatchAction(artifact.artifactId);
+        const operation = beginRemoteAction();
+        if (!operation) return;
         setRemoteActionError(null);
         try {
           const blob = await downloadRemoteArtifact(bridge.desktopRemoteControl, remoteBinding, artifact);
+          // The user already requested this exact file. Retiring its UI slot
+          // does not cancel delivery or redirect it to the selected session.
           saveRemoteArtifactBlob(blob, artifact.displayName);
         } catch (failure) {
-          setRemoteActionError(remoteActionFailureCode(failure));
+          if (isCurrentRemoteAction(operation)) setRemoteActionError(remoteActionFailureCode(failure));
         } finally {
-          setRemoteDispatchAction(null);
+          finishRemoteAction(operation);
         }
       }
       const remoteSendMessage = remotePermissionFailureText(currentRemoteSendError, t.remoteConversation)
-        ?? (currentRemoteSendError === 'remote_proxy_byte_budget'
+        ?? (currentRemoteSendError === 'remote_capability_not_ready'
+        ? t.remoteConversation.capabilityNotReady
+        : currentRemoteSendError === 'remote_proxy_byte_budget'
         ? t.remoteArchive.byteBudget
         : currentRemoteSendError === 'task_session_busy'
         ? t.remoteConversation.sessionBusy
@@ -3893,8 +3972,11 @@ const openChatExternalUrl = (url) => {
           isMultiAgentReadOnly
           || !canSend
           || (remoteChatActive && !remoteNewDispatchReady)
-          || (controlledChatActive && !remoteChatActive && !controlledLinkReady)
         ) return;
+        if (controlledChatActive && !remoteChatActive && !controlledDispatchReady) {
+          setRemoteSendError({ identity: remoteSendIdentity, code: 'remote_capability_not_ready' });
+          return;
+        }
         if (chatVoice && chatVoice.editPreview) {
           await chatVoice.applyVoiceEditPreview({ send: true });
           return;
@@ -4675,6 +4757,12 @@ const openChatExternalUrl = (url) => {
               </div>
             )}
 
+            {controlledChatActive && !remoteChatActive && !controlledDispatchReady && (
+              <div role="status" data-testid="chat-remote-capability-not-ready" className="mb-4 px-5 text-[12px] opacity-70">
+                {t.remoteConversation.capabilityNotReady}
+              </div>
+            )}
+
             {remoteChatActive && bs?.remoteProxyDraftError === activeSessionId && (
               <div role="alert" className={`mb-4 w-full max-w-[800px] px-5 text-[12px] text-[#EA4335] max-sm:px-4 ${hasMessages ? 'mx-auto' : ''}`}>
                 {t.remoteConversation.draftCapacityExceeded}
@@ -4797,9 +4885,7 @@ const openChatExternalUrl = (url) => {
 
             {remoteChatActive && remoteActionError && (
               <div role="alert" data-testid="chat-remote-action-error" className={`mb-4 w-full max-w-[800px] px-5 text-[12px] text-[#EA4335] max-sm:px-4 ${hasMessages ? 'mx-auto' : ''}`}>
-                {remoteActionError === 'result_unknown'
-                  ? t.remoteConversation.actionResultUnknown
-                  : t.remoteConversation.actionFailed}
+                {t.remoteConversation[remoteActionFailureCopyKey(remoteActionError)]}
               </div>
             )}
 
@@ -5549,7 +5635,7 @@ const openChatExternalUrl = (url) => {
                     && !sceneCapabilityPreparing
                     && !chatVoice.editPreview
                     && (!remoteChatActive || remoteNewDispatchReady)
-                    && (!controlledChatActive || remoteChatActive || controlledLinkReady);
+                    && (!controlledChatActive || remoteChatActive || controlledDispatchReady);
                   const isQueue = busy && ready;
                   return (
                     <div className="flex items-center gap-1">
@@ -5561,8 +5647,8 @@ const openChatExternalUrl = (url) => {
                       )}
                       {(!busy || hasDraftText || hasReadyAttachment || hasSessionRefs) && (
                         <button type="button" data-testid="chat-composer-send" onClick={handleSend} disabled={!ready}
-                          aria-label={busy ? t.queueMsg : t.sendMsg}
-                          title={busy ? (can('interruptSend') ? t.queueMsgTip : t.queueMsg) : t.sendMsg}
+                          aria-label={isQueue ? t.queueMsg : t.sendMsg}
+                          title={isQueue ? (can('interruptSend') ? t.queueMsgTip : t.queueMsg) : t.sendMsg}
                           className={`w-9 h-9 shrink-0 rounded-full flex items-center justify-center transition-all ${ready ? (isQueue ? 'bg-gradient-to-b from-[#47A1FF] to-[#007AFF] text-white shadow-md ring-2 ring-amber-300 dark:ring-amber-400' : 'bg-gradient-to-b from-[#47A1FF] to-[#007AFF] text-white shadow-md hover:-translate-y-0.5 active:translate-y-0') : 'bg-black/5 dark:bg-white/10 text-gray-400 cursor-not-allowed'}`}>
                           <Send size={17} className="translate-x-[1px]" />
                         </button>
