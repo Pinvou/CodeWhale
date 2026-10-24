@@ -34,6 +34,13 @@ export function ownerCandidateQuery(ownerType, query = {}, organizationID = '') 
   };
 }
 
+export function tokenOwnerOrganizationSelection(ownerType, organizationID, selected) {
+  if (ownerType !== 'UNIT' || !uuidPattern.test(String(organizationID || ''))) return null;
+  // Navigation owns the parent identity; the local selection only caches its label.
+  if (selected?.type === 'ORGANIZATION' && selected.id === organizationID) return selected;
+  return { id: organizationID, type: 'ORGANIZATION', display_label: organizationID };
+}
+
 export function tokenAccountCreateInput({ candidate, organization, name, priority = 100 }) {
   if (!candidate || !uuidPattern.test(String(candidate.id || '')) || candidate.status !== 'ACTIVE') return null;
   const displayName = String(name || '').trim();

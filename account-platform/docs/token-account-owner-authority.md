@@ -8,6 +8,14 @@
 
 Token 创建保留 `validOwner` 的 USER/ORG/ORG_UNIT 与 `validShareScope` 的既有验证，移除额外 USER-only 裁剪；不新增分享范围或成员管理写入口。EXPLICIT_MEMBERS 的既有读取与空成员行为保持，本修复不宣称补齐成员管理功能。
 
+管理界面复用已有三语词条，创建入口可选择 USER、ORGANIZATION、UNIT；
+UNIT 仍先选组织再选择该组织下的单元。账户列表筛选使用服务端的
+USER、ORG、ORG_UNIT 枚举。双权限和功能开关、非活动候选禁选、既有
+分享范围映射、高风险预检及未知结果的原键恢复门禁保持不变。
+浏览器前进、后退及刷新恢复 UNIT 查询时，以当前 URL 中的父组织身份
+重建选择；本地缓存仅复用同一组织的显示标签，不沿用其他组织身份。
+最终归属仍由服务端权威及创建预检校验，URL 不是授权凭据。
+
 规范化状态和 tombstone 不变：存在但非 ACTIVE 的行归 INACTIVE，版本化 DELETED 归 NOT_FOUND，物理缺行作为不可用失败关闭。组织正常停用/启用在同一 Account 事务推进其 raw ACTIVE UNIT 的持久 version 与 updated_at，保留 raw 状态与组织结构版本；精确状态重放不重复推进，非 ACTIVE、tombstone 和其他组织 UNIT 不受影响。Token 因正常停用取得更高版 DENY 后终结 FAILED 并释放 reservation 容量；共享 owner wallet 保留。只有模拟旧存量或异常绕过领域写入的同版 DENY 才继续保持 PENDING，不能用放宽 Token DENY 校验修复版本缺口，也不据此宣称所有 Saga 终态问题已解决。
 
 T1 仅写合法 reservation/result/audit/outbox，不调用钱包。worker 按已有合同先取得 Billing receipt 再 T3；后置失败不能宣称零 wallet，且不得危险删除共享 owner wallet。只有最终 Token 权威及事务围栏通过才生成可读账户。
