@@ -193,6 +193,9 @@ func (r *PostgresRepository) CreateApprovalDraft(ctx context.Context, principal 
 	if err := r.requireApprovalAdvancement(ctx, policy); err != nil {
 		return ApprovalRequest{}, err
 	}
+	if err := requireTokenApprovalRecentAuthentication(principal, policy.CommandType, r.now()); err != nil {
+		return ApprovalRequest{}, err
+	}
 	if draft.SupersedesRequestID != nil {
 		var previousRequester uuid.UUID
 		var previousStatus string
@@ -214,6 +217,9 @@ func (r *PostgresRepository) CreateApprovalDraft(ctx context.Context, principal 
 		return ApprovalRequest{}, ErrConflict
 	}
 	now := r.now()
+	if err := requireTokenApprovalRecentAuthentication(principal, policy.CommandType, now); err != nil {
+		return ApprovalRequest{}, err
+	}
 	id := uuid.Must(uuid.NewV7())
 	expiresAt := now.Add(policy.ExpiresAfter)
 	policySnapshot, _ := json.Marshal(map[string]any{"policy_version": policy.PolicyVersion, "requester_permission": policy.RequesterPermission, "approver_permission": policy.ApproverPermission, "approval_count": policy.ApprovalCount, "executor_identity": policy.ExecutorIdentity, "valid_until": validUntil})
@@ -322,6 +328,9 @@ func (r *PostgresRepository) UpdateApprovalDraft(ctx context.Context, principal 
 	if current.Status != "DRAFT" || current.Version != expectedVersion {
 		return ApprovalRequest{}, ErrConflict
 	}
+	if err := requireTokenApprovalRecentAuthentication(principal, policy.CommandType, r.now()); err != nil {
+		return ApprovalRequest{}, err
+	}
 	draft, err = r.authoritativeApprovalDraft(ctx, draft)
 	if err != nil {
 		return ApprovalRequest{}, err
@@ -331,6 +340,9 @@ func (r *PostgresRepository) UpdateApprovalDraft(ctx context.Context, principal 
 		return ApprovalRequest{}, ErrConflict
 	}
 	now := r.now()
+	if err := requireTokenApprovalRecentAuthentication(principal, policy.CommandType, now); err != nil {
+		return ApprovalRequest{}, err
+	}
 	command, err := tx.Exec(ctx, `UPDATE approval_requests SET normalized_command=$2,command_fingerprint=$3,target_resource_type=$4,target_resource_id=$5,reason=$6,redacted_evidence=$7,expected_impact=$8,version=version+1,updated_at=$9 WHERE id=$1 AND status='DRAFT' AND version=$10`, requestID, normalized, fingerprint[:], strings.TrimSpace(draft.TargetResourceType), strings.TrimSpace(draft.TargetResourceID), strings.TrimSpace(draft.Reason), jsonOrDefault(draft.RedactedEvidence, `[]`), jsonOrDefault(draft.ExpectedImpact, `{}`), now, expectedVersion)
 	if err != nil || command.RowsAffected() != 1 {
 		return ApprovalRequest{}, ErrConflict
@@ -459,6 +471,9 @@ func (r *PostgresRepository) transitionOwnApproval(ctx context.Context, principa
 		if err := r.requireApprovalAdvancement(ctx, policy); err != nil {
 			return ApprovalRequest{}, err
 		}
+		if err := requireTokenApprovalRecentAuthentication(principal, item.CommandType, r.now()); err != nil {
+			return ApprovalRequest{}, err
+		}
 		if approvalSnapshotCommand(item.CommandType) {
 			projection, precheckErr := r.precheckApprovalSnapshot(ctx, ApprovalSnapshotRequest{CommandType: item.CommandType, TargetResourceType: item.TargetResourceType, TargetResourceID: item.TargetResourceID, NormalizedCommand: item.NormalizedCommand})
 			if precheckErr != nil {
@@ -466,6 +481,12 @@ func (r *PostgresRepository) transitionOwnApproval(ctx context.Context, principa
 			}
 			if !sameJSONObject(projection.CriticalResourceVersions, item.CriticalResourceVersions) || !sameApprovalFinancialFacts(item.CommandType, projection.FinancialSnapshot, item.FinancialSnapshot) {
 				return r.invalidateApproval(ctx, tx, item, *actorID, "INVALIDATED", "AUTHORITATIVE_SNAPSHOT_CHANGED", map[string]any{}, now, ErrApprovalInvalidated)
+			}
+		}
+		if approvalTokenNeedsRecentAuthentication(item.CommandType) {
+			now = r.now()
+			if err := requireTokenApprovalRecentAuthentication(principal, item.CommandType, now); err != nil {
+				return ApprovalRequest{}, err
 			}
 		}
 		submittedExpiresAt = now.Add(policy.ExpiresAfter)
@@ -583,6 +604,12 @@ func (r *PostgresRepository) decideApprovalRequestWithoutAuthorization(ctx conte
 		return ApprovalRequest{}, err
 	}
 	authSnapshot, _ := json.Marshal(map[string]any{"user_id": actorID, "binding_id": bindingID, "authorization_version": authorizationVersion, "valid_until": validUntil})
+	if approvalTokenNeedsRecentAuthentication(item.CommandType) {
+		now = r.now()
+		if err := requireTokenApprovalRecentAuthentication(principal, item.CommandType, now); err != nil {
+			return ApprovalRequest{}, err
+		}
+	}
 	if _, err := tx.Exec(ctx, `INSERT INTO approval_decisions(id,approval_request_id,approver_user_id,approver_binding_id,approver_authorization_version,decision,reason,authorization_snapshot,decided_at) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9)`, uuid.Must(uuid.NewV7()), requestID, *actorID, bindingID, authorizationVersion, decision, reason, authSnapshot, now); err != nil {
 		return ApprovalRequest{}, mapConstraintError(err)
 	}
@@ -818,6 +845,9 @@ func (r *PostgresRepository) approveApprovalRequestAttempt(
 		if errors.Is(err, ErrForbidden) {
 			return rollback(ApprovalRequest{}, ErrApprovalRequestNotFound)
 		}
+		return rollback(ApprovalRequest{}, err)
+	}
+	if err := requireTokenApprovalRecentAuthentication(principal, item.CommandType, r.now()); err != nil {
 		return rollback(ApprovalRequest{}, err)
 	}
 	if checkpoint != nil {

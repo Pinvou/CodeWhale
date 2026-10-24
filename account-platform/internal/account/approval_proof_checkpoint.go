@@ -3,6 +3,7 @@ package account
 import (
 	"context"
 	"errors"
+	"time"
 
 	"github.com/Pinvou/pinvou3/account-platform/internal/platform/approvalencoding"
 	"github.com/Pinvou/pinvou3/account-platform/internal/platform/identity"
@@ -98,10 +99,29 @@ func (r *PostgresRepository) readApprovalProofCheckpoint(ctx context.Context, pr
 }
 
 func approvalProofNeedsRecentAuthentication(command string) bool {
+	if approvalTokenNeedsRecentAuthentication(command) {
+		return true
+	}
 	switch command {
 	case "PAYMENT_PROVIDER_RESUME", "PAYMENT_PRODUCT_RESUME", "ENTITLEMENT_COMPONENT_ADJUSTMENT":
 		return true
 	default:
 		return false
 	}
+}
+
+func approvalTokenNeedsRecentAuthentication(command string) bool {
+	switch command {
+	case "TOKEN_MODEL_LIFECYCLE_CHANGE", "TOKEN_MODEL_CATALOG_ROLLBACK", "TOKEN_CREDENTIAL_REVOKE":
+		return true
+	default:
+		return false
+	}
+}
+
+func requireTokenApprovalRecentAuthentication(principal identity.Principal, command string, now time.Time) error {
+	if approvalTokenNeedsRecentAuthentication(command) && !recentlyAuthenticated(principal.AuthenticatedAt, now) {
+		return ErrRecentAuthenticationRequired
+	}
+	return nil
 }
