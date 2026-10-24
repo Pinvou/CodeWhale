@@ -282,7 +282,7 @@ func consumeAdjustmentLots(ctx context.Context, tx pgx.Tx, entryID, walletAccoun
 		if command.RowsAffected() != 1 {
 			return ErrConflict
 		}
-		command, err = tx.Exec(ctx, `UPDATE entitlement_components SET available_microcredits=available_microcredits-$2,revoked_microcredits=revoked_microcredits+$2,status=CASE WHEN available_microcredits=$2 AND reserved_microcredits=0 THEN 'REVOKED' ELSE status END,updated_at=$3 WHERE id=$1 AND available_microcredits>=$2`, item.componentID, consume, now)
+		command, err = tx.Exec(ctx, `UPDATE entitlement_components SET available_microcredits=available_microcredits-$2,revoked_microcredits=revoked_microcredits+$2,status=CASE WHEN available_microcredits=$2 AND reserved_microcredits=0 AND active_grant_microcredits=0 AND suspended_grant_microcredits=0 THEN 'REVOKED' ELSE status END,updated_at=$3 WHERE id=$1 AND available_microcredits>=$2`, item.componentID, consume, now)
 		if err != nil {
 			return err
 		}
@@ -292,7 +292,7 @@ func consumeAdjustmentLots(ctx context.Context, tx pgx.Tx, entryID, walletAccoun
 		if err := insertPosting(ctx, tx, entryID, walletAccount, -consume, &item.lotID, now); err != nil {
 			return err
 		}
-		if _, err := tx.Exec(ctx, `UPDATE entitlement_packages package SET status=CASE WHEN EXISTS(SELECT 1 FROM entitlement_components component WHERE component.package_id=package.id AND (component.available_microcredits>0 OR component.reserved_microcredits>0)) THEN 'ACTIVE' ELSE 'CONSUMED' END,updated_at=$2 WHERE id=$1`, item.packageID, now); err != nil {
+		if _, err := tx.Exec(ctx, `UPDATE entitlement_packages package SET status=CASE WHEN EXISTS(SELECT 1 FROM entitlement_components component WHERE component.package_id=package.id AND (component.available_microcredits>0 OR component.reserved_microcredits>0 OR component.active_grant_microcredits>0 OR component.suspended_grant_microcredits>0)) THEN 'ACTIVE' ELSE 'CONSUMED' END,updated_at=$2 WHERE id=$1`, item.packageID, now); err != nil {
 			return err
 		}
 		remaining -= consume

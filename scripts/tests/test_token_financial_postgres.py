@@ -135,6 +135,24 @@ class FinancialPostgresRunnerTests(unittest.TestCase):
                 RUNNER.verify_results(invalid, {name}, **options)
 
 
+    def test_negative_adjustment_member_bucket_root_and_children_are_required(self):
+        root = "TestNegativeAdjustmentMemberBucketConservationPostgres"
+        self.assertIn(root, RUNNER.RETAINED_REQUIRED)
+        self.assertIn(root, RUNNER.BILLING_CHILD_REQUIRED)
+        options = {"package": RUNNER.BILLING_PACKAGE, "exact_roots": True,
+                   "require_children": True, "children_required": {root}}
+        events = self.events(required={root}, package=RUNNER.BILLING_PACKAGE, children=True)
+        RUNNER.verify_results(events, {root}, **options)
+        for invalid in ([],
+                        [event for event in events if event.get("Test") != root],
+                        [event for event in events if not event.get("Test", "").startswith(root + "/")],
+                        events + [{"Action": "skip", "Package": RUNNER.BILLING_PACKAGE, "Test": root}],
+                        events + [{"Action": "skip", "Package": RUNNER.BILLING_PACKAGE, "Test": root + "/case"}],
+                        events + [{"Action": "fail", "Package": RUNNER.BILLING_PACKAGE, "Test": root + "/case"}]):
+            with self.subTest(events=invalid), self.assertRaises(RuntimeError):
+                RUNNER.verify_results(invalid, {root}, **options)
+
+
     def test_disposable_loopback_url(self):
         raw = "postgres://postgres@127.0.0.1:5433/postgres?sslmode=disable"
         self.assertEqual(RUNNER.local_database_url(raw), raw)
@@ -836,7 +854,7 @@ class FinancialPostgresRunnerTests(unittest.TestCase):
         }
         self.assertEqual(RUNNER.REFUND_REQUIRED, expected)
         self.assertTrue(expected <= RUNNER.RETAINED_REQUIRED)
-        self.assertEqual(len(RUNNER.RETAINED_REQUIRED), 38)
+        self.assertEqual(len(RUNNER.RETAINED_REQUIRED), 39)
         valid = self.events(RUNNER.RETAINED_REQUIRED, RUNNER.BILLING_PACKAGE, children=True)
         options = {"package": RUNNER.BILLING_PACKAGE, "require_children": True, "exact_roots": True,
                    "children_required": RUNNER.BILLING_CHILD_REQUIRED}
