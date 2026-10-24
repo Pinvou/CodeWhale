@@ -48,7 +48,7 @@ pinvou_vc_redist_install:
   ${If} $6 != 0
     SetRegView lastused
     DetailPrint "VC++ prerequisite temp preflight failed: $7"
-    MessageBox MB_ICONSTOP|MB_OK "无法修复 Microsoft Visual C++ 运行库所需的系统临时目录。请确认以管理员身份安装。$\r$\nFailed to repair Windows Installer temporary directories: $7" /SD IDOK
+    MessageBox MB_ICONSTOP|MB_OK "无法修复 Microsoft Visual C++ 运行库所需的系统临时目录。请确认以管理员身份安装，并检查安全策略或杀毒软件是否阻止了安装程序脚本。$\r$\nFailed to repair the Windows Installer temporary directories: $7. Verify the install is elevated and that security policy or antivirus is not blocking installer scripts." /SD IDOK
     Abort
   ${EndIf}
   DetailPrint "$7"

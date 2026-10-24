@@ -81,8 +81,9 @@
 # exhausts the stock memory budget in rust-test; before memory provisioning
 # existed the failure mode was "hosted runner lost communication" with all
 # logs lost. Every Linux job that needs extra memory runs this script right
-# after checkout (enforced by the gate policy; rust-lint is exempt — its
-# lint-only workload fits in stock memory).
+# after checkout (enforced by the gate policy; rust-lint's old lint-only
+# exemption ended when the benchmark-hooks all-targets compile gate landed
+# there — its memory profile is rust-test-grade now).
 
 set -uo pipefail
 

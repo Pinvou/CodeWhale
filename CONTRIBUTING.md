@@ -77,6 +77,14 @@ cargo test --manifest-path pinvou3-app/src-tauri/Cargo.toml --lib -- --test-thre
 
 Run additional frontend, Relay, Rust, CodeWhale, or platform checks when relevant. The workflows in [`.github/workflows/`](.github/workflows/) are the source of truth for automated gates. Disclose checks that could not be run locally.
 
+When a change regenerates a `package-lock.json`, regenerate against the official
+registry (`https://registry.npmjs.org/`): a mirror configured in a local npmrc is
+copied verbatim into the lock's `resolved` URLs, and
+`scripts/check-lock-registry.py` (fast-gate) fails any committed mirror URL. Use
+npm >= 11.11 so the `libc` fields on the `@img/*` platform packages survive the
+rewrite — the libc serializer fix landed in npm 11.11.0, so every npm from 10
+up to 11.10 silently strips them and the same guard fails the strip.
+
 Tests requiring a live model, network service, credential, or large model asset must be ignored by default and provide an explicit opt-in command.
 
 ## CI and merge queue
