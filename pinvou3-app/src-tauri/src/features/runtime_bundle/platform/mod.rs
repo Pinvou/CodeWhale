@@ -198,8 +198,12 @@ pub(crate) use crate::platform::connector_skills::{
 ///       断言由 `wecom_skill_dirs_track_platform_truth`（15 名）取代。
 ///       技能树不参与内容哈希，必须 bump 语义版本让已连接用户启动时
 ///       刷新；extracted-VERSION 门禁只做不等比较。
+/// 0.37: 回流 Community #777 的 dws CLI pin 升至 1.0.65：五平台
+///       connectors.lock.json 换 1.0.65 下载钉扎，NOTICE-dingtalk.md 拆分
+///       「技能内容基线 1.0.64 / CLI pin 1.0.65」并同步手册条目；技能内容
+///       基线不变，v1.0.65 技能同步另行进行。
 pub const BUNDLE_VERSION: &str = concat!(
-    "0.36-",
+    "0.37-",
     env!("BUNDLE_INSTRUCTIONS_HASH"),
     "-",
     env!("BUNDLE_H3C_CLI_HASH"),
