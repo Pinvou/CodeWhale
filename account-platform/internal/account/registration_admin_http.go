@@ -18,10 +18,19 @@ func (s *Service) adminRegistrationOperations(w http.ResponseWriter, r *http.Req
 		api.WriteError(w, http.StatusServiceUnavailable, "REGISTRATION_REPAIR_UNAVAILABLE", "registration repair is unavailable", httpserver.RequestID(r.Context()))
 		return
 	}
+	var operationID uuid.UUID
+	if raw := strings.TrimSpace(r.URL.Query().Get("operation_id")); raw != "" {
+		var err error
+		operationID, err = uuid.Parse(raw)
+		if err != nil || operationID == uuid.Nil {
+			api.WriteError(w, http.StatusBadRequest, "INVALID_REQUEST", "invalid registration operation", httpserver.RequestID(r.Context()))
+			return
+		}
+	}
 	limit, _ := strconv.Atoi(r.URL.Query().Get("limit"))
 	olderThanMinutes, _ := strconv.Atoi(r.URL.Query().Get("older_than_minutes"))
 	items, err := repository.RegistrationRepairQueue(r.Context(), RegistrationRepairFilter{
-		Status: r.URL.Query().Get("status"), Stage: r.URL.Query().Get("stage"),
+		OperationID: operationID, Status: r.URL.Query().Get("status"), Stage: r.URL.Query().Get("stage"),
 		Responsibility: r.URL.Query().Get("responsibility"), SLA: r.URL.Query().Get("sla"),
 		OlderThanMinutes: olderThanMinutes, Limit: limit,
 	})

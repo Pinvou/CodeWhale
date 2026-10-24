@@ -386,7 +386,7 @@ export class AdminPlatformClient {
 
   registrationRepairs(filters = {}, signal) {
     const query = new URLSearchParams({ limit: '100' });
-    for (const key of ['status', 'stage', 'responsibility', 'sla', 'older_than_minutes']) if (filters[key]) query.set(key, filters[key]);
+    for (const key of ['operation_id', 'status', 'stage', 'responsibility', 'sla', 'older_than_minutes']) if (filters[key]) query.set(key, filters[key]);
     return this.request('account', `/admin/v1/registration-operations?${query}`, signal);
   }
 

@@ -15,21 +15,23 @@ import (
 var ErrRegistrationCompensationForbidden = errors.New("registration compensation proof is incomplete")
 
 type RegistrationRepairItem struct {
-	OperationID         uuid.UUID  `json:"registration_operation_id"`
-	Status              string     `json:"status"`
-	Stage               string     `json:"stage"`
-	Responsibility      string     `json:"responsibility"`
-	AccountCreated      bool       `json:"account_created"`
-	CompensationAllowed bool       `json:"compensation_allowed"`
-	Attempts            int        `json:"attempts"`
-	Reason              string     `json:"reason,omitempty"`
-	NextRetryAt         time.Time  `json:"next_retry_at"`
-	CreatedAt           time.Time  `json:"created_at"`
-	UpdatedAt           time.Time  `json:"updated_at"`
-	SLAExpiresAt        *time.Time `json:"sla_expires_at,omitempty"`
+	OperationID               uuid.UUID  `json:"registration_operation_id"`
+	IdentityCreateAttemptedAt *time.Time `json:"identity_create_attempted_at,omitempty"`
+	Status                    string     `json:"status"`
+	Stage                     string     `json:"stage"`
+	Responsibility            string     `json:"responsibility"`
+	AccountCreated            bool       `json:"account_created"`
+	CompensationAllowed       bool       `json:"compensation_allowed"`
+	Attempts                  int        `json:"attempts"`
+	Reason                    string     `json:"reason,omitempty"`
+	NextRetryAt               time.Time  `json:"next_retry_at"`
+	CreatedAt                 time.Time  `json:"created_at"`
+	UpdatedAt                 time.Time  `json:"updated_at"`
+	SLAExpiresAt              *time.Time `json:"sla_expires_at,omitempty"`
 }
 
 type RegistrationRepairFilter struct {
+	OperationID      uuid.UUID
 	Status           string
 	Stage            string
 	Responsibility   string
@@ -74,6 +76,10 @@ func (r *PostgresRepository) RegistrationRepairQueue(ctx context.Context, filter
 	if filter.OlderThanMinutes < 0 || filter.OlderThanMinutes > 43200 {
 		filter.OlderThanMinutes = 0
 	}
+	var operationID *uuid.UUID
+	if filter.OperationID != uuid.Nil {
+		operationID = &filter.OperationID
+	}
 	rows, err := r.pool.Query(ctx, `
 WITH queue AS (
  SELECT ro.id,ro.status,
@@ -91,17 +97,20 @@ WITH queue AS (
  COALESCE(wj.attempts,ro.attempts) AS attempts,
  COALESCE(wj.last_error_code,ro.last_error_code,'') AS reason,
  CASE WHEN wj.user_id IS NOT NULL THEN wj.next_attempt_at ELSE ro.next_retry_at END AS next_retry_at,
- ro.created_at,ro.updated_at,
+ ro.created_at,ro.updated_at,ro.identity_create_attempted_at,
  COALESCE(wj.sla_expires_at,ro.identity_created_at+interval '30 minutes') AS sla_expires_at
  FROM registration_operations ro LEFT JOIN wallet_provisioning_jobs wj ON wj.registration_operation_id=ro.id
  WHERE ro.status IN ('REPAIR_REQUIRED','COMPENSATION_PENDING')
+ OR (ro.status='IDENTITY_CREATING' AND ro.identity_create_attempted_at IS NOT NULL
+     AND ro.identity_subject IS NULL AND ro.identity_created_at IS NULL AND ro.committed_user_id IS NULL)
 )
-SELECT id,status,stage,responsibility,account_created,compensation_allowed,attempts,reason,next_retry_at,created_at,updated_at,sla_expires_at
+SELECT id,status,stage,responsibility,account_created,compensation_allowed,attempts,reason,next_retry_at,created_at,updated_at,identity_create_attempted_at,sla_expires_at
 FROM queue
 WHERE ($1='' OR status=$1) AND ($2='' OR stage=$2) AND ($3='' OR responsibility=$3)
   AND ($4=0 OR updated_at <= now()-make_interval(mins => $4))
   AND ($5='' OR $5='OVERDUE' AND sla_expires_at <= now() OR $5='WITHIN' AND sla_expires_at > now())
-ORDER BY updated_at,created_at LIMIT $6`, filter.Status, filter.Stage, filter.Responsibility, filter.OlderThanMinutes, filter.SLA, filter.Limit)
+  AND ($7::uuid IS NULL OR id=$7)
+ORDER BY updated_at,created_at LIMIT $6`, filter.Status, filter.Stage, filter.Responsibility, filter.OlderThanMinutes, filter.SLA, filter.Limit, operationID)
 	if err != nil {
 		return nil, err
 	}
@@ -109,7 +118,7 @@ ORDER BY updated_at,created_at LIMIT $6`, filter.Status, filter.Stage, filter.Re
 	items := make([]RegistrationRepairItem, 0, filter.Limit)
 	for rows.Next() {
 		var item RegistrationRepairItem
-		if err := rows.Scan(&item.OperationID, &item.Status, &item.Stage, &item.Responsibility, &item.AccountCreated, &item.CompensationAllowed, &item.Attempts, &item.Reason, &item.NextRetryAt, &item.CreatedAt, &item.UpdatedAt, &item.SLAExpiresAt); err != nil {
+		if err := rows.Scan(&item.OperationID, &item.Status, &item.Stage, &item.Responsibility, &item.AccountCreated, &item.CompensationAllowed, &item.Attempts, &item.Reason, &item.NextRetryAt, &item.CreatedAt, &item.UpdatedAt, &item.IdentityCreateAttemptedAt, &item.SLAExpiresAt); err != nil {
 			return nil, err
 		}
 		items = append(items, item)

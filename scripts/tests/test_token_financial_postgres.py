@@ -376,6 +376,7 @@ class FinancialPostgresRunnerTests(unittest.TestCase):
             "TestIdentityRecoveryClaimsRuntimePostgres",
             "TestProfileSessionRevocationRecoveryRuntimePostgres",
             "TestRegistrationCreateDispatchRuntimePostgres",
+    "TestRegistrationUnknownInspectionPostgres",
             "TestRegistrationIdentityRejectionRuntimePostgres",
             "TestPlatformRoleManagementRuntimePostgres",
             "TestUserCodeLookupRuntimePostgres",
@@ -500,7 +501,11 @@ class FinancialPostgresRunnerTests(unittest.TestCase):
                 RUNNER.verify_results(invalid, roots, package=package, require_children=True, exact_roots=True)
 
     def test_registration_dispatch_root_requires_actual_completed_children(self):
-        for name in ("TestRegistrationCreateDispatchRuntimePostgres", "TestRegistrationIdentityRejectionRuntimePostgres"):
+        for name in (
+            "TestRegistrationCreateDispatchRuntimePostgres",
+            "TestRegistrationUnknownInspectionPostgres",
+            "TestRegistrationIdentityRejectionRuntimePostgres",
+        ):
             roots, package = RUNNER.ACCOUNT_REQUIRED, RUNNER.ACCOUNT_PACKAGE
             self.run_main_fixture()
             command = self.fixture_commands[self.fixture_phases.index("owner-account")]
