@@ -1571,13 +1571,16 @@ class CiGatePolicyTests(unittest.TestCase):
         step = fast_gate.split(
             "- name: 锁文件 registry 卫生门禁", maxsplit=1
         )[1].split("\n      - name:", maxsplit=1)[0]
+        # Round-22 review: substring-on-non-comment-line is echo-neutralizable
+        # (`run: echo skip # python3 …` passes) — pin the full exact line.
         self.assertTrue(
             any(
-                "python3 scripts/check-lock-registry.py" in line
+                line.strip() == "run: python3 scripts/check-lock-registry.py"
                 for line in step.splitlines()
-                if not line.lstrip().startswith("#")
             ),
-            "pinned command must appear as an executable (non-comment) line",
+            "the lock-guard step must invoke the guard as its whole run line "
+            "— a weakened or echoed form runs nothing while passing every "
+            "other assertion here",
         )
         self.assertNotIn("|| true", step)
         self.assertNotIn("continue-on-error", step)
@@ -1619,13 +1622,16 @@ class CiGatePolicyTests(unittest.TestCase):
         step = rust_test.split(
             "- name: test-registry guard (duplicates + required pins)", maxsplit=1
         )[1].split("\n      - name:", maxsplit=1)[0]
+        # Round-22 review: substring-on-non-comment-line is echo-neutralizable
+        # (`run: echo skip # python3 …` passes) — pin the full exact line.
         self.assertTrue(
             any(
-                "python3 scripts/test-registry-guard.py" in line
+                line.strip() == "run: python3 scripts/test-registry-guard.py"
                 for line in step.splitlines()
-                if not line.lstrip().startswith("#")
             ),
-            "pinned command must appear as an executable (non-comment) line",
+            "the registry-guard step must invoke the guard as its whole run "
+            "line — a weakened or echoed form runs nothing while passing "
+            "every other assertion here",
         )
         self.assertNotIn("|| true", step)
         self.assertNotIn("continue-on-error", step)
@@ -1656,14 +1662,17 @@ class CiGatePolicyTests(unittest.TestCase):
         step = job.split(
             "- name: Windows runtime manifest 契约", maxsplit=1
         )[1].split("\n      - name:", maxsplit=1)[0]
+        # Round-22 review: substring-on-non-comment-line is echo-neutralizable
+        # (`run: echo skip # npm …` passes) — pin the full exact line.
         self.assertTrue(
             any(
-                "npm --prefix pinvou3-app run test:windows-runtime-manifest"
-                in line
+                line.strip()
+                == "run: npm --prefix pinvou3-app run test:windows-runtime-manifest"
                 for line in step.splitlines()
-                if not line.lstrip().startswith("#")
             ),
-            "pinned command must appear as an executable (non-comment) line",
+            "the manifest contract step must invoke the contract suite as "
+            "its whole run line — a weakened or echoed form runs nothing "
+            "while passing every other assertion here",
         )
         self.assertNotIn("|| true", step)
         self.assertNotIn("continue-on-error", step)
@@ -1813,6 +1822,32 @@ class CiGatePolicyTests(unittest.TestCase):
             "deny.toml must keep unused-ignored-advisory = \"deny\" on an "
             "executable line — without it an advisory ignore outliving its "
             "advisory is silent instead of failing the deny gate",
+        )
+
+    def test_deny_toml_bans_the_crypto_bigint_vulnerable_window(self):
+        # Round-22 review: the RUSTSEC-2026-0387 id ignore has no version
+        # dimension — a partial upgrade (age/p256 on the patched line while
+        # a new third-party dep re-introduces old elliptic-curve, leaving
+        # crypto-bigint 0.5.x in the graph) would stay silently green. The
+        # [bans] entry forbids the vulnerable window independently of the
+        # advisory database's classification; the current graph (0.5.5)
+        # sits outside it. Pin the executable line so dropping the
+        # tripwire while keeping the id ignore fails here.
+        deny_toml = (
+            ROOT / "pinvou3-app/src-tauri/deny.toml"
+        ).read_text(encoding="utf-8")
+        deny_code = "\n".join(
+            line
+            for line in deny_toml.splitlines()
+            if not line.lstrip().startswith("#")
+        )
+        self.assertIn(
+            '{ name = "crypto-bigint", version = ">0.5.5, <0.7.6" },',
+            deny_code,
+            "deny.toml must keep the crypto-bigint vulnerable-window ban on "
+            "an executable line — without it a partially upgraded graph can "
+            "carry a still-vulnerable crypto-bigint while the id ignore "
+            "keeps advisories green",
         )
 
     def test_zip_lockfiles_sit_inside_the_assessed_advisory_window(self):
@@ -3180,11 +3215,26 @@ class CiGatePolicyTests(unittest.TestCase):
         # PR #1518: the test-registry guard script is executed by the
         # rust-test leg, so a guard-script-only change must route to that leg
         # (round-47 class: a script the leg runs must select the leg itself).
-        self.assertIn(
+        # Round-22 review: the two entries are pinned BEHAVIORALLY, not by
+        # literal presence — dorny/paths-filter's some-with-excludes lets an
+        # appended `!path` entry silence a positive match while every
+        # assertIn stays green, so replay the filter for the exact paths and
+        # fail on both deletion and any exclude entry that targets them.
+        for route_path in (
             "scripts/test-registry-guard.py",
-            rust_full_paths,
-            "registry guard script edits must trigger the rust-test leg that executes it",
-        )
+            "scripts/tests/test_registry_guard.py",
+        ):
+            self.assertTrue(
+                (ROOT / route_path).is_file(),
+                f"routed path must exist in the checkout: {route_path}",
+            )
+            self.assertTrue(
+                _matches_paths_filter(route_path, rust_full_paths),
+                f"{route_path}: a rust_full exclude entry (or the entry's "
+                "deletion) silently unroutes the test-registry guard from "
+                "the rust-test leg that executes it — a guard-script-only "
+                "PR would run no rust leg",
+            )
         # Same class, review #1518 round-7: the guard's behavior regression
         # suite pins the module-aware ignore attribution; a change confined
         # to the suite must still run the leg that executes the guard.
@@ -5108,6 +5158,46 @@ class CiGatePolicyTests(unittest.TestCase):
                 "closed",
             )
         self.assertIn("rustc-stack-wrapper", step_code)
+        # Round-22 review: substring pins are echo-neutralizable — a step
+        # that merely echoes the pinned substrings (probe logic deleted)
+        # passed every assertion above, and the smoke workflow has no
+        # step-name-uniqueness backstop. Pin the full invocation and the
+        # five full assertion LINES (the disk-step exact-recipe pattern),
+        # and ban the step-level decoys (if:/continue-on-error).
+        self.assertIn(
+            'out="$(RUSTC_WRAPPER_CHAIN="$PWD/chain-probe.exe" '
+            '"$wrapper" rustc --version --verbose)"',
+            step_code,
+            "the probe must actually run THROUGH the wrapper under "
+            "RUSTC_WRAPPER_CHAIN — running it directly (or echoing the "
+            "assertions) breaks the delegation contract this step exists "
+            "to verify",
+        )
+        for assertion_line in (
+            "printf '%s\\n' \"$out\" | grep -Fqx 'chain_probe_stack=[16777216]'",
+            "printf '%s\\n' \"$out\" | grep -Fqx 'chain_probe_argc=3'",
+            "printf '%s\\n' \"$out\" | grep -Fqx 'chain_probe_arg=[rustc]'",
+            "printf '%s\\n' \"$out\" | grep -Fqx 'chain_probe_arg=[--version]'",
+            "printf '%s\\n' \"$out\" | grep -Fqx 'chain_probe_arg=[--verbose]'",
+        ):
+            self.assertIn(
+                assertion_line,
+                step_code,
+                "the chain probe must keep its full per-field assertion "
+                "line — a weakened or echoed form no longer proves the "
+                "delegation contract",
+            )
+        self.assertNotIn(
+            "continue-on-error",
+            step_code,
+            "the chain probe step must not be allowed to fail silently",
+        )
+        self.assertFalse(
+            any(re.match(r"^ {8}if:", line) for line in step.splitlines()),
+            "the chain probe step must run unconditionally on its leg "
+            "(an `if:` on the step would let a self-decoy keep every pin "
+            "green while the probe never runs)",
+        )
 
 
 

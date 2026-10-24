@@ -103,6 +103,12 @@ multiple-versions = "allow"
 deny = [
     { name = "webpki-roots", version = ">=1.0.0, <1.0.10" },
     { name = "webpki-roots", version = ">=0.26.0, <0.26.11" },
+    # Round-22 review: 上面 [advisories] 的 RUSTSEC-2026-0387 id 级忽略没有
+    # 版本维度——半升级形态(age/p256 升到修复线,而新的第三方依赖把旧
+    # elliptic-curve 重新带进图、crypto-bigint 0.5.5 残留)不会触发任何
+    # 重评信号。这里独立封禁漏洞窗口(现图 0.5.5 恰在窗口外,bans 全绿);
+    # 与 id 忽略同一提交摘除时同步收窄为 "<0.7.6" 或删除本条。
+    { name = "crypto-bigint", version = ">0.5.5, <0.7.6" },
 ]
 # wildcards 保留 "warn"(不能升 deny):本仓 3 个 CodeWhale 子模块依赖是
 # path = "../../CodeWhale/..." 形式(AGENTS.md §2 禁止给它们加版本约束),

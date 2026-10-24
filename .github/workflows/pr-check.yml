@@ -834,7 +834,7 @@ jobs:
       - name: 锁文件 registry 卫生门禁
         # resolved 禁止已知 npm 镜像(黑名单制,非官方 registry 白名单):
         # 镜像慢且是跨境单点,CI 的 npm ci 逐字消费 lock 的 resolved URL
-        # (#1518 清理前在用锁残留 npmmirror 镜像,本 PR diff 清掉最后 15 处)。
+        # (#1518 清理前在用锁残留 npmmirror 镜像,本 PR diff 清掉最后 14 处;round-22 rebase 后 codex-bridge 锁残留已由主线自行清理)。
         # 同时钉住 team-relay-hub 锁的 16 条 @img/* libc 字段:npm 10 的
         # arborist 不序列化 libc,node22 本地一次 npm install 会静默剥掉。
         # 注:本 step 在 submodule 检出之前执行,只覆盖本仓自有锁(5 把);

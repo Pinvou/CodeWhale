@@ -8,7 +8,9 @@ Two failure classes are pinned here:
    every mirror URL is a latency/flake dependency on every build. The
    CI-consumed repo locks carried npmmirror URLs before the #1518
    cleanup (14 in team-relay-hub alone at the cleanup commit's parent;
-   the PR diff clears the last 15); the blocklist covers npmmirror plus
+   the PR diff clears exactly those 14 — the one remaining codex-bridge
+   URL was cleaned on main itself before the round-22 rebase); the
+   blocklist covers npmmirror plus
    the other common CN mirrors (round-11 review: matching only
    registry.npmmirror.com let the same lock-regen creep back in via a
    taobao/tencent/huawei/cnpm mirror in a contributor's npmrc). Matching

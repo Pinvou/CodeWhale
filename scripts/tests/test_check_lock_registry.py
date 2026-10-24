@@ -110,6 +110,10 @@ class LockRegistryGuardTests(unittest.TestCase):
             "https://mirrors.tuna.tsinghua.edu.cn/npm/left-pad/-/left-pad-1.3.0.tgz",
             "https://npm.taobao.org/left-pad/-/left-pad-1.3.0.tgz",
             "https://mirrors.cloud.tencent.com/npm/left-pad/-/left-pad-1.3.0.tgz",
+            # round-22 review: the non-cloud tencent host is a separate
+            # marker — deleting it survived this suite (only the -cloud
+            # URL was pinned); each marker needs its own URL here.
+            "https://mirrors.tencent.com/npm/left-pad/-/left-pad-1.3.0.tgz",
             "https://mirrors.huaweicloud.com/repository/npm/left-pad-1.3.0.tgz",
             "https://registry.cnpmjs.org/left-pad/-/left-pad-1.3.0.tgz",
         ):
