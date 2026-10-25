@@ -1,17 +1,24 @@
 # 产物 Markdown 直接编辑开发方案
 
+> **状态（2026-09 时点）**：本方案已整体落地，功能已随主线发布。写作时（2026-07
+> 目录重组前）bridge 位于单体文件 `src/tauri-bridge.js`，后经目录重组迁移到
+> `src/platform/tauri/bridge.js` 及 `src/platform/tauri/bridge/` 子模块；
+> 下文 bridge 相关引用均按现行路径标注。文中"方案/建议"句式为开发当时的
+> 设计语气，对应功能均可在现行代码中找到。文中 bridge 调用按当时平面写法
+> 记录，现行 `window.TauriBridge` 已分域（`chat.` / `rendering.` / `artifacts.`）。
+
 ## 背景
 
 当前 Pinvou3 的产物面板已经支持 Markdown 产物预览，但只是只读渲染：
 
 - 前端入口：`pinvou3-app/src/features/artifacts/ArtifactsPanel.jsx`
 - 当前逻辑：`pv.kind === 'md'` 时调用 `bridge.renderMarkdown(pv.text || '')`，再通过 `dangerouslySetInnerHTML` 输出 HTML
-- 后端读取：`pinvou3-app/src-tauri/src/commands.rs` 的 `read_artifact_text`
-- bridge 暴露：`pinvou3-app/src/tauri-bridge.js` 的 `readArtifactText`
+- 后端读取：`pinvou3-app/src-tauri/src/app/commands/artifacts.rs` 的 `read_artifact_text`
+- bridge 暴露：`pinvou3-app/src/platform/tauri/bridge/artifacts.js` 的 `readArtifactText`
 
 目标改为：Markdown 产物打开后仍然显示渲染后的文档视图，但这个文档视图本身可以直接编辑；鼠标选中文本后出现“AI 编辑”按钮，用户输入修改要求后，把选中文本和要求预填到 AI 对话输入框。
 
-本方案仅描述开发设计，不继续开发实现。
+本文档为方案加落地记录：正文描述开发设计，落地情况在相关小节的“已实现结果”中记录。
 
 ## 目标交互
 
@@ -182,7 +189,7 @@ const markdown = turndown.turndown(editableEl.innerHTML)
 
 ### 新增 Tauri 命令
 
-在 `pinvou3-app/src-tauri/src/commands.rs` 新增：
+在 `pinvou3-app/src-tauri/src/app/commands/artifacts.rs` 新增：
 
 ```rust
 #[tauri::command]
@@ -213,15 +220,14 @@ pub async fn write_artifact_text(path: String, content: String) -> Result<(), St
 在 `pinvou3-app/src-tauri/src/lib.rs` 的 `invoke_handler` 中加入：
 
 ```rust
-commands::write_artifact_text,
+commands::artifacts::write_artifact_text,
 ```
 
 ### 后端测试
 
-在 `commands.rs` 的 tests 中增加：
+在 `pinvou3-app/src-tauri/src/app/commands/tests.rs` 中增加：
 
-- `write_artifact_text_allows_markdown`
-- `write_artifact_text_allows_markdown_extension`
+- `write_artifact_text_allows_markdown_extensions`
 - `write_artifact_text_blocks_non_markdown`
 - `write_artifact_text_blocks_sensitive_path`
 - `write_artifact_text_requires_existing_file`
@@ -229,7 +235,8 @@ commands::write_artifact_text,
 
 ## Bridge 方案
 
-在 `pinvou3-app/src/tauri-bridge.js` 增加：
+在 `pinvou3-app/src/platform/tauri/bridge/artifacts.js` 增加（已实现，经
+`bridge.js` 对外导出）：
 
 ```js
 function writeArtifactText(path, content) {
@@ -425,8 +432,8 @@ prompt 建议：
 - `apMdSaveFailed`
 - `apMdAiEdit`
 - `apMdAiInstructionPlaceholder`
-- `apMdAiConfirm`
-- `apMdAiCancel`
+- `apMdAiConfirm`（未采用）
+- `apMdAiCancel`（未采用）
 - `apMdComposerReplaceConfirm`
 - `apMdAiPrompt`
 
@@ -473,13 +480,13 @@ AI 编辑的特殊处理：
 
 ## 已打开产出物动态刷新开发方案
 
-### 现状判断
+### 现状判断（实现前时点；落地结果见本节末「已实现结果」）
 
 当前产出物相关刷新分成两层：
 
-- `tauri-bridge.js` 已监听 `artifact:disk`，能把新产物或删除事件同步到 `state.artifacts`，从而刷新右侧“产物与代码”的列表。
+- `src/platform/tauri/bridge/chat-events.js` 监听 `artifact:disk`，经 `artifact-tracker.js` 把新产物或删除事件同步到 `state.artifacts`，从而刷新右侧“产物与代码”的列表。
 - `ArtifactsPanel.jsx` 在点击某个产物预览时调用 `artifact_info` / `read_artifact_text` 读取一次。
-- `EditableMarkdownPreview.jsx` 已暴露 `reloadFromDisk({ force })`，但当前没有接入 `artifact:disk` 或 Agent 完成事件，因此已打开的 Markdown 预览不会跟随磁盘内容变化自动刷新。
+- `EditableMarkdownPreview.jsx` 已暴露 `reloadFromDisk({ force })`，但当时没有接入 `artifact:disk` 或 Agent 完成事件，因此已打开的 Markdown 预览不会跟随磁盘内容变化自动刷新。
 
 所以需要补的是：**文件变更事件 → bridge 状态快照 → 当前打开预览判断同一路径 → dirty 保护 → reloadFromDisk**。
 
@@ -503,14 +510,14 @@ listen("artifact:disk", function (e) {
 
 预期事件：
 
-- `created` / `modified`：刷新列表，并对已打开同一路径预览触发 reload。
+- `upsert`（写入或修改；现行 payload 只区分存在/不存在两态）：刷新列表，并对已打开同一路径预览触发 reload。
 - `removed`：刷新列表；如果当前预览的就是被删除文件，显示 missing 状态或退回列表。
 
 Agent 完成事件不单独作为第一版主触发源，因为 Agent 写文件最终会走 file watcher。后续如果发现某些写入不触发 watcher，再补 `chat:done` 后基于当前打开 path 做一次 `artifact_info` / mtime 检查。
 
 ### Bridge 状态设计
 
-`tauri-bridge.js` 需要在快照中新增一个轻量字段，例如：
+`src/platform/tauri/bridge.js` 需要在快照中新增一个轻量字段，例如：
 
 ```js
 state.artifactChange = {
@@ -525,7 +532,7 @@ state.artifactChange = {
 要求：
 
 - 每次收到有效 `artifact:disk` 事件都递增 `seq`，即使 `state.artifacts` 列表没有新增条目也要 `notify()`。
-- `path` 使用事件 payload 的绝对路径；比较前用现有 `normalizedPath()` 统一分隔符和大小写策略。
+- `path` 使用事件 payload 的绝对路径；比较前用现有 `normalizedPath()`（现居 `artifact-tracker.js`）统一分隔符和大小写策略。
 - `sessionId` 来自 payload，用于避免后台 session 的文件变化刷新当前 session 面板。
 - `event === "removed"` 时也要发出变更，让当前预览能处理删除态。
 
@@ -611,7 +618,7 @@ if (!force && latestDraftRef.current !== lastSavedRef.current) return false;
 
    ```js
    window.__TAURI_EVENT_HANDLERS__["artifact:disk"].forEach((handler) => {
-     handler({ payload: { path: ARTIFACT_PATH, event: "modified", session_id: "s-md" } });
+     handler({ payload: { path: ARTIFACT_PATH, event: "upsert", session_id: "s-md" } });
    });
    ```
 
@@ -628,11 +635,11 @@ if (!force && latestDraftRef.current !== lastSavedRef.current) return false;
 
 - `reloads open markdown preview when current artifact changes on disk`
 - `does not overwrite dirty markdown draft on external artifact change`
-- `shows missing state when current artifact is removed`
+- `keeps dirty markdown draft when current artifact is removed`
 
 ### 实施步骤
 
-1. `tauri-bridge.js`：给 state / snapshot 增加 `artifactChange`。
+1. `src/platform/tauri/bridge.js`：给 state / snapshot 增加 `artifactChange`。
 2. `artifact:disk` listener：有效事件统一 bump `artifactChange.seq` 并 `notify()`。
 3. `ArtifactsPanel.jsx`：监听 `bs.artifactChange.seq`，按当前 `sel.path` 决定 reload / missing / ignore。
 4. `EditableMarkdownPreview.jsx`：保留 `reloadFromDisk({ force:false })` dirty 保护；必要时暴露 reload 被拦截的返回状态。
@@ -646,7 +653,6 @@ if (!force && latestDraftRef.current !== lastSavedRef.current) return false;
    npm run build:ui
    npm run test
    node tests/markdown_artifact_edit_smoke.js
-   node tests/render_markdown_smoke.js
    ```
 
 ### 风险
@@ -660,7 +666,7 @@ if (!force && latestDraftRef.current !== lastSavedRef.current) return false;
 
 本次已按第一版方案落地：
 
-- `tauri-bridge.js` 增加 `artifactChange` 快照字段；`artifact:disk` 有效事件会递增 `seq`，即使产物列表没有变化也会通知前端。
+- `src/platform/tauri/bridge.js` 增加 `artifactChange` 快照字段；`artifact:disk` 有效事件会递增 `seq`，即使产物列表没有变化也会通知前端。
 - `ArtifactsPanel.jsx` 监听 `bs.artifactChange.seq`，命中当前预览路径时自动刷新。
 - Markdown 预览调用 `EditableMarkdownPreview.reloadFromDisk({ force:false })`，有本地未保存内容时不会覆盖草稿。
 - dirty 拦截时展示“文件已在外部更新”提示。
@@ -779,7 +785,7 @@ bubbleRect.right <= containerRect.right
 
 本次按以上方案落地：
 
-- `ChatView.jsx` 的分栏宽度增加左侧聊天栏最小宽度约束，右侧 artifact 面板不能继续挤压到聊天栏不可用。
+- 聊天分栏布局增加左侧聊天栏最小宽度约束（`RightDock.jsx` 的 `minWidth=420` / `minMainWidth=520`），右侧 artifact 面板不能继续挤压到聊天栏不可用。
 - 左侧聊天滚动容器、消息列表和用户消息气泡补充 `min-w-0` / `max-w-full`。
 - 用户消息正文、编辑态 textarea、转交修订气泡增加 `break-words [overflow-wrap:anywhere]`，长 Windows 路径会在气泡内断行。
 - `markdown_artifact_edit_smoke.js` 增加 `user bubble remains inside narrowed chat panel` 用例，模拟窄分栏并断言蓝色用户消息气泡没有越出聊天滚动容器。
