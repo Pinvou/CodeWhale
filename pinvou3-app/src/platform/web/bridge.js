@@ -922,26 +922,35 @@ function savePinvouSceneEventsForSession(sid, events) { return pinvouSharedweb()
   function reportSidecarReadFailure(kind, sid, error) {
     console.warn(`[sidecar] ${kind} read failed for session ${sid}; falling back to the local cache`, error);
   }
+  function reportSidecarWriteFailure(kind, sid, error) {
+    console.warn(`[sidecar] ${kind} migration write failed for session ${sid}; keeping the local cache`, error);
+  }
   async function syncPinvouSceneEventsForSession(sid) {
     var cached = loadPinvouSceneEventsForSession(sid);
     if (!sid) return cached;
+    var remote;
     try {
-      var remote = normalizePinvouSceneEvents(
+      remote = normalizePinvouSceneEvents(
         await invoke("get_session_pinvou_scene_events", { sessionId: sid })
       );
-      if (remote.length) {
-        try {
-          window.localStorage.setItem(pinvouSceneStorageKey(sid), JSON.stringify(remote));
-        } catch (_) {}
-        return remote;
-      }
-      if (cached.length) {
-        await invoke("save_session_pinvou_scene_events", { sessionId: sid, events: cached });
-      }
-      return cached;
-    } catch (_) {
+    } catch (error) {
+      reportSidecarReadFailure("pinvou scene", sid, error);
       return cached;
     }
+    if (remote.length) {
+      try {
+        window.localStorage.setItem(pinvouSceneStorageKey(sid), JSON.stringify(remote));
+      } catch (_) { /* fall back to the remote data when the localStorage write fails */ }
+      return remote;
+    }
+    if (cached.length) {
+      try {
+        await invoke("save_session_pinvou_scene_events", { sessionId: sid, events: cached });
+      } catch (error) {
+        reportSidecarWriteFailure("pinvou scene", sid, error);
+      }
+    }
+    return cached;
   }
   // Persona events and pinvou reviews have no local migration cache, but the
   // backend now fails a corrupt sidecar explicitly (missing stays []). Degrade
@@ -5288,6 +5297,7 @@ async function revealModelApiKey(id) { return pinvouSharedweb().revealModelApiKe
   async function setActiveModel(id) {
     await invoke("set_active_model", { id: id });
     await loadModels();
+    await loadSettings();
     await loadEffectiveModelConfig();
   }
   // 读某会话当前绑定的模型 id(切会话时刷新 chip)。
