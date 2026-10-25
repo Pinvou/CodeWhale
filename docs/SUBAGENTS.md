@@ -381,18 +381,28 @@ provider's resolved fanout, depth, and timeout profile.
 
 ## Advertised agent-tool fields (v0.9.9)
 
-The model-facing `agent` tool schema advertises exactly **13 fields**
+The model-facing `agent` tool schema advertises exactly **14 fields**
 (#5324, #5123; T7 later added `profile_query`, the roster host-profile
-keyword filter):
+keyword filter; `timeout_secs` was re-advertised for `action=wait` — see
+below):
 
 `action`, `prompt`, `type`, `profile`, `profile_query`, `name`, `agent_id`,
-`message`, `until`, `detached`, `worktree`, `write_roots`, `resume_from`
+`message`, `until`, `timeout_secs`, `detached`, `worktree`, `write_roots`,
+`resume_from`
 
 plus the action-discriminated `dependentSchemas` tree (`start` requires
 `prompt`; `message`/`followup` require a target and `message`; `peek`/
 `interrupt`/`cancel` require a target). The schema change is part of the
 pinned prompt prefix, so upgrading re-fills the provider KV prefix once per
 session (docs/CACHE.md; accepted at the v0.9.9 boundary).
+
+`timeout_secs` (integer, 1..=120, default 30) bounds a single `action=wait`
+block. It had been dropped with the other lifecycle extras, but the `until`
+text kept promising "default 30s, max 120s": a model with no field to reach
+the max simply repeated 30-second waits — a four-child research fan-out
+observed on 2026-10-23 needed eight of them while the receipt kept saying
+"do not poll". Advertising the bound lets the parent size one wait to the
+batch.
 
 **Parse-accepted but unadvertised (compat).** The following inputs were
 removed from the advertised schema but remain accepted for saved transcripts,
@@ -411,12 +421,41 @@ intersects them with live policy:
   `cwd`, `worktree_path`, `worktree_branch`, `worktree_base`
 - spawn contract: `deliberate`, `dependencies`, `acceptance`,
   `expected_artifact`, `exact_files`, `coordination_contracts`
-- lifecycle extras: `timeout_secs` (wait), `reason` (interrupt),
-  `include_archived` (status), and `token_budget`
+- lifecycle extras: `reason` (interrupt), `include_archived` (status), and
+  `token_budget`; the wait alias `timeout` (same meaning as `timeout_secs`)
 
 Authority never widens: the #5426/#5435 containment clamps are unchanged —
 `write_authority` moves to roles/profiles, and delegation can only narrow
 inherited authority.
+
+### Session names and parallel read-only fan-outs
+
+A `name` passed to `action=start` is reserved only while its holder is live:
+running, or interrupted (parked; only some interrupts leave a checkpoint
+`followup` can wake). Once the child settles (completed, failed, cancelled,
+budget-exhausted) the name is free, so a cancel-and-retry under the same name
+succeeds. If a settled and a live child share a name, the name resolves to
+the live one; among settled-only holders it resolves to the most recent
+spawn. The held-name refusal says what the holder's status can actually do: a
+running child can be waited out or cancelled; an interrupted one is already
+terminal (its completion event has fired and `cancel` only touches Running
+children), so the advice is `action=followup` if its checkpoint still allows,
+or a different name. A ref that is no child's session name still reaches its
+record by exact `agent_id`; when the string is also a session name — unnamed
+children take `session_name = id`, and `name` accepts id-shaped strings —
+the name rules above win. A record hydrated from an older boot is history for
+resolution too — it never outranks the current boot's child — so the
+bare-name "ambiguous" refusal only guards state spawn cannot produce; use the
+`agent_id` if you ever meet it.
+
+`type=general` and `type=implement` are write-capable and claim the whole
+parent workspace unless `write_roots` narrows them, so several started
+without disjoint `write_roots` collide on that claim even when none of them
+writes. For parallel research or inspection use a read-only role (`explore`,
+`planner`, `reviewer`, `test`, `advisor`), a prompt-only start, or
+`type=custom` without declared write authority (it then starts read-only):
+read-only children claim no scope and never contend. The spawn-time
+contention refusal names this path.
 
 ## Child budgets (steps, wall time)
 
