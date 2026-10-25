@@ -2446,7 +2446,10 @@ export function CodexAcpView({
     if (!String(outgoing || '').trim()) return false;
     if (busy || working || activeRuntimeBusy || workspaceUnavailable || sessionSyncing) return false;
     if (!activeId && !draftWorkspacePath) return false;
-    if (attachments.some(attachment => attachment.status === 'parsing')) return false;
+    // Pending (parsing/uploading) attachments are deliberately NOT gated here:
+    // this hook's gate path has no failure feedback, so blocking here would
+    // report a fake "task sent" success. Fall through to send(), which shows
+    // the inline attachments error and fails the voice task for real.
     if (activeId && !sessionReady) return false;
     if (!isNativeAgent && !activeStatus?.authenticated) return false;
     return true;
