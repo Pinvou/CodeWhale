@@ -99,7 +99,7 @@ func legacyExpiryFacts(t *testing.T, ctx context.Context, c *pgx.Conn) string {
 	return stageValue(t, ctx, c, `SELECT jsonb_build_object('journal',(SELECT COALESCE(jsonb_agg(to_jsonb(j) ORDER BY id),'[]') FROM journal_entries j),'postings',(SELECT COALESCE(jsonb_agg(to_jsonb(p) ORDER BY id),'[]') FROM ledger_postings p))::text`)
 }
 
-func seedLegacyExpiry(t *testing.T, ctx context.Context, c *pgx.Conn) {
+func seedLegacyJournalType(t *testing.T, ctx context.Context, c *pgx.Conn, entryType string) {
 	t.Helper()
 	id := uuid.New()
 	tx, err := c.Begin(ctx)
@@ -107,7 +107,7 @@ func seedLegacyExpiry(t *testing.T, ctx context.Context, c *pgx.Conn) {
 		t.Fatal(err)
 	}
 	defer tx.Rollback(ctx)
-	if _, err := tx.Exec(ctx, `INSERT INTO journal_entries(id,entry_type,business_reference,description,created_at) VALUES($1,'EXPIRE',$2,'original expiry fact',now())`, id, "original-expiry:"+id.String()); err != nil {
+	if _, err := tx.Exec(ctx, `INSERT INTO journal_entries(id,entry_type,business_reference,description,created_at) VALUES($1,$2,$3,'original journal fact',now())`, id, entryType, "original-journal:"+id.String()); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := tx.Exec(ctx, `INSERT INTO ledger_postings(id,journal_entry_id,ledger_account_id,delta_microcredits,created_at) SELECT gen_random_uuid(),$1,id,CASE WHEN row_number() OVER(ORDER BY id)=1 THEN -7 ELSE 7 END,now() FROM (SELECT id FROM ledger_accounts ORDER BY id LIMIT 2) accounts`, id); err != nil {
@@ -126,16 +126,26 @@ func TestLegacyExpiry025UpgradePreservesOriginalLedgerPostgres(t *testing.T) {
 	defer stopActors()
 	newStageFixture(t, actorContext, os.Getenv("PINVOU_TEST_SCHEMA_DATABASE_URL"))
 	for through := int64(16); through <= 24; through++ {
-		for _, old := range []bool{false, true} {
-			t.Run(fmt.Sprintf("original%03d/EXPIRE=%v", through, old), func(t *testing.T) {
+		for _, legacy := range []struct {
+			name      string
+			types     []string
+			hasExpiry bool
+		}{
+			{"NONE", nil, false},
+			{"EXPIRE", []string{"EXPIRE"}, true},
+			{"REPAIR_CREDIT_ONLY", []string{"REPAIR_CREDIT"}, false},
+			{"EXPIRE_AND_REPAIR_CREDIT", []string{"EXPIRE", "REPAIR_CREDIT"}, true},
+		} {
+			t.Run(fmt.Sprintf("original%03d/%s", through, legacy.name), func(t *testing.T) {
+				old := len(legacy.types) > 0
 				ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 				defer cancel()
 				c := legacyExpiryDatabase(t, ctx)
 				if err := Up(ctx, c, legacyExpiryInput(t, through)); err != nil {
 					t.Fatal(err)
 				}
-				if old {
-					seedLegacyExpiry(t, ctx, c)
+				for _, entryType := range legacy.types {
+					seedLegacyJournalType(t, ctx, c, entryType)
 				}
 				facts := legacyExpiryFacts(t, ctx, c)
 				ledger := stageValue(t, ctx, c, `SELECT jsonb_agg(to_jsonb(m) ORDER BY version)::text FROM schema_migrations m`)
@@ -165,6 +175,16 @@ func TestLegacyExpiry025UpgradePreservesOriginalLedgerPostgres(t *testing.T) {
 						t.Fatalf("expected CHECK rejection: %v", err)
 					}
 				}
+				// NOT VALID only preserves old rows. It must not allow new rows
+				// of a type excluded by the exact frozen 025 contract.
+				if _, err := c.Exec(ctx, `INSERT INTO journal_entries(id,entry_type,business_reference,description,created_at) VALUES($1,'REPAIR_CREDIT',$2,'new repair before 060',now())`, uuid.New(), uuid.NewString()); err == nil {
+					t.Fatal("025 accepted new REPAIR_CREDIT")
+				} else {
+					var pg *pgconn.PgError
+					if !errorsAsCheck(err, &pg) {
+						t.Fatalf("025 repair CHECK rejection missing: %v", err)
+					}
+				}
 				if _, err := c.Exec(ctx, `INSERT INTO journal_entries(id,entry_type,business_reference,description,created_at) VALUES($1,'EXPIRY',$2,'current expiry spelling',now())`, uuid.New(), uuid.NewString()); err != nil {
 					t.Fatal("new EXPIRY rejected", err)
 				}
@@ -188,8 +208,8 @@ func TestLegacyExpiry025UpgradePreservesOriginalLedgerPostgres(t *testing.T) {
 				if beforeFullFacts != legacyExpiryFacts(t, ctx, c) || beforeFullHistory != stageValue(t, ctx, c, `SELECT jsonb_agg(to_jsonb(m) ORDER BY version)::text FROM schema_migrations m WHERE version<=25 OR version IN (900001,900011)`) {
 					t.Fatal("full upgrade rewrote original financial facts or installed migration records")
 				}
-				if err := c.QueryRow(ctx, `SELECT convalidated FROM pg_constraint WHERE conrelid='journal_entries'::regclass AND conname='journal_entries_entry_type_check'`).Scan(&validated); err != nil || validated == old {
-					t.Fatalf("final conditional validation=%v old=%v err=%v", validated, old, err)
+				if err := c.QueryRow(ctx, `SELECT convalidated FROM pg_constraint WHERE conrelid='journal_entries'::regclass AND conname='journal_entries_entry_type_check'`).Scan(&validated); err != nil || validated == legacy.hasExpiry {
+					t.Fatalf("final conditional validation=%v oldExpiry=%v err=%v", validated, legacy.hasExpiry, err)
 				}
 				if err := c.QueryRow(ctx, `SELECT checksum FROM schema_migrations WHERE version=60`).Scan(&installed); err != nil || installed != repairedExpiryChecksum {
 					t.Fatalf("060 ledger identity=%s err=%v", installed, err)
@@ -204,6 +224,11 @@ func TestLegacyExpiry025UpgradePreservesOriginalLedgerPostgres(t *testing.T) {
 				}
 				if _, err := c.Exec(ctx, `INSERT INTO journal_entries(id,entry_type,business_reference,description,created_at) VALUES($1,'EXPIRY',$2,'current expiry after complete upgrade',now())`, uuid.New(), uuid.NewString()); err != nil {
 					t.Fatal("full upgrade rejected EXPIRY", err)
+				}
+				// Exact 060 restores REPAIR_CREDIT. A repair-only old database
+				// needs a normally validated CHECK here, unlike EXPIRE history.
+				if _, err := c.Exec(ctx, `INSERT INTO journal_entries(id,entry_type,business_reference,description,created_at) VALUES($1,'REPAIR_CREDIT',$2,'current repair after 060',now())`, uuid.New(), uuid.NewString()); err != nil {
+					t.Fatal("full upgrade rejected REPAIR_CREDIT", err)
 				}
 				finalFacts := legacyExpiryFacts(t, ctx, c)
 				finalHistory := stageValue(t, ctx, c, `SELECT jsonb_agg(to_jsonb(m) ORDER BY version)::text FROM schema_migrations m`)

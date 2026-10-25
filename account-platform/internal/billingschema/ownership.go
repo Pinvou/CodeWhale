@@ -15,7 +15,9 @@ const legacyAnomalyChecksum = "849e4ae4ff57132486992216005fc56a3f9a06c31a3cc84bc
 const chargebackStatusCheck = "ADD CONSTRAINT chargeback_cases_status_check CHECK (status IN ('REVIEW_REQUIRED','CONFIRMED','DISMISSED'))"
 
 // Original 025 changed the expiry spelling and 060 rebuilds that CHECK.
-// Preserve posted EXPIRE facts across both, while rejecting new old spellings.
+// Preserve posted EXPIRE facts across both. Original 013 also allowed
+// REPAIR_CREDIT, which 025 temporarily excludes until 060 restores that type.
+// Apply only the exact retained checks to new rows; never rewrite posted facts.
 const legacyExpiryChecksum = "a5015c7fdaa8948820967a887c556cf55ca70be5078d4378fb5457dca9dec23d"
 const journalExpiryCheck = "ADD CONSTRAINT journal_entries_entry_type_check\n    CHECK (entry_type IN ('RECHARGE','USAGE','REFUND','REVERSAL','ADJUSTMENT','EXPIRY','RECEIVABLE','CHARGEBACK'))"
 const repairedExpiryChecksum = "159061bfd00cd057249247e292a5aaa96242becd506f845731b866c0c10c8bfb"
@@ -58,7 +60,7 @@ func applyBillingMigration(ctx context.Context, tx pgx.Tx, migration migrations.
 			return err
 		}
 		var legacy bool
-		if err := tx.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM journal_entries WHERE entry_type='EXPIRE')`).Scan(&legacy); err != nil {
+		if err := tx.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM journal_entries WHERE entry_type='EXPIRE' OR ($1::bigint=25 AND entry_type='REPAIR_CREDIT'))`, migration.Version).Scan(&legacy); err != nil {
 			return err
 		}
 		if legacy {
