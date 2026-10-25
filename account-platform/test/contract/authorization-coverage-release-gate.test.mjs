@@ -25,7 +25,7 @@ async function rejectedMutation(mutate, expected) {
 
 test('authorization release gate classifies every HTTP task event callback and CLI entrypoint', async () => {
   const catalog = JSON.parse(await readFile(catalogURL, 'utf8'));
-  // The six existing Portal transports use Any, alongside the 388 verb-specific
+  // The six existing Portal transports use Any, alongside the 390 verb-specific
   // registrations. Keep the expected complete graph independent of its parser.
   const wildcardPaths = [
     '/api/account/*resource', '/api/token/*resource',
@@ -39,7 +39,7 @@ test('authorization release gate classifies every HTTP task event callback and C
   for (const route of wildcardPaths) assert.ok(portal.includes(`router.Any("${route}",`), `missing existing Portal transport ${route}`);
   // The real checker still rejects missing, stale, duplicate or mis-scoped
   // entries before returning these exact inventory sizes.
-  assert.deepEqual(await runAuthorizationCoverage(), { routes: 394, tasks: 32, events: 18, cli: 26 });
+  assert.deepEqual(await runAuthorizationCoverage(), { routes: 396, tasks: 32, events: 18, cli: 26 });
 });
 
 test('password preparation adds only the captcha admission and two exact internal authority routes', async () => {
@@ -268,4 +268,23 @@ test('late review query keeps exactly two sync-authorized audit-only POST regist
     assert.equal(matches[0].method, 'POST');
     assert.equal(matches[0].registration.trim(), `admin.POST("${route}", s.authorizer.Require("platform.billing.orders.sync"), approvalpolicy.Require("BILLING_LATE_PAYMENT_QUERY", approvalpolicy.AuditOnly), httpserver.AdaptFunc(s.${handler}))`);
   }
+});
+
+test('withdrawal result exposes exactly two platform original-receipt GET bindings', async () => {
+  const source = 'account-platform/internal/account/service.go';
+  const routePath = '/approval-requests/:approval_request_id/actions/withdraw-result';
+  const text = await readFile(new URL(`../../../${source}`, import.meta.url), 'utf8');
+  const routes = authorizationRoutes(source, text).filter(item => item.path === routePath);
+  assert.deepEqual(routes.map(({ receiver, method, path: route }) => ({ receiver, method, path: route })),
+    ['admin', 'adminV2'].map(receiver => ({ receiver, method: 'GET', path: routePath })));
+  for (const item of routes) {
+    assert.equal(item.registration.trim(), `${item.receiver}.GET("${routePath}", httpserver.AdaptFunc(s.adminApprovalWithdrawalResult))`);
+  }
+  const catalog = JSON.parse(await readFile(catalogURL, 'utf8'));
+  const bindings = catalog.http_policies.filter(item => item.source === source && item.path === routePath);
+  assert.deepEqual(bindings, ['admin', 'adminV2'].map(receiver => ({ source, receiver, method: 'GET', path: routePath,
+    scope: 'platform', strategy: 'domain.approval-policy-withdrawal-original-receipt' })));
+  await rejectedMutation(value => {
+    value.http_policies = value.http_policies.filter(item => !(item.source === source && item.receiver === 'adminV2' && item.path === routePath));
+  }, /unclassified_http_entrypoint/);
 });

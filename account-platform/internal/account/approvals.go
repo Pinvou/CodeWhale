@@ -417,6 +417,15 @@ func (r *PostgresRepository) transitionOwnApproval(ctx context.Context, principa
 			return ApprovalRequest{}, err
 		}
 	}
+	if to == "WITHDRAWN" && approvalWithdrawProtocol(ctx) && (item.Status != from || item.Version != expectedVersion) {
+		// Only the exact immutable event confirms this original safe-close. The
+		// current control/actor/authority checks above still precede recovery.
+		if _, proofErr := readApprovalWithdrawalReceipt(ctx, tx, item, *actorID, expectedVersion, approvalV2ControlVersion(ctx), approvalV2ControlVersion(ctx)); proofErr == nil {
+			return item, tx.Commit(ctx)
+		} else if !errors.Is(proofErr, ErrConflict) {
+			return ApprovalRequest{}, proofErr
+		}
+	}
 	if from == "DRAFT" && to == "SUBMITTED" && (item.Status != from || item.Version != expectedVersion) {
 		// A newer version alone cannot prove that this caller's submit committed.
 		// Recover only the durable event for the exact requester and original CAS,
@@ -518,6 +527,12 @@ func (r *PostgresRepository) transitionOwnApproval(ctx context.Context, principa
 		return ApprovalRequest{}, ErrConflict
 	}
 	details := map[string]any{}
+	if to == "WITHDRAWN" && approvalWithdrawProtocol(ctx) {
+		details, err = approvalWithdrawalEventDetails(item, expectedVersion, approvalV2ControlVersion(ctx))
+		if err != nil {
+			return ApprovalRequest{}, err
+		}
+	}
 	if from == "DRAFT" && to == "SUBMITTED" {
 		fingerprint, err := approvalRequestOriginalFingerprint(item)
 		if err != nil {

@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/Pinvou/pinvou3/account-platform/internal/platform/api"
 	"github.com/Pinvou/pinvou3/account-platform/internal/platform/approvalencoding"
@@ -24,8 +25,8 @@ func (s *Service) adminApprovalRequests(w http.ResponseWriter, r *http.Request) 
 		api.WriteError(w, http.StatusNotFound, "NOT_FOUND", "the portal endpoint was not found", httpserver.RequestID(r.Context()))
 		return
 	}
-	mutation := kind != "list" && kind != "detail"
-	if kind != "list" && (r.URL.RawQuery != "" || r.URL.ForceQuery) {
+	mutation := kind != "list" && kind != "detail" && kind != "withdraw-result"
+	if kind != "list" && kind != "withdraw-result" && (r.URL.RawQuery != "" || r.URL.ForceQuery) {
 		api.WriteError(w, http.StatusBadRequest, "INVALID_APPROVAL_REQUEST", "approval detail accepts no query", httpserver.RequestID(r.Context()))
 		return
 	}
@@ -62,6 +63,10 @@ func (s *Service) adminApprovalRequests(w http.ResponseWriter, r *http.Request) 
 		approvalBFFUnavailable(w, r)
 		return
 	}
+	if kind == "withdraw-result" && !validApprovalWithdrawalResultQuery(r, capability.Version) {
+		api.WriteError(w, http.StatusBadRequest, "INVALID_APPROVAL_REQUEST", "invalid withdrawal confirmation", httpserver.RequestID(r.Context()))
+		return
+	}
 	var body []byte
 	if mutation {
 		limit := int64(8192)
@@ -82,9 +87,12 @@ func (s *Service) adminApprovalRequests(w http.ResponseWriter, r *http.Request) 
 	if kind != "list" && kind != "create" {
 		target.Path += "/" + requestID.String()
 	}
-	if kind == "decide" || kind == "submit" || kind == "withdraw" {
+	if kind == "decide" || kind == "submit" || kind == "withdraw" || kind == "withdraw-result" {
 		target.Path += "/actions/" + kind
 	} else if kind == "list" {
+		target.RawQuery = r.URL.RawQuery
+	}
+	if kind == "withdraw-result" {
 		target.RawQuery = r.URL.RawQuery
 	}
 	request, err := http.NewRequestWithContext(r.Context(), r.Method, target.String(), bytes.NewReader(body))
@@ -96,9 +104,9 @@ func (s *Service) adminApprovalRequests(w http.ResponseWriter, r *http.Request) 
 	request.Header.Set("Accept", "application/json")
 	if mutation {
 		request.Header.Set("Content-Type", "application/json")
-		if wire == 2 && kind != "decide" {
-			request.Header.Set("X-Pinvou-Approval-Action-Control-Version", strconv.FormatInt(capability.Version, 10))
-		}
+	}
+	if wire == 2 && mutation && kind != "decide" || kind == "withdraw" || kind == "withdraw-result" {
+		request.Header.Set("X-Pinvou-Approval-Action-Control-Version", strconv.FormatInt(capability.Version, 10))
 	}
 	client := *s.client
 	client.CheckRedirect = func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
@@ -138,6 +146,10 @@ func (s *Service) adminApprovalRequests(w http.ResponseWriter, r *http.Request) 
 			api.WriteError(w, http.StatusConflict, "APPROVAL_ACTION_CONTROL_CHANGED", "approval actions changed; reload the approval detail", httpserver.RequestID(r.Context()))
 			return
 		}
+	}
+	if kind == "withdraw-result" && response.StatusCode == http.StatusOK && !validApprovalWithdrawalResult(data, requestID, r, capability.Version) {
+		approvalBFFUnavailable(w, r)
+		return
 	}
 	if kind == "detail" && response.StatusCode == http.StatusOK {
 		response.Body = io.NopCloser(bytes.NewReader(data))
@@ -193,6 +205,12 @@ func approvalBFFTarget(method, resource string) (uuid.UUID, string) {
 		}
 		return id, "update"
 	}
+	if len(parts) == 3 && parts[1] == "actions" && parts[2] == "withdraw-result" && method == http.MethodGet {
+		id, err := uuid.Parse(parts[0])
+		if err == nil && id != uuid.Nil && id.String() == parts[0] {
+			return id, "withdraw-result"
+		}
+	}
 	if len(parts) == 3 && parts[1] == "actions" && method == http.MethodPost && (parts[2] == "decide" || parts[2] == "submit" || parts[2] == "withdraw") {
 		id, err := uuid.Parse(parts[0])
 		if err == nil && id != uuid.Nil && id.String() == parts[0] {
@@ -211,6 +229,9 @@ func validApprovalBFFMutation(kind string, raw []byte, wire int, version int64, 
 		return len(raw) <= 8192 && validApprovalBFFDecision(raw, wire, version, header)
 	}
 	allowed := map[string]bool{"expected_version": true}
+	if kind == "withdraw" {
+		allowed["command_protocol"] = true
+	}
 	if kind == "create" || kind == "update" {
 		allowed = map[string]bool{
 			"command_type": true, "idempotency_key": true, "normalized_command": true,
@@ -247,6 +268,12 @@ func validApprovalBFFMutation(kind string, raw []byte, wire int, version int64, 
 	closing, err := decoder.Token()
 	if err != nil || closing != json.Delim('}') || decoder.Decode(new(any)) != io.EOF {
 		return false
+	}
+	if protocol, present := seen["command_protocol"]; present {
+		var version int
+		if kind != "withdraw" || json.Unmarshal(protocol, &version) != nil || version != 1 {
+			return false
+		}
 	}
 	if kind == "create" || kind == "update" {
 		var commandType string
@@ -336,4 +363,49 @@ func sameApprovalControl(a, b trustedApprovalCapability) bool {
 
 func approvalBFFUnavailable(w http.ResponseWriter, r *http.Request) {
 	api.WriteError(w, http.StatusServiceUnavailable, "APPROVAL_PROTOCOL_UNAVAILABLE", "approval protocol is unavailable", httpserver.RequestID(r.Context()))
+}
+
+// This endpoint cannot mutate an approval or upgrade its frozen write control.
+func validApprovalWithdrawalResultQuery(r *http.Request, control int64) bool {
+	q := r.URL.Query()
+	if len(q) != 3 || len(q["command_protocol"]) != 1 || q.Get("command_protocol") != "1" {
+		return false
+	}
+	for _, name := range []string{"expected_version", "origin_action_control_version"} {
+		values := q[name]
+		if len(values) != 1 {
+			return false
+		}
+		v, e := strconv.ParseInt(values[0], 10, 64)
+		if e != nil || v < 1 || values[0] != strconv.FormatInt(v, 10) {
+			return false
+		}
+	}
+	values := r.Header.Values("X-Pinvou-Approval-Action-Control-Version")
+	return len(values) == 1 && values[0] == strconv.FormatInt(control, 10)
+}
+
+func validApprovalWithdrawalResult(raw []byte, id uuid.UUID, r *http.Request, control int64) bool {
+	var receipt struct {
+		ID        uuid.UUID `json:"approval_request_id"`
+		Protocol  int       `json:"command_protocol"`
+		Operation string    `json:"operation"`
+		Expected  int64     `json:"expected_version"`
+		Result    int64     `json:"result_version"`
+		Origin    int64     `json:"origin_action_control_version"`
+		Control   int64     `json:"action_control_version"`
+		Event     uuid.UUID `json:"receipt_event_id"`
+		Status    string    `json:"status"`
+		At        time.Time `json:"recorded_at"`
+	}
+	d := json.NewDecoder(bytes.NewReader(raw))
+	d.DisallowUnknownFields()
+	if d.Decode(&receipt) != nil || d.Decode(new(any)) != io.EOF {
+		return false
+	}
+	return receipt.ID == id && receipt.Protocol == 1 && receipt.Operation == "WITHDRAW" && receipt.Status == "WITHDRAWN" &&
+		receipt.Expected > 0 && receipt.Expected < receipt.Result && receipt.Result-receipt.Expected == 1 &&
+		strconv.FormatInt(receipt.Expected, 10) == r.URL.Query().Get("expected_version") &&
+		strconv.FormatInt(receipt.Origin, 10) == r.URL.Query().Get("origin_action_control_version") &&
+		receipt.Control == control && receipt.Event != uuid.Nil && !receipt.At.IsZero()
 }

@@ -162,6 +162,7 @@ func (s *Service) Handler(verify identity.VerifyFunc) http.Handler {
 	admin.PUT("/approval-requests/:approval_request_id", approvalpolicy.Require("APPROVAL_DRAFT_UPDATE", approvalpolicy.AuditOnly), httpserver.AdaptFunc(s.adminUpdateApprovalDraft))
 	admin.POST("/approval-requests/:approval_request_id/actions/submit", approvalpolicy.Require("APPROVAL_REQUEST_SUBMIT", approvalpolicy.AuditOnly), httpserver.AdaptFunc(s.adminSubmitApprovalRequest))
 	admin.POST("/approval-requests/:approval_request_id/actions/withdraw", approvalpolicy.Require("APPROVAL_REQUEST_WITHDRAW", approvalpolicy.AuditOnly), httpserver.AdaptFunc(s.adminWithdrawApprovalRequest))
+	admin.GET("/approval-requests/:approval_request_id/actions/withdraw-result", httpserver.AdaptFunc(s.adminApprovalWithdrawalResult))
 	admin.POST("/approval-requests/:approval_request_id/actions/decide", approvalpolicy.Require("APPROVAL_REQUEST_DECIDE", approvalpolicy.AuditOnly), httpserver.AdaptFunc(s.adminDecideApprovalRequest))
 	adminV2 := protected.Group("/admin/v2")
 	adminV2.POST("/approval-command-prechecks", s.requirePermission("platform.billing.repairs.request"), httpserver.AdaptFunc(s.adminApprovalCommandPrecheck))
@@ -173,6 +174,7 @@ func (s *Service) Handler(verify identity.VerifyFunc) http.Handler {
 	adminV2.PUT("/approval-requests/:approval_request_id", approvalpolicy.Require("APPROVAL_DRAFT_UPDATE", approvalpolicy.AuditOnly), httpserver.AdaptFunc(s.adminUpdateApprovalDraftV2))
 	adminV2.POST("/approval-requests/:approval_request_id/actions/submit", approvalpolicy.Require("APPROVAL_REQUEST_SUBMIT", approvalpolicy.AuditOnly), httpserver.AdaptFunc(s.adminSubmitApprovalRequestV2))
 	adminV2.POST("/approval-requests/:approval_request_id/actions/withdraw", approvalpolicy.Require("APPROVAL_REQUEST_WITHDRAW", approvalpolicy.AuditOnly), httpserver.AdaptFunc(s.adminWithdrawApprovalRequestV2))
+	adminV2.GET("/approval-requests/:approval_request_id/actions/withdraw-result", httpserver.AdaptFunc(s.adminApprovalWithdrawalResult))
 	adminV2.POST("/approval-requests/:approval_request_id/actions/decide", approvalpolicy.Require("APPROVAL_REQUEST_DECIDE", approvalpolicy.AuditOnly), httpserver.AdaptFunc(s.adminDecideApprovalRequestV2))
 	s.registerOrganizationRoutes(protected, admin)
 	return router

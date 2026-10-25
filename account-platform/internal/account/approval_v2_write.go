@@ -195,10 +195,19 @@ func (s *Service) adminTransitionApprovalV2(w http.ResponseWriter, r *http.Reque
 	}
 	var body struct {
 		ExpectedVersion int64 `json:"expected_version"`
+		CommandProtocol *int  `json:"command_protocol"`
 	}
-	if decodeApprovalV2WriteBody(r.Body, map[string]bool{"expected_version": true}, &body) != nil || body.ExpectedVersion <= 0 {
+	allowed := map[string]bool{"expected_version": true}
+	if action == "withdraw" {
+		allowed["command_protocol"] = true
+	}
+	if decodeApprovalV2WriteBody(r.Body, allowed, &body) != nil || body.ExpectedVersion <= 0 ||
+		(body.CommandProtocol != nil && *body.CommandProtocol != 1) {
 		invalidApprovalV2Write(w, r)
 		return
+	}
+	if body.CommandProtocol != nil {
+		ctx = withApprovalWithdrawProtocol(ctx)
 	}
 	var err error
 	if action == "submit" {

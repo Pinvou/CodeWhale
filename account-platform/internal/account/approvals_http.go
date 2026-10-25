@@ -288,10 +288,21 @@ func (s *Service) adminTransitionApproval(w http.ResponseWriter, r *http.Request
 	}
 	var body struct {
 		ExpectedVersion int64 `json:"expected_version"`
+		CommandProtocol *int  `json:"command_protocol"`
 	}
-	if api.DecodeJSON(w, r, &body) != nil || body.ExpectedVersion <= 0 {
+	if api.DecodeJSON(w, r, &body) != nil || body.ExpectedVersion <= 0 ||
+		(body.CommandProtocol != nil && (action != "withdraw" || *body.CommandProtocol != 1)) {
 		api.WriteError(w, http.StatusBadRequest, "INVALID_APPROVAL_REQUEST", "invalid approval request", httpserver.RequestID(r.Context()))
 		return
+	}
+	ctx := r.Context()
+	if body.CommandProtocol != nil {
+		var valid bool
+		ctx, valid = approvalV2WriteContext(w, r)
+		if !valid {
+			return
+		}
+		ctx = withApprovalWithdrawProtocol(ctx)
 	}
 	principal := mustPrincipal(r.Context())
 	var item ApprovalRequest
@@ -299,7 +310,7 @@ func (s *Service) adminTransitionApproval(w http.ResponseWriter, r *http.Request
 	if action == "submit" {
 		item, err = repository.SubmitApprovalRequest(r.Context(), principal, requestID, body.ExpectedVersion)
 	} else {
-		item, err = repository.WithdrawApprovalRequest(r.Context(), principal, requestID, body.ExpectedVersion)
+		item, err = repository.WithdrawApprovalRequest(ctx, principal, requestID, body.ExpectedVersion)
 	}
 	if err != nil {
 		s.writeError(w, r, err)

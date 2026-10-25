@@ -11,6 +11,7 @@ import { responseRetryAfter } from './auth-error.js';
 import { beforeFinanceDispatch, financeNotDispatched } from './finance-operation-state.js';
 import { canonicalApprovalDecision } from './approval-decision-contract.js';
 import { latePaymentQueryBody, requireLatePaymentQueryReceipt, isCurrentLatePaymentQueryAuthority } from './late-payment-query-contract.js';
+import { withdrawWithOriginalReceipt } from './approval-withdrawal-recovery.js';
 import { parseRegistrationBonusJSON, encodeRegistrationBonusJSON } from './registration-bonus-contract.js';
 function errorFromResponse(response, payload) {
   const error = new Error(payload?.message || `HTTP ${response.status}`);
@@ -644,7 +645,7 @@ export class AdminPlatformClient {
       signal?.removeEventListener('abort', abort);
     }
   }
-  async writeGovernedApproval(kind, requestID, detail, draft, signal) {
+  async writeGovernedApproval(kind, requestID, detail, draft, signal, commandProtocol) {
     const capability = await beforeFinanceDispatch(() => this.governedApprovalCapability(signal));
     const lineage = this.approvalLineage();
     if (lineage.control !== capability) throw financeNotDispatched(approvalControlChanged());
@@ -654,6 +655,7 @@ export class AdminPlatformClient {
       !Number.isSafeInteger(detail?.version) || detail.version < 1)) throw financeNotDispatched(approvalControlChanged());
     const body = kind === 'create' ? { ...draft } : kind === 'update'
       ? { ...draft, expected_version: detail.version } : { expected_version: detail.version };
+    if (kind === 'withdraw' && commandProtocol === 1) body.command_protocol = 1;
     const suffix = kind === 'create' ? '' : kind === 'update' ? `/${encodeURIComponent(requestID)}`
       : `/${encodeURIComponent(requestID)}/actions/${kind}`;
     const controller = new AbortController();
@@ -697,8 +699,9 @@ export class AdminPlatformClient {
   submitGovernedApprovalRequest(requestID, detail, signal) {
     return this.writeGovernedApproval('submit', requestID, detail, null, signal);
   }
-  withdrawGovernedApprovalRequest(requestID, detail, signal) {
-    return this.writeGovernedApproval('withdraw', requestID, detail, null, signal);
+  withdrawGovernedApprovalRequest(requestID, detail, signal, commandProtocol) {
+    return withdrawWithOriginalReceipt(this, requestID, detail, signal, commandProtocol,
+      () => this.writeGovernedApproval('withdraw', requestID, detail, null, signal, commandProtocol));
   }
   createApprovalDraft(input, signal) {
     return this.mutate('account', '/admin/v1/approval-requests', 'POST', input, '', signal);

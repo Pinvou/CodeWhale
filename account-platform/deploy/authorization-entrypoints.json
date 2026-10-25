@@ -1388,6 +1388,22 @@
       "path": "/v1/auth/password-preparation-authorizations",
       "scope": "public",
       "strategy": "protocol.registration.captcha-password-preparation"
+    },
+    {
+      "source": "account-platform/internal/account/service.go",
+      "receiver": "admin",
+      "method": "GET",
+      "path": "/approval-requests/:approval_request_id/actions/withdraw-result",
+      "scope": "platform",
+      "strategy": "domain.approval-policy-withdrawal-original-receipt"
+    },
+    {
+      "source": "account-platform/internal/account/service.go",
+      "receiver": "adminV2",
+      "method": "GET",
+      "path": "/approval-requests/:approval_request_id/actions/withdraw-result",
+      "scope": "platform",
+      "strategy": "domain.approval-policy-withdrawal-original-receipt"
     }
   ],
   "tasks": [

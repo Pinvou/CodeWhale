@@ -95,12 +95,12 @@ export function Approvals({ client, copy, permissions, owner, commandTypes = def
     if (!facts) {
       const draft = action === 'EDIT' ? await operation.read(() => currentApprovalEditDraft(client, detail, reason)) : null;
       if (action === 'EDIT' && !draft) return;
-      facts = { detail, action, reason, draft };
+      facts = { detail, action, reason, draft, ...(action === 'WITHDRAW' ? { commandProtocol: 1 } : {}) };
     }
     const value = await operation.mutate(facts, async (facts, invocationKey) => {
       if (facts.action === 'EDIT') await updateAndSubmitGovernedApproval(client, facts.detail, { ...facts.draft, idempotency_key: invocationKey });
       else if (facts.action === 'SUBMIT') await client.submitGovernedApprovalRequest(facts.detail.approval_request_id, facts.detail);
-      else if (facts.action === 'WITHDRAW') await client.withdrawGovernedApprovalRequest(facts.detail.approval_request_id, facts.detail);
+      else if (facts.action === 'WITHDRAW') await client.withdrawGovernedApprovalRequest(facts.detail.approval_request_id, facts.detail, undefined, facts.commandProtocol);
       else await client.decideGovernedApproval(facts.detail.approval_request_id, facts.detail, facts.action, facts.reason);
       return true;
     });

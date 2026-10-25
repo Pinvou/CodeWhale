@@ -72,6 +72,7 @@ ACCOUNT_REQUIRED = {
     "TestOrganizationUnitAuthorityWallClockPostgres",
     "TestApprovalListPoolRuntimePostgres",
     "TestPasswordPreparationAuthorizationPostgres",
+    "TestApprovalWithdrawalOriginalReceiptPostgres",
 }
 TOKEN_PACKAGE = "github.com/Pinvou/pinvou3/account-platform/internal/token"
 TOKEN_CHILD_REQUIRED = {
