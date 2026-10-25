@@ -1064,11 +1064,20 @@ function closeVoiceAsrSetup() { return pinvouSharedtauriVoice().closeVoiceAsrSet
       }
       const claimed = await syncVoiceShortcutRecording(currentVoiceWindowLabel(), session.id);
       if (activeVoiceInput !== session) {
+        // A cancel raced the claim resolution: finishVoiceInput may have
+        // released before the claim landed, so release again — the Rust
+        // side ignores a release from a non-owner.
+        syncVoiceShortcutRecording(null, session.id);
         cleanupVoiceInputSession(session);
         return;
       }
       if (claimed !== true) {
-        throw voiceFlowError("device_unavailable", "device", bt("voiceMicUnavailable"));
+        // The mic is held by another Pinvou window — unless the ownership
+        // check itself failed, which must not be reported as "another
+        // window" (a transient IPC error would otherwise look like a
+        // cross-window lock and send the user hunting for it).
+        throw voiceFlowError("device_unavailable", "device",
+          claimed === "error" ? bt("voiceMicOwnershipUnavailable") : bt("voiceMicBusyOtherWindow"));
       }
       var hasAudioInput = await probeVoiceAudioInput(VOICE_DEVICE_PROBE_TIMEOUT_MS);
       if (activeVoiceInput !== session) return;
@@ -1202,12 +1211,37 @@ function cancelVoiceInput() { return pinvouSharedtauriVoice().cancelVoiceInput()
     return "";
   }
 
-  // Rust atomically owns (caller window, token). Claim must succeed before opening
-  // a microphone; stale teardown and another WebView can never overwrite ownership.
+  // Rust atomically owns (caller window, token): release only dispatches when
+  // the token still matches — a previous session's late teardown can never
+  // wipe the claim the new session just registered, another WebView can never
+  // overwrite it, and tokenless clears are rejected instead of clearing the
+  // current owner. Returns whether the claim/release landed, or the string
+  // "error" when the IPC itself failed or the window identity could not be
+  // read (the caller must still fail closed, but may tell the user the check
+  // failed instead of blaming another window).
+  // Ownership syncs are serialized through one promise chain: the
+  // release-then-reclaim handoff (a fire-and-forget release racing the next
+  // start's claim) relies on the backend receiving the syncs in call order,
+  // and per-webview IPC ordering alone does not guarantee that once the
+  // runtime dispatches invokes concurrently.
+  var voiceOwnershipSyncTail = Promise.resolve();
   function syncVoiceShortcutRecording(label, token) {
-    if (!token) return false;
-    return Promise.resolve(invoke("set_voice_shortcut_recording", { label: label || null, token: token }))
-      .then(function (claimed) { return claimed === true; }, function () { return false; });
+    var attempt = voiceOwnershipSyncTail.then(function () {
+      if (!token) return false;
+      // An unreadable window label must not go over the wire: the Rust command
+      // treats a null label as a release and would answer false, which the
+      // caller would misreport as "another window is recording". Report the
+      // ownership check as unavailable instead.
+      if (label === "") return "error";
+      return Promise.resolve(invoke("set_voice_shortcut_recording", { label: label || null, token: token }))
+        .then(function (claimed) { return claimed === true; }, function (error) {
+          console.warn("[voice] recording ownership sync failed", error);
+          emitVoiceDiagnostic("recording", "warn", "recording ownership sync failed: " + String((error && error.message) || error), "", "claim_error");
+          return "error";
+        });
+    });
+    voiceOwnershipSyncTail = attempt.then(function () {}, function () {});
+    return attempt;
   }
 
   function setVoiceShortcutEnabled(enabled) {
