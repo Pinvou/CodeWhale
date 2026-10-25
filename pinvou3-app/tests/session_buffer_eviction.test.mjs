@@ -536,6 +536,21 @@ test('web scene sidecar save failure + capacity eviction: the localStorage cache
 // reachable path: eviction → scheduled-run reopen → the draft must return
 // to the visible working set.
 
+test('web capacity-evict loops cancel stream timers before dropping the buffer', () => {
+  // Static pin (review of the parity backflow): the two prune loops gained a
+  // cancelStreamTimers(id) pairing to match purgeSessionBuffer. A removed
+  // cancel would let a stray render timer outlive its evicted buffer. Both
+  // loops must keep the cancel between the stash guard and the delete.
+  const source = read('bridge.js');
+  const pins = source.match(
+    /stashEvictedSessionDraft\(id, buf\)\) continue;[\s\S]*?cancelStreamTimers\(id\);[\s\S]*?delete sessionStates\[id\];/g,
+  ) || [];
+  assert.equal(
+    pins.length, 2,
+    'both capacity-evict loops (scheduled + all-session LRU) must cancel stream timers before the delete',
+  );
+});
+
 test('web scheduled-run reopen: after eviction, the scheduled open restores the draft via the getBuffer rebuild', async () => {
   const rt = bootWebBridge();
   // The sched session was visited earlier and left an unsent draft, then

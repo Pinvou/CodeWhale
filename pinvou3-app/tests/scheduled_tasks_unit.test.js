@@ -1624,15 +1624,15 @@ async function backgroundSessionFirstDeltaPublishesViaFrame(bridgeKind) {
     bridgeKind + ": the background first delta text must survive the coalesced publication");
 }
 
-// Regression anchor (PR #1215 review): the web bridge's chat:tool_end reset
-// branches cleared currentStreamText/currentStreamId without the desktop
-// invariant "the flush must precede the stream state reset", so item.html
-// stayed at the first-delta markdown while item.text already held the whole
-// turn until (or unless) the 180ms trailing-edge render fired.
-async function webToolEndFlushesStreamHtmlBeforeReset() {
-  var harness = createBridgeHarness(null, { bridgeKind: "web" });
+// Regression anchor (PR #1215 review): the chat:tool_end reset branches
+// cleared currentStreamText/currentStreamId without the invariant "the flush
+// must precede the stream state reset", so item.html stayed at the
+// first-delta markdown while item.text already held the whole turn until (or
+// unless) the 180ms trailing-edge render fired. Pinned on both lanes.
+async function toolEndFlushesStreamHtmlBeforeReset(bridgeKind) {
+  var harness = createBridgeHarness(null, { bridgeKind: bridgeKind });
   var bridge = harness.bridge;
-  var sessionId = "chat-web-tool-end-flush";
+  var sessionId = "chat-" + bridgeKind + "-tool-end-flush";
   harness.handlers.load_session = function () {
     return { metadata: { id: sessionId, title: "Tool end flush" }, messages: [], artifacts: [] };
   };
@@ -1644,18 +1644,48 @@ async function webToolEndFlushesStreamHtmlBeforeReset() {
   // tool_end, so the 180ms trailing-edge render cannot preempt the flush.
   harness.emit("chat:tool_end", {
     session_id: sessionId,
-    id: "web-flush-tool",
+    id: "flush-tool",
     name: "read_file",
     output: "ok",
     success: true,
   });
 
-  var streamedItem = bridge.state.get().chatItems.filter(function (item) {
+  var chatItems = (bridgeKind === "tauri" ? bridge.state.get("chat") : bridge.state.get()).chatItems;
+  var streamedItem = chatItems.filter(function (item) {
     return item.type === "assistant" && item.text === "before tool-end-tail";
   }).pop();
-  assert.ok(streamedItem, "web: the accumulated stream bubble must survive tool_end");
+  assert.ok(streamedItem, bridgeKind + ": the accumulated stream bubble must survive tool_end");
   assert.ok(String(streamedItem.html || "").includes("before tool-end-tail"),
-    "web: tool_end must synchronously flush the full markdown html before the stream state reset");
+    bridgeKind + ": tool_end must synchronously flush the full markdown html before the stream state reset");
+}
+
+// The early-return terminal branches inside chat:tool_end each carry their own
+// flush before the stream reset; a removed flush there is invisible to the
+// general tool_end pin because those branches return before reaching it.
+async function terminalToolEndBranchFlushesStreamHtmlBeforeReset(bridgeKind, toolStartPayload, toolEndPayload, label) {
+  var harness = createBridgeHarness(null, { bridgeKind: bridgeKind });
+  var bridge = harness.bridge;
+  var sessionId = "chat-" + bridgeKind + "-terminal-flush-" + label;
+  harness.handlers.load_session = function () {
+    return { metadata: { id: sessionId, title: "Terminal flush " + label }, messages: [], artifacts: [] };
+  };
+  assert.strictEqual(await bridge.sessions.switchToSession(sessionId), true);
+
+  harness.emit("chat:tool_start", Object.assign({ session_id: sessionId }, toolStartPayload));
+  harness.emit("chat:delta", { session_id: sessionId, text: "before " });
+  harness.emit("chat:delta", { session_id: sessionId, text: label + "-tail" });
+  // Deliberately synchronous: no awaited timer between the deltas and
+  // tool_end, so the 180ms trailing-edge render cannot preempt the flush.
+  harness.emit("chat:tool_end", Object.assign({ session_id: sessionId }, toolEndPayload));
+
+  var tail = "before " + label + "-tail";
+  var chatItems = (bridgeKind === "tauri" ? bridge.state.get("chat") : bridge.state.get()).chatItems;
+  var streamedItem = chatItems.filter(function (item) {
+    return item.type === "assistant" && item.text === tail;
+  }).pop();
+  assert.ok(streamedItem, bridgeKind + "[" + label + "]: the accumulated stream bubble must survive the terminal tool_end branch");
+  assert.ok(String(streamedItem.html || "").includes(tail),
+    bridgeKind + "[" + label + "]: the terminal tool_end branch must synchronously flush the full markdown html before the stream state reset");
 }
 
 // Regression anchor (stream coalescing review): the web admission-reject path
@@ -1707,6 +1737,53 @@ async function webAdmissionRejectFlushesStreamHtmlBeforeReset() {
   assert.ok(postToolBubble, "web: the post-tool remote bubble must survive the admission reject");
   assert.ok(String(postToolBubble.html || "").includes("Z-SECOND"),
     "web: the admission reject must synchronously flush the remote bubble's html before the stream reset");
+}
+
+// Desktop twin of webAdmissionRejectFlushesStreamHtmlBeforeReset: the tauri
+// admission-reject catch resets the pending assistant inside the same
+// working-set sync, so without the synchronous flush the surviving post-tool
+// remote bubble's html stayed at its first-delta markdown forever (the
+// trailing-edge render no longer finds the item once currentStreamId is 0).
+async function tauriAdmissionRejectFlushesStreamHtmlBeforeReset() {
+  var harness = createBridgeHarness(null, {});
+  var bridge = harness.bridge;
+  var sessionId = "chat-admission-flush-tauri";
+  harness.handlers.load_session = function () {
+    return { metadata: { id: sessionId, title: "Admission flush tauri" }, messages: [], artifacts: [] };
+  };
+  assert.strictEqual(await bridge.sessions.switchToSession(sessionId), true);
+
+  // An optimistic local send hangs inside the admission RPC while the remote
+  // turn streams past its first delta and crosses a tool boundary, so the
+  // live bubble at reject time is a fresh post-tool bubble, not the removed
+  // optimistic one.
+  var rejectRpc = null;
+  var rejectedRpc = new Promise(function (resolve) { rejectRpc = resolve; });
+  harness.handlers.chat = function () {
+    return rejectedRpc.then(function () {
+      return Promise.reject(new Error("session_turn_in_progress"));
+    });
+  };
+  var sendOutcome = bridge.chat.sendMessage("racing send");
+  await tick();
+  await harness.emit("chat:user_message", { session_id: sessionId, content: "remote q" });
+  await harness.emit("chat:delta", { session_id: sessionId, text: "INTO-Y " });
+  await harness.emit("chat:tool_start", { session_id: sessionId, id: "adm-tool", name: "read_file", args: { path: "x" } });
+  await harness.emit("chat:delta", { session_id: sessionId, text: "Z-FIRST" });
+  await harness.emit("chat:delta", { session_id: sessionId, text: "-Z-SECOND" });
+
+  rejectRpc();
+  // The desktop contract differs from the web bridge: a main-path send
+  // failure still throws to the caller (surfaceFailure) — but only after the
+  // catch has cleaned up the optimistic items and flushed the stream state.
+  await assert.rejects(sendOutcome, /session_turn_in_progress/,
+    "tauri: the racing send must surface the admission failure after the cleanup ran");
+  var postToolBubble = bridge.state.get("chat").chatItems.filter(function (item) {
+    return item.type === "assistant" && String(item.text || "").includes("Z-FIRST");
+  }).pop();
+  assert.ok(postToolBubble, "tauri: the post-tool remote bubble must survive the admission reject");
+  assert.ok(String(postToolBubble.html || "").includes("Z-SECOND"),
+    "tauri: the admission reject must synchronously flush the remote bubble's html before the stream reset");
 }
 
 async function olderDesktopUsesServerGeneratedSessionDownloadId() {
@@ -9248,8 +9325,40 @@ Promise.resolve()
   .then(function () { return streamNotificationTimerFallback("web"); })
   .then(function () { return backgroundSessionFirstDeltaPublishesViaFrame("tauri"); })
   .then(function () { return backgroundSessionFirstDeltaPublishesViaFrame("web"); })
-  .then(function () { return webToolEndFlushesStreamHtmlBeforeReset(); })
   .then(function () { return webAdmissionRejectFlushesStreamHtmlBeforeReset(); })
+  .then(function () { return tauriAdmissionRejectFlushesStreamHtmlBeforeReset(); })
+  .then(function () { return toolEndFlushesStreamHtmlBeforeReset("tauri"); })
+  .then(function () { return toolEndFlushesStreamHtmlBeforeReset("web"); })
+  .then(function () { return terminalToolEndBranchFlushesStreamHtmlBeforeReset(
+    "tauri",
+    { id: "tauri-flush-req-input", name: "request_user_input", args: {} },
+    { id: "tauri-flush-req-input", name: "request_user_input", output: "ok", success: true },
+    "req-input"); })
+  .then(function () { return terminalToolEndBranchFlushesStreamHtmlBeforeReset(
+    "tauri",
+    { id: "tauri-flush-artifact-fail", name: "present_artifact", args: { path: "tail.png" } },
+    { id: "tauri-flush-artifact-fail", name: "present_artifact", output: "boom", success: false },
+    "artifact-fail"); })
+  .then(function () { return terminalToolEndBranchFlushesStreamHtmlBeforeReset(
+    "tauri",
+    { id: "tauri-flush-artifact-ok", name: "present_artifact", args: { path: "tail.png" } },
+    { id: "tauri-flush-artifact-ok", name: "present_artifact", output: "tail.png", success: true },
+    "artifact-ok"); })
+  .then(function () { return terminalToolEndBranchFlushesStreamHtmlBeforeReset(
+    "web",
+    { id: "web-flush-req-input", name: "request_user_input", args: {} },
+    { id: "web-flush-req-input", name: "request_user_input", output: "ok", success: true },
+    "req-input"); })
+  .then(function () { return terminalToolEndBranchFlushesStreamHtmlBeforeReset(
+    "web",
+    { id: "web-flush-artifact-fail", name: "present_artifact", args: { path: "tail.png" } },
+    { id: "web-flush-artifact-fail", name: "present_artifact", output: "boom", success: false },
+    "artifact-fail"); })
+  .then(function () { return terminalToolEndBranchFlushesStreamHtmlBeforeReset(
+    "web",
+    { id: "web-flush-artifact-ok", name: "present_artifact", args: { path: "tail.png" } },
+    { id: "web-flush-artifact-ok", name: "present_artifact", output: "tail.png", success: true },
+    "artifact-ok"); })
   .then(multipleKnowledgeMountBehavior)
   .then(queuedKnowledgeMountKeepsOriginalSession)
   .then(staleKnowledgeSnapshotDoesNotCrossSessions)

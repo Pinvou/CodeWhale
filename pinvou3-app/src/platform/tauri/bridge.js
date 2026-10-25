@@ -1061,6 +1061,10 @@ function pinvouSceneForMessagePos(pos) { return pinvouSharedtauriMain().pinvouSc
     isDefaultChatTitle: isDefaultChatTitle,
     notify: function () { return notify.apply(null, arguments); },
     runSyncOnSession: function () { return runSyncOnSession.apply(null, arguments); },
+    // 惰性转发（chat-events 在其后安装）：准入拒绝在重置流状态前同步冲刷幸存
+    // post-tool 气泡的 html，与 web 桥同形；chat lane 不直接依赖 chat-events
+    // 内部表，经宿主转交。
+    flushPendingStreamRender: function () { return chatEventsFeature && chatEventsFeature.flushPendingStreamRender(); },
     // 壳化（#701 T0-c）：chat 域 sendMessageToSession 委托 helpers 后，共享实现
     // 需要触碰 LRU 时钟；惰性转发（sessionsFeature 在其后安装）。
     touchSessionBuffer: function () { return touchSessionBuffer.apply(null, arguments); },
