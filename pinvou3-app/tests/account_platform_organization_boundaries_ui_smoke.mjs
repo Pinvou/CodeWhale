@@ -11,6 +11,11 @@ const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const chrome = process.env.CHROME || ['C:/Program Files/Google/Chrome/Application/chrome.exe', 'C:/Program Files (x86)/Microsoft/Edge/Application/msedge.exe', '/usr/bin/chromium', '/usr/bin/google-chrome', '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome'].find(fs.existsSync);
 assert.ok(chrome, 'Browser unavailable; no organization boundary validation performed');
 const profile = fs.mkdtempSync(path.join(os.tmpdir(), 'pinvou-f06-boundaries-'));
+const removeProfile = () => {
+  const resolvedProfile = path.resolve(profile), temporaryRoot = path.resolve(os.tmpdir());
+  if (path.dirname(resolvedProfile) !== temporaryRoot || !path.basename(resolvedProfile).startsWith('pinvou-f06-boundaries-')) throw new Error('Unsafe browser profile cleanup path');
+  fs.rmSync(resolvedProfile, { recursive: true, force: true });
+};
 let vite, browser, page;
 const results = [];
 const unavailable = { zh: '邀请已失效或不可用，请刷新邀请列表。', en: 'The invitation is expired or unavailable. Refresh invitations.', ja: '招待は期限切れか利用できません。招待一覧を更新してください。' };
@@ -23,6 +28,89 @@ try {
   const fresh = async (language, mode = '') => { errors.length = 0; await page.goto(url); await page.waitForFunction(() => window.f06); await page.evaluate(({ language, mode }) => { Object.assign(window.f06, { language, boundaries: true, roleMode: mode }); window.f06.authorizationVersion++; window.f06.render(); }, { language, mode }); await page.waitForFunction(() => document.body.textContent.includes('Controlled Unit')); };
   const run = async (name, fn) => { try { await fn(); assert.deepEqual(errors, []); results.push({ name, pass: true }); } catch (error) { results.push({ name, pass: false, error: error.message }); } };
   const accept = async () => { await page.evaluate(() => { const form = [...document.querySelectorAll('form')].find(item => item.querySelector('input[type=password]')); assertInput(form); function assertInput(item) { if (!item) throw new Error('Invitation form absent'); const input = item.querySelector('input'); Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value').set.call(input, 'PUBLIC_CONTROLLED_INVITATION'); input.dispatchEvent(new Event('input', { bubbles: true })); } }); await page.waitForFunction(() => [...document.querySelectorAll('form')].find(item => item.querySelector('input[type=password]'))?.querySelector('button')?.disabled === false); await page.evaluate(() => [...document.querySelectorAll('form')].find(item => item.querySelector('input[type=password]')).requestSubmit()); };
+  const renameFresh = async (language = 'en') => {
+    errors.length = 0; await page.goto(url); await page.waitForFunction(() => window.f06);
+    await page.evaluate(language => { Object.assign(window.f06, { language, admin: true, renameMode: true }); window.f06.render(); }, language);
+    await page.waitForFunction(() => [...document.querySelectorAll('button')].some(button => button.textContent.startsWith('Controlled Org')));
+    await page.evaluate(() => [...document.querySelectorAll('button')].find(button => button.textContent.startsWith('Controlled Org')).click());
+    await page.waitForFunction(() => document.body.textContent.includes('Second Controlled Unit'));
+  };
+  // Select by the real form heading/current name, not implementation state.
+  const renameWrites = () => page.evaluate(() => window.f06.calls.filter(call => call.method === 'PATCH'));
+  const editName = async (title, name, next) => {
+    await page.evaluate(({ title, name }) => {
+      const node = [...document.querySelectorAll('.ap-org-action')].find(node => node.querySelector('h4')?.textContent === window.f06.copy()[title] && node.textContent.includes(name));
+      node.querySelector('button').click();
+    }, { title, name });
+    await page.waitForFunction(({ title, name }) => [...document.querySelectorAll('.ap-org-action')].some(node => node.querySelector('h4')?.textContent === window.f06.copy()[title] && node.querySelector('input')?.value === name), {}, { title, name });
+    if (next) await page.evaluate(({ title, name, next }) => {
+      const node = [...document.querySelectorAll('form.ap-org-action')].find(node => node.querySelector('h4')?.textContent === window.f06.copy()[title] && node.querySelector('input')?.value === name);
+      const input = node.querySelector('input'); Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value').set.call(input, next); input.dispatchEvent(new Event('input', { bubbles: true }));
+    }, { title, name, next });
+  };
+  const submitName = async title => page.evaluate(title => [...document.querySelectorAll('form.ap-org-action')].find(node => node.querySelector('h4')?.textContent === window.f06.copy()[title]).requestSubmit(), title);
+  const cancelName = async title => page.evaluate(title => [...document.querySelectorAll('form.ap-org-action')].find(node => node.querySelector('h4')?.textContent === window.f06.copy()[title]).querySelector('button[type=button]').click(), title);
+  for (const language of ['zh', 'en', 'ja']) await run(`${language}: organization and unit names require explicit edit, cancel discards and save exits`, async () => {
+    await renameFresh(language);
+    assert.equal(await page.evaluate(() => [...document.querySelectorAll('form.ap-org-action')].filter(node => [window.f06.copy().rename, window.f06.copy().renameUnit].includes(node.querySelector('h4')?.textContent)).length), 0, 'Default detail must not expose rename inputs or submit forms');
+    await editName('rename', 'Controlled Org', 'Discarded Org');
+    await page.evaluate(() => { const form = [...document.querySelectorAll('form.ap-org-action')].find(node => node.querySelector('h4')?.textContent === window.f06.copy().rename); window.f06.cancelledNameSubmit = form[Object.keys(form).find(key => key.startsWith('__reactProps$'))].onSubmit; });
+    await cancelName('rename'); await page.evaluate(() => window.f06.cancelledNameSubmit({ preventDefault() {} }));
+    assert.equal((await renameWrites()).length, 0);
+    await editName('rename', 'Controlled Org', 'Saved Org'); await submitName('rename');
+    await page.waitForFunction(() => document.querySelector('h3')?.textContent === 'Saved Org');
+    assert.equal(await page.evaluate(() => [...document.querySelectorAll('form.ap-org-action')].some(node => node.querySelector('h4')?.textContent === window.f06.copy().rename)), false);
+    await editName('renameUnit', 'Controlled Unit', 'Saved Unit'); await submitName('renameUnit');
+    await page.waitForFunction(() => document.body.textContent.includes('Saved Unit'));
+    const calls = await renameWrites(); assert.equal(calls.length, 2); assert.equal(calls[0].body, '{"name":"Saved Org"}'); assert.equal(calls[1].body, '{"name":"Saved Unit"}');
+    assert.ok(calls[0].key.startsWith('finance-') && calls[1].key.startsWith('finance-')); assert.notEqual(calls[0].key, calls[1].key);
+  });
+  await run('Name edit state belongs independently to organization and each unit', async () => {
+    await renameFresh(); await editName('rename', 'Controlled Org', 'Org Draft'); await editName('renameUnit', 'Controlled Unit', 'First Draft'); await editName('renameUnit', 'Second Controlled Unit', 'Second Draft');
+    await page.evaluate(() => [...document.querySelectorAll('form.ap-org-action')].find(form => form.querySelector('input')?.value === 'First Draft').querySelector('button[type=button]').click());
+    assert.deepEqual(await page.evaluate(() => [...document.querySelectorAll('form.ap-org-action input')].map(input => input.value).filter(value => value.endsWith('Draft')).sort()), ['Org Draft', 'Second Draft']);
+    assert.equal((await renameWrites()).length, 0);
+    await submitName('rename'); await page.waitForFunction(() => document.querySelector('h3')?.textContent === 'Org Draft');
+    await page.waitForFunction(() => [...document.querySelectorAll('form.ap-org-action input')].some(input => input.value === 'Second Draft'));
+    assert.equal(await page.evaluate(() => [...document.querySelectorAll('form.ap-org-action input')].some(input => input.value === 'First Draft')), false, 'A cancelled peer draft must not revive on reload');
+    await submitName('renameUnit');
+    await page.waitForFunction(() => ![...document.querySelectorAll('form.ap-org-action')].some(node => node.querySelector('h4')?.textContent === window.f06.copy().renameUnit));
+    assert.equal((await renameWrites()).length, 2);
+  });
+  await run('Invalid name and definite denial retain editable state without an unresolved invocation', async () => {
+    await renameFresh(); await editName('rename', 'Controlled Org', '   '); await submitName('rename');
+    await page.waitForFunction(() => [...document.querySelectorAll('form.ap-org-action')].find(node => node.querySelector('h4')?.textContent === window.f06.copy().rename).querySelector('[role=alert]')?.textContent === window.f06.copy().invalid);
+    assert.equal((await renameWrites()).length, 0); await cancelName('rename');
+    await editName('rename', 'Controlled Org', 'Denied Name'); await page.evaluate(() => { window.f06.renameDenied = true; }); await submitName('rename');
+    await page.waitForFunction(() => [...document.querySelectorAll('form.ap-org-action')].find(node => node.querySelector('h4')?.textContent === window.f06.copy().rename).querySelector('[role=alert]')?.textContent === window.f06.copy().permissions);
+    assert.equal(await page.evaluate(() => [...document.querySelectorAll('form.ap-org-action')].find(node => node.querySelector('h4')?.textContent === window.f06.copy().rename).querySelector('button[type=button]').disabled), false);
+    await cancelName('rename'); await editName('rename', 'Controlled Org');
+    assert.equal((await renameWrites()).length, 1);
+  });
+  for (const target of ['rename', 'renameUnit']) await run(`${target}: busy and unknown retain immutable invocation until explicit original retry`, async () => {
+    await renameFresh(); const name = target === 'rename' ? 'Controlled Org' : 'Controlled Unit';
+    await editName(target, name, 'Retained Name'); await page.evaluate(() => { window.f06.renameDelayed = true; window.f06.renameUnknown = true; }); await submitName(target);
+    await page.waitForFunction(() => window.f06.releaseRename);
+    assert.equal(await page.evaluate(target => [...document.querySelectorAll('form.ap-org-action')].find(node => node.querySelector('h4')?.textContent === window.f06.copy()[target]).querySelector('button[type=button]').disabled, target), true);
+    await submitName(target); assert.equal((await renameWrites()).length, 1);
+    await page.evaluate(() => { window.f06.releaseRename(); });
+    await page.waitForFunction(target => [...document.querySelectorAll('form.ap-org-action')].find(node => node.querySelector('h4')?.textContent === window.f06.copy()[target]).querySelector('[role=alert]')?.textContent === window.f06.copy().unknown, {}, target);
+    await page.evaluate(() => { window.f06.language = 'ja'; window.f06.renameUnknown = false; window.f06.renameDelayed = false; window.f06.render(); });
+    assert.equal(await page.evaluate(target => [...document.querySelectorAll('form.ap-org-action')].find(node => node.querySelector('h4')?.textContent === window.f06.copy()[target]).querySelector('button[type=button]').disabled, target), true);
+    await submitName(target);
+    await page.waitForFunction(target => ![...document.querySelectorAll('form.ap-org-action')].some(node => node.querySelector('h4')?.textContent === window.f06.copy()[target]), {}, target);
+    const calls = await renameWrites(); assert.equal(calls.length, 2); assert.equal(calls[0].key, calls[1].key); assert.equal(calls[0].body, calls[1].body);
+  });
+  await run('Read-only permission and retired late save cannot expose or revive a name editor', async () => {
+    await renameFresh(); await editName('rename', 'Controlled Org', 'Late Name'); await page.evaluate(() => { window.f06.renameDelayed = true; }); await submitName('rename');
+    await page.waitForFunction(() => window.f06.releaseRename);
+    await page.evaluate(() => { window.f06.readonly = true; window.f06.authorizationVersion++; window.f06.render(); });
+    await page.waitForFunction(() => ![...document.querySelectorAll('h4')].some(node => [window.f06.copy().rename, window.f06.copy().renameUnit].includes(node.textContent)));
+    await page.evaluate(() => window.f06.releaseRename());
+    await page.evaluate(() => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve))));
+    assert.equal(await page.evaluate(() => [...document.querySelectorAll('form.ap-org-action')].some(node => [window.f06.copy().rename, window.f06.copy().renameUnit].includes(node.querySelector('h4')?.textContent))), false);
+    assert.equal((await renameWrites()).length, 1);
+  });
   for (const language of ['zh', 'en', 'ja']) {
     await run(`${language}: roles.assign without members.manage exposes only legal role control`, async () => { await fresh(language, 'roles'); await page.waitForFunction(() => document.body.textContent.includes(window.f06.user)); assert.equal(await page.evaluate(() => [...document.querySelectorAll('h4')].some(item => item.textContent === window.f06.copy().replaceRoles)), true); assert.equal(await page.evaluate(() => [...document.querySelectorAll('h4')].some(item => item.textContent === window.f06.copy().invite)), false); await page.evaluate(() => { const form = [...document.querySelectorAll('form')].find(item => item.querySelector('h4')?.textContent === window.f06.copy().replaceRoles); const selects = form.querySelectorAll('select'); selects[0].value = window.f06.user; selects[0].dispatchEvent(new Event('change', { bubbles: true })); selects[1].value = 'MEMBER'; selects[1].dispatchEvent(new Event('change', { bubbles: true })); }); await page.evaluate(() => [...document.querySelectorAll('form')].find(item => item.querySelector('h4')?.textContent === window.f06.copy().replaceRoles).requestSubmit()); await page.waitForSelector('[role=alertdialog]'); await page.click('[role=alertdialog] button:last-child'); await page.waitForFunction(() => [...document.querySelectorAll('[role=status]')].some(item => item.textContent === window.f06.copy().saved)); assert.equal(await page.evaluate(() => { const call = window.f06.calls.find(item => item.path.endsWith('/roles')); return call?.method === 'PUT' && JSON.stringify(JSON.parse(call.body)) === JSON.stringify({ roles: ['MEMBER'] }) && call.key.startsWith('finance-'); }), true); });
     await run(`${language}: members.manage without roles.assign hides role replacement`, async () => { await fresh(language, 'members'); await page.waitForFunction(() => document.body.textContent.includes(window.f06.user)); assert.equal(await page.evaluate(() => [...document.querySelectorAll('h4')].some(item => item.textContent === window.f06.copy().replaceRoles)), false); assert.equal(await page.evaluate(() => [...document.querySelectorAll('h4')].some(item => item.textContent === window.f06.copy().invite)), true); });
@@ -114,6 +202,6 @@ try {
     assert.equal((await writes()).length, 1); assert.equal(await page.$('[role=alertdialog]'), null);
   });
   results.push(...await runOrganizationUnitScopeCases(page, `http://127.0.0.1:${vite.httpServer.address().port}`));
-} finally { if (browser) await browser.close(); if (vite) await vite.close(); fs.rmSync(profile, { recursive: true, force: true }); }
+} finally { if (browser) await browser.close(); if (vite) await vite.close(); removeProfile(); }
 console.log(JSON.stringify({ results, passed: results.filter(item => item.pass).length, failed: results.filter(item => !item.pass).length }));
 if (results.some(item => !item.pass)) process.exitCode = 1;

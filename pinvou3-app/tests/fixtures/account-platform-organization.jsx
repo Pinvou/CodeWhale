@@ -18,6 +18,23 @@ const control={authorizationVersion:1,modelPolicy:false,policy:{organization_id:
 const json=(value,status=200)=>new Response(JSON.stringify(value),{status,headers:{'Content-Type':'application/json'}});
 globalThis.fetch=async(url,options={})=>{
  const requestURL=new URL(String(url),'http://fixture.invalid');const path=requestURL.pathname;const method=options.method||'GET';control.calls.push({path,method,body:options.body,key:options.headers?.['Idempotency-Key']});
+ // Synthetic public admin DTOs consumed by the real AdminPlatformClient and
+ // OrganizationAdminClient. No account service, credentials or real writes.
+ if (control.renameMode && path.startsWith('/api/admin/account/admin/v1/organizations')) {
+  const names = control.renameNames ||= { org: 'Controlled Org', unit: 'Controlled Unit', other: 'Second Controlled Unit' };
+  const unitRow = id => ({ unit_id: id, organization_id: org, parent_id: null, name: names[id === unit ? 'unit' : 'other'], status: 'ACTIVE', version: 1 });
+  if (method === 'GET' && path === '/api/admin/account/admin/v1/organizations') return json({ items: [{ organization_id: org, name: names.org, status: 'ACTIVE', version: 1 }], next_cursor: null });
+  if (method === 'GET' && path.endsWith('/units')) return json({ items: [unitRow(unit), unitRow(other)], structure_version: 1 });
+  if (method === 'GET' && path.endsWith('/members')) return json({ items: [], next_cursor: null });
+  if (method === 'PATCH') {
+   if (control.renameDenied) return json({ code: 'FORBIDDEN' }, 403);
+   const body = JSON.parse(options.body), target = path.endsWith(`/units/${unit}`) ? 'unit' : path.endsWith(`/units/${other}`) ? 'other' : 'org';
+   names[target] = body.name;
+   const response = () => control.renameUnknown ? json({ code: 'COMMAND_RESULT_UNKNOWN' }, 503) : target === 'org' ? new Response(null, { status: 204 }) : json({ unit: unitRow(target === 'unit' ? unit : other), structure_version: 1, replayed: false });
+   if (control.renameDelayed) return new Promise(resolve => { control.releaseRename = () => resolve(response()); });
+   return response();
+  }
+ }
  if(method==='GET' && control.readError && path.endsWith(control.readError.path)) return json({code:'CONTROLLED_READ_FAILURE'},control.readError.status);
  if(method==='GET' && (path===`/api/account/v1/organizations/${org}/members` || path===`/api/account/v1/organizations/${org}/quota-members`) && control.pagination) {
   const quota=path.endsWith('/quota-members'),cursor=requestURL.searchParams.get('cursor')||'';
@@ -89,7 +106,7 @@ if(path==='/api/token/v1/models')return json({items:Object.prototype.hasOwnPrope
  }
  return json({code:'UNEXPECTED_FIXTURE_ROUTE'},404);
 };
-const me=()=>({user_id:control.user,personal_permissions:['personal.profile.read','personal.context.switch',...(control.boundaries?['personal.invitations.read','personal.invitations.accept']:[])],platform_permissions:control.admin?['platform.organizations.read','platform.organizations.create']:[],active_context:{context_type:control.context,organization_id:control.context==='ORGANIZATION'?org:undefined,context_version:control.contextVersion,organization_authorization_version:control.authorizationVersion,permissions:['org.units.read','org.wallet.read',...(control.enumMode?['org.roles.read','org.roles.assign','org.members.read','org.quota.read.self','org.quota.allocate']:[]),...(control.roleMode?['org.members.read',control.roleMode==='roles'?'org.roles.assign':'org.members.manage']:[]),...(control.modelPolicy?['org.models.read',...(control.readonly?[]:['org.models.manage'])]:[]),...(control.purchase?['org.entitlements.purchase']:[]),...(control.readonly?[]:['org.units.manage'])]}});
+const me=()=>({user_id:control.user,personal_permissions:['personal.profile.read','personal.context.switch',...(control.boundaries?['personal.invitations.read','personal.invitations.accept']:[])],platform_permissions:control.admin?['platform.organizations.read','platform.organizations.create',...(control.renameMode&&!control.readonly?['platform.organizations.profile.manage','platform.organizations.units.manage']:[])]:[],active_context:{context_type:control.context,organization_id:control.context==='ORGANIZATION'?org:undefined,context_version:control.contextVersion,organization_authorization_version:control.authorizationVersion,permissions:['org.units.read','org.wallet.read',...(control.enumMode?['org.roles.read','org.roles.assign','org.members.read','org.quota.read.self','org.quota.allocate']:[]),...(control.roleMode?['org.members.read',control.roleMode==='roles'?'org.roles.assign':'org.members.manage']:[]),...(control.modelPolicy?['org.models.read',...(control.readonly?[]:['org.models.manage'])]:[]),...(control.purchase?['org.entitlements.purchase']:[]),...(control.readonly?[]:['org.units.manage'])]}});
 function MemberClientProbe() {
  useLayoutEffect(() => {
   if (!control.inspectMemberClientCommit) return;
