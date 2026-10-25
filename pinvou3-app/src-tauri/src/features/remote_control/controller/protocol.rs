@@ -1562,6 +1562,7 @@ pub(crate) struct LeaseInstallValidationContext {
     capability_hash: String,
     handshake_public_key_a_b64: String,
     handshake_public_key_b_b64: String,
+    signed_expires_at_ms: u64,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -1582,6 +1583,7 @@ pub(crate) struct ParsedTranscript {
     relay_signature: Vec<u8>,
     handshake_public_key_a_b64: String,
     handshake_public_key_b_b64: String,
+    signed_expires_at_ms: u64,
 }
 
 pub(crate) struct ParsedTranscriptParts {
@@ -1601,6 +1603,7 @@ pub(crate) struct ParsedTranscriptParts {
     pub(crate) relay_signature: Vec<u8>,
     pub(crate) handshake_public_key_a_b64: String,
     pub(crate) handshake_public_key_b_b64: String,
+    pub(crate) signed_expires_at_ms: u64,
 }
 
 impl ParsedTranscript {
@@ -1622,6 +1625,7 @@ impl ParsedTranscript {
             relay_signature: self.relay_signature,
             handshake_public_key_a_b64: self.handshake_public_key_a_b64,
             handshake_public_key_b_b64: self.handshake_public_key_b_b64,
+            signed_expires_at_ms: self.signed_expires_at_ms,
         }
     }
 }
@@ -1643,6 +1647,7 @@ impl LeaseInstallValidationContext {
             capability_hash: verified.capability_hash().to_owned(),
             handshake_public_key_a_b64: verified.local_handshake_public_key().to_owned(),
             handshake_public_key_b_b64: verified.peer_handshake_public_key().to_owned(),
+            signed_expires_at_ms: verified.signed_expires_at_ms(),
         }
     }
 
@@ -1688,6 +1693,12 @@ impl LeaseInstallValidationContext {
     /// E2E-02：对端（B）握手公钥，用于 ECDH 派生会话密钥。
     pub(crate) fn peer_handshake_public_key_b64(&self) -> &str {
         &self.handshake_public_key_b_b64
+    }
+
+    /// Relay wall-clock expiry carried through the authenticated transcript.
+    /// Consumers convert it once into their own local monotonic clock domain.
+    pub(crate) fn signed_expires_at_ms(&self) -> u64 {
+        self.signed_expires_at_ms
     }
 
     /// Transcript hash as raw bytes for the handshake KDF. Hex is validated on
@@ -3735,6 +3746,11 @@ pub(crate) fn parse_controller_pairing_transcript(input: &str) -> Result<ParsedT
         relay_signature,
         handshake_public_key_a_b64: handshake_key("handshake_public_key_a_b64")?,
         handshake_public_key_b_b64: handshake_key("handshake_public_key_b_b64")?,
+        signed_expires_at_ms: object_string(transcript, "expires_at_ms", "transcript")?
+            .parse()
+            .map_err(|_| {
+                ControllerProtocolError::new("invalid_field", "transcript.expires_at_ms")
+            })?,
     })
 }
 

@@ -11,6 +11,25 @@ use tokio_tungstenite::{WebSocketStream, tungstenite::Message};
 
 type Socket = WebSocketStream<TcpStream>;
 
+// Reusing a registered endpoint enqueues its transport setup acknowledgement
+// before application frames. Skip only that known frame, and leave the final
+// Joined receipt as the channel's last authenticated receipt.
+async fn next_application_frame(
+    channel: &mut crate::features::remote_control::manager::ControllerRelayChannel,
+) -> Value {
+    tokio::time::timeout(Duration::from_secs(3), async {
+        loop {
+            let frame = channel.recv().await.expect("controller channel closed");
+            if frame["v"] == 2 && frame["type"] == "desktop_endpoint_registered" {
+                continue;
+            }
+            return frame;
+        }
+    })
+    .await
+    .expect("controller application frame timed out")
+}
+
 async fn accept(listener: &TcpListener) -> Socket {
     let (stream, _) = listener.accept().await.unwrap();
     tokio_tungstenite::accept_hdr_async(
@@ -23,10 +42,10 @@ async fn accept(listener: &TcpListener) -> Socket {
 
 async fn send(socket: &mut Socket, value: &Value) {
     if value["v"] == 1 {
-        let role = if value["sender_role"] == "A" {
-            SenderRole::ControllerA
-        } else {
-            SenderRole::Relay
+        let role = match value["sender_role"].as_str() {
+            Some("A") => SenderRole::ControllerA,
+            Some("B") => SenderRole::ControlledB,
+            _ => SenderRole::Relay,
         };
         validate_controller_message_json(&value.to_string(), role).unwrap();
     }
@@ -163,6 +182,7 @@ struct OwnedLane {
     generation: String,
     worker: Option<tokio::task::JoinHandle<()>>,
 }
+
 impl Drop for OwnedLane {
     fn drop(&mut self) {
         self.relay.stop_controller_relay(&self.generation);
@@ -171,6 +191,70 @@ impl Drop for OwnedLane {
         }
         self.relay.shutdown_loopback_test_endpoint();
     }
+}
+
+// The same actual handshake/reader receipt supports a success control and a
+// final-admission expiry test, without a serve timer or reaper winning first.
+async fn current_joined_receipt(
+    socket: &mut Socket,
+    worker: &mut ControlledRelayWorker,
+    reserved: &Value,
+    a_keys: HandshakeKeyPair,
+    trust: super::super::crypto::AuthenticatedRelayTrustConfig,
+) -> (ControlledHandshakeDriver, Value) {
+    use super::super::controlling_handshake::ControllingHandshake;
+    let mut peer = ControllingHandshake::new(
+        reserved["request_id"].as_str().unwrap(),
+        "claim-0001",
+        "2345678",
+        a_keys,
+        trust,
+    );
+    let a_commit = peer.accept_reserved(reserved).unwrap();
+    let mut driver = ControlledHandshakeDriver::new(worker.handshake.take().unwrap());
+    send(socket, reserved).await;
+    let incoming = next_application_frame(&mut worker.channel).await;
+    assert_eq!(incoming, *reserved);
+    let b_commit = worker
+        .begin_handshake(&incoming, &mut driver)
+        .unwrap()
+        .unwrap();
+    worker.channel.try_send(b_commit).unwrap();
+    worker
+        .app
+        .state::<ControlledDeviceManager>()
+        .mark_handshake_pending_at(worker.operation.clone(), controlled_monotonic_millis)
+        .unwrap();
+    let b_commit = receive(socket, "finished_receipt_commit").await;
+    let a_finished = peer.accept_peer_commitment(&b_commit).unwrap();
+    send(socket, &a_commit).await;
+    let incoming = tokio::time::timeout(Duration::from_secs(3), worker.channel.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    let b_finished = driver.accept_peer_commitment(&incoming).unwrap();
+    worker.channel.try_send(b_finished).unwrap();
+    let b_finished = receive(socket, "encrypted_handshake_finished").await;
+    peer.accept_peer_finished(&b_finished).unwrap();
+    send(socket, &a_finished).await;
+    let incoming = tokio::time::timeout(Duration::from_secs(3), worker.channel.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    let ack = driver.accept_peer_finished(&incoming).unwrap();
+    worker.channel.try_send(ack).unwrap();
+    receive(socket, "finished_receipt_ack").await;
+    let joined = super::super::test_support::joined_message(reserved, [7; 32]);
+    peer.accept_joined(&joined).unwrap();
+    send(socket, &joined).await;
+    let incoming = tokio::time::timeout(Duration::from_secs(3), worker.channel.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(incoming, joined);
+    // Do not recv another message: the real channel must retain this Joined
+    // receipt for authenticated_transport, rather than a hand-built proof.
+    (driver, incoming)
 }
 
 pub(crate) async fn resume_round_trip<T>(
@@ -200,6 +284,406 @@ pub(crate) async fn resume_round_trip<T>(
     }
     // App owns host construction. Keep its guard alive through all readers.
     let (handle, _host) = build_host();
+    if std::env::var("PINVOU_READER_FINAL_ADMISSION_SCENARIO").as_deref() == Ok("1") {
+        let manager = handle.state::<ControlledDeviceManager>();
+        // The app factory manages this exact Relay and registers the production
+        // DesktopControlledCleanup adapter. No task exists before pairing.
+        let relay = handle.state::<RemoteControlManager>().inner().clone();
+        let mut owned = OwnedLane {
+            relay: relay.clone(),
+            generation: String::new(),
+            worker: None,
+        };
+        // Retain the old channel across production cleanup and successor
+        // admission: drop must not be the reason the lane becomes available.
+        let old = manager.start(None, Vec::new()).unwrap();
+        let mut old_channel = relay
+            .start_controller_relay(old.generation())
+            .await
+            .unwrap();
+        let mut connected = accept(&listener).await;
+        registered(&mut connected).await;
+        let now = controlled_monotonic_millis();
+        manager
+            .complete_registration(
+                old.clone(),
+                ControlledRegistration {
+                    pairing_code: "2345678".into(),
+                    sealed_code_b64: "sealed".into(),
+                    expires_at_ms: now + 300,
+                },
+                now,
+            )
+            .unwrap();
+        let deadline = manager
+            .preconnect_deadline(&old)
+            .unwrap()
+            .unwrap()
+            .deadline_b();
+        manager.poll_watchdog(deadline).unwrap();
+        let status = serde_json::to_value(manager.status()).unwrap();
+        assert_eq!(status["errorCode"], "desktop_remote_pairing_expired");
+        assert!(manager.current_operation().is_none());
+        assert!(
+            tokio::time::timeout(Duration::from_secs(1), old_channel.recv())
+                .await
+                .unwrap()
+                .is_none()
+        );
+        let successor = manager.start(None, Vec::new()).unwrap();
+        let mut successor_channel = relay
+            .start_controller_relay(successor.generation())
+            .await
+            .unwrap();
+        drop(old_channel);
+        let cleanup =
+            handle.state::<std::sync::Arc<dyn super::super::controlled::ControlledCleanupSink>>();
+        cleanup.cleanup(
+            old.generation(),
+            super::super::controlled::ControlledCleanupScope {
+                session_keys: true,
+                workspace_grants: true,
+                remote_tasks: true,
+                pending_permissions: true,
+                temporary_models: true,
+            },
+        );
+        let probe = json!({"v":1,"type":"error","request_id":"cleanup_probe","code":"pairing_code_invalid","message":"cleanup probe"});
+        send(&mut connected, &probe).await;
+        let received = next_application_frame(&mut successor_channel).await;
+        assert_eq!(received, probe);
+        assert_eq!(
+            manager.current_operation().unwrap().generation(),
+            successor.generation()
+        );
+        manager.stop();
+        drop(successor_channel);
+        let mut socket = Some(connected);
+        for scenario in 0..4 {
+            let operation = manager.start(None, Vec::new()).unwrap();
+            let channel = relay
+                .start_controller_relay(operation.generation())
+                .await
+                .unwrap();
+            owned.generation = operation.generation().into();
+            if socket.is_none() {
+                let mut connected = accept(&listener).await;
+                registered(&mut connected).await;
+                socket = Some(connected);
+            }
+            let now = controlled_monotonic_millis();
+            manager
+                .complete_registration(
+                    operation.clone(),
+                    ControlledRegistration {
+                        pairing_code: "2345678".into(),
+                        sealed_code_b64: "sealed".into(),
+                        expires_at_ms: now + 30_000,
+                    },
+                    now,
+                )
+                .unwrap();
+            let a_keys = HandshakeKeyPair::generate().unwrap();
+            let b_keys = HandshakeKeyPair::generate().unwrap();
+            let budget = if scenario < 2 { 2_000 } else { 5_000 };
+            let mut reserved = super::super::test_support::signed_reservation_expiring_at(
+                &fixture.relay,
+                &base64::engine::general_purpose::STANDARD.encode(a_keys.public_key().to_bytes()),
+                &base64::engine::general_purpose::STANDARD.encode(b_keys.public_key().to_bytes()),
+                wall_clock_millis().unwrap() + budget,
+            );
+            reserved["remote_control_generation"] = json!(operation.generation());
+            reserved["transcript"]["remote_control_generation"] = json!(operation.generation());
+            let preimage =
+                super::super::protocol::build_pairing_transcript_preimage(&reserved["transcript"])
+                    .unwrap();
+            reserved["transcript_hash"] = json!(hex_lower(&Sha256::digest(&preimage)));
+            reserved["relay_signature_b64"] = json!(
+                base64::engine::general_purpose::STANDARD
+                    .encode(fixture.relay.key_pair.sign(&preimage).as_ref())
+            );
+            if scenario == 0 {
+                // Adversarial outer-only change: still a valid signature over
+                // the short transcript. This is not a normal Relay output.
+                reserved["handshake_expires_at_ms"] =
+                    json!((wall_clock_millis().unwrap() + 60_000).to_string());
+            } else if scenario == 1 {
+                // Reach actual signature verification: update the public hash
+                // after changing the signed field, but retain the old signature.
+                let changed = (wall_clock_millis().unwrap() + 10_000).to_string();
+                reserved["transcript"]["expires_at_ms"] = json!(changed);
+                reserved["handshake_expires_at_ms"] =
+                    reserved["transcript"]["expires_at_ms"].clone();
+                let preimage = super::super::protocol::build_pairing_transcript_preimage(
+                    &reserved["transcript"],
+                )
+                .unwrap();
+                reserved["transcript_hash"] = json!(hex_lower(&Sha256::digest(&preimage)));
+                assert!(
+                    super::super::protocol::parse_controller_pairing_transcript(
+                        &reserved.to_string()
+                    )
+                    .is_ok()
+                );
+            }
+            let (processed_tx, mut processed_rx) = tokio::sync::mpsc::channel(8);
+            let mut worker = ControlledRelayWorker {
+                app: handle.clone(),
+                relay: relay.clone(),
+                operation: operation.clone(),
+                code_wrap: CodeWrapKeyPair::generate().unwrap(),
+                handshake: Some(b_keys),
+                channel,
+                business: std::sync::Arc::new(NoBusiness),
+                action_results: std::sync::Arc::new(RemoteActionResultCache::default()),
+                business_epoch: std::sync::Arc::new(AtomicU64::new(0)),
+                processed_frames: Some(processed_tx),
+            };
+            let socket = socket.as_mut().unwrap();
+            if scenario < 2 {
+                owned.worker = Some(tokio::spawn(worker.serve()));
+                send(socket, &reserved).await;
+                processed(&mut processed_rx, &reserved).await;
+                if scenario == 0 {
+                    receive(socket, "finished_receipt_commit").await;
+                    let deadline = manager
+                        .preconnect_deadline(&operation)
+                        .unwrap()
+                        .unwrap()
+                        .deadline_b();
+                    assert!(
+                        deadline.saturating_sub(controlled_monotonic_millis()) <= 2_002,
+                        "unsigned outer expiry must not replace short signed budget"
+                    );
+                }
+                tokio::time::timeout(Duration::from_secs(3), owned.worker.take().unwrap())
+                    .await
+                    .unwrap()
+                    .unwrap();
+                let status = serde_json::to_value(manager.status()).unwrap();
+                assert_eq!(status["status"], "error");
+                assert_eq!(
+                    status["errorCode"],
+                    if scenario == 0 {
+                        "desktop_remote_handshake_timeout"
+                    } else {
+                        "controller_transcript_untrusted"
+                    }
+                );
+                if scenario == 1 {
+                    tokio::time::timeout(Duration::from_millis(100), async {
+                        while let Some(Ok(message)) = socket.next().await {
+                            match message {
+                                Message::Text(text) => assert_ne!(
+                                    serde_json::from_str::<Value>(&text).unwrap()["type"],
+                                    "finished_receipt_commit"
+                                ),
+                                Message::Ping(body) => {
+                                    socket.send(Message::Pong(body)).await.unwrap()
+                                }
+                                Message::Pong(_) => {}
+                                other => panic!("unexpected socket event: {other:?}"),
+                            }
+                        }
+                        panic!("endpoint must remain live after signature rejection");
+                    })
+                    .await
+                    .unwrap_err();
+                }
+            } else {
+                let (mut driver, joined) = current_joined_receipt(
+                    socket,
+                    &mut worker,
+                    &reserved,
+                    a_keys,
+                    fixture.relay.trust.clone(),
+                )
+                .await;
+                let deadline = manager
+                    .preconnect_deadline(&operation)
+                    .unwrap()
+                    .unwrap()
+                    .deadline_b();
+                assert!(
+                    controlled_monotonic_millis() < deadline,
+                    "handshake setup exhausted its signed budget"
+                );
+                if scenario == 3 {
+                    while controlled_monotonic_millis() < deadline {
+                        tokio::time::sleep(Duration::from_millis(
+                            deadline.saturating_sub(controlled_monotonic_millis()),
+                        ))
+                        .await;
+                    }
+                    assert_eq!(
+                        worker.complete_handshake(&joined, &mut driver).unwrap_err(),
+                        "desktop_remote_handshake_timeout"
+                    );
+                    let status = serde_json::to_value(manager.status()).unwrap();
+                    assert_eq!(status["status"], "error");
+                    assert_eq!(status["errorCode"], "desktop_remote_handshake_timeout");
+                    assert!(status.get("pairingCode").is_none());
+                } else {
+                    worker.complete_handshake(&joined, &mut driver).unwrap();
+                    assert_eq!(manager.status().kind(), ControlledStatusKind::Connected);
+                    assert!(manager.live_lease().is_ok());
+                    assert!(handle.state::<ControlledLaneState>().is_installed());
+                    assert!(handle.state::<ControlledOutboundState>().sender().is_some());
+                    manager.stop();
+                    // Clear this test's installed business state before the
+                    // next case; the production sink above retires the Relay.
+                    handle.state::<ControlledLaneState>().clear();
+                    handle
+                        .state::<ControlledOutboundState>()
+                        .clear_owned(&worker.channel.sender());
+                }
+                drop(worker);
+            }
+            assert!(manager.current_operation().is_none());
+            assert!(manager.live_lease().is_err());
+            assert!(!handle.state::<ControlledLaneState>().is_installed());
+            assert!(handle.state::<ControlledOutboundState>().sender().is_none());
+        }
+        let next = manager.start(None, Vec::new()).unwrap();
+        assert!(
+            relay
+                .start_controller_relay(next.generation())
+                .await
+                .is_ok()
+        );
+        manager.stop();
+        return;
+    }
+    if std::env::var("PINVOU_READER_PRECONNECT_SCENARIO").as_deref() == Ok("1") {
+        let manager = handle.state::<ControlledDeviceManager>();
+        let relay = RemoteControlManager::new(handle.clone());
+        let mut socket = None;
+        let mut owned = OwnedLane {
+            relay: relay.clone(),
+            generation: String::new(),
+            worker: None,
+        };
+        for scenario in 0..3 {
+            let operation = manager.start(None, Vec::new()).unwrap();
+            let channel = relay
+                .start_controller_relay(operation.generation())
+                .await
+                .unwrap();
+            owned.generation = operation.generation().into();
+            if socket.is_none() {
+                let mut connected = accept(&listener).await;
+                registered(&mut connected).await;
+                socket = Some(connected);
+            }
+            let now = controlled_monotonic_millis();
+            manager
+                .complete_registration(
+                    operation.clone(),
+                    ControlledRegistration {
+                        pairing_code: "2345678".into(),
+                        sealed_code_b64: "sealed".into(),
+                        expires_at_ms: now + if scenario == 0 { 300 } else { 10_000 },
+                    },
+                    now,
+                )
+                .unwrap();
+            let (processed_tx, mut processed_rx) = tokio::sync::mpsc::channel(128);
+            let keys = HandshakeKeyPair::generate().unwrap();
+            // A delayed but still live reservation has one signed/outer handshake
+            // expiry, as emitted by the real Relay. Only its remaining budget is short.
+            fixture.reservation = super::super::test_support::signed_reservation_expiring_at(
+                &fixture.relay,
+                &base64::engine::general_purpose::STANDARD
+                    .encode(fixture.a_keys.public_key().to_bytes()),
+                &base64::engine::general_purpose::STANDARD.encode(keys.public_key().to_bytes()),
+                wall_clock_millis().unwrap() + 1_500,
+            );
+            fixture.reservation["remote_control_generation"] = json!(operation.generation());
+            fixture.reservation["transcript"]["remote_control_generation"] =
+                json!(operation.generation());
+            let preimage = super::super::protocol::build_pairing_transcript_preimage(
+                &fixture.reservation["transcript"],
+            )
+            .unwrap();
+            fixture.reservation["transcript_hash"] = json!(hex_lower(&Sha256::digest(&preimage)));
+            fixture.reservation["relay_signature_b64"] = json!(
+                base64::engine::general_purpose::STANDARD
+                    .encode(fixture.relay.key_pair.sign(&preimage).as_ref())
+            );
+            let worker = ControlledRelayWorker {
+                app: handle.clone(),
+                relay: relay.clone(),
+                operation: operation.clone(),
+                code_wrap: CodeWrapKeyPair::generate().unwrap(),
+                handshake: Some(keys),
+                channel,
+                business: std::sync::Arc::new(NoBusiness),
+                action_results: std::sync::Arc::new(RemoteActionResultCache::default()),
+                business_epoch: std::sync::Arc::new(AtomicU64::new(0)),
+                processed_frames: Some(processed_tx),
+            };
+            owned.worker = Some(tokio::spawn(worker.serve()));
+            let socket = socket.as_mut().unwrap();
+            if scenario != 0 {
+                send(socket, &fixture.reservation).await;
+                processed(&mut processed_rx, &fixture.reservation).await;
+                let b_commit = receive(socket, "finished_receipt_commit").await;
+                assert_eq!(
+                    manager.status().kind(),
+                    ControlledStatusKind::HandshakePending
+                );
+                let original = manager.preconnect_deadline(&operation).unwrap().unwrap();
+                if scenario == 2 {
+                    for _ in 0..8 {
+                        let unrelated = json!({"v":1,"type":"error","request_id":"unrelated-preconnect-request",
+                            "code":"pairing_code_invalid","message":"reservation expired"});
+                        send(socket, &unrelated).await;
+                        processed(&mut processed_rx, &unrelated).await;
+                        // Relay's real self-echo path must also leave the budget fixed.
+                        send(socket, &b_commit).await;
+                        processed(&mut processed_rx, &b_commit).await;
+                        assert_eq!(
+                            manager.preconnect_deadline(&operation).unwrap(),
+                            Some(original.clone())
+                        );
+                    }
+                }
+            }
+            // No status poll/reaper drives expiration: the actual socket/worker does.
+            tokio::time::timeout(Duration::from_secs(3), owned.worker.take().unwrap())
+                .await
+                .unwrap()
+                .unwrap();
+            let status = manager.status();
+            assert_eq!(status.kind(), ControlledStatusKind::Error);
+            let status = serde_json::to_value(status).unwrap();
+            assert_eq!(
+                status["errorCode"].as_str(),
+                Some(if scenario == 0 {
+                    "desktop_remote_pairing_expired"
+                } else {
+                    "desktop_remote_handshake_timeout"
+                })
+            );
+            assert!(status.get("pairingCode").is_none());
+            assert!(manager.current_operation().is_none());
+            assert!(manager.live_lease().is_err());
+            assert!(!handle.state::<ControlledLaneState>().is_installed());
+            assert!(handle.state::<ControlledOutboundState>().sender().is_none());
+            // The next loop must acquire a fresh channel on the same still-live socket.
+        }
+        let next = manager.start(None, Vec::new()).unwrap();
+        assert_eq!(manager.status().kind(), ControlledStatusKind::Registering);
+        assert!(
+            relay
+                .start_controller_relay(next.generation())
+                .await
+                .is_ok()
+        );
+        manager.stop();
+        relay.shutdown_loopback_test_endpoint();
+        return;
+    }
     let manager = handle.state::<ControlledDeviceManager>();
     let operation = manager.start(None, Vec::new()).unwrap();
     // Match a genuine operation before signing, not a forged post-sign tuple.

@@ -2369,6 +2369,8 @@ dictJa["controlledDevice"] = {
   unsupported: "このシステムではデスクトップ遠隔操作を利用できません。",
   errorGeneric: "操作に失敗しました。もう一度お試しください。",
   errorRelayUnavailable: "リモートサービスでデスクトップ操作が有効になっていません。時間をおいて再試行するか、サービス管理者に連絡してください。",
+  errorPairingExpired: "接続コードの有効期限が切れました。リモート操作を開始し直し、新しい接続コードで再試行してください。",
+  errorHandshakeTimeout: "安全な接続がタイムアウトしました。リモート操作を開始し直し、新しい接続コードで再試行してください。",
   workspaceAuthorize: "ワークスペースを追加",
   workspaceAuthorized: "許可済み",
   workspaceUnauthorized: "未許可",

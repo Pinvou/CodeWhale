@@ -1,8 +1,9 @@
 //! Windows controlled-device (B) lifecycle owner.
 //!
 //! The manager keeps only in-memory pairing and lease material. A monotonic
-//! intent/generation pair gates every late network result, while DEV-08's A
-//! watchdog remains the sole source of B's local safety deadline.
+//! intent/generation pair gates every late network result. Preconnection has
+//! separate, nonrenewable local deadlines; after authentication DEV-08's A
+//! watchdog remains the sole source of B's liveness/resume safety deadline.
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -92,6 +93,46 @@ pub(crate) struct ControlledOperation {
 impl ControlledOperation {
     pub(crate) fn generation(&self) -> &str {
         &self.generation
+    }
+}
+
+pub(crate) const MAX_HANDSHAKE_TTL_MS: u64 = 20_000;
+
+#[derive(Debug, Clone, Copy, Eq, PartialEq)]
+enum PreconnectPhase {
+    Waiting,
+    Handshake,
+}
+
+/// An immutable timer ticket. A late timer must match this exact operation and
+/// preconnection phase, even if its operation has since become Connected.
+#[derive(Debug, Clone, Eq, PartialEq)]
+pub(crate) struct ControlledPreconnectDeadline {
+    operation: ControlledOperation,
+    phase: PreconnectPhase,
+    deadline_b: u64,
+}
+
+impl ControlledPreconnectDeadline {
+    pub(crate) fn deadline_b(&self) -> u64 {
+        self.deadline_b
+    }
+
+    fn error_code(&self) -> &'static str {
+        match self.phase {
+            PreconnectPhase::Waiting => "desktop_remote_pairing_expired",
+            PreconnectPhase::Handshake => "desktop_remote_handshake_timeout",
+        }
+    }
+
+    fn matches_phase(&self, phase: ControlledStatusKind) -> bool {
+        match self.phase {
+            PreconnectPhase::Waiting => phase == ControlledStatusKind::WaitingForPairing,
+            PreconnectPhase::Handshake => matches!(
+                phase,
+                ControlledStatusKind::PairingReserved | ControlledStatusKind::HandshakePending
+            ),
+        }
     }
 }
 
@@ -329,6 +370,7 @@ struct Inner {
     registration_request_id: Option<String>,
     device_name: Option<String>,
     pairing: Option<PairingState>,
+    preconnect_deadline: Option<ControlledPreconnectDeadline>,
     lease_context: Option<LeaseContext>,
     negotiated_capabilities: Vec<String>,
     liveness_epoch_a: Option<String>,
@@ -359,6 +401,7 @@ impl Default for Inner {
             registration_request_id: None,
             device_name: None,
             pairing: None,
+            preconnect_deadline: None,
             lease_context: None,
             negotiated_capabilities: Vec::new(),
             liveness_epoch_a: None,
@@ -455,24 +498,40 @@ impl ControlledDeviceManager {
         self.inner.lock().generation.clone()
     }
 
+    #[cfg(test)]
     pub(crate) fn complete_registration(
         &self,
         operation: ControlledOperation,
         registration: ControlledRegistration,
         now_b: u64,
     ) -> Result<ControlledStatus> {
+        self.complete_registration_at(operation, registration, || now_b)
+    }
+
+    pub(crate) fn complete_registration_at(
+        &self,
+        operation: ControlledOperation,
+        registration: ControlledRegistration,
+        now: impl FnOnce() -> u64,
+    ) -> Result<ControlledStatus> {
         validate_pairing_code(&registration.pairing_code)?;
         if registration.sealed_code_b64.is_empty() {
             return Err(ControlledStateError::new("sealed_code_invalid"));
-        }
-        if now_b >= registration.expires_at_ms {
-            return Err(ControlledStateError::new("pairing_code_expired"));
         }
         let mut inner = self.inner.lock();
         ensure_operation(&inner, &operation)?;
         if inner.phase != ControlledStatusKind::Registering {
             return Err(ControlledStateError::new("desktop_remote_phase_invalid"));
         }
+        let now_b = now();
+        if now_b >= registration.expires_at_ms {
+            return Err(ControlledStateError::new("pairing_code_expired"));
+        }
+        inner.preconnect_deadline = Some(ControlledPreconnectDeadline {
+            operation,
+            phase: PreconnectPhase::Waiting,
+            deadline_b: registration.expires_at_ms,
+        });
         inner.pairing = Some(PairingState {
             registration_request_id: inner
                 .registration_request_id
@@ -488,35 +547,117 @@ impl ControlledDeviceManager {
     }
 
     /// Only after the Relay-signed reservation transcript was verified.
-    pub(crate) fn mark_pairing_reserved(
+    pub(crate) fn mark_pairing_reserved_at(
         &self,
         operation: ControlledOperation,
+        handshake_deadline_b: u64,
+        now: impl FnOnce() -> u64,
     ) -> Result<ControlledStatus> {
         let mut inner = self.inner.lock();
         ensure_operation(&inner, &operation)?;
         if inner.phase != ControlledStatusKind::WaitingForPairing {
             return Err(ControlledStateError::new("desktop_remote_phase_invalid"));
         }
+        let now_b = now();
+        require_preconnect_live(&inner, now_b)?;
+        if handshake_deadline_b <= now_b {
+            return Err(ControlledStateError::new(
+                "desktop_remote_handshake_timeout",
+            ));
+        }
+        if handshake_deadline_b - now_b > MAX_HANDSHAKE_TTL_MS {
+            return Err(ControlledStateError::new(
+                "desktop_remote_handshake_deadline_invalid",
+            ));
+        }
         if let Some(pairing) = inner.pairing.as_mut() {
             pairing.pairing_code.zeroize();
         }
         inner.pairing = None;
+        inner.preconnect_deadline = Some(ControlledPreconnectDeadline {
+            operation,
+            phase: PreconnectPhase::Handshake,
+            deadline_b: handshake_deadline_b,
+        });
         inner.phase = ControlledStatusKind::PairingReserved;
+        inner.last_observed_now_b = inner.last_observed_now_b.max(now_b);
         Ok(status_locked(&inner))
     }
 
-    /// The authenticated receipt commitment has been queued to Relay.
-    pub(crate) fn mark_handshake_pending(
+    #[cfg(test)]
+    pub(crate) fn mark_pairing_reserved(
         &self,
         operation: ControlledOperation,
+    ) -> Result<ControlledStatus> {
+        let now_b = self.inner.lock().last_observed_now_b;
+        let deadline = now_b
+            .checked_add(MAX_HANDSHAKE_TTL_MS)
+            .ok_or_else(|| ControlledStateError::new("desktop_remote_handshake_timeout"))?;
+        self.mark_pairing_reserved_at(operation, deadline, || now_b)
+    }
+
+    /// The authenticated receipt commitment has been queued to Relay.
+    pub(crate) fn mark_handshake_pending_at(
+        &self,
+        operation: ControlledOperation,
+        now: impl FnOnce() -> u64,
     ) -> Result<ControlledStatus> {
         let mut inner = self.inner.lock();
         ensure_operation(&inner, &operation)?;
         if inner.phase != ControlledStatusKind::PairingReserved {
             return Err(ControlledStateError::new("desktop_remote_phase_invalid"));
         }
+        let now_b = now();
+        require_preconnect_live(&inner, now_b)?;
         inner.phase = ControlledStatusKind::HandshakePending;
+        inner.last_observed_now_b = inner.last_observed_now_b.max(now_b);
         Ok(status_locked(&inner))
+    }
+
+    #[cfg(test)]
+    pub(crate) fn mark_handshake_pending(
+        &self,
+        operation: ControlledOperation,
+    ) -> Result<ControlledStatus> {
+        let now_b = self.inner.lock().last_observed_now_b;
+        self.mark_handshake_pending_at(operation, || now_b)
+    }
+
+    pub(crate) fn preconnect_deadline(
+        &self,
+        operation: &ControlledOperation,
+    ) -> Result<Option<ControlledPreconnectDeadline>> {
+        let inner = self.inner.lock();
+        ensure_operation(&inner, operation)?;
+        Ok(inner.preconnect_deadline.clone())
+    }
+
+    pub(crate) fn expire_preconnect(
+        &self,
+        ticket: &ControlledPreconnectDeadline,
+        now: impl FnOnce() -> u64,
+    ) -> Result<Option<ControlledStatus>> {
+        let status;
+        {
+            let mut inner = self.inner.lock();
+            ensure_operation(&inner, &ticket.operation)?;
+            if inner.preconnect_deadline.as_ref() != Some(ticket)
+                || !ticket.matches_phase(inner.phase)
+            {
+                return Ok(None);
+            }
+            let now_b = now();
+            if now_b < ticket.deadline_b {
+                return Ok(None);
+            }
+            let retired = inner.generation.clone();
+            clear_sensitive(&mut inner, now_b, true);
+            inner.phase = ControlledStatusKind::Error;
+            inner.error_code = Some(ticket.error_code().to_owned());
+            status = terminal_status_with_retired_generation(&inner, retired);
+        }
+        self.notify_cleanup(ticket.operation.generation());
+        Ok(Some(status))
     }
 
     // Preserve the original late-liveness red regression's fixture setup.
@@ -527,16 +668,42 @@ impl ControlledDeviceManager {
         self.mark_handshake_pending(operation)
     }
 
+    #[cfg(test)]
     pub(crate) fn complete_connected(
         &self,
         operation: ControlledOperation,
         lease: ControlledLease,
+    ) -> Result<ControlledStatus> {
+        let now_b = lease.connected_at_b;
+        self.complete_connected_inner(operation, lease, || now_b, || Ok(None))
+    }
+
+    /// Final admission samples the local clock after acquiring the lifecycle
+    /// owner. The synchronous install may take R/lane/outbound locks, never C.
+    pub(crate) fn complete_connected_with_install(
+        &self,
+        operation: ControlledOperation,
+        lease: ControlledLease,
+        now: impl FnOnce() -> u64,
+        install: impl FnOnce() -> Result<Arc<dyn ControlledTransportAuthority>>,
+    ) -> Result<ControlledStatus> {
+        self.complete_connected_inner(operation, lease, now, || install().map(Some))
+    }
+
+    fn complete_connected_inner(
+        &self,
+        operation: ControlledOperation,
+        lease: ControlledLease,
+        now: impl FnOnce() -> u64,
+        install: impl FnOnce() -> Result<Option<Arc<dyn ControlledTransportAuthority>>>,
     ) -> Result<ControlledStatus> {
         let mut inner = self.inner.lock();
         ensure_operation(&inner, &operation)?;
         if inner.phase != ControlledStatusKind::HandshakePending {
             return Err(ControlledStateError::new("desktop_remote_phase_invalid"));
         }
+        let now_b = now();
+        require_preconnect_live(&inner, now_b)?;
         if lease.context.remote_control_generation != operation.generation {
             return Err(ControlledStateError::new(
                 "desktop_remote_generation_mismatch",
@@ -554,16 +721,25 @@ impl ControlledDeviceManager {
             lease.transport_key_fingerprint,
             lease.resume_deadline_b,
         );
+        if let Some(transport) = install()? {
+            if let Some(previous) = inner.transport.replace(transport) {
+                previous.stop();
+            }
+        }
         inner.lease_context = Some(lease.context);
         inner.negotiated_capabilities = lease.negotiated_capabilities;
         inner.liveness_epoch_a = Some(lease.liveness_epoch_a);
         inner.controller_device_name = Some(lease.controller_device_name);
         inner.connected_at_b = Some(lease.connected_at_b);
-        inner.last_observed_now_b = inner.last_observed_now_b.max(lease.connected_at_b);
+        inner.last_observed_now_b = inner
+            .last_observed_now_b
+            .max(lease.connected_at_b)
+            .max(now_b);
         inner.watchdog = Some(watchdog);
         inner.resume_gate = Some(resume_gate);
         inner.reconnect_reason = None;
         inner.pairing = None;
+        inner.preconnect_deadline = None;
         inner.phase = ControlledStatusKind::Connected;
         Ok(status_locked(&inner))
     }
@@ -767,6 +943,7 @@ impl ControlledDeviceManager {
             pairing.pairing_code.zeroize();
         }
         inner.pairing = None;
+        inner.preconnect_deadline = None;
         inner.phase = ControlledStatusKind::RetiringGeneration;
         inner.error_code = None;
         current_operation(&inner).ok_or_else(|| ControlledStateError::new("generation_unavailable"))
@@ -815,6 +992,35 @@ impl ControlledDeviceManager {
     ) -> Result<ControlledStatus> {
         self.fail_operation_with_retired_lease(operation, error_code)
             .map(|(status, _)| status)
+    }
+
+    /// A failed preconnection install cannot clear an already Connected lane
+    /// or a successor operation while its error is returning to the worker.
+    pub(crate) fn fail_preconnect_with_cleanup(
+        &self,
+        operation: ControlledOperation,
+        error_code: String,
+        cleanup: impl FnOnce(),
+    ) -> Result<ControlledStatus> {
+        let mut inner = self.inner.lock();
+        ensure_operation(&inner, &operation)?;
+        if !inner
+            .preconnect_deadline
+            .as_ref()
+            .is_some_and(|ticket| ticket.matches_phase(inner.phase))
+        {
+            return Err(ControlledStateError::new("desktop_remote_phase_invalid"));
+        }
+        cleanup();
+        let retired_generation = inner.generation.clone();
+        clear_sensitive(&mut inner, u64::MAX, true);
+        inner.device_name = None;
+        inner.phase = ControlledStatusKind::Error;
+        inner.error_code = Some(error_code);
+        let status = terminal_status_with_retired_generation(&inner, retired_generation);
+        drop(inner);
+        self.notify_cleanup(operation.generation());
+        Ok(status)
     }
 
     /// Capture cleanup identity under the same lock as retiring its operation.
@@ -1132,7 +1338,17 @@ impl ControlledDeviceManager {
                 .watchdog
                 .as_ref()
                 .map(|watchdog| watchdog.state(now_b));
-            if watchdog_state == Some(LivenessWatchdogState::Expired) {
+            let expired_preconnect = inner
+                .preconnect_deadline
+                .as_ref()
+                .filter(|ticket| ticket.matches_phase(inner.phase) && now_b >= ticket.deadline_b)
+                .map(ControlledPreconnectDeadline::error_code);
+            if let Some(code) = expired_preconnect {
+                clear_sensitive(&mut inner, now_b, true);
+                inner.phase = ControlledStatusKind::Error;
+                inner.error_code = Some(code.to_owned());
+                expired = true;
+            } else if watchdog_state == Some(LivenessWatchdogState::Expired) {
                 clear_sensitive(&mut inner, now_b, true);
                 inner.phase = ControlledStatusKind::Error;
                 inner.error_code = Some("desktop_remote_watchdog_expired".to_owned());
@@ -1540,6 +1756,19 @@ fn recover_liveness_suspect(inner: &mut Inner, now_b: u64) {
     }
 }
 
+fn require_preconnect_live(inner: &Inner, now_b: u64) -> Result<()> {
+    let ticket = inner
+        .preconnect_deadline
+        .as_ref()
+        .filter(|ticket| ticket.matches_phase(inner.phase))
+        .ok_or_else(|| ControlledStateError::new("desktop_remote_phase_invalid"))?;
+    ensure_operation(inner, &ticket.operation)?;
+    if now_b >= ticket.deadline_b {
+        return Err(ControlledStateError::new(ticket.error_code()));
+    }
+    Ok(())
+}
+
 fn clear_sensitive(inner: &mut Inner, now_b: u64, clear_workspaces: bool) {
     if let Some(generation) = inner.generation.as_ref() {
         inner.retired_generation = Some(generation.clone());
@@ -1556,6 +1785,7 @@ fn clear_sensitive(inner: &mut Inner, now_b: u64, clear_workspaces: bool) {
     inner.resume_gate = None;
     inner.reconnect_reason = None;
     inner.pairing = None;
+    inner.preconnect_deadline = None;
     inner.lease_context = None;
     inner.negotiated_capabilities.clear();
     inner.liveness_epoch_a = None;
@@ -3274,3 +3504,7 @@ mod tests {
         );
     }
 }
+
+#[cfg(test)]
+#[path = "controlled/preconnect_tests.rs"]
+mod preconnect_tests;

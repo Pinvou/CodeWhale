@@ -26,7 +26,8 @@ use crate::features::remote_control::manager::RemoteControlManager;
 
 use super::controlled::{
     ControlledDeviceManager, ControlledLease, ControlledOperation, ControlledRegistration,
-    ControlledResumeStep, ControlledStatus, ControlledStatusKind,
+    ControlledResumeStep, ControlledStateError, ControlledStatus, ControlledStatusKind,
+    ControlledTransportAuthority, MAX_HANDSHAKE_TTL_MS,
 };
 use super::controlled_handshake::ControlledHandshake;
 use super::controlling_handshake::JoinedLease;
@@ -152,6 +153,21 @@ fn pairing_deadline_b(wire_expiry_ms: u64, wall_now_ms: u64, now_b: u64) -> Resu
     now_b
         .checked_add(remaining)
         .ok_or_else(|| "pairing_registration_invalid".to_owned())
+}
+
+fn handshake_deadline_b(
+    signed_expiry_ms: u64,
+    wall_now_ms: u64,
+    now_b: u64,
+) -> Result<u64, String> {
+    let remaining = signed_expiry_ms
+        .checked_sub(wall_now_ms)
+        .filter(|remaining| *remaining > 0)
+        .ok_or_else(|| "desktop_remote_handshake_timeout".to_owned())?
+        .min(MAX_HANDSHAKE_TTL_MS);
+    now_b
+        .checked_add(remaining)
+        .ok_or_else(|| "desktop_remote_handshake_timeout".to_owned())
 }
 
 fn wall_clock_millis() -> Result<u64, String> {
@@ -865,6 +881,13 @@ impl ControlledHandshakeDriver {
         self.handshake.is_some()
     }
 
+    fn signed_expires_at_ms(&self) -> Result<u64, &'static str> {
+        self.handshake
+            .as_ref()
+            .map(ControlledHandshake::signed_expires_at_ms)
+            .ok_or("controller_handshake_stage_invalid")
+    }
+
     /// `controller_pairing_reserved`：验签 transcript、派生会话密钥与 receipt，
     /// 产出本端 `finished_receipt_commit`。未验签或重复接管都失败关闭。
     pub(crate) fn accept_reserved(
@@ -1120,7 +1143,11 @@ impl ControlledRelayWorker {
                         now_b,
                     )?;
                     let status = manager
-                        .complete_registration(self.operation.clone(), registration, now_b)
+                        .complete_registration_at(
+                            self.operation.clone(),
+                            registration,
+                            controlled_monotonic_millis,
+                        )
                         .map_err(|error| error.code.to_owned())?;
                     log_controlled_event("registered", "waiting_for_pairing");
                     emit_controlled_status(&self.app, &status);
@@ -1179,8 +1206,40 @@ impl ControlledRelayWorker {
         poll.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
         poll.tick().await;
         'serve: loop {
+            let preconnect = if joined {
+                None
+            } else {
+                let manager = self.app.state::<ControlledDeviceManager>();
+                match manager.preconnect_deadline(&self.operation) {
+                    Ok(ticket) => ticket,
+                    Err(_) => break 'serve,
+                }
+            };
+            let deadline_wait = async {
+                match preconnect.as_ref() {
+                    Some(ticket) => {
+                        let remaining = ticket
+                            .deadline_b()
+                            .saturating_sub(controlled_monotonic_millis());
+                        tokio::time::sleep(Duration::from_millis(remaining)).await;
+                    }
+                    None => std::future::pending::<()>().await,
+                }
+            };
             tokio::select! {
                 biased;
+                _ = deadline_wait => {
+                    let Some(ticket) = preconnect.as_ref() else { continue 'serve };
+                    let manager = self.app.state::<ControlledDeviceManager>();
+                    match manager.expire_preconnect(ticket, controlled_monotonic_millis) {
+                        Ok(Some(status)) => {
+                            emit_controlled_status(&self.app, &status);
+                            break 'serve;
+                        }
+                        Ok(None) => continue 'serve,
+                        Err(_) => break 'serve,
+                    }
+                }
                 _ = poll.tick() => {
                     if joined {
                         let manager = self.app.state::<ControlledDeviceManager>();
@@ -1378,7 +1437,7 @@ impl ControlledRelayWorker {
                                 == Some("controller_pairing_reserved")
                             {
                                 let manager = self.app.state::<ControlledDeviceManager>();
-                                match manager.mark_handshake_pending(self.operation.clone()) {
+                                match manager.mark_handshake_pending_at(self.operation.clone(), controlled_monotonic_millis) {
                                     Ok(status) => {
                                         emit_controlled_status(&self.app, &status);
                                     }
@@ -1576,8 +1635,18 @@ impl ControlledRelayWorker {
         let commit = driver
             .accept_reserved(message, &trust)
             .map_err(str::to_owned)?;
+        let now_b = controlled_monotonic_millis();
+        let deadline_b = handshake_deadline_b(
+            driver.signed_expires_at_ms().map_err(str::to_owned)?,
+            wall_clock_millis()?,
+            now_b,
+        )?;
         let status = manager
-            .mark_pairing_reserved(self.operation.clone())
+            .mark_pairing_reserved_at(
+                self.operation.clone(),
+                deadline_b,
+                controlled_monotonic_millis,
+            )
             .map_err(|error| error.code.to_owned())?;
         emit_controlled_status(&self.app, &status);
         Ok(Some(commit))
@@ -1598,44 +1667,59 @@ impl ControlledRelayWorker {
         // 加密业务通道先于 connected 就位：状态一旦是 connected，业务帧既有租约
         // 准入也有会话密钥可用。
         let Ok(session) = driver.take_session() else {
-            return Err(self.fail_completed_handshake(&manager));
+            return Err(self.fail_completed_handshake(&manager, HANDSHAKE_FAILED));
         };
         let business = self.app.state::<ControlledLaneState>();
-        business.clear();
-        if business
-            .install(super::crypto::ControllerRole::B, &lease.context, session)
-            .is_err()
-        {
-            return Err(self.fail_completed_handshake(&manager));
-        }
-        // 出站旁路（journal 事件回传）与通道一起就位。
         let outbound = self.app.state::<ControlledOutboundState>();
-        let transport = self
-            .channel
-            .authenticated_transport(&lease.context, lease.negotiated_capabilities.clone())
-            .map_err(|_| self.fail_completed_handshake(&manager))?;
-        manager
-            .replace_authenticated_transport(self.operation.clone(), transport)
-            .map_err(|_| self.fail_completed_handshake(&manager))?;
-        outbound.install(self.channel.sender());
+        let context = lease.context.clone();
+        let capabilities = lease.negotiated_capabilities.clone();
         let status = manager
-            .complete_connected(self.operation.clone(), lease)
-            .map_err(|error| error.code.to_owned())?;
+            .complete_connected_with_install(
+                self.operation.clone(),
+                lease,
+                controlled_monotonic_millis,
+                || {
+                    let transport = self
+                        .channel
+                        .authenticated_transport(&context, capabilities)
+                        .map_err(|_| ControlledStateError {
+                            code: HANDSHAKE_FAILED,
+                        })?;
+                    business.clear();
+                    business
+                        .install(super::crypto::ControllerRole::B, &context, session)
+                        .map_err(|_| ControlledStateError {
+                            code: HANDSHAKE_FAILED,
+                        })?;
+                    outbound.install(self.channel.sender());
+                    Ok(std::sync::Arc::new(transport)
+                        as std::sync::Arc<dyn ControlledTransportAuthority>)
+                },
+            )
+            .map_err(|error| self.fail_completed_handshake(&manager, error.code))?;
         emit_controlled_status(&self.app, &status);
         Ok(())
     }
 
     /// 握手成功后本地收尾失败（无权安装会话密钥/状态竞争）：失败关闭并返回
     /// 有界错误码，绝不留下「connected 但无业务通道」的状态。
-    fn fail_completed_handshake(&self, manager: &ControlledDeviceManager) -> String {
+    fn fail_completed_handshake(&self, manager: &ControlledDeviceManager, cause: &str) -> String {
+        // Preserve the local final-admission deadline result. Protocol/session
+        // failures retain the existing bounded generic code.
+        let code = if cause == "desktop_remote_handshake_timeout" {
+            "desktop_remote_handshake_timeout"
+        } else {
+            HANDSHAKE_FAILED
+        };
         let business = self.app.state::<ControlledLaneState>();
-        business.clear();
         if let Ok(status) =
-            manager.fail_operation(self.operation.clone(), HANDSHAKE_FAILED.to_owned())
+            manager.fail_preconnect_with_cleanup(self.operation.clone(), code.to_owned(), || {
+                business.clear()
+            })
         {
             emit_controlled_status(&self.app, &status);
         }
-        HANDSHAKE_FAILED.to_owned()
+        code.to_owned()
     }
 
     /// 握手失败收尾：投影为有界错误并结束本代通道（dropping the channel 会
@@ -3013,6 +3097,23 @@ mod tests {
             pairing_deadline_b(999_999, 1_000_000, 70).unwrap_err(),
             "pairing_code_expired"
         );
+    }
+
+    #[test]
+    fn authenticated_handshake_expiry_is_frozen_capped_and_overflow_checked() {
+        assert_eq!(handshake_deadline_b(10_001, 10_000, 7).unwrap(), 8);
+        assert_eq!(handshake_deadline_b(30_000, 10_000, 7).unwrap(), 20_007);
+        assert_eq!(handshake_deadline_b(u64::MAX, 10_000, 7).unwrap(), 20_007);
+        for (expiry, wall, mono) in [
+            (10_000, 10_000, 7),
+            (9_999, 10_000, 7),
+            (u64::MAX, 10_000, u64::MAX),
+        ] {
+            assert_eq!(
+                handshake_deadline_b(expiry, wall, mono).unwrap_err(),
+                "desktop_remote_handshake_timeout"
+            );
+        }
     }
     use crate::features::remote_control::controller::controlling_handshake::ControllingHandshake;
     use crate::features::remote_control::controller::crypto::{CodeWrapKeyPair, HandshakeKeyPair};

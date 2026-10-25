@@ -1,15 +1,21 @@
 //! Process-private Windows host driver for the feature's real reader regression.
 use std::io::Read;
 use std::time::{Duration, Instant};
+use tauri::Manager as _;
 
 #[test]
 fn real_reader_manager_worker_resume_round_trip() {
-    run_isolated_reader(false);
+    run_isolated_reader(false, false, false);
 }
 
 #[test]
 fn real_reader_endpoint_retirement_closes_waiting_and_connected_workers() {
-    run_isolated_reader(true);
+    run_isolated_reader(true, false, false);
+}
+
+#[test]
+fn real_reader_preconnection_deadlines_bound_silence_and_self_echo() {
+    run_isolated_reader(false, true, false);
 }
 
 #[test]
@@ -88,7 +94,12 @@ fn real_relay_manager_routes_controller_lane_outage_signal() {
     );
 }
 
-fn run_isolated_reader(retire_endpoint: bool) {
+#[test]
+fn real_worker_final_admission_preserves_timeout_and_signed_deadline() {
+    run_isolated_reader(false, false, true);
+}
+
+fn run_isolated_reader(retire_endpoint: bool, preconnect: bool, final_admission: bool) {
     const CHILD: &str = "PINVOU_READER_RESUME_TEST_CHILD";
     if std::env::var(CHILD).as_deref() == Ok("1") {
         let runtime = tokio::runtime::Builder::new_current_thread()
@@ -105,6 +116,14 @@ fn run_isolated_reader(retire_endpoint: bool) {
                         .manage(crate::features::remote_control::controller::encrypted_lane::ControlledLaneState::default())
                         .manage(crate::features::remote_control::controller::relay_runtime::ControlledOutboundState::default())
                         .build(context).unwrap();
+                    if final_admission {
+                        let handle = app.handle().clone();
+                        handle.manage(crate::features::remote_control::RemoteControlManager::new(handle.clone()));
+                        let cleanup: std::sync::Arc<dyn crate::features::remote_control::controller::controlled::ControlledCleanupSink> = std::sync::Arc::new(super::super::desktop_remote_controller_business::DesktopControlledCleanup::new(handle.clone()));
+                        handle.state::<crate::features::remote_control::controller::controlled::ControlledDeviceManager>()
+                            .register_cleanup_sink(cleanup.clone());
+                        handle.manage(cleanup);
+                    }
                     (app.handle().clone(), app)
                 }, retire_endpoint))
                 .await
@@ -115,7 +134,11 @@ fn run_isolated_reader(retire_endpoint: bool) {
     // A separate process owns Tauri's global runtime and path/env overrides.
     // Never alter the test runner's home or share its live managed states.
     let module = module_path!().split_once("::").unwrap().1;
-    let name = if retire_endpoint {
+    let name = if final_admission {
+        "real_worker_final_admission_preserves_timeout_and_signed_deadline"
+    } else if preconnect {
+        "real_reader_preconnection_deadlines_bound_silence_and_self_echo"
+    } else if retire_endpoint {
         "real_reader_endpoint_retirement_closes_waiting_and_connected_workers"
     } else {
         "real_reader_manager_worker_resume_round_trip"
@@ -124,6 +147,14 @@ fn run_isolated_reader(retire_endpoint: bool) {
     let mut child = std::process::Command::new(std::env::current_exe().unwrap())
         .args(["--exact", &filter, "--nocapture"])
         .env(CHILD, "1")
+        .env(
+            "PINVOU_READER_PRECONNECT_SCENARIO",
+            if preconnect { "1" } else { "0" },
+        )
+        .env(
+            "PINVOU_READER_FINAL_ADMISSION_SCENARIO",
+            if final_admission { "1" } else { "0" },
+        )
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
         .spawn()
