@@ -1090,14 +1090,26 @@ func (r *PostgresRepository) ListApprovalRequests(ctx context.Context, principal
 		return nil, err
 	}
 	defer rows.Close()
-	items := make([]ApprovalRequest, 0)
-	canAdvance := r.approvalAdvancementProjection(ctx)
-	writerReady := r.ApprovalWriterReady(ctx) == nil
+	// The bounded visibility query owns one runtime connection until it is
+	// exhausted. Release it before fresh per-item authorization uses the same
+	// pool, so concurrent lists cannot each hold a row stream while waiting for
+	// another connection. The original authorization/version fences still run.
+	selected := make([]ApprovalRequest, 0)
 	for rows.Next() {
 		item, err := scanApprovalRequest(rows)
 		if err != nil {
 			return nil, err
 		}
+		selected = append(selected, item)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	rows.Close()
+	items := make([]ApprovalRequest, 0, len(selected))
+	canAdvance := r.approvalAdvancementProjection(ctx)
+	writerReady := r.ApprovalWriterReady(ctx) == nil
+	for _, item := range selected {
 		canRequest, canApprove, err := r.approvalCapabilities(ctx, actorID, item)
 		if err != nil {
 			return nil, err
@@ -1116,10 +1128,6 @@ func (r *PostgresRepository) ListApprovalRequests(ctx context.Context, principal
 		item.AllowedActions = approvalAllowedActions(item, actorID, canRequest, canApprove, advanceAllowed, writerReady)
 		items = append(items, item)
 	}
-	if err := rows.Err(); err != nil {
-		return nil, err
-	}
-	rows.Close()
 	if err := ensureApprovalAuthorizationVersion(ctx, r.pool, actorID, authorizationVersion); err != nil {
 		return nil, err
 	}

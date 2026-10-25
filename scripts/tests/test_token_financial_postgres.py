@@ -15,6 +15,30 @@ SPEC.loader.exec_module(RUNNER)
 
 
 class FinancialPostgresRunnerTests(unittest.TestCase):
+    def test_approval_list_pool_root_is_selected_and_requires_real_children(self):
+        name = "TestApprovalListPoolRuntimePostgres"
+        roots, package = RUNNER.ACCOUNT_REQUIRED, RUNNER.ACCOUNT_PACKAGE
+        self.assertIn(name, roots)
+        self.run_main_fixture()
+        command = self.fixture_commands[self.fixture_phases.index("owner-account")]
+        self.assertIn(name, command[command.index("-run") + 1])
+        events = self.events(roots, package, children=True)
+        options = {"package": package, "exact_roots": True, "require_children": True}
+        self.assertGreater(RUNNER.verify_results(events, roots, **options), 0)
+        for invalid in (
+            [],
+            [event for event in events if event.get("Test", "").split("/", 1)[0] != name],
+            [event for event in events if not event.get("Test", "").startswith(name + "/")],
+            [event for event in events if not (event.get("Test", "") == name and event.get("Action") == "run")],
+            events + [{"Action": "skip", "Package": package, "Test": name}],
+            events + [{"Action": "skip", "Package": package, "Test": name + "/actual"}],
+            events + [{"Action": "fail", "Package": package, "Test": name + "/actual"}],
+            [{**event, "Package": RUNNER.TOKEN_PACKAGE} if event.get("Test", "").split("/", 1)[0] == name else event for event in events],
+        ):
+            with self.subTest(events=len(invalid)), self.assertRaises(RuntimeError):
+                RUNNER.verify_results(invalid, roots, **options)
+
+
     def test_forced_refund_member_terminal_root_and_children_are_mandatory(self):
         name = "TestForcedRefundMemberGrantTerminalStatePostgres"
         self.assertIn(name, RUNNER.RETAINED_REQUIRED)
@@ -545,6 +569,7 @@ class FinancialPostgresRunnerTests(unittest.TestCase):
             "TestApprovalMutationWallClockPostgres",
             "TestApprovalProofWallClockPostgres",
             "TestOrganizationUnitAuthorityWallClockPostgres",
+            "TestApprovalListPoolRuntimePostgres",
         })
         for name in RUNNER.ACCOUNT_REQUIRED:
             with self.subTest(name=name), self.assertRaises(RuntimeError):
@@ -568,6 +593,7 @@ class FinancialPostgresRunnerTests(unittest.TestCase):
             "TestApprovalMutationWallClockPostgres",
             "TestApprovalProofWallClockPostgres",
             "TestOrganizationUnitAuthorityWallClockPostgres",
+            "TestApprovalListPoolRuntimePostgres",
         ):
             with self.subTest(root=root):
                 self.assertIn(root, roots)
