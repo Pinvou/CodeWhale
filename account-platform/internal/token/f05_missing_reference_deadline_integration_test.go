@@ -93,6 +93,8 @@ func (c *f05DeadlineTariffClient) Price(_ context.Context, model string) (PriceV
 }
 
 type f05DeadlineCase struct {
+	key           string
+	responseCode  int
 	usage         UsageRequest
 	service       *Service
 	price         PriceVersion
@@ -170,7 +172,7 @@ func f05DeadlineProofCounts(t *testing.T, r *PostgresRepository, ctx context.Con
 	return
 }
 
-func f05DeadlineSeedThroughChat(t *testing.T, ctx context.Context, r *PostgresRepository, funds *billing.PostgresRepository, pool *pgxpool.Pool, client *HTTPBillingClient, clock *atomic.Int64, started, acquired time.Time, acquire bool, withFinalUsage bool) f05DeadlineCase {
+func f05DeadlineSeedThroughChat(t *testing.T, ctx context.Context, r *PostgresRepository, funds *billing.PostgresRepository, pool *pgxpool.Pool, client *HTTPBillingClient, clock *atomic.Int64, started, acquired time.Time, acquire bool, withFinalUsage bool, configure ...func(*Service)) f05DeadlineCase {
 	t.Helper()
 	user, account, credential, modelID, capabilityID := uuid.New(), uuid.New(), uuid.New(), uuid.New(), uuid.New()
 	wallet, _, err := funds.EnsureWallet(ctx, "PERSONAL", user)
@@ -262,6 +264,9 @@ func f05DeadlineSeedThroughChat(t *testing.T, ctx context.Context, r *PostgresRe
 	clock.Store(started.UnixNano())
 	defer clock.Store(0)
 	response := httptest.NewRecorder()
+	for _, setup := range configure {
+		setup(service)
+	}
 	identity.Middleware(successfulBillingVerify, http.HandlerFunc(service.chatCompletions)).ServeHTTP(response, request)
 	usage, err := r.FindUsageByIdempotency(ctx, user, digestString([]byte(key)))
 	if err != nil {
@@ -271,7 +276,8 @@ func f05DeadlineSeedThroughChat(t *testing.T, ctx context.Context, r *PostgresRe
 		t.Fatalf("real chat dispatch failed: HTTP%d %s", response.Code, response.Body.String())
 	}
 	if usage.HoldID == nil || usage.PriceVersionID == nil || usage.MaximumMicrocredits <= 0 {
-		t.Fatal("real positive reservation/price tuple missing", usage)
+		actualWallet, walletErr := funds.GetWallet(ctx, usage.WalletID)
+		t.Fatalf("real positive reservation/price tuple missing: status=%s execution=%s settlement=%s hold=%v wallet_reserved=%d wallet_error=%v", usage.Status, usage.ExecutionStatus, usage.SettlementStatus, usage.HoldID, actualWallet.ReservedMicrocredits, walletErr)
 	}
 	var snapshot map[string]json.RawMessage
 	if json.Unmarshal(usage.RequestSnapshot, &snapshot) != nil || string(snapshot["organization_id"]) != "null" {
@@ -294,7 +300,7 @@ func f05DeadlineSeedThroughChat(t *testing.T, ctx context.Context, r *PostgresRe
 	if !acquire && calls.Load() != 0 {
 		t.Fatal("unacquired intent invoked provider")
 	}
-	return f05DeadlineCase{usage: usage, service: service, price: price, body: body, providerCalls: &calls}
+	return f05DeadlineCase{key: key, responseCode: response.Code, usage: usage, service: service, price: price, body: body, providerCalls: &calls}
 }
 
 func f05DeadlineReleased(t *testing.T, r *PostgresRepository, funds *billing.PostgresRepository, pool *pgxpool.Pool, ctx context.Context, c f05DeadlineCase) {

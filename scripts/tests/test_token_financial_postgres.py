@@ -15,6 +15,22 @@ SPEC.loader.exec_module(RUNNER)
 
 
 class FinancialPostgresRunnerTests(unittest.TestCase):
+    def test_hold_acknowledgement_recovery_root_and_children_are_mandatory(self):
+        root = "TestHoldAcknowledgementSurvivesDispatchPersistenceFailurePostgres"
+        self.assertIn(root, RUNNER.REQUIRED)
+        self.assertIn(root, RUNNER.TOKEN_CHILD_REQUIRED)
+        events = self.events(required={root}, package=RUNNER.TOKEN_PACKAGE, children=True)
+        options = {"package": RUNNER.TOKEN_PACKAGE, "exact_roots": True,
+                   "require_children": True, "children_required": {root}}
+        RUNNER.verify_results(events, {root}, **options)
+        for rejected in ([event for event in events if event.get("Test") != root],
+                         [event for event in events if "/" not in event.get("Test", "")],
+                         [dict(event, Action="skip") if "/" in event.get("Test", "") and event.get("Action") == "pass" else event for event in events],
+                         [dict(event, Action="fail") if "/" in event.get("Test", "") and event.get("Action") == "pass" else event for event in events]):
+            with self.subTest(events=rejected), self.assertRaises(RuntimeError):
+                RUNNER.verify_results(rejected, {root}, **options)
+
+
     def test_reconciliation_fair_retry_is_selected_and_requires_real_children(self):
         root = "TestReconciliationFairRetryRuntimePostgres"
         self.assertIn(root, RUNNER.RETAINED_REQUIRED)
@@ -696,7 +712,7 @@ class FinancialPostgresRunnerTests(unittest.TestCase):
     def test_actual_main_requires_token_waiver_children(self):
         self.assertEqual(
             RUNNER.TOKEN_CHILD_REQUIRED,
-            {"TestUsageWaiverCoordinatorRecoveryPostgres", "TestPersonalZeroBudgetCancellationAndExpiryPostgres"},
+            {"TestHoldAcknowledgementSurvivesDispatchPersistenceFailurePostgres", "TestUsageWaiverCoordinatorRecoveryPostgres", "TestPersonalZeroBudgetCancellationAndExpiryPostgres"},
         )
         with self.assertRaisesRegex(RuntimeError, "no completed child"):
             self.run_main_fixture(missing_token_children=True)

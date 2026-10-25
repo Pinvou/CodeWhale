@@ -60,7 +60,52 @@ func (r *PostgresRepository) PrepareDispatch(ctx context.Context, usageID uuid.U
 	return tx.Commit(ctx)
 }
 
+// Persist the acknowledged hold before the fallible dispatch-intent transaction.
+// A promotion rollback must not erase the only local Billing identity. Recovery
+// can resume the same reservation or use the existing unused-hold expiry proof.
 func (r *PostgresRepository) CompleteHoldAndDispatch(ctx context.Context, usageID, holdID, priceVersionID uuid.UUID) error {
+	if err := r.persistAcknowledgedHold(ctx, usageID, holdID, priceVersionID); err != nil {
+		return err
+	}
+	tx, err := r.pool.Begin(ctx)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback(ctx)
+	if err := lockReplayUsageTx(ctx, tx, usageID); err != nil {
+		return err
+	}
+	var status, cancelStatus string
+	if err := tx.QueryRow(ctx, `SELECT execution_status,cancel_status FROM usage_requests WHERE id=$1 FOR UPDATE`, usageID).Scan(&status, &cancelStatus); err != nil {
+		return err
+	}
+	if status != "HOLD_RESERVED" {
+		if status == "DISPATCH_INTENT_PERSISTED" || status == "UPSTREAM_DISPATCHING" || status == "STREAMING" || status == "SETTLEMENT_PENDING" || status == "SUCCEEDED" || status == "REVIEW" {
+			return tx.Commit(ctx)
+		}
+		return ErrForbidden
+	}
+	if cancelStatus == "CANCEL_REQUESTED" {
+		return ErrCancellationRequested
+	}
+	now := r.now()
+	command, err := tx.Exec(ctx, `INSERT INTO usage_dispatch_intents(usage_request_id,encrypted_envelope,key_id,envelope_integrity,upstream_idempotency_key,adapter_supports_idempotency,created_at) SELECT usage_request_id,encrypted_envelope,key_id,envelope_integrity,$2,false,$3 FROM usage_dispatch_preparations WHERE usage_request_id=$1 ON CONFLICT(usage_request_id) DO NOTHING`, usageID, "pinvou-"+usageID.String(), now)
+	if err != nil {
+		return err
+	}
+	if command.RowsAffected() != 1 {
+		return ErrForbidden
+	}
+	if err := transitionExecutionTx(ctx, tx, usageID, []string{"HOLD_RESERVED"}, "DISPATCH_INTENT_PERSISTED", "prepared dispatch promoted after hold", now); err != nil {
+		return err
+	}
+	if _, err := tx.Exec(ctx, `DELETE FROM usage_dispatch_preparations WHERE usage_request_id=$1`, usageID); err != nil {
+		return err
+	}
+	return tx.Commit(ctx)
+}
+
+func (r *PostgresRepository) persistAcknowledgedHold(ctx context.Context, usageID, holdID, priceVersionID uuid.UUID) error {
 	if usageID == uuid.Nil || holdID == uuid.Nil || priceVersionID == uuid.Nil {
 		return ErrForbidden
 	}
@@ -72,20 +117,24 @@ func (r *PostgresRepository) CompleteHoldAndDispatch(ctx context.Context, usageI
 	if err := lockReplayUsageTx(ctx, tx, usageID); err != nil {
 		return err
 	}
-	now := r.now()
 	var status, cancelStatus string
-	if err := tx.QueryRow(ctx, `SELECT execution_status,cancel_status FROM usage_requests WHERE id=$1 FOR UPDATE`, usageID).Scan(&status, &cancelStatus); errors.Is(err, pgx.ErrNoRows) {
+	var storedHold, storedPrice *uuid.UUID
+	if err := tx.QueryRow(ctx, `SELECT execution_status,cancel_status,hold_id,price_version_id FROM usage_requests WHERE id=$1 FOR UPDATE`, usageID).Scan(&status, &cancelStatus, &storedHold, &storedPrice); errors.Is(err, pgx.ErrNoRows) {
 		return ErrNotFound
 	} else if err != nil {
 		return err
 	}
-	if status == "DISPATCH_INTENT_PERSISTED" || status == "UPSTREAM_DISPATCHING" || status == "STREAMING" || status == "SETTLEMENT_PENDING" || status == "SUCCEEDED" || status == "REVIEW" {
-		return tx.Commit(ctx)
-	}
 	if status != "HOLD_RESERVING" {
+		if storedHold == nil || storedPrice == nil || *storedHold != holdID || *storedPrice != priceVersionID {
+			return ErrForbidden
+		}
+		if status == "HOLD_RESERVED" || status == "DISPATCH_INTENT_PERSISTED" || status == "UPSTREAM_DISPATCHING" || status == "STREAMING" || status == "SETTLEMENT_PENDING" || status == "SUCCEEDED" || status == "REVIEW" {
+			return tx.Commit(ctx)
+		}
 		return ErrForbidden
 	}
-	command, err := tx.Exec(ctx, `UPDATE usage_requests SET status='RESERVED',settlement_status='HOLD_ACTIVE',hold_id=$2,price_version_id=$3,updated_at=$4 WHERE id=$1 AND status='CREATED'`, usageID, holdID, priceVersionID, now)
+	now := r.now()
+	command, err := tx.Exec(ctx, `UPDATE usage_requests SET status='RESERVED',settlement_status='HOLD_ACTIVE',hold_id=$2,price_version_id=$3,updated_at=$4 WHERE id=$1 AND status='CREATED' AND (hold_id IS NULL OR hold_id=$2) AND (price_version_id IS NULL OR price_version_id=$3)`, usageID, holdID, priceVersionID, now)
 	if err != nil {
 		return err
 	}
@@ -93,25 +142,6 @@ func (r *PostgresRepository) CompleteHoldAndDispatch(ctx context.Context, usageI
 		return ErrForbidden
 	}
 	if err := transitionExecutionTx(ctx, tx, usageID, []string{"HOLD_RESERVING"}, "HOLD_RESERVED", "billing ensured one hold", now); err != nil {
-		return err
-	}
-	if cancelStatus == "CANCEL_REQUESTED" {
-		if err := tx.Commit(ctx); err != nil {
-			return err
-		}
-		return ErrCancellationRequested
-	}
-	command, err = tx.Exec(ctx, `INSERT INTO usage_dispatch_intents(usage_request_id,encrypted_envelope,key_id,envelope_integrity,upstream_idempotency_key,adapter_supports_idempotency,created_at) SELECT usage_request_id,encrypted_envelope,key_id,envelope_integrity,$2,false,$3 FROM usage_dispatch_preparations WHERE usage_request_id=$1 ON CONFLICT(usage_request_id) DO NOTHING`, usageID, "pinvou-"+usageID.String(), now)
-	if err != nil {
-		return err
-	}
-	if command.RowsAffected() != 1 {
-		return ErrForbidden
-	}
-	if err := transitionExecutionTx(ctx, tx, usageID, []string{"HOLD_RESERVED"}, "DISPATCH_INTENT_PERSISTED", "prepared dispatch promoted after hold", now); err != nil {
-		return err
-	}
-	if _, err := tx.Exec(ctx, `DELETE FROM usage_dispatch_preparations WHERE usage_request_id=$1`, usageID); err != nil {
 		return err
 	}
 	return tx.Commit(ctx)

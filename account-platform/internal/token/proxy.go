@@ -317,8 +317,9 @@ func (s *Service) chatCompletions(w http.ResponseWriter, r *http.Request) {
 			api.WriteJSON(w, http.StatusOK, result)
 			return
 		}
-		_ = s.executionBilling.Release(r.Context(), usageRequest.ID, hold.ID, "usage state persistence failed")
-		_ = s.repository.MarkReleased(r.Context(), usageRequest.ID, "dispatch_intent_persistence_failed")
+		// A failed/unknown local commit does not authorize releasing Billing's
+		// hold or claiming a terminal result. Preserve the original usage key;
+		// the acknowledged hold survives an intent-promotion rollback.
 		s.writeError(w, r, err)
 		return
 	}
@@ -581,7 +582,7 @@ func inferenceFingerprint(protocol string, version int, body []byte) string {
 }
 
 func (s *Service) replayUsage(w http.ResponseWriter, r *http.Request, usage UsageRequest, logicalBody []byte) {
-	if (usage.ExecutionStatus == "RECEIVED" || usage.ExecutionStatus == "HOLD_RESERVING" || usage.ExecutionStatus == "DISPATCH_INTENT_PERSISTED") && !s.dispatchIdentityMatches(usage, nil) {
+	if (usage.ExecutionStatus == "RECEIVED" || usage.ExecutionStatus == "HOLD_RESERVING" || usage.ExecutionStatus == "HOLD_RESERVED" || usage.ExecutionStatus == "DISPATCH_INTENT_PERSISTED") && !s.dispatchIdentityMatches(usage, nil) {
 		s.writeDispatchIdentityReview(w, r, usage.ID)
 		return
 	}
@@ -612,7 +613,7 @@ func (s *Service) replayUsage(w http.ResponseWriter, r *http.Request, usage Usag
 		}
 		usage.ExecutionStatus = "HOLD_RESERVING"
 	}
-	if usage.ExecutionStatus == "HOLD_RESERVING" {
+	if usage.ExecutionStatus == "HOLD_RESERVING" || usage.ExecutionStatus == "HOLD_RESERVED" {
 		envelope, err := s.repository.LoadDispatchPreparation(context.WithoutCancel(r.Context()), usage.ID)
 		if err != nil {
 			_ = s.repository.MarkReview(context.WithoutCancel(r.Context()), usage.ID, "dispatch_preparation_missing", map[string]any{"automatic_redispatch": false})
@@ -623,15 +624,26 @@ func (s *Service) replayUsage(w http.ResponseWriter, r *http.Request, usage Usag
 			s.writeDispatchIdentityReview(w, r, usage.ID)
 			return
 		}
-		hold, err := s.ensureUsageHold(context.WithoutCancel(r.Context()), usage, envelope)
-		if err != nil {
-			if definitiveInitialBillingFailure(err) {
-				s.writeInitialReservationFailure(w, r, usage.ID, envelope, err)
-			} else {
-				w.Header().Set("Location", "/v1/usage-requests/"+usage.ID.String())
-				api.WriteJSON(w, http.StatusAccepted, map[string]any{"code": "HOLD_RESULT_UNKNOWN", "usage_request_id": usage.ID, "execution_status": "HOLD_RESERVING", "status_url": "/v1/usage-requests/" + usage.ID.String()})
+		var hold BillingHold
+		if usage.ExecutionStatus == "HOLD_RESERVED" {
+			// The exact receipt has already committed. Do not re-enter initial
+			// reservation rejection handling or infer that this hold vanished.
+			if usage.HoldID == nil || usage.PriceVersionID == nil || *usage.PriceVersionID != envelope.Price.ID {
+				s.writeError(w, r, ErrForbidden)
+				return
 			}
-			return
+			hold.ID = *usage.HoldID
+		} else {
+			hold, err = s.ensureUsageHold(context.WithoutCancel(r.Context()), usage, envelope)
+			if err != nil {
+				if definitiveInitialBillingFailure(err) {
+					s.writeInitialReservationFailure(w, r, usage.ID, envelope, err)
+				} else {
+					w.Header().Set("Location", "/v1/usage-requests/"+usage.ID.String())
+					api.WriteJSON(w, http.StatusAccepted, map[string]any{"code": "HOLD_RESULT_UNKNOWN", "usage_request_id": usage.ID, "execution_status": "HOLD_RESERVING", "status_url": "/v1/usage-requests/" + usage.ID.String()})
+				}
+				return
+			}
 		}
 		if err := s.repository.CompleteHoldAndDispatch(context.WithoutCancel(r.Context()), usage.ID, hold.ID, envelope.Price.ID); err != nil {
 			if errors.Is(err, ErrCancellationRequested) {
