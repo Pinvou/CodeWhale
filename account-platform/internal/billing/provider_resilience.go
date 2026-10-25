@@ -9,6 +9,13 @@ import (
 )
 
 func providerCall[T any](ctx context.Context, coordinator *PaymentCoordinator, capability, route string, uncertainOnFailure bool, scope ProviderCallScope, call func() (T, error)) (T, error) {
+	return providerCallWithAdmissionHook(ctx, coordinator, capability, route, uncertainOnFailure, scope, nil, call)
+}
+
+// The optional local hook runs only after circuit/probe admission and before
+// recording a provider attempt. Failure returns the permit without attributing
+// local persistence failure to the provider. Existing callers use no hook.
+func providerCallWithAdmissionHook[T any](ctx context.Context, coordinator *PaymentCoordinator, capability, route string, uncertainOnFailure bool, scope ProviderCallScope, beforeAttempt func() error, call func() (T, error)) (T, error) {
 	var zero T
 	capabilities := coordinator.Capabilities()
 	key := resilience.Key(capabilities.ProviderID+"@"+capabilities.Version, capability, route)
@@ -21,6 +28,14 @@ func providerCall[T any](ctx context.Context, coordinator *PaymentCoordinator, c
 	}
 	if admissionErr != nil {
 		return zero, admissionErr
+	}
+	if beforeAttempt != nil {
+		if err := beforeAttempt(); err != nil {
+			if cancelProbe != nil {
+				cancelProbe()
+			}
+			return zero, err
+		}
 	}
 	attempt, err := coordinator.repository.beginProviderAttempt(ctx, capabilities.ProviderID, capabilities.Version, capability, route, route, scope)
 	if err != nil {

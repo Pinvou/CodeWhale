@@ -448,6 +448,10 @@ func providerBillMatchesQuery(row ProviderBillEntry, fact ProviderOrder) bool {
 }
 
 func (p *PaymentCoordinator) confirmBillPaymentFacts(ctx context.Context, rows []ProviderBillEntry) (map[string]*ProviderOrder, error) {
+	return p.confirmBillPaymentFactsBeforeQuery(ctx, rows, nil)
+}
+
+func (p *PaymentCoordinator) confirmBillPaymentFactsBeforeQuery(ctx context.Context, rows []ProviderBillEntry, beforeQuery func(context.Context) error) (map[string]*ProviderOrder, error) {
 	confirmed := map[string]*ProviderOrder{}
 	if !p.Capabilities().OrderQuerySupported {
 		return confirmed, nil
@@ -479,7 +483,11 @@ func (p *PaymentCoordinator) confirmBillPaymentFacts(ctx context.Context, rows [
 		if order.FulfillmentStatus == "CREDITED" {
 			continue
 		}
-		fact, err := providerCall(ctx, p, "ORDER_QUERY", order.Channel, false, providerCallScope(order), func() (ProviderOrder, error) { return p.provider.Get(ctx, order.MerchantOrderNo) })
+		var beforeAttempt func() error
+		if beforeQuery != nil {
+			beforeAttempt = func() error { return beforeQuery(ctx) }
+		}
+		fact, err := providerCallWithAdmissionHook(ctx, p, "ORDER_QUERY", order.Channel, false, providerCallScope(order), beforeAttempt, func() (ProviderOrder, error) { return p.provider.Get(ctx, order.MerchantOrderNo) })
 		if err != nil {
 			return nil, errors.Join(ErrPaymentProvider, err)
 		}

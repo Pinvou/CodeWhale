@@ -238,18 +238,18 @@ func (p *PaymentCoordinator) resumeReconciliationRun(ctx context.Context, id uui
 	if err := p.persistReadOnlyBillEvidence(ctx, run); err != nil {
 		return run, err
 	}
-	progressRows, err := p.repository.pool.Query(ctx, `SELECT row_number FROM reconciliation_row_progress WHERE run_id=$1 AND processed_at IS NOT NULL`, id)
+	progressRows, err := p.repository.pool.Query(ctx, `SELECT row_number FROM reconciliation_row_progress WHERE run_id=$1 AND processed_at IS NULL ORDER BY last_attempted_at NULLS FIRST,row_number`, id)
 	if err != nil {
 		return run, err
 	}
-	processedRows := map[int]bool{}
+	pendingRows := []int{}
 	for progressRows.Next() {
 		var index int
 		if err := progressRows.Scan(&index); err != nil {
 			progressRows.Close()
 			return run, err
 		}
-		processedRows[index] = true
+		pendingRows = append(pendingRows, index)
 	}
 	err = progressRows.Err()
 	progressRows.Close()
@@ -257,11 +257,23 @@ func (p *PaymentCoordinator) resumeReconciliationRun(ctx context.Context, id uui
 		return run, err
 	}
 	var deferredErr error
-	for index, row := range providerRows {
-		if processedRows[index+1] {
-			continue
+	for _, rowNumber := range pendingRows {
+		if rowNumber < 1 || rowNumber > len(providerRows) {
+			return run, ErrConflict
 		}
-		confirmed, err := p.confirmBillPaymentFacts(ctx, []ProviderBillEntry{row})
+		row := providerRows[rowNumber-1]
+		confirmed, err := p.confirmBillPaymentFactsBeforeQuery(ctx, []ProviderBillEntry{row}, func(attemptCtx context.Context) error {
+			// Circuit refusals did not attempt this row. Persist scheduling
+			// progress only for an admitted query, before any provider I/O.
+			attempt, err := p.repository.pool.Exec(attemptCtx, `UPDATE reconciliation_row_progress SET last_attempted_at=clock_timestamp() WHERE run_id=$1 AND row_number=$2 AND processed_at IS NULL`, id, rowNumber)
+			if err != nil {
+				return err
+			}
+			if attempt.RowsAffected() != 1 {
+				return ErrConflict
+			}
+			return nil
+		})
 		if err != nil {
 			if ctx.Err() != nil {
 				return run, ctx.Err()
@@ -276,7 +288,7 @@ func (p *PaymentCoordinator) resumeReconciliationRun(ctx context.Context, id uui
 			}
 			defer tx.Rollback(ctx)
 			var done bool
-			if err := tx.QueryRow(ctx, `SELECT processed_at IS NOT NULL FROM reconciliation_row_progress WHERE run_id=$1 AND row_number=$2 FOR UPDATE`, id, index+1).Scan(&done); err != nil {
+			if err := tx.QueryRow(ctx, `SELECT processed_at IS NOT NULL FROM reconciliation_row_progress WHERE run_id=$1 AND row_number=$2 FOR UPDATE`, id, rowNumber).Scan(&done); err != nil {
 				return err
 			}
 			if done {
@@ -285,7 +297,7 @@ func (p *PaymentCoordinator) resumeReconciliationRun(ctx context.Context, id uui
 			if err := p.mergeProviderBillEvidenceWithinTransaction(ctx, tx, row, confirmed[billPaymentKey(row)], p.now()); err != nil {
 				return err
 			}
-			if _, err := tx.Exec(ctx, `UPDATE reconciliation_row_progress SET processed_at=$3 WHERE run_id=$1 AND row_number=$2`, id, index+1, p.now()); err != nil {
+			if _, err := tx.Exec(ctx, `UPDATE reconciliation_row_progress SET processed_at=$3 WHERE run_id=$1 AND row_number=$2`, id, rowNumber, p.now()); err != nil {
 				return err
 			}
 			return tx.Commit(ctx)

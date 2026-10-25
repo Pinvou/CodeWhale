@@ -2074,6 +2074,16 @@
         "file": "900025_reconciliation_unknown_provider_entry.up.sql",
         "version": 900025,
         "sha256": "99b24e9021eabd48e23df45c84a56835fcbbaa1b62c19813ae075246b953f7e3"
+      },
+      {
+        "file": "900026_reconciliation_fair_retry.down.sql",
+        "version": 900026,
+        "sha256": "02712cfee57e182b145c3ee3708d2322fcf49e8f7c5e7d8e3e79cb70652cacbb"
+      },
+      {
+        "file": "900026_reconciliation_fair_retry.up.sql",
+        "version": 900026,
+        "sha256": "bb362cb8d473ba5625986e98a2c936aa6c737ecc2bf617ac3cd935eb7c74a153"
       }
     ],
     "payment-simulator": [
