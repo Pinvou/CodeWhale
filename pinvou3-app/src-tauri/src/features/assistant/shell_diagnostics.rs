@@ -3,6 +3,28 @@
 use deepseek_tui::tools::shell::{SharedShellManager, ShellJobSnapshot, ShellStatus};
 use serde_json::{Value, json};
 
+pub(crate) fn is_shell_execution_tool(name: &str) -> bool {
+    matches!(name, "bash" | "exec_shell" | "task_shell_start" | "Bash")
+}
+
+/// The production completion projection, shared with the real Engine fixture.
+/// Explicit metadata wins; only a failed shell without metadata may be observed.
+pub(crate) fn tool_completion_metadata(
+    manager: &SharedShellManager,
+    session: &str,
+    turn: &str,
+    call: &str,
+    tool: &str,
+    success: bool,
+    metadata: Option<&Value>,
+) -> Option<Value> {
+    metadata.cloned().or_else(|| {
+        (!success && is_shell_execution_tool(tool))
+            .then(|| failed_shell_metadata(manager, session, turn, call))
+            .flatten()
+    })
+}
+
 pub(crate) fn failed_shell_metadata(
     manager: &SharedShellManager,
     session: &str,

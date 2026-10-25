@@ -39,6 +39,25 @@ test("window covers beginning, end, exact capacity and missing terminal without 
   assert.deepEqual(failureTimeline([],incident).timeline,[{event_name:incident.event_name,occurred_at:incident.occurred_at}]);
 });
 
+test("only terminals at or after the incident count as final evidence", () => {
+  for (const remote of [false, true]) {
+    const key = "b".repeat(64);
+    const incident = event(20, remote ? { execution_task_key: key } : {});
+    const terminal = event(5, remote ? {
+      event_name: "remote_control_event", remote_task_key: key,
+      remote_role: "controlled", remote_stage: "task_terminal", remote_task_status: "failed",
+    } : { event_name: "task_finished", status: "failed" });
+    const stale = failureTimeline([terminal, incident], incident);
+    assert.equal(stale.timeline_context.task_terminal_included, false);
+    // Earlier events remain honest context; they cannot satisfy the terminal flag.
+    assert.equal(stale.timeline.length, 2);
+    for (const occurred_at of [incident.occurred_at, incident.occurred_at + 1]) {
+      const current = failureTimeline([incident, { ...terminal, occurred_at }], incident);
+      assert.equal(current.timeline_context.task_terminal_included, true);
+    }
+  }
+});
+
 test("correlation excludes another turn, device or consent period even when other IDs coincide", () => {
   const incident=event(20,{operation_id:"shared_operation"});
   const events=[incident,event(21),event(22,{turn_id:"other_turn",event_name:"task_finished",status:"failed"}),

@@ -91,7 +91,7 @@ mod shell_diagnostics;
 #[tokio::test]
 async fn diagnostic_real_engine_default_bash_produces_exact_exit_facts() {
     behavior_telemetry::tests::shell_producer::run_shell_producer_fixture(
-        shell_diagnostics::failed_shell_metadata,
+        shell_diagnostics::tool_completion_metadata,
     )
     .await;
 }

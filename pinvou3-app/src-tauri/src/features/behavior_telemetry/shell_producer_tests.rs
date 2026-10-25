@@ -1,4 +1,4 @@
-// Engine producer fixture. The integration harness supplies the host observer,
+// Engine producer fixture. The integration harness supplies the host projection,
 // keeping telemetry independent of the assistant feature.
 use super::*;
 use deepseek_tui::core::engine::{Engine, EngineConfig};
@@ -121,7 +121,15 @@ impl Drop for RuntimeHome {
 }
 
 pub(crate) async fn run_shell_producer_fixture(
-    observe: fn(&deepseek_tui::tools::shell::SharedShellManager, &str, &str, &str) -> Option<Value>,
+    project: fn(
+        &deepseek_tui::tools::shell::SharedShellManager,
+        &str,
+        &str,
+        &str,
+        &str,
+        bool,
+        Option<&Value>,
+    ) -> Option<Value>,
 ) {
     // TestHome holds the harness-wide environment lock for the entire Engine
     // lifetime. All runtime state belongs to this fixture, never the user home.
@@ -210,17 +218,82 @@ pub(crate) async fn run_shell_producer_fixture(
                             .as_ref()
                             .ok()
                             .and_then(|result| result.metadata.as_ref());
-                        let fallback = (!success && original_metadata.is_none())
-                            .then(|| observe(&manager, &session, turn.as_deref().unwrap(), &id))
-                            .flatten();
-                        let metadata = original_metadata.or(fallback.as_ref()).cloned();
+                        let turn = turn.as_deref().unwrap();
+                        let metadata = project(
+                            &manager,
+                            &session,
+                            turn,
+                            &id,
+                            &name,
+                            success,
+                            original_metadata,
+                        );
+                        if !success && original_metadata.is_none() {
+                            // Wrong identities/manager or a non-shell/success
+                            // must never borrow a matching job's exit status.
+                            let other_manager =
+                                deepseek_tui::tools::shell::new_shared_shell_manager(
+                                    folder.join("other_jobs"),
+                                );
+                            for (source, sid, tid, cid, tool, ok) in [
+                                (
+                                    &other_manager,
+                                    session.as_str(),
+                                    turn,
+                                    id.as_str(),
+                                    "bash",
+                                    false,
+                                ),
+                                (&manager, "other_session", turn, id.as_str(), "bash", false),
+                                (
+                                    &manager,
+                                    session.as_str(),
+                                    "other_turn",
+                                    id.as_str(),
+                                    "bash",
+                                    false,
+                                ),
+                                (
+                                    &manager,
+                                    session.as_str(),
+                                    turn,
+                                    "other_call",
+                                    "bash",
+                                    false,
+                                ),
+                                (
+                                    &manager,
+                                    session.as_str(),
+                                    turn,
+                                    id.as_str(),
+                                    "read_file",
+                                    false,
+                                ),
+                                (&manager, session.as_str(), turn, id.as_str(), "bash", true),
+                            ] {
+                                assert!(project(source, sid, tid, cid, tool, ok, None).is_none());
+                            }
+                            let explicit = serde_json::json!({"status":"TimedOut","exit_code":9});
+                            assert_eq!(
+                                project(
+                                    &manager,
+                                    &session,
+                                    turn,
+                                    &id,
+                                    &name,
+                                    false,
+                                    Some(&explicit)
+                                ),
+                                Some(explicit),
+                            );
+                        }
                         let statuses = manager
                             .lock()
                             .unwrap()
                             .list_jobs_for_session(&session)
                             .into_iter()
                             .filter(|job| {
-                                job.origin_turn_id.as_deref() == turn.as_deref()
+                                job.origin_turn_id.as_deref() == Some(turn)
                                     && job.origin_tool_call_id.as_deref() == Some(id.as_str())
                                     && job.owner_agent_id.is_none()
                             })

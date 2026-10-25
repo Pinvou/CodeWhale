@@ -200,7 +200,7 @@
   const statsDay=value=>Math.floor((Number(value)+STATS_TIMEZONE_OFFSET_MS)/DAY_MS);
   const statsDayLabel=day=>new Date(day*DAY_MS).toISOString().slice(0,10);
   async function api(path,options={}){const response=await fetch(`/pinvou3/stats/api/${path}`,{...options,headers:{'content-type':'application/json',...(options.headers||{})}});if(response.status===401)throw new Error('unauthorized');if(response.status===403)throw new Error('forbidden');if(!response.ok)throw new Error(`HTTP ${response.status}`);return response.json()}
-  function showLogin(message=''){failureRevision++;clearFailureDetail();$('failureRows').replaceChildren();if(state.timer)clearInterval(state.timer);state.timer=null;$('loginLayer').classList.remove('hidden');$('loginError').textContent=message;setTimeout(()=>$('password').focus(),60)}
+  function showLogin(message=''){failureRevision++;clearFailureDetail();$('failureRows').replaceChildren();$('failureStatus').textContent='请登录后查看故障诊断。';if(state.timer)clearInterval(state.timer);state.timer=null;$('loginLayer').classList.remove('hidden');$('loginError').textContent=message;setTimeout(()=>$('password').focus(),60)}
   function linePath(values,max,left=35,right=770,top=22,bottom=184){
     let connected=false;
     return values.map((value,index)=>{
@@ -417,12 +417,17 @@
   }
   async function refreshData(manual=false){
     const version=++state.dataRefreshVersion,isCurrent=()=>state.dataRefreshVersion===version;
+    if(manual)$('refreshButton').textContent='↻ 刷新';
     try{
       const session=await api('session');
       if(!isCurrent())return;
       if(state.role!==session.role){failureRevision++;clearFailureDetail();$('failureRows').replaceChildren()}
       state.role=session.role;
-      if(state.role==='behavior_analyst'){
+      const diagnosticsRefresh=manual&&state.view==='diagnostics';
+      let diagnosticsOk=true;
+      if(diagnosticsRefresh){
+        $('loginLayer').classList.add('hidden');renderPageTabs();diagnosticsOk=await loadFailures();
+      }else if(state.role==='behavior_analyst'){
         if(!['behavior','remote','diagnostics'].includes(state.view))state.view='behavior';$('loginLayer').classList.add('hidden');renderPageTabs();await refreshBehavior();
         if(!isCurrent())return;
         $('time').textContent=new Date(state.behavior?.generated_at||Date.now()).toLocaleTimeString('zh-CN',{hour12:false});
@@ -432,9 +437,8 @@
         state.overview=overview;state.devices=devices.devices||[];$('loginLayer').classList.add('hidden');renderPageTabs();renderMetrics();renderDevices();await refreshBehavior();
         if(!isCurrent())return;
       }
-      const diagnosticsOk=state.view!=='diagnostics'||!manual?true:await loadFailures();
       if(!isCurrent()||diagnosticsOk===null)return;
-      if(manual){$('refreshButton').textContent=Object.keys(state.behaviorErrors).length||!diagnosticsOk?'↻ 部分失败，重试':'✓ 已更新';if(!Object.keys(state.behaviorErrors).length&&diagnosticsOk)setTimeout(()=>{if(isCurrent())$('refreshButton').textContent='↻ 刷新'},1200)}
+      if(manual){const failed=!diagnosticsOk||(!diagnosticsRefresh&&Object.keys(state.behaviorErrors).length);$('refreshButton').textContent=failed?'↻ 部分失败，重试':'✓ 已更新';if(!failed)setTimeout(()=>{if(isCurrent())$('refreshButton').textContent='↻ 刷新'},1200)}
     }catch(error){if(!isCurrent())return;if(error.message==='unauthorized')showLogin();else{$('time').textContent=error.message==='forbidden'?'当前角色无权访问':'刷新失败';if(manual)$('refreshButton').textContent='↻ 重试'}}
   }
   document.querySelectorAll('[data-daily-metric]').forEach(input=>input.addEventListener('change',()=>{if(input.checked)state.dailyMetrics.add(input.dataset.dailyMetric);else state.dailyMetrics.delete(input.dataset.dailyMetric);renderTrend()}));
@@ -483,7 +487,7 @@
   $('failureIssueForm').addEventListener('submit',async event=>{event.preventDefault();if(!selectedFailure||state.role!=='operations_admin')return;const revision=failureRevision;try{await diagnosticApi('diagnostics/issue',{method:'POST',headers:{'X-Pinvou-Diagnostics':'1'},body:JSON.stringify({fingerprint:selectedFailure,issue:{status:$('failureIssueStatus').value,fixed_version:$('failureFixedVersion').value.trim()}})},revision);if(revision===failureRevision)await loadFailures()}catch{if(revision===failureRevision)$('failureStatus').textContent='处理状态保存失败，标记已修复时须填写有效修复版本。'}});
   $('logout').addEventListener('click',()=>{failureRevision++;clearFailureDetail();$('failureRows').replaceChildren();$('failureStatus').textContent='请登录后查看故障诊断。'},true);
   $('refreshButton').addEventListener('click',()=>refreshData(true));
-  $('loginForm').addEventListener('submit',async event=>{event.preventDefault();$('loginError').textContent='';try{await api('login',{method:'POST',body:JSON.stringify({password:$('password').value})});$('password').value='';$('loginLayer').classList.add('hidden');await refreshData();if(!state.timer)state.timer=setInterval(refreshData,30000)}catch(error){showLogin(error.message==='unauthorized'?'密码不正确，请重试':'登录失败，请稍后重试')}});
+  $('loginForm').addEventListener('submit',async event=>{event.preventDefault();$('loginError').textContent='';try{await api('login',{method:'POST',body:JSON.stringify({password:$('password').value})});$('password').value='';$('loginLayer').classList.add('hidden');await refreshData();if(state.view==='diagnostics'&&$('loginLayer').classList.contains('hidden'))await loadFailures();if(!state.timer&&$('loginLayer').classList.contains('hidden'))state.timer=setInterval(refreshData,30000)}catch(error){showLogin(error.message==='unauthorized'?'密码不正确，请重试':'登录失败，请稍后重试')}});
   $('logout').addEventListener('click',async()=>{try{await api('logout',{method:'POST',body:'{}'})}catch{}state.role=null;showLogin()});
   Object.keys(state.behaviorRanges).forEach(syncBehaviorRangeControls);
   refreshData().then(()=>{if($('loginLayer').classList.contains('hidden')&&!state.timer)state.timer=setInterval(refreshData,30000)});

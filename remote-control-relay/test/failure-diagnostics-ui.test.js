@@ -138,11 +138,13 @@ test("superseded manual refresh cannot label a newer filter result as failed", a
       if(String(url).includes('/behavior/failures')&&++count===1)await new Promise(resolve=>{release=resolve;});
       return original(url,options);
     };
+    document.querySelector('#refreshButton').textContent='↻ 部分失败，重试';
     document.querySelector('#refreshButton').click();await tick();assert.equal(typeof release,'function');
     document.querySelector('#failureVersion').value='0.10.14';
     document.querySelector('#failureFilters').dispatchEvent(new Event('submit',{cancelable:true}));await tick();
     assert(document.querySelector('[data-failure-group]'));release();await tick();
     assert.doesNotMatch(document.querySelector('#refreshButton').textContent,/部分失败/);
+    assert.equal(document.querySelector('#refreshButton').textContent,'↻ 刷新');
     assert(document.querySelector('[data-failure-group]'));
   } finally {dom.window.close();}
 });
@@ -193,3 +195,47 @@ test("old query 401 cannot hide newer data while current query 401 returns to lo
     assert.equal(document.querySelector('#failureRows').children.length,0);
   } finally {dom.window.close();}
 });
+
+for (const role of ["operations_admin", "behavior_analyst"]) {
+  test(`${role} diagnostics refresh is independent of other dashboard endpoints`, async () => {
+    const {dom,requests}=dashboard(role);
+    try {
+      const {document}=dom.window;await tick();
+      document.querySelector('[data-view="diagnostics"]').click();await tick();
+      const original=dom.window.fetch;
+      dom.window.fetch=(url,options)=>String(url).includes('/behavior/failures')||String(url).endsWith('/session')
+        ? original(url,options) : Promise.resolve({ok:false,status:503});
+      const before=requests.filter(row=>row.path.includes('/behavior/failures')).length;
+      document.querySelector('#refreshButton').click();await tick();
+      assert.equal(requests.filter(row=>row.path.includes('/behavior/failures')).length,before+1);
+      assert.equal(document.querySelector('#refreshButton').textContent,'✓ 已更新');
+      assert(document.querySelector('#failureRows').children.length>0);
+    } finally {dom.window.close();}
+  });
+
+  test(`${role} resumes the active diagnostics query after session expiry and login`, async () => {
+    const {dom,requests}=dashboard(role);
+    try {
+      const {document,Event}=dom.window;await tick();
+      const original=dom.window.fetch;let expired=true;
+      dom.window.fetch=(url,options)=>String(url).includes('/behavior/failures')&&expired
+        ? Promise.resolve({ok:false,status:401}) : original(url,options);
+      document.querySelector('#failureVersion').value='0.10.12';
+      document.querySelector('[data-view="diagnostics"]').click();await tick();
+      assert.equal(document.querySelector('#loginLayer').classList.contains('hidden'),false);
+      assert.doesNotMatch(document.querySelector('#failureStatus').textContent,/加载中/);
+      assert.equal(document.querySelector('#failurePanel').getAttribute('aria-busy'),'false');
+      expired=false;
+      document.querySelector('#password').value='fixture-password';
+      document.querySelector('#loginForm').dispatchEvent(new Event('submit',{cancelable:true}));await tick();
+      assert.equal(document.querySelector('#loginLayer').classList.contains('hidden'),true);
+      assert.equal(document.querySelector('[data-view="diagnostics"]').getAttribute('aria-selected'),'true');
+      assert.equal(document.querySelector('#failureVersion').value,'0.10.12');
+      assert.equal(requests.filter(r=>r.path.includes('/behavior/failures')&&r.path.includes('app_version=0.10.12')).length,1);
+      assert(document.querySelector('#failureRows').children.length>0);
+      assert.doesNotMatch(document.querySelector('#failureStatus').textContent,/加载中/);
+      assert.equal(document.querySelector('#failurePanel').getAttribute('aria-busy'),'false');
+      assert.equal(Boolean(document.querySelector('[data-failure-group]')),role==='operations_admin');
+    } finally {dom.window.close();}
+  });
+}
