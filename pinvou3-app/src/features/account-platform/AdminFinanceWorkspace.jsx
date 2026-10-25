@@ -40,12 +40,15 @@ function Payments({ client, copy, language, permissions, owner }) {
     const result = await operation.read(async () => { const value = await client.paymentOrder(id); if (value?.order_id !== id) throw new Error('INVALID_FINANCE_ACK'); return { value, targets: wholeRefundTargets(value) }; });
     if (result) { setDetail(result.value); setTargets(result.targets); setTargetID(result.targets[0]?.package.package_id || ''); setReason(''); }
   };
+  const repair = async () => {
+    const value = await operation.mutate({ action: 'repair', orderID: detail.order_id, reason: reason.trim(), commandProtocol: 1 }, (facts, key) => client.repairPaymentOrder(facts.orderID, facts.reason, key, facts.commandProtocol)); if (value) await open(detail.order_id);
+  };
   const refund = async () => {
     const target = targets.find(item => item.package.package_id === targetID);
     const facts = operation.pendingFacts || (detail && target && { action: 'refund', orderID: detail.order_id, transactionID: target.transaction.payment_transaction_id, packageID: targetID, amountFen: String(target.transaction.amount_fen), reason: reason.trim() });
     if (!facts || (!operation.unknown && (!reason.trim() || !refundEnabled || !permissions.includes('platform.billing.repairs.request') || !globalThis.confirm(copy.confirmRefund)))) return;
     const value = await operation.mutate(facts, async (current, key) => {
-      if (current.action === 'repair') return client.repairPaymentOrder(current.orderID, current.reason);
+      if (current.action === 'repair') return client.repairPaymentOrder(current.orderID, current.reason, key, current.commandProtocol);
       const receipt = await client.refundPaymentOrder(current.orderID, current.transactionID, current.packageID, current.reason, key);
       if (integerMoney(receipt.amount_fen) !== integerMoney(current.amountFen)) throw new Error('INVALID_FINANCE_ACK');
       return receipt;
@@ -59,7 +62,7 @@ function Payments({ client, copy, language, permissions, owner }) {
     {detail && <article><h4>{copy.details}: {detail.order_id}</h4><p>{detail.status} / {detail.fulfillment_status} / {detail.attention_summary}</p>
       {permissions.includes('platform.billing.orders.sync') && <button disabled={operation.busy || operation.unknown} onClick={async () => { const value = await operation.read(() => client.syncOrder(detail.order_id)); if (value) await open(detail.order_id); }}>{copy.query}</button>}
       <label>{copy.reason}<textarea disabled={operation.busy || operation.unknown} maxLength={500} value={reason} onChange={event => setReason(event.target.value)} /></label>
-      {detail.status === 'MANUAL_REVIEW' && permissions.includes('platform.billing.repairs.request') && <button disabled={operation.busy || operation.unknown || !reason.trim()} onClick={async () => { const value = await operation.mutate({ action: 'repair', orderID: detail.order_id, reason: reason.trim() }, facts => client.repairPaymentOrder(facts.orderID, facts.reason)); if (value) await open(detail.order_id); }}>{copy.orderRepair}</button>}
+      {detail.status === 'MANUAL_REVIEW' && permissions.includes('platform.billing.repairs.request') && <button disabled={operation.busy || operation.unknown || !reason.trim()} onClick={() => void repair()}>{copy.orderRepair}</button>}
       <h4>{copy.refunds}</h4>{targets.length ? <label>{copy.transaction} / {copy.package}<select disabled={operation.busy || operation.unknown} value={targetID} onChange={event => setTargetID(event.target.value)}>{targets.map(item => <option key={item.package.package_id} value={item.package.package_id}>{item.transaction.payment_transaction_id} / {item.package.package_id} — {formatFen(item.transaction.amount_fen, language)}</option>)}</select></label> : <p>{copy.refundUnavailable}</p>}
       {!refundEnabled && <p>{copy.refundUnavailable}</p>}
       {permissions.includes('platform.billing.repairs.request') && targets.length > 0 && <button disabled={operation.busy || operation.unknown || !refundEnabled || !reason.trim()} onClick={() => void refund()}>{operation.unknown ? copy.retry : copy.refunds}</button>}

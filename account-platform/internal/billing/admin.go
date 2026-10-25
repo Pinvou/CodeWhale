@@ -468,17 +468,27 @@ func (s *Service) adminSyncPaymentOrder(w http.ResponseWriter, r *http.Request) 
 func (s *Service) adminRepairPaymentOrder(w http.ResponseWriter, r *http.Request) {
 	orderID, err := uuid.Parse(r.PathValue("order_id"))
 	var body struct {
-		Reason string `json:"reason"`
+		Reason          string `json:"reason"`
+		CommandProtocol int    `json:"command_protocol"`
 	}
 	if decodeErr := api.DecodeJSON(w, r, &body); err != nil || decodeErr != nil || strings.TrimSpace(body.Reason) == "" {
 		api.WriteError(w, http.StatusBadRequest, "INVALID_REQUEST", "a repair reason is required", httpserver.RequestID(r.Context()))
+		return
+	}
+	if body.CommandProtocol != 1 {
+		api.WriteError(w, http.StatusBadRequest, "COMMAND_PROTOCOL_REQUIRED", "a versioned repair command is required", httpserver.RequestID(r.Context()))
+		return
+	}
+	commandKey := strings.TrimSpace(r.Header.Get("Idempotency-Key"))
+	if len(commandKey) < 16 || len(commandKey) > 128 {
+		api.WriteError(w, http.StatusBadRequest, "IDEMPOTENCY_KEY_REQUIRED", "a stable repair command key is required", httpserver.RequestID(r.Context()))
 		return
 	}
 	if s.payments == nil {
 		api.WriteError(w, http.StatusServiceUnavailable, "PAYMENT_UNAVAILABLE", "payment operations are unavailable", httpserver.RequestID(r.Context()))
 		return
 	}
-	order, err := s.payments.RepairReviewedOrder(r.Context(), orderID, adminActor(adminPrincipal(r)), body.Reason)
+	order, err := s.payments.RepairReviewedOrder(r.Context(), orderID, adminActor(adminPrincipal(r)), body.Reason, commandKey)
 	if err != nil {
 		s.writeError(w, r, err)
 		return

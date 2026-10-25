@@ -2134,6 +2134,16 @@
         "file": "900030_late_payment_query_commands.up.sql",
         "version": 900030,
         "sha256": "00ebf3987ce4718c538bb78035bc3ff5ca4a3dc64709db78ee6a97e09c55da6a"
+      },
+      {
+        "file": "900031_direct_payment_repair_commands.down.sql",
+        "version": 900031,
+        "sha256": "e365bc1fc35bd7fcfda9f263d2ce0572724b6ad30e1a630195b284bc037ed66a"
+      },
+      {
+        "file": "900031_direct_payment_repair_commands.up.sql",
+        "version": 900031,
+        "sha256": "3e9eb2e93d22e52b5c8fbf162e5c5d63761129de449c3df10dd43d9ac1f10f02"
       }
     ],
     "payment-simulator": [

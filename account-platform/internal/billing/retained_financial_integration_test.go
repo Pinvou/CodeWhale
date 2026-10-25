@@ -465,7 +465,7 @@ func TestRetainedManualRepairAuditUsesNetPersistedBalance(t *testing.T) {
 	if err = tx.Commit(ctx); err != nil {
 		t.Fatal(err)
 	}
-	if _, err = c.RepairReviewedOrder(ctx, order.ID, uuid.New(), "controlled verified payment repair"); err != nil {
+	if _, err = c.RepairReviewedOrder(ctx, order.ID, uuid.New(), "controlled verified payment repair", "direct-repair-"+uuid.NewString()); err != nil {
 		t.Fatal(err)
 	}
 	var before, after, gross, posted, outstanding int64

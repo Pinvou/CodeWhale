@@ -436,8 +436,9 @@ export class AdminPlatformClient {
   syncPaymentOrder(orderID) {
     return this.mutate('billing', `/admin/v1/payment-orders/${encodeURIComponent(orderID)}/sync`, 'POST', {}, '', undefined, 200);
   }
-  repairPaymentOrder(orderID, reason) {
-    return this.mutate('billing', `/admin/v1/payment-orders/${encodeURIComponent(orderID)}/repair`, 'POST', { reason }, '', undefined, 200);
+  repairPaymentOrder(orderID, reason, key, commandProtocol) {
+    if (commandProtocol !== 1) throw financeNotDispatched(new Error('FINANCE_COMMAND_PROTOCOL_REQUIRED'), true);
+    return this.mutate('billing', `/admin/v1/payment-orders/${encodeURIComponent(orderID)}/repair`, 'POST', { reason, command_protocol: 1 }, key, undefined, 200);
   }
   async refundPaymentOrder(orderID, transactionID, packageID, reason, idempotencyKey) {
     [orderID, transactionID, packageID].forEach(requireFinanceID);

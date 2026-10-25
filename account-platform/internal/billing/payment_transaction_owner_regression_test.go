@@ -34,7 +34,7 @@ func TestPaymentSharedProviderTransactionRejectsOtherOrderAndRepairPostgres(t *t
 	if err := c2.recordProviderObservation(ctx, second.ID, "QUERY", review); !errors.Is(err, ErrConflict) {
 		t.Fatalf("create real review prerequisite: %v", err)
 	}
-	if _, err := c2.RepairReviewedOrder(ctx, second.ID, uuid.New(), "controlled cross-order evidence rejection"); !errors.Is(err, ErrConflict) {
+	if _, err := c2.RepairReviewedOrder(ctx, second.ID, uuid.New(), "controlled cross-order evidence rejection", "direct-repair-"+uuid.NewString()); !errors.Is(err, ErrConflict) {
 		t.Fatalf("cross-order repair accepted: %v", err)
 	}
 	var anomalies, queryEvidence, repairEvidence, packages, repairs int

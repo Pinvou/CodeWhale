@@ -13,8 +13,12 @@ import (
 	"github.com/jackc/pgx/v5"
 )
 
-func (p *PaymentCoordinator) RepairReviewedOrder(ctx context.Context, orderID, actorID uuid.UUID, reason string) (PaymentOrder, error) {
-	return p.repairReviewedOrder(ctx, orderID, actorID, reason, uuid.Nil, "")
+func (p *PaymentCoordinator) RepairReviewedOrder(ctx context.Context, orderID, actorID uuid.UUID, reason, commandKey string) (PaymentOrder, error) {
+	commandKey = strings.TrimSpace(commandKey)
+	if len(commandKey) < 16 || len(commandKey) > 128 {
+		return PaymentOrder{}, ErrConflict
+	}
+	return p.repairReviewedOrder(ctx, orderID, actorID, reason, uuid.Nil, commandKey)
 }
 
 func (p *PaymentCoordinator) repairReviewedOrder(ctx context.Context, orderID, actorID uuid.UUID, reason string, caseID uuid.UUID, commandKey string) (PaymentOrder, error) {
@@ -28,6 +32,12 @@ func (p *PaymentCoordinator) repairReviewedOrder(ctx context.Context, orderID, a
 	}
 	if err != nil {
 		return PaymentOrder{}, err
+	}
+	directCommand := caseID == uuid.Nil && commandKey != ""
+	if directCommand {
+		if saved, found, err := readDirectPaymentRepair(ctx, p.repository.pool, orderID, actorID, commandKey, reason); err != nil || found {
+			return saved, err
+		}
 	}
 	// Bind the positive repair receipt to this immutable anomaly command. An
 	// unrelated historical repair of the same order cannot authorize completion.
@@ -58,14 +68,18 @@ func (p *PaymentCoordinator) repairReviewedOrder(ctx context.Context, orderID, a
 	if order.Status != "MANUAL_REVIEW" || order.FulfillmentStatus != "MANUAL_REVIEW" {
 		return PaymentOrder{}, ErrConflict
 	}
-	provider, err := providerCall(ctx, p, "ORDER_QUERY", order.Channel, false, providerCallScope(order), func() (ProviderOrder, error) {
+	provider, providerErr := providerCall(ctx, p, "ORDER_QUERY", order.Channel, false, providerCallScope(order), func() (ProviderOrder, error) {
 		return p.provider.Get(ctx, order.MerchantOrderNo)
 	})
-	if err != nil {
-		return PaymentOrder{}, ErrPaymentProvider
-	}
-	if provider.Status != "SUCCESS" || provider.ChannelTransactionID == nil || provider.PaidAt == nil || provider.MerchantOrderNo != order.MerchantOrderNo || provider.Channel != order.Channel || provider.AmountFen != order.AmountFen || provider.Currency != order.Currency {
-		return PaymentOrder{}, ErrConflict
+	// The provider read remains outside the financial transaction. For a direct
+	// command, a concurrent commit's receipt has priority over this late read.
+	if !directCommand {
+		if providerErr != nil {
+			return PaymentOrder{}, ErrPaymentProvider
+		}
+		if provider.Status != "SUCCESS" || provider.ChannelTransactionID == nil || provider.PaidAt == nil || provider.MerchantOrderNo != order.MerchantOrderNo || provider.Channel != order.Channel || provider.AmountFen != order.AmountFen || provider.Currency != order.Currency {
+			return PaymentOrder{}, ErrConflict
+		}
 	}
 	tx, err := p.repository.pool.Begin(ctx)
 	if err != nil {
@@ -73,6 +87,20 @@ func (p *PaymentCoordinator) repairReviewedOrder(ctx context.Context, orderID, a
 	}
 	defer tx.Rollback(ctx)
 	order, err = getPaymentOrderByID(ctx, tx, orderID, true)
+	if err == nil && directCommand {
+		if saved, found, receiptErr := readDirectPaymentRepair(ctx, tx, orderID, actorID, commandKey, reason); receiptErr != nil || found {
+			if receiptErr != nil {
+				return PaymentOrder{}, receiptErr
+			}
+			return saved, tx.Commit(ctx)
+		}
+		if providerErr != nil {
+			return PaymentOrder{}, ErrPaymentProvider
+		}
+		if provider.Status != "SUCCESS" || provider.ChannelTransactionID == nil || provider.PaidAt == nil || provider.MerchantOrderNo != order.MerchantOrderNo || provider.Channel != order.Channel || provider.AmountFen != order.AmountFen || provider.Currency != order.Currency {
+			return PaymentOrder{}, ErrConflict
+		}
+	}
 	if err != nil || order.Status != "MANUAL_REVIEW" || order.FulfillmentStatus != "MANUAL_REVIEW" {
 		if err != nil {
 			return PaymentOrder{}, err
@@ -115,6 +143,28 @@ func (p *PaymentCoordinator) repairReviewedOrder(ctx context.Context, orderID, a
 			return PaymentOrder{}, err
 		}
 		if _, err = tx.Exec(ctx, `INSERT INTO idempotency_records(scope,idempotency_key,request_hash,response_status,response_body,created_at,expires_at) VALUES('payment.anomaly-repair',$1,$2,200,$3,$4,$4::timestamptz+interval '100 years')`, receiptKey, requestHash, body, now); err != nil {
+			return PaymentOrder{}, err
+		}
+	}
+	if directCommand {
+		// Use the actual database projection, including timestamp precision.
+		order, err = getPaymentOrderByID(ctx, tx, orderID, false)
+		if err != nil {
+			return PaymentOrder{}, err
+		}
+		body, err := json.Marshal(order)
+		if err != nil {
+			return PaymentOrder{}, err
+		}
+		if _, err = tx.Exec(ctx, `INSERT INTO payment_order_repair_commands(id,payment_order_id,actor_id,idempotency_key,command_protocol,reason,request_hash,response_body,created_at) VALUES($1,$2,$3,$4,1,$5,$6,$7,$8)`, uuid.Must(uuid.NewV7()), orderID, actorID, commandKey, reason, directPaymentRepairHash(orderID, actorID, reason), body, now); err != nil {
+			return PaymentOrder{}, directPaymentRepairWriteError(err)
+		}
+		var found bool
+		order, found, err = readDirectPaymentRepair(ctx, tx, orderID, actorID, commandKey, reason)
+		if err != nil || !found {
+			if err == nil {
+				err = ErrConflict
+			}
 			return PaymentOrder{}, err
 		}
 	}

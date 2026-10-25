@@ -56,7 +56,7 @@ func TestFinanceCreationRecoveryRejectsChangedProvider(t *testing.T) {
 	if _, err := r.pool.Exec(ctx, `UPDATE payment_orders SET status='MANUAL_REVIEW',fulfillment_status='MANUAL_REVIEW' WHERE id=$1`, order.ID); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := c.RepairReviewedOrder(ctx, order.ID, uuid.New(), "controlled provider mismatch"); !errors.Is(err, ErrConflict) {
+	if _, err := c.RepairReviewedOrder(ctx, order.ID, uuid.New(), "controlled provider mismatch", "direct-repair-"+uuid.NewString()); !errors.Is(err, ErrConflict) {
 		t.Fatal("repair accepted another provider", err)
 	}
 	if provider.gets.Load() != 0 || provider.creates.Load() != 0 {
