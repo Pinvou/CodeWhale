@@ -16,6 +16,7 @@ export function AccountLogin({ client, copy, onAuthenticated, reauthentication =
   const [offset, setOffset] = useState(0);
   const [challenge, setChallenge] = useState('');
   const [reference, setReference] = useState(null);
+  const [preparation, setPreparation] = useState(null);
   const [recovery, setRecovery] = useState(null);
   const [progress, setProgress] = useState(null);
   const [cooldown, setCooldown] = useState(0);
@@ -23,7 +24,7 @@ export function AccountLogin({ client, copy, onAuthenticated, reauthentication =
   const [error, setError] = useState('');
   const [notice, setNotice] = useState('');
   const owner = useRef(0);
-  useEffect(() => { owner.current++; return () => { owner.current++; }; }, [client]);
+  useEffect(() => { owner.current++; setPreparation(null); setReference(null); setCaptcha(null); setChallenge(''); setPassword(''); setConfirmation(''); setBusy(false); return () => { owner.current++; }; }, [client]);
   useEffect(() => {
     if (cooldown <= 0) return;
     const timer = setTimeout(() => setCooldown(value => Math.max(0, value - 1)), 1000);
@@ -66,7 +67,9 @@ export function AccountLogin({ client, copy, onAuthenticated, reauthentication =
           MOBILE_INVALID: copy.mobileInvalid,
           MOBILE_ALREADY_REGISTERED: copy.mobileAlreadyRegistered,
           CAPTCHA_INVALID: copy.captchaInvalid,
+          PASSWORD_PREPARATION_INVALID: copy.captchaInvalid,
           SMS_RATE_LIMITED: copy.smsRateLimited,
+          RATE_LIMITED: copy.authRequestRateLimited,
           SMS_UNAVAILABLE: copy.smsUnavailable,
           SMS_CODE_INVALID: copy.mobileAuthFailed,
           MOBILE_AUTH_FAILED: copy.mobileAuthFailed,
@@ -85,27 +88,42 @@ export function AccountLogin({ client, copy, onAuthenticated, reauthentication =
   const openCaptcha = () => {
     if (mode === 'register' && registrationError()) { setError(registrationError()); return; }
     void run(async current => {
-      let checked = reference;
-      if (mode === 'register' && !checked) {
-        checked = await client.prepareRegistrationPassword(password);
-        if (!current()) return;
-        setReference(checked);
-      }
       const result = await client.createSliderCaptcha(mobile.trim(), mode === 'register' ? 'REGISTER' : mode === 'forgot' ? 'PASSWORD_RESET' : 'LOGIN');
-      if (current()) { setCaptcha(result); setOffset(0); }
+      if (current()) { setCaptcha(result); setOffset(0); setPreparation(null); }
     });
   };
   const sendCode = selectedOffset => void run(async current => {
     const purpose = mode === 'register' ? 'REGISTER' : mode === 'forgot' ? 'PASSWORD_RESET' : 'LOGIN';
     let result;
+    let checked = reference;
+    let sending = false;
     try {
-      result = await client.sendSms(mode === 'register' ? account.trim() : '', mobile.trim(), mode === 'register' ? reference : null, purpose, captcha.captcha_id, profileCaptchaSubmissionOffset(selectedOffset, offset));
+      if (purpose === 'REGISTER' || purpose === 'PASSWORD_RESET') {
+        if (password !== confirmation) throw new Error('PASSWORD_MISMATCH');
+        const attempt = preparation || {
+          operation_id: globalThis.crypto.randomUUID(), mobile: mobile.trim(), purpose,
+          captcha_id: captcha.captcha_id, captcha_offset: profileCaptchaSubmissionOffset(selectedOffset, offset),
+          password_handle: reference?.password_handle || '', password_policy_version: reference?.password_policy_version || '',
+        };
+        // Retain only public operation facts in memory. An uncertain preparation
+        // retries this operation; it never silently starts another allocation.
+        if (current()) setPreparation(attempt);
+        checked = await client.prepareRegistrationPassword(password, attempt);
+        if (!current()) return;
+        setReference(checked);
+      }
+      sending = true;
+      result = await client.sendSms(mode === 'register' ? account.trim() : '', mobile.trim(), checked, purpose, captcha.captcha_id, profileCaptchaSubmissionOffset(selectedOffset, offset));
     } catch (reason) {
-      if (current() && accountPlatformErrorCodes(reason).some(code => ['PASSWORD_REFERENCE_INVALID', 'PASSWORD_REFERENCE_CONFLICT'].includes(code))) setReference(null);
+      if (current()) {
+        const codes=accountPlatformErrorCodes(reason);
+        if (codes.some(code => ['PASSWORD_REFERENCE_INVALID', 'PASSWORD_REFERENCE_CONFLICT'].includes(code))) setReference(null);
+        if (codes.some(code => ['CAPTCHA_INVALID', 'PASSWORD_PREPARATION_INVALID'].includes(code))) { setCaptcha(null); setPreparation(null); setOffset(0); }
+      }
       throw reason;
     } finally {
       // Send may already have consumed the proof even when its response fails.
-      if (current()) { setCaptcha(null); setOffset(0); }
+      if (current() && sending) { setCaptcha(null); setOffset(0); setPreparation(null); }
     }
     if (!current()) return;
     if (!result?.challenge_id) throw new Error('INVALID_SMS_ACK');
@@ -127,7 +145,7 @@ export function AccountLogin({ client, copy, onAuthenticated, reauthentication =
     void run(async current => {
       if (mode === 'forgot') {
         if (password !== confirmation) { setError(copy.passwordMismatch); return; }
-        await client.resetPassword(mobile.trim(), challenge, code.trim(), password);
+        await client.resetPassword(mobile.trim(), challenge, code.trim(), reference);
         if (!current()) return;
         setMode('password'); setPassword(''); setConfirmation(''); setChallenge(''); setCode(''); setNotice(copy.passwordResetComplete);
         return;
@@ -153,10 +171,10 @@ export function AccountLogin({ client, copy, onAuthenticated, reauthentication =
   };
   const changeMode = value => {
     if (busy || pending) return;
-    owner.current++; setMode(value); setPassword(''); setConfirmation(''); setCode(''); setChallenge(''); setReference(null); setRecovery(null); setProgress(null); setCaptcha(null); setError(''); setNotice('');
+    owner.current++; setPreparation(null); setMode(value); setPassword(''); setConfirmation(''); setCode(''); setChallenge(''); setReference(null); setRecovery(null); setProgress(null); setCaptcha(null); setError(''); setNotice('');
   };
   const changeFacts = setter => event => {
-    owner.current++; setter(event.target.value); setReference(null); setChallenge(''); setCode(''); setCaptcha(null); setRecovery(null);
+    owner.current++; setPreparation(null); setter(event.target.value); setReference(null); setChallenge(''); setCode(''); setCaptcha(null); setRecovery(null);
   };
   return <section className="ap-stack">
     <h1>{reauthentication ? copy.desktopReauthenticationTitle : copy.title}</h1><p>{reauthentication ? copy.desktopReauthenticationLead : copy.desktopLoginIntro}</p>
@@ -165,8 +183,8 @@ export function AccountLogin({ client, copy, onAuthenticated, reauthentication =
     {pending ? <div role="status"><p>{manualReviewReason ? copy.registrationManualReview : copy.registrationDoNotRepeat}</p>{manualReviewReason && <p>{manualReviewReason === 'USERNAME_ALREADY_REGISTERED' ? copy.usernameAlreadyRegistered : copy.mobileAlreadyRegistered}</p>}<p>{progress.status}</p><button disabled={busy} onClick={recover}>{copy.retry}</button></div> : <form className="ap-stack" onSubmit={submit}>
       {(mode === 'password' || mode === 'register') && <label>{mode === 'register' ? copy.registrationUsername : copy.account}<input required value={account} autoComplete="username" disabled={busy} onChange={changeFacts(setAccount)} /></label>}
       {mode !== 'password' && <label>{copy.mobile}<input required value={mobile} inputMode="tel" autoComplete="tel-national" disabled={busy || Boolean(challenge)} onChange={changeFacts(setMobile)} /></label>}
-      {mode !== 'sms' && <label>{copy.password}<PasswordInput resetKey={mode} showLabel={copy.showPassword} hideLabel={copy.hidePassword} ariaLabel={copy.password} autoComplete={mode === 'password' ? 'current-password' : 'new-password'} maxLength={128} value={password} disabled={busy || mode === 'register' && Boolean(challenge)} onValueChange={value => { owner.current++; setPassword(value); setReference(null); setChallenge(''); setCode(''); setCaptcha(null); setRecovery(null); }} /></label>}
-      {(mode === 'register' || mode === 'forgot') && <label>{copy.confirmPassword}<PasswordInput resetKey={mode} showLabel={copy.showPasswordConfirmation} hideLabel={copy.hidePasswordConfirmation} ariaLabel={copy.confirmPassword} autoComplete="new-password" value={confirmation} maxLength={128} disabled={busy || mode === 'register' && Boolean(challenge)} onValueChange={value => { owner.current++; setConfirmation(value); setReference(null); setChallenge(''); setCode(''); setCaptcha(null); setRecovery(null); }} /></label>}
+      {mode !== 'sms' && <label>{copy.password}<PasswordInput resetKey={mode} showLabel={copy.showPassword} hideLabel={copy.hidePassword} ariaLabel={copy.password} autoComplete={mode === 'password' ? 'current-password' : 'new-password'} maxLength={128} value={password} disabled={busy || mode === 'register' && Boolean(challenge)} onValueChange={value => { owner.current++; setPreparation(null); setPassword(value); setReference(null); setChallenge(''); setCode(''); setCaptcha(null); setRecovery(null); }} /></label>}
+      {(mode === 'register' || mode === 'forgot') && <label>{copy.confirmPassword}<PasswordInput resetKey={mode} showLabel={copy.showPasswordConfirmation} hideLabel={copy.hidePasswordConfirmation} ariaLabel={copy.confirmPassword} autoComplete="new-password" value={confirmation} maxLength={128} disabled={busy || mode === 'register' && Boolean(challenge)} onValueChange={value => { owner.current++; setPreparation(null); setConfirmation(value); setReference(null); setChallenge(''); setCode(''); setCaptcha(null); setRecovery(null); }} /></label>}
       {mode !== 'password' && <><button type="button" disabled={busy || cooldown > 0 || !mobile.trim()} onClick={openCaptcha}>{cooldown > 0 ? copy.resendCountdown(cooldown) : copy.sendCode}</button><label>{copy.smsCode}<input value={code} required autoComplete="one-time-code" inputMode="numeric" disabled={busy} onChange={event => setCode(event.target.value)} /></label></>}
       <button disabled={busy || mode !== 'password' && !challenge}>{busy ? copy.signingIn : mode === 'register' ? copy.register : mode === 'forgot' ? copy.resetPassword : copy.login}</button>
     </form>}

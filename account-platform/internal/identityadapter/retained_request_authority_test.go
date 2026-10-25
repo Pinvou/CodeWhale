@@ -22,6 +22,8 @@ func TestIndependentIdentityBadBodiesNeverACKSuccess(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	prepared, _, authorization := preparationFixture(t)
+	s.preparations = prepared.preparations
 	for _, item := range []struct{ name, method, path, body string }{
 		{"precheck-malformed", "POST", "/v1/registration/password-prechecks", "{"},
 		{"validate-malformed", "POST", "/internal/v1/registration/password-references/validate", "{"},
@@ -36,6 +38,11 @@ func TestIndependentIdentityBadBodiesNeverACKSuccess(t *testing.T) {
 		t.Run(item.name, func(t *testing.T) {
 			r := httptest.NewRequest(item.method, item.path, strings.NewReader(item.body))
 			r.Header.Set("Content-Type", "application/json")
+			if item.path == "/v1/registration/password-prechecks" {
+				r.RemoteAddr = "192.0.2.10:4242"
+				r.Header.Set("X-Device-ID", "fixture-device")
+				r.Header.Set("X-Pinvou-Password-Preparation", authorization)
+			}
 			r.Header.Set("Authorization", "Bearer independent-fixture-token")
 			w := httptest.NewRecorder()
 			s.Handler().ServeHTTP(w, r)

@@ -8,7 +8,7 @@
 
 TLS 叶证书与私钥来自现有专属 `/run/pinvou/public-tls/server.crt`、`server.key` 挂载，证书覆盖已核验主机，只有 nginx 运行身份可读私钥；不借用数据库或独立凭据站点的私钥。模板仅监听 TLS，既有 loopback upstream、路由、内部路径拒绝、请求大小和 Token admin deadline 保持原布局，转发完整受控 host/port 与 HTTPS。它不提供 HTTP 密码/Token 入口，也不创建证书、网络或上游服务。旧仅 HTTP 的站点输入不能当作已满足生产 HTTPS 门禁。
 
-旧布局中 Account 与 Portal 入口强制覆盖 `X-Pinvou-Client-Source` 为 nginx 的真实连接地址 `$remote_addr`，不透传调用方伪造的来源头。Account 的 `ACCOUNT_TRUSTED_SOURCE_PEER_IPS` 必须配置 nginx、Portal 与启用时的 Keycloak 准确即时 peer IP；Portal 的 `PORTAL_TRUSTED_PROXY_IPS` 也须只包含已核验 nginx peer。不得使用整个 CIDR 或无条件信任 X-Forwarded-For。若在 loopback 上游均经本机连接，应核实实际使用的 IPv4/IPv6 地址；未配置时接收方只按直接连接地址分桶，不能保持公网用户来源隔离。
+旧布局中 Account、Portal 与精确 Identity 密码准备入口均强制覆盖 `X-Pinvou-Client-Source` 为 nginx 的真实连接地址 `$remote_addr`，不透传调用方伪造的来源头。Identity 的 `IDENTITY_PASSWORD_PREPARATION_TRUSTED_PROXY_IPS` 必须配置已核验 nginx 即时 peer；它与 Account 必须在同一验证码授权链中得到同一 canonical source/device，否则授权领取会按既有规则拒绝，不能用取消来源绑定修复。Account 的 `ACCOUNT_TRUSTED_SOURCE_PEER_IPS` 必须配置 nginx、Portal 与启用时的 Keycloak 准确即时 peer IP；Portal 的 `PORTAL_TRUSTED_PROXY_IPS` 也须只包含已核验 nginx peer。不得使用整个 CIDR 或无条件信任 X-Forwarded-For。若在 loopback 上游均经本机连接，应核实实际使用的 IPv4/IPv6 地址；未配置时接收方只按直接连接地址分桶，不能保持公网用户来源隔离。
 
 安装前分别核验当前源码、私有证书/权限、渲染零标记、真实 nginx 解析及适用正反入口响应；启用或替换现场配置仍须单独授权。源码静态合同或隔离 fixture 通过不能代替正式证书、上游连通性、切换或发布验收。
 

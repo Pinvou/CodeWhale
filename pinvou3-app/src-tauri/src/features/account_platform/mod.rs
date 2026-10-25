@@ -475,6 +475,8 @@ pub struct PortalOpenRequest {
 
 #[derive(Debug, Deserialize)]
 pub struct SMSRequest {
+    #[serde(default)]
+    pub password_preparation_token: String,
     pub username: String,
     pub mobile: String,
     pub password_handle: String,
@@ -493,6 +495,15 @@ pub struct SliderCaptchaRequest {
 #[derive(Debug, Deserialize)]
 pub struct RegistrationPasswordPreparation {
     pub password: String,
+    pub operation_id: String,
+    pub mobile: String,
+    pub purpose: String,
+    pub captcha_id: String,
+    pub captcha_offset: u16,
+    #[serde(default)]
+    pub password_handle: String,
+    #[serde(default)]
+    pub password_policy_version: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -507,7 +518,8 @@ pub struct PasswordReset {
     pub mobile: String,
     pub challenge_id: String,
     pub code: String,
-    pub password: String,
+    pub password_handle: String,
+    pub password_policy_version: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -694,6 +706,7 @@ impl AccountPlatformState {
                 "username": input.username.trim(), "mobile": input.mobile.trim(),
                 "password_handle": input.password_handle, "password_policy_version": input.password_policy_version,
                 "purpose": purpose, "captcha_id": input.captcha_id.trim(), "captcha_offset": input.captcha_offset,
+                "password_preparation_token": input.password_preparation_token,
             }),
         )
         .await?;
@@ -770,30 +783,58 @@ impl AccountPlatformState {
         input: RegistrationPasswordPreparation,
     ) -> Result<Value, String> {
         let config = AccountPlatformConfig::current()?;
-        let reference = self
-            .public_identity_request(
+        let purpose = input.purpose.trim().to_ascii_uppercase();
+        if purpose != "REGISTER" && purpose != "PASSWORD_RESET" {
+            return Err(
+                "mobile_auth_request_invalid: invalid password preparation purpose".to_string(),
+            );
+        }
+        let authorization = self.public_account_request(&config,
+            "v1/auth/password-preparation-authorizations", serde_json::json!({
+                "operation_id": input.operation_id, "mobile": input.mobile.trim(), "purpose": purpose,
+                "captcha_id": input.captcha_id, "captcha_offset": input.captcha_offset,
+            })).await?;
+        let token = authorization
+            .get("authorization_token")
+            .and_then(Value::as_str)
+            .filter(|value| !value.is_empty())
+            .ok_or_else(|| {
+                "mobile_auth_response_invalid: password preparation authorization is missing"
+                    .to_string()
+            })?;
+        let reference = if !input.password_handle.is_empty()
+            && !input.password_policy_version.is_empty()
+        {
+            serde_json::json!({"password_handle":input.password_handle,"password_policy_version":input.password_policy_version})
+        } else {
+            self.public_identity_request(
                 &config,
                 "v1/registration/password-prechecks",
-                serde_json::json!({"password": input.password}),
+                serde_json::json!({"password":input.password}),
+                token,
             )
-            .await?;
+            .await?
+        };
         let password_handle = reference
             .get("password_handle")
             .and_then(Value::as_str)
+            .filter(|value| !value.is_empty())
             .ok_or_else(|| {
                 "identity_adapter_response_invalid: password handle is missing".to_string()
             })?;
         let password_policy_version = reference
             .get("password_policy_version")
             .and_then(Value::as_str)
+            .filter(|value| !value.is_empty())
             .ok_or_else(|| {
                 "identity_adapter_response_invalid: password policy version is missing".to_string()
             })?;
-        // Password policy preparation is independent of account availability.
-        // Availability remains behind the one-shot challenge in Account Send.
+        // Account receives only public challenge facts. The admitted capability
+        // accompanies Send; account availability remains behind that capability.
         let mut result = serde_json::json!({
             "password_handle": password_handle,
             "password_policy_version": password_policy_version,
+            "authorization_token": token,
         });
         if let Some(expires_at) = reference.get("expires_at") {
             result["expires_at"] = expires_at.clone();
@@ -834,20 +875,14 @@ impl AccountPlatformState {
 
     pub async fn reset_password(&self, input: PasswordReset) -> Result<Value, String> {
         let config = AccountPlatformConfig::current()?;
-        let reference = self
-            .public_identity_request(
-                &config,
-                "v1/registration/password-prechecks",
-                serde_json::json!({"password": input.password}),
-            )
-            .await?;
+
         self.public_account_request(
             &config,
             "v1/auth/password-resets",
             serde_json::json!({
                 "mobile": input.mobile.trim(), "challenge_id": input.challenge_id.trim(), "code": input.code.trim(),
-                "password_handle": reference.get("password_handle").and_then(Value::as_str).unwrap_or_default(),
-                "password_policy_version": reference.get("password_policy_version").and_then(Value::as_str).unwrap_or_default(),
+                "password_handle": input.password_handle,
+                "password_policy_version": input.password_policy_version,
             }),
         ).await
     }
@@ -1482,6 +1517,7 @@ impl AccountPlatformState {
         config: &AccountPlatformConfig,
         path: &str,
         body: Value,
+        authorization: &str,
     ) -> Result<Value, String> {
         let identity_url = config.identity_url.as_ref().ok_or_else(|| {
             format!(
@@ -1500,6 +1536,8 @@ impl AccountPlatformState {
                 crate::platform::client_version::CURRENT,
             )
             .header("X-Request-ID", random_urlsafe(18))
+            .header("X-Device-ID", &self.device_id)
+            .header("X-Pinvou-Password-Preparation", authorization)
             .json(&body)
             .send()
             .await
@@ -1511,7 +1549,11 @@ impl AccountPlatformState {
                 .get("code")
                 .and_then(Value::as_str)
                 .unwrap_or("IDENTITY_REQUEST_FAILED");
-            return Err(format!("mobile_auth_failed: {code}"));
+            let retry = response
+                .retry_after_seconds
+                .map(|seconds| format!(":{}", seconds.min(86_400)))
+                .unwrap_or_default();
+            return Err(format!("mobile_auth_failed: {code}{retry}"));
         }
         Ok(response.body)
     }
@@ -2091,38 +2133,111 @@ mod tests {
     use std::sync::Mutex as StdMutex;
     use std::thread;
 
+    fn admitted_preparation(purpose: &str) -> RegistrationPasswordPreparation {
+        RegistrationPasswordPreparation {
+            password: "SyntheticPassword9".into(),
+            operation_id: "11111111-1111-4111-8111-111111111111".into(),
+            mobile: "13800138000".into(),
+            purpose: purpose.into(),
+            captcha_id: "22222222-2222-4222-8222-222222222222".into(),
+            captcha_offset: 128,
+            password_handle: String::new(),
+            password_policy_version: String::new(),
+        }
+    }
+
     #[tokio::test]
-    async fn registration_password_preparation_only_calls_identity_policy() {
+    async fn registration_password_preparation_requires_account_admission_before_identity() {
         let _env = crate::platform::paths::tests::ENV_LOCK
             .lock()
             .unwrap_or_else(|e| e.into_inner());
         let _snapshot = AccountEnvSnapshot::take();
-        let (base, server) = spawn_portal_fixture(1, |request| {
-            assert!(request.starts_with("POST /v1/registration/password-prechecks "));
-            let body: Value =
-                serde_json::from_str(request.split_once("\r\n\r\n").unwrap().1).unwrap();
-            assert_eq!(body, serde_json::json!({"password":"SyntheticPassword9"}));
-            assert!(!request.to_ascii_lowercase().contains("authorization:"));
-            (
-                201,
-                r#"{"password_handle":"PUBLIC_HANDLE","password_policy_version":"policy-v1","expires_at":"2026-10-24T12:00:00Z","username":"must-not-cross","password":"must-not-cross","available":true}"#,
-            )
-        });
-        independent_env_config(&base);
-        unsafe {
-            std::env::set_var(IDENTITY_URL_ENV, base.as_str());
+        for purpose in ["REGISTER", "PASSWORD_RESET"] {
+            let mut calls = 0;
+            let (base, server) = spawn_portal_fixture(2, move |request| {
+                calls += 1;
+                let body: Value =
+                    serde_json::from_str(request.split_once("\r\n\r\n").unwrap().1).unwrap();
+                assert!(!request.to_ascii_lowercase().contains("authorization:"));
+                assert!(request.to_ascii_lowercase().contains("x-device-id:"));
+                if calls == 1 {
+                    assert!(
+                        request.starts_with("POST /v1/auth/password-preparation-authorizations ")
+                    );
+                    assert_eq!(
+                        body,
+                        serde_json::json!({"operation_id":"11111111-1111-4111-8111-111111111111","mobile":"13800138000","purpose":purpose,"captcha_id":"22222222-2222-4222-8222-222222222222","captcha_offset":128})
+                    );
+                    (201, r#"{"authorization_token":"PUBLIC_SYNTHETIC_GRANT"}"#)
+                } else {
+                    assert!(request.starts_with("POST /v1/registration/password-prechecks "));
+                    assert!(
+                        request
+                            .to_ascii_lowercase()
+                            .contains("x-pinvou-password-preparation: public_synthetic_grant")
+                    );
+                    assert_eq!(body, serde_json::json!({"password":"SyntheticPassword9"}));
+                    (
+                        201,
+                        r#"{"password_handle":"PUBLIC_HANDLE","password_policy_version":"policy-v1","expires_at":"2026-10-24T12:00:00Z","username":"must-not-cross","password":"must-not-cross"}"#,
+                    )
+                }
+            });
+            independent_env_config(&base);
+            unsafe {
+                std::env::set_var(IDENTITY_URL_ENV, base.as_str());
+            }
+            let state = portal_test_state(Arc::new(MemoryCredentialStore::default()), None);
+            let result = state
+                .prepare_registration_password(admitted_preparation(purpose))
+                .await;
+            server.join().unwrap();
+            assert_eq!(
+                result.unwrap(),
+                serde_json::json!({"password_handle":"PUBLIC_HANDLE","password_policy_version":"policy-v1","expires_at":"2026-10-24T12:00:00Z","authorization_token":"PUBLIC_SYNTHETIC_GRANT"})
+            );
         }
-        let state = portal_test_state(Arc::new(MemoryCredentialStore::default()), None);
-        let result = state
-            .prepare_registration_password(RegistrationPasswordPreparation {
-                password: "SyntheticPassword9".into(),
-            })
-            .await;
-        server.join().unwrap();
-        assert_eq!(
-            result.unwrap(),
-            serde_json::json!({"password_handle":"PUBLIC_HANDLE","password_policy_version":"policy-v1","expires_at":"2026-10-24T12:00:00Z"})
-        );
+    }
+
+    #[tokio::test]
+    async fn registration_password_preparation_denial_never_sends_password_to_identity() {
+        let _env = crate::platform::paths::tests::ENV_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let _snapshot = AccountEnvSnapshot::take();
+        for (status, body, expected) in [
+            (
+                400,
+                r#"{"code":"CAPTCHA_INVALID"}"#,
+                "mobile_auth_failed: CAPTCHA_INVALID",
+            ),
+            (
+                429,
+                r#"{"code":"RATE_LIMITED"}"#,
+                "mobile_auth_failed: RATE_LIMITED",
+            ),
+            (
+                503,
+                r#"{"code":"AUTH_SERVICE_UNAVAILABLE"}"#,
+                "mobile_auth_failed: AUTH_SERVICE_UNAVAILABLE",
+            ),
+        ] {
+            let (base, server) = spawn_portal_fixture(1, move |request| {
+                assert!(request.starts_with("POST /v1/auth/password-preparation-authorizations "));
+                assert!(!request.contains("SyntheticPassword9"));
+                (status, body)
+            });
+            independent_env_config(&base);
+            unsafe {
+                std::env::set_var(IDENTITY_URL_ENV, base.as_str());
+            }
+            let state = portal_test_state(Arc::new(MemoryCredentialStore::default()), None);
+            let result = state
+                .prepare_registration_password(admitted_preparation("REGISTER"))
+                .await;
+            server.join().unwrap();
+            assert_eq!(result.unwrap_err(), expected);
+        }
     }
 
     #[tokio::test]
@@ -2153,20 +2268,53 @@ mod tests {
                 "identity_adapter_response_invalid: password policy version is missing",
             ),
         ] {
-            let (base, server) = spawn_portal_fixture(1, move |_| (status, body));
+            let mut count = 0;
+            let (base, server) = spawn_portal_fixture(2, move |_| {
+                count += 1;
+                if count == 1 {
+                    (201, r#"{"authorization_token":"PUBLIC_SYNTHETIC_GRANT"}"#)
+                } else {
+                    (status, body)
+                }
+            });
             independent_env_config(&base);
             unsafe {
                 std::env::set_var(IDENTITY_URL_ENV, base.as_str());
             }
             let state = portal_test_state(Arc::new(MemoryCredentialStore::default()), None);
             let result = state
-                .prepare_registration_password(RegistrationPasswordPreparation {
-                    password: "SyntheticPassword9".into(),
-                })
+                .prepare_registration_password(admitted_preparation("REGISTER"))
                 .await;
             server.join().unwrap();
             assert_eq!(result.unwrap_err(), expected);
         }
+    }
+
+    #[tokio::test]
+    async fn registration_password_preparation_reuses_accepted_reference_without_allocating() {
+        let _env = crate::platform::paths::tests::ENV_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let _snapshot = AccountEnvSnapshot::take();
+        let (base, server) = spawn_portal_fixture(1, |request| {
+            assert!(request.starts_with("POST /v1/auth/password-preparation-authorizations "));
+            assert!(!request.contains("SyntheticPassword9"));
+            (201, r#"{"authorization_token":"PUBLIC_SYNTHETIC_GRANT"}"#)
+        });
+        independent_env_config(&base);
+        unsafe {
+            std::env::set_var(IDENTITY_URL_ENV, base.as_str());
+        }
+        let state = portal_test_state(Arc::new(MemoryCredentialStore::default()), None);
+        let mut input = admitted_preparation("REGISTER");
+        input.password_handle = "EXISTING_HANDLE".into();
+        input.password_policy_version = "existing-policy".into();
+        let result = state.prepare_registration_password(input).await;
+        server.join().unwrap();
+        assert_eq!(
+            result.unwrap(),
+            serde_json::json!({"password_handle":"EXISTING_HANDLE","password_policy_version":"existing-policy","authorization_token":"PUBLIC_SYNTHETIC_GRANT"})
+        );
     }
 
     #[test]
@@ -3370,6 +3518,7 @@ mod tests {
         first_rx.recv_timeout(Duration::from_secs(5)).unwrap();
         state
             .send_sms(SMSRequest {
+                password_preparation_token: String::new(),
                 username: "public-b".into(),
                 mobile: "+8613800000000".into(),
                 password_handle: "PUBLIC_HANDLE".into(),

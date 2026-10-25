@@ -85,16 +85,21 @@ func TestPasswordReferenceCapacityHTTPPreservesOriginalHandle(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	service := &Service{vault: v}
+	service, verifier, _ := preparationFixture(t)
+	service.vault = v
 	request := func() *httptest.ResponseRecorder {
 		r := httptest.NewRequest(http.MethodPost, "/v1/registration/password-prechecks", strings.NewReader(`{"password":"Password123"}`))
+		verifier.facts.ID = uuid.New()
+		r.RemoteAddr = "192.0.2.10:4242"
+		r.Header.Set("X-Device-ID", "fixture-device")
+		r.Header.Set("X-Pinvou-Password-Preparation", verifier.facts.ID.String()+".PUBLIC_SYNTHETIC_MAC")
 		w := httptest.NewRecorder()
 		service.precheckPassword(w, r)
 		return w
 	}
 	first := request()
 	if first.Code != http.StatusCreated {
-		t.Fatal("anonymous precheck compatibility lost", first.Code)
+		t.Fatal("admitted precheck rejected", first.Code)
 	}
 	var original string
 	for handle := range v.records {

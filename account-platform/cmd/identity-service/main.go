@@ -12,6 +12,7 @@ import (
 
 	"github.com/Pinvou/pinvou3/account-platform/internal/identityadapter"
 	"github.com/Pinvou/pinvou3/account-platform/internal/platform/httpserver"
+	"github.com/Pinvou/pinvou3/account-platform/internal/platform/serviceauth"
 )
 
 func main() {
@@ -80,6 +81,14 @@ func main() {
 	service, err := identityadapter.NewService(vault, os.Getenv("INTERNAL_SERVICE_TOKEN"), tokenHandlers...)
 	if err != nil {
 		log.Fatal(err)
+	}
+	verifier, err := identityadapter.NewHTTPPasswordPreparationVerifier(os.Getenv("ACCOUNT_HTTP_URL"), serviceauth.CredentialFromEnvironment(), os.Getenv("ACCOUNT_CA_FILE"))
+	if err != nil {
+		log.Fatal("IDENTITY_PASSWORD_PREPARATION_CONFIGURATION_REQUIRED")
+	}
+	service, err = service.WithPasswordPreparation(verifier, os.Getenv("IDENTITY_PASSWORD_PREPARATION_TRUSTED_PROXY_IPS"))
+	if err != nil {
+		log.Fatal("IDENTITY_PASSWORD_PREPARATION_CONFIGURATION_INVALID")
 	}
 	if err := httpserver.RunWithApplication("identity-service", service.Handler(), ready); err != nil {
 		log.Fatal(err)

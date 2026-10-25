@@ -22,7 +22,7 @@ async function rejectedMutation(mutate, expected) {
 
 test('authorization release gate classifies every HTTP task event callback and CLI entrypoint', async () => {
   const catalog = JSON.parse(await readFile(catalogURL, 'utf8'));
-  // The six existing Portal transports use Any, alongside the 383 verb-specific
+  // The six existing Portal transports use Any, alongside the 386 verb-specific
   // registrations. Keep the expected complete graph independent of its parser.
   const wildcardPaths = [
     '/api/account/*resource', '/api/token/*resource',
@@ -36,7 +36,23 @@ test('authorization release gate classifies every HTTP task event callback and C
   for (const route of wildcardPaths) assert.ok(portal.includes(`router.Any("${route}",`), `missing existing Portal transport ${route}`);
   // The real checker still rejects missing, stale, duplicate or mis-scoped
   // entries before returning these exact inventory sizes.
-  assert.deepEqual(await runAuthorizationCoverage(), { routes: 389, tasks: 32, events: 18, cli: 26 });
+  assert.deepEqual(await runAuthorizationCoverage(), { routes: 392, tasks: 32, events: 18, cli: 26 });
+});
+
+test('password preparation adds only the captcha admission and two exact internal authority routes', async () => {
+  const account = await readFile(new URL('../../internal/account/service.go', import.meta.url), 'utf8');
+  const identity = await readFile(new URL('../../internal/identityadapter/service.go', import.meta.url), 'utf8');
+  const expected = [
+    [account, '/v1/auth/password-preparation-authorizations', 'router.POST("/v1/auth/password-preparation-authorizations", httpserver.AdaptFunc(s.createPasswordPreparation))'],
+    [account, '/auth/password-preparation-authorizations/claim', 'internal.POST("/auth/password-preparation-authorizations/claim", serviceauth.Require("internal.auth.password-preparation.claim"), httpserver.AdaptFunc(s.claimPasswordPreparation))'],
+    [identity, '/registration/password-references/preparation', 'internal.POST("/registration/password-references/preparation", serviceauth.Require("internal.identity.password-reference.validate"), httpserver.AdaptFunc(s.passwordReferencePreparation))'],
+  ];
+  for (const [source, route, registration] of expected) {
+    assert.equal(source.split(`POST("${route}"`).length - 1, 1);
+    assert.ok(source.includes(registration));
+  }
+  const catalog = JSON.parse(await readFile(catalogURL, 'utf8'));
+  assert.deepEqual(catalog.http_policies.filter(item => item.path === '/v1/auth/password-preparation-authorizations').map(item => item.strategy), ['protocol.registration.captcha-password-preparation']);
 });
 
 

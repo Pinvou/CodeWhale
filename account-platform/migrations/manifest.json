@@ -1042,6 +1042,16 @@
         "file": "900010_approval_authorization_wall_clock.up.sql",
         "version": 900010,
         "sha256": "00b16dc894e5e1d21c13e056d590b3e60667f8de9cccd7dfba81ef5a774199da"
+      },
+      {
+        "file": "900011_password_preparation_authorizations.down.sql",
+        "version": 900011,
+        "sha256": "1635b5c1cf89909e1e3d3a286fb2b2ee2eed2948a7db015b0d409a913380694d"
+      },
+      {
+        "file": "900011_password_preparation_authorizations.up.sql",
+        "version": 900011,
+        "sha256": "7ccbdd93e9a476c95cfe6e6bde79ff7c055d2bdc7fc56f19a7a491654c9cab0e"
       }
     ],
     "billing": [

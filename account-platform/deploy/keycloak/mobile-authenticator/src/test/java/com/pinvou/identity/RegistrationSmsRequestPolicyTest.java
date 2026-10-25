@@ -30,18 +30,18 @@ final class RegistrationSmsRequestPolicyTest {
     }
 
     @Test
-    void emptyPasswordSmsRequestPreservesRegistrationFieldsAndRendersActionableError() {
+    void emptyPasswordAfterCaptchaPreservesRegistrationFieldsAndRendersActionableError() {
         AuthenticationFlowContext context = mock(AuthenticationFlowContext.class);
         AuthenticationSessionModel session = mock(AuthenticationSessionModel.class);
         HttpRequest request = mock(HttpRequest.class);
         LoginFormsProvider forms = mock(LoginFormsProvider.class, Answers.RETURNS_SELF);
-        Map<String, String> notes = new LinkedHashMap<>();
+        Map<String, String> notes = new LinkedHashMap<>(Map.of("pinvou.browser.mobile","+8618002237050","pinvou.browser.device","browser-device-1","pinvou.browser.username","ke12_12","pinvou.browser.captcha_id","fixture-captcha"));
         var parameters = new MultivaluedHashMap<String, String>();
         parameters.putSingle("mode", "register");
-        parameters.putSingle("intent", "request_sms");
+        parameters.putSingle("intent", "send_sms");
         parameters.putSingle("username", "ke12_12");
         parameters.putSingle("mobile", "18002237050");
-        parameters.putSingle("device_id", "browser-device-1");
+        parameters.putSingle("device_id", "browser-device-1"); parameters.putSingle("captcha_offset","128");
         parameters.putSingle("password", "");
         parameters.putSingle("password_confirmation", "");
 
@@ -63,7 +63,7 @@ final class RegistrationSmsRequestPolicyTest {
             "pinvou.browser.mode", "register",
             "pinvou.browser.mobile", "+8618002237050",
             "pinvou.browser.device", "browser-device-1",
-            "pinvou.browser.username", "ke12_12"
+            "pinvou.browser.username", "ke12_12", "pinvou.browser.captcha_id", "fixture-captcha"
         ), notes);
         verify(forms).setAttribute("pinvouUsername", "ke12_12");
         verify(forms).setAttribute("pinvouMobile", "18002237050");

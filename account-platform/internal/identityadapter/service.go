@@ -13,6 +13,7 @@ import (
 )
 
 type Service struct {
+	preparations       *passwordPreparationState
 	profileRevocations *profileSessionRevocations
 	vault              *PasswordVault
 	serviceToken       string
@@ -36,13 +37,14 @@ func NewService(vault *PasswordVault, serviceToken string, tokenProxy ...http.Ha
 
 func (s *Service) Handler() http.Handler {
 	router := httpserver.NewRouter()
-	router.POST("/v1/registration/password-prechecks", httpserver.AdaptFunc(s.precheckPassword))
+	router.POST("/v1/registration/password-prechecks", httpserver.AdaptFunc(s.preparePassword))
 	if s.tokenProxy != nil {
 		router.POST("/realms/pinvou/protocol/openid-connect/token", httpserver.AdaptFunc(s.tokenProxy.ServeHTTP))
 	}
 	internal := router.Group("/internal/v1")
 	internal.Use(serviceauth.GinMiddleware(s.serviceToken))
 	internal.DELETE("/users/:subject", serviceauth.Require("internal.identity.user.delete"), httpserver.AdaptFunc(s.deleteUser))
+	internal.POST("/registration/password-references/preparation", serviceauth.Require("internal.identity.password-reference.validate"), httpserver.AdaptFunc(s.passwordReferencePreparation))
 	internal.POST("/registration/password-references/validate", serviceauth.Require("internal.identity.password-reference.validate"), httpserver.AdaptFunc(s.validateReference))
 	internal.POST("/users/mobile", serviceauth.Require("internal.identity.user.create"), httpserver.AdaptFunc(s.createMobileUser))
 	internal.GET("/registration-operations/:operation_id/user", serviceauth.Require("internal.identity.registration.read"), httpserver.AdaptFunc(s.findRegistrationUser))
@@ -117,20 +119,7 @@ func (s *Service) revokeSessions(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Service) precheckPassword(w http.ResponseWriter, r *http.Request) {
-	var body struct {
-		Password string `json:"password"`
-	}
-	if err := api.DecodeJSON(w, r, &body); err != nil {
-		api.WriteError(w, http.StatusBadRequest, "INVALID_REQUEST", "a complete JSON request is required", httpserver.RequestID(r.Context()))
-		return
-	}
-	reference, err := s.vault.Precheck(body.Password)
-	if err != nil {
-		s.writeError(w, r, err)
-		return
-	}
-	w.Header().Set("Cache-Control", "no-store")
-	api.WriteJSON(w, http.StatusCreated, reference)
+	s.preparePassword(w, r)
 }
 
 type registrationReferenceRequest struct {
@@ -210,6 +199,10 @@ func (s *Service) deleteUser(w http.ResponseWriter, r *http.Request) {
 func (s *Service) writeError(w http.ResponseWriter, r *http.Request, err error) {
 	status, code, message := http.StatusInternalServerError, "IDENTITY_INTERNAL_ERROR", "the identity request could not be completed"
 	switch {
+	case errors.Is(err, ErrPasswordPreparationUnavailable):
+		status, code, message = http.StatusServiceUnavailable, "PASSWORD_PREPARATION_UNAVAILABLE", "password preparation authority is temporarily unavailable; retry the same operation"
+	case errors.Is(err, ErrPasswordPreparation):
+		status, code, message = http.StatusForbidden, "PASSWORD_PREPARATION_INVALID", "complete slider verification before preparing a password"
 	case errors.Is(err, ErrPasswordReferenceCapacity):
 		status, code, message = http.StatusServiceUnavailable, "PASSWORD_PRECHECK_CAPACITY_REACHED", "password precheck capacity is temporarily unavailable; retry later"
 	case errors.Is(err, ErrPasswordEdgeSpace):

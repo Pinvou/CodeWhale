@@ -1380,6 +1380,14 @@
         "platform.users.read"
       ],
       "strategy": "domain.user-code.exact-lookup-audit"
+    },
+    {
+      "source": "account-platform/internal/account/service.go",
+      "receiver": "router",
+      "method": "POST",
+      "path": "/v1/auth/password-preparation-authorizations",
+      "scope": "public",
+      "strategy": "protocol.registration.captcha-password-preparation"
     }
   ],
   "tasks": [

@@ -223,7 +223,7 @@ func (s *MobileAuthService) Send(ctx context.Context, rawUsername, rawMobile, pa
 	if captchaID == uuid.Nil || captchaOffset < 0 {
 		return SMSChallenge{}, ErrCaptchaInvalid
 	}
-	if err := s.repository.ConsumeSliderCaptcha(ctx, captchaID, mobile, purpose, captchaOffset); err != nil {
+	if err := s.consumePasswordPreparation(ctx, captchaID, mobile, purpose, captchaOffset, source, device); err != nil {
 		return SMSChallenge{}, err
 	}
 	username := ""
@@ -234,7 +234,15 @@ func (s *MobileAuthService) Send(ctx context.Context, rawUsername, rawMobile, pa
 		if err := s.repository.AdmitPublicMobileRequest(ctx, "PRECHECK", mobile, source); err != nil {
 			return SMSChallenge{}, err
 		}
+		if err := s.validatePreparationReference(ctx, passwordHandle, passwordPolicyVersion, mobile, purpose); err != nil {
+			return SMSChallenge{}, err
+		}
 		if username, err = s.precheckRegistration(ctx, rawUsername, mobile, passwordHandle, passwordPolicyVersion); err != nil {
+			return SMSChallenge{}, err
+		}
+	}
+	if purpose != SMSPurposeRegister {
+		if err := s.validatePreparationReference(ctx, passwordHandle, passwordPolicyVersion, mobile, purpose); err != nil {
 			return SMSChallenge{}, err
 		}
 	}

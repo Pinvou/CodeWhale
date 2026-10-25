@@ -11,6 +11,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/Pinvou/pinvou3/account-platform/internal/platform/passwordpreparation"
 	"github.com/google/uuid"
 )
 
@@ -73,7 +74,10 @@ func (v *PasswordVault) ResetPassword(ctx context.Context, operationID uuid.UUID
 	if applied {
 		return nil
 	}
-	if err := v.ValidateReference(operationID, handle, policyVersion, subject, mobile); err != nil {
+	if err := v.validatePreparedPurpose(handle, policyVersion, "PASSWORD_RESET", mobile); err != nil {
+		return err
+	}
+	if err := v.validateReference(operationID, handle, policyVersion, subject, mobile); err != nil {
 		return err
 	}
 	record, err := v.record(handle, policyVersion)
@@ -117,6 +121,7 @@ type PasswordReference struct {
 }
 
 type passwordRecord struct {
+	preparation passwordpreparation.Reference
 	mu          sync.Mutex
 	password    string
 	fingerprint [32]byte
@@ -200,6 +205,10 @@ func ValidatePassword(password string) error {
 }
 
 func (v *PasswordVault) Precheck(password string) (PasswordReference, error) {
+	return v.precheckBefore(password, time.Time{})
+}
+
+func (v *PasswordVault) precheckBefore(password string, deadline time.Time) (PasswordReference, error) {
 	if err := ValidatePassword(password); err != nil {
 		return PasswordReference{}, err
 	}
@@ -214,6 +223,10 @@ func (v *PasswordVault) Precheck(password string) (PasswordReference, error) {
 	v.mu.Lock()
 	defer v.mu.Unlock()
 	v.removeExpiredLocked()
+	// The body and capacity-lock wait cannot extend the admitted allocation window.
+	if !deadline.IsZero() && !deadline.After(v.now()) {
+		return PasswordReference{}, ErrPasswordPreparation
+	}
 	if len(v.records) >= v.capacity {
 		return PasswordReference{}, ErrPasswordReferenceCapacity
 	}
@@ -222,6 +235,13 @@ func (v *PasswordVault) Precheck(password string) (PasswordReference, error) {
 }
 
 func (v *PasswordVault) ValidateReference(operationID uuid.UUID, handle, policyVersion, username, mobile string) error {
+	if err := v.validatePreparedPurpose(handle, policyVersion, "REGISTER", mobile); err != nil {
+		return err
+	}
+	return v.validateReference(operationID, handle, policyVersion, username, mobile)
+}
+
+func (v *PasswordVault) validateReference(operationID uuid.UUID, handle, policyVersion, username, mobile string) error {
 	record, err := v.record(handle, policyVersion)
 	if err != nil {
 		return err

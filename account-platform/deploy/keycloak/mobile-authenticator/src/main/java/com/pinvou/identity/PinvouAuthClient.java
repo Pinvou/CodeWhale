@@ -37,9 +37,19 @@ final class PinvouAuthClient {
     PinvouAuthClient() { this(System::getenv); }
     PinvouAuthClient(Function<String, String> environment) { this.environment = environment; }
 
-    Map<String, Object> precheckPassword(String password, String source, String device) throws AuthClientException {
-        return post(publicURL("PINVOU_IDENTITY_AUTH_URL", "/v1/registration/password-prechecks"),
-            Map.of("password", password), Map.of("X-Pinvou-Client-Source", source, "X-Device-ID", device), 201).body();
+    Map<String, Object> precheckPassword(String password, String authorization, String source, String device) throws AuthClientException {
+        Map<String, Object> reference = post(publicURL("PINVOU_IDENTITY_AUTH_URL", "/v1/registration/password-prechecks"),
+            Map.of("password", password), Map.of("X-Pinvou-Password-Preparation", authorization, "X-Pinvou-Client-Source", source, "X-Device-ID", device), 201).body();
+        if (string(reference.get("password_handle")).isEmpty() || string(reference.get("password_policy_version")).isEmpty()) {
+            throw new AuthClientException(503, "AUTH_SERVICE_UNAVAILABLE");
+        }
+        return reference;
+    }
+
+    Map<String, Object> authorizePasswordPreparation(String operation, String mobile, String purpose, String captcha, int offset, String source, String device) throws AuthClientException {
+        return post(publicURL("PINVOU_ACCOUNT_AUTH_URL", "/v1/auth/password-preparation-authorizations"),
+            Map.of("operation_id", operation, "mobile", mobile, "purpose", purpose, "captcha_id", captcha, "captcha_offset", offset),
+            Map.of("X-Pinvou-Client-Source", source, "X-Device-ID", device), 201).body();
     }
 
     Map<String, Object> createCaptcha(String mobile, String purpose, String source, String device) throws AuthClientException {
@@ -105,7 +115,7 @@ final class PinvouAuthClient {
             byte[] bytes = response.body();
             Map<String, Object> payload = bytes.length == 0 ? Collections.emptyMap() : JSON.readValue(bytes, OBJECT_MAP);
             if (response.statusCode() < 200 || response.statusCode() >= 300) {
-                throw new AuthClientException(response.statusCode(), string(payload.get("code")));
+                throw new AuthClientException(response.statusCode(), string(payload.get("code")), boundedRetryAfter(response.headers().firstValue("Retry-After").orElse("")));
             }
             if (java.util.Arrays.stream(expectedStatuses).noneMatch(status -> status == response.statusCode())) {
                 throw new AuthClientException(503, "AUTH_SERVICE_UNAVAILABLE");
@@ -119,6 +129,14 @@ final class PinvouAuthClient {
         } catch (Exception error) {
             throw new AuthClientException(503, "AUTH_SERVICE_UNAVAILABLE");
         }
+    }
+
+    private static int boundedRetryAfter(String value) {
+        try {
+            long seconds=value.matches("[0-9]{1,18}") ? Long.parseLong(value)
+                : java.time.Duration.between(java.time.Instant.now(),java.time.ZonedDateTime.parse(value,java.time.format.DateTimeFormatter.RFC_1123_DATE_TIME).toInstant()).getSeconds();
+            return (int)Math.min(86400,Math.max(0,seconds));
+        } catch (RuntimeException ignored) { return 0; }
     }
 
     private static final class BoundedBodySubscriber implements HttpResponse.BodySubscriber<byte[]> {
@@ -216,8 +234,11 @@ final class PinvouAuthClient {
     static final class AuthClientException extends Exception {
         private final int status;
         private final String code;
-        AuthClientException(int status, String code) {
+        private final int retryAfterSeconds;
+        AuthClientException(int status, String code) { this(status,code,0); }
+        AuthClientException(int status, String code, int retryAfterSeconds) {
             super(safeErrorCode(code));
+            this.retryAfterSeconds=Math.min(86400,Math.max(0,retryAfterSeconds));
             this.status = status;
             this.code = safeErrorCode(code);
         }
@@ -226,12 +247,13 @@ final class PinvouAuthClient {
             return switch (code) {
                 case "AUTH_SERVICE_UNAVAILABLE", "SMS_CODE_INVALID", "MOBILE_INVALID", "USERNAME_INVALID",
                     "USERNAME_ALREADY_REGISTERED", "USERNAME_TAKEN", "MOBILE_ALREADY_REGISTERED", "PHONE_IN_USE",
-                    "CAPTCHA_INVALID", "SMS_RATE_LIMITED", "PASSWORD_POLICY_VIOLATION", "PASSWORD_INVALID",
+                    "CAPTCHA_INVALID", "PASSWORD_PREPARATION_INVALID", "PASSWORD_PREPARATION_UNAVAILABLE", "PASSWORD_PRECHECK_CAPACITY_REACHED", "RATE_LIMITED", "SMS_RATE_LIMITED", "PASSWORD_POLICY_VIOLATION", "PASSWORD_INVALID",
                     "PASSWORD_EDGE_SPACE_NOT_ALLOWED", "PASSWORD_REFERENCE_INVALID", "PASSWORD_REFERENCE_CONFLICT",
                     "REGISTRATION_RESTART_REQUIRED" -> code;
                 default -> "AUTH_REQUEST_FAILED";
             };
         }
+        int retryAfterSeconds() { return retryAfterSeconds; }
         int status() { return status; }
         String code() { return code; }
     }

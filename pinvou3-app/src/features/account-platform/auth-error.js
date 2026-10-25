@@ -31,6 +31,6 @@ export function normalizeAccountAuthError(reason) {
   error.code = code;
   error.retryAfterSeconds = retryAfterSeconds(reason?.retryAfterSeconds)
     || responseRetryAfter(reason, null)
-    || (code === 'SMS_RATE_LIMITED' ? retryAfterSeconds(mobile?.[2]) : 0);
+    || (['SMS_RATE_LIMITED', 'RATE_LIMITED'].includes(code) ? retryAfterSeconds(mobile?.[2]) : 0);
   return error;
 }

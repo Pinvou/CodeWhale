@@ -221,6 +221,9 @@ func TestF01ProxyExactScopeAndAnonymousRegistrationProof(t *testing.T) {
 		anonymous    bool
 	}{
 		{"POST", "/api/account/v1/auth/registration/precheck", 404, true},
+		{"POST", "/api/account/v1/auth/password-preparation-authorizations", 200, true},
+		{"GET", "/api/account/v1/auth/password-preparation-authorizations", 404, true},
+		{"POST", "/api/account/v1/auth/password-preparation-authorizations/extra", 404, true},
 		{"POST", "/api/account/v1/auth/captcha/challenges", 200, true}, {"POST", "/api/account/v1/auth/sms/challenges", 200, true}, {"POST", "/api/account/v1/auth/register", 200, true}, {"POST", "/api/account/v1/auth/password-resets", 200, true}, {"GET", "/api/account/v1/auth/registration-operations/" + id, 200, true},
 		{"POST", "/api/account/v1/account/bootstrap", 200, false}, {"GET", "/api/account/v1/me", 200, false}, {"HEAD", "/api/account/v1/me/authorization-context", 200, false}, {"POST", "/api/account/v1/me/password-changes", 200, false}, {"POST", "/api/account/v1/me/profile-change-requests", 200, false}, {"GET", "/api/account/v1/me/profile-change-requests/" + id, 200, false}, {"POST", "/api/account/v1/me/profile-change-requests/" + id + "/mobile-challenges", 200, false}, {"POST", "/api/account/v1/me/profile-change-requests/" + id + "/actions/complete", 200, false},
 		{"GET", "/api/token/v1/me/balance", 200, false}, {"HEAD", "/api/token/v1/me/balance", 200, false}, {"GET", "/api/admin/account/admin/v1/users", 200, false}, {"PATCH", "/api/admin/account/admin/v1/users/" + id + "/status", 200, false},

@@ -109,6 +109,8 @@ services:
       MOBILE_AUTH_ENABLED: "true"
       AUTH_RISK_REDIS_CA_FILE: /run/pinvou/trust/ca.crt
       IDENTITY_TRUSTED_PROXY_IPS: ${PERSONAL_EDGE_BACKEND_IP:?set fixed verified edge peer IP}
+      IDENTITY_PASSWORD_PREPARATION_TRUSTED_PROXY_IPS: "${PERSONAL_EDGE_BACKEND_IP:?set fixed verified edge peer IP},${PERSONAL_KEYCLOAK_BACKEND_IP:?set fixed verified Keycloak peer IP}"
+      ACCOUNT_HTTP_URL: http://account-service:8080
       KEYCLOAK_CA_FILE: /run/pinvou/trust/ca.crt
       KEYCLOAK_ADMIN_API_URL: ${KEYCLOAK_PRIVATE_ORIGIN:?set private verified HTTPS Keycloak origin}
       KEYCLOAK_PROVISIONER_TOKEN_URL: ${KEYCLOAK_PRIVATE_TOKEN_URL:?set private verified HTTPS realm token URL}

@@ -388,6 +388,10 @@
                   },
                   "captcha_offset": {
                     "type": "integer"
+                  },
+                  "password_preparation_token": {
+                    "type": "string",
+                    "description": "One SMS capability issued by the captcha authorization. The original captcha path remains available for already accepted references and non-password login."
                   }
                 },
                 "required": [
@@ -526,6 +530,64 @@
           },
           "503": {
             "description": "SMS/Identity temporarily unavailable; durable recovery retained."
+          }
+        }
+      }
+    },
+    "/v1/auth/password-preparation-authorizations": {
+      "post": {
+        "operationId": "authorizePasswordPreparation",
+        "description": "Consume a valid mobile/purpose captcha and issue a password-free one-time Identity preparation and SMS capability. Exact operation/facts replay preserves the original deadline. Account rejects password fields.",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": [
+                  "operation_id",
+                  "mobile",
+                  "purpose",
+                  "captcha_id",
+                  "captcha_offset"
+                ],
+                "properties": {
+                  "operation_id": {
+                    "type": "string",
+                    "format": "uuid"
+                  },
+                  "mobile": {
+                    "type": "string"
+                  },
+                  "purpose": {
+                    "enum": [
+                      "REGISTER",
+                      "PASSWORD_RESET"
+                    ]
+                  },
+                  "captcha_id": {
+                    "type": "string",
+                    "format": "uuid"
+                  },
+                  "captcha_offset": {
+                    "type": "integer",
+                    "minimum": 0
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "Original authorization_id, authorization_token and captcha expires_at; no-store."
+          },
+          "400": {
+            "description": "Invalid or expired challenge; no availability disclosure."
+          },
+          "409": {
+            "description": "Operation facts conflict; no new capability."
           }
         }
       }

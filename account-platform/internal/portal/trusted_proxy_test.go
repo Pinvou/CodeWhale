@@ -59,15 +59,18 @@ func TestPortalTrustedProxyRiskSourceUsesExactImmediatePeer(t *testing.T) {
 		{"invalid-peer", "192.0.2.45", "edge.example:443", "", []string{"203.0.113.99"}, 400},
 		{"peer-missing-port", "192.0.2.45", "192.0.2.45", "", []string{"203.0.113.99"}, 400},
 	} {
-		for _, route := range []string{"/v1/auth/sms/challenges", "/v1/auth/captcha/challenges"} {
+		for _, route := range []string{"/v1/auth/sms/challenges", "/v1/auth/captcha/challenges", "/v1/auth/password-preparation-authorizations"} {
 			t.Run(test.name+route, func(t *testing.T) {
 				observed := make(chan string, 1)
 				upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 					if r.Header.Get("X-Forwarded-For") != "" || r.Header.Get("X-Real-IP") != "" || r.Header.Get("Cookie") != "" || r.Header.Get("Authorization") != "" || r.Header.Get("X-Internal-Service-Token") != "" {
 						t.Error("untrusted authority/proxy headers reached Account")
 					}
-					if route != "/v1/auth/sms/challenges" && r.Header.Get("X-Device-ID") != "" {
+					if route == "/v1/auth/captcha/challenges" && r.Header.Get("X-Device-ID") != "" {
 						t.Error("public admission gained device proof authority")
+					}
+					if route == "/v1/auth/password-preparation-authorizations" && r.Header.Get("X-Device-ID") != "controlled-browser-device" {
+						t.Error("password preparation lost its matching device proof")
 					}
 					observed <- r.Header.Get("X-Pinvou-Client-Source")
 					w.WriteHeader(200)
@@ -126,6 +129,8 @@ func TestPortalTrustedProxyHeaderRemainsRiskRouteBound(t *testing.T) {
 		{http.MethodGet, "/v1/auth/captcha/challenges"},
 		{http.MethodPost, "/v1/auth/login"},
 		{http.MethodPost, "/v1/auth/captcha/challenges/extra"},
+		{http.MethodGet, "/v1/auth/password-preparation-authorizations"},
+		{http.MethodPost, "/v1/auth/password-preparation-authorizations/extra"},
 		{http.MethodGet, "/v1/auth/registration-operations/11111111-1111-4111-8111-111111111111"},
 	} {
 		if accountRiskSourceAllowed(test.method, test.route) {

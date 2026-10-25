@@ -77,16 +77,8 @@
                 <button type="submit" class="pv-code-button" data-request-sms data-cooldown="${pinvouRetryAfter}" formnovalidate><#if pinvouSmsSent>${msg("pinvouResendCode")}<#else>${msg("pinvouGetCode")}</#if></button>
               </span>
             </label>
-            <#if !pinvouPasswordAccepted>
-              <label class="pv-field">
-                <span>${msg("pinvouPasswordLabel")}</span>
-                <span class="pv-password-wrap"><input id="pv-password" name="password" type="password" autocomplete="new-password" minlength="8" maxlength="128" placeholder="${msg('pinvouNewPasswordPlaceholder')}" required><span class="pv-password-reveal-output" data-password-reveal-output role="status" aria-live="polite" aria-atomic="true" aria-hidden="true" hidden></span><button type="button" class="pv-eye" data-toggle-password aria-label="${msg('pinvouShowPassword')}" aria-pressed="false" disabled hidden><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M2.5 12s3.4-6 9.5-6 9.5 6 9.5 6-3.4 6-9.5 6-9.5-6-9.5-6Z"/><circle cx="12" cy="12" r="2.6"/></svg></button></span>
-              </label>
-              <label class="pv-field">
-                <span>${msg("pinvouConfirmPasswordLabel")}</span>
-                <input name="password_confirmation" type="password" autocomplete="new-password" minlength="8" maxlength="128" placeholder="${msg('pinvouConfirmPasswordPlaceholder')}" required>
-              </label>
-            <#else>
+            <#if pinvouPasswordAccepted>
+
               <div class="pv-password-accepted" role="status">${msg("pinvouPasswordAccepted")}</div>
             </#if>
             <label class="pv-field">
@@ -102,16 +94,8 @@
                 <button type="submit" class="pv-code-button" data-request-sms data-cooldown="${pinvouRetryAfter}" formnovalidate><#if pinvouSmsSent>${msg("pinvouResendCode")}<#else>${msg("pinvouGetCode")}</#if></button>
               </span>
             </label>
-            <#if !pinvouPasswordAccepted>
-              <label class="pv-field">
-                <span>${msg("pinvouNewPasswordLabel")}</span>
-                <span class="pv-password-wrap"><input id="pv-password" name="password" type="password" autocomplete="new-password" minlength="8" maxlength="128" placeholder="${msg('pinvouNewPasswordPlaceholder')}" required><span class="pv-password-reveal-output" data-password-reveal-output role="status" aria-live="polite" aria-atomic="true" aria-hidden="true" hidden></span><button type="button" class="pv-eye" data-toggle-password aria-label="${msg('pinvouShowPassword')}" aria-pressed="false" disabled hidden><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M2.5 12s3.4-6 9.5-6 9.5 6 9.5 6-3.4 6-9.5 6-9.5-6-9.5-6Z"/><circle cx="12" cy="12" r="2.6"/></svg></button></span>
-              </label>
-              <label class="pv-field">
-                <span>${msg("pinvouConfirmPasswordLabel")}</span>
-                <input name="password_confirmation" type="password" autocomplete="new-password" minlength="8" maxlength="128" placeholder="${msg('pinvouConfirmPasswordPlaceholder')}" required>
-              </label>
-            <#else>
+            <#if pinvouPasswordAccepted>
+
               <div class="pv-password-accepted" role="status">${msg("pinvouResetPasswordAccepted")}</div>
             </#if>
             <label class="pv-field">
@@ -138,6 +122,16 @@
             <section class="pv-captcha" role="dialog" aria-modal="true" aria-labelledby="pv-captcha-title">
               <h2 id="pv-captcha-title">${msg("pinvouCaptchaTitle")}</h2>
               <p>${msg("pinvouCaptchaHelp")}</p>
+            <#if (pinvouMode == "register" || pinvouMode == "reset") && !pinvouPasswordAccepted>
+              <label class="pv-field">
+                <span>${msg("pinvouPasswordLabel")}</span>
+                <span class="pv-password-wrap"><input id="pv-password" name="password" type="password" autocomplete="new-password" minlength="8" maxlength="128" placeholder="${msg('pinvouNewPasswordPlaceholder')}" required><span class="pv-password-reveal-output" data-password-reveal-output role="status" aria-live="polite" aria-atomic="true" aria-hidden="true" hidden></span><button type="button" class="pv-eye" data-toggle-password aria-label="${msg('pinvouShowPassword')}" aria-pressed="false" disabled hidden><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M2.5 12s3.4-6 9.5-6 9.5 6 9.5 6-3.4 6-9.5 6-9.5-6-9.5-6Z"/><circle cx="12" cy="12" r="2.6"/></svg></button></span>
+              </label>
+              <label class="pv-field">
+                <span>${msg("pinvouConfirmPasswordLabel")}</span>
+                <input name="password_confirmation" type="password" autocomplete="new-password" minlength="8" maxlength="128" placeholder="${msg('pinvouConfirmPasswordPlaceholder')}" required>
+              </label>
+            </#if>
               <div class="pv-captcha-stage" style="--captcha-width:${pinvouCaptchaWidth}px;--captcha-height:${pinvouCaptchaHeight}px;--piece-y:${pinvouCaptchaPieceY}px">
                 <img src="${pinvouCaptchaBackground}" alt="">
                 <img class="pv-captcha-piece" src="${pinvouCaptchaPiece}" alt="">

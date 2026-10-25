@@ -649,6 +649,7 @@ class FinancialPostgresRunnerTests(unittest.TestCase):
             "TestApprovalProofWallClockPostgres",
             "TestOrganizationUnitAuthorityWallClockPostgres",
             "TestApprovalListPoolRuntimePostgres",
+            "TestPasswordPreparationAuthorizationPostgres",
         })
         for name in RUNNER.ACCOUNT_REQUIRED:
             with self.subTest(name=name), self.assertRaises(RuntimeError):
@@ -673,6 +674,7 @@ class FinancialPostgresRunnerTests(unittest.TestCase):
             "TestApprovalProofWallClockPostgres",
             "TestOrganizationUnitAuthorityWallClockPostgres",
             "TestApprovalListPoolRuntimePostgres",
+            "TestPasswordPreparationAuthorizationPostgres",
         ):
             with self.subTest(root=root):
                 self.assertIn(root, roots)

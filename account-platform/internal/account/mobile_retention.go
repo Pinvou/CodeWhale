@@ -17,9 +17,10 @@ func (r *PostgresRepository) CleanupMobileRecords(ctx context.Context) error {
 	defer tx.Rollback(ctx)
 	queries := []string{
 		`DELETE FROM slider_captcha_challenges WHERE id IN (
-            SELECT id FROM slider_captcha_challenges
-            WHERE expires_at < now() AND updated_at < now()-interval '24 hours'
-            ORDER BY updated_at LIMIT 500 FOR UPDATE SKIP LOCKED)`,
+            SELECT c.id FROM slider_captcha_challenges c
+            WHERE c.expires_at < now() AND c.updated_at < now()-interval '24 hours'
+              AND NOT EXISTS (SELECT 1 FROM password_preparation_authorizations a WHERE a.captcha_id=c.id)
+            ORDER BY c.updated_at LIMIT 500 FOR UPDATE OF c SKIP LOCKED)`,
 		`DELETE FROM sms_challenges WHERE id IN (
             SELECT c.id FROM sms_challenges c
             WHERE c.expires_at < now() AND c.updated_at < now()-interval '90 days'

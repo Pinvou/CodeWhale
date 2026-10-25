@@ -62,7 +62,8 @@ public final class PinvouBrowserAuthenticator implements Authenticator {
             }
         } catch (PinvouAuthClient.AuthClientException error) {
             LOG.warnf("Pinvou browser authentication dependency rejected a request: %s", error.code());
-            if ("CAPTCHA_INVALID".equals(error.code()) || "SMS_RATE_LIMITED".equals(error.code())) clearCaptcha(context);
+            if (error.retryAfterSeconds()>0) put(context,"retry_after",Integer.toString(error.retryAfterSeconds()));
+            if ("CAPTCHA_INVALID".equals(error.code()) || "PASSWORD_PREPARATION_INVALID".equals(error.code()) || "SMS_RATE_LIMITED".equals(error.code())) clearCaptcha(context);
             if ("register".equals(requestedMode) && ("PASSWORD_REFERENCE_INVALID".equals(error.code()) || "PASSWORD_REFERENCE_CONFLICT".equals(error.code()))) {
                 context.getAuthenticationSession().removeAuthNote(note("password_handle"));
                 context.getAuthenticationSession().removeAuthNote(note("password_policy"));
@@ -99,31 +100,8 @@ public final class PinvouBrowserAuthenticator implements Authenticator {
             // Preserve the validated, non-secret field before password precheck
             // errors re-render the form. Passwords must never be stored in notes.
             put(context, "username", username);
-            if (get(context, "password_handle").isEmpty()) {
-                String password = form.getFirst("password");
-                String confirmation = form.getFirst("password_confirmation");
-                String passwordMessage = registrationPasswordMessage(password, confirmation);
-                if (!passwordMessage.isEmpty()) {
-                    render(context, mode, passwordMessage);
-                    return;
-                }
-                Map<String, Object> reference = client.precheckPassword(password, source(context), device);
-                String handle = PinvouAuthClient.string(reference.get("password_handle"));
-                String policy = PinvouAuthClient.string(reference.get("password_policy_version"));
-                put(context, "password_handle", handle);
-                put(context, "password_policy", policy);
-            }
-        } else if ("reset".equals(mode) && get(context, "password_handle").isEmpty()) {
-            String password = form.getFirst("password");
-            String confirmation = form.getFirst("password_confirmation");
-            if (password == null || password.length() < 8 || password.length() > 128 || !password.equals(confirmation)) {
-                render(context, mode, "pinvouPasswordInvalid");
-                return;
-            }
-            Map<String, Object> reference = client.precheckPassword(password, source(context), device);
-            put(context, "password_handle", PinvouAuthClient.string(reference.get("password_handle")));
-            put(context, "password_policy", PinvouAuthClient.string(reference.get("password_policy_version")));
         }
+        clearCaptcha(context);
         Map<String, Object> captcha = client.createCaptcha(mobile, purpose(mode), source(context), device);
         put(context, "captcha_id", PinvouAuthClient.string(captcha.get("captcha_id")));
         put(context, "captcha_background", PinvouAuthClient.string(captcha.get("background_image")));
@@ -148,11 +126,39 @@ public final class PinvouBrowserAuthenticator implements Authenticator {
             render(context, mode, "pinvouCaptchaInvalid");
             return;
         }
+        String authorization = "";
+        if ("register".equals(mode) || "reset".equals(mode)) {
+            String password = form.getFirst("password");
+            if (get(context, "password_handle").isEmpty()) {
+                String message = registrationPasswordMessage(password, form.getFirst("password_confirmation"));
+                if (!message.isEmpty()) { render(context, mode, message); return; }
+            }
+            String operation = get(context, "preparation_operation");
+            if (operation.isEmpty()) {
+                operation = java.util.UUID.randomUUID().toString();
+                put(context, "preparation_operation", operation);
+                put(context, "preparation_offset", Integer.toString(offset));
+            } else {
+                offset = Integer.parseInt(get(context, "preparation_offset"));
+            }
+            // Only operation/grant/reference facts may enter notes, never passwords.
+            Map<String, Object> admitted = client.authorizePasswordPreparation(operation, mobile, purpose(mode), captchaID, offset, source(context), get(context, "device"));
+            if (!preparationCurrent(context,mode,mobile,captchaID,operation)) { render(context,safeMode(get(context,"mode")),""); return; }
+            authorization = PinvouAuthClient.string(admitted.get("authorization_token"));
+            if (authorization.isEmpty()) throw new PinvouAuthClient.AuthClientException(503, "AUTH_SERVICE_UNAVAILABLE");
+            if (get(context, "password_handle").isEmpty()) {
+                Map<String, Object> reference = client.precheckPassword(password, authorization, source(context), get(context, "device"));
+                if (!preparationCurrent(context,mode,mobile,captchaID,operation)) { render(context,safeMode(get(context,"mode")),""); return; }
+                put(context, "password_handle", PinvouAuthClient.string(reference.get("password_handle")));
+                put(context, "password_policy", PinvouAuthClient.string(reference.get("password_policy_version")));
+            }
+        }
         Map<String, Object> request = new LinkedHashMap<>();
+        request.put("password_preparation_token", authorization);
         request.put("username", "register".equals(mode) ? get(context, "username") : "");
         request.put("mobile", mobile);
-        request.put("password_handle", "register".equals(mode) ? get(context, "password_handle") : "");
-        request.put("password_policy_version", "register".equals(mode) ? get(context, "password_policy") : "");
+        request.put("password_handle", get(context, "password_handle"));
+        request.put("password_policy_version", get(context, "password_policy"));
         request.put("purpose", purpose(mode));
         request.put("captcha_id", captchaID);
         request.put("captcha_offset", offset);
@@ -173,6 +179,11 @@ public final class PinvouBrowserAuthenticator implements Authenticator {
             put(context, "registration_token", PinvouAuthClient.string(response.get("registration_query_token")));
         }
         render(context, mode, "pinvouCodeSent");
+    }
+
+    private static boolean preparationCurrent(AuthenticationFlowContext context,String mode,String mobile,String captcha,String operation) {
+        return mode.equals(get(context,"mode")) && mobile.equals(get(context,"mobile"))
+            && captcha.equals(get(context,"captcha_id")) && operation.equals(get(context,"preparation_operation"));
     }
 
     private void submit(AuthenticationFlowContext context, MultivaluedMap<String, String> form, String mode)
@@ -385,8 +396,9 @@ public final class PinvouBrowserAuthenticator implements Authenticator {
             case "USERNAME_INVALID" -> "pinvouUsernameInvalid";
             case "USERNAME_ALREADY_REGISTERED", "USERNAME_TAKEN" -> "pinvouUsernameTaken";
             case "MOBILE_ALREADY_REGISTERED", "PHONE_IN_USE" -> "pinvouMobileTaken";
-            case "CAPTCHA_INVALID" -> "pinvouCaptchaInvalid";
+            case "CAPTCHA_INVALID", "PASSWORD_PREPARATION_INVALID" -> "pinvouCaptchaInvalid";
             case "SMS_RATE_LIMITED" -> "pinvouSmsRateLimited";
+            case "RATE_LIMITED" -> "pinvouAuthRateLimited";
             case "SMS_CODE_INVALID" -> "pinvouCodeInvalid";
             case "PASSWORD_POLICY_VIOLATION", "PASSWORD_INVALID", "PASSWORD_EDGE_SPACE_NOT_ALLOWED", "PASSWORD_REFERENCE_INVALID", "PASSWORD_REFERENCE_CONFLICT" -> "pinvouPasswordInvalid";
             case "REGISTRATION_RESTART_REQUIRED" -> "pinvouRegistrationRestart";
@@ -428,6 +440,8 @@ public final class PinvouBrowserAuthenticator implements Authenticator {
     }
     private static String mode(AuthenticationFlowContext context) { return safeMode(get(context, "mode")); }
     private static void clearCaptcha(AuthenticationFlowContext context) {
+        context.getAuthenticationSession().removeAuthNote(note("preparation_operation"));
+        context.getAuthenticationSession().removeAuthNote(note("preparation_offset"));
         for (String key : new String[]{"captcha_id", "captcha_background", "captcha_piece", "captcha_width", "captcha_height", "captcha_piece_width", "captcha_piece_height", "captcha_piece_y"}) {
             context.getAuthenticationSession().removeAuthNote(note(key));
         }

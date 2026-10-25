@@ -741,7 +741,7 @@ func publicAccountPathAllowed(method, resource string) bool {
 	}
 	if method == http.MethodPost {
 		switch resource {
-		case "/v1/auth/captcha/challenges", "/v1/auth/sms/challenges", "/v1/auth/register", "/v1/auth/password-resets":
+		case "/v1/auth/captcha/challenges", "/v1/auth/password-preparation-authorizations", "/v1/auth/sms/challenges", "/v1/auth/register", "/v1/auth/password-resets":
 			return true
 		}
 	}
@@ -1068,7 +1068,7 @@ func accountProofHeaderAllowed(method, resource, name string) bool {
 	if name != "X-Device-ID" || method != http.MethodPost {
 		return false
 	}
-	if resource == "/v1/auth/sms/challenges" || resource == "/v1/auth/register" || resource == "/v1/auth/password-resets" || resource == "/v1/me/password-changes" {
+	if resource == "/v1/auth/password-preparation-authorizations" || resource == "/v1/auth/sms/challenges" || resource == "/v1/auth/register" || resource == "/v1/auth/password-resets" || resource == "/v1/me/password-changes" {
 		return true
 	}
 	parts := strings.Split(strings.TrimPrefix(resource, "/"), "/")

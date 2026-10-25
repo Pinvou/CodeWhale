@@ -123,8 +123,8 @@ export class AccountPlatformDesktopClient {
     return this.call(() => this.transport.createSliderCaptcha({ mobile, purpose }), signal);
   }
 
-  prepareRegistrationPassword(password, signal) {
-    return this.call(() => this.transport.prepareRegistrationPassword({ password }), signal);
+  prepareRegistrationPassword(password, preparation, signal) {
+    return this.call(() => this.transport.prepareRegistrationPassword({ ...preparation, password }), signal);
   }
 
   sendSms(username, mobile, passwordReference, purpose, captchaId, captchaOffset, signal) {
@@ -138,6 +138,7 @@ export class AccountPlatformDesktopClient {
           purpose,
           captcha_id: captchaId,
           captcha_offset: captchaOffset,
+          password_preparation_token: passwordReference?.authorization_token || '',
         }),
       signal,
     );
@@ -176,14 +177,15 @@ export class AccountPlatformDesktopClient {
     return value;
   }
 
-  resetPassword(mobile, challengeId, code, password, signal) {
+  resetPassword(mobile, challengeId, code, passwordReference, signal) {
     return this.call(
       () =>
         this.transport.resetPassword({
           mobile,
           challenge_id: challengeId,
           code,
-          password,
+          password_handle: passwordReference?.password_handle || '',
+          password_policy_version: passwordReference?.password_policy_version || '',
         }),
       signal,
     );

@@ -33,13 +33,14 @@ func (s *Service) createSliderCaptcha(w http.ResponseWriter, r *http.Request) {
 
 func (s *Service) sendSMSChallenge(w http.ResponseWriter, r *http.Request) {
 	var body struct {
-		Username              string     `json:"username"`
-		Mobile                string     `json:"mobile"`
-		PasswordHandle        string     `json:"password_handle"`
-		PasswordPolicyVersion string     `json:"password_policy_version"`
-		Purpose               SMSPurpose `json:"purpose"`
-		CaptchaID             uuid.UUID  `json:"captcha_id"`
-		CaptchaOffset         int        `json:"captcha_offset"`
+		Username                 string     `json:"username"`
+		Mobile                   string     `json:"mobile"`
+		PasswordHandle           string     `json:"password_handle"`
+		PasswordPolicyVersion    string     `json:"password_policy_version"`
+		PasswordPreparationToken string     `json:"password_preparation_token"`
+		Purpose                  SMSPurpose `json:"purpose"`
+		CaptchaID                uuid.UUID  `json:"captcha_id"`
+		CaptchaOffset            int        `json:"captcha_offset"`
 	}
 	if err := api.DecodeJSON(w, r, &body); err != nil {
 		api.WriteError(w, http.StatusBadRequest, "INVALID_REQUEST", "invalid SMS challenge request", httpserver.RequestID(r.Context()))
@@ -49,7 +50,7 @@ func (s *Service) sendSMSChallenge(w http.ResponseWriter, r *http.Request) {
 		api.WriteError(w, http.StatusUnauthorized, "AUTH_REQUIRED", "a valid bearer token is required", httpserver.RequestID(r.Context()))
 		return
 	}
-	challenge, err := s.mobileAuth.Send(r.Context(), body.Username, body.Mobile, body.PasswordHandle, body.PasswordPolicyVersion, SMSPurpose(strings.ToUpper(string(body.Purpose))), body.CaptchaID, body.CaptchaOffset, requestSource(r), r.Header.Get("X-Device-ID"))
+	challenge, err := s.mobileAuth.Send(withPasswordPreparation(r.Context(), body.PasswordPreparationToken), body.Username, body.Mobile, body.PasswordHandle, body.PasswordPolicyVersion, SMSPurpose(strings.ToUpper(string(body.Purpose))), body.CaptchaID, body.CaptchaOffset, requestSource(r), r.Header.Get("X-Device-ID"))
 	if err != nil {
 		s.writeMobileAuthError(w, r, err)
 		return
@@ -154,6 +155,8 @@ func (s *Service) writeMobileAuthError(w http.ResponseWriter, r *http.Request, e
 		status, code, message = http.StatusGone, "PASSWORD_REFERENCE_INVALID", "the password precheck has expired; restart registration"
 	case errors.Is(err, ErrPasswordReferenceConflict):
 		status, code, message = http.StatusConflict, "PASSWORD_REFERENCE_CONFLICT", "the password precheck belongs to different registration data"
+	case errors.Is(err, ErrPasswordPreparation):
+		status, code, message = http.StatusForbidden, "PASSWORD_PREPARATION_INVALID", "complete a new slider verification before preparing a password"
 	case errors.Is(err, ErrCaptchaInvalid):
 		status, code, message = http.StatusBadRequest, "CAPTCHA_INVALID", "the slider verification is invalid or expired"
 	case errors.Is(err, ErrSMSRateLimited):

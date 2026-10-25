@@ -105,6 +105,8 @@ func (s *Service) Handler(verify identity.VerifyFunc) http.Handler {
 	internal.POST("/approval-authorization/events/:event_id/deliveries/:durable/terminal", serviceauth.Require("internal.approval-authorization.consume"), httpserver.AdaptFunc(s.recordApprovalAuthorizationTerminal))
 	if s.mobileAuth != nil {
 		router.POST("/v1/auth/captcha/challenges", httpserver.AdaptFunc(s.createSliderCaptcha))
+		router.POST("/v1/auth/password-preparation-authorizations", httpserver.AdaptFunc(s.createPasswordPreparation))
+		internal.POST("/auth/password-preparation-authorizations/claim", serviceauth.Require("internal.auth.password-preparation.claim"), httpserver.AdaptFunc(s.claimPasswordPreparation))
 		router.POST("/v1/auth/sms/challenges", httpserver.AdaptFunc(s.sendSMSChallenge))
 		router.POST("/v1/auth/register", httpserver.AdaptFunc(s.registerMobile))
 		router.GET("/v1/auth/registration-operations/:operation_id", httpserver.AdaptFunc(s.registrationOperationStatus))

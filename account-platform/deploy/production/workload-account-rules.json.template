@@ -55,5 +55,12 @@
       "internal.approval-execution.complete",
       "internal.approval-authorization.consume"
     ]
+  },
+  {
+    "subject": "__IDENTITY_WORKLOAD_SUBJECT__",
+    "service": "identity-service",
+    "permissions": [
+      "internal.auth.password-preparation.claim"
+    ]
   }
 ]
