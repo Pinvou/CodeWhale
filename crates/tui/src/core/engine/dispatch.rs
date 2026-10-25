@@ -279,8 +279,16 @@ fn bounded_valid_shape(
         .get("required")
         .cloned()
         .unwrap_or_else(|| serde_json::json!([]));
+    // Carry the schema's own type when it declares one: a composition-only
+    // (oneOf/anyOf) schema may admit non-objects, and a hardcoded
+    // `"type":"object"` would let a model reading only this receipt infer a
+    // shape the tool never promised.
+    let schema_type = schema
+        .get("type")
+        .cloned()
+        .unwrap_or_else(|| serde_json::json!("object"));
     serde_json::json!({
-        "type": "object",
+        "type": schema_type,
         "properties": properties,
         "required": required,
         "guidance": format!(

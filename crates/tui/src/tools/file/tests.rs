@@ -106,10 +106,16 @@ async fn contract_read_refuses_binary_payloads_but_keeps_lossy_text() {
     let mut zip = b"PK\x03\x04\x14\x00\x00\x00\x08\x00".to_vec();
     zip.extend([0xA7u8; 64]);
     std::fs::write(temporary.path().join("deck.pptx"), &zip).expect("fixture");
-    // UTF-16LE text with a BOM is not UTF-8 either.
-    std::fs::write(temporary.path().join("notes.txt"), b"\xFF\xFEh\x00i\x00").expect("fixture");
-    // UTF-16BE BOM: the FE FF prefix arm, NUL-free so only the BOM catches it.
-    std::fs::write(temporary.path().join("be.txt"), b"\xFE\xFFh\x00i\x00").expect("fixture");
+    // UTF-16LE "你好" with a BOM is not UTF-8 either. Both UTF-16 fixtures are
+    // NUL-free on purpose: ASCII-range code units would carry a NUL and the
+    // NUL arm alone would satisfy the refusal, leaving the BOM arms unpinned.
+    std::fs::write(
+        temporary.path().join("notes.txt"),
+        b"\xFF\xFE\x60\x4F\x34\x6C",
+    )
+    .expect("fixture");
+    // UTF-16BE BOM: the FE FF prefix arm, equally NUL-free.
+    std::fs::write(temporary.path().join("be.txt"), b"\xFE\xFF\x4F\x60\x6C\x34").expect("fixture");
     // UTF-8 text with one truncated multibyte sequence: still text.
     std::fs::write(temporary.path().join("caf.txt"), b"caf\xC3\nnext line\n").expect("fixture");
     // Latin-1 text with a lone `ÿ` (0xFF) mid-stream: still text, not a BOM.
@@ -118,6 +124,16 @@ async fn contract_read_refuses_binary_payloads_but_keeps_lossy_text() {
         b"na\xEFve \xFF\nnext line\n",
     )
     .expect("fixture");
+    // A UTF-8 BOM is text (it decodes to U+FEFF), and a NUL exactly past the
+    // 8 KiB sniff window is outside the heuristic — both stay reads.
+    std::fs::write(
+        temporary.path().join("utf8bom.txt"),
+        b"\xEF\xBB\xBFplain text\n",
+    )
+    .expect("fixture");
+    let mut late_nul = vec![b'a'; 8192];
+    late_nul.push(0);
+    std::fs::write(temporary.path().join("late-nul.txt"), &late_nul).expect("fixture");
     let context = ToolContext::new(temporary.path());
 
     for name in ["deck.pptx", "notes.txt", "be.txt"] {
@@ -126,7 +142,10 @@ async fn contract_read_refuses_binary_payloads_but_keeps_lossy_text() {
             .expect_err("binary payloads are refused")
             .to_string();
         assert!(
-            error.contains(name) && error.contains("binary file") && error.contains("unzip"),
+            error.contains(name)
+                && error.contains("binary file")
+                && error.contains("Use `file`")
+                && error.contains("unzip"),
             "{name}: {error}"
         );
     }
@@ -137,6 +156,16 @@ async fn contract_read_refuses_binary_payloads_but_keeps_lossy_text() {
             .expect("lossy text read");
         assert!(
             result.content.contains('\u{FFFD}') && result.content.contains("next line"),
+            "{name}: {}",
+            result.content
+        );
+    }
+    for name in ["utf8bom.txt", "late-nul.txt"] {
+        let result = ReadFileTool::execute_contract_read(json!({"path": name}), &context)
+            .await
+            .expect("a UTF-8 BOM and a NUL past the sniff window are text");
+        assert!(
+            result.content.contains("text") || result.content.contains('a'),
             "{name}: {}",
             result.content
         );

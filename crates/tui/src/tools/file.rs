@@ -788,7 +788,7 @@ impl ReadFileTool {
         // extraction commands below need a role whose shell allows them; `file` is read-only.
         if contract_read_payload_is_binary(&bytes) {
             return Err(ToolError::execution_failed(format!(
-                "{path_str} is a binary file ({}); read returns text only. Use `file` to identify it, or — with a role that permits it — `unzip -l`/`unzip -p` for .pptx/.docx/.xlsx/.zip instead of reading the raw bytes.",
+                "{path_str} is a binary file ({}); read returns text only. Use `file` to identify it; if it is a zip-based document (.pptx/.docx/.xlsx/.zip), read its members with `unzip -l`/`unzip -p` using a role that permits it.",
                 contract_format_size(bytes.len())
             )));
         }
