@@ -826,7 +826,10 @@ fn is_agent_readonly_git(tokens: &[String]) -> bool {
 
 /// `git branch` in listing form only: `--show-current` with nothing else, or
 /// `--list`/`-l` (then every positional is a match pattern, not a new
-/// branch). A bare `git branch <name>` stays refused.
+/// branch). A bare `git branch <name>` stays refused. `-l` has meant
+/// `--list` only since git 2.20; on the pre-2018 gits where it meant
+/// `--create-reflog` this parser would be wrong, but every supported
+/// toolchain ships ≥ 2.20.
 fn is_agent_readonly_git_branch(args: &[String]) -> bool {
     if args.len() == 1 && args[0] == "--show-current" {
         return true;
@@ -844,6 +847,9 @@ fn is_agent_readonly_git_branch(args: &[String]) -> bool {
         "--quiet",
         "--no-color",
         "--color",
+        // OPTARG-style: git only reads `--column=<style>`; the separate-word
+        // form would make the next token a match pattern.
+        "--column",
         "--show-current",
     ];
     let value_flags: &[&str] = &[
@@ -854,7 +860,6 @@ fn is_agent_readonly_git_branch(args: &[String]) -> bool {
         "--no-contains",
         "--merged",
         "--no-merged",
-        "--column",
     ];
     if !args.iter().any(|token| token == "--list" || token == "-l") {
         return false;
@@ -868,10 +873,16 @@ fn is_agent_readonly_git_branch(args: &[String]) -> bool {
                 continue;
             }
             if value_flags.contains(&token) {
-                index += 2;
-                if index > args.len() {
-                    return false;
+                // git consumes the next word as the value; refuse a
+                // dash-prefixed one instead of swallowing it uninspected, so
+                // a mutating flag can never hide behind a value flag (the
+                // shared option engine refuses these too).
+                index += 1;
+                match args.get(index) {
+                    Some(value) if !value.starts_with('-') => {}
+                    _ => return false,
                 }
+                index += 1;
                 continue;
             }
             return false;
@@ -902,10 +913,14 @@ fn is_agent_readonly_git_worktree(args: &[String]) -> bool {
             continue;
         }
         if value_flags.contains(&token) {
-            index += 2;
-            if index > args.len() {
-                return false;
+            // Same dash-value rule as the branch parser: never swallow a
+            // token the checker has not inspected.
+            index += 1;
+            match args.get(index) {
+                Some(value) if !value.starts_with('-') => {}
+                _ => return false,
             }
+            index += 1;
             continue;
         }
         return false;
@@ -2198,8 +2213,11 @@ mod tests {
             "git branch --show-current",
             "git branch --list",
             "git branch -a --list codex/*",
+            "git branch --list -v",
+            "git branch -l feature/*",
             "git worktree list",
             "git worktree list --porcelain",
+            "git worktree list -z",
         ] {
             assert!(
                 is_agent_readonly_shell_command(command),
@@ -2270,6 +2288,17 @@ mod tests {
             "git worktree list extra",
             "git rev-parse --git-path hooks",
             "git rev-parse --resolve-git-dir /tmp/x",
+            // A value flag must never swallow a mutating flag: git's
+            // `--column` takes only the attached `=<style>` form, so the
+            // separate-word spelling leaves `-d` as a real flag the checker
+            // has to see and refuse.
+            "git branch --list --column -d x",
+            "git branch -D x",
+            "git branch --edit-description",
+            "git branch -u origin/main",
+            "git worktree lock ../wt",
+            "git worktree move ../a ../b",
+            "git rev-parse --parseopt x",
         ] {
             assert!(
                 !is_agent_readonly_shell_command(command),
