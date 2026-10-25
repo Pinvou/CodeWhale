@@ -727,8 +727,9 @@ export class AdminPlatformClient {
   archiveLatePaymentReview(caseID) {
     return this.mutate('billing', `/admin/v1/late-payment-reviews/${encodeURIComponent(caseID)}/archive`, 'POST', {}, '', undefined, 200);
   }
-  escalateProviderBlind(caseID, reason) {
-    return this.mutate('billing', `/admin/v1/late-payment-reviews/${encodeURIComponent(caseID)}/provider-blind`, 'POST', { reason }, '', undefined, 200);
+  escalateProviderBlind(caseID, reason, key, commandProtocol) {
+    if (commandProtocol !== 1) throw financeNotDispatched(new Error('FINANCE_COMMAND_PROTOCOL_REQUIRED'), true);
+    return this.mutate('billing', `/admin/v1/late-payment-reviews/${encodeURIComponent(caseID)}/provider-blind`, 'POST', { reason, command_protocol: 1 }, key, undefined, 200);
   }
   paymentAnomalies(filters = {}, signal) {
     const query = billingCollectionQuery(filters, { keys: ['q', 'anomaly_type', 'status', 'severity', 'owner_id', 'provider_id'], dateTimeKeys: ['created_from', 'created_to'] });

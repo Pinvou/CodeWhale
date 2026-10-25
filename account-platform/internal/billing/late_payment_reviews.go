@@ -443,9 +443,10 @@ func (r *PostgresRepository) ArchiveLatePaymentReview(ctx context.Context, caseI
 	return item, tx.Commit(ctx)
 }
 
-func (r *PostgresRepository) EscalateProviderBlind(ctx context.Context, caseID, actorID uuid.UUID, reason string) (LatePaymentReviewCase, error) {
+func (r *PostgresRepository) EscalateProviderBlind(ctx context.Context, caseID, actorID uuid.UUID, reason, commandKey string) (LatePaymentReviewCase, error) {
 	reason = strings.TrimSpace(reason)
-	if caseID == uuid.Nil || actorID == uuid.Nil || len(reason) < 10 || len(reason) > 1000 {
+	commandKey = strings.TrimSpace(commandKey)
+	if caseID == uuid.Nil || actorID == uuid.Nil || len(reason) < 10 || len(reason) > 1000 || len(commandKey) < 16 || len(commandKey) > 128 {
 		return LatePaymentReviewCase{}, ErrConflict
 	}
 	tx, err := r.pool.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.Serializable})
@@ -454,11 +455,21 @@ func (r *PostgresRepository) EscalateProviderBlind(ctx context.Context, caseID, 
 	}
 	defer tx.Rollback(ctx)
 	item, found, err := scanLatePaymentReviewCase(tx.QueryRow(ctx, latePaymentReviewSelect+` WHERE late.id=$1 FOR UPDATE OF late,manual`, caseID))
-	if err != nil || !found || item.OwnerID == nil || *item.OwnerID != actorID || item.ReviewStatus == "ARCHIVED_CONFIRMED_UNPAID" || item.ReviewStatus == "RESOLVED_PAID" {
+	if err != nil || !found || item.OwnerID == nil || *item.OwnerID != actorID {
+		return LatePaymentReviewCase{}, ErrConflict
+	}
+	// Current authority and ownership remain prerequisites for reading the old
+	// receipt. Current state gates only new writes, never an exact prior ACK.
+	if saved, found, err := readProviderBlindCommand(ctx, tx, caseID, actorID, commandKey, reason); err != nil {
+		return LatePaymentReviewCase{}, err
+	} else if found {
+		return saved, tx.Commit(ctx)
+	}
+	if item.ReviewStatus == "ARCHIVED_CONFIRMED_UNPAID" || item.ReviewStatus == "RESOLVED_PAID" {
 		return LatePaymentReviewCase{}, ErrConflict
 	}
 	now := r.now()
-	_, err = tx.Exec(ctx, `UPDATE late_payment_review_cases SET review_status='PROVIDER_BLIND',blind_reason=$2,next_review_at=$3,updated_at=$3 WHERE id=$1`, caseID, reason, now.Add(24*time.Hour))
+	_, err = tx.Exec(ctx, `UPDATE late_payment_review_cases SET review_status='PROVIDER_BLIND',blind_reason=$2,next_review_at=$3,updated_at=$4 WHERE id=$1`, caseID, reason, now.Add(24*time.Hour), now)
 	if err == nil {
 		_, err = tx.Exec(ctx, `INSERT INTO payment_provider_controls(provider_id,provider_version,new_orders_enabled,reason,reason_code,updated_at) VALUES($1,$2,FALSE,$3,'PROVIDER_BLIND',$4) ON CONFLICT(provider_id,provider_version) DO UPDATE SET new_orders_enabled=FALSE,reason=EXCLUDED.reason,reason_code='PROVIDER_BLIND',version=payment_provider_controls.version+1,updated_at=EXCLUDED.updated_at`, item.ProviderID, item.ProviderVersion, reason, now)
 	}
@@ -466,7 +477,20 @@ func (r *PostgresRepository) EscalateProviderBlind(ctx context.Context, caseID, 
 		err = appendManualReviewEvent(ctx, tx, caseID, "PROVIDER_BLIND", &actorID, map[string]any{"reason": reason, "new_orders_enabled": false}, now)
 	}
 	if err == nil {
-		payload, _ := json.Marshal(map[string]any{"reason": reason, "new_orders_enabled": false})
+		// Snapshot the actual joined row after all state writes. PostgreSQL
+		// timestamp precision and the new review schedule belong to the ACK.
+		item, found, err = scanLatePaymentReviewCase(tx.QueryRow(ctx, latePaymentReviewSelect+` WHERE late.id=$1`, caseID))
+		if err != nil || !found {
+			if err == nil {
+				err = ErrConflict
+			}
+			return LatePaymentReviewCase{}, err
+		}
+		receipt := providerBlindCommandReceipt{Version: 1, CommandProtocol: 1, IdempotencyKey: commandKey, RequestHash: providerBlindCommandHash(caseID, actorID, reason), ActorID: actorID, CaseID: caseID, Reason: reason, Response: item}
+		payload, marshalErr := json.Marshal(map[string]any{"reason": reason, "new_orders_enabled": false, "provider_blind_command": receipt})
+		if marshalErr != nil {
+			return LatePaymentReviewCase{}, marshalErr
+		}
 		digest := sha256.Sum256(payload)
 		_, err = tx.Exec(ctx, `INSERT INTO late_payment_review_evidence(id,case_id,evidence_type,actor_id,payload_digest,payload_snapshot,created_at) VALUES($1,$2,'PROVIDER_BLIND',$3,$4,$5,$6) ON CONFLICT(case_id,evidence_type,payload_digest) DO NOTHING`, uuid.Must(uuid.NewV7()), caseID, actorID, hex.EncodeToString(digest[:]), payload, now)
 	}
@@ -474,9 +498,17 @@ func (r *PostgresRepository) EscalateProviderBlind(ctx context.Context, caseID, 
 		err = events.AppendOutbox(ctx, tx, "billing.provider-blind.detected.v1", caseID, 1, map[string]any{"case_id": caseID, "payment_order_id": item.PaymentOrderID, "provider_id": item.ProviderID, "provider_version": item.ProviderVersion, "reason": reason, "new_orders_enabled": false})
 	}
 	if err != nil {
+		return LatePaymentReviewCase{}, providerBlindCommandWriteError(err)
+	}
+	// Read the actual stored JSON for the first ACK too: raw JSON and time
+	// precision must match a later receipt replay exactly.
+	item, found, err = readProviderBlindCommand(ctx, tx, caseID, actorID, commandKey, reason)
+	if err != nil || !found {
+		if err == nil {
+			err = ErrConflict
+		}
 		return LatePaymentReviewCase{}, err
 	}
-	item.ReviewStatus, item.BlindReason, item.UpdatedAt = "PROVIDER_BLIND", &reason, now
 	return item, tx.Commit(ctx)
 }
 

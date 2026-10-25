@@ -2104,6 +2104,16 @@
         "file": "900027_late_payment_schedule_commands.up.sql",
         "version": 900027,
         "sha256": "55d7c2ce0e0017d2d6cab5818a0a1a2b32d9510dad54dbeb48a5fc613c5f6d6f"
+      },
+      {
+        "file": "900028_provider_blind_command_receipts.down.sql",
+        "version": 900028,
+        "sha256": "17224bd72c47302bb1ed6a8132f2a48eb7552f3427318932f3f9997b56f9eaf0"
+      },
+      {
+        "file": "900028_provider_blind_command_receipts.up.sql",
+        "version": 900028,
+        "sha256": "6e9acd4ca2e514b74fd58a66259efcc90c001c4451559f872d3a37b86fd488f1"
       }
     ],
     "payment-simulator": [

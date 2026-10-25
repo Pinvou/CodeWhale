@@ -443,7 +443,7 @@ func TestBillingFinancialEventOutboxContractsPostgres(t *testing.T) {
 	if _, err = r.ClaimLatePaymentReview(ctx, late.ID, actor); err != nil {
 		t.Fatal(err)
 	}
-	if _, err = r.EscalateProviderBlind(ctx, late.ID, actor, "渠道异常"); err != nil {
+	if _, err = r.EscalateProviderBlind(ctx, late.ID, actor, "渠道异常", "outbox-blind-"+uuid.NewString()); err != nil {
 		t.Fatal(err)
 	}
 	if _, err = r.RecordAndFreezeForcedRefund(ctx, transaction, "contract-forced-"+uuid.NewString(), 100, json.RawMessage(`{"controlled":true}`)); err != nil {

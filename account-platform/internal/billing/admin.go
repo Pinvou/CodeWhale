@@ -207,7 +207,7 @@ type adminRepository interface {
 	ScheduleLatePaymentReview(context.Context, uuid.UUID, uuid.UUID, time.Time, string, string) (LatePaymentReviewCase, error)
 	RecordLatePaymentReviewQuery(context.Context, uuid.UUID, uuid.UUID, PaymentOrder, error) (LatePaymentReviewCase, error)
 	ArchiveLatePaymentReview(context.Context, uuid.UUID, uuid.UUID) (LatePaymentReviewCase, error)
-	EscalateProviderBlind(context.Context, uuid.UUID, uuid.UUID, string) (LatePaymentReviewCase, error)
+	EscalateProviderBlind(context.Context, uuid.UUID, uuid.UUID, string, string) (LatePaymentReviewCase, error)
 }
 
 type adminAdjustmentRequester interface {
@@ -641,7 +641,8 @@ func (s *Service) adminEscalateProviderBlind(w http.ResponseWriter, r *http.Requ
 	repository, ok := s.requireAdminRepository(w, r)
 	caseID, valid := parseLatePaymentCaseID(w, r)
 	var body struct {
-		Reason string `json:"reason"`
+		Reason          string `json:"reason"`
+		CommandProtocol int    `json:"command_protocol"`
 	}
 	if !ok || !valid {
 		return
@@ -650,7 +651,16 @@ func (s *Service) adminEscalateProviderBlind(w http.ResponseWriter, r *http.Requ
 		api.WriteError(w, http.StatusBadRequest, "INVALID_REQUEST", "invalid financial request", httpserver.RequestID(r.Context()))
 		return
 	}
-	item, err := repository.EscalateProviderBlind(r.Context(), caseID, adminActor(adminPrincipal(r)), body.Reason)
+	if body.CommandProtocol != 1 {
+		api.WriteError(w, http.StatusBadRequest, "COMMAND_PROTOCOL_REQUIRED", "a versioned command is required", httpserver.RequestID(r.Context()))
+		return
+	}
+	commandKey := strings.TrimSpace(r.Header.Get("Idempotency-Key"))
+	if len(commandKey) < 16 || len(commandKey) > 128 {
+		api.WriteError(w, http.StatusBadRequest, "IDEMPOTENCY_KEY_REQUIRED", "a stable command key is required", httpserver.RequestID(r.Context()))
+		return
+	}
+	item, err := repository.EscalateProviderBlind(r.Context(), caseID, adminActor(adminPrincipal(r)), body.Reason, commandKey)
 	if err != nil {
 		s.writeError(w, r, err)
 		return
