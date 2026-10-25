@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import os
 import re
 import subprocess
 import sys
@@ -117,7 +118,7 @@ def validate_text(raw: str, label: str) -> list[str]:
     if not CJK_RE.search(semantic_desc):
         errors.append(f"{label}: description must use Chinese")
 
-    if semantic_desc[-1] in FORBIDDEN_ENDING_PUNCTUATION:
+    if semantic_desc and semantic_desc[-1] in FORBIDDEN_ENDING_PUNCTUATION:
         errors.append(f"{label}: description must not end with punctuation")
 
     if normalized_desc in PROHIBITED_DESCRIPTIONS:
@@ -165,6 +166,58 @@ def git(*args: str) -> str:
     return subprocess.check_output(("git", *args), text=True, encoding="utf-8").strip()
 
 
+def git_commit_exists(revision: str) -> bool:
+    return (
+        subprocess.run(
+            ("git", "cat-file", "-e", f"{revision}^{{commit}}"),
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            check=False,
+        ).returncode
+        == 0
+    )
+
+
+def _in_shallow_clone() -> bool:
+    """True when this checkout is a shallow clone. At a shallow boundary git
+    grafts the boundary commit's parent links away: `git log --format=%P`
+    reports NO parents even for a merge (verified on a depth-1 clone of a
+    merge head, while `git cat-file` shows both), which would strip a merge
+    head of its merge exemption and validate a GitHub auto-merge commit's
+    subject/DCO. Uses subprocess directly (not the mockable `git` helper)
+    so the merge-detection fast path stays testable without git mocking;
+    round-12 review."""
+    probe = subprocess.run(
+        # --git-path (not --git-dir + join): in a linked worktree the
+        # per-worktree .git dir is where `shallow` lives only when git says
+        # so — joining the worktree git-dir missed a shallow file recorded
+        # in the common dir (round-13 review: false-red direction, shallow
+        # worktrees lost the merge exemption).
+        ("git", "rev-parse", "--git-path", "shallow"),
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if probe.returncode != 0:
+        return False
+    return os.path.isfile(probe.stdout.strip())
+
+
+def _raw_parents(commit: str) -> list[str]:
+    """Parent hashes read from the RAW commit object via cat-file — the
+    only graft-free source at a shallow boundary (see _in_shallow_clone).
+    Only called when a shallow clone was detected, so full clones pay
+    nothing. Only the commit HEADER (before the first blank line) is
+    scanned: a body line starting with `parent ` is prose, and counting it
+    made a forged body line exempt a non-merge commit from the subject and
+    DCO checks entirely (round-13 review, false-pass direction)."""
+    out = subprocess.check_output(
+        ("git", "cat-file", "commit", commit), text=True, encoding="utf-8"
+    )
+    header = out.split("\n\n", 1)[0]
+    return [line.split()[1] for line in header.splitlines() if line.startswith("parent ")]
+
+
 def validate_file(path: Path, *, require_signoff: bool = True) -> list[str]:
     raw = path.read_text(encoding="utf-8")
     errors = validate_text(raw, str(path))
@@ -179,14 +232,25 @@ def validate_range(
     *,
     require_matching_signoff: bool = True,
 ) -> list[str]:
-    commit_log = git(
+    # Shallow clones may not have the base or the legacy cutoff object; fall
+    # back to the `head^!` revision (head with all parents excluded — exactly
+    # the one commit) rather than letting `git log` fail on a missing
+    # revision. A bare `head` would walk every reachable ancestor and, when
+    # the cutoff object is missing too, mis-flag old nonconforming commits
+    # the cutoff would have grandfathered; `^!` validates head alone in both
+    # subcases. `^!` also works on a parentless root commit (verified:
+    # selects the root alone).
+    revision = f"{base}..{head}" if git_commit_exists(base) else f"{head}^!"
+    log_args = [
         "log",
         "--format=%H%x00%P%x00%an%x00%ae%x00%B%x1e",
-        f"{base}..{head}",
-        "--not",
-        LEGACY_HISTORY_CUTOFF,
-    )
+        revision,
+    ]
+    if git_commit_exists(LEGACY_HISTORY_CUTOFF):
+        log_args.extend(("--not", LEGACY_HISTORY_CUTOFF))
+    commit_log = git(*log_args)
     errors: list[str] = []
+    shallow = _in_shallow_clone()
 
     for record in commit_log.split("\x1e"):
         record = record.strip("\r\n")
@@ -198,6 +262,10 @@ def validate_range(
         commit, parents, author_name, author_email, raw = fields
         label = f"{commit[:12]} {first_subject(raw)}"
         if len(parents.split()) > 1:
+            continue
+        if shallow and len(_raw_parents(commit)) > 1:
+            # Shallow boundary: %P was grafted to empty even though the raw
+            # object is a merge — keep the merge exemption (round-12 review).
             continue
 
         errors.extend(validate_text(raw, label))
