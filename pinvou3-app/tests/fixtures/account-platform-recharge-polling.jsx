@@ -1,3 +1,4 @@
+import '../../src/features/account-platform/account-platform.css';
 import React, { useEffect, useRef, useState } from 'react';
 import { createRoot } from 'react-dom/client';
 import { PersonalFinanceWorkspace } from '../../src/features/account-platform/PersonalFinanceWorkspace.jsx';
@@ -22,6 +23,7 @@ function Fixture() {
   const client = useRef(null); if (!client.current) client.current = new AccountPlatformBffClient();
   const [actor, setActor] = useState('A'), [allowed, setAllowed] = useState(true), [epoch, setEpoch] = useState(0);
   const [mounted, setMounted] = useState(true), [mountKey, setMountKey] = useState(0), [paid, setPaid] = useState(0);
+  const [language, setLanguage] = useState('en');
   const [surface, setSurface] = useState('personal'), [org, setOrg] = useState('A'), [wallet, setWallet] = useState(true);
   const me = { user_id: users[actor], personal_permissions: allowed ? ['personal.billing.read', 'personal.recharge.create', 'personal.recharge.manage'] : [],
     active_context: surface === 'personal' ? { context_type: 'PERSONAL', context_version: 1, personal_authorization_version: allowed ? 1 : 2 }
@@ -29,10 +31,11 @@ function Fixture() {
         organization_authorization_version: (allowed ? 1 : 2) + (wallet ? 0 : 2), permissions: [...(allowed ? ['org.entitlements.purchase'] : []), ...(wallet ? ['org.wallet.read'] : [])] } };
   const reset = async () => { await control({ reset: true }); setActor('A'); setOrg('A'); setAllowed(true); setWallet(true); setPaid(0); setMounted(true); setEpoch(client.current.financeSessionEpoch); setMountKey(value => value + 1); };
   const swapActor = async () => { await control({ actor: 'B' }); setActor('B'); };
-  return <main><h1>Public loopback fixture: actual React finance components</h1>
+  return <main className="ap-shell"><h1>Public loopback fixture: actual React finance components</h1>
     <p data-fixture-actor>Actor {actor}; epoch {epoch}; permission {String(allowed)}; surface {surface}</p><p data-fixture-paid>Paid callbacks: {paid}</p>
     <p>Organization order reference: <code>33333333-3333-4333-8333-333333333333</code></p>
     <Metrics client={client.current} paid={paid} actor={actor} epoch={epoch} allowed={allowed} mounted={mounted} surface={surface} org={org} wallet={wallet} />
+    <label>Fixture language<select aria-label="Fixture language" value={language} onChange={event => setLanguage(event.target.value)}>{['zh', 'en', 'ja'].map(value => <option key={value}>{value}</option>)}</select></label>
     <button onClick={() => void reset()}>Reset fixture</button>
     <button onClick={() => setSurface('personal')}>Personal surface</button><button onClick={() => setSurface('organization')}>Organization surface</button>
     <button onClick={() => void control({ status: 'PAID' })}>Provider paid proof</button>
@@ -49,8 +52,8 @@ function Fixture() {
     <button onClick={() => setWallet(false)}>Remove organization wallet read permission</button>
     <button onClick={() => setMounted(false)}>Unmount component</button>
     {mounted && (surface === 'personal'
-      ? <PersonalFinanceWorkspace key={mountKey} client={client.current} me={me} language="en" onPaid={() => setPaid(value => value + 1)} />
-      : <OrganizationFinanceWorkspace key={mountKey} client={client.current} me={me} language="en" />)}
+      ? <PersonalFinanceWorkspace key={mountKey} client={client.current} me={me} language={language} onPaid={() => setPaid(value => value + 1)} />
+      : <OrganizationFinanceWorkspace key={mountKey} client={client.current} me={me} language={language} />)}
   </main>;
 }
 createRoot(document.getElementById('root')).render(<Fixture />);

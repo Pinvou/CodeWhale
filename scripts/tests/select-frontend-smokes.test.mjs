@@ -205,3 +205,11 @@ test("installed hosts run once after full and account command expansion", () => 
     assert.ok(expanded.includes("node tests/account_platform_closure_production_smoke.mjs"));
   }
 });
+
+
+test("personal and organization recharge presentation keeps the real browser gate selected", () => {
+  for (const path of ["pinvou3-app/src/features/account-platform/PersonalFinanceWorkspace.jsx", "pinvou3-app/src/features/account-platform/OrganizationFinanceWorkspace.jsx", "pinvou3-app/src/features/account-platform/useRechargePaymentDialog.js"]) {
+    assert.ok(labels(selectFrontendSmokes([path])).includes("npm:test:account-platform-recharge-ui"));
+  }
+  assert.ok(fullLabels.includes("npm:test:account-platform-recharge-ui"));
+});

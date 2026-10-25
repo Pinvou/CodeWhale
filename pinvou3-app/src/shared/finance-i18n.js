@@ -37,3 +37,7 @@ export const financeCopy = {
 Object.assign(financeCopy.zh, { cancelClose: '取消关闭' });
 Object.assign(financeCopy.en, { cancelClose: 'Keep order open' });
 Object.assign(financeCopy.ja, { cancelClose: '注文を閉じない' });
+
+Object.assign(financeCopy.zh, { pendingOrders: '待支付订单', continuePayment: '继续支付', paymentDialog: '扫码支付', dismissPayment: '关闭扫码窗口' });
+Object.assign(financeCopy.en, { pendingOrders: 'Pending payments', continuePayment: 'Continue payment', paymentDialog: 'Pay this order', dismissPayment: 'Dismiss payment window' });
+Object.assign(financeCopy.ja, { pendingOrders: '支払い待ちの注文', continuePayment: '支払いを続ける', paymentDialog: '注文の支払い', dismissPayment: '支払い画面を閉じる' });

@@ -61,3 +61,14 @@ export function orderDurationDays(item) {
   if (!creditedAt || !validUntil || validUntil <= creditedAt) return null;
   return Math.max(1, Math.round((validUntil - creditedAt) / 86_400_000));
 }
+
+// Lists and historical details carry facts, never a retained payment instruction.
+export function paymentOrderFacts(order) {
+  return order ? { ...order, payment_url: '', qr_data: '' } : order;
+}
+
+export function upsertPaymentOrderFacts(orders, order) {
+  const facts = paymentOrderFacts(order);
+  return orders.some(item => item.order_id === order.order_id)
+    ? orders.map(item => item.order_id === order.order_id ? { ...item, ...facts } : item) : [facts, ...orders];
+}

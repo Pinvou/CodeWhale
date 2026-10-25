@@ -3,7 +3,7 @@ import { createServer } from 'node:http';
 import test from 'node:test';
 import { OrganizationClient } from '../src/features/account-platform/organization-client.js';
 import { AccountPlatformBffClient } from '../src/features/account-platform/bff-client.js';
-import { createRechargeOrderReader, rechargePollDelay, refreshPaidRechargeRead, startRechargeOrderPolling } from '../src/features/account-platform/recharge-order-polling.js';
+import { createRechargeOrderReader, rechargePollDelay, refreshPaidRechargeRead, startRechargeOrderPolling, startRechargeOrderListPolling } from '../src/features/account-platform/recharge-order-polling.js';
 const id = '11111111-1111-4111-8111-111111111111', other = '22222222-2222-4222-8222-222222222222';
 const pending = () => ({ order_id: id, amount_fen: '9007199254740993', status: 'PENDING', close_status: 'OPEN', expires_at: new Date(Date.now() + 60000).toISOString() });
 const wait = async predicate => { const end = Date.now() + 3000; while (!predicate()) { if (Date.now() > end) assert.fail('controlled operation did not converge'); await new Promise(resolve => setTimeout(resolve, 5)); } };
@@ -174,4 +174,44 @@ test('organization polling retains explicit organization scope through the produ
       await assert.rejects(p.reader.read(id), reason => reason.name === 'AbortError'); assert.equal(f.calls.length, 1);
     }
   });
+});
+
+
+test('closed payment window list timer uses only collection HTTP and preserves original cadence', async t => {
+  const f = await fixture(t, (_request, response) => send(response, { items: [{ ...pending(), status: 'PAID', qr_data: '', payment_url: '' }] }));
+  const timers = clock(), reader = createRechargeOrderReader(f.client, () => true); let orders = [pending()];
+  const stop = startRechargeOrderListPolling({ timers, random: () => 0.5, isCurrent: () => true,
+    hasPayableOrders: () => orders.some(item => item.status === 'PENDING'), read: () => reader.readList(), accept: value => { orders = value.items; } });
+  t.after(() => { stop(); reader.dispose(); }); assert.equal(timers.fire(), 2000); await wait(() => orders[0].status === 'PAID');
+  assert.deepEqual(f.calls, [{ method: 'GET', url: '/api/token/v1/recharge/orders' }]); assert.equal(timers.queue.size, 0);
+});
+
+test('list read coalesces and rejects live client-epoch retirement without a detail endpoint', async t => {
+  let response; const f = await fixture(t, (_request, r) => { response = r; }), reader = createRechargeOrderReader(f.client, () => true); t.after(() => reader.dispose());
+  const first = reader.readList(), observed = first.catch(reason => reason); assert.equal(reader.readList(), first); await wait(() => f.calls.length === 1);
+  f.client.financeSessionEpoch++; send(response, { items: [pending()] }); assert.equal((await observed).name, 'AbortError');
+  await assert.rejects(reader.readList(), reason => reason.name === 'AbortError'); assert.equal(f.calls.length, 1);
+});
+
+test('list timer stops on permission denial and owner retirement, without selecting an order', async t => {
+  for (const status of [401, 403]) {
+    const f = await fixture(t, (_request, response) => send(response, {}, status)), reader = createRechargeOrderReader(f.client, () => true), timers = clock(); let errors = 0;
+    const stop = startRechargeOrderListPolling({ timers, isCurrent: () => true, hasPayableOrders: () => true,
+      read: () => reader.readList(), accept: () => assert.fail('denied list accepted'), onError: () => { errors++; } });
+    t.after(() => { stop(); reader.dispose(); }); timers.fire(); await wait(() => errors === 1); assert.equal(timers.queue.size, 0);
+    assert.deepEqual(f.calls, [{ method: 'GET', url: '/api/token/v1/recharge/orders' }]);
+  }
+});
+
+test('dismissed window consumes only already-started owned paid proof without another HTTP', async t => {
+  for (const owned of [true, false]) {
+    let response, visible = true; const f = await fixture(t, (_request, r) => { response = r; });
+    const timers = clock(), reader = createRechargeOrderReader(f.client, () => true); let accepted = 0;
+    const stop = startRechargeOrderPolling({ reader, timers, getOrder: pending, isCurrent: () => visible,
+      allowLatePaid: () => owned, accept: latest => { assert.equal(latest.status, 'PAID'); accepted++; } });
+    t.after(() => reader.dispose()); timers.fire(); await wait(() => f.calls.length === 1); visible = false; stop();
+    send(response, { ...pending(), status: 'PAID', qr_data: '', payment_url: '' }); await wait(() => f.active() === 0);
+    await new Promise(resolve => setTimeout(resolve, 20)); assert.equal(accepted, owned ? 1 : 0);
+    assert.equal(f.calls.length, 1); assert.equal(timers.queue.size, 0);
+  }
 });

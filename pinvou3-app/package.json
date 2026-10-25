@@ -4,6 +4,7 @@
   "description": "品悟智能助手桌面应用",
   "private": true,
   "scripts": {
+    "test:account-platform-recharge-ui": "node tests/account_platform_recharge_payment_ui_smoke.mjs",
     "tauri": "node scripts/tauri/build.js",
     "dev": "node scripts/tauri/build.js dev",
     "dev:ui": "node scripts/tauri/build.js dev",

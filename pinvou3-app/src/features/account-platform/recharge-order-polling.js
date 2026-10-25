@@ -28,11 +28,22 @@ export function createRechargeOrderReader(client, isCurrent) {
       pending.set(orderID, result);
       return result;
     },
+    pending(orderID) { return pending.get(orderID); },
+    readList() {
+      if (!current()) return Promise.reject(retired());
+      if (pending.has('list')) return pending.get('list');
+      const result = Promise.resolve().then(() => {
+        if (!current()) throw retired();
+        return client.rechargeOrders(controller.signal);
+      }).then(value => { if (!current()) throw retired(); return value; })
+        .finally(() => { if (pending.get('list') === result) pending.delete('list'); });
+      pending.set('list', result); return result;
+    },
     dispose() { closed = true; controller.abort(); pending.clear(); },
   };
 }
 
-export function startRechargeOrderPolling({ reader, getOrder, isCurrent, accept, onError,
+export function startRechargeOrderPolling({ reader, getOrder, isCurrent, accept, onError, allowLatePaid,
   timers = globalThis, now = Date.now, random = Math.random }) {
   const orderID = getOrder()?.order_id;
   let stopped = false, timer, attempt = 0;
@@ -46,7 +57,12 @@ export function startRechargeOrderPolling({ reader, getOrder, isCurrent, accept,
     try {
       const request = reader.read(orderID);
       latest = await request;
-      if (!current()) return;
+      if (!current()) {
+        // A dismissed/expired window stops scheduling, but an already-started
+        // owned paid read may still refresh facts without restoring instructions.
+        if (allowLatePaid?.() && ['PAID', 'PAID_LATE'].includes(latest.status)) await accept(latest, request);
+        return;
+      }
       await accept(latest, request);
       if (current() && isPayablePaymentOrder(latest, now())) schedule();
     } catch (reason) {
@@ -66,4 +82,25 @@ export async function refreshPaidRechargeRead(order, request, seen, refresh) {
   if (!['PAID', 'PAID_LATE'].includes(order.status) || seen.has(request)) return;
   seen.add(request);
   await refresh();
+}
+
+// A closed payment window still receives callback changes through the collection.
+// This reader never selects an order and never fetches its QR/detail endpoint.
+export function startRechargeOrderListPolling({ read, hasPayableOrders, isCurrent, accept, onError,
+  timers = globalThis, random = Math.random }) {
+  let stopped = false, timer, attempt = 0;
+  const current = () => !stopped && isCurrent();
+  const schedule = () => { if (current() && hasPayableOrders()) timer = timers.setTimeout(() => { void poll(); }, rechargePollDelay(attempt++, random)); };
+  const poll = async () => {
+    if (!current() || !hasPayableOrders()) return;
+    try { const result = await read(); if (!current()) return; await accept(result); }
+    catch (reason) {
+      if (!current() || reason?.name === 'AbortError') return;
+      onError?.(reason);
+      if (reason?.status === 401 || reason?.status === 403) { stopped = true; return; }
+    }
+    schedule();
+  };
+  schedule();
+  return () => { stopped = true; timers.clearTimeout(timer); };
 }

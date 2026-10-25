@@ -64,3 +64,9 @@
 .ap-closure-confirm-dialog input { box-sizing: border-box; width: 100%; min-height: 40px; padding: 8px; margin-bottom: 16px; }
 .ap-closure-confirm-dialog footer { display: flex; justify-content: flex-end; gap: 12px; }
 .ap-closure-confirm-dialog button { min-height: 40px; padding: 8px 12px; }
+.ap-pending-payments { list-style: none; padding: 0; }
+.ap-pending-payments li { display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 12px; padding: 12px 0; border-bottom: 1px solid #8884; }
+.ap-payment-dialog img { display: block; max-width: 100%; height: auto; margin: 12px auto; }
+
+.ap-payment-dialog { box-sizing: border-box; }
+.ap-payment-dialog footer { flex-wrap: wrap; }

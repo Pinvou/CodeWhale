@@ -26,7 +26,7 @@ try {
       const original = globalThis.fetch;
       window.controlledOrderNow = Date.parse('2026-09-01T00:00:00Z');
       Date.now = () => window.controlledOrderNow;
-      const item = { order_id: window.f02.id, product_id: 'personal-base', display_name_en: 'Controlled product', amount_fen: '100', status: 'PENDING', close_status: 'OPEN', created_at: '2026-08-31T00:00:00Z', paid_at: '2026-08-31T01:00:00Z', expires_at: '2026-09-01T00:10:00Z', credited_at: '2026-08-01T00:00:00Z', valid_until: '2026-08-31T00:00:00Z', payment_url: 'https://payments.example/pay', qr_data: 'data:image/png;base64,aGVsbG8=', qr_scan_apps: ['ALIPAY', ' alipay ', 'WECHAT'] };
+      const item = { order_id: window.f02.id, product_id: 'personal-base', display_name_en: 'Controlled product', amount_fen: '100', status: 'PENDING', close_status: 'OPEN', created_at: '2026-08-31T00:00:00Z', paid_at: '2026-08-31T01:00:00Z', expires_at: '2026-09-01T00:10:00Z', credited_at: '2026-08-01T00:00:00Z', valid_until: '2026-08-31T00:00:00Z', payment_url: 'https://payments.example/pay', qr_data: 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+aNbQAAAAASUVORK5CYII=', qr_scan_apps: ['ALIPAY', ' alipay ', 'WECHAT'] };
       globalThis.fetch = async (url, options = {}) => {
         if (url.endsWith('/v1/recharge/orders') && (options.method || 'GET') === 'GET') return new Response(JSON.stringify({ items: [item] }), { status: 200 });
         if (url.endsWith(`/v1/recharge/orders/${window.f02.id}`)) return new Response(JSON.stringify(item), { status: 200 });
@@ -37,11 +37,15 @@ try {
     });
     await page.waitForFunction(() => document.querySelector('tbody')?.textContent.includes('2026-08-31T01:00:00Z'));
     await page.evaluate(() => { const text = window.f02.languageCopy().details; [...document.querySelectorAll('button')].find(button => button.textContent.trim() === text && !button.disabled).click(); });
-    await page.waitForSelector('article img');
-    assert.ok(await page.evaluate(() => { const text = document.querySelector('article').textContent; const copy = window.f02.languageCopy(); return text.includes(copy.durationDays(30)) && text.includes(copy.scanToPayWithApps([copy.channels.ALIPAY, copy.channels.WECHAT])); }));
-    await page.waitForFunction(() => document.querySelector('article').textContent.includes(window.f02.languageCopy().countdown(600)));
+    await page.waitForSelector('article');
+    assert.equal(await page.$('article img, article a'), null, 'history details must not restore payment instructions');
+    await page.waitForFunction(() => [...document.querySelectorAll('button')].some(button => button.textContent.trim() === window.f02.languageCopy().continuePayment && !button.disabled));
+    await page.evaluate(() => { const text = window.f02.languageCopy().continuePayment; [...document.querySelectorAll('button')].find(button => button.textContent.trim() === text && !button.disabled).click(); });
+    await page.waitForSelector('[role=dialog] img');
+    assert.ok(await page.evaluate(() => { const text = document.querySelector('article').textContent + document.querySelector('[role=dialog]').textContent; const copy = window.f02.languageCopy(); return text.includes(copy.durationDays(30)) && text.includes(copy.scanToPayWithApps([copy.channels.ALIPAY, copy.channels.WECHAT])); }));
+    await page.waitForFunction(() => document.querySelector('[role=dialog]')?.textContent.includes(window.f02.languageCopy().countdown(600)));
     await page.evaluate(() => { window.controlledOrderNow += 600000; });
-    await page.waitForFunction(() => !document.querySelector('article img, article a') && ![...document.querySelectorAll('article button')].some(button => button.textContent.trim() === window.f02.languageCopy().close));
+    await page.waitForFunction(() => !document.querySelector('[role=dialog], article img, article a') && ![...document.querySelectorAll('article button')].some(button => button.textContent.trim() === window.f02.languageCopy().close));
     assert.deepEqual(errors, []); passed++; console.log(`PASS ${language} actual order facts, provider prompt and expiry actions`);
     await page.close();
   }
