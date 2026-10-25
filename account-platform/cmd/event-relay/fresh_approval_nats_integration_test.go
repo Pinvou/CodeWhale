@@ -176,16 +176,39 @@ func TestFreshApprovalConsumersActualTLSNATS(t *testing.T) {
 	var wire struct {
 		HighWatermark string `json:"high_watermark"`
 		BillingStarts []struct {
+			Durable       string `json:"durable"`
 			StartSequence string `json:"start_sequence"`
 		} `json:"billing_starts"`
 	}
-	if json.Unmarshal(receipt, &wire) != nil || wire.HighWatermark != "1" || len(wire.BillingStarts) != 3 {
+	// Independently pin the released Billing command/durable inventory; an empty
+	// or incomplete producer registry must not make both sides agree by accident.
+	expectedBillingDurables := map[string]bool{
+		"billing-usage-settlement-repair-executor-p1-v1":          true,
+		"billing-reconciliation-financial-repair-executor-p1-v1":  true,
+		"billing-chargeback-financial-repair-executor-p1-v1":      true,
+		"billing-refund-exception-repair-executor-p1-v1":          true,
+		"billing-payment-financial-repair-executor-p1-v1":         true,
+		"billing-entitlement-component-adjustment-executor-p2-v1": true,
+		"billing-ledger-repair-executor-p1-v1":                    true,
+		"billing-wallet-adjustment-executor-p1-v1":                true,
+		"billing-payment-provider-resume-executor-p2-v1":          true,
+		"billing-payment-product-resume-executor-p1-v1":           true,
+		"billing-receivable-write-off-executor-p1-v1":             true,
+	}
+	if json.Unmarshal(receipt, &wire) != nil || wire.HighWatermark != "1" || len(wire.BillingStarts) != len(expectedBillingDurables) {
 		t.Fatal("receipt lost actual high watermark or command scope")
 	}
 	for _, s := range wire.BillingStarts {
+		if !expectedBillingDurables[s.Durable] {
+			t.Fatal("receipt contains an unknown or repeated Billing durable")
+		}
+		delete(expectedBillingDurables, s.Durable)
 		if s.StartSequence != "2" {
 			t.Fatal("receipt did not use actual Q+1")
 		}
+	}
+	if len(expectedBillingDurables) != 0 {
+		t.Fatal("receipt omitted a released Billing durable")
 	}
 	stream, err := js.Stream(ctx, "ACCOUNT_PLATFORM")
 	if err != nil {
