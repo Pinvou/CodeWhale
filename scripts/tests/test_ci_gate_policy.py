@@ -3323,9 +3323,14 @@ class CiGatePolicyTests(unittest.TestCase):
         # by GATE_JOB_LEVEL_IFS["rust-test"]; the asserts below keep the
         # step-level pins that `if:` cannot cover.
         self.assertIn(
-            "cargo test --manifest-path pinvou3-app/src-tauri/Cargo.toml --no-default-features --lib --locked -- --test-threads=1",
+            "cargo test --manifest-path pinvou3-app/src-tauri/Cargo.toml --no-default-features --lib --features benchmark-hooks --locked -- --test-threads=1",
             rust_test,
         )
+        # 开源侧同口径：Linux lib 腿显式开启 benchmark-hooks，headless-bridge
+        # 合同回归随全量 lib 测试编译并执行（可编译性另由 rust-lint 的
+        # all-targets check 钉住）；--no-default-features 的 local-embed 关闭
+        # 理由不变（避免 fastembed/ORT 重复链接进巨型测试二进制）。
+        self.assertIn("--no-default-features --lib --features benchmark-hooks --locked --no-run", rust_test)
         # PR #1518 closed the last unlocked repo-workspace cargo-test leg:
         # all four src-tauri cargo-test run lines in this job carry --locked
         # (lib --no-run on PR and push, --lib execution, behavior_telemetry

@@ -1896,6 +1896,11 @@ jobs:
       # 已经很大的 pinvou3_lib 测试二进制。local-embed 覆盖没有删除：
       # knowledge-rust 仍以 --all-features 测试 pinvou-knowledge，rust-lint 与原生
       # Windows 门禁仍按默认 features 编译应用集成路径。
+      # benchmark-hooks 则显式开启（与开源 Linux 腿同口径）：headless-bridge
+      # 合同回归只存在于该 feature 下，仅编译不执行会漏掉运行期断言。该 feature
+      # 只拉 workspace 内 agent-backend-api 与 deepseek-tui/benchmark-eval-controls，
+      # 不引入 local-embed 的 fastembed/ORT 重依赖；可编译性已由 rust-lint 的
+      # all-targets check 先行钉住。
       # 编译链接与测试执行拆成两个 step:该 job 在标准 hosted runner 上多次在
       # 本环节被打到 runner 失联(日志全丢,只剩 step 状态可查),拆开后失联时
       # 能定位是编译/链接期还是测试执行期。内存压力现由 job 开头的
@@ -1909,7 +1914,7 @@ jobs:
       # 只有下方超出单进程内存预算的 behavior-telemetry 测试使用独立目标。
       - name: cargo test --lib --no-run（编译链接测试二进制）
         if: ${{ github.event_name != 'push' }}
-        run: /usr/bin/time -v cargo test --manifest-path pinvou3-app/src-tauri/Cargo.toml --no-default-features --lib --locked --no-run
+        run: /usr/bin/time -v cargo test --manifest-path pinvou3-app/src-tauri/Cargo.toml --no-default-features --lib --features benchmark-hooks --locked --no-run
 
       # Test registry guard: a duplicated #[test] registers one case twice and
       # swallows the adjacent case's attributes (happened twice on upstream PR
@@ -1931,7 +1936,7 @@ jobs:
           chrome="$(command -v google-chrome || command -v chromium || command -v chromium-browser)"
           export CHROME="$chrome"
           export PINVOU_REQUIRE_REMOTE_E2E=1
-          cargo test --manifest-path pinvou3-app/src-tauri/Cargo.toml --no-default-features --lib --locked -- --test-threads=1
+          cargo test --manifest-path pinvou3-app/src-tauri/Cargo.toml --no-default-features --lib --features benchmark-hooks --locked -- --test-threads=1
 
       # The behavior-telemetry state-machine tests intentionally use a separate
       # harness. Linking their 2,300+ source lines into the already-large lib
@@ -1978,7 +1983,7 @@ jobs:
       # 故恢复只编译设计;不要在 push 上重新打开测试执行。
       - name: cargo test --lib --no-run (push main 仅编译暖 cache)
         if: ${{ github.event_name == 'push' }}
-        run: /usr/bin/time -v cargo test --manifest-path pinvou3-app/src-tauri/Cargo.toml --no-default-features --lib --locked --no-run
+        run: /usr/bin/time -v cargo test --manifest-path pinvou3-app/src-tauri/Cargo.toml --no-default-features --lib --features benchmark-hooks --locked --no-run
 
   # pinvou-cli contract tests: since PR #478 the product CLI surface (~20k
   # lines + ~340 contract tests) has no other automated execution leg (the
