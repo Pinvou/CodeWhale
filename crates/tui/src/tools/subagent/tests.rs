@@ -15798,13 +15798,17 @@ fn spawn_child_runtime_inherits_session_client_and_config() {
             child.client.api_provider(),
             crate::config::ApiProvider::Deepseek
         );
+        // The endpoint is not interpolated into the panic message: the child
+        // config is built from the session's credential-bearing provider
+        // settings, and echoing the resolved URL hands CodeQL's
+        // cleartext-logging taint a sink (and would echo a credential-bearing
+        // config's endpoint into logs on failure).
         assert!(
             child
                 .client
                 .base_url()
                 .contains("session-provider.example.com"),
-            "child stays on the session endpoint, got {}",
-            child.client.base_url()
+            "child stays on the session endpoint"
         );
         assert!(std::sync::Arc::ptr_eq(
             runtime.api_config.as_ref().expect("session config"),
