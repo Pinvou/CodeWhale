@@ -7,7 +7,6 @@ import (
 	"strings"
 
 	"github.com/Pinvou/pinvou3/account-platform/internal/platform/payment"
-	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 )
 
@@ -40,6 +39,26 @@ func (p *PaymentCoordinator) recoverDispatchedRefund(ctx context.Context, reques
 	if p.Capabilities().ProviderID != order.ProviderID || p.Capabilities().Version != order.ProviderVersion {
 		return refund, true, ErrConflict
 	}
+	if known, err := persistedRefundSuccess(ctx, tx, order, refund); known || err != nil {
+		return refund, true, err
+	}
+	reader, ok := p.provider.(payment.RefundQuerier)
+	if !ok {
+		return refundQueryReview(ctx, tx, refund, p)
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return refund, true, err
+	}
+	result, queryErr := providerCall(ctx, p, "REFUND", "query", false, providerCallScope(order), func() (ProviderRefund, error) {
+		return reader.QueryRefund(ctx, order.MerchantOrderNo, refund.MerchantRefundNo)
+	})
+	settled, err := p.finishRefundProviderResult(ctx, order, refund, result, queryErr, true)
+	return settled, true, err
+}
+
+// The original canonical receipt is immutable and can retire a duplicate
+// result without new provider I/O or another F13 snapshot/version mutation.
+func persistedRefundSuccess(ctx context.Context, tx pgx.Tx, order PaymentOrder, refund Refund) (bool, error) {
 	// The exact result already persisted for F13 is final evidence. Repeated
 	// reconciliation must not mutate its approval snapshot or query externally.
 	// Evidence stores this lookup identity with the published TrimSpace rule.
@@ -51,52 +70,25 @@ func (p *PaymentCoordinator) recoverDispatchedRefund(ctx context.Context, reques
 	}
 	var raw []byte
 	var digest string
-	err = tx.QueryRow(ctx, `SELECT payload_snapshot,payload_digest FROM payment_evidence WHERE payment_order_id=$1 AND payment_transaction_id=$2
+	err := tx.QueryRow(ctx, `SELECT payload_snapshot,payload_digest FROM payment_evidence WHERE payment_order_id=$1 AND payment_transaction_id=$2
  AND provider_id=$3 AND provider_version=$4 AND evidence_type='QUERY' AND evidence_key=$5 AND provider_status='SUCCESS'
  AND provider_refund_id=$6 AND amount_fen=$7 AND currency=$8 ORDER BY received_at,id LIMIT 1`, order.ID, refund.PaymentTransactionID,
 		order.ProviderID, order.ProviderVersion, "refund:"+refund.ID.String()+":"+refund.MerchantRefundNo, evidenceRefundID, refund.AmountFen, order.Currency).Scan(&raw, &digest)
 	if err == nil {
 		var result ProviderRefund
 		if json.Unmarshal(raw, &result) != nil || !refundQueryResultMatches(refund, result) || result.Status != "SUCCESS" {
-			return refund, true, ErrConflict
+			return false, ErrConflict
 		}
 		canonical, err := json.Marshal(result)
 		if err != nil || digestHex(canonical) != digest {
-			return refund, true, ErrConflict
+			return false, ErrConflict
 		}
-		return refund, true, nil
+		return true, nil
 	}
 	if !errors.Is(err, pgx.ErrNoRows) {
-		return refund, true, err
+		return false, err
 	}
-	reader, ok := p.provider.(payment.RefundQuerier)
-	if !ok {
-		return refundQueryReview(ctx, tx, refund, p)
-	}
-	result, queryErr := providerCall(ctx, p, "REFUND", "query", false, providerCallScope(order), func() (ProviderRefund, error) {
-		return reader.QueryRefund(ctx, order.MerchantOrderNo, refund.MerchantRefundNo)
-	})
-	if queryErr != nil || !refundQueryResultMatches(refund, result) || result.Status != "SUCCESS" && result.Status != "FAILED" {
-		return refundQueryReview(ctx, tx, refund, p)
-	}
-	blocked, err := packageFinancialFreezeBlocked(ctx, tx, refund.EntitlementPackageID, order.WalletID, refund.ID, uuid.Nil)
-	if err != nil {
-		return refund, true, err
-	}
-	if blocked && result.Status == "SUCCESS" {
-		refund, err = p.recordRefundSuccessConflict(ctx, tx, order, refund, result, "competing financial evidence after original provider refund", p.now())
-		if err != nil {
-			return refund, true, err
-		}
-		return refund, true, tx.Commit(ctx)
-	}
-	// Settlement retains the ordinary grant CAS. An authoritative SUCCESS over
-	// a prior suspension becomes the existing local-conflict evidence for F13.
-	if _, err := tx.Exec(ctx, `UPDATE refunds SET status='REQUESTED' WHERE id=$1 AND status='MANUAL_REVIEW'`, refund.ID); err != nil {
-		return refund, true, err
-	}
-	resultRefund, _, err := p.finishRefundTransaction(ctx, tx, refund, result, false)
-	return resultRefund, true, err
+	return false, nil
 }
 
 func refundQueryResultMatches(refund Refund, result ProviderRefund) bool {

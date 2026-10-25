@@ -325,38 +325,15 @@ func (p *PaymentCoordinator) processRefund(ctx context.Context, refundID uuid.UU
 	if err != nil {
 		return refund, err
 	}
+	// The financial eligibility gate is local and short. The durable original
+	// dispatch claim already exists; no wallet/order/refund lock crosses I/O.
+	if err := tx.Commit(ctx); err != nil {
+		return refund, err
+	}
 	providerRefund, providerErr := providerCall(ctx, p, "REFUND", "default", true, ProviderCallScope{OrderID: refund.PaymentOrderID, SubjectID: refund.RequesterID}, func() (ProviderRefund, error) {
 		return p.provider.Refund(ctx, merchantOrderNo, refund.MerchantRefundNo, refund.AmountFen)
 	})
-	if providerErr != nil {
-		// JetStream may redeliver this event. Retain the possible dispatch so
-		// recovery only queries the original refund and never repeats creation.
-		if _, err := tx.Exec(ctx, `UPDATE refunds SET dispatch_state='RESULT_UNKNOWN',dispatch_lease_until=NULL WHERE id=$1`, refundID); err != nil {
-			return refund, err
-		}
-		if err := tx.Commit(ctx); err != nil {
-			return refund, err
-		}
-		return refund, ErrPaymentProvider
-	}
-	if reconcile {
-		// The trusted idempotent provider result, not the human's declaration,
-		// must prove the terminal outcome before re-entering local settlement.
-		if providerRefund.MerchantRefundNo != refund.MerchantRefundNo || providerRefund.AmountFen != refund.AmountFen || providerRefund.Status != "SUCCESS" && providerRefund.Status != "FAILED" || providerRefund.Status == "SUCCESS" && strings.TrimSpace(providerRefund.ChannelRefundID) == "" {
-			if _, err := tx.Exec(ctx, `UPDATE refunds SET dispatch_state='RESULT_UNKNOWN',dispatch_lease_until=NULL WHERE id=$1`, refundID); err != nil {
-				return refund, err
-			}
-			if err := tx.Commit(ctx); err != nil {
-				return refund, err
-			}
-			return refund, ErrConflict
-		}
-		if _, err := tx.Exec(ctx, `UPDATE refunds SET status='REQUESTED' WHERE id=$1 AND status='MANUAL_REVIEW'`, refundID); err != nil {
-			return refund, err
-		}
-	}
-	result, _, err := p.finishRefundTransaction(ctx, tx, refund, providerRefund, false)
-	return result, err
+	return p.finishRefundProviderResult(ctx, order, refund, providerRefund, providerErr, false)
 }
 
 func (p *PaymentCoordinator) reserveRefund(ctx context.Context, orderID, requesterID, transactionID, packageID uuid.UUID, idempotencyKey, requestHash, reason string) (Refund, bool, error) {

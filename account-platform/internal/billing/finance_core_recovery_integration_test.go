@@ -334,10 +334,10 @@ func TestFinanceRefundCancelledCallReleasesFinancialGate(t *testing.T) {
 	case <-ctx.Done():
 		t.Fatal("provider gate not reached")
 	}
-	freezeCtx, stop := context.WithTimeout(ctx, 150*time.Millisecond)
+	freezeCtx, stop := context.WithTimeout(ctx, 2*time.Second)
 	defer stop()
-	if _, err := r.RecordAndFreezeForcedRefund(freezeCtx, money, "concurrent-before-cancel", 100, nil); err == nil {
-		t.Fatal("financial writer passed active refund gate")
+	if _, err := r.RecordAndFreezeForcedRefund(freezeCtx, money, "concurrent-before-cancel", 100, nil); err != nil {
+		t.Fatal("provider network retained the financial gate", err)
 	}
 	cancel()
 	select {
@@ -348,7 +348,7 @@ func TestFinanceRefundCancelledCallReleasesFinancialGate(t *testing.T) {
 	case <-ctx.Done():
 		t.Fatal("refund cancellation did not release gate")
 	}
-	if _, err := r.RecordAndFreezeForcedRefund(ctx, money, "concurrent-after-cancel", 100, nil); err != nil {
+	if _, err := r.RecordAndFreezeForcedRefund(ctx, money, "concurrent-before-cancel", 100, nil); err != nil {
 		t.Fatal("cancelled call left financial gate locked", err)
 	}
 	var posted int64

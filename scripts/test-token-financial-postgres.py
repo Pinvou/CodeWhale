@@ -92,6 +92,7 @@ OWNER_REQUIRED = {
 }
 PROVISIONING_REQUIRED = {"TestTokenWalletSupplierActualProvisioningConsumerPostgres"}
 REFUND_REQUIRED = {
+    "TestRefundProviderNetworkOutsideFinancialTransactionPostgres",
     "TestRefundRejectsPlanBeforeFinancialWritesPostgres",
     "TestRefundSuspendedMemberAdmissionWithoutEarlierBlockerPostgres",
     "TestRefundStalePreflightCannotReclaimUnknownDispatchPostgres",

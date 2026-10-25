@@ -28,7 +28,7 @@ import (
 // the original limited payment_simulator role, including actual protected
 // HTTP adapter/SQL. No supplier or real money is used. The counters distinguish
 // read-only original-result recovery from creating/repeating any refund.
-func refundQuerySimulator(t *testing.T, ctx context.Context) (*paymentsimulator.Provider, *atomic.Int32, *atomic.Int32) {
+func refundQuerySimulator(t *testing.T, ctx context.Context, interceptors ...func(http.Handler) http.Handler) (*paymentsimulator.Provider, *atomic.Int32, *atomic.Int32) {
 	t.Helper()
 	t.Setenv("APP_ENV", "test")
 	raw := os.Getenv("PINVOU_TEST_BILLING_DATABASE_URL")
@@ -134,6 +134,9 @@ func refundQuerySimulator(t *testing.T, ctx context.Context) (*paymentsimulator.
 	t.Cleanup(sim.Close)
 	reads, writes := &atomic.Int32{}, &atomic.Int32{}
 	handler := paymentsim.NewService(sim).Handler(token)
+	for _, intercept := range interceptors {
+		handler = intercept(handler)
+	}
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if strings.Contains(r.URL.Path, "/refunds") {
 			if r.Method == http.MethodGet {

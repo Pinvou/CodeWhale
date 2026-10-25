@@ -48,8 +48,9 @@ func ordinaryRefundReservationsEligible(ctx context.Context, source queryable, r
 }
 
 // This preflight precedes the durable possible-dispatch claim. The ordinary
-// financial transaction repeats the check under the wallet/order/refund gate,
-// so a concurrent lifecycle change cannot race an external call.
+// preparation transaction repeats the check under the wallet/order/refund gate.
+// The provider call follows that commit; local settlement reacquires the gate
+// and rechecks any lifecycle or financial evidence arriving during the call.
 func (p *PaymentCoordinator) refundDispatchGrantPreflight(ctx context.Context, requested Refund, reconcile bool) (Refund, bool, error) {
 	tx, err := p.repository.pool.Begin(ctx)
 	if err != nil {

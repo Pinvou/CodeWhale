@@ -15,6 +15,21 @@ SPEC.loader.exec_module(RUNNER)
 
 
 class FinancialPostgresRunnerTests(unittest.TestCase):
+    def test_refund_network_boundary_requires_completed_children(self):
+        root = "TestRefundProviderNetworkOutsideFinancialTransactionPostgres"
+        self.assertIn(root, RUNNER.REFUND_REQUIRED)
+        self.assertIn(root, RUNNER.BILLING_CHILD_REQUIRED)
+        valid = self.events(RUNNER.RETAINED_REQUIRED, RUNNER.BILLING_PACKAGE, children=True)
+        options = {"package": RUNNER.BILLING_PACKAGE, "require_children": True, "exact_roots": True,
+                   "children_required": RUNNER.BILLING_CHILD_REQUIRED}
+        RUNNER.verify_results(valid, RUNNER.RETAINED_REQUIRED, **options)
+        for invalid in ([e for e in valid if e.get("Test", "").split("/", 1)[0] != root],
+                        [e for e in valid if not e.get("Test", "").startswith(root + "/")],
+                        valid + [{"Action": "skip", "Package": RUNNER.BILLING_PACKAGE, "Test": root + "/actual"}]):
+            with self.assertRaises(RuntimeError):
+                RUNNER.verify_results(invalid, RUNNER.RETAINED_REQUIRED, **options)
+
+
     def test_approval_list_pool_root_is_selected_and_requires_real_children(self):
         name = "TestApprovalListPoolRuntimePostgres"
         roots, package = RUNNER.ACCOUNT_REQUIRED, RUNNER.ACCOUNT_PACKAGE
@@ -913,10 +928,11 @@ class FinancialPostgresRunnerTests(unittest.TestCase):
             "TestRefundLegacyUnknownSuccessQueriesOriginalSimulatorThenRepairsPostgres",
             "TestRefundUnknownMissingSimulatorResultNeverCreatesRefundPostgres",
             "TestRefundOriginalUnknownSuccessQueriesAndSettlesOrdinaryGrantsPostgres",
+            "TestRefundProviderNetworkOutsideFinancialTransactionPostgres",
         }
         self.assertEqual(RUNNER.REFUND_REQUIRED, expected)
         self.assertTrue(expected <= RUNNER.RETAINED_REQUIRED)
-        self.assertEqual(len(RUNNER.RETAINED_REQUIRED), 41)
+        self.assertEqual(len(RUNNER.RETAINED_REQUIRED), 42)
         valid = self.events(RUNNER.RETAINED_REQUIRED, RUNNER.BILLING_PACKAGE, children=True)
         options = {"package": RUNNER.BILLING_PACKAGE, "require_children": True, "exact_roots": True,
                    "children_required": RUNNER.BILLING_CHILD_REQUIRED}
