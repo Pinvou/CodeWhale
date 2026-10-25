@@ -43,20 +43,39 @@ func (w *RegistrationRecoveryWorker) Run(ctx context.Context) {
 }
 
 func (w *RegistrationRecoveryWorker) RunOnce(ctx context.Context) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	operations, err := w.repository.LeaseRegistrationRecoveries(ctx, 20, 30*time.Second)
 	if err != nil {
 		return err
 	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	// A failed operation must not abandon the other independently leased rows.
+	var failures []error
 	for _, operation := range operations {
-		itemCtx, cancel, err := withIdentityRecoveryClaim(ctx, "registration", operation.ID, operation.RecoveryGeneration, operation.RecoveryLeaseUntil)
-		if err != nil {
-			return err
+		if err := ctx.Err(); err != nil {
+			return errors.Join(append(failures, err)...)
 		}
-		_, err = w.auth.resumeRegistration(itemCtx, operation)
-		cancel()
+		itemCtx, cancel, err := withIdentityRecoveryClaim(ctx, "registration", operation.ID, operation.RecoveryGeneration, operation.RecoveryLeaseUntil)
+		var itemErr error
+		if err == nil {
+			_, err = w.auth.resumeRegistration(itemCtx, operation)
+			// Inspect the lease context before cancel releases its resources.
+			itemErr = itemCtx.Err()
+			cancel()
+		}
 		if err != nil && !errors.Is(err, ErrRegistrationRecovering) && !errors.Is(err, ErrRegistrationRestart) {
-			return err
+			failures = append(failures, err)
+		}
+		if err := ctx.Err(); err != nil {
+			return errors.Join(append(failures, err)...)
+		}
+		if itemErr != nil {
+			return errors.Join(append(failures, itemErr)...)
 		}
 	}
-	return nil
+	return errors.Join(failures...)
 }
