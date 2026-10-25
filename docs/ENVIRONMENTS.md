@@ -6,10 +6,10 @@ they do not cost context on machines that will never hit them.
 
 ## Cursor Cloud VMs
 
-- **System build dep:** the build needs `libdbus-1-dev` (pulled in by
-  `crates/secrets` for the OS keyring). It is installed by the startup update
-  script; if a `cargo build` fails with a `dbus`/`pkg-config` error, that dep is
-  missing.
+- **System build deps:** the build needs a C toolchain (`build-essential`) and
+  `pkg-config`. `crates/secrets` uses the pure-Rust zbus D-Bus backend for the
+  OS keyring and no longer needs `libdbus-1-dev`; if a `cargo build` fails with
+  a `dbus`/`pkg-config` error, a toolchain package is missing.
 - **`rustup default` must be set:** some tests and runtime paths spawn shells in
   temp dirs *outside* this checkout (e.g. `run_verifiers_background_*`, sub-agent
   worktrees). Those spawned shells only see the repo's `rust-toolchain.toml`

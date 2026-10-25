@@ -10,7 +10,9 @@ use reqwest::Url;
 use reqwest::header::{HeaderMap, HeaderName, HeaderValue};
 use rmcp::transport::AuthorizationManager;
 use rmcp::transport::AuthorizationSession;
-use rmcp::transport::auth::{AuthError, OAuthClientConfig, OAuthState, OAuthTokenResponse};
+use rmcp::transport::auth::{
+    AuthError, AuthorizationRequest, OAuthClientConfig, OAuthState, OAuthTokenResponse,
+};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -234,6 +236,24 @@ impl std::fmt::Display for OAuthProviderError {
 
 impl std::error::Error for OAuthProviderError {}
 
+/// Build the rmcp `AuthorizationManager` every OAuth path in this module
+/// starts from, routed through the given client.
+///
+/// rmcp 3 rejects authorization-server metadata that omits `issuer` by
+/// default (modelcontextprotocol/rust-sdk#1054), but servers this tui served
+/// under rmcp 2.2 still publish such metadata (rust-sdk#1047) and the stored
+/// token path resolves metadata too, so strict mode would brick them on
+/// upgrade. Allow a missing issuer; a mismatching issuer is still rejected.
+async fn new_authorization_manager(
+    url: &str,
+    client: reqwest::Client,
+) -> Result<AuthorizationManager> {
+    let mut manager = AuthorizationManager::new(url).await?;
+    manager.set_allow_missing_issuer(true);
+    manager.with_client(client)?;
+    Ok(manager)
+}
+
 /// Build an `AuthorizationManager` preloaded with stored credentials, the
 /// shared construction step for initial load and for adopting a credential
 /// that another process rotated on disk.
@@ -245,7 +265,8 @@ async fn manager_from_stored_tokens(
     let client = apply_default_headers(crate::tls::reqwest_client_builder(), default_headers)
         .build()
         .context("building MCP OAuth metadata client")?;
-    let mut state = OAuthState::new(url.to_string(), Some(client)).await?;
+    let manager = new_authorization_manager(url, client).await?;
+    let mut state = OAuthState::Unauthorized(manager);
     state
         .set_credentials(&tokens.client_id, tokens.token_response.0.clone())
         .await
@@ -609,11 +630,10 @@ async fn discover_streamable_http_oauth_with_headers(
         .timeout(Duration::from_secs(5))
         .build()
         .context("building MCP OAuth discovery client")?;
-    let mut manager = AuthorizationManager::new(url).await?;
-    manager.with_client(client)?;
-    match manager.discover_metadata().await {
-        Ok(metadata) => Ok(Some(McpOAuthDiscovery {
-            scopes_supported: normalize_scopes(metadata.scopes_supported),
+    let manager = new_authorization_manager(url, client).await?;
+    match manager.resolve_metadata().await {
+        Ok(resolution) => Ok(Some(McpOAuthDiscovery {
+            scopes_supported: normalize_scopes(resolution.metadata.scopes_supported),
         })),
         Err(AuthError::NoAuthorizationSupport) => Ok(None),
         Err(err) => Err(err.into()),
@@ -1345,17 +1365,18 @@ async fn start_authorization(
     oauth_client_id: Option<&str>,
 ) -> Result<OAuthState> {
     let Some(client_id) = oauth_client_id.filter(|client_id| !client_id.trim().is_empty()) else {
-        let mut oauth_state = OAuthState::new(server_url, Some(client)).await?;
-        oauth_state
-            .start_authorization(scopes, redirect_uri, Some("Codewhale"))
-            .await?;
+        let mut oauth_state =
+            OAuthState::Unauthorized(new_authorization_manager(server_url, client).await?);
+        let request = AuthorizationRequest::new(redirect_uri)
+            .with_scopes(scopes.iter().map(|scope| (*scope).to_string()))
+            .with_client_name("Codewhale");
+        oauth_state.start_authorization(request).await?;
         return Ok(oauth_state);
     };
 
-    let mut manager = AuthorizationManager::new(server_url).await?;
-    manager.with_client(client)?;
-    let metadata = manager.discover_metadata().await?;
-    manager.set_metadata(metadata);
+    let mut manager = new_authorization_manager(server_url, client).await?;
+    let resolution = manager.resolve_metadata().await?;
+    manager.set_metadata(resolution.metadata);
     manager.configure_client(
         OAuthClientConfig::new(client_id, redirect_uri)
             .with_scopes(scopes.iter().map(|scope| (*scope).to_string()).collect()),

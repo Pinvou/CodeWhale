@@ -32,6 +32,11 @@ edition = "2024"
 # codebase relies on extensively. Cargo enforces this so users on older
 # toolchains get a clear "package requires rustc 1.88+" error instead of a
 # confusing E0658 from rustc.
+#
+# Lock-held for this MSRV: aes is deliberately kept at 0.9.2 in Cargo.lock;
+# 0.9.3 (what secret-service's crypto-rust pulls on a bare `cargo update`)
+# declares rust-version 1.89. Re-examine when secret-service drops its aes
+# 0.9 requirement or the workspace MSRV reaches 1.89.
 rust-version = "1.88"
 license = "MIT"
 repository = "https://github.com/Hmbown/CodeWhale"
@@ -50,7 +55,7 @@ axum = { version = "0.8.5", features = ["json"] }
 chrono = { version = "0.4.43", features = ["serde"] }
 clap = { version = "4.5.54", features = ["derive"] }
 clap_complete = "4.5"
-dirs = "6.0.0"
+dirs = "7.0.0"
 encoding_rs = "0.8.35"
 # Sole user is crates/workflow-js (schemaui is gone); keep the graph on one
 # jsonschema/jsonschema-regex/referencing/fancy-regex stack.

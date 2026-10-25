@@ -219,8 +219,9 @@ Users behind GitHub-blocking networks can also select a source explicitly:
   The current `codewhale` binary runs the TUI in-process. Cargo users who want
   the optional short command can add a `codew` symlink beside it; a separate
   `codewhale-tui` install is not required.
-  Linux build-time dependencies (`build-essential`, `pkg-config`,
-  `libdbus-1-dev` on Debian/Ubuntu) are required — see
+  Linux build-time dependencies (`build-essential`, `pkg-config`) are
+  required — the D-Bus secret-service backend is pure Rust and needs no
+  `libdbus` system package; see
   [INSTALL.md](INSTALL.md#4-install-via-cargo-any-tier-1-rust-target).
 
 - **CNB release assets** for Linux x64, when the matching CNB tag pipeline has
