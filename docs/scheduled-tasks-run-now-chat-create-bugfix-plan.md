@@ -1679,7 +1679,7 @@ cargo test -p pinvou3-tauri engine_pool --no-run
 
 - 侧边栏记录的删除**只删这一次运行**，绝不调用 `delete_scheduled_task`。
 - 运行中/排队中的运行记录不允许删除（后端返回“正在运行的定时任务记录不能删除”）。
-- 定时运行的 transcript 由 Engine 独占持久化，`ensure_chat_session` 守卫的七个会话覆盖类命令——`chat`、`save_session_messages`、`save_session_artifacts`、save/get `pinjou_scene_events`、save/get `steered_messages`——仍拒绝 `sched-*`（按 `SessionKind` 分发）。
+- 定时运行的 transcript 由 Engine 独占持久化，`ensure_chat_session` 守卫的会话覆盖类命令——`chat`、`save_session_messages`、`save_session_artifacts`、save/get `pinvou_scene_events`、save/get `steered_messages` 等——仍拒绝 `sched-*`（按 `SessionKind` 分发；同一守卫还覆盖 aux 会话的创建/重置与 `move_session_to_project`，合计十个调用点）。
 
 #### 3. 侧边栏“定时任务记录”的范围
 
@@ -1704,7 +1704,7 @@ cargo test -p pinvou3-tauri engine_pool --no-run
 
 #### 6. 立即运行后的执行约束
 
-任务 prompt 原文本来就作为用户消息传入会话（`ScheduledChatExecutor::execute` → `task.prompt()` → `EnginePool::run_scheduled_turn` → `AppEngine::send_scheduled_message`），链路无缺失。为防模型把目标改写成别的事，`engine.rs` 的 `SCHEDULED_TURN_REMINDER` 只加**一条**短约束（走既有 per-turn `<system-reminder>` 通道，复用 persona reminder 参数位）：
+任务 prompt 原文本来就作为用户消息传入会话（`ScheduledChatExecutor::execute` → `task.prompt()` → `EnginePool::run_scheduled_turn` → `AppEngine::send_scheduled_message`），链路无缺失。为防模型把目标改写成别的事，`features/assistant/engine.rs` 的 `SCHEDULED_TURN_REMINDER` 只加**一条**短约束（走既有 per-turn `<system-reminder>` 通道，复用 persona reminder 参数位）：
 
 ```
 本轮是定时任务的自动执行：直接执行用户消息里的任务，不要改写、替换或扩展任务目标。

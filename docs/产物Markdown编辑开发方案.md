@@ -9,10 +9,10 @@
 
 ## 背景
 
-当前 Pinvou3 的产物面板已经支持 Markdown 产物预览，但只是只读渲染：
+方案写作时 Pinvou3 的产物面板已经支持 Markdown 产物预览，但只是只读渲染：
 
 - 前端入口：`pinvou3-app/src/features/artifacts/ArtifactsPanel.jsx`
-- 当前逻辑：`pv.kind === 'md'` 时调用 `bridge.renderMarkdown(pv.text || '')`，再通过 `dangerouslySetInnerHTML` 输出 HTML
+- 当时逻辑：`pv.kind === 'md'` 时调用 `bridge.renderMarkdown(pv.text || '')`，再通过 `dangerouslySetInnerHTML` 输出 HTML（落地后由 `EditableMarkdownPreview` 承接，`rendering.renderMarkdown` 在其内部调用）
 - 后端读取：`pinvou3-app/src-tauri/src/app/commands/artifacts.rs` 的 `read_artifact_text`
 - bridge 暴露：`pinvou3-app/src/platform/tauri/bridge/artifacts.js` 的 `readArtifactText`
 
@@ -426,7 +426,7 @@ prompt 建议：
 
 新增文案：
 
-- `apMdSaved`
+- `apMdSaved`（未采用）
 - `apMdSaving`
 - `apMdDirty`
 - `apMdSaveFailed`
@@ -621,6 +621,8 @@ if (!force && latestDraftRef.current !== lastSavedRef.current) return false;
      handler({ payload: { path: ARTIFACT_PATH, event: "upsert", session_id: "s-md" } });
    });
    ```
+
+   （片段按后端现行两态 payload 书写；现行冒烟 `markdown_artifact_edit_smoke.js` 仍以 `event: 'modified'` 注入——listener 只对 `removed` 分支，其余值一律走刷新路径，两种写法等价。）
 
 5. 等待 UI 更新，断言 contentEditable 内出现“外部更新后的内容”。
 6. 再执行 dirty 保护场景：
