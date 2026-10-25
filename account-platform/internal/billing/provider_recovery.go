@@ -283,7 +283,13 @@ func (r *PostgresRepository) productResumeVersionsFrom(ctx context.Context, sour
 		return ProductResumeVersions{}, ErrConflict
 	}
 	var providerEnabled, productEnabled bool
-	if err := source.QueryRow(ctx, `SELECT new_orders_enabled,version FROM payment_provider_controls WHERE provider_id=$1 AND provider_version=$2`, actual.ProviderID, actual.ProviderVersion).Scan(&providerEnabled, &actual.ProviderControlVersion); err != nil || !providerEnabled {
+	err := source.QueryRow(ctx, `SELECT new_orders_enabled,version FROM payment_provider_controls WHERE provider_id=$1 AND provider_version=$2`, actual.ProviderID, actual.ProviderVersion).Scan(&providerEnabled, &actual.ProviderControlVersion)
+	if errors.Is(err, pgx.ErrNoRows) {
+		// The provider catalogue and order gate share this virtual initial state.
+		// Reading an approval draft must not create or enable a control row.
+		providerEnabled, actual.ProviderControlVersion, err = true, 0, nil
+	}
+	if err != nil || !providerEnabled {
 		return ProductResumeVersions{}, ErrConflict
 	}
 	if err := source.QueryRow(ctx, `SELECT new_orders_enabled,version FROM payment_product_controls WHERE provider_id=$1 AND provider_version=$2 AND product_id=$3`, actual.ProviderID, actual.ProviderVersion, actual.ProductID).Scan(&productEnabled, &actual.ProductControlVersion); err != nil || productEnabled {
@@ -292,7 +298,6 @@ func (r *PostgresRepository) productResumeVersionsFrom(ctx context.Context, sour
 	if err := source.QueryRow(ctx, `SELECT item.catalog_item_id,item.version,item.admission_version,mapping.id,mapping.mapping_version FROM recharge_product_catalog_items item JOIN product_admission_bindings binding ON binding.catalog_item_id=item.catalog_item_id AND binding.effective_to IS NULL JOIN product_admission_evidence evidence ON evidence.evidence_id=binding.evidence_id JOIN payment_product_mappings mapping ON mapping.id=binding.mapping_id WHERE item.product_id=$1 AND item.lifecycle_status='ON_SALE' AND mapping.provider_id=$2 AND mapping.provider_version=$3 AND mapping.status='FROZEN' AND mapping.effective_from<=now() AND (mapping.effective_to IS NULL OR mapping.effective_to>now()) AND evidence.expires_at>now() AND NOT EXISTS(SELECT 1 FROM product_admission_revocations revocation WHERE revocation.evidence_id=evidence.evidence_id)`, actual.ProductID, actual.ProviderID, actual.ProviderVersion).Scan(&actual.CatalogItemID, &actual.CatalogVersion, &actual.AdmissionVersion, &actual.MappingID, &actual.MappingVersion); err != nil {
 		return ProductResumeVersions{}, err
 	}
-	var err error
 	if actual.ObservationHighWatermark, err = latestObservationHighWatermark(ctx, source, actual.ProviderID, actual.ProviderVersion, actual.ProductID); err != nil {
 		return ProductResumeVersions{}, err
 	}
@@ -574,9 +579,24 @@ func (r *PostgresRepository) executeProductResume(ctx context.Context, expected 
 	if err := lockTransactionKey(ctx, tx, "payment-provider.resume", expected.ProviderID+":"+expected.ProviderVersion); err != nil {
 		return ProductResumeResult{}, err
 	}
+	providerControlVersion := expected.ProviderControlVersion
+	if providerControlVersion == 0 {
+		// A missing row is AVAILABLE/version 0, but it cannot be row-locked.
+		// Materialize that exact observed state in this same serializable
+		// transaction. Only this transaction's successful insert can match the
+		// virtual snapshot; an existing or concurrent row requires a new approval.
+		inserted, err := tx.Exec(ctx, `INSERT INTO payment_provider_controls(provider_id,provider_version,new_orders_enabled,reason_code,reason,updated_at) VALUES($1,$2,TRUE,'AVAILABLE','',$3) ON CONFLICT(provider_id,provider_version) DO NOTHING`, expected.ProviderID, expected.ProviderVersion, r.now())
+		if err != nil {
+			return ProductResumeResult{}, err
+		}
+		if inserted.RowsAffected() != 1 {
+			return ProductResumeResult{}, ErrApprovalSnapshotMismatch
+		}
+		providerControlVersion = 1
+	}
 	var providerEnabled, productEnabled bool
 	var providerVersion, productVersion int64
-	if err := tx.QueryRow(ctx, `SELECT new_orders_enabled,version FROM payment_provider_controls WHERE provider_id=$1 AND provider_version=$2 FOR UPDATE`, expected.ProviderID, expected.ProviderVersion).Scan(&providerEnabled, &providerVersion); err != nil || !providerEnabled || providerVersion != expected.ProviderControlVersion {
+	if err := tx.QueryRow(ctx, `SELECT new_orders_enabled,version FROM payment_provider_controls WHERE provider_id=$1 AND provider_version=$2 FOR UPDATE`, expected.ProviderID, expected.ProviderVersion).Scan(&providerEnabled, &providerVersion); err != nil || !providerEnabled || providerVersion != providerControlVersion {
 		return ProductResumeResult{}, ErrApprovalSnapshotMismatch
 	}
 	if err := tx.QueryRow(ctx, `SELECT new_orders_enabled,version FROM payment_product_controls WHERE provider_id=$1 AND provider_version=$2 AND product_id=$3 FOR UPDATE`, expected.ProviderID, expected.ProviderVersion, expected.ProductID).Scan(&productEnabled, &productVersion); err != nil || productEnabled || productVersion != expected.ProductControlVersion {

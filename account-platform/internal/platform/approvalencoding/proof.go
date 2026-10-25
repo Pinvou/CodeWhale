@@ -493,7 +493,9 @@ func validateProofValues(commandType string, spec commandSpec, targetType, targe
 			return ErrInvalidDocument
 		}
 	case "PAYMENT_PRODUCT_RESUME":
-		if !boundedString(targetID, 160) || !equalString(normalizedObject["product_id"], targetID) || !sameCanonical(normalized, critical) || integers["n.provider_control_version"] < 1 || integers["n.product_control_version"] < 1 || integers["n.catalog_version"] < 1 || integers["n.admission_version"] < 1 || integers["n.mapping_version"] < 1 || integers["n.provider_control_version"] != integers["f.provider_control_version"] || integers["n.product_control_version"] != integers["f.product_control_version"] || !productCommon(normalizedObject) || !boolEquals(financialObject["new_orders_enabled"], false) {
+		// A never-paused provider is the virtual AVAILABLE/version 0 state.
+		// Only that provider field may be zero; the product is a persisted pause.
+		if !boundedString(targetID, 160) || !equalString(normalizedObject["product_id"], targetID) || !sameCanonical(normalized, critical) || integers["n.provider_control_version"] < 0 || integers["n.product_control_version"] < 1 || integers["n.catalog_version"] < 1 || integers["n.admission_version"] < 1 || integers["n.mapping_version"] < 1 || integers["n.provider_control_version"] != integers["f.provider_control_version"] || integers["n.product_control_version"] != integers["f.product_control_version"] || !productCommon(normalizedObject) || !boolEquals(financialObject["new_orders_enabled"], false) {
 			return ErrInvalidDocument
 		}
 
