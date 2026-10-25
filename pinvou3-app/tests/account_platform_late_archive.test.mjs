@@ -48,7 +48,7 @@ test('an archive conflict is never converted to a successful original receipt', 
 });
 
 const actSource = queue.slice(queue.indexOf('  const act ='), queue.indexOf('  const item ='));
-const actFor = (operation, execute = () => {}) => new Function('operation', 'detail', 'reason', 'resolution', 'nextReview', 'paymentAnomalyResolutions', 'anomaly', 'copy', 'execute', 'open', 'load', `${actSource}\nreturn act;`)(operation, { case: { case_id: id, anomaly_type: 'controlled' } }, 'controlled review reason', 'controlled', '2099-01-01T00:00:00Z', () => ['controlled'], false, { confirmAction: 'controlled confirmation' }, execute, async () => {}, async () => {});
+const actFor = (operation, execute = () => {}) => new Function('query', 'operation', 'detail', 'reason', 'resolution', 'nextReview', 'paymentAnomalyResolutions', 'anomaly', 'copy', 'execute', 'open', 'load', `${actSource}\nreturn act;`)({ unknown: false, busy: false }, operation, { case: { case_id: id, anomaly_type: 'controlled' } }, 'controlled review reason', 'controlled', '2099-01-01T00:00:00Z', () => ['controlled'], false, { confirmAction: 'controlled confirmation' }, execute, async () => {}, async () => {});
 
 test('actual fresh facts mark the three upgraded actions and leave other actions unmarked', async () => {
   const previous = globalThis.confirm; globalThis.confirm = () => true;

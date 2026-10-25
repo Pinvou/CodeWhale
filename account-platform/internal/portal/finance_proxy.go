@@ -72,7 +72,7 @@ func billingAdminPathAllowed(method, resource string) bool {
 		case "payment-orders":
 			return parts[4] == "sync" || parts[4] == "repair" || parts[4] == "refunds"
 		case "late-payment-reviews":
-			return parts[4] == "claim" || parts[4] == "query" || parts[4] == "schedule" || parts[4] == "archive-command" || parts[4] == "provider-blind"
+			return parts[4] == "claim" || parts[4] == "query-commands" || parts[4] == "query-command-results" || parts[4] == "schedule" || parts[4] == "archive-command" || parts[4] == "provider-blind"
 		case "payment-anomalies":
 			return parts[4] == "claim" || parts[4] == "resolve"
 		case "adjustments":

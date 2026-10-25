@@ -1,5 +1,13 @@
 export const financeCopy = {
   zh: {
+    queryUnknown: '前次复核查询的结果尚未确认。重试仅确认原查询，不会再次派发。',
+    newQuery: '新建复核',
+    confirmNewQuery: '确认新建一次复核？',
+    confirmQuery: '确认查询本次付款结果？',
+    newQueryHelp: '本次将以新请求重新查询支付服务商。前次未确认记录会保留，不会被标为成功。',
+    confirmQueryAction: '确认查询',
+    cancelQuery: '取消',
+    queryRecorded: '本次复核查询及证据已记录；付款状态以实际证据为准。',
     reauthenticationRecoveryUnavailable: "原充值请求仍待确认，但当前身份、上下文或权限无法安全重试。请恢复原账号上下文和权限；不要创建新请求。",
     inputInvalid: '输入格式无效，请检查金额或标识后重试。',
     resolutions: { CONFIRM_CHARGEBACK: '确认拒付', CONFIRM_FORCED_REFUND: '确认强制退款', CONFIRM_PAYMENT: '按支付证据确认付款', CONFIRM_PROVIDER_FAILED: '确认服务商付款失败', RECONCILE_REFUND: '查询并对账退款结果', DISMISS: '驳回异常', ESCALATE_FINANCIAL_REPAIR: '移交财务修复' },
@@ -11,6 +19,14 @@ export const financeCopy = {
     title: '充值与权益', products: '充值商品', orders: '支付订单', packages: '权益包', refresh: '刷新', loading: '正在加载…', empty: '暂无记录', product: '商品', channel: '支付渠道', amount: '金额（人民币元）', status: '状态', create: '创建支付订单', retry: '以同一请求重试', unknown: '请求结果尚未确认。请以同一请求重试，不要重新创建。', saved: '操作已确认。', query: '查询付款结果', pay: '打开付款页面', close: '关闭支付订单', confirmClose: '确认关闭这个支付订单？已完成的付款仍会按实际付款事实处理。', claim: '提交付款申诉', statement: '付款情况说明', expires: '付款截止时间', remaining: '剩余积分', used: '已用积分', total: '总积分', validUntil: '有效期至', unavailable: '暂时无法获取真实财务数据，请重试。', invalid: '服务返回的财务回执无效，请刷新确认。', name: '名称', type: '类型', base: '充值积分', bonus: '赠送积分', planNoRefund: 'PLAN 套餐不支持普通退款。', mobileRequired: '请先验证手机号再充值。', noChannel: '当前没有可用支付渠道。', orderID: '订单号', return: '返回', providerQR: '付款二维码', processing: '付款确认或权益发放处理中。', history: '订单详情', finance: '财务管理', approvals: '审批', refunds: '整笔退款', reason: '原因', transaction: '支付流水', package: '权益包', confirmRefund: '确认按所选支付流水和权益包发起整笔退款？', refundUnavailable: '普通退款当前不可用。', permissions: '没有执行此操作的权限。', filters: '筛选', search: '查询', previous: '上一页', next: '下一页', owner: '处理人', severity: '严重级别', nextReview: '下次复核时间', claimCase: '认领', schedule: '安排复核', archive: '归档已确认未付', escalate: '升级人工复核', resolve: '处理异常', resolution: '处理方式', orderRepair: '按付款证据修复', submit: '提交', details: '详情', wallet: '钱包', delta: '调整积分（微积分）', draft: '创建审批草稿', decision: '审批决定', approve: '批准', reject: '拒绝', withdraw: '撤回', version: '版本', command: '操作类型', effects: '执行状态', sla: '处理期限', actions: '操作', productAdmin: '商品管理', providerControls: '支付渠道控制', resume: '恢复收款', more: '更多', confirmAction: '确认提交本次操作？', noActions: '当前没有可执行操作。', reload: '重新读取最新事实', completed: '已完成', sourceChanged: '当前资源或权限已变化，请重新读取。', newInvocation: '开始新的操作', adjustment: '钱包调整'
   },
   en: {
+    queryUnknown: 'The previous review query is unconfirmed. Retry only checks that original query and never dispatches it again.',
+    newQuery: 'Start a new review',
+    confirmNewQuery: 'Start a new review query?',
+    confirmQuery: 'Query the payment result for this review?',
+    newQueryHelp: 'This sends a new request to the payment provider. Previous unconfirmed records remain visible and are not marked successful.',
+    confirmQueryAction: 'Confirm query',
+    cancelQuery: 'Cancel',
+    queryRecorded: 'This review query and its evidence were recorded. Payment status follows the actual evidence.',
     reauthenticationRecoveryUnavailable: "The original recharge request is unresolved, but the current identity, context or permissions cannot safely retry it. Restore the original account context and permissions; do not create a new request.",
     inputInvalid: 'Invalid input. Check the amount or identifier and try again.',
     resolutions: { CONFIRM_CHARGEBACK: 'Confirm chargeback', CONFIRM_FORCED_REFUND: 'Confirm forced refund', CONFIRM_PAYMENT: 'Confirm payment from evidence', CONFIRM_PROVIDER_FAILED: 'Confirm provider payment failure', RECONCILE_REFUND: 'Check and reconcile refund outcome', DISMISS: 'Dismiss anomaly', ESCALATE_FINANCIAL_REPAIR: 'Escalate to financial repair' },
@@ -22,6 +38,14 @@ export const financeCopy = {
     title: 'Payments and entitlements', products: 'Recharge products', orders: 'Payment orders', packages: 'Entitlement packages', refresh: 'Refresh', loading: 'Loading…', empty: 'No records', product: 'Product', channel: 'Payment channel', amount: 'Amount (CNY)', status: 'Status', create: 'Create payment order', retry: 'Retry the same request', unknown: 'The result is unconfirmed. Retry the same request instead of creating another.', saved: 'The operation is confirmed.', query: 'Check payment', pay: 'Open payment page', close: 'Close payment order', confirmClose: 'Close this payment order? Completed payments are still handled according to actual payment facts.', claim: 'Submit payment claim', statement: 'Payment statement', expires: 'Payment deadline', remaining: 'Remaining credits', used: 'Used credits', total: 'Total credits', validUntil: 'Valid until', unavailable: 'Financial data is temporarily unavailable. Please retry.', invalid: 'The financial receipt is invalid. Refresh to confirm the result.', name: 'Name', type: 'Type', base: 'Recharge credits', bonus: 'Bonus credits', planNoRefund: 'PLAN packages do not support normal refunds.', mobileRequired: 'Verify your mobile number before recharging.', noChannel: 'No payment channel is currently available.', orderID: 'Order ID', return: 'Back', providerQR: 'Payment QR code', processing: 'Payment confirmation or entitlement delivery is processing.', history: 'Order details', finance: 'Finance', approvals: 'Approvals', refunds: 'Full refund', reason: 'Reason', transaction: 'Payment transaction', package: 'Entitlement package', confirmRefund: 'Request a full refund for the selected payment transaction and entitlement package?', refundUnavailable: 'Normal refunds are currently unavailable.', permissions: 'You do not have permission for this operation.', filters: 'Filters', search: 'Search', previous: 'Previous', next: 'Next', owner: 'Owner', severity: 'Severity', nextReview: 'Next review time', claimCase: 'Claim', schedule: 'Schedule review', archive: 'Archive confirmed unpaid', escalate: 'Escalate review', resolve: 'Resolve anomaly', resolution: 'Resolution', orderRepair: 'Repair using payment evidence', submit: 'Submit', details: 'Details', wallet: 'Wallet', delta: 'Credit adjustment (microcredits)', draft: 'Create approval draft', decision: 'Decision', approve: 'Approve', reject: 'Reject', withdraw: 'Withdraw', version: 'Version', command: 'Command', effects: 'Execution status', sla: 'Deadline', actions: 'Actions', productAdmin: 'Products', providerControls: 'Payment provider controls', resume: 'Resume collection', more: 'More', confirmAction: 'Submit this operation?', noActions: 'No action is currently available.', reload: 'Read current facts again', completed: 'Completed', sourceChanged: 'The resource or permissions changed. Read the current facts again.', newInvocation: 'Start a new operation', adjustment: 'Wallet adjustment'
   },
   ja: {
+    queryUnknown: '前回の照会結果は未確認です。再試行は元の照会を確認するだけで、再送信しません。',
+    newQuery: '新しい審査を開始',
+    confirmNewQuery: '新しい審査照会を開始しますか？',
+    confirmQuery: '今回の審査で支払結果を照会しますか？',
+    newQueryHelp: '新しいリクエストで決済事業者に照会します。前回の未確認記録は保持され、成功扱いにはなりません。',
+    confirmQueryAction: '照会を確認',
+    cancelQuery: 'キャンセル',
+    queryRecorded: '今回の照会と証拠を記録しました。支払状態は実際の証拠に従います。',
     reauthenticationRecoveryUnavailable: "元のチャージ要求は未確認ですが、現在の本人情報、コンテキストまたは権限では安全に再試行できません。元のアカウントのコンテキストと権限を復元し、新しい要求を作成しないでください。",
     inputInvalid: '入力形式が無効です。金額または識別子を確認して再試行してください。',
     resolutions: { CONFIRM_CHARGEBACK: 'チャージバックを確認', CONFIRM_FORCED_REFUND: '強制返金を確認', CONFIRM_PAYMENT: '支払い証拠で入金を確認', CONFIRM_PROVIDER_FAILED: '決済サービスの支払い失敗を確認', RECONCILE_REFUND: '返金結果を照会して照合', DISMISS: '異常を却下', ESCALATE_FINANCIAL_REPAIR: '財務修復へ引き継ぐ' },

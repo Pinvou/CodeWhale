@@ -50,5 +50,5 @@ export function useFinanceOperation(owner, copy, client, scope) {
       setUnknown(uncertain); setError(uncertain ? 'unknown' : reason.financeInputInvalid ? 'inputInvalid' : reason.status === 403 ? 'permissions' : 'sourceChanged');
     } finally { if (stamp === generation.current) { running.current = false; setBusy(false); } }
   };
-  return { busy, unknown, pendingFacts: intent.current?.facts || null, message: copy[message] || '', error: copy[error] || '', read, mutate };
+  return { busy, unknown, pendingFacts: intent.current?.facts || null, pendingKey: intent.current?.key || null, message: copy[message] || '', error: copy[error] || '', read, mutate };
 }

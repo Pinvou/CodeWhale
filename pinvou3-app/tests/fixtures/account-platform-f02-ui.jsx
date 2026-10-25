@@ -8,6 +8,7 @@ import { AccountPlatformBffClient } from '../../src/features/account-platform/bf
 import { AdminPlatformClient } from '../../src/features/account-platform/admin-client.js';
 import { financeCopy } from '../../src/shared/i18n.js';
 import { parseFinanceJSON } from '../../src/features/account-platform/finance-contract.js';
+import { useFinanceOperation } from '../../src/features/account-platform/useFinanceOperation.js';
 const root = createRoot(document.querySelector('#root'));
 const id = '11111111-1111-4111-8111-111111111111';
 const other = '22222222-2222-4222-8222-222222222222';
@@ -17,10 +18,10 @@ Object.assign(control, { financeRecovery: false, expiredCursor: false, replaceme
 const personal = new AccountPlatformBffClient();
 const alternatePersonal = new AccountPlatformBffClient();
 const pendingOrder = orderID => ({ ...order(), order_id: orderID, product_id: orderID === other ? 'controlled-alternate-order' : 'controlled-original-order', status: control.closeStatus || 'PENDING', close_status: control.orderCloseStatus || 'OPEN', expires_at: control.closeExpires || '2099-01-01T00:00:00Z' });
-const admin = new AdminPlatformClient(); admin.csrfToken = 'CONTROL_SYNTHETIC_CSRF';
+let admin = new AdminPlatformClient(); admin.csrfToken = 'CONTROL_SYNTHETIC_CSRF';
 const order = () => ({ order_id: id, amount_fen: '9007199254740993', status: 'PAID', fulfillment_status: 'CREDITED', attention_summary: 'NORMAL' });
 const pkg = () => ({ package_id: id, source_payment_transaction_id: id, source_type: 'PAYMENT', status: 'ACTIVE', points_remaining_microcredits: '1000000', points_used_microcredits: '0', components: [{ component_type: control.plan ? 'PLAN' : 'BASE' }] });
-const late = () => ({ case_id: id, payment_order_id: id, owner_id: id, review_status: 'REVIEW_REQUIRED_LATE_PAYMENT', severity: 'P2', next_review_at: '2099-01-01T00:00:00Z' });
+const late = () => ({ case_id: id, payment_order_id: id, owner_id: control.user, provider_id: 'controlled', provider_version: 'v1', merchant_order_no: 'controlled-review-order', review_status: 'REVIEW_REQUIRED_LATE_PAYMENT', severity: 'P2', next_review_at: '2099-01-01T00:00:00Z' });
 const anomaly = () => ({ case_id: id, payment_order_id: id, owner_id: control.user, anomaly_type: control.anomalyType || 'PAYMENT_FACT_CONFLICT', status: control.anomalyResolved ? 'RESOLVED' : 'OPEN', severity: 'P2' });
 const product = { catalog_item_id: id, product_id: 'personal-base', display_name_en: 'Controlled product', display_name_zh_cn: '受控商品', display_name_ja: 'テスト商品', display_order: 1, base_points: '100', bonus_points: '0', validity_days: 30, invoice_product_name: 'Controlled invoice', lifecycle_status: 'DRAFT', version: 1, mapping: { draft_version: 1, provider_id: 'controlled', provider_version: 'v1', sku_bom: 'sku-base', amount_fen: '100', currency: 'CNY', channels: ['ALIPAY'], admission_class: 'TEST_ONLY' } };
 const recoveryControl = () => ({ provider_id: 'controlled', provider_control_version: 3, resume_draft: { command_type: 'PAYMENT_PROVIDER_RESUME', target_resource_type: 'PAYMENT_PROVIDER', target_resource_id: 'controlled', normalized_command: { provider_id: 'controlled', provider_control_version: 3 }, critical_resource_versions: { provider_control_version: 3 } }, products: [{ product_id: 'personal-base', version: 4, resume_draft: { command_type: 'PAYMENT_PRODUCT_RESUME', target_resource_type: 'PAYMENT_PRODUCT', target_resource_id: 'personal-base', normalized_command: { provider_id: 'controlled', product_id: 'personal-base', provider_control_version: 3, product_control_version: 4 }, critical_resource_versions: { provider_control_version: 3, product_control_version: 4 } } }] });
@@ -78,7 +79,28 @@ globalThis.fetch = async (url, options = {}) => {
   }
   if (url.includes('/late-payment-reviews?')) return json({ items: [late()] });
   if (url.endsWith(`/late-payment-reviews/${id}`)) return json({ case: late(), events: [] });
-  if (url.endsWith(`/late-payment-reviews/${id}/query`)) return json(late());
+  if (url.endsWith(`/late-payment-reviews/${id}/query`)) return json({ code: 'QUERY_PROTOCOL_REQUIRED' }, 409);
+  if (url.endsWith(`/late-payment-reviews/${id}/query-commands`) || url.endsWith(`/late-payment-reviews/${id}/query-command-results`)) {
+    const readonly = url.endsWith('/query-command-results');
+    const body = JSON.parse(options.body);
+    const expected = { command_protocol: 1, payment_order_id: id, provider_id: 'controlled', provider_version: 'v1', merchant_order_no: 'controlled-review-order' };
+    if (JSON.stringify(body) !== JSON.stringify(expected) || !options.headers['Idempotency-Key']) return json({ code: 'INVALID_QUERY_COMMAND' }, 400);
+    if (control.queryUnavailable) return json({ code: 'NOT_FOUND' }, 404);
+    control.queryCommands ||= new Map();
+    const key = options.headers['Idempotency-Key'];
+    let receipt = control.queryCommands.get(key);
+    if (!receipt) {
+      receipt = { command_protocol: 1, query_reference: key, actor_id: control.user, case_id: id, payment_order_id: id, state: 'UNKNOWN' };
+      if (!readonly) {
+        control.queryDispatches = (control.queryDispatches || 0) + 1;
+        if (!control.queryUnknown) receipt = { ...receipt, state: 'COMPLETED', result: { ...late(), last_query_at: '2026-10-25T00:00:00Z', last_query_result: 'PENDING' } };
+        control.queryCommands.set(key, receipt);
+      }
+    }
+    if (control.queryDelayed && !readonly) return new Promise(resolve => { control.releaseQuery = () => resolve(json(receipt)); });
+    if (control.queryLostACK && !readonly) { control.queryLostACK = false; throw new TypeError('controlled original query ACK loss'); }
+    return json(receipt);
+  }
   if (url.includes('/recharge-products?')) return json({ items: [product] });
   if (url.endsWith('/recharge-product-create-options')) return json({ adapters: [{ provider_id: 'controlled', provider_version: 'v1', channels: ['ALIPAY'] }], invoice_product_names: ['Controlled invoice'] });
   if (url.endsWith('/admission-verifications')) return json({ items: control.verifiedProduct ? [{ verification_id: other, status: control.verificationStatus || 'VERIFIED', current: true, active: true, evidence_id: other }] : [] });
@@ -110,15 +132,25 @@ globalThis.fetch = async (url, options = {}) => {
   if (url.includes('/wallets?') || url.includes('/requests?')) return json({ items: [] });
   throw new Error('UNEXPECTED_CONTROLLED_ROUTE');
 };
+function LegacyQuerySeed() {
+  const operation = useFinanceOperation(`${control.user}:1`, financeCopy[control.language], admin, 'late-review');
+  control.seedLegacyQuery = () => operation.mutate({ action: 'query', id }, async () => { throw new TypeError('controlled pre-protocol lost ACK'); });
+  control.seedOtherUnknown = () => operation.mutate({ action: 'archive', id }, async () => { throw new TypeError('controlled unrelated lost ACK'); });
+  control.legacyQueryReference = operation.pendingKey;
+  return null;
+}
 function render() {
-  const me = { user_id: control.user, platform_authorization_version: 1, personal_permissions: [...(control.denyPersonalRead ? [] : ['personal.billing.read']), 'personal.recharge.create', ...(control.denyClose ? [] : ['personal.recharge.manage'])], platform_permissions: ['platform.billing.wallets.read', 'platform.billing.orders.sync', 'platform.billing.repairs.request', 'platform.billing.adjustments.approve', 'platform.billing.payment-controls.resume.approve', 'platform.billing.payment-controls.resume.request', 'platform.products.read', 'platform.products.create', 'platform.products.publish'], active_context: { scope: 'PERSONAL', context_version: control.contextVersion || 1, personal_authorization_version: control.personalVersion || 1, personal_permissions: [...(control.denyPersonalRead ? [] : ['personal.billing.read']), 'personal.recharge.create', ...(control.denyClose ? [] : ['personal.recharge.manage'])] } };
+  const me = { user_id: control.user, personal_permissions: [...(control.denyPersonalRead ? [] : ['personal.billing.read']), 'personal.recharge.create', ...(control.denyClose ? [] : ['personal.recharge.manage'])], platform_permissions: ['platform.billing.wallets.read', 'platform.billing.orders.sync', 'platform.billing.repairs.request', 'platform.billing.adjustments.approve', 'platform.billing.payment-controls.resume.approve', 'platform.billing.payment-controls.resume.request', 'platform.products.read', 'platform.products.create', 'platform.products.publish'], active_context: { scope: 'PERSONAL', platform_authorization_version: control.platformVersion || 1, context_version: control.contextVersion || 1, personal_authorization_version: control.personalVersion || 1, personal_permissions: [...(control.denyPersonalRead ? [] : ['personal.billing.read']), 'personal.recharge.create', ...(control.denyClose ? [] : ['personal.recharge.manage'])] } };
   if (control.publishOnly) me.platform_permissions = ['platform.products.read', 'platform.products.publish'];
   const client = control.kind === 'personal' ? (control.alternateClient ? alternatePersonal : personal) : admin;
-  root.render(<><select aria-label="fixture-language" value={control.language} onChange={event => { control.language = event.target.value; render(); }}>{['en', 'zh', 'ja'].map(value => <option key={value}>{value}</option>)}</select>{control.kind === 'personal' ? <PersonalFinanceWorkspace key={control.user} {...{ client, me }} language={control.language} /> : control.kind === 'products' ? <RechargeProductWorkspace {...{ client, me }} copy={financeCopy[control.language]} language={control.language} /> : <AdminFinanceWorkspace {...{ client, me }} language={control.language} />}</>);
+  root.render(<><LegacyQuerySeed /><select aria-label="fixture-language" value={control.language} onChange={event => { control.language = event.target.value; render(); }}>{['en', 'zh', 'ja'].map(value => <option key={value}>{value}</option>)}</select>{control.kind === 'personal' ? <PersonalFinanceWorkspace key={control.user} {...{ client, me }} language={control.language} /> : control.kind === 'products' ? <RechargeProductWorkspace {...{ client, me }} copy={financeCopy[control.language]} language={control.language} /> : <AdminFinanceWorkspace {...{ client, me }} language={control.language} />}</>);
 }
 control.render = kind => { control.kind = kind; render(); };
 control.languageCopy = () => financeCopy[control.language];
 control.unmountPersonal = () => root.render(null);
 control.switchIdentity = () => { control.user = other; render(); };
+control.replaceAdminClient = () => { admin = new AdminPlatformClient(); admin.csrfToken = 'CONTROL_SYNTHETIC_REPLACEMENT_CSRF'; render(); };
+control.retireAdminSession = () => { admin.retireSession('CONTROL_SYNTHETIC_NEXT_SESSION_CSRF'); render(); };
+control.observeAdminAuthorization = version => admin.observeAuthorizationVersions(new Headers({ 'X-Platform-Authorization-Version': String(version) }));
 control.setAdminEpoch = value => { admin.financeSessionEpoch = value; render(); };
 window.f02 = control; render();

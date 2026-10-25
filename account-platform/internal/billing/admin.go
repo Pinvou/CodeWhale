@@ -566,33 +566,10 @@ func (s *Service) adminClaimLatePaymentReview(w http.ResponseWriter, r *http.Req
 	writeAdminFinancialJSON(w, http.StatusOK, item)
 }
 
+// The legacy keyless endpoint cannot establish the original dispatch identity.
+// Keep its authenticated route as an explicit refusal; never call Provider.
 func (s *Service) adminQueryLatePaymentReview(w http.ResponseWriter, r *http.Request) {
-	repository, ok := s.requireAdminRepository(w, r)
-	caseID, valid := parseLatePaymentCaseID(w, r)
-	if !ok || !valid {
-		return
-	}
-	if s.payments == nil {
-		api.WriteError(w, http.StatusServiceUnavailable, "PAYMENT_UNAVAILABLE", "payment operations are unavailable", httpserver.RequestID(r.Context()))
-		return
-	}
-	actorID := adminActor(adminPrincipal(r))
-	target, err := repository.LatePaymentReview(r.Context(), caseID)
-	if err != nil {
-		s.writeError(w, r, err)
-		return
-	}
-	if target.OwnerID == nil || *target.OwnerID != actorID {
-		s.writeError(w, r, ErrConflict)
-		return
-	}
-	order, queryErr := s.payments.SyncReviewedOrder(r.Context(), target.PaymentOrderID)
-	item, recordErr := repository.RecordLatePaymentReviewQuery(r.Context(), caseID, actorID, order, queryErr)
-	if recordErr != nil {
-		s.writeError(w, r, recordErr)
-		return
-	}
-	writeAdminFinancialJSON(w, http.StatusOK, item)
+	api.WriteError(w, http.StatusConflict, "QUERY_PROTOCOL_REQUIRED", "start an explicit payment review query command", httpserver.RequestID(r.Context()))
 }
 
 func (s *Service) adminScheduleLatePaymentReview(w http.ResponseWriter, r *http.Request) {

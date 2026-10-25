@@ -10,6 +10,7 @@ import { requireReconciliationDate, requireReconciliationRun } from './reconcili
 import { responseRetryAfter } from './auth-error.js';
 import { beforeFinanceDispatch, financeNotDispatched } from './finance-operation-state.js';
 import { canonicalApprovalDecision } from './approval-decision-contract.js';
+import { latePaymentQueryBody, requireLatePaymentQueryReceipt, isCurrentLatePaymentQueryAuthority } from './late-payment-query-contract.js';
 import { parseRegistrationBonusJSON, encodeRegistrationBonusJSON } from './registration-bonus-contract.js';
 function errorFromResponse(response, payload) {
   const error = new Error(payload?.message || `HTTP ${response.status}`);
@@ -90,6 +91,7 @@ export class AdminPlatformClient {
     this.csrfToken = '';
     this.financeSessionEpoch = 0;
     this.authorizationVersions = {};
+    this.financeQueryAuthorizationGeneration = 0;
     this.authorizationVersionListeners = new Set();
     this.inflightReads = new Map();
     this.approvalControl = null;
@@ -111,6 +113,12 @@ export class AdminPlatformClient {
       organization_authorization_version: headers.get('X-Organization-Authorization-Version'),
     });
     if (JSON.stringify(next) === JSON.stringify(this.authorizationVersions)) return;
+    // First observations establish a baseline. A change to any already known
+    // authority retires in-flight Query receipts, including changes observed
+    // synchronously from that receipt's own response headers.
+    if (Object.keys(this.authorizationVersions).some(key => next[key] !== this.authorizationVersions[key])) {
+      this.financeQueryAuthorizationGeneration++;
+    }
     this.authorizationVersions = next;
     for (const listener of this.authorizationVersionListeners) listener({ ...next });
   }
@@ -710,8 +718,23 @@ export class AdminPlatformClient {
   claimLatePaymentReview(caseID) {
     return this.mutate('billing', `/admin/v1/late-payment-reviews/${encodeURIComponent(caseID)}/claim`, 'POST', {}, '', undefined, 200);
   }
-  queryLatePaymentReview(caseID) {
-    return this.mutate('billing', `/admin/v1/late-payment-reviews/${encodeURIComponent(caseID)}/query`, 'POST', {}, '', undefined, 200);
+  async queryLatePaymentReview(caseID, facts, key, signal) {
+    return this.latePaymentQueryCommand(caseID, facts, key, signal, 'query-commands');
+  }
+  async queryLatePaymentReviewResult(caseID, facts, key, signal, authorization = facts?.authorization) {
+    return this.latePaymentQueryCommand(caseID, facts, key, signal, 'query-command-results', authorization);
+  }
+  async latePaymentQueryCommand(caseID, facts, key, signal, action, authority = facts?.authorization) {
+    const body = latePaymentQueryBody(caseID, facts, key);
+    if (authority?.actorID !== facts.actorID || !isCurrentLatePaymentQueryAuthority(authority, this.authorizationVersions)) {
+      throw financeNotDispatched(Object.assign(new Error('payment query authorization changed'), { code: 'QUERY_AUTHORIZATION_CHANGED' }), true);
+    }
+    const epoch = this.financeSessionEpoch;
+    const authorization = this.financeQueryAuthorizationGeneration;
+    const receipt = await this.mutate('billing', `/admin/v1/late-payment-reviews/${encodeURIComponent(caseID)}/${action}`, 'POST', body, key, signal, 200);
+    this.requireCurrentSession(epoch, signal);
+    if (authorization !== this.financeQueryAuthorizationGeneration) throw abortRequestError();
+    return requireLatePaymentQueryReceipt(receipt, facts, key);
   }
   scheduleLatePaymentReview(caseID, nextReviewAt, reason, key, commandProtocol) {
     if (commandProtocol !== 1) throw financeNotDispatched(new Error('UNSUPPORTED_REVIEW_SCHEDULE_PROTOCOL'), true);

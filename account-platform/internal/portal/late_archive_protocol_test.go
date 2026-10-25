@@ -25,7 +25,7 @@ func TestLateArchiveCommandProxyProtocol(t *testing.T) {
 		}
 	})
 	t.Run("other-installed-review-actions-are-preserved", func(t *testing.T) {
-		for _, action := range []string{"claim", "query", "schedule", "provider-blind"} {
+		for _, action := range []string{"claim", "query-commands", "query-command-results", "schedule", "provider-blind"} {
 			if !billingAdminPathAllowed(http.MethodPost, base+action) {
 				t.Fatal("unrelated review action changed", action)
 			}

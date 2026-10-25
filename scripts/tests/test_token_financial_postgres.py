@@ -15,6 +15,37 @@ SPEC.loader.exec_module(RUNNER)
 
 
 class FinancialPostgresRunnerTests(unittest.TestCase):
+    def test_query_command_and_actual_client_roots_are_strongly_selected(self):
+        roots = {"TestLatePaymentQueryCommandPostgres", "TestLatePaymentQueryClientHTTPPostgres"}
+        self.assertTrue(roots <= RUNNER.RETAINED_REQUIRED)
+        self.assertTrue(roots <= RUNNER.BILLING_CHILD_REQUIRED)
+        self.run_main_fixture()
+        command = self.fixture_commands[self.fixture_phases.index("retained-billing")]
+        for root in roots:
+            self.assertIn(root, command[command.index("-run") + 1])
+        package = RUNNER.BILLING_PACKAGE
+        options = {"package": package, "exact_roots": True, "require_children": True}
+        valid = self.events(roots, package, children=True)
+        self.assertGreater(RUNNER.verify_results(valid, roots, **options), 0)
+        for root in roots:
+            for invalid in (
+                [event for event in valid if event.get("Test", "").split("/", 1)[0] != root],
+                [event for event in valid if not event.get("Test", "").startswith(root + "/")],
+                valid + [{"Action": "skip", "Package": package, "Test": root + "/actual"}],
+                valid + [{"Action": "fail", "Package": package, "Test": root + "/actual"}],
+            ):
+                with self.subTest(root=root, invalid=invalid), self.assertRaises(RuntimeError):
+                    RUNNER.verify_results(invalid, roots, **options)
+
+
+    def test_query_forward_identity_is_in_schema_selection(self):
+        root = "TestLatePaymentQueryRegisteredIdentity"
+        self.assertIn(root, RUNNER.SCHEMA_REQUIRED)
+        self.run_main_fixture()
+        command = self.fixture_commands[self.fixture_phases.index("owner-schema")]
+        self.assertIn(root, command[command.index("-run") + 1])
+
+
     def test_late_schedule_receipt_root_is_selected_and_requires_completed_children(self):
         root = "TestLatePaymentScheduleCommandReplayPostgres"
         self.assertIn(root, RUNNER.RETAINED_REQUIRED)
@@ -79,7 +110,7 @@ class FinancialPostgresRunnerTests(unittest.TestCase):
 
     def test_reconciliation_retry_identity_root_is_selected_and_cannot_be_faked(self):
         root = "TestReconciliationFairRetryRegisteredIdentity"
-        self.assertEqual(len(RUNNER.SCHEMA_REQUIRED), 9)
+        self.assertEqual(len(RUNNER.SCHEMA_REQUIRED), 10)
         self.assertIn(root, RUNNER.SCHEMA_REQUIRED)
         self.run_main_fixture()
         command = self.fixture_commands[self.fixture_phases.index("owner-schema")]
@@ -588,7 +619,7 @@ class FinancialPostgresRunnerTests(unittest.TestCase):
     def test_package_index_schema_contract_is_selected_and_cannot_skip(self):
         self.run_main_fixture()
         roots, package = RUNNER.SCHEMA_REQUIRED, RUNNER.SCHEMA_PACKAGE
-        self.assertEqual(roots, {"TestReconciliationFairRetryRegisteredIdentity", "TestF09EntitlementPackageIndexPublicMigration", "TestTokenWalletReceiptSchemaPostgres", "TestLegacyEntitlementUpgradeAdmissionPostgres", "TestUsageWaiverHistoricalSchemaPostgres", "TestBillingOrdinaryReplayOriginalMigrationPostgres", "TestUnknownProviderEntryPublicMigrationPostgres", "TestLegacyExpiry025UpgradePreservesOriginalLedgerPostgres", "TestF04PublicTokenUserOwnerAuthorityAndDirectory"})
+        self.assertEqual(roots, {"TestLatePaymentQueryRegisteredIdentity", "TestReconciliationFairRetryRegisteredIdentity", "TestF09EntitlementPackageIndexPublicMigration", "TestTokenWalletReceiptSchemaPostgres", "TestLegacyEntitlementUpgradeAdmissionPostgres", "TestUsageWaiverHistoricalSchemaPostgres", "TestBillingOrdinaryReplayOriginalMigrationPostgres", "TestUnknownProviderEntryPublicMigrationPostgres", "TestLegacyExpiry025UpgradePreservesOriginalLedgerPostgres", "TestF04PublicTokenUserOwnerAuthorityAndDirectory"})
         command = self.fixture_commands[self.fixture_phases.index("owner-schema")]
         selection = command[command.index("-run") + 1]
         self.assertIn("TestF09EntitlementPackageIndexPublicMigration", selection)
@@ -1039,7 +1070,7 @@ class FinancialPostgresRunnerTests(unittest.TestCase):
         }
         self.assertEqual(RUNNER.REFUND_REQUIRED, expected)
         self.assertTrue(expected <= RUNNER.RETAINED_REQUIRED)
-        self.assertEqual(len(RUNNER.RETAINED_REQUIRED), 46)
+        self.assertEqual(len(RUNNER.RETAINED_REQUIRED), 48)
         valid = self.events(RUNNER.RETAINED_REQUIRED, RUNNER.BILLING_PACKAGE, children=True)
         options = {"package": RUNNER.BILLING_PACKAGE, "require_children": True, "exact_roots": True,
                    "children_required": RUNNER.BILLING_CHILD_REQUIRED}

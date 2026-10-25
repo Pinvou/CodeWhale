@@ -2124,6 +2124,16 @@
         "file": "900029_late_payment_archive_commands.up.sql",
         "version": 900029,
         "sha256": "e6f61d5d2a2a1ce0521f1cc13c39cb4f70f6aa175427103af7c9205ab66784f8"
+      },
+      {
+        "file": "900030_late_payment_query_commands.down.sql",
+        "version": 900030,
+        "sha256": "ab49b51e3596b78aa088bfafbffac83203bc65d97e2da587c08f235afba6f867"
+      },
+      {
+        "file": "900030_late_payment_query_commands.up.sql",
+        "version": 900030,
+        "sha256": "00ebf3987ce4718c538bb78035bc3ff5ca4a3dc64709db78ee6a97e09c55da6a"
       }
     ],
     "payment-simulator": [

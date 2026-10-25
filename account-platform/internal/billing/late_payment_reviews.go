@@ -346,6 +346,18 @@ func (r *PostgresRepository) RecordLatePaymentReviewQuery(ctx context.Context, c
 	if item.OwnerID == nil || *item.OwnerID != actorID || (item.ReviewStatus != "REVIEW_REQUIRED_LATE_PAYMENT" && item.ReviewStatus != "PROVIDER_BLIND") {
 		return LatePaymentReviewCase{}, ErrConflict
 	}
+	item, err = r.recordLatePaymentReviewQueryLocked(ctx, tx, item, actorID, order, queryErr)
+	if err != nil {
+		return LatePaymentReviewCase{}, err
+	}
+	return item, tx.Commit(ctx)
+}
+
+// The caller owns the locked late/manual rows. Query evidence and the original
+// command receipt commit together; Provider and PAY-12 work remain outside.
+func (r *PostgresRepository) recordLatePaymentReviewQueryLocked(ctx context.Context, tx pgx.Tx, item LatePaymentReviewCase, actorID uuid.UUID, order PaymentOrder, queryErr error) (LatePaymentReviewCase, error) {
+	caseID := item.ID
+	var err error
 	now := r.now()
 	result := order.Status
 	if queryErr != nil {
@@ -380,7 +392,7 @@ func (r *PostgresRepository) RecordLatePaymentReviewQuery(ctx context.Context, c
 	if err != nil {
 		return LatePaymentReviewCase{}, err
 	}
-	return item, tx.Commit(ctx)
+	return item, nil
 }
 
 func nextLatePaymentReviewAt(createdAt, now time.Time) time.Time {
