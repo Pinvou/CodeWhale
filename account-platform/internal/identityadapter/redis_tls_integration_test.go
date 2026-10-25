@@ -31,7 +31,7 @@ func TestRedisAdmissionProductionTLS(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
 	d := tokenRiskDimensions{action: "password", source: "fixture-source", device: "fixture-device", identifier: "fixture-user", session: "fixture-session"}
-	if retry, err := a.Admit(ctx, d); err != nil || retry != 0 {
+	if retry, err := a.Admit(ctx, d); err != nil || retry.RetryAfter != 0 || retry.VerificationDelay != 0 {
 		t.Fatal("initial Lua admission failed")
 	}
 	if retry, err := a.Complete(ctx, d, true, "stable-user"); err != nil || retry != 0 {
@@ -42,8 +42,8 @@ func TestRedisAdmissionProductionTLS(t *testing.T) {
 			t.Fatal("failure increment/expiry failed")
 		}
 	}
-	if retry, err := a.Admit(ctx, d); err != nil || retry <= 0 {
-		t.Fatal("failure block not enforced")
+	if decision, err := a.Admit(ctx, d); err != nil || decision.RetryAfter != 0 || decision.VerificationDelay != time.Second {
+		t.Fatal("fifth failure must delay verification rather than hard-block")
 	}
 	if n, err := a.client.Get(ctx, "pinvou:auth-failure:user:"+a.digest("stable-user")).Int(); err != nil || n != 5 {
 		t.Fatal("stable-user aggregation failed")

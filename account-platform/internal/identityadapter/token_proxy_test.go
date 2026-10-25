@@ -18,9 +18,13 @@ type admissionFake struct {
 	completions int
 }
 
-func (f *admissionFake) Admit(_ context.Context, dimensions tokenRiskDimensions) (time.Duration, error) {
+func (f *admissionFake) Admit(_ context.Context, dimensions tokenRiskDimensions) (tokenAdmissionDecision, error) {
 	f.dimensions = dimensions
-	return f.retry, nil
+	return tokenAdmissionDecision{RetryAfter: f.retry}, nil
+}
+
+func (f *admissionFake) RecheckStableLock(context.Context, tokenRiskDimensions) (time.Duration, error) {
+	return 0, nil
 }
 
 func (f *admissionFake) Complete(_ context.Context, _ tokenRiskDimensions, success bool, stableUser string) (time.Duration, error) {

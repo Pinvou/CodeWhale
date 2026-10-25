@@ -52,6 +52,8 @@ const TOKEN_GATEWAY_CONFIG_FIELD: &str = "token_gateway_url";
 const MAX_INSTALLED_CONFIG_BYTES: u64 = 64 * 1024;
 const MAX_RESPONSE_BYTES: usize = 2 * 1024 * 1024;
 const ACCOUNT_API_REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
+// Password/SMS may include up to 30s cancellable identifier risk wait.
+const LOGIN_TOKEN_REQUEST_TIMEOUT: Duration = Duration::from_secs(60);
 const MAX_REQUEST_BODY_BYTES: usize = 64 * 1024;
 
 #[derive(Debug, Clone)]
@@ -1191,6 +1193,10 @@ impl AccountPlatformState {
         let response = self
             .client
             .post(config.token_url.clone())
+            .timeout(match &flow {
+                TokenFlow::Password | TokenFlow::Sms => LOGIN_TOKEN_REQUEST_TIMEOUT,
+                TokenFlow::Refresh => ACCOUNT_API_REQUEST_TIMEOUT,
+            })
             .header("X-Device-ID", &self.device_id)
             .form(form)
             .send()
@@ -3416,6 +3422,74 @@ mod tests {
             );
         });
         (url, join)
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn identifier_delay_token_budgets_preserve_refresh_bound() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let url = Url::parse(&format!("http://{}/", listener.local_addr().unwrap())).unwrap();
+        let server = thread::spawn(move || {
+            let mut workers = Vec::new();
+            for _ in 0..3 {
+                let (mut socket, _) = listener.accept().unwrap();
+                workers.push(thread::spawn(move || {
+                    let request = independent_read_request(&mut socket);
+                    thread::sleep(Duration::from_millis(31_100));
+                    let body = r#"{"access_token":"public-access","refresh_token":"public-refresh","expires_in":300}"#;
+                    socket.set_write_timeout(Some(Duration::from_secs(5))).unwrap();
+                    // Refresh is expected to have cancelled before this write.
+                    let _ = write!(socket, "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len());
+                    request
+                }));
+            }
+            workers
+                .into_iter()
+                .map(|worker| worker.join().unwrap())
+                .collect::<Vec<_>>()
+        });
+        let mut state = portal_test_state(Arc::new(MemoryCredentialStore::default()), None);
+        state.client = reqwest::Client::builder()
+            .connect_timeout(Duration::from_secs(10))
+            .timeout(ACCOUNT_API_REQUEST_TIMEOUT)
+            .redirect(reqwest::redirect::Policy::none())
+            .build()
+            .unwrap();
+        let mut cfg = config();
+        cfg.token_url = url;
+        let started = Instant::now();
+        let (password, sms, refresh) = tokio::join!(
+            state.token_request(&cfg, &[("grant_type", "password")], TokenFlow::Password),
+            state.token_request(
+                &cfg,
+                &[("grant_type", "password"), ("pinvou_sms", "true")],
+                TokenFlow::Sms
+            ),
+            state.token_request(&cfg, &[("grant_type", "refresh_token")], TokenFlow::Refresh),
+        );
+        assert!(
+            password.is_ok(),
+            "password grant lost a permitted risk wait: {password:?}"
+        );
+        assert!(
+            sms.is_ok(),
+            "SMS direct grant lost a permitted risk wait: {sms:?}"
+        );
+        assert!(
+            refresh
+                .unwrap_err()
+                .starts_with("oidc_token_endpoint_unavailable:"),
+            "refresh budget was enlarged"
+        );
+        assert!(started.elapsed() >= Duration::from_secs(31));
+        let requests = server.join().unwrap();
+        assert_eq!(requests.len(), 3, "token requests were retried");
+        assert_eq!(
+            requests
+                .iter()
+                .filter(|request| request.contains("grant_type=refresh_token"))
+                .count(),
+            1
+        );
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

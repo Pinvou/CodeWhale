@@ -69,6 +69,9 @@ http {
         location /billing/ { return 404; }
         # Token admission must run before forwarding a user token grant.
         location = /realms/pinvou/protocol/openid-connect/token {
+            # Identity bounds password/SMS risk wait + processing to60s.
+            # Refresh retains its original server/client deadline and no wait.
+            proxy_read_timeout 60s;
             proxy_pass http://$identity_origin;
         }
         # Only realm and static-theme public paths reach Keycloak. Its admin

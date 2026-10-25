@@ -25,7 +25,8 @@ type tokenRiskDimensions struct {
 }
 
 type tokenAdmission interface {
-	Admit(context.Context, tokenRiskDimensions) (time.Duration, error)
+	Admit(context.Context, tokenRiskDimensions) (tokenAdmissionDecision, error)
+	RecheckStableLock(context.Context, tokenRiskDimensions) (time.Duration, error)
 	Complete(context.Context, tokenRiskDimensions, bool, string) (time.Duration, error)
 }
 
@@ -66,7 +67,7 @@ func (a *RedisTokenAdmission) digest(value string) string {
 	return base64.RawURLEncoding.EncodeToString(mac.Sum(nil)[:18])
 }
 
-func (a *RedisTokenAdmission) Admit(ctx context.Context, d tokenRiskDimensions) (time.Duration, error) {
+func (a *RedisTokenAdmission) Admit(ctx context.Context, d tokenRiskDimensions) (tokenAdmissionDecision, error) {
 	specs := []struct {
 		kind, value   string
 		limit, window int
@@ -84,44 +85,27 @@ func (a *RedisTokenAdmission) Admit(ctx context.Context, d tokenRiskDimensions) 
 	}
 	retry, err := admissionScript.Run(ctx, a.client, keys, args...).Int64()
 	if err != nil {
-		return 0, err
+		return tokenAdmissionDecision{}, err
 	}
 	if retry > 0 {
-		return time.Duration(max(retry, 1)) * time.Second, nil
+		return tokenAdmissionDecision{RetryAfter: time.Duration(max(retry, 1)) * time.Second}, nil
 	}
 	if d.action == "password" {
 		identifierKey := "pinvou:auth-failure:password:" + a.digest(d.identifier)
 		identifierCount, err := a.client.Get(ctx, identifierKey).Int64()
 		if err != nil && !errors.Is(err, redis.Nil) {
-			return 0, err
+			return tokenAdmissionDecision{}, err
 		}
-		if identifierCount >= 5 {
-			ttl, ttlErr := a.client.TTL(ctx, identifierKey).Result()
-			if ttlErr != nil {
-				return 0, ttlErr
-			}
-			return max(ttl, time.Second), nil
+		lock, err := a.RecheckStableLock(ctx, d)
+		if err != nil {
+			return tokenAdmissionDecision{}, err
 		}
-		stableDigest, err := a.client.Get(ctx, "pinvou:auth-alias:"+a.digest(d.identifier)).Result()
-		if err != nil && !errors.Is(err, redis.Nil) {
-			return 0, err
+		if lock > 0 {
+			return tokenAdmissionDecision{RetryAfter: lock}, nil
 		}
-		if stableDigest != "" {
-			stableKey := "pinvou:auth-failure:user:" + stableDigest
-			stableCount, countErr := a.client.Get(ctx, stableKey).Int64()
-			if countErr != nil && !errors.Is(countErr, redis.Nil) {
-				return 0, countErr
-			}
-			if stableCount >= 10 {
-				ttl, ttlErr := a.client.TTL(ctx, stableKey).Result()
-				if ttlErr != nil {
-					return 0, ttlErr
-				}
-				return max(ttl, time.Second), nil
-			}
-		}
+		return tokenAdmissionDecision{VerificationDelay: identifierVerificationDelay(identifierCount)}, nil
 	}
-	return 0, nil
+	return tokenAdmissionDecision{}, nil
 }
 
 func (a *RedisTokenAdmission) Complete(ctx context.Context, d tokenRiskDimensions, success bool, stableUser string) (time.Duration, error) {
@@ -191,6 +175,7 @@ func NewTokenProxyWithTrust(endpoint string, admission tokenAdmission, caFile st
 
 func (p *TokenProxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	started := p.now()
+	requestStarted := time.Now()
 	if err := r.ParseForm(); err != nil {
 		writeOAuthError(w, http.StatusBadRequest, "invalid_request", 0)
 		return
@@ -211,14 +196,40 @@ func (p *TokenProxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		d.session = r.Form.Get("refresh_token")
 		d.identifier = "refresh-session"
 	}
-	retry, err := p.admission.Admit(r.Context(), d)
+	decision, err := p.admission.Admit(r.Context(), d)
 	if err != nil {
 		writeOAuthError(w, http.StatusServiceUnavailable, "temporarily_unavailable", 1)
 		return
 	}
-	if retry > 0 {
+	if decision.RetryAfter > 0 {
 		waitTokenFloor(r.Context(), started, p.floor)
-		writeOAuthError(w, http.StatusTooManyRequests, "temporarily_unavailable", int(retry.Seconds()))
+		writeOAuthError(w, http.StatusTooManyRequests, "temporarily_unavailable", int(decision.RetryAfter.Seconds()))
+		return
+	}
+	if decision.VerificationDelay > 0 {
+		ctx, cancel, err := tokenVerificationContext(w, r, requestStarted, decision.VerificationDelay)
+		if err != nil {
+			writeOAuthError(w, http.StatusServiceUnavailable, "temporarily_unavailable", 1)
+			return
+		}
+		defer cancel()
+		r = r.WithContext(ctx)
+		if err := waitTokenVerification(ctx, decision.VerificationDelay); err != nil {
+			return
+		}
+		// A stable-user lock may have become effective during the wait. Recheck
+		// it without counting source/device/provider admission a second time.
+		lock, err := p.admission.RecheckStableLock(ctx, d)
+		if err != nil {
+			writeOAuthError(w, http.StatusServiceUnavailable, "temporarily_unavailable", 1)
+			return
+		}
+		if lock > 0 {
+			writeOAuthError(w, http.StatusTooManyRequests, "temporarily_unavailable", int(lock.Seconds()))
+			return
+		}
+	}
+	if r.Context().Err() != nil {
 		return
 	}
 	request, _ := http.NewRequestWithContext(r.Context(), http.MethodPost, p.endpoint, strings.NewReader(r.Form.Encode()))
@@ -261,6 +272,11 @@ func (p *TokenProxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if completeErr != nil && !success {
 		writeOAuthError(w, http.StatusServiceUnavailable, "temporarily_unavailable", 1)
 		return
+	}
+	// Once this attempt already waited before verification, do not add the
+	// legacy failed-response delay again. Complete still records all risk facts.
+	if decision.VerificationDelay > 0 {
+		delay = 0
 	}
 	waitTokenFloor(r.Context(), started, max(p.floor, delay))
 	if !success {
