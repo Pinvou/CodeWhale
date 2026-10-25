@@ -8,7 +8,6 @@ import (
 	"fmt"
 	"net/url"
 	"os"
-	"strings"
 	"testing"
 	"time"
 
@@ -623,7 +622,51 @@ func TestApprovalAuthorizationWallClockPostgres(t *testing.T) {
 		if err := connection.QueryRow(ctx, `SELECT (to_jsonb(p)-'prosrc')::text FROM pg_proc p WHERE oid='public.lock_approval_writer_authorization(uuid,text)'::regprocedure`).Scan(&originalFunction); err != nil {
 			return err
 		}
-		return connection.QueryRow(ctx, `SELECT COALESCE(jsonb_agg(to_jsonb(m) ORDER BY version),'[]')::text FROM schema_migrations m WHERE version<900010`).Scan(&originalMigrations)
+		if err := connection.QueryRow(ctx, `SELECT COALESCE(jsonb_agg(to_jsonb(m) ORDER BY version),'[]')::text FROM schema_migrations m WHERE version<900010`).Scan(&originalMigrations); err != nil {
+			return err
+		}
+		// The wall-clock migration owns this forward-only assertion. Check it
+		// while exactly its prefix is installed, before later additive fences.
+		var wallClockMigrations int
+		for _, migration := range installed {
+			if migration.Version == 900010 {
+				prefix = append(prefix, migration)
+				wallClockMigrations++
+			}
+		}
+		if wallClockMigrations != 1 {
+			return errors.New("exact wall-clock migration is required")
+		}
+		if err := accountschema.Up(ctx, connection, prefix); err != nil {
+			return err
+		}
+		if _, err := migrations.VerifyApplied(ctx, connection, prefix); err != nil {
+			return err
+		}
+		const rollbackFacts = `SELECT jsonb_build_object(
+ 'function',to_jsonb(p),
+ 'schema',(SELECT to_jsonb(n) FROM pg_namespace n WHERE n.nspname='public'),
+ 'migrations',(SELECT COALESCE(jsonb_agg(to_jsonb(m) ORDER BY version),'[]') FROM schema_migrations m))::text
+ FROM pg_proc p WHERE oid='public.lock_approval_writer_authorization(uuid,text)'::regprocedure`
+		var before, after string
+		if err := connection.QueryRow(ctx, rollbackFacts).Scan(&before); err != nil {
+			return err
+		}
+		err := accountschema.DownOne(ctx, connection, prefix)
+		var failure *pgconn.PgError
+		if !errors.As(err, &failure) || failure.Code != "55000" || failure.Message != "ACCOUNT_APPROVAL_AUTHORIZATION_WALL_CLOCK_FORWARD_ONLY: preserve current authorization fences" {
+			return fmt.Errorf("wall-clock prefix rollback was not explicitly refused: %v", err)
+		}
+		if _, err := migrations.VerifyApplied(ctx, connection, prefix); err != nil {
+			return err
+		}
+		if err := connection.QueryRow(ctx, rollbackFacts).Scan(&after); err != nil {
+			return err
+		}
+		if after != before {
+			return errors.New("refused wall-clock rollback changed function identity, ACL, schema grants or migration facts")
+		}
+		return nil
 	})
 	ctx := f.ctx
 	parsed, err := url.Parse(os.Getenv("PINVOU_TEST_ACCOUNT_DATABASE_URL"))
@@ -778,14 +821,11 @@ func TestApprovalAuthorizationWallClockPostgres(t *testing.T) {
 				t.Fatal("wrong runtime identity classification", err)
 			}
 		}
-		err = accountschema.DownOne(ctx, connection, installed)
-		var failure *pgconn.PgError
-		if !errors.As(err, &failure) || failure.Code != "55000" || !strings.Contains(err.Error(), "ACCOUNT_APPROVAL_AUTHORIZATION_WALL_CLOCK_FORWARD_ONLY") {
-			t.Fatal("highest security fence rollback was not explicitly refused", err)
-		}
+		// The exact 900010 prefix above proves its rollback fence. The full
+		// schema may contain newer migrations and must retain their history.
 		var after string
 		if err := connection.QueryRow(ctx, `SELECT (to_jsonb(p)-'prosrc')::text FROM pg_proc p WHERE oid='public.lock_approval_writer_authorization(uuid,text)'::regprocedure`).Scan(&after); err != nil || after != function {
-			t.Fatal("refused rollback modified function identity/privileges", err)
+			t.Fatal("full migration replay changed function identity/privileges", err)
 		}
 	})
 }
