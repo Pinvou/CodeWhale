@@ -104,7 +104,6 @@ func (s *Service) Handler(verify identity.VerifyFunc) http.Handler {
 	internal.POST("/approval-authorization/events/:event_id/deliveries/:durable/dlq-puback", serviceauth.Require("internal.approval-authorization.consume"), httpserver.AdaptFunc(s.recordApprovalAuthorizationDLQPubAck))
 	internal.POST("/approval-authorization/events/:event_id/deliveries/:durable/terminal", serviceauth.Require("internal.approval-authorization.consume"), httpserver.AdaptFunc(s.recordApprovalAuthorizationTerminal))
 	if s.mobileAuth != nil {
-		router.POST("/v1/auth/registration/precheck", httpserver.AdaptFunc(s.precheckMobileRegistration))
 		router.POST("/v1/auth/captcha/challenges", httpserver.AdaptFunc(s.createSliderCaptcha))
 		router.POST("/v1/auth/sms/challenges", httpserver.AdaptFunc(s.sendSMSChallenge))
 		router.POST("/v1/auth/register", httpserver.AdaptFunc(s.registerMobile))

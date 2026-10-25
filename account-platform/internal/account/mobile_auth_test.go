@@ -33,7 +33,6 @@ func TestPublicMobileAuthRejectsMalformedJSONWithStructuredErrors(t *testing.T) 
 	handler := NewService(nil, nil).WithMobileAuth(auth, "internal-service-token-for-tests-123456").Handler(nil)
 
 	for _, path := range []string{
-		"/v1/auth/registration/precheck",
 		"/v1/auth/captcha/challenges",
 		"/v1/auth/sms/challenges",
 	} {
@@ -559,11 +558,11 @@ func TestMobileAuthLoginRejectsMissingIdentityBeforeConsumingCode(t *testing.T) 
 func TestRegistrationPrecheckRejectsDuplicatesBeforeSMS(t *testing.T) {
 	repository := &mobileAuthRepositoryFake{usernameExists: true}
 	service := newMobileAuthForTest(t, repository, &smsProviderFake{}, &identityProvisionerFake{})
-	if _, err := service.PrecheckRegistration(context.Background(), "pinvou.user", "13800138000", "password-handle", "user-v1"); !errors.Is(err, ErrUsernameAlreadyRegistered) {
+	if _, err := service.Send(context.Background(), "pinvou.user", "13800138000", "password-handle", "user-v1", SMSPurposeRegister, uuid.New(), 128, "trusted-source", "device"); !errors.Is(err, ErrUsernameAlreadyRegistered) {
 		t.Fatalf("expected duplicate username, got %v", err)
 	}
-	if repository.captchaConsumed {
-		t.Fatal("registration precheck must finish before captcha or SMS consumption")
+	if !repository.captchaConsumed || repository.challengeSent || repository.operation.ID != uuid.Nil {
+		t.Fatal("registration precheck must follow captcha and precede SMS or registration creation")
 	}
 }
 

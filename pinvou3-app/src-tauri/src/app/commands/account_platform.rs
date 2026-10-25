@@ -5,8 +5,8 @@ use tauri::{AppHandle, State};
 
 use crate::features::account_platform::{
     AccountPlatformState, ApiRequest, ApiResponse, LoginCredentials, MobileRegistration,
-    MobileRegistrationPrecheck, PasswordReset, PortalOpenRequest, SMSLoginCredentials, SMSRequest,
-    SessionStatus, SliderCaptchaRequest,
+    PasswordReset, PortalOpenRequest, RegistrationPasswordPreparation, SMSLoginCredentials,
+    SMSRequest, SessionStatus, SliderCaptchaRequest,
 };
 
 #[tauri::command]
@@ -60,11 +60,11 @@ pub async fn account_platform_create_slider_captcha(
 }
 
 #[tauri::command]
-pub async fn account_platform_precheck_mobile_registration(
-    input: MobileRegistrationPrecheck,
+pub async fn account_platform_prepare_registration_password(
+    input: RegistrationPasswordPreparation,
     state: State<'_, AccountPlatformState>,
 ) -> Result<serde_json::Value, String> {
-    state.precheck_mobile_registration(input).await
+    state.prepare_registration_password(input).await
 }
 
 #[tauri::command]

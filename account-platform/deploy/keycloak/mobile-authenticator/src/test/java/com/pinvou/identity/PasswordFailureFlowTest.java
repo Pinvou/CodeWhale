@@ -42,6 +42,7 @@ final class PasswordFailureFlowTest {
         final DefaultAuthenticationFlow flow;
         final AuthenticationExecutionModel execution = new AuthenticationExecutionModel();
         boolean exists = true;
+        String lastMessage = "";
         final MultivaluedHashMap<String, String> form = new MultivaluedHashMap<>();
 
         Fixture() throws Exception {
@@ -88,6 +89,7 @@ final class PasswordFailureFlowTest {
             Authenticator authenticator = browser ? new PinvouBrowserAuthenticator(client) : new MobileDirectGrantAuthenticator(client);
             var result = spy(processor.createAuthenticatorContext(execution, authenticator, List.of(execution)));
             LoginFormsProvider forms = mock(LoginFormsProvider.class, RETURNS_SELF);
+            doAnswer(i -> { lastMessage = i.getArgument(0); return forms; }).when(forms).setError(anyString());
             when(forms.createForm(anyString())).thenReturn(Response.status(401).build());
             doReturn(forms).when(result).form();
             if (browser) authenticator.action(result); else authenticator.authenticate(result);
@@ -164,10 +166,85 @@ final class PasswordFailureFlowTest {
         f.form.putSingle("username", "fixture"); f.form.putSingle("mobile", "13800000000");
         f.form.putSingle("password_confirmation", "fixture-password"); f.form.putSingle("device_id", "fixture-device");
         f.attempt(true);
-        verify(f.client).precheckPassword("fixture-password", "198.51.100.21", "fixture-device");
-        verify(f.client).precheckRegistration("fixture", "+8613800000000", "fixture-handle", "fixture-policy", "198.51.100.21", "fixture-device");
-        verify(f.client).createCaptcha("+8613800000000", "REGISTER", "198.51.100.21", "fixture-device");
+        var order = inOrder(f.client);
+        order.verify(f.client).precheckPassword("fixture-password", "198.51.100.21", "fixture-device");
+        order.verify(f.client).createCaptcha("+8613800000000", "REGISTER", "198.51.100.21", "fixture-device");
+        verifyNoMoreInteractions(f.client);
         f.assertFailures(0);
+    }
+
+    private Fixture registrationSendFixture() throws Exception {
+        Fixture f = new Fixture();
+        when(f.session.getContext().getConnection().getRemoteAddr()).thenReturn("198.51.100.21");
+        f.form.putSingle("intent", "send_sms"); f.form.putSingle("mode", "register");
+        f.form.putSingle("captcha_offset", "128");
+        f.notes.put("pinvou.browser.username", "fixture"); f.notes.put("pinvou.browser.mobile", "+8613800000000");
+        f.notes.put("pinvou.browser.device", "fixture-device"); f.notes.put("pinvou.browser.password_handle", "fixture-handle");
+        f.notes.put("pinvou.browser.password_policy", "fixture-policy"); f.notes.put("pinvou.browser.captcha_id", "fixture-captcha");
+        return f;
+    }
+
+    @Test void registrationAvailabilityFailureRetiresTheConsumedCaptchaButKeepsValidPasswordReference() throws Exception {
+        for (String code : List.of("USERNAME_ALREADY_REGISTERED", "MOBILE_ALREADY_REGISTERED", "AUTH_SERVICE_UNAVAILABLE")) {
+            Fixture f = registrationSendFixture();
+            when(f.client.sendSMS(anyMap(), anyString(), anyString())).thenThrow(new PinvouAuthClient.AuthClientException(code.equals("AUTH_SERVICE_UNAVAILABLE") ? 503 : 409, code));
+            f.attempt(true);
+            assertFalse(f.notes.containsKey("pinvou.browser.captcha_id"), code);
+            assertEquals(PinvouBrowserAuthenticator.messageFor(code), f.lastMessage, code);
+            assertEquals("fixture-handle", f.notes.get("pinvou.browser.password_handle"), code);
+            assertFalse(f.notes.containsKey("pinvou.browser.sms_sent"), code);
+            f.form.putSingle("intent", "request_sms"); f.form.putSingle("username", "fixture");
+            f.form.putSingle("mobile", "13800000000"); f.form.putSingle("device_id", "fixture-device");
+            when(f.client.createCaptcha(anyString(), anyString(), anyString(), anyString())).thenReturn(Map.of("captcha_id", "new-captcha"));
+            f.attempt(true);
+            assertEquals("new-captcha", f.notes.get("pinvou.browser.captcha_id"));
+            verify(f.client, never()).precheckPassword(anyString(), anyString(), anyString());
+            verify(f.client, times(1)).sendSMS(anyMap(), eq("198.51.100.21"), eq("fixture-device"));
+            f.assertFailures(0);
+        }
+    }
+
+    @Test void expiredOrConflictingRegistrationPasswordReferenceRequiresNewOpaqueReference() throws Exception {
+        for (String code : List.of("PASSWORD_REFERENCE_INVALID", "PASSWORD_REFERENCE_CONFLICT")) {
+            Fixture f = registrationSendFixture();
+            when(f.client.sendSMS(anyMap(), anyString(), anyString())).thenThrow(new PinvouAuthClient.AuthClientException(code.equals("PASSWORD_REFERENCE_INVALID") ? 410 : 409, code));
+            f.attempt(true);
+            assertFalse(f.notes.containsKey("pinvou.browser.password_handle"));
+            assertFalse(f.notes.containsKey("pinvou.browser.password_policy"));
+            assertFalse(f.notes.containsKey("pinvou.browser.captcha_id"));
+            f.form.putSingle("intent", "request_sms"); f.form.putSingle("username", "fixture");
+            f.form.putSingle("mobile", "13800000000"); f.form.putSingle("device_id", "fixture-device");
+            f.form.putSingle("password_confirmation", "fixture-password");
+            when(f.client.precheckPassword(anyString(), anyString(), anyString())).thenReturn(Map.of("password_handle", "new-handle", "password_policy_version", "new-policy"));
+            when(f.client.createCaptcha(anyString(), anyString(), anyString(), anyString())).thenReturn(Map.of("captcha_id", "new-captcha"));
+            f.attempt(true);
+            var order = inOrder(f.client);
+            order.verify(f.client).sendSMS(anyMap(), eq("198.51.100.21"), eq("fixture-device"));
+            order.verify(f.client).precheckPassword("fixture-password", "198.51.100.21", "fixture-device");
+            order.verify(f.client).createCaptcha("+8613800000000", "REGISTER", "198.51.100.21", "fixture-device");
+            assertEquals("new-handle", f.notes.get("pinvou.browser.password_handle"));
+            assertFalse(f.notes.containsValue("fixture-password"), "raw passwords cannot enter authentication notes");
+            f.assertFailures(0);
+        }
+    }
+
+    @Test void registrationSendKeepsOriginalIdentityPurposeProofAndRiskFields() throws Exception {
+        Fixture f = registrationSendFixture();
+        when(f.client.sendSMS(anyMap(), anyString(), anyString())).thenReturn(Map.of("challenge_id", "sms-challenge", "registration_operation_id", "operation", "registration_query_token", "query-token"));
+        f.attempt(true);
+        verify(f.client).sendSMS(eq(Map.of("username", "fixture", "mobile", "+8613800000000", "password_handle", "fixture-handle", "password_policy_version", "fixture-policy", "purpose", "REGISTER", "captcha_id", "fixture-captcha", "captcha_offset", 128)), eq("198.51.100.21"), eq("fixture-device"));
+        assertFalse(f.notes.containsKey("pinvou.browser.captcha_id"));
+        assertEquals("sms-challenge", f.notes.get("pinvou.browser.sms_challenge"));
+        assertEquals("operation", f.notes.get("pinvou.browser.registration_operation"));
+        assertEquals("query-token", f.notes.get("pinvou.browser.registration_token"));
+        assertEquals("true", f.notes.get("pinvou.browser.sms_sent"));
+        f.assertFailures(0);
+    }
+
+    @Test void registrationCannotSendWithoutAStoredCaptcha() throws Exception {
+        Fixture f = registrationSendFixture(); f.notes.remove("pinvou.browser.captcha_id");
+        f.attempt(true); verifyNoInteractions(f.client);
+        assertFalse(f.notes.containsKey("pinvou.browser.sms_sent")); f.assertFailures(0);
     }
 
     @Test void successfulPasswordAndBrowserModeSwitchKeepTheirExistingAuthenticationSemantics() throws Exception {

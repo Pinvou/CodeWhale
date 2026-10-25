@@ -490,9 +490,7 @@ pub struct SliderCaptchaRequest {
 }
 
 #[derive(Debug, Deserialize)]
-pub struct MobileRegistrationPrecheck {
-    pub username: String,
-    pub mobile: String,
+pub struct RegistrationPasswordPreparation {
     pub password: String,
 }
 
@@ -766,9 +764,9 @@ impl AccountPlatformState {
         .await
     }
 
-    pub async fn precheck_mobile_registration(
+    pub async fn prepare_registration_password(
         &self,
-        input: MobileRegistrationPrecheck,
+        input: RegistrationPasswordPreparation,
     ) -> Result<Value, String> {
         let config = AccountPlatformConfig::current()?;
         let reference = self
@@ -790,17 +788,14 @@ impl AccountPlatformState {
             .ok_or_else(|| {
                 "identity_adapter_response_invalid: password policy version is missing".to_string()
             })?;
-        let mut result = self.public_account_request(
-            &config, "v1/auth/registration/precheck",
-            serde_json::json!({"username": input.username.trim(), "mobile": input.mobile.trim(),
-                "password_handle": password_handle, "password_policy_version": password_policy_version}),
-        ).await?;
-        if let (Some(result), Some(reference)) = (result.as_object_mut(), reference.as_object()) {
-            for key in ["password_handle", "password_policy_version", "expires_at"] {
-                if let Some(value) = reference.get(key) {
-                    result.insert(key.to_string(), value.clone());
-                }
-            }
+        // Password policy preparation is independent of account availability.
+        // Availability remains behind the one-shot challenge in Account Send.
+        let mut result = serde_json::json!({
+            "password_handle": password_handle,
+            "password_policy_version": password_policy_version,
+        });
+        if let Some(expires_at) = reference.get("expires_at") {
+            result["expires_at"] = expires_at.clone();
         }
         Ok(result)
     }
@@ -1589,7 +1584,6 @@ fn account_public_operation(path: &str) -> &'static str {
     match path {
         "v1/auth/captcha/challenges" => "captcha_challenge",
         "v1/auth/sms/challenges" => "sms_challenge",
-        "v1/auth/registration/precheck" => "registration_precheck",
         "v1/auth/register" => "mobile_registration",
         "v1/auth/password-resets" => "password_reset",
         _ => "public_account_request",
@@ -2045,6 +2039,84 @@ mod tests {
     use std::net::TcpListener;
     use std::sync::Mutex as StdMutex;
     use std::thread;
+
+    #[tokio::test]
+    async fn registration_password_preparation_only_calls_identity_policy() {
+        let _env = crate::platform::paths::tests::ENV_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let _snapshot = AccountEnvSnapshot::take();
+        let (base, server) = spawn_portal_fixture(1, |request| {
+            assert!(request.starts_with("POST /v1/registration/password-prechecks "));
+            let body: Value =
+                serde_json::from_str(request.split_once("\r\n\r\n").unwrap().1).unwrap();
+            assert_eq!(body, serde_json::json!({"password":"SyntheticPassword9"}));
+            assert!(!request.to_ascii_lowercase().contains("authorization:"));
+            (
+                201,
+                r#"{"password_handle":"PUBLIC_HANDLE","password_policy_version":"policy-v1","expires_at":"2026-10-24T12:00:00Z","username":"must-not-cross","password":"must-not-cross","available":true}"#,
+            )
+        });
+        independent_env_config(&base);
+        unsafe {
+            std::env::set_var(IDENTITY_URL_ENV, base.as_str());
+        }
+        let state = portal_test_state(Arc::new(MemoryCredentialStore::default()), None);
+        let result = state
+            .prepare_registration_password(RegistrationPasswordPreparation {
+                password: "SyntheticPassword9".into(),
+            })
+            .await;
+        server.join().unwrap();
+        assert_eq!(
+            result.unwrap(),
+            serde_json::json!({"password_handle":"PUBLIC_HANDLE","password_policy_version":"policy-v1","expires_at":"2026-10-24T12:00:00Z"})
+        );
+    }
+
+    #[tokio::test]
+    async fn registration_password_preparation_preserves_policy_errors_and_requires_reference() {
+        let _env = crate::platform::paths::tests::ENV_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let _snapshot = AccountEnvSnapshot::take();
+        for (status, body, expected) in [
+            (
+                400,
+                r#"{"code":"PASSWORD_POLICY_VIOLATION"}"#,
+                "mobile_auth_failed: PASSWORD_POLICY_VIOLATION",
+            ),
+            (
+                503,
+                r#"{"code":"IDENTITY_UNAVAILABLE"}"#,
+                "mobile_auth_failed: IDENTITY_UNAVAILABLE",
+            ),
+            (
+                201,
+                r#"{"password_policy_version":"policy-v1"}"#,
+                "identity_adapter_response_invalid: password handle is missing",
+            ),
+            (
+                201,
+                r#"{"password_handle":"PUBLIC_HANDLE"}"#,
+                "identity_adapter_response_invalid: password policy version is missing",
+            ),
+        ] {
+            let (base, server) = spawn_portal_fixture(1, move |_| (status, body));
+            independent_env_config(&base);
+            unsafe {
+                std::env::set_var(IDENTITY_URL_ENV, base.as_str());
+            }
+            let state = portal_test_state(Arc::new(MemoryCredentialStore::default()), None);
+            let result = state
+                .prepare_registration_password(RegistrationPasswordPreparation {
+                    password: "SyntheticPassword9".into(),
+                })
+                .await;
+            server.join().unwrap();
+            assert_eq!(result.unwrap_err(), expected);
+        }
+    }
 
     #[test]
     fn portal_handoff_tickets_reject_shell_metacharacters_and_invalid_lengths() {

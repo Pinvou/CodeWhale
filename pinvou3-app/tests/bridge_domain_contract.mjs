@@ -1,5 +1,5 @@
 export const desktopBridgeApi = {
-  accountPlatform: ['session', 'openPortal', 'login', 'createSliderCaptcha', 'precheckMobileRegistration', 'sendSms', 'registerMobile', 'registrationStatus', 'loginSms', 'resetPassword', 'logout', 'request', 'modelCatalog', 'selectCatalogModel', 'selectSessionCatalogModel', 'branchReplacementSession'],
+  accountPlatform: ['session', 'openPortal', 'login', 'createSliderCaptcha', 'prepareRegistrationPassword', 'sendSms', 'registerMobile', 'registrationStatus', 'loginSms', 'resetPassword', 'logout', 'request', 'modelCatalog', 'selectCatalogModel', 'selectSessionCatalogModel', 'branchReplacementSession'],
   lifecycle: ['init'],
   state: ['get', 'getMany', 'subscribe', 'subscribeMany'],
   platform: ['loadPlatformCapabilities', 'refreshConnectorAuthGates'],

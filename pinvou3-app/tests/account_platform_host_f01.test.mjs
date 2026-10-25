@@ -16,7 +16,7 @@ const methods = [
   ['openPortal', 'account_platform_open_portal', [{ language: 'ja' }], { input: { language: 'ja' } }],
   ['login', 'account_platform_login', [{ username: 'public-fixture-user', password: 'PUBLIC_SYNTHETIC_PASSWORD' }], { credentials: { username: 'public-fixture-user', password: 'PUBLIC_SYNTHETIC_PASSWORD' } }],
   ['createSliderCaptcha', 'account_platform_create_slider_captcha', [{ mobile: '13800000000', purpose: 'REGISTER' }], { input: { mobile: '13800000000', purpose: 'REGISTER' } }],
-  ['precheckMobileRegistration', 'account_platform_precheck_mobile_registration', [{ mobile: '13800000000', username: 'public-fixture-user' }], { input: { mobile: '13800000000', username: 'public-fixture-user' } }],
+  ['prepareRegistrationPassword', 'account_platform_prepare_registration_password', [{ password: 'PUBLIC_SYNTHETIC_PASSWORD' }], { input: { password: 'PUBLIC_SYNTHETIC_PASSWORD' } }],
   ['sendSms', 'account_platform_send_sms', [{ mobile: '13800000000', captcha_id: id, captcha_offset: 12, purpose: 'REGISTER' }], { input: { mobile: '13800000000', captcha_id: id, captcha_offset: 12, purpose: 'REGISTER' } }],
   ['registerMobile', 'account_platform_register_mobile', [{ mobile: '13800000000', challenge_id: id, code: '000000', password_handle: 'PUBLIC_SYNTHETIC_HANDLE' }], { input: { mobile: '13800000000', challenge_id: id, code: '000000', password_handle: 'PUBLIC_SYNTHETIC_HANDLE' } }],
   ['registrationStatus', 'account_platform_registration_status', [], undefined],

@@ -21,7 +21,7 @@ final class PinvouAuthClientTransportTest {
                 + exchange.getRequestHeaders().getFirst("X-Device-ID"));
             assertNull(exchange.getRequestHeaders().getFirst("Authorization"), "public bootstrap must not acquire a service credential");
             byte[] body = "{}".getBytes(StandardCharsets.UTF_8);
-            int status = exchange.getRequestURI().getPath().endsWith("precheck") ? 200 : 201;
+            int status = exchange.getRequestURI().getPath().endsWith("/sms/challenges") ? 202 : 201;
             exchange.sendResponseHeaders(status, body.length);
             exchange.getResponseBody().write(body); exchange.close();
         });
@@ -31,16 +31,16 @@ final class PinvouAuthClientTransportTest {
             var client = new PinvouAuthClient(Map.of("PINVOU_ACCOUNT_AUTH_URL", origin, "PINVOU_IDENTITY_AUTH_URL", origin)::get);
             for (String source : new String[]{"198.51.100.11", "198.51.100.12"}) {
                 client.precheckPassword("fixture-password", source, "fixture-device");
-                client.precheckRegistration("fixture", "+8613800000000", "fixture-handle", "fixture-policy", source, "fixture-device");
                 client.createCaptcha("+8613800000000", "REGISTER", source, "fixture-device");
+                client.sendSMS(Map.of("username", "fixture", "mobile", "+8613800000000", "password_handle", "fixture-handle", "password_policy_version", "fixture-policy", "captcha_id", "fixture-captcha", "captcha_offset", 128, "purpose", "REGISTER"), source, "fixture-device");
             }
             assertEquals(java.util.List.of(
                 "/v1/registration/password-prechecks|198.51.100.11|fixture-device",
-                "/v1/auth/registration/precheck|198.51.100.11|fixture-device",
                 "/v1/auth/captcha/challenges|198.51.100.11|fixture-device",
+                "/v1/auth/sms/challenges|198.51.100.11|fixture-device",
                 "/v1/registration/password-prechecks|198.51.100.12|fixture-device",
-                "/v1/auth/registration/precheck|198.51.100.12|fixture-device",
-                "/v1/auth/captcha/challenges|198.51.100.12|fixture-device"), received);
+                "/v1/auth/captcha/challenges|198.51.100.12|fixture-device",
+                "/v1/auth/sms/challenges|198.51.100.12|fixture-device"), received);
         } finally { server.stop(0); }
     }
     private PinvouAuthClient client(HttpServer server) {

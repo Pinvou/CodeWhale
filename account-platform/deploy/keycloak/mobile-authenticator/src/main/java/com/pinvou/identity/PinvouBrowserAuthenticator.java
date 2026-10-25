@@ -63,6 +63,10 @@ public final class PinvouBrowserAuthenticator implements Authenticator {
         } catch (PinvouAuthClient.AuthClientException error) {
             LOG.warnf("Pinvou browser authentication dependency rejected a request: %s", error.code());
             if ("CAPTCHA_INVALID".equals(error.code()) || "SMS_RATE_LIMITED".equals(error.code())) clearCaptcha(context);
+            if ("register".equals(requestedMode) && ("PASSWORD_REFERENCE_INVALID".equals(error.code()) || "PASSWORD_REFERENCE_CONFLICT".equals(error.code()))) {
+                context.getAuthenticationSession().removeAuthNote(note("password_handle"));
+                context.getAuthenticationSession().removeAuthNote(note("password_policy"));
+            }
             if ("REGISTRATION_RESTART_REQUIRED".equals(error.code())) clearState(context);
             if (shouldRestartPasswordReset(requestedMode, error.code())) clearState(context);
             render(context, requestedMode, messageFor(error.code()));
@@ -106,7 +110,6 @@ public final class PinvouBrowserAuthenticator implements Authenticator {
                 Map<String, Object> reference = client.precheckPassword(password, source(context), device);
                 String handle = PinvouAuthClient.string(reference.get("password_handle"));
                 String policy = PinvouAuthClient.string(reference.get("password_policy_version"));
-                client.precheckRegistration(username, mobile, handle, policy, source(context), device);
                 put(context, "password_handle", handle);
                 put(context, "password_policy", policy);
             }
@@ -153,7 +156,15 @@ public final class PinvouBrowserAuthenticator implements Authenticator {
         request.put("purpose", purpose(mode));
         request.put("captcha_id", captchaID);
         request.put("captcha_offset", offset);
-        Map<String, Object> response = client.sendSMS(request, source(context), get(context, "device"));
+        Map<String, Object> response;
+        try {
+            response = client.sendSMS(request, source(context), get(context, "device"));
+        } finally {
+            // Send consumes the one-shot captcha before availability precheck.
+            // Both a rejected precheck and an uncertain response need a new
+            // challenge; neither may reuse the old image/proof.
+            clearCaptcha(context);
+        }
         put(context, "sms_challenge", PinvouAuthClient.string(response.get("challenge_id")));
         put(context, "sms_sent", "true");
         put(context, "retry_after", PinvouAuthClient.string(response.getOrDefault("retry_after_seconds", "60")));
@@ -161,7 +172,6 @@ public final class PinvouBrowserAuthenticator implements Authenticator {
             put(context, "registration_operation", PinvouAuthClient.string(response.get("registration_operation_id")));
             put(context, "registration_token", PinvouAuthClient.string(response.get("registration_query_token")));
         }
-        clearCaptcha(context);
         render(context, mode, "pinvouCodeSent");
     }
 

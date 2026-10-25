@@ -741,7 +741,7 @@ func publicAccountPathAllowed(method, resource string) bool {
 	}
 	if method == http.MethodPost {
 		switch resource {
-		case "/v1/auth/registration/precheck", "/v1/auth/captcha/challenges", "/v1/auth/sms/challenges", "/v1/auth/register", "/v1/auth/password-resets":
+		case "/v1/auth/captcha/challenges", "/v1/auth/sms/challenges", "/v1/auth/register", "/v1/auth/password-resets":
 			return true
 		}
 	}
@@ -1044,7 +1044,7 @@ func accountRiskSourceAllowed(method, resource string) bool {
 	if method == http.MethodGet && userCodeLookupPath(resource) {
 		return true
 	}
-	return method == http.MethodPost && (resource == "/v1/auth/registration/precheck" || resource == "/v1/auth/captcha/challenges" || accountProofHeaderAllowed(method, resource, "X-Device-ID"))
+	return method == http.MethodPost && (resource == "/v1/auth/captcha/challenges" || accountProofHeaderAllowed(method, resource, "X-Device-ID"))
 }
 
 // These proofs belong to the individual registration or SMS operation, not to

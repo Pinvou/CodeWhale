@@ -101,6 +101,47 @@ try {
     await clickText(await page.evaluate(() => globalThis.f01.copy().account.captchaConfirm)); await page.waitForFunction(() => globalThis.f01.nativeCalls.some(call => call[0] === 'sms'));
     await page.type('input[autocomplete=one-time-code]', '000000');
   };
+  const registrationCaptcha = async language => {
+    await fresh();
+    await page.select('header select', language);
+    await page.evaluate(() => { globalThis.f01.authenticated = false; globalThis.f01.render('desktop'); });
+    await page.waitForSelector('.ap-login input[autocomplete=username]');
+    await clickText(await page.evaluate(() => globalThis.f01.copy().account.register));
+    await page.type('input[autocomplete=username]', 'controluser'); await page.type('input[autocomplete=tel-national]', '13800000000');
+    const inputs = await page.$$('input[type=password]'); await inputs[0].type('ControlPassword9'); await inputs[1].type('ControlPassword9');
+    await clickText(await page.evaluate(() => globalThis.f01.copy().account.sendCode)); await page.waitForSelector('[role=dialog]');
+    assert(await page.evaluate(() => JSON.stringify(globalThis.f01.nativeCalls.map(call => call[0])) === JSON.stringify(['password-reference', 'captcha'])), 'availability or SMS requested before challenge completion');
+  };
+  for (const language of ['zh', 'en', 'ja']) for (const code of ['USERNAME_ALREADY_REGISTERED', 'MOBILE_ALREADY_REGISTERED', 'PASSWORD_REFERENCE_INVALID', 'PASSWORD_REFERENCE_CONFLICT', 'UPSTREAM_UNAVAILABLE']) await caseRun(`${language}: registration ${code} consumes challenge and safely prepares retry`, async () => {
+    await registrationCaptcha(language);
+    await page.evaluate(code => { globalThis.f01.smsError = { code }; }, code);
+    await clickText(await page.evaluate(() => globalThis.f01.copy().account.captchaConfirm));
+    await page.waitForFunction(() => !document.querySelector('[role=dialog]') && document.querySelector('[role=alert]'));
+    const message = await page.evaluate(code => {
+      const copy = globalThis.f01.copy().account;
+      return code === 'USERNAME_ALREADY_REGISTERED' ? copy.usernameAlreadyRegistered : code === 'MOBILE_ALREADY_REGISTERED' ? copy.mobileAlreadyRegistered : copy.errors[code] || copy.requestFailed;
+    }, code);
+    assert(await page.$eval('[role=alert]', node => node.textContent) === message, 'registration error was not localized');
+    assert(await page.evaluate(() => !globalThis.f01.nativeCalls.some(call => call[0] === 'register')), 'registration followed failed precheck');
+    await page.evaluate(() => { globalThis.f01.smsError = null; });
+    await clickText(await page.evaluate(() => globalThis.f01.copy().account.sendCode)); await page.waitForSelector('[role=dialog]');
+    const invalidReference = code.startsWith('PASSWORD_REFERENCE_');
+    assert(await page.evaluate(() => globalThis.f01.nativeCalls.filter(call => call[0] === 'password-reference').length) === (invalidReference ? 2 : 1), 'password handle retry ownership changed');
+    assert(await page.evaluate(() => globalThis.f01.nativeCalls.filter(call => call[0] === 'captcha').length === 2 && globalThis.f01.nativeCalls.filter(call => call[0] === 'sms').length === 1), 'retry reused proof or sent SMS before confirmation');
+    await clickText(await page.evaluate(() => globalThis.f01.copy().account.captchaConfirm));
+    await page.waitForFunction(() => !document.querySelector('[role=dialog]'));
+    assert(await page.evaluate(() => { const requests = globalThis.f01.nativeCalls.filter(call => call[0] === 'sms'); return requests.length === 2 && requests.every(([, body]) => body.password_handle === 'control-password-handle' && body.password_policy_version === 'control-policy-v1' && !('password' in body)); }), 'retry lost password reference or exposed plaintext');
+  });
+  await caseRun('retired registration SMS error cannot mutate the next account page', async () => {
+    await registrationCaptcha('en');
+    await page.evaluate(() => { globalThis.f01.delaySMS = true; globalThis.f01.smsError = { code: 'PASSWORD_REFERENCE_INVALID' }; });
+    await clickText(await page.evaluate(() => globalThis.f01.copy().account.captchaConfirm));
+    await page.waitForFunction(() => typeof globalThis.f01.releaseSMS === 'function');
+    await page.evaluate(() => { globalThis.f01.authenticated = true; globalThis.f01.switchIdentity(); }); await waitText('account-b');
+    await page.evaluate(() => globalThis.f01.releaseSMS());
+    await page.waitForFunction(() => !document.querySelector('.ap-login') && !document.querySelector('[role=dialog]'));
+    assert(await page.evaluate(() => !document.body.textContent.includes(globalThis.f01.copy().account.requestFailed) && !document.querySelector('.ap-login [role=alert]') && globalThis.f01.nativeCalls.filter(call => call[0] === 'sms').length === 1), 'retired response contaminated current account');
+  });
   await caseRun('typed passwords require an explicit reveal and blur hides without shifting submit', async () => {
     await desktopGuest(); await page.type('input[autocomplete=username]', 'controluser'); await page.type('input[type=password]', 'ControlPassword9');
     assert(await page.evaluate(() => document.querySelector('[data-password-reveal-output]').hidden), 'typed password automatically revealed');

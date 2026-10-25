@@ -185,13 +185,6 @@ func NormalizeRegistrationUsername(value string) (string, error) {
 	return value, nil
 }
 
-func (s *MobileAuthService) PrecheckRegistration(ctx context.Context, rawUsername, rawMobile, passwordHandle, passwordPolicyVersion string) (string, error) {
-	if err := s.repository.AdmitPublicMobileRequest(ctx, "PRECHECK", rawMobile, authRiskFromContext(ctx).source); err != nil {
-		return "", err
-	}
-	return s.precheckRegistration(ctx, rawUsername, rawMobile, passwordHandle, passwordPolicyVersion)
-}
-
 func (s *MobileAuthService) precheckRegistration(ctx context.Context, rawUsername, rawMobile, passwordHandle, passwordPolicyVersion string) (string, error) {
 	username, err := NormalizeRegistrationUsername(rawUsername)
 	if err != nil {
@@ -235,6 +228,12 @@ func (s *MobileAuthService) Send(ctx context.Context, rawUsername, rawMobile, pa
 	}
 	username := ""
 	if purpose == SMSPurposeRegister {
+		// Registration availability is disclosed only after the one-shot,
+		// mobile/purpose-bound captcha has been consumed. Keep the original
+		// source/target/global admission before any availability or Identity read.
+		if err := s.repository.AdmitPublicMobileRequest(ctx, "PRECHECK", mobile, source); err != nil {
+			return SMSChallenge{}, err
+		}
 		if username, err = s.precheckRegistration(ctx, rawUsername, mobile, passwordHandle, passwordPolicyVersion); err != nil {
 			return SMSChallenge{}, err
 		}
