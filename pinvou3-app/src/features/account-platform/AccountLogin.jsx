@@ -1,5 +1,6 @@
 import React, { useEffect, useRef, useState } from 'react';
 import { registrationManualReviewReason } from './registration-recovery-state.js';
+import { secureRequestID } from './request-id.js';
 import { PasswordInput } from './PasswordInput.jsx';
 import { ProfileCaptcha } from './ProfileSettings.jsx';
 import { accountPlatformErrorCodes, localizedAccountPlatformError } from './error-localization.js';
@@ -101,7 +102,7 @@ export function AccountLogin({ client, copy, onAuthenticated, reauthentication =
       if (purpose === 'REGISTER' || purpose === 'PASSWORD_RESET') {
         if (password !== confirmation) throw new Error('PASSWORD_MISMATCH');
         const attempt = preparation || {
-          operation_id: globalThis.crypto.randomUUID(), mobile: mobile.trim(), purpose,
+          operation_id: secureRequestID(), mobile: mobile.trim(), purpose,
           captcha_id: captcha.captcha_id, captcha_offset: profileCaptchaSubmissionOffset(selectedOffset, offset),
           password_handle: reference?.password_handle || '', password_policy_version: reference?.password_policy_version || '',
         };

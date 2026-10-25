@@ -26,6 +26,10 @@ try {
   await vite.listen();
   browser = await puppeteer.launch({ executablePath: chrome, headless: 'new', userDataDir: profile, args: ['--no-sandbox', '--disable-gpu', '--no-first-run'] });
   page = await browser.newPage(); const errors = []; const duplicateKeys = [];
+  // Safari 14 exposes secure getRandomValues but has no crypto.randomUUID.
+  await page.evaluateOnNewDocument(() => {
+    Object.defineProperty(document.defaultView.crypto, 'randomUUID', { value: undefined, configurable: true });
+  });
   page.on('pageerror', error => errors.push(error.message)); page.on('dialog', dialog => dialog.accept());
   page.on('console', message => {
     if (/Encountered two children with the same key/.test(message.text())) duplicateKeys.push(message.text());
@@ -35,6 +39,10 @@ try {
   const clickText = async text => { const clicked = await page.evaluate(value => { const button = [...document.querySelectorAll('button')].find(item => item.textContent.trim() === value); if (!button || button.disabled) return false; button.click(); return true; }, text); assert(clicked, `button unavailable: ${text}`); };
   const waitText = async text => page.waitForFunction(value => document.body.textContent.includes(value), {}, text);
   const caseRun = async (name, action) => { await action(); assert(errors.length === 0, `React errors: ${errors.join(',')}`); passed++; console.log(`PASS ${name}`); };
+  await caseRun('Safari 14 retains secure Web Crypto without randomUUID for every auth flow', async () => {
+    await fresh();
+    assert(await page.evaluate(() => typeof document.defaultView.crypto.randomUUID === 'undefined' && typeof document.defaultView.crypto.getRandomValues === 'function'), 'Safari 14 crypto boundary not installed');
+  });
   await caseRun('personal exact int64 balance through production BFF', async () => { await fresh(); await waitText('922,337,203,685,477.5807'); await waitText('-1.0001'); });
   await caseRun('missing balance permission does not query token', async () => { await fresh(); await page.evaluate(() => { globalThis.f01.balanceAllowed = false; globalThis.f01.calls.length = 0; globalThis.f01.switchIdentity(); }); await waitText('account-b'); assert(await page.evaluate(() => !globalThis.f01.calls.some(call => call.url.includes('/me/balance'))), 'unauthorized balance queried'); });
   await caseRun('balance unavailability is visible and never substituted with zero', async () => { await fresh(); await page.evaluate(() => { globalThis.f01.balanceFail = true; globalThis.f01.switchIdentity(); }); await page.waitForSelector('[role=alert]'); assert(await page.evaluate(() => document.querySelector('[role=alert]').textContent.length > 0), 'empty error'); assert(await page.evaluate(() => !document.body.textContent.includes('922,337,203')), 'old balance retained'); });
@@ -130,6 +138,19 @@ try {
     await clickText(await page.evaluate(() => globalThis.f01.copy().account.sendCode)); await page.waitForSelector('[role=dialog]');
     assert(await page.evaluate(() => JSON.stringify(globalThis.f01.nativeCalls.map(call => call[0])) === JSON.stringify(['captcha'])), 'availability or SMS requested before challenge completion');
   };
+  await caseRun('Safari 14 registration dispatches a secure preparation after captcha', async () => {
+    await registrationCaptcha('en');
+    await clickText(await page.evaluate(() => globalThis.f01.copy().account.captchaConfirm));
+    await page.waitForFunction(() => globalThis.f01.nativeCalls.some(([method]) => method === 'password-authorization') || Boolean(document.querySelector('[role=alert]')));
+    const outcome = await page.evaluate(() => ({
+      operations: globalThis.f01.nativeCalls.filter(([method]) => method === 'password-authorization').map(([, body]) => body.operation_id),
+      error: document.querySelector('[role=alert]')?.textContent || '',
+    }));
+    assert(outcome.operations.length === 1, `Safari 14 password preparation was not dispatched: ${outcome.error}`);
+    assert(/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/.test(outcome.operations[0]), 'preparation operation is not a secure UUID v4');
+    await page.waitForFunction(() => !document.querySelector('[role=dialog]'));
+    assert(await page.evaluate(() => globalThis.f01.nativeCalls.filter(([method]) => method === 'sms').length === 1), 'Safari 14 preparation did not continue exactly once to SMS');
+  });
   for (const language of ['zh', 'en', 'ja']) for (const code of ['USERNAME_ALREADY_REGISTERED', 'MOBILE_ALREADY_REGISTERED', 'PASSWORD_REFERENCE_INVALID', 'PASSWORD_REFERENCE_CONFLICT', 'UPSTREAM_UNAVAILABLE']) await caseRun(`${language}: registration ${code} consumes challenge and safely prepares retry`, async () => {
     await registrationCaptcha(language);
     await page.evaluate(code => { globalThis.f01.smsError = { code }; }, code);
@@ -150,7 +171,7 @@ try {
     assert(await page.evaluate(() => { const requests = globalThis.f01.nativeCalls.filter(call => call[0] === 'sms'); return requests.length === 2 && requests.every(([, body]) => body.password_handle === 'control-password-handle' && body.password_policy_version === 'control-policy-v1' && !('password' in body)); }), 'retry lost password reference or exposed plaintext');
     assert(await page.evaluate(code => globalThis.f01.nativeCalls.filter(call => call[0] === 'password-reference').length === (code.startsWith('PASSWORD_REFERENCE_') ? 2 : 1), code), 'retry changed accepted reference ownership');
   });
-  await caseRun('password preparation uncertain ACK retains one operation and does not send SMS', async () => {
+  await caseRun('Safari 14 password preparation uncertain ACK retains one secure operation and does not send SMS', async () => {
     await registrationCaptcha('en');
     await page.evaluate(() => { globalThis.f01.preparationError = { code: 'UPSTREAM_UNAVAILABLE' }; });
     await clickText(await page.evaluate(() => globalThis.f01.copy().account.captchaConfirm));
@@ -159,7 +180,7 @@ try {
     await page.evaluate(() => { globalThis.f01.preparationError = null; });
     await clickText(await page.evaluate(() => globalThis.f01.copy().account.captchaConfirm));
     await page.waitForFunction(() => !document.querySelector('[role=dialog]'));
-    assert(await page.evaluate(() => { const attempts=globalThis.f01.nativeCalls.filter(([method]) => method === 'password-authorization').map(([,body])=>body); return attempts.length === 2 && Boolean(attempts[0].operation_id) && JSON.stringify(attempts[0]) === JSON.stringify(attempts[1]); }), 'uncertain preparation allocated a new operation');
+    assert(await page.evaluate(() => { const attempts=globalThis.f01.nativeCalls.filter(([method]) => method === 'password-authorization').map(([,body])=>body); return attempts.length === 2 && /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/.test(attempts[0].operation_id) && JSON.stringify(attempts[0]) === JSON.stringify(attempts[1]); }), 'uncertain preparation allocated a new operation');
     assert(await page.evaluate(() => globalThis.f01.nativeCalls.filter(([method])=>method==='sms').length===1), 'preparation retry duplicated SMS');
   });
   for (const language of ['zh','en','ja']) await caseRun(`${language}: reset prepares only after challenge and submits only original reference`, async () => {
