@@ -52,10 +52,12 @@ impl super::super::SessionStore {
         // The archive anchor has its own bounded storage, so even a completely
         // full legacy active JSON can seal without first growing that JSON.
         if let Err(error) = state.archives.seal(&record) {
-            // A durable intent may already exist. Never restore execution
-            // authority after ambiguous I/O; startup recovers that exact seal.
-            state.load_failed = true;
-            return Err(error);
+            // A proven rejection before intent is retryable. Ambiguous I/O
+            // still disables remote mutations until strict startup recovery.
+            if error.requires_quarantine() {
+                state.load_failed = true;
+            }
+            return Err(error.into_error());
         }
         // The archive transaction is now permanent. A stale active JSON copy
         // cannot authorize a reopen, even if cleanup fails or the process exits.
