@@ -981,6 +981,10 @@ function isProtectedScheduledBuffer(id, buf) { return pinvouSharedweb().isProtec
       var buf = sessionStates[id];
       if (!buf || id === keepId || isProtectedScheduledBuffer(id, buf)) continue;
       if (!stashEvictedSessionDraft(id, buf)) continue; // draft cannot be safely retained; keep the buffer
+      // Defense in depth: protection predicates make live stream timers
+      // unreachable here today, but a stray timer must not outlive its
+      // evicted buffer (purgeSessionBuffer does the same).
+      cancelStreamTimers(id);
       delete sessionStates[id];
       delete turnUsageDirty[id];
       // personaPlaceholderTitles is lightweight session metadata (the marker
@@ -1020,6 +1024,10 @@ function touchSessionBuffer(id, buf, scheduled) { return pinvouSharedweb().touch
       var buf = sessionStates[id];
       if (!buf || id === keepId || isProtectedScheduledBuffer(id, buf)) continue;
       if (!stashEvictedSessionDraft(id, buf)) continue; // draft cannot be safely retained; keep the buffer
+      // Defense in depth: protection predicates make live stream timers
+      // unreachable here today, but a stray timer must not outlive its
+      // evicted buffer (purgeSessionBuffer does the same).
+      cancelStreamTimers(id);
       delete sessionStates[id];
       delete turnUsageDirty[id];
       // personaPlaceholderTitles survives capacity eviction (see the
