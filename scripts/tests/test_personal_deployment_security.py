@@ -11,6 +11,15 @@ ROOT = Path(__file__).resolve().parents[2]
 DEPLOY = ROOT / "account-platform/deploy"
 
 
+def nginx_active_text(text):
+    # A hash starts a comment only outside quoted or escaped text.
+    return re.sub(
+        r"""(?P<quoted>"(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*')|(?P<escaped>\\.)|(?P<comment>#[^\r\n]*)""",
+        lambda match: "" if match.lastgroup == "comment" else match.group(0),
+        text,
+    )
+
+
 class PersonalDeploymentSecurityTests(unittest.TestCase):
     def test_keycloak_applies_and_verifies_hardening(self):
         text = (DEPLOY / "keycloak/provision-mobile-auth.sh").read_text(encoding="utf-8")
@@ -83,6 +92,65 @@ kcadm() {
         self.assertIn("proxy_ssl_name $keycloak_tls_name;", text)
         self.assertIn("map $keycloak_origin $keycloak_tls_name", text)
         self.assertIn("location = /realms/pinvou/protocol/openid-connect/token", text)
+
+    def test_nginx_active_text_keeps_quoted_and_escaped_hashes(self):
+        for config, active in [
+            ('set $label "# retained"; # retired\n', 'set $label "# retained"; \n'),
+            ("set $label '# retained'; # retired\n", "set $label '# retained'; \n"),
+            (r"set $label \#retained; # retired", r"set $label \#retained; "),
+            ("# proxy_read_timeout 300s;\n", "\n"),
+        ]:
+            with self.subTest(config=config):
+                self.assertEqual(nginx_active_text(config), active)
+
+    def test_token_location_preserves_stream_read_interval_without_widening_other_routes(self):
+        text = (DEPLOY / "nginx/personal.conf.template").read_text(encoding="utf-8")
+        # Use the actual rendered personal layout, including exact/private
+        # location precedence; do not pass because an unrelated block says 300s.
+        text = text.replace("__PUBLIC_HOST__", "personal.example.test").replace(
+            "__KEYCLOAK_ORIGIN__", "identity.example.test:8443"
+        ).replace("__PUBLIC_TLS_PORT__", "443")
+        self.assertNotRegex(text, r"__[A-Z_]+__")
+        legacy = (DEPLOY / "nginx/account-platform.conf.template").read_text(encoding="utf-8")
+        legacy = nginx_active_text(legacy)
+        legacy_token = re.search(r"location /token/\s*\{([^}]+)\}", legacy).group(1)
+        self.assertEqual(re.findall(r"proxy_read_timeout\s+([^;]+);", legacy_token), ["300s"])
+        text = nginx_active_text(text)
+        locations = []
+        for match in re.finditer(r"\blocation\s+(?:(=|\^~|~\*?)\s+)?([^\s{]+)\s*\{", text):
+            depth = 1
+            end = match.end()
+            while depth:
+                depth += (text[end] == "{") - (text[end] == "}")
+                end += 1
+            self.assertNotIn(match.group(1), ("~", "~*"), "review regex precedence explicitly")
+            locations.append((match.group(1), match.group(2), text[match.end():end - 1]))
+        server_defaults = text.split("location", 1)[0]
+        self.assertEqual(re.findall(r"proxy_read_timeout\s+([^;]+);", server_defaults), ["30s"])
+
+        def selected_location(uri):
+            exact = [item for item in locations if item[0] == "=" and item[1] == uri]
+            prefixes = [item for item in locations if item[0] != "=" and uri.startswith(item[1])]
+            return exact[0] if exact else max(prefixes, key=lambda item: len(item[1]))
+
+        for uri in ["/token/v1/chat/completions", "/token/v1/models"]:
+            with self.subTest(uri=uri):
+                _, route, body = selected_location(uri)
+                self.assertEqual(route, "/token/")
+                self.assertEqual(re.findall(r"proxy_read_timeout\s+([^;]+);", body), ["300s"])
+                self.assertIn("proxy_pass http://$token_origin;", body)
+                self.assertIn("rewrite ^/token/(.*)$ /$1 break;", body)
+        self.assertEqual(text.count("proxy_read_timeout 300s;"), 1)
+        for uri in ["/token/admin", "/token/admin/requests", "/token/internal", "/token/internal/settlements"]:
+            with self.subTest(private_uri=uri):
+                body = selected_location(uri)[2]
+                self.assertIn("return 404;", body)
+                self.assertNotIn("proxy_pass", body)
+        for uri in ["/account/v1/me", "/api/v1/payment-callbacks", "/session"]:
+            with self.subTest(ordinary_uri=uri):
+                self.assertNotRegex(selected_location(uri)[2], r"proxy_read_timeout\s+300s;")
+        self.assertEqual(re.findall(r"proxy_connect_timeout\s+([^;]+);", text), ["3s"])
+        self.assertEqual(re.findall(r"proxy_send_timeout\s+([^;]+);", text), ["30s"])
 
     def test_large_import_has_one_exact_authenticated_portal_path(self):
         text = (DEPLOY / "nginx/personal.conf.template").read_text(encoding="utf-8")

@@ -88,6 +88,9 @@ http {
         location /token/ {
             rewrite ^/token/(.*)$ /$1 break;
             proxy_pass http://$token_origin;
+            # Match the existing Token edge budget between upstream reads.
+            # This is a silence interval, not a total generation deadline.
+            proxy_read_timeout 300s;
         }
         # Large imports still pass through Portal session/CSRF and Billing RBAC.
         location = /api/admin/billing/admin/v1/reconciliation-imports {
