@@ -4743,7 +4743,7 @@ const App = () => {
 
             {/* Header / Logo */}
             <div className={`px-4 py-3 max-sm:px-3 max-sm:py-0 flex items-center ${isSidebarOpen ? 'gap-3' : 'justify-center'} overflow-hidden`}>
-              <button
+              <button type="button"
                 data-sidebar-toggle
                 onClick={() => setIsSidebarOpen(!isSidebarOpen)}
                 title={isSidebarOpen ? t.sidebarCollapse : t.sidebarExpand}
@@ -5188,7 +5188,7 @@ const App = () => {
               <div className={`${isSidebarOpen ? 'flex items-center justify-between gap-2' : 'flex flex-col items-center gap-3'}`}>
                 {!isSidebarOpen && (
                   <>
-                    {can('webAccessAdmin') && <button
+                    {can('webAccessAdmin') && <button type="button"
                       onClick={handleOpenWebAccess}
                       title={t.uiRemote.title}
                       className={`relative w-10 h-10 shrink-0 rounded-full flex items-center justify-center transition-colors ${activeTheme === 'dark' ? 'text-[#E3E3E3] hover:bg-[#333537]' : 'text-[#444746] hover:bg-[#E1E5EA]'}`}
@@ -5196,14 +5196,14 @@ const App = () => {
                       <Smartphone size={18} />
                       {isWebAccessConnected && <span className="absolute top-1 right-1 w-2 h-2 rounded-full bg-[#34A853]" />}
                     </button>}
-                    {can('pet') && <button
+                    {can('pet') && <button type="button"
                       onClick={() => handleSetPetEnabled(!(bs && bs.settings && bs.settings.pet && bs.settings.pet.enabled))}
                       title={(bs && bs.settings && bs.settings.pet && bs.settings.pet.enabled) ? t.uiPet.hide : t.uiMainApp.petSummon}
                       className={`relative w-10 h-10 shrink-0 rounded-full flex items-center justify-center transition-colors ${(bs && bs.settings && bs.settings.pet && bs.settings.pet.enabled) ? 'text-[#34A853]' : (activeTheme === 'dark' ? 'text-[#E3E3E3]' : 'text-[#444746]')} ${activeTheme === 'dark' ? 'hover:bg-[#333537]' : 'hover:bg-[#E1E5EA]'}`}
                     >
                       <PetPawIcon />
                     </button>}
-                    <button
+                    <button type="button"
                       data-testid="nav-settings"
                       onClick={() => openSettingsSection('general')}
                       title={t.settings}
@@ -5215,7 +5215,7 @@ const App = () => {
                   </>
                 )}
                 {showMegacubeSite && (
-                  <button
+                  <button type="button"
                     onClick={() => invokeTauri('open_external_url', { url: 'https://www.h3c.com/cn/pub/minisite/202606/MegaCube/megacube/index.html' })}
                     title={t.megacubeSite}
                     className={`flex items-center rounded-xl transition-colors ${isSidebarOpen ? 'flex-1 min-w-0 px-2 py-1.5 gap-3' : 'justify-center w-10 h-10'} ${activeTheme === 'dark' ? 'hover:bg-[#333537] active:bg-[#3A3C3E]' : 'hover:bg-[#E1E5EA] active:bg-[#D8DCE1]'}`}
@@ -5228,7 +5228,7 @@ const App = () => {
                 )}
                 {isSidebarOpen && (
                   <div className="flex items-center gap-1">
-                    {can('webAccessAdmin') && <button
+                    {can('webAccessAdmin') && <button type="button"
                       onClick={handleOpenWebAccess}
                       title={t.uiRemote.title}
                       className={`relative w-9 h-9 shrink-0 rounded-full flex items-center justify-center transition-colors ${activeTheme === 'dark' ? 'text-[#C4C7C5] hover:bg-[#333537]' : 'text-[#444746] hover:bg-[#E1E5EA]'}`}
@@ -5236,14 +5236,14 @@ const App = () => {
                       <Smartphone size={18} />
                       {isWebAccessConnected && <span className="absolute top-1 right-1 w-2 h-2 rounded-full bg-[#34A853]" />}
                     </button>}
-                    {can('pet') && <button
+                    {can('pet') && <button type="button"
                       onClick={() => handleSetPetEnabled(!(bs && bs.settings && bs.settings.pet && bs.settings.pet.enabled))}
                       title={(bs && bs.settings && bs.settings.pet && bs.settings.pet.enabled) ? t.uiPet.hide : t.uiMainApp.petSummon}
                       className={`relative w-9 h-9 shrink-0 rounded-full flex items-center justify-center transition-colors ${(bs && bs.settings && bs.settings.pet && bs.settings.pet.enabled) ? 'text-[#34A853]' : (activeTheme === 'dark' ? 'text-[#C4C7C5]' : 'text-[#444746]')} ${activeTheme === 'dark' ? 'hover:bg-[#333537]' : 'hover:bg-[#E1E5EA]'}`}
                     >
                       <PetPawIcon />
                     </button>}
-                    <button
+                    <button type="button"
                       data-testid="nav-settings"
                       onClick={() => navigateFromScheduledRun('settings')}
                       title={t.settings}
