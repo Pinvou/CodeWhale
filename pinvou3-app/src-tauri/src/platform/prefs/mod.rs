@@ -835,6 +835,10 @@ pub struct AdvancedPrefs {
     /// compatibility mirrors for older clients and scheduled-task code.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub default_model_ref: Option<ModelSelectionRef>,
+    /// Opaque local CAS identity. Even reselecting the same default is a new
+    /// intent and must not be retired by an earlier catalog observation.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub(crate) default_model_selection_revision: String,
     #[serde(
         default,
         alias = "builtin_llmapi_default_model",
@@ -1737,8 +1741,34 @@ impl UserPrefs {
             }
         }
         self.advanced.default_model_ref = Some(selection);
+        self.advanced.default_model_selection_revision = uuid::Uuid::new_v4().to_string();
         self.model_selection_schema_version = 1;
         Ok(())
+    }
+
+    /// Called only under the existing prefs transaction and a current Account
+    /// owner guard, after a catalog explicitly reports this model retired.
+    pub(crate) fn retire_observed_platform_default(
+        &mut self,
+        expected: &ModelSelectionRef,
+        revision: &str,
+    ) -> bool {
+        if !matches!(expected, ModelSelectionRef::AccountPlatform { .. })
+            || self.advanced.default_model_ref.as_ref() != Some(expected)
+            || self.advanced.default_model_selection_revision != revision
+        {
+            return false;
+        }
+        self.advanced.default_model_ref = None;
+        self.advanced.account_platform_default_model = None;
+        if self.advanced.active_model_id.as_deref().is_some_and(|id| {
+            id == BUILTIN_ACCOUNT_PLATFORM_MODEL_ID || id == LEGACY_BUILTIN_LLMAPI_MODEL_ID
+        }) {
+            self.advanced.active_model_id = None;
+        }
+        self.advanced.default_model_selection_revision = uuid::Uuid::new_v4().to_string();
+        self.model_selection_schema_version = 1;
+        true
     }
 
     pub fn migrate_plaintext_api_keys_with_store(
@@ -2050,6 +2080,40 @@ impl UserPrefs {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn platform_default_retirement_rejects_reselection_aba_and_preserves_local_models() {
+        let mut prefs = super::UserPrefs::default();
+        let mut local = super::SavedModel::builtin_account_platform();
+        local.id = "controlled-local-config".into();
+        local.provider_kind = Some("custom".into());
+        prefs.advanced.saved_models = vec![super::SavedModel::builtin_account_platform(), local];
+        let selection =
+            super::ModelSelectionRef::account_platform("0199a100-0001-7000-8000-000000000106");
+        prefs.set_default_model_ref(selection.clone()).unwrap();
+        let old = prefs.advanced.default_model_selection_revision.clone();
+        let models = serde_json::to_value(&prefs.advanced.saved_models).unwrap();
+        prefs.set_default_model_ref(selection.clone()).unwrap();
+        assert_ne!(prefs.advanced.default_model_selection_revision, old);
+        assert!(!prefs.retire_observed_platform_default(&selection, &old));
+        prefs
+            .set_default_model_ref(super::ModelSelectionRef::account_platform(
+                "0199a100-0001-7000-8000-000000000107",
+            ))
+            .unwrap();
+        prefs.set_default_model_ref(selection.clone()).unwrap();
+        assert!(!prefs.retire_observed_platform_default(&selection, &old));
+        let current = prefs.advanced.default_model_selection_revision.clone();
+        assert!(prefs.retire_observed_platform_default(&selection, &current));
+        assert!(prefs.advanced.default_model_ref.is_none());
+        assert!(prefs.advanced.account_platform_default_model.is_none());
+        assert_eq!(
+            serde_json::to_value(&prefs.advanced.saved_models).unwrap(),
+            models
+        );
+        assert_eq!(prefs.model_selection_schema_version, 1);
+        assert!(!prefs.retire_observed_platform_default(&selection, &current));
+    }
+
     use super::*;
     use crate::platform::credential_store::MemoryCredentialStore;
     use crate::platform::paths::tests::ENV_LOCK;

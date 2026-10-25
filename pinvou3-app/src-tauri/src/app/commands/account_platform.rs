@@ -114,7 +114,12 @@ pub async fn account_platform_request(
 #[tauri::command]
 pub async fn account_platform_model_catalog(
     state: State<'_, AccountPlatformState>,
+    pool: State<'_, EnginePool>,
 ) -> Result<serde_json::Value, String> {
+    let generation = state.model_settings_generation().await?;
+    let observed = UserPrefs::load();
+    let expected = observed.advanced.default_model_ref.clone();
+    let revision = observed.advanced.default_model_selection_revision.clone();
     let response = state
         .request(ApiRequest {
             area: "token".to_string(),
@@ -127,22 +132,46 @@ pub async fn account_platform_model_catalog(
     if !(200..300).contains(&response.status) {
         return Err("model_catalog_unavailable: current catalog cannot be loaded".to_string());
     }
-    let mut body = response.body;
-    if let Some(object) = body.as_object_mut() {
-        object.insert(
-            "selected_model_id".to_string(),
-            UserPrefs::load()
-                .advanced
-                .default_model_ref
-                .and_then(|selection| match selection {
-                    ModelSelectionRef::AccountPlatform { model_id } => Some(model_id),
-                    ModelSelectionRef::LocalConfig { .. } => None,
-                })
-                .map(serde_json::Value::String)
-                .unwrap_or(serde_json::Value::Null),
-        );
+    state
+        .with_model_settings_generation(generation, || {
+            let mut body = response.body;
+            let retired = retire_catalog_default(&body, expected.as_ref(), &revision, &pool)?;
+            if let Some(object) = body.as_object_mut() {
+                object.insert(
+                    "default_model_retired".to_string(),
+                    serde_json::Value::Bool(retired),
+                );
+                object.insert(
+                    "selected_model_id".to_string(),
+                    UserPrefs::load()
+                        .advanced
+                        .default_model_ref
+                        .and_then(|selection| match selection {
+                            ModelSelectionRef::AccountPlatform { model_id } => Some(model_id),
+                            ModelSelectionRef::LocalConfig { .. } => None,
+                        })
+                        .map(serde_json::Value::String)
+                        .unwrap_or(serde_json::Value::Null),
+                );
+            }
+            Ok(body)
+        })
+        .await
+}
+
+fn retire_catalog_default(
+    catalog: &serde_json::Value,
+    expected: Option<&ModelSelectionRef>,
+    revision: &str,
+    pool: &EnginePool,
+) -> Result<bool, String> {
+    let retired = crate::features::account_platform::default_selection::retire_catalog_default(
+        catalog, expected, revision,
+    )?;
+    if retired {
+        pool.mark_model_updated(BUILTIN_ACCOUNT_PLATFORM_MODEL_ID);
     }
-    Ok(body)
+    Ok(retired)
 }
 
 #[derive(serde::Deserialize)]
@@ -240,11 +269,13 @@ fn require_main_session_model_target(session_id: &str) -> Result<(), String> {
 async fn validate_catalog_model(
     requested_model_id: &str,
     state: &AccountPlatformState,
-) -> Result<serde_json::Value, String> {
+    default_selection: bool,
+) -> Result<(serde_json::Value, u64), String> {
     let model_id = requested_model_id.trim();
     if model_id.is_empty() || model_id.len() > 128 {
         return Err("model_catalog_selection_invalid: model_id is invalid".to_string());
     }
+    let generation = state.model_settings_generation().await?;
     let catalog = state
         .request(ApiRequest {
             area: "token".to_string(),
@@ -269,12 +300,19 @@ async fn validate_catalog_model(
         .ok_or_else(|| {
             "model_catalog_selection_invalid: model is not catalog visible".to_string()
         })?;
-    ensure_new_session_model_selectable(item)?;
-    Ok(serde_json::json!({
-        "model_id": model_id,
-        "catalog_version": catalog.body.get("catalog_version"),
-        "lifecycle_status": item.get("lifecycle_status"),
-    }))
+    if default_selection {
+        ensure_default_model_selectable(item)?;
+    } else {
+        ensure_new_session_model_selectable(item)?;
+    }
+    Ok((
+        serde_json::json!({
+            "model_id": model_id,
+            "catalog_version": catalog.body.get("catalog_version"),
+            "lifecycle_status": item.get("lifecycle_status"),
+        }),
+        generation,
+    ))
 }
 
 // Explicitly changing the default is separate from validating a model for a
@@ -284,13 +322,18 @@ async fn select_catalog_model(
     state: &AccountPlatformState,
     pool: &EnginePool,
 ) -> Result<serde_json::Value, String> {
-    let selection = validate_catalog_model(requested_model_id, state).await?;
-    let model_id = requested_model_id.trim();
-    UserPrefs::update_transaction(|prefs| {
-        prefs.set_default_model_ref(ModelSelectionRef::account_platform(model_id))
-    })?;
-    pool.mark_model_updated(BUILTIN_ACCOUNT_PLATFORM_MODEL_ID);
-    Ok(selection)
+    let (selection, generation) = validate_catalog_model(requested_model_id, state, true).await?;
+    state
+        .with_model_settings_generation(generation, || {
+            UserPrefs::update_transaction(|prefs| {
+                prefs.set_default_model_ref(ModelSelectionRef::account_platform(
+                    requested_model_id.trim(),
+                ))
+            })?;
+            pool.mark_model_updated(BUILTIN_ACCOUNT_PLATFORM_MODEL_ID);
+            Ok(selection)
+        })
+        .await
 }
 
 #[derive(serde::Deserialize)]
@@ -324,7 +367,7 @@ pub async fn account_platform_branch_replacement_session(
                 .to_string(),
         );
     }
-    validate_catalog_model(&input.replacement_model_id, &state).await?;
+    validate_catalog_model(&input.replacement_model_id, &state, false).await?;
     let (session, lineage) = store
         .create_replacement_branch(
             input.source_conversation_id.trim(),
@@ -343,6 +386,17 @@ pub async fn account_platform_branch_replacement_session(
         "replacement_branch",
     );
     Ok(serde_json::json!({ "session": session.metadata, "lineage": lineage }))
+}
+
+fn ensure_default_model_selectable(item: &serde_json::Value) -> Result<(), String> {
+    match item
+        .get("lifecycle_status")
+        .and_then(serde_json::Value::as_str)
+    {
+        Some("PUBLISHED") => ensure_new_session_model_selectable(item),
+        Some("DEPRECATED") => Err("model_catalog_selection_unavailable: MODEL_DEPRECATED".into()),
+        _ => Err("model_catalog_selection_unavailable: MODEL_REMOVED".into()),
+    }
 }
 
 fn ensure_new_session_model_selectable(item: &serde_json::Value) -> Result<(), String> {
@@ -379,6 +433,25 @@ fn ensure_new_session_model_selectable(item: &serde_json::Value) -> Result<(), S
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn defaults_never_inherit_explicit_deprecated_grace() {
+        let item = serde_json::json!({"context_eligible":true,"lifecycle_status":"DEPRECATED","new_session_cutoff_at":"2099-01-01T00:00:00Z"});
+        assert!(super::ensure_new_session_model_selectable(&item).is_ok());
+        assert!(super::ensure_default_model_selectable(&item).is_err());
+        assert!(
+            super::ensure_default_model_selectable(
+                &serde_json::json!({"context_eligible":true,"lifecycle_status":"PUBLISHED"})
+            )
+            .is_ok()
+        );
+        assert!(
+            super::ensure_default_model_selectable(
+                &serde_json::json!({"context_eligible":false,"lifecycle_status":"PUBLISHED"})
+            )
+            .is_err()
+        );
+    }
+
     use super::ensure_new_session_model_selectable;
 
     #[test]
@@ -392,7 +465,9 @@ mod tests {
             .next()
             .unwrap();
         assert!(
-            branch.contains("validate_catalog_model(&input.replacement_model_id, &state).await?")
+            branch.contains(
+                "validate_catalog_model(&input.replacement_model_id, &state, false).await?"
+            )
         );
         assert!(!branch.contains("select_catalog_model("));
         assert!(!branch.contains("UserPrefs::update_transaction"));
@@ -420,7 +495,9 @@ mod tests {
             .split("pub struct ReplacementSessionBranch")
             .next()
             .unwrap();
-        assert!(selection.contains("validate_catalog_model(requested_model_id, state).await?"));
+        assert!(
+            selection.contains("validate_catalog_model(requested_model_id, state, true).await?")
+        );
         assert!(selection.contains("UserPrefs::update_transaction"));
         assert!(selection.contains("pool.mark_model_updated(BUILTIN_ACCOUNT_PLATFORM_MODEL_ID)"));
     }

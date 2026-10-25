@@ -1052,6 +1052,16 @@ impl SessionStore {
         model_id: Option<String>,
         workspace: PathBuf,
     ) -> Result<SavedSession> {
+        self.create_new_inheriting_default(model, model_id, workspace, None)
+    }
+
+    pub(crate) fn create_new_inheriting_default(
+        &self,
+        model: String,
+        model_id: Option<String>,
+        workspace: PathBuf,
+        inherited_default_revision: Option<String>,
+    ) -> Result<SavedSession> {
         let id = generate_session_id();
         let mut session = create_saved_session_with_id_and_mode(
             id.clone(),
@@ -1073,7 +1083,11 @@ impl SessionStore {
             } else {
                 ModelSelectionRef::local(mid)
             };
-            self.set_session_model_ref(&id, Some(selection))?;
+            if let Some(revision) = inherited_default_revision {
+                self.set_inherited_session_model_ref(&id, selection, revision)?;
+            } else {
+                self.set_session_model_ref(&id, Some(selection))?;
+            }
         }
         if let Err(error) = self.save(&session) {
             return Err(self.rollback_created_session(

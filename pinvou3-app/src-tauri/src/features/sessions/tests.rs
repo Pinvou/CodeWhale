@@ -10466,3 +10466,87 @@ fn strip_session_message_block_impl_rejects_lookalikes_and_preserves_nesting() {
         );
     }
 }
+
+#[test]
+fn inherited_platform_default_provenance_survives_other_mutations_and_explicit_reselect_clears_it()
+{
+    with_isolated_store_restoring_home(|store| {
+        let revision = uuid::Uuid::new_v4().to_string();
+        let a = "0199a100-0001-7000-8000-000000000106";
+        let session = store
+            .create_new_inheriting_default(
+                a.into(),
+                Some(BUILTIN_ACCOUNT_PLATFORM_MODEL_ID.into()),
+                PathBuf::from("workspace"),
+                Some(revision.clone()),
+            )
+            .unwrap();
+        let id = session.metadata.id;
+        let source = || {
+            store
+                .with_inherited_platform_default(&id, a, |value| Ok(value.map(str::to_owned)))
+                .unwrap()
+        };
+        assert_eq!(source(), Some(revision.clone()));
+        store
+            .set_session_model_ref("unrelated", Some(ModelSelectionRef::local("local")))
+            .unwrap();
+        store.save_session_models();
+        store.load_session_models();
+        assert_eq!(source(), Some(revision));
+        store
+            .set_session_model_ref(&id, Some(ModelSelectionRef::account_platform(a)))
+            .unwrap();
+        assert_eq!(
+            source(),
+            None,
+            "same-ID explicit selection retires default provenance"
+        );
+        assert_eq!(
+            store.session_model_ref(&id),
+            Some(ModelSelectionRef::account_platform(a))
+        );
+    });
+}
+
+#[test]
+fn inherited_default_confirmation_is_exact_and_old_bindings_never_become_implicit() {
+    with_isolated_store_restoring_home(|store| {
+        let a = "0199a100-0001-7000-8000-000000000106";
+        let revision = uuid::Uuid::new_v4().to_string();
+        store
+            .set_inherited_session_model_ref(
+                "new",
+                ModelSelectionRef::account_platform(a),
+                revision.clone(),
+            )
+            .unwrap();
+        store
+            .confirm_inherited_platform_default("new", a, "obsolete")
+            .unwrap();
+        assert_eq!(
+            store
+                .with_inherited_platform_default("new", a, |r| Ok(r.map(str::to_owned)))
+                .unwrap(),
+            Some(revision.clone())
+        );
+        store
+            .confirm_inherited_platform_default("new", a, &revision)
+            .unwrap();
+        assert_eq!(
+            store
+                .with_inherited_platform_default("new", a, |r| Ok(r.map(str::to_owned)))
+                .unwrap(),
+            None
+        );
+        store
+            .set_session_model_ref("old", Some(ModelSelectionRef::account_platform(a)))
+            .unwrap();
+        assert_eq!(
+            store
+                .with_inherited_platform_default("old", a, |r| Ok(r.map(str::to_owned)))
+                .unwrap(),
+            None
+        );
+    });
+}

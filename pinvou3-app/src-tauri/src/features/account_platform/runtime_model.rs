@@ -8,7 +8,7 @@ use crate::features::assistant::runtime_model::{
     RuntimeModelRequest, RuntimeTurnAuthority,
 };
 use crate::features::sessions::SessionStore;
-use crate::platform::prefs::{ModelSelectionRef, SavedModel};
+use crate::platform::prefs::{ModelSelectionRef, SavedModel, UserPrefs};
 
 #[derive(Debug, Deserialize)]
 struct RuntimeCatalog {
@@ -166,6 +166,19 @@ fn runtime_model_limits(body: serde_json::Value, model_id: &str) -> Result<Runti
     })
 }
 
+// A typed absence is produced only after the complete catalog has passed the
+// existing version, identity and capability validation. It rejects this bound
+// model, but must not suppress observation of another current global default.
+fn can_observe_catalog_default(limits: &Result<RuntimeModelLimits>) -> bool {
+    match limits {
+        Ok(_) => true,
+        Err(error) => {
+            error.downcast_ref::<BoundModelAbsent>().is_some()
+                || error.downcast_ref::<BoundLegacyModelAbsent>().is_some()
+        }
+    }
+}
+
 /// Only the engine host may supply a task-profile catalog reference. Resolving
 /// a mutable session selection is lazy, so it cannot replace that frozen fact.
 fn runtime_catalog_reference<F>(
@@ -191,6 +204,98 @@ where
         );
     }
     session_reference()
+}
+
+fn inherited_default_rejection(
+    catalog: &serde_json::Value,
+    model_id: &str,
+) -> Option<crate::features::assistant::timing::ModelRejectionCode> {
+    use crate::features::assistant::timing::ModelRejectionCode;
+    let item = catalog
+        .get("items")
+        .and_then(serde_json::Value::as_array)
+        .and_then(|items| {
+            items.iter().find(|item| {
+                item.get("model_id").and_then(serde_json::Value::as_str) == Some(model_id)
+            })
+        });
+    let status = item
+        .and_then(|item| item.get("lifecycle_status"))
+        .and_then(serde_json::Value::as_str);
+    let eligible = item
+        .and_then(|item| item.get("context_eligible"))
+        .and_then(serde_json::Value::as_bool)
+        == Some(true);
+    if status == Some("PUBLISHED") && eligible {
+        None
+    } else if status == Some("DEPRECATED") {
+        Some(ModelRejectionCode::Deprecated)
+    } else {
+        Some(ModelRejectionCode::Unavailable)
+    }
+}
+
+// A draft has no SessionStore entry. Only the backend factory can attach the
+// default selection revision from the same prefs snapshot that resolved it.
+fn observe_draft_default_preparation(
+    scope: &crate::features::assistant::runtime_model::AuxiliaryModelContext,
+    model_id: &str,
+    catalog: &serde_json::Value,
+    expected_default: Option<&ModelSelectionRef>,
+    selection_revision: &str,
+) -> Result<(
+    bool,
+    Option<String>,
+    Option<crate::features::assistant::timing::ModelRejectionCode>,
+)> {
+    let retired = super::default_selection::retire_catalog_default(
+        catalog,
+        expected_default,
+        selection_revision,
+    )
+    .map_err(anyhow::Error::msg)?;
+    let rejection = scope
+        .inherited_default_revision
+        .as_ref()
+        .and_then(|_| inherited_default_rejection(catalog, model_id));
+    // The in-memory draft source has no persisted provenance to confirm.
+    Ok((retired, None, rejection))
+}
+
+/// Observe the current global default independently of this conversation's
+/// binding. Only a newly proven implicit binding is subject to default-only
+/// admission; legacy, explicit and scheduled bindings retain their own rules.
+fn observe_default_preparation(
+    store: &SessionStore,
+    session_id: &str,
+    model_id: &str,
+    scheduled_binding: bool,
+    catalog: &serde_json::Value,
+    expected_default: Option<&ModelSelectionRef>,
+    selection_revision: &str,
+) -> Result<(
+    bool,
+    Option<String>,
+    Option<crate::features::assistant::timing::ModelRejectionCode>,
+)> {
+    let retired = super::default_selection::retire_catalog_default(
+        catalog,
+        expected_default,
+        selection_revision,
+    )
+    .map_err(anyhow::Error::msg)?;
+    if scheduled_binding {
+        return Ok((retired, None, None));
+    }
+    store.with_inherited_platform_default(session_id, model_id, |revision| {
+        let Some(revision) = revision else {
+            return Ok((retired, None, None));
+        };
+        match inherited_default_rejection(catalog, model_id) {
+            None => Ok((retired, Some(revision.to_string()), None)),
+            Some(rejection) => Ok((retired, None, Some(rejection))),
+        }
+    })
 }
 
 /// Runtime provider for the only platform-managed model path.
@@ -280,6 +385,7 @@ impl RuntimeModelProvider for AccountPlatformRuntimeModelProvider {
             .chat_runtime_authorization()
             .await
             .map_err(|error| anyhow!(error))?;
+        let observed_default = UserPrefs::load();
         let (catalog_response, authorization) = account
             .chat_catalog_for_authorization(authorization)
             .await
@@ -290,7 +396,23 @@ impl RuntimeModelProvider for AccountPlatformRuntimeModelProvider {
                 catalog_response.status
             );
         }
-        let limits = match runtime_model_limits(catalog_response.body, session_model_ref) {
+        let limits = runtime_model_limits(catalog_response.body.clone(), session_model_ref);
+        if limits.is_err() && can_observe_catalog_default(&limits) {
+            // An absent bound model never needs provenance admission. Observe
+            // only the independent global default, then preserve its original
+            // typed rejection below without reading or mutating this session.
+            account
+                .with_model_settings_authorization(&authorization, || {
+                    super::default_selection::retire_catalog_default(
+                        &catalog_response.body,
+                        observed_default.advanced.default_model_ref.as_ref(),
+                        &observed_default.advanced.default_model_selection_revision,
+                    )
+                })
+                .await
+                .map_err(anyhow::Error::msg)?;
+        }
+        let limits = match limits {
             Ok(limits) => limits,
             Err(error) => {
                 if error.downcast_ref::<BoundModelAbsent>().is_some()
@@ -313,6 +435,54 @@ impl RuntimeModelProvider for AccountPlatformRuntimeModelProvider {
                 return Err(error);
             }
         };
+        let (_, inherited_revision, rejection) = account
+            .with_model_settings_authorization(&authorization, || {
+                if let Some(scope) = request
+                    .auxiliary
+                    .as_ref()
+                    .filter(|_| request.session_id.is_empty())
+                {
+                    observe_draft_default_preparation(
+                        scope,
+                        session_model_ref,
+                        &catalog_response.body,
+                        observed_default.advanced.default_model_ref.as_ref(),
+                        &observed_default.advanced.default_model_selection_revision,
+                    )
+                    .map_err(|error| error.to_string())
+                } else {
+                    let store = self
+                        .app
+                        .try_state::<SessionStore>()
+                        .context("session store is not initialized")
+                        .map_err(|error| error.to_string())?;
+                    observe_default_preparation(
+                        &store,
+                        &request.session_id,
+                        session_model_ref,
+                        request.scheduled_model_ref.is_some() || request.scheduled_unattended,
+                        &catalog_response.body,
+                        observed_default.advanced.default_model_ref.as_ref(),
+                        &observed_default.advanced.default_model_selection_revision,
+                    )
+                    .map_err(|error| error.to_string())
+                }
+            })
+            .await
+            .map_err(anyhow::Error::msg)?;
+        if let Some(code) = rejection {
+            use crate::features::assistant::timing::ModelRejection;
+            if let (Some(owner), Some(rejection)) = (
+                timing_owner.as_ref(),
+                ModelRejection::new(code, session_model_ref),
+            ) {
+                self.model_proxy
+                    .record_prepare_rejection(&request.session_id, owner, rejection);
+            }
+            anyhow::bail!(
+                "model_catalog_selection_required: an inherited platform default is no longer selectable; choose a session model explicitly"
+            );
+        }
         let mut model = request.model;
         model.model = limits.engine_model.clone();
         model.context_window_tokens = Some(limits.context_tokens);
@@ -344,6 +514,23 @@ impl RuntimeModelProvider for AccountPlatformRuntimeModelProvider {
             }
         }
         .context("start account platform model proxy")?;
+        if let Some(revision) = inherited_revision {
+            account
+                .with_model_settings_authorization(&authorization, || {
+                    self.app
+                        .try_state::<SessionStore>()
+                        .context("session store is not initialized")
+                        .map_err(|error| error.to_string())?
+                        .confirm_inherited_platform_default(
+                            &request.session_id,
+                            session_model_ref,
+                            &revision,
+                        )
+                        .map_err(|error| error.to_string())
+                })
+                .await
+                .map_err(anyhow::Error::msg)?;
+        }
         Ok(PreparedRuntimeModel {
             model,
             credential: Some(RuntimeModelCredential::account_platform_access_token(
@@ -385,6 +572,47 @@ impl RuntimeModelProvider for AccountPlatformRuntimeModelProvider {
 #[cfg(test)]
 mod tests {
     #[test]
+    fn voice_default_origin_uses_default_admission_without_a_session() {
+        let id = "0199a100-0001-7000-8000-000000000106";
+        let mut scope = crate::features::assistant::runtime_model::AuxiliaryModelContext {
+            scope_id: "private-voice-policy".into(),
+            draft_model_ref: Some(id.into()),
+            inherited_default_revision: Some("captured-backend-default".into()),
+        };
+        let mut catalog = serde_json::json!({"catalog_version":7,"items":[{
+            "model_id":id,"lifecycle_status":"DEPRECATED","context_eligible":true
+        }]});
+        assert_eq!(
+            super::observe_draft_default_preparation(&scope, id, &catalog, None, "")
+                .unwrap()
+                .2,
+            Some(crate::features::assistant::timing::ModelRejectionCode::Deprecated)
+        );
+        scope.inherited_default_revision = None;
+        assert!(
+            super::observe_draft_default_preparation(&scope, id, &catalog, None, "")
+                .unwrap()
+                .2
+                .is_none()
+        );
+        scope.inherited_default_revision = Some("captured-backend-default".into());
+        catalog["items"][0]["lifecycle_status"] = serde_json::json!("PUBLISHED");
+        assert!(
+            super::observe_draft_default_preparation(&scope, id, &catalog, None, "")
+                .unwrap()
+                .2
+                .is_none()
+        );
+        catalog["items"][0]["context_eligible"] = serde_json::json!(false);
+        assert_eq!(
+            super::observe_draft_default_preparation(&scope, id, &catalog, None, "")
+                .unwrap()
+                .2,
+            Some(crate::features::assistant::timing::ModelRejectionCode::Unavailable)
+        );
+    }
+
+    #[test]
     fn voice_draft_reference_is_private_and_does_not_load_a_session() {
         let mut request = crate::features::assistant::runtime_model::RuntimeModelRequest {
             session_id: String::new(),
@@ -395,6 +623,7 @@ mod tests {
                 crate::features::assistant::runtime_model::AuxiliaryModelContext {
                     scope_id: "private-voice-test".into(),
                     draft_model_ref: Some("0199a100-0001-7000-8000-000000000106".into()),
+                    inherited_default_revision: None,
                 },
             ),
         };
@@ -422,6 +651,130 @@ mod tests {
     };
     use crate::platform::credential_store::{CredentialEditAction, CredentialState};
     use crate::platform::prefs::{ModelPreset, SavedModel};
+
+    #[test]
+    fn validated_absent_history_still_allows_independent_default_observation() {
+        let present = "0199a100-0001-7000-8000-000000000107";
+        let body = json!({"catalog_version":7,"items":[{
+            "model_id":present,"display_name":"Current model",
+            "model_capability_version_id":"0199a100-0001-7000-8000-000000000108",
+            "context_length":8192,"maximum_output_tokens":1024,
+            "runtime_protocol":"OPENAI_CHAT_V1","lifecycle_status":"DEPRECATED"
+        }]});
+        for absent in ["0199a100-0001-7000-8000-000000000106", "old-provider-model"] {
+            let limits = runtime_model_limits(body.clone(), absent);
+            assert!(limits.is_err(), "historical binding must still be rejected");
+            assert!(super::can_observe_catalog_default(&limits));
+        }
+    }
+
+    #[test]
+    fn invalid_directory_and_selected_capability_do_not_prove_default_retirement() {
+        let id = "0199a100-0001-7000-8000-000000000107";
+        let valid = json!({"catalog_version":7,"items":[{
+            "model_id":id,"display_name":"Current model",
+            "model_capability_version_id":"0199a100-0001-7000-8000-000000000108",
+            "context_length":8192,"maximum_output_tokens":1024,
+            "runtime_protocol":"OPENAI_CHAT_V1","lifecycle_status":"DEPRECATED"
+        }]});
+        for corruption in ["version", "identity", "capability", "limits", "protocol"] {
+            let mut body = valid.clone();
+            match corruption {
+                "version" => body["catalog_version"] = json!(0),
+                "identity" => body["items"][0]["model_id"] = json!("invalid"),
+                "capability" => body["items"][0]["model_capability_version_id"] = json!("invalid"),
+                "limits" => body["items"][0]["context_length"] = json!(0),
+                _ => {
+                    body["items"][0]
+                        .as_object_mut()
+                        .unwrap()
+                        .remove("runtime_protocol");
+                }
+            }
+            let limits = runtime_model_limits(body, id);
+            assert!(limits.is_err());
+            assert!(!super::can_observe_catalog_default(&limits), "{corruption}");
+        }
+    }
+
+    #[test]
+    fn fresh_implicit_default_rejects_deprecation_without_changing_explicit_or_scheduled_binding() {
+        crate::features::sessions::with_isolated_store_restoring_home(|store| {
+            let id = "0199a100-0001-7000-8000-000000000106";
+            let catalog = json!({"catalog_version":7,"items":[{"model_id":id,"lifecycle_status":"DEPRECATED","context_eligible":true}]});
+            let revision = uuid::Uuid::new_v4().to_string();
+            store
+                .set_inherited_session_model_ref(
+                    "initial",
+                    crate::platform::prefs::ModelSelectionRef::account_platform(id),
+                    revision,
+                )
+                .unwrap();
+            let outcome =
+                super::observe_default_preparation(store, "initial", id, false, &catalog, None, "")
+                    .unwrap();
+            assert_eq!(
+                outcome.2,
+                Some(crate::features::assistant::timing::ModelRejectionCode::Deprecated)
+            );
+            assert!(
+                super::observe_default_preparation(store, "initial", id, true, &catalog, None, "")
+                    .unwrap()
+                    .2
+                    .is_none()
+            );
+            store
+                .set_session_model_ref(
+                    "initial",
+                    Some(crate::platform::prefs::ModelSelectionRef::account_platform(
+                        id,
+                    )),
+                )
+                .unwrap();
+            assert!(
+                super::observe_default_preparation(store, "initial", id, false, &catalog, None, "")
+                    .unwrap()
+                    .2
+                    .is_none()
+            );
+        });
+    }
+
+    #[test]
+    fn successful_initial_preparation_consumes_only_its_source_and_keeps_historical_binding() {
+        crate::features::sessions::with_isolated_store_restoring_home(|store| {
+            let id = "0199a100-0001-7000-8000-000000000106";
+            let revision = uuid::Uuid::new_v4().to_string();
+            store
+                .set_inherited_session_model_ref(
+                    "initial",
+                    crate::platform::prefs::ModelSelectionRef::account_platform(id),
+                    revision.clone(),
+                )
+                .unwrap();
+            let mut catalog = json!({"catalog_version":7,"items":[{"model_id":id,"lifecycle_status":"PUBLISHED","context_eligible":true}]});
+            let outcome =
+                super::observe_default_preparation(store, "initial", id, false, &catalog, None, "")
+                    .unwrap();
+            assert_eq!(outcome.1, Some(revision.clone()));
+            store
+                .confirm_inherited_platform_default("initial", id, &revision)
+                .unwrap();
+            catalog["items"][0]["lifecycle_status"] = json!("DEPRECATED");
+            assert!(
+                super::observe_default_preparation(store, "initial", id, false, &catalog, None, "")
+                    .unwrap()
+                    .2
+                    .is_none()
+            );
+            assert_eq!(
+                store.session_model_ref("initial"),
+                Some(crate::platform::prefs::ModelSelectionRef::account_platform(
+                    id
+                ))
+            );
+        });
+    }
 
     #[test]
     fn scheduled_catalog_reference_is_frozen_before_mutable_session_lookup() {

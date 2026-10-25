@@ -44,6 +44,9 @@ pub struct RuntimeModelRequest {
 pub(crate) struct AuxiliaryModelContext {
     pub scope_id: String,
     pub draft_model_ref: Option<String>,
+    /// Present only for a draft resolved from the backend's current global default.
+    /// It is private invocation provenance, not a session or a browser assertion.
+    pub inherited_default_revision: Option<String>,
 }
 
 /// Retiring local voice delivery does not request Provider cancellation or release funds.
@@ -62,6 +65,7 @@ impl AuxiliaryModelScope {
         AuxiliaryModelContext {
             scope_id: self.id.clone(),
             draft_model_ref,
+            inherited_default_revision: None,
         }
     }
 }

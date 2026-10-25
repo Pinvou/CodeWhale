@@ -2598,13 +2598,26 @@ impl EnginePool {
         let reference = model
             .is_builtin_account_platform()
             .then(|| model.model.clone());
+        let inherited_default_revision = (model_ref.is_none()
+            && model_id.filter(|id| !id.trim().is_empty()).is_none()
+            && model.is_builtin_account_platform()
+            && matches!(
+                bridge.prefs.advanced.default_model_ref.as_ref(),
+                Some(ModelSelectionRef::AccountPlatform { model_id }) if model_id == &model.model
+            ))
+        .then(|| {
+            bridge
+                .prefs
+                .advanced
+                .default_model_selection_revision
+                .clone()
+        });
         let scope = AuxiliaryModelScope::new(self.runtime_model_provider.clone());
-        let prepared = prepare_draft_runtime_model(
-            self.runtime_model_provider.as_ref(),
-            model,
-            scope.context(reference),
-        )
-        .await?;
+        let mut auxiliary = scope.context(reference);
+        auxiliary.inherited_default_revision = inherited_default_revision;
+        let prepared =
+            prepare_draft_runtime_model(self.runtime_model_provider.as_ref(), model, auxiliary)
+                .await?;
         Ok((
             Self::finalize_runtime_bridge(bridge, &prepared, false).await,
             scope,
@@ -4114,8 +4127,21 @@ impl EnginePool {
     /// global active model. Read fresh from disk (the GUI may have just
     /// changed the default); falls back to the boot snapshot on failure.
     pub fn default_model_for_new_session(&self) -> (String, Option<String>) {
+        let (model, model_id, _) = self.default_model_for_new_session_with_origin();
+        (model, model_id)
+    }
+
+    pub(crate) fn default_model_for_new_session_with_origin(
+        &self,
+    ) -> (String, Option<String>, Option<String>) {
         let prefs = UserPrefs::load();
-        default_model_for_new_session_from(&prefs, &self.bridge)
+        let (model, model_id) = default_model_for_new_session_from(&prefs, &self.bridge);
+        let revision = matches!(
+            prefs.advanced.default_model_ref,
+            Some(crate::platform::prefs::ModelSelectionRef::AccountPlatform { .. })
+        )
+        .then(|| prefs.advanced.default_model_selection_revision.clone());
+        (model, model_id, revision)
     }
 
     #[cfg(any(feature = "benchmark-hooks", test))]
@@ -6117,6 +6143,7 @@ mod scheduled_model_tests {
                 super::AuxiliaryModelContext {
                     scope_id: "voice-test".into(),
                     draft_model_ref: None,
+                    inherited_default_revision: None,
                 },
             )
             .await
@@ -6140,7 +6167,8 @@ mod scheduled_model_tests {
                     SavedModel::builtin_account_platform(),
                     super::AuxiliaryModelContext {
                         scope_id: "voice-test".into(),
-                        draft_model_ref: None
+                        draft_model_ref: None,
+                        inherited_default_revision: None,
                     },
                 )
                 .await

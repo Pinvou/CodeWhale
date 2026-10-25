@@ -1415,6 +1415,8 @@ fn apply_general_settings_patch(current: &mut UserPrefs, patch: GeneralSettingsP
         advanced.saved_models = current.advanced.saved_models.clone();
         advanced.active_model_id = current.advanced.active_model_id.clone();
         advanced.default_model_ref = current.advanced.default_model_ref.clone();
+        advanced.default_model_selection_revision =
+            current.advanced.default_model_selection_revision.clone();
         advanced.account_platform_default_model =
             current.advanced.account_platform_default_model.clone();
         current.advanced = advanced;
@@ -2134,6 +2136,23 @@ mod tests {
         assert!(current.pet.enabled);
         assert_eq!(current.advanced.saved_models, saved_models);
         assert_eq!(current.advanced.active_model_id, active_model_id);
+    }
+
+    #[test]
+    fn general_settings_patch_cannot_replace_default_selection_revision() {
+        let mut current = UserPrefs::default();
+        let selection = ModelSelectionRef::account_platform("0199a100-0001-7000-8000-000000000106");
+        current.set_default_model_ref(selection.clone()).unwrap();
+        let revision = current.advanced.default_model_selection_revision.clone();
+        apply_general_settings_patch(
+            &mut current,
+            GeneralSettingsPatch {
+                advanced: Some(Default::default()),
+                ..Default::default()
+            },
+        );
+        assert_eq!(current.advanced.default_model_selection_revision, revision);
+        assert_eq!(current.advanced.default_model_ref, Some(selection));
     }
 
     #[test]

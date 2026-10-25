@@ -6,6 +6,7 @@
 //! token in the system credential store so the next launch can sign in again.
 
 pub(crate) mod client_migration;
+pub(crate) mod default_selection;
 mod model_cancellation;
 mod model_proxy;
 mod organization_routes;
@@ -1059,6 +1060,56 @@ impl AccountPlatformState {
             return Err("authentication_required: account session changed".to_string());
         }
         Ok((catalog, current))
+    }
+
+    /// Catalog/settings readers need the current authenticated epoch, not a
+    /// model runtime configuration or an extra bootstrap request.
+    pub(crate) async fn model_settings_generation(&self) -> Result<u64, String> {
+        let config = AccountPlatformConfig::current()?;
+        let token = self.access_token(&config, None).await?;
+        self.token_generation(&token).await
+    }
+
+    pub(crate) async fn with_model_settings_generation<T, F>(
+        &self,
+        generation: u64,
+        action: F,
+    ) -> Result<T, String>
+    where
+        F: FnOnce() -> Result<T, String>,
+    {
+        let session = self.session.lock().await;
+        if !session
+            .as_ref()
+            .is_some_and(|session| session.generation == generation)
+        {
+            return Err("authentication_required: account session changed".into());
+        }
+        let result = action();
+        drop(session);
+        result
+    }
+
+    /// Linearize model settings writes with login/logout retirement. Refreshing
+    /// credentials for the same owner is allowed; bearer bytes are not identity.
+    pub(crate) async fn with_model_settings_authorization<T, F>(
+        &self,
+        authorization: &ChatRuntimeAuthorization,
+        action: F,
+    ) -> Result<T, String>
+    where
+        F: FnOnce() -> Result<T, String>,
+    {
+        let session = self.session.lock().await;
+        if !session.as_ref().is_some_and(|session| {
+            session.generation == authorization.generation
+                && session.account_user_id.as_deref() == Some(authorization.user_id.as_str())
+        }) {
+            return Err("authentication_required: account session changed".into());
+        }
+        let result = action();
+        drop(session);
+        result
     }
 
     pub async fn request(&self, input: ApiRequest) -> Result<ApiResponse, String> {

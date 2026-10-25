@@ -8,6 +8,7 @@ import {
   LOCAL_CONFIG_SOURCE,
   composerPlatformModels,
   platformModelSelectableForNewSession,
+  platformModelSelectableAsDefault,
   sameModelSelectionRef,
 } from '../src/features/account-platform/model-catalog-selection.js';
 
@@ -115,4 +116,15 @@ test('Personal known execution/settlement labels match current management meanin
     assert.equal(modelUsageCopy[language][key]?.[state], tokenManagementCopy[language].modelToken.enumLabels[state], `${language}:${key}:${state}`);
     assert.notEqual(modelUsageCopy[language][key]?.[state], state);
   }
+});
+
+test('global defaults exclude every deprecated model while explicit new-session grace remains', () => {
+  const now = Date.parse('2026-08-25T08:00:00Z');
+  for (const cutoff of [undefined, 'invalid', '2026-08-25T07:59:59Z', '2026-08-25T08:00:00Z', '2026-08-25T08:00:01Z']) {
+    const item = { model_id: 'catalog-id-a', context_eligible: true, lifecycle_status: 'DEPRECATED', new_session_cutoff_at: cutoff };
+    assert.equal(platformModelSelectableAsDefault(item), false);
+  }
+  assert.equal(platformModelSelectableForNewSession({context_eligible:true,lifecycle_status:'DEPRECATED',new_session_cutoff_at:'2026-08-25T08:00:01Z'},now),true);
+  for (const item of [null,{}, {context_eligible:false,lifecycle_status:'PUBLISHED'}, {context_eligible:true,lifecycle_status:'REMOVED'}, {context_eligible:true,lifecycle_status:'DRAFT'}, {context_eligible:true,lifecycle_status:'UNKNOWN'}]) assert.equal(platformModelSelectableAsDefault(item),false);
+  assert.equal(platformModelSelectableAsDefault({context_eligible:true,lifecycle_status:'PUBLISHED'}),true);
 });

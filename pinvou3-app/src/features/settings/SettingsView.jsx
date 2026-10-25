@@ -37,7 +37,7 @@ import { ProvidersSection } from './ProvidersSection.jsx';
 import {
   ACCOUNT_PLATFORM_SOURCE,
   LOCAL_CONFIG_SOURCE,
-  platformModelSelectableForNewSession,
+  platformModelSelectableAsDefault,
 } from '../account-platform/model-catalog-selection.js';
 import {
   VOICE_POSTPROCESS_ENABLED_KEY,
@@ -2106,6 +2106,8 @@ const formatMemoryTime = (item, copy) => {
         bridge.computerUse.refreshStatus(bs && bs.activeSessionId).catch(() => {});
         // eslint-disable-next-line react-hooks/exhaustive-deps -- mount-only: the read is idempotent and must not refire on every bs change
       }, []);
+      const platformDefaultModelId = defaultModelRef?.source === 'ACCOUNT_PLATFORM'
+        ? defaultModelRef.model_id : null;
       useEffect(() => {
         if (activeSection !== 'model' || !accountPlatformClient) return undefined;
         const controller = new window.AbortController();
@@ -2117,15 +2119,22 @@ const formatMemoryTime = (item, copy) => {
             return null;
           }
           return accountPlatformClient.modelCatalog(controller.signal);
-        }).then(catalog => {
+        }).then(async catalog => {
           if (!catalog || controller.signal.aborted) return;
+          const defaultChanged = Object.prototype.hasOwnProperty.call(catalog, 'selected_model_id')
+            && catalog.selected_model_id !== platformDefaultModelId;
+          if ((catalog.default_model_retired === true || defaultChanged)
+            && !await refreshModelAccessAfterAuthentication(bridge.models)) {
+            throw new Error('model_configuration_refresh_unavailable');
+          }
+          if (controller.signal.aborted) return;
           setPlatformCatalog(catalog);
           setPlatformCatalogState('ready');
         }).catch(() => {
           if (!controller.signal.aborted) setPlatformCatalogState('error');
         });
         return () => controller.abort();
-      }, [activeSection, accountPlatformClient]);
+      }, [activeSection, accountPlatformClient, platformDefaultModelId]);
       useEffect(() => {
         if (!feedbackNotice) return;
         const timer = window.setTimeout(() => setFeedbackNotice(''), 2600);
@@ -2771,7 +2780,7 @@ const formatMemoryTime = (item, copy) => {
               {platformCatalogState === 'error' && <div className="px-4 py-4 text-[14px] text-[#FF3B30]">{settingsCopy.platformModelsUnavailable}</div>}
               {platformCatalogState === 'ready' && (platformCatalog.items || []).length === 0 && <div className="px-4 py-4 text-[14px] text-[#8A8A8E] dark:text-[#98989D]">{settingsCopy.noModels}</div>}
               {platformCatalogState === 'ready' && (platformCatalog.items || []).map(item => {
-                const selectable = platformModelSelectableForNewSession(item);
+                const selectable = platformModelSelectableAsDefault(item);
                 const selected = item.model_id === activePlatformModelId;
                 return (
                   <div key={item.model_id} className="min-h-[60px] grid grid-cols-[24px_minmax(0,1fr)_auto] items-center gap-3 px-4 py-3 border-b last:border-b-0 border-black/[0.12] dark:border-white/[0.10]">

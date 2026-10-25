@@ -1,6 +1,10 @@
 export const ACCOUNT_PLATFORM_SOURCE = 'ACCOUNT_PLATFORM';
 export const LOCAL_CONFIG_SOURCE = 'LOCAL_CONFIG';
 
+export function platformModelSelectableAsDefault(item) {
+  return item?.context_eligible === true && item.lifecycle_status === 'PUBLISHED';
+}
+
 export function platformModelSelectableForNewSession(item, now = Date.now()) {
   if (!item || item.context_eligible !== true) return false;
   if (item.lifecycle_status === 'PUBLISHED') return true;
