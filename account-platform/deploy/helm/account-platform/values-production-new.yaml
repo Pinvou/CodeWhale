@@ -2,8 +2,9 @@ global:
   environment: production-new
   runtimeSecret: pinvou-account-platform-production-new
   trustedTimeSources: [time.cloudflare.com:123, pool.ntp.org:123, ntp.aliyun.com:123, time1.cloud.tencent.com:123, time.windows.com:123]
-  # Replace with the ordered stable user IDs of the real on-call escalation chain.
-  manualReviewOnCallUserIds: ["00000000-0000-0000-0000-000000000101", "00000000-0000-0000-0000-000000000102"]
+  # Production must explicitly provide the ordered stable IDs of real on-call users.
+  # The existing schema rejects this empty default until an operator configures it.
+  manualReviewOnCallUserIds: []
 
 externalSecrets:
   enabled: true
