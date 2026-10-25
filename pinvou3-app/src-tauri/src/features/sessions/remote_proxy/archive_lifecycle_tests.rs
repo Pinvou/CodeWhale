@@ -3,8 +3,11 @@ use super::super::archive::{ArchiveStore, ArchiveTestPoint};
 use super::*;
 use std::io::{BufRead, Write};
 use std::path::{Path, PathBuf};
-use std::process::{Child, Command, Stdio};
+use std::process::{Child, Command, ExitStatus, Stdio};
 use std::sync::atomic::AtomicBool;
+use std::sync::mpsc;
+use std::thread::JoinHandle;
+use std::time::{Duration, Instant};
 
 // Restore before releasing the crate-wide lock, including panic unwinding.
 // SessionStore's explicit root does not relocate every global sidecar.
@@ -158,7 +161,7 @@ fn assert_local_usable(store: &SessionStore, root: &Path) {
 }
 
 #[test]
-#[ignore = "private child-process entry; invoked by seal_lock_contention_remains_retryable"]
+#[ignore = "private child-process entry; invoked by bounded lock-helper parents"]
 fn archive_lock_child() {
     let path = std::env::var_os("PINVOU_ARCHIVE_LOCK_HELPER").expect("child-only path");
     let file = std::fs::OpenOptions::new()
@@ -168,40 +171,256 @@ fn archive_lock_child() {
         .unwrap();
     let mut ownership = fd_lock::RwLock::new(file);
     let _guard = ownership.try_write().unwrap();
+    let mode = std::env::var("PINVOU_ARCHIVE_LOCK_HELPER_MODE").unwrap_or_default();
+    if mode == "stall-before-ready" {
+        println!("PINVOU_LOCK_STALLED_BEFORE_READY");
+        std::io::stdout().flush().unwrap();
+        loop {
+            std::thread::park();
+        }
+    }
     println!("PINVOU_LOCK_READY");
     std::io::stdout().flush().unwrap();
     let mut release = String::new();
     assert!(std::io::stdin().read_line(&mut release).unwrap() > 0);
     assert_eq!(release.trim(), "release");
-}
-
-fn spawn_lock_child(path: &Path) -> Child {
-    let mut child = Command::new(std::env::current_exe().unwrap())
-        .args([
-            "--exact",
-            "features::sessions::remote_proxy::tests::archive_lifecycle::archive_lock_child",
-            "--ignored",
-            "--nocapture",
-            "--test-threads=1",
-        ])
-        .env("PINVOU_ARCHIVE_LOCK_HELPER", path)
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .spawn()
-        .unwrap();
-    let mut output = std::io::BufReader::new(child.stdout.take().unwrap());
-    loop {
-        let mut line = String::new();
-        assert!(
-            output.read_line(&mut line).unwrap() > 0,
-            "child exited before locking"
-        );
-        if line.contains("PINVOU_LOCK_READY") {
-            break;
+    if mode == "stall-after-release" {
+        println!("PINVOU_LOCK_STALLED_AFTER_RELEASE");
+        std::io::stdout().flush().unwrap();
+        loop {
+            std::thread::park();
         }
     }
-    child.stdout = Some(output.into_inner());
+}
+
+const LOCK_HELPER_TIMEOUT: Duration = Duration::from_secs(30);
+const LOCK_HELPER_CLEANUP_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// Own the helper from spawn through reap, including assertion unwinding.
+/// Only the reader thread blocks on stdout; the test thread always has a deadline.
+struct LockChild {
+    child: Child,
+    output: mpsc::Receiver<Result<String, String>>,
+    reader: Option<JoinHandle<()>>,
+}
+
+impl LockChild {
+    fn spawn(path: &Path, mode: &str) -> Result<Self, String> {
+        let child = Command::new(std::env::current_exe().map_err(|e| e.to_string())?)
+            .args([
+                "--exact",
+                "features::sessions::remote_proxy::tests::archive_lifecycle::archive_lock_child",
+                "--ignored",
+                "--nocapture",
+                "--test-threads=1",
+            ])
+            .env("PINVOU_ARCHIVE_LOCK_HELPER", path)
+            .env("PINVOU_ARCHIVE_LOCK_HELPER_MODE", mode)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .spawn()
+            .map_err(|e| format!("spawn lock child: {e}"))?;
+        let (tx, output) = mpsc::channel();
+        let mut owned = Self {
+            child,
+            output,
+            reader: None,
+        };
+        let stdout = owned.child.stdout.take().ok_or("missing child stdout")?;
+        owned.reader = Some(
+            std::thread::Builder::new()
+                .name("archive-lock-stdout".into())
+                .spawn(move || {
+                    for line in std::io::BufReader::new(stdout).lines() {
+                        let terminal = line.is_err();
+                        if tx.send(line.map_err(|e| e.to_string())).is_err() || terminal {
+                            break;
+                        }
+                    }
+                })
+                .map_err(|e| format!("spawn stdout reader: {e}"))?,
+        );
+        Ok(owned)
+    }
+
+    fn wait_marker(&self, marker: &str, timeout: Duration) -> Result<(), String> {
+        let deadline = Instant::now() + timeout;
+        loop {
+            match self
+                .output
+                .recv_timeout(deadline.saturating_duration_since(Instant::now()))
+            {
+                // libtest may prefix the first marker with its test-name line.
+                Ok(Ok(line)) if line.trim_end().ends_with(marker) => return Ok(()),
+                Ok(Ok(_)) => {}
+                Ok(Err(error)) => return Err(format!("child stdout: {error}")),
+                Err(mpsc::RecvTimeoutError::Timeout) => {
+                    return Err(format!("{marker} wait timed out"));
+                }
+                Err(mpsc::RecvTimeoutError::Disconnected) => {
+                    return Err(format!("stdout closed before {marker}"));
+                }
+            }
+            if Instant::now() >= deadline {
+                return Err(format!("{marker} wait timed out"));
+            }
+        }
+    }
+
+    fn ready(&mut self, timeout: Duration) -> Result<(), String> {
+        if let Err(error) = self.wait_marker("PINVOU_LOCK_READY", timeout) {
+            return Err(self.failure_with_cleanup(error));
+        }
+        Ok(())
+    }
+
+    fn release(&mut self) -> Result<(), String> {
+        let result = self
+            .child
+            .stdin
+            .take()
+            .ok_or_else(|| "missing child stdin".to_owned())
+            .and_then(|mut input| {
+                writeln!(input, "release").map_err(|e| format!("release child: {e}"))
+            });
+        result.map_err(|error| self.failure_with_cleanup(error))
+    }
+
+    // try_wait reaps the child when it returns Some. Never use unbounded wait.
+    fn poll_exit(&mut self, deadline: Instant) -> Result<ExitStatus, String> {
+        loop {
+            if let Some(status) = self
+                .child
+                .try_wait()
+                .map_err(|e| format!("reap child: {e}"))?
+            {
+                return Ok(status);
+            }
+            if Instant::now() >= deadline {
+                return Err("child exit wait timed out".into());
+            }
+            std::thread::sleep(Duration::from_millis(5));
+        }
+    }
+
+    fn join_reader(&mut self, deadline: Instant) -> Result<(), String> {
+        if let Some(reader) = self.reader.as_ref() {
+            while !reader.is_finished() {
+                if Instant::now() >= deadline {
+                    return Err("child stdout reader did not exit".into());
+                }
+                std::thread::sleep(Duration::from_millis(5));
+            }
+        }
+        if let Some(reader) = self.reader.take() {
+            reader
+                .join()
+                .map_err(|_| "child stdout reader panicked".to_owned())?;
+        }
+        Ok(())
+    }
+
+    fn cleanup(&mut self) -> Result<(), String> {
+        let deadline = Instant::now() + LOCK_HELPER_CLEANUP_TIMEOUT;
+        drop(self.child.stdin.take());
+        if self.child.try_wait().map_err(|e| e.to_string())?.is_none() {
+            // kill may race a natural exit; accept it only if try_wait reaps it.
+            if let Err(error) = self.child.kill() {
+                if self.child.try_wait().map_err(|e| e.to_string())?.is_none() {
+                    return Err(format!("kill lock child: {error}"));
+                }
+            }
+        }
+        self.poll_exit(deadline)?;
+        self.join_reader(deadline)
+    }
+
+    fn failure_with_cleanup(&mut self, error: String) -> String {
+        match self.cleanup() {
+            Ok(()) => error,
+            Err(cleanup) => format!("{error}; cleanup failed: {cleanup}"),
+        }
+    }
+
+    fn wait_exit(&mut self, timeout: Duration) -> Result<ExitStatus, String> {
+        match self.poll_exit(Instant::now() + timeout) {
+            Ok(status) => {
+                self.join_reader(Instant::now() + LOCK_HELPER_CLEANUP_TIMEOUT)?;
+                Ok(status)
+            }
+            Err(error) => Err(self.failure_with_cleanup(error)),
+        }
+    }
+}
+
+impl Drop for LockChild {
+    fn drop(&mut self) {
+        if let Err(error) = self.cleanup() {
+            eprintln!("archive lock helper cleanup: {error}");
+        }
+    }
+}
+
+fn spawn_lock_child(path: &Path) -> LockChild {
+    let mut child = LockChild::spawn(path, "normal").unwrap();
+    child.ready(LOCK_HELPER_TIMEOUT).unwrap();
     child
+}
+
+fn assert_stalled_child_is_reaped(mode: &str) {
+    let temp = tempfile::tempdir().unwrap();
+    let path = temp.path().join("probe.lock");
+    std::fs::File::create(&path).unwrap();
+    {
+        let _home = isolate_home(temp.path());
+        let mut child = LockChild::spawn(&path, mode).unwrap();
+        if mode == "stall-before-ready" {
+            child
+                .wait_marker("PINVOU_LOCK_STALLED_BEFORE_READY", LOCK_HELPER_TIMEOUT)
+                .unwrap();
+        } else {
+            child.ready(LOCK_HELPER_TIMEOUT).unwrap();
+            child.release().unwrap();
+            child
+                .wait_marker("PINVOU_LOCK_STALLED_AFTER_RELEASE", LOCK_HELPER_TIMEOUT)
+                .unwrap();
+        }
+        let started = Instant::now();
+        let timeout = Duration::from_millis(200);
+        let error = if mode == "stall-before-ready" {
+            child.ready(timeout).unwrap_err()
+        } else {
+            child.wait_exit(timeout).unwrap_err()
+        };
+        assert!(
+            error.contains(if mode == "stall-before-ready" {
+                "PINVOU_LOCK_READY wait timed out"
+            } else {
+                "child exit wait timed out"
+            }),
+            "{error}"
+        );
+        assert!(!error.contains("cleanup failed"), "{error}");
+        assert!(started.elapsed() < timeout + LOCK_HELPER_CLEANUP_TIMEOUT + Duration::from_secs(5));
+        assert!(child.child.try_wait().unwrap().is_some());
+        assert!(child.child.stdin.is_none());
+        assert!(child.reader.is_none());
+    }
+    // Reacquire the same environment lock and actual fd-lock after failure.
+    let _home = isolate_home(temp.path());
+    let mut next = spawn_lock_child(&path);
+    next.release().unwrap();
+    assert!(next.wait_exit(LOCK_HELPER_TIMEOUT).unwrap().success());
+}
+
+#[test]
+fn lock_child_ready_stall_is_bounded_and_reaped() {
+    assert_stalled_child_is_reaped("stall-before-ready");
+}
+
+#[test]
+fn lock_child_exit_stall_is_bounded_and_reaped() {
+    assert_stalled_child_is_reaped("stall-after-release");
 }
 
 #[test]
@@ -211,7 +430,7 @@ fn seal_lock_contention_remains_retryable() {
     let (store, record) = fixture(temp.path());
     let before = raw_snapshot(temp.path());
     let active = std::fs::read(active_path(temp.path())).unwrap();
-    let child = Arc::new(parking_lot::Mutex::new(None::<Child>));
+    let child = Arc::new(parking_lot::Mutex::new(None::<LockChild>));
     let child_hook = child.clone();
     let lock_path = bank_path(temp.path()).with_extension("lock");
     let reached = Arc::new(AtomicUsize::new(0));
@@ -241,8 +460,8 @@ fn seal_lock_contention_remains_retryable() {
     assert_eq!(raw_snapshot(temp.path()), before);
     assert_eq!(std::fs::read(active_path(temp.path())).unwrap(), active);
     let mut child = child.lock().take().unwrap();
-    writeln!(child.stdin.as_mut().unwrap(), "release").unwrap();
-    assert!(child.wait().unwrap().success());
+    child.release().unwrap();
+    assert!(child.wait_exit(LOCK_HELPER_TIMEOUT).unwrap().success());
     assert!(store.prepare_remote_proxy_open(None, &context()).is_ok());
     assert_local_usable(&store, temp.path());
     assert!(
