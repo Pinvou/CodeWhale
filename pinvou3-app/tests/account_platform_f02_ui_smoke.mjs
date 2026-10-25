@@ -153,7 +153,7 @@ try {
   });
   await caseRun('Approval decision uses the current action control and expected request version', async () => {
     await fresh('admin'); await page.evaluate(() => { window.f02.approvalStatus = 'SUBMITTED'; }); await click('approvals'); await settled(); await click('details'); await page.waitForSelector('article textarea'); await page.type('article textarea', 'Controlled approval decision reason'); await click('approve'); await page.waitForFunction(() => window.f02.approvalStatus === 'APPROVED'); await settled();
-    assert.ok(await page.evaluate(() => { const call = window.f02.calls.find(call => call.url.endsWith('/actions/decide')); const body = JSON.parse(call.body); return body.expected_version === 1 && body.decision === 'APPROVE' && body.reason === 'Controlled approval decision reason'; }));
+    assert.ok(await page.evaluate(() => { const call = window.f02.calls.find(call => call.url.endsWith('/actions/decide')); const body = JSON.parse(call.body); return body.expected_version === 1 && body.decision === 'APPROVED' && body.reason === 'Controlled approval decision reason'; }));
   });
   await caseRun('Publish-only product operator keeps mapping read-only while saving localized names', async () => {
     await fresh('products'); await page.evaluate(() => { window.f02.publishOnly = true; window.f02.switchIdentity(); }); await settled(); await click('details'); await page.waitForSelector('form textarea'); await settled();

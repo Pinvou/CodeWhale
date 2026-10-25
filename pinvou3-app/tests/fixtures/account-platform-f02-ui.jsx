@@ -97,7 +97,14 @@ globalThis.fetch = async (url, options = {}) => {
   }
   if (url.includes(`/api/admin/approvals/requests/${id}/actions/`)) {
     if (control.approval202) return json({ approval_request_id: id }, 202);
-    const action = url.split('/').pop(); control.approvalStatus = action === 'submit' ? 'SUBMITTED' : action === 'withdraw' ? 'WITHDRAWN' : JSON.parse(options.body).decision === 'APPROVE' ? 'APPROVED' : 'REJECTED'; control.approvalVersion++; return json(null, 204);
+    const action = url.split('/').pop();
+    if (action === 'decide') {
+      const { decision } = JSON.parse(options.body);
+      if (decision !== 'APPROVED' && decision !== 'REJECTED') return json({ code: 'INVALID_APPROVAL_DECISION' }, 400);
+      control.approvalStatus = decision;
+    } else control.approvalStatus = action === 'submit' ? 'SUBMITTED' : 'WITHDRAWN';
+    control.approvalVersion++;
+    return json(null, 204);
   }
   if (url.includes('/adjustments?')) return json({ items: [{ adjustment_id: id, wallet_id: id, status: 'PENDING_APPROVAL', amount_microcredits: '9007199254740993', requested_by: id, request_idempotency_key: 'controlled-adjustment-key', version: 1 }] });
   if (url.includes('/wallets?') || url.includes('/requests?')) return json({ items: [] });

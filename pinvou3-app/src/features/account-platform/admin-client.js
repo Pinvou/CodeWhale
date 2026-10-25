@@ -9,6 +9,7 @@ import { secureRequestID } from './request-id.js';
 import { requireReconciliationDate, requireReconciliationRun } from './reconciliation-contract.js';
 import { responseRetryAfter } from './auth-error.js';
 import { beforeFinanceDispatch, financeNotDispatched } from './finance-operation-state.js';
+import { canonicalApprovalDecision } from './approval-decision-contract.js';
 import { parseRegistrationBonusJSON, encodeRegistrationBonusJSON } from './registration-bonus-contract.js';
 function errorFromResponse(response, payload) {
   const error = new Error(payload?.message || `HTTP ${response.status}`);
@@ -598,13 +599,14 @@ export class AdminPlatformClient {
     }
   }
   async decideGovernedApproval(requestID, detail, decision, reason, signal) {
+    const canonicalDecision = canonicalApprovalDecision(decision);
     const capability = await beforeFinanceDispatch(() => this.governedApprovalCapability(signal));
     const lineage = this.approvalLineage();
     if (lineage.control !== capability) throw financeNotDispatched(approvalControlChanged());
     const version = detail?.action_control_version;
     if (detail?.approval_request_id !== requestID || !Number.isSafeInteger(version) || version !== capability.control.version ||
       !Number.isSafeInteger(detail?.version) || detail.version < 1) throw financeNotDispatched(approvalControlChanged());
-    const body = { expected_version: detail.version, decision, reason };
+    const body = { expected_version: detail.version, decision: canonicalDecision, reason };
     if (capability.session_approval_wire_version === 2) body.action_control_version = version;
     else body.observed_versions = detail.critical_resource_versions || {};
     const controller = new AbortController();
