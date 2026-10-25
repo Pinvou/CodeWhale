@@ -5,7 +5,7 @@ GSA-07 专用审批授权 Relay 的独立凭据、专项就绪与迁移顺序见
 本目录的 Compose 基线用于开发、测试和单机部署编排；能够启动这些容器不代表能够从空白主机恢复当前账号平台。完整恢复还需要同一恢复集中的四个 PostgreSQL 数据库、NATS JetStream、独立模型网关、站点 Secret/override、边缘代理/证书/网络配置和不可变制品。生产或灾难恢复必须执行 [`../runbooks/full-redeployment.md`](../runbooks/full-redeployment.md)，不得把新建空卷后的健康检查当作恢复成功。
 
 1. 将 `.env.example` 复制为 `.env`，把每个占位值替换为不同的随机值；`.env` 已被仓库忽略。
-2. 从仓库根执行 `node scripts/account-platform.mjs dev up`。
+2. 按[开发 NATS 材料与初始化说明](../runbooks/development-nats.md)准备独立 TLS/身份、当前 consumer 制品及真实 fresh 回执，并在进程环境声明 `PINVOU_DEV_NATS_CONFIG_FILE`；已有数据不得自动重新初始化。随后从仓库根执行 `node scripts/account-platform.mjs dev up`，入口固定追加 `compose.dev-nats.yaml`。
 3. Keycloak 开发入口为 `http://127.0.0.1:18080`；Account、Billing、Token Gateway、Payment Simulator、Token Portal、New API 和 Identity Adapter 分别绑定 `18101` 至 `18107` 的对应回环端口。
 4. 真实 New API 通过 `real-newapi` profile 启动，仅绑定 `http://127.0.0.1:18106`；首次启动后需在本机完成管理员、上游 Channel 和最小权限 API Token 初始化，具体见 [`../runbooks/newapi-deployment.md`](../runbooks/newapi-deployment.md)。
 
@@ -82,7 +82,7 @@ docker compose --env-file account-platform/deploy/compose/.env \
 
 当前商城合同仍没有主动关闭订单、退款和对账单接口，因此这些能力不会伪造：订单关闭跟随商城查询到的 `PAY_CLOSED`，退款和渠道账单明确返回“供应商能力不可用”，对账模式显示为 `QUERY_DEGRADED`。普通未支付订单在72小时最终查询后进入唯一 P2 晚到复核案件，回调漏送时继续由查询补偿；Provider 明确声明不提供权威未支付终态时，案件继续保留并接收晚到支付，但不能仅因订单超过最终归档期限就升级 `PROVIDER_BLIND` 或停用该 Provider 版本新单。只有查询持续不可用、历史订单不可访问、能力声明与实际行为不符等真实事实盲区才适用 `PROVIDER_BLIND`。没有有限晚到窗口、长期历史查询、权威终态和足够保留期时不得把商城 `TEST_ONLY` 映射升级为正式 `FROZEN` 映射；查询快照不能冒充渠道账单。UAT 的新 `TEST_ONLY` 验证证据默认有效 `720h`，可用 `BILLING_TEST_ADMISSION_EVIDENCE_TTL` 在 `1h` 至 `2160h` 范围内调整；该参数不续期既有证据，也不绕过失效后的验证和恢复审批。上线退款前仍需补充商城退款合同。
 
-确定性集成烟测使用独立 project：`node scripts/account-platform.mjs test integration`。命令会启动完整栈、验证五个 Readiness、请求/Trace 关联头和 Portal 安全头，然后仅删除该测试 project 的卷。
+确定性集成烟测使用独立 project：`node scripts/account-platform.mjs test integration`。命令还需要上述独立 NATS 材料；先在随机新 project 通过真实 CLI/DB/NATS 生成 fresh 回执，再启动原完整栈、验证五个 Readiness、请求/Trace 关联头和 Portal 安全头，最后仅删除本次测试 project 的卷。`e2e/fault` 使用同一隔离初始化和 overlay；既有开发数据库/总线不进入自动 fresh 路径。资源初始化停止在 QUIESCING/FENCED，不代表正式审批激活。
 
 数据库、Redis、NATS 和服务间网络不对公网开放。`compose.yaml` 是可重复的开发/测试基础拓扑；单机远程访问使用 `compose.remote.yaml` 及由部署负责人提供的不入库站点专用覆盖；恢复前置、状态核对与操作顺序见 [`../runbooks/full-redeployment.md`](../runbooks/full-redeployment.md)，站点实际配置和操作记录仍须独立取得。Kubernetes 生产目标仍以 Helm Chart 为准，不能把基础 Compose 文件单独当作高可用生产模板。Payment Simulator 不得承接生产流量。
 

@@ -7,11 +7,15 @@ import { spawnSync } from 'node:child_process';
 import process from 'node:process';
 import { fileURLToPath } from 'node:url';
 import { readTestWorkloadCredential } from '../account-platform/test/integration/workload-credential.mjs';
+import { developmentNATSConfiguration, newDevelopmentNATSProject, removeDevelopmentNATSProject, retainDevelopmentNATSEvidence } from './account-platform-dev-nats.mjs';
+import { guardExistingDevelopmentNATSStorage } from './account-platform-dev-nats-storage.mjs';
+import { initializeFreshDevelopmentNATS, developmentTestPaymentEnvironment } from './account-platform-dev-nats-runner.mjs';
 import { composeTestConfiguration } from '../account-platform/test/integration/compose-test-configuration.mjs';
 
 const repositoryRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const platformRoot = path.join(repositoryRoot, 'account-platform');
 const composeFile = path.join(platformRoot, 'deploy', 'compose', 'compose.yaml');
+const composeNATSFile = path.join(platformRoot, 'deploy', 'compose', 'compose.dev-nats.yaml');
 const composeEnv = path.join(platformRoot, 'deploy', 'compose', '.env');
 
 function executable(name) {
@@ -59,7 +63,6 @@ function generatedComposeEnvironment() {
   const secret = (bytes = 32) => randomBytes(bytes).toString('base64url');
   return {
     ...operatorConfiguration,
-    COMPOSE_PROJECT_NAME: `pinvou-account-platform-test-${process.pid}`,
     ACCOUNT_PLATFORM_POSTGRES_PASSWORD: secret(),
     ACCOUNT_DB_PASSWORD: secret(),
     BILLING_DB_PASSWORD: secret(),
@@ -113,25 +116,62 @@ function verify() {
   run('git', ['diff', '--check']);
 }
 
+function capture(command, args, env) {
+  const result = spawnSync(command, args, { cwd: repositoryRoot, env: { ...process.env, ...env }, encoding: 'utf8', shell: false, maxBuffer: 1024 * 1024 });
+  if (result.error || result.status !== 0) throw new Error('DEV_NATS_OPERATOR_COMMAND_FAILED');
+  return result.stdout;
+}
+
 function compose(action) {
   if (!existsSync(composeEnv)) {
     throw new Error(`Compose environment is missing: copy ${composeEnv}.example to ${composeEnv} and replace every placeholder`);
   }
-  run('docker', ['compose', '--env-file', composeEnv, '-f', composeFile, '--profile', 'real-newapi', action, ...(action === 'up' ? ['--build', '-d', '--wait'] : [])]);
+  const environment = developmentNATSConfiguration(process.env, { cleanup: action === 'down' });
+  const args = ['compose', '--env-file', composeEnv, '-f', composeFile, '-f', composeNATSFile, '--profile', 'real-newapi'];
+  if (action === 'up') guardExistingDevelopmentNATSStorage({ args, environment, dockerHost: process.env.DOCKER_HOST, capture: (command, commandArgs) => capture(command, commandArgs, environment) });
+  run('docker', [...args, action, ...(action === 'up' ? ['--build', '-d', '--wait'] : [])], { env: environment });
+}
+
+function composeNATSOperation(operationArgs) {
+  const [operation, flag, expectedVersion, ...extra] = operationArgs;
+  let command;
+  if (operation === 'prepare' && flag === undefined) command = [];
+  else if (operation === 'create-only' && flag === undefined) command = ['dev-event-resources', '-create-only'];
+  else if (['status', 'quiesce', 'fence', 'initialize-consumers'].includes(operation) && flag === '--expected-version' && /^[1-9][0-9]{0,18}$/.test(expectedVersion || '') && BigInt(expectedVersion) <= 9223372036854775807n && extra.length === 0) command = ['dev-approval-resources', '-action', operation, '-expected-version', expectedVersion];
+  else throw new Error('usage: dev nats <prepare|create-only> | dev nats <status|quiesce|fence|initialize-consumers> --expected-version N');
+  if (!existsSync(composeEnv)) throw new Error('Compose environment is missing');
+  const environment = developmentNATSConfiguration(process.env, { initializing: true });
+  const args = ['compose', '--env-file', composeEnv, '-f', composeFile, '-f', composeNATSFile, '--profile', 'real-newapi'];
+  guardExistingDevelopmentNATSStorage({ args, environment, dockerHost: process.env.DOCKER_HOST, capture: (command, commandArgs) => capture(command, commandArgs, environment) });
+  if (operation === 'prepare') {
+    run('docker', [...args, 'run', '--rm', '--no-deps', 'deployment-credentials-check'], { env: environment });
+    run('docker', [...args, 'up', '--build', '-d', '--wait', 'postgres', 'nats'], { env: environment });
+    run('docker', [...args, 'run', '--rm', '--build', '--no-deps', 'account-migrate'], { env: environment });
+  } else run('docker', [...args, 'run', '--rm', '--build', '--no-deps', ...command], { env: environment });
 }
 
 function composeTest(testFiles) {
-  const environment = generatedComposeEnvironment();
-  if (!commandAvailable('docker', ['version'])) throw new Error('Docker is required for integration tests');
-  const args = ['compose', '--env-file', `${composeEnv}.example`, '-f', composeFile, '--profile', 'real-newapi'];
+  const paymentEnvironment = developmentTestPaymentEnvironment(testFiles, process.env);
+  const environment = { ...generatedComposeEnvironment(), ...developmentNATSConfiguration(process.env, { fresh: true }), ...paymentEnvironment };
+  if (process.env.DOCKER_HOST) throw new Error('DEV_NATS_TEST_DOCKER_HOST_OVERRIDE_FORBIDDEN');
+  if (!commandAvailable('docker', ['--version'])) throw new Error('Docker is required for integration tests');
+  const owned = newDevelopmentNATSProject(environment);
+  const args = ['compose', '--env-file', `${composeEnv}.example`, '-f', composeFile, '-f', composeNATSFile, '--profile', 'real-newapi'];
   let failure;
+  let clean = true;
   try {
-    run('docker', [...args, 'up', '--build', '-d', '--wait'], { env: environment });
+    initializeFreshDevelopmentNATS({
+      args, owned,
+      run: (command, commandArgs) => run(command, commandArgs, { env: owned.environment }),
+      capture: (command, commandArgs) => capture(command, commandArgs, owned.environment),
+    });
+    run('docker', [...args, 'up', '--build', '-d', '--wait'], { env: owned.environment });
     for (const testFile of testFiles) {
       run(process.execPath, [path.join(platformRoot, 'test', 'integration', testFile)], {
         env: {
-          ...environment,
+          ...owned.environment,
           PINVOU_TEST_COMPOSE_FILE: composeFile,
+          PINVOU_TEST_COMPOSE_NATS_FILE: composeNATSFile,
           PINVOU_TEST_COMPOSE_ENV_FILE: `${composeEnv}.example`,
         },
       });
@@ -139,12 +179,20 @@ function composeTest(testFiles) {
   } catch (error) {
     failure = error;
   } finally {
-    try {
-      run('docker', [...args, 'down', '--volumes', '--remove-orphans'], { env: environment });
-    } catch (cleanupError) {
-      if (!failure) throw cleanupError;
-      console.error(`[account-platform] cleanup failed: ${cleanupError.message}`);
+    if (owned.mayCleanCompose) {
+      try {
+        run('docker', [...args, 'down', '--volumes', '--remove-orphans'], { env: owned.environment });
+      } catch (cleanupError) {
+        clean = false;
+        if (!failure) failure = cleanupError;
+        else console.error(`[account-platform] cleanup failed: ${cleanupError.message}`);
+      }
     }
+    // Retain owned files when Docker cleanup failed; a live container may
+    // still be using them. External supplied material is never removed.
+    try { console.log(`[account-platform] public initialization evidence: ${retainDevelopmentNATSEvidence(owned, failure)}`); }
+    catch { if (!failure) failure = new Error('DEV_NATS_EVIDENCE_RETENTION_FAILED'); clean = false; }
+    if (clean) removeDevelopmentNATSProject(owned);
   }
   if (failure) throw failure;
 }
@@ -176,6 +224,7 @@ try {
       ? 'account-platform-business-compose-check.mjs' : 'account-platform-business-migrations-check.mjs'), ...process.argv.slice(4)]);
   }
   else if (scope === 'approval-backfill') run(executable('go'), ['run', '-tags=nomsgpack', './cmd/approval-authorization-backfill', ...process.argv.slice(3)], { cwd: platformRoot });
+  else if (scope === 'dev' && action === 'nats') composeNATSOperation(process.argv.slice(4));
   else if (scope === 'dev' && action === 'up') compose('up');
   else if (scope === 'dev' && action === 'down') compose('down');
   else if (scope === 'test' && action === 'unit') run(executable('go'), ['test', '-tags=nomsgpack', './...'], { cwd: platformRoot });
@@ -187,7 +236,7 @@ try {
   else if (scope === 'test' && action === 'fault') fault();
   else if (scope === 'test' && action === 'security') security();
   else {
-    throw new Error('usage: account-platform.mjs verify | production <check-business|check-migrations> --recipe FILE --inventory FILE --renderer BINARY | approval-backfill [--batch=100 --deadline=5m] | dev <up|down> | test <unit|contract|integration|e2e|fault|security>');
+    throw new Error('usage: account-platform.mjs verify | production <check-business|check-migrations> --recipe FILE --inventory FILE --renderer BINARY | approval-backfill [--batch=100 --deadline=5m] | dev <up|down> | dev nats <prepare|create-only|status|quiesce|fence|initialize-consumers> [--expected-version N] | test <unit|contract|integration|e2e|fault|security>');
   }
 } catch (error) {
   console.error(`[account-platform] ${error.message}`);

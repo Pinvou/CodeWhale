@@ -7,17 +7,19 @@ import { readTestWorkloadCredential } from './workload-credential.mjs';
 const billingOrigin = 'http://127.0.0.1:18102';
 readTestWorkloadCredential();
 const composeFile = process.env.PINVOU_TEST_COMPOSE_FILE;
+const composeNATSFile = process.env.PINVOU_TEST_COMPOSE_NATS_FILE;
 const composeEnvFile = process.env.PINVOU_TEST_COMPOSE_ENV_FILE;
 const project = process.env.COMPOSE_PROJECT_NAME;
 
-assert.match(project || '', /^pinvou-account-platform-test-\d+$/, 'faults may only target an isolated test project');
-assert.ok(composeFile && composeEnvFile, 'the fault runner requires explicit Compose paths');
+assert.match(project || '', /^pinvou-account-platform-test-\d+-[a-f0-9]{32}$/, 'faults may only target an isolated test project');
+assert.ok(composeFile && composeEnvFile && composeNATSFile, 'the fault runner requires explicit Compose paths');
 const expectedCompose = path.resolve(import.meta.dirname, '../../deploy/compose/compose.yaml');
 assert.equal(path.resolve(composeFile), expectedCompose, 'faults may only use the repository test Compose file');
+assert.equal(path.resolve(composeNATSFile), path.join(path.dirname(expectedCompose), 'compose.dev-nats.yaml'));
 assert.equal(path.resolve(composeEnvFile), `${expectedCompose.slice(0, -'compose.yaml'.length)}.env.example`);
 
 function compose(...args) {
-  const result = spawnSync('docker', ['compose', '--env-file', composeEnvFile, '-f', composeFile, ...args], {
+  const result = spawnSync('docker', ['compose', '--env-file', composeEnvFile, '-f', composeFile, '-f', composeNATSFile, '--profile', 'real-newapi', ...args], {
     env: process.env,
     stdio: 'inherit',
     shell: false,

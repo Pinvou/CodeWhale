@@ -1,0 +1,118 @@
+# Unified local dev/test only. Supplied identities are never issued or broadened here.
+# Select after compose.yaml; resource preparation is an explicit operations step.
+services:
+  nats:
+    user: "${DEV_NATS_UID:?set non-root material owner UID}:${DEV_NATS_GID:?set non-root material owner GID}"
+    command: ["-c", "/etc/pinvou/nats/nats.conf"]
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    tmpfs: ["/tmp:size=16m,mode=1777"]
+    volumes:
+      - {type: bind, source: ./nats.dev.conf, target: /etc/pinvou/nats/nats.conf, read_only: true, bind: {create_host_path: false}}
+      - {type: bind, source: "${DEV_NATS_AUTHORIZATION_FILE:?set verified development material}", target: /etc/pinvou/nats/authorization.conf, read_only: true, bind: {create_host_path: false}}
+      - {type: bind, source: "${DEV_NATS_SERVER_TLS_DIRECTORY:?set verified development material}", target: /run/pinvou/nats-tls, read_only: true, bind: {create_host_path: false}}
+      - {type: bind, source: "${DEV_NATS_DATA_DIRECTORY:?set verified development material}", target: /data, bind: {create_host_path: false}}
+  account-event-relay:
+    user: "${DEV_NATS_UID:?set non-root material owner UID}:${DEV_NATS_GID:?set non-root material owner GID}"
+    environment:
+      NATS_URL: tls://nats:4222
+      NATS_CA_FILE: /run/pinvou/trust/ca.crt
+      NATS_NKEY_SEED_FILE: /run/pinvou/nats/nkey.seed
+      NATS_CREDENTIALS_FILE: ""
+      APPROVAL_RELAY_NATS_NKEY_SEED_FILE: /run/pinvou/approval-nats/nkey.seed
+      APPROVAL_RELAY_NATS_CREDENTIALS_FILE: ""
+      APPROVAL_RELAY_NATS_CURRENT_PUBLIC_KEYS_FILE: /run/pinvou/approval-identities/current.json
+      APPROVAL_RELAY_NATS_CURRENT_PUBLIC_KEYS_SHA256: ${DEV_NATS_PUBLIC_KEYS_SHA256:?set trusted public identity SHA256}
+    volumes:
+      - {type: bind, source: "${DEV_NATS_CA_FILE:?set verified development material}", target: /run/pinvou/trust/ca.crt, read_only: true, bind: {create_host_path: false}}
+      - {type: bind, source: "${DEV_NATS_ACCOUNT_OUTBOX_RELAY_DIRECTORY:?set verified development material}", target: /run/pinvou/nats, read_only: true, bind: {create_host_path: false}}
+      - {type: bind, source: "${DEV_NATS_ACCOUNT_APPROVAL_RELAY_DIRECTORY:?set verified development material}", target: /run/pinvou/approval-nats, read_only: true, bind: {create_host_path: false}}
+      - {type: bind, source: "${DEV_NATS_PUBLIC_KEYS_FILE:?set verified development material}", target: /run/pinvou/approval-identities/current.json, read_only: true, bind: {create_host_path: false}}
+  billing-event-relay:
+    user: "${DEV_NATS_UID:?set non-root material owner UID}:${DEV_NATS_GID:?set non-root material owner GID}"
+    environment:
+      NATS_URL: tls://nats:4222
+      NATS_CA_FILE: /run/pinvou/trust/ca.crt
+      NATS_NKEY_SEED_FILE: /run/pinvou/nats/nkey.seed
+      NATS_CREDENTIALS_FILE: ""
+    volumes:
+      - {type: bind, source: "${DEV_NATS_CA_FILE:?set verified development material}", target: /run/pinvou/trust/ca.crt, read_only: true, bind: {create_host_path: false}}
+      - {type: bind, source: "${DEV_NATS_BILLING_OUTBOX_RELAY_DIRECTORY:?set verified development material}", target: /run/pinvou/nats, read_only: true, bind: {create_host_path: false}}
+  billing-service:
+    user: "${DEV_NATS_UID:?set non-root material owner UID}:${DEV_NATS_GID:?set non-root material owner GID}"
+    environment:
+      NATS_URL: tls://nats:4222
+      NATS_CA_FILE: /run/pinvou/trust/ca.crt
+      NATS_NKEY_SEED_FILE: /run/pinvou/nats/nkey.seed
+      NATS_CREDENTIALS_FILE: ""
+      BILLING_APPROVAL_CONSUMER_PUBLIC_KEYS_FILE: /run/pinvou/approval-identities/current.json
+      BILLING_APPROVAL_CONSUMER_PUBLIC_KEYS_SHA256: ${DEV_NATS_PUBLIC_KEYS_SHA256:?set trusted public identity SHA256}
+      BILLING_APPROVAL_CONSUMER_MANIFEST_FILE: /run/pinvou/approval-manifest/manifest.json
+      BILLING_APPROVAL_CONSUMER_MANIFEST_SHA256: ${DEV_NATS_MANIFEST_SHA256:?set trusted manifest SHA256}
+      BILLING_APPROVAL_CONSUMER_RECEIPT_FILE: /run/pinvou/approval-receipt/${DEV_NATS_RECEIPT_FILE_NAME:?set receipt file name}
+      BILLING_APPROVAL_CONSUMER_RECEIPT_SHA256: ${DEV_NATS_RECEIPT_SHA256:-}
+    volumes:
+      - {type: bind, source: "${DEV_NATS_CA_FILE:?set verified development material}", target: /run/pinvou/trust/ca.crt, read_only: true, bind: {create_host_path: false}}
+      - {type: bind, source: "${DEV_NATS_BILLING_COMMAND_EXECUTOR_DIRECTORY:?set verified development material}", target: /run/pinvou/nats, read_only: true, bind: {create_host_path: false}}
+      - {type: bind, source: "${DEV_NATS_PUBLIC_KEYS_FILE:?set verified development material}", target: /run/pinvou/approval-identities/current.json, read_only: true, bind: {create_host_path: false}}
+      - {type: bind, source: "${DEV_NATS_MANIFEST_FILE:?set verified development material}", target: /run/pinvou/approval-manifest/manifest.json, read_only: true, bind: {create_host_path: false}}
+      - {type: bind, source: "${DEV_NATS_RECEIPT_DIRECTORY:?set verified development material}", target: /run/pinvou/approval-receipt, read_only: true, bind: {create_host_path: false}}
+  dev-event-resources:
+    user: "${DEV_NATS_UID:?set non-root material owner UID}:${DEV_NATS_GID:?set non-root material owner GID}"
+    profiles: [dev-nats-operations]
+    restart: "no"
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    tmpfs: ["/tmp:size=16m,mode=1777"]
+    build:
+      context: ../..
+      dockerfile: Dockerfile
+      args: {SERVICE: event-resources, GOPROXY: "${GOPROXY:-https://proxy.golang.org,direct}"}
+    healthcheck: {disable: true}
+    networks: [backend]
+    environment:
+      APP_ENV: development
+      NATS_URL: tls://nats:4222
+      NATS_CA_FILE: /run/pinvou/trust/ca.crt
+      NATS_NKEY_SEED_FILE: /run/pinvou/nats/nkey.seed
+      NATS_CREDENTIALS_FILE: ""
+    volumes:
+      - {type: bind, source: "${DEV_NATS_CA_FILE:?set verified development material}", target: /run/pinvou/trust/ca.crt, read_only: true, bind: {create_host_path: false}}
+      - {type: bind, source: "${DEV_NATS_EVENT_RESOURCE_OPERATOR_DIRECTORY:?set verified development material}", target: /run/pinvou/nats, read_only: true, bind: {create_host_path: false}}
+  dev-approval-resources:
+    user: "${DEV_NATS_UID:?set non-root material owner UID}:${DEV_NATS_GID:?set non-root material owner GID}"
+    profiles: [dev-nats-operations]
+    restart: "no"
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    tmpfs: ["/tmp:size=16m,mode=1777"]
+    build:
+      context: ../..
+      dockerfile: Dockerfile
+      args: {SERVICE: approval-resources, GOPROXY: "${GOPROXY:-https://proxy.golang.org,direct}"}
+    healthcheck: {disable: true}
+    networks: [backend]
+    environment:
+      APP_ENV: development
+      NATS_URL: tls://nats:4222
+      NATS_CA_FILE: /run/pinvou/trust/ca.crt
+      NATS_NKEY_SEED_FILE: /run/pinvou/nats/nkey.seed
+      NATS_CREDENTIALS_FILE: ""
+      ACCOUNT_PLATFORM_PROFILE: models
+      APPROVAL_INITIALIZER_DATABASE_URL: postgresql://account_migrator:${ACCOUNT_MIGRATION_DB_PASSWORD:?set initializer DB password}@postgres:5432/account_platform_account?sslmode=disable
+      APPROVAL_RESOURCE_CURRENT_PUBLIC_KEYS_FILE: /run/pinvou/approval-identities/current.json
+      APPROVAL_RESOURCE_CURRENT_PUBLIC_KEYS_SHA256: ${DEV_NATS_PUBLIC_KEYS_SHA256:?set trusted public identity SHA256}
+      APPROVAL_RESOURCE_MANIFEST_FILE: /run/pinvou/approval-manifest/manifest.json
+      APPROVAL_RESOURCE_MANIFEST_SHA256: ${DEV_NATS_MANIFEST_SHA256:?set trusted manifest SHA256}
+      APPROVAL_RESOURCE_RECEIPT_FILE: /run/pinvou/approval-receipt/${DEV_NATS_RECEIPT_FILE_NAME:?set receipt file name}
+      APPROVAL_RESOURCE_RECEIPT_SHA256: ${DEV_NATS_RECEIPT_SHA256:-}
+    command: [-action, status, -expected-version, "1"]
+    volumes:
+      - {type: bind, source: "${DEV_NATS_CA_FILE:?set verified development material}", target: /run/pinvou/trust/ca.crt, read_only: true, bind: {create_host_path: false}}
+      - {type: bind, source: "${DEV_NATS_EVENT_RESOURCE_OPERATOR_DIRECTORY:?set verified development material}", target: /run/pinvou/nats, read_only: true, bind: {create_host_path: false}}
+      - {type: bind, source: "${DEV_NATS_PUBLIC_KEYS_FILE:?set verified development material}", target: /run/pinvou/approval-identities/current.json, read_only: true, bind: {create_host_path: false}}
+      - {type: bind, source: "${DEV_NATS_MANIFEST_FILE:?set verified development material}", target: /run/pinvou/approval-manifest/manifest.json, read_only: true, bind: {create_host_path: false}}
+      - {type: bind, source: "${DEV_NATS_RECEIPT_DIRECTORY:?set verified development material}", target: /run/pinvou/approval-receipt, bind: {create_host_path: false}}
