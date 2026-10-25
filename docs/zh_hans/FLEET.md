@@ -56,7 +56,7 @@ Fleet 状态存储在工作区下的 `.codewhale/fleet.jsonl`。worker 日志与
 
 选择具体模型会显式固定其 provider：保存的配置同时记录 `model` 与 `provider` 字段，因此它命名的 route 不依赖于配置稍后加载时碰巧处于活动状态的 provider。在 review 步骤按 **Enter**（"start"）会在同一屏内联预览确切的首个配置 TOML；在你保存之前什么都不会写入。`provider` 字段可以是内置 provider id（如 `openrouter`），也可以是配置在 `[providers.<name>]` 下的用户命名 OpenAI 兼容 provider（如 `lm-studio`）；启动路径保留该 id，并在 provider 未配置时 fail closed。
 
-自 v0.9.9 schema 精简（#5324, #5123）以来，配置也是模型面向的 `agent` 工具选择 route 的方式：对外公布的表面不再携带 `model` 或 `thinking`——子任务要么以 `profile` 运行（精确使用其保存的 route 与 thinking 级别），要么继承操作者的 model。已移除的字段对已保存的 transcript、ACP/MCP 客户端与 Fleet 配置仍然保持可解析；对外公布的 12 字段列表与兼容列表见 docs/SUBAGENTS.md。
+自 v0.9.9 schema 精简（#5324, #5123）以来，配置也是模型面向的 `agent` 工具选择 route 的方式：对外公布的表面不再携带 `model` 或 `thinking`——子任务要么以 `profile` 运行（精确使用其保存的 route 与 thinking 级别），要么继承操作者的 model。已移除的字段对已保存的 transcript、ACP/MCP 客户端与 Fleet 配置仍然保持可解析；对外公布的 14 字段列表与兼容列表见 docs/SUBAGENTS.md。
 
 当配置了 provider 时，review 步骤还会在显式的保存前预览门控之后提供模型辅助起草：
 

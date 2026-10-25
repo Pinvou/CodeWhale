@@ -29,6 +29,12 @@ use crate::tools::subagent::normalize_claim_path;
 /// Decision records, write-scope claims, and contention detection for parallel
 /// agent work. Parallel work may proceed only when scopes and contracts do not
 /// collide silently.
+/// Marker at the head of a write-scope contention refusal (see
+/// [`CoordinationLedger::register_claim`]); the spawn path in the tool layer
+/// keys its read-only recovery guidance on this prefix, and the shared-claim
+/// e2e test pins the pairing.
+pub(crate) const WRITE_SCOPE_CONTENTION_PREFIX: &str = "write-scope contention";
+
 /// Status of a coordination decision.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -540,7 +546,7 @@ impl CoordinationLedger {
             self.contentions.push(receipt);
             trim_front(&mut self.contentions, COORDINATION_RECORD_LIMIT);
             return Err(format!(
-                "write-scope contention with {} (roots: {:?}, files: {:?}, contracts: {:?}); serialize the work, narrow the claim, or use worktree isolation",
+                "{WRITE_SCOPE_CONTENTION_PREFIX} with {} (roots: {:?}, files: {:?}, contracts: {:?}); serialize the work, narrow the claim, or use worktree isolation",
                 existing.claim.owner,
                 existing.claim.roots,
                 existing.claim.exact_files,
