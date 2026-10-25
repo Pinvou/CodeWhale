@@ -325,6 +325,7 @@ func (s *Service) adminDecideApprovalRequest(w http.ResponseWriter, r *http.Requ
 		return
 	}
 	var body struct {
+		CommandProtocol  json.RawMessage `json:"command_protocol"`
 		ExpectedVersion  int64           `json:"expected_version"`
 		Decision         string          `json:"decision"`
 		Reason           string          `json:"reason"`
@@ -334,7 +335,21 @@ func (s *Service) adminDecideApprovalRequest(w http.ResponseWriter, r *http.Requ
 		api.WriteError(w, http.StatusBadRequest, "INVALID_APPROVAL_REQUEST", "invalid approval request", httpserver.RequestID(r.Context()))
 		return
 	}
-	item, err := repository.DecideApprovalRequest(r.Context(), mustPrincipal(r.Context()), requestID, body.ExpectedVersion, body.Decision, body.Reason, body.ObservedVersions)
+	ctx := r.Context()
+	if len(body.CommandProtocol) != 0 {
+		var protocol int
+		if json.Unmarshal(body.CommandProtocol, &protocol) != nil || protocol != 1 || (body.Decision != "APPROVED" && body.Decision != "REJECTED") {
+			invalidApprovalV2Write(w, r)
+			return
+		}
+		var valid bool
+		ctx, valid = approvalV2WriteContext(w, r)
+		if !valid {
+			return
+		}
+		ctx = withApprovalDecisionProtocol(ctx, body.Decision, body.Reason)
+	}
+	item, err := repository.DecideApprovalRequest(ctx, mustPrincipal(r.Context()), requestID, body.ExpectedVersion, body.Decision, body.Reason, body.ObservedVersions)
 	if err != nil {
 		s.writeError(w, r, err)
 		return
@@ -390,6 +405,9 @@ func (s *Service) adminDecideApprovalRequestV2(w http.ResponseWriter, r *http.Re
 		}
 	}
 	decisionCtx := context.WithValue(r.Context(), approvalV2ControlVersionKey{}, decision.ActionControlVersion)
+	if decision.CommandProtocol != nil {
+		decisionCtx = withApprovalDecisionProtocol(decisionCtx, decision.Decision, decision.Reason)
+	}
 	if _, err := repository.DecideApprovalRequest(decisionCtx, mustPrincipal(r.Context()), requestID, decision.ExpectedVersion, decision.Decision, decision.Reason, nil); err != nil {
 		s.writeError(w, r, err)
 		return

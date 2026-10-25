@@ -25,7 +25,7 @@ async function rejectedMutation(mutate, expected) {
 
 test('authorization release gate classifies every HTTP task event callback and CLI entrypoint', async () => {
   const catalog = JSON.parse(await readFile(catalogURL, 'utf8'));
-  // The six existing Portal transports use Any, alongside the 390 verb-specific
+  // The six existing Portal transports use Any, alongside the 392 verb-specific
   // registrations. Keep the expected complete graph independent of its parser.
   const wildcardPaths = [
     '/api/account/*resource', '/api/token/*resource',
@@ -39,7 +39,7 @@ test('authorization release gate classifies every HTTP task event callback and C
   for (const route of wildcardPaths) assert.ok(portal.includes(`router.Any("${route}",`), `missing existing Portal transport ${route}`);
   // The real checker still rejects missing, stale, duplicate or mis-scoped
   // entries before returning these exact inventory sizes.
-  assert.deepEqual(await runAuthorizationCoverage(), { routes: 396, tasks: 32, events: 18, cli: 26 });
+  assert.deepEqual(await runAuthorizationCoverage(), { routes: 398, tasks: 32, events: 18, cli: 26 });
 });
 
 test('password preparation adds only the captcha admission and two exact internal authority routes', async () => {
@@ -287,4 +287,22 @@ test('withdrawal result exposes exactly two platform original-receipt GET bindin
   await rejectedMutation(value => {
     value.http_policies = value.http_policies.filter(item => !(item.source === source && item.receiver === 'adminV2' && item.path === routePath));
   }, /unclassified_http_entrypoint/);
+});
+
+test('decision receipt adds exactly two versioned GETs with the existing current-authority domain reader', async () => {
+  const source = 'account-platform/internal/account/service.go';
+  const text = await readFile(new URL('../../internal/account/service.go', import.meta.url), 'utf8');
+  const routePath = '/approval-requests/:approval_request_id/actions/decision-result';
+  const expected = ['admin', 'adminV2'];
+  const routes = authorizationRoutes(source, text).filter(item => item.path === routePath);
+  assert.equal(routes.length, 2);
+  for (const receiver of expected) {
+    assert.equal(routes.filter(item => item.receiver === receiver && item.method === 'GET' && item.registration.trim() === `${receiver}.GET("${routePath}", httpserver.AdaptFunc(s.adminApprovalDecisionResult))`).length, 1);
+  }
+  const catalog = JSON.parse(await readFile(catalogURL, 'utf8'));
+  const policies = catalog.http_policies.filter(item => item.path === routePath);
+  assert.deepEqual(policies.map(item => [item.receiver, item.method, item.scope, item.strategy]), expected.map(receiver => [receiver, 'GET', 'platform', 'domain.approval-policy-decision-original-receipt']));
+  const reader = await readFile(new URL('../../internal/account/approval_decision_receipts.go', import.meta.url), 'utf8');
+  for (const bound of ['humanApprovalPrincipal(principal)', 'approvalRequestVisibilityForActor', 'requireApprovalDraftCloseControl', 'item.RequesterUserID == *actor', 'policy.ApproverPermission', 'readApprovalDecisionReceipt']) assert.ok(reader.includes(bound), `missing existing decision receipt boundary ${bound}`);
+  await rejectedMutation(catalog => { catalog.http_policies = catalog.http_policies.filter(item => !(item.path === routePath && item.receiver === 'adminV2')); }, /unclassified_http_entrypoint:account-platform\/internal\/account\/service\.go\|adminV2\|GET\|\/approval-requests\/:approval_request_id\/actions\/decision-result/);
 });

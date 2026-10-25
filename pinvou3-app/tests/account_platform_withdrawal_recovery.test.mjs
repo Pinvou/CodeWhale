@@ -46,8 +46,8 @@ test('retired session, csrf or authorization generation cannot launch a confirma
 test('missing legacy protocol and pre-dispatch cancellation perform no requests',()=>fixture(async(c,calls,wire)=>{
  wire(()=>{throw new Error('unexpected network');});await assert.rejects(c.withdrawGovernedApprovalRequest(id,detail),e=>e.financeRequestState==='NOT_DISPATCHED');const abort=new AbortController();abort.abort();await assert.rejects(c.withdrawGovernedApprovalRequest(id,detail,abort.signal,1),e=>e.financeRequestState==='NOT_DISPATCHED');assert.equal(calls.length,0);
 }));
-test('actual approval fresh-facts expression marks WITHDRAW alone and retains no protocol for other actions',async()=>{
+test('actual approval fresh-facts expression marks only WITHDRAW and the installed APPROVE/REJECT actions',async()=>{
  const text=await readFile(new URL('../src/features/account-platform/AdminFinanceWorkspace.jsx',import.meta.url),'utf8');const line=text.split('\n').find(x=>x.includes('facts = { detail, action, reason, draft,'));assert.ok(line);const fresh=new Function('action','detail','reason','draft',`let facts;${line};return facts;`);
- assert.equal(fresh('WITHDRAW',detail,'',null).commandProtocol,1);for(const action of['SUBMIT','APPROVE','REJECT','EDIT','query','claim','resolve'])assert.equal(fresh(action,detail,'',null).commandProtocol,undefined);
+ for(const action of['WITHDRAW','APPROVE','REJECT'])assert.equal(fresh(action,detail,'',null).commandProtocol,1);for(const action of['SUBMIT','EDIT','query','claim','resolve'])assert.equal(fresh(action,detail,'',null).commandProtocol,undefined);
  assert.ok(text.includes('let facts = operation.pendingFacts;'));assert.ok(text.includes('if (!facts) {'));assert.ok(text.includes('undefined, facts.commandProtocol'));
 });

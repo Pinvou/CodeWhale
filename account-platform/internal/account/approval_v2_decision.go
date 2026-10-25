@@ -14,6 +14,7 @@ var errInvalidApprovalDecision = errors.New("invalid v2 approval decision")
 var ErrApprovalActionControlChanged = errors.New("approval action control changed")
 
 type approvalV2Decision struct {
+	CommandProtocol      *int
 	ExpectedVersion      int64
 	ActionControlVersion int64
 	Decision             string
@@ -57,6 +58,13 @@ func decodeApprovalV2Decision(body io.Reader) (approvalV2Decision, error) {
 			return approvalV2Decision{}, errInvalidApprovalDecision
 		}
 		switch key {
+		case "command_protocol":
+			var version int
+			err = json.Unmarshal(field, &version)
+			if err != nil || version != 1 {
+				return approvalV2Decision{}, errInvalidApprovalDecision
+			}
+			result.CommandProtocol = &version
 		case "expected_version":
 			if len(field) == 0 || field[0] < '1' || field[0] > '9' {
 				return approvalV2Decision{}, errInvalidApprovalDecision
@@ -79,7 +87,7 @@ func decodeApprovalV2Decision(body io.Reader) (approvalV2Decision, error) {
 		}
 	}
 	end, err := decoder.Token()
-	if err != nil || end != json.Delim('}') || decoder.Decode(new(any)) != io.EOF || len(seen) != 4 ||
+	if err != nil || end != json.Delim('}') || decoder.Decode(new(any)) != io.EOF || (len(seen) != 4 && !(len(seen) == 5 && result.CommandProtocol != nil)) ||
 		result.ExpectedVersion <= 0 || result.ActionControlVersion <= 0 || result.Decision != strings.ToUpper(result.Decision) ||
 		(result.Decision != "APPROVED" && result.Decision != "REJECTED") ||
 		len(strings.TrimSpace(result.Reason)) < 3 || len(strings.TrimSpace(result.Reason)) > 2000 {

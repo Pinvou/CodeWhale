@@ -1,3 +1,4 @@
+import { decideWithOriginalReceipt } from './approval-decision-recovery.js';
 import { requirePlatformRoles, requirePlatformRoleBinding } from './platform-role-management.js';
 import { parseSystemStatusJSON } from './admin-system-status.js';
 import { parseUsageJSON, encodeUsageJSON } from './admin-usage-governance.js';
@@ -9,7 +10,6 @@ import { secureRequestID } from './request-id.js';
 import { requireReconciliationDate, requireReconciliationRun } from './reconciliation-contract.js';
 import { responseRetryAfter } from './auth-error.js';
 import { beforeFinanceDispatch, financeNotDispatched } from './finance-operation-state.js';
-import { canonicalApprovalDecision } from './approval-decision-contract.js';
 import { latePaymentQueryBody, requireLatePaymentQueryReceipt, isCurrentLatePaymentQueryAuthority } from './late-payment-query-contract.js';
 import { withdrawWithOriginalReceipt } from './approval-withdrawal-recovery.js';
 import { parseRegistrationBonusJSON, encodeRegistrationBonusJSON } from './registration-bonus-contract.js';
@@ -608,15 +608,19 @@ export class AdminPlatformClient {
       signal?.removeEventListener('abort', abort);
     }
   }
-  async decideGovernedApproval(requestID, detail, decision, reason, signal) {
-    const canonicalDecision = canonicalApprovalDecision(decision);
+  decideGovernedApproval(requestID, detail, decision, reason, signal, commandProtocol) {
+    return decideWithOriginalReceipt(this, requestID, detail, decision, reason, signal, commandProtocol,
+      (canonical, onDispatch) => this.writeGovernedDecision(requestID, detail, canonical, reason, signal, commandProtocol, onDispatch));
+  }
+  async writeGovernedDecision(requestID, detail, decision, reason, signal, commandProtocol, onDispatch) {
+    if (commandProtocol !== 1) throw financeNotDispatched(approvalControlChanged());
     const capability = await beforeFinanceDispatch(() => this.governedApprovalCapability(signal));
     const lineage = this.approvalLineage();
     if (lineage.control !== capability) throw financeNotDispatched(approvalControlChanged());
     const version = detail?.action_control_version;
     if (detail?.approval_request_id !== requestID || !Number.isSafeInteger(version) || version !== capability.control.version ||
       !Number.isSafeInteger(detail?.version) || detail.version < 1) throw financeNotDispatched(approvalControlChanged());
-    const body = { expected_version: detail.version, decision: canonicalDecision, reason };
+    const body = { expected_version: detail.version, decision, reason, command_protocol: 1 };
     if (capability.session_approval_wire_version === 2) body.action_control_version = version;
     else body.observed_versions = detail.critical_resource_versions || {};
     const controller = new AbortController();
@@ -625,6 +629,7 @@ export class AdminPlatformClient {
     if (signal?.aborted) controller.abort();
     this.approvalControllers.add(controller);
     try {
+      onDispatch?.(lineage);
       const response = await fetch(`${this.baseURL}/api/admin/approvals/requests/${encodeURIComponent(requestID)}/actions/decide`, {
         method: 'POST', headers: { Accept: 'application/json', 'Content-Type': 'application/json',
           'X-CSRF-Token': this.csrfToken, 'X-Pinvou-Approval-Action-Control-Version': String(version) },

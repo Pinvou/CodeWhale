@@ -555,8 +555,38 @@ func (r *PostgresRepository) transitionOwnApproval(ctx context.Context, principa
 }
 
 func (r *PostgresRepository) DecideApprovalRequest(ctx context.Context, principal identity.Principal, requestID uuid.UUID, expectedVersion int64, decision, reason string, observedVersions json.RawMessage) (ApprovalRequest, error) {
+	if command, protocol := approvalDecisionProtocol(ctx); protocol {
+		if command.Decision != strings.ToUpper(strings.TrimSpace(decision)) || strings.TrimSpace(command.RawReason) != strings.TrimSpace(reason) {
+			return ApprovalRequest{}, ErrConflict
+		}
+		_, item, err := r.approvalDecisionResult(ctx, principal, requestID, expectedVersion, approvalV2ControlVersion(ctx), command.Decision, command.ReasonDigest)
+		if err == nil {
+			return item, nil
+		}
+		// An unconfirmed original POST retains all of its original normal write
+		// fences below. A self-decision still follows that path's original denial
+		// and audit behavior; no current-state label is accepted as a receipt.
+		if !errors.Is(err, ErrApprovalDecisionUnconfirmed) && !errors.Is(err, ErrApprovalSelfDecision) {
+			return ApprovalRequest{}, err
+		}
+	}
 	if strings.EqualFold(strings.TrimSpace(decision), "APPROVED") {
-		return r.approveApprovalRequest(ctx, principal, requestID, expectedVersion, reason, observedVersions)
+		item, err := r.approveApprovalRequest(ctx, principal, requestID, expectedVersion, reason, observedVersions)
+		// The dedicated writer cannot SELECT decisions/state events. A raced
+		// original may only be confirmed through the ordinary runtime reader,
+		// after the writer has ended and released all transaction locks.
+		if command, protocol := approvalDecisionProtocol(ctx); protocol &&
+			(errors.Is(err, ErrConflict) || errors.Is(err, ErrApprovalRequestChanged)) {
+			_, confirmed, proofErr := r.approvalDecisionResult(ctx, principal, requestID, expectedVersion,
+				approvalV2ControlVersion(ctx), command.Decision, command.ReasonDigest)
+			if proofErr == nil {
+				return confirmed, nil
+			}
+			if !errors.Is(proofErr, ErrApprovalDecisionUnconfirmed) {
+				return ApprovalRequest{}, proofErr
+			}
+		}
+		return item, err
 	}
 	return r.decideApprovalRequestWithoutAuthorization(ctx, principal, requestID, expectedVersion, decision, reason, observedVersions)
 }
@@ -597,6 +627,15 @@ func (r *PostgresRepository) decideApprovalRequestWithoutAuthorization(ctx conte
 	if item.Status != "SUBMITTED" || item.Version != expectedVersion {
 		if policy, lookupErr := approvalPolicyForItem(item); lookupErr == nil {
 			if _, _, _, authErr := strongPlatformAuthorization(ctx, tx, *actorID, policy.ApproverPermission); authErr == nil {
+				if command, protocol := approvalDecisionProtocol(ctx); protocol {
+					_, proofErr := readApprovalDecisionReceipt(ctx, tx, item, *actorID, expectedVersion, approvalV2ControlVersion(ctx), approvalV2ControlVersion(ctx), command.Decision, command.ReasonDigest)
+					if proofErr == nil {
+						return item, tx.Commit(ctx)
+					}
+					if !errors.Is(proofErr, ErrApprovalDecisionUnconfirmed) {
+						return ApprovalRequest{}, proofErr
+					}
+				}
 				now := r.now()
 				if err := appendApprovalStateEvent(ctx, tx, requestID, item.Status, item.Status, "USER", actorID.String(), "DECISION_CONFLICT", map[string]any{"expected_version": expectedVersion, "current_version": item.Version}, now); err != nil {
 					return ApprovalRequest{}, err
@@ -656,13 +695,18 @@ func (r *PostgresRepository) decideApprovalRequestWithoutAuthorization(ctx conte
 			return ApprovalRequest{}, err
 		}
 	}
-	if _, err := tx.Exec(ctx, `INSERT INTO approval_decisions(id,approval_request_id,approver_user_id,approver_binding_id,approver_authorization_version,decision,reason,authorization_snapshot,decided_at) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9)`, uuid.Must(uuid.NewV7()), requestID, *actorID, bindingID, authorizationVersion, decision, reason, authSnapshot, now); err != nil {
+	decisionID := uuid.Must(uuid.NewV7())
+	if _, err := tx.Exec(ctx, `INSERT INTO approval_decisions(id,approval_request_id,approver_user_id,approver_binding_id,approver_authorization_version,decision,reason,authorization_snapshot,decided_at) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9)`, decisionID, requestID, *actorID, bindingID, authorizationVersion, decision, reason, authSnapshot, now); err != nil {
 		return ApprovalRequest{}, mapConstraintError(err)
 	}
 	if _, err := tx.Exec(ctx, `UPDATE approval_requests SET status=$2,execution_deadline=NULL,decided_at=$3,version=version+1,updated_at=$3 WHERE id=$1`, requestID, decision, now); err != nil {
 		return ApprovalRequest{}, err
 	}
-	if err := appendApprovalStateEvent(ctx, tx, requestID, "SUBMITTED", decision, "USER", actorID.String(), "INDEPENDENT_DECISION", map[string]any{"reason": reason}, now); err != nil {
+	decisionDetails, err := approvalDecisionEventDetails(ctx, item, expectedVersion, decision, reason, decisionID)
+	if err != nil {
+		return ApprovalRequest{}, err
+	}
+	if err := appendApprovalStateEvent(ctx, tx, requestID, "SUBMITTED", decision, "USER", actorID.String(), "INDEPENDENT_DECISION", decisionDetails, now); err != nil {
 		return ApprovalRequest{}, err
 	}
 	item, err = approvalRequestByID(ctx, tx, requestID)
@@ -826,6 +870,11 @@ func (r *PostgresRepository) approveApprovalRequestAttempt(
 		}
 		if policy, lookupErr := approvalPolicyForItem(item); lookupErr == nil {
 			if _, _, _, authErr := strongApprovalWriterAuthorization(ctx, tx, *actorID, policy.ApproverPermission); authErr == nil {
+				if _, protocol := approvalDecisionProtocol(ctx); protocol {
+					// No runtime read inside this least-privilege writer tx, and
+					// no duplicate conflict event for an unresolved original.
+					return rollback(ApprovalRequest{}, ErrConflict)
+				}
 				if err := appendApprovalStateEventWithID(ctx, tx, stateEventID, requestID, item.Status, item.Status, "USER", actorID.String(), "DECISION_CONFLICT", map[string]any{"expected_version": expectedVersion, "current_version": item.Version}, now); err != nil {
 					return rollback(ApprovalRequest{}, err)
 				}
@@ -985,7 +1034,11 @@ func (r *PostgresRepository) approveApprovalRequestAttempt(
 		}
 		return rollback(ApprovalRequest{}, err)
 	}
-	if err := appendApprovalStateEventWithID(ctx, tx, stateEventID, requestID, "SUBMITTED", "APPROVED", "USER", actorID.String(), "INDEPENDENT_DECISION", map[string]any{"reason": reason}, now); err != nil {
+	decisionDetails, err := approvalDecisionEventDetails(ctx, item, expectedVersion, "APPROVED", reason, decisionID)
+	if err != nil {
+		return rollback(ApprovalRequest{}, err)
+	}
+	if err := appendApprovalStateEventWithID(ctx, tx, stateEventID, requestID, "SUBMITTED", "APPROVED", "USER", actorID.String(), "INDEPENDENT_DECISION", decisionDetails, now); err != nil {
 		return rollback(ApprovalRequest{}, err)
 	}
 	item, err = approvalRequestByID(ctx, tx, requestID)

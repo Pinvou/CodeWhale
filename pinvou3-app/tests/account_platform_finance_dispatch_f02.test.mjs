@@ -81,10 +81,12 @@ test('optional usage codec response rejection is not declared undispatched', asy
 test('decision control rejection before POST is distinct from post-POST ACK rejection', async () => {
   const client = new AdminPlatformClient(''); const calls = [];
   await withFetch(async (url) => { calls.push(url); return url.endsWith('/capability') ? json(capability()) : json({}, 200); }, async () => {
-    const before = await rejection(() => client.decideGovernedApproval(id, { ...detail, action_control_version: 1 }, 'APPROVE', 'Controlled reason'));
+    const before = await rejection(() => client.decideGovernedApproval(id, { ...detail, action_control_version: 1 }, 'APPROVE', 'Controlled reason', undefined, 1));
     assert.equal(before.financeRequestState, 'NOT_DISPATCHED');
-    assert.equal(calls.length, 1);
-    const after = await rejection(() => client.decideGovernedApproval(id, detail, 'APPROVE', 'Controlled reason'));
+    assert.equal(calls.filter(url => url.endsWith('/capability')).length, 1);
+    assert.equal(calls.filter(url => url.includes('/actions/decision-result?')).length, 1);
+    assert.equal(calls.filter(url => url.endsWith('/actions/decide')).length, 0);
+    const after = await rejection(() => client.decideGovernedApproval(id, detail, 'APPROVE', 'Controlled reason', undefined, 1));
     assert.notEqual(after.financeRequestState, 'NOT_DISPATCHED');
     assert.equal(calls.filter(url => url.endsWith('/actions/decide')).length, 1);
   });
@@ -92,7 +94,7 @@ test('decision control rejection before POST is distinct from post-POST ACK reje
 
 test('failed capability GET before a decision remains a non-writing failure', async () => {
   await withFetch(() => { throw new TypeError('controlled GET failure'); }, async () => {
-    const error = await rejection(() => new AdminPlatformClient('').decideGovernedApproval(id, detail, 'APPROVE', 'Controlled reason'));
+    const error = await rejection(() => new AdminPlatformClient('').decideGovernedApproval(id, detail, 'APPROVE', 'Controlled reason', undefined, 1));
     assert.equal(error.financeRequestState, 'NOT_DISPATCHED');
   });
 });
@@ -165,7 +167,7 @@ test('parallel capability reads can confirm the exact same live tuple', async ()
 test('late rejected decision cannot revoke a newer live control or its readers', async () => {
   const client = new AdminPlatformClient(''); let complete;
   await withFetch((url) => url.endsWith('/capability') ? json(capability()) : new Promise(resolve => { complete = resolve; }), async () => {
-    const old = client.decideGovernedApproval(id, detail, 'APPROVE', 'Controlled reason');
+    const old = client.decideGovernedApproval(id, detail, 'APPROVE', 'Controlled reason', undefined, 1);
     while (!complete) await new Promise(resolve => setTimeout(resolve, 0));
     client.approvalControl = capability(3);
     const reader = new AbortController(); client.approvalControllers.add(reader);
@@ -180,7 +182,7 @@ test('late rejected decision cannot revoke a newer live control or its readers',
 test('late success ACK from a retired session is not a current decision receipt', async () => {
   const client = new AdminPlatformClient(''); let complete;
   await withFetch((url) => url.endsWith('/capability') ? json(capability()) : new Promise(resolve => { complete = resolve; }), async () => {
-    const old = client.decideGovernedApproval(id, detail, 'APPROVE', 'Controlled reason');
+    const old = client.decideGovernedApproval(id, detail, 'APPROVE', 'Controlled reason', undefined, 1);
     while (!complete) await new Promise(resolve => setTimeout(resolve, 0));
     client.financeSessionEpoch++;
     complete(new Response(null, { status: 204 }));

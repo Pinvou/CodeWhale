@@ -76,7 +76,7 @@ try {
     await fresh();
     await page.evaluate(async () => {
       const s = window.f02Dispatch;
-      await s.operation.mutate({ detail: { approval_request_id: s.id, version: 1, action_control_version: 1 } }, facts => s.client.decideGovernedApproval(s.id, facts.detail, 'APPROVE', 'Controlled reason'));
+      await s.operation.mutate({ detail: { approval_request_id: s.id, version: 1, action_control_version: 1 } }, facts => s.client.decideGovernedApproval(s.id, facts.detail, 'APPROVE', 'Controlled reason', undefined, 1));
     });
     await page.waitForFunction(() => window.f02Dispatch.operation.error);
     assert.equal(await page.$eval('[data-unknown]', node => node.textContent), 'false');
@@ -99,7 +99,7 @@ try {
     await fresh();
     await page.evaluate(async () => {
       const s = window.f02Dispatch; s.badAck = true;
-      await s.operation.mutate({ detail: { approval_request_id: s.id, version: 1, action_control_version: 2 } }, facts => s.client.decideGovernedApproval(s.id, facts.detail, 'APPROVE', 'Controlled reason'));
+      await s.operation.mutate({ detail: { approval_request_id: s.id, version: 1, action_control_version: 2 } }, facts => s.client.decideGovernedApproval(s.id, facts.detail, 'APPROVE', 'Controlled reason', undefined, 1));
     });
     await page.waitForFunction(() => window.f02Dispatch.operation.unknown);
     assert.equal(await page.evaluate(() => window.f02Dispatch.calls.filter(call => call.method === 'POST').length), 1);

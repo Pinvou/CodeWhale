@@ -25,8 +25,8 @@ func (s *Service) adminApprovalRequests(w http.ResponseWriter, r *http.Request) 
 		api.WriteError(w, http.StatusNotFound, "NOT_FOUND", "the portal endpoint was not found", httpserver.RequestID(r.Context()))
 		return
 	}
-	mutation := kind != "list" && kind != "detail" && kind != "withdraw-result"
-	if kind != "list" && kind != "withdraw-result" && (r.URL.RawQuery != "" || r.URL.ForceQuery) {
+	mutation := kind != "list" && kind != "detail" && kind != "withdraw-result" && kind != "decision-result"
+	if kind != "list" && kind != "withdraw-result" && kind != "decision-result" && (r.URL.RawQuery != "" || r.URL.ForceQuery) {
 		api.WriteError(w, http.StatusBadRequest, "INVALID_APPROVAL_REQUEST", "approval detail accepts no query", httpserver.RequestID(r.Context()))
 		return
 	}
@@ -67,6 +67,10 @@ func (s *Service) adminApprovalRequests(w http.ResponseWriter, r *http.Request) 
 		api.WriteError(w, http.StatusBadRequest, "INVALID_APPROVAL_REQUEST", "invalid withdrawal confirmation", httpserver.RequestID(r.Context()))
 		return
 	}
+	if kind == "decision-result" && !validApprovalDecisionResultQuery(r, capability.Version) {
+		api.WriteError(w, http.StatusBadRequest, "INVALID_APPROVAL_REQUEST", "invalid decision confirmation", httpserver.RequestID(r.Context()))
+		return
+	}
 	var body []byte
 	if mutation {
 		limit := int64(8192)
@@ -87,12 +91,12 @@ func (s *Service) adminApprovalRequests(w http.ResponseWriter, r *http.Request) 
 	if kind != "list" && kind != "create" {
 		target.Path += "/" + requestID.String()
 	}
-	if kind == "decide" || kind == "submit" || kind == "withdraw" || kind == "withdraw-result" {
+	if kind == "decide" || kind == "submit" || kind == "withdraw" || kind == "withdraw-result" || kind == "decision-result" {
 		target.Path += "/actions/" + kind
 	} else if kind == "list" {
 		target.RawQuery = r.URL.RawQuery
 	}
-	if kind == "withdraw-result" {
+	if kind == "withdraw-result" || kind == "decision-result" {
 		target.RawQuery = r.URL.RawQuery
 	}
 	request, err := http.NewRequestWithContext(r.Context(), r.Method, target.String(), bytes.NewReader(body))
@@ -105,7 +109,7 @@ func (s *Service) adminApprovalRequests(w http.ResponseWriter, r *http.Request) 
 	if mutation {
 		request.Header.Set("Content-Type", "application/json")
 	}
-	if wire == 2 && mutation && kind != "decide" || kind == "withdraw" || kind == "withdraw-result" {
+	if wire == 2 && mutation && kind != "decide" || kind == "withdraw" || kind == "withdraw-result" || kind == "decide" || kind == "decision-result" {
 		request.Header.Set("X-Pinvou-Approval-Action-Control-Version", strconv.FormatInt(capability.Version, 10))
 	}
 	client := *s.client
@@ -148,6 +152,10 @@ func (s *Service) adminApprovalRequests(w http.ResponseWriter, r *http.Request) 
 		}
 	}
 	if kind == "withdraw-result" && response.StatusCode == http.StatusOK && !validApprovalWithdrawalResult(data, requestID, r, capability.Version) {
+		approvalBFFUnavailable(w, r)
+		return
+	}
+	if kind == "decision-result" && response.StatusCode == http.StatusOK && !validApprovalDecisionResult(data, requestID, r, capability.Version) {
 		approvalBFFUnavailable(w, r)
 		return
 	}
@@ -205,10 +213,10 @@ func approvalBFFTarget(method, resource string) (uuid.UUID, string) {
 		}
 		return id, "update"
 	}
-	if len(parts) == 3 && parts[1] == "actions" && parts[2] == "withdraw-result" && method == http.MethodGet {
+	if len(parts) == 3 && parts[1] == "actions" && (parts[2] == "withdraw-result" || parts[2] == "decision-result") && method == http.MethodGet {
 		id, err := uuid.Parse(parts[0])
 		if err == nil && id != uuid.Nil && id.String() == parts[0] {
-			return id, "withdraw-result"
+			return id, parts[2]
 		}
 	}
 	if len(parts) == 3 && parts[1] == "actions" && method == http.MethodPost && (parts[2] == "decide" || parts[2] == "submit" || parts[2] == "withdraw") {
@@ -335,12 +343,18 @@ func validApprovalBFFDecision(raw []byte, wire int, version int64, header string
 		}
 		seen[name] = true
 		if name != "expected_version" && name != "decision" && name != "reason" &&
-			!(wire == 1 && name == "observed_versions") && !(wire == 2 && name == "action_control_version") {
+			!(wire == 1 && name == "observed_versions") && !(wire == 2 && name == "action_control_version") && name != "command_protocol" {
 			return false
 		}
 		var value json.RawMessage
 		if decoder.Decode(&value) != nil {
 			return false
+		}
+		if name == "command_protocol" {
+			var protocol int
+			if json.Unmarshal(value, &protocol) != nil || protocol != 1 {
+				return false
+			}
 		}
 		if name == "action_control_version" {
 			parsed, err := strconv.ParseInt(string(value), 10, 64)
@@ -408,4 +422,60 @@ func validApprovalWithdrawalResult(raw []byte, id uuid.UUID, r *http.Request, co
 		strconv.FormatInt(receipt.Expected, 10) == r.URL.Query().Get("expected_version") &&
 		strconv.FormatInt(receipt.Origin, 10) == r.URL.Query().Get("origin_action_control_version") &&
 		receipt.Control == control && receipt.Event != uuid.Nil && !receipt.At.IsZero()
+}
+
+func validApprovalDecisionDigest(value string) bool {
+	if len(value) != 64 {
+		return false
+	}
+	for _, c := range value {
+		if !(c >= '0' && c <= '9' || c >= 'a' && c <= 'f') {
+			return false
+		}
+	}
+	return true
+}
+func validApprovalDecisionResultQuery(r *http.Request, control int64) bool {
+	q := r.URL.Query()
+	if len(q) != 5 || len(q["command_protocol"]) != 1 || q.Get("command_protocol") != "1" {
+		return false
+	}
+	for _, key := range []string{"expected_version", "origin_action_control_version"} {
+		v := q[key]
+		if len(v) != 1 {
+			return false
+		}
+		n, e := strconv.ParseInt(v[0], 10, 64)
+		if e != nil || n < 1 || strconv.FormatInt(n, 10) != v[0] {
+			return false
+		}
+	}
+	if len(q["decision"]) != 1 || (q.Get("decision") != "APPROVED" && q.Get("decision") != "REJECTED") || len(q["reason_digest"]) != 1 || !validApprovalDecisionDigest(q.Get("reason_digest")) {
+		return false
+	}
+	values := r.Header.Values("X-Pinvou-Approval-Action-Control-Version")
+	return len(values) == 1 && values[0] == strconv.FormatInt(control, 10)
+}
+func validApprovalDecisionResult(raw []byte, id uuid.UUID, r *http.Request, control int64) bool {
+	var receipt struct {
+		ID         uuid.UUID `json:"approval_request_id"`
+		Protocol   int       `json:"command_protocol"`
+		Operation  string    `json:"operation"`
+		Decision   string    `json:"decision"`
+		Expected   int64     `json:"expected_version"`
+		Result     int64     `json:"result_version"`
+		Origin     int64     `json:"origin_action_control_version"`
+		Control    int64     `json:"action_control_version"`
+		Digest     string    `json:"reason_digest"`
+		Event      uuid.UUID `json:"receipt_event_id"`
+		DecisionID uuid.UUID `json:"decision_id"`
+		At         time.Time `json:"recorded_at"`
+	}
+	d := json.NewDecoder(bytes.NewReader(raw))
+	d.DisallowUnknownFields()
+	if d.Decode(&receipt) != nil || d.Decode(new(any)) != io.EOF {
+		return false
+	}
+	q := r.URL.Query()
+	return receipt.ID == id && receipt.Protocol == 1 && receipt.Operation == "DECIDE" && receipt.Decision == q.Get("decision") && receipt.Expected > 0 && receipt.Result > receipt.Expected && receipt.Result-receipt.Expected == 1 && strconv.FormatInt(receipt.Expected, 10) == q.Get("expected_version") && strconv.FormatInt(receipt.Origin, 10) == q.Get("origin_action_control_version") && receipt.Control == control && receipt.Digest == q.Get("reason_digest") && validApprovalDecisionDigest(receipt.Digest) && receipt.Event != uuid.Nil && receipt.DecisionID != uuid.Nil && !receipt.At.IsZero()
 }

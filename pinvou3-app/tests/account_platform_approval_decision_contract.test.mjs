@@ -22,7 +22,7 @@ for (const wire of [1, 2]) {
         }), { status: 200 });
         return new Response(null, { status: 204 });
       };
-      assert.equal(await client.decideGovernedApproval(id, detail, action, reason), null);
+      assert.equal(await client.decideGovernedApproval(id, detail, action, reason, undefined, 1), null);
       assert.equal(calls.length, 2);
       const { url, options } = calls[1];
       assert.equal(url, `/api/admin/approvals/requests/${id}/actions/decide`);
@@ -32,7 +32,7 @@ for (const wire of [1, 2]) {
       assert.equal(options.headers['X-CSRF-Token'], client.csrfToken);
       assert.equal(options.headers['X-Pinvou-Approval-Action-Control-Version'], '2');
       assert.deepEqual(JSON.parse(options.body), {
-        expected_version: 4, decision, reason,
+        expected_version: 4, decision, reason, command_protocol: 1,
         ...(wire === 2 ? { action_control_version: 2 } : { observed_versions: detail.critical_resource_versions }),
       });
     });
@@ -45,7 +45,7 @@ test('invalid approval actions reject before any capability or mutation fetch', 
   let calls = 0;
   globalThis.fetch = async () => { calls++; throw new Error('unexpected fetch'); };
   for (const action of [undefined, null, '', 'approve', 'reject', ' APPROVE', 'REJECTED ', 'WITHDRAW', 'toString', '__proto__', 'constructor', {}, ['APPROVE'], new String('APPROVE')]) {
-    await assert.rejects(new AdminPlatformClient('').decideGovernedApproval(id, detail, action, reason), error => {
+    await assert.rejects(new AdminPlatformClient('').decideGovernedApproval(id, detail, action, reason, undefined, 1), error => {
       assert.equal(error.code, 'INVALID_APPROVAL_DECISION');
       assert.equal(error.financeRequestState, 'NOT_DISPATCHED');
       assert.equal(error.financeInputInvalid, true);
