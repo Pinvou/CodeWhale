@@ -644,12 +644,18 @@ pub(crate) fn activate_result_dependencies(
     cache: &mut ToolActivationCache,
     result: &ToolResult,
 ) -> ToolSurfaceUpdate {
-    let needs_retrieval = result
-        .metadata
-        .as_ref()
+    let metadata = result.metadata.as_ref();
+    let needs_retrieval = metadata
         .and_then(|metadata| metadata.get("evidence_available"))
         .and_then(Value::as_bool)
-        == Some(true);
+        == Some(true)
+        // Model-context preservation publishes an artifact without replacing
+        // the original content with a tool-time evidence preview. Its ref
+        // still needs the same deferred retrieval schema on the next step.
+        || metadata
+            .and_then(|metadata| metadata.get("artifact_id"))
+            .and_then(Value::as_str)
+            .is_some_and(|id| id.starts_with("art_"));
     if !needs_retrieval {
         return ToolSurfaceUpdate::default();
     }

@@ -187,6 +187,76 @@ fn make_snapshot(status: SubAgentStatus) -> SubAgentResult {
     }
 }
 
+#[test]
+fn forkguard_interrupted_snapshot_preserves_checkpoint_recovery() {
+    let _spill = crate::tools::truncate::TEST_SPILLOVER_GUARD
+        .lock()
+        .unwrap_or_else(|err| err.into_inner());
+    let home = tempdir().expect("artifact home");
+    crate::tools::truncate::with_test_home(home.path(), || {
+        let reason = "provider timeout";
+        let checkpoint = make_checkpoint("agent_test", 2, Vec::new());
+        let handle = checkpoint.continuation_handle.clone();
+        let needs_input = needs_input_for_interrupted_checkpoint(reason, &checkpoint);
+        assert!(needs_input.question.contains(&handle));
+        let mut snapshot = make_snapshot(SubAgentStatus::Interrupted(reason.to_string()));
+        snapshot.result = Some(reason.to_string());
+        snapshot.checkpoint = Some(checkpoint);
+        snapshot.needs_input = Some(needs_input);
+        let raw = serde_json::to_string(&snapshot).expect("real interrupted DTO");
+        assert!(raw.len() < 15_360, "fixture is a small result");
+        let mut result = ToolResult::success(raw.clone());
+        let view = crate::core::engine::compact_tool_result_for_route(
+            ApiProvider::Deepseek,
+            "deepseek-v3.2-128k",
+            None,
+            "agent",
+            &result,
+        );
+        assert!(
+            view.contains(&handle) || view.contains("the full output could not be saved"),
+            "interrupted coordination must remain actionable: {view}"
+        );
+        if !view.contains(&handle) {
+            assert!(
+                crate::tools::truncate::preserve_full_output_for_model_context(
+                    &mut result,
+                    "coordination",
+                    "agent",
+                    "session-coordination"
+                )
+            );
+            let view = crate::core::engine::compact_tool_result_for_route(
+                ApiProvider::Deepseek,
+                "deepseek-v3.2-128k",
+                None,
+                "agent",
+                &result,
+            );
+            assert!(view.contains("ref=\"art_coordination\""));
+            let retained = std::fs::read_to_string(
+                result.metadata.as_ref().expect("artifact metadata")["artifact_path"]
+                    .as_str()
+                    .expect("full artifact path"),
+            )
+            .expect("retained original DTO");
+            assert_eq!(retained, raw);
+            let restored: SubAgentResult = serde_json::from_str(&retained).expect("restore DTO");
+            assert_eq!(
+                restored.checkpoint.expect("checkpoint").continuation_handle,
+                handle
+            );
+            assert!(
+                restored
+                    .needs_input
+                    .expect("follow-up")
+                    .question
+                    .contains(&handle)
+            );
+        }
+    });
+}
+
 fn make_worker_spec(worker_id: &str, workspace: PathBuf) -> AgentWorkerSpec {
     let tool_profile =
         AgentWorkerToolProfile::Explicit(vec!["read_file".to_string(), "grep_files".to_string()]);
@@ -11787,6 +11857,48 @@ fn stamp_subagent_summary_appends_note_when_short() {
 }
 
 #[test]
+fn forkguard_subagent_report_artifact_keeps_exact_bytes() {
+    let home = tempdir().expect("artifact home");
+    with_spillover_root(home.path(), || {
+        let session = "report-owner";
+        let mut result = make_snapshot(SubAgentStatus::Completed);
+        result.result = Some("short report".to_string());
+        assert!(spill_subagent_final_report(session, &result).is_none());
+
+        let report = "first\n报告 detail\n".repeat(1_100);
+        assert!(report.chars().count() > SUBAGENT_SUMMARY_CHAR_BUDGET);
+        result.result = Some(report.clone());
+        let reference = spill_subagent_final_report(session, &result).expect("report retained");
+        assert_eq!(reference, format!("art_sa_{}_report", result.agent_id));
+        let path = crate::artifacts::session_artifact_absolute_path(
+            session,
+            &crate::artifacts::session_artifact_relative_path(&reference),
+        )
+        .expect("session-owned artifact");
+        assert_eq!(
+            std::fs::read(&path).expect("report bytes"),
+            report.as_bytes()
+        );
+        assert_eq!(
+            spill_subagent_final_report(session, &result),
+            Some(reference.clone())
+        );
+        assert_eq!(std::fs::read(&path).unwrap(), report.as_bytes());
+
+        result.agent_id = "second-child".to_string();
+        let second = spill_subagent_final_report(session, &result).expect("second report");
+        assert_ne!(reference, second);
+        let blocked_session = "blocked-report-owner";
+        std::fs::write(
+            home.path().join("sessions").join(blocked_session),
+            "blocked",
+        )
+        .expect("write failure fixture");
+        assert!(spill_subagent_final_report(blocked_session, &result).is_none());
+    });
+}
+
+#[test]
 fn stamp_subagent_summary_truncates_when_over_budget() {
     // issue #2652: a summary exceeding the budget is head+tail truncated using
     // the existing [Output truncated ...] vocabulary, honestly noting there is
@@ -11814,6 +11926,11 @@ fn stamp_subagent_summary_truncates_when_over_budget() {
         stamped.chars().filter(|c| *c == 'a').count() < big.chars().count(),
         "truncation removed middle characters"
     );
+    let (saved, truncated) = stamp_subagent_summary_with_ref(&big, Some("art_sa_child_report"));
+    assert!(truncated);
+    assert!(saved.contains("artifact art_sa_child_report"));
+    assert!(saved.contains("activate it via tool_search first"));
+    assert!(saved.contains("if neither route is available"));
 }
 
 #[test]
