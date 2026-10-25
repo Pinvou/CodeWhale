@@ -310,6 +310,11 @@ func TestRefundCorrectedZeroSourceAndPriorSuspensionRecoverTogetherPostgres(t *t
 }
 
 func TestRefundPriorSuspensionRepairFrozenGrantChangesFailWithoutEffectsPostgres(t *testing.T) {
+	// PostgreSQL scans use time.Local, while receipt JSON Z timestamps use UTC.
+	// Exercise the same-instant representation boundary on every host.
+	local := time.Local
+	time.Local = time.FixedZone("refund-receipt-test-UTC", 0)
+	t.Cleanup(func() { time.Local = local })
 	for _, mutation := range []string{"suspension_reason='ACCOUNT_CLOSED'", "allocation_version=allocation_version+1", "available_microcredits=available_microcredits-1,used_microcredits=used_microcredits+1"} {
 		t.Run(mutation, func(t *testing.T) {
 			r, ctx := retainedFinanceRepository(t)
@@ -513,14 +518,15 @@ func refundFrozenQuotaOrdinaryRevokeRegression(t *testing.T) {
 					t.Fatal("valid ordinary revocation regressed", err)
 				}
 				after := refundRecoveryMoneySnapshot(t, ctx, r)
+				receipt := refundRecoveryRevokeReceiptSnapshot(t, ctx, r)
 				replayed, err := r.RevokeMemberQuota(ctx, *order.BeneficiaryOrganizationID, grant.ID, actor, commandReason, key)
-				if err != nil || !reflect.DeepEqual(result, replayed) || !reflect.DeepEqual(after, refundRecoveryMoneySnapshot(t, ctx, r)) {
+				if err != nil || !sameRefundRecoveryGrantReceipt(result, replayed) || !reflect.DeepEqual(after, refundRecoveryMoneySnapshot(t, ctx, r)) || !reflect.DeepEqual(receipt, refundRecoveryRevokeReceiptSnapshot(t, ctx, r)) {
 					t.Fatal("original ordinary revoke receipt changed on retry", err)
 				}
 				if _, err := r.RevokeMemberQuota(ctx, *order.BeneficiaryOrganizationID, grant.ID, actor, commandReason+" changed", key); !errors.Is(err, ErrIdempotencyConflict) {
 					t.Fatal("changed ordinary revoke facts reused original key", err)
 				}
-				if !reflect.DeepEqual(after, refundRecoveryMoneySnapshot(t, ctx, r)) {
+				if !reflect.DeepEqual(after, refundRecoveryMoneySnapshot(t, ctx, r)) || !reflect.DeepEqual(receipt, refundRecoveryRevokeReceiptSnapshot(t, ctx, r)) {
 					t.Fatal("rejected key conflict changed funds")
 				}
 				return
@@ -572,4 +578,19 @@ func refundFrozenQuotaOrdinaryRevokeRegression(t *testing.T) {
 			}
 		})
 	}
+}
+
+// Retain complete persisted command/outbox facts as well as the original
+// financial and audit table snapshots across replay and rejected-key reuse.
+func refundRecoveryRevokeReceiptSnapshot(t *testing.T, ctx context.Context, r *PostgresRepository) map[string]string {
+	t.Helper()
+	facts := map[string]string{}
+	for _, table := range []string{"member_quota_revoke_commands", "outbox_events"} {
+		var raw string
+		if err := r.pool.QueryRow(ctx, "SELECT COALESCE(jsonb_agg(to_jsonb(x) ORDER BY to_jsonb(x)::text),'[]'::jsonb)::text FROM "+table+" x").Scan(&raw); err != nil {
+			t.Fatal(err)
+		}
+		facts[table] = raw
+	}
+	return facts
 }
