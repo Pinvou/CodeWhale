@@ -26,6 +26,76 @@ fn tool(name: &str) -> Tool {
     }
 }
 
+#[test]
+fn forkguard_preserved_output_activates_only_available_retrieval_schema() {
+    use crate::tools::spec::ToolResult;
+
+    let _workshop = crate::tools::large_output_router::active_workshop_test_guard();
+    let _lock = crate::artifacts::TEST_ARTIFACT_SESSIONS_GUARD
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
+    let temporary = tempfile::tempdir().unwrap();
+    struct Restore(Option<std::path::PathBuf>);
+    impl Drop for Restore {
+        fn drop(&mut self) {
+            crate::artifacts::set_test_artifact_sessions_root(self.0.take());
+        }
+    }
+    let _restore = Restore(crate::artifacts::set_test_artifact_sessions_root(Some(
+        temporary.path().join("sessions"),
+    )));
+    let mut retrieval = tool(super::TOOL_RESULT_RETRIEVAL_NAME);
+    retrieval.defer_loading = Some(true);
+    let catalog = vec![tool("read"), retrieval];
+    let mut active = initial_active_tools(&catalog);
+    let mut cache = ToolActivationCache::default();
+    assert!(!active.contains(super::TOOL_RESULT_RETRIEVAL_NAME));
+    let mut result = ToolResult::success("complete body".repeat(2_000));
+    assert!(
+        !super::activate_result_dependencies(&catalog, &mut active, &mut cache, &result).changed
+    );
+    assert!(!active.contains(super::TOOL_RESULT_RETRIEVAL_NAME));
+    assert!(
+        crate::tools::truncate::preserve_full_output_for_model_context(
+            &mut result,
+            "activation-call",
+            "fetch_url",
+            "activation-session",
+        )
+    );
+    assert!(
+        result
+            .metadata
+            .as_ref()
+            .unwrap()
+            .get("evidence_available")
+            .is_none()
+    );
+    assert!(
+        super::activate_result_dependencies(&catalog, &mut active, &mut cache, &result).changed
+    );
+    assert!(active.contains(super::TOOL_RESULT_RETRIEVAL_NAME));
+    assert!(
+        super::active_tools_for_step(&catalog, &active)
+            .iter()
+            .any(|definition| definition.name == super::TOOL_RESULT_RETRIEVAL_NAME)
+    );
+    // A result dependency must never add a tool removed by the turn's policy.
+    let restricted = vec![tool("read")];
+    let mut active = initial_active_tools(&restricted);
+    let mut cache = ToolActivationCache::default();
+    super::activate_result_dependencies(&restricted, &mut active, &mut cache, &result);
+    assert!(!active.contains(super::TOOL_RESULT_RETRIEVAL_NAME));
+    // Keep the older tool-time evidence-preview contract as well.
+    let legacy = ToolResult::success("preview").with_metadata(json!({"evidence_available": true}));
+    let mut active = initial_active_tools(&catalog);
+    let mut cache = ToolActivationCache::default();
+    assert!(
+        super::activate_result_dependencies(&catalog, &mut active, &mut cache, &legacy).changed
+    );
+    assert!(active.contains(super::TOOL_RESULT_RETRIEVAL_NAME));
+}
+
 /// `code_execution` writes the script to a tempdir and runs it as a plain
 /// child process in the workspace — no seccomp, no jail, no container. The
 /// description is model-facing, so calling it a sandbox would tell the model

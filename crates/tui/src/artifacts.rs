@@ -194,10 +194,16 @@ pub fn write_session_relative_immutable(
         uuid::Uuid::new_v4()
     ));
     let publish = (|| -> io::Result<()> {
-        let mut file = std::fs::OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(&temp_path)?;
+        let mut options = std::fs::OpenOptions::new();
+        options.write(true).create_new(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            // The temporary inode must already be private before any payload
+            // is written or published through the immutable hard link.
+            options.mode(0o600);
+        }
+        let mut file = options.open(&temp_path)?;
         file.write_all(content)?;
         file.sync_all()?;
         match std::fs::hard_link(&temp_path, &absolute_path) {
@@ -416,5 +422,37 @@ mod tests {
 
         assert!(write_session_relative_immutable("session-a", &relative, b"payload").is_err());
         assert!(!sessions.join("session-a/artifacts/art_failed.txt").exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn forkguard_immutable_artifacts_are_private_and_replay_safe() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let _guard = TEST_ARTIFACT_SESSIONS_GUARD
+            .lock()
+            .unwrap_or_else(|err| err.into_inner());
+        let tmp = tempfile::tempdir().unwrap();
+        let _root = set_test_sessions_root(tmp.path().join("sessions"));
+        let relative = PathBuf::from("artifacts/art_private.txt");
+        let bytes = b"private complete output";
+        let path = write_session_relative_immutable("private-session", &relative, bytes).unwrap();
+        assert_eq!(
+            std::fs::metadata(&path).unwrap().permissions().mode() & 0o077,
+            0
+        );
+        assert_eq!(std::fs::read(&path).unwrap(), bytes);
+        assert_eq!(
+            write_session_relative_immutable("private-session", &relative, bytes).unwrap(),
+            path
+        );
+        assert!(
+            write_session_relative_immutable("private-session", &relative, b"changed").is_err()
+        );
+        assert_eq!(std::fs::read(&path).unwrap(), bytes);
+        assert_eq!(
+            std::fs::read_dir(path.parent().unwrap()).unwrap().count(),
+            1
+        );
     }
 }

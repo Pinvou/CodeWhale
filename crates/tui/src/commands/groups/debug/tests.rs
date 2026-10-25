@@ -725,60 +725,85 @@ fn cache_inspect_reports_divergence_from_previous_request() {
 
 #[test]
 fn cache_inspect_displays_tool_result_budget_metadata() {
-    let mut app = create_test_app();
-    let long_output = format!("{}{}", "A".repeat(7_000), "Z".repeat(7_000));
-    app.api_messages.push(Message {
-        role: Role::Assistant,
-        content: vec![ContentBlock::ToolUse {
-            id: "tool-1".to_string(),
-            name: "shell_command".to_string(),
-            input: serde_json::json!({"command": "cargo test"}),
-            caller: None,
-            thought_signature: None,
-        }],
-    });
-    app.api_messages.push(Message {
-        role: Role::User,
-        content: vec![ContentBlock::ToolResult {
-            tool_use_id: "tool-1".to_string(),
-            content: long_output.clone(),
-            is_error: None,
-            content_blocks: None,
-        }],
-    });
-    app.api_messages.push(Message {
-        role: Role::Assistant,
-        content: vec![ContentBlock::ToolUse {
-            id: "tool-2".to_string(),
-            name: "shell_command".to_string(),
-            input: serde_json::json!({"command": "cargo test"}),
-            caller: None,
-            thought_signature: None,
-        }],
-    });
-    app.api_messages.push(Message {
-        role: Role::User,
-        content: vec![ContentBlock::ToolResult {
-            tool_use_id: "tool-2".to_string(),
-            content: long_output,
-            is_error: None,
-            content_blocks: None,
-        }],
-    });
+    let budget = crate::route_budget::route_inline_char_budget(None);
+    for output_chars in [14_000, budget, budget + 1] {
+        let mut app = create_test_app();
+        let long_output = format!("{}Z", "A".repeat(output_chars - 1));
+        app.api_messages.push(Message {
+            role: Role::Assistant,
+            content: vec![ContentBlock::ToolUse {
+                id: "tool-1".to_string(),
+                name: "shell_command".to_string(),
+                input: serde_json::json!({"command": "cargo test"}),
+                caller: None,
+                thought_signature: None,
+            }],
+        });
+        app.api_messages.push(Message {
+            role: Role::User,
+            content: vec![ContentBlock::ToolResult {
+                tool_use_id: "tool-1".to_string(),
+                content: long_output.clone(),
+                is_error: None,
+                content_blocks: None,
+            }],
+        });
+        app.api_messages.push(Message {
+            role: Role::Assistant,
+            content: vec![ContentBlock::ToolUse {
+                id: "tool-2".to_string(),
+                name: "shell_command".to_string(),
+                input: serde_json::json!({"command": "cargo test"}),
+                caller: None,
+                thought_signature: None,
+            }],
+        });
+        app.api_messages.push(Message {
+            role: Role::User,
+            content: vec![ContentBlock::ToolResult {
+                tool_use_id: "tool-2".to_string(),
+                content: long_output,
+                is_error: None,
+                content_blocks: None,
+            }],
+        });
 
-    let result = cache(&mut app, Some("inspect"));
-    let msg = result.message.expect("inspect output");
+        let result = cache(&mut app, Some("inspect"));
+        let msg = result.message.expect("inspect output");
 
-    let tool_budget_lines: Vec<_> = msg
-        .lines()
-        .filter(|line| line.contains("original_chars=14000"))
-        .collect();
-    assert_eq!(tool_budget_lines.len(), 2, "got: {msg}");
+        let tool_budget_lines: Vec<_> = msg
+            .lines()
+            .filter(|line| line.contains(&format!("original_chars={output_chars}")))
+            .collect();
+        assert_eq!(tool_budget_lines.len(), 2, "got: {msg}");
 
-    for sighting in tool_budget_lines {
-        assert!(sighting.contains("sent_chars="), "got: {msg}");
-        assert!(sighting.contains("truncated=true"), "got: {msg}");
-        assert!(sighting.contains("deduplicated=false"), "got: {msg}");
+        for (index, sighting) in tool_budget_lines.iter().enumerate() {
+            let sent_chars: usize = sighting
+                .split("sent_chars=")
+                .nth(1)
+                .expect("sent count")
+                .split_whitespace()
+                .next()
+                .expect("count")
+                .trim_end_matches(',')
+                .parse()
+                .expect("numeric count");
+            assert!(sent_chars <= budget, "got: {msg}");
+            assert!(
+                sighting.contains(&format!("truncated={}", output_chars > budget)),
+                "got: {msg}"
+            );
+            let deduplicated = index == 1 && output_chars <= budget;
+            assert!(
+                sighting.contains(&format!("deduplicated={deduplicated}")),
+                "got: {msg}"
+            );
+            if output_chars <= budget && !deduplicated {
+                assert_eq!(sent_chars, output_chars, "got: {msg}");
+            } else {
+                assert!(sent_chars < output_chars, "got: {msg}");
+            }
+        }
     }
 }
 
