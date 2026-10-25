@@ -103,11 +103,11 @@ func TestPortalAccountPersistentPublicSourceAdmission(t *testing.T) {
 	}
 	portal := newPortal()
 	request := func(portal http.Handler, index int, remote, claimedSource string, captcha bool, want int) {
-		route := "/v1/auth/registration/precheck"
-		// Invalid username intentionally proves admission precedes validation,
+		route := "/v1/auth/captcha/challenges"
+		// Invalid purpose intentionally proves admission precedes validation,
 		// without contacting an unrelated identity service. Captcha uses the real
 		// image generator and repository and must successfully return201.
-		body := fmt.Sprintf(`{"username":"!","mobile":"139%08d"}`, index)
+		body := fmt.Sprintf(`{"mobile":"139%08d","purpose":"INVALID"}`, index)
 		if captcha {
 			route = "/v1/auth/captcha/challenges"
 			body = fmt.Sprintf(`{"mobile":"139%08d","purpose":"LOGIN"}`, index)
@@ -139,7 +139,7 @@ func TestPortalAccountPersistentPublicSourceAdmission(t *testing.T) {
 	}
 	request(portal, 30, "192.0.2.45:443", "203.0.113.10", false, http.StatusTooManyRequests)
 	request(portal, 31, "192.0.2.45:443", "203.0.113.11", true, http.StatusCreated)
-	// Replacement Portal instance and endpoint changes cannot reset Account quota.
+	// Replacement Portal instance and purpose changes cannot reset Account quota.
 	request(newPortal(), 32, "192.0.2.45:443", "203.0.113.10", true, http.StatusTooManyRequests)
 	// An untrusted immediate peer cannot rotate buckets through browser headers.
 	for i := range 30 {

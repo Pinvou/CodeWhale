@@ -9,7 +9,7 @@
       openPortal: function (input) { return invoke("account_platform_open_portal", { input: input }); },
       login: function (credentials) { return invoke("account_platform_login", { credentials: credentials }); },
       createSliderCaptcha: function (input) { return invoke("account_platform_create_slider_captcha", { input: input }); },
-      precheckMobileRegistration: function (input) { return invoke("account_platform_precheck_mobile_registration", { input: input }); },
+      prepareRegistrationPassword: function (input) { return invoke("account_platform_prepare_registration_password", { input: input }); },
       sendSms: function (input) { return invoke("account_platform_send_sms", { input: input }); },
       registerMobile: function (input) { return invoke("account_platform_register_mobile", { input: input }); },
       registrationStatus: function () { return invoke("account_platform_registration_status"); },

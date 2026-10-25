@@ -23,14 +23,6 @@
       "source": "account-platform/internal/account/service.go",
       "receiver": "router",
       "method": "POST",
-      "path": "/v1/auth/registration/precheck",
-      "scope": "public",
-      "strategy": "protocol.registration.precheck"
-    },
-    {
-      "source": "account-platform/internal/account/service.go",
-      "receiver": "router",
-      "method": "POST",
       "path": "/v1/auth/captcha/challenges",
       "scope": "public",
       "strategy": "protocol.registration.slider-challenge"

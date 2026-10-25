@@ -59,7 +59,7 @@ func TestPortalTrustedProxyRiskSourceUsesExactImmediatePeer(t *testing.T) {
 		{"invalid-peer", "192.0.2.45", "edge.example:443", "", []string{"203.0.113.99"}, 400},
 		{"peer-missing-port", "192.0.2.45", "192.0.2.45", "", []string{"203.0.113.99"}, 400},
 	} {
-		for _, route := range []string{"/v1/auth/sms/challenges", "/v1/auth/registration/precheck", "/v1/auth/captcha/challenges"} {
+		for _, route := range []string{"/v1/auth/sms/challenges", "/v1/auth/captcha/challenges"} {
 			t.Run(test.name+route, func(t *testing.T) {
 				observed := make(chan string, 1)
 				upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -122,6 +122,7 @@ func TestPortalTrustedProxyRiskSourceUsesExactImmediatePeer(t *testing.T) {
 func TestPortalTrustedProxyHeaderRemainsRiskRouteBound(t *testing.T) {
 	for _, test := range []struct{ method, route string }{
 		{http.MethodGet, "/v1/auth/registration/precheck"},
+		{http.MethodPost, "/v1/auth/registration/precheck"},
 		{http.MethodGet, "/v1/auth/captcha/challenges"},
 		{http.MethodPost, "/v1/auth/login"},
 		{http.MethodPost, "/v1/auth/captcha/challenges/extra"},
@@ -145,7 +146,7 @@ func TestPortalTrustedProxyHeaderRemainsRiskRouteBound(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, route := range []string{"/v1/auth/registration/precheck", "/v1/auth/captcha/challenges"} {
+	for _, route := range []string{"/v1/auth/captcha/challenges"} {
 		request := httptest.NewRequest("POST", "/api/account"+route, strings.NewReader(`{}`))
 		request.RemoteAddr = "192.0.2.45:443"
 		request.Header.Set("Origin", service.config.PublicURL.String())

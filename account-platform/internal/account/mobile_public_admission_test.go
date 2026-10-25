@@ -7,6 +7,8 @@ import (
 	"image/png"
 	"testing"
 	"time"
+
+	"github.com/google/uuid"
 )
 
 func TestPublicMobileAdmissionPrecedesValidationAndGeneration(t *testing.T) {
@@ -16,7 +18,7 @@ func TestPublicMobileAdmissionPrecedesValidationAndGeneration(t *testing.T) {
 		ctx := withAuthRisk(context.Background(), "trusted-source", "rotated-device")
 		var err error
 		if operation == "PRECHECK" {
-			_, err = service.PrecheckRegistration(ctx, "invalid", "invalid", "", "")
+			_, err = service.Send(ctx, "invalid", "13800138000", "", "", SMSPurposeRegister, uuid.New(), 100, "trusted-source", "rotated-device")
 		} else {
 			_, err = service.CreateSliderCaptcha(ctx, "invalid", SMSPurposeLogin)
 		}

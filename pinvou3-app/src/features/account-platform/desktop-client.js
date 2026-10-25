@@ -123,16 +123,8 @@ export class AccountPlatformDesktopClient {
     return this.call(() => this.transport.createSliderCaptcha({ mobile, purpose }), signal);
   }
 
-  precheckMobileRegistration(username, mobile, password, signal) {
-    return this.call(
-      () =>
-        this.transport.precheckMobileRegistration({
-          username,
-          mobile,
-          password,
-        }),
-      signal,
-    );
+  prepareRegistrationPassword(password, signal) {
+    return this.call(() => this.transport.prepareRegistrationPassword({ password }), signal);
   }
 
   sendSms(username, mobile, passwordReference, purpose, captchaId, captchaOffset, signal) {

@@ -13,26 +13,6 @@ import (
 	"github.com/google/uuid"
 )
 
-func (s *Service) precheckMobileRegistration(w http.ResponseWriter, r *http.Request) {
-	var body struct {
-		Username              string `json:"username"`
-		Mobile                string `json:"mobile"`
-		PasswordHandle        string `json:"password_handle"`
-		PasswordPolicyVersion string `json:"password_policy_version"`
-	}
-	if err := api.DecodeJSON(w, r, &body); err != nil {
-		api.WriteError(w, http.StatusBadRequest, "INVALID_REQUEST", "invalid mobile registration precheck request", httpserver.RequestID(r.Context()))
-		return
-	}
-	ctx := withAuthRisk(r.Context(), requestSource(r), r.Header.Get("X-Device-ID"))
-	username, err := s.mobileAuth.PrecheckRegistration(ctx, body.Username, body.Mobile, body.PasswordHandle, body.PasswordPolicyVersion)
-	if err != nil {
-		s.writeMobileAuthError(w, r, err)
-		return
-	}
-	api.WriteJSON(w, http.StatusOK, map[string]any{"username": username, "available": true})
-}
-
 func (s *Service) createSliderCaptcha(w http.ResponseWriter, r *http.Request) {
 	var body struct {
 		Mobile  string     `json:"mobile"`

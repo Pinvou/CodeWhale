@@ -2,7 +2,7 @@ import React, { useEffect, useRef, useState } from 'react';
 import { registrationManualReviewReason } from './registration-recovery-state.js';
 import { PasswordInput } from './PasswordInput.jsx';
 import { ProfileCaptcha } from './ProfileSettings.jsx';
-import { localizedAccountPlatformError } from './error-localization.js';
+import { accountPlatformErrorCodes, localizedAccountPlatformError } from './error-localization.js';
 import { profileCaptchaSubmissionOffset } from './profile-captcha-state.js';
 
 export function AccountLogin({ client, copy, onAuthenticated, reauthentication = false, onAuthenticationFailure }) {
@@ -87,7 +87,7 @@ export function AccountLogin({ client, copy, onAuthenticated, reauthentication =
     void run(async current => {
       let checked = reference;
       if (mode === 'register' && !checked) {
-        checked = await client.precheckMobileRegistration(account.trim(), mobile.trim(), password);
+        checked = await client.prepareRegistrationPassword(password);
         if (!current()) return;
         setReference(checked);
       }
@@ -97,10 +97,19 @@ export function AccountLogin({ client, copy, onAuthenticated, reauthentication =
   };
   const sendCode = selectedOffset => void run(async current => {
     const purpose = mode === 'register' ? 'REGISTER' : mode === 'forgot' ? 'PASSWORD_RESET' : 'LOGIN';
-    const result = await client.sendSms(mode === 'register' ? account.trim() : '', mobile.trim(), mode === 'register' ? reference : null, purpose, captcha.captcha_id, profileCaptchaSubmissionOffset(selectedOffset, offset));
+    let result;
+    try {
+      result = await client.sendSms(mode === 'register' ? account.trim() : '', mobile.trim(), mode === 'register' ? reference : null, purpose, captcha.captcha_id, profileCaptchaSubmissionOffset(selectedOffset, offset));
+    } catch (reason) {
+      if (current() && accountPlatformErrorCodes(reason).some(code => ['PASSWORD_REFERENCE_INVALID', 'PASSWORD_REFERENCE_CONFLICT'].includes(code))) setReference(null);
+      throw reason;
+    } finally {
+      // Send may already have consumed the proof even when its response fails.
+      if (current()) { setCaptcha(null); setOffset(0); }
+    }
     if (!current()) return;
     if (!result?.challenge_id) throw new Error('INVALID_SMS_ACK');
-    setChallenge(result.challenge_id); setCaptcha(null); setOffset(0);
+    setChallenge(result.challenge_id);
     setCooldown(Math.max(1, Number(result.retry_after_seconds || 60)));
     if (mode === 'register') {
       setRecovery({ registration_operation_id: result.registration_operation_id, registration_query_token: result.registration_query_token || '' });

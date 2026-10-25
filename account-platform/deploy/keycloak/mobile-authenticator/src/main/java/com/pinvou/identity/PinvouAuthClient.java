@@ -42,12 +42,6 @@ final class PinvouAuthClient {
             Map.of("password", password), Map.of("X-Pinvou-Client-Source", source, "X-Device-ID", device), 201).body();
     }
 
-    void precheckRegistration(String username, String mobile, String handle, String policy, String source, String device) throws AuthClientException {
-        post(publicURL("PINVOU_ACCOUNT_AUTH_URL", "/v1/auth/registration/precheck"), Map.of(
-            "username", username, "mobile", mobile, "password_handle", handle, "password_policy_version", policy),
-            Map.of("X-Pinvou-Client-Source", source, "X-Device-ID", device), 200);
-    }
-
     Map<String, Object> createCaptcha(String mobile, String purpose, String source, String device) throws AuthClientException {
         return post(publicURL("PINVOU_ACCOUNT_AUTH_URL", "/v1/auth/captcha/challenges"),
             Map.of("mobile", mobile, "purpose", purpose), Map.of("X-Pinvou-Client-Source", source, "X-Device-ID", device), 201).body();

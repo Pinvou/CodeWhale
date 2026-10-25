@@ -52,15 +52,6 @@ func (s *MobileAuthService) CreateSliderCaptcha(ctx context.Context, rawMobile s
 	if err != nil || purpose != SMSPurposeRegister && purpose != SMSPurposeLogin && purpose != SMSPurposeProfileMobile && purpose != SMSPurposePasswordReset {
 		return SliderCaptchaResponse{}, ErrMobileInvalid
 	}
-	if purpose == SMSPurposeRegister {
-		exists, err := s.repository.MobileExists(ctx, mobile)
-		if err != nil {
-			return SliderCaptchaResponse{}, err
-		}
-		if exists {
-			return SliderCaptchaResponse{}, ErrMobileAlreadyRegistered
-		}
-	}
 	targetX, err := secureRandomInt(72, sliderCaptchaWidth-sliderCaptchaPieceSize-14)
 	if err != nil {
 		return SliderCaptchaResponse{}, ErrCaptchaInvalid

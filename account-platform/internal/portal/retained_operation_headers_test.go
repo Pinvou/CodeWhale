@@ -24,7 +24,6 @@ func TestPersonalOperationHeadersStayRouteBound(t *testing.T) {
 		{"POST", "/v1/me/password-changes", false, true, true},
 		{"POST", "/v1/me/profile-change-requests/" + id + "/mobile-challenges", false, true, true},
 		{"POST", "/v1/me/profile-change-requests/" + id + "/actions/complete", false, true, true},
-		{"POST", "/v1/auth/registration/precheck", false, false, false},
 		{"POST", "/v1/auth/captcha/challenges", false, false, false},
 		{"GET", "/v1/me", false, false, true},
 		{"GET", "/v1/me/profile-change-requests/" + id, false, false, true},

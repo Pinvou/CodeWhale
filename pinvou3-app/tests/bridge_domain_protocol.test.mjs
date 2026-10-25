@@ -88,8 +88,8 @@ const protocolSources = {
 // Combined main954 shared extraction with current Account model refs, typed selection,
 // local rollback and compact API. Digests pin actual combined invoke/listen bodies.
 const expectedProtocolHashes = {
-  // F05 retains all twelve personal commands and adds four typed-model Native commands.
-  accountPlatform: '3b053054ae162417977e71dc8910611e0655e6c1d3538689b67e3f659a858865',
+  // Registration prepares only the password reference; availability stays behind captcha in Send.
+  accountPlatform: '5a768685d7d2c8f5eea288b6b00d0ba03e680f76be195d20a131a71b8436fa8f',
   // #566 共享模块移植后的重算：invoke/listen 函数体按字节等价合并进
   // shared/bridge-shared-helpers.js（其共享面哈希单独立钉于 expectedSharedBaseHash），
   // 各 lane feature 文件的原始文本摘要随之变化；命令面（命令名/事件名集合）
