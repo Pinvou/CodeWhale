@@ -39,6 +39,8 @@ let pauseNextPolicyRead = false;
 let releasePolicyRead = null;
 let completedAuthorizationReads = 0;
 let completedPolicyReads = 0;
+let policyContextVersionRefreshGate = null;
+let authorizationRefreshGate = null;
 
 function json(response, payload, status = 200) {
   response.writeHead(status, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' });
@@ -111,10 +113,22 @@ const server = createServer(async (request, response) => {
       nextAuthorizationReadDelayMs = 0;
       await new Promise((resolve) => { setTimeout(resolve, delay); });
     }
+    if (authorizationRefreshGate) {
+      const gate = authorizationRefreshGate;
+      authorizationRefreshGate = null;
+      gate.started = true;
+      await gate.pending;
+    }
     completedAuthorizationReads++;
     return json(response, { user_id: requestedUserID, status: "ACTIVE", active_context: { context_type: "PERSONAL", context_version: 1, authorization_version: 1, personal_authorization_version: 1, platform_authorization_version: 1, organization_authorization_version: 0, membership_version: 1, permissions: [] }, personal_permissions: [], platform_permissions: requestedPermissions });
   }
   if (url.pathname === '/api/admin/billing/admin/v1/registration-bonus-policy' && request.method === 'GET') {
+    if (policyContextVersionRefreshGate) {
+      // Account emits this context clock and Billing/Portal forward it; the real SDK observes it.
+      authorizationRefreshGate = policyContextVersionRefreshGate;
+      policyContextVersionRefreshGate = null;
+      response.setHeader('X-Context-Version', '2');
+    }
     policyReads++;
     if (failingPolicyReads > 0) { failingPolicyReads--; return json(response, { code: 'REGISTRATION_BONUS_UNAVAILABLE' }, 503); }
     const responsePolicy = { ...policy };
@@ -622,6 +636,49 @@ try {
       console.log(JSON.stringify({ action: 'pass', test: `${kind}: actual shared SDK abort restores existing explicit GET retry` }));
     } catch (error) { newFailures++; console.log(JSON.stringify({ action: 'fail', test: `${kind}: actual shared SDK abort`, message: error.message })); }
     finally { recentAuthenticationRequired = false; nextAuthorizationReadDelayMs = 0; nextPolicyReadDelayMs = 0; await retryPage.close(); }
+  }
+  for (const language of ['zh', 'en', 'ja']) {
+    for (const completion of ['while-away', 'after-return']) {
+      const page = await browser.newPage();
+      const pageErrors = [];
+      page.on('pageerror', error => pageErrors.push(error.message));
+      let release;
+      const gate = { started: false, pending: new Promise(resolve => { release = resolve; }) };
+      try {
+        permissions = ['platform.users.read', 'platform.registration-bonus.read', 'platform.registration-bonus.manage'];
+        currentUserID = '0199a100-0001-7000-8000-000000000101'; csrfToken = 'csrf-user-a';
+        policy = { ...policy, revision: 1000, enabled: false, amount_microcredits: 0, validity_days: 30, eligibility_status: 'READY' };
+        recentAuthenticationRequired = false; nextAuthorizationReadDelayMs = 0; nextPolicyReadDelayMs = 0;
+        const authBefore = completedAuthorizationReads;
+        const writesBefore = writes.length;
+        policyContextVersionRefreshGate = gate;
+        await page.evaluateOnNewDocument(locale => localStorage.setItem('pinvou.admin.language', locale), language);
+        await page.goto(`http://127.0.0.1:${port}/admin.html?section=operations`, { waitUntil: 'domcontentloaded' });
+        await page.waitForSelector('[data-testid="registration-bonus-policy"]');
+        for (let attempt = 0; attempt < 200 && !gate.started; attempt++) await new Promise(resolve => { setTimeout(resolve, 10); });
+        assert.equal(gate.started, true, 'the real SDK clock observer must have started a pending authorization refresh');
+        await page.evaluate(label => [...document.querySelectorAll('.adm-shell > nav button')].find(button => button.textContent === label).click(), adminPlatformCopy[language].nav.users);
+        await page.waitForFunction(() => !document.querySelector('[data-testid="registration-bonus-policy"]'));
+        if (completion === 'while-away') {
+          release();
+          for (let attempt = 0; attempt < 200 && completedAuthorizationReads < authBefore + 2; attempt++) await new Promise(resolve => { setTimeout(resolve, 10); });
+          assert.equal(completedAuthorizationReads, authBefore + 2);
+          await page.waitForNetworkIdle({ idleTime: 100 });
+        }
+        const readsBeforeReturn = policyReads;
+        await page.evaluate(label => [...document.querySelectorAll('.adm-shell > nav button')].find(button => button.textContent === label).click(), adminPlatformCopy[language].operations.nav);
+        await page.waitForSelector('[data-testid="registration-bonus-policy"]');
+        if (completion === 'after-return') release();
+        await page.waitForSelector('[data-testid="registration-bonus-policy"] form', { timeout: 3000 });
+        assert.equal(policyReads, readsBeforeReturn + 1, 'returning workspace must load exactly one current policy');
+        assert.equal(writes.length, writesBefore, 'navigation and refresh cannot write business state');
+        assert.deepEqual(pageErrors, []);
+        console.log(JSON.stringify({ action: 'pass', test: `${language}: retired authorization refresh settles ${completion} without stranding Operations` }));
+      } catch (error) {
+        newFailures++;
+        console.log(JSON.stringify({ action: 'fail', test: `${language}: retired authorization refresh ${completion}`, message: error.message, pageErrors }));
+      } finally { release(); policyContextVersionRefreshGate = null; authorizationRefreshGate = null; await page.close(); }
+    }
   }
   if (newFailures) process.exitCode = 1;
   console.log('Admin registration bonus UI smoke passed');

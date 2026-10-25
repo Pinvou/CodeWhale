@@ -181,9 +181,11 @@ export function AdminPlatformView({ client, copy, language, onLanguageChange }) 
       } catch (reason) {
         if (!disposed) { setAuthorization(null); setState('error'); setError(localizedAccountPlatformError(copy, reason)); }
       } finally {
-        if (authorizationRefreshRef.current.generation === refreshGeneration) authorizationRefreshRef.current = { active: false, generation: refreshGeneration, settled: Promise.resolve() };
+        if (authorizationRefreshRef.current.generation === refreshGeneration) {
+          authorizationRefreshRef.current = { active: false, generation: refreshGeneration, settled: Promise.resolve() };
+          setAuthorizationRefreshing(false);
+        }
         settle();
-        if (!disposed) setAuthorizationRefreshing(false);
       }
     };
     const unsubscribe = client.onAuthorizationVersion?.(() => { void refresh(); });
