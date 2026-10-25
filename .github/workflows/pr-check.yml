@@ -2243,6 +2243,15 @@ jobs:
         with:
           submodules: false
 
+      # main twice exhausted this shared disk during cache post-metadata,
+      # after both Cargo checks passed. Reuse only the base SDK allowlist;
+      # reserve 24 GiB before swap and dependency/toolchain writes.
+      - name: Prepare CLI disk capacity before swap
+        run: |
+          sudo env GITHUB_WORKSPACE="$GITHUB_WORKSPACE" \
+            RUNNER_ENVIRONMENT="$RUNNER_ENVIRONMENT" \
+            python3 scripts/ci-rust-disk.py --min-free-gib 24
+
       - name: Set up zram and swap
         # Best effort: timeouts or failures only warn and never block (falls back to stock runner memory).
         run: timeout --kill-after=15 240 sudo --preserve-env=GITHUB_ACTIONS,PINVOU3_CI_DISABLE_ZRAM bash "${{ github.workspace }}/scripts/ci-memory-setup.sh" || echo "::warning::ci-memory-setup did not finish; continuing with stock runner memory"
@@ -2300,6 +2309,14 @@ jobs:
       # which is exactly the rust-lint case ("clippy/check" target caching in
       # the repo's cache policy). Own key: clippy artifacts differ from the
       # rustc artifacts of the cli-test cache and would evict each other.
+      # Swap and installed dependencies can consume the initial reserve.
+      # Refuse a runner already below the default 12 GiB before restoring.
+      - name: Check CLI disk capacity before cache
+        run: |
+          sudo env GITHUB_WORKSPACE="$GITHUB_WORKSPACE" \
+            RUNNER_ENVIRONMENT="$RUNNER_ENVIRONMENT" \
+            python3 scripts/ci-rust-disk.py
+
       - name: Cargo cache
         uses: Swatinem/rust-cache@v2
         with:
@@ -2312,6 +2329,16 @@ jobs:
           # compile. Saves stay main-only (save-if below).
           cache-on-failure: true
           save-if: ${{ github.ref == 'refs/heads/main' }}
+
+      # Check actual remaining space after cache restore, before Cargo.
+      # This is stage admission, not a peak-space guarantee. On main,
+      # cache-on-failure may still run post-metadata if this gate fails;
+      # keep that cache policy and the complete job failure visible.
+      - name: Check CLI disk capacity after cache
+        run: |
+          sudo env GITHUB_WORKSPACE="$GITHUB_WORKSPACE" \
+            RUNNER_ENVIRONMENT="$RUNNER_ENVIRONMENT" \
+            python3 scripts/ci-rust-disk.py
 
       # Warn-visible by design (see the job comment); --all-targets so tests
       # are linted too (they carry their own share of the measured debt).

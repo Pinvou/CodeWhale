@@ -691,6 +691,9 @@ PINNED_GATE_STEP_NAMES = {
         "cargo compile check (push, adapter-gaia test-support)",
     ),
     "cli-lint": (
+        "Prepare CLI disk capacity before swap",
+        "Check CLI disk capacity before cache",
+        "Check CLI disk capacity after cache",
         "Install Tauri Linux system dependencies",
     ),
     "rust-test": (
@@ -2696,6 +2699,47 @@ class CiGatePolicyTests(unittest.TestCase):
         # links nothing (rmeta-size artifacts). Regressing to false would
         # silently re-introduce the cold compile this round removed.
         self.assertNotIn("cache-targets:", cache_step)
+
+    def test_cli_lint_disk_capacity_is_admitted_at_each_writing_stage(self):
+        # A successful Clippy/check is insufficient when main's cache post
+        # still needs disk. Pin executable recipes and order in this job,
+        # not a comment, a similarly named decoy, or a sibling's cleanup.
+        job = _extract_job_block(self.pr_workflow, "cli-lint")
+        initial = "Prepare CLI disk capacity before swap"
+        precache = "Check CLI disk capacity before cache"
+        postcache = "Check CLI disk capacity after cache"
+        stages = ((initial, " --min-free-gib 24"), (precache, ""), (postcache, ""))
+        for name, arguments in stages:
+            body = _without_inline_comments(_step_named(job, name))
+            self.assertEqual(
+                [line.strip() for line in body.splitlines() if line.strip()],
+                [
+                    "- name: " + name,
+                    "run: |",
+                    'sudo env GITHUB_WORKSPACE="$GITHUB_WORKSPACE" \\',
+                    'RUNNER_ENVIRONMENT="$RUNNER_ENVIRONMENT" \\',
+                    "python3 scripts/ci-rust-disk.py" + arguments,
+                ],
+                name + ": keep the unconditional base-tier, fail-closed recipe",
+            )
+        names = [name for name, _ in _steps_of(job)]
+        self.assertEqual(names[:2], ["Checkout", initial])
+        expected = [
+            "Checkout", initial, "Set up zram and swap",
+            "Init CodeWhale submodule", "Install Tauri Linux system dependencies",
+            "Build PipeWire 1.0.7 dev prefix (jammy SPA headers too old)",
+            "Rust toolchain", "Align the toolchain pinned by rust-toolchain.toml",
+            precache, "Cargo cache", postcache,
+            "cargo clippy (workspace, all targets)",
+            "cargo check (workspace, no default features, all targets)",
+        ]
+        self.assertEqual([name for name in names if name in expected], expected)
+        self.assertEqual(names.index("Cargo cache"), names.index(precache) + 1)
+        self.assertEqual(names.index(postcache), names.index("Cargo cache") + 1)
+        self.assertEqual(
+            names.index("cargo clippy (workspace, all targets)"),
+            names.index(postcache) + 1,
+        )
 
     def test_cli_lint_job_is_wired_into_required_gate(self):
         # Round-18 review §3: "The CI leg doesn't lint the CLI" — no clippy on
