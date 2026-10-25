@@ -1658,6 +1658,57 @@ async function webToolEndFlushesStreamHtmlBeforeReset() {
     "web: tool_end must synchronously flush the full markdown html before the stream state reset");
 }
 
+// Regression anchor (stream coalescing review): the web admission-reject path
+// filters the optimistic send and resets the remote stream state, so without
+// the synchronous flush the live post-tool bubble's html stayed at its
+// first-delta markdown forever — the trailing-edge render no longer finds the
+// item once currentStreamId has been reset.
+async function webAdmissionRejectFlushesStreamHtmlBeforeReset() {
+  var harness = createBridgeHarness(null, {
+    bridgeKind: "web",
+    webSupportedCommands: ["web_access_chat", "web_access_load_session_chunk",
+      "web_access_list_sessions", "web_access_list_archived_sessions", "web_access_status"],
+  });
+  var bridge = harness.bridge;
+  var sessionId = "chat-admission-flush";
+  harness.handlers.load_session = function () {
+    return { metadata: { id: sessionId, title: "Admission flush" }, messages: [], artifacts: [] };
+  };
+  assert.strictEqual(await bridge.sessions.switchToSession(sessionId), true);
+
+  // An optimistic local send hangs inside the admission RPC while the remote
+  // turn streams past its first delta and crosses a tool boundary, so the live
+  // bubble at reject time is a fresh post-tool bubble, not the removed one.
+  var rejectRpc = null;
+  var rejectedRpc = new Promise(function (resolve) { rejectRpc = resolve; });
+  harness.handlers.web_access_chat = function () {
+    return rejectedRpc.then(function () {
+      return Promise.reject(new Error("session_turn_in_progress"));
+    });
+  };
+  var sendOutcome = bridge.chat.sendMessage("racing send");
+  await tick();
+  await harness.emit("chat:user_message", { session_id: sessionId, content: "remote q" });
+  await harness.emit("chat:delta", { session_id: sessionId, text: "INTO-Y " });
+  await harness.emit("chat:tool_start", { session_id: sessionId, id: "adm-tool", name: "read_file", args: { path: "x" } });
+  await harness.emit("chat:delta", { session_id: sessionId, text: "Z-FIRST" });
+  await harness.emit("chat:delta", { session_id: sessionId, text: "-Z-SECOND" });
+
+  rejectRpc();
+  // sendMessage refuses the racing send (false) once its admission RPC
+  // rejects; the reject path itself must have run — that is exactly the
+  // context the flush under test lives in. The deferred remote user_message
+  // replays afterwards, so busy legitimately returns to the remote turn.
+  assert.strictEqual(await sendOutcome, false,
+    "web: the racing send must be refused once its admission RPC rejects");
+  var postToolBubble = bridge.state.get().chatItems.filter(function (item) {
+    return item.type === "assistant" && String(item.text || "").includes("Z-FIRST");
+  }).pop();
+  assert.ok(postToolBubble, "web: the post-tool remote bubble must survive the admission reject");
+  assert.ok(String(postToolBubble.html || "").includes("Z-SECOND"),
+    "web: the admission reject must synchronously flush the remote bubble's html before the stream reset");
+}
+
 async function olderDesktopUsesServerGeneratedSessionDownloadId() {
   var harness = createBridgeHarness(null, { bridgeKind: "web", webSupportedCommands: [] });
   var sessionId = "chat-legacy-download";
@@ -9198,6 +9249,7 @@ Promise.resolve()
   .then(function () { return backgroundSessionFirstDeltaPublishesViaFrame("tauri"); })
   .then(function () { return backgroundSessionFirstDeltaPublishesViaFrame("web"); })
   .then(function () { return webToolEndFlushesStreamHtmlBeforeReset(); })
+  .then(function () { return webAdmissionRejectFlushesStreamHtmlBeforeReset(); })
   .then(multipleKnowledgeMountBehavior)
   .then(queuedKnowledgeMountKeepsOriginalSession)
   .then(staleKnowledgeSnapshotDoesNotCrossSessions)
