@@ -24441,3 +24441,47 @@ async fn cwd_narrowed_scoped_worktree_child_validates_paths_in_its_own_frame() {
         "unexpected refusal shape: {refused}"
     );
 }
+
+/// The rewritten `[shell.readonly.command]` guidance is the fix for the
+/// recorded 13-step retry loop: its value is the enumeration itself, so the
+/// admitted families and the do-not-retry instruction are pinned, not just
+/// the refusal tag. Reverting the message to the old one-liner must redden
+/// this.
+#[tokio::test]
+async fn shell_readonly_refusal_enumerates_the_admitted_families() {
+    let mut runtime =
+        stub_runtime().with_agent_tool_surface_options(enabled_agent_surface_options());
+    runtime.context = ToolContext::new(tempdir().expect("tempdir").path().to_path_buf());
+    runtime.worker_profile = WorkerRuntimeProfile::for_role(FleetRole::Scout);
+    seed_read_only_role_deny_list(&mut runtime);
+    let registry = SubAgentToolRegistry::new(
+        runtime,
+        FleetRole::Scout,
+        None,
+        crate::tools::todo::new_shared_todo_list(),
+        crate::tools::plan::new_shared_plan_state(),
+    );
+
+    let refusal = registry
+        .execute("agent_readonly_guidance", "bash", json!({"command": "git push origin main"}))
+        .await
+        .expect_err("a read-only role must not push")
+        .to_string();
+    assert!(
+        refusal.contains("[shell.readonly.command]"),
+        "refusal lost its tag: {refusal}"
+    );
+    for expected in [
+        "Admitted:",
+        "git branch (bare/flag-only",
+        "git worktree list (flags only)",
+        "find (no -delete/-exec/-execdir",
+        "comm, npm view",
+        "Do not retry variations",
+    ] {
+        assert!(
+            refusal.contains(expected),
+            "guidance missing {expected:?}: {refusal}"
+        );
+    }
+}

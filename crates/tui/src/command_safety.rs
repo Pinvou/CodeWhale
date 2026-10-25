@@ -832,6 +832,35 @@ fn is_agent_readonly_git(tokens: &[String]) -> bool {
 /// `--list` only since git 2.20; on the pre-2018 gits where it meant
 /// `--create-reflog` this parser would be wrong, but every supported
 /// toolchain ships ≥ 2.20.
+/// Classify an attached-value token `--flag=value`: read-only exactly when
+/// the flag part is a known value flag of this subcommand or one of its
+/// OPTARG-style switches (`--column=<style>`, `--color=<when>`), whose
+/// attached form git consumes without touching the next word — so there is
+/// no dash-value ambiguity for the checker to resolve.
+fn attached_readonly_value<'a>(
+    token: &'a str,
+    value_flags: &[&str],
+    optarg_switches: &[&str],
+) -> Option<&'a str> {
+    let (flag, value) = token.split_once('=')?;
+    if !token.starts_with("--") || value.is_empty() {
+        return None;
+    }
+    (value_flags.contains(&flag) || optarg_switches.contains(&flag)).then_some(flag)
+}
+
+/// A combined short-flag cluster `-arv` is read-only exactly when every
+/// letter is a known read-only single-dash switch of this subcommand; any
+/// mutating short (`-d`, `-m`, …) falls outside the set and refuses.
+fn is_combined_readonly_shorts(token: &str, singles: &str) -> bool {
+    let mut chars = token.chars();
+    if chars.next() != Some('-') {
+        return false;
+    }
+    let flags = chars.collect::<Vec<_>>();
+    flags.len() > 1 && flags.iter().all(|ch| singles.contains(*ch))
+}
+
 fn is_agent_readonly_git_branch(args: &[String]) -> bool {
     if args.is_empty() {
         // Bare `git branch` lists local branches; nothing to inspect.
@@ -850,8 +879,8 @@ fn is_agent_readonly_git_branch(args: &[String]) -> bool {
         "--quiet",
         "--no-color",
         "--color",
-        // OPTARG-style: git only reads `--column=<style>`; the separate-word
-        // form would make the next token a match pattern.
+        // OPTARG-style: the separate-word form would make the next token a
+        // match pattern, but git also reads the attached `=<style>` form.
         "--column",
         "--show-current",
     ];
@@ -864,16 +893,35 @@ fn is_agent_readonly_git_branch(args: &[String]) -> bool {
         "--merged",
         "--no-merged",
     ];
+    // OPTARG-style switches: git also reads their attached `=<style>` form
+    // (bare and separate-word spellings are already in `switches`).
+    let optarg_switches: &[&str] = &["--column", "--color"];
     if !args.iter().any(|token| token == "--list" || token == "-l") {
-        // Every token must be a known read-only switch; a value flag or an
-        // unknown flag without `--list` stays refused (fail-closed).
-        return args.iter().all(|token| switches.contains(&token.as_str()));
+        // Every token must be a known read-only switch (or an attached-value
+        // or combined-short spelling of one); a value flag or an unknown
+        // flag without `--list` stays refused (fail-closed).
+        return args.iter().all(|token| {
+            switches.contains(&token.as_str())
+                || attached_readonly_value(token, value_flags, optarg_switches).is_some()
+                || is_combined_readonly_shorts(token, "arlvq")
+        });
     }
     let mut index = 0;
     while index < args.len() {
         let token = args[index].as_str();
         if token.starts_with('-') {
             if switches.contains(&token) {
+                index += 1;
+                continue;
+            }
+            if attached_readonly_value(token, value_flags, optarg_switches).is_some() {
+                // `--sort=-committerdate` and friends: the value is bound to
+                // the flag in the same token, so there is no next word to
+                // swallow and no dash-value ambiguity.
+                index += 1;
+                continue;
+            }
+            if is_combined_readonly_shorts(token, "arlvq") {
                 index += 1;
                 continue;
             }
@@ -914,6 +962,12 @@ fn is_agent_readonly_git_worktree(args: &[String]) -> bool {
             return false;
         }
         if switches.contains(&token) {
+            index += 1;
+            continue;
+        }
+        if attached_readonly_value(token, value_flags, &[]).is_some()
+            || is_combined_readonly_shorts(token, "vz")
+        {
             index += 1;
             continue;
         }
@@ -2228,6 +2282,22 @@ mod tests {
             "git worktree list",
             "git worktree list --porcelain",
             "git worktree list -z",
+            // Attached-value and combined-short listing spellings —
+            // `--sort=-committerdate` is the most idiomatic branch probe a
+            // read-only child makes. The value is bound to its flag in the
+            // same token, so nothing is swallowed uninspected.
+            "git branch --list --sort=-committerdate",
+            "git branch --list --format=%h",
+            "git branch --list --column=always",
+            "git branch --list --color=never",
+            "git branch -arv",
+            // Separate-word value flags consume their value but stay
+            // read-only, and must stay pinned so the flags cannot silently
+            // vanish from the grammar.
+            "git branch --list --format %h",
+            "git branch --list --contains HEAD",
+            "git worktree list --expire 2.weeks.ago",
+            "git worktree list --verbose",
         ] {
             assert!(
                 is_agent_readonly_shell_command(command),
@@ -2299,11 +2369,12 @@ mod tests {
             "git rev-parse --git-path hooks",
             "git rev-parse --resolve-git-dir /tmp/x",
             // A value flag must never swallow a mutating flag: git's
-            // `--column` takes only the attached `=<style>` form, so the
-            // separate-word spelling leaves `-d` as a real flag the checker
-            // has to see and refuse. The same rule pins the true value-flag
-            // path (`--sort`/`--expire` consume the next word): a
-            // dash-prefixed "value" is refused, not swallowed uninspected.
+            // `--column` is an OPTARG — bare `--column` works, but the
+            // separate-word spelling attaches no value, so `-d` remains a
+            // real flag the checker has to see and refuse. The same rule
+            // pins the true value-flag path (`--sort`/`--expire` consume
+            // the next word): a dash-prefixed "value" is refused, not
+            // swallowed uninspected.
             "git branch --list --column -d x",
             "git branch --list --sort -d x",
             "git worktree list --expire -v",
