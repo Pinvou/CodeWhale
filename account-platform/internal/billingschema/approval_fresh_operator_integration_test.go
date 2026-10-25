@@ -262,16 +262,38 @@ func freshActualResources(t *testing.T, ctx context.Context, binary string) func
 			var wire struct {
 				HighWatermark string `json:"high_watermark"`
 				BillingStarts []struct {
+					Durable       string `json:"durable"`
 					StartSequence string `json:"start_sequence"`
 				} `json:"billing_starts"`
 			}
-			if json.Unmarshal(receipt, &wire) != nil || wire.HighWatermark != "1" || len(wire.BillingStarts) != 3 {
+			// Pin the released inventory independently of the runtime registry.
+			expectedBillingDurables := map[string]bool{
+				"billing-usage-settlement-repair-executor-p1-v1":          true,
+				"billing-reconciliation-financial-repair-executor-p1-v1":  true,
+				"billing-chargeback-financial-repair-executor-p1-v1":      true,
+				"billing-refund-exception-repair-executor-p1-v1":          true,
+				"billing-payment-financial-repair-executor-p1-v1":         true,
+				"billing-entitlement-component-adjustment-executor-p2-v1": true,
+				"billing-ledger-repair-executor-p1-v1":                    true,
+				"billing-wallet-adjustment-executor-p1-v1":                true,
+				"billing-payment-provider-resume-executor-p2-v1":          true,
+				"billing-payment-product-resume-executor-p1-v1":           true,
+				"billing-receivable-write-off-executor-p1-v1":             true,
+			}
+			if json.Unmarshal(receipt, &wire) != nil || wire.HighWatermark != "1" || len(wire.BillingStarts) != len(expectedBillingDurables) {
 				return nil, events.ErrNATSResources
 			}
 			for _, s := range wire.BillingStarts {
+				if !expectedBillingDurables[s.Durable] {
+					return nil, events.ErrNATSResources
+				}
+				delete(expectedBillingDurables, s.Durable)
 				if s.StartSequence != "2" {
 					return nil, events.ErrNATSResources
 				}
+			}
+			if len(expectedBillingDurables) != 0 {
+				return nil, events.ErrNATSResources
 			}
 			receiptPath := write(resources, "receipt.json", receipt)
 			sum := sha256.Sum256(receipt)
