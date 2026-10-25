@@ -15,6 +15,36 @@ SPEC.loader.exec_module(RUNNER)
 
 
 class FinancialPostgresRunnerTests(unittest.TestCase):
+    def test_retained_billing_budget_preserves_all_phase_commands_and_cleanup(self):
+        self.run_main_fixture()
+        self.assertEqual(self.fixture_phases, [
+            "owner-account", "owner-wallet", "owner-schema",
+            "owner-provisioning", "retained-token", "retained-billing",
+        ])
+        for phase, command in zip(self.fixture_phases, self.fixture_commands, strict=True):
+            with self.subTest(phase=phase):
+                budgets = [arg for arg in command if arg.startswith("-timeout=")]
+                self.assertEqual(budgets, ["-timeout=75m" if phase == "retained-billing" else "-timeout=20m"])
+                self.assertIn("-race", command)
+                self.assertIn("-count=1", command)
+        billing = self.fixture_commands[-1]
+        self.assertEqual(billing[-1], "./internal/billing")
+        self.assertEqual(billing[billing.index("-run") + 1],
+                         "^(" + "|".join(sorted(RUNNER.RETAINED_REQUIRED)) + ")$")
+        self.assertEqual(len(RUNNER.RETAINED_REQUIRED), 49)
+        self.assertEqual(self.fixture_writes, ["create", "drop"])
+        self.assertEqual(self.fixture_trace, [
+            "owner-account", "owner-wallet", "owner-schema", "owner-provisioning",
+            "create", "retained-token", "retained-billing", "drop",
+        ])
+
+    def test_account_job_budget_includes_retained_billing_and_later_closure(self):
+        workflow = (Path(__file__).resolve().parents[2] / ".github/workflows/pr-check.yml").read_text(encoding="utf-8")
+        job = workflow.split("\n  account-platform-test:\n", 1)[1].split("\n  windows-relay-dacl:\n", 1)[0]
+        self.assertIn("\n    timeout-minutes: 180\n", job)
+        self.assertIn("python3 scripts/test-token-financial-postgres.py", job)
+        self.assertIn("python3 scripts/test-account-closure-postgres.py", job)
+
     def test_withdrawal_original_receipt_is_selected_and_requires_real_children(self):
         name = "TestApprovalWithdrawalOriginalReceiptPostgres"
         roots, package = RUNNER.ACCOUNT_REQUIRED, RUNNER.ACCOUNT_PACKAGE

@@ -271,7 +271,10 @@ def main():
             env["PINVOU_TEST_BILLING_DATABASE_URL"] = raw
         if target == "./internal/token":
             env["PINVOU_TEST_TOKEN_DATABASE_URL"] = raw
-        command = [go, "test", "-p=1", "-race", "-tags=nomsgpack", "-mod=readonly", "-count=1", "-timeout=20m", "-json"]
+        # The 49 retained Billing roots create about 250 isolated migration
+        # fixtures. Other phases retain their existing finite 20-minute bound.
+        timeout = "75m" if label == "retained-billing" else "20m"
+        command = [go, "test", "-p=1", "-race", "-tags=nomsgpack", "-mod=readonly", "-count=1", "-timeout=" + timeout, "-json"]
         if scoped:
             command += ["-run", "^(" + "|".join(sorted(required)) + ")$"] if len(required) > 1 else ["-run", "^" + next(iter(required)) + "$"]
         if label == "retained-token":
