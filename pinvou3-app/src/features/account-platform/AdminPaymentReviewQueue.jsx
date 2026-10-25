@@ -32,7 +32,7 @@ export function AdminPaymentReviewQueue({ client, copy, me, anomaly = false }) {
       case 'claim': return anomaly ? client.claimPaymentAnomaly(facts.id, key) : client.claimLatePaymentReview(facts.id);
       case 'query': return client.queryLatePaymentReview(facts.id);
       case 'schedule': return client.scheduleLatePaymentReview(facts.id, facts.nextReview, facts.reason, key, facts.commandProtocol);
-      case 'archive': return client.archiveLatePaymentReview(facts.id);
+      case 'archive': return client.archiveLatePaymentReview(facts.id, key, facts.commandProtocol);
       case 'provider-blind': return client.escalateProviderBlind(facts.id, facts.reason, key, facts.commandProtocol);
       case 'resolve': return client.resolvePaymentAnomaly(facts.id, facts.resolution, facts.reason, key);
       default: throw new Error('INVALID_FINANCE_ACK');
@@ -42,7 +42,7 @@ export function AdminPaymentReviewQueue({ client, copy, me, anomaly = false }) {
     // Capture the user's local wall time only for a new invocation. Its UTC
     // instant is immutable with the key even if the system time zone changes.
     const scheduleDate = !operation.pendingFacts && action === 'schedule' ? new Date(nextReview) : null;
-    const facts = operation.pendingFacts || { action, id: detail?.case?.case_id, reason: reason.trim(), resolution, nextReview: scheduleDate && Number.isFinite(scheduleDate.getTime()) ? scheduleDate.toISOString() : nextReview, commandProtocol: action === 'schedule' || action === 'provider-blind' ? 1 : undefined };
+    const facts = operation.pendingFacts || { action, id: detail?.case?.case_id, reason: reason.trim(), resolution, nextReview: scheduleDate && Number.isFinite(scheduleDate.getTime()) ? scheduleDate.toISOString() : nextReview, commandProtocol: action === 'schedule' || action === 'provider-blind' || action === 'archive' ? 1 : undefined };
     if (!facts.id || (!operation.pendingFacts && action === 'resolve' && !paymentAnomalyResolutions(detail?.case?.anomaly_type).includes(resolution)) || (!operation.unknown && !globalThis.confirm(copy.confirmAction))) return;
     const value = await operation.mutate(facts, async (current, key) => {
       const receipt = await execute(current, key);

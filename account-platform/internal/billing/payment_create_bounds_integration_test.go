@@ -466,7 +466,7 @@ func instructionUnmergedSuccessArchive(t *testing.T, r *PostgresRepository, c *P
 	}
 	before := instructionCommandFactsSnapshot(t, r, ctx)
 	archiveBefore := instructionArchiveSnapshot(t, r, ctx)
-	if _, err = r.ArchiveLatePaymentReview(ctx, item.ID, actor); !errors.Is(err, ErrConflict) {
+	if _, err = r.ArchiveLatePaymentReview(ctx, item.ID, actor, "archive-"+uuid.NewString()); !errors.Is(err, ErrConflict) {
 		t.Fatal("unmerged verified SUCCESS permitted unpaid archive", err)
 	}
 	if stored := instructionStoredOrder(t, r, ctx, order.ID); stored.ArchiveStatus != "ACTIVE" {

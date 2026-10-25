@@ -689,17 +689,17 @@ func instructionExternalArchiveBoundary(t *testing.T) {
 	if !stored.ExpiresAt.Equal(t1) || !stored.ProviderPayableUntil.Equal(t2) || !stored.FinalArchiveEligibleAt.Equal(newArchive) {
 		t.Fatal("closed/reviewed order lost distinct deadline bounds")
 	}
-	if _, err = r.ArchiveLatePaymentReview(ctx, item.ID, actor); !errors.Is(err, ErrConflict) {
+	if _, err = r.ArchiveLatePaymentReview(ctx, item.ID, actor, "archive-"+uuid.NewString()); !errors.Is(err, ErrConflict) {
 		t.Fatal("later external deadline allowed premature archive", err)
 	}
 	clock = newArchive.Add(time.Second)
-	if _, err = r.ArchiveLatePaymentReview(ctx, item.ID, actor); !errors.Is(err, ErrConflict) {
+	if _, err = r.ArchiveLatePaymentReview(ctx, item.ID, actor, "archive-"+uuid.NewString()); !errors.Is(err, ErrConflict) {
 		t.Fatal("new archive boundary accepted old query evidence", err)
 	}
 	if _, err = c.SyncOrder(ctx, first.ID); err != nil {
 		t.Fatal(err)
 	}
-	archived, err := r.ArchiveLatePaymentReview(ctx, item.ID, actor)
+	archived, err := r.ArchiveLatePaymentReview(ctx, item.ID, actor, "archive-"+uuid.NewString())
 	if err != nil || archived.ReviewStatus != "ARCHIVED_CONFIRMED_UNPAID" {
 		t.Fatal("fresh authoritative terminal query did not allow lawful archive", err)
 	}
@@ -768,7 +768,7 @@ func instructionFirstTerminalDeadline(t *testing.T, status string, authoritative
 	if err = r.pool.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM payment_evidence WHERE payment_order_id=$1 AND payload_snapshot->>'status'=$3 AND (payload_snapshot->>'provider_payable_until')::timestamptz=$2),(SELECT last_authoritative_unpaid_at IS NOT NULL FROM payment_orders WHERE id=$1)`, first.ID, t2, status).Scan(&exactEvidence, &hasAuthority); err != nil || !exactEvidence || hasAuthority != authoritative {
 		t.Fatal("exact terminal deadline evidence/authority contract", err)
 	}
-	archived, archiveErr := r.ArchiveLatePaymentReview(ctx, item.ID, actor)
+	archived, archiveErr := r.ArchiveLatePaymentReview(ctx, item.ID, actor, "archive-"+uuid.NewString())
 	t.Logf("first terminal deadline facts: status=%s declared_authority=%t T1=%s T2=%s now=%s external=%s archive_bound=%s required_bound=%s exact_terminal_T2_evidence=%t full_financial_and_receipts_unchanged=true archive_status=%s archive_error=%v", status, authoritative, t1.Format(time.RFC3339Nano), t2.Format(time.RFC3339Nano), clock.Format(time.RFC3339Nano), observed.ProviderPayableUntil.Format(time.RFC3339Nano), observed.FinalArchiveEligibleAt.Format(time.RFC3339Nano), newArchive.Format(time.RFC3339Nano), exactEvidence, archived.ReviewStatus, archiveErr)
 	if !errors.Is(archiveErr, ErrConflict) {
 		t.Fatal("first terminal T2 allowed premature archive", archiveErr)
@@ -777,7 +777,7 @@ func instructionFirstTerminalDeadline(t *testing.T, status string, authoritative
 		t.Fatal("first terminal observation lost later external/archive bound")
 	}
 	clock = newArchive.Add(time.Second)
-	if _, err = r.ArchiveLatePaymentReview(ctx, item.ID, actor); !errors.Is(err, ErrConflict) {
+	if _, err = r.ArchiveLatePaymentReview(ctx, item.ID, actor, "archive-"+uuid.NewString()); !errors.Is(err, ErrConflict) {
 		t.Fatal("new boundary accepted pre-boundary query", err)
 	}
 	if _, err = c.SyncOrder(ctx, first.ID); err != nil {
@@ -800,7 +800,7 @@ func instructionFirstTerminalDeadline(t *testing.T, status string, authoritative
 			t.Fatal(err)
 		}
 	}
-	archived, err = r.ArchiveLatePaymentReview(ctx, item.ID, actor)
+	archived, err = r.ArchiveLatePaymentReview(ctx, item.ID, actor, "archive-"+uuid.NewString())
 	if authoritative {
 		if err != nil || archived.ReviewStatus != "ARCHIVED_CONFIRMED_UNPAID" {
 			t.Fatal("fresh declared-authoritative terminal query could not archive lawfully", err)

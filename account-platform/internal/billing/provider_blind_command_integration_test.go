@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -19,6 +20,7 @@ import (
 	"github.com/Pinvou/pinvou3/account-platform/internal/platform/migrations"
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 )
 
 // Account permission decisions and IdP decoding are controlled. Installed
@@ -229,17 +231,38 @@ func TestProviderBlindCommandReceiptPostgres(t *testing.T) {
 			t.Fatal("runtime TRUNCATE did not fail closed without changing facts", err)
 		}
 	})
-	t.Run("highest-down-preserves-key-proof-and-migration-ledger", func(t *testing.T) {
-		r, ctx := retainedFinanceRepository(t)
+	t.Run("provider-prefix-down-preserves-key-proof-and-migration-ledger", func(t *testing.T) {
+		r, ctx := retainedFinanceRepository(t, 900028)
 		_, late, actor := providerBlindFixture(t, r, ctx)
-		if _, err := r.EscalateProviderBlind(ctx, late.ID, actor, "controlled retained immutable command", "blind-down-"+uuid.NewString()); err != nil {
+		key, reason := "blind-down-"+uuid.NewString(), "controlled retained immutable command"
+		original, err := r.EscalateProviderBlind(ctx, late.ID, actor, reason, key)
+		if err != nil {
 			t.Fatal(err)
 		}
 		before := providerBlindFacts(t, r, ctx)
-		var ledger string
-		if err := r.pool.QueryRow(ctx, `SELECT jsonb_agg(to_jsonb(item) ORDER BY to_jsonb(item)::text)::text FROM schema_migrations item`).Scan(&ledger); err != nil {
-			t.Fatal(err)
+		ledger := func() string {
+			var value string
+			if err := r.pool.QueryRow(ctx, `SELECT jsonb_agg(to_jsonb(item) ORDER BY to_jsonb(item)::text)::text FROM schema_migrations item`).Scan(&value); err != nil {
+				t.Fatal(err)
+			}
+			return value
 		}
+		marker := func() string {
+			var value string
+			if err := r.pool.QueryRow(ctx, `SELECT jsonb_build_object(
+ 'index',jsonb_build_object('oid',i.oid,'definition',pg_get_indexdef(i.oid),'owner',pg_get_userbyid(i.relowner),'acl',i.relacl),
+ 'evidence',jsonb_build_object('oid',e.oid,'owner',pg_get_userbyid(e.relowner),'acl',e.relacl))::text
+ FROM pg_class i,pg_class e WHERE i.oid='public.late_payment_provider_blind_command_key'::regclass AND e.oid='public.late_payment_review_evidence'::regclass`).Scan(&value); err != nil {
+				t.Fatal(err)
+			}
+			return value
+		}
+		var highest int64
+		var archiveInstalled bool
+		if err := r.pool.QueryRow(ctx, `SELECT max(version),bool_or(version=900029) FROM schema_migrations`).Scan(&highest, &archiveInstalled); err != nil || highest != 900028 || archiveInstalled {
+			t.Fatal("fixture did not stop at exact provider prefix", highest, archiveInstalled, err)
+		}
+		beforeLedger, beforeMarker := ledger(), marker()
 		cfg := r.pool.Config().ConnConfig.Copy()
 		cfg.User, cfg.Password = "billing_migrator", ""
 		connection, err := pgx.ConnectConfig(ctx, cfg)
@@ -254,15 +277,56 @@ func TestProviderBlindCommandReceiptPostgres(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if err = billingschema.DownOne(ctx, connection, loaded); err == nil || !strings.Contains(err.Error(), "55000") || !strings.Contains(err.Error(), "provider blind command receipts are forward-only") {
-			t.Fatal("highest migration rollback lost the proof boundary", err)
+		var prefix []migrations.Migration
+		var hasArchive bool
+		for _, migration := range loaded {
+			if migration.Version <= 900028 {
+				prefix = append(prefix, migration)
+			}
+			hasArchive = hasArchive || migration.Version == 900029
 		}
-		var after string
-		if err := r.pool.QueryRow(ctx, `SELECT jsonb_agg(to_jsonb(item) ORDER BY to_jsonb(item)::text)::text FROM schema_migrations item`).Scan(&after); err != nil || ledger != after || before != providerBlindFacts(t, r, ctx) {
-			t.Fatal("failed down changed ledger or domain facts", err)
+		if !hasArchive {
+			t.Fatal("full current input must include Archive 900029")
+		}
+		if _, err := billingschema.VerifyApplied(ctx, connection, prefix); err != nil {
+			t.Fatal("prefix migration identity", err)
+		}
+		err = billingschema.DownOne(ctx, connection, prefix)
+		var rejected *pgconn.PgError
+		if !errors.As(err, &rejected) || rejected.Code != "55000" || rejected.Message != "provider blind command receipts are forward-only" {
+			t.Fatal("provider-prefix rollback lost its exact proof boundary", err)
+		}
+		if ledger() != beforeLedger || marker() != beforeMarker || providerBlindFacts(t, r, ctx) != before {
+			t.Fatal("provider-prefix rejected down changed ledger, ACL, marker or financial facts")
+		}
+		if _, err := billingschema.VerifyApplied(ctx, connection, prefix); err != nil {
+			t.Fatal("rejected down changed prefix identity", err)
+		}
+		if err := billingschema.Up(ctx, connection, loaded); err != nil {
+			t.Fatal("full current Up after provider prefix", err)
 		}
 		if _, err := billingschema.VerifyApplied(ctx, connection, loaded); err != nil {
-			t.Fatal("failed down changed migration identity", err)
+			t.Fatal("full current migration identity", err)
+		}
+		var archiveMarker bool
+		if err := r.pool.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM schema_migrations WHERE version=900029) AND to_regclass('public.late_payment_review_archive_commands') IS NOT NULL`).Scan(&archiveMarker); err != nil || !archiveMarker {
+			t.Fatal("full Up did not install Archive 900029", archiveMarker, err)
+		}
+		fullLedger := ledger()
+		if err := billingschema.Up(ctx, connection, loaded); err != nil {
+			t.Fatal("full current Up replay", err)
+		}
+		if _, err := billingschema.VerifyApplied(ctx, connection, loaded); err != nil {
+			t.Fatal("full replay migration identity", err)
+		}
+		if fullLedger != ledger() || marker() != beforeMarker || before != providerBlindFacts(t, r, ctx) {
+			t.Fatal("full Up/replay changed provider ledger, ACL, marker or domain facts")
+		}
+		replay, err := r.EscalateProviderBlind(ctx, late.ID, actor, reason, key)
+		left, _ := json.Marshal(original)
+		right, _ := json.Marshal(replay)
+		if err != nil || !bytes.Equal(left, right) || before != providerBlindFacts(t, r, ctx) {
+			t.Fatal("full Up/replay changed original provider command receipt", err)
 		}
 	})
 }

@@ -724,8 +724,10 @@ export class AdminPlatformClient {
     catch (error) { throw financeNotDispatched(error, true); }
     return this.mutate('billing', `/admin/v1/late-payment-reviews/${encodeURIComponent(caseID)}/schedule`, 'POST', { command_protocol: commandProtocol, next_review_at: nextReview, reason }, key, undefined, 200);
   }
-  archiveLatePaymentReview(caseID) {
-    return this.mutate('billing', `/admin/v1/late-payment-reviews/${encodeURIComponent(caseID)}/archive`, 'POST', {}, '', undefined, 200);
+  archiveLatePaymentReview(caseID, key, commandProtocol) {
+    if (commandProtocol !== 1) throw financeNotDispatched(new Error('UNSUPPORTED_REVIEW_ARCHIVE_PROTOCOL'), true);
+    if (typeof key !== 'string' || key.trim().length < 8 || key.trim().length > 120) throw financeNotDispatched(new Error('INVALID_REVIEW_ARCHIVE_KEY'), true);
+    return this.mutate('billing', `/admin/v1/late-payment-reviews/${encodeURIComponent(caseID)}/archive-command`, 'POST', {}, key, undefined, 200);
   }
   escalateProviderBlind(caseID, reason, key, commandProtocol) {
     if (commandProtocol !== 1) throw financeNotDispatched(new Error('FINANCE_COMMAND_PROTOCOL_REQUIRED'), true);

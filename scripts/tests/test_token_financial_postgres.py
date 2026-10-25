@@ -1039,7 +1039,7 @@ class FinancialPostgresRunnerTests(unittest.TestCase):
         }
         self.assertEqual(RUNNER.REFUND_REQUIRED, expected)
         self.assertTrue(expected <= RUNNER.RETAINED_REQUIRED)
-        self.assertEqual(len(RUNNER.RETAINED_REQUIRED), 45)
+        self.assertEqual(len(RUNNER.RETAINED_REQUIRED), 46)
         valid = self.events(RUNNER.RETAINED_REQUIRED, RUNNER.BILLING_PACKAGE, children=True)
         options = {"package": RUNNER.BILLING_PACKAGE, "require_children": True, "exact_roots": True,
                    "children_required": RUNNER.BILLING_CHILD_REQUIRED}
@@ -1055,6 +1055,31 @@ class FinancialPostgresRunnerTests(unittest.TestCase):
             wrong = self.events(required, "unrelated/package", children=True)
             with self.subTest(package=package), self.assertRaises(RuntimeError):
                 RUNNER.verify_results(wrong, required, package=package)
+
+
+    def test_late_archive_receipt_root_is_selected_and_requires_completed_children(self):
+        root = "TestLatePaymentArchiveCommandReplayPostgres"
+        self.assertIn(root, RUNNER.RETAINED_REQUIRED)
+        self.assertIn(root, RUNNER.BILLING_CHILD_REQUIRED)
+        self.run_main_fixture()
+        command = self.fixture_commands[self.fixture_phases.index("retained-billing")]
+        self.assertIn(root, command[command.index("-run") + 1])
+        events = self.events({root}, RUNNER.BILLING_PACKAGE, children=True)
+        options = {"package": RUNNER.BILLING_PACKAGE, "exact_roots": True,
+                   "require_children": True, "children_required": {root}}
+        RUNNER.verify_results(events, {root}, **options)
+        for invalid in (
+            [],
+            [event for event in events if event.get("Test") != root],
+            [event for event in events if "/" not in event.get("Test", "")],
+            [event for event in events if not (event.get("Test") == root and event.get("Action") == "run")],
+            events + [{"Action": "skip", "Package": RUNNER.BILLING_PACKAGE, "Test": root}],
+            events + [{"Action": "skip", "Package": RUNNER.BILLING_PACKAGE, "Test": root + "/actual"}],
+            events + [{"Action": "fail", "Package": RUNNER.BILLING_PACKAGE, "Test": root + "/actual"}],
+            [{**event, "Package": RUNNER.TOKEN_PACKAGE} for event in events],
+        ):
+            with self.subTest(events=len(invalid)), self.assertRaises(RuntimeError):
+                RUNNER.verify_results(invalid, {root}, **options)
 
 
 if __name__ == "__main__":

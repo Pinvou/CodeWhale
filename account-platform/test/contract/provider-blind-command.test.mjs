@@ -12,7 +12,7 @@ test('only a fresh provider-blind action receives protocol provenance; old pendi
   const initializer = new Function('operation', 'action', 'detail', 'reason', 'resolution', 'nextReview', `${source.slice(start, end + 1)}\nreturn facts;`);
   for (const action of ['query', 'claim', 'resolve', 'schedule', 'archive', 'provider-blind']) {
     const current = initializer({}, action, { case: { case_id: 'owned-case' } }, ' original reason ', '', '');
-    assert.equal(current.commandProtocol, ['schedule', 'provider-blind'].includes(action) ? 1 : undefined);
+    assert.equal(current.commandProtocol, ['schedule', 'provider-blind', 'archive'].includes(action) ? 1 : undefined);
     const pending = Object.freeze({ action, id: 'old-case', reason: 'old original reason' });
     assert.equal(initializer({ pendingFacts: pending }, action, {}, 'new form reason', '', ''), pending);
     assert.equal(pending.commandProtocol, undefined);

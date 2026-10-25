@@ -206,7 +206,7 @@ type adminRepository interface {
 	ClaimLatePaymentReview(context.Context, uuid.UUID, uuid.UUID) (LatePaymentReviewCase, error)
 	ScheduleLatePaymentReview(context.Context, uuid.UUID, uuid.UUID, time.Time, string, string) (LatePaymentReviewCase, error)
 	RecordLatePaymentReviewQuery(context.Context, uuid.UUID, uuid.UUID, PaymentOrder, error) (LatePaymentReviewCase, error)
-	ArchiveLatePaymentReview(context.Context, uuid.UUID, uuid.UUID) (LatePaymentReviewCase, error)
+	ArchiveLatePaymentReview(context.Context, uuid.UUID, uuid.UUID, string) (LatePaymentReviewCase, error)
 	EscalateProviderBlind(context.Context, uuid.UUID, uuid.UUID, string, string) (LatePaymentReviewCase, error)
 }
 
@@ -629,7 +629,12 @@ func (s *Service) adminArchiveLatePaymentReview(w http.ResponseWriter, r *http.R
 	if !ok || !valid {
 		return
 	}
-	item, err := repository.ArchiveLatePaymentReview(r.Context(), caseID, adminActor(adminPrincipal(r)))
+	keys := r.Header.Values("Idempotency-Key")
+	if len(keys) != 1 || len(strings.TrimSpace(keys[0])) < 8 || len(strings.TrimSpace(keys[0])) > 120 {
+		api.WriteError(w, http.StatusBadRequest, "INVALID_REQUEST", "an archive command key is required", httpserver.RequestID(r.Context()))
+		return
+	}
+	item, err := repository.ArchiveLatePaymentReview(r.Context(), caseID, adminActor(adminPrincipal(r)), keys[0])
 	if err != nil {
 		s.writeError(w, r, err)
 		return

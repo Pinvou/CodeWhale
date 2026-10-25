@@ -34,7 +34,7 @@ import (
 // intentionally bind public; moving their tables into another schema is invalid.
 // Provider facts are controlled; this is not
 // live collection, supplier, NATS, or four-way reconciliation acceptance.
-func retainedFinanceRepository(t *testing.T) (*PostgresRepository, context.Context) {
+func retainedFinanceRepository(t *testing.T, throughVersion ...int64) (*PostgresRepository, context.Context) {
 	t.Helper()
 	raw := os.Getenv("PINVOU_TEST_BILLING_DATABASE_URL")
 	if raw == "" {
@@ -101,6 +101,25 @@ func retainedFinanceRepository(t *testing.T) (*PostgresRepository, context.Conte
 	loaded, err := migrations.Load("../../migrations/billing")
 	if err != nil {
 		t.Fatal(err)
+	}
+	// Ordinary fixtures install every current migration. Only an explicit
+	// versioned-contract fixture may stop at its real historical prefix.
+	if len(throughVersion) > 1 {
+		t.Fatal("one exact migration prefix is required")
+	}
+	if len(throughVersion) == 1 {
+		var prefix []migrations.Migration
+		found := false
+		for _, migration := range loaded {
+			if migration.Version <= throughVersion[0] {
+				prefix = append(prefix, migration)
+			}
+			found = found || migration.Version == throughVersion[0]
+		}
+		if !found {
+			t.Fatal("requested migration prefix is not installed input")
+		}
+		loaded = prefix
 	}
 	if err = billingschema.Up(ctx, connection, loaded); err != nil {
 		t.Fatal(err)
@@ -909,7 +928,7 @@ func TestRetainedLateClaimQueryAuthority(t *testing.T) {
 			if _, err = r.RecordLatePaymentReviewQuery(ctx, item.ID, actor, order, queryErr); err != nil {
 				t.Fatal(err)
 			}
-			_, err = r.ArchiveLatePaymentReview(ctx, item.ID, actor)
+			_, err = r.ArchiveLatePaymentReview(ctx, item.ID, actor, "archive-"+uuid.NewString())
 			if mode == "failed_query_reject" {
 				if !errors.Is(err, ErrConflict) {
 					t.Fatalf("failed query after newer claim must not authorize archive: error=%v", err)

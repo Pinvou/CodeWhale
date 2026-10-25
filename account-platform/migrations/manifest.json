@@ -2114,6 +2114,16 @@
         "file": "900028_provider_blind_command_receipts.up.sql",
         "version": 900028,
         "sha256": "6e9acd4ca2e514b74fd58a66259efcc90c001c4451559f872d3a37b86fd488f1"
+      },
+      {
+        "file": "900029_late_payment_archive_commands.down.sql",
+        "version": 900029,
+        "sha256": "316d4b543255c46c957b2e8c60f0fbca5eb0a4aa2c1c4285bd863e960052ddd5"
+      },
+      {
+        "file": "900029_late_payment_archive_commands.up.sql",
+        "version": 900029,
+        "sha256": "e6f61d5d2a2a1ce0521f1cc13c39cb4f70f6aa175427103af7c9205ab66784f8"
       }
     ],
     "payment-simulator": [
