@@ -540,15 +540,23 @@ test('web capacity-evict loops cancel stream timers before dropping the buffer',
   // Static pin (review of the parity backflow): the two prune loops gained a
   // cancelStreamTimers(id) pairing to match purgeSessionBuffer. A removed
   // cancel would let a stray render timer outlive its evicted buffer. Both
-  // loops must keep the cancel between the stash guard and the delete.
+  // loops must keep the cancel between the stash guard and the delete. The
+  // pin is anchored per function body: a file-global lazy regex can borrow a
+  // later cancel+delete pair (purgeSessionBuffer's) and mask the removal
+  // from a single loop.
   const source = read('bridge.js');
-  const pins = source.match(
-    /stashEvictedSessionDraft\(id, buf\)\) continue;[\s\S]*?cancelStreamTimers\(id\);[\s\S]*?delete sessionStates\[id\];/g,
-  ) || [];
-  assert.equal(
-    pins.length, 2,
-    'both capacity-evict loops (scheduled + all-session LRU) must cancel stream timers before the delete',
-  );
+  const bodyOf = signature => {
+    const start = source.indexOf(signature);
+    assert.ok(start > 0, `${signature} must exist`);
+    const end = source.indexOf('\n  function ', start + 1);
+    return source.slice(start, end > 0 ? end : undefined);
+  };
+  const loopPin = /stashEvictedSessionDraft\(id, buf\)\) continue;[\s\S]*?cancelStreamTimers\(id\);[\s\S]*?delete sessionStates\[id\];/;
+  for (const name of ['function pruneScheduledSessionBuffers', 'function pruneSessionBuffers']) {
+    const hits = bodyOf(name).match(new RegExp(loopPin.source, 'g')) || [];
+    assert.equal(hits.length, 1,
+      `${name} must keep exactly one cancelStreamTimers(id) between the stash guard and the delete`);
+  }
 });
 
 test('web scheduled-run reopen: after eviction, the scheduled open restores the draft via the getBuffer rebuild', async () => {
