@@ -824,14 +824,17 @@ fn is_agent_readonly_git(tokens: &[String]) -> bool {
     readonly_tokens_admitted(&reduced.join(" "))
 }
 
-/// `git branch` in listing form only: `--show-current` with nothing else, or
+/// `git branch` in listing form only: bare, `--show-current`, flag-only
+/// spellings of known read-only switches (`git branch -a`), or
 /// `--list`/`-l` (then every positional is a match pattern, not a new
-/// branch). A bare `git branch <name>` stays refused. `-l` has meant
+/// branch). A bare `git branch <name>` stays refused — without `--list`
+/// a positional would create a branch. `-l` has meant
 /// `--list` only since git 2.20; on the pre-2018 gits where it meant
 /// `--create-reflog` this parser would be wrong, but every supported
 /// toolchain ships ≥ 2.20.
 fn is_agent_readonly_git_branch(args: &[String]) -> bool {
-    if args.len() == 1 && args[0] == "--show-current" {
+    if args.is_empty() {
+        // Bare `git branch` lists local branches; nothing to inspect.
         return true;
     }
     let switches: &[&str] = &[
@@ -862,7 +865,9 @@ fn is_agent_readonly_git_branch(args: &[String]) -> bool {
         "--no-merged",
     ];
     if !args.iter().any(|token| token == "--list" || token == "-l") {
-        return false;
+        // Every token must be a known read-only switch; a value flag or an
+        // unknown flag without `--list` stays refused (fail-closed).
+        return args.iter().all(|token| switches.contains(&token.as_str()));
     }
     let mut index = 0;
     while index < args.len() {
@@ -2215,6 +2220,11 @@ mod tests {
             "git branch -a --list codex/*",
             "git branch --list -v",
             "git branch -l feature/*",
+            // Bare and flag-only listing spellings (real git: local/all
+            // branches) — the most idiomatic probe a read-only child makes.
+            "git branch",
+            "git branch -a",
+            "git branch -r -v",
             "git worktree list",
             "git worktree list --porcelain",
             "git worktree list -z",
@@ -2291,8 +2301,12 @@ mod tests {
             // A value flag must never swallow a mutating flag: git's
             // `--column` takes only the attached `=<style>` form, so the
             // separate-word spelling leaves `-d` as a real flag the checker
-            // has to see and refuse.
+            // has to see and refuse. The same rule pins the true value-flag
+            // path (`--sort`/`--expire` consume the next word): a
+            // dash-prefixed "value" is refused, not swallowed uninspected.
             "git branch --list --column -d x",
+            "git branch --list --sort -d x",
+            "git worktree list --expire -v",
             "git branch -D x",
             "git branch --edit-description",
             "git branch -u origin/main",
@@ -2362,7 +2376,16 @@ mod tests {
     #[test]
     fn parallel_classifier_stays_unchanged_for_parent_auto_approve() {
         // The relaxations belong to the agent surface only; the parent's
-        // parallel auto-approve chunks keep rejecting them.
+        // parallel auto-approve chunks admit only their own bounded prefix
+        // list. That list carries `git rev-parse` (the orientation probe a
+        // worktree child needs) against the same bounded option table as the
+        // interactive surface — pinned here in both directions; the
+        // branch/worktree listing parsers stay interactive-only.
+        assert!(is_parallel_readonly_command(
+            "git rev-parse --show-toplevel"
+        ));
+        assert!(!is_parallel_readonly_command("git rev-parse --parseopt x"));
+        assert!(!is_parallel_readonly_command("git branch --list -d x"));
         for command in [
             "git log | head -5",
             "grep TODO crates/ | head",
