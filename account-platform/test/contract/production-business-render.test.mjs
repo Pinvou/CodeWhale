@@ -318,3 +318,24 @@ test('manual production preflight CLIs use only pinned renderer config/template 
     assert.equal(result.status, 0, result.stderr); assert.equal(JSON.parse(result.stdout).decision, 'BUSINESS_CONFIG_VALID');
   });
 });
+
+test('production Helm requires explicit operator on-call users instead of inherited examples', helm, () => {
+  const f = currentRenderFixture('helm', 'models');
+  try {
+    const values = JSON.parse(readFileSync(f.recipe.valuesFile, 'utf8'));
+    const explicit = values.global.manualReviewOnCallUserIds;
+    assert.ok(Array.isArray(explicit) && explicit.length > 0, 'the existing positive fixture must explicitly configure on-call users');
+    delete values.global.manualReviewOnCallUserIds;
+    writeFileSync(f.recipe.valuesFile, JSON.stringify(values));
+    assert.throws(() => f.rerender(), /production_render_renderer_failed/);
+    values.global.manualReviewOnCallUserIds = explicit;
+    writeFileSync(f.recipe.valuesFile, JSON.stringify(values));
+    f.rerender();
+    const result = checkProductionBusiness(f.render, f.inventory);
+    assert.equal(result.decision, 'BUSINESS_CONFIG_VALID');
+    const configured = workloads(f.render, f.render.secrets)
+      .filter(w => w.environment.MANUAL_REVIEW_ON_CALL_USER_IDS !== undefined);
+    assert.ok(configured.length > 0);
+    for (const w of configured) assert.equal(w.environment.MANUAL_REVIEW_ON_CALL_USER_IDS, explicit.join(','));
+  } finally { f.dispose(); }
+});

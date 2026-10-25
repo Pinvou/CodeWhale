@@ -315,3 +315,19 @@ repository workflows. Default contract success therefore does not prove either
 renderer ran. Record the exact command, input and result for an explicit run;
 local isolated rendering is not proof of a successful remote Actions run or
 production rollout. See [release validation and environment boundaries](../../runbooks/model-token-release.md#9-g6-持续门禁与环境交接).
+
+### Production on-call escalation chain
+
+`values-production-new.yaml` intentionally leaves
+`global.manualReviewOnCallUserIds` empty. Its existing schema requires at least
+one unique UUID, so production rendering fails until operator values explicitly
+provide the ordered stable user IDs of the real on-call escalation chain.
+The schema validates configuration shape, not whether an Account user exists,
+is active, or is currently on call; verify those facts before deployment.
+Development defaults and runtime escalation/SLA behavior are unchanged.
+
+For upgrades, include the current production values and the verified operator
+override. Using only `helm --reuse-values` can retain earlier example IDs;
+this default change does not repair saved release values or historical case
+owners. If those values were used, inspect the deployment and use the existing
+audited case-assignment process rather than automatically rewriting history.

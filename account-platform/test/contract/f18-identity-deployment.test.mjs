@@ -15,6 +15,8 @@ const newApi = ['newApi.tlsSecretName=fixture-only-newapi', 'newApi.caConfigMap=
 function render(overrides = [], production = true) {
   const args = ['template', 'fixture', chart,
     ...(production ? ['-f', path.join(chart, 'values-production-new.yaml')] : []),
+    // Config-only fixture member; production values require real deployed on-call users.
+    ...(production ? ['--set-json', 'global.manualReviewOnCallUserIds=["00000000-0000-4000-8000-000000000707"]'] : []),
     ...[...newApi, ...overrides].flatMap(value =>
       [/^(keycloak|sms)\.enabled=(true|false)$/.test(value) ? '--set' : '--set-string', value])];
   return spawnSync(process.env.PINVOU_TEST_KMS_HELM_BINARY || 'helm', args,
