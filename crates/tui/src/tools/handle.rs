@@ -250,7 +250,8 @@ impl ToolSpec for HandleReadTool {
         "Read a bounded projection from a var_handle returned by tools such \
          as RLM sessions or sub-agents. This does not read artifact ids \
          (`art_...`), tool-call ids (`call_...`), SHA refs, or files; use \
-         retrieve_tool_result for spilled tool results/artifacts and \
+         retrieve_tool_result for spilled tool results/artifacts (activate it via \
+         tool_search first if absent; if neither route is available, narrow the original tool call) and \
          the `read` tool for workspace files. Provide \
          exactly one projection: `slice` for char/line slices, `range` for \
          one-based line ranges, `count` for metadata counts, `jsonpath` \
@@ -403,13 +404,17 @@ fn parse_handle(value: &Value) -> Result<VarHandle, ToolError> {
         if looks_like_tool_result_ref(raw) {
             return Err(ToolError::invalid_input(
                 "handle_read only accepts var_handle objects or `session_id/name` strings. \
-                 This looks like an artifact/tool-result ref; use `retrieve_tool_result` instead.",
+                 This looks like an artifact/tool-result ref; use `retrieve_tool_result` instead \
+                 (activate it via tool_search first if absent; if neither route is available, \
+                 narrow the original tool call).",
             ));
         }
         let Some((session_id, name)) = raw.rsplit_once('/') else {
             return Err(ToolError::invalid_input(
                 "handle_read: string handles must use `session_id/name`. \
-                 For `art_...`, `call_...`, SHA, or file refs, use `retrieve_tool_result`.",
+                 For `art_...`, `call_...`, SHA, or file refs, use `retrieve_tool_result` \
+                 (activate it via tool_search first if absent; if neither route is available, \
+                 narrow the original tool call).",
             ));
         };
         return Ok(VarHandle {
@@ -1028,6 +1033,9 @@ mod tests {
         let message = err.to_string();
         assert!(message.contains("retrieve_tool_result"));
         assert!(message.contains("artifact/tool-result ref"));
+        assert!(message.contains("activate it via tool_search first"));
+        assert!(message.contains("if neither route is available"));
+        assert!(HandleReadTool.description().contains("activate it via"));
     }
 
     // === #5472 findings 4-5: the store is bounded across all sessions ===

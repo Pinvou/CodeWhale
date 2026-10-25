@@ -16272,13 +16272,10 @@ fn annotate_child_model_error(
 }
 
 /// Char budget above which a sub-agent summary is treated as a large dump and
-/// head+tail truncated. Mirrors `TOOL_RESULT_SENT_CHAR_BUDGET` in
-/// `crates/tui/src/client/chat.rs:1377` so sub-agent summaries use the same
-/// threshold as regular tool outputs. Duplicated locally to avoid coupling the
-/// sub-agent module to the wire-compaction internals.
+/// head+tail truncated. This producer limit is independent of the engine's
+/// route-aware inline budget; the full report is retained before this cut.
 const SUBAGENT_SUMMARY_CHAR_BUDGET: usize = 12_000;
-/// Head/tail slice sizes when truncating; mirror the wire constants
-/// (`TOOL_RESULT_HEAD_CHARS`/`TOOL_RESULT_TAIL_CHARS`, chat.rs:1378-1379).
+/// Head/tail slice sizes for the producer's report preview.
 const SUBAGENT_SUMMARY_HEAD_CHARS: usize = 4_000;
 const SUBAGENT_SUMMARY_TAIL_CHARS: usize = 4_000;
 
@@ -16326,7 +16323,8 @@ fn stamp_subagent_summary_with_ref(raw: &str, report_ref: Option<&str>) -> (Stri
         Some(reference) => format!(
             "the full report is retained as artifact {reference} — read the elided middle ({omitted} \
 chars) with retrieve_tool_result using that ref (mode=lines/query/bytes). Re-verify material claims \
-before relying on them."
+before relying on them. If retrieve_tool_result is absent, activate it via tool_search first; if \
+neither route is available, re-open the child or read changed files directly."
         ),
         None => format!(
             "the elided middle ({omitted} chars) is not in the spillover store and cannot be \
