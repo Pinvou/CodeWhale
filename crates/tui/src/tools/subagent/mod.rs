@@ -4119,6 +4119,60 @@ impl SubAgentManager {
         Ok(released)
     }
 
+    /// Isolated claims live in the worktree's path frame, but a
+    /// cwd-narrowed child's tool paths resolve against its own workspace.
+    /// Map each relative path into the worktree frame by prefixing the
+    /// child workspace's offset from the claim's recorded root, so the
+    /// natural spelling of an in-scope file validates — the shared lane
+    /// re-anchors through `coordination_workspace_prefix`, and without an
+    /// isolated analogue every natural spelling of a scoped, cwd-narrowed
+    /// worktree child was refused. Absolute spellings, legacy `None`
+    /// roots, and undecidable workspace/root drift are kept as-is and
+    /// still judged in the worktree frame.
+    fn reanchor_isolated_mutation_paths(
+        &self,
+        owner: &str,
+        worktree_root: Option<&str>,
+        paths: &[String],
+    ) -> Vec<String> {
+        let Some(root) = worktree_root else {
+            return paths.to_vec();
+        };
+        let workspace = self
+            .worker_records
+            .get(owner)
+            .map(|record| record.spec.workspace.clone())
+            .or_else(|| self.agents.get(owner).map(|agent| agent.workspace.clone()));
+        let Some(workspace) = workspace else {
+            return paths.to_vec();
+        };
+        let normalized = normalize_subagent_workspace(&workspace);
+        let Ok(offset) = normalized.strip_prefix(Path::new(root)) else {
+            return paths.to_vec();
+        };
+        let offset = offset.to_string_lossy();
+        if offset.is_empty() {
+            return paths.to_vec();
+        }
+        paths
+            .iter()
+            .map(|path| {
+                if path.starts_with('/') {
+                    // Already outside the repo-relative frame; keep it so
+                    // the containment check refuses it unchanged.
+                    return path.clone();
+                }
+                // Lexically resolve rather than plain-prefix: a `..` in the
+                // tool path must land on its true worktree-frame target, not
+                // prefix-match past the scoped root.
+                match lexically_under(&offset, path) {
+                    Some(joined) => joined,
+                    None => path.clone(),
+                }
+            })
+            .collect()
+    }
+
     fn validate_write_scope(&self, owner: &str, paths: &[String]) -> Result<(), String> {
         let Some(claim) = self
             .coordination
@@ -4130,11 +4184,16 @@ impl SubAgentManager {
                 "agent '{owner}' has no registered write claim; declare scope at launch before mutation"
             ));
         };
+        let scoped = if claim.isolated_worktree {
+            self.reanchor_isolated_mutation_paths(owner, claim.worktree_root.as_deref(), paths)
+        } else {
+            paths.to_vec()
+        };
         let (_, paths) = self.namespace_claim_paths_for_owner(
             owner,
             claim.isolated_worktree,
             Vec::new(),
-            paths.to_vec(),
+            scoped,
         )?;
         if let Some(path) = paths.iter().find(|path| !claim.claim.contains_path(path)) {
             return Err(format!(
@@ -5103,6 +5162,21 @@ impl SubAgentManager {
                 .find(|record| record.claim.owner == owner)
                 && record.isolated_worktree
                 && let Some(root) = record.worktree_root.as_deref()
+                && workspace.starts_with(root)
+            {
+                return root.to_string();
+            }
+            // A swept or evicted row leaves the ancestor's launch manifest
+            // as the only durable record of its worktree key — a claim-less
+            // worktree child never had a row at all. Without this leg its
+            // own cwd-narrowed descendants would each key on their
+            // individual workspaces and never serialize against each other.
+            if let Some(record) = self.worker_records.get(&owner)
+                && let Some(root) = record
+                    .spec
+                    .launch_manifest
+                    .as_ref()
+                    .and_then(|manifest| manifest.worktree_root.as_deref())
                 && workspace.starts_with(root)
             {
                 return root.to_string();
@@ -6089,7 +6163,19 @@ impl SubAgentManager {
                         .get(&agent_id)
                         .and_then(|record| worker_coordination_claim(&record.spec).ok().flatten())
                 });
-            let restored_worktree_root = restored_claim.and_then(|(_, _, root)| root);
+            // The row's recorded root is the freshest serialization key;
+            // the manifest's is the durable one. A swept or evicted row
+            // must not re-key a cwd-narrowed worktree child on its own
+            // subdirectory — the manifest root keeps the resumed claim in
+            // the worktree's serialization domain.
+            let manifest_worktree_root = self
+                .worker_records
+                .get(&agent_id)
+                .and_then(|record| record.spec.launch_manifest.as_ref())
+                .and_then(|manifest| manifest.worktree_root.clone());
+            let restored_worktree_root = restored_claim
+                .and_then(|(_, _, root)| root)
+                .or(manifest_worktree_root);
             // The spec's launch manifest durably pins that this child was
             // spawned into an isolated worktree, independent of the claim
             // lifecycle. Keying isolation on the claim alone resumed a
@@ -6810,6 +6896,24 @@ impl SubAgentManager {
         }
         let durable_launch_snapshot =
             write_capable.then(|| (self.worker_records.clone(), self.coordination.clone()));
+        // Every isolated child — claim or claim-less — durably records the
+        // serialization key it (or its descendants) must contend under: the
+        // containing worktree, not the child's own (possibly cwd-narrowed)
+        // workspace. The ledger row can be swept or evicted while the child
+        // is parked; the manifest is what survives.
+        let claimed_worktree_root = isolated_worktree.then(|| {
+            options
+                .write_claim_worktree_root
+                .clone()
+                .unwrap_or_else(|| {
+                    self.containing_worktree_root(
+                        runtime.parent_agent_id.as_deref(),
+                        normalize_subagent_workspace(&agent.workspace)
+                            .to_string_lossy()
+                            .into_owned(),
+                    )
+                })
+        });
         let persisted_claim = if write_capable {
             options
                 .write_claim
@@ -6822,19 +6926,7 @@ impl SubAgentManager {
                         self.namespace_write_claim(&agent.workspace, isolated_worktree, claim)?
                     };
                     let active_owners = self.active_coordination_owners();
-                    let worktree_root = isolated_worktree.then(|| {
-                        options
-                            .write_claim_worktree_root
-                            .clone()
-                            .unwrap_or_else(|| {
-                                self.containing_worktree_root(
-                                    runtime.parent_agent_id.as_deref(),
-                                    normalize_subagent_workspace(&agent.workspace)
-                                        .to_string_lossy()
-                                        .into_owned(),
-                                )
-                            })
-                    });
+                    let worktree_root = claimed_worktree_root.clone();
                     let exempt_owners =
                         self.worktree_claim_exemptions(runtime.parent_agent_id.as_deref());
                     self.coordination.register_claim(
@@ -6959,6 +7051,7 @@ impl SubAgentManager {
                 resume_identity: Some(agent.session_name.clone()),
                 generation: 1,
                 resume_from_agent_id: options.resume_from_agent_id.clone(),
+                worktree_root: claimed_worktree_root.clone(),
             }),
         };
         agent.work_lifecycle =
@@ -13476,6 +13569,30 @@ fn normalize_claim_path(path: &str) -> Result<String, String> {
     } else {
         Ok(components.join("/"))
     }
+}
+
+/// Join `offset` and `path` under one lexical spelling, resolving `.` and
+/// `..` components. Returns `None` when `path` escapes above `offset`
+/// entirely; the caller then keeps the raw spelling and lets the claim's
+/// own containment check refuse it.
+fn lexically_under(offset: &str, path: &str) -> Option<String> {
+    let mut components: Vec<&str> = offset
+        .split('/')
+        .filter(|component| !component.is_empty() && *component != ".")
+        .collect();
+    for component in path.split('/') {
+        match component {
+            "" | "." => {}
+            ".." => {
+                components.pop()?;
+            }
+            other => components.push(other),
+        }
+    }
+    if components.is_empty() {
+        return Some(".".to_string());
+    }
+    Some(components.join("/"))
 }
 
 fn coordination_workspace_prefix(

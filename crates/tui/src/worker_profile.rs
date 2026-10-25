@@ -366,6 +366,15 @@ pub struct ChildLaunchManifest {
     /// the lineage without inspecting the transcript.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub resume_from_agent_id: Option<String>,
+    /// Durable serialization key for an isolated worktree child: the
+    /// canonical worktree root its write claim registers under. The ledger
+    /// row can be swept or evicted while the child is parked (or never
+    /// exist for a claim-less worktree child), and a cwd-narrowed child
+    /// must not re-key on its own subdirectory when the row is gone —
+    /// resume and descendant spawns fall back to this root to stay in the
+    /// worktree's serialization domain. `None` predates serialization.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub worktree_root: Option<String>,
 }
 
 #[cfg(test)]
