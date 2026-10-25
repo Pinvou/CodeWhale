@@ -25,7 +25,7 @@ import { useCompactViewport, useVisualViewportHeight } from '../hooks/useViewpor
 import { useSystemDarkMode } from '../hooks/useSystemDarkMode.js';
 import { useModalIsolation } from '../hooks/useModalIsolation.js';
 import { refreshModelAccessAfterAuthentication } from '../features/settings/model-access.js';
-import { COLOR_SCHEME_STORAGE_KEY, normalizeColorScheme, resolveTheme } from '../shared/color-scheme.js';
+import { COLOR_SCHEME_STORAGE_KEY, normalizeColorScheme, readStoredColorScheme, resolveTheme } from '../shared/color-scheme.js';
 import { DEFAULT_CHAT_TITLES, dict, createLatestLanguageGate, ensureLanguage, ensureLanguageWithZhFallback, LANG_TO_TAG, initialSystemLanguage, SEARCH_KEY_PROVIDERS, TAG_TO_LANG, zhDict, accountPlatformCopy } from '../shared/i18n.js';
 import { mountWhenLanguageReady } from '../shared/entry-boot.js';
 import { formatSessionDate, localDateKey, formatDateGroupLabel } from '../shared/date-utils.js';
@@ -355,20 +355,15 @@ const App = () => {
       // theme to render; light when the system preference is undeterminable
       // (see shared/color-scheme.js).
       const systemDark = useSystemDarkMode();
-      const [colorScheme, setColorScheme] = useState(() => {
-        // Seed from the persisted scheme so the class the index.html pre-paint
-        // script applied survives until real settings arrive: reconciling from
-        // plain 'system' first would strip a correct pre-paint class whenever
-        // the stored pick differs from the OS at boot. Mirrors the pre-paint
-        // rule exactly: stored light/dark wins, anything else follows the OS.
-        // Web stores the raw choice here ('system' falls through to the
-        // default); desktop stores the resolved scheme as a boot cache.
-        try {
-          const stored = window.localStorage.getItem(COLOR_SCHEME_STORAGE_KEY);
-          if (stored === 'light' || stored === 'dark') return stored;
-        } catch { /* storage may be unavailable */ }
-        return 'system';
-      });
+      // Seed from the persisted scheme (readStoredColorScheme mirrors the
+      // pre-paint rule: stored light/dark wins, anything else follows the OS)
+      // so the class the index.html pre-paint script applied survives until
+      // real settings arrive: reconciling from plain 'system' first would
+      // strip a correct pre-paint class whenever the stored pick differs from
+      // the OS at boot. Web stores the raw choice in localStorage ('system'
+      // falls through to the default); desktop stores the resolved scheme as
+      // a boot cache.
+      const [colorScheme, setColorScheme] = useState(readStoredColorScheme);
       const activeTheme = resolveTheme(colorScheme, systemDark);
       const [personalAccountOpen, setPersonalAccountOpen] = useState(false);
       const personalAccountClient = useMemo(() => bridge.available && bridge.accountPlatform
