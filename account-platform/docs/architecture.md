@@ -403,11 +403,11 @@ Provider 确认支付成功后，Billing 以 Provider 流水为幂等边界创�
 
 ## 11. 审计证据与主要风险
 
-本次代码级校准使用以下验证：
+以下保留原代码级校准记录；旧计数和通过措辞不是当前 head 的执行证据。已退役入口改列历史来源，当前复跑入口与历史记录分别说明：
 
 - `node scripts/account-platform.mjs test unit`：所有 Go 包测试通过（项目内置 Go 工具链，`nomsgpack` 标签）。
 - `npm test`（`account-platform/`）：OpenAPI lint 和 194 个合同测试通过。
-- `node --test tests/account_platform_state.test.mjs tests/ui_language_coverage.test.mjs tests/scheduled_tasks_unit.test.js`（`pinvou3-app/`）：41 个测试通过。
+- 原状态测试已退出当前树，其[历史源码](https://github.com/Pinvou/pinvou3/blob/828242031c42911099792ec78c1f746ed8620c49/pinvou3-app/tests/account_platform_state.test.mjs)只供追溯，原41项计数不适用于现行文件集合。当前可在 `pinvou3-app/` 执行 `node --test tests/account_platform_session_binding.test.mjs tests/account_platform_personal_f01.test.mjs tests/ui_language_coverage.test.mjs tests/scheduled_tasks_unit.test.js`，定向核验会话绑定、个人入口、语言和计划任务；结果以实际日志为准，不代表完整前端验收。
 - `node scripts/account-platform.mjs verify`：Go 单测与 Vet、合同测试、架构守卫和差异检查通过。
 
 | 项目 | 当前事实 | 风险/下一步 |
