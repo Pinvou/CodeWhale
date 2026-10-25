@@ -151,3 +151,16 @@ their existing behavior; 044 also checks references from approval requests.
 The isolated numeric-history tests are not deployment acceptance or permission
 to erase retained history. They include an empty-history original 031 positive
 control, and do not bypass the current high-numbered forward-only migrations.
+
+### Portal 支付来源签名
+
+个人及组织的 Portal 创建订单、查询单笔订单也使用上面的既有签名协议，
+不受管理概览 gate 是否开启影响。部署前须在 Portal 和 Token 的既有私密环境文件中
+配置相同的 `TOKEN_ADMIN_PAGINATION_CURSOR_HMAC_KEY_BASE64`（解码至少32字节）；
+Helm 对应既有 runtime Secret 的 `token-admin-pagination-cursor-hmac-key-base64`。
+不新增密钥渠道，也不要将真实值写入 values、浏览器或日志。
+缺少有效 Portal 签名密钥时，这四类支付入口返回503 `PAYMENT_SOURCE_UNAVAILABLE`，
+不转发至 Token 或 Billing；不会将所有用户折叠到代理IP的支付来源桶。
+配置缺失不改变现有启动规则、直连桌面支付、商品/订单列表、钱包读取或其它功能。
+Token仍只接受来自既有受控peer、绑定最终方法/完整URI/规范IP的有效签名；
+浏览器自报来源/签名不会透传。配置投递和真实部署验收须另行完成。

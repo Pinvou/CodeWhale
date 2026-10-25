@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"net"
 	"net/http"
+	"strings"
 )
 
 func tokenPageQuerySigningPath(method, resource string) bool {
@@ -32,4 +33,21 @@ func (s *Service) signTokenPageQuery(request *http.Request, source string) bool 
 	request.Header.Set("X-Pinvou-Client-Source", canonical)
 	request.Header.Set("X-Pinvou-Client-Source-Signature", hex.EncodeToString(mac.Sum(nil)))
 	return true
+}
+
+// Only create and provider-query handlers consume a trusted payment source.
+// Product/order lists, balances, and close/claim operations retain their
+// existing contracts and do not acquire a new key requirement.
+func paymentSourceSigningPath(method, resource string) bool {
+	if method == http.MethodHead {
+		method = http.MethodGet
+	}
+	parts := strings.Split(strings.TrimPrefix(resource, "/"), "/")
+	if len(parts) >= 3 && parts[0] == "v1" && parts[1] == "recharge" && parts[2] == "orders" {
+		return method == http.MethodPost && len(parts) == 3 || method == http.MethodGet && len(parts) == 4 && pathUUID(parts[3])
+	}
+	if len(parts) >= 5 && parts[0] == "v1" && parts[1] == "organizations" && parts[2] != "" && parts[3] == "recharge" && parts[4] == "orders" {
+		return method == http.MethodPost && len(parts) == 5 || method == http.MethodGet && len(parts) == 6 && pathUUID(parts[5])
+	}
+	return false
 }

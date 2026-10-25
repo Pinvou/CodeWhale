@@ -96,7 +96,7 @@ func (s *Service) createRechargeOrder(w http.ResponseWriter, r *http.Request) {
 		api.WriteError(w, http.StatusServiceUnavailable, "BILLING_UNAVAILABLE", "the active wallet is unavailable", httpserver.RequestID(r.Context()))
 		return
 	}
-	payload, err := s.billing.CreateRechargeOrder(paymentSourceContext(r), resolved.UserID, walletID, body.ProductID, strings.ToUpper(body.Channel), *resolved.Mobile, commerceStatus, r.Header.Get("Idempotency-Key"))
+	payload, err := s.billing.CreateRechargeOrder(s.paymentSourceContext(r), resolved.UserID, walletID, body.ProductID, strings.ToUpper(body.Channel), *resolved.Mobile, commerceStatus, r.Header.Get("Idempotency-Key"))
 	if err != nil {
 		var limited *BillingHTTPError
 		if errors.As(err, &limited) && limited.Status == http.StatusTooManyRequests {
@@ -126,7 +126,7 @@ func (s *Service) getRechargeOrder(w http.ResponseWriter, r *http.Request) {
 		api.WriteError(w, http.StatusBadRequest, "INVALID_REQUEST", "invalid recharge order", httpserver.RequestID(r.Context()))
 		return
 	}
-	payload, err := s.billing.RechargeOrder(paymentSourceContext(r), orderID, resolved.UserID)
+	payload, err := s.billing.RechargeOrder(s.paymentSourceContext(r), orderID, resolved.UserID)
 	if err != nil {
 		var limited *BillingHTTPError
 		if errors.As(err, &limited) && limited.Status == http.StatusTooManyRequests {

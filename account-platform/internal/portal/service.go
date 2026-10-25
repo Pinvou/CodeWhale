@@ -957,13 +957,18 @@ func (s *Service) forward(w http.ResponseWriter, r *http.Request, upstream *url.
 			request.Header.Set("X-Pinvou-Client-Source", source)
 		}
 	}
-	if upstream == s.config.TokenGatewayURL && strings.HasPrefix(resource, "/v1/recharge/") {
+	if upstream == s.config.TokenGatewayURL && paymentSourceSigningPath(r.Method, resource) {
 		source, valid := s.clientRiskSource(r)
 		if !valid {
 			api.WriteError(w, http.StatusBadRequest, "INVALID_REQUEST_SOURCE", "the request source is invalid", httpserver.RequestID(r.Context()))
 			return
 		}
-		request.Header.Set("X-Forwarded-For", source)
+		// Payment source admission requires the existing shared signing key.
+		// Never collapse all Portal users into the proxy peer's source bucket.
+		if !s.signTokenPageQuery(request, source) {
+			api.WriteError(w, http.StatusServiceUnavailable, "PAYMENT_SOURCE_UNAVAILABLE", "the payment source authority is unavailable", httpserver.RequestID(r.Context()))
+			return
+		}
 	}
 	if upstream == s.config.TokenGatewayURL && tokenPageQuerySigningPath(r.Method, resource) {
 		source, valid := s.clientRiskSource(r)

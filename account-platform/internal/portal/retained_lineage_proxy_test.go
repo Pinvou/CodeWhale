@@ -205,6 +205,8 @@ func TestF01ProxyExactScopeAndAnonymousRegistrationProof(t *testing.T) {
 	defer upstream.Close()
 	store := newMemoryStore()
 	service := testService(t, store)
+	// This delivered-payment positive explicitly supplies the shared source key.
+	service.config.TokenAdminProxyHMACKey = []byte("controlled-retained-payment-source-key-32")
 	service.config.AccountURL = parseTestURL(t, upstream.URL)
 	service.config.TokenGatewayURL = service.config.AccountURL
 	service.config.BillingURL = service.config.AccountURL

@@ -6,10 +6,8 @@ import (
 	"errors"
 	"fmt"
 
-	"net"
 	"net/http"
 	"net/url"
-	"strings"
 
 	"github.com/google/uuid"
 )
@@ -75,19 +73,13 @@ func (c *HTTPBillingClient) Packages(ctx context.Context, userID, walletID uuid.
 
 type paymentSourceContextKey struct{}
 
-func paymentSourceContext(r *http.Request) context.Context {
-	source := "source:unknown"
-	forwarded := strings.Split(r.Header.Get("X-Forwarded-For"), ",")
-	for index := len(forwarded) - 1; index >= 0; index-- {
-		if candidate := strings.TrimSpace(forwarded[index]); net.ParseIP(candidate) != nil {
-			source = candidate
-			break
-		}
-	}
-	if source == "source:unknown" {
-		if host, _, err := net.SplitHostPort(r.RemoteAddr); err == nil {
-			source = host
-		}
+// Public callers cannot choose the source bucket. A Portal-signed source is
+// accepted by the same peer/signature policy used by management queries;
+// otherwise the immediate transport peer owns this request's source.
+func (s *Service) paymentSourceContext(r *http.Request) context.Context {
+	source := s.trustedAdminQuerySource(r)
+	if source == "untrusted" {
+		source = "source:unknown"
 	}
 	return context.WithValue(r.Context(), paymentSourceContextKey{}, source)
 }
