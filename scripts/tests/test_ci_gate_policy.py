@@ -2037,30 +2037,42 @@ class CiGatePolicyTests(unittest.TestCase):
         )
 
     def test_deny_toml_bans_the_crypto_bigint_vulnerable_window(self):
-        # Round-22 review: the RUSTSEC-2026-0387 id ignore has no version
-        # dimension — a partial upgrade (age/p256 on the patched line while
-        # a new third-party dep re-introduces old elliptic-curve, leaving
-        # crypto-bigint 0.5.x in the graph) would stay silently green. The
-        # [bans] entry forbids the vulnerable window independently of the
-        # advisory database's classification; the current graph (0.5.5)
-        # sits outside it. Pin the executable line so dropping the
-        # tripwire while keeping the id ignore fails here.
-        deny_toml = (
-            ROOT / "pinvou3-app/src-tauri/deny.toml"
-        ).read_text(encoding="utf-8")
-        deny_code = "\n".join(
-            line
-            for line in deny_toml.splitlines()
-            if not line.lstrip().startswith("#")
+        # The retired exception must not leave 0.5.5 outside the independent
+        # ban: every affected version below the published fix stays denied.
+        policy = tomllib.loads(
+            (ROOT / "pinvou3-app/src-tauri/deny.toml").read_text(encoding="utf-8")
         )
-        self.assertIn(
-            '{ name = "crypto-bigint", version = ">0.5.5, <0.7.6" },',
-            deny_code,
-            "deny.toml must keep the crypto-bigint vulnerable-window ban on "
-            "an executable line — without it a partially upgraded graph can "
-            "carry a still-vulnerable crypto-bigint while the id ignore "
-            "keeps advisories green",
+        bans = [
+            entry for entry in policy["bans"]["deny"]
+            if entry.get("name") == "crypto-bigint"
+        ]
+        self.assertEqual(
+            [entry.get("version") for entry in bans], ["<0.7.6"],
+            "the complete vulnerable range, including 0.5.5, must stay banned",
         )
+
+    def test_retired_crypto_exception_matches_all_reviewed_lock_graphs(self):
+        policy = tomllib.loads(
+            (ROOT / "pinvou3-app/src-tauri/deny.toml").read_text(encoding="utf-8")
+        )
+        ignored = [
+            item if isinstance(item, str) else item.get("id")
+            for item in policy["advisories"].get("ignore", [])
+        ]
+        self.assertNotIn("RUSTSEC-2026-0387", ignored)
+        self.assertEqual(policy["advisories"]["unused-ignored-advisory"], "deny")
+        for lock in (
+            "pinvou3-app/src-tauri/Cargo.lock",
+            "pinvou-cli/Cargo.lock",
+            "pinvou-knowledge/Cargo.lock",
+        ):
+            with self.subTest(lock=lock):
+                packages = tomllib.loads((ROOT / lock).read_text(encoding="utf-8"))["package"]
+                self.assertFalse(
+                    {"crypto-bigint", "hpke", "p256", "elliptic-curve"}
+                    & {package["name"] for package in packages},
+                    "reintroduction requires a fresh security assessment",
+                )
 
     def test_zip_lockfiles_sit_inside_the_assessed_advisory_window(self):
         # Round-20 review, re-baselined in round-22: deny.toml retired the
