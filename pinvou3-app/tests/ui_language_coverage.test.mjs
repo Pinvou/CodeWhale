@@ -1,4 +1,7 @@
 import assert from 'node:assert/strict';
+import test from 'node:test';
+import * as sharedCopyExports from '../src/shared/i18n.js';
+import * as connectorCopyExports from '../src/shared/connector-i18n.js';
 import { readFileSync } from 'node:fs';
 import { accountPlatformCopy } from '../src/shared/account-platform-i18n.js';
 import { dict } from './helpers/i18n-all.js'; // 三语全量断言：浏览器入口惰性装载，测试使用聚合 shim。
@@ -59,6 +62,40 @@ function assertContainsTranslationKeys(reference, candidate, path) {
       assertContainsTranslationKeys(reference[key], candidate[key], keyPath);
     }
   }
+}
+
+// Independent copy exports do not join the lazy main dict. Discover their
+// public entry points so future locale objects join this gate automatically.
+// Keep dict's historical one-way key coverage/fallback contract below intact.
+const copyLanguages = ['zh', 'en', 'ja'];
+const copyNodeType = value => value === null ? 'null' : Array.isArray(value) ? 'array' : typeof value;
+function assertCopyShape(reference, candidate, path) {
+  const type = copyNodeType(reference);
+  assert.equal(copyNodeType(candidate), type, `${path} must have ${type} type`);
+  if (type !== 'object' && type !== 'array') return;
+  assert.deepEqual(Object.keys(candidate).sort(), Object.keys(reference).sort(), `${path} translation keys must match`);
+  if (type === 'array') assert.equal(candidate.length, reference.length, `${path} array length must match`);
+  for (const key of Object.keys(reference)) assertCopyShape(reference[key], candidate[key], `${path}.${key}`);
+}
+const independentCopies = [
+  ['shared', sharedCopyExports],
+  ['connector', connectorCopyExports],
+].flatMap(([entry, exports]) => Object.entries(exports)
+  .filter(([name, value]) => name !== 'dict' && (
+    /(?:Copy|_COPY)$/i.test(name) || isRecord(value) && copyLanguages.some(language => isRecord(value[language]))
+  ))
+  .map(([name, copy]) => ({ name: `${entry}.${name}`, copy })));
+assert.ok(independentCopies.length > 0, 'public independent locale copy exports must be covered');
+for (const { name, copy } of independentCopies) {
+  test(`independent locale parity: ${name}`, () => {
+    assert.ok(isRecord(copy), `${name} must be a locale object`);
+    for (const language of copyLanguages) {
+      assert.ok(Object.hasOwn(copy, language), `${name}.${language} locale must exist`);
+      assert.ok(isRecord(copy[language]), `${name}.${language} locale must be an object`);
+      assert.ok(Object.keys(copy[language]).length > 0, `${name}.${language} locale must not be empty`);
+    }
+    for (const language of ['en', 'ja']) assertCopyShape(copy.zh, copy[language], `${name}.${language}`);
+  });
 }
 
 assertContainsTranslationKeys(dict.zh, dict.en, 'en');
@@ -877,4 +914,4 @@ assert.equal(connectorUiStep({ active: 'cli' }), 'cli');
   assert.match(source('features/settings/SettingsView.jsx'), /item\.title \|\| presetProviderLabel\(p, t\)/);
 }
 
-console.log('UI language coverage tests passed');
+console.log('UI language legacy assertions passed');
