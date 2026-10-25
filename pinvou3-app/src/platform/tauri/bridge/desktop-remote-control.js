@@ -904,15 +904,14 @@
         return Promise.reject(invalidTaskIntent());
       }
       var navigationRead = options && options.navigation === true;
-      var kind = navigationRead ? "navigation" : "background";
+      var kind = navigationRead ? "navigation" : options && options.view === true ? "view" : "background";
       var intents = proxyReadIntents[localSessionId];
       if (!intents) intents = proxyReadIntents[localSessionId] = Object.create(null);
-      // Navigation and background refresh supersede only their own kind.
-      // The bucket identity also fences both kinds after delete/archive,
+      // Navigation, isolated view and background refresh supersede only their own kind.
+      // The bucket identity also fences every kind after delete/archive,
       // including when the same ID is read again before old replies arrive.
       var intent = {};
       intents[kind] = intent;
-      var sequence = intents.sequence = (intents.sequence || 0) + 1;
       var epoch = proxyReadEpoch;
       return invoke("desktop_remote_proxy_history_read", { localSessionId: localSessionId })
         .then(function (record) {
@@ -922,12 +921,12 @@
           var before = current();
           var after = logic.projectRemoteProxyRead(before, record);
           if (after === before) throw asBoundedError("remote_proxy_projection_invalid");
-          var read = { intents: intents, intent: intent, kind: kind, sequence: sequence, epoch: epoch };
+          var read = { intents: intents, intent: intent, kind: kind, epoch: epoch };
           proxyReadResults.set(after.remoteProxyHistory, read);
           // Navigation consumes this verified value directly and publishes it
           // only after sessions adopts the ID. A background read of another
           // proxy must never replace the selected ChatView projection.
-          if (!navigationRead && state.activeSessionId === localSessionId) publishProxyRead(after, read);
+          if (kind === "background" && state.activeSessionId === localSessionId) publishProxyRead(after);
           return after.remoteProxyHistory;
         }).catch(function (failure) { throw asBoundedError(failure); });
     }
@@ -939,22 +938,21 @@
         && read.intent === read.intents[read.kind];
     }
 
-    function publishProxyRead(after, read) {
-      // Both kinds may succeed, but an older request must not roll back a
-      // newer request's already published projection of this same proxy.
+    function publishProxyRead(after) {
       // Blocking Rust reads can execute in a different order from invocation.
-      // A comparable authenticated cursor takes precedence over request order.
+      // Only comparable authenticated cursors establish a journal regression.
+      // Equal cursors can carry changed metadata; opaque epochs have no order.
       var selected = current().remoteProxyHistory;
       var candidate = after.remoteProxyHistory;
       var previousCursor = selected && selected.localSessionId === candidate.localSessionId
         && selected.authenticatedCursor;
       var nextCursor = candidate.authenticatedCursor;
+      // None is the initial empty journal, never a reset of this same ID.
+      // Its delayed snapshot must not erase an authenticated journal.
+      if (previousCursor && !nextCursor) return;
       var comparable = previousCursor && nextCursor
         && previousCursor.journalEpoch === nextCursor.journalEpoch;
       if (comparable && nextCursor.sequence < previousCursor.sequence) return;
-      var advancesCursor = comparable && nextCursor.sequence > previousCursor.sequence;
-      if (!advancesCursor && read.sequence < (read.intents.publishedSequence || 0)) return;
-      read.intents.publishedSequence = Math.max(read.intents.publishedSequence || 0, read.sequence);
       publish(after);
     }
 
@@ -963,7 +961,9 @@
       var before = current();
       var after = logic.projectRemoteProxyRead(before, record);
       if (after === before) return false;
-      publishProxyRead(after, proxyReadResults.get(record));
+      publishProxyRead(after);
+      // True means the current record was accepted; a comparable older cursor
+      // can leave the already published projection unchanged.
       return true;
     }
 

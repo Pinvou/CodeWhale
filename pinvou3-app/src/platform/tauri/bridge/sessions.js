@@ -797,9 +797,9 @@ function interruptedDisplayRange(item) { return pinvouSharedtauriSessionsN47342(
         var remoteRecord = await readRemoteProxyHistory(id);
         if (requestToken !== sessionSwitchRequestToken) return false;
         if (!remoteRecord || remoteRecord.localSessionId !== id) throw new Error("remote_proxy_not_found");
-        // Rust validation may finish before a stop/delete/archive completion
-        // retires the read. Recheck synchronously at the ID adoption boundary.
-        if (typeof isRemoteProxyReadCurrent === "function" && !isRemoteProxyReadCurrent(remoteRecord)) {
+        // Keep the identity check at adoption, including synchronous retirement.
+        // The checker is required wiring, not an optional validation fallback.
+        if (typeof isRemoteProxyReadCurrent !== "function" || !isRemoteProxyReadCurrent(remoteRecord)) {
           throw new Error("remote_proxy_not_found");
         }
         if (state.activeSessionId && !isRemoteProxyView(state.activeSessionId)) {

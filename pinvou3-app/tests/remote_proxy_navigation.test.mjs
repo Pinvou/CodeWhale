@@ -10,7 +10,9 @@ const source = fs.readFileSync(path.join(path.dirname(fileURLToPath(import.meta.
 const chatSource = fs.readFileSync(path.join(path.dirname(fileURLToPath(import.meta.url)),
   '../src/platform/tauri/bridge/chat.js'), 'utf8');
 
-function install(read, remove, select, isCurrent) {
+// Simple sessions-only fixtures explicitly stand in for a validated read.
+// installRemoteHistory below uses the real remote bridge identity checker.
+function install(read, remove, select, isCurrent = () => true) {
   const root = { __PINVOU_TAURI_BRIDGE_FEATURES__: {} };
   const sandbox = { window: root, console };
   vm.createContext(sandbox);
@@ -79,18 +81,22 @@ function installRemoteHistory() {
     },
   });
   // The production bridge mirrors the domain list into the sessions routing hint.
-  harness.state.desktopRemoteControl.remoteProxyHistories = [{ localSessionId: 'remote-local-1' }];
+  harness.state.desktopRemoteControl.remoteProxyHistories = [
+    { localSessionId: 'remote-local-1' }, { localSessionId: 'remote-local-2' },
+  ];
   harness.state.remoteProxyHistories = harness.state.desktopRemoteControl.remoteProxyHistories;
-  function complete(index, title = 'verified', sequence = 1) {
+  function complete(index, title = 'verified', sequence = 1, metadata = {}) {
+    assert.ok(requests[index], `read request ${index} exists`);
+    const { journalEpoch = 'epoch-1', ...fields } = metadata;
     requests[index].resolve({ localSessionId: requests[index].id, title,
       // Rust validate_snapshot_window requires a contiguous window ending at
       // its authenticated cursor, including a tail entry for nonzero cursors.
       entries: Array.from({ length: sequence }, (_, index) => ({
-        journalEpoch: 'epoch-1', sequence: index + 1, eventId: `event-${index + 1}`,
+        journalEpoch, sequence: index + 1, eventId: `${journalEpoch}-event-${index + 1}`,
         kind: 'assistant_message', body: `message-${index + 1}`, taskId: null, attachments: [],
       })),
-      authenticatedCursor: { journalEpoch: 'epoch-1', sequence },
-      pendingUnknownCount: 0, unattemptedPending: [] });
+      authenticatedCursor: { journalEpoch, sequence },
+      pendingUnknownCount: 0, unattemptedPending: [], ...fields });
   }
   return { ...harness, remote, requests, complete };
 }
@@ -114,7 +120,7 @@ for (const newer of ['navigation', 'refresh']) {
     assert.equal(state.remoteProxyHistory.authenticatedCursor.sequence, 3);
     complete(1, 'older', 2);
     assert.equal(await navigation, true);
-    assert.ok(await refresh);
+    assert.equal((await refresh).title, newer === 'refresh' ? 'newer' : 'older');
     assert.equal(state.remoteProxyHistory.title, 'newer');
     assert.equal(state.remoteProxyHistory.authenticatedCursor.sequence, 3);
   });
@@ -136,25 +142,184 @@ for (const fresherCompletesFirst of [true, false]) {
     complete(fresherCompletesFirst ? 2 : 1, fresherCompletesFirst ? 'old' : 'fresh',
       fresherCompletesFirst ? 2 : 3);
     assert.equal(await navigation, true);
-    assert.ok(await refresh);
+    assert.equal((await refresh).title, 'fresh');
     assert.equal(state.remoteProxyHistory.authenticatedCursor.sequence, 3);
     assert.equal(state.remoteProxyHistory.entries.at(-1).body, 'message-3');
   });
 }
 
+for (const earlier of ['navigation', 'refresh']) {
+  for (const sequence of [0, 1]) {
+    test(`initial null-cursor snapshot cannot replace authenticated history (${earlier}, cursor ${sequence})`, async () => {
+    const { feature, remote, state, requests, complete } = installRemoteHistory();
+    const initial = feature.switchToSession('remote-local-1');
+    complete(0, 'history', 0, { authenticatedCursor: null });
+    assert.equal(await initial, true);
+    assert.equal(state.remoteProxyHistory.authenticatedCursor, null);
+    const old = earlier === 'navigation' ? feature.switchToSession('remote-local-1')
+      : remote.readRemoteProxyHistory('remote-local-1');
+    const fresh = earlier === 'navigation' ? remote.readRemoteProxyHistory('remote-local-1')
+      : feature.switchToSession('remote-local-1');
+    assert.equal(requests.length, 3);
+    complete(2, 'history', sequence);
+    const freshResult = await fresh;
+    if (earlier === 'navigation') assert.equal(freshResult.authenticatedCursor.sequence, sequence);
+    else assert.equal(freshResult, true);
+    const populated = state.remoteProxyHistory;
+    assert.equal(populated.authenticatedCursor.sequence, sequence);
+    complete(1, 'history', 0, { authenticatedCursor: null });
+    const oldResult = await old;
+    if (earlier === 'navigation') assert.equal(oldResult, true);
+    else assert.equal(oldResult.authenticatedCursor, null);
+    assert.equal(state.remoteProxyHistory, populated, 'initial snapshot does not publish');
+    assert.equal(state.remoteProxyHistory.entries.length, sequence);
+    if (sequence) assert.equal(state.remoteProxyHistory.entries[0].body, 'message-1');
+    });
+  }
+}
+
+test('a different proxy can still open its initial null-cursor history', async () => {
+  const { feature, state, complete } = installRemoteHistory();
+  const first = feature.switchToSession('remote-local-1');
+  complete(0, 'first', 1);
+  assert.equal(await first, true);
+  const second = feature.switchToSession('remote-local-2');
+  complete(1, 'second', 0, { authenticatedCursor: null });
+  assert.equal(await second, true);
+  assert.equal(state.activeSessionId, 'remote-local-2');
+  assert.equal(state.remoteProxyHistory.localSessionId, 'remote-local-2');
+  assert.equal(state.remoteProxyHistory.authenticatedCursor, null);
+  assert.equal(state.remoteProxyHistory.entries.length, 0);
+});
+
+for (const kind of ['navigation', 'refresh']) {
+  for (const crossEpoch of [false, true]) {
+    test(`${kind} requested earlier can publish later metadata (${crossEpoch ? 'cross epoch' : 'equal cursor'})`, async () => {
+      const { feature, remote, state, complete } = installRemoteHistory();
+      const initial = feature.switchToSession('remote-local-1');
+      complete(0, 'initial');
+      assert.equal(await initial, true);
+      // Two admitted IPC workers may acquire the store lock in reverse order.
+      // Pending metadata can change without appending a journal entry.
+      const first = kind === 'navigation' ? feature.switchToSession('remote-local-1')
+        : remote.readRemoteProxyHistory('remote-local-1');
+      const second = kind === 'navigation' ? remote.readRemoteProxyHistory('remote-local-1')
+        : feature.switchToSession('remote-local-1');
+      complete(2, 'earlier snapshot', 1, { pendingUnknownCount: 1 });
+      await second;
+      assert.equal(state.remoteProxyHistory.pendingUnknownCount, 1);
+      complete(1, 'later snapshot', 1, {
+        journalEpoch: crossEpoch ? 'epoch-2' : 'epoch-1', pendingUnknownCount: 0,
+      });
+      await first;
+      assert.equal(state.remoteProxyHistory.pendingUnknownCount, 0);
+      assert.equal(state.remoteProxyHistory.title, 'later snapshot');
+      assert.equal(state.remoteProxyHistory.authenticatedCursor.journalEpoch,
+        crossEpoch ? 'epoch-2' : 'epoch-1');
+    });
+  }
+}
+
+for (const first of ['old', 'new']) {
+  test(`two different proxy navigations retain the latest selection (${first} first)`, async () => {
+    const { feature, state, complete, requests, invokes } = installRemoteHistory();
+    const old = feature.switchToSession('remote-local-1');
+    const latest = feature.switchToSession('remote-local-2');
+    assert.equal(requests.length, 2);
+    assert.equal(state.activeSessionId, null);
+    complete(first === 'old' ? 0 : 1, first);
+    assert.equal(await (first === 'old' ? old : latest), first === 'new');
+    assert.equal(state.activeSessionId, first === 'old' ? null : 'remote-local-2');
+    assert.equal(state.remoteProxyHistory?.localSessionId ?? null,
+      first === 'old' ? null : 'remote-local-2');
+    complete(first === 'old' ? 1 : 0, first === 'old' ? 'new' : 'old');
+    assert.equal(await old, false);
+    assert.equal(await latest, true);
+    assert.equal(state.activeSessionId, 'remote-local-2');
+    assert.equal(state.remoteProxyHistory.title, 'new');
+    assert.deepEqual(invokes, []);
+  });
+}
+
+for (const first of ['view', 'navigation']) {
+  test(`archive view and navigation have independent read identities (${first} first)`, async () => {
+    const { feature, remote, state, requests, complete } = installRemoteHistory();
+    const initial = feature.switchToSession('remote-local-1');
+    complete(0, 'sealed history');
+    assert.equal(await initial, true);
+    await remote.archiveRemoteProxyHistory('remote-local-1');
+    assert.equal(requests.length, 2, 'archive schedules one background read');
+    complete(1, 'sealed history', 1, { archived: true });
+    await Promise.resolve();
+    // Production list refresh removes archived IDs, but sessions retains its
+    // selected-proxy routing hint. Both reads now return an archived record.
+    state.remoteProxyHistories = [];
+    assert.equal(feature.isRemoteProxyView('remote-local-1'), true);
+    const beforeView = state.remoteProxyHistory;
+    const navigation = feature.switchToSession('remote-local-1');
+    const view = remote.readRemoteProxyHistory('remote-local-1', { view: true });
+    assert.equal(requests.length, 4);
+    complete(first === 'view' ? 3 : 2, 'sealed history', 1, { archived: true });
+    let navigationProjection;
+    if (first === 'view') {
+      assert.equal((await view).title, 'sealed history');
+      assert.equal(state.activeSessionId, 'remote-local-1');
+      assert.equal(state.remoteProxyHistory, beforeView, 'view does not publish');
+    } else {
+      assert.equal(await navigation, true);
+      navigationProjection = state.remoteProxyHistory;
+    }
+    complete(first === 'view' ? 2 : 3, 'sealed history', 1, { archived: true });
+    assert.equal(await navigation, true);
+    assert.equal((await view).title, 'sealed history');
+    assert.equal(state.remoteProxyHistory.title, 'sealed history');
+    assert.equal(state.remoteProxyHistory.archived, true);
+    if (first === 'navigation') assert.equal(state.remoteProxyHistory, navigationProjection,
+      'late view leaves the selected projection object unchanged');
+  });
+}
+
+test('a newer isolated view supersedes its own older read without publishing', async () => {
+  const { remote, state, complete, requests } = installRemoteHistory();
+  const old = remote.readRemoteProxyHistory('remote-local-1', { view: true });
+  const latest = remote.readRemoteProxyHistory('remote-local-1', { view: true });
+  assert.equal(requests.length, 2);
+  complete(1, 'sealed history', 1, { archived: true });
+  assert.equal((await latest).title, 'sealed history');
+  complete(0, 'sealed history', 1, { archived: true });
+  assert.equal(await old, null);
+  assert.equal(state.remoteProxyHistory, null);
+});
+
+test('sessions fails closed when its read identity dependency is missing', async () => {
+  const { feature, state } = install(async id => ({ localSessionId: id, entries: [] }),
+    undefined, undefined, null);
+  assert.equal(await feature.switchToSession('remote-local-1'), false);
+  assert.equal(state.activeSessionId, null);
+});
+
+test('production sessions wiring forwards the remote identity check and view intent stays separate', () => {
+  const facade = fs.readFileSync(new URL('../src/platform/tauri/bridge.js', import.meta.url), 'utf8');
+  assert.match(facade, /isRemoteProxyReadCurrent:\s*function\s*\(record\)\s*\{\s*return desktopRemoteControlFeature\.isRemoteProxyReadCurrent\(record\);\s*\}/u);
+  const panel = fs.readFileSync(new URL('../src/features/remote-control/RemoteProxyArchivePanel.jsx', import.meta.url), 'utf8');
+  assert.match(panel, /readRemoteProxyHistory\(id,\s*\{\s*view:\s*true\s*\}\)/u);
+});
+
 for (const retire of ['stop', 'deleteRemoteProxyHistory', 'archiveRemoteProxyHistory']) {
-  test(`${retire} between read validation and navigation adoption prevents selection`, async () => {
-    const { feature, remote, state, complete } = installRemoteHistory();
+  test(`controlled IPC: ${retire} between validation and adoption prevents selection`, async () => {
+    const { feature, remote, state, requests, complete } = installRemoteHistory();
     const navigation = feature.switchToSession('remote-local-1');
     complete(0);
     await Promise.resolve();
-    // Queue retirement after bridge validation but before sessions resumes.
-    // Mutation commands resolve immediately in this controlled IPC harness.
+    // This controlled IPC resolves mutations in the microtask drain. It is not
+    // a claim that separate production IPC completions can interleave here.
+    // stop is synchronous; retain the adoption guard as defensive wiring.
     const retirement = remote[retire]('remote-local-1');
     await retirement;
     assert.equal(await navigation, false);
     assert.equal(state.activeSessionId, null);
     assert.equal(state.remoteProxyHistory, null);
+    for (let index = 1; index < requests.length; index += 1) complete(index, 'archive refresh');
   });
 }
 
@@ -188,7 +353,7 @@ for (const first of ['old', 'new']) {
     const latest = feature.switchToSession('remote-local-1');
     const refresh = remote.readRemoteProxyHistory('remote-local-1');
     complete(2, 'background');
-    assert.ok(await refresh);
+    assert.equal((await refresh).title, 'background');
     complete(first === 'old' ? 0 : 1, first);
     assert.equal(await (first === 'old' ? old : latest), first !== 'old');
     complete(first === 'old' ? 1 : 0, first === 'old' ? 'new' : 'old');
@@ -220,24 +385,38 @@ test('background refreshes still discard earlier replies and recover after a fai
 });
 
 for (const retire of ['stop', 'deleteRemoteProxyHistory', 'archiveRemoteProxyHistory']) {
-  test(`${retire} invalidates both pending read kinds, including after a replacement read`, async () => {
+  test(`${retire} invalidates all pending read kinds, including after a replacement read`, async () => {
     const { feature, remote, state, requests, complete } = installRemoteHistory();
     const navigation = feature.switchToSession('remote-local-1');
     const refresh = remote.readRemoteProxyHistory('remote-local-1');
+    const view = remote.readRemoteProxyHistory('remote-local-1', { view: true });
     await remote[retire]('remote-local-1');
-    // Reuse the same ID before the retired replies arrive to catch counter reuse.
+    // A new request for the same ID must not resurrect retired reply identities.
+    // A successful delete remains hidden; archive returns its sealed record.
     const replacement = remote.readRemoteProxyHistory('remote-local-1', { navigation: true });
     const replacementIndex = requests.length - 1;
-    complete(0, 'retired navigation');
-    complete(1, 'retired refresh');
+    complete(0, 'history');
+    complete(1, 'history');
+    complete(2, 'history');
     assert.equal(await navigation, false);
     assert.equal(await refresh, null);
+    assert.equal(await view, null);
     assert.equal(state.activeSessionId, null);
     assert.equal(state.remoteProxyHistory, null);
-    complete(replacementIndex, 'replacement');
-    assert.equal((await replacement).title, 'replacement');
+    if (retire === 'deleteRemoteProxyHistory') {
+      requests[replacementIndex].reject(new Error('remote_proxy_not_found'));
+      await assert.rejects(replacement);
+      const next = remote.readRemoteProxyHistory('remote-local-2');
+      complete(requests.length - 1, 'other history');
+      assert.equal((await next).localSessionId, 'remote-local-2');
+    } else {
+      complete(replacementIndex, 'history', 1, { archived: retire === 'archiveRemoteProxyHistory' });
+      const record = await replacement;
+      assert.equal(record.title, 'history');
+      assert.equal(record.archived, retire === 'archiveRemoteProxyHistory');
+    }
     // Archive schedules its own refresh. Settle it to leave no unresolved work.
-    for (let index = 2; index < replacementIndex; index += 1) complete(index, 'archived');
+    for (let index = 3; index < replacementIndex; index += 1) complete(index, 'history', 1, { archived: true });
   });
 }
 
