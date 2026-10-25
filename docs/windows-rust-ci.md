@@ -213,6 +213,8 @@ order:
     - `features::monitor::platform::windows_gpu::tests::`
     - `features::remote_control::platform::windows::tests::`
     - `app::commands::remote_control::reader_resume_tests::`
+    - `features::remote_control::controller::controlling_inbound::tests::`
+    - `features::remote_control::controller::controlling_service::inbound_tests::`
     - `features::remote_control::controller::transfer::staging::tests::`
     - `features::computer_use::platform::windows::tests::`
     - `failed_probe_never_deletes_an_existing_store_windows`
@@ -227,6 +229,10 @@ order:
     filters cover the atomic-replacement state machine that the static
     updater exercises end to end; the `filesystem`/`artifact_*` filters cover
     the same writer-side invariants at the unit level.
+    The two controller inbound prefixes execute the A-only item/byte budgets,
+    control/disconnect ordering, real port/reader failure handling and owner
+    replacement contracts. They run in this same linked and patched binary;
+    `all-targets-check` alone is not behavior coverage for these paths.
 17. (`regression`) `pinvou-cli Windows-gated unit tests`: the `pinvou-cli`
     workspace's own cfg(windows) unit tests run on no other leg — the Linux
     CLI leg cannot compile them and the all-targets-check leg only
