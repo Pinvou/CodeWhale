@@ -615,7 +615,7 @@ function pinvouSharedtauriVoice() {
     return fenced ? fenced[1].trim() : value;
   }
 
-  async function postprocessVoiceText(correctedText, mode, draftText, sessionId, timeoutMs, rawText, modelId) {
+  async function postprocessVoiceText(correctedText, mode, draftText, sessionId, timeoutMs, rawText, modelId, modelRef) {
     const normalizedMode = normalizeVoiceMode(mode);
     const startedAt = voiceNow();
     let timer = null;
@@ -630,6 +630,7 @@ function pinvouSharedtauriVoice() {
           mode: normalizedMode,
           session_id: sessionId || null,
           model_id: modelId || null,
+          model_ref: modelRef || null,
           draft_text: draftText || "",
         },
       });
@@ -766,7 +767,8 @@ function pinvouSharedtauriVoice() {
           session.sessionId,
           voicePostprocessTimeoutMs(mode, ruleText),
           text,
-          session.modelId
+          session.modelId,
+          session.modelRef
         );
       } else {
         // Smart post-processing is off: do not send the recognized text to the model service;
@@ -974,6 +976,7 @@ function closeVoiceAsrSetup() { return pinvouSharedtauriVoice().closeVoiceAsrSet
       sessionId: options && Object.prototype.hasOwnProperty.call(options, "sessionId") ? options.sessionId : state.activeSessionId || null,
       ownerKind: options && options.ownerKind || "chat",
       modelId: options && options.modelId || null,
+      modelRef: options && options.modelRef ? { ...options.modelRef } : null,
       telemetrySessionId: (options && Object.prototype.hasOwnProperty.call(options, "sessionId") ? options.sessionId : state.activeSessionId) || voiceToken("draftsession_"),
       draftBeforeStart: String(draftText || ""),
       writeback,

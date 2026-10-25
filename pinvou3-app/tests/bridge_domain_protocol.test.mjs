@@ -255,10 +255,9 @@ const expectedProtocolHashes = {
 // (merged: builtin feature toggles from F-series + set_global_shortcut_config from main)
   settings: '5fadac6005cb2f3c179925fbf0511b445350dd19789254c5383ac193624fc3fd',
   updater: 'e5d3ffaed0548bca3a40ee4c8138a59f9a2add9474477d924d4ecd7b8efd73e6',
-  // Official's bridge/voice.js is untouched by this backflow, so the hash
-  // stays at the Official base value (the community value differs only via
-  // comment differences inside its own voice.js; no invoke/listen surface).
-  voice: '8581b43940d101353fdd1468232dc778c2d1320854af5fdbbbc0326e5cdedbbb',
+  // Voice draft preparation now carries its typed source/model reference;
+  // session bindings remain authoritative and the command set is unchanged.
+  voice: '79c031f1039f8b8cb46d47c37ec9946706d1ec5378cf06c1f7f4654cdf21bd37',
   // Official-only team-relay surface; unchanged by this backflow.
   teamRelay: '246f7cfd5a5ff4b730e2f3972fe9e74860b51a4781bd323bf10b3d795d24ed1d',
   // Recomputed for the rebind carryover feed-back (review #463 F-Major):

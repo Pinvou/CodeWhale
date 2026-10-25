@@ -175,6 +175,13 @@ fn runtime_catalog_reference<F>(
 where
     F: FnOnce() -> Result<String>,
 {
+    if let Some(reference) = request
+        .auxiliary
+        .as_ref()
+        .and_then(|scope| scope.draft_model_ref.as_ref())
+    {
+        return Ok(reference.clone());
+    }
     if let Some(reference) = request.scheduled_model_ref.as_ref() {
         return Ok(reference.clone());
     }
@@ -227,7 +234,11 @@ impl RuntimeModelProvider for AccountPlatformRuntimeModelProvider {
             return Ok(PreparedRuntimeModel::unchanged(request.model));
         }
 
-        let timing_owner = self.model_proxy.capture_timing_owner(&request.session_id);
+        let timing_owner = if request.auxiliary.is_none() {
+            self.model_proxy.capture_timing_owner(&request.session_id)
+        } else {
+            None
+        };
         super::client_migration::runtime_ready().map_err(|error| anyhow!(error))?;
         // A task-profile reference is frozen before preparation; only ordinary
         // interactive selection reads the mutable session. The wire model is
@@ -236,11 +247,11 @@ impl RuntimeModelProvider for AccountPlatformRuntimeModelProvider {
         // A removed model can therefore only continue through the explicit
         // replacement-branch command, whose new session records the replacement
         // model in its own metadata.
-        let store = self
-            .app
-            .try_state::<SessionStore>()
-            .context("session store is not initialized")?;
         let session_model_ref = runtime_catalog_reference(&request, || {
+            let store = self
+                .app
+                .try_state::<SessionStore>()
+                .context("session store is not initialized")?;
             Ok(match store.session_model_ref(&request.session_id) {
                 Some(ModelSelectionRef::AccountPlatform { model_id }) => model_id,
                 _ => {
@@ -306,17 +317,33 @@ impl RuntimeModelProvider for AccountPlatformRuntimeModelProvider {
         model.model = limits.engine_model.clone();
         model.context_window_tokens = Some(limits.context_tokens);
         model.max_output_tokens = Some(limits.output_tokens);
-        model.base_url = self
-            .model_proxy
-            .register_authorized_session(
-                &request.session_id,
-                &authorization.base_url,
-                &limits.gateway_model_id,
-                limits.output_tokens,
-                Some(authorization.supplier(self.app.clone())),
-            )
-            .await
-            .context("start account platform model proxy")?;
+        let supplier = Some(authorization.supplier(self.app.clone()));
+        model.base_url = match request.auxiliary.as_ref() {
+            Some(scope) => {
+                self.model_proxy
+                    .register_authorized_runtime(
+                        &scope.scope_id,
+                        true,
+                        &authorization.base_url,
+                        &limits.gateway_model_id,
+                        limits.output_tokens,
+                        supplier,
+                    )
+                    .await
+            }
+            None => {
+                self.model_proxy
+                    .register_authorized_session(
+                        &request.session_id,
+                        &authorization.base_url,
+                        &limits.gateway_model_id,
+                        limits.output_tokens,
+                        supplier,
+                    )
+                    .await
+            }
+        }
+        .context("start account platform model proxy")?;
         Ok(PreparedRuntimeModel {
             model,
             credential: Some(RuntimeModelCredential::account_platform_access_token(
@@ -357,6 +384,36 @@ impl RuntimeModelProvider for AccountPlatformRuntimeModelProvider {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn voice_draft_reference_is_private_and_does_not_load_a_session() {
+        let mut request = crate::features::assistant::runtime_model::RuntimeModelRequest {
+            session_id: String::new(),
+            model: crate::platform::prefs::SavedModel::builtin_account_platform(),
+            scheduled_unattended: false,
+            scheduled_model_ref: None,
+            auxiliary: Some(
+                crate::features::assistant::runtime_model::AuxiliaryModelContext {
+                    scope_id: "private-voice-test".into(),
+                    draft_model_ref: Some("0199a100-0001-7000-8000-000000000106".into()),
+                },
+            ),
+        };
+        assert_eq!(
+            super::runtime_catalog_reference(&request, || panic!(
+                "a voice draft is not a stored session"
+            ))
+            .unwrap(),
+            "0199a100-0001-7000-8000-000000000106"
+        );
+        request.auxiliary.as_mut().unwrap().draft_model_ref = None;
+        request.session_id = "real-session".into();
+        assert_eq!(
+            super::runtime_catalog_reference(&request, || Ok("original-session-model".into()))
+                .unwrap(),
+            "original-session-model"
+        );
+    }
+
     use serde_json::json;
 
     use super::{runtime_catalog_reference, runtime_model_limits};
@@ -375,6 +432,7 @@ mod tests {
                 model: SavedModel::builtin_account_platform(),
                 scheduled_unattended,
                 scheduled_model_ref: Some(ORIGINAL.into()),
+                auxiliary: None,
             };
             let reference = runtime_catalog_reference(&request, || {
                 panic!("a later override or Engine alias must not replace the pinned profile")
@@ -391,6 +449,7 @@ mod tests {
             model: SavedModel::builtin_account_platform(),
             scheduled_unattended: false,
             scheduled_model_ref: None,
+            auxiliary: None,
         };
         let reference = runtime_catalog_reference(&request, || {
             Ok("0199a100-0001-7000-8000-000000000107".into())
@@ -409,6 +468,7 @@ mod tests {
             model: SavedModel::builtin_account_platform(),
             scheduled_unattended: true,
             scheduled_model_ref: None,
+            auxiliary: None,
         };
         let error = runtime_catalog_reference(&request, || {
             panic!("unattended task must not fall back to a mutable session")
@@ -797,6 +857,7 @@ mod tests {
                 model: ordinary_model(),
                 scheduled_unattended: false,
                 scheduled_model_ref: None,
+                auxiliary: None,
             })
             .await
             .expect("ordinary model passthrough");

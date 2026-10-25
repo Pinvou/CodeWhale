@@ -36,6 +36,39 @@ pub struct RuntimeModelRequest {
     /// App-owned catalog reference frozen when the task profile selected the
     /// platform model. It is never inferred from an Engine protocol alias.
     pub(crate) scheduled_model_ref: Option<String>,
+    pub(crate) auxiliary: Option<AuxiliaryModelContext>,
+}
+
+/// App-private delivery ownership for an auxiliary invocation, never a stored chat.
+#[derive(Clone)]
+pub(crate) struct AuxiliaryModelContext {
+    pub scope_id: String,
+    pub draft_model_ref: Option<String>,
+}
+
+/// Retiring local voice delivery does not request Provider cancellation or release funds.
+pub(crate) struct AuxiliaryModelScope {
+    id: String,
+    provider: Arc<dyn RuntimeModelProvider>,
+}
+impl AuxiliaryModelScope {
+    pub(crate) fn new(provider: Arc<dyn RuntimeModelProvider>) -> Self {
+        Self {
+            id: format!("pinvou-voice-{}", uuid::Uuid::new_v4()),
+            provider,
+        }
+    }
+    pub(crate) fn context(&self, draft_model_ref: Option<String>) -> AuxiliaryModelContext {
+        AuxiliaryModelContext {
+            scope_id: self.id.clone(),
+            draft_model_ref,
+        }
+    }
+}
+impl Drop for AuxiliaryModelScope {
+    fn drop(&mut self) {
+        self.provider.forget_model_session(&self.id);
+    }
 }
 
 /// 运行时提供器准备的敏感模型凭据。
@@ -158,6 +191,35 @@ impl RuntimeModelProvider for PassthroughRuntimeModelProvider {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn voice_scopes_retire_only_their_own_invisible_delivery_identity() {
+        #[derive(Default)]
+        struct Recorder(std::sync::Mutex<Vec<String>>);
+        #[async_trait::async_trait]
+        impl super::RuntimeModelProvider for Recorder {
+            async fn prepare(
+                &self,
+                request: super::RuntimeModelRequest,
+            ) -> anyhow::Result<super::PreparedRuntimeModel> {
+                Ok(super::PreparedRuntimeModel::unchanged(request.model))
+            }
+            fn forget_model_session(&self, id: &str) {
+                self.0.lock().unwrap().push(id.to_string());
+            }
+        }
+        let provider = std::sync::Arc::new(Recorder::default());
+        let first = super::AuxiliaryModelScope::new(provider.clone());
+        let second = super::AuxiliaryModelScope::new(provider.clone());
+        let first_id = first.context(None).scope_id;
+        let second_id = second.context(None).scope_id;
+        assert_ne!(first_id, second_id);
+        assert!(first_id.starts_with("pinvou-voice-"));
+        drop(first);
+        assert_eq!(*provider.0.lock().unwrap(), vec![first_id.clone()]);
+        drop(second);
+        assert_eq!(*provider.0.lock().unwrap(), vec![first_id, second_id]);
+    }
+
     use super::{
         ModelCredentialMode, PassthroughRuntimeModelProvider, PreparedRuntimeModel,
         RuntimeModelCredential, RuntimeModelProvider, RuntimeModelRequest,
@@ -204,6 +266,7 @@ mod tests {
                 model: model(),
                 scheduled_unattended: false,
                 scheduled_model_ref: None,
+                auxiliary: None,
             })
             .await
             .expect("prepare model");

@@ -88,6 +88,7 @@ struct ProxyTarget {
     upstream: Url,
     gateway_model_id: String,
     turn_generation: u64,
+    auxiliary: bool,
     maximum_output_tokens: u32,
 }
 
@@ -242,6 +243,28 @@ impl ModelGatewayProxy {
         maximum_output_tokens: u32,
         authorization: Option<Arc<dyn super::ModelAuthorization>>,
     ) -> Result<String> {
+        self.register_authorized_runtime(
+            session_id,
+            false,
+            upstream_base_url,
+            gateway_model_id,
+            maximum_output_tokens,
+            authorization,
+        )
+        .await
+    }
+
+    /// Auxiliary scopes have their own opaque route/incarnation, never the
+    /// original chat session's cancellation, generation, or timing owner.
+    pub(super) async fn register_authorized_runtime(
+        &self,
+        session_id: &str,
+        auxiliary: bool,
+        upstream_base_url: &str,
+        gateway_model_id: &str,
+        maximum_output_tokens: u32,
+        authorization: Option<Arc<dyn super::ModelAuthorization>>,
+    ) -> Result<String> {
         let upstream = Url::parse(upstream_base_url)
             .context("account platform model gateway URL is invalid")?;
         if !upstream_is_allowed(&upstream) {
@@ -300,6 +323,7 @@ impl ModelGatewayProxy {
                     target.upstream = upstream.clone();
                     target.gateway_model_id = gateway_model_id.to_string();
                     target.maximum_output_tokens = maximum_output_tokens;
+                    target.auxiliary = auxiliary;
                 })
                 .or_insert(ProxyTarget {
                     authorization,
@@ -308,6 +332,7 @@ impl ModelGatewayProxy {
                     upstream,
                     gateway_model_id: gateway_model_id.to_string(),
                     turn_generation: 0,
+                    auxiliary,
                     maximum_output_tokens,
                 });
             route
@@ -424,12 +449,21 @@ async fn forward_chat(
     else {
         return proxy_error(StatusCode::NOT_FOUND, "unknown model proxy route");
     };
-    let Some(generation) = state
-        .turn_authority
-        .current_generation(&target.session_id)
-        .filter(|value| *value > 0)
-    else {
-        return proxy_error(StatusCode::CONFLICT, "model turn is not active");
+    let generation = if target.auxiliary {
+        // Admission exists only while the command owns its private scope.
+        if target.incarnation.is_retired() {
+            return proxy_error(StatusCode::CONFLICT, "model auxiliary delivery is retired");
+        }
+        1
+    } else {
+        let Some(generation) = state
+            .turn_authority
+            .current_generation(&target.session_id)
+            .filter(|value| *value > 0)
+        else {
+            return proxy_error(StatusCode::CONFLICT, "model turn is not active");
+        };
+        generation
     };
     target.turn_generation = generation;
     let body = match prepare_chat_body(body, target.maximum_output_tokens, &target.gateway_model_id)
@@ -510,7 +544,9 @@ async fn forward(
         );
     }
     // Capture the timing owner before authorization may wait for token refresh.
-    let timing_turn_id = crate::features::assistant::timing::current_turn_id(&target.session_id);
+    let timing_turn_id = (!target.auxiliary)
+        .then(|| crate::features::assistant::timing::current_turn_id(&target.session_id))
+        .flatten();
     let mut bearer = headers
         .get(header::AUTHORIZATION)
         .and_then(|v| v.to_str().ok())
@@ -703,16 +739,21 @@ async fn forward(
         }
     }
 
-    let notice_emitter = state.app.clone().map(|app| BillingNoticeEmitter {
-        app,
-        session_id: target.session_id.clone(),
-        turn_generation: target.turn_generation,
-        turn_authority: state.turn_authority.clone(),
-        cancellation: delivery
-            .as_ref()
-            .map(|delivery| delivery.cancellation_token()),
-        incarnation: target.incarnation.clone(),
-    });
+    let notice_emitter =
+        state
+            .app
+            .clone()
+            .filter(|_| !target.auxiliary)
+            .map(|app| BillingNoticeEmitter {
+                app,
+                session_id: target.session_id.clone(),
+                turn_generation: target.turn_generation,
+                turn_authority: state.turn_authority.clone(),
+                cancellation: delivery
+                    .as_ref()
+                    .map(|delivery| delivery.cancellation_token()),
+                incarnation: target.incarnation.clone(),
+            });
     if let Some(notice) = billing_notice_from_headers(&upstream_headers) {
         if let Some(emitter) = &notice_emitter {
             emitter.emit(notice);

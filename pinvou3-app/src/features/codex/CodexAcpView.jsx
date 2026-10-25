@@ -2523,6 +2523,7 @@ export function CodexAcpView({
     modelId: isNativeAgent ? (activeId
       ? (nativeControlsSessionRef.current === activeId ? nativeControls.modelId : null)
       : nativeDraftControls.modelId) : null,
+    modelRef: isNativeAgent && !activeId ? nativeDraftControls.modelRef : null,
     getDraft: () => draft,
     setDraft,
     appendDraft: bridge.voice.appendVoiceText,

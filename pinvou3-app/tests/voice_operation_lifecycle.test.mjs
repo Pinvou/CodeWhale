@@ -280,11 +280,34 @@ test('composer adapters preserve explicit metadata and authoritative native owne
   assert.match(chat, /sendChatMessage\(outgoingText, \{ \.\.\.context, draftOwner: owner \}\)/);
   assert.match(native, /sendTask: async \(outgoing, context\) => send\(outgoing, \{ voiceOperationId: context\?\.operationId \}\)/);
   assert.match(native, /nativeControlsSessionRef\.current === activeId \? nativeControls\.modelId : null/);
+  assert.match(native, /modelRef: isNativeAgent && !activeId \? nativeDraftControls\.modelRef : null/);
+  assert.match(hook, /modelRef: current\.modelRef \|\| null/);
   assert.match(native, /completeVoiceSubmission\(voiceOperationId, targetId, true\)/);
   assert.match(native, /ownerKind: isNativeAgent \? 'native' : 'acp'/);
   const web = sources.web;
   assert.match(web, /completeVoiceSubmission\(submission\.voiceOperationId, metadata\.id, true\)/);
   assert.doesNotMatch(web, /error: "session_required"/);
+});
+
+test('desktop voice HTTP invoke preserves the draft typed model reference', async () => {
+  const source = sources.desktop;
+  const start = source.indexOf('  async function postprocessVoiceText(');
+  const end = source.indexOf('  async function finishVoiceInput(', start);
+  assert.ok(start >= 0 && end > start);
+  const calls = [];
+  const fn = vm.runInNewContext(`(function () { ${source.slice(start, end)}; return postprocessVoiceText; })()`, {
+    invoke: async (command, args) => { calls.push({ command, args }); return { text: 'output', source: 'llm' }; },
+    normalizeVoiceMode: value => value, voiceNow: () => 0, roundedMs: () => 0,
+    stripVoicePostprocessFences: text => text, voicePostprocessTimeoutMs: () => 500,
+    setTimeout, clearTimeout, console,
+  });
+  const reference = { source: 'account_platform', model_id: '0199a100-0001-7000-8000-000000000106' };
+  assert.equal((await fn('input', 'dictation', '', null, 500, 'raw', 'builtin-account-platform', reference)).text, 'output');
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0].command, 'postprocess_voice_text');
+  assert.equal(calls[0].args.request.session_id, null);
+  assert.deepEqual(calls[0].args.request.model_ref, reference);
+  assert.equal(calls[0].args.request.model_id, 'builtin-account-platform');
 });
 
 for (const code of ['permission_denied', 'outcome_unknown']) {

@@ -70,8 +70,9 @@ use crate::features::assistant::platform::bridge::{Pinvou3Bridge, base_url_uses_
 #[cfg(any(feature = "benchmark-hooks", test))]
 use crate::features::assistant::product_runtime::note_stderr;
 use crate::features::assistant::runtime_model::{
-    ModelCredentialMode, PassthroughRuntimeModelProvider, PreparedRuntimeModel,
-    RuntimeModelCredential, RuntimeModelProvider, RuntimeModelRequest,
+    AuxiliaryModelContext, AuxiliaryModelScope, ModelCredentialMode,
+    PassthroughRuntimeModelProvider, PreparedRuntimeModel, RuntimeModelCredential,
+    RuntimeModelProvider, RuntimeModelRequest,
 };
 use crate::features::assistant::turn_shell_tasks::{SessionShellManagers, SessionTurnShellTasks};
 use crate::features::sessions::{ScheduledRunProfile, SessionStore, transcript_revision};
@@ -91,6 +92,7 @@ pub(crate) struct RemoteRuntimeModelBundle {
 /// Per-call preparation inputs, including the remote task's frozen route.
 #[derive(Default)]
 struct RuntimeModelOverrides {
+    auxiliary: Option<AuxiliaryModelContext>,
     freeze_remote_credentials: bool,
     explicit_model: Option<SavedModel>,
     explicit_credential: Option<RuntimeModelCredential>,
@@ -2553,32 +2555,60 @@ impl EnginePool {
         Ok(Self::finalize_runtime_bridge(bridge, &prepared, pins_scheduled_model).await)
     }
 
-    /// Prepare an unsent composer's model without borrowing the active chat session
-    /// or creating a synthetic session/task. Credentials follow the same provider as chat.
+    /// Voice owns a separate, invisible transport lifetime even when its model
+    /// comes from an existing session. It must not retire or cancel that chat.
+    pub(crate) async fn fresh_bridge_for_voice(
+        &self,
+        session_id: &str,
+    ) -> Result<(Pinvou3Bridge, AuxiliaryModelScope)> {
+        #[cfg(any(feature = "benchmark-hooks", test))]
+        let eval_model = self.eval_model_snapshots.for_session(session_id);
+        #[cfg(not(any(feature = "benchmark-hooks", test)))]
+        let eval_model = None;
+        let scope = AuxiliaryModelScope::new(self.runtime_model_provider.clone());
+        let (bridge, prepared, pins) = Self::prepare_runtime_model_with(
+            &self.store,
+            self.runtime_model_provider.as_ref(),
+            self.runtime_credential_store.as_ref(),
+            self.bridge.clone(),
+            session_id,
+            false,
+            RuntimeModelOverrides {
+                auxiliary: Some(scope.context(None)),
+                explicit_model: eval_model,
+                ..Default::default()
+            },
+        )
+        .await?;
+        Ok((
+            Self::finalize_runtime_bridge(bridge, &prepared, pins).await,
+            scope,
+        ))
+    }
+
+    /// Prepare an unsent composer without creating or borrowing a chat session.
     pub(crate) async fn fresh_bridge_for_draft(
         &self,
         model_id: Option<&str>,
-    ) -> Result<Pinvou3Bridge> {
+        model_ref: Option<&ModelSelectionRef>,
+    ) -> Result<(Pinvou3Bridge, AuxiliaryModelScope)> {
         let mut bridge = self.bridge.clone();
         bridge.prefs = UserPrefs::load();
-        let model = match model_id.filter(|id| !id.trim().is_empty()) {
-            Some(id) => bridge
-                .prefs
-                .advanced
-                .saved_models
-                .iter()
-                .find(|model| model.id == id)
-                .cloned()
-                .context("Draft model binding is unavailable; select a model again")?,
-            None => bridge
-                .prefs
-                .active_model()
-                .cloned()
-                .context("No effective model is available for draft preparation")?,
-        };
-        let prepared =
-            prepare_draft_runtime_model(self.runtime_model_provider.as_ref(), model).await?;
-        Ok(Self::finalize_runtime_bridge(bridge, &prepared, false).await)
+        let model = resolve_voice_draft_model(&bridge.prefs, model_id, model_ref)?;
+        let reference = model
+            .is_builtin_account_platform()
+            .then(|| model.model.clone());
+        let scope = AuxiliaryModelScope::new(self.runtime_model_provider.clone());
+        let prepared = prepare_draft_runtime_model(
+            self.runtime_model_provider.as_ref(),
+            model,
+            scope.context(reference),
+        )
+        .await?;
+        Ok((
+            Self::finalize_runtime_bridge(bridge, &prepared, false).await,
+            scope,
+        ))
     }
 
     async fn prepare_runtime_model(
@@ -2598,6 +2628,7 @@ impl EnginePool {
             session_id,
             scheduled_unattended,
             RuntimeModelOverrides {
+                auxiliary: None,
                 freeze_remote_credentials,
                 explicit_model: explicit_model_override,
                 explicit_credential,
@@ -2624,6 +2655,7 @@ impl EnginePool {
         bridge.prefs = UserPrefs::load();
         Self::install_session_affinity_key(&mut bridge, session_id);
         let RuntimeModelOverrides {
+            auxiliary,
             freeze_remote_credentials,
             explicit_model: explicit_model_override,
             explicit_credential,
@@ -2683,6 +2715,7 @@ impl EnginePool {
             RuntimeModelRequest {
                 session_id: session_id.to_string(),
                 scheduled_model_ref,
+                auxiliary,
                 model: selected,
                 scheduled_unattended,
             },
@@ -5938,9 +5971,54 @@ fn validate_prepared_runtime_route(
     Ok(())
 }
 
+fn resolve_voice_draft_model(
+    prefs: &UserPrefs,
+    model_id: Option<&str>,
+    selection: Option<&ModelSelectionRef>,
+) -> Result<SavedModel> {
+    let selection = selection.or_else(|| {
+        model_id
+            .filter(|id| !id.trim().is_empty())
+            .is_none()
+            .then_some(prefs.advanced.default_model_ref.as_ref())
+            .flatten()
+    });
+    let selected = match selection {
+        Some(selection) => prefs
+            .resolve_model_ref(selection)
+            .context("Draft model binding is unavailable; select a model again")?,
+        None => match model_id.filter(|id| !id.trim().is_empty()) {
+            Some(id) => prefs
+                .model_by_id(id)
+                .filter(|model| !model.is_builtin_account_platform())
+                .cloned()
+                .context("Draft model binding is unavailable; select a model again")?,
+            None => match prefs.advanced.default_model_ref.as_ref() {
+                Some(selection) => prefs.resolve_model_ref(selection),
+                None if prefs.model_selection_schema_version == 0 => prefs
+                    .active_model()
+                    .filter(|model| !model.is_builtin_account_platform())
+                    .cloned(),
+                None => None,
+            }
+            .context("model_selection_required: choose a model before voice postprocess")?,
+        },
+    };
+    if model_id
+        .filter(|id| !id.trim().is_empty())
+        .is_some_and(|id| id != selected.id)
+        || (selected.is_builtin_account_platform()
+            && matches!(selection, Some(ModelSelectionRef::LocalConfig { .. })))
+    {
+        bail!("Draft model binding is unavailable; select a model again");
+    }
+    Ok(selected)
+}
+
 async fn prepare_draft_runtime_model(
     provider: &dyn RuntimeModelProvider,
     model: SavedModel,
+    auxiliary: AuxiliaryModelContext,
 ) -> Result<PreparedRuntimeModel> {
     let selected_id = model.id.clone();
     let prepared = provider
@@ -5950,6 +6028,7 @@ async fn prepare_draft_runtime_model(
             model,
             scheduled_unattended: false,
             scheduled_model_ref: None,
+            auxiliary: Some(auxiliary),
         })
         .await?;
     if prepared.model.id != selected_id {
@@ -5965,6 +6044,35 @@ async fn prepare_draft_runtime_model(
 // so it cannot deadlock.
 #[allow(clippy::await_holding_lock)]
 mod scheduled_model_tests {
+    #[test]
+    fn voice_draft_typed_reference_never_guesses_an_unbound_carrier() {
+        let mut prefs = crate::platform::prefs::UserPrefs::default();
+        prefs.advanced.saved_models = vec![SavedModel::builtin_account_platform()];
+        let id = prefs.advanced.saved_models[0].id.clone();
+        prefs
+            .set_default_model_ref(crate::platform::prefs::ModelSelectionRef::account_platform(
+                "0199a100-0001-7000-8000-000000000106",
+            ))
+            .unwrap();
+        prefs.model_selection_schema_version = 1;
+        let resolved = super::resolve_voice_draft_model(&prefs, None, None).unwrap();
+        assert_eq!(resolved.model, "0199a100-0001-7000-8000-000000000106");
+        assert!(super::resolve_voice_draft_model(&prefs, Some(&id), None).is_err());
+        assert!(
+            super::resolve_voice_draft_model(
+                &prefs,
+                None,
+                Some(&crate::platform::prefs::ModelSelectionRef::local(&id))
+            )
+            .is_err()
+        );
+        prefs.advanced.default_model_ref =
+            Some(crate::platform::prefs::ModelSelectionRef::local(&id));
+        assert!(super::resolve_voice_draft_model(&prefs, None, None).is_err());
+        prefs.advanced.default_model_ref = None;
+        assert!(super::resolve_voice_draft_model(&prefs, None, None).is_err());
+    }
+
     struct DraftModelProvider {
         calls: AtomicUsize,
         fail: bool,
@@ -6003,9 +6111,16 @@ mod scheduled_model_tests {
             model("custom-draft", "custom-wire"),
         ] {
             let expected_id = selected.id.clone();
-            let prepared = super::prepare_draft_runtime_model(&provider, selected)
-                .await
-                .unwrap();
+            let prepared = super::prepare_draft_runtime_model(
+                &provider,
+                selected,
+                super::AuxiliaryModelContext {
+                    scope_id: "voice-test".into(),
+                    draft_model_ref: None,
+                },
+            )
+            .await
+            .unwrap();
             assert_eq!(prepared.model.id, expected_id);
         }
         assert_eq!(provider.calls.load(Ordering::SeqCst), 2);
@@ -6023,6 +6138,10 @@ mod scheduled_model_tests {
                 super::prepare_draft_runtime_model(
                     &provider,
                     SavedModel::builtin_account_platform(),
+                    super::AuxiliaryModelContext {
+                        scope_id: "voice-test".into(),
+                        draft_model_ref: None
+                    },
                 )
                 .await
                 .is_err()
@@ -7522,6 +7641,7 @@ mod scheduled_model_tests {
                 model: selected,
                 scheduled_unattended: false,
                 scheduled_model_ref: None,
+                auxiliary: None,
             },
             None,
             false,
@@ -7568,6 +7688,7 @@ mod scheduled_model_tests {
                     model: selected,
                     scheduled_unattended,
                     scheduled_model_ref: None,
+                    auxiliary: None,
                 },
                 None,
                 false,
@@ -7592,6 +7713,7 @@ mod scheduled_model_tests {
                 model: selected,
                 scheduled_unattended: false,
                 scheduled_model_ref: None,
+                auxiliary: None,
             },
             None,
             false,

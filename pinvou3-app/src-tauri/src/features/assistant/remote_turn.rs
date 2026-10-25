@@ -1285,6 +1285,7 @@ mod tests {
                     model: selected,
                     scheduled_unattended: false,
                     scheduled_model_ref: None,
+                    auxiliary: None,
                 },
                 None,
                 false,
