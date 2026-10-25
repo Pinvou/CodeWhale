@@ -108,6 +108,8 @@ async fn contract_read_refuses_binary_payloads_but_keeps_lossy_text() {
     std::fs::write(temporary.path().join("deck.pptx"), &zip).expect("fixture");
     // UTF-16LE text with a BOM is not UTF-8 either.
     std::fs::write(temporary.path().join("notes.txt"), b"\xFF\xFEh\x00i\x00").expect("fixture");
+    // UTF-16BE BOM: the FE FF prefix arm, NUL-free so only the BOM catches it.
+    std::fs::write(temporary.path().join("be.txt"), b"\xFE\xFFh\x00i\x00").expect("fixture");
     // UTF-8 text with one truncated multibyte sequence: still text.
     std::fs::write(temporary.path().join("caf.txt"), b"caf\xC3\nnext line\n").expect("fixture");
     // Latin-1 text with a lone `ÿ` (0xFF) mid-stream: still text, not a BOM.
@@ -118,7 +120,7 @@ async fn contract_read_refuses_binary_payloads_but_keeps_lossy_text() {
     .expect("fixture");
     let context = ToolContext::new(temporary.path());
 
-    for name in ["deck.pptx", "notes.txt"] {
+    for name in ["deck.pptx", "notes.txt", "be.txt"] {
         let error = ReadFileTool::execute_contract_read(json!({"path": name}), &context)
             .await
             .expect_err("binary payloads are refused")

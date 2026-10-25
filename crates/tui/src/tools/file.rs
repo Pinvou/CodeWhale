@@ -647,9 +647,11 @@ fn primitive_image_mime(bytes: &[u8]) -> Option<&'static str> {
 /// in the sniffed head marks a binary container (zip-based Office documents,
 /// OLE2, executables, images without a sniffable magic) or UTF-16 text, whose
 /// ASCII range carries a NUL per code unit; a leading UTF-16/UTF-32 BOM is
-/// recognized even when the text that follows happens to avoid NULs. Single
-/// stray high bytes are left to the lossy decode — Latin-1 text with `ÿ` is
-/// still text.
+/// recognized even when the text that follows happens to avoid NULs. The
+/// sniff is a heuristic, not a format detector: a binary whose first 8 KiB
+/// happen to be NUL-free passes — most PDFs and zips carry a NUL early, an
+/// ASCII-headed one does not. Single stray high bytes are left to the lossy
+/// decode — Latin-1 text with `ÿ` is still text.
 fn contract_read_payload_is_binary(bytes: &[u8]) -> bool {
     const SNIFF_BYTES: usize = 8192;
     let head = &bytes[..bytes.len().min(SNIFF_BYTES)];
@@ -780,12 +782,13 @@ impl ReadFileTool {
 
         // The small-contract reader decodes non-image buffers as UTF-8 text with replacement
         // characters instead of refusing the whole read on one invalid byte. That tolerance
-        // is for text with a stray bad byte, not for binary containers: a .pptx/.docx/.zip,
-        // a PDF or an executable decoded this way fills the whole read budget with mojibake
-        // and tells the model nothing. Refuse those up front and point at an extractor.
+        // is for text with a stray bad byte, not for binary containers: a .pptx/.docx/.zip
+        // or an executable decoded this way fills the whole read budget with mojibake and
+        // tells the model nothing. Refuse those up front and point at an extractor. The
+        // extraction commands below need a role whose shell allows them; `file` is read-only.
         if contract_read_payload_is_binary(&bytes) {
             return Err(ToolError::execution_failed(format!(
-                "{path_str} is a binary file ({}); read returns text only. Extract it with a file-type tool (PDF/document readers) or bash (`file` to identify it, `unzip -l`/`unzip -p` for .pptx/.docx/.xlsx/.zip) instead of reading the raw bytes.",
+                "{path_str} is a binary file ({}); read returns text only. Use `file` to identify it, or — with a role that permits it — `unzip -l`/`unzip -p` for .pptx/.docx/.xlsx/.zip instead of reading the raw bytes.",
                 contract_format_size(bytes.len())
             )));
         }

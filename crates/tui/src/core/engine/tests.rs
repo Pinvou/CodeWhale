@@ -12478,6 +12478,46 @@ fn tool_validation_feedback_bounds_oversized_schemas_to_their_field_inventory() 
         "small schemas stay verbatim: {formatted}"
     );
     assert!(!formatted.contains("omitted"), "{formatted}");
+
+    // Budget boundary: a schema serialized to exactly 2048 bytes stays
+    // verbatim; one byte more reduces it to the field inventory.
+    let sized_schema = |filler: usize| {
+        json!({
+            "type": "object",
+            "properties": {"path": {"description": "x".repeat(filler)}},
+            "required": ["path"]
+        })
+    };
+    let base_len = sized_schema(0).to_string().len();
+    let at_budget = sized_schema(2048 - base_len);
+    assert_eq!(at_budget.to_string().len(), 2048);
+    let formatted = format_tool_error_with_schema(&error, "boundary", Some(&at_budget));
+    assert!(
+        !formatted.contains("omitted from this receipt"),
+        "a schema at exactly the budget stays verbatim: {formatted}"
+    );
+    let over_budget = sized_schema(2049 - base_len);
+    let formatted = format_tool_error_with_schema(&error, "boundary+1", Some(&over_budget));
+    assert!(
+        formatted.contains("omitted from this receipt")
+            && formatted.contains("\"required\":[\"path\"]"),
+        "one byte over the budget reduces to the inventory: {formatted}"
+    );
+
+    // A composition-only schema has no top-level properties: the reduced
+    // receipt carries an empty inventory plus the pointer back to the
+    // advertised schema, not a misleading shape.
+    let composition = json!({
+        "oneOf": [
+            {"type": "object", "description": "x".repeat(3000)},
+            {"type": "string", "description": "x".repeat(3000)}
+        ]
+    });
+    let formatted = format_tool_error_with_schema(&error, "apply_patch", Some(&composition));
+    assert!(
+        formatted.contains("\"properties\":[]") && formatted.contains("omitted from this receipt"),
+        "a no-properties schema reduces with an empty inventory: {formatted}"
+    );
 }
 
 #[test]

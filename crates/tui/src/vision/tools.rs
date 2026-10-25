@@ -95,12 +95,17 @@ impl ImageAnalyzeTool {
         let candidate = if image_path_buf.is_absolute() {
             image_path_buf.to_path_buf()
         } else {
-            if image_path_buf
-                .components()
-                .any(|c| matches!(c, Component::Prefix(_) | Component::ParentDir))
-            {
+            // `RootDir` cannot appear in a Unix-relative path but can in a
+            // Windows rooted one (`\foo`): keep it refused here so the
+            // containment check below is not the only line of defense.
+            if image_path_buf.components().any(|c| {
+                matches!(
+                    c,
+                    Component::Prefix(_) | Component::RootDir | Component::ParentDir
+                )
+            }) {
                 return Err(ToolError::execution_failed(
-                    "image_path must be a relative path within the workspace and cannot escape it.",
+                    "image_path must resolve within the workspace and cannot escape it.",
                 ));
             }
             workspace.join(image_path_buf)
@@ -628,8 +633,7 @@ mod tests {
             .await
             .expect_err("`..`-traversal must reject");
         assert!(
-            err.to_string()
-                .contains("relative path within the workspace"),
+            err.to_string().contains("within the workspace"),
             "error must call out the workspace boundary; got {err}"
         );
     }
