@@ -364,7 +364,7 @@ export function auditDistCss(assetsDir) {
     // Cascade layers ship in Safari 15.4+ and lightningcss does not flatten
     // them at cssTarget safari14; a Tailwind 4 build puts ~90% of its output
     // inside @layer blocks, so any survivor means the macOS 11 / Safari 14.0
-    // floor renders unstyled (same verdict as the #665 TW4 investigation).
+    // floor renders unstyled (same verdict as the earlier Tailwind 4 deps-bump audit).
     // Comments, quoted strings, and url() token bodies cannot create layers,
     // but lightningcss keeps `/*! … */` license headers verbatim and
     // `content` strings can quote at-rule syntax, so both scans run over the

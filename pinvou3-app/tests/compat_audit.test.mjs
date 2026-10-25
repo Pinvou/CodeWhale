@@ -160,7 +160,7 @@ test('the auditor flags @layer blocks that survive into dist CSS (Safari 14.0 co
   // Cascade layers ship in Safari 15.4+ and lightningcss does not flatten
   // them at cssTarget safari14: a Tailwind 4 build puts most of its output
   // inside @layer blocks and the macOS 11 / Safari 14.0 floor renders
-  // unstyled (the #665 TW4 verdict). The auditor fails on any survivor in
+  // unstyled (the Tailwind 4 deps-bump audit verdict). The auditor fails on any survivor in
   // the built artifact; other at-rules must not phantom-match.
   const distDir = fs.mkdtempSync(path.join(os.tmpdir(), 'compat-audit-layer-'));
   try {
