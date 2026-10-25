@@ -536,9 +536,12 @@ impl CoordinationLedger {
         // contend unless the existing owner is an ancestor of the new one
         // (`exempt_owners` is that ancestor chain — the parent delegated the
         // work downward), so parallel siblings refuse instead of racing the
-        // same checkout.
+        // same checkout. A `None` root predates serialization; it names no
+        // worktree, so it keeps the documented legacy never-contending
+        // footing instead of matching every other `None`.
         let mut same_worktree_sibling = |existing: &PersistedWriteClaim| {
             existing.isolated_worktree
+                && existing.worktree_root.is_some()
                 && existing.worktree_root == worktree_root
                 && existing.claim.owner != claim.owner
                 && !exempt_owners.contains(&existing.claim.owner)

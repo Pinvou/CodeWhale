@@ -1641,6 +1641,53 @@ mod tests {
         );
     }
 
+    /// A `None` worktree root predates serialization and names no worktree,
+    /// so legacy isolated claims keep the documented never-contending footing
+    /// instead of `None == None` matching every other `None` — including one
+    /// in a different worktree. Rooted claims still serialize by their root.
+    #[tokio::test]
+    async fn legacy_none_root_isolated_claims_never_contend() {
+        let tmp = tempdir().unwrap();
+        let mut manager = super::super::SubAgentManager::new(tmp.path().to_path_buf(), 4);
+        let claim = |owner: &str| WriteScopeClaim {
+            owner: owner.to_string(),
+            roots: vec![".".into()],
+            exact_files: Vec::new(),
+            contracts: Vec::new(),
+        };
+        manager
+            .coordination
+            .register_claim(claim("legacy-a"), true, None, &[], |_| true)
+            .expect("first legacy isolated claim");
+        manager
+            .coordination
+            .register_claim(claim("legacy-b"), true, None, &[], |_| true)
+            .expect("legacy claims never contend with each other");
+        manager
+            .coordination
+            .register_claim(
+                claim("elsewhere"),
+                true,
+                Some("/other-wt".into()),
+                &[],
+                |_| true,
+            )
+            .expect("a different worktree never contends with a legacy record");
+
+        manager
+            .coordination
+            .register_claim(claim("rooted-a"), true, Some("/wt".into()), &[], |_| true)
+            .expect("first rooted isolated claim");
+        let error = manager
+            .coordination
+            .register_claim(claim("rooted-b"), true, Some("/wt".into()), &[], |_| true)
+            .expect_err("equal rooted siblings contend");
+        assert!(
+            error.contains("write-scope contention with rooted-a"),
+            "the refusal names the rooted sibling: {error}"
+        );
+    }
+
     #[tokio::test]
     async fn release_action_clears_only_stale_write_claims_and_persists() {
         let tmp = tempdir().unwrap();

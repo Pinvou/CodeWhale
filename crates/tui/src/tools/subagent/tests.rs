@@ -11674,6 +11674,10 @@ fn create_isolated_worktree_rejects_ambiguous_nested_repos() {
 /// under /Users/asto. Specify cwd to disambiguate: /Users/asto/flutter,
 /// /Users/asto/Spec2017-iOS") — leaking unrelated project names and, with a
 /// single sibling, silently adopting a stranger's repository.
+///
+/// The anchor probe itself (`git rev-parse` from the workspace) walks
+/// unboundedly, so this test assumes the tempdir is not inside a checkout
+/// (the base no-repo test nests six levels to dodge the same assumption).
 #[test]
 fn worktree_discovery_never_adopts_or_enumerates_an_ancestors_sibling_repos() {
     let home = tempdir().expect("home");
@@ -13579,6 +13583,108 @@ async fn interrupted_child_resume_does_not_contend_with_its_own_parked_claim() {
     assert!(!guard.is_live_coordination_owner(&first.agent_id));
 }
 
+/// The launch-manifest fallback for claim restoration: the parked claim row
+/// can be swept (`coordinate action=release` — the recovery the contention
+/// receipts recommend — removes every non-live owner) or evicted at ledger
+/// capacity, and `action=claim` cannot re-attach one (it only expands an
+/// existing row). The resume must rebuild the scope from the durable launch
+/// manifest instead of leaving the write-capable child claim-less.
+#[tokio::test]
+async fn resumed_child_restores_claim_scope_from_its_manifest_when_the_row_is_gone() {
+    let tmp = tempdir().expect("tempdir");
+    let manager = new_shared_subagent_manager(tmp.path().to_path_buf(), 4);
+    let mut runtime = stub_runtime();
+    runtime.manager = Arc::clone(&manager);
+    runtime.context = ToolContext::new(tmp.path());
+
+    let mut guard = manager.write().await;
+    let first = guard
+        .spawn_background_with_assignment_options(
+            Arc::clone(&manager),
+            runtime.clone(),
+            FleetRole::Builder,
+            "edit the workspace".into(),
+            make_assignment(),
+            Some(vec![]),
+            SubAgentSpawnOptions {
+                name: Some("writer-a".into()),
+                write_claim: Some(WriteScopeClaim {
+                    owner: String::new(),
+                    roots: vec!["fixture/calc".into()],
+                    exact_files: vec![],
+                    contracts: vec![],
+                }),
+                ..Default::default()
+            },
+        )
+        .expect("writer admitted");
+    assert!(
+        guard
+            .worker_records
+            .get(&first.agent_id)
+            .and_then(|record| record.spec.launch_manifest.as_ref())
+            .is_some_and(|manifest| manifest.writable_roots == vec!["fixture/calc".to_string()]),
+        "the spawn stamps the durable manifest with the claim scope"
+    );
+    // Give the child a continuable checkpoint with content, as a real
+    // interrupted loop leaves behind.
+    guard
+        .agents
+        .get_mut(&first.agent_id)
+        .expect("agent")
+        .checkpoint = Some(build_subagent_checkpoint(
+        &first.agent_id,
+        "parent_interrupt",
+        &[Message {
+            role: Role::User,
+            content: vec![ContentBlock::Text {
+                text: "prior work".to_string(),
+                cache_control: None,
+            }],
+        }],
+        1,
+        true,
+    ));
+    guard
+        .interrupt_child(&first.agent_id, None, "interrupted by parent".into())
+        .expect("interrupt");
+
+    // The interrupted child is no longer a live claimant, so the recovery
+    // the contention receipts recommend sweeps its parked row.
+    let released = guard
+        .release_stale_write_claims(None)
+        .expect("the stale-claim sweep runs");
+    assert!(
+        released.contains(&first.agent_id),
+        "the parked claim was swept: {released:?}"
+    );
+    assert!(
+        !guard
+            .coordination_snapshot()
+            .write_claims
+            .iter()
+            .any(|record| record.claim.owner == first.agent_id),
+        "the row is gone from the ledger"
+    );
+
+    let resumed = guard
+        .resume_from_checkpoint(Arc::clone(&manager), runtime, &first.agent_id, "continue")
+        .expect("resume rebuilds the scope from the manifest");
+    let resumed_claim = guard
+        .coordination_snapshot()
+        .write_claims
+        .into_iter()
+        .find(|record| record.claim.owner == resumed.agent_id)
+        .expect("the resumed child holds a claim rebuilt from its manifest");
+    assert_eq!(
+        resumed_claim.claim.roots,
+        vec!["fixture/calc".to_string()],
+        "the manifest scope survives the sweep"
+    );
+    assert!(!resumed_claim.isolated_worktree);
+    assert!(guard.is_live_coordination_owner(&resumed.agent_id));
+}
+
 /// Reproduces a live session (2026-10-24): a `general` child running in an
 /// isolated worktree asked for a write-capable child of its own (no worktree
 /// request, so the grandchild keeps the worktree as its workspace). Worktrees
@@ -13885,6 +13991,167 @@ async fn worktree_sibling_grandchildren_contend_while_a_descendant_chain_does_no
         live_owners.len(),
         3,
         "parent, first sibling, and depth-3 hold claims; the refused sibling does not: {live_owners:?}"
+    );
+}
+
+/// A `cwd`-narrowed child of a worktree parent keeps the parent's full root
+/// set (a cwd swap carries the root set over), so its claim must serialize
+/// against the containing worktree — keying on the child's own workspace
+/// would hand two children of one worktree disjoint keys and let them race
+/// the checkout unchecked, the fan-out same-worktree serialization exists to
+/// refuse. A child that creates its own worktree (a sibling of its parent's,
+/// never nested) keys on that worktree instead.
+#[tokio::test]
+async fn cwd_narrowed_children_of_a_worktree_serialize_against_the_worktree() {
+    let tmp = tempdir().expect("tempdir");
+    let coordination_root = tmp.path().join("workspace");
+    let worktree = tmp
+        .path()
+        .join(".codewhale-worktrees")
+        .join("workspace")
+        .join("codex-agent-parent");
+    let narrowed = worktree.join("crates").join("app");
+    let sibling_worktree = tmp
+        .path()
+        .join(".codewhale-worktrees")
+        .join("workspace")
+        .join("codex-agent-sibling");
+    for dir in [&coordination_root, &worktree, &narrowed, &sibling_worktree] {
+        std::fs::create_dir_all(dir).expect("mkdir");
+    }
+    let manager = new_shared_subagent_manager(coordination_root.clone(), 4);
+    let claim = || WriteScopeClaim {
+        owner: String::new(),
+        roots: vec![".".into()],
+        exact_files: vec![],
+        contracts: vec![],
+    };
+
+    let mut guard = manager.write().await;
+    let mut parent_runtime = stub_runtime();
+    parent_runtime.manager = Arc::clone(&manager);
+    parent_runtime.context = ToolContext::new(&worktree);
+    let parent = guard
+        .spawn_background_with_assignment_options(
+            Arc::clone(&manager),
+            parent_runtime,
+            FleetRole::Builder,
+            "work in the worktree".into(),
+            make_assignment(),
+            Some(vec![]),
+            SubAgentSpawnOptions {
+                name: Some("worktree-parent".into()),
+                write_claim: Some(claim()),
+                isolated_worktree: true,
+                ..Default::default()
+            },
+        )
+        .expect("worktree child admitted");
+
+    // A `cwd: crates/app` child is a descendant of the worktree parent:
+    // admitted through the ancestor exemption, but its claim must key on the
+    // containing worktree, not on its subdirectory workspace.
+    let narrowed_child = {
+        let mut child_runtime = stub_runtime();
+        child_runtime.manager = Arc::clone(&manager);
+        child_runtime.context = ToolContext::new(&narrowed);
+        child_runtime.parent_agent_id = Some(parent.agent_id.clone());
+        guard
+            .spawn_background_with_assignment_options(
+                Arc::clone(&manager),
+                child_runtime,
+                FleetRole::Builder,
+                "edit the crate".into(),
+                make_assignment(),
+                Some(vec![]),
+                SubAgentSpawnOptions {
+                    name: Some("cwd-child".into()),
+                    write_claim: Some(claim()),
+                    ..Default::default()
+                },
+            )
+            .expect("a cwd-narrowed descendant is exempt from its ancestors' claims")
+    };
+    let expected_root = worktree.canonicalize().expect("canonical worktree");
+    let snapshot = guard.coordination_snapshot();
+    let narrowed_record = snapshot
+        .write_claims
+        .iter()
+        .find(|record| record.claim.owner == narrowed_child.agent_id)
+        .expect("cwd-narrowed claim registered");
+    assert_eq!(
+        narrowed_record.worktree_root.as_deref(),
+        Some(expected_root.to_string_lossy().as_ref()),
+        "the cwd-narrowed child serializes against the containing worktree"
+    );
+
+    // A root-level sibling of the same worktree covers the whole checkout
+    // exactly like the narrowed child does: the two must contend.
+    let error = {
+        let mut child_runtime = stub_runtime();
+        child_runtime.manager = Arc::clone(&manager);
+        child_runtime.context = ToolContext::new(&worktree);
+        child_runtime.parent_agent_id = Some(parent.agent_id.clone());
+        guard
+            .spawn_background_with_assignment_options(
+                Arc::clone(&manager),
+                child_runtime,
+                FleetRole::Builder,
+                "edit inside the worktree".into(),
+                make_assignment(),
+                Some(vec![]),
+                SubAgentSpawnOptions {
+                    name: Some("root-sibling".into()),
+                    write_claim: Some(claim()),
+                    ..Default::default()
+                },
+            )
+            .expect_err("a root sibling overlaps the narrowed child's whole-checkout claim")
+            .to_string()
+    };
+    assert!(
+        error.contains("write-scope contention with") && error.contains(&narrowed_child.agent_id),
+        "the refusal names the narrowed child it would race: {error}"
+    );
+
+    // A child that requests its own worktree gets a sibling worktree
+    // (nesting is forbidden) outside its parent's root: it keys on its own
+    // worktree and does not contend with the parent's claim.
+    let own_worktree_child = {
+        let mut child_runtime = stub_runtime();
+        child_runtime.manager = Arc::clone(&manager);
+        child_runtime.context = ToolContext::new(&sibling_worktree);
+        child_runtime.parent_agent_id = Some(parent.agent_id.clone());
+        guard
+            .spawn_background_with_assignment_options(
+                Arc::clone(&manager),
+                child_runtime,
+                FleetRole::Builder,
+                "work in my own worktree".into(),
+                make_assignment(),
+                Some(vec![]),
+                SubAgentSpawnOptions {
+                    name: Some("own-worktree-child".into()),
+                    write_claim: Some(claim()),
+                    isolated_worktree: true,
+                    ..Default::default()
+                },
+            )
+            .expect("a child in its own worktree does not contend with the parent's claim")
+    };
+    let expected_own_root = sibling_worktree
+        .canonicalize()
+        .expect("canonical sibling worktree");
+    let snapshot = guard.coordination_snapshot();
+    let own_record = snapshot
+        .write_claims
+        .iter()
+        .find(|record| record.claim.owner == own_worktree_child.agent_id)
+        .expect("own-worktree claim registered");
+    assert_eq!(
+        own_record.worktree_root.as_deref(),
+        Some(expected_own_root.to_string_lossy().as_ref()),
+        "an own worktree keys itself, not the parent's worktree"
     );
 }
 

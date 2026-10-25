@@ -1537,6 +1537,12 @@ pub(crate) struct SubAgentSpawnOptions {
     /// Checkpoint resume: the claim comes from the coordination ledger and is
     /// already namespaced — skip re-namespacing in the spawn seam.
     pub claim_pre_namespaced: bool,
+    /// Checkpoint resume: the worktree root the restored claim was registered
+    /// under. A root-session resume has no ancestor chain to resolve
+    /// containment from, so the recorded key keeps the claim in its original
+    /// serialization domain instead of falling back to the child's own
+    /// (possibly `cwd`-narrowed) workspace.
+    pub write_claim_worktree_root: Option<String>,
     /// Checkpoint resume: preserve the interrupted child's runtime posture
     /// instead of rebuilding it from the caller's role.
     pub preserve_runtime_profile: Option<WorkerRuntimeProfile>,
@@ -5031,6 +5037,12 @@ impl SubAgentManager {
             .is_some_and(|manifest| manifest.worktree)
     }
 
+    /// Ancestor hops the exemption/containment walk may follow. Generous
+    /// over `MAX_SPAWN_DEPTH_CEILING` (8): a legal delegation chain can
+    /// never exhaust this, so exhausting it means a cycle or corrupted
+    /// records. Raise it together with that ceiling if it ever grows.
+    const WORKTREE_ANCESTOR_WALK_LIMIT: usize = 15;
+
     /// The claim owner `owner`/`start` may overlap inside one worktree: its
     /// ancestor chain, nearest first. A parent delegates its work downward,
     /// so a descendant's claim may cover the ancestor's; unrelated owners in
@@ -5047,7 +5059,7 @@ impl SubAgentManager {
         };
         let mut chain = vec![start_id.clone()];
         let mut cursor = start_id;
-        for _ in 0..15 {
+        for _ in 0..Self::WORKTREE_ANCESTOR_WALK_LIMIT {
             let Some(record) = self.worker_records.get(&cursor) else {
                 break;
             };
@@ -5071,6 +5083,32 @@ impl SubAgentManager {
             cursor = parent_id;
         }
         chain
+    }
+
+    /// The serialization key an isolated claim registers under: the worktree
+    /// the child runs in, not the child's own workspace. A `cwd`-narrowed
+    /// child keeps the parent's full root set, so keying on its workspace
+    /// would hand two children of one worktree disjoint keys and let them
+    /// race the checkout unchecked. The nearest ancestor claim whose root
+    /// contains the child's workspace supplies the key; a child that created
+    /// its own worktree (a sibling of its parent's — nesting is forbidden)
+    /// or has no isolated ancestor keys on its own workspace.
+    fn containing_worktree_root(&self, parent_id: Option<&str>, workspace_root: String) -> String {
+        let workspace = Path::new(&workspace_root);
+        for owner in self.worktree_claim_exemptions(parent_id) {
+            if let Some(record) = self
+                .coordination
+                .write_claims
+                .iter()
+                .find(|record| record.claim.owner == owner)
+                && record.isolated_worktree
+                && let Some(root) = record.worktree_root.as_deref()
+                && workspace.starts_with(root)
+            {
+                return root.to_string();
+            }
+        }
+        workspace_root
     }
 
     fn namespace_write_claim(
@@ -5981,6 +6019,7 @@ impl SubAgentManager {
             workspace,
             claim,
             recorded_worktree_isolation,
+            restored_worktree_root,
             preserved_profile,
             child_route,
         ) = {
@@ -6023,16 +6062,34 @@ impl SubAgentManager {
             // stays inside the coordination ledger with the original bounded
             // scope instead of inheriting the caller's unchecked write surface.
             // The ledger claim is already namespaced and carries the isolation
-            // flag; both are passed through to the spawn seam. The claim is
-            // not the isolation authority, though — it can be released or
-            // never have existed for a worktree child — so the worker
-            // record's launch manifest is read below as the durable fallback.
-            let claim = self
+            // flag and its worktree key; all three pass through to the spawn
+            // seam. The claim is not the authority, though — the row can be
+            // released (the sweep the contention receipts recommend), evicted
+            // at ledger capacity, or never have existed for a worktree child —
+            // so the worker record's launch manifest is the durable fallback
+            // for the scope too, not only for the isolation flag. A claim-less
+            // manifest stays claim-less; one carrying scope restores it.
+            let restored_claim = self
                 .coordination
                 .write_claims
                 .iter()
                 .find(|record| record.claim.owner == agent_id)
-                .map(|record| (record.claim.clone(), record.isolated_worktree));
+                .map(|record| {
+                    (
+                        record.claim.clone(),
+                        record.isolated_worktree,
+                        record.worktree_root.clone(),
+                    )
+                });
+            let claim = restored_claim
+                .as_ref()
+                .map(|(claim, isolated, _)| (claim.clone(), *isolated))
+                .or_else(|| {
+                    self.worker_records
+                        .get(&agent_id)
+                        .and_then(|record| worker_coordination_claim(&record.spec).ok().flatten())
+                });
+            let restored_worktree_root = restored_claim.and_then(|(_, _, root)| root);
             // The spec's launch manifest durably pins that this child was
             // spawned into an isolated worktree, independent of the claim
             // lifecycle. Keying isolation on the claim alone resumed a
@@ -6064,6 +6121,7 @@ impl SubAgentManager {
                 agent.workspace.clone(),
                 claim,
                 recorded_worktree_isolation,
+                restored_worktree_root,
                 preserved_profile,
                 child_route,
             )
@@ -6118,6 +6176,7 @@ impl SubAgentManager {
             write_claim: claim.as_ref().map(|(claim, _)| claim.clone()),
             isolated_worktree,
             claim_pre_namespaced: claim.is_some(),
+            write_claim_worktree_root: restored_worktree_root,
             preserve_runtime_profile: preserved_profile,
             ..Default::default()
         };
@@ -6724,9 +6783,12 @@ impl SubAgentManager {
         // workspace ... must remain inside coordination root". Isolation truth
         // uses the resume path's precedence: the parent's registered claim
         // flag, falling back to its durable launch manifest. The claim is
-        // keyed on the canonical worktree root, so the ledger can still
-        // serialize unrelated writers inside one worktree while exempting the
-        // ancestor chain the work was delegated down through.
+        // keyed on the containing worktree root — resolved through the
+        // ancestor chain, so a `cwd`-narrowed child serializes against its
+        // worktree rather than its subdirectory, and a resumed claim keeps
+        // its recorded root — so the ledger can still serialize unrelated
+        // writers inside one worktree while exempting the ancestor chain the
+        // work was delegated down through.
         let isolated_worktree = options.isolated_worktree
             || runtime
                 .parent_agent_id
@@ -6761,9 +6823,17 @@ impl SubAgentManager {
                     };
                     let active_owners = self.active_coordination_owners();
                     let worktree_root = isolated_worktree.then(|| {
-                        normalize_subagent_workspace(&agent.workspace)
-                            .to_string_lossy()
-                            .into_owned()
+                        options
+                            .write_claim_worktree_root
+                            .clone()
+                            .unwrap_or_else(|| {
+                                self.containing_worktree_root(
+                                    runtime.parent_agent_id.as_deref(),
+                                    normalize_subagent_workspace(&agent.workspace)
+                                        .to_string_lossy()
+                                        .into_owned(),
+                                )
+                            })
                     });
                     let exempt_owners =
                         self.worktree_claim_exemptions(runtime.parent_agent_id.as_deref());
@@ -9918,6 +9988,7 @@ async fn spawn_subagent_from_input(
             expected_artifact: spawn_request.expected_artifact.clone(),
             resume_from_agent_id: resume_from_agent_id.clone(),
             claim_pre_namespaced: false,
+            write_claim_worktree_root: None,
             preserve_runtime_profile: None,
         },
     );
@@ -15855,7 +15926,7 @@ impl SubAgentToolRegistry {
         if !self.posture_permits_tool(name, Some(&input)) {
             if self.allows_bounded_readonly_bash(name) {
                 return Err(anyhow!(
-                    "[shell.readonly.command] Tool {name} input did not match the bounded read-only shell grammar for Fleet role `{role}`. Admitted: a single read-only command or a pipe of them — git status/log/diff/show/ls-files/blame/grep/rev-parse, git branch --show-current|--list, git worktree list, ls, pwd, cat, head, tail, wc, stat, file, du, df, which, grep, rg, fd, find (no -delete/-exec), sed -n <range>p, sort, uniq, cut, tr, npm view. Not admitted: cd, &&, ;, redirects, $(...), env prefixes, interpreters (python3/node/...), sleep, test. Do not retry variations of a refused shape; use `read`/`file_search` instead, or an `implement`/`general` role for mutation or arbitrary execution.",
+                    "[shell.readonly.command] Tool {name} input did not match the bounded read-only shell grammar for Fleet role `{role}`. Admitted: a single read-only command or a pipe of them — git status/log/diff/show/ls-files/blame/grep, git rev-parse (bounded read-only flags), git branch (bare, --show-current, --list), git worktree list, ls, pwd, cat, head, tail, wc, stat, file, du, df, which, grep, rg, fd, find (no -delete/-exec), sed -n <range>p, sort, uniq, cut, tr, npm view. Not admitted: cd, &&, ;, redirects, $(...), env prefixes, interpreters (python3/node/...), sleep, test. Do not retry variations of a refused shape; use `read`/`file_search` instead, or an `implement`/`general` role for mutation or arbitrary execution.",
                     role = self.agent_type.as_str()
                 ));
             }
