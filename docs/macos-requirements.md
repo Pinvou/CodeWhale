@@ -50,7 +50,7 @@ brew install --cask libreoffice
 | PDF 渲染预览 | poppler (`pdftoppm`) | Homebrew / 官网 | https://poppler.freedesktop.org |
 | Office 文档转换 | LibreOffice | Homebrew cask / 官网 | https://www.libreoffice.org/download |
 | Markdown/文档转换 | pandoc | Homebrew / 官网 | https://pandoc.org/installing.html |
-| OCR（扫描件识别） | tesseract | Homebrew / 官网 | https://tesseract-ocr.github.io/tessdoc/Installation.html |
+| OCR（扫描件识别） | tesseract + tesseract-lang（中文语言包，中文识别必需） | Homebrew / 官网 | https://tesseract-ocr.github.io/tessdoc/Installation.html |
 | 压缩包解压 | 7-Zip (`7z`) | Homebrew (`p7zip`) / 官网 | https://www.7-zip.org |
 | 语音输入 | macOS 系统 Speech 框架 | 系统自带（无需安装） | — |
 | 邮件解析 (.msg) | msgconvert (Perl 模块) | `sudo cpan -i Email::Outlook::Message` | — |

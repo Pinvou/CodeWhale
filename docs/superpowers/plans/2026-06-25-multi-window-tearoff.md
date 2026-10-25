@@ -3,7 +3,7 @@
 > **历史快照：** 本文为 2026-06 时点的实施记录，非现行操作指南，文中路径与做法以写作时点为准。与当前源码的主要差异：
 >
 > - 前端已迁移 Vite 模块构建（React 入口 `pinvou3-app/src/app/main.jsx`，不再是单文件 `index.html` + 浏览器内 Babel）；Rust 侧撕离实现现位于 `pinvou3-app/src-tauri/src/features/pet/platform/detach.rs`（原 `src-tauri/src/detach.rs`）。
-> - 交互已从「⧉ 按钮撕离」改为长按浮起拖拽（历史提交 `aaba16380` 等）；全局鼠标钩子 `device_query` 已改为按平台直连输入（Linux 直连 x11，另落 macOS/Windows 分支，历史提交 `7629abcb9c`），`examples/tearoff_spike.rs` 已删除。
+> - 交互已从「⧉ 按钮撕离」改为长按浮起拖拽（历史提交 `aaba16380` 等）；全局鼠标钩子 `device_query` 已改为按平台直连输入（Linux 直连 x11，另落 macOS/Windows 分支，历史提交 `7629abcb9c`、`6ae62ec8cb` 等），`examples/tearoff_spike.rs` 已删除。
 > - 文中引用的 `tests/tearoff_buttons_smoke.js`、`tests/ghost_boot_smoke.js` 已删除，由 `tests/detached_boot_smoke.js` 与 `tests/drag_gesture_smoke.js` 接替。
 > - 可撕离窗口种类以 `pinvou3-app/src/app/DetachedShell.jsx` 现行注册表为准（persona/workflow/localenv 未上线，实际含 session/codex-session/monitor/cardpool/toolstore/knowledge/outputs）。
 > - Rust 侧引擎与并发模块已随目录重组迁移（`engine_pool.rs` 现位于 `features/assistant/`）；Tauri `capabilities` 配置的窗口键已由 `windows` 数组改为 `webviews`。
