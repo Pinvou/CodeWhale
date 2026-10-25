@@ -51,6 +51,23 @@ test("diagnostics consent smoke is executable and selected for all entry points"
   }
 });
 
+test("offline abandonment smoke is selected for the real UI, bridge and fixtures", () => {
+  const smoke = "node:tests/remote_offline_abandon_smoke.mjs";
+  assert.ok(fullLabels.includes(smoke));
+  for (const changedPath of [
+    "pinvou3-app/src/features/chat/ChatView.jsx",
+    "pinvou3-app/src/platform/tauri/bridge/desktop-remote-control.js",
+    "pinvou3-app/tests/remote_offline_abandon_smoke.mjs",
+    "pinvou3-app/tests/fixtures/remote_offline_abandon_smoke.jsx",
+    "pinvou3-app/tests/fixtures/remote_offline_abandon_smoke.html",
+  ]) assert.ok(labels(selectFrontendSmokes([changedPath])).includes(smoke), changedPath);
+  const knip = JSON.parse(readFileSync(
+    new URL("../../pinvou3-app/knip.json", import.meta.url), "utf8",
+  ));
+  assert.ok(knip.entry.includes("tests/remote_offline_abandon_smoke.mjs"));
+  assert.ok(!knip.ignore.includes("tests/remote_offline_abandon_smoke.mjs"));
+});
+
 const fullSuiteCases = [
   [
     "shared frontend paths fail closed to the full browser suite",

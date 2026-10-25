@@ -4817,7 +4817,7 @@ const openChatExternalUrl = (url) => {
                           <button type="button" onClick={() => commitPreparedRemoteTask(item)} disabled={!!remoteDispatchAction}
                             className="rounded-full border px-2 py-1 disabled:opacity-50">{t.remoteConversation.commitPreparedTask}</button>
                         )}
-                        <button type="button" onClick={() => abandonRemoteTask(item)} disabled={!!remoteDispatchAction || !remoteLinkReady}
+                        <button type="button" onClick={() => abandonRemoteTask(item)} disabled={!!remoteDispatchAction}
                           className="rounded-full border px-2 py-1 disabled:opacity-50">{t.remoteConversation.abandonPreparedTask}</button>
                       </div>
                     )}
