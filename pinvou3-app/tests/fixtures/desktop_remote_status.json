@@ -27,6 +27,20 @@
     },
     "errorCode": null
   },
+  "controllerReconnecting": {
+    "status": "reconnecting",
+    "claimRequestId": "claim-0001",
+    "hasPendingCode": false,
+    "deviceDisplayName": "Studio PC",
+    "lease": {
+      "connectionId": "connection-0001",
+      "controllerLeaseId": "lease-0001",
+      "leaseEpoch": "1",
+      "relayEpoch": "relay-epoch-0001",
+      "remoteControlGeneration": "generation-0001"
+    },
+    "errorCode": null
+  },
   "controllerError": {
     "status": "error",
     "claimRequestId": "claim-0001",

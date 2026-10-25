@@ -79,6 +79,14 @@ pub(crate) trait ControllingLane: Send {
     /// authenticated keeper must carry this exact transport and lease tuple.
     fn transport_sender(&self) -> Option<ControllerTransportSender>;
 
+    /// Test-only synchronization after authenticated commit, before activation.
+    /// No manager lock is held; production builds have no hook or new API.
+    #[cfg(test)]
+    fn before_resume_activation(&self) {}
+
+    #[cfg(test)]
+    fn after_resume_activation(&self) {}
+
     /// E2E-06：发送恢复族的敏感控制帧（prepare/confirm/ready_ack）。默认实现
     /// 失败关闭，只有真实 transport 端口实现它；测试替身可覆写以记录帧。
     fn send_resume_control(&self, _message: Value) -> Result<(), String> {
@@ -715,7 +723,7 @@ async fn serve_controlling_lane_with_evidence_context(
                             let now_b = (evidence.monotonic)();
                             match handle_resume_frame(lane, manager, &operation, business, &mut resume, now_b, &json) {
                                 ResumeOutcome::Progressed | ResumeOutcome::Ignored => {}
-                                ResumeOutcome::Completed => {
+                                ResumeOutcome::Completed(status) => {
                                     resume.reset();
                                     liveness = LivenessExpectations::default();
                                     // A transport resume is not a journal
@@ -726,6 +734,9 @@ async fn serve_controlling_lane_with_evidence_context(
                                     // can establish the next finite local cycle.
                                     budget = LivenessBudget::authenticated_cycle(now_b);
                                     resume_deadline = budget.timer();
+                                    // The production sink owns the final state
+                                    // fence. Never invoke it under the owner lock.
+                                    (sinks.on_status)(&status);
                                 }
                                 ResumeOutcome::Failed => {
                                     let _ = manager.with_lane_owner(&operation, || business.clear());
@@ -786,7 +797,7 @@ impl ResumeAttempt {
 enum ResumeOutcome {
     Ignored,
     Progressed,
-    Completed,
+    Completed(ControllingStatus),
     Failed,
 }
 
@@ -1028,28 +1039,29 @@ fn handle_resume_frame(
             let Some(resume_request_id) = frame.get("request_id").and_then(Value::as_str) else {
                 return ResumeOutcome::Failed;
             };
+            let Ok(status) = manager.complete_resumed(
+                operation,
+                activation_id,
+                resume_request_id,
+                now_b,
+                (liveness_epoch_a, liveness_epoch_b),
+                token,
+                fingerprint,
+                relay_deadline,
+            ) else {
+                return ResumeOutcome::Failed;
+            };
+            #[cfg(test)]
+            lane.before_resume_activation();
             if manager
-                .complete_resumed(
-                    operation,
-                    activation_id,
-                    resume_request_id,
-                    now_b,
-                    (liveness_epoch_a, liveness_epoch_b),
-                    token,
-                    fingerprint,
-                    relay_deadline,
-                )
+                .with_status_projection(owner, &status, || business.activate())
                 .is_err()
             {
                 return ResumeOutcome::Failed;
             }
-            if manager
-                .with_lane_owner(owner, || business.activate())
-                .is_err()
-            {
-                return ResumeOutcome::Failed;
-            }
-            ResumeOutcome::Completed
+            #[cfg(test)]
+            lane.after_resume_activation();
+            ResumeOutcome::Completed(status)
         }
         "error" => ResumeOutcome::Failed,
         _ => ResumeOutcome::Ignored,
@@ -1825,6 +1837,51 @@ fn controller_status_log_detail(status: &ControllingStatus) -> String {
     }
 }
 
+/// The production keeper's synchronous state consumer. Both transition tracking
+/// and publication use the same captured snapshot under one final owner/state
+/// fence. Ports must not re-enter manager; unavailable telemetry remains optional.
+/// A single keeper calls this before processing its next event, so no asynchronous
+/// status queue or cross-cycle replay is introduced here.
+fn keeper_status_sink<'a>(
+    manager: &'a ControllingDeviceManager,
+    operation: &'a ControllerOperation,
+    mut track: impl FnMut(RemoteControlEvent) + Send + 'a,
+    mut publish: impl FnMut(&ControllingStatus) + Send + 'a,
+) -> impl FnMut(&ControllingStatus) + Send + 'a {
+    let mut previous_status = ControllingStatusKind::Connected;
+    move |status| {
+        let _ = manager.with_status_projection(operation, status, || {
+            let current = status.kind();
+            if current != previous_status {
+                let event = match (previous_status, current) {
+                    (ControllingStatusKind::Connected, ControllingStatusKind::Reconnecting) => {
+                        Some(RemoteControlEvent::new(
+                            RemoteStage::Disconnection,
+                            RemoteOutcome::Ok,
+                        ))
+                    }
+                    (ControllingStatusKind::Reconnecting, ControllingStatusKind::Connected) => {
+                        Some(RemoteControlEvent::new(
+                            RemoteStage::Resume,
+                            RemoteOutcome::Ok,
+                        ))
+                    }
+                    (ControllingStatusKind::Reconnecting, ControllingStatusKind::Error) => Some(
+                        RemoteControlEvent::new(RemoteStage::Resume, RemoteOutcome::Rejected)
+                            .reason(RemoteReason::ResumeFailed),
+                    ),
+                    _ => None,
+                };
+                if let Some(event) = event {
+                    track(event.role(false));
+                }
+                previous_status = current;
+            }
+            publish(status);
+        });
+    }
+}
+
 /// 连接入口的早期准备：取待决连接码、加载 Relay 信任根、生成握手密钥。
 /// 任何失败都与 `run_controlling_connection` 的失败路径走同一收敛
 /// （`fail_connection`：清空待决连接码并投影有界公共错误码），不让 manager
@@ -1882,7 +1939,7 @@ pub(crate) async fn connect_controlling_device(
     let mut emit = {
         let operation = operation.clone();
         move |status: &ControllingStatus| {
-            let _ = manager.with_lane_owner(&operation, || {
+            let _ = manager.with_status_projection(&operation, status, || {
                 log_controller_event("status", &controller_status_log_detail(status));
                 let _ = app.emit(CONTROLLER_STATUS_EVENT, status);
             });
@@ -1944,44 +2001,15 @@ pub(crate) async fn connect_controlling_device(
         let manager = keeper.state::<ControllingDeviceManager>();
         let sessions = keeper.state::<ControllingSessionManager>();
         let business = keeper.state::<ControllingLaneState>();
-        let mut previous_status = ControllingStatusKind::Connected;
-        let mut on_status = |status: &ControllingStatus| {
-            let _ = manager.with_lane_owner(&operation, || {
-                let current = status.kind();
-                if current != previous_status {
-                    let event = match (previous_status, current) {
-                        (ControllingStatusKind::Connected, ControllingStatusKind::Reconnecting) => {
-                            Some(RemoteControlEvent::new(
-                                RemoteStage::Disconnection,
-                                RemoteOutcome::Ok,
-                            ))
-                        }
-                        (ControllingStatusKind::Reconnecting, ControllingStatusKind::Connected) => {
-                            Some(RemoteControlEvent::new(
-                                RemoteStage::Resume,
-                                RemoteOutcome::Ok,
-                            ))
-                        }
-                        (ControllingStatusKind::Reconnecting, ControllingStatusKind::Error) => {
-                            Some(
-                                RemoteControlEvent::new(
-                                    RemoteStage::Resume,
-                                    RemoteOutcome::Rejected,
-                                )
-                                .reason(RemoteReason::ResumeFailed),
-                            )
-                        }
-                        _ => None,
-                    };
-                    if let Some(event) = event {
-                        track_remote_control(&keeper, event.role(false));
-                    }
-                    previous_status = current;
-                }
+        let mut on_status = keeper_status_sink(
+            manager.inner(),
+            &operation,
+            |event| track_remote_control(&keeper, event),
+            |status| {
                 log_controller_event("status", &controller_status_log_detail(status));
                 let _ = keeper.emit(CONTROLLER_STATUS_EVENT, status);
-            });
-        };
+            },
+        );
         let capability_sink = Arc::clone(&journal);
         let mut on_session = |projection: &ControllingSessionProjection| {
             let _ = capability_sink.publish_capability(&operation, projection);
@@ -2039,6 +2067,10 @@ pub(crate) async fn connect_controlling_device(
     });
     Ok(status)
 }
+
+#[cfg(test)]
+#[path = "controlling_resume_projection_tests.rs"]
+mod resume_projection_tests;
 
 #[cfg(test)]
 mod tests {
@@ -3654,8 +3686,8 @@ mod tests {
         }
         assert_eq!(
             statuses,
-            vec!["reconnecting".to_owned()],
-            "恢复成功不产生错误投影"
+            vec!["reconnecting".to_owned(), "connected".to_owned()],
+            "恢复成功必须发布完整成功投影"
         );
         assert_eq!(
             projection(&manager.status())["status"],

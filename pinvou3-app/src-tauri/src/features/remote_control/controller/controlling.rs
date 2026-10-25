@@ -647,6 +647,24 @@ impl ControllingDeviceManager {
         Ok(action())
     }
 
+    /// Publish/activate only the captured state of this exact operation. A
+    /// disconnect preserves the operation, so owner identity alone is not enough.
+    /// Comparison and action share the owner lock; action must not re-enter it.
+    /// This is a current-state fence, not a historical resume-cycle deduplicator.
+    pub(crate) fn with_status_projection<T>(
+        &self,
+        operation: &ControllerOperation,
+        expected: &ControllingStatus,
+        action: impl FnOnce() -> T,
+    ) -> Result<T> {
+        let inner = self.inner.lock();
+        ensure_operation(&inner, operation)?;
+        if status_locked(&inner) != *expected {
+            return Err(ControllingStateError::new("controller_stale_result"));
+        }
+        Ok(action())
+    }
+
     pub(crate) fn transport_for_operation(
         &self,
         operation: &ControllerOperation,
@@ -1209,6 +1227,69 @@ fn terminal_status_with_retired_identity(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn status_projection_requires_current_phase_claim_and_every_lease_field() {
+        let manager = ControllingDeviceManager::default();
+        let operation = manager.connect("2345678").unwrap();
+        manager.complete_reserved(operation.clone()).unwrap();
+        let status = manager
+            .complete_connected(operation.clone(), lease())
+            .unwrap();
+        let calls = std::cell::Cell::new(0);
+        let action = || calls.set(calls.get() + 1);
+        manager
+            .with_status_projection(&operation, &status, action)
+            .unwrap();
+        let mut mismatches = Vec::new();
+        let mut foreign = status.clone();
+        foreign.claim_request_id = Some("foreign-claim".into());
+        mismatches.push(foreign);
+        for field in 0..5 {
+            let mut foreign = status.clone();
+            let lease = foreign.lease.as_mut().unwrap();
+            match field {
+                0 => lease.connection_id = "foreign-connection".into(),
+                1 => lease.controller_lease_id = "foreign-lease".into(),
+                2 => lease.lease_epoch = "2".into(),
+                3 => lease.relay_epoch = "foreign-relay".into(),
+                _ => lease.remote_control_generation = "foreign-generation".into(),
+            }
+            mismatches.push(foreign);
+        }
+        for foreign in mismatches {
+            assert!(
+                manager
+                    .with_status_projection(&operation, &foreign, action)
+                    .is_err()
+            );
+        }
+        manager.disconnect();
+        assert_eq!(manager.current_operation().unwrap(), operation);
+        assert!(
+            manager
+                .with_status_projection(&operation, &status, action)
+                .is_err()
+        );
+        let next_operation = manager.connect("2345678").unwrap();
+        manager.complete_reserved(next_operation.clone()).unwrap();
+        let next = manager
+            .complete_connected(next_operation.clone(), lease())
+            .unwrap();
+        assert_eq!(
+            next.lease, status.lease,
+            "same full lease cannot replace operation ownership"
+        );
+        assert!(
+            manager
+                .with_status_projection(&operation, &next, action)
+                .is_err()
+        );
+        manager
+            .with_status_projection(&next_operation, &next, action)
+            .unwrap();
+        assert_eq!(calls.get(), 2);
+    }
 
     #[test]
     fn identity_bound_business_send_rejects_rebind_before_transport_enqueue() {

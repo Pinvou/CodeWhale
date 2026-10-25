@@ -213,6 +213,9 @@ order:
     - `features::monitor::platform::windows_gpu::tests::`
     - `features::remote_control::platform::windows::tests::`
     - `app::commands::remote_control::reader_resume_tests::`
+    - `features::remote_control::controller::controlling_service::resume_projection_tests::`
+    - `features::remote_control::controller::controlling::tests::`
+    - `features::remote_control::controller::controlling_service::tests::resume_sequence_reopens_business_only_after_controller_resumed`
     - `features::remote_control::controller::transfer::staging::tests::`
     - `features::computer_use::platform::windows::tests::`
     - `failed_probe_never_deletes_an_existing_store_windows`
@@ -227,6 +230,13 @@ order:
     filters cover the atomic-replacement state machine that the static
     updater exercises end to end; the `filesystem`/`artifact_*` filters cover
     the same writer-side invariants at the unit level.
+    The A controller filters execute the authenticated resume status consumer,
+    its first/second-disconnection telemetry, exact state/owner publication
+    fences, raw DTO/shared fixture contract, and existing reader-authorized
+    service sequence. They run the linked product executable with the same
+    nonzero-match guard, independently of the B reader/worker filters. Controlled
+    Relay and telemetry ports do not establish a two-machine/WebView or upload
+    E2E; full Linux and Windows gates remain required for remote-control changes.
 17. (`regression`) `pinvou-cli Windows-gated unit tests`: the `pinvou-cli`
     workspace's own cfg(windows) unit tests run on no other leg — the Linux
     CLI leg cannot compile them and the all-targets-check leg only
