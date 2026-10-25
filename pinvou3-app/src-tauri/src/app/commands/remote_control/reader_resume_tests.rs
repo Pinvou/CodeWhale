@@ -4,12 +4,32 @@ use std::time::{Duration, Instant};
 
 #[test]
 fn real_reader_manager_worker_resume_round_trip() {
-    run_isolated_reader(false);
+    run_isolated_reader(false, None);
 }
 
 #[test]
 fn real_reader_endpoint_retirement_closes_waiting_and_connected_workers() {
-    run_isolated_reader(true);
+    run_isolated_reader(true, None);
+}
+
+#[test]
+fn real_reader_old_received_disconnect_cannot_mutate_successor() {
+    run_isolated_reader(false, Some("disconnect"));
+}
+
+#[test]
+fn real_reader_old_received_joined_cannot_install_or_clear_successor() {
+    run_isolated_reader(false, Some("joined"));
+}
+
+#[test]
+fn real_reader_old_tick_challenge_cannot_mask_successor_suspicion() {
+    run_isolated_reader(false, Some("challenge"));
+}
+
+#[test]
+fn real_reader_resume_activation_holds_lifecycle_owner_commit() {
+    run_isolated_reader(false, Some("activation"));
 }
 
 #[test]
@@ -88,15 +108,38 @@ fn real_relay_manager_routes_controller_lane_outage_signal() {
     );
 }
 
-fn run_isolated_reader(retire_endpoint: bool) {
+fn run_isolated_reader(retire_endpoint: bool, owner_case: Option<&str>) {
     const CHILD: &str = "PINVOU_READER_RESUME_TEST_CHILD";
     if std::env::var(CHILD).as_deref() == Ok("1") {
-        let runtime = tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .unwrap();
+        if let Some(case) = owner_case {
+            unsafe {
+                std::env::set_var("PINVOU_READER_OWNER_CASE", case);
+            }
+        } else {
+            unsafe {
+                std::env::remove_var("PINVOU_READER_OWNER_CASE");
+            }
+        }
+        let concurrent_race = matches!(
+            owner_case,
+            Some("disconnect") | Some("joined") | Some("challenge")
+        );
+        let runtime = if concurrent_race {
+            tokio::runtime::Builder::new_multi_thread()
+                .worker_threads(2)
+                .enable_all()
+                .build()
+                .unwrap()
+        } else {
+            // The activation lock probe has no other C-lock user on this
+            // runtime: a dropped commit lock cannot look held by another task.
+            tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .unwrap()
+        };
         runtime.block_on(async {
-            tokio::time::timeout(Duration::from_secs(15),
+            tokio::time::timeout(Duration::from_secs(if concurrent_race { 40 } else { 15 }),
                 crate::features::remote_control::controller::relay_runtime::reader_resume_tests::resume_round_trip(|| {
                     let mut context = crate::build_tauri_context();
                     context.config_mut().app.windows.clear();
@@ -115,10 +158,16 @@ fn run_isolated_reader(retire_endpoint: bool) {
     // A separate process owns Tauri's global runtime and path/env overrides.
     // Never alter the test runner's home or share its live managed states.
     let module = module_path!().split_once("::").unwrap().1;
-    let name = if retire_endpoint {
-        "real_reader_endpoint_retirement_closes_waiting_and_connected_workers"
-    } else {
-        "real_reader_manager_worker_resume_round_trip"
+    let name = match owner_case {
+        Some("disconnect") => "real_reader_old_received_disconnect_cannot_mutate_successor",
+        Some("joined") => "real_reader_old_received_joined_cannot_install_or_clear_successor",
+        Some("activation") => "real_reader_resume_activation_holds_lifecycle_owner_commit",
+        Some("challenge") => "real_reader_old_tick_challenge_cannot_mask_successor_suspicion",
+        Some(other) => panic!("unknown isolated ownership case: {other}"),
+        None if retire_endpoint => {
+            "real_reader_endpoint_retirement_closes_waiting_and_connected_workers"
+        }
+        None => "real_reader_manager_worker_resume_round_trip",
     };
     let filter = format!("{module}::{name}");
     let mut child = std::process::Command::new(std::env::current_exe().unwrap())
@@ -128,7 +177,7 @@ fn run_isolated_reader(retire_endpoint: bool) {
         .stderr(std::process::Stdio::piped())
         .spawn()
         .unwrap();
-    let deadline = Instant::now() + Duration::from_secs(25);
+    let deadline = Instant::now() + Duration::from_secs(if owner_case.is_some() { 50 } else { 25 });
     let status = loop {
         if let Some(status) = child.try_wait().unwrap() {
             break status;
