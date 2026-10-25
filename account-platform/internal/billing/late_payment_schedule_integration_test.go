@@ -21,6 +21,11 @@ import (
 // Identity and Account authority are controlled producers. Registered middleware,
 // repository, migration, transaction and receipt reads use production code/SQL.
 func TestLatePaymentScheduleCommandReplayPostgres(t *testing.T) {
+	// PostgreSQL scans use time.Local, while JSON Z timestamps use time.UTC.
+	// Keep this same-instant representation boundary covered on every host.
+	local := time.Local
+	time.Local = time.FixedZone("receipt-test-UTC", 0)
+	t.Cleanup(func() { time.Local = local })
 	r, ctx := retainedFinanceRepository(t)
 	now := time.Now().UTC().Truncate(time.Microsecond)
 	r.now = func() time.Time { return now }
@@ -60,6 +65,7 @@ func TestLatePaymentScheduleCommandReplayPostgres(t *testing.T) {
 	handler := NewService(r).WithAuthorizer(authorizer).Handler("controlled-service", func(_ context.Context, token string) (identity.Principal, error) {
 		return identity.Principal{Issuer: "controlled", Subject: token, AuthenticatedAt: r.now()}, nil
 	})
+	var lastCallJSON []byte
 	call := func(t *testing.T, item LatePaymentReviewCase, token, key string, next time.Time, reason string, want int) LatePaymentReviewCase {
 		t.Helper()
 		body, err := json.Marshal(map[string]any{"command_protocol": 1, "next_review_at": next, "reason": reason})
@@ -78,6 +84,7 @@ func TestLatePaymentScheduleCommandReplayPostgres(t *testing.T) {
 		if response.Code != want {
 			t.Fatalf("schedule got %d want %d: %s", response.Code, want, response.Body.String())
 		}
+		lastCallJSON = append([]byte(nil), response.Body.Bytes()...)
 		var result LatePaymentReviewCase
 		if want == 200 {
 			if err := json.Unmarshal(response.Body.Bytes(), &result); err != nil {
@@ -281,9 +288,42 @@ func TestLatePaymentScheduleCommandReplayPostgres(t *testing.T) {
 		}
 		close(start)
 		a, b := <-results, <-results
-		if a.err != nil || b.err != nil || !reflect.DeepEqual(a.item, b.item) {
+		aJSON, aJSONErr := json.Marshal(a.item)
+		bJSON, bJSONErr := json.Marshal(b.item)
+		if a.err != nil || b.err != nil || aJSONErr != nil || bJSONErr != nil || string(aJSON) != string(bJSON) {
 			t.Fatal("concurrent schedule receipts differ", a.err, b.err)
 		}
+
+		// Both concurrent values must be the complete persisted original receipt,
+		// and later repository/HTTP recovery must return that same invocation.
+		var storedJSON []byte
+		if err := r.pool.QueryRow(ctx, `SELECT after_snapshot FROM late_payment_review_schedule_commands WHERE case_id=$1 AND idempotency_key=$2`, item.ID, key).Scan(&storedJSON); err != nil {
+			t.Fatal(err)
+		}
+		var stored LatePaymentReviewCase
+		if err := json.Unmarshal(storedJSON, &stored); err != nil {
+			t.Fatal(err)
+		}
+		storedWire, err := json.Marshal(stored)
+		if err != nil || string(storedWire) != string(aJSON) {
+			t.Fatal("concurrent receipt differs from persisted original", err)
+		}
+		replayed, err := r.ScheduleLatePaymentReview(ctx, item.ID, actor, next, reason, key)
+		if err != nil {
+			t.Fatal(err)
+		}
+		replayedWire, err := json.Marshal(replayed)
+		if err != nil || string(replayedWire) != string(aJSON) {
+			t.Fatal("later same-key repository recovery changed original receipt", err)
+		}
+		call(t, item, actor.String(), key, next, reason, 200)
+		// Admin HTTP intentionally stringifies exact financial integers. Compare
+		// its whole body with that production wire projection, without float64.
+		wantHTTP, err := adminFinancialSnapshot(aJSON)
+		if err != nil || strings.TrimSpace(string(lastCallJSON)) != string(wantHTTP) {
+			t.Fatal("HTTP recovery changed the complete original receipt wire", err)
+		}
+
 		var commands, events int
 		if err := r.pool.QueryRow(ctx, `SELECT (SELECT count(*) FROM late_payment_review_schedule_commands WHERE case_id=$1),(SELECT count(*) FROM manual_review_case_events WHERE case_id=$1 AND event_type='REVIEW_SCHEDULED')`, item.ID).Scan(&commands, &events); err != nil || commands != 1 || events != 1 {
 			t.Fatal(commands, events, err)
