@@ -193,6 +193,12 @@ isolated footing (worktree-relative roots) rather than against the shared
 coordination root. An interrupted child holds no live claim: its loop is gone
 and a resume runs under a new id with its own claim, so later writers — and the
 resume itself — are not gated by it.
+Within one worktree the ledger still serializes unrelated writers: a claim may
+overlap its ancestors' (the work was delegated downward), but two unrelated
+descendants — parallel siblings — with overlapping scope contend, exactly as
+they would in the shared root. A resumed loop is only serialized against
+writers still live at resume time; it must re-orient to whatever completed
+while it was parked.
 
 Optional fields:
 
