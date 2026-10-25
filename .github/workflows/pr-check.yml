@@ -655,6 +655,9 @@ jobs:
               - 'docs/windows-update-release-console.md'
               - '.github/workflows/pr-check.yml'
             acp_runtime:
+              # 开发启动器。开源侧把 run-dev.sh 变更路由进 acp_runtime 门禁,
+              # 本仓同路由:launcher-only PR 不再静默跳过运行时门禁。
+              - 'pinvou3-app/run-dev.sh'
               - 'pinvou3-app/scripts/codex-bridge-runtime/**'
               - 'pinvou3-app/scripts/prepare-codex-bridge-runtime.sh'
               - 'pinvou3-app/scripts/tauri/build.js'
