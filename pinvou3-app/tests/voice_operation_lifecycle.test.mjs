@@ -456,6 +456,42 @@ test('desktop: an unreadable window label reports the ownership check unavailabl
   );
 });
 
+test('desktop: a rejected ownership claim IPC maps to "error" with its diagnostics, never to false', async () => {
+  // Direct test of the real helper's rejection mapping (the "claim IPC
+  // failure" consumer test above stubs syncVoiceShortcutRecording, so the
+  // real reject→"error" branch has no anchor there; a reject→false regression
+  // would misreport an IPC failure as "another window is recording").
+  const h = harness(sources.desktop);
+  const source = sources.desktop;
+  const start = source.indexOf('  var voiceOwnershipSyncTail = Promise.resolve();');
+  const end = source.indexOf('  function setVoiceShortcutEnabled(enabled) {', start);
+  assert.ok(start >= 0 && end > start, 'desktop must keep the ownership sync helper');
+  const diagnostics = [];
+  const warns = [];
+  h.context.console = { warn: (...args) => warns.push(args) };
+  h.context.emitVoiceDiagnostic = (scope, level, message, sessionId, reason) => {
+    diagnostics.push({ scope, level, message, sessionId, reason });
+  };
+  h.context.invoke = async (command, args) => {
+    if (args.label === null) return true; // the release dispatch lands normally
+    throw new Error('ipc down'); // the claim IPC itself fails
+  };
+  vm.runInContext(`${source.slice(start, end)}\nthis.sync = syncVoiceShortcutRecording;`, h.context);
+  assert.equal(
+    await h.context.sync('detached-b', 'voice_1'), 'error',
+    'a rejected claim IPC must resolve to "error" (the consumer maps it to voiceMicOwnershipUnavailable); returning false would claim another window is recording',
+  );
+  assert.equal(diagnostics.length, 1, 'the rejection must emit exactly one voice diagnostic');
+  assert.equal(diagnostics[0].scope, 'recording');
+  assert.equal(diagnostics[0].level, 'warn');
+  assert.ok(String(diagnostics[0].message).includes('recording ownership sync failed'));
+  assert.equal(diagnostics[0].reason, 'claim_error');
+  assert.equal(warns.length, 1, 'the rejection must also land on the console.warn path');
+  // The serialization chain must swallow the rejection: the next sync in the
+  // queue still reaches the backend.
+  assert.equal(await h.context.sync(null, 'voice_1'), true, 'the ownership chain must heal after a rejected claim');
+});
+
 test('desktop: ownership syncs reach the backend in call order', async () => {
   // The release-then-reclaim handoff relies on backend ordering: the chain
   // must not resolve a later sync before the earlier one finished its IPC.

@@ -960,6 +960,10 @@ function createBridgeHarness(sharedStorage, runtimeOptions) {
 
   return {
     bridge: bridge,
+    // The web wrapper above only mirrors the few namespaces scheduled-task
+    // scenarios need; tests that must reach the rest of the web bridge's
+    // TauriBridge surface (e.g. models.setActiveModel) use rawBridge directly.
+    rawBridge: rawBridge,
     bridgeKind: bridgeKind,
     handlers: handlers,
     calls: calls,
@@ -1622,6 +1626,110 @@ async function backgroundSessionFirstDeltaPublishesViaFrame(bridgeKind) {
   assert.ok(streamedItem, bridgeKind + ": the background stream bubble must exist after switching");
   assert.strictEqual(streamedItem.text, "bg-first-delta",
     bridgeKind + ": the background first delta text must survive the coalesced publication");
+}
+
+// Regression anchor (PR #2135 review, web lane): a background session's
+// chat:done must cancel that session's own pending 32ms notify frame. The
+// trailing notify() runs after runSyncOnSession has restored the visible
+// session, so it only cancels the visible session's frame — without the
+// terminal's explicit cancelPendingStreamNotify(sid) the coalesced frame
+// fires a redundant late publish round within 32ms (the desktop lane's
+// twin line is anchored by the bridge_domain_protocol chat-domain
+// fingerprint, so this behavioral pin is the web side's only anchor).
+// The 32ms frame clock is intercepted (runtimeOptions.setTimeout idiom) so
+// the late round is observed deterministically, not by wall-clock waits.
+async function backgroundTerminalCancelsPendingStreamFrame() {
+  var frameClock = createAnimationFrameClock();
+  var timers = [];
+  var nextTimerId = 1;
+  var harness = createBridgeHarness(null, {
+    bridgeKind: "web",
+    requestAnimationFrame: frameClock.request,
+    cancelAnimationFrame: frameClock.cancel,
+    setTimeout: function (callback, delay) {
+      timers.push({ id: nextTimerId, callback: callback, delay: delay });
+      return nextTimerId++;
+    },
+    clearTimeout: function () {},
+  });
+  var bridge = harness.bridge;
+  var activeId = "chat-bg-terminal-active";
+  var backgroundId = "chat-bg-terminal-frame";
+  harness.handlers.load_session = function (args) {
+    return { metadata: { id: args.id, title: "BG " + args.id }, messages: [], artifacts: [] };
+  };
+  assert.strictEqual(await bridge.sessions.switchToSession(activeId), true);
+  var snapshots = [];
+  var unsubscribe = bridge.state.subscribe("chat", function (snapshot) { snapshots.push(snapshot); });
+
+  // Arm the background session's coalesced notify frame exactly like the
+  // first-delta pin above: the suppressed background delta publishes nothing
+  // synchronously and falls through to the bounded 32ms frame.
+  harness.emit("chat:turn_started", { session_id: backgroundId });
+  assert.strictEqual(snapshots.length, 1,
+    "the background turn start should publish its session-list round");
+  harness.emit("chat:delta", { session_id: backgroundId, text: "bg-tail" });
+  assert.strictEqual(snapshots.length, 1,
+    "the background delta must stay inside its coalescing frame");
+
+  // The terminal publishes its own flush rounds; let them settle before
+  // sampling the baseline.
+  await harness.emit("chat:done", { session_id: backgroundId, status: "Completed" });
+  for (var settle = 0; settle < 8; settle++) await tick();
+  var publishedAtTerminal = snapshots.length;
+  assert.ok(publishedAtTerminal >= 2,
+    "the background terminal must publish its flush round");
+
+  // Elapse the 32ms frame budget: with the terminal's own cancel intact the
+  // frame's publish must find its pending entry cancelled and stay silent
+  // (STREAM_NOTIFY_MAX_WAIT_MS is the only 32ms timer the web bridge arms).
+  var frameTimers = timers.filter(function (timer) { return timer.delay === 32; });
+  assert.strictEqual(frameTimers.length, 1,
+    "the background delta must have armed exactly one coalesced 32ms notify frame");
+  frameTimers[0].callback();
+  assert.strictEqual(snapshots.length, publishedAtTerminal,
+    "a background chat:done must cancel its own pending stream notify frame");
+  unsubscribe();
+}
+
+// Regression anchor (PR #2135 review): setActiveModel must re-run
+// loadSettings after the backend switch, otherwise state.settings keeps the
+// previous active model and the UI keeps showing the old selection after a
+// successful switch. Pinned on both lanes: the web bridge and its tauri twin
+// (bridge/settings.js) each carry the call, and this behavioral pin is the
+// only anchor on either side (the domain fingerprints anchor invoke/listen
+// call-graph slices, and a dropped awaited call is a body-internal change).
+async function setActiveModelRefreshesSettingsSnapshot(bridgeKind) {
+  var harness = createBridgeHarness(null, { bridgeKind: bridgeKind });
+  var bridge = harness.bridge;
+  var setActiveModel = bridgeKind === "tauri" ? bridge.models.setActiveModel : harness.rawBridge.setActiveModel;
+  var backendActiveModel = "model-a";
+  harness.handlers.get_settings = function () {
+    return { theme: "genesis", language: "zh-Hans", active_model_id: backendActiveModel };
+  };
+  harness.handlers.set_active_model = function (args) {
+    backendActiveModel = args.id;
+    return true;
+  };
+  harness.handlers.list_models = function () {
+    return { models: [{ id: backendActiveModel, model: "/wire/" + backendActiveModel }], active_model_id: backendActiveModel };
+  };
+  harness.handlers.get_effective_model_config = function () {
+    return { model: "/wire/" + backendActiveModel };
+  };
+
+  // First switch establishes the pre-switch baseline in state.settings.
+  await setActiveModel("model-a");
+  var settingsAfterFirst = (bridgeKind === "tauri" ? bridge.state.get("settings") : bridge.state.get()).settings || {};
+  assert.strictEqual(settingsAfterFirst.active_model_id, "model-a",
+    bridgeKind + ": the first switch must load the backend settings into state");
+
+  // The second switch is the regression probe: after setActiveModel resolves,
+  // state.settings must already reflect the new backend active model.
+  await setActiveModel("model-b");
+  var settingsAfterSecond = (bridgeKind === "tauri" ? bridge.state.get("settings") : bridge.state.get()).settings || {};
+  assert.strictEqual(settingsAfterSecond.active_model_id, "model-b",
+    bridgeKind + ": setActiveModel must refresh state.settings after the backend switch");
 }
 
 // Regression anchor (PR #1215 review): the chat:tool_end reset branches
@@ -9325,6 +9433,9 @@ Promise.resolve()
   .then(function () { return streamNotificationTimerFallback("web"); })
   .then(function () { return backgroundSessionFirstDeltaPublishesViaFrame("tauri"); })
   .then(function () { return backgroundSessionFirstDeltaPublishesViaFrame("web"); })
+  .then(backgroundTerminalCancelsPendingStreamFrame)
+  .then(function () { return setActiveModelRefreshesSettingsSnapshot("tauri"); })
+  .then(function () { return setActiveModelRefreshesSettingsSnapshot("web"); })
   .then(function () { return webAdmissionRejectFlushesStreamHtmlBeforeReset(); })
   .then(function () { return tauriAdmissionRejectFlushesStreamHtmlBeforeReset(); })
   .then(function () { return toolEndFlushesStreamHtmlBeforeReset("tauri"); })
