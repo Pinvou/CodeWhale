@@ -21,6 +21,11 @@ import (
 // under isolated migrator/runtime actors in an owned UUID database. HTTP here
 // uses controlled test service credentials, not a production identity issuer.
 func TestRetainedF04PricingFirstDelivery(t *testing.T) {
+	// pgx may decode timestamps in Local while JSON decodes a Z suffix in UTC.
+	// Exercise that equal-instant representation boundary on every host.
+	originalLocal := time.Local
+	time.Local = time.FixedZone("pricing-receipt-test-UTC", 0)
+	t.Cleanup(func() { time.Local = originalLocal })
 	t.Setenv("APP_ENV", "test")
 	t.Setenv("WORKLOAD_AUTH_ISSUER", "")
 	repository, ctx := retainedFinanceRepository(t)
@@ -98,8 +103,11 @@ func TestRetainedF04PricingFirstDelivery(t *testing.T) {
 		response := httptest.NewRecorder()
 		handler.ServeHTTP(response, request)
 		var got FormulaBindingReceipt
-		if response.Code != http.StatusOK || json.Unmarshal(response.Body.Bytes(), &got) != nil || !reflect.DeepEqual(got, first) {
-			t.Fatalf("real formula HTTP replay status=%d", response.Code)
+		decodeErr := json.Unmarshal(response.Body.Bytes(), &got)
+		wantJSON, wantErr := json.Marshal(first)
+		gotJSON, gotErr := json.Marshal(got)
+		if response.Code != http.StatusOK || decodeErr != nil || wantErr != nil || gotErr != nil || !bytes.Equal(gotJSON, wantJSON) {
+			t.Fatalf("real formula HTTP replay status=%d decode=%v expected JSON=%v actual JSON=%v", response.Code, decodeErr, wantErr, gotErr)
 		}
 	})
 	t.Run("published-binding-replay-survives-unit-deactivation", func(t *testing.T) {
