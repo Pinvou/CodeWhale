@@ -82,7 +82,8 @@ use crate::worker_profile::{
 };
 use coord::{
     CoordinationDetailMetrics, CoordinationHotPath, CoordinationLedger, DecisionRecord,
-    DecisionStatus, PersistedWriteClaim, ReconciliationReceipt, WriteScopeClaim,
+    DecisionStatus, PersistedWriteClaim, ReconciliationReceipt, WRITE_SCOPE_CONTENTION_PREFIX,
+    WriteScopeClaim,
 };
 
 pub mod advisor;
@@ -403,7 +404,7 @@ fn subagent_perf_enabled() -> bool {
 
 const VALID_SUBAGENT_TYPES: &str = "general, explore, planner, reviewer, implement, test, advisor, custom \
      (legacy aliases remain accepted: worker, scout, builder, verifier, consultant, general-purpose, general_purpose, default, exploration/explorer, plan/planning/awaiter, review/code-review/code_review, implementer/implementation, verify/verification/validator/tester, oracle)";
-const SUBAGENT_TYPE_DESCRIPTION: &str = "Fleet role for this delegated worker. general: full tool access for multi-step tasks. explore: fast read-only exploration. planner: grounded strategy with read-only probes. reviewer: reads and grades code. implement: lands focused code changes. test: runs tests/validation gates and reports evidence. advisor: read-only high-reasoning counsel for judgement calls and design critique. custom: the tools listed in allowed_tools on the parent's posture. Legacy aliases remain accepted at deserialization boundaries.";
+const SUBAGENT_TYPE_DESCRIPTION: &str = "Fleet role for this delegated worker. general: full tool access for multi-step tasks; write-capable, so it claims the parent workspace unless write_roots narrows it — parallel generals without disjoint write_roots contend, so prefer a read-only role for research fan-outs. explore: fast read-only exploration. planner: grounded strategy with read-only probes. reviewer: reads and grades code. implement: lands focused code changes; write-capable under the same workspace-claim rules as general, so parallel implements need disjoint write_roots or worktree=true. test: runs tests/validation gates and reports evidence. advisor: read-only high-reasoning counsel for judgement calls and design critique. custom: the tools listed in allowed_tools on the parent's posture; without an explicit write authority it starts read-only and never contends. Legacy aliases remain accepted at deserialization boundaries.";
 
 // === Types ===
 
@@ -4178,6 +4179,45 @@ impl SubAgentManager {
         agent.session_boot_id.is_empty() || agent.session_boot_id != self.current_session_boot_id
     }
 
+    /// Whether a child still holds its session name against a fresh spawn.
+    ///
+    /// Only a live child reserves its name: running, or interrupted (parked;
+    /// only some interrupts leave a checkpoint `followup` can wake). A child
+    /// that has settled — completed, failed, cancelled, budget-exhausted —
+    /// releases the name, so a cancel-and-retry under the same name succeeds
+    /// instead of forcing the parent to invent suffixes while the error text
+    /// tells it to "wait for the completion event" that already arrived.
+    fn session_name_is_reserved(status: &SubAgentStatus) -> bool {
+        matches!(
+            status,
+            SubAgentStatus::Running | SubAgentStatus::Interrupted(_)
+        )
+    }
+
+    /// The live child that currently holds `name`, if any.
+    ///
+    /// Names are scoped to the live session: a worker hydrated from a
+    /// previous session's ledger is invisible to `status`/`peek`/`followup`,
+    /// so it must not reserve the name either (cloud-agent e2e, 2026-08-30:
+    /// a fresh `exec` in the same workspace could not spawn `worker-a` again).
+    fn reserved_session_name_holder(&self, name: &str) -> Option<&SubAgent> {
+        // At most one holder can pass this filter: the spawn gate refuses a
+        // second live spawn under a taken name, so first match on the
+        // unordered map is deterministic in effect.
+        self.agents.values().find(|existing| {
+            existing.session_name == name && self.is_live_session_name_holder(existing)
+        })
+    }
+
+    /// The liveness predicate both the spawn gate and name resolution filter
+    /// on, spelled once so the two cannot drift: running, or interrupted
+    /// (parked), and this boot's record — a worker hydrated from a previous
+    /// boot is terminal history that neither reserves a name nor outranks
+    /// this boot's child in resolution.
+    fn is_live_session_name_holder(&self, agent: &SubAgent) -> bool {
+        Self::session_name_is_reserved(&agent.status) && !self.is_from_prior_session(agent)
+    }
+
     #[must_use]
     fn with_state_path(mut self, path: PathBuf) -> Self {
         self.state_path = Some(path);
@@ -6518,14 +6558,7 @@ impl SubAgentManager {
             .map(str::trim)
             .filter(|name| !name.is_empty())
         {
-            // Names are scoped to the live session: a completed worker
-            // hydrated from a previous session's ledger is invisible to
-            // `status`/`peek`/`followup`, so it must not reserve the name
-            // either (cloud-agent e2e, 2026-08-30: a fresh `exec` in the same
-            // workspace could not spawn `worker-a` again).
-            if let Some(existing) = self.agents.values().find(|existing| {
-                existing.session_name == name && !self.is_from_prior_session(existing)
-            }) {
+            if let Some(existing) = self.reserved_session_name_holder(name) {
                 // #3020: Include elapsed time so the parent can distinguish a
                 // live worker from a stale/failed earlier spawn (#2656).
                 let elapsed = existing.started_at.elapsed();
@@ -6533,10 +6566,22 @@ impl SubAgentManager {
                     "{} ago",
                     crate::elapsed::format_elapsed_secs(elapsed.as_secs())
                 );
+                // Advice the holder's status can actually act on: a running
+                // child can be waited out or cancelled, but an interrupted
+                // one is already terminal — its completion event has fired
+                // and cancel only touches Running children — so only
+                // followup (checkpoint permitting) or a different name
+                // moves forward.
+                let advice = if matches!(existing.status, SubAgentStatus::Interrupted(_)) {
+                    "It is parked: resume it with action=followup if its checkpoint \
+                     still allows, or open a new agent with a different name."
+                } else {
+                    "Wait for its completion event, cancel it, or open a new agent \
+                     with a different name."
+                };
                 return Err(anyhow!(
-                    "Sub-agent session name '{name}' is already in use by agent_id '{}' \
-                     (status: {}, started {since}). \
-                     Wait for its completion event, or open a new agent with a different name.",
+                    "Sub-agent session name '{name}' is still held by agent_id '{}' \
+                     (status: {}, started {since}). {advice}",
                     existing.id,
                     subagent_status_name(&existing.status)
                 ));
@@ -6612,6 +6657,7 @@ impl SubAgentManager {
         let persisted_claim = match persisted_claim {
             Ok(claim) => claim,
             Err(error) => {
+                let error = spawn_claim_error_with_guidance(error);
                 if let Err(persist_error) = self.persist_state_synchronously() {
                     if let Some((worker_records, coordination)) = durable_launch_snapshot.as_ref() {
                         self.worker_records = worker_records.clone();
@@ -6958,13 +7004,6 @@ impl SubAgentManager {
         active_session_id: Option<&str>,
     ) -> Result<String> {
         let agent_ref = agent_ref.trim();
-        if let Some(agent) = self.agents.get(agent_ref)
-            && active_session_id
-                .is_none_or(|session_id| self.agent_is_owned_by_session(agent, session_id))
-        {
-            return Ok(agent.id.clone());
-        }
-
         let matches = self
             .agents
             .values()
@@ -6973,16 +7012,50 @@ impl SubAgentManager {
                 active_session_id
                     .is_none_or(|session_id| self.agent_is_owned_by_session(agent, session_id))
             })
-            .map(|agent| agent.id.clone())
             .collect::<Vec<_>>();
 
-        match matches.as_slice() {
-            [id] => Ok(id.clone()),
-            [] => Err(anyhow!("Agent session {agent_ref} not found")),
-            _ => Err(anyhow!(
-                "Agent session name '{agent_ref}' is ambiguous; use an agent_id"
-            )),
+        // A name is released once its holder settles (see
+        // `reserved_session_name_holder`), so a retried spawn can leave a
+        // settled and a live child sharing one name. The live holder is the
+        // one the name means now; among settled-only holders the newest
+        // spawn is the one the parent just retried. Liveness is the spawn
+        // gate's own predicate (`is_live_session_name_holder`): an
+        // interrupted record hydrated from a previous boot is terminal
+        // history, not the name's live holder, so it can never outrank this
+        // boot's child.
+        let live = matches
+            .iter()
+            .filter(|agent| self.is_live_session_name_holder(agent))
+            .collect::<Vec<_>>();
+        match live.as_slice() {
+            [agent] => return Ok(agent.id.clone()),
+            [_, _, ..] => {
+                return Err(anyhow!(
+                    "Agent session name '{agent_ref}' is ambiguous; use an agent_id"
+                ));
+            }
+            _ => {}
         }
+
+        // The exact-id fast path only applies when the ref is not any
+        // child's session name: `validate_session_name` accepts id-shaped
+        // names and an unnamed child takes `session_name = id`, so an id
+        // string that is also a name must follow the name rules above — a
+        // settled record must not shadow the child that name now means,
+        // live or newest-settled. A ref that names no child still reaches
+        // its own record by id (a named child stays reachable by its id).
+        if matches.is_empty()
+            && let Some(agent) = self.agents.get(agent_ref)
+            && active_session_id
+                .is_none_or(|session_id| self.agent_is_owned_by_session(agent, session_id))
+        {
+            return Ok(agent.id.clone());
+        }
+        matches
+            .iter()
+            .max_by_key(|agent| agent.started_at)
+            .map(|agent| agent.id.clone())
+            .ok_or_else(|| anyhow!("Agent session {agent_ref} not found"))
     }
 
     fn agent_is_owned_by_session(&self, agent: &SubAgent, active_session_id: &str) -> bool {
@@ -8492,21 +8565,24 @@ impl ToolSpec for AgentTool {
             "Use action=roster to inspect Fleet roles and host-presented prompt-only profiles before choosing a type or profile. The host-profile listing is capped and unpaged — search a large pool with profile_query. ",
             "Child run budgets come from Fleet role defaults and operator [subagents] config; budget fields are not advertised (parse-accepted for compatibility). ",
             "worktree=true gives the child an isolated git worktree — use it whenever parallel writers must not collide with the parent checkout. ",
-            "A write-capable child defaults write scope to the parent workspace; narrow it with write_roots (repo-relative paths) so parallel children claim disjoint scope. ",
+            "A write-capable child defaults write scope to the parent workspace; narrow it with write_roots (repo-relative paths) so parallel children claim disjoint scope. Read-only roles (explore, planner, reviewer, test, advisor) claim no scope and never contend — use them for parallel research instead of type=general. ",
             "Prefer type=implement for write work and type=test (or the Run tool with action=\"verifiers\") after writes settle — dispatch is not completion. ",
             "Coordinate through this same tool: action=message queues a note without waking the child; action=followup delivers queued notes and wakes a running child for its next user-provenance turn; action=interrupt stops the current child turn while preserving its checkpoint; action=wait blocks without changing child state, and until=\"all\" joins a whole fan-out in one call. ",
             "action=claim widens your own enforced write scope: pass write_roots before mutating anything a fail-closed write refusal named. Records a durable claim receipt; fails on peer-claim contention; never touches another agent's scope. ",
             "Action contract: start requires prompt; message/followup require a target and message; peek/interrupt/cancel require a target; claim requires at least one scope entry; roster, status, and wait are unscoped. ",
             "This is the whole model-facing sub-agent surface; there is no second transport. ",
-            "In Operate, use detached=true only for independent or long work that must outlive the active turn; a write-capable root start defaults write scope to the parent workspace unless narrowed with write_roots; arbitrary shell remains gated. "
+            "In Operate, detached=true marks work that must outlive the active turn; arbitrary shell remains gated. "
         )
     }
 
-    /// Advertised `agent` schema: exactly 13 fields (#5324, #5123; T7 added
-    /// `profile_query`, the roster host-profile keyword filter) — action,
-    /// prompt, type, profile, profile_query, name, agent_id, message, until,
-    /// detached, worktree, write_roots, resume_from — plus the
-    /// action-discriminated `dependentSchemas` tree. Every field removed
+    /// Advertised `agent` schema: exactly 14 fields (#5324, #5123; T7 added
+    /// `profile_query`, the roster host-profile keyword filter; the wait
+    /// timeout `timeout_secs` was re-advertised after real fan-outs showed a
+    /// model told "default 30s, max 120s" with no way to reach the max just
+    /// repeats short waits) — action, prompt, type, profile, profile_query,
+    /// name, agent_id, message, until, timeout_secs, detached, worktree,
+    /// write_roots, resume_from — plus the action-discriminated
+    /// `dependentSchemas` tree. Every field removed
     /// from this schema (budgets, model/thinking overrides, worktree-path
     /// knobs, deliberate/spawn-contract knobs, wait/status extras) stays
     /// parse-accepted unchanged for saved transcripts, ACP/MCP clients and
@@ -8533,7 +8609,15 @@ impl ToolSpec for AgentTool {
                 "until": {
                     "type": "string",
                     "enum": ["completion", "all", "activity"],
-                    "description": "For action=wait. A wait blocks until one child settles or the timeout (default 30s, max 120s) elapses; on timeout the receipt reports timed_out=true with any already-settled children, and full results still arrive as completion sentinels. completion (default) returns when any one child settles. all returns only once every child running at call time has settled, with each outcome — the fan-out join: start the batch, make one wait, then synthesize. activity also returns on progress."
+                    "description": "For action=wait. A wait blocks until one child settles or the timeout (default 30s, max 120s; set with timeout_secs) elapses; on timeout the receipt reports timed_out=true with any already-settled children, and full results still arrive as completion sentinels. completion (default) returns when any one child settles. all returns only once every child running at call time has settled, with each outcome — the fan-out join: start the batch, make one wait with a timeout_secs sized for the batch, then synthesize. activity also returns on progress."
+                },
+                "timeout_secs": {
+                    "type": "integer",
+                    "minimum": SUBAGENT_WAIT_MIN_TIMEOUT_SECS,
+                    "maximum": SUBAGENT_WAIT_MAX_TIMEOUT_SECS,
+                    "description": format!(
+                        "For action=wait: seconds to block before the receipt returns timed_out=true. Default {SUBAGENT_WAIT_DEFAULT_TIMEOUT_SECS}, max {SUBAGENT_WAIT_MAX_TIMEOUT_SECS}. Size it to the batch instead of repeating short waits — a fan-out of research children typically needs the maximum."
+                    )
                 },
                 "agent_id": {
                     "type": "string",
@@ -9210,6 +9294,18 @@ const SUBAGENT_WAIT_CHECK_INTERVAL: Duration = Duration::from_millis(250);
 /// engine turn's cancel token interrupts the block, and no lock is held
 /// across an await.
 ///
+/// The one wait-bound read shared by every wait face (`until=completion`,
+/// `until=all`, `until=activity`): the advertised `timeout_secs` plus its
+/// parse-accepted `timeout` alias. The alias is a documented compat contract
+/// (docs/SUBAGENTS.md), so the read lives in this one function — every face
+/// rejects a malformed value identically instead of silently falling back to
+/// the 30s default — and the alias pin test calls it directly, so dropping
+/// the alias fails loudly there instead of silently defaulting saved
+/// transcripts.
+fn wait_timeout_secs(input: &Value) -> Result<Option<u64>, ToolError> {
+    parse_optional_u64(input, &["timeout_secs", "timeout"])
+}
+
 /// This is the `until=completion` arm only. `until=all` — the fan-out join
 /// that blocks for *every* watched child — lives in
 /// [`coord::dispatch_wait`]; both arms are reachable from `agents/wait` and
@@ -9219,7 +9315,7 @@ async fn wait_for_subagents_from_input(
     manager: SharedSubAgentManager,
     context: &ToolContext,
 ) -> Result<ToolResult, ToolError> {
-    let timeout_secs = parse_optional_u64(input, &["timeout_secs", "timeout"])?
+    let timeout_secs = wait_timeout_secs(input)?
         .unwrap_or(SUBAGENT_WAIT_DEFAULT_TIMEOUT_SECS)
         .clamp(
             SUBAGENT_WAIT_MIN_TIMEOUT_SECS,
@@ -9787,6 +9883,26 @@ fn mint_child_route_receipt(
         )));
     }
     Ok(receipt)
+}
+
+/// Recovery guidance for a spawn refused by write-scope contention.
+///
+/// The ledger's own text ("serialize the work, narrow the claim, or use
+/// worktree isolation") is written for writers. The refusal seen most in
+/// practice is a research fan-out launched as several `type=general` children
+/// with no `write_roots`: each defaults to the whole workspace and all but
+/// the first collide, although none of them needed to write at all. The
+/// shortest fix for that case is the read-only path, so name it here; the
+/// `claim` action shares the ledger message and keeps the writer-only text.
+fn spawn_claim_error_with_guidance(error: String) -> String {
+    if !error.starts_with(WRITE_SCOPE_CONTENTION_PREFIX) {
+        return error;
+    }
+    format!(
+        "{error}. Read-only children never contend: for research or inspection launch a \
+         read-only type (explore, planner, reviewer, test, advisor) or a prompt-only start; \
+         parallel writers need disjoint write_roots or worktree=true."
+    )
 }
 
 fn apply_spawn_write_authority(runtime: &mut SubAgentRuntime, request: &SpawnRequest) {

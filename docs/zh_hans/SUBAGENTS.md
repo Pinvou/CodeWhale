@@ -194,11 +194,13 @@ max_admitted = 12
 
 ## 对外公布的 agent 工具字段（v0.9.9）
 
-面向模型的 `agent` 工具 schema 正好公布 **12 个字段**（#5324、#5123）：
+面向模型的 `agent` 工具 schema 正好公布 **14 个字段**（#5324、#5123；T7 后来加入 `profile_query`，即 roster 的宿主 profile 关键字过滤；`timeout_secs` 为 `action=wait` 重新公布——见下文）：
 
-`action`、`prompt`、`type`、`profile`、`name`、`agent_id`、`message`、`until`、`detached`、`worktree`、`write_roots`、`resume_from`
+`action`、`prompt`、`type`、`profile`、`profile_query`、`name`、`agent_id`、`message`、`until`、`timeout_secs`、`detached`、`worktree`、`write_roots`、`resume_from`
 
 外加按 action 区分的 `dependentSchemas` 树（`start` 需要 `prompt`；`message`/`followup` 需要目标和 `message`；`peek`/`interrupt`/`cancel` 需要目标）。schema 变更是钉死的提示词前缀的一部分，所以升级会在每个会话中重新填充一次 provider KV 前缀（docs/CACHE.md；在 v0.9.9 边界接受）。
+
+`timeout_secs`（整数，1..=120，默认 30）限制单次 `action=wait` 阻塞的时长。它曾随其他生命周期附加字段一起被移出公布的 schema，但 `until` 文案仍承诺"默认 30 秒、上限 120 秒"：拿不到任何字段去触及上限的模型只会反复做 30 秒的等待。重新公布后，父代理可以按整个批次来设定一次等待。
 
 **解析接受但未公布（兼容）。** 以下输入已从公布的 schema 中移除，但仍保持解析接受并按原样生效，因此已保存的转录、ACP/MCP 客户端和 Fleet 配置照旧重放——`token_budget` 已经遵循的正是同一个契约：
 
@@ -206,9 +208,15 @@ max_admitted = 12
 - 路由：`model`、`model_strength`、`thinking`（`profile` 钉死路由和思维层级；没有它时子代理继承操作者模型）
 - workspace/隔离：`workspace_policy`、`write_authority`、`fork_context`、`cwd`、`worktree_path`、`worktree_branch`、`worktree_base`
 - 发起契约：`deliberate`、`dependencies`、`acceptance`、`expected_artifact`、`exact_files`、`coordination_contracts`
-- 生命周期附加：`timeout_secs`（wait）、`reason`（interrupt）、`include_archived`（status）以及 `token_budget`
+- 生命周期附加：`reason`（interrupt）、`include_archived`（status）以及 `token_budget`；wait 别名 `timeout`（与 `timeout_secs` 同义）
 
 权限绝不会变宽：#5426/#5435 的遏制钳制不变——`write_authority` 移到角色/profile，委派只能收窄继承的权限。
+
+### 会话名与并行只读扇出
+
+传给 `action=start` 的 `name` 只在其持有者仍然存活时被保留：运行中，或已中断（挂起，checkpoint 未必能被 `followup` 唤醒）。子代理一旦落定（completed、failed、cancelled、budget-exhausted）即释放名字，因此同名的"取消后重试"可以直接成功，不必另造后缀。若一个已落定与一个存活的子代理共用同名，该名字解析到存活的那一个；当只剩已落定的持有者时，解析到最近一次启动的那一个。同名拒绝会按持有者状态给出可行的建议：运行中的子代理可以等待其完成事件或取消；已中断的已经终态（完成事件已发出，且 `cancel` 只作用于运行中的子代理），因此建议是 `action=followup`（checkpoint 仍允许时）或换一个名字。不被任何子代理用作会话名的引用仍按精确 `agent_id` 解析到其自身记录；当该字符串同时也是某个会话名时（未命名的子代理以 `session_name = id` 为名，且 `name` 接受形似 id 的字符串），以上名字规则优先。从更早一次启动水合（hydrate）而来的记录对解析同样是历史——绝不会盖过当前这次启动的子代理——因此裸名的"ambiguous（歧义）"拒绝只防范 spawn 本无法产生的状态；真遇到时请改用 `agent_id`。
+
+`type=general` 与 `type=implement` 具备写能力，除非用 `write_roots` 收窄，否则会认领整个父工作区，因此多个未用互斥 `write_roots` 启动的实例即使都不写入也会在该声明上相撞。并行研究或检查请改用只读角色（`explore`、`planner`、`reviewer`、`test`、`advisor`）、仅提示词的启动（只传 `prompt`），或不声明写权限的 `type=custom`（此时它以只读启动）：只读子代理不认领任何范围、永不争用。spawn 时的争用拒绝会指明这条路径。
 
 ## 子代理预算（步数、墙钟时间）
 
