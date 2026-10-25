@@ -243,7 +243,10 @@ func (r *PostgresRepository) Refund(ctx context.Context, merchantOrderNo, mercha
 	if errors.Is(err, pgx.ErrNoRows) {
 		return Refund{}, false, ErrNotFound
 	}
-	if err != nil || (order.Status != "SUCCESS" && order.Status != "PARTIALLY_REFUNDED") || amountFen > order.AmountFen-order.RefundedAmountFen {
+	if err != nil {
+		return Refund{}, false, err
+	}
+	if (order.Status != "SUCCESS" && order.Status != "PARTIALLY_REFUNDED") || amountFen > order.AmountFen-order.RefundedAmountFen {
 		return Refund{}, false, ErrConflict
 	}
 	now := r.now()
