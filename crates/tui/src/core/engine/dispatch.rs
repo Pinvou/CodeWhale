@@ -255,6 +255,7 @@ pub(super) fn format_tool_error_with_schema(
 /// per retry. Above the budget the receipt keeps the field inventory — which
 /// is what a shape repair needs — and points back at the advertised schema.
 const VALID_SHAPE_BUDGET_BYTES: usize = 2048;
+const VALID_SHAPE_MAX_PROPERTIES: usize = 40;
 
 fn bounded_valid_shape(
     tool_name: &str,
@@ -270,11 +271,21 @@ fn bounded_valid_shape(
     if serialized_len <= VALID_SHAPE_BUDGET_BYTES {
         return schema.clone();
     }
-    let properties = schema
+    let mut properties = schema
         .get("properties")
         .and_then(serde_json::Value::as_object)
         .map(|properties| properties.keys().cloned().collect::<Vec<_>>())
         .unwrap_or_default();
+    // The reduction must honor the budget it enforces: a schema with
+    // hundreds of properties would otherwise reduce to a receipt larger
+    // than the schema it replaced.
+    let omitted_properties = properties.len().saturating_sub(VALID_SHAPE_MAX_PROPERTIES);
+    if omitted_properties > 0 {
+        properties.truncate(VALID_SHAPE_MAX_PROPERTIES);
+        properties.push(format!(
+            "... and {omitted_properties} more properties (see the advertised schema)"
+        ));
+    }
     let required = schema
         .get("required")
         .cloned()

@@ -111,11 +111,11 @@ async fn contract_read_refuses_binary_payloads_but_keeps_lossy_text() {
     // NUL arm alone would satisfy the refusal, leaving the BOM arms unpinned.
     std::fs::write(
         temporary.path().join("notes.txt"),
-        b"\xFF\xFE\x60\x4F\x34\x6C",
+        b"\xFF\xFE\x60\x4F\x7D\x59",
     )
     .expect("fixture");
     // UTF-16BE BOM: the FE FF prefix arm, equally NUL-free.
-    std::fs::write(temporary.path().join("be.txt"), b"\xFE\xFF\x4F\x60\x6C\x34").expect("fixture");
+    std::fs::write(temporary.path().join("be.txt"), b"\xFE\xFF\x4F\x60\x59\x7D").expect("fixture");
     // UTF-8 text with one truncated multibyte sequence: still text.
     std::fs::write(temporary.path().join("caf.txt"), b"caf\xC3\nnext line\n").expect("fixture");
     // Latin-1 text with a lone `ÿ` (0xFF) mid-stream: still text, not a BOM.

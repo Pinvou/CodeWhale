@@ -11689,7 +11689,9 @@ fn worktree_discovery_never_adopts_or_enumerates_an_ancestors_sibling_repos() {
         init_git_repo_at(&sibling);
     }
     // `<home>/.pinvou3/sessions/<sid>/workspace`: not a repository, with the
-    // sibling repositories two levels up.
+    // sibling repositories four hops up — home is exactly the fourth (last)
+    // probed ancestor, and the Tried-list assertion below fails if a fixture
+    // change pushes it out of the probe window and turns this test vacuous.
     let workspace = home
         .path()
         .join(".pinvou3")
@@ -11716,6 +11718,10 @@ fn worktree_discovery_never_adopts_or_enumerates_an_ancestors_sibling_repos() {
             && !message.contains("flutter")
             && !message.contains("Spec2017-iOS"),
         "ancestor siblings must not be scanned or named: {message}"
+    );
+    assert!(
+        message.contains(home.path().to_string_lossy().as_ref()),
+        "the walk must have actually probed home (last ancestor in the window): {message}"
     );
 
     // A single sibling must not be adopted silently either.
@@ -24103,7 +24109,11 @@ async fn swept_cwd_narrowed_worktree_child_resume_rekeys_on_its_manifest_worktre
         true,
     ));
     guard
-        .interrupt_child(&narrowed_child.agent_id, None, "interrupted by parent".into())
+        .interrupt_child(
+            &narrowed_child.agent_id,
+            None,
+            "interrupted by parent".into(),
+        )
         .expect("interrupt");
     let released = guard
         .release_stale_write_claims(None)
@@ -24463,7 +24473,11 @@ async fn shell_readonly_refusal_enumerates_the_admitted_families() {
     );
 
     let refusal = registry
-        .execute("agent_readonly_guidance", "bash", json!({"command": "git push origin main"}))
+        .execute(
+            "agent_readonly_guidance",
+            "bash",
+            json!({"command": "git push origin main"}),
+        )
         .await
         .expect_err("a read-only role must not push")
         .to_string();
@@ -24484,4 +24498,107 @@ async fn shell_readonly_refusal_enumerates_the_admitted_families() {
             "guidance missing {expected:?}: {refusal}"
         );
     }
+}
+
+/// The registry lane must resolve mutation paths against the child's own
+/// context workspace: for an isolated worktree child an absolute in-workspace
+/// spelling only strips (and then validates) when `mutation_paths` receives
+/// that workspace — passing the session root would refuse it again. This is
+/// the end-to-end pin for the `mutation_paths(.., &self.registry.context().workspace)`
+/// call site that the unit-level helper tests cannot see.
+#[tokio::test]
+async fn child_write_tool_resolves_absolute_spellings_against_the_childs_workspace() {
+    let _env_lock = crate::test_support::lock_test_env();
+    let home = tempdir().expect("isolated CODEWHALE_HOME");
+    let _codewhale_home = crate::test_support::EnvVarGuard::set("CODEWHALE_HOME", home.path());
+    let tmp = tempdir().expect("coordination root");
+    let worktree = tmp
+        .path()
+        .join(".codewhale-worktrees")
+        .join("workspace")
+        .join("codex-agent-child");
+    std::fs::create_dir_all(worktree.join("src")).expect("worktree src");
+    let manager = new_shared_subagent_manager(tmp.path().to_path_buf(), 2);
+    {
+        let mut guard = manager.write().await;
+        let claim_owner = guard.insert_test_running_agent("wtchild", &worktree);
+        guard
+            .coordination
+            .register_claim(
+                WriteScopeClaim {
+                    owner: claim_owner.clone(),
+                    roots: vec!["src".into()],
+                    exact_files: vec![],
+                    contracts: vec![],
+                },
+                true,
+                Some(
+                    worktree
+                        .canonicalize()
+                        .expect("canonical worktree")
+                        .to_string_lossy()
+                        .into_owned(),
+                ),
+                &[],
+                |_| false,
+            )
+            .expect("isolated claim registered");
+    }
+    let mut runtime = stub_runtime();
+    runtime.manager = Arc::clone(&manager);
+    runtime.context = ToolContext::new(worktree.clone());
+    runtime.context.auto_approve = true;
+    runtime.worker_profile = WorkerRuntimeProfile::for_role(FleetRole::Builder);
+    let registry = SubAgentToolRegistry::new_with_owner(
+        runtime,
+        FleetRole::Builder,
+        "agent_wtchild".into(),
+        "implementer".into(),
+        Some(vec!["File".into()]),
+        Arc::new(Mutex::new(TodoList::new())),
+        Arc::new(Mutex::new(PlanState::default())),
+    );
+
+    let absolute = worktree.join("src").join("ok.txt");
+    registry
+        .execute(
+            "agent_wtchild",
+            "File",
+            json!({
+                "action": "write",
+                "path": absolute.display().to_string(),
+                "content": "ok"
+            }),
+        )
+        .await
+        .expect("an absolute in-workspace spelling must write through the registry lane");
+    assert!(
+        absolute.exists(),
+        "the absolute spelling must land at the real target"
+    );
+
+    let outside = tmp.path().join("escape.txt");
+    let refused = registry
+        .execute(
+            "agent_wtchild",
+            "File",
+            json!({
+                "action": "write",
+                "path": outside.display().to_string(),
+                "content": "no"
+            }),
+        )
+        .await
+        .expect_err("an absolute spelling outside the workspace must refuse");
+    let refused = refused.to_string();
+    assert!(
+        refused.contains("outside agent")
+            || refused.contains("outside the workspace")
+            || refused.contains("repo-relative without traversal"),
+        "unexpected refusal shape: {refused}"
+    );
+    assert!(
+        !outside.exists(),
+        "the out-of-workspace write must not land"
+    );
 }

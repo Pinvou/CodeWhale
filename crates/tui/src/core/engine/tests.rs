@@ -12518,6 +12518,49 @@ fn tool_validation_feedback_bounds_oversized_schemas_to_their_field_inventory() 
         formatted.contains("\"properties\":[]") && formatted.contains("omitted from this receipt"),
         "a no-properties schema reduces with an empty inventory: {formatted}"
     );
+
+    // The reduced receipt carries the schema's DECLARED type, not a
+    // hardcoded \"object\": a composition-free string schema must say so.
+    let string_schema = json!({
+        "type": "string",
+        "description": "x".repeat(3000),
+        "minLength": 1
+    });
+    let formatted = format_tool_error_with_schema(&error, "read", Some(&string_schema));
+    assert!(
+        formatted.contains("\"type\":\"string\""),
+        "the declared type must survive the reduction: {formatted}"
+    );
+    assert!(
+        !formatted.contains("\"type\":\"object\""),
+        "the declared type must not be overridden: {formatted}"
+    );
+
+    // The reduction honors its own budget: a schema with more properties
+    // than the inventory cap truncates the list with an explicit marker
+    // instead of echoing an unbounded receipt.
+    let many_properties = (0..60)
+        .map(|index| {
+            (
+                format!("field_{index:02}"),
+                json!({"type": "string", "description": "x".repeat(40)}),
+            )
+        })
+        .collect::<serde_json::Map<_, _>>();
+    let wide_schema = json!({
+        "type": "object",
+        "properties": many_properties,
+        "required": ["field_00"]
+    });
+    let formatted = format_tool_error_with_schema(&error, "wide", Some(&wide_schema));
+    assert!(
+        formatted.contains("... and 20 more properties"),
+        "truncated inventories name their remainder: {formatted}"
+    );
+    assert!(
+        formatted.contains("\"field_39\"") && !formatted.contains("\"field_40\""),
+        "the inventory truncates at the cap: {formatted}"
+    );
 }
 
 #[test]

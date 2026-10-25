@@ -4086,9 +4086,11 @@ impl SubAgentManager {
             }
         }
         let active_owners = self.active_coordination_owners();
-        // The owner's own claim is excluded by the ledger (same owner), and
-        // its ancestors stay exempt: growing a claim must not start
-        // contending with the agent the work was delegated from.
+        // The owner's own claim is excluded by the ledger (same owner). In
+        // the isolated lane its ancestors stay exempt: growing a claim must
+        // not start contending with the agent the work was delegated from.
+        // The shared lane never consults exemptions — plain overlap alone
+        // decides there, as it always has.
         let exempt_owners = self.worktree_claim_exemptions(Some(owner));
         self.coordination.register_claim(
             claim,
@@ -5122,11 +5124,7 @@ impl SubAgentManager {
             let Some(record) = self.worker_records.get(&cursor) else {
                 break;
             };
-            let Some(parent_ref) = record
-                .parent_run_id
-                .as_deref()
-                .or(record.spec.parent_run_id.as_deref())
-            else {
+            let Some(parent_ref) = worker_parent_ref(record) else {
                 break;
             };
             if parent_ref == "root" {
@@ -5150,8 +5148,9 @@ impl SubAgentManager {
     /// would hand two children of one worktree disjoint keys and let them
     /// race the checkout unchecked. The nearest ancestor claim whose root
     /// contains the child's workspace supplies the key; a child that created
-    /// its own worktree (a sibling of its parent's — nesting is forbidden)
-    /// or has no isolated ancestor keys on its own workspace.
+    /// its own worktree (harness worktrees land outside the parent checkout,
+    /// never inside it) or has no isolated ancestor keys on its own
+    /// workspace.
     fn containing_worktree_root(&self, parent_id: Option<&str>, workspace_root: String) -> String {
         let workspace = Path::new(&workspace_root);
         for owner in self.worktree_claim_exemptions(parent_id) {
@@ -6863,8 +6862,9 @@ impl SubAgentManager {
         // as its workspace, so its writes are confined there exactly like its
         // parent's. Its claim must go on the same isolated footing: namespacing
         // it against the shared coordination root fails by construction —
-        // worktrees are created as siblings of the checkout
-        // (`resolve_worktree_path` forbids nesting) — so every write-capable
+        // worktrees live outside the checkout (`resolve_worktree_path`
+        // refuses any path inside the parent checkout, and harness worktrees
+        // land next to it) — so every write-capable
         // grandchild of a worktree child was refused with "shared writer
         // workspace ... must remain inside coordination root". Isolation truth
         // uses the resume path's precedence: the parent's registered claim
@@ -7393,11 +7393,7 @@ impl SubAgentManager {
             let Some((_, record)) = self.worker_record_by_ref(&cursor) else {
                 break;
             };
-            let Some(parent_ref) = record
-                .parent_run_id
-                .as_deref()
-                .or(record.spec.parent_run_id.as_deref())
-            else {
+            let Some(parent_ref) = worker_parent_ref(record) else {
                 break;
             };
             if parent_ref == caller {
@@ -13571,6 +13567,17 @@ fn normalize_claim_path(path: &str) -> Result<String, String> {
     }
 }
 
+/// The parent reference a worker record records: the live pointer wins, the
+/// launch spec's is the durable fallback. Both ancestry walks
+/// (`worktree_claim_exemptions`, `ensure_caller_controls_descendant`) must
+/// resolve it identically or they disagree about who delegated to whom.
+fn worker_parent_ref(record: &AgentWorkerRecord) -> Option<&str> {
+    record
+        .parent_run_id
+        .as_deref()
+        .or(record.spec.parent_run_id.as_deref())
+}
+
 /// Join `offset` and `path` under one lexical spelling, resolving `.` and
 /// `..` components. Returns `None` when `path` escapes above `offset`
 /// entirely; the caller then keeps the raw spelling and lets the claim's
@@ -16573,11 +16580,11 @@ fn workspace_relative_mutation_path(workspace: &Path, path: &str) -> String {
         return path.to_string();
     }
     let workspace = normalize_subagent_workspace(workspace);
-    let resolved = codewhale_core::walk_deepest_existing(
-        candidate,
-        codewhale_core::DeepestExistingFallback::DeepestAncestor,
-    )
-    .compose();
+    // The crate's single deepest-existing delegation point — the exact walk
+    // the write tool's boundary resolves through — so the claim lane cannot
+    // drift from it.
+    let resolved = crate::core::authority::resolve_deepest_existing(candidate)
+        .unwrap_or_else(|| candidate.to_path_buf());
     match resolved.strip_prefix(&workspace) {
         Ok(relative) => relative.to_string_lossy().into_owned(),
         Err(_) => path.to_string(),
