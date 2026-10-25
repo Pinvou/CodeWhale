@@ -2094,6 +2094,16 @@
         "file": "900026_reconciliation_fair_retry.up.sql",
         "version": 900026,
         "sha256": "bb362cb8d473ba5625986e98a2c936aa6c737ecc2bf617ac3cd935eb7c74a153"
+      },
+      {
+        "file": "900027_late_payment_schedule_commands.down.sql",
+        "version": 900027,
+        "sha256": "25ed011a4f05d0fd5c82dac90bd85a4bab72aeaea59deff1f42af71dab0ade75"
+      },
+      {
+        "file": "900027_late_payment_schedule_commands.up.sql",
+        "version": 900027,
+        "sha256": "55d7c2ce0e0017d2d6cab5818a0a1a2b32d9510dad54dbeb48a5fc613c5f6d6f"
       }
     ],
     "payment-simulator": [

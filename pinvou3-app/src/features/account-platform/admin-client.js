@@ -713,8 +713,16 @@ export class AdminPlatformClient {
   queryLatePaymentReview(caseID) {
     return this.mutate('billing', `/admin/v1/late-payment-reviews/${encodeURIComponent(caseID)}/query`, 'POST', {}, '', undefined, 200);
   }
-  scheduleLatePaymentReview(caseID, nextReviewAt, reason) {
-    return this.mutate('billing', `/admin/v1/late-payment-reviews/${encodeURIComponent(caseID)}/schedule`, 'POST', { next_review_at: new Date(nextReviewAt).toISOString(), reason }, '', undefined, 200);
+  scheduleLatePaymentReview(caseID, nextReviewAt, reason, key, commandProtocol) {
+    if (commandProtocol !== 1) throw financeNotDispatched(new Error('UNSUPPORTED_REVIEW_SCHEDULE_PROTOCOL'), true);
+    if (typeof key !== 'string' || key.trim().length < 8 || key.trim().length > 120) throw financeNotDispatched(new Error('INVALID_REVIEW_SCHEDULE_KEY'), true);
+    // Callers must freeze an absolute instant before retaining command facts.
+    // Reinterpreting a datetime-local string here would change an unknown retry.
+    if (typeof nextReviewAt !== 'string' || !/(?:Z|[+-]\d{2}:\d{2})$/i.test(nextReviewAt)) throw financeNotDispatched(new Error('INVALID_REVIEW_SCHEDULE_TIME'), true);
+    let nextReview;
+    try { nextReview = new Date(nextReviewAt).toISOString(); }
+    catch (error) { throw financeNotDispatched(error, true); }
+    return this.mutate('billing', `/admin/v1/late-payment-reviews/${encodeURIComponent(caseID)}/schedule`, 'POST', { command_protocol: commandProtocol, next_review_at: nextReview, reason }, key, undefined, 200);
   }
   archiveLatePaymentReview(caseID) {
     return this.mutate('billing', `/admin/v1/late-payment-reviews/${encodeURIComponent(caseID)}/archive`, 'POST', {}, '', undefined, 200);

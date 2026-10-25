@@ -204,7 +204,7 @@ type adminRepository interface {
 	LatePaymentReview(context.Context, uuid.UUID) (LatePaymentReviewCase, error)
 	LatePaymentReviewDetail(context.Context, uuid.UUID) (LatePaymentReviewDetail, error)
 	ClaimLatePaymentReview(context.Context, uuid.UUID, uuid.UUID) (LatePaymentReviewCase, error)
-	ScheduleLatePaymentReview(context.Context, uuid.UUID, uuid.UUID, time.Time, string) (LatePaymentReviewCase, error)
+	ScheduleLatePaymentReview(context.Context, uuid.UUID, uuid.UUID, time.Time, string, string) (LatePaymentReviewCase, error)
 	RecordLatePaymentReviewQuery(context.Context, uuid.UUID, uuid.UUID, PaymentOrder, error) (LatePaymentReviewCase, error)
 	ArchiveLatePaymentReview(context.Context, uuid.UUID, uuid.UUID) (LatePaymentReviewCase, error)
 	EscalateProviderBlind(context.Context, uuid.UUID, uuid.UUID, string) (LatePaymentReviewCase, error)
@@ -599,17 +599,23 @@ func (s *Service) adminScheduleLatePaymentReview(w http.ResponseWriter, r *http.
 	repository, ok := s.requireAdminRepository(w, r)
 	caseID, valid := parseLatePaymentCaseID(w, r)
 	var body struct {
-		NextReviewAt time.Time `json:"next_review_at"`
-		Reason       string    `json:"reason"`
+		CommandProtocol int       `json:"command_protocol"`
+		NextReviewAt    time.Time `json:"next_review_at"`
+		Reason          string    `json:"reason"`
 	}
 	if !ok || !valid {
 		return
 	}
-	if api.DecodeJSON(w, r, &body) != nil {
+	if api.DecodeJSON(w, r, &body) != nil || body.CommandProtocol != 1 {
 		api.WriteError(w, http.StatusBadRequest, "INVALID_REQUEST", "invalid financial request", httpserver.RequestID(r.Context()))
 		return
 	}
-	item, err := repository.ScheduleLatePaymentReview(r.Context(), caseID, adminActor(adminPrincipal(r)), body.NextReviewAt, body.Reason)
+	keys := r.Header.Values("Idempotency-Key")
+	if len(keys) != 1 || len(strings.TrimSpace(keys[0])) < 8 || len(strings.TrimSpace(keys[0])) > 120 {
+		api.WriteError(w, http.StatusBadRequest, "INVALID_REQUEST", "a schedule command key is required", httpserver.RequestID(r.Context()))
+		return
+	}
+	item, err := repository.ScheduleLatePaymentReview(r.Context(), caseID, adminActor(adminPrincipal(r)), body.NextReviewAt, body.Reason, keys[0])
 	if err != nil {
 		s.writeError(w, r, err)
 		return

@@ -330,38 +330,6 @@ func (r *PostgresRepository) ClaimLatePaymentReview(ctx context.Context, caseID,
 	return item, tx.Commit(ctx)
 }
 
-func (r *PostgresRepository) ScheduleLatePaymentReview(ctx context.Context, caseID, actorID uuid.UUID, nextReviewAt time.Time, reason string) (LatePaymentReviewCase, error) {
-	reason = strings.TrimSpace(reason)
-	now := r.now()
-	if caseID == uuid.Nil || actorID == uuid.Nil || len(reason) < 10 || len(reason) > 500 || !nextReviewAt.After(now) || nextReviewAt.After(now.Add(8*24*time.Hour)) {
-		return LatePaymentReviewCase{}, ErrConflict
-	}
-	tx, err := r.pool.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.Serializable})
-	if err != nil {
-		return LatePaymentReviewCase{}, err
-	}
-	defer tx.Rollback(ctx)
-	item, found, err := scanLatePaymentReviewCase(tx.QueryRow(ctx, latePaymentReviewSelect+` WHERE late.id=$1 FOR UPDATE OF late,manual`, caseID))
-	if err != nil || !found || item.OwnerID == nil || *item.OwnerID != actorID || (item.ReviewStatus != "REVIEW_REQUIRED_LATE_PAYMENT" && item.ReviewStatus != "PROVIDER_BLIND") {
-		return LatePaymentReviewCase{}, ErrConflict
-	}
-	_, err = tx.Exec(ctx, `UPDATE late_payment_review_cases SET next_review_at=$2,updated_at=$3 WHERE id=$1`, caseID, nextReviewAt.UTC(), now)
-	if err == nil {
-		_, err = tx.Exec(ctx, `UPDATE manual_review_cases SET first_response_at=COALESCE(first_response_at,$2),mitigation_at=COALESCE(mitigation_at,$2),updated_at=$2 WHERE id=$1`, caseID, now)
-	}
-	if err == nil {
-		err = appendManualReviewEvent(ctx, tx, caseID, "REVIEW_SCHEDULED", &actorID, map[string]any{"next_review_at": nextReviewAt.UTC(), "reason": reason}, now)
-	}
-	if err != nil {
-		return LatePaymentReviewCase{}, err
-	}
-	item.NextReviewAt, item.UpdatedAt = nextReviewAt.UTC(), now
-	if item.FirstResponseAt == nil {
-		item.FirstResponseAt = &now
-	}
-	return item, tx.Commit(ctx)
-}
-
 func (r *PostgresRepository) RecordLatePaymentReviewQuery(ctx context.Context, caseID, actorID uuid.UUID, order PaymentOrder, queryErr error) (LatePaymentReviewCase, error) {
 	if caseID == uuid.Nil || actorID == uuid.Nil {
 		return LatePaymentReviewCase{}, ErrConflict
