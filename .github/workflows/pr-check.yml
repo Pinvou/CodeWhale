@@ -853,6 +853,16 @@ jobs:
       - name: fork-guard 指纹层 (秒级,不编译)
         run: ./scripts/fork-guard.sh --fast
 
+      # 合并提交 authored 标识披露审计（仅披露,恒以 0 退出,不阻断）：枚举
+      # 分支上每个 merge commit 的 resolution-authored 标识并打印，让
+      # 「resolution 内容已进树」在每个 PR 上持续可见，而不是依赖每轮手工运行。
+      - name: Merge authored audit (seconds)
+        if: ${{ github.event_name != 'push' }}
+        run: |
+          base_ref="${{ github.event_name == 'merge_group' && github.event.merge_group.base_ref || github.base_ref }}"
+          base_ref="${base_ref#refs/heads/}"
+          python3 scripts/audit-merge-authored.py "origin/$base_ref"
+
       - name: fork 合规联动 (gitlink ↔ fork-modifications)
         run: |
           base_ref="${{ github.event_name == 'merge_group' && github.event.merge_group.base_ref || github.base_ref }}"
