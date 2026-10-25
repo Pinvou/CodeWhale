@@ -15,6 +15,7 @@ import (
 
 	"github.com/Pinvou/pinvou3/account-platform/internal/platform/identity"
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5"
 )
 
 // Only the remote identity outcome is controlled. The durable dispatch grant,
@@ -40,7 +41,8 @@ func (i *inspectionUnknownIdentity) DisableUserAndConfirm(context.Context, strin
 func TestRegistrationUnknownInspectionPostgres(t *testing.T) {
 	userCodeLookupTestGuard(t)
 	f := retainedWalletFenceActors(t)
-	t.Run("durable-unknown-visible-through-real-authorized-route-without-actions", func(t *testing.T) {
+	registrationManualQueryCases(t, f)
+	t.Run("durable-unknown-visible-active-worker-claim-denies-manual-actions", func(t *testing.T) {
 		t.Setenv("APP_ENV", "test")
 		r := f.repository(t)
 		ctx := context.Background()
@@ -354,4 +356,169 @@ func inspectionRegistrationFacts(t *testing.T, r *PostgresRepository, id uuid.UU
 		t.Fatal(err)
 	}
 	return fmt.Sprint(value)
+}
+
+type manualQueryIdentity struct {
+	inspectionUnknownIdentity
+	subject string
+	found   bool
+	err     error
+	after   func()
+}
+
+func (i *manualQueryIdentity) FindMobileUserByRegistrationOperation(_ context.Context, _ uuid.UUID) (string, bool, error) {
+	i.queries.Add(1)
+	if i.after != nil {
+		i.after()
+	}
+	return i.subject, i.found, i.err
+}
+
+func registrationManualQueryCases(t *testing.T, f *retainedWalletFenceFixture) {
+	for index, name := range []string{"missing-keeps-reservation", "lookup-error-keeps-reservation", "found-commits-once", "permission-retired-during-query", "generation-retired-during-query", "version-retired-during-query", "query-audit-rollback"} {
+		t.Run("manual-"+name, func(t *testing.T) {
+			t.Setenv("APP_ENV", "test")
+			ctx := context.Background()
+			r := f.repository(t)
+			principal, actor, _ := userCodeActor(t, r, "manual-query-operator")
+			id := inspectionRegistrationReady(t, r, "manualquery", fmt.Sprintf("+861380014%04d", index))
+			if first, _, err := r.MarkRegistrationCreateAttempted(ctx, id); err != nil || !first {
+				t.Fatal("durable original dispatch", err)
+			}
+			before, err := r.RegistrationOperation(ctx, id)
+			if err != nil {
+				t.Fatal(err)
+			}
+			remote := &manualQueryIdentity{}
+			if name != "missing-keeps-reservation" && name != "lookup-error-keeps-reservation" {
+				remote.found, remote.subject = true, "public-correlated-identity"
+			}
+			if name == "lookup-error-keeps-reservation" {
+				remote.err = errors.New("controlled query unavailable")
+			}
+			if name == "permission-retired-during-query" {
+				userCodeActor(t, r, "manual-query-spare-super")
+				remote.after = func() {
+					if _, err := r.pool.Exec(ctx, `UPDATE users SET status='DISABLED' WHERE id=$1`, actor); err != nil {
+						t.Fatal(err)
+					}
+				}
+			}
+			if name == "generation-retired-during-query" {
+				remote.after = func() {
+					if _, err := r.pool.Exec(ctx, `UPDATE registration_operations SET recovery_generation=recovery_generation+1 WHERE id=$1`, id); err != nil {
+						t.Fatal(err)
+					}
+				}
+			}
+			if name == "version-retired-during-query" {
+				remote.after = func() {
+					if _, err := r.pool.Exec(ctx, `UPDATE registration_operations SET version=version+1 WHERE id=$1`, id); err != nil {
+						t.Fatal(err)
+					}
+				}
+			}
+			if name == "query-audit-rollback" {
+				config := f.config.Copy()
+				config.Database = r.pool.Config().ConnConfig.Database
+				admin, err := pgx.ConnectConfig(ctx, config)
+				if err != nil {
+					t.Fatal(err)
+				}
+				defer admin.Close(ctx)
+				if _, err = admin.Exec(ctx, `CREATE FUNCTION public.reject_manual_query_audit() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN IF NEW.action='registration.repair.identity.query' THEN RAISE EXCEPTION 'controlled query audit failure'; END IF; RETURN NEW; END $$; CREATE TRIGGER reject_manual_query_audit BEFORE INSERT ON audit_logs FOR EACH ROW EXECUTE FUNCTION public.reject_manual_query_audit()`); err != nil {
+					t.Fatal(err)
+				}
+			}
+			auth := newMobileAuthForTest(t, r, &smsProviderFake{}, remote)
+			if err = r.ConfigureRegistrationBonusFingerprint("public-manual-query", bytes.Repeat([]byte{7}, 32)); err != nil {
+				t.Fatal(err)
+			}
+			h := NewService(r, nil).WithMobileAuth(auth, "public-manual-query-token").Handler(func(_ context.Context, token string) (identity.Principal, error) {
+				if token == "operator" {
+					return principal, nil
+				}
+				return identity.Principal{}, errors.New("untrusted public fixture")
+			})
+			path := "/admin/v1/registration-operations/" + id.String() + "/actions/retry"
+			out := inspectionHTTP(h, "operator", http.MethodPost, path)
+			after, err := r.RegistrationOperation(ctx, id)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if remote.queries.Load() != 1 || remote.creates.Load() != 0 || remote.disables.Load() != 0 {
+				t.Fatal("manual query dispatched identity mutation", remote.queries.Load(), remote.creates.Load(), remote.disables.Load())
+			}
+			if name == "found-commits-once" {
+				if out.Code != 202 || after.Status != "PROVISIONING" || after.UserID == nil || after.IdentitySubject != remote.subject || after.IdentityCreatedAt == nil {
+					t.Fatal("correlated identity did not advance existing commit", out.Code, out.Body.String(), after.Status)
+				}
+				facts := inspectionRegistrationFacts(t, r, id)
+				if again := inspectionHTTP(h, "operator", http.MethodPost, path); again.Code == 202 {
+					t.Fatal("advanced operation accepted another query")
+				}
+				if facts != inspectionRegistrationFacts(t, r, id) || remote.queries.Load() != 1 {
+					t.Fatal("replay changed established facts")
+				}
+				return
+			}
+			if name == "missing-keeps-reservation" || name == "lookup-error-keeps-reservation" {
+				if out.Code != 202 || after.LastErrorCode != "IDENTITY_UNAVAILABLE" {
+					t.Fatal("unknown lookup not recoverable", out.Code, out.Body.String())
+				}
+				var occupied bool
+				if err = r.pool.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM registration_operations WHERE id=$1 AND status='IDENTITY_CREATING' AND username_normalized=$2 AND mobile_e164=$3)`, id, before.Username, before.Mobile).Scan(&occupied); err != nil || !occupied {
+					t.Fatal("unknown lost reservation", err)
+				}
+				if again := inspectionHTTP(h, "operator", http.MethodPost, path); again.Code == 202 || remote.queries.Load() != 1 {
+					t.Fatal("active claim was stolen")
+				}
+			} else if out.Code < 400 {
+				t.Fatal("stale or unaudited query advanced", name, out.Code)
+			}
+			if after.Status != "IDENTITY_CREATING" || after.IdentitySubject != "" || after.IdentityCreatedAt != nil || after.UserID != nil || after.IdentityCreateAttemptedAt == nil || !after.IdentityCreateAttemptedAt.Equal(*before.IdentityCreateAttemptedAt) {
+				t.Fatal("unknown facts changed", name, after.Status)
+			}
+			var events, users int
+			if err = r.pool.QueryRow(ctx, `SELECT (SELECT count(*) FROM outbox_events WHERE aggregate_id=$1),(SELECT count(*) FROM users WHERE id=$2)`, id.String(), before.CandidateUserID).Scan(&events, &users); err != nil {
+				t.Fatal(err)
+			}
+			if events != 0 || users != 0 {
+				t.Fatal("unknown produced Account facts", events, users)
+			}
+		})
+	}
+	t.Run("manual-claim-cas-exact-stage-and-lease", func(t *testing.T) {
+		r := f.repository(t)
+		ctx := context.Background()
+		principal, _, _ := userCodeActor(t, r, "manual-claim")
+		id := inspectionRegistrationReady(t, r, "manualclaim", "+8613800140099")
+		op, err := r.RegistrationOperation(ctx, id)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err = r.ClaimRegistrationIdentityQuery(ctx, principal, op); !errors.Is(err, ErrRegistrationConflict) {
+			t.Fatal("unattempted accepted", err)
+		}
+		if _, _, err = r.MarkRegistrationCreateAttempted(ctx, id); err != nil {
+			t.Fatal(err)
+		}
+		if _, err = r.ClaimRegistrationIdentityQuery(ctx, principal, op); !errors.Is(err, ErrRegistrationConflict) {
+			t.Fatal("stale version accepted", err)
+		}
+		op, err = r.RegistrationOperation(ctx, id)
+		if err != nil {
+			t.Fatal(err)
+		}
+		claimed, err := r.ClaimRegistrationIdentityQuery(ctx, principal, op)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err = r.ClaimRegistrationIdentityQuery(ctx, principal, op); !errors.Is(err, ErrRegistrationConflict) {
+			t.Fatal("live lease stolen", err)
+		}
+		if err = r.RecordRegistrationIdentityQuery(ctx, principal, claimed, "public-unleased"); !errors.Is(err, ErrIdentityRecoveryClaimLost) {
+			t.Fatal("unleased result accepted", err)
+		}
+	})
 }

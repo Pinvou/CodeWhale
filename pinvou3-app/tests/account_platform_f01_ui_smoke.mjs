@@ -62,6 +62,24 @@ try {
     await page.waitForSelector('tbody tr'); await waitText('account-a');
   });
   await caseRun('admin users keep enable and disable with no direct delete', async () => { await fresh('admin'); assert(await page.evaluate(() => ![...document.querySelectorAll('button')].some(button => /delete/i.test(button.textContent))), 'delete exposed'); await clickText(await page.evaluate(() => globalThis.f01.copy().admin.accounts.disable)); await waitText('DISABLED'); await clickText(await page.evaluate(() => globalThis.f01.copy().admin.accounts.enable)); await waitText('ACTIVE'); assert(await page.evaluate(() => globalThis.f01.calls.filter(call => call.url.endsWith('/status')).every(call => call.method === 'PATCH')), 'wrong status method'); });
+  for (const language of ['zh','en','ja']) await caseRun(`${language}: unknown identity manual query uses original retry route without compensation`, async () => {
+    await fresh('admin'); await page.select('header select',language);
+    await page.evaluate(() => { globalThis.f01.unknownRegistration=true;globalThis.f01.calls.length=0; });
+    await clickText(await page.evaluate(() => globalThis.f01.copy().admin.userManagement.registrationRepair));
+    const row='tr[data-operation-status="IDENTITY_CREATING"]'; await page.waitForSelector(`${row} button`);
+    const text=await page.$eval(`${row} button`,node=>node.textContent);
+    assert(text===registrationRepairCopy[language].stages.IDENTITY_CREATING,'unknown action is not a localized identity query');
+    assert(await page.$$eval(`${row} button`,nodes=>nodes.length)===1,'unknown offered compensation');
+    await page.evaluate(() => { globalThis.f01.calls.length = 0; });
+    await page.click(`${row} button`); await page.waitForFunction(()=>globalThis.f01.calls.some(call=>call.url.endsWith('/actions/retry')));
+    await page.waitForNetworkIdle({ idleTime: 100 });
+    assert(await page.evaluate(() => {
+      // Bootstrap is a read-only POST that language refresh may legitimately finish here.
+      // Every other POST in this action window must be the single original operation query.
+      const posts = globalThis.f01.calls.filter(call => call.method === 'POST' && call.url !== '/api/account/v1/account/bootstrap');
+      return posts.length === 1 && posts[0].url === `/api/admin/account/admin/v1/registration-operations/${globalThis.f01.id}/actions/retry`;
+    }), 'query duplicated a command, requested compensation, or sent a new or foreign operation');
+  });
   await caseRun('registration retry and compensation are actual wired actions', async () => { await fresh('admin'); await clickText(await page.evaluate(() => globalThis.f01.copy().admin.userManagement.registrationRepair)); const operationID = await page.evaluate(() => globalThis.f01.id);
     const row = `tr[data-operation-id="${operationID}"][data-operation-status="REPAIR_REQUIRED"]`;
     await page.waitForSelector(row, { visible: true });

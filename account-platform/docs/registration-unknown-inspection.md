@@ -1,4 +1,4 @@
-# 未确认注册操作的只读定位
+# 未确认注册操作的定位与关联查询
 
 具有既有 platform.registrations.repair 权限的运营人员，可在注册修复页或 GET /admin/v1/registration-operations 查看已记录创建尝试、仍处于 IDENTITY_CREATING、尚未确认 Identity 或提交 Account 的操作。operation_id 参数按原注册操作 UUID 精确筛选；未知 ID 返回空列表，格式无效或全零 ID 返回400，权限边界不变。
 
@@ -6,6 +6,6 @@
 
 未知 Identity 没有已确认的 identity_created_at，不从操作创建或尝试时间制造30分钟/24小时SLA。已有SLA来源与过滤不变：WITHIN/OVERDUE不包含无SLA的未知操作，界面显示空值。列表仍受原100条上限约束，可用原操作ID精确定位，不推算总数。
 
-这些未知行只读，不提供重试或补偿操作。后台继续按原关联查询，只有原durable首个grant可进入Identity创建；本项不改变该恢复流程，不释放预约、不删除或重建Identity。已有REPAIR_REQUIRED重试和满足原证明门禁的补偿、资料变更重试保持。
+这些未知行提供“身份创建查询”，复用原 retry 路由及 platform.registrations.repair 权限，仅按原 operation ID 调用既有只读 Identity 关联查询。领取与自动 worker 互斥的原30秒恢复租约，检查操作版本、精确未知条件及当前权限，并在查询返回后重新验证租约、版本、权限和持久审计。查询仍未知或失败时保留占用与原退避；只有明确查到身份才复用原 Account 幂等提交。该分支没有 Identity Create、禁用、补偿或释放路径。活跃 worker/人工租约不可被抢占。已有REPAIR_REQUIRED重试和满足原证明门禁的补偿、资料变更重试保持。
 
-读取不返回手机号、用户名、Identity subject、密码/引用、验证码、指纹或查询凭据。拒绝的写请求和未授权访问可能按原规则写安全审计；这不代表注册或身份领域效果发生。当前未知行retry的既有通用错误分类仍为500拒绝，补偿为409拒绝；本项不改该分类。
+读取不返回手机号、用户名、Identity subject、密码/引用、验证码、指纹或查询凭据。拒绝的写请求和未授权访问可能按原规则写安全审计；这不代表注册或身份领域效果发生。符合精确未知条件的人工查询返回202和原操作投影；不符合条件或租约/版本失效仍按既有冲突分类拒绝，补偿仍为409拒绝。

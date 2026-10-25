@@ -54,7 +54,8 @@ func (s *Service) adminRetryRegistration(w http.ResponseWriter, r *http.Request)
 	}
 	principal := mustPrincipal(r.Context())
 	operation, err := repository.RegistrationOperation(r.Context(), operationID)
-	if err == nil && operation.Status != "REPAIR_REQUIRED" {
+	unknown := err == nil && registrationIdentityUnknown(operation)
+	if err == nil && operation.Status != "REPAIR_REQUIRED" && !unknown {
 		err = ErrRegistrationConflict
 	}
 	if err == nil {
@@ -63,7 +64,9 @@ func (s *Service) adminRetryRegistration(w http.ResponseWriter, r *http.Request)
 			return
 		}
 	}
-	if err == nil && operation.UserID != nil {
+	if err == nil && unknown {
+		err = s.mobileAuth.queryUnknownRegistration(r.Context(), principal, operation)
+	} else if err == nil && operation.UserID != nil {
 		err = repository.RetryWalletProvisioning(r.Context(), principal, *operation.UserID)
 	} else if err == nil {
 		_, err = s.mobileAuth.resumeRegistration(r.Context(), operation)

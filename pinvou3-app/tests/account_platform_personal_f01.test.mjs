@@ -168,3 +168,14 @@ test('bootstrap preserves personal balance without model authority and validates
   }
   assert.throws(() => requirePersonalAccount({ ...me, active_context: { ...me.active_context, organization_id: id } }), /INVALID_ACCOUNT_ACK/);
 });
+
+
+test('manual unknown identity action only queries the attempted original operation', async () => {
+  const { registrationRepairActions } = await import('../src/features/account-platform/registration-repair.js');
+  const item = {status:'IDENTITY_CREATING',stage:'IDENTITY_CREATING',identity_create_attempted_at:'2026-10-25T00:00:00Z',account_created:false};
+  assert.deepEqual(registrationRepairActions(item), {query:true,retry:true,compensate:false});
+  for (const change of [{identity_create_attempted_at:null},{account_created:true},{stage:'ACCOUNT_COMMITTING'},{status:'ACTIVE'}]) {
+    assert.equal(registrationRepairActions({...item,...change}).query,false);
+    assert.equal(registrationRepairActions({...item,...change}).compensate,false);
+  }
+});

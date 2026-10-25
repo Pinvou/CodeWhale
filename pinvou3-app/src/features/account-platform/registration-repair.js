@@ -1,8 +1,11 @@
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 export function registrationRepairActions(item) {
+  const query = item?.status === 'IDENTITY_CREATING' && item?.stage === 'IDENTITY_CREATING'
+    && Boolean(item?.identity_create_attempted_at) && item?.account_created === false;
   return {
-    retry: item?.status === 'REPAIR_REQUIRED',
+    query,
+    retry: query || item?.status === 'REPAIR_REQUIRED',
     compensate: ['REPAIR_REQUIRED', 'COMPENSATION_PENDING'].includes(item?.status) && item?.compensation_allowed === true,
   };
 }
