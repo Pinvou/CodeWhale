@@ -37,6 +37,26 @@ assert.match(
   pollBackendStatusGuard,
   'web pollBackendStatus must keep the in-flight reentrancy guard',
 );
+// 仅钉赋值不够：删掉早退会退回慢响应上的叠轮询（原 bug），删掉 finally 重置
+// 会在首轮之后永久闩死（live dot 冻结，比原 bug 更糟）。两份手抄体单源之前，
+// 三个片段都是契约（评审变异实测：早退/重置删除在仅钉赋值时均保持绿）。
+const pollBackendStatusEarlyReturn = /if \(backendStatusPollInFlight\) return;/;
+const pollBackendStatusReset = /finally \{\s*backendStatusPollInFlight = false;/;
+for (const lane of [
+  ['src', 'platform', 'tauri', 'bridge', 'monitor.js'],
+  ['src', 'platform', 'web', 'bridge.js'],
+]) {
+  assert.match(
+    read(...lane),
+    pollBackendStatusEarlyReturn,
+    'pollBackendStatus must keep the in-flight early return (' + lane.join('/') + ')',
+  );
+  assert.match(
+    read(...lane),
+    pollBackendStatusReset,
+    'pollBackendStatus must keep the in-flight reset (' + lane.join('/') + ')',
+  );
+}
 
 const TTFT_FALLBACK_PATTERN =
   /vllmTtft: sadj && sadj\.ttft_count > 0\s*\?\s*\(sadj\.ttft_sum_s \/ sadj\.ttft_count\)\.toFixed\(2\) \+ " s" : "—"/;
