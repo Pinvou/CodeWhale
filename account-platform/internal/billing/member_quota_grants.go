@@ -198,8 +198,23 @@ func (r *PostgresRepository) RevokeMemberQuota(ctx context.Context, organization
 	if accountClosed || grant.Status == "RECLAIMED_ACCOUNT_CLOSED" || grant.ReservedMicrocredits > 0 || grant.AvailableMicrocredits == 0 || (grant.Status != "ACTIVE" && grant.Status != "SUSPENDED") {
 		return MemberQuotaGrant{}, ErrConflict
 	}
-	if _, err := tx.Exec(ctx, `SELECT id FROM entitlement_components WHERE id=$1 FOR UPDATE`, grant.ComponentID); err != nil {
+	// A financial freeze owns the original component/grant snapshot. Ordinary
+	// revocation must not move its suspended balance into another bucket while
+	// a retained refund or channel review is still being resolved. The wallet
+	// lock above serializes this check with those financial writers.
+	var componentStatus, packageStatus string
+	err = tx.QueryRow(ctx, `SELECT component.status,package.status
+ FROM entitlement_components component JOIN entitlement_packages package ON package.id=component.package_id
+ WHERE component.id=$1 AND package.id=$2 FOR UPDATE OF component,package`, grant.ComponentID, grant.PackageID).
+		Scan(&componentStatus, &packageStatus)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return MemberQuotaGrant{}, ErrConflict
+	}
+	if err != nil {
 		return MemberQuotaGrant{}, err
+	}
+	if componentStatus == "FROZEN" || packageStatus == "FROZEN" {
+		return MemberQuotaGrant{}, ErrConflict
 	}
 	bucket := "active_grant_microcredits"
 	if grant.Status == "SUSPENDED" {

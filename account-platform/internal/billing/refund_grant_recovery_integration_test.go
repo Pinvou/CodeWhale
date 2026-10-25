@@ -333,6 +333,7 @@ func TestRefundPriorSuspensionRepairFrozenGrantChangesFailWithoutEffectsPostgres
 			}
 		})
 	}
+	t.Run("ordinary-revoke-preserves-financial-freeze", refundFrozenQuotaOrdinaryRevokeRegression)
 }
 
 func TestRefundUnknownQueryCannotInventSuccessOrDispatchPostgres(t *testing.T) {
@@ -484,6 +485,90 @@ func TestRefundPersistedSuccessReferenceUsesPublishedCanonicalIdentityPostgres(t
 			}
 			if _, err := c.processRefund(ctx, refund.ID, true); err != nil || provider.queries != 1 || provider.calls != 0 || terminalEffects != refundEffectSnapshot(t, ctx, r) {
 				t.Fatal("terminal receipt repeated original provider query", err)
+			}
+		})
+	}
+}
+
+// Exercise the ordinary revoke producer at the supported retained-refund
+// boundary, including a mixed component that defeats the old bucket-only gate.
+func refundFrozenQuotaOrdinaryRevokeRegression(t *testing.T) {
+	for _, scenario := range []string{"current-active-freeze", "legacy-removed-freeze", "legacy-mixed-active-target", "unfrozen-active", "unfrozen-removed"} {
+		t.Run(scenario, func(t *testing.T) {
+			r, ctx := retainedFinanceRepository(t)
+			c, order, transaction, pack := retainedOrganizationFinanceOrder(t, r, ctx, 100, true)
+			reason := ""
+			if scenario == "legacy-removed-freeze" || scenario == "legacy-mixed-active-target" || scenario == "unfrozen-removed" {
+				reason = "MEMBER_REMOVED"
+			}
+			grant := refundRecoveryGrant(t, r, ctx, order, pack, reason)
+			if scenario == "legacy-mixed-active-target" {
+				grant = refundRecoveryGrant(t, r, ctx, order, pack, "")
+			}
+			actor, key := uuid.New(), uuid.NewString()
+			commandReason := "ordinary quota revocation regression"
+			if strings.HasPrefix(scenario, "unfrozen-") {
+				result, err := r.RevokeMemberQuota(ctx, *order.BeneficiaryOrganizationID, grant.ID, actor, commandReason, key)
+				if err != nil || result.Status != "REVOKED" || result.AvailableMicrocredits != 0 || result.RevokedMicrocredits != 10 {
+					t.Fatal("valid ordinary revocation regressed", err)
+				}
+				after := refundRecoveryMoneySnapshot(t, ctx, r)
+				replayed, err := r.RevokeMemberQuota(ctx, *order.BeneficiaryOrganizationID, grant.ID, actor, commandReason, key)
+				if err != nil || !reflect.DeepEqual(result, replayed) || !reflect.DeepEqual(after, refundRecoveryMoneySnapshot(t, ctx, r)) {
+					t.Fatal("original ordinary revoke receipt changed on retry", err)
+				}
+				if _, err := r.RevokeMemberQuota(ctx, *order.BeneficiaryOrganizationID, grant.ID, actor, commandReason+" changed", key); !errors.Is(err, ErrIdempotencyConflict) {
+					t.Fatal("changed ordinary revoke facts reused original key", err)
+				}
+				if !reflect.DeepEqual(after, refundRecoveryMoneySnapshot(t, ctx, r)) {
+					t.Fatal("rejected key conflict changed funds")
+				}
+				return
+			}
+			refund := refundRecoveryLegacyReservation(t, ctx, r, order, transaction, pack)
+			before := refundRecoveryMoneySnapshot(t, ctx, r)
+			if _, err := r.RevokeMemberQuota(ctx, *order.BeneficiaryOrganizationID, grant.ID, actor, commandReason, key); !errors.Is(err, ErrConflict) {
+				t.Fatal("ordinary revoke accepted a financial freeze", err)
+			}
+			if !reflect.DeepEqual(before, refundRecoveryMoneySnapshot(t, ctx, r)) {
+				t.Fatal("rejected ordinary revoke changed frozen funds or grants")
+			}
+			var commands int
+			if err := r.pool.QueryRow(ctx, `SELECT count(*) FROM member_quota_revoke_commands WHERE organization_id=$1 AND idempotency_key=$2`, *order.BeneficiaryOrganizationID, key).Scan(&commands); err != nil || commands != 0 {
+				t.Fatal("rejected ordinary revoke wrote a success receipt", err)
+			}
+			provider := &reviewRefundProvider{refund: ProviderRefund{Status: "SUCCESS", ChannelRefundID: "original-frozen-quota-success"}}
+			confirmed, err := provider.Refund(ctx, order.MerchantOrderNo, refund.MerchantRefundNo, refund.AmountFen)
+			if err != nil {
+				t.Fatal(err)
+			}
+			refund, _, err = c.finishRefund(ctx, refund, confirmed, false)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if scenario == "current-active-freeze" {
+				if refund.Status != "SUCCEEDED" {
+					t.Fatal("original active-grant refund no longer settles", refund.Status)
+				}
+			} else {
+				if refund.Status != "MANUAL_REVIEW" || !reflect.DeepEqual(before, refundRecoveryMoneySnapshot(t, ctx, r)) {
+					t.Fatal("retained prior suspension must preserve funds before governed repair")
+				}
+				input := refundRecoveryEscalate(t, ctx, r, refund, order)
+				result, err := r.ApplyRefundExceptionRepair(ctx, input)
+				if err != nil || result.Status != "SUCCEEDED" || result.RevokedMicrocredits != 100 || result.ShortfallMicrocredits != 0 {
+					t.Fatal("ordinary refusal failed to preserve full original refund repair", err)
+				}
+				refundRecoveryExactPostings(t, ctx, r, result, 100)
+				after, receipt := refundRecoveryMoneySnapshot(t, ctx, r), refundEffectSnapshot(t, ctx, r)
+				replayed, err := r.ApplyRefundExceptionRepair(ctx, input)
+				if err != nil || replayed != result || !reflect.DeepEqual(after, refundRecoveryMoneySnapshot(t, ctx, r)) || receipt != refundEffectSnapshot(t, ctx, r) {
+					t.Fatal("same original repair no longer replays without a second effect", err)
+				}
+			}
+			var posted int64
+			if err := r.pool.QueryRow(ctx, `SELECT posted_microcredits FROM wallets WHERE id=$1`, order.WalletID).Scan(&posted); err != nil || posted != 0 {
+				t.Fatal("original refund left customer balance after full reclaim", err)
 			}
 		})
 	}
