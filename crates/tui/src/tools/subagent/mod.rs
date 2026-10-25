@@ -4080,10 +4080,17 @@ impl SubAgentManager {
             }
         }
         let active_owners = self.active_coordination_owners();
-        self.coordination
-            .register_claim(claim, existing.isolated_worktree, |candidate| {
-                active_owners.contains(candidate)
-            })
+        // The owner's own claim is excluded by the ledger (same owner), and
+        // its ancestors stay exempt: growing a claim must not start
+        // contending with the agent the work was delegated from.
+        let exempt_owners = self.worktree_claim_exemptions(Some(owner));
+        self.coordination.register_claim(
+            claim,
+            existing.isolated_worktree,
+            existing.worktree_root.clone(),
+            &exempt_owners,
+            |candidate| active_owners.contains(candidate),
+        )
     }
 
     /// Release write claims whose owner is no longer a live claimant.
@@ -4811,22 +4818,34 @@ impl SubAgentManager {
         if !isolated_worktree {
             self.ensure_coordination_process_lock()?;
         }
+        let worktree_root = isolated_worktree.then(|| {
+            normalize_subagent_workspace(&spec.workspace)
+                .to_string_lossy()
+                .into_owned()
+        });
+        let exempt_owners = self.worktree_claim_exemptions(spec.parent_run_id.as_deref());
         let active_owners = self.active_coordination_owners();
         let mut probe = self.coordination.clone();
-        match probe.register_claim(claim.clone(), isolated_worktree, |owner| {
-            active_owners.contains(owner)
-        }) {
+        match probe.register_claim(
+            claim.clone(),
+            isolated_worktree,
+            worktree_root.clone(),
+            &exempt_owners,
+            |owner| active_owners.contains(owner),
+        ) {
             Ok(_) => Ok(()),
             Err(error) => {
                 // Re-run against the authoritative ledger so a real overlap
                 // remains visible after restart. Invalid/schema failures do
                 // not mutate either ledger.
                 let coordination_before = self.coordination.clone();
-                let _ = self
-                    .coordination
-                    .register_claim(claim, isolated_worktree, |owner| {
-                        active_owners.contains(owner)
-                    });
+                let _ = self.coordination.register_claim(
+                    claim,
+                    isolated_worktree,
+                    worktree_root,
+                    &exempt_owners,
+                    |owner| active_owners.contains(owner),
+                );
                 if let Err(persist_error) = self.persist_state_synchronously() {
                     self.coordination = coordination_before;
                     return Err(format!(
@@ -4858,11 +4877,20 @@ impl SubAgentManager {
         let previous_coordination = self.coordination.clone();
         let persisted_claim = claim
             .map(|(claim, isolated_worktree)| {
+                let worktree_root = isolated_worktree.then(|| {
+                    normalize_subagent_workspace(&spec.workspace)
+                        .to_string_lossy()
+                        .into_owned()
+                });
+                let exempt_owners = self.worktree_claim_exemptions(spec.parent_run_id.as_deref());
                 let active_owners = self.active_coordination_owners();
-                self.coordination
-                    .register_claim(claim, isolated_worktree, |owner| {
-                        active_owners.contains(owner)
-                    })
+                self.coordination.register_claim(
+                    claim,
+                    isolated_worktree,
+                    worktree_root,
+                    &exempt_owners,
+                    |owner| active_owners.contains(owner),
+                )
             })
             .transpose()?;
 
@@ -4985,8 +5013,8 @@ impl SubAgentManager {
     /// Whether `parent_id` is a child running in an isolated worktree, so a
     /// spawn it issues lands inside that worktree rather than the shared
     /// coordination root. Same precedence as the resume path: the parent's
-    /// live claim carries the freshest flag; the launch manifest covers a
-    /// released or never-registered claim. The root session has neither and
+    /// registered claim carries the freshest flag; the launch manifest covers
+    /// a released or never-registered claim. The root session has neither and
     /// is never isolated.
     fn parent_runs_in_isolated_worktree(&self, parent_id: &str) -> bool {
         if let Some(record) = self
@@ -5001,6 +5029,48 @@ impl SubAgentManager {
             .get(parent_id)
             .and_then(|record| record.spec.launch_manifest.as_ref())
             .is_some_and(|manifest| manifest.worktree)
+    }
+
+    /// The claim owner `owner`/`start` may overlap inside one worktree: its
+    /// ancestor chain, nearest first. A parent delegates its work downward,
+    /// so a descendant's claim may cover the ancestor's; unrelated owners in
+    /// the same worktree (parallel siblings) still contend, exactly as they
+    /// would in the shared root. Unresolvable references simply end the
+    /// walk; `start` itself is included so callers can pass either the new
+    /// agent's parent id or the expanding owner.
+    fn worktree_claim_exemptions(&self, start: Option<&str>) -> Vec<String> {
+        let Some(start) = start else {
+            return Vec::new();
+        };
+        let Some((start_id, _)) = self.worker_record_by_ref(start) else {
+            return Vec::new();
+        };
+        let mut chain = vec![start_id.clone()];
+        let mut cursor = start_id;
+        for _ in 0..15 {
+            let Some(record) = self.worker_records.get(&cursor) else {
+                break;
+            };
+            let Some(parent_ref) = record
+                .parent_run_id
+                .as_deref()
+                .or(record.spec.parent_run_id.as_deref())
+            else {
+                break;
+            };
+            if parent_ref == "root" {
+                break;
+            }
+            let Some((parent_id, _)) = self.worker_record_by_ref(parent_ref) else {
+                break;
+            };
+            if chain.iter().any(|seen| seen == &parent_id) {
+                break;
+            }
+            chain.push(parent_id.clone());
+            cursor = parent_id;
+        }
+        chain
     }
 
     fn namespace_write_claim(
@@ -6652,8 +6722,11 @@ impl SubAgentManager {
         // (`resolve_worktree_path` forbids nesting) — so every write-capable
         // grandchild of a worktree child was refused with "shared writer
         // workspace ... must remain inside coordination root". Isolation truth
-        // uses the resume path's precedence: the parent's live claim flag,
-        // falling back to its durable launch manifest.
+        // uses the resume path's precedence: the parent's registered claim
+        // flag, falling back to its durable launch manifest. The claim is
+        // keyed on the canonical worktree root, so the ledger can still
+        // serialize unrelated writers inside one worktree while exempting the
+        // ancestor chain the work was delegated down through.
         let isolated_worktree = options.isolated_worktree
             || runtime
                 .parent_agent_id
@@ -6687,10 +6760,20 @@ impl SubAgentManager {
                         self.namespace_write_claim(&agent.workspace, isolated_worktree, claim)?
                     };
                     let active_owners = self.active_coordination_owners();
-                    self.coordination
-                        .register_claim(claim, isolated_worktree, |owner| {
-                            active_owners.contains(owner)
-                        })
+                    let worktree_root = isolated_worktree.then(|| {
+                        normalize_subagent_workspace(&agent.workspace)
+                            .to_string_lossy()
+                            .into_owned()
+                    });
+                    let exempt_owners =
+                        self.worktree_claim_exemptions(runtime.parent_agent_id.as_deref());
+                    self.coordination.register_claim(
+                        claim,
+                        isolated_worktree,
+                        worktree_root,
+                        &exempt_owners,
+                        |owner| active_owners.contains(owner),
+                    )
                 })
                 .transpose()
         } else {
@@ -16292,42 +16375,25 @@ fn mutation_paths(name: &str, input: &Value, workspace: &Path) -> Result<Vec<Str
 /// the claim ledger speaks repo-relative paths, so strip the workspace
 /// prefix before scope validation instead of refusing the spelling. A target
 /// outside the workspace is handed to the validator untouched and refused
-/// there, as before.
+/// there, as before. The deepest-existing walk delegates to the core's
+/// single implementation — the same one behind the write tool's own
+/// boundary (`tools::spec::resolve_nonexistent_path`) — so this lane cannot
+/// drift from it on symlinked or partially-existing spellings.
 fn workspace_relative_mutation_path(workspace: &Path, path: &str) -> String {
     let candidate = Path::new(path.trim());
     if !candidate.is_absolute() {
         return path.to_string();
     }
     let workspace = normalize_subagent_workspace(workspace);
-    match resolve_absolute_target(candidate).strip_prefix(&workspace) {
+    let resolved = codewhale_core::walk_deepest_existing(
+        candidate,
+        codewhale_core::DeepestExistingFallback::DeepestAncestor,
+    )
+    .compose();
+    match resolved.strip_prefix(&workspace) {
         Ok(relative) => relative.to_string_lossy().into_owned(),
         Err(_) => path.to_string(),
     }
-}
-
-/// Canonicalize the deepest existing ancestor of `candidate` (so a symlinked
-/// workspace such as macOS `/var` → `/private/var` compares equal to its
-/// canonical form) and re-append the not-yet-existing tail lexically — a
-/// write may be creating the file.
-fn resolve_absolute_target(candidate: &Path) -> PathBuf {
-    let mut existing = candidate;
-    let mut missing_tail = Vec::new();
-    while !existing.exists() {
-        match (existing.parent(), existing.file_name()) {
-            (Some(parent), Some(name)) => {
-                missing_tail.push(name.to_os_string());
-                existing = parent;
-            }
-            _ => return normalize_path_components(candidate),
-        }
-    }
-    let mut resolved = existing
-        .canonicalize()
-        .unwrap_or_else(|_| normalize_path_components(existing));
-    for name in missing_tail.into_iter().rev() {
-        resolved.push(name);
-    }
-    resolved
 }
 
 fn reject_subagent_terminal_takeover(name: &str, input: &Value) -> Result<()> {

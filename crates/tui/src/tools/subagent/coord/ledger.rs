@@ -160,6 +160,13 @@ pub struct PersistedWriteClaim {
     pub sequence: u64,
     #[serde(default)]
     pub isolated_worktree: bool,
+    /// Canonical workspace of the worktree this claim is confined to, when
+    /// `isolated_worktree`. Claims sharing a root contend with each other
+    /// (ancestors exempted at registration); claims in different worktrees
+    /// never do. `None` on records persisted before the field existed, which
+    /// keeps those on the legacy never-contending footing.
+    #[serde(default)]
+    pub worktree_root: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -480,6 +487,8 @@ impl CoordinationLedger {
         &mut self,
         mut claim: WriteScopeClaim,
         isolated_worktree: bool,
+        worktree_root: Option<String>,
+        exempt_owners: &[String],
         mut owner_is_active: F,
     ) -> Result<PersistedWriteClaim, String>
     where
@@ -521,9 +530,28 @@ impl CoordinationLedger {
                 ));
             }
         }
-        if !isolated_worktree
-            && let Some(existing) = self
-                .write_claims
+        // Isolated claims name a private checkout, so they never contend with
+        // shared-root claims. Within ONE worktree the ledger still serializes
+        // unrelated writers: claims registered against the same worktree root
+        // contend unless the existing owner is an ancestor of the new one
+        // (`exempt_owners` is that ancestor chain — the parent delegated the
+        // work downward), so parallel siblings refuse instead of racing the
+        // same checkout.
+        let mut same_worktree_sibling = |existing: &PersistedWriteClaim| {
+            existing.isolated_worktree
+                && existing.worktree_root == worktree_root
+                && existing.claim.owner != claim.owner
+                && !exempt_owners.contains(&existing.claim.owner)
+                && owner_is_active(&existing.claim.owner)
+                && existing.claim.overlaps(&claim)
+        };
+        let conflicting = if isolated_worktree {
+            self.write_claims
+                .iter()
+                .find(|existing| same_worktree_sibling(existing))
+                .cloned()
+        } else {
+            self.write_claims
                 .iter()
                 .find(|existing| {
                     !existing.isolated_worktree
@@ -532,7 +560,8 @@ impl CoordinationLedger {
                         && existing.claim.overlaps(&claim)
                 })
                 .cloned()
-        {
+        };
+        if let Some(existing) = conflicting {
             let receipt = WriteContentionReceipt {
                 claimant: claim.owner.clone(),
                 conflicting_owner: existing.claim.owner.clone(),
@@ -559,6 +588,7 @@ impl CoordinationLedger {
             claim,
             sequence: self.next_sequence(),
             isolated_worktree,
+            worktree_root,
         };
         for contention in &mut self.contentions {
             if contention.claimant == record.claim.owner
@@ -1379,6 +1409,8 @@ mod records_tests {
                         contracts: Vec::new(),
                     },
                     false,
+                    None,
+                    &[],
                     |candidate| candidate == "live-builder",
                 )
                 .expect("non-overlapping claim registers");
@@ -1411,6 +1443,8 @@ mod records_tests {
                     contracts: Vec::new(),
                 },
                 false,
+                None,
+                &[],
                 |candidate| candidate == "live-builder",
             )
             .expect("claim registers");
@@ -1431,6 +1465,8 @@ mod records_tests {
                     contracts: Vec::new(),
                 },
                 false,
+                None,
+                &[],
                 |candidate| candidate == "live-builder",
             )
             .expect("claim registers");
@@ -1497,7 +1533,9 @@ mod records_tests {
             exact_files: vec![],
             contracts: vec!["public-api".into()],
         };
-        ledger.register_claim(first, false, |_| false).unwrap();
+        ledger
+            .register_claim(first, false, None, &[], |_| false)
+            .unwrap();
         let second = WriteScopeClaim {
             owner: "agent-b".into(),
             roots: vec!["docs".into()],
@@ -1505,7 +1543,7 @@ mod records_tests {
             contracts: vec!["public-api".into()],
         };
         let err = ledger
-            .register_claim(second.clone(), false, |owner| owner == "agent-a")
+            .register_claim(second.clone(), false, None, &[], |owner| owner == "agent-a")
             .unwrap_err();
         assert!(
             err.contains("contention") && err.contains("agent-a"),
@@ -1523,7 +1561,7 @@ mod records_tests {
             json!("blocked_pending_isolation_or_serialization")
         );
         let resolving_claim = ledger
-            .register_claim(second, true, |owner| owner == "agent-a")
+            .register_claim(second, true, None, &[], |owner| owner == "agent-a")
             .expect("isolated claim resolves the blocked admission");
         assert_eq!(
             ledger.contentions[0].disposition,
@@ -1548,6 +1586,8 @@ mod records_tests {
                         contracts: vec![],
                     },
                     false,
+                    None,
+                    &[],
                     |_| true,
                 )
                 .unwrap();
@@ -1561,6 +1601,8 @@ mod records_tests {
                     contracts: vec![],
                 },
                 false,
+                None,
+                &[],
                 |_| true,
             )
             .expect_err("all-active capacity must fail before evicting ownership");
@@ -1721,6 +1763,8 @@ mod records_tests {
                     contracts: vec![],
                 },
                 false,
+                None,
+                &[],
                 |_| false,
             )
             .unwrap_err();

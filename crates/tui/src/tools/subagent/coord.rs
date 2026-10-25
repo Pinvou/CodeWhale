@@ -1669,7 +1669,9 @@ mod tests {
             ] {
                 guard
                     .coordination
-                    .register_claim(claim, false, |candidate| active.contains(candidate))
+                    .register_claim(claim, false, None, &[], |candidate| {
+                        active.contains(candidate)
+                    })
                     .expect("initial claim");
             }
             let _ = guard.persist_state_synchronously();
@@ -1737,7 +1739,9 @@ mod tests {
             ] {
                 guard
                     .coordination
-                    .register_claim(claim, false, |candidate| active.contains(candidate))
+                    .register_claim(claim, false, None, &[], |candidate| {
+                        active.contains(candidate)
+                    })
                     .expect("initial non-overlapping claim");
             }
             (claimant, owner)
@@ -1798,7 +1802,9 @@ mod tests {
             ] {
                 guard
                     .coordination
-                    .register_claim(claim, false, |candidate| active.contains(candidate))
+                    .register_claim(claim, false, None, &[], |candidate| {
+                        active.contains(candidate)
+                    })
                     .expect("initial non-overlapping claim");
             }
             claimant
@@ -1824,6 +1830,8 @@ mod tests {
                         contracts: Vec::new(),
                     },
                     true,
+                    None,
+                    &[],
                     |_| true,
                 )
                 .expect("later isolated claim resolves contention");
@@ -1858,6 +1866,8 @@ mod tests {
                         contracts: Vec::new(),
                     },
                     true,
+                    None,
+                    &[],
                     |_| false,
                 )
                 .expect("fill inactive claim capacity");
@@ -1873,6 +1883,8 @@ mod tests {
                         contracts: Vec::new(),
                     },
                     true,
+                    None,
+                    &[],
                     |_| false,
                 )
                 .expect("evict oldest inactive claim at capacity");

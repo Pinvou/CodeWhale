@@ -931,6 +931,8 @@ fn coordination_ledger_persists_and_replays_bounded_contracts() {
                 contracts: vec!["public-api".into()],
             },
             false,
+            None,
+            &[],
             |_| false,
         )
         .expect("claim");
@@ -1079,6 +1081,8 @@ fn coordination_hot_paths_count_only_active_authoritative_owners() {
                     contracts: Vec::new(),
                 },
                 false,
+                None,
+                &[],
                 |_| false,
             )
             .expect("bounded non-overlapping claim");
@@ -1193,6 +1197,8 @@ fn session_close_finalizes_live_fleet_and_releases_write_claims() {
                 contracts: Vec::new(),
             },
             false,
+            None,
+            &[],
             |candidate| active.contains(candidate),
         )
         .expect("legacy claim");
@@ -1264,6 +1270,8 @@ fn terminal_result_releases_owner_from_write_claim_contention() {
                 contracts: Vec::new(),
             },
             false,
+            None,
+            &[],
             |candidate| active.contains(candidate),
         )
         .expect("owner claim");
@@ -1327,6 +1335,8 @@ fn prior_session_owners_never_count_as_active_coordination_owners() {
                 contracts: Vec::new(),
             },
             false,
+            None,
+            &[],
             |candidate| active.contains(candidate),
         )
         .expect("stale claim");
@@ -1773,15 +1783,15 @@ fn coordination_acceptance_preserves_scopes_candidates_and_replay() {
     };
     manager
         .coordination
-        .register_claim(claim(&agent_a, "src/a.rs"), false, |_| false)
+        .register_claim(claim(&agent_a, "src/a.rs"), false, None, &[], |_| false)
         .expect("A claim");
     manager
         .coordination
-        .register_claim(claim(&agent_b, "src/b.rs"), false, |_| false)
+        .register_claim(claim(&agent_b, "src/b.rs"), false, None, &[], |_| false)
         .expect("B claim");
     let contention = manager
         .coordination
-        .register_claim(claim(&agent_c, "src/a.rs"), false, |owner| {
+        .register_claim(claim(&agent_c, "src/a.rs"), false, None, &[], |owner| {
             owner == agent_a || owner == agent_b
         })
         .expect_err("C cannot collide silently with A");
@@ -3589,7 +3599,7 @@ fn shared_child_cwd_claims_use_one_root_namespace_for_collisions_and_mutations()
         .expect("root claim namespace");
     manager
         .coordination
-        .register_claim(root_claim, false, |_| true)
+        .register_claim(root_claim, false, None, &[], |_| true)
         .expect("root writer claim");
     let child_alias = manager
         .namespace_write_claim(
@@ -3607,7 +3617,9 @@ fn shared_child_cwd_claims_use_one_root_namespace_for_collisions_and_mutations()
     let active = manager.active_coordination_owners();
     let collision = manager
         .coordination
-        .register_claim(child_alias, false, |owner| active.contains(owner))
+        .register_claim(child_alias, false, None, &[], |owner| {
+            active.contains(owner)
+        })
         .expect_err("root and child cwd aliases must collide");
     assert!(collision.contains(&root_owner), "{collision}");
 
@@ -3628,7 +3640,7 @@ fn shared_child_cwd_claims_use_one_root_namespace_for_collisions_and_mutations()
     assert_eq!(claim.roots, vec!["pkg/src"]);
     scoped
         .coordination
-        .register_claim(claim, false, |_| true)
+        .register_claim(claim, false, None, &[], |_| true)
         .expect("scoped child claim");
     scoped
         .validate_write_scope(&child_owner, &["src/lib.rs".into()])
@@ -10388,6 +10400,8 @@ async fn write_scope_contention_covers_regular_agent_and_active_fleet_writer() {
                 contracts: Vec::new(),
             },
             false,
+            None,
+            &[],
             |_| false,
         )
         .expect("regular agent initial claim");
@@ -12849,6 +12863,8 @@ async fn child_write_tool_fails_closed_outside_registered_scope() {
                     contracts: vec![],
                 },
                 false,
+                None,
+                &[],
                 |_| false,
             )
             .unwrap();
@@ -13047,6 +13063,8 @@ async fn lone_shared_writer_keeps_unbounded_shell() {
                     contracts: vec![],
                 },
                 false,
+                None,
+                &[],
                 |_| false,
             )
             .unwrap();
@@ -13158,6 +13176,8 @@ async fn contended_shared_writers_keep_proven_readonly_shell() {
                         contracts: vec![],
                     },
                     false,
+                    None,
+                    &[],
                     |candidate| live.contains(candidate),
                 )
                 .expect("disjoint exact-file claims admit both live writers");
@@ -13200,6 +13220,8 @@ async fn contended_shared_writer_refusal_names_blocking_peer_and_remediation() {
                         contracts: vec![],
                     },
                     false,
+                    None,
+                    &[],
                     |candidate| live.contains(candidate),
                 )
                 .expect("disjoint exact-file claims admit both live writers");
@@ -13255,6 +13277,8 @@ async fn panicked_child_task_terminalizes_and_stops_gating_peers() {
                     contracts: vec![],
                 },
                 false,
+                None,
+                &[],
                 |_| false,
             )
             .expect("panicked child's claim");
@@ -13711,6 +13735,240 @@ async fn write_capable_grandchild_of_a_worktree_child_inherits_isolation() {
     assert!(
         error.contains("must remain inside coordination root"),
         "{error}"
+    );
+}
+
+/// Isolation inherits down the chain, and the ledger still serializes
+/// unrelated writers inside ONE worktree: a worktree child may claim "."
+/// while its parent holds "." (the work was delegated downward), but two
+/// parallel siblings with overlapping scope contend — the same rule the
+/// shared root applies, keyed on the canonical worktree root.
+#[tokio::test]
+async fn worktree_sibling_grandchildren_contend_while_a_descendant_chain_does_not() {
+    let tmp = tempdir().expect("tempdir");
+    let coordination_root = tmp.path().join("workspace");
+    let worktree = tmp
+        .path()
+        .join(".codewhale-worktrees")
+        .join("workspace")
+        .join("codex-agent-parent");
+    for dir in [&coordination_root, &worktree] {
+        std::fs::create_dir_all(dir).expect("mkdir");
+    }
+    let manager = new_shared_subagent_manager(coordination_root.clone(), 4);
+    let claim = || WriteScopeClaim {
+        owner: String::new(),
+        roots: vec![".".into()],
+        exact_files: vec![],
+        contracts: vec![],
+    };
+
+    let mut guard = manager.write().await;
+    let mut parent_runtime = stub_runtime();
+    parent_runtime.manager = Arc::clone(&manager);
+    parent_runtime.context = ToolContext::new(&worktree);
+    let parent = guard
+        .spawn_background_with_assignment_options(
+            Arc::clone(&manager),
+            parent_runtime,
+            FleetRole::Builder,
+            "work in the worktree".into(),
+            make_assignment(),
+            Some(vec![]),
+            SubAgentSpawnOptions {
+                name: Some("worktree-parent".into()),
+                write_claim: Some(claim()),
+                isolated_worktree: true,
+                ..Default::default()
+            },
+        )
+        .expect("worktree child admitted");
+
+    let first = {
+        let mut child_runtime = stub_runtime();
+        child_runtime.manager = Arc::clone(&manager);
+        child_runtime.context = ToolContext::new(&worktree);
+        child_runtime.parent_agent_id = Some(parent.agent_id.clone());
+        guard
+            .spawn_background_with_assignment_options(
+                Arc::clone(&manager),
+                child_runtime,
+                FleetRole::Builder,
+                "edit inside the worktree".into(),
+                make_assignment(),
+                Some(vec![]),
+                SubAgentSpawnOptions {
+                    name: Some("sibling-a".into()),
+                    write_claim: Some(claim()),
+                    ..Default::default()
+                },
+            )
+            .expect("a descendant of the worktree parent is exempt from its ancestors' claims")
+    };
+
+    // A deeper descendant may still overlap the whole chain: parent → child
+    // → grandchild all holding "." in the same worktree is one delegated
+    // work unit, not a contention.
+    let deep = {
+        let mut inner_runtime = stub_runtime();
+        inner_runtime.manager = Arc::clone(&manager);
+        inner_runtime.context = ToolContext::new(&worktree);
+        inner_runtime.parent_agent_id = Some(first.agent_id.clone());
+        guard
+            .spawn_background_with_assignment_options(
+                Arc::clone(&manager),
+                inner_runtime,
+                FleetRole::Builder,
+                "keep editing".into(),
+                make_assignment(),
+                Some(vec![]),
+                SubAgentSpawnOptions {
+                    name: Some("depth-three".into()),
+                    write_claim: Some(claim()),
+                    ..Default::default()
+                },
+            )
+            .expect("a depth-3 descendant overlaps its whole ancestor chain, not a peer")
+    };
+
+    // A parallel sibling with overlapping scope is refused, naming the live
+    // sibling it would race — exactly what the shared root refuses.
+    let error = {
+        let mut child_runtime = stub_runtime();
+        child_runtime.manager = Arc::clone(&manager);
+        child_runtime.context = ToolContext::new(&worktree);
+        child_runtime.parent_agent_id = Some(parent.agent_id.clone());
+        guard
+            .spawn_background_with_assignment_options(
+                Arc::clone(&manager),
+                child_runtime,
+                FleetRole::Builder,
+                "edit inside the worktree".into(),
+                make_assignment(),
+                Some(vec![]),
+                SubAgentSpawnOptions {
+                    name: Some("sibling-b".into()),
+                    write_claim: Some(claim()),
+                    ..Default::default()
+                },
+            )
+            .expect_err("overlapping siblings in one worktree must contend")
+            .to_string()
+    };
+    assert!(
+        error.contains("write-scope contention with") && error.contains(&first.agent_id),
+        "the refusal names the live sibling: {error}"
+    );
+
+    // The deep descendant's claim is registered isolated against the same
+    // canonical worktree root, and the sibling refusal left the ledger
+    // holding exactly the chain's claims.
+    let snapshot = guard.coordination_snapshot();
+    let deep_record = snapshot
+        .write_claims
+        .iter()
+        .find(|record| record.claim.owner == deep.agent_id)
+        .expect("depth-3 claim registered");
+    assert!(deep_record.isolated_worktree);
+    let expected_root = worktree.canonicalize().expect("canonical worktree");
+    assert_eq!(
+        deep_record.worktree_root.as_deref(),
+        Some(expected_root.to_string_lossy().as_ref()),
+        "same-worktree serialization keys on the canonical worktree root"
+    );
+    let live_owners: Vec<&str> = snapshot
+        .write_claims
+        .iter()
+        .map(|record| record.claim.owner.as_str())
+        .collect();
+    assert_eq!(
+        live_owners.len(),
+        3,
+        "parent, first sibling, and depth-3 hold claims; the refused sibling does not: {live_owners:?}"
+    );
+}
+
+/// The manifest-fallback leg of isolation inheritance: a worktree child whose
+/// claim was never registered (or has been released) still passes its
+/// isolation to a grandchild through the durable launch manifest.
+#[tokio::test]
+async fn claim_less_worktree_child_still_confers_isolation_through_its_manifest() {
+    let tmp = tempdir().expect("tempdir");
+    let coordination_root = tmp.path().join("workspace");
+    let worktree = tmp
+        .path()
+        .join(".codewhale-worktrees")
+        .join("workspace")
+        .join("codex-agent-parent");
+    for dir in [&coordination_root, &worktree] {
+        std::fs::create_dir_all(dir).expect("mkdir");
+    }
+    let manager = new_shared_subagent_manager(coordination_root.clone(), 4);
+    let mut guard = manager.write().await;
+
+    // The worktree child: write-capable, but spawned without a claim of its
+    // own, so inheritance must resolve through the launch manifest.
+    let mut parent_runtime = stub_runtime();
+    parent_runtime.manager = Arc::clone(&manager);
+    parent_runtime.context = ToolContext::new(&worktree);
+    let parent = guard
+        .spawn_background_with_assignment_options(
+            Arc::clone(&manager),
+            parent_runtime,
+            FleetRole::Builder,
+            "work in the worktree".into(),
+            make_assignment(),
+            Some(vec![]),
+            SubAgentSpawnOptions {
+                name: Some("worktree-parent".into()),
+                isolated_worktree: true,
+                ..Default::default()
+            },
+        )
+        .expect("claim-less worktree child admitted");
+    assert!(
+        guard
+            .coordination_snapshot()
+            .write_claims
+            .iter()
+            .all(|record| record.claim.owner != parent.agent_id),
+        "fixture premise: the parent holds no claim"
+    );
+
+    let mut child_runtime = stub_runtime();
+    child_runtime.manager = Arc::clone(&manager);
+    child_runtime.context = ToolContext::new(&worktree);
+    child_runtime.parent_agent_id = Some(parent.agent_id.clone());
+    let grandchild = guard
+        .spawn_background_with_assignment_options(
+            Arc::clone(&manager),
+            child_runtime,
+            FleetRole::Builder,
+            "edit inside the worktree".into(),
+            make_assignment(),
+            Some(vec![]),
+            SubAgentSpawnOptions {
+                name: Some("worktree-grandchild".into()),
+                write_claim: Some(WriteScopeClaim {
+                    owner: String::new(),
+                    roots: vec![".".into()],
+                    exact_files: vec![],
+                    contracts: vec![],
+                }),
+                ..Default::default()
+            },
+        )
+        .expect("the manifest's worktree flag confers isolation without a claim");
+
+    let snapshot = guard.coordination_snapshot();
+    let record = snapshot
+        .write_claims
+        .iter()
+        .find(|record| record.claim.owner == grandchild.agent_id)
+        .expect("grandchild claim registered");
+    assert!(
+        record.isolated_worktree,
+        "the manifest fallback still puts the claim on the isolated footing"
     );
 }
 
@@ -22026,6 +22284,8 @@ async fn resume_of_isolated_worktree_child_keeps_the_worktree_as_its_only_root()
                     contracts: Vec::new(),
                 },
                 true,
+                None,
+                &[],
                 |_| false,
             )
             .expect("isolated worktree claim");
@@ -23013,6 +23273,8 @@ async fn agent_claim_expands_the_callers_write_scope() {
                     contracts: vec![],
                 },
                 false,
+                None,
+                &[],
                 |_| false,
             )
             .unwrap();
