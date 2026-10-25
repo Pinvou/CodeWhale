@@ -16,13 +16,16 @@ async function rejectedMutation(mutate, expected) {
     await writeFile(target, `${JSON.stringify(catalog, null, 2)}\n`);
     await assert.rejects(runAuthorizationCoverage(target), expected);
   } finally {
-    await rm(directory, { recursive: true, force: true });
+    const owned = path.resolve(directory);
+    assert.equal(path.dirname(owned), path.resolve(tmpdir()));
+    assert.ok(path.basename(owned).startsWith('pinvou-authorization-coverage-'));
+    await rm(owned, { recursive: true, force: true });
   }
 }
 
 test('authorization release gate classifies every HTTP task event callback and CLI entrypoint', async () => {
   const catalog = JSON.parse(await readFile(catalogURL, 'utf8'));
-  // The six existing Portal transports use Any, alongside the 386 verb-specific
+  // The six existing Portal transports use Any, alongside the 388 verb-specific
   // registrations. Keep the expected complete graph independent of its parser.
   const wildcardPaths = [
     '/api/account/*resource', '/api/token/*resource',
@@ -36,7 +39,7 @@ test('authorization release gate classifies every HTTP task event callback and C
   for (const route of wildcardPaths) assert.ok(portal.includes(`router.Any("${route}",`), `missing existing Portal transport ${route}`);
   // The real checker still rejects missing, stale, duplicate or mis-scoped
   // entries before returning these exact inventory sizes.
-  assert.deepEqual(await runAuthorizationCoverage(), { routes: 392, tasks: 32, events: 18, cli: 26 });
+  assert.deepEqual(await runAuthorizationCoverage(), { routes: 394, tasks: 32, events: 18, cli: 26 });
 });
 
 test('password preparation adds only the captcha admission and two exact internal authority routes', async () => {
@@ -246,5 +249,23 @@ test('authorization gate discovers all three unresolved Token approval subscript
     await rejectedMutation((catalog) => {
       catalog.events = catalog.events.filter((entry) => entry.durable !== durable);
     }, new RegExp(`unclassified_event:.*${durable}`));
+  }
+});
+
+test('late review query keeps exactly two sync-authorized audit-only POST registrations', async () => {
+  const source = 'account-platform/internal/billing/service.go';
+  const text = await readFile(new URL(`../../../${source}`, import.meta.url), 'utf8');
+  const expected = [
+    ['/late-payment-reviews/:case_id/query-commands', 'adminLatePaymentQueryCommand'],
+    ['/late-payment-reviews/:case_id/query-command-results', 'adminLatePaymentQueryResult'],
+  ];
+  const routes = authorizationRoutes(source, text).filter(item => expected.some(([route]) => route === item.path));
+  assert.equal(routes.length, expected.length);
+  for (const [route, handler] of expected) {
+    const matches = routes.filter(item => item.path === route);
+    assert.equal(matches.length, 1);
+    assert.equal(matches[0].receiver, 'admin');
+    assert.equal(matches[0].method, 'POST');
+    assert.equal(matches[0].registration.trim(), `admin.POST("${route}", s.authorizer.Require("platform.billing.orders.sync"), approvalpolicy.Require("BILLING_LATE_PAYMENT_QUERY", approvalpolicy.AuditOnly), httpserver.AdaptFunc(s.${handler}))`);
   }
 });
