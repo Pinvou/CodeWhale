@@ -63,9 +63,11 @@ func definitiveBillingFailure(err error) bool {
 	switch failure.Status {
 	case http.StatusConflict:
 		return failure.Code == "INSUFFICIENT_COMPONENT_CAPACITY"
-	case http.StatusBadRequest, http.StatusPaymentRequired, http.StatusForbidden, http.StatusNotFound, http.StatusUnprocessableEntity, http.StatusTooManyRequests:
+	case http.StatusBadRequest, http.StatusPaymentRequired, http.StatusForbidden, http.StatusNotFound, http.StatusUnprocessableEntity:
 		return true
 	default:
+		// Rate limits and transport/service failures do not establish a
+		// terminal funds outcome. Preserve the original usage for recovery.
 		return false
 	}
 }
