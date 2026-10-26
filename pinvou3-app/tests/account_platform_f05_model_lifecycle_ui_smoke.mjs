@@ -27,7 +27,7 @@ assert.equal(path.dirname(ownedProfile), path.resolve(os.tmpdir()));
 assert.ok(path.basename(ownedProfile).startsWith('pinvou-f05-lifecycle-'));
 let vite, browser, page, passed = 0, launchAttempted = false, phase = "setup";
 try {
-  vite = await createServer({ root, configFile: false, appType: 'mpa', logLevel: 'error', plugins: [react()], server: { host: '127.0.0.1', port: 0, watch: null } });
+  vite = await createServer({ root, configFile: false, appType: 'mpa', logLevel: 'error', plugins: [react()], cacheDir: path.join(profile, 'vite-cache'), server: { host: '127.0.0.1', port: 0, watch: null } });
   await vite.listen();
   launchAttempted = true;
   browser = await puppeteer.launch({ executablePath: chrome, headless: 'new', userDataDir: profile, args: ['--no-sandbox', '--disable-gpu', '--no-first-run'] });
@@ -44,7 +44,9 @@ try {
     const control = window.f05Lifecycle = { language: 'en', ready: false, mode: 'fresh', legacy: false, calls: [], reads: [], timeline: old, oldSnapshot: old, branches: 0 };
     const savedSource = { metadata: { id: 's1', title: 'Controlled source', model: id, workspace: '' },
       messages: [{ role: 'user', content: [{ type: 'text', text: 'Previous committed question' }] },
-        { role: 'assistant', content: [{ type: 'text', text: 'Previous committed response' }] }], artifacts: [] };
+        { role: 'assistant', content: [{ type: 'text', text: 'Previous committed response' }, { type: 'tool_use', id: 'lineage-tool', name: 'read_file', input: { path: '/controlled/lineage.txt' } }] },
+        { role: 'user', content: [{ type: 'tool_result', tool_use_id: 'lineage-tool', content: 'Controlled retained tool output' }] },
+        { role: 'assistant', content: [{ type: 'text', text: 'Previous tool result explained' }] }], artifacts: [] };
     control.savedSource = savedSource;
     control.resolveRead = index => { const read = control.reads[index]; if (!read) throw new Error('missing controlled read'); read.resolve(read.snapshot); read.resolved = true; };
     window.__TAURI__.core.invoke = (command, args = {}) => {
@@ -100,6 +102,8 @@ try {
     assert.equal((await page.evaluate(() => window.f05Lifecycle.sendFailure())).ok, false);
     phase = `locale ${language} current B banner`;
     await awaitBanner();
+    const presentationTypes = await page.evaluate(() => window.f05Lifecycle.presentationTypes());
+    assert.ok(presentationTypes.includes('tool') && presentationTypes.includes('system'), 'real hydration and prepare failure must retain tool/system presentation rows');
     assert.equal(await page.evaluate(() => window.f05Lifecycle.currentMarker()?.code), 'MODEL_UNAVAILABLE');
     assert.equal(await page.evaluate(() => window.f05Lifecycle.currentMarker()?.legacy_binding === true), legacy);
     assert.equal(await page.evaluate(() => window.f05Lifecycle.branches), 0, 'an unavailable binding never selects a new branch automatically');
@@ -110,7 +114,8 @@ try {
     const after = await page.evaluate(() => ({ defaultRef: window.f05Lifecycle.defaultRef(), source: window.f05Lifecycle.savedSource, input: window.f05Lifecycle.branchInput,
       defaults: window.f05Lifecycle.calls.filter(call => ['account_platform_select_catalog_model', 'set_default_model', 'set_active_model'].includes(call.command)).length }));
     assert.deepEqual(after.defaultRef, before.defaultRef); assert.deepEqual(after.source, before.source); assert.equal(after.defaults, 0);
-    assert.equal(after.input.sourceConversationId, 's1'); assert.equal(after.input.replacementModelId, '0199a100-0001-7000-8000-000000000106');
+    assert.equal(after.input.sourceConversationId, 's1'); assert.equal(after.input.sourceTurnId, 'timing-B', 'branch lineage must retain the authoritative rejected turn, not a presentation index');
+    assert.equal(after.input.sourceMessageCount, 0); assert.equal(after.input.replacementModelId, '0199a100-0001-7000-8000-000000000106');
     assert.deepEqual(errors, []); passed++; console.log(`PASS compiled ChatView ${legacy ? 'legacy name' : 'UUID'} prepare rejection and manual branch ${language}`);
   }
   for (const language of ['zh', 'en', 'ja']) {
@@ -132,7 +137,8 @@ try {
     const after = await page.evaluate(() => ({ defaultRef: window.f05Lifecycle.defaultRef(), source: window.f05Lifecycle.savedSource, input: window.f05Lifecycle.branchInput,
       defaults: window.f05Lifecycle.calls.filter(call => ['account_platform_select_catalog_model', 'set_default_model', 'set_active_model'].includes(call.command)).length }));
     assert.deepEqual(after.defaultRef, before.defaultRef); assert.deepEqual(after.source, before.source); assert.equal(after.defaults, 0);
-    assert.equal(after.input.sourceConversationId, 's1'); assert.equal(after.input.replacementModelId, 'deprecated-future');
+    assert.equal(after.input.sourceConversationId, 's1'); assert.equal(after.input.sourceTurnId, 'timing-B');
+    assert.equal(after.input.sourceMessageCount, 0); assert.equal(after.input.replacementModelId, 'deprecated-future');
     assert.deepEqual(errors, []); passed++; console.log(`PASS compiled ChatView selectable deprecated replacement ${language}`);
   }
   // An old A read starts after B's failed attempt, in a background working set.

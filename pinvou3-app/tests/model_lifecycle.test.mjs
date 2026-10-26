@@ -8,8 +8,8 @@ const rejection = { schema_version: 1, code: 'MODEL_UNAVAILABLE', model_id: '01a
 const legacyRejection = { schema_version: 1, code: 'MODEL_UNAVAILABLE', model_id: '', legacy_binding: true };
 const start = (id, timestamp = 1) => ({ event: 'user_start', turn_id: id, timestamp });
 const done = (id, marker = rejection, status = 'Failed', timestamp = 2) => ({ event: 'assistant_done', turn_id: id, timestamp, status, model_rejection: marker });
-for (const status of ['Failed', 'send_error']) assert.deepEqual(latestModelLifecycleRejection([start('a'), done('a', rejection, status)]), rejection);
-for (const status of ['Failed', 'send_error']) assert.deepEqual(latestModelLifecycleRejection([start('a'), done('a', legacyRejection, status)]), legacyRejection);
+for (const status of ['Failed', 'send_error']) assert.deepEqual(latestModelLifecycleRejection([start('a'), done('a', rejection, status)]), { turnId: 'a', rejection });
+for (const status of ['Failed', 'send_error']) assert.deepEqual(latestModelLifecycleRejection([start('a'), done('a', legacyRejection, status)]), { turnId: 'a', rejection: legacyRejection });
 for (const value of [{ ...legacyRejection, model_id: 'deepseek-v4-flash' }, { ...legacyRejection, model_id: rejection.model_id }, { ...legacyRejection, code: 'MODEL_DEPRECATED' }, { ...legacyRejection, legacy_binding: false }, { ...rejection, legacy_binding: 'true' }, { ...rejection, legacy_binding: null }]) assert.equal(isModelLifecycleRejection(value), false);
 for (const status of ['Completed', 'succeeded', 'Cancelled', 'Interrupted', '', 'unknown']) assert.equal(latestModelLifecycleRejection([start('a'), done('a', rejection, status)]), null);
 for (const code of ['MODEL_UNAVAILABLE', 'MODEL_DEPRECATED']) assert.equal(isModelLifecycleRejection({ ...rejection, code }), true);
@@ -28,7 +28,7 @@ hydrateNativeLane(lane, { messages: [] }, []);
 const item = { id: 44, type: 'system', text: 'retained' }; lane.items.push(item);
 lane.tokens.input = 123;
 assert.equal(await refreshNativeTurnTimeline(lane, async () => disk, () => true), true);
-assert.deepEqual(latestModelLifecycleRejection(lane.timeline), rejection);
+assert.deepEqual(latestModelLifecycleRejection(lane.timeline)?.rejection, rejection);
 assert.equal(lane.items[0], item); assert.equal(lane.tokens.input, 123);
 for (const change of ['next-send', 'next-turn-started', 'hydrate', 'deleted-recreated', 'unmount']) {
   const current = createNativeLane(); let owned = true;
@@ -50,7 +50,7 @@ const preSubmit = createNativeLane();
 const optimistic = appendLocalUserMessage(preSubmit, 'send'); removeLocalUserMessage(preSubmit, optimistic);
 const preparedDisk = [start("prepared-rust-id", preSubmit.timelineTurnAnchor.submittedAt + 1), done("prepared-rust-id", rejection, "send_error", preSubmit.timelineTurnAnchor.submittedAt + 2)];
 assert.equal(await refreshNativeTurnTimeline(preSubmit, async () => preparedDisk, () => true), true);
-assert.deepEqual(latestModelLifecycleRejection(preSubmit.timeline), rejection);
+assert.deepEqual(latestModelLifecycleRejection(preSubmit.timeline)?.rejection, rejection);
 
 const sandbox = { window: {} };
 vm.runInNewContext(fs.readFileSync(new URL('../src/shared/bridge-shared-helpers.js', import.meta.url), 'utf8'), sandbox);
@@ -82,7 +82,7 @@ const f = fixture();
 const a = f.feature.refreshAuthoritativeTurnTimeline('s'), b = f.feature.refreshAuthoritativeTurnTimeline('s');
 f.waiting[1].resolve(disk); assert.equal(await b, true);
 f.waiting[0].resolve([start('old'), done('old')]); assert.equal(await a, false);
-assert.deepEqual(latestModelLifecycleRejection(f.state.turnTimeline), rejection);
+assert.deepEqual(latestModelLifecycleRejection(f.state.turnTimeline)?.rejection, rejection);
 delete f.owners.s;
 assert.equal(await f.feature.refreshAuthoritativeTurnTimeline('s'), false, 'read must never allocate a deleted buffer');
 
@@ -106,10 +106,10 @@ for (const completed of [false, true]) {
     // Exact same-ms new Rust ids remain admissible; no synthetic id equality.
     const typedB = [...old, start('rust-B', current.timelineTurnAnchor.submittedAt), done('rust-B', rejection, 'Failed', current.timelineTurnAnchor.submittedAt + 1)];
     assert.equal(await refreshNativeTurnTimeline(current, async () => typedB, () => true), true);
-    assert.deepEqual(latestModelLifecycleRejection(current.timeline), rejection);
+    assert.deepEqual(latestModelLifecycleRejection(current.timeline)?.rejection, rejection);
     const next = f.feature.refreshAuthoritativeTurnTimeline('s');
     f.waiting[1].resolve(typedB); assert.equal(await next, true);
-    assert.deepEqual(latestModelLifecycleRejection(f.state.turnTimeline), rejection);
+    assert.deepEqual(latestModelLifecycleRejection(f.state.turnTimeline)?.rejection, rejection);
     assert.ok(current.timeline.some(event => event.turn_id === 'rust-A' && event.model_rejection), 'A evidence remains history');
     void optimisticId;
   }
@@ -125,7 +125,7 @@ assert.equal(latestModelLifecycleRejection(failed.timeline), null);
 assert.equal(await refreshNativeTurnTimeline(failed, async () => [start('older-A', failedAt), done('older-A', rejection, 'Failed', failedAt)], () => true), false);
 const failedDisk = [start('new-prepared-B', failed.timelineTurnAnchor.submittedAt + 1), done('new-prepared-B', rejection, 'send_error', failed.timelineTurnAnchor.submittedAt + 2)];
 assert.equal(await refreshNativeTurnTimeline(failed, async () => failedDisk, () => true), true);
-assert.deepEqual(latestModelLifecycleRejection(failed.timeline), rejection);
+assert.deepEqual(latestModelLifecycleRejection(failed.timeline)?.rejection, rejection);
 
 // A received native start can lag real backend timing. Its timestamp is not a
 // pre-IPC anchor; known A is excluded while a distinct new B is still accepted.
@@ -176,7 +176,7 @@ const plainTypedRead = failedPlain.feature.refreshAuthoritativeTurnTimeline('s')
 const plainBAt = failedPlain.owner.timelineTurnAnchor.submittedAt;
 failedPlain.waiting[1].resolve([...plainOld, start('plain-rust-B', plainBAt), done('plain-rust-B', rejection, 'send_error', plainBAt + 1)]);
 assert.equal(await plainTypedRead, true, 'new backend prepare timing id differs from UI start and is accepted');
-assert.deepEqual(latestModelLifecycleRejection(failedPlain.state.turnTimeline), rejection);
+assert.deepEqual(latestModelLifecycleRejection(failedPlain.state.turnTimeline)?.rejection, rejection);
 
 
 // A previous authority read can fail while the UI retains only synthetic A.
@@ -251,3 +251,9 @@ const provenPlainRead = runningPlain.feature.refreshAuthoritativeTurnTimeline('s
 runningPlain.waiting[1].resolve([start('new-after-local-submit', localPlainClock + 1), done('new-after-local-submit', rejection, 'Failed', localPlainClock + 2)]);
 assert.equal(await provenPlainRead, true, 'plain different new Rust timing id strictly after actual submit is accepted');
 pendingPlainIPC.resolve(); await localPlainSend;
+
+// Turn ids come from the latest authoritative start/terminal pair, never rows.
+for (const turnId of [null, undefined, 5, {}, '', '   ']) {
+  assert.equal(latestModelLifecycleRejection([start(turnId), done(turnId)]), null);
+}
+assert.deepEqual(latestModelLifecycleRejection([start('old'), done('old'), start('rust-current'), done('other'), done('rust-current')]), { turnId: 'rust-current', rejection });

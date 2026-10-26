@@ -19,7 +19,8 @@ function Host() {
     onGotoSettings={none} onGotoTools={none} />;
 }
 control.copy = () => dict[control.language];
-control.currentMarker = () => latestModelLifecycleRejection(bridge.state.getMany(['chat']).turnTimeline);
+control.presentationTypes = () => bridge.state.getMany(['chat']).chatItems.map(item => item.type);
+control.currentMarker = () => latestModelLifecycleRejection(bridge.state.getMany(['chat']).turnTimeline)?.rejection ?? null;
 control.activeId = () => bridge.state.getMany(['sessions']).activeSessionId;
 control.defaultRef = () => bridge.state.getMany(['models']).defaultModelRef;
 control.render = async () => { await ensureLanguage(control.language); root.render(<Host />); };

@@ -11,7 +11,8 @@ export function isModelLifecycleRejection(value) {
 }
 
 // Only the current turn's authoritative terminal can trigger replacement.
-// Display text, older failed turns and an in-progress newer turn are excluded.
+// Keep its turn id with the typed rejection so callers never infer lineage from
+// display rows. Older failed turns and an in-progress newer turn are excluded.
 export function latestModelLifecycleRejection(events) {
   if (!Array.isArray(events)) return null;
   let start = null;
@@ -19,7 +20,7 @@ export function latestModelLifecycleRejection(events) {
   for (let index = events.length - 1; index >= 0; index--) {
     const event = events[index];
     if (event?.event === 'user_start') {
-      if (!event.turn_id) return null;
+      if (typeof event.turn_id !== 'string' || !event.turn_id.trim()) return null;
       start = event; startIndex = index; break;
     }
   }
@@ -28,7 +29,8 @@ export function latestModelLifecycleRejection(events) {
     const event = events[index];
     if (event?.event === 'assistant_done' && event.turn_id === start.turn_id) {
       if (!['failed', 'send_error'].includes(String(event.status || '').toLowerCase())) return null;
-      return isModelLifecycleRejection(event.model_rejection) ? event.model_rejection : null;
+      return isModelLifecycleRejection(event.model_rejection)
+        ? { turnId: start.turn_id, rejection: event.model_rejection } : null;
     }
   }
   return null;
