@@ -364,7 +364,7 @@ nix = { version = "0.29", features = ["fs", "term", "process", "signal", "poll"]
 # 这里曾经有一条 `keyring = { version = "3", features = ["sync-secret-service"] }`,
 # 给模型商店的 HF Token 用。已删除:config.rs 改走 codewhale_secrets::DefaultKeyringStore,
 # keyring 由底座 codewhale-secrets 按平台引入(Linux 走
-# features = ["linux-native-sync-persistent", "crypto-rust"]),app 层不再直接依赖。
+# keyring 4 的 zbus-secret-service-keyring-store),app 层不再直接依赖。
 # 别加回来 —— 见上面 age 那段下面的决策注释。
 # Wayland same-session screen capture (features/computer_use/platform/wayland_capture, a
 # Linux-only module): the ScreenCast stream of the portal RemoteDesktop session takes frames
