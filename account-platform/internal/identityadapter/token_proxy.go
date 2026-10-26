@@ -51,13 +51,29 @@ func NewRedisTokenAdmissionWithCA(rawURL, rawKey, caFile string) (*RedisTokenAdm
 	return &RedisTokenAdmission{client: redis.NewClient(options), key: key}, nil
 }
 
+// A new count and its deadline are one SET EX command: script errors do not
+// roll back preceding Redis writes. Legacy no-TTL counts retain their value
+// and acquire their own dimension's window once; healthy deadlines never move.
 const admissionScriptSource = `
+local function incrementQuota(key, window)
+  local value = redis.call('GET', key)
+  local ttl = -2
+  if value then ttl = redis.call('TTL', key) end
+  if ttl == -2 then
+    redis.call('SET', key, '1', 'EX', window)
+    return 1, window
+  end
+  if ttl == -1 then
+    redis.call('SET', key, value, 'EX', window)
+    ttl = window
+  end
+  return redis.call('INCR', key), ttl
+end
 local retry = 0
 for i = 1, #KEYS do
-  local value = redis.call('INCR', KEYS[i])
   local window = tonumber(ARGV[(i-1)*2+2])
-  if value == 1 then redis.call('EXPIRE', KEYS[i], window) end
-  if value > tonumber(ARGV[(i-1)*2+1]) then retry = math.max(retry, redis.call('TTL', KEYS[i])) end
+  local value, ttl = incrementQuota(KEYS[i], window)
+  if value > tonumber(ARGV[(i-1)*2+1]) then retry = math.max(retry, ttl, 1) end
 end
 return retry`
 
@@ -78,16 +94,22 @@ func (a *RedisTokenAdmission) Admit(ctx context.Context, d tokenRiskDimensions) 
 		{"session-minute", d.session, 30, 60}, {"provider-minute", "keycloak", 1000, 60},
 	}
 	keys, args := make([]string, 0, len(specs)), make([]any, 0, len(specs)*2)
+	maximumWindow := int64(0)
 	for _, spec := range specs {
 		if strings.TrimSpace(spec.value) == "" {
 			continue
 		}
 		keys = append(keys, "pinvou:auth-admission:"+d.action+":"+spec.kind+":"+a.digest(spec.value))
 		args = append(args, spec.limit, spec.window)
+		maximumWindow = max(maximumWindow, int64(spec.window))
 	}
-	retry, err := admissionScript.Run(ctx, a.client, keys, args...).Int64()
+	result, err := admissionScript.Run(ctx, a.client, keys, args...).Result()
 	if err != nil {
 		return tokenAdmissionDecision{}, err
+	}
+	retry, valid := result.(int64)
+	if !valid || retry < 0 || retry > maximumWindow {
+		return tokenAdmissionDecision{}, errors.New("authentication admission result is invalid")
 	}
 	if retry > 0 {
 		return tokenAdmissionDecision{RetryAfter: time.Duration(max(retry, 1)) * time.Second}, nil

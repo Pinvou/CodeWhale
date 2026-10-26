@@ -262,6 +262,7 @@ jobs:
               - 'scripts/tests/test_postgres_backup.py'
               - 'scripts/tests/test_postgres_backup_job.py'
               - 'scripts/tests/test_user_realm.py'
+              - 'scripts/tests/test_auth_quota_lua_check.py'
               - 'scripts/check-token-management-authorization-coverage.mjs'
               - 'scripts/tests/token-management-authorization-coverage.test.mjs'
               - 'scripts/tests/token-management-phase-coverage.test.mjs'
@@ -1229,6 +1230,17 @@ jobs:
           grep -Eq '^# pass [1-9][0-9]*$' "$RUNNER_TEMP/f18-account-contracts.tap"
           grep -Eq '^# fail 0$' "$RUNNER_TEMP/f18-account-contracts.tap"
           grep -Eq '^# skipped 0$' "$RUNNER_TEMP/f18-account-contracts.tap"
+
+      - name: Require production authentication quota Lua through Go consumers
+        timeout-minutes: 5
+        shell: bash
+        run: |
+          set -euo pipefail
+          # Test-only official Ubuntu Lua5.1 CLI; no product Lua dependency.
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends lua5.1
+          python3 -m unittest discover -s scripts/tests -p test_auth_quota_lua_check.py
+          python3 scripts/account-platform-auth-quota-lua-check.py --race
 
       - name: Test and vet all Account Platform Go modules
         shell: bash
