@@ -138,7 +138,7 @@ export function createCmsdSwitchFollow({
           displayName: (fallback && cards?.find(card => card.id === logicalCard)?.name)
             || cmsdCardRowName(logicalCard, fallback ? logicalCard : entry.model_id),
           baseUrl: gateway, storeCardId: logicalCard, cardId: target.fromStore ? logicalCard : null,
-          existingId: id,
+          registrationId: id,
           // Store-linked rows follow runtime probes; only a user edit fixes a cap.
           contextWindow: target.fromStore ? null : (entry.max_model_len > 0 ? entry.max_model_len : null),
         });
