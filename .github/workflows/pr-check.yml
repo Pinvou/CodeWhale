@@ -255,6 +255,8 @@ jobs:
               - 'pinvou3-app/src/shared/i18n.js'
               - 'scripts/account-platform*'
               - 'scripts/check-account-platform*'
+              - 'scripts/build-credential-handoff.mjs'
+              - 'scripts/check-recharge-product-document-baseline.mjs'
               - 'scripts/test-token-financial-postgres.py'
               - 'scripts/tests/test_token_financial_postgres.py'
               - 'scripts/test-account-closure-postgres.py'
@@ -609,6 +611,7 @@ jobs:
               - 'account-platform/deploy/nginx/credential-edge.example.json'
               - 'account-platform/internal/portal/credential-handoff.v1.js'
               - 'account-platform/internal/portal/credential_handoff_hash_generated.go'
+              - 'scripts/build-credential-handoff.mjs'
               - 'scripts/account-platform-credential-browser-scope.mjs'
               - 'scripts/account-platform-credential-origin-probe.mjs'
               - 'scripts/account-platform-credential-edge.mjs'
@@ -1012,6 +1015,12 @@ jobs:
           git diff --exit-code -- ../account-platform/internal/portal/static
           test -z "$(git ls-files --others --exclude-standard -- ../account-platform/internal/portal/static)"
 
+      - name: Verify credential handoff built deployment boundary
+        shell: bash
+        run: |
+          set -euo pipefail
+          node ../scripts/build-credential-handoff.mjs --check-deployment
+
       # Web (relay) build: the startup-bundle layer and the web index contract
       # test (tests/vite_static_assets_contract.test.mjs) only cover the web
       # dist when it exists, so build it unconditionally here instead of
@@ -1156,6 +1165,13 @@ jobs:
         uses: actions/setup-node@v7
         with:
           node-version: "24"
+
+      - name: Verify Account Platform generated inputs and document baseline
+        shell: bash
+        run: |
+          set -euo pipefail
+          node scripts/build-credential-handoff.mjs --check
+          node scripts/check-recharge-product-document-baseline.mjs
 
       - name: Verify Token management authorization contracts
         run: |
