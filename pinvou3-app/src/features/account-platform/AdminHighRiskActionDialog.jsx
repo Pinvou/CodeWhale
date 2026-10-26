@@ -1,3 +1,4 @@
+import { isImeComposing } from '../../shared/ime-guard.mjs';
 import React, { useEffect, useRef, useState } from 'react';
 import { executeHighRiskCommand, resetHighRiskCommandAfterSafeFailure, validImpactPrecheck } from './admin-high-risk-action-state.js';
 import { validateCatalogDifference } from './admin-model-operations-overview.js';
@@ -115,7 +116,7 @@ export function AdminHighRiskActionDialog({ action, copy, target, policy = 'AUDI
     setState((current) => ({ ...current, error: null, loading: Boolean(impactLoaderRef.current) }));
     setImpactGeneration((value) => value + 1);
   };
-  return <div className="adm-protocol-dialog-backdrop"><form ref={root} className="adm-protocol-dialog adm-high-risk-dialog" role="dialog" aria-modal="true" aria-labelledby={`${action.key}-dialog-title`} onSubmit={submit} onKeyDown={(event) => { trapFocus(event, root.current); if (event.key === 'Escape' && !state.busy && !state.unknown) closeDialog(); }}>
+  return <div className="adm-protocol-dialog-backdrop"><form ref={root} className="adm-protocol-dialog adm-high-risk-dialog" role="dialog" aria-modal="true" aria-labelledby={`${action.key}-dialog-title`} onSubmit={submit} onKeyDown={(event) => { trapFocus(event, root.current); if (event.key === 'Escape' && !isImeComposing(event) && !state.busy && !state.unknown) closeDialog(); }}>
     <header><div><h3 id={`${action.key}-dialog-title`}>{action.title}</h3><p>{action.lead || copy.actionLead}</p></div><button ref={first} type="button" disabled={state.busy || state.unknown} onClick={closeDialog} aria-label={copy.close}>×</button></header>
     <dl className="adm-command-target"><div><dt>{copy.target}</dt><dd>{target.label}</dd></div><div><dt>{copy.actionResourceVersion}</dt><dd>{target.version || copy.serverResolvedBeforeSubmit}</dd></div><div><dt>{copy.policy}</dt><dd>{policy === 'APPROVAL_REQUIRED' ? copy.approvalRequired : copy.auditOnly}</dd></div><div><dt>{copy.actionEffectiveAt}</dt><dd>{target.effectiveAt || copy.actionImmediate}</dd></div><div><dt>{copy.idempotency}</dt><dd>{copy.fixedIdempotency}</dd></div></dl>
     {recentAuth && <div className="adm-inline-message info" role="status">{copy.recentAuthRequired}</div>}
