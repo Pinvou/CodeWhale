@@ -3,6 +3,7 @@ package token
 import (
 	"context"
 	"encoding/json"
+	"errors"
 
 	"math"
 
@@ -95,15 +96,24 @@ func unitCost(quantity int64, unit ResolvedUnitPrice) (int64, error) {
 }
 
 func (c *HTTPBillingClient) Reserve(ctx context.Context, usageID, walletID uuid.UUID, maximum int64, priceID uuid.UUID) (BillingHold, error) {
-	var hold BillingHold
-	err := c.call(ctx, http.MethodPost, "/internal/v1/holds/reserve", map[string]any{"usage_request_id": usageID, "wallet_id": walletID, "maximum_microcredits": maximum, "price_version_id": priceID, "lease_seconds": 900}, &hold)
-	return hold, err
+	return c.reserveHold(ctx, usageID, map[string]any{"usage_request_id": usageID, "wallet_id": walletID, "maximum_microcredits": maximum, "price_version_id": priceID, "lease_seconds": 900})
 }
 
 func (c *HTTPBillingClient) ReservePriced(ctx context.Context, usageID, walletID uuid.UUID, maximum int64, priceID uuid.UUID, pricing HoldPricingContext) (BillingHold, error) {
+	return c.reserveHold(ctx, usageID, holdReservationBody(usageID, walletID, maximum, priceID, pricing))
+}
+
+func (c *HTTPBillingClient) reserveHold(ctx context.Context, usageID uuid.UUID, body map[string]any) (BillingHold, error) {
 	var hold BillingHold
-	err := c.call(ctx, http.MethodPost, "/internal/v1/holds/reserve", holdReservationBody(usageID, walletID, maximum, priceID, pricing), &hold)
-	return hold, err
+	if err := c.call(ctx, http.MethodPost, "/internal/v1/holds/reserve", body, &hold); err != nil {
+		return BillingHold{}, err
+	}
+	if usageID == uuid.Nil || hold.ID == uuid.Nil || hold.UsageRequestID != usageID {
+		return BillingHold{}, errors.New("invalid Billing reservation acknowledgement")
+	}
+	// Idempotent recovery can return a terminal hold. Its identity is evidence;
+	// this client must not reinterpret it as a newly ACTIVE reservation.
+	return hold, nil
 }
 
 func (c *HTTPBillingClient) Release(ctx context.Context, usageID, holdID uuid.UUID, reason string) error {
