@@ -488,6 +488,7 @@ The public verifier advanced to `ea9fdc90f` (CodeWhale#117) between the parent a
 
 The preceding e9 execution regressions are retained as such. This help-only update is checked through current consumer compilation, Clippy and the current foundation schema/fork contracts; retained prior full-suite counts must not be presented as fresh runs at this documentation-only head.
 
+<<<<<<< HEAD
 ## 2026-10-26 consumed baseline: tool-output recovery, subagent name lifecycle, deps round-3 (T2/T1)
 
 The public maintenance branch advanced by five reviewed squashes — #118 `a96fdec8e`, #119 `5861912a3`, #120 `f12299e69`, #121 `c2fdfd3e2`, #122 `6e1ee88ee` — and this parent consumes them with reference and lock updates only; it creates no new fork topic.
@@ -506,3 +507,10 @@ Official 父仓集成边界：三套产品锁文件继续服从 `docs/webpki-roo
 Official 已有引擎快照写入/通知的同事务提交、代际写入存活标记、mutation 门内启动基线和 ColdEngineCustody 未公开引擎回收，本次保留这些实现与远控生产 CAS。仅补齐乐观准入显示消息回退：`persist_admitted_chat_display_with_commit` 在同一 mutation 门内检查代际、落盘并通知，版本不匹配时通知现有 durable 版本而不覆盖。转发器三条保存路径均使用原引擎存活标记，退休回退不再写入或发布。既有无回调接口保留。
 
 行为回归：`display_fallback_publishes_in_transaction_and_refuses_retired_writers`、`queued_engine_snapshot_checks_retirement_under_the_mutation_gate` 与 `transcript_persist_pins`；生命周期及已有回收方 5 秒兜底边界见 `docs/chat-transcript-commit-lifecycle.md`。不修改底座 gitlink 或底座行为。
+=======
+## 2026-10-26 consumed baseline: upstream fixes and dependency refresh (T2)
+
+The public maintenance head advanced to `6e1ee88e` (CodeWhale#118-#122, five commits, all signed) while both long-running feature branches were being rebased; the parent consumes them together with this rebase. Production deltas: #118 recovers returned tool results in the context builder; #119 frees settled subagent names and advertises the wait timeout; #120 is npm security fixes (next/vite/vitest, CodeWhale-internal tooling); #121 restores a CodeWhale-side CI lane; #122 is a lock refresh deduping oauth2/keyring/dirs. The #122 dependency reshuffle is why the parent Cargo.locks are re-minimized in the same change: the apple-native keyring backend pulls aes 0.9 / block-padding 0.4 / cbc 0.2 (linked bumps, not version drift); no parent manifest changes beyond that.
+
+Public CodeWhale signatures consumed by the parent are unchanged; no app adapter or new fork patch is introduced — all five land under existing maintenance topics. Recount at this head: 84 registered commits; #107/#116 remain the only missing-footer exceptions. The immutable r3 closure tag stays `61cb769be`; fork-guard EXPECTED_HEAD/EXPECTED_COMMITS advance with the gitlink in the same commit.
+>>>>>>> 54e2d77d2 (chore: Cargo.lock 对齐 CodeWhale 6e1ee88e 的依赖集)
