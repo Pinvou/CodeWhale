@@ -129,8 +129,24 @@ services:
     environment:
       <<: *http
       PGPASSFILE: /run/pinvou/database/pgpass
+      # The current same-source Billing binary always verifies these resources,
+      # independently of the personal facade's business feature selection.
+      NATS_URL: ${NATS_URL:?set verified TLS NATS endpoint}
+      NATS_CA_FILE: /run/pinvou/trust/ca.crt
+      NATS_NKEY_SEED_FILE: /run/pinvou/nats/nkey.seed
+      BILLING_APPROVAL_CONSUMER_PUBLIC_KEYS_FILE: /run/pinvou/approval-identities/current.json
+      BILLING_APPROVAL_CONSUMER_PUBLIC_KEYS_SHA256: ${APPROVAL_PUBLIC_KEYS_SHA256:?set independently verified identity SHA256}
+      BILLING_APPROVAL_CONSUMER_MANIFEST_FILE: /run/pinvou/approval-manifest/manifest.json
+      BILLING_APPROVAL_CONSUMER_MANIFEST_SHA256: ${APPROVAL_MANIFEST_SHA256:?set independently verified manifest SHA256}
+      BILLING_APPROVAL_CONSUMER_RECEIPT_FILE: /run/pinvou/approval-receipt/receipt.json
+      # Empty only during explicit external initialization; Billing rejects it.
+      BILLING_APPROVAL_CONSUMER_RECEIPT_SHA256: ${APPROVAL_RECEIPT_SHA256:-}
     volumes:
       - *trust
+      - {type: bind, source: "${BILLING_EXECUTOR_NATS_DIRECTORY:?set only current Billing executor NKey directory}", target: /run/pinvou/nats, read_only: true, bind: {create_host_path: false}}
+      - {type: bind, source: "${APPROVAL_PUBLIC_IDENTITY_DIRECTORY:?set verified public identity-only directory}", target: /run/pinvou/approval-identities, read_only: true, bind: {create_host_path: false}}
+      - {type: bind, source: "${APPROVAL_PUBLIC_MANIFEST_DIRECTORY:?set verified manifest directory}", target: /run/pinvou/approval-manifest, read_only: true, bind: {create_host_path: false}}
+      - {type: bind, source: "${APPROVAL_PUBLIC_RECEIPT_DIRECTORY:?set independently checked receipt directory}", target: /run/pinvou/approval-receipt, read_only: true, bind: {create_host_path: false}}
       - {type: bind, source: "${BILLING_SERVICE_DATABASE_DIRECTORY:?set private pgpass directory}", target: /run/pinvou/database, read_only: true, bind: {create_host_path: false}}
       - {type: bind, source: "${BILLING_SERVICE_WORKLOAD_DIRECTORY:?set only Billing projected token directory}", target: /run/pinvou/workload, read_only: true, bind: {create_host_path: false}}
     depends_on:

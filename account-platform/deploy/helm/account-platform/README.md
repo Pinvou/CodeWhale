@@ -61,6 +61,48 @@ wiring only: confirm real cluster ownership/readability, server TLS/authenticati
 ACLs and all existing resource-configuration inputs separately before rollout.
 Credential preparation alone does not establish complete service readiness.
 
+### Billing approval consumer public artifacts
+
+Billing always loads all six `BILLING_APPROVAL_CONSUMER_*` inputs before opening
+its broker connection, including base/staging installs with governed workloads off.
+Set `billing.approvalConsumerArtifactsConfigMap` to the reviewed, existing public
+ConfigMap in the release namespace (default name:
+`pinvou-account-platform-billing-approval-artifacts`). It must contain exactly the
+three referenced public JSON keys below. The chart neither creates these artifacts
+nor initializes consumers, captures a watermark, signs a receipt or activates an
+approval controller.
+
+| Bootstrap input suffix | Fixed file / ConfigMap key | Independent key in `global.runtimeSecret` |
+| --- | --- | --- |
+| `PUBLIC_KEYS_FILE` / `PUBLIC_KEYS_SHA256` | `/run/pinvou/approval-identities/current.json` / `current-v2.json` | `billing-approval-consumer-public-keys-sha256` |
+| `MANIFEST_FILE` / `MANIFEST_SHA256` | `/run/pinvou/approval-manifest/manifest.json` / `manifest.json` | `billing-approval-consumer-manifest-sha256` |
+| `RECEIPT_FILE` / `RECEIPT_SHA256` | `/run/pinvou/approval-receipt/receipt.json` / `receipt.json` | `billing-approval-consumer-receipt-sha256` |
+
+The prefix for every suffix in this table is `BILLING_APPROVAL_CONSUMER_`.
+Each SHA must be an independently verified lowercase 64-character SHA-256 value
+supplied by the deployment authority through the existing runtime Secret process.
+There are no digest defaults in values and no startup self-hashing trust fallback.
+Provision the Ready ConfigMap and all three required Secret keys before Billing
+rollout. Missing keys prevent container startup; invalid digests, missing files or
+content drift fail the unchanged bootstrap/readiness checks.
+
+Follow [the NATS provisioning runbook](../../runbooks/nats-resources.md) with the
+same fixed-source `approval-resources` operator. The manifest must be its complete
+current registry output, and the separately captured, reviewed receipt must bind
+all current `approvalconsumer.BillingCommands()` durables to their exact Q+1 start.
+Do not use the runbook's historical three-consumer prose as the current inventory,
+truncate the manifest/receipt, or regenerate evidence to disguise retained-resource
+drift. Only the existing explicit operator procedure can establish live cutover
+facts; a ConfigMap or successful Helm render does not prove resource readiness.
+
+The three public files are 0444, read-only file `subPath` mounts in three separate
+directories, isolated from private credentials. The identity directory contains
+only `current.json`; a whole ConfigMap directory would expose projection symlinks
+and unrelated files and is rejected by the reader. `subPath` snapshots do not
+hot-reload. Rotate a matched artifact set and its independently controlled digest
+keys in a controlled rollout that recreates Pods, then verify actual per-instance
+readiness and broker/control state. Preserve prior cutover evidence and history.
+
 Install External Secrets Operator and create the least-privilege referenced
 `SecretStore` or `ClusterSecretStore` before install. Production values create
 an `ExternalSecret` that owns the runtime Secret; non-production environments

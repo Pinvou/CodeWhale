@@ -1,3 +1,4 @@
+import { checkHelmBillingApprovalArtifacts, checkComposeBillingApprovalArtifacts } from './account-platform-billing-approval-artifacts-check.mjs';
 import { checkHelmNATSCredentials } from './account-platform-nats-helm-check.mjs';
 import { isMainModule } from './account-platform-cli-entry.mjs';
 import { readFileSync } from 'node:fs';
@@ -255,8 +256,10 @@ function checkCompose(all, render, inventory) {
       && [a.workload, b.workload].every(n => ['event-resources', 'approval-resources'].includes(n));
     check(publicCA || projection || approvedPublic || runtimeDatabase || operatorIdentity, 'shared_secret');
   }
+  checkComposeBillingApprovalArtifacts(render.config);
 }
 function checkHelm(all, render, inventory) {
+  checkHelmBillingApprovalArtifacts(render.config, render.secrets, render.recipe.namespace);
   checkHelmNATSCredentials(render.config);
   check(inventory.namespace === render.recipe.namespace, 'namespace');
   for (const resource of render.config) {

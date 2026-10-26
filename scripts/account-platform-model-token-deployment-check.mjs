@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+import { checkHelmBillingApprovalArtifacts } from './account-platform-billing-approval-artifacts-check.mjs';
 import { checkHelmNATSCredentials } from './account-platform-nats-helm-check.mjs';
 import { isMainModule } from './account-platform-cli-entry.mjs';
 // Structural verification of real renderer output. No cluster, process or activation mutation.
@@ -188,6 +189,7 @@ export function checkGovernedHelmResources(items) {
     }
   }
   checkHelmNATSCredentials(items);
+  checkHelmBillingApprovalArtifacts(items);
   return success();
 }
 

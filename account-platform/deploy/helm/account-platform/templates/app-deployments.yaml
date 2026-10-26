@@ -150,6 +150,13 @@ spec:
             - { name: NATS_URL, value: {{ include "pinvou.natsUrl" $root | quote }} }
             {{- end }}
             {{- if eq $app.name "billing-service" }}
+            - { name: BILLING_APPROVAL_CONSUMER_PUBLIC_KEYS_FILE, value: /run/pinvou/approval-identities/current.json }
+            - { name: BILLING_APPROVAL_CONSUMER_MANIFEST_FILE, value: /run/pinvou/approval-manifest/manifest.json }
+            - { name: BILLING_APPROVAL_CONSUMER_RECEIPT_FILE, value: /run/pinvou/approval-receipt/receipt.json }
+            {{- range $artifact := list (dict "name" "PUBLIC_KEYS" "key" "public-keys") (dict "name" "MANIFEST" "key" "manifest") (dict "name" "RECEIPT" "key" "receipt") }}
+            - name: BILLING_APPROVAL_CONSUMER_{{ $artifact.name }}_SHA256
+              valueFrom: { secretKeyRef: { name: {{ $root.Values.global.runtimeSecret }}, key: billing-approval-consumer-{{ $artifact.key }}-sha256 } }
+            {{- end }}
             - { name: NATS_CREDENTIALS_FILE, value: /run/pinvou/nats/private/billing-command-executor.creds }
             {{- else if and (or $root.Values.tokenCredentialPortal.enabled $root.Values.tokenCommandExecutor.enabled) (or (eq $app.name "account-service") (eq $app.name "token-gateway")) }}
             - { name: NATS_CREDENTIALS_FILE, value: {{ printf "/run/pinvou/nats/private/%s.creds" $app.name | quote }} }
@@ -341,6 +348,13 @@ spec:
             {{- if or (eq $app.name "billing-service") (and (or $root.Values.tokenCredentialPortal.enabled $root.Values.tokenCommandExecutor.enabled) (or (eq $app.name "account-service") (eq $app.name "token-gateway"))) }}
             - { name: nats-private, mountPath: /run/pinvou/nats, readOnly: true }
             {{- end }}
+            {{- if eq $app.name "billing-service" }}
+            # File subPaths are real mounts; the identity directory contains only
+            # current.json, never the ConfigMap's ..data symlinks or other artifacts.
+            - { name: billing-approval-public-artifacts, mountPath: /run/pinvou/approval-identities/current.json, subPath: current-v2.json, readOnly: true }
+            - { name: billing-approval-public-artifacts, mountPath: /run/pinvou/approval-manifest/manifest.json, subPath: manifest.json, readOnly: true }
+            - { name: billing-approval-public-artifacts, mountPath: /run/pinvou/approval-receipt/receipt.json, subPath: receipt.json, readOnly: true }
+            {{- end }}
         {{- if and (eq $app.name "token-gateway") (eq $root.Values.tokenGateway.secretProvider "vault-transit") }}
         {{- include "pinvou.nativeKmsAgent" $root | nindent 8 }}
         {{- end }}
@@ -370,6 +384,16 @@ spec:
           secret:
             secretName: {{ $root.Values.global.runtimeSecret }}
             items: [{ key: portal-handoff-oidc-client-secret, path: client-secret }]
+        {{- end }}
+        {{- if eq $app.name "billing-service" }}
+        - name: billing-approval-public-artifacts
+          configMap:
+            name: {{ $root.Values.billing.approvalConsumerArtifactsConfigMap }}
+            defaultMode: 292
+            items:
+              - { key: current-v2.json, path: current-v2.json }
+              - { key: manifest.json, path: manifest.json }
+              - { key: receipt.json, path: receipt.json }
         {{- end }}
         {{- if $natsClient }}
         - { name: nats-private, emptyDir: { medium: Memory, sizeLimit: 1Mi } }

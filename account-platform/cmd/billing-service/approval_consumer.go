@@ -11,7 +11,7 @@ import (
 
 // billingApprovalConsumerArtifactEnvironment names the six independent inputs
 // of the dedicated Billing authorization consumer bootstrap. One verified
-// receipt set covers the three installed financial command durables. Only
+// receipt set covers every installed BillingCommands descriptor. Only
 // the three digests are site-supplied: every artifact path is fixed by the
 // deployment template and the public-artifact directories are read-only mounts.
 var billingApprovalConsumerArtifactEnvironment = []string{

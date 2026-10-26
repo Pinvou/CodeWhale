@@ -132,6 +132,9 @@ account:
   commerceAdapterBaseUrl: ""
 
 billing:
+  # Public v2 identity, fixed manifest and independently captured cutover receipt.
+  # Digests remain independent keys in global.runtimeSecret, never values.
+  approvalConsumerArtifactsConfigMap: pinvou-account-platform-billing-approval-artifacts
   adminModelPriceProjectionEnabled: false
   paymentProvider: h3c_mall
   allowTentativePrices: false

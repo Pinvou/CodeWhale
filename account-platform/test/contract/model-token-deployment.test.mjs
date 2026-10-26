@@ -60,6 +60,20 @@ function helmFixture() {
     });
   }
   const setEnv = (name, values) => { resources.find(item => item.metadata.name === name).spec.template.spec.containers[0].env.push(...Object.entries(values).map(([key, value]) => typeof value === 'string' ? { name: key, value } : { name: key, valueFrom: value })); };
+  const billingPod = resources.find(item => item.metadata.name === 'billing-service').spec.template.spec;
+  setEnv('billing-service', { DATABASE_URL: { secretKeyRef: { name: 'fixture-billing-service', key: 'database-url' } } });
+  billingPod.volumes.push({ name: 'billing-approval-public-artifacts', configMap: {
+    name: 'fixture-billing-public', defaultMode: 292,
+    items: ['current-v2.json', 'manifest.json', 'receipt.json'].map(key => ({ key, path: key })) } });
+  for (const [suffix, directory, file, key, digestKey] of [
+    ['PUBLIC_KEYS', 'approval-identities', 'current.json', 'current-v2.json', 'public-keys'],
+    ['MANIFEST', 'approval-manifest', 'manifest.json', 'manifest.json', 'manifest'],
+    ['RECEIPT', 'approval-receipt', 'receipt.json', 'receipt.json', 'receipt'],
+  ]) {
+    setEnv('billing-service', { ['BILLING_APPROVAL_CONSUMER_' + suffix + '_FILE']: '/run/pinvou/' + directory + '/' + file,
+      ['BILLING_APPROVAL_CONSUMER_' + suffix + '_SHA256']: { secretKeyRef: { name: 'fixture-billing-service', key: 'billing-approval-consumer-' + digestKey + '-sha256' } } });
+    billingPod.containers[0].volumeMounts.push({ name: 'billing-approval-public-artifacts', mountPath: '/run/pinvou/' + directory + '/' + file, subPath: key, readOnly: true });
+  }
   for (const name of ['token-gateway']) setEnv(name, { DATABASE_URL: { secretKeyRef: { name: 'gateway-release', key: 'database' } } });
   setEnv('token-credential-portal', { ...credentialEnv(), DATABASE_URL: { secretKeyRef: { name: 'credential-release', key: 'database' } } });
   for (const name of ['token-command-executor', 'token-credential-portal']) {

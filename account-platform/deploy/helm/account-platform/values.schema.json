@@ -217,9 +217,10 @@
     },
     "billing": {
       "type": "object",
-      "required": ["paymentProvider", "allowTentativePrices", "testAdmissionEvidenceTtl", "normalRefundCreationEnabled", "paymentExpiryIntervalSeconds", "paymentCallbackTokenKeyId", "paymentCallbackTokenTtlSeconds"],
+      "required": ["approvalConsumerArtifactsConfigMap", "paymentProvider", "allowTentativePrices", "testAdmissionEvidenceTtl", "normalRefundCreationEnabled", "paymentExpiryIntervalSeconds", "paymentCallbackTokenKeyId", "paymentCallbackTokenTtlSeconds"],
       "additionalProperties": false,
       "properties": {
+        "approvalConsumerArtifactsConfigMap": { "type": "string", "minLength": 1, "maxLength": 253, "pattern": "^[a-z0-9]([-a-z0-9.]*[a-z0-9])?$" },
         "paymentProvider": { "type": "string", "minLength": 1 },
         "adminModelPriceProjectionEnabled": { "type": "boolean" },
         "allowTentativePrices": { "type": "boolean" },
