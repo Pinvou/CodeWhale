@@ -124,13 +124,17 @@ func (a *RedisTokenAdmission) Complete(ctx context.Context, d tokenRiskDimension
 	if err != nil {
 		return 0, err
 	}
-	stableDigest, aliasErr := a.client.Get(ctx, "pinvou:auth-alias:"+a.digest(d.identifier)).Result()
-	if aliasErr != nil && !errors.Is(aliasErr, redis.Nil) {
-		return 0, aliasErr
-	}
-	if stableDigest != "" {
-		if _, err := incrementFailure(ctx, a.client, "pinvou:auth-failure:user:"+stableDigest); err != nil {
-			return 0, err
+	// Password aliases identify login names. Refresh uses an opaque session
+	// dimension and must never resolve its placeholder as another user's name.
+	if d.action == "password" {
+		stableDigest, aliasErr := a.client.Get(ctx, "pinvou:auth-alias:"+a.digest(d.identifier)).Result()
+		if aliasErr != nil && !errors.Is(aliasErr, redis.Nil) {
+			return 0, aliasErr
+		}
+		if stableDigest != "" {
+			if _, err := incrementFailure(ctx, a.client, "pinvou:auth-failure:user:"+stableDigest); err != nil {
+				return 0, err
+			}
 		}
 	}
 	delay := time.Duration(1<<min(count-1, 5)) * time.Second
