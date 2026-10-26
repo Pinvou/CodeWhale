@@ -138,6 +138,12 @@ func (s *Service) chatCompletions(w http.ResponseWriter, r *http.Request) {
 		s.writeError(w, r, lookupErr)
 		return
 	}
+	// New acceptance follows the integer wire contract. Older accepted null
+	// requests must first retain their original canonical-v1 replay above.
+	if err := validateNewChatMaximumOutput(logicalBody); err != nil {
+		api.WriteError(w, http.StatusBadRequest, "INVALID_REQUEST", "maximum output token limits must be integers", httpserver.RequestID(r.Context()))
+		return
+	}
 	catalog, ok := s.repository.(CatalogRepository)
 	if !ok {
 		api.WriteError(w, http.StatusServiceUnavailable, "MODEL_CATALOG_UNAVAILABLE", "the model catalog is unavailable", httpserver.RequestID(r.Context()))
@@ -371,6 +377,22 @@ func applyDefaultChatMaximumOutput(body []byte, request *chatCompletionRequest, 
 	normalized["max_completion_tokens"] = fallback
 	request.MaxCompletionTokens = fallback
 	return json.Marshal(normalized)
+}
+
+// The typed request decode already rejects non-integer values except JSON null,
+// which encoding/json leaves as zero in an int64. Reject only that remaining
+// type gap for new acceptance; explicit integer zero is not a missing field.
+func validateNewChatMaximumOutput(body []byte) error {
+	payload, err := decodeChatCompletionPayload(body)
+	if err != nil {
+		return err
+	}
+	for _, name := range []string{"max_completion_tokens", "max_tokens"} {
+		if value, present := payload[name]; present && value == nil {
+			return errors.New("maximum output token limits must be integers")
+		}
+	}
+	return nil
 }
 
 func normalizeLogicalTurnID(raw string) (string, error) {
