@@ -2882,6 +2882,10 @@ jobs:
             'features::monitor::platform::windows_gpu::tests::' \
             'features::remote_control::platform::windows::tests::' \
             'app::commands::remote_control::reader_resume_tests::' \
+            'features::remote_control::controller::controlled::journal_owner_tests::' \
+            'app::commands::desktop_remote_journal::tests::' \
+            'app::commands::desktop_remote_task::journal_owner_tests::' \
+            'features::remote_control::controller::controlled::tests::resume_sequence_advances_the_gate_and_rotates_material' \
             'features::remote_control::controller::transfer::staging::tests::' \
             'features::computer_use::platform::windows::tests::' \
             'failed_probe_never_deletes_an_existing_store_windows' \

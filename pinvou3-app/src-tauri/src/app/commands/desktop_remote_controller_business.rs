@@ -987,21 +987,25 @@ impl DesktopControlledBusiness {
         &self,
         lease: &LeaseContext,
         session_ref: &str,
-    ) -> Result<String, String> {
-        let (current, _) = self
+    ) -> Result<
+        (
+            String,
+            crate::features::remote_control::controller::journal::JournalOwner,
+        ),
+        String,
+    > {
+        let owner = self
             .app
             .state::<ControlledDeviceManager>()
-            .live_runtime_context()
+            .business_journal_owner(lease)
             .map_err(|_| "journal_lease_stale".to_owned())?;
-        if &current != lease {
-            return Err("journal_lease_stale".to_owned());
-        }
         let runtime = self
             .app
             .state::<Arc<super::desktop_remote_task::DesktopRemoteTaskRuntime>>();
         runtime
             .service()
             .session_for(session_ref, &lease.remote_control_generation)
+            .map(|session| (session, owner))
             .ok_or_else(|| "journal_session_mapping_missing".to_owned())
     }
 
@@ -1378,43 +1382,46 @@ impl ControlledBusinessPort for DesktopControlledBusiness {
         journal_epoch: &str,
         after_sequence: u64,
     ) -> Result<Vec<(String, Value)>, String> {
-        let b_session_id = self.authoritative_journal_session(lease, session_ref)?;
+        let (b_session_id, owner) = self.authoritative_journal_session(lease, session_ref)?;
         let history = self
             .app
             .state::<std::sync::Arc<super::desktop_remote_journal::DesktopRemoteJournalRuntime>>();
-        history
-            .journal()
-            .bind_generation(&lease.remote_control_generation)
-            .map_err(|error| error.code.to_owned())?;
-        Ok(
-            match history
-                .journal()
-                .replay_after_for_generation(
-                    &lease.remote_control_generation,
-                    &b_session_id,
-                    journal_epoch,
-                    after_sequence,
-                )
-                .map_err(|error| error.code.to_owned())?
-            {
-                crate::features::remote_control::controller::journal::ReplayOutcome::Events(
-                    events,
-                ) => build_replay_frames(lease, session_ref, &events)?,
-                crate::features::remote_control::controller::journal::ReplayOutcome::Gap(
-                    snapshot,
-                ) => {
-                    vec![(
-                        "session_snapshot".to_owned(),
-                        build_session_snapshot_payload(
-                            lease,
-                            session_ref,
-                            "request-replay-gap",
-                            &snapshot,
-                        )?,
-                    )]
-                }
-            },
-        )
+        #[cfg(all(test, target_os = "windows"))]
+        let capture = self.app.try_state::<Arc<
+            crate::features::remote_control::controller::relay_runtime::reader_resume_tests::journal_owner_tests::JournalReplayBarrier,
+        >>().map(|probe| (Arc::clone(probe.inner()), probe.pause_once()));
+        let replay = history.journal().replay_after_for_owner(
+            &owner,
+            &b_session_id,
+            journal_epoch,
+            after_sequence,
+        );
+        #[cfg(all(test, target_os = "windows"))]
+        if let Some((probe, true)) = capture {
+            probe.complete(
+                replay
+                    .as_ref()
+                    .err()
+                    .map(|error| error.code)
+                    .unwrap_or("ok"),
+            );
+        }
+        Ok(match replay.map_err(|error| error.code.to_owned())? {
+            crate::features::remote_control::controller::journal::ReplayOutcome::Events(events) => {
+                build_replay_frames(lease, session_ref, &events)?
+            }
+            crate::features::remote_control::controller::journal::ReplayOutcome::Gap(snapshot) => {
+                vec![(
+                    "session_snapshot".to_owned(),
+                    build_session_snapshot_payload(
+                        lease,
+                        session_ref,
+                        "request-replay-gap",
+                        &snapshot,
+                    )?,
+                )]
+            }
+        })
     }
 
     async fn session_snapshot(
@@ -1423,17 +1430,13 @@ impl ControlledBusinessPort for DesktopControlledBusiness {
         session_ref: &str,
         request_id: &str,
     ) -> Result<Value, String> {
-        let b_session_id = self.authoritative_journal_session(lease, session_ref)?;
+        let (b_session_id, owner) = self.authoritative_journal_session(lease, session_ref)?;
         let history = self
             .app
             .state::<std::sync::Arc<super::desktop_remote_journal::DesktopRemoteJournalRuntime>>();
-        history
-            .journal()
-            .bind_generation(&lease.remote_control_generation)
-            .map_err(|error| error.code.to_owned())?;
         let snapshot = history
             .journal()
-            .snapshot_for_generation(&lease.remote_control_generation, &b_session_id)
+            .snapshot_for_owner(&owner, &b_session_id)
             .map_err(|error| error.code.to_owned())?;
         build_session_snapshot_payload(lease, session_ref, request_id, &snapshot)
     }

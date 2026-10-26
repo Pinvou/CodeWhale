@@ -1248,14 +1248,14 @@ fn dispatch_inbound(
 /// Test adapters exercise the real suspension and reader validation paths;
 /// they never manufacture or directly install reader authority.
 #[cfg(test)]
-pub(super) fn disconnect_test_transport(sender: &ControllerTransportSender) {
+pub(crate) fn disconnect_test_transport(sender: &ControllerTransportSender) {
     let config =
         ControllerTransportConfig::new("ws://127.0.0.1:1", sender.role, sender.generation());
     emit_disconnected(&config, sender, &|_| {}, "test socket closed".into());
 }
 
 #[cfg(test)]
-pub(super) fn dispatch_test_transport_frame(sender: &ControllerTransportSender, frame: &Value) {
+pub(crate) fn dispatch_test_transport_frame(sender: &ControllerTransportSender, frame: &Value) {
     let config =
         ControllerTransportConfig::new("ws://127.0.0.1:1", sender.role, sender.generation());
     dispatch_inbound(&config, sender, &|_| {}, &frame.to_string());

@@ -11,6 +11,9 @@ use tokio_tungstenite::{WebSocketStream, tungstenite::Message};
 
 type Socket = WebSocketStream<TcpStream>;
 
+#[path = "reader_resume_tests/journal_owner_tests.rs"]
+pub(crate) mod journal_owner_tests;
+
 async fn accept(listener: &TcpListener) -> Socket {
     let (stream, _) = listener.accept().await.unwrap();
     tokio_tungstenite::accept_hdr_async(
@@ -23,7 +26,9 @@ async fn accept(listener: &TcpListener) -> Socket {
 
 async fn send(socket: &mut Socket, value: &Value) {
     if value["v"] == 1 {
-        let role = if value["sender_role"] == "A" {
+        let role = if value["sender_role"] == "A"
+            || (value["type"] == "encrypted_frame" && value["direction"] == "a_to_b")
+        {
             SenderRole::ControllerA
         } else {
             SenderRole::Relay

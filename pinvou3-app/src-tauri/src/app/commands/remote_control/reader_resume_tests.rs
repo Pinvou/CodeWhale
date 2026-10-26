@@ -13,6 +13,33 @@ fn real_reader_endpoint_retirement_closes_waiting_and_connected_workers() {
 }
 
 #[test]
+fn real_reader_journal_owner_rejects_late_replay_after_fifo_rotation() {
+    const CHILD: &str = "PINVOU_READER_RESUME_TEST_CHILD";
+    if std::env::var(CHILD).as_deref() != Ok("1") {
+        run_reader_child("real_reader_journal_owner_rejects_late_replay_after_fifo_rotation");
+        return;
+    }
+    // The real business poll pauses synchronously outside M/J; other runtime
+    // threads must remain free to rotate the manager and authenticate a peer.
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(4)
+        .enable_all()
+        .build()
+        .unwrap();
+    runtime.block_on(async {
+        tokio::time::timeout(Duration::from_secs(60),
+            crate::features::remote_control::controller::relay_runtime::reader_resume_tests::journal_owner_tests::journal_owner_round_trip(
+                |probe| super::super::desktop_remote_task::journal_owner_tests::host(Some(probe)),
+                |handle,lease,remote_ref| {
+                    use tauri::Manager as _;
+                    handle.state::<std::sync::Arc<super::super::desktop_remote_task::DesktopRemoteTaskRuntime>>()
+                        .service().ensure_unclaimed_remote_session(remote_ref,"Journal owner regression",&lease.remote_control_generation).unwrap()
+                }
+            )).await.unwrap();
+    });
+}
+
+#[test]
 fn real_relay_manager_routes_controller_lane_outage_signal() {
     const CHILD: &str = "PINVOU_READER_RESUME_TEST_CHILD";
     if std::env::var(CHILD).as_deref() == Ok("1") {
@@ -112,14 +139,19 @@ fn run_isolated_reader(retire_endpoint: bool) {
         });
         return;
     }
-    // A separate process owns Tauri's global runtime and path/env overrides.
-    // Never alter the test runner's home or share its live managed states.
-    let module = module_path!().split_once("::").unwrap().1;
     let name = if retire_endpoint {
         "real_reader_endpoint_retirement_closes_waiting_and_connected_workers"
     } else {
         "real_reader_manager_worker_resume_round_trip"
     };
+    run_reader_child(name);
+}
+
+fn run_reader_child(name: &str) {
+    const CHILD: &str = "PINVOU_READER_RESUME_TEST_CHILD";
+    // A separate process owns Tauri's global runtime and path/env overrides.
+    // Never alter the test runner's home or share its live managed states.
+    let module = module_path!().split_once("::").unwrap().1;
     let filter = format!("{module}::{name}");
     let mut child = std::process::Command::new(std::env::current_exe().unwrap())
         .args(["--exact", &filter, "--nocapture"])
@@ -128,7 +160,12 @@ fn run_isolated_reader(retire_endpoint: bool) {
         .stderr(std::process::Stdio::piped())
         .spawn()
         .unwrap();
-    let deadline = Instant::now() + Duration::from_secs(25);
+    let seconds = if name == "real_reader_journal_owner_rejects_late_replay_after_fifo_rotation" {
+        70
+    } else {
+        25
+    };
+    let deadline = Instant::now() + Duration::from_secs(seconds);
     let status = loop {
         if let Some(status) = child.try_wait().unwrap() {
             break status;
