@@ -152,7 +152,7 @@ fn partial_input_proof_reuses_dispositions_and_rechecks_changed_segments() {
         assert_eq!(parse_tool_input(&buffer).is_some(), expected_some);
 
         // A newly completed raw root takes precedence over an extracted array.
-        buffer.push_str("}");
+        buffer.push('}');
         assert_eq!(proof.reuse(&buffer, "}"), None);
         let some = parse_tool_input(&buffer).is_some();
         proof.record(some);
@@ -183,6 +183,26 @@ fn partial_input_proof_rejects_stale_buffers_and_explicit_invalidation() {
     let mut invalidated = certified;
     invalidated.invalidate();
     assert_eq!(invalidated.reuse(&format!("{prefix}x"), "x"), None);
+}
+
+#[test]
+fn partial_input_refresh_uses_certified_reuse_for_both_dispositions() {
+    for (prefix, parsed) in [(r#"{"content":""#, false), (r#"{"s":"[1]"#, true)] {
+        let mut state = tool_state(json!({"initial":true}), "");
+        for (delta, expected_reuses) in [(prefix, 0), (" first", 1), (" second", 2)] {
+            state.input_buffer.push_str(delta);
+            assert_eq!(state.refresh_partial_input(delta), parsed);
+            assert_eq!(
+                state.input_parse_proof.reuse_count, expected_reuses,
+                "refresh must take the reuse branch instead of parsing every prefix"
+            );
+        }
+        // A changed raw segment forces parsing rather than a counted reuse.
+        state.input_buffer.push('}');
+        let expected = parse_tool_input(&state.input_buffer);
+        assert_eq!(state.refresh_partial_input("}"), expected.is_some());
+        assert_eq!(state.input_parse_proof.reuse_count, 2);
+    }
 }
 
 #[test]
@@ -225,7 +245,7 @@ fn partial_input_differential_invalidation_preserves_terminal_mutations_and_late
     // These writes model block-stop error tagging or schema normalization.
     // They must survive when the next full evaluation returns None, and be
     // replaced when the authoritative parser returns Some (the extracted array).
-    candidate.invalidate_input_parse_hint();
+    candidate.invalidate_input_parse_proof();
     baseline.input = json!({"terminal":"mutation"});
     baseline.input_parse_error = Some("terminal parse error".into());
     candidate.input = baseline.input.clone();
@@ -238,7 +258,7 @@ fn partial_input_differential_invalidation_preserves_terminal_mutations_and_late
     for delta in [r#"{"content":""#, "unfinished"] {
         compare_delta(&mut baseline, &mut candidate, delta);
     }
-    candidate.invalidate_input_parse_hint();
+    candidate.invalidate_input_parse_proof();
     baseline.input = json!({"raw_arguments":baseline.input_buffer});
     baseline.input_parse_error = Some("malformed final input".into());
     candidate.input = baseline.input.clone();

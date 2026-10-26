@@ -403,6 +403,7 @@ fn extract_json_segment(text: &str) -> Option<String> {
 }
 
 fn extract_balanced_segment(text: &str, open: char, close: char) -> Option<String> {
+    // Raw segment selection is mirrored by engine::partial_input; keep in sync.
     let start = text.find(open)?;
     let mut depth = 0i32;
     let mut end = None;

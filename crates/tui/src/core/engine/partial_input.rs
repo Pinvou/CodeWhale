@@ -8,7 +8,9 @@
 //! case only the raw balanced-segment fallback can produce a value. Reuse the
 //! prior Some/None disposition only while that segment's byte range is stable.
 //! This state is owned by one append-only tool block, never by a tool ID.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+//! Invalid Unicode hex disables reuse conservatively; unlike the escape-match
+//! rule, this is defense in depth, not a separately mutation-killed condition.
+#[derive(Clone, Debug, PartialEq, Eq)]
 enum Segment {
     Root(usize),
     Array(usize, usize),
@@ -31,6 +33,8 @@ pub(super) struct PartialInputProof {
     certified: bool,
     previous: Option<Segment>,
     last_some: bool,
+    #[cfg(test)]
+    pub(super) reuse_count: usize,
 }
 impl PartialInputProof {
     /// The owner must append exactly `delta` and invalidate before any other
@@ -94,8 +98,9 @@ impl PartialInputProof {
                     self.array_end = Some(pos + 1);
                 }
             }
-            // No fence stripping, invalid escapes or raw control removal may
-            // alter quote/escape parity under the certificate.
+            // Reject fences and raw controls. Invalid escapes must also disable
+            // reuse: quote-unaware closer removal can merge escape runs and
+            // change quote parity. There is no invalid-escape repair pass.
             if b == b'`' {
                 self.disabled = true;
             }

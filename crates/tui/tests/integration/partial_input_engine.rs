@@ -1,4 +1,5 @@
 //! Public-boundary integration evidence: real Engine, synthetic local tools only.
+use crate::llm_client::mock::canned;
 use codewhale_tui::{
     AppMode, ApprovalMode,
     config::Config,
@@ -15,7 +16,10 @@ use std::{
     collections::VecDeque,
     fs,
     path::Path,
-    sync::{Arc, Mutex},
+    sync::{
+        Arc, Mutex,
+        atomic::{AtomicBool, AtomicUsize, Ordering},
+    },
     time::Duration,
 };
 use tempfile::tempdir;
@@ -73,12 +77,12 @@ fn external_user_message_op(content: &str, mode: AppMode, config: &Config) -> Op
     }
 }
 
-struct MockLlmClient {
+struct PartialInputModel {
     turns: Mutex<VecDeque<anyhow::Result<Vec<StreamEvent>>>>,
     requests: Mutex<Vec<MessageRequest>>,
     initial_network_error: AtomicBool,
 }
-impl MockLlmClient {
+impl PartialInputModel {
     fn new(turns: Vec<Vec<StreamEvent>>) -> Self {
         Self {
             turns: Mutex::new(turns.into_iter().map(Ok).collect()),
@@ -94,7 +98,7 @@ impl MockLlmClient {
     }
 }
 #[async_trait::async_trait]
-impl ModelClient for MockLlmClient {
+impl ModelClient for PartialInputModel {
     fn provider_name(&self) -> &str {
         "partial-tool-test"
     }
@@ -125,8 +129,6 @@ impl ModelClient for MockLlmClient {
         Ok(true)
     }
 }
-
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
 fn argument_chunks(text: &str) -> Vec<&str> {
     let mut parts = Vec::new();
@@ -201,7 +203,7 @@ async fn partial_input_engine_interleaved_tools_keep_complete_arguments_and_hist
         canned::message_delta("tool_use", None),
         canned::message_stop(),
     ]);
-    let mock = Arc::new(MockLlmClient::new(vec![
+    let mock = Arc::new(PartialInputModel::new(vec![
         turn,
         canned::simple_text_turn("done"),
     ]));
@@ -284,7 +286,7 @@ async fn partial_input_engine_malformed_final_preserves_raw_arguments_and_does_n
         canned::message_delta("tool_use", None),
         canned::message_stop(),
     ]);
-    let mock = Arc::new(MockLlmClient::new(vec![
+    let mock = Arc::new(PartialInputModel::new(vec![
         turn,
         canned::simple_text_turn("recovered"),
     ]));
@@ -313,6 +315,43 @@ async fn partial_input_engine_malformed_final_preserves_raw_arguments_and_does_n
         2,
         "validation feedback must reach the next model request"
     );
+    let requests = mock.captured_requests();
+    let history_input = requests[1]
+        .messages
+        .iter()
+        .flat_map(|message| &message.content)
+        .find_map(|block| match block {
+            ContentBlock::ToolUse { id, input, .. } if id == "bad-call" => Some(input),
+            _ => None,
+        })
+        .expect("malformed arguments must reach validation feedback history");
+    assert_eq!(history_input, &json!({"raw_arguments":raw}));
+    let feedback = requests[1]
+        .messages
+        .iter()
+        .flat_map(|message| &message.content)
+        .find_map(|block| match block {
+            ContentBlock::ToolResult {
+                tool_use_id,
+                content,
+                is_error,
+                ..
+            } if tool_use_id == "bad-call" => Some((content, is_error)),
+            _ => None,
+        })
+        .expect("the next request must contain the matching validation error");
+    assert_eq!(*feedback.1, Some(true));
+    let validation_feedback: serde_json::Value = serde_json::from_str(
+        feedback
+            .0
+            .rsplit_once("\nTool validation feedback: ")
+            .expect("machine-readable validation feedback must reach the model")
+            .1,
+    )
+    .expect("valid feedback JSON");
+    assert_eq!(validation_feedback["category"], "invalid_input");
+    assert_eq!(validation_feedback["retryable"], true);
+    assert_eq!(validation_feedback["side_effect_status"], "not_started");
     handle.send(Op::Shutdown).await.expect("shutdown");
     task.await.expect("Engine task");
 }
@@ -555,136 +594,10 @@ async fn partial_input_engine_network_error_preserves_partial_tool_feedback() {
     task.await.expect("Engine task");
 }
 
-mod canned {
-    use codewhale_tui::models::{
-        ContentBlockStart, Delta, MessageDelta, MessageResponse, StreamEvent, Usage,
-    };
-    use serde_json::Value;
-
-    /// `MessageStart` event with a synthetic message envelope.
-    #[must_use]
-    pub fn message_start(id: &str) -> StreamEvent {
-        StreamEvent::MessageStart {
-            message: MessageResponse {
-                id: id.to_string(),
-                r#type: "message".to_string(),
-                role: "assistant".to_string(),
-                content: vec![],
-                model: "mock-model".to_string(),
-                stop_reason: None,
-                stop_sequence: None,
-                container: None,
-                usage: Usage::default(),
-            },
-        }
-    }
-
-    /// Open a text content block at `index`.
-    #[must_use]
-    pub fn text_block_start(index: u32) -> StreamEvent {
-        StreamEvent::ContentBlockStart {
-            index,
-            content_block: ContentBlockStart::Text {
-                text: String::new(),
-            },
-        }
-    }
-
-    /// Append `text` to the content block at `index`.
-    #[must_use]
-    pub fn text_delta(index: u32, text: &str) -> StreamEvent {
-        StreamEvent::ContentBlockDelta {
-            index,
-            delta: Delta::TextDelta {
-                text: text.to_string(),
-            },
-        }
-    }
-
-    /// Open a tool_use content block at `index`.
-    #[must_use]
-    pub fn tool_use_block_start(index: u32, id: &str, name: &str) -> StreamEvent {
-        StreamEvent::ContentBlockStart {
-            index,
-            content_block: ContentBlockStart::ToolUse {
-                id: id.to_string(),
-                name: name.to_string(),
-                input: Value::Null,
-                caller: None,
-                thought_signature: None,
-            },
-        }
-    }
-
-    /// Stream partial JSON for a tool's input arguments.
-    #[must_use]
-    pub fn tool_input_delta(index: u32, partial_json: &str) -> StreamEvent {
-        StreamEvent::ContentBlockDelta {
-            index,
-            delta: Delta::InputJsonDelta {
-                partial_json: partial_json.to_string(),
-            },
-        }
-    }
-
-    /// Close the content block at `index`.
-    #[must_use]
-    pub fn block_stop(index: u32) -> StreamEvent {
-        StreamEvent::ContentBlockStop { index }
-    }
-
-    /// Emit a `message_delta` carrying `stop_reason` and optional `usage`.
-    #[must_use]
-    pub fn message_delta(stop_reason: &str, usage: Option<Usage>) -> StreamEvent {
-        StreamEvent::MessageDelta {
-            delta: MessageDelta {
-                stop_reason: Some(stop_reason.to_string()),
-                stop_sequence: None,
-            },
-            usage,
-        }
-    }
-
-    /// Final `message_stop` sentinel.
-    #[must_use]
-    pub fn message_stop() -> StreamEvent {
-        StreamEvent::MessageStop
-    }
-
-    /// Convenience: a complete "assistant emits this text" turn ending with
-    /// `stop_reason = "end_turn"`.
-    #[must_use]
-    pub fn simple_text_turn(text: &str) -> Vec<StreamEvent> {
-        vec![
-            message_start("mock_msg_1"),
-            text_block_start(0),
-            text_delta(0, text),
-            block_stop(0),
-            message_delta("end_turn", None),
-            message_stop(),
-        ]
-    }
-
-    /// Convenience: a turn that emits one assistant tool_call and stops.
-    #[must_use]
-    pub fn tool_call_turn(call_id: &str, tool_name: &str, args_json: &str) -> Vec<StreamEvent> {
-        vec![
-            message_start("mock_msg_tool"),
-            tool_use_block_start(0, call_id, tool_name),
-            tool_input_delta(0, args_json),
-            block_stop(0),
-            message_delta("tool_use", None),
-            message_stop(),
-        ]
-    }
-}
-
-// === Tests ===
-
 #[tokio::test]
 async fn partial_input_engine_network_error_before_any_content_can_retry() {
     let workspace = tempdir().expect("workspace");
-    let model = Arc::new(MockLlmClient::new(vec![canned::simple_text_turn(
+    let model = Arc::new(PartialInputModel::new(vec![canned::simple_text_turn(
         "recovered",
     )]));
     model.initial_network_error.store(true, Ordering::SeqCst);
@@ -708,6 +621,12 @@ async fn partial_input_engine_network_error_before_any_content_can_retry() {
         model.call_count(),
         2,
         "a transient stream failure before content may retry"
+    );
+    let requests = model.captured_requests();
+    assert_eq!(
+        serde_json::to_value(&requests[0]).expect("serialize original request"),
+        serde_json::to_value(&requests[1]).expect("serialize retried request"),
+        "a transparent retry must preserve the entire original model request"
     );
     assert!(
         !events

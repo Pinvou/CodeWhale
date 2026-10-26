@@ -2761,13 +2761,13 @@ impl Engine {
                         thought_signature: None,
                         input_buffer: String::new(),
                         input_parse_error: None,
-                        input_parse_hint: Default::default(),
+                        input_parse_proof: Default::default(),
                     });
                 }
             }
 
             for tool in &mut tool_uses {
-                tool.invalidate_input_parse_hint();
+                tool.invalidate_input_parse_proof();
                 let Some(schema) = tool_catalog
                     .iter()
                     .find(|candidate| candidate.name == tool.name)
@@ -6091,7 +6091,7 @@ impl Engine {
                             thought_signature,
                             input_buffer: String::new(),
                             input_parse_error: None,
-                            input_parse_hint: Default::default(),
+                            input_parse_proof: Default::default(),
                         });
                     }
                     ContentBlockStart::ServerToolUse { id, name, input } => {
@@ -6114,7 +6114,7 @@ impl Engine {
                             thought_signature: None,
                             input_buffer: String::new(),
                             input_parse_error: None,
-                            input_parse_hint: Default::default(),
+                            input_parse_proof: Default::default(),
                         });
                     }
                 },
@@ -6267,7 +6267,7 @@ impl Engine {
                     if let Some(tool_idx) = current_tool_indices.remove(&index)
                         && let Some(tool_state) = tool_uses.get_mut(tool_idx)
                     {
-                        tool_state.invalidate_input_parse_hint();
+                        tool_state.invalidate_input_parse_proof();
                         if self.active_turn_tool_security.is_some() {
                             crate::logging::info("Restricted tool block stop (details redacted)");
                         } else {

@@ -27,6 +27,12 @@ the actual binary in the terminal being changed.
 `integration/` and `cucumber/`). The surviving binaries are the 2 directory
 harnesses above.
 
+The integration harness re-exports the production `models` types instead of
+compiling a second copy. Shared mock/canned events can therefore drive the
+public Engine boundary directly, without conversions or duplicate builders.
+Its former `model_catalog` mirror is unnecessary as well; both modules retain
+their canonical unit tests in the library.
+
 Filtering still works via the module path:
 
 ```sh

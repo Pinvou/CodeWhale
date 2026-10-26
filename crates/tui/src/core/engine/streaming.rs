@@ -26,27 +26,33 @@ pub(super) struct ToolUseState {
     pub(super) thought_signature: Option<String>,
     pub(super) input_buffer: String,
     pub(super) input_parse_error: Option<String>,
-    pub(super) input_parse_hint: PartialInputProof,
+    pub(super) input_parse_proof: PartialInputProof,
 }
 
 impl ToolUseState {
     /// Called after appending/logging the raw delta, preserving parsed-log order.
+    /// Returns whether the current buffer has a parsed value, including reuse.
+    /// A false return leaves the existing partial mirror unchanged.
     pub(super) fn refresh_partial_input(&mut self, delta: &str) -> bool {
-        if let Some(some) = self.input_parse_hint.reuse(&self.input_buffer, delta) {
-            return some;
+        if let Some(parsed) = self.input_parse_proof.reuse(&self.input_buffer, delta) {
+            #[cfg(test)]
+            {
+                self.input_parse_proof.reuse_count += 1;
+            }
+            return parsed;
         }
-        let some = if let Some(value) = parse_tool_input(&self.input_buffer) {
+        let parsed = if let Some(value) = parse_tool_input(&self.input_buffer) {
             self.input = value;
             true
         } else {
             false
         };
-        self.input_parse_hint.record(some);
-        some
+        self.input_parse_proof.record(parsed);
+        parsed
     }
 
-    pub(super) fn invalidate_input_parse_hint(&mut self) {
-        self.input_parse_hint.invalidate();
+    pub(super) fn invalidate_input_parse_proof(&mut self) {
+        self.input_parse_proof.invalidate();
     }
 }
 

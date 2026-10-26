@@ -23447,7 +23447,7 @@ fn tool_state(initial: serde_json::Value, buffer: &str) -> ToolUseState {
         thought_signature: None,
         input_buffer: buffer.into(),
         input_parse_error: None,
-        input_parse_hint: Default::default(),
+        input_parse_proof: Default::default(),
     }
 }
 
@@ -29924,7 +29924,7 @@ async fn hydration_receipt_audit_payload_carries_the_executed_marker() {
         thought_signature: None,
         input_buffer: String::new(),
         input_parse_error: None,
-        input_parse_hint: Default::default(),
+        input_parse_proof: Default::default(),
     }];
     let mut active = HashSet::new();
     let mut budget = crate::tools::tool_call_budget::ToolCallBudget::new(surface.max_tool_calls);
