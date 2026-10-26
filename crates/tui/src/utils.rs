@@ -378,6 +378,23 @@ fn write_atomic_with_permissions(
         None
     };
 
+    // tempfile calls Win32 directly when persisting. Give both its source and
+    // destination the canonical parent's extended-length prefix, as std::fs
+    // already does internally. Canonicalize only the parent: replacing a leaf
+    // symlink must retain the existing atomic-write semantics.
+    #[cfg(windows)]
+    let windows_parent = fs::canonicalize(if parent.as_os_str().is_empty() {
+        Path::new(".")
+    } else {
+        parent
+    })?;
+    #[cfg(windows)]
+    let windows_destination = windows_parent.join(path.file_name().ok_or_else(|| {
+        std::io::Error::new(std::io::ErrorKind::InvalidInput, "path has no file name")
+    })?);
+    #[cfg(windows)]
+    let (parent, path) = (windows_parent.as_path(), windows_destination.as_path());
+
     // Use parent directory so the rename is on the same filesystem.
     #[cfg(unix)]
     let mut builder = tempfile::Builder::new();
@@ -1081,6 +1098,27 @@ mod atomic_write_tests {
         write_atomic(&path, b"new content").expect("write_atomic");
         let read = fs::read_to_string(&path).expect("read");
         assert_eq!(read, "new content");
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn forkguard_atomic_write_preserves_long_windows_destinations() {
+        let tmp = tempdir().expect("tempdir");
+        let parent = tmp
+            .path()
+            .join("a".repeat(80))
+            .join("b".repeat(80))
+            .join("c".repeat(80));
+        fs::create_dir_all(&parent).unwrap();
+        let path = parent.join("artifact.owner.json");
+        assert!(path.as_os_str().len() > 260);
+        write_atomic(&path, b"private first").unwrap();
+        assert_eq!(fs::read(&path).unwrap(), b"private first");
+        write_atomic(&path, b"private replacement").unwrap();
+        assert_eq!(fs::read(&path).unwrap(), b"private replacement");
+        write_atomic_workspace(&path, b"workspace replacement").unwrap();
+        assert_eq!(fs::read(&path).unwrap(), b"workspace replacement");
+        assert_eq!(fs::read_dir(&parent).unwrap().count(), 1);
     }
 
     #[cfg(windows)]

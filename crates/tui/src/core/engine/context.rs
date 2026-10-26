@@ -878,14 +878,15 @@ pub(crate) fn tool_result_context_view(
     let lead = tool_result_metadata_summary(metadata)
         .map(|summary| format!("Summary: {summary}\n"))
         .unwrap_or_default();
-    let body = crate::tools::truncate::fit_to_inline_budget(
+    let text = crate::tools::truncate::fit_to_inline_budget_with_lead(
         raw,
-        budget.saturating_sub(lead.chars().count()),
+        &lead,
+        budget,
         recovery_path,
         retrieval_ref,
     );
     ToolResultContextView {
-        text: format!("{lead}{body}"),
+        text,
         needs_full_output_artifact: recovery.is_none(),
     }
 }
@@ -902,16 +903,8 @@ fn summary_view(
     }
     let recovery_path = recovery.map(|recovery| recovery.path);
     let retrieval_ref = recovery.and_then(|recovery| recovery.artifact_id);
-    let footer = match recovery_path {
-        Some(path) => format!(
-            "[complete returned tool result at {path}; {}]",
-            crate::tools::truncate::spillover_recovery_instruction(retrieval_ref)
-        ),
-        None => format!(
-            "[the full output could not be saved; {}]",
-            crate::tools::truncate::unsaved_output_recovery_instruction()
-        ),
-    };
+    let footer =
+        crate::tools::truncate::model_context_recovery_footer(recovery_path, retrieval_ref, budget);
     // A second fit_to_inline_budget call would append its own footer before
     // ours, duplicating recovery instructions and overshooting small routes.
     let footer_chars = footer.chars().count();

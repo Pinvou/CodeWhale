@@ -19776,28 +19776,1024 @@ fn forkguard_short_coordination_fields_are_inline_or_recoverable() {
 #[test]
 fn forkguard_structured_recovery_footer_is_single_and_route_bounded() {
     let _workshop = crate::tools::large_output_router::active_workshop_test_guard();
-    let output =
-        ToolResult::success(json!({"action": "roster", "members": "x".repeat(4_000)}).to_string());
-    for window in [1, 64, 1_024, 4_096, 128_000] {
+    with_artifact_home(|home| {
+        // The production fleet projection has an agents array, rather than a
+        // fictitious string-valued members field.
+        let raw = json!({"agents":[{"agent_id":"agent_12345678","status":"completed","result":"detail\n".repeat(4_000)}]}).to_string();
+        let unsaved = ToolResult::success(raw.clone());
+        let mut saved = unsaved.clone();
+        assert!(
+            crate::tools::truncate::preserve_full_output_for_model_context(
+                &mut saved,
+                "structured-short",
+                "agent",
+                SESSION_6508
+            )
+        );
+        for window in [1, 64, 1_024, 2_048, 4_096, 128_000] {
+            for (output, is_saved) in [(&unsaved, false), (&saved, true)] {
+                let view = super::context::tool_result_context_view(
+                    ApiProvider::Deepseek,
+                    ROUTE_128K,
+                    Some(codewhale_config::route::RouteLimits {
+                        context_tokens: Some(window),
+                        ..Default::default()
+                    }),
+                    "agent",
+                    output,
+                );
+                let budget = crate::route_budget::route_inline_char_budget(Some(window as u32));
+                assert_eq!(view.needs_full_output_artifact, !is_saved);
+                assert!(
+                    view.text.chars().count() <= budget,
+                    "window={window}: {}",
+                    view.text
+                );
+                assert!(view.text.matches("recovery").count() <= 1, "{}", view.text);
+                if window >= 2_048 {
+                    if is_saved {
+                        assert!(view.text.contains("retrieve_tool_result"), "{}", view.text);
+                        let (_, rest) = view
+                            .text
+                            .split_once("ref=\"")
+                            .expect("short ref must be advertised whole");
+                        let (reference, _) = rest.split_once('"').expect("closed recovery ref");
+                        let runtime = tokio::runtime::Builder::new_current_thread()
+                            .enable_all()
+                            .build()
+                            .unwrap();
+                        let context =
+                            crate::tools::ToolContext::new(home).with_state_namespace(SESSION_6508);
+                        let recovered = runtime
+                            .block_on(crate::tools::spec::ToolSpec::execute(
+                                &crate::tools::tool_result_retrieval::RetrieveToolResultTool,
+                                json!({"ref":reference,"mode":"tail","line_count":1}),
+                                &context,
+                            ))
+                            .unwrap();
+                        assert!(recovered.success && recovered.content.contains("detail"));
+                    } else {
+                        assert!(
+                            view.text.contains("no tool call reaches this copy"),
+                            "{}",
+                            view.text
+                        );
+                        assert!(view.text.contains("re-run"), "{}", view.text);
+                    }
+                }
+            }
+        }
+        let call_id = format!("art_{}", "x".repeat(188));
+        let mut long_saved = unsaved.clone();
+        assert!(
+            crate::tools::truncate::preserve_full_output_for_model_context(
+                &mut long_saved,
+                &call_id,
+                "agent",
+                SESSION_6508
+            )
+        );
         let view = super::context::tool_result_context_view(
             ApiProvider::Deepseek,
             ROUTE_128K,
             Some(codewhale_config::route::RouteLimits {
-                context_tokens: Some(window),
+                context_tokens: Some(2048),
                 ..Default::default()
             }),
             "agent",
+            &long_saved,
+        );
+        assert!(view.text.contains("ref_kind=tool_call_id"), "{}", view.text);
+        assert!(view.text.chars().count() <= 245);
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let context = crate::tools::ToolContext::new(home).with_state_namespace(SESSION_6508);
+        let recovered = runtime
+            .block_on(crate::tools::spec::ToolSpec::execute(
+                &crate::tools::tool_result_retrieval::RetrieveToolResultTool,
+                json!({"ref":call_id,"ref_kind":"tool_call_id","mode":"tail","line_count":1}),
+                &context,
+            ))
+            .unwrap();
+        assert!(recovered.success && recovered.content.contains("detail"));
+        assert_eq!(saved.content, raw);
+    });
+}
+
+#[test]
+fn forkguard_plan_retained_output_is_discoverable_and_session_bound() {
+    with_artifact_home(|home| {
+        let raw = "first\nretained tail".repeat(400);
+        let mut output = ToolResult::success(raw);
+        assert!(
+            crate::tools::truncate::preserve_full_output_for_model_context(
+                &mut output,
+                "plan-own",
+                "generic_result",
+                SESSION_6508
+            )
+        );
+        let mut foreign = ToolResult::success("foreign evidence".repeat(400));
+        assert!(
+            crate::tools::truncate::preserve_full_output_for_model_context(
+                &mut foreign,
+                "plan-foreign",
+                "generic_result",
+                "session-other"
+            )
+        );
+        let (engine, _handle) = Engine::new(deterministic_engine_config(home), &Config::default());
+        let context = engine
+            .build_tool_context(AppMode::Plan, false)
+            .with_state_namespace(SESSION_6508);
+        let registry = engine
+            .build_turn_tool_registry_builder(
+                AppMode::Plan,
+                engine.config.todos.clone(),
+                engine.config.plan_state.clone(),
+            )
+            .build(context);
+        // Match Engine::build_turn_tools: registry specs alone have not
+        // received the native deferral policy used by real model requests.
+        let catalog = build_model_tool_catalog_with_surface(
+            registry.to_api_tools(),
+            Vec::new(),
+            AppMode::Plan,
+            &HashSet::new(),
+            crate::model_profile::ToolSurfaceBudget::Standard,
+        );
+        let mut surface = ToolSurfacePolicy::new(
+            registry,
+            Some(catalog),
+            AppMode::Plan,
+            &HashSet::new(),
+            &[],
+            false,
+            Some(vec!["retrieve_tool_result".into(), "tool_search".into()]),
+            None,
+            None,
+            engine.session.approval_mode,
+        );
+        assert!(surface.registry.contains("retrieve_tool_result"));
+        assert!(!surface.active_names.contains("retrieve_tool_result"));
+        let search = execute_tool_search(
+            "tool_search",
+            &json!({"query":"retrieve_tool_result","match":"regex"}),
+            &surface.catalog,
+            &mut surface.active_names,
+        )
+        .unwrap();
+        assert!(search.content.contains("retrieve_tool_result"));
+        assert!(surface.active_names.contains("retrieve_tool_result"));
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let result = runtime
+            .block_on(surface.registry.execute_full(
+                "retrieve_tool_result",
+                json!({"ref":"art_plan-own","mode":"tail","line_count":1}),
+            ))
+            .unwrap();
+        assert!(result.success && result.content.contains("retained tail"));
+        let foreign_path = foreign.metadata.as_ref().unwrap()["artifact_path"]
+            .as_str()
+            .unwrap();
+        assert!(
+            runtime
+                .block_on(
+                    surface
+                        .registry
+                        .execute_full("retrieve_tool_result", json!({"ref":foreign_path}))
+                )
+                .is_err()
+        );
+        // Explicit deny still narrows a registered reader out of discovery.
+        let denied = policy_for_catalog(
+            surface.catalog.clone(),
+            None,
+            Some(vec!["retrieve_tool_result".into()]),
+            engine.session.approval_mode,
+        );
+        assert!(
+            !denied
+                .catalog
+                .iter()
+                .any(|tool| tool.name == "retrieve_tool_result")
+        );
+    });
+}
+
+#[test]
+fn forkguard_classic_legacy_hint_recovers_after_session_artifact_write_failure() {
+    use crate::tools::large_output_router::WorkshopConfig;
+    use crate::tools::spec::ToolSpec;
+    let _environment = crate::test_support::lock_test_env();
+    let _classic = crate::test_support::EnvVarGuard::set("CODEWHALE_CLASSIC_OUTPUT_ROUTING", "1");
+    let _workshop = crate::tools::large_output_router::active_workshop_test_guard();
+    struct RestoreWorkshop(WorkshopConfig);
+    impl Drop for RestoreWorkshop {
+        fn drop(&mut self) {
+            let _ = WorkshopConfig::install_active(Some(&self.0));
+        }
+    }
+    let _restore = RestoreWorkshop(WorkshopConfig::install_active(None));
+    with_artifact_home(|home| {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        for (index, call_id) in ["call.legacy", "art_call.legacy"].into_iter().enumerate() {
+            let session = format!("classic-recovery-{index}");
+            let artifacts = home
+                .join(".codewhale/sessions")
+                .join(&session)
+                .join("artifacts");
+            fs::create_dir_all(artifacts.parent().unwrap()).unwrap();
+            // A real filesystem failure for the session writer, while the
+            // independent legacy directory and its ownership sidecar work.
+            fs::write(&artifacts, b"not a directory").unwrap();
+            #[cfg(unix)]
+            assert_eq!(
+                crate::tools::large_output_router::read_evidence_metadata(
+                    &session,
+                    &crate::artifacts::artifact_id_for_tool_call(call_id),
+                )
+                .unwrap_err()
+                .kind(),
+                std::io::ErrorKind::NotADirectory,
+            );
+            let raw = format!("BEGIN\n{}END", "classic-line\n".repeat(10_000));
+            assert!(raw.len() > crate::tools::truncate::SPILLOVER_THRESHOLD_BYTES);
+            let mut output = ToolResult::success(raw.clone());
+            let saved = crate::tools::truncate::apply_spillover_with_artifact(
+                &mut output,
+                call_id,
+                "generic_result",
+                &session,
+            )
+            .expect("classic spillover survives session write failure");
+            assert_eq!(
+                Some(saved.clone()),
+                crate::tools::truncate::spillover_path(call_id)
+            );
+            assert_eq!(fs::read_to_string(&saved).unwrap(), raw);
+            assert!(
+                output
+                    .metadata
+                    .as_ref()
+                    .unwrap()
+                    .get("artifact_id")
+                    .is_none()
+            );
+            let proof = crate::tools::truncate::read_legacy_spillover_ownership(&saved).unwrap();
+            assert_eq!(proof.origin_session, session);
+            let view = super::context::tool_result_context_view(
+                ApiProvider::Deepseek,
+                ROUTE_128K,
+                Some(codewhale_config::route::RouteLimits {
+                    context_tokens: Some(2048),
+                    ..Default::default()
+                }),
+                "generic_result",
+                &output,
+            );
+            assert!(view.text.chars().count() <= 245, "{}", view.text);
+            assert!(!view.needs_full_output_artifact);
+            assert!(
+                view.text
+                    .contains("retrieve_tool_result ref=<call id>,ref_kind=tool_call_id"),
+                "{}",
+                view.text
+            );
+            let full_view = super::context::tool_result_context_view(
+                ApiProvider::Deepseek,
+                ROUTE_128K,
+                None,
+                "generic_result",
+                &output,
+            );
+            assert!(full_view.text.chars().count() <= budget_128k());
+            assert!(!full_view.needs_full_output_artifact);
+            assert!(
+                full_view
+                    .text
+                    .contains("ref=<this call's id>, ref_kind=\"tool_call_id\""),
+                "{}",
+                full_view.text
+            );
+            let context = crate::tools::spec::ToolContext::new(home).with_state_namespace(&session);
+            #[cfg(unix)]
+            if call_id.starts_with("art_") {
+                // This printed default path follows the historical grammar.
+                // The emitted full hint must instead teach typed raw-ID
+                // retrieval, which uses this legacy writer's own proof below.
+                let default_error = runtime
+                    .block_on(
+                        crate::tools::tool_result_retrieval::RetrieveToolResultTool.execute(
+                            json!({"ref":saved.to_str().unwrap(),"mode":"tail","line_count":1}),
+                            &context,
+                        ),
+                    )
+                    .unwrap_err()
+                    .to_string();
+                assert!(
+                    default_error.contains("evidence metadata is corrupt"),
+                    "{default_error}"
+                );
+            }
+            let metadata = runtime
+                .block_on(
+                    crate::tools::tool_result_retrieval::RetrieveToolResultTool.execute(
+                        json!({"ref":call_id,"ref_kind":"tool_call_id","mode":"metadata"}),
+                        &context,
+                    ),
+                )
+                .unwrap();
+            let metadata: Value = serde_json::from_str(&metadata.content).unwrap();
+            assert_eq!(metadata["ref"], call_id);
+            assert_eq!(metadata["ref_kind"], "tool_call_id");
+            assert_eq!(metadata["total_bytes"], raw.len());
+            let tail_input = json!({"ref":metadata["ref"],"ref_kind":metadata["ref_kind"],"mode":"tail","line_count":1});
+            let tail = runtime
+                .block_on(
+                    crate::tools::tool_result_retrieval::RetrieveToolResultTool
+                        .execute(tail_input.clone(), &context),
+                )
+                .unwrap();
+            assert!(tail.success && tail.content.contains("END"));
+            let bytes = runtime.block_on(crate::tools::tool_result_retrieval::RetrieveToolResultTool.execute(
+                json!({"ref":metadata["ref"],"ref_kind":metadata["ref_kind"],"mode":"bytes","length":5}), &context,
+            )).unwrap();
+            let bytes: Value = serde_json::from_str(&bytes.content).unwrap();
+            assert_eq!(bytes["data"], "QkVHSU4=");
+            assert_eq!(bytes["ref"], call_id);
+            assert_eq!(bytes["ref_kind"], "tool_call_id");
+            let foreign = crate::tools::spec::ToolContext::new(home)
+                .with_state_namespace("foreign-classic-session");
+            let error = runtime
+                .block_on(
+                    crate::tools::tool_result_retrieval::RetrieveToolResultTool
+                        .execute(tail_input.clone(), &foreign),
+                )
+                .unwrap_err()
+                .to_string();
+            assert!(error.contains("belongs to another session"), "{error}");
+            fs::write(&saved, "tampered").unwrap();
+            let error = runtime
+                .block_on(
+                    crate::tools::tool_result_retrieval::RetrieveToolResultTool
+                        .execute(tail_input.clone(), &context),
+                )
+                .unwrap_err()
+                .to_string();
+            assert!(error.contains("corrupt"), "{error}");
+            fs::write(&saved, &raw).unwrap();
+            let recovered = runtime
+                .block_on(
+                    crate::tools::tool_result_retrieval::RetrieveToolResultTool
+                        .execute(tail_input, &context),
+                )
+                .unwrap();
+            assert!(recovered.content.contains("END"));
+        }
+    });
+}
+
+#[test]
+fn forkguard_classic_typed_recovery_rejects_replaced_call_identity() {
+    use crate::tools::large_output_router::WorkshopConfig;
+    use crate::tools::spec::ToolSpec;
+    let _environment = crate::test_support::lock_test_env();
+    let _classic = crate::test_support::EnvVarGuard::set("CODEWHALE_CLASSIC_OUTPUT_ROUTING", "1");
+    let _workshop = crate::tools::large_output_router::active_workshop_test_guard();
+    struct RestoreWorkshop(WorkshopConfig);
+    impl Drop for RestoreWorkshop {
+        fn drop(&mut self) {
+            let _ = WorkshopConfig::install_active(Some(&self.0));
+        }
+    }
+    let _restore = RestoreWorkshop(WorkshopConfig::install_active(None));
+    with_artifact_home(|home| {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        for legacy_only in [true, false] {
+            let session = if legacy_only {
+                "collision-legacy"
+            } else {
+                "collision-session"
+            };
+            let first_id = "call.legacy";
+            let second_id = if legacy_only {
+                "calllegacy"
+            } else {
+                "call_legacy"
+            };
+            if legacy_only {
+                let path = home
+                    .join(".codewhale/sessions")
+                    .join(session)
+                    .join("artifacts");
+                fs::create_dir_all(path.parent().unwrap()).unwrap();
+                fs::write(path, b"not a directory").unwrap();
+                assert_eq!(
+                    crate::tools::truncate::spillover_path(first_id),
+                    crate::tools::truncate::spillover_path(second_id)
+                );
+            } else {
+                assert_eq!(
+                    crate::artifacts::artifact_id_for_tool_call(first_id),
+                    crate::artifacts::artifact_id_for_tool_call(second_id)
+                );
+            }
+            let context = crate::tools::spec::ToolContext::new(home).with_state_namespace(session);
+            let request =
+                json!({"ref":first_id,"ref_kind":"tool_call_id","mode":"tail","line_count":1});
+            let mut first =
+                ToolResult::success(format!("OLD\n{}OLD END", "payload\n".repeat(20_000)));
+            crate::tools::truncate::apply_spillover_with_artifact(
+                &mut first,
+                first_id,
+                "generic_result",
+                session,
+            )
+            .unwrap();
+            let before = runtime
+                .block_on(
+                    crate::tools::tool_result_retrieval::RetrieveToolResultTool
+                        .execute(request.clone(), &context),
+                )
+                .unwrap();
+            assert!(before.content.contains("OLD END"));
+            let mut second =
+                ToolResult::success(format!("NEW\n{}NEW END", "payload\n".repeat(20_000)));
+            let saved = crate::tools::truncate::apply_spillover_with_artifact(
+                &mut second,
+                second_id,
+                "generic_result",
+                session,
+            )
+            .unwrap();
+            assert!(fs::read_to_string(saved).unwrap().contains("NEW END"));
+            let wrong = runtime
+                .block_on(
+                    crate::tools::tool_result_retrieval::RetrieveToolResultTool
+                        .execute(request, &context),
+                )
+                .unwrap_err()
+                .to_string();
+            assert!(wrong.contains("tool-call identity"), "{session}: {wrong}");
+            let next = runtime.block_on(crate::tools::tool_result_retrieval::RetrieveToolResultTool.execute(
+                json!({"ref":second_id,"ref_kind":"tool_call_id","mode":"tail","line_count":1}), &context,
+            )).unwrap();
+            assert!(next.content.contains("NEW END") && !next.content.contains("OLD END"));
+        }
+    });
+}
+
+#[test]
+fn forkguard_classic_both_unrecoverable_copies_keep_full_output_and_retry() {
+    use crate::tools::large_output_router::WorkshopConfig;
+    use crate::tools::spec::ToolSpec;
+    let _environment = crate::test_support::lock_test_env();
+    let _classic = crate::test_support::EnvVarGuard::set("CODEWHALE_CLASSIC_OUTPUT_ROUTING", "1");
+    let _workshop = crate::tools::large_output_router::active_workshop_test_guard();
+    struct RestoreWorkshop(WorkshopConfig);
+    impl Drop for RestoreWorkshop {
+        fn drop(&mut self) {
+            let _ = WorkshopConfig::install_active(Some(&self.0));
+        }
+    }
+    let _restore = RestoreWorkshop(WorkshopConfig::install_active(None));
+    with_artifact_home(|home| {
+        let call_id = "call-both-unavailable";
+        let session = "classic-both-unavailable";
+        let legacy = crate::tools::truncate::spillover_path(call_id).unwrap();
+        let proof = crate::tools::truncate::legacy_spillover_ownership_path(&legacy);
+        let payload = crate::artifacts::session_artifact_absolute_path(
+            session,
+            &crate::artifacts::session_artifact_relative_path(
+                &crate::artifacts::artifact_id_for_tool_call(call_id),
+            ),
+        )
+        .unwrap();
+        // Separate leaf obstructions keep the metadata parent valid on both
+        // Unix and Windows: both real writes fail after the preflight passes.
+        fs::create_dir_all(&proof).unwrap();
+        fs::create_dir_all(&payload).unwrap();
+        let raw = format!("FULL\n{}END", "payload\n".repeat(20_000));
+        let mut output = ToolResult::success(raw.clone());
+        assert!(
+            crate::tools::truncate::apply_spillover_with_artifact(
+                &mut output,
+                call_id,
+                "generic_result",
+                session
+            )
+            .is_none()
+        );
+        assert_eq!(output.content, raw);
+        assert!(
+            output
+                .metadata
+                .as_ref()
+                .and_then(|m| m.get("spillover_path"))
+                .is_none()
+        );
+        assert!(
+            !crate::tools::truncate::preserve_full_output_for_model_context(
+                &mut output,
+                call_id,
+                "generic_result",
+                session
+            )
+        );
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let context = crate::tools::spec::ToolContext::new(home).with_state_namespace(session);
+        assert!(runtime.block_on(crate::tools::tool_result_retrieval::RetrieveToolResultTool.execute(
+            json!({"ref":call_id,"ref_kind":"tool_call_id","mode":"tail","line_count":1}), &context,
+        )).is_err());
+        fs::remove_dir(&proof).unwrap();
+        fs::remove_dir(&payload).unwrap();
+        crate::tools::truncate::apply_spillover_with_artifact(
+            &mut output,
+            call_id,
+            "generic_result",
+            session,
+        )
+        .unwrap();
+        let restored = runtime
+            .block_on(
+                crate::tools::tool_result_retrieval::RetrieveToolResultTool.execute(
+                    json!({"ref":call_id,"ref_kind":"tool_call_id","mode":"tail","line_count":1}),
+                    &context,
+                ),
+            )
+            .unwrap();
+        assert!(restored.content.contains("END"));
+    });
+}
+
+#[test]
+fn forkguard_classic_long_call_has_a_bounded_recoverable_proof() {
+    use crate::tools::large_output_router::WorkshopConfig;
+    use crate::tools::spec::ToolSpec;
+    let _environment = crate::test_support::lock_test_env();
+    let _classic = crate::test_support::EnvVarGuard::set("CODEWHALE_CLASSIC_OUTPUT_ROUTING", "1");
+    let _workshop = crate::tools::large_output_router::active_workshop_test_guard();
+    struct RestoreWorkshop(WorkshopConfig);
+    impl Drop for RestoreWorkshop {
+        fn drop(&mut self) {
+            let _ = WorkshopConfig::install_active(Some(&self.0));
+        }
+    }
+    let _restore = RestoreWorkshop(WorkshopConfig::install_active(None));
+    with_artifact_home(|home| {
+        let call_id = "x".repeat(241);
+        let session = "classic-long-proof";
+        let mut output = ToolResult::success(format!("LONG\n{}END", "payload\n".repeat(20_000)));
+        crate::tools::truncate::apply_spillover_with_artifact(
+            &mut output,
+            &call_id,
+            "generic_result",
+            session,
+        )
+        .unwrap();
+        let path = std::path::PathBuf::from(
+            output.metadata.as_ref().unwrap()["artifact_path"]
+                .as_str()
+                .unwrap(),
+        );
+        assert_eq!(path.file_name().unwrap().as_encoded_bytes().len(), 249);
+        let proof_path = crate::tools::truncate::legacy_spillover_ownership_path(&path);
+        assert!(proof_path.file_name().unwrap().as_encoded_bytes().len() < 100);
+        assert!(proof_path.is_file());
+        let view = super::context::tool_result_context_view(
+            ApiProvider::Deepseek,
+            ROUTE_128K,
+            Some(codewhale_config::route::RouteLimits {
+                context_tokens: Some(2048),
+                ..Default::default()
+            }),
+            "generic_result",
             &output,
         );
-        let budget = crate::route_budget::route_inline_char_budget(Some(window as u32));
-        assert!(view.needs_full_output_artifact);
         assert!(
-            view.text.chars().count() <= budget,
-            "window={window}: {}",
+            view.text.chars().count() <= 245 && view.text.contains("ref_kind=tool_call_id"),
+            "{}",
             view.text
         );
-        assert!(view.text.matches("recovery").count() <= 1, "{}", view.text);
+        let context = crate::tools::spec::ToolContext::new(home).with_state_namespace(session);
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let retained = runtime
+            .block_on(
+                crate::tools::tool_result_retrieval::RetrieveToolResultTool.execute(
+                    json!({"ref":call_id,"ref_kind":"tool_call_id","mode":"tail","line_count":1}),
+                    &context,
+                ),
+            )
+            .unwrap();
+        assert!(retained.content.contains("END"));
+    });
+}
+
+#[test]
+fn forkguard_classic_failed_proof_keeps_full_output_unadvertised_and_retryable() {
+    use crate::tools::large_output_router::WorkshopConfig;
+    use crate::tools::spec::ToolSpec;
+    let _environment = crate::test_support::lock_test_env();
+    let _classic = crate::test_support::EnvVarGuard::set("CODEWHALE_CLASSIC_OUTPUT_ROUTING", "1");
+    let _workshop = crate::tools::large_output_router::active_workshop_test_guard();
+    struct RestoreWorkshop(WorkshopConfig);
+    impl Drop for RestoreWorkshop {
+        fn drop(&mut self) {
+            let _ = WorkshopConfig::install_active(Some(&self.0));
+        }
     }
+    let _restore = RestoreWorkshop(WorkshopConfig::install_active(None));
+    with_artifact_home(|home| {
+        let session = "classic-blocked-proof";
+        let call_id = "call-proof-blocked";
+        let handle = crate::artifacts::artifact_id_for_tool_call(call_id);
+        let relative = crate::artifacts::session_artifact_relative_path(&handle);
+        let payload = crate::artifacts::session_artifact_absolute_path(session, &relative).unwrap();
+        let blocked = crate::tools::truncate::legacy_spillover_ownership_path(&payload);
+        fs::create_dir_all(&blocked).unwrap();
+        let raw = format!("FULL\n{}END", "payload\n".repeat(20_000));
+        let mut output = ToolResult::success(raw.clone());
+        assert!(
+            crate::tools::truncate::apply_spillover_with_artifact(
+                &mut output,
+                call_id,
+                "generic_result",
+                session
+            )
+            .is_none()
+        );
+        assert_eq!(output.content, raw);
+        assert!(
+            output
+                .metadata
+                .as_ref()
+                .and_then(|m| m.get("artifact_id"))
+                .is_none()
+        );
+        assert!(
+            !crate::tools::truncate::preserve_full_output_for_model_context(
+                &mut output,
+                call_id,
+                "generic_result",
+                session
+            )
+        );
+        assert_eq!(output.content, raw);
+        assert!(
+            output
+                .metadata
+                .as_ref()
+                .and_then(|m| m.get("artifact_id"))
+                .is_none()
+        );
+        // Repair only this test-owned obstruction; the immutable payload is
+        // retained and the next legitimate save/read succeeds in-process.
+        fs::remove_dir(&blocked).unwrap();
+        assert!(
+            crate::tools::truncate::preserve_full_output_for_model_context(
+                &mut output,
+                call_id,
+                "generic_result",
+                session
+            )
+        );
+        let context = crate::tools::spec::ToolContext::new(home).with_state_namespace(session);
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let retained = runtime
+            .block_on(
+                crate::tools::tool_result_retrieval::RetrieveToolResultTool.execute(
+                    json!({"ref":call_id,"ref_kind":"tool_call_id","mode":"tail","line_count":1}),
+                    &context,
+                ),
+            )
+            .unwrap();
+        assert!(retained.content.contains("END"));
+    });
+}
+
+#[test]
+fn forkguard_generic_long_call_retention_publishes_typed_identity() {
+    use crate::tools::spec::ToolSpec;
+    with_artifact_home(|home| {
+        let session = "generic-long-proof";
+        let call_id = "g".repeat(140);
+        let raw = format!("GENERIC\n{}END", "payload\n".repeat(1_000));
+        let mut output = ToolResult::success(raw.clone());
+        assert!(
+            crate::tools::truncate::preserve_full_output_for_model_context(
+                &mut output,
+                &call_id,
+                "generic_result",
+                session
+            )
+        );
+        assert_eq!(output.content, raw);
+        let handle = crate::artifacts::artifact_id_for_tool_call(&call_id);
+        assert!(
+            crate::tools::large_output_router::read_evidence_metadata(session, &handle).is_err()
+        );
+        let view = super::context::tool_result_context_view(
+            ApiProvider::Deepseek,
+            ROUTE_128K,
+            Some(codewhale_config::route::RouteLimits {
+                context_tokens: Some(2048),
+                ..Default::default()
+            }),
+            "generic_result",
+            &output,
+        );
+        assert!(!view.needs_full_output_artifact);
+        assert!(
+            view.text.chars().count() <= 245 && view.text.contains("ref_kind=tool_call_id"),
+            "{}",
+            view.text
+        );
+        let context = crate::tools::spec::ToolContext::new(home).with_state_namespace(session);
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let retained = runtime
+            .block_on(
+                crate::tools::tool_result_retrieval::RetrieveToolResultTool.execute(
+                    json!({"ref":call_id,"ref_kind":"tool_call_id","mode":"tail","line_count":1}),
+                    &context,
+                ),
+            )
+            .unwrap();
+        assert!(retained.content.contains("END"));
+    });
+}
+
+#[test]
+fn forkguard_retention_conflicting_evidence_never_advertises_another_call() {
+    use crate::tools::large_output_router::WorkshopConfig;
+    use crate::tools::spec::ToolSpec;
+    let _environment = crate::test_support::lock_test_env();
+    let _workshop = crate::tools::large_output_router::active_workshop_test_guard();
+    struct RestoreWorkshop(WorkshopConfig);
+    impl Drop for RestoreWorkshop {
+        fn drop(&mut self) {
+            let _ = WorkshopConfig::install_active(Some(&self.0));
+        }
+    }
+    let _restore = RestoreWorkshop(WorkshopConfig::install_active(None));
+    with_artifact_home(|home| {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let first_id = format!("{}.", "x".repeat(139));
+        let second_id = format!("{}_", "x".repeat(139));
+        let next_id = format!("{}z", "x".repeat(139));
+        let handle = crate::artifacts::artifact_id_for_tool_call(&first_id);
+        assert_eq!(
+            handle,
+            crate::artifacts::artifact_id_for_tool_call(&second_id)
+        );
+        for classic in [false, true] {
+            let _adaptive =
+                crate::test_support::EnvVarGuard::set("CODEWHALE_CLASSIC_OUTPUT_ROUTING", "0");
+            let session = if classic {
+                "retention-classic-conflict"
+            } else {
+                "retention-generic-conflict"
+            };
+            let raw = format!(
+                "BEGIN\n{}\nEND",
+                "x".repeat(if classic { 120_000 } else { 60_000 })
+            );
+            let mut first = ToolResult::success(raw.clone());
+            crate::tools::truncate::apply_spillover_with_artifact(
+                &mut first,
+                &first_id,
+                "generic_result",
+                session,
+            )
+            .unwrap();
+            let evidence =
+                crate::tools::large_output_router::read_evidence_metadata(session, &handle)
+                    .unwrap();
+            assert_eq!(evidence.call_id, first_id);
+            let _routing = crate::test_support::EnvVarGuard::set(
+                "CODEWHALE_CLASSIC_OUTPUT_ROUTING",
+                if classic { "1" } else { "0" },
+            );
+            let mut rejected = ToolResult::success(raw.clone());
+            assert!(
+                crate::tools::truncate::apply_spillover_with_artifact(
+                    &mut rejected,
+                    &second_id,
+                    "generic_result",
+                    session
+                )
+                .is_none()
+            );
+            assert!(
+                !crate::tools::truncate::preserve_full_output_for_model_context(
+                    &mut rejected,
+                    &second_id,
+                    "generic_result",
+                    session
+                )
+            );
+            assert_eq!(rejected.content, raw);
+            assert!(
+                rejected
+                    .metadata
+                    .as_ref()
+                    .and_then(|m| m.get("artifact_id"))
+                    .is_none()
+            );
+            assert_eq!(
+                serde_json::to_value(
+                    crate::tools::large_output_router::read_evidence_metadata(session, &handle)
+                        .unwrap()
+                )
+                .unwrap(),
+                serde_json::to_value(&evidence).unwrap()
+            );
+            let context = crate::tools::spec::ToolContext::new(home).with_state_namespace(session);
+            let retained = runtime.block_on(crate::tools::tool_result_retrieval::RetrieveToolResultTool.execute(
+                json!({"ref":first_id,"ref_kind":"tool_call_id","mode":"tail","line_count":1}), &context,
+            )).unwrap();
+            assert!(retained.content.contains("END"));
+            let wrong = runtime.block_on(crate::tools::tool_result_retrieval::RetrieveToolResultTool.execute(
+                json!({"ref":second_id,"ref_kind":"tool_call_id","mode":"tail","line_count":1}), &context,
+            )).unwrap_err().to_string();
+            assert!(wrong.contains("another tool call"), "{wrong}");
+            // A subsequent noncolliding call still saves and restores normally.
+            let mut next = ToolResult::success(raw.clone());
+            assert!(
+                crate::tools::truncate::preserve_full_output_for_model_context(
+                    &mut next,
+                    &next_id,
+                    "generic_result",
+                    session
+                )
+            );
+            let retained = runtime.block_on(crate::tools::tool_result_retrieval::RetrieveToolResultTool.execute(
+                json!({"ref":next_id,"ref_kind":"tool_call_id","mode":"tail","line_count":1}), &context,
+            )).unwrap();
+            assert!(retained.content.contains("END"));
+        }
+    });
+}
+
+#[test]
+fn forkguard_generic_metadata_and_recovery_share_the_whole_route_budget() {
+    use crate::tools::large_output_router::WorkshopConfig;
+    let _workshop = crate::tools::large_output_router::active_workshop_test_guard();
+    struct RestoreWorkshop(WorkshopConfig);
+    impl Drop for RestoreWorkshop {
+        fn drop(&mut self) {
+            let _ = WorkshopConfig::install_active(Some(&self.0));
+        }
+    }
+    let _restore = RestoreWorkshop(WorkshopConfig::install_active(None));
+    assert_eq!(
+        crate::route_budget::route_inline_char_budget(Some(2048)),
+        245
+    );
+    with_artifact_home(|home| {
+        // The old bare-ID grammar would select this distinct prior call for
+        // a current provider ID that itself starts with art_.
+        let mut previous = ToolResult::success("WRONG OLDER EVIDENCE\n".repeat(1000));
+        assert!(
+            crate::tools::truncate::preserve_full_output_for_model_context(
+                &mut previous,
+                &"x".repeat(188),
+                "generic_result",
+                SESSION_6508
+            )
+        );
+        for window in [2048, 4096, 128_000] {
+            for (index, summary) in [None, Some("m".repeat(320)), Some("界🙂".repeat(160))]
+                .into_iter()
+                .enumerate()
+            {
+                let raw = format!("BEGIN\n{}END", "一行🙂data\n".repeat(4_000));
+                let mut output = ToolResult::success(raw.clone());
+                if let Some(summary) = summary {
+                    output.metadata = Some(json!({"summary": summary}));
+                }
+                let view = |output: &ToolResult| {
+                    super::context::tool_result_context_view(
+                        ApiProvider::Deepseek,
+                        ROUTE_128K,
+                        Some(codewhale_config::route::RouteLimits {
+                            context_tokens: Some(window),
+                            ..Default::default()
+                        }),
+                        "generic_result",
+                        output,
+                    )
+                };
+                let budget = crate::route_budget::route_inline_char_budget(Some(window as u32));
+                let unsaved = view(&output);
+                assert!(unsaved.needs_full_output_artifact);
+                assert!(
+                    unsaved.text.chars().count() <= budget,
+                    "window={window}: {}",
+                    unsaved.text
+                );
+                assert!(
+                    unsaved.text.contains("no tool call reaches this copy"),
+                    "{}",
+                    unsaved.text
+                );
+                // Keep even the writer's temporary component below 255 bytes.
+                // The emitted ref still cannot fit the small-route footer.
+                let call_id = if window == 2048 {
+                    match index {
+                        0 => format!("art_{}", "x".repeat(188)),
+                        1 => format!("{}.", "x".repeat(191)),
+                        _ => "x".repeat(192),
+                    }
+                } else {
+                    format!("budget-{window}-{index}")
+                };
+                assert!(
+                    crate::tools::truncate::preserve_full_output_for_model_context(
+                        &mut output,
+                        &call_id,
+                        "generic_result",
+                        SESSION_6508,
+                    )
+                );
+                let saved = view(&output);
+                assert!(!saved.needs_full_output_artifact);
+                assert!(
+                    saved.text.chars().count() <= budget,
+                    "window={window}: {}",
+                    saved.text
+                );
+                assert!(
+                    saved.text.contains("retrieve_tool_result"),
+                    "{}",
+                    saved.text
+                );
+                assert!(saved.text.contains("output omitted ("), "{}", saved.text);
+                assert!(
+                    unsaved.text.contains("output omitted ("),
+                    "{}",
+                    unsaved.text
+                );
+                // Follow the actual model-visible instruction. A full ref
+                // invented by the test would conceal a cut quoted reference.
+                let advertised_ref = if let Some((_, rest)) = saved.text.split_once("ref=\"") {
+                    rest.split_once('"')
+                        .expect("complete quoted recovery ref")
+                        .0
+                        .to_owned()
+                } else {
+                    assert!(
+                        saved.text.contains("ref_kind=tool_call_id"),
+                        "{}",
+                        saved.text
+                    );
+                    call_id.clone()
+                };
+                // The context view cannot change the UI/full-evidence payload.
+                assert_eq!(output.content, raw);
+                let runtime = tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                    .unwrap();
+                let context =
+                    crate::tools::spec::ToolContext::new(home).with_state_namespace(SESSION_6508);
+                let recovered = runtime
+                    .block_on(crate::tools::spec::ToolSpec::execute(
+                        &crate::tools::tool_result_retrieval::RetrieveToolResultTool,
+                        json!({"ref": advertised_ref, "ref_kind":if saved.text.contains("ref_kind=tool_call_id") {"tool_call_id"} else {"artifact"}, "mode":"tail", "line_count":1}),
+                        &context,
+                    ))
+                    .unwrap();
+                assert!(recovered.success && recovered.content.contains("END"));
+            }
+        }
+    });
 }
 
 #[test]
