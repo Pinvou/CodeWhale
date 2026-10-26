@@ -161,11 +161,25 @@ fn reservation_switches_phase_once_and_pending_does_not_renew_budget() {
     );
     assert_eq!(
         manager.preconnect_deadline(&operation).unwrap(),
-        Some(handshake)
+        Some(handshake.clone())
     );
     assert_eq!(
         manager.poll_watchdog(20_098).unwrap().kind(),
         ControlledStatusKind::HandshakePending
+    );
+    assert!(
+        manager
+            .mark_pairing_reserved_at(operation.clone(), 40_099, || 20_099)
+            .is_err()
+    );
+    assert!(
+        manager
+            .mark_handshake_pending_at(operation.clone(), || 20_099)
+            .is_err()
+    );
+    assert_eq!(
+        manager.preconnect_deadline(&operation).unwrap(),
+        Some(handshake)
     );
     let expired = manager.poll_watchdog(20_099).unwrap();
     assert_eq!(expired.kind(), ControlledStatusKind::Error);
@@ -173,6 +187,218 @@ fn reservation_switches_phase_once_and_pending_does_not_renew_budget() {
         expired.error_code.as_deref(),
         Some("desktop_remote_handshake_timeout")
     );
+}
+
+#[test]
+fn reserved_expiry_rejects_pending_and_early_timer_cannot_consume_ticket() {
+    let (manager, operation) = waiting(0, 100);
+    manager
+        .mark_pairing_reserved_at(operation.clone(), 20_000, || 1)
+        .unwrap();
+    let ticket = manager.preconnect_deadline(&operation).unwrap().unwrap();
+    let cleanup = Arc::new(Cleanup::default());
+    manager.register_cleanup_sink(cleanup.clone());
+    assert!(
+        manager
+            .expire_preconnect(&ticket, || 19_999)
+            .unwrap()
+            .is_none()
+    );
+    assert!(cleanup.0.lock().is_empty());
+    assert_eq!(
+        manager.status().kind(),
+        ControlledStatusKind::PairingReserved
+    );
+    assert_eq!(
+        manager.preconnect_deadline(&operation).unwrap(),
+        Some(ticket.clone())
+    );
+    // Keep PairingReserved live until this call: a phase guard must not mask
+    // the local deadline check at the actual pending transition.
+    assert_eq!(
+        manager
+            .mark_handshake_pending_at(operation.clone(), || 20_000)
+            .unwrap_err()
+            .code,
+        "desktop_remote_handshake_timeout"
+    );
+    assert_eq!(
+        manager.status().kind(),
+        ControlledStatusKind::PairingReserved
+    );
+    assert_eq!(
+        manager.preconnect_deadline(&operation).unwrap(),
+        Some(ticket.clone())
+    );
+    let expired = manager
+        .expire_preconnect(&ticket, || 20_000)
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        expired.error_code.as_deref(),
+        Some("desktop_remote_handshake_timeout")
+    );
+    assert_eq!(*cleanup.0.lock(), vec![operation.generation().to_owned()]);
+    assert_ne!(manager.start(None, Vec::new()).unwrap(), operation);
+}
+
+#[test]
+fn failed_live_install_preserves_pending_until_exact_cleanup_then_allows_next_start() {
+    let (manager, operation) = pending();
+    let ticket = manager.preconnect_deadline(&operation).unwrap().unwrap();
+    let cleanup = Arc::new(Cleanup::default());
+    manager.register_cleanup_sink(cleanup.clone());
+    let installed = AtomicUsize::new(0);
+    let error = manager
+        .complete_connected_with_install(
+            operation.clone(),
+            lease(&operation, 19_999),
+            || 19_999,
+            || {
+                installed.fetch_add(1, Ordering::SeqCst);
+                Err(ControlledStateError::new("desktop_relay_disconnected"))
+            },
+        )
+        .unwrap_err();
+    assert_eq!(error.code, "desktop_relay_disconnected");
+    assert_eq!(installed.load(Ordering::SeqCst), 1);
+    assert_eq!(
+        manager.status().kind(),
+        ControlledStatusKind::HandshakePending
+    );
+    assert_eq!(
+        manager.preconnect_deadline(&operation).unwrap(),
+        Some(ticket)
+    );
+    {
+        let inner = manager.inner.lock();
+        assert!(inner.transport.is_none());
+        assert!(inner.lease_context.is_none());
+        assert!(inner.watchdog.is_none());
+        assert!(inner.resume_gate.is_none());
+    }
+    assert!(cleanup.0.lock().is_empty());
+    let cleaned = AtomicUsize::new(0);
+    let failed = manager
+        .fail_preconnect_with_cleanup(operation.clone(), error.code.into(), || {
+            cleaned.fetch_add(1, Ordering::SeqCst);
+        })
+        .unwrap();
+    assert_eq!(
+        failed.error_code.as_deref(),
+        Some("desktop_relay_disconnected")
+    );
+    assert_eq!(cleaned.load(Ordering::SeqCst), 1);
+    assert_eq!(*cleanup.0.lock(), vec![operation.generation().to_owned()]);
+    assert!(
+        manager
+            .fail_preconnect_with_cleanup(operation.clone(), "late_error".into(), || {
+                cleaned.fetch_add(1, Ordering::SeqCst);
+            })
+            .is_err()
+    );
+    assert_eq!(cleaned.load(Ordering::SeqCst), 1);
+    let next = manager.start(None, Vec::new()).unwrap();
+    assert_ne!(next, operation);
+    manager
+        .complete_registration(
+            next,
+            ControlledRegistration {
+                pairing_code: "2345678".into(),
+                sealed_code_b64: "sealed".into(),
+                expires_at_ms: 40_000,
+            },
+            20_000,
+        )
+        .unwrap();
+    assert_eq!(
+        manager.status().kind(),
+        ControlledStatusKind::WaitingForPairing
+    );
+}
+
+#[test]
+fn preconnect_failure_cleans_pending_once_and_preserves_the_original_error() {
+    let (manager, operation) = pending();
+    let cleanup = Arc::new(Cleanup::default());
+    manager.register_cleanup_sink(cleanup.clone());
+    let called = AtomicUsize::new(0);
+    let failed = manager
+        .fail_preconnect_with_cleanup(
+            operation.clone(),
+            "desktop_remote_handshake_timeout".into(),
+            || {
+                called.fetch_add(1, Ordering::SeqCst);
+            },
+        )
+        .unwrap();
+    assert_eq!(failed.kind(), ControlledStatusKind::Error);
+    assert_eq!(
+        failed.error_code.as_deref(),
+        Some("desktop_remote_handshake_timeout")
+    );
+    assert_eq!(called.load(Ordering::SeqCst), 1);
+    assert_eq!(*cleanup.0.lock(), vec![operation.generation().to_owned()]);
+    assert!(manager.inner.lock().preconnect_deadline.is_none());
+    assert!(
+        manager
+            .fail_preconnect_with_cleanup(operation.clone(), "late_error".into(), || {
+                called.fetch_add(1, Ordering::SeqCst);
+            })
+            .is_err()
+    );
+    assert_eq!(called.load(Ordering::SeqCst), 1);
+    assert_ne!(
+        manager.start(None, Vec::new()).unwrap().generation(),
+        operation.generation()
+    );
+}
+
+#[test]
+fn preconnect_failure_never_cleans_a_connected_or_retiring_lane() {
+    for retire in [false, true] {
+        let (manager, operation) = pending();
+        let material = lease(&operation, 19_999);
+        let context = material.context.clone();
+        let sender = super::super::test_support::resume_reader_transport(
+            super::super::relay_transport::ControllerRole::ControlledB,
+            context.clone(),
+            material.negotiated_capabilities.clone(),
+        );
+        manager
+            .complete_connected_with_install(
+                operation.clone(),
+                material,
+                || 19_999,
+                || Ok(Arc::new(sender) as Arc<dyn ControlledTransportAuthority>),
+            )
+            .unwrap();
+        let current = if retire {
+            manager.begin_refresh().unwrap()
+        } else {
+            operation
+        };
+        let cleanup = Arc::new(Cleanup::default());
+        manager.register_cleanup_sink(cleanup.clone());
+        let called = AtomicUsize::new(0);
+        let error = manager
+            .fail_preconnect_with_cleanup(current, "late_install_error".into(), || {
+                called.fetch_add(1, Ordering::SeqCst);
+            })
+            .unwrap_err();
+        assert_eq!(error.code, "desktop_remote_phase_invalid");
+        assert_eq!(called.load(Ordering::SeqCst), 0);
+        assert!(cleanup.0.lock().is_empty());
+        assert_eq!(manager.inner.lock().lease_context.as_ref(), Some(&context));
+        assert_eq!(
+            manager.status().kind(),
+            if retire {
+                ControlledStatusKind::RetiringGeneration
+            } else {
+                ControlledStatusKind::Connected
+            }
+        );
+    }
 }
 
 #[test]

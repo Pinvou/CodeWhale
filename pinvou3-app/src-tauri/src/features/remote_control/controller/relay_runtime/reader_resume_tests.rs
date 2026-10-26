@@ -11,6 +11,15 @@ use tokio_tungstenite::{WebSocketStream, tungstenite::Message};
 
 type Socket = WebSocketStream<TcpStream>;
 
+fn fixture_wall_clock_millis() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_millis()
+        .try_into()
+        .unwrap()
+}
+
 // Reusing a registered endpoint enqueues its transport setup acknowledgement
 // before application frames. Skip only that known frame, and leave the final
 // Joined receipt as the channel's last authenticated receipt.
@@ -385,12 +394,15 @@ pub(crate) async fn resume_round_trip<T>(
                 .unwrap();
             let a_keys = HandshakeKeyPair::generate().unwrap();
             let b_keys = HandshakeKeyPair::generate().unwrap();
-            let budget = if scenario < 2 { 2_000 } else { 5_000 };
+            // Scenario 0 models a valid Relay whose wall clock is 60 seconds
+            // behind B. The reservation is live in that Relay's own domain.
+            let relay_wall =
+                fixture_wall_clock_millis().saturating_sub(if scenario == 0 { 60_000 } else { 0 });
             let mut reserved = super::super::test_support::signed_reservation_expiring_at(
                 &fixture.relay,
                 &base64::engine::general_purpose::STANDARD.encode(a_keys.public_key().to_bytes()),
                 &base64::engine::general_purpose::STANDARD.encode(b_keys.public_key().to_bytes()),
-                wall_clock_millis().unwrap() + budget,
+                relay_wall + 20_000,
             );
             reserved["remote_control_generation"] = json!(operation.generation());
             reserved["transcript"]["remote_control_generation"] = json!(operation.generation());
@@ -404,13 +416,13 @@ pub(crate) async fn resume_round_trip<T>(
             );
             if scenario == 0 {
                 // Adversarial outer-only change: still a valid signature over
-                // the short transcript. This is not a normal Relay output.
+                // the authenticated transcript. This is not a normal Relay output.
                 reserved["handshake_expires_at_ms"] =
-                    json!((wall_clock_millis().unwrap() + 60_000).to_string());
+                    json!((fixture_wall_clock_millis() + 60_000).to_string());
             } else if scenario == 1 {
                 // Reach actual signature verification: update the public hash
                 // after changing the signed field, but retain the old signature.
-                let changed = (wall_clock_millis().unwrap() + 10_000).to_string();
+                let changed = (fixture_wall_clock_millis() + 10_000).to_string();
                 reserved["transcript"]["expires_at_ms"] = json!(changed);
                 reserved["handshake_expires_at_ms"] =
                     reserved["transcript"]["expires_at_ms"].clone();
@@ -442,9 +454,15 @@ pub(crate) async fn resume_round_trip<T>(
             let socket = socket.as_mut().unwrap();
             if scenario < 2 {
                 owned.worker = Some(tokio::spawn(worker.serve()));
+                let sent_at_b = controlled_monotonic_millis();
                 send(socket, &reserved).await;
                 processed(&mut processed_rx, &reserved).await;
                 if scenario == 0 {
+                    assert_eq!(
+                        manager.status().kind(),
+                        ControlledStatusKind::HandshakePending,
+                        "authenticated reservation must survive a different Relay wall-clock origin"
+                    );
                     receive(socket, "finished_receipt_commit").await;
                     let deadline = manager
                         .preconnect_deadline(&operation)
@@ -452,14 +470,18 @@ pub(crate) async fn resume_round_trip<T>(
                         .unwrap()
                         .deadline_b();
                     assert!(
-                        deadline.saturating_sub(controlled_monotonic_millis()) <= 2_002,
-                        "unsigned outer expiry must not replace short signed budget"
+                        deadline >= sent_at_b + 20_000
+                            && deadline <= controlled_monotonic_millis() + 20_000,
+                        "local budget is twenty seconds from authenticated receipt, independent of either wire expiry"
                     );
                 }
-                tokio::time::timeout(Duration::from_secs(3), owned.worker.take().unwrap())
-                    .await
-                    .unwrap()
-                    .unwrap();
+                tokio::time::timeout(
+                    Duration::from_secs(if scenario == 0 { 23 } else { 3 }),
+                    owned.worker.take().unwrap(),
+                )
+                .await
+                .unwrap()
+                .unwrap();
                 let status = serde_json::to_value(manager.status()).unwrap();
                 assert_eq!(status["status"], "error");
                 assert_eq!(
@@ -506,7 +528,7 @@ pub(crate) async fn resume_round_trip<T>(
                     .deadline_b();
                 assert!(
                     controlled_monotonic_millis() < deadline,
-                    "handshake setup exhausted its signed budget"
+                    "handshake setup exhausted its local budget"
                 );
                 if scenario == 3 {
                     while controlled_monotonic_millis() < deadline {
@@ -515,9 +537,26 @@ pub(crate) async fn resume_round_trip<T>(
                         ))
                         .await;
                     }
+                    let diagnostic_path =
+                        crate::platform::paths::pinvou3_home().join("logs/remote-control.log");
+                    let diagnostic_start = std::fs::read(&diagnostic_path)
+                        .map(|bytes| bytes.len())
+                        .unwrap_or(0);
                     assert_eq!(
                         worker.complete_handshake(&joined, &mut driver).unwrap_err(),
                         "desktop_remote_handshake_timeout"
+                    );
+                    // Serve forwards this error to the outer failure helper.
+                    // It must not log a second transition after the owner is terminal.
+                    worker.fail_handshake("desktop_remote_handshake_timeout");
+                    let diagnostic = std::fs::read_to_string(&diagnostic_path).unwrap();
+                    assert_eq!(
+                        diagnostic[diagnostic_start..]
+                            .matches(
+                                "stage=handshake_failed detail=desktop_remote_handshake_timeout"
+                            )
+                            .count(),
+                        1
                     );
                     let status = serde_json::to_value(manager.status()).unwrap();
                     assert_eq!(status["status"], "error");
@@ -557,13 +596,108 @@ pub(crate) async fn resume_round_trip<T>(
     if std::env::var("PINVOU_READER_PRECONNECT_SCENARIO").as_deref() == Ok("1") {
         let manager = handle.state::<ControlledDeviceManager>();
         let relay = RemoteControlManager::new(handle.clone());
-        let mut socket = None;
+        // Exercise the actual retry loop and real RelayClient disconnects.
+        // The simulated peer seals valid wire input with the Rust protocol
+        // primitive; this does not run the JS Relay or its persistent store.
+        let mut socket = Some({
+            let manager = handle.state::<ControlledDeviceManager>();
+            let operation = manager.start(None, Vec::new()).unwrap();
+            let channel = relay
+                .start_controller_relay(operation.generation())
+                .await
+                .unwrap();
+            let code_wrap = CodeWrapKeyPair::generate().unwrap();
+            let receiver = code_wrap.public_key();
+            let mut worker = ControlledRelayWorker {
+                app: handle.clone(),
+                relay: relay.clone(),
+                operation: operation.clone(),
+                code_wrap,
+                handshake: Some(HandshakeKeyPair::generate().unwrap()),
+                channel,
+                business: std::sync::Arc::new(NoBusiness),
+                action_results: std::sync::Arc::new(RemoteActionResultCache::default()),
+                business_epoch: std::sync::Arc::new(AtomicU64::new(0)),
+                processed_frames: None,
+            };
+            let before_first_send = controlled_monotonic_millis();
+            let task = tokio::spawn(async move {
+                let status = worker.register_pairing().await;
+                (worker, status)
+            });
+            let mut socket = accept(&listener).await;
+            registered(&mut socket).await;
+            let first = receive(&mut socket, "desktop_pairing_register").await;
+            let after_first_send = controlled_monotonic_millis();
+            let mut last = first.clone();
+            for _ in 0..2 {
+                // A real WebSocket close reaches the production reader, which sends
+                // its retryable disconnect notification to this worker's channel.
+                socket.close(None).await.unwrap();
+                socket = accept(&listener).await;
+                registered(&mut socket).await;
+                last = receive(&mut socket, "desktop_pairing_register").await;
+                assert_eq!(
+                    last, first,
+                    "retries must reuse the same registration and keys"
+                );
+            }
+            assert!(controlled_monotonic_millis() > after_first_send);
+            let relay_expiry =
+                fixture_wall_clock_millis().saturating_sub(60_000) + MAX_PAIRING_CODE_TTL_MS;
+            let string = |key: &str| last[key].as_str().unwrap().to_owned();
+            let binding = CodeWrapBinding::new(
+                string("registration_request_id"),
+                "pairing-reader-retry-0001",
+                string("remote_control_generation"),
+                "relay-reader-retry-0001",
+                relay_expiry,
+            )
+            .unwrap();
+            let sealed = CodeWrapKeyPair::generate()
+                .unwrap()
+                .seal_pairing_code(receiver, &binding, "2345678")
+                .unwrap();
+            send(&mut socket, &json!({"v":1,"type":"desktop_pairing_registered",
+        "request_id":last["request_id"], "registration_request_id":last["registration_request_id"],
+        "pairing_id":"pairing-reader-retry-0001", "remote_control_generation":last["remote_control_generation"],
+        "relay_epoch":"relay-reader-retry-0001", "expires_at_ms":relay_expiry.to_string(),
+        "sealed_code_b64":base64::engine::general_purpose::STANDARD.encode(sealed)})).await;
+            let (worker, status) = tokio::time::timeout(Duration::from_secs(3), task)
+                .await
+                .unwrap()
+                .unwrap();
+            let status = status.unwrap();
+            assert_eq!(status.kind(), ControlledStatusKind::WaitingForPairing);
+            assert_eq!(
+                serde_json::to_value(status).unwrap()["pairingCode"],
+                "2345678"
+            );
+            let ticket = manager.preconnect_deadline(&operation).unwrap().unwrap();
+            assert!(ticket.deadline_b() >= before_first_send + MAX_PAIRING_CODE_TTL_MS);
+            assert!(
+                ticket.deadline_b() <= after_first_send + MAX_PAIRING_CODE_TTL_MS,
+                "the second/third send or final response must not renew the first-send budget"
+            );
+            assert!(manager.live_lease().is_err());
+            assert!(!handle.state::<ControlledLaneState>().is_installed());
+            assert!(handle.state::<ControlledOutboundState>().sender().is_none());
+            manager.stop();
+            relay.stop_controller_relay(operation.generation());
+            drop(worker);
+            socket
+        });
         let mut owned = OwnedLane {
             relay: relay.clone(),
             generation: String::new(),
             worker: None,
         };
         for scenario in 0..3 {
+            let diagnostic_path =
+                crate::platform::paths::pinvou3_home().join("logs/remote-control.log");
+            let diagnostic_start = std::fs::read(&diagnostic_path)
+                .map(|bytes| bytes.len())
+                .unwrap_or(0);
             let operation = manager.start(None, Vec::new()).unwrap();
             let channel = relay
                 .start_controller_relay(operation.generation())
@@ -589,14 +723,14 @@ pub(crate) async fn resume_round_trip<T>(
                 .unwrap();
             let (processed_tx, mut processed_rx) = tokio::sync::mpsc::channel(128);
             let keys = HandshakeKeyPair::generate().unwrap();
-            // A delayed but still live reservation has one signed/outer handshake
-            // expiry, as emitted by the real Relay. Only its remaining budget is short.
+            // A valid reservation from a Relay whose wall clock is 60 seconds
+            // behind B still receives one real local twenty-second budget.
             fixture.reservation = super::super::test_support::signed_reservation_expiring_at(
                 &fixture.relay,
                 &base64::engine::general_purpose::STANDARD
                     .encode(fixture.a_keys.public_key().to_bytes()),
                 &base64::engine::general_purpose::STANDARD.encode(keys.public_key().to_bytes()),
-                wall_clock_millis().unwrap() + 1_500,
+                fixture_wall_clock_millis().saturating_sub(60_000) + 20_000,
             );
             fixture.reservation["remote_control_generation"] = json!(operation.generation());
             fixture.reservation["transcript"]["remote_control_generation"] =
@@ -625,14 +759,23 @@ pub(crate) async fn resume_round_trip<T>(
             owned.worker = Some(tokio::spawn(worker.serve()));
             let socket = socket.as_mut().unwrap();
             if scenario != 0 {
+                let sent_at_b = controlled_monotonic_millis();
                 send(socket, &fixture.reservation).await;
                 processed(&mut processed_rx, &fixture.reservation).await;
+                assert_eq!(
+                    manager.status().kind(),
+                    ControlledStatusKind::HandshakePending
+                );
                 let b_commit = receive(socket, "finished_receipt_commit").await;
                 assert_eq!(
                     manager.status().kind(),
                     ControlledStatusKind::HandshakePending
                 );
                 let original = manager.preconnect_deadline(&operation).unwrap().unwrap();
+                assert!(
+                    original.deadline_b() >= sent_at_b + 20_000
+                        && original.deadline_b() <= controlled_monotonic_millis() + 20_000
+                );
                 if scenario == 2 {
                     for _ in 0..8 {
                         let unrelated = json!({"v":1,"type":"error","request_id":"unrelated-preconnect-request",
@@ -650,20 +793,28 @@ pub(crate) async fn resume_round_trip<T>(
                 }
             }
             // No status poll/reaper drives expiration: the actual socket/worker does.
-            tokio::time::timeout(Duration::from_secs(3), owned.worker.take().unwrap())
-                .await
-                .unwrap()
-                .unwrap();
+            tokio::time::timeout(
+                Duration::from_secs(if scenario == 0 { 3 } else { 23 }),
+                owned.worker.take().unwrap(),
+            )
+            .await
+            .unwrap()
+            .unwrap();
             let status = manager.status();
             assert_eq!(status.kind(), ControlledStatusKind::Error);
             let status = serde_json::to_value(status).unwrap();
+            let expected_error = if scenario == 0 {
+                "desktop_remote_pairing_expired"
+            } else {
+                "desktop_remote_handshake_timeout"
+            };
+            assert_eq!(status["errorCode"].as_str(), Some(expected_error));
+            let diagnostic = std::fs::read_to_string(&diagnostic_path).unwrap();
             assert_eq!(
-                status["errorCode"].as_str(),
-                Some(if scenario == 0 {
-                    "desktop_remote_pairing_expired"
-                } else {
-                    "desktop_remote_handshake_timeout"
-                })
+                diagnostic[diagnostic_start..]
+                    .matches(&format!("stage=preconnect_expired detail={expected_error}"))
+                    .count(),
+                1
             );
             assert!(status.get("pairingCode").is_none());
             assert!(manager.current_operation().is_none());

@@ -527,16 +527,17 @@ impl ControlledDeviceManager {
         if now_b >= registration.expires_at_ms {
             return Err(ControlledStateError::new("pairing_code_expired"));
         }
+        let registration_request_id = inner
+            .registration_request_id
+            .clone()
+            .ok_or_else(|| ControlledStateError::new("registration_request_unavailable"))?;
         inner.preconnect_deadline = Some(ControlledPreconnectDeadline {
             operation,
             phase: PreconnectPhase::Waiting,
             deadline_b: registration.expires_at_ms,
         });
         inner.pairing = Some(PairingState {
-            registration_request_id: inner
-                .registration_request_id
-                .clone()
-                .ok_or_else(|| ControlledStateError::new("registration_request_unavailable"))?,
+            registration_request_id,
             sealed_code_b64: registration.sealed_code_b64,
             pairing_code: Zeroizing::new(registration.pairing_code),
             expires_at_ms: registration.expires_at_ms,
@@ -657,6 +658,7 @@ impl ControlledDeviceManager {
             status = terminal_status_with_retired_generation(&inner, retired);
         }
         self.notify_cleanup(ticket.operation.generation());
+        super::relay_runtime::log_controlled_event("preconnect_expired", ticket.error_code());
         Ok(Some(status))
     }
 
@@ -744,6 +746,7 @@ impl ControlledDeviceManager {
         Ok(status_locked(&inner))
     }
 
+    #[cfg(test)]
     pub(crate) fn replace_authenticated_transport<T: ControlledTransportAuthority + 'static>(
         &self,
         operation: ControlledOperation,
@@ -1325,6 +1328,7 @@ impl ControlledDeviceManager {
     ) -> Result<ControlledStatus> {
         let generation;
         let expired;
+        let expired_preconnect;
         let status;
         {
             let mut inner = self.inner.lock();
@@ -1338,7 +1342,7 @@ impl ControlledDeviceManager {
                 .watchdog
                 .as_ref()
                 .map(|watchdog| watchdog.state(now_b));
-            let expired_preconnect = inner
+            expired_preconnect = inner
                 .preconnect_deadline
                 .as_ref()
                 .filter(|ticket| ticket.matches_phase(inner.phase) && now_b >= ticket.deadline_b)
@@ -1374,6 +1378,9 @@ impl ControlledDeviceManager {
         }
         if expired {
             self.notify_cleanup(&generation);
+        }
+        if let Some(code) = expired_preconnect {
+            super::relay_runtime::log_controlled_event("preconnect_expired", code);
         }
         Ok(status)
     }
@@ -2123,6 +2130,7 @@ mod tests {
         assert_eq!(manager.status(), before);
         let inner = manager.inner.lock();
         assert!(inner.pairing.is_none());
+        assert!(inner.preconnect_deadline.is_none());
         assert_eq!(inner.last_observed_now_b, observed_before);
     }
 

@@ -101,13 +101,20 @@ fn real_worker_final_admission_preserves_timeout_and_signed_deadline() {
 
 fn run_isolated_reader(retire_endpoint: bool, preconnect: bool, final_admission: bool) {
     const CHILD: &str = "PINVOU_READER_RESUME_TEST_CHILD";
+    // These two regressions exercise real twenty-second local deadlines twice;
+    // they never shorten the production budget through a test-only branch.
+    let child_budget = if preconnect || final_admission {
+        65
+    } else {
+        15
+    };
     if std::env::var(CHILD).as_deref() == Ok("1") {
         let runtime = tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()
             .unwrap();
         runtime.block_on(async {
-            tokio::time::timeout(Duration::from_secs(15),
+            tokio::time::timeout(Duration::from_secs(child_budget),
                 crate::features::remote_control::controller::relay_runtime::reader_resume_tests::resume_round_trip(|| {
                     let mut context = crate::build_tauri_context();
                     context.config_mut().app.windows.clear();
@@ -159,7 +166,7 @@ fn run_isolated_reader(retire_endpoint: bool, preconnect: bool, final_admission:
         .stderr(std::process::Stdio::piped())
         .spawn()
         .unwrap();
-    let deadline = Instant::now() + Duration::from_secs(25);
+    let deadline = Instant::now() + Duration::from_secs(child_budget + 10);
     let status = loop {
         if let Some(status) = child.try_wait().unwrap() {
             break status;

@@ -105,7 +105,7 @@ const MAX_ARTIFACTS: usize = 256;
 pub(crate) const MAX_ENCRYPTED_WIRE_BYTES: usize =
     MAX_ENCRYPTED_FRAME_BYTES.div_ceil(3) * 4 + MAX_CONTROL_MESSAGE_BYTES;
 const CONTROLLER_CONTRACT_SHA256: &str =
-    "63db457fd305cf8d758133fa8996b853bd3073892fa8bfe93aec7de8f873e242";
+    "5208650492c4e37286a7322d12ffc6c401724b8f261f8672d830146839db9f63";
 
 pub(crate) const CONTROLLER_CAPABILITIES: &[&str] = &[
     "pairing_v1",
@@ -288,6 +288,7 @@ pub(crate) const CONTROLLER_ERROR_CODES: &[&str] = &[
     "permission_expired",
     "result_unknown",
     "capability_snapshot_unavailable",
+    "pairing_registration_stale_relay_epoch",
 ];
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -1696,7 +1697,8 @@ impl LeaseInstallValidationContext {
     }
 
     /// Relay wall-clock expiry carried through the authenticated transcript.
-    /// Consumers convert it once into their own local monotonic clock domain.
+    /// This authenticates a Relay fact, not the receiving host's current time.
+    /// Local preconnection budgets must not subtract an unrelated wall clock.
     pub(crate) fn signed_expires_at_ms(&self) -> u64 {
         self.signed_expires_at_ms
     }
