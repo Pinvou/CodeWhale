@@ -654,6 +654,7 @@ export const dictZh = {
         depCheckTitle: '依赖体检', depChecking: '检测中…', depRecheck: '重新检测',
         depAllOk: '所有依赖项已就绪', depMissingSuffix: ' 项依赖缺失（对应能力将不可用）',
         depInstalling: '安装中…', depInstallBtn: '一键安装', depGoInstall: '去安装', depInstallNote: '将提权安装缺失依赖（需联网或可用 apt 源）', depInstallNoteWindows: '将下载缺失模型；LibreOffice 通过 winget 提权安装（需联网）', depInstallNoteMac: '将通过 Homebrew 安装缺失依赖（需联网；若未安装 Homebrew，请先到 brew.sh 安装）',
+        dep_office_stream: '远程 Office 附件解析（需 python3-uno，可在此安装）',
         dep_pdf: 'PDF 文本提取', dep_office_modern: 'Office 文档（docx）', dep_office_legacy: '旧版 Office / 演示与表格',
         dep_ocr: '图片 / 扫描件 OCR', dep_archive: '压缩包（zip/rar/7z）', dep_email: '邮件（.eml / .msg）', dep_voice_asr: '本地语音识别',
         dep_voice_asr_model: '语音识别模型（SenseVoice q8）', dep_knowledge_embedding_model: '知识库向量模型（bge-m3）',

@@ -71,13 +71,22 @@ test('the full desktop bridge and shared UI gate agree before load, after failur
   available(false);
   assert.throws(() => host.api.desktopRemoteControl.controllerStatus(), /desktop_remote_control_unsupported/);
   assert.equal(host.calls.includes('desktop_remote_controller_status'), false);
-  for (const os of ['linux', 'macos', 'windows']) {
-    host.setCapabilities({ os, desktopRemoteControlSupported: true });
+  for (const [os, supported] of [['linux', true], ['macos', false], ['windows', true], ['unknown', false]]) {
+    host.setCapabilities({ os, desktopRemoteControlSupported: supported });
     await host.api.platform.loadPlatformCapabilities();
     assert.equal(platformSnapshots.at(-1).platformCapabilities.os, os);
     assert.equal(platformSnapshots.at(-1).platformCapabilities.loaded, true);
-    available(os === 'windows');
+    available(supported);
+    if (supported) {
+      await host.api.desktopRemoteControl.controllerStatus();
+      await host.api.desktopRemoteControl.controlledStatus();
+      assert.ok(host.calls.includes('desktop_remote_controlled_status'));
+    }
   }
+  // The backend owns platform support; an adapter must not second-guess it.
+  host.setCapabilities({ os: 'future-host', desktopRemoteControlSupported: true });
+  await host.api.platform.loadPlatformCapabilities();
+  available(true);
   host.setCapabilities({ os: 'windows', desktopRemoteControlSupported: false });
   await host.api.platform.loadPlatformCapabilities();
   available(false);

@@ -861,6 +861,10 @@ pub(crate) struct PublishedPrivateFile {
     file: parking_lot::Mutex<Option<File>>,
     _directory: Option<PrivateFileDirectory>,
     path: PathBuf,
+    #[cfg(all(target_os = "linux", target_pointer_width = "64"))]
+    read_path: PathBuf,
+    #[cfg(all(target_os = "linux", target_pointer_width = "64"))]
+    cleanup_parent: PrivateFileDirectory,
     cleanup_requested: std::sync::atomic::AtomicBool,
     #[cfg(windows)]
     identity: (u32, u64),
@@ -885,12 +889,36 @@ impl PublishedPrivateFile {
         &self.path
     }
 
+    /// Parser input may differ from the logical attachment path. Linux uses a
+    /// sealed anonymous file; its proc fd path is valid for child readers too.
+    pub(crate) fn read_path(&self) -> &Path {
+        #[cfg(all(target_os = "linux", target_pointer_width = "64"))]
+        {
+            &self.read_path
+        }
+        #[cfg(not(all(target_os = "linux", target_pointer_width = "64")))]
+        {
+            &self.path
+        }
+    }
+
+    pub(crate) fn validate_scope(&self, root: &Path) -> io::Result<()> {
+        #[cfg(all(target_os = "linux", target_pointer_width = "64"))]
+        {
+            linux_publication::validate_scope(self, root)
+        }
+        #[cfg(not(all(target_os = "linux", target_pointer_width = "64")))]
+        {
+            validate_published_path_scope(&self.path, root)
+        }
+    }
+
     pub(crate) fn read_bounded(&self, maximum_bytes: u64) -> io::Result<Vec<u8>> {
         use std::io::{Read as _, Seek as _};
         let mut state = self.file.lock();
         let file = state
             .as_mut()
-            .ok_or_else(|| io::Error::other("private file is closed"))?;
+            .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "private file is closed"))?;
         file.rewind()?;
         let mut bytes = Vec::new();
         (&mut *file)
@@ -924,7 +952,15 @@ impl PublishedPrivateFile {
         remove_known_private_file(directory, name, self.identity)
     }
 
-    #[cfg(not(windows))]
+    #[cfg(all(target_os = "linux", target_pointer_width = "64"))]
+    pub(crate) fn cleanup(&self) -> io::Result<()> {
+        // There is no directory entry to unlink. The last owning fd releases
+        // the sealed bytes, and foreign files at the logical name are retained.
+        self.file.lock().take();
+        Ok(())
+    }
+
+    #[cfg(not(any(windows, all(target_os = "linux", target_pointer_width = "64"))))]
     pub(crate) fn cleanup(&self) -> io::Result<()> {
         Err(io::Error::new(
             io::ErrorKind::Unsupported,
@@ -933,7 +969,7 @@ impl PublishedPrivateFile {
     }
 }
 
-#[cfg(windows)]
+#[cfg(any(windows, all(target_os = "linux", target_pointer_width = "64")))]
 impl Drop for PublishedPrivateFile {
     fn drop(&mut self) {
         if !self
@@ -942,40 +978,74 @@ impl Drop for PublishedPrivateFile {
         {
             return;
         }
-        // Last-owner cleanup uses the exact publication object, not a recursive
-        // pathname delete. Unknown entries are never removed.
-        let Some(path_parent) = self.path.parent() else {
-            return;
-        };
-        let Some(parent_path) = path_parent.parent() else {
-            return;
-        };
-        let Some(directory_name) = path_parent.file_name() else {
-            return;
-        };
-        let parent = match open_private_file_directory(parent_path) {
-            Ok(parent) => parent,
-            Err(_) => {
-                eprintln!("[private-file] cleanup anchor unavailable");
+        #[cfg(all(target_os = "linux", target_pointer_width = "64"))]
+        {
+            linux_publication::cleanup_directory(self);
+        }
+        #[cfg(windows)]
+        {
+            // Last-owner cleanup uses the exact publication object, not a recursive
+            // pathname delete. Unknown entries are never removed.
+            let Some(path_parent) = self.path.parent() else {
+                return;
+            };
+            let Some(parent_path) = path_parent.parent() else {
+                return;
+            };
+            let Some(directory_name) = path_parent.file_name() else {
+                return;
+            };
+            let parent = match open_private_file_directory(parent_path) {
+                Ok(parent) => parent,
+                Err(_) => {
+                    eprintln!("[private-file] cleanup anchor unavailable");
+                    return;
+                }
+            };
+            if self.cleanup().is_err() {
+                eprintln!(
+                    "[private-file] authenticated-object cleanup failed; foreign entries retained"
+                );
                 return;
             }
-        };
-        if self.cleanup().is_err() {
-            eprintln!(
-                "[private-file] authenticated-object cleanup failed; foreign entries retained"
-            );
-            return;
-        }
-        self._directory.take();
-        if parent.remove_empty_child_directory(directory_name).is_err() {
-            eprintln!("[private-file] empty-directory cleanup failed; foreign entries retained");
+            self._directory.take();
+            if parent.remove_empty_child_directory(directory_name).is_err() {
+                eprintln!(
+                    "[private-file] empty-directory cleanup failed; foreign entries retained"
+                );
+            }
         }
     }
 }
 
 pub(crate) const fn supports_private_read_path_publication() -> bool {
-    cfg!(windows)
+    cfg!(any(
+        windows,
+        all(target_os = "linux", target_pointer_width = "64")
+    ))
 }
+
+/// Ordinary publication scopes retain the existing canonical regular-file
+/// check. Anonymous Linux sources authenticate their pinned directory instead.
+pub(crate) fn validate_published_path_scope(path: &Path, root: &Path) -> io::Result<()> {
+    if std::fs::canonicalize(path)? == path
+        && path.starts_with(root)
+        && std::fs::symlink_metadata(path)?.file_type().is_file()
+    {
+        Ok(())
+    } else {
+        Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "private publication scope mismatch",
+        ))
+    }
+}
+
+#[cfg(all(target_os = "linux", target_pointer_width = "64"))]
+#[path = "filesystem/linux_publication.rs"]
+mod linux_publication;
+#[cfg(all(target_os = "linux", target_pointer_width = "64"))]
+pub(crate) use linux_publication::publish_private_read_path;
 
 /// Cleanup authority only: rejected content never grants read authority.
 pub(crate) struct PrivatePublicationCleanup {
@@ -1087,10 +1157,8 @@ thread_local! {
     static PRIVATE_PUBLICATION_AFTER_RENAME: std::cell::RefCell<Option<Box<dyn FnOnce(&Path)>>> = const { std::cell::RefCell::new(None) };
 }
 
-/// No Unix path fallback: directory fds cannot prevent pathname replacement
-/// when a later external parser opens a path. This Windows-only capability is
-/// distinct from portable, handle-relative private writes.
-#[cfg(not(windows))]
+/// Unsupported targets never substitute mutable Unix paths for an OS lease.
+#[cfg(not(any(windows, all(target_os = "linux", target_pointer_width = "64"))))]
 pub(crate) fn publish_private_read_path(
     _directory: PrivateFileDirectory,
     _name: &std::ffi::OsStr,

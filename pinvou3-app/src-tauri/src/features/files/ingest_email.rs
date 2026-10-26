@@ -12,6 +12,7 @@ use std::path::Path;
 use super::IngestResult;
 use super::estimate_tokens;
 use super::ingest_deps::{read_capped_text, system_tools};
+use super::ingest_diagnostics::safe_error;
 
 /// 邮件（.eml / .msg）：.eml 直接用 python 标准库 email 模块解出收发件人/主题/
 /// 日期/正文/附件名；.msg 在 Windows 走 Rust 原生解析，非 Windows 保留 msgconvert 转 .eml。
@@ -26,6 +27,7 @@ pub(super) fn ingest_email(
     let mk = |markdown: Option<String>, warning: Option<String>| {
         let token_estimate = markdown.as_deref().map(estimate_tokens).unwrap_or(0);
         IngestResult {
+            read_owner: None,
             kind: kind.into(),
             basename: basename.clone(),
             path: path_str.clone(),
@@ -60,14 +62,11 @@ pub(super) fn ingest_email(
             );
         }
         // msgconvert 把 .msg 转成 .eml（输出到 cwd），用临时目录承接再解析。
-        let ts = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_nanos())
-            .unwrap_or(0);
-        let tmpdir = std::env::temp_dir().join(format!("pinvou3-msg-{ts}"));
-        if let Err(e) = std::fs::create_dir_all(&tmpdir) {
-            return mk(None, Some(format!("创建临时目录失败: {e}")));
-        }
+        let temporary = match super::super::platform::private_conversion_directory("pinvou3-msg-") {
+            Ok(directory) => directory,
+            Err(e) => return mk(None, Some(safe_error(format!("创建临时目录失败: {e}")))),
+        };
+        let tmpdir = temporary.path().to_owned();
         // msgconvert 是 perl 脚本，网络/编码异常下会挂死，按超时 kill-tree。
         let conv = crate::platform::process::output_with_timeout_and_kill_tree(
             {
@@ -86,7 +85,7 @@ pub(super) fn ingest_email(
                 Ok(o) => String::from_utf8_lossy(&o.stderr).trim().to_string(),
                 Err(e) => e,
             };
-            Err(format!("msgconvert 转换失败: {detail}"))
+            Err(safe_error(format!("msgconvert 转换失败: {detail}")))
         };
         let _ = std::fs::remove_dir_all(&tmpdir);
         result
@@ -117,8 +116,8 @@ struct MsgMarkdownParts {
 /// The msg_parser-typed parsing helpers below compile on Windows only (same gating as the dependency section).
 #[cfg(target_os = "windows")]
 fn parse_msg_via_msg_parser(path: &Path) -> Result<String, String> {
-    let outlook =
-        msg_parser::Outlook::from_path(path).map_err(|e| format!(".msg 解析失败: {e}"))?;
+    let outlook = msg_parser::Outlook::from_path(path)
+        .map_err(|e| safe_error(format!(".msg 解析失败: {e}")))?;
     let body = decode_msg_body(&outlook);
     let parts = MsgMarkdownParts {
         sender: person_to_text(&outlook.sender),
@@ -477,7 +476,7 @@ if atts:
         command,
         std::time::Duration::from_secs(60),
     )
-    .map_err(|e| format!("Python 调用失败({program}): {e}"))?;
+    .map_err(|e| safe_error(format!("Python 调用失败({program}): {e}")))?;
     if out.status.success() {
         let mut markdown = String::from_utf8_lossy(&out.stdout).trim_end().to_string();
         // 脚本仅在成功提取正文时写 argv[2]，仅有附件时写 argv[3]；解析
@@ -492,10 +491,10 @@ if atts:
         }
         Ok(markdown.trim_end().to_string())
     } else {
-        Err(format!(
+        Err(safe_error(format!(
             "邮件解析失败: {}",
             String::from_utf8_lossy(&out.stderr).trim()
-        ))
+        )))
     }
 }
 

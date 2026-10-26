@@ -1992,6 +1992,7 @@ fn mk_image_attachment(
     byte_size: u64,
 ) -> crate::features::files::file_ingest::IngestResult {
     crate::features::files::file_ingest::IngestResult {
+        read_owner: None,
         kind: "image".into(),
         basename: basename.into(),
         path: path.to_string_lossy().to_string(),
@@ -2210,6 +2211,7 @@ fn mk_attachment(
 ) -> crate::features::files::file_ingest::IngestResult {
     let md: String = (1..=rows).map(|i| format!("row-{i},value-{i}\n")).collect();
     crate::features::files::file_ingest::IngestResult {
+        read_owner: None,
         kind: kind.into(),
         basename: basename.into(),
         path: format!("/tmp/fake/{basename}"),

@@ -11,6 +11,7 @@ use std::path::Path;
 use std::process::Command;
 use std::sync::OnceLock;
 
+use super::ingest_diagnostics::safe_error;
 use serde::Serialize;
 
 /// 各 ingest 子模块需要的系统工具探测结果（启动时缓存一次）。
@@ -108,6 +109,9 @@ pub fn check_dependencies() -> Vec<DependencyCheckItem> {
         crate::features::voice::asr_dependency_packages(),
     ));
     items.push(item("office_legacy", libreoffice, "libreoffice"));
+    if let Some((installed, packages)) = super::super::platform::office_stream_dependency() {
+        items.push(item("office_stream", installed, packages));
+    }
     if crate::platform::os::show_ocr_dependency_check() {
         items.push(item(
             "ocr",
@@ -180,12 +184,12 @@ pub(super) fn pdftotext_extract(pdf: &Path) -> Result<String, String> {
         command,
         std::time::Duration::from_secs(60),
     ) {
-        Ok(o) if o.status.success() => read_capped_text(&output_path),
-        Ok(o) => Err(format!(
+        Ok(o) if o.status.success() => read_capped_text(&output_path).map_err(safe_error),
+        Ok(o) => Err(safe_error(format!(
             "pdftotext 失败: {}",
             String::from_utf8_lossy(&o.stderr).trim()
-        )),
-        Err(e) => Err(format!("pdftotext 调用失败: {e}")),
+        ))),
+        Err(e) => Err(safe_error(format!("pdftotext 调用失败: {e}"))),
     }
 }
 
@@ -231,19 +235,23 @@ pub(super) fn run_libreoffice_convert<T>(
     fail_label: &str,
     consume: impl FnOnce(&Path) -> Result<T, String>,
 ) -> Result<T, String> {
-    // Temp dir: unique each time, avoiding concurrent file-name conflicts.
-    let ts = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_nanos())
-        .unwrap_or(0);
-    let tmpdir = std::env::temp_dir().join(format!("{tmp_prefix}-{ts}"));
-    std::fs::create_dir_all(&tmpdir).map_err(|e| format!("failed to create temp dir: {e}"))?;
+    // The output contains decrypted attachment content too. A fresh private
+    // directory avoids permissive modes and pre-existing-name adoption on Unix.
+    let temporary = super::super::platform::private_conversion_directory(&format!("{tmp_prefix}-"))
+        .map_err(|e| safe_error(format!("failed to create temp dir: {e}")))?;
+    let tmpdir = temporary.path().to_owned();
 
     // soffice cold start or a stale lock can hang; bounded by a 180s kill-tree
     // timeout (same budget as the #532 inline conversion points). The profile
     // argument is built inside the closure so every error path below still
     // reaches the cleanup step instead of leaking the temp dir.
     let result = (|| -> Result<T, String> {
+        if let Some(converted) =
+            super::super::platform::convert_office_stream(path, convert_to, &tmpdir)
+        {
+            converted?;
+            return consume(&tmpdir);
+        }
         let profile_arg = libreoffice_user_installation_arg(&tmpdir.join("profile"))?;
         let out = crate::platform::process::output_with_timeout_and_kill_tree(
             {
@@ -262,11 +270,11 @@ pub(super) fn run_libreoffice_convert<T>(
         );
         match out {
             Ok(o) if o.status.success() => consume(&tmpdir),
-            Ok(o) => Err(format!(
+            Ok(o) => Err(safe_error(format!(
                 "{fail_label}: {}",
                 String::from_utf8_lossy(&o.stderr).trim()
-            )),
-            Err(e) => Err(format!("LibreOffice invocation failed: {e}")),
+            ))),
+            Err(e) => Err(safe_error(format!("LibreOffice invocation failed: {e}"))),
         }
     })();
     let _ = std::fs::remove_dir_all(&tmpdir);

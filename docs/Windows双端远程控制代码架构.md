@@ -1,6 +1,6 @@
 # Windows 双端远程控制代码架构
 
-本文当前契约描述 Windows 桌面 A 端控制 B 端的加密远程会话。已发布的浏览器 WebUI v2 是另一条既有能力，架构见 `docs/remote-control-phase1-architecture.md`。
+本文当前契约描述 Windows/Linux 桌面 A 端控制 B 端的加密远程会话。Linux 的平台范围和附件只读源见 [Linux 双端远程控制](./linux-desktop-remote-control.md)，原有 Windows 验收记录不代表 Linux 验收。已发布的浏览器 WebUI v2 是另一条既有能力，架构见 `docs/remote-control-phase1-architecture.md`。
 
 ## 当前架构契约
 
