@@ -31,6 +31,24 @@ test("system status participates in full and feature-local Account Platform brow
   assert.ok(labels(selectFrontendSmokes(["pinvou3-app/src/features/account-platform/AdminSystemStatusWorkspace.jsx"])).includes(status));
 });
 
+test("user-code lookup smoke runs once for its actual feature owner and shared inputs", () => {
+  const target = "npm:test:account-platform-user-code-ui";
+  const packageJson = JSON.parse(readFileSync(
+    new URL("../../pinvou3-app/package.json", import.meta.url), "utf8",
+  ));
+  assert.equal(packageJson.scripts["test:account-platform-user-code-ui"], "node tests/account_platform_user_code_lookup_smoke.mjs");
+  const feature = labels(selectFrontendSmokes([
+    "pinvou3-app/src/features/account-platform/AdminPlatformView.jsx",
+  ]));
+  assert.ok(feature.includes("npm:test:ui-smoke"), "exercise the feature branch rather than the full-suite fallback");
+  for (const selected of [
+    feature,
+    fullLabels,
+    labels(selectFrontendSmokes(["pinvou3-app/src/shared/i18n.js"])),
+    labels(selectFrontendSmokes(["pinvou3-app/tests/account_platform_user_code_lookup_smoke.mjs"])),
+  ]) assert.equal(selected.filter(label => label === target).length, 1);
+});
+
 test("diagnostics consent smoke is executable and selected for all entry points", () => {
   const packageJson = JSON.parse(readFileSync(
     new URL("../../pinvou3-app/package.json", import.meta.url), "utf8",
