@@ -84,6 +84,9 @@ const MAX_LINE_CHARS: usize = 4_000;
 
 /// 目录里最多留几次运行的日志。够覆盖「昨天那次为什么失败」，又不会无限涨。
 const MAX_RUN_FILES: usize = 20;
+/// 用户导出件的独立上界（r6 P2-5）：不吃运行日志预算，但源日志轮转掉之后
+/// 旧导出件就是孤儿，只增不减。
+const MAX_EXPORT_FILES: usize = 10;
 
 /// 登记的字面量机密最多留几条。宿主目前只会登记一条（HF Token）；给点余量，
 /// 但必须有上限——这张表是全进程常驻的。
@@ -358,8 +361,18 @@ pub fn sanitize_for_disk(line: &str) -> String {
             continue;
         }
         if let Some(HeaderExpect::Value) = header_expect {
+            // r6 P1-5：`Authorization: Basic <凭据>`——scheme 词（Basic/Bearer）
+            // 本身不是机密，真正的凭据是它**后面**那个词。只抹 scheme 词会把
+            // 凭据词原样留下（实测泄漏）。scheme 词照抹（无诊断价值），并连带
+            // 标记紧随的凭据词。
+            let scheme_word = word.trim_matches(|c: char| matches!(c, '"' | '\'' | ',' | ';'));
             out.push_str(REDACTED);
             header_expect = None;
+            if scheme_word.eq_ignore_ascii_case("basic")
+                || scheme_word.eq_ignore_ascii_case("bearer")
+            {
+                redact_next = true;
+            }
             continue;
         }
         if let Some(HeaderExpect::Name) = header_expect.take() {
@@ -427,8 +440,14 @@ pub fn sanitize_for_disk(line: &str) -> String {
         }
         let bare = word.trim_matches(|c: char| matches!(c, '"' | '\'' | ',' | ';' | ':'));
         // `--TOKEN x`（空格形态）此前大小写敏感漏网——`=` 形态早已不敏感，两处对齐。
+        // r6 P1-5：`SECRET_ENV_KEYS.contains(&bare)` 同样是精确匹配，pretty-JSON
+        // 的小写键（`  "api_key": "secret"` 分词后 bare=`api_key`）全部漏网——
+        // 与 `=`/`--flag` 两支对齐成不敏感，键命中即 redact-next（值无长度下限，
+        // 导出侧 <24 字符的短值也因此被定向层先行抹掉）。
         if bare.eq_ignore_ascii_case("bearer")
-            || SECRET_ENV_KEYS.contains(&bare)
+            || SECRET_ENV_KEYS
+                .iter()
+                .any(|known| bare.eq_ignore_ascii_case(known))
             || SECRET_FLAGS
                 .iter()
                 .any(|known| bare.eq_ignore_ascii_case(known))
@@ -707,48 +726,58 @@ impl RunLogFile {
 /// 只留最近 `MAX_RUN_FILES` 份。按 mtime 排，拿不到 mtime 的排最后（宁可留着
 /// 也不要因为读不到元数据就删掉一份可能有用的日志）。
 ///
-/// 两个不能删的例外（2026-10-20 评审 P2）：
+/// 不能删的例外（2026-10-20 评审 P2）：
 /// - **活跃运行的日志**（`active_run_ids`）：脚本静默期（等输入最长 600s）里它的
 ///   mtime 会变旧，下一次别的运行 open 触发轮转时它正落在删除线上——fd 还开着，
 ///   删掉后写入全进孤儿 inode，「导出日志」从此读不到这次运行；
-/// - **`.export.log`**：那是用户手动导出的产物，不是运行日志——不该吃 20 份预算，
-///   更不该被静默删掉。
+///
+/// **`.export.log` 是用户手动导出的产物**：不吃运行日志的 20 份预算，但也不能
+/// 无限累积（r6 P2-5：源日志轮转掉之后，旧导出件成了没人引用的孤儿，只增不减）。
+/// 独立上界 `MAX_EXPORT_FILES`，同一次轮转里清更旧的。
 fn prune_old_logs(dir: &Path, active_run_ids: &[String]) {
     let Ok(entries) = std::fs::read_dir(dir) else {
         return;
     };
     let active: std::collections::HashSet<String> =
         active_run_ids.iter().map(|id| safe_stem(id)).collect();
-    let mut files: Vec<(std::time::SystemTime, PathBuf)> = entries
-        .flatten()
-        .filter(|entry| {
-            let path = entry.path();
-            path.extension().is_some_and(|extension| extension == "log")
-                && !path
-                    .file_stem()
-                    .is_some_and(|stem| stem.to_string_lossy().ends_with(".export"))
-        })
-        .map(|entry| {
-            let modified = entry
-                .metadata()
-                .and_then(|m| m.modified())
-                .unwrap_or(std::time::SystemTime::UNIX_EPOCH);
-            (modified, entry.path())
-        })
-        .collect();
-    if files.len() < MAX_RUN_FILES {
-        return;
-    }
-    files.sort_by(|a, b| b.0.cmp(&a.0));
-    for (_, path) in files.into_iter().skip(MAX_RUN_FILES - 1) {
-        // 活跃运行的日志宁可让预算临时超一份，也不能删。
-        if path
-            .file_stem()
-            .is_some_and(|stem| active.contains(stem.to_string_lossy().as_ref()))
-        {
+    let mut runs: Vec<(std::time::SystemTime, PathBuf)> = Vec::new();
+    let mut exports: Vec<(std::time::SystemTime, PathBuf)> = Vec::new();
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if !path.extension().is_some_and(|extension| extension == "log") {
             continue;
         }
-        let _ = std::fs::remove_file(path);
+        let modified = entry
+            .metadata()
+            .and_then(|m| m.modified())
+            .unwrap_or(std::time::SystemTime::UNIX_EPOCH);
+        if path
+            .file_stem()
+            .is_some_and(|stem| stem.to_string_lossy().ends_with(".export"))
+        {
+            exports.push((modified, path));
+        } else {
+            runs.push((modified, path));
+        }
+    }
+    if runs.len() >= MAX_RUN_FILES {
+        runs.sort_by(|a, b| b.0.cmp(&a.0));
+        for (_, path) in runs.into_iter().skip(MAX_RUN_FILES - 1) {
+            // 活跃运行的日志宁可让预算临时超一份，也不能删。
+            if path
+                .file_stem()
+                .is_some_and(|stem| active.contains(stem.to_string_lossy().as_ref()))
+            {
+                continue;
+            }
+            let _ = std::fs::remove_file(path);
+        }
+    }
+    if exports.len() > MAX_EXPORT_FILES {
+        exports.sort_by(|a, b| b.0.cmp(&a.0));
+        for (_, path) in exports.into_iter().skip(MAX_EXPORT_FILES) {
+            let _ = std::fs::remove_file(path);
+        }
     }
 }
 
@@ -1009,6 +1038,48 @@ mod tests {
         );
     }
 
+    /// r6 P1-5：pretty-JSON 的小写机密键。`  "api_key": "secret"` 分词后
+    /// 键词 bare=`api_key`——裸键检查此前是精确匹配 `API_KEY`，小写全漏
+    /// （值再短也没有长度下限兜底，导出侧的 ≥24 粗尺同样放过短值）。
+    /// 键命中即 redact-next，导出件同样先过这道定向层。
+    #[test]
+    fn pretty_json_secret_keys_redact_next_word_case_insensitively() {
+        for line in [
+            "  \"api_key\": \"short-secret\"",
+            "  \"Api_Key\": \"another-one\"",
+            "  \"password\": \"hunter2\"",
+        ] {
+            let disk = sanitize_for_disk(line);
+            assert!(!disk.contains("short-secret"), "{line} -> {disk}");
+            assert!(!disk.contains("another-one"), "{line} -> {disk}");
+            assert!(!disk.contains("hunter2"), "{line} -> {disk}");
+            assert!(disk.contains("[REDACTED]"), "{line} -> {disk}");
+            // 导出件先过同一道定向层再上通用尺子
+            let export = sanitize_for_export(line);
+            assert!(!export.contains("short-secret"), "{line} -> {export}");
+        }
+        // 对照：非机密键的普通 JSON 不受影响
+        assert_eq!(
+            sanitize_for_disk("  \"model_name\": \"qwen3.8-27b\""),
+            "  \"model_name\": \"qwen3.8-27b\""
+        );
+    }
+
+    /// r6 P1-5：`Authorization: Basic <凭据>` 的凭据词存活——scheme 词被抹了，
+    /// 它后面的 base64 凭据原样落盘。scheme 词连带标记下一个词。
+    #[test]
+    fn authorization_basic_scheme_redacts_following_credential() {
+        for line in [
+            "curl -s -H 'Authorization: Basic dXNlcjpwYXNzOndyb25n' https://example.internal/v1",
+            "curl -H \"Authorization: Basic dXNlcjpwYXNzOndyb25n\" http://10.0.0.8/api",
+            "curl --header=Authorization: Bearer eyJhbGciOi.very.long.token https://x",
+        ] {
+            let disk = sanitize_for_disk(line);
+            assert!(!disk.contains("dXNlcjpwYXNz"), "{line} -> {disk}");
+            assert!(!disk.contains("eyJhbGciOi"), "{line} -> {disk}");
+        }
+    }
+
     /// 行首缩进必须留着。
     ///
     /// 脱敏是按空白分词重拼的，默认会把缩进一起压平。而 Python traceback 是这份日志里
@@ -1257,6 +1328,48 @@ mod tests {
             file.finish("成功");
         }
         assert!(export.exists(), "用户导出的文件被轮转删掉了");
+    }
+
+    /// r6 P2-5：导出件不吃运行预算，但要有独立上界——源日志轮转掉之后，
+    /// 旧导出件是没人引用的孤儿，只增不减。超过 `MAX_EXPORT_FILES` 份时
+    /// 清最旧的，且不影响运行日志的预算。
+    #[test]
+    fn export_files_have_their_own_bounded_retention() {
+        let _home = config::TempHome::new();
+        let dir = logs_dir();
+        std::fs::create_dir_all(&dir).unwrap();
+        for index in 0..(MAX_EXPORT_FILES + 7) {
+            let path = dir.join(format!("run-x{index:03}.export.log"));
+            std::fs::write(&path, "exported snapshot").unwrap();
+            // mtime 递增：编号大的新
+            set_mtime(
+                &path,
+                std::time::SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(index as u64),
+            );
+        }
+        // 一份运行日志触发轮转（prune 在 open 时执行）
+        let file = RunLogFile::open("run-x-trigger", "导出上界测试", &[]).unwrap();
+        file.append("一行");
+        file.finish("成功");
+        let remaining: Vec<String> = std::fs::read_dir(&dir)
+            .unwrap()
+            .flatten()
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .filter(|name| name.ends_with(".export.log"))
+            .collect();
+        assert_eq!(
+            remaining.len(),
+            MAX_EXPORT_FILES,
+            "导出件应收敛到独立上界，实际剩 {remaining:?}"
+        );
+        assert!(
+            remaining.contains(&"run-x016.export.log".to_string()),
+            "最新的一份必须保留：{remaining:?}"
+        );
+        assert!(
+            !remaining.contains(&"run-x000.export.log".to_string()),
+            "最旧的一份应被清掉：{remaining:?}"
+        );
     }
 
     #[test]

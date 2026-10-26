@@ -18,8 +18,11 @@ command -v gtk-update-icon-cache >/dev/null 2>&1 && \
 # 模型商店开机自启（2026-10-23）：systemd user 服务要在用户未登录时也能跑，
 # 需要 loginctl enable-linger。best-effort：失败不阻塞安装，只影响自启时机
 # （用户登录后 GUI 启动时仍会托管拉起，见 service.rs autostart_pending）。
+# r6 P1-3：只对**用过品悟**的用户开（~/.pinvou3 存在）——enable-linger 是持久
+# 的登录态变更，给从未用过品悟的账号开等于无谓扩大后台常驻面。
 enable_linger() {
   uhome="$1"; uowner="$2"
+  [ -d "$uhome/.pinvou3" ] || return 0
   command -v loginctl >/dev/null 2>&1 || return 0
   loginctl enable-linger "$uowner" 2>/dev/null || true
 }
@@ -27,8 +30,10 @@ enable_linger() {
 # 服务单元随包落在 /usr/lib/systemd/user/ 后还要「enable」才进开机链。装机时
 # 用户的 session dbus 未必在线（systemctl --user 需要），直接做等价的文件操作：
 # default.target.wants 软链——与 systemctl --user enable 落盘结果一致。
+# 与 enable_linger 同判据：只给用过品悟的用户挂（r6 P1-3）。
 link_autostart() {
   uhome="$1"; uowner="$2"
+  [ -d "$uhome/.pinvou3" ] || return 0
   UNIT=/usr/lib/systemd/user/pinvou3-model-store-autostart.service
   [ -f "$UNIT" ] || return 0
   wants="$uhome/.config/systemd/user/default.target.wants"
