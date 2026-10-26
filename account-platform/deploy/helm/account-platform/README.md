@@ -1,8 +1,36 @@
 # Account Platform Helm Chart
 
 This chart deploys Account Service, Billing Service, Token Gateway, Token Portal,
-Keycloak, Redis, and NATS. PostgreSQL and payment/model providers stay external so
+Keycloak, and Redis. NATS, PostgreSQL and payment/model providers stay external so
 their backup, certificate, and merchant controls remain environment-owned.
+
+### NATS prerequisite for every profile
+
+Billing Service and the Account/Billing event relays always require provisioned
+JetStream resources and explicit per-service authentication over TLS. This is
+also true for base/staging installs with all optional governed workloads disabled.
+The legacy bundled unauthenticated NATS cannot satisfy that runtime contract;
+rendering now rejects it before installation instead of producing crashing Pods.
+Do not weaken the runtime authentication or provisioning checks to install it.
+
+In a site-specific values file, set `nats.enabled=false`, supply the approved
+`dependencies.natsUrl` as a single `tls://<approved-host>:4222` URL without URL
+credentials, path, query or fragment, and supply the HTTPS
+`dependencies.natsMonitorUrl`. Set `external.natsCidrs` and
+`external.natsMonitorCidrs` to the reviewed destinations for the existing
+NetworkPolicies. Base/staging example values intentionally do not invent an
+external cluster or credential; these operator inputs are required before a
+successful render/install. Existing valid external TLS configurations continue
+to work, including the dedicated production and governed-workload profiles.
+
+Before rollout, provision the existing least-privilege per-service NATS credentials,
+their matching server-side authentication, streams and durable consumers as
+described in [the NATS provisioning runbook](../../runbooks/nats-resources.md).
+Populate the existing runtime Secret credential keys and the Account approval
+relay public-artifact ConfigMap; mounting client credentials alone does not
+configure server authentication. Render and review the exact site values, then
+perform the separately authorized TLS/authentication/resource and network
+reachability checks. Rendering does not prove those external resources exist.
 
 Install External Secrets Operator and create the least-privilege referenced
 `SecretStore` or `ClusterSecretStore` before install. Production values create

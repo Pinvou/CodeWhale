@@ -3,6 +3,12 @@ global:
   runtimeSecret: pinvou-account-platform-staging
   trustedTimeSources: [time.cloudflare.com:123, pool.ntp.org:123, ntp.aliyun.com:123, time1.cloud.tencent.com:123, time.windows.com:123]
 
+# Billing and both ordinary relays always require provisioned, authenticated TLS
+# NATS, even with all optional governed workloads disabled. Supply the approved
+# external URL, monitor URL and egress CIDRs in the site-specific values file.
+nats:
+  enabled: false
+
 externalSecrets:
   enabled: true
   secretStoreKind: ClusterSecretStore
