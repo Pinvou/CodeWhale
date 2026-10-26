@@ -1,10 +1,13 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { copyFile, mkdtemp, mkdir, readFile, rm, writeFile } from 'node:fs/promises';
+import { copyFile, mkdtemp, mkdir, readFile, realpath, rm, writeFile } from 'node:fs/promises';
 import { spawnSync } from 'node:child_process';
 import os from 'node:os';
 import path from 'node:path';
 import { pathToFileURL } from 'node:url';
+
+import { createHash } from 'node:crypto';
+import { developmentNATSFixture } from '../account-platform/test/fixtures/development-nats.mjs';
 
 import { validateTaskDocuments } from './check-account-platform-tasks.mjs';
 
@@ -112,42 +115,105 @@ test('rejects empty task queues and malformed identifiers while retaining CRLF i
   assert.deepEqual(validateTaskDocuments(buildStatusMarkdown().replaceAll('\n', '\r\n'), buildTaskMarkdown().replaceAll('\n', '\r\n'), requirements.replaceAll('\n', '\r\n')), validateFixture());
 });
 
-test('actual development CLI closes the profile it starts and never removes volumes', async () => {
-  const temporaryRoot = await mkdtemp(path.join(os.tmpdir(), 'pinvou-account-cli-test-'));
+test('actual development CLI preserves material and storage preflights and never removes volumes', async (t) => {
+  const parent = await realpath(os.tmpdir());
+  const temporaryRoot = await mkdtemp(path.join(parent, 'pinvou-account-cli-test-'));
   const scripts = path.join(temporaryRoot, 'scripts');
   const compose = path.join(temporaryRoot, 'account-platform', 'deploy', 'compose');
   const integration = path.join(temporaryRoot, 'account-platform', 'test', 'integration');
   try {
-    await Promise.all([mkdir(scripts, { recursive: true }), mkdir(compose, { recursive: true }), mkdir(integration, { recursive: true })]);
+    await Promise.all([mkdir(scripts), mkdir(compose, { recursive: true }), mkdir(integration, { recursive: true })]);
     await writeFile(path.join(compose, '.env'), '# Owned fixture; no credentials.\n');
-    const script = path.join(scripts, 'account-platform.mjs');
-    await copyFile(new URL('./account-platform.mjs', import.meta.url), script);
-    for (const helper of ['workload-credential.mjs', 'compose-test-configuration.mjs']) {
-      await copyFile(new URL(`../account-platform/test/integration/${helper}`, import.meta.url), path.join(integration, helper));
+    // Execute the unchanged CLI and its complete production helper graph.
+    for (const name of ['account-platform.mjs', 'account-platform-dev-nats.mjs', 'account-platform-dev-nats-storage.mjs', 'account-platform-dev-nats-runner.mjs']) {
+      await copyFile(new URL(`./${name}`, import.meta.url), path.join(scripts, name));
     }
-    const capture = path.join(temporaryRoot, 'docker-argv.json');
+    for (const name of ['workload-credential.mjs', 'compose-test-configuration.mjs']) {
+      await copyFile(new URL(`../account-platform/test/integration/${name}`, import.meta.url), path.join(integration, name));
+    }
+    const capture = path.join(temporaryRoot, 'docker-argv.jsonl');
     const preload = path.join(scripts, 'capture-docker.mjs');
     await writeFile(preload, `import childProcess from 'node:child_process';
-import { writeFileSync } from 'node:fs';
+import { appendFileSync } from 'node:fs';
+import path from 'node:path';
 import { syncBuiltinESMExports } from 'node:module';
 childProcess.spawnSync = (command, args, options) => {
   if (command !== 'docker' || options.shell !== false) throw new Error('unexpected CLI boundary');
-  writeFileSync(process.env.PINVOU_CLI_CAPTURE, JSON.stringify(args));
-  return { status: 0 };
+  appendFileSync(process.env.PINVOU_CLI_CAPTURE, JSON.stringify(args) + '\\n');
+  const scenario = process.env.PINVOU_CLI_SCENARIO;
+  const data = options.env.DEV_NATS_DATA_DIRECTORY;
+  const project = 'controlled-task-cli';
+  let stdout;
+  if (args[0] === 'context') stdout = JSON.stringify(scenario === 'remote' ? 'ssh://fixture.invalid' : 'unix:///var/run/docker.sock');
+  else if (args[0] === 'compose' && args.includes('config')) stdout = JSON.stringify({ name: project, services: { nats: { volumes: [{ type: 'bind', target: '/data', source: data }] } } });
+  else if (args[0] === 'volume' && args[1] === 'ls') stdout = scenario === 'old-volume' ? project + '_nats-data' : '';
+  else if (args[0] === 'compose' && args.includes('ps')) stdout = ['same-bind', 'different-bind'].includes(scenario) ? 'a'.repeat(64) : '';
+  else if (args[0] === 'inspect') stdout = JSON.stringify([{ Type: 'bind', Destination: '/data', Source: scenario === 'different-bind' ? path.join(data, 'other') : data }]);
+  else if (args[0] === 'compose' && (args.includes('up') || args.includes('down'))) stdout = '';
+  else throw new Error('unexpected Docker command');
+  return { status: 0, stdout };
 };
 syncBuiltinESMExports();
 `);
-    for (const action of ['up', 'down']) {
-      const result = spawnSync(process.execPath, ['--import', pathToFileURL(preload).href, script, 'dev', action], {
-        encoding: 'utf8', shell: false, timeout: 10_000, windowsHide: true,
-        env: { ...process.env, PINVOU_CLI_CAPTURE: capture },
+    const prefix = ['compose', '--env-file', path.join(compose, '.env'), '-f', path.join(compose, 'compose.yaml'), '-f', path.join(compose, 'compose.dev-nats.yaml'), '--profile', 'real-newapi'];
+    const context = ['context', 'inspect', '--format', '{{json .Endpoints.docker.Host}}'];
+    const volumes = [
+      ['volume', 'ls', '-q', '--filter', 'label=com.docker.compose.project=controlled-task-cli', '--filter', 'label=com.docker.compose.volume=nats-data'],
+      ['volume', 'ls', '-q', '--filter', 'name=controlled-task-cli_nats-data'],
+    ];
+    const preflight = [context, [...prefix, 'config', '--format', 'json'], ...volumes, [...prefix, 'ps', '-aq', 'nats']];
+    const inspect = ['inspect', '--format', '{{json .Mounts}}', 'a'.repeat(64)];
+    for (const scenario of ['new', 'same-bind', 'down', 'down-missing-material', 'bad-material', 'missing-receipt', 'old-volume', 'different-bind', 'remote', 'host-override']) {
+      await t.test(scenario, async () => {
+        const directory = path.join(temporaryRoot, scenario);
+        await mkdir(directory, { mode: 0o700 });
+        // Reuse the offline assembly fixture: ephemeral TLS material and syntax
+        // identities only, not issued credentials or real broker cutover proof.
+        const fixture = developmentNATSFixture(directory);
+        const receipt = Buffer.from(JSON.stringify({
+          schema: 'approval-consumer-cutover-receipt-v1', schema_version: 1,
+          identity_sha256: fixture.config.currentPublicKeysSHA256,
+          manifest_sha256: fixture.config.manifestSHA256,
+          stream: 'ACCOUNT_PLATFORM', control: 'ADMIN_APPROVAL',
+          captured_mode: 'QUIESCING', captured_relay_state: 'FENCED',
+          control_version: '3', approval_epoch: '2', authorization_relay_epoch: '2',
+          captured_at: new Date().toISOString(), high_watermark: '0',
+          billing_starts: [{ durable: 'fixture-only-durable', start_sequence: '1' }],
+        }));
+        await writeFile(fixture.config.receiptFile, receipt, { mode: 0o600 });
+        fixture.config.receiptSHA256 = createHash('sha256').update(receipt).digest('hex');
+        if (scenario === 'bad-material') fixture.config.authorizationSHA256 = '0'.repeat(64);
+        fixture.save();
+        if (scenario === 'missing-receipt' || scenario === 'down-missing-material') await rm(fixture.config.receiptFile);
+        if (scenario === 'down-missing-material') await rm(fixture.config.caFile);
+        await writeFile(capture, '');
+        const env = { ...process.env, ...fixture.environment, PINVOU_CLI_CAPTURE: capture, PINVOU_CLI_SCENARIO: scenario };
+        // A developer's Docker host override cannot redirect this inert fixture.
+        for (const key of Object.keys(env)) if (key.toUpperCase() === 'DOCKER_HOST') delete env[key];
+        if (scenario === 'host-override') env.DOCKER_HOST = 'tcp://fixture.invalid:2376';
+        const action = scenario.startsWith('down') ? 'down' : 'up';
+        const result = spawnSync(process.execPath, ['--import', pathToFileURL(preload).href, path.join(scripts, 'account-platform.mjs'), 'dev', action], {
+          encoding: 'utf8', shell: false, timeout: 10_000, windowsHide: true, env,
+        });
+        assert.equal(result.error, undefined);
+        const calls = (await readFile(capture, 'utf8')).trim().split('\n').filter(Boolean).map(line => JSON.parse(line));
+        const success = ['new', 'same-bind', 'down', 'down-missing-material'].includes(scenario);
+        assert.equal(result.status, success ? 0 : 1, result.stderr);
+        assert.ok(calls.every(args => !args.some(value => ['--volumes', '-v', 'rm', 'prune'].includes(value))), 'developer CLI must never remove volumes or storage');
+        let expected;
+        if (action === 'down') expected = [[...prefix, 'down']];
+        else if (scenario === 'new') expected = [...preflight, [...prefix, 'up', '--build', '-d', '--wait']];
+        else if (scenario === 'same-bind') expected = [...preflight, inspect, [...prefix, 'up', '--build', '-d', '--wait']];
+        else if (scenario === 'old-volume') expected = preflight.slice(0, 3);
+        else if (scenario === 'different-bind') expected = [...preflight, inspect];
+        else if (scenario === 'remote') expected = [context];
+        else expected = [];
+        assert.deepEqual(calls, expected, `${scenario} must retain its exact read-only preflight and compose overlay`);
+        if (!success) assert.match(result.stderr, ['bad-material', 'missing-receipt'].includes(scenario) ? /DEV_NATS_MATERIALS_INVALID/ : /DEV_NATS_EXISTING_STORAGE_UNPROVEN/);
       });
-      assert.equal(result.error, undefined);
-      assert.equal(result.status, 0, result.stderr);
-      assert.deepEqual(JSON.parse(await readFile(capture, 'utf8')), ['compose', '--env-file', path.join(compose, '.env'), '-f', path.join(compose, 'compose.yaml'), '--profile', 'real-newapi', action, ...(action === 'up' ? ['--build', '-d', '--wait'] : [])]);
     }
   } finally {
-    assert.equal(path.dirname(temporaryRoot), path.resolve(os.tmpdir()));
+    assert.equal(path.dirname(temporaryRoot), parent);
     assert.ok(path.basename(temporaryRoot).startsWith('pinvou-account-cli-test-'));
     await rm(temporaryRoot, { recursive: true, force: true });
   }

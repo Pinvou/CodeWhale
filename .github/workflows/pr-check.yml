@@ -1184,6 +1184,10 @@ jobs:
           npm --prefix account-platform ci --ignore-scripts --no-audit --fund=false
           npm --prefix account-platform run test:closure-contracts
 
+      - name: Verify Account Platform task contracts
+        run: |
+          node --test scripts/check-account-platform-tasks.test.mjs
+
       - name: Verify Account Platform authorization contracts
         run: |
           node scripts/check-account-platform-authorization-coverage.mjs

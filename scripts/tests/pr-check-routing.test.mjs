@@ -852,3 +852,23 @@ test("Account Platform generator/checker steps run real inputs and propagate fai
     rmSync(directory, { recursive: true, force: true });
   }
 });
+
+
+test("Account Platform task tests run for their own inputs without bypassing production CLI preflights", () => {
+  for (const input of [
+    "scripts/check-account-platform-tasks.test.mjs",
+    "scripts/check-account-platform-tasks.mjs",
+    "scripts/account-platform.mjs",
+    "scripts/account-platform-dev-nats.mjs",
+    "scripts/account-platform-dev-nats-storage.mjs",
+    "scripts/account-platform-dev-nats-runner.mjs",
+    "account-platform/test/fixtures/development-nats.mjs",
+    "account-platform/docs/implementation-status.md",
+    "account-platform/docs/implementation-tasks.md",
+    "account-platform/docs/requirements.md",
+  ]) assert.ok(inputSelects(workflow, "account_platform", input), `${input} alone must select the task contracts`);
+  const job = jobBlock("account-platform-test");
+  const name = "Verify Account Platform task contracts";
+  assert.doesNotMatch(namedStep(job, name), /^ {8}(?:if|continue-on-error|working-directory|env):/m);
+  assert.equal(stepRun(job, name).trim(), "node --test scripts/check-account-platform-tasks.test.mjs");
+});
