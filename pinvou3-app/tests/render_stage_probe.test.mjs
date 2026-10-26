@@ -220,3 +220,37 @@ test('隐藏期间的 markDispatched 不武装 rAF，恢复可见不补触发（
   h.probe.begin('hid1');
   assert.equal(h.recorded.length, 0, '隐藏期收尾被豁免，不产假 stall');
 });
+
+// r4 P2-A 行为锁：后台会话的陈旧条目（未派发存活数分钟）被任意 notify() 补盖
+// 派发标记时，不得盖章成分钟级假 stall——静默收尾。
+test('陈旧条目的 markDispatched 静默收尾，不盖章不上报（P2-A）', () => {
+  const h = harness();
+  h.probe.begin('stale1');
+  h.probe.markScheduled('stale1');
+  const entry = h.probe._liveEntry('stale1');
+  entry.t_sched -= 60000;                 // 一分钟前武装的合并帧，publish 只标记活跃 sid
+  h.probe.markDispatched('stale1');       // 数分钟后某事件路径的 notify() 补盖
+  assert.equal(h.recorded.length, 0, '分钟级 recv→dispatch 是补盖伪差，不得上报');
+  assert.equal(h.probe.snapshot()[0].recv_to_dispatch_ms, null, '未盖章，段差保持 null');
+  assert.ok(h.probe._liveEntry('stale1') === null || h.probe._liveEntry('stale1').finalized !== false,
+    '陈旧条目应已收尾');
+});
+
+// r4 P2-B 行为锁：begin 发生在隐藏期、恢复可见后定时器腿才落地的条目，
+// recv→dispatch 含浏览器 ~1s 节流伪差——豁免上报；可见期起源的同类时差仍正常上报。
+test('隐藏期起源的条目恢复可见后不产节流假 stall（P2-B）', () => {
+  const h = harness({ visibility: 'hidden' });
+  h.probe.begin('hid2');                    // 隐藏期到达
+  const entry = h.probe._liveEntry('hid2');
+  entry.t_recv -= 1000;                     // 标准节流 ~1s 桶
+  h.document.visibilityState = 'visible';   // 恢复可见，32ms 定时器腿此刻才 fire
+  h.probe.markDispatched('hid2');           // 此刻可见：武装 rAF
+  flushFrames(h);
+  assert.equal(h.recorded.length, 0, '节流伪差不得进诊断流');
+  // 对照组：可见期起源的同样时差是真实卡顿，必须照常上报
+  h.probe.begin('vis2');
+  h.probe._liveEntry('vis2').t_recv -= 1000;
+  h.probe.markDispatched('vis2');
+  flushFrames(h);
+  assert.equal(h.recorded.length, 1, '可见起源不受豁免影响');
+});

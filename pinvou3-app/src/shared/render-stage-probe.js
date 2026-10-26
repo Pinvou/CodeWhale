@@ -18,6 +18,9 @@
  *     路径同样未打标记。后台流式卡顿定位靠切回前台后的周期。
  *   - 长任务阻塞期间「未派发即被取代」的周期只有恰处已派发帧未回相位才
  *     补报一条（begin 的 supersede 补报），其余静默收尾。
+ *   - 防补盖伪差（r4）：派发标记带 5s 新鲜度上界——后台会话存活数分钟的
+ *     未派发条目被任意 notify() 补盖时不盖章、静默收尾（P2-A）；begin 发生
+ *     在隐藏期的条目一律不上报——其时差含浏览器对隐藏定时器的节流（P2-B）。
  */
 (function (root) {
   "use strict";
@@ -28,6 +31,10 @@
   var RING_SIZE = 64;
   var STALL_RECV_TO_DISPATCH_MS = 120;
   var STALL_DISPATCH_TO_FRAME_MS = 120;
+  // 派发标记的新鲜度上界（r4 P2-A）：后台会话的未派发条目可存活数分钟，
+  // 任意事件路径的 notify() 补盖 t_dispatch 会把它变成分钟级假 stall。
+  // 正常合并节奏是 rAF/32ms、隐藏期 ~1s，5s 上界足够宽不吞真实卡顿。
+  var STALE_DISPATCH_LIMIT_MS = 5000;
   // 同一会话持续卡顿时，上报本身（8-80ms/条的同步写）会形成正反馈挤爆共享诊断
   // 队列——一条 stall 记录已经足够定位"卡在哪段"，10 秒内不重复上报。
   // **按会话**节流（评审 P2-3）：全局节流会让一个会话的持续卡顿把另一个会话的
@@ -71,6 +78,12 @@
     // 周期都误判成 stall，~36 秒就把 256 条共享队列全部挤成假记录——恰恰在要
     // 诊断的现场毁掉诊断（评审 P2 实测 5/5 周期误报）。隐藏期间不上报。
     if (typeof document !== "undefined" && document.visibilityState === "hidden") return;
+    // r4 P2-B：begin 发生在隐藏期的条目，其 recv→dispatch 间隔含浏览器对隐藏
+    // 窗口定时器的节流（标准节流 ~1s 桶）——恢复可见后定时器腿落地会测得 ~1s
+    // 的假 stall，且几乎每次「流式中切走再切回」都产一条。探针分不清「应用
+    // 卡了」和「浏览器节流」，隐藏期起源的条目一律不上报（snapshot 仍可见，
+    // 只是不进诊断流）。
+    if (entry.hiddenOrigin) return;
     // 先确认诊断模块可用、再消耗节流窗口（评审 P3：诊断缺失/record 抛错时
     // 不该把该会话的 10s 节流窗口白白烧掉）。
     var diagnostics = root.PinvouAuthoritySyncDiagnostics;
@@ -136,13 +149,15 @@
         }
         finalize(previous);
       }
-      var entry = { sid: key, seq: ++seq, t_recv: now(), t_sched: null, t_dispatch: null, t_frame: null, rafHandle: null, finalized: false };
+      var beganHidden =
+        typeof document !== "undefined" && document.visibilityState === "hidden";
+      var entry = { sid: key, seq: ++seq, t_recv: now(), t_sched: null, t_dispatch: null, t_frame: null, rafHandle: null, hiddenOrigin: beganHidden, finalized: false };
       currentBySession[key] = entry;
       ring.push(entry);
       if (ring.length > RING_SIZE) ring.shift();
       return entry;
     },
-    /** 合并帧已排上（rAF/32ms 定时器已武装）。 */
+    /** 合并帧已排上（rAF/32ms 定时器已武装）。t_sched 兼作派发新鲜度的参考点。 */
     markScheduled: function (sid) {
       var entry = currentBySession[sid || ""];
       if (entry && entry.t_sched == null) entry.t_sched = now();
@@ -151,6 +166,17 @@
     markDispatched: function (sid) {
       var entry = currentBySession[sid || ""];
       if (!entry || entry.finalized) return;
+      // r4 P2-A（陈旧条目新鲜度上界）：后台会话的最后一条 delta 停在「未派发」
+      // 状态可存活数分钟（合并帧 publish 只标记活跃 sid、chat:done 不调 notify
+      // 收尾它），期间任意事件路径的 notify() 都会无条件补盖 t_dispatch——
+      // recv→dispatch 当场变成分钟级假 stall。派发标记只对新鲜条目有效：距
+      // 调度参考点（t_sched，直发路径为 t_recv）超过上界的条目静默收尾（不
+      // 盖章 → 段差为 null → 不上报）。
+      var freshRef = entry.t_sched != null ? entry.t_sched : entry.t_recv;
+      if (freshRef != null && now() - freshRef > STALE_DISPATCH_LIMIT_MS) {
+        finalize(entry);
+        return;
+      }
       entry.t_dispatch = now();
       if (entry.t_sched == null) entry.t_sched = entry.t_dispatch;
       // r2 P1-1（平台无关修法）：窗口已隐藏时不武装 rAF——rAF 在隐藏期挂起、
