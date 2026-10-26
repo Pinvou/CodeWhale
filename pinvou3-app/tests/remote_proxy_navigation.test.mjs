@@ -194,7 +194,7 @@ test('a different proxy can still open its initial null-cursor history', async (
 
 for (const kind of ['navigation', 'refresh']) {
   for (const crossEpoch of [false, true]) {
-    test(`${kind} requested earlier can publish later metadata (${crossEpoch ? 'cross epoch' : 'equal cursor'})`, async () => {
+    test(`${kind} requested earlier can publish later metadata (${crossEpoch ? 'cross epoch with lower sequence' : 'equal cursor'})`, async () => {
       const { feature, remote, state, complete } = installRemoteHistory();
       const initial = feature.switchToSession('remote-local-1');
       complete(0, 'initial');
@@ -205,7 +205,7 @@ for (const kind of ['navigation', 'refresh']) {
         : remote.readRemoteProxyHistory('remote-local-1');
       const second = kind === 'navigation' ? remote.readRemoteProxyHistory('remote-local-1')
         : feature.switchToSession('remote-local-1');
-      complete(2, 'earlier snapshot', 1, { pendingUnknownCount: 1 });
+      complete(2, 'earlier snapshot', crossEpoch ? 3 : 1, { pendingUnknownCount: 1 });
       await second;
       assert.equal(state.remoteProxyHistory.pendingUnknownCount, 1);
       complete(1, 'later snapshot', 1, {

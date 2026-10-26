@@ -1,8 +1,9 @@
 # RemoteProxy 导航、后台与只读面板读取
 
 桌面 sessions 的会话切换通过 bridge 注入的 `readRemoteProxyHistory(id,
-{ navigation: true })` 验证 Rust 返回的历史记录。轮询、事件刷新和归档后的
-刷新使用默认的后台读取。归档管理面板通过 `{ view: true }` 读取组件本地的
+{ navigation: true })` 验证 Rust 返回的历史记录。远控 notice 的50ms去抖刷新、
+归档后的刷新，以及 ChatView 任务提交、取消和放弃等动作后的五处读取，均使用
+默认的后台读取；此链没有周期轮询。归档管理面板通过 `{ view: true }` 读取组件本地的
 只读正文，不导航、不发布全局投影。三类读取分别保留同一会话的最新意图，
 各类只替换本类请求，不使其他类的有效读取失效。
 
@@ -16,7 +17,8 @@
 测试可以安排校验到采用之间的微任务交错，不代表生产中独立的删除/归档 IPC
 完成回调可以插入同一微任务 drain。同步 stop 当前没有生产调用者。
 Rust 阻塞读取的实际执行顺序可能不同于请求顺序；同会话、同 journal epoch 的
-认证 cursor 可比较时保持 cursor 不回退。同一 ID 已发布认证 cursor 后，不再
+认证 cursor 可比较时保持 cursor 不回退。新 epoch 的较小 sequence 仍不可与旧
+epoch 的较大 sequence 比较，不能按数字大小误丢弃它。同一 ID 已发布认证 cursor 后，不再
 接受初始无 cursor 的空窗覆盖；Rust 无 cursor 只代表该记录尚无认证 journal，
 不会用它重置既有 journal。其他会话的初始空历史仍可正常打开。
 cursor 相同或跨 epoch 不可比较时
@@ -33,5 +35,7 @@ epoch 新增排序规则。相同 cursor 的 pending 等非 journal 元数据仍
 `node --test tests/remote_proxy_navigation.test.mjs`：使用真实 sessions、桌面
 remote bridge 和状态投影，固定导航/刷新两种完成顺序、等 cursor 元数据、跨
 epoch、重复导航、双 pending 跨会话导航、只读面板隔离、停止/删除/归档后的
-迟到结果及失败后继续读取，并检查生产 checker 接线。Rust IPC 在此测试中由受控
+迟到结果及失败后继续读取，并检查生产 checker 接线。另运行
+`node --test tests/desktop_remote_bridge_projection.test.mjs`，从实际 index 脚本顺序
+加载完整 facade，验证其导航包装不会被后台或 view 读取替换。Rust IPC 在这些测试中由受控
 Promise 替代；该验证不代表真实双机部署或发布验收。
