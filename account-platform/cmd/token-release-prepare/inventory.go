@@ -5,6 +5,7 @@ import (
 	"slices"
 
 	"github.com/Pinvou/pinvou3/account-platform/internal/platform/migrations"
+	"github.com/Pinvou/pinvou3/account-platform/internal/tokenschema"
 	"github.com/jackc/pgx/v5"
 )
 
@@ -63,6 +64,10 @@ func installationSnapshot(ctx context.Context, tx pgx.Tx, directory string, lock
 		}
 	}
 	if len(applied) == 0 || result.Version != applied[len(applied)-1].Version {
+		return result, coded("MIGRATION_LEDGER_INVALID")
+	}
+	applied, err = tokenschema.ExpectedHistory(ctx, tx.Conn(), applied)
+	if err != nil {
 		return result, coded("MIGRATION_LEDGER_INVALID")
 	}
 	if _, err = migrations.VerifyApplied(ctx, tx.Conn(), applied); err != nil {

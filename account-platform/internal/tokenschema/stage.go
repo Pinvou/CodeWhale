@@ -89,6 +89,10 @@ func Up(ctx context.Context, c *pgx.Conn, loaded []migrations.Migration) error {
 	// migration engine acquires its own session lock, which remains the caller's
 	// responsibility to release once; a rejected ledger never reaches that engine.
 	defer migrations.Unlock(context.Background(), c)
+	ordered, err = ExpectedHistory(ctx, c, ordered)
+	if err != nil {
+		return err
+	}
 	var exists bool
 	if err = c.QueryRow(ctx, `SELECT to_regclass('schema_migrations') IS NOT NULL`).Scan(&exists); err != nil {
 		return err
@@ -106,6 +110,13 @@ func Up(ctx context.Context, c *pgx.Conn, loaded []migrations.Migration) error {
 				return err
 			}
 			expected, ok := installed[version]
+			if version == 18 {
+				expected = identity{name: "event_replay_audit", checksum: originalEventReplayChecksum}
+				ok = true
+				if checksum == originalEventReplayCRLFChecksum {
+					checksum = originalEventReplayChecksum
+				}
+			}
 			if !ok || name != expected.name || checksum != expected.checksum {
 				rows.Close()
 				return fmt.Errorf("Token database is outside the installed management stage")

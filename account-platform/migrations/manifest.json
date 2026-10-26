@@ -1052,6 +1052,16 @@
         "file": "900011_password_preparation_authorizations.up.sql",
         "version": 900011,
         "sha256": "7ccbdd93e9a476c95cfe6e6bde79ff7c055d2bdc7fc56f19a7a491654c9cab0e"
+      },
+      {
+        "file": "900012_outbox_generation_upgrade.down.sql",
+        "version": 900012,
+        "sha256": "2ac62f0bc954f92cedc0edf04f700f10ebbce76dc800163b649dccc594ab2a75"
+      },
+      {
+        "file": "900012_outbox_generation_upgrade.up.sql",
+        "version": 900012,
+        "sha256": "d69bc590c056a3d99ad86e206323bd0f288b5297fe0b2c08883ab1ee68f0bd74"
       }
     ],
     "billing": [
