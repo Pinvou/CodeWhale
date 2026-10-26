@@ -575,16 +575,11 @@ async fn serve_controlling_lane_with_evidence_context(
     let registration = owned_sender
         .as_ref()
         .map(|sender| sender.disconnect_context());
-    #[cfg(not(test))]
-    if registration.is_none() {
+    let Some(registration) = registration else {
         return;
-    }
-    // Only legacy isolated state tests omit a physical port. Every production
-    // keeper binds the original operation to its port's full registration.
-    let operation = match registration.as_ref() {
-        Some(registration) => evidence.operation.clone().for_lane(registration.clone()),
-        None => evidence.operation.clone(),
     };
+    // Every keeper, including isolated tests, uses its original registration.
+    let operation = evidence.operation.clone().for_lane(registration.clone());
     if manager.with_lane_owner(&operation, || ()).is_err() {
         return;
     }
@@ -592,17 +587,10 @@ async fn serve_controlling_lane_with_evidence_context(
         if manager.with_lane_owner(&operation, || ()).is_err() {
             return false;
         }
-        if let Some(sender) = owned_sender.as_ref() {
-            return sender.try_send_authenticated_control(&frame).is_ok();
-        }
-        #[cfg(test)]
-        {
-            (sinks.on_liveness)(frame)
-        }
-        #[cfg(not(test))]
-        {
-            false
-        }
+        // Production binds this sink to the port's original sender below.
+        // Keep admission/backpressure injectable through the same interface;
+        // tests must still pass the identical registration/owner checks.
+        (sinks.on_liveness)(frame)
     };
     let mut owned_sinks = ControllingLaneSinks {
         on_status: &mut *sinks.on_status,
@@ -674,7 +662,6 @@ async fn serve_controlling_lane_with_evidence_context(
                 let Some(event) = event else { return };
                 match event {
                     ControllerLaneEvent::Disconnected(context) => {
-                        let Some(registration) = registration.as_ref() else { return; };
                         if context.owner != registration.owner {
                             continue;
                         }
@@ -700,13 +687,13 @@ async fn serve_controlling_lane_with_evidence_context(
                             }
                             return;
                         }
-                        if &context != registration {
+                        if context != registration {
                             continue;
                         }
                         // 断线：保留密钥材料并挂起业务/存活帧，随后启动恢复流程。
                         let now_b = (evidence.monotonic)();
                         let Ok(status) = manager.mark_registered_transport_disconnected(
-                            &operation, registration, &context, now_b,
+                            &operation, &registration, &context, now_b,
                             || budget.freeze(now_b), business,
                         ) else { return; };
                         (sinks.on_status)(&status);
@@ -2202,6 +2189,17 @@ mod tests {
         }
     }
 
+    fn registered_lane_sender(manager: &ControllingDeviceManager) -> ControllerTransportSender {
+        let (context, capabilities) = manager.live_runtime_context().unwrap();
+        let sender = super::super::test_support::resume_reader_transport(
+            ControllerRole::ControllerA,
+            context,
+            capabilities,
+        );
+        manager.replace_transport(sender.clone());
+        sender
+    }
+
     #[derive(Default)]
     struct TestLane {
         events: VecDeque<ControllerLaneEvent>,
@@ -2212,6 +2210,12 @@ mod tests {
     }
 
     impl TestLane {
+        fn bind(&mut self, manager: &ControllingDeviceManager) {
+            if self.reader_transport.is_none() {
+                self.reader_transport = Some(registered_lane_sender(manager));
+            }
+        }
+
         fn with_events(events: Vec<ControllerLaneEvent>) -> Self {
             Self {
                 events: VecDeque::from(events),
@@ -2747,6 +2751,40 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn keeper_without_original_registration_cannot_read_or_send() {
+        let manager = ControllingDeviceManager::default();
+        let operation = manager.connect("234-4567").unwrap();
+        manager.complete_reserved(operation.clone()).unwrap();
+        manager
+            .complete_connected(operation, adapter_fixture_lease())
+            .unwrap();
+        let mut lane = TestLane::with_events(vec![ControllerLaneEvent::Frame("{}".into())]);
+        let mut sinks = ControllingLaneSinks {
+            on_status: &mut |_| panic!("unregistered keeper cannot project"),
+            on_session: &mut |_| panic!("unregistered keeper cannot project"),
+            on_mapping: &mut |_, _, _| panic!("unregistered keeper cannot map"),
+            on_task: &mut |_, _| panic!("unregistered keeper cannot dispatch"),
+            on_journal: &mut |_| panic!("unregistered keeper cannot dispatch"),
+            on_snapshot: &mut |_| panic!("unregistered keeper cannot dispatch"),
+            on_liveness: &mut |_| panic!("unregistered keeper cannot send"),
+        };
+        serve_controlling_lane(
+            &mut lane,
+            &manager,
+            &ControllingSessionManager::default(),
+            &ControllingLaneState::default(),
+            &mut sinks,
+        )
+        .await;
+        assert_eq!(
+            lane.events.len(),
+            1,
+            "entry must reject before reading a frame"
+        );
+        assert_eq!(manager.status().kind(), ControllingStatusKind::Connected);
+    }
+
+    #[tokio::test]
     async fn post_handshake_disconnect_projects_reconnecting_and_keeps_draining() {
         let manager = ControllingDeviceManager::default();
         let operation = manager.connect("234-4567").unwrap();
@@ -2801,6 +2839,7 @@ mod tests {
             on_snapshot: &mut on_snapshot,
             on_liveness: &mut on_liveness,
         };
+        lane.bind(&manager);
         serve_controlling_lane(&mut lane, &manager, &sessions, &business, &mut sinks).await;
         assert_eq!(statuses, vec!["reconnecting".to_owned()]);
         assert!(sessions_seen.is_empty());
@@ -3025,6 +3064,7 @@ mod tests {
             on_snapshot: &mut on_snapshot,
             on_liveness: &mut on_liveness,
         };
+        lane.bind(&manager);
         serve_controlling_lane(&mut lane, &manager, &sessions, &business, &mut sinks).await;
         assert_eq!(
             session_projections,
@@ -3074,6 +3114,8 @@ mod tests {
             .unwrap();
         let mut stale_lane =
             TestLane::with_events(vec![ControllerLaneEvent::Frame(stale.to_string())]);
+        // Retain the original reader identity after explicit disconnect.
+        stale_lane.reader_transport = lane.reader_transport.clone();
         let seen_before = task_events.len();
         let mut stale_status = |_: &ControllingStatus| {};
         let mut stale_session = |_: &ControllingSessionProjection| {};
@@ -3265,6 +3307,7 @@ mod tests {
             on_snapshot: &mut on_snapshot,
             on_liveness: &mut on_liveness,
         };
+        lane.bind(&manager);
         serve_controlling_lane(&mut lane, &manager, &sessions, &business, &mut sinks).await;
 
         let frames = lane.resume_frames();
@@ -3510,6 +3553,7 @@ mod tests {
             on_snapshot: &mut on_snapshot,
             on_liveness: &mut on_liveness,
         };
+        lane.bind(&manager);
         serve_controlling_lane(&mut lane, &manager, &sessions, &business, &mut sinks).await;
 
         assert!(statuses.is_empty(), "派发业务帧不得改变连接状态");
@@ -3834,6 +3878,7 @@ mod tests {
             on_liveness: &mut on_liveness,
         };
 
+        lane.bind(&manager);
         serve_controlling_lane(&mut lane, &manager, &sessions, &business, &mut sinks).await;
         drop(sinks);
         assert_eq!(
@@ -4153,6 +4198,7 @@ mod tests {
             on_snapshot: &mut on_snapshot,
             on_liveness: &mut on_liveness,
         };
+        lane.bind(&manager);
         serve_controlling_lane(&mut lane, &manager, &sessions, &business, &mut sinks).await;
 
         assert!(session_projections.is_empty());
@@ -4313,6 +4359,7 @@ mod tests {
             on_snapshot: &mut on_snapshot,
             on_liveness: &mut on_liveness,
         };
+        lane.bind(&manager);
         serve_controlling_lane(&mut lane, &manager, &sessions, &business, &mut sinks).await;
         assert_eq!(snapshots_seen.len(), 1, "只有摘要与基准都正确的快照被接受");
         assert_eq!(snapshots_seen[0].epoch, "epoch-9");
@@ -4430,10 +4477,14 @@ mod tests {
     /// 只在 connected 时发送；未连接时没有帧可发。
     #[tokio::test]
     async fn keeper_emits_monotonic_liveness_heartbeats() {
-        struct PendingLane;
+        struct PendingLane(ControllerTransportSender);
 
         #[async_trait::async_trait]
         impl ControllingLane for PendingLane {
+            fn transport_sender(&self) -> Option<ControllerTransportSender> {
+                Some(self.0.clone())
+            }
+
             async fn next_lane_event(&mut self) -> Option<ControllerLaneEvent> {
                 std::future::pending().await
             }
@@ -4472,6 +4523,7 @@ mod tests {
             .unwrap();
         let sessions = ControllingSessionManager::default();
         let business = ControllingLaneState::default();
+        let mut lane = PendingLane(registered_lane_sender(&manager));
         let mut frames = Vec::new();
         let mut on_status = |_: &ControllingStatus| {};
         let mut on_session = |_: &ControllingSessionProjection| {};
@@ -4494,7 +4546,7 @@ mod tests {
         let outcome = tokio::time::timeout(
             Duration::from_millis(150),
             serve_controlling_lane_with_interval(
-                &mut PendingLane,
+                &mut lane,
                 &manager,
                 &sessions,
                 &business,
@@ -4559,9 +4611,16 @@ mod tests {
                 let _ = self.child.wait();
             }
         }
-        struct IpcLane(mpsc::UnboundedReceiver<ControllerLaneEvent>);
+        struct IpcLane(
+            mpsc::UnboundedReceiver<ControllerLaneEvent>,
+            ControllerTransportSender,
+        );
         #[async_trait::async_trait]
         impl ControllingLane for IpcLane {
+            fn transport_sender(&self) -> Option<ControllerTransportSender> {
+                Some(self.1.clone())
+            }
+
             async fn next_lane_event(&mut self) -> Option<ControllerLaneEvent> {
                 self.0.recv().await
             }
@@ -4643,7 +4702,7 @@ mod tests {
         let origin = tokio::time::Instant::now();
         let clock = || u64::try_from(origin.elapsed().as_millis()).unwrap();
         let (tx, rx) = mpsc::unbounded_channel();
-        let mut lane = IpcLane(rx);
+        let mut lane = IpcLane(rx, registered_lane_sender(&manager));
         let mut a_heartbeats_after_b_loss = 0;
         let mut proofs = 0;
         let mut proof_rejections = 0;
@@ -4748,9 +4807,13 @@ mod tests {
 
     #[tokio::test(start_paused = true)]
     async fn keeper_replaced_after_heartbeat_snapshot_never_sends_peer_request_on_new_owner() {
-        struct PendingLane;
+        struct PendingLane(ControllerTransportSender);
         #[async_trait::async_trait]
         impl ControllingLane for PendingLane {
+            fn transport_sender(&self) -> Option<ControllerTransportSender> {
+                Some(self.0.clone())
+            }
+
             async fn next_lane_event(&mut self) -> Option<ControllerLaneEvent> {
                 std::future::pending().await
             }
@@ -4785,6 +4848,7 @@ mod tests {
         }
         let manager = ControllingDeviceManager::default();
         let old = connect(&manager, "generation-old");
+        let mut lane = PendingLane(registered_lane_sender(&manager));
         let mut calls = 0;
         let mut replacement = None;
         let mut on_liveness = |frame: Value| {
@@ -4793,6 +4857,7 @@ mod tests {
             assert_eq!(frame["remote_control_generation"], "generation-old");
             manager.disconnect();
             replacement = Some(connect(&manager, "generation-new"));
+            registered_lane_sender(&manager);
             true
         };
         let mut statuses = Vec::new();
@@ -4809,7 +4874,7 @@ mod tests {
         let origin = tokio::time::Instant::now();
         let clock = || u64::try_from(origin.elapsed().as_millis()).unwrap();
         serve_controlling_lane_with_evidence_context(
-            &mut PendingLane,
+            &mut lane,
             &manager,
             &ControllingSessionManager::default(),
             &ControllingLaneState::default(),
@@ -4847,7 +4912,7 @@ mod tests {
             on_liveness: &mut no_tx,
         };
         serve_controlling_lane_with_evidence_context(
-            &mut PendingLane,
+            &mut lane,
             &manager,
             &ControllingSessionManager::default(),
             &ControllingLaneState::default(),

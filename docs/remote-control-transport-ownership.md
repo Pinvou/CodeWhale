@@ -58,3 +58,19 @@ Windows parent driver 使用隔离子进程和临时运行目录，固定真实 
 A adapter 测试使用真实事件生产/投递及控制队列，但认证 lane 状态由测试夹具安装；
 同 operation 换 sender 是防御 API 场景，不声称当前 A 产品能复现跨新操作竞态。
 这些回归不等价于双机公网、供应商任务执行或发布安全验收。
+
+keeper 在所有编译模式都必须带原 transport 注册；缺失时在读取帧或发送之前退出。
+孤立服务测试也登记真实内存 sender 的完整身份，不再跳过此入口检查。存活发送口由
+生产组合入口绑定原 sender，测试可通过相同发送接口注入背压或连接替换；这类测试
+证明注册检查及状态派发，不替代实际 socket writer。实际 adapter/reader 回归另验
+事件生产与传输边界。
+
+B 的两个平台无关回归分别保持 operation、generation、租约不变只替换 transport，
+验证旧 owner 无权执行闭包；以及在后继握手已开始后交付旧安装，验证安装闭包从未
+执行、后继仍可正常完成。Linux 完整 lib 测试和 Windows 回归均可收集这些用例：
+
+```sh
+cargo test --locked --manifest-path pinvou3-app/src-tauri/Cargo.toml --lib same_operation_replaced_transport_rejects_the_old_owner -- --test-threads=1
+cargo test --locked --manifest-path pinvou3-app/src-tauri/Cargo.toml --lib stale_connected_install_never_runs_its_shared_side_effect -- --test-threads=1
+cargo test --locked --manifest-path pinvou3-app/src-tauri/Cargo.toml --lib keeper_without_original_registration_cannot_read_or_send -- --test-threads=1
+```

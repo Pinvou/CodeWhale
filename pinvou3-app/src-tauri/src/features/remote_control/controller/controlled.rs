@@ -2030,6 +2030,90 @@ mod tests {
     use super::*;
 
     #[test]
+    fn same_operation_replaced_transport_rejects_the_old_owner() {
+        let manager = ControlledDeviceManager::default();
+        let operation = manager.start(None, Vec::new()).unwrap();
+        register(&manager, &operation);
+        enter_handshake(&manager, &operation);
+        let material = lease(operation.generation());
+        let context = material.context.clone();
+        let capabilities = material.negotiated_capabilities.clone();
+        let sender = super::super::test_support::resume_reader_transport(
+            super::super::relay_transport::ControllerRole::ControlledB,
+            context.clone(),
+            capabilities.clone(),
+        );
+        let (_, old) = manager
+            .complete_connected_with_install(operation.clone(), material, || Ok(Arc::new(sender)))
+            .unwrap();
+        let calls = AtomicUsize::new(0);
+        manager
+            .with_transport_owner(&old, || calls.fetch_add(1, Ordering::SeqCst))
+            .unwrap();
+        let successor = super::super::test_support::resume_reader_transport(
+            super::super::relay_transport::ControllerRole::ControlledB,
+            context.clone(),
+            capabilities,
+        );
+        manager.replace_transport(successor);
+        // No new intent, generation or lease: only the transport Arc differs.
+        assert_eq!(manager.current_operation(), Some(operation.clone()));
+        assert_eq!(manager.live_lease().unwrap(), context);
+        assert_eq!(
+            manager
+                .with_transport_owner(&old, || calls.fetch_add(1, Ordering::SeqCst))
+                .unwrap_err()
+                .code,
+            "desktop_remote_stale_transport"
+        );
+        let current = manager.transport_owner_for_test(&operation).unwrap();
+        manager
+            .with_transport_owner(&current, || calls.fetch_add(1, Ordering::SeqCst))
+            .unwrap();
+        assert_eq!(calls.load(Ordering::SeqCst), 2);
+        assert_eq!(manager.status().kind(), ControlledStatusKind::Connected);
+    }
+
+    #[test]
+    fn stale_connected_install_never_runs_its_shared_side_effect() {
+        let manager = ControlledDeviceManager::default();
+        let old = manager.start(None, Vec::new()).unwrap();
+        register(&manager, &old);
+        enter_handshake(&manager, &old);
+        manager.stop();
+        let current = manager.start(None, Vec::new()).unwrap();
+        register(&manager, &current);
+        enter_handshake(&manager, &current);
+        let calls = AtomicUsize::new(0);
+        let result =
+            manager.complete_connected_with_install(old.clone(), lease(old.generation()), || {
+                calls.fetch_add(1, Ordering::SeqCst);
+                Err(ControlledStateError::new("install_must_not_run"))
+            });
+        assert_eq!(result.err().unwrap().code, "desktop_remote_stale_result");
+        assert_eq!(calls.load(Ordering::SeqCst), 0);
+        assert_eq!(manager.current_operation(), Some(current.clone()));
+        assert_eq!(
+            manager.status().kind(),
+            ControlledStatusKind::HandshakePending
+        );
+        let material = lease(current.generation());
+        let sender = super::super::test_support::resume_reader_transport(
+            super::super::relay_transport::ControllerRole::ControlledB,
+            material.context.clone(),
+            material.negotiated_capabilities.clone(),
+        );
+        manager
+            .complete_connected_with_install(current, material, || {
+                calls.fetch_add(1, Ordering::SeqCst);
+                Ok(Arc::new(sender))
+            })
+            .unwrap();
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+        assert_eq!(manager.status().kind(), ControlledStatusKind::Connected);
+    }
+
+    #[test]
     fn old_evidence_owner_cannot_register_or_cancel_successor_challenge() {
         let manager = ControlledDeviceManager::default();
         let connect = || {
