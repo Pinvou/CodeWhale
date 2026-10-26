@@ -83,6 +83,22 @@ for (const kind of ["source", "connection"]) {
     assert.equal(subject.attempt("active-1"), "claim_invalid");
     assert.equal(subject.attempt("active-1"), "claim_rate_limited", "sweeping also preserves partial counts");
   });
+
+  test(`${kind} a mid-window sweep does not postpone an active bucket's original expiry`, () => {
+    const subject = table(kind, 65, 1);
+    for (let index = 0; index < 65; index += 1) {
+      assert.equal(subject.attempt(`active-${index}`), "claim_invalid");
+    }
+    subject.time(50);
+    assert.equal(subject.attempt("rejected-new"), "claim_rate_limited");
+    subject.time(99);
+    assert.equal(subject.attempt("active-0"), "claim_rate_limited");
+    subject.time(100);
+    assert.equal(subject.attempt("active-0"), "claim_invalid",
+      "rotation must preserve the expiry measured from the original claim, not the sweep");
+    assert.equal(subject.attempt("active-0"), "claim_rate_limited",
+      "the renewed window still enforces its one-claim allowance");
+  });
 }
 
 for (const dimension of ["sourceLimit", "connectionLimit", "globalLimit"]) {
