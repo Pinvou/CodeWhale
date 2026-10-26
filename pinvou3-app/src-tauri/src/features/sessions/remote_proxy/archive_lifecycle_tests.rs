@@ -844,6 +844,74 @@ fn actual_anchor_write_and_sql_failures_remain_quarantined() {
 }
 
 #[test]
+fn seal_action_sql_read_failure_without_durable_work_still_quarantines() {
+    let temp = tempfile::tempdir().unwrap();
+    let _home = isolate_home(temp.path());
+    let (store, record) = fixture(temp.path());
+    let before = raw_snapshot(temp.path());
+    assert!(before.anchor["pending"].is_null());
+    let active = std::fs::read(active_path(temp.path())).unwrap();
+    let path = bank_path(temp.path());
+    let path_hook = path.clone();
+    let fired = Arc::new(AtomicBool::new(false));
+    let fired_hook = fired.clone();
+    let reached_pending = Arc::new(AtomicBool::new(false));
+    let pending_hook = reached_pending.clone();
+    store
+        .remote_proxies
+        .lock()
+        .archives
+        .set_test_hook(move |point| {
+            if point == ArchiveTestPoint::BeforeSealLock && !fired_hook.swap(true, Ordering::SeqCst)
+            {
+                // Earlier contains() used the healthy schema. UUID/count/anchor
+                // validation needs no record column, so the real seal SELECT below
+                // is the failure source, through From<rusqlite::Error>.
+                rusqlite::Connection::open(&path_hook)?.execute_batch(
+                    "ALTER TABLE archives RENAME COLUMN record TO unreadable_record",
+                )?;
+            }
+            if point == ArchiveTestPoint::BeforePendingWrite {
+                pending_hook.store(true, Ordering::SeqCst);
+            }
+            Ok(())
+        });
+    let error = store
+        .archive_remote_proxy(&record.local_session_id, None)
+        .unwrap_err();
+    assert!(
+        error.downcast_ref::<rusqlite::Error>().is_some(),
+        "{error:?}"
+    );
+    assert!(fired.load(Ordering::SeqCst));
+    assert!(!reached_pending.load(Ordering::SeqCst));
+    assert!(store.remote_proxies.lock().load_failed);
+    assert_eq!(std::fs::read(active_path(temp.path())).unwrap(), active);
+    assert!(store.prepare_remote_proxy_open(None, &context()).is_err());
+    // Repair only the test-owned fault. Neither the durable history nor the
+    // anchor may change, and this process remains quarantined after repair.
+    rusqlite::Connection::open(&path)
+        .unwrap()
+        .execute_batch("ALTER TABLE archives RENAME COLUMN unreadable_record TO record")
+        .unwrap();
+    assert_eq!(raw_snapshot(temp.path()), before);
+    assert!(
+        store
+            .archive_remote_proxy(&record.local_session_id, None)
+            .is_err()
+    );
+    assert_local_usable(&store, temp.path());
+    let restarted = make_store(temp.path());
+    assert!(!restarted.remote_proxies.lock().load_failed);
+    assert!(
+        restarted
+            .archive_remote_proxy(&record.local_session_id, None)
+            .unwrap()
+    );
+    assert_eq!(raw_snapshot(temp.path()).anchor["committed_count"], 2);
+}
+
+#[test]
 fn initialization_errors_are_not_safe_action_rejections() {
     for point in [
         ArchiveTestPoint::BeforeBankCreate,

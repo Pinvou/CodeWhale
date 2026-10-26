@@ -46,6 +46,9 @@ pub(super) struct SealFailure {
 }
 
 impl SealFailure {
+    // Call only when this action provably returned before any durable write.
+    // This is a boundary proof, not a classification by error kind; the outer
+    // wrapper still upgrades it if initialization or prior recovery wrote.
     fn before_intent(source: anyhow::Error) -> Self {
         Self {
             before_intent: true,
