@@ -66,6 +66,34 @@ def _without_yaml_comments(block):
     )
 
 
+def _without_inline_comments(block):
+    """整行与行尾 `#` 注释都剥掉(引号内的 `#` 保留)。
+
+    Round-4 review R3 of PR #745: `_without_yaml_comments` 只剥整行注释,
+    一个从 node --test 列表里删掉、却仍被某条活行行尾注提及的套件
+    (`... a.test.mjs # still runs b.test.mjs`)能让成员/全集 pin 继续假绿。
+    剥掉行尾注释后,注释里的路径进不了任何提取结果;良性尾注只是被剥掉,
+    不会造成假红。
+    """
+    stripped_lines = []
+    for line in block.splitlines():
+        if line.lstrip().startswith("#"):
+            continue
+        quote = None
+        cut = len(line)
+        for index, char in enumerate(line):
+            if quote is not None:
+                if char == quote:
+                    quote = None
+            elif char in ("'", '"'):
+                quote = char
+            elif char == "#" and index > 0 and line[index - 1] in (" ", "\t"):
+                cut = index
+                break
+        stripped_lines.append(line[:cut].rstrip())
+    return "\n".join(stripped_lines)
+
+
 def _is_covered_by_trigger(entry, trigger_paths):
     """entry 被 trigger path 覆盖:完全相同,或 trigger 是其上层 `/**` 目录 glob。
 
@@ -316,6 +344,32 @@ def _extract_job_level_if(job_block):
     return "\n".join(folded)
 
 
+def _step_if_value(step_text):
+    """Value of a step-level `if:` (8-space key) with whitespace normalized
+    to single spaces — a single-line `${{ ... }}` and a folded `>-`/`>`
+    block compare equal. Round-23: the deny-step routing pins compared the
+    raw single-line text, so a semantics-preserving fold of the condition
+    (the shape main adopted for its job-level ifs in #745) false-redded
+    them. Returns None when the step carries no `if:`."""
+    lines = step_text.splitlines()
+    for index, line in enumerate(lines):
+        match = re.match(r"^        if:(.*)$", line)
+        if match is None:
+            continue
+        value = match.group(1).strip()
+        if value in (">-", ">", "|", "|-"):
+            folded = []
+            for following in lines[index + 1 :]:
+                if not following.strip():
+                    break
+                if len(following) - len(following.lstrip(" ")) <= 8:
+                    break
+                folded.append(following.strip())
+            value = " ".join(folded)
+        return " ".join(value.split())
+    return None
+
+
 _STEP_NAME = re.compile(r"^      - name: (.*)$")
 
 
@@ -515,17 +569,44 @@ GATE_JOB_LEVEL_IFS = {
         "(github.event_name != 'pull_request' || "
         "github.event.pull_request.draft == false) }}"
     ),
+    # knowledge-rust/cli-test share the push-unconditional shape since
+    # 2026-10: main push refreshes the cache namespace even on
+    # non-knowledge merges (PRs never save; a paths-gated writer ages out).
+    # Drafts skip like every other heavy leg.
     "knowledge-rust": (
-        "${{ !cancelled() && github.event.action != 'closed' && "
-        "needs.changes.outputs.pure_release_backflow != 'true' && "
-        "(needs.changes.outputs.knowledge_rust == 'true' || "
-        "needs.changes.outputs.knowledge_dependencies == 'true') }}"
+        # knowledge-rust gains the push-unconditional arm on the Official tree's
+        # existing guard (pure_release_backflow): main push refreshes the
+        # knowledge-rust-v2 namespace even on non-knowledge merges (PRs never
+        # save; a paths-gated writer ages out). PR/Queue routing stays
+        # paths-driven and Official's existing draft behavior is unchanged.
+        "${{\n"
+        "!cancelled() &&\n"
+        "github.event.action != 'closed' &&\n"
+        "needs.changes.outputs.pure_release_backflow != 'true' &&\n"
+        "(\n"
+        "github.event_name == 'push' ||\n"
+        "needs.changes.outputs.knowledge_rust == 'true' ||\n"
+        "needs.changes.outputs.knowledge_dependencies == 'true'\n"
+        ")\n"
+        "}}"
     ),
+    # rust-lint got the same main-push refresh, but keeps its draft
+    # fmt-only fast pass: no draft clause here (RUN_HEAVY_RUST_CHECKS
+    # degrades drafts instead).
     "rust-lint": (
-        "${{ !cancelled() && github.event.action != 'closed' && "
-        "needs.changes.outputs.pure_release_backflow != 'true' && "
-        "(needs.changes.outputs.rust_code == 'true' || "
-        "needs.changes.outputs.rust_dependencies == 'true') }}"
+        # rust-lint gains the same main-push refresh while keeping Official's
+        # guard; the draft fmt + bounded-regression fast pass is unchanged
+        # (RUN_HEAVY_RUST_CHECKS degrades drafts, no draft clause here).
+        "${{\n"
+        "!cancelled() &&\n"
+        "github.event.action != 'closed' &&\n"
+        "needs.changes.outputs.pure_release_backflow != 'true' &&\n"
+        "(\n"
+        "github.event_name == 'push' ||\n"
+        "needs.changes.outputs.rust_code == 'true' ||\n"
+        "needs.changes.outputs.rust_dependencies == 'true'\n"
+        ")\n"
+        "}}"
     ),
     "rust-test": (
         "${{\n"
@@ -592,10 +673,14 @@ GATE_JOB_LEVEL_IFS = {
 # windows-rust-test 不在表内:它的步骤名唯一性已由
 # test_windows_rust_test_parallel_phases_preserve_routing_and_coverage 的
 # round-45 duplicate-step 断言覆盖。
+# Round-6 review (#1518): 本 PR 新钉的三枚步骤(锁文件 registry 卫生门禁/
+# test-registry guard/Prepare Rust disk capacity)同样按 name+if 钉住,
+# 一并登记;rust-lint 的磁盘与 zram 步骤为本 PR 新增,同表钉住防诱饵替换。
 PINNED_GATE_STEP_NAMES = {
     "fast-gate": (
         "Checkout (含 submodule,fork 为 public 直接拉)",
         "workflow lint (actionlint)",
+        "锁文件 registry 卫生门禁",
     ),
     "cli-test": (
         "Install Tauri Linux system dependencies",
@@ -612,9 +697,23 @@ PINNED_GATE_STEP_NAMES = {
         "cargo test --lib --no-run（编译链接测试二进制）",
         "cargo test --lib（含 strict_mode 回归；真 bge-m3/vLLM 测试已 #[ignore]）",
         "cargo test --lib --no-run (push main 仅编译暖 cache)",
+        "test-registry guard (duplicates + required pins)",
+    ),
+    "rust-lint": (
+        "Prepare Rust disk capacity",
+        "Set up zram and swap",
+        "cargo-deny (advisories/licenses/bans/sources)",
+        "cargo deny check (hard gate)",
+    ),
+    # PR #1518 round-11: 复活的 test:windows-runtime-manifest 契约步是全仓
+    # 唯一执行器,同样按 name 钉住防诱饵/防静默删除。
+    "windows-codex-runtime-test": (
+        "Windows runtime manifest 契约",
     ),
     "knowledge-rust": (
         "cargo clippy (hard gate, lib/bins/tests + server)",
+        "cargo-deny",
+        "cargo deny check",
     ),
     "rust-loongarch64-check": (
         "Set up the pinned loong64 cross toolchain (sha256-pinned asset)",
@@ -830,6 +929,73 @@ class CiGatePolicyTests(unittest.TestCase):
                 frontend_paths,
                 f"静态门禁配置 {path} 不在 frontend filter 中,config-only PR 会静默跳过 frontend-test",
             )
+
+    def test_webui_wrapper_routes_to_frontend_test_with_suite_wired(self):
+        # run-webui-smoke.mjs is consumed only inside frontend-test (the
+        # diff-selected test:webui entry), and its behavior suite
+        # scripts/tests/run-webui-smoke.test.mjs is executed by
+        # version-consistency from an explicit file list. Miss either
+        # registration and a wrapper-only PR loses every gate over the file
+        # it changed (round-2 review of PR #745 found both holes: the
+        # selector branch existed but the filter never routed the path, and
+        # the suite only ever ran locally).
+        changes = _without_yaml_comments(_changes_block(self.pr_workflow))
+        # Extracted entries, not raw substrings: a trailing-comment decoy
+        # ("- 'other' # was 'run-webui-smoke.mjs'") must not satisfy this
+        # pin (round-42 extractor discipline; unrecognized entry shapes
+        # fail closed). Round-3 review of PR #745.
+        frontend_paths = _extract_quoted_paths(_frontend_filter_paths(changes))
+        self.assertIn(
+            "pinvou3-app/scripts/run-webui-smoke.mjs",
+            frontend_paths,
+            "webui wrapper 不在 frontend filter 中,wrapper-only PR 会静默跳过 frontend-test",
+        )
+        # Inline-stripped (round-4 review R3 of PR #745): whole-line
+        # stripping alone lets a suite that was removed from the live list
+        # survive as a trailing comment on another list line, keeping this
+        # membership pin green while version-consistency never runs it.
+        version_consistency = _without_inline_comments(
+            self.pr_workflow.split(
+                "\n  version-consistency:", maxsplit=1
+            )[1].split("\n  changes:", maxsplit=1)[0]
+        )
+        self.assertIn(
+            "scripts/tests/run-webui-smoke.test.mjs",
+            version_consistency,
+            "wrapper 套件未接入 version-consistency 的显式 node --test 列表,CI 永不执行",
+        )
+
+    def test_node_suites_under_scripts_tests_are_all_wired(self):
+        # Nothing auto-discovers scripts/tests/*.test.mjs:
+        # version-consistency's explicit node --test list is the only
+        # runner (the PR #745 round-2 review found a suite that only ever
+        # ran locally). Pin both directions so the class stays closed:
+        # every suite on disk must be listed (a forgotten new suite
+        # silently never runs), and every listed scripts/tests entry must
+        # exist (a renamed suite must not leave a dead entry green).
+        # Inline-stripped (round-4 review R3 of PR #745): a trailing
+        # comment on a live list line must not count a removed suite as
+        # "listed" — whole-line stripping alone left that hole open.
+        version_consistency = _without_inline_comments(
+            self.pr_workflow.split("\n  version-consistency:", maxsplit=1)[1].split(
+                "\n  changes:", maxsplit=1
+            )[0]
+        )
+        listed = set(
+            re.findall(
+                r"scripts/tests/[A-Za-z0-9_./-]+\.test\.mjs", version_consistency
+            )
+        )
+        on_disk = {
+            f"scripts/tests/{path.name}"
+            for path in (ROOT / "scripts" / "tests").glob("*.test.mjs")
+        }
+        self.assertEqual(
+            listed,
+            on_disk,
+            "scripts/tests node 套件与 version-consistency 显式列表不一致"
+            "(缺失=永不执行;多余=死条目)",
+        )
 
     def test_cross_language_contract_rust_sources_route_to_frontend_test(self):
         # multiagent_plan_normalize.test.mjs reads the Rust sources below for
@@ -1415,6 +1581,428 @@ class CiGatePolicyTests(unittest.TestCase):
         self.assertIn("| sha256sum --check -", step)
         self.assertNotIn("download-actionlint.bash", step)
 
+    def test_fast_gate_lock_registry_guard_is_pinned(self):
+        # PR #1518: the lockfile registry-hygiene guard runs in fast-gate on
+        # every PR — pin the exact command so deleting the step (or
+        # neutralizing it to `|| true`) fails here instead of silently
+        # letting mirror URLs and npm-10 libc strips back into the locks.
+        # Round-6 review: the command must appear as an executable
+        # (non-comment) line — a commented-out command otherwise satisfies
+        # assertIn while the guard never runs — and the step must carry no
+        # `if:` at all (a decoy replacement with `if: false` would otherwise
+        # pass every assertion here while never executing).
+        fast_gate = self.pr_workflow.split("\n  fast-gate:", maxsplit=1)[1].split(
+            "\n  frontend-test:", maxsplit=1
+        )[0]
+        step = fast_gate.split(
+            "- name: 锁文件 registry 卫生门禁", maxsplit=1
+        )[1].split("\n      - name:", maxsplit=1)[0]
+        # Round-22 review: substring-on-non-comment-line is echo-neutralizable
+        # (`run: echo skip # python3 …` passes) — pin the full exact line.
+        self.assertTrue(
+            any(
+                line.strip() == "run: python3 scripts/check-lock-registry.py"
+                for line in step.splitlines()
+            ),
+            "the lock-guard step must invoke the guard as its whole run line "
+            "— a weakened or echoed form runs nothing while passing every "
+            "other assertion here",
+        )
+        self.assertNotIn("|| true", step)
+        self.assertNotIn("continue-on-error", step)
+        self.assertNotIn(
+            "if:",
+            _without_yaml_comments(step),
+            "the lock-guard step must run unconditionally in fast-gate",
+        )
+        # Round-11 review: also pin its POSITION before the submodule
+        # checkout — the guard's scan scope is THIS repo's own lockfiles
+        # (CI sees 5 before submodule init); run after it, the CodeWhale
+        # locks enter the tree and the scope silently changes.
+        self.assertLess(
+            fast_gate.find("- name: 锁文件 registry 卫生门禁"),
+            fast_gate.find("- name: 初始化公共底座 submodule"),
+            "the lock guard must scan before the submodule checkout brings "
+            "in the CodeWhale lockfiles",
+        )
+
+    def test_rust_test_registry_guard_step_is_pinned(self):
+        # PR #1518 round-5 review: the test-registry guard step runs inside
+        # the rust-test leg, but unlike its fast-gate sibling above nothing
+        # pinned its existence — deleting or neutralizing the step would keep
+        # every test here green. Pin name + command + the push exclusion (the
+        # push leg is compile-only warm-cache and must not run the guard).
+        # Round-6 review: also pin its POSITION after the PR-leg build step —
+        # the guard reuses that step's artifacts, so moving it before the
+        # build keeps every assertion here green while silently paying a
+        # full ~7-minute recompile on every PR.
+        build_step = "cargo test --lib --no-run（编译链接测试二进制）"
+        guard_step = "test-registry guard (duplicates + required pins)"
+        rust_test = _extract_job_block(self.pr_workflow, "rust-test")
+        self.assertLess(
+            rust_test.find(build_step),
+            rust_test.find(guard_step),
+            "test-registry guard must run after the PR-leg build step "
+            "(artifact reuse); moving it earlier silently recompiles",
+        )
+        # Round-23: pin the other side of the window too — the reclaim step
+        # deletes the pinvou3_lib-* test binaries the guard's `--list`
+        # consumes; moving the guard below it stayed green while silently
+        # paying the documented ~4-minute relink on every PR.
+        reclaim_step = "- name: 回收已完成的主测试产物"
+        self.assertIn(reclaim_step, rust_test)
+        self.assertLess(
+            rust_test.find(guard_step),
+            rust_test.find(reclaim_step),
+            "test-registry guard must run before the artifact-reclaim step "
+            "(it lists the test binary that step deletes); moving it later "
+            "silently relinks",
+        )
+        step = rust_test.split(
+            "- name: test-registry guard (duplicates + required pins)", maxsplit=1
+        )[1].split("\n      - name:", maxsplit=1)[0]
+        # Round-22 review: substring-on-non-comment-line is echo-neutralizable
+        # (`run: echo skip # python3 …` passes) — pin the full exact line.
+        self.assertTrue(
+            any(
+                line.strip() == "run: python3 scripts/test-registry-guard.py"
+                for line in step.splitlines()
+            ),
+            "the registry-guard step must invoke the guard as its whole run "
+            "line — a weakened or echoed form runs nothing while passing "
+            "every other assertion here",
+        )
+        self.assertNotIn("|| true", step)
+        self.assertNotIn("continue-on-error", step)
+        # Round-13: match the push exclusion on executable lines only — a
+        # commented copy of the `if:` satisfied the raw-text assertIn while
+        # the (deleted) real condition silently widened the guard's run
+        # set. Direction is over-run, not bypass, but the same fix as the
+        # disk step keeps the file's convention uniform.
+        self.assertIn(
+            "if: ${{ github.event_name != 'push' }}",
+            "\n".join(
+                line
+                for line in step.splitlines()
+                if not line.lstrip().startswith("#")
+            ),
+            "test-registry guard must stay push-excluded (executable line)",
+        )
+
+    def test_windows_runtime_manifest_contract_step_is_pinned(self):
+        # PR #1518 round-11 review: the revived test:windows-runtime-manifest
+        # contract has exactly one CI executor — this step. The PR's other
+        # two new steps were pinned in rounds 5/6; this one shipped without
+        # any pin, so deleting the step (or commenting out its command)
+        # kept every gate-policy test green while the contract silently
+        # stopped running (deletion verified green before this pin).
+        job = _extract_job_block(self.pr_workflow, "windows-codex-runtime-test")
+        self.assertIn("- name: Windows runtime manifest 契约", job)
+        step = job.split(
+            "- name: Windows runtime manifest 契约", maxsplit=1
+        )[1].split("\n      - name:", maxsplit=1)[0]
+        # Round-22 review: substring-on-non-comment-line is echo-neutralizable
+        # (`run: echo skip # npm …` passes) — pin the full exact line.
+        self.assertTrue(
+            any(
+                line.strip()
+                == "run: npm --prefix pinvou3-app run test:windows-runtime-manifest"
+                for line in step.splitlines()
+            ),
+            "the manifest contract step must invoke the contract suite as "
+            "its whole run line — a weakened or echoed form runs nothing "
+            "while passing every other assertion here",
+        )
+        self.assertNotIn("|| true", step)
+        self.assertNotIn("continue-on-error", step)
+        # Round-12 review: without the `if:` ban an `if: false` self-decoy
+        # (or any conditional that evaluates false on the leg) keeps every
+        # assertion here green while the contract's only CI executor
+        # silently stops — the same decoy class the sibling pins (lock
+        # registry, test-registry guard) ban explicitly.
+        self.assertNotIn(
+            "if:",
+            _without_yaml_comments(step),
+            "the manifest contract step must run unconditionally on its leg",
+        )
+
+    def test_cargo_deny_gate_steps_are_pinned(self):
+        # Round-12 review: the deny gate (advisories/yanked) is the leg most
+        # exposed to ecosystem drift (the 2026-10 zip yank + RUSTSEC wave
+        # landed the day after this branch's last green run), yet its four
+        # steps carried no pins — a version drift or a deleted check step
+        # would pass every gate-policy test. Pin both legs' install (fixed
+        # 0.20.2: the advisory-ignore routing and
+        # unused-ignored-advisory semantics are version-sensitive) and the
+        # check command (must keep `advisories` and target the shared
+        # deny.toml), on executable lines only.
+        # Round-13 review: the check step's `if:` itself was unpinned —
+        # flipping it to `false` (or dropping one conjunct) silently
+        # disarms the hard gate while every assertion here stays green.
+        # These steps carry legitimate routing conditions, so instead of
+        # the sibling steps' no-`if:` ban, pin the exact condition per
+        # leg on non-comment lines.
+        for job, install_name, check_name, route_condition in (
+            (
+                "knowledge-rust",
+                "cargo-deny",
+                "cargo deny check",
+                "needs.changes.outputs.knowledge_dependencies == 'true'",
+            ),
+            (
+                "rust-lint",
+                "cargo-deny (advisories/licenses/bans/sources)",
+                "cargo deny check (hard gate)",
+                "env.RUN_HEAVY_RUST_CHECKS == 'true' && "
+                "needs.changes.outputs.rust_dependencies == 'true'",
+            ),
+        ):
+            with self.subTest(job=job):
+                job_block = _extract_job_block(self.pr_workflow, job)
+                install = job_block.split(f"- name: {install_name}", maxsplit=1)[
+                    1
+                ].split("\n      - name:", maxsplit=1)[0]
+                install_code = "\n".join(
+                    line
+                    for line in install.splitlines()
+                    if not line.lstrip().startswith("#")
+                )
+                self.assertTrue(
+                    any(
+                        "tool: cargo-deny@0.20.2" in line
+                        for line in install_code.splitlines()
+                    ),
+                    f"{job}: cargo-deny must stay pinned to 0.20.2 (the "
+                    "advisory-ignore routing and unused-ignored-advisory "
+                    "semantics are version-sensitive)",
+                )
+                self.assertEqual(
+                    _step_if_value(install_code),
+                    " ".join(f"${{{{ {route_condition} }}}}".split()),
+                    f"{job}: the deny install step's routing condition "
+                    "drifted — the gate must run exactly when the shared "
+                    "deny.toml's inputs change",
+                )
+                check = job_block.split(f"- name: {check_name}", maxsplit=1)[
+                    1
+                ].split("\n      - name:", maxsplit=1)[0]
+                code = "\n".join(
+                    line for line in check.splitlines()
+                    if not line.lstrip().startswith("#")
+                )
+                self.assertIn("advisories", code)
+                self.assertTrue(
+                    # knowledge-rust names the shared config explicitly;
+                    # rust-lint reaches it via its working-directory
+                    "deny.toml" in code
+                    or "working-directory: pinvou3-app/src-tauri" in code,
+                    f"{job}: the check must target the shared src-tauri "
+                    "deny.toml (explicitly or via working-directory)",
+                )
+                self.assertEqual(
+                    _step_if_value(code),
+                    " ".join(f"${{{{ {route_condition} }}}}".split()),
+                    f"{job}: the deny check step's `if:` drifted — flipping "
+                    "it (to `false` or a weaker condition) would silently "
+                    "disarm the advisories/yanked hard gate",
+                )
+                self.assertNotIn("|| true", check)
+                self.assertNotIn("continue-on-error", check)
+
+    def test_deny_toml_keeps_strict_yanked_deny(self):
+        # Round-13 review: the whole zip yank episode (rounds 8-12) made
+        # `yanked = "deny"` load-bearing — ANY future yank of any pinned
+        # crate must fail CI. Nothing machine-checked the value: downgrading
+        # to "warn" passed every gate-policy test, the guard suites, and
+        # cargo-deny itself. Pin it as a non-comment line of the shared
+        # config.
+        deny_toml = (
+            ROOT / "pinvou3-app/src-tauri/deny.toml"
+        ).read_text(encoding="utf-8")
+        deny_code = "\n".join(
+            line
+            for line in deny_toml.splitlines()
+            if not line.lstrip().startswith("#")
+        )
+        # Round-23: match whole executable LINES — a substring check could
+        # be satisfied by the literal text inside a TOML string elsewhere
+        # while the real key was absent.
+        yanked_lines = [
+            line.split("#", 1)[0].strip()
+            for line in deny_code.splitlines()
+            if line.split("#", 1)[0].strip().startswith("yanked")
+        ]
+        self.assertEqual(
+            yanked_lines,
+            ['yanked = "deny"'],
+            "deny.toml must carry exactly one executable `yanked = \"deny\"` "
+            "line — a silent downgrade to warn, a second yanked line, or a "
+            "removed key reopens the ecosystem-drift hole",
+        )
+
+    def test_deny_toml_unused_ignore_self_enforcement_pinned(self):
+        # Round-20 review: `unused-ignored-advisory = "deny"` is the field
+        # that makes an expired exception LOUD — once the graph no longer
+        # matches an id-level ignore (e.g. the RUSTSEC-2026-0387
+        # crypto-bigint exception after an elliptic-curve ecosystem bump),
+        # cargo-deny itself fails until the stale entry is removed.
+        # Dropping the field passed every gate-policy test (only comments
+        # mentioned it), so a future expired exception would sit green
+        # forever. Pin it on an executable line next to the yanked value.
+        deny_toml = (
+            ROOT / "pinvou3-app/src-tauri/deny.toml"
+        ).read_text(encoding="utf-8")
+        deny_code = "\n".join(
+            line
+            for line in deny_toml.splitlines()
+            if not line.lstrip().startswith("#")
+        )
+        unused_lines = [
+            line.split("#", 1)[0].strip()
+            for line in deny_code.splitlines()
+            if line.split("#", 1)[0].strip().startswith("unused-ignored-advisory")
+        ]
+        self.assertEqual(
+            unused_lines,
+            ['unused-ignored-advisory = "deny"'],
+            "deny.toml must carry exactly one executable "
+            "`unused-ignored-advisory = \"deny\"` line — without it an "
+            "advisory ignore outliving its advisory is silent instead of "
+            "failing the deny gate (round-23: line-anchored and unique, like "
+            "the yanked pin)",
+        )
+
+    def test_deny_toml_bans_the_crypto_bigint_vulnerable_window(self):
+        # Round-22 review: the RUSTSEC-2026-0387 id ignore has no version
+        # dimension — a partial upgrade (age/p256 on the patched line while
+        # a new third-party dep re-introduces old elliptic-curve, leaving
+        # crypto-bigint 0.5.x in the graph) would stay silently green. The
+        # [bans] entry forbids the vulnerable window independently of the
+        # advisory database's classification; the current graph (0.5.5)
+        # sits outside it. Pin the executable line so dropping the
+        # tripwire while keeping the id ignore fails here.
+        deny_toml = (
+            ROOT / "pinvou3-app/src-tauri/deny.toml"
+        ).read_text(encoding="utf-8")
+        deny_code = "\n".join(
+            line
+            for line in deny_toml.splitlines()
+            if not line.lstrip().startswith("#")
+        )
+        self.assertIn(
+            '{ name = "crypto-bigint", version = ">0.5.5, <0.7.6" },',
+            deny_code,
+            "deny.toml must keep the crypto-bigint vulnerable-window ban on "
+            "an executable line — without it a partially upgraded graph can "
+            "carry a still-vulnerable crypto-bigint while the id ignore "
+            "keeps advisories green",
+        )
+
+    def test_zip_lockfiles_sit_inside_the_assessed_advisory_window(self):
+        # Round-20 review, re-baselined in round-22: deny.toml retired the
+        # zip id-level advisory ignores on the premise that the graph
+        # converged on a single zip 9.0.5 (calamine 0.37) — a downgrade
+        # below zip 9 would re-arm RUSTSEC-2026-0367/0368/0369, and any
+        # other in-band drift must be reassessed against the deny posture
+        # in the same change. Nothing else pins the version: pin every repo
+        # lock's zip to the exact assessed baseline so a bump fails HERE
+        # first.
+        zip_locks = []
+        for lock in sorted(ROOT.glob("**/Cargo.lock")):
+            if "CodeWhale" in str(lock):
+                continue  # the public base governs its own locks
+            versions = re.findall(
+                r'name = "zip"\nversion = "([^"]+)"',
+                lock.read_text(encoding="utf-8"),
+            )
+            if versions:
+                zip_locks.append((lock, versions))
+        self.assertTrue(
+            zip_locks,
+            "expected at least one repo lock to carry zip — if the "
+            "dependency is gone, remove this pin",
+        )
+        for lock, versions in zip_locks:
+            for version in versions:
+                self.assertEqual(
+                    version,
+                    "9.0.5",
+                    f"{lock}: zip {version} is outside the assessed 9.0.5 "
+                    "baseline — deny.toml retired the zip advisory ignores "
+                    "on the single-zip-9.0.5 premise, so reassess the deny "
+                    "posture for the new version and update this pin in the "
+                    "same change",
+                )
+
+    def test_rust_lint_disk_step_is_draft_gated_and_precedes_zram(self):
+        # PR #1518 round-5 review: the rust-lint disk cleanup is only needed
+        # for the heavy (non-draft) compile, so it must stay draft-gated —
+        # drafts run fmt-only and would otherwise pay ~1-3 minutes per push —
+        # and must keep the sibling jobs' disk-before-zram order (swap
+        # allocation consumes 8-16 GiB disk before the cleanup runs).
+        rust_lint = _extract_job_block(self.pr_workflow, "rust-lint")
+        self.assertIn("- name: Prepare Rust disk capacity", rust_lint)
+        self.assertIn("- name: Set up zram and swap", rust_lint)
+        self.assertLess(
+            rust_lint.find("- name: Prepare Rust disk capacity"),
+            rust_lint.find("- name: Set up zram and swap"),
+            "rust-lint must clean disk before allocating swap (sibling-job order)",
+        )
+        disk_step = rust_lint.split(
+            "- name: Prepare Rust disk capacity", maxsplit=1
+        )[1].split("\n      - name:", maxsplit=1)[0]
+        # Round-13: executable-lines-only (a commented copy of the `if:`
+        # satisfied the raw assertIn while the real gate was dropped).
+        self.assertIn(
+            "if: ${{ env.RUN_HEAVY_RUST_CHECKS == 'true' }}",
+            "\n".join(
+                line
+                for line in disk_step.splitlines()
+                if not line.lstrip().startswith("#")
+            ),
+            "rust-lint disk cleanup must stay draft-gated (RUN_HEAVY_RUST_CHECKS)",
+        )
+        self.assertTrue(
+            any(
+                "python3 scripts/ci-rust-disk.py" in line
+                for line in disk_step.splitlines()
+                if not line.lstrip().startswith("#")
+            ),
+            "pinned command must appear as an executable (non-comment) line",
+        )
+        # Round-20 review: only the command's existence was pinned, not its
+        # arguments — appending `--min-free-gib 1` (ENOSPC gate at an
+        # empty-disk level) kept every gate-policy test green. Pin the
+        # exact recipe the way the rust-test sibling steps do. Round-23:
+        # the floor is the rust-test value (24 GiB) — swap lands on disk
+        # first (8-16 GiB) and this leg's all-targets clippy/doc target is
+        # rust-test-sized, so the 12 GiB default could ENOSPC at cache
+        # restore on a zram-degraded runner.
+        body = "\n".join(
+            line
+            for line in disk_step.splitlines()
+            if not line.lstrip().startswith("#")
+        )
+        self.assertIn(
+            "run: |\n"
+            '          sudo env GITHUB_WORKSPACE="$GITHUB_WORKSPACE" \\\n'
+            '            RUNNER_ENVIRONMENT="$RUNNER_ENVIRONMENT" \\\n'
+            "            python3 scripts/ci-rust-disk.py --min-free-gib 24",
+            body,
+            "rust-lint's disk step must keep the sibling recipe shape "
+            "(sudo env prefix, 24 GiB floor like rust-test)",
+        )
+        for line in body.splitlines():
+            if "ci-rust-disk.py" in line:
+                self.assertEqual(
+                    line.strip(),
+                    "python3 scripts/ci-rust-disk.py --min-free-gib 24",
+                    "the disk-clean command must keep the exact 24 GiB floor "
+                    "— retuning the ENOSPC gate (lower, or argument-free "
+                    "12 GiB default) must land as a deliberate change here",
+                )
+        self.assertNotIn("|| true", disk_step)
+
     def test_fast_gate_runner_line_is_pinned(self):
         # Round-47 review: this one line is the ONLY place the gate-policy
         # suite itself executes in CI. Deleting it (or narrowing the `-p`
@@ -1425,9 +2013,15 @@ class CiGatePolicyTests(unittest.TestCase):
         fast_gate = self.pr_workflow.split("\n  fast-gate:", maxsplit=1)[1].split(
             "\n  frontend-test:", maxsplit=1
         )[0]
-        self.assertIn(
-            "python3 -m unittest discover -s scripts/tests -p 'test_*.py'",
-            fast_gate,
+        # Round-6 review: assert the runner line is EXECUTABLE, not merely
+        # present — a commented-out runner satisfies assertIn while the whole
+        # suite silently stops running in CI (the meta-bypass of this file).
+        self.assertTrue(
+            any(
+                "python3 -m unittest discover -s scripts/tests -p 'test_*.py'" in line
+                for line in fast_gate.splitlines()
+                if not line.lstrip().startswith("#")
+            ),
             "the gate-policy suite's only CI runner must not be deletable in "
             "silence",
         )
@@ -2669,6 +3263,38 @@ class CiGatePolicyTests(unittest.TestCase):
             "workflow policy changes must not link the full application tests",
         )
 
+        # PR #1518: the test-registry guard script is executed by the
+        # rust-test leg, so a guard-script-only change must route to that leg
+        # (round-47 class: a script the leg runs must select the leg itself).
+        # Round-22 review: the two entries are pinned BEHAVIORALLY, not by
+        # literal presence — dorny/paths-filter's some-with-excludes lets an
+        # appended `!path` entry silence a positive match while every
+        # assertIn stays green, so replay the filter for the exact paths and
+        # fail on both deletion and any exclude entry that targets them.
+        for route_path in (
+            "scripts/test-registry-guard.py",
+            "scripts/tests/test_registry_guard.py",
+        ):
+            self.assertTrue(
+                (ROOT / route_path).is_file(),
+                f"routed path must exist in the checkout: {route_path}",
+            )
+            self.assertTrue(
+                _matches_paths_filter(route_path, rust_full_paths),
+                f"{route_path}: a rust_full exclude entry (or the entry's "
+                "deletion) silently unroutes the test-registry guard from "
+                "the rust-test leg that executes it — a guard-script-only "
+                "PR would run no rust leg",
+            )
+        # Same class, review #1518 round-7: the guard's behavior regression
+        # suite pins the module-aware ignore attribution; a change confined
+        # to the suite must still run the leg that executes the guard.
+        self.assertIn(
+            "scripts/tests/test_registry_guard.py",
+            rust_full_paths,
+            "registry guard behavior tests must trigger the rust-test leg that executes the guard",
+        )
+
         literal_feature_files = [
             path
             for path in rust_full_paths
@@ -2697,8 +3323,36 @@ class CiGatePolicyTests(unittest.TestCase):
         # by GATE_JOB_LEVEL_IFS["rust-test"]; the asserts below keep the
         # step-level pins that `if:` cannot cover.
         self.assertIn(
-            "cargo test --manifest-path pinvou3-app/src-tauri/Cargo.toml --no-default-features --lib -- --test-threads=1",
+            "cargo test --manifest-path pinvou3-app/src-tauri/Cargo.toml --no-default-features --lib --locked -- --test-threads=1",
             rust_test,
+        )
+        # PR #1518 closed the last unlocked repo-workspace cargo-test leg:
+        # all four src-tauri cargo-test run lines in this job carry --locked
+        # (lib --no-run on PR and push, --lib execution, behavior_telemetry
+        # harness). Pin the count so silently dropping any single --locked
+        # (e.g. while editing the surrounding command) goes red here.
+        # Round-11 review: count EXECUTABLE lines only — a bare `--locked`
+        # inside a comment otherwise offsets a real removal and the swap
+        # keeps this at 4 while a run line silently unlocks. Round-12
+        # review: an inline trailing comment (`cmd  # --locked`) defeats a
+        # full-line-only filter too, so each line is stripped at its first
+        # `#` before matching — a real relocation into a comment drops the
+        # count and goes red.
+        def _code_part(line):
+            return line.split("#", 1)[0]
+
+        locked_run_lines = [
+            line
+            for line in rust_test.splitlines()
+            if "--locked" in _code_part(line)
+            and not line.lstrip().startswith("#")
+        ]
+        self.assertEqual(
+            len(locked_run_lines),
+            4,
+            "every src-tauri cargo test invocation in rust-test must stay "
+            "--locked (counted on comment-stripped code only); when a fifth "
+            "cargo test lands here, raise this pin in the same commit",
         )
         # push(main) 只编译暖 cache,不执行测试:MQ 已对同一组合树跑过全量测试;
         # push 恢复暖 cache 后跑全量测试曾连续触发 hosted runner 失联(见 workflow 注释)。
@@ -2765,10 +3419,10 @@ class CiGatePolicyTests(unittest.TestCase):
         # Only split at 2-space-indented `key:` lines (job/trigger boundaries),
         # not at deeper indentation.
         setup_step = "- name: Set up zram and swap"
-        # rust-lint 例外:该 job 在 Swatinem/rust-cache 恢复阶段与扩容后的
-        # 内存配置组合曾稳定杀死 runner(2026-09-12 前后 5/5 复现;后定性为
-        # 时间窗环境事故,但 fmt/clippy 非内存密集,保守维持豁免)。
-        excluded_jobs = {"rust-lint"}
+        # rust-lint 曾豁免(Swatinem/rust-cache 恢复与扩容组合曾稳定杀死
+        # runner,2026-09-12 前后 5/5 复现;后定性为时间窗环境事故)。自
+        # rust-lint 承接 benchmark-hooks all-targets 编译门禁起,其内存压力
+        # 与 rust-test 同级,2026-10 起一并强制,不再豁免。
         blocks = re.split(
             r"\n  (?=[A-Za-z0-9_-]+:\s*$)", self.pr_workflow, flags=re.MULTILINE
         )
@@ -2776,19 +3430,26 @@ class CiGatePolicyTests(unittest.TestCase):
             block
             for block in blocks
             if re.search(r"^    runs-on: ubuntu", block, flags=re.MULTILINE)
-            and block.strip().split(":", maxsplit=1)[0] not in excluded_jobs
         ]
         self.assertGreaterEqual(len(linux_jobs), 10)
         for job in linux_jobs:
             job_name = job.strip().split(":", maxsplit=1)[0]
+            # Round-11 review: judge the contract on EXECUTABLE lines only —
+            # a commented-out step otherwise satisfies every assertIn below
+            # while the job actually runs on stock memory.
+            job_exec = "\n".join(
+                line
+                for line in job.splitlines()
+                if not line.lstrip().startswith("#")
+            )
             self.assertIn(
                 setup_step,
-                job,
+                job_exec,
                 f"ubuntu job '{job_name}' must run scripts/ci-memory-setup.sh",
             )
             self.assertIn(
                 '"${{ github.workspace }}/scripts/ci-memory-setup.sh"',
-                job,
+                job_exec,
                 f"ubuntu job '{job_name}' must invoke scripts/ci-memory-setup.sh"
                 " via an absolute path (some jobs set a run working-directory)",
             )
@@ -2800,7 +3461,7 @@ class CiGatePolicyTests(unittest.TestCase):
                 'run: timeout --kill-after=15 240 sudo --preserve-env='
                 'GITHUB_ACTIONS,PINVOU3_CI_DISABLE_ZRAM'
                 ' bash "${{ github.workspace }}/scripts/ci-memory-setup.sh"',
-                job,
+                job_exec,
                 f"ubuntu job '{job_name}' must hard-cap ci-memory-setup with"
                 " 'timeout --kill-after=15 240' (userspace hang backstop) and"
                 " pass GITHUB_ACTIONS and the PINVOU3_CI_DISABLE_ZRAM emergency"
@@ -2810,7 +3471,7 @@ class CiGatePolicyTests(unittest.TestCase):
             )
             self.assertIn(
                 '|| echo "::warning::ci-memory-setup',
-                job,
+                job_exec,
                 f"ubuntu job '{job_name}' must keep ci-memory-setup non-fatal"
                 " (degrade to stock runner memory with a ::warning)",
             )
@@ -4248,6 +4909,13 @@ class CiGatePolicyTests(unittest.TestCase):
             # "one failed main push drops the namespace fully cold" reason
             # as its siblings; pin it so it cannot rot the same way.
             ("cli-lint", "\n  windows-rust-test:"),
+            # 2026-10 audit followups (PR #745): knowledge-rust/rust-lint/
+            # cli-test joined the flag when their main-push unconditional
+            # runs landed — same "one failed main push drops the namespace
+            # fully cold" exposure; pin them so they cannot rot the same way.
+            ("knowledge-rust", "\n  rust-lint:"),
+            ("rust-lint", "\n  rust-test:"),
+            ("cli-test", "\n  cli-lint:"),
         ):
             job = self.pr_workflow.split(
                 f"\n  {job_name}:", maxsplit=1
@@ -4281,6 +4949,111 @@ class CiGatePolicyTests(unittest.TestCase):
         # (rust-cache's default keeps target artifacts). Comments stripped:
         # the decision record above mentions the old value historically.
         self.assertNotIn("cache-targets:", rust_test_cache)
+
+    def test_dev_profile_o0_guard_stays_on_all_three_heavy_legs(self):
+        # rust-test's codewhale-tui dev-O0 memory guard defuses the
+        # documented ~7 GB single-rustc dev thin-LTO OOM; the 2026-10 audit
+        # followups (PR #745) ported it to the 7 GB no-swap macOS runner
+        # beside the existing Windows twin. The override is a silent policy
+        # knob — dropping a leg's step or gutting the TOML section
+        # resurfaces the cold-run OOM with no runtime error — so pin the
+        # shared payload in every leg. Windows speaks pwsh (Add-Content
+        # here-string), the others a bash heredoc; the TOML section is the
+        # contract they share. Judged on comment-stripped text: commenting
+        # the TOML section out is inert in the written config.toml and must
+        # red this pin exactly like deletion (round-3 review of PR #745).
+        for job_name, end_marker in (
+            ("rust-test", "\n  cli-test:"),
+            ("windows-rust-test", "\n  macos-rust-check:"),
+            ("macos-rust-check", "\n  windows-codex-runtime-test:"),
+        ):
+            job = _without_yaml_comments(
+                self.pr_workflow.split(f"\n  {job_name}:", maxsplit=1)[1].split(
+                    end_marker, maxsplit=1
+                )[0]
+            )
+            self.assertIn("codewhale-tui O0", job, job_name)
+            self.assertIn("[profile.dev.package.codewhale-tui]", job, job_name)
+            self.assertIn("opt-level = 0", job, job_name)
+        # The bash twins append to the cargo-home config; rust-cache's
+        # cachePaths never include config.toml, so warm runs cannot
+        # accumulate duplicate TOML tables.
+        for job_name, end_marker in (
+            ("rust-test", "\n  cli-test:"),
+            ("macos-rust-check", "\n  windows-codex-runtime-test:"),
+        ):
+            job = _without_yaml_comments(
+                self.pr_workflow.split(f"\n  {job_name}:", maxsplit=1)[1].split(
+                    end_marker, maxsplit=1
+                )[0]
+            )
+            self.assertIn(
+                'config="${CARGO_HOME:-$HOME/.cargo}/config.toml"',
+                job,
+                job_name,
+            )
+
+    def test_frontend_test_webui_smoke_reuses_the_prebuilt_dist(self):
+        # frontend-test builds the web dist unconditionally (the web index
+        # contract test only covers it when it exists), so the diff-selected
+        # test:webui smoke must reuse that dist via PINVOU_WEBUI_SKIP_BUILD=1
+        # instead of paying a second identical vite build. Both smoke steps —
+        # the PR-selected and the merge-group one — must keep the env: a
+        # dropped step silently reintroduces the duplicate build.
+        # Comment-stripped: commenting one of the two live lines must not
+        # keep the count at 2 (round-3 review of PR #745).
+        frontend = _without_yaml_comments(
+            self.pr_workflow.split("\n  frontend-test:", maxsplit=1)[1].split(
+                "\n  relay-test:", maxsplit=1
+            )[0]
+        )
+        self.assertEqual(
+            frontend.count('PINVOU_WEBUI_SKIP_BUILD: "1"'),
+            2,
+            "both webui smoke steps must set PINVOU_WEBUI_SKIP_BUILD=1",
+        )
+
+    def test_release_checkouts_never_persist_credentials(self):
+        # release-packages 的 header 承诺 checkout 后不保留凭据。构建 job 的
+        # 子模块在 checkout 内部用 token 初始化,之后的运行时仓库按锁定
+        # gitlink 匿名拉取(Windows 先行验证);PR #745 补齐其余四腿,这里把
+        # 每个 checkout(含 gate 的纯文件级比对)钉住,凭据策略不得回退。
+        workflow = (ROOT / ".github/workflows/release-packages.yml").read_text(
+            encoding="utf-8"
+        )
+        for job_name, end_marker in (
+            ("check-version-bump", "\n  build-linux-x64:"),
+            ("build-linux-x64", "\n  build-linux-arm64:"),
+            ("build-linux-arm64", "\n  build-linux-loongarch64:"),
+            ("build-linux-loongarch64", "\n  build-windows-x64:"),
+            ("build-windows-x64", "\n  build-macos-universal:"),
+            ("build-macos-universal", None),
+        ):
+            job = workflow.split(f"\n  {job_name}:", maxsplit=1)[1]
+            if end_marker is not None:
+                job = job.split(end_marker, maxsplit=1)[0]
+            checkout = job.split("uses: actions/checkout@v7", maxsplit=1)[1].split(
+                "\n      - name:", maxsplit=1
+            )[0]
+            # Comment-stripped: a commented-out live line must not satisfy
+            # the pin (same live-config rule as _without_yaml_comments users
+            # elsewhere in this file).
+            self.assertIn(
+                "persist-credentials: false",
+                _without_yaml_comments(checkout),
+                job_name,
+            )
+        # The gate compares VERSION files only: no submodules, depth 1 — a
+        # future git-history-reading step must not silently need depth 0.
+        gate = workflow.split("\n  check-version-bump:", maxsplit=1)[1].split(
+            "\n  build-linux-x64:", maxsplit=1
+        )[0]
+        gate_checkout = gate.split("uses: actions/checkout@v7", maxsplit=1)[1].split(
+            "\n      - name:", maxsplit=1
+        )[0]
+        live_gate_checkout = _without_yaml_comments(gate_checkout)
+        self.assertIn("\n          fetch-depth: 1\n", live_gate_checkout)
+        self.assertNotIn("submodules:", live_gate_checkout)
 
     def test_quota_and_toolchain_hardening_stays_pinned(self):
         # 2026-10 audit hardening. Each item is a silent policy change (quota
@@ -4390,6 +5163,96 @@ class CiGatePolicyTests(unittest.TestCase):
         )
         self.assertIn("timeout-minutes: 10", changes)
         self.assertIn("timeout-minutes: 20", smoke)
+
+    def test_wrapper_smoke_chain_probe_step_is_pinned(self):
+        # Round-13 review: the chain-contract probe (step 5) had no
+        # anti-deletion pin — deleting the whole step left the remaining
+        # smoke steps green and every gate-policy test here untouched,
+        # exactly the gap this PR fixed for the windows runtime-manifest
+        # step in round 11. Pin the step name and the two load-bearing
+        # probe assertions on executable lines, so the smoke can silently
+        # lose its delegation contract no more.
+        workflow = (
+            ROOT / ".github/workflows/rustc-wrapper-smoke.yml"
+        ).read_text(encoding="utf-8")
+        self.assertIn(
+            "- name: 链式 wrapper —— 完整 argv 委托链上命令且仍注入 16 MiB",
+            workflow,
+        )
+        step = workflow.split(
+            "- name: 链式 wrapper —— 完整 argv 委托链上命令且仍注入 16 MiB",
+            maxsplit=1,
+        )[1].split("\n      - name:", maxsplit=1)[0]
+        step_code = "\n".join(
+            line
+            for line in step.splitlines()
+            if not line.lstrip().startswith("#")
+        )
+        # Round-20 review: two of the probe's five assertions were pinned —
+        # deleting the three per-argv content greps kept every gate-policy
+        # test green, so a "same arg count, different args" edit (the
+        # delegation contract's other half) regressed silently. Pin all
+        # five on executable lines.
+        for probe in (
+            "grep -Fqx 'chain_probe_stack=[16777216]'",
+            "grep -Fqx 'chain_probe_argc=3'",
+            "grep -Fqx 'chain_probe_arg=[rustc]'",
+            "grep -Fqx 'chain_probe_arg=[--version]'",
+            "grep -Fqx 'chain_probe_arg=[--verbose]'",
+        ):
+            self.assertIn(
+                probe,
+                step_code,
+                f"the chain probe must keep its {probe.split('[')[0]}… "
+                "assertion as an executable line — deleting it reopens the "
+                "merge-args/drop-injection escape the round-12 probe rewrite "
+                "closed",
+            )
+        self.assertIn("rustc-stack-wrapper", step_code)
+        # Round-22 review: substring pins are echo-neutralizable — a step
+        # that merely echoes the pinned substrings (probe logic deleted)
+        # passed every assertion above, and the smoke workflow has no
+        # step-name-uniqueness backstop. Pin the full invocation and the
+        # five full assertion LINES (the disk-step exact-recipe pattern),
+        # and ban the step-level decoys (if:/continue-on-error).
+        self.assertIn(
+            'out="$(RUSTC_WRAPPER_CHAIN="$PWD/chain-probe.exe" '
+            '"$wrapper" rustc --version --verbose)"',
+            step_code,
+            "the probe must actually run THROUGH the wrapper under "
+            "RUSTC_WRAPPER_CHAIN — running it directly (or echoing the "
+            "assertions) breaks the delegation contract this step exists "
+            "to verify",
+        )
+        for assertion_line in (
+            "printf '%s\\n' \"$out\" | grep -Fqx 'chain_probe_stack=[16777216]'",
+            "printf '%s\\n' \"$out\" | grep -Fqx 'chain_probe_argc=3'",
+            "printf '%s\\n' \"$out\" | grep -Fqx 'chain_probe_arg=[rustc]'",
+            "printf '%s\\n' \"$out\" | grep -Fqx 'chain_probe_arg=[--version]'",
+            "printf '%s\\n' \"$out\" | grep -Fqx 'chain_probe_arg=[--verbose]'",
+            # round-23: exit-code half of the delegation contract
+            'CHAIN_PROBE_EXIT=42 RUSTC_WRAPPER_CHAIN="$PWD/chain-probe.exe" '
+            '"$wrapper" rustc --version --verbose >/dev/null || chain_status=$?',
+            'test "$chain_status" -eq 42',
+        ):
+            self.assertIn(
+                assertion_line,
+                step_code,
+                "the chain probe must keep its full per-field assertion "
+                "line — a weakened or echoed form no longer proves the "
+                "delegation contract",
+            )
+        self.assertNotIn(
+            "continue-on-error",
+            step_code,
+            "the chain probe step must not be allowed to fail silently",
+        )
+        self.assertFalse(
+            any(re.match(r"^ {8}if:", line) for line in step.splitlines()),
+            "the chain probe step must run unconditionally on its leg "
+            "(an `if:` on the step would let a self-decoy keep every pin "
+            "green while the probe never runs)",
+        )
 
 
 

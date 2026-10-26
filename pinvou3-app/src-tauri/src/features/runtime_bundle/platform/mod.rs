@@ -198,8 +198,12 @@ pub(crate) use crate::platform::connector_skills::{
 ///       断言由 `wecom_skill_dirs_track_platform_truth`（15 名）取代。
 ///       技能树不参与内容哈希，必须 bump 语义版本让已连接用户启动时
 ///       刷新；extracted-VERSION 门禁只做不等比较。
+/// 0.37: 回流 Community #777 的 dws CLI pin 升至 1.0.65：五平台
+///       connectors.lock.json 换 1.0.65 下载钉扎，NOTICE-dingtalk.md 拆分
+///       「技能内容基线 1.0.64 / CLI pin 1.0.65」并同步手册条目；技能内容
+///       基线不变，v1.0.65 技能同步另行进行。
 pub const BUNDLE_VERSION: &str = concat!(
-    "0.36-",
+    "0.37-",
     env!("BUNDLE_INSTRUCTIONS_HASH"),
     "-",
     env!("BUNDLE_H3C_CLI_HASH"),
@@ -1129,13 +1133,14 @@ mod tests {
     /// crontab/schtasks/systemctl 路径）,但 bash 的回合内 `cmd &` 仍然可用——
     /// 措辞必须限定「回合结束后」,不得写成无条件的「无后台运行能力」。
     #[test]
-    fn shared_skeleton_pins_no_scheduling_red_line() {
+    fn shared_skeleton_describes_the_actual_scheduling_capability() {
+        assert!(INSTRUCTIONS_SHARED_MD.contains("app-automations"));
+        assert!(INSTRUCTIONS_SHARED_MD.contains("Plan 模式"));
+        assert!(INSTRUCTIONS_SHARED_MD.contains("pending 只表示排队"));
         assert!(
-            INSTRUCTIONS_SHARED_MD
+            !INSTRUCTIONS_SHARED_MD
                 .contains("你没有定时执行、回合结束后继续运行或稍后主动发消息的能力")
         );
-        assert!(INSTRUCTIONS_SHARED_MD.contains("定时任务功能"));
-        assert!(!INSTRUCTIONS_SHARED_MD.contains("你没有定时、后台运行"));
     }
 
     fn run_depth_guard(bundle: &Pinvou3Bundle, tool: &str, args: &str) -> std::process::Output {

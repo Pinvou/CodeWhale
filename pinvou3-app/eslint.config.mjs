@@ -39,6 +39,18 @@ const srcFiles = [
   'src/shared/**/*.{js,jsx}',
 ];
 
+// unicorn 79 中这些 preset 规则仅支持非 JS 语言（markdown/frontmatter 等），
+// 不能应用到 js/js 文件，展开 preset 前必须剔除。
+const UNICORN_NON_JS_RULES = new Set([
+  'unicorn/comma-spacing',
+  'unicorn/indent',
+  'unicorn/key-name-casing',
+  'unicorn/no-empty-link-text',
+  'unicorn/no-javascript-url',
+  'unicorn/no-loss-of-precision',
+  'unicorn/require-frontmatter-fields',
+]);
+
 export default defineConfig([
   {
     files: srcFiles,
@@ -230,9 +242,9 @@ export default defineConfig([
     plugins: { n: nPlugin, jsdoc, unicorn, sonarjs, 'import-x': importX },
     settings: {
       'import-x/resolver': { node: { extensions: ['.js', '.mjs'] } },
-      // CI runs Node 22 (latest 22.x, which is >= 22.16 where
-      // import.meta.dirname landed); without this the n plugin falls back to
-      // its built-in >=16 floor and flags every modern builtin.
+      // CI runs Node 24; the n plugin stays pinned to the conservative
+      // >= 22.16 floor (where import.meta.dirname landed) instead of its
+      // built-in >=16 floor, which would flag every modern builtin.
       n: { version: '>=22.16.0 <23' },
     },
     rules: {
@@ -302,8 +314,18 @@ export default defineConfig([
       ...Object.fromEntries(
         Object.keys(reactHooks.configs.flat['recommended-latest'].rules).map((rule) => [rule, 'warn'])
       ),
+      // unicorn 79 起 preset 里这 7 条仅声明支持非 JS 语言（markdown/frontmatter 等）；
+      // 即使 severity 为 off，条目落在 js/js 文件上也会让 ESLint 10 配置校验直接
+      // 失败，必须在展开前剔除。
       ...Object.fromEntries(
-        Object.keys(unicorn.configs.recommended.rules).map((rule) => [rule, 'warn'])
+        Object.keys(unicorn.configs.recommended.rules)
+          .filter((rule) => !UNICORN_NON_JS_RULES.has(rule))
+          .map((rule) => [rule, 'warn'])
+      ),
+      ...Object.fromEntries(
+        Object.keys(unicorn.configs.recommended.rules)
+          .filter((rule) => !UNICORN_NON_JS_RULES.has(rule))
+          .map((rule) => [rule, 'warn'])
       ),
       'unicorn/prefer-explicit-viewport-units': 'off',
       'no-unused-vars': 'warn',
@@ -360,7 +382,9 @@ export default defineConfig([
       'prefer-const': 'warn',
       'object-shorthand': 'warn',
       ...Object.fromEntries(
-        Object.keys(unicorn.configs.recommended.rules).map((rule) => [rule, 'warn'])
+        Object.keys(unicorn.configs.recommended.rules)
+          .filter((rule) => !UNICORN_NON_JS_RULES.has(rule))
+          .map((rule) => [rule, 'warn'])
       ),
       'unicorn/prefer-explicit-viewport-units': 'off',
       'unicorn/no-unsafe-string-replacement': 'warn',

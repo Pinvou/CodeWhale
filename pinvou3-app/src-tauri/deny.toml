@@ -22,22 +22,31 @@ ignore = [
     # RUSTSEC-2026-0194 (quick-xml quadratic complexity) and
     # RUSTSEC-2026-0195 (NsReader memory exhaustion) no longer match:
     # both advisories are fixed in quick-xml >=0.41.0, and the lockfile
-    # already resolves 0.41.0 (both the plist 1.10.0 and calamine 0.36.1
-    # paths). Without an ignore entry, a future dependency downgrade below
-    # 0.41 would trip the advisory and fail CI again — reassess then.
+    # resolves 0.41.0 + 0.42.0（0.42 来自本仓直接依赖与 calamine 0.37；
+    # 残留的 0.41.0 走 plist 1.10.0 与 wayland-scanner/xcb 的 Linux 构建
+    # 链,同样在修复线上）。 Without an ignore entry, a future dependency
+    # downgrade below 0.41 would trip the advisory and fail CI again —
+    # reassess then.
     #
-    # RUSTSEC-2026-0367/0368/0369 (zip 8.6.0: SUID/SGID preservation,
-    # symlink escape and permission-through-symlink in the wholesale
-    # `ZipArchive::extract()` / stream-extract APIs). Patched only in
-    # zip >=9.0.0, which calamine 0.36.1 (^8.6) cannot reach; ignore is
-    # scoped on reachability: the graph never calls the wholesale
-    # extraction APIs — calamine only reads xlsx in memory, and every
-    # direct zip consumer iterates `by_index` with `enclosed_name()`
-    # guards (artifacts/native_installer/marketplace/python_dependencies).
-    # Reassess on any calamine/zip bump or new extract() call site.
-    "RUSTSEC-2026-0367",
-    "RUSTSEC-2026-0368",
-    "RUSTSEC-2026-0369",
+    # RUSTSEC-2026-0367/0368/0369 (zip 8.x extract-family) RETIRED:
+    # calamine 0.37 requires zip ^9, and all three workspaces now pin
+    # calamine = "0.37" — the graph converges on a single zip 9.0.5 and no
+    # longer contains a vulnerable zip. The reachability note (the
+    # graph never calls the wholesale `ZipArchive::extract()` /
+    # stream-extract APIs — every direct zip consumer iterates `by_index`
+    # with `enclosed_name()` guards) remains true and is the fallback
+    # posture: if a future downgrade below zip 9 re-enters the tree, these
+    # three advisories trip CI again.
+    #
+    # RUSTSEC-2026-0387 (crypto-bigint constant-time timing variability,
+    # DB 刷新于 2026-10-23——community#761 移植当日,其线上 deny 全绿先于本通告):
+    # patched 仅 >= 0.7.6,而本图 crypto-bigint 0.5.5 由 elliptic-curve 0.13 →
+    # p256 0.13 / hpke 0.12 钉住,再往上由 age 0.12 锁定;升级到 0.7.x 需要
+    # RustCrypto elliptic-curve/p256 全生态大版本迁移,非本仓可单独完成。
+    # 影响面:age 0.12 的本地静态数据加密(会话/密钥落盘),不存在能观测
+    # EC 运算时序的远程攻击者;timing 侧信道在本威胁模型下不可实际利用。
+    # Reassess on any age/elliptic-curve/p256 bump.
+    "RUSTSEC-2026-0387",
 ]
 # unmaintained 保留 "workspace":父 crate 依赖图比子模块深
 # (子模块 + Tauri GTK3/glib + fastembed),实测 unmaintained="all" 会命中 gtk-rs GTK3、
@@ -45,11 +54,21 @@ ignore = [
 # 的条目并 fail CI。这些非本仓可修(等 tauri/gtk-rs 升级),"workspace" 仅报 workspace crate,
 # 把噪声挡在 CI 之外;真漏洞仍由上面的 ignore 显式管理 + cargo update 修复。
 unmaintained = "workspace"
-# Keep yanked releases visible while calamine 0.36.1 requires zip ^8.6.
-# Retain the locked graph; RustSec vulnerability advisories still fail.
-# Restore "deny" with a supported non-yanked dependency update, and reassess
-# immediately if an advisory affects the pinned version.
-yanked = "warn"
+# unsound 是独立的 informational 类别,cargo-deny 0.20 默认同为 "workspace";
+# 写明以示有意为之:它(而非上面的 unmaintained 行)屏蔽的是传递依赖里的
+# glib 0.18.5 RUSTSEC-2024-0429(VariantStrIter unsound,Dependabot #13/#35),
+# 由 wry 0.55.1 → gtk ^0.18 钉住,修复版 glib 0.20 要等 GTK3 hold 解除;
+# unsound="all" 探针恰好只命中它。GTK hold 移动时在此重评。
+unsound = "workspace"
+# Restored to "deny": the supported non-yanked dependency update this block
+# waited for has landed — calamine 0.37 with a single zip 9.0.5 in the graph —
+# so yanked releases are denied again. Reassess immediately if an advisory
+# affects the pinned version.
+yanked = "deny"
+# 被忽略条目不再命中任何 crate 时直接报错(默认 warn):上面按 id 的 advisory
+# 例外(现为 RUSTSEC-2026-0387)都是带重评条件的临时豁免——依赖升级使条目
+# 失效的同一提交里 CI 就会变红,摘除协议因此自强制,不依赖注释自觉。
+unused-ignored-advisory = "deny"
 
 [licenses]
 version = 2
@@ -84,6 +103,12 @@ multiple-versions = "allow"
 deny = [
     { name = "webpki-roots", version = ">=1.0.0, <1.0.10" },
     { name = "webpki-roots", version = ">=0.26.0, <0.26.11" },
+    # Round-22 review: 上面 [advisories] 的 RUSTSEC-2026-0387 id 级忽略没有
+    # 版本维度——半升级形态(age/p256 升到修复线,而新的第三方依赖把旧
+    # elliptic-curve 重新带进图、crypto-bigint 0.5.5 残留)不会触发任何
+    # 重评信号。这里独立封禁漏洞窗口(现图 0.5.5 恰在窗口外,bans 全绿);
+    # 与 id 忽略同一提交摘除时同步收窄为 "<0.7.6" 或删除本条。
+    { name = "crypto-bigint", version = ">0.5.5, <0.7.6" },
 ]
 # wildcards 保留 "warn"(不能升 deny):本仓 3 个 CodeWhale 子模块依赖是
 # path = "../../CodeWhale/..." 形式(AGENTS.md §2 禁止给它们加版本约束),

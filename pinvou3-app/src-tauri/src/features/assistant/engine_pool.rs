@@ -549,9 +549,9 @@ pub(crate) fn turn_restrict_tools(
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum AuxToolSurface {
     /// The legacy zero-tool aux engine. Also the fail-closed fallback:
-    /// isolated-prefix parents (`aux-sched-x` / `aux-aux-x` / `aux-eval_x`)
-    /// and per-aux scoped-config write failures demote here — byte-identical
-    /// to the pre-ADR-0024 behavior.
+    /// isolated-prefix parents (`aux-sched-x` / `aux-aux-x` / `aux-eval_x` /
+    /// `aux-agentic_x`) and per-aux scoped-config write failures demote here —
+    /// byte-identical to the pre-ADR-0024 behavior.
     ZeroTool,
     /// Scoped read-only parent context: exactly one model-visible tool (the
     /// session-reader `read_session`), pinned at spawn time to the parent
@@ -572,8 +572,8 @@ pub(crate) const AUX_SCOPED_READ_TOOL: &str = "mcp_session-reader_read_session";
 /// argument as `is_aux_session_id`). `None` for non-aux ids, an empty parent
 /// part, isolated-prefix parents, a parent part that fails the session-id
 /// charset, or a parent longer than the server's id length cap: aux creation
-/// rejects sched-/aux-prefixed parents (and `eval_` sessions have no aux
-/// entry point), but the surface decision must not trust construction —
+/// rejects sched-/aux-/agentic_-prefixed parents (and `eval_` sessions have
+/// no aux entry point), but the surface decision must not trust construction —
 /// those ids fail closed to the ZeroTool fallback (a charset-invalid or
 /// over-long parent could never name a real record, and the scoped server's
 /// own startup validation would refuse the pin).
@@ -588,7 +588,11 @@ pub(crate) fn aux_parent_session_id(session_id: &str) -> Option<&str> {
     // Isolated-prefix parents (the server's ISOLATED_SESSION_PREFIXES set,
     // case-insensitive): an aux engine pinned to one would point the scoped
     // reader at another isolated class — fail closed instead.
-    for prefix in ["sched-", "eval_", "aux-"] {
+    // The set gained agentic_ (headless runs) alongside the store's
+    // ensure_parent_can_own_aux refusal: an aux side-chat pinned to a
+    // headless parent is refused at creation, and this loop is the
+    // spawn-time backstop for ids that reach the pool anyway.
+    for prefix in ["sched-", "eval_", "aux-", "agentic_"] {
         if parent
             .get(..prefix.len())
             .is_some_and(|head| head.eq_ignore_ascii_case(prefix))
@@ -3039,7 +3043,8 @@ impl EnginePool {
                 ) && remote_owner_matches(
                     entry.remote_owner.as_ref(),
                     remote_skills.as_ref().map(|skills| skills.owner()),
-                ) {
+                ) && entry.engine.scheduled_run_engine == scheduled_unattended
+                {
                     (
                         Some(entry.engine.clone()),
                         entry.native_window_pending.clone(),
@@ -3226,6 +3231,7 @@ impl EnginePool {
             shell_manager,
             turn_shell_tasks,
             steer_incarnation,
+            scheduled_unattended,
         )?;
         let custody = ColdEngineCustody::new(engine, forwarder);
         let engine = &custody
@@ -5228,10 +5234,22 @@ impl EnginePool {
             // sessions keep present_artifact hidden), and the entries lock is
             // released before sending, avoiding holding the global engine
             // table lock across awaits.
+            // Round-9 M2(b) (#628): compose the unattended shield for
+            // active unattended runs — CodeWhale applies the op as a
+            // plain OVERWRITE of config.disallowed_tools, so the un-gated
+            // broadcast replaced a live scheduled run's shield with the
+            // ordinary catalog (turns after the toggle ran unshielded).
+            let shaped = if engine.scheduled_unattended.load(Ordering::Acquire) {
+                crate::features::assistant::engine::unattended_disallowed_tools(
+                    &self.bridge.shape_disallowed_tools(&sid, tools.clone()),
+                )
+            } else {
+                self.bridge.shape_disallowed_tools(&sid, tools.clone())
+            };
             if let Err(e) = engine
                 .handle
                 .send(Op::SetDisallowedTools {
-                    tools: Some(self.bridge.shape_disallowed_tools(&sid, tools.clone())),
+                    tools: Some(shaped),
                 })
                 .await
             {
@@ -6146,7 +6164,10 @@ mod scheduled_model_tests {
         }
         assert_eq!(aux_parent_session_id("AUX-Case01"), Some("Case01"));
         // Isolated-prefix parents fail closed (case-insensitive, matching the
-        // server's ISOLATED_SESSION_PREFIXES set).
+        // server's ISOLATED_SESSION_PREFIXES set). The aux-agentic_ rows are
+        // the spawn-time backstop's red arm (r1 MAJOR-2): deleting the
+        // `agentic_` conjunct from aux_parent_session_id's loop turns these
+        // two rows red while every other suite stays green.
         for id in [
             "aux-sched-x",
             "AUX-SCHED-x",
@@ -6154,6 +6175,8 @@ mod scheduled_model_tests {
             "Aux-Aux-x",
             "aux-eval_x",
             "aux-EVAL_x",
+            "aux-agentic_4242_0",
+            "AUX-AGENTIC_x",
             // Degenerate shapes: bare prefix, empty parent, non-aux ids.
             "aux-",
             "sched-1",
@@ -12318,6 +12341,98 @@ mod probed_facts_wiring_tests {
         assert!(
             unkeyed.workspace_roots.is_empty(),
             "no snapshot = single-root semantics"
+        );
+    }
+
+    /// Round-9 M2(b) (#628): the toggle broadcast COMPOSES the unattended
+    /// shield for sched- sessions — CodeWhale applies SetDisallowedTools as
+    /// a plain overwrite, so an un-gated broadcast replaced a live
+    /// scheduled run's shield with the ordinary catalog. Source pin: the
+    /// set_disallowed_all body routes sched- ids through
+    /// unattended_disallowed_tools; deleting the branch turns this red.
+    #[test]
+    fn toggle_broadcast_composes_the_shield_for_sched_sessions() {
+        let source = include_str!("engine_pool.rs");
+        let fn_start = source
+            .find("pub async fn set_disallowed_all")
+            .expect("set_disallowed_all must exist");
+        let fn_end = source[fn_start..]
+            .find("\n    /// execpolicy")
+            .map(|offset| fn_start + offset)
+            .expect("next method boundary");
+        let fn_body = source[fn_start..fn_end]
+            .lines()
+            .map(|line| line.split("//").next().unwrap_or(line))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let compact: String = fn_body.chars().filter(|c| !c.is_whitespace()).collect();
+        assert!(compact.contains("letshaped=ifengine.scheduled_unattended.load(Ordering::Acquire){crate::features::assistant::engine::unattended_disallowed_tools("),
+            "the positive unattended branch must compose the shield, not merely mention it");
+        let gate = fn_body
+            .find("engine.scheduled_unattended.load(Ordering::Acquire)")
+            .expect("the active unattended branch exists");
+        let compose = fn_body
+            .find("unattended_disallowed_tools")
+            .expect("the composition");
+        assert!(
+            gate < compose,
+            "only active unattended engines receive the shield on broadcast"
+        );
+        // Round-24 minor 12: the composition must reach the op — the
+        // ordering assert above stays green if the send is reverted to the
+        // raw catalog. The engine.rs counterpart pin checks dataflow; this
+        // asserts the broadcast carries `Some(shaped)`, the composed value.
+        let send = fn_body
+            .find("Op::SetDisallowedTools {")
+            .expect("the broadcast send exists");
+        let carries = fn_body[send..]
+            .find("tools: Some(shaped)")
+            .expect("the broadcast must carry the composed shield value");
+        assert!(
+            compose < send + carries,
+            "the composed value (not the raw catalog) reaches Op::SetDisallowedTools"
+        );
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    /// Round-35 M1: the unattended/interactive pool-reuse clause is
+    /// load-bearing — it is the only thing preventing an interactive
+    /// continuation of a sched session from reusing the run engine
+    /// (subagents disabled, spawn-pinned scheduled model, stale shield
+    /// entries). Deleting the second leg kept the whole serial suite
+    /// green (reviewer mutation, re-confirmed by the round-36 subagent
+    /// review). Source-pin BOTH legs and their conjunction at the reuse
+    /// site: engine_pool.rs carries production code after its scattered
+    /// cfg(test) modules, so the span is the reuse function's own body
+    /// (up to the next item), which excludes the test module at the
+    /// file's end.
+    #[test]
+    fn pool_reuse_requires_the_same_engine_class() {
+        let source = include_str!("engine_pool.rs");
+        let span = source
+            .split("fn get_or_spawn_with_policy")
+            .nth(1)
+            .expect("the pool-reuse function present")
+            .split("fn ")
+            .next()
+            .expect("the reuse gate present")
+            // Round-36 review: strip line comments — a comment-anchored
+            // revert of the clause must not self-satisfy the pin (the
+            // same mutation class its three sibling pins defend against).
+            .split('\n')
+            .map(|line| line.split("//").next().unwrap_or(line))
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(
+            span.contains("entry_is_fresh("),
+            "the freshness leg must stay in the reuse gate"
+        );
+        assert!(
+            span.contains(") && entry.engine.scheduled_run_engine == scheduled_unattended"),
+            "reuse must be CONJOINED with the run-engine class — the clause \
+             that keeps interactive continuations off the run engine (round-35 M1)"
         );
     }
 }

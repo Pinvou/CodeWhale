@@ -36,6 +36,37 @@ fn persist_chat_snapshot(
     Ok(saved.map(|saved| (saved, revision)))
 }
 
+/// [`persist_chat_snapshot`] for the optimistic admission fallback, which
+/// has no engine snapshot: the revision-guarded display write and its
+/// notification share one blocking transaction, and a writer retired before
+/// admission is skipped — the reclaiming owner re-persists and publishes the
+/// fallback itself.
+fn persist_admitted_display_snapshot(
+    store: &SessionStore,
+    session_id: &str,
+    baseline_revision: &str,
+    display_message: Message,
+    edit_last: bool,
+    writer_active: &AtomicBool,
+    committed: impl FnOnce(&str, usize),
+) -> Result<Option<(SavedSession, Option<String>)>> {
+    let mut revision = None;
+    let saved = store.persist_admitted_chat_display_with_commit(
+        session_id,
+        baseline_revision,
+        display_message,
+        edit_last,
+        || writer_active.load(Ordering::Acquire),
+        |saved| {
+            revision = transcript_revision(&saved.messages).ok();
+            if let Some(revision) = revision.as_deref() {
+                committed(revision, saved.messages.len());
+            }
+        },
+    )?;
+    Ok(saved.map(|saved| (saved, revision)))
+}
+
 fn behavior_task_status(status: TurnOutcomeStatus, error: Option<&str>) -> &'static str {
     match status {
         TurnOutcomeStatus::Completed if error.is_none() => "success",
@@ -992,12 +1023,19 @@ pub(crate) fn spawn_event_forwarder(
                     owner_session_id,
                     id,
                     status,
+                    activity,
                     ..
                 } if owner_session_id == session_id => {
                     let payload = json!({
                         "session_id": session_id,
                         "agent_id": id,
                         "status": status,
+                        // 结构化生命周期态（与 worker ledger 同一词表）：展示层
+                        // 不得从自由文本 progress 短语反推状态，否则台账令牌与
+                        // 实时短语互相覆盖，运行中子智能体的状态标签来回闪烁。
+                        "worker_status": deepseek_tui::tools::subagent::agent_worker_status_name(
+                            activity.worker_status,
+                        ),
                     });
                     // Web 端没有 chat:tool_start 的子智能体等价事件， bridge 靠该进展
                     // 文本调度 shell 快照轮询（发现子 agent 的后台任务），必须转发。
@@ -1015,7 +1053,7 @@ pub(crate) fn spawn_event_forwarder(
                     message,
                     ..
                 } if owner_session_id == session_id => {
-                    use deepseek_tui::tools::subagent::MailboxMessage as MM;
+                    use deepseek_tui::tools::subagent::{AgentWorkerStatus, MailboxMessage as MM};
                     // 审计是应用账本：绑了项目目录的原生代码会话写会话私有目录，
                     // 不污染用户项目；其余会话账本根与执行根相同，行为不变。
                     let ws = bridge.audit_workspace(&session_id, &execution_workspace);
@@ -1061,6 +1099,12 @@ pub(crate) fn spawn_event_forwarder(
                                 "session_id": session_id,
                                 "agent_id": agent_id,
                                 "status": format!("🔧 {tool_name} (step {step})"),
+                                // 与 AgentProgress 臂同词表：工具执行中。经
+                                // agent_worker_status_name 派生而非手写字面量，
+                                // 底座改词表时两臂一起变而非静默分叉。
+                                "worker_status": deepseek_tui::tools::subagent::agent_worker_status_name(
+                                    AgentWorkerStatus::RunningTool,
+                                ),
                             });
                             // 同 AgentProgress：Web 端靠它发现子 agent 的后台 shell 任务。
                             let _ = app.emit("multiagent:agent_progress", payload.clone());
@@ -1248,7 +1292,6 @@ pub(crate) fn spawn_event_forwarder(
                                                 );
                                             },
                                         )
-                                        .map(|saved| saved.map(|(saved, _)| saved))
                                     })
                                 }),
                             }
@@ -1256,37 +1299,38 @@ pub(crate) fn spawn_event_forwarder(
                             turn_lifecycle.active_transcript_fallback().map(|fallback| {
                                 let store_for_save = store.clone();
                                 let session_for_save = session_id.clone();
+                                let app_for_save = app.clone();
+                                let writer_for_save = transcript_writer_active.clone();
                                 tokio::task::spawn_blocking(move || {
-                                    store_for_save
-                                        .persist_admitted_chat_display(
-                                            &session_for_save,
-                                            &fallback.baseline_revision,
-                                            fallback.display_message,
-                                            fallback.operation == TranscriptOperation::EditLast,
-                                        )
-                                        .map(Some)
+                                    persist_admitted_display_snapshot(
+                                        &store_for_save,
+                                        &session_for_save,
+                                        &fallback.baseline_revision,
+                                        fallback.display_message,
+                                        fallback.operation == TranscriptOperation::EditLast,
+                                        &writer_for_save,
+                                        |revision, message_count| {
+                                            emit_transcript_committed(
+                                                &app_for_save,
+                                                &session_for_save,
+                                                revision.to_owned(),
+                                                "terminal_fallback",
+                                                message_count,
+                                            );
+                                        },
+                                    )
                                 })
                             })
                         };
                         if let Some(save_task) = terminal_save {
                             match save_task.await {
-                                Ok(Ok(Some(saved))) => {
+                                // Both save arms published their durable
+                                // revision on the blocking worker.
+                                Ok(Ok(Some(_))) => {
                                     chat_persistence_error = None;
-                                    // Engine snapshots already published on
-                                    // their blocking worker. The admission
-                                    // fallback has no engine snapshot.
-                                    if !active_transcript_seen
-                                        && let Ok(revision) = transcript_revision(&saved.messages)
-                                    {
-                                        emit_transcript_committed(
-                                            &app,
-                                            &session_id,
-                                            revision,
-                                            "terminal_fallback",
-                                            saved.messages.len(),
-                                        );
-                                    }
                                 }
+                                // The retired writer published nothing: the
+                                // reclaiming owner emits the terminal now.
                                 Ok(Ok(None)) => continue,
                                 Ok(Err(save_error)) => {
                                     chat_persistence_error = Some(format!("{save_error:#}"));
@@ -2031,7 +2075,7 @@ mod tests {
 
 #[cfg(test)]
 mod transcript_commit_tests {
-    use super::persist_chat_snapshot;
+    use super::{persist_admitted_display_snapshot, persist_chat_snapshot};
     use crate::features::sessions::{ChatEngineState, SessionStore, transcript_revision};
     use crate::platform::paths::tests::{ENV_LOCK, EnvVarGuard};
     use deepseek_tui::models::{ContentBlock, Message};
@@ -2160,15 +2204,98 @@ mod transcript_commit_tests {
             .is_none()
         );
         assert_eq!(store.load(&id).unwrap().messages, replacement_messages);
+        // The revision check refuses a stale CAS before the overwrite guard
+        // runs; a CAS at the current revision that drops every message must
+        // be refused by the truncating-overwrite guard itself.
         assert!(
             store
                 .compare_and_swap_messages(&id, &marker.0, vec![])
+                .is_err()
+        );
+        assert!(
+            store
+                .compare_and_swap_messages(&id, &replacement_revision, vec![])
                 .is_err()
         );
         assert_eq!(
             transcript_revision(&store.load(&id).unwrap().messages).unwrap(),
             replacement_revision
         );
+    }
+
+    #[test]
+    fn display_fallback_publishes_in_transaction_and_refuses_retired_writers() {
+        let _env = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        let _restore = EnvVarGuard::capture(&["PINVOU3_HOME"]);
+        let tmp = tempfile::tempdir().unwrap();
+        // SAFETY: ENV_LOCK held.
+        unsafe { std::env::set_var("PINVOU3_HOME", tmp.path()) };
+        let store = SessionStore::boot_with_scheduled_root(tmp.path().join("scheduled")).unwrap();
+        let session = store
+            .create_new("/model".into(), None, tmp.path().into())
+            .unwrap();
+        let id = session.metadata.id;
+        let messages = vec![
+            message("user", "synthetic task"),
+            message("assistant", "synthetic answer"),
+        ];
+        store.update_messages(&id, messages.clone()).unwrap();
+        let baseline = transcript_revision(&messages).unwrap();
+
+        // Retired before admission: nothing persists, nothing notifies.
+        assert!(
+            persist_admitted_display_snapshot(
+                &store,
+                &id,
+                &baseline,
+                message("user", "synthetic next task"),
+                false,
+                &AtomicBool::new(false),
+                |_, _| panic!("retired fallback writer emitted"),
+            )
+            .unwrap()
+            .is_none()
+        );
+        assert_eq!(store.load(&id).unwrap().messages, messages);
+
+        // Admitted: the write and its marker land together.
+        let mut marker = None;
+        let (saved, revision) = persist_admitted_display_snapshot(
+            &store,
+            &id,
+            &baseline,
+            message("user", "synthetic next task"),
+            false,
+            &AtomicBool::new(true),
+            |revision, count| marker = Some((revision.to_owned(), count)),
+        )
+        .unwrap()
+        .unwrap();
+        let mut appended = messages.clone();
+        appended.push(message("user", "synthetic next task"));
+        let appended_revision = transcript_revision(&appended).unwrap();
+        assert_eq!(saved.messages, appended);
+        assert_eq!(revision.as_deref(), Some(appended_revision.as_str()));
+        assert_eq!(marker, Some((appended_revision.clone(), appended.len())));
+        assert_eq!(store.load(&id).unwrap().messages, appended);
+
+        // A stale baseline is a no-op that still publishes the durable
+        // revision, so the caller only ever learns the revision on disk.
+        let mut marker = None;
+        let (_, revision) = persist_admitted_display_snapshot(
+            &store,
+            &id,
+            &baseline,
+            message("user", "synthetic stale task"),
+            false,
+            &AtomicBool::new(true),
+            |revision, count| marker = Some((revision.to_owned(), count)),
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(revision.as_deref(), Some(appended_revision.as_str()));
+        assert_eq!(marker, Some((appended_revision, appended.len())));
+        assert_eq!(store.load(&id).unwrap().messages, appended);
     }
 
     #[test]
@@ -2194,6 +2321,79 @@ mod transcript_commit_tests {
                 |_, _| panic!("failed writer emitted")
             )
             .is_err()
+        );
+    }
+}
+
+#[cfg(test)]
+mod transcript_persist_pins {
+    //! The forwarder is the only place the engine's writer flag reaches the
+    //! save arms, and `transcript_commit_tests` drives the persist helpers
+    //! directly with their own flags — a regression that hands an arm a
+    //! fresh always-true atomic would ship green. Pin the plumbing instead.
+
+    /// The production `spawn_event_forwarder` body with line comments
+    /// stripped, so prose that mentions a needle verbatim cannot satisfy a
+    /// pin.
+    fn forwarder_body() -> String {
+        let src = include_str!("forwarder.rs");
+        let signature = "pub(crate) fn spawn_event_forwarder(";
+        let start = src.find(signature).expect("the forwarder fn must exist");
+        let rest = &src[start + signature.len()..];
+        let end = ["\nfn ", "\npub(crate) fn ", "\npub fn ", "\n#[cfg(test)]"]
+            .iter()
+            .filter_map(|marker| rest.find(marker))
+            .min()
+            .map_or(src.len(), |offset| start + signature.len() + offset);
+        src[start..end]
+            .split('\n')
+            .map(|line| {
+                line.split("//")
+                    .next()
+                    .expect("split always yields one item")
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    #[test]
+    fn every_save_arm_moves_a_clone_of_the_engine_writer_flag() {
+        let body = forwarder_body();
+        assert!(
+            body.contains("transcript_writer_active: Arc<AtomicBool>,"),
+            "the forwarder must take the engine's writer flag"
+        );
+        // Mid-turn engine snapshot, terminal engine snapshot, and the
+        // admission fallback each clone the parameter — never a fresh atomic.
+        assert_eq!(
+            body.matches("let writer_for_save = transcript_writer_active.clone();")
+                .count(),
+            3,
+            "every save arm must clone the engine's writer flag"
+        );
+        assert_eq!(
+            body.matches("&writer_for_save,").count(),
+            3,
+            "every save arm must hand its clone to the persist helper"
+        );
+        assert_eq!(
+            body.matches("persist_chat_snapshot(").count(),
+            2,
+            "both engine snapshot arms must persist through persist_chat_snapshot"
+        );
+        assert_eq!(
+            body.matches("persist_admitted_display_snapshot(").count(),
+            1,
+            "the admission fallback must persist through persist_admitted_display_snapshot"
+        );
+        assert!(
+            !body.contains("AtomicBool::new("),
+            "no save arm may mint its own writer flag"
+        );
+        assert!(
+            !body.contains(".persist_admitted_chat_display(")
+                && !body.contains(".persist_chat_engine_state"),
+            "the forwarder must not bypass the commit-callback helpers"
         );
     }
 }

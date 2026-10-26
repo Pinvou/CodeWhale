@@ -24,7 +24,7 @@ const SIZE_SPECS = {
 
 // 降级贴片的配色。沿用 iOS 系统蓝的 tint 而不是灰:没有品牌图标不代表这个条目
 // 是禁用态,灰底会读成「不可用」。
-const FALLBACK_SURFACE = 'bg-[#007AFF]/10 text-[#007AFF] dark:bg-[#0A84FF]/18 dark:text-[#64B5F6]';
+const FALLBACK_SURFACE = 'bg-[#007AFF]/10 text-[#007AFF] dark:bg-[#0A84FF]/[0.18] dark:text-[#64B5F6]';
 
 /**
  * 品牌图标贴片:有图标画图标,没有就画降级图标。

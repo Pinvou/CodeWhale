@@ -40,6 +40,7 @@ export const staticRuntimeScripts = new Set([
   'shared/legacy-polyfills.js',
   'shared/markdown-bridge-fallback.js',
   'shared/model-service-errors.js',
+  'shared/theme-boot.js',
 ]);
 export const staticRuntimeScriptPrefixes = ['platform/tauri/bridge/', 'platform/web/bridge/'];
 
@@ -449,7 +450,11 @@ export const lazyChunkContracts = {
   toolWelcome: ['features/tools/ToolWelcomeCard.jsx', 'ToolWelcomeCard'],
 };
 
-export function assertLazyChunks(bundle, contracts = lazyChunkContracts) {
+export const lazyToolChunkContracts = {
+  scheduledTaskCard: ['features/tools/scheduled-task-card.jsx', 'ScheduledTaskToolCard'],
+};
+
+export function assertLazyChunks(bundle, contracts = { ...lazyChunkContracts, ...lazyToolChunkContracts }) {
   for (const [modulePath, label] of Object.values(contracts)) {
     const chunks = Object.values(bundle).filter(output => output.type === 'chunk'
       && Object.keys(output.modules).some(moduleId => moduleId.replaceAll('\\', '/')
@@ -521,6 +526,13 @@ export const MAIN_ENTRY_BUDGET_BYTES = 496_000;
 // #484 backflow note: the upstream branch raised its own ceiling to 505_000 for
 // the picker/grouping entry weight; on this tree the raise must be re-measured
 // (desktop + web, per policy) before landing, so the current budget stands.
+// #773 backflow note: the upstream branch raised its ceiling 506_000 → 507_000
+// for the subagent status-flicker merge rules. On this tree the swarm overlay
+// rides the lazy chat-view chunk (see the codeSplitting group below), so the
+// measured main entry is unchanged: web 158,857 B and desktop 156,692 B both
+// before and after the port (same-base builds on this macOS toolchain; the
+// chat-view chunk itself grew ~340 B web, far inside the informational
+// 500 kB chunk warning). No raise needed; the current budget stands.
 
 export function assertMainEntryBudget(bundle, budgetBytes = MAIN_ENTRY_BUDGET_BYTES) {
   const mainEntry = Object.values(bundle).find(output => (

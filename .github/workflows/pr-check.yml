@@ -13,6 +13,7 @@ name: PR Check
 # - release-contract-test:发布链路改动只跑配置/脚本契约,不在 PR 构建安装包。
 # - knowledge-rust:独立 pinvou-knowledge crate/部署入口改动跑 fmt/clippy/test 与 shell
 #   语法检查；依赖或策略改动时追加 cargo-deny，不依赖 Tauri workspace 间接覆盖。
+#   main push 无条件运行刷新 knowledge-rust-v2 存档(同 cli-test);draft 跳过。
 # - rust-test: Draft and explicitly low-risk Rust changes skip the large test
 #   binary. Ready high-risk PRs and their combined Merge Queue tree run Linux
 #   regressions; Windows runs once on the ready PR, and trusted same-repository
@@ -25,7 +26,8 @@ name: PR Check
 #   rust-lint: clippy-driver artifacts are not reusable by the test
 #   compilers). Warn-visible until the pinvou-cli [lints] table and the
 #   measured debt cleanup land; fails closed on compile errors either way.
-# - rust-lint:Draft 跑 fmt 和有界 controller 安全回归；Ready/Queue/main 跑 clippy；cargo-deny 仅在依赖
+# - rust-lint:Draft 跑 fmt 和有界 controller 安全回归；Ready/Queue 跑 clippy；
+#   main push 无条件跑(刷新 rust-lint-v2 存档)；cargo-deny 仅在依赖
 #   或策略路径变化时追加，三项均无 continue-on-error。
 #   与 rust-test 并行,各自独立 cache。clippy 规则见 Cargo.toml [lints] 表:
 #   只启用实测零欠账的 lint(deny),有欠账的 lint/group 显式 allow,
@@ -159,6 +161,7 @@ jobs:
           scripts/tests/pr-check-routing.test.mjs
           scripts/tests/windows-relay-dacl-routing.test.mjs
           scripts/tests/windows-relay-dacl-runner.test.mjs
+          scripts/tests/run-webui-smoke.test.mjs
 
       - name: 校验 VERSION 与各版本文件一致
         run: node scripts/sync-version.mjs --check
@@ -274,6 +277,17 @@ jobs:
               - '.gitmodules'
               - 'CodeWhale'
               - 'pinvou3-app/src-tauri/rust-toolchain.toml'
+              # Round-1518 review: this guard script is executed by the
+              # rust-test leg, so a change confined to it must run that leg —
+              # without this entry the guard is never exercised on the
+              # PR/MQ paths (same class as scripts/ci-libpipewire-build.sh
+              # below; the push leg is compile-only and never runs the guard
+              # regardless of path filters).
+              - 'scripts/test-registry-guard.py'
+              # The guard's behavior regression suite (module-aware ignore
+              # attribution positive control); a change confined to it must
+              # run the leg that executes the guard it pins.
+              - 'scripts/tests/test_registry_guard.py'
               - 'pinvou3-app/src-tauri/**/*.rs'
               # diagnostics.rs 在生产校验中 include_str! v1 schema，
               # behavior_telemetry_tests.rs 同时嵌入 schema 与 registries。
@@ -612,6 +626,9 @@ jobs:
               - 'pinvou3-app/knip.json'
               - 'pinvou3-app/jsconfig.json'
               - 'pinvou3-app/scripts/audit-compat.mjs'
+              # test:webui 的包装脚本只被 frontend-test 的 diff-selection 消费;
+              # 不列入则 wrapper-only PR 静默跳过该门禁(test_ci_gate_policy 锁定)。
+              - 'pinvou3-app/scripts/run-webui-smoke.mjs'
               - 'pinvou3-app/src-tauri/tauri.conf.json'
               - '.gitmodules'
               - '.github/workflows/pr-check.yml'
@@ -814,6 +831,16 @@ jobs:
         # 以为自己读错了。这道门禁就是那个「会报错的东西」。
         run: python3 scripts/check-doc-anchors.py
 
+      - name: 锁文件 registry 卫生门禁
+        # resolved 禁止已知 npm 镜像(黑名单制,非官方 registry 白名单):
+        # 镜像慢且是跨境单点,CI 的 npm ci 逐字消费 lock 的 resolved URL
+        # (#1518 清理前在用锁残留 npmmirror 镜像,本 PR diff 清掉最后 14 处;round-22 rebase 后 codex-bridge 锁残留已由主线自行清理)。
+        # 同时钉住 team-relay-hub 锁的 16 条 @img/* libc 字段:npm 10 的
+        # arborist 不序列化 libc,node22 本地一次 npm install 会静默剥掉。
+        # 注:本 step 在 submodule 检出之前执行,只覆盖本仓自有锁(5 把);
+        # CodeWhale 子模块的锁由公开底座自身治理,本地全树运行时可全量扫描。
+        run: python3 scripts/check-lock-registry.py
+
       - name: 公开底座 gitlink 可达性
         # Fail closed: the gitlink must equal the public maintenance head,
         # including candidate windows. The transition policy only lets that
@@ -926,7 +953,9 @@ jobs:
       # Web (relay) build: the startup-bundle layer and the web index contract
       # test (tests/vite_static_assets_contract.test.mjs) only cover the web
       # dist when it exists, so build it unconditionally here instead of
-      # relying on the diff-selected test:webui smoke.
+      # relying on the diff-selected test:webui smoke. That smoke reuses this
+      # dist via PINVOU_WEBUI_SKIP_BUILD=1 (smoke steps below) instead of
+      # running a second identical vite build.
       - name: Vite web build (remote relay)
         run: npm run build:web
 
@@ -956,6 +985,9 @@ jobs:
         env:
           BASE_SHA: ${{ github.event.pull_request.base.sha }}
           HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          # dist was already built unconditionally above; skip the identical
+          # in-smoke rebuild (see scripts/run-webui-smoke.mjs).
+          PINVOU_WEBUI_SKIP_BUILD: "1"
         run: |
           git diff --name-only "$BASE_SHA" "$HEAD_SHA" \
             | node ../scripts/select-frontend-smokes.mjs \
@@ -966,6 +998,8 @@ jobs:
         env:
           BASE_SHA: ${{ github.event.merge_group.base_sha }}
           HEAD_SHA: ${{ github.event.merge_group.head_sha }}
+          # Same dist reuse as the PR smoke step above.
+          PINVOU_WEBUI_SKIP_BUILD: "1"
         run: |
           git diff --name-only "$BASE_SHA" "$HEAD_SHA" \
             | node ../scripts/select-frontend-smokes.mjs \
@@ -1211,8 +1245,32 @@ jobs:
   knowledge-rust:
     name: knowledge-rust
     needs: changes
-    if: ${{ !cancelled() && github.event.action != 'closed' && needs.changes.outputs.pure_release_backflow != 'true' && (needs.changes.outputs.knowledge_rust == 'true' || needs.changes.outputs.knowledge_dependencies == 'true') }}
+    # Main push runs unconditionally so the knowledge-rust-v2 namespace keeps
+    # refreshing on non-knowledge merges (PRs never save; a namespace whose
+    # writer skips on main ages out and the next knowledge PR pays a full cold
+    # run). The push arm reads no changes outputs, so it also covers a push
+    # where the changes job itself fails (same cumulative-verification trade
+    # as rust-test/cli-lint). PR/Queue routing stays paths-driven; the job
+    # keeps Official's existing paths shape for pull_request (drafts included,
+    # same as before this change).
+    if: >-
+      ${{
+        !cancelled() &&
+        github.event.action != 'closed' &&
+        needs.changes.outputs.pure_release_backflow != 'true' &&
+        (
+          github.event_name == 'push' ||
+          needs.changes.outputs.knowledge_rust == 'true' ||
+          needs.changes.outputs.knowledge_dependencies == 'true'
+        )
+      }}
     runs-on: ubuntu-22.04
+    # 冷跑时长未实测(~/.cargo 存档命中的运行 3–6min;cache-targets: false,
+    # 编译每轮全冷)。工具链滚动触发冷跑且逼近 30m 时 job 被超时判败,
+    # cache-on-failure 的 post 步会保存 ~/.cargo(registry/git 等,不含
+    # target 编译产物),失败与手动取消都会触发(post-if =
+    # success() || cache-on-failure;取消时 runner 仍执行 post 步),
+    # namespace 不会全冷。冷跑实测逼近上限时再上调。
     timeout-minutes: 30
     steps:
       - name: Checkout
@@ -1248,6 +1306,10 @@ jobs:
           # job is never on the critical path (it runs parallel to the heavy
           # legs), so only ~/.cargo is cached and the compile stays cold.
           cache-targets: false
+          # cache-on-failure: still save when a main push fails — otherwise
+          # one failure drops the namespace fully cold (same anti-death-loop
+          # rationale as rust-test/cli-lint).
+          cache-on-failure: true
           save-if: ${{ github.ref == 'refs/heads/main' }}
 
       - name: cargo fmt --check
@@ -1289,6 +1351,10 @@ jobs:
       - name: Cargo.lock drift guard
         run: git diff --exit-code -- '**/Cargo.lock'
 
+      # 版本已固定(round-11 review):install-action 默认装最新,而 deny.toml 的
+      # advisories.ignore 例外路由(id 级条目、unused-ignored-advisory 语义,
+      # round-12 起为 RUSTSEC id ignore)随版本可能漂移;cargo-shear 同理按
+      # 1.13.4 钉住。
       - name: cargo-deny
         if: ${{ needs.changes.outputs.knowledge_dependencies == 'true' }}
         uses: taiki-e/install-action@v2
@@ -1323,14 +1389,37 @@ jobs:
     # 纳入 rust_dependencies:只改 deny.toml 时 rust_code=false 但 rust_dependencies=true,
     # cargo-deny 子步骤(已按 rust_dependencies 门控)需本 job 启动才能运行;
     # 否则 deny.toml 策略改动会静默漏检 cargo-deny。
-    if: ${{ !cancelled() && github.event.action != 'closed' && needs.changes.outputs.pure_release_backflow != 'true' && (needs.changes.outputs.rust_code == 'true' || needs.changes.outputs.rust_dependencies == 'true') }}
+    # Main push runs unconditionally (same "cumulative verification
+    # independent of a single push's paths-filter" rule as cli-lint): the
+    # rust-lint-v2 namespace must keep refreshing on non-rust merges, which a
+    # paths-gated writer cannot do. The push arm reads no changes outputs, so
+    # it also covers a push where the changes job itself fails. PR routing
+    # stays paths-driven, and drafts keep the fmt + bounded-regression fast
+    # pass via RUN_HEAVY_RUST_CHECKS below.
+    if: >-
+      ${{
+        !cancelled() &&
+        github.event.action != 'closed' &&
+        needs.changes.outputs.pure_release_backflow != 'true' &&
+        (
+          github.event_name == 'push' ||
+          needs.changes.outputs.rust_code == 'true' ||
+          needs.changes.outputs.rust_dependencies == 'true'
+        )
+      }}
     runs-on: ubuntu-22.04
-    # 30m 上限在缓存冷启动下不够:Cargo cache 是 save-if main-only(PR 永不保存),
-    # 且本 job 在 main 上遇到非 rust 合并(如纯前端依赖 bump)时被整体跳过、不产存档,
-    # 加上 actions 缓存池被高频小体积 npm 缓存挤占淘汰,PR 端经常 "No cache found"
-    # 冷跑(2026-10-02 回流批次 5/6 在 ~30m 整点被 cancel,证据 job 110876653922)。
+    # 30m 上限在缓存冷启动下不够:Cargo cache 是 save-if main-only(PR 永不保存)。
+    # 2026-10 起本 job 在 main push 上无条件运行以刷新存档(此前非 rust 合并会
+    # 整体跳过、存档老化),但工具链滚动或缓存池淘汰仍可能让 PR 端
+    # "No cache found" 冷跑(2026-10-02 回流批次 5/6 在 ~30m 整点被 cancel,
+    # 证据 job 110876653922)。main push 成功运行实测(2026-10-17..22,近 30 次
+    # push 中 15 次成功):10m19s–34m53s,其中 12/15 落在 10–17m,
+    # 29m03s/34m53s 两个离群也未触上限,不受影响。
     # 冷跑全流程(fmt+两遍 clippy+doc+check+shear)实测需 35-50m,60m 留出余量;
     # 缓存命中时(如 community-603 19m35s / community-602 25m36s)不受影响。
+    # 本 PR(#1518)新增的 zram(最坏 240s+15s kill)与磁盘清理(约 1-3m,
+    # draft 门控不跑)step 计入预算:最坏叠加约 57m,余量约 3m;再往本 job
+    # 加重活需同步上调。
     timeout-minutes: 60
     env:
       # Draft 跑无系统依赖的 fmt 和有界 controller 回归；Ready PR、Queue 与 main 跑 clippy。
@@ -1344,6 +1433,24 @@ jobs:
         uses: actions/checkout@v7
         with:
           submodules: false
+
+      # benchmark-hooks all-targets 编译会显著放大 target 目录;与 rust-test /
+      # 同款磁盘清理(同样先清盘再扩 swap:swap 落盘会先吃掉 8-16GiB 磁盘),
+      # 避免 clippy/check 阶段 No space left on device。余量门与 rust-test 腿
+      # 对齐为 24 GiB(round-23:本腿 all-targets clippy ×2 + doc 的 target
+      # 体量接近 rust-test,而 swap 先占 8-16GiB,12 GiB 默认门在 zram 退化
+      # 跑上可能在缓存恢复时 ENOSPC)。Draft 只跑 fmt 快检,不产生编译放大,
+      # 跳过本 step 省下每次 draft push 约 1-3 分钟。
+      - name: Prepare Rust disk capacity
+        if: ${{ env.RUN_HEAVY_RUST_CHECKS == 'true' }}
+        run: |
+          sudo env GITHUB_WORKSPACE="$GITHUB_WORKSPACE" \
+            RUNNER_ENVIRONMENT="$RUNNER_ENVIRONMENT" \
+            python3 scripts/ci-rust-disk.py --min-free-gib 24
+
+      - name: Set up zram and swap
+        # 内存扩容为尽力而为:超时/失败只告警不阻断(回退 runner 默认内存)。
+        run: timeout --kill-after=15 240 sudo --preserve-env=GITHUB_ACTIONS,PINVOU3_CI_DISABLE_ZRAM bash "${{ github.workspace }}/scripts/ci-memory-setup.sh" || echo "::warning::ci-memory-setup 未完成,继续使用 runner 默认内存"
 
       - name: 初始化公共底座 submodule
         run: git submodule update --init --recursive -- CodeWhale
@@ -1365,6 +1472,10 @@ jobs:
             pinvou-knowledge
           # v2:镜像统一到 ubuntu-22.04 后与 24.04 时代缓存隔离(同 knowledge-rust)。
           shared-key: rust-lint-v2
+          # cache-on-failure: still save when a main push fails — otherwise
+          # one failure drops the namespace fully cold (same anti-death-loop
+          # rationale as rust-test/cli-lint).
+          cache-on-failure: true
           save-if: ${{ github.ref == 'refs/heads/main' }}
 
       # fmt 硬门禁:风格规则见 rustfmt.toml(只用 stable 可用选项)。
@@ -1454,7 +1565,7 @@ jobs:
         if: ${{ env.RUN_HEAVY_RUST_CHECKS == 'true' && needs.changes.outputs.rust_code == 'true' }}
         uses: taiki-e/install-action@v2
         with:
-          tool: cargo-shear@1.13.4
+          tool: cargo-shear@1.14.0
       - name: cargo shear (hard gate, both workspaces)
         if: ${{ env.RUN_HEAVY_RUST_CHECKS == 'true' && needs.changes.outputs.rust_code == 'true' }}
         run: |
@@ -1482,6 +1593,7 @@ jobs:
         run: git diff --exit-code -- '**/Cargo.lock'
 
       # cargo-deny only cares about dependency/policy paths (Cargo/lock/deny/gitlink).
+      # 版本固定 0.20.2,理由见 knowledge-rust 同名安装步(round-11 review)。
       - name: cargo-deny (advisories/licenses/bans/sources)
         if: ${{ env.RUN_HEAVY_RUST_CHECKS == 'true' && needs.changes.outputs.rust_dependencies == 'true' }}
         uses: taiki-e/install-action@v2
@@ -1797,7 +1909,21 @@ jobs:
       # 只有下方超出单进程内存预算的 behavior-telemetry 测试使用独立目标。
       - name: cargo test --lib --no-run（编译链接测试二进制）
         if: ${{ github.event_name != 'push' }}
-        run: /usr/bin/time -v cargo test --manifest-path pinvou3-app/src-tauri/Cargo.toml --no-default-features --lib --no-run
+        run: /usr/bin/time -v cargo test --manifest-path pinvou3-app/src-tauri/Cargo.toml --no-default-features --lib --locked --no-run
+
+      # Test registry guard: a duplicated #[test] registers one case twice and
+      # swallows the adjacent case's attributes (happened twice on upstream PR
+      # #455, rounds 26/28), and raw run totals cannot catch the pair because
+      # the inflation and the deflation cancel. Reuses the previous step's
+      # build artifacts (same manifest/feature set), so it skips the
+      # ~7-minute compile — but loading and listing the huge lib test binary
+      # still dominates the step at ~4 minutes on the hosted runner
+      # (observed 2026-10-14, job 115954987270); still far cheaper than any
+      # rebuild. Asserts no duplicated registration paths + every
+      # consent-critical pin present (full libtest paths).
+      - name: test-registry guard (duplicates + required pins)
+        if: ${{ github.event_name != 'push' }}
+        run: python3 scripts/test-registry-guard.py
 
       - name: cargo test --lib（含 strict_mode 回归；真 bge-m3/vLLM 测试已 #[ignore]）
         if: ${{ github.event_name != 'push' }}
@@ -1805,7 +1931,7 @@ jobs:
           chrome="$(command -v google-chrome || command -v chromium || command -v chromium-browser)"
           export CHROME="$chrome"
           export PINVOU_REQUIRE_REMOTE_E2E=1
-          cargo test --manifest-path pinvou3-app/src-tauri/Cargo.toml --no-default-features --lib -- --test-threads=1
+          cargo test --manifest-path pinvou3-app/src-tauri/Cargo.toml --no-default-features --lib --locked -- --test-threads=1
 
       # The behavior-telemetry state-machine tests intentionally use a separate
       # harness. Linking their 2,300+ source lines into the already-large lib
@@ -1833,6 +1959,7 @@ jobs:
             --no-default-features \
             --test behavior_telemetry \
             --features behavior-telemetry-test \
+            --locked \
             -- --test-threads=1
 
       - name: Native and Relay diagnostic redaction parity
@@ -1851,7 +1978,7 @@ jobs:
       # 故恢复只编译设计;不要在 push 上重新打开测试执行。
       - name: cargo test --lib --no-run (push main 仅编译暖 cache)
         if: ${{ github.event_name == 'push' }}
-        run: /usr/bin/time -v cargo test --manifest-path pinvou3-app/src-tauri/Cargo.toml --no-default-features --lib --no-run
+        run: /usr/bin/time -v cargo test --manifest-path pinvou3-app/src-tauri/Cargo.toml --no-default-features --lib --locked --no-run
 
   # pinvou-cli contract tests: since PR #478 the product CLI surface (~20k
   # lines + ~340 contract tests) has no other automated execution leg (the
@@ -2001,6 +2128,10 @@ jobs:
           # cheaper side of the trade.
           cache-targets: false
           shared-key: cli-test
+          # cache-on-failure: still save when a main push fails — otherwise
+          # one failure drops the namespace fully cold (same anti-death-loop
+          # rationale as rust-test/cli-lint).
+          cache-on-failure: true
           save-if: ${{ github.ref == 'refs/heads/main' }}
 
       # --all is required: pinvou-cli is a virtual workspace (no [package]),
@@ -3040,6 +3171,31 @@ jobs:
         working-directory: pinvou3-app/src-tauri
         run: rustup default "$(rustup show active-toolchain | awk '{print $1}')"
 
+      # Same dev-profile memory guard as rust-test/windows-rust-test: with
+      # [profile.dev.package."*"] opt-level = 2, codewhale-tui's LLVM IR makes
+      # the dev thin-LTO compile of the final crate the heaviest single rustc
+      # invocation of this job's test-link legs (cargo check does no
+      # codegen), and this runner has under half the RAM of the 16 GB
+      # machine where that recipe already OOM'd (14.2 GB Max RSS peaks,
+      # see rust-test's Cargo cache comment; this runner is 7 GB with no
+      # swap-expansion step). Warm-cache runs were validated without it on
+      # #646 — this guards the cold runs (toolchain rollover, cache
+      # eviction). Package-level profile overrides can only live in a cargo
+      # config (no env equivalent); writing CARGO_HOME/config.toml keeps the
+      # repo Cargo.toml untouched, so local dev and release artifacts are
+      # unaffected. Profile-scoped: the push-only release-fast/bundle legs
+      # build release profiles and ignore [profile.dev.*].
+      - name: dev-profile memory guard (codewhale-tui O0, this job only)
+        run: |
+          config="${CARGO_HOME:-$HOME/.cargo}/config.toml"
+          cat >> "$config" <<'EOF'
+
+          [profile.dev.package.codewhale-tui]
+          opt-level = 0
+          EOF
+          echo "appended codewhale-tui dev O0 override to $config"
+          tail -n 4 "$config"
+
       # [lld linker] Probe which stable rustc flag selects the bundled
       # ld64.lld for this apple-darwin toolchain, then emit the winning
       # flags as a step output. Tier order mirrors #642's Windows probe:
@@ -3412,6 +3568,9 @@ jobs:
       # One npm invocation per step: a multi-command pwsh run block only
       # reports the last command's exit code, so a harness that dies before
       # its assertions would be masked by the next command's success.
+      - name: Windows runtime manifest 契约
+        run: npm --prefix pinvou3-app run test:windows-runtime-manifest
+
       - name: Windows runtime packaging contract
         run: npm --prefix pinvou3-app run test:windows-runtime
 
@@ -3682,7 +3841,7 @@ jobs:
       # 旧代由 scripts/cache-janitor.sh 规则 E 去重。
       - name: Restore loong64 cross toolchain cache
         id: loong64-toolchain-cache
-        uses: actions/cache/restore@v4
+        uses: actions/cache/restore@v6
         with:
           path: ${{ github.workspace }}/.pinvou-loong64-cache/cross-tools
           key: release-linux-loong64-jammy-toolchain-${{ hashFiles('scripts/ci-loongarch64-toolchain.sh') }}
@@ -3691,7 +3850,7 @@ jobs:
 
       - name: Restore loong64 sysroot cache
         id: loong64-sysroot-cache
-        uses: actions/cache/restore@v4
+        uses: actions/cache/restore@v6
         with:
           path: ${{ github.workspace }}/.pinvou-loong64-cache/sysroot
           key: release-linux-loong64-jammy-sysroot-${{ hashFiles('scripts/ci-loongarch64-sysroot.sh') }}
@@ -3743,14 +3902,14 @@ jobs:
       # key,后续 restore 会永远命中这份空代;cache-hit 时无需重写同一键)。
       - name: Save loong64 cross toolchain cache
         if: ${{ success() && github.ref == 'refs/heads/main' && steps.loong64-toolchain-cache.outputs.cache-hit != 'true' }}
-        uses: actions/cache/save@v4
+        uses: actions/cache/save@v6
         with:
           path: ${{ github.workspace }}/.pinvou-loong64-cache/cross-tools
           key: release-linux-loong64-jammy-toolchain-${{ hashFiles('scripts/ci-loongarch64-toolchain.sh') }}
 
       - name: Save loong64 sysroot cache
         if: ${{ success() && github.ref == 'refs/heads/main' && steps.loong64-sysroot-cache.outputs.cache-hit != 'true' }}
-        uses: actions/cache/save@v4
+        uses: actions/cache/save@v6
         with:
           path: ${{ github.workspace }}/.pinvou-loong64-cache/sysroot
           key: release-linux-loong64-jammy-sysroot-${{ hashFiles('scripts/ci-loongarch64-sysroot.sh') }}

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import contextlib
 import importlib.util
 import os
 import re
@@ -73,6 +74,18 @@ class ValidateCommitTextTests(unittest.TestCase):
         self.assertEqual(len(errors), 1)
         self.assertIn("description is too vague: 修改代码", errors[0])
 
+    def test_empty_description_after_pr_suffix_fails_cleanly(self) -> None:
+        # `fix:  (#1)`: the GitHub suffix stripper leaves an empty description;
+        # the guard must report a validation error, not crash with IndexError
+        # (the pre-#1518 behavior that broke the commit-message CI leg).
+        errors = validate_commit_msg.validate_text(
+            "fix:  (#1)",
+            "squash commit",
+        )
+
+        self.assertNotEqual(errors, [])
+        self.assertIn("description must use Chinese", errors[0])
+
     def test_subject_only_file_accepts_pr_title_without_signoff(self) -> None:
         with patch.object(Path, "read_text", return_value="ci(pr): 修复标题校验"):
             errors = validate_commit_msg.validate_file(
@@ -84,6 +97,18 @@ class ValidateCommitTextTests(unittest.TestCase):
 
 
 class ValidateCommitRangeTests(unittest.TestCase):
+    def setUp(self) -> None:
+        # Round-13: these tests mock `git` and run against FAKE object ids —
+        # inside a real shallow clone `_in_shallow_clone()` probed true and
+        # the raw-parents fallback shelled out `cat-file` on the fakes,
+        # exploding the whole suite (106 errors). Hermetic by default;
+        # the two shallow-boundary tests below re-patch to True explicitly.
+        patcher = patch.object(
+            validate_commit_msg, "_in_shallow_clone", return_value=False
+        )
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
     @staticmethod
     def commit_record(
         commit: str,
@@ -97,7 +122,12 @@ class ValidateCommitRangeTests(unittest.TestCase):
         ) + "\x1e"
 
     def test_range_grandfathers_legacy_history_and_skips_merge_subject(self) -> None:
-        with patch.object(validate_commit_msg, "git") as git_mock:
+        with (
+            patch.object(
+                validate_commit_msg, "git_commit_exists", side_effect=[True, True]
+            ),
+            patch.object(validate_commit_msg, "git") as git_mock,
+        ):
             git_mock.return_value = self.commit_record(
                 "0123456789abcdef",
                 "parent-one parent-two",
@@ -116,8 +146,94 @@ class ValidateCommitRangeTests(unittest.TestCase):
             validate_commit_msg.LEGACY_HISTORY_CUTOFF,
         )
 
+    def test_range_skips_cutoff_exclusion_when_cutoff_missing(self) -> None:
+        with (
+            patch.object(
+                validate_commit_msg, "git_commit_exists", side_effect=[True, False]
+            ),
+            patch.object(validate_commit_msg, "git") as git_mock,
+        ):
+            git_mock.return_value = self.commit_record(
+                "0123456789abcdef",
+                "parent",
+                "Test User",
+                "test@example.com",
+                "fix: 修复提交门禁范围\n\nSigned-off-by: Test User <test@example.com>",
+            )
+
+            self.assertEqual(validate_commit_msg.validate_range("base", "head"), [])
+
+        git_mock.assert_called_once_with(
+            "log",
+            "--format=%H%x00%P%x00%an%x00%ae%x00%B%x1e",
+            "base..head",
+        )
+
+    def test_missing_base_validates_head_alone_in_shallow_clone(self) -> None:
+        with (
+            patch.object(
+                validate_commit_msg, "git_commit_exists", side_effect=[False, False]
+            ),
+            patch.object(validate_commit_msg, "git") as git_mock,
+        ):
+            git_mock.return_value = self.commit_record(
+                "0123456789abcdef",
+                "parent",
+                "Test User",
+                "test@example.com",
+                "fix: 修复提交门禁范围\n\nSigned-off-by: Test User <test@example.com>",
+            )
+
+            self.assertEqual(
+                validate_commit_msg.validate_range("missing-base", "head"), []
+            )
+
+        # `head^!` selects head and excludes its parents: a bare `head` would
+        # walk every reachable ancestor and mis-flag old nonconforming
+        # commits the legacy cutoff would have grandfathered (the round-5
+        # review regression for the shallow-clone fallback).
+        git_mock.assert_called_once_with(
+            "log",
+            "--format=%H%x00%P%x00%an%x00%ae%x00%B%x1e",
+            "head^!",
+        )
+
+    def test_missing_base_with_present_cutoff_still_excludes_cutoff(self) -> None:
+        # Shallow-clone combo (F, T): base absent but the legacy cutoff object
+        # present — validate `head` alone while still excluding the cutoff.
+        with (
+            patch.object(
+                validate_commit_msg, "git_commit_exists", side_effect=[False, True]
+            ),
+            patch.object(validate_commit_msg, "git") as git_mock,
+        ):
+            git_mock.return_value = self.commit_record(
+                "0123456789abcdef",
+                "parent",
+                "Test User",
+                "test@example.com",
+                "fix: 修复提交门禁范围\n\nSigned-off-by: Test User <test@example.com>",
+            )
+
+            self.assertEqual(
+                validate_commit_msg.validate_range("missing-base", "head"), []
+            )
+
+        git_mock.assert_called_once_with(
+            "log",
+            "--format=%H%x00%P%x00%an%x00%ae%x00%B%x1e",
+            "head^!",
+            "--not",
+            validate_commit_msg.LEGACY_HISTORY_CUTOFF,
+        )
+
     def test_range_still_rejects_new_nonconforming_commit(self) -> None:
-        with patch.object(validate_commit_msg, "git") as git_mock:
+        with (
+            patch.object(
+                validate_commit_msg, "git_commit_exists", side_effect=[True, True]
+            ),
+            patch.object(validate_commit_msg, "git") as git_mock,
+        ):
             git_mock.return_value = self.commit_record(
                 "fedcba9876543210",
                 "parent",
@@ -131,8 +247,119 @@ class ValidateCommitRangeTests(unittest.TestCase):
         self.assertTrue(errors)
         self.assertIn("description must use Chinese", errors[0])
 
+    def test_shallow_boundary_merge_keeps_exemption(self) -> None:
+        # Round-12 review: at a shallow boundary git grafts the boundary
+        # commit's parents away — `git log --format=%P` reports NO parents
+        # even for a merge (verified on a depth-1 clone of a merge head,
+        # while `git cat-file` shows both), so without the raw-object check
+        # a merge head loses its merge exemption and a GitHub auto-merge
+        # commit's subject/DCO gets validated. The raw parent check only
+        # arms in a shallow clone (.git/shallow), so full clones never pay
+        # the extra plumbing calls.
+        with (
+            patch.object(
+                validate_commit_msg, "git_commit_exists", side_effect=[False, False]
+            ),
+            patch.object(
+                validate_commit_msg, "_in_shallow_clone", return_value=True
+            ),
+            patch.object(
+                validate_commit_msg, "_raw_parents", return_value=["p1", "p2"]
+            ) as raw_parents,
+            patch.object(validate_commit_msg, "git") as git_mock,
+        ):
+            git_mock.return_value = self.commit_record(
+                "0123456789abcdef",
+                "",  # grafted away at the shallow boundary
+                "GitHub",
+                "noreply@github.com",
+                "Merge pull request #1 from branch",
+            )
+
+            self.assertEqual(
+                validate_commit_msg.validate_range("missing-base", "head"), []
+            )
+        raw_parents.assert_called_once_with("0123456789abcdef")
+
+    def test_shallow_boundary_non_merge_still_validated(self) -> None:
+        # The raw-object check must not become a blanket exemption: a
+        # shallow-boundary single-parent commit (raw object agrees with %P)
+        # is still validated, and the raw check runs exactly once.
+        with (
+            patch.object(
+                validate_commit_msg, "git_commit_exists", side_effect=[False, False]
+            ),
+            patch.object(
+                validate_commit_msg, "_in_shallow_clone", return_value=True
+            ),
+            patch.object(
+                validate_commit_msg, "_raw_parents", return_value=["p1"]
+            ),
+            patch.object(validate_commit_msg, "git") as git_mock,
+        ):
+            git_mock.return_value = self.commit_record(
+                "fedcba9876543210",
+                "parent",
+                "Test User",
+                "test@example.com",
+                "fix: 修复提交门禁范围",
+            )
+
+            errors = validate_commit_msg.validate_range("missing-base", "head")
+
+        self.assertEqual(len(errors), 1)
+        self.assertIn("missing Signed-off-by", errors[0])
+
+    def test_raw_parents_reads_only_the_commit_header(self) -> None:
+        # Round-13 review (P2): `_raw_parents` scanned EVERY line of the raw
+        # object, so a non-merge commit whose BODY carried a forged
+        # `parent <40-hex>` line counted as a merge and was exempted from
+        # the subject and DCO checks entirely (reproduced end-to-end on a
+        # depth-1 clone during review). Only the header — everything before
+        # the first blank line — may contribute parents; a real merge must
+        # keep reporting both.
+        with tempfile.TemporaryDirectory() as td, contextlib.chdir(td):
+            def git(*args: str) -> str:
+                out = subprocess.run(
+                    ("git", *args), cwd=td, check=True, capture_output=True,
+                    text=True,
+                )
+                return out.stdout.strip()
+
+            git("init", "-q", "-b", "main")
+            git("config", "user.name", "Test User")
+            git("config", "user.email", "test@example.com")
+            git("config", "commit.gpgsign", "false")
+            Path(td, "f.txt").write_text("one\n", encoding="utf-8")
+            git("add", ".")
+            git(
+                "commit", "-q", "-m",
+                "fix: 合法主题\n\nSigned-off-by: Test User <test@example.com>",
+            )
+            git("checkout", "-q", "-b", "side")
+            git("commit", "-q", "--allow-empty", "-m", "fix: side")
+            git("checkout", "-q", "main")
+            git(
+                "commit", "-q", "--allow-empty", "-m",
+                "not-a-type: 伪造豁免\n\nparent "
+                "1234567890123456789012345678901234567890",
+            )
+            forged = git("rev-parse", "HEAD")
+            git("merge", "-q", "--no-ff", "-m", "Merge branch 'side'", "side")
+            merge = git("rev-parse", "HEAD")
+
+            # Exactly the ONE real parent — the forged body line must not
+            # turn the commit into an exempt "merge" (two parents).
+            self.assertEqual(len(validate_commit_msg._raw_parents(forged)), 1)
+            self.assertEqual(len(validate_commit_msg._raw_parents(merge)), 2)
+
     def test_range_rejects_missing_signoff(self) -> None:
-        with patch.object(validate_commit_msg, "git") as git_mock:
+        with (
+            patch.object(
+                validate_commit_msg, "git_commit_exists", side_effect=[True, True]
+            ),
+            patch.object(validate_commit_msg, "git") as git_mock,
+        ):
             git_mock.return_value = self.commit_record(
                 "fedcba9876543210",
                 "parent",
@@ -147,7 +374,12 @@ class ValidateCommitRangeTests(unittest.TestCase):
         self.assertIn("missing Signed-off-by", errors[0])
 
     def test_range_rejects_signoff_from_another_identity(self) -> None:
-        with patch.object(validate_commit_msg, "git") as git_mock:
+        with (
+            patch.object(
+                validate_commit_msg, "git_commit_exists", side_effect=[True, True]
+            ),
+            patch.object(validate_commit_msg, "git") as git_mock,
+        ):
             git_mock.return_value = self.commit_record(
                 "fedcba9876543210",
                 "parent",
@@ -163,7 +395,12 @@ class ValidateCommitRangeTests(unittest.TestCase):
         self.assertIn("must match commit author", errors[0])
 
     def test_range_accepts_rewritten_squash_author_when_enabled(self) -> None:
-        with patch.object(validate_commit_msg, "git") as git_mock:
+        with (
+            patch.object(
+                validate_commit_msg, "git_commit_exists", side_effect=[True, True]
+            ),
+            patch.object(validate_commit_msg, "git") as git_mock,
+        ):
             git_mock.return_value = self.commit_record(
                 "fedcba9876543210",
                 "parent",
@@ -182,7 +419,12 @@ class ValidateCommitRangeTests(unittest.TestCase):
         self.assertEqual(errors, [])
 
     def test_range_still_requires_signoff_when_author_matching_is_disabled(self) -> None:
-        with patch.object(validate_commit_msg, "git") as git_mock:
+        with (
+            patch.object(
+                validate_commit_msg, "git_commit_exists", side_effect=[True, True]
+            ),
+            patch.object(validate_commit_msg, "git") as git_mock,
+        ):
             git_mock.return_value = self.commit_record(
                 "fedcba9876543210",
                 "parent",
@@ -201,7 +443,12 @@ class ValidateCommitRangeTests(unittest.TestCase):
         self.assertIn("missing Signed-off-by", errors[0])
 
     def test_range_exempts_trusted_dependabot_identity(self) -> None:
-        with patch.object(validate_commit_msg, "git") as git_mock:
+        with (
+            patch.object(
+                validate_commit_msg, "git_commit_exists", side_effect=[True, True]
+            ),
+            patch.object(validate_commit_msg, "git") as git_mock,
+        ):
             git_mock.return_value = self.commit_record(
                 "fedcba9876543210",
                 "parent",
@@ -213,7 +460,86 @@ class ValidateCommitRangeTests(unittest.TestCase):
             self.assertEqual(validate_commit_msg.validate_range("base", "head"), [])
 
 
+class ShallowCloneEndToEndTests(unittest.TestCase):
+    """Real depth-1 clones with the shallow probe UNmocked (the range
+    suite above forces `_in_shallow_clone` False in setUp for hermeticity,
+    so it can never exercise the armed path)."""
+
+    def test_depth_one_clone_end_to_end_exempts_merge_and_validates_plain_head(self) -> None:
+        # Round-23: closes the disclosed test-debt — the two shallow-path unit
+        # tests patch BOTH `_in_shallow_clone` and `_raw_parents`, so the real
+        # `.git/shallow` probe and the raw-object parent read never ran under
+        # test (a `return False` mutation of the probe killed nothing). Build
+        # a real repo, depth-1 clone it, and drive validate_range through the
+        # armed path: a merge head at the graft boundary is exempt, a plain
+        # head with a forged body `parent` line is still validated.
+        def git(cwd: Path, *args: str) -> str:
+            out = subprocess.run(
+                ("git", *args), cwd=cwd, check=True, capture_output=True, text=True,
+            )
+            return out.stdout.strip()
+
+        def seed(repo: Path) -> None:
+            repo.mkdir()
+            git(repo, "init", "-q", "-b", "main")
+            git(repo, "config", "user.name", "Test User")
+            git(repo, "config", "user.email", "test@example.com")
+            git(repo, "config", "commit.gpgsign", "false")
+            Path(repo, "f.txt").write_text("one\n", encoding="utf-8")
+            git(repo, "add", ".")
+            git(
+                repo, "commit", "-q", "-m",
+                "fix: 合法主题\n\nSigned-off-by: Test User <test@example.com>",
+            )
+
+        absent_base = "0" * 40
+        with tempfile.TemporaryDirectory() as td:
+            merge_src = Path(td, "merge-src")
+            seed(merge_src)
+            git(merge_src, "checkout", "-q", "-b", "side")
+            git(merge_src, "commit", "-q", "--allow-empty", "-m", "fix: side")
+            git(merge_src, "checkout", "-q", "main")
+            git(merge_src, "merge", "-q", "--no-ff", "-m", "Merge branch 'side'", "side")
+            merge_clone = Path(td, "merge-clone")
+            git(Path(td), "clone", "-q", "--depth", "1", merge_src.as_uri(), str(merge_clone))
+            with contextlib.chdir(merge_clone):
+                self.assertTrue(validate_commit_msg._in_shallow_clone())
+                head = git(merge_clone, "rev-parse", "HEAD")
+                # %P is grafted empty at the boundary; only the raw object
+                # reveals the two parents that make this head exempt
+                self.assertEqual(len(validate_commit_msg._raw_parents(head)), 2)
+                self.assertEqual(
+                    validate_commit_msg.validate_range(absent_base, head), []
+                )
+
+            plain_src = Path(td, "plain-src")
+            seed(plain_src)
+            git(
+                plain_src, "commit", "-q", "--allow-empty", "-m",
+                "not-a-type: 伪造豁免\n\nparent "
+                "1234567890123456789012345678901234567890",
+            )
+            plain_clone = Path(td, "plain-clone")
+            git(Path(td), "clone", "-q", "--depth", "1", plain_src.as_uri(), str(plain_clone))
+            with contextlib.chdir(plain_clone):
+                self.assertTrue(validate_commit_msg._in_shallow_clone())
+                head = git(plain_clone, "rev-parse", "HEAD")
+                errors = validate_commit_msg.validate_range(absent_base, head)
+                self.assertTrue(errors, "forged-parent plain head must still be validated")
+                self.assertTrue(any("not-a-type" in e or "主题" in e or "subject" in e.lower() for e in errors), errors)
+
+
 class HistoricalSquashSignoffTests(unittest.TestCase):
+    def setUp(self) -> None:
+        # Round-13: same hermetic rule as ValidateCommitRangeTests — these
+        # records use FAKE/foreign object ids, and inside a real shallow
+        # clone the raw-parents fallback cat-file'd them for real.
+        patcher = patch.object(
+            validate_commit_msg, "_in_shallow_clone", return_value=False
+        )
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
     commit_record = staticmethod(ValidateCommitRangeTests.commit_record)
     message = "fix: 修复历史提交签署校验\n\nSigned-off-by: z27014 <zhuo.wenpei@h3c.com>"
 
@@ -310,6 +636,15 @@ class HistoricalSquashSignoffTests(unittest.TestCase):
 
 
 class CommitMessageWorkflowTests(unittest.TestCase):
+    def setUp(self) -> None:
+        # Round-13: hermetic against real shallow clones (see
+        # ValidateCommitRangeTests.setUp).
+        patcher = patch.object(
+            validate_commit_msg, "_in_shallow_clone", return_value=False
+        )
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
     def test_main_push_allows_squash_author_rewrite_only_after_pr_validation(self) -> None:
         workflow = WORKFLOW.read_text(encoding="utf-8")
 

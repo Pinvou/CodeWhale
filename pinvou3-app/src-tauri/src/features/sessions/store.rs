@@ -1493,12 +1493,61 @@ impl SessionStore {
         edit_last: bool,
     ) -> Result<SavedSession> {
         let _mutation = self.scheduled_mutation.lock();
+        self.persist_admitted_chat_display_locked(
+            id,
+            expected_revision,
+            display_message,
+            edit_last,
+            |_| {},
+        )
+    }
+
+    /// Same transaction contract as [`Self::persist_chat_engine_state_with_commit`]
+    /// for the optimistic admission fallback. `committed` receives the durable
+    /// state on every successful return — including the revision-mismatch
+    /// no-op, which leaves the newer transcript untouched — so the caller
+    /// always publishes the exact durable revision. Neither callback may
+    /// re-enter a mutating SessionStore method.
+    pub(crate) fn persist_admitted_chat_display_with_commit(
+        &self,
+        id: &str,
+        expected_revision: &str,
+        display_message: Message,
+        edit_last: bool,
+        admit: impl FnOnce() -> bool,
+        committed: impl FnOnce(&SavedSession),
+    ) -> Result<Option<SavedSession>> {
+        let _mutation = self.scheduled_mutation.lock();
+        if !admit() {
+            return Ok(None);
+        }
+        self.persist_admitted_chat_display_locked(
+            id,
+            expected_revision,
+            display_message,
+            edit_last,
+            committed,
+        )
+        .map(Some)
+    }
+
+    /// Body of the admitted display fallback; the caller holds
+    /// `scheduled_mutation` for the whole call, including `committed`.
+    fn persist_admitted_chat_display_locked(
+        &self,
+        id: &str,
+        expected_revision: &str,
+        display_message: Message,
+        edit_last: bool,
+        committed: impl FnOnce(&SavedSession),
+    ) -> Result<SavedSession> {
         validate_session_id(id)?;
         let mut session = self
             .manager
             .load_session_snapshot(id)
             .with_context(|| format!("load chat session {id} for admitted display fallback"))?;
         if transcript_revision(&session.messages)? != expected_revision {
+            committed(&session);
             return Ok(session);
         }
         if edit_last {
@@ -1529,6 +1578,7 @@ impl SessionStore {
             || format!("persist admitted chat display for {id}"),
             "admitted display save",
         )?;
+        committed(&session);
         Ok(session)
     }
 }
@@ -1545,17 +1595,26 @@ pub(crate) fn is_not_found_error(error: &anyhow::Error) -> bool {
     })
 }
 
-/// The two ownership refusals shared by `create_aux_session` and
+/// The ownership refusals shared by `create_aux_session` and
 /// `get_or_create_aux_session`: an auxiliary conversation must not own another
 /// aux (an aux session is itself a Chat kind, so the command layer's
-/// `ensure_chat_session` cannot catch it), and a scheduled session is deleted
-/// through its automation rather than gaining an aux.
+/// `ensure_chat_session` cannot catch it), a scheduled session is deleted
+/// through its automation rather than gaining an aux, and a headless
+/// `agentic_` run is nobody's interactive parent — an aux side-chat pinned to
+/// one used to fail later at spawn time (the scoped reader refusing the
+/// isolated parent) instead of here at creation.
 fn ensure_parent_can_own_aux(parent_id: &str) -> Result<()> {
     if super::validators::is_aux_session_id(parent_id) {
         bail!("Auxiliary session '{parent_id}' cannot own an aux session");
     }
     if super::validators::is_sched_session_id(parent_id) {
         bail!("Scheduled-run session '{parent_id}' cannot own an aux session");
+    }
+    if parent_id
+        .to_ascii_lowercase()
+        .starts_with(HEADLESS_SESSION_PREFIX)
+    {
+        bail!("Headless session '{parent_id}' cannot own an aux session");
     }
     Ok(())
 }

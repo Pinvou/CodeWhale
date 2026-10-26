@@ -8,6 +8,7 @@ import createViteConfig, {
   assertLazyChunks,
   assertMainEntryBudget,
   lazyChunkContracts,
+  lazyToolChunkContracts,
 } from '../vite.config.mjs';
 
 function chunk({ name, modules = {}, isEntry = false, code = '' }) {
@@ -20,7 +21,8 @@ const chatSource = readFileSync(new URL('../src/features/chat/ChatView.jsx', imp
 test('startup gates remain active in desktop and web production builds', () => {
   // Official's measured budget (see vite.config.mjs history): the #484 backflow
   // keeps the current ceiling; a raise requires fresh desktop + web
-  // measurements on the merged tree per policy.
+  // measurements on the merged tree per policy. The #773 backflow was measured
+  // under this ceiling and needed no raise (see the config comment).
   assert.equal(MAIN_ENTRY_BUDGET_BYTES, 496_000);
   for (const mode of ['production', 'web']) {
     const config = createViteConfig({ command: 'build', mode });
@@ -48,6 +50,20 @@ test('every view loader and the tool welcome card have explicit lazy chunk contr
     chatSource,
     /<ViewErrorBoundary t=\{t\}>\s*<React\.Suspense fallback=\{null\}>\s*<LazyToolWelcomeCard/u,
   );
+});
+
+test('scheduled task cards have a production lazy-chunk gate', () => {
+  assert.deepEqual(lazyToolChunkContracts.scheduledTaskCard,
+    ['features/tools/scheduled-task-card.jsx', 'ScheduledTaskToolCard']);
+  const views = Object.fromEntries(Object.entries(lazyChunkContracts).map(([key, [suffix, name]]) =>
+    [key, chunk({ name, modules: { [`/repo/src/${suffix}`]: {} } })]));
+  assert.doesNotThrow(() => assertLazyChunks(views, lazyChunkContracts));
+  assert.throws(() => assertLazyChunks(views), /ScheduledTaskToolCard lazy module was not emitted/);
+  const complete = { ...views, scheduledTaskCard: chunk({ name: 'ScheduledTaskToolCard',
+    modules: { '/repo/src/features/tools/scheduled-task-card.jsx': {} } }) };
+  assert.doesNotThrow(() => assertLazyChunks(complete));
+  complete.scheduledTaskCard.isEntry = true;
+  assert.throws(() => assertLazyChunks(complete), /non-entry lazy chunk/);
 });
 
 test('rare global overlays stay out of the startup module graph', () => {
