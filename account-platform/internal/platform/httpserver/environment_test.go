@@ -37,7 +37,7 @@ func TestProcessGinModeControlsRouteDiagnostics(t *testing.T) {
 			t.Setenv("GIN_MODE", test.explicitMode)
 			var output bytes.Buffer
 			gin.DefaultWriter = &output
-			if err := configureGinMode(test.environment); err != nil {
+			if err := ConfigureGinMode(test.environment); err != nil {
 				t.Fatal(err)
 			}
 			if gin.Mode() != test.wantMode {
@@ -52,7 +52,7 @@ func TestProcessGinModeControlsRouteDiagnostics(t *testing.T) {
 	}
 	t.Setenv("GIN_MODE", "invalid-mode")
 	priorMode := gin.Mode()
-	if err := configureGinMode("production"); err == nil {
+	if err := ConfigureGinMode("production"); err == nil {
 		t.Fatal("invalid mode accepted")
 	}
 	if gin.Mode() != priorMode {
