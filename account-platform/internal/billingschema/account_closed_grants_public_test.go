@@ -16,25 +16,41 @@ const (
 	closedGrantCleanupReserve = 45 * time.Second
 	closedGrantWaitDelay      = 5 * time.Second
 	closedGrantExitGrace      = 15 * time.Second
-	closedGrantMinChildBudget = 90 * time.Second
 )
 
 // Preserve the fixture's cleanup context even when Command.Wait consumes its
 // entire delay after cancellation. The child timer leaves a separate exit gap.
-func closedGrantChildBudget(now, parentDeadline time.Time, hasDeadline bool) (time.Time, time.Duration, error) {
+func closedGrantChildBudget(now, parentDeadline time.Time, hasDeadline bool, minimum time.Duration) (time.Time, time.Duration, error) {
 	if !hasDeadline || parentDeadline.IsZero() {
 		return time.Time{}, 0, errors.New("owner harness requires a finite Go test deadline")
 	}
 	commandDeadline := parentDeadline.Add(-closedGrantCleanupReserve - closedGrantWaitDelay)
-	// The existing published-owner root alone may use up to 90 seconds.
 	remaining := commandDeadline.Sub(now)
-	if remaining < closedGrantMinChildBudget+closedGrantExitGrace {
+	if minimum <= 0 || remaining < minimum+closedGrantExitGrace {
 		return time.Time{}, 0, errors.New("insufficient owner child budget after setup and cleanup reserves")
 	}
 	return commandDeadline, remaining - closedGrantExitGrace, nil
 }
 
 func TestClosedGrantPublicOwnerHarness(t *testing.T) {
+	// ~107s in the failed CI run, including the published-owner and concurrency
+	// roots. The minimum admits this complete group, not one 90s owner root.
+	runClosedGrantPublicOwnerHarness(t, 150*time.Second, "^(TestClosedGrantPublishedOwnerEffects|TestF08ClosedGrantConcurrentReceiptReplayPostgres|TestAccountClosureIsolationScrubsContactWithoutFinancialMutation|TestAccountClosureIsolationPreservesPriorAuditFacts)$")
+}
+
+func TestClosedGrantPublicFinancialHarness(t *testing.T) {
+	// The four real financial-blocker roots took ~190s together in CI.
+	runClosedGrantPublicOwnerHarness(t, 240*time.Second, "^(TestAccountClosurePreservesUnknownForcedRefundEvidence|TestAccountClosureRequiresAuthoritativeChargebackTerminal|TestF08ClosureBlocksPendingFinancialAnomalyPostgres|TestF08ReclaimBlocksPendingFinancialAnomalyPostgres)$")
+}
+
+func TestClosedGrantPublicMembershipHarness(t *testing.T) {
+	// Assessment alone took ~96s; membership previously started with only 9s
+	// left. Both now receive a separate full public harness invocation.
+	runClosedGrantPublicOwnerHarness(t, 180*time.Second, "^(TestAccountClosureAssessmentIncludesMemberReservations|TestF08MembershipClosureReasonQuotaReplayPostgres)$")
+}
+
+func runClosedGrantPublicOwnerHarness(t *testing.T, minimum time.Duration, selection string) {
+	t.Helper()
 	if os.Getenv("PINVOU_TEST_SCHEMA_DATABASE_URL") == "" {
 		t.Skip("explicit isolated schema database required")
 	}
@@ -53,17 +69,17 @@ func TestClosedGrantPublicOwnerHarness(t *testing.T) {
 		t.Fatal(e)
 	}
 	migrations.Unlock(ctx, bc)
-	// Setup keeps its existing limit; the ten complete owner roots use the
-	// remaining enclosing test budget rather than sharing setup's 150 seconds.
+	// Every wrapper invocation selects one fixed public test above. Each group
+	// owns fresh setup and cleanup and retains the enclosing eight-minute cap.
 	cancel()
 	parentDeadline, hasDeadline := t.Deadline()
-	commandDeadline, childTimeout, err := closedGrantChildBudget(time.Now(), parentDeadline, hasDeadline)
+	commandDeadline, childTimeout, err := closedGrantChildBudget(time.Now(), parentDeadline, hasDeadline, minimum)
 	if err != nil {
 		t.Fatal(err)
 	}
 	childCtx, cancelChild := context.WithDeadline(context.Background(), commandDeadline)
 	defer cancelChild()
-	args := []string{"test", "-mod=readonly", "-tags=nomsgpack", "-count=1", "-json", "./internal/billing", "-run", "^(TestClosedGrantPublishedOwnerEffects|TestAccountClosureIsolationPreservesPriorAuditFacts|TestAccountClosureIsolationScrubsContactWithoutFinancialMutation|TestAccountClosurePreservesUnknownForcedRefundEvidence|TestAccountClosureRequiresAuthoritativeChargebackTerminal|TestAccountClosureAssessmentIncludesMemberReservations|TestF08MembershipClosureReasonQuotaReplayPostgres|TestF08ClosedGrantConcurrentReceiptReplayPostgres|TestF08ClosureBlocksPendingFinancialAnomalyPostgres|TestF08ReclaimBlocksPendingFinancialAnomalyPostgres)$"}
+	args := []string{"test", "-mod=readonly", "-tags=nomsgpack", "-count=1", "-json", "./internal/billing", "-run", selection}
 	args = append(args, "-timeout="+childTimeout.String())
 	if runtime.GOOS != "windows" {
 		args = append(args, "-race")

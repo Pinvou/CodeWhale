@@ -43,15 +43,145 @@ class ClosurePostgresResults(unittest.TestCase):
                                "TestF08ReclaimBlocksPendingFinancialAnomalyPostgres"}
         self.assertEqual(runner.BILLING_ROOTS, expected)
         harness = (runner.ROOT / "account-platform/internal/billingschema/account_closed_grants_public_test.go").read_text(encoding="utf-8")
-        selected = re.search(r'"-run", "\^\(([^"]+)\)\$"', harness)
-        self.assertIsNotNone(selected)
-        self.assertEqual(set(selected.group(1).split("|")), expected)
+        selected = {name: (int(minimum), selection) for name, minimum, selection in re.findall(
+            r'func (TestClosedGrantPublic\w+Harness)\(t \*testing.T\) \{\s*'
+            r'(?:\s*//[^\n]*\n)*\s*runClosedGrantPublicOwnerHarness\(t, (\d+)\*time.Second, "\^\(([^"]+)\)\$"\)',
+            harness)}
+        self.assertEqual(set(selected), {parent for _, parent, _ in runner.CLOSED_GRANT_GROUPS})
+        # Bind admission to the actual public callers, not just a separately
+        # invoked budget helper. These are lower bounds from the failed CI,
+        # with membership's final root having run only nine seconds there.
+        observed_seconds = {"TestClosedGrantPublicOwnerHarness": 107.39,
+                            "TestClosedGrantPublicFinancialHarness": 190.42,
+                            "TestClosedGrantPublicMembershipHarness": 105.07}
+        for _, parent, roots in runner.CLOSED_GRANT_GROUPS:
+            minimum, selection = selected[parent]
+            self.assertGreater(minimum, observed_seconds[parent])
+            self.assertEqual(len(selection.split("|")), len(roots))
+            self.assertEqual(set(selection.split("|")), roots)
         for missing in expected:
             with self.subTest(missing=missing), self.assertRaises(RuntimeError):
                 runner.verify_results(stream(*({"Action": "pass", "Test": name} for name in sorted(expected - {missing}))), expected)
         events = [row for row in runner.CONTRACTS if row[0] == "membership-closure-event"]
         self.assertEqual(events, [("membership-closure-event", "./internal/billingschema",
                                  {"TestF08AccountClosureMembershipEventConsumerPublicPostgres"}, {})])
+
+    def test_fixed_owner_groups_are_disjoint_complete_and_required_once(self):
+        runner.validate_closed_grant_contracts(runner.CONTRACTS)
+        selected = [row for row in runner.CONTRACTS if row[0].startswith("closed-grants")]
+        self.assertEqual(len(selected), 3)
+        self.assertEqual([len(row[3][""]) for row in selected], [4, 4, 2])
+        roots = [root for row in selected for root in row[3][""]]
+        self.assertEqual(len(roots), len(set(roots)))
+        self.assertEqual(set(roots), runner.BILLING_ROOTS)
+        for row in selected:
+            for broken in [runner.CONTRACTS + [row], [item for item in runner.CONTRACTS if item is not row]]:
+                with self.subTest(group=row[0]), self.assertRaises(RuntimeError):
+                    runner.validate_closed_grant_contracts(broken)
+        for missing in runner.BILLING_ROOTS:
+            groups = [(name, parent, roots - {missing}) for name, parent, roots in runner.CLOSED_GRANT_GROUPS]
+            with self.subTest(missing=missing), mock.patch.object(runner, "CLOSED_GRANT_GROUPS", groups), \
+                    self.assertRaises(RuntimeError):
+                runner.validate_closed_grant_contracts(runner.CONTRACTS)
+
+    def test_duplicate_or_unexpected_root_is_not_success(self):
+        for names in [["Owner", "Owner"], ["Owner", "Unexpected"]]:
+            with self.subTest(names=names), self.assertRaises(RuntimeError):
+                runner.verify_results(stream(*({"Action": "pass", "Test": name} for name in names)), {"Owner"})
+
+    def run_public_wrapper(self, bad_group=None, failure=None, missing_root=None, platform="linux"):
+        """Exercise the actual entry point with controlled process/PG replies."""
+        calls = []
+        last_group = None
+        contracts = {"^(" + "|".join(sorted(roots)) + ")$": (name, roots, children)
+                     for name, _, roots, children in runner.CONTRACTS}
+
+        def process(argv, **kwargs):
+            nonlocal last_group
+            if argv[0] != "fixture-go":
+                sql = argv[-1]
+                calls.append(("query", sql))
+                if sql == "SELECT current_user":
+                    output = "fixture_owner"
+                elif sql == "SELECT datname FROM pg_database ORDER BY datname":
+                    output = "postgres\ntemplate0\ntemplate1"
+                    if failure == "cleanup" and last_group == bad_group:
+                        output += "\nretained_for_diagnosis"
+                elif "SELECT rolname FROM pg_roles" in sql:
+                    output = "fixture_owner"
+                elif sql == "SHOW server_version_num":
+                    output = "170011"
+                else:
+                    output = "0"
+                return subprocess_result(output)
+            name, roots, children = contracts[argv[-1]]
+            last_group = name
+            calls.append(("go", name, argv))
+            for suffix, required in children.items():
+                if name == bad_group and failure == "missing-child-process":
+                    continue
+                rows = [{"Action": "pass", "Test": root} for root in sorted(required)]
+                if name == bad_group and missing_root:
+                    rows = [row for row in rows if row["Test"] != missing_root]
+                if name == bad_group and failure in {"fail", "skip"}:
+                    rows[0]["Action"] = failure
+                log = Path(kwargs["env"]["F08_TEST_CHILD_LOG"] + suffix)
+                log.write_text(stream(*rows), encoding="utf-8")
+            if name == bad_group and failure == "missing-parent-process":
+                return subprocess_result("")
+            return subprocess_result(stream(*({"Action": "pass", "Test": root} for root in sorted(roots))),
+                                     1 if name == bad_group and failure == "process-failed" else 0)
+
+        def subprocess_result(output, code=0):
+            return mock.Mock(stdout=output, stderr="", returncode=code)
+
+        error = None
+        with tempfile.TemporaryDirectory() as directory, \
+                mock.patch.dict(os.environ, {
+                    "PINVOU_ACCOUNT_CLOSURE_TEST_DATABASE_URL": "postgres://fixture_owner@127.0.0.1:5433/postgres?sslmode=disable",
+                    "PINVOU_ACCOUNT_CLOSURE_TEST_ARTIFACT_DIR": directory,
+                }), mock.patch.object(runner.shutil, "which", return_value="fixture-go"), \
+                mock.patch.object(runner.subprocess, "run", side_effect=process), \
+                mock.patch.object(runner.sys, "platform", platform), \
+                contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+            try:
+                runner.main()
+            except RuntimeError as caught:
+                error = caught
+        return error, calls
+
+    def test_public_entry_runs_each_fixed_group_with_cleanup_between_processes(self):
+        for platform in ["linux", "win32"]:
+            with self.subTest(platform=platform):
+                error, calls = self.run_public_wrapper(platform=platform)
+                self.assertIsNone(error)
+                actual = [call for call in calls if call[0] == "go"]
+                self.assertEqual([call[1] for call in actual], [row[0] for row in runner.CONTRACTS])
+                for call in actual:
+                    self.assertIn("-timeout=8m", call[2])
+                    self.assertEqual("-race" in call[2], platform != "win32")
+                positions = [i for i, call in enumerate(calls) if call[0] == "go"]
+                for current, following in zip(positions, positions[1:]):
+                    # The finally cleanup check and the next invocation's
+                    # absence guard both precede the next process launch.
+                    self.assertEqual(sum(call == ("query", "SELECT datname FROM pg_database ORDER BY datname")
+                                         for call in calls[current + 1:following]), 2)
+
+    def test_public_entry_rejects_each_missing_owner_child_root(self):
+        for group, _, roots in runner.CLOSED_GRANT_GROUPS:
+            for root in roots:
+                with self.subTest(group=group, root=root):
+                    error, calls = self.run_public_wrapper(bad_group=group, missing_root=root)
+                    self.assertIsNotNone(error)
+                    self.assertEqual([call[1] for call in calls if call[0] == "go"][-1], group)
+
+    def test_public_entry_rejects_missing_failed_skipped_processes_and_retains_unknown_cleanup(self):
+        for group, _, _ in runner.CLOSED_GRANT_GROUPS:
+            for failure in ["missing-child-process", "missing-parent-process", "process-failed", "fail", "skip", "cleanup"]:
+                with self.subTest(group=group, failure=failure):
+                    error, calls = self.run_public_wrapper(bad_group=group, failure=failure)
+                    self.assertIsNotNone(error)
+                    self.assertEqual([call[1] for call in calls if call[0] == "go"][-1], group)
 
     def test_anonymization_advance_failure_root_cannot_silently_drop(self):
         expected = {"TestAccountClosureAnonymizesOwnedHistoricalContacts",
