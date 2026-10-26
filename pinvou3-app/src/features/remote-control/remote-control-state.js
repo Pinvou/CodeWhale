@@ -835,6 +835,10 @@
     if (!record || !remoteProxyId(record.localSessionId)
       || !Array.isArray(record.entries) || record.entries.length > 512
       || !Number.isSafeInteger(record.pendingUnknownCount) || record.pendingUnknownCount < 0
+      || (record.quarantined !== undefined && typeof record.quarantined !== "boolean")
+      || (record.quarantined === true && record.archived !== true)
+      || (record.frozenPreparedCount !== undefined && (!Number.isSafeInteger(record.frozenPreparedCount)
+        || record.frozenPreparedCount < 0 || record.frozenPreparedCount > 64))
       || !Array.isArray(record.unattemptedPending) || record.unattemptedPending.length > 128
       || record.unattemptedPending.some(function (item) {
         return !item || item.dispatchState !== "prepared_never_attempted"
@@ -845,6 +849,8 @@
     var next = shallowCopy(state);
     next.remoteProxyHistory = {
       archived: record.archived === true,
+      quarantined: record.quarantined === true,
+      frozenPreparedCount: record.frozenPreparedCount || 0,
       localSessionId: record.localSessionId,
       title: projectionText(record.title, 120),
       pinned: record.pinned === true,

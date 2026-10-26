@@ -250,6 +250,21 @@ impl RemoteDispatchService {
         }
     }
 
+    /// Keep the dispatch -> host lifecycle -> Store lock order used by reserve
+    /// and commit. Only a successful permanent seal may discard these payloads;
+    /// cleanup=false still means the seal committed. A prepare already outside
+    /// this lock must recheck the Store before it can publish another package.
+    pub(crate) fn with_remote_history_seal<E>(
+        &self,
+        local_session_id: &str,
+        seal: impl FnOnce(&SessionStore) -> Result<bool, E>,
+    ) -> Result<bool, E> {
+        let mut ephemeral = self.ephemeral.lock();
+        let cleaned = seal(&self.store)?;
+        ephemeral.retain(|(local_id, _, _), _| local_id != local_session_id);
+        Ok(cleaned)
+    }
+
     pub(crate) fn reserve_new(
         &self,
         mut request: RemoteDispatchRequest,
@@ -398,12 +413,11 @@ impl RemoteDispatchService {
                 &request.live,
                 pending,
             )
-            .map_err(|failure| {
-                if failure.code() == "remote_proxy_byte_budget" {
-                    error("remote_proxy_byte_budget")
-                } else {
-                    error("remote_pending_persist_failed")
-                }
+            .map_err(|failure| match failure.code() {
+                "remote_proxy_byte_budget" => error("remote_proxy_byte_budget"),
+                "remote_pending_limit_reached" => error("remote_pending_limit_reached"),
+                "remote_retirement_budget_exhausted" => error("remote_retirement_budget_exhausted"),
+                _ => error("remote_pending_persist_failed"),
             })? {
             PendingReservation::Inserted => {
                 ephemeral.insert(
@@ -681,7 +695,14 @@ impl RemoteDispatchService {
                 task_id,
                 &pending.request_fingerprint,
             )
-            .map_err(|_| error("remote_pending_abandon_failed"))
+            .map_err(|failure| {
+                match crate::features::sessions::remote_proxy::schema::remote_proxy_capacity_code(
+                    &failure,
+                ) {
+                    Some(code) => error(code),
+                    None => error("remote_pending_abandon_failed"),
+                }
+            })
     }
 }
 
@@ -1112,6 +1133,176 @@ mod tests {
             live: request.live.clone(),
             semantics: request.semantics.clone(),
         }
+    }
+
+    #[test]
+    fn quarantine_releases_only_its_prepared_payloads_and_restores_the_same_service_capacity() {
+        let (_temp, store, template) = setup();
+        let first_id = template.semantics.local_session_id.clone();
+        let port = Arc::new(FakePort::new(store.clone(), first_id.clone()));
+        let service = RemoteDispatchService::new(store.clone(), port.clone());
+        let mut first_handle = None;
+        for session in 0..4 {
+            let mut base = same_request(&template);
+            if session != 0 {
+                let opened = store
+                    .test_commit_remote_proxy_open(None, &base.live)
+                    .unwrap();
+                store
+                    .confirm_remote_mapping(
+                        &opened.local_session_id,
+                        &base.live,
+                        &AuthenticatedMapping {
+                            remote_session_ref: opened.remote_session_ref.clone(),
+                            controlled_session_id: base.semantics.controlled_session_id.clone(),
+                        },
+                    )
+                    .unwrap();
+                base.semantics.local_session_id = opened.local_session_id;
+                base.semantics.remote_session_ref = opened.remote_session_ref;
+            }
+            for index in 0..64 {
+                let mut request = same_request(&base);
+                request.client_request_id = format!("quarantine-client-{session}-{index}");
+                request.task_id = format!("quarantine-task-{session}-{index}");
+                let report = service.reserve_new(request).unwrap();
+                if session == 0 && index == 0 {
+                    first_handle = Some(report.retry_handle);
+                }
+            }
+        }
+        assert_eq!(service.ephemeral.lock().len(), MAX_EPHEMERAL_PACKAGES);
+        let original = store.remote_proxy_snapshot(&first_id).unwrap();
+        assert_eq!(original.pending.len(), 64);
+        // Native host-owner refusal must not discard still-live prepared data.
+        assert!(
+            service
+                .with_remote_history_seal(&first_id, |store| {
+                    store.quarantine_remote_proxy(&first_id, Some(&template.live), true)
+                })
+                .is_err()
+        );
+        assert_eq!(service.ephemeral.lock().len(), MAX_EPHEMERAL_PACKAGES);
+        let successor = store
+            .test_commit_remote_proxy_open(None, &template.live)
+            .unwrap();
+        store
+            .confirm_remote_mapping(
+                &successor.local_session_id,
+                &template.live,
+                &AuthenticatedMapping {
+                    remote_session_ref: successor.remote_session_ref.clone(),
+                    controlled_session_id: template.semantics.controlled_session_id.clone(),
+                },
+            )
+            .unwrap();
+        let mut next = same_request(&template);
+        next.semantics.local_session_id = successor.local_session_id;
+        next.semantics.remote_session_ref = successor.remote_session_ref;
+        next.client_request_id = "quarantine-successor-client".into();
+        next.task_id = "quarantine-successor-task".into();
+        assert_eq!(
+            service.reserve_new(same_request(&next)).unwrap_err().code(),
+            "remote_outbox_capacity"
+        );
+        // None models the trusted host's disconnected owner; this is the real
+        // service + Store seal, not native IPC or a cancellation of remote work.
+        assert!(
+            service
+                .with_remote_history_seal(&first_id, |store| {
+                    store.quarantine_remote_proxy(&first_id, None, true)
+                })
+                .unwrap()
+        );
+        assert_eq!(service.ephemeral.lock().len(), MAX_EPHEMERAL_PACKAGES - 64);
+        assert!(
+            service
+                .ephemeral
+                .lock()
+                .keys()
+                .all(|(id, _, _)| id != &first_id)
+        );
+        let frozen = store.read_remote_proxy_history(&first_id).unwrap();
+        assert!(frozen.quarantined);
+        assert_eq!(frozen.frozen_prepared_count, 64);
+        assert!(frozen.unattempted_pending.is_empty());
+        assert!(
+            service
+                .commit_prepared(
+                    &first_id,
+                    &template.semantics.remote_session_ref,
+                    first_handle.unwrap(),
+                    &[]
+                )
+                .is_err()
+        );
+        assert!(service.reserve_new(next).is_ok());
+        assert_eq!(service.ephemeral.lock().len(), MAX_EPHEMERAL_PACKAGES - 63);
+        assert_eq!(port.send_count.load(Ordering::SeqCst), 0);
+    }
+
+    #[test]
+    fn quarantine_cleanup_pending_still_releases_the_sealed_payload() {
+        let (temp, store, request) = setup();
+        let id = request.semantics.local_session_id.clone();
+        let port = Arc::new(FakePort::new(store.clone(), id.clone()));
+        let service = RemoteDispatchService::new(store.clone(), port.clone());
+        service.reserve_new(request).unwrap();
+        let path = temp.path().join("sessions/_remote_proxies.json");
+        let saved = temp.path().join("sessions/quarantine-service-residue.json");
+        std::fs::rename(&path, &saved).unwrap();
+        std::fs::create_dir(&path).unwrap();
+        assert!(
+            !service
+                .with_remote_history_seal(&id, |store| {
+                    store.quarantine_remote_proxy(&id, None, true)
+                })
+                .unwrap()
+        );
+        assert!(service.ephemeral.lock().is_empty());
+        assert!(store.read_remote_proxy_history(&id).unwrap().quarantined);
+        assert!(store.remote_proxy_snapshot(&id).is_none());
+        // Remove only this test's exact empty blocker; never roll back the bank.
+        std::fs::remove_dir(&path).unwrap();
+        std::fs::rename(&saved, &path).unwrap();
+        assert_eq!(port.send_count.load(Ordering::SeqCst), 0);
+    }
+
+    #[test]
+    fn quarantine_prevents_an_already_preparing_request_from_repopulating_the_cache() {
+        let (_temp, store, request) = setup();
+        let id = request.semantics.local_session_id.clone();
+        let port = Arc::new(FakePort::new(store.clone(), id.clone()));
+        let service = Arc::new(RemoteDispatchService::new(store.clone(), port.clone()));
+        service.reserve_new(same_request(&request)).unwrap();
+        let mut late = same_request(&request);
+        late.task_id = "quarantine-late-task".into();
+        late.client_request_id = "quarantine-late-client".into();
+        let (entered_tx, entered_rx) = std::sync::mpsc::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        *port.prepare_gate.lock() = Some((late.task_id.clone(), entered_tx, release_rx));
+        let worker = service.clone();
+        let preparing = std::thread::spawn(move || worker.reserve_new(late));
+        entered_rx
+            .recv_timeout(std::time::Duration::from_secs(5))
+            .unwrap();
+        assert!(
+            service
+                .with_remote_history_seal(&id, |store| {
+                    store.quarantine_remote_proxy(&id, None, true)
+                })
+                .unwrap()
+        );
+        release_tx.send(()).unwrap();
+        assert_eq!(
+            preparing.join().unwrap().unwrap_err().code(),
+            "remote_proxy_not_found"
+        );
+        assert!(service.ephemeral.lock().is_empty());
+        let frozen = store.read_remote_proxy_history(&id).unwrap();
+        assert!(frozen.quarantined);
+        assert_eq!(frozen.frozen_prepared_count, 1);
+        assert_eq!(port.send_count.load(Ordering::SeqCst), 0);
     }
 
     #[test]

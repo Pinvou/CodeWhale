@@ -203,7 +203,16 @@ function remoteProxySystemBody(item) {
 
 function remoteActionFailureCode(failure) {
   const candidate = failure?.code || failure?.message || failure;
-  return String(candidate || '') === 'result_unknown' ? 'result_unknown' : 'errorGeneric';
+  const code = String(candidate || '');
+  return ['result_unknown', 'remote_proxy_byte_budget', 'remote_pending_limit_reached', 'remote_retirement_budget_exhausted'].includes(code)
+    ? code : 'errorGeneric';
+}
+
+function remoteCapacityFailureText(code, copy) {
+  if (code === 'remote_proxy_byte_budget') return copy.byteBudget;
+  if (code === 'remote_pending_limit_reached') return copy.pendingLimit;
+  if (code === 'remote_retirement_budget_exhausted') return copy.retirementBudget;
+  return null;
 }
 
 function constrainDialogFocus(event, dialog) {
@@ -3269,9 +3278,8 @@ const openChatExternalUrl = (url) => {
         }
       }
       const remoteSendMessage = remotePermissionFailureText(currentRemoteSendError, t.remoteConversation)
-        ?? (currentRemoteSendError === 'remote_proxy_byte_budget'
-        ? t.remoteArchive.byteBudget
-        : currentRemoteSendError === 'task_session_busy'
+        ?? remoteCapacityFailureText(currentRemoteSendError, t.remoteArchive)
+        ?? (currentRemoteSendError === 'task_session_busy'
         ? t.remoteConversation.sessionBusy
         : (currentRemoteSendError === 'temporary_model_capability_required'
           ? t.remoteConversation.temporaryModelCapabilityRequired
@@ -4797,9 +4805,9 @@ const openChatExternalUrl = (url) => {
 
             {remoteChatActive && remoteActionError && (
               <div role="alert" data-testid="chat-remote-action-error" className={`mb-4 w-full max-w-[800px] px-5 text-[12px] text-[#EA4335] max-sm:px-4 ${hasMessages ? 'mx-auto' : ''}`}>
-                {remoteActionError === 'result_unknown'
+                {remoteCapacityFailureText(remoteActionError, t.remoteArchive) ?? (remoteActionError === 'result_unknown'
                   ? t.remoteConversation.actionResultUnknown
-                  : t.remoteConversation.actionFailed}
+                  : t.remoteConversation.actionFailed)}
               </div>
             )}
 

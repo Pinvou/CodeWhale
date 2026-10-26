@@ -10,14 +10,41 @@ impl super::super::SessionStore {
         id: &str,
         live: Option<&super::binding::LiveRemoteContext>,
     ) -> Result<bool> {
+        self.seal_remote_proxy_history(id, live, false)
+    }
+
+    /// Irreversible, explicitly confirmed exit. Pending records remain frozen
+    /// facts; this neither cancels remote execution nor invents a result.
+    pub(crate) fn quarantine_remote_proxy(
+        &self,
+        id: &str,
+        live: Option<&super::binding::LiveRemoteContext>,
+        confirmed: bool,
+    ) -> Result<bool> {
+        if !confirmed {
+            bail!("remote_proxy_quarantine_confirmation_required");
+        }
+        self.seal_remote_proxy_history(id, live, true)
+    }
+
+    fn seal_remote_proxy_history(
+        &self,
+        id: &str,
+        live: Option<&super::binding::LiveRemoteContext>,
+        quarantine: bool,
+    ) -> Result<bool> {
         let mut state = self.remote_proxies.lock();
         state.require_available()?;
         if state.archives.contains(id)? {
+            let snapshot = state
+                .archives
+                .read_snapshot(id)?
+                .ok_or_else(|| anyhow::anyhow!("remote_proxy_archive_unavailable"))?;
+            if snapshot.is_quarantined() != quarantine {
+                bail!("remote_proxy_archive_conflict");
+            }
             if let Some(record) = state.records.get(id) {
-                let mut archived = state
-                    .archives
-                    .read(id)?
-                    .ok_or_else(|| anyhow::anyhow!("remote_proxy_archive_unavailable"))?;
+                let mut archived = snapshot.into_record();
                 // Another cooperating instance may have sealed this exact
                 // residue after our active JSON was loaded. Hidden is a separate
                 // archive UI flag; every immutable field must still match.
@@ -43,7 +70,7 @@ impl super::super::SessionStore {
         }) {
             bail!("remote_proxy_archive_online");
         }
-        if !record.pending.is_empty() {
+        if !quarantine && !record.pending.is_empty() {
             bail!("remote_proxy_archive_pending");
         }
         state
@@ -51,7 +78,12 @@ impl super::super::SessionStore {
             .require_active_records(state.records.values())?;
         // The archive anchor has its own bounded storage, so even a completely
         // full legacy active JSON can seal without first growing that JSON.
-        if let Err(error) = state.archives.seal(&record) {
+        let sealed = if quarantine {
+            state.archives.quarantine(&record)
+        } else {
+            state.archives.seal(&record)
+        };
+        if let Err(error) = sealed {
             // A durable intent may already exist. Never restore execution
             // authority after ambiguous I/O; startup recovers that exact seal.
             state.load_failed = true;

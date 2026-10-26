@@ -88,10 +88,11 @@ fn retire_snapshot_terminals(
             // outbox record. Their authenticated status remains display-only.
             continue;
         };
-        if pending.dispatch_state != PendingDispatchState::AttemptMayHaveOccurred
-            || record.retired_requests.len() >= MAX_RETIRED_REQUESTS
-        {
+        if pending.dispatch_state != PendingDispatchState::AttemptMayHaveOccurred {
             bail!("remote snapshot terminal correlation or capacity mismatch");
+        }
+        if record.retired_requests.len() >= MAX_RETIRED_REQUESTS {
+            return Err(super::schema::RemoteProxyCapacityError::RetirementBudget.into());
         }
         let retired = RetiredRemoteRequest {
             client_request_id: pending.client_request_id.clone(),
@@ -367,9 +368,11 @@ impl SessionStore {
         let pending = &record.pending[index];
         if pending.request_fingerprint != fingerprint
             || pending.dispatch_state != PendingDispatchState::AttemptMayHaveOccurred
-            || record.retired_requests.len() >= MAX_RETIRED_REQUESTS
         {
             bail!("terminal correlation or capacity mismatch");
+        }
+        if record.retired_requests.len() >= MAX_RETIRED_REQUESTS {
+            return Err(super::schema::RemoteProxyCapacityError::RetirementBudget.into());
         }
         record.pending.remove(index);
         record.retired_requests.push(RetiredRemoteRequest {

@@ -1842,6 +1842,10 @@ pub(super) fn with_current_dispatch_binding<T>(
         .map_err(|code| match code.as_str() {
             "remote_pending_persist_failed" => dispatch_error("remote_pending_persist_failed"),
             "remote_proxy_byte_budget" => dispatch_error("remote_proxy_byte_budget"),
+            "remote_pending_limit_reached" => dispatch_error("remote_pending_limit_reached"),
+            "remote_retirement_budget_exhausted" => {
+                dispatch_error("remote_retirement_budget_exhausted")
+            }
             "remote_attempt_persist_failed" => dispatch_error("remote_attempt_persist_failed"),
             "remote_attachment_unconfirmed"
             | "remote_attachment_count_invalid"
@@ -1912,7 +1916,13 @@ impl RemoteTaskDispatchPort for DesktopRemoteTaskDispatchPort {
             store
                 .insert_remote_pending(local_session_id, remote_ref, live, pending)
                 .map_err(|error| {
-                    if error.to_string() == "remote_proxy_byte_budget" {
+                    if let Some(code) =
+                        crate::features::sessions::remote_proxy::schema::remote_proxy_capacity_code(
+                            &error,
+                        )
+                    {
+                        code.to_owned()
+                    } else if error.to_string() == "remote_proxy_byte_budget" {
                         "remote_proxy_byte_budget".to_owned()
                     } else {
                         "remote_pending_persist_failed".to_owned()

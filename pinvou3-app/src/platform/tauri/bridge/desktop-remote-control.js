@@ -950,7 +950,9 @@
         .then(function (records) {
           if (!Array.isArray(records) || records.length > 256 || records.some(function (record) {
             return !record || !requiredOpaqueId(record.localSessionId)
-              || !record.localSessionId.startsWith("remote-") || typeof record.hidden !== "boolean";
+              || !record.localSessionId.startsWith("remote-") || typeof record.hidden !== "boolean"
+              || (record.pendingCount !== undefined && (!Number.isSafeInteger(record.pendingCount)
+                || record.pendingCount < 0 || record.pendingCount > 64));
           })) throw asBoundedError("remote_proxy_projection_invalid");
           // This management-only result must not publish hidden entries into
           // the ordinary history list or select a live execution target.
@@ -973,18 +975,36 @@
     }
 
     function archiveRemoteProxyHistory(localSessionId) {
+      return sealRemoteProxyHistory(localSessionId, false);
+    }
+
+    function quarantineRemoteProxyHistory(localSessionId, confirmed) {
+      if (confirmed !== true) {
+        return Promise.reject(asBoundedError("remote_proxy_quarantine_confirmation_required"));
+      }
+      return sealRemoteProxyHistory(localSessionId, true);
+    }
+
+    function sealRemoteProxyHistory(localSessionId, quarantine) {
       ensureAvailable();
       if (!requiredOpaqueId(localSessionId) || !localSessionId.startsWith("remote-")) {
         return Promise.reject(invalidTaskIntent());
       }
-      return invoke("desktop_remote_proxy_archive", { localSessionId: localSessionId })
+      var command = quarantine ? "desktop_remote_proxy_quarantine" : "desktop_remote_proxy_archive";
+      var payload = quarantine ? { localSessionId: localSessionId, confirmed: true }
+        : { localSessionId: localSessionId };
+      return invoke(command, payload)
         .then(function (cleaned) {
           ++proxyListIntent;
           proxyReadIntents[localSessionId] = (proxyReadIntents[localSessionId] || 0) + 1;
           var selected = current().remoteProxyHistory;
           if (selected && selected.localSessionId === localSessionId) {
             publish(logic.projectRemoteProxyRead(current(), Object.assign({}, selected, {
-              archived: true, pendingUnknownCount: 0, unattemptedPending: [],
+              archived: true,
+              quarantined: quarantine,
+              pendingUnknownCount: quarantine ? selected.pendingUnknownCount : 0,
+              frozenPreparedCount: quarantine ? selected.unattemptedPending.length : 0,
+              unattemptedPending: [],
             })));
           }
           // The irreversible Rust commit succeeded. Refresh failure cannot
@@ -1369,6 +1389,7 @@
       selectRemoteProxyHistory: selectRemoteProxyHistory,
       deleteRemoteProxyHistory: deleteRemoteProxyHistory,
       archiveRemoteProxyHistory: archiveRemoteProxyHistory,
+      quarantineRemoteProxyHistory: quarantineRemoteProxyHistory,
       listRemoteProxyArchives: listRemoteProxyArchives,
       listRemoteProxyArchiveCandidates: listRemoteProxyArchiveCandidates,
       reserveRemoteTask: reserveRemoteTask,

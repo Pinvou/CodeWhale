@@ -10,6 +10,18 @@ import {
 const labels = (items) => items.map(({ kind, target }) => `${kind}:${target}`);
 const fullLabels = labels(FULL_FRONTEND_SMOKES);
 
+test("quarantine confirmation smoke runs in full CI and for its real public facade", () => {
+  const smoke = "node:tests/remote_quarantine_smoke.mjs";
+  assert.ok(fullLabels.includes(smoke));
+  for (const entry of ["pinvou3-app/src/features/remote-control/RemoteProxyArchivePanel.jsx",
+    "pinvou3-app/src/platform/tauri/bridge.js", "pinvou3-app/tests/fixtures/remote_quarantine_smoke.jsx"]) {
+    assert.ok(labels(selectFrontendSmokes([entry])).includes(smoke));
+  }
+  const knip = JSON.parse(readFileSync(new URL("../../pinvou3-app/knip.json", import.meta.url), "utf8"));
+  assert.ok(knip.entry.includes("tests/remote_quarantine_smoke.mjs"));
+  assert.ok(!knip.ignore.includes("tests/remote_quarantine_smoke.mjs"));
+});
+
 test("the real archive component smoke is included in the full CI suite", () => {
   assert.ok(fullLabels.includes("node:tests/remote_archive_smoke.mjs"));
   assert.ok(labels(selectFrontendSmokes([

@@ -2583,9 +2583,18 @@ dictZh.uiSettings.remoteControl = '桌面远程控制';
 dictZh.uiSettingsDetail.desktopRemoteControlEntryDesc = '允许他人输入连接码连接本机，使用本机模型执行任务；可随时查看并断开。';
 dictZh.uiSettingsDetail.desktopRemoteControlBack = '返回通用';
 dictZh.remoteArchive = {
+  pendingLimit: '未决请求已达上限。请等待权威结果；若无法继续，可在“设置 → 远程控制 → 远控会话归档”断开并明确隔离旧记录，另建新会话。隔离不会取消远端任务，也不允许重发旧任务。',
+  retirementBudget: '该会话的永久请求身份额度已用尽。请在“设置 → 远程控制 → 远控会话归档”断开会话；无未决任务时永久归档，有未决任务时明确只读隔离，再新建会话。',
+  quarantine: '不可逆只读隔离', quarantineTitle: '确认隔离旧会话', quarantineConfirm: '确认永久隔离',
+  quarantineWarning: '此操作不可撤销。将保留全部历史、未决请求和未知结果，永久禁用旧身份并释放活动容量。远端任务可能仍在运行；隔离不代表取消、成功或失败。旧记录将冻结，不再自动更新迟到结果，也不能重连或重发旧任务。请另建新会话继续。',
+  quarantinedHint: '此记录已永久冻结。未发送与结果未知的事实保持原样；远端任务可能仍在运行，旧记录不再自动更新结果。',
+  frozenPrepared: '确认从未尝试发送的请求', frozenUnknown: '结果未知的请求',
+  quarantineCompleted: '已永久只读隔离并释放活动容量。请另建新会话，不要重发旧任务。',
+  quarantineRefreshPending: '已永久只读隔离，但列表刷新失败。请刷新；旧身份不可恢复，远端任务可能仍在运行。',
+  quarantineCleanupPending: '已永久只读隔离，活动文件清理待后续写入重试。旧身份已不可执行，未知结果保持原样。',
   byteBudget: '远控会话容量已满。请打开“设置 → 远程控制 → 远控会话归档”，先断开会话并处理未决任务，再永久归档离线会话以释放容量。',
   title: '远控会话归档', active: '活动台账', archived: '已归档历史',
-  hint: '归档离线会话可释放活动容量，历史与反重放记录仍会保留。归档后不可执行任务或重新连接；在线会话及未决任务须先收口。',
+  hint: '无未决任务的离线会话可永久归档；有未决任务时可明确选择不可逆只读隔离。两者都保留历史与反重放记录，旧身份不可执行或重连。请先断开在线或正在恢复的会话。',
   archive: '永久归档', refresh: '刷新', empty: '暂无会话', untitled: '未命名会话',
   previous: '上一页', next: '下一页', readOnly: '只读归档',
   completed: '归档完成，已释放活动容量。',

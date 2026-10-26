@@ -9,6 +9,7 @@ use parking_lot::Mutex;
 use rusqlite::{Connection, OptionalExtension, params};
 use serde::{Deserialize, Serialize};
 
+use super::archive_snapshot::{ArchiveSnapshot, MAX_ARCHIVE_SNAPSHOT_BYTES, sealed_request_ids};
 use super::schema::{MAX_REMOTE_PROXY_FILE_BYTES, RemoteProxyListItem, RemoteProxyRecord};
 
 #[derive(Default)]
@@ -83,11 +84,12 @@ mod tests {
             bank.with_connection(true, |_| Ok(())).unwrap();
             let mut anchor = bank.read_anchor().unwrap().unwrap();
             let record = record("crash");
-            anchor.pending = Some(record.clone());
+            anchor.pending = Some(ArchiveSnapshot::Archived(record.clone()));
             bank.write_anchor(&anchor).unwrap();
             if committed {
                 let mut db = Connection::open(&bank.path).unwrap();
-                ArchiveStore::insert_seal(&mut db, &record, &anchor).unwrap();
+                ArchiveStore::insert_seal(&mut db, anchor.pending.as_ref().unwrap(), &anchor)
+                    .unwrap();
             }
             let restarted = ArchiveStore::at(bank.path.clone());
             restarted.require_present().unwrap();
@@ -141,10 +143,10 @@ mod tests {
         bank.with_connection(true, |_| Ok(())).unwrap();
         let record = record("incomplete");
         let mut anchor = bank.read_anchor().unwrap().unwrap();
-        anchor.pending = Some(record.clone());
+        anchor.pending = Some(ArchiveSnapshot::Archived(record.clone()));
         bank.write_anchor(&anchor).unwrap();
         let mut db = Connection::open(&bank.path).unwrap();
-        ArchiveStore::insert_seal(&mut db, &record, &anchor).unwrap();
+        ArchiveStore::insert_seal(&mut db, anchor.pending.as_ref().unwrap(), &anchor).unwrap();
         db.execute("DELETE FROM retired_ids", []).unwrap();
         drop(db);
         assert!(bank.require_present().is_err());
@@ -240,6 +242,96 @@ mod tests {
         assert_eq!(std::fs::read(bank.anchor_path()).unwrap(), before);
         assert!(bank.read_anchor().unwrap().unwrap().pending.is_none());
     }
+
+    fn quarantine_record() -> RemoteProxyRecord {
+        use super::super::schema::{PendingDispatchState, PendingRemoteRequest};
+        let mut record = record("quarantine-crash");
+        for (index, state) in [
+            PendingDispatchState::PreparedNeverAttempted,
+            PendingDispatchState::AttemptMayHaveOccurred,
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            record.pending.push(PendingRemoteRequest {
+                client_request_id: format!("pending-client-{index}"),
+                task_id: format!("pending-task-{index}"),
+                request_fingerprint: "c".repeat(64),
+                reservation_fingerprint: None,
+                dispatch_state: state,
+            });
+        }
+        record.validate_stored().unwrap();
+        record
+    }
+
+    #[test]
+    fn quarantine_intent_recovers_before_and_after_sql_commit_with_all_pending_facts() {
+        for committed in [false, true] {
+            let temp = tempfile::tempdir().unwrap();
+            let bank = bank(temp.path());
+            bank.with_connection(true, |_| Ok(())).unwrap();
+            let original = quarantine_record();
+            let mut anchor = bank.read_anchor().unwrap().unwrap();
+            anchor.pending = Some(ArchiveSnapshot::quarantined(original.clone()));
+            bank.write_anchor(&anchor).unwrap();
+            if committed {
+                let mut db = Connection::open(&bank.path).unwrap();
+                ArchiveStore::insert_seal(&mut db, anchor.pending.as_ref().unwrap(), &anchor)
+                    .unwrap();
+            }
+            let restarted = ArchiveStore::at(bank.path.clone());
+            restarted.require_present().unwrap();
+            let frozen = restarted
+                .read_snapshot(&original.local_session_id)
+                .unwrap()
+                .unwrap();
+            assert!(frozen.is_quarantined());
+            assert_eq!(frozen.record(), &original);
+            let complete = restarted.read_anchor().unwrap().unwrap();
+            assert_eq!(complete.committed_count, 1);
+            assert!(complete.pending.is_none());
+            let mut next = original.clone();
+            next.local_session_id = "remote-successor".into();
+            next.remote_session_ref = "ref-successor".into();
+            next.retired_requests.clear();
+            next.pending.truncate(1);
+            assert!(
+                restarted
+                    .require_active_records(std::iter::once(&next))
+                    .is_err()
+            );
+            next.pending[0].client_request_id = "fresh-client".into();
+            next.pending[0].task_id = "fresh-task".into();
+            restarted
+                .require_active_records(std::iter::once(&next))
+                .unwrap();
+        }
+    }
+
+    #[test]
+    fn quarantine_unfinished_commit_never_advances_watermark_without_pending_id_authority() {
+        let temp = tempfile::tempdir().unwrap();
+        let bank = bank(temp.path());
+        bank.with_connection(true, |_| Ok(())).unwrap();
+        let original = quarantine_record();
+        let mut anchor = bank.read_anchor().unwrap().unwrap();
+        anchor.pending = Some(ArchiveSnapshot::quarantined(original.clone()));
+        bank.write_anchor(&anchor).unwrap();
+        let mut db = Connection::open(&bank.path).unwrap();
+        ArchiveStore::insert_seal(&mut db, anchor.pending.as_ref().unwrap(), &anchor).unwrap();
+        db.execute(
+            "DELETE FROM retired_ids WHERE client_id=?1",
+            [&original.pending[1].client_request_id],
+        )
+        .unwrap();
+        drop(db);
+        let restarted = ArchiveStore::at(bank.path.clone());
+        assert!(restarted.require_present().is_err());
+        let unresolved = restarted.read_anchor().unwrap().unwrap();
+        assert_eq!(unresolved.committed_count, 0);
+        assert_eq!(unresolved.pending.unwrap().record(), &original);
+    }
 }
 
 /// Independent of the active JSON byte budget. A durable pending intent is an
@@ -249,7 +341,7 @@ mod tests {
 struct ArchiveAnchor {
     id: String,
     committed_count: i64,
-    pending: Option<RemoteProxyRecord>,
+    pending: Option<ArchiveSnapshot>,
 }
 
 impl ArchiveStore {
@@ -289,11 +381,8 @@ impl ArchiveStore {
         if uuid::Uuid::parse_str(&anchor.id).is_err() || anchor.committed_count < 0 {
             bail!("remote_proxy_archive_unavailable");
         }
-        if let Some(record) = &anchor.pending {
-            record.validate_stored()?;
-            if !record.pending.is_empty() {
-                bail!("remote_proxy_archive_unavailable");
-            }
+        if let Some(snapshot) = &anchor.pending {
+            snapshot.validate()?;
         }
         Ok(Some(anchor))
     }
@@ -324,9 +413,11 @@ impl ArchiveStore {
 
     fn insert_seal(
         db: &mut Connection,
-        record: &RemoteProxyRecord,
+        snapshot: &ArchiveSnapshot,
         anchor: &ArchiveAnchor,
     ) -> Result<()> {
+        snapshot.validate()?;
+        let record = snapshot.record();
         let tx = db.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
         if Self::bank_state(&tx)? != (anchor.id.clone(), anchor.committed_count) {
             bail!("remote_proxy_archive_unavailable");
@@ -336,18 +427,14 @@ impl ArchiveStore {
             params![
                 record.local_session_id,
                 record.remote_session_ref,
-                serde_json::to_vec(record)?,
+                serde_json::to_vec(snapshot)?,
                 false
             ],
         )?;
-        for retired in &record.retired_requests {
+        for (client_id, task_id) in sealed_request_ids(record) {
             tx.execute(
                 "INSERT INTO retired_ids(client_id,task_id,local_id) VALUES(?1,?2,?3)",
-                params![
-                    retired.client_request_id,
-                    retired.task_id,
-                    record.local_session_id
-                ],
+                params![client_id, task_id, record.local_session_id],
             )?;
         }
         tx.commit()?;
@@ -355,10 +442,11 @@ impl ArchiveStore {
     }
 
     fn verify_pending(db: &Connection, anchor: &ArchiveAnchor) -> Result<()> {
-        let record = anchor
+        let snapshot = anchor
             .pending
             .as_ref()
             .ok_or_else(|| anyhow::anyhow!("missing seal intent"))?;
+        let record = snapshot.record();
         let (sequence, bytes): (i64, Vec<u8>) = db.query_row(
             "SELECT sequence,record FROM archives WHERE local_id=?1 AND remote_ref=?2",
             params![record.local_session_id, record.remote_session_ref],
@@ -369,7 +457,7 @@ impl ArchiveStore {
                 .committed_count
                 .checked_add(1)
                 .ok_or_else(|| anyhow::anyhow!("archive capacity"))?
-            || bytes != serde_json::to_vec(record)?
+            || bytes != serde_json::to_vec(snapshot)?
         {
             bail!("remote_proxy_archive_unavailable");
         }
@@ -382,18 +470,14 @@ impl ArchiveStore {
             [&record.local_session_id],
             |row| row.get(0),
         )?;
-        if count != record.retired_requests.len() as i64 {
+        if count != (record.retired_requests.len() + record.pending.len()) as i64 {
             bail!("remote_proxy_archive_unavailable");
         }
-        for retired in &record.retired_requests {
+        for (client_id, task_id) in sealed_request_ids(record) {
             let present = db
                 .query_row(
                     "SELECT 1 FROM retired_ids WHERE client_id=?1 AND task_id=?2 AND local_id=?3",
-                    params![
-                        retired.client_request_id,
-                        retired.task_id,
-                        record.local_session_id
-                    ],
+                    params![client_id, task_id, record.local_session_id],
                     |_| Ok(()),
                 )
                 .optional()?
@@ -562,33 +646,43 @@ impl ArchiveStore {
     }
 
     pub(super) fn read(&self, id: &str) -> Result<Option<RemoteProxyRecord>> {
+        Ok(self.read_snapshot(id)?.map(ArchiveSnapshot::into_record))
+    }
+
+    pub(super) fn read_snapshot(&self, id: &str) -> Result<Option<ArchiveSnapshot>> {
         Ok(self
             .with_connection(false, |db| {
                 let bytes: Option<(Vec<u8>, bool)> = db.query_row(
                 "SELECT record,hidden FROM archives WHERE local_id=?1 AND length(record)<=?2",
-                params![id, MAX_REMOTE_PROXY_FILE_BYTES as i64], |row| Ok((row.get(0)?, row.get(1)?))
+                params![id, MAX_ARCHIVE_SNAPSHOT_BYTES as i64], |row| Ok((row.get(0)?, row.get(1)?))
             ).optional()?;
                 let Some((bytes, hidden)) = bytes else {
                     return Ok(None);
                 };
-                let mut record: RemoteProxyRecord = serde_json::from_slice(&bytes)?;
-                record.validate_stored()?;
-                if record.local_session_id != id || !record.pending.is_empty() {
+                let mut snapshot: ArchiveSnapshot = serde_json::from_slice(&bytes)?;
+                snapshot.validate()?;
+                if snapshot.record().local_session_id != id {
                     bail!("invalid remote archive");
                 }
-                record.ui.hidden = hidden;
-                Ok(Some(record))
+                snapshot.record_mut().ui.hidden = hidden;
+                Ok(Some(snapshot))
             })?
             .flatten())
     }
 
     pub(super) fn seal(&self, record: &RemoteProxyRecord) -> Result<()> {
-        record.validate_stored()?;
-        if !record.pending.is_empty() {
-            bail!("remote_proxy_archive_pending");
-        }
-        let bytes = serde_json::to_vec(record)?;
-        if bytes.len() > MAX_REMOTE_PROXY_FILE_BYTES {
+        self.seal_snapshot(ArchiveSnapshot::Archived(record.clone()))
+    }
+
+    pub(super) fn quarantine(&self, record: &RemoteProxyRecord) -> Result<()> {
+        self.seal_snapshot(ArchiveSnapshot::quarantined(record.clone()))
+    }
+
+    fn seal_snapshot(&self, snapshot: ArchiveSnapshot) -> Result<()> {
+        snapshot.validate()?;
+        let record = snapshot.record();
+        let bytes = serde_json::to_vec(&snapshot)?;
+        if bytes.len() > MAX_ARCHIVE_SNAPSHOT_BYTES {
             bail!("remote_proxy_byte_budget");
         }
         self.with_connection(true, |db| {
@@ -621,11 +715,11 @@ impl ArchiveStore {
             if ref_exists {
                 bail!("remote_proxy_archive_conflict");
             }
-            for retired in &record.retired_requests {
+            for (client_id, task_id) in sealed_request_ids(record) {
                 let reused = db
                     .query_row(
                         "SELECT 1 FROM retired_ids WHERE client_id=?1 OR task_id=?2 LIMIT 1",
-                        params![retired.client_request_id, retired.task_id],
+                        params![client_id, task_id],
                         |_| Ok(()),
                     )
                     .optional()?
@@ -637,7 +731,7 @@ impl ArchiveStore {
             let mut anchor = self
                 .read_anchor()?
                 .ok_or_else(|| anyhow::anyhow!("missing archive anchor"))?;
-            anchor.pending = Some(record.clone());
+            anchor.pending = Some(snapshot.clone());
             self.write_anchor(&anchor)?;
             Ok(())
         })?;
@@ -709,8 +803,12 @@ impl ArchiveStore {
             .with_connection(false, |db| {
                 let mut statement = db.prepare(
                     "SELECT sequence,local_id,
-                json_extract(CAST(record AS TEXT),'$.ui'),
-                json_array_length(CAST(record AS TEXT),'$.projection.entries')
+                coalesce(json_extract(CAST(record AS TEXT),'$.record.ui'),
+                    json_extract(CAST(record AS TEXT),'$.ui')),
+                coalesce(json_array_length(CAST(record AS TEXT),'$.record.projection.entries'),
+                    json_array_length(CAST(record AS TEXT),'$.projection.entries')),
+                coalesce(json_array_length(CAST(record AS TEXT),'$.record.pending'),
+                    json_array_length(CAST(record AS TEXT),'$.pending'))
                 FROM archives WHERE hidden=0 AND sequence<?1 ORDER BY sequence DESC LIMIT 256",
                 )?;
                 let rows = statement.query_map([before.unwrap_or(i64::MAX)], |row| {
@@ -719,17 +817,19 @@ impl ArchiveStore {
                         row.get::<_, String>(1)?,
                         row.get::<_, String>(2)?,
                         row.get::<_, u32>(3)?,
+                        row.get::<_, u32>(4)?,
                     ))
                 })?;
                 let mut list = Vec::new();
                 for row in rows {
-                    let (cursor, id, ui, count) = row?;
+                    let (cursor, id, ui, count, pending_count) = row?;
                     list.push((
                         cursor,
                         RemoteProxyListItem {
                             local_session_id: id,
                             ui: serde_json::from_str(&ui)?,
                             projected_entry_count: count as usize,
+                            pending_count: pending_count as usize,
                         },
                     ));
                 }
