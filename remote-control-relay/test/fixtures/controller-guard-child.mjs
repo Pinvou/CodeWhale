@@ -6,13 +6,20 @@ import { DatabaseSync } from "node:sqlite";
 const statePath = process.argv[2];
 const mode = process.argv[3];
 const seedMode = mode.replace(/^native-/u, "");
+// Distinct exits prove the exact synchronous fault boundary was reached.
+// An earlier open failure must never look like a successful fault injection.
+const bootstrapFaultExit = {
+  "exit-before-guard-protect": 81,
+  "exit-before-seed-commit": 82,
+  "exit-after-seed-commit": 83,
+};
 if (seedMode === "exit-before-seed-commit" || seedMode === "exit-after-seed-commit") {
   const execute = DatabaseSync.prototype.exec;
   DatabaseSync.prototype.exec = function(sql) {
     if (sql.startsWith("PRAGMA application_id=")) {
       const initialization = sql.slice(0, sql.indexOf("COMMIT;"));
       execute.call(this, seedMode === "exit-before-seed-commit" ? initialization : `${initialization}COMMIT;`);
-      process.exit(0); // Real product bootstrap interrupted, without cleanup.
+      process.exit(bootstrapFaultExit[seedMode]); // No cleanup after the real SQL boundary.
     }
     return execute.call(this, sql);
   };
@@ -30,12 +37,15 @@ const io = { ...fs, async rename(source, target) {
   }
   return fs.rename(source, target);
 }, async lstat(target, ...options) {
+  if (seedMode === "fail-before-seed-commit" && target.endsWith(".pinvou-controller-state.guard")) {
+    throw Object.assign(new Error("injected pre-bootstrap failure"), { code: "EACCES" });
+  }
   const metadata = await fs.lstat(target, ...options);
   // The first successful guard stat follows SQLite creation and precedes any
   // protection. This boundary also exists when a restrictive umask means no
   // chmod is needed, unlike a hook on chmod/protect itself.
   if (seedMode === "exit-before-guard-protect" && target.endsWith(".pinvou-controller-state.guard")
-    && metadata.isFile() && (metadata.size === 0n || metadata.size === 0)) process.exit(0);
+    && metadata.isFile() && (metadata.size === 0n || metadata.size === 0)) process.exit(bootstrapFaultExit[seedMode]);
   return metadata;
 } };
 let store;
@@ -68,5 +78,5 @@ try {
     }
   });
 } catch (error) {
-  process.send({ event: "error", code: error.code || "unexpected" }, () => process.exit(0));
+  process.send({ event: "error", code: error.code || "unexpected" }, () => process.exit(1));
 }

@@ -13,6 +13,51 @@ const childFile = fileURLToPath(new URL("./fixtures/controller-guard-child.mjs",
 const security = process.platform === "win32" ? {
   protectPath: async () => {}, verifyPath: async () => {}, verifyAncestors: async () => {},
 } : {};
+async function expectBootstrapFault(child, phase) {
+  const expected = { "before-guard-protect": 81, "before-seed-commit": 82, "after-seed-commit": 83 }[phase];
+  assert.ok(expected, "known bootstrap fault phase required");
+  const { code, signal } = await child.exited;
+  assert.equal(signal, null, "bootstrap fault must exit without a signal");
+  assert.equal(code, expected, `child did not reach the ${phase} fault boundary`);
+}
+function windowsCreatorMetadata(target) {
+  const script = `
+$ErrorActionPreference = 'Stop'
+$identity = [System.Security.Principal.WindowsIdentity]::GetCurrent()
+$current = $identity.User.Value
+$defaultOwner = $identity.Owner.Value
+$acl = Microsoft.PowerShell.Security\\Get-Acl -LiteralPath $env:PINVOU_GUARD_PROBE
+$owner = $acl.GetOwner([System.Security.Principal.SecurityIdentifier]).Value
+function OwnerClass([string]$sid) {
+  if ($sid -eq $current) { return 'current' }
+  if ($sid -eq 'S-1-5-32-544') { return 'administrators' }
+  if ($sid -eq 'S-1-5-18') { return 'system' }
+  return 'other'
+}
+[Console]::Out.Write(([pscustomobject]@{
+  token_owner = (OwnerClass $defaultOwner)
+  file_owner = (OwnerClass $owner)
+  matches_creator_default = ($owner -eq $defaultOwner)
+  protected = $acl.AreAccessRulesProtected
+} | Microsoft.PowerShell.Utility\\ConvertTo-Json -Compress))
+`;
+  const systemRoot = process.env.SystemRoot || process.env.WINDIR;
+  assert.ok(systemRoot);
+  const environment = { PINVOU_GUARD_PROBE: target };
+  for (const key of ["SystemRoot", "WINDIR", "PATH", "PATHEXT", "TEMP", "TMP"]) {
+    if (process.env[key] !== undefined) environment[key] = process.env[key];
+  }
+  const result = spawnSync(join(systemRoot, "System32", "WindowsPowerShell", "v1.0", "powershell.exe"),
+    ["-NoLogo", "-NoProfile", "-NonInteractive", "-EncodedCommand", Buffer.from(script, "utf16le").toString("base64")],
+    { env: environment, encoding: "utf8", windowsHide: true, timeout: 15000, maxBuffer: 4096 });
+  assert.ifError(result.error);
+  assert.equal(result.status, 0, "native creator metadata inspection failed");
+  const metadata = JSON.parse(result.stdout);
+  for (const key of ["token_owner", "file_owner"]) assert.ok(["current", "administrators", "system", "other"].includes(metadata[key]));
+  assert.equal(typeof metadata.matches_creator_default, "boolean");
+  assert.equal(typeof metadata.protected, "boolean");
+  return metadata;
+}
 async function fixture(t) {
   const directory = await fs.realpath(await fs.mkdtemp(join(tmpdir(), "pinvou-guard-test-")));
   const statePath = join(directory, "controller", "state.json");
@@ -43,6 +88,7 @@ async function fixture(t) {
       env: Object.fromEntries(Object.entries(globalThis.process.env).filter(([key]) => !key.startsWith("PINVOU_"))),
     });
     children.push(process);
+    const exited = new Promise(resolve => process.once("exit", (code, signal) => resolve({ code, signal })));
     let failure = "";
     process.stderr.on("data", chunk => { failure += chunk; });
     const messages = [], waiters = [];
@@ -57,7 +103,7 @@ async function fixture(t) {
         waiters.push(message => { clearTimeout(timer); resolve(message); });
       });
     }
-    return { process, next, send: message => process.send(message) };
+    return { process, next, exited, send: message => process.send(message) };
   }
   return { directory, statePath, options, open, child };
 }
@@ -218,21 +264,29 @@ test("controller guard close failure retains resource until retry without deleti
 
 test("controller guard native exit before protecting its new inode recovers through CAS and restart", async t => {
   const f = await fixture(t), child = f.child("native-exit-before-guard-protect");
-  await new Promise((resolve, reject) => {
-    child.process.once("exit", (code, signal) => code === 0 && !signal
-      ? resolve() : reject(new Error(`bootstrap child failed: ${code}/${signal}`)));
-  });
+  await expectBootstrapFault(child, "before-guard-protect");
   const path = join(dirname(f.statePath), RELAY_CONTROLLER_GUARD_FILENAME);
   const before = await fs.lstat(path, { bigint: true });
   assert.equal(before.size, 0n);
   await assert.rejects(fs.stat(f.statePath), { code: "ENOENT" });
   await assert.rejects(fs.stat(`${path}-journal`), { code: "ENOENT" });
+  if (process.platform === "win32") {
+    const metadata = windowsCreatorMetadata(path);
+    t.diagnostic(`windows_guard_empty_creator ${JSON.stringify(metadata)}`);
+    assert.equal(metadata.matches_creator_default, true);
+    assert.notEqual(metadata.token_owner, "other");
+  }
   const native = { protectPath: undefined, verifyPath: undefined, verifyAncestors: undefined };
   const restored = await f.open(native);
   await restored.compareAndSwap("guard_test", "0", { commits: 1 });
   await restored.close();
   const after = await fs.lstat(path, { bigint: true });
   assert.deepEqual([after.dev, after.ino], [before.dev, before.ino]);
+  if (process.platform === "win32") {
+    const metadata = windowsCreatorMetadata(path);
+    assert.equal(metadata.file_owner, "current");
+    assert.equal(metadata.protected, true);
+  }
   const restarted = await f.open(native);
   assert.equal(restarted.readNamespace("guard_test").value.commits, 1);
   await restarted.close();
@@ -290,10 +344,7 @@ test("controller guard refuses changed identity before bootstrap permission repa
 
 test("controller guard bootstrap recovery never tightens a nonempty unprotected protocol", async t => {
   const f = await fixture(t), child = f.child("native-exit-before-guard-protect");
-  await new Promise((resolve, reject) => {
-    child.process.once("exit", (code, signal) => code === 0 && !signal
-      ? resolve() : reject(new Error(`bootstrap child failed: ${code}/${signal}`)));
-  });
+  await expectBootstrapFault(child, "before-guard-protect");
   const path = join(dirname(f.statePath), RELAY_CONTROLLER_GUARD_FILENAME);
   const database = new DatabaseSync(path);
   database.exec("PRAGMA application_id=7; PRAGMA user_version=99;");
@@ -313,16 +364,19 @@ test("controller guard bootstrap recovery never tightens a nonempty unprotected 
 for (const phase of ["before", "after"]) {
   test(`controller guard native bootstrap exit ${phase} seed commit recovers before first JSON access`, async t => {
     const f = await fixture(t), child = f.child(`native-exit-${phase}-seed-commit`);
-    await new Promise((resolve, reject) => {
-      child.process.once("exit", (code, signal) => code === 0 && !signal
-        ? resolve() : reject(new Error(`bootstrap child failed: ${code}/${signal}`)));
-    });
+    await expectBootstrapFault(child, `${phase}-seed-commit`);
     await assert.rejects(fs.stat(f.statePath), { code: "ENOENT" });
     const guardPath = join(dirname(f.statePath), RELAY_CONTROLLER_GUARD_FILENAME);
     const identity = await fs.lstat(guardPath, { bigint: true });
     if (phase === "before") {
       assert.equal(identity.size, 0n);
       assert.equal((await fs.stat(`${guardPath}-journal`)).size, 512);
+      if (process.platform === "win32") {
+        const metadata = windowsCreatorMetadata(`${guardPath}-journal`);
+        t.diagnostic(`windows_guard_journal_creator ${JSON.stringify(metadata)}`);
+        assert.equal(metadata.matches_creator_default, true);
+        assert.notEqual(metadata.token_owner, "other");
+      }
     } else {
       assert.ok(identity.size > 0n);
       await assert.rejects(fs.stat(`${guardPath}-journal`), { code: "ENOENT" });
@@ -342,6 +396,15 @@ for (const phase of ["before", "after"]) {
     await restarted.close();
   });
 }
+
+test("controller guard fault qualification rejects an early open failure", async t => {
+  const f = await fixture(t), child = f.child("native-fail-before-seed-commit");
+  await assert.rejects(expectBootstrapFault(child, "before-seed-commit"), {
+    code: "ERR_ASSERTION", actual: 1, expected: 82,
+  });
+  assert.equal((await child.next()).event, "error");
+  await assert.rejects(fs.stat(f.statePath), { code: "ENOENT" });
+});
 
 test("controller guard refuses unknown protocol and unrelated journal without changing JSON", async t => {
   const f = await fixture(t);

@@ -33,8 +33,14 @@ If that opener exits before protection, a later opener may finish tightening onl
 an owned, single-link, zero-byte bootstrap with no journal in the verified private
 directory. On POSIX it removes only default extra read bits from an owner-readable
 and writable file; on Windows it first checks owner, allowed principals and rights
-of the inherited ACL. It then revalidates the fixed identity and full private
-permissions. Nonempty protocols, shared write/execute bits, foreign ownership,
+of the inherited ACL. Only for the empty bootstrap and exact SQLite journal,
+the owner may be the running User, SYSTEM or Administrators, the same principals
+already granted FullControl by the private directory. This is not proof of the
+file's creator and does not admit any foreign ACL principal. It permits the same
+User to recover after its elevation token changes; no same-token requirement is
+imposed. Empty bootstrap protection then assigns the running User as owner.
+The store revalidates the fixed identity and full private permissions; ready or
+nonempty guards, JSON and owner files still require the strict User owner. Nonempty protocols, shared write/execute bits, foreign ownership,
 unsafe identities and unknown sidecars are never repaired this way.
 
 The exact `.pinvou-controller-state.guard-journal` is a registered default-DELETE
@@ -137,3 +143,8 @@ Local Windows concurrency tests use the existing injected filesystem-security
 adapters and are separate from native DACL qualification. Linux and Windows CI
 must exercise their applicable guard regressions; one platform's API experiment
 does not establish the other platform or deployment qualification.
+
+The lock-rollout tests resolve Bash from the active Git for Windows installation
+instead of assuming a drive. For a custom installation, set `PINVOU_TEST_BASH`
+to an existing absolute Bash executable before running those tests. This is a
+test-only setting, not a deployment or service configuration option.

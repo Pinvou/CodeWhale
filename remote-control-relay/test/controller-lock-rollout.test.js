@@ -1,14 +1,34 @@
 import assert from "node:assert/strict";
 import * as fs from "node:fs/promises";
+import { existsSync } from "node:fs";
 import { spawnSync } from "node:child_process";
 import { tmpdir } from "node:os";
-import { dirname, join } from "node:path";
+import { dirname, isAbsolute, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import test from "node:test";
 
 const relay = dirname(dirname(fileURLToPath(import.meta.url)));
 const helper = join(relay, "scripts", "controller-lock-rollout.sh");
-const bash = process.platform === "win32" ? "C:/Program Files/Git/bin/bash.exe" : "/bin/bash";
+function bashExecutable() {
+  const configured = process.env.PINVOU_TEST_BASH;
+  if (configured) {
+    assert.ok(isAbsolute(configured) && existsSync(configured), "PINVOU_TEST_BASH must name an existing absolute Bash executable");
+    return configured;
+  }
+  if (process.platform !== "win32") return "/bin/bash";
+  const gitPaths = spawnSync("where.exe", ["git"], {
+    encoding: "utf8", timeout: 10000, windowsHide: true, maxBuffer: 64 * 1024,
+  });
+  assert.ifError(gitPaths.error);
+  if (gitPaths.status === 0) {
+    for (const gitPath of (gitPaths.stdout || "").trim().split(/\r?\n/u).filter(Boolean)) {
+      const candidate = join(dirname(dirname(gitPath)), "bin", "bash.exe");
+      if (existsSync(candidate)) return candidate;
+    }
+  }
+  throw new Error("Lock rollout tests require Git for Windows on PATH or PINVOU_TEST_BASH");
+}
+const bash = bashExecutable();
 const capability = "export const RELAY_CONTROLLER_LOCK_PROTOCOL = 2;\n";
 
 async function setup(t) {

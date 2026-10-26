@@ -191,11 +191,18 @@ export async function verifyWindowsPath(target, kind) {
 }
 
 async function verifyWindowsGuardJournal(target) {
-  // A SQLite-created rollback journal inherits the already verified private
-  // directory ACL. Verify the same owner/principals/rights without requiring
-  // the SQLite engine to change that ACL's inheritance bit.
+  // SQLite-created empty guards and rollback journals inherit the verified
+  // private directory ACL. Their owner may be an already trusted private
+  // principal (User, SYSTEM or Administrators), including after the same User
+  // restarts with a different elevation token. Owner equality is not provenance.
+  // Empty bootstrap is normalized to User after all identity/ACL checks;
+  // ready/nonempty guards remain strict User-owned. Never modify a live journal.
   const script = WINDOWS_ACL_VERIFY_SCRIPT.replace(
     "if (-not $acl.AreAccessRulesProtected) { throw 'ACL inheritance enabled' }", "",
+  ).replace(
+    "if ($acl.Owner -ne $current.Value -and $acl.Owner -ne $current.Translate([System.Security.Principal.NTAccount]).Value) { throw 'unexpected ACL owner' }",
+    `$owner = $acl.GetOwner([System.Security.Principal.SecurityIdentifier]).Value
+if ($allowed -notcontains $owner) { throw 'unexpected ACL owner' }`,
   );
   await runWindowsAclScript(script, target, "file");
 }
@@ -810,8 +817,8 @@ export class RelayStateStore {
 
   async #verifyEmptyGuardBootstrap(target, metadata) {
     if (process.platform === "win32") {
-      // Same strict owner/principals/rights check; only the inherited bit can
-      // remain from SQLite creation inside our already verified private parent.
+      // Only existing private principals may own this empty bootstrap. Keep
+      // the full rights/ACE checks; protect then restores strict User ownership.
       if (this.#verifyPath === verifyWindowsPath) return verifyWindowsGuardJournal(target);
       return this.#verifyFilesystemPath(target, "file");
     }
