@@ -499,4 +499,10 @@ The public maintenance branch advanced by five reviewed squashes — #118 `a96fd
 
 Recount: 84 registered commits above v0.9.12, 82 with a sign-off; #107 `f27672935` and #116 `e9a7f48da1` remain the only missing-footer exceptions. Measured drift at this head: 520 files, +89901/-39349, net +50552; 253 distinct `forkguard_*` names (floor 64). The immutable r3 closure tag remains `61cb769be`. CodeWhale-side review receipts for #118/#119/#122 live in their CodeWhale PRs; this register records the consumed public state and does not re-claim those execution boundaries for the parent tree beyond the parent gates run in this PR.
 
-Official ?????????????????? `docs/webpki-roots-exception.md` ???? `webpki-roots 0.26.11 ? 1.0.10` ??????? `webpki-root-certs 1.0.10`??????? lock ? 1.0.11 ???????????????????????????????????????????
+Official 父仓集成边界：三套产品锁文件继续服从 `docs/webpki-roots-exception.md` 的已审核 `webpki-roots 0.26.11 → 1.0.10` 精确图，保留原 `webpki-root-certs 1.0.10`；不以底座自身 lock 的 1.0.11 解析替代父仓证书变更控制。本次仅消费底座公开维护实现及必要依赖迁移，不扩大证书图守卫。
+
+## 2026-10-26 普通对话提交事务补齐（Community #785）
+
+Official 已有引擎快照写入/通知的同事务提交、代际写入存活标记、mutation 门内启动基线和 ColdEngineCustody 未公开引擎回收，本次保留这些实现与远控生产 CAS。仅补齐乐观准入显示消息回退：`persist_admitted_chat_display_with_commit` 在同一 mutation 门内检查代际、落盘并通知，版本不匹配时通知现有 durable 版本而不覆盖。转发器三条保存路径均使用原引擎存活标记，退休回退不再写入或发布。既有无回调接口保留。
+
+行为回归：`display_fallback_publishes_in_transaction_and_refuses_retired_writers`、`queued_engine_snapshot_checks_retirement_under_the_mutation_gate` 与 `transcript_persist_pins`；生命周期及已有回收方 5 秒兜底边界见 `docs/chat-transcript-commit-lifecycle.md`。不修改底座 gitlink 或底座行为。
