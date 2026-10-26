@@ -1493,12 +1493,61 @@ impl SessionStore {
         edit_last: bool,
     ) -> Result<SavedSession> {
         let _mutation = self.scheduled_mutation.lock();
+        self.persist_admitted_chat_display_locked(
+            id,
+            expected_revision,
+            display_message,
+            edit_last,
+            |_| {},
+        )
+    }
+
+    /// Same transaction contract as [`Self::persist_chat_engine_state_with_commit`]
+    /// for the optimistic admission fallback. `committed` receives the durable
+    /// state on every successful return — including the revision-mismatch
+    /// no-op, which leaves the newer transcript untouched — so the caller
+    /// always publishes the exact durable revision. Neither callback may
+    /// re-enter a mutating SessionStore method.
+    pub(crate) fn persist_admitted_chat_display_with_commit(
+        &self,
+        id: &str,
+        expected_revision: &str,
+        display_message: Message,
+        edit_last: bool,
+        admit: impl FnOnce() -> bool,
+        committed: impl FnOnce(&SavedSession),
+    ) -> Result<Option<SavedSession>> {
+        let _mutation = self.scheduled_mutation.lock();
+        if !admit() {
+            return Ok(None);
+        }
+        self.persist_admitted_chat_display_locked(
+            id,
+            expected_revision,
+            display_message,
+            edit_last,
+            committed,
+        )
+        .map(Some)
+    }
+
+    /// Body of the admitted display fallback; the caller holds
+    /// `scheduled_mutation` for the whole call, including `committed`.
+    fn persist_admitted_chat_display_locked(
+        &self,
+        id: &str,
+        expected_revision: &str,
+        display_message: Message,
+        edit_last: bool,
+        committed: impl FnOnce(&SavedSession),
+    ) -> Result<SavedSession> {
         validate_session_id(id)?;
         let mut session = self
             .manager
             .load_session_snapshot(id)
             .with_context(|| format!("load chat session {id} for admitted display fallback"))?;
         if transcript_revision(&session.messages)? != expected_revision {
+            committed(&session);
             return Ok(session);
         }
         if edit_last {
@@ -1529,6 +1578,7 @@ impl SessionStore {
             || format!("persist admitted chat display for {id}"),
             "admitted display save",
         )?;
+        committed(&session);
         Ok(session)
     }
 }
