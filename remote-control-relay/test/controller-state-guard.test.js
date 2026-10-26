@@ -316,6 +316,51 @@ if (process.platform !== "win32") test("controller guard bootstrap recovery only
   }
 });
 
+if (process.platform !== "win32") {
+  for (const fault of ["foreign-uid", "other-write"]) {
+    test(`controller guard bootstrap refuses ${fault} before chmod and remains recoverable`, async t => {
+      const f = await fixture(t);
+      await (await f.open()).close();
+      const path = join(dirname(f.statePath), RELAY_CONTROLLER_GUARD_FILENAME);
+      await fs.writeFile(path, ""); // No SQLite connection remains open.
+      await fs.chmod(path, fault === "foreign-uid" ? 0o644 : 0o602);
+      const before = await fs.lstat(path, { bigint: true });
+      const primary = await fs.readFile(f.statePath);
+      let injected = true, guardChmods = 0;
+      const filesystem = { ...fs,
+        async lstat(target, ...args) {
+          const stat = await fs.lstat(target, ...args);
+          if (!injected || target !== path || fault !== "foreign-uid") return stat;
+          const foreign = Object.create(stat);
+          foreign.uid = typeof stat.uid === "bigint" ? stat.uid + 1n : stat.uid + 1;
+          return foreign;
+        },
+        async chmod(target, ...args) {
+          if (target === path) guardChmods++;
+          return fs.chmod(target, ...args);
+        },
+      };
+      try {
+        await assert.rejects(f.open({ fs: filesystem }), { code: "relay_state_permissions_unsafe" });
+        assert.equal(guardChmods, 0, "foreign ownership or shared write must be rejected before repair");
+        const after = await fs.lstat(path, { bigint: true });
+        assert.deepEqual([after.dev, after.ino, after.mode, after.size], [before.dev, before.ino, before.mode, 0n]);
+        assert.equal(await fs.readFile(path, "utf8"), "");
+        assert.deepEqual(await fs.readFile(f.statePath), primary);
+      } finally {
+        injected = false;
+        await fs.chmod(path, 0o600);
+      }
+      const recovered = await f.open({ fs: filesystem });
+      await recovered.compareAndSwap("guard_test", "0", { commits: 1 });
+      await recovered.close();
+      const restarted = await f.open();
+      assert.equal(restarted.readNamespace("guard_test").value.commits, 1);
+      await restarted.close();
+    });
+  }
+}
+
 test("controller guard refuses changed identity before bootstrap permission repair", async () => {
   let stats = 0, protects = 0, bootstrapChecks = 0, verifies = 0;
   const metadata = ino => ({ isFile: () => true, isSymbolicLink: () => false,
@@ -439,6 +484,36 @@ test("controller guard retained after abandoned open before old owner publicatio
     await recovered.close();
     assert.equal((await f.open()).readNamespace("guard_test").value.commits, 1);
   } finally { DatabaseSync.prototype.close = original; }
+});
+
+test("controller guard first release refuses unverifiable identity before removing its owner or unlocking", async t => {
+  const f = await fixture(t), path = join(dirname(f.statePath), RELAY_CONTROLLER_GUARD_FILENAME);
+  let injected = false;
+  const owner = await f.open({ fs: { ...fs, async lstat(target, ...args) {
+    const stat = await fs.lstat(target, ...args);
+    if (!injected || target !== path) return stat;
+    const changed = Object.create(stat);
+    changed.ino = typeof stat.ino === "bigint" ? stat.ino + 1n : stat.ino + 1;
+    return changed;
+  } } });
+  const legacyOwner = await fs.readFile(`${f.statePath}.lock`);
+  injected = true;
+  try {
+    await assert.rejects(owner.close(), { code: "relay_state_guard_identity_changed" });
+    assert.deepEqual(await fs.readFile(`${f.statePath}.lock`), legacyOwner);
+    await assert.rejects(f.open(), { code: "relay_state_locked" });
+    const contender = f.child();
+    assert.deepEqual(await contender.next(), { event: "error", code: "relay_state_locked" });
+  } finally {
+    injected = false;
+    await owner.close();
+  }
+  const successor = await f.open();
+  await successor.compareAndSwap("guard_test", "0", { commits: 1 });
+  await successor.close();
+  const restarted = await f.open();
+  assert.equal(restarted.readNamespace("guard_test").value.commits, 1);
+  await restarted.close();
 });
 
 test("controller guard late close after actual OS unlock cannot remove a successor's old owner", async t => {

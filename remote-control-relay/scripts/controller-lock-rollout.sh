@@ -34,7 +34,9 @@ controller_lock_prepare_upgrade() {
       echo 'controller_lock_upgrade_archive_already_exists' >&2
       return 78
     fi
-    # All owners are stopped. This is an offline archive, never a live-guard copy.
+    # Precondition on every upgrade: the operator has stopped all other shared-
+    # directory writers and restart sources; stopping this unit alone is not proof.
+    # Only under that precondition is this an offline archive, never a live copy.
     cp -a -- "$state_dir" "$backup/controller-state" || return
   fi
 }

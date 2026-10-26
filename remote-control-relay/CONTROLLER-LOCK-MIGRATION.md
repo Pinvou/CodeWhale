@@ -144,6 +144,17 @@ adapters and are separate from native DACL qualification. Linux and Windows CI
 must exercise their applicable guard regressions; one platform's API experiment
 does not establish the other platform or deployment qualification.
 
+The rollout helper stops only its supplied service unit. Before every upgrade,
+including upgrades from an already recognized lock protocol, the operator must
+stop all other writers sharing the state directory and their restart sources.
+The helper's archive is an offline archive only after that independent check.
+
+On Windows, each guarded write rechecks the fixed guard's ACL. A normal persist
+writes backup and primary, adding two guard-verification PowerShell launches to
+the existing protection/verification work. This is not the total process count
+of a CAS. Windows latency has not been measured here and depends on the host;
+Linux timing cannot substitute for it. These checks retain the identity fence.
+
 The lock-rollout tests resolve Bash from the active Git for Windows installation
 instead of assuming a drive. For a custom installation, set `PINVOU_TEST_BASH`
 to an existing absolute Bash executable before running those tests. This is a

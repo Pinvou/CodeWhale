@@ -388,6 +388,12 @@ then preserves that verified file identity, avoiding duplicate PowerShell
 processes for each installed target; a normal CAS invokes the setter once for
 each of its two new state files.
 
+The fixed controller guard is separately verified immediately before each
+guarded write. On Windows, the two backup/primary writes of a normal persist
+therefore add two PowerShell guard-ACL checks to the existing work; this is not
+the whole CAS process count. Windows latency is host-dependent and unmeasured
+here. See `CONTROLLER-LOCK-MIGRATION.md`; the guard checks are not cached away.
+
 The JSON parser rejects unknown schema fields, unsafe object keys, non-integer
 numbers, excessive nesting, oversized strings/files, unsafe paths, symlinks,
 junctions/reparse points and unsupported schema versions. Every existing path
