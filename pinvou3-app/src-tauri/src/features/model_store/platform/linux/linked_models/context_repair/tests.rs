@@ -186,6 +186,77 @@ fn verified_legacy_32k_is_corrected_once_and_survives_reload_and_later_user_edit
 }
 
 #[test]
+fn every_verified_card_repairs_legacy_32k_and_persists_its_own_receipt() {
+    for (card, profile) in [
+        ("qwen38-27b-sglang0519", None),
+        ("qwen38-27b-nvfp4-tachyon", None),
+        ("ornith15-35b-a3b-nvfp4", None),
+        ("ornith-15-9b-nvfp4", None),
+        ("qwen38-27b-nvfp4-mtp", None),
+        ("qwen38-27b-nvfp4-mtp", Some("production-sampling")),
+    ] {
+        // Keep the HOME/config lock for the full SQLite, settings and HTTP lifecycle.
+        let _home = config::TempHome::new();
+        let server = Server::new();
+        let mut expected = setup(card, &server.base);
+        db::connect()
+            .unwrap()
+            .execute(
+                "UPDATE store_models SET active_profile_id=?1 WHERE card_id=?2",
+                rusqlite::params![profile, card],
+            )
+            .unwrap();
+        assert_eq!(window(), Some(32768), "{card} / {profile:?}");
+        assert_eq!(receipts(), 0, "{card} / {profile:?}");
+        assert_eq!(server.count(), 0, "{card} / {profile:?}");
+
+        // Exercise real route discovery, /models probing and the settings transaction.
+        assert_eq!(
+            super::super::sync(None).unwrap(),
+            ["stable-id"],
+            "{card} / {profile:?}"
+        );
+        expected.context_window_tokens = Some(262144);
+        let persisted = UserPrefs::load();
+        assert_eq!(
+            persisted.model_by_id("stable-id"),
+            Some(&expected),
+            "{card} / {profile:?}"
+        );
+        assert_eq!(
+            persisted.advanced.active_model_id.as_deref(),
+            Some("stable-id"),
+            "{card} / {profile:?}"
+        );
+        let receipt = format!("verified-256k-v1/{card}");
+        assert_eq!(
+            persisted
+                .advanced
+                .model_store_context_repairs
+                .get("stable-id"),
+            Some(&receipt),
+            "{card} / {profile:?}"
+        );
+        assert_eq!(receipts(), 1, "{card} / {profile:?}");
+        assert_eq!(server.count(), 1, "{card} / {profile:?}");
+
+        // A later user edit survives a reload: each card's persisted receipt is honored.
+        UserPrefs::update_transaction(|prefs| {
+            prefs.advanced.saved_models[0].context_window_tokens = Some(32768);
+            Ok(())
+        })
+        .unwrap();
+        assert!(
+            super::super::sync(None).unwrap().is_empty(),
+            "{card} / {profile:?}"
+        );
+        assert_eq!(window(), Some(32768), "{card} / {profile:?}");
+        assert_eq!(receipts(), 1, "{card} / {profile:?}");
+        assert_eq!(server.count(), 1, "{card} / {profile:?}");
+    }
+}
+
+#[test]
 fn explicit_32k_during_a_successful_probe_survives_with_or_without_a_legacy_card_link() {
     for already_linked in [false, true] {
         let _home = config::TempHome::new();

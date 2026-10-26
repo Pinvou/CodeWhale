@@ -80,6 +80,7 @@ try {
       can_delete: state !== 'downloading', size_bytes: 128, error,
     }]);
     window.interruptedCopy = dictZh.uiModelStore.versionInterrupted;
+    window.versionCostCopy = dictZh.uiModelStore.versionCostHint;
     window.renderVersions(true);
   });
   const waitRequest = () => page.waitForFunction(() => window.pendingVersions.length > 0);
@@ -98,6 +99,7 @@ try {
   for (const [state, error] of [['ready', null], ['failed', 'test download failure'], ['failed', 'version_download_interrupted']]) {
     await answer('downloading');
     await page.waitForSelector('[data-testid="model-version-row"]');
+    assert.equal(await page.$eval('[data-testid="model-version-cost-hint"]', (node) => node.textContent), await page.evaluate(() => window.versionCostCopy));
     await page.evaluate(() => window.renderVersions(false));
     await answer(state, error);
     await expectActions(2);
@@ -479,17 +481,28 @@ try {
   await page.click('[data-testid="model-store-follow-context"]');
   await page.waitForFunction(() => window.detailToast?.includes('无法恢复跟随部署'));
   assert.equal(await page.$eval('[data-testid="model-store-follow-context"]', (button) => button.disabled), false);
-  await page.evaluate(() => { window.contextError = 'store_context_follow_unsupported'; });
+  await page.evaluate(() => {
+    window.contextError = 'model store endpoint changed or is unavailable; refresh the card and retry';
+    window.detailToast = null;
+  });
   await page.click('[data-testid="model-store-follow-context"]');
-  await page.waitForFunction(() => window.detailToast?.includes('后台商店需要更新'));
-  await page.evaluate(() => { window.contextError = 'store_protocol: incompatible host'; window.detailToast = null; });
+  await page.waitForFunction(() => window.detailToast === window.staleLinkCopy);
+  for (const unavailable of ['Command model_store_follow_deployment_context not found', 'Tauri invoke is unavailable']) {
+    await page.evaluate((message) => { window.contextError = message; window.detailToast = null; }, unavailable);
+    await page.click('[data-testid="model-store-follow-context"]');
+    await page.waitForFunction(() => window.detailToast?.includes('当前宿主无法执行此操作'));
+  }
+  await page.evaluate(() => { window.contextError = 'private backend path not found: credential'; window.detailToast = null; });
   await page.click('[data-testid="model-store-follow-context"]');
-  await page.waitForFunction(() => window.detailToast?.includes('后台商店需要更新'));
+  await page.waitForFunction(() => window.detailToast?.includes('无法恢复跟随部署'));
+  assert.doesNotMatch(await page.evaluate(() => window.detailToast), /private|credential|当前宿主/);
   await page.evaluate(() => { window.failContext = false; });
   await page.click('[data-testid="model-store-follow-context"]');
   await page.waitForFunction(() => window.detailToast?.includes('已恢复跟随部署'));
   await page.waitForFunction(() => !document.querySelector('[data-testid="model-store-follow-context"]'));
   assert.deepEqual(await page.evaluate(() => window.contextRequests), [
+    { cardId: 'isolated-card', modelId: 'existing-store-link' },
+    { cardId: 'isolated-card', modelId: 'existing-store-link' },
     { cardId: 'isolated-card', modelId: 'existing-store-link' },
     { cardId: 'isolated-card', modelId: 'existing-store-link' },
     { cardId: 'isolated-card', modelId: 'existing-store-link' },

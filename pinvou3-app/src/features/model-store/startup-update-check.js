@@ -11,7 +11,10 @@ export function scheduleStartupUpdateCheck({ available, requestFrame, cancelFram
       timer = setTimer(() => {
         Promise.resolve().then(check).then((report) => {
           if (alive) onReport(report);
-        }).catch(() => {});
+        }).catch(() => {
+          // Backend errors may contain private paths or credentials; log only the operation.
+          console.warn('model_store_startup_update_check failed');
+        });
       }, STARTUP_UPDATE_DELAY_MS);
     });
   });
