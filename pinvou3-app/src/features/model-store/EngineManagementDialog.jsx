@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { deleteInstalledEngine, fetchInstalledEngines } from './model-store-api.js';
 import { formatBytes } from './model-store-logic.js';
 import { MsButton, MsDialog, MsDialogTitle, TEXT_PRIMARY, TEXT_SECONDARY } from './model-store-ui.jsx';
@@ -15,17 +15,23 @@ function EngineManagementDialog({ open, onClose, onChanged, theme, copy }) {
   const [error, setError] = useState(null);
   const [confirm, setConfirm] = useState(null);
   const [busy, setBusy] = useState(false);
+  // r6 P2-4：快关快开/慢 IPC 下，过期响应会覆盖新一轮结果或把新界面打成
+  // 错误态（LocalResourcesDialog 同款闸门——它有、这里此前没有）。
+  const loadTokenRef = useRef(0);
 
   const load = async () => {
+    const token = (loadTokenRef.current += 1);
     setLoading(true);
     setError(null);
     try {
       const list = await fetchInstalledEngines();
+      if (token !== loadTokenRef.current) return;
       setEngines(Array.isArray(list) ? list : []);
     } catch (cause) {
+      if (token !== loadTokenRef.current) return;
       setError(String(cause?.message || cause));
     } finally {
-      setLoading(false);
+      if (token === loadTokenRef.current) setLoading(false);
     }
   };
 

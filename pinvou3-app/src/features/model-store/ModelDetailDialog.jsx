@@ -152,13 +152,17 @@ function ModelDetailDialog({ cardId, card, copy, theme, onClose, onRedeploy, onT
   };
 
   const addKey = async () => {
+    // r6 P2-4：慢 IPC 期间用户可能已切到另一张卡——过期响应的 toast 和 load()
+    // 会把 A 卡的结果落进 B 卡的弹窗（revokeKey 同款闸门）。
+    const token = loadTokenRef.current;
     setBusy(true);
     try {
       await createApiKey(cardId, null);
+      if (token !== loadTokenRef.current) return;
       onToast(copy.keyCreated);
       await load();
     } catch (keyError) {
-      onToast(String(keyError?.message || keyError));
+      if (token === loadTokenRef.current) onToast(String(keyError?.message || keyError));
     } finally {
       setBusy(false);
     }
@@ -201,6 +205,9 @@ function ModelDetailDialog({ cardId, card, copy, theme, onClose, onRedeploy, onT
       onToast(copy[linkable.reason] || copy.linkFailed);
       return;
     }
+    // r6 P2-4：saveModel 是慢 IPC——期间用户可能切卡，过期结果的 toast/load()
+    // 会落进别的卡（revokeKey 同款闸门）。
+    const token = loadTokenRef.current;
     setBusy(true);
     try {
       const modelName = record.endpoint_model || record.model_name;
@@ -218,12 +225,13 @@ function ModelDetailDialog({ cardId, card, copy, theme, onClose, onRedeploy, onT
         existingId: findLinkedRows(savedModels, modelName)[0]?.id,
       });
       await bridge.models.saveModel(saved);
+      if (token !== loadTokenRef.current) return;
       // 选为当前模型。注意这只影响**新建的会话**，不会打断正在生成的那些。
       if (bridge.models.setActiveModel) await bridge.models.setActiveModel(saved.id);
       onToast(copy.linkDone);
       await load();
     } catch (linkError) {
-      onToast(String(linkError?.message || linkError));
+      if (token === loadTokenRef.current) onToast(String(linkError?.message || linkError));
     } finally {
       setBusy(false);
     }
@@ -316,7 +324,20 @@ function ModelDetailDialog({ cardId, card, copy, theme, onClose, onRedeploy, onT
                 <input
                   type="checkbox"
                   checked={record.auto_start !== false}
-                  onChange={async (event) => { await setAutoStart(record.card_id, event.target.checked); }}
+                  onChange={async (event) => {
+                    const next = event.target.checked;
+                    try {
+                      await setAutoStart(record.card_id, next);
+                    } catch (toggleError) {
+                      // 静默回弹不是反馈（r6 P2-4）：失败要说清没生效以及原因
+                      onToast(`${copy.autoStartSaveFailed}：${String(toggleError?.message || toggleError)}`);
+                      return;
+                    }
+                    // 成功才同步本地副本；不重拉详情（重拉会闪整个面板）
+                    setDetail((prev) => (prev?.record === record
+                      ? { ...prev, record: { ...record, auto_start: next } }
+                      : prev));
+                  }}
                   data-testid="model-store-auto-start-toggle"
                 />
               </MsRow>
@@ -451,7 +472,11 @@ function ModelDetailDialog({ cardId, card, copy, theme, onClose, onRedeploy, onT
                 运行中禁用：重新部署会撞上还占着端口的旧容器，必须先停用。 */}
             {/* 智能操作按钮：一个按钮按状态切换（更新脚本 > 卸载部署 > 部署模型）。
                 设计目标：用户在详情页只需要关注一个主操作，不需要在多个按钮间
-                猜测哪个是自己想要的。关闭弹窗走右上角 × 或点击遮罩。 */}
+                猜测哪个是自己想要的。关闭弹窗走右上角 × 或点击遮罩。
+                r6 P2-4：主按钮收窄后另外两个入口**常驻在次级行**——有更新徽标时
+                卸载入口曾被主按钮顶掉（用户没有卸载路径）；「重新部署」是修复
+                入口（见上注释：部署被外部破坏时脚本哈希没变也要能重来），
+                deployed 状态常驻，运行中禁用。 */}
             {(() => {
               const hasUpdate = scriptUpdates?.[record.card_id];
               const isDeployed = record.status === 'deployed';
@@ -509,6 +534,36 @@ function ModelDetailDialog({ cardId, card, copy, theme, onClose, onRedeploy, onT
                 >
                   {copy.actionDeploy}
                 </MsButton>
+              );
+            })()}
+            {(() => {
+              // r6 P2-4 次级行：主按钮收窄后仍要可达的两个入口。
+              const hasUpdate = scriptUpdates?.[record.card_id];
+              const isDeployed = record.status === 'deployed';
+              if (!isDeployed) return null;
+              const isRunning = record.running;
+              return (
+                <div className="mt-1.5 flex flex-wrap items-center gap-2">
+                  {hasUpdate ? (
+                    <MsButton
+                      tone="danger"
+                      disabled={isRunning || cardBusy}
+                      onClick={() => { onClose(); onUninstall?.(record); }}
+                      data-testid="model-store-detail-secondary-uninstall"
+                    >
+                      {copy.actionUninstall}
+                    </MsButton>
+                  ) : null}
+                  <MsButton
+                    tone="ghost"
+                    disabled={isRunning || cardBusy}
+                    title={isRunning ? copy.redeployBlockedByRunning : undefined}
+                    onClick={() => { onClose(); onRedeploy?.(record); }}
+                    data-testid="model-store-detail-secondary-redeploy"
+                  >
+                    {copy.actionRedeploy}
+                  </MsButton>
+                </div>
               );
             })()}
           </div>

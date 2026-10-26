@@ -1190,7 +1190,11 @@ pub fn list_store_models_light() -> rusqlite::Result<Vec<LibraryRow>> {
                 NULL AS assets_content_json,
                 m.resource_requirements_json, m.auto_start,
                 COALESCE((SELECT json_group_object(j.key, json_extract(j.value, '$.sha256'))
-                          FROM json_each(m.scripts_content_json) j), '{}') AS script_hashes_json
+                          FROM json_each(
+                            CASE WHEN m.scripts_content_json IS NULL
+                                      OR json_valid(m.scripts_content_json)
+                                 THEN m.scripts_content_json ELSE NULL END) j),
+                         '{}') AS script_hashes_json
          FROM store_models m ORDER BY m.downloaded_at DESC",
     )?;
     let rows = stmt
@@ -1369,10 +1373,22 @@ mod tests {
             [],
         )
         .unwrap();
+        // r6 P2-5：一行损坏的 scripts_content_json（半截 JSON）不得砸掉整页
+        // 列表——json_each 直接吃坏值会令整个查询报错，json_valid 守门后
+        // 该行哈希为空、其余行照常。
+        conn.execute(
+            "INSERT INTO store_models
+                 (card_id, model_name, card_name, engine_name, downloaded_at,
+                  scripts_content_json)
+             VALUES ('card-broken', 'broken', 'Broken', 'tachyon', '2026-10-22T00:00:00Z',
+                     '{broken-json')",
+            [],
+        )
+        .unwrap();
 
         let rows = list_store_models_light()
             .unwrap_or_else(|e| panic!("轻量列表查询执行失败（SQL 语法错误会在这里暴露）：{e}"));
-        assert_eq!(rows.len(), 1);
+        assert_eq!(rows.len(), 2);
 
         // 每脚本 sha256 摘要由 json_each 在库内提取，键名与固化正文的键一致。
         assert_eq!(
@@ -1380,6 +1396,14 @@ mod tests {
             Some("aa11bb22"),
             "脚本哈希提取失败：{:?}",
             rows[0].script_hashes
+        );
+        assert!(
+            rows.iter()
+                .find(|r| r.record.card_id == "card-broken")
+                .unwrap()
+                .script_hashes
+                .is_empty(),
+            "损坏行的哈希应为空，而不是砸掉整个查询"
         );
 
         // 两个 MB 级正文字段绝不能从这条路径漏出去。
@@ -1393,6 +1417,52 @@ mod tests {
         assert_eq!(rows[0].record.card_id, "card-light");
         assert!(!rows[0].record.running);
         assert!(rows[0].record.auto_start, "存量行 auto_start 默认应为开");
+    }
+
+    /// r6 P2-7：自启清单的 WHERE 语义要钉住——用户意愿（auto_start）× 上次
+    /// 运行中（running）× 已部署（status='deployed'）三者缺一不可；
+    /// set_auto_start 是唯一改意愿的入口且可逆。
+    #[test]
+    fn autostart_cards_filter_and_toggle() {
+        let _ctx = setup_temp_db();
+        let conn = connect().unwrap();
+        // (card, status, running, downloaded_at)：时间不同让排序确定
+        for (card, status, running, at) in [
+            ("want-running", "deployed", 1, "2026-10-23T00:00:00Z"),
+            ("want-stopped", "deployed", 0, "2026-10-23T00:00:01Z"),
+            ("want-downloaded", "downloaded", 1, "2026-10-23T00:00:02Z"),
+            ("optout-running", "deployed", 1, "2026-10-24T00:00:00Z"),
+        ] {
+            conn.execute(
+                "INSERT INTO store_models
+                     (card_id, model_name, card_name, engine_name, status, running, downloaded_at)
+                 VALUES (?1, ?1, ?1, 'tachyon', ?2, ?3, ?4)",
+                params![card, status, running, at],
+            )
+            .unwrap();
+        }
+        set_auto_start("optout-running", false).unwrap();
+        let ids: Vec<String> = list_autostart_cards()
+            .unwrap()
+            .into_iter()
+            .map(|r| r.card_id)
+            .collect();
+        assert_eq!(
+            ids,
+            vec!["want-running".to_string()],
+            "只有「意愿开 × 上次运行中 × 已部署」三者齐备的卡才开机拉起"
+        );
+        // 开关可逆：重新打开后回到清单里（新的在前）
+        set_auto_start("optout-running", true).unwrap();
+        let ids: Vec<String> = list_autostart_cards()
+            .unwrap()
+            .into_iter()
+            .map(|r| r.card_id)
+            .collect();
+        assert_eq!(
+            ids,
+            vec!["optout-running".to_string(), "want-running".to_string()]
+        );
     }
 
     #[test]
