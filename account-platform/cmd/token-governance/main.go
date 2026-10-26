@@ -32,6 +32,7 @@ func run() error {
 	flag.StringVar(&input.Reason, "reason", "", "auditable reason, without credentials or private data")
 	flag.StringVar(&requestID, "request-id", "", "stable UUID for this operations attempt")
 	flag.StringVar(&roles, "runtime-roles", "", "sorted comma-separated new release NOLOGIN writer roles")
+	flag.StringVar(&input.PolicyUpgrade, "policy-upgrade", "", "explicit published SAFE-to-ACTIVE policy expansion contract")
 	flag.Parse()
 	if flag.NArg() != 0 {
 		return fmt.Errorf("unexpected positional arguments")

@@ -2,6 +2,7 @@ package accountschema
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"path/filepath"
 	"slices"
@@ -22,8 +23,9 @@ func TestOutboxGenerationBridgeIdentityAndOrder(t *testing.T) {
 	}
 	bridge := slices.IndexFunc(ordered, func(m migrations.Migration) bool { return m.Version == outboxGenerationVersion })
 	replay := slices.IndexFunc(ordered, func(m migrations.Migration) bool { return m.Version == 94 })
-	if bridge < 0 || replay <= bridge {
-		t.Fatal("forward column bridge must precede its first legacy consumer")
+	owner := slices.IndexFunc(ordered, func(m migrations.Migration) bool { return m.Version == 51 })
+	if bridge < 0 || owner < 0 || owner >= bridge || replay <= bridge {
+		t.Fatal("forward bridge must follow outbox ownership and precede its first legacy consumer")
 	}
 	for _, direction := range []string{"up", "down"} {
 		t.Run(direction, func(t *testing.T) {
@@ -45,6 +47,14 @@ func TestOutboxGenerationBridgeIdentityAndOrder(t *testing.T) {
 }
 
 func TestProductionAccountEventDeliveryUpgrade(t *testing.T) {
+	for _, through := range []int{3, 50, 51, 87} {
+		t.Run(fmt.Sprintf("published-through-%d", through), func(t *testing.T) {
+			testProductionAccountEventDeliveryUpgrade(t, through)
+		})
+	}
+}
+
+func testProductionAccountEventDeliveryUpgrade(t *testing.T, through int) {
 	legacyRoot := os.Getenv("PINVOU_TEST_LEGACY_MIGRATIONS_DIRECTORY")
 	if legacyRoot == "" || os.Getenv("F17_TEST_DATABASE_URL") == "" {
 		t.Skip("owned PostgreSQL and exact published migration package required")
@@ -57,7 +67,7 @@ func TestProductionAccountEventDeliveryUpgrade(t *testing.T) {
 	if err != nil || len(legacy) != 87 || legacy[2].Checksum != originalEventDeliveryChecksum {
 		t.Fatal("exact published Account 1..87 package required", err)
 	}
-	if err := migrations.Up(ctx, c, legacy); err != nil {
+	if err := migrations.Up(ctx, c, legacy[:through]); err != nil {
 		t.Fatal("install published Account package", err)
 	}
 	migrations.Unlock(ctx, c)
@@ -92,8 +102,12 @@ func TestProductionAccountEventDeliveryUpgrade(t *testing.T) {
 		}
 		var afterHistory, afterEvent string
 		var generation int64
-		if err := c.QueryRow(ctx, `SELECT (SELECT jsonb_agg(to_jsonb(s) ORDER BY version)::text FROM schema_migrations s WHERE version<=87),
- (SELECT (to_jsonb(o)-'publication_generation')::text FROM outbox_events o LIMIT 1),(SELECT publication_generation FROM outbox_events LIMIT 1)`).Scan(&afterHistory, &afterEvent, &generation); err != nil || afterHistory != history || afterEvent != event || generation != 0 {
+		// Later published migrations add relay/authorization columns. Compare
+		// every original field, while separately proving the forward bridge's
+		// initial value; additive schema must not look like changed event facts.
+		if err := c.QueryRow(ctx, `SELECT (SELECT jsonb_agg(to_jsonb(s) ORDER BY version)::text FROM schema_migrations s WHERE version<=$1),
+ (SELECT jsonb_object_agg(e.key,e.value)::text FROM outbox_events o CROSS JOIN LATERAL jsonb_each(to_jsonb(o)) e WHERE $2::jsonb ? e.key),
+ (SELECT publication_generation FROM outbox_events WHERE event_id='11111111-1111-4111-8111-111111111111')`, through, event).Scan(&afterHistory, &afterEvent, &generation); err != nil || afterHistory != history || afterEvent != event || generation != 0 {
 			t.Fatal("upgrade changed historical ledger/event facts", err)
 		}
 	}

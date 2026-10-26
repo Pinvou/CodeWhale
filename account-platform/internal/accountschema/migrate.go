@@ -132,11 +132,12 @@ func Ordered(input []migrations.Migration) ([]migrations.Migration, error) {
 		result = append(result, *seed)
 	}
 	// Original 094 consumes this column when upgrading the published pre-column
-	// 003. The forward bridge has its own later identity, not a rewritten 003.
+	// 003. Original 051 must transfer outbox ownership before this bridge.
+	// Supplemental versions are not chronological anchors for ordinary 094.
 	for i, m := range result {
 		if m.Version == outboxGenerationVersion {
 			result = slices.Delete(result, i, i+1)
-			at := slices.IndexFunc(result, func(m migrations.Migration) bool { return m.Version >= 94 })
+			at := slices.IndexFunc(result, func(m migrations.Migration) bool { return m.Version == 94 })
 			if at < 0 {
 				at = len(result)
 			}

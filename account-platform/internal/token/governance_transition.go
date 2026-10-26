@@ -9,6 +9,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/Pinvou/pinvou3/account-platform/internal/platform/approvalpolicy"
+	"github.com/Pinvou/pinvou3/account-platform/internal/platform/postgrescontrol"
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -24,6 +25,7 @@ type GovernanceTransitionRequest struct {
 	Reason               string
 	RequestID            uuid.UUID
 	ApprovedRuntimeRoles []string
+	PolicyUpgrade        string
 	Apply                bool
 }
 
@@ -87,7 +89,14 @@ func CheckOrTransitionTokenGovernance(ctx context.Context, tokenPool, accountPoo
 	if current.UpdatedAt.IsZero() || (current.State == "PRE_ACTIVATION" && (current.Epoch != 0 || current.PolicySetDigest != "" || current.HandlerSetDigest != "" || len(current.ApprovedRuntimeRoles) != 0)) || (current.State != "PRE_ACTIVATION" && current.State != "ACTIVE" && current.State != "SAFE_ROLLBACK") {
 		return current, errors.New("persistent governance state is invalid")
 	}
-	if current.State != "PRE_ACTIVATION" && (current.Epoch < 1 || current.PolicySetDigest != policyDigest || current.HandlerSetDigest != handlerDigest) {
+	policyUpgrade := input.PolicyUpgrade == approvalpolicy.BillingPolicySetUpgradeV1 &&
+		input.TargetState == "ACTIVE" && input.ExpectedState == "SAFE_ROLLBACK" &&
+		current.State == "SAFE_ROLLBACK" && current.HandlerSetDigest == handlerDigest &&
+		approvalpolicy.CanExpandGovernancePolicySet(current.PolicySetDigest, policyDigest)
+	if input.PolicyUpgrade != "" && !policyUpgrade {
+		return current, errors.New("the explicitly selected governance policy upgrade is not applicable")
+	}
+	if current.State != "PRE_ACTIVATION" && (current.Epoch < 1 || current.HandlerSetDigest != handlerDigest || (current.PolicySetDigest != policyDigest && !policyUpgrade)) {
 		return current, errors.New("installed release differs from persistent governance evidence")
 	}
 	if input.TargetState == "" && !input.Apply {
@@ -184,7 +193,7 @@ func checkGovernanceWriterQuiescence(ctx context.Context, tx pgx.Tx, candidates 
 	}
 	var unsafe int64
 	err = tx.QueryRow(ctx, `WITH writers AS (
- SELECT r.oid,r.rolname,r.rolcanlogin,r.rolsuper FROM pg_catalog.pg_roles r
+ SELECT r.oid,r.rolname,r.rolcanlogin,`+postgrescontrol.TrustedAdministratorSQL+` AS rolsuper FROM pg_catalog.pg_roles r
  WHERE EXISTS (
   SELECT 1 FROM pg_catalog.pg_roles g WHERE (g.oid=r.oid OR pg_catalog.pg_has_role(r.oid,g.oid,'MEMBER')) AND (
    pg_catalog.pg_has_role(g.oid,'token_gateway','MEMBER') OR

@@ -1247,6 +1247,18 @@ jobs:
             )
           done < <(find account-platform -name vendor -prune -o -name go.mod -print0 | sort -z)
 
+      - name: Production history and managed PostgreSQL release contracts
+        shell: bash
+        env:
+          PINVOU_DEPLOYMENT_TEST_MODULE_CACHE: ${{ runner.temp }}/deployment-contracts-gomod
+          PINVOU_DEPLOYMENT_TEST_BUILD_CACHE: ${{ runner.temp }}/deployment-contracts-gobuild
+        run: |
+          set -euo pipefail
+          python3 -m unittest discover -s scripts/tests -p test_deployment_contracts.py
+          for postgres_version in 17 18.4; do
+            python3 scripts/account-platform-deployment-contracts.py --postgres-version "$postgres_version" --artifacts "$RUNNER_TEMP/account-platform-deployment-contracts-$postgres_version"
+          done
+
       - name: Audit export finite PostgreSQL rollback and persisted boundaries
         working-directory: account-platform
         env:

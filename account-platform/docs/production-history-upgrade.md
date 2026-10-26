@@ -6,7 +6,7 @@
 
 原始 `000003_event_delivery` 不含 `publication_generation`，后续候选的同版本 SQL 含该列。两份已存在的 SQL 都保留原字节。Account 专用升级器仅在旧账本精确匹配原版名称及 LF/CRLF 校验和时，使用嵌入的原始 SQL 核验该条历史；通用迁移器的校验规则不变。
 
-新增 `900012_outbox_generation_upgrade` 使用出箱表现有的 `account_approval_authorization_owner` 增加非空、默认零且非负的 BIGINT 代次，已存在的列必须符合该定义。该增量排在首个使用此列的 094 之前执行，之后恢复 `account_service` 角色。旧事件及原迁移记录均不重写。当前候选本身的 003 也不改动，空库沿原候选创建列，增量只核验定义。
+新增 `900012_outbox_generation_upgrade` 使用出箱表现有的 `account_approval_authorization_owner` 增加非空、默认零且非负的 BIGINT 代次，已存在的列必须符合该定义。该增量排在 051 转移出箱所有权之后、首个使用此列的原 094 之前执行，不按补充版本的数值大小定位；之后恢复 `account_service` 角色。旧事件及原迁移记录均不重写。当前候选本身的 003 也不改动，空库沿原候选创建列，增量只核验定义。
 
 Account migrator 完成后使用 `accountschema.VerifyApplied` 核验原始历史与完整新包。缺少新增桥接、未知旧名或 SQL 校验和、列定义不符均失败关闭。新增迁移为 forward-only。
 
@@ -21,6 +21,8 @@ Account migrator 完成后使用 `accountschema.VerifyApplied` 核验原始历�
 当前版本按既有运行手册退役普通 Token Relay；兼容 018 只保留已安装的审计与账本，不重新启用已退役的进程、writer 或其数据库权限。上线前须按原发布准备与 writer inventory 流程停用/fence 现网残留的旧 Token Relay，并验证 Account/Billing 两个仍在使用的普通 Relay。不能为了迁移通过重新引入旧 Token Relay。
 
 ## 发布与验证
+
+受管 RDS 运维身份、平台库边界、候选 SCRAM 及精确治理策略扩展见 [受管 PostgreSQL 发布](managed-postgres-release.md)。这些发布控制规则不放宽下述历史身份核验，也不表示已经执行生产升级。
 
 1. 记录当前不可变应用镜像、配置摘要和实际数据库版本，保留旧发布目录。
 2. 以原始已发布 SQL 和独立临时 PostgreSQL 运行历史升级用例。测试使用空的专属临时实例，拒绝其他数据库/角色；原历史 SQL 通过显式 `PINVOU_TEST_LEGACY_MIGRATIONS_DIRECTORY` 提供。Account 从 1..87、Token 从 1..34 的原始包升级，并核对重复 Up、完整 Verify、原行及账本不变、非法历史拒绝和审计不可变。

@@ -54,14 +54,17 @@ export function validateOperation(request) {
       fields(options, ['request_id']); check(uuid(options.request_id), 'REQUEST_ID_INVALID');
       result.args = ['--request-id', options.request_id]; result.environment = ['TOKEN_MIGRATOR_DATABASE_URL']; break;
     case 'governance-active-check': case 'governance-activate': case 'governance-safe-check': case 'governance-safe': {
-      fields(options, ['expected_state', 'expected_epoch', 'request_id', 'operator', 'reason', 'runtime_roles']);
       const safe = request.operation.startsWith('governance-safe');
+      const expansion = options && Object.hasOwn(options, 'policy_upgrade');
+      fields(options, ['expected_state', 'expected_epoch', 'request_id', 'operator', 'reason', 'runtime_roles', ...(expansion ? ['policy_upgrade'] : [])]);
+      if (expansion) check(!safe && options.expected_state === 'SAFE_ROLLBACK' && options.policy_upgrade === 'billing-policy-set-v1', 'GOVERNANCE_POLICY_UPGRADE_INVALID');
       check(Number.isSafeInteger(options.expected_epoch) && options.expected_epoch >= 0 && uuid(options.request_id) && reference(options.operator)
         && typeof options.reason === 'string' && options.reason.trim() === options.reason && options.reason.length > 0 && options.reason.length <= 500
         && (safe ? options.expected_state === 'ACTIVE' && options.expected_epoch > 0 : options.expected_state === 'PRE_ACTIVATION' && options.expected_epoch === 0 || options.expected_state === 'SAFE_ROLLBACK' && options.expected_epoch > 0)
         && Array.isArray(options.runtime_roles) && options.runtime_roles.length === 2
         && options.runtime_roles.every((role, i, roles) => typeof role === 'string' && /^[a-z][a-z0-9_]{0,62}$/.test(role) && role !== 'token_gateway' && !role.startsWith('pg_') && !['token_schema_owner', 'token_migrator', 'token_cap_policy_deployer', 'token_policy_operator'].includes(role) && (i === 0 || roles[i-1] < role)), 'GOVERNANCE_INPUT_INVALID');
       result.args = ['--to', safe ? 'SAFE_ROLLBACK' : 'ACTIVE', '--expected-state', options.expected_state, '--expected-epoch', String(options.expected_epoch), '--request-id', options.request_id, '--operator', options.operator, '--reason', options.reason, '--runtime-roles', options.runtime_roles.join(',')];
+      if (expansion) result.args.push('--policy-upgrade', options.policy_upgrade);
       result.write = ['governance-activate', 'governance-safe'].includes(request.operation);
       if (result.write) result.args.push('--apply');
       result.environment = safe ? ['TOKEN_MIGRATOR_DATABASE_URL'] : ['TOKEN_MIGRATOR_DATABASE_URL', 'ACCOUNT_POLICY_DATABASE_URL'];

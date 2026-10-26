@@ -21,16 +21,20 @@ var roleName = regexp.MustCompile(`^[a-z][a-z0-9_]{0,62}$`)
 var evidenceReference = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$`)
 
 type releaseRequest struct {
-	Operation     string
-	Database      string
-	Approval      string
-	Maintenance   string
-	ExpectedEpoch int64
-	Retired       []string
-	Candidates    []string
-	Apply         bool
-	Terminate     bool
-	Migrations    string
+	Operation       string
+	Database        string
+	Approval        string
+	Maintenance     string
+	ExpectedEpoch   int64
+	Retired         []string
+	Candidates      []string
+	Apply           bool
+	Terminate       bool
+	Migrations      string
+	Provider        string
+	ExpectedDBA     string
+	ExpectedHost    string
+	CredentialsFile string
 }
 
 type releaseEvidence struct {
@@ -49,6 +53,18 @@ type releaseEvidence struct {
 func coded(code string) error { return errors.New("TOKEN_RELEASE_" + code) }
 
 func (r releaseRequest) validate() error {
+	if r.Provider != "" && r.Provider != "postgres" && r.Provider != "aliyun-rds" {
+		return coded("PROVIDER_INVALID")
+	}
+	if r.managedRDS() {
+		if !roleName.MatchString(r.ExpectedDBA) || protectedRole(r.ExpectedDBA) ||
+			len(r.ExpectedHost) > 253 || !regexp.MustCompile(`^[a-z0-9][a-z0-9.-]*[a-z0-9]$`).MatchString(r.ExpectedHost) ||
+			r.Operation == "account-policy-check" || (r.Operation == "enable") != (r.CredentialsFile != "") {
+			return coded("MANAGED_BINDING_REQUIRED")
+		}
+	} else if r.ExpectedDBA != "" || r.ExpectedHost != "" || r.CredentialsFile != "" {
+		return coded("MANAGED_OPTIONS_UNEXPECTED")
+	}
 	if !slices.Contains([]string{"inventory", "fence", "prepare", "enable", "account-policy-check"}, r.Operation) || !roleName.MatchString(r.Database) {
 		return coded("INPUT_INVALID")
 	}
@@ -104,6 +120,10 @@ func parseRequest(args []string) (releaseRequest, error) {
 	flags.StringVar(&r.Approval, "approval-reference", "", "approved operation reference")
 	flags.StringVar(&r.Maintenance, "maintenance-reference", "", "exclusive DBA maintenance window reference")
 	flags.StringVar(&r.Migrations, "migrations", "migrations/token", "packaged Token migrations")
+	flags.StringVar(&r.Provider, "database-provider", "postgres", "postgres or explicitly bound aliyun-rds")
+	flags.StringVar(&r.ExpectedDBA, "expected-dba", "", "exact independently controlled managed DBA login")
+	flags.StringVar(&r.ExpectedHost, "expected-server-host", "", "exact verified managed database TLS hostname")
+	flags.StringVar(&r.CredentialsFile, "candidate-credentials-file", "", "POSIX-owned 0600 managed enable credentials file; other platforms unsupported")
 	flags.StringVar(&retired, "retired-roles", "", "exact sorted retired roles")
 	flags.StringVar(&candidates, "candidate-roles", "", "exact sorted gateway and credential roles")
 	flags.Int64Var(&r.ExpectedEpoch, "expected-epoch", -1, "ACTIVE epoch for enable")
@@ -153,6 +173,13 @@ func run(args []string) error {
 	}
 	config.RuntimeParams["search_path"] = "pg_catalog,public"
 	config.RuntimeParams["application_name"] = "pinvou-token-release-prepare"
+	if r.managedRDS() {
+		// Binding is a pre-authentication boundary: rejecting the connection
+		// after ConnectConfig could not retract a credential already sent.
+		if err := validateManagedConnection(config, r); err != nil {
+			return err
+		}
+	}
 	connection, err := pgx.ConnectConfig(ctx, config)
 	if err != nil {
 		return coded("CONNECTION_UNAVAILABLE")
