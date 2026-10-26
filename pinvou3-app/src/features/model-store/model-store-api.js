@@ -103,13 +103,7 @@ function revokeApiKey(keyId) { return invokeTauri('model_store_revoke_api_key', 
  * @param {string} cardId - 卡片 ID。
  * @returns {Promise<{run_id:string}>} 运行句柄。
  */
-function takeAutostartReport() {
-  return invokeTauri('model_store_take_autostart_report');
-}
 
-function setAutoStart(cardId, enabled) {
-  return invokeTauri('model_store_set_auto_start', { cardId, enabled: enabled === true });
-}
 
 function startCardScripts(cardId, confirmed = false) {
   return invokeTauri('model_store_start_card_scripts', { cardId, confirmed: confirmed === true });
@@ -313,8 +307,6 @@ export {
   setLanSharing,
   revokeApiKey,
   startDownload,
-  setAutoStart,
-  takeAutostartReport,
   startCardScripts,
   startDeploy,
   startEnable,

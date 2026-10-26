@@ -19,7 +19,6 @@ import { IosSearchField } from '../../components/IosControls.jsx';
 import {
   fetchLibrary,
   fetchMemoryAdmission,
-  takeAutostartReport,
   fetchStoreCards,
   forceRemoveModel,
   startDeploy,
@@ -267,17 +266,6 @@ const ModelStoreView = ({ theme, t, bs }) => {
     if (guide === 'ready') loadAll();
   }, [guide, loadAll]);
 
-  useEffect(() => {
-    // eslint-disable-next-line react-hooks/set-state-in-effect -- 进入商店页时取一次自启报告（后端读后即删）
-    if (guide !== 'ready') return;
-    takeAutostartReport()
-      .then((report) => { if (report && report.results && report.results.some((r) => !r.ok)) setAutostartReport(report); })
-      .catch(() => {/* 无报告=正常（没跑过恢复器或已取走） */});
-  }, [guide]);
-
-  // 自启报告（要求②：任何问题都有解决方法弹窗）：恢复器落盘的结构化结果，
-  // GUI 首次进入商店页时取走（一次性），有失败
-  const [autostartReport, setAutostartReport] = useState(null);
 
   // 启动清理的结果：上次应用被强杀/崩溃后残留的脚本进程，这一轮启动时收掉了哪些。
   //
@@ -1240,19 +1228,6 @@ const ModelStoreView = ({ theme, t, bs }) => {
         ) : null}
       </MsDialog>
 
-      <MsDialog open={!!autostartReport} onClose={() => setAutostartReport(null)} theme={theme} labelledBy="model-store-autostart-fail-title">
-        {autostartReport ? (
-          <div>
-            <MsDialogTitle id="model-store-autostart-fail-title">{copy.autostartFailTitle}</MsDialogTitle>
-            {(autostartReport.results || []).filter((r) => !r.ok).map((r) => (
-              <div key={r.card_id} className="mt-2 text-[13px]" data-testid="model-store-autostart-fail-item">
-                <span className="font-medium">{copy.autostartFailCard(r.card_name)}</span>
-                <span className="ml-1">{String(r.error || '')}</span>
-              </div>
-            ))}
-          </div>
-        ) : null}
-      </MsDialog>
             <MsDialog open={!!retainedStop} onClose={() => setRetainedStop(null)} theme={theme} labelledBy="model-store-retained-stop-title">
         {retainedStop ? (
           <>

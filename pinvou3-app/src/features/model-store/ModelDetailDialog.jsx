@@ -6,7 +6,7 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import { KeyRound, Plus } from '../../components/icons.jsx';
 import { EmptyState } from '../../components/EmptyState.jsx';
 import { Spinner } from '../../components/Spinner.jsx';
-import { createApiKey, fetchApiKeys, fetchModelDetail, revokeApiKey, setAutoStart } from './model-store-api.js';
+import { createApiKey, fetchApiKeys, fetchModelDetail, revokeApiKey } from './model-store-api.js';
 import { LanSharingPanel } from './LanSharingPanel.jsx';
 import { lanError } from './lan-access.js';
 import { tryGetTauriBridge } from '../../platform/tauri/client.js';
@@ -319,29 +319,6 @@ function ModelDetailDialog({ cardId, card, copy, theme, onClose, onRedeploy, onT
         <>
           <div className="space-y-1">
             <MsRow label={copy.detailStatus}>{copy[STATUS_LABEL_KEYS[libraryStateOf(record)]] || copy.statusPending}</MsRow>
-            {record.status === 'deployed' ? (
-              <MsRow label={copy.autoStartLabel}>
-                <input
-                  type="checkbox"
-                  checked={record.auto_start !== false}
-                  onChange={async (event) => {
-                    const next = event.target.checked;
-                    try {
-                      await setAutoStart(record.card_id, next);
-                    } catch (toggleError) {
-                      // 静默回弹不是反馈（r6 P2-4）：失败要说清没生效以及原因
-                      onToast(`${copy.autoStartSaveFailed}：${String(toggleError?.message || toggleError)}`);
-                      return;
-                    }
-                    // 成功才同步本地副本；不重拉详情（重拉会闪整个面板）
-                    setDetail((prev) => (prev?.record === record
-                      ? { ...prev, record: { ...record, auto_start: next } }
-                      : prev));
-                  }}
-                  data-testid="model-store-auto-start-toggle"
-                />
-              </MsRow>
-            ) : null}
             <MsRow label={copy.detailEngine}>
               {record.engine_name}
               {record.engine_version ? ` ${record.engine_version}` : ''}

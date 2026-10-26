@@ -471,7 +471,6 @@ fn library_payload(rows: Vec<db::LibraryRow>) -> Value {
             Value::Object(map)
         })
         .collect();
-    let auto_starts: Vec<bool> = rows.iter().map(|row| row.record.auto_start).collect();
     let models: Vec<db::StoreModelRecord> = rows.into_iter().map(|row| row.record).collect();
     let mut value = strip_bulky_fields(models);
     if let Some(items) = value.as_array_mut() {
@@ -479,8 +478,6 @@ fn library_payload(rows: Vec<db::LibraryRow>) -> Value {
             if let Some(obj) = item.as_object_mut() {
                 obj.insert("needs_redeploy".to_string(), Value::Bool(flags[i]));
                 obj.insert("local_script_hashes".to_string(), local_hashes[i].clone());
-                // 开机自启意愿（详情页开关默认开）
-                obj.insert("auto_start".to_string(), Value::Bool(auto_starts[i]));
             }
         }
     }
@@ -1039,183 +1036,6 @@ pub fn reveal_run_logs_dir() -> Result<Value, String> {
 pub fn export_run_log(run_id: String) -> Result<Value, String> {
     let (path, text) = run_log_store::export_run_log(&run_id)?;
     Ok(json!({ "path": path.to_string_lossy(), "text": text }))
-}
-
-/// 详情页「开机自启」开关（默认开）。只改意愿位，不动运行状态。
-pub fn set_auto_start(card_id: String, enabled: bool) -> Result<Value, String> {
-    db::set_auto_start(&card_id, enabled).map_err(|e| e.to_string())?;
-    Ok(json!({ "card_id": card_id, "auto_start": enabled }))
-}
-
-/// 恢复器入口（开机自启，2026-10-23）：把上次运行中且用户未关闭自启的已部署卡
-/// 逐张拉起。给两个消费方用：GUI 启动时的托管拉起、systemd user 服务的
-/// headless 拉起。串行执行（内存准入一次一张），每张独立成败——一张失败不停
-/// 后面的，失败结果落库供 GUI 弹窗（要求②：任何问题都有解决方法提示）。
-///
-/// r6 P1-3.2/P1-4：docker 就绪做有界等待（user unit 排不了 system 服务）；
-/// 每张卡走与 GUI 完全相同的守卫链（内存准入+全局启动锁 → per-card flock+
-/// 卡片互斥+panic 收尾），运行日志照常落盘。
-pub async fn autostart_pending(service: Arc<ModelStoreService>) -> Value {
-    wait_for_docker_ready().await;
-    let rows = match tokio::task::spawn_blocking(db::list_autostart_cards).await {
-        Ok(Ok(rows)) => rows,
-        Ok(Err(e)) => return json!({ "ok": false, "error": format!("读取自启清单失败：{e}") }),
-        Err(e) => return json!({ "ok": false, "error": format!("自启任务异常：{e}") }),
-    };
-    let mut results: Vec<Value> = Vec::new();
-    for rec in rows {
-        let card_id = rec.card_id.clone();
-        let card_name = rec.card_name.clone();
-        // r6 P1-4：此前直接调 mgr.enable()，跳过了 spawn_op 的全部并发守卫——
-        // headless 恢复进行中用户在 GUI 对同卡点启用就是两个 enable 脚本同卡
-        // 竞态（双引擎实例/端口冲突/显存双占）。现在与 start_lifecycle 的
-        // enable 分支完全同链：prepare_model_start（全局启动锁+内存准入）→
-        // spawn_op（跨进程 per-card flock、卡片级互斥、panic 安全收尾）。
-        // 内存确认不代答：要求确认的卡按失败进报告，GUI 弹窗给「去手动启用」
-        // 的指引（报告本来就是给用户看的）。
-        let spawned = tokio::task::spawn_blocking({
-            let service = Arc::clone(&service);
-            let card = card_id.clone();
-            move || {
-                let startup_guard = prepare_model_start(&card, false);
-                // job 闭包 move 走一份克隆，`&card` 的借用要在 spawn_op 调用期间
-                // 存活——同一变量两头用是 E0505（start_lifecycle_checked 同款两份）。
-                let card_for_job = card.clone();
-                spawn_op(&service, &card, OP_ENABLE, move |log, control, _run_id| {
-                    // 准备失败的守卫在这里变成该卡的失败结局（进报告，不静默）
-                    let _startup_guard = startup_guard?;
-                    let log_cb = Arc::clone(log);
-                    let mut cb = move |line: &str| log_cb.push(line);
-                    let mgr = ModelManager::new(None, None);
-                    mgr.enable(&card_for_job, &mut cb, control)
-                        .map(|_| Value::Null)
-                        .map_err(|e| e.to_string())
-                })
-            }
-        })
-        .await;
-        let entry = match spawned {
-            // spawn_op 即刻返回 run_id；headless 没有轮询方，在这里等它结束。
-            // 运行日志由 RunLog 照常落盘（r6 P2-5：此前 headless 的操作日志
-            // 全部丢弃，出错只剩一行人话，没法查）。
-            Ok(Ok(value)) => {
-                let run_id = value
-                    .get("run_id")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or_default()
-                    .to_string();
-                match wait_run_outcome(&service, &run_id).await {
-                    Some(Ok(_)) => json!({
-                        "card_id": card_id, "card_name": card_name,
-                        "ok": true, "run_id": run_id,
-                    }),
-                    Some(Err(e)) => json!({
-                        "card_id": card_id, "card_name": card_name,
-                        "ok": false, "error": e, "run_id": run_id,
-                    }),
-                    None => {
-                        // 单卡 20 分钟上界（大模型加载分钟级；systemd 单元总预算
-                        // 30 分钟）。超时先取消（脚本循环随取消退出、锁随 Drop
-                        // 释放），按失败进报告。
-                        let _ = cancel_run(&service, run_id.clone());
-                        json!({
-                            "card_id": card_id, "card_name": card_name,
-                            "ok": false,
-                            "error": "自启等待超时（20 分钟），已取消。请打开模型商店手动启用；若反复超时，请把运行日志反馈给我们。",
-                            "run_id": run_id,
-                        })
-                    }
-                }
-            }
-            // 占不到坑（GUI 正在操作同卡）或线程创建失败：直接进报告
-            Ok(Err(e)) => json!({
-                "card_id": card_id, "card_name": card_name, "ok": false, "error": e,
-            }),
-            Err(e) => json!({
-                "card_id": card_id, "card_name": card_name,
-                "ok": false, "error": format!("任务异常：{e}"),
-            }),
-        };
-        results.push(entry);
-    }
-    let failed = results
-        .iter()
-        .filter(|r| r.get("ok") != Some(&Value::Bool(true)))
-        .count();
-    json!({ "ok": failed == 0, "failed": failed, "results": results })
-}
-
-/// r6 P1-3.2：headless 自启可能早于 docker daemon 就绪——user unit 无法对
-/// system 服务排序（`After=docker.service` 在用户管理器里是静默 no-op）。
-/// 有界轮询 `docker info`：已就绪立即返回；权限类失败（用户不在 docker 组）
-/// 等待无意义、立即返回；其余每 2s 重试、上限 120s，到期限照常继续——
-/// tachyon 原生卡不依赖 docker，docker 卡会在自己的 enable 里得到真实错误
-/// 并进报告（GUI 弹窗按报告给指引）。
-async fn wait_for_docker_ready() {
-    const MAX_WAIT: Duration = Duration::from_secs(120);
-    const POLL: Duration = Duration::from_secs(2);
-    let deadline = Instant::now() + MAX_WAIT;
-    loop {
-        let probe = tokio::task::spawn_blocking(|| {
-            std::process::Command::new("docker")
-                .arg("info")
-                .stdin(std::process::Stdio::null())
-                .stdout(std::process::Stdio::null())
-                .stderr(std::process::Stdio::piped())
-                .output()
-        })
-        .await;
-        match probe {
-            Ok(Ok(out)) if out.status.success() => return,
-            Ok(Ok(out)) => {
-                if String::from_utf8_lossy(&out.stderr).contains("permission denied") {
-                    return;
-                }
-            }
-            // docker CLI 缺失或执行自身失败：继续等到期限（可能只是还没就绪）
-            _ => {}
-        }
-        if Instant::now() >= deadline {
-            return;
-        }
-        tokio::time::sleep(POLL).await;
-    }
-}
-
-/// 等一个 run 到终态（成功/失败），带单卡超时。返回 `None` = 超时。
-/// 与 GUI 长轮询同一套「先登记等待者、再取快照」顺序——顺序反了会丢唤醒
-/// （run_log 的注释里有完整推演）。
-async fn wait_run_outcome(
-    service: &Arc<ModelStoreService>,
-    run_id: &str,
-) -> Option<Result<Value, String>> {
-    const PER_CARD_BUDGET: Duration = Duration::from_secs(1200);
-    let log = service.run(run_id)?;
-    let deadline = Instant::now() + PER_CARD_BUDGET;
-    loop {
-        let notified = log.notify.notified();
-        let (_, _, outcome) = log.snapshot(usize::MAX);
-        if let Some(outcome) = outcome {
-            return Some(outcome);
-        }
-        let remaining = deadline.saturating_duration_since(Instant::now());
-        if remaining.is_zero() {
-            return None;
-        }
-        if tokio::time::timeout(remaining, notified).await.is_err() {
-            return None;
-        }
-    }
-}
-
-/// GUI 启动时取走自启报告（一次性：读后删除，下次打开不再弹）。
-/// 恢复器落盘的结构化结果（autostart_pending 的 JSON）——按结果弹窗是
-/// 产品要求②：任何问题都有解决方法提示。
-pub fn take_autostart_report() -> Result<Value, String> {
-    let path = super::config::data_dir().join("autostart-report.json");
-    let raw = std::fs::read_to_string(&path).map_err(|e| format!("读取自启报告失败：{e}"))?;
-    let _ = std::fs::remove_file(&path);
-    serde_json::from_str(&raw).map_err(|e| format!("自启报告格式错误：{e}"))
 }
 
 pub fn cancel_run(service: &Arc<ModelStoreService>, run_id: String) -> Result<Value, String> {

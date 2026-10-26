@@ -877,58 +877,7 @@ pub(crate) fn remove_agents_index_entry(
     }
 }
 
-/// 模型商店开机自启恢复器的 headless 入口（systemd user 服务 ExecStart）。
-/// 不启 GUI：拉起上次运行中且用户未关闭自启的已部署卡（autostart_pending），
-/// 结构化结果落 JSON 到卡片库旁（GUI 启动后读取并按结果弹窗——要求②：
-/// 任何问题都有解决方法提示）。
-// process::exit 的定点豁免（clippy::exit）：这是 systemd 调起的 headless 入口，
-// runtime 构建失败时唯一可用的报告通道就是非零退出码（journal 里可见）；
-// 库内其余路径仍禁止 exit。
-#[allow(clippy::exit)]
-pub fn run_model_store_autostart() {
-    let runtime = match tokio::runtime::Builder::new_multi_thread()
-        .worker_threads(2)
-        .enable_all()
-        .build()
-    {
-        Ok(runtime) => runtime,
-        // headless 入口（systemd 调起）：连 runtime 都建不起来时没有 GUI 可弹，
-        // 报到 journal 即退（非零退出码让 systemd 单元显示 failed，便于发现）。
-        Err(error) => {
-            eprintln!("[pinvou3-app] model-store autostart: tokio runtime build failed: {error}");
-            std::process::exit(1);
-        }
-    };
-    let report = runtime.block_on(async {
-        let service = std::sync::Arc::new(features::model_store::ModelStoreService::new());
-        features::model_store::autostart_pending(service).await
-    });
-    let path = features::model_store::autostart_report_path();
-    let _ = std::fs::write(
-        &path,
-        serde_json::to_string_pretty(&report).unwrap_or_default(),
-    );
-    println!(
-        "pinvou3 model-store autostart: {} failed / {} total (report: {})",
-        report.get("failed").and_then(|v| v.as_i64()).unwrap_or(-1),
-        report
-            .get("results")
-            .and_then(|v| v.as_array())
-            .map(|a| a.len())
-            .unwrap_or(0),
-        path.display()
-    );
-}
-
 pub fn run() {
-    // 模型商店开机自启恢复器（systemd user 服务调用的 headless 入口）：
-    // 不启 GUI，拉起后直接退出。跨平台分发（非 Linux 走 stub 空实现），
-    // main.rs 不持任何 target cfg（架构闸门：cfg 只许在适配层）。
-    let args: Vec<String> = std::env::args().collect();
-    if args.len() == 2 && args[1] == "model-store-autostart" {
-        run_model_store_autostart();
-        return;
-    }
     // WebKitGTK reads its RemoteInspector endpoint while constructing the first
     // WebContext, so the browser feature must reserve it before Tauri starts.
     features::browser::prepare_process_environment();
@@ -2075,8 +2024,6 @@ pub fn run() {
             commands::model_store::model_store_lan_status,
             commands::model_store::model_store_set_lan_sharing,
             commands::model_store::model_store_revoke_api_key,
-            commands::model_store::model_store_set_auto_start,
-            commands::model_store::model_store_take_autostart_report,
             commands::model_store::model_store_take_startup_cleanup,
             commands::model_store::model_store_storage_settings,
             commands::model_store::model_store_set_storage_settings,

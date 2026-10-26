@@ -182,18 +182,6 @@ pub mod config {
     }
 }
 
-pub fn set_auto_start(_card_id: String, _enabled: bool) -> Result<Value, String> {
-    nope()
-}
-
-pub async fn autostart_pending(_service: std::sync::Arc<ModelStoreService>) -> Value {
-    Value::Null
-}
-
-pub fn take_autostart_report() -> Result<Value, String> {
-    nope()
-}
-
 pub fn set_storage_settings(
     _models_dir: Option<String>,
     _import_scan_dirs: Option<Vec<String>>,

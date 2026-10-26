@@ -76,17 +76,10 @@ pub type ModelStoreService = platform::backend::ModelStoreService;
 
 // 操作一律透传到平台后端。这一层不加逻辑，只是把「Linux 真做 / 其他平台回一句
 // 解释」这件事收在 platform 里，命令层不必分支。
-/// 自启恢复器报告的落盘路径（lib.rs headless 入口用——platform 模块是私有的，
-/// 这里代为转出路径，避免扩大模块可见性）。
-pub fn autostart_report_path() -> std::path::PathBuf {
-    platform::backend::config::data_dir().join("autostart-report.json")
-}
-
 pub use platform::backend::{
-    active_runs, answer_run, api_keys, autostart_pending, cancel_run, create_api_key,
-    delete_engine, export_run_log, force_remove, installed_engines, lan_status, library,
-    list_cards, local_resources, memory_admission, model_detail, reveal_run_logs_dir,
-    revoke_api_key, run_log, run_startup_cleanup, set_auto_start, set_lan_sharing,
-    set_storage_settings, start_card_scripts, start_deploy, start_download, start_lifecycle,
-    storage_settings, take_autostart_report, take_startup_cleanup,
+    active_runs, answer_run, api_keys, cancel_run, create_api_key, delete_engine, export_run_log,
+    force_remove, installed_engines, lan_status, library, list_cards, local_resources,
+    memory_admission, model_detail, reveal_run_logs_dir, revoke_api_key, run_log,
+    run_startup_cleanup, set_lan_sharing, set_storage_settings, start_card_scripts, start_deploy,
+    start_download, start_lifecycle, storage_settings, take_startup_cleanup,
 };

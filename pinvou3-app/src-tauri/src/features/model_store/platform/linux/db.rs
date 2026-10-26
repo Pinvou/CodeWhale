@@ -115,10 +115,6 @@ const MIGRATION_COLUMNS: &[(&str, &[(&str, &str)])] = &[
             ("scripts_fetched_at", "TEXT"),
             // 上次成功部署时用的 deploy 脚本哈希（见 deployed_script_sha256）
             ("deployed_script_sha256", "TEXT"),
-            // 开机自启的用户意愿（2026-10-23 产品拍板默认开）：1=开（默认，
-            // ADD COLUMN 带 DEFAULT 1 使存量行也开）0=用户显式关。与停用/关机
-            // 那一刻的 running 求交——上次运行中的已部署卡才真的被拉起。
-            ("auto_start", "INTEGER NOT NULL DEFAULT 1"),
             // 这张卡需要几台设备（"single" / "dual"），见 store_client::DeployTopology
             ("deploy_topology", "TEXT"),
             // 附属文件的本地固化副本（相对路径 -> 正文+哈希），见 assets_content
@@ -725,8 +721,6 @@ pub struct StoreModelRecord {
     /// 一比就知道。以前界面对所有已部署模型都常驻一个「重新部署」按钮，用户
     /// 根本不知道自己为什么要点它。
     pub deployed_script_sha256: Option<String>,
-    /// 开机自启意愿（默认开）。与停用时的 running 求交决定是否拉起。
-    pub auto_start: bool,
     /// 卡片下发的运行内存需求。空结构表示当前卡片尚未提供可信预算。
     pub resource_requirements: ResourceRequirements,
 }
@@ -796,7 +790,6 @@ impl StoreModelRecord {
                 .and_then(|s| serde_json::from_value(serde_json::Value::String(s)).ok())
                 .unwrap_or_default(),
             deployed_script_sha256: row.get("deployed_script_sha256")?,
-            auto_start: row.get::<_, Option<i64>>("auto_start")?.unwrap_or(1) != 0,
             resource_requirements: row
                 .get::<_, Option<String>>("resource_requirements_json")?
                 .and_then(|raw| serde_json::from_str(&raw).ok())
@@ -1188,7 +1181,7 @@ pub fn list_store_models_light() -> rusqlite::Result<Vec<LibraryRow>> {
                 NULL AS scripts_content_json,
                 m.scripts_fetched_at, m.deployed_script_sha256, m.deploy_topology,
                 NULL AS assets_content_json,
-                m.resource_requirements_json, m.auto_start,
+                m.resource_requirements_json,
                 COALESCE((SELECT json_group_object(j.key, json_extract(j.value, '$.sha256'))
                           FROM json_each(
                             CASE WHEN m.scripts_content_json IS NULL
@@ -1212,28 +1205,6 @@ pub fn list_store_models_light() -> rusqlite::Result<Vec<LibraryRow>> {
                 script_hashes,
             })
         })?
-        .collect::<rusqlite::Result<Vec<_>>>()?;
-    Ok(rows)
-}
-
-/// 读/写单卡的开机自启意愿（详情页开关用）。
-pub fn set_auto_start(card_id: &str, enabled: bool) -> rusqlite::Result<()> {
-    let conn = connect()?;
-    conn.execute(
-        "UPDATE store_models SET auto_start = ?1 WHERE card_id = ?2",
-        params![i64::from(enabled), card_id],
-    )?;
-    Ok(())
-}
-
-/// 恢复器/拉起判定用：开机应自启的卡（用户意愿开 × 上次运行中 × 已部署）。
-pub fn list_autostart_cards() -> rusqlite::Result<Vec<StoreModelRecord>> {
-    let conn = connect()?;
-    let mut stmt = conn.prepare(
-        "SELECT * FROM store_models          WHERE auto_start = 1 AND running = 1 AND status = 'deployed'          ORDER BY downloaded_at DESC",
-    )?;
-    let rows = stmt
-        .query_map([], StoreModelRecord::from_row)?
         .collect::<rusqlite::Result<Vec<_>>>()?;
     Ok(rows)
 }
@@ -1416,53 +1387,6 @@ mod tests {
         // 常规字段照常可读（顺带覆盖显式列清单没有漏列）。
         assert_eq!(rows[0].record.card_id, "card-light");
         assert!(!rows[0].record.running);
-        assert!(rows[0].record.auto_start, "存量行 auto_start 默认应为开");
-    }
-
-    /// r6 P2-7：自启清单的 WHERE 语义要钉住——用户意愿（auto_start）× 上次
-    /// 运行中（running）× 已部署（status='deployed'）三者缺一不可；
-    /// set_auto_start 是唯一改意愿的入口且可逆。
-    #[test]
-    fn autostart_cards_filter_and_toggle() {
-        let _ctx = setup_temp_db();
-        let conn = connect().unwrap();
-        // (card, status, running, downloaded_at)：时间不同让排序确定
-        for (card, status, running, at) in [
-            ("want-running", "deployed", 1, "2026-10-23T00:00:00Z"),
-            ("want-stopped", "deployed", 0, "2026-10-23T00:00:01Z"),
-            ("want-downloaded", "downloaded", 1, "2026-10-23T00:00:02Z"),
-            ("optout-running", "deployed", 1, "2026-10-24T00:00:00Z"),
-        ] {
-            conn.execute(
-                "INSERT INTO store_models
-                     (card_id, model_name, card_name, engine_name, status, running, downloaded_at)
-                 VALUES (?1, ?1, ?1, 'tachyon', ?2, ?3, ?4)",
-                params![card, status, running, at],
-            )
-            .unwrap();
-        }
-        set_auto_start("optout-running", false).unwrap();
-        let ids: Vec<String> = list_autostart_cards()
-            .unwrap()
-            .into_iter()
-            .map(|r| r.card_id)
-            .collect();
-        assert_eq!(
-            ids,
-            vec!["want-running".to_string()],
-            "只有「意愿开 × 上次运行中 × 已部署」三者齐备的卡才开机拉起"
-        );
-        // 开关可逆：重新打开后回到清单里（新的在前）
-        set_auto_start("optout-running", true).unwrap();
-        let ids: Vec<String> = list_autostart_cards()
-            .unwrap()
-            .into_iter()
-            .map(|r| r.card_id)
-            .collect();
-        assert_eq!(
-            ids,
-            vec!["optout-running".to_string(), "want-running".to_string()]
-        );
     }
 
     #[test]
