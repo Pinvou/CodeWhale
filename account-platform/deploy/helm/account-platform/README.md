@@ -147,6 +147,32 @@ Registry names, provider hosts, and CIDRs in the production values file are
 documentation examples; replace every one with the reviewed deployment values
 before rendering a release manifest.
 
+### User realm prerequisite
+
+The chart starts Keycloak but does not import or create the `pinvou` user realm.
+The three SQL migration hooks do not provision it, and
+`keycloak.realmUpgradeEnabled` updates an **existing** realm and desktop client;
+it is not a first-install bootstrap switch. Keycloak's management readiness
+probe alone does not establish that application login or JWKS is available.
+
+For a fresh Keycloak database, complete the separately authorized first import
+using the reviewed realm object from the
+[offline production realm bootstrap bundle](../../keycloak/README.md#offline-production-realm-bootstrap-bundle),
+then follow that document's controlled realm/client provisioning and readback.
+Keep the upgrade hook disabled until its existing-realm prerequisites are met.
+Do not expose application login until this handoff is complete. The bundle
+wrapper and development realm are not production import documents; do not
+overwrite a retained realm or import development users. Existing and external
+Keycloak installations retain their reviewed realm and provisioning workflow.
+
+Before enabling application traffic, verify that the public discovery issuer
+exactly matches `oidc.issuer`, the configured JWKS endpoint serves the intended
+realm, and the deployed desktop/Portal clients, audiences and secret files match
+the provisioning readback. Complete real login, refresh and logout acceptance;
+neither a successful Helm render nor a healthy Keycloak process proves this.
+Keep credentials in the existing controlled files and out of values, argv and
+logs. TLS, workload identities and egress prerequisites below remain required.
+
 ### Identity Keycloak backchannel
 
 When mobile authentication is enabled in a `production*` environment, Identity
