@@ -58,7 +58,7 @@ test('valid external staging NATS reaches Billing and both relays without an int
       const container = consumer.spec.template.spec.containers[0];
       const env = Object.fromEntries(container.env.map(item => [item.name, item.value]));
       assert.equal(env.NATS_URL, url);
-      assert.ok(env.NATS_CREDENTIALS_FILE?.startsWith('/var/run/secrets/pinvou/'));
+      assert.ok(env.NATS_CREDENTIALS_FILE?.startsWith('/run/pinvou/nats/private/'));
       assert.ok(consumer.spec.template.spec.volumes.some(volume => volume.secret));
     }
     for (const name of ['token-command-executor', 'token-credential-portal']) {

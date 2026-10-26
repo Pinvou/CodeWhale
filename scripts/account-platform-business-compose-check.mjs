@@ -1,3 +1,4 @@
+import { checkHelmNATSCredentials } from './account-platform-nats-helm-check.mjs';
 import { isMainModule } from './account-platform-cli-entry.mjs';
 import { readFileSync } from 'node:fs';
 import { approvedRender, gateCLI, mountedSource, physicalSourcePath, readSourceFile, requireGate as check, stableJSON } from './account-platform-production-render.mjs';
@@ -256,6 +257,7 @@ function checkCompose(all, render, inventory) {
   }
 }
 function checkHelm(all, render, inventory) {
+  checkHelmNATSCredentials(render.config);
   check(inventory.namespace === render.recipe.namespace, 'namespace');
   for (const resource of render.config) {
     if (resource.kind === 'Service') check(!['NodePort', 'LoadBalancer', 'ExternalName'].includes(resource.spec?.type)

@@ -34,6 +34,13 @@ import (
 )
 
 func main() {
+	if handled, err := events.PrepareNATSCredentials(os.Args[1:], "billing-command-executor"); handled {
+		if err != nil {
+			os.Exit(1)
+		}
+		return
+	}
+
 	if err := httpserver.ConfigureProcessLogging("billing-service"); err != nil {
 		log.Fatal("BILLING_LOG_CONFIGURATION_FAILED")
 	}

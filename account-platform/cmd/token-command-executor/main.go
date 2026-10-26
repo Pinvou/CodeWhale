@@ -19,6 +19,13 @@ import (
 )
 
 func main() {
+	if handled, err := events.PrepareNATSCredentials(os.Args[1:], "token-command-executor"); handled {
+		if err != nil {
+			os.Exit(1)
+		}
+		return
+	}
+
 	if err := httpserver.ConfigureProcessLogging("token-command-executor"); err != nil {
 		log.Fatal(err)
 	}

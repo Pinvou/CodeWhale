@@ -30,6 +30,9 @@
   (dict "name" "token-portal" "image" .Values.images.tokenPortal "replicas" .Values.replicas.tokenPortal)
 -}}
 {{- range $app := $apps }}
+{{- $natsClient := "" -}}
+{{- if eq $app.name "billing-service" -}}{{- $natsClient = "billing-command-executor" -}}
+{{- else if and (or $root.Values.tokenCredentialPortal.enabled $root.Values.tokenCommandExecutor.enabled) (or (eq $app.name "account-service") (eq $app.name "token-gateway")) -}}{{- $natsClient = $app.name -}}{{- end }}
 ---
 apiVersion: apps/v1
 kind: Deployment
@@ -59,13 +62,16 @@ spec:
       {{- with $root.Values.global.imagePullSecrets }}
       imagePullSecrets: {{ toYaml . | nindent 8 }}
       {{- end }}
-      {{- if or (and (eq $app.name "identity-service") $identityFiles) (and (eq $app.name "token-gateway") (eq $root.Values.tokenGateway.secretProvider "vault-transit")) }}
+      {{- if or $natsClient (and (eq $app.name "identity-service") $identityFiles) (and (eq $app.name "token-gateway") (eq $root.Values.tokenGateway.secretProvider "vault-transit")) }}
       securityContext: { runAsNonRoot: true, runAsUser: 65532, runAsGroup: 65532, fsGroup: 65532, seccompProfile: { type: RuntimeDefault } }
       {{- else }}
       securityContext: { runAsNonRoot: true, seccompProfile: { type: RuntimeDefault } }
       {{- end }}
-      {{- if and (eq $app.name "identity-service") $identityFiles }}
+      {{- if or $natsClient (and (eq $app.name "identity-service") $identityFiles) }}
       initContainers:
+        {{- if $natsClient }}
+        {{- include "pinvou.natsCredentialsInit" (dict "image" $app.image "client" $natsClient) | nindent 8 }}
+        {{- else }}
         - name: prepare-keycloak-secret
           image: "{{ $app.image.repository }}:{{ $app.image.tag }}"
           imagePullPolicy: {{ $app.image.pullPolicy }}
@@ -76,6 +82,7 @@ spec:
           volumeMounts:
             - { name: keycloak-provisioner-source, mountPath: /var/run/bootstrap/pinvou/keycloak, readOnly: true }
             - { name: keycloak-private, mountPath: /run/pinvou/keycloak-private }
+        {{- end }}
       {{- end }}
       containers:
         - name: {{ $app.name }}
@@ -143,9 +150,9 @@ spec:
             - { name: NATS_URL, value: {{ include "pinvou.natsUrl" $root | quote }} }
             {{- end }}
             {{- if eq $app.name "billing-service" }}
-            - { name: NATS_CREDENTIALS_FILE, value: /var/run/secrets/pinvou/nats/billing-command-executor.creds }
+            - { name: NATS_CREDENTIALS_FILE, value: /run/pinvou/nats/private/billing-command-executor.creds }
             {{- else if and (or $root.Values.tokenCredentialPortal.enabled $root.Values.tokenCommandExecutor.enabled) (or (eq $app.name "account-service") (eq $app.name "token-gateway")) }}
-            - { name: NATS_CREDENTIALS_FILE, value: {{ printf "/var/run/secrets/pinvou/nats/%s.creds" $app.name | quote }} }
+            - { name: NATS_CREDENTIALS_FILE, value: {{ printf "/run/pinvou/nats/private/%s.creds" $app.name | quote }} }
             {{- end }}
             {{- if eq $app.name "account-service" }}
             - { name: ACCOUNT_SERVICE_VERSION, value: {{ $root.Chart.AppVersion | quote }} }
@@ -332,7 +339,7 @@ spec:
             - { name: portal-handoff-oidc, mountPath: /var/run/secrets/pinvou/portal-handoff, readOnly: true }
             {{- end }}
             {{- if or (eq $app.name "billing-service") (and (or $root.Values.tokenCredentialPortal.enabled $root.Values.tokenCommandExecutor.enabled) (or (eq $app.name "account-service") (eq $app.name "token-gateway"))) }}
-            - { name: nats-credentials, mountPath: /var/run/secrets/pinvou/nats, readOnly: true }
+            - { name: nats-private, mountPath: /run/pinvou/nats, readOnly: true }
             {{- end }}
         {{- if and (eq $app.name "token-gateway") (eq $root.Values.tokenGateway.secretProvider "vault-transit") }}
         {{- include "pinvou.nativeKmsAgent" $root | nindent 8 }}
@@ -364,11 +371,10 @@ spec:
             secretName: {{ $root.Values.global.runtimeSecret }}
             items: [{ key: portal-handoff-oidc-client-secret, path: client-secret }]
         {{- end }}
-        {{- if eq $app.name "billing-service" }}
-        - name: nats-credentials
-          secret: { secretName: {{ $root.Values.global.runtimeSecret }}, items: [{ key: billing-command-executor.creds, path: billing-command-executor.creds }] }
-        {{- else if and (or $root.Values.tokenCredentialPortal.enabled $root.Values.tokenCommandExecutor.enabled) (or (eq $app.name "account-service") (eq $app.name "token-gateway")) }}
-        - name: nats-credentials
-          secret: { secretName: {{ if eq $app.name "token-gateway" }}{{ default $root.Values.global.runtimeSecret $root.Values.tokenGateway.runtimeSecret }}{{ else }}{{ $root.Values.global.runtimeSecret }}{{ end }}, items: [{ key: {{ printf "%s.creds" $app.name }}, path: {{ printf "%s.creds" $app.name }} }] }
+        {{- if $natsClient }}
+        - { name: nats-private, emptyDir: { medium: Memory, sizeLimit: 1Mi } }
+        {{- $natsSecret := $root.Values.global.runtimeSecret -}}
+        {{- if eq $app.name "token-gateway" -}}{{- $natsSecret = default $root.Values.global.runtimeSecret $root.Values.tokenGateway.runtimeSecret -}}{{- end }}
+        {{- include "pinvou.natsCredentialsSource" (dict "client" $natsClient "secret" $natsSecret "key" (printf "%s.creds" $natsClient)) | nindent 8 }}
         {{- end }}
 {{- end }}

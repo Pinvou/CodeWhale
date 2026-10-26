@@ -14,6 +14,7 @@ import (
 
 	"github.com/Pinvou/pinvou3/account-platform/internal/account"
 	"github.com/Pinvou/pinvou3/account-platform/internal/platform/config"
+	"github.com/Pinvou/pinvou3/account-platform/internal/platform/events"
 	"github.com/Pinvou/pinvou3/account-platform/internal/platform/h3cmall"
 	"github.com/Pinvou/pinvou3/account-platform/internal/platform/httpserver"
 	"github.com/Pinvou/pinvou3/account-platform/internal/platform/identity"
@@ -22,6 +23,13 @@ import (
 )
 
 func main() {
+	if handled, err := events.PrepareNATSCredentials(os.Args[1:], "account-service"); handled {
+		if err != nil {
+			os.Exit(1)
+		}
+		return
+	}
+
 	if err := httpserver.ConfigureProcessLogging("account-service"); err != nil {
 		log.Fatal("ACCOUNT_LOGGING_CONFIGURATION_INVALID")
 	}

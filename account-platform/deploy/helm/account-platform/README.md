@@ -32,6 +32,35 @@ configure server authentication. Render and review the exact site values, then
 perform the separately authorized TLS/authentication/resource and network
 reachability checks. Rendering does not prove those external resources exist.
 
+### Private NATS credential files
+
+The unchanged NATS runtime reader rejects projected symlinks and group/world-readable
+credential files or parent directories. Each NATS client uses a narrow
+`prepare-nats-credentials` init mode in the same service image, running as UID/GID
+65532 with fsGroup 65532. Only that init receives its one projected Secret key
+(0440); it preserves and validates the complete multi-line JWT/NKey credential,
+then atomically creates a real 0400 file in a 0700 private child directory of a
+Memory `emptyDir`. The main container mounts only that memory output read-only;
+it does not mount the original NATS Secret projection. No root container or
+runtime permission/symlink exception is used.
+
+The existing Secret keys stay `billing-command-executor.creds`,
+`account-event-relay.creds`, `billing-event-relay.creds` and the independent
+`account-approval-relay.creds`. With governed workloads enabled, the existing
+`account-service.creds`, `token-gateway.creds` and
+`token-command-executor.creds` keys use the same preparation. Each preparation
+receives only its own key; Account's ordinary and approval channels retain
+separate files and init steps. Runtime credential paths are now
+`/run/pinvou/nats/private/<client>.creds`. The service image must support this
+init command before chart rollout; an older image fails closed.
+
+An init retry accepts an already published file only if it is private, valid and
+byte-identical to the current projection; it never replaces a credential. Secret
+rotation requires recreating the Pod and its memory volume. Rendering verifies
+wiring only: confirm real cluster ownership/readability, server TLS/authentication,
+ACLs and all existing resource-configuration inputs separately before rollout.
+Credential preparation alone does not establish complete service readiness.
+
 Install External Secrets Operator and create the least-privilege referenced
 `SecretStore` or `ClusterSecretStore` before install. Production values create
 an `ExternalSecret` that owns the runtime Secret; non-production environments

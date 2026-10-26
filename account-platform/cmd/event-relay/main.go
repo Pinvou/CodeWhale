@@ -21,6 +21,13 @@ import (
 )
 
 func main() {
+	if handled, err := events.PrepareNATSCredentials(os.Args[1:], "account-event-relay", "billing-event-relay", "account-approval-relay"); handled {
+		if err != nil {
+			os.Exit(1)
+		}
+		return
+	}
+
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 	environment := strings.TrimSpace(os.Getenv("APP_ENV"))
