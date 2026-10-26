@@ -89,6 +89,7 @@ async fn remote_send_joint_preparation_and_reserved_dispatch_freeze_credentials_
                         session_id,
                         false,
                         RuntimeModelOverrides {
+                            auxiliary: None,
                             freeze_remote_credentials: options.policy.require_model_credentials,
                             explicit_model: options.model,
                             explicit_credential: options.credential,
