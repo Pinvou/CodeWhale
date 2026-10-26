@@ -429,6 +429,148 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn default_item_budgets_deliver_all_controls_before_256_business_frames() {
+        let (sender, mut receiver) = inbound_channel(InboundLimits::default());
+        let enqueue = |priority, json: String| {
+            sender.enqueue(ControllerTransportEvent::Frame {
+                priority,
+                remote_control_generation: "generation-test".into(),
+                lease_epoch: Some("1".into()),
+                json,
+            })
+        };
+        for index in 0..256 {
+            enqueue(FramePriority::Business, format!("business-{index}"));
+        }
+        for index in 0..64 {
+            enqueue(FramePriority::Control, format!("control-{index}"));
+        }
+        assert_eq!(receiver.failure(), None);
+        for index in 0..64 {
+            assert_eq!(
+                next(&mut receiver).await.event,
+                ControllerLaneEvent::Frame(format!("control-{index}"))
+            );
+        }
+        for index in 0..256 {
+            assert_eq!(
+                next(&mut receiver).await.event,
+                ControllerLaneEvent::Frame(format!("business-{index}"))
+            );
+        }
+        assert_eq!(receiver.remaining_bytes(), 8 * 1024 * 1024);
+    }
+
+    #[tokio::test]
+    async fn default_item_overflow_is_terminal_at_257_business_or_65_controls() {
+        for (priority, accepted) in [(FramePriority::Business, 256), (FramePriority::Control, 64)] {
+            let (sender, mut receiver) = inbound_channel(InboundLimits::default());
+            for _ in 0..accepted {
+                sender.enqueue(frame(priority, b'a', 1));
+            }
+            assert_eq!(receiver.failure(), None);
+            sender.enqueue(frame(priority, b'x', 1));
+            assert_eq!(
+                receiver.failure(),
+                Some(ControllerLaneFailure::ItemCapacity)
+            );
+            assert_eq!(receiver.remaining_bytes(), 8 * 1024 * 1024);
+            assert_eq!(
+                next(&mut receiver).await.event,
+                ControllerLaneEvent::Failed(ControllerLaneFailure::ItemCapacity)
+            );
+            sender.enqueue(frame(FramePriority::Control, b'z', 1));
+            drop(sender);
+            assert_eq!(
+                receiver.failure(),
+                Some(ControllerLaneFailure::ItemCapacity)
+            );
+            assert!(receiver.recv().await.is_none());
+        }
+    }
+
+    #[tokio::test]
+    async fn default_business_byte_backlog_keeps_two_max_controls_and_both_fifos() {
+        let (sender, mut receiver) = inbound_channel(InboundLimits::default());
+        // This is the post-validation opaque-buffer seam. Framing and AEAD
+        // admission are exercised separately by the actual-Port regressions.
+        for index in 0..63 {
+            let event = frame(FramePriority::Business, b'!' + index, 128 * 1024);
+            let ControllerTransportEvent::Frame { ref json, .. } = event else {
+                unreachable!()
+            };
+            assert_eq!(json.capacity(), 128 * 1024);
+            assert!(json.len() <= MAX_ENCRYPTED_WIRE_BYTES);
+            sender.enqueue(event);
+        }
+        for byte in [b'a', b'b'] {
+            let event = frame(FramePriority::Control, byte, MAX_CONTROL_MESSAGE_BYTES);
+            let ControllerTransportEvent::Frame { ref json, .. } = event else {
+                unreachable!()
+            };
+            assert_eq!(json.capacity(), MAX_CONTROL_MESSAGE_BYTES);
+            sender.enqueue(event);
+        }
+        assert_eq!(receiver.failure(), None);
+        assert_eq!(receiver.remaining_bytes(), 0);
+        for byte in [b'a', b'b'] {
+            let delivery = next(&mut receiver).await;
+            let ControllerLaneEvent::Frame(json) = &delivery.event else {
+                panic!("expected control frame")
+            };
+            assert_eq!(json.len(), MAX_CONTROL_MESSAGE_BYTES);
+            assert!(json.bytes().all(|value| value == byte));
+        }
+        for index in 0..63 {
+            let delivery = next(&mut receiver).await;
+            let ControllerLaneEvent::Frame(json) = &delivery.event else {
+                panic!("expected business frame")
+            };
+            assert_eq!(json.len(), 128 * 1024);
+            assert!(json.bytes().all(|value| value == b'!' + index));
+        }
+        assert_eq!(receiver.remaining_bytes(), 8 * 1024 * 1024);
+    }
+
+    #[tokio::test]
+    async fn default_byte_overflow_preserves_reservation_and_releases_terminal_backlog() {
+        for exceed_total in [false, true] {
+            let (sender, mut receiver) = inbound_channel(InboundLimits::default());
+            for _ in 0..63 {
+                sender.enqueue(frame(FramePriority::Business, b'b', 128 * 1024));
+            }
+            assert_eq!(receiver.failure(), None);
+            if exceed_total {
+                for _ in 0..2 {
+                    sender.enqueue(frame(
+                        FramePriority::Control,
+                        b'c',
+                        MAX_CONTROL_MESSAGE_BYTES,
+                    ));
+                }
+                assert_eq!(receiver.failure(), None);
+                assert_eq!(receiver.remaining_bytes(), 0);
+            }
+            sender.enqueue(frame(
+                if exceed_total {
+                    FramePriority::Control
+                } else {
+                    FramePriority::Business
+                },
+                b'x',
+                1,
+            ));
+            assert_eq!(receiver.failure(), Some(ControllerLaneFailure::ByteBudget));
+            assert_eq!(receiver.remaining_bytes(), 8 * 1024 * 1024);
+            assert_eq!(
+                next(&mut receiver).await.event,
+                ControllerLaneEvent::Failed(ControllerLaneFailure::ByteBudget)
+            );
+            assert!(receiver.recv().await.is_none());
+        }
+    }
+
+    #[tokio::test]
     async fn item_capacity_is_independent_of_bytes_and_terminal_cannot_be_lost() {
         let (sender, mut receiver) = inbound_channel(InboundLimits {
             business_items: 2,

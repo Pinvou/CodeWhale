@@ -583,6 +583,8 @@ impl ControllerTransportSender {
         // Repeated failed reconnects preserve the original binding, not a new lease.
     }
 
+    // An active-lease view for consumers; None after stop does not claim that
+    // the underlying binding/key storage was synchronously erased.
     pub(crate) fn authenticated_lease(&self) -> Option<AuthenticatedLease> {
         let lease = self.lease.read();
         if self.is_stopped() {

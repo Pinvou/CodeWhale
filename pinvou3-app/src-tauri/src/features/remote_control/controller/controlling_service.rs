@@ -345,7 +345,8 @@ fn relay_error_code(value: &Value) -> Option<&'static str> {
     }
 }
 
-/// 失败分类：Relay 明确给出的码优先；断线与本地上限超时归为对端不可达；
+/// 失败分类：已观察到的本地入站终态优先于已保存的 Relay 错误码；
+/// 否则使用 Relay 明确码，断线与本地上限超时归为对端不可达；
 /// 其余（验签失败、顺序错误、本地 generation 绑定失败）归为协议错误。
 fn public_failure_code(port: &impl ControllingRelayPort, timed_out: bool) -> &'static str {
     if port.ingress_failure().is_some() {

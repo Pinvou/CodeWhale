@@ -12,6 +12,8 @@ A 专用入站 inbox 在真实 transport 已完成角色、generation、协议�
 
 本地固定诊断原因是 `inbound_item_capacity`、`inbound_byte_budget`、`inbound_closed`；对外复用既有 `endpoint_offline` 公共码，日志区分本地来源，不透传原始帧、远端错误文本或凭证。握手成功交接和返回前复核本地终态及已知断线，避免把已失效的 joined 结果遗忘为可用连接。
 
+公共错误映射时，已经观察到的本地入站终态优先于此前保存的 Relay 错误；没有本地终态时才按原 Relay/断线规则映射。停止后的 active-lease getter 返回空只表示不再暴露活动租约，不代表底层绑定或密钥字节已同步擦除。
+
 40 秒整体握手上限、原 30 秒认证证据/恢复冻结截止和 reader socket epoch 一次性授权保持。队列等待、重复断线和容量故障不延长它们；只有既有有效证据或完整认证恢复才可更新周期。
 
 回归在真实产品 lib 的 `controlling_inbound::tests` 与 `controlling_service::inbound_tests`；Windows 正式 regression 的已链接 exe 执行两个精确非零筛选，Linux 仍按既有全 lib 门禁运行。发布仍须独立通过 #1428 的安全前置条件。

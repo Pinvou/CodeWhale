@@ -302,8 +302,28 @@ async fn keeper(fixture: &mut Connected) -> Vec<Value> {
 
 #[tokio::test]
 async fn actual_port_fatal_and_closed_both_commit_current_owner_error() {
+    let _env_lock = crate::platform::paths::tests::ENV_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let directory = tempfile::tempdir().unwrap();
+    let _restore =
+        crate::platform::test_support::EnvRestore::capture(&["PINVOU3_HOME", "CODEWHALE_HOME"]);
+    // SAFETY: the crate-wide lock is held through environment restoration.
+    unsafe {
+        std::env::set_var("PINVOU3_HOME", directory.path());
+        std::env::set_var("CODEWHALE_HOME", directory.path());
+    }
     for closed in [false, true] {
         let mut fixture = connected(limits());
+        fixture.ingress.enqueue(raw_control(
+            json!({"v":1,"type":"error","code":"controller_busy"}),
+        ));
+        let prior = tokio::time::timeout(Duration::from_secs(5), fixture.port.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(prior["code"], "controller_busy");
+        assert_eq!(public_failure_code(&fixture.port, false), "controller_busy");
         if closed {
             // This is the actual last producer, not a fake None-returning lane.
             let (replacement, _unused) = inbound_channel(limits());
@@ -320,6 +340,10 @@ async fn actual_port_fatal_and_closed_both_commit_current_owner_error() {
                 assert!(admit(&fixture, &frame));
             }
         }
+        assert_eq!(
+            public_failure_code(&fixture.port, false),
+            PEER_UNAVAILABLE_ERROR
+        );
         let status = keeper(&mut fixture).await;
         assert_eq!(status.len(), 1);
         assert_eq!(status[0]["status"], "error");
@@ -329,6 +353,16 @@ async fn actual_port_fatal_and_closed_both_commit_current_owner_error() {
         assert!(fixture.sender.authenticated_lease().is_none());
         assert!(fixture.manager.live_lease().is_err());
         assert!(!fixture.business.is_installed());
+        let written =
+            std::fs::read_to_string(directory.path().join("logs/remote-control.log")).unwrap();
+        let reason = if closed {
+            "inbound_closed"
+        } else {
+            "inbound_item_capacity"
+        };
+        assert!(written.contains(&format!("stage=inbound_failed detail={reason}")));
+        assert!(!written.contains("fake-secret"));
+        assert!(!written.contains("claim-0001"));
         assert!(fixture.manager.connect("2345678").is_ok());
     }
 }
@@ -442,24 +476,41 @@ async fn stale_fatal_and_receiver_drop_cannot_clear_replacement_with_same_lease(
 }
 
 #[tokio::test]
-async fn retained_last_terminal_reaches_authenticated_projection_after_resume_with_b_silent() {
+async fn retained_ordered_tail_reaches_authenticated_projection_after_resume_with_b_silent() {
     let mut fixture = connected(limits());
     let terminal = JournalEvent {
         event_id: "event-last-terminal".into(),
         epoch: "journal-inbound".into(),
-        sequence: 1,
+        sequence: 2,
         kind: "task_status".into(),
         session_id: "session-inbound".into(),
         task_id: Some("task-inbound".into()),
         terminal_status: Some("succeeded".into()),
         payload: json!({"status":"succeeded"}),
     };
+    let earlier = JournalEvent {
+        event_id: "event-earlier-tail".into(),
+        epoch: "journal-inbound".into(),
+        sequence: 1,
+        kind: "assistant_delta".into(),
+        session_id: "session-inbound".into(),
+        task_id: None,
+        terminal_status: None,
+        payload: super::super::journal::sanitize_event_payload(&json!({"text":"before terminal"})),
+    };
+    let earlier_frame = journal_event_frame(
+        &mut fixture.b,
+        &fixture.lease,
+        &fixture.capabilities,
+        &earlier,
+    );
     let frame = journal_event_frame(
         &mut fixture.b,
         &fixture.lease,
         &fixture.capabilities,
         &terminal,
     );
+    assert!(admit(&fixture, &earlier_frame));
     assert!(admit(&fixture, &frame));
     disconnect(&fixture);
     assert!(fixture.port.inbound.disconnect_pending());
@@ -472,11 +523,19 @@ async fn retained_last_terminal_reaches_authenticated_projection_after_resume_wi
     let mut seen = Vec::new();
     let (done, received) = oneshot::channel();
     let mut done = Some(done);
+    // The serving keeper fences every dispatch with the lane's original
+    // registration, so the dispatched operation carries that context.
+    let expected_operation = fixture
+        .operation
+        .clone()
+        .for_lane(fixture.sender.disconnect_context());
     let mut on_journal = |authenticated: &AuthenticatedJournalFrame<'_>| {
-        assert_eq!(authenticated.operation(), &fixture.operation);
+        assert_eq!(authenticated.operation(), &expected_operation);
         assert_eq!(authenticated.lease(), &fixture.lease);
         seen.push(authenticated.event().clone());
-        if let Some(done) = done.take() {
+        if seen.len() == 2
+            && let Some(done) = done.take()
+        {
             let _ = done.send(());
         }
         Ok(())
@@ -514,8 +573,7 @@ async fn retained_last_terminal_reaches_authenticated_projection_after_resume_wi
     drop(serving);
     drop(sinks);
     drop(on_journal);
-    assert_eq!(seen.len(), 1);
-    assert_eq!(seen[0], terminal);
+    assert_eq!(seen, vec![earlier, terminal]);
     assert_eq!(
         fixture.manager.status().kind(),
         ControllingStatusKind::Connected
