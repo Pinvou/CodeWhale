@@ -175,14 +175,14 @@ export function CmsSettingsPanel({ copy, onOpenModelStore }) {
       return;
     }
     stopConfirm.current?.focus();
-    const escape = (event) => {
+    const handleEscape = (event) => {
       if (event.key === 'Escape') {
         event.preventDefault();
         setConfirmStop('');
       }
     };
-    document.addEventListener('keydown', escape);
-    return () => document.removeEventListener('keydown', escape);
+    document.addEventListener('keydown', handleEscape);
+    return () => document.removeEventListener('keydown', handleEscape);
   }, [confirmStop]);
   const inFlight = useRef(false);
 

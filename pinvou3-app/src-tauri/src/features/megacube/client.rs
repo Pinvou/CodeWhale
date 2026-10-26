@@ -8,6 +8,7 @@
 // 解析与判定形状，commands::cms 层有 socket_missing 门控测试）。
 
 use serde_json::Value;
+#[cfg(unix)]
 use std::io::{Read, Write};
 use std::path::PathBuf;
 use std::time::{Duration, Instant};

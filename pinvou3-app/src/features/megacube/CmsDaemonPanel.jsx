@@ -28,14 +28,14 @@ export function CmsDaemonPanel({ copy, onChanged }) {
       return;
     }
     confirmButton.current?.focus();
-    const escape = (event) => {
+    const handleEscape = (event) => {
       if (event.key === 'Escape') {
         event.preventDefault();
         setConfirm('');
       }
     };
-    document.addEventListener('keydown', escape);
-    return () => document.removeEventListener('keydown', escape);
+    document.addEventListener('keydown', handleEscape);
+    return () => document.removeEventListener('keydown', handleEscape);
   }, [confirm]);
   const alive = useRef(true),
     inFlight = useRef(false),
