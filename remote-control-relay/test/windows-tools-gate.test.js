@@ -63,6 +63,7 @@ test('Windows tools version probe emits only cached closed metadata and preserve
       Object.defineProperty(process, 'platform', { value: 'win32' });
       const mode = ${JSON.stringify(mode)};
       let calls = 0, reads = {}, forbidden = 0, emitted;
+      const executedTools = [];
       const error = {};
       for (const key of ['message','stack','stdout','stderr','cmd','path','args','env'])
         Object.defineProperty(error,key,{get(){forbidden++;throw new Error('PRIVATE_SENTINEL');}});
@@ -82,7 +83,8 @@ test('Windows tools version probe emits only cached closed metadata and preserve
         if(calls===1){assert.equal(executable,'powershell.exe');assert.equal(options.timeout,60000);assert.equal(options.windowsHide,true);
           assert.deepEqual(args,['-NoProfile','-NonInteractive','-Command','$PSVersionTable.PSVersion.ToString()']);
           if(mode==='spawn_throw')throw error;return result;}
-        assert.equal(mode,'success');return {status:0,stdout:${JSON.stringify(summary)},stderr:''};
+        assert.equal(mode,'success');executedTools.push(args.at(-1).split(/[\\\\/]/u).at(-1));
+        return {status:0,stdout:${JSON.stringify(summary)},stderr:''};
       };
       syncBuiltinESMExports();
       try {
@@ -90,9 +92,15 @@ test('Windows tools version probe emits only cached closed metadata and preserve
         else await assert.rejects(import(${JSON.stringify(entry)}),e=>e.message.startsWith('Windows PowerShell 5.1 required: ')
           && !e.message.includes('PRIVATE_SENTINEL') && e.cause===undefined);
       } finally {console.error=observer;}
-      assert.equal(forbidden,0);assert.equal(calls,mode==='success'?4:1);
-      if(mode==='success'){assert.equal(emitted,undefined);}
+      assert.equal(forbidden,0);
+      if(mode==='success'){
+        assert.equal(emitted,undefined);
+        assert.deepEqual(executedTools,['local-selftest-ownership.test.js','local-selftest-identity.test.js',
+          'endpoint-launcher.test.js','controller-state-guard.test.js','controller-lock-rollout.test.js']);
+        assert.equal(calls,executedTools.length+1);
+      }
       else {
+        assert.equal(calls,1);
         assert.ok(!emitted.includes('PRIVATE_SENTINEL'));
         const payload=JSON.parse(emitted.slice('windows_relay_tools_version_failure '.length));
         assert.deepEqual(Object.keys(payload),['stage','reason','code','errno','status','signal']);

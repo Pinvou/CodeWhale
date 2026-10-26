@@ -3,6 +3,7 @@ import { isIP } from "node:net";
 import { resolve } from "node:path";
 import { isDirectCliEntry } from "../cli-entrypoint.js";
 import { isExampleHmacKey } from "../hmac-key-config.js";
+import { requireControllerLockRuntime } from "../relay-state-guard.js";
 
 const REQUIRED_KEYS = Object.freeze([
   "NODE_ENV",
@@ -205,6 +206,7 @@ export async function validateControllerStateDirectories(
 if (isDirectCliEntry(import.meta.url)) {
   const expectedFeatureFlag = process.argv.includes("--expect-feature-off") ? "0" : "1";
   validateControllerEnvironmentFile(process.argv[2] || "", { expectedFeatureFlag })
+    .then(() => expectedFeatureFlag === "1" ? requireControllerLockRuntime() : undefined)
     .then(() => validateControllerStateDirectories())
     .catch((error) => {
       // Never print file contents or variable values: this file contains production secrets.

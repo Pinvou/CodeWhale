@@ -9,6 +9,12 @@ is not a production enrollment flow and must not be advertised as one.
 
 ## Deployment configuration
 
+Store-opening controller services and management commands require Node.js 24 or
+newer with built-in SQLite. Disabled legacy-only operation keeps its existing
+runtime requirements. Follow [the lock upgrade and offline downgrade procedure](CONTROLLER-LOCK-MIGRATION.md)
+before mixing deployment versions; an activated new lock prevents automatic
+restart of an unaware predecessor.
+
 Desktop/controller identifiers use the frozen wire grammar: 1–128 ASCII
 characters, an alphanumeric first character, then alphanumerics or `._:-`.
 Tilde is not accepted. Existing Web v2 endpoint IDs keep their released
@@ -241,15 +247,15 @@ snapshot and commits with
 write. One process serializes mutations. A complete, synced temporary lock is
 protected and published as the exclusive sibling `.lock` with an atomic
 hardlink, so this implementation never publishes an empty or partial lock. As
-soon as the published link's inode is verified, the store records a provisional
-owner and process hold before removing the temporary hardlink or syncing the
-directory. The record binds PID, a boot-plus-process-start identity, and a
+soon as publication succeeds, the store records a provisional owner before its
+post-publication inode check, temporary hardlink removal or directory sync. The
+process hold and OS guard already cover this entire interval. The record binds PID, a boot-plus-process-start identity, and a
 144-bit per-open session nonce. A live matching process is never preempted, and
 PID reuse is detected. Legacy empty/truncated locks and dead owners are re-read
 for a bounded interval, then quarantined and identity-checked before removal.
-Failures before verified publication close the handle and remove only matching
+Failures before publication close the handle and remove only matching
 owned inodes; cleanup failures remain attached to the original primary error.
-Failures after verified publication use the same owner-checked release and
+Failures after publication use the same owner-checked release and
 abandoned-owner recovery path as initialization failures.
 
 Calling `close()` synchronously closes read/write admission. A CAS already
