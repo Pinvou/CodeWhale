@@ -51,12 +51,14 @@ test('unmount or availability loss cancels the delayed check', () => {
   assert.equal(f.frames.size, 0); assert.equal(f.timers.size, 0);
 });
 
-test('network failure does not schedule automatic retries', async () => {
+test('network failure logs only the operation and does not schedule automatic retries', async (t) => {
+  const warning = t.mock.method(console, 'warn', () => {});
   let calls = 0;
-  const f = fixture(true, async () => { calls += 1; throw Error('offline'); });
+  const f = fixture(true, async () => { calls += 1; throw Error('private backend error with credential'); });
   f.paint(); f.paint(); f.fire(); await new Promise(setImmediate);
   assert.equal(calls, 1); assert.equal(f.reports.length, 0);
   assert.equal(f.frames.size, 0); assert.equal(f.timers.size, 0);
+  assert.deepEqual(warning.mock.calls.map(({ arguments: args }) => args), [['model_store_startup_update_check failed']]);
 });
 
 test('late results do not update an unmounted consumer', async () => {

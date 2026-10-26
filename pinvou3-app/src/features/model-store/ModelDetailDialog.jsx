@@ -227,8 +227,13 @@ function ModelDetailDialog({ cardId, card, copy, theme, onClose, onRedeploy, onT
       await load();
     } catch (contextError) {
       const message = String(contextError?.message || contextError);
-      if (viewToken === viewTokenRef.current) onToast(message.includes('store_context_follow_unsupported') || message.startsWith('store_protocol:')
-        ? copy.contextFollowHostUpdate : copy.contextFollowFailed);
+      let failure = copy.contextFollowFailed;
+      if (message === 'model store endpoint changed or is unavailable; refresh the card and retry') {
+        failure = copy.linkEndpointChanged;
+      } else if (message === 'Command model_store_follow_deployment_context not found' || message === 'Tauri invoke is unavailable') {
+        failure = copy.contextFollowUnavailable;
+      }
+      if (viewToken === viewTokenRef.current) onToast(failure);
     } finally {
       if (viewToken === viewTokenRef.current) setBusy(false);
     }

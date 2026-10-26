@@ -314,6 +314,7 @@ fn follow_rejects_stale_unlinked_detached_and_stopped_models_without_mutation() 
         "detached",
         "stopped",
         "wrong-card",
+        "missing",
     ] {
         let mut row = original.clone();
         match mode {
@@ -322,16 +323,22 @@ fn follow_rejects_stale_unlinked_detached_and_stopped_models_without_mutation() 
             "unlinked" => row.model_store_card_id = None,
             "detached" => row.model_store_link_detached = true,
             "stopped" => db::set_running("qwen-card", false).unwrap(),
-            _ => row.model_store_card_id = Some("another-card".into()),
+            "wrong-card" => row.model_store_card_id = Some("another-card".into()),
+            _ => {}
         }
         UserPrefs::update_transaction(|prefs| {
-            prefs.advanced.saved_models = vec![row.clone()];
+            prefs.advanced.saved_models = if mode == "missing" {
+                vec![]
+            } else {
+                vec![row.clone()]
+            };
             Ok(())
         })
         .unwrap();
         let before = UserPrefs::load();
-        assert!(
-            follow_deployment_context("qwen-card", "target").is_err(),
+        assert_eq!(
+            follow_deployment_context("qwen-card", "target").unwrap_err(),
+            "model store endpoint changed or is unavailable; refresh the card and retry",
             "{mode}"
         );
         assert!(current_linked_ids("qwen-card").is_empty(), "{mode}");
