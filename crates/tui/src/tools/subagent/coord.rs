@@ -11,8 +11,8 @@ use async_trait::async_trait;
 use serde_json::{Value, json};
 
 use super::{
-    COMPLETED_AGENT_RETENTION, ParentMailReceipt, SharedSubAgentManager, SubAgentRuntime,
-    SubAgentStatus, parse_agent_ref, subagent_session_projection, subagent_status_name,
+    COMPLETED_AGENT_RETENTION, SharedSubAgentManager, SubAgentRuntime, SubAgentStatus,
+    parse_agent_ref, subagent_session_projection, subagent_status_name,
     wait_for_subagents_from_input,
 };
 use crate::tools::registry::ToolRegistryBuilder;
@@ -90,7 +90,7 @@ impl ToolSpec for AgentsListTool {
                 },
                 "agent_id": {
                     "type": "string",
-                    "description": "Optional single agent id or session name to inspect."
+                    "description": "Optional durable agent id to inspect; unambiguous ordinary legacy names are accepted. Use name for explicit name selection."
                 }
             },
             "required": []
@@ -123,6 +123,7 @@ impl ToolSpec for AgentsListTool {
         let mut manager = self.manager.write().await;
         manager.cleanup_for_session(&context.state_namespace, COMPLETED_AGENT_RETENTION);
         let summaries = if let Some(agent_ref) = agent_ref {
+            let agent_ref = agent_ref.resolve_for_session(&manager, &context.state_namespace)?;
             let summary = manager
                 .coordination_summary_for_session(
                     &context.state_namespace,
@@ -203,14 +204,18 @@ impl ToolSpec for AgentsMessageTool {
             "properties": {
                 "agent_id": {
                     "type": "string",
-                    "description": "Target child agent id or session name."
+                    "description": "Durable target id; unambiguous ordinary legacy names are accepted. Use name for explicit name selection."
+                },
+                "name": {
+                    "type": "string",
+                    "description": "Explicit current session name, including id-shaped names. agent_id/id takes precedence if supplied. A target is required for message, followup and interrupt."
                 },
                 "message": {
                     "type": "string",
                     "description": "Message text to queue."
                 }
             },
-            "required": ["agent_id", "message"]
+            "required": ["message"]
         })
     }
 
@@ -236,6 +241,7 @@ impl ToolSpec for AgentsMessageTool {
 
         let receipt = {
             let mut manager = self.manager.write().await;
+            let agent_ref = agent_ref.resolve_for_session(&manager, &context.state_namespace)?;
             manager
                 .ensure_caller_controls_descendant_for_session(
                     &context.state_namespace,
@@ -332,14 +338,18 @@ impl ToolSpec for AgentsFollowupTool {
             "properties": {
                 "agent_id": {
                     "type": "string",
-                    "description": "Target child agent id or session name."
+                    "description": "Durable target id; unambiguous ordinary legacy names are accepted. Use name for explicit name selection."
+                },
+                "name": {
+                    "type": "string",
+                    "description": "Explicit current session name, including id-shaped names. agent_id/id takes precedence if supplied. A target is required for message, followup and interrupt."
                 },
                 "message": {
                     "type": "string",
                     "description": "Follow-up message text."
                 }
             },
-            "required": ["agent_id", "message"]
+            "required": ["message"]
         })
     }
 
@@ -367,8 +377,9 @@ impl ToolSpec for AgentsFollowupTool {
         // (interrupted_continuable with a runtime attached) and queue-only
         // followup while holding only the read lock. The resume path takes
         // the write lock itself via the manager method.
-        let should_resume = {
+        let (agent_ref, should_resume) = {
             let manager = self.manager.read().await;
+            let agent_ref = agent_ref.resolve_for_session(&manager, &context.state_namespace)?;
             manager
                 .ensure_caller_controls_descendant_for_session(
                     &context.state_namespace,
@@ -377,8 +388,8 @@ impl ToolSpec for AgentsFollowupTool {
                     "agents/followup",
                 )
                 .map_err(|err| ToolError::invalid_input(err.to_string()))?;
-            manager
-                .get_result_by_ref_for_session(&context.state_namespace, &agent_ref)
+            let should_resume = manager
+                .get_result_for_session(&context.state_namespace, &agent_ref)
                 .ok()
                 .is_some_and(|snapshot| {
                     matches!(snapshot.status, SubAgentStatus::Interrupted(_))
@@ -386,14 +397,15 @@ impl ToolSpec for AgentsFollowupTool {
                             .checkpoint
                             .as_ref()
                             .is_some_and(|cp| cp.continuable && !cp.messages.is_empty())
-                })
+                });
+            (agent_ref, should_resume)
         };
 
         let receipt = if should_resume {
             match self.runtime.clone() {
                 Some(runtime) => {
                     let mut manager = self.manager.write().await;
-                    let snapshot = manager
+                    manager
                         .resume_from_checkpoint_for_session(
                             &context.state_namespace,
                             Arc::clone(&self.manager),
@@ -401,19 +413,7 @@ impl ToolSpec for AgentsFollowupTool {
                             &agent_ref,
                             &message,
                         )
-                        .map_err(|err| ToolError::execution_failed(err.to_string()))?;
-                    ParentMailReceipt {
-                        agent_id: snapshot.agent_id.clone(),
-                        status: subagent_status_name(&snapshot.status).to_string(),
-                        queue_depth: 0,
-                        woke: true,
-                        continued_from_checkpoint: true,
-                        continuation_handle: None,
-                        note: format!(
-                            "resumed from checkpoint as new agent {} ({}); prior terminal record {} stays intact",
-                            snapshot.agent_id, snapshot.model, agent_ref
-                        ),
-                    }
+                        .map_err(|err| ToolError::execution_failed(err.to_string()))?
                 }
                 None => {
                     let mut manager = self.manager.write().await;
@@ -519,14 +519,18 @@ impl ToolSpec for AgentsInterruptTool {
             "properties": {
                 "agent_id": {
                     "type": "string",
-                    "description": "Child agent id or session name to interrupt."
+                    "description": "Durable child id to interrupt; unambiguous ordinary legacy names are accepted. Use name for explicit name selection."
+                },
+                "name": {
+                    "type": "string",
+                    "description": "Explicit current session name, including id-shaped names. agent_id/id takes precedence if supplied. A target is required for message, followup and interrupt."
                 },
                 "reason": {
                     "type": "string",
                     "description": "Optional interrupt reason recorded on the checkpoint."
                 }
             },
-            "required": ["agent_id"]
+            "required": []
         })
     }
 
@@ -551,6 +555,7 @@ impl ToolSpec for AgentsInterruptTool {
 
         let (prior, snapshot) = {
             let mut manager = self.manager.write().await;
+            let agent_ref = agent_ref.resolve_for_session(&manager, &context.state_namespace)?;
             manager
                 .interrupt_child_for_session(
                     &context.state_namespace,
@@ -627,7 +632,11 @@ impl ToolSpec for AgentsWaitTool {
             "properties": {
                 "agent_id": {
                     "type": "string",
-                    "description": "Optional specific child. When omitted, watches every child running at call time."
+                    "description": "Optional durable child id. Without a target, watches every child running at call time. Use name for explicit name selection."
+                },
+                "name": {
+                    "type": "string",
+                    "description": "Explicit current session name, including id-shaped names. agent_id/id takes precedence if supplied. A target is required for message, followup and interrupt."
                 },
                 "timeout_secs": {
                     "type": "integer",
@@ -725,8 +734,9 @@ async fn wait_for_all_children(
     let watched: Vec<String> = {
         let manager = manager.read().await;
         if let Some(agent_ref) = &agent_ref {
+            let agent_id = agent_ref.resolve_for_session(&manager, &context.state_namespace)?;
             let snapshot = manager
-                .get_result_by_ref_for_session(&context.state_namespace, agent_ref)
+                .get_result_for_session(&context.state_namespace, &agent_id)
                 .map_err(|err| ToolError::invalid_input(err.to_string()))?;
             if snapshot.status != SubAgentStatus::Running {
                 // Already settled: hand back its outcome rather than an empty
@@ -771,7 +781,7 @@ async fn wait_for_all_children(
             let mut settled = Vec::new();
             let mut still_running = Vec::new();
             for agent_id in &watched {
-                match manager.get_result_by_ref_for_session(&context.state_namespace, agent_id) {
+                match manager.get_result_for_session(&context.state_namespace, agent_id) {
                     Ok(snapshot) if snapshot.status == SubAgentStatus::Running => {
                         still_running.push(json!({
                             "agent_id": snapshot.agent_id,
@@ -877,8 +887,9 @@ async fn wait_for_activity(
     let (watched, baseline): (Vec<String>, Vec<(String, u64)>) = {
         let manager = manager.read().await;
         if let Some(agent_ref) = &agent_ref {
+            let agent_id = agent_ref.resolve_for_session(&manager, &context.state_namespace)?;
             let snap = manager
-                .get_result_by_ref_for_session(&context.state_namespace, agent_ref)
+                .get_result_for_session(&context.state_namespace, &agent_id)
                 .map_err(|err| ToolError::invalid_input(err.to_string()))?;
             let fp = manager.activity_fingerprint(&snap.agent_id).unwrap_or(0);
             if snap.status != SubAgentStatus::Running {
@@ -942,11 +953,9 @@ async fn wait_for_activity(
             let mut settled = Vec::new();
             let mut activity = Vec::new();
             for (id, base_fp) in &baseline {
-                if let Ok(snap) =
-                    manager.get_result_by_ref_for_session(&context.state_namespace, id)
-                {
+                if let Ok(snap) = manager.get_result_for_session(&context.state_namespace, id) {
                     if snap.status != SubAgentStatus::Running {
-                        settled.push(snap);
+                        settled.push(json!({"agent_id":snap.agent_id,"status":subagent_status_name(&snap.status)}));
                         continue;
                     }
                     let fp = manager.activity_fingerprint(id).unwrap_or(0);
@@ -957,6 +966,8 @@ async fn wait_for_activity(
                             "activity_fingerprint": fp,
                         }));
                     }
+                } else {
+                    settled.push(json!({"agent_id":id,"status":"gone"}));
                 }
             }
             (
@@ -974,10 +985,7 @@ async fn wait_for_activity(
                 "running": outcome.2,
                 "elapsed_ms": started.elapsed().as_millis(),
                 "timed_out": false,
-                "settled": outcome.0.iter().map(|s| json!({
-                    "agent_id": s.agent_id,
-                    "status": subagent_status_name(&s.status),
-                })).collect::<Vec<_>>(),
+                "settled": outcome.0,
                 "activity": outcome.1,
             });
             let mut tool_result = ToolResult::json(&payload)
@@ -1180,7 +1188,7 @@ impl ToolSpec for AgentsCoordinateTool {
         let mut manager = self.manager.write().await;
         if let Some(caller) = self.caller.as_deref() {
             manager
-                .get_result_by_ref_for_session(&context.state_namespace, caller)
+                .get_result_for_session(&context.state_namespace, caller)
                 .map_err(|_| {
                     ToolError::invalid_input("Agent not found in the active session".to_string())
                 })?;

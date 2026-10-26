@@ -936,6 +936,28 @@ mod tests {
     }
 
     #[test]
+    fn undelivered_existing_successor_keeps_focus_and_shows_the_failure_note() {
+        let tmp = tempdir().expect("tempdir");
+        let mut app = test_app(tmp.path().to_path_buf());
+        focus_agent(&mut app, "agent_original");
+        let outcome = Ok(crate::tools::subagent::UserFollowUpOutcome {
+            agent_id: "agent_original".into(),
+            target_agent_id: "agent_existing".into(),
+            delivered: false,
+            resumed: false,
+            note: "queued; live input channel closed".into(),
+        });
+        apply_follow_up_receipt(&mut app, "agent_original", &outcome);
+        assert_eq!(app.agent_focus.as_ref().unwrap().agent_id, "agent_original");
+        assert!(
+            app.status_message
+                .as_deref()
+                .unwrap()
+                .contains("queued; live input channel closed")
+        );
+    }
+
+    #[test]
     fn scroll_to_bottom_returns_the_focused_transcript_to_its_tail() {
         let tmp = tempdir().expect("tempdir");
         let mut app = test_app(tmp.path().to_path_buf());

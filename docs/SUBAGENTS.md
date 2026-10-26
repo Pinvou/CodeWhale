@@ -440,13 +440,24 @@ spawn. The held-name refusal says what the holder's status can actually do: a
 running child can be waited out or cancelled; an interrupted one is already
 terminal (its completion event has fired and `cancel` only touches Running
 children), so the advice is `action=followup` if its checkpoint still allows,
-or a different name. A ref that is no child's session name still reaches its
-record by exact `agent_id`; when the string is also a session name — unnamed
-children take `session_name = id`, and `name` accepts id-shaped strings —
-the name rules above win. A record hydrated from an older boot is history for
-resolution too — it never outranks the current boot's child — so the
-bare-name "ambiguous" refusal only guards state spawn cannot produce; use the
-`agent_id` if you ever meet it.
+or a different name.
+
+Target selectors distinguish stable identity from reusable names. `agent_id`
+(and the parse-accepted `id` alias) selects the exact issued id first, even
+when a newer child uses that string as its name. A foreign or missing issued
+id fails closed; `agent_` followed by exactly eight hexadecimal digits is the issued-id shape and never falls back to
+a name after cleanup. To select a reused name, use `name` (or `session_name`),
+including when the name looks like an id. An explicit id takes precedence if
+both selectors are supplied. Unambiguous ordinary names in the legacy id
+field remain accepted. Saved calls that used an id-shaped `agent_id` as a
+name must migrate to `name`; returned receipt ids and captured wait sets keep
+their original object and never follow a retry. For example, if B is named
+after A's returned id, `agent_id=A.id` still selects A while `name=A.id`
+selects B, subject to B's own session and hierarchy permissions.
+
+Records hydrated from an older boot remain history for name resolution: they
+never outrank the current boot's live child. Two live holders of one name are
+ambiguous; use the exact `agent_id` rather than guessing a holder.
 
 `type=general` and `type=implement` are write-capable and claim the whole
 parent workspace unless `write_roots` narrows them, so several started

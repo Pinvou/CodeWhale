@@ -9,6 +9,7 @@ use std::process::Command;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use tempfile::{Builder as TempDirBuilder, tempdir};
 
+mod identity_selection;
 mod launch_receipt;
 mod operation_identity;
 
@@ -10048,11 +10049,9 @@ fn session_name_resolution_ignores_prior_boot_interrupted_ghost() {
 }
 
 #[tokio::test]
-async fn id_shaped_session_name_resolves_by_the_name_rules_not_the_settled_id() {
-    // `validate_session_name` accepts id-shaped names and an unnamed child
-    // takes `session_name = id`, so a retry can legitimately hold a settled
-    // sibling's agent id as its session name. The exact-id fast path must
-    // not let the settled record shadow the child the name now means.
+async fn id_shaped_session_name_requires_an_explicit_name_selector() {
+    // Name reuse cannot reinterpret a durable receipt. Both live and settled
+    // retries stay reachable through the explicit name selector instead.
     let tmp = tempdir().expect("tempdir");
     let manager = new_shared_subagent_manager(tmp.path().to_path_buf(), 5);
     let settled_id = seed_named_same_session_agent(
@@ -10081,34 +10080,30 @@ async fn id_shaped_session_name_resolves_by_the_name_rules_not_the_settled_id() 
             .started_at = Instant::now() - Duration::from_secs(300);
     }
 
-    // While the retry runs, the id string is its session name: status/
-    // interrupt/cancel by that ref must reach the live child, not the
-    // settled id-holder.
-    assert_eq!(
+    for status in [SubAgentStatus::Running, SubAgentStatus::Completed] {
         manager
-            .read()
+            .write()
             .await
-            .resolve_agent_ref("agent_7e2950c4")
-            .expect("the live holder owns the id-shaped name"),
-        live_id,
-        "a settled id must not shadow the live name holder"
-    );
-
-    // After the retry settles too, the name rules still govern — the
-    // newest settled holder (the retry the parent just waited on) wins
-    // over the older id-holder.
-    {
+            .agents
+            .get_mut(&live_id)
+            .unwrap()
+            .status = status;
+        let guard = manager.read().await;
+        assert_eq!(guard.resolve_agent_ref(&settled_id).unwrap(), settled_id);
+        let selector = parse_agent_ref(&json!({"name":settled_id}))
+            .unwrap()
+            .unwrap();
+        // These historical fixture rows intentionally have no session owner;
+        // assign the local test owner before using the production selector.
+        drop(guard);
         let mut guard = manager.write().await;
-        guard.agents.get_mut(&live_id).expect("live").status = SubAgentStatus::Completed;
+        guard.assign_test_session_owner(&settled_id, "workspace");
+        guard.assign_test_session_owner(&live_id, "workspace");
+        assert_eq!(
+            selector.resolve_for_session(&guard, "workspace").unwrap(),
+            live_id
+        );
     }
-    assert_eq!(
-        manager
-            .read()
-            .await
-            .resolve_agent_ref("agent_7e2950c4")
-            .expect("newest settled holder wins"),
-        live_id
-    );
 }
 
 #[test]
@@ -18358,6 +18353,103 @@ fn checkpoint_without_omitted_field_still_deserializes() {
     let checkpoint: SubAgentCheckpoint =
         serde_json::from_str(legacy).expect("legacy checkpoint should load");
     assert_eq!(checkpoint.omitted_messages, 0);
+}
+
+#[test]
+fn forkguard_subagent_classic_hint_names_the_actual_storage_call() {
+    use crate::tools::large_output_router::WorkshopConfig;
+    use crate::tools::spec::ToolSpec;
+    let _environment = crate::test_support::lock_test_env();
+    let _classic = crate::test_support::EnvVarGuard::set("CODEWHALE_CLASSIC_OUTPUT_ROUTING", "1");
+    let _workshop = crate::tools::large_output_router::active_workshop_test_guard();
+    struct RestoreWorkshop(WorkshopConfig);
+    impl Drop for RestoreWorkshop {
+        fn drop(&mut self) {
+            let _ = WorkshopConfig::install_active(Some(&self.0));
+        }
+    }
+    let _restore = RestoreWorkshop(WorkshopConfig::install_active(None));
+    let home = tempdir().unwrap();
+    with_spillover_root(home.path(), || {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let session = "child-classic-recovery";
+        let artifacts = home.path().join("sessions").join(session).join("artifacts");
+        std::fs::create_dir_all(artifacts.parent().unwrap()).unwrap();
+        std::fs::write(&artifacts, b"not a directory").unwrap();
+        let provider_id = "call.legacy\"quoted";
+        let raw = format!("BEGIN\n{}END", "child-line\n".repeat(12_000));
+        let (content, path) = bound_subagent_tool_result(
+            "worker-1",
+            provider_id,
+            "exec_shell",
+            session,
+            true,
+            raw.clone(),
+        );
+        let path = path.expect("owned global copy survives session writer failure");
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), raw);
+        // Exercise the same producer and message identities as the worker:
+        // provider tool_use_id remains unchanged, while the footer names the
+        // namespaced storage ID. Parse its emitted JSON value for the reader.
+        let block = ContentBlock::ToolResult {
+            tool_use_id: provider_id.to_owned(),
+            content,
+            is_error: None,
+            content_blocks: None,
+        };
+        let ContentBlock::ToolResult {
+            tool_use_id,
+            content,
+            ..
+        } = block
+        else {
+            unreachable!()
+        };
+        assert_eq!(tool_use_id, provider_id);
+        let reference = content
+            .split_once("retrieve_tool_result with ref=")
+            .unwrap()
+            .1;
+        let reference: serde_json::Value = serde_json::Deserializer::from_str(reference)
+            .into_iter::<serde_json::Value>()
+            .next()
+            .unwrap()
+            .unwrap();
+        assert_eq!(reference, format!("sa_worker-1_{provider_id}"));
+        assert!(content.contains("ref_kind=\"tool_call_id\""));
+        let context = ToolContext::new(home.path()).with_state_namespace(session);
+        let reader = crate::tools::tool_result_retrieval::RetrieveToolResultTool;
+        let input = json!({"ref":reference,"ref_kind":"tool_call_id","mode":"tail","line_count":1});
+        let tail = runtime
+            .block_on(reader.execute(input.clone(), &context))
+            .unwrap();
+        assert!(tail.success && tail.content.contains("END"));
+        assert!(
+            runtime
+                .block_on(reader.execute(
+                    json!({"ref":provider_id,"ref_kind":"tool_call_id","mode":"tail"}),
+                    &context,
+                ))
+                .is_err()
+        );
+        let foreign = ToolContext::new(home.path()).with_state_namespace("foreign-child-session");
+        let error = runtime
+            .block_on(reader.execute(input.clone(), &foreign))
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("belongs to another session"), "{error}");
+        // A rejected read must not consume or poison the valid next read.
+        assert!(
+            runtime
+                .block_on(reader.execute(input, &context))
+                .unwrap()
+                .content
+                .contains("END")
+        );
+    });
 }
 
 #[test]
