@@ -19575,7 +19575,13 @@ fn legacy_spill_without_ref_keeps_the_ownership_retrieval_hint() {
     assert!(!view.needs_full_output_artifact);
     assert!(view.text.chars().count() <= budget_128k());
     assert!(view.text.contains("/tmp/tool_outputs/call-legacy.txt"));
-    assert!(view.text.contains("this call's id or the spillover path"));
+    assert!(
+        view.text
+            .contains("ref=<this call's id>, ref_kind=\"tool_call_id\""),
+        "legacy recovery must select the raw-call namespace explicitly: {}",
+        view.text
+    );
+    assert!(!view.text.contains("this call's id or the spillover path"));
     assert!(view.text.contains("retrieve_tool_result"));
 }
 
