@@ -19,6 +19,7 @@ export function IncompleteInstallPanel({ installations = EMPTY, error, copy, onR
   // 用户要防的只是手滑，不是没看清后果。
   const [confirmingId, setConfirmingId] = useState(null);
   const [dismissing, setDismissing] = useState(false);
+  const confirmingItem = installations.find(item => item.runId === confirmingId);
   if (installations.length === 0 && !error) return null;
   const describe = value => describeIncompleteError(copy, value);
   const inspect = async item => {
@@ -40,6 +41,8 @@ export function IncompleteInstallPanel({ installations = EMPTY, error, copy, onR
       setConfirmingId(null);
       return;
     }
+    // 确认期间也可能开始了同卡重试，不能再放弃它所依赖的原始回执。
+    if (isRetrying?.(item.cardId)) return;
     setDismissing(true);
     setRequestError('');
     try {
@@ -67,7 +70,7 @@ export function IncompleteInstallPanel({ installations = EMPTY, error, copy, onR
       </div>
       <div className="flex shrink-0 items-center gap-2">
         {/* 只放已终结的记录：还在跑的任务没有「放弃」语义，后端也会拒绝。 */}
-        {item.terminal && <MsButton tone="ghost" disabled={loading || dismissing} onClick={() => setConfirmingId(item.runId)}>{copy.incompleteDismiss}</MsButton>}
+        {item.terminal && <MsButton tone="ghost" disabled={loading || dismissing || isRetrying?.(item.cardId)} onClick={() => setConfirmingId(item.runId)}>{copy.incompleteDismiss}</MsButton>}
         <MsButton disabled={loading || !item.canPreview || isRetrying?.(item.cardId)} onClick={() => inspect(item)}>{copy.incompletePreview}</MsButton>
       </div>
     </div>)}
@@ -76,8 +79,8 @@ export function IncompleteInstallPanel({ installations = EMPTY, error, copy, onR
       <p className="mt-2 opacity-75">{copy.incompleteDismissConfirmHint}</p>
       <div className="mt-3 flex gap-3">
         <MsButton tone="ghost" disabled={dismissing} onClick={() => setConfirmingId(null)}>{copy.taskCancel}</MsButton>
-        <MsButton disabled={dismissing} busy={dismissing} data-testid="incomplete-dismiss-confirm-button"
-          onClick={() => dismiss(installations.find(item => item.runId === confirmingId))}>{copy.incompleteDismiss}</MsButton>
+        <MsButton disabled={dismissing || (confirmingItem && isRetrying?.(confirmingItem.cardId))} busy={dismissing} data-testid="incomplete-dismiss-confirm-button"
+          onClick={() => dismiss(confirmingItem)}>{copy.incompleteDismiss}</MsButton>
       </div>
     </div>}
     {preview && <div role="alertdialog" aria-modal="false" aria-label={copy.incompletePreview} className="my-3 rounded-xl border border-amber-500 p-3 text-xs">

@@ -46,6 +46,8 @@ test('dismiss copy promises files are kept and resumable in all three languages'
     // 落盘失败与记录缺失也是放弃按钮可直接触达的错误，缺词就是裸奔错误码。
     assert.ok(text.includes('installation_dismiss_persist_failed:'), 'installation_dismiss_persist_failed 文案缺失');
     assert.ok(text.includes('installation_record_unavailable:'), 'installation_record_unavailable 文案缺失');
+    assert.ok(text.includes('installation_order_ambiguous:'), 'installation_order_ambiguous 文案缺失');
+    assert.ok(text.includes('installation_index_unavailable:'), 'installation_index_unavailable 文案缺失');
   }
   // 三个语言的确认文案都必须把「文件保留」说出口——这是本功能最重要的承诺。
   assert.match(DICTS.get('zh'), /incompleteDismissConfirmHint:'[^']*原样保留[^']*'/);

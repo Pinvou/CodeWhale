@@ -332,9 +332,9 @@ impl RunLog {
         }
         *self.dismissed.lock() = true;
         if let Err(error) = self.persist_result() {
-            // 落盘失败就回滚内存标记：内存说"已放弃"而磁盘没记，重启后横幅
-            // 会带着"已放弃"的内存态复活成两条不一样的世界线。回滚让两边
-            // 始终一致——这次放弃失败，用户重按一次就是了。
+            // 落盘报错时回滚内存，避免内存领先于未提交的磁盘状态。
+            // rename 成功而父目录 fsync 失败时磁盘可能已经 dismissed；
+            // 磁盘回执仍是权威，后续重新读取时以它为准。
             *self.dismissed.lock() = false;
             return Err(format!("installation_dismiss_persist_failed: {error}"));
         }

@@ -45,8 +45,7 @@ impl Blocked {
         if self.dirs.contains(&canonical) {
             return true;
         }
-        // 祖先链兜底：误配置把 models_dir 本身登记成权重根时，一级祖先推不
-        // 出任何东西，但它下面的每个子目录都该被拦——精确匹配拦不住。
+        // 祖先链兜底：记录里的隔离权重根也要保护其子目录。
         canonical
             .ancestors()
             .skip(1)
@@ -96,57 +95,41 @@ pub(super) fn is_in_flight_kind(kind: &str) -> bool {
 }
 
 /// 未终结的安装类回执的卡片集合（card_id -> kind）。
-fn non_terminal_install_cards(out: &mut std::collections::HashMap<String, String>) {
+fn non_terminal_install_cards(out: &mut std::collections::HashMap<String, String>) -> usize {
     let runs_dir = config::data_dir().join("runs");
-    let Ok(entries) = std::fs::read_dir(&runs_dir) else {
-        return;
+    let entries = match std::fs::read_dir(&runs_dir) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return 0,
+        Err(_) => return 1,
     };
-    for entry in entries.flatten() {
+    let mut unresolved = 0;
+    for entry in entries {
+        let Ok(entry) = entry else {
+            unresolved += 1;
+            continue;
+        };
         let path = entry.path();
         if path.extension().and_then(|value| value.to_str()) != Some("json") {
             continue;
         }
         let Ok(bytes) = std::fs::read(&path) else {
+            unresolved += 1;
             continue;
         };
         let Ok(value) = serde_json::from_slice::<Value>(&bytes) else {
+            unresolved += 1;
             continue;
         };
         let kind = value.get("kind").and_then(Value::as_str).unwrap_or("");
         if is_in_flight_kind(kind) && value.get("outcome").is_some_and(Value::is_null) {
             if let Some(card) = value.get("card_id").and_then(Value::as_str) {
                 out.insert(card.to_string(), kind.to_string());
+            } else {
+                unresolved += 1;
             }
         }
     }
-}
-
-/// 未终结的安装类回执的 run_id（run id 就是回执文件名）。
-fn non_terminal_install_run_ids() -> Vec<String> {
-    let mut ids = Vec::new();
-    let runs_dir = config::data_dir().join("runs");
-    let Ok(entries) = std::fs::read_dir(&runs_dir) else {
-        return ids;
-    };
-    for entry in entries.flatten() {
-        let path = entry.path();
-        if path.extension().and_then(|value| value.to_str()) != Some("json") {
-            continue;
-        }
-        let Ok(bytes) = std::fs::read(&path) else {
-            continue;
-        };
-        let Ok(value) = serde_json::from_slice::<Value>(&bytes) else {
-            continue;
-        };
-        let kind = value.get("kind").and_then(Value::as_str).unwrap_or("");
-        if is_in_flight_kind(kind) && value.get("outcome").is_some_and(Value::is_null) {
-            if let Some(id) = path.file_stem().and_then(|value| value.to_str()) {
-                ids.push(id.to_string());
-            }
-        }
-    }
-    ids
+    unresolved
 }
 
 /// 汇总「不准碰」的目录。库记录来自 sqlite；进行中下载来自盘上未终结的安装
@@ -161,11 +144,20 @@ fn blocked_dirs(service: Option<&super::service::ModelStoreService>) -> Result<B
 
     let records = db::list_store_models().map_err(|error| error.to_string())?;
     for rec in &records {
-        // 原生（runtime）/版本化卡片的权重根指向实际隔离目录（版本化记录指向
-        // models_dir/.versions/<card>/<revision> 深层），原样收进集合；它可能
-        // 不在 models_dir 下，只有落在 models_dir 下时才会被列举命中。
+        // 普通下载登记的是共享 models_dir，不是这张卡独占的目录；若拦住
+        // 共享根，祖先匹配会把所有残留都误判为有主。此类记录仍由下面的
+        // 实际目录、HF 仓库名和 model_name 保护。隔离/版本化根继续完整保护。
         if let Some(root) = &rec.models_root {
-            blocked.insert(&models_dir, PathBuf::from(root));
+            let root = PathBuf::from(root);
+            let shared_root = root == models_dir
+                || root
+                    .canonicalize()
+                    .ok()
+                    .zip(models_dir.canonicalize().ok())
+                    .is_some_and(|(root, models)| root == models);
+            if !shared_root {
+                blocked.insert(&models_dir, root);
+            }
         }
         // 旧记录的权威实际目录：部署脚本写在卡片 .deploy-env 里的 MODEL_DIR，
         // 与 candidate_paths 同一份真相，不能在扫描里再猜一遍。
@@ -197,7 +189,7 @@ fn blocked_dirs(service: Option<&super::service::ModelStoreService>) -> Result<B
             cards.insert(run.card_id, run.kind.to_string());
         }
     }
-    non_terminal_install_cards(&mut cards);
+    blocked.unresolved += non_terminal_install_cards(&mut cards);
 
     for (card, kind) in &cards {
         let dirs = if kind == "version_stage" {
@@ -352,6 +344,11 @@ pub(super) fn remove(
         return Err("orphan_path_unsafe".into());
     }
 
+    // 与下载、本地安装及版本暂存共用资源锁；从归属核查到删除结束始终排他，
+    // 避免终验后又有写入方启动。已有写入方持共享锁时立即拒绝，供用户稍后重试。
+    let _resources = super::version_store::resource_operation_lock(true)
+        .map_err(|error| format!("orphan_resources_busy: {error}"))?;
+
     // 3) 不是库记录的目录、不是进行中下载的目标目录。进行中下载有推导失败的
     //    情形时整题拒绝：删错不可逆，等它结束再删只是晚几分钟。
     let blocked = blocked_dirs(service)?;
@@ -362,24 +359,11 @@ pub(super) fn remove(
         return Err("orphan_activity_unresolved".into());
     }
 
-    // 4) 没有任何安装器进程还活着：对所有未终结的下载/本地安装回执逐个做
-    //    进程核查。回执是每个下载开工就落盘的，"有回执且进程还活着"说明它
-    //    正在写权重——写手不死，一个字节都不能动。
-    for run_id in non_terminal_install_run_ids() {
-        super::orphans::ensure_run_quiet(&run_id)?;
-    }
+    // 4) 全量核查安装器进程，不依赖回执可读性或 run_id 关联；崩溃后即使
+    //    回执已损坏/丢失，也不能跳过仍在写权重的脚本进程。
+    super::orphans::ensure_host_quiet()?;
 
     let bytes = super::disk::dir_size_bytes(&target);
-    // 5) 临门一脚再验一遍归属与占用：步骤 3/4 与删除之间有毫秒级窗口（用户
-    //    恰好同时点了一次下载，或一条记录恰好落库）。重算一次的成本是毫秒，
-    //    删错的代价不可逆——这一步和步骤 3 是同一段逻辑跑两遍，不是冗余。
-    let final_blocked = blocked_dirs(service)?;
-    if final_blocked.contains(&target) {
-        return Err("orphan_directory_owned".into());
-    }
-    if final_blocked.unresolved > 0 {
-        return Err("orphan_activity_unresolved".into());
-    }
     std::fs::remove_dir_all(&target).map_err(|error| format!("orphan_remove_failed: {error}"))?;
     Ok(json!({ "freedBytes": bytes }))
 }
@@ -417,8 +401,12 @@ mod tests {
     }
 
     fn seed_record(model_name: &str) {
+        seed_record_at_root(model_name, None);
+    }
+
+    fn seed_record_at_root(model_name: &str, root: Option<&Path>) {
         db::init_db().unwrap();
-        db::add_store_model(db::AddStoreModelParams {
+        let params = db::AddStoreModelParams {
             card_id: "owned-card",
             model_name,
             card_name: "Owned Model",
@@ -428,15 +416,104 @@ mod tests {
             engine_version: None,
             size_bytes: 1,
             quantization: None,
-            source_repo_id: None,
+            source_repo_id: Some("example/owned-repo"),
             source_filename: None,
-            scripts: &std::collections::BTreeMap::new(),
+            scripts: &Default::default(),
             status: "downloaded",
             profiles: &[],
             deploy_topology: Default::default(),
             card_source: "store",
-        })
-        .unwrap();
+        };
+        if let Some(root) = root {
+            db::add_store_model_with_root(params, &root.to_string_lossy()).unwrap();
+        } else {
+            db::add_store_model(params).unwrap();
+        }
+    }
+
+    #[test]
+    fn shared_download_root_keeps_owned_models_but_allows_unrelated_orphans() {
+        for linked_root in [false, true] {
+            let _home = config::TempHome::new();
+            if linked_root {
+                let real = config::data_dir().join("real-models");
+                std::fs::create_dir_all(&real).unwrap();
+                std::os::unix::fs::symlink(&real, config::data_dir().join("models")).unwrap();
+            }
+            let (orphan, owned) = seed_models_dir();
+            let models = config::load_settings().models_path();
+            let repo_owned = models.join("owned-repo");
+            std::fs::create_dir_all(&repo_owned).unwrap();
+            // 与普通下载成功的落库路径一致：共享根以 canonical 形式登记。
+            seed_record_at_root("owned-model", Some(&models.canonicalize().unwrap()));
+
+            let report = scan(None).unwrap();
+            let entries = report["entries"].as_array().unwrap();
+            assert_eq!(entries.len(), 1, "共享根不得遮住所有残留：{report}");
+            assert_eq!(entries[0]["path"], orphan.to_string_lossy().as_ref());
+            for protected in [&owned, &repo_owned] {
+                assert_eq!(
+                    remove(None, &protected.to_string_lossy()).unwrap_err(),
+                    "orphan_directory_owned"
+                );
+                assert!(protected.exists());
+            }
+            remove(None, &orphan.to_string_lossy()).unwrap();
+            assert!(!orphan.exists());
+        }
+    }
+
+    #[test]
+    fn remove_refuses_while_a_writer_holds_the_shared_resource_lock() {
+        let _home = config::TempHome::new();
+        db::init_db().unwrap();
+        let (orphan, _) = seed_models_dir();
+        let writer = super::super::version_store::resource_operation_lock(false).unwrap();
+        assert_eq!(
+            remove(None, &orphan.to_string_lossy())
+                .unwrap_err()
+                .split(':')
+                .next()
+                .unwrap(),
+            "orphan_resources_busy"
+        );
+        assert!(orphan.exists());
+        drop(writer);
+        remove(None, &orphan.to_string_lossy()).unwrap();
+        assert!(!orphan.exists());
+    }
+
+    #[test]
+    fn corrupt_receipts_are_unresolved_and_block_removal() {
+        let _home = config::TempHome::new();
+        db::init_db().unwrap();
+        let (orphan, _) = seed_models_dir();
+        let receipt = config::data_dir().join("runs/broken.json");
+        super::super::execution_fence::private_write(&receipt, b"{broken").unwrap();
+        assert_eq!(scan(None).unwrap()["unresolvedInFlight"], 1);
+        assert_eq!(
+            remove(None, &orphan.to_string_lossy()).unwrap_err(),
+            "orphan_activity_unresolved"
+        );
+        assert!(orphan.exists());
+    }
+
+    #[test]
+    fn live_installer_without_a_receipt_still_blocks_removal() {
+        let _home = config::TempHome::new();
+        db::init_db().unwrap();
+        let (orphan, _) = seed_models_dir();
+        let _installer = super::super::orphans::RunGuard::register_with_run_id(
+            std::process::id() as i32,
+            false,
+            "orphan deletion regression",
+            Some("missing-receipt"),
+        );
+        assert_eq!(
+            remove(None, &orphan.to_string_lossy()).unwrap_err(),
+            "installation_process_still_alive"
+        );
+        assert!(orphan.exists());
     }
 
     #[test]
@@ -661,9 +738,8 @@ mod tests {
             &json!({"card_id":"versioned-card","kind":"version_stage","created_at":"2026-10-22T00:00:00Z","outcome":null,"cancelled":false,"lines":[]}),
         );
         // kind 白名单必须覆盖 version_stage：回执进入目标排除与进程核查。
-        assert_eq!(non_terminal_install_run_ids(), vec!["staging".to_string()]);
         let mut cards = std::collections::HashMap::new();
-        non_terminal_install_cards(&mut cards);
+        assert_eq!(non_terminal_install_cards(&mut cards), 0);
         assert_eq!(
             cards.get("versioned-card").map(String::as_str),
             Some("version_stage")

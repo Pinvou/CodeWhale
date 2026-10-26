@@ -478,7 +478,7 @@ const jaBase = {
           orphansDeleteConfirmTitle:'このディレクトリを完全に削除しますか？',
           orphansDeleteConfirmHint:'ディレクトリと中身はすべて削除され、元に戻せません。ライブラリ登録済みのモデルには影響しません。',
           orphansDeleted:(size)=>`削除しました。${size} を解放しました。`,
-          orphanErrors:{orphan_scan_unavailable:'重みディレクトリを読み取れません。ストレージ設定を確認してください。',orphan_directory_owned:'このディレクトリはライブラリまたは実行中のタスクに属するため、削除を拒否しました。',orphan_activity_unresolved:'実行中のダウンロードの対象を確認できないため、削除は保留中です。終了後に再試行してください。',orphan_path_unsafe:'危険なパスまたは重みディレクトリの直下ではないため、拒否しました。',orphan_remove_failed:'削除に失敗しました。ファイル権限を確認して再試行してください。'},
+          orphanErrors:{orphan_resources_busy:'モデルファイルが使用中、または一時的に利用できません。他の操作の終了後に再試行してください。',orphan_scan_unavailable:'重みディレクトリを読み取れません。ストレージ設定を確認してください。',orphan_directory_owned:'このディレクトリはライブラリまたは実行中のタスクに属するため、削除を拒否しました。',orphan_activity_unresolved:'実行中のダウンロードの対象を確認できないため、削除は保留中です。終了後に再試行してください。',orphan_path_unsafe:'危険なパスまたは重みディレクトリの直下ではないため、拒否しました。',orphan_remove_failed:'削除に失敗しました。ファイル権限を確認して再試行してください。'},
           statusAvailable:'ダウンロード可能',
           linkRowRemoved:(name,n)=>`PINVOU のモデル一覧からも「${name}」の設定 ${n} 件を削除しました`,
           linkRowStale:(name,e)=>`「${name}」をアンインストールしましたが、PINVOU のモデル一覧の項目を削除できませんでした（${e}）。その項目はもう使えません。設定から手動で削除するか、別のモデルに切り替えてください。`,

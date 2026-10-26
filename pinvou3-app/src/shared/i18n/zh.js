@@ -484,7 +484,7 @@ export const dictZh = {
           orphansDeleteConfirmTitle:'永久删除这个目录？',
           orphansDeleteConfirmHint:'将删除该目录及其全部内容，不可恢复；已入库的模型不受影响。',
           orphansDeleted:(size)=>`已删除，释放 ${size}。`,
-          orphanErrors:{orphan_scan_unavailable:'无法读取权重目录，请检查存储设置。',orphan_directory_owned:'这个目录属于模型库或进行中的任务，已拒绝删除。',orphan_activity_unresolved:'有正在进行的下载无法确认目标目录，暂不能删除；等它结束后再试。',orphan_path_unsafe:'路径不安全或不是权重目录下的直接子目录，已拒绝。',orphan_remove_failed:'删除失败，请检查文件权限后重试。'},
+          orphanErrors:{orphan_resources_busy:'模型文件正在使用或暂时不可用，请待其他操作结束后重试。',orphan_scan_unavailable:'无法读取权重目录，请检查存储设置。',orphan_directory_owned:'这个目录属于模型库或进行中的任务，已拒绝删除。',orphan_activity_unresolved:'有正在进行的下载无法确认目标目录，暂不能删除；等它结束后再试。',orphan_path_unsafe:'路径不安全或不是权重目录下的直接子目录，已拒绝。',orphan_remove_failed:'删除失败，请检查文件权限后重试。'},
           statusAvailable:'可下载',
           linkRowRemoved:(name,n)=>`已同时从品悟的模型列表移除「${name}」的 ${n} 条配置`,
           linkRowStale:(name,e)=>`「${name}」已卸载，但品悟模型列表里那一条没能移除（${e}）。它现在已经不可用，请到设置里手动删除或改用其它模型。`,

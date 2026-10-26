@@ -89,13 +89,13 @@ test('downloads copy exists in all three languages', () => {
 });
 
 test('orphan copy exists in all three languages and promises irreversibility', () => {
-  const KEYS = ['orphansTitle:', 'orphansHint:', 'orphansScan:', 'orphansEmpty:', 'orphansDelete:', 'orphansDeleteConfirmTitle:', 'orphansDeleteConfirmHint:', 'orphansDeleted:', 'orphanErrors:'];
+  const KEYS = ['orphansTitle:', 'orphansHint:', 'orphansScan:', 'orphansScanning:', 'orphansPartial:', 'orphansUnresolved:', 'orphansEmpty:', 'orphansDelete:', 'orphansDeleteConfirmTitle:', 'orphansDeleteConfirmHint:', 'orphansDeleted:', 'orphanErrors:'];
   for (const text of DICTS.values()) {
     for (const key of KEYS) {
       assert.ok(text.includes(key), `${key} 缺失`);
     }
-    // 后端五类拒绝码必须都有人话对应，缺一个界面上就裸奔错误码。
-    for (const code of ['orphan_scan_unavailable', 'orphan_directory_owned', 'orphan_activity_unresolved', 'orphan_path_unsafe', 'orphan_remove_failed']) {
+    // 后端拒绝码必须都有人话对应，缺一个界面上就裸奔错误码。
+    for (const code of ['orphan_scan_unavailable', 'orphan_directory_owned', 'orphan_activity_unresolved', 'orphan_path_unsafe', 'orphan_remove_failed', 'orphan_resources_busy']) {
       assert.ok(text.includes(`${code}:`), `orphanErrors.${code} 缺失`);
     }
   }

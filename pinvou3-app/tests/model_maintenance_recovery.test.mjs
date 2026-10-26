@@ -113,6 +113,21 @@ test('unfinished tasks and older downloads without source context cannot retry d
   }
 });
 
+test('retrying a card disables dismissing its original failed receipt', () => {
+  for (const copy of copies) {
+    for (const retryingCard of ['incomplete-card', 'another-card']) {
+      const html = renderToStaticMarkup(React.createElement(IncompleteInstallPanel, {
+        installations: [{ cardId: 'incomplete-card', runId: 'failed-run', terminal: true, canPreview: true }],
+        copy, onRetry() {}, onRefresh() {}, isRetrying: cardId => cardId === retryingCard,
+      }));
+      const dismiss = [...html.matchAll(/<button\b([^>]*)>([\s\S]*?)<\/button>/g)]
+        .find(([, , contents]) => contents.includes(copy.incompleteDismiss));
+      assert.ok(dismiss, 'dismiss action must remain visible');
+      assert.equal(dismiss[1].includes('disabled=""'), retryingCard === 'incomplete-card');
+    }
+  }
+});
+
 test('incomplete-install retry passes only the original run reference and reviewed digest', async () => {
   const digest = 'a'.repeat(64);
   await api.previewIncomplete('failed-run');
