@@ -51,7 +51,7 @@ func NewRedisTokenAdmissionWithCA(rawURL, rawKey, caFile string) (*RedisTokenAdm
 	return &RedisTokenAdmission{client: redis.NewClient(options), key: key}, nil
 }
 
-var admissionScript = redis.NewScript(`
+const admissionScriptSource = `
 local retry = 0
 for i = 1, #KEYS do
   local value = redis.call('INCR', KEYS[i])
@@ -59,7 +59,9 @@ for i = 1, #KEYS do
   if value == 1 then redis.call('EXPIRE', KEYS[i], window) end
   if value > tonumber(ARGV[(i-1)*2+1]) then retry = math.max(retry, redis.call('TTL', KEYS[i])) end
 end
-return retry`)
+return retry`
+
+var admissionScript = redis.NewScript(admissionScriptSource)
 
 func (a *RedisTokenAdmission) digest(value string) string {
 	mac := hmac.New(sha256.New, a.key)
@@ -92,8 +94,8 @@ func (a *RedisTokenAdmission) Admit(ctx context.Context, d tokenRiskDimensions) 
 	}
 	if d.action == "password" {
 		identifierKey := "pinvou:auth-failure:password:" + a.digest(d.identifier)
-		identifierCount, err := a.client.Get(ctx, identifierKey).Int64()
-		if err != nil && !errors.Is(err, redis.Nil) {
+		identifierCount, _, err := readFailureCounter(ctx, a.client, identifierKey)
+		if err != nil {
 			return tokenAdmissionDecision{}, err
 		}
 		lock, err := a.RecheckStableLock(ctx, d)
@@ -142,10 +144,7 @@ func (a *RedisTokenAdmission) Complete(ctx context.Context, d tokenRiskDimension
 }
 
 func incrementFailure(ctx context.Context, client *redis.Client, key string) (int64, error) {
-	count, err := client.Incr(ctx, key).Result()
-	if err == nil && count == 1 {
-		err = client.Expire(ctx, key, 15*time.Minute).Err()
-	}
+	count, _, err := failureCounter(ctx, client, key, true)
 	return count, err
 }
 

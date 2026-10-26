@@ -37,15 +37,14 @@ func (a *RedisTokenAdmission) RecheckStableLock(ctx context.Context, d tokenRisk
 		return 0, nil
 	}
 	key := "pinvou:auth-failure:user:" + stableDigest
-	count, err := a.client.Get(ctx, key).Int64()
-	if err != nil && !errors.Is(err, redis.Nil) {
+	count, ttl, err := readFailureCounter(ctx, a.client, key)
+	if err != nil {
 		return 0, err
 	}
 	if count < 10 {
 		return 0, nil
 	}
-	ttl, err := a.client.TTL(ctx, key).Result()
-	return max(ttl, time.Second), err
+	return max(ttl, time.Second), nil
 }
 
 // Only an admitted password/SMS grant with a real progressive wait opts into

@@ -8,6 +8,7 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -23,10 +24,14 @@ import (
 // router, metrics/recovery wrappers and shared30s server execute unchanged.
 // This does not execute Redis/Lua or a real Keycloak user store.
 type identifierRiskStore struct {
-	mu          sync.Mutex
-	values      map[string]string
-	scriptRetry int64
-	scriptCalls int
+	mu                  sync.Mutex
+	values              map[string]string
+	scriptRetry         int64
+	scriptCalls         int
+	expires             map[string]time.Time
+	clock               time.Time
+	denyCommand         string
+	unknownCounterReply bool
 }
 
 func (s *identifierRiskStore) DialHook(redis.DialHook) redis.DialHook {
@@ -35,18 +40,41 @@ func (s *identifierRiskStore) DialHook(redis.DialHook) redis.DialHook {
 	}
 }
 func (s *identifierRiskStore) ProcessHook(redis.ProcessHook) redis.ProcessHook {
-	return func(_ context.Context, c redis.Cmder) error {
+	return func(ctx context.Context, c redis.Cmder) error {
+		if err := ctx.Err(); err != nil {
+			c.SetErr(err)
+			return err
+		}
 		s.mu.Lock()
 		defer s.mu.Unlock()
+		if s.expires == nil {
+			s.expires = make(map[string]time.Time)
+		}
 		a := c.Args()
 		key := ""
 		if len(a) > 1 {
 			key, _ = a[1].(string)
 		}
+		if c.Name() == s.denyCommand {
+			err := errors.New("controlled Redis command denial")
+			c.SetErr(err)
+			return err
+		}
+		s.expireValue(key)
 		switch c.Name() {
 		case "evalsha", "eval":
-			s.scriptCalls++
-			c.(*redis.Cmd).SetVal(s.scriptRetry)
+			script, _ := a[1].(string)
+			switch script {
+			case admissionScript.Hash(), admissionScriptSource:
+				s.scriptCalls++
+				c.(*redis.Cmd).SetVal(s.scriptRetry)
+			case failureCounterScript.Hash(), failureCounterLua:
+				return s.failureCounterCommand(c)
+			default:
+				err := errors.New("unrecognized Redis test script")
+				c.SetErr(err)
+				return err
+			}
 		case "get":
 			v, ok := s.values[key]
 			if !ok {
@@ -61,17 +89,100 @@ func (s *identifierRiskStore) ProcessHook(redis.ProcessHook) redis.ProcessHook {
 			s.values[key] = fmt.Sprint(n)
 			c.(*redis.IntCmd).SetVal(n)
 		case "expire":
+			s.expires[key] = s.clock.Add(time.Duration(a[2].(int64)) * time.Second)
 			c.(*redis.BoolCmd).SetVal(true)
 		case "ttl":
-			c.(*redis.DurationCmd).SetVal(15 * time.Minute)
+			c.(*redis.DurationCmd).SetVal(time.Duration(s.valueTTL(key)) * time.Second)
 		case "set":
 			s.values[key] = fmt.Sprint(a[2])
+			delete(s.expires, key)
 			c.(*redis.StatusCmd).SetVal("OK")
 		default:
 			return errors.New("unexpected Redis test command " + c.Name())
 		}
 		return nil
 	}
+}
+
+// This controlled store models script results, not a Redis/Lua interpreter.
+// Script identity is exact: unknown scripts fail rather than returning a fake
+// successful admission. These tests exercise the Go producer/consumer and
+// failures; Lua control flow and real Redis ACLs need separate execution.
+func (s *identifierRiskStore) failureCounterCommand(c redis.Cmder) error {
+	a := c.Args()
+	if len(a) != 6 || a[2] != 1 {
+		return errors.New("invalid failure-counter script invocation")
+	}
+	key, ok := a[3].(string)
+	if !ok {
+		return errors.New("invalid failure-counter key")
+	}
+	increment := a[4] == "1"
+	window, ok := a[5].(int64)
+	if !ok || window != 900 {
+		return errors.New("invalid failure-counter window")
+	}
+	s.expireValue(key)
+	value, exists := s.values[key]
+	ttl := int64(0)
+	if exists {
+		ttl = s.valueTTL(key)
+	}
+	if exists && ttl < 0 || !exists && increment {
+		if s.denyCommand == "set" {
+			err := errors.New("controlled Redis SET denial")
+			c.SetErr(err)
+			return err
+		}
+		if !exists {
+			value = "1"
+		}
+		s.values[key] = value
+		s.expires[key] = s.clock.Add(time.Duration(window) * time.Second)
+		ttl = window
+	}
+	if exists && increment {
+		if s.denyCommand == "incr" {
+			err := errors.New("controlled Redis INCR denial")
+			c.SetErr(err)
+			return err
+		}
+		n, err := strconv.ParseInt(value, 10, 64)
+		if err != nil {
+			return err
+		}
+		value = strconv.FormatInt(n+1, 10)
+		s.values[key] = value
+	}
+	if !exists && !increment {
+		value = "0"
+	}
+	if increment && s.unknownCounterReply {
+		s.unknownCounterReply = false
+		err := errors.New("controlled lost counter response")
+		c.SetErr(err)
+		return err
+	}
+	c.(*redis.Cmd).SetVal([]any{value, ttl})
+	return nil
+}
+
+func (s *identifierRiskStore) expireValue(key string) {
+	if expires, ok := s.expires[key]; ok && !expires.After(s.clock) {
+		delete(s.values, key)
+		delete(s.expires, key)
+	}
+}
+
+func (s *identifierRiskStore) valueTTL(key string) int64 {
+	if _, ok := s.values[key]; !ok {
+		return -2
+	}
+	expires, ok := s.expires[key]
+	if !ok {
+		return -1
+	}
+	return int64(expires.Sub(s.clock) / time.Second)
 }
 func (s *identifierRiskStore) ProcessPipelineHook(next redis.ProcessPipelineHook) redis.ProcessPipelineHook {
 	return next
