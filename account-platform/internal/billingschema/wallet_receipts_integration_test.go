@@ -111,8 +111,25 @@ func TestTokenWalletReceiptSchemaPostgres(t *testing.T) {
 			t.Fatal(err)
 		}
 		f.roles = append(f.roles, "billing_wallet_receipt_deployer")
-		for _, checksum := range []string{originalWalletReceiptChecksum, originalWalletReceiptCRLFChecksum} {
-			t.Run(checksum[:8], func(t *testing.T) {
+		for _, scenario := range []struct{ checksum, owner string }{
+			{originalWalletReceiptChecksum, "deployer"},
+			{originalWalletReceiptCRLFChecksum, "deployer"},
+			{originalWalletReceiptChecksum, "schema-owner"},
+			{originalWalletReceiptCRLFChecksum, "schema-owner"},
+			{originalWalletReceiptChecksum, "schema-owner-hardening-crlf"},
+			{originalWalletReceiptChecksum, "schema-owner-extra-trigger"},
+			{originalWalletReceiptChecksum, "schema-owner-altered-guard"},
+			{originalWalletReceiptChecksum, "schema-owner-pending-replaced-trigger"},
+			{originalWalletReceiptChecksum, "schema-owner-pending-altered-guard"},
+			{originalWalletReceiptChecksum, "schema-owner-pending-missing-standard-extra-trigger"},
+			{originalWalletReceiptChecksum, "schema-owner-pending-missing-standard-altered-guard"},
+			{originalWalletReceiptChecksum, "schema-owner-pending-replaced-original-guard"},
+			{originalWalletReceiptChecksum, "schema-owner-pending-missing-standard-replaced-original-guard"},
+			{originalWalletReceiptChecksum, "runtime-owner"},
+			{originalWalletReceiptChecksum, "runtime-owner-unreviewed-standard"},
+		} {
+			checksum := scenario.checksum
+			t.Run(scenario.owner+"-"+checksum[:8], func(t *testing.T) {
 				c := f.database(t, ctx, "billing", "billing_schema_owner")
 				var base []migrations.Migration
 				for _, m := range loaded {
@@ -145,6 +162,96 @@ func TestTokenWalletReceiptSchemaPostgres(t *testing.T) {
 					t.Fatal(err)
 				}
 				before := stageValue(t, ctx, c, `SELECT jsonb_agg(to_jsonb(v) ORDER BY command_reference)::text FROM token_account_wallet_provisioning_receipts v`)
+				if scenario.owner != "deployer" {
+					control, err := pgx.Connect(ctx, f.serviceURL(t, c, f.config.User))
+					if err != nil {
+						t.Fatal(err)
+					}
+					defer control.Close(context.Background())
+					ownerRole := "billing_schema_owner"
+					if strings.HasPrefix(scenario.owner, "runtime-owner") {
+						ownerRole = "billing_service"
+					}
+					if _, err := control.Exec(ctx, `ALTER TABLE public.token_account_wallet_provisioning_receipts OWNER TO `+pgx.Identifier{ownerRole}.Sanitize()+`;
+ALTER FUNCTION public.reject_token_account_wallet_receipt_mutation() OWNER TO `+pgx.Identifier{ownerRole}.Sanitize()); err != nil {
+						t.Fatal(err)
+					}
+					if scenario.owner == "runtime-owner-unreviewed-standard" {
+						if _, err := control.Exec(ctx, `CREATE FUNCTION public.unreviewed_receipt_guard() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RETURN NULL; END $$;
+CREATE TRIGGER billing_no_truncate BEFORE TRUNCATE ON public.token_account_wallet_provisioning_receipts FOR EACH STATEMENT EXECUTE FUNCTION public.unreviewed_receipt_guard()`); err != nil {
+							t.Fatal(err)
+						}
+						shape := stageShape(t, ctx, c)
+						ledger := stageValue(t, ctx, c, `SELECT jsonb_agg(to_jsonb(s) ORDER BY version)::text FROM schema_migrations s`)
+						if err := Up(ctx, c, loaded); err == nil || !strings.Contains(err.Error(), "unreviewed hardening guard") {
+							t.Fatal("first hardening accepted an unknown runtime-owned guard", err)
+						}
+						if shape != stageShape(t, ctx, c) || ledger != stageValue(t, ctx, c, `SELECT jsonb_agg(to_jsonb(s) ORDER BY version)::text FROM schema_migrations s`) || before != stageValue(t, ctx, c, `SELECT jsonb_agg(to_jsonb(v) ORDER BY command_reference)::text FROM token_account_wallet_provisioning_receipts v`) {
+							t.Fatal("first hardening rejection changed schema, history, or receipts")
+						}
+						return
+					}
+					withHardening := append([]migrations.Migration(nil), base...)
+					for _, m := range loaded {
+						if m.Version == 900003 {
+							withHardening = append(withHardening, m)
+						}
+					}
+					if err := Up(ctx, c, withHardening); err != nil {
+						t.Fatal("public hardening of restored schema-owned receipt", err)
+					}
+					if scenario.owner == "schema-owner-hardening-crlf" {
+						if _, err := control.Exec(ctx, `UPDATE public.schema_migrations SET checksum=$1 WHERE version=900003`, walletReceiptHardeningCRLFChecksum); err != nil {
+							t.Fatal(err)
+						}
+					}
+					if strings.HasSuffix(scenario.owner, "extra-trigger") || strings.HasSuffix(scenario.owner, "altered-guard") || strings.HasSuffix(scenario.owner, "replaced-trigger") || strings.HasSuffix(scenario.owner, "replaced-original-guard") {
+						var withoutReceipt []migrations.Migration
+						for _, m := range loaded {
+							if m.Version != walletReceiptVersion {
+								withoutReceipt = append(withoutReceipt, m)
+							}
+						}
+						if !strings.Contains(scenario.owner, "-pending-") {
+							if err := Up(ctx, c, withoutReceipt); err != nil {
+								t.Fatal(err)
+							}
+						}
+						mutation := `CREATE FUNCTION public.unreviewed_receipt_guard() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RETURN NULL; END $$;
+CREATE TRIGGER unreviewed_receipt_guard BEFORE TRUNCATE ON public.token_account_wallet_provisioning_receipts FOR EACH STATEMENT EXECUTE FUNCTION public.unreviewed_receipt_guard()`
+						if strings.HasSuffix(scenario.owner, "altered-guard") {
+							mutation = `CREATE OR REPLACE FUNCTION public.reject_billing_truncate() RETURNS trigger LANGUAGE plpgsql SET search_path=pg_catalog AS $$ BEGIN RETURN NULL; END $$`
+						}
+						if strings.HasSuffix(scenario.owner, "replaced-trigger") {
+							mutation = `CREATE FUNCTION public.unreviewed_receipt_guard() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RETURN NULL; END $$;
+DROP TRIGGER billing_no_truncate ON public.token_account_wallet_provisioning_receipts;
+CREATE TRIGGER billing_no_truncate BEFORE TRUNCATE ON public.token_account_wallet_provisioning_receipts FOR EACH STATEMENT EXECUTE FUNCTION public.unreviewed_receipt_guard()`
+						}
+						if strings.Contains(scenario.owner, "missing-standard") {
+							mutation += `; DROP TRIGGER billing_no_truncate ON public.token_account_wallet_provisioning_receipts`
+						}
+						if strings.HasSuffix(scenario.owner, "replaced-original-guard") {
+							mutation = `CREATE FUNCTION public.unreviewed_receipt_guard() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RETURN NULL; END $$;
+DROP TRIGGER token_account_wallet_receipt_immutable ON public.token_account_wallet_provisioning_receipts;
+CREATE TRIGGER token_account_wallet_receipt_immutable BEFORE UPDATE OR DELETE ON public.token_account_wallet_provisioning_receipts FOR EACH ROW EXECUTE FUNCTION public.unreviewed_receipt_guard()`
+							if strings.Contains(scenario.owner, "missing-standard") {
+								mutation += `; DROP TRIGGER billing_no_truncate ON public.token_account_wallet_provisioning_receipts`
+							}
+						}
+						if _, err := control.Exec(ctx, mutation); err != nil {
+							t.Fatal(err)
+						}
+						shape := stageShape(t, ctx, c)
+						ledger := stageValue(t, ctx, c, `SELECT jsonb_agg(to_jsonb(s) ORDER BY version)::text FROM schema_migrations s`)
+						if err := Up(ctx, c, loaded); err == nil || !strings.Contains(err.Error(), "unreviewed hardening guard") {
+							t.Fatal("unknown guard accepted", err)
+						}
+						if shape != stageShape(t, ctx, c) || ledger != stageValue(t, ctx, c, `SELECT jsonb_agg(to_jsonb(s) ORDER BY version)::text FROM schema_migrations s`) || before != stageValue(t, ctx, c, `SELECT jsonb_agg(to_jsonb(v) ORDER BY command_reference)::text FROM token_account_wallet_provisioning_receipts v`) {
+							t.Fatal("rejected guard changed schema, history, or receipts")
+						}
+						return
+					}
+				}
 				if err := Up(ctx, c, loaded); err != nil {
 					t.Fatal("public upgrade from original053", err)
 				}
@@ -160,6 +267,11 @@ func TestTokenWalletReceiptSchemaPostgres(t *testing.T) {
 				}
 				if _, err := migrations.VerifyApplied(ctx, c, loaded); err == nil {
 					t.Fatal("generic exact verifier was weakened")
+				}
+				if scenario.owner == "schema-owner" || scenario.owner == "schema-owner-hardening-crlf" {
+					if got := stageValue(t, ctx, c, `SELECT count(*) FROM pg_trigger WHERE tgrelid='public.token_account_wallet_provisioning_receipts'::regclass AND NOT tgisinternal`); got != "2" {
+						t.Fatal("both immutable and truncate guards must survive", got)
+					}
 				}
 			})
 		}

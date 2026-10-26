@@ -105,6 +105,9 @@ func prepareBillingMigration(ctx context.Context, tx pgx.Tx, migration migration
 	if !actor {
 		return errors.New("billing migration requires separate, provisioned deployment and owner identities")
 	}
+	if err := protectExistingWalletReceiptHardening(ctx, tx); err != nil {
+		return err
+	}
 	var hardened bool
 	if err := tx.QueryRow(ctx, `SELECT to_regclass('public.billing_runtime_hardening') IS NOT NULL`).Scan(&hardened); err != nil {
 		return err
@@ -148,7 +151,10 @@ SET ROLE billing_service;`); err != nil {
 			return err
 		}
 	}
-	return protectLegacyRefundMigration(ctx, tx, migration)
+	if err := protectLegacyRefundMigration(ctx, tx, migration); err != nil {
+		return err
+	}
+	return prepareWalletReceiptValidation(ctx, tx, migration)
 }
 
 func finishBillingMigration(ctx context.Context, tx pgx.Tx, migration migrations.Migration) error {
@@ -215,5 +221,8 @@ DO $$ BEGIN
  END IF;
 END $$;
 SET ROLE billing_service;`)
-	return err
+	if err != nil {
+		return err
+	}
+	return verifyWalletReceiptValidationRestored(ctx, tx, migration)
 }
