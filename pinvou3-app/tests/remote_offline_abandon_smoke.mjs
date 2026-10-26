@@ -24,7 +24,7 @@ if(process.env.PINVOU_OFFLINE_ABANDON_WORKER !== '1') {
     // Exactly the root allocated above; the worker and its writers have exited.
     fs.rmSync(ownedRoot,{recursive:true,force:true});
   }
-  process.exit(worker.status ?? 2);
+  process.exit(worker.status ?? 1);
 }
 const option=(name,fallback)=>{const index=args.indexOf(name);return index<0?fallback:args[index+1];};
 const app=path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
@@ -199,4 +199,4 @@ const expected=results.scenarios.length===4 && results.scenarios.every(result=>r
   && results.sourcesUnchanged;
 console.log('baselineCounterexampleConfirmed='+expected);
 console.log('remote_offline_abandon_smoke: '+results.scenarios.filter(result=>result.outcome==='pass').length+'/4 renderer scenarios passed (real JS bridge; mocked native IPC)');
-process.exitCode=results.fatal||!results.sourcesUnchanged||results.scenarios.some(result=>result.outcome==='harness-failed')?2:results.scenarios.every(result=>result.outcome==='pass')?0:1;
+process.exitCode=results.fatal||!results.sourcesUnchanged||results.scenarios.some(result=>result.outcome==='harness-failed')?1:results.scenarios.every(result=>result.outcome==='pass')?0:1;
