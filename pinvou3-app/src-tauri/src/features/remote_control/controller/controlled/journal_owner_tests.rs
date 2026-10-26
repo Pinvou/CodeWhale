@@ -37,6 +37,186 @@ fn append(journal: &RemoteJournal, owner: &JournalOwner, event: &str, session: &
         .unwrap();
 }
 
+fn assert_failed_owner_before_successor(
+    manager: &ControlledDeviceManager,
+    operation: &ControlledOperation,
+    owner: &JournalOwner,
+    epoch: &str,
+    event: &super::super::journal::JournalEvent,
+) {
+    let journal = manager.journal();
+    // Inspect the failed generation before connect() can call stop() and
+    // independently revoke it. Otherwise that cleanup could mask a regression.
+    let before = journal.owner_test_state(owner);
+    assert_eq!(
+        journal
+            .snapshot_for_owner(owner, "b-session")
+            .unwrap_err()
+            .code,
+        "journal_generation_stale"
+    );
+    assert_eq!(
+        journal
+            .append_for_owner(
+                owner,
+                "late",
+                JournalKind::UserMessage,
+                "b-session",
+                None,
+                json!({"text":"late"})
+            )
+            .unwrap_err()
+            .code,
+        "journal_generation_stale"
+    );
+    assert_eq!(
+        journal
+            .replay_after_for_owner(owner, "b-session", epoch, 0)
+            .unwrap_err()
+            .code,
+        "journal_generation_stale"
+    );
+    assert_eq!(
+        journal
+            .acknowledge_for_owner(owner, "b-session", epoch, 1)
+            .unwrap_err()
+            .code,
+        "journal_generation_stale"
+    );
+    assert_eq!(
+        journal
+            .append_terminal_for_owner(
+                owner,
+                "late-terminal",
+                "b-session",
+                "old-task",
+                "succeeded",
+                json!({"status":"succeeded"})
+            )
+            .unwrap_err()
+            .code,
+        "journal_generation_stale"
+    );
+    let terminal = RemoteTaskEvent {
+        task_id: "old-task".into(),
+        session_id: "b-session".into(),
+        generation: operation.generation().into(),
+        model_source: RemoteTaskModelSource::ControlledDevice,
+        status: "succeeded".into(),
+        sequence: "1".into(),
+        transition_sequence: 2,
+        outcome_unknown: false,
+        terminal_reason: None,
+        result_digest: None,
+    };
+    assert!(
+        journal
+            .record_task_event_for_owner(owner, &terminal)
+            .is_none()
+    );
+    assert_eq!(
+        journal
+            .require_current_event_for_owner(owner, event)
+            .unwrap_err()
+            .code,
+        "journal_generation_stale"
+    );
+    assert_eq!(journal.owner_test_state(owner), before);
+    assert!(manager.local_journal_context().is_err());
+    let (next_operation, next_owner) = connect(manager);
+    assert_ne!(operation.generation(), next_operation.generation());
+    append(&journal, &next_owner, "next-valid", "b-session");
+    assert_eq!(
+        journal
+            .snapshot_for_owner(&next_owner, "b-session")
+            .unwrap()
+            .sequence,
+        1
+    );
+    assert_eq!(
+        journal
+            .snapshot_for_owner(owner, "b-session")
+            .unwrap_err()
+            .code,
+        "journal_generation_stale"
+    );
+}
+
+#[test]
+fn journal_owner_expired_transport_close_revokes_before_any_successor_cleanup() {
+    let manager = ControlledDeviceManager::default();
+    let (operation, owner) = connect(&manager);
+    let journal = manager.journal();
+    append(&journal, &owner, "accepted", "b-session");
+    let snapshot = journal.snapshot_for_owner(&owner, "b-session").unwrap();
+    let epoch = snapshot.epoch;
+    let event = &snapshot.events[0];
+    assert_eq!(
+        manager.mark_transport_disconnected(33_000).status,
+        ControlledStatusKind::Error
+    );
+    assert_failed_owner_before_successor(&manager, &operation, &owner, &epoch, event);
+}
+
+#[test]
+fn journal_owner_second_resume_disconnect_revokes_before_any_successor_cleanup() {
+    for activated in [false, true] {
+        let manager = ControlledDeviceManager::default();
+        let (operation, owner) = connect(&manager);
+        let journal = manager.journal();
+        append(&journal, &owner, "accepted", "b-session");
+        let snapshot = journal.snapshot_for_owner(&owner, "b-session").unwrap();
+        let epoch = snapshot.epoch;
+        let event = &snapshot.events[0];
+        assert_eq!(
+            manager.mark_transport_disconnected(5_000).status,
+            ControlledStatusKind::Reconnecting
+        );
+        manager.begin_resume(operation.clone(), 6_000).unwrap();
+        let activation_id = "owner-second-close";
+        manager
+            .advance_resume(
+                operation.clone(),
+                ControlledResumeStep::Provisional { activation_id },
+                7_000,
+            )
+            .unwrap();
+        if activated {
+            for (step, now) in [
+                (ControlledResumeStep::Confirmed { activation_id }, 8_000),
+                (
+                    ControlledResumeStep::ActivationAcknowledged { activation_id },
+                    9_000,
+                ),
+                (
+                    ControlledResumeStep::PostActivationLiveness {
+                        activation_id,
+                        liveness_epoch_b: "owner-live-b",
+                    },
+                    10_000,
+                ),
+            ] {
+                manager
+                    .advance_resume(operation.clone(), step, now)
+                    .unwrap();
+            }
+        }
+        assert_eq!(
+            manager.status().status,
+            if activated {
+                ControlledStatusKind::ResumeActivatedPendingLiveness
+            } else {
+                ControlledStatusKind::ResumeProvisional
+            }
+        );
+        assert_eq!(
+            manager.mark_transport_disconnected(12_000).status,
+            ControlledStatusKind::Error
+        );
+        assert_failed_owner_before_successor(&manager, &operation, &owner, &epoch, event);
+    }
+}
+
 #[test]
 fn journal_owner_late_worker_after_66_actual_generations_cannot_change_current_state() {
     let manager = ControlledDeviceManager::default();

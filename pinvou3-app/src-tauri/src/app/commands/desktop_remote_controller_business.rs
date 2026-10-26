@@ -4,7 +4,7 @@
 //! 任务接纳、任务取消）在这里落到既有的命令层实现上：三条路径都复用
 //! `desktop_remote_task` / `desktop_remote_capabilities` 的同一套逻辑，避免
 //! 「命令入口」与「wire 入口」两份实现漂移。
-// architecture-guard: allow-target-cfg -- Tests of anchored private publication require Windows sharing leases; unsupported hosts get a separate fail-closed test, while runtime OS selection stays in platform::filesystem.
+// architecture-guard: allow-target-cfg -- Tests of anchored private publication require Windows sharing leases; the Windows Wry reader replay test also needs a test-only barrier at the real business port. Unsupported publication hosts get a separate fail-closed test, while runtime OS selection stays in platform::filesystem.
 
 use crate::features::codex_acp::{AcpPool, RemotePermissionOwner};
 use serde_json::{Value, json};
