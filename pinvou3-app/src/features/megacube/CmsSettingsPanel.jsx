@@ -110,11 +110,11 @@ function TaskRow({ task, copy, busy, onCancel, read, onRead, modelName }) {
 }
 
 const TAG_TONES = {
-  green: 'bg-emerald-500/12 text-emerald-700 dark:text-emerald-400',
+  green: 'bg-emerald-500/10 text-emerald-700 dark:text-emerald-400',
   gray: 'bg-black/[0.06] text-[#6C6C70] dark:bg-white/[0.08] dark:text-[#8E8E93]',
-  amber: 'bg-amber-500/12 text-amber-800 dark:text-amber-400',
-  red: 'bg-red-500/12 text-red-700 dark:text-red-400',
-  blue: 'bg-blue-500/12 text-blue-700 dark:text-blue-400',
+  amber: 'bg-amber-500/10 text-amber-800 dark:text-amber-400',
+  red: 'bg-red-500/10 text-red-700 dark:text-red-400',
+  blue: 'bg-blue-500/10 text-blue-700 dark:text-blue-400',
 };
 
 /** @param {{ tone?: keyof typeof TAG_TONES, children?: any }} props */
