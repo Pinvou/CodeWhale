@@ -35,3 +35,5 @@ PR Check 对账号平台路径改动在 Draft、Ready 和 Merge Queue 均执行 
 实际 public-schema 回归覆盖 Bootstrap、Account 侧钱包确认、GetMe、启动映射补齐和 Claim/Retry/Complete，以及停用/启用恢复、旧映射代次、DETACHED、任务过期重领和有数据的晚装迁移。该验证不等同 Billing HTTP、实际供应商或完整 E2E 验收。
 
 Billing 的本地与部署初始化、升级角色前置见 [数据库运行说明](deploy/postgres/README.md)。迁移必须由独立 migrator 执行，服务启动不创建 owner 或扩大权限。
+
+迁移包的身份校验、已知旧快照的实际拒绝条件和核验限制见[迁移准入与快照识别](docs/migration-snapshot-admission.md)。该说明不替代历史库升级实证，也不撤销已有兼容承诺。
