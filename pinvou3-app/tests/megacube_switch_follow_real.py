@@ -188,14 +188,17 @@ def main():
             time.sleep(.1)
         def action(card, verb):
             accepted = api(sock,'POST','/v1/models/'+card+'/'+verb,{})
-            deadline = time.monotonic()+90
+            # Cold CPU weight loading can exceed 90 seconds on a shared host.
+            # Bound fixture setup independently of the later handoff checks;
+            # a terminal failed task must still fail immediately below.
+            deadline = time.monotonic()+300
             while time.monotonic()<deadline:
                 task = api(sock,'GET','/v1/tasks/'+accepted['task_id'])
                 if task['status']!='running':
                     assert task['status']=='succeeded', task
                     return
                 time.sleep(.2)
-            raise TimeoutError('setup action')
+            raise TimeoutError(f'setup action {verb} for {card}: last task {task!r}')
         action(cards['a'],'enable'); action(cards['b'],'enable')
         action(cards['b'],'disable'); action(cards['a'],'set-default')
         environment.update(PINVOU3_HOME=str(profile), CODEWHALE_HOME=str(root/'credentials'),
