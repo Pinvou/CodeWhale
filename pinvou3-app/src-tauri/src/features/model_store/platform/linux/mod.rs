@@ -76,6 +76,7 @@ pub mod startup_updates;
 pub mod store_client;
 pub mod version_store;
 pub mod weight_identity;
+pub mod worker;
 
 // 服务层的操作直接对外，签名与 `platform/unsupported.rs` 里的桩一一对应。
 // 命令层因此不必分平台分支。

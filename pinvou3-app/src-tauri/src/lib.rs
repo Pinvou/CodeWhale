@@ -939,6 +939,15 @@ fn fail_headless_cli(message: impl std::fmt::Display, code: i32) -> ! {
 }
 
 pub fn run() {
+    // `pinvou3-tauri model-store-worker <子命令>`：双机卡片脚本调用的从机控制
+    // 助手（model_store::platform::linux::worker，经 $LMM_WORKER 注入）。必须在
+    // 碰任何 GUI/TLS/异步运行时之前分流出去——它跑在卡片脚本的 pty 里，等不起
+    // 一整个应用的启动链，而且同进程里那些全局副作用（rustls provider、环境
+    // 变量）对它只有干扰。
+    if std::env::args().nth(1).as_deref() == Some("model-store-worker") {
+        let rest: Vec<String> = std::env::args().skip(2).collect();
+        std::process::exit(features::model_store::platform::worker_cli(&rest));
+    }
     let component_args: Vec<String> = std::env::args().skip(1).collect();
     if component_args == ["--cmsd-store-inventory"] {
         match features::model_store::cmsd_inventory() {
