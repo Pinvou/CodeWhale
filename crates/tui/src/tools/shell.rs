@@ -2337,6 +2337,13 @@ impl ShellManager {
 
         if stdin_data.is_some() {
             cmd.stdin(Stdio::piped());
+        } else {
+            // std defaults to `Stdio::inherit()`, which on a hosted (non-PTY)
+            // run hands the child the parent's TTY or an arbitrary pipe it can
+            // never see EOF on. This lane has no stdin payload and no operator:
+            // a deterministic null stdin gives stdin-readers an immediate
+            // end-of-file instead of a hang or a SIGTTIN stop.
+            cmd.stdin(Stdio::null());
         }
 
         child_env::apply_to_command(&mut cmd, child_env::string_map_env(&exec_env.env));
@@ -4360,7 +4367,16 @@ async fn execute_foreground_via_background(
         manager.attach_heavy_permit(&task_id, permit)?;
     }
 
-    if stdin_data.is_some() {
+    // Foreground has no operator at the keyboard and no later `interact`
+    // call, so whatever the command will ever read from stdin must be
+    // bounded now. With stdin data the payload was delivered at spawn and
+    // closing the write end turns the pipe into a normal end-of-file; with
+    // no data, closing immediately delivers that EOF at once. Leaving the
+    // write end open wedged any stdin-reading command (`cat`, a bare
+    // `$SHELL`) on a pipe that never EOFs until the foreground watchdog
+    // killed it. The manager-side close is idempotent-safe after natural
+    // completion and on lanes that carry no pipe handle (PTY/persistent).
+    {
         let mut manager = context
             .shell_manager
             .lock()

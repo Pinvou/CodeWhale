@@ -2277,6 +2277,129 @@ fn test_write_stdin_streams_output() {
     assert!(delta2.result.stdout.is_empty());
 }
 
+/// A foreground command that reads stdin with NO stdin data used to wedge on
+/// a pipe whose write end the tool kept open: the live repro was `$SHELL`
+/// holding the turn until the foreground watchdog killed it at the full
+/// timeout (`cat` behaves identically). The foreground lane must deliver EOF
+/// at spawn instead. Background keeps the pipe open for deferred
+/// `interact` streaming — that contract is pinned by
+/// `test_write_stdin_streams_output` and must not regress.
+#[tokio::test]
+async fn foreground_without_stdin_data_gives_stdin_readers_eof() {
+    let workspace = tempdir().expect("workspace");
+    let context = ToolContext::new(workspace.path().to_path_buf());
+    // `cat` on Unix, `more` on cmd, `[Console]::In.ReadToEnd()` on PowerShell —
+    // each blocks until stdin reaches EOF.
+    let echo_stdin = echo_stdin_command();
+
+    let started = Instant::now();
+    let result = BashTool::new("Bash")
+        .execute(json!({"command": echo_stdin, "timeout_ms": 3000}), &context)
+        .await
+        .expect("foreground stdin-reader must spawn");
+    let elapsed = started.elapsed();
+
+    assert!(
+        result.success,
+        "a stdin-reading foreground command with no stdin data must see EOF \
+         and exit promptly, not run to the timeout; took {elapsed:?}: {}",
+        result.content
+    );
+    assert!(
+        elapsed < Duration::from_millis(2900),
+        "EOF must be delivered right after spawn, not discovered at the \
+         timeout; took {elapsed:?}: {}",
+        result.content
+    );
+}
+
+#[cfg(unix)]
+const SYNC_STDIN_EOF_HELPER_ENV: &str = "CODEWHALE_SYNC_STDIN_EOF_HELPER";
+#[cfg(unix)]
+const SYNC_STDIN_EOF_RESULT_FILE_ENV: &str = "CODEWHALE_SYNC_STDIN_EOF_RESULT_FILE";
+
+/// Helper half of
+/// `sync_lane_without_stdin_data_gets_eof_not_inherited_stdin`: runs one
+/// synchronous (background=false) stdin-reading command from a process whose
+/// own stdin is a pipe the driver deliberately holds open, and records the
+/// resulting status for the driver to judge.
+#[cfg(unix)]
+#[test]
+fn sync_lane_stdin_eof_helper_process() {
+    if std::env::var(SYNC_STDIN_EOF_HELPER_ENV).ok().as_deref() != Some("1") {
+        return;
+    }
+    let result = ShellManager::new(std::env::temp_dir())
+        .execute_with_options_env(
+            &echo_stdin_command(),
+            None,
+            10_000,
+            false,
+            None,
+            false,
+            None,
+            HashMap::new(),
+        )
+        .expect("sync execute in helper");
+    std::fs::write(
+        PathBuf::from(
+            std::env::var(SYNC_STDIN_EOF_RESULT_FILE_ENV).expect("sync stdin result file"),
+        ),
+        format!("{:?}", result.status),
+    )
+    .expect("write sync stdin result file");
+}
+
+/// The sync lane's old default left the child inheriting the host's stdin
+/// (std's `Stdio::inherit()`), so on a live TTY a stdin-reading command hung
+/// or drew SIGTTIN. Reproduce deterministically: re-exec this test binary as
+/// a helper whose own stdin is a pipe this process holds open, and run the
+/// sync lane inside it. An inherited pipe can never EOF; `Stdio::null()`
+/// gives the child an immediate end-of-file.
+#[cfg(unix)]
+#[test]
+fn sync_lane_without_stdin_data_gets_eof_not_inherited_stdin() {
+    let tmp = tempdir().expect("tempdir");
+    let result_file = tmp.path().join("sync-stdin-result");
+    let test_binary = std::env::current_exe().expect("current test binary");
+    let mut helper = Command::new(&test_binary)
+        .arg("--exact")
+        .arg("tools::shell::tests::sync_lane_stdin_eof_helper_process")
+        .arg("--nocapture")
+        .env(SYNC_STDIN_EOF_HELPER_ENV, "1")
+        .env(SYNC_STDIN_EOF_RESULT_FILE_ENV, &result_file)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .expect("spawn sync stdin helper");
+    // Hold the write end for the whole run: while it is open, an inherited
+    // stdin can never reach EOF, which is exactly the old hang.
+    let held_stdin = helper.stdin.take().expect("helper stdin pipe");
+    let deadline = Instant::now() + Duration::from_secs(60);
+    let status = loop {
+        match helper.try_wait().expect("poll sync stdin helper") {
+            Some(status) => break status,
+            None => {
+                assert!(
+                    Instant::now() < deadline,
+                    "sync-lane helper never finished; the lane is inheriting \
+                     a never-EOF stdin"
+                );
+                std::thread::sleep(Duration::from_millis(50));
+            }
+        }
+    };
+    drop(held_stdin);
+    assert!(status.success(), "sync stdin helper failed: {status}");
+    let outcome = std::fs::read_to_string(&result_file).expect("sync lane result file");
+    assert_eq!(
+        outcome, "Completed",
+        "a sync command reading stdin with no stdin data must get EOF, not \
+         inherited host stdin"
+    );
+}
+
 #[test]
 #[cfg(all(unix, not(target_env = "ohos")))]
 fn background_tty_command_has_controlling_terminal() {
