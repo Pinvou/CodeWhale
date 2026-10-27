@@ -843,14 +843,17 @@ fn is_agent_readonly_segment(segment: &str) -> bool {
 /// Several of these programs have write or helper-execution forms despite
 /// looking like harmless stdout transforms (`sort -o`, `sort
 /// --compress-program`, and uniq's second FILE operand). Keep their accepted
-/// options exact, reject attached/unknown flags, and cap operands where the
-/// command's positional grammar can name an output file.
+/// options exact, reject unknown flags, and cap operands where the command's
+/// positional grammar can name an output file. Clustered short spellings
+/// (`-rn`, `-d,`, `-f1`) are expanded first so that only admitted letters
+/// ever reach the exact match — see [`expand_clustered_short_options`].
 fn agent_text_filter_options_match(
     tokens: &[String],
     switches: &[&str],
     value_options: &[&str],
     max_operands: usize,
 ) -> bool {
+    let tokens = expand_clustered_short_options(tokens, switches, value_options);
     let mut index = 1;
     let mut options = true;
     let mut operands = 0;
@@ -878,6 +881,57 @@ fn agent_text_filter_options_match(
         index += 1;
     }
     true
+}
+
+/// Expand the clustered short-option spellings POSIX `getopt` accepts and
+/// models reach for first: `-rn` becomes `-r -n`, `-d,` becomes `-d ,`, and
+/// `-f1` becomes `-f 1`. A cluster expands only when its first letter is an
+/// admitted value option (the remainder is its value) or when every letter is
+/// an admitted switch; anything else, every long option, and every token
+/// after `--` is left verbatim so the exact-match grammar refuses it.
+fn expand_clustered_short_options(
+    tokens: &[String],
+    switches: &[&str],
+    value_options: &[&str],
+) -> Vec<String> {
+    let mut expanded = Vec::with_capacity(tokens.len());
+    let mut options = true;
+    for (index, token) in tokens.iter().enumerate() {
+        if index == 0 || !options || !token.starts_with('-') || token.starts_with("--") {
+            if index > 0 && options && token == "--" {
+                options = false;
+            }
+            expanded.push(token.clone());
+            continue;
+        }
+        let mut letters = token.char_indices().skip(1);
+        let Some((_, first_letter)) = letters.next() else {
+            expanded.push(token.clone());
+            continue;
+        };
+        let remainder_start = letters.next().map_or(token.len(), |(offset, _)| offset);
+        let remainder = &token[remainder_start..];
+        if remainder.is_empty() {
+            // A single short option is already in exact-match form.
+            expanded.push(token.clone());
+            continue;
+        }
+        let first = format!("-{first_letter}");
+        if value_options.contains(&first.as_str()) {
+            expanded.push(first);
+            expanded.push(remainder.to_string());
+        } else if switches.contains(&first.as_str())
+            && remainder
+                .chars()
+                .all(|letter| switches.contains(&format!("-{letter}").as_str()))
+        {
+            expanded.push(first);
+            expanded.extend(remainder.chars().map(|letter| format!("-{letter}")));
+        } else {
+            expanded.push(token.clone());
+        }
+    }
+    expanded
 }
 
 fn is_agent_readonly_git(tokens: &[String]) -> bool {
@@ -2479,6 +2533,44 @@ mod tests {
         // shell lane instead of falling into a direct-argv exec of the
         // spelling with quotes.
         assert!(agent_readonly_command_needs_shell_for_cd("\"cd\" sub"));
+    }
+
+    /// Clustered short options — the spellings models reach for first — are
+    /// admitted exactly when every letter is an admitted switch or the first
+    /// letter is an admitted value option; nothing outside the tables slips in
+    /// through a cluster.
+    #[test]
+    fn agent_text_filters_admit_clustered_short_options() {
+        for command in [
+            "cut -d, -f1 notes.csv",
+            "cut -d: -f2,3 notes.csv",
+            "comm -12 a.txt b.txt",
+            "comm -3 a.txt b.txt",
+            "sort -rn notes.txt",
+            "sort -k2 notes.txt",
+            "sort -k2,2n notes.txt",
+            "uniq -ci notes.txt",
+            "tr -ds abc xyz",
+            "cat notes.csv | cut -d, -f1 | sort -u",
+        ] {
+            assert!(
+                is_agent_readonly_shell_command(command),
+                "{command} should be an admitted clustered text filter"
+            );
+        }
+        for command in [
+            "sort -ro out.txt notes.txt",
+            "sort -no out.txt notes.txt",
+            "cut -zq notes.csv",
+            "comm -14 a.txt b.txt",
+            "tr -dq abc xyz",
+            "uniq -cz notes.txt out.txt",
+        ] {
+            assert!(
+                !is_agent_readonly_shell_command(command),
+                "{command} must stay denied: a cluster may not smuggle an unknown letter"
+            );
+        }
     }
 
     /// The parent-side parallel auto-approve classifier keeps its whole-
