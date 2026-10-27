@@ -892,6 +892,27 @@ pub fn update_store_model_status(
     Ok(())
 }
 
+/// Persist the successful deployment and its selected profile as one statement.
+/// A failed write must not clear the redeployment gate while retaining an older
+/// profile; the caller reports failure even though the script already ran.
+pub fn mark_deployed(
+    card_id: &str,
+    deploy_script_sha256: Option<&str>,
+    profile_id: Option<&str>,
+) -> rusqlite::Result<()> {
+    let conn = connect()?;
+    let changed = conn.execute(
+        "UPDATE store_models SET status = 'deployed', deployed_at = ?1,
+         deployed_script_sha256 = ?2, card_update_pending = 0, active_profile_id = ?3
+         WHERE card_id = ?4",
+        params![now_iso(), deploy_script_sha256, profile_id, card_id],
+    )?;
+    if changed != 1 {
+        return Err(rusqlite::Error::QueryReturnedNoRows);
+    }
+    Ok(())
+}
+
 pub fn set_running(card_id: &str, running: bool) -> rusqlite::Result<()> {
     let conn = connect()?;
     conn.execute(
@@ -1667,6 +1688,15 @@ mod tests {
         assert!(cols.contains("active_profile_id"));
         assert!(cols.contains("endpoint_url"));
     }
+    #[test]
+    fn deployment_commit_rejects_an_absent_model() {
+        let _ctx = setup_temp_db();
+        assert!(matches!(
+            mark_deployed("missing-card", Some("hash"), Some("custom")),
+            Err(rusqlite::Error::QueryReturnedNoRows)
+        ));
+    }
+
     fn update_fixture() -> (
         StoreModelRecord,
         super::super::store_client::StoreCardDetail,

@@ -311,7 +311,7 @@ pub fn test_cards() -> Vec<TestCard> {
                     "production-sampling",
                     "生产采样配置（默认，256K 上下文）",
                     "面向生产环境 + Agent/工具调用调过的参数：262144 上下文、FP8 E4M3 KV \
-                     Cache，默认监听 0.0.0.0，带工具调用/推理内容解析和生产默认采样参数。",
+                     Cache，默认只监听 127.0.0.1，带工具调用/推理内容解析和生产默认采样参数。",
                 ),
             ],
             scripts: card_scripts!("qwen38-27b-nvfp4-mtp"),
@@ -568,6 +568,101 @@ pub fn to_detail(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn mtp_generated_production_defaults_to_loopback_256k_and_preserves_existing_env() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let cards = test_cards();
+        let card = cards
+            .iter()
+            .find(|card| card.summary.id == "qwen38-27b-nvfp4-mtp")
+            .expect("MTP card");
+        let production = card
+            .profiles
+            .iter()
+            .find(|profile| profile.id == "production-sampling")
+            .expect("production profile");
+        let description = production.description.as_deref().expect("description");
+        assert!(description.contains("127.0.0.1"));
+        assert!(!description.contains("0.0.0.0"));
+
+        let install = script_content(card, "install_engine").expect("install_engine");
+        // Only run the profile materialization block: never the installer, Docker,
+        // GPU probes, privilege changes or network operations.
+        let start = install
+            .find("mkdir -p \"$VENDOR_DIR/profiles\"\n")
+            .expect("profile materialization start");
+        let end = install[start..]
+            .find("cp \"$VENDOR_DIR/profiles/benchmark/compose.yaml\"")
+            .map(|offset| start + offset)
+            .expect("profile materialization end");
+        let temp = tempfile::tempdir().expect("temporary HOME");
+        let vendor = temp
+            .path()
+            .join(".local/share/local-model-manager/vendor/qwen38-nvfp4-mtp");
+        std::fs::create_dir_all(vendor.join("scripts")).expect("vendor scripts");
+        let generated = std::process::Command::new("bash")
+            .args(["-euo", "pipefail", "-c", &install[start..end]])
+            .env("HOME", temp.path())
+            .env("VENDOR_DIR", &vendor)
+            .output()
+            .expect("generate real profile templates");
+        assert!(
+            generated.status.success(),
+            "{}",
+            String::from_utf8_lossy(&generated.stderr)
+        );
+
+        // Exercise the actual entry script against a harmless deployment sink.
+        let sink = vendor.join("scripts/deploy.sh");
+        std::fs::write(&sink, "#!/bin/bash\nexit 0\n").expect("deployment sink");
+        std::fs::set_permissions(&sink, std::fs::Permissions::from_mode(0o755))
+            .expect("executable sink");
+        let deploy = script_content(card, "deploy").expect("deploy");
+        let run_deploy = || {
+            let output = std::process::Command::new("bash")
+                .args(["-c", &deploy])
+                .env("HOME", temp.path())
+                .env("LMM_MODELS_DIR", temp.path().join("models"))
+                .env("LMM_DEPLOY_PROFILE", "production-sampling")
+                .output()
+                .expect("deploy with generated profile");
+            assert!(
+                output.status.success(),
+                "{}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+        };
+        run_deploy();
+        let env_file = vendor.join(".env");
+        let generated_env = std::fs::read_to_string(&env_file).expect("generated .env");
+        assert!(
+            generated_env
+                .lines()
+                .any(|line| line == "HOST_BIND=127.0.0.1")
+        );
+        assert!(
+            generated_env
+                .lines()
+                .any(|line| line == "CONTEXT_LENGTH=262144")
+        );
+
+        let configured_env = generated_env
+            .replace("HOST_BIND=127.0.0.1", "HOST_BIND=0.0.0.0")
+            .replace("CONTEXT_LENGTH=262144", "CONTEXT_LENGTH=131072");
+        std::fs::write(&env_file, &configured_env).expect("existing user configuration");
+        run_deploy();
+        assert_eq!(
+            std::fs::read_to_string(env_file).expect("retained .env"),
+            configured_env,
+            "same-profile redeploy must retain existing user configuration"
+        );
+        assert_eq!(
+            std::fs::read_to_string(vendor.join(".active_profile")).expect("active profile"),
+            "production-sampling\n"
+        );
+    }
 
     #[test]
     fn all_cards_have_six_scripts() {

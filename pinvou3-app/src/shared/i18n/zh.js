@@ -420,6 +420,7 @@ export const dictZh = {
           profileDefault:"默认",
           profileMtpBenchmark:"基准测试配置（64K 上下文）",
           profileMtpProduction:"生产采样配置（256K 上下文）",
+          mtpNetworkHint:'内置 MTP 256K 模板默认仅监听本机 127.0.0.1，引擎没有 API 鉴权。重新部署或回退会保留已有 .env，旧配置仍可能监听 0.0.0.0；请检查实际监听地址及访问控制。',
           startupUpdatesFound:n=>`发现 ${n} 个模型卡片更新`,
           startupUpdatesView:"查看更新",
           startupUpdateBadge:"有更新",

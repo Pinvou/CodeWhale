@@ -407,6 +407,7 @@ export const dictEn = {
           profileDefault:"Default",
           profileMtpBenchmark:"Benchmark (64K context)",
           profileMtpProduction:"Production sampling (256K context)",
+          mtpNetworkHint:'The built-in MTP 256K template defaults to listening only on this device at 127.0.0.1. The engine has no API authentication. Redeployment or rollback preserves the existing .env, so older configurations may still listen on 0.0.0.0. Check the actual listening address and access controls.',
           startupUpdatesFound:n=>`${n} model card updates available`,
           startupUpdatesView:"View updates",
           startupUpdateBadge:"Update available",

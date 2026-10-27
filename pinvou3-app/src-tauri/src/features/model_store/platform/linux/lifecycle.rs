@@ -1924,11 +1924,12 @@ impl ModelManager {
         )?;
         // 记下这次用的 deploy 脚本版本：以后脚本一更新，界面就能准确判断
         // 「这个模型需要重新部署」，而不是对所有已部署模型都常驻一个按钮。
-        db::update_store_model_status(card_id, "deployed", source.script_hash("deploy").as_deref())
-            .map_err(|e| ModelManagerError::new(format!("记录部署状态失败：{e}")))?;
-        if let Some(pid) = &resolved_profile_id {
-            let _ = db::set_active_profile(card_id, Some(pid));
-        }
+        db::mark_deployed(
+            card_id,
+            source.script_hash("deploy").as_deref(),
+            resolved_profile_id.as_deref(),
+        )
+        .map_err(|e| ModelManagerError::new(format!("记录部署状态和方案失败：{e}")))?;
         Ok(())
     }
 
@@ -2951,6 +2952,7 @@ fn write_temp_script(content: &str) -> Result<PathBuf, ModelManagerError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::fs;
 
     fn make_card(name: &str, quant: Option<&str>) -> StoreCardDetail {
         StoreCardDetail {
@@ -3304,6 +3306,119 @@ exit 0
             mgr.deploy(id, Some("unknown"), &mut |_| {}, Default::default())
                 .is_err()
         );
+    }
+
+    fn profile_deploy_fixture(
+        profiles: &str,
+        selected: Option<&str>,
+    ) -> (config::TempHome, ModelManager) {
+        let temp = setup_temp_db();
+        let id = "saved-profile";
+        add_stuck_record(id, "org/model", 11);
+        db::connect()
+            .unwrap()
+            .execute(
+                "UPDATE store_models SET profiles_json=?1,active_profile_id=?2,
+                 status='downloaded',deployed_at='previous-deployment',
+                 deployed_script_sha256='previous-hash',card_update_pending=1 WHERE card_id=?3",
+                rusqlite::params![profiles, selected, id],
+            )
+            .unwrap();
+        let blob = |content: &str| db::ScriptBlob {
+            content: content.into(),
+            sha256: script_runner::sha256_hex(content),
+        };
+        db::set_scripts_content(
+            id,
+            &BTreeMap::from([
+                ("install_engine".into(), blob("#!/bin/bash\nexit 0\n")),
+                (
+                    "deploy".into(),
+                    blob("#!/bin/bash\nmkdir -p \"$LMM_MODELS_DIR\"\nprintf '%s' \"${LMM_DEPLOY_PROFILE-}\" > \"$LMM_MODELS_DIR/selected\"\n"),
+                ),
+            ]),
+            &Default::default(),
+        )
+        .unwrap();
+        let mgr = manager_with_models_dir(&temp.path().join("models"));
+        (temp, mgr)
+    }
+
+    #[test]
+    fn deployment_profile_write_failure_preserves_all_deployment_fields_and_reports_failure() {
+        let (_temp, mgr) = profile_deploy_fixture(
+            r#"[{"id":"default","name":"Default"},{"id":"custom","name":"Custom"}]"#,
+            Some("default"),
+        );
+        let id = "saved-profile";
+        let before = db::get_store_model(id).unwrap().unwrap();
+        db::connect()
+            .unwrap()
+            .execute_batch(
+                "CREATE TRIGGER reject_profile BEFORE UPDATE OF active_profile_id ON store_models
+             BEGIN SELECT RAISE(ABORT,'injected profile write failure'); END;",
+            )
+            .unwrap();
+        let error = mgr
+            .deploy(id, Some("custom"), &mut |_| {}, Default::default())
+            .unwrap_err();
+        assert!(
+            error.to_string().contains("记录部署状态和方案失败"),
+            "{error}"
+        );
+        assert_eq!(
+            serde_json::to_value(db::get_store_model(id).unwrap().unwrap()).unwrap(),
+            serde_json::to_value(&before).unwrap()
+        );
+        // The real deployment script already ran; only its database commit is
+        // atomic. Reporting this failure must not claim to undo script effects.
+        assert_eq!(
+            fs::read_to_string(mgr.settings.models_path().join("selected")).unwrap(),
+            "custom"
+        );
+        db::connect()
+            .unwrap()
+            .execute_batch("DROP TRIGGER reject_profile")
+            .unwrap();
+        mgr.deploy(id, Some("custom"), &mut |_| {}, Default::default())
+            .unwrap();
+        let deployed = db::get_store_model(id).unwrap().unwrap();
+        assert_eq!(deployed.status, "deployed");
+        assert!(!deployed.card_update_pending);
+        assert_ne!(deployed.deployed_at, before.deployed_at);
+        assert_eq!(
+            deployed.deployed_script_sha256.as_deref(),
+            Some(deployed.scripts_content["deploy"].sha256.as_str())
+        );
+        assert_eq!(deployed.active_profile_id.as_deref(), Some("custom"));
+        fs::write(mgr.settings.models_path().join("selected"), "pending").unwrap();
+        mgr.deploy(id, None, &mut |_| {}, Default::default())
+            .unwrap();
+        assert_eq!(
+            fs::read_to_string(mgr.settings.models_path().join("selected")).unwrap(),
+            "custom"
+        );
+    }
+
+    #[test]
+    fn deployment_replaces_invalid_saved_profiles_and_clears_them_for_profileless_cards() {
+        for (profiles, expected) in [
+            (
+                r#"[{"id":"default","name":"Default"},{"id":"custom","name":"Custom"}]"#,
+                Some("default"),
+            ),
+            ("[]", None),
+        ] {
+            let (_temp, mgr) = profile_deploy_fixture(profiles, Some("removed"));
+            mgr.deploy("saved-profile", None, &mut |_| {}, Default::default())
+                .unwrap();
+            let deployed = db::get_store_model("saved-profile").unwrap().unwrap();
+            assert_eq!(deployed.active_profile_id.as_deref(), expected);
+            assert_eq!(
+                fs::read_to_string(mgr.settings.models_path().join("selected")).unwrap(),
+                expected.unwrap_or("")
+            );
+        }
     }
 
     /// 防的是「卸载删到一半被打断，卡片永远赖在模型库里」。

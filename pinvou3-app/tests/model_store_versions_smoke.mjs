@@ -121,6 +121,71 @@ try {
     version_id: 'test-version', state: 'downloading', can_switch: false, can_delete: false,
   }]));
   await expectActions(2);
+  assert.equal(await page.$('[data-testid="model-version-mtp-network-hint"]'), null,
+    'other cards must not inherit the built-in MTP template disclosure');
+  // Both entry points must show the active language's disclosure without
+  // implying that redeployment migrated an existing .env or a remote recipe.
+  const networkHintCopies = [];
+  for (const [language, marker] of [['zh', '内置 MTP 256K'], ['en', 'built-in MTP 256K'], ['ja', '内蔵 MTP 256K']]) {
+    await page.reload();
+    const expectedHint = await page.evaluate(async (locale) => {
+      /* eslint-disable import-x/no-unresolved, n/no-missing-import */
+      const reactModule = await import('/@id/react');
+      const { createElement } = reactModule.default || reactModule;
+      const client = await import('/@id/react-dom/client');
+      const { ModelStoreView } = await import('/features/model-store/ModelStoreView.jsx');
+      const { dictZh } = await import('/shared/i18n/zh.js');
+      const { dictEn } = await import('/shared/i18n/en.js');
+      const { dictJa } = await import('/shared/i18n/ja.js');
+      /* eslint-enable import-x/no-unresolved, n/no-missing-import */
+      const t = { zh: dictZh, en: dictEn, ja: dictJa }[locale];
+      const copy = t.uiModelStore;
+      if (!Object.hasOwn(copy, 'mtpNetworkHint')) throw Error(`${locale}: missing network disclosure`);
+      const records = ['qwen38-27b-nvfp4-mtp', 'network-neutral'].map((id) => ({
+        card_id: id, card_name: id, model_name: id, status: 'deployed', running: false,
+        size_bytes: 128, deploy_topology: 'single', card_update_pending: true,
+        default_profile_id: 'production-sampling', profiles: [
+          { id: 'benchmark', name: 'Benchmark' }, { id: 'production-sampling', name: 'Production' },
+        ],
+      }));
+      window.__TAURI__ = { core: { invoke: async (command) => {
+        if (command === 'model_store_availability') return { available: true };
+        if (command === 'model_store_cards' || command === 'model_store_active_runs' || command === 'model_store_versions') return [];
+        if (command === 'model_store_library') return { models: records, corrected: [] };
+        if (command === 'model_store_test_store_state') return { enabled: false };
+        if (command === 'model_store_take_startup_cleanup') return null;
+        throw Error(`Unexpected command: ${command}`);
+      } } };
+      window.openMtpNetworkHistory = () => {
+        const row = document.querySelector('[data-card-id="qwen38-27b-nvfp4-mtp"]');
+        [...row.querySelectorAll('button')].find((button) => button.textContent === copy.versionHistory).click();
+      };
+      const createRoot = client.createRoot || client.default?.createRoot;
+      createRoot(document.getElementById('root')).render(createElement(ModelStoreView, {
+        theme: 'light', t, bs: { savedModels: [] },
+      }));
+      return copy.mtpNetworkHint;
+    }, language);
+    assert.ok(expectedHint.includes(marker), `${language}: must use its own translated disclosure`);
+    for (const fact of ['127.0.0.1', '0.0.0.0', '.env', 'API']) assert.ok(expectedHint.includes(fact));
+    networkHintCopies.push(expectedHint);
+    await page.waitForSelector('[data-card-id="qwen38-27b-nvfp4-mtp"] [data-testid="model-store-deploy"]');
+    await page.click('[data-card-id="qwen38-27b-nvfp4-mtp"] [data-testid="model-store-deploy"]');
+    await page.waitForSelector('[data-testid="model-store-mtp-network-hint"]');
+    assert.equal(await page.$eval('[data-testid="model-store-mtp-network-hint"]', (node) => node.textContent), expectedHint);
+    assert.equal(await page.$eval('[data-testid="model-store-profile-dialog"] input:checked', (input) => input.closest('label').textContent.includes('256K')), true,
+      'the network disclosure must preserve the existing 256K production default');
+    await page.keyboard.press('Escape');
+    await page.evaluate(() => window.openMtpNetworkHistory());
+    await page.waitForSelector('[data-testid="model-version-mtp-network-hint"]');
+    assert.equal(await page.$eval('[data-testid="model-version-mtp-network-hint"]', (node) => node.textContent), expectedHint);
+    await page.keyboard.press('Escape');
+    await page.click('[data-card-id="network-neutral"] [data-testid="model-store-deploy"]');
+    await page.waitForSelector('[data-testid="model-store-profile-dialog"]');
+    assert.equal(await page.$('[data-testid="model-store-mtp-network-hint"]'), null,
+      'other deployment profiles must not claim the built-in MTP network defaults');
+  }
+  assert.equal(new Set(networkHintCopies).size, 3, 'all three disclosures must be translated without fallback');
   await page.reload();
   await page.evaluate(async () => {
     /* eslint-disable import-x/no-unresolved, n/no-missing-import */
@@ -630,10 +695,8 @@ try {
   assert.equal(aliasOnly.preserve_context_window_tokens, true);
   assert.notEqual(aliasOnly.context_window_edit_requested, true,
     'an untouched context snapshot must not become an explicit choice after an alias save');
-  await page.click('[data-testid="model-form-context-window"]');
-  await page.keyboard.down('Control');
-  await page.keyboard.press('A');
-  await page.keyboard.up('Control');
+  // DOM selection works across Chrome platforms while typing still fires real input events.
+  await page.$eval('[data-testid="model-form-context-window"]', (input) => { input.focus(); input.select(); });
   await page.type('[data-testid="model-form-context-window"]', '64000');
   await page.click('[data-testid="model-form-save"]');
   await page.waitForFunction(() => window.savedFormPayloads.length === 2);
@@ -647,10 +710,7 @@ try {
   assert.equal(unchangedRoute.preserve_context_window_tokens, false);
   const routeInput = await page.$('input[value="http://127.0.0.1:8911/v1"]');
   assert.ok(routeInput, 'the existing form still displays its original route');
-  await routeInput.click();
-  await page.keyboard.down('Control');
-  await page.keyboard.press('A');
-  await page.keyboard.up('Control');
+  await routeInput.evaluate((input) => { input.focus(); input.select(); });
   await routeInput.type('http://127.0.0.1:8999/v1');
   await page.click('[data-testid="model-form-save"]');
   await page.waitForFunction(() => window.savedFormPayloads.length === 3);
@@ -682,10 +742,7 @@ try {
   assert.equal(untouched32k.preserve_context_window_tokens, true);
   assert.notEqual(untouched32k.context_window_edit_requested, true);
   for (const [value, count] of [['32768', 6], ['', 7]]) {
-    await page.click('[data-testid="model-form-context-window"]');
-    await page.keyboard.down('Control');
-    await page.keyboard.press('A');
-    await page.keyboard.up('Control');
+    await page.$eval('[data-testid="model-form-context-window"]', (input) => { input.focus(); input.select(); });
     if (value) await page.type('[data-testid="model-form-context-window"]', value);
     else await page.keyboard.press('Backspace');
     await page.click('[data-testid="model-form-save"]');
@@ -697,6 +754,7 @@ try {
   }
   assert.deepEqual(errors, []);
   console.log('PASS: versions refresh after success/failure/cancellation and ignore stale responses');
+  console.log('PASS: MTP deployment and version dialogs disclose network defaults and retained .env in all three languages without changing the 256K default');
   console.log('PASS: existing settings forms preserve untouched routes after migration; edited routes and new drafts opt out');
   console.log('PASS: alias-only and untouched drafts do not claim context edits; explicit 32K and automatic choices retain their intent');
   console.log('PASS: unknown compatibility reasons remain visible; uninstall cleanup preserves sync failures');

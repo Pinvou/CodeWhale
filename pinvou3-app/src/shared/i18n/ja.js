@@ -405,6 +405,7 @@ const jaBase = {
           profileDefault:"既定",
           profileMtpBenchmark:"ベンチマーク（64K コンテキスト）",
           profileMtpProduction:"本番サンプリング（256K コンテキスト）",
+          mtpNetworkHint:'内蔵 MTP 256K テンプレートの既定の待受先は、この端末の 127.0.0.1 のみです。エンジンに API 認証はありません。再デプロイやロールバックでは既存の .env が保持されるため、古い設定は 0.0.0.0 で待ち受ける可能性があります。実際の待受アドレスとアクセス制御を確認してください。',
           startupUpdatesFound:n=>`${n} 件のモデルカード更新があります`,
           startupUpdatesView:"更新内容を見る",
           startupUpdateBadge:"更新あり",
