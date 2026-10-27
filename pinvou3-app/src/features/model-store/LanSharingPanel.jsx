@@ -3,7 +3,7 @@ import { fetchLanStatus, setLanSharing } from './model-store-api.js';
 import { lanError, lanSample } from './lan-access.js';
 import { MsButton, SUBTLE_SURFACE, TEXT_PRIMARY, TEXT_SECONDARY, TEXT_DANGER } from './model-store-ui.jsx';
 
-export function LanSharingPanel({ cardId, copy, keys, keysKnown = true, onCopy }) {
+export function LanSharingPanel({ cardId, copy, keys, keysKnown = true, onCopy, flat = false }) {
   const [status, setStatus] = useState(null);
   const [address, setAddress] = useState('');
   const [port, setPort] = useState(null);
@@ -50,8 +50,14 @@ export function LanSharingPanel({ cardId, copy, keys, keysKnown = true, onCopy }
   const activeKeys = keys.filter((key) => key.card_id === cardId).length;
   const sample = lanSample(status);
   return (
-    <section className={`mt-4 space-y-2 rounded-[12px] p-3 ${SUBTLE_SURFACE}`} data-testid="model-store-lan-sharing">
-      <h4 className={`text-[13px] font-medium ${TEXT_PRIMARY}`}>{copy.lanTitle}</h4>
+    // flat：详情页分享面板里的子卡已经提供了边框外壳和「局域网共享」标题，
+    // 这时不再自带 section 外壳/标题（双层卡片叠出来就是上一版的糊成一团）。
+    // 独立使用（旧入口/测试）保留原样。
+    <section
+      className={flat ? 'space-y-2' : `mt-4 space-y-2 rounded-[12px] p-3 ${SUBTLE_SURFACE}`}
+      data-testid="model-store-lan-sharing"
+    >
+      {flat ? null : <h4 className={`text-[13px] font-medium ${TEXT_PRIMARY}`}>{copy.lanTitle}</h4>}
       <p className={`text-[12px] ${TEXT_SECONDARY}`}>{copy.lanHint}</p>
       <p className={`text-[12px] ${TEXT_SECONDARY}`} role="status">{error ? copy.lanUnknown : !status ? copy.lanLoading : status.enabled ? copy.lanOn : copy.lanOff}</p>
       {status?.interfaces.length === 0 ? <p className={`text-[12px] ${TEXT_SECONDARY}`}>{copy.lanNoAddress}</p> : null}
