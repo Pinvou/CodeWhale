@@ -421,7 +421,7 @@ fn connected_clears_original_ticket_and_late_timer_does_not_kill_same_operation(
         })
         .unwrap();
     let called = AtomicUsize::new(0);
-    let status = manager
+    let (status, _owner) = manager
         .complete_connected_with_install(
             operation.clone(),
             materials,

@@ -272,7 +272,9 @@ pub(crate) async fn resume_round_trip<T>(
 ) {
     use super::super::controlling_handshake::ControllingHandshake;
     use super::super::encrypted_lane::ControllingLaneState;
-    use super::super::test_support::{bind_pairing_generation, joined_message, pairing_fixture};
+    use super::super::test_support::{
+        bind_pairing_generation, hex_lower, joined_message, pairing_fixture,
+    };
     use ring::signature::KeyPair as _;
     let directory = tempfile::tempdir().unwrap();
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -450,6 +452,10 @@ pub(crate) async fn resume_round_trip<T>(
                 action_results: std::sync::Arc::new(RemoteActionResultCache::default()),
                 business_epoch: std::sync::Arc::new(AtomicU64::new(0)),
                 processed_frames: Some(processed_tx),
+                transport_owner: None,
+                before_frame_effect: None,
+                activation_probe: None,
+                evidence_hooks: None,
             };
             let socket = socket.as_mut().unwrap();
             if scenario < 2 {
@@ -619,6 +625,10 @@ pub(crate) async fn resume_round_trip<T>(
                 action_results: std::sync::Arc::new(RemoteActionResultCache::default()),
                 business_epoch: std::sync::Arc::new(AtomicU64::new(0)),
                 processed_frames: None,
+                transport_owner: None,
+                before_frame_effect: None,
+                activation_probe: None,
+                evidence_hooks: None,
             };
             let before_first_send = controlled_monotonic_millis();
             let task = tokio::spawn(async move {
@@ -755,6 +765,10 @@ pub(crate) async fn resume_round_trip<T>(
                 action_results: std::sync::Arc::new(RemoteActionResultCache::default()),
                 business_epoch: std::sync::Arc::new(AtomicU64::new(0)),
                 processed_frames: Some(processed_tx),
+                transport_owner: None,
+                before_frame_effect: None,
+                activation_probe: None,
+                evidence_hooks: None,
             };
             owned.worker = Some(tokio::spawn(worker.serve()));
             let socket = socket.as_mut().unwrap();
