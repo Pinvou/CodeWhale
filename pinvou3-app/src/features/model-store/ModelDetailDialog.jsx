@@ -348,14 +348,38 @@ function ModelDetailDialog({ cardId, card, copy, theme, onClose, onRedeploy, onT
             ) : null}
           </div>
 
-          {/* 分享面板（Agent 接入 + 局域网共享 统一） */}
+          {/* 分享面板（Agent 接入 + 局域网共享 统一，2026-10-27 r2 重排）。
+              外层两张卡片只描边不填充：里面的复制行/Key 行本来就是 SUBTLE_SURFACE
+              填充，外框再填充就糊成一片——上一版「不够好看」一半是这个叠色。 */}
           <div className="mt-5">
             <h3 className={`mb-2 text-[13px] font-medium ${TEXT_PRIMARY}`}>{copy.shareTitle}</h3>
 
-            {/* 子区 1：Agent 接入 */}
-            <div className={`rounded-[12px] p-3 ${SUBTLE_SURFACE}`}>
-              <div className={`mb-2 text-[12px] font-medium ${TEXT_PRIMARY}`}>{copy.shareAgentSection}</div>
-              <div className="space-y-2">
+            {/* 子卡 1：Agent 接入。本段的主行动（在品悟里使用）放标题行右侧——
+                卡片头带行动按钮是标准形态；上一版把两个按钮悬在卡片底部，
+                用户反馈「很突兀」，根子就是行动没有挂到它所属的语境上。 */}
+            <div className="rounded-[12px] border border-[#E1E5EA] p-3 dark:border-[#2E3134]">
+              <div className="flex flex-wrap items-center justify-between gap-2">
+                <div className={`text-[12px] font-medium ${TEXT_PRIMARY}`}>{copy.shareAgentSection}</div>
+                <MsButton
+                  tone="primary"
+                  busy={busy}
+                  disabled={!linkable.ok}
+                  onClick={useInPinvou}
+                  data-testid="model-store-use-in-pinvou"
+                  className="!h-7 !px-3 !text-[12px]"
+                >
+                  {copy.linkUse}
+                </MsButton>
+              </div>
+              {linkable.ok ? null : (
+                <div
+                  className={`mt-1.5 max-w-[420px] text-[11px] leading-4 ${TEXT_SECONDARY}`}
+                  data-testid="model-store-link-blocked-reason"
+                >
+                  {copy[linkable.reason] || copy.linkFailed}
+                </div>
+              )}
+              <div className="mt-2 space-y-2">
                 <CopyRow
                   label={copy.accessModelId}
                   value={modelId}
@@ -409,38 +433,31 @@ function ModelDetailDialog({ cardId, card, copy, theme, onClose, onRedeploy, onT
                         <p className={`mt-1 text-[11px] ${TEXT_SECONDARY}`}>{copy.keysHint}</p>
                       </div>
                     )}
+                    {/* 新建 Key 的样子就是「往上面这个列表再加一行」：同宽同圆角的
+                        虚线行，整行可点。一颗孤零零悬在下方的小按钮没有这个语境
+                        （上一版「突兀」的另一半来源）。 */}
+                    <button
+                      type="button"
+                      disabled={busy}
+                      onClick={addKey}
+                      data-testid="model-store-add-key"
+                      className={`mt-1.5 flex w-full items-center justify-center gap-1 rounded-[12px] border border-dashed border-[#C4C7C5] px-3 py-1.5 text-[12px] transition-colors hover:border-current disabled:cursor-not-allowed disabled:opacity-40 dark:border-[#3C4043] ${TEXT_SECONDARY} ${HOVER_SURFACE}`}
+                    >
+                      <Plus size={13} />
+                      {copy.addKey}
+                    </button>
                   </div>
                 </div>
                 {record.running ? null : (
                   <p className="text-[11px] text-[#A15C07] dark:text-[#FDD663]">{copy.notRunningHint}</p>
                 )}
-                <div className="flex flex-wrap items-center gap-2 pt-1">
-                  <MsButton tone="ghost" busy={busy} onClick={addKey} data-testid="model-store-add-key">
-                    <Plus size={14} />
-                    {copy.addKey}
-                  </MsButton>
-                  <MsButton
-                    tone="primary"
-                    busy={busy}
-                    disabled={!linkable.ok}
-                    onClick={useInPinvou}
-                    data-testid="model-store-use-in-pinvou"
-                  >
-                    {copy.linkUse}
-                  </MsButton>
-                  {linkable.ok ? null : (
-                    <span className={`text-[11px] ${TEXT_SECONDARY}`} data-testid="model-store-link-blocked-reason">
-                      {copy[linkable.reason] || copy.linkFailed}
-                    </span>
-                  )}
-                </div>
               </div>
             </div>
 
-            {/* 子区 2：局域网共享 */}
-            <div className={`mt-2 rounded-[12px] p-3 ${SUBTLE_SURFACE}`}>
+            {/* 子卡 2：局域网共享（flat：外壳和标题由本卡片提供，面板只出内容） */}
+            <div className="mt-2 rounded-[12px] border border-[#E1E5EA] p-3 dark:border-[#2E3134]">
               <div className={`mb-2 text-[12px] font-medium ${TEXT_PRIMARY}`}>{copy.shareLanSection}</div>
-              <LanSharingPanel key={cardId} cardId={cardId} copy={copy} keys={keys} keysKnown={keysKnown} onCopy={copyText} />
+              <LanSharingPanel key={cardId} cardId={cardId} copy={copy} keys={keys} keysKnown={keysKnown} onCopy={copyText} flat />
             </div>
           </div>
 
@@ -455,7 +472,9 @@ function ModelDetailDialog({ cardId, card, copy, theme, onClose, onRedeploy, onT
                 运行中禁用：重新部署会撞上还占着端口的旧容器，必须先停用。 */}
             {/* 操作按钮区：一行整齐排列，主按钮+次级入口（r6 P2-4 + r7 P1-3 + 用户排版反馈）。
                 主按钮按状态切换（更新脚本 > 卸载部署 > 部署模型）；次级入口确保
-                所有操作始终可达——有更新时卸载不被主按钮顶掉、重新部署/删除常驻。 */}
+                所有操作始终可达——有更新时卸载不被主按钮顶掉、重新部署/删除常驻。
+                「在品悟里使用」不属于部署生命周期，已上移到 Agent 子卡头部。 */}
+            <div className="mt-6">
             {(() => {
               const hasUpdate = scriptUpdates?.[record.card_id];
               const isDeployed = record.status === 'deployed';
@@ -564,6 +583,7 @@ function ModelDetailDialog({ cardId, card, copy, theme, onClose, onRedeploy, onT
                 </div>
               );
             })()}
+            </div>
         </>
       ) : null}
     </MsDialog>
