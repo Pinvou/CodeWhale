@@ -52,6 +52,8 @@
     "^/features/model-store/ModelStoreView\\.jsx$",
     "^/features/settings/SettingsView\\.jsx$",
     "^/shared/i18n/zh\\.js$",
+    "^/shared/i18n/en\\.js$",
+    "^/shared/i18n/ja\\.js$",
     "^/shared/i18n.js$"
   ],
   "ignoreDependencies": [
