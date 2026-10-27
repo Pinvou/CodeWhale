@@ -44,6 +44,12 @@ func (r *PostgresRepository) PrepareDispatch(ctx context.Context, usageID uuid.U
 	if err := lockReplayUsageTx(ctx, tx, usageID); err != nil {
 		return err
 	}
+	// Serialize preparation with the exact pre-dispatch credential-failure
+	// fence. An INSERT ... SELECT alone can observe an older RECEIVED snapshot.
+	var lockedID uuid.UUID
+	if err := tx.QueryRow(ctx, `SELECT id FROM usage_requests WHERE id=$1 FOR UPDATE`, usageID).Scan(&lockedID); err != nil {
+		return err
+	}
 	command, err := tx.Exec(ctx, `INSERT INTO usage_dispatch_preparations(usage_request_id,encrypted_envelope,key_id,envelope_integrity,created_at) SELECT $1,$2,$3,$4,$5 FROM usage_requests WHERE id=$1 AND execution_status='RECEIVED' ON CONFLICT(usage_request_id) DO NOTHING`, usageID, ciphertext, r.secrets.KeyID(), replayDigest(ciphertext), r.now())
 	if err != nil {
 		return err

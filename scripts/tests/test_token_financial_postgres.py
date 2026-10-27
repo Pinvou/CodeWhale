@@ -15,6 +15,48 @@ SPEC.loader.exec_module(RUNNER)
 
 
 class FinancialPostgresRunnerTests(unittest.TestCase):
+    def test_credential_failure_pg_roots_cannot_disappear_or_skip(self):
+        roots = {
+            "TestCredentialRotationWindowReceiptPostgres",
+            "TestCredentialRotationOtherActorEffectPostgres",
+            "TestCredentialFailurePersistenceBoundariesPostgres",
+            "TestCredentialFailurePreparationFencePostgres",
+            "TestCredentialFailureExistingEventsPostgres",
+        }
+        children = {"TestCredentialRotationWindowReceiptPostgres",
+                    "TestCredentialFailurePersistenceBoundariesPostgres"}
+        self.assertTrue(roots <= RUNNER.REQUIRED)
+        self.assertTrue(children <= RUNNER.TOKEN_CHILD_REQUIRED)
+        self.run_main_fixture()
+        command = self.fixture_commands[self.fixture_phases.index("retained-token")]
+        # This phase already runs the whole package with its PostgreSQL URL.
+        # Required sets enforce evidence; they are not a -run selection filter.
+        self.assertNotIn("-run", command)
+        self.assertIn("-skip", command)
+        self.assertEqual(command[command.index("-skip") + 1],
+                         "^(" + "|".join(sorted(RUNNER.PROVISIONING_REQUIRED)) + ")$")
+        package = RUNNER.TOKEN_PACKAGE
+        events = self.events(RUNNER.REQUIRED, package, children=True)
+        options = {"package": package, "require_children": True,
+                   "children_required": RUNNER.TOKEN_CHILD_REQUIRED}
+        self.assertGreater(RUNNER.verify_results(events, **options), 0)
+        for name in roots:
+            for invalid in (
+                [event for event in events if event.get("Test", "").split("/", 1)[0] != name],
+                [event for event in events if not (event.get("Test") == name and event.get("Action") == "run")],
+                events + [{"Action": "skip", "Package": package, "Test": name}],
+                events + [{"Action": "skip", "Package": package, "Test": name + "/actual"}],
+                events + [{"Action": "fail", "Package": package, "Test": name + "/actual"}],
+                [{**event, "Package": RUNNER.BILLING_PACKAGE}
+                 if event.get("Test", "").split("/", 1)[0] == name else event for event in events],
+            ):
+                with self.subTest(name=name, events=len(invalid)), self.assertRaises(RuntimeError):
+                    RUNNER.verify_results(invalid, **options)
+        for name in children:
+            with self.subTest(no_children=name), self.assertRaises(RuntimeError):
+                RUNNER.verify_results([event for event in events
+                                       if not event.get("Test", "").startswith(name + "/")], **options)
+
     def test_retained_billing_budget_preserves_all_phase_commands_and_cleanup(self):
         self.run_main_fixture()
         self.assertEqual(self.fixture_phases, [
@@ -846,7 +888,7 @@ class FinancialPostgresRunnerTests(unittest.TestCase):
     def test_actual_main_requires_token_waiver_children(self):
         self.assertEqual(
             RUNNER.TOKEN_CHILD_REQUIRED,
-            {"TestHoldAcknowledgementSurvivesDispatchPersistenceFailurePostgres", "TestUsageWaiverCoordinatorRecoveryPostgres", "TestPersonalZeroBudgetCancellationAndExpiryPostgres"},
+            {"TestHoldAcknowledgementSurvivesDispatchPersistenceFailurePostgres", "TestUsageWaiverCoordinatorRecoveryPostgres", "TestPersonalZeroBudgetCancellationAndExpiryPostgres", "TestCredentialRotationWindowReceiptPostgres", "TestCredentialFailurePersistenceBoundariesPostgres"},
         )
         with self.assertRaisesRegex(RuntimeError, "no completed child"):
             self.run_main_fixture(missing_token_children=True)

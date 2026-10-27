@@ -268,8 +268,7 @@ func (s *Service) chatCompletions(w http.ResponseWriter, r *http.Request) {
 	}
 	credential, secret, err := s.repository.CredentialSecret(r.Context(), route.TokenAccountID, route.CredentialID)
 	if err != nil {
-		_ = s.repository.MarkReleased(r.Context(), usageRequest.ID, "credential_unavailable")
-		s.writeError(w, r, err)
+		s.writeCredentialLookupFailure(w, r, usageRequest.ID)
 		return
 	}
 	defer clear(secret)
@@ -740,6 +739,31 @@ func (s *Service) replayStoredUsage(w http.ResponseWriter, r *http.Request, usag
 		s.writeError(w, r, err)
 		return
 	}
+	s.writeStoredUsageSnapshot(w, r, usage, snapshot)
+}
+
+// A local failed lookup proves no facts about another actor. The store fences
+// the original acceptance and persists its failure receipt in one transaction;
+// failed/unknown acknowledgements are resolved only through a fresh read.
+func (s *Service) writeCredentialLookupFailure(w http.ResponseWriter, r *http.Request, usageID uuid.UUID) {
+	w.Header().Set("X-Pinvou-Usage-Request-ID", usageID.String())
+	w.Header().Set("Cache-Control", "no-store")
+	w.Header().Set("Location", "/v1/usage-requests/"+usageID.String())
+	payload, err := json.Marshal(api.Error{Code: "PROVIDER_CREDENTIAL_UNAVAILABLE", Message: "the accepted model request failed before dispatch because its credential was unavailable", RequestID: httpserver.RequestID(r.Context()), Details: map[string]any{"usage_request_id": usageID, "execution_status": "FAILED", "settlement_status": "RELEASED", "status_url": "/v1/usage-requests/" + usageID.String()}})
+	if err == nil {
+		_, _ = s.repository.FailCredentialBeforeDispatch(r.Context(), usageID, ReplayResult{Kind: "JSON", HTTPStatus: http.StatusServiceUnavailable, ContentType: "application/json", Payload: payload})
+	}
+	snapshot, err := s.repository.LoadReplay(r.Context(), usageID, 0)
+	if err != nil {
+		api.WriteJSON(w, http.StatusServiceUnavailable, api.Error{Code: "USAGE_STATE_UNCONFIRMED", Message: "the accepted model request status could not be confirmed; inspect the original usage request", RequestID: httpserver.RequestID(r.Context()), Details: map[string]any{"usage_request_id": usageID, "status_url": "/v1/usage-requests/" + usageID.String()}})
+		return
+	}
+	// Read-only even if another actor progressed or the failure did not commit.
+	// replayUsage may resume reservation/dispatch and is deliberately not used.
+	s.writeStoredUsageSnapshot(w, r, snapshot.Usage, snapshot)
+}
+
+func (s *Service) writeStoredUsageSnapshot(w http.ResponseWriter, r *http.Request, usage UsageRequest, snapshot ReplaySnapshot) {
 	if snapshot.ResultExpired {
 		api.WriteError(w, http.StatusGone, "IDEMPOTENCY_RESULT_EXPIRED", "the retained model result has expired; inspect the usage request status", httpserver.RequestID(r.Context()))
 		return
