@@ -50,6 +50,7 @@
     "^/features/model-store/CardUpdateDialog\\.jsx$",
     "^/features/model-store/ModelDetailDialog\\.jsx$",
     "^/features/model-store/ModelStoreView\\.jsx$",
+    "^/features/model-store/useModelStoreStartupUpdates\\.js$",
     "^/features/settings/SettingsView\\.jsx$",
     "^/shared/i18n/zh\\.js$",
     "^/shared/i18n/en\\.js$",

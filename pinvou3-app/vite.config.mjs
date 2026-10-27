@@ -471,12 +471,37 @@ export function assertLazyChunks(bundle, contracts = { ...lazyChunkContracts, ..
   }
 }
 
+// A non-entry chunk can still be eagerly imported. Follow the complete static
+// dependency graph so moving the reminder to a static group cannot pass this.
+export function assertDeferredStartupUpdates(bundle) {
+  const chunks = Object.values(bundle).filter(output => output.type === 'chunk');
+  const main = chunks.find(output => output.name === 'main' && output.isEntry);
+  if (!main) throw new Error('Startup reminder gate did not find the main entry');
+  const byFile = new Map(chunks.map(output => [output.fileName, output]));
+  const eager = new Set();
+  const pending = [main.fileName];
+  while (pending.length) {
+    const file = pending.pop();
+    if (eager.has(file)) continue;
+    eager.add(file);
+    pending.push(...(byFile.get(file)?.imports || []));
+  }
+  for (const module of ['startup-update-runtime.js', 'startup-update-read-state.js']) {
+    const holders = chunks.filter(output => Object.keys(output.modules).some(id =>
+      id.replaceAll('\\', '/').endsWith(`/features/model-store/${module}`)));
+    if (holders.length !== 1 || holders[0].isEntry || eager.has(holders[0].fileName)) {
+      throw new Error(`${module} must be emitted once outside the main static dependency graph`);
+    }
+  }
+}
+
 function enforceLazyChunks() {
   return {
     name: 'pinvou-enforce-lazy-chunks',
     apply: 'build',
     generateBundle(_options, bundle) {
       assertLazyChunks(bundle);
+      assertDeferredStartupUpdates(bundle);
     },
   };
 }
