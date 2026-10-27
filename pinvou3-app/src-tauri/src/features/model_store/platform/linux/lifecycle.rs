@@ -2046,8 +2046,13 @@ impl ModelManager {
                 // container_name 留在库里而容器早已删掉，inspect 报 No such object，
                 // 此前落入"无法确认"分支把更新链整个拒掉）。用 ps -a 精确名字过滤
                 // 区分「不存在」与「真的查不动」。
+                //
+                // r18 P2-1：`ps -a` 自己也返回 None（daemon 卡死/宕机）时是「查不动」，
+                // 不是「不存在」——此前 is_some_and 把两种 None 混为一谈，live-restore
+                // 下活容器会被宣告已停。与 reconcile_running_status 的 None=未知口径
+                // 对齐：查不动就拒绝，宁可让用户重试。
                 _ => {
-                    let exists = proc_timeout::query(
+                    let Some(ps_stdout) = proc_timeout::query(
                         "docker",
                         &[
                             "ps",
@@ -2057,8 +2062,12 @@ impl ModelManager {
                             "--format",
                             "{{.Names}}",
                         ],
-                    )
-                    .is_some_and(|out| out.lines().any(|l| l.trim() == name));
+                    ) else {
+                        return Err(ModelManagerError::new(format!(
+                            "暂时查不到 Docker 状态（守护进程无响应），无法确认容器已停止，请稍后再试或先检查 Docker，再{action}。"
+                        )));
+                    };
+                    let exists = ps_stdout.lines().any(|l| l.trim() == name);
                     if !exists {
                         return Ok(());
                     }

@@ -131,13 +131,22 @@ codewhale-config = { path = "../../CodeWhale/crates/config" }
 codewhale-execpolicy = { path = "../../CodeWhale/crates/execpolicy" }
 
 # Monitor 用：vLLM HTTP probe（/v1/models + Prometheus /metrics）
-# 0.13 与 CodeWhale 子模块对齐；feature `rustls`(0.13 改名,自带 aws-lc-rs)。
-# aws-lc-rs 构建需 cmake,CI 已加安装步骤。
-# 注意:hf-hub(经 reqwest 0.12 传递)会把 rustls 0.23 的 `ring` feature 拉进图,
-# 使 rustls 同时启用 aws-lc-rs + ring。tokio-tungstenite 的无参 ClientConfig::builder()
-# 在两 provider 共存时会 panic,故需在启动时显式 install_default(见 lib.rs)。
-# (CodeWhale#122 已把底座 oauth2 改为 default-features=false,不再经它引入 reqwest 0.12;
-# ring 的另一 requirer 仍在,本备注因此保持有效。)
+# 0.13 与 CodeWhale 子模块对齐。
+#
+# TLS 底座：**native-tls（OpenSSL），保留**——r15 评审 B1 曾要求回退或拆分，
+# r18 P1-2 的处置是「正文如实改写为保留并给根因」，依据如下：
+# - 切换发生于一次商店 TLS 握手失败的事故处置，同批还有 webpki-roots
+#   1.0.9→1.0.10 升级；两项同时落地，**无法归因**是哪一项修好的（r15 评审
+#   自己复核了这一点：reqwest 的 `rustls` feature 走 rustls-platform-verifier
+#   系统根库，与 OpenSSL 同源，「rustls 不认 Sectigo/USERTrust 根」的原归因
+#   不成立）。
+# - 保留 native-tls 的理由：当前生产商店（account.pinvou.com）连接正是在
+#   native-tls 上全量设备验证通过的；回退需要先复现原始失败才能验证不回归，
+#   而原始失败没有留存复现证据。宁可为已知可用的配置写清楚，也不为无法
+#   验证的「理论等价」赌生产 TLS 面。
+# - pinvou-cli **有意保留 rustls**（不引 OpenSSL 依赖），两边信任源不同
+#   （app=系统 OpenSSL 库，cli=platform-verifier 系统根库）——分裂已评估，
+#   CLI 面向的开发机场景无商店连接需求。
 # system-proxy: reqwest 0.13 的 default feature,读 macOS SystemConfiguration /
 # Windows 系统代理设置(非环境变量)。此前 default-features=false 把它关掉,
 # 导致用「系统代理」模式(非 TUN)的用户模型请求直连而被代理工具的路由规则
@@ -145,8 +154,11 @@ codewhale-execpolicy = { path = "../../CodeWhale/crates/execpolicy" }
 reqwest = { version = "0.13", default-features = false, features = ["native-tls", "json", "blocking", "stream", "query", "multipart", "system-proxy"] }
 wait-timeout = "0.2"
 
-# rustls 直依赖:仅为在启动时调 aws_lc_rs::default_provider().install_default()
-# 选定进程级 CryptoProvider(见上方 panic 根因)。只声明 aws-lc-rs;ring 由传递依赖启用。
+# rustls 直依赖:tokio-tungstenite(经 platform-verifier)仍把 rustls 带进图,
+# 无参 ClientConfig::builder() 在 aws-lc-rs + ring 两 provider 共存时会 panic,
+# 故需在启动时显式 install_default(见 lib.rs)。TLS 底座切到 native-tls 后
+# reqwest 不再消费它,但 tungstenite 那条腿还需要——所以这行不能随 TLS
+# 切换一起删。只声明 aws-lc-rs;ring 由传递依赖启用。
 rustls = { version = "0.23", default-features = false, features = ["aws-lc-rs"] }
 
 # Updater 用：sha256 校验；反馈接口校验码使用 MD5；产物卡封面读 .pptx 里的 thumbnail。

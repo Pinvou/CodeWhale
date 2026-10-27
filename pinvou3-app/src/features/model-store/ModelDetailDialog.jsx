@@ -418,14 +418,39 @@ function ModelDetailDialog({ cardId, card, copy, theme, onClose, onRedeploy, onT
                               {copy.copy}
                             </button>
                             {revokePending === key.id ? (
-                              <span className={`shrink-0 text-[12px] ${TEXT_SECONDARY}`}>{copy.keysRevoking}</span>
+                              // r18 P1-4：撤销是破坏性操作，走「确认 → 调用」两步。
+                              // 此前只有 setRevokePending 置状态、revokeKey 从未被
+                              // 调用（按钮点了永久卡住），且复数键 keysRevoke/
+                              // keysRevoking 三语字典里根本不存在——按钮渲染的是
+                              // 空标签。现改用既有单数键；取消复用 lanCancel。
+                              <>
+                                <button
+                                  type="button"
+                                  disabled={busy}
+                                  className="shrink-0 rounded-full px-2 py-0.5 text-[12px] text-rose-600 disabled:opacity-40 dark:text-rose-400"
+                                  onClick={() => revokeKey(key.id)}
+                                  data-testid="model-store-key-revoke-confirm"
+                                >
+                                  {copy.keyRevokeConfirm}
+                                </button>
+                                <button
+                                  type="button"
+                                  disabled={busy}
+                                  className={`shrink-0 rounded-full px-2 py-0.5 text-[12px] ${TEXT_SECONDARY} ${HOVER_SURFACE}`}
+                                  onClick={() => setRevokePending(null)}
+                                  data-testid="model-store-key-revoke-cancel"
+                                >
+                                  {copy.lanCancel}
+                                </button>
+                              </>
                             ) : (
                               <button
                                 type="button"
                                 className={`shrink-0 rounded-full px-2 py-0.5 text-[12px] ${TEXT_SECONDARY} ${HOVER_SURFACE}`}
                                 onClick={() => setRevokePending(key.id)}
+                                data-testid="model-store-key-revoke"
                               >
-                                {copy.keysRevoke}
+                                {copy.keyRevoke}
                               </button>
                             )}
                           </div>

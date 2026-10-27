@@ -423,7 +423,10 @@ pub fn sanitize_for_disk(line: &str) -> String {
             let flag_secret = SECRET_FLAGS
                 .iter()
                 .any(|known| key.eq_ignore_ascii_case(known));
-            if flag_secret || key_is_secret(key) {
+            // r18 P1-3：bare 键分支（下方）r7 已并入 query 名单，`=` 分支漏了
+            // 同一次并入——`+ export token=sk-xxx` / `passwd=` / `apikey=` 整值
+            // 落盘+导出。两个分支必须同一张名单，分开维护就会再来一轮。
+            if flag_secret || key_is_secret(key) || query_key_is_secret(key) {
                 out.push_str(key);
                 out.push('=');
                 // `--header=X-Api-Key:value`：`= ` 形式里 header 的名字同样要留。
@@ -969,6 +972,38 @@ mod tests {
             "时间戳被抹掉了：{exported}"
         );
         assert!(!exported.contains("shortsecret123"), "{exported}");
+    }
+
+    /// r18 P1-3：`KEY=VALUE` 形态此前没并入 query 名单（bare 分支 r7 已并入、
+    /// `=` 分支漏了），`set -x` 痕迹 `+ export token=sk-xxx` 整值落盘+导出。
+    /// 两个分支共用同一张名单的行为由这里钉住。
+    #[test]
+    fn key_value_form_covers_the_query_key_list_too() {
+        for line in [
+            "+ export token=sk-live-abc123def456ghi789",
+            "+ ACCESS_TOKEN=ghp_16C7e42F292c6912E7710c838347Ae178B4a",
+            "+ accesstoken=shortsecret123",
+            "+ passwd=s3cr3tValue2026",
+            "+ pwd=shortsecret123",
+            "+ secret=shortsecret123",
+            "+ apikey=shortsecret123",
+            "+ api_key=shortsecret123",
+            "+ X-Amz-Security-Token=FwoGZXIvYXdzEB",
+        ] {
+            let cleaned = sanitize_for_disk(line);
+            for secret in ["sk-live-abc123def456ghi789", "ghp_16C7e42F292c6912E7710c838347Ae178B4a", "shortsecret123", "s3cr3tValue2026", "FwoGZXIvYXdzEB"] {
+                assert!(!cleaned.contains(secret), "{line} -> {cleaned}");
+            }
+            let exported = sanitize_for_export(line);
+            for secret in ["sk-live-abc123def456ghi789", "ghp_16C7e42F292c6912E7710c838347Ae178B4a", "shortsecret123", "s3cr3tValue2026", "FwoGZXIvYXdzEB"] {
+                assert!(!exported.contains(secret), "{line} -> {exported}");
+            }
+        }
+        // 名字留着的诊断价值：键名本身不是机密。
+        assert!(
+            sanitize_for_disk("+ export token=sk-live-abc123def456ghi789").contains("token="),
+            "键名被一起抹掉了"
+        );
     }
 
     /// 落盘时**不能**上全量启发式。
