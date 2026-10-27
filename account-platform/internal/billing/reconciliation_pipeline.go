@@ -59,6 +59,14 @@ func (p *PaymentCoordinator) runReconciliationPipeline(ctx context.Context, chan
 	}
 	sum := sha256.Sum256(encoded)
 	digest := hex.EncodeToString(sum[:])
+	var scheduledProofs ledgerRepairProofSet
+	if mode == "SCHEDULED_API" {
+		probe := ReconciliationRun{ProviderID: caps.ProviderID, ProviderVersion: caps.Version, Channel: channel, BusinessDate: date.Format("2006-01-02")}
+		scheduledProofs, err = p.prefetchLedgerRepairProofs(ctx, probe, rows)
+		if err != nil {
+			return ReconciliationRun{}, err
+		}
+	}
 	tx, err := p.repository.pool.Begin(ctx)
 	if err != nil {
 		return ReconciliationRun{}, err
@@ -73,7 +81,7 @@ func (p *PaymentCoordinator) runReconciliationPipeline(ctx context.Context, chan
 		err = scanReconciliationRun(tx.QueryRow(ctx, reconciliationRunSelect+` WHERE provider_id=$1 AND provider_version=$2 AND channel=$3 AND business_date=$4 AND source_mode=$5 AND input_digest=$6 ORDER BY started_at DESC,id DESC LIMIT 1`, caps.ProviderID, caps.Version, channel, date, mode, digest), &run)
 		if err == nil {
 			if mode == "SCHEDULED_API" && run.Status == "COMPLETED" {
-				facts, e := p.auditedReconciliationFacts(ctx, tx, run, rows)
+				facts, e := p.auditedReconciliationFacts(ctx, tx, run, rows, scheduledProofs)
 				if e != nil {
 					return run, e
 				}
@@ -511,7 +519,8 @@ func (p *PaymentCoordinator) prepareReconciliationResolution(ctx context.Context
 	}
 	var origin ReconciliationRun
 	var version int64
-	if err := p.repository.pool.QueryRow(ctx, `SELECT run.provider_id,run.provider_version,run.channel,run.business_date::text,c.version FROM reconciliation_cases c JOIN reconciliation_runs run ON run.id=c.reconciliation_run_id WHERE c.id=$1`, id).Scan(&origin.ProviderID, &origin.ProviderVersion, &origin.Channel, &origin.BusinessDate, &version); err != nil {
+	var merchant string
+	if err := p.repository.pool.QueryRow(ctx, `SELECT run.provider_id,run.provider_version,run.channel,run.business_date::text,c.version,c.merchant_order_no FROM reconciliation_cases c JOIN reconciliation_runs run ON run.id=c.reconciliation_run_id WHERE c.id=$1`, id).Scan(&origin.ProviderID, &origin.ProviderVersion, &origin.Channel, &origin.BusinessDate, &version, &merchant); err != nil {
 		return err
 	}
 	caps := p.Capabilities()
@@ -528,12 +537,45 @@ func (p *PaymentCoordinator) prepareReconciliationResolution(ctx context.Context
 	}
 	command.verificationRunID = run.ID
 	command.verificationCaseVersion = version
+	command.verificationRepairProofs, err = p.prefetchOrderRepairProofs(ctx, merchant)
+	if err != nil {
+		return err
+	}
 	return nil
+}
+
+// IGNORE does not perform a new provider query, but it cannot bypass missing
+// repair authority for the same order. The stored bill is enough to identify
+// the relevant immutable repair facts; the database rechecks them afterwards.
+func (p *PaymentCoordinator) prepareReconciliationCaseCommand(ctx context.Context, id uuid.UUID, command *ReconciliationCaseCommand) error {
+	if strings.EqualFold(strings.TrimSpace(command.Action), "RESOLVE") {
+		return p.prepareReconciliationResolution(ctx, id, command)
+	}
+	var exists bool
+	if err := p.repository.pool.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM reconciliation_case_commands WHERE reconciliation_case_id=$1 AND idempotency_key=$2)`, id, command.IdempotencyKey).Scan(&exists); err != nil {
+		return err
+	}
+	if exists {
+		return nil
+	}
+	var merchant, caseType string
+	if err := p.repository.pool.QueryRow(ctx, `SELECT merchant_order_no,case_type FROM reconciliation_cases WHERE id=$1`, id).Scan(&merchant, &caseType); err != nil {
+		return err
+	}
+	if caseType == ledgerRepairProofUnavailableCase {
+		return ErrConflict
+	}
+	proofs, err := p.prefetchOrderRepairProofs(ctx, merchant)
+	command.verificationRepairProofs = proofs
+	return err
 }
 
 func (r *PostgresRepository) validateReconciliationResolution(ctx context.Context, tx pgx.Tx, item AdminReconciliationCase, command ReconciliationCaseCommand) error {
 	if command.verificationRunID == uuid.Nil || command.verificationCaseVersion != item.Version {
 		return ErrConflict
+	}
+	if err := validateOrderRepairAuthority(ctx, tx, item.MerchantOrderNo, command.verificationRepairProofs); err != nil {
+		return err
 	}
 	var verification, origin ReconciliationRun
 	if err := scanReconciliationRun(tx.QueryRow(ctx, reconciliationRunSelect+` WHERE id=$1`, command.verificationRunID), &verification); err != nil {
@@ -580,6 +622,7 @@ func (r *PostgresRepository) validateReconciliationResolution(ctx context.Contex
 	if err := auditFourWayReconciliationFacts(ctx, tx, facts); err != nil {
 		return err
 	}
+	applyLedgerRepairAuthority(facts, command.verificationRepairProofs)
 	for _, difference := range CompareFourWayReconciliation(providerRows, facts) {
 		if difference.MerchantOrderNo == item.MerchantOrderNo {
 			return ErrConflict
@@ -706,7 +749,7 @@ func bindProviderOnlyReconciliationDifferences(differences []ReconciliationDiffe
 	return nil
 }
 
-func (p *PaymentCoordinator) auditedReconciliationFacts(ctx context.Context, q reconciliationQuerier, run ReconciliationRun, providerRows []ProviderBillEntry) ([]ReconciliationInternalFact, error) {
+func (p *PaymentCoordinator) auditedReconciliationFacts(ctx context.Context, q reconciliationQuerier, run ReconciliationRun, providerRows []ProviderBillEntry, proofs ledgerRepairProofSet) ([]ReconciliationInternalFact, error) {
 	date, err := time.Parse("2006-01-02", run.BusinessDate)
 	if err != nil {
 		return nil, err
@@ -719,6 +762,7 @@ func (p *PaymentCoordinator) auditedReconciliationFacts(ctx context.Context, q r
 	if err := auditFourWayReconciliationFacts(ctx, q, facts); err != nil {
 		return nil, err
 	}
+	applyLedgerRepairAuthority(facts, proofs)
 	return facts, nil
 }
 
@@ -785,6 +829,10 @@ func reconciliationObservedCaseVersions(raw []byte) (map[string]int64, error) {
 }
 
 func (p *PaymentCoordinator) finalizeReconciliationObservation(ctx context.Context, run ReconciliationRun, providerRows []ProviderBillEntry) error {
+	proofs, err := p.prefetchLedgerRepairProofs(ctx, run, providerRows)
+	if err != nil {
+		return err
+	}
 	var observationID uuid.UUID
 	var facts []ReconciliationInternalFact
 	var factsDigest string
@@ -792,13 +840,13 @@ func (p *PaymentCoordinator) finalizeReconciliationObservation(ctx context.Conte
 	var unique []ReconciliationDifference
 	var observedVersions map[string]int64
 	// This snapshot transaction copies audit evidence, never locks financial rows.
-	err := reconciliationRetry(ctx, func() error {
+	err = reconciliationRetry(ctx, func() error {
 		tx, err := p.repository.pool.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.Serializable})
 		if err != nil {
 			return err
 		}
 		defer tx.Rollback(ctx)
-		facts, err = p.auditedReconciliationFacts(ctx, tx, run, providerRows)
+		facts, err = p.auditedReconciliationFacts(ctx, tx, run, providerRows, proofs)
 		if err != nil {
 			return err
 		}
@@ -914,7 +962,7 @@ func (p *PaymentCoordinator) finalizeReconciliationObservation(ctx context.Conte
 			return err
 		}
 		defer tx.Rollback(ctx)
-		current, err := p.auditedReconciliationFacts(ctx, tx, run, providerRows)
+		current, err := p.auditedReconciliationFacts(ctx, tx, run, providerRows, proofs)
 		if err != nil {
 			return err
 		}

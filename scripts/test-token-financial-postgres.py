@@ -133,6 +133,15 @@ REFUND_REQUIRED = {
     "TestRefundOriginalUnknownSuccessQueriesAndSettlesOrdinaryGrantsPostgres",
 }
 RETAINED_REQUIRED = {
+    "TestLedgerRepairProofHistoricalUpgradePostgres",
+    "TestLedgerRepairAuthorityDuplicateForcedRefundPostgres",
+    "TestLedgerRepairAuthorityCrossDatePostgres",
+    "TestLedgerRepairAuthorityMixedBatchPostgres",
+    "TestLedgerRepairHistoryCapabilityPostgres",
+    "TestF03CumulativeForcedRefundReceiptAudit",
+    "TestRealRepairOnRefundAndChargeback",
+    "TestReconciliationLedgerRepairForcedPeerPostgres",
+    "TestReconciliationLedgerRepairPublicPostgres",
     "TestCallbackHTTPAdmissionPersistsPostgres",
     "TestDirectPaymentRepairCommandReceiptPostgres",
     "TestLatePaymentQueryCommandPostgres",
@@ -166,6 +175,11 @@ RETAINED_REQUIRED = {
 # These exact roots are named leaves. Every other retained root must still
 # produce completed child-case evidence, not just a parent PASS.
 BILLING_LEAF_REQUIRED = {
+    "TestLedgerRepairProofHistoricalUpgradePostgres",
+    "TestLedgerRepairAuthorityMixedBatchPostgres",
+    "TestLedgerRepairHistoryCapabilityPostgres",
+    "TestReconciliationLedgerRepairForcedPeerPostgres",
+    "TestReconciliationLedgerRepairPublicPostgres",
     "TestCallbackHTTPAdmissionPersistsPostgres",
     "TestRefundRejectsPlanBeforeFinancialWritesPostgres",
     "TestRefundSuspendedMemberAdmissionWithoutEarlierBlockerPostgres",
@@ -180,6 +194,14 @@ BILLING_LEAF_REQUIRED = {
     "TestRefundOriginalUnknownSuccessQueriesAndSettlesOrdinaryGrantsPostgres",
 }
 BILLING_CHILD_REQUIRED = RETAINED_REQUIRED - BILLING_LEAF_REQUIRED
+EXACT_REQUIRED_CHILDREN = {
+    "TestLedgerRepairAuthorityDuplicateForcedRefundPostgres": {
+        "reverse=false/available=false",
+        "reverse=false/available=true",
+        "reverse=true/available=false",
+        "reverse=true/available=true",
+    },
+}
 
 
 def local_database_url(raw):
@@ -203,6 +225,7 @@ def verify_results(events, required=None, *, package=None, require_children=Fals
     required = REQUIRED if required is None else required
     started, passed = set(), set()
     children = set()
+    passed_children = set()
     package_passed = False
     count = 0
     for event in events:
@@ -224,6 +247,7 @@ def verify_results(events, required=None, *, package=None, require_children=Fals
                     passed.add(name)
                 else:
                     children.add(root)
+                    passed_children.add(name)
             elif event.get("Package") == package:
                 package_passed = True
         if action == "skip" and root in required:
@@ -232,6 +256,11 @@ def verify_results(events, required=None, *, package=None, require_children=Fals
         raise RuntimeError("required financial contracts did not execute: " + ", ".join(sorted(required - passed | required - started)))
     if require_children and (required if children_required is None else children_required) - children:
         raise RuntimeError("required financial contract has no completed child cases")
+    for root, names in EXACT_REQUIRED_CHILDREN.items():
+        if root in required:
+            missing = {root + "/" + name for name in names} - passed_children
+            if missing:
+                raise RuntimeError("required financial contract subcases did not complete: " + ", ".join(sorted(missing)))
     if package is not None and not package_passed:
         raise RuntimeError("financial package did not complete successfully")
     return count
@@ -284,7 +313,7 @@ def main():
             env["PINVOU_TEST_BILLING_DATABASE_URL"] = raw
         if target == "./internal/token":
             env["PINVOU_TEST_TOKEN_DATABASE_URL"] = raw
-        # The 50 retained Billing roots create about 250 isolated migration
+        # The 59 retained Billing roots create about 250 isolated migration
         # fixtures. Other phases retain their existing finite 20-minute bound.
         timeout = "75m" if label == "retained-billing" else "20m"
         command = [go, "test", "-p=1", "-race", "-tags=nomsgpack", "-mod=readonly", "-count=1", "-timeout=" + timeout, "-json"]

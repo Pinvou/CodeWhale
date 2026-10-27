@@ -18,7 +18,7 @@ Billing 私有环境必须配置 `MANUAL_REVIEW_ON_CALL_USER_IDS`、与 Account 
 
 ## 权限、资源与启动次序
 
-重新渲染三个 workload rules 模板的已核验 subject。Account 只增加 Billing activation/proof/effect/result 读取；Token 只增加个人商品、渠道、订单和权益调用；Billing 向 Account 进行权限验证、人工委托、执行栅栏和授权投递确认。不授予 `internal.*` 通配权限，不给 Token 管理退款或管理商品接口权限。
+重新渲染三个 workload rules 模板的已核验 subject。Account 只增加 Billing activation/proof/effect/result 读取；Token 只增加个人商品、渠道、订单和权益调用；Billing 向 Account 进行权限验证、人工委托、执行栅栏和授权投递确认。不授予 `internal.*` 通配权限，不给 Token 管理退款或管理商品接口权限。 账本归属修复接入后，Account 的 `WORKLOAD_IDENTITY_RULES_JSON` 必须按 `workload-account-rules.json.template` 为已核验的 Billing workload 精确授予 `internal.account.ledger-repair-proof.read`；此权限不能授予其他 workload。既有私有环境文件须先更新并重新渲染；Account 不可用或历史审批证明缺失时，相关修复案例暂不能结案。
 
 依照 `../runbooks/nats-resources.md` 离线渲染、独立核验当前公开身份清单、固定六 descriptor consumer manifest、v2 预留公钥和 renderer broker ACL。公共 artifact 是既有固定期望，个人模式不另造三项 manifest、receipt 或 ACL；离线输出不联系 broker、不创建消费者、不证明已安装或 ready。F01 双身份 `authorization.conf` 不能用于 F02 executor。broker 只接收核验后的公开配置；每个运行角色只挂载自己的 NKey，公开身份、manifest、receipt 与私钥分别放在独立受控目录。Compose 中三个 SHA 由独立审核输入，不能由运行服务自行计算并信任。
 

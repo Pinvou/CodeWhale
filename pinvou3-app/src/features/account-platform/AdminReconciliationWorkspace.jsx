@@ -37,7 +37,7 @@ function CaseActions({ client, item, owner, copy, canWrite, onChanged }) {
   return <section className="adm-panel">
     <h3>{item.merchant_order_no} · {reconciliationCaseLabel(item.case_type, copy)}</h3><p>{copy.status}: {item.status}</p>
     <details><summary>{copy.snapshots}</summary>{['provider_snapshot', 'internal_snapshot', 'refund_snapshot', 'ledger_snapshot'].map(key => <pre key={key}>{JSON.stringify(item[key] || {}, null, 2)}</pre>)}</details>
-    {canWrite && <><label>{copy.action}<select disabled={disabled} value={action} onChange={event => setAction(event.target.value)}>{RECONCILIATION_ACTIONS.map((value, index) => <option key={value} value={value}>{copy[labels[index]]}</option>)}</select></label>
+    {canWrite && <><label>{copy.action}<select disabled={disabled} value={action} onChange={event => setAction(event.target.value)}>{RECONCILIATION_ACTIONS.map((value, index) => <option key={value} value={value} disabled={item.case_type === 'LEDGER_REPAIR_PROOF_UNAVAILABLE' && value === 'IGNORE'}>{copy[labels[index]]}</option>)}</select></label>
       {action === 'ASSIGN' && <label>{copy.owner}<input disabled={disabled} value={fields.owner} onChange={update('owner')} /></label>}
       {action === 'SET_REPAIR_ACTION' && <label>{copy.repair}<textarea disabled={disabled} value={fields.repair} onChange={update('repair')} /></label>}
       {['RESOLVE', 'IGNORE'].includes(action) && <label>{copy.review}<textarea disabled={disabled} value={fields.review} onChange={update('review')} /></label>}

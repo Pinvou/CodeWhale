@@ -30,6 +30,12 @@ try {
       await fresh(language); await page.evaluate(() => { window.f03.caseType = 'CHARGEBACK_DATE_UNVERIFIED'; }); await selectCase();
       assert.ok(await page.evaluate(() => document.querySelector('tbody').textContent.includes(window.f03.copy().caseTypes.CHARGEBACK_DATE_UNVERIFIED)));
     });
+    await caseRun(`${language}: unavailable ledger proof cannot be ignored and remains retryable`, async () => {
+      await fresh(language); await page.evaluate(() => { window.f03.caseType = 'LEDGER_REPAIR_PROOF_UNAVAILABLE'; }); await selectCase();
+      assert.ok(await page.evaluate(() => document.querySelector('tbody').textContent.includes(window.f03.copy().caseTypes.LEDGER_REPAIR_PROOF_UNAVAILABLE)));
+      assert.equal(await page.evaluate(() => document.querySelector('option[value=IGNORE]')?.disabled), true);
+      assert.equal(await page.evaluate(() => document.querySelector('option[value=RESOLVE]')?.disabled), false);
+    });
     await caseRun(`${language}: financial read errors keep permission and input attribution`, async () => {
       await fresh(language);
       for (const [status, key] of [[403, 'permission'], [400, 'sourceChanged']]) {

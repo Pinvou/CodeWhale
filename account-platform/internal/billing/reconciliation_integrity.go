@@ -93,6 +93,7 @@ func auditFourWayReconciliationFacts(ctx context.Context, q reconciliationQuerie
  'correction_postings',COALESCE((SELECT jsonb_agg(to_jsonb(p)||jsonb_build_object('account',to_jsonb(a))) FROM ledger_postings p JOIN entitlement_component_corrections c ON c.journal_entry_id=p.journal_entry_id LEFT JOIN ledger_accounts a ON a.id=p.ledger_account_id WHERE c.payment_transaction_id=input.transaction_id::uuid),'[]'),
  'journals',COALESCE((SELECT jsonb_agg(to_jsonb(j)) FROM journal_entries j WHERE j.business_reference=ANY(input.journal_refs)),'[]'),
  'postings',COALESCE((SELECT jsonb_agg(to_jsonb(post)||jsonb_build_object('account',to_jsonb(a))) FROM ledger_postings post JOIN journal_entries j ON j.id=post.journal_entry_id LEFT JOIN ledger_accounts a ON a.id=post.ledger_account_id WHERE j.business_reference=ANY(input.journal_refs)),'[]'),
+ `+reconciliationLedgerRepairEvidenceSQL(`root.business_reference=ANY(input.journal_refs)`)+`,
  'allocations',COALESCE((SELECT jsonb_agg(to_jsonb(a)||jsonb_build_object('receivable_wallet_id',r.wallet_id)) FROM receivable_allocations a JOIN receivables r ON r.id=a.receivable_id JOIN journal_entries j ON j.id=a.journal_entry_id WHERE j.business_reference=ANY(input.journal_refs)),'[]'),
  'receivables',COALESCE((SELECT jsonb_agg(to_jsonb(r)) FROM receivables r WHERE r.source_reference=ANY(input.journal_refs)),'[]'),
  'refund_repairs',COALESCE((SELECT jsonb_agg(to_jsonb(r)) FROM refund_exception_repair_cases r WHERE input.entry_type='REFUND' AND NOT input.is_forced AND r.refund_id=NULLIF(input.source_id,'')::uuid),'[]'),
@@ -103,6 +104,7 @@ func auditFourWayReconciliationFacts(ctx context.Context, q reconciliationQuerie
   'dismissed',EXISTS(SELECT 1 FROM payment_anomaly_cases anomaly JOIN payment_anomaly_commands command ON command.payment_anomaly_case_id=anomaly.id AND command.action='DISMISS' WHERE anomaly.id=s.manual_review_case_id AND anomaly.forced_refund_case_id=s.id AND anomaly.status='RESOLVED' AND anomaly.resolution_code='DISMISS' AND anomaly.financial_action_status='NONE'),
   'journals',COALESCE((SELECT jsonb_agg(to_jsonb(j)) FROM journal_entries j WHERE j.business_reference='forced-refund:'||s.id::text),'[]'),
   'postings',COALESCE((SELECT jsonb_agg(to_jsonb(post)||jsonb_build_object('account',to_jsonb(a))) FROM ledger_postings post JOIN journal_entries j ON j.id=post.journal_entry_id LEFT JOIN ledger_accounts a ON a.id=post.ledger_account_id WHERE j.business_reference='forced-refund:'||s.id::text),'[]'),
+  `+reconciliationLedgerRepairEvidenceSQL(`root.business_reference='forced-refund:'||s.id::text`)+`,
   'receivables',COALESCE((SELECT jsonb_agg(to_jsonb(r)) FROM receivables r WHERE r.source_reference='forced-refund:'||s.id::text),'[]')))
  FROM forced_refund_cases s WHERE input.is_forced AND s.payment_transaction_id=input.transaction_id::uuid),'[]'),
  'forced_mixed',input.is_forced AND (EXISTS(SELECT 1 FROM refunds r WHERE r.payment_transaction_id=input.transaction_id::uuid AND (r.status='SUCCEEDED' OR EXISTS(SELECT 1 FROM journal_entries j WHERE j.entry_type='REFUND' AND j.business_reference='refund:'||r.id::text)))
@@ -161,6 +163,10 @@ func auditReconciliationFactWithForcedGroup(f *ReconciliationInternalFact, reque
 	invalid := func() { f.IntegrityCaseType = f.EntryType + "_LEDGER_INVALID" }
 	invalid()
 	if len(journals) != 1 {
+		return
+	}
+	effectivePostings, repairEvidenceValid := reconciliationLedgerRepairPostings(payload)
+	if !repairEvidenceValid {
 		return
 	}
 	var order reconciliationAuditRecord
@@ -436,7 +442,7 @@ func auditReconciliationFactWithForcedGroup(f *ReconciliationInternalFact, reque
 	}
 	observedWallet, observedReceivable, observedClearing := new(big.Int), new(big.Int), new(big.Int)
 	observedLots := map[string]*big.Int{}
-	for _, post := range auditRecords(payload["postings"]) {
+	for _, post := range effectivePostings {
 		n := auditInteger(post, "delta_microcredits")
 		var account reconciliationAuditRecord
 		_ = json.Unmarshal(post["account"], &account)
@@ -570,7 +576,7 @@ func auditForcedRefundGroupComponents(request reconciliationAuditRequest, payloa
 				peerPayload[key] = value
 			}
 		}
-		for _, key := range []string{"journals", "postings", "receivables"} {
+		for _, key := range []string{"journals", "postings", "receivables", "ledger_repairs"} {
 			peerPayload[key] = history[key]
 		}
 		peerRequest := request
@@ -633,7 +639,7 @@ func reconciliationIntegrityDigest(payload reconciliationAuditRecord) string {
 				peer[key] = value
 			}
 		}
-		for _, key := range []string{"source", "journals", "postings", "receivables"} {
+		for _, key := range []string{"source", "journals", "postings", "receivables", "ledger_repairs"} {
 			peer[key] = history[key]
 		}
 		var source reconciliationAuditRecord
@@ -703,6 +709,7 @@ func reconciliationIntegrityDigest(payload reconciliationAuditRecord) string {
 			selected = append(selected, section+":"+string(raw))
 		}
 	}
+	selected = append(selected, reconciliationLedgerRepairDigestFacts(payload)...)
 	sort.Strings(selected)
 	raw, _ := json.Marshal(selected)
 	digest := sha256.Sum256(raw)

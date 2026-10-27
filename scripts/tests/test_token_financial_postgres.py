@@ -16,6 +16,18 @@ SPEC.loader.exec_module(RUNNER)
 
 
 class FinancialPostgresRunnerTests(unittest.TestCase):
+    def test_duplicate_forced_refund_requires_all_four_order_and_proof_cases(self):
+        root = "TestLedgerRepairAuthorityDuplicateForcedRefundPostgres"
+        self.assertIn(root, RUNNER.BILLING_CHILD_REQUIRED)
+        events = self.events(RUNNER.RETAINED_REQUIRED, RUNNER.BILLING_PACKAGE, children=True)
+        options = {"package": RUNNER.BILLING_PACKAGE, "require_children": True,
+                   "children_required": RUNNER.BILLING_CHILD_REQUIRED}
+        RUNNER.verify_results(events, RUNNER.RETAINED_REQUIRED, **options)
+        for child in RUNNER.EXACT_REQUIRED_CHILDREN[root]:
+            reduced = [e for e in events if e.get("Test") != root + "/" + child]
+            with self.assertRaises(RuntimeError):
+                RUNNER.verify_results(reduced, RUNNER.RETAINED_REQUIRED, **options)
+
     def test_preparation_ack_pg_evidence_is_required(self):
         name = "TestPreparationFailurePreservesAcceptedUsagePostgres"
         self.assertIn(name, RUNNER.REQUIRED)
@@ -32,6 +44,43 @@ class FinancialPostgresRunnerTests(unittest.TestCase):
         ):
             with self.assertRaises(RuntimeError):
                 RUNNER.verify_results(invalid, **options)
+
+    def test_cumulative_forced_refund_audit_is_selected_and_requires_child(self):
+        name = "TestF03CumulativeForcedRefundReceiptAudit"
+        self.run_main_fixture()
+        command = self.fixture_commands[self.fixture_phases.index("retained-billing")]
+        self.assertIsNotNone(re.fullmatch(command[command.index("-run") + 1], name))
+        self.assertIn(name, RUNNER.RETAINED_REQUIRED)
+        self.assertIn(name, RUNNER.BILLING_CHILD_REQUIRED)
+        events = self.events({name}, RUNNER.BILLING_PACKAGE, children=True)
+        options = {"package": RUNNER.BILLING_PACKAGE, "exact_roots": True,
+                   "require_children": True, "children_required": {name}}
+        self.assertGreater(RUNNER.verify_results(events, {name}, **options), 0)
+        for invalid in ([], [e for e in events if "/" not in e.get("Test", "")],
+                        events + [{"Action": "skip", "Package": RUNNER.BILLING_PACKAGE, "Test": name + "/actual"}]):
+            with self.assertRaises(RuntimeError):
+                RUNNER.verify_results(invalid, {name}, **options)
+
+    def test_reconciliation_ledger_repair_pg_leaf_is_selected_and_cannot_skip(self):
+        for name in ("TestLedgerRepairProofHistoricalUpgradePostgres", "TestReconciliationLedgerRepairPublicPostgres", "TestReconciliationLedgerRepairForcedPeerPostgres", "TestLedgerRepairAuthorityMixedBatchPostgres", "TestLedgerRepairHistoryCapabilityPostgres"):
+            with self.subTest(name=name):
+                self._assert_reconciliation_repair_leaf(name)
+
+    def _assert_reconciliation_repair_leaf(self, name):
+        self.run_main_fixture()
+        command = self.fixture_commands[self.fixture_phases.index("retained-billing")]
+        self.assertIsNotNone(re.fullmatch(command[command.index("-run") + 1], name))
+        self.assertIn(name, RUNNER.RETAINED_REQUIRED)
+        self.assertIn(name, RUNNER.BILLING_LEAF_REQUIRED)
+        events = self.events({name}, RUNNER.BILLING_PACKAGE)
+        options = {"package": RUNNER.BILLING_PACKAGE, "exact_roots": True,
+                   "require_children": True, "children_required": set()}
+        self.assertEqual(RUNNER.verify_results(events, {name}, **options), 1)
+        for invalid in ([], [e for e in events if e.get("Test") != name],
+                        events + [{"Action": "skip", "Package": RUNNER.BILLING_PACKAGE, "Test": name}],
+                        events + [{"Action": "fail", "Package": RUNNER.BILLING_PACKAGE, "Test": name}]):
+            with self.assertRaises(RuntimeError):
+                RUNNER.verify_results(invalid, {name}, **options)
 
     def test_callback_http_admission_pg_leaf_is_selected_and_cannot_skip(self):
         name = "TestCallbackHTTPAdmissionPersistsPostgres"
@@ -137,7 +186,7 @@ class FinancialPostgresRunnerTests(unittest.TestCase):
         self.assertEqual(billing[-1], "./internal/billing")
         self.assertEqual(billing[billing.index("-run") + 1],
                          "^(" + "|".join(sorted(RUNNER.RETAINED_REQUIRED)) + ")$")
-        self.assertEqual(len(RUNNER.RETAINED_REQUIRED), 50)
+        self.assertEqual(len(RUNNER.RETAINED_REQUIRED), 59)
         self.assertEqual(self.fixture_writes, ["create", "drop"])
         self.assertEqual(self.fixture_trace, [
             "owner-account", "owner-wallet", "owner-schema", "owner-provisioning",
@@ -548,6 +597,9 @@ class FinancialPostgresRunnerTests(unittest.TestCase):
             if children:
                 result += [{"Action": "run", "Package": package, "Test": name + "/actual"},
                            {"Action": "pass", "Package": package, "Test": name + "/actual"}]
+                for child in RUNNER.EXACT_REQUIRED_CHILDREN.get(name, ()):
+                    result += [{"Action": "run", "Package": package, "Test": name + "/" + child},
+                               {"Action": "pass", "Package": package, "Test": name + "/" + child}]
             result += [{"Action": "pass", "Package": package, "Test": name}]
         if package is not None:
             result.append({"Action": "pass", "Package": package})
@@ -1180,6 +1232,11 @@ class FinancialPostgresRunnerTests(unittest.TestCase):
 
     def test_only_explicit_original_and_refund_leaves_can_omit_children(self):
         leaves = {
+            "TestLedgerRepairProofHistoricalUpgradePostgres",
+            "TestLedgerRepairAuthorityMixedBatchPostgres",
+            "TestLedgerRepairHistoryCapabilityPostgres",
+            "TestReconciliationLedgerRepairForcedPeerPostgres",
+            "TestReconciliationLedgerRepairPublicPostgres",
             "TestCallbackHTTPAdmissionPersistsPostgres",
             "TestRefundRejectsPlanBeforeFinancialWritesPostgres",
             "TestRefundSuspendedMemberAdmissionWithoutEarlierBlockerPostgres",
@@ -1237,7 +1294,7 @@ class FinancialPostgresRunnerTests(unittest.TestCase):
         }
         self.assertEqual(RUNNER.REFUND_REQUIRED, expected)
         self.assertTrue(expected <= RUNNER.RETAINED_REQUIRED)
-        self.assertEqual(len(RUNNER.RETAINED_REQUIRED), 50)
+        self.assertEqual(len(RUNNER.RETAINED_REQUIRED), 59)
         valid = self.events(RUNNER.RETAINED_REQUIRED, RUNNER.BILLING_PACKAGE, children=True)
         options = {"package": RUNNER.BILLING_PACKAGE, "require_children": True, "exact_roots": True,
                    "children_required": RUNNER.BILLING_CHILD_REQUIRED}
