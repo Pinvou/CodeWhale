@@ -447,24 +447,20 @@ function ModelDetailDialog({ cardId, card, copy, theme, onClose, onRedeploy, onT
                   确实需要能重来一次。详情页是主动打开、带着上下文的那一面，
                   放一个随时可用的修复动作是合适的。
                 运行中禁用：重新部署会撞上还占着端口的旧容器，必须先停用。 */}
-            {/* 智能操作按钮：一个按钮按状态切换（更新脚本 > 卸载部署 > 部署模型）。
-                设计目标：用户在详情页只需要关注一个主操作，不需要在多个按钮间
-                猜测哪个是自己想要的。关闭弹窗走右上角 × 或点击遮罩。
-                r6 P2-4：主按钮收窄后另外两个入口**常驻在次级行**——有更新徽标时
-                卸载入口曾被主按钮顶掉（用户没有卸载路径）；「重新部署」是修复
-                入口（见上注释：部署被外部破坏时脚本哈希没变也要能重来），
-                deployed 状态常驻，运行中禁用。 */}
+            {/* 操作按钮区：一行整齐排列，主按钮+次级入口（r6 P2-4 + r7 P1-3 + 用户排版反馈）。
+                主按钮按状态切换（更新脚本 > 卸载部署 > 部署模型）；次级入口确保
+                所有操作始终可达——有更新时卸载不被主按钮顶掉、重新部署/删除常驻。 */}
             {(() => {
               const hasUpdate = scriptUpdates?.[record.card_id];
               const isDeployed = record.status === 'deployed';
               const isRunning = record.running;
-              // 权重未就绪（评审 P2-1）：incomplete/cleanup_required 的记录
-              // 缺少一次成功校验的物理凭据（weights_ready_at），部署必然失败——
-              // 兜底按钮对这类记录禁用并说明原因，而不是发起注定失败的部署。
               const weightsReady = !!record.weights_ready_at;
+              const secondaryDisabled = isRunning || cardBusy;
 
+              // 主按钮
+              let primary;
               if (hasUpdate) {
-                return (
+                primary = (
                   <MsButton
                     tone="primary"
                     disabled={cardBusy}
@@ -477,21 +473,19 @@ function ModelDetailDialog({ cardId, card, copy, theme, onClose, onRedeploy, onT
                     {copy.actionUpdate}
                   </MsButton>
                 );
-              }
-              if (isDeployed) {
-                return (
+              } else if (isDeployed) {
+                primary = (
                   <MsButton
                     tone="danger"
-                    disabled={isRunning || cardBusy}
+                    disabled={secondaryDisabled}
                     onClick={() => { onClose(); onUninstall?.(record); }}
                     data-testid="model-store-detail-action-uninstall"
                   >
                     {copy.actionUninstall}
                   </MsButton>
                 );
-              }
-              if (!weightsReady) {
-                return (
+              } else if (!weightsReady) {
+                primary = (
                   <MsButton
                     tone="ghost"
                     disabled
@@ -501,56 +495,52 @@ function ModelDetailDialog({ cardId, card, copy, theme, onClose, onRedeploy, onT
                     {copy.actionDeploy}
                   </MsButton>
                 );
-              }
-              return (
-                <MsButton
-                  tone="ghost"
-                  disabled={cardBusy}
-                  onClick={() => { onClose(); onRedeploy?.(record); }}
-                  data-testid="model-store-detail-action-deploy"
-                >
-                  {copy.actionDeploy}
-                </MsButton>
-              );
-            })()}
-            {(() => {
-              // r6 P2-4 + r7 P1-3：主按钮收窄后仍要可达的入口。
-              // - deployed：常驻「重新部署」（修复入口）+ 有更新时的「卸载」
-              // - downloaded/incomplete：「删除」——旧版列表行有垃圾桶入口，
-              //   UX 重构后失去全部删除路径（评审 r7 P1-3）；复用同一个
-              //   onUninstall → delete-only 确认弹窗
-              const hasUpdate = scriptUpdates?.[record.card_id];
-              const isDeployed = record.status === 'deployed';
-              const isRunning = record.running;
-              if (isDeployed) {
-                return (
-                  <div className="mt-1.5 flex flex-wrap items-center gap-2">
-                    {hasUpdate ? (
-                      <MsButton
-                        tone="danger"
-                        disabled={isRunning || cardBusy}
-                        onClick={() => { onClose(); onUninstall?.(record); }}
-                        data-testid="model-store-detail-secondary-uninstall"
-                      >
-                        {copy.actionUninstall}
-                      </MsButton>
-                    ) : null}
-                    <MsButton
-                      tone="ghost"
-                      disabled={isRunning || cardBusy}
-                      title={isRunning ? copy.redeployBlockedByRunning : undefined}
-                      onClick={() => { onClose(); onRedeploy?.(record); }}
-                      data-testid="model-store-detail-secondary-redeploy"
-                    >
-                      {copy.actionRedeploy}
-                    </MsButton>
-                  </div>
+              } else {
+                primary = (
+                  <MsButton
+                    tone="ghost"
+                    disabled={cardBusy}
+                    onClick={() => { onClose(); onRedeploy?.(record); }}
+                    data-testid="model-store-detail-action-deploy"
+                  >
+                    {copy.actionDeploy}
+                  </MsButton>
                 );
               }
-              // 非 deployed（downloaded / incomplete / cleanup_required）：删除入口
-              return (
-                <div className="mt-1.5 flex flex-wrap items-center gap-2">
+
+              // 次级按钮（与主按钮同一行，排版统一）
+              const secondary = [];
+              if (isDeployed) {
+                if (hasUpdate) {
+                  secondary.push(
+                    <MsButton
+                      key="uninstall"
+                      tone="ghost"
+                      disabled={secondaryDisabled}
+                      onClick={() => { onClose(); onUninstall?.(record); }}
+                      data-testid="model-store-detail-secondary-uninstall"
+                    >
+                      {copy.actionUninstall}
+                    </MsButton>
+                  );
+                }
+                secondary.push(
                   <MsButton
+                    key="redeploy"
+                    tone="ghost"
+                    disabled={secondaryDisabled}
+                    title={isRunning ? copy.redeployBlockedByRunning : undefined}
+                    onClick={() => { onClose(); onRedeploy?.(record); }}
+                    data-testid="model-store-detail-secondary-redeploy"
+                  >
+                    {copy.actionRedeploy}
+                  </MsButton>
+                );
+              } else {
+                // 非 deployed：删除入口（r7 P1-3）
+                secondary.push(
+                  <MsButton
+                    key="delete"
                     tone="danger"
                     disabled={cardBusy}
                     onClick={() => { onClose(); onUninstall?.(record); }}
@@ -558,6 +548,13 @@ function ModelDetailDialog({ cardId, card, copy, theme, onClose, onRedeploy, onT
                   >
                     {copy.actionDelete || copy.actionUninstall}
                   </MsButton>
+                );
+              }
+
+              return (
+                <div className="flex flex-wrap items-center gap-2">
+                  {primary}
+                  {secondary}
                 </div>
               );
             })()}
