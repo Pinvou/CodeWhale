@@ -867,6 +867,7 @@ impl ControlledDeviceManager {
         Ok(())
     }
 
+    #[cfg(test)]
     pub(crate) fn replace_transport<T: ControlledTransportAuthority + 'static>(
         &self,
         transport: T,
@@ -963,6 +964,7 @@ impl ControlledDeviceManager {
         Ok(status)
     }
 
+    #[cfg(test)]
     pub(crate) fn register_liveness_challenge(
         &self,
         challenge_id: impl Into<String>,
