@@ -193,7 +193,7 @@ impl FleetRole {
                 "Lands focused code changes cleanly with the minimum surrounding edit."
             }
             Self::Verifier => {
-                "Runs the test suite and validation gates, reports pass/fail with evidence."
+                "Runs the built-in verification gates with test-selection arguments, plus a bounded read-only shell for evidence gathering; cannot execute custom commands — use a write-capable role for those."
             }
             Self::Consultant => {
                 "Read-only high-reasoning counsel for judgement calls and design critique."
@@ -715,11 +715,17 @@ pub(crate) fn posture_role_for(ceiling: PermissionCeiling) -> &'static str {
 /// Whether a Fleet role is never allowed a mutating shell, whatever its
 /// requested runtime profile says. Spawn narrows the child to a read-only
 /// shell for these roles, and every receipt must report that same posture.
+///
+/// The narrowing downgrades only the raw-command policy: canonical `bash`
+/// becomes the classifier-bounded probe lane, while the bounded built-in
+/// verification surface keeps keying on the role's shell *ceiling* and the
+/// shell-authority sentinel — the `test` role keeps both, because running the
+/// workspace's own gates is its entire purpose.
 #[must_use]
 pub(crate) fn role_requires_read_only_shell(role: &FleetRole) -> bool {
     matches!(
         role,
-        FleetRole::Scout | FleetRole::Reviewer | FleetRole::Planner
+        FleetRole::Scout | FleetRole::Reviewer | FleetRole::Planner | FleetRole::Verifier
     )
 }
 
