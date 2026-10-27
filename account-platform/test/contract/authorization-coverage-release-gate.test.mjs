@@ -25,7 +25,7 @@ async function rejectedMutation(mutate, expected) {
 
 test('authorization release gate classifies every HTTP task event callback and CLI entrypoint', async () => {
   const catalog = JSON.parse(await readFile(catalogURL, 'utf8'));
-  // The six existing Portal transports use Any, alongside the 392 verb-specific
+  // The six existing Portal transports use Any, alongside the 393 verb-specific
   // registrations. Keep the expected complete graph independent of its parser.
   const wildcardPaths = [
     '/api/account/*resource', '/api/token/*resource',
@@ -39,7 +39,58 @@ test('authorization release gate classifies every HTTP task event callback and C
   for (const route of wildcardPaths) assert.ok(portal.includes(`router.Any("${route}",`), `missing existing Portal transport ${route}`);
   // The real checker still rejects missing, stale, duplicate or mis-scoped
   // entries before returning these exact inventory sizes.
-  assert.deepEqual(await runAuthorizationCoverage(), { routes: 398, tasks: 32, events: 18, cli: 26 });
+  assert.deepEqual(await runAuthorizationCoverage(), { routes: 399, tasks: 32, events: 18, cli: 26 });
+});
+
+function assertLedgerRepairProofAuthorization(service, handler) {
+  const source = 'account-platform/internal/account/service.go';
+  const routePath = '/ledger-repair/authorization-proofs:batch';
+  const routes = authorizationRoutes(source, service).filter(route => route.path === routePath);
+  assert.equal(routes.length, 1, 'the ledger repair proof route must exist exactly once');
+  assert.equal(routes[0].receiver, 'internal');
+  assert.equal(routes[0].method, 'POST');
+  assert.equal(routes[0].registration.trim(), 'internal.POST("/ledger-repair/authorization-proofs:batch", serviceauth.Require("internal.account.ledger-repair-proof.read"), httpserver.AdaptFunc(s.ledgerRepairAuthorizationProofBatch))');
+  const {code, masked} = goSource(service);
+  const groups = [...code.matchAll(/\binternal\s*(?::=|=)\s*router\.Group\("([^"]+)"\)/g)]
+    .filter(match => masked[match.index] !== ' ');
+  assert.deepEqual(groups.map(match => match[1]), ['/internal/v1']);
+  assert.match(handler, /caller, ok := serviceauth\.FromContext\(r\.Context\(\)\)/);
+  assert.match(handler, /if !ok \|\| caller\.ActorType != "SERVICE" \|\| caller\.Service != "billing-service"/);
+  // Gin treats the colon in :batch as a parameter; the handler must constrain
+  // the resolved path and reject alternate query-bearing URLs as well.
+  assert.match(handler, /if r\.URL\.Path != "\/internal\/v1\/ledger-repair\/authorization-proofs:batch" \|\| r\.URL\.RawQuery != "" \|\| r\.URL\.ForceQuery/);
+}
+
+test('ledger repair history proof is one exact Billing-only workload route', async () => {
+  const source = 'account-platform/internal/account/service.go';
+  const service = await readFile(new URL('../../internal/account/service.go', import.meta.url), 'utf8');
+  const handler = await readFile(new URL('../../internal/account/approval_ledger_repair_proofs.go', import.meta.url), 'utf8');
+  const catalog = JSON.parse(await readFile(catalogURL, 'utf8'));
+  assert.ok(catalog.http_sources.includes(source));
+  assert.equal(catalog.http_policies.some(route => route.source === source && route.path === '/ledger-repair/authorization-proofs:batch'), false);
+  assertLedgerRepairProofAuthorization(service, handler);
+  const registration = 'internal.POST("/ledger-repair/authorization-proofs:batch", serviceauth.Require("internal.account.ledger-repair-proof.read"), httpserver.AdaptFunc(s.ledgerRepairAuthorizationProofBatch))';
+  for (const mutation of [
+    service.replace(registration, ''),
+    service.replace(registration, registration.replace('internal.POST', 'internal.GET')),
+    service.replace(registration, registration.replace('internal.account.ledger-repair-proof.read', 'internal.account.other.read')),
+    service.replace(registration, registration.replace('s.ledgerRepairAuthorizationProofBatch', 's.otherHandler')),
+    service.replace('internal := router.Group("/internal/v1")', 'internal := router.Group("/other")'),
+  ]) {
+    assert.notEqual(mutation, service, 'each negative mutation must actually change the source');
+    assert.throws(() => assertLedgerRepairProofAuthorization(mutation, handler));
+  }
+  for (const mutation of [
+    handler.replace('caller.ActorType != "SERVICE"', 'caller.ActorType != "USER"'),
+    handler.replace('caller.Service != "billing-service"', 'caller.Service != "other-service"'),
+    handler.replace('r.URL.Path != "/internal/v1/ledger-repair/authorization-proofs:batch"', 'r.URL.Path != "/internal/v1/ledger-repair/other"'),
+  ]) {
+    assert.notEqual(mutation, handler, 'each negative mutation must actually change the handler');
+    assert.throws(() => assertLedgerRepairProofAuthorization(service, mutation));
+  }
+  await rejectedMutation(catalog => {
+    catalog.http_sources = catalog.http_sources.filter(item => item !== source);
+  }, /unregistered_http_source:account-platform\/internal\/account\/service\.go/);
 });
 
 test('password preparation adds only the captcha admission and two exact internal authority routes', async () => {
