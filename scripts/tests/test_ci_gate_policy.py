@@ -1,6 +1,7 @@
 import re
 import os
 import subprocess
+import tempfile
 import tomllib
 import unittest
 from fnmatch import fnmatchcase
@@ -4425,6 +4426,35 @@ class CiGatePolicyTests(unittest.TestCase):
                 with self.assertRaises((AssertionError, IndexError)):
                     self._assert_macos_deployment_regression(self.workflow.replace(old, new))
 
+    def test_macos_scheduled_spool_step_rejects_zero_match_and_failed_command(self):
+        job = _extract_job_block(self.pr_workflow, "macos-rust-check")
+        step = job.split("- name: macOS scheduled spool filename regression", 1)[1].split(
+            "\n      - name:", 1
+        )[0]
+        body = step.split("        run: |\n", 1)[1]
+        lines = []
+        for line in body.splitlines():
+            if line and not line.startswith("          "):
+                break
+            lines.append(line[10:] if line else "")
+        shell = "\n".join(lines)
+        self.assertEqual(shell.count("/tmp/macos_scheduled_spool.log"), 2)
+        shell = shell.replace("/tmp/macos_scheduled_spool.log", '"$TEST_LOG"')
+        prelude = 'cargo() { printf "%s\\n" "$FAKE_OUTPUT"; return "$FAKE_EXIT"; }; cd() { :; };\n'
+        with tempfile.TemporaryDirectory() as tmp:
+            for output, code, expected in (
+                ("test result: ok. 1 passed; 0 failed;", "0", True),
+                ("test result: ok. 0 passed; 0 failed;", "0", False),
+                ("test result: ok. 1 passed; 0 failed;", "1", False),
+                ("test result: ok. 0 passed; 1 ignored;", "0", False),
+            ):
+                result = subprocess.run(
+                    ["bash", "-c", prelude + shell], capture_output=True, timeout=10,
+                    env={**os.environ, "FAKE_OUTPUT": output, "FAKE_EXIT": code,
+                         "TEST_LOG": os.path.join(tmp, "spool.log")},
+                )
+                self.assertEqual(result.returncode == 0, expected, (output, code, result.stderr))
+
     def test_mac_bundle_smoke_is_gated_on_bundle_chain_paths(self):
         # mac-build.yml's bundle_chain filter (before its 2026-10 fold into
         # pr-check's macos-rust-check) decided when to append the universal
@@ -4719,6 +4749,22 @@ class CiGatePolicyTests(unittest.TestCase):
             )[1].split("\n      - name:", maxsplit=1)[0]
         )
         self.assertIn("github.event_name != 'push'", computer_use)
+
+        # The APFS-specific spool regression must execute on PR macOS, not
+        # only after main is updated; pin the actual case and no-match guard.
+        scheduled = _without_yaml_comments(
+            macos_job.split(
+                "- name: macOS scheduled spool filename regression", maxsplit=1
+            )[1].split("\n      - name:", maxsplit=1)[0]
+        )
+        self.assertIn("github.event_name == 'pull_request'", scheduled)
+        self.assertIn("set -euo pipefail", scheduled)
+        self.assertIn(
+            "features::scheduled::tasks::creation_requests::tests::non_utf8_squatters_do_not_starve_legitimate_records",
+            scheduled,
+        )
+        self.assertIn("--exact --test-threads=1", scheduled)
+        self.assertIn("test result: ok. 1 passed; 0 failed;", scheduled)
 
         # The bundle smoke consumes node_modules (build.js resolves
         # @tauri-apps/cli from it and the beforeBuildCommand runs vite), so the
