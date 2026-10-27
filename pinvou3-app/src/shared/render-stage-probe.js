@@ -9,18 +9,23 @@
  *   - **异常触发上报**：仅当段间隔超过阈值时才推一条记录到
  *     authority-sync 诊断流（该流本身再有界落盘）。
  *
- * 实现边界（r2 评审 P2-3/P2-4，正文与这里保持一致，勿超出边界表述）：
+ * 实现边界（r2 评审 P2-3/P2-4，r5 勘误，正文与这里保持一致）：
  *   - 独立上报的段差只有两段：recv→dispatch、dispatch→frame。t_sched 仅在
  *     同步直发路径补齐（不差量、不独立上报）；React 提交与最终呈现合并在
  *     dispatch→frame 一段里，测不出二者之间的停顿。
- *   - 后台会话（合并帧 publish 时非活跃 sid）的 publish 不打派发标记，
- *     其 recv→dispatch 段当前不量（纯失测、不产假报）；会话激活的真实发布
- *     路径同样未打标记。后台流式卡顿定位靠切回前台后的周期。
+ *   - 后台会话的段量是混合竞速（r5 P2-2 勘误）：publish 对流属 sid 打
+ *     markDispatched，但抑制态 notify 也可能提前盖章——后台段的 recv→dispatch
+ *     既非纯失测也非纯可靠，是两者竞速的产物。抑制态直发钩子已加门控
+ *     （!isNotifySuppressed），publish 侧仍无条件。
  *   - 长任务阻塞期间「未派发即被取代」的周期只有恰处已派发帧未回相位才
  *     补报一条（begin 的 supersede 补报），其余静默收尾。
  *   - 防补盖伪差（r4）：派发标记带 5s 新鲜度上界——后台会话存活数分钟的
  *     未派发条目被任意 notify() 补盖时不盖章、静默收尾（P2-A）；begin 发生
  *     在隐藏期的条目一律不上报——其时差含浏览器对隐藏定时器的节流（P2-B）。
+ *   - →hidden 转变收尾的条目**可以上报**（r5 P2-1）：测量全在可见期，
+ *     transitionFinalized 标记绕过隐藏豁免；武装条目按 supersede 先例补章
+ *     t_frame。用户的自然冻结反应就是切走窗口——这些恰是最有价值的记录。
+ *   - >5s 的真实派发冻结被 P2-A 上界静默吞——5s 新鲜度上界的已知取舍。
  */
 (function (root) {
   "use strict";
@@ -75,9 +80,15 @@
       (dispatchToFrame != null && dispatchToFrame > STALL_DISPATCH_TO_FRAME_MS);
     if (!stalled) return;
     // 隐藏窗口的定时器合并把正常的 32ms 帧间隔节流到 ~1s，纯时差判据会把每个
-    // 周期都误判成 stall，~36 秒就把 256 条共享队列全部挤成假记录——恰恰在要
-    // 诊断的现场毁掉诊断（评审 P2 实测 5/5 周期误报）。隐藏期间不上报。
-    if (typeof document !== "undefined" && document.visibilityState === "hidden") return;
+    // 周期都误判成 stall。隐藏期间不上报——**例外**（r5 P2-1）：转变收尾的
+    // 条目打有 transitionFinalized 标记，其测量全部落在可见期，放行上报。
+    if (
+      typeof document !== "undefined" &&
+      document.visibilityState === "hidden" &&
+      !entry.transitionFinalized
+    ) {
+      return;
+    }
     // r4 P2-B：begin 发生在隐藏期的条目，其 recv→dispatch 间隔含浏览器对隐藏
     // 窗口定时器的节流（标准节流 ~1s 桶）——恢复可见后定时器腿落地会测得 ~1s
     // 的假 stall，且几乎每次「流式中切走再切回」都产一条。探针分不清「应用
@@ -117,16 +128,31 @@
   }
 
   // P2-1（隐藏→恢复可见的假 stall）：rAF 在隐藏窗口里被浏览器挂起，恢复可见
-  // 后才触发——此刻 finalize 量到的 dispatch_to_frame 横跨整个隐藏时段（实测
-  // 5 分钟假 stall）。「边生成边切走窗口」是常见用法。窗口隐藏时主动收尾所有
-  // 武装条目（此刻量到的时间差全部落在可见期内，量程诚实；rAF 句柄随 finalize
-  // 取消，不会在恢复后补触发）。
+  // 后才触发——此刻 finalize 量到的 dispatch_to_frame 横跨整个隐藏时段。
+  // 「边生成边切走窗口」是常见用法。窗口隐藏时主动收尾所有武装条目。
+  //
+  // r5 P2-1：转变收尾运行时 visibilityState 已是 hidden，finalize 内的上报
+  // 时刻隐藏豁免必然先行拦截——测量全部落在可见期却被静默丢弃，恰是最有
+  // 价值的冻结记录（用户对冻结的自然反应就是切走窗口）。修法：转变收尾的
+  // 条目按 supersede 先例补章 t_frame（等待超阈值时）后，绕过隐藏豁免上报。
   if (typeof document !== "undefined" && typeof document.addEventListener === "function") {
     document.addEventListener("visibilitychange", function () {
       if (document.visibilityState !== "hidden") return;
       var entries = Object.keys(currentBySession);
       for (var i = 0; i < entries.length; i++) {
-        finalize(currentBySession[entries[i]]);
+        var entry = currentBySession[entries[i]];
+        if (!entry || entry.finalized) continue;
+        // 武装条目（已派发、帧未回）：按 supersede 先例——等待已超阈值则
+        // 把此刻记为帧时刻（测量诚实地覆盖到切走瞬间），否则不补章。
+        if (entry.t_dispatch != null) {
+          var waited = now() - entry.t_dispatch;
+          if (waited > STALL_DISPATCH_TO_FRAME_MS) {
+            entry.t_frame = now();
+          }
+        }
+        // 标记为转变收尾——finalize 的隐藏豁免对此条目放行（测量全在可见期）
+        entry.transitionFinalized = true;
+        finalize(entry);
       }
     });
   }

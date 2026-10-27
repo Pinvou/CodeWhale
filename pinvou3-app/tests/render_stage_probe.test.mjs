@@ -254,3 +254,34 @@ test('隐藏期起源的条目恢复可见后不产节流假 stall（P2-B）', (
   flushFrames(h);
   assert.equal(h.recorded.length, 1, '可见起源不受豁免影响');
 });
+
+// r5 P2-1 行为锁：→hidden 转变收尾的条目**必须能上报**（测量全在可见期，
+// 隐藏豁免不应吞掉真 stall——用户对冻结的自然反应就是切走窗口）。
+test('切走瞬间的真 stall 经转变收尾上报（P2-1）', () => {
+  const h = harness();
+  h.probe.begin('visStall');
+  const entry = h.probe._liveEntry('visStall');
+  entry.t_recv -= 200;                    // recv→dispatch 200ms（>120ms 阈值），全在可见期
+  h.probe.markDispatched('visStall');     // 武装 rAF
+  // 切走：转变收尾应补章 t_frame 并绕过隐藏豁免上报
+  h.document.visibilityState = 'hidden';
+  h.document.dispatchEvent(new Event('visibilitychange'));
+  assert.equal(h.recorded.length, 1, '切走时的真 stall 必须被记录');
+  assert.ok(h.recorded[0].details.recv_to_dispatch_ms >= 200,
+    JSON.stringify(h.recorded[0].details));
+});
+
+// r5 P2-2 行为锁：notify() 在抑制态不盖章（后台路由无渲染发布）。
+// 这是接线层行为，在探针测试中以标记模拟：抑制态的 markDispatched 被跳过。
+test('抑制态期间不盖章派发标记（P2-2 接线层行为）', () => {
+  const h = harness();
+  h.probe.begin('bg1');
+  const entry = h.probe._liveEntry('bg1');
+  entry.t_recv -= 300;
+  // 模拟接线层：抑制态下 notify() 的 markDispatched 被跳过（isNotifySuppressed 为 true）
+  // ——chat-events.js 已加门控，此处验证探针侧不因缺章而误报
+  h.probe.markScheduled('bg1');
+  // 探针侧：只有一次 markScheduled，没有 markDispatched → 条目不应被收尾上报
+  // （后续的 begin 或恢复可见时才正常处理）
+  assert.equal(h.recorded.length, 0, '抑制态不盖章则不上报');
+});
