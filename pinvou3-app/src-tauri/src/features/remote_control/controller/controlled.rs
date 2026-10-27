@@ -1207,7 +1207,6 @@ impl ControlledDeviceManager {
         self.fail_operation_with_cleanup_inner(operation, None, error_code, || {})
     }
 
-
     pub(crate) fn fail_owned_transport(
         &self,
         owner: &ControlledTransportOwner,
