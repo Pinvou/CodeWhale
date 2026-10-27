@@ -139,19 +139,18 @@ mod tests {
         };
         assert!(message.contains("`handle_read`"));
         assert!(
-            message.contains("activate it via `tool_search` first"),
+            message.contains("activate it via `tool_search` when available"),
             "the dispatch brief must teach the handle_read activation path:\n{message}"
         );
         assert!(
-            message.contains("try calling `handle_read` directly"),
-            "allowlist-filtered hosts can keep handle_read in the catalog while \
-             removing tool_search; the brief must try the direct call before \
-             declaring transcript reads unavailable:\n{message}"
+            message.contains("do not call a tool absent from the catalog"),
+            "a missing handle_read entry must not be called blindly when \
+             discovery cannot provide it:\n{message}"
         );
         assert!(
             message.contains("transcript reads are unavailable in this session"),
-            "when tool_search cannot surface handle_read and the direct call \
-             errors, the brief must degrade honestly instead of dead-ending or \
+            "when discovery cannot provide handle_read, \
+             the brief must degrade honestly instead of dead-ending or \
              over-promising:\n{message}"
         );
         assert!(

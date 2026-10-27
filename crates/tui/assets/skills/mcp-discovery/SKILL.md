@@ -29,6 +29,9 @@ entirely; check your tool list and follow step 1 either way.
 
 ## Workflow
 
+Follow host-declared built-in capability entry points and discovery exceptions
+before this workflow. Those capabilities do not require a Registry lookup.
+
 1. **Check the registry.** Call `registry_sync` with a `query` describing the
    specialized capability the task needs, for example
    `registry_sync {query: "convert PDF to markdown"}`. It returns at most

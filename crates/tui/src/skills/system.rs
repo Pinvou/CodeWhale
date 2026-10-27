@@ -19,7 +19,8 @@ use std::path::Path;
 /// audit (#112: real `mcp` CLI forms, alias-stub direction, pdf extraction
 /// route, xlsx recalc caveat) and refreshes superseded shipped copies via
 /// [`SUPERSEDED_SHIPPED_BODY_DIGESTS`].
-const BUNDLED_SKILL_VERSION: &str = "11";
+/// Generation 12 respects host-provided built-in discovery entry points.
+const BUNDLED_SKILL_VERSION: &str = "12";
 
 /// SHA-256 digests of bundled bodies shipped by the previous generation that
 /// this generation replaces. The non-destructive upgrade table (#4691) must
@@ -31,6 +32,10 @@ const BUNDLED_SKILL_VERSION: &str = "11";
 /// only when installs older than the dropped generation are no longer
 /// supported.
 const SUPERSEDED_SHIPPED_BODY_DIGESTS: &[(&str, &str)] = &[
+    (
+        "mcp-discovery",
+        "249aa4932ffcb0f5bbd886b7e266cbca894b01d435aebea4e0fa9fa0a0c1f956",
+    ),
     (
         "documents",
         "27ba3161ab9448245d6658efadccf955ee8f4ef2cda4f7b825a99c45b8bd66aa",

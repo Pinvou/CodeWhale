@@ -903,14 +903,11 @@ fn default_agent_inspect_tool() -> String {
 /// `handle_read` is deferred on stock hosts, so model-facing text that pairs
 /// it with a transcript handle must teach the activation path instead of
 /// commanding a tool absent from the first-turn catalog (Pinvou #490 class).
-/// The fallback names both rungs honestly: `tool_search` hydration only
-/// reaches tools the host allowlist kept in the catalog, but a direct call
-/// by name still succeeds when the allowlist kept `handle_read` and only
-/// removed `tool_search` — so the hint tries the direct call before
-/// declaring transcript reads unavailable. `pub(crate)` so the engine's
-/// parent-context hint reuses the exact wording instead of re-typing a
-/// drifting copy.
-pub(crate) const HANDLE_READ_ACTIVATION_HINT: &str = "if `handle_read` is not in your tool list, activate it via `tool_search` first; if `tool_search` cannot surface it, try calling `handle_read` directly; if that call errors, transcript reads are unavailable in this session — rely on the returned summaries";
+/// A tool already present in the catalog can be called normally. If it is
+/// absent and the host cannot activate it, use the available summaries and
+/// disclose the evidence gap. `pub(crate)` lets the parent-context hint reuse
+/// the exact wording instead of drifting.
+pub(crate) const HANDLE_READ_ACTIVATION_HINT: &str = "if `handle_read` is not in your tool list, activate it via `tool_search` when available; if it cannot be provided, transcript reads are unavailable in this session — rely on the returned summaries and disclose any evidence gap; do not call a tool absent from the catalog";
 
 /// Shared inspect brief for worker records and takeover targets; both name
 /// `handle_read`, so both must carry the activation hint.
@@ -10259,7 +10256,7 @@ fn subagent_skill_catalog(context: &ToolContext) -> String {
     // children lack `tool_search` too. The header below must stay honest in
     // all three states.
     let mut output = String::from(
-        "## Skills\n\nLoad a Skill with `load_skill`, activating it via `tool_search` first if it is not in your tool list; if `tool_search` is absent or does not surface `load_skill`, try `load_skill` directly anyway, and treat Skills as unavailable only if that call fails too. Catalog entries are workspace-scoped snapshots; plugin entries are revalidated at use.\n",
+        "## Skills\n\nLoad an applicable Skill with `load_skill` before use. Use its known exact name; list skills only when the name or index is insufficient. If `load_skill` is not in your tool list, activate it via `tool_search` if available. If discovery cannot provide it, report the limitation and continue with permitted tools; do not call tools absent from the provided catalog. Catalog entries are workspace-scoped snapshots; plugin entries are revalidated at use.\n",
     );
     for skill in registry.list() {
         let source = match &skill.source {

@@ -165,12 +165,12 @@ fn forkguard_skill_index_usage_names_tool_search_activation() {
         "usage must tell the model how to activate deferred load_skill:\n{rendered}"
     );
     assert!(
-        rendered.contains("call `load_skill` anyway"),
-        "tool_search being unable to surface load_skill does not make it \
-         unreachable — a registered deferred tool hydrates on demand when \
-         called directly; the usage line must not surrender that path:\n\
-         {rendered}"
+        rendered.contains("do not call tools absent from the provided catalog"),
+        "failed discovery must respect the host's tool surface:\n{rendered}"
     );
+    assert!(!rendered.contains("call `load_skill` anyway"));
+    assert!(rendered.contains("Use its known exact name directly"));
+    assert!(rendered.contains("Do not carry a skill across turns unless re-mentioned"));
 }
 
 // Regression guard paired with the Usage-line dedup (commit 9f46ac5f0): the

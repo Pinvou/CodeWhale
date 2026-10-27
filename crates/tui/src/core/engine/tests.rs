@@ -617,6 +617,10 @@ fn ordinary_engine_default_has_a_finite_step_budget() {
 /// `tools::canonical_action::no_advertised_tool_teaches_a_retired_name`).
 #[test]
 fn registry_first_instruction_only_names_published_tools() {
+    assert!(MCP_REGISTRY_FIRST_INSTRUCTION.contains("host-declared built-in capability"));
+    assert!(
+        MCP_REGISTRY_FIRST_INSTRUCTION.contains("do not search Registry for those capabilities")
+    );
     for unpublished in [
         "Bash",
         "File",
@@ -731,9 +735,7 @@ fn registry_first_scenario() {
                 .expect("system prompt"),
         );
         assert!(prompt.contains(MCP_REGISTRY_FIRST_INSTRUCTION_SOURCE));
-        assert!(
-            prompt.contains("must call `registry_sync` with a `query` describing that capability")
-        );
+        assert!(prompt.contains("call `registry_sync` with a capability query"));
 
         let mut disabled = EngineConfig::default();
         disabled.features.disable(Feature::Mcp);
@@ -20065,26 +20067,24 @@ fn forkguard_subagent_context_hint_names_active_tools() {
          handle_read accepts:\n{context}"
     );
     assert!(
-        context.contains("activate it via `tool_search` first"),
+        context.contains("activate it via `tool_search` when available"),
         "handle_read is deferred on stock hosts; the hint must name the \
          activation path instead of commanding a tool the model cannot see:\n\
          {context}"
     );
     assert!(
-        context.contains("try calling `handle_read` directly"),
-        "allowlist-filtered hosts can keep handle_read in the catalog while \
-         removing tool_search; the hint must try the direct call before \
-         declaring transcript reads unavailable:\n{context}"
+        context.contains("do not call a tool absent from the catalog"),
+        "a missing activation path must not teach calls to absent tools:\n{context}"
     );
     assert!(
         context.contains("transcript reads are unavailable in this session"),
-        "when neither tool_search nor the direct call can reach handle_read \
+        "when the host cannot provide handle_read \
          the hint must degrade honestly instead of dead-ending:\n{context}"
     );
     assert!(
         !context.contains("hydrate when called by name"),
         "the hint must not assert a hydration mechanism; only the activation \
-         path and the direct-call fallback belong in model-facing text:\n\
+         path and the honest unavailable fallback belong in model-facing text:\n\
          {context}"
     );
 

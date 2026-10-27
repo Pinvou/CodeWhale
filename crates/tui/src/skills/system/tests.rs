@@ -205,8 +205,8 @@ fn contributor_onboarding_ships_at_generation_8_and_keeps_its_refusals() {
     // The pin tracks the current catalog generation: 9 added handoff,
     // 10 added mcp-discovery (#5238), 11 corrected bundled skill bodies
     // from the model-facing text audit (#112) and refreshes superseded
-    // shipped copies.
-    assert_eq!(BUNDLED_SKILL_VERSION, "11");
+    // shipped copies; 12 updates host-aware discovery.
+    assert_eq!(BUNDLED_SKILL_VERSION, "12");
 
     let body = skill.body;
     assert!(body.contains("invocation: explicit-only"));
@@ -642,7 +642,7 @@ fn version_bump_refreshes_superseded_shipped_body() {
         current,
         "superseded shipped body must be refreshed on bump"
     );
-    assert_eq!(fs::read_to_string(marker_file(&tmp)).unwrap().trim(), "11");
+    assert_eq!(fs::read_to_string(marker_file(&tmp)).unwrap().trim(), "12");
 }
 
 #[test]
@@ -712,6 +712,40 @@ fn procedural_skill_homes_remain_bundled_and_lazy() {
         assert!(
             is_bundled_skill_name(name),
             "procedural skill home must remain available on demand: {name}"
+        );
+    }
+}
+
+#[test]
+fn forkguard_skill_upgrade_refreshes_shipped_mcp_discovery_and_preserves_user_edits() {
+    const PREVIOUS: &str = include_str!("fixtures/mcp-discovery-v11.md");
+    assert!(is_superseded_shipped_body("mcp-discovery", PREVIOUS));
+    for customized in [false, true] {
+        let tmp = TempDir::new().unwrap();
+        fs::create_dir_all(skill_dir(&tmp, "mcp-discovery")).unwrap();
+        let installed = if customized {
+            format!("{PREVIOUS}\nUser customization\n")
+        } else {
+            PREVIOUS.to_string()
+        };
+        fs::write(skill_file(&tmp, "mcp-discovery"), &installed).unwrap();
+        fs::write(marker_file(&tmp), "11").unwrap();
+        install_system_skills(tmp.path()).unwrap();
+        let expected = if customized {
+            installed.as_str()
+        } else {
+            MCP_DISCOVERY_BODY
+        };
+        assert_eq!(
+            fs::read_to_string(skill_file(&tmp, "mcp-discovery")).unwrap(),
+            expected
+        );
+        // With only a user-customized body and intentionally absent peers,
+        // nothing was installed, so the existing no-op keeps its marker too.
+        let expected_version = if customized { "11" } else { "12" };
+        assert_eq!(
+            fs::read_to_string(marker_file(&tmp)).unwrap().trim(),
+            expected_version
         );
     }
 }
