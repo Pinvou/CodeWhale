@@ -11,6 +11,22 @@ struct Fixture {
     stop: Arc<AtomicBool>,
     health: Option<std::thread::JoinHandle<()>>,
 }
+fn read_health_request(connection: &mut impl Read) -> std::io::Result<()> {
+    let mut request = Vec::new();
+    let mut chunk = [0u8; 512];
+    while request.len() < 4096 {
+        let remaining = (4096 - request.len()).min(chunk.len());
+        let read = connection.read(&mut chunk[..remaining])?;
+        if read == 0 {
+            return Err(std::io::ErrorKind::UnexpectedEof.into());
+        }
+        request.extend_from_slice(&chunk[..read]);
+        if request.windows(4).any(|bytes| bytes == b"\r\n\r\n") {
+            return Ok(());
+        }
+    }
+    Err(std::io::ErrorKind::InvalidData.into())
+}
 impl Drop for Fixture {
     fn drop(&mut self) {
         self.stop.store(true, Ordering::Relaxed);
@@ -49,8 +65,12 @@ fn fixture(tag: &str) -> Fixture {
                 Ok((mut conn, _)) => {
                     conn.set_read_timeout(Some(std::time::Duration::from_secs(1)))
                         .unwrap();
-                    let mut bytes = [0; 4096];
-                    let _ = conn.read(&mut bytes);
+                    // The client writes the request in several pieces. Closing
+                    // with unread request bytes can reset the connection and
+                    // discard an otherwise successful health response.
+                    if read_health_request(&mut conn).is_err() {
+                        continue;
+                    }
                     let body = r#"{"data":[{"id":"Native"}]}"#;
                     write!(conn,"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",body.len(),body).unwrap();
                 }
@@ -150,6 +170,34 @@ exit 0
         stop,
         health: Some(health),
     }
+}
+#[test]
+fn health_fixture_waits_for_complete_fragmented_headers() {
+    let f = fixture("native-health-fragmented-request");
+    let port = f.card.deploy.as_ref().unwrap().port;
+    let mut connection = std::net::TcpStream::connect(("127.0.0.1", port)).unwrap();
+    connection
+        .set_read_timeout(Some(std::time::Duration::from_millis(100)))
+        .unwrap();
+    connection
+        .write_all(b"GET /v1/models HTTP/1.1\r\n")
+        .unwrap();
+    let mut byte = [0];
+    let error = connection.read(&mut byte).unwrap_err();
+    assert!(matches!(
+        error.kind(),
+        std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
+    ));
+    connection
+        .write_all(b"Host: localhost\r\nConnection: close\r\n\r\n")
+        .unwrap();
+    connection
+        .set_read_timeout(Some(std::time::Duration::from_secs(3)))
+        .unwrap();
+    let mut response = String::new();
+    connection.read_to_string(&mut response).unwrap();
+    assert!(response.starts_with("HTTP/1.1 200 OK\r\n"));
+    assert!(response.ends_with(r#"{"data":[{"id":"Native"}]}"#));
 }
 #[test]
 fn readonly_preflight_and_explicit_enable_retain_discovered_legacy_binding() {
