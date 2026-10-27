@@ -36,4 +36,17 @@ assert.doesNotMatch(chatSource, /\btabletVoiceMode\b/, 'tablet or touch mode mus
 assert.doesNotMatch(chatSource, /\bfloatingVoice[A-Z]/, 'floating voice state and refs should stay removed');
 assert.equal(packageJson.scripts['test:floating-voice-drag'], undefined, 'obsolete floating voice drag test script must stay removed');
 
+// Abandon-on-clear (backflow pinvou-agent#789): emptying a composer must sever the
+// lane's pending voice result — in-flight through the live voice state,
+// completed-but-adoptable through the operation registry — so a late transcription
+// can neither land in the cleared draft nor be adopted by an unrelated send. The
+// registry lookup must use the lane's real ownerKind: an ownerKind the bridge never
+// books silently disables the whole branch. Official adaptation: this repo books
+// 'native'/'acp' for the codex page (upstream books 'codex'), so the pinned
+// ownerKind differs accordingly.
+assert.match(chatSource, /!String\(value \|\| ''\)\.trim\(\) && bridge\.voice && typeof bridge\.voice\.abandonVoiceResult === 'function'/, 'chat composer must abandon its pending voice result when emptied');
+assert.match(codexSource, /const pendingOperationId = \(nativeVoiceActive && nativeVoiceInput\.operationId\)/, 'codex composer must reach the in-flight operation through the live voice state');
+assert.match(codexSource, /bridge\.voice\.getVoiceOperationId\(activeId \|\| null, isNativeAgent \? 'native' : 'acp'\)/, 'codex composer must look up adoptable results under the ownerKind the bridge books for the page');
+assert.doesNotMatch(codexSource, /getVoiceOperationId\([^)]*'codex'/, 'codex composer must not query an ownerKind the bridge never books');
+
 console.log('voice_entry_policy: ok');

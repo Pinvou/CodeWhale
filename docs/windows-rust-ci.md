@@ -3,7 +3,8 @@
 ## Coverage contract
 
 `windows-rust-test` is the required native-Windows **Rust** job (the required
-gate also has `windows-codex-runtime-test`, which is out of scope here). It is
+gate also has related native-runtime, rustup-repair, static-updater and
+relay jobs — see the related-jobs section below). It is
 a two-leg matrix on `windows-latest` (`fail-fast: false`, `max-parallel: 2`);
 the required gate aggregates the matrix result, so both legs must pass:
 
@@ -33,13 +34,23 @@ scheduling, not the set or failure semantics of the checks.
 `rust_full` fails closed: all of `pinvou3-app/src-tauri/**/*.rs` plus shared
 manifests (`**/Cargo.toml`, `**/Cargo.lock`, `**/deny.toml`, `**/build.rs`,
 `pinvou3-app/src-tauri/.cargo/**`, `pinvou3-app/src-tauri/rust-toolchain.toml`,
-the `CodeWhale` submodule, `.gitmodules`) trigger it, except the documented
+the `CodeWhale` submodule, `.gitmodules`) and the loongarch64 cross-pipeline
+build scripts the rust legs execute (`scripts/ci-loongarch64-toolchain.sh`,
+`scripts/ci-loongarch64-sysroot.sh`, `scripts/ci-build-linux-loongarch64.sh`)
+trigger it, except the documented
 low-risk leaf features `feedback`, `personas`, and `pet` (their registration
 or app command surface still matches). `cli_rust` covers `pinvou-cli` Rust
-paths plus the compile inputs the CLI embeds, and keeps all three leaf
-features (`feedback`, `personas`, `pet`) gated through the CLI suite because
-the CLI path-depends on the app crate — they are exempt only from the full
-app suite, never from pre-merge Windows coverage.
+paths plus the compile inputs
+the CLI embeds (`pinvou-cli/.cargo/**`, `pinvou-cli/**/*.manifest`,
+`pinvou3-app/src-tauri/tauri.conf.json`, the `CodeWhale` submodule, the
+connector lock tables `pinvou3-app/src-tauri/resources/platforms/**`, the
+bundle resources `pinvou3-app/src-tauri/resources/common/bundle/**` and
+`pinvou3-app/resources/mcp-servers/**`, and the embedded docs
+`docs/plugin-package-spec.md` / `docs/gaia-benchmark.md`), the pipewire
+setup script its legs run (`scripts/ci-libpipewire-build.sh`), and keeps all
+three leaf features (`feedback`, `personas`, `pet`) gated through the CLI
+suite because the CLI path-depends on the app crate — they are exempt only
+from the full app suite, never from pre-merge Windows coverage.
 
 ## What the job runs
 
@@ -107,8 +118,11 @@ order:
 13. (`regression`) Run `python scripts/ci-windows-imports-diagnose.py` on `PINVOU3_TEST_EXE`
     — a non-blocking PE import-table diagnostic (`continue-on-error`), after
     step 12 so the embedded manifest exempts SxS DLLs such as `comctl32`.
-14. (`regression`) Run the CodeWhale PowerShell regression filters
-    (`forkguard_powershell` and `forkguard_windows_shell_text`) from the
+14. (`regression`) Run the CodeWhale Windows PowerShell regression filters
+    (`forkguard_powershell`, `forkguard_windows_shell_text`,
+    `command_spec_env_overlays_preserve_existing_values`,
+    `forkguard_windows_shell_env_overlays_keep_python_stdio_utf8`,
+    `windows_shell_env_explicit_override_is_case_insensitive`) from the
     dependency crate itself. The parent application jobs do not execute a
     dependency crate's lib tests. The step pins `RUSTUP_TOOLCHAIN` to the
     aligned toolchain — the env var overrides CodeWhale's own
@@ -144,6 +158,10 @@ order:
     - `before_anything_lands`
     - `preserves_consent_state`
     - `command_bodies_register_deny_first`
+    - `shared_apply_preserves_order`
+    - `production_skill_gate_refusal`
+    - `deny_decision_keeps_lazy_alias`
+    - `app::connector_consent_tests::`
     - `vacuous_uninstall_keeps_fresh_consent_entries`
     - `standalone_tencent_docs_preset_deny_entry_excludes_the_materialized_dir`
     - `restore_of_package_missing_entry_registers_no_deny_entry`
@@ -194,6 +212,8 @@ order:
     - `features::monitor::platform::windows_memory::tests::`
     - `features::monitor::platform::windows_gpu::tests::`
     - `features::remote_control::platform::windows::tests::`
+    - `app::commands::remote_control::reader_resume_tests::`
+    - `features::remote_control::controller::transfer::staging::tests::`
     - `features::computer_use::platform::windows::tests::`
     - `failed_probe_never_deletes_an_existing_store_windows`
     - `features::voice_shortcut::platform::tests::`
