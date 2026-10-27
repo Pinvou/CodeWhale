@@ -100,7 +100,11 @@
     var diagnostics = root.PinvouAuthoritySyncDiagnostics;
     if (!diagnostics || typeof diagnostics.record !== "function") return;
     var t = now();
-    var last = lastStallRecordAt[entry.sid] || 0;
+    // r6 P2-A：never-recorded 用 -Infinity 而非 0——performance.now() 纪元
+    // 是页面加载时刻，|| 0 把"从未上报"当"在第 0ms 上报过"，启动后前 10s
+    // 的 stall 全部静默丢弃（启动恰是冻结高发窗口）。
+    var last = lastStallRecordAt[entry.sid];
+    if (last === undefined) last = -Infinity;
     if (t - last < STALL_RECORD_MIN_INTERVAL_MS) return;
     var details = { stage_seq: entry.seq };
     if (entry.sid) details.session_id = entry.sid;
@@ -192,6 +196,16 @@
     markDispatched: function (sid) {
       var entry = currentBySession[sid || ""];
       if (!entry || entry.finalized) return;
+      // r6 P2-B：先章有效——主线程冻结期间排队的终态事件（chat:done 等
+      // ~30 个 handler 的 notify）在解冻后先于迟到的 rAF 执行，无条件覆盖
+      // 会把冻结从 dispatch→frame 段搬到 recv→dispatch 段（分段归因颠倒）。
+      // 直发路径两盖章方互斥，先章有效不影响。
+      if (entry.t_dispatch != null) {
+        // 已有派发章：只更新 t_sched（如有），不动 t_dispatch
+        if (entry.t_sched == null) entry.t_sched = entry.t_dispatch;
+        finalize(entry);
+        return;
+      }
       // r4 P2-A（陈旧条目新鲜度上界）：后台会话的最后一条 delta 停在「未派发」
       // 状态可存活数分钟（合并帧 publish 只标记活跃 sid、chat:done 不调 notify
       // 收尾它），期间任意事件路径的 notify() 都会无条件补盖 t_dispatch——

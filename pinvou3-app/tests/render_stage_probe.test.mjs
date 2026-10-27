@@ -200,11 +200,12 @@ test('同一周期二次 markDispatched 时旧 rAF 句柄被取消（P2-5 行为
   h.probe.begin('dbl');
   h.probe.markDispatched('dbl');
   assert.equal(h.rafCount(), 1);
-  const stale = h.rafCallbacks()[0];
+  // r6 P2-B：先章有效——已有 t_dispatch 的二次 markDispatched 直接收尾，
+  // 不重臂 rAF、不堆积句柄
   h.probe.markDispatched('dbl');
-  assert.equal(h.rafCount(), 1, '二次派发不应堆积两个 rAF');
-  assert.notEqual(h.rafCallbacks()[0], stale, '旧回调应已被替换而非残留');
-  assert.ok(h.cancelled.size >= 1, '覆盖前调用了 cancelAnimationFrame');
+  assert.ok(h.rafCount() <= 1, '二次派发不堆积 rAF（finalize 后可能为 0）');
+  assert.ok(h.probe._liveEntry('dbl') === null || h.probe._liveEntry('dbl').finalized,
+    '先章有效：二次 markDispatched 应 finalize 而非覆盖');
 });
 
 // r2 P1-1 行为锁：窗口隐藏期间的 markDispatched 不武装 rAF（同步收尾），
@@ -271,17 +272,25 @@ test('切走瞬间的真 stall 经转变收尾上报（P2-1）', () => {
     JSON.stringify(h.recorded[0].details));
 });
 
-// r5 P2-2 行为锁：notify() 在抑制态不盖章（后台路由无渲染发布）。
-// 这是接线层行为，在探针测试中以标记模拟：抑制态的 markDispatched 被跳过。
-test('抑制态期间不盖章派发标记（P2-2 接线层行为）', () => {
+// r6 P2-E：真行为锁——已有 t_dispatch 的条目，二次 markDispatched（终态
+// notify 路径）不覆盖 t_dispatch（P2-B 先章有效）。抑制态的接线层门控
+// （chat-events.js !isNotifySuppressed）由 native_stream 测试覆盖。
+test('已有派发章的条目不被终态 notify 重章（P2-B 先章有效）', () => {
   const h = harness();
-  h.probe.begin('bg1');
-  const entry = h.probe._liveEntry('bg1');
-  entry.t_recv -= 300;
-  // 模拟接线层：抑制态下 notify() 的 markDispatched 被跳过（isNotifySuppressed 为 true）
-  // ——chat-events.js 已加门控，此处验证探针侧不因缺章而误报
-  h.probe.markScheduled('bg1');
-  // 探针侧：只有一次 markScheduled，没有 markDispatched → 条目不应被收尾上报
-  // （后续的 begin 或恢复可见时才正常处理）
-  assert.equal(h.recorded.length, 0, '抑制态不盖章则不上报');
+  h.probe.begin('frozen');
+  const entry = h.probe._liveEntry('frozen');
+  entry.t_recv -= 100;
+  h.probe.markDispatched('frozen');       // 首次派发章
+  assert.ok(entry.t_dispatch != null, '首次派发应记录 t_dispatch');
+  const firstDispatch = entry.t_dispatch;
+  // 冻结后终态 notify 重章——不应覆盖 t_dispatch（P2-B）
+  h.probe.markDispatched('frozen');
+  const after = h.probe._liveEntry('frozen');
+  assert.ok(after === null || after.finalized || after.t_dispatch === firstDispatch,
+    '二次 markDispatched 不覆盖 t_dispatch（分段归因不颠倒）');
+  // 若 finalize 了，分段应诚实：recv→dispatch ~100ms（不是被覆盖后的值）
+  if (h.recorded.length > 0) {
+    assert.ok(h.recorded[0].details.recv_to_dispatch_ms < 200,
+      'recv→dispatch 应保持在首次章的量级（~100ms），不被重章拉长');
+  }
 });
