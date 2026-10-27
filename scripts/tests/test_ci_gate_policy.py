@@ -697,6 +697,7 @@ PINNED_GATE_STEP_NAMES = {
         "Check CLI disk capacity before cache",
         "Check CLI disk capacity after cache",
         "Install Tauri Linux system dependencies",
+        "Guard CLI cache post-save",
     ),
     "rust-test": (
         "cargo test --lib --no-run（编译链接测试二进制）",

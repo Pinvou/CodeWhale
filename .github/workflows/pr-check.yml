@@ -2319,8 +2319,8 @@ jobs:
 
       - name: Cargo cache
         id: cli_lint_cache
-        # Pin the implementation whose post-if uses CACHE_ON_FAILURE; the
-        # final disk gate below enables failure caching only when safe to try.
+        # Pin the reviewed implementation to prevent action behavior drift;
+        # the final disk gate enables failure caching only when safe to try.
         uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0
         with:
           workspaces: pinvou-cli
