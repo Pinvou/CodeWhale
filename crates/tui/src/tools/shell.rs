@@ -4115,14 +4115,21 @@ fn enforce_readonly_workspace_operands(
     // command token parse glues the separator onto the operand spelling and
     // both mis-resolves and mis-reports it). A bare `&` never classifies, so
     // a `None` split reaching this gate fails closed instead of checking
-    // nothing.
+    // nothing. The shell changes its live working directory at each admitted
+    // `cd`, so the segments fold the same drift left-to-right: after an
+    // admitted `cd` the base cwd for every later segment becomes the
+    // canonicalized destination, and relative operands resolve exactly where
+    // the shell will resolve them — a symlink that exists only under the
+    // `cd` destination can otherwise slip past the dispatch-cwd check while
+    // the shell still dereferences it.
     let Some(segments) = readonly_sequence_segments(command) else {
         return Err(ToolError::invalid_input(
             "Read-only command contains a bare `&` and matches no admitted shape.".to_string(),
         ));
     };
+    let mut live_cwd = effective_cwd;
     for segment in segments {
-        enforce_readonly_segment_operands(segment, &roots, &effective_cwd)?;
+        live_cwd = enforce_readonly_segment_operands(segment, &roots, &live_cwd)?;
     }
     Ok(())
 }
@@ -4132,17 +4139,19 @@ fn enforce_readonly_workspace_operands(
 /// not consume local path operands; their host is pinned and evaluated
 /// separately by the network-policy guard), and a leading `cd` has its
 /// single operand resolved against the workspace like the shell working
-/// directory itself.
+/// directory itself. Returns the working directory the next segment runs
+/// under: unchanged for non-`cd` segments, the canonicalized `cd`
+/// destination for an admitted `cd`.
 fn enforce_readonly_segment_operands(
     segment: &str,
     roots: &[PathBuf],
     effective_cwd: &std::path::Path,
-) -> Result<(), ToolError> {
+) -> Result<std::path::PathBuf, ToolError> {
     let argv = shlex::split(&normalize_windows_command_paths(segment)).ok_or_else(|| {
         ToolError::invalid_input("Could not parse read-only command arguments".to_string())
     })?;
     if argv.first().is_some_and(|program| program == "gh") {
-        return Ok(());
+        return Ok(effective_cwd.to_path_buf());
     }
     if argv.first().is_some_and(|program| program == "cd") {
         // `cd` is admitted only as `cd <one relative path>`. Resolve the
@@ -4162,7 +4171,7 @@ fn enforce_readonly_segment_operands(
                 "[shell.readonly.cwd.outside_workspace] Read-only `cd` operand {target:?} resolves outside the workspace."
             )));
         }
-        return Ok(());
+        return Ok(resolved);
     }
     for token in argv.iter().skip(1) {
         if token.starts_with('-') && (token.contains('/') || token.contains('\\')) {
@@ -4241,7 +4250,7 @@ fn enforce_readonly_segment_operands(
             }
         }
     }
-    Ok(())
+    Ok(effective_cwd.to_path_buf())
 }
 
 fn readonly_sanitized_path_from(

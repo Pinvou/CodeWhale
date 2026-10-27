@@ -1292,6 +1292,59 @@ fn readonly_operand_gate_covers_sequence_segments_and_cd() {
     }
 }
 
+/// Regression pin for the `cd` cwd-drift escape: the shell changes its live
+/// working directory at each admitted `cd`, so every later segment's relative
+/// operands must resolve against that destination — exactly where the shell
+/// resolves them — not against the dispatch-time workspace. Without the
+/// fold, `link` exists only under `sub/`, so a gate keyed on the dispatch cwd
+/// never inspects it (`ws/link` does not `exists()`), the gate admits the
+/// sequence, and the shell dereferences a symlink to a file outside the
+/// workspace.
+#[cfg(unix)]
+#[test]
+fn readonly_operand_gate_refuses_relative_operands_after_cd_cwd_drift() {
+    let workspace = tempdir().expect("workspace");
+    let outside = tempdir().expect("outside");
+    let sub = workspace.path().join("sub");
+    std::fs::create_dir(&sub).expect("subdir");
+    std::fs::write(outside.path().join("secret.txt"), "secret").expect("outside file");
+    std::os::unix::fs::symlink(outside.path().join("secret.txt"), sub.join("link"))
+        .expect("outside symlink under sub");
+    let roots = [workspace.path().to_path_buf()];
+
+    for command in ["cd sub; cat link", "cd sub && od -c link"] {
+        let error = enforce_readonly_workspace_operands(command, &roots, workspace.path())
+            .expect_err("cwd drift must not carry a relative operand outside the workspace")
+            .to_string();
+        assert!(
+            error.contains("operand.outside_workspace") || error.contains("cwd.outside_workspace"),
+            "{command}: expected the operand/cwd containment refusal, got: {error}"
+        );
+    }
+}
+
+/// Positive control for the cwd fold: a legitimate post-`cd` probe keeps
+/// running. The second segment resolves against the FIRST `cd`'s
+/// destination — `notes.txt` exists only under `sub/`, not at the workspace
+/// root — so the fold must admit it, and a second `cd` must be folded
+/// against the first destination too.
+#[test]
+fn readonly_operand_gate_keeps_admitting_operands_under_cd_destination() {
+    let workspace = tempdir().expect("workspace");
+    let sub = workspace.path().join("sub");
+    std::fs::create_dir(&sub).expect("subdir");
+    std::fs::write(sub.join("real.txt"), "inside").expect("inside file");
+    std::fs::write(sub.join("notes.txt"), "notes").expect("notes file");
+    let roots = [workspace.path().to_path_buf()];
+
+    enforce_readonly_workspace_operands("cd sub; cat real.txt", &roots, workspace.path())
+        .expect("operand under the cd destination stays admitted");
+    enforce_readonly_workspace_operands("cd sub; cat notes.txt", &roots, workspace.path())
+        .expect("sequence operand resolves against the cd destination");
+    enforce_readonly_workspace_operands("cd sub; cd .; cat notes.txt", &roots, workspace.path())
+        .expect("a second cd folds against the first destination");
+}
+
 /// A compound probe admitted by the bounded grammar must actually execute
 /// end to end under `ShellPolicy::ReadOnly`: the sequence routes through the
 /// shell lane (direct argv cannot bind `&&`), `cd` confines to the

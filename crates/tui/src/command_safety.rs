@@ -664,9 +664,11 @@ pub(crate) fn readonly_sequence_segments(command: &str) -> Option<Vec<&str>> {
 /// in a not-found exec error.
 pub(crate) fn agent_readonly_command_needs_shell_for_cd(command: &str) -> bool {
     readonly_sequence_segments(command).is_some_and(|segments| {
-        segments
-            .iter()
-            .any(|segment| segment.split_whitespace().next() == Some("cd"))
+        segments.iter().any(|segment| {
+            shell_words(segment)
+                .first()
+                .is_some_and(|word| word == "cd")
+        })
     })
 }
 
@@ -2392,12 +2394,39 @@ mod tests {
             "od -w 8 x",
             "od -j x f",
             "od --strange f",
+            "od -A z f",
         ] {
             assert!(
                 !is_agent_readonly_shell_command(command),
                 "{command} must stay denied for agents"
             );
         }
+    }
+
+    /// The shell-lane routing term is classifier-level, not host-dependent:
+    /// any segment whose first word is the `cd` builtin must route to the
+    /// shell lane. Pinned here because on macOS `/usr/bin/cd` exists, so a
+    /// host-execution probe would pass through the wrong (direct-argv) lane
+    /// and hide a routing regression that breaks on Linux.
+    #[test]
+    fn agent_readonly_cd_routing_covers_every_segment_shape() {
+        for command in ["cd sub", "cd sub && wc -c f", "cd sub; pwd"] {
+            assert!(
+                agent_readonly_command_needs_shell_for_cd(command),
+                "{command} must route to the shell lane for the `cd` builtin"
+            );
+        }
+        for command in ["wc -c f", "cat x | od -c"] {
+            assert!(
+                !agent_readonly_command_needs_shell_for_cd(command),
+                "{command} has no `cd` and may keep the direct-argv lane"
+            );
+        }
+        // The routing term reads the first word exactly like the admitting
+        // classifier (`shell_words`), so a quoted `"cd"` still routes to the
+        // shell lane instead of falling into a direct-argv exec of the
+        // spelling with quotes.
+        assert!(agent_readonly_command_needs_shell_for_cd("\"cd\" sub"));
     }
 
     /// The parent-side parallel auto-approve classifier keeps its whole-
