@@ -824,18 +824,29 @@ impl ModelManager {
         // 这两处没设，标准不一致本身就是漏了的信号。
         // docker 不可用时不能据此把容器卡判成已停止，但原生引擎和 Ollama 仍各有
         // 自己可靠的健康检查；不能因为 daemon 挂了就跳过整张模型库的状态纠正。
-        let docker_stdout =
-            proc_timeout::query("docker", &["ps", "--format", "{{.Names}}\t{{.Image}}"]);
+        // 用 `ps -a` 而不是只看运行中的：无 container_name 的 docker 卡要按
+        // 「容器存在与否 + 状态」认领（见下方 owned_running 分支）， exited 的
+        // 容器也得能看见。
+        let docker_rows = proc_timeout::query(
+            "docker",
+            &[
+                "ps",
+                "-a",
+                "--format",
+                "{{.Names}}\t{{.Image}}\t{{.State}}\t{{.Label \"com.docker.compose.project\"}}",
+            ],
+        )
+        .map(|stdout| parse_docker_ps_a(&stdout));
         let mut live_images: std::collections::HashSet<String> = std::collections::HashSet::new();
         let mut live_names: std::collections::HashSet<String> = std::collections::HashSet::new();
-        if let Some(stdout) = docker_stdout.as_deref() {
-            for line in stdout.lines() {
-                let mut parts = line.splitn(2, '\t');
-                if let Some(n) = parts.next() {
-                    live_names.insert(n.trim().to_string());
+        if let Some(rows) = docker_rows.as_ref() {
+            for row in rows {
+                if !row.running {
+                    continue;
                 }
-                if let Some(i) = parts.next() {
-                    live_images.insert(i.trim().to_string());
+                live_names.insert(row.name.clone());
+                if !row.image.is_empty() {
+                    live_images.insert(row.image.clone());
                 }
             }
         }
@@ -850,6 +861,28 @@ impl ModelManager {
             image_of.insert(rec.card_id.clone(), image);
         }
 
+        // card_id -> 是否有活着的自有容器。键取两个都等于 card_id 的身份：
+        // compose 项目名（部署时我们的脚本定的，如 ornith15-bf16 的容器
+        // ornith15-api）和容器名（z-image-turbo 直接拿 card_id 当容器名）。
+        // 之所以需要：没有 container_name 的老记录（迁移前部署的卡）在设备
+        // 重启后会被 docker 的 restart 策略自己拉起来（unless-stopped），商店
+        // 对此失明的话用户看到的就是「内存被占着、商店却全部离线」（真机
+        // 实锤：ornith15-api 重启后照常服务，DB 里全部 running=0），再启用
+        // 别的模型时内存预算也把这 76G 漏掉了。
+        let mut owned_running: HashMap<String, bool> = HashMap::new();
+        if let Some(rows) = docker_rows.as_ref() {
+            for row in rows {
+                let keys = [row.compose_project.as_deref(), Some(row.name.as_str())];
+                for key in keys.into_iter().flatten() {
+                    if key.is_empty() {
+                        continue;
+                    }
+                    let slot = owned_running.entry(key.to_string()).or_insert(false);
+                    *slot = *slot || row.running;
+                }
+            }
+        }
+
         for rec in records {
             // 有容器名就只认容器名——那是启用时脚本亲口报上来的，是确定的身份。
             if let Some(name) = rec
@@ -859,7 +892,7 @@ impl ModelManager {
                 .filter(|n| !n.is_empty())
             {
                 // docker daemon 此刻不可查时，状态未知而不是“容器不存在”。
-                if docker_stdout.is_none() {
+                if docker_rows.is_none() {
                     continue;
                 }
                 let alive = live_names.contains(name);
@@ -936,11 +969,29 @@ impl ModelManager {
                 }
             }
 
+            // 无 container_name、端点也不适用（非 OpenAI 路径或根本没报端点）的
+            // docker 卡：按上面的 owned_running 认领，双向都纠正。项目名/容器名
+            // == card_id 是我们自己的部署约定，同事用同款镜像跑**别的**模型不会
+            // 撞上这两个名——镜像比对那条路当初不敢反向认领的理由在这里不成立。
+            // docker 查不动时不认领也不清除（状态未知，保留原值）。
+            if docker_rows.is_some() {
+                if let Some(alive) = owned_running.get(&rec.card_id) {
+                    if *alive && !rec.running && rec.status == "deployed" {
+                        let _ = db::set_running(&rec.card_id, true);
+                        corrected.push(rec.card_name.clone());
+                    } else if !*alive && rec.running {
+                        let _ = db::set_running(&rec.card_id, false);
+                        corrected.push(rec.card_name);
+                    }
+                    continue;
+                }
+            }
+
             // 没有容器名（这一版之前启用的老记录）：退回按镜像判断，但**只做
             // 「说在跑其实没跑」这一个方向**。反向认领在这里是危险的：别人用
             // 同款镜像起的容器会让我们把自己的卡误标成运行中——真机上就撞见过
             // 同事用同一个 vllm 镜像跑了另一个模型。宁可让用户自己点一下启用。
-            if docker_stdout.is_none() {
+            if docker_rows.is_none() {
                 continue;
             }
             let Some(image) = image_of.get(&rec.card_id).cloned().flatten() else {
@@ -2060,9 +2111,33 @@ impl ModelManager {
         } else if rec.status == "deployed" {
             // Unknown deployment must not be treated as safely stopped just
             // because a stale database flag says false.
-            return Err(ModelManagerError::new(format!(
-                "无法可靠确认此部署已停止，请先停用后再{action}。"
-            )));
+            // 例外（2026-10-27 真机实锤）：无 container_name 的 docker 卡——
+            // z-image-turbo 停用五天后点「更新脚本」，一路落到这里被「无法确认」
+            // 拦死，设备从此没有自助出路。docker 卡的运行形态只有容器：按
+            // compose 项目名/容器名 == card_id 找得到容器（任何状态）就按容器
+            // 状态下结论；找不到而引擎登记过 docker 镜像，同样没有别的运行
+            // 形态，视为已停。其余（docker 查不动、又无镜像记录）保留原护栏。
+            return match docker_owned_container_state(&rec.card_id) {
+                DockerOwnedContainerState::Running => Err(ModelManagerError::new(format!(
+                    "模型容器仍在运行，请先停用再{action}。"
+                ))),
+                DockerOwnedContainerState::Stopped => Ok(()),
+                DockerOwnedContainerState::Absent
+                    if db::get_installed_engine(
+                        &rec.engine_name,
+                        rec.engine_version.as_deref(),
+                    )
+                    .ok()
+                    .flatten()
+                    .and_then(|e| e.docker_image)
+                    .is_some() =>
+                {
+                    Ok(())
+                }
+                _ => Err(ModelManagerError::new(format!(
+                    "无法可靠确认此部署已停止，请先停用后再{action}。"
+                ))),
+            };
         }
         // 端口存活只对**无容器名**的记录有意义（原生引擎）：docker 卡的存活性由
         // 上面的容器分支负责，而且同端口可能被别的服务占着——z-image 默认 8000
@@ -3239,12 +3314,11 @@ impl ModelManager {
                 runtime_note: String::new(),
             });
         }
+        let (runtime_lines, runtime_note) = model_runtime_lines(&rec);
         Ok(ModelDetail {
             record: rec,
-            runtime_lines: gpu_runtime_lines(),
-            runtime_note: "以下是设备 GPU 整体状态，不是精确到这一个模型的占用\
-                           （同一时间通常只跑一个大模型，仅供参考）"
-                .into(),
+            runtime_lines,
+            runtime_note,
         })
     }
 
@@ -3609,21 +3683,108 @@ fn openai_compatible_endpoint_alive(endpoint_url: &str) -> bool {
 /// `{"version":1, "process":{"pid":N, "start_ticks":N, "uid":N}, ...}`。
 /// 文件缺失/损坏/PID 不活 → false（不认领，可能是外来服务或残留端口占用）。
 fn native_engine_identity_alive(card_dir: &std::path::Path) -> bool {
-    let identity_path = card_dir.join(".runtime").join("serve.identity.json");
-    let Ok(content) = std::fs::read_to_string(&identity_path) else {
-        return false;
-    };
-    let Ok(value) = serde_json::from_str::<serde_json::Value>(&content) else {
-        return false;
-    };
-    let Some(pid) = value["process"]["pid"].as_i64() else {
-        return false;
-    };
-    if pid <= 0 {
-        return false;
-    }
-    // /proc/{pid}/stat 存在 = 进程活着；不需要解析内容
+    native_identity_pid(card_dir).is_some_and(pid_alive)
+}
+
+/// /proc/{pid}/stat 存在 = 进程活着；不需要解析内容。
+fn pid_alive(pid: i64) -> bool {
     std::path::Path::new(&format!("/proc/{pid}/stat")).exists()
+}
+
+/// 从 `.runtime/serve.identity.json` 读出记录的 PID；文件缺失/损坏/没有合法
+/// PID 都返回 None（调用方据此判定「无身份」，不认领、不编数据）。
+fn native_identity_pid(card_dir: &std::path::Path) -> Option<i64> {
+    let identity_path = card_dir.join(".runtime").join("serve.identity.json");
+    let content = std::fs::read_to_string(&identity_path).ok()?;
+    let value = serde_json::from_str::<serde_json::Value>(&content).ok()?;
+    let pid = value["process"]["pid"].as_i64()?;
+    (pid > 0).then_some(pid)
+}
+
+/// `docker ps -a --format '{{.Names}}\t{{.Image}}\t{{.State}}\t{{.Label ...}}'`
+/// 的一行。`running` 只认 `state == "running"`（restarted/paused 都不算在服务）；
+/// compose 项目名是 `docker run` 起的容器和外来的容器没有的标签，用 None 表示。
+struct DockerPsRow {
+    name: String,
+    image: String,
+    running: bool,
+    compose_project: Option<String>,
+}
+
+fn parse_docker_ps_a(stdout: &str) -> Vec<DockerPsRow> {
+    stdout
+        .lines()
+        .filter(|line| !line.trim().is_empty())
+        .map(|line| {
+            let mut parts = line.splitn(4, '\t');
+            let name = parts.next().unwrap_or_default().trim().to_string();
+            let image = parts.next().unwrap_or_default().trim().to_string();
+            let state = parts.next().unwrap_or_default().trim();
+            let project = parts
+                .next()
+                .map(|p| p.trim().to_string())
+                .filter(|p| !p.is_empty());
+            DockerPsRow {
+                name,
+                image,
+                running: state == "running",
+                compose_project: project,
+            }
+        })
+        .collect()
+}
+
+/// `require_actually_stopped` 对「无 container_name 的 docker 卡」的结论。
+enum DockerOwnedContainerState {
+    /// 找到本卡容器且有运行中的。
+    Running,
+    /// 找到本卡容器但全部处于退出/暂停等非运行状态。
+    Stopped,
+    /// 没有任何容器以本卡 card_id 为 compose 项目名或容器名。
+    Absent,
+    /// docker 查不动（超时/未装），下不了结论。
+    Unknown,
+}
+
+fn docker_owned_container_state(card_id: &str) -> DockerOwnedContainerState {
+    // 字段顺序与 parse_docker_ps_a 对齐（名字、镜像、状态、compose 项目名），
+    // 多带一个镜像字段不亏——两条查询用同一套解析，格式改一处就够了。
+    let Some(stdout) = proc_timeout::query(
+        "docker",
+        &[
+            "ps",
+            "-a",
+            "--format",
+            "{{.Names}}\t{{.Image}}\t{{.State}}\t{{.Label \"com.docker.compose.project\"}}",
+        ],
+    ) else {
+        return DockerOwnedContainerState::Unknown;
+    };
+    let rows = parse_docker_ps_a(&stdout);
+    owned_container_state_from_rows(&rows, card_id)
+}
+
+fn owned_container_state_from_rows(
+    rows: &[DockerPsRow],
+    card_id: &str,
+) -> DockerOwnedContainerState {
+    let mut found = false;
+    let mut any_running = false;
+    for row in rows {
+        let owned = row.compose_project.as_deref() == Some(card_id) || row.name == card_id;
+        if !owned {
+            continue;
+        }
+        found = true;
+        any_running = any_running || row.running;
+    }
+    if !found {
+        DockerOwnedContainerState::Absent
+    } else if any_running {
+        DockerOwnedContainerState::Running
+    } else {
+        DockerOwnedContainerState::Stopped
+    }
 }
 
 /// 一次 HTTP 探测的失败，是否**确定**说明「那个地址后面没有服务」。
@@ -3717,8 +3878,243 @@ fn gpu_runtime_lines() -> Vec<String> {
     labels
         .iter()
         .zip(parts.iter())
+        // GB10 这类统一内存设备上显存两行是 [N/A]——留着就是两行空数据
+        // （2026-10-27 用户反馈），设备不支持的指标直接不出。
+        .filter(|(_, value)| !gpu_value_unsupported(value))
         .map(|(label, value)| format!("{label}：{value}"))
         .collect()
+}
+
+/// nvidia-smi 的这个字段值是否为「设备不支持此指标」的占位。
+fn gpu_value_unsupported(value: &str) -> bool {
+    let v = value.trim().to_ascii_lowercase();
+    matches!(
+        v.as_str(),
+        "" | "n/a" | "[n/a]" | "[not supported]" | "not supported"
+    )
+}
+
+/// 运行中模型的真实时画像（2026-10-27 用户反馈重做）：以前这里只有设备级
+/// GPU 六行，GB10 这类统一内存设备上「显存已用/总量」是 [N/A]，用户看到的
+/// 就是两行空数据。现在按优先级拼三段真实数据，全部即时实测：
+///
+/// 1. **本模型的进程**——docker 卡经 `docker inspect` 拿容器 PID/健康状态、
+///    `docker stats` 拿容器内存；原生引擎经 `.runtime/serve.identity.json`
+///    拿 PID、/proc 拿主进程 RSS。没有身份可查（如刚认领、无 identity 的
+///    老卡）就整段跳过，不编数据。
+/// 2. **端点实测**——OpenAI 风格端点发一次 /v1/models，报告响应耗时和
+///    端点里的模型清单。/generate 这类非 OpenAI 路径改写成 /v1/models 必
+///    404，探了只会误导，跳过。
+/// 3. **GPU 整体**——nvidia-smi，过滤设备不支持的行（[N/A]）。
+fn model_runtime_lines(rec: &db::StoreModelRecord) -> (Vec<String>, String) {
+    let mut lines = Vec::new();
+
+    if let Some(container) = owned_container_name(rec) {
+        lines.push(format!("运行方式：Docker 容器 {container}"));
+        if let Some((pid, state, health)) = docker_container_runtime(&container) {
+            let mut state_desc = state;
+            if let Some(h) = health {
+                state_desc = format!("{state_desc} · {h}");
+            }
+            lines.push(format!("容器状态：{state_desc}"));
+            if pid > 0 {
+                lines.push(format!("进程 PID：{pid}"));
+                push_uptime_and_rss(&mut lines, pid);
+            }
+        }
+        if let Some(mem) = docker_container_memory(&container) {
+            lines.push(format!("内存占用：{mem}（容器合计，实时）"));
+        }
+    } else if let Some(pid) = native_runtime_pid(rec).filter(|pid| pid_alive(*pid)) {
+        lines.push("运行方式：原生引擎进程".into());
+        if pid > 0 {
+            lines.push(format!("进程 PID：{pid}"));
+            push_uptime_and_rss(&mut lines, pid);
+        }
+    }
+
+    if let Some(endpoint) = rec.endpoint_url.as_deref() {
+        if endpoint_path_is_openai_style(endpoint) {
+            match probe_openai_endpoint(endpoint) {
+                OpenAiProbe::Ok { latency_ms, models } => {
+                    lines.push(format!("服务状态：正常（/v1/models 响应 {latency_ms}ms）"));
+                    if !models.is_empty() {
+                        lines.push(format!("端点模型：{}", models.join("、")));
+                    }
+                }
+                // 连接被拒是确定性的「没在服务」，照实说；超时/DNS 之类「问不出来」
+                // 的一行都不加——加了就是把不确定当结论。
+                OpenAiProbe::Refused => lines.push("服务状态：端点无响应（连接被拒）".into()),
+                OpenAiProbe::Unknown => {}
+            }
+        }
+    }
+
+    let gpu = gpu_runtime_lines();
+    let has_gpu = !gpu.is_empty();
+    lines.extend(gpu);
+    let note = if has_gpu {
+        "进程/内存/端点为本模型实时实测；GPU 行是设备整体状态，仅供参考。".into()
+    } else {
+        String::new()
+    };
+    (lines, note)
+}
+
+/// 本卡自有的 docker 容器名：优先用 DB 里启用脚本报上来的 container_name，
+/// 没有的话按 compose 项目名/容器名 == card_id 找（与 reconcile 同一套身份）。
+fn owned_container_name(rec: &db::StoreModelRecord) -> Option<String> {
+    if let Some(name) = rec
+        .container_name
+        .as_deref()
+        .map(str::trim)
+        .filter(|n| !n.is_empty())
+    {
+        return Some(name.to_string());
+    }
+    let stdout = proc_timeout::query(
+        "docker",
+        &[
+            "ps",
+            "-a",
+            "--format",
+            "{{.Names}}\t{{.State}}\t{{.Label \"com.docker.compose.project\"}}",
+        ],
+    )?;
+    let rows = parse_docker_ps_a(&stdout);
+    rows.iter()
+        .find(|row| {
+            row.compose_project.as_deref() == Some(rec.card_id.as_str()) || row.name == rec.card_id
+        })
+        .map(|row| row.name.clone())
+}
+
+/// `docker inspect` 出 (容器主进程 PID, 状态, 健康检查结论)。
+fn docker_container_runtime(container: &str) -> Option<(i64, String, Option<String>)> {
+    let stdout = proc_timeout::query(
+        "docker",
+        &[
+            "inspect",
+            "--format",
+            "{{.State.Pid}}\t{{.State.Status}}\t{{if .State.Health}}{{.State.Health.Status}}{{end}}",
+            container,
+        ],
+    )?;
+    let mut parts = stdout.trim().splitn(3, '\t');
+    let pid = parts.next()?.trim().parse::<i64>().ok()?;
+    let state = parts.next().unwrap_or_default().trim().to_string();
+    let health = parts
+        .next()
+        .map(|h| h.trim().to_string())
+        .filter(|h| !h.is_empty());
+    Some((pid, state, health))
+}
+
+/// `docker stats --no-stream` 的容器内存用量（如 `7.9GiB`，docker 自己的口径）。
+/// 这个命令要等一个采样周期（约 2 秒），靠 proc_timeout 兜底防卡死。
+fn docker_container_memory(container: &str) -> Option<String> {
+    let stdout = proc_timeout::query(
+        "docker",
+        &[
+            "stats",
+            "--no-stream",
+            "--format",
+            "{{.MemUsage}}",
+            container,
+        ],
+    )?;
+    stdout
+        .trim()
+        .split_whitespace()
+        .next()
+        .map(|first| first.trim().to_string())
+        .filter(|mem| !mem.is_empty())
+}
+
+/// 原生引擎在 `.runtime/serve.identity.json` 里记的 PID（活着与否由调用方看
+/// 场景决定；这里只管「有没有身份文件」）。与 reconcile 的身份核验共用格式。
+fn native_runtime_pid(rec: &db::StoreModelRecord) -> Option<i64> {
+    let card_dir = config::data_dir()
+        .join("cards")
+        .join(config::safe_path_component(&rec.card_id).unwrap_or_default());
+    if card_dir.as_os_str().is_empty() {
+        return None;
+    }
+    native_identity_pid(&card_dir)
+}
+
+/// uptime（ps etime）+ 主进程 RSS（/proc VmRSS）。两项各自尽力：拿不到就少一行，
+/// 不编数。RSS 是主进程而非整个进程树，容器场景另有 docker stats 的容器合计，
+/// 这里标明「主进程」避免两个数对不上时像是测错了。
+fn push_uptime_and_rss(lines: &mut Vec<String>, pid: i64) {
+    if let Some(etime) = proc_timeout::query("ps", &["-o", "etime=", &pid.to_string()]) {
+        let etime = etime.trim();
+        if !etime.is_empty() {
+            lines.push(format!("已运行：{etime}"));
+        }
+    }
+    if let Ok(status) = std::fs::read_to_string(format!("/proc/{pid}/status")) {
+        let rss = status.lines().find_map(|line| {
+            let rest = line.strip_prefix("VmRSS:")?.trim();
+            rest.split_whitespace()
+                .next()
+                .and_then(|kb| kb.parse::<u64>().ok())
+                .map(|kb| disk::format_bytes((kb * 1024) as f64))
+        });
+        if let Some(rss) = rss {
+            lines.push(format!("内存占用：{rss}（主进程）"));
+        }
+    }
+}
+
+enum OpenAiProbe {
+    Ok {
+        latency_ms: u64,
+        models: Vec<String>,
+    },
+    Refused,
+    Unknown,
+}
+
+fn probe_openai_endpoint(endpoint_url: &str) -> OpenAiProbe {
+    let Ok(mut url) = reqwest::Url::parse(endpoint_url) else {
+        return OpenAiProbe::Unknown;
+    };
+    url.set_path("/v1/models");
+    url.set_query(None);
+    let started = std::time::Instant::now();
+    let result = reqwest::blocking::Client::builder()
+        .timeout(std::time::Duration::from_secs(5))
+        .no_proxy()
+        .build()
+        .and_then(|client| client.get(url).send());
+    match result {
+        Ok(response) if response.status().is_success() => {
+            let latency_ms = started.elapsed().as_millis() as u64;
+            let models = response
+                .json::<serde_json::Value>()
+                .ok()
+                .and_then(|body| {
+                    body["data"].as_array().map(|items| {
+                        items
+                            .iter()
+                            .filter_map(|item| item["id"].as_str().map(str::to_string))
+                            .collect::<Vec<_>>()
+                    })
+                })
+                .unwrap_or_default();
+            OpenAiProbe::Ok { latency_ms, models }
+        }
+        // HTTP 有响应但非 2xx：服务在、路由不对，与「没服务」分开说。
+        Ok(_) => OpenAiProbe::Refused,
+        Err(error) => {
+            if probe_failure_means_nothing_listening(&error) {
+                OpenAiProbe::Refused
+            } else {
+                OpenAiProbe::Unknown
+            }
+        }
+    }
 }
 
 fn write_temp_script(content: &str) -> Result<PathBuf, ModelManagerError> {
@@ -3767,6 +4163,62 @@ mod tests {
         assert!(native_tachyon_identity(install, None, None).is_none());
         assert!(declared_native_sha("ENGINE_BIN_SHA256=short").is_none());
         assert!(native_tachyon_identity("ENGINE_BIN_SHA256=bad", None, None).is_none());
+    }
+
+    /// 真机（2026-10-27 cube-9fde）`docker ps -a` 四字段的实际形态：compose 卡
+    /// 带项目标签，`docker run` 起的容器没有（None），状态字段区分 running/exited。
+    #[test]
+    fn parse_docker_ps_a_handles_missing_label_and_states() {
+        let stdout = "ornith15-api\tvllm/vllm-openai:v0.27.1\trunning\tornith15-bf16\n\
+                      z-image-turbo\tz-image-turbo:diffusers-0.40.0\texited\tz-image-turbo\n\
+                      megacube-qwen38fn-single\ta551e05307cd\texited\t\n";
+        let rows = parse_docker_ps_a(stdout);
+        assert_eq!(rows.len(), 3);
+        assert_eq!(rows[0].name, "ornith15-api");
+        assert!(rows[0].running);
+        assert_eq!(rows[0].compose_project.as_deref(), Some("ornith15-bf16"));
+        assert!(!rows[1].running);
+        assert_eq!(rows[1].compose_project.as_deref(), Some("z-image-turbo"));
+        assert_eq!(rows[2].compose_project, None);
+        // 空行不算容器
+        assert!(parse_docker_ps_a("\n  \n").is_empty());
+    }
+
+    /// 无 container_name 的 docker 卡判停/认领依据：compose 项目名或容器名等于
+    /// card_id 即视为本卡部署；两者都对不上时绝不把别人的容器当自己的。
+    #[test]
+    fn owned_container_state_matches_project_or_name() {
+        let rows = parse_docker_ps_a(
+            "ornith15-api\tvllm:v0.27.1\trunning\tornith15-bf16\n\
+             z-image-turbo\tz-image:diffusers\texited\tz-image-turbo\n\
+             cowork-vllm\tvllm:v0.27.1\trunning\t\n",
+        );
+        // 项目名 == card_id（ornith15-bf16 的容器叫 ornith15-api，名字对不上）
+        assert!(matches!(
+            owned_container_state_from_rows(&rows, "ornith15-bf16"),
+            DockerOwnedContainerState::Running
+        ));
+        // 容器名 == card_id，且已退出 → Stopped（z-image「更新脚本」被拦的场景）
+        assert!(matches!(
+            owned_container_state_from_rows(&rows, "z-image-turbo"),
+            DockerOwnedContainerState::Stopped
+        ));
+        // 同款镜像的外来容器：项目名、容器名都对不上 → Absent，不认领
+        assert!(matches!(
+            owned_container_state_from_rows(&rows, "ornith15-35b-a3b-nvfp4"),
+            DockerOwnedContainerState::Absent
+        ));
+    }
+
+    /// GB10 统一内存设备上 nvidia-smi 的显存两行是 [N/A]，过滤后不再出现空数据。
+    #[test]
+    fn gpu_value_unsupported_covers_na_placeholders() {
+        assert!(gpu_value_unsupported("[N/A]"));
+        assert!(gpu_value_unsupported(" N/A "));
+        assert!(gpu_value_unsupported("[Not Supported]"));
+        assert!(gpu_value_unsupported(""));
+        assert!(!gpu_value_unsupported("11.44 W"));
+        assert!(!gpu_value_unsupported("45"));
     }
 
     #[test]
@@ -5125,35 +5577,32 @@ echo '权重就绪'
     }
 }
 
-    /// r7 P1-5：启动时自动收紧存量 775 目录链的行为锁。
-    /// 构造模拟目录（0775），验证收紧后变 0755；非属主目录不动。
-    #[test]
-    fn tighten_directory_permissions_fixes_wide_modes_and_skips_foreign() {
-        use std::os::unix::fs::PermissionsExt;
-        let _home = config::TempHome::new();
-        let data = config::data_dir();
-        let cards = data.join("cards");
-        let logs = data.join("logs");
-        let card_a = cards.join("test-card-a");
-        for dir in [&data, &cards, &logs, &card_a] {
-            std::fs::create_dir_all(dir).unwrap();
-            std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o775)).unwrap();
-        }
-        // 已正确的目录不动
-        let already_tight = cards.join("already-755");
-        std::fs::create_dir(&already_tight).unwrap();
-        std::fs::set_permissions(&already_tight, std::fs::Permissions::from_mode(0o755)).unwrap();
-
-        let settings = config::Settings::default();
-        tighten_store_directory_permissions(&settings);
-
-        let mode = |p: &std::path::Path| {
-            use std::os::unix::fs::MetadataExt;
-            std::fs::metadata(p).unwrap().permissions().mode() & 0o777
-        };
-        assert_eq!(mode(&data), 0o755, "data 目录应收紧到 755");
-        assert_eq!(mode(&cards), 0o755, "cards 目录应收紧到 755");
-        assert_eq!(mode(&logs), 0o755, "logs 目录应收紧到 755");
-        assert_eq!(mode(&card_a), 0o755, "一级子目录应收紧到 755");
-        assert_eq!(mode(&already_tight), 0o755, "已正确的目录不变");
+/// r7 P1-5：启动时自动收紧存量 775 目录链的行为锁。
+/// 构造模拟目录（0775），验证收紧后变 0755；非属主目录不动。
+#[test]
+fn tighten_directory_permissions_fixes_wide_modes_and_skips_foreign() {
+    use std::os::unix::fs::PermissionsExt;
+    let _home = config::TempHome::new();
+    let data = config::data_dir();
+    let cards = data.join("cards");
+    let logs = data.join("logs");
+    let card_a = cards.join("test-card-a");
+    for dir in [&data, &cards, &logs, &card_a] {
+        std::fs::create_dir_all(dir).unwrap();
+        std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o775)).unwrap();
     }
+    // 已正确的目录不动
+    let already_tight = cards.join("already-755");
+    std::fs::create_dir(&already_tight).unwrap();
+    std::fs::set_permissions(&already_tight, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+    let settings = config::Settings::default();
+    tighten_store_directory_permissions(&settings);
+
+    let mode = |p: &std::path::Path| std::fs::metadata(p).unwrap().permissions().mode() & 0o777;
+    assert_eq!(mode(&data), 0o755, "data 目录应收紧到 755");
+    assert_eq!(mode(&cards), 0o755, "cards 目录应收紧到 755");
+    assert_eq!(mode(&logs), 0o755, "logs 目录应收紧到 755");
+    assert_eq!(mode(&card_a), 0o755, "一级子目录应收紧到 755");
+    assert_eq!(mode(&already_tight), 0o755, "已正确的目录不变");
+}
