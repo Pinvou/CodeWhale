@@ -8458,12 +8458,10 @@ fn verifier_child_keeps_the_default_and_selection_bounded_run_surface() {
     );
 }
 
-/// The prompt contracts state the lane: the verifier intro tells the child
-/// about its bounded read-only shell and the custom-command refusal; the
-/// reviewer intro demands quoted line numbers and verified counts instead of
-/// estimates.
+/// The verifier intro tells the child about its bounded read-only shell and
+/// the custom-command refusal.
 #[test]
-fn verifier_and_reviewer_intros_state_the_evidence_contract() {
+fn verifier_intro_states_the_evidence_contract() {
     assert!(
         VERIFIER_AGENT_INTRO.contains("bounded read-only shell"),
         "verifier intro must name the bounded read-only evidence shell: {VERIFIER_AGENT_INTRO}"
@@ -8471,14 +8469,6 @@ fn verifier_and_reviewer_intros_state_the_evidence_contract() {
     assert!(
         VERIFIER_AGENT_INTRO.contains("custom commands are refused"),
         "verifier intro must repeat the custom-command refusal: {VERIFIER_AGENT_INTRO}"
-    );
-    assert!(
-        REVIEW_AGENT_INTRO.contains("exactly as the read output shows"),
-        "reviewer intro must demand quoted path:line ranges: {REVIEW_AGENT_INTRO}"
-    );
-    assert!(
-        REVIEW_AGENT_INTRO.contains("wc -l"),
-        "reviewer intro must demand verified counts over estimates: {REVIEW_AGENT_INTRO}"
     );
 }
 

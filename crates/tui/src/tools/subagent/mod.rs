@@ -16571,7 +16571,6 @@ const REVIEW_AGENT_INTRO: &str = concat!(
     "Use `read` for bounded file reads and `bash` only for the allowed read-only navigation/rg, safe Git, and read-only GitHub evidence subset; builds, tests, writes, and shell control actions are unavailable.\n",
     "Use your private `todo_write` list as editable working notes when useful; it is agent-owned state, not permission to write project files. Those tool calls remain in the complete transcript artifact returned to the parent.\n",
     "Use BLOCKER/MAJOR/MINOR/NIT and include path:line-range plus suggested fix.\n",
-    "Quote `path:line-range` exactly as the read output shows it, and verify counts with a command (for example `wc -l`) instead of estimating them.\n",
     "You may use more tool calls than quick exploration, but stop after decisive evidence instead of widening the review forever.\n",
     "If nothing survives your attack, say plainly in SUMMARY that no MAJOR+ issues exist — a clean verdict earned adversarially is a real result, not a failure.\n",
     "CHANGES will almost always be \"None.\" for a reviewer.\n\n"
