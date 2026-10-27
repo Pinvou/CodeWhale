@@ -27,6 +27,7 @@
     .metric-filters label{display:flex;align-items:center;gap:6px;cursor:pointer;min-height:28px}.metric-filters input{width:14px;height:14px;margin:0;accent-color:var(--metric-color)}.metric-filters input:focus-visible{outline:2px solid #3267e3;outline-offset:3px}.metric-filters label:has(input:not(:checked)){color:#98a2b3}
     .period-legend{font-size:11px;gap:16px;margin-top:6px}.period-legend i{width:22px;height:0;border-top:2px solid #778399;border-radius:0}.period-legend .previous-key{border-top-style:dashed;opacity:.5}
     .chart-tooltip .comparison-label{margin-top:8px;font-size:11px;color:#778399}
+    .failure-filters,.failure-issue-form{display:flex;flex-wrap:wrap;align-items:end;gap:12px}.failure-filters{padding:4px 22px 16px;border-bottom:1px solid var(--line)}.failure-filters label,.failure-issue-form label{display:grid;gap:7px;flex:1 1 140px;min-width:0;color:#718096;font-size:12px}.failure-filters input,.failure-filters select,.failure-issue-form input,.failure-issue-form select{width:100%;min-width:0;height:38px;padding:8px 11px;border:1px solid var(--line);border-radius:9px;background:#f8fafc;color:#59667c;font:inherit;outline:none}.failure-filters :is(input,select):focus,.failure-issue-form :is(input,select):focus{border-color:#b7c8eb;background:#fff;box-shadow:0 0 0 3px rgba(50,103,227,.1)}.failure-apply{height:38px;background:#edf3ff;color:var(--blue);border-color:#c5d4f5;white-space:nowrap}.failure-status{padding:0 22px;color:var(--muted);font-size:12px;line-height:1.6}#failureAdmin.hidden{display:none}#failurePanel{margin-bottom:16px}#failurePanel table{min-width:1040px}#failurePanel td{line-height:1.8}#failurePanel td:first-child{white-space:normal;min-width:200px;overflow-wrap:anywhere}.failure-samples{display:flex;flex-wrap:wrap;gap:8px;margin:16px 0;max-height:240px;overflow:auto}.failure-samples button{text-align:left;white-space:normal;overflow-wrap:anywhere}.failure-samples button[aria-pressed="true"]{background:#edf3ff;border-color:#c5d4f5;color:var(--blue)}.failure-issue-form{padding:16px 0;border-top:1px solid var(--line);border-bottom:1px solid var(--line)}.failure-issue-form label{flex:0 1 220px}.failure-evidence{margin:16px 0 0;padding:16px;border:1px solid var(--line);border-radius:12px;background:#f8fafc;color:#53627a;font-size:12px;line-height:1.7;max-height:440px;overflow:auto;white-space:pre-wrap;overflow-wrap:anywhere}.failure-evidence:empty{display:none}#failureImages{display:grid;gap:12px;margin-top:12px}@media(max-width:680px){.failure-filters label,.failure-issue-form label{flex:1 1 100%}.failure-apply{width:100%}#diagnosticsView .table-head{flex-wrap:wrap;gap:12px}}
   </style>
   <style>
     .rank-card-full-width { grid-column: 1 / -1; }
@@ -65,7 +66,7 @@
     </header>
     <div class="content">
       <section class="headline"><div><h1 id="pageTitle">设备运营概览</h1><p id="pageSubtitle">掌握设备在线情况、活跃趋势与版本健康度</p></div><div class="refresh">更新于 <span id="time">等待数据</span><button id="refreshButton">↻ 刷新</button></div></section>
-      <nav class="page-tabs" role="tablist" aria-label="运营数据视图"><button class="page-tab active" data-view="devices" role="tab" aria-selected="true">设备概览</button><button class="page-tab" data-view="behavior" role="tab" aria-selected="false">行为分析</button><button class="page-tab" data-view="remote" role="tab" aria-selected="false">远程控制</button><button class="page-tab" data-view="commercial" role="tab" aria-selected="false">商业（未接入）</button></nav>
+      <nav class="page-tabs" role="tablist" aria-label="运营数据视图"><button class="page-tab active" data-view="devices" role="tab" aria-selected="true">设备概览</button><button class="page-tab" data-view="behavior" role="tab" aria-selected="false">行为分析</button><button class="page-tab" data-view="diagnostics" role="tab" aria-selected="false">故障诊断</button><button class="page-tab" data-view="remote" role="tab" aria-selected="false">远程控制</button><button class="page-tab" data-view="commercial" role="tab" aria-selected="false">商业（未接入）</button></nav>
       <section class="page-view" id="devicesView">
       <section class="metrics device-metrics">
         <article class="metric" style="--accent:#3267e3;--tint:#eef3ff"><div class="metric-head"><span>当前在线设备</span><span class="metric-icon">⌁</span></div><div class="metric-main"><div><div class="number"><span id="online">—</span><span class="number-unit">台</span></div><div class="note">5 分钟内收到心跳的设备数</div></div><span class="trend" id="onlineRate">在线率 —</span></div></article>
@@ -89,6 +90,30 @@
       </section>
       <section class="card table-card" id="devices"><div class="table-head"><div class="table-title"><h2>设备明细</h2><p id="deviceSummary">等待设备数据</p></div><div class="tools"><input class="search" id="deviceSearch" placeholder="搜索设备 ID / 区域"/><button class="filter" id="statusFilter">全部状态⌄</button></div></div><div class="platform-tabs" role="tablist" aria-label="按系统筛选设备"><button class="platform-tab active" data-platform="all" role="tab" aria-selected="true">全部 <b>0</b></button><button class="platform-tab" data-platform="windows" role="tab" aria-selected="false">Windows <b>0</b></button><button class="platform-tab" data-platform="linux" role="tab" aria-selected="false">Linux <b>0</b></button><button class="platform-tab" data-platform="macos" role="tab" aria-selected="false">macOS <b>0</b></button></div><div class="table-wrap"><table><thead><tr><th>设备</th><th>状态</th><th>当前版本</th><th>系统</th><th>所在区域</th><th>首次登记</th><th>最后活跃</th><th class="sortable sort-active desc" data-sort="turns_7d" aria-sort="descending">近 7 日对话</th><th class="sortable" data-sort="turns_today" aria-sort="none">今日对话</th></tr></thead><tbody id="deviceRows"></tbody></table></div></section>
       </section>
+      <section class="page-view hidden" id="diagnosticsView">
+        <div class="quality-banner">故障观测不等同于任务失败，工具错误可能在执行中恢复。统计角色仅查看达到最小群体阈值的汇总；样本和授权材料仅向运营管理员开放。</div>
+        <article class="card table-card" id="failurePanel">
+          <div class="table-head"><div class="table-title"><h2>故障分组</h2><p>按组件、阶段和错误码聚类，支持跨版本追踪处理状态</p></div><span class="pill">最近最多 200 组</span></div>
+          <form id="failureFilters" class="failure-filters">
+            <label><span>应用版本</span><input id="failureVersion" aria-label="故障版本" placeholder="版本（留空为全部）" maxlength="48"></label>
+            <label><span>错误码</span><input id="failureCode" aria-label="具体错误码" placeholder="具体错误码" maxlength="64"></label>
+            <label><span>提供商</span><input id="failureProvider" aria-label="提供商分类" placeholder="提供商分类" maxlength="48"></label>
+            <label><span>平台</span><select id="failurePlatform" aria-label="故障平台"><option value="">全部平台</option><option>windows</option><option>macos</option><option>linux</option><option>web</option></select></label>
+            <label><span>运行模式</span><select id="failureMode" aria-label="故障模式"><option value="">全部模式</option><option>assistant</option><option>code</option><option>team</option><option>scheduled</option></select></label>
+            <label><span>统计周期</span><select id="failureDays" aria-label="故障周期"><option value="1">24 小时</option><option value="7" selected>7 日</option><option value="30">30 日</option></select></label>
+            <button class="filter failure-apply" type="submit">查询故障</button>
+          </form>
+          <p class="failure-status" id="failureStatus" role="status">进入此页后加载故障分组。</p>
+          <div class="table-wrap"><table><thead><tr><th>错误码 / 组件 / 阶段</th><th>观测数 / 安装数</th><th>受影响版本</th><th>首次 / 最近</th><th>处理状态</th><th>操作</th></tr></thead><tbody id="failureRows"></tbody></table></div>
+        </article>
+        <article id="failureAdmin" class="card hidden">
+          <div class="card-title"><div><h2>故障样本与证据</h2><p>选择样本查看脱敏记录与用户授权材料</p></div></div>
+          <p class="note">最多 50 个脱敏样本，优先展示有阶段详情的样本。</p><div class="failure-samples" id="failureSamples"></div>
+          <form id="failureIssueForm" class="failure-issue-form"><label><span>处理状态</span><select id="failureIssueStatus" aria-label="故障处理状态"><option value="open">待定位</option><option value="reproduced">已复现</option><option value="fixed">已修复</option></select></label><label><span>修复版本</span><input id="failureFixedVersion" aria-label="修复版本" placeholder="修复版本" maxlength="48"></label><button class="filter failure-apply" type="submit">保存处理状态</button></form>
+          <p id="failureTimelineStatus" class="note" role="status"></p>
+          <pre id="failureEvidence" class="failure-evidence" aria-label="脱敏故障证据"></pre><div id="failureImages"></div>
+        </article>
+      </section>
       <section class="page-view hidden" id="behaviorView">
         <div class="quality-banner hidden" id="behaviorLoadStatus" role="status"></div>
         <div class="behavior-meta-row"><div class="quality-banner ok" id="behaviorMeta">统计元数据加载中</div><div class="behavior-period"><span class="behavior-period-label">概览周期</span><div class="seg behavior-range" data-behavior-section="summary" role="group" aria-label="行为概览统计周期"><button data-range="today">今日</button><button data-range="7">7 日</button><button class="active" data-range="30">30 日</button></div></div></div>
@@ -99,25 +124,7 @@
           <article class="metric" style="--accent:#c54848;--tint:#fff0f0"><div class="metric-head"><span>任务失败</span><span class="metric-icon">!</span></div><div class="metric-main"><div><div class="number"><span id="taskFailed">—</span><span class="number-unit">次</span></div><div class="note">任务终态为 failed</div></div><span class="trend">终态统计</span></div></article>
         </section>
         <div class="quality-banner" id="behaviorQuality">正在检查样本量与数据质量…</div>
-        <article class="card" id="failurePanel" style="margin-bottom:16px">
-          <h2>故障诊断</h2><p>故障观测按指纹聚类；任务成功率仍使用原任务口径。明细和用户授权材料仅向运营管理员开放。</p>
-          <form id="failureFilters" style="display:flex;flex-wrap:wrap;gap:8px;margin:12px 0">
-            <input id="failureVersion" aria-label="故障版本" placeholder="版本（留空为全部）" maxlength="48">
-            <input id="failureCode" aria-label="具体错误码" placeholder="具体错误码" maxlength="64">
-            <input id="failureProvider" aria-label="提供商分类" placeholder="提供商分类" maxlength="48">
-            <select id="failurePlatform" aria-label="故障平台"><option value="">全部平台</option><option>windows</option><option>macos</option><option>linux</option><option>web</option></select>
-            <select id="failureMode" aria-label="故障模式"><option value="">全部模式</option><option>assistant</option><option>code</option><option>team</option><option>scheduled</option></select>
-            <select id="failureDays" aria-label="故障周期"><option value="1">24 小时</option><option value="7" selected>7 日</option><option value="30">30 日</option></select>
-            <button type="submit">查看故障</button>
-          </form>
-          <p id="failureStatus" role="status">点击查看故障；低于最小群体阈值的分组仅管理员可查看。</p>
-          <div class="table-wrap"><table><thead><tr><th>错误码 / 组件 / 阶段</th><th>观测数 / 安装数</th><th>受影响版本</th><th>首次 / 最近</th><th>处理状态</th><th>操作</th></tr></thead><tbody id="failureRows"></tbody></table></div>
-          <div id="failureAdmin" class="hidden">
-            <p>最多 50 个脱敏样本（优先展示有阶段详情的样本）</p><div id="failureSamples"></div>
-            <form id="failureIssueForm"><select id="failureIssueStatus" aria-label="故障处理状态"><option value="open">待定位</option><option value="reproduced">已复现</option><option value="fixed">已修复</option></select><input id="failureFixedVersion" aria-label="修复版本" placeholder="修复版本" maxlength="48"><button type="submit">保存处理状态</button></form>
-            <pre id="failureEvidence" style="max-height:440px;overflow:auto;white-space:pre-wrap;word-break:break-word"></pre><div id="failureImages"></div>
-          </div>
-        </article>
+
         <section class="metrics">
           <article class="metric" style="--accent:#3267e3;--tint:#eef3ff"><div class="metric-head"><span>WSTA 技术成功</span><span class="metric-icon">✓</span></div><div class="metric-main"><div><div class="number"><span id="valueWsta">—</span><span class="number-unit">台</span></div><div class="note"><span class="fixed-range-note">固定口径</span> · 北京自然周技术成功安装实例</div></div></div></article>
           <article class="metric" style="--accent:#1d9b70;--tint:#eaf8f2"><div class="metric-head"><span>WEVTA 显性价值</span><span class="metric-icon">◆</span></div><div class="metric-main"><div><div class="number"><span id="valueWevta">—</span><span class="number-unit">台</span></div><div class="note"><span class="fixed-range-note">固定口径</span> · 北京自然周、同一回合 30 分钟</div></div><span class="trend" id="valueWevtaRate">—</span></div></article>
@@ -193,7 +200,7 @@
   const statsDay=value=>Math.floor((Number(value)+STATS_TIMEZONE_OFFSET_MS)/DAY_MS);
   const statsDayLabel=day=>new Date(day*DAY_MS).toISOString().slice(0,10);
   async function api(path,options={}){const response=await fetch(`/pinvou3/stats/api/${path}`,{...options,headers:{'content-type':'application/json',...(options.headers||{})}});if(response.status===401)throw new Error('unauthorized');if(response.status===403)throw new Error('forbidden');if(!response.ok)throw new Error(`HTTP ${response.status}`);return response.json()}
-  function showLogin(message=''){failureRevision++;clearFailureDetail();$('failureRows').replaceChildren();if(state.timer)clearInterval(state.timer);state.timer=null;$('loginLayer').classList.remove('hidden');$('loginError').textContent=message;setTimeout(()=>$('password').focus(),60)}
+  function showLogin(message=''){failureRevision++;clearFailureDetail();$('failureRows').replaceChildren();$('failureStatus').textContent='请登录后查看故障诊断。';if(state.timer)clearInterval(state.timer);state.timer=null;$('loginLayer').classList.remove('hidden');$('loginError').textContent=message;setTimeout(()=>$('password').focus(),60)}
   function linePath(values,max,left=35,right=770,top=22,bottom=184){
     let connected=false;
     return values.map((value,index)=>{
@@ -289,7 +296,7 @@
   }
   function renderMetrics(){const counts=state.overview?.counts||{},total=state.devices.length,today=statsDay(Date.now()),weekStart=today-6,todayTurns=Number(state.overview?.usage_trend?.at(-1)?.turns||0),newTodayDevices=state.devices.filter(device=>statsDay(device.first_seen_at)===today),newTodayPlatforms={windows:0,linux:0,macos:0},newWeek=state.devices.filter(device=>{const day=statsDay(device.first_seen_at);return day>=weekStart&&day<=today}).length;newTodayDevices.forEach(device=>{const key=String(device.platform||'').toLowerCase();if(key in newTodayPlatforms)newTodayPlatforms[key]+=1});$('online').textContent=nf.format(counts.online||0);$('activeToday').textContent=nf.format(counts.active_today||0);$('todayTurns').textContent=nf.format(todayTurns);$('activeWeek').textContent=nf.format(counts.active_7d||0);$('newToday').textContent=nf.format(newTodayDevices.length);$('newTodayPlatforms').textContent=`Windows ${nf.format(newTodayPlatforms.windows)} · Linux ${nf.format(newTodayPlatforms.linux)} · macOS ${nf.format(newTodayPlatforms.macos)}`;$('newWeek').textContent=`近 7 日 ${nf.format(newWeek)} 台`;$('onlineRate').textContent=`在线率 ${percent(counts.online||0,total)}`;$('todayRate').textContent=`7日内占比 ${percent(counts.active_today||0,counts.active_7d||0)}`;$('time').textContent=new Date(state.overview?.generated_at||Date.now()).toLocaleTimeString('zh-CN',{hour12:false});renderTrend();renderHourlyTrend();renderVersions()}
   function renderDevices(){const all=state.devices,query=state.query.toLowerCase(),platformCounts={all:all.length,windows:0,linux:0,macos:0};all.forEach(device=>{const key=String(device.platform||'').toLowerCase();if(key in platformCounts)platformCounts[key]+=1});document.querySelectorAll('.platform-tab').forEach(button=>{const selected=button.dataset.platform===state.platform;button.classList.toggle('active',selected);button.setAttribute('aria-selected',String(selected));button.querySelector('b').textContent=nf.format(platformCounts[button.dataset.platform]||0)});const platformDevices=all.filter(device=>state.platform==='all'||String(device.platform||'').toLowerCase()===state.platform),rows=platformDevices.filter(device=>(!query||`${device.device_id} ${device.region||''}`.toLowerCase().includes(query))&&(state.status==='all'||(state.status==='online')===Boolean(device.online))),direction=state.deviceSortDirection==='asc'?1:-1,sortedRows=rows.slice().sort((left,right)=>direction*(Number(left[state.deviceSort]||0)-Number(right[state.deviceSort]||0))||Number(right.last_active_at||0)-Number(left.last_active_at||0)||String(left.device_id).localeCompare(String(right.device_id))),online=platformDevices.filter(device=>device.online).length,platformLabel=state.platform==='all'?'全部平台':platform(state.platform);document.querySelectorAll('th.sortable').forEach(header=>{const active=header.dataset.sort===state.deviceSort;header.classList.toggle('sort-active',active);header.classList.toggle('asc',active&&state.deviceSortDirection==='asc');header.classList.toggle('desc',active&&state.deviceSortDirection==='desc');header.setAttribute('aria-sort',active?(state.deviceSortDirection==='asc'?'ascending':'descending'):'none')});$('deviceSummary').textContent=`${platformLabel}：共 ${nf.format(platformDevices.length)} 台设备 · ${nf.format(online)} 台在线`;$('deviceRows').innerHTML=sortedRows.length?sortedRows.map(device=>`<tr><td><div class="device"><span class="device-icon">▣</span><div><b title="${escapeHtml(device.device_id)}">${escapeHtml(device.device_id)}</b><small>桌面设备</small></div></div></td><td><span class="pill ${device.online?'online':''}"><i></i>${device.online?'在线':'离线'}</span></td><td><span class="version">${escapeHtml(device.app_version||'—')}</span></td><td>${escapeHtml(platform(device.platform))}</td><td class="region">${escapeHtml(device.region||'未知')}</td><td>${dateTime(device.first_seen_at)}</td><td>${relativeTime(device.last_active_at)}</td><td>${nf.format(device.turns_7d||0)}</td><td>${nf.format(device.turns_today||0)}</td></tr>`).join(''):'<tr><td class="table-empty" colspan="9">没有符合条件的设备</td></tr>'}
-  function renderPageTabs(){const titles={devices:['设备运营概览','掌握设备在线情况、活跃趋势与版本健康度'],behavior:['安装实例行为','查看任务、语音、工具和场景使用情况'],remote:['远程控制','查看双端使用、执行结果和连接质量'],commercial:['商业转化未接入','P2 商业与实验本版本暂不实现']};document.querySelectorAll('.page-tab').forEach(button=>{button.hidden=state.role==='behavior_analyst'&&!['behavior','remote'].includes(button.dataset.view);const selected=button.dataset.view===state.view;button.classList.toggle('active',selected);button.setAttribute('aria-selected',String(selected))});document.querySelectorAll('.page-view').forEach(view=>view.classList.toggle('hidden',view.id!==`${state.view}View`));$('pageTitle').textContent=titles[state.view][0];$('pageSubtitle').textContent=titles[state.view][1]}
+  function renderPageTabs(){const titles={devices:['设备运营概览','掌握设备在线情况、活跃趋势与版本健康度'],behavior:['安装实例行为','查看任务、语音、工具和场景使用情况'],diagnostics:['故障诊断','查看故障分组、脱敏样本与处理进展'],remote:['远程控制','查看双端使用、执行结果和连接质量'],commercial:['商业转化未接入','P2 商业与实验本版本暂不实现']};document.querySelectorAll('.page-tab').forEach(button=>{button.hidden=state.role==='behavior_analyst'&&!['behavior','remote','diagnostics'].includes(button.dataset.view);const selected=button.dataset.view===state.view;button.classList.toggle('active',selected);button.setAttribute('aria-selected',String(selected))});document.querySelectorAll('.page-view').forEach(view=>view.classList.toggle('hidden',view.id!==`${state.view}View`));$('pageTitle').textContent=titles[state.view][0];$('pageSubtitle').textContent=titles[state.view][1]}
   function renderSimpleRows(target,rows,columns,empty='暂无数据'){const body=$(target);body.innerHTML=rows?.length?rows.map(row=>`<tr>${columns.map(column=>`<td>${column(row)}</td>`).join('')}</tr>`).join(''):`<tr><td class="table-empty" colspan="${columns.length}">${empty}</td></tr>`}
   function renderBehavior(){
     const report=state.behavior||{},metrics=report.metrics||{},quality=report.data_quality||{};
@@ -410,13 +417,18 @@
   }
   async function refreshData(manual=false){
     const version=++state.dataRefreshVersion,isCurrent=()=>state.dataRefreshVersion===version;
+    if(manual)$('refreshButton').textContent='↻ 刷新';
     try{
       const session=await api('session');
       if(!isCurrent())return;
       if(state.role!==session.role){failureRevision++;clearFailureDetail();$('failureRows').replaceChildren()}
       state.role=session.role;
-      if(state.role==='behavior_analyst'){
-        if(!['behavior','remote'].includes(state.view))state.view='behavior';$('loginLayer').classList.add('hidden');renderPageTabs();await refreshBehavior();
+      const diagnosticsRefresh=manual&&state.view==='diagnostics';
+      let diagnosticsOk=true;
+      if(diagnosticsRefresh){
+        $('loginLayer').classList.add('hidden');renderPageTabs();diagnosticsOk=await loadFailures();
+      }else if(state.role==='behavior_analyst'){
+        if(!['behavior','remote','diagnostics'].includes(state.view))state.view='behavior';$('loginLayer').classList.add('hidden');renderPageTabs();await refreshBehavior();
         if(!isCurrent())return;
         $('time').textContent=new Date(state.behavior?.generated_at||Date.now()).toLocaleTimeString('zh-CN',{hour12:false});
       }else{
@@ -425,51 +437,57 @@
         state.overview=overview;state.devices=devices.devices||[];$('loginLayer').classList.add('hidden');renderPageTabs();renderMetrics();renderDevices();await refreshBehavior();
         if(!isCurrent())return;
       }
-      if(manual){$('refreshButton').textContent=Object.keys(state.behaviorErrors).length?'↻ 部分失败，重试':'✓ 已更新';if(!Object.keys(state.behaviorErrors).length)setTimeout(()=>{if(isCurrent())$('refreshButton').textContent='↻ 刷新'},1200)}
+      if(!isCurrent()||diagnosticsOk===null)return;
+      if(manual){const failed=!diagnosticsOk||(!diagnosticsRefresh&&Object.keys(state.behaviorErrors).length);$('refreshButton').textContent=failed?'↻ 部分失败，重试':'✓ 已更新';if(!failed)setTimeout(()=>{if(isCurrent())$('refreshButton').textContent='↻ 刷新'},1200)}
     }catch(error){if(!isCurrent())return;if(error.message==='unauthorized')showLogin();else{$('time').textContent=error.message==='forbidden'?'当前角色无权访问':'刷新失败';if(manual)$('refreshButton').textContent='↻ 重试'}}
   }
   document.querySelectorAll('[data-daily-metric]').forEach(input=>input.addEventListener('change',()=>{if(input.checked)state.dailyMetrics.add(input.dataset.dailyMetric);else state.dailyMetrics.delete(input.dataset.dailyMetric);renderTrend()}));
   document.querySelectorAll('[data-hourly-metric]').forEach(input=>input.addEventListener('change',()=>{if(input.checked)state.hourlyMetrics.add(input.dataset.hourlyMetric);else state.hourlyMetrics.delete(input.dataset.hourlyMetric);renderHourlyTrend()}));
   document.querySelectorAll('.seg button[data-days]').forEach(button=>button.addEventListener('click',()=>{document.querySelectorAll('.seg button[data-days]').forEach(item=>item.classList.remove('active'));button.classList.add('active');state.range=Number(button.dataset.days);renderTrend()}));
-  document.querySelectorAll('.page-tab').forEach(button=>button.addEventListener('click',()=>{state.view=button.dataset.view;renderPageTabs()}));
+  document.querySelectorAll('.page-tab').forEach(button=>button.addEventListener('click',()=>{state.view=button.dataset.view;renderPageTabs();if(state.view==='diagnostics')void loadFailures()}));
   document.querySelectorAll('.behavior-range button').forEach(button=>button.addEventListener('click',async()=>{const section=button.closest('.behavior-range').dataset.behaviorSection,range=button.dataset.range;if(state.behaviorRanges[section]===range)return;setBehaviorRangeBusy(section,true);try{await refreshBehaviorSection(section,range)}catch{syncBehaviorRangeControls(section)}finally{setBehaviorRangeBusy(section,false)}}));
   document.querySelectorAll('.platform-tab').forEach(button=>button.addEventListener('click',()=>{state.platform=button.dataset.platform;renderDevices()}));
   $('deviceSearch').addEventListener('input',event=>{state.query=event.target.value.trim();renderDevices()});
   document.querySelectorAll('th.sortable[data-sort]').forEach(header=>header.addEventListener('click',()=>{const sort=header.dataset.sort;if(state.deviceSort===sort)state.deviceSortDirection=state.deviceSortDirection==='desc'?'asc':'desc';else{state.deviceSort=sort;state.deviceSortDirection='desc'}renderDevices()}));
   $('statusFilter').addEventListener('click',()=>{state.status=state.status==='all'?'online':state.status==='online'?'offline':'all';$('statusFilter').textContent={all:'全部状态⌄',online:'仅在线⌄',offline:'仅离线⌄'}[state.status];renderDevices()});
   let failureRevision=0,selectedFailure=null;
-  function clearFailureDetail(){selectedFailure=null;$('failureAdmin').classList.add('hidden');$('failureEvidence').textContent='';$('failureImages').replaceChildren();$('failureSamples').replaceChildren()}
-  async function diagnosticApi(path,options){try{return await api(path,options)}catch(error){if(error.message==='unauthorized')showLogin();else if(error.message==='forbidden'){failureRevision++;clearFailureDetail();$('failureRows').replaceChildren();$('failureStatus').textContent='权限已改变，请刷新后重试。'}throw error}}
+  function clearFailureDetail(){$('failurePanel').setAttribute('aria-busy','false');selectedFailure=null;$('failureTimelineStatus').textContent='';$('failureAdmin').classList.add('hidden');$('failureEvidence').textContent='';$('failureImages').replaceChildren();$('failureSamples').replaceChildren()}
+  async function diagnosticApi(path,options,revision){try{return await api(path,options)}catch(error){if(revision!==failureRevision)throw error;if(error.message==='unauthorized')showLogin();else if(error.message==='forbidden'){failureRevision++;clearFailureDetail();$('failureRows').replaceChildren();$('failureStatus').textContent='权限已改变，请刷新后重试。'}throw error}}
   function failureFilterParams(){return new URLSearchParams({days:$('failureDays').value,app_version:$('failureVersion').value.trim(),diagnostic_code:$('failureCode').value.trim(),provider_key:$('failureProvider').value.trim(),platform:$('failurePlatform').value,mode:$('failureMode').value})}
   async function loadFailures(){
-    const revision=++failureRevision;clearFailureDetail();$('failureRows').replaceChildren();$('failureStatus').textContent='加载中…';
+    const revision=++failureRevision;clearFailureDetail();$('failureRows').replaceChildren();$('failurePanel').setAttribute('aria-busy','true');$('failureStatus').textContent='加载中…';
     const params=failureFilterParams();
-    try{const report=await diagnosticApi(`behavior/failures?${params}`);if(revision!==failureRevision)return;
+    try{const report=await diagnosticApi(`behavior/failures?${params}`,undefined,revision);if(revision!==failureRevision)return null;
       $('failureStatus').textContent=report.rows.length?'点击样本查看证据；工具错误可能已被任务恢复，不能直接等同任务失败。':'当前条件无可展示记录，旧客户端未提供证据时不会反推原因。';
-      renderSimpleRows('failureRows',report.rows,[r=>escapeHtml(`${r.code} / ${r.component} / ${r.stage}`),r=>`${nf.format(r.count)} / ${nf.format(r.installations)}`,r=>escapeHtml(JSON.stringify(r.versions)),r=>escapeHtml(`${new Date(r.first_seen).toLocaleString()} / ${new Date(r.last_seen).toLocaleString()}`),r=>escapeHtml(`${({open:'待定位',reproduced:'已复现',fixed:'已修复'})[r.status]||r.status} ${r.fixed_version||''}`),r=>report.detail_allowed?`<button data-failure-group="${escapeHtml(r.fingerprint)}" data-failure-state="${escapeHtml(r.status)}" data-fixed-version="${escapeHtml(r.fixed_version||'')}">查看样本</button>`:'仅汇总']);
-    }catch{if(revision===failureRevision)$('failureStatus').textContent='故障诊断加载失败，请检查权限或服务端版本后重试。'}
+      renderSimpleRows('failureRows',report.rows,[r=>escapeHtml(`${r.code} / ${r.component} / ${r.stage}`),r=>`${nf.format(r.count)} / ${nf.format(r.installations)}`,r=>Object.entries(r.versions||{}).map(([version,count])=>`<span class="version">${escapeHtml(version)} · ${nf.format(count)}</span>`).join(' '),r=>`${dateTime(r.first_seen)}<br><span class="note">${dateTime(r.last_seen)}</span>`,r=>escapeHtml(`${({open:'待定位',reproduced:'已复现',fixed:'已修复'})[r.status]||r.status} ${r.fixed_version||''}`),r=>report.detail_allowed?`<button class="filter" data-failure-group="${escapeHtml(r.fingerprint)}" data-failure-state="${escapeHtml(r.status)}" data-fixed-version="${escapeHtml(r.fixed_version||'')}">查看样本</button>`:'仅汇总']);
+      return true;
+    }catch{if(revision!==failureRevision)return null;$('failureStatus').textContent='故障诊断加载失败，请检查权限或服务端版本后重试。';return false}finally{if(revision===failureRevision)$('failurePanel').setAttribute('aria-busy','false')}
   }
   $('failureFilters').addEventListener('submit',event=>{event.preventDefault();void loadFailures()});
   $('failureRows').addEventListener('click',async event=>{
     const button=event.target.closest('[data-failure-group]');if(!button||state.role!=='operations_admin')return;
     const revision=++failureRevision;clearFailureDetail();selectedFailure=button.dataset.failureGroup;$('failureAdmin').classList.remove('hidden');$('failureIssueStatus').value=button.dataset.failureState;$('failureFixedVersion').value=button.dataset.fixedVersion;
-    try{const result=await diagnosticApi(`diagnostics/samples?${failureFilterParams()}&fingerprint=${encodeURIComponent(selectedFailure)}`);if(revision!==failureRevision)return;
-      for(const item of result.incidents){const sample=document.createElement('button');sample.type='button';sample.textContent=`${new Date(item.at).toLocaleString()} · ${item.version} · ${item.mode||'—'} · ${item.code}`;sample.dataset.failureIncident=item.id;$('failureSamples').append(sample,document.createElement('br'))}
+    try{const result=await diagnosticApi(`diagnostics/samples?${failureFilterParams()}&fingerprint=${encodeURIComponent(selectedFailure)}`,undefined,revision);if(revision!==failureRevision)return;
+      if(!result.incidents.length)$('failureSamples').textContent='当前条件下暂无可用样本。';
+      for(const item of result.incidents){const sample=document.createElement('button');sample.type='button';sample.className='filter';sample.setAttribute('aria-pressed','false');sample.textContent=`${new Date(item.at).toLocaleString()} · ${item.version} · ${item.mode||'—'} · ${item.code}`;sample.dataset.failureIncident=item.id;$('failureSamples').append(sample)}
     }catch{if(revision===failureRevision)$('failureStatus').textContent='样本读取失败，请重试。'}
   });
   $('failureSamples').addEventListener('click',async event=>{
     const button=event.target.closest('[data-failure-incident]');if(!button||state.role!=='operations_admin')return;
-    const revision=++failureRevision;$('failureEvidence').textContent='加载中…';$('failureImages').replaceChildren();
-    try{const result=await diagnosticApi(`diagnostics/incident?id=${encodeURIComponent(button.dataset.failureIncident)}`);if(revision!==failureRevision)return;
+    document.querySelectorAll('[data-failure-incident]').forEach(item=>item.setAttribute('aria-pressed',String(item===button)));
+    const revision=++failureRevision;$('failureTimelineStatus').textContent='';$('failureEvidence').textContent='加载中…';$('failureImages').replaceChildren();
+    try{const result=await diagnosticApi(`diagnostics/incident?id=${encodeURIComponent(button.dataset.failureIncident)}`,undefined,revision);if(revision!==failureRevision)return;
+      const coverage=result.timeline_context;
+      $('failureTimelineStatus').textContent=coverage?`相关事件 ${coverage.returned_events} / ${coverage.total_events} 条${coverage.truncated?' · 已截断，优先保留故障附近事件':''}${coverage.task_terminal_included?' · 包含任务终态':' · 暂无可关联的任务终态'}`:'服务端未提供时间线完整性信息。';
       const textReports=result.reports.map(report=>({...report,attachments:report.attachments.map(item=>({kind:item.kind,...(item.kind==='text'?{content:item.content}:{})}))}));
-      $('failureEvidence').textContent=JSON.stringify({incident:result.incident,timeline:result.timeline,related:result.related,reports:textReports},null,2);
+      $('failureEvidence').textContent=JSON.stringify({incident:result.incident,timeline:result.timeline,timeline_context:result.timeline_context,related:result.related,reports:textReports},null,2);
       for(const report of result.reports)for(const item of report.attachments){if(!['image/png','image/jpeg'].includes(item.kind))continue;const img=document.createElement('img');img.src=`data:${item.kind};base64,${item.content}`;img.alt='用户逐次授权的诊断截图';img.style.maxWidth='100%';img.style.maxHeight='480px';$('failureImages').append(img)}
     }catch{if(revision===failureRevision)$('failureEvidence').textContent='证据读取失败或已过期。'}
   });
-  $('failureIssueForm').addEventListener('submit',async event=>{event.preventDefault();if(!selectedFailure||state.role!=='operations_admin')return;const revision=failureRevision;try{await diagnosticApi('diagnostics/issue',{method:'POST',headers:{'X-Pinvou-Diagnostics':'1'},body:JSON.stringify({fingerprint:selectedFailure,issue:{status:$('failureIssueStatus').value,fixed_version:$('failureFixedVersion').value.trim()}})});if(revision===failureRevision)await loadFailures()}catch{if(revision===failureRevision)$('failureStatus').textContent='处理状态保存失败，标记已修复时须填写有效修复版本。'}});
+  $('failureIssueForm').addEventListener('submit',async event=>{event.preventDefault();if(!selectedFailure||state.role!=='operations_admin')return;const revision=failureRevision;try{await diagnosticApi('diagnostics/issue',{method:'POST',headers:{'X-Pinvou-Diagnostics':'1'},body:JSON.stringify({fingerprint:selectedFailure,issue:{status:$('failureIssueStatus').value,fixed_version:$('failureFixedVersion').value.trim()}})},revision);if(revision===failureRevision)await loadFailures()}catch{if(revision===failureRevision)$('failureStatus').textContent='处理状态保存失败，标记已修复时须填写有效修复版本。'}});
   $('logout').addEventListener('click',()=>{failureRevision++;clearFailureDetail();$('failureRows').replaceChildren();$('failureStatus').textContent='请登录后查看故障诊断。'},true);
   $('refreshButton').addEventListener('click',()=>refreshData(true));
-  $('loginForm').addEventListener('submit',async event=>{event.preventDefault();$('loginError').textContent='';try{await api('login',{method:'POST',body:JSON.stringify({password:$('password').value})});$('password').value='';$('loginLayer').classList.add('hidden');await refreshData();if(!state.timer)state.timer=setInterval(refreshData,30000)}catch(error){showLogin(error.message==='unauthorized'?'密码不正确，请重试':'登录失败，请稍后重试')}});
+  $('loginForm').addEventListener('submit',async event=>{event.preventDefault();$('loginError').textContent='';try{await api('login',{method:'POST',body:JSON.stringify({password:$('password').value})});$('password').value='';$('loginLayer').classList.add('hidden');await refreshData();if(state.view==='diagnostics'&&$('loginLayer').classList.contains('hidden'))await loadFailures();if(!state.timer&&$('loginLayer').classList.contains('hidden'))state.timer=setInterval(refreshData,30000)}catch(error){showLogin(error.message==='unauthorized'?'密码不正确，请重试':'登录失败，请稍后重试')}});
   $('logout').addEventListener('click',async()=>{try{await api('logout',{method:'POST',body:'{}'})}catch{}state.role=null;showLogin()});
   Object.keys(state.behaviorRanges).forEach(syncBehaviorRangeControls);
   refreshData().then(()=>{if($('loginLayer').classList.contains('hidden')&&!state.timer)state.timer=setInterval(refreshData,30000)});

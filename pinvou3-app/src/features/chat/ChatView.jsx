@@ -2709,12 +2709,6 @@ const openChatExternalUrl = (url) => {
           : (controlledChatActive ? (hasDraftText || hasReadyAttachment || hasSessionRefs)
             : (hasDraftText || hasReadyAttachment || hasSessionRefs)));
       const sceneCapabilityPreparing = sceneCapabilityStatus && sceneCapabilityStatus.kind === 'preparing';
-      const canClearInput = hasDraftText && !voiceActive;
-      function handleClearInput() {
-        if (!canClearInput) return;
-        handleComposerInputChange('');
-        composerRef.current?.focus();
-      }
       // eslint-disable-next-line sonarjs/cognitive-complexity -- scene-capability preflight and send orchestration are cohesive in a single callback; split refactor tracked separately
       const dispatchChatMessage = useCallback(async (text, voiceMeta, voiceOwner) => {
         // Round-29 m8 (review #455): this flow awaits IPC between status
@@ -3435,6 +3429,17 @@ const openChatExternalUrl = (url) => {
             variant="timeline"
           />
         : undefined), [activeSessionId, t]);
+      const retryLastTurn = useCallback((turn) => {
+        // Regenerate: re-send the last user turn verbatim. The timeline only
+        // hands us the newest turn; skip while a reply is streaming. Kept on
+        // a useCallback so the memoized timeline's props stay referentially
+        // stable across streaming renders; the retryReason payload is this
+        // repo's own feedback-retry telemetry (395365006), preserved on top
+        // of the backported #789 behavior.
+        if (!busy && turn && turn.userText && bridge.available) {
+          bridge.interaction.editLastTurn(turn.userText, { retryReason: 'manual_regenerate' });
+        }
+      }, [busy]);
       const timelineAssistantAvatar = useMemo(() => (
         <div className="mt-1 flex h-7 w-7 shrink-0 items-center justify-center">
           <PinvouLogo className="h-5 w-5" title={chatViewCopy.agentName} />
@@ -4261,6 +4266,19 @@ const openChatExternalUrl = (url) => {
       });
       const handleVoiceTrigger = chatVoice.triggerVoice;
 
+      // One-click draft clear: hidden while the composer is empty, disabled while a
+      // voice capture/rewrite is in flight or an edit rewrite preview is armed
+      // (clearing mid-capture would race the write-back; clearing with a pending
+      // preview would strand a stale card). Declared after the voice hook so the
+      // preview flag is in scope. Backflow pinvou-agent#789: the editPreview arm
+      // closes the gap where clearing stranded an armed rewrite preview.
+      const canClearInput = hasDraftText && !voiceActive && !chatVoice.editPreview;
+      function handleClearInput() {
+        if (!canClearInput) return;
+        handleComposerInputChange('');
+        composerRef.current?.focus();
+      }
+
       function rememberVoiceIntroSeen() {
         setVoiceIntroSeenState(true);
         setVoiceShortcutIntroSeen(true);
@@ -4921,11 +4939,7 @@ const openChatExternalUrl = (url) => {
                     busy={busy}
                     turnGapPx={16}
                     followOutputRef={autoScrollRef}
-                    onRetry={(turn) => {
-                      if (!busy && turn.userText && bridge.available) {
-                        bridge.interaction.editLastTurn(turn.userText, { retryReason: 'manual_regenerate' });
-                      }
-                    }}
+                    onRetry={isMultiAgentReadOnly ? undefined : retryLastTurn}
                     copy={t.uiConversation}
                     agentLabel={chatViewCopy.agentName}
                     assistantAvatar={(timelineAssistantAvatar)}
@@ -5514,7 +5528,7 @@ const openChatExternalUrl = (url) => {
                   )}
                 </div>
                 {hasDraftText && (
-                  <button onClick={handleClearInput} disabled={!canClearInput} aria-label={t.clearInput} title={t.clearInput}
+                  <button type="button" data-testid="chat-clear-input" onClick={handleClearInput} disabled={!canClearInput} aria-label={t.clearInput} title={t.clearInput}
                     className={`w-9 h-9 shrink-0 rounded-full flex items-center justify-center transition-colors ${
                       canClearInput
                         ? 'text-[#5F6368] hover:bg-black/5 dark:text-[#C4C7C5] dark:hover:bg-white/10'
