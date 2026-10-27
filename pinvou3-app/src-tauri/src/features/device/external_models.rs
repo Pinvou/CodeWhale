@@ -9,6 +9,11 @@
 //! 权重删除是全文件最危险的动作，所以守卫拆成**纯函数**
 //! （`weights_deletion_guard`），输入只有 (家目录, 权重路径)，测试矩阵直接覆盖。
 
+// architecture-guard: allow-target-cfg -- 生产代码零 target cfg；唯一 target
+// cfg 在相交矩阵测试的符号链接别名用例上：std::os::unix::fs::symlink 在
+// Windows 不存在，运行时 OS 判断保不住类型检查（projects/tests.rs round-19
+// BLOCKER 1 同款结论），且 symlink 无特权创建仅 unix 可用。
+
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
@@ -94,11 +99,14 @@ pub(crate) fn registry_dir() -> PathBuf {
         .join("external-models.d")
 }
 
-/// 商店边界（路径臂）：权重路径位于**任一**商店权重根之下即命中。根列表由
-/// `model_store::store_weights_roots()` 提供（默认 store 数据根 + 设置里可自定义
-/// 的 `models_dir`）——设备侧不得自行推断默认值，否则商店改了权重根这里就会漂移。
+/// 商店边界（路径臂）：权重路径与**任一**商店权重根相交（位于其下、包含该根
+/// 或两者相等）即命中。根列表由 `model_store::store_weights_roots()` 提供（默认
+/// store 数据根 + 设置里可自定义的 `models_dir`）——设备侧不得自行推断默认值，
+/// 否则商店改了权重根这里就会漂移。祖先方向（登记路径包含商店权重根）同样拒绝：
+/// 放行的话登记能成功，移除时递归删除会把整棵商店权重根连根清掉（二十六轮
+/// 评审 P1），登记端先拒绝比留一条永远删不掉的记录更好。
 fn weights_in_store(weights: &str) -> bool {
-    path_under_any(
+    paths_intersect_any(
         Path::new(weights),
         &crate::features::model_store::store_weights_roots(),
     )
@@ -107,6 +115,25 @@ fn weights_in_store(weights: &str) -> bool {
 /// 路径包含判断（多根版，测试直打）：任一根命中即 true。
 fn path_under_any(path: &Path, roots: &[PathBuf]) -> bool {
     roots.iter().any(|root| path_is_under(path, root))
+}
+
+/// 路径相交判断：相等、任一侧包含另一侧都算命中。解析纪律与 [`path_is_under`]
+/// 相同（原样、解析后、双侧 canonical），等价于两个方向各做一次单向判断——
+/// 复用 [`path_is_under`] 而不是另写解析，避免两套规范化口径漂移。
+///
+/// 删除语义下单向判断不够：`target.starts_with(root)` 只回答"目标在根之下"，
+/// "目标是根的祖先"会放行，而 `remove_dir_all` 对祖先目标恰好是整棵连根删
+/// （二十六轮评审 P1：外部权重登记 `$HOME/ai/shared/weights`，商店自定义
+/// `models_dir` 在其内的 `store-managed` 子目录——初次检查与删除时复查都单向
+/// 放行，商店管理的权重被连带清掉）。比较基于 `Path::starts_with` 的路径分量
+/// 语义，不做字符串前缀匹配。
+fn paths_intersect(a: &Path, b: &Path) -> bool {
+    path_is_under(a, b) || path_is_under(b, a)
+}
+
+/// 路径相交判断（多根版，测试直打）：任一根命中即 true。
+fn paths_intersect_any(path: &Path, roots: &[PathBuf]) -> bool {
+    roots.iter().any(|root| paths_intersect(path, root))
 }
 
 /// 本机 Ollama 守护进程的**候选**模型权重根（纯函数，测试直打）：`OLLAMA_MODELS`
@@ -130,17 +157,20 @@ fn ollama_model_roots(env_value: Option<&str>, home: &Path) -> Vec<PathBuf> {
     roots
 }
 
-/// 登记端路径臂：weights_path（**任何 kind**）落在任一 daemon 模型候选根内即拒绝。
-/// kind 只是自我声明的元数据，照抄它布防会让 "other"/"llamacpp" 记录带着同样
-/// 的 weights_path 绕过全链（`~/.ollama/models/blobs` 恰好家目录三层，深度臂
-/// 放行）。与 `weights_in_store` 同池执行（canonicalize 是文件系统调用）。
+/// 登记端路径臂：weights_path（**任何 kind**）与任一 daemon 模型候选根相交
+/// （位于其下、包含该根或两者相等）即拒绝。kind 只是自我声明的元数据，照抄它
+/// 布防会让 "other"/"llamacpp" 记录带着同样的 weights_path 绕过全链
+/// （`~/.ollama/models/blobs` 恰好家目录三层，深度臂放行）。祖先方向同样拒绝：
+/// env 迁移根（如 `$HOME/ai/shared/models`）比登记路径更深时，单向判断放行，
+/// 移除会连根删掉 daemon 的候选根（二十六轮评审 P1 同向缺口）。与
+/// `weights_in_store` 同池执行（canonicalize 是文件系统调用）。
 fn weights_under_ollama_root(weights: &str) -> bool {
     ollama_model_roots(
         std::env::var("OLLAMA_MODELS").ok().as_deref(),
         &crate::platform::paths::user_home_dir(),
     )
     .iter()
-    .any(|root| path_is_under(Path::new(weights), root))
+    .any(|root| paths_intersect(Path::new(weights), root))
 }
 
 /// daemon 模型库布局签名（第九轮评审 P2，第二十轮评审 P2 扩展，纯函数测试直打）：
@@ -574,13 +604,14 @@ pub async fn register_external_model(
             effective_ollama_name.unwrap_or_default()
         ));
     }
-    // 商店边界（路径臂）：权重位于任一商店权重根（含自定义 models_dir）之下，
-    // 与名字臂同等拒绝——否则商店权重可被登记成外部模型后经设备管理删除。
-    // 回显限长：手写/存量记录的 weights_path 只受 64KB 记录上限约束，超长路径
-    // 不该逐字搬进错误与日志（第二十轮评审 P3）。
+    // 商店边界（路径臂）：权重与任一商店权重根（含自定义 models_dir）相交
+    // （位于其下或包含该根），与名字臂同等拒绝——否则商店权重可被登记成外部
+    // 模型后经设备管理删除；祖先方向放行的话，移除时递归删除会把商店权重根
+    // 连根清掉（二十六轮评审 P1）。回显限长：手写/存量记录的 weights_path
+    // 只受 64KB 记录上限约束，超长路径不该逐字搬进错误与日志（第二十轮评审 P3）。
     if weights_hit {
         return Err(format!(
-            "“{}”位于模型商店目录之下，由模型商店管理，不能登记为外部模型；请前往模型商店操作",
+            "“{}”与模型商店目录相交（位于商店目录之下，或包含商店权重根），由模型商店管理，不能登记为外部模型；请前往模型商店操作",
             truncate_path_echo(weights_path.unwrap_or_default().as_str())
         ));
     }
@@ -590,7 +621,7 @@ pub async fn register_external_model(
     // 深度臂放行，整目录删除会连根清掉全部 blob（含商店 ollama 卡片的权重）。
     if ollama_root_hit {
         return Err(format!(
-            "“{}”位于本机 Ollama 守护进程的模型目录之内，权重由守护进程统一管理，不能登记为权重路径",
+            "“{}”与本机 Ollama 守护进程的模型目录相交，权重由守护进程统一管理，不能登记为权重路径",
             truncate_path_echo(weights_path.unwrap_or_default().as_str())
         ));
     }
@@ -861,7 +892,7 @@ pub async fn remove_external_model(
                 // 登记端维持宽松版 weights_in_store）。
                 Some(weights) => {
                     let roots = crate::features::model_store::store_weights_roots_checked()?;
-                    path_under_any(Path::new(weights), &roots)
+                    paths_intersect_any(Path::new(weights), &roots)
                 }
                 None => false,
             };
@@ -1071,8 +1102,10 @@ fn removal_boundary_error(
         ));
     }
     if weights_in_store {
+        // 相交两个方向共用一句：祖先方向（登记路径包含商店权重根）的删除同样
+        // 由商店边界拦下——递归删除会连根清掉商店目录（二十六轮评审 P1）。
         return Err(format!(
-            "该模型的权重位于模型商店目录之下，由模型商店管理，请在模型商店中操作{STORE_BOUNDARY_ESCAPE_HINT}"
+            "该模型的权重目录与模型商店目录相交（位于商店目录之下，或包含商店权重根），由模型商店管理，请在模型商店中操作{STORE_BOUNDARY_ESCAPE_HINT}"
         ));
     }
     Ok(())
@@ -1155,22 +1188,34 @@ pub(crate) fn weights_deletion_guard(
                 protected.display()
             )
         })?;
-        if target == protected_canonical || target.starts_with(&protected_canonical) {
+        // 相交两方向都拒绝（二十六轮评审 P1）：目标在根之下覆盖了既有臂，祖先
+        // 方向（目标包含保护根）此前会放行——不过该方向对应用数据根实际到不了
+        // （目标必须位于家目录之下且家目录本身已被拒），这里补齐是防御纵深，与
+        // 商店/Ollama 根的相交臂同口径。
+        if target == protected_canonical
+            || target.starts_with(&protected_canonical)
+            || protected_canonical.starts_with(&target)
+        {
             return Err(format!(
-                "拒绝删除：目标位于应用数据目录（{}）之内，请到设置或模型商店操作",
+                "拒绝删除：目标目录与应用数据目录（{}）相交，请到设置或模型商店操作",
                 protected_canonical.display()
             ));
         }
     }
     // daemon 模型候选根逐根比对（第二十轮评审 P2：env 迁移根 + 默认根并集，
     // env 失真时默认根不再失守）。根不存在（未装 Ollama / env 指向未建目录）时
-    // canonicalize 失败：目标目录存在而该根不存在，"目标在根之下"不可能成立，
-    // 跳过该根是安全的；可解析根与保护根同口径。
+    // canonicalize 失败：跳过的只是"目标在根之下"方向，根不存在时祖先方向同样
+    // 不可能成立（目标存在而根不存在，互不包含），跳过该根是安全的；可解析根
+    // 与保护根同口径，相交两方向都拒绝（二十六轮评审 P1：env 迁移根比目标
+    // 更深时，单向判断放行祖先目标，递归删除连根清掉 daemon 候选根）。
     for root in ollama_roots {
         if let Ok(root_canonical) = root.canonicalize() {
-            if target == root_canonical || target.starts_with(&root_canonical) {
+            if target == root_canonical
+                || target.starts_with(&root_canonical)
+                || root_canonical.starts_with(&target)
+            {
                 return Err(format!(
-                    "拒绝删除：目标位于 Ollama 守护进程的模型目录（{}）之内，权重由守护进程统一管理",
+                    "拒绝删除：目标目录与 Ollama 守护进程的模型目录（{}）相交，权重由守护进程统一管理",
                     root_canonical.display()
                 ));
             }
@@ -1328,14 +1373,16 @@ fn ensure_recheck_unchanged(target: &Path, recheck: &Path) -> Result<(), String>
 }
 
 /// 删除时刻商店权重根复查的纯逻辑（测试直打，第二十轮评审 P3）：守卫通过到
-/// 真正删除之间，目录可能已被移进任一商店权重根——命中即拒绝，由模型商店管理。
+/// 真正删除之间，目录可能已被移进任一商店权重根、或目录本就是商店权重根的
+/// 祖先（递归删除连根清掉根内商店权重，二十六轮评审 P1）——相交即拒绝，
+/// 由模型商店管理。
 fn ensure_recheck_outside_store_roots(
     recheck: &Path,
     store_roots: &[PathBuf],
 ) -> Result<(), String> {
-    if path_under_any(recheck, store_roots) {
+    if paths_intersect_any(recheck, store_roots) {
         return Err(
-            "拒绝删除：目标位于模型商店目录之下，由模型商店管理，请在模型商店中操作".to_string(),
+            "拒绝删除：目标目录与模型商店目录相交（位于商店目录之下，或包含商店权重根），由模型商店管理，请在模型商店中操作".to_string(),
         );
     }
     Ok(())
@@ -1828,12 +1875,27 @@ mod tests {
             weights_deletion_guard(home.path(), None, std::slice::from_ref(&root), &weights)
                 .is_ok()
         );
-        // 根不存在（未装 Ollama）时跳过该臂：目标存在而根不存在，"目标在根
-        // 之下"不可能成立。
+        // 根不存在（未装 Ollama）时跳过该臂：目标存在而根不存在，两个方向的
+        // 包含都不可能成立。
         let missing = home.path().join("no-ollama").join("models");
         assert!(
             weights_deletion_guard(home.path(), None, std::slice::from_ref(&missing), &weights)
                 .is_ok()
+        );
+        // 祖先方向（二十六轮评审 P1）：目标是候选根的祖先必须拒绝——env 迁移
+        // 根比目标更深时（如 OLLAMA_MODELS 指向权重目录内的 models/），单向
+        // 判断放行，递归删除连根清掉 daemon 候选根。祖先深度 ≥ 3 家目录层，
+        // 深度臂不再兜底。
+        let deep_env_root = weights.join("daemon-models");
+        std::fs::create_dir_all(&deep_env_root).expect("create env root");
+        assert!(
+            weights_deletion_guard(
+                home.path(),
+                None,
+                std::slice::from_ref(&deep_env_root),
+                &weights
+            )
+            .is_err()
         );
     }
 
@@ -1880,6 +1942,10 @@ mod tests {
         assert!(weights_deletion_guard(home.path(), Some(&app_root), &[], &deep_app).is_err());
         // 保护根本身同样拒绝。
         assert!(weights_deletion_guard(home.path(), Some(&app_root), &[], &app_root).is_err());
+        // 祖先方向（二十六轮评审 P1）：目标是保护根的祖先同样拒绝——实际到
+        // 不了（目标是家目录本身，后被家目录臂拒绝），这里钉住纵深，与商店/
+        // Ollama 根的相交臂同口径。
+        assert!(weights_deletion_guard(home.path(), Some(&app_root), &[], home.path()).is_err());
         // 同深度、保护根之外的家目录仍放行。
         let weights = home.path().join("ai").join("weights").join("qwen3");
         std::fs::create_dir_all(&weights).expect("create weights");
@@ -2398,6 +2464,57 @@ mod tests {
     }
 
     #[test]
+    fn paths_intersect_covers_equal_descendant_ancestor_sibling_and_alias() {
+        // 删除保护的方向臂（二十六轮评审 P1）：单向 `target 在根之下`放行
+        // "目标是保护根祖先"的场景——递归删除连根清掉根内的商店权重。相交
+        // 判定必须在两个方向都命中，矩阵覆盖评审点名的五类形状。
+        let root = TempDir::new("intersect-root");
+        let store_managed = root.path().join("store-managed");
+        std::fs::create_dir_all(&store_managed).expect("create store root inside target");
+        // 后代（目标在根之下，既有单向臂）。
+        assert!(paths_intersect(&store_managed, root.path()));
+        // 相等（既有单向臂本就覆盖，钉住防止重构回退）。
+        assert!(paths_intersect(root.path(), root.path()));
+        // 祖先（目标是根的祖先——此前放行，修复后必须拒绝）。
+        assert!(paths_intersect(root.path(), &store_managed));
+        // 无关兄弟（root 的兄弟目录）不命中。
+        let sibling_parent = TempDir::new("intersect-sibling-parent");
+        let sibling = sibling_parent.path().join("root");
+        std::fs::create_dir_all(&sibling).expect("create sibling");
+        assert!(!paths_intersect(&sibling, root.path()));
+        // canonical 别名：经由符号链接指到根的路径与根相交（symlink 创建是
+        // unix 专属 API；Windows 侧的相交语义由非 symlink 用例覆盖）。
+        #[cfg(unix)]
+        {
+            let alias_dir = TempDir::new("intersect-alias");
+            let link = alias_dir.path().join("link");
+            std::os::unix::fs::symlink(root.path(), &link).expect("create symlink");
+            assert!(paths_intersect(&link, root.path()));
+            // 符号链接落在根一侧：目标在真实根之下、根以别名形式给出，仍命中。
+            let child = store_managed.join("qwen3");
+            std::fs::create_dir_all(&child).expect("create child");
+            assert!(paths_intersect(&child, &link));
+        }
+        // 路径分量比较不是字符串前缀：`root-evil` 与 `root` 共享字符串前缀
+        // 但互不相交。
+        let evil = sibling_parent.path().join("root-evil");
+        std::fs::create_dir_all(&evil).expect("create evil");
+        assert!(!paths_intersect(&evil, root.path()));
+    }
+
+    #[test]
+    fn paths_intersect_any_hits_when_any_root_intersects() {
+        let root_a = TempDir::new("intersect-any-a");
+        let root_b = TempDir::new("intersect-any-b");
+        let roots = vec![root_a.path().to_path_buf(), root_b.path().join("inner")];
+        // 祖先方向多根：目标是 root_b 的祖先。
+        assert!(paths_intersect_any(root_b.path(), &roots));
+        // 与两根都不相交的路径不命中。
+        let outside = TempDir::new("intersect-any-outside");
+        assert!(!paths_intersect_any(outside.path(), &roots));
+    }
+
+    #[test]
     fn read_registry_skips_oversized_record_files() {
         let dir = TempDir::new("registry-big");
         std::fs::write(
@@ -2861,12 +2978,22 @@ mod tests {
     #[test]
     fn ensure_recheck_outside_store_roots_rejects_targets_moved_into_store() {
         // 删除时刻商店根复查臂（九轮补的防线、第二十轮评审 P3 抽纯函数补测）：
-        // 守卫后目录被移进任一商店权重根必须拒绝。
+        // 守卫后目录被移进任一商店权重根必须拒绝。祖先方向同样拒绝（二十六轮
+        // 评审 P1）：目标是商店权重根的祖先时，`remove_dir_all` 会把根连根清掉。
         let root = PathBuf::from("/home/u/.pinvou3/model-store");
         let inside = root.join("weights").join("qwen3");
         assert!(ensure_recheck_outside_store_roots(&inside, std::slice::from_ref(&root)).is_err());
+        let ancestor = PathBuf::from("/home/u/ai/weights");
+        let store_custom = ancestor.join("store-managed");
+        let error =
+            ensure_recheck_outside_store_roots(&ancestor, std::slice::from_ref(&store_custom))
+                .unwrap_err();
+        assert!(error.contains("相交"), "unexpected error: {error}");
         let outside = PathBuf::from("/home/u/ai/weights/qwen3");
         assert!(ensure_recheck_outside_store_roots(&outside, &[root]).is_ok());
+        // 兄弟目录（商店根的兄弟）放行。
+        let sibling_of_store = ancestor.join("other-weights");
+        assert!(ensure_recheck_outside_store_roots(&sibling_of_store, &[store_custom]).is_ok());
     }
 
     #[test]

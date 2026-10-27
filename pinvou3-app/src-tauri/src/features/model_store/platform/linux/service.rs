@@ -717,7 +717,9 @@ pub fn disable_test_store() -> Result<Value, String> {
 
 fn set_test_store_enabled(enabled: bool) -> Result<(), String> {
     // 先读再改再整体写回：配置里还有 store_url / models_dir 等一堆字段，
-    // 只写自己关心的那个会把其余的全清掉。
+    // 只写自己关心的那个会把其余的全清掉。写回被 save_settings 拒绝的情形
+    // （配置缺失且隔离留存还在，二十六轮评审 P1）原样上报，错误信息里带
+    // 恢复/放弃两条出路。
     let mut settings = config::load_settings();
     settings.test_mode_enabled = enabled;
     config::save_settings(&settings).map_err(|e| format!("保存设置失败：{e}"))

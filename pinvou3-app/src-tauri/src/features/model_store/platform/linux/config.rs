@@ -250,7 +250,9 @@ fn quarantine_bad_path(cfg_file: &Path) -> PathBuf {
 ///
 /// 留存文件同时也是 [`try_load_settings`] 的隔离标记：原文件改名后，后续读取在
 /// 文件系统里看到的就是"缺失"，破坏性消费方必须凭这份残留继续 fail-closed，
-/// 而不是把保护范围未知的半拍当成全新安装（十六轮评审 P1）。
+/// 而不是把保护范围未知的半拍当成全新安装（十六轮评审 P1）。写端同一口径：
+/// [`save_settings`] 在"配置缺失+留存还在"的态下拒绝普通保存，防止宽松读取的
+/// 默认值被固化成合法配置、把读端的 fail-closed 洗掉（二十六轮评审 P1）。
 fn quarantine_broken_config(cfg_file: &Path, reason: &str) {
     let bad = quarantine_bad_path(cfg_file);
     match fs::rename(cfg_file, &bad) {
@@ -349,10 +351,24 @@ pub fn load_settings() -> Settings {
 /// 2. 先写后 `set_permissions` 之间有一个 0644 的窗口，而这个文件里有商店地址
 ///    这类不该给同机其他用户看的东西。用 `OpenOptions::mode` 直接按 0600 建，
 ///    窗口就不存在了。
+///
+/// 配置缺失而隔离留存还在时不写（二十六轮评审 P1）：这正是
+/// [`try_load_settings`] 持续 `Err` 的"保护范围未知"态。普通 setter（切测试
+/// 商店开关等）先经宽松 [`load_settings`] 拿到默认值再整体写回——放行的话，
+/// 一次与删除无关的开关切换就会把默认值固化成合法 `config.json`，此后严格读取
+/// 走"合法 JSON"分支接受它，隔离留存里未知的自定义 `models_dir` 保护整个失效
+/// （严格读端的 fail-closed 被写端洗掉）。拒绝的报错与读端同口径给出两条出路：
+/// 从留存恢复原配置，或确认放弃后手工删除留存文件。配置文件在而留存也在
+/// （用户已显式恢复）不拦——不能让历史留存永久阻断已恢复的有效配置。
 pub fn save_settings(settings: &Settings) -> std::io::Result<()> {
     use std::io::Write as _;
 
     let cfg_file = config_file();
+    if !cfg_file.exists() && quarantine_bad_path(&cfg_file).exists() {
+        return Err(std::io::Error::other(
+            "配置文件缺失，且此前读取失败的隔离留存 config.json.bad 仍在：自定义设置（如权重目录）的保护范围未知，已拒绝用默认值覆盖。请从留存恢复配置文件，或确认放弃后删除该留存文件后重试",
+        ));
+    }
     let json = serde_json::to_string_pretty(settings)?;
 
     let tmp = cfg_file.with_extension("json.tmp");
@@ -696,6 +712,87 @@ mod tests {
         assert!(
             kept.contains("192.0.2.10"),
             "留存的必须是原样内容，用户还指着它把值抄回来：{kept}"
+        );
+    }
+
+    /// 隔离态下普通保存必须被拒绝（二十六轮评审 P1）：普通 setter 走宽松读取
+    /// 拿到默认值再整体写回——放行的话，一次与删除无关的开关切换就把默认值
+    /// 固化成合法 `config.json`，此后严格读取走"合法 JSON"分支接受它，隔离留存
+    /// 里未知的自定义 `models_dir` 保护整个失效（写端把读端的 fail-closed 洗掉）。
+    /// 回归场景即评审点名的三拍：隔离 → 普通 toggle/save → 严格查询仍拒绝。
+    #[test]
+    fn quarantined_config_blocks_plain_save_until_resolved() {
+        let _home = TempHome::new();
+        let path = config_file();
+
+        // 第一拍：带自定义权重目录的合法配置损坏被隔离（与现有隔离测试同一坏法）。
+        std::fs::write(
+            &path,
+            r#"{"store_url": "http://192.0.2.10:8088", "models_dir": "/home/u/ai/shared/weights", "gateway_port": "不是数字"}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            load_settings().store_url,
+            Settings::default().store_url,
+            "坏文件应当回退到默认值"
+        );
+        let bad = path.with_extension("json.bad");
+        assert!(bad.exists(), "坏文件应已隔离留存");
+        assert!(!path.exists(), "原文件应已改名让位");
+
+        // 第二拍：普通 setter 的"读-改-整体写回"。宽松读取拿到默认值，保存
+        // 必须拒绝，而不是把默认值固化成合法配置。
+        let mut toggled = load_settings();
+        toggled.test_mode_enabled = true;
+        let error = save_settings(&toggled).expect_err("隔离态普通保存必须被拒绝");
+        assert!(
+            error.to_string().contains("隔离留存"),
+            "报错应指明隔离留存与出路：{error}"
+        );
+        assert!(
+            !path.exists(),
+            "被拒的保存不得留下半截产物（合法 config.json 会洗掉 fail-closed）"
+        );
+        let kept = std::fs::read_to_string(&bad).expect("隔离留存必须原样保留");
+        assert!(
+            kept.contains("/home/u/ai/shared/weights"),
+            "留存内容不得被改动：{kept}"
+        );
+
+        // 第三拍：严格查询仍拒绝——写端被拒后，保护范围未知的判定没有变化。
+        assert!(
+            try_load_settings().is_err(),
+            "隔离态下严格读取必须继续 fail-closed"
+        );
+        let roots = crate::features::model_store::store_weights_roots_checked();
+        assert!(roots.is_err(), "破坏性消费方的权重根查询同样必须继续拒绝");
+
+        // 对照流程 1：显式恢复（用户把留存修好放回原位）→ 保存放行、严格读取
+        // 接受；历史留存不永久阻断已恢复的有效配置。
+        std::fs::write(
+            &path,
+            r#"{"store_url": "http://192.0.2.10:8088", "models_dir": "/home/u/ai/shared/weights"}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            try_load_settings()
+                .expect("显式恢复后严格读取应接受")
+                .models_dir,
+            "/home/u/ai/shared/weights"
+        );
+        save_settings(&toggled).expect("显式恢复后普通保存放行");
+
+        // 对照流程 2：显式放弃（确认不要旧配置，删掉新配置与历史留存）→ 回到
+        // "配置缺失、无留存"的全新安装态 → 保存放行并建立新配置，严格读取从此
+        // 接受。
+        std::fs::remove_file(&path).expect("remove config");
+        std::fs::remove_file(&bad).expect("abandon quarantine leftover");
+        let mut fresh = load_settings();
+        fresh.test_mode_enabled = true;
+        save_settings(&fresh).expect("显式放弃残留后普通保存放行");
+        assert!(
+            try_load_settings().is_ok(),
+            "显式放弃后严格读取不应再被阻断"
         );
     }
 
