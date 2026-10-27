@@ -348,96 +348,102 @@ function ModelDetailDialog({ cardId, card, copy, theme, onClose, onRedeploy, onT
             ) : null}
           </div>
 
+          {/* 分享面板（Agent 接入 + 局域网共享 统一） */}
           <div className="mt-5">
-            <h3 className={`mb-2 text-[13px] font-medium ${TEXT_PRIMARY}`}>{copy.accessTitle}</h3>
-            <div className="space-y-2">
-              <CopyRow
-                label={copy.accessModelId}
-                value={modelId}
-                copyLabel={copy.copy}
-                onCopy={copyText}
-                testId="model-store-access-model-id"
-              />
-              <CopyRow
-                label={copy.accessApiUrl}
-                value={apiUrl}
-                copyLabel={copy.copy}
-                onCopy={copyText}
-                hint={copy.accessLocalOnly}
-                testId="model-store-access-url"
-              />
+            <h3 className={`mb-2 text-[13px] font-medium ${TEXT_PRIMARY}`}>{copy.shareTitle}</h3>
 
-              <div className="flex items-start gap-3">
-                <span className={`w-20 shrink-0 pt-1.5 text-[13px] ${TEXT_SECONDARY}`}>{copy.accessApiKey}</span>
-                <div className="min-w-0 flex-1">
-                  {keys.length === 0 ? (
-                    <EmptyState
-                      testId="model-store-keys-empty"
-                      className={`rounded-[12px] px-3 py-2 text-left text-[12px] ${SUBTLE_SURFACE} ${TEXT_SECONDARY}`}
-                      title={keysKnown ? copy.keysEmpty : copy.lanKeyUnknown}
-                    />
-                  ) : (
-                    <div className="space-y-1.5">
-                      {keys.map((key) => (
-                        <div key={key.id} className={`flex items-center gap-2 rounded-[12px] px-3 py-1.5 ${SUBTLE_SURFACE}`}>
-                          <KeyRound size={13} className={TEXT_SECONDARY} />
-                          <div className="min-w-0 flex-1 text-[12px]"><code>••••{key.key_value.slice(-6)}</code><span className={`ml-2 ${TEXT_SECONDARY}`}>{key.card_id ? copy.keyActive : copy.keyLegacy}</span></div>
-                          <button
-                            type="button"
-                            className={`shrink-0 rounded-full px-2 py-0.5 text-[12px] ${TEXT_SECONDARY} ${HOVER_SURFACE}`}
-                            onClick={() => copyText(key.key_value)}
-                          >
-                            {copy.copy}
-                          </button>
-                          <MsButton tone="ghost" busy={busy} onClick={() => revokePending === key.id ? revokeKey(key.id) : setRevokePending(key.id)}>{revokePending === key.id ? copy.keyRevokeConfirm : copy.keyRevoke}</MsButton>
-                          {revokePending === key.id ? <MsButton tone="ghost" disabled={busy} onClick={() => setRevokePending(null)}>{copy.lanCancel}</MsButton> : null}
-                        </div>
-                      ))}
-                    </div>
+            {/* 子区 1：Agent 接入 */}
+            <div className={`rounded-[12px] p-3 ${SUBTLE_SURFACE}`}>
+              <div className={`mb-2 text-[12px] font-medium ${TEXT_PRIMARY}`}>{copy.shareAgentSection}</div>
+              <div className="space-y-2">
+                <CopyRow
+                  label={copy.accessModelId}
+                  value={modelId}
+                  copyLabel={copy.copy}
+                  onCopy={copyText}
+                  testId="model-store-access-model-id"
+                />
+                <CopyRow
+                  label={copy.accessApiUrl}
+                  value={apiUrl}
+                  copyLabel={copy.copy}
+                  onCopy={copyText}
+                  hint={copy.accessLocalOnly}
+                  testId="model-store-access-url"
+                />
+                <div className="flex items-start gap-3">
+                  <span className={`w-20 shrink-0 pt-1.5 text-[13px] ${TEXT_SECONDARY}`}>{copy.accessApiKey}</span>
+                  <div className="min-w-0 flex-1">
+                    {keys.length === 0 ? (
+                      <EmptyState
+                        testId="model-store-keys-empty"
+                        className={`rounded-[12px] px-3 py-2 text-left text-[12px] ${SUBTLE_SURFACE} ${TEXT_SECONDARY}`}
+                        title={keysKnown ? copy.keysEmpty : copy.lanKeyUnknown}
+                      />
+                    ) : (
+                      <div className="space-y-1.5">
+                        {keys.map((key) => (
+                          <div key={key.id} className={`flex items-center gap-2 rounded-[12px] px-3 py-1.5 ${SUBTLE_SURFACE}`}>
+                            <KeyRound size={13} className={TEXT_SECONDARY} />
+                            <div className="min-w-0 flex-1 text-[12px]"><code>••••{key.key_value.slice(-6)}</code><span className={`ml-2 ${TEXT_SECONDARY}`}>{key.card_id ? copy.keyActive : copy.keyLegacy}</span></div>
+                            <button
+                              type="button"
+                              className={`shrink-0 rounded-full px-2 py-0.5 text-[12px] ${TEXT_SECONDARY} ${HOVER_SURFACE}`}
+                              onClick={() => copyText(key.key_value)}
+                            >
+                              {copy.copy}
+                            </button>
+                            {revokePending === key.id ? (
+                              <span className={`shrink-0 text-[12px] ${TEXT_SECONDARY}`}>{copy.keysRevoking}</span>
+                            ) : (
+                              <button
+                                type="button"
+                                className={`shrink-0 rounded-full px-2 py-0.5 text-[12px] ${TEXT_SECONDARY} ${HOVER_SURFACE}`}
+                                onClick={() => setRevokePending(key.id)}
+                              >
+                                {copy.keysRevoke}
+                              </button>
+                            )}
+                          </div>
+                        ))}
+                        <p className={`mt-1 text-[11px] ${TEXT_SECONDARY}`}>{copy.keysHint}</p>
+                      </div>
+                    )}
+                  </div>
+                </div>
+                {record.running ? null : (
+                  <p className="text-[11px] text-[#A15C07] dark:text-[#FDD663]">{copy.notRunningHint}</p>
+                )}
+                <div className="flex flex-wrap items-center gap-2 pt-1">
+                  <MsButton tone="ghost" busy={busy} onClick={addKey} data-testid="model-store-add-key">
+                    <Plus size={14} />
+                    {copy.addKey}
+                  </MsButton>
+                  <MsButton
+                    tone="primary"
+                    busy={busy}
+                    disabled={!linkable.ok}
+                    onClick={useInPinvou}
+                    data-testid="model-store-use-in-pinvou"
+                  >
+                    {copy.linkUse}
+                  </MsButton>
+                  {linkable.ok ? null : (
+                    <span className={`text-[11px] ${TEXT_SECONDARY}`} data-testid="model-store-link-blocked-reason">
+                      {copy[linkable.reason] || copy.linkFailed}
+                    </span>
                   )}
-                  <p className={`mt-1 text-[11px] ${TEXT_SECONDARY}`}>{copy.keysHint}</p>
                 </div>
               </div>
             </div>
 
-            {record.running ? null : (
-              <p className="mt-2 text-[11px] text-[#A15C07] dark:text-[#FDD663]">{copy.notRunningHint}</p>
-            )}
-
-            <div className="mt-3 flex flex-wrap items-center gap-2">
-              <MsButton tone="ghost" busy={busy} onClick={addKey} data-testid="model-store-add-key">
-                <Plus size={14} />
-                {copy.addKey}
-              </MsButton>
+            {/* 子区 2：局域网共享 */}
+            <div className={`mt-2 rounded-[12px] p-3 ${SUBTLE_SURFACE}`}>
+              <div className={`mb-2 text-[12px] font-medium ${TEXT_PRIMARY}`}>{copy.shareLanSection}</div>
+              <LanSharingPanel key={cardId} cardId={cardId} copy={copy} keys={keys} keysKnown={keysKnown} onCopy={copyText} />
             </div>
-            <LanSharingPanel key={cardId} cardId={cardId} copy={copy} keys={keys} keysKnown={keysKnown} onCopy={copyText} />
           </div>
 
-          <div className="mt-6 flex items-center justify-between">
-            {/* 修复入口:部署被外部破坏(比如手删了 vendor 目录)时需要能重来一次。
-                运行中的模型要先停用,否则重来一次只会撞上还占着端口的旧容器。 */}
-            {/* 接不进去时按钮禁用，并且**把原因说出来**。只禁用不解释的话，
-                用户面对一个灰掉的按钮只能猜——尤其"这不是对话模型"这种原因，
-                光看界面根本想不到。 */}
-            <div className="min-w-0 flex-1">
-              <MsButton
-                tone="primary"
-                busy={busy}
-                disabled={!linkable.ok}
-                onClick={useInPinvou}
-                data-testid="model-store-use-in-pinvou"
-              >
-                {copy.linkUse}
-              </MsButton>
-              {linkable.ok ? null : (
-                <div
-                  className={`mt-1.5 max-w-[420px] text-[11px] leading-4 ${TEXT_SECONDARY}`}
-                  data-testid="model-store-link-blocked-reason"
-                >
-                  {copy[linkable.reason] || copy.linkFailed}
-                </div>
-              )}
-            </div>
             {/* 这个「重新部署」**刻意常驻**，跟列表行那个不是一回事：
                 - 列表行（ModelRow）只在 needs_redeploy 时出现——脚本更新了、跟上次
                   部署用的版本对不上。那是日常路径，不该让用户对着一个常亮的按钮
@@ -558,7 +564,6 @@ function ModelDetailDialog({ cardId, card, copy, theme, onClose, onRedeploy, onT
                 </div>
               );
             })()}
-          </div>
         </>
       ) : null}
     </MsDialog>
