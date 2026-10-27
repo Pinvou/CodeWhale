@@ -1,41 +1,42 @@
-import { useCallback, useEffect, useReducer, useRef } from 'react';
-import { invokeTauri } from '../../platform/tauri/client.js';
-import { scheduleStartupUpdateCheck, initialStartupUpdateState, reduceStartupUpdates, hasUnreadStartupUpdates } from './startup-update-check.js';
-import { loadViewedUpdateRevisions, saveViewedUpdateRevisions } from './startup-update-read-state.js';
+import { useCallback, useEffect, useRef, useState } from 'react';
+import { prepareAfterStartupPaint, warnStartupUpdateFailure } from './startup-update-scheduler.js';
+import { readViewedUpdateSnapshot } from './startup-update-snapshot.js';
 
 const EMPTY_UPDATES = [];
 
 export function useModelStoreStartupUpdates(available, viewingStore = false) {
-  const [state, dispatch] = useReducer(reduceStartupUpdates, undefined, () => initialStartupUpdateState(loadViewedUpdateRevisions()));
-  const modelsRef = useRef(null);
-  const viewingStoreRef = useRef(viewingStore);
+  const [state, setState] = useState(() => ({
+    updates: EMPTY_UPDATES, hasUnread: false, snapshot: readViewedUpdateSnapshot(),
+  }));
+  const contextRef = useRef({ snapshot: state.snapshot });
   useEffect(() => {
-    saveViewedUpdateRevisions(state.viewedRevisions);
-  }, [state.viewedRevisions]);
-  useEffect(() => {
-    viewingStoreRef.current = viewingStore;
-    if (viewingStore) dispatch({ type: 'viewed' });
+    const context = contextRef.current;
+    context.viewingStore = viewingStore;
+    if (viewingStore) context.controller?.send({ type: 'viewed' });
   }, [viewingStore]);
-  useEffect(() => scheduleStartupUpdateCheck({
-    available,
-    requestFrame: (callback) => window.requestAnimationFrame(callback),
-    cancelFrame: (frame) => window.cancelAnimationFrame(frame),
-    setTimer: (callback, delay) => window.setTimeout(callback, delay),
-    clearTimer: (timer) => window.clearTimeout(timer),
-    check: () => invokeTauri('model_store_startup_update_check'),
-    onReport: (report) => {
-      const rows = Array.isArray(report?.updates) ? report.updates : EMPTY_UPDATES;
-      dispatch({ type: 'report', updates: rows, models: modelsRef.current, viewingStore: viewingStoreRef.current });
-    },
-  }), [available]);
-
+  useEffect(() => {
+    if (!available) return;
+    const context = contextRef.current;
+    let alive = true;
+    let cancelCheck;
+    const cancelPaint = prepareAfterStartupPaint((deadline) => {
+      import('./startup-update-runtime.js').then((runtime) => {
+        if (!alive) return;
+        context.controller ??= runtime.createStartupUpdateController(context.snapshot, setState);
+        context.snapshot = null;
+        cancelCheck = runtime.startStartupUpdateCheck(context, deadline);
+      }).catch(warnStartupUpdateFailure);
+    });
+    return () => { alive = false; cancelPaint(); cancelCheck?.(); };
+  }, [available]);
   const reconcile = useCallback((models) => {
-    modelsRef.current = models;
-    dispatch({ type: 'library', models });
+    const context = contextRef.current;
+    context.models = models;
+    context.controller?.send({ type: 'library', models });
   }, []);
   return {
     updates: available ? state.updates : EMPTY_UPDATES,
-    hasUnread: available && !viewingStore && hasUnreadStartupUpdates(state),
+    hasUnread: available && !viewingStore && state.hasUnread,
     reconcile,
   };
 }

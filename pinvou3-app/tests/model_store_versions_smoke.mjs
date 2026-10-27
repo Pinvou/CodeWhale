@@ -27,6 +27,10 @@ try {
       enforce: 'pre',
       transform(source, id) {
         // Expose the real form only inside this isolated browser fixture.
+        if (matchesViteModule(id, path.join(appRoot, 'src/features/model-store/useModelStoreStartupUpdates.js'))) {
+          // Use the hook's optimized React instance in the browser probe too.
+          return `${source}\nimport * as __TestReact from 'react'; export { __TestReact };\n`;
+        }
         if (matchesViteModule(id, path.join(appRoot, 'src/features/settings/SettingsView.jsx'))) {
           return `${source}\nexport { ModelFormModal as __TestModelForm };\n`;
         }
@@ -752,6 +756,147 @@ try {
     assert.equal(explicitChoice.context_window_edit_requested, true);
     assert.equal(explicitChoice.preserve_context_window_tokens, false);
   }
+  // Exercise the actual hook and lazy module in Chrome, including resource
+  // loading boundaries that pure scheduler/controller tests cannot observe.
+  async function waitForStartupProbe(predicate) {
+    const deadline = Date.now() + 5000;
+    while (!predicate() && Date.now() < deadline) await new Promise((resolve) => { setTimeout(resolve, 10); });
+    assert.ok(predicate(), 'startup probe event must arrive before the timeout');
+  }
+  async function startupProbe({ available = true, holdRuntime = false, failRuntime = false } = {}) {
+    const probe = await browser.newPage();
+    await probe.setCacheEnabled(false);
+    const pending = [];
+    const warnings = [];
+    let runtimeRequests = 0;
+    probe.on('pageerror', (error) => errors.push(error.message));
+    probe.on('console', (message) => { if (message.type() === 'warn') warnings.push(message.text()); });
+    await probe.setRequestInterception(true);
+    probe.on('request', (request) => {
+      if (new URL(request.url()).pathname.endsWith('/startup-update-runtime.js')) {
+        runtimeRequests += 1;
+        if (failRuntime) { void request.abort('failed'); return; }
+        if (holdRuntime) { pending.push(request); return; }
+      }
+      void request.continue();
+    });
+    await probe.goto(`http://127.0.0.1:${vite.httpServer.address().port}/versions.html`);
+    await probe.evaluate(async (initialAvailable) => {
+      /* eslint-disable import-x/no-unresolved, n/no-missing-import */
+      const client = await import('/@id/react-dom/client');
+      const createRoot = client.createRoot || client.default?.createRoot;
+      const { useModelStoreStartupUpdates, __TestReact: React } = await import('/features/model-store/useModelStoreStartupUpdates.js');
+      /* eslint-enable import-x/no-unresolved, n/no-missing-import */
+      localStorage.clear();
+      localStorage.setItem('pinvou.model-store.viewed-updates.v1', JSON.stringify([JSON.stringify(['a', 'v1'])]));
+      window.startupCalls = 0;
+      window.startupReplies = [];
+      window.startupDelays = [];
+      const nativeTimeout = window.setTimeout.bind(window);
+      window.setTimeout = (callback, delay, ...args) => {
+        window.startupDelays.push(delay);
+        // Keep tests fast; exact 15s and deadline arithmetic have Node coverage.
+        return nativeTimeout(callback, delay > 10000 && delay <= 15000 ? 20 : delay, ...args);
+      };
+      window.__TAURI__ = { core: { invoke: (command) => {
+        if (command !== 'model_store_startup_update_check') throw Error(`Unexpected command: ${command}`);
+        window.startupCalls += 1;
+        return new Promise((resolve) => { window.startupReplies.push(resolve); });
+      } } };
+      function Probe() {
+        const [available, setAvailable] = React.useState(initialAvailable);
+        const [viewing, setViewing] = React.useState(false);
+        const updates = useModelStoreStartupUpdates(available, viewing);
+        React.useEffect(() => {
+          window.startupState = { updates: updates.updates, hasUnread: updates.hasUnread, available, viewing };
+          window.startupControl = { setAvailable, setViewing, reconcile: updates.reconcile };
+        });
+        return null;
+      }
+      const root = createRoot(document.getElementById('root'));
+      window.unmountStartupProbe = () => root.unmount();
+      root.render(React.createElement(React.StrictMode, null, React.createElement(Probe)));
+    }, available);
+    await probe.waitForFunction(() => !!window.startupControl).catch((error) => { throw new Error(`Startup probe did not mount: ${errors.join('; ')}`, { cause: error }); });
+    return { page: probe, pending, warnings, runtimeRequests: () => runtimeRequests };
+  }
+  const report = { updates: [
+    { card_id: 'a', local_revision: 'installed', revision: 'v1' },
+    { card_id: 'b', local_revision: 'installed', revision: 'v2' },
+  ] };
+  const unavailable = await startupProbe({ available: false });
+  await unavailable.page.evaluate(() => new Promise((resolve) => { setTimeout(resolve, 80); }));
+  assert.equal(unavailable.runtimeRequests(), 0);
+  assert.equal(await unavailable.page.evaluate(() => window.startupCalls), 0);
+  await unavailable.page.close();
+
+  const normal = await startupProbe();
+  await normal.page.waitForFunction(() => window.startupCalls === 1);
+  await normal.page.evaluate((value) => window.startupReplies[0](value), report);
+  await normal.page.waitForFunction(() => window.startupState.hasUnread && window.startupState.updates.length === 2);
+  // Controller state remains live while availability hides the feature.
+  await normal.page.evaluate(() => window.startupControl.setAvailable(false));
+  await normal.page.waitForFunction(() => !window.startupState.available);
+  await normal.page.evaluate(() => window.startupControl.setViewing(true));
+  await normal.page.waitForFunction(() => window.startupState.viewing);
+  await normal.page.evaluate(() => window.startupControl.setViewing(false));
+  await normal.page.waitForFunction(() => !window.startupState.viewing);
+  await normal.page.evaluate(() => window.startupControl.setAvailable(true));
+  await normal.page.waitForFunction(() => window.startupState.available && window.startupCalls === 2);
+  assert.equal(await normal.page.evaluate(() => window.startupState.hasUnread), false);
+  const saved = await normal.page.evaluate(() => JSON.parse(localStorage.getItem('pinvou.model-store.viewed-updates.v1')));
+  assert.deepEqual(new Set(saved), new Set([JSON.stringify(['a', 'v1']), JSON.stringify(['b', 'v2'])]));
+  await normal.page.evaluate(() => window.startupControl.setAvailable(false));
+  await normal.page.waitForFunction(() => !window.startupState.available);
+  await normal.page.evaluate(() => window.startupControl.reconcile([]));
+  await normal.page.evaluate(() => window.startupControl.setAvailable(true));
+  await normal.page.waitForFunction(() => window.startupState.available && window.startupCalls === 3);
+  assert.deepEqual(await normal.page.evaluate(() => window.startupState.updates), []);
+  // A result from an earlier availability generation cannot restore updates.
+  await normal.page.evaluate((value) => window.startupReplies[1](value), report);
+  await normal.page.evaluate(() => new Promise((resolve) => { setTimeout(resolve, 50); }));
+  assert.deepEqual(await normal.page.evaluate(() => window.startupState.updates), []);
+  await normal.page.close();
+
+  const slow = await startupProbe({ holdRuntime: true });
+  await waitForStartupProbe(() => slow.pending.length > 0);
+  assert.equal(await slow.page.evaluate(() => window.startupCalls), 0);
+  // Simulate a local chunk arriving after the original lower-bound deadline.
+  await slow.page.evaluate(() => {
+    const now = performance.now.bind(performance);
+    performance.now = () => now() + 20000;
+  });
+  for (const request of slow.pending.splice(0)) await request.continue();
+  await slow.page.waitForFunction(() => window.startupCalls === 1);
+  assert.ok(await slow.page.evaluate(() => window.startupDelays.includes(0)));
+  await slow.page.evaluate(() => window.startupControl.setViewing(true));
+  await slow.page.waitForFunction(() => window.startupState.viewing);
+  await slow.page.evaluate((value) => window.startupReplies[0](value), report);
+  await slow.page.waitForFunction(() => window.startupState.updates.length === 2);
+  assert.equal(await slow.page.evaluate(() => window.startupState.hasUnread), false);
+  await slow.page.close();
+
+  for (const unmount of [false, true]) {
+    const cancelled = await startupProbe({ holdRuntime: true });
+    await waitForStartupProbe(() => cancelled.pending.length > 0);
+    await cancelled.page.evaluate((remove) => {
+      if (remove) window.unmountStartupProbe();
+      else window.startupControl.setAvailable(false);
+    }, unmount);
+    if (!unmount) await cancelled.page.waitForFunction(() => !window.startupState.available);
+    for (const request of cancelled.pending.splice(0)) await request.continue();
+    await cancelled.page.evaluate(() => new Promise((resolve) => { setTimeout(resolve, 80); }));
+    assert.equal(await cancelled.page.evaluate(() => window.startupCalls), 0);
+    await cancelled.page.close();
+  }
+  const broken = await startupProbe({ failRuntime: true });
+  await waitForStartupProbe(() => broken.warnings.length > 0);
+  await broken.page.evaluate(() => new Promise((resolve) => { setTimeout(resolve, 80); }));
+  assert.equal(await broken.page.evaluate(() => window.startupCalls), 0);
+  assert.equal(broken.runtimeRequests(), 1);
+  assert.deepEqual(broken.warnings, ['model_store_startup_update_check failed']);
+  await broken.page.close();
+  console.log('PASS: startup hook lazy loading preserves unavailable-state acknowledgement, library reconciliation, cancellation, deadlines and private failure handling in real Chrome');
   assert.deepEqual(errors, []);
   console.log('PASS: versions refresh after success/failure/cancellation and ignore stale responses');
   console.log('PASS: MTP deployment and version dialogs disclose network defaults and retained .env in all three languages without changing the 256K default');

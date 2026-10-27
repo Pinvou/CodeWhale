@@ -1,6 +1,9 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { scheduleStartupUpdateCheck, STARTUP_UPDATE_DELAY_MS, updatesForLibrary, initialStartupUpdateState, reduceStartupUpdates, hasUnreadStartupUpdates } from '../src/features/model-store/startup-update-check.js';
+import { createStartupUpdateController, scheduleDelayedStartupUpdateCheck } from '../src/features/model-store/startup-update-runtime.js';
+import { prepareAfterStartupPaint } from '../src/features/model-store/startup-update-scheduler.js';
+import { readViewedUpdateSnapshot } from '../src/features/model-store/startup-update-snapshot.js';
 import { VIEWED_UPDATES_STORAGE_KEY, loadViewedUpdateRevisions, saveViewedUpdateRevisions } from '../src/features/model-store/startup-update-read-state.js';
 
 function memoryStorage(raw) {
@@ -12,17 +15,20 @@ function memoryStorage(raw) {
   };
 }
 
-function fixture(available = true, check = async () => ({ updates: [] })) {
+function fixture(available = true, check = async () => ({ updates: [] }), prepare) {
   let counter = 0;
   const frames = new Map();
   const timers = new Map();
   const reports = [];
   const cleanup = scheduleStartupUpdateCheck({
-    available, check, onReport: (report) => reports.push(report),
-    requestFrame: (callback) => { frames.set(++counter, callback); return counter; },
-    cancelFrame: (id) => frames.delete(id),
-    setTimer: (callback, delay) => { timers.set(++counter, { callback, delay }); return counter; },
-    clearTimer: (id) => timers.delete(id),
+    available, check, prepare, onReport: (report) => reports.push(report),
+    host: {
+      performance: { now: () => 100 },
+      requestAnimationFrame: (callback) => { frames.set(++counter, callback); return counter; },
+      cancelAnimationFrame: (id) => frames.delete(id),
+      setTimeout: (callback, delay) => { timers.set(++counter, { callback, delay }); return counter; },
+      clearTimeout: (id) => timers.delete(id),
+    },
   });
   const paint = () => { const batch = [...frames.values()]; frames.clear(); batch.forEach((callback) => callback()); };
   const fire = () => { const batch = [...timers.values()]; timers.clear(); batch.forEach(({ callback }) => callback()); };
@@ -176,4 +182,194 @@ test('initialization and repeated saves do not rewrite storage unnecessarily', (
   saveViewedUpdateRevisions(keys, storage);
   saveViewedUpdateRevisions(keys, storage);
   assert.equal(storage.writes, 1);
+});
+
+
+test('prepared-check compatibility callers retain the original two-frame timer schedule', async () => {
+  let preparations = 0;
+  let requests = 0;
+  const f = fixture(true, async () => { requests += 1; return { updates: [] }; }, () => {
+    preparations += 1;
+    return new Promise(() => {});
+  });
+  assert.equal(preparations, 0);
+  f.paint();
+  assert.equal(preparations, 0);
+  f.paint();
+  assert.equal(preparations, 1);
+  assert.equal([...f.timers.values()][0].delay, 15000);
+  f.fire();
+  await new Promise(setImmediate);
+  assert.equal(requests, 1);
+  assert.equal(f.reports.length, 1);
+  f.cleanup();
+});
+
+test('cancellation before painting prevents runtime preparation as well as IPC', () => {
+  let preparations = 0;
+  const f = fixture(true, () => assert.fail('must not request'), () => { preparations += 1; });
+  f.paint();
+  f.cleanup();
+  f.paint();
+  assert.equal(preparations, 0);
+});
+
+test('a loaded controller applies report, acknowledgement and library changes synchronously', () => {
+  const updates = [{ card_id: 'a', local_revision: 'old', revision: 'new' }];
+  let latest;
+  const controller = createStartupUpdateController('[]', (state) => { latest = state; });
+  controller.send({ type: 'report', updates, models: [{ card_id: 'a', card_revision: 'old' }], viewingStore: false });
+  assert.equal(latest.hasUnread, true);
+  controller.send({ type: 'viewed' });
+  assert.deepEqual(latest.updates, updates);
+  assert.equal(latest.hasUnread, false);
+  controller.send({ type: 'library', models: [{ card_id: 'a', card_revision: 'new' }] });
+  assert.deepEqual(latest.updates, []);
+});
+
+test('controller responses received while the store is open are already read', () => {
+  let latest;
+  const controller = createStartupUpdateController('[]', (state) => { latest = state; });
+  controller.send({ type: 'report', updates: [{ card_id: 'a', revision: 'new' }], models: null, viewingStore: true });
+  assert.equal(latest.hasUnread, false);
+  assert.equal(latest.updates.length, 1);
+});
+
+test('runtime parsing uses the mounted snapshot and saving merges newer window acknowledgements', () => {
+  const first = JSON.stringify(['a', 'v1']);
+  const second = JSON.stringify(['b', 'v2']);
+  const storage = memoryStorage(JSON.stringify([first]));
+  const snapshot = readViewedUpdateSnapshot(storage);
+  storage.setItem(VIEWED_UPDATES_STORAGE_KEY, JSON.stringify([second]));
+  let latest;
+  const controller = createStartupUpdateController(snapshot, (state) => { latest = state; }, storage);
+  controller.send({ type: 'report', updates: [{ card_id: 'a', revision: 'v1' }], models: null });
+  assert.equal(latest.hasUnread, false, 'parsing later must retain the value read synchronously during mount');
+  assert.deepEqual(new Set(loadViewedUpdateRevisions(storage)), new Set([first, second]));
+  let restarted;
+  const next = createStartupUpdateController(readViewedUpdateSnapshot(storage), (state) => { restarted = state; });
+  next.send({ type: 'report', updates: [{ card_id: 'a', revision: 'v1' }, { card_id: 'b', revision: 'v2' }], models: null });
+  assert.equal(restarted.hasUnread, false);
+  assert.equal(restarted.updates.length, 2);
+});
+
+
+test('delayed runtime loading uses the original deadline, including an already elapsed delay', async () => {
+  for (const [now, remaining] of [[100, 15000], [4100, 11000], [16100, 0]]) {
+    let timer;
+    let calls = 0;
+    let reports = 0;
+    const cleanup = scheduleDelayedStartupUpdateCheck({
+      deadline: 15100,
+      host: {
+        performance: { now: () => now },
+        setTimeout(callback, delay) { timer = { callback, delay }; return 1; },
+        clearTimeout() { timer = null; },
+      },
+      check: async () => { calls += 1; return { updates: [] }; },
+      onReport: () => { reports += 1; },
+    });
+    assert.equal(timer.delay, remaining);
+    assert.equal(calls, 0);
+    timer.callback();
+    await new Promise(setImmediate);
+    assert.equal(calls, 1);
+    assert.equal(reports, 1);
+    cleanup();
+    assert.equal(timer, null);
+  }
+});
+
+
+test('the earliest deadline is measured after the second paint rather than mounting', () => {
+  const frames = new Map();
+  let id = 0;
+  let now = 0;
+  let deadline;
+  const cleanup = prepareAfterStartupPaint((value) => { deadline = value; }, {
+    performance: { now: () => now },
+    requestAnimationFrame(callback) { frames.set(++id, callback); return id; },
+    cancelAnimationFrame(frame) { frames.delete(frame); },
+  });
+  const paint = () => {
+    const callbacks = [...frames.values()];
+    frames.clear();
+    callbacks.forEach((callback) => callback());
+  };
+  now = 1000;
+  paint();
+  assert.equal(deadline, undefined);
+  now = 5000;
+  paint();
+  assert.equal(deadline, 20000);
+  cleanup();
+  assert.equal(frames.size, 0);
+});
+
+
+test('availability loss cancels the loaded runtime timer before a request starts', async () => {
+  let callback;
+  let requests = 0;
+  const cleanup = scheduleDelayedStartupUpdateCheck({
+    deadline: 15000,
+    host: {
+      performance: { now: () => 0 },
+      setTimeout(run) { callback = run; return 7; },
+      clearTimeout(id) { assert.equal(id, 7); callback = null; },
+    },
+    check: () => { requests += 1; },
+    onReport: () => assert.fail('cancelled checks must not publish'),
+  });
+  cleanup();
+  callback?.();
+  await new Promise(setImmediate);
+  assert.equal(requests, 0);
+});
+
+test('loaded runtime suppresses an in-flight response after cleanup without a retry', async () => {
+  let callback;
+  let resolve;
+  let requests = 0;
+  const reports = [];
+  const cleanup = scheduleDelayedStartupUpdateCheck({
+    deadline: 15000,
+    host: {
+      performance: { now: () => 15000 },
+      setTimeout(run, delay) { assert.equal(delay, 0); callback = run; return 8; },
+      clearTimeout(id) { assert.equal(id, 8); callback = null; },
+    },
+    check: () => { requests += 1; return new Promise((done) => { resolve = done; }); },
+    onReport: (report) => reports.push(report),
+  });
+  callback();
+  await new Promise(setImmediate);
+  cleanup();
+  resolve({ updates: [{ card_id: 'late' }] });
+  await new Promise(setImmediate);
+  assert.equal(requests, 1);
+  assert.deepEqual(reports, []);
+  assert.equal(callback, null);
+});
+
+
+test('controller persists only acknowledgement changes and keeps failures usable in memory', () => {
+  const storage = memoryStorage();
+  const updates = [{ card_id: 'a', local_revision: 'old', revision: 'v1' }];
+  let latest;
+  const controller = createStartupUpdateController('[]', (state) => { latest = state; }, storage);
+  assert.equal(storage.writes, 0, 'initialization must not rewrite an empty snapshot');
+  controller.send({ type: 'report', updates, models: null, viewingStore: false });
+  assert.equal(storage.writes, 0, 'an unread response must not write acknowledgement data');
+  controller.send({ type: 'viewed' });
+  assert.equal(storage.writes, 1);
+  assert.equal(latest.hasUnread, false);
+  controller.send({ type: 'viewed' });
+  controller.send({ type: 'library', models: [] });
+  assert.equal(storage.writes, 1, 'repeat acknowledgement and library changes must not rewrite storage');
+  const blocked = { getItem() { throw Error('private'); }, setItem() { throw Error('quota'); } };
+  let inMemory;
+  const failing = createStartupUpdateController('[]', (state) => { inMemory = state; }, blocked);
+  failing.send({ type: 'report', updates, models: null, viewingStore: true });
+  assert.equal(inMemory.hasUnread, false);
+  assert.deepEqual(inMemory.updates, updates);
 });

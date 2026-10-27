@@ -1,6 +1,7 @@
 // Keep acknowledgement separate from the updates returned by each startup check.
 // The WebView's persistent storage survives normal application restarts.
-export const VIEWED_UPDATES_STORAGE_KEY = 'pinvou.model-store.viewed-updates.v1';
+import { VIEWED_UPDATES_STORAGE_KEY, readViewedUpdateSnapshot } from './startup-update-snapshot.js';
+export { VIEWED_UPDATES_STORAGE_KEY };
 
 function validKeys(value) {
   if (!Array.isArray(value)) return [];
@@ -16,14 +17,18 @@ function validKeys(value) {
   });
 }
 
-/** Missing, inaccessible or malformed storage must not break the model store. */
-export function loadViewedUpdateRevisions(storage) {
+/** Parse the value captured synchronously when this app consumer mounted. */
+export function parseViewedUpdateSnapshot(snapshot) {
   try {
-    const target = storage === undefined ? globalThis.localStorage : storage;
-    return new Set(validKeys(JSON.parse(target?.getItem(VIEWED_UPDATES_STORAGE_KEY) || '[]')));
+    return new Set(validKeys(JSON.parse(snapshot)));
   } catch {
     return new Set();
   }
+}
+
+/** Missing, inaccessible or malformed storage must not break the model store. */
+export function loadViewedUpdateRevisions(storage) {
+  return parseViewedUpdateSnapshot(readViewedUpdateSnapshot(storage));
 }
 
 /** Merge before writing so another window's acknowledgements are retained. */
