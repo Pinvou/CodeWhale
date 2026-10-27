@@ -325,9 +325,10 @@ test('bridge onSessionEvent 包装层：流式事件打 begin、始终委托共�
 
   assert.equal(sandbox.onSessionEvent({ event: 'chat:delta', payload: { session_id: 'sB' } }), 'delegated');
   sandbox.onSessionEvent({ event: 'chat:reasoning_delta', payload: { session_id: 'sB2' } });
-  assert.deepEqual(begun, ['sB', 'sB2'], '两条流式事件各打一次 begin');
+  assert.deepEqual(begun, ['sB', 'sB2'], '两条流式事件各打一次 begin；前缀/后缀拼凑名均不触发');
   sandbox.onSessionEvent({ event: 'pre_chat:delta', payload: { session_id: 'no1' } });
+  sandbox.onSessionEvent({ event: 'chat:delta_x', payload: { session_id: 'no3' } });  // r5: $ 锚定
   sandbox.onSessionEvent({ event: 'chat:turn_completed', payload: { session_id: 'no2' } });
   assert.deepEqual(begun, ['sB', 'sB2'], '前缀拼凑名与非流式事件不得触发 begin');
-  assert.equal(delegated.length, 4, '所有事件（含未打 begin 的）都必须原样委托');
+  assert.equal(delegated.length, 5, '所有事件（含未打 begin 的）都必须原样委托');
 });

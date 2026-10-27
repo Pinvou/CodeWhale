@@ -79,7 +79,11 @@ function pinvouSharedtauriChatEvents() {
       immediateNotify();
       // 直发（无合并帧）路径的派发标记；仅对有探针条目的流式 session 生效，
       // 其它事件是空操作。
-      if (window.RenderStageProbe) {
+      // r5 P2-2：抑制态 notify 不盖章——后台路由期间（runSyncOnSession 翻转
+      // activeSessionId + suppressNotify），此处没有任何渲染发布发生，盖章
+      // 会产出假 stall 记录（recv→dispatch≈201ms 实测）或系统性量快（漏报）。
+      // 发布侧（publish 内）不需要门控：rAF/定时器腿在路由 finally 后才 fire。
+      if (window.RenderStageProbe && !isNotifySuppressed()) {
         try { window.RenderStageProbe.markDispatched(state.activeSessionId); } catch (_) {}
       }
     }
