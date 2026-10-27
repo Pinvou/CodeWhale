@@ -1224,6 +1224,9 @@ const ModelStoreView = ({ theme, t, bs, startupUpdates = EMPTY_STARTUP_UPDATES, 
         {profilePick ? (
           <>
             <MsDialogTitle id="model-store-profile-title">{copy.profileTitle}</MsDialogTitle>
+            {profilePick.record.card_id === 'qwen38-27b-nvfp4-mtp' ? (
+              <p className={`mb-4 text-[13px] leading-6 ${TEXT_SECONDARY}`} data-testid="model-store-mtp-network-hint">{copy.mtpNetworkHint}</p>
+            ) : null}
             <div className="space-y-2">
               {profilePick.record.profiles.map((profile) => (
                 <label

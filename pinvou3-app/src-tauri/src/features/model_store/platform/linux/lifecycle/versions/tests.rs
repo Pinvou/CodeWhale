@@ -1505,18 +1505,34 @@ fn clearing_a_selected_artifact_in_a_multi_file_manifest_requires_review() {
     assert!(card_update::compatibility(&current, &card, Some(&manifest)).can_update);
 }
 
-#[test]
-fn switching_resolves_defaults_and_rollback_preserves_the_saved_profile() {
+fn profile_fixture(
+    target_profiles: &[&str],
+    selected: Option<&str>,
+) -> (
+    config::TempHome,
+    ModelManager,
+    db::StoreModelRecord,
+    StoreCardDetail,
+    CardPackage,
+    String,
+) {
     let (_temp, mgr, current, mut card, mut pkg, _id) = fixture();
     let profiles = serde_json::json!([
-        {"id":"default","name":"Default"}, {"id":"custom","name":"Custom"}
+        {"id":"default","name":"Default"}, {"id":"custom","name":"Custom"},
+        {"id":"other","name":"Other"}
     ]);
-    card.profiles = serde_json::from_value(profiles.clone()).unwrap();
+    card.profiles = serde_json::from_value(serde_json::json!(
+        target_profiles
+            .iter()
+            .map(|id| serde_json::json!({"id":id,"name":id}))
+            .collect::<Vec<_>>()
+    ))
+    .unwrap();
     db::connect()
         .unwrap()
         .execute(
-            "UPDATE store_models SET profiles_json=?1,active_profile_id='custom' WHERE card_id=?2",
-            rusqlite::params![profiles.to_string(), current.card_id],
+            "UPDATE store_models SET profiles_json=?1,active_profile_id=?2 WHERE card_id=?3",
+            rusqlite::params![profiles.to_string(), selected, current.card_id],
         )
         .unwrap();
     let mut scripts = current.scripts_content.clone();
@@ -1524,7 +1540,7 @@ fn switching_resolves_defaults_and_rollback_preserves_the_saved_profile() {
         .get_mut("deploy")
         .unwrap()
         .content
-        .push_str("printf '%s' \"$LMM_DEPLOY_PROFILE\" > chosen-profile\n");
+        .push_str("printf '%s' \"${LMM_DEPLOY_PROFILE-}\" > chosen-profile\n");
     scripts.get_mut("deploy").unwrap().sha256 =
         script_runner::sha256_hex(&scripts["deploy"].content);
     db::set_scripts_content(&current.card_id, &scripts, &current.assets_content).unwrap();
@@ -1533,7 +1549,7 @@ fn switching_resolves_defaults_and_rollback_preserves_the_saved_profile() {
         .get_mut("deploy")
         .unwrap()
         .content
-        .push_str("printf '%s' \"$LMM_DEPLOY_PROFILE\" > chosen-profile\n");
+        .push_str("printf '%s' \"${LMM_DEPLOY_PROFILE-}\" > chosen-profile\n");
     let deploy = pkg.scripts.get_mut("deploy").unwrap();
     deploy.sha256 = script_runner::sha256_hex(&deploy.content);
     card.script_sha256
@@ -1541,15 +1557,42 @@ fn switching_resolves_defaults_and_rollback_preserves_the_saved_profile() {
         .unwrap()
         .insert("deploy".into(), deploy.sha256.clone());
     let id = card_update::revision(&card_update::remote_manifest(&card));
+    (_temp, mgr, current, card, pkg, id)
+}
+
+#[test]
+fn upgrades_preserve_valid_choices_and_history_prefers_its_own_saved_profile() {
+    let (_temp, mgr, current, card, pkg, id) =
+        profile_fixture(&["default", "custom", "other"], Some("custom"));
     mgr.stage_verified(&current, &card, &id, pkg, &mut |_| {}, Default::default())
         .unwrap();
+    let staged = version_store::get(&current.card_id, &id).unwrap().unwrap();
+    assert_eq!(
+        staged.record.unwrap().active_profile_id.as_deref(),
+        Some("custom")
+    );
     mgr.switch_version(&current.card_id, &id, &mut |_| {}, Default::default())
         .unwrap();
     let active = db::get_store_model(&current.card_id).unwrap().unwrap();
-    assert_eq!(active.active_profile_id.as_deref(), Some("default"));
+    assert_eq!(active.active_profile_id.as_deref(), Some("custom"));
     assert_eq!(
         fs::read_to_string(runtime_path(&active).unwrap().join("chosen-profile")).unwrap(),
-        "default"
+        "custom"
+    );
+    mgr.deploy(
+        &current.card_id,
+        Some("other"),
+        &mut |_| {},
+        Default::default(),
+    )
+    .unwrap();
+    assert_eq!(
+        db::get_store_model(&current.card_id)
+            .unwrap()
+            .unwrap()
+            .active_profile_id
+            .as_deref(),
+        Some("other")
     );
     mgr.switch_version(
         &current.card_id,
@@ -1564,6 +1607,53 @@ fn switching_resolves_defaults_and_rollback_preserves_the_saved_profile() {
         fs::read_to_string(runtime_path(&restored).unwrap().join("chosen-profile")).unwrap(),
         "custom"
     );
+}
+
+#[test]
+fn ready_versions_use_the_latest_valid_choice_including_older_staged_records() {
+    for staged_choice in [None, Some("default")] {
+        let (_temp, mgr, current, card, pkg, id) =
+            profile_fixture(&["default", "custom"], Some("default"));
+        mgr.stage_verified(&current, &card, &id, pkg, &mut |_| {}, Default::default())
+            .unwrap();
+        let mut staged = version_store::get(&current.card_id, &id).unwrap().unwrap();
+        staged.record.as_mut().unwrap().active_profile_id = staged_choice.map(str::to_owned);
+        version_store::put(&staged).unwrap();
+        mgr.deploy(
+            &current.card_id,
+            Some("custom"),
+            &mut |_| {},
+            Default::default(),
+        )
+        .unwrap();
+        mgr.switch_version(&current.card_id, &id, &mut |_| {}, Default::default())
+            .unwrap();
+        let active = db::get_store_model(&current.card_id).unwrap().unwrap();
+        assert_eq!(active.active_profile_id.as_deref(), Some("custom"));
+        assert_eq!(
+            fs::read_to_string(runtime_path(&active).unwrap().join("chosen-profile")).unwrap(),
+            "custom"
+        );
+    }
+}
+
+#[test]
+fn upgrades_discard_unsupported_choices_and_allow_cards_without_profiles() {
+    for (profiles, expected) in [(&["default"][..], Some("default")), (&[][..], None)] {
+        let (_temp, mgr, current, card, pkg, id) = profile_fixture(profiles, Some("custom"));
+        mgr.stage_verified(&current, &card, &id, pkg, &mut |_| {}, Default::default())
+            .unwrap();
+        let staged = version_store::get(&current.card_id, &id).unwrap().unwrap();
+        assert!(staged.record.unwrap().active_profile_id.is_none());
+        mgr.switch_version(&current.card_id, &id, &mut |_| {}, Default::default())
+            .unwrap();
+        let active = db::get_store_model(&current.card_id).unwrap().unwrap();
+        assert_eq!(active.active_profile_id.as_deref(), expected);
+        assert_eq!(
+            fs::read_to_string(runtime_path(&active).unwrap().join("chosen-profile")).unwrap(),
+            expected.unwrap_or("")
+        );
+    }
 }
 
 #[test]

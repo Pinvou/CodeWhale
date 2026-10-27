@@ -1146,7 +1146,11 @@ impl ModelManager {
             rec.source_filename = card.source_filename.clone();
             rec.deploy_topology = card.summary.deploy_topology;
             rec.profiles = card.profiles.clone();
-            rec.active_profile_id = None;
+            rec.active_profile_id = current
+                .active_profile_id
+                .as_ref()
+                .filter(|id| rec.profiles.iter().any(|profile| &profile.id == *id))
+                .cloned();
             rec.scripts = card
                 .scripts
                 .iter()
@@ -1249,6 +1253,7 @@ impl ModelManager {
                 ));
             }
         }
+        let is_upgrade = target.state == "ready";
         let rec = target
             .record
             .as_mut()
@@ -1272,12 +1277,21 @@ impl ModelManager {
             return Err(fail("目标权重校验失败，未切换版本。"));
         }
         let source = self.local_scripts_source(rec)?;
-        let selected_profile = super::super::deploy_profiles::selected_id(
-            card_id,
-            source.profiles(),
-            rec.active_profile_id.as_deref(),
-        )
-        .map(str::to_owned);
+        // A ready version has never been deployed: retain the user's latest
+        // supported choice, including versions staged by older app releases.
+        // A history version instead owns its saved deployment configuration.
+        let saved_profile = if is_upgrade {
+            current
+                .active_profile_id
+                .as_deref()
+                .filter(|id| source.profiles().iter().any(|profile| profile.id == *id))
+                .or(rec.active_profile_id.as_deref())
+        } else {
+            rec.active_profile_id.as_deref()
+        };
+        let selected_profile =
+            super::super::deploy_profiles::selected_id(card_id, source.profiles(), saved_profile)
+                .map(str::to_owned);
         let mut env = self.env_for_record(rec);
         if let Some(profile) = &selected_profile {
             env.insert("LMM_DEPLOY_PROFILE".into(), profile.clone());

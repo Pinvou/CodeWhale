@@ -30,6 +30,9 @@ export function ModelVersionsDialog({ record, copy, theme, busy, onClose, onActi
       </MsDialogTitle>
       <p className={`mb-4 text-[13px] leading-6 ${TEXT_SECONDARY}`}>{copy.versionHint}</p>
       <p className={`mb-4 text-[13px] leading-6 ${TEXT_SECONDARY}`} data-testid="model-version-cost-hint">{copy.versionCostHint}</p>
+      {record.card_id === 'qwen38-27b-nvfp4-mtp' ? (
+        <p className={`mb-4 text-[13px] leading-6 ${TEXT_SECONDARY}`} data-testid="model-version-mtp-network-hint">{copy.mtpNetworkHint}</p>
+      ) : null}
       {record.running ? <p role="status" className="mb-3 text-[13px] text-amber-700 dark:text-amber-300">{copy.versionStopFirst}</p> : null}
       {error ? <div role="alert"><p>{error}</p><MsButton tone="ghost" onClick={() => setAttempt((n) => n + 1)}>{copy.retry}</MsButton></div> : null}
       {!versions && !error ? <p role="status">{copy.cardUpdateChecking}</p> : null}
