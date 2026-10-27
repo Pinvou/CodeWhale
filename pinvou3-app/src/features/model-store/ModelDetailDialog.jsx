@@ -71,7 +71,7 @@ function CopyRow({ label, value, hint, copyLabel, onCopy, testId }) {
  *
  * @returns {React.ReactElement} 弹窗。
  */
-function ModelDetailDialog({ cardId, card, copy, theme, onClose, onRedeploy, onToast, savedModels, cardBusy, scriptUpdates, onUninstall, onUpdateWithCleanup }) {
+function ModelDetailDialog({ cardId, copy, theme, onClose, onRedeploy, onToast, savedModels, cardBusy, scriptUpdates, onUninstall, onUpdateWithCleanup }) {
   const [detail, setDetail] = useState(null);
   const [keys, setKeys] = useState([]);
   const [keysKnown, setKeysKnown] = useState(false);

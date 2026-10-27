@@ -3692,7 +3692,10 @@ fn openai_compatible_endpoint_alive(endpoint_url: &str) -> bool {
 /// `{"version":1, "process":{"pid":N, "start_ticks":N, "uid":N}, ...}`。
 /// 文件缺失/损坏/PID 不活 → false（不认领，可能是外来服务或残留端口占用）。
 fn native_engine_identity_alive(card_dir: &std::path::Path) -> bool {
-    native_identity_pid(card_dir).is_some_and(pid_alive)
+    let Some(identity) = native_identity_process(card_dir) else {
+        return false;
+    };
+    identity_process_alive(&identity)
 }
 
 /// /proc/{pid}/stat 存在 = 进程活着；不需要解析内容。
@@ -3700,14 +3703,61 @@ fn pid_alive(pid: i64) -> bool {
     std::path::Path::new(&format!("/proc/{pid}/stat")).exists()
 }
 
-/// 从 `.runtime/serve.identity.json` 读出记录的 PID；文件缺失/损坏/没有合法
-/// PID 都返回 None（调用方据此判定「无身份」，不认领、不编数据）。
-fn native_identity_pid(card_dir: &std::path::Path) -> Option<i64> {
+/// identity 文件里记录的进程身份。start_ticks/uid 老文件可能缺——缺了就
+/// 只能退回「PID 在不在」，带了就比对（见 [`identity_process_alive`]）。
+struct NativeIdentity {
+    pid: i64,
+    start_ticks: Option<u64>,
+    uid: Option<u32>,
+}
+
+/// 从 `.runtime/serve.identity.json` 读出记录的进程身份；文件缺失/损坏/没有
+/// 合法 PID 都返回 None（调用方据此判定「无身份」，不认领、不编数据）。
+fn native_identity_process(card_dir: &std::path::Path) -> Option<NativeIdentity> {
     let identity_path = card_dir.join(".runtime").join("serve.identity.json");
     let content = std::fs::read_to_string(&identity_path).ok()?;
     let value = serde_json::from_str::<serde_json::Value>(&content).ok()?;
     let pid = value["process"]["pid"].as_i64()?;
-    (pid > 0).then_some(pid)
+    if pid <= 0 {
+        return None;
+    }
+    Some(NativeIdentity {
+        pid,
+        start_ticks: value["process"]["start_ticks"].as_u64(),
+        uid: value["process"]["uid"].as_u64().map(|u| u as u32),
+    })
+}
+
+/// PID 存在**不等于**还是那个进程——PID 会被内核复用（r18 P2-2：仅凭 PID
+/// 文件判活违反 native_process 自己立的规矩，`matching_pid` 在 60 行外就有
+/// 现成机制）。identity 带了 start_ticks/uid 就比对：start_ticks 换了 =
+/// 同号新进程；uid 换了 = 别的用户起的。老 identity 缺字段时保守退回仅
+/// PID 存在（比误杀好——这条只影响「认领」方向，正向纠正另有端点判据）。
+fn identity_process_alive(identity: &NativeIdentity) -> bool {
+    if !pid_alive(identity.pid) {
+        return false;
+    }
+    let stat = match std::fs::read_to_string(format!("/proc/{pid}/stat", pid = identity.pid)) {
+        Ok(stat) => stat,
+        Err(_) => return false,
+    };
+    if let Some(expected) = identity.start_ticks {
+        if super::native_process::start_ticks(&stat) != Some(expected) {
+            return false;
+        }
+    }
+    if let Some(expected) = identity.uid {
+        match std::fs::metadata(format!("/proc/{pid}", pid = identity.pid)) {
+            Ok(meta) => {
+                use std::os::unix::fs::MetadataExt;
+                if meta.uid() != expected {
+                    return false;
+                }
+            }
+            Err(_) => return false,
+        }
+    }
+    true
 }
 
 /// `docker ps -a --format '{{.Names}}\t{{.Image}}\t{{.State}}\t{{.Label ...}}'`
@@ -4040,8 +4090,8 @@ fn docker_container_memory(container: &str) -> Option<String> {
         .filter(|mem| !mem.is_empty())
 }
 
-/// 原生引擎在 `.runtime/serve.identity.json` 里记的 PID（活着与否由调用方看
-/// 场景决定；这里只管「有没有身份文件」）。与 reconcile 的身份核验共用格式。
+/// 原生引擎在 `.runtime/serve.identity.json` 里记的 PID（含 start_ticks/uid
+/// 核验——与 reconcile 的身份核验同一判据，PID 复用后老 PID 的假活不展示）。
 fn native_runtime_pid(rec: &db::StoreModelRecord) -> Option<i64> {
     let card_dir = config::data_dir()
         .join("cards")
@@ -4049,7 +4099,8 @@ fn native_runtime_pid(rec: &db::StoreModelRecord) -> Option<i64> {
     if card_dir.as_os_str().is_empty() {
         return None;
     }
-    native_identity_pid(&card_dir)
+    let identity = native_identity_process(&card_dir)?;
+    identity_process_alive(&identity).then_some(identity.pid)
 }
 
 /// uptime（ps etime）+ 主进程 RSS（/proc VmRSS）。两项各自尽力：拿不到就少一行，
@@ -4228,6 +4279,56 @@ mod tests {
         assert!(gpu_value_unsupported(""));
         assert!(!gpu_value_unsupported("11.44 W"));
         assert!(!gpu_value_unsupported("45"));
+    }
+
+    /// r18 P2-2：identity 判活必须比对 start_ticks/uid——PID 会被内核复用，
+    /// 仅凭「/proc/{pid}/stat 存在」会把同号新进程当成自己的实例认领。
+    /// 用本测试进程自己的 /proc 做真实比对（非伪造）。
+    #[test]
+    fn identity_pid_reuse_is_caught_by_start_ticks_and_uid() {
+        let stat = std::fs::read_to_string("/proc/self/stat").unwrap();
+        let ticks = super::super::native_process::start_ticks(&stat)
+            .expect("本进程 stat 应可解析出 starttime");
+        use std::os::unix::fs::MetadataExt;
+        let uid = std::fs::metadata("/proc/self").unwrap().uid();
+        let self_pid = std::process::id() as i64;
+
+        let ok = NativeIdentity {
+            pid: self_pid,
+            start_ticks: Some(ticks),
+            uid: Some(uid),
+        };
+        assert!(identity_process_alive(&ok), "字段全对必须判活");
+
+        let reused = NativeIdentity {
+            pid: self_pid,
+            start_ticks: Some(ticks + 1),
+            uid: Some(uid),
+        };
+        assert!(
+            !identity_process_alive(&reused),
+            "start_ticks 换了 = 同号新进程（PID 复用），不得判活"
+        );
+
+        let foreign_uid = NativeIdentity {
+            pid: self_pid,
+            start_ticks: Some(ticks),
+            uid: Some(uid + 1),
+        };
+        assert!(
+            !identity_process_alive(&foreign_uid),
+            "uid 对不上 = 别的用户起的进程，不得判活"
+        );
+
+        let legacy = NativeIdentity {
+            pid: self_pid,
+            start_ticks: None,
+            uid: None,
+        };
+        assert!(
+            identity_process_alive(&legacy),
+            "老 identity 缺 start_ticks/uid 时退回仅 PID 存在"
+        );
     }
 
     #[test]

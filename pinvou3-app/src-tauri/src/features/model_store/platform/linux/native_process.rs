@@ -27,7 +27,10 @@ fn argument(args: &[String], name: &str) -> Option<String> {
     })
 }
 
-fn start_ticks(stat: &str) -> Option<u64> {
+/// /proc/{pid}/stat 的第 22 字段（starttime，自启动起的时钟滴答）。
+/// comm 可含空格和 ')'，从最后一个 ") " 之后取，跳过 state 一词后数到
+/// starttime（此后字段序号 22 对应剩余序列的下标 19）。
+pub(crate) fn start_ticks(stat: &str) -> Option<u64> {
     // comm can itself contain spaces and ')' characters.
     stat.rsplit_once(") ")?
         .1

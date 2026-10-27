@@ -991,11 +991,23 @@ mod tests {
             "+ X-Amz-Security-Token=FwoGZXIvYXdzEB",
         ] {
             let cleaned = sanitize_for_disk(line);
-            for secret in ["sk-live-abc123def456ghi789", "ghp_16C7e42F292c6912E7710c838347Ae178B4a", "shortsecret123", "s3cr3tValue2026", "FwoGZXIvYXdzEB"] {
+            for secret in [
+                "sk-live-abc123def456ghi789",
+                "ghp_16C7e42F292c6912E7710c838347Ae178B4a",
+                "shortsecret123",
+                "s3cr3tValue2026",
+                "FwoGZXIvYXdzEB",
+            ] {
                 assert!(!cleaned.contains(secret), "{line} -> {cleaned}");
             }
             let exported = sanitize_for_export(line);
-            for secret in ["sk-live-abc123def456ghi789", "ghp_16C7e42F292c6912E7710c838347Ae178B4a", "shortsecret123", "s3cr3tValue2026", "FwoGZXIvYXdzEB"] {
+            for secret in [
+                "sk-live-abc123def456ghi789",
+                "ghp_16C7e42F292c6912E7710c838347Ae178B4a",
+                "shortsecret123",
+                "s3cr3tValue2026",
+                "FwoGZXIvYXdzEB",
+            ] {
                 assert!(!exported.contains(secret), "{line} -> {exported}");
             }
         }

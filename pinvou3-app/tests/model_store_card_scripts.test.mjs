@@ -66,8 +66,6 @@ async function fixture(t, { running = false, status = 'deployed', activeRuns = [
         starts.push({ command, payload, id });
         return { run_id: id };
       }
-      case 'model_store_take_autostart_report':
-        return {}; // 自启报告：无报告=正常
       default: unexpected.push(command); throw new Error(`Unexpected IPC: ${command}`);
     }
   } } };
