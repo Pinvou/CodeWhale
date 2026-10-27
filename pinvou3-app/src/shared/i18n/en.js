@@ -512,6 +512,7 @@ export const dictEn = {
           actionUninstall:'Undeploy',
           actionUpdate:'Update Scripts',
           actionRedeploy:'Redeploy',
+          actionDelete:'Delete Model',
           redeployBlockedByRunning:'The model is running — stop it before redeploying.',
           updateConfirmRunning:'The model is running; updating scripts will stop it first, then update the scripts (downloaded weights are untouched). You will need to redeploy afterwards. Continue?',
           updateConfirmStopped:'Updating scripts only refreshes the scripts; downloaded weights are untouched. You will need to redeploy afterwards. Continue?',

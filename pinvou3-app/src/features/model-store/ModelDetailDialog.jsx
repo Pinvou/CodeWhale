@@ -514,31 +514,49 @@ function ModelDetailDialog({ cardId, card, copy, theme, onClose, onRedeploy, onT
               );
             })()}
             {(() => {
-              // r6 P2-4 次级行：主按钮收窄后仍要可达的两个入口。
+              // r6 P2-4 + r7 P1-3：主按钮收窄后仍要可达的入口。
+              // - deployed：常驻「重新部署」（修复入口）+ 有更新时的「卸载」
+              // - downloaded/incomplete：「删除」——旧版列表行有垃圾桶入口，
+              //   UX 重构后失去全部删除路径（评审 r7 P1-3）；复用同一个
+              //   onUninstall → delete-only 确认弹窗
               const hasUpdate = scriptUpdates?.[record.card_id];
               const isDeployed = record.status === 'deployed';
-              if (!isDeployed) return null;
               const isRunning = record.running;
+              if (isDeployed) {
+                return (
+                  <div className="mt-1.5 flex flex-wrap items-center gap-2">
+                    {hasUpdate ? (
+                      <MsButton
+                        tone="danger"
+                        disabled={isRunning || cardBusy}
+                        onClick={() => { onClose(); onUninstall?.(record); }}
+                        data-testid="model-store-detail-secondary-uninstall"
+                      >
+                        {copy.actionUninstall}
+                      </MsButton>
+                    ) : null}
+                    <MsButton
+                      tone="ghost"
+                      disabled={isRunning || cardBusy}
+                      title={isRunning ? copy.redeployBlockedByRunning : undefined}
+                      onClick={() => { onClose(); onRedeploy?.(record); }}
+                      data-testid="model-store-detail-secondary-redeploy"
+                    >
+                      {copy.actionRedeploy}
+                    </MsButton>
+                  </div>
+                );
+              }
+              // 非 deployed（downloaded / incomplete / cleanup_required）：删除入口
               return (
                 <div className="mt-1.5 flex flex-wrap items-center gap-2">
-                  {hasUpdate ? (
-                    <MsButton
-                      tone="danger"
-                      disabled={isRunning || cardBusy}
-                      onClick={() => { onClose(); onUninstall?.(record); }}
-                      data-testid="model-store-detail-secondary-uninstall"
-                    >
-                      {copy.actionUninstall}
-                    </MsButton>
-                  ) : null}
                   <MsButton
-                    tone="ghost"
-                    disabled={isRunning || cardBusy}
-                    title={isRunning ? copy.redeployBlockedByRunning : undefined}
-                    onClick={() => { onClose(); onRedeploy?.(record); }}
-                    data-testid="model-store-detail-secondary-redeploy"
+                    tone="danger"
+                    disabled={cardBusy}
+                    onClick={() => { onClose(); onUninstall?.(record); }}
+                    data-testid="model-store-detail-secondary-delete"
                   >
-                    {copy.actionRedeploy}
+                    {copy.actionDelete || copy.actionUninstall}
                   </MsButton>
                 </div>
               );

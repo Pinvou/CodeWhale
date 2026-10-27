@@ -510,6 +510,7 @@ const jaBase = {
           actionUninstall:'デプロイ解除',
           actionUpdate:'スクリプト更新',
           actionRedeploy:'再デプロイ',
+          actionDelete:'モデル削除',
           redeployBlockedByRunning:'モデルが実行中です。再デプロイ前に停止してください。',
           updateConfirmRunning:'モデルが実行中のため、スクリプト更新はまず停止してからスクリプトを更新します（ダウンロード済みの重みには影響しません）。更新後の再デプロイが必要です。続行しますか？',
           updateConfirmStopped:'スクリプト更新はスクリプト内容のみを更新し、ダウンロード済みの重みには影響しません。更新後の再デプロイが必要です。続行しますか？',

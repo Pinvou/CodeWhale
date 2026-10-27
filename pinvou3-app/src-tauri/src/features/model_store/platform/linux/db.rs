@@ -1186,7 +1186,8 @@ pub fn list_store_models_light() -> rusqlite::Result<Vec<LibraryRow>> {
                           FROM json_each(
                             CASE WHEN m.scripts_content_json IS NULL
                                       OR json_valid(m.scripts_content_json)
-                                 THEN m.scripts_content_json ELSE NULL END) j),
+                                 THEN m.scripts_content_json ELSE NULL END) j
+                          WHERE json_valid(j.value) AND json_type(j.value) = 'object'),
                          '{}') AS script_hashes_json
          FROM store_models m ORDER BY m.downloaded_at DESC",
     )?;

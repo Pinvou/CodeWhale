@@ -545,6 +545,7 @@ export const dictZh = {
           actionUninstall:'卸载部署',
           actionUpdate:'更新脚本',
           actionRedeploy:'重新部署',
+          actionDelete:'删除模型',
           redeployBlockedByRunning:'模型运行中，请先停用再重新部署。',
           updateConfirmRunning:'模型正在运行，更新脚本会先停止它，再更新脚本内容（已下载的权重不受影响）。更新完成后需要重新部署才会生效。确定继续吗？',
           updateConfirmStopped:'更新脚本只更新脚本内容，已下载的权重不受影响。更新完成后需要重新部署才会生效。确定继续吗？',
