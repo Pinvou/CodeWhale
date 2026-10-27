@@ -9,8 +9,90 @@ import (
 	"testing"
 	"time"
 
+	"github.com/Pinvou/pinvou3/account-platform/tools/kms-recovery/internal/custody"
 	"github.com/nats-io/nkeys"
 )
+
+func TestIdentityBundleV2DirectCutoverPreservesAllExistingKeys(t *testing.T) {
+	now := time.Now().UTC().Truncate(time.Second)
+	v1, _ := fixture(t)
+	if generateAt(v1, now) != nil {
+		t.Fatal("owned v1 custody setup failed")
+	}
+	v1Public := read(t, v1.OutputDirectory, "public-keys.json")
+	v1Manifest := read(t, v1.OutputDirectory, "manifest.json")
+	v2, recovery := fixture(t)
+	v2.ArtifactVersion, v2.PreviousDirectory, v2.OverlapExpiresAt = 2, v1.OutputDirectory, now.Add(time.Hour).Format(time.RFC3339)
+	v2.DirectCutoverPreserveAccountOutbox = true
+	if generateAt(v2, now) != nil {
+		t.Fatal("explicit direct cutover generation failed")
+	}
+	var old, current PublicKeys
+	if json.Unmarshal(v1Public, &old) != nil || json.Unmarshal(read(t, v2.OutputDirectory, "public-keys.json"), &current) != nil || current.PreviousV1SHA256 != hash(v1Public) || current.Version != 2 || len(current.Keys) != 7 {
+		t.Fatal("closed direct cutover public binding failed")
+	}
+	plain, err := custody.Decrypt(read(t, v2.OutputDirectory, "identities.age"), recovery)
+	if err != nil {
+		t.Fatal("direct cutover recovery decryption failed")
+	}
+	defer clear(plain)
+	var recovered envelope
+	if json.Unmarshal(plain, &recovered) != nil || len(recovered.Seeds) != 7 || len(recovered.Keys) != 7 {
+		t.Fatal("direct cutover recovery envelope invalid")
+	}
+	defer func() {
+		for _, seed := range recovered.Seeds {
+			clear(seed)
+		}
+	}()
+	for _, role := range roles() {
+		oldSeed := read(t, v1.OutputDirectory, role+"/nkey.seed")
+		newSeed := read(t, v2.OutputDirectory, role+"/nkey.seed")
+		if current.Keys[role] != old.Keys[role] || !bytes.Equal(oldSeed, newSeed) || !bytes.Equal(newSeed, recovered.Seeds[role]) || recovered.Keys[role] != current.Keys[role] {
+			t.Fatalf("existing role identity changed: %s", role)
+		}
+		clear(oldSeed)
+		clear(newSeed)
+	}
+	approvalSeed := read(t, v2.OutputDirectory, "account-approval-relay/nkey.seed")
+	approval, err := nkeys.FromSeed(approvalSeed)
+	clear(approvalSeed)
+	if err != nil {
+		t.Fatal("new approval identity invalid")
+	}
+	defer approval.Wipe()
+	approvalPublic, err := approval.PublicKey()
+	if err != nil || approvalPublic != current.Keys["account-approval-relay"] || approvalPublic == old.Keys["account-outbox-relay"] || !bytes.Equal(recovered.Seeds["account-approval-relay"], read(t, v2.OutputDirectory, "account-approval-relay/nkey.seed")) {
+		t.Fatal("dedicated approval identity was not independently bound")
+	}
+	var metadata manifest
+	manifestRaw := read(t, v2.OutputDirectory, "manifest.json")
+	if json.Unmarshal(manifestRaw, &metadata) != nil || metadata.Version != 2 || len(metadata.Files) != 9 || string(read(t, v2.OutputDirectory, "READY")) != "NATS_IDENTITIES_READY_V2\n"+hash(manifestRaw)+"\n" {
+		t.Fatal("closed v2 custody manifest invalid")
+	}
+	for name, digest := range metadata.Files {
+		if hash(read(t, v2.OutputDirectory, name)) != digest {
+			t.Fatal("v2 custody file hash mismatch")
+		}
+	}
+	if !bytes.Equal(v1Public, read(t, v1.OutputDirectory, "public-keys.json")) || !bytes.Equal(v1Manifest, read(t, v1.OutputDirectory, "manifest.json")) {
+		t.Fatal("prior custody evidence changed")
+	}
+	if generateAt(v2, now) == nil {
+		t.Fatal("existing v2 custody directory overwritten")
+	}
+}
+
+func TestIdentityBundleDirectCutoverRejectsV1Mode(t *testing.T) {
+	cfg, _ := fixture(t)
+	cfg.DirectCutoverPreserveAccountOutbox = true
+	if Generate(cfg) != ErrIdentity {
+		t.Fatal("direct cutover accepted without a verified v1 source")
+	}
+	if _, err := os.Stat(cfg.OutputDirectory); !os.IsNotExist(err) {
+		t.Fatal("invalid option created custody output")
+	}
+}
 
 func v2Config(t *testing.T, now time.Time) (Config, Config) {
 	t.Helper()

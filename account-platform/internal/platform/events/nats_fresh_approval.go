@@ -129,7 +129,7 @@ func checkFreshApprovalConsumers(ctx context.Context, rawURL string, cfg NATSCon
 		return FreshApprovalControl{}, ErrNATSResources
 	}
 	var receipt approvalConsumerCutoverReceipt
-	if json.Unmarshal(raw, &receipt) != nil {
+	if json.Unmarshal(raw, &receipt) != nil || receipt.Schema != "approval-consumer-cutover-receipt-v1" {
 		return FreshApprovalControl{}, ErrNATSResources
 	}
 	version, _ := strconv.ParseInt(receipt.ControlVersion, 10, 64)

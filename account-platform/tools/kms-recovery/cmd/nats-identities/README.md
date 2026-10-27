@@ -6,6 +6,8 @@ v1 配置仅含 `recipient_file`、`recipient_sha256`（去除首尾空白后的
 
 v1 固定六身份：三个 `account/billing/token-outbox-relay`、`billing-command-executor`、`token-command-executor` 和 `event-resource-operator`。v2 新增 `account-approval-relay`，沿用其余五个无关角色的原始 seed，并为 generic Account Relay 与授权 Relay 生成两个互不复用的新 seed。角色和权限均不能由调用方输入。
 
+经过明确批准的**直接切换**可在 v2 配置中设置 `"direct_cutover_preserve_account_outbox": true`：工具先完整验证原 v1 保管包，保留原六个身份的 seed，仅新增独立的 `account-approval-relay` 身份；默认值仍采用上述轮换行为。此选项只适用于已停写、无旧权限重叠的受控切换，不得将 previous v1 文件投递给 v2 渲染器，否则会被拒绝。`previous_v1_sha256` 仍绑定原 v1 公开文件，但无 previous 文件时运行时不会复核该绑定：部署者必须独立核验旧摘要、六个公钥和 seed 的对应关系、恢复包、最终 ACL 及所有旧连接的权限撤销，然后才能恢复发布。不得为保持身份而手改已签收的保管包、清单或 READY。
+
 输出先写 `identities.age`（目的为 `pinvou-nats-service-identities`，包含闭合种子和公开映射），然后写每个 `<角色>/nkey.seed`、`public-keys.json`，最后写文件 SHA-256 清单 `manifest.json` 和绑定其摘要的版本化 `READY`。v1 清单含八个被摘要文件，v2 含九个。Linux 目录 0700、文件 0600；写后同步并读回，已有输出禁止覆盖。失败保留部分目录，不可部署或原地重试。种子和序列化缓冲尽力清零，Go/库内部内存不保证完全擦除。
 
 `READY` 不代表现场验收。部署仍须核验闭合文件集合、摘要、公钥与种子对应及权限。只向各业务投递自己的种子；broker 只需公开映射派生的 ACL。初始化角色不投递给普通业务，串行初始化窗口结束后撤除其临时投递并关闭连接。`identities.age`、公开映射、清单及独立可信摘要交既有保管人离线保存，与口令分开；不要把整个未加密种子目录复制到业务服务器。

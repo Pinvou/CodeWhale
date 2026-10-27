@@ -20,6 +20,15 @@ import (
 )
 
 func main() {
+	if len(os.Args) > 1 && os.Args[1] == "existing-broker" {
+		raw, err := runExistingBroker(os.Args[2:], os.Getenv)
+		if err != nil {
+			fmt.Fprintln(os.Stderr, "APPROVAL_EXISTING_BROKER_OPERATION_BLOCKED")
+			os.Exit(1)
+		}
+		fmt.Println(string(raw))
+		return
+	}
 	if len(os.Args) > 1 && os.Args[1] == "token-consumers" {
 		raw, err := runTokenResources(os.Args[1:], os.Getenv)
 		if err != nil {
@@ -29,8 +38,8 @@ func main() {
 		fmt.Println(string(raw))
 		return
 	}
-	if len(os.Args) == 2 && os.Args[1] == "render" {
-		result, err := renderPublicResources(os.Getenv)
+	if len(os.Args) == 2 && (os.Args[1] == "render" || os.Args[1] == "render-existing-broker") {
+		result, err := renderResources(os.Getenv, os.Args[1] == "render-existing-broker")
 		if err != nil {
 			fmt.Fprintln(os.Stderr, "PUBLIC_RESOURCE_RENDER_FAILED")
 			os.Exit(1)

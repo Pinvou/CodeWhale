@@ -117,10 +117,11 @@ function stepRun(job, name) {
 
 const goStepName = "Test and vet all Account Platform Go modules";
 const auditPGStepName = "Audit export finite PostgreSQL rollback and persisted boundaries";
+const existingBrokerStepName = "Existing broker compatibility on owned PostgreSQL and TLS NATS";
 
 function assertFiniteAuditPGSetup(job) {
   const text = job.replaceAll("\r\n", "\n");
-  // These are exactly two approved ephemeral services, not permission for arbitrary
+  // These are exactly three approved ephemeral services, not permission for arbitrary
   // services, production credentials, public ports or persistent volumes.
   const service = text.match(/^ {4}services:\n[\s\S]*?(?=^ {4}\S|$(?![\s\S]))/m);
   assert.ok(service, "isolated audit PostgreSQL service not found");
@@ -137,6 +138,20 @@ function assertFiniteAuditPGSetup(job) {
     "          --health-interval 10s",
     "          --health-timeout 5s",
     "          --health-retries 5",
+    "      existing-broker-postgres:",
+    "        # Dedicated disposable PG18.4, matching the supported production-history",
+    "        # contract. The acceptance creates and removes only its own actors/DBs.",
+    "        image: postgres:18.4-alpine@sha256:9a8afca54e7861fd90fab5fdf4c42477a6b1cb7d293595148e674e0a3181de15",
+    "        env:",
+    "          POSTGRES_HOST_AUTH_METHOD: trust",
+    "          POSTGRES_DB: postgres",
+    "        ports:",
+    "          - 127.0.0.1:5434:5432",
+    "        options: >-",
+    "          --health-cmd \"pg_isready -U postgres -d postgres\"",
+    "          --health-interval 5s",
+    "          --health-timeout 5s",
+    "          --health-retries 12",
     "      financial-postgres:",
     "        # Same immutable PostgreSQL image already used by team-relay-hub-test.",
     "        # Disposable runner only; trust is never a deployment configuration.",
@@ -165,6 +180,26 @@ function assertFiniteAuditPGSetup(job) {
   // Validate each whole step before removing it from the audit-only env ban;
   // arbitrary env, commands, conditions and extra steps remain rejected.
   let outsidePGSteps = text.replace(pg, "");
+  // Admit only this bounded acceptance step before enforcing the job-wide ban
+  // on incidental database inputs. The complete step is fixed deliberately.
+  const existingBroker = namedStep(text, existingBrokerStepName);
+  assert.equal(existingBroker.trimEnd(), [
+    `      - name: ${existingBrokerStepName}`,
+    "        timeout-minutes: 12", "        shell: bash", "        env:",
+    "          PINVOU_TEST_SCHEMA_DATABASE_URL: postgres://postgres@127.0.0.1:5434/postgres?sslmode=disable",
+    "        run: |", "          set -euo pipefail",
+    "          # Extract only the pinned public server executable. The test itself",
+    "          # starts a private loopback broker with its own TLS keys and store.",
+    '          fixture_container="$(docker create --network none nats@sha256:ad7a43eb7e3337c3c38ce5d784d1461791f95f730f252d2b25eee699752a0ca3)"',
+    `          trap 'docker rm "$fixture_container" >/dev/null' EXIT`,
+    '          docker cp "$fixture_container:/nats-server" "$RUNNER_TEMP/pinvou-test-nats-server" 2>/dev/null || \\',
+    '            docker cp "$fixture_container:/usr/local/bin/nats-server" "$RUNNER_TEMP/pinvou-test-nats-server"',
+    '          printf \'%s  %s\\n\' 2d0dc83e0547185a6820377114215d6a7c645f607aeb31728fffaf3d84e77c10 "$RUNNER_TEMP/pinvou-test-nats-server" | sha256sum --check --strict',
+    '          chmod 0700 "$RUNNER_TEMP/pinvou-test-nats-server"',
+    '          export PINVOU_TEST_NATS_SERVER_BINARY="$RUNNER_TEMP/pinvou-test-nats-server"',
+    "          npm --prefix account-platform run test:existing-broker",
+  ].join("\n"));
+  outsidePGSteps = outsidePGSteps.replace(existingBroker, "");
   for (const [name, environment, commands] of [
     ["Token financial contracts on isolated PostgreSQL", [
       "PINVOU_ACCOUNT_FINANCIAL_TEST_DATABASE_URL: postgres://postgres@127.0.0.1:5433/postgres?sslmode=disable",
@@ -430,6 +465,9 @@ test("finite audit PostgreSQL exception rejects unsafe or unrelated service and 
     ["        ports:", "        volumes:\n          - shared-data:/var/lib/postgresql/data\n        ports:"],
     ["F17_TEST_DATABASE_PROFILE: github-actions-service", "F17_TEST_DATABASE_PROFILE: local-owned"],
     ["postgres://postgres@127.0.0.1:5432/postgres?sslmode=disable", "postgres://postgres@remote.invalid:5432/postgres?sslmode=disable"],
+    ["127.0.0.1:5434:5432", "5434:5432"],
+    ["PINVOU_TEST_SCHEMA_DATABASE_URL: postgres://postgres@127.0.0.1:5434/postgres?sslmode=disable", "PINVOU_TEST_SCHEMA_DATABASE_URL: postgres://postgres@remote.invalid:5434/postgres?sslmode=disable"],
+    ["npm --prefix account-platform run test:existing-broker", "npm --prefix account-platform run test:existing-broker || true"],
     ["PINVOU_ACCOUNT_FINANCIAL_TEST_DATABASE_URL: postgres://postgres@127.0.0.1:5433/postgres?sslmode=disable", "PINVOU_ACCOUNT_FINANCIAL_TEST_DATABASE_URL: postgres://postgres@remote.invalid:5433/postgres?sslmode=disable"],
     ["PINVOU_ACCOUNT_CLOSURE_TEST_DATABASE_URL: postgres://postgres@127.0.0.1:5433/postgres?sslmode=disable", "PINVOU_ACCOUNT_CLOSURE_TEST_DATABASE_URL: postgres://postgres@127.0.0.1:5432/postgres?sslmode=disable"],
     ["python3 scripts/test-token-financial-postgres.py", "python3 scripts/test-token-financial-postgres.py || true"],
@@ -449,6 +487,20 @@ test("finite audit PostgreSQL exception rejects unsafe or unrelated service and 
     const mutatedJob = original === job ? changed : job.replace(original, changed);
     assert.throws(() => assertFiniteAuditPGSetup(mutatedJob), `must reject: ${after}`);
   }
+});
+
+test("existing broker acceptance is required and propagates fixture failures", () => {
+  const job = jobBlock("account-platform-test");
+  assertFiniteAuditPGSetup(job);
+  const run = stepRun(job, existingBrokerStepName);
+  const prefix = `docker() { case "$1" in create) printf 'fixture-container\\n';; cp|rm) return 0;; *) return 8;; esac; };\n` +
+    `sha256sum() { cat >/dev/null; return 0; }; chmod() { return 0; };\n` +
+    `npm() { [[ "$*" == '--prefix account-platform run test:existing-broker' ]] || return 9; return "\${TEST_NPM_EXIT:-0}"; };\n`;
+  for (const exit of [0, 7]) {
+    const result = spawnSync(bash, ["-c", prefix + run], { encoding: "utf8", timeout: 30_000, windowsHide: true, env: { ...process.env, RUNNER_TEMP: tmpdir().replaceAll("\\", "/"), TEST_NPM_EXIT: String(exit) } });
+    assert.equal(result.status, exit, `acceptance exit ${exit} must propagate: ${result.stderr}`);
+  }
+  assert.throws(() => assertFiniteAuditPGSetup(job.replace(namedStep(job, existingBrokerStepName), "")));
 });
 
 test("Keycloak contract gate invokes the existing suite and propagates failure", () => {
@@ -473,8 +525,8 @@ test("Token financial PostgreSQL gate is required and cannot swallow a failed ru
   assert.match(job, /image: mirror\.gcr\.io\/library\/postgres@sha256:[a-f0-9]{64}/);
   const services = job.match(/^    services:\r?\n([\s\S]*?)^    env:/m)?.[1];
   assert.ok(services, "the disposable PostgreSQL service must exist");
-  assert.deepEqual([...services.matchAll(/^ {6}([a-z][a-z-]*):\r?$/gm)].map(match => match[1]), ["audit-export-postgres", "financial-postgres"]);
-  assert.deepEqual([...services.matchAll(/^ {10}- (.+)\r?$/gm)].map(match => match[1]), ["127.0.0.1:5432:5432", "127.0.0.1:5433:5432"]);
+  assert.deepEqual([...services.matchAll(/^ {6}([a-z][a-z-]*):\r?$/gm)].map(match => match[1]), ["audit-export-postgres", "existing-broker-postgres", "financial-postgres"]);
+  assert.deepEqual([...services.matchAll(/^ {10}- (.+)\r?$/gm)].map(match => match[1]), ["127.0.0.1:5432:5432", "127.0.0.1:5434:5432", "127.0.0.1:5433:5432"]);
   assert.match(job, /^          PINVOU_ACCOUNT_FINANCIAL_TEST_DATABASE_URL: postgres:\/\/postgres@127\.0\.0\.1:5433\/postgres\?sslmode=disable\r?$/m);
   const run = stepRun(job, "Token financial contracts on isolated PostgreSQL");
   for (const failedPhase of ["guard", "postgres"]) {

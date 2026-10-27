@@ -43,6 +43,7 @@ type approvalConsumerCutoverReceipt struct {
 	CapturedAt              string                         `json:"captured_at"`
 	HighWatermark           string                         `json:"high_watermark"`
 	BillingStarts           []approvalConsumerReceiptStart `json:"billing_starts"`
+	ExistingBroker          *existingBrokerReceiptFacts    `json:"existing_broker,omitempty"`
 }
 
 // VerifiedReceipt returns only independently hash-bound canonical public
@@ -87,7 +88,7 @@ func (files ApprovalConsumerResourceFiles) Load(now time.Time) (*ApprovalConsume
 	}
 	canonical, err := json.Marshal(receipt)
 	if err != nil || !bytes.Equal(raw, canonical) ||
-		receipt.Schema != "approval-consumer-cutover-receipt-v1" || receipt.SchemaVersion != 1 ||
+		!validReceiptOrigin(receipt, now) || receipt.SchemaVersion != 1 ||
 		receipt.IdentitySHA256 != files.Identity.CurrentSHA256 || receipt.ManifestSHA256 != files.ManifestSHA256 ||
 		receipt.Stream != platformStream || receipt.Control != "ADMIN_APPROVAL" ||
 		receipt.CapturedMode != "QUIESCING" || receipt.CapturedRelayState != "FENCED" {

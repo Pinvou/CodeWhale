@@ -32,7 +32,33 @@ const (
 // or rewrites historical execution, delivery, exclusion or financial evidence.
 // The callback retains the exclusive control lock around broker verification.
 func RunFreshApprovalStep(ctx context.Context, dsn string, expectedVersion int64, step FreshApprovalStep, resources func(context.Context, AdminApprovalControl) (json.RawMessage, error)) (AdminApprovalControl, error) {
-	if expectedVersion <= 0 || !validFreshApprovalStep(step) || ((step == FreshApprovalResources || step == FreshApprovalActivate || step == FreshApprovalResume) && resources == nil) {
+	return runEmptyHistoryApprovalStep(ctx, dsn, expectedVersion, step, resources, false, "")
+}
+
+// ExistingBrokerPrepare captures a hash-bound plan while the same exclusive
+// Account fence and empty-history checks used by initialization are held.
+const ExistingBrokerPrepare FreshApprovalStep = "prepare-existing-consumers"
+const ExistingBrokerPrepareTokenUpgrade FreshApprovalStep = "prepare-token-upgrade"
+const ExistingBrokerUpgradeToken FreshApprovalStep = "upgrade-token-consumers"
+const ExistingBrokerCheckTokenUpgrade FreshApprovalStep = "check-token-upgrade"
+const ExistingBrokerVerify FreshApprovalStep = "verify-consumers"
+const ExistingBrokerInspectTokenUpgrade FreshApprovalStep = "inspect-token-upgrade"
+const ExistingBrokerInspect FreshApprovalStep = "inspect-consumers"
+
+// RunExistingBrokerApprovalStep preserves the fresh SQL-history boundary, but
+// records the distinct existing-broker operation rather than claiming a fresh
+// broker initialization. The original entry point cannot select this mode.
+func RunExistingBrokerApprovalStep(ctx context.Context, dsn string, expectedVersion int64, step FreshApprovalStep, planSHA256 string, resources func(context.Context, AdminApprovalControl) (json.RawMessage, error)) (AdminApprovalControl, error) {
+	return runEmptyHistoryApprovalStep(ctx, dsn, expectedVersion, step, resources, true, planSHA256)
+}
+
+func runEmptyHistoryApprovalStep(ctx context.Context, dsn string, expectedVersion int64, step FreshApprovalStep, resources func(context.Context, AdminApprovalControl) (json.RawMessage, error), existingBroker bool, planSHA256 string) (AdminApprovalControl, error) {
+	auditStep := step
+	if existingBroker && (step == ExistingBrokerPrepare || step == ExistingBrokerPrepareTokenUpgrade || step == ExistingBrokerUpgradeToken || step == ExistingBrokerCheckTokenUpgrade || step == ExistingBrokerVerify || step == ExistingBrokerInspectTokenUpgrade || step == ExistingBrokerInspect) {
+		step = FreshApprovalResources
+	}
+	queryCurrent := existingBroker && step == FreshApprovalStatus && expectedVersion == 0
+	if (expectedVersion <= 0 && !queryCurrent) || !validFreshApprovalStep(step) || ((step == FreshApprovalResources || step == FreshApprovalActivate || step == FreshApprovalResume) && resources == nil) {
 		return AdminApprovalControl{}, ErrApprovalFreshInitialization
 	}
 	ctx, cancel := context.WithTimeout(ctx, 90*time.Second)
@@ -64,7 +90,7 @@ func RunFreshApprovalStep(ctx context.Context, dsn string, expectedVersion int64
 		return AdminApprovalControl{}, ErrApprovalFreshInitialization
 	}
 	control, err := LockAdminApprovalControlExclusive(ctx, tx)
-	if err != nil || control.Version != expectedVersion {
+	if err != nil || (!queryCurrent && control.Version != expectedVersion) {
 		return AdminApprovalControl{}, ErrApprovalFreshInitialization
 	}
 	if step == FreshApprovalStatus {
@@ -90,6 +116,29 @@ func RunFreshApprovalStep(ctx context.Context, dsn string, expectedVersion int64
 	if _, err = approvalpolicy.VerifyPolicySet(ctx, tx); err != nil {
 		return AdminApprovalControl{}, ErrApprovalFreshInitialization
 	}
+	if existingBroker {
+		prepare := ExistingBrokerPrepare
+		needsPlan := step == FreshApprovalResources || step == FreshApprovalActivate || step == FreshApprovalResume
+		if auditStep == ExistingBrokerPrepare || auditStep == ExistingBrokerPrepareTokenUpgrade {
+			needsPlan = false
+		}
+		if auditStep == ExistingBrokerUpgradeToken || auditStep == ExistingBrokerCheckTokenUpgrade || auditStep == ExistingBrokerInspectTokenUpgrade {
+			prepare = ExistingBrokerPrepareTokenUpgrade
+		}
+		if needsPlan {
+			decoded, e := hex.DecodeString(planSHA256)
+			var prepared bool
+			if e != nil || len(decoded) != sha256.Size || hex.EncodeToString(decoded) != planSHA256 {
+				return AdminApprovalControl{}, ErrApprovalFreshInitialization
+			}
+			e = tx.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM public.audit_logs WHERE action='APPROVAL_EXISTING_BROKER_INITIALIZATION' AND resource_type='ADMIN_APPROVAL_CONTROL' AND resource_id='ADMIN_APPROVAL' AND result='SUCCEEDED' AND change_summary->>'step'=$1 AND change_summary->>'resource_receipt_sha256'=$2)`, string(prepare), planSHA256).Scan(&prepared)
+			if e != nil || !prepared {
+				return AdminApprovalControl{}, ErrApprovalFreshInitialization
+			}
+		} else if planSHA256 != "" {
+			return AdminApprovalControl{}, ErrApprovalFreshInitialization
+		}
+	}
 	if _, err = tx.Exec(ctx, `SET LOCAL ROLE account_approval_authorization_owner`); err != nil {
 		return AdminApprovalControl{}, ErrApprovalFreshInitialization
 	}
@@ -103,6 +152,12 @@ func RunFreshApprovalStep(ctx context.Context, dsn string, expectedVersion int64
 		if err != nil || !json.Valid(receipt) {
 			return AdminApprovalControl{}, ErrApprovalFreshInitialization
 		}
+	}
+	if existingBroker && (auditStep == ExistingBrokerInspectTokenUpgrade || auditStep == ExistingBrokerInspect || auditStep == ExistingBrokerCheckTokenUpgrade || auditStep == ExistingBrokerVerify) {
+		if tx.Commit(ctx) != nil {
+			return AdminApprovalControl{}, ErrApprovalFreshInitialization
+		}
+		return control, nil
 	}
 	if _, err = tx.Exec(ctx, `SET LOCAL ROLE account_approval_control_owner`); err != nil {
 		return AdminApprovalControl{}, ErrApprovalFreshInitialization
@@ -128,8 +183,12 @@ func RunFreshApprovalStep(ctx context.Context, dsn string, expectedVersion int64
 		return AdminApprovalControl{}, ErrApprovalFreshInitialization
 	}
 	digest := sha256.Sum256(receipt)
-	summary, _ := json.Marshal(map[string]any{"step": step, "control_version": control.Version, "approval_epoch": control.ApprovalEpoch, "authorization_relay_epoch": control.AuthorizationRelayEpoch, "resource_receipt_sha256": hex.EncodeToString(digest[:])})
-	_, err = tx.Exec(ctx, `INSERT INTO public.audit_logs(id,action,resource_type,resource_id,result,request_id,trace_id,change_summary,occurred_at) VALUES($1,'APPROVAL_FRESH_INITIALIZATION','ADMIN_APPROVAL_CONTROL','ADMIN_APPROVAL','SUCCEEDED',$2,'operator',$3,transaction_timestamp())`, uuid.New(), uuid.NewString(), summary)
+	summary, _ := json.Marshal(map[string]any{"step": auditStep, "control_version": control.Version, "approval_epoch": control.ApprovalEpoch, "authorization_relay_epoch": control.AuthorizationRelayEpoch, "resource_receipt_sha256": hex.EncodeToString(digest[:])})
+	action := "APPROVAL_FRESH_INITIALIZATION"
+	if existingBroker {
+		action = "APPROVAL_EXISTING_BROKER_INITIALIZATION"
+	}
+	_, err = tx.Exec(ctx, `INSERT INTO public.audit_logs(id,action,resource_type,resource_id,result,request_id,trace_id,change_summary,occurred_at) VALUES($1,$2,'ADMIN_APPROVAL_CONTROL','ADMIN_APPROVAL','SUCCEEDED',$3,'operator',$4,transaction_timestamp())`, uuid.New(), action, uuid.NewString(), summary)
 	if err != nil || tx.Commit(ctx) != nil {
 		return AdminApprovalControl{}, ErrApprovalFreshInitialization
 	}
