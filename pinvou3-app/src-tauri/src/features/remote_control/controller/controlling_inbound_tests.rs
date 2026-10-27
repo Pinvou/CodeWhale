@@ -670,6 +670,17 @@ async fn repeated_disconnect_and_waiting_business_keep_the_first_absolute_cutoff
 
 #[tokio::test(start_paused = true)]
 async fn local_full_and_closed_during_reconnect_retire_owner_without_another_resume() {
+    let _env_lock = crate::platform::paths::tests::ENV_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let directory = tempfile::tempdir().unwrap();
+    let _restore =
+        crate::platform::test_support::EnvRestore::capture(&["PINVOU3_HOME", "CODEWHALE_HOME"]);
+    // SAFETY: the crate-wide lock is held through environment restoration.
+    unsafe {
+        std::env::set_var("PINVOU3_HOME", directory.path());
+        std::env::set_var("CODEWHALE_HOME", directory.path());
+    }
     for closed in [false, true] {
         let mut fixture = connected(limits());
         disconnect(&fixture);
@@ -744,10 +755,25 @@ async fn local_full_and_closed_during_reconnect_retire_owner_without_another_res
         assert!(!fixture.business.is_installed());
         assert!(fixture.manager.connect("2345678").is_ok());
     }
+    let written =
+        std::fs::read_to_string(directory.path().join("logs/remote-control.log")).unwrap();
+    assert!(written.contains("stage=inbound_failed detail=inbound_closed"));
+    assert!(written.contains("stage=inbound_failed detail=inbound_item_capacity"));
 }
 
 #[tokio::test]
 async fn ingress_terminal_does_not_wait_for_an_admitted_mutations_lease_guard() {
+    let _env_lock = crate::platform::paths::tests::ENV_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let directory = tempfile::tempdir().unwrap();
+    let _restore =
+        crate::platform::test_support::EnvRestore::capture(&["PINVOU3_HOME", "CODEWHALE_HOME"]);
+    // SAFETY: the crate-wide lock is held through environment restoration.
+    unsafe {
+        std::env::set_var("PINVOU3_HOME", directory.path());
+        std::env::set_var("CODEWHALE_HOME", directory.path());
+    }
     let mut fixture = connected(InboundLimits {
         business_items: 1,
         ..limits()
@@ -803,6 +829,9 @@ async fn ingress_terminal_does_not_wait_for_an_admitted_mutations_lease_guard() 
             ))
     );
     assert_eq!(keeper(&mut fixture).await[0]["status"], "error");
+    let written =
+        std::fs::read_to_string(directory.path().join("logs/remote-control.log")).unwrap();
+    assert!(written.contains("stage=inbound_failed detail=inbound_item_capacity"));
 }
 
 async fn receive(socket: &mut WebSocketStream<TcpStream>) -> Value {
