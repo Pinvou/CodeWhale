@@ -2243,6 +2243,15 @@ jobs:
         with:
           submodules: false
 
+      # PR #1995 exhausted the runner disk while restoring the Cargo cache,
+      # before clippy started. Free the same unused SDKs as rust-lint before
+      # swap, dependencies and cache extraction consume the initial space.
+      - name: Prepare Rust disk capacity
+        run: |
+          sudo env GITHUB_WORKSPACE="$GITHUB_WORKSPACE" \
+            RUNNER_ENVIRONMENT="$RUNNER_ENVIRONMENT" \
+            python3 scripts/ci-rust-disk.py --min-free-gib 24
+
       - name: Set up zram and swap
         # Best effort: timeouts or failures only warn and never block (falls back to stock runner memory).
         run: timeout --kill-after=15 240 sudo --preserve-env=GITHUB_ACTIONS,PINVOU3_CI_DISABLE_ZRAM bash "${{ github.workspace }}/scripts/ci-memory-setup.sh" || echo "::warning::ci-memory-setup did not finish; continuing with stock runner memory"
@@ -2312,6 +2321,14 @@ jobs:
           # compile. Saves stay main-only (save-if below).
           cache-on-failure: true
           save-if: ${{ github.ref == 'refs/heads/main' }}
+
+      # The preflight floor precedes cache extraction; check the remaining
+      # capacity again before either compiler mode starts producing artifacts.
+      - name: Check Rust disk capacity after cache restore
+        run: |
+          sudo env GITHUB_WORKSPACE="$GITHUB_WORKSPACE" \
+            RUNNER_ENVIRONMENT="$RUNNER_ENVIRONMENT" \
+            python3 scripts/ci-rust-disk.py
 
       # Warn-visible by design (see the job comment); --all-targets so tests
       # are linted too (they carry their own share of the measured debt).

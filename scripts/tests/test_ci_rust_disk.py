@@ -352,5 +352,42 @@ class RustDiskTests(unittest.TestCase):
                 self._assert_disk_preparation_recipe(job.replace(marker, marker + bypass, 1))
 
 
+class CliLintDiskPolicyTests(unittest.TestCase):
+    def test_cli_lint_reserves_disk_before_swap_and_after_cache(self):
+        workflow = (ROOT / ".github/workflows/pr-check.yml").read_text(encoding="utf-8")
+        job = workflow.split("\n  cli-lint:", 1)[1].split("\n  windows-rust-test:", 1)[0]
+        pre = "- name: Prepare Rust disk capacity"
+        post = "- name: Check Rust disk capacity after cache restore"
+        swap = "- name: Set up zram and swap"
+        cache = "- name: Cargo cache"
+        clippy = "- name: cargo clippy (workspace, all targets)"
+        featureless = "- name: cargo check (workspace, no default features, all targets)"
+
+        # Restoring the cache itself can ENOSPC; a check only after it is too
+        # late. Swap and dependency installation must also follow preparation.
+        self.assertLess(job.index(pre), job.index(swap))
+        self.assertLess(job.index(pre), job.index("- name: Install Tauri Linux system dependencies"))
+        self.assertLess(job.index(swap), job.index(cache))
+        self.assertLess(job.index(cache), job.index(post))
+        self.assertLess(job.index(post), job.index(clippy))
+        self.assertLess(job.index(post), job.index(featureless))
+        self.assertEqual(job.count("python3 scripts/ci-rust-disk.py"), 2)
+
+        # Keep the existing safe base allowlist and hard capacity floor. An
+        # exact recipe also rejects if:false, swallowed failures or aggressive
+        # deletion of setup-action tools; neither check may become optional.
+        expected = (
+            'run: |\n'
+            '          sudo env GITHUB_WORKSPACE="$GITHUB_WORKSPACE" \\\n'
+            '            RUNNER_ENVIRONMENT="$RUNNER_ENVIRONMENT" \\\n'
+            '            python3 scripts/ci-rust-disk.py'
+        )
+        for marker, suffix in ((pre, " --min-free-gib 24"), (post, "")):
+            step = job.split(marker, 1)[1].split("\n      - name:", 1)[0]
+            body = "\n".join(line for line in step.splitlines() if not line.lstrip().startswith("#"))
+            self.assertEqual(body.strip(), expected + suffix)
+        self.assertNotIn("continue-on-error", job)
+
+
 if __name__ == "__main__":
     unittest.main()
