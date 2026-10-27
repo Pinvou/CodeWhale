@@ -15720,7 +15720,7 @@ impl SubAgentToolRegistry {
         if !self.posture_permits_tool(name, Some(&input)) {
             if self.allows_bounded_readonly_bash(name) {
                 return Err(anyhow!(
-                    "[shell.readonly.command] Tool {name} input did not match the bounded read-only shell grammar for Fleet role `{role}`. Use read-only inspection commands, or an `implement`/`general` role for mutation or arbitrary execution.",
+                    "[shell.readonly.command] Tool {name} input did not match the bounded read-only shell grammar for Fleet role `{role}`. Admitted families: git status/log/diff/show/ls-files/blame/grep (with -C dir / --no-pager), ls, pwd, cat, head, tail, wc, which, stat, file, du, df, grep, rg, fd, read-only od dumps (-b -c -d -o -s -x -h -v, -A d|o|x|n|none, numeric -j/-N), sort, uniq, cut, tr, comm, find without mutating primaries, sed -n '<range>p', npm view/show/info, gh issue/pr/release/repo/run/workflow reads, and `cd <one relative path>` (workspace-confined). These combine into compound probes separated by `;`, `&&`, `||`, or `|` — but every segment of a sequence must individually be admitted (an empty segment refuses). Refused shapes: a bare `&`, redirects (`<`, `>`), `$` or backtick expansions, subshells, interpreters (`python3 -c ...`), mutation commands (`rm`, `touch`, `sed -i`, ...), and any `cd` outside the workspace. Do not retry variations of a refused command; pick a different admitted probe, or use an `implement`/`general` role for mutation or arbitrary execution.",
                     role = self.agent_type.as_str()
                 ));
             }

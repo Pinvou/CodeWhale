@@ -2158,13 +2158,42 @@ impl ShellManager {
 
         // Create command spec and prepare sandboxed environment
         let spec = if let Some(roots) = readonly_roots {
-            if command.contains('|') {
-                // An agent read-only pipeline: every segment was admitted by
-                // `is_agent_readonly_shell_command` (no separators, redirects,
+            // Windows asymmetry: `cmd.exe` treats `;` as an argument
+            // delimiter, not a command separator, so an admitted
+            // `;`-sequence could neither run nor fail as a sequence there.
+            // PowerShell executes `;`-sequences, and `&&`/`||` are parsed by
+            // every supported Windows shell (an old PowerShell parse error is
+            // still a safe nothing-ran failure). Refuse exactly the shape the
+            // resolved executor cannot bind; never admit a form the executor
+            // cannot run safely. Non-Windows hosts run sequences under a
+            // POSIX shell and keep every admitted form.
+            #[cfg(windows)]
+            if readonly_sequence_segments(command).is_some_and(|segments| segments.len() > 1)
+                && matches!(
+                    crate::shell_dispatcher::global_dispatcher().kind(),
+                    crate::shell_dispatcher::ShellKind::Cmd
+                )
+            {
+                return Err(anyhow!(
+                    "[shell.readonly.sequence.unsupported_shell] `;`-sequences are not executable by this host's cmd.exe shell; run each read-only probe as its own command."
+                ));
+            }
+            if command.contains('|')
+                || readonly_sequence_segments(command).is_some_and(|segments| segments.len() > 1)
+            {
+                // An agent read-only compound: every sequence segment and
+                // every pipeline stage was admitted by
+                // `is_agent_readonly_shell_command` (no redirects,
                 // expansions, or subshells — only `|` between validated
-                // segments), so a shell is needed solely to bind the segments
-                // and report a failed stage through pipefail.
-                let piped = format!("set -o pipefail; {command}");
+                // pipeline stages and `;`/`&&`/`||` between validated
+                // segments), so a shell is needed to bind them; pipefail
+                // additionally reports a failed stage. Single commands keep
+                // the shell-free direct-argv lane below.
+                let piped = if command.contains('|') {
+                    format!("set -o pipefail; {command}")
+                } else {
+                    command.to_string()
+                };
                 CommandSpec::shell(&piped, work_dir.clone(), Duration::from_millis(timeout_ms))
             } else {
                 let (program, args) = hardened_readonly_argv(command)?;
@@ -3560,6 +3589,7 @@ pub fn new_shared_shell_manager(workspace: PathBuf) -> SharedShellManager {
 use crate::command_safety::{
     SafetyLevel, analyze_command, extract_primary_command, is_agent_readonly_shell_command,
     is_github_readonly_command, is_parallel_readonly_command, normalize_windows_command_paths,
+    readonly_sequence_segments,
 };
 use crate::execpolicy::{ExecPolicyDecision, load_default_policy};
 use crate::features::Feature;
@@ -4062,14 +4092,6 @@ fn enforce_readonly_workspace_operands(
     roots: &[PathBuf],
     effective_cwd: &std::path::Path,
 ) -> Result<(), ToolError> {
-    let argv = shlex::split(&normalize_windows_command_paths(command)).ok_or_else(|| {
-        ToolError::invalid_input("Could not parse read-only command arguments".to_string())
-    })?;
-    if argv.first().is_some_and(|program| program == "gh") {
-        // High-level gh reads do not consume local path operands. Their host
-        // is pinned and evaluated separately by the network-policy guard.
-        return Ok(());
-    }
     let roots = canonical_readonly_roots(roots).map_err(|error| {
         ToolError::execution_failed(format!(
             "Could not resolve the Scout workspace before shell dispatch: {error}"
@@ -4086,6 +4108,61 @@ fn enforce_readonly_workspace_operands(
         ));
     }
 
+    // Compound sequences are judged segment by segment, with exactly the
+    // split the admitting classifier used, so an operand can never hide in a
+    // later `;`/`&&`/`||` segment behind a clean first command (a whole-
+    // command token parse glues the separator onto the operand spelling and
+    // both mis-resolves and mis-reports it). A bare `&` never classifies, so
+    // a `None` split reaching this gate fails closed instead of checking
+    // nothing.
+    let Some(segments) = readonly_sequence_segments(command) else {
+        return Err(ToolError::invalid_input(
+            "Read-only command contains a bare `&` and matches no admitted shape.".to_string(),
+        ));
+    };
+    for segment in segments {
+        enforce_readonly_segment_operands(segment, &roots, &effective_cwd)?;
+    }
+    Ok(())
+}
+
+/// Operand containment for one sequence segment of a read-only command.
+/// A leading `gh` keeps its whole-segment exemption (high-level gh reads do
+/// not consume local path operands; their host is pinned and evaluated
+/// separately by the network-policy guard), and a leading `cd` has its
+/// single operand resolved against the workspace like the shell working
+/// directory itself.
+fn enforce_readonly_segment_operands(
+    segment: &str,
+    roots: &[PathBuf],
+    effective_cwd: &std::path::Path,
+) -> Result<(), ToolError> {
+    let argv = shlex::split(&normalize_windows_command_paths(segment)).ok_or_else(|| {
+        ToolError::invalid_input("Could not parse read-only command arguments".to_string())
+    })?;
+    if argv.first().is_some_and(|program| program == "gh") {
+        return Ok(());
+    }
+    if argv.first().is_some_and(|program| program == "cd") {
+        // `cd` is admitted only as `cd <one relative path>`. Resolve the
+        // operand against the workspace exactly like the shell's own working
+        // directory and reuse the same refusal tag, so a destination outside
+        // the workspace (absolute, or a relative symlink pointing out) fails
+        // with the boundary the model already knows.
+        let target = argv.get(1).map(String::as_str).unwrap_or_default();
+        let joined = effective_cwd.join(target);
+        let resolved = joined.canonicalize().map_err(|error| {
+            ToolError::permission_denied(format!(
+                "[shell.readonly.cwd.outside_workspace] Could not prove read-only `cd` operand {target:?} stays inside the workspace because it could not be resolved: {error}"
+            ))
+        })?;
+        if !roots.iter().any(|root| resolved.starts_with(root)) {
+            return Err(ToolError::permission_denied(format!(
+                "[shell.readonly.cwd.outside_workspace] Read-only `cd` operand {target:?} resolves outside the workspace."
+            )));
+        }
+        return Ok(());
+    }
     for token in argv.iter().skip(1) {
         if token.starts_with('-') && (token.contains('/') || token.contains('\\')) {
             return Err(ToolError::permission_denied(format!(

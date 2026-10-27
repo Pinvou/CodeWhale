@@ -94,7 +94,11 @@ canonical `Bash` is denied to it too (only bounded-inspection roles keep the
 classified read-only shell). Delegating to obtain shell is therefore
 mechanically useless — the scout's own bounded shell (`git -C … log`,
 `find … | head`, `npm view …`, classifier-gated) is the only shell path a
-read-only parent has. Read-only is transitive through any delegation chain:
+read-only parent has. The bounded grammar also admits compound probes of
+those families — segments joined by `;`, `&&`, `||`, or `|`, where every
+segment must individually be admitted (e.g. `wc -c f; wc -l f`,
+`cd sub && wc -c notes.md`, `cat x | od -c`) — and `cd` as a
+workspace-confined sequence prefix. Read-only is transitive through any delegation chain:
 the clamp (`ChildAuthority::clamp` in `fleet/exact.rs`) intersects every
 field with the narrower side, the deny-list union means a descendant can
 never drop an ancestor's restriction, and `inherit_disallowed_tools: false`

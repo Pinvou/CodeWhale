@@ -559,6 +559,14 @@ fn readonly_tokens_admitted(trimmed: &str) -> bool {
 /// untouched for the parent's parallel auto-approve chunks, where its
 /// tightness is load-bearing):
 ///
+/// - compound sequences `a; b`, `a && b`, `a || b`, where **every** segment
+///   must itself be an admitted read-only command (an empty segment —
+///   including `;;` or a trailing `;` — rejects); a bare `&` still refuses;
+/// - `cd <one relative path>` as a standalone segment or sequence prefix,
+///   with the operand additionally resolved against the workspace at the
+///   execution seam;
+/// - read-only `od` dump forms (display radices plus numeric `-j`/`-N`),
+///   piped in either direction like any other segment;
 /// - pipelines `a | b`, where **every** segment must itself be an admitted
 ///   read-only command (an empty segment — including `||` — rejects);
 /// - glob `*` arguments, expanded by the shell only against workspace paths
@@ -574,8 +582,8 @@ fn readonly_tokens_admitted(trimmed: &str) -> bool {
 /// - pure text filters `sort`, `uniq`, `cut`, `tr`, `comm` as pipeline
 ///   stages.
 ///
-/// Everything else keeps the parallel classifier's posture: no separators,
-/// redirects, backgrounding, command/parameter expansion, subshells, or
+/// Everything else keeps the parallel classifier's posture: no bare `&`
+/// backgrounding, redirects, command/parameter expansion, subshells, or
 /// env-assignment prefixes.
 pub fn is_agent_readonly_shell_command(command: &str) -> bool {
     let trimmed = normalize_windows_command_paths(command);
@@ -586,29 +594,62 @@ pub fn is_agent_readonly_shell_command(command: &str) -> bool {
     if trimmed.chars().any(|ch| {
         matches!(
             ch,
-            '\n' | '\r'
-                | ';'
-                | '&'
-                | '>'
-                | '<'
-                | '`'
-                | '$'
-                | '?'
-                | '['
-                | ']'
-                | '{'
-                | '}'
-                | '('
-                | ')'
+            '\n' | '\r' | '>' | '<' | '`' | '$' | '?' | '[' | ']' | '{' | '}' | '(' | ')'
         )
     }) {
         return false;
     }
-    // A pipeline is admitted only when every segment is: `a | b` is two
-    // read-only commands, while `a | | b`, `a |`, and `||` all carry an empty
-    // segment and reject. Quoted pipes inside an argument mis-split here,
-    // which only ever makes a segment fail classification (fail closed).
-    trimmed.split('|').all(is_agent_readonly_segment)
+    // A sequence (`;` / `&&` / `||`) is admitted only when every segment is:
+    // the same every-segment rule the pipeline split applies, one level up.
+    // Within a segment, a pipeline is admitted only when every stage is:
+    // `a | b` is two read-only commands, while `a | | b`, `a |`, and a
+    // dangling pipe around a separator all carry an empty stage and reject.
+    // A bare `&` refuses. Quoted separators inside an argument mis-split
+    // here, which only ever makes a segment fail classification (fail
+    // closed).
+    let Some(segments) = readonly_sequence_segments(trimmed) else {
+        return false;
+    };
+    segments
+        .into_iter()
+        .all(|segment| segment.split('|').all(is_agent_readonly_segment))
+}
+
+/// Split a command on the sequence separators `;`, `&&`, and `||`.
+///
+/// Returns `None` when a bare `&` (backgrounding) appears: `&&` separates a
+/// sequence, a lone `&` refuses. The split is deliberately naive — straight
+/// byte scanning with no quote parsing, exactly like the `|` pipeline split
+/// above — because the charset gate has already refused every metacharacter
+/// that could make a quoted separator behave differently than this split
+/// assumes. A quoted `;` mis-splits, and the resulting segment fails
+/// classification: fail closed.
+pub(crate) fn readonly_sequence_segments(command: &str) -> Option<Vec<&str>> {
+    let mut segments = Vec::new();
+    let bytes = command.as_bytes();
+    let mut start = 0;
+    let mut index = 0;
+    while index < bytes.len() {
+        let byte = bytes[index];
+        let doubled = index + 1 < bytes.len() && bytes[index + 1] == byte;
+        if byte == b';' {
+            segments.push(&command[start..index]);
+            index += 1;
+            start = index;
+        } else if doubled && (byte == b'&' || byte == b'|') {
+            segments.push(&command[start..index]);
+            index += 2;
+            start = index;
+        } else if byte == b'&' {
+            // A single `&` is backgrounding, never admitted: the sequence
+            // split is where the charset gate used to refuse it.
+            return None;
+        } else {
+            index += 1;
+        }
+    }
+    segments.push(&command[start..]);
+    Some(segments)
 }
 
 fn is_agent_readonly_segment(segment: &str) -> bool {
@@ -625,10 +666,12 @@ fn is_agent_readonly_segment(segment: &str) -> bool {
         return false;
     }
     match program.as_str() {
+        "cd" => is_agent_readonly_cd(&tokens),
         "git" => is_agent_readonly_git(&tokens),
         "find" => is_agent_readonly_find(&tokens),
         "sed" => is_agent_readonly_sed(&tokens),
         "npm" => is_agent_readonly_npm(&tokens),
+        "od" => is_agent_readonly_od(&tokens),
         "sort" => agent_text_filter_options_match(
             &tokens,
             &[
@@ -861,6 +904,72 @@ fn is_agent_readonly_npm(tokens: &[String]) -> bool {
         tokens.get(1).map(String::as_str),
         Some("view" | "show" | "info")
     )
+}
+
+/// Admit exactly `cd <one relative path>`: one operand, relative, no `..`,
+/// no flags. Bare `cd` (home directory), absolute targets, `~`/drive shapes,
+/// and every flag spelling refuse here. The operand is additionally resolved
+/// against the workspace by the execution seam
+/// (`enforce_readonly_workspace_operands`, which reuses the
+/// `[shell.readonly.cwd.outside_workspace]` refusal), so a relative
+/// directory whose destination escapes the workspace — a symlink, say — is
+/// still refused before any shell runs.
+fn is_agent_readonly_cd(tokens: &[String]) -> bool {
+    if tokens.len() != 2 {
+        return false;
+    }
+    let target = &tokens[1];
+    if target.starts_with('-') || target.contains('\\') || looks_like_windows_absolute_path(target)
+    {
+        return false;
+    }
+    let candidate = std::path::Path::new(target);
+    !candidate.is_absolute()
+        && !target.starts_with('~')
+        && candidate
+            .components()
+            .all(|component| !matches!(component, std::path::Component::ParentDir))
+}
+
+/// Admit read-only `od` (octal/hex dump) forms via the segment dispatcher.
+/// Only pure-read display options: the type selectors BSD/GNU `od` shares
+/// (`-b -c -d -o -s -x -h`) plus `-v`, the address radix `-A` restricted to
+/// its fixed value set, and the numeric skip/count pair `-j`/`-N`. `-w` and
+/// every output-affecting or GNU-extension flag stays out on purpose, and
+/// file operands flow through the normal workspace operand gate.
+fn is_agent_readonly_od(tokens: &[String]) -> bool {
+    let mut index = 1;
+    let mut options = true;
+    while index < tokens.len() {
+        let token = tokens[index].as_str();
+        if options && token == "--" {
+            options = false;
+        } else if options && token.starts_with('-') && token != "-" {
+            match token {
+                "-b" | "-c" | "-d" | "-o" | "-s" | "-x" | "-h" | "-v" => {}
+                "-A" => {
+                    index += 1;
+                    if index >= tokens.len()
+                        || !matches!(tokens[index].as_str(), "d" | "o" | "x" | "n" | "none")
+                    {
+                        return false;
+                    }
+                }
+                "-j" | "-N" => {
+                    index += 1;
+                    let numeric = tokens.get(index).is_some_and(|value| {
+                        !value.is_empty() && value.bytes().all(|byte| byte.is_ascii_digit())
+                    });
+                    if !numeric {
+                        return false;
+                    }
+                }
+                _ => return false,
+            }
+        }
+        index += 1;
+    }
+    true
 }
 
 /// Return `true` only for the networked GitHub CLI subset admitted by
@@ -2208,6 +2317,94 @@ mod tests {
         assert!(!is_agent_readonly_shell_command(
             "head f | rm -rf / | wc -l"
         ));
+    }
+
+    /// Compound probe sequences (`;` / `&&` / `||`) of admitted read-only
+    /// commands, workspace-confined `cd`, and read-only `od` dumps are
+    /// admitted for ShellPolicy::ReadOnly scouts. Live sessions burned many
+    /// steps rewriting probes like `wc -c f; wc -l f` around the old
+    /// whole-command `;` refusal.
+    #[test]
+    fn agent_readonly_shell_admits_compound_sequences_cd_and_od() {
+        for command in [
+            "wc -c notes.md; wc -l notes.md",
+            "cd sub && wc -c notes.md",
+            "cd sub",
+            "cd sub/deeper",
+            "ls; pwd",
+            "ls || pwd",
+            "ls && cat notes.md | head",
+            "cat x | od -c",
+            "od -c x",
+            "od -c x | head",
+            "od -A d -j 2 -N 8 -c x",
+        ] {
+            assert!(
+                is_agent_readonly_shell_command(command),
+                "{command} should be an admitted compound/cd/od probe"
+            );
+        }
+    }
+
+    /// Every denied compound shape: a bare `&`, empty sequence segments, a
+    /// mutation or expansion in any segment, `cd` shapes that leave the
+    /// workspace shape rules, redirects anywhere, and `od` flags outside the
+    /// read-only display set.
+    #[test]
+    fn agent_readonly_shell_rejects_unsafe_compound_cd_and_od_shapes() {
+        for command in [
+            "ls & pwd",
+            "ls;;pwd",
+            "ls;",
+            "; ls",
+            "wc -c f; rm -rf g",
+            "ls && rm -rf g",
+            "ls || sh",
+            "cd /etc && ls",
+            "cd ..",
+            "cd ../sub",
+            "cd",
+            "cd -L sub",
+            "cd sub extra",
+            "cd ~/x",
+            "echo hi > f; ls",
+            "a`b`",
+            "wc -c f; cat $(x)",
+            "python3 -c print(1)",
+            "od -w 8 x",
+            "od -j x f",
+            "od --strange f",
+        ] {
+            assert!(
+                !is_agent_readonly_shell_command(command),
+                "{command} must stay denied for agents"
+            );
+        }
+    }
+
+    /// The parent-side parallel auto-approve classifier keeps its whole-
+    /// command posture: no separators of any kind and no `cd`/`od`, exactly
+    /// as before the agent-surface relaxations.
+    #[test]
+    fn parallel_classifier_still_refuses_compound_cd_and_od_forms() {
+        for command in [
+            "wc -c f; wc -l f",
+            "cd sub && wc -c f",
+            "cd sub",
+            "ls; pwd",
+            "ls || pwd",
+            "od -c x",
+            "cat x | od -c",
+        ] {
+            assert!(
+                !is_parallel_readonly_command(command),
+                "{command} must stay parallel-strict"
+            );
+            assert!(
+                is_agent_readonly_shell_command(command),
+                "{command} should be agent read-only"
+            );
+        }
     }
 
     #[test]

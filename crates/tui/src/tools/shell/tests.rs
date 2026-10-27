@@ -1235,6 +1235,98 @@ fn readonly_operands_are_workspace_bounded_and_symlink_aware() {
     }
 }
 
+/// The operand gate judges compound probe sequences segment by segment and
+/// resolves an admitted `cd` operand against the workspace, refusing an
+/// escape with the same `[shell.readonly.cwd.outside_workspace]` tag the
+/// shell working-directory check uses.
+#[test]
+fn readonly_operand_gate_covers_sequence_segments_and_cd() {
+    let workspace = tempdir().expect("workspace");
+    let outside = tempdir().expect("outside");
+    std::fs::create_dir(workspace.path().join("sub")).expect("subdir");
+    std::fs::write(workspace.path().join("sub").join("notes.md"), "data").expect("notes file");
+    std::fs::write(outside.path().join("secret.txt"), "secret").expect("outside file");
+    let roots = [workspace.path().to_path_buf()];
+
+    // Operands are checked in every segment of a sequence, not just the
+    // first command.
+    let error = enforce_readonly_workspace_operands(
+        &format!(
+            "wc -c notes.md; cat {}",
+            outside.path().join("secret.txt").display()
+        ),
+        &roots,
+        workspace.path(),
+    )
+    .expect_err("operand check must cover the whole sequence")
+    .to_string();
+    assert!(error.contains("operand.outside_workspace"), "{error}");
+
+    // A `cd` operand that stays inside the workspace is admitted, standalone
+    // or as a sequence prefix.
+    enforce_readonly_workspace_operands("cd sub", &roots, workspace.path())
+        .expect("in-workspace cd");
+    enforce_readonly_workspace_operands("cd sub && wc -c notes.md", &roots, workspace.path())
+        .expect("in-workspace cd as a sequence prefix");
+
+    // A `cd` operand resolving outside every declared root reuses the cwd
+    // refusal tag — absolute and symlink spellings alike.
+    let error = enforce_readonly_workspace_operands(
+        &format!("cd {}; ls", outside.path().display()),
+        &roots,
+        workspace.path(),
+    )
+    .expect_err("cd outside the workspace must fail")
+    .to_string();
+    assert!(error.contains("cwd.outside_workspace"), "{error}");
+
+    #[cfg(unix)]
+    {
+        std::os::unix::fs::symlink(outside.path(), workspace.path().join("escape-link"))
+            .expect("outside symlink");
+        let error =
+            enforce_readonly_workspace_operands("cd escape-link && ls", &roots, workspace.path())
+                .expect_err("cd through an outside symlink must fail")
+                .to_string();
+        assert!(error.contains("cwd.outside_workspace"), "{error}");
+    }
+}
+
+/// A compound probe admitted by the bounded grammar must actually execute
+/// end to end under `ShellPolicy::ReadOnly`: the sequence routes through the
+/// shell lane (direct argv cannot bind `&&`), `cd` confines to the
+/// workspace, and the real byte count comes back.
+#[cfg(unix)]
+#[tokio::test]
+async fn readonly_shell_executes_admitted_compound_sequence() {
+    let workspace = tempdir().expect("workspace");
+    std::fs::create_dir(workspace.path().join("sub")).expect("subdir");
+    std::fs::write(workspace.path().join("sub").join("notes.md"), "data\n").expect("notes file");
+    let context = ToolContext::new(workspace.path())
+        .with_shell_policy(crate::worker_profile::ShellPolicy::ReadOnly);
+
+    let result = LowercaseBashTool
+        .execute(json!({"command": "cd sub && wc -c notes.md"}), &context)
+        .await
+        .expect("read-only compound sequence runs");
+    assert!(result.success, "{}", result.content);
+    assert!(
+        result.content.contains("notes.md"),
+        "expected real `wc -c` output, got: {}",
+        result.content
+    );
+
+    let refused = LowercaseBashTool
+        .execute(json!({"command": "cd .. && ls"}), &context)
+        .await
+        .expect("escaping compound is refused as a normal tool result");
+    assert!(
+        !refused.success,
+        "a `cd ..` sequence must not execute: {}",
+        refused.content
+    );
+}
+
 /// B14-1: the operand/cwd gate judges against the full declared root set.
 /// Operands and working directories under an attached root were already
 /// admitted by the roots-aware `resolve_path`; refusing them here would
