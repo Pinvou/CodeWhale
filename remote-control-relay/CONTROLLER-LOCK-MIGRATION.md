@@ -149,6 +149,15 @@ including upgrades from an already recognized lock protocol, the operator must
 stop all other writers sharing the state directory and their restart sources.
 The helper's archive is an offline archive only after that independent check.
 
+If a deployment fails before replacing the live code or unit configuration,
+the scripts attempt to restart the previous unit only when it was confirmed
+active before a successful, confirmed stop and the existing guard is compatible
+with that code. Uncertain stop or incompatible guard states remain for operator
+inspection. A failed recovery start or active-state check triggers a best-effort
+stop. The deployment still reports the original failure: verify the unit and
+its health before resuming any other writers or restart sources. These checks
+do not replace the independent all-writer shutdown precondition.
+
 On Windows, each guarded write rechecks the fixed guard's ACL. A normal persist
 writes backup and primary, adding two guard-verification PowerShell launches to
 the existing protection/verification work. This is not the total process count

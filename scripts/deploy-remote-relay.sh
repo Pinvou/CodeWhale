@@ -203,6 +203,18 @@ node --check "$code_stage/scripts/controller-route-smoke.mjs"
 # file is provisioned out of band and must never be generated or printed here.
 node "$code_stage/scripts/deploy-controller-preflight.mjs" "$controller_env"
 source "$code_stage/scripts/controller-lock-rollout.sh"
+# Early failures occur before live code or unit configuration changes and may
+# happen before a complete backup exists. Never use that backup for recovery.
+controller_lock_early_arm "$service"
+controller_lock_early_failure() {
+  local status=$?
+  trap - ERR
+  if ! controller_lock_early_recover "$service" "$controller_state_dir" "$remote_dir"; then
+    echo '早期部署恢复失败；服务状态需由运维检查' >&2
+  fi
+  exit "$status"
+}
+trap controller_lock_early_failure ERR
 # Keep a copy with the code backup so later public-check rollback uses the same
 # migration fence even after the staging tree has been removed.
 mkdir -p "$backup"
@@ -308,6 +320,7 @@ rollback_on_error() {
   fi
   exit "$status"
 }
+controller_lock_early_armed=0
 trap rollback_on_error ERR
 
 install_db() {

@@ -310,7 +310,7 @@ tar -czf - -C "$RELAY_DIR" \
 STAGE="配置并重启测试 relay 实例(端口 $TEST_PORT,含失败回滚)"
 echo "── 配置并重启测试 relay 实例(端口 $TEST_PORT) ──"
 relay_ssh "bash -s -- $(shq_all "$TEST_DIR" "$TEST_PORT" "$BASE_PATH" "$SERVICE" "$PROXY_SERVER" "$ENABLE_DESKTOP_CONTROLLER" "${PINVOU_CONFIRM_CONTROLLER_LOCK_UPGRADE:-0}")" <<'REMOTE'
-set -euo pipefail
+set -eEuo pipefail
 test_dir="$1"; port="$2"; base_path="$3"; service="$4"; proxy_server="$5"; controller="$6"
 lock_upgrade_confirmed="$7"
 proxy_ip="${proxy_server#*@}"
@@ -441,6 +441,16 @@ CONTROLLER_IDENTITY
 fi
 # 身份验证失败时不得触碰现役代码；验证成功后才整体替换，旧版供回滚。
 source "$test_dir.extract/scripts/controller-lock-rollout.sh"
+controller_lock_early_arm "$service"
+controller_lock_early_failure() {
+  local status=$?
+  trap - ERR
+  if ! controller_lock_early_recover "$service" /var/lib/pinvou-remote-relay-test/state "$test_dir"; then
+    echo '早期测试部署恢复失败；服务状态需由运维检查' >&2
+  fi
+  exit "$status"
+}
+trap controller_lock_early_failure ERR
 if [ "$controller" = "1" ]; then
   controller_lock_prepare_upgrade "$service" /var/lib/pinvou-remote-relay-test/state "$test_dir" \
     "$test_dir.lock-upgrade-backup-$(date +%Y%m%d-%H%M%S)" "$lock_upgrade_confirmed"
@@ -448,6 +458,10 @@ else
   controller_lock_stop_service "$service"
 fi
 rm -rf "$test_dir.bak"
+# From the first live-code rename onward, an incomplete replacement must not
+# be treated as a harmless pre-change failure.
+controller_lock_early_armed=0
+trap - ERR
 [ ! -d "$test_dir" ] || mv "$test_dir" "$test_dir.bak"
 mv "$test_dir.extract" "$test_dir"
 controller_unit_line=""
