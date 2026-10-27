@@ -109,6 +109,19 @@ export function currentRenderFixture(kind, profile = 'personal', settings = {}) 
       const path = env[`${prefix}_DATABASE_DIRECTORY`];
       if (path) writeFileSync(join(path, 'pgpass'), `postgres.fixture.invalid:5432:account_platform_${domain}:${login}:public-fixture-password\n`, { mode: 0o600 });
     }
+    // These public bytes and independently supplied fixture digests exercise
+    // offline binding only; real bootstrap semantics are covered in Go, and
+    // this configuration fixture claims no broker cutover or resource readiness.
+    for (const [variable, filename, hash] of [
+      ['APPROVAL_PUBLIC_IDENTITY_DIRECTORY', 'current.json', 'APPROVAL_PUBLIC_KEYS_SHA256'],
+      ['APPROVAL_PUBLIC_MANIFEST_DIRECTORY', 'manifest.json', 'APPROVAL_MANIFEST_SHA256'],
+      ['APPROVAL_PUBLIC_RECEIPT_DIRECTORY', 'receipt.json', 'APPROVAL_RECEIPT_SHA256'],
+    ]) {
+      if (!env[variable]) continue;
+      const bytes = JSON.stringify({ fixture: 'configuration-only', artifact: filename });
+      writeFileSync(join(env[variable], filename), bytes, { mode: 0o444 });
+      env[hash] = bytesDigest(bytes);
+    }
     const envFile = file('compose.env', Object.entries(env).map(([k, v]) => `${k}=${v}`).join('\n') + '\n');
     fixture.recipe = { kind, profile, envFile, overlays: [] };
     fixture.env = env; fixture.raw = raw;
@@ -161,6 +174,8 @@ export function currentRenderFixture(kind, profile = 'personal', settings = {}) 
         else if (ref.key === 'migration-backup-evidence-id') value = backup.id;
         else if (ref.key === 'migration-backup-completed-at') value = backup.completedAt;
         else if (ref.key === 'migration-backup-sha256') value = backup.sha256;
+        // Independent config-only digest values; no public artifact or resource readiness is asserted.
+        else if (/^BILLING_APPROVAL_CONSUMER_.*_SHA256$/.test(env.name)) value = 'a'.repeat(64);
         else if (/REDIS_URL/.test(env.name)) value = 'rediss://fixture:fixture@redis.fixture.invalid:6379/0';
         else if (env.name === 'NATS_URL') value = 'tls://nats.fixture.invalid:4222';
         else if (env.name.endsWith('_BASE64URL')) value = Buffer.alloc(32, 'f').toString('base64url');

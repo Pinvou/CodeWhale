@@ -177,7 +177,9 @@ test('actual production Helm migration hooks bind resolved Secret keys and backu
     // every runtime, trust preparation, TLS sidecar and migration container.
     const expectedContainers = ['account-service', 'billing-service', 'identity-service',
       'token-gateway', 'token-portal', 'new-api', 'newapi-tls-data', 'newapi-tls-status-only',
-      'prepare-keycloak-secret', 'event-relay', 'event-relay', 'migrate', 'migrate', 'migrate'];
+      'prepare-keycloak-secret', 'prepare-nats-billing-command-executor', 'prepare-nats-account-event-relay',
+      'prepare-nats-account-approval-relay', 'prepare-nats-billing-event-relay',
+      'event-relay', 'event-relay', 'migrate', 'migrate', 'migrate'];
     const rendered = workloads(f.render, f.render.secrets);
     assert.deepEqual(rendered.map(w => w.service.name).sort(), expectedContainers.slice().sort());
     assert.deepEqual(rendered.filter(w => w.service.name === 'event-relay').map(w =>
@@ -185,6 +187,17 @@ test('actual production Helm migration hooks bind resolved Secret keys and backu
     assert.equal(checkProductionBusiness(f.render, f.inventory).workloads_checked, expectedContainers.length);
     assert.equal(checkBusinessMigrations(f.render, f.inventory).domains_checked, 3);
   });
+  for (const suffix of ['public-keys', 'manifest', 'receipt']) for (const value of [undefined, '', 'untrusted']) {
+    await fixtureCase(t, 'helm', 'models', `Billing ${suffix} digest ${value === undefined ? 'missing' : value === '' ? 'empty' : 'invalid'} fails actual preflight`, f => {
+      const snapshots = JSON.parse(readFileSync(f.recipe.secretSnapshotFile));
+      const key = Object.keys(snapshots).find(key => key.endsWith(`/billing-approval-consumer-${suffix}-sha256`));
+      assert.ok(key, 'actual chart must bind the dedicated digest key');
+      if (value === undefined) delete snapshots[key]; else snapshots[key] = value;
+      writeFileSync(f.recipe.secretSnapshotFile, JSON.stringify(snapshots));
+      f.rerender();
+      rejected(f, checkProductionBusiness, /production_render_secret_missing|billing_approval_artifacts_digest_value/);
+    });
+  }
   for (const [label, value] of [['missing', undefined], ['empty', '']])
     await fixtureCase(t, 'helm', 'models', `${label} enabled credential portal SQL Secret DSN rejected after actual rerender`, f => {
       const portal = workloads(f.render, f.render.secrets).find(w => w.service.name === 'token-credential-portal');

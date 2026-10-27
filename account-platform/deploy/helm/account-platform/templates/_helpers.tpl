@@ -56,5 +56,9 @@ topologySpreadConstraints:
 {{- if or (lt (int .Values.replicas.accountService) 2) (lt (int .Values.replicas.billingService) 2) (lt (int .Values.replicas.tokenGateway) 2) (lt (int .Values.replicas.tokenPortal) 2) (lt (int .Values.replicas.eventRelay) 2) (lt (int .Values.keycloak.replicas) 2) (lt (int .Values.newApi.replicas) 2) -}}{{ fail "production-new requires at least two replicas for horizontally safe workloads" }}{{- end -}}
 {{- if or (eq (len .Values.external.postgresCidrs) 0) (eq (len .Values.external.paymentProviderCidrs) 0) (eq (len .Values.external.secretProviderCidrs) 0) (eq (len .Values.external.modelProviderCidrs) 0) (eq (len .Values.external.timeSourceCidrs) 0) -}}{{ fail "production-new requires explicit external dependency CIDRs" }}{{- end -}}
 {{- end -}}
+{{- $nats := urlParse .Values.dependencies.natsUrl -}}
+{{- if or .Values.nats.enabled (ne $nats.scheme "tls") (eq $nats.host "") (hasPrefix ":" $nats.host) (hasPrefix "[]" $nats.host) (contains "@" .Values.dependencies.natsUrl) (ne $nats.userinfo "") (ne $nats.path "") (ne $nats.query "") (ne $nats.fragment "") (contains "," .Values.dependencies.natsUrl) -}}
+{{- fail "Billing and event relays require authenticated external TLS NATS: set nats.enabled=false and dependencies.natsUrl=tls://<approved-host>:4222; provision per-service credentials and JetStream resources before install" -}}
+{{- end -}}
 {{- if and (not .Values.keycloak.enabled) (or (eq .Values.oidc.jwksUrl "") (eq .Values.oidc.tokenUrl "")) -}}{{ fail "external Keycloak requires explicit OIDC JWKS and token backchannel URLs" }}{{- end -}}
 {{- end -}}

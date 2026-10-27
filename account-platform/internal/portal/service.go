@@ -192,7 +192,7 @@ func (s *Service) Handler(static http.Handler) http.Handler {
 	router.GET("/api/admin/approvals/requests", httpserver.AdaptFunc(s.adminApprovalRequests))
 	router.POST("/api/admin/approvals/requests", httpserver.AdaptFunc(s.adminApprovalRequests))
 	router.Any("/api/admin/approvals/requests/*resource", httpserver.AdaptFunc(s.adminApprovalRequests))
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	return s.withRateLimitSource(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Referrer-Policy", "no-referrer")
 		w.Header().Set("X-Content-Type-Options", "nosniff")
 		w.Header().Set("X-Frame-Options", "DENY")
@@ -228,7 +228,7 @@ func (s *Service) Handler(static http.Handler) http.Handler {
 			}
 		}
 		static.ServeHTTP(w, r)
-	})
+	}))
 }
 
 func (s *Service) login(w http.ResponseWriter, r *http.Request) {
@@ -929,6 +929,7 @@ func (s *Service) forward(w http.ResponseWriter, r *http.Request, upstream *url.
 		api.WriteError(w, http.StatusBadGateway, "UPSTREAM_UNAVAILABLE", "the account platform is unavailable", httpserver.RequestID(r.Context()))
 		return
 	}
+	setRateLimitSource(request)
 	if authenticated {
 		request.Header.Set("Authorization", "Bearer "+session.AccessToken)
 		s.setSessionCookies(w, session)

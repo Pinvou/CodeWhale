@@ -169,7 +169,7 @@
 
 - 每条事实可回溯到 §1/§2 的迁移与源码路径；“内部无可归属事实”由 `payment_order_id IS NULL` 与比对语义共同证明。
 - 首版范围与版本复用决策与用户 2026-09-19 确认一致；零账务效果是显式冻结的结论，并在 §12 记录被拒方案。
-- 历史设计阶段记录的 `node scripts/check-account-platform-tasks.mjs`、`node scripts/account-platform-migration-manifest.mjs check` 未随仓库发布，不能当作当前可执行验收入口或已执行证据。当前验证使用项目实际存在的统一构建、Go race、有限真实 PG 与受控 React 入口，命令和结果以当前 PR 记录为准；不使用 SKIP 或零用例作为通过证据。
+- `node scripts/check-account-platform-tasks.mjs` 与 `node scripts/account-platform-migration-manifest.mjs check` 已随仓库发布，均从仓库根目录执行；统一验证入口 `node scripts/account-platform.mjs verify` 也调用这两项检查。它们分别检查任务覆盖关系与迁移文件不可变性，不证明财务修复已实际执行。历史设计阶段的命令记录不能代替当前版本的已执行证据；统一构建、Go race、有限真实 PG 与受控 React 验证的命令和结果以当前 PR 记录为准，不使用 SKIP 或零用例作为通过证据。
 
 ## 15. 记录
 

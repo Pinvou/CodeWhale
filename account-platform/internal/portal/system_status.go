@@ -108,6 +108,7 @@ func (s *Service) hasSystemStatusPermission(ctx context.Context, accessToken, cl
 	if err != nil {
 		return false, false
 	}
+	setRateLimitSource(request)
 	request.Header.Set("Accept", "application/json")
 	request.Header.Set("Content-Type", "application/json")
 	request.Header.Set("Authorization", "Bearer "+accessToken)
@@ -342,6 +343,8 @@ func (s *Service) getJSON(ctx context.Context, target *url.URL, accessToken stri
 	return json.NewDecoder(io.LimitReader(response.Body, 1<<20)).Decode(output)
 }
 
+// get serves only the fixed Token reconciliation APIs above. Configurable
+// probes stay on getProbe; background contexts do not invent a user source.
 func (s *Service) get(ctx context.Context, target *url.URL, accessToken string) (*http.Response, error) {
 	if target == nil {
 		return nil, errors.New("status endpoint is not configured")
@@ -350,6 +353,7 @@ func (s *Service) get(ctx context.Context, target *url.URL, accessToken string) 
 	if err != nil {
 		return nil, err
 	}
+	setRateLimitSource(request)
 	request.Header.Set("Accept", "application/json")
 	if accessToken != "" {
 		request.Header.Set("Authorization", "Bearer "+accessToken)

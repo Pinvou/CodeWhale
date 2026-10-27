@@ -141,6 +141,7 @@ services:
         <<: *go-build-args
         SERVICE: account-service
     environment:
+      HTTP_TRUSTED_PROXY_IPS: ${ACCOUNT_SERVICE_HTTP_TRUSTED_PROXY_IPS:-}
       <<: *client-compatibility
       APP_ENV: development
       PORT: 8080
@@ -205,6 +206,7 @@ services:
         <<: *go-build-args
         SERVICE: identity-service
     environment:
+      HTTP_TRUSTED_PROXY_IPS: ${IDENTITY_SERVICE_HTTP_TRUSTED_PROXY_IPS:-}
       APP_ENV: development
       PORT: 8080
       INTERNAL_SERVICE_TOKEN: ${INTERNAL_SERVICE_TOKEN:?set INTERNAL_SERVICE_TOKEN}
@@ -239,6 +241,7 @@ services:
         <<: *go-build-args
         SERVICE: billing-service
     environment:
+      HTTP_TRUSTED_PROXY_IPS: ${BILLING_SERVICE_HTTP_TRUSTED_PROXY_IPS:-}
       <<: *client-compatibility
       APP_ENV: development
       PORT: 8080
@@ -293,6 +296,7 @@ services:
         <<: *go-build-args
         SERVICE: token-gateway
     environment:
+      HTTP_TRUSTED_PROXY_IPS: ${TOKEN_GATEWAY_HTTP_TRUSTED_PROXY_IPS:-}
       <<: *client-compatibility
       APP_ENV: development
       PORT: 8080
@@ -396,6 +400,7 @@ services:
         <<: *go-build-args
         SERVICE: token-portal
     environment:
+      HTTP_TRUSTED_PROXY_IPS: ${TOKEN_PORTAL_HTTP_TRUSTED_PROXY_IPS:-}
       <<: *client-compatibility
       APP_ENV: development
       PORT: 8080

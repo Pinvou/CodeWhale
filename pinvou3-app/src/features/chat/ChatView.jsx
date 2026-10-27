@@ -2701,7 +2701,9 @@ const openChatExternalUrl = (url) => {
         && (remoteChatActive ? (hasDraftText || hasRemoteFile)
           : (controlledChatActive ? (hasDraftText || hasReadyAttachment || hasSessionRefs)
             : (hasDraftText || hasReadyAttachment || hasSessionRefs)));
-      const modelContinuationBlocked = Boolean(!remoteTranscriptActive && activeSessionId && latestModelLifecycleRejection(turnTimeline));
+      const modelLifecycleRejection = !remoteTranscriptActive && activeSessionId
+        ? latestModelLifecycleRejection(turnTimeline) : null;
+      const modelContinuationBlocked = Boolean(modelLifecycleRejection);
       const [replacementModels, setReplacementModels] = useState([]);
       const [replacementModelId, setReplacementModelId] = useState('');
       const [replacementBusy, setReplacementBusy] = useState(false);
@@ -2718,12 +2720,12 @@ const openChatExternalUrl = (url) => {
         return () => { active = false; };
       }, [modelContinuationBlocked, activeSessionId]);
       const createReplacementBranch = useCallback(async () => {
-        if (remoteTranscriptActive || !activeSessionId || !replacementModelId || replacementBusy) return;
+        if (remoteTranscriptActive || !activeSessionId || !modelLifecycleRejection || !replacementModelId || replacementBusy) return;
         setReplacementBusy(true); setReplacementError('');
         try {
           const result = await bridge.accountPlatform.branchReplacementSession({
             sourceConversationId: activeSessionId,
-            sourceTurnId: `message:${Math.max(0, chatItems.length - 1)}`,
+            sourceTurnId: modelLifecycleRejection.turnId,
             sourceMessageCount: 0,
             replacementModelId,
             replacementTitleSuffix: t.uiModelReplacement.branchTitleSuffix,
@@ -2735,7 +2737,7 @@ const openChatExternalUrl = (url) => {
         } finally {
           setReplacementBusy(false);
         }
-      }, [activeSessionId, chatItems.length, remoteTranscriptActive, replacementBusy, replacementModelId, t.uiModelReplacement.branchTitleSuffix, t.newChat]);
+      }, [activeSessionId, modelLifecycleRejection, remoteTranscriptActive, replacementBusy, replacementModelId, t.uiModelReplacement.branchTitleSuffix, t.newChat]);
       const sceneCapabilityPreparing = sceneCapabilityStatus && sceneCapabilityStatus.kind === 'preparing';
       const canClearInput = hasDraftText && !voiceActive;
       function handleClearInput() {

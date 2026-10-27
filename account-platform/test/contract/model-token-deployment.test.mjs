@@ -40,7 +40,40 @@ function helmFixture() {
       readinessProbe: { httpGet: { path: '/health/ready' } }, livenessProbe: { httpGet: { path: '/health/live' } } }],
     volumes: [{ projected: { sources: [{ serviceAccountToken: { audience: 'internal' } }] } }],
   } } } }));
+  for (const item of resources) {
+    const name = item.metadata.name, pod = item.spec.template.spec, main = pod.containers[0];
+    if (name === 'token-credential-portal') { main.env = []; continue; }
+    const clients = name === 'account-event-relay' ? ['account-event-relay', 'account-approval-relay']
+      : [name === 'billing-service' ? 'billing-command-executor' : name];
+    main.image = 'fixture/service:config-only'; main.imagePullPolicy = 'IfNotPresent';
+    main.env.find(v => v.name === 'NATS_CREDENTIALS_FILE').value = '/run/pinvou/nats/private/' + clients[0] + '.creds';
+    if (name === 'account-event-relay') main.env.push({ name: 'APPROVAL_RELAY_NATS_CREDENTIALS_FILE', value: '/run/pinvou/nats/private/account-approval-relay.creds' });
+    main.volumeMounts = [{ name: 'nats-private', mountPath: '/run/pinvou/nats', readOnly: true }];
+    pod.securityContext = { runAsNonRoot: true, runAsUser: 65532, runAsGroup: 65532, fsGroup: 65532 };
+    pod.volumes.push({ name: 'nats-private', emptyDir: { medium: 'Memory', sizeLimit: '1Mi' } });
+    pod.initContainers = clients.map(client => {
+      pod.volumes.push({ name: 'nats-source-' + client, secret: { secretName: 'fixture-' + name, defaultMode: 288, items: [{ key: client + '.creds', path: client + '.creds' }] } });
+      return { name: 'prepare-nats-' + client, image: main.image, imagePullPolicy: main.imagePullPolicy,
+        command: ['/service'], args: ['prepare-nats-credentials', client],
+        securityContext: { runAsNonRoot: true, runAsUser: 65532, runAsGroup: 65532, allowPrivilegeEscalation: false, readOnlyRootFilesystem: true, capabilities: { drop: ['ALL'] } },
+        volumeMounts: [{ name: 'nats-source-' + client, mountPath: '/var/run/bootstrap/pinvou/nats', readOnly: true }, { name: 'nats-private', mountPath: '/run/pinvou/nats' }] };
+    });
+  }
   const setEnv = (name, values) => { resources.find(item => item.metadata.name === name).spec.template.spec.containers[0].env.push(...Object.entries(values).map(([key, value]) => typeof value === 'string' ? { name: key, value } : { name: key, valueFrom: value })); };
+  const billingPod = resources.find(item => item.metadata.name === 'billing-service').spec.template.spec;
+  setEnv('billing-service', { DATABASE_URL: { secretKeyRef: { name: 'fixture-billing-service', key: 'database-url' } } });
+  billingPod.volumes.push({ name: 'billing-approval-public-artifacts', configMap: {
+    name: 'fixture-billing-public', defaultMode: 292,
+    items: ['current-v2.json', 'manifest.json', 'receipt.json'].map(key => ({ key, path: key })) } });
+  for (const [suffix, directory, file, key, digestKey] of [
+    ['PUBLIC_KEYS', 'approval-identities', 'current.json', 'current-v2.json', 'public-keys'],
+    ['MANIFEST', 'approval-manifest', 'manifest.json', 'manifest.json', 'manifest'],
+    ['RECEIPT', 'approval-receipt', 'receipt.json', 'receipt.json', 'receipt'],
+  ]) {
+    setEnv('billing-service', { ['BILLING_APPROVAL_CONSUMER_' + suffix + '_FILE']: '/run/pinvou/' + directory + '/' + file,
+      ['BILLING_APPROVAL_CONSUMER_' + suffix + '_SHA256']: { secretKeyRef: { name: 'fixture-billing-service', key: 'billing-approval-consumer-' + digestKey + '-sha256' } } });
+    billingPod.containers[0].volumeMounts.push({ name: 'billing-approval-public-artifacts', mountPath: '/run/pinvou/' + directory + '/' + file, subPath: key, readOnly: true });
+  }
   for (const name of ['token-gateway']) setEnv(name, { DATABASE_URL: { secretKeyRef: { name: 'gateway-release', key: 'database' } } });
   setEnv('token-credential-portal', { ...credentialEnv(), DATABASE_URL: { secretKeyRef: { name: 'credential-release', key: 'database' } } });
   for (const name of ['token-command-executor', 'token-credential-portal']) {

@@ -1,8 +1,107 @@
 # Account Platform Helm Chart
 
 This chart deploys Account Service, Billing Service, Token Gateway, Token Portal,
-Keycloak, Redis, and NATS. PostgreSQL and payment/model providers stay external so
+Keycloak, and Redis. NATS, PostgreSQL and payment/model providers stay external so
 their backup, certificate, and merchant controls remain environment-owned.
+
+### NATS prerequisite for every profile
+
+Billing Service and the Account/Billing event relays always require provisioned
+JetStream resources and explicit per-service authentication over TLS. This is
+also true for base/staging installs with all optional governed workloads disabled.
+The legacy bundled unauthenticated NATS cannot satisfy that runtime contract;
+rendering now rejects it before installation instead of producing crashing Pods.
+Do not weaken the runtime authentication or provisioning checks to install it.
+
+In a site-specific values file, set `nats.enabled=false`, supply the approved
+`dependencies.natsUrl` as a single `tls://<approved-host>:4222` URL without URL
+credentials, path, query or fragment, and supply the HTTPS
+`dependencies.natsMonitorUrl`. Set `external.natsCidrs` and
+`external.natsMonitorCidrs` to the reviewed destinations for the existing
+NetworkPolicies. Base/staging example values intentionally do not invent an
+external cluster or credential; these operator inputs are required before a
+successful render/install. Existing valid external TLS configurations continue
+to work, including the dedicated production and governed-workload profiles.
+
+Before rollout, provision the existing least-privilege per-service NATS credentials,
+their matching server-side authentication, streams and durable consumers as
+described in [the NATS provisioning runbook](../../runbooks/nats-resources.md).
+Populate the existing runtime Secret credential keys and the Account approval
+relay public-artifact ConfigMap; mounting client credentials alone does not
+configure server authentication. Render and review the exact site values, then
+perform the separately authorized TLS/authentication/resource and network
+reachability checks. Rendering does not prove those external resources exist.
+
+### Private NATS credential files
+
+The unchanged NATS runtime reader rejects projected symlinks and group/world-readable
+credential files or parent directories. Each NATS client uses a narrow
+`prepare-nats-credentials` init mode in the same service image, running as UID/GID
+65532 with fsGroup 65532. Only that init receives its one projected Secret key
+(0440); it preserves and validates the complete multi-line JWT/NKey credential,
+then atomically creates a real 0400 file in a 0700 private child directory of a
+Memory `emptyDir`. The main container mounts only that memory output read-only;
+it does not mount the original NATS Secret projection. No root container or
+runtime permission/symlink exception is used.
+
+The existing Secret keys stay `billing-command-executor.creds`,
+`account-event-relay.creds`, `billing-event-relay.creds` and the independent
+`account-approval-relay.creds`. With governed workloads enabled, the existing
+`account-service.creds`, `token-gateway.creds` and
+`token-command-executor.creds` keys use the same preparation. Each preparation
+receives only its own key; Account's ordinary and approval channels retain
+separate files and init steps. Runtime credential paths are now
+`/run/pinvou/nats/private/<client>.creds`. The service image must support this
+init command before chart rollout; an older image fails closed.
+
+An init retry accepts an already published file only if it is private, valid and
+byte-identical to the current projection; it never replaces a credential. Secret
+rotation requires recreating the Pod and its memory volume. Rendering verifies
+wiring only: confirm real cluster ownership/readability, server TLS/authentication,
+ACLs and all existing resource-configuration inputs separately before rollout.
+Credential preparation alone does not establish complete service readiness.
+
+### Billing approval consumer public artifacts
+
+Billing always loads all six `BILLING_APPROVAL_CONSUMER_*` inputs before opening
+its broker connection, including base/staging installs with governed workloads off.
+Set `billing.approvalConsumerArtifactsConfigMap` to the reviewed, existing public
+ConfigMap in the release namespace (default name:
+`pinvou-account-platform-billing-approval-artifacts`). It must contain exactly the
+three referenced public JSON keys below. The chart neither creates these artifacts
+nor initializes consumers, captures a watermark, signs a receipt or activates an
+approval controller.
+
+| Bootstrap input suffix | Fixed file / ConfigMap key | Independent key in `global.runtimeSecret` |
+| --- | --- | --- |
+| `PUBLIC_KEYS_FILE` / `PUBLIC_KEYS_SHA256` | `/run/pinvou/approval-identities/current.json` / `current-v2.json` | `billing-approval-consumer-public-keys-sha256` |
+| `MANIFEST_FILE` / `MANIFEST_SHA256` | `/run/pinvou/approval-manifest/manifest.json` / `manifest.json` | `billing-approval-consumer-manifest-sha256` |
+| `RECEIPT_FILE` / `RECEIPT_SHA256` | `/run/pinvou/approval-receipt/receipt.json` / `receipt.json` | `billing-approval-consumer-receipt-sha256` |
+
+The prefix for every suffix in this table is `BILLING_APPROVAL_CONSUMER_`.
+Each SHA must be an independently verified lowercase 64-character SHA-256 value
+supplied by the deployment authority through the existing runtime Secret process.
+There are no digest defaults in values and no startup self-hashing trust fallback.
+Provision the Ready ConfigMap and all three required Secret keys before Billing
+rollout. Missing keys prevent container startup; invalid digests, missing files or
+content drift fail the unchanged bootstrap/readiness checks.
+
+Follow [the NATS provisioning runbook](../../runbooks/nats-resources.md) with the
+same fixed-source `approval-resources` operator. The manifest must be its complete
+current registry output, and the separately captured, reviewed receipt must bind
+all current `approvalconsumer.BillingCommands()` durables to their exact Q+1 start.
+Do not use the runbook's historical three-consumer prose as the current inventory,
+truncate the manifest/receipt, or regenerate evidence to disguise retained-resource
+drift. Only the existing explicit operator procedure can establish live cutover
+facts; a ConfigMap or successful Helm render does not prove resource readiness.
+
+The three public files are 0444, read-only file `subPath` mounts in three separate
+directories, isolated from private credentials. The identity directory contains
+only `current.json`; a whole ConfigMap directory would expose projection symlinks
+and unrelated files and is rejected by the reader. `subPath` snapshots do not
+hot-reload. Rotate a matched artifact set and its independently controlled digest
+keys in a controlled rollout that recreates Pods, then verify actual per-instance
+readiness and broker/control state. Preserve prior cutover evidence and history.
 
 Install External Secrets Operator and create the least-privilege referenced
 `SecretStore` or `ClusterSecretStore` before install. Production values create
@@ -47,6 +146,32 @@ the separate external KMS/Vault, payment, and model-provider release evidence.
 Registry names, provider hosts, and CIDRs in the production values file are
 documentation examples; replace every one with the reviewed deployment values
 before rendering a release manifest.
+
+### User realm prerequisite
+
+The chart starts Keycloak but does not import or create the `pinvou` user realm.
+The three SQL migration hooks do not provision it, and
+`keycloak.realmUpgradeEnabled` updates an **existing** realm and desktop client;
+it is not a first-install bootstrap switch. Keycloak's management readiness
+probe alone does not establish that application login or JWKS is available.
+
+For a fresh Keycloak database, complete the separately authorized first import
+using the reviewed realm object from the
+[offline production realm bootstrap bundle](../../keycloak/README.md#offline-production-realm-bootstrap-bundle),
+then follow that document's controlled realm/client provisioning and readback.
+Keep the upgrade hook disabled until its existing-realm prerequisites are met.
+Do not expose application login until this handoff is complete. The bundle
+wrapper and development realm are not production import documents; do not
+overwrite a retained realm or import development users. Existing and external
+Keycloak installations retain their reviewed realm and provisioning workflow.
+
+Before enabling application traffic, verify that the public discovery issuer
+exactly matches `oidc.issuer`, the configured JWKS endpoint serves the intended
+realm, and the deployed desktop/Portal clients, audiences and secret files match
+the provisioning readback. Complete real login, refresh and logout acceptance;
+neither a successful Helm render nor a healthy Keycloak process proves this.
+Keep credentials in the existing controlled files and out of values, argv and
+logs. TLS, workload identities and egress prerequisites below remain required.
 
 ### Identity Keycloak backchannel
 

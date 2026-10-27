@@ -1,6 +1,8 @@
 #!/bin/sh
+set +x
 set -eu
 umask 077
+unset KC_CLI_PASSWORD KC_CLI_TRUSTSTORE_PASSWORD
 
 KEYCLOAK_ADMIN_USERNAME=${KEYCLOAK_ADMIN_USERNAME:-${KC_BOOTSTRAP_ADMIN_USERNAME:-}}
 KEYCLOAK_ADMIN_PASSWORD=${KEYCLOAK_ADMIN_PASSWORD:-${KC_BOOTSTRAP_ADMIN_PASSWORD:-}}
@@ -20,9 +22,14 @@ fi
 KCADM_BINARY=/opt/keycloak/bin/kcadm.sh
 KCADM_CONFIG=$(mktemp "${TMPDIR:-/tmp}/pinvou-kcadm.XXXXXXXX")
 trap 'rm -f "$KCADM_CONFIG"' 0 HUP INT TERM
-kcadm() {
+kcadm() (
+  if [ -n "${KEYCLOAK_ADMIN_TRUSTSTORE:-}" ]; then
+    KC_CLI_TRUSTSTORE_PASSWORD=$KEYCLOAK_ADMIN_TRUSTSTORE_PASSWORD
+    export KC_CLI_TRUSTSTORE_PASSWORD
+  fi
+  unset KEYCLOAK_ADMIN_PASSWORD KC_BOOTSTRAP_ADMIN_PASSWORD KEYCLOAK_ADMIN_TRUSTSTORE_PASSWORD KEYCLOAK_PROVISIONER_CLIENT_SECRET HANDOFF_SECRET
   "$KCADM_BINARY" "$@" --config "$KCADM_CONFIG"
-}
+)
 KCADM=kcadm
 REALM=${KEYCLOAK_REALM:-pinvou}
 DESKTOP_CLIENT=${PINVOU_OIDC_CLIENT_ID:-pinvou-desktop-dev}
@@ -87,7 +94,12 @@ if [ -n "${KEYCLOAK_ADMIN_TRUSTSTORE:-}" ]; then
     KEYCLOAK_ADMIN_TRUSTSTORE_PASSWORD=$(cat "$KEYCLOAK_ADMIN_TRUSTSTORE_PASSWORD_FILE")
   fi
   : "${KEYCLOAK_ADMIN_TRUSTSTORE_PASSWORD:?set truststore password or password file}"
-  "$KCADM" config truststore --trustpass "$KEYCLOAK_ADMIN_TRUSTSTORE_PASSWORD" "$KEYCLOAK_ADMIN_TRUSTSTORE" >/dev/null
+  # Keep only the path in the private CLI config. The supported Keycloak 26.7
+  # TLS setup reads KC_CLI_TRUSTSTORE_PASSWORD on each subsequent invocation.
+  if ! "$KCADM" config truststore "$KEYCLOAK_ADMIN_TRUSTSTORE" >/dev/null 2>&1; then
+    printf '%s\n' 'Keycloak truststore configuration failed' >&2
+    exit 1
+  fi
 fi
 
 find_id_by_name() {
@@ -101,8 +113,12 @@ find_id_by_name() {
 }
 
 attempt=0
-until "$KCADM" config credentials --server "$ADMIN_SERVER" --realm master \
-  --user "$KEYCLOAK_ADMIN_USERNAME" --password "$KEYCLOAK_ADMIN_PASSWORD" >/dev/null 2>&1; do
+until (
+  KC_CLI_PASSWORD=$KEYCLOAK_ADMIN_PASSWORD
+  export KC_CLI_PASSWORD
+  "$KCADM" config credentials --server "$ADMIN_SERVER" --realm master \
+    --user "$KEYCLOAK_ADMIN_USERNAME"
+) >/dev/null 2>&1; do
   attempt=$((attempt + 1))
   if [ "$attempt" -ge "${KEYCLOAK_PROVISION_MAX_ATTEMPTS:-60}" ]; then
     printf 'Keycloak realm provisioning could not authenticate after %s attempts\n' "$attempt" >&2

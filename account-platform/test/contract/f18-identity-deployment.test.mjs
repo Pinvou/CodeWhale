@@ -15,6 +15,10 @@ const newApi = ['newApi.tlsSecretName=fixture-only-newapi', 'newApi.caConfigMap=
 function render(overrides = [], production = true) {
   const args = ['template', 'fixture', chart,
     ...(production ? ['-f', path.join(chart, 'values-production-new.yaml')] : []),
+    // The base profile also uses strict provisioned NATS consumers. Keep this
+    // Identity fixture valid without reviving the unauthenticated legacy server.
+    ...(!production ? ['--set', 'nats.enabled=false', '--set-string',
+      'dependencies.natsUrl=tls://nats.example.invalid:4222'] : []),
     // Config-only fixture member; production values require real deployed on-call users.
     ...(production ? ['--set-json', 'global.manualReviewOnCallUserIds=["00000000-0000-4000-8000-000000000707"]'] : []),
     ...[...newApi, ...overrides].flatMap(value =>

@@ -67,6 +67,18 @@ Account 的 `ACCOUNT_TRUSTED_SOURCE_PEER_IPS` 只包含固定入口、Portal 和
 
 NATS 使用现有 `nats.conf`、`authorization.conf` 和 `runbooks/nats-resources.md`。独立 operator 首先显式创建缺失固定 stream，然后严格检查。普通 relay 只使用专属 publisher NKey；已有 stream drift 必须拒绝，不自动覆盖或借 operator 身份执行。relay 与 operator 不共享 seed，不添加未来 Billing/Token consumer 或审批 subject。
 
+## 当前 Billing 启动的必需审批资源校验
+
+即使仅组合 `compose.personal.yaml` 与 `compose.personal-workload.yaml`，当前同源 Billing 二进制仍无条件执行审批 consumer bootstrap 和 NATS 连接校验，不能把个人余额业务范围当成进程启动最小配置。基础模板现与 Finance 复用这些既有运维输入，不要求叠加 Finance、增加进程或启用支付/审批/模型业务入口：
+
+- `NATS_URL` 必须是核验的 TLS broker；`BILLING_EXECUTOR_NATS_DIRECTORY` 只存本 Billing executor 的私密 `nkey.seed`，只读挂载到 `/run/pinvou/nats`。CA 仍来自独立 `INFRA_CA_DIRECTORY/ca.crt`，严格 reader 与既有 ACL 不变。
+- `APPROVAL_PUBLIC_IDENTITY_DIRECTORY` 只存公开 v2 `current.json`；`APPROVAL_PUBLIC_MANIFEST_DIRECTORY/manifest.json`、`APPROVAL_PUBLIC_RECEIPT_DIRECTORY/receipt.json` 分置另外两个独立受控目录。三个目录均只读 bind、`create_host_path=false`，不能指向私密凭据目录、彼此嵌套或用链接伪装。
+- `APPROVAL_PUBLIC_KEYS_SHA256`、`APPROVAL_MANIFEST_SHA256`、`APPROVAL_RECEIPT_SHA256` 由既有独立审核/运维流程供应，不由 Billing 自算自信。它们映射到六项 `BILLING_APPROVAL_CONSUMER_*` 输入。receipt SHA 可在外部显式初始化窗口为空，但此时 Billing 必须拒绝启动；启动前须补齐真实回执摘要。
+
+先按 [NATS 资源流程](../runbooks/nats-resources.md) 使用同固定源码的显式 operator，生成并核验当前完整 registry manifest，以及覆盖当前全部 `approvalconsumer.BillingCommands()` durable 的真实 Q+1 回执。这里消费外部已审核制品，不由基础组合自动运行 initializer 或创建审批控制事实。不得按历史“三条”或“六 descriptor”文字截断当前清单，不得删除 retained 资源或改回执伪装首次初始化。既有 personal/models 业务与运维模式边界仍适用；配置检查不授予新的资金或执行权限。
+
+制品或摘要更新后按受控流程重建/滚动应用实例，保留旧 cutover 证据，并核验实际每实例 bootstrap/readiness、TLS、ACL 与资源状态。仅成功渲染配置、通过 hash 绑定或挂载三个公开文件，都不代表 broker 资源已经安装或运行验收通过。
+
 ## 运行验证边界
 
 部署前依次核验镜像/私有挂载、真实 TLS/证书与身份、迁移 schema/角色、固定 NATS 资源，再启动业务和公开入口。实际注册必须直到 Billing wallet READY；密码/资料变更须完成 Keycloak fencing 和会话撤销；验证 Portal PKCE/refresh/logout/handoff、Desktop 登录恢复与个人余额。未知 ACK 按原请求恢复，不强制激活，不替换主体。

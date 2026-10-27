@@ -9,7 +9,7 @@ import test from "node:test";
 import { readFile } from "node:fs/promises";
 import { existsSync, mkdtempSync, mkdirSync, writeFileSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, matchesGlob } from "node:path";
 import { spawnSync } from "node:child_process";
 
 const workflow = await readFile(
@@ -723,4 +723,152 @@ test("frontend probe dependency guard rejects incomplete or conditional installa
     assert.throws(() => assertFrontendProbeDependencies(
       workflow.replace(`              - '${path}'`, "")), `missing route ${path}`);
   }
+});
+
+const handoffGenerator = "scripts/build-credential-handoff.mjs";
+const documentBaselineChecker = "scripts/check-recharge-product-document-baseline.mjs";
+const generatedInputsStep = "Verify Account Platform generated inputs and document baseline";
+const handoffDeploymentStep = "Verify credential handoff built deployment boundary";
+
+// These simple path patterns use the same inclusion/exclusion semantics as the
+// workflow's some-with-excludes. Each input is a separate changed-file set.
+function inputSelects(text, filter, input) {
+  const patterns = filterPaths(text, filter);
+  return patterns.some(pattern => !pattern.startsWith("!") && matchesGlob(input, pattern))
+    && !patterns.some(pattern => pattern.startsWith("!") && matchesGlob(input, pattern.slice(1)));
+}
+
+function assertAccountPlatformInputChecks(text) {
+  assert.match(text, /predicate-quantifier: some-with-excludes/);
+  for (const input of [handoffGenerator, documentBaselineChecker]) {
+    assert.ok(inputSelects(text, "account_platform", input), `${input} must select Account Platform checks`);
+  }
+  assert.ok(inputSelects(text, "frontend", handoffGenerator), "handoff deployment checker needs freshly built Portal assets");
+  const account = jobBlock("account-platform-test", text);
+  const generated = namedStep(account, generatedInputsStep);
+  assert.match(generated, /^ {8}shell: bash$/m);
+  assert.doesNotMatch(generated, /^ {8}(?:if|continue-on-error|working-directory|env):/m);
+  assert.deepEqual(stepRun(account, generatedInputsStep).trim().split(/\r?\n/), [
+    "set -euo pipefail", `node ${handoffGenerator} --check`, `node ${documentBaselineChecker}`,
+  ]);
+  const frontend = jobBlock("frontend-test", text);
+  const deployment = namedStep(frontend, handoffDeploymentStep);
+  assert.match(deployment, /^ {8}shell: bash$/m);
+  assert.doesNotMatch(deployment, /^ {8}(?:if|continue-on-error|working-directory|env):/m);
+  assert.deepEqual(stepRun(frontend, handoffDeploymentStep).trim().split(/\r?\n/), [
+    "set -euo pipefail", `node ../${handoffGenerator} --check-deployment`,
+  ]);
+  const portalBuild = namedStep(frontend, "Verify embedded Account Portal assets are current");
+  assert.doesNotMatch(portalBuild, /^ {8}(?:if|continue-on-error):/m);
+  assert.match(stepRun(frontend, "Verify embedded Account Portal assets are current"), /^npm run build:account-portal$/m);
+  assert.ok(frontend.indexOf(portalBuild)
+    < frontend.indexOf(deployment), "deployment check must follow the actual Portal build");
+}
+
+test("Account Platform generator/checker inputs reach exact applicable CI legs", () => {
+  assertAccountPlatformInputChecks(workflow);
+  assert.equal(inputSelects(workflow, "frontend", documentBaselineChecker), false,
+    "document-only policy checker does not need a browser build");
+  for (const input of [
+    "account-platform/internal/portal/credential-handoff.v1.js",
+    "account-platform/internal/portal/credential_handoff_hash_generated.go",
+  ]) {
+    assert.ok(inputSelects(workflow, "account_platform", input));
+    assert.ok(inputSelects(workflow, "frontend", input));
+  }
+});
+
+test("Account Platform generator/checker CI guard rejects old routes and bypassed checks", () => {
+  assertAccountPlatformInputChecks(workflow);
+  const account = jobBlock("account-platform-test");
+  const frontend = jobBlock("frontend-test");
+  const generated = namedStep(account, generatedInputsStep);
+  const deployment = namedStep(frontend, handoffDeploymentStep);
+  const portalBuild = namedStep(frontend, "Verify embedded Account Portal assets are current");
+  const variants = [
+    workflow.replaceAll(`              - '${handoffGenerator}'\r\n`, "").replaceAll(`              - '${handoffGenerator}'\n`, ""),
+    workflow.replaceAll(`              - '${documentBaselineChecker}'\r\n`, "").replaceAll(`              - '${documentBaselineChecker}'\n`, ""),
+    workflow.replace(generated, ""), workflow.replace(deployment, ""),
+    workflow.replace(`node ${handoffGenerator} --check`, `node ${handoffGenerator}`),
+    workflow.replace(`node ${documentBaselineChecker}`, "true"),
+    workflow.replace(`node ../${handoffGenerator} --check-deployment`, "true"),
+    workflow.replace(generated, generated.replace("        run:", "        if: ${{ github.event.pull_request.draft == false }}\n        run:")),
+    workflow.replace(deployment, deployment.replace("        run:", "        continue-on-error: true\n        run:")),
+    workflow.replace("npm run build:account-portal", "true"),
+    workflow.replace(portalBuild, portalBuild.replace("        run:", "        if: ${{ github.event.pull_request.draft == false }}\n        run:")),
+    workflow.replace(frontend, frontend.replace(deployment, "").replace("      - name: Vite build", `${deployment}      - name: Vite build`)),
+  ];
+  for (const variant of variants) assert.throws(() => assertAccountPlatformInputChecks(variant));
+});
+
+test("Account Platform generator/checker steps run real inputs and propagate failures", () => {
+  const directory = mkdtempSync(join(tmpdir(), "pinvou-generated-ci-"));
+  try {
+    const put = (relative, body) => {
+      const parts = relative.split("/"); parts.pop();
+      mkdirSync(join(directory, ...parts), { recursive: true });
+      writeFileSync(join(directory, relative), body);
+    };
+    for (const script of [handoffGenerator, documentBaselineChecker]) {
+      put(script, readFileSync(new URL(`../../${script}`, import.meta.url)));
+    }
+    const source = "(() => { /* controlled public handoff input */ })();\n";
+    put("account-platform/internal/portal/credential-handoff.v1.js", source);
+    const generatedPath = "account-platform/internal/portal/credential_handoff_hash_generated.go";
+    // Generate only inside this owned fixture. The workflow below must use the
+    // read-only check mode and must reject subsequent controlled output drift.
+    const prepare = spawnSync(process.execPath, [join(directory, handoffGenerator)],
+      { cwd: directory, encoding: "utf8", timeout: 10_000, windowsHide: true });
+    assert.equal(prepare.status, 0, prepare.stderr);
+    for (const name of ["requirements", "architecture", "implementation-tasks", "implementation-status"]) {
+      put(`account-platform/docs/${name}.md`, "Catalog facts are supplied by the runtime authority.\n");
+    }
+    put("account-platform/internal/portal/static/index.html", "<!doctype html><title>controlled public fixture</title>\n");
+    mkdirSync(join(directory, "pinvou3-app"));
+    const executable = process.execPath.replaceAll("\\", "/").replaceAll("'", "'\\''");
+    const prefix = `node() { '${executable}' "$@"; };\n`;
+    const execute = (job, name, cwd = directory) => spawnSync(bash,
+      ["--noprofile", "--norc", "-c", prefix + stepRun(jobBlock(job), name)],
+      { cwd, encoding: "utf8", timeout: 30_000, windowsHide: true });
+    const clean = execute("account-platform-test", generatedInputsStep);
+    assert.equal(clean.status, 0, clean.stderr);
+    assert.match(clean.stdout, /Recharge product document baseline passed/);
+    const generated = readFileSync(join(directory, generatedPath));
+    put(generatedPath, "// stale controlled artifact\n");
+    const stale = execute("account-platform-test", generatedInputsStep);
+    assert.equal(stale.status, 1); assert.match(stale.stderr, /handoff script digest is stale/);
+    assert.doesNotMatch(stale.stdout, /baseline passed/);
+    put(generatedPath, generated);
+    put("account-platform/docs/requirements.md", "售价为 10 元\n");
+    const catalog = execute("account-platform-test", generatedInputsStep);
+    assert.equal(catalog.status, 1); assert.match(catalog.stderr, /baseline contains runtime catalog facts/);
+    const cleanDeployment = execute("frontend-test", handoffDeploymentStep, join(directory, "pinvou3-app"));
+    assert.equal(cleanDeployment.status, 0, cleanDeployment.stderr);
+    put("account-platform/internal/portal/static/unsafe.js", "navigator.serviceWorker.register('/controlled-worker.js');\n");
+    const worker = execute("frontend-test", handoffDeploymentStep, join(directory, "pinvou3-app"));
+    assert.equal(worker.status, 1); assert.match(worker.stderr, /Service Worker registration may cover/);
+  } finally {
+    assert.ok(directory.startsWith(join(tmpdir(), "pinvou-generated-ci-")));
+    rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+
+test("Account Platform task tests run for their own inputs without bypassing production CLI preflights", () => {
+  for (const input of [
+    "scripts/check-account-platform-tasks.test.mjs",
+    "scripts/check-account-platform-tasks.mjs",
+    "scripts/account-platform.mjs",
+    "scripts/account-platform-dev-nats.mjs",
+    "scripts/account-platform-dev-nats-storage.mjs",
+    "scripts/account-platform-dev-nats-runner.mjs",
+    "account-platform/test/fixtures/development-nats.mjs",
+    "account-platform/docs/implementation-status.md",
+    "account-platform/docs/implementation-tasks.md",
+    "account-platform/docs/requirements.md",
+  ]) assert.ok(inputSelects(workflow, "account_platform", input), `${input} alone must select the task contracts`);
+  const job = jobBlock("account-platform-test");
+  const name = "Verify Account Platform task contracts";
+  assert.doesNotMatch(namedStep(job, name), /^ {8}(?:if|continue-on-error|working-directory|env):/m);
+  assert.equal(stepRun(job, name).trim(), "node --test scripts/check-account-platform-tasks.test.mjs");
 });

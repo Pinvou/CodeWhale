@@ -15,6 +15,7 @@ import (
 
 	"github.com/Pinvou/pinvou3/account-platform/internal/platform/authorization"
 	"github.com/Pinvou/pinvou3/account-platform/internal/platform/config"
+	"github.com/Pinvou/pinvou3/account-platform/internal/platform/events"
 	"github.com/Pinvou/pinvou3/account-platform/internal/platform/httpserver"
 	"github.com/Pinvou/pinvou3/account-platform/internal/platform/identity"
 	"github.com/Pinvou/pinvou3/account-platform/internal/platform/observability"
@@ -24,6 +25,13 @@ import (
 )
 
 func main() {
+	if handled, err := events.PrepareNATSCredentials(os.Args[1:], "token-gateway"); handled {
+		if err != nil {
+			os.Exit(1)
+		}
+		return
+	}
+
 	if err := httpserver.ConfigureProcessLogging("token-gateway"); err != nil {
 		log.Fatal("TOKEN_STARTUP_CONFIGURATION_FAILED")
 	}

@@ -25,7 +25,6 @@
     "permissions": [
       "internal.registration-bonus-eligibility.read",
       "internal.authorization.check",
-      "internal.authorization.delegate",
       "internal.approval-execution.begin",
       "internal.approval-execution.complete",
       "internal.approval-authorization.consume",

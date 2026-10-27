@@ -13,6 +13,17 @@ import (
 	"github.com/nats-io/nkeys"
 )
 
+func privateResourceTestDir(t *testing.T) string {
+	t.Helper()
+	directory := t.TempDir()
+	// TempDir's numbered child uses 0777 subject to the process umask.
+	// Fixtures must satisfy the same custody checks even with umask 0002.
+	if err := os.Chmod(directory, 0700); err != nil {
+		t.Fatal("cannot secure the controlled resource directory", err)
+	}
+	return directory
+}
+
 func TestInvalidOperatorActionDoesNotReadCredentials(t *testing.T) {
 	for _, args := range [][]string{{}, {"-expected-version", "0"}, {"-expected-version", "1", "-action", "drain"}, {"-expected-version", "1", "unexpected"}, {"-expected-version", "1", "-unknown", "secret"}} {
 		if _, err := run(args, func(string) string { t.Fatal("invalid command read runtime credentials"); return "" }); err == nil {
@@ -22,7 +33,7 @@ func TestInvalidOperatorActionDoesNotReadCredentials(t *testing.T) {
 }
 
 func TestPublicReceiptIsBoundedCreateOnly(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "receipt.json")
+	path := filepath.Join(privateResourceTestDir(t), "receipt.json")
 	if writePublicReceipt(path, []byte(`{"current":true}`)) != nil {
 		t.Fatal("new receipt failed")
 	}
@@ -34,14 +45,14 @@ func TestPublicReceiptIsBoundedCreateOnly(t *testing.T) {
 		t.Fatal("prior evidence changed")
 	}
 	for _, raw := range [][]byte{nil, []byte(`{} {}`), make([]byte, 256<<10+1)} {
-		if writePublicReceipt(filepath.Join(t.TempDir(), "rejected.json"), raw) == nil {
+		if writePublicReceipt(filepath.Join(privateResourceTestDir(t), "rejected.json"), raw) == nil {
 			t.Fatal("unbounded or incomplete receipt accepted")
 		}
 	}
 }
 
 func TestOfflineResourceRendererAndIsolation(t *testing.T) {
-	identityDir, resourceDir, privateDir := t.TempDir(), t.TempDir(), t.TempDir()
+	identityDir, resourceDir, privateDir := privateResourceTestDir(t), privateResourceTestDir(t), privateResourceTestDir(t)
 	keys := map[string]string{}
 	for _, role := range []string{"account-outbox-relay", "account-approval-relay", "billing-outbox-relay", "token-outbox-relay", "billing-command-executor", "token-command-executor", "event-resource-operator"} {
 		pair, err := nkeys.CreateUser()

@@ -26,7 +26,6 @@ use crate::platform::prefs::ModelSelectionRef;
 use anyhow::{Context, Result};
 use chrono::Utc;
 use parking_lot::RwLock;
-use serde::Deserialize;
 
 const SESSION_MODELS_FILE: &str = "_session_models.json";
 const PINNED_SESSIONS_FILE: &str = "_pinned_sessions.json";

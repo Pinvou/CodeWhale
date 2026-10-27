@@ -28,6 +28,28 @@ BILLING_ROOTS = {
     "TestF08ClosureBlocksPendingFinancialAnomalyPostgres",
     "TestF08ReclaimBlocksPendingFinancialAnomalyPostgres",
 }
+# Each fixed public harness owns its complete actor/schema lifecycle. The
+# original CI child spent ~394s on nine roots before its 403s hard timeout;
+# these groups retain the existing per-invocation limits instead of enlarging
+# that shared timeout. Their observed root totals were ~107s, ~190s and >96s.
+CLOSED_GRANT_GROUPS = [
+    ("closed-grants-owner", "TestClosedGrantPublicOwnerHarness", {
+        "TestClosedGrantPublishedOwnerEffects",
+        "TestF08ClosedGrantConcurrentReceiptReplayPostgres",
+        "TestAccountClosureIsolationScrubsContactWithoutFinancialMutation",
+        "TestAccountClosureIsolationPreservesPriorAuditFacts",
+    }),
+    ("closed-grants-financial", "TestClosedGrantPublicFinancialHarness", {
+        "TestAccountClosurePreservesUnknownForcedRefundEvidence",
+        "TestAccountClosureRequiresAuthoritativeChargebackTerminal",
+        "TestF08ClosureBlocksPendingFinancialAnomalyPostgres",
+        "TestF08ReclaimBlocksPendingFinancialAnomalyPostgres",
+    }),
+    ("closed-grants-membership", "TestClosedGrantPublicMembershipHarness", {
+        "TestAccountClosureAssessmentIncludesMemberReservations",
+        "TestF08MembershipClosureReasonQuotaReplayPostgres",
+    }),
+]
 CONTRACTS = [
     ("migration-cli", "./cmd/migrate",
      {"TestAccountClosureLegacyRollbackCLI", "TestPhaseMigrationCLIPinsBeforeDown"}, {}),
@@ -35,14 +57,31 @@ CONTRACTS = [
      {"": {"TestClosureClaimACKOrder"}}),
     ("membership-closure-event", "./internal/billingschema",
      {"TestF08AccountClosureMembershipEventConsumerPublicPostgres"}, {}),
-    ("closed-grants", "./internal/billingschema", {"TestClosedGrantPublicOwnerHarness"},
-     {"": BILLING_ROOTS}),
+    *((name, "./internal/billingschema", {parent}, {"": roots})
+      for name, parent, roots in CLOSED_GRANT_GROUPS),
     ("gift-closure", "./internal/billingschema", {"TestGiftClosurePublicHarness"},
      {"": {"TestGiftClosureProducerBoundaries"}, ".billing": {"TestClosedGrantPublishedOwnerEffects"}}),
     ("account-anonymization", "./internal/account",
      {"TestAccountClosureAnonymizesOwnedHistoricalContacts", "TestAccountClosureRollbackPreservesEvidence",
       "TestAccountClosureSelfServiceRecoveryPostgres", "TestF08ClosureAdvanceFailureIsScheduledPostgres"}, {}),
 ]
+
+
+def validate_closed_grant_contracts(contracts):
+    seen, names, parents = set(), set(), set()
+    for name, parent, roots in CLOSED_GRANT_GROUPS:
+        if not roots or seen & roots or name in names or parent in parents:
+            raise RuntimeError("closed-grant groups must be nonempty and disjoint")
+        seen.update(roots)
+        names.add(name)
+        parents.add(parent)
+    if seen != BILLING_ROOTS:
+        raise RuntimeError("closed-grant groups must execute exactly the ten required owner roots")
+    expected = [(name, "./internal/billingschema", {parent}, {"": roots})
+                for name, parent, roots in CLOSED_GRANT_GROUPS]
+    selected = [row for row in contracts if row[0].startswith("closed-grants")]
+    if selected != expected:
+        raise RuntimeError("every closed-grant public harness invocation is required exactly once")
 
 
 def emit_child_logs(child_log, children):
@@ -87,16 +126,21 @@ def verify_results(raw, required):
         if name and action == "pass":
             count += 1
             if "/" not in name:
+                if name in passed:
+                    raise RuntimeError("duplicate closure root result: " + name)
                 passed.add(name)
     if (running or not passed_packages or started_packages - passed_packages
             or test_packages - passed_packages):
         raise RuntimeError("incomplete Go package or test lifecycle")
-    if not required or not count or required - passed:
-        raise RuntimeError("required closure contracts did not execute: " + ", ".join(sorted(required - passed)))
+    if not required or not count or passed != required:
+        raise RuntimeError("required closure contracts did not execute exactly: missing="
+                           + ", ".join(sorted(required - passed)) + "; unexpected="
+                           + ", ".join(sorted(passed - required)))
     return count
 
 
 def main():
+    validate_closed_grant_contracts(CONTRACTS)
     raw = local_database_url(os.environ.get("PINVOU_ACCOUNT_CLOSURE_TEST_DATABASE_URL", ""))
     psql = os.environ.get("PINVOU_ACCOUNT_TEST_PSQL", "psql")
     go = shutil.which(os.environ.get("PINVOU_ACCOUNT_TEST_GO", "go"))
@@ -142,7 +186,8 @@ def main():
     for name, package, roots, children in CONTRACTS:
         require_empty()
         child_log = artifacts / (name + ".child.jsonl")
-        argv = [go, "test", "-p=1", "-race", "-tags=nomsgpack", "-mod=readonly", "-count=1",
+        race_enabled = sys.platform != "win32"
+        argv = [go, "test", "-p=1", *(["-race"] if race_enabled else []), "-tags=nomsgpack", "-mod=readonly", "-count=1",
                 "-timeout=8m", "-json", package, "-run", "^(" + "|".join(sorted(roots)) + ")$"]
         try:
             parent_log = artifacts / (name + ".parent.jsonl")
@@ -175,7 +220,8 @@ def main():
                 child_raw = child_logs[suffix]
                 child_counts[suffix or "account_or_billing"] = verify_results(child_raw, required)
             print(json.dumps({"contract": name, "parent_named_passes": parent_count,
-                              "child_named_passes": child_counts, "artifacts": str(artifacts)}))
+                              "child_named_passes": child_counts, "race_enabled": race_enabled,
+                              "artifacts": str(artifacts)}))
         finally:
             # Go fixtures own cleanup. Unknown remnants are never force-removed.
             require_empty()

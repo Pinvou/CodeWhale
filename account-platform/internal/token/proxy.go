@@ -138,6 +138,12 @@ func (s *Service) chatCompletions(w http.ResponseWriter, r *http.Request) {
 		s.writeError(w, r, lookupErr)
 		return
 	}
+	// New acceptance follows the integer wire contract. Older accepted null
+	// requests must first retain their original canonical-v1 replay above.
+	if err := validateNewChatMaximumOutput(logicalBody); err != nil {
+		api.WriteError(w, http.StatusBadRequest, "INVALID_REQUEST", "maximum output token limits must be integers", httpserver.RequestID(r.Context()))
+		return
+	}
 	catalog, ok := s.repository.(CatalogRepository)
 	if !ok {
 		api.WriteError(w, http.StatusServiceUnavailable, "MODEL_CATALOG_UNAVAILABLE", "the model catalog is unavailable", httpserver.RequestID(r.Context()))
@@ -262,8 +268,7 @@ func (s *Service) chatCompletions(w http.ResponseWriter, r *http.Request) {
 	}
 	credential, secret, err := s.repository.CredentialSecret(r.Context(), route.TokenAccountID, route.CredentialID)
 	if err != nil {
-		_ = s.repository.MarkReleased(r.Context(), usageRequest.ID, "credential_unavailable")
-		s.writeError(w, r, err)
+		s.writeCredentialLookupFailure(w, r, usageRequest.ID)
 		return
 	}
 	defer clear(secret)
@@ -280,17 +285,18 @@ func (s *Service) chatCompletions(w http.ResponseWriter, r *http.Request) {
 	envelope := DispatchEnvelope{BaseURL: credential.BaseURL, Provider: credential.Provider, AdapterVersion: s.executionUpstream.AdapterVersion(), Credential: append([]byte(nil), secret...), RequestBody: upstreamBody, Price: price, Stream: request.Stream, MaximumCost: maximumCost, MaximumOutput: maximumUsage.OutputTokens, ContextType: resolved.ContextType, OrganizationID: resolved.OrganizationID, CanPurchaseOrganizationEntitlements: slices.Contains(resolved.Permissions, "org.entitlements.purchase")}
 	circuitKey := resilience.Key(envelope.Provider, "MODEL_DISPATCH", envelope.BaseURL)
 	if circuitErr := s.breaker.BeforeHighRisk(circuitKey); circuitErr != nil {
-		_ = s.repository.MarkReleased(r.Context(), usageRequest.ID, "provider_circuit_open")
 		var open *resilience.CircuitOpenError
 		if errors.As(circuitErr, &open) {
 			w.Header().Set("Retry-After", strconv.Itoa(max(1, int(open.RetryAfter.Seconds()+0.999))))
 		}
-		api.WriteError(w, http.StatusServiceUnavailable, "PROVIDER_CIRCUIT_OPEN", "the selected provider route is temporarily unavailable", httpserver.RequestID(r.Context()))
+		s.writeCircuitOpenFailure(w, r, usageRequest.ID)
 		return
 	}
 	if err := s.repository.PrepareDispatch(r.Context(), usageRequest.ID, envelope); err != nil {
-		_ = s.repository.MarkReleased(r.Context(), usageRequest.ID, "dispatch_preparation_failed")
-		s.writeError(w, r, err)
+		// A preparation write may have committed despite a missing ACK, and a
+		// same-key actor may already hold funds or have dispatched. Read only:
+		// the local error proves neither a terminal state nor an unused hold.
+		s.writeAcceptedUsageProjection(w, r, usageRequest.ID)
 		return
 	}
 	if err := s.repository.MarkHoldReserving(r.Context(), usageRequest.ID); err != nil {
@@ -371,6 +377,22 @@ func applyDefaultChatMaximumOutput(body []byte, request *chatCompletionRequest, 
 	normalized["max_completion_tokens"] = fallback
 	request.MaxCompletionTokens = fallback
 	return json.Marshal(normalized)
+}
+
+// The typed request decode already rejects non-integer values except JSON null,
+// which encoding/json leaves as zero in an int64. Reject only that remaining
+// type gap for new acceptance; explicit integer zero is not a missing field.
+func validateNewChatMaximumOutput(body []byte) error {
+	payload, err := decodeChatCompletionPayload(body)
+	if err != nil {
+		return err
+	}
+	for _, name := range []string{"max_completion_tokens", "max_tokens"} {
+		if value, present := payload[name]; present && value == nil {
+			return errors.New("maximum output token limits must be integers")
+		}
+	}
+	return nil
 }
 
 func normalizeLogicalTurnID(raw string) (string, error) {
@@ -718,6 +740,45 @@ func (s *Service) replayStoredUsage(w http.ResponseWriter, r *http.Request, usag
 		s.writeError(w, r, err)
 		return
 	}
+	s.writeStoredUsageSnapshot(w, r, usage, snapshot)
+}
+
+// A local failed lookup proves no facts about another actor. The store fences
+// the original acceptance and persists its failure receipt in one transaction;
+// failed/unknown acknowledgements are resolved only through a fresh read.
+func (s *Service) writeCredentialLookupFailure(w http.ResponseWriter, r *http.Request, usageID uuid.UUID) {
+	s.writeUndispatchedFailure(w, r, usageID, "PROVIDER_CREDENTIAL_UNAVAILABLE", "the accepted model request failed before dispatch because its credential was unavailable", s.repository.FailCredentialBeforeDispatch)
+}
+
+func (s *Service) writeCircuitOpenFailure(w http.ResponseWriter, r *http.Request, usageID uuid.UUID) {
+	s.writeUndispatchedFailure(w, r, usageID, "PROVIDER_CIRCUIT_OPEN", "the selected provider route is temporarily unavailable", s.repository.FailCircuitBeforeDispatch)
+}
+
+func (s *Service) writeUndispatchedFailure(w http.ResponseWriter, r *http.Request, usageID uuid.UUID, code, message string, persist func(context.Context, uuid.UUID, ReplayResult) (bool, error)) {
+	payload, err := json.Marshal(api.Error{Code: code, Message: message, RequestID: httpserver.RequestID(r.Context()), Details: map[string]any{"usage_request_id": usageID, "execution_status": "FAILED", "settlement_status": "RELEASED", "status_url": "/v1/usage-requests/" + usageID.String()}})
+	if err == nil {
+		_, _ = persist(r.Context(), usageID, ReplayResult{Kind: "JSON", HTTPStatus: http.StatusServiceUnavailable, ContentType: "application/json", Payload: payload})
+	}
+	s.writeAcceptedUsageProjection(w, r, usageID)
+}
+
+// Preserve the accepted identity and current authoritative facts without
+// resuming dispatch or inferring no effect from a failed/unknown write ACK.
+func (s *Service) writeAcceptedUsageProjection(w http.ResponseWriter, r *http.Request, usageID uuid.UUID) {
+	w.Header().Set("X-Pinvou-Usage-Request-ID", usageID.String())
+	w.Header().Set("Cache-Control", "no-store")
+	w.Header().Set("Location", "/v1/usage-requests/"+usageID.String())
+	snapshot, err := s.repository.LoadReplay(r.Context(), usageID, 0)
+	if err != nil {
+		api.WriteJSON(w, http.StatusServiceUnavailable, api.Error{Code: "USAGE_STATE_UNCONFIRMED", Message: "the accepted model request status could not be confirmed; inspect the original usage request", RequestID: httpserver.RequestID(r.Context()), Details: map[string]any{"usage_request_id": usageID, "status_url": "/v1/usage-requests/" + usageID.String()}})
+		return
+	}
+	// Read-only even if another actor progressed or the failure did not commit.
+	// replayUsage may resume reservation/dispatch and is deliberately not used.
+	s.writeStoredUsageSnapshot(w, r, snapshot.Usage, snapshot)
+}
+
+func (s *Service) writeStoredUsageSnapshot(w http.ResponseWriter, r *http.Request, usage UsageRequest, snapshot ReplaySnapshot) {
 	if snapshot.ResultExpired {
 		api.WriteError(w, http.StatusGone, "IDEMPOTENCY_RESULT_EXPIRED", "the retained model result has expired; inspect the usage request status", httpserver.RequestID(r.Context()))
 		return

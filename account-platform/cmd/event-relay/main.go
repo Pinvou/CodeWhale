@@ -15,23 +15,48 @@ import (
 
 	"github.com/Pinvou/pinvou3/account-platform/internal/account"
 	"github.com/Pinvou/pinvou3/account-platform/internal/platform/events"
+	"github.com/Pinvou/pinvou3/account-platform/internal/platform/httpserver"
 	"github.com/Pinvou/pinvou3/account-platform/internal/platform/observability"
 	"github.com/Pinvou/pinvou3/account-platform/internal/platform/serviceauth"
 	"github.com/google/uuid"
 )
 
 func main() {
+	if handled, err := events.PrepareNATSCredentials(os.Args[1:], "account-event-relay", "billing-event-relay", "account-approval-relay"); handled {
+		if err != nil {
+			os.Exit(1)
+		}
+		return
+	}
+
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
-	environment := strings.TrimSpace(os.Getenv("APP_ENV"))
-	if environment == "" {
-		environment = "development"
+	logger, err := configureRelayLogging(os.Getenv)
+	if err == nil {
+		err = run(ctx, os.Getenv, logger)
 	}
-	logger := observability.ConfigureDefaultLogger(observability.Config{Service: "event-relay", Environment: environment, Version: "dev", Commit: "unknown"})
-	if err := run(ctx, os.Getenv, logger); err != nil {
+	if err != nil {
 		logger.Error("ordinary Account relay stopped", "error", "ACCOUNT_EVENT_RELAY_UNAVAILABLE")
 		os.Exit(1)
 	}
+}
+
+func relayObservabilityConfig(environment func(string) string) observability.Config {
+	name := strings.TrimSpace(environment("APP_ENV"))
+	if name == "" {
+		name = "development"
+	}
+	return httpserver.ProcessObservabilityConfig("event-relay", name)
+}
+
+func configureRelayLogging(environment func(string) string) (*slog.Logger, error) {
+	config := relayObservabilityConfig(environment)
+	logger := observability.ConfigureDefaultLogger(config)
+	return logger, httpserver.ConfigureGinMode(config.Environment)
+}
+
+func setupRelayTracing(ctx context.Context, environment func(string) string) (observability.Shutdown, error) {
+	return observability.SetupTracing(ctx, relayObservabilityConfig(environment))
 }
 
 func run(ctx context.Context, environment func(string) string, logger *slog.Logger) error {
@@ -65,7 +90,7 @@ func run(ctx context.Context, environment func(string) string, logger *slog.Logg
 		return errors.New("ACCOUNT_EVENT_BROKER_UNAVAILABLE")
 	}
 	defer broker.Close()
-	shutdownTracing, err := observability.SetupTracing(ctx, observability.Config{Service: "event-relay", Environment: environment("APP_ENV"), Version: "dev", Commit: "unknown"})
+	shutdownTracing, err := setupRelayTracing(ctx, environment)
 	if err != nil {
 		return errors.New("ACCOUNT_EVENT_TRACING_UNAVAILABLE")
 	}

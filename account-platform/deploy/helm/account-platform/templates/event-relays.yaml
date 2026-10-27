@@ -39,7 +39,12 @@ spec:
       serviceAccountName: {{ $fullname }}-{{ $source }}-event-relay
       automountServiceAccountToken: false
       {{- include "pinvou.availabilityPodSpec" (dict "root" $root "component" (printf "%s-event-relay" $source)) | nindent 6 }}
-      securityContext: { runAsNonRoot: true, seccompProfile: { type: RuntimeDefault } }
+      securityContext: { runAsNonRoot: true, runAsUser: 65532, runAsGroup: 65532, fsGroup: 65532, seccompProfile: { type: RuntimeDefault } }
+      initContainers:
+        {{- include "pinvou.natsCredentialsInit" (dict "image" $root.Values.images.eventRelay "client" (printf "%s-event-relay" $source)) | nindent 8 }}
+        {{- if eq $source "account" }}
+        {{- include "pinvou.natsCredentialsInit" (dict "image" $root.Values.images.eventRelay "client" "account-approval-relay") | nindent 8 }}
+        {{- end }}
       containers:
         - name: event-relay
           image: "{{ $root.Values.images.eventRelay.repository }}:{{ $root.Values.images.eventRelay.tag }}"
@@ -54,11 +59,11 @@ spec:
             - name: DATABASE_URL
               valueFrom: { secretKeyRef: { name: {{ $root.Values.global.runtimeSecret }}, key: {{ printf "%s-service-database-url" $source }} } }
             - { name: NATS_URL, value: {{ include "pinvou.natsUrl" $root | quote }} }
-            - { name: NATS_CREDENTIALS_FILE, value: {{ printf "/var/run/secrets/pinvou/nats/%s.creds" $source | quote }} }
+            - { name: NATS_CREDENTIALS_FILE, value: {{ printf "/run/pinvou/nats/private/%s-event-relay.creds" $source | quote }} }
             {{- if eq $source "account" }}
             - name: APPROVAL_RELAY_DATABASE_URL
               valueFrom: { secretKeyRef: { name: {{ $root.Values.global.runtimeSecret }}, key: account-approval-relay-database-url } }
-            - { name: APPROVAL_RELAY_NATS_CREDENTIALS_FILE, value: "/var/run/secrets/pinvou/approval-nats/account-approval-relay.creds" }
+            - { name: APPROVAL_RELAY_NATS_CREDENTIALS_FILE, value: "/run/pinvou/nats/private/account-approval-relay.creds" }
             - { name: APPROVAL_RELAY_NATS_CURRENT_PUBLIC_KEYS_FILE, value: "/var/run/public/pinvou/nats-authorization/current-v2.json" }
             - name: APPROVAL_RELAY_NATS_CURRENT_PUBLIC_KEYS_SHA256
               valueFrom: { secretKeyRef: { name: {{ $root.Values.global.runtimeSecret }}, key: account-approval-relay-nats-current-public-keys-sha256 } }
@@ -72,9 +77,8 @@ spec:
           livenessProbe: { httpGet: { path: /health/live, port: metrics }, periodSeconds: 20, timeoutSeconds: 3 }
           volumeMounts:
             - { name: tmp, mountPath: /tmp }
-            - { name: nats-credentials, mountPath: /var/run/secrets/pinvou/nats, readOnly: true }
+            - { name: nats-private, mountPath: /run/pinvou/nats, readOnly: true }
             {{- if eq $source "account" }}
-            - { name: approval-nats-credentials, mountPath: /var/run/secrets/pinvou/approval-nats, readOnly: true }
             # subPath produces a real bind-mounted file at the checked path;
             # the default ConfigMap ..data symlink layout is deliberately not
             # accepted by the runtime artifact verifier. Rotation requires a
@@ -86,11 +90,10 @@ spec:
             {{- end }}
       volumes:
         - { name: tmp, emptyDir: { sizeLimit: 16Mi } }
-        - name: nats-credentials
-          secret: { secretName: {{ $root.Values.global.runtimeSecret }}, items: [{ key: {{ printf "%s-event-relay.creds" $source }}, path: {{ printf "%s.creds" $source }} }] }
+        - { name: nats-private, emptyDir: { medium: Memory, sizeLimit: 1Mi } }
+        {{- include "pinvou.natsCredentialsSource" (dict "client" (printf "%s-event-relay" $source) "secret" $root.Values.global.runtimeSecret "key" (printf "%s-event-relay.creds" $source)) | nindent 8 }}
         {{- if eq $source "account" }}
-        - name: approval-nats-credentials
-          secret: { secretName: {{ $root.Values.global.runtimeSecret }}, items: [{ key: account-approval-relay.creds, path: account-approval-relay.creds }] }
+        {{- include "pinvou.natsCredentialsSource" (dict "client" "account-approval-relay" "secret" $root.Values.global.runtimeSecret "key" "account-approval-relay.creds") | nindent 8 }}
         - name: approval-nats-public-artifacts
           configMap:
             name: {{ $root.Values.approvalRelay.natsPublicArtifactConfigMap }}

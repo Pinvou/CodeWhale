@@ -1,3 +1,4 @@
+import { checkHelmNATSCredentials } from './account-platform-nats-helm-check.mjs';
 // Validate rendered native KMS isolation, not the cluster's actual identities or CNI.
 const image = 'quay.io/openbao/openbao@sha256:11fd73a2102cda9c55d5d881a8c3210303146a7ec1e8ac76f526e175c6d24641';
 const names = ['token-gateway', 'token-credential-portal'];
@@ -18,7 +19,7 @@ export function checkHelmKMS(items) {
   for (const w of workloads) {
     const pod = w.spec.template.spec; const app = pod.containers[0]; const env = environment(app);
     check(Object.keys(env).length === (app.env || []).length, 'native_identity_invalid');
-    check(pod.containers.length === 2 && !pod.initContainers?.length && !pod.ephemeralContainers?.length
+    check(pod.containers.length === 2 && (pod.initContainers || []).length === (env.NATS_CREDENTIALS_FILE ? 1 : 0) && !pod.ephemeralContainers?.length
       && !pod.hostNetwork && !pod.hostPID && !pod.hostIPC && !pod.shareProcessNamespace, 'runtime_isolation');
     const agent = pod.containers[1];
     check(agent.name === 'kms-agent' && agent.image === image && exact(agent.command, ['/usr/bin/bao'])
@@ -75,4 +76,5 @@ export function checkHelmKMS(items) {
       }
     }
   }
+  checkHelmNATSCredentials(items);
 }

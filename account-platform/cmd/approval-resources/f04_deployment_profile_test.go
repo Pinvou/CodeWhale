@@ -63,7 +63,7 @@ func TestF04OfflineRendererPreservesArtifactSuperset(t *testing.T) {
 				}
 				keys[role] = key
 			}
-			identityDirectory, resourcesDirectory := t.TempDir(), t.TempDir()
+			identityDirectory, resourcesDirectory := privateResourceTestDir(t), privateResourceTestDir(t)
 			raw, err := json.Marshal(map[string]any{"version": 2, "purpose": "pinvou-nats-service-identities", "public_keys": keys, "previous_v1_sha256": hex.EncodeToString(make([]byte, 32)), "overlap_expires_at": time.Now().UTC().Add(time.Hour).Truncate(time.Second).Format(time.RFC3339)})
 			if err != nil {
 				t.Fatal(err)

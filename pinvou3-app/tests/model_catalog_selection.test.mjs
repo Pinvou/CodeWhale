@@ -1,6 +1,8 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
+import vm from 'node:vm';
+import { latestModelLifecycleRejection } from '../src/features/account-platform/model-lifecycle.js';
 import { dict, ensureLanguage, modelUsageCopy, tokenManagementCopy } from '../src/shared/i18n.js';
 
 import {
@@ -64,7 +66,7 @@ const alertBody = chatSource.match(/replacementError && <div role="alert"[^>]*>\
 assert.ok(branchBody && alertBody);
 const effectCallback = new Function('bridge', 'activeSessionId', 'modelContinuationBlocked', 'setReplacementModels', 'setReplacementModelId', 'setReplacementError', 't', 'platformModelSelectableForNewSession', effectBody);
 const effect = (...args) => effectCallback(...args, platformModelSelectableForNewSession);
-const branch = new Function('bridge', 'activeSessionId', 'replacementModelId', 'replacementBusy', 'chatItems', 'setReplacementBusy', 'setReplacementError', 't', 'remoteTranscriptActive', `return (async () => {${branchBody}})();`);
+const branch = new Function('bridge', 'activeSessionId', 'replacementModelId', 'replacementBusy', 'chatItems', 'setReplacementBusy', 'setReplacementError', 't', 'remoteTranscriptActive', 'modelLifecycleRejection', `return (async () => {${branchBody}})();`);
 const renderAlert = new Function('t', 'replacementError', `return ${alertBody};`);
 for (const language of ['zh', 'en', 'ja']) {
   test(`ChatView catalog rejection renders shared safe error in ${language}`, async () => {
@@ -75,8 +77,8 @@ for (const language of ['zh', 'en', 'ja']) {
   });
   test(`ChatView replacement rejection retains tuple and busy release with safe copy in ${language}`, async () => {
     assert.equal(await ensureLanguage(language), true); const t = dict[language]; let error = ''; const busy = []; const calls = [];
-    await branch({ accountPlatform: { branchReplacementSession: async input => { calls.push(input); throw new Error('CONTROLLED_RAW_FILESYSTEM_DETAIL'); } }, sessions: { switchToSession: () => assert.fail('failed branch must not switch sessions') } }, 'source-a', 'catalog-id-a', false, [{}, {}], value => busy.push(value), value => { error = value; }, t, false);
-    assert.deepEqual(calls, [{sourceConversationId:'source-a',sourceTurnId:'message:1',sourceMessageCount:0,replacementModelId:'catalog-id-a',replacementTitleSuffix:t.uiModelReplacement.branchTitleSuffix,defaultChatTitle:t.newChat}]); assert.deepEqual(busy, [true, false]);
+    await branch({ accountPlatform: { branchReplacementSession: async input => { calls.push(input); throw new Error('CONTROLLED_RAW_FILESYSTEM_DETAIL'); } }, sessions: { switchToSession: () => assert.fail('failed branch must not switch sessions') } }, 'source-a', 'catalog-id-a', false, [{}, {}], value => busy.push(value), value => { error = value; }, t, false, { turnId: 'authoritative-rejected-turn', rejection: {} });
+    assert.deepEqual(calls, [{sourceConversationId:'source-a',sourceTurnId:'authoritative-rejected-turn',sourceMessageCount:0,replacementModelId:'catalog-id-a',replacementTitleSuffix:t.uiModelReplacement.branchTitleSuffix,defaultChatTitle:t.newChat}]); assert.deepEqual(busy, [true, false]);
     assert.equal(renderAlert(t, error), t.uiSettingsDetail.modelSwitchFailed); assert.ok(!renderAlert(t, error).includes('CONTROLLED_RAW_FILESYSTEM_DETAIL'));
     assert.equal(renderAlert(dict.zh, error), dict.zh.uiSettingsDetail.modelSwitchFailed, 'current locale renders a stored failure without another catalog request');
   });
@@ -127,4 +129,42 @@ test('global defaults exclude every deprecated model while explicit new-session 
   assert.equal(platformModelSelectableForNewSession({context_eligible:true,lifecycle_status:'DEPRECATED',new_session_cutoff_at:'2026-08-25T08:00:01Z'},now),true);
   for (const item of [null,{}, {context_eligible:false,lifecycle_status:'PUBLISHED'}, {context_eligible:true,lifecycle_status:'REMOVED'}, {context_eligible:true,lifecycle_status:'DRAFT'}, {context_eligible:true,lifecycle_status:'UNKNOWN'}]) assert.equal(platformModelSelectableAsDefault(item),false);
   assert.equal(platformModelSelectableAsDefault({context_eligible:true,lifecycle_status:'PUBLISHED'}),true);
+});
+
+// Tool/system presentation rows have no relationship to authoritative turn ids.
+// Execute the installed callback through the actual account-platform IPC adapter.
+test('ChatView replacement carries current authoritative turn through the actual IPC adapter', async () => {
+  const marker = { schema_version: 1, code: 'MODEL_UNAVAILABLE', model_id: '01a08b7a-654d-7e8d-8a7c-87b4506f2c7c' };
+  const timeline = [
+    { event: 'user_start', turn_id: 'previous-authority' },
+    { event: 'assistant_done', turn_id: 'previous-authority', status: 'Completed' },
+    { event: 'user_start', turn_id: 'authoritative-rejected-turn' },
+    { event: 'assistant_done', turn_id: 'authoritative-rejected-turn', status: 'send_error', model_rejection: marker },
+  ];
+  for (const chatItems of [[], [{ type: 'user' }, { type: 'tool' }, { type: 'system' }, { type: 'assistant' }], Array.from({ length: 17 }, (_, id) => ({ id, type: id % 2 ? 'system' : 'tool' }))]) {
+    const sandbox = { window: {} }, calls = [], switched = [];
+    vm.runInNewContext(fs.readFileSync(new URL('../src/platform/tauri/bridge/account-platform.js', import.meta.url), 'utf8'), sandbox);
+    const accountPlatform = sandbox.window.__PINVOU_TAURI_BRIDGE_FEATURES__['account-platform']({ invoke(command, args) {
+      calls.push({ command, args }); return Promise.resolve({ session: { id: 'replacement-a' } });
+    } });
+    await branch({ accountPlatform, sessions: { switchToSession: id => switched.push(id) } }, 'source-a', 'catalog-id-a', false,
+      chatItems, () => {}, value => assert.equal(value, ''), dict.en, false, latestModelLifecycleRejection(timeline));
+    assert.equal(calls.length, 1); assert.equal(calls[0].command, 'account_platform_branch_replacement_session');
+    assert.equal(calls[0].args.input.sourceTurnId, 'authoritative-rejected-turn');
+    assert.equal(calls[0].args.input.sourceConversationId, 'source-a');
+    assert.equal(calls[0].args.input.sourceMessageCount, 0);
+    assert.equal(calls[0].args.input.replacementModelId, 'catalog-id-a');
+    assert.deepEqual(switched, ['replacement-a']);
+  }
+});
+
+test('replacement callback requires a current typed rejected turn, excluding newer running/completed turns', async () => {
+  const marker = { schema_version: 1, code: 'MODEL_UNAVAILABLE', model_id: '01a08b7a-654d-7e8d-8a7c-87b4506f2c7c' };
+  const old = [{ event: 'user_start', turn_id: 'old' }, { event: 'assistant_done', turn_id: 'old', status: 'Failed', model_rejection: marker }];
+  for (const timeline of [[], [...old, { event: 'user_start', turn_id: 'new' }], [...old, { event: 'user_start', turn_id: 'new' }, { event: 'assistant_done', turn_id: 'new', status: 'Completed' }]]) {
+    await branch({ accountPlatform: { branchReplacementSession: () => assert.fail('no current authority must not dispatch') },
+      sessions: { switchToSession: () => assert.fail('no current authority must not navigate') } }, 'source-a', 'catalog-id-a', false,
+      [{ type: 'system' }], () => assert.fail('no authority must not enter busy state'), () => assert.fail('no authority must not replace error'), dict.en,
+      false, latestModelLifecycleRejection(timeline));
+  }
 });

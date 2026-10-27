@@ -117,6 +117,19 @@ A failed readback stops provisioning; importing a development realm is not a
 production hardening check. Existing sessions and real refresh/logout behavior
 must still be verified before releasing the updated realm.
 
+The pinned Keycloak 26.7 CLI reads the administrator password from
+`KC_CLI_PASSWORD` only for the login invocation. The script supplies the
+truststore password through `KC_CLI_TRUSTSTORE_PASSWORD` for each CLI invocation
+that uses the configured private CA; the temporary CLI configuration stores
+the truststore path without its password. These variables follow the upstream
+[login](https://github.com/keycloak/keycloak/blob/26.7.0/integration/client-cli/admin-cli/src/main/java/org/keycloak/client/cli/common/BaseConfigCredentialsCmd.java)
+and [TLS setup](https://github.com/keycloak/keycloak/blob/26.7.0/integration/client-cli/admin-cli/src/main/java/org/keycloak/client/cli/common/BaseAuthOptionsCmd.java)
+contracts. Original password and client-secret variables are removed from CLI
+child environments, shell tracing is disabled, and sensitive authentication or
+truststore failures use fixed diagnostics. No password is passed in CLI arguments.
+This protects argument and diagnostic exposure; it does not hide process
+environments from privileged observers or constitute real realm acceptance.
+
 | Variable | Meaning |
 | --- | --- |
 | `KEYCLOAK_REALM` | Realm to update, default `pinvou` |

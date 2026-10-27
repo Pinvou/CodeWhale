@@ -255,6 +255,8 @@ jobs:
               - 'pinvou3-app/src/shared/i18n.js'
               - 'scripts/account-platform*'
               - 'scripts/check-account-platform*'
+              - 'scripts/build-credential-handoff.mjs'
+              - 'scripts/check-recharge-product-document-baseline.mjs'
               - 'scripts/test-token-financial-postgres.py'
               - 'scripts/tests/test_token_financial_postgres.py'
               - 'scripts/test-account-closure-postgres.py'
@@ -262,6 +264,7 @@ jobs:
               - 'scripts/tests/test_postgres_backup.py'
               - 'scripts/tests/test_postgres_backup_job.py'
               - 'scripts/tests/test_user_realm.py'
+              - 'scripts/tests/test_auth_quota_lua_check.py'
               - 'scripts/check-token-management-authorization-coverage.mjs'
               - 'scripts/tests/token-management-authorization-coverage.test.mjs'
               - 'scripts/tests/token-management-phase-coverage.test.mjs'
@@ -608,6 +611,7 @@ jobs:
               - 'account-platform/deploy/nginx/credential-edge.example.json'
               - 'account-platform/internal/portal/credential-handoff.v1.js'
               - 'account-platform/internal/portal/credential_handoff_hash_generated.go'
+              - 'scripts/build-credential-handoff.mjs'
               - 'scripts/account-platform-credential-browser-scope.mjs'
               - 'scripts/account-platform-credential-origin-probe.mjs'
               - 'scripts/account-platform-credential-edge.mjs'
@@ -1011,6 +1015,12 @@ jobs:
           git diff --exit-code -- ../account-platform/internal/portal/static
           test -z "$(git ls-files --others --exclude-standard -- ../account-platform/internal/portal/static)"
 
+      - name: Verify credential handoff built deployment boundary
+        shell: bash
+        run: |
+          set -euo pipefail
+          node ../scripts/build-credential-handoff.mjs --check-deployment
+
       # Web (relay) build: the startup-bundle layer and the web index contract
       # test (tests/vite_static_assets_contract.test.mjs) only cover the web
       # dist when it exists, so build it unconditionally here instead of
@@ -1156,6 +1166,13 @@ jobs:
         with:
           node-version: "24"
 
+      - name: Verify Account Platform generated inputs and document baseline
+        shell: bash
+        run: |
+          set -euo pipefail
+          node scripts/build-credential-handoff.mjs --check
+          node scripts/check-recharge-product-document-baseline.mjs
+
       - name: Verify Token management authorization contracts
         run: |
           node scripts/check-token-management-authorization-coverage.mjs
@@ -1166,6 +1183,10 @@ jobs:
         run: |
           npm --prefix account-platform ci --ignore-scripts --no-audit --fund=false
           npm --prefix account-platform run test:closure-contracts
+
+      - name: Verify Account Platform task contracts
+        run: |
+          node --test scripts/check-account-platform-tasks.test.mjs
 
       - name: Verify Account Platform authorization contracts
         run: |
@@ -1229,6 +1250,17 @@ jobs:
           grep -Eq '^# pass [1-9][0-9]*$' "$RUNNER_TEMP/f18-account-contracts.tap"
           grep -Eq '^# fail 0$' "$RUNNER_TEMP/f18-account-contracts.tap"
           grep -Eq '^# skipped 0$' "$RUNNER_TEMP/f18-account-contracts.tap"
+
+      - name: Require production authentication quota Lua through Go consumers
+        timeout-minutes: 5
+        shell: bash
+        run: |
+          set -euo pipefail
+          # Test-only official Ubuntu Lua5.1 CLI; no product Lua dependency.
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends lua5.1
+          python3 -m unittest discover -s scripts/tests -p test_auth_quota_lua_check.py
+          python3 scripts/account-platform-auth-quota-lua-check.py --race
 
       - name: Test and vet all Account Platform Go modules
         shell: bash

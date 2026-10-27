@@ -1,5 +1,13 @@
 [
   {
+    "subject": "__APPROVAL_RECOVERY_WORKLOAD_SUBJECT__",
+    "service": "account-approval-recovery",
+    "permissions": [
+      "internal.token.approval-effect.read",
+      "internal.token.approval-result.read"
+    ]
+  },
+  {
     "subject": "__BILLING_WORKLOAD_SUBJECT__",
     "service": "billing-service",
     "permissions": [

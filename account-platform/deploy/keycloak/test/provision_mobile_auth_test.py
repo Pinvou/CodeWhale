@@ -17,7 +17,29 @@ SCRIPT = Path(__file__).resolve().parents[1] / "provision-mobile-auth.sh"
 BASH = os.environ.get("PINVOU_TEST_BASH") or shutil.which("bash")
 FAKE = r'''#!/bin/sh
 set -eu
+if [ "${CONTROL_CHECK_SECRET_TRANSPORT:-false}" = true ]; then
+  for argument in "$@"; do
+    case "$argument" in --password|--trustpass) exit 81 ;; esac
+  done
+  if [ -n "${KEYCLOAK_ADMIN_PASSWORD+x}${KC_BOOTSTRAP_ADMIN_PASSWORD+x}${KEYCLOAK_ADMIN_TRUSTSTORE_PASSWORD+x}${KEYCLOAK_PROVISIONER_CLIENT_SECRET+x}${HANDOFF_SECRET+x}" ]; then exit 82; fi
+  if [ "$1:$2" = config:credentials ]; then
+    [ "${KC_CLI_PASSWORD:-}" = "$CONTROL_EXPECT_ADMIN_PASSWORD" ] || exit 83
+  else
+    [ -z "${KC_CLI_PASSWORD+x}" ] || exit 84
+  fi
+  if [ "${CONTROL_WITH_TRUSTSTORE:-false}" = true ]; then
+    [ "${KC_CLI_TRUSTSTORE_PASSWORD:-}" = "$CONTROL_EXPECT_TRUST_PASSWORD" ] || exit 85
+  else
+    [ -z "${KC_CLI_TRUSTSTORE_PASSWORD+x}" ] || exit 86
+  fi
+fi
 printf '%s\n' "$*" >> "$CONTROL_ARGS"
+if [ "$1:$2" = config:truststore ] && [ "${CONTROL_SECRET_FAIL:-}" = trust ]; then
+  printf '%s' "$CONTROL_EXPECT_TRUST_PASSWORD" >&2; exit 87
+fi
+if [ "$1:$2" = config:credentials ] && [ "${CONTROL_SECRET_FAIL:-}" = auth ]; then
+  printf '%s' "$CONTROL_EXPECT_ADMIN_PASSWORD" >&2; exit 88
+fi
 if [ "${CONTROL_FAIL_ROLE:-false}" = true ] && [ "$1" = add-roles ]; then exit 1; fi
 case "$2" in
   realms/test-realm|events/config)
@@ -84,7 +106,7 @@ esac
 
 @unittest.skipUnless(BASH, "A local POSIX shell is required")
 class ProvisioningContractTest(unittest.TestCase):
-    def run_producer(self, changes=None, *, existing=False, role_failure=False):
+    def run_producer(self, changes=None, *, existing=False, role_failure=False, truststore=False, trace=False):
         with tempfile.TemporaryDirectory(prefix="pinvou-keycloak-controls-") as directory:
             root = Path(directory)
             fake = root / "kcadm.sh"
@@ -120,7 +142,12 @@ class ProvisioningContractTest(unittest.TestCase):
                 "TMPDIR": root.as_posix(),
             })
             env.update(changes or {})
-            result = subprocess.run([BASH, str(clone)], env=env, capture_output=True, timeout=60)
+            if truststore:
+                store = root / "controlled-truststore"
+                store.write_bytes(b"inert fixture; the CLI double does not open a real truststore")
+                env.update({"KEYCLOAK_ADMIN_TRUSTSTORE": store.as_posix(),
+                            "KEYCLOAK_ADMIN_TRUSTSTORE_PASSWORD": "controlled-trust-value-for-local-tests"})
+            result = subprocess.run([BASH, *(["-x"] if trace else []), str(clone)], env=env, capture_output=True, timeout=60)
             args = (root / "args").read_text(encoding="utf-8") if (root / "args").exists() else ""
             body_text = (root / "bodies").read_text(encoding="utf-8") if (root / "bodies").exists() else ""
             # Pretty profile JSON occupies several lines; use a complete JSON decoder.
@@ -132,6 +159,55 @@ class ProvisioningContractTest(unittest.TestCase):
                 text = text[end:].lstrip()
             self.assertFalse(list(root.glob("pinvou-kcadm.*")), "kcadm private session file must be removed")
             return result, args, bodies
+
+    def secret_transport_environment(self, **changes):
+        return {
+            "CONTROL_CHECK_SECRET_TRANSPORT": "true",
+            "CONTROL_WITH_TRUSTSTORE": "false",
+            "CONTROL_EXPECT_ADMIN_PASSWORD": "controlled-test-admin-value",
+            "CONTROL_EXPECT_TRUST_PASSWORD": "controlled-trust-value-for-local-tests",
+            "KEYCLOAK_PROVISION_MAX_ATTEMPTS": "1",
+            "KC_CLI_PASSWORD": "controlled-stale-ambient-admin",
+            "KC_CLI_TRUSTSTORE_PASSWORD": "controlled-stale-ambient-trust",
+            **changes,
+        }
+
+    def assert_no_secret_diagnostics(self, result, args):
+        for value in ("controlled-test-admin-value", "controlled-trust-value-for-local-tests",
+                      "controlled-stale-ambient-admin", "controlled-stale-ambient-trust"):
+            self.assertNotIn(value, args)
+            self.assertNotIn(value.encode(), result.stdout + result.stderr)
+
+    def test_cli_passwords_are_scoped_without_secret_arguments_or_trace(self):
+        result, args, bodies = self.run_producer(
+            self.secret_transport_environment(CONTROL_WITH_TRUSTSTORE="true"), truststore=True, trace=True)
+        self.assert_clients(result, args, bodies)
+        self.assertIn("config truststore ", args)
+        self.assertIn("config credentials ", args)
+        self.assert_no_secret_diagnostics(result, args)
+
+    def test_cli_ambient_passwords_are_not_reused_without_private_ca(self):
+        result, args, bodies = self.run_producer(self.secret_transport_environment())
+        self.assert_clients(result, args, bodies)
+        self.assertNotIn("config truststore ", args)
+        self.assert_no_secret_diagnostics(result, args)
+
+    def test_cli_auth_failure_keeps_fixed_diagnostic_and_stops(self):
+        result, args, bodies = self.run_producer(self.secret_transport_environment(CONTROL_SECRET_FAIL="auth"))
+        self.assertNotEqual(0, result.returncode)
+        self.assertIn(b"could not authenticate", result.stderr)
+        self.assertNotIn("get clients ", args)
+        self.assertEqual([], bodies)
+        self.assert_no_secret_diagnostics(result, args)
+
+    def test_cli_trust_failure_keeps_fixed_diagnostic_and_stops(self):
+        result, args, bodies = self.run_producer(
+            self.secret_transport_environment(CONTROL_WITH_TRUSTSTORE="true", CONTROL_SECRET_FAIL="trust"), truststore=True)
+        self.assertNotEqual(0, result.returncode)
+        self.assertIn(b"truststore configuration failed", result.stderr)
+        self.assertNotIn("config credentials ", args)
+        self.assertEqual([], bodies)
+        self.assert_no_secret_diagnostics(result, args)
 
     def assert_hardening(self, args):
         settings = {

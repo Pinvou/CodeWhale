@@ -195,6 +195,7 @@ func (s *Service) accountUserID(ctx context.Context, token string) (string, erro
 	if err != nil {
 		return "", err
 	}
+	setRateLimitSource(request)
 	request.Header.Set("Authorization", "Bearer "+token)
 	request.Header.Set("Accept", "application/json")
 	response, err := s.client.Do(request)

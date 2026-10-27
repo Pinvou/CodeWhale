@@ -137,7 +137,7 @@ func handlerWithMetrics(cfg config.Config, application http.Handler, ready func(
 		}
 		application.ServeHTTP(w, r)
 	})
-	observed := metrics.middleware(withRateLimit(cfg, withRecovery(dispatch)), newLogger(cfg))
+	observed := metrics.middleware(withApplicationRateLimit(cfg, withRecovery(dispatch), application), newLogger(cfg))
 	return observability.TraceHTTPHandler(withRequestID(withSecurityHeaders(cfg, observed))), metrics
 }
 
@@ -172,10 +172,10 @@ func ConfigureProcessLogging(serviceName string) error {
 	if environment == "" {
 		return errors.New("APP_ENV must be explicitly configured")
 	}
-	if err := configureGinMode(environment); err != nil {
+	if err := ConfigureGinMode(environment); err != nil {
 		return err
 	}
-	config := observability.Config{Service: serviceName, Environment: environment, Version: version, Commit: commit}
+	config := ProcessObservabilityConfig(serviceName, environment)
 	observability.ConfigureDefaultLogger(config)
 	shutdown, err := observability.SetupTracing(context.Background(), config)
 	if err != nil {
@@ -188,9 +188,15 @@ func ConfigureProcessLogging(serviceName string) error {
 	return nil
 }
 
-// Configure the process-wide Gin mode before constructing application routes.
+// ProcessObservabilityConfig uses the build identity injected by the shared
+// Docker build. Workers can share it without preparing a second tracing lifecycle.
+func ProcessObservabilityConfig(serviceName, environment string) observability.Config {
+	return observability.Config{Service: serviceName, Environment: environment, Version: version, Commit: commit}
+}
+
+// ConfigureGinMode configures the process-wide mode before constructing routes.
 // An explicit GIN_MODE remains available for deliberate diagnostics.
-func configureGinMode(environment string) error {
+func ConfigureGinMode(environment string) error {
 	mode := strings.TrimSpace(os.Getenv("GIN_MODE"))
 	if mode == "" {
 		switch environment {
@@ -230,7 +236,7 @@ func runApplication(ctx context.Context, serviceName string, application http.Ha
 	if err != nil {
 		return err
 	}
-	if err := configureGinMode(cfg.Environment); err != nil {
+	if err := ConfigureGinMode(cfg.Environment); err != nil {
 		return err
 	}
 

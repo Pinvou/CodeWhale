@@ -49,7 +49,7 @@ flowchart LR
     PG[("PostgreSQL\n按服务分库分用户")]
     Redis[("Redis\nPortal 会话")]
     NATS[("NATS JetStream")]
-    Relays["Account / Billing / Token\nEvent Relay"]
+    Relays["Account / Billing\nEvent Relay"]
 
     Desktop -->|"登录、注册、业务 API"| Proxy
     Browser --> Proxy
@@ -83,7 +83,6 @@ flowchart LR
     Portal --> Redis
     Account --> Relays
     Billing --> Relays
-    Gateway --> Relays
     Relays --> NATS
 ```
 
@@ -101,7 +100,7 @@ flowchart LR
 | Billing Service | 钱包、账本、BASE/BONUS 组成级权益、组织购买与成员授予、版本化计量单位、全局/模型价格解析、价格生命周期、Hold/组成分配/租约及异常处理证据、独立应收与清偿分配、单流水拒付冲销、供应商中立支付能力/商品映射、目标退款及其独立产品门禁、晚到支付复核、人工调整、到期/损失复核、支付修复和对账 | Billing 数据库 | 正式商品业务冻结、统一拒付/强制退款复核结案及账单证据归并 |
 | Token Gateway | Token Account、加密凭据、共享策略、路由、协议/公式版本、独立模型目录与稳定身份、能力/目录版本、托管 Provisioning、组织模型策略、资格管线、非计费客户端 Readiness/准入证明、安全参数映射、动态预占、持久派发/重放、执行/交付隔离、取消意图、可信用量和 Model Gateway Adapter 核对 | Token 数据库 | 更多数据面协议及其显式 Provider 取消 Adapter；客户端准入生产联调 |
 | Token Portal | OIDC PKCE、Redis Session、CSRF、个人中心、运营后台、路径白名单代理和制品级三语门禁 | Redis Session | 目标后台权限模型和尚未实现的业务页面 |
-| Event Relay ×3 | 事务 Outbox 投递、重试和死信 | 各服务 Outbox/Inbox | 现有事件有限，不能替代缺失的跨域 Saga |
+| Event Relay ×2 | Account/Billing 事务 Outbox 投递、重试和死信 | Account/Billing Outbox/Inbox | Token 本地事件没有投递入口；现有消息不能替代缺失的跨域 Saga |
 | New API | OpenAI 兼容代理、供应商调用日志和用量证据 | 独立数据库 | 仍需通过 Adapter 契约补齐协议、取消和证据能力 |
 
 四个对外服务由同一客户端兼容策略包裹，所有响应声明 API 契约版本和当前最小支持版本。正式清单至少包含当前桌面小版本及前两个小版本，旧版的 `sunset_at` 必须晚于后继正式发布90天，普通弃用通知必须至少提前60天；严重安全例外可缩至7天，但清单必须携带审批号。桌面直连请求及经 CodeWhale 发出的平台模型请求都使用 `X-Pinvou-Client-Version` 标识真实制品版本。版本到期后仅远程写操作返回稳定 `426 CLIENT_UPGRADE_REQUIRED`、`Link: rel="latest-version"` 和 HTTPS 升级地址；只读远程数据、本地数据与本地独立模型不经过该淘汰门禁。
@@ -349,15 +348,16 @@ Provider 确认支付成功后，Billing 以 Provider 流水为幂等边界创�
 
 ## 8. 一致性与事件
 
-平台不使用跨服务分布式事务。三个服务具备本地 Outbox/Inbox、Relay、重试和死信基础，当前主要事件为：
+平台不使用跨服务分布式事务。三个服务保留各自的本地 Outbox 事实，当前仅交付 Account/Billing 两个 Relay；主要投递事件为：
 
 - `account.membership.changed.v1`
 - `billing.recharge.succeeded.v1`
-- `token.usage.settled.v1`
 
-本地业务状态与对应 Outbox 写入具备事务原子性；Relay 以至少一次语义重试投递，默认达到 12 次失败后进入死信，需审计后人工重新入队。Account/Billing 两个普通 Relay 分别只接受本域 `account.>`、`billing.>` Subject，并分别挂载 NATS 凭据；跨域 Subject 在进入 Broker 前失败关闭。普通 Token 消息新写已退休，不启动 `EVENT_SOURCE=token` 的 Relay；既有 Token 历史事件、主题和不可变资源授权材料仍保留，不自动补发。Relay 周期审计明确记录 `actor_type=SERVICE`、服务、任务类型和 `job_run_id`，不能借用人类角色。因此该机制保留并重试事件，但业务最终收敛仍依赖死信处置，不能无条件宣称最终投递。注册 Account 提交会原子写入 `account.wallet.provisioning.requested.v1`，钱包成功写入 `account.wallet.provisioning.completed.v1`；财务审批成功写入绑定命令指纹、策略、目标和关键版本的 `account.approval-command.authorized.v1`，Billing 重复消费使用同一领域执行键。目标退款意图原子写入 `billing.refund.requested.v1`，明确成功或失败再写对应终态事件；Provider 不确定结果保持冻结并等待证据收敛。托管路由 Provisioning 由 Token 数据库内的聚合、尝试、命令和审计协调；账号注销也由 Account 数据库的持久聚合协调，跨域评估是无副作用强一致读取，不把消息送达误当成门禁结论。
+Token 仍有本地事件新增。例如，`MarkCommitted` 仍在结算事务中新增 `token.usage.settled.v1`，政策修订也继续保留政策审计及对应事件。这些本地记录当前均没有 Token Relay 或下游投递入口；本地持久化不代表消息已送达。F04 停止的是其[普通治理通知清单](f04-ordinary-outbox-contract.md)，不能据此宣称 Token Outbox 零增长或停写结算事实。
 
-死信恢复不允许直接改表或仅凭事件 ID 清零状态。运维先以只读 `--inspect` 获取原事件不可变包络的 SHA-256，再以稳定幂等键、同一摘要、至少20字符原因和 `EVENT_REPLAY` 服务任务身份执行；Account、Billing、Token 各自在串行事务中登记不可变 `event_replay_requests` 后才重新排队。同键异请求、已发布、非死信或摘要变化均失败关闭。
+本地业务状态与对应 Outbox 写入具备事务原子性；Relay 以至少一次语义重试投递，默认达到 12 次失败后进入死信，需审计后人工重新入队。Account/Billing 两个普通 Relay 分别只接受本域 `account.>`、`billing.>` Subject，并分别挂载 NATS 凭据；跨域 Subject 在进入 Broker 前失败关闭。F04 清单内的普通 Token 治理通知停止新写，不启动 `EVENT_SOURCE=token` 的 Relay；结算和政策审计事件仍按原事务写入，既有 Token 历史事件、主题和不可变资源授权材料也继续保留，不自动补发。Relay 周期审计明确记录 `actor_type=SERVICE`、服务、任务类型和 `job_run_id`，不能借用人类角色。因此该机制保留并重试事件，但业务最终收敛仍依赖死信处置，不能无条件宣称最终投递。注册 Account 提交会原子写入 `account.wallet.provisioning.requested.v1`，钱包成功写入 `account.wallet.provisioning.completed.v1`；财务审批成功写入绑定命令指纹、策略、目标和关键版本的 `account.approval-command.authorized.v1`，Billing 重复消费使用同一领域执行键。目标退款意图原子写入 `billing.refund.requested.v1`，明确成功或失败再写对应终态事件；Provider 不确定结果保持冻结并等待证据收敛。托管路由 Provisioning 由 Token 数据库内的聚合、尝试、命令和审计协调；账号注销也由 Account 数据库的持久聚合协调，跨域评估是无副作用强一致读取，不把消息送达误当成门禁结论。
+
+死信恢复不允许直接改表或仅凭事件 ID 清零状态。运维先以只读 `--inspect` 获取原事件不可变包络的 SHA-256，再以稳定幂等键、同一摘要、至少20字符原因和 `EVENT_REPLAY` 服务任务身份执行；Account、Billing、Token 各自在串行事务中登记不可变 `event_replay_requests` 后才重新排队。同键异请求、已发布、非死信或摘要变化均失败关闭。保留 Token 的恢复存储能力不代表已经交付 Token Relay，也不构成自动补发历史事件的授权。
 
 ## 9. 客户端与 Portal
 

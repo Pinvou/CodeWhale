@@ -1,4 +1,6 @@
 #!/usr/bin/env node
+import { checkHelmBillingApprovalArtifacts } from './account-platform-billing-approval-artifacts-check.mjs';
+import { checkHelmNATSCredentials } from './account-platform-nats-helm-check.mjs';
 import { isMainModule } from './account-platform-cli-entry.mjs';
 // Structural verification of real renderer output. No cluster, process or activation mutation.
 import { readFile } from 'node:fs/promises';
@@ -186,6 +188,8 @@ export function checkGovernedHelmResources(items) {
       check(!('TOKEN_MIGRATOR_DATABASE_URL' in value) && !('ACCOUNT_POLICY_DATABASE_URL' in value), 'operations_secret_in_runtime');
     }
   }
+  checkHelmNATSCredentials(items);
+  checkHelmBillingApprovalArtifacts(items);
   return success();
 }
 

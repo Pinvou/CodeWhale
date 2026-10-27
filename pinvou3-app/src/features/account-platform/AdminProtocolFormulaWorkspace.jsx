@@ -1,3 +1,4 @@
+import { isImeComposing } from '../../shared/ime-guard.mjs';
 import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { adminModelTokenQueryUpdates, previousAdminModelTokenCursor, readAdminModelTokenQuery, rememberAdminModelTokenNextCursor, synchronizeAdminModelTokenCursorHistory } from './admin-navigation.js';
 import { executeAdminSourceRequest, initialAdminSourceState, reduceAdminSourceState, visibleAdminSourceState } from './admin-model-token-state.js';
@@ -108,7 +109,7 @@ function Dialog({ action, copy, units, busy, onClose, onSubmit }) {
   const locked = busy || terminal;
 	const closeLocked = busy || action.failure?.unknown;
 	const fieldsLocked = busy || terminal || action.failure?.unknown;
-  return <div className="adm-protocol-dialog-backdrop" onMouseDown={(event) => { if (event.target === event.currentTarget && !closeLocked) onClose(); }}><form ref={dialogRef} className="adm-protocol-dialog" role="dialog" aria-modal="true" aria-labelledby="protocol-action-title" onSubmit={submit} onKeyDown={(event) => { keepDialogFocus(event, dialogRef.current); if (event.key === 'Escape' && !closeLocked) onClose(); }}>
+  return <div className="adm-protocol-dialog-backdrop" onMouseDown={(event) => { if (event.target === event.currentTarget && !closeLocked) onClose(); }}><form ref={dialogRef} className="adm-protocol-dialog" role="dialog" aria-modal="true" aria-labelledby="protocol-action-title" onSubmit={submit} onKeyDown={(event) => { keepDialogFocus(event, dialogRef.current); if (event.key === 'Escape' && !isImeComposing(event) && !closeLocked) onClose(); }}>
     <header><div><h3 id="protocol-action-title">{title}</h3><p>{copy.actionLead}</p></div><button ref={firstRef} type="button" disabled={closeLocked} onClick={onClose} aria-label={copy.close}>×</button></header>
 		{action.failure && <div className="adm-inline-message error" role="alert" data-error-code={action.failure.code}>{copy.commandErrors[action.failure.code] || copy.commandFailed}{action.failure.requestID && <small>{copy.requestID}: {action.failure.requestID}</small>}{action.failure.commandReference && <code>{copy.commandReference}: {action.failure.commandReference}</code>}</div>}
 		{action.precheck && <dl className="adm-command-target adm-high-risk-impact"><div><dt>{copy.status}</dt><dd>{action.precheck.evidence.current_status}</dd></div><div><dt>{copy.actionRoutes}</dt><dd>{action.precheck.evidence.dependencies.routes}</dd></div><div><dt>{copy.actionProvisionings}</dt><dd>{action.precheck.evidence.dependencies.provisionings}</dd></div><div><dt>{copy.actionInflight}</dt><dd>{action.precheck.evidence.dependencies.inflight_requests}</dd></div></dl>}

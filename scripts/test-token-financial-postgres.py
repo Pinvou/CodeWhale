@@ -18,6 +18,13 @@ from urllib.parse import parse_qs, urlsplit
 ROOT = Path(__file__).resolve().parents[1]
 ACTORS = {"billing_migrator", "billing_schema_owner", "billing_service"}
 REQUIRED = {
+    "TestPreparationFailurePreservesAcceptedUsagePostgres",
+    "TestCircuitFailureBeforeDispatchPostgres",
+    "TestCredentialRotationWindowReceiptPostgres",
+    "TestCredentialRotationOtherActorEffectPostgres",
+    "TestCredentialFailurePersistenceBoundariesPostgres",
+    "TestCredentialFailurePreparationFencePostgres",
+    "TestCredentialFailureExistingEventsPostgres",
     "TestHoldAcknowledgementSurvivesDispatchPersistenceFailurePostgres",
     "TestPersonalZeroBudgetCancellationAndExpiryPostgres",
     "TestUsageWaiverCoordinatorRecoveryPostgres",
@@ -78,6 +85,10 @@ ACCOUNT_REQUIRED = {
 }
 TOKEN_PACKAGE = "github.com/Pinvou/pinvou3/account-platform/internal/token"
 TOKEN_CHILD_REQUIRED = {
+    "TestPreparationFailurePreservesAcceptedUsagePostgres",
+    "TestCircuitFailureBeforeDispatchPostgres",
+    "TestCredentialRotationWindowReceiptPostgres",
+    "TestCredentialFailurePersistenceBoundariesPostgres",
     "TestHoldAcknowledgementSurvivesDispatchPersistenceFailurePostgres",
     "TestUsageWaiverCoordinatorRecoveryPostgres",
     "TestPersonalZeroBudgetCancellationAndExpiryPostgres",
@@ -122,6 +133,7 @@ REFUND_REQUIRED = {
     "TestRefundOriginalUnknownSuccessQueriesAndSettlesOrdinaryGrantsPostgres",
 }
 RETAINED_REQUIRED = {
+    "TestCallbackHTTPAdmissionPersistsPostgres",
     "TestDirectPaymentRepairCommandReceiptPostgres",
     "TestLatePaymentQueryCommandPostgres",
     "TestLatePaymentQueryClientHTTPPostgres",
@@ -154,6 +166,7 @@ RETAINED_REQUIRED = {
 # These exact roots are named leaves. Every other retained root must still
 # produce completed child-case evidence, not just a parent PASS.
 BILLING_LEAF_REQUIRED = {
+    "TestCallbackHTTPAdmissionPersistsPostgres",
     "TestRefundRejectsPlanBeforeFinancialWritesPostgres",
     "TestRefundSuspendedMemberAdmissionWithoutEarlierBlockerPostgres",
     "TestRefundStalePreflightCannotReclaimUnknownDispatchPostgres",
@@ -271,7 +284,7 @@ def main():
             env["PINVOU_TEST_BILLING_DATABASE_URL"] = raw
         if target == "./internal/token":
             env["PINVOU_TEST_TOKEN_DATABASE_URL"] = raw
-        # The 49 retained Billing roots create about 250 isolated migration
+        # The 50 retained Billing roots create about 250 isolated migration
         # fixtures. Other phases retain their existing finite 20-minute bound.
         timeout = "75m" if label == "retained-billing" else "20m"
         command = [go, "test", "-p=1", "-race", "-tags=nomsgpack", "-mod=readonly", "-count=1", "-timeout=" + timeout, "-json"]
