@@ -91,6 +91,10 @@ impl ToolSpec for AgentsListTool {
                 "agent_id": {
                     "type": "string",
                     "description": "Optional durable agent id to inspect; unambiguous ordinary legacy names are accepted. Use name for explicit name selection."
+                },
+                "name": {
+                    "type": "string",
+                    "description": "Optional explicit current-session task name, including id-shaped names. agent_id/id takes precedence when supplied."
                 }
             },
             "required": []
