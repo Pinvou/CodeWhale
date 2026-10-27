@@ -1378,7 +1378,10 @@ impl BackgroundShell {
             return Ok(());
         }
 
-        Err(anyhow!("stdin is not available for task {}", self.id))
+        Err(anyhow!(
+            "stdin is not available for task {}: its stdin is already at end-of-file (foreground commands run that way so stdin readers exit instead of hanging); start input-driven work with background=true and feed it with action=\"interact\"",
+            self.id
+        ))
     }
 
     fn full_output(&self) -> (String, String, usize, usize) {
@@ -4613,15 +4616,19 @@ async fn execute_foreground_via_background(
         manager.attach_heavy_permit(&task_id, permit)?;
     }
 
-    // Foreground has no operator at the keyboard and no later `interact`
-    // call, so whatever the command will ever read from stdin must be
-    // bounded now. With stdin data the payload was delivered at spawn and
-    // closing the write end turns the pipe into a normal end-of-file; with
-    // no data, closing immediately delivers that EOF at once. Leaving the
-    // write end open wedged any stdin-reading command (`cat`, a bare
-    // `$SHELL`) on a pipe that never EOFs until the foreground watchdog
-    // killed it. The manager-side close is idempotent-safe after natural
-    // completion and on lanes that carry no pipe handle (PTY/persistent).
+    // Foreground has no operator at the keyboard, so whatever the command
+    // will ever read from stdin must be bounded now. With stdin data the
+    // payload was delivered at spawn and closing the write end turns the
+    // pipe into a normal end-of-file; with no data, closing immediately
+    // delivers that EOF at once. Leaving the write end open wedged any
+    // stdin-reading command (`cat`, a bare `$SHELL`) on a pipe that never
+    // EOFs until the foreground watchdog killed it. This is the foreground
+    // stdin contract the tool description states: a command detached to the
+    // background later (`request_foreground_background`) keeps running, but
+    // its stdin stays at EOF — `interact` reports the closed stdin and points
+    // at background=true, which is the lane for input-driven work. The
+    // manager-side close is idempotent-safe after natural completion and on
+    // lanes that carry no pipe handle (PTY/persistent).
     {
         let mut manager = context
             .shell_manager

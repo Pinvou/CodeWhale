@@ -3583,6 +3583,64 @@ async fn test_exec_shell_foreground_can_move_to_background() {
     assert_eq!(killed.status, ShellStatus::Killed);
 }
 
+/// The foreground stdin contract survives a detach: the command keeps
+/// running in the background, but its stdin was put at end-of-file at spawn
+/// (so stdin readers exit instead of wedging), and a later `interact` says so
+/// and points at the background lane instead of failing opaquely.
+#[tokio::test]
+async fn detached_foreground_command_reports_its_closed_stdin_on_interact() {
+    let tmp = tempdir().expect("tempdir");
+    let ctx = ToolContext::new(tmp.path());
+    let shell_manager = ctx.shell_manager.clone();
+    let command = sleep_command(30);
+    let task_ctx = ctx.clone();
+
+    let task = tokio::spawn(async move {
+        BashTool::new("Bash")
+            .execute(
+                json!({"command": command, "timeout_ms": 600_000}),
+                &task_ctx,
+            )
+            .await
+            .expect("execute")
+    });
+    tokio::time::sleep(Duration::from_millis(150)).await;
+    shell_manager
+        .lock()
+        .expect("shell manager lock")
+        .request_foreground_background();
+    let result = tokio::time::timeout(Duration::from_secs(5), task)
+        .await
+        .expect("foreground shell should detach")
+        .expect("task should not panic");
+    let task_id = result
+        .metadata
+        .as_ref()
+        .and_then(|meta| meta.get("task_id"))
+        .and_then(Value::as_str)
+        .expect("task id")
+        .to_string();
+
+    let mut manager = shell_manager.lock().expect("shell manager lock");
+    assert_eq!(
+        manager
+            .inspect_job(&task_id)
+            .expect("inspect job")
+            .snapshot
+            .status,
+        ShellStatus::Running,
+        "the detached command keeps running"
+    );
+    let error = manager
+        .write_stdin(&task_id, "hello\n", false)
+        .expect_err("stdin was closed at spawn by the foreground contract")
+        .to_string();
+    assert!(error.contains("end-of-file"), "{error}");
+    assert!(error.contains("background=true"), "{error}");
+    let killed = manager.kill(&task_id).expect("kill");
+    assert_eq!(killed.status, ShellStatus::Killed);
+}
+
 #[tokio::test]
 async fn lowercase_bash_foreground_detach_is_a_successful_running_receipt() {
     let tmp = tempdir().expect("tempdir");
