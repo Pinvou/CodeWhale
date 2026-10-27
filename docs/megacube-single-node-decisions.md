@@ -1,6 +1,6 @@
 # MegaCube 单机管理：最终决策与实现说明
 
-本文记录 Pinvou、模型商店与 Cube Manage Software 的单机职责、已经确定的取舍及验收边界。操作入口见[单机管理](megacube-single-node.md)，商店版本合同见[当前部署选择](megacube-model-store-selection.md)。Cube Manage Software 仓库的 `docs/single-node-decisions.md` 记录后台领域决策，其 `/v1` 协议文档继续作为字段和错误行为的依据。
+本文记录 Pinvou、模型商店与 Cube Manage Software 的单机职责、已经确定的取舍及验收边界。操作入口见[单机管理](megacube-single-node.md)，商店版本合同见[当前部署选择](megacube-model-store-selection.md)。同仓 [`components/cmsd/docs/single-node-decisions.md`](../components/cmsd/docs/single-node-decisions.md) 记录后台领域决策，其 `/v1` 协议文档继续作为字段和错误行为的依据。
 
 ## 交付范围与依赖
 
@@ -31,7 +31,9 @@ Linux 桌面从启动起就连接同一独立商店 host；首次安装 cmsd 后
 
 离线包先检查清单、大小、SHA-256、ELF 平台和能力，再复制到私有摘要目录执行探针。包的自附摘要与 `--component-info` 只证明内容及兼容声明，不构成发布者签名或发行认证。使用显式选定的可信来源，不将“本地 hash 正确”扩大成来源可信。
 
-源码由独立 Cube Manage Software 仓库维护，Pinvou 消费其 Linux 组件二进制与清单。构建时显式设置 `PINVOU3_CMSD_PACKAGE` 才将组件加入 `runtime/cmsd/`；发现随包候选不安装、不启动，仍由用户确认后登记为同账号的 systemd 用户服务。桌面通过 Unix socket 调用它；独立商店 host 由 Pinvou 自身提供。当前发布 workflow 尚未供应该组件输入，普通发布包不会因这两个 PR 合入而自动携带 cmsd。发行供应链、完整安装包和来源认证需要单独完成，不能以本地 debug 构建替代。
+cmsd 源码直接纳入同仓 `components/cmsd/`，保留独立 Rust crate、`0.1.x` 组件版本及既有进程边界。该目录从历史 CMS 提交 `80a7ebc` 导入，此后为唯一开发来源；历史仓库保留记录，不并行维护第二份源码，也不依赖其 Release。Linux x86_64 / arm64 的统一 `build` / `bundle` 从当前 Pinvou 提交编译并校验组件，自动放入 `runtime/cmsd/`，正式构建拒绝 `PINVOU3_CMSD_PACKAGE` 外包覆盖。CI 直接测试独立 crate，发布 workflow 与本地 OTA 脚本在正式 deb 上传前验证组件存在、清单、摘要、架构和 ABI。其他平台管理范围不扩大。
+
+发现随包候选不安装、不启动，仍由用户确认后登记为同账号的 systemd 用户服务。桌面通过 Unix socket 调用它；独立商店 host 与组件维护 helper 由 Pinvou 提供。用户更新 Pinvou 后，已有后台仍须确认组件升级。源码构建身份与实际发版包、GUI 自动发现、服务安装分别验收，不能以 debug/no-bundle 或显式包路径的测试代替。
 
 中断回执只封存已持久化的维护现场：首次安装在受理后、登记落盘前被硬杀时，回执之后没有可恢复的服务记录，重试安装不视为绕过恢复门；登记一旦落盘，恢复仍走 restore/rollback 等既有入口。
 
@@ -112,7 +114,7 @@ MCP 换模接续绑定发起时的原会话、原模型绑定、任务、准确 
 
 ## 验证入口与声明边界
 
-验收记录必须固定两仓源码、测试实际输入、二进制/组件摘要、配置与测试种类。只有夹具变更且能够证明生产内容相同时，也应明确各项旧结果实际受测的源码，不将旧制品改标为新提交。正式文档描述可复现入口与边界；最终计数、制品对应关系及未通过项写入当次 PR 和本地验收记录。
+验收记录必须固定 Pinvou 提交、同仓组件源码身份、测试实际输入、二进制/组件摘要、配置与测试种类。只有夹具变更且能够证明生产内容相同时，也应明确各项旧结果实际受测的源码，不将旧制品改标为新提交。正式文档描述可复现入口与边界；最终计数、制品对应关系及未通过项写入当次 PR 和本地验收记录。
 
 | 层次 | 可复现入口与证明范围 |
 |---|---|
@@ -120,7 +122,7 @@ MCP 换模接续绑定发起时的原会话、原模型绑定、任务、准确 
 | Rust/Node | Pinvou Rust 库、bundle、Clippy/fmt 及 `npm --prefix pinvou3-app test`；覆盖逻辑和状态机，不等于真实桌面/推理 |
 | MCP | `python3 -B -m unittest discover -s scripts/tests -p test_megacube_mcp.py`、`python3 scripts/mcp-server-contract-smoke.py`，以及 `pinvou3-app/tests/megacube_*_test.py` 对应回归；区分 JSON-RPC/夹具与真实服务 |
 | 构建 | 统一 `npm --prefix pinvou3-app run build`；原生 debug/no-bundle 与正式安装包分别记录，跳过 ASR/知识宿主不构成完整发布包验收 |
-| 单机真实进程 | `pinvou3-app/tests/real_component_*.py`、`real_model_maintenance.py` 等显式传入独立制品的驱动，以及 cmsd 仓库 `tests/real_*.py`；按驱动参数创建新配置/单元/socket，保存完整错误与恢复过程 |
+| 单机真实进程 | `pinvou3-app/tests/real_component_*.py`、`real_model_maintenance.py` 等显式传入独立制品的驱动，以及 `components/cmsd/tests/real_*.py`；按驱动参数创建新配置/单元/socket，保存完整错误与恢复过程 |
 | 真实推理 | 提供真实权重及引擎后执行模型调用，分别记录下载、部署、收编前后、重启后和会话路由；模拟响应或监听成功不能替代 |
 | 完整评审 | 以最终实际差异做三 scope 完整独立审核，逐轮保留结论和来源提交；窄候选 peer 和旧提交的通过不作为最终版本的通过轮次，创建 PR 不等同于批准合并 |
 
@@ -130,6 +132,6 @@ MCP 换模接续绑定发起时的原会话、原模型绑定、任务、准确 
 
 ## 文档维护约定
 
-本说明保留跨仓决策与理由；[单机管理](megacube-single-node.md) 提供用户入口，[当前部署选择](megacube-model-store-selection.md) 和[商店更新](model-store-updates.md) 保留具体版本合同，bundle `megacube-admin` 的技能与 references 约束工具使用。CMS 仓库保留部署、配置、组件、安装重试、维护、预算恢复、原生实例、网关、诊断、网络、生命周期与脚本协议文档。协议变化更新原合同及受影响说明，不把全部字段复制到本文件。
+本说明保留跨仓决策与理由；[单机管理](megacube-single-node.md) 提供用户入口，[当前部署选择](megacube-model-store-selection.md) 和[商店更新](model-store-updates.md) 保留具体版本合同，bundle `megacube-admin` 的技能与 references 约束工具使用。`components/cmsd/docs/` 保留部署、配置、组件、安装重试、维护、预算恢复、原生实例、网关、诊断、网络、生命周期与脚本协议文档。协议变化更新原合同及受影响说明，不把全部字段复制到本文件。
 
 开发过程的候选、逐轮审阅、失败证据、临时 PR 草稿和本机验收索引保存在本地 `.luzeyang`，不进入产品源码。必要的正式合同和继承主线的其他项目文档不作为中间稿删除；历史实验材料只证明其明确记录的来源。

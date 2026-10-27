@@ -1,4 +1,4 @@
-// Explicit operator-selected artifact; never download or execute it while packaging.
+// Source builds and verified resource staging are kept outside pure Tauri config derivation.
 const crypto = require('node:crypto');
 const fs = require('node:fs');
 const path = require('node:path');
@@ -6,8 +6,9 @@ const { spawnSync } = require('node:child_process');
 const { APP_ROOT } = require('./platform-config.js');
 
 function prepareCmsdComponent({ platform = process.platform, architecture = process.arch,
-  environment = process.env, tauriRoot = path.join(APP_ROOT, 'src-tauri'), spawn = spawnSync } = {}) {
-  const input = environment.PINVOU3_CMSD_PACKAGE;
+  environment = process.env, packageDirectory = environment.PINVOU3_CMSD_PACKAGE,
+  tauriRoot = path.join(APP_ROOT, 'src-tauri'), spawn = spawnSync } = {}) {
+  const input = packageDirectory;
   if (!input) return null;
   if (platform !== 'linux') throw new Error('Bundled cmsd requires a Linux target');
   const arch = { arm64: ['aarch64', 183], x64: ['x86_64', 62] }[architecture];
@@ -54,4 +55,78 @@ function prepareCmsdComponent({ platform = process.platform, architecture = proc
     [`target/cmsd-component/${arch[0]}/manifest.json`]: 'runtime/cmsd/manifest.json',
   } } }) };
 }
-module.exports = { prepareCmsdComponent };
+/** Resolve the component from the requested target, never from host architecture alone. */
+function cmsdSourceTarget({ platform = process.platform, architecture = process.arch,
+  targetTriple = null, environment = process.env } = {}) {
+  const triple = targetTriple || environment.CARGO_BUILD_TARGET || null;
+  if (triple && !triple.includes('-linux-')) return null;
+  if (!triple && platform !== 'linux') return null;
+  // Pinvou supports LoongArch, but CMS does not yet ship on that platform.
+  if ((triple && triple.startsWith('loongarch64-')) || (!triple && architecture === 'loong64')) return null;
+  const targetArchitecture = triple
+    ? { 'x86_64-unknown-linux-gnu': 'x64', 'aarch64-unknown-linux-gnu': 'arm64' }[triple]
+    : architecture;
+  if (!['x64', 'arm64'].includes(targetArchitecture)) {
+    throw new Error(`Unsupported cmsd Linux target: ${triple || targetArchitecture}; only GNU x86_64/aarch64 are supported`);
+  }
+  if (platform !== 'linux' || targetArchitecture !== architecture) {
+    throw new Error(`cmsd source builds require native Linux ${targetArchitecture}; host is ${platform}/${architecture}`);
+  }
+  return { architecture: targetArchitecture,
+    triple: triple || (architecture === 'arm64' ? 'aarch64-unknown-linux-gnu' : 'x86_64-unknown-linux-gnu') };
+}
+
+/** Build the committed in-repository crate for both build and standalone bundle. */
+function prepareBundledCmsd({ command, platform = process.platform, architecture = process.arch,
+  targetTriple = null, environment = process.env, repositoryRoot = path.join(APP_ROOT, '..'),
+  tauriRoot = path.join(APP_ROOT, 'src-tauri'), spawn = spawnSync } = {}) {
+  if (!['build', 'bundle'].includes(command)) return null;
+  const target = cmsdSourceTarget({ platform, architecture, targetTriple, environment });
+  if (!target) return null;
+  if (environment.PINVOU3_CMSD_PACKAGE) {
+    throw new Error('PINVOU3_CMSD_PACKAGE cannot override a Pinvou build: cmsd must be built from components/cmsd in this repository');
+  }
+  const builder = path.join(repositoryRoot, 'components', 'cmsd', 'scripts', 'build-linux-component.py');
+  if (!fs.existsSync(builder)) throw new Error(`cmsd source builder is missing: ${builder}`);
+  const stagingRoot = path.join(tauriRoot, 'target', 'cmsd-source');
+  fs.mkdirSync(stagingRoot, { recursive: true });
+  const temporary = fs.mkdtempSync(path.join(stagingRoot, 'package-'));
+  const output = path.join(temporary, 'component');
+  const args = [builder, '--output', output, '--target-dir', path.join(stagingRoot, 'cargo')];
+  if (environment.PINVOU3_CMSD_SYSROOT) args.push('--sysroot', environment.PINVOU3_CMSD_SYSROOT);
+  try {
+    const build = spawn('python3', args, { cwd: repositoryRoot, env: { ...environment }, stdio: 'inherit' });
+    if (build.error || build.status !== 0) {
+      throw new Error(`Failed to build bundled cmsd from repository source (exit ${build.status ?? 'unknown'}): ${build.error?.message || builder}`);
+    }
+    const provenance = path.join(output, 'source.json');
+    if (!fs.existsSync(provenance)) throw new Error('Source-built cmsd is missing source.json provenance');
+    const stat = fs.lstatSync(provenance);
+    if (!stat.isFile() || stat.isSymbolicLink() || stat.size > 16384) {
+      throw new Error('Invalid cmsd source provenance file');
+    }
+    const receipt = fs.readFileSync(provenance);
+    let source;
+    try { source = JSON.parse(receipt); } catch { throw new Error('Invalid cmsd source provenance JSON'); }
+    const keys = ['repository_revision', 'source_directory', 'source_sha256', 'dirty', 'build_revision'];
+    if (receipt.length > 16384 || !source || typeof source !== 'object' || Array.isArray(source) ||
+        Object.keys(source).length !== keys.length || keys.some(key => !(key in source)) ||
+        source.source_directory !== 'components/cmsd' || source.dirty !== false ||
+        !/^[a-f0-9]{40}(?:[a-f0-9]{24})?$/.test(source.repository_revision) ||
+        source.build_revision !== source.repository_revision || !/^[a-f0-9]{64}$/.test(source.source_sha256)) {
+      throw new Error('Invalid or uncommitted cmsd source provenance');
+    }
+    const revision = spawn('git', ['rev-parse', '--verify', 'HEAD'], { cwd: repositoryRoot,
+      env: { ...environment }, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] });
+    if (revision.error || revision.status !== 0 || typeof revision.stdout !== 'string' ||
+        revision.stdout.trim() !== source.repository_revision) {
+      throw new Error('cmsd source provenance does not match the current Pinvou repository HEAD');
+    }
+    const staged = prepareCmsdComponent({ platform: 'linux', architecture: target.architecture,
+      packageDirectory: output, environment, tauriRoot, spawn });
+    // Retain the verified receipt without shipping local build metadata as an app resource.
+    fs.writeFileSync(path.join(stagingRoot, `source-${target.architecture}.json`), receipt);
+    return staged;
+  } finally { fs.rmSync(temporary, { recursive: true, force: true }); }
+}
+module.exports = { cmsdSourceTarget, prepareBundledCmsd, prepareCmsdComponent };

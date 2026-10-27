@@ -88,7 +88,7 @@ PINVOU 不只是一个聊天界面。它把通用工作、视觉设计和软件�
 
 ## MegaCube 单机管理
 
-Linux 用户级服务可通过 Pinvou 管理 Cube Manage Software、后台模型商店和持久模型任务。部署与救援见[单机管理](docs/megacube-single-node.md)，职责、设计取舍和验收边界见[最终决策与实现说明](docs/megacube-single-node-decisions.md)。
+Linux 用户级服务可通过 Pinvou 管理 Cube Manage Software、后台模型商店和持久模型任务。 Cube Manage Software 源码位于 [`components/cmsd/`](components/cmsd/)，Linux x86_64 / arm64 安装包从同仓源码自动构建并携带组件，用户在设备页确认后安装为后台服务。部署与救援见[单机管理](docs/megacube-single-node.md)，职责、设计取舍和验收边界见[最终决策与实现说明](docs/megacube-single-node-decisions.md)。
 
 ## 模型接入
 

@@ -19,7 +19,7 @@ const {
 const { linuxStartupWindowConfigSpec } = require("./startup-window-config.js");
 const { prepareLinuxAsrRuntime } = require("./linux-asr-runtime.js");
 const { prepareKnowledgeHost } = require("./knowledge-host.js");
-const { prepareCmsdComponent } = require("./cmsd-component.js");
+const { prepareBundledCmsd } = require("./cmsd-component.js");
 const { WRAPPER_ENV } = require("./require-wrapper.js");
 const { stageWindowsInstaller } = require("./windows-installer.js");
 const {
@@ -1091,7 +1091,10 @@ async function main() {
       );
     }
 
-    const cmsdComponent = prepareCmsdComponent({ architecture: targetArch || hostArch });
+    const cmsdComponent = prepareBundledCmsd({
+      command: args[tauriCommandIndex(args)],
+      targetTriple: triple,
+    });
     if (cmsdComponent) additionalConfigs.push(cmsdComponent.configSpec);
     // SenseVoice 按设计只能在目标架构上原生构建（build-sensevoice-runtime.sh 要求
     // requested_arch == host_arch，产物还链接宿主 glibc）。交叉构建改按目标架构

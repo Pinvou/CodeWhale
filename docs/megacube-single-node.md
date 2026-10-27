@@ -19,17 +19,19 @@
 - `features/megacube`：本机客户端、管理权、组件维护、只读硬件观测和 UI 状态。
 - `features/model_store`：后台商店、安装委托、维护事务及当前部署清单。
 - bundle `megacube-admin`：MCP 管理与安装工具、选型和排障技能；模型调用和工具循环复用 CodeWhale。
-- 组件打包通过项目 npm 包装器的 `PINVOU3_CMSD_PACKAGE` 输入接入；包缺失不冒充已内置，实际安装需明确确认。
+- `components/cmsd/`：Cube Manage Software 的唯一开发源码，保留独立 Rust crate 与组件版本；项目 npm 包装器在受支持的 Linux 构建中自动编译并打包。
 
 Linux 桌面从启动起连接同一独立商店执行器，不依赖 cmsd 是否已安装。首次完成组件安装无需重启桌面即可委托商店任务；后台无法启动时明确报错，不另开进程内队列。
 
 ## cmsd 的分发、安装与运行
 
-Cube Manage Software 源码由独立仓库维护，先构建成对应 Linux 架构的组件目录（`cmsd` 可执行文件和 `manifest.json`）。构建 Pinvou 时，通过 `PINVOU3_CMSD_PACKAGE` 显式提供该目录；打包器校验清单、大小、SHA-256、ELF 架构和 Linux 动态链接基线后，将组件放入应用资源 `runtime/cmsd/`。
+Cube Manage Software 源码在同仓 [`components/cmsd/`](../components/cmsd/)，从历史源码提交 `80a7ebc` 导入后以本目录作为唯一开发来源。Linux x86_64 / arm64 的项目 `build` 和 `bundle` 命令自动从当前 Pinvou 提交编译组件，校验源码身份、清单、大小、SHA-256、ELF 架构及 GLIBC ≤ 2.35，再将 `cmsd` 和 `manifest.json` 放入应用资源 `runtime/cmsd/`。组件版本独立于 Pinvou 版本，构建来源绑定 Pinvou 提交。
 
 随包携带组件不等于已安装后台。设备页发现候选组件后，用户确认安装；Pinvou 将验证过的二进制复制到当前用户的私有版本目录，登记并启动 systemd 用户服务。Pinvou 通过本机 Unix socket 调用 cmsd。关闭桌面不停止该服务；开机未登录时能否启动还取决于用户服务的 linger 配置。模型商店执行器是另一个独立后台，由 Pinvou 提供，不包含在 cmsd 二进制中。
 
-目前发布 workflow 尚未自动供应 `PINVOU3_CMSD_PACKAGE`。普通构建未显式提供组件目录时，不携带 cmsd；用户可在设备页选择可信的本地组件包。两仓 PR 合入本身不意味着正式发布包已内置后台，完整安装包与发布供应链仍需另外接通和验收。
+CI 打包与本地 Linux OTA 发版共用该源码构建入口；正式 deb 在上传前还检查包内组件是否齐全、摘要、架构和 ABI。缺失或不匹配即失败，不能发布一个声称带后台但没有组件的目标平台安装包。`PINVOU3_CMSD_PACKAGE` 不再允许覆盖正式构建来源；较新 Linux 构建宿主可用 `PINVOU3_CMSD_SYSROOT` 显式指定匹配架构的 Ubuntu 22.04 sysroot。开发 `dev`、纯 UI 和配置测试不编译组件，LoongArch / Windows / macOS 仍不提供本机 CMS 管理。用户仍可在设备页验证并导入可信的本地组件包。
+
+随包分发不需要先发布独立 CMS Release，也不需要跨私有仓库下载权限。源码归仓和构建检查不代替实际安装包验收；验证时须分别记录真实包内容、GUI 随包发现、用户确认安装和用户服务运行，不能用显式传入包路径的夹具冒充 GUI 自动发现。
 
 本批不包含远程 TLS 配对、Plan/Grant/Operation、独立历史维护页面、组事务、平台接入或出厂初始化器。单机硬件观测不读取初始化收据，也不宣称有预置模型。未提交的产品指导插件草稿保留在原工作树。
 

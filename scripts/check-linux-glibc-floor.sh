@@ -26,6 +26,15 @@ command -v dpkg-deb >/dev/null || { echo "missing required command: dpkg-deb" >&
 
 extract_dir="$(mktemp -d)"
 trap 'rm -rf -- "$extract_dir"' EXIT
+package_arch="$(dpkg-deb -f "$deb_path" Architecture)"
+[ "$package_arch" = "$expected_arch" ] || {
+  echo "FAIL: deb architecture $package_arch != expected $expected_arch" >&2
+  exit 1
+}
 dpkg-deb -x "$deb_path" "$extract_dir"
+# A desktop ELF alone is insufficient: supported packages must carry the full
+# cmsd component at the resource path used by Tauri, with matching metadata.
+python3 "$(cd "$(dirname "$0")" && pwd)/check-cmsd-bundled-package.py" \
+  "$extract_dir" "$expected_arch"
 "$(cd "$(dirname "$0")" && pwd)/check-linux-elf-policy.sh" \
   "$extract_dir" "$expected_arch" "$glibc_floor"

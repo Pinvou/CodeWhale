@@ -1,0 +1,6 @@
+/target
+.dev/
+__pycache__/
+*.py[cod]
+
+/target-jammy/

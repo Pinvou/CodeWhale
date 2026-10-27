@@ -41,6 +41,12 @@ on:
       - 'scripts/asr/build-sensevoice-runtime.sh'
       - 'scripts/asr/sensevoice-source.env'
       - 'scripts/check-linux-elf-policy.sh'
+      - 'components/cmsd/**'
+      - 'scripts/check-cmsd-bundled-package.py'
+      - 'scripts/release-deb.sh'
+      - 'scripts/tests/test_cmsd_release_policy.py'
+      - 'pinvou3-app/scripts/tauri/cmsd-component.js'
+      - 'pinvou3-app/tests/cmsd_bundled_packaging.test.js'
       - 'scripts/check-linux-glibc-floor.sh'
       - '.github/workflows/release-packages.yml'
       - '.github/workflows/pr-check.yml'
@@ -235,13 +241,19 @@ on:
       - 'pinvou3-app/tests/desktop_remote_*'
       - 'pinvou3-app/tests/connect_remote_device_*'
   pull_request:
-    branches: [main]
+    # Stacked feature-base PRs need the same lightweight release contracts.
     paths:
       - 'VERSION'
       - 'scripts/sync-version.mjs'
       - 'scripts/asr/build-sensevoice-runtime.sh'
       - 'scripts/asr/sensevoice-source.env'
       - 'scripts/check-linux-elf-policy.sh'
+      - 'components/cmsd/**'
+      - 'scripts/check-cmsd-bundled-package.py'
+      - 'scripts/release-deb.sh'
+      - 'scripts/tests/test_cmsd_release_policy.py'
+      - 'pinvou3-app/scripts/tauri/cmsd-component.js'
+      - 'pinvou3-app/tests/cmsd_bundled_packaging.test.js'
       - 'scripts/check-linux-glibc-floor.sh'
       - '.github/workflows/release-packages.yml'
       - '.github/workflows/pr-check.yml'
@@ -526,7 +538,7 @@ jobs:
           else
             CHANGED_FILES=$(git diff --name-only "$BEFORE" "$GITHUB_SHA")
             if printf '%s\n' "$CHANGED_FILES" | node scripts/remote-control-release-path-policy.mjs || printf '%s\n' "$CHANGED_FILES" | grep -Eq \
-              '^(VERSION|scripts/(sync-version\.mjs|run-windows-remote-control-e2e\.ps1|windows-e2e-process-guard\.ps1|ci-fixture-process\.py|tests/test_ci_fixture_process\.py|windows-owned-process\.cs|release-owned-process\.py|windows-e2e-orchestrator-helpers\.ps1|create-installer-spdx\.mjs|check-enrollment-gated-v2-rollback\.mjs|asr/(build-sensevoice-runtime\.sh|sensevoice-source\.env)|check-linux-(elf-policy|glibc-floor)\.sh)|remote-control-relay/(docs/schemas/|package(-lock)?\.json|scripts/(release-process|controller-release-gate|validate-controller-release-evidence|deploy-controller-preflight|query-controller-release-telemetry|prepare-legacy-gateway-route|verify-provider-attestation|verify-installer-supply-chain)\.mjs|controller-sensitive-scan\.js|test/(windows-release-owned-service\.test\.js|fixtures/windows-owned-driver\.cs|release-process\.test\.js|controller-(release-|sensitive-scan|telemetry)|windows-e2e-(orchestrator-contract|orchestrator-helpers|path-guard)))|\.github/workflows/(release-packages|windows-remote-control-(evidence|build-evidence))\.yml|\.gitmodules|private-runtimes/windows|pinvou3-app/(package(-lock)?\.json|scripts/(remote-control-ui-smoke\.mjs|tauri/(build|codex-bridge|linux-asr-runtime|platform-config|windows-installer|windows-runtime)\.js)|src-tauri/(config/platforms/(linux|windows)|packaging/windows)/|src-tauri/resources/platforms/linux/asr/|tests/(codex_acp_windows_|linux_asr_runtime_packaging\.test\.js|remote_control_real_ui_smoke_contract\.test\.mjs|windows_runtime_packaging_contract\.test\.js)))'; then
+              '^(components/cmsd/|pinvou3-app/(scripts/tauri/cmsd-component\.js|tests/cmsd_bundled_packaging\.test\.js)$|scripts/(check-cmsd-bundled-package\.py|release-deb\.sh|tests/test_cmsd_release_policy\.py)$|VERSION|scripts/(sync-version\.mjs|run-windows-remote-control-e2e\.ps1|windows-e2e-process-guard\.ps1|ci-fixture-process\.py|tests/test_ci_fixture_process\.py|windows-owned-process\.cs|release-owned-process\.py|windows-e2e-orchestrator-helpers\.ps1|create-installer-spdx\.mjs|check-enrollment-gated-v2-rollback\.mjs|asr/(build-sensevoice-runtime\.sh|sensevoice-source\.env)|check-linux-(elf-policy|glibc-floor)\.sh)|remote-control-relay/(docs/schemas/|package(-lock)?\.json|scripts/(release-process|controller-release-gate|validate-controller-release-evidence|deploy-controller-preflight|query-controller-release-telemetry|prepare-legacy-gateway-route|verify-provider-attestation|verify-installer-supply-chain)\.mjs|controller-sensitive-scan\.js|test/(windows-release-owned-service\.test\.js|fixtures/windows-owned-driver\.cs|release-process\.test\.js|controller-(release-|sensitive-scan|telemetry)|windows-e2e-(orchestrator-contract|orchestrator-helpers|path-guard)))|\.github/workflows/(release-packages|windows-remote-control-(evidence|build-evidence))\.yml|\.gitmodules|private-runtimes/windows|pinvou3-app/(package(-lock)?\.json|scripts/(remote-control-ui-smoke\.mjs|tauri/(build|codex-bridge|linux-asr-runtime|platform-config|windows-installer|windows-runtime)\.js)|src-tauri/(config/platforms/(linux|windows)|packaging/windows)/|src-tauri/resources/platforms/linux/asr/|tests/(codex_acp_windows_|linux_asr_runtime_packaging\.test\.js|remote_control_real_ui_smoke_contract\.test\.mjs|windows_runtime_packaging_contract\.test\.js)))'; then
               BUILD_REQUIRED=true
             else
               BUILD_REQUIRED=false
