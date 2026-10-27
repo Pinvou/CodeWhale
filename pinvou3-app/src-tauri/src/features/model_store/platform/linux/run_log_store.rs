@@ -356,8 +356,19 @@ pub fn sanitize_for_disk(line: &str) -> String {
         }
         first = false;
         if redact_next {
-            out.push_str(REDACTED);
-            redact_next = false;
+            // r7 P1-4：`password => 'secret'` 的 `=>` 是操作符不是值——把它当值
+            // 消耗后真正的凭据词反而存活。操作符词（纯符号+引号+冒号+等号）不
+            // 抹零、继续等下一个真正的值词。
+            let is_operator = word
+                .chars()
+                .all(|c| matches!(c, '=' | '>' | '<' | '|' | '&' | ':' | ',' | ';' | '"'));
+            if is_operator {
+                out.push_str(word);
+                // 保持 redact_next = true，等下一个真正的值
+            } else {
+                out.push_str(REDACTED);
+                redact_next = false;
+            }
             continue;
         }
         if let Some(HeaderExpect::Value) = header_expect {
@@ -440,14 +451,17 @@ pub fn sanitize_for_disk(line: &str) -> String {
         }
         let bare = word.trim_matches(|c: char| matches!(c, '"' | '\'' | ',' | ';' | ':'));
         // `--TOKEN x`（空格形态）此前大小写敏感漏网——`=` 形态早已不敏感，两处对齐。
-        // r6 P1-5：`SECRET_ENV_KEYS.contains(&bare)` 同样是精确匹配，pretty-JSON
-        // 的小写键（`  "api_key": "secret"` 分词后 bare=`api_key`）全部漏网——
-        // 与 `=`/`--flag` 两支对齐成不敏感，键命中即 redact-next（值无长度下限，
-        // 导出侧 <24 字符的短值也因此被定向层先行抹掉）。
+        // r6 P1-5 + r7 P1-4：bare 键检查大小写不敏感，且并入 SECRET_QUERY_KEYS
+        // （token / x-api-key / access_token 等 URL query 表已有的名字，此前
+        // 裸键漏检：`token: ab12cd34` / `> x-api-key: abcdef012` 落盘+导出）。
         if bare.eq_ignore_ascii_case("bearer")
             || SECRET_ENV_KEYS
                 .iter()
                 .any(|known| bare.eq_ignore_ascii_case(known))
+            || SECRET_QUERY_KEYS
+                .iter()
+                .any(|known| bare.eq_ignore_ascii_case(known))
+            || query_key_is_secret(bare)
             || SECRET_FLAGS
                 .iter()
                 .any(|known| bare.eq_ignore_ascii_case(known))
