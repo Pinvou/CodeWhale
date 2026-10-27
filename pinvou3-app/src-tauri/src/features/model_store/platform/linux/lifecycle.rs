@@ -5124,3 +5124,36 @@ echo '权重就绪'
         assert!(!endpoint_path_is_openai_style("not a url"));
     }
 }
+
+    /// r7 P1-5：启动时自动收紧存量 775 目录链的行为锁。
+    /// 构造模拟目录（0775），验证收紧后变 0755；非属主目录不动。
+    #[test]
+    fn tighten_directory_permissions_fixes_wide_modes_and_skips_foreign() {
+        use std::os::unix::fs::PermissionsExt;
+        let _home = config::TempHome::new();
+        let data = config::data_dir();
+        let cards = data.join("cards");
+        let logs = data.join("logs");
+        let card_a = cards.join("test-card-a");
+        for dir in [&data, &cards, &logs, &card_a] {
+            std::fs::create_dir_all(dir).unwrap();
+            std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o775)).unwrap();
+        }
+        // 已正确的目录不动
+        let already_tight = cards.join("already-755");
+        std::fs::create_dir(&already_tight).unwrap();
+        std::fs::set_permissions(&already_tight, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+        let settings = config::Settings::default();
+        tighten_store_directory_permissions(&settings);
+
+        let mode = |p: &std::path::Path| {
+            use std::os::unix::fs::MetadataExt;
+            std::fs::metadata(p).unwrap().permissions().mode() & 0o777
+        };
+        assert_eq!(mode(&data), 0o755, "data 目录应收紧到 755");
+        assert_eq!(mode(&cards), 0o755, "cards 目录应收紧到 755");
+        assert_eq!(mode(&logs), 0o755, "logs 目录应收紧到 755");
+        assert_eq!(mode(&card_a), 0o755, "一级子目录应收紧到 755");
+        assert_eq!(mode(&already_tight), 0o755, "已正确的目录不变");
+    }
