@@ -78,7 +78,7 @@ impl<'a> Redactor<'a> {
                     && n.fract() == 0.0
                     && match key {
                         "httpstatus" | "statuscode" | "status" => (100.0..=599.0).contains(n),
-                        "exitcode" => (f64::from(i32::MIN)..=f64::from(i32::MAX)).contains(n),
+                        "exitcode" => (f64::from(i32::MIN)..=f64::from(u32::MAX)).contains(n),
                         _ => (0.0..=1_000_000_000.0).contains(n),
                     }
             });
