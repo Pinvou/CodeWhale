@@ -698,6 +698,7 @@ impl ControlledDeviceManager {
         self.inner.try_lock().is_none()
     }
 
+    #[cfg(test)]
     pub(crate) fn replace_authenticated_transport<T: ControlledTransportAuthority + 'static>(
         &self,
         operation: ControlledOperation,
@@ -711,6 +712,7 @@ impl ControlledDeviceManager {
         Ok(())
     }
 
+    #[cfg(test)]
     pub(crate) fn replace_transport<T: ControlledTransportAuthority + 'static>(
         &self,
         transport: T,
@@ -807,6 +809,7 @@ impl ControlledDeviceManager {
         Ok(status)
     }
 
+    #[cfg(test)]
     pub(crate) fn register_liveness_challenge(
         &self,
         challenge_id: impl Into<String>,
@@ -1073,6 +1076,7 @@ impl ControlledDeviceManager {
         Ok((status, retired_lease))
     }
 
+    #[cfg(test)]
     pub(crate) fn complete_resumed(
         &self,
         operation: ControlledOperation,
@@ -1212,6 +1216,7 @@ impl ControlledDeviceManager {
 
     /// E2E-06：断线（`desktop_relay_connection{connected:false}`）后取恢复材料并让
     /// 本端 gate 进入 `Prepared`；相位不符或 gate 已终止时失败关闭并清理本代。
+    #[cfg(test)]
     pub(crate) fn begin_resume(
         &self,
         operation: ControlledOperation,
@@ -1279,6 +1284,7 @@ impl ControlledDeviceManager {
     }
 
     /// E2E-06：按帧顺序推进 B 端恢复相位；任一步失败即终止候选并清理本代。
+    #[cfg(test)]
     pub(crate) fn advance_resume(
         &self,
         operation: ControlledOperation,

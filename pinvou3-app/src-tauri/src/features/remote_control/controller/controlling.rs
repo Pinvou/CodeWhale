@@ -385,6 +385,7 @@ impl ControllingDeviceManager {
         Ok(status_locked(&inner))
     }
 
+    #[cfg(test)]
     pub(crate) fn mark_transport_disconnected(
         &self,
         now_a: u64,

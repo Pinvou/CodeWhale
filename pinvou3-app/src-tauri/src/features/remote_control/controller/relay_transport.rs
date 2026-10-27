@@ -132,8 +132,10 @@ impl ControllerTransportConfig {
     }
 }
 
-/// A local queue identity, never accepted from the wire. Holding the original
-/// Arc keeps its allocation alive, so a replacement cannot reuse its identity.
+/// A local queue identity, never accepted from the wire. Each new transport
+/// allocates its own epoch Arc; socket resume retains the same sender and Arc.
+/// Holding the original Arc keeps its allocation alive, so a replacement cannot
+/// reuse its identity. Sharing an epoch Arc across transports breaks this fence.
 #[derive(Clone)]
 pub(crate) struct ControllerTransportOwner(Arc<AtomicU64>);
 
