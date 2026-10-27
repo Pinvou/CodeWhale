@@ -278,9 +278,13 @@ OUTPUT: VERDICT, EVIDENCE, GAPS, NEXT.
 - **`test`** — when the parent needs an authoritative pass/fail
   on the test suite or other validation. Verifiers don't fix
   failures; they capture the failing assertion + stack and put fix
-  candidates under RISKS. The verifier posture never writes, and shell
-  is clamped to the bounded built-in verification surface: the write
-  ceiling is read-only and unbounded shell forms are refused (#5186).
+  candidates under RISKS. The verifier posture never writes; its shell
+  is the bounded built-in verification surface plus the same
+  classifier-gated read-only probe lane the inspection roles hold
+  (`wc`, `ls`, `cat`, `grep` pipelines) for gathering evidence. The
+  write ceiling is read-only, unbounded shell forms are refused
+  (#5186), and custom commands are refused — use a write-capable role
+  for those.
 - **`advisor`** — when the operator wants a high-leverage second opinion
   before cheaper execution continues. Consultants read enough to ground a
   recommendation, but cannot write or run shell commands. `oracle` and

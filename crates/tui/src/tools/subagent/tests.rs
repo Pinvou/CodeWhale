@@ -8331,14 +8331,18 @@ async fn verifier_child_still_refuses_raw_shell_custom_commands_and_writes() {
             && super::reject_unbounded_verification("Run", &custom_command, false).is_err(),
         "custom Run commands must be refused by the unbounded-verification guard"
     );
-    // …and the refusal reaches the real dispatch path too.
+    // …and the refusal reaches the real dispatch path too, from one of the
+    // two walls that own it — the approval gate (a Required call with no
+    // session decision) or the unbounded-verification guard — rather than
+    // failing for some unrelated reason.
     let custom = registry
         .execute("agent_verifier_walls", "Run", custom_command)
         .await
         .expect_err("custom Run commands are refused by design");
+    let custom = custom.to_string();
     assert!(
-        !custom.to_string().is_empty(),
-        "custom command refusal must reach dispatch: {custom}"
+        custom.contains("requires approval") || custom.contains("operator-supplied commands"),
+        "custom command refusal must come from the approval or unbounded wall: {custom}"
     );
 
     let write = registry
@@ -8353,6 +8357,75 @@ async fn verifier_child_still_refuses_raw_shell_custom_commands_and_writes() {
         write.to_string().contains("not allowed") || write.to_string().contains("read-only"),
         "workspace-write refusal did not identify the denial: {write}"
     );
+}
+
+/// A registry for a write-capable role whose parent handed it a read-only
+/// shell and no writes — what `derive_child` produces for a Builder, Worker,
+/// or Custom child of a Scout or Planner on the plain `agent` nesting path,
+/// where no Fleet deny list is installed.
+fn read_only_shell_child_registry(role: FleetRole) -> (tempfile::TempDir, SubAgentToolRegistry) {
+    let tmp = tempdir().expect("tempdir");
+    let mut runtime =
+        stub_runtime().with_agent_tool_surface_options(enabled_agent_surface_options());
+    runtime.context = ToolContext::new(tmp.path().to_path_buf());
+    runtime.allow_shell = true;
+    let mut profile = WorkerRuntimeProfile::for_role(role.clone());
+    profile.permissions = crate::worker_profile::PermissionSet::read_only_with_network();
+    profile.shell = crate::worker_profile::ShellPolicy::ReadOnly;
+    runtime.worker_profile = profile;
+    let registry = SubAgentToolRegistry::new(
+        runtime,
+        role,
+        None,
+        Arc::new(Mutex::new(TodoList::new())),
+        Arc::new(Mutex::new(PlanState::default())),
+    );
+    (tmp, registry)
+}
+
+/// Shell authority is the Verifier's carve-out alone. Every other role whose
+/// runtime shell was narrowed to read-only — the Builder, Worker, or Custom
+/// child of a read-only parent — holds no process authority: the built-in
+/// test runner stays refused at posture and envelope and absent from the
+/// catalog, exactly as before the verifier lane existed, so delegation
+/// cannot widen a read-only parent into a child that runs the suite.
+#[tokio::test]
+async fn read_only_shell_children_of_other_roles_hold_no_shell_authority() {
+    let gate = json!({"action": "tests", "args": "--lib fleet::exact"});
+    for role in [FleetRole::Builder, FleetRole::Worker, FleetRole::Custom] {
+        let (_tmp, registry) = read_only_shell_child_registry(role.clone());
+        assert!(
+            !registry.posture_permits_tool("Run", Some(&gate)),
+            "{role:?} with a read-only shell must not hold the Required surface"
+        );
+        assert!(
+            registry.envelope_refusal("Run", &gate).is_some(),
+            "{role:?} envelope must report no shell authority"
+        );
+        let names: Vec<String> = registry
+            .tools_for_model(&role)
+            .iter()
+            .map(|tool| tool.name.clone())
+            .collect();
+        assert!(
+            !names.iter().any(|name| name == "Run"),
+            "{role:?} catalog must not offer the verification gate: {names:?}"
+        );
+        let refused = registry
+            .execute("agent_read_only_child", "Run", gate.clone())
+            .await
+            .expect_err("the test runner must stay refused for a read-only-shell child");
+        assert!(
+            refused.to_string().contains("not permitted") || refused.to_string().contains("shell"),
+            "{role:?}: {refused}"
+        );
+    }
+    // The carve-out itself: the same narrowed shell on the Verifier keeps the
+    // bounded gates (pinned in detail by
+    // `verifier_child_keeps_the_default_and_selection_bounded_run_surface`).
+    let (_tmp, verifier) = read_only_with_shell_registry();
+    assert!(verifier.posture_permits_tool("Run", Some(&gate)));
+    assert!(verifier.envelope_refusal("Run", &gate).is_none());
 }
 
 /// The purpose survives the narrowing: default gates and test-selection

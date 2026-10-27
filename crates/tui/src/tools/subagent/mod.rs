@@ -15264,30 +15264,18 @@ impl SubAgentToolRegistry {
                     {
                         return true;
                     }
-                    // Shell *authority* (this branch, and `shell_is_denied`
-                    // for the envelope) keys on the role's requested posture
-                    // plus a held shell — not on the runtime policy alone.
-                    // `role_requires_read_only_shell` downgrades only the
-                    // raw-command policy, so a verifier whose bash became
-                    // classifier-bounded probes keeps the Required surface
-                    // it always had (the built-in gates it exists to run,
-                    // with `reject_unbounded_verification` and the envelope
-                    // still bounding every concrete call), while a planner
-                    // or advisor — read-only by requested posture, not by
-                    // role narrowing — holds no process authority at all.
                     // Canonical `bash` on a lane role is deliberately NOT
-                    // covered: the classifier carve-out above is its only
-                    // door, so a command the grammar refuses keeps the
-                    // `[shell.readonly.command]` refusal instead of being
-                    // waved through to the envelope. The exclusion is
-                    // case-aware because legacy `Bash` is the raw-shell
-                    // alias — the carve-out is exact-name `bash` only, and
-                    // the alias must not re-enter through this branch.
-                    let bash_lane_role = name.eq_ignore_ascii_case("bash")
+                    // covered by the authority check below: the classifier
+                    // carve-out above is its only door, so a command the
+                    // grammar refuses keeps the `[shell.readonly.command]`
+                    // refusal instead of being waved through to the
+                    // envelope. The check is case-aware because legacy
+                    // `Bash` is the raw-shell alias — the carve-out is
+                    // exact-name `bash` only, and the alias must not
+                    // re-enter through this branch.
+                    let bash_must_use_classifier_lane = name.eq_ignore_ascii_case("bash")
                         && self.allows_bounded_readonly_bash("bash");
-                    !matches!(self.runtime_profile.shell, ShellPolicy::None)
-                        && role_posture_permits(&self.agent_type, ApprovalRequirement::Required)
-                        && !bash_lane_role
+                    !bash_must_use_classifier_lane && self.holds_shell_authority()
                 }
             },
             None => true,
@@ -15328,10 +15316,7 @@ impl SubAgentToolRegistry {
     /// first-turn catalog actually offers is bounded by the classifier.
     fn allows_bounded_readonly_bash(&self, name: &str) -> bool {
         name == "bash"
-            && matches!(
-                &self.agent_type,
-                FleetRole::Scout | FleetRole::Reviewer | FleetRole::Planner | FleetRole::Verifier
-            )
+            && crate::fleet::role::role_requires_read_only_shell(&self.agent_type)
             && self.runtime_profile.shell != crate::worker_profile::ShellPolicy::None
     }
 
@@ -15427,21 +15412,28 @@ impl SubAgentToolRegistry {
         !self.runtime_profile.permissions.write
     }
 
+    /// Shell *authority* — the right to start the processes the built-in
+    /// verification surface runs. A full runtime shell holds it. The one
+    /// narrowed exception is the Verifier: `role_requires_read_only_shell`
+    /// downgrades its raw-command policy to the classifier-bounded probe lane,
+    /// and running the workspace's own gates is the role's entire purpose, so
+    /// the downgrade must not take the gates away (`reject_unbounded_
+    /// verification` and the envelope still bound every concrete call). No
+    /// other role regains authority through a narrowed shell: a Builder or
+    /// Custom child of a read-only parent inherits `ShellPolicy::ReadOnly` and
+    /// must not start the test runner its parent cannot — keying this on the
+    /// role's *default* posture would hand exactly that to every role whose
+    /// default shell is full, and widen authority through delegation.
+    fn holds_shell_authority(&self) -> bool {
+        matches!(self.runtime_profile.shell, ShellPolicy::Full)
+            || (matches!(self.agent_type, FleetRole::Verifier)
+                && !matches!(self.runtime_profile.shell, ShellPolicy::None))
+    }
+
     fn shell_is_denied(&self) -> bool {
-        // Shell *authority* — the right to start the processes the built-in
-        // verification surface runs — requires the role's requested posture
-        // to grant it (`role_posture_permits` at `Required`: planner and
-        // advisor never held process authority), the runtime posture to still
-        // hold a shell, and no explicit shell sentinel. The
-        // `role_requires_read_only_shell` narrowing downgrades only the
-        // raw-command policy, so a verifier whose bash became classifier-
-        // bounded probes keeps the gates it exists to run, while a planner
-        // (read-only by requested posture, not by role narrowing) does not.
         // Read-only evidence commands are Auto-classified exceptions, not a
-        // Full-shell grant.
-        !role_posture_permits(&self.agent_type, ApprovalRequirement::Required)
-            || matches!(self.runtime_profile.shell, ShellPolicy::None)
-            || self.is_tool_denied(SHELL_AUTHORITY_SENTINEL)
+        // shell-authority grant; the explicit shell sentinel always wins.
+        !self.holds_shell_authority() || self.is_tool_denied(SHELL_AUTHORITY_SENTINEL)
     }
 
     fn execution_envelope(&self) -> crate::tools::execution_envelope::ExecutionEnvelope {
@@ -15540,12 +15532,9 @@ impl SubAgentToolRegistry {
         // Visibility and dispatch consult the same capability guard. These
         // representative calls let a read-only bash schema survive catalog
         // shaping without treating an empty input as arbitrary shell authority.
-        // The verifier joins the inspection roles: its bounded evidence lane
-        // admits canonical `bash`, so its catalog must offer it too.
-        if !matches!(
-            &self.agent_type,
-            FleetRole::Scout | FleetRole::Reviewer | FleetRole::Planner | FleetRole::Verifier
-        ) {
+        // The role set is the one `allows_bounded_readonly_bash` admits: the
+        // read-only-shell roles, including the verifier's evidence lane.
+        if !crate::fleet::role::role_requires_read_only_shell(&self.agent_type) {
             return None;
         }
         match name {
