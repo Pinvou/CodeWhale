@@ -2180,6 +2180,7 @@ impl ShellManager {
             }
             if command.contains('|')
                 || readonly_sequence_segments(command).is_some_and(|segments| segments.len() > 1)
+                || agent_readonly_command_needs_shell_for_cd(command)
             {
                 // An agent read-only compound: every sequence segment and
                 // every pipeline stage was admitted by
@@ -3587,9 +3588,9 @@ pub fn new_shared_shell_manager(workspace: PathBuf) -> SharedShellManager {
 // === ToolSpec Implementations ===
 
 use crate::command_safety::{
-    SafetyLevel, analyze_command, extract_primary_command, is_agent_readonly_shell_command,
-    is_github_readonly_command, is_parallel_readonly_command, normalize_windows_command_paths,
-    readonly_sequence_segments,
+    SafetyLevel, agent_readonly_command_needs_shell_for_cd, analyze_command,
+    extract_primary_command, is_agent_readonly_shell_command, is_github_readonly_command,
+    is_parallel_readonly_command, normalize_windows_command_paths, readonly_sequence_segments,
 };
 use crate::execpolicy::{ExecPolicyDecision, load_default_policy};
 use crate::features::Feature;

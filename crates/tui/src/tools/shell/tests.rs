@@ -1316,6 +1316,19 @@ async fn readonly_shell_executes_admitted_compound_sequence() {
         result.content
     );
 
+    // A standalone `cd` names a shell builtin: it must take the shell lane,
+    // not the direct-argv lane, or hosts without a `cd` binary (most Linux
+    // systems) would refuse an admitted probe with a not-found exec error.
+    let standalone = LowercaseBashTool
+        .execute(json!({"command": "cd sub"}), &context)
+        .await
+        .expect("standalone cd runs through the shell lane");
+    assert!(
+        standalone.success,
+        "standalone `cd` must execute via the shell builtin: {}",
+        standalone.content
+    );
+
     let refused = LowercaseBashTool
         .execute(json!({"command": "cd .. && ls"}), &context)
         .await

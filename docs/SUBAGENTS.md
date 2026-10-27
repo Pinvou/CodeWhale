@@ -97,8 +97,9 @@ mechanically useless — the scout's own bounded shell (`git -C … log`,
 read-only parent has. The bounded grammar also admits compound probes of
 those families — segments joined by `;`, `&&`, `||`, or `|`, where every
 segment must individually be admitted (e.g. `wc -c f; wc -l f`,
-`cd sub && wc -c notes.md`, `cat x | od -c`) — and `cd` as a
-workspace-confined sequence prefix. Read-only is transitive through any delegation chain:
+`cd sub && wc -c notes.md`, `cat x | od -c`) — and a workspace-confined
+`cd <one relative path>`, standalone or as a sequence prefix.
+Read-only is transitive through any delegation chain:
 the clamp (`ChildAuthority::clamp` in `fleet/exact.rs`) intersects every
 field with the narrower side, the deny-list union means a descendant can
 never drop an ancestor's restriction, and `inherit_disallowed_tools: false`

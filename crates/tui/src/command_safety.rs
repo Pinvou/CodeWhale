@@ -622,8 +622,10 @@ pub fn is_agent_readonly_shell_command(command: &str) -> bool {
 /// byte scanning with no quote parsing, exactly like the `|` pipeline split
 /// above — because the charset gate has already refused every metacharacter
 /// that could make a quoted separator behave differently than this split
-/// assumes. A quoted `;` mis-splits, and the resulting segment fails
-/// classification: fail closed.
+/// assumes. A quoted `;` mis-splits; a mis-split that still classifies is
+/// refused before any shell runs by the operand gate's stricter
+/// `shlex::split` (`enforce_readonly_workspace_operands`), so the residual
+/// risk is a refusal, never an execution.
 pub(crate) fn readonly_sequence_segments(command: &str) -> Option<Vec<&str>> {
     let mut segments = Vec::new();
     let bytes = command.as_bytes();
@@ -650,6 +652,22 @@ pub(crate) fn readonly_sequence_segments(command: &str) -> Option<Vec<&str>> {
     }
     segments.push(&command[start..]);
     Some(segments)
+}
+
+/// Whether an admitted read-only command must run under a shell because it
+/// names the `cd` builtin. The direct-argv lane execs a real binary, and
+/// `cd` exists as one only on some hosts (macOS ships `/usr/bin/cd`; most
+/// Linux systems do not), so any command whose leading segment is `cd` takes
+/// the shell lane pipelines already use, where the builtin always resolves.
+/// Pipeline-bearing commands route to the shell anyway; this covers a
+/// standalone or sequence-leading `cd`, whose admission would otherwise end
+/// in a not-found exec error.
+pub(crate) fn agent_readonly_command_needs_shell_for_cd(command: &str) -> bool {
+    readonly_sequence_segments(command).is_some_and(|segments| {
+        segments
+            .iter()
+            .any(|segment| segment.split_whitespace().next() == Some("cd"))
+    })
 }
 
 fn is_agent_readonly_segment(segment: &str) -> bool {
