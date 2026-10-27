@@ -15,6 +15,24 @@ SPEC.loader.exec_module(RUNNER)
 
 
 class FinancialPostgresRunnerTests(unittest.TestCase):
+    def test_circuit_failure_pg_evidence_is_required(self):
+        name = "TestCircuitFailureBeforeDispatchPostgres"
+        self.assertIn(name, RUNNER.REQUIRED)
+        self.assertIn(name, RUNNER.TOKEN_CHILD_REQUIRED)
+        events = self.events(RUNNER.REQUIRED, RUNNER.TOKEN_PACKAGE, children=True)
+        options = {"package": RUNNER.TOKEN_PACKAGE, "require_children": True,
+                   "children_required": RUNNER.TOKEN_CHILD_REQUIRED}
+        self.assertGreater(RUNNER.verify_results(events, **options), 0)
+        invalid_sets = [
+            [event for event in events if event.get("Test", "").split("/", 1)[0] != name],
+            [event for event in events if not event.get("Test", "").startswith(name + "/")],
+            events + [{"Action": "skip", "Package": RUNNER.TOKEN_PACKAGE, "Test": name}],
+            events + [{"Action": "skip", "Package": RUNNER.TOKEN_PACKAGE, "Test": name + "/actual"}],
+        ]
+        for invalid in invalid_sets:
+            with self.assertRaises(RuntimeError):
+                RUNNER.verify_results(invalid, **options)
+
     def test_credential_failure_pg_roots_cannot_disappear_or_skip(self):
         roots = {
             "TestCredentialRotationWindowReceiptPostgres",
@@ -888,7 +906,7 @@ class FinancialPostgresRunnerTests(unittest.TestCase):
     def test_actual_main_requires_token_waiver_children(self):
         self.assertEqual(
             RUNNER.TOKEN_CHILD_REQUIRED,
-            {"TestHoldAcknowledgementSurvivesDispatchPersistenceFailurePostgres", "TestUsageWaiverCoordinatorRecoveryPostgres", "TestPersonalZeroBudgetCancellationAndExpiryPostgres", "TestCredentialRotationWindowReceiptPostgres", "TestCredentialFailurePersistenceBoundariesPostgres"},
+            {"TestHoldAcknowledgementSurvivesDispatchPersistenceFailurePostgres", "TestUsageWaiverCoordinatorRecoveryPostgres", "TestPersonalZeroBudgetCancellationAndExpiryPostgres", "TestCredentialRotationWindowReceiptPostgres", "TestCredentialFailurePersistenceBoundariesPostgres", "TestCircuitFailureBeforeDispatchPostgres"},
         )
         with self.assertRaisesRegex(RuntimeError, "no completed child"):
             self.run_main_fixture(missing_token_children=True)

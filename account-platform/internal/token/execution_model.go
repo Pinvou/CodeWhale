@@ -114,6 +114,7 @@ type UsageStore interface {
 	RecoverUncertainDispatches(context.Context) error
 	MarkCommitted(context.Context, uuid.UUID, int64, map[string]any) error
 	FailCredentialBeforeDispatch(context.Context, uuid.UUID, ReplayResult) (bool, error)
+	FailCircuitBeforeDispatch(context.Context, uuid.UUID, ReplayResult) (bool, error)
 	MarkReleased(context.Context, uuid.UUID, string) error
 	MarkReview(context.Context, uuid.UUID, string, map[string]any) error
 }

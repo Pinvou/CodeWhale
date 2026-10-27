@@ -285,12 +285,11 @@ func (s *Service) chatCompletions(w http.ResponseWriter, r *http.Request) {
 	envelope := DispatchEnvelope{BaseURL: credential.BaseURL, Provider: credential.Provider, AdapterVersion: s.executionUpstream.AdapterVersion(), Credential: append([]byte(nil), secret...), RequestBody: upstreamBody, Price: price, Stream: request.Stream, MaximumCost: maximumCost, MaximumOutput: maximumUsage.OutputTokens, ContextType: resolved.ContextType, OrganizationID: resolved.OrganizationID, CanPurchaseOrganizationEntitlements: slices.Contains(resolved.Permissions, "org.entitlements.purchase")}
 	circuitKey := resilience.Key(envelope.Provider, "MODEL_DISPATCH", envelope.BaseURL)
 	if circuitErr := s.breaker.BeforeHighRisk(circuitKey); circuitErr != nil {
-		_ = s.repository.MarkReleased(r.Context(), usageRequest.ID, "provider_circuit_open")
 		var open *resilience.CircuitOpenError
 		if errors.As(circuitErr, &open) {
 			w.Header().Set("Retry-After", strconv.Itoa(max(1, int(open.RetryAfter.Seconds()+0.999))))
 		}
-		api.WriteError(w, http.StatusServiceUnavailable, "PROVIDER_CIRCUIT_OPEN", "the selected provider route is temporarily unavailable", httpserver.RequestID(r.Context()))
+		s.writeCircuitOpenFailure(w, r, usageRequest.ID)
 		return
 	}
 	if err := s.repository.PrepareDispatch(r.Context(), usageRequest.ID, envelope); err != nil {
@@ -746,12 +745,20 @@ func (s *Service) replayStoredUsage(w http.ResponseWriter, r *http.Request, usag
 // the original acceptance and persists its failure receipt in one transaction;
 // failed/unknown acknowledgements are resolved only through a fresh read.
 func (s *Service) writeCredentialLookupFailure(w http.ResponseWriter, r *http.Request, usageID uuid.UUID) {
+	s.writeUndispatchedFailure(w, r, usageID, "PROVIDER_CREDENTIAL_UNAVAILABLE", "the accepted model request failed before dispatch because its credential was unavailable", s.repository.FailCredentialBeforeDispatch)
+}
+
+func (s *Service) writeCircuitOpenFailure(w http.ResponseWriter, r *http.Request, usageID uuid.UUID) {
+	s.writeUndispatchedFailure(w, r, usageID, "PROVIDER_CIRCUIT_OPEN", "the selected provider route is temporarily unavailable", s.repository.FailCircuitBeforeDispatch)
+}
+
+func (s *Service) writeUndispatchedFailure(w http.ResponseWriter, r *http.Request, usageID uuid.UUID, code, message string, persist func(context.Context, uuid.UUID, ReplayResult) (bool, error)) {
 	w.Header().Set("X-Pinvou-Usage-Request-ID", usageID.String())
 	w.Header().Set("Cache-Control", "no-store")
 	w.Header().Set("Location", "/v1/usage-requests/"+usageID.String())
-	payload, err := json.Marshal(api.Error{Code: "PROVIDER_CREDENTIAL_UNAVAILABLE", Message: "the accepted model request failed before dispatch because its credential was unavailable", RequestID: httpserver.RequestID(r.Context()), Details: map[string]any{"usage_request_id": usageID, "execution_status": "FAILED", "settlement_status": "RELEASED", "status_url": "/v1/usage-requests/" + usageID.String()}})
+	payload, err := json.Marshal(api.Error{Code: code, Message: message, RequestID: httpserver.RequestID(r.Context()), Details: map[string]any{"usage_request_id": usageID, "execution_status": "FAILED", "settlement_status": "RELEASED", "status_url": "/v1/usage-requests/" + usageID.String()}})
 	if err == nil {
-		_, _ = s.repository.FailCredentialBeforeDispatch(r.Context(), usageID, ReplayResult{Kind: "JSON", HTTPStatus: http.StatusServiceUnavailable, ContentType: "application/json", Payload: payload})
+		_, _ = persist(r.Context(), usageID, ReplayResult{Kind: "JSON", HTTPStatus: http.StatusServiceUnavailable, ContentType: "application/json", Payload: payload})
 	}
 	snapshot, err := s.repository.LoadReplay(r.Context(), usageID, 0)
 	if err != nil {

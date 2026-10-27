@@ -13,6 +13,16 @@ import (
 // The exact error body, transition, convergence evidence and retention clocks
 // commit together; a failed/unknown acknowledgement authorizes only a read.
 func (r *PostgresRepository) FailCredentialBeforeDispatch(ctx context.Context, id uuid.UUID, result ReplayResult) (bool, error) {
+	return r.failBeforeDispatch(ctx, id, result, "PROVIDER_CREDENTIAL_UNAVAILABLE", "credential_unavailable")
+}
+
+// FailCircuitBeforeDispatch fences the original acceptance exactly as credential
+// failure does. A local open circuit proves nothing about another actor's effects.
+func (r *PostgresRepository) FailCircuitBeforeDispatch(ctx context.Context, id uuid.UUID, result ReplayResult) (bool, error) {
+	return r.failBeforeDispatch(ctx, id, result, "PROVIDER_CIRCUIT_OPEN", "provider_circuit_open")
+}
+
+func (r *PostgresRepository) failBeforeDispatch(ctx context.Context, id uuid.UUID, result ReplayResult, code, reason string) (bool, error) {
 	var receipt struct {
 		Code    string `json:"code"`
 		Details struct {
@@ -22,7 +32,7 @@ func (r *PostgresRepository) FailCredentialBeforeDispatch(ctx context.Context, i
 			URL        string    `json:"status_url"`
 		} `json:"details"`
 	}
-	if id == uuid.Nil || result.Kind != "JSON" || result.HTTPStatus != http.StatusServiceUnavailable || result.ContentType != "application/json" || result.ResponseReceived || result.FinalUsage != nil || result.ActualMicrocredits != nil || result.SettlementSnapshot != nil || result.LastSequence != 0 || json.Unmarshal(result.Payload, &receipt) != nil || receipt.Code != "PROVIDER_CREDENTIAL_UNAVAILABLE" || receipt.Details.ID != id || receipt.Details.Execution != "FAILED" || receipt.Details.Settlement != "RELEASED" || receipt.Details.URL != "/v1/usage-requests/"+id.String() {
+	if id == uuid.Nil || result.Kind != "JSON" || result.HTTPStatus != http.StatusServiceUnavailable || result.ContentType != "application/json" || result.ResponseReceived || result.FinalUsage != nil || result.ActualMicrocredits != nil || result.SettlementSnapshot != nil || result.LastSequence != 0 || json.Unmarshal(result.Payload, &receipt) != nil || receipt.Code != code || receipt.Details.ID != id || receipt.Details.Execution != "FAILED" || receipt.Details.Settlement != "RELEASED" || receipt.Details.URL != "/v1/usage-requests/"+id.String() {
 		return false, ErrForbidden
 	}
 	ciphertext, err := r.secrets.Encrypt(result.Payload, replayAAD(id, "result:JSON", 0))
@@ -68,14 +78,14 @@ func (r *PostgresRepository) FailCredentialBeforeDispatch(ctx context.Context, i
 	if !untouched {
 		return false, nil
 	}
-	command, err := tx.Exec(ctx, `UPDATE usage_requests SET status='RELEASED',settlement_status='RELEASED',error_class='credential_unavailable',terminal_at=$2,updated_at=$2,reconciliation_next_at=NULL,reconciliation_lease_until=NULL,reconciliation_last_error=NULL,reconciliation_stopped_at=NULL WHERE id=$1 AND status='CREATED' AND execution_status='RECEIVED' AND execution_version=1`, id, now)
+	command, err := tx.Exec(ctx, `UPDATE usage_requests SET status='RELEASED',settlement_status='RELEASED',error_class=$3,terminal_at=$2,updated_at=$2,reconciliation_next_at=NULL,reconciliation_lease_until=NULL,reconciliation_last_error=NULL,reconciliation_stopped_at=NULL WHERE id=$1 AND status='CREATED' AND execution_status='RECEIVED' AND execution_version=1`, id, now, reason)
 	if err != nil {
 		return false, err
 	}
 	if command.RowsAffected() != 1 {
 		return false, ErrForbidden
 	}
-	if err := transitionExecutionTx(ctx, tx, id, []string{"RECEIVED"}, "FAILED", "credential_unavailable", now); err != nil {
+	if err := transitionExecutionTx(ctx, tx, id, []string{"RECEIVED"}, "FAILED", reason, now); err != nil {
 		return false, err
 	}
 	_, err = tx.Exec(ctx, `INSERT INTO usage_replay_results(usage_request_id,response_kind,http_status,content_type,encrypted_payload,key_id,payload_integrity,evidence_payload_digest,last_sequence,created_at,expires_at) VALUES($1,'JSON',$2,$3,$4,$5,$6,$7,0,$8,$9)`, id, result.HTTPStatus, result.ContentType, ciphertext, r.secrets.KeyID(), replayDigest(ciphertext), replayDigest(result.Payload), now, now.Add(resultRetention))
@@ -88,7 +98,7 @@ func (r *PostgresRepository) FailCredentialBeforeDispatch(ctx context.Context, i
 	if err := addReplayTombstone(ctx, tx, id, "FAILED", now); err != nil {
 		return false, err
 	}
-	if err := appendUsageConvergenceEvidenceTx(ctx, tx, id, "CUSTOMER_HOLD_RELEASE", "BILLING", "RELEASE", "credential_unavailable", map[string]any{"reason": "credential_unavailable", "external_success_inferred": false}, now); err != nil {
+	if err := appendUsageConvergenceEvidenceTx(ctx, tx, id, "CUSTOMER_HOLD_RELEASE", "BILLING", "RELEASE", reason, map[string]any{"reason": reason, "external_success_inferred": false}, now); err != nil {
 		return false, err
 	}
 	if err := tx.Commit(ctx); err != nil {

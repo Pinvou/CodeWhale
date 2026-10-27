@@ -18,6 +18,7 @@ from urllib.parse import parse_qs, urlsplit
 ROOT = Path(__file__).resolve().parents[1]
 ACTORS = {"billing_migrator", "billing_schema_owner", "billing_service"}
 REQUIRED = {
+    "TestCircuitFailureBeforeDispatchPostgres",
     "TestCredentialRotationWindowReceiptPostgres",
     "TestCredentialRotationOtherActorEffectPostgres",
     "TestCredentialFailurePersistenceBoundariesPostgres",
@@ -83,6 +84,7 @@ ACCOUNT_REQUIRED = {
 }
 TOKEN_PACKAGE = "github.com/Pinvou/pinvou3/account-platform/internal/token"
 TOKEN_CHILD_REQUIRED = {
+    "TestCircuitFailureBeforeDispatchPostgres",
     "TestCredentialRotationWindowReceiptPostgres",
     "TestCredentialFailurePersistenceBoundariesPostgres",
     "TestHoldAcknowledgementSurvivesDispatchPersistenceFailurePostgres",
