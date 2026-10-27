@@ -911,6 +911,26 @@ impl ModelManager {
                     if rec.running && !openai_compatible_endpoint_alive(endpoint) {
                         let _ = db::set_running(&rec.card_id, false);
                         corrected.push(rec.card_name);
+                        continue;
+                    }
+                    // 任务 G（收编）：记录说没在跑、端点实际有服务、且身份核验
+                    // 通过（.runtime/serve.identity.json 的 PID 活着）→ 认领为
+                    // 运行中。运维常在终端手动跑 enable.sh 恢复模型，商店对此
+                    // 失明的话用户再点启用就是双实例（sglang 双负载致整机崩溃
+                    // 已实锤）。身份核验确保不把外来服务误认为自己的实例。
+                    if !rec.running
+                        && rec.status == "deployed"
+                        && openai_compatible_endpoint_alive(endpoint)
+                    {
+                        let card_dir = config::data_dir()
+                            .join("cards")
+                            .join(config::safe_path_component(&rec.card_id).unwrap_or_default());
+                        if !card_dir.as_os_str().is_empty()
+                            && native_engine_identity_alive(&card_dir)
+                        {
+                            let _ = db::set_running(&rec.card_id, true);
+                            corrected.push(rec.card_name.clone());
+                        }
                     }
                     continue;
                 }
@@ -3580,6 +3600,30 @@ fn openai_compatible_endpoint_alive(endpoint_url: &str) -> bool {
         Ok(alive) => alive,
         Err(error) => !probe_failure_means_nothing_listening(&error),
     }
+}
+
+/// 任务 G（收编）：读卡片 `.runtime/serve.identity.json` 核验进程身份。
+///
+/// 端点活着只能说明「这个端口上有服务」，不能说明是我们的实例——身份核验
+/// 靠 PID 存活检查。`.runtime` 目录由 enable.sh 写入（卡片脚本自管），格式
+/// `{"version":1, "process":{"pid":N, "start_ticks":N, "uid":N}, ...}`。
+/// 文件缺失/损坏/PID 不活 → false（不认领，可能是外来服务或残留端口占用）。
+fn native_engine_identity_alive(card_dir: &std::path::Path) -> bool {
+    let identity_path = card_dir.join(".runtime").join("serve.identity.json");
+    let Ok(content) = std::fs::read_to_string(&identity_path) else {
+        return false;
+    };
+    let Ok(value) = serde_json::from_str::<serde_json::Value>(&content) else {
+        return false;
+    };
+    let Some(pid) = value["process"]["pid"].as_i64() else {
+        return false;
+    };
+    if pid <= 0 {
+        return false;
+    }
+    // /proc/{pid}/stat 存在 = 进程活着；不需要解析内容
+    std::path::Path::new(&format!("/proc/{pid}/stat")).exists()
 }
 
 /// 一次 HTTP 探测的失败，是否**确定**说明「那个地址后面没有服务」。
