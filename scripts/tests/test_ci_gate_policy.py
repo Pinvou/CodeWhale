@@ -2734,6 +2734,7 @@ class CiGatePolicyTests(unittest.TestCase):
             "cargo check (workspace, no default features, all targets)",
         ]
         self.assertEqual([name for name in names if name in expected], expected)
+        self.assertEqual(names.index("Set up zram and swap"), names.index(initial) + 1)
         self.assertEqual(names.index("Cargo cache"), names.index(precache) + 1)
         self.assertEqual(names.index(postcache), names.index("Cargo cache") + 1)
         self.assertEqual(
