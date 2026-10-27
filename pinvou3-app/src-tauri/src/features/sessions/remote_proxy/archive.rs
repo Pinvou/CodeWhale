@@ -227,6 +227,38 @@ mod tests {
     }
 
     #[test]
+    fn invalid_seal_input_is_rejected_before_durable_work() {
+        let temp = tempfile::tempdir().unwrap();
+        let bank = bank(temp.path());
+        bank.with_connection(true, |_| Ok(())).unwrap();
+        let anchor = std::fs::read(bank.anchor_path()).unwrap();
+        let db = std::fs::read(&bank.path).unwrap();
+        let mut invalid = record("invalid");
+        invalid.local_session_id.clear();
+        assert!(!bank.seal(&invalid).unwrap_err().requires_quarantine());
+        assert_eq!(std::fs::read(bank.anchor_path()).unwrap(), anchor);
+        assert_eq!(std::fs::read(&bank.path).unwrap(), db);
+        bank.seal(&record("valid-after-invalid")).unwrap();
+    }
+
+    #[test]
+    fn lock_open_error_is_indeterminate_and_preserves_bank() {
+        let temp = tempfile::tempdir().unwrap();
+        let bank = bank(temp.path());
+        bank.with_connection(true, |_| Ok(())).unwrap();
+        let anchor = std::fs::read(bank.anchor_path()).unwrap();
+        let db = std::fs::read(&bank.path).unwrap();
+        let lock_path = bank.path.with_extension("lock");
+        std::fs::remove_file(&lock_path).unwrap();
+        std::fs::create_dir(&lock_path).unwrap();
+        assert!(bank.seal(&record("lock-open")).unwrap_err().requires_quarantine());
+        assert_eq!(std::fs::read(bank.anchor_path()).unwrap(), anchor);
+        assert_eq!(std::fs::read(&bank.path).unwrap(), db);
+        std::fs::remove_dir(&lock_path).unwrap();
+        bank.seal(&record("valid-after-open-error")).unwrap();
+    }
+
+    #[test]
     fn competing_bank_owner_cannot_overwrite_seal_intent() {
         let temp = tempfile::tempdir().unwrap();
         let bank = bank(temp.path());
@@ -622,6 +654,8 @@ impl ArchiveStore {
                 SealFailure::indeterminate(error.into())
             }
         })?;
+        // Set this before every setup write, including recovery of old intent.
+        // New actions must not report before_intent after any durable write.
         let mut durable_work = false;
         // Setup and the postlude have their own failure semantics. In
         // particular, a postlude error must override a safe action rejection.

@@ -886,6 +886,10 @@ fn seal_action_sql_read_failure_without_durable_work_still_quarantines() {
     assert!(fired.load(Ordering::SeqCst));
     assert!(!reached_pending.load(Ordering::SeqCst));
     assert!(store.remote_proxies.lock().load_failed);
+    assert_eq!(
+        store.remote_proxy_snapshot(&record.local_session_id),
+        Some(record.clone())
+    );
     assert_eq!(std::fs::read(active_path(temp.path())).unwrap(), active);
     assert!(store.prepare_remote_proxy_open(None, &context()).is_err());
     // Repair only the test-owned fault. Neither the durable history nor the
