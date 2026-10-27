@@ -148,7 +148,7 @@ export function diagnosticRedactor(
       if (!Number.isSafeInteger(value)) return removed;
       if (["httpstatus", "statuscode", "status"].includes(key))
         return value >= 100 && value <= 599 ? value : removed;
-      if (key === "exitcode") return value >= -2147483648 && value <= 2147483647 ? value : removed;
+      if (key === "exitcode") return value >= -2147483648 && value <= 4294967295 ? value : removed;
       return value >= 0 && value <= 1000000000 ? value : removed;
     }
     if (categories.has(key)) {

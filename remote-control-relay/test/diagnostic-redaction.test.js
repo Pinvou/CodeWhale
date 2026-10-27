@@ -12,6 +12,12 @@ import { nativeRedact } from "../eval/failure-redaction/native-runner.mjs";
 // New formats and canaries, not the prototype's 13-family layout set.
 const cases = [
   {
+    name: "full Windows exit status survives without adjacent command content",
+    text: '{"exit_code":3221225477,"command":"PRIVATE_WINDOWS_COMMAND"}',
+    keep: ["3221225477"],
+    drop: ["PRIVATE_WINDOWS_COMMAND"],
+  },
+  {
     name: "non-ASCII whitespace cannot create records inside unframed material",
     text: "http_status\u00a0=401\nPRIVATE_HELDOUT_SPACE",
     keep: [],
@@ -81,14 +87,14 @@ const cases = [
     name: "safe fields cannot carry private strings or fake numeric values",
     text: JSON.stringify({
       http_status: "PRIVATE_HELDOUT_STATUS",
-      exit_code: 2147483648,
+      exit_code: 4294967296,
       input_tokens: "PRIVATE_HELDOUT_COUNT",
       component: "PRIVATE_HELDOUT_COMPONENT",
       code: "aHR0cHM6Ly9leGFtcGxlLmludmFsaWQvUFJJVkFURV9IRUxET1VU",
       request_id: "",
     }),
     keep: [],
-    drop: ["PRIVATE_HELDOUT", "2147483648", "aHR0cHM6"],
+    drop: ["PRIVATE_HELDOUT", "4294967296", "aHR0cHM6"],
   },
   {
     name: "technical counts survive despite token being a credential word",

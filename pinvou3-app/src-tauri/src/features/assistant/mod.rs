@@ -16,6 +16,7 @@ pub(crate) mod remote_turn;
 pub(crate) mod runtime_model;
 pub(crate) mod safety_deny_rules;
 pub mod session_policy;
+pub(crate) mod shell_diagnostics;
 pub(crate) mod shell_output;
 pub(crate) mod skill_materialization;
 pub(crate) mod swarm;
