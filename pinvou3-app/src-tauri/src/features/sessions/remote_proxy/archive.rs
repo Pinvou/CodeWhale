@@ -251,7 +251,11 @@ mod tests {
         let lock_path = bank.path.with_extension("lock");
         std::fs::remove_file(&lock_path).unwrap();
         std::fs::create_dir(&lock_path).unwrap();
-        assert!(bank.seal(&record("lock-open")).unwrap_err().requires_quarantine());
+        assert!(
+            bank.seal(&record("lock-open"))
+                .unwrap_err()
+                .requires_quarantine()
+        );
         assert_eq!(std::fs::read(bank.anchor_path()).unwrap(), anchor);
         assert_eq!(std::fs::read(&bank.path).unwrap(), db);
         std::fs::remove_dir(&lock_path).unwrap();
