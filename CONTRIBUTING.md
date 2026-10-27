@@ -126,13 +126,17 @@ Release-chain changes run lightweight contract tests only; full deb, dmg, and ns
 packages are built only after a
 `VERSION` change reaches `main`, or through an explicit `workflow_dispatch`.
 
-The Linux Rust job reserves at least 12 GiB of free disk after dependencies and
-caches are prepared. `scripts/ci-rust-disk.py` removes only the unused
-preinstalled SDK directories (Android, .NET, Haskell/ghcup, Julia by default;
-optionally the hostedtoolcache and browser bundles with `--aggressive`) on
-disposable GitHub-hosted Linux runners; it refuses self-hosted runners,
-redirected paths, and an undersized disk (`--min-free-gib`, default 12). The
-release build jobs run the same preparation with a 24 GiB floor. Hosted Linux
+The Linux Rust jobs prepare disk with `scripts/ci-rust-disk.py`, which removes
+only the unused preinstalled SDK directories (Android, .NET, Haskell/ghcup,
+Julia by default; optionally the hostedtoolcache and browser bundles with
+`--aggressive`) on disposable GitHub-hosted Linux runners; it refuses
+self-hosted runners, redirected paths, and an undersized disk
+(`--min-free-gib`, default 12). The pr-check rust-test job calls it before the
+swap file and caches land with a 24 GiB floor, again before the cache
+restores, and again after them (12 GiB floor); rust-lint uses the same
+24 GiB pre-swap floor, while cli-test and the loongarch64 cross-check run the
+default floor. The release build jobs run the same preparation once with a
+24 GiB floor. Hosted Linux
 runners use a single disk (`/` and `/mnt` share one ext4 filesystem), so the
 memory expansion step (`scripts/ci-memory-setup.sh`) provisions memory in
 layers: zram (on by default, sized to 2x RAM with a zstd compressor, pool
