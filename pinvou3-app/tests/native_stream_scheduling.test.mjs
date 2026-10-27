@@ -332,3 +332,59 @@ test('bridge onSessionEvent 包装层：流式事件打 begin、始终委托共�
   assert.deepEqual(begun, ['sB', 'sB2'], '前缀拼凑名与非流式事件不得触发 begin');
   assert.equal(delegated.length, 5, '所有事件（含未打 begin 的）都必须原样委托');
 });
+
+// r7 P1：抑制态 notify 不盖章的**行为锁**——r5 P2-2 的修复本体
+// （chat-events notify 钩子的 !isNotifySuppressed() 门控）此前没有任何测试
+// 能在删掉门控后变红。场景：后台会话的语义事件（reasoning_done 无
+// deferBackgroundNotify）在 runSyncOnSession 内执行——此刻 suppressNotify=true、
+// activeSessionId 翻转为该后台 sid，notify() 被调用但**没有任何渲染发布发生**，
+// 盖章即假 stall。删掉门控 → markDispatched 记到后台 sid → 第一条断言必红。
+test('后台路由期间的抑制态 notify 不打派发标记（r5 P2-2 行为锁）', () => {
+  const calls = [];
+  const h = createNativeStreamHarness({
+    count: 2,
+    probe: {
+      begin(sid) { calls.push(['begin', sid]); },
+      markScheduled(sid) { calls.push(['markScheduled', sid]); },
+      markDispatched(sid) { calls.push(['markDispatched', sid]); },
+    },
+  });
+  // s1 是后台会话（s0 活跃）：reasoning_done 的处理器在抑制态路由内跑
+  h.emit('s1', 'chat:reasoning_done', { index: 0 });
+  assert.equal(
+    calls.filter(([kind]) => kind === 'markDispatched').length, 0,
+    '抑制态 notify 不得打派发标记（删掉 !isNotifySuppressed() 门控此断言必红）',
+  );
+  // 对照：同一事件给活跃会话 → 直发路径是真实发布 → 必须盖章
+  h.emit('s0', 'chat:reasoning_done', { index: 0 });
+  assert.ok(
+    calls.some(([kind, sid]) => kind === 'markDispatched' && sid === 's0'),
+    '活跃会话的 notify 是真实发布，必须盖章',
+  );
+});
+
+// r7 P2-2 接线锁：后台渲染腿（1s 预览）发布前必须给探针条目打节流标记——
+// 否则 LLM 思考间隙的后台会话每 10s 上报一条 ~1032ms 的节律性假 stall。
+// 删掉 chat-events 里的 markThrottled 接线 → 此断言必红。
+// 首条 delta 同步渲染（无可再渲染的内容），第二条 delta 的文本要等 1s
+// 后沿才渲染——节流标记正是那一条后沿发布的（与「1000ms edge」用例同构）。
+test('后台渲染腿给探针条目打节流标记（r7 P2-2 接线锁）', () => {
+  const calls = [];
+  const h = createNativeStreamHarness({
+    count: 2,
+    probe: {
+      begin() {},
+      markScheduled() {},
+      markThrottled(sid) { calls.push(['markThrottled', sid]); },
+      markDispatched(sid) { calls.push(['markDispatched', sid]); },
+    },
+  });
+  h.emit('s1', 'chat:delta', { text: 'first' });
+  h.advance(40);
+  h.emit('s1', 'chat:delta', { text: ' latest' });
+  h.advance(2200); // 后台渲染腿（1000ms）fire → 渲染 → 后台分支发布
+  assert.ok(
+    calls.some(([kind, sid]) => kind === 'markThrottled' && sid === 's1'),
+    '后台渲染腿必须打节流标记（删掉该接线此断言必红）',
+  );
+});

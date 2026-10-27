@@ -26,6 +26,13 @@
  *     transitionFinalized 标记绕过隐藏豁免；武装条目按 supersede 先例补章
  *     t_frame。用户的自然冻结反应就是切走窗口——这些恰是最有价值的记录。
  *   - >5s 的真实派发冻结被 P2-A 上界静默吞——5s 新鲜度上界的已知取舍。
+ *   - 后台会话经 1s 预览腿发布的条目**不上报**（r7 P2-2）：其 recv→dispatch
+ *     ≈1000ms+32ms 的量级是应用自己的合并节流（LLM 思考间隙常态），不是
+ *     冻结；打 throttledOrigin 标记后只进 snapshot。可见会话的 180ms 渲染
+ *     合并腿低于 120ms 上报阈值，不构成同类噪音。
+ *   - 先章有效分支对等待超阈值的条目补章 t_frame（r7 P2-3）：冻结中排队的
+ *     终态 notify 解冻后先于 rAF 执行，不补章则该条 dispatch→frame 为 null、
+ *     真实冻结零记录。t_dispatch 首章有效，归因不颠倒。
  */
 (function (root) {
   "use strict";
@@ -95,6 +102,11 @@
     // 卡了」和「浏览器节流」，隐藏期起源的条目一律不上报（snapshot 仍可见，
     // 只是不进诊断流）。
     if (entry.hiddenOrigin) return;
+    // r7 P2-2：后台预览腿的合并节流被当成 stall 上报过（后台会话生成停顿
+    // ≥1s 时每会话每 10s 一条 ~1032ms 记录，受控时钟实测）——那 ~1s 是应用
+    // 自己 BACKGROUND_STREAM_RENDER_THROTTLE_MS 的节流，不是主线程冻结，
+    // 节律性假信号会支配诊断流。打标条目不上报（snapshot 仍可见）。
+    if (entry.throttledOrigin) return;
     // 先确认诊断模块可用、再消耗节流窗口（评审 P3：诊断缺失/record 抛错时
     // 不该把该会话的 10s 节流窗口白白烧掉）。
     var diagnostics = root.PinvouAuthoritySyncDiagnostics;
@@ -192,6 +204,13 @@
       var entry = currentBySession[sid || ""];
       if (entry && entry.t_sched == null) entry.t_sched = now();
     },
+    /** r7 P2-2：这条目目的 recv→dispatch 间隔含**应用自己的**合并节流（后台
+     * 会话 1s 预览腿），不是主线程冻结——打标后 finalize 不上报（snapshot
+     * 保留，段差仍可查）。调用方是 chat-events 的后台渲染腿。 */
+    markThrottled: function (sid) {
+      var entry = currentBySession[sid || ""];
+      if (entry && !entry.finalized) entry.throttledOrigin = true;
+    },
     /** 可见发布已执行（React 状态已更新）。缺 scheduled 视为同步路径，补齐。 */
     markDispatched: function (sid) {
       var entry = currentBySession[sid || ""];
@@ -203,6 +222,14 @@
       if (entry.t_dispatch != null) {
         // 已有派发章：只更新 t_sched（如有），不动 t_dispatch
         if (entry.t_sched == null) entry.t_sched = entry.t_dispatch;
+        // r7 P2-3：先章有效分支的补章——终态 notify 在冻结中排队、解冻后先于
+        // 迟到的 rAF 执行时，帧还没回来。不补章的话这条 dispatch→frame 就是
+        // null，真实冻结零记录（受控时钟实测 recorded:[]）。与 begin-supersede/
+        // 转变收尾同一先例：等待超阈值才补章；补 t_frame 不动 t_dispatch，
+        // 分段归因不颠倒（recv→dispatch 保持在首章量级）。
+        if (entry.t_frame == null && now() - entry.t_dispatch > STALL_DISPATCH_TO_FRAME_MS) {
+          entry.t_frame = now();
+        }
         finalize(entry);
         return;
       }
