@@ -1345,6 +1345,174 @@ fn readonly_operand_gate_keeps_admitting_operands_under_cd_destination() {
         .expect("a second cd folds against the first destination");
 }
 
+/// A pipeline stage runs in a subshell, so a `cd` or `gh` stage must exempt
+/// or fold nothing past its `|`: judging a segment by its first program left
+/// every operand after the pipe unchecked (`cd sub | cat /etc/passwd` read
+/// the file; `gh … | cat <outside>` did too). The gate judges each stage on
+/// its own and refuses `cd` as a stage outright.
+#[cfg(unix)]
+#[test]
+fn readonly_operand_gate_judges_every_pipeline_stage_on_its_own() {
+    let workspace = tempdir().expect("workspace");
+    let outside = tempdir().expect("outside");
+    std::fs::create_dir(workspace.path().join("sub")).expect("subdir");
+    std::fs::write(outside.path().join("secret.txt"), "secret").expect("outside file");
+    std::os::unix::fs::symlink(
+        outside.path().join("secret.txt"),
+        workspace.path().join("link"),
+    )
+    .expect("outside symlink at the workspace root");
+    let roots = [workspace.path().to_path_buf()];
+    let secret = outside.path().join("secret.txt").display().to_string();
+
+    for command in [
+        "cd sub | cat /etc/passwd".to_string(),
+        "cd sub | cat; cat link".to_string(),
+        "pwd; cd sub | cat link".to_string(),
+        "cat link | cd sub".to_string(),
+    ] {
+        let error = enforce_readonly_workspace_operands(&command, &roots, workspace.path())
+            .expect_err("a `cd` pipeline stage must be refused")
+            .to_string();
+        assert!(
+            error.contains("cwd.pipeline_stage") || error.contains("operand.outside_workspace"),
+            "{command}: {error}"
+        );
+    }
+    for command in [
+        format!("gh issue list | cat {secret}"),
+        "gh issue list | cat link".to_string(),
+        format!("ls | gh issue list | cat {secret}"),
+    ] {
+        let error = enforce_readonly_workspace_operands(&command, &roots, workspace.path())
+            .expect_err("a gh stage exempts only itself")
+            .to_string();
+        assert!(
+            error.contains("operand.outside_workspace"),
+            "{command}: {error}"
+        );
+    }
+    // The exemption still holds for the gh stage's own operands, and an
+    // ordinary pipeline keeps working.
+    enforce_readonly_workspace_operands("gh issue view 5287 | head -n 3", &roots, workspace.path())
+        .expect("gh stage keeps its exemption");
+    enforce_readonly_workspace_operands("ls sub | wc -l", &roots, workspace.path())
+        .expect("plain pipelines stay admitted");
+}
+
+/// Glob operands are judged by what they expand to, not by their spelling:
+/// `*` exists on no disk, so the literal check skipped it while the shell
+/// expanded it over an in-workspace symlink to an outside file.
+#[cfg(unix)]
+#[test]
+fn readonly_operand_gate_judges_glob_expansions_by_resolved_location() {
+    let workspace = tempdir().expect("workspace");
+    let outside = tempdir().expect("outside");
+    let sub = workspace.path().join("sub");
+    std::fs::create_dir(&sub).expect("subdir");
+    std::fs::write(sub.join("inner.txt"), "inside").expect("inside file");
+    std::fs::create_dir(workspace.path().join("clean")).expect("clean dir");
+    std::fs::write(workspace.path().join("clean").join("a.txt"), "a").expect("clean file");
+    std::fs::write(outside.path().join("secret.txt"), "secret").expect("outside file");
+    std::os::unix::fs::symlink(outside.path().join("secret.txt"), sub.join("link"))
+        .expect("outside symlink under sub");
+    std::os::unix::fs::symlink(outside.path(), workspace.path().join("dirlink"))
+        .expect("outside directory symlink");
+    let roots = [workspace.path().to_path_buf()];
+
+    for command in [
+        "cd sub; cat *",
+        "cd sub && od -c *",
+        "cat sub/*",
+        "cat sub/l*",
+        "cat */link",
+        "cat */li*",
+        "cat dirlink/*",
+        "cat * | head -3",
+        "wc -c sub/*",
+    ] {
+        let error = enforce_readonly_workspace_operands(command, &roots, workspace.path())
+            .expect_err("a glob expanding to an outside location must be refused")
+            .to_string();
+        assert!(
+            error.contains("operand.outside_workspace"),
+            "{command}: {error}"
+        );
+    }
+    // Expansions that stay inside, and globs that match nothing, are admitted.
+    for command in [
+        "cat clean/*",
+        "cat clean/*.txt",
+        "wc -c clean/a*",
+        "cat sub/*.txt",
+        "cat nomatch*",
+        "find . -name *.rs",
+        "cd clean; cat *",
+    ] {
+        enforce_readonly_workspace_operands(command, &roots, workspace.path())
+            .unwrap_or_else(|error| panic!("{command} must stay admitted: {error}"));
+    }
+    // Hidden entries are expanded only when the component asks for them.
+    std::os::unix::fs::symlink(outside.path().join("secret.txt"), sub.join(".hidden-link"))
+        .expect("hidden outside symlink");
+    enforce_readonly_workspace_operands("cat sub/*.txt", &roots, workspace.path())
+        .expect("`*` does not expand hidden entries");
+    let error = enforce_readonly_workspace_operands("cat sub/.*", &roots, workspace.path())
+        .expect_err("`.*` does")
+        .to_string();
+    assert!(error.contains("operand.outside_workspace"), "{error}");
+}
+
+/// The escapes end to end: none of these may return the outside content
+/// under `ShellPolicy::ReadOnly`, whichever lane they would have taken.
+#[cfg(unix)]
+#[tokio::test]
+async fn readonly_shell_refuses_pipeline_cd_and_glob_escapes_end_to_end() {
+    let workspace = tempdir().expect("workspace");
+    let outside = tempdir().expect("outside");
+    let sub = workspace.path().join("sub");
+    std::fs::create_dir(&sub).expect("subdir");
+    std::fs::write(sub.join("inner.txt"), "inside\n").expect("inside file");
+    std::fs::write(outside.path().join("secret.txt"), "TOPSECRET-OUTSIDE\n").expect("secret");
+    std::os::unix::fs::symlink(outside.path().join("secret.txt"), sub.join("link"))
+        .expect("outside symlink under sub");
+    std::os::unix::fs::symlink(
+        outside.path().join("secret.txt"),
+        workspace.path().join("link"),
+    )
+    .expect("outside symlink at the root");
+    let context = ToolContext::new(workspace.path())
+        .with_shell_policy(crate::worker_profile::ShellPolicy::ReadOnly);
+
+    for command in [
+        "cd sub | cat /etc/passwd",
+        "cd sub | cat; cat link",
+        "cd sub; cat *",
+        "cd sub && cat *",
+        "cat * | head -3",
+        "cat */link",
+    ] {
+        let result = LowercaseBashTool
+            .execute(json!({"command": command}), &context)
+            .await;
+        let content = match &result {
+            Ok(output) => {
+                assert!(
+                    !output.success,
+                    "{command} must not succeed: {}",
+                    output.content
+                );
+                output.content.clone()
+            }
+            Err(error) => error.to_string(),
+        };
+        assert!(
+            !content.contains("TOPSECRET-OUTSIDE") && !content.contains("User Database"),
+            "{command} leaked outside content: {content}"
+        );
+    }
+}
+
 /// A compound probe admitted by the bounded grammar must actually execute
 /// end to end under `ShellPolicy::ReadOnly`: the sequence routes through the
 /// shell lane (direct argv cannot bind `&&`), `cd` confines to the
@@ -1516,6 +1684,24 @@ fn readonly_github_shell_calls_obey_the_host_network_policy_before_spawn() {
     assert!(denied.contains("blocked by the active network policy"));
     enforce_readonly_github_network_policy("git status", &deny)
         .expect("local reads do not consult the network policy");
+    // A gh read reaches the network from inside a compound exactly like a
+    // bare one, so every sequence segment and pipeline stage is judged.
+    for compound in [
+        "pwd; gh issue list",
+        "ls && gh issue view 5287",
+        "gh issue list | head -n 3",
+        "git status || gh pr view 7",
+    ] {
+        let denied = enforce_readonly_github_network_policy(compound, &deny)
+            .expect_err("a gh stage inside a compound must consult the policy")
+            .to_string();
+        assert!(
+            denied.contains("blocked by the active network policy"),
+            "{compound}: {denied}"
+        );
+    }
+    enforce_readonly_github_network_policy("git status; wc -l README.md", &deny)
+        .expect("compounds without a gh stage stay local");
 
     let prompt = context(crate::network_policy::DecisionToml::Prompt);
     let prompted = enforce_readonly_github_network_policy("gh issue view 5287", &prompt)

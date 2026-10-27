@@ -3888,7 +3888,19 @@ fn enforce_readonly_github_network_policy(
     command: &str,
     context: &ToolContext,
 ) -> Result<(), ToolError> {
-    if !is_github_readonly_command(command) {
+    // Judge every pipeline stage of every sequence segment with the same
+    // splits the classifier used: `pwd; gh repo view` and `gh repo view |
+    // head` reach the network exactly like a bare `gh repo view`, so they
+    // must consult the decider exactly like it. Judging the whole command
+    // would see a compound, classify it as "not a gh read", and skip the
+    // policy for the gh stage inside it.
+    let reaches_github = readonly_sequence_segments(command).is_some_and(|segments| {
+        segments
+            .iter()
+            .flat_map(|segment| segment.split('|'))
+            .any(is_github_readonly_command)
+    });
+    if !reaches_github {
         return Ok(());
     }
     let Some(decider) = context.network_policy.as_ref() else {
@@ -4135,21 +4147,44 @@ fn enforce_readonly_workspace_operands(
 }
 
 /// Operand containment for one sequence segment of a read-only command.
-/// A leading `gh` keeps its whole-segment exemption (high-level gh reads do
-/// not consume local path operands; their host is pinned and evaluated
-/// separately by the network-policy guard), and a leading `cd` has its
-/// single operand resolved against the workspace like the shell working
-/// directory itself. Returns the working directory the next segment runs
-/// under: unchanged for non-`cd` segments, the canonicalized `cd`
-/// destination for an admitted `cd`.
+///
+/// A segment with a pipeline is judged stage by stage, because every stage
+/// runs in its own subshell against the same working directory: a `gh`
+/// stage exempts only itself (high-level gh reads do not consume local path
+/// operands; their host is pinned and evaluated separately by the
+/// network-policy guard), and a `cd` stage is refused outright — it persists
+/// nowhere, so there is no destination to fold and nothing a later stage
+/// could safely be resolved against. Judging the whole segment by its first
+/// program would let `gh … | cat /etc/passwd` or `cd sub | cat /etc/passwd`
+/// skip every operand after the `|`.
+///
+/// An unpiped segment that is `cd <one relative path>` has its operand
+/// resolved against the workspace like the shell working directory itself.
+/// Returns the working directory the next segment runs under: unchanged for
+/// every other segment, the canonicalized `cd` destination for an admitted
+/// `cd`.
 fn enforce_readonly_segment_operands(
     segment: &str,
     roots: &[PathBuf],
     effective_cwd: &std::path::Path,
 ) -> Result<std::path::PathBuf, ToolError> {
-    let argv = shlex::split(&normalize_windows_command_paths(segment)).ok_or_else(|| {
-        ToolError::invalid_input("Could not parse read-only command arguments".to_string())
-    })?;
+    let stages: Vec<&str> = segment.split('|').collect();
+    if stages.len() > 1 {
+        for stage in stages {
+            let argv = readonly_segment_argv(stage)?;
+            match argv.first().map(String::as_str) {
+                Some("cd") => {
+                    return Err(ToolError::permission_denied(format!(
+                        "[shell.readonly.cwd.pipeline_stage] Read-only `cd` is admitted only as a whole sequence segment, never as a pipeline stage; refused {stage:?}."
+                    )));
+                }
+                Some("gh") => {}
+                _ => enforce_readonly_argv_operands(&argv, roots, effective_cwd)?,
+            }
+        }
+        return Ok(effective_cwd.to_path_buf());
+    }
+    let argv = readonly_segment_argv(segment)?;
     if argv.first().is_some_and(|program| program == "gh") {
         return Ok(effective_cwd.to_path_buf());
     }
@@ -4173,6 +4208,23 @@ fn enforce_readonly_segment_operands(
         }
         return Ok(resolved);
     }
+    enforce_readonly_argv_operands(&argv, roots, effective_cwd)?;
+    Ok(effective_cwd.to_path_buf())
+}
+
+fn readonly_segment_argv(segment: &str) -> Result<Vec<String>, ToolError> {
+    shlex::split(&normalize_windows_command_paths(segment)).ok_or_else(|| {
+        ToolError::invalid_input("Could not parse read-only command arguments".to_string())
+    })
+}
+
+/// Judge every operand of one parsed command against the workspace roots,
+/// resolving relative spellings against `effective_cwd`.
+fn enforce_readonly_argv_operands(
+    argv: &[String],
+    roots: &[PathBuf],
+    effective_cwd: &std::path::Path,
+) -> Result<(), ToolError> {
     for token in argv.iter().skip(1) {
         if token.starts_with('-') && (token.contains('/') || token.contains('\\')) {
             return Err(ToolError::permission_denied(format!(
@@ -4236,6 +4288,11 @@ fn enforce_readonly_segment_operands(
             )));
         }
 
+        if value.contains('*') {
+            enforce_readonly_glob_operand(value, roots, effective_cwd)?;
+            continue;
+        }
+
         let joined = effective_cwd.join(candidate);
         if joined.exists() {
             let resolved = joined.canonicalize().map_err(|error| {
@@ -4250,7 +4307,109 @@ fn enforce_readonly_segment_operands(
             }
         }
     }
-    Ok(effective_cwd.to_path_buf())
+    Ok(())
+}
+
+/// Containment for a relative operand that carries a glob. The classifier's
+/// charset admits `*` as the only wildcard (`?`, `[`, and `{` are refused
+/// outright), and the shell expands it against the live working directory —
+/// including entries that are symlinks to files outside the workspace, which
+/// the literal check above never sees because the spelling `*` exists on no
+/// disk. Walk the pattern the way the shell does (component by component,
+/// `*` matching within one name, hidden entries only when the component asks
+/// for them, symlinked directories followed) and judge every match by its
+/// resolved location. No match is inert: the shell either errors (zsh
+/// `nomatch`) or hands the literal spelling to a program that finds no file.
+fn enforce_readonly_glob_operand(
+    value: &str,
+    roots: &[PathBuf],
+    effective_cwd: &std::path::Path,
+) -> Result<(), ToolError> {
+    let components: Vec<&str> = value
+        .split('/')
+        .filter(|component| !component.is_empty() && *component != ".")
+        .collect();
+    let mut matches = Vec::new();
+    collect_readonly_glob_matches(effective_cwd, &components, &mut matches);
+    for matched in matches {
+        let resolved = matched.canonicalize().map_err(|error| {
+            ToolError::permission_denied(format!(
+                "[shell.readonly.operand.unresolved] Could not prove glob operand {value:?} match {matched:?} stays in the workspace: {error}"
+            ))
+        })?;
+        if !roots.iter().any(|root| resolved.starts_with(root)) {
+            return Err(ToolError::permission_denied(format!(
+                "[shell.readonly.operand.outside_workspace] Read-only Scout shell glob operand {value:?} expands to {matched:?}, which resolves outside the workspace. Use the bounded File read/search actions for project evidence."
+            )));
+        }
+    }
+    Ok(())
+}
+
+fn collect_readonly_glob_matches(
+    base: &std::path::Path,
+    components: &[&str],
+    matches: &mut Vec<PathBuf>,
+) {
+    let Some((component, rest)) = components.split_first() else {
+        matches.push(base.to_path_buf());
+        return;
+    };
+    if !component.contains('*') {
+        let next = base.join(component);
+        if rest.is_empty() {
+            // `symlink_metadata` so a dangling symlink still counts as a
+            // match the shell would hand to the program.
+            if next.symlink_metadata().is_ok() {
+                matches.push(next);
+            }
+        } else if next.is_dir() {
+            collect_readonly_glob_matches(&next, rest, matches);
+        }
+        return;
+    }
+    let Ok(entries) = std::fs::read_dir(base) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let name = entry.file_name();
+        // A name that is not UTF-8 cannot be matched textually; count it as a
+        // match so its location is still judged (fail closed).
+        let matched = name.to_str().is_none_or(|name| {
+            (!name.starts_with('.') || component.starts_with('.'))
+                && readonly_star_match(component, name)
+        });
+        if !matched {
+            continue;
+        }
+        let next = base.join(&name);
+        if rest.is_empty() {
+            matches.push(next);
+        } else if next.is_dir() {
+            collect_readonly_glob_matches(&next, rest, matches);
+        }
+    }
+}
+
+/// Match one path component against a pattern whose only wildcard is `*`
+/// (any run of characters, including none).
+fn readonly_star_match(pattern: &str, name: &str) -> bool {
+    let mut pieces = pattern.split('*');
+    let first = pieces.next().unwrap_or("");
+    let Some(mut rest) = name.strip_prefix(first) else {
+        return false;
+    };
+    let pieces: Vec<&str> = pieces.collect();
+    let Some((last, middle)) = pieces.split_last() else {
+        return rest.is_empty();
+    };
+    for piece in middle {
+        match rest.find(piece) {
+            Some(offset) => rest = &rest[offset + piece.len()..],
+            None => return false,
+        }
+    }
+    rest.ends_with(last)
 }
 
 fn readonly_sanitized_path_from(

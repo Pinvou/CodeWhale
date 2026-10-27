@@ -562,15 +562,18 @@ fn readonly_tokens_admitted(trimmed: &str) -> bool {
 /// - compound sequences `a; b`, `a && b`, `a || b`, where **every** segment
 ///   must itself be an admitted read-only command (an empty segment —
 ///   including `;;` or a trailing `;` — rejects); a bare `&` still refuses;
-/// - `cd <one relative path>` as a standalone segment or sequence prefix,
-///   with the operand additionally resolved against the workspace at the
-///   execution seam;
+///   at most `MAX_READONLY_SEQUENCE_SEGMENTS` segments;
+/// - `cd <one relative path>` as a standalone segment or sequence prefix —
+///   never a pipeline stage, where it would run in a subshell and persist
+///   nowhere the operand gate could follow — with the operand additionally
+///   resolved against the workspace at the execution seam;
 /// - read-only `od` dump forms (display radices plus numeric `-j`/`-N`),
 ///   piped in either direction like any other segment;
 /// - pipelines `a | b`, where **every** segment must itself be an admitted
 ///   read-only command (an empty segment — including `||` — rejects);
-/// - glob `*` arguments, expanded by the shell only against workspace paths
-///   the operand gate already confines;
+/// - glob `*` arguments, the only wildcard the charset admits; the operand
+///   gate expands each one against the live working directory and judges
+///   every match by its resolved location before any shell runs;
 /// - `git -C <dir> <subcommand>` and `git --no-pager <subcommand>`, whose
 ///   remainder re-enters the existing per-subcommand option tables;
 /// - `find` without any mutating primary (`-delete`, `-exec`, `-execdir`,
@@ -601,18 +604,41 @@ pub fn is_agent_readonly_shell_command(command: &str) -> bool {
     }
     // A sequence (`;` / `&&` / `||`) is admitted only when every segment is:
     // the same every-segment rule the pipeline split applies, one level up.
-    // Within a segment, a pipeline is admitted only when every stage is:
-    // `a | b` is two read-only commands, while `a | | b`, `a |`, and a
-    // dangling pipe around a separator all carry an empty stage and reject.
     // A bare `&` refuses. Quoted separators inside an argument mis-split
     // here, which only ever makes a segment fail classification (fail
     // closed).
     let Some(segments) = readonly_sequence_segments(trimmed) else {
         return false;
     };
-    segments
-        .into_iter()
-        .all(|segment| segment.split('|').all(is_agent_readonly_segment))
+    // The execution seam resolves one `cd` destination per segment against
+    // the filesystem, so an unbounded sequence would let a single command
+    // buy O(segments × path depth) of gate work; real probes are a handful.
+    if segments.len() > MAX_READONLY_SEQUENCE_SEGMENTS {
+        return false;
+    }
+    segments.into_iter().all(readonly_segment_stages_admitted)
+}
+
+/// Upper bound on `;`/`&&`/`||` segments in one admitted read-only command.
+pub(crate) const MAX_READONLY_SEQUENCE_SEGMENTS: usize = 32;
+
+/// Admit one sequence segment: every pipeline stage must be an admitted
+/// read-only command (`a | b` is two read-only commands, while `a | | b`,
+/// `a |`, and a dangling pipe around a separator all carry an empty stage and
+/// reject), and `cd` may only be the whole segment. A pipeline stage runs in
+/// a subshell, so `cd sub | cat f` changes no working directory the operand
+/// gate could follow — the gate folds `cd` into the cwd of later segments
+/// precisely because an unpiped `cd` does persist — and a `cd` stage would
+/// otherwise end the gate's token walk before the operands after the `|`.
+fn readonly_segment_stages_admitted(segment: &str) -> bool {
+    let stages: Vec<&str> = segment.split('|').collect();
+    let piped = stages.len() > 1;
+    stages.into_iter().all(|stage| {
+        if piped && shell_words(stage).first().is_some_and(|word| word == "cd") {
+            return false;
+        }
+        is_agent_readonly_segment(stage)
+    })
 }
 
 /// Split a command on the sequence separators `;`, `&&`, and `||`.
@@ -620,12 +646,14 @@ pub fn is_agent_readonly_shell_command(command: &str) -> bool {
 /// Returns `None` when a bare `&` (backgrounding) appears: `&&` separates a
 /// sequence, a lone `&` refuses. The split is deliberately naive — straight
 /// byte scanning with no quote parsing, exactly like the `|` pipeline split
-/// above — because the charset gate has already refused every metacharacter
-/// that could make a quoted separator behave differently than this split
-/// assumes. A quoted `;` mis-splits; a mis-split that still classifies is
-/// refused before any shell runs by the operand gate's stricter
-/// `shlex::split` (`enforce_readonly_workspace_operands`), so the residual
-/// risk is a refusal, never an execution.
+/// in `readonly_segment_stages_admitted`. Quotes and backslashes pass the
+/// charset gate, so a quoted `;` mis-splits here; a mis-split that still
+/// classifies is refused before any shell runs by the operand gate's stricter
+/// `shlex::split` (`enforce_readonly_workspace_operands`), which rejects the
+/// now-unbalanced quote, so the residual risk is a refusal, never an
+/// execution. The destructive-command pass keeps its own
+/// `split_command_segments`, which folds `|` and a bare `&` into the same
+/// level and drops empty segments — the opposite contract from this gate.
 pub(crate) fn readonly_sequence_segments(command: &str) -> Option<Vec<&str>> {
     let mut segments = Vec::new();
     let bytes = command.as_bytes();
@@ -2358,6 +2386,10 @@ mod tests {
             "od -c x",
             "od -c x | head",
             "od -A d -j 2 -N 8 -c x",
+            // An unpiped `cd` persists, so a later segment may `cd` again
+            // and the operand gate folds both.
+            "cd sub; cd deeper; wc -c notes.md",
+            "pwd; cd sub && ls",
         ] {
             assert!(
                 is_agent_readonly_shell_command(command),
@@ -2368,8 +2400,8 @@ mod tests {
 
     /// Every denied compound shape: a bare `&`, empty sequence segments, a
     /// mutation or expansion in any segment, `cd` shapes that leave the
-    /// workspace shape rules, redirects anywhere, and `od` flags outside the
-    /// read-only display set.
+    /// workspace shape rules or sit inside a pipeline, redirects anywhere,
+    /// and `od` flags outside the read-only display set.
     #[test]
     fn agent_readonly_shell_rejects_unsafe_compound_cd_and_od_shapes() {
         for command in [
@@ -2387,6 +2419,13 @@ mod tests {
             "cd -L sub",
             "cd sub extra",
             "cd ~/x",
+            // A pipeline stage runs in a subshell: its `cd` persists nowhere
+            // and would end the gate's operand walk at the `|`.
+            "cd sub | cat /etc/passwd",
+            "cd sub | cat; cat link",
+            "pwd; cd sub | cat x",
+            "cat x | cd sub",
+            "cat x | \"cd\" sub",
             "echo hi > f; ls",
             "a`b`",
             "wc -c f; cat $(x)",
@@ -2401,6 +2440,19 @@ mod tests {
                 "{command} must stay denied for agents"
             );
         }
+    }
+
+    /// The sequence count is bounded: the execution seam resolves one `cd`
+    /// per segment against the filesystem, so a pathological chain must not
+    /// buy unbounded gate work.
+    #[test]
+    fn agent_readonly_shell_bounds_the_number_of_sequence_segments() {
+        let at_limit = vec!["pwd"; MAX_READONLY_SEQUENCE_SEGMENTS].join("; ");
+        assert!(is_agent_readonly_shell_command(&at_limit));
+        let over_limit = vec!["pwd"; MAX_READONLY_SEQUENCE_SEGMENTS + 1].join("; ");
+        assert!(!is_agent_readonly_shell_command(&over_limit));
+        let nested_cd = vec!["cd ."; MAX_READONLY_SEQUENCE_SEGMENTS + 1].join(";");
+        assert!(!is_agent_readonly_shell_command(&nested_cd));
     }
 
     /// The shell-lane routing term is classifier-level, not host-dependent:
