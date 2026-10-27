@@ -8,8 +8,23 @@ import test from "node:test";
 import { DatabaseSync } from "node:sqlite";
 import { RelayStateStore } from "../relay-state-store.js";
 import { RELAY_CONTROLLER_GUARD_FILENAME, RelayStateGuard } from "../relay-state-guard.js";
+import { WINDOWS_ACL_VERIFY_SCRIPT, buildGuardJournalAclScript } from "../windows-guard-acl.js";
 
 const childFile = fileURLToPath(new URL("./fixtures/controller-guard-child.mjs", import.meta.url));
+
+test("guard journal ACL script fails closed when either reviewed template anchor drifts", () => {
+  const inherited = "if (-not $acl.AreAccessRulesProtected) { throw 'ACL inheritance enabled' }";
+  const owner = "if ($acl.Owner -ne $current.Value -and $acl.Owner -ne $current.Translate([System.Security.Principal.NTAccount]).Value) { throw 'unexpected ACL owner' }";
+  const replacement = `$owner = $acl.GetOwner([System.Security.Principal.SecurityIdentifier]).Value
+if ($allowed -notcontains $owner) { throw 'unexpected ACL owner' }`;
+  assert.equal(buildGuardJournalAclScript(), WINDOWS_ACL_VERIFY_SCRIPT.replace(inherited, "").replace(owner, replacement));
+  for (const marker of [inherited, owner]) {
+    assert.equal(WINDOWS_ACL_VERIFY_SCRIPT.split(marker).length, 2);
+    assert.equal(buildGuardJournalAclScript(WINDOWS_ACL_VERIFY_SCRIPT.replace(marker, "")), null);
+    assert.equal(buildGuardJournalAclScript(WINDOWS_ACL_VERIFY_SCRIPT.replace(marker, `${marker}\n${marker}`)), null);
+  }
+  assert.equal(buildGuardJournalAclScript(null), null);
+});
 const security = process.platform === "win32" ? {
   protectPath: async () => {}, verifyPath: async () => {}, verifyAncestors: async () => {},
 } : {};
@@ -514,6 +529,62 @@ test("controller guard first release refuses unverifiable identity before removi
   const restarted = await f.open();
   assert.equal(restarted.readNamespace("guard_test").value.commits, 1);
   await restarted.close();
+});
+
+test("controller guard refuses an unexpected journal before releasing its owner", async t => {
+  const f = await fixture(t);
+  const guard = join(dirname(f.statePath), RELAY_CONTROLLER_GUARD_FILENAME);
+  const journal = `${guard}-journal`;
+  const fixtureFile = join(f.directory, "simulated-journal-metadata");
+  await fs.writeFile(fixtureFile, "simulated", { mode: 0o600 });
+  let injectJournal = false;
+  const filesystem = { ...fs, async lstat(target, ...args) {
+    if (injectJournal && target === journal) return fs.lstat(fixtureFile, ...args);
+    return fs.lstat(target, ...args);
+  } };
+  const owner = await f.open({ fs: filesystem });
+  const oldOwner = await fs.readFile(`${f.statePath}.lock`);
+  const primary = await fs.readFile(f.statePath);
+  // A separate process probes SQLite directly, without the JSON owner
+  // layer. Never open the live guard inode in this process: POSIX locks are
+  // process-scoped and doing so could release our own lock on close.
+  const probeSqlite = () => {
+    const result = spawnSync(process.execPath, ["--input-type=module", "-e", `
+      import { DatabaseSync } from "node:sqlite";
+      let db;
+      try {
+        db = new DatabaseSync(process.argv[1], { timeout: 0, allowExtension: false });
+        db.exec("BEGIN EXCLUSIVE");
+        console.log(JSON.stringify({ acquired: true }));
+      } catch (error) {
+        console.log(JSON.stringify({ acquired: false, errcode: error.errcode }));
+      } finally { db?.close(); }
+    `, guard], { encoding: "utf8", windowsHide: true, timeout: 15000 });
+    assert.ifError(result.error);
+    assert.equal(result.status, 0, result.stderr);
+    return JSON.parse(result.stdout.trim());
+  };
+  injectJournal = true;
+  try {
+    await assert.rejects(owner.close(), { code: "relay_state_guard_unexpected_journal" });
+    assert.deepEqual(await fs.readFile(`${f.statePath}.lock`), oldOwner);
+    assert.deepEqual(await fs.readFile(f.statePath), primary);
+    const contender = f.child();
+    assert.deepEqual(await contender.next(), { event: "error", code: "relay_state_locked" });
+    const lockResult = probeSqlite();
+    assert.equal(lockResult.acquired, false);
+    assert.ok([5, 6].includes(lockResult.errcode), `unexpected SQLite result: ${JSON.stringify(lockResult)}`);
+    assert.equal(await fs.readFile(fixtureFile, "utf8"), "simulated");
+  } finally {
+    injectJournal = false;
+    await owner.close();
+  }
+  assert.deepEqual(probeSqlite(), { acquired: true });
+  const successor = await f.open();
+  await successor.compareAndSwap("guard_test", "0", { commits: 1 });
+  await successor.close();
+  const restarted = await f.open();
+  assert.equal(restarted.readNamespace("guard_test").value.commits, 1);
 });
 
 test("controller guard late close after actual OS unlock cannot remove a successor's old owner", async t => {

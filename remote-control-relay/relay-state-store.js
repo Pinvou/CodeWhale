@@ -5,6 +5,7 @@ import * as nodeFs from "node:fs/promises";
 import { promisify } from "node:util";
 import { basename, dirname, isAbsolute, join, parse, relative, resolve, sep } from "node:path";
 import { RELAY_CONTROLLER_GUARD_FILENAME, RELAY_CONTROLLER_GUARD_JOURNAL, RelayStateGuard, requireControllerLockRuntime } from "./relay-state-guard.js";
+import { WINDOWS_ACL_VERIFY_SCRIPT, buildGuardJournalAclScript } from "./windows-guard-acl.js";
 
 export const RELAY_CONTROLLER_STATE_SCHEMA = "pinvou-relay-controller-state";
 export const RELAY_CONTROLLER_STATE_VERSION = 1;
@@ -61,28 +62,6 @@ foreach ($rule in $actual) {
   if ($rule.AccessControlType -ne [System.Security.AccessControl.AccessControlType]::Allow) { throw 'deny ACL present' }
   $sid = $rule.IdentityReference.Translate([System.Security.Principal.SecurityIdentifier]).Value
   if ($sids.Value -notcontains $sid) { throw 'unexpected ACL principal' }
-  if (($rule.FileSystemRights -band [System.Security.AccessControl.FileSystemRights]::FullControl) -ne [System.Security.AccessControl.FileSystemRights]::FullControl) { throw 'insufficient ACL rights' }
-  if ($kind -eq 'directory' -and $rule.InheritanceFlags -ne [System.Security.AccessControl.InheritanceFlags]'ContainerInherit, ObjectInherit') { throw 'directory ACL inheritance mismatch' }
-  if ($kind -eq 'file' -and $rule.InheritanceFlags -ne [System.Security.AccessControl.InheritanceFlags]::None) { throw 'file ACL inheritance mismatch' }
-}
-[Console]::Out.Write('ok')
-`;
-
-const WINDOWS_ACL_VERIFY_SCRIPT = `
-$ErrorActionPreference = 'Stop'
-$target = $env:PINVOU_ACL_TARGET
-$kind = $env:PINVOU_ACL_KIND
-$current = [System.Security.Principal.WindowsIdentity]::GetCurrent().User
-$allowed = @($current.Value, 'S-1-5-18', 'S-1-5-32-544') | Microsoft.PowerShell.Utility\\Select-Object -Unique
-$acl = Microsoft.PowerShell.Security\\Get-Acl -LiteralPath $target
-if (-not $acl.AreAccessRulesProtected) { throw 'ACL inheritance enabled' }
-if ($acl.Owner -ne $current.Value -and $acl.Owner -ne $current.Translate([System.Security.Principal.NTAccount]).Value) { throw 'unexpected ACL owner' }
-$actual = @($acl.Access)
-if ($actual.Count -ne $allowed.Count) { throw 'unexpected ACL entry count' }
-foreach ($rule in $actual) {
-  if ($rule.AccessControlType -ne [System.Security.AccessControl.AccessControlType]::Allow) { throw 'deny ACL present' }
-  $sid = $rule.IdentityReference.Translate([System.Security.Principal.SecurityIdentifier]).Value
-  if ($allowed -notcontains $sid) { throw 'unexpected ACL principal' }
   if (($rule.FileSystemRights -band [System.Security.AccessControl.FileSystemRights]::FullControl) -ne [System.Security.AccessControl.FileSystemRights]::FullControl) { throw 'insufficient ACL rights' }
   if ($kind -eq 'directory' -and $rule.InheritanceFlags -ne [System.Security.AccessControl.InheritanceFlags]'ContainerInherit, ObjectInherit') { throw 'directory ACL inheritance mismatch' }
   if ($kind -eq 'file' -and $rule.InheritanceFlags -ne [System.Security.AccessControl.InheritanceFlags]::None) { throw 'file ACL inheritance mismatch' }
@@ -197,13 +176,8 @@ async function verifyWindowsGuardJournal(target) {
   // restarts with a different elevation token. Owner equality is not provenance.
   // Empty bootstrap is normalized to User after all identity/ACL checks;
   // ready/nonempty guards remain strict User-owned. Never modify a live journal.
-  const script = WINDOWS_ACL_VERIFY_SCRIPT.replace(
-    "if (-not $acl.AreAccessRulesProtected) { throw 'ACL inheritance enabled' }", "",
-  ).replace(
-    "if ($acl.Owner -ne $current.Value -and $acl.Owner -ne $current.Translate([System.Security.Principal.NTAccount]).Value) { throw 'unexpected ACL owner' }",
-    `$owner = $acl.GetOwner([System.Security.Principal.SecurityIdentifier]).Value
-if ($allowed -notcontains $owner) { throw 'unexpected ACL owner' }`,
-  );
+  const script = buildGuardJournalAclScript();
+  if (script === null) fail("relay_state_acl_unverified");
   await runWindowsAclScript(script, target, "file");
 }
 
