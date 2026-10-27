@@ -990,10 +990,10 @@
       if (!requiredOpaqueId(localSessionId) || !localSessionId.startsWith("remote-")) {
         return Promise.reject(invalidTaskIntent());
       }
-      var command = quarantine ? "desktop_remote_proxy_quarantine" : "desktop_remote_proxy_archive";
-      var payload = quarantine ? { localSessionId: localSessionId, confirmed: true }
-        : { localSessionId: localSessionId };
-      return invoke(command, payload)
+      var operation = quarantine
+        ? invoke("desktop_remote_proxy_quarantine", { localSessionId: localSessionId, confirmed: true })
+        : invoke("desktop_remote_proxy_archive", { localSessionId: localSessionId });
+      return operation
         .then(function (cleaned) {
           ++proxyListIntent;
           proxyReadIntents[localSessionId] = (proxyReadIntents[localSessionId] || 0) + 1;

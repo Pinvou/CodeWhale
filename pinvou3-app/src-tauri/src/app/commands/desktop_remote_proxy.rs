@@ -308,6 +308,7 @@ pub(crate) async fn desktop_remote_proxy_archive<R: tauri::Runtime>(
     app: tauri::AppHandle<R>,
     local_session_id: String,
 ) -> Result<bool, String> {
+    super::desktop_remote_state::ensure_ready(&app)?;
     seal_history(app, local_session_id, false).await
 }
 
@@ -317,6 +318,7 @@ pub(crate) async fn desktop_remote_proxy_quarantine<R: tauri::Runtime>(
     local_session_id: String,
     confirmed: bool,
 ) -> Result<bool, String> {
+    super::desktop_remote_state::ensure_ready(&app)?;
     if !confirmed {
         return Err("remote_proxy_quarantine_confirmation_required".to_owned());
     }
