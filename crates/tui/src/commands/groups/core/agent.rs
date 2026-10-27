@@ -143,9 +143,9 @@ mod tests {
             "the dispatch brief must teach the handle_read activation path:\n{message}"
         );
         assert!(
-            message.contains("do not call a tool absent from the catalog"),
-            "a missing handle_read entry must not be called blindly when \
-             discovery cannot provide it:\n{message}"
+            message.contains("try calling `handle_read` directly once"),
+            "an exact-allowlist host can retain a deferred handle_read without \
+             discovery, so the hint must preserve one documented-name probe:\n{message}"
         );
         assert!(
             message.contains("transcript reads are unavailable in this session"),

@@ -597,7 +597,9 @@ fn server_to_entry(server: RegistryServer) -> Result<Option<McpRegistryServerEnt
 /// `start_registry_mcp_server` is deferred independently, so the prompt must
 /// teach its activation path instead of commanding an absent tool name.
 const REGISTRY_FIRST_PROMPT: &str = concat!(
-    "REGISTRY-FIRST POLICY: These are the top scored matches for your ",
+    "REGISTRY-FIRST POLICY: Host-declared built-in capability entry points ",
+    "from trusted host instructions take precedence; those capabilities do not ",
+    "require Registry discovery. Otherwise, these are the top scored matches for your ",
     "query from the local Registry snapshot; the full catalog stays on the ",
     "host. Treat a server as a match when it plausibly covers the task's ",
     "core specialized capability; wording need not be exact. If a returned ",

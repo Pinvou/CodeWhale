@@ -22923,7 +22923,7 @@ fn forkguard_subagent_skill_catalog_uses_tool_search_discovery() {
          lack tool_search or load_skill:\n{catalog}"
     );
     assert!(
-        catalog.contains("do not call tools absent from the provided catalog"),
+        catalog.contains("try `load_skill` directly once"),
         "restricted children must not be told to guess unavailable tool calls:\n{catalog}"
     );
     assert!(!catalog.contains("try `load_skill` directly anyway"));
@@ -22941,8 +22941,9 @@ fn forkguard_worker_record_hints_teach_handle_read_activation() {
         HANDLE_READ_ACTIVATION_HINT.contains("`tool_search`"),
         "shared hint must name the activation tool:\n{HANDLE_READ_ACTIVATION_HINT}"
     );
-    assert!(HANDLE_READ_ACTIVATION_HINT.contains("do not call a tool absent from the catalog"));
-    assert!(!HANDLE_READ_ACTIVATION_HINT.contains("try calling `handle_read` directly"));
+    assert!(HANDLE_READ_ACTIVATION_HINT.contains("try calling `handle_read` directly once"));
+    assert!(HANDLE_READ_ACTIVATION_HINT.contains("do not repeat failed probes"));
+    assert!(HANDLE_READ_ACTIVATION_HINT.contains("a schema receipt is not transcript evidence"));
 
     let instructions = agent_transcript_inspect_instructions("worker_1");
     assert!(

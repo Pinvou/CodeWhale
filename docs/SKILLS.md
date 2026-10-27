@@ -10,6 +10,23 @@ aliases share the same write path.
 For Claude Code plugin boundaries, see [CLAUDE_PLUGIN_COMPAT.md](CLAUDE_PLUGIN_COMPAT.md).
 For `skills_dir` and `[skills]` config keys, see [CONFIGURATION.md](CONFIGURATION.md).
 
+## Bundled-body upgrade boundary
+
+Generation 12 recognizes the exact generation-11 `mcp-discovery` body as a
+superseded shipped copy. Its fixture and digest cover that population; they do
+not claim a complete inventory of older shipped bodies. In particular, some
+generation-10-era discovery/builder/PDF/installer bodies are absent from the
+historical digest table. Unknown bodies are conservatively treated as edits
+and preserved, even when a catalog marker advances. Backfilling those versions
+requires a separate byte-level release audit, not a blanket overwrite rule.
+
+A user-customized discovery body is preserved independently of peer upgrades.
+If unchanged peers are refreshed, the marker can advance beside that edit;
+if all peers were intentionally removed and nothing changes, the existing
+no-op also leaves the old marker. A current marker alone does not establish
+that every installed body equals its shipped copy. Intentional deletions and
+user edits remain protected by the existing installer.
+
 ## Architecture (four layers)
 
 | Layer | Role |

@@ -165,10 +165,12 @@ fn forkguard_skill_index_usage_names_tool_search_activation() {
         "usage must tell the model how to activate deferred load_skill:\n{rendered}"
     );
     assert!(
-        rendered.contains("do not call tools absent from the provided catalog"),
+        rendered.contains("try `load_skill` directly once"),
         "failed discovery must respect the host's tool surface:\n{rendered}"
     );
     assert!(!rendered.contains("call `load_skill` anyway"));
+    assert!(rendered.contains("access was not denied"));
+    assert!(rendered.contains("do not repeat failed probes or guess other names"));
     assert!(rendered.contains("Use its known exact name directly"));
     assert!(rendered.contains("Do not carry a skill across turns unless re-mentioned"));
 }

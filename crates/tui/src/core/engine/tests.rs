@@ -13526,6 +13526,80 @@ fn print_skill_discovery_turn_metrics() {
 }
 
 #[test]
+fn forkguard_parent_deferred_tools_remain_reachable_without_discovery() {
+    // An exact embedding policy can retain deferred entries while omitting
+    // tool_search. A documented-name probe then publishes schema, not evidence
+    // of execution. Denials must still remove the same entry entirely.
+    let names = ["load_skill", "handle_read"];
+    let exact = ExactToolDispatchPolicy::try_new(
+        names
+            .into_iter()
+            .chain(std::iter::once("read"))
+            .map(str::to_string),
+    )
+    .unwrap();
+    for denied in [false, true] {
+        let catalog = names
+            .iter()
+            .map(|name| {
+                let mut tool = api_tool(name);
+                tool.defer_loading = Some(true);
+                tool
+            })
+            .chain(std::iter::once(api_tool("read")))
+            .collect();
+        let surface = policy_for_catalog(
+            catalog,
+            Some(exact.allowed_tools().to_vec()),
+            denied.then(|| exact.allowed_tools().to_vec()),
+            crate::tui::approval::ApprovalMode::Suggest,
+        );
+        assert!(
+            !surface
+                .catalog
+                .iter()
+                .any(|tool| tool.name == "tool_search")
+        );
+        for name in names {
+            assert_eq!(surface.allows_tool(name), !denied);
+            assert!(!surface.active_names.contains(name));
+            let mut hydrated = HashSet::new();
+            let result = maybe_hydrate_requested_deferred_tool(
+                name,
+                &json!({}),
+                &surface.catalog,
+                &surface.active_names,
+                &mut hydrated,
+            );
+            if denied {
+                assert!(result.is_none());
+                assert!(hydrated.is_empty());
+                continue;
+            }
+            let Some(DeferredHydration::Loaded(receipt)) = result else {
+                panic!("permitted deferred entry must publish its schema");
+            };
+            assert!(receipt.success);
+            let metadata = receipt.metadata.unwrap();
+            assert_eq!(metadata["executed"], false);
+            assert_eq!(metadata["retry_required"], true);
+            assert!(hydrated.contains(name));
+            assert!(
+                maybe_hydrate_requested_deferred_tool(
+                    name,
+                    &json!({}),
+                    &surface.catalog,
+                    &hydrated,
+                    &mut HashSet::new(),
+                )
+                .is_none(),
+                "the next call no longer requires schema hydration"
+            );
+        }
+    }
+}
+
+#[test]
 fn deferred_apply_patch_first_use_hydrates_schema_without_execution() {
     let mut apply_patch = api_tool("apply_patch");
     apply_patch.defer_loading = Some(true);
@@ -20073,8 +20147,8 @@ fn forkguard_subagent_context_hint_names_active_tools() {
          {context}"
     );
     assert!(
-        context.contains("do not call a tool absent from the catalog"),
-        "a missing activation path must not teach calls to absent tools:\n{context}"
+        context.contains("try calling `handle_read` directly once"),
+        "a missing discovery tool must not hide a permitted deferred entry:\n{context}"
     );
     assert!(
         context.contains("transcript reads are unavailable in this session"),

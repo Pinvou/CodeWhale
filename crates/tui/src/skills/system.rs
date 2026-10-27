@@ -33,10 +33,6 @@ const BUNDLED_SKILL_VERSION: &str = "12";
 /// supported.
 const SUPERSEDED_SHIPPED_BODY_DIGESTS: &[(&str, &str)] = &[
     (
-        "mcp-discovery",
-        "249aa4932ffcb0f5bbd886b7e266cbca894b01d435aebea4e0fa9fa0a0c1f956",
-    ),
-    (
         "documents",
         "27ba3161ab9448245d6658efadccf955ee8f4ef2cda4f7b825a99c45b8bd66aa",
     ),
@@ -47,6 +43,10 @@ const SUPERSEDED_SHIPPED_BODY_DIGESTS: &[(&str, &str)] = &[
     (
         "mcp-builder",
         "3caa3ca14b9fc9560726642c4b73c62b5261da580e882e144d36842904f02bb6",
+    ),
+    (
+        "mcp-discovery",
+        "249aa4932ffcb0f5bbd886b7e266cbca894b01d435aebea4e0fa9fa0a0c1f956",
     ),
     (
         "mcp-discovery",
