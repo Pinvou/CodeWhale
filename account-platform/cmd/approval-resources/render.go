@@ -15,6 +15,10 @@ func renderPublicResources(environment func(string) string) (map[string]string, 
 }
 
 func renderResources(environment func(string) string, existingBroker bool) (map[string]string, error) {
+	return renderResourcesKind(environment, existingBroker, false)
+}
+
+func renderResourcesKind(environment func(string) string, existingBroker, refundUpgrade bool) (map[string]string, error) {
 	if _, err := config.ParseAccountPlatformProfile(environment("ACCOUNT_PLATFORM_PROFILE")); err != nil {
 		return nil, errors.New("PUBLIC_RESOURCE_RENDER_REJECTED")
 	}
@@ -30,6 +34,9 @@ func renderResources(environment func(string) string, existingBroker bool) (map[
 	manifest, configuration, err := identity.ConsumerAuthorizationArtifacts(time.Now().UTC())
 	if existingBroker {
 		manifest, configuration, err = identity.ExistingBrokerAuthorizationArtifacts(time.Now().UTC())
+	}
+	if refundUpgrade {
+		manifest, configuration, err = identity.RefundUpgradeAuthorizationArtifacts(time.Now().UTC())
 	}
 	if err != nil {
 		return nil, errors.New("PUBLIC_RESOURCE_RENDER_REJECTED")

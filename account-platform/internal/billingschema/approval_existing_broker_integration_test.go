@@ -26,11 +26,14 @@ import (
 )
 
 type existingActualFixture struct {
-	url       string
-	cfg       events.NATSConfig
-	files     events.ExistingBrokerResourceFiles
-	js        jetstream.JetStream
-	resources string
+	url        string
+	cfg        events.NATSConfig
+	billingCfg events.NATSConfig
+	files      events.ExistingBrokerResourceFiles
+	js         jetstream.JetStream
+	resources  string
+	configPath string
+	serverPID  int
 }
 
 func existingPublicWrite(t *testing.T, directory, name string, raw []byte) string {
@@ -48,6 +51,10 @@ func existingPublicHash(raw []byte) string {
 }
 
 func existingActualBroker(t *testing.T, ctx context.Context, binary string) existingActualFixture {
+	return existingActualBrokerRefundFixture(t, ctx, binary, false)
+}
+
+func existingActualBrokerRefundFixture(t *testing.T, ctx context.Context, binary string, refundUpgrade bool) existingActualFixture {
 	t.Helper()
 	root := t.TempDir()
 	public, private, resources := filepath.Join(root, "identities"), filepath.Join(root, "private"), filepath.Join(root, "resources")
@@ -58,13 +65,16 @@ func existingActualBroker(t *testing.T, ctx context.Context, binary string) exis
 	}
 	roles := []string{"account-outbox-relay", "account-approval-relay", "billing-outbox-relay", "token-outbox-relay", "billing-command-executor", "token-command-executor", "event-resource-operator"}
 	keys := map[string]string{}
-	var operatorSeed []byte
+	var operatorSeed, billingSeed []byte
 	for _, role := range roles {
 		pair := freshNKey(t)
 		t.Cleanup(pair.Wipe)
 		keys[role], _ = pair.PublicKey()
 		if role == "event-resource-operator" {
 			operatorSeed, _ = pair.Seed()
+		}
+		if role == "billing-command-executor" {
+			billingSeed, _ = pair.Seed()
 		}
 	}
 	previousKeys := map[string]string{}
@@ -76,8 +86,12 @@ func existingActualBroker(t *testing.T, ctx context.Context, binary string) exis
 	previous, _ := json.Marshal(map[string]any{"version": 1, "purpose": "pinvou-nats-service-identities", "public_keys": previousKeys})
 	current, _ := json.Marshal(map[string]any{"version": 2, "purpose": "pinvou-nats-service-identities", "public_keys": keys, "previous_v1_sha256": existingPublicHash(previous), "overlap_expires_at": time.Now().UTC().Add(time.Hour).Truncate(time.Second).Format(time.RFC3339)})
 	op := existingPublicWrite(t, private, "operator.seed", operatorSeed)
+	billing := existingPublicWrite(t, private, "billing.seed", billingSeed)
 	identity := events.NATSAuthorizationArtifactFiles{CurrentFile: existingPublicWrite(t, public, "current.json", current), CurrentSHA256: existingPublicHash(current), PrivateIdentityFiles: []string{op}}
 	manifest, rendered, err := identity.ExistingBrokerAuthorizationArtifacts(time.Now().UTC())
+	if refundUpgrade {
+		manifest, rendered, err = identity.RefundUpgradeAuthorizationArtifacts(time.Now().UTC())
+	}
 	if err != nil {
 		t.Fatal("actual existing-broker ACL renderer failed")
 	}
@@ -91,7 +105,7 @@ func existingActualBroker(t *testing.T, ctx context.Context, binary string) exis
 	users := auth["authorization"].(map[string]any)["users"].([]any)
 	// This fixture-only identity seeds legacy resources and controlled drift.
 	// It is not an issued production role or part of the trusted projection.
-	auth["authorization"].(map[string]any)["users"] = append(users, map[string]any{"nkey": observerPublic, "permissions": map[string]any{"publish": []string{"$JS.API.>", "account.fixture.>", "account.approval-command.authorized.v1"}, "subscribe": []string{"_INBOX.existing-test.>"}}})
+	auth["authorization"].(map[string]any)["users"] = append(users, map[string]any{"nkey": observerPublic, "permissions": map[string]any{"publish": []string{"$JS.API.>", "account.fixture.>", "account.approval-command.authorized.v1", "billing.refund.requested.v1"}, "subscribe": []string{"_INBOX.existing-test.>"}}})
 	ca, cert, key := freshTLS(t)
 	caPath, certPath, keyPath := existingPublicWrite(t, private, "ca.crt", ca), existingPublicWrite(t, private, "server.crt", cert), existingPublicWrite(t, private, "server.key", key)
 	port := freshFreePort(t)
@@ -142,7 +156,11 @@ func existingActualBroker(t *testing.T, ctx context.Context, binary string) exis
 		t.Fatal("owned legacy stream failed")
 	}
 	for _, pair := range [][2]string{{"billing-command-executor-v1", "account.approval-command.authorized.v1"}, {"billing-refund-executor-v1", "billing.refund.requested.v1"}, {"token-model-lifecycle-executor-v1", "account.approval-command.authorized.v1"}, {"token-catalog-rollback-executor-v1", "account.approval-command.authorized.v1"}, {"token-credential-revoke-executor-v1", "account.approval-command.authorized.v1"}} {
-		_, err = stream.CreateConsumer(ctx, jetstream.ConsumerConfig{Name: pair[0], Durable: pair[0], FilterSubject: pair[1], AckPolicy: jetstream.AckExplicitPolicy, AckWait: 30 * time.Second, MaxDeliver: -1, BackOff: []time.Duration{time.Second, 2 * time.Second, 5 * time.Second, 10 * time.Second, 30 * time.Second, time.Minute, 2 * time.Minute, 5 * time.Minute}})
+		maxDeliver := -1
+		if refundUpgrade && (pair[0] == "billing-command-executor-v1" || pair[0] == "billing-refund-executor-v1") {
+			maxDeliver = 12
+		}
+		_, err = stream.CreateConsumer(ctx, jetstream.ConsumerConfig{Name: pair[0], Durable: pair[0], FilterSubject: pair[1], AckPolicy: jetstream.AckExplicitPolicy, AckWait: 30 * time.Second, MaxDeliver: maxDeliver, BackOff: []time.Duration{time.Second, 2 * time.Second, 5 * time.Second, 10 * time.Second, 30 * time.Second, time.Minute, 2 * time.Minute, 5 * time.Minute}})
 		if err != nil {
 			t.Fatal("owned published legacy consumer failed")
 		}
@@ -151,7 +169,7 @@ func existingActualBroker(t *testing.T, ctx context.Context, binary string) exis
 		t.Fatal("owned ordinary message failed")
 	}
 	files := events.ExistingBrokerResourceFiles{ApprovalConsumerResourceFiles: events.ApprovalConsumerResourceFiles{Identity: identity, ManifestFile: existingPublicWrite(t, resources, "manifest.json", manifest), ManifestSHA256: rendered.ManifestSHA256}}
-	return existingActualFixture{url: url, cfg: events.NATSConfig{Environment: "production", ResourceMode: "provisioned", RequireExplicitAuthentication: true, CAFile: caPath, SeedFile: op}, files: files, js: js, resources: resources}
+	return existingActualFixture{url: url, cfg: events.NATSConfig{Environment: "production", ResourceMode: "provisioned", RequireExplicitAuthentication: true, CAFile: caPath, SeedFile: op}, billingCfg: events.NATSConfig{Environment: "production", ResourceMode: "provisioned", RequireExplicitAuthentication: true, CAFile: caPath, SeedFile: billing}, files: files, js: js, resources: resources, configPath: configPath, serverPID: command.Process.Pid}
 }
 
 func TestExistingBrokerOperatorActualPGTLSNATS(t *testing.T) {

@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"time"
 
 	"github.com/Pinvou/pinvou3/account-platform/internal/platform/approvalpolicy"
@@ -38,6 +39,10 @@ func RunFreshApprovalStep(ctx context.Context, dsn string, expectedVersion int64
 // ExistingBrokerPrepare captures a hash-bound plan while the same exclusive
 // Account fence and empty-history checks used by initialization are held.
 const ExistingBrokerPrepare FreshApprovalStep = "prepare-existing-consumers"
+const ExistingBrokerPrepareRefundUpgrade FreshApprovalStep = "prepare-refund-upgrade"
+const ExistingBrokerUpgradeRefund FreshApprovalStep = "upgrade-refund-consumer"
+const ExistingBrokerCheckRefundUpgrade FreshApprovalStep = "check-refund-upgrade"
+const ExistingBrokerInspectRefundUpgrade FreshApprovalStep = "inspect-refund-upgrade"
 const ExistingBrokerPrepareTokenUpgrade FreshApprovalStep = "prepare-token-upgrade"
 const ExistingBrokerUpgradeToken FreshApprovalStep = "upgrade-token-consumers"
 const ExistingBrokerCheckTokenUpgrade FreshApprovalStep = "check-token-upgrade"
@@ -54,7 +59,7 @@ func RunExistingBrokerApprovalStep(ctx context.Context, dsn string, expectedVers
 
 func runEmptyHistoryApprovalStep(ctx context.Context, dsn string, expectedVersion int64, step FreshApprovalStep, resources func(context.Context, AdminApprovalControl) (json.RawMessage, error), existingBroker bool, planSHA256 string) (AdminApprovalControl, error) {
 	auditStep := step
-	if existingBroker && (step == ExistingBrokerPrepare || step == ExistingBrokerPrepareTokenUpgrade || step == ExistingBrokerUpgradeToken || step == ExistingBrokerCheckTokenUpgrade || step == ExistingBrokerVerify || step == ExistingBrokerInspectTokenUpgrade || step == ExistingBrokerInspect) {
+	if existingBroker && (step == ExistingBrokerPrepare || step == ExistingBrokerPrepareRefundUpgrade || step == ExistingBrokerUpgradeRefund || step == ExistingBrokerCheckRefundUpgrade || step == ExistingBrokerInspectRefundUpgrade || step == ExistingBrokerPrepareTokenUpgrade || step == ExistingBrokerUpgradeToken || step == ExistingBrokerCheckTokenUpgrade || step == ExistingBrokerVerify || step == ExistingBrokerInspectTokenUpgrade || step == ExistingBrokerInspect) {
 		step = FreshApprovalResources
 	}
 	queryCurrent := existingBroker && step == FreshApprovalStatus && expectedVersion == 0
@@ -77,7 +82,9 @@ func runEmptyHistoryApprovalStep(ctx context.Context, dsn string, expectedVersio
 	if err != nil || !valid {
 		return AdminApprovalControl{}, ErrApprovalFreshInitialization
 	}
-	tx, err := c.Begin(ctx)
+	// Each post-lock statement must see a concurrent attempt committed while
+	// this transaction waited for the control row, regardless of server defaults.
+	tx, err := c.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.ReadCommitted})
 	if err != nil {
 		return AdminApprovalControl{}, ErrApprovalFreshInitialization
 	}
@@ -119,11 +126,14 @@ func runEmptyHistoryApprovalStep(ctx context.Context, dsn string, expectedVersio
 	if existingBroker {
 		prepare := ExistingBrokerPrepare
 		needsPlan := step == FreshApprovalResources || step == FreshApprovalActivate || step == FreshApprovalResume
-		if auditStep == ExistingBrokerPrepare || auditStep == ExistingBrokerPrepareTokenUpgrade {
+		if auditStep == ExistingBrokerPrepare || auditStep == ExistingBrokerPrepareRefundUpgrade || auditStep == ExistingBrokerPrepareTokenUpgrade {
 			needsPlan = false
 		}
 		if auditStep == ExistingBrokerUpgradeToken || auditStep == ExistingBrokerCheckTokenUpgrade || auditStep == ExistingBrokerInspectTokenUpgrade {
 			prepare = ExistingBrokerPrepareTokenUpgrade
+		}
+		if auditStep == ExistingBrokerUpgradeRefund || auditStep == ExistingBrokerCheckRefundUpgrade || auditStep == ExistingBrokerInspectRefundUpgrade {
+			prepare = ExistingBrokerPrepareRefundUpgrade
 		}
 		if needsPlan {
 			decoded, e := hex.DecodeString(planSHA256)
@@ -146,6 +156,22 @@ func runEmptyHistoryApprovalStep(ctx context.Context, dsn string, expectedVersio
 	if err != nil || history {
 		return AdminApprovalControl{}, ErrApprovalFreshInitialization
 	}
+	// A separate committed audit record is the one-shot send barrier. Account's
+	// exclusive control lock serializes competing attempts; the independent
+	// commit survives rollback or loss of the later broker response.
+	if existingBroker && (auditStep == ExistingBrokerPrepareRefundUpgrade || auditStep == ExistingBrokerUpgradeRefund) {
+		if _, err = tx.Exec(ctx, `SET LOCAL ROLE account_service`); err != nil {
+			return AdminApprovalControl{}, ErrApprovalFreshInitialization
+		}
+		var attempted bool
+		err = tx.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM public.audit_logs WHERE action='security.approval_refund_upgrade_attempt' AND resource_type='ADMIN_APPROVAL_CONTROL' AND resource_id='ADMIN_APPROVAL' AND change_summary->>'control_version'=$1 AND change_summary->>'approval_epoch'=$2 AND change_summary->>'authorization_relay_epoch'=$3)`, fmt.Sprint(control.Version), fmt.Sprint(control.ApprovalEpoch), fmt.Sprint(control.AuthorizationRelayEpoch)).Scan(&attempted)
+		if err != nil || attempted {
+			return AdminApprovalControl{}, ErrApprovalFreshInitialization
+		}
+		if auditStep == ExistingBrokerUpgradeRefund && recordRefundUpgradeAttempt(ctx, dsn, control, planSHA256) != nil {
+			return AdminApprovalControl{}, ErrApprovalFreshInitialization
+		}
+	}
 	var receipt json.RawMessage
 	if resources != nil {
 		receipt, err = resources(ctx, control)
@@ -153,7 +179,7 @@ func runEmptyHistoryApprovalStep(ctx context.Context, dsn string, expectedVersio
 			return AdminApprovalControl{}, ErrApprovalFreshInitialization
 		}
 	}
-	if existingBroker && (auditStep == ExistingBrokerInspectTokenUpgrade || auditStep == ExistingBrokerInspect || auditStep == ExistingBrokerCheckTokenUpgrade || auditStep == ExistingBrokerVerify) {
+	if existingBroker && (auditStep == ExistingBrokerInspectRefundUpgrade || auditStep == ExistingBrokerCheckRefundUpgrade || auditStep == ExistingBrokerInspectTokenUpgrade || auditStep == ExistingBrokerInspect || auditStep == ExistingBrokerCheckTokenUpgrade || auditStep == ExistingBrokerVerify) {
 		if tx.Commit(ctx) != nil {
 			return AdminApprovalControl{}, ErrApprovalFreshInitialization
 		}
@@ -215,4 +241,39 @@ func freshApprovalStepMatches(control AdminApprovalControl, step FreshApprovalSt
 		return control.Mode == AdminApprovalModeProofRequired && control.AuthorizationRelayState == AdminApprovalRelayFenced
 	}
 	return false
+}
+
+// recordRefundUpgradeAttempt commits before any UPDATE. Even a failed or
+// ambiguous commit blocks the broker operation; a committed marker cannot be
+// reused to send another update in this control epoch.
+func recordRefundUpgradeAttempt(ctx context.Context, dsn string, control AdminApprovalControl, planSHA256 string) error {
+	conn, err := pgx.Connect(ctx, dsn)
+	if err != nil {
+		return err
+	}
+	defer func() {
+		c, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		_ = conn.Close(c)
+	}()
+	tx, err := conn.Begin(ctx)
+	if err != nil {
+		return err
+	}
+	defer func() {
+		c, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		_ = tx.Rollback(c)
+	}()
+	if _, err = tx.Exec(ctx, `SET LOCAL lock_timeout='5s'; SET LOCAL statement_timeout='15s'; SET LOCAL ROLE account_service`); err != nil {
+		return err
+	}
+	summary, err := json.Marshal(map[string]any{"control_version": control.Version, "approval_epoch": control.ApprovalEpoch, "authorization_relay_epoch": control.AuthorizationRelayEpoch, "resource_receipt_sha256": planSHA256})
+	if err != nil {
+		return err
+	}
+	if _, err = tx.Exec(ctx, `INSERT INTO public.audit_logs(id,action,resource_type,resource_id,result,request_id,trace_id,change_summary,occurred_at) VALUES($1,'security.approval_refund_upgrade_attempt','ADMIN_APPROVAL_CONTROL','ADMIN_APPROVAL','SUCCEEDED',$2,'operator',$3,transaction_timestamp())`, uuid.New(), uuid.NewString(), summary); err != nil {
+		return err
+	}
+	return tx.Commit(ctx)
 }

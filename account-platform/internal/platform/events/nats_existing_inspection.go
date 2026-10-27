@@ -13,8 +13,20 @@ import (
 // plan. All original resource facts must still match; it never recaptures Q,
 // writes the plan file, or performs a broker mutation.
 func VerifyPreparedBrokerPlan(ctx context.Context, rawURL string, cfg NATSConfig, files ExistingBrokerResourceFiles, facts FreshApprovalControl, tokenUpgrade bool) ([]byte, error) {
+	kind := "existing"
+	if tokenUpgrade {
+		kind = "token"
+	}
+	return verifyPreparedBrokerOperation(ctx, rawURL, cfg, files, facts, kind)
+}
+
+func VerifyPreparedRefundUpgradePlan(ctx context.Context, rawURL string, cfg NATSConfig, files ExistingBrokerResourceFiles, facts FreshApprovalControl) ([]byte, error) {
+	return verifyPreparedBrokerOperation(ctx, rawURL, cfg, files, facts, "refund")
+}
+
+func verifyPreparedBrokerOperation(ctx context.Context, rawURL string, cfg NATSConfig, files ExistingBrokerResourceFiles, facts FreshApprovalControl, kind string) ([]byte, error) {
 	files = files.withAuthentication(cfg)
-	plan, err := readBrokerPlan(files, facts, tokenUpgrade)
+	plan, err := readBrokerOperation(files, facts, kind)
 	if err != nil {
 		return nil, err
 	}
@@ -27,8 +39,14 @@ func VerifyPreparedBrokerPlan(ctx context.Context, rawURL string, cfg NATSConfig
 		return nil, ErrNATSResources
 	}
 	wants := existingBrokerConfigurations()
-	if tokenUpgrade {
+	switch kind {
+	case "existing":
+	case "token":
 		wants = tokenUpgradeConfigurations()
+	case "refund":
+		wants = refundUpgradeConfigurations()
+	default:
+		return nil, ErrNATSResources
 	}
 	actual, err := readExistingCaptures(ctx, stream, wants)
 	if err != nil {

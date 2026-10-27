@@ -18,6 +18,7 @@ import (
 const existingBrokerPlanSchema = "approval-existing-broker-plan-v1"
 const existingBrokerReceiptSchema = "approval-existing-broker-cutover-receipt-v1"
 const tokenUpgradePlanSchema = "approval-token-consumer-upgrade-plan-v1"
+const refundUpgradePlanSchema = "approval-refund-consumer-upgrade-plan-v1"
 
 // Captures are public metadata, not event payloads. Integer strings preserve
 // exact sequence positions across JSON readers and operator review tools.
@@ -68,6 +69,14 @@ func existingBrokerConfigurations() []jetstream.ConsumerConfig {
 	return result
 }
 
+// refundUpgradeConfigurations is the exact historical pre-upgrade state.
+func refundUpgradeConfigurations() []jetstream.ConsumerConfig {
+	result := tokenUpgradeConfigurations()
+	result[0].MaxDeliver = 12
+	result[1].MaxDeliver = 12
+	return result
+}
+
 func tokenUpgradeConfigurations() []jetstream.ConsumerConfig {
 	result := existingBrokerConfigurations()
 	for i := 2; i < len(result); i++ {
@@ -77,6 +86,9 @@ func tokenUpgradeConfigurations() []jetstream.ConsumerConfig {
 }
 
 func existingConfigurationValid(actual, expected jetstream.ConsumerConfig) bool {
+	if expected.Name == approvalconsumer.LegacyBilling().Durable && actual.MaxDeliver == 12 {
+		expected.MaxDeliver = 12
+	}
 	if len(expected.BackOff) != 0 {
 		// The historical server projects the first BackOff into AckWait and
 		// supplies MaxAckPending=1000. Do not accept alternate values here:
@@ -114,10 +126,24 @@ func (plan existingBrokerPlan) validate(now time.Time) error {
 }
 
 func (plan existingBrokerPlan) validateKind(now time.Time, tokenUpgrade bool) error {
+	kind := "existing"
+	if tokenUpgrade {
+		kind = "token"
+	}
+	return plan.validateOperation(now, kind)
+}
+
+func (plan existingBrokerPlan) validateOperation(now time.Time, kind string) error {
 	schema := existingBrokerPlanSchema
 	wants := existingBrokerConfigurations()
-	if tokenUpgrade {
+	switch kind {
+	case "existing":
+	case "token":
 		schema, wants = tokenUpgradePlanSchema, tokenUpgradeConfigurations()
+	case "refund":
+		schema, wants = refundUpgradePlanSchema, refundUpgradeConfigurations()
+	default:
+		return ErrNATSResources
 	}
 	id, err := uuid.Parse(plan.OperationID)
 	if err != nil || id == uuid.Nil || id.String() != plan.OperationID || plan.Schema != schema || !canonicalSHA256(plan.IdentitySHA256) || !canonicalSHA256(plan.ManifestSHA256) {
@@ -173,10 +199,18 @@ func decodeExistingBrokerPlan(raw []byte, expected string, now time.Time) (exist
 }
 
 func decodeBrokerPlan(raw []byte, expected string, now time.Time, tokenUpgrade bool) (existingBrokerPlan, error) {
+	kind := "existing"
+	if tokenUpgrade {
+		kind = "token"
+	}
+	return decodeBrokerOperation(raw, expected, now, kind)
+}
+
+func decodeBrokerOperation(raw []byte, expected string, now time.Time, kind string) (existingBrokerPlan, error) {
 	var plan existingBrokerPlan
 	decoder := json.NewDecoder(bytes.NewReader(raw))
 	decoder.DisallowUnknownFields()
-	if !matchesSHA256(raw, expected) || decoder.Decode(&plan) != nil || plan.validateKind(now, tokenUpgrade) != nil {
+	if !matchesSHA256(raw, expected) || decoder.Decode(&plan) != nil || plan.validateOperation(now, kind) != nil {
 		return plan, ErrNATSResources
 	}
 	canonical, err := json.Marshal(plan)

@@ -16,6 +16,15 @@ import (
 // operators never create a stream or modify the retained refund durable, so
 // those inherited creation subjects are removed while their INFO remains.
 func (files NATSAuthorizationArtifactFiles) ExistingBrokerAuthorizationArtifacts(now time.Time) ([]byte, NATSConsumerAuthorizationRender, error) {
+	return files.existingBrokerAuthorizationArtifacts(now, false)
+}
+
+// RefundUpgradeAuthorizationArtifacts is a temporary operator-only projection.
+func (files NATSAuthorizationArtifactFiles) RefundUpgradeAuthorizationArtifacts(now time.Time) ([]byte, NATSConsumerAuthorizationRender, error) {
+	return files.existingBrokerAuthorizationArtifacts(now, true)
+}
+
+func (files NATSAuthorizationArtifactFiles) existingBrokerAuthorizationArtifacts(now time.Time, refundUpgrade bool) ([]byte, NATSConsumerAuthorizationRender, error) {
 	manifest, rendered, err := files.ConsumerAuthorizationArtifacts(now)
 	if err != nil {
 		return nil, rendered, err
@@ -68,6 +77,9 @@ func (files NATSAuthorizationArtifactFiles) ExistingBrokerAuthorizationArtifacts
 			}
 		}
 		permissions.Publish = append(permissions.Publish, "$JS.API.CONSUMER.INFO."+platformStream+"."+approvalconsumer.LegacyBilling().Durable)
+		if refundUpgrade {
+			permissions.Publish = append(permissions.Publish, "$JS.API.CONSUMER.CREATE."+platformStream+"."+refund.Name+"."+refund.FilterSubject)
+		}
 		var encoded bytes.Buffer
 		encoder := json.NewEncoder(&encoded)
 		encoder.SetEscapeHTML(false)

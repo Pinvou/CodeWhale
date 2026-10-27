@@ -8,6 +8,15 @@ import tempfile
 
 ROOT = Path(__file__).resolve().parents[2]
 REQUIRED = {
+    "TestActualHistoricalRefundUpgrade",
+    "TestRefundAttemptIsDurableWhenResultUnknown",
+    "TestRefundCLIUnknownACKReadback",
+    "TestRefundPreparationRejectsHistoricalDrift",
+    "TestRefundPreparationRejectsPendingOrAckPending",
+    "TestRefundUpgradeNeedsTemporaryOperatorPermission",
+    "TestRefundTemporaryPermissionReload",
+    "TestConcurrentRefundAttemptsSendAtMostOnce",
+    "TestRefundLostActualUpdateReplyCannotResend",
     "TestExistingBrokerOperatorActualPGTLSNATS",
     "TestExistingBrokerCLIActualPGTLSNATS",
     "TestExistingBrokerCLIUnknownACKReadbackAndRecovery",
@@ -19,6 +28,11 @@ REQUIRED = {
     "TestPasswordPreparationExactWorkloadRoute",
 }
 REQUIRED_CASES = {
+    "TestRefundPreparationRejectsPendingOrAckPending/pending",
+    "TestRefundPreparationRejectsPendingOrAckPending/ack-pending",
+    "TestRefundPreparationRejectsHistoricalDrift/shared-maxdeliver",
+    "TestRefundPreparationRejectsHistoricalDrift/refund-maxdeliver",
+    "TestRefundPreparationRejectsHistoricalDrift/token-pending",
     "TestExistingBrokerCLIUnknownACKReadbackAndRecovery/token-update-interrupted",
     "TestExistingBrokerCLIUnknownACKReadbackAndRecovery/billing-create-interrupted",
     "TestExistingBrokerCLIUnknownACKReadbackAndRecovery/token-update-timeout",
@@ -45,7 +59,7 @@ def main():
             sys.stderr.buffer.write(identity_build.stderr)
             raise SystemExit("IDENTITY_OPERATOR_BUILD_FAILED")
         environment = dict(os.environ, PINVOU_TEST_APPROVAL_OPERATOR_BINARY=binary, PINVOU_TEST_NATS_IDENTITY_BINARY=identity_binary, GIN_MODE="release")
-        command = ["go", "test", "-mod=readonly", "-json", "-count=1", "-p", "1", "-parallel=1", "-run", "Test(ExistingBroker|FreshApprovalOperator|PasswordPreparationExactWorkloadRoute)", "./internal/platform/events", "./internal/billingschema", "./cmd/approval-resources", "./internal/account"]
+        command = ["go", "test", "-mod=readonly", "-json", "-count=1", "-p", "1", "-parallel=1", "-run", "Test(ExistingBroker|FreshApprovalOperator|PasswordPreparationExactWorkloadRoute|ActualHistoricalRefundUpgrade|Refund|ConcurrentRefund)", "./internal/platform/events", "./internal/billingschema", "./cmd/approval-resources", "./internal/account"]
         result = subprocess.run(command, cwd=ROOT, env=environment, capture_output=True)
         passed, skipped = set(), set()
         for line in result.stdout.splitlines():

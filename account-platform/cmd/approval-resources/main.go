@@ -38,8 +38,8 @@ func main() {
 		fmt.Println(string(raw))
 		return
 	}
-	if len(os.Args) == 2 && (os.Args[1] == "render" || os.Args[1] == "render-existing-broker") {
-		result, err := renderResources(os.Getenv, os.Args[1] == "render-existing-broker")
+	if len(os.Args) == 2 && (os.Args[1] == "render" || os.Args[1] == "render-existing-broker" || os.Args[1] == "render-refund-upgrade") {
+		result, err := renderResourcesKind(os.Getenv, os.Args[1] == "render-existing-broker", os.Args[1] == "render-refund-upgrade")
 		if err != nil {
 			fmt.Fprintln(os.Stderr, "PUBLIC_RESOURCE_RENDER_FAILED")
 			os.Exit(1)

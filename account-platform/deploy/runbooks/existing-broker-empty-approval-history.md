@@ -75,6 +75,48 @@ Preparation performs INFO calls only. Review the file independently and project
 its SHA before any effect operation; hashing a file at service startup does not
 create trust. Token upgrade and Billing initialization use **different plans**.
 
+## Optional historical refund upgrade before Token preparation
+
+If the verified old shared Billing and refund durables both have MaxDeliver 12,
+Token preparation cannot start until a separately authorized refund upgrade has
+completed. Use this path only under an approved maintenance plan. Stop all
+Billing refund writers and outbox publishers; independently check the refund
+table and unpublished/in-flight refund outbox, as the Account approval lock
+does not fence Billing. Confirm empty required histories and zero consumer
+pending/ACK-pending. Back up and independently verify the state first.
+
+The offline `render-refund-upgrade` projection adds only the exact refund
+consumer CREATE API subject to the existing operator ACL. That NATS subject
+also accepts UPDATE and cannot restrict individual fields: isolate existing
+connections, exclusively control the operator credential, independently review
+the generated configuration, and use the reviewed CLI. Runtime roles do not
+receive this grant. Revoke it by restoring the reviewed `render-existing-broker`
+ACL after the operation; reload and verify the effective configuration and that
+old connections cannot retain the temporary permission.
+
+After quiesce/fence at version 3, use a **new, distinct** plan file and run
+`-action prepare-refund-upgrade -expected-version 3 -operation-id <new-UUID>`.
+Independently review its bytes and set `APPROVAL_EXISTING_PLAN_SHA256`. Use
+`inspect-refund-upgrade` for INFO-only classification, then
+`upgrade-refund-consumer` to change only MaxDeliver 12 to -1 on that same
+refund durable. `check-refund-upgrade` performs readback. The shared Billing
+consumer stays unchanged at 12, and the three Token consumers stay in their
+original legacy shape until the later Token plan. All positions, instances,
+other configuration and messages must match the original plan. Stream MaxAge
+still applies; -1 does not make messages live indefinitely.
+
+Before attempting the update, the CLI commits a protected audit marker for the
+control version and epochs. Once identity, plan, control and database checks pass and the marker is
+committed, even a broker preflight failure consumes this one-time attempt.
+A failure in those earlier checks writes no marker and sends no broker update. Never rerun the update or prepare a replacement plan in that
+epoch after an unknown result: preserve the original plan and use read-only
+`inspect-refund-upgrade`; independently determine any further recovery. This
+barrier assumes exclusive operator custody and use of the Account-controlled
+CLI, not a direct broker API call. Resume the normal sequence below only after
+readback is complete, temporary authority is removed, and its own preconditions
+are freshly verified. The Token and Billing plans remain separate from the
+refund plan.
+
 ## Explicit sequence
 
 All commands below start with `approval-resources existing-broker`. `status`

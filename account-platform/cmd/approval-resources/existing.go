@@ -33,14 +33,16 @@ func runExistingBroker(args []string, environment func(string) string) ([]byte, 
 		return nil, blocked
 	}
 	step := account.FreshApprovalStep(*action)
+	prepareRefund := step == account.ExistingBrokerPrepareRefundUpgrade
 	prepareToken := step == account.ExistingBrokerPrepareTokenUpgrade
-	prepare := prepareToken || step == account.ExistingBrokerPrepare
-	mutatingResources := step == account.ExistingBrokerUpgradeToken || step == account.FreshApprovalResources
+	prepare := prepareRefund || prepareToken || step == account.ExistingBrokerPrepare
+	mutatingResources := step == account.ExistingBrokerUpgradeRefund || step == account.ExistingBrokerUpgradeToken || step == account.FreshApprovalResources
 	if (*resume && !mutatingResources && !prepare) || (!prepare && *operationID != "") || (prepare && *resume && *operationID != "") || (prepare && !*resume && *operationID == "") {
 		return nil, blocked
 	}
 	switch step {
 	case account.FreshApprovalStatus, account.FreshApprovalQuiesce, account.FreshApprovalFence,
+		account.ExistingBrokerPrepareRefundUpgrade, account.ExistingBrokerUpgradeRefund, account.ExistingBrokerCheckRefundUpgrade, account.ExistingBrokerInspectRefundUpgrade,
 		account.ExistingBrokerPrepareTokenUpgrade, account.ExistingBrokerUpgradeToken, account.ExistingBrokerCheckTokenUpgrade,
 		account.ExistingBrokerPrepare, account.FreshApprovalResources, account.ExistingBrokerVerify,
 		account.FreshApprovalActivate, account.FreshApprovalResume, account.ExistingBrokerInspectTokenUpgrade, account.ExistingBrokerInspect:
@@ -58,7 +60,7 @@ func runExistingBroker(args []string, environment func(string) string) ([]byte, 
 		planSHA = ""
 	}
 	var callback func(context.Context, account.AdminApprovalControl) (json.RawMessage, error)
-	if prepare || mutatingResources || step == account.ExistingBrokerCheckTokenUpgrade || step == account.ExistingBrokerVerify || step == account.FreshApprovalActivate || step == account.FreshApprovalResume || step == account.ExistingBrokerInspectTokenUpgrade || step == account.ExistingBrokerInspect {
+	if prepare || mutatingResources || step == account.ExistingBrokerCheckRefundUpgrade || step == account.ExistingBrokerInspectRefundUpgrade || step == account.ExistingBrokerCheckTokenUpgrade || step == account.ExistingBrokerVerify || step == account.FreshApprovalActivate || step == account.FreshApprovalResume || step == account.ExistingBrokerInspectTokenUpgrade || step == account.ExistingBrokerInspect {
 		if files.PlanFile == files.ManifestFile || files.PlanFile == files.ReceiptFile {
 			return nil, blocked
 		}
@@ -90,9 +92,18 @@ func runExistingBroker(args []string, environment func(string) string) ([]byte, 
 			url := environment("NATS_URL")
 			if prepare {
 				if *resume {
+					if prepareRefund {
+						return events.VerifyPreparedRefundUpgradePlan(ctx, url, cfg, files, facts)
+					}
 					return events.VerifyPreparedBrokerPlan(ctx, url, cfg, files, facts, prepareToken)
 				}
-				raw, e := events.PrepareExistingBrokerPlan(ctx, url, cfg, files.ApprovalConsumerResourceFiles, facts, *operationID, prepareToken)
+				var raw []byte
+				var e error
+				if prepareRefund {
+					raw, e = events.PrepareRefundUpgradePlan(ctx, url, cfg, files.ApprovalConsumerResourceFiles, facts, *operationID)
+				} else {
+					raw, e = events.PrepareExistingBrokerPlan(ctx, url, cfg, files.ApprovalConsumerResourceFiles, facts, *operationID, prepareToken)
+				}
 				if e != nil {
 					return nil, e
 				}
@@ -100,6 +111,12 @@ func runExistingBroker(args []string, environment func(string) string) ([]byte, 
 					return nil, blocked
 				}
 				return raw, nil
+			}
+			if step == account.ExistingBrokerUpgradeRefund || step == account.ExistingBrokerCheckRefundUpgrade {
+				return events.UpgradeLegacyRefundConsumer(ctx, url, cfg, files, facts, step == account.ExistingBrokerUpgradeRefund, *resume)
+			}
+			if step == account.ExistingBrokerInspectRefundUpgrade {
+				return events.InspectLegacyRefundConsumer(ctx, url, cfg, files, facts)
 			}
 			if step == account.ExistingBrokerUpgradeToken || step == account.ExistingBrokerCheckTokenUpgrade {
 				return events.UpgradeLegacyTokenConsumers(ctx, url, cfg, files, facts, step == account.ExistingBrokerUpgradeToken, *resume)

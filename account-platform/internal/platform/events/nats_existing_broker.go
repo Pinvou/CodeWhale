@@ -116,6 +116,18 @@ func readExistingCaptures(ctx context.Context, stream jetstream.Stream, configur
 // tokenUpgrade selects the exact published retained-event legacy Token shape;
 // it is not a caller-supplied configuration or a permissive drift allowance.
 func PrepareExistingBrokerPlan(ctx context.Context, rawURL string, cfg NATSConfig, files ApprovalConsumerResourceFiles, facts FreshApprovalControl, operationID string, tokenUpgrade bool) ([]byte, error) {
+	kind := "existing"
+	if tokenUpgrade {
+		kind = "token"
+	}
+	return prepareBrokerOperation(ctx, rawURL, cfg, files, facts, operationID, kind)
+}
+
+func PrepareRefundUpgradePlan(ctx context.Context, rawURL string, cfg NATSConfig, files ApprovalConsumerResourceFiles, facts FreshApprovalControl, operationID string) ([]byte, error) {
+	return prepareBrokerOperation(ctx, rawURL, cfg, files, facts, operationID, "refund")
+}
+
+func prepareBrokerOperation(ctx context.Context, rawURL string, cfg NATSConfig, files ApprovalConsumerResourceFiles, facts FreshApprovalControl, operationID, kind string) ([]byte, error) {
 	if facts.Version <= 0 || facts.ApprovalEpoch <= 0 || facts.RelayEpoch <= 0 {
 		return nil, ErrNATSResources
 	}
@@ -128,8 +140,14 @@ func PrepareExistingBrokerPlan(ctx context.Context, rawURL string, cfg NATSConfi
 		return nil, ErrNATSResources
 	}
 	wants, schema := existingBrokerConfigurations(), existingBrokerPlanSchema
-	if tokenUpgrade {
+	switch kind {
+	case "existing":
+	case "token":
 		wants, schema = tokenUpgradeConfigurations(), tokenUpgradePlanSchema
+	case "refund":
+		wants, schema = refundUpgradeConfigurations(), refundUpgradePlanSchema
+	default:
+		return nil, ErrNATSResources
 	}
 	captures, err := readExistingCaptures(ctx, stream, wants)
 	if err != nil {
@@ -143,13 +161,21 @@ func PrepareExistingBrokerPlan(ctx context.Context, rawURL string, cfg NATSConfi
 		StreamCreatedAt: info.Created.UTC().Format(time.RFC3339Nano), ControlVersion: strconv.FormatInt(facts.Version, 10), ApprovalEpoch: strconv.FormatInt(facts.ApprovalEpoch, 10), RelayEpoch: strconv.FormatInt(facts.RelayEpoch, 10),
 		CapturedAt: time.Now().UTC().Format(time.RFC3339Nano), HighWatermark: strconv.FormatUint(info.State.LastSeq, 10),
 		StreamFirst: strconv.FormatUint(info.State.FirstSeq, 10), StreamMessages: strconv.FormatUint(info.State.Msgs, 10), StreamBytes: strconv.FormatUint(info.State.Bytes, 10), Existing: captures}
-	if plan.validateKind(time.Now().UTC(), tokenUpgrade) != nil || noAuthorizationMessages(ctx, stream) != nil {
+	if plan.validateOperation(time.Now().UTC(), kind) != nil || noAuthorizationMessages(ctx, stream) != nil {
 		return nil, ErrNATSResources
 	}
 	return json.Marshal(plan)
 }
 
 func readBrokerPlan(files ExistingBrokerResourceFiles, facts FreshApprovalControl, tokenUpgrade bool) (existingBrokerPlan, error) {
+	kind := "existing"
+	if tokenUpgrade {
+		kind = "token"
+	}
+	return readBrokerOperation(files, facts, kind)
+}
+
+func readBrokerOperation(files ExistingBrokerResourceFiles, facts FreshApprovalControl, kind string) (existingBrokerPlan, error) {
 	var plan existingBrokerPlan
 	if !isolatedNATSPublicArtifactPath(files.PlanFile, files.Identity.PrivateIdentityFiles) {
 		return plan, ErrNATSResources
@@ -158,7 +184,7 @@ func readBrokerPlan(files ExistingBrokerResourceFiles, facts FreshApprovalContro
 	if err != nil {
 		return plan, ErrNATSResources
 	}
-	plan, err = decodeBrokerPlan(raw, files.PlanSHA256, time.Now().UTC(), tokenUpgrade)
+	plan, err = decodeBrokerOperation(raw, files.PlanSHA256, time.Now().UTC(), kind)
 	if err != nil || plan.IdentitySHA256 != files.Identity.CurrentSHA256 || plan.ManifestSHA256 != files.ManifestSHA256 ||
 		plan.ControlVersion != strconv.FormatInt(facts.Version, 10) || plan.ApprovalEpoch != strconv.FormatInt(facts.ApprovalEpoch, 10) || plan.RelayEpoch != strconv.FormatInt(facts.RelayEpoch, 10) {
 		return plan, ErrNATSResources
