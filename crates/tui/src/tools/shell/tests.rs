@@ -1363,7 +1363,7 @@ fn readonly_operand_gate_judges_every_pipeline_stage_on_its_own() {
     )
     .expect("outside symlink at the workspace root");
     let roots = [workspace.path().to_path_buf()];
-    let secret = outside.path().join("secret.txt").display().to_string();
+    let outside_path = outside.path().join("secret.txt").display().to_string();
 
     for command in [
         "cd sub | cat /etc/passwd".to_string(),
@@ -1380,9 +1380,9 @@ fn readonly_operand_gate_judges_every_pipeline_stage_on_its_own() {
         );
     }
     for command in [
-        format!("gh issue list | cat {secret}"),
+        format!("gh issue list | cat {outside_path}"),
         "gh issue list | cat link".to_string(),
-        format!("ls | gh issue list | cat {secret}"),
+        format!("ls | gh issue list | cat {outside_path}"),
     ] {
         let error = enforce_readonly_workspace_operands(&command, &roots, workspace.path())
             .expect_err("a gh stage exempts only itself")
