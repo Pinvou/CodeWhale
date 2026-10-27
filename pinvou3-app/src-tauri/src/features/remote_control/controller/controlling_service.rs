@@ -77,9 +77,7 @@ pub(crate) trait ControllingLane: Send {
 
     /// The port's original registration, never a fresh manager lookup. A real
     /// authenticated keeper must carry this exact transport and lease tuple.
-    fn transport_sender(&self) -> Option<ControllerTransportSender> {
-        None
-    }
+    fn transport_sender(&self) -> Option<ControllerTransportSender>;
 
     /// E2E-06：发送恢复族的敏感控制帧（prepare/confirm/ready_ack）。默认实现
     /// 失败关闭，只有真实 transport 端口实现它；测试替身可覆写以记录帧。
