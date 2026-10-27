@@ -2318,22 +2318,19 @@ jobs:
             python3 scripts/ci-rust-disk.py
 
       - name: Cargo cache
-        uses: Swatinem/rust-cache@v2
+        id: cli_lint_cache
+        # Pin the implementation whose post-if uses CACHE_ON_FAILURE; the
+        # final disk gate below enables failure caching only when safe to try.
+        uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0
         with:
           workspaces: pinvou-cli
           shared-key: cli-lint
-          # cache-on-failure matches the sibling legs (rust-test,
-          # windows-rust-test, macos-rust-check, macos-cli-check):
-          # save-on-success-only means one failed main push drops the
-          # namespace fully cold and every later run pays the full cold
-          # compile. Saves stay main-only (save-if below).
-          cache-on-failure: true
+          cache-on-failure: false
           save-if: ${{ github.ref == 'refs/heads/main' }}
 
       # Check actual remaining space after cache restore, before Cargo.
-      # This is stage admission, not a peak-space guarantee. On main,
-      # cache-on-failure may still run post-metadata if this gate fails;
-      # keep that cache policy and the complete job failure visible.
+      # Failure remains visible; the post-save gate below leaves failure
+      # caching disabled if space cannot be recovered.
       - name: Check CLI disk capacity after cache
         run: |
           sudo env GITHUB_WORKSPACE="$GITHUB_WORKSPACE" \
@@ -2365,6 +2362,18 @@ jobs:
         run: >-
           cargo check --manifest-path pinvou-cli/Cargo.toml
           --workspace --all-targets --no-default-features --locked
+
+      # A successful build can consume the earlier reserve. If this gate
+      # fails, the job fails and the pinned cache post is skipped. When it
+      # passes, preserve main's failure-cache warming for earlier failures.
+      # This sample cannot reserve space or guarantee a later save succeeds.
+      - name: Guard CLI cache post-save
+        if: ${{ always() && !cancelled() && steps.cli_lint_cache.outcome == 'success' }}
+        run: |
+          sudo env GITHUB_WORKSPACE="$GITHUB_WORKSPACE" \
+            RUNNER_ENVIRONMENT="$RUNNER_ENVIRONMENT" \
+            python3 scripts/ci-rust-disk.py
+          printf '%s\n' 'CACHE_ON_FAILURE=true' >> "$GITHUB_ENV"
 
   windows-rust-test:
     name: windows-rust-test (${{ matrix.phase }})
