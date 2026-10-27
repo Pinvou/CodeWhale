@@ -132,6 +132,32 @@ impl ControllerTransportConfig {
     }
 }
 
+/// A local queue identity, never accepted from the wire. Holding the original
+/// Arc keeps its allocation alive, so a replacement cannot reuse its identity.
+#[derive(Clone)]
+pub(crate) struct ControllerTransportOwner(Arc<AtomicU64>);
+
+impl PartialEq for ControllerTransportOwner {
+    fn eq(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.0, &other.0)
+    }
+}
+
+impl Eq for ControllerTransportOwner {}
+
+impl fmt::Debug for ControllerTransportOwner {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("ControllerTransportOwner([REDACTED])")
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct ControllerDisconnectContext {
+    pub(crate) owner: ControllerTransportOwner,
+    pub(crate) generation: String,
+    pub(crate) lease: Option<LeaseContext>,
+}
+
 #[derive(Clone, Eq, PartialEq)]
 pub(crate) enum ControllerTransportEvent {
     Connected {
@@ -141,6 +167,7 @@ pub(crate) enum ControllerTransportEvent {
     Disconnected {
         remote_control_generation: String,
         lease_epoch: Option<String>,
+        context: ControllerDisconnectContext,
         error: String,
     },
     Frame {
@@ -170,6 +197,7 @@ impl fmt::Debug for ControllerTransportEvent {
                 remote_control_generation,
                 lease_epoch,
                 error,
+                ..
             } => f
                 .debug_struct("Disconnected")
                 .field("remote_control_generation", remote_control_generation)
@@ -343,6 +371,27 @@ pub(crate) struct ControllerTransportSender {
 }
 
 impl ControllerTransportSender {
+    pub(crate) fn owner(&self) -> ControllerTransportOwner {
+        ControllerTransportOwner(self.transport_epoch.clone())
+    }
+
+    /// Capture before suspension: a disconnected active lease becomes only a
+    /// saved resume binding. None is a pre-authentication identity, not a lease
+    /// wildcard, and must never match an authenticated keeper.
+    pub(crate) fn disconnect_context(&self) -> ControllerDisconnectContext {
+        let generation = self.generation();
+        let active = self.lease.read();
+        let saved = self.resume_lease.read();
+        ControllerDisconnectContext {
+            owner: self.owner(),
+            generation,
+            lease: active
+                .as_ref()
+                .or(saved.as_ref())
+                .map(|lease| lease.context.clone()),
+        }
+    }
+
     /// E2E-02 受控绑定：A 端在验签 transcript 之后才有权把 transport 的
     /// generation 固定为 B 的 generation。只允许一次，且必须在安装租约之前；
     /// 空值、非法 id、重复绑定或已安装租约都失败关闭，绝不覆盖既有绑定。
@@ -762,6 +811,11 @@ pub(crate) struct ControllerTransportReceiver {
 }
 
 impl ControllerTransportReceiver {
+    #[cfg(test)]
+    pub(super) fn pending_control_for_test(&self) -> usize {
+        self.control_rx.len()
+    }
+
     async fn recv_prioritized(&mut self) -> Option<QueuedFrame> {
         tokio::select! {
             biased;
@@ -893,6 +947,7 @@ async fn run_transport_with_heartbeat(
                 sink.emit(ControllerTransportEvent::Disconnected {
                     remote_control_generation: config.generation(),
                     lease_epoch: current_lease_epoch(&sender),
+                    context: sender.disconnect_context(),
                     error: format!("connect Relay: {error}"),
                 });
                 if !wait_reconnect(&sender.shutdown, &mut liveness.reconnect).await {
@@ -1164,6 +1219,7 @@ fn emit_disconnected(
     let event = ControllerTransportEvent::Disconnected {
         remote_control_generation: config.generation(),
         lease_epoch: current_lease_epoch(sender),
+        context: sender.disconnect_context(),
         error,
     };
     sender.suspend_authenticated_lease();
@@ -1249,9 +1305,17 @@ fn dispatch_inbound(
 /// they never manufacture or directly install reader authority.
 #[cfg(test)]
 pub(super) fn disconnect_test_transport(sender: &ControllerTransportSender) {
+    disconnect_test_transport_to(sender, &|_| {});
+}
+
+#[cfg(test)]
+pub(super) fn disconnect_test_transport_to(
+    sender: &ControllerTransportSender,
+    sink: &dyn ControllerEventSink,
+) {
     let config =
         ControllerTransportConfig::new("ws://127.0.0.1:1", sender.role, sender.generation());
-    emit_disconnected(&config, sender, &|_| {}, "test socket closed".into());
+    emit_disconnected(&config, sender, sink, "test socket closed".into());
 }
 
 #[cfg(test)]
@@ -1407,6 +1471,14 @@ mod tests {
 
     #[test]
     fn inbound_debug_keeps_normal_lifecycle_diagnostics() {
+        let (sender, _receiver) = transport_channels(
+            ControllerRole::ControllerA,
+            "generation-diagnostic",
+            2,
+            2,
+            4096,
+            1024,
+        );
         let events = [
             ControllerTransportEvent::Connected {
                 remote_control_generation: "generation-diagnostic".to_owned(),
@@ -1415,6 +1487,7 @@ mod tests {
             ControllerTransportEvent::Disconnected {
                 remote_control_generation: "generation-diagnostic".to_owned(),
                 lease_epoch: Some("epoch-diagnostic".to_owned()),
+                context: sender.disconnect_context(),
                 error: "read deadline".to_owned(),
             },
             ControllerTransportEvent::RttSample {

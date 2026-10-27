@@ -11,7 +11,10 @@ use zeroize::{Zeroize, Zeroizing};
 
 use super::liveness::validate_liveness_epoch;
 use super::protocol::{LeaseContext, RuntimeValidationContext};
-use super::relay_transport::{ControllerRole, ControllerSendError, ControllerTransportSender};
+use super::relay_transport::{
+    ControllerDisconnectContext, ControllerRole, ControllerSendError, ControllerTransportOwner,
+    ControllerTransportSender,
+};
 use super::resume::ControllerResumeGate;
 
 const MAX_DEVICE_NAME_CHARS: usize = 80;
@@ -32,9 +35,28 @@ pub(crate) enum ControllingStatusKind {
 pub(crate) struct ControllerOperation {
     intent: u64,
     claim_request_id: String,
+    registration: Option<ControllerRegistration>,
+}
+
+#[derive(Debug, Clone, Eq, PartialEq)]
+enum ControllerRegistration {
+    Attempt(ControllerTransportOwner),
+    Authenticated(ControllerDisconnectContext),
 }
 
 impl ControllerOperation {
+    /// Bind the already-created intent to its original authenticated port.
+    /// Subsequent manager commits inherit the same final registration fence.
+    pub(crate) fn for_lane(mut self, registration: ControllerDisconnectContext) -> Self {
+        self.registration = Some(ControllerRegistration::Authenticated(registration));
+        self
+    }
+
+    pub(crate) fn for_transport(mut self, owner: ControllerTransportOwner) -> Self {
+        self.registration = Some(ControllerRegistration::Attempt(owner));
+        self
+    }
+
     /// A 端 claim 的稳定 id：Relay 以它做预留幂等键（重连只能换 `request_id`）。
     pub(crate) fn claim_request_id(&self) -> &str {
         &self.claim_request_id
@@ -199,6 +221,7 @@ struct Inner {
     lease: Option<ControllerLease>,
     /// Identity of the last terminal transition only; never grants a live lease.
     retired_lease: Option<LeaseContext>,
+    retired_transport_owner: Option<ControllerTransportOwner>,
     resume_gate: Option<ControllerResumeGate>,
     transport: Option<ControllerTransportSender>,
     error_code: Option<&'static str>,
@@ -213,6 +236,7 @@ impl Default for Inner {
             pending_code: None,
             lease: None,
             retired_lease: None,
+            retired_transport_owner: None,
             resume_gate: None,
             transport: None,
             error_code: None,
@@ -279,6 +303,7 @@ impl ControllingDeviceManager {
         }
         clear_live_context(&mut inner);
         inner.retired_lease = None;
+        inner.retired_transport_owner = None;
         inner.intent += 1;
         let claim_request_id = format!("claim_{}", Uuid::new_v4().simple());
         inner.claim_request_id = Some(claim_request_id.clone());
@@ -291,6 +316,7 @@ impl ControllingDeviceManager {
         Ok(ControllerOperation {
             intent: inner.intent,
             claim_request_id,
+            registration: None,
         })
     }
 
@@ -381,6 +407,7 @@ impl ControllingDeviceManager {
         status_locked(&inner)
     }
 
+    #[cfg(test)]
     pub(crate) fn mark_owned_transport_disconnected(
         &self,
         operation: &ControllerOperation,
@@ -396,6 +423,46 @@ impl ControllingDeviceManager {
                 .resume_gate
                 .as_mut()
                 .is_some_and(|gate| gate.disconnect(now_a, evidence_deadline_a).is_ok())
+            {
+                inner.phase = ControllingStatusKind::Reconnecting;
+            } else {
+                clear_live_context(&mut inner);
+                inner.phase = ControllingStatusKind::Error;
+                inner.error_code = Some("endpoint_offline");
+            }
+        }
+        Ok(status_locked(&inner))
+    }
+
+    pub(crate) fn mark_registered_transport_disconnected(
+        &self,
+        operation: &ControllerOperation,
+        registration: &ControllerDisconnectContext,
+        event: &ControllerDisconnectContext,
+        now_a: u64,
+        freeze_budget: impl FnOnce() -> Option<u64>,
+        business: &super::encrypted_lane::ControllingLaneState,
+    ) -> Result<ControllingStatus> {
+        let mut inner = self.inner.lock();
+        ensure_operation(&inner, operation)?;
+        ensure_lane_registration(&inner, registration)?;
+        if event != registration
+            || !matches!(
+                inner.phase,
+                ControllingStatusKind::Connected | ControllingStatusKind::Reconnecting
+            )
+        {
+            return Err(ControllingStateError::new("controller_stale_transport"));
+        }
+        // Freeze only after the final owner/lease fence. A foreign queued
+        // disconnect must not consume the current keeper's local budget.
+        let cutoff = freeze_budget();
+        business.suspend();
+        if inner.phase == ControllingStatusKind::Connected {
+            if inner
+                .resume_gate
+                .as_mut()
+                .is_some_and(|gate| gate.disconnect(now_a, cutoff).is_ok())
             {
                 inner.phase = ControllingStatusKind::Reconnecting;
             } else {
@@ -564,6 +631,7 @@ impl ControllingDeviceManager {
             .map(|request| ControllerOperation {
                 intent: inner.intent,
                 claim_request_id: request.clone(),
+                registration: None,
             })
     }
 
@@ -1009,6 +1077,59 @@ fn ensure_operation(inner: &Inner, operation: &ControllerOperation) -> Result<()
     {
         return Err(ControllingStateError::new("controller_stale_result"));
     }
+    if let Some(registration) = operation.registration.as_ref() {
+        match registration {
+            ControllerRegistration::Authenticated(registration) => {
+                ensure_lane_registration(inner, registration)?;
+            }
+            ControllerRegistration::Attempt(owner) => {
+                let live = inner
+                    .transport
+                    .as_ref()
+                    .is_some_and(|sender| &sender.owner() == owner);
+                let retired = inner.transport.is_none()
+                    && matches!(
+                        inner.phase,
+                        ControllingStatusKind::Error | ControllingStatusKind::Disconnected
+                    )
+                    && inner.retired_transport_owner.as_ref() == Some(owner);
+                if !(live || retired) {
+                    return Err(ControllingStateError::new("controller_stale_transport"));
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+fn ensure_lane_registration(
+    inner: &Inner,
+    registration: &ControllerDisconnectContext,
+) -> Result<()> {
+    let live = registration.lease.as_ref() == inner.lease.as_ref().map(|lease| &lease.context)
+        && inner
+            .transport
+            .as_ref()
+            .is_some_and(|transport| transport.owner() == registration.owner);
+    // A failed resume may already have retired its transport before the
+    // keeper clears keys and emits its bounded error. Retain this exact local
+    // identity for terminal cleanup only. Every live/resume API still checks
+    // its phase and active lease; a new registration never matches this arm.
+    let retired = matches!(
+        inner.phase,
+        ControllingStatusKind::Error | ControllingStatusKind::Disconnected
+    ) && inner.lease.is_none()
+        && inner.transport.is_none()
+        && registration.lease.as_ref() == inner.retired_lease.as_ref()
+        && inner.retired_transport_owner.as_ref() == Some(&registration.owner);
+    if registration
+        .lease
+        .as_ref()
+        .is_none_or(|lease| lease.remote_control_generation != registration.generation)
+        || !(live || retired)
+    {
+        return Err(ControllingStateError::new("controller_stale_transport"));
+    }
     Ok(())
 }
 
@@ -1017,6 +1138,7 @@ fn clear_live_context(inner: &mut Inner) {
         inner.retired_lease = Some(lease.context.clone());
     }
     if let Some(transport) = inner.transport.take() {
+        inner.retired_transport_owner = Some(transport.owner());
         transport.stop();
     }
     inner.pending_code = None;
@@ -1793,6 +1915,7 @@ mod tests {
                 .complete_reserved(ControllerOperation {
                     intent: 1,
                     claim_request_id: "claim_old".into(),
+                    registration: None,
                 })
                 .unwrap_err()
                 .code,
@@ -1951,5 +2074,293 @@ mod tests {
             !manager.is_connecting(operation),
             "用户已断开时在途失败不得覆盖状态"
         );
+    }
+
+    mod registration_ownership {
+        use super::super::super::encrypted_lane::ControllingLaneState;
+        use super::*;
+        use crate::features::remote_control::controller::test_support::{
+            bind_pairing_generation, lease_context, paired_session_keys, pairing_fixture,
+            resume_reader_transport,
+        };
+        use std::cell::Cell;
+
+        fn connected(
+            manager: &ControllingDeviceManager,
+            business: &ControllingLaneState,
+        ) -> (
+            ControllerOperation,
+            ControllerDisconnectContext,
+            ControllerTransportSender,
+        ) {
+            let operation = manager.connect("234-4567").unwrap();
+            manager.complete_reserved(operation.clone()).unwrap();
+            let mut fixture = pairing_fixture("relay-registration-owner");
+            bind_pairing_generation(
+                &mut fixture,
+                &format!("generation-{}", Uuid::new_v4().simple()),
+            );
+            let context = lease_context(&fixture.reservation);
+            let (session, _) =
+                paired_session_keys(fixture.a_keys, fixture.b_keys, &fixture.reservation);
+            let mut current = lease();
+            current.context = context.clone();
+            let sender = resume_reader_transport(
+                ControllerRole::ControllerA,
+                context.clone(),
+                current.negotiated_capabilities.clone(),
+            );
+            manager
+                .replace_owned_transport(&operation, sender.clone(), business)
+                .unwrap();
+            business
+                .install(
+                    super::super::super::crypto::ControllerRole::A,
+                    &context,
+                    session,
+                )
+                .unwrap();
+            manager
+                .complete_connected(operation.clone(), current)
+                .unwrap();
+            let registration = sender.disconnect_context();
+            (
+                operation.for_lane(registration.clone()),
+                registration,
+                sender,
+            )
+        }
+
+        #[test]
+        fn registration_foreign_metadata_never_freezes_or_suspends_current_lease() {
+            let manager = ControllingDeviceManager::default();
+            let business = ControllingLaneState::default();
+            let (operation, registration, sender) = connected(&manager, &business);
+            let other = resume_reader_transport(
+                ControllerRole::ControllerA,
+                registration.lease.clone().unwrap(),
+                vec!["encrypted_frames_v1".into()],
+            );
+            let frozen = Cell::new(0);
+            let before = manager.status();
+            for field in 0..8 {
+                let mut foreign = registration.clone();
+                match field {
+                    0 => foreign.owner = other.owner(),
+                    1 => foreign.lease = None,
+                    2 => foreign.generation = "generation-foreign".into(),
+                    3 => {
+                        foreign.lease.as_mut().unwrap().connection_id = "connection-foreign".into()
+                    }
+                    4 => {
+                        foreign.lease.as_mut().unwrap().controller_lease_id = "lease-foreign".into()
+                    }
+                    5 => foreign.lease.as_mut().unwrap().lease_epoch = "2".into(),
+                    6 => foreign.lease.as_mut().unwrap().relay_epoch = "relay-foreign".into(),
+                    7 => {
+                        foreign.lease.as_mut().unwrap().remote_control_generation =
+                            "generation-foreign".into()
+                    }
+                    _ => unreachable!(),
+                }
+                assert!(
+                    manager
+                        .mark_registered_transport_disconnected(
+                            &operation,
+                            &registration,
+                            &foreign,
+                            5_000,
+                            || {
+                                frozen.set(frozen.get() + 1);
+                                Some(30_000)
+                            },
+                            &business,
+                        )
+                        .is_err(),
+                    "foreign metadata field {field} acquired resume authority"
+                );
+                assert_eq!(frozen.get(), 0);
+                assert_eq!(manager.status(), before);
+                assert!(business.is_installed());
+                assert!(!business.is_suspended());
+            }
+            // The real suspension removes active TX before manager consumption;
+            // the same full lease remains a legitimate saved resume binding.
+            super::super::super::relay_transport::disconnect_test_transport(&sender);
+            assert!(sender.authenticated_lease().is_none());
+            manager
+                .mark_registered_transport_disconnected(
+                    &operation,
+                    &registration,
+                    &registration,
+                    5_000,
+                    || {
+                        frozen.set(frozen.get() + 1);
+                        Some(30_000)
+                    },
+                    &business,
+                )
+                .unwrap();
+            assert_eq!(frozen.get(), 1);
+            assert_eq!(manager.status().kind(), ControllingStatusKind::Reconnecting);
+            assert!(business.is_suspended());
+        }
+
+        #[test]
+        fn registration_same_intent_sender_replacement_rejects_old_commits() {
+            // Defensive API case, not a claim that current production changes
+            // an A transport without changing its operation/generation.
+            let manager = ControllingDeviceManager::default();
+            let business = ControllingLaneState::default();
+            let (old, old_registration, _) = connected(&manager, &business);
+            let replacement = resume_reader_transport(
+                ControllerRole::ControllerA,
+                old_registration.lease.clone().unwrap(),
+                vec!["encrypted_frames_v1".into()],
+            );
+            manager.replace_transport(replacement.clone());
+            let frozen = Cell::new(false);
+            assert!(manager.with_lane_owner(&old, || business.clear()).is_err());
+            assert!(
+                manager
+                    .mark_registered_transport_disconnected(
+                        &old,
+                        &old_registration,
+                        &old_registration,
+                        5_000,
+                        || {
+                            frozen.set(true);
+                            Some(30_000)
+                        },
+                        &business,
+                    )
+                    .is_err()
+            );
+            assert!(manager.fail_connection(old, "endpoint_offline").is_err());
+            assert!(!frozen.get());
+            assert!(business.is_installed());
+            assert!(!business.is_suspended());
+            assert_eq!(manager.status().kind(), ControllingStatusKind::Connected);
+            let current = manager
+                .current_operation()
+                .unwrap()
+                .for_lane(replacement.disconnect_context());
+            let registration = replacement.disconnect_context();
+            super::super::super::relay_transport::disconnect_test_transport(&replacement);
+            manager
+                .mark_registered_transport_disconnected(
+                    &current,
+                    &registration,
+                    &registration,
+                    5_000,
+                    || Some(30_000),
+                    &business,
+                )
+                .unwrap();
+            assert_eq!(manager.status().kind(), ControllingStatusKind::Reconnecting);
+        }
+
+        #[test]
+        fn registration_retired_owner_can_finish_cleanup_but_not_clear_successor() {
+            let manager = ControllingDeviceManager::default();
+            let business = ControllingLaneState::default();
+            let (old, registration, _) = connected(&manager, &business);
+            manager
+                .mark_registered_transport_disconnected(
+                    &old,
+                    &registration,
+                    &registration,
+                    5_000,
+                    || Some(30_000),
+                    &business,
+                )
+                .unwrap();
+            manager
+                .fail_resume_connection(old.clone(), "endpoint_offline")
+                .unwrap();
+            manager.with_lane_owner(&old, || business.clear()).unwrap();
+            assert!(!business.is_installed());
+            assert_eq!(
+                manager
+                    .fail_resume_connection(old.clone(), "endpoint_offline")
+                    .unwrap()
+                    .kind(),
+                ControllingStatusKind::Error
+            );
+            let (_current, _, _) = connected(&manager, &business);
+            assert!(manager.with_lane_owner(&old, || business.clear()).is_err());
+            assert!(business.is_installed());
+            assert!(!business.is_suspended());
+            assert_eq!(manager.status().kind(), ControllingStatusKind::Connected);
+        }
+
+        #[test]
+        fn registration_pre_auth_attempt_cannot_install_over_replaced_sender() {
+            let manager = ControllingDeviceManager::default();
+            let business = ControllingLaneState::default();
+            let operation = manager.connect("234-4567").unwrap();
+            manager.complete_reserved(operation.clone()).unwrap();
+            let (old_sender, _old_rx) = super::super::super::relay_transport::transport_channels(
+                ControllerRole::ControllerA,
+                "",
+                2,
+                2,
+                4096,
+                1024,
+            );
+            manager
+                .replace_owned_transport(&operation, old_sender.clone(), &business)
+                .unwrap();
+            let old = operation.clone().for_transport(old_sender.owner());
+            let (current_sender, _current_rx) =
+                super::super::super::relay_transport::transport_channels(
+                    ControllerRole::ControllerA,
+                    "",
+                    2,
+                    2,
+                    4096,
+                    1024,
+                );
+            manager
+                .replace_owned_transport(&operation, current_sender.clone(), &business)
+                .unwrap();
+            let installs = Cell::new(0);
+            assert!(
+                manager
+                    .complete_connected_with_install(old, lease(), || {
+                        installs.set(installs.get() + 1);
+                        Ok(())
+                    })
+                    .is_err()
+            );
+            assert_eq!(installs.get(), 0);
+            assert_eq!(
+                manager.status().kind(),
+                ControllingStatusKind::SafetyHandshake
+            );
+            let current = operation.for_transport(current_sender.owner());
+            let authenticated = lease();
+            let context = authenticated.context.clone();
+            let capabilities = authenticated.negotiated_capabilities.clone();
+            manager
+                .complete_connected_with_install(current, authenticated, || {
+                    current_sender
+                        .bind_generation(&context.remote_control_generation)
+                        .unwrap();
+                    current_sender
+                        .install_authenticated_lease(
+                            super::super::super::relay_transport::AuthenticatedLease {
+                                context,
+                                negotiated_capabilities: capabilities,
+                            },
+                        )
+                        .unwrap();
+                    installs.set(installs.get() + 1);
+                    Ok(())
+                })
+                .unwrap();
+            assert_eq!(installs.get(), 1);
+            assert_eq!(manager.status().kind(), ControllingStatusKind::Connected);
+        }
     }
 }

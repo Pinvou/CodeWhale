@@ -88,9 +88,18 @@ pub(crate) enum ControlledStatusKind {
 pub(crate) struct ControlledOperation {
     intent: u64,
     generation: String,
+    registration: Option<ControlledTransportRegistration>,
 }
 
 impl ControlledOperation {
+    pub(crate) fn for_lane(mut self, owner: &ControlledTransportOwner) -> Self {
+        self.registration = Some(ControlledTransportRegistration {
+            lease: owner.lease.clone(),
+            transport: owner.transport.clone(),
+        });
+        self
+    }
+
     pub(crate) fn generation(&self) -> &str {
         &self.generation
     }
@@ -133,6 +142,52 @@ impl ControlledPreconnectDeadline {
                 ControlledStatusKind::PairingReserved | ControlledStatusKind::HandshakePending
             ),
         }
+    }
+}
+
+#[derive(Clone)]
+struct ControlledTransportRegistration {
+    lease: LeaseContext,
+    transport: Arc<dyn ControlledTransportAuthority>,
+}
+
+impl PartialEq for ControlledTransportRegistration {
+    fn eq(&self, other: &Self) -> bool {
+        self.lease == other.lease && Arc::ptr_eq(&self.transport, &other.transport)
+    }
+}
+
+impl Eq for ControlledTransportRegistration {}
+
+impl std::fmt::Debug for ControlledTransportRegistration {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("ControlledTransportRegistration([REDACTED])")
+    }
+}
+
+/// Original authenticated worker registration. The Arc keeps the registered
+/// transport allocation alive; equality is checked under the lifecycle lock,
+/// independently of whether its socket is temporarily disconnected.
+#[derive(Clone)]
+pub(crate) struct ControlledTransportOwner {
+    operation: ControlledOperation,
+    lease: LeaseContext,
+    transport: Arc<dyn ControlledTransportAuthority>,
+}
+
+impl ControlledTransportOwner {
+    pub(crate) fn operation(&self) -> &ControlledOperation {
+        &self.operation
+    }
+
+    pub(crate) fn lease(&self) -> &LeaseContext {
+        &self.lease
+    }
+}
+
+impl std::fmt::Debug for ControlledTransportOwner {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("ControlledTransportOwner([REDACTED])")
     }
 }
 
@@ -678,18 +733,25 @@ impl ControlledDeviceManager {
     ) -> Result<ControlledStatus> {
         let now_b = lease.connected_at_b;
         self.complete_connected_inner(operation, lease, || now_b, || Ok(None))
+            .map(|(status, _)| status)
     }
 
     /// Final admission samples the local clock after acquiring the lifecycle
     /// owner. The synchronous install may take R/lane/outbound locks, never C.
+    /// Validate before every shared install and commit Connected in one C lock.
+    /// The callback may take R/S/lane/outbound locks, never re-enter this owner.
     pub(crate) fn complete_connected_with_install(
         &self,
         operation: ControlledOperation,
         lease: ControlledLease,
         now: impl FnOnce() -> u64,
         install: impl FnOnce() -> Result<Arc<dyn ControlledTransportAuthority>>,
-    ) -> Result<ControlledStatus> {
-        self.complete_connected_inner(operation, lease, now, || install().map(Some))
+    ) -> Result<(ControlledStatus, ControlledTransportOwner)> {
+        let (status, owner) =
+            self.complete_connected_inner(operation, lease, now, || install().map(Some))?;
+        owner
+            .map(|owner| (status, owner))
+            .ok_or_else(|| ControlledStateError::new("desktop_remote_transport_unavailable"))
     }
 
     fn complete_connected_inner(
@@ -698,7 +760,7 @@ impl ControlledDeviceManager {
         lease: ControlledLease,
         now: impl FnOnce() -> u64,
         install: impl FnOnce() -> Result<Option<Arc<dyn ControlledTransportAuthority>>>,
-    ) -> Result<ControlledStatus> {
+    ) -> Result<(ControlledStatus, Option<ControlledTransportOwner>)> {
         let mut inner = self.inner.lock();
         ensure_operation(&inner, &operation)?;
         if inner.phase != ControlledStatusKind::HandshakePending {
@@ -728,6 +790,14 @@ impl ControlledDeviceManager {
                 previous.stop();
             }
         }
+        let owner = inner
+            .transport
+            .as_ref()
+            .map(|transport| ControlledTransportOwner {
+                operation,
+                lease: lease.context.clone(),
+                transport: transport.clone(),
+            });
         inner.lease_context = Some(lease.context);
         inner.negotiated_capabilities = lease.negotiated_capabilities;
         inner.liveness_epoch_a = Some(lease.liveness_epoch_a);
@@ -743,7 +813,44 @@ impl ControlledDeviceManager {
         inner.pairing = None;
         inner.preconnect_deadline = None;
         inner.phase = ControlledStatusKind::Connected;
-        Ok(status_locked(&inner))
+        Ok((status_locked(&inner), owner))
+    }
+
+    pub(crate) fn with_transport_owner<T>(
+        &self,
+        owner: &ControlledTransportOwner,
+        action: impl FnOnce() -> T,
+    ) -> Result<T> {
+        let inner = self.inner.lock();
+        ensure_transport_owner(&inner, owner)?;
+        Ok(action())
+    }
+
+    /// Test fixtures capture the already-installed real registration before
+    /// disconnect/replacement; this mints no reader or authentication proof.
+    #[cfg(test)]
+    pub(super) fn transport_owner_for_test(
+        &self,
+        operation: &ControlledOperation,
+    ) -> Result<ControlledTransportOwner> {
+        let inner = self.inner.lock();
+        ensure_operation(&inner, operation)?;
+        Ok(ControlledTransportOwner {
+            operation: operation.clone(),
+            lease: inner
+                .lease_context
+                .clone()
+                .ok_or_else(|| ControlledStateError::new("desktop_remote_transport_unavailable"))?,
+            transport: inner
+                .transport
+                .clone()
+                .ok_or_else(|| ControlledStateError::new("desktop_remote_transport_unavailable"))?,
+        })
+    }
+
+    #[cfg(test)]
+    pub(super) fn lifecycle_lock_held_for_test(&self) -> bool {
+        self.inner.try_lock().is_none()
     }
 
     #[cfg(test)]
@@ -778,8 +885,32 @@ impl ControlledDeviceManager {
             .is_some_and(|transport| !transport.is_stopped())
     }
 
+    #[cfg(test)]
     pub(crate) fn mark_transport_disconnected(&self, now_b: u64) -> ControlledStatus {
+        self.mark_transport_disconnected_inner(None, now_b, || {})
+            .expect("unscoped state fixture has no owner rejection")
+    }
+
+    pub(crate) fn mark_owned_transport_disconnected(
+        &self,
+        owner: &ControlledTransportOwner,
+        now_b: u64,
+        suspend: impl FnOnce(),
+    ) -> Result<ControlledStatus> {
+        self.mark_transport_disconnected_inner(Some(owner), now_b, suspend)
+    }
+
+    fn mark_transport_disconnected_inner(
+        &self,
+        owner: Option<&ControlledTransportOwner>,
+        now_b: u64,
+        suspend: impl FnOnce(),
+    ) -> Result<ControlledStatus> {
         let mut inner = self.inner.lock();
+        if let Some(owner) = owner {
+            ensure_transport_owner(&inner, owner)?;
+        }
+        suspend();
         inner.last_observed_now_b = inner.last_observed_now_b.max(now_b);
         if (inner.phase == ControlledStatusKind::Connected
             || (inner.phase == ControlledStatusKind::Reconnecting
@@ -806,9 +937,10 @@ impl ControlledDeviceManager {
                 inner.device_name = None;
                 inner.phase = ControlledStatusKind::Error;
                 inner.error_code = Some(RESUME_FAILED_CODE.to_owned());
+                let status = status_locked(&inner);
                 drop(inner);
                 self.notify_cleanup(&generation);
-                return self.status();
+                return Ok(status);
             }
         } else if matches!(
             inner.phase,
@@ -821,13 +953,14 @@ impl ControlledDeviceManager {
             inner.phase = ControlledStatusKind::Error;
             inner.error_code = Some("desktop_remote_resume_invalid".to_owned());
             inner.reconnect_reason = None;
+            let status = status_locked(&inner);
             drop(inner);
             self.notify_cleanup(&generation);
-            return self.status();
+            return Ok(status);
         }
         let status = status_locked(&inner);
         drop(inner);
-        status
+        Ok(status)
     }
 
     pub(crate) fn register_liveness_challenge(
@@ -848,11 +981,25 @@ impl ControlledDeviceManager {
 
     /// 本地未成功发出或已超时的挑战必须从 watchdog 一并撤销，否则 worker 的
     /// 轻量状态虽已 reset，watchdog 内仍会累积到容量上限。
+    #[cfg(test)]
     pub(crate) fn cancel_liveness_challenge(&self, challenge_id: &str) {
         let mut inner = self.inner.lock();
         if let Some(watchdog) = inner.watchdog.as_mut() {
             watchdog.cancel_challenge(challenge_id);
         }
+    }
+
+    pub(crate) fn cancel_owned_liveness_challenge(
+        &self,
+        owner: &ControlledTransportOwner,
+        challenge_id: &str,
+    ) -> Result<()> {
+        let mut inner = self.inner.lock();
+        ensure_transport_owner(&inner, owner)?;
+        if let Some(watchdog) = inner.watchdog.as_mut() {
+            watchdog.cancel_challenge(challenge_id);
+        }
+        Ok(())
     }
 
     /// E2E-06：是否需要向对端/Relay 索取存活证据（watchdog 政策）。
@@ -865,20 +1012,45 @@ impl ControlledDeviceManager {
     }
 
     /// E2E-06：开启一次存活挑战（生成 + 登记）并返回 (challenge_id, challenge_b64)。
+    #[cfg(test)]
     pub(crate) fn begin_liveness_challenge(&self, now_b: u64) -> Result<(String, String)> {
+        self.begin_liveness_challenge_inner(None, now_b)
+            .map(|(_, challenge_id, challenge_b64)| (challenge_id, challenge_b64))
+    }
+
+    /// The captured worker owns both this watchdog mutation and the returned
+    /// lease. Do not check an owner, unlock, then register in the current one.
+    pub(crate) fn begin_owned_liveness_challenge(
+        &self,
+        owner: &ControlledTransportOwner,
+        now_b: u64,
+    ) -> Result<(LeaseContext, String, String)> {
+        self.begin_liveness_challenge_inner(Some(owner), now_b)
+    }
+
+    fn begin_liveness_challenge_inner(
+        &self,
+        owner: Option<&ControlledTransportOwner>,
+        now_b: u64,
+    ) -> Result<(LeaseContext, String, String)> {
         let (challenge_id, challenge_b64) = super::liveness::new_liveness_challenge()
             .map_err(|_| ControlledStateError::new("liveness_challenge_invalid"))?;
-        {
-            let mut inner = self.inner.lock();
-            ensure_connected_evidence(&inner)?;
-            let Some(watchdog) = inner.watchdog.as_mut() else {
-                return Err(ControlledStateError::new("watchdog_unavailable"));
-            };
-            watchdog
-                .register_challenge(challenge_id.clone(), challenge_b64.clone(), now_b)
-                .map_err(|_| ControlledStateError::new("liveness_challenge_invalid"))?;
+        let mut inner = self.inner.lock();
+        if let Some(owner) = owner {
+            ensure_transport_owner(&inner, owner)?;
         }
-        Ok((challenge_id, challenge_b64))
+        ensure_connected_evidence(&inner)?;
+        let context = inner
+            .lease_context
+            .clone()
+            .ok_or_else(|| ControlledStateError::new("lease_unavailable"))?;
+        let Some(watchdog) = inner.watchdog.as_mut() else {
+            return Err(ControlledStateError::new("watchdog_unavailable"));
+        };
+        watchdog
+            .register_challenge(challenge_id.clone(), challenge_b64.clone(), now_b)
+            .map_err(|_| ControlledStateError::new("liveness_challenge_invalid"))?;
+        Ok((context, challenge_id, challenge_b64))
     }
 
     pub(crate) fn accept_direct_liveness(&self, json: &str, received_at_b: u64) -> Result<()> {
@@ -1032,8 +1204,48 @@ impl ControlledDeviceManager {
         operation: ControlledOperation,
         error_code: String,
     ) -> Result<(ControlledStatus, Option<LeaseContext>)> {
+        self.fail_operation_with_cleanup_inner(operation, None, error_code, || {})
+    }
+
+    /// Local key cleanup belongs to the same final operation commit, before
+    /// releasing C. External cleanup notifications run after releasing C.
+    pub(crate) fn fail_operation_with_cleanup(
+        &self,
+        operation: ControlledOperation,
+        error_code: String,
+        cleanup: impl FnOnce(),
+    ) -> Result<ControlledStatus> {
+        self.fail_operation_with_cleanup_inner(operation, None, error_code, cleanup)
+            .map(|(status, _)| status)
+    }
+
+    pub(crate) fn fail_owned_transport(
+        &self,
+        owner: &ControlledTransportOwner,
+        error_code: String,
+    ) -> Result<ControlledStatus> {
+        self.fail_operation_with_cleanup_inner(
+            owner.operation.clone(),
+            Some(owner),
+            error_code,
+            || {},
+        )
+        .map(|(status, _)| status)
+    }
+
+    fn fail_operation_with_cleanup_inner(
+        &self,
+        operation: ControlledOperation,
+        owner: Option<&ControlledTransportOwner>,
+        error_code: String,
+        cleanup: impl FnOnce(),
+    ) -> Result<(ControlledStatus, Option<LeaseContext>)> {
         let mut inner = self.inner.lock();
         ensure_operation(&inner, &operation)?;
+        if let Some(owner) = owner {
+            ensure_transport_owner(&inner, owner)?;
+        }
+        cleanup();
         let retired_lease = inner.lease_context.clone();
         let retired_generation = inner.generation.clone();
         let generation = retired_generation.clone().unwrap_or_default();
@@ -1058,15 +1270,71 @@ impl ControlledDeviceManager {
         transport_key_fingerprint: [u8; 32],
         relay_resume_deadline_ms: u64,
     ) -> Result<ControlledStatus> {
+        self.complete_resumed_inner(
+            operation,
+            None,
+            activation_id,
+            resume_request_id,
+            now_b,
+            liveness_epoch_a.into(),
+            resume_token,
+            transport_key_fingerprint,
+            relay_resume_deadline_ms,
+            || {},
+        )
+    }
+
+    pub(crate) fn complete_owned_resume(
+        &self,
+        owner: &ControlledTransportOwner,
+        activation_id: &str,
+        resume_request_id: &str,
+        now_b: u64,
+        liveness_epoch_a: impl Into<String>,
+        resume_token: [u8; 32],
+        transport_key_fingerprint: [u8; 32],
+        relay_resume_deadline_ms: u64,
+        activate: impl FnOnce(),
+    ) -> Result<ControlledStatus> {
+        self.complete_resumed_inner(
+            owner.operation.clone(),
+            Some(owner),
+            activation_id,
+            resume_request_id,
+            now_b,
+            liveness_epoch_a.into(),
+            resume_token,
+            transport_key_fingerprint,
+            relay_resume_deadline_ms,
+            activate,
+        )
+    }
+
+    fn complete_resumed_inner(
+        &self,
+        operation: ControlledOperation,
+        owner: Option<&ControlledTransportOwner>,
+        activation_id: &str,
+        resume_request_id: &str,
+        now_b: u64,
+        liveness_epoch_a: String,
+        resume_token: [u8; 32],
+        transport_key_fingerprint: [u8; 32],
+        relay_resume_deadline_ms: u64,
+        activate: impl FnOnce(),
+    ) -> Result<ControlledStatus> {
         let mut inner = self.inner.lock();
         ensure_operation(&inner, &operation)?;
+        if let Some(owner) = owner {
+            ensure_transport_owner(&inner, owner)?;
+        }
         if inner.phase != ControlledStatusKind::ResumeActivatedPendingLiveness {
             return Err(ControlledStateError::new("desktop_remote_phase_invalid"));
         }
         let Some(context) = inner.lease_context.clone() else {
             return Err(ControlledStateError::new("lease_unavailable"));
         };
-        let epoch = liveness_epoch_a.into();
+        let epoch = liveness_epoch_a;
         let next_watchdog =
             ControllerLivenessWatchdog::authenticated_cycle(epoch.clone(), now_b).ok();
         // E2E-06：先用完整的 `controller_resumed` 让旧 gate 消费旧材料；任何
@@ -1122,6 +1390,9 @@ impl ControlledDeviceManager {
         inner.phase = ControlledStatusKind::Connected;
         inner.reconnect_reason = None;
         inner.last_observed_now_b = inner.last_observed_now_b.max(now_b);
+        // Restore proof, phase and business activation share the final C
+        // commit. The activation callback must not re-enter the manager.
+        activate();
         Ok(status_locked(&inner))
     }
 
@@ -1132,8 +1403,28 @@ impl ControlledDeviceManager {
         operation: ControlledOperation,
         now_b: u64,
     ) -> Result<ControlledResumeMaterial> {
+        self.begin_resume_inner(operation, None, now_b)
+    }
+
+    pub(crate) fn begin_owned_resume(
+        &self,
+        owner: &ControlledTransportOwner,
+        now_b: u64,
+    ) -> Result<ControlledResumeMaterial> {
+        self.begin_resume_inner(owner.operation.clone(), Some(owner), now_b)
+    }
+
+    fn begin_resume_inner(
+        &self,
+        operation: ControlledOperation,
+        owner: Option<&ControlledTransportOwner>,
+        now_b: u64,
+    ) -> Result<ControlledResumeMaterial> {
         let mut inner = self.inner.lock();
         ensure_operation(&inner, &operation)?;
+        if let Some(owner) = owner {
+            ensure_transport_owner(&inner, owner)?;
+        }
         if inner.phase != ControlledStatusKind::Reconnecting {
             return Err(ControlledStateError::new("desktop_remote_phase_invalid"));
         }
@@ -1180,8 +1471,30 @@ impl ControlledDeviceManager {
         step: ControlledResumeStep<'_>,
         now_b: u64,
     ) -> Result<ControlledStatus> {
+        self.advance_resume_inner(operation, None, step, now_b)
+    }
+
+    pub(crate) fn advance_owned_resume(
+        &self,
+        owner: &ControlledTransportOwner,
+        step: ControlledResumeStep<'_>,
+        now_b: u64,
+    ) -> Result<ControlledStatus> {
+        self.advance_resume_inner(owner.operation.clone(), Some(owner), step, now_b)
+    }
+
+    fn advance_resume_inner(
+        &self,
+        operation: ControlledOperation,
+        owner: Option<&ControlledTransportOwner>,
+        step: ControlledResumeStep<'_>,
+        now_b: u64,
+    ) -> Result<ControlledStatus> {
         let mut inner = self.inner.lock();
         ensure_operation(&inner, &operation)?;
+        if let Some(owner) = owner {
+            ensure_transport_owner(&inner, owner)?;
+        }
         if !matches!(
             inner.phase,
             ControlledStatusKind::Reconnecting
@@ -1682,6 +1995,7 @@ fn prepare_generation(inner: &mut Inner) -> ControlledOperation {
     ControlledOperation {
         intent: inner.intent,
         generation,
+        registration: None,
     }
 }
 
@@ -1692,12 +2006,38 @@ fn current_operation(inner: &Inner) -> Option<ControlledOperation> {
         .map(|generation| ControlledOperation {
             intent: inner.intent,
             generation,
+            registration: None,
         })
 }
 
 fn ensure_operation(inner: &Inner, operation: &ControlledOperation) -> Result<()> {
-    if current_operation(inner).as_ref() != Some(operation) {
+    if inner.intent != operation.intent
+        || inner.generation.as_deref() != Some(operation.generation.as_str())
+    {
         return Err(ControlledStateError::new("desktop_remote_stale_result"));
+    }
+    if let Some(registration) = operation.registration.as_ref() {
+        if inner.lease_context.as_ref() != Some(&registration.lease)
+            || !inner
+                .transport
+                .as_ref()
+                .is_some_and(|transport| Arc::ptr_eq(transport, &registration.transport))
+        {
+            return Err(ControlledStateError::new("desktop_remote_stale_transport"));
+        }
+    }
+    Ok(())
+}
+
+fn ensure_transport_owner(inner: &Inner, owner: &ControlledTransportOwner) -> Result<()> {
+    ensure_operation(inner, &owner.operation)?;
+    if inner.lease_context.as_ref() != Some(&owner.lease)
+        || !inner
+            .transport
+            .as_ref()
+            .is_some_and(|transport| Arc::ptr_eq(transport, &owner.transport))
+    {
+        return Err(ControlledStateError::new("desktop_remote_stale_transport"));
     }
     Ok(())
 }
@@ -1902,6 +2242,200 @@ mod tests {
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     use super::*;
+
+    #[test]
+    fn same_operation_replaced_transport_rejects_the_old_owner() {
+        let manager = ControlledDeviceManager::default();
+        let operation = manager.start(None, Vec::new()).unwrap();
+        register(&manager, &operation);
+        enter_handshake(&manager, &operation);
+        let material = lease(operation.generation());
+        let context = material.context.clone();
+        let capabilities = material.negotiated_capabilities.clone();
+        let sender = super::super::test_support::resume_reader_transport(
+            super::super::relay_transport::ControllerRole::ControlledB,
+            context.clone(),
+            capabilities.clone(),
+        );
+        let now_b = material.connected_at_b;
+        let (_, old) = manager
+            .complete_connected_with_install(
+                operation.clone(),
+                material,
+                || now_b,
+                || Ok(Arc::new(sender)),
+            )
+            .unwrap();
+        let calls = AtomicUsize::new(0);
+        manager
+            .with_transport_owner(&old, || calls.fetch_add(1, Ordering::SeqCst))
+            .unwrap();
+        let successor = super::super::test_support::resume_reader_transport(
+            super::super::relay_transport::ControllerRole::ControlledB,
+            context.clone(),
+            capabilities,
+        );
+        manager.replace_transport(successor);
+        // No new intent, generation or lease: only the transport Arc differs.
+        assert_eq!(manager.current_operation(), Some(operation.clone()));
+        assert_eq!(manager.live_lease().unwrap(), context);
+        assert_eq!(
+            manager
+                .with_transport_owner(&old, || calls.fetch_add(1, Ordering::SeqCst))
+                .unwrap_err()
+                .code,
+            "desktop_remote_stale_transport"
+        );
+        let current = manager.transport_owner_for_test(&operation).unwrap();
+        manager
+            .with_transport_owner(&current, || calls.fetch_add(1, Ordering::SeqCst))
+            .unwrap();
+        assert_eq!(calls.load(Ordering::SeqCst), 2);
+        assert_eq!(manager.status().kind(), ControlledStatusKind::Connected);
+    }
+
+    #[test]
+    fn stale_connected_install_never_runs_its_shared_side_effect() {
+        let manager = ControlledDeviceManager::default();
+        let old = manager.start(None, Vec::new()).unwrap();
+        register(&manager, &old);
+        enter_handshake(&manager, &old);
+        manager.stop();
+        let current = manager.start(None, Vec::new()).unwrap();
+        register(&manager, &current);
+        enter_handshake(&manager, &current);
+        let calls = AtomicUsize::new(0);
+        let stale = lease(old.generation());
+        let now_b = stale.connected_at_b;
+        let result = manager.complete_connected_with_install(
+            old.clone(),
+            stale,
+            || now_b,
+            || {
+                calls.fetch_add(1, Ordering::SeqCst);
+                Err(ControlledStateError::new("install_must_not_run"))
+            },
+        );
+        assert_eq!(result.err().unwrap().code, "desktop_remote_stale_result");
+        assert_eq!(calls.load(Ordering::SeqCst), 0);
+        assert_eq!(manager.current_operation(), Some(current.clone()));
+        assert_eq!(
+            manager.status().kind(),
+            ControlledStatusKind::HandshakePending
+        );
+        let material = lease(current.generation());
+        let sender = super::super::test_support::resume_reader_transport(
+            super::super::relay_transport::ControllerRole::ControlledB,
+            material.context.clone(),
+            material.negotiated_capabilities.clone(),
+        );
+        let now_b = material.connected_at_b;
+        manager
+            .complete_connected_with_install(
+                current,
+                material,
+                || now_b,
+                || {
+                    calls.fetch_add(1, Ordering::SeqCst);
+                    Ok(Arc::new(sender))
+                },
+            )
+            .unwrap();
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+        assert_eq!(manager.status().kind(), ControlledStatusKind::Connected);
+    }
+
+    #[test]
+    fn old_evidence_owner_cannot_register_or_cancel_successor_challenge() {
+        let manager = ControlledDeviceManager::default();
+        let connect = || {
+            let operation = manager.start(None, Vec::new()).unwrap();
+            register(&manager, &operation);
+            enter_handshake(&manager, &operation);
+            let mut material = lease(operation.generation());
+            material.connected_at_b = 0;
+            let sender = super::super::test_support::resume_reader_transport(
+                super::super::relay_transport::ControllerRole::ControlledB,
+                material.context.clone(),
+                material.negotiated_capabilities.clone(),
+            );
+            let now_b = material.connected_at_b;
+            let (_, owner) = manager
+                .complete_connected_with_install(
+                    operation.clone(),
+                    material,
+                    || now_b,
+                    || Ok(Arc::new(sender)),
+                )
+                .unwrap();
+            (operation, owner)
+        };
+        let (_, old) = connect();
+        manager.stop();
+        let (operation, current) = connect();
+        let deadline = manager.watchdog_deadline_for_test();
+        assert_eq!(deadline, Some(30_000));
+        assert_eq!(
+            manager
+                .begin_owned_liveness_challenge(&old, 14_500)
+                .unwrap_err()
+                .code,
+            "desktop_remote_stale_result",
+        );
+        assert_eq!(
+            manager
+                .poll_watchdog_for(&operation, 15_000)
+                .unwrap()
+                .kind(),
+            ControlledStatusKind::Reconnecting
+        );
+        let (lease, challenge_id, _) = manager
+            .begin_owned_liveness_challenge(&current, 16_000)
+            .unwrap();
+        assert_eq!(&lease, current.lease());
+        assert_eq!(
+            manager
+                .inner
+                .lock()
+                .watchdog
+                .as_ref()
+                .unwrap()
+                .state(16_000),
+            LivenessWatchdogState::Healthy
+        );
+        assert_eq!(
+            manager
+                .cancel_owned_liveness_challenge(&old, &challenge_id)
+                .unwrap_err()
+                .code,
+            "desktop_remote_stale_result",
+        );
+        assert_eq!(
+            manager
+                .inner
+                .lock()
+                .watchdog
+                .as_ref()
+                .unwrap()
+                .state(16_000),
+            LivenessWatchdogState::Healthy,
+            "old cancellation removed the successor's genuine pending challenge"
+        );
+        manager
+            .cancel_owned_liveness_challenge(&current, &challenge_id)
+            .unwrap();
+        assert_eq!(
+            manager
+                .inner
+                .lock()
+                .watchdog
+                .as_ref()
+                .unwrap()
+                .state(16_000),
+            LivenessWatchdogState::Suspect
+        );
+        assert_eq!(manager.watchdog_deadline_for_test(), deadline);
+    }
 
     #[test]
     fn serialized_status_matches_the_shared_bridge_fixture() {

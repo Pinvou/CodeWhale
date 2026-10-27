@@ -9,7 +9,7 @@ use futures_util::{SinkExt, StreamExt};
 use tokio::net::{TcpListener, TcpStream};
 use tokio_tungstenite::{WebSocketStream, tungstenite::Message};
 
-type Socket = WebSocketStream<TcpStream>;
+pub(super) type Socket = WebSocketStream<TcpStream>;
 
 fn fixture_wall_clock_millis() -> u64 {
     std::time::SystemTime::now()
@@ -39,7 +39,7 @@ async fn next_application_frame(
     .expect("controller application frame timed out")
 }
 
-async fn accept(listener: &TcpListener) -> Socket {
+pub(super) async fn accept(listener: &TcpListener) -> Socket {
     let (stream, _) = listener.accept().await.unwrap();
     tokio_tungstenite::accept_hdr_async(
         stream,
@@ -49,7 +49,7 @@ async fn accept(listener: &TcpListener) -> Socket {
     .unwrap()
 }
 
-async fn send(socket: &mut Socket, value: &Value) {
+pub(super) async fn send(socket: &mut Socket, value: &Value) {
     if value["v"] == 1 {
         let role = match value["sender_role"].as_str() {
             Some("A") => SenderRole::ControllerA,
@@ -64,7 +64,7 @@ async fn send(socket: &mut Socket, value: &Value) {
         .unwrap();
 }
 
-async fn receive(socket: &mut Socket, kind: &str) -> Value {
+pub(super) async fn receive(socket: &mut Socket, kind: &str) -> Value {
     tokio::time::timeout(Duration::from_secs(3), async {
         loop {
             match socket.next().await.unwrap().unwrap() {
@@ -84,7 +84,7 @@ async fn receive(socket: &mut Socket, kind: &str) -> Value {
     .unwrap_or_else(|_| panic!("wire timeout waiting for {kind}"))
 }
 
-async fn processed(receiver: &mut tokio::sync::mpsc::Receiver<Value>, expected: &Value) {
+pub(super) async fn processed(receiver: &mut tokio::sync::mpsc::Receiver<Value>, expected: &Value) {
     tokio::time::timeout(Duration::from_secs(3), async {
         loop {
             let frame = receiver
@@ -100,7 +100,7 @@ async fn processed(receiver: &mut tokio::sync::mpsc::Receiver<Value>, expected: 
     .expect("actual worker completion barrier timed out");
 }
 
-async fn registered(socket: &mut Socket) {
+pub(super) async fn registered(socket: &mut Socket) {
     let frame = receive(socket, "desktop_endpoint_register").await;
     send(
         socket,
@@ -110,7 +110,7 @@ async fn registered(socket: &mut Socket) {
     .await;
 }
 
-async fn wait_status(
+pub(super) async fn wait_status(
     manager: &ControlledDeviceManager,
     expected: ControlledStatusKind,
     stage: &'static str,
@@ -129,7 +129,7 @@ async fn wait_status(
     });
 }
 
-async fn wait_prepared(manager: &ControlledDeviceManager) {
+pub(super) async fn wait_prepared(manager: &ControlledDeviceManager) {
     tokio::time::timeout(Duration::from_secs(3), async {
         while manager.resume_phase_for_test() != Some(super::super::resume::ResumePhase::Prepared) {
             tokio::time::sleep(Duration::from_millis(5)).await;
@@ -140,7 +140,7 @@ async fn wait_prepared(manager: &ControlledDeviceManager) {
 }
 
 // Any unexpected business entry fails rather than returning plausible output.
-struct NoBusiness;
+pub(super) struct NoBusiness;
 #[async_trait::async_trait]
 impl ControlledBusinessPort for NoBusiness {
     async fn remote_action(
@@ -272,7 +272,7 @@ pub(crate) async fn resume_round_trip<T>(
 ) {
     use super::super::controlling_handshake::ControllingHandshake;
     use super::super::encrypted_lane::ControllingLaneState;
-    use super::super::test_support::{hex_lower, joined_message, pairing_fixture};
+    use super::super::test_support::{bind_pairing_generation, joined_message, pairing_fixture};
     use ring::signature::KeyPair as _;
     let directory = tempfile::tempdir().unwrap();
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -835,20 +835,65 @@ pub(crate) async fn resume_round_trip<T>(
         relay.shutdown_loopback_test_endpoint();
         return;
     }
+    let owner_case = std::env::var("PINVOU_READER_OWNER_CASE").ok();
+    let race = match owner_case.as_deref() {
+        Some("disconnect") => {
+            Some(super::owner_interleaving_tests::OwnerRaceCase::ReceivedDisconnect)
+        }
+        Some("joined") => Some(super::owner_interleaving_tests::OwnerRaceCase::ReceivedJoined),
+        Some("challenge") => Some(super::owner_interleaving_tests::OwnerRaceCase::OldChallenge),
+        _ => None,
+    };
+    if let Some(race) = race {
+        let manager = handle.state::<ControlledDeviceManager>();
+        let business = handle.state::<ControlledLaneState>();
+        let outbound = handle.state::<ControlledOutboundState>();
+        let relay = RemoteControlManager::new(handle.clone());
+        super::owner_interleaving_tests::ownership_round_trip(
+            manager.inner(),
+            business.inner(),
+            outbound.inner(),
+            &relay,
+            &listener,
+            |input| ControlledRelayWorker {
+                transport_owner: None,
+                app: handle.clone(),
+                relay: relay.clone(),
+                operation: input.operation,
+                code_wrap: CodeWrapKeyPair::generate().unwrap(),
+                handshake: Some(input.keys),
+                channel: input.channel,
+                business: std::sync::Arc::new(NoBusiness),
+                action_results: std::sync::Arc::new(RemoteActionResultCache::default()),
+                business_epoch: std::sync::Arc::new(AtomicU64::new(0)),
+                processed_frames: Some(input.processed),
+                before_frame_effect: input.before_effect,
+                activation_probe: None,
+                evidence_hooks: input.evidence_hooks,
+            },
+            race,
+        )
+        .await;
+        return;
+    }
+    let observe_activation = owner_case.as_deref() == Some("activation");
+    let activation_observed = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let activation_probe = observe_activation.then(|| {
+        let handle = handle.clone();
+        let observed = activation_observed.clone();
+        Box::new(move || {
+            assert!(
+                handle
+                    .state::<ControlledDeviceManager>()
+                    .lifecycle_lock_held_for_test(),
+                "actual resume activation escaped the C ownership commit"
+            );
+            observed.fetch_add(1, Ordering::SeqCst);
+        }) as Box<dyn FnOnce() + Send + Sync>
+    });
     let manager = handle.state::<ControlledDeviceManager>();
     let operation = manager.start(None, Vec::new()).unwrap();
-    // Match a genuine operation before signing, not a forged post-sign tuple.
-    fixture.reservation["remote_control_generation"] = json!(operation.generation());
-    fixture.reservation["transcript"]["remote_control_generation"] = json!(operation.generation());
-    let preimage = super::super::protocol::build_pairing_transcript_preimage(
-        &fixture.reservation["transcript"],
-    )
-    .unwrap();
-    fixture.reservation["transcript_hash"] = json!(hex_lower(&Sha256::digest(&preimage)));
-    fixture.reservation["relay_signature_b64"] = json!(
-        base64::engine::general_purpose::STANDARD
-            .encode(fixture.relay.key_pair.sign(&preimage).as_ref())
-    );
+    bind_pairing_generation(&mut fixture, operation.generation());
     let joined = joined_message(&fixture.reservation, fixture.resume_token);
     let now = controlled_monotonic_millis();
     manager
@@ -874,6 +919,7 @@ pub(crate) async fn resume_round_trip<T>(
     };
     let (processed_tx, mut processed_rx) = tokio::sync::mpsc::channel(128);
     let worker = ControlledRelayWorker {
+        transport_owner: None,
         app: handle.clone(),
         relay: relay.clone(),
         operation: operation.clone(),
@@ -884,6 +930,9 @@ pub(crate) async fn resume_round_trip<T>(
         action_results: std::sync::Arc::new(RemoteActionResultCache::default()),
         business_epoch: std::sync::Arc::new(AtomicU64::new(0)),
         processed_frames: Some(processed_tx),
+        before_frame_effect: None,
+        activation_probe,
+        evidence_hooks: None,
     };
     owned.worker = Some(tokio::spawn(worker.serve()));
     let mut socket = accept(&listener).await;
@@ -960,6 +1009,7 @@ pub(crate) async fn resume_round_trip<T>(
             .await
             .unwrap();
         let worker = ControlledRelayWorker {
+            transport_owner: None,
             app: handle.clone(),
             relay: relay.clone(),
             operation: waiting.clone(),
@@ -970,6 +1020,9 @@ pub(crate) async fn resume_round_trip<T>(
             action_results: std::sync::Arc::new(RemoteActionResultCache::default()),
             business_epoch: std::sync::Arc::new(AtomicU64::new(0)),
             processed_frames: None,
+            before_frame_effect: None,
+            activation_probe: None,
+            evidence_hooks: None,
         };
         let waiting_worker = tokio::spawn(worker.serve());
         relay.stop_current().unwrap();
@@ -1109,7 +1162,15 @@ pub(crate) async fn resume_round_trip<T>(
         "resumed_connected",
     )
     .await;
+    processed(&mut processed_rx, &resumed).await;
     assert!(!handle.state::<ControlledLaneState>().is_suspended());
+    if observe_activation {
+        assert_eq!(
+            activation_observed.load(Ordering::SeqCst),
+            1,
+            "the real reader final must reach the in-commit activation exactly once"
+        );
+    }
     assert_eq!(
         manager.live_liveness_epoch().as_deref(),
         Some("live-a-reader-2")
