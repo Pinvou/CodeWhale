@@ -986,7 +986,9 @@ fn transport_class(err: &reqwest::Error) -> &'static str {
                 class = match io_err.kind() {
                     std::io::ErrorKind::ConnectionRefused => "connection_refused",
                     std::io::ErrorKind::TimedOut => "timeout",
-                    _ if io_err.to_string().contains("failed to lookup address information")
+                    _ if io_err
+                        .to_string()
+                        .contains("failed to lookup address information")
                         || io_err.to_string().contains("No such host is known") =>
                     {
                         "dns_failed"
