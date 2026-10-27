@@ -102,4 +102,3 @@ try {
   assert.ok(path.basename(resolvedProfile).startsWith('pinvou-controlled-preconnect-smoke-'));
   fs.rmSync(resolvedProfile, { recursive: true, force: true });
 }
-
