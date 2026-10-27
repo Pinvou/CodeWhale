@@ -272,25 +272,71 @@ test('切走瞬间的真 stall 经转变收尾上报（P2-1）', () => {
     JSON.stringify(h.recorded[0].details));
 });
 
-// r6 P2-E：真行为锁——已有 t_dispatch 的条目，二次 markDispatched（终态
-// notify 路径）不覆盖 t_dispatch（P2-B 先章有效）。抑制态的接线层门控
-// （chat-events.js !isNotifySuppressed）由 native_stream 测试覆盖。
-test('已有派发章的条目不被终态 notify 重章（P2-B 先章有效）', () => {
+// r6 P2-E（r7 P2-4 换真锁）：已有 t_dispatch 的条目，主线程冻结期间排队的
+// 终态 notify 解冻后二次 markDispatched——先章有效（t_dispatch 不被覆盖）+
+// 补章 t_frame（dispatch→frame 段诚实覆盖冻结时长）。上一版依赖两次调用间的
+// 真实墙钟差，同毫秒执行时 t_dispatch === firstDispatch 巧合为真（变异全绿的
+// 空转锁）；本版把 t_recv/t_dispatch 同步回拨模拟确定性冻结，不依赖时钟。
+test('冻结中排队的终态 notify：首章有效且 dispatch→frame 补章（P2-B+P2-3）', () => {
   const h = harness();
   h.probe.begin('frozen');
   const entry = h.probe._liveEntry('frozen');
-  entry.t_recv -= 100;
-  h.probe.markDispatched('frozen');       // 首次派发章
-  assert.ok(entry.t_dispatch != null, '首次派发应记录 t_dispatch');
+  entry.t_recv -= 100;                     // recv→dispatch ~100ms（<120，不因该段上报）
+  h.probe.markDispatched('frozen');        // 首次派发章，武装 rAF
   const firstDispatch = entry.t_dispatch;
-  // 冻结后终态 notify 重章——不应覆盖 t_dispatch（P2-B）
-  h.probe.markDispatched('frozen');
-  const after = h.probe._liveEntry('frozen');
-  assert.ok(after === null || after.finalized || after.t_dispatch === firstDispatch,
-    '二次 markDispatched 不覆盖 t_dispatch（分段归因不颠倒）');
-  // 若 finalize 了，分段应诚实：recv→dispatch ~100ms（不是被覆盖后的值）
-  if (h.recorded.length > 0) {
-    assert.ok(h.recorded[0].details.recv_to_dispatch_ms < 200,
-      'recv→dispatch 应保持在首次章的量级（~100ms），不被重章拉长');
-  }
+  // 主线程冻结 500ms：终态 notify 在解冻后先于迟到的 rAF 执行——等效于
+  // 「此刻距首章已 500ms」（两个旧章同步回拨，两段关系不变）。
+  entry.t_recv -= 500;
+  entry.t_dispatch -= 500;
+  h.probe.markDispatched('frozen');        // 二次（终态 notify 路径）
+  assert.equal(entry.t_dispatch, firstDispatch - 500,
+    't_dispatch 首章值不被重章覆盖');
+  assert.equal(h.recorded.length, 1, '真实冻结必须产出记录（不补章则是零记录——r7 P2-3）');
+  const details = h.recorded[0].details;
+  assert.ok(details.recv_to_dispatch_ms < 200,
+    `recv→dispatch 保持在首章量级（~100ms），不被重章拉长：${JSON.stringify(details)}`);
+  assert.ok(details.dispatch_to_frame_ms >= 500,
+    `dispatch→frame 覆盖冻结时长：${JSON.stringify(details)}`);
+});
+
+// r7 P2-4：武装条目（已派发、帧未回）等待超阈值后切走——转变收尾的补章分支
+// （waited>120ms 时 t_frame=now）此前无测试覆盖（既有 visStall 用例 waited≈0
+// 触不到该分支）。
+test('武装条目帧等待超阈值后切走：dispatch→frame 经转变收尾上报', () => {
+  const h = harness();
+  h.probe.begin('armed');
+  const entry = h.probe._liveEntry('armed');
+  h.probe.markDispatched('armed');         // 武装 rAF，帧未回
+  entry.t_recv -= 490;                     // recv→dispatch 段保持 <120（聚焦帧段）
+  entry.t_dispatch -= 490;                 // 帧等待 490ms（>120ms 阈值）
+  h.document.visibilityState = 'hidden';
+  h.document.dispatchEvent(new Event('visibilitychange'));
+  assert.equal(h.recorded.length, 1, '武装条目的帧等待必须经转变收尾上报');
+  assert.ok(h.recorded[0].details.dispatch_to_frame_ms >= 490,
+    JSON.stringify(h.recorded[0].details));
+});
+
+// r7 P2-2：后台预览腿（1s 合并节流）的条目打了 throttledOrigin 标记后
+// finalize 不上报——节流不是冻结，节律性假信号（每会话每 10s 一条 ~1032ms）
+// 会支配诊断流。snapshot 仍保留段差可查。
+test('后台预览腿节流条目不上报但保留 snapshot（P2-2）', () => {
+  const h = harness();
+  h.probe.begin('bg');
+  const entry = h.probe._liveEntry('bg');
+  entry.t_recv -= 1032;                    // 后台 1s 预览腿量级（受控时钟实测 ~1032ms）
+  h.probe.markThrottled('bg');
+  h.probe.markScheduled('bg');
+  h.probe.markDispatched('bg');
+  flushFrames(h);
+  assert.equal(h.recorded.length, 0, '应用自己的合并节流不是冻结，不进诊断流');
+  const snap = h.probe.snapshot();
+  assert.ok(snap.length > 0 && snap[snap.length - 1].recv_to_dispatch_ms >= 1032,
+    'snapshot 仍可查段差（只拦上报，不拦观测）');
+  // 对照组：同样时差、无节流标记 → 是真实卡顿，必须照常上报
+  h.probe.begin('fg');
+  h.probe._liveEntry('fg').t_recv -= 1032;
+  h.probe.markScheduled('fg');
+  h.probe.markDispatched('fg');
+  flushFrames(h);
+  assert.equal(h.recorded.length, 1, '无节流标记的同类时差是真实卡顿，必须上报');
 });
