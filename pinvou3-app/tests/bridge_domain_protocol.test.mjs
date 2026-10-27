@@ -245,7 +245,7 @@ const expectedProtocolHashes = {
   // the plugin registration and the prefs persistence; update_settings
   // stays untouched).
   settings: 'afdc9da9a5343f61bf90f2d4adcf4e7677df117537c7a8bfc15c2469c450e31c',
-  updater: 'e5d3ffaed0548bca3a40ee4c8138a59f9a2add9474477d924d4ecd7b8efd73e6',
+  updater: 'cfe92470008c2dade64f891c36a5fa70930478f803d4d2a6d100e68d9c29392b',
   // Official's bridge/voice.js is untouched by this backflow, so the hash
   // stays at the Official base value (the community value differs only via
   // comment differences inside its own voice.js; no invoke/listen surface).
