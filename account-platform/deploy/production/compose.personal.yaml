@@ -81,6 +81,7 @@ services:
       <<: *http
       ACCOUNT_PLATFORM_PROFILE: personal
       MOBILE_AUTH_ENABLED: "true"
+      HTTP_TRUSTED_PROXY_IPS: "${PERSONAL_EDGE_BACKEND_IP:?set fixed verified edge peer IP},${PERSONAL_PORTAL_BACKEND_IP:?set fixed verified Portal peer IP}"
       ACCOUNT_TRUSTED_SOURCE_PEER_IPS: "${PERSONAL_EDGE_BACKEND_IP:?set fixed verified edge peer IP},${PERSONAL_PORTAL_BACKEND_IP:?set fixed verified Portal peer IP},${PERSONAL_KEYCLOAK_BACKEND_IP:?set fixed verified Keycloak peer IP}"
       OIDC_ISSUER: ${USER_OIDC_ISSUER:?set exact public user realm issuer}
       OIDC_JWKS_URL: ${USER_OIDC_JWKS_URL:?set verified user JWKS endpoint}
@@ -108,6 +109,7 @@ services:
       <<: *http
       MOBILE_AUTH_ENABLED: "true"
       AUTH_RISK_REDIS_CA_FILE: /run/pinvou/trust/ca.crt
+      HTTP_TRUSTED_PROXY_IPS: ${PERSONAL_EDGE_BACKEND_IP:?set fixed verified edge peer IP}
       IDENTITY_TRUSTED_PROXY_IPS: ${PERSONAL_EDGE_BACKEND_IP:?set fixed verified edge peer IP}
       IDENTITY_PASSWORD_PREPARATION_TRUSTED_PROXY_IPS: "${PERSONAL_EDGE_BACKEND_IP:?set fixed verified edge peer IP},${PERSONAL_KEYCLOAK_BACKEND_IP:?set fixed verified Keycloak peer IP}"
       ACCOUNT_HTTP_URL: http://account-service:8080
@@ -127,6 +129,7 @@ services:
     env_file:
       - {path: "${BILLING_SERVICE_PRIVATE_ENV_FILE:?set private Billing DSN and workload rules file}", required: true, format: raw}
     environment:
+      HTTP_TRUSTED_PROXY_IPS: "${PERSONAL_EDGE_BACKEND_IP:?set fixed verified edge peer IP},${PERSONAL_PORTAL_BACKEND_IP:?set fixed verified Portal peer IP}"
       <<: *http
       PGPASSFILE: /run/pinvou/database/pgpass
       # The current same-source Billing binary always verifies these resources,
@@ -157,6 +160,7 @@ services:
     env_file:
       - {path: "${TOKEN_GATEWAY_PRIVATE_ENV_FILE:?set private Token workload rules file}", required: true, format: raw}
     environment:
+      HTTP_TRUSTED_PROXY_IPS: "${PERSONAL_EDGE_BACKEND_IP:?set fixed verified edge peer IP},${PERSONAL_PORTAL_BACKEND_IP:?set fixed verified Portal peer IP}"
       <<: *http
       ACCOUNT_PLATFORM_PROFILE: personal
       OIDC_ISSUER: ${USER_OIDC_ISSUER:?set exact public user realm issuer}
@@ -195,6 +199,7 @@ services:
       PORTAL_HANDOFF_OIDC_CLIENT_ID: ${PORTAL_HANDOFF_OIDC_CLIENT_ID:?set access-only confidential handoff client}
       PORTAL_HANDOFF_OIDC_CLIENT_SECRET_FILE: /run/pinvou/handoff/client-secret
       PORTAL_SESSION_HANDOFF: "true"
+      HTTP_TRUSTED_PROXY_IPS: ${PERSONAL_EDGE_BACKEND_IP:?set fixed verified edge peer IP}
       PORTAL_TRUSTED_PROXY_IPS: ${PERSONAL_EDGE_BACKEND_IP:?set fixed private edge peer IP}
       ACCOUNT_HTTP_URL: http://account-service:8080
       TOKEN_GATEWAY_HTTP_URL: http://token-gateway:8080

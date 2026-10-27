@@ -108,6 +108,13 @@ observability:
 security:
   rateLimitRPS: 100
   rateLimitBurst: 200
+  # Per-service immediate peers; only ingress/BFF that overwrite the admission header.
+  httpTrustedProxyIPs:
+    account-service: []
+    identity-service: []
+    billing-service: []
+    token-gateway: []
+    token-portal: []
   authRiskEnabled: false
   # Exact immediate edge/Keycloak peers only; never CIDRs or a private-network wildcard.
   passwordPreparationTrustedProxyIPs: []

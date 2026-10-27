@@ -96,6 +96,7 @@ func (s *Service) allowReconciliationImport(w http.ResponseWriter, r *http.Reque
 	if err != nil {
 		return reconciliationPreflightUnavailable(w, r)
 	}
+	setRateLimitSource(request)
 	request.Header.Set("Authorization", "Bearer "+session.AccessToken)
 	request.Header.Set("Accept", "application/json")
 	response, err := s.client.Do(request)

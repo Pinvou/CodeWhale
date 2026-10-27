@@ -137,7 +137,7 @@ func handlerWithMetrics(cfg config.Config, application http.Handler, ready func(
 		}
 		application.ServeHTTP(w, r)
 	})
-	observed := metrics.middleware(withRateLimit(cfg, withRecovery(dispatch)), newLogger(cfg))
+	observed := metrics.middleware(withApplicationRateLimit(cfg, withRecovery(dispatch), application), newLogger(cfg))
 	return observability.TraceHTTPHandler(withRequestID(withSecurityHeaders(cfg, observed))), metrics
 }
 

@@ -275,7 +275,7 @@ func (s *Service) Handler(serviceToken string, adminVerify ...identity.VerifyFun
 		admin.POST("/adjustments/:adjustment_id/approve", s.authorizer.Require("platform.billing.adjustments.approve"), approvalpolicy.Require("WALLET_ADJUSTMENT", approvalpolicy.ApprovalRequired), httpserver.AdaptFunc(s.adminApproveAdjustment))
 		admin.POST("/adjustments/:adjustment_id/reject", s.authorizer.Require("platform.billing.adjustments.approve"), approvalpolicy.Require("BILLING_ADJUSTMENT_REJECT", approvalpolicy.AuditOnly), httpserver.AdaptFunc(s.adminRejectAdjustment))
 	}
-	return router
+	return httpserver.WithAdmissionPolicy(router, s.callbackAdmission)
 }
 
 func (s *Service) paymentCallbackToken(w http.ResponseWriter, r *http.Request) {
@@ -324,7 +324,7 @@ func (s *Service) providerPaymentCallback(w http.ResponseWriter, r *http.Request
 		api.WriteError(w, http.StatusBadRequest, "INVALID_PAYMENT_CALLBACK", "invalid payment callback", httpserver.RequestID(r.Context()))
 		return
 	}
-	notificationID, _, err := s.payments.PersistProviderNotification(r.Context(), principal.ProviderID, principal.MerchantID, notification.ID, notification.SentAt, notification.Provider, body, paymentRequestSource(r))
+	notificationID, _, err := s.payments.PersistProviderNotification(r.Context(), principal.ProviderID, principal.MerchantID, notification.ID, notification.SentAt, notification.Provider, body, callbackRequestSource(r))
 	if err != nil {
 		if errors.Is(err, ErrForbiddenPayment) {
 			api.WriteError(w, http.StatusUnauthorized, "PAYMENT_CALLBACK_REJECTED", "payment callback rejected", httpserver.RequestID(r.Context()))

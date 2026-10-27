@@ -25,17 +25,49 @@ type rateLimiter struct {
 }
 
 func withRateLimit(cfg config.Config, next http.Handler) http.Handler {
+	return withApplicationRateLimit(cfg, next, nil)
+}
+
+func withApplicationRateLimit(cfg config.Config, next, application http.Handler) http.Handler {
 	if cfg.RateLimitRPS <= 0 || cfg.RateLimitBurst <= 0 {
 		return next
 	}
 	limiter := &rateLimiter{visitors: map[string]rateLimitVisitor{}, rate: cfg.RateLimitRPS, burst: float64(cfg.RateLimitBurst), now: time.Now}
+	newBucket := func(rate float64, burst int) *rateLimiter {
+		return &rateLimiter{visitors: map[string]rateLimitVisitor{}, rate: rate, burst: float64(burst), now: time.Now}
+	}
+	// NFR-41 has an independent >=200/s authenticated callback contract.
+	// Token issuance and invalid traffic cannot spend the notification budget.
+	callbacks, tokens := newBucket(200, 200), newBucket(200, 200)
+	invalid := newBucket(cfg.RateLimitRPS, cfg.RateLimitBurst)
+	policy, _ := application.(AdmissionPolicy)
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		// Client traffic must not consume the health probes' admission budget.
 		if (r.Method == http.MethodGet || r.Method == http.MethodHead) && (r.URL.Path == "/health/live" || r.URL.Path == "/health/ready") {
 			next.ServeHTTP(w, r)
 			return
 		}
-		if !limiter.allow(remoteHost(r.RemoteAddr)) {
+		bucket, key := limiter, rateLimitSource(r, cfg.HTTPTrustedProxyIPs)
+		r = withAdmittedRateLimitSource(r, key)
+		if policy != nil {
+			class, principal := policy.RateLimitAdmission(r)
+			switch class {
+			case InvalidCallbackAdmission:
+				bucket = invalid
+			case VerifiedCallbackAdmission, VerifiedCallbackTokenAdmission:
+				if principal == "" {
+					bucket = invalid
+					break
+				}
+				if class == VerifiedCallbackAdmission {
+					bucket = callbacks
+				} else {
+					bucket = tokens
+				}
+				key += "\x00" + principal
+			}
+		}
+		if !bucket.allow(key) {
 			w.Header().Set("Retry-After", "1")
 			api.WriteError(w, http.StatusTooManyRequests, "RATE_LIMITED", "request rate limit exceeded", RequestID(r.Context()))
 			return

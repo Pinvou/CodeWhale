@@ -49,6 +49,7 @@ func (s *Service) adminApprovalDirectory(w http.ResponseWriter, r *http.Request)
 		approvalBFFUnavailable(w, r)
 		return
 	}
+	setRateLimitSource(request)
 	request.Header.Set("Authorization", "Bearer "+session.AccessToken)
 	request.Header.Set("Accept", "application/json")
 	client := *s.client

@@ -108,19 +108,29 @@ func (a *Authenticator) Issue(clientID, clientSecret, requestedScope string) (To
 	if requestedScope == "" {
 		requestedScope = Scope
 	}
-	configured, ok := a.clients[clientID]
-	if !ok || len(clientSecret) != len(configured.secret) || subtle.ConstantTimeCompare([]byte(clientSecret), configured.secret) != 1 || requestedScope != Scope {
+	principal, err := a.AuthenticateClient(clientID, clientSecret)
+	if err != nil || requestedScope != Scope {
 		return Token{}, ErrUnauthorized
 	}
 	now := a.now().UTC()
 	header, _ := json.Marshal(map[string]string{"alg": "HS256", "typ": "JWT", "kid": a.keyID})
 	claims, _ := json.Marshal(tokenClaims{
-		Issuer: "pinvou-billing", Subject: configured.principal.ClientID, Audience: Audience, Scope: Scope,
-		ProviderID: configured.principal.ProviderID, ProviderVersion: configured.principal.ProviderVersion,
-		MerchantID: configured.principal.MerchantID, IssuedAt: now.Unix(), Expires: now.Add(a.tokenTTL).Unix(),
+		Issuer: "pinvou-billing", Subject: principal.ClientID, Audience: Audience, Scope: Scope,
+		ProviderID: principal.ProviderID, ProviderVersion: principal.ProviderVersion,
+		MerchantID: principal.MerchantID, IssuedAt: now.Unix(), Expires: now.Add(a.tokenTTL).Unix(),
 	})
 	unsigned := base64.RawURLEncoding.EncodeToString(header) + "." + base64.RawURLEncoding.EncodeToString(claims)
 	return Token{AccessToken: unsigned + "." + sign(a.signingKey, unsigned), TokenType: "Bearer", ExpiresIn: int64(a.tokenTTL.Seconds()), Scope: Scope}, nil
+}
+
+// AuthenticateClient validates a configured callback client without minting a
+// token or consuming a request body, for admission before the existing handler.
+func (a *Authenticator) AuthenticateClient(clientID, clientSecret string) (Principal, error) {
+	configured, ok := a.clients[strings.TrimSpace(clientID)]
+	if !ok || len(clientSecret) != len(configured.secret) || subtle.ConstantTimeCompare([]byte(clientSecret), configured.secret) != 1 {
+		return Principal{}, ErrUnauthorized
+	}
+	return configured.principal, nil
 }
 
 func (a *Authenticator) VerifyBearer(authorization string) (Principal, error) {

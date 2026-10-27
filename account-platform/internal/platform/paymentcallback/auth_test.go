@@ -46,3 +46,17 @@ func TestAuthenticatorRejectsUnboundOrWeakClient(t *testing.T) {
 		t.Fatal("unknown callback client was accepted")
 	}
 }
+
+func TestAuthenticateClientDoesNotMintOrReadClock(t *testing.T) {
+	auth, err := NewAuthenticator(AuthConfig{Clients: []ClientConfig{{ClientID: "controlled-client", ClientSecret: strings.Repeat("s", 32), ProviderID: "controlled", ProviderVersion: "v1", MerchantID: "fixture"}}, SigningKey: []byte(strings.Repeat("k", 32)), KeyID: "v1"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	auth.now = func() time.Time { t.Fatal("credential-only admission read minting clock"); return time.Time{} }
+	if principal, err := auth.AuthenticateClient("controlled-client", strings.Repeat("s", 32)); err != nil || principal.ClientID != "controlled-client" {
+		t.Fatal("configured credential validation failed")
+	}
+	if _, err := auth.AuthenticateClient("unconfigured-client", strings.Repeat("s", 32)); !errors.Is(err, ErrUnauthorized) {
+		t.Fatal("unconfigured credential accepted")
+	}
+}

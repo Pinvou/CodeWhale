@@ -78,6 +78,7 @@ func (s *Service) readApprovalCapability(ctx context.Context, session Session) (
 	if err != nil {
 		return trustedApprovalCapability{}, errApprovalCapabilityUnavailable
 	}
+	setRateLimitSource(request)
 	request.Header.Set("Authorization", "Bearer "+session.AccessToken)
 	request.Header.Set("Accept", "application/json")
 	request.Header.Set("Cache-Control", "no-cache")

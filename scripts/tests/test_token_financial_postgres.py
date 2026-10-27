@@ -2,6 +2,7 @@ import importlib.util
 import contextlib
 import io
 import json
+import re
 from pathlib import Path
 from types import SimpleNamespace
 import unittest
@@ -15,6 +16,34 @@ SPEC.loader.exec_module(RUNNER)
 
 
 class FinancialPostgresRunnerTests(unittest.TestCase):
+    def test_callback_http_admission_pg_leaf_is_selected_and_cannot_skip(self):
+        name = "TestCallbackHTTPAdmissionPersistsPostgres"
+        self.run_main_fixture()
+        command = self.fixture_commands[self.fixture_phases.index("retained-billing")]
+        selection = command[command.index("-run") + 1]
+        self.assertIsNotNone(re.fullmatch(selection, name),
+                             "callback PG root absent from retained-billing -run selection")
+        self.assertIn(name, RUNNER.RETAINED_REQUIRED)
+        self.assertIn(name, RUNNER.BILLING_LEAF_REQUIRED)
+        self.assertNotIn(name, RUNNER.BILLING_CHILD_REQUIRED)
+        events = self.events({name}, RUNNER.BILLING_PACKAGE)
+        options = {"package": RUNNER.BILLING_PACKAGE, "exact_roots": True,
+                   "require_children": True, "children_required": set()}
+        # This real Go test is a named leaf: run + pass + package completion is
+        # necessary, while fabricated child-case evidence is not required.
+        self.assertEqual(RUNNER.verify_results(events, {name}, **options), 1)
+        for invalid in (
+                [],
+                [event for event in events if event.get("Action") != "run"],
+                [event for event in events if event.get("Test") != name],
+                [event for event in events if event.get("Test")],
+                events + [{"Action": "skip", "Package": RUNNER.BILLING_PACKAGE, "Test": name}],
+                events + [{"Action": "skip", "Package": RUNNER.BILLING_PACKAGE, "Test": name + "/unexpected"}],
+                events + [{"Action": "fail", "Package": RUNNER.BILLING_PACKAGE, "Test": name}],
+                [{**event, "Package": RUNNER.TOKEN_PACKAGE} for event in events]):
+            with self.subTest(events=len(invalid)), self.assertRaises(RuntimeError):
+                RUNNER.verify_results(invalid, {name}, **options)
+
     def test_circuit_failure_pg_evidence_is_required(self):
         name = "TestCircuitFailureBeforeDispatchPostgres"
         self.assertIn(name, RUNNER.REQUIRED)
@@ -91,7 +120,7 @@ class FinancialPostgresRunnerTests(unittest.TestCase):
         self.assertEqual(billing[-1], "./internal/billing")
         self.assertEqual(billing[billing.index("-run") + 1],
                          "^(" + "|".join(sorted(RUNNER.RETAINED_REQUIRED)) + ")$")
-        self.assertEqual(len(RUNNER.RETAINED_REQUIRED), 49)
+        self.assertEqual(len(RUNNER.RETAINED_REQUIRED), 50)
         self.assertEqual(self.fixture_writes, ["create", "drop"])
         self.assertEqual(self.fixture_trace, [
             "owner-account", "owner-wallet", "owner-schema", "owner-provisioning",
@@ -1134,6 +1163,7 @@ class FinancialPostgresRunnerTests(unittest.TestCase):
 
     def test_only_explicit_original_and_refund_leaves_can_omit_children(self):
         leaves = {
+            "TestCallbackHTTPAdmissionPersistsPostgres",
             "TestRefundRejectsPlanBeforeFinancialWritesPostgres",
             "TestRefundSuspendedMemberAdmissionWithoutEarlierBlockerPostgres",
             "TestRefundStalePreflightCannotReclaimUnknownDispatchPostgres",
@@ -1190,7 +1220,7 @@ class FinancialPostgresRunnerTests(unittest.TestCase):
         }
         self.assertEqual(RUNNER.REFUND_REQUIRED, expected)
         self.assertTrue(expected <= RUNNER.RETAINED_REQUIRED)
-        self.assertEqual(len(RUNNER.RETAINED_REQUIRED), 49)
+        self.assertEqual(len(RUNNER.RETAINED_REQUIRED), 50)
         valid = self.events(RUNNER.RETAINED_REQUIRED, RUNNER.BILLING_PACKAGE, children=True)
         options = {"package": RUNNER.BILLING_PACKAGE, "require_children": True, "exact_roots": True,
                    "children_required": RUNNER.BILLING_CHILD_REQUIRED}

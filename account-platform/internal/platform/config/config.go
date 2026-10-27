@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"math"
+	"net/netip"
 	"os"
 	"strconv"
 	"strings"
@@ -18,13 +19,14 @@ func IsProduction(environment string) bool {
 }
 
 type Config struct {
-	ServiceName        string
-	Environment        string
-	Address            string
-	ShutdownTimeout    time.Duration
-	RateLimitRPS       float64
-	RateLimitBurst     int
-	TrustedTimeSources []string
+	ServiceName         string
+	Environment         string
+	Address             string
+	ShutdownTimeout     time.Duration
+	RateLimitRPS        float64
+	RateLimitBurst      int
+	HTTPTrustedProxyIPs []netip.Addr
+	TrustedTimeSources  []string
 }
 
 func Load(serviceName string) (Config, error) {
@@ -72,19 +74,46 @@ func Load(serviceName string) (Config, error) {
 		rateLimitBurst = parsed
 	}
 	timeSources := splitUnique(os.Getenv("TRUSTED_TIME_SOURCES"))
+	trustedProxies, err := ParseHTTPTrustedProxyIPs(os.Getenv("HTTP_TRUSTED_PROXY_IPS"))
+	if err != nil {
+		return Config{}, err
+	}
 	if IsProduction(environment) && len(timeSources) < 3 {
 		return Config{}, errors.New("TRUSTED_TIME_SOURCES requires at least three independent sources in production")
 	}
 
 	return Config{
-		ServiceName:        serviceName,
-		Environment:        environment,
-		Address:            fmt.Sprintf(":%d", port),
-		ShutdownTimeout:    shutdownTimeout,
-		RateLimitRPS:       rateLimitRPS,
-		RateLimitBurst:     rateLimitBurst,
-		TrustedTimeSources: timeSources,
+		ServiceName:         serviceName,
+		Environment:         environment,
+		Address:             fmt.Sprintf(":%d", port),
+		ShutdownTimeout:     shutdownTimeout,
+		RateLimitRPS:        rateLimitRPS,
+		RateLimitBurst:      rateLimitBurst,
+		HTTPTrustedProxyIPs: trustedProxies,
+		TrustedTimeSources:  timeSources,
 	}, nil
+}
+
+// ParseHTTPTrustedProxyIPs trusts only explicitly configured immediate peers.
+// It does not accept networks, zones, names or empty entries in a nonempty list.
+func ParseHTTPTrustedProxyIPs(raw string) ([]netip.Addr, error) {
+	if strings.TrimSpace(raw) == "" {
+		return nil, nil
+	}
+	var peers []netip.Addr
+	seen := map[netip.Addr]bool{}
+	for _, item := range strings.Split(raw, ",") {
+		peer, err := netip.ParseAddr(strings.TrimSpace(item))
+		if err != nil || peer.Zone() != "" {
+			return nil, errors.New("HTTP_TRUSTED_PROXY_IPS requires comma-separated exact IP addresses")
+		}
+		peer = peer.Unmap()
+		if !seen[peer] {
+			peers = append(peers, peer)
+			seen[peer] = true
+		}
+	}
+	return peers, nil
 }
 
 func splitUnique(raw string) []string {
