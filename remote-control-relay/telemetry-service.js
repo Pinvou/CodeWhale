@@ -1,5 +1,5 @@
 import crypto from "node:crypto";
-import { DiagnosticError, FailureReportStore, diagnosticFingerprint, failureGroups, failureSamples } from "./failure-diagnostics.js";
+import { DiagnosticError, FailureReportStore, diagnosticFingerprint, failureGroups, failureSamples, failureTimeline } from "./failure-diagnostics.js";
 import { RetentionFacts, retentionFromEvents } from "./retention-store.js";
 import {
   DAY_MS, STATS_TIMEZONE_OFFSET_MS, MIN_RELIABLE_SAMPLE,
@@ -3182,15 +3182,13 @@ export function createTelemetryService(options = {}) {
           const incident = store.behaviorEvents.find(e => e.diagnostic_id && diagnosticCaseId(e) === params.get("id"));
           if (!incident) throw new DiagnosticError(404, "diagnostic_incident_not_found");
           const detail = store.failureReports.detail(incident, actor);
-          const timeline = store.behaviorEvents.filter(e => e.device_id === incident.device_id && (
-            (incident.turn_id && e.turn_id === incident.turn_id)
-            || (incident.attempt_id && e.attempt_id === incident.attempt_id)
-            || (incident.operation_id && e.operation_id === incident.operation_id)))
-            .sort((a,b)=>a.occurred_at-b.occurred_at).slice(-32).map(e=>Object.fromEntries(
-              ["event_name","occurred_at","status","success","stage","error_category","provider_key","model_key","tool_key","duration_ms","diagnostic_code"].filter(k=>e[k]!==undefined).map(k=>[k,e[k]])));
-          const related = store.behaviorEvents.filter(e => e.diagnostic_id && e.diagnostic_trace_id === incident.diagnostic_trace_id && e !== incident).slice(-24)
+          const timeline = failureTimeline(store.behaviorEvents, incident);
+          // Shared traces can intentionally connect both ends of a remote task.
+          // Keep that existing drill-down independent of the local timeline.
+          const related = store.behaviorEvents.filter(e => e.diagnostic_id && incident.diagnostic_trace_id
+            && e.diagnostic_trace_id === incident.diagnostic_trace_id && e !== incident).slice(-24)
             .map(e => ({id:diagnosticCaseId(e),code:e.diagnostic_code,component:e.diagnostic_component,at:e.occurred_at,routing:e.diagnostic_environment?.routing}));
-          json(res, 200, { ...detail, timeline, related }); return true;
+          json(res, 200, { ...detail, ...timeline, related }); return true;
         }
         if (routePath.endsWith("/issue") && req.method === "POST") {
           if (req.headers["x-pinvou-diagnostics"] !== "1") throw new DiagnosticError(403, "diagnostic_csrf_rejected");
