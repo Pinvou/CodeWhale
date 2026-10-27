@@ -293,8 +293,10 @@ func (s *Service) chatCompletions(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err := s.repository.PrepareDispatch(r.Context(), usageRequest.ID, envelope); err != nil {
-		_ = s.repository.MarkReleased(r.Context(), usageRequest.ID, "dispatch_preparation_failed")
-		s.writeError(w, r, err)
+		// A preparation write may have committed despite a missing ACK, and a
+		// same-key actor may already hold funds or have dispatched. Read only:
+		// the local error proves neither a terminal state nor an unused hold.
+		s.writeAcceptedUsageProjection(w, r, usageRequest.ID)
 		return
 	}
 	if err := s.repository.MarkHoldReserving(r.Context(), usageRequest.ID); err != nil {
@@ -753,13 +755,19 @@ func (s *Service) writeCircuitOpenFailure(w http.ResponseWriter, r *http.Request
 }
 
 func (s *Service) writeUndispatchedFailure(w http.ResponseWriter, r *http.Request, usageID uuid.UUID, code, message string, persist func(context.Context, uuid.UUID, ReplayResult) (bool, error)) {
-	w.Header().Set("X-Pinvou-Usage-Request-ID", usageID.String())
-	w.Header().Set("Cache-Control", "no-store")
-	w.Header().Set("Location", "/v1/usage-requests/"+usageID.String())
 	payload, err := json.Marshal(api.Error{Code: code, Message: message, RequestID: httpserver.RequestID(r.Context()), Details: map[string]any{"usage_request_id": usageID, "execution_status": "FAILED", "settlement_status": "RELEASED", "status_url": "/v1/usage-requests/" + usageID.String()}})
 	if err == nil {
 		_, _ = persist(r.Context(), usageID, ReplayResult{Kind: "JSON", HTTPStatus: http.StatusServiceUnavailable, ContentType: "application/json", Payload: payload})
 	}
+	s.writeAcceptedUsageProjection(w, r, usageID)
+}
+
+// Preserve the accepted identity and current authoritative facts without
+// resuming dispatch or inferring no effect from a failed/unknown write ACK.
+func (s *Service) writeAcceptedUsageProjection(w http.ResponseWriter, r *http.Request, usageID uuid.UUID) {
+	w.Header().Set("X-Pinvou-Usage-Request-ID", usageID.String())
+	w.Header().Set("Cache-Control", "no-store")
+	w.Header().Set("Location", "/v1/usage-requests/"+usageID.String())
 	snapshot, err := s.repository.LoadReplay(r.Context(), usageID, 0)
 	if err != nil {
 		api.WriteJSON(w, http.StatusServiceUnavailable, api.Error{Code: "USAGE_STATE_UNCONFIRMED", Message: "the accepted model request status could not be confirmed; inspect the original usage request", RequestID: httpserver.RequestID(r.Context()), Details: map[string]any{"usage_request_id": usageID, "status_url": "/v1/usage-requests/" + usageID.String()}})
