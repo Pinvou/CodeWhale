@@ -680,7 +680,15 @@ function finalizeStreamingReasoning(index) { return pinvouSharedtauriChatEvents(
         // Keep the visible preview's existing immediate publication after
         // parsing; only background render completions share a later frame.
         if (sid === state.activeSessionId) notify();
-        else scheduleStreamNotify(sid, false);
+        else {
+          // r7 P2-2：这条 publish 走后台 1s 预览腿——该条目的 recv→dispatch
+          // 间隔是应用自己的合并节流（生成停顿 ≥1s 时 ~1032ms 实测），不是
+          // 主线程冻结。给探针条目打标，finalize 不上报（snapshot 保留）。
+          if (window.RenderStageProbe) {
+            try { window.RenderStageProbe.markThrottled(sid); } catch (_) {}
+          }
+          scheduleStreamNotify(sid, false);
+        }
       }
     }, isNotifySuppressed() ? BACKGROUND_STREAM_RENDER_THROTTLE_MS : STREAM_RENDER_THROTTLE_MS);
   }
