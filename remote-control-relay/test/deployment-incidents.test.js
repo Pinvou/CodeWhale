@@ -12,6 +12,10 @@ const { isTrustedSystemAlias } = createRequire(import.meta.url)(join(root, 'remo
 const production = readFileSync(join(root, 'scripts/deploy-remote-relay.sh'), 'utf8');
 const testing = readFileSync(join(root, 'scripts/deploy-remote-relay-test.sh'), 'utf8');
 const bash = process.platform === 'win32' ? 'C:/Program Files/Git/bin/bash.exe' : 'bash';
+// Health-fragment tests isolate service/filesystem IO. The real lock helper's
+// policy and archive behavior run in controller-lock-rollout.test.js; here the
+// boundary checks the real deployment caller's exact service/state/backup args.
+const lockFenceBoundary = 'controller_lock_before_rollback() { [[ "$1" == fixture.service && "$2" == /var/lib/pinvou-remote-relay-test/state && "$3" == /fixture.bak ]] || return 98; printf "lock_fence\\n"; systemctl stop "$1"; }';
 const posixPath = (value) => process.platform === 'win32'
   ? value.replaceAll('\\', '/').replace(/^([A-Za-z]):/, (_, drive) => '/' + drive.toLowerCase()) : value;
 function shell(source, env = {}) {
@@ -119,6 +123,7 @@ test('actual remote health loops retry transient failures and bound permanent fa
       'rm() { :; }; mv() { :; }',
       'cp() { printf "copy:%s\\n" "$*"; }',
       'rollback() { echo rollback; }',
+      lockFenceBoundary,
       'trap \'IFS= read -r calls < "$COUNTER_FILE"; printf "calls=%s\\n" "$calls"\' EXIT',
     ].join('\n');
     const modes = source === production
@@ -188,11 +193,22 @@ test('actual test public rollback restores the old unit before restarting and bo
     'cp() { echo restored_unit; }',
     'systemctl() { printf "systemctl:%s\\n" "$*"; }',
     'curl() { [[ " $* " == *" --connect-timeout 3 "* && " $* " == *" --max-time 5 "* ]]; }',
+    'source() { [[ "$1" == /fixture/scripts/controller-lock-rollout.sh ]]; }',
+    lockFenceBoundary,
     remote,
   ].join('\n'));
   assert.equal(result.status, 0, result.stderr);
   assert.match(result.stdout, /restored_unit/);
+  assert.ok(result.stdout.indexOf('lock_fence') < result.stdout.indexOf('restored_unit'));
   assert.ok(result.stdout.indexOf('restored_unit') < result.stdout.indexOf('systemctl:restart'));
+});
+
+test('both deployment artifacts contain the exact lock helper used by rollback', () => {
+  for (const source of [production, testing]) {
+    assert.match(source, /scripts\/controller-lock-rollout\.sh \\/);
+    assert.match(source, /source "\$(?:code_stage|test_dir)(?:\.extract)?\/scripts\/controller-lock-rollout\.sh"/);
+  }
+  assert.ok(existsSync(join(root, 'remote-control-relay/scripts/controller-lock-rollout.sh')));
 });
 
 test('private hardening input is explicit, validated and uploaded as a snapshot', (t) => {

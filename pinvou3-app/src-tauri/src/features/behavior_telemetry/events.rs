@@ -897,12 +897,36 @@ pub fn track_tool_call_started(
 pub fn track_tool_call_completed(
     app: &tauri::AppHandle,
     session_id: &str,
+    turn_id: &str,
+    call_id: &str,
+    tool_name: &str,
+    success: bool,
+    error_category: Option<&str>,
+    diagnostic_error: Option<&str>,
+) {
+    track_tool_call_completed_with_metadata(
+        app,
+        session_id,
+        turn_id,
+        call_id,
+        tool_name,
+        success,
+        error_category,
+        diagnostic_error,
+        None,
+    );
+}
+
+pub fn track_tool_call_completed_with_metadata(
+    app: &tauri::AppHandle,
+    session_id: &str,
     _turn_id: &str,
     call_id: &str,
     _tool_name: &str,
     success: bool,
     error_category: Option<&str>,
     diagnostic_error: Option<&str>,
+    diagnostic_metadata: Option<&Value>,
 ) {
     let Some(telemetry) = app.try_state::<BehaviorTelemetry>() else {
         return;
@@ -935,6 +959,7 @@ pub fn track_tool_call_completed(
         if let Some(error) = diagnostic_error {
             event = event.diagnostic_error(error, "tool_result");
         }
+        event = event.diagnostic_tool_metadata(diagnostic_metadata);
     }
     telemetry.track_for_lease(
         execution_fields(event, operation.execution_task_key.as_deref()),
@@ -1123,7 +1148,10 @@ pub fn model_registry_key(model: &str) -> &'static str {
 pub fn classify_tool(tool_name: &str) -> &'static str {
     if tool_name.starts_with("mcp_") || tool_name.contains("-mcp") {
         "mcp"
-    } else if matches!(tool_name, "Bash" | "exec_shell" | "task_shell_start") {
+    } else if matches!(
+        tool_name,
+        "Bash" | "bash" | "exec_shell" | "task_shell_start"
+    ) {
         "cli"
     } else if matches!(tool_name, "load_skill" | "tool_search") {
         "skill"
@@ -1134,7 +1162,7 @@ pub fn classify_tool(tool_name: &str) -> &'static str {
 
 pub fn tool_registry_key(tool_name: &str) -> &'static str {
     let key = match tool_name {
-        "Bash" | "exec_shell" | "task_shell_start" => "shell",
+        "Bash" | "bash" | "exec_shell" | "task_shell_start" => "shell",
         "read_file" => "read_file",
         "write_file" | "apply_patch" => "edit_file",
         "glob" | "rg" | "search_files" => "search_files",

@@ -1666,6 +1666,7 @@ test("Windows state directory and every durable/lock file have protected DACLs",
     statePath,
     `${statePath}.bak`,
     lockPath(statePath),
+    path.join(path.dirname(statePath), ".pinvou-controller-state.guard"),
   ];
   const inspector = windowsDaclInspectorConfiguration(paths.join("|"));
   const { stdout } = await executeDaclInspector(t, inspector.executable, [
@@ -2120,20 +2121,23 @@ test("a CAS uses one verified Windows ACL application per new state file", {
 }, async (t) => {
   const statePath = await temporaryState(t);
   let protectionCalls = 0;
-  let verificationCalls = 0;
+  const verifiedPaths = [];
   const store = await RelayStateStore.open({
     statePath,
     legacyStatePath: legacyStatePath(statePath),
     processIdentity: async (pid) => `acl-count-test:${pid}`,
     protectPath: async () => { protectionCalls += 1; },
-    verifyPath: async () => { verificationCalls += 1; },
+    verifyPath: async (target) => { verifiedPaths.push(target); },
     verifyAncestors: async () => {},
   });
   protectionCalls = 0;
-  verificationCalls = 0;
+  verifiedPaths.length = 0;
   await store.compareAndSwap("test", "0", { value: 1 });
   assert.equal(protectionCalls, 2);
-  assert.equal(verificationCalls, 0);
+  const guardPath = path.join(path.dirname(statePath), ".pinvou-controller-state.guard");
+  assert.ok(verifiedPaths.length > 0, "the held guard still requires identity/permission validation");
+  assert.deepEqual(verifiedPaths.filter(target => target !== guardPath), [],
+    "new state temporaries are protected once, without redundant ACL verification");
   await store.close();
 });
 

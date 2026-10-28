@@ -28,6 +28,7 @@ function pinvouSharedtauriChat() {
     var bt = context.bt;
     var isDefaultChatTitle = context.isDefaultChatTitle;
     var runSyncOnSession = context.runSyncOnSession;
+    var flushPendingStreamRender = context.flushPendingStreamRender || function () {};
     var startThinking = context.startThinking;
     var stopThinking = context.stopThinking;
     var ensureSessionBufferLoaded = context.ensureSessionBufferLoaded;
@@ -439,6 +440,7 @@ function timeStr() { return pinvouSharedtauriChat().timeStr(); }
             }
             if (state.activeTurnTimelineId === localId) state.activeTurnTimelineId = null;
           }
+          flushPendingStreamRender(); // admission reject mid-stream: emit final html before the reset
           resetPendingAssistant();
           state.busy = false;
           stopThinking();
