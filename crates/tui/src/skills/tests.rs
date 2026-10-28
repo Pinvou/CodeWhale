@@ -213,6 +213,21 @@ fn forkguard_mcp_discovery_skill_conditions_registry_commands() {
         "registry_sync requires a non-empty `query`; the skill must teach a \
          call that can succeed:\n{SKILL}"
     );
+    let normalized = SKILL.split_whitespace().collect::<Vec<_>>().join(" ");
+    for wording in [
+        "try `registry_sync` directly once",
+        "try `start_registry_mcp_server` directly once",
+        "try its exact returned name directly once",
+        "access was not denied",
+        "`retry_required: true` licenses one retry",
+        "do not repeat failed probes or guess other names",
+    ] {
+        assert!(
+            normalized.contains(wording),
+            "missing bounded-probe rule: {wording}"
+        );
+    }
+    assert!(!normalized.contains("instead of following the rest of this workflow"));
     assert!(
         SKILL.contains("eight scored matches"),
         "the skill must describe the scored-matches contract, not a complete \

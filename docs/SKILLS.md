@@ -15,8 +15,9 @@ For `skills_dir` and `[skills]` config keys, see [CONFIGURATION.md](CONFIGURATIO
 Generation 12 recognizes the exact generation-11 `mcp-discovery` body as a
 superseded shipped copy. Its fixture and digest cover that population; they do
 not claim a complete inventory of older shipped bodies. In particular, some
-generation-10-era discovery/builder/PDF/installer bodies are absent from the
-historical digest table. Unknown bodies are conservatively treated as edits
+generation-10-era discovery/builder/PDF bodies and the pre-generation-10
+installer body are absent from the historical digest table. The generation-10
+installer body is covered. Unknown bodies are conservatively treated as edits
 and preserved, even when a catalog marker advances. Backfilling those versions
 requires a separate byte-level release audit, not a blanket overwrite rule.
 

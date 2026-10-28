@@ -61,10 +61,12 @@ host may retain a deferred `load_skill` or `handle_read` entry while an exact
 dispatch policy excludes `tool_search`. Prefer discovery when available; if it
 cannot provide a documented tool and access has not been denied, one call by
 that exact name may return its schema. Such a receipt explicitly says the tool
-was not executed. Follow its schema and retry only when instructed. An unknown
-name, a denial, or a failed probe is not permission to keep trying or invent
-other names. The Goal family retains this same discovery/direct-probe fallback;
-no alternate dispatch, approval or provenance bypass is introduced.
+was not executed. `retry_required: true` licenses one retry with the returned
+schema; otherwise retry only when instructed. An unknown name, a denial, or a
+failed probe is not permission to keep trying or invent other names. The Goal
+family retains a discovery/direct-probe fallback without this bounded-probe
+wording; its guidance is outside this alignment. No alternate dispatch, approval
+or provenance bypass is introduced.
 
 ### Host-declared built-in capabilities
 

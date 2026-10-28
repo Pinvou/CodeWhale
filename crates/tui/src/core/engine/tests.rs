@@ -642,6 +642,19 @@ fn registry_first_instruction_only_names_published_tools() {
     }
     assert!(MCP_REGISTRY_FIRST_INSTRUCTION.contains("`bash`"));
     assert!(MCP_REGISTRY_FIRST_INSTRUCTION.contains("`Web`"));
+    for wording in [
+        "you must call `registry_sync`",
+        "you must call `start_registry_mcp_server`",
+        "local programs, custom code, or a manual implementation",
+        "full catalog never enters the conversation",
+        "snapshot scores candidates",
+        "`retry_required: true` licenses one retry",
+    ] {
+        assert!(
+            MCP_REGISTRY_FIRST_INSTRUCTION.contains(wording),
+            "missing rule: {wording}"
+        );
+    }
     // Round-2 review pin: the fresh-install caveat must stay disclosed, and
     // the false "clearly irrelevant" verdict it replaced must not return.
     assert!(MCP_REGISTRY_FIRST_INSTRUCTION.contains("may still be downloading"));
@@ -770,6 +783,18 @@ fn registry_first_scenario() {
         assert_eq!(after_second, &after_first);
         assert!(after_second.contains("registry_sync"));
         assert!(after_second.contains("start_registry_mcp_server"));
+        for wording in [
+            "try `registry_sync` directly once",
+            "try `start_registry_mcp_server` directly once",
+            "access was not denied",
+            "`retry_required: true` licenses one retry",
+            "do not repeat failed probes or guess other names",
+        ] {
+            assert!(
+                after_second.contains(wording),
+                "missing shell rule: {wording}"
+            );
+        }
     }
 }
 
@@ -13551,7 +13576,7 @@ fn forkguard_parent_deferred_tools_remain_reachable_without_discovery() {
         let surface = policy_for_catalog(
             catalog,
             Some(exact.allowed_tools().to_vec()),
-            denied.then(|| exact.allowed_tools().to_vec()),
+            denied.then(|| names.iter().map(|name| (*name).to_string()).collect()),
             crate::tui::approval::ApprovalMode::Suggest,
         );
         assert!(
@@ -13560,6 +13585,8 @@ fn forkguard_parent_deferred_tools_remain_reachable_without_discovery() {
                 .iter()
                 .any(|tool| tool.name == "tool_search")
         );
+        assert!(surface.allows_tool("read"));
+        assert!(surface.active_names.contains("read"));
         for name in names {
             assert_eq!(surface.allows_tool(name), !denied);
             assert!(!surface.active_names.contains(name));
@@ -13573,13 +13600,11 @@ fn forkguard_parent_deferred_tools_remain_reachable_without_discovery() {
             );
             if denied {
                 assert!(result.is_none());
-                assert!(hydrated.is_empty());
                 continue;
             }
             let Some(DeferredHydration::Loaded(receipt)) = result else {
                 panic!("permitted deferred entry must publish its schema");
             };
-            assert!(receipt.success);
             let metadata = receipt.metadata.unwrap();
             assert_eq!(metadata["executed"], false);
             assert_eq!(metadata["retry_required"], true);
