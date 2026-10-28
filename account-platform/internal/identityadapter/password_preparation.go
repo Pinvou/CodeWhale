@@ -86,7 +86,41 @@ type passwordPreparationState struct {
 	incarnation uuid.UUID
 	peers       map[netip.Addr]struct{}
 	records     map[uuid.UUID]preparedPassword
+	locks       map[uuid.UUID]*passwordPreparationLock
 }
+
+// A grant has one local allocation/replay owner. The map mutex only protects
+// in-memory bookkeeping, never authority calls, request bodies or responses.
+// References include waiters, so removing an idle lock cannot split ownership.
+type passwordPreparationLock struct {
+	mu    sync.Mutex
+	users int
+}
+
+func (s *passwordPreparationState) lockGrant(id uuid.UUID) func() {
+	s.mu.Lock()
+	if s.locks == nil {
+		s.locks = make(map[uuid.UUID]*passwordPreparationLock)
+	}
+	lock := s.locks[id]
+	if lock == nil {
+		lock = &passwordPreparationLock{}
+		s.locks[id] = lock
+	}
+	lock.users++
+	s.mu.Unlock()
+	lock.mu.Lock()
+	return func() {
+		lock.mu.Unlock()
+		s.mu.Lock()
+		lock.users--
+		if lock.users == 0 {
+			delete(s.locks, id)
+		}
+		s.mu.Unlock()
+	}
+}
+
 type preparedPassword struct {
 	tokenDigest    [32]byte
 	facts          passwordpreparation.Facts
@@ -157,9 +191,11 @@ func (s *Service) preparePassword(w http.ResponseWriter, r *http.Request) {
 		s.writeError(w, r, err)
 		return
 	}
-	// Serialize allocation/replay through a single incarnation; Account serializes replicas.
+	// Serialize only this grant; unrelated admitted requests must not wait on
+	// authority I/O or a slow body. Account still serializes replicas.
+	unlock := state.lockGrant(id)
+	defer unlock()
 	state.mu.Lock()
-	defer state.mu.Unlock()
 	for key, saved := range state.records {
 		if !saved.reference.ExpiresAt.After(s.vault.now()) {
 			delete(state.records, key)
@@ -167,6 +203,7 @@ func (s *Service) preparePassword(w http.ResponseWriter, r *http.Request) {
 	}
 	digest := sha256.Sum256([]byte(token))
 	saved, exists := state.records[id]
+	state.mu.Unlock()
 	var facts passwordpreparation.Facts
 	if exists {
 		if !hmac.Equal(saved.tokenDigest[:], digest[:]) || saved.source != source || saved.device != device {
@@ -225,7 +262,9 @@ func (s *Service) preparePassword(w http.ResponseWriter, r *http.Request) {
 	record.mu.Lock()
 	record.preparation = passwordpreparation.Reference{ID: facts.ID, Mobile: facts.Mobile, Purpose: facts.Purpose}
 	record.mu.Unlock()
+	state.mu.Lock()
 	state.records[id] = preparedPassword{tokenDigest: digest, facts: facts, source: source, device: device, reference: reference}
+	state.mu.Unlock()
 	w.Header().Set("Cache-Control", "no-store")
 	api.WriteJSON(w, http.StatusCreated, reference)
 }
