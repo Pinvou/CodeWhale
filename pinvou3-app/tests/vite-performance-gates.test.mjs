@@ -5,6 +5,7 @@ import test from 'node:test';
 import { VIEW_LOADERS } from '../src/app/view-loaders.js';
 import createViteConfig, {
   MAIN_ENTRY_BUDGET_BYTES,
+  WEB_MAIN_ENTRY_BUDGET_BYTES,
   assertLazyChunks,
   assertMainEntryBudget,
   lazyChunkContracts,
@@ -18,18 +19,64 @@ function chunk({ name, modules = {}, isEntry = false, code = '' }) {
 const mainSource = readFileSync(new URL('../src/app/main.jsx', import.meta.url), 'utf8');
 const chatSource = readFileSync(new URL('../src/features/chat/ChatView.jsx', import.meta.url), 'utf8');
 
+function buildPlugins(mode) {
+  return createViteConfig({ command: 'build', mode }).plugins.flat(Infinity).filter(Boolean);
+}
+
 test('startup gates remain active in desktop and web production builds', () => {
-  // Official's measured budget (see vite.config.mjs history): the #484 backflow
-  // keeps the current ceiling; a raise requires fresh desktop + web
-  // measurements on the merged tree per policy. The #773 backflow was measured
-  // under this ceiling and needed no raise (see the config comment).
-  assert.equal(MAIN_ENTRY_BUDGET_BYTES, 496_000);
+  // The 2026-10-27 per-mode re-cut (see vite.config.mjs history) is measured
+  // per policy; a raise requires fresh desktop + web measurements on the
+  // merged tree per policy. The #773 backflow was measured under its ceiling
+  // and needed no raise (see the config comment).
+  assert.equal(MAIN_ENTRY_BUDGET_BYTES, 159_000);
+  assert.equal(WEB_MAIN_ENTRY_BUDGET_BYTES, 161_000);
   for (const mode of ['production', 'web']) {
-    const config = createViteConfig({ command: 'build', mode });
-    const pluginNames = new Set(config.plugins.flat(Infinity).filter(Boolean).map(plugin => plugin.name));
+    const pluginNames = new Set(buildPlugins(mode).map(plugin => plugin.name));
     assert.ok(pluginNames.has('pinvou-enforce-lazy-chunks'), `${mode} must enforce lazy chunks`);
     assert.ok(pluginNames.has('pinvou-enforce-main-entry-budget'), `${mode} must enforce the entry budget`);
   }
+});
+
+test('each build mode enforces its own main entry ceiling', () => {
+  // The web entry is far below the desktop-scale ceiling after the web
+  // groups, so a shared ceiling would never fire for web; the plugin must
+  // bind the ceiling to the mode it was created for.
+  for (const [mode, budget] of [['production', MAIN_ENTRY_BUDGET_BYTES], ['web', WEB_MAIN_ENTRY_BUDGET_BYTES]]) {
+    const plugin = buildPlugins(mode).find(candidate => candidate.name === 'pinvou-enforce-main-entry-budget');
+    const atBudget = chunk({ name: 'main', isEntry: true, code: 'x'.repeat(budget) });
+    assert.doesNotThrow(() => plugin.writeBundle({}, { main: atBudget }), `${mode} must accept an entry at its ceiling`);
+    const overBudget = chunk({ name: 'main', isEntry: true, code: `${atBudget.code}x` });
+    assert.throws(
+      () => plugin.writeBundle({}, { main: overBudget }),
+      new RegExp(`Main entry chunk ${budget + 1} B exceeds the ${budget} B startup budget`, 'u'),
+      `${mode} must reject an entry one byte over its ceiling`,
+    );
+  }
+});
+
+test('codeSplitting groups stay deliberate in both build modes', () => {
+  // The entry-budget gate only measures the entry FILE, not the startup
+  // closure (entry + statically imported chunks + index.html modulepreload),
+  // so these pins carry the structural protection the byte gate cannot.
+  const webOutput = createViteConfig({ command: 'build', mode: 'web' }).build.rolldownOptions.output;
+  assert.deepEqual(
+    webOutput.codeSplitting.groups.map(group => group.name),
+    ['vendor', 'markdown-vendor', 'chat-view'],
+  );
+  // This tree keeps highlight.js inside the markdown-vendor group: the
+  // curated language set is statically imported (syntax-highlighter.js), so
+  // the group only moves the stack out of the entry file. Upstream's lazy
+  // fence-language wiring requires the opposite pin — do not copy it here
+  // without porting that wiring too.
+  const markdownGroup = webOutput.codeSplitting.groups.find(group => group.name === 'markdown-vendor');
+  assert.match(String(markdownGroup.test), /marked\|dompurify\|highlight/u);
+  // The desktop multi-entry build shares dependencies automatically but keeps
+  // the explicit chat-view group that holds the main entry within budget.
+  const desktopOutput = createViteConfig({ command: 'build', mode: 'production' }).build.rolldownOptions.output;
+  assert.deepEqual(
+    desktopOutput.codeSplitting.groups.map(group => group.name),
+    ['chat-view'],
+  );
 });
 
 test('search overlay chunk failures render inside the visible app flow', () => {

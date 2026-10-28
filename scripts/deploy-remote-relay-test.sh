@@ -48,6 +48,10 @@
 #                                        注意:该模式是 development + TOFU，仅限测试端点。
 # 注:必须带 -E,否则函数+heredoc 调用失败时 ERR trap 不触发(错误路径无阶段报告)。
 set -eEuo pipefail
+case "${PINVOU_CONFIRM_CONTROLLER_LOCK_UPGRADE:-0}" in
+  0|1) ;;
+  *) echo "PINVOU_CONFIRM_CONTROLLER_LOCK_UPGRADE must be 0 or 1" >&2; exit 64 ;;
+esac
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 RELAY_DIR="$ROOT/remote-control-relay"
@@ -299,14 +303,16 @@ while IFS= read -r relay_js_file; do
 done < <(cd "$RELAY_DIR" && printf '%s\n' ./*.js)
 tar -czf - -C "$RELAY_DIR" \
   "${relay_js_files[@]}" behavior-telemetry-schema.js package.json package-lock.json web/dist web/stats.html \
+  scripts/controller-lock-rollout.sh \
   -C "$ROOT" docs/schemas/behavior-telemetry-v1.schema.json docs/schemas/behavior-telemetry-registries.json \
   | relay_ssh "cat > '$TEST_DIR.staging.tar.gz.tmp' && mv '$TEST_DIR.staging.tar.gz.tmp' '$TEST_DIR.staging.tar.gz'"
 
 STAGE="配置并重启测试 relay 实例(端口 $TEST_PORT,含失败回滚)"
 echo "── 配置并重启测试 relay 实例(端口 $TEST_PORT) ──"
-relay_ssh "bash -s -- $(shq_all "$TEST_DIR" "$TEST_PORT" "$BASE_PATH" "$SERVICE" "$PROXY_SERVER" "$ENABLE_DESKTOP_CONTROLLER")" <<'REMOTE'
-set -euo pipefail
+relay_ssh "bash -s -- $(shq_all "$TEST_DIR" "$TEST_PORT" "$BASE_PATH" "$SERVICE" "$PROXY_SERVER" "$ENABLE_DESKTOP_CONTROLLER" "${PINVOU_CONFIRM_CONTROLLER_LOCK_UPGRADE:-0}")" <<'REMOTE'
+set -eEuo pipefail
 test_dir="$1"; port="$2"; base_path="$3"; service="$4"; proxy_server="$5"; controller="$6"
+lock_upgrade_confirmed="$7"
 proxy_ip="${proxy_server#*@}"
 # 先解包到暂存目录并装依赖:此步失败则现役目录未被触碰,在跑服务不受影响。
 rm -rf "$test_dir.extract"
@@ -320,6 +326,7 @@ mkdir -p /var/lib/pinvou-telemetry-test
 # 旧代码目录中的身份只作一次性运维迁移来源，不保留双轨配置或重新生成旧身份。
 controller_identity_dir=/var/lib/pinvou-remote-relay-test/identity
 if [ "$controller" = "1" ]; then
+  (cd "$test_dir.extract" && node --input-type=module -e "const m=await import('./relay-state-guard.js'); await m.requireControllerLockRuntime()")
   # relay-state-store 要求专用目录 mode 0700 且属主为运行用户(relay_state_permissions_unsafe),
   # 且状态必须放在会被整体替换的代码目录之外,重新部署不会丢掉 tombstone/keyring 状态。
   node - "$controller_identity_dir" "$test_dir/controller.env" /var/lib/pinvou-remote-relay-test/state/controller-state.json <<'CONTROLLER_IDENTITY'
@@ -433,7 +440,28 @@ fs.chmodSync(publicPath, 0o600);
 CONTROLLER_IDENTITY
 fi
 # 身份验证失败时不得触碰现役代码；验证成功后才整体替换，旧版供回滚。
+source "$test_dir.extract/scripts/controller-lock-rollout.sh"
+controller_lock_early_arm "$service"
+controller_lock_early_failure() {
+  local status=$?
+  trap - ERR
+  if ! controller_lock_early_recover "$service" /var/lib/pinvou-remote-relay-test/state "$test_dir"; then
+    echo '早期测试部署恢复失败；服务状态需由运维检查' >&2
+  fi
+  exit "$status"
+}
+trap controller_lock_early_failure ERR
+if [ "$controller" = "1" ]; then
+  controller_lock_prepare_upgrade "$service" /var/lib/pinvou-remote-relay-test/state "$test_dir" \
+    "$test_dir.lock-upgrade-backup-$(date +%Y%m%d-%H%M%S)" "$lock_upgrade_confirmed"
+else
+  controller_lock_stop_service "$service"
+fi
 rm -rf "$test_dir.bak"
+# From the first live-code rename onward, an incomplete replacement must not
+# be treated as a harmless pre-change failure.
+controller_lock_early_armed=0
+trap - ERR
 [ ! -d "$test_dir" ] || mv "$test_dir" "$test_dir.bak"
 mv "$test_dir.extract" "$test_dir"
 controller_unit_line=""
@@ -486,6 +514,7 @@ done
 if [ "$healthy" != "1" ]; then
   echo "✗ 新版本健康检查失败" >&2
   if [ -d "$test_dir.bak" ]; then
+    controller_lock_before_rollback "$service" /var/lib/pinvou-remote-relay-test/state "$test_dir.bak"
     echo "── 自动回滚到上一版($test_dir.bak)──" >&2
     rm -rf "$test_dir.failed"
     mv "$test_dir" "$test_dir.failed"
@@ -748,6 +777,8 @@ if [ ! -d "$test_dir.bak" ]; then
   echo "⚠ 无历史版本可回滚" >&2
   exit 1
 fi
+source "$test_dir/scripts/controller-lock-rollout.sh"
+controller_lock_before_rollback "$service" /var/lib/pinvou-remote-relay-test/state "$test_dir.bak"
 rm -rf "$test_dir.failed"
 mv "$test_dir" "$test_dir.failed"
 mv "$test_dir.bak" "$test_dir"

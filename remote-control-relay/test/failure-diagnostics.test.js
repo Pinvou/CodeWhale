@@ -446,6 +446,9 @@ test("HTTP closes the collection/authorization/admin/CSRF/delete loop without pu
   assert.equal(JSON.stringify(frozen),exact);
   assert.equal((await call(prefix+"/diagnostics/report",{...renewed,collection_period_id:"fixture_original_period"},auth)).status,409);
   const detail=await call(prefix+`/diagnostics/incident?id=${samples.json.incidents[0].id}`,undefined,{cookie:admin.cookie});assert.equal(detail.json.reports.length,1);
+  assert.equal(detail.json.timeline_context.incident_included,true);
+  assert.equal(detail.json.timeline_context.task_terminal_included,true);
+  assert(detail.json.timeline.some(item=>item.diagnostic_code===event.diagnostic_code));
   assert.equal((await call(prefix+`/diagnostics/incident?id=${event.diagnostic_id}`,undefined,{cookie:admin.cookie})).status,404);
   const update={fingerprint,issue:{status:"reproduced",fixed_version:""}};
   assert.equal((await call(prefix+"/diagnostics/issue",update,{cookie:admin.cookie})).status,403);

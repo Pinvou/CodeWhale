@@ -12,6 +12,7 @@ use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
 use deepseek_tui::AppMode;
+use futures_util::FutureExt as _;
 use parking_lot::Mutex;
 use serde_json::{Value, json};
 use tauri::Listener as _;
@@ -32,9 +33,9 @@ use crate::features::remote_control::controller::protocol::LeaseContext;
     )
 )]
 use crate::features::remote_control::controller::task::{
-    AdmissionOutcome, ChatTurnExecutor, ControllerTaskEventSink, PublishedAttachment,
-    RemoteChatTurnPort, RemoteTaskLedger, RemoteTaskService, RemoteTaskState, TASK_CANCELLED_CODE,
-    TASK_MODE_CHAT, TASK_MODEL_SOURCE_CONTROLLED, TASK_MODEL_SOURCE_TEMPORARY,
+    AdmissionOutcome, ChatTurnExecutor, ControllerTaskEventSink, JsonTaskLedgerStore,
+    PublishedAttachment, RemoteChatTurnPort, RemoteTaskLedger, RemoteTaskService, RemoteTaskState,
+    TASK_CANCELLED_CODE, TASK_MODE_CHAT, TASK_MODEL_SOURCE_CONTROLLED, TASK_MODEL_SOURCE_TEMPORARY,
     task_input_digest_for_value,
 };
 // The policy boundary is shared by production validation and the real-store
@@ -960,56 +961,64 @@ impl EnginePoolChatTurnPort {
         let owner = Arc::new(RemoteTurnOwner::default());
         let mut reserved = self.engine.reserve_remote_turn(session_id)?;
         let generation = reserved.as_ref().map(|reserved| reserved.generation);
-        let mut turn_relay = self.engine.start_turn_relay(session_id, task_id, events);
-        if let Some(relay) = turn_relay.as_mut() {
-            if let Some(reserved) = reserved.as_ref() {
-                if let Some(turn) = reserved.turn.as_ref() {
-                    relay.arm(turn.generation());
+        // Keep the exact published owner alive through unwind settlement. The
+        // outer service owns the durable failure, but its model-package hook
+        // cannot retire this pool entry or the turn it already submitted.
+        let result = std::panic::AssertUnwindSafe(crate::core::panic_scope::future(async {
+            let mut turn_relay = self.engine.start_turn_relay(session_id, task_id, events);
+            if let Some(relay) = turn_relay.as_mut() {
+                if let Some(reserved) = reserved.as_ref() {
+                    if let Some(turn) = reserved.turn.as_ref() {
+                        relay.arm(turn.generation());
+                    }
                 }
             }
-        }
-        let result = budget
-            .run(&cancel, async {
-                tokio::select! {
-                    biased;
-                    _ = cancel.cancelled() => {
-                        return Err(TASK_CANCELLED_CODE.to_owned());
+            let result = budget
+                .run(&cancel, async {
+                    tokio::select! {
+                        biased;
+                        _ = cancel.cancelled() => {
+                            return Err(TASK_CANCELLED_CODE.to_owned());
+                        }
+                        result = self.engine.send_user_message_with_attachments(
+                            session_id,
+                            task_id,
+                            model_source,
+                            lease,
+                            content,
+                            skill_ids,
+                            attachments,
+                            turn_relay.as_ref(),
+                            owner.clone(),
+                            &mut reserved,
+                        ) => result?,
                     }
-                    result = self.engine.send_user_message_with_attachments(
-                        session_id,
-                        task_id,
-                        model_source,
-                        lease,
-                        content,
-                        skill_ids,
-                        attachments,
-                        turn_relay.as_ref(),
-                        owner.clone(),
-                        &mut reserved,
-                    ) => result?,
-                }
-                self.wait_for_terminal(session_id, &cancel, turn_relay.as_ref(), generation)
-                    .await?;
-                Ok(())
-            })
-            .await;
-        if matches!(
-            result.as_ref().err().map(String::as_str),
-            Some(TASK_CANCELLED_CODE | TURN_TIMEOUT_CODE)
-        ) {
-            let _ = tokio::time::timeout(
-                CANCEL_SETTLE_BUDGET,
-                self.engine.cancel_turn(session_id, generation),
-            )
-            .await;
-        }
-        // Only a successful, accepted terminal can classify the final block.
-        // Cancellation, failure and Drop mask pending text instead.
-        // Assistant content is journaled from real `chat:delta` callbacks,
-        // never synthesized as one final response here.
-        if let Some(relay) = turn_relay.as_mut() {
-            relay.finish(result.is_ok());
-        }
+                    self.wait_for_terminal(session_id, &cancel, turn_relay.as_ref(), generation)
+                        .await?;
+                    Ok(())
+                })
+                .await;
+            if matches!(
+                result.as_ref().err().map(String::as_str),
+                Some(TASK_CANCELLED_CODE | TURN_TIMEOUT_CODE)
+            ) {
+                let _ = tokio::time::timeout(
+                    CANCEL_SETTLE_BUDGET,
+                    self.engine.cancel_turn(session_id, generation),
+                )
+                .await;
+            }
+            // Only a successful, accepted terminal can classify the final block.
+            // Cancellation, failure and Drop mask pending text instead.
+            // Assistant content is journaled from real `chat:delta` callbacks,
+            // never synthesized as one final response here.
+            if let Some(relay) = turn_relay.as_mut() {
+                relay.finish(result.is_ok());
+            }
+            result
+        }))
+        .catch_unwind()
+        .await;
         // All remote model sources own a private skills root. Retire only this
         // attempt's entry before releasing credentials; never rewrite shared B
         // skills here, especially when a replacement already owns the session.
@@ -1019,6 +1028,12 @@ impl EnginePoolChatTurnPort {
             engine.release_task_model(&session_id, &owner).await;
         })
         .await;
+        // Preserve panic classification in RemoteTaskService, after the same
+        // exact-owner cleanup used by ordinary success/error has been owned.
+        let result = match result {
+            Ok(result) => result,
+            Err(payload) => std::panic::resume_unwind(payload),
+        };
         if result.is_ok() {
             budget.checkpoint(&cancel)?;
         }
@@ -2570,5 +2585,137 @@ mod tests {
         assert_eq!(state.push_assistant("must not leak"), None);
         state.generation = Some(1);
         assert_eq!(state.push_assistant("accepted "), Some("accepted ".into()));
+    }
+
+    // Real service/ledger and real engine publication/custody; only the
+    // provider turn and AppHandle-dependent reclaimer remain explicit seams.
+    mod panic_owner_regression {
+        use super::*;
+        use crate::features::assistant::engine_pool::remote_snapshot_tests::panic_owner_fixture::PublishedEngine;
+
+        struct PublishedEnginePort(PublishedEngine);
+
+        #[async_trait::async_trait]
+        impl RemoteChatEnginePort for PublishedEnginePort {
+            async fn send_user_message(
+                &self,
+                session_id: &str,
+                _task_id: &str,
+                model_source: &str,
+                _lease: &LeaseContext,
+                content: String,
+                skill_ids: Vec<String>,
+                _relay: Option<&TurnEventRelayHandle>,
+                owner: Arc<RemoteTurnOwner>,
+                _reserved: &mut Option<RemoteChatReservation>,
+            ) -> std::result::Result<(), String> {
+                self.0
+                    .submit(
+                        session_id,
+                        model_source == TASK_MODEL_SOURCE_TEMPORARY,
+                        content,
+                        skill_ids,
+                        owner,
+                    )
+                    .await
+            }
+
+            fn is_turn_active(&self, _: &str, _: Option<u64>) -> bool {
+                self.0.is_active()
+            }
+
+            fn terminal_result(
+                &self,
+                _: &str,
+                _: Option<&TurnEventRelayHandle>,
+            ) -> Option<std::result::Result<(), String>> {
+                (!self.0.is_active()).then_some(Ok(()))
+            }
+
+            async fn cancel_turn(&self, _: &str, _: Option<u64>) {}
+
+            async fn release_task_model(&self, session_id: &str, owner: &Arc<RemoteTurnOwner>) {
+                self.0.release(session_id, owner).await;
+            }
+        }
+        struct Events;
+        impl ControllerTaskEventSink for Events {
+            fn emit(&self, _: Value) {}
+        }
+
+        fn request(task_id: &str, source: &str) -> Value {
+            let input =
+                json!({"text":"private ownership probe","attachment_ids":[],"skill_ids":[]});
+            json!({
+                "v":1,"type":"task_submit","connection_id":"connection-0001",
+                "controller_lease_id":"lease-0001","lease_epoch":"1","relay_epoch":"relay-0001",
+                "remote_control_generation":"generation-0001","request_id":task_id,
+                "task_id":task_id,"client_request_id":task_id,"session_id":"session-0001",
+                "capability_revision":"7","model_source":source,"mode":"chat",
+                "input_digest":task_input_digest_for_value(&input).unwrap(),"input":input,
+            })
+        }
+
+        #[tokio::test(flavor = "current_thread")]
+        async fn published_chat_panic_retires_private_owner_and_persists_failure_before_next_send()
+        {
+            let _guard = crate::platform::paths::tests::ENV_LOCK
+                .lock()
+                .unwrap_or_else(|p| p.into_inner());
+            let lease = LeaseContext {
+                connection_id: "connection-0001".into(),
+                controller_lease_id: "lease-0001".into(),
+                lease_epoch: "1".into(),
+                relay_epoch: "relay-0001".into(),
+                remote_control_generation: "generation-0001".into(),
+            };
+            for source in [TASK_MODEL_SOURCE_CONTROLLED, TASK_MODEL_SOURCE_TEMPORARY] {
+                let engine = Arc::new(PublishedEnginePort(PublishedEngine::new()));
+                let path = engine.0.ledger_path(source);
+                let service = RemoteTaskService::new(Arc::new(RemoteTaskLedger::new(Arc::new(
+                    JsonTaskLedgerStore::new(path.clone()),
+                ))));
+                service.register_executor(
+                    TASK_MODE_CHAT,
+                    Arc::new(ChatTurnExecutor::new(Arc::new(
+                        EnginePoolChatTurnPort::new(engine.clone()),
+                    ))),
+                );
+                for (task_id, expected) in [
+                    ("task-panic-owner-1", RemoteTaskState::Failed),
+                    ("task-panic-owner-2", RemoteTaskState::Succeeded),
+                ] {
+                    let body = request(task_id, source);
+                    let AdmissionOutcome::Admitted(ticket) =
+                        service.submit(&lease, &body, 1_000).unwrap()
+                    else {
+                        panic!("the next real service task must be admissible")
+                    };
+                    let cancel = CancellationToken::new();
+                    let result = tokio::time::timeout(
+                        std::time::Duration::from_secs(10),
+                        service.dispatch(ticket, Arc::new(Events), cancel.clone(), 1_100),
+                    )
+                    .await
+                    .expect("panic settlement must be bounded")
+                    .unwrap();
+                    assert_eq!(result.state, expected);
+                    if expected == RemoteTaskState::Failed {
+                        assert_eq!(
+                            result.terminal_reason.as_deref(),
+                            Some("task_dispatch_panicked")
+                        );
+                        assert!(cancel.is_cancelled());
+                    }
+                    engine.0.assert_retired().await;
+                    assert_eq!(service.ledger().live_task_count(), 0);
+                    let records = JsonTaskLedgerStore::load(&path).unwrap();
+                    assert_eq!(records.last().unwrap().state, expected);
+                    let reopened = RemoteTaskLedger::open_recovered(path.clone(), 1_200).unwrap();
+                    assert_eq!(reopened.live_task_count(), 0);
+                }
+                engine.0.assert_attempts(2);
+            }
+        }
     }
 }

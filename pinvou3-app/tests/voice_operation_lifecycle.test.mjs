@@ -268,7 +268,11 @@ for (const [lane, source] of Object.entries(sources)) {
     if (lane === 'desktop') assert.match(finish, /session\.voiceResultReady = !!finalText && !editUnchanged;/);
     assert.ok(finish.indexOf('"voice_recognition_completed"') < finish.indexOf('await session.writeback'));
     assert.doesNotMatch(finish, /telemetryTerminal:\s*false/);
-    assert.match(finish, /if \(session\.telemetryTerminal\) return;/);
+    // Backflow pinvou-agent#789: the latch gate now also resets the stuck
+    // active status to idle (both before the write-back and before the
+    // completed notice) instead of a bare return; the terminal flag itself is
+    // still never reset (the doesNotMatch above).
+    assert.match(finish, /if \(session\.telemetryTerminal\) \{[^}]*?setVoiceInputStatus\("idle"/);
   });
 }
 
@@ -383,6 +387,173 @@ test('desktop waits for Rust ownership and cannot open a microphone after a reje
   await starting;
   assert.equal(microphoneProbes, 0);
   assert.equal(h.state.voiceInput.status, 'failed');
+});
+
+test('desktop: a cancel racing the ownership claim re-releases the claim token', async () => {
+  const h = harness(sources.desktop);
+  let resolveClaim;
+  const claim = new Promise(resolve => { resolveClaim = resolve; });
+  const ownershipCalls = [];
+  let claiming = true;
+  let microphoneProbes = 0;
+  h.state.voiceAsrSetup = {};
+  Object.assign(h.context, {
+    window: Object.assign(h.context.window, { AudioContext() {} }), navigator: { mediaDevices: { getUserMedia() {} } },
+    normalizeVoiceMode: mode => mode, bt: key => key, emitVoiceDiagnostic() {},
+    cleanupVoiceInputSession() {}, normalizeVoiceError: error => error,
+    currentVoiceWindowLabel: () => 'detached-b',
+    syncVoiceShortcutRecording: (label, token) => {
+      ownershipCalls.push([label, token]);
+      if (claiming) return claim;
+      return Promise.resolve(true);
+    },
+    probeVoiceAudioInput: () => { microphoneProbes += 1; return true; },
+    invoke: async command => command === 'voice_asr_status' ? { ready: true } : undefined,
+  });
+  const start = sources.desktop.indexOf('  async function startVoiceInput(');
+  const end = blockEnd(sources.desktop, start, 'cancelVoiceInput');
+  vm.runInContext(`${sources.desktop.slice(start, end)}\nthis.startVoiceInput = startVoiceInput;`, h.context);
+  const starting = h.context.startVoiceInput('', () => {}, { mode: 'dictation' });
+  await new Promise(resolve => setImmediate(resolve));
+  const token = h.state.voiceInput.ownershipToken;
+  // A cancel lands while the claim IPC is still in flight: finishVoiceInput
+  // already released, so the resolving claim must release again.
+  h.context.activeVoiceInput = null;
+  claiming = false;
+  resolveClaim(true);
+  await starting;
+  assert.deepEqual(
+    ownershipCalls,
+    [['detached-b', token], [null, token]],
+    'the raced claim must be re-released, or the leaked claim locks the microphone in every window',
+  );
+  assert.equal(microphoneProbes, 0, 'a raced start must not open the microphone');
+});
+
+test('desktop: a claim IPC failure fails closed without probing and reports the check, not another window', async () => {
+  const h = harness(sources.desktop);
+  let microphoneProbes = 0;
+  h.state.voiceAsrSetup = {};
+  Object.assign(h.context, {
+    window: Object.assign(h.context.window, { AudioContext() {} }), navigator: { mediaDevices: { getUserMedia() {} } },
+    normalizeVoiceMode: mode => mode, bt: key => key, emitVoiceDiagnostic() {},
+    cleanupVoiceInputSession() {}, normalizeVoiceError: error => error,
+    currentVoiceWindowLabel: () => 'detached-b', syncVoiceShortcutRecording: () => Promise.resolve('error'),
+    probeVoiceAudioInput: () => { microphoneProbes += 1; return true; },
+    invoke: async command => command === 'voice_asr_status' ? { ready: true } : undefined,
+  });
+  const start = sources.desktop.indexOf('  async function startVoiceInput(');
+  const end = blockEnd(sources.desktop, start, 'cancelVoiceInput');
+  vm.runInContext(`${sources.desktop.slice(start, end)}\nthis.startVoiceInput = startVoiceInput;`, h.context);
+  await h.context.startVoiceInput('', () => {}, { mode: 'dictation' });
+  assert.equal(microphoneProbes, 0, 'an unverifiable claim must still fail closed before the microphone');
+  assert.equal(h.state.voiceInput.status, 'failed');
+  assert.equal(
+    h.state.voiceInput.message,
+    'voiceMicOwnershipUnavailable',
+    'a claim IPC failure must not be misattributed to another window recording',
+  );
+});
+
+test('desktop: an unreadable window label reports the ownership check unavailable instead of another window', async () => {
+  const h = harness(sources.desktop);
+  const source = sources.desktop;
+  // The slice must include the serialization chain variable: the sync helper
+  // queues every attempt through it.
+  const start = source.indexOf('  var voiceOwnershipSyncTail = Promise.resolve();');
+  const end = source.indexOf('  function setVoiceShortcutEnabled(enabled) {', start);
+  assert.ok(start >= 0 && end > start, 'desktop must keep the ownership sync helper');
+  const invokeCalls = [];
+  h.context.console = { warn() {} };
+  h.context.emitVoiceDiagnostic = () => {};
+  h.context.invoke = async (command, args) => {
+    invokeCalls.push([command, { label: args.label, token: args.token }]);
+    return true;
+  };
+  vm.runInContext(`${source.slice(start, end)}\nthis.sync = syncVoiceShortcutRecording;`, h.context);
+  assert.equal(
+    await h.context.sync('', 'voice_1'), 'error',
+    'an unreadable window label must not go over the wire as a claim',
+  );
+  assert.deepEqual(invokeCalls, [], 'no ownership IPC may fire without a window label');
+  assert.equal(await h.context.sync(null, 'voice_1'), true, 'a null label is a release and still dispatches');
+  assert.deepEqual(
+    invokeCalls,
+    [['set_voice_shortcut_recording', { label: null, token: 'voice_1' }]],
+    'the release path keeps dispatching with an explicit null label',
+  );
+});
+
+test('desktop: a rejected ownership claim IPC maps to "error" with its diagnostics, never to false', async () => {
+  // Direct test of the real helper's rejection mapping (the "claim IPC
+  // failure" consumer test above stubs syncVoiceShortcutRecording, so the
+  // real reject→"error" branch has no anchor there; a reject→false regression
+  // would misreport an IPC failure as "another window is recording").
+  const h = harness(sources.desktop);
+  const source = sources.desktop;
+  const start = source.indexOf('  var voiceOwnershipSyncTail = Promise.resolve();');
+  const end = source.indexOf('  function setVoiceShortcutEnabled(enabled) {', start);
+  assert.ok(start >= 0 && end > start, 'desktop must keep the ownership sync helper');
+  const diagnostics = [];
+  const warns = [];
+  h.context.console = { warn: (...args) => warns.push(args) };
+  h.context.emitVoiceDiagnostic = (scope, level, message, sessionId, reason) => {
+    diagnostics.push({ scope, level, message, sessionId, reason });
+  };
+  h.context.invoke = async (command, args) => {
+    if (args.label === null) return true; // the release dispatch lands normally
+    throw new Error('ipc down'); // the claim IPC itself fails
+  };
+  vm.runInContext(`${source.slice(start, end)}\nthis.sync = syncVoiceShortcutRecording;`, h.context);
+  assert.equal(
+    await h.context.sync('detached-b', 'voice_1'), 'error',
+    'a rejected claim IPC must resolve to "error" (the consumer maps it to voiceMicOwnershipUnavailable); returning false would claim another window is recording',
+  );
+  assert.equal(diagnostics.length, 1, 'the rejection must emit exactly one voice diagnostic');
+  assert.equal(diagnostics[0].scope, 'recording');
+  assert.equal(diagnostics[0].level, 'warn');
+  assert.ok(String(diagnostics[0].message).includes('recording ownership sync failed'));
+  assert.equal(diagnostics[0].reason, 'claim_error');
+  assert.equal(warns.length, 1, 'the rejection must also land on the console.warn path');
+  // The serialization chain must swallow the rejection: the next sync in the
+  // queue still reaches the backend.
+  assert.equal(await h.context.sync(null, 'voice_1'), true, 'the ownership chain must heal after a rejected claim');
+});
+
+test('desktop: ownership syncs reach the backend in call order', async () => {
+  // The release-then-reclaim handoff relies on backend ordering: the chain
+  // must not resolve a later sync before the earlier one finished its IPC.
+  const h = harness(sources.desktop);
+  const source = sources.desktop;
+  const start = source.indexOf('  var voiceOwnershipSyncTail = Promise.resolve();');
+  const end = source.indexOf('  function setVoiceShortcutEnabled(enabled) {', start);
+  const order = [];
+  let releaseIpc;
+  const releaseGate = new Promise(resolve => { releaseIpc = resolve; });
+  h.context.console = { warn() {} };
+  h.context.emitVoiceDiagnostic = () => {};
+  h.context.invoke = async (command, args) => {
+    order.push(`start:${args.label}`);
+    if (args.label === null) await releaseGate;
+    order.push(`end:${args.label}`);
+    return true;
+  };
+  vm.runInContext(`${source.slice(start, end)}\nthis.sync = syncVoiceShortcutRecording;`, h.context);
+  const claim = h.context.sync('detached-b', 'voice_1');
+  await claim;
+  const release = h.context.sync(null, 'voice_1');
+  const reclaim = h.context.sync('detached-b', 'voice_2');
+  let reclaimSettled = false;
+  reclaim.then(() => { reclaimSettled = true; });
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(reclaimSettled, false, 'the reclaim must wait behind the in-flight release IPC');
+  releaseIpc();
+  await Promise.all([release, reclaim]);
+  assert.deepEqual(order, [
+    'start:detached-b', 'end:detached-b',
+    'start:null', 'end:null',
+    'start:detached-b', 'end:detached-b',
+  ], 'syncs must run strictly one at a time, in call order');
 });
 
 function bridgeFunction(source, name) {
@@ -989,4 +1160,59 @@ test('web: enterDraft closes the operation of a finished first-turn submission a
     'an in-flight submission is left to its own RPC settlement (closing it here would mark a delivered message cancelled)',
   );
   assert.equal(state.draftEpoch, 5, 'enterDraft still advances the draft epoch');
+});
+
+// ── Abandon-on-clear (backflow pinvou-agent#789): cleared drafts must not receive late results ──
+
+function abandonHarness(lane) {
+  const source = sources[lane];
+  const fnStart = source.indexOf("  function abandonCompletedVoiceResult(");
+  assert.ok(fnStart >= 0, `${lane} bridge must keep abandonCompletedVoiceResult`);
+  const bodyEnd = source.indexOf("\n  }\n", fnStart);
+  assert.ok(bodyEnd > fnStart, `${lane} abandonCompletedVoiceResult must stay a self-contained slice`);
+  const terminalCalls = [];
+  const sandbox = {
+    voiceOperations: new Map(), state: {},
+    trackVoiceTerminal(reason, operation) { terminalCalls.push(reason); operation.telemetryTerminal = true; },
+    // Official adaptation: this repo's slice also stamps durationMs through the
+    // lane-local helper; the sandbox stubs it so the slice stays runnable.
+    voiceDurationMs() { return 0; },
+  };
+  sandbox.window = sandbox;
+  vm.createContext(sandbox);
+  vm.runInContext(`${source.slice(fnStart, bodyEnd + 6)}\nthis.abandonCompletedVoiceResult = abandonCompletedVoiceResult;`, sandbox);
+  return { sandbox, terminalCalls };
+}
+
+test("both lanes: a result recorded for another session survives clearing the viewed draft", () => {
+  for (const [lane, harness] of [["desktop", abandonHarness("desktop")], ["web", abandonHarness("web")]]) {
+    const { sandbox, terminalCalls } = harness;
+    const operation = {
+      operationId: "voiceop_cross", sessionId: "session-a", ownerKind: "chat",
+      pendingSubmission: false, telemetryTerminal: false, voiceResultReady: true,
+    };
+    sandbox.voiceOperations.set("voiceop_cross", operation);
+    sandbox.state = { activeSessionId: "session-b", voiceInput: { status: "completed", operationId: "voiceop_cross" } };
+    sandbox.abandonCompletedVoiceResult();
+    assert.equal(terminalCalls.length, 0, `${lane} a cross-session clear must not touch the foreign operation`);
+    assert.equal(operation.telemetryTerminal, false, `${lane} a cross-session result must not be terminated by another session's clear`);
+    assert.equal(sandbox.state.voiceInput.operationId, "voiceop_cross", `${lane} the foreign result keeps its notice binding`);
+    // The fix must not over-block: clearing the owning session's draft still terminates.
+    sandbox.state.activeSessionId = "session-a";
+    sandbox.abandonCompletedVoiceResult();
+    assert.equal(operation.telemetryTerminal, true, `${lane} a same-session clear still terminates the result`);
+  }
+});
+
+test("both lanes: the terminal latch gates the write-back itself, not only the completed notice", () => {
+  for (const [lane, source] of [["desktop", sources.desktop], ["web", sources.web]]) {
+    const finishStart = source.indexOf("async function finishVoiceInput(");
+    assert.ok(finishStart >= 0, `${lane} bridge must keep finishVoiceInput`);
+    const writebackCall = source.indexOf("await session.writeback(", finishStart);
+    assert.ok(writebackCall > finishStart, `${lane} finishVoiceInput must call the write-back`);
+    const gate = source.lastIndexOf("if (session.telemetryTerminal) {", writebackCall);
+    assert.ok(gate > finishStart, `${lane} must check the terminal latch before the write-back so an abandoned result never lands in the cleared draft`);
+    const idleReset = source.indexOf('setVoiceInputStatus("idle"', gate);
+    assert.ok(idleReset > gate && idleReset < writebackCall, `${lane} abandoning mid-pipeline must reset the active status instead of leaving the pill stuck`);
+  }
 });

@@ -17,11 +17,90 @@ const sessionsRustSource = fs.readFileSync(path.join(__dirname, '..', 'src-tauri
 const tauriSessionsSource = fs.readFileSync(path.join(__dirname, '..', 'src', 'platform', 'tauri', 'bridge', 'sessions.js'), 'utf8');
 const sharedBaseSource = fs.readFileSync(path.join(__dirname, '..', 'src', 'shared', 'bridge-shared-helpers.js'), 'utf8');
 
-function extractReadReporter(source) {
-  // Official 适配：上游从 lane 抽取 read+write 双上报助手；官方 lane 暂只保留
-  // read 助手（write 助手随 T4 reconcile 补齐），此处只抽 read。
-  const match = source.match(/function reportSidecarReadFailure\(kind, sid, error\) \{[\s\S]*?\n {2}\}\n/);
+function extractSidecarReporters(source) {
+  const match = source.match(
+    /function reportSidecarReadFailure\(kind, sid, error\) \{[\s\S]*?function reportSidecarWriteFailure\(kind, sid, error\) \{[\s\S]*?\n {2}\}\n/,
+  );
   return match ? match[0] : '';
+}
+// The scene sidecar sync block (the two reporting helpers plus the sync function) is
+// extracted verbatim from the source: it is used both for a byte-for-byte comparison
+// across the two hosts and for actually executing the failure paths in a sandbox.
+const CACHED_SCENE_EVENTS = [{ pos: 0, scene: 'design:poster' }];
+function extractSceneSyncBlock(source) {
+  const match = source.match(
+    /function reportSidecarReadFailure\(kind, sid, error\) \{[\s\S]*?async function syncPinvouSceneEventsForSession\(sid\) \{[\s\S]*?\n {2}\}\n/,
+  );
+  return match ? match[0] : '';
+}
+async function runSceneSync(block, { readFails = false, saveFails = false } = {}) {
+  const warnings = [];
+  const sandbox = {
+    console: { warn: (...args) => warnings.push(args.map(String).join(' ')) },
+    window: { localStorage: { setItem() {}, getItem() { return null; } } },
+    loadPinvouSceneEventsForSession: () => [...CACHED_SCENE_EVENTS],
+    normalizePinvouSceneEvents: (events) => (Array.isArray(events) ? events : []),
+    pinvouSceneStorageKey: (sid) => `pinvou_scene_events_v1:${sid}`,
+    async invoke(command) {
+      if (command === 'get_session_pinvou_scene_events') {
+        if (readFails) throw new Error('sidecar unreadable');
+        return [];
+      }
+      if (command === 'save_session_pinvou_scene_events') {
+        if (saveFails) throw new Error('No space left on device');
+        return null;
+      }
+      return null;
+    },
+  };
+  vm.runInNewContext(`${block}\nthis.__syncScene = syncPinvouSceneEventsForSession;`, sandbox, {
+    filename: 'scene-sidecar-block.js',
+  });
+  try {
+    return { value: await sandbox.__syncScene('s1'), warnings, threw: false };
+  } catch (error) {
+    return { value: null, warnings, threw: String(error) };
+  }
+}
+
+// The steered-message sidecar exists only in the tauri host (the web bridge has
+// no steer persistence), so there is no byte twin to compare against. Run the
+// real source block through the same failure paths as the scene sidecar: a read
+// failure degrades to the cache, and a migration-write failure must never throw
+// across the bare await in the session-switch path. The reporting helpers live
+// before the scene block, outside the steered span, so they are extracted too and
+// the sandbox executes the real reporter wording rather than mirrored stubs.
+function extractSteeredSyncBlock(source) {
+  const match = source.match(
+    /(?:const|var) STEERED_MESSAGES_STORAGE_PREFIX[\s\S]*?async function syncSteeredMessagesForSession\(sid\) \{[\s\S]*?\n {2}\}\n/,
+  );
+  return match ? match[0] : '';
+}
+async function runSteeredSync(reporters, block, { readFails = false, saveFails = false, cachedEvents = [] } = {}) {
+  const warnings = [];
+  const sandbox = {
+    console: { warn: (...args) => warnings.push(args.map(String).join(' ')) },
+    window: { localStorage: { setItem() {}, getItem: () => JSON.stringify(cachedEvents) } },
+    async invoke(command) {
+      if (command === 'get_session_steered_messages') {
+        if (readFails) throw new Error('sidecar unreadable');
+        return [];
+      }
+      if (command === 'save_session_steered_messages') {
+        if (saveFails) throw new Error('No space left on device');
+        return null;
+      }
+      return null;
+    },
+  };
+  vm.runInNewContext(`${reporters}\n${block}\nthis.__syncSteered = syncSteeredMessagesForSession;`, sandbox, {
+    filename: 'steered-sidecar-block.js',
+  });
+  try {
+    return { value: await sandbox.__syncSteered('s1'), warnings, threw: false };
+  } catch (error) {
+    return { value: null, warnings, threw: String(error) };
+  }
 }
 function extractSharedPersonaReviewLoaders(src) {
   const match = src.match(
@@ -340,7 +419,7 @@ function rec(name, pass, detail = '') {
 
   // Persona/review sidecars have no local cache: read failure must report and
   // degrade to [] (never throw across the bare await in the switch path).
-  const tauriReadReporter = extractReadReporter(tauriBridgeSource);
+  const tauriSidecarReporters = extractSidecarReporters(tauriBridgeSource);
   const sharedPersonaReviewLoaders = extractSharedPersonaReviewLoaders(sharedBaseSource);
   rec('persona/review sidecar 读取助手已合并进共享基座，两个宿主均委托同一实现',
     sharedPersonaReviewLoaders !== '' &&
@@ -350,12 +429,12 @@ function rec(name, pass, detail = '') {
       /function loadPinvouReviewsForSession\(sid\) \{ return pinvouSharedweb\(\)\.loadPinvouReviewsForSession\(sid\); \}/.test(webBridgeSource),
     'shared persona-review loaders + per-host delegation pins');
   {
-    const ok = await runPersonaReviewLoaders(tauriReadReporter, sharedPersonaReviewLoaders, {});
+    const ok = await runPersonaReviewLoaders(tauriSidecarReporters, sharedPersonaReviewLoaders, {});
     rec('persona/review 读取成功路径保持原值(null 归一为 [])',
       JSON.stringify(ok.persona) === JSON.stringify([{ pos: 0, kind: 'equip' }]) &&
         JSON.stringify(ok.reviews) === '[]' && ok.warnings.length === 0,
       JSON.stringify(ok));
-    const failed = await runPersonaReviewLoaders(tauriReadReporter, sharedPersonaReviewLoaders, { readFails: true });
+    const failed = await runPersonaReviewLoaders(tauriSidecarReporters, sharedPersonaReviewLoaders, { readFails: true });
     rec('persona/review 读失败时逐项上报后降级为 []，绝不抛给会话切换',
       JSON.stringify(failed.persona) === '[]' && JSON.stringify(failed.reviews) === '[]' &&
         failed.warnings.some(text => text.includes('persona events read failed')) &&
@@ -373,6 +452,52 @@ function rec(name, pass, detail = '') {
       /pub async fn save_session_pinvou_scene_events/.test(sessionsRustSource) &&
       /pub async fn get_session_pinvou_scene_events/.test(sessionsRustSource),
     'shared session scene sidecar contract');
+
+  // The real source of both bridges is extracted and executed rather than shape-matching
+  // the catch: shape assertions cannot tell "migration write inside the try" from
+  // "outside the try", and the latter would let a write failure escape to the bare-await
+  // switchToSessionInternal, escalating a decorative tag's write failure into the whole
+  // session failing to open.
+  const tauriSceneSync = extractSceneSyncBlock(tauriBridgeSource);
+  const webSceneSync = extractSceneSyncBlock(webBridgeSource);
+  rec('scene sidecar 同步在两个宿主上逐字节同一，避免二次漂移',
+    tauriSceneSync !== '' && tauriSceneSync === webSceneSync,
+    'tauri/web scene sidecar sync must stay byte-identical');
+
+  for (const [host, block] of [['tauri', tauriSceneSync], ['web', webSceneSync]]) {
+    const read = await runSceneSync(block, { readFails: true });
+    rec(`${host}: scene sidecar 读失败时上报后降级到本地缓存`,
+      !read.threw && JSON.stringify(read.value) === JSON.stringify(CACHED_SCENE_EVENTS) &&
+        read.warnings.some(text => text.includes('read failed')),
+      JSON.stringify(read));
+    const write = await runSceneSync(block, { saveFails: true });
+    rec(`${host}: scene sidecar 迁移写失败时上报后降级，绝不抛给会话切换`,
+      !write.threw && JSON.stringify(write.value) === JSON.stringify(CACHED_SCENE_EVENTS) &&
+        write.warnings.some(text => text.includes('migration write failed')),
+      JSON.stringify(write));
+  }
+
+  {
+    // Steered sidecar（仅 tauri 宿主）走同一套读/迁移写失败路径：执行真实源码块
+    // 而不是镜像桩，钉住上报措辞与「绝不抛给会话切换」的降级契约。
+    const steeredReporters = extractSidecarReporters(tauriBridgeSource);
+    const steeredBlock = extractSteeredSyncBlock(tauriBridgeSource);
+    const cached = [{ pos: 2, text: 'steered-2' }];
+    const ok = await runSteeredSync(steeredReporters, steeredBlock, { cachedEvents: cached });
+    rec('tauri: steered sidecar 远端为空时保留本地迁移缓存且不上报',
+      !ok.threw && JSON.stringify(ok.value) === JSON.stringify(cached) && ok.warnings.length === 0,
+      JSON.stringify(ok));
+    const read = await runSteeredSync(steeredReporters, steeredBlock, { readFails: true, cachedEvents: cached });
+    rec('tauri: steered sidecar 读失败时上报后降级到本地缓存',
+      !read.threw && JSON.stringify(read.value) === JSON.stringify(cached) &&
+        read.warnings.some(text => text.includes('steered messages read failed')),
+      JSON.stringify(read));
+    const write = await runSteeredSync(steeredReporters, steeredBlock, { saveFails: true, cachedEvents: cached });
+    rec('tauri: steered sidecar 迁移写失败时上报后降级，绝不抛给会话切换',
+      !write.threw && JSON.stringify(write.value) === JSON.stringify(cached) &&
+        write.warnings.some(text => text.includes('steered messages migration write failed')),
+      JSON.stringify(write));
+  }
 
   rec('三个场景白名单(Tauri/Web/Rust)必须同时登记 work:personal-workbench，否则 sidecar 重载后会丢标签',
     tauriNormalizeSceneRegexSource.includes('work:personal-workbench') &&

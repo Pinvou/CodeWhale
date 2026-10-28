@@ -210,8 +210,22 @@ const expectedProtocolHashes = {
   // now opts into deferBackgroundNotify so background output chunks ride the
   // existing terminal 50ms publication timer; invoke and event wire shapes
   // stay unchanged (publication timing is the deliberate change).
-  // Combined local lifecycle receipts and main trailing-edge publication.
-  chat: 'f8772da023ae23b5e65d1598e91d1be8ef908cdc65e3e826e7a15a7a2086903b',
+  // T0-d (#701 桥接面对齐, FFE4-1) 重算：remote_control:tools_changed 监听体
+  // 的内联 CustomEvent 派发改经 window.PinvouToolStoreEvents
+  // .notifyComposerToolsChanged()（shared/tool-store-events.js），命令面无增删。
+  // Recomputed for the #2135 review fix wave: the chat:done listener body in
+  // chat-events.js gains cancelPendingStreamNotify(sid) (with its trailing
+  // comment) so a background session's terminal cancels its own pending
+  // stream notify frame — the wave's only digest-input change. The desktop
+  // admission-reject flush pairing and its context parameter (chat.js) and
+  // the chat-events cluster export entry all sit outside every invoke/listen
+  // call span, so they ride along hash-neutral — no invoke or listen call-set
+  // Recomputed for the account-platform integration merge: the chat.js send
+  // rejection path additionally synthesizes the local lifecycle receipts
+  // (assistant_done with status send_error for the current turn anchor)
+  // alongside the #2135 admission-reject flush pairing; invoke/listen
+  // call-set shapes unchanged.
+  chat: '6d9277e52fc51d55680e832370673095ae41a8b890fc4ad9c23d0f986246a982',
   dependencies: 'd39f5a46b8e34c1c30d8f8e08ef62baccfe822ffb7fad8dbf3301c69c566e31c',
   // Recomputed for #445: the YOLO gate threads an adjudicated session id
   // through exitPlanToYolo and planStuckGo.

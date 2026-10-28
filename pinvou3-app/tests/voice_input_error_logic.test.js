@@ -1033,6 +1033,26 @@ assert.strictEqual(
   3,
   "voiceEditPostprocessDisabled must exist in all three BT_TABLE languages",
 );
+// The mic-ownership failures must keep their dedicated copy: the three-state
+// claim switch routes an IPC failure to the ownership-unavailable key and a
+// cross-window claim to the busy-other-window key, and each key must exist in
+// all three BT_TABLE languages (bt()'s zh fallback would silently mask a
+// future en/ja deletion).
+assert.match(
+  source,
+  /claimed === "error" \? bt\("voiceMicOwnershipUnavailable"\) : bt\("voiceMicBusyOtherWindow"\)/,
+  "the ownership claim must keep the three-state copy switch (check failure ≠ another window)",
+);
+assert.strictEqual(
+  (bridgeMainSource.match(/voiceMicBusyOtherWindow:/g) || []).length,
+  3,
+  "voiceMicBusyOtherWindow must exist in all three BT_TABLE languages",
+);
+assert.strictEqual(
+  (bridgeMainSource.match(/voiceMicOwnershipUnavailable:/g) || []).length,
+  3,
+  "voiceMicOwnershipUnavailable must exist in all three BT_TABLE languages",
+);
 assert.match(
   source,
   /pinvou_voice_postprocess_enabled_v1/,

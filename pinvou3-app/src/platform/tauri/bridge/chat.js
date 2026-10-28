@@ -28,6 +28,7 @@ function pinvouSharedtauriChat() {
     var bt = context.bt;
     var isDefaultChatTitle = context.isDefaultChatTitle;
     var runSyncOnSession = context.runSyncOnSession;
+    var flushPendingStreamRender = context.flushPendingStreamRender || function () {};
     var startThinking = context.startThinking;
     var stopThinking = context.stopThinking;
     var ensureSessionBufferLoaded = context.ensureSessionBufferLoaded;
@@ -427,6 +428,7 @@ function timeStr() { return pinvouSharedtauriChat().timeStr(); }
           state.chatItems = state.chatItems.filter(function (item) {
             return item.id !== submittedUserItemId && item.id !== submittedStreamId;
           });
+          flushPendingStreamRender(); // admission reject mid-stream: emit final html before the reset
           if (sessionStates[sid] === turnOwnerBuffer && turnOwnerBuffer && turnOwnerBuffer.timelineTurnAnchor === submittedTimelineAnchor && submittedTimelineAnchor) {
             var localId = submittedTimelineAnchor.localTurnId;
             if ((state.turnTimeline || []).some(function (event) { return event && event.event === "user_start" && event.turn_id === localId; })
