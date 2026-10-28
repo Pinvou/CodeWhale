@@ -2643,6 +2643,11 @@ dictEn["remoteConversation"] = {
   errorGeneric: "The operation failed. Please try again.",
   attachmentOnlyPrompt: "Process the attachments submitted with this task.",
   addAttachment: "Add remote attachment",
+  attachmentCountInvalid: "Select 1–8 remote attachments.",
+  attachmentSizeInvalid: "Each attachment must be nonempty and no larger than 32 MiB.",
+  attachmentTotalSizeInvalid: "Attachments must total no more than 64 MiB.",
+  attachmentMetadataInvalid: "An attachment name or type is invalid or too long. Select the files again.",
+  capabilityNotReady: "Remote task capabilities are not ready. Wait for setup or refresh before sending.",
   removeAttachment: name => `Remove attachment ${name}`,
   uploadingAttachment: (name, received, total) => `Uploading ${name} (${received}/${total} bytes)`,
   taskActions: "Remote task actions",
@@ -2665,6 +2670,12 @@ dictEn.uiSettings.remoteControl = 'Desktop Remote Control';
 dictEn.uiSettingsDetail.desktopRemoteControlEntryDesc = "Let someone connect with a pairing code and run tasks with this machine's model; you can review and disconnect at any time.";
 dictEn.uiSettingsDetail.desktopRemoteControlBack = 'Back to General';
 dictEn.remoteArchive = {
+  remote_proxy_unreadable: 'Remote records cannot be read. Remote writes are disabled.',
+  remote_proxy_oversized: 'Remote records exceed the supported size or count. Remote writes are disabled.',
+  remote_proxy_malformed: 'Remote records cannot be read in the current format; they may be damaged or use an incompatible version. Remote writes are disabled.',
+  remote_proxy_version_unsupported: 'The remote record version is unsupported. Remote writes are disabled.',
+  remote_proxy_invalid_records: 'Remote records failed validation. Remote writes are disabled.',
+  remote_proxy_archive_unavailable: 'The remote archive is unavailable or conflicts with active records. Remote writes are disabled.',
   byteBudget: 'Remote conversation capacity is full. Open Settings → Remote control → Remote conversation archives, disconnect offline conversations and settle unresolved tasks, then archive them permanently to free capacity.',
   title: 'Remote conversation archives', active: 'Active records', archived: 'Archived history',
   hint: 'Archive offline conversations to free active capacity. History and replay protection are retained; archived conversations cannot run tasks or reconnect. Connected conversations and unresolved tasks must be settled first.',

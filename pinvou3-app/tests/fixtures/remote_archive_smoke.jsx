@@ -6,10 +6,16 @@ import { dictZh } from '../../src/shared/i18n/zh.js';
 // This fixture verifies renderer behavior, not Store, IPC or replay protection.
 const state = window.archiveFixture = {
   active: [{ localSessionId: 'remote-proxy-hidden', title: 'Hidden offline', hidden: true }],
-  archived: [], calls: [], failure: null, cleanup: true, refreshFails: false,
+  archived: [], calls: [], failure: null, loadFailure: null, statusFails: false, cleanup: true, refreshFails: false,
 };
 window.TauriBridge = { desktopRemoteControl: {
+  async getRemoteProxyLoadStatus() {
+    state.calls.push(['status']);
+    if (state.statusFails) throw new Error('status_failed');
+    return state.loadFailure;
+  },
   async listRemoteProxyArchiveCandidates() {
+    state.calls.push(['candidates']);
     if (state.refreshFails) throw new Error('list_failed');
     return [...state.active];
   },

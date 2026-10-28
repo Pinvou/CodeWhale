@@ -78,6 +78,8 @@ undeclared files (bin roots, strays) must be invisible to it.
 from __future__ import annotations
 
 import importlib.util
+import re
+import shlex
 import tempfile
 import unittest
 from pathlib import Path
@@ -2754,6 +2756,40 @@ class Round21TerseParseContractTests(unittest.TestCase):
         _, cmd = self._list("a::b: test\n")
         self.assertIn("--", cmd)
         self.assertEqual(cmd[cmd.index("--") + 1 :], ["--list", "--format", "terse"])
+
+    def test_feature_set_matches_all_ci_lib_build_and_run_steps(self):
+        # Read the executable CI commands, rather than duplicating the guard's
+        # desired feature string: drift must fail whichever side changes.
+        workflow = (SCRIPT.parent.parent / ".github/workflows/pr-check.yml").read_text(
+            encoding="utf-8"
+        )
+        job = re.search(r"(?ms)^  rust-test:\n(.*?)(?=^  [\w-]+:\n|\Z)", workflow)
+        self.assertIsNotNone(job)
+        commands = [
+            shlex.split(line)
+            for line in re.findall(
+                r"cargo test --manifest-path pinvou3-app/src-tauri/Cargo.toml [^\n]+",
+                job.group(1),
+            )
+            if "--lib" in shlex.split(line)
+        ]
+        self.assertGreaterEqual(len(commands), 2)
+        _, listing = self._list("fixture::test: test\n")
+
+        def feature_set(command):
+            features = set()
+            for index, arg in enumerate(command[:-1]):
+                if arg == "--features":
+                    features.update(command[index + 1].replace(",", " ").split())
+            return (
+                "--no-default-features" in command,
+                "--all-features" in command,
+                features,
+            )
+
+        for command in commands:
+            with self.subTest(command=command):
+                self.assertEqual(feature_set(listing), feature_set(command))
 
     def test_parses_terse_test_lines_verbatim(self):
         paths, _ = self._list("alpha::beta::t1: test\nalpha::t2: test\n")

@@ -356,8 +356,10 @@ class CliLintDiskPolicyTests(unittest.TestCase):
     def test_cli_lint_reserves_disk_before_swap_and_after_cache(self):
         workflow = (ROOT / ".github/workflows/pr-check.yml").read_text(encoding="utf-8")
         job = workflow.split("\n  cli-lint:", 1)[1].split("\n  windows-rust-test:", 1)[0]
-        pre = "- name: Prepare Rust disk capacity"
-        post = "- name: Check Rust disk capacity after cache restore"
+        pre = "- name: Prepare CLI disk capacity before swap"
+        precache = "- name: Check CLI disk capacity before cache"
+        post = "- name: Check CLI disk capacity after cache"
+        postsave = "- name: Guard CLI cache post-save"
         swap = "- name: Set up zram and swap"
         cache = "- name: Cargo cache"
         clippy = "- name: cargo clippy (workspace, all targets)"
@@ -367,22 +369,24 @@ class CliLintDiskPolicyTests(unittest.TestCase):
         # late. Swap and dependency installation must also follow preparation.
         self.assertLess(job.index(pre), job.index(swap))
         self.assertLess(job.index(pre), job.index("- name: Install Tauri Linux system dependencies"))
-        self.assertLess(job.index(swap), job.index(cache))
+        self.assertLess(job.index(swap), job.index(precache))
+        self.assertLess(job.index(precache), job.index(cache))
         self.assertLess(job.index(cache), job.index(post))
         self.assertLess(job.index(post), job.index(clippy))
         self.assertLess(job.index(post), job.index(featureless))
-        self.assertEqual(job.count("python3 scripts/ci-rust-disk.py"), 2)
+        self.assertLess(job.index(featureless), job.index(postsave))
+        self.assertEqual(job.count("python3 scripts/ci-rust-disk.py"), 4)
 
         # Keep the existing safe base allowlist and hard capacity floor. An
         # exact recipe also rejects if:false, swallowed failures or aggressive
-        # deletion of setup-action tools; neither check may become optional.
+        # deletion of setup-action tools; none of these checks may become optional.
         expected = (
             'run: |\n'
             '          sudo env GITHUB_WORKSPACE="$GITHUB_WORKSPACE" \\\n'
             '            RUNNER_ENVIRONMENT="$RUNNER_ENVIRONMENT" \\\n'
             '            python3 scripts/ci-rust-disk.py'
         )
-        for marker, suffix in ((pre, " --min-free-gib 24"), (post, "")):
+        for marker, suffix in ((pre, " --min-free-gib 24"), (precache, ""), (post, "")):
             step = job.split(marker, 1)[1].split("\n      - name:", 1)[0]
             body = "\n".join(line for line in step.splitlines() if not line.lstrip().startswith("#"))
             self.assertEqual(body.strip(), expected + suffix)

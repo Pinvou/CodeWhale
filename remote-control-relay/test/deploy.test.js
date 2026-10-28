@@ -280,7 +280,7 @@ elif [[ "$command" == *"cat > '/tmp/pinvou-remote-web-"* ]]; then
 elif [[ "$command" == *"bash -s --"* && $# -eq 3 && "$3" == "$1/backups/"* ]]; then
   echo rollback >> "${log}"
   echo '已恢复备份'
-elif [[ "$command" == *"bash -s --"* && $# -eq 11 ]]; then
+elif [[ "$command" == *"bash -s --"* && $# -eq 12 && ( "\${12}" == "0" || "\${12}" == "1" ) ]]; then
   echo deploy >> "${log}"
   echo 'backup=/opt/pinvou-remote-relay/backups/fake'
 else
@@ -303,13 +303,18 @@ test("deployment SSH mock recognizes timestamped rollback and rejects unknown ca
     "-c", mockedSshScript(shellLog), "mock-ssh", "-i", "fixture-key",
     "-o", "BatchMode=yes", "fixture.invalid", "bash", "-s", "--", ...args,
   ], { input: "", encoding: "utf8", timeout: 10_000 });
-  const deployed = remoteCommand(remoteDir, "fixture.service", "20261001-123456", ...Array(8).fill("/tmp/fixture"));
-  assert.equal(deployed.status, 0, deployed.stderr);
+  for (const confirmed of ["0", "1"]) {
+    const deployed = remoteCommand(remoteDir, "fixture.service", "20261001-123456", ...Array(8).fill("/tmp/fixture"), confirmed);
+    assert.equal(deployed.status, 0, deployed.stderr);
+  }
   for (const stamp of ["20261001-123456", "20261102-234567"]) {
     const rolledBack = remoteCommand(remoteDir, "fixture.service", `${remoteDir}/backups/${stamp}`);
     assert.equal(rolledBack.status, 0, rolledBack.stderr);
   }
   for (const args of [
+    [remoteDir, "fixture.service", "20261001-123456", ...Array(8).fill("/tmp/fixture")],
+    [remoteDir, "fixture.service", "20261001-123456", ...Array(8).fill("/tmp/fixture"), "unexpected"],
+    [remoteDir, "fixture.service", "20261001-123456", ...Array(8).fill("/tmp/fixture"), "1", "unexpected"],
     [remoteDir, "fixture.service", "/opt/other-relay/backups/20261001-123456"],
     [remoteDir, "fixture.service", `${remoteDir}/backups/20261001-123456`, "unexpected"],
     ["unknown"],
@@ -318,7 +323,7 @@ test("deployment SSH mock recognizes timestamped rollback and rejects unknown ca
     assert.equal(rejected.status, 97, rejected.stdout + rejected.stderr);
     assert.match(rejected.stderr, /unexpected mocked SSH command/);
   }
-  assert.deepEqual((await readFile(log, "utf8")).trim().split(/\r?\n/), ["deploy", "rollback", "rollback"]);
+  assert.deepEqual((await readFile(log, "utf8")).trim().split(/\r?\n/), ["deploy", "deploy", "rollback", "rollback"]);
 });
 
 test("deploy script rolls back when post-deploy public verification fails", {

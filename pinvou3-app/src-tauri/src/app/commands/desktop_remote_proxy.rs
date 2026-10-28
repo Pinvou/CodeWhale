@@ -300,6 +300,14 @@ fn hide_visible(store: &SessionStore, local_session_id: &str) -> Result<(), Stri
 }
 
 #[tauri::command]
+pub(crate) fn desktop_remote_proxy_load_status(
+    store: State<'_, SessionStore>,
+) -> Result<Option<&'static str>, String> {
+    crate::platform::capabilities::ensure_desktop_remote_control_enabled()?;
+    Ok(store.remote_proxy_load_failure_code())
+}
+
+#[tauri::command]
 pub(crate) async fn desktop_remote_proxy_archive<R: tauri::Runtime>(
     app: tauri::AppHandle<R>,
     local_session_id: String,

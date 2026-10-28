@@ -200,7 +200,15 @@ const expectedProtocolHashes = {
   // T0-d (#701 桥接面对齐, FFE4-1) 重算：remote_control:tools_changed 监听体
   // 的内联 CustomEvent 派发改经 window.PinvouToolStoreEvents
   // .notifyComposerToolsChanged()（shared/tool-store-events.js），命令面无增删。
-  chat: '9f3c8bdd3de2de2d366f6090eb537dbf7a236377b84ad7a04331e12ac004261b',
+  // Recomputed for the #2135 review fix wave: the chat:done listener body in
+  // chat-events.js gains cancelPendingStreamNotify(sid) (with its trailing
+  // comment) so a background session's terminal cancels its own pending
+  // stream notify frame — the wave's only digest-input change. The desktop
+  // admission-reject flush pairing and its context parameter (chat.js) and
+  // the chat-events cluster export entry all sit outside every invoke/listen
+  // call span, so they ride along hash-neutral — no invoke or listen call-set
+  // change.
+  chat: 'ec6881aa20351e3c5bf29beefb89b859f543b80ed647ca8224eb54f66d23157a',
   dependencies: 'd39f5a46b8e34c1c30d8f8e08ef62baccfe822ffb7fad8dbf3301c69c566e31c',
   // Recomputed for #445: the YOLO gate threads an adjudicated session id
   // through exitPlanToYolo and planStuckGo.
@@ -244,10 +252,9 @@ const expectedProtocolHashes = {
   // the set_global_shortcut_config invoke (the dedicated command owns both
   // the plugin registration and the prefs persistence; update_settings
   // stays untouched).
-  // The pet listener now publishes through the shared settings read guard;
-  // invoke payloads and event names are unchanged (the digest includes its body).
+  // Preserve #1995's guarded settings listener and main's Windows updater progress.
   settings: '9f953948ce711230c2b0151851134acbd294c9315b7e6f5964bdb4258158bcd8',
-  updater: 'e5d3ffaed0548bca3a40ee4c8138a59f9a2add9474477d924d4ecd7b8efd73e6',
+  updater: 'cfe92470008c2dade64f891c36a5fa70930478f803d4d2a6d100e68d9c29392b',
   // Official's bridge/voice.js is untouched by this backflow, so the hash
   // stays at the Official base value (the community value differs only via
   // comment differences inside its own voice.js; no invoke/listen surface).
@@ -338,6 +345,7 @@ assert.deepEqual(Object.keys(api).sort(), ['available', ...Object.keys(desktopBr
 for (const [domain, methods] of Object.entries(desktopBridgeApi)) {
   assert.deepEqual(Object.keys(api[domain]).sort(), methods.sort(), `${domain} API surface changed`);
 }
+assert.equal(typeof api.desktopRemoteControl.getRemoteProxyLoadStatus, 'function', 'diagnostic must reach the assembled desktop bridge');
 assert.equal(api.sendMessage, undefined, 'flat compatibility facade must not return');
 assert.equal(api.getState, undefined, 'flat state facade must not return');
 
