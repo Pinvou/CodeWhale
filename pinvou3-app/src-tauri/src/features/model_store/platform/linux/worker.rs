@@ -774,11 +774,15 @@ fn cli_push(a: &WorkerAccess, rest: &[String]) -> i32 {
     exit_code(
         Command::new("rsync")
             .arg("-a")
+            // 10-28 双机验证 P1-②：远端路径不能再 shell_quote——argv 传进去的引号
+            // 会被原样保留，远端收到的是带字面引号的相对路径
+            // （'/home/gann/…'，mkdir ENOENT code 11，真机实锤）。argv 传参本就
+            // 不经 shell，特殊字符靠 --protect-args（-s）保护到远端 shell 之外。
+            .arg("-s")
             .args(&excludes)
             .args(["-e", &transport])
             .arg(format!("{src}/"))
-            // rsync 的远端路径会再经过远端 shell 一次，含空格就得引起来
-            .arg(format!("{}:{}/", a.target(), shell_quote(dst)))
+            .arg(format!("{}:{}/", a.target(), dst))
             .status(),
     )
 }
