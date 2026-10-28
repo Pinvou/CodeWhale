@@ -155,6 +155,18 @@ The three SQL migration hooks do not provision it, and
 it is not a first-install bootstrap switch. Keycloak's management readiness
 probe alone does not establish that application login or JWKS is available.
 
+The realm updater accepts `oidc.audience` and `oidc.portalClientId` only as
+nonempty ASCII letters, digits, dots, underscores and hyphens. The chart rejects
+other characters during schema validation, before rendering resources. This is
+the updater's existing alphabet, not the offline generator's full identifier
+contract: that generator additionally requires an alphanumeric first character
+and at most 64 characters. Follow each tool's applicable constraints.
+
+Existing values outside the updater alphabet now fail rendering. Operators must
+review their identity/client compatibility and plan any required configuration
+transition separately before release; this chart does not migrate or rename
+realm data. Do not bypass the schema or widen the updater to force installation.
+
 For `production-new`, keep `keycloak.realmUpgradeEnabled=true` as required by
 its schema. Complete this independently authorized bootstrap **before
 `helm install`**; missing prerequisites or readback must stop installation.
