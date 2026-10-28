@@ -117,6 +117,47 @@ readback is complete, temporary authority is removed, and its own preconditions
 are freshly verified. The Token and Billing plans remain separate from the
 refund plan.
 
+### Separately authorized one-time refund recovery
+
+After a failed original attempt, an operator may explicitly authorize one
+recovery in the same control epoch. Preserve the original plan, attempt audit,
+and operation journals. Keep all business writers stopped and retain the
+continuous Billing write fence through the new preparation, update, readback,
+and temporary-authority revocation. This is not an automatic retry or a way
+to change the Account control version.
+
+Set `APPROVAL_REFUND_RECOVERY_ORIGINAL_PLAN_FILE` and
+`APPROVAL_REFUND_RECOVERY_ORIGINAL_PLAN_SHA256` to the immutable original
+plan. Set `APPROVAL_EXISTING_PLAN_FILE` to a **different, unused** public
+plan path and leave its SHA unset. Invoke
+`prepare-refund-recovery -expected-version 3 -operation-id <new-UUID>`.
+SQL requires exactly one original attempt, its matching prepared plan, no
+successful original upgrade, and no previous recovery preparation or attempt
+in these control epochs. The broker must still have the original five legacy
+consumers, exact creation identities, configuration, and delivery/ACK positions,
+the original stream identity and high watermark. A reduced retained prefix
+may be captured in this explicitly authorized new plan; the original 30-day
+MaxAge is unchanged. New messages or any consumer drift reject recovery.
+
+Independently check the new exact plan and set
+`APPROVAL_EXISTING_PLAN_SHA256` to its digest. Invoke
+`upgrade-refund-recovery -expected-version 3` once. The recovery has its own
+committed, predecessor-bound attempt marker. A subsequent failure consumes
+this recovery opportunity even if no UPDATE was sent. All stream state must
+remain exactly equal to the **new** plan through its update and verification;
+recovery does not relax ongoing drift checks. Neither recovery preparation
+nor update accepts `-resume`.
+
+Use `check-refund-recovery -expected-version 3` only for readback against the
+same new plan, including after an unknown update result. It sends no UPDATE
+and does not require a successful response or successful upgrade audit.
+An unchanged legacy consumer causes this check to reject. Never delete either
+attempt marker, replace either plan, create/delete a consumer, or move its
+positions to make a check pass. Revoke the temporary exact authority on every
+aborted operation as well as after success, then independently decide any
+further action. Continue the existing Token/Billing sequence only after a
+successful recovery readback and final ACL verification.
+
 ## Explicit sequence
 
 All commands below start with `approval-resources existing-broker`. `status`

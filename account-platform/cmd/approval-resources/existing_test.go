@@ -10,6 +10,9 @@ func TestExistingBrokerArgumentsRejectBeforeCredentials(t *testing.T) {
 		{"-expected-version", "1", "-action", "prepare-token-upgrade", "-resume", "-operation-id", "replacement"},
 		{"-expected-version", "1", "-action", "inspect-token-upgrade", "-resume"},
 		{"-expected-version", "1", "-action", "upgrade-token-consumers", "-operation-id", "replacement"},
+		{"-expected-version", "3", "-action", "prepare-refund-recovery", "-resume"},
+		{"-expected-version", "3", "-action", "upgrade-refund-recovery", "-resume"},
+		{"-expected-version", "3", "-action", "check-refund-recovery", "-resume"},
 	} {
 		_, err := runExistingBroker(args, func(key string) string {
 			if key == "ACCOUNT_PLATFORM_PROFILE" {

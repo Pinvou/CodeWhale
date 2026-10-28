@@ -34,15 +34,28 @@ func runExistingBroker(args []string, environment func(string) string) ([]byte, 
 	}
 	step := account.FreshApprovalStep(*action)
 	prepareRefund := step == account.ExistingBrokerPrepareRefundUpgrade
+	prepareRecovery := step == account.ExistingBrokerPrepareRefundRecovery
+	recovery := prepareRecovery || step == account.ExistingBrokerUpgradeRefundRecovery || step == account.ExistingBrokerCheckRefundRecovery
 	prepareToken := step == account.ExistingBrokerPrepareTokenUpgrade
-	prepare := prepareRefund || prepareToken || step == account.ExistingBrokerPrepare
-	mutatingResources := step == account.ExistingBrokerUpgradeRefund || step == account.ExistingBrokerUpgradeToken || step == account.FreshApprovalResources
+	prepare := prepareRefund || prepareRecovery || prepareToken || step == account.ExistingBrokerPrepare
+	mutatingResources := step == account.ExistingBrokerUpgradeRefund || step == account.ExistingBrokerUpgradeRefundRecovery || step == account.ExistingBrokerUpgradeToken || step == account.FreshApprovalResources
 	if (*resume && !mutatingResources && !prepare) || (!prepare && *operationID != "") || (prepare && *resume && *operationID != "") || (prepare && !*resume && *operationID == "") {
 		return nil, blocked
+	}
+	var originalPlanFile, originalPlanSHA string
+	if recovery {
+		if *resume {
+			return nil, blocked
+		}
+		originalPlanFile, originalPlanSHA = environment("APPROVAL_REFUND_RECOVERY_ORIGINAL_PLAN_FILE"), environment("APPROVAL_REFUND_RECOVERY_ORIGINAL_PLAN_SHA256")
+		if originalPlanFile == "" || originalPlanSHA == "" {
+			return nil, blocked
+		}
 	}
 	switch step {
 	case account.FreshApprovalStatus, account.FreshApprovalQuiesce, account.FreshApprovalFence,
 		account.ExistingBrokerPrepareRefundUpgrade, account.ExistingBrokerUpgradeRefund, account.ExistingBrokerCheckRefundUpgrade, account.ExistingBrokerInspectRefundUpgrade,
+		account.ExistingBrokerPrepareRefundRecovery, account.ExistingBrokerUpgradeRefundRecovery, account.ExistingBrokerCheckRefundRecovery,
 		account.ExistingBrokerPrepareTokenUpgrade, account.ExistingBrokerUpgradeToken, account.ExistingBrokerCheckTokenUpgrade,
 		account.ExistingBrokerPrepare, account.FreshApprovalResources, account.ExistingBrokerVerify,
 		account.FreshApprovalActivate, account.FreshApprovalResume, account.ExistingBrokerInspectTokenUpgrade, account.ExistingBrokerInspect:
@@ -60,8 +73,11 @@ func runExistingBroker(args []string, environment func(string) string) ([]byte, 
 		planSHA = ""
 	}
 	var callback func(context.Context, account.AdminApprovalControl) (json.RawMessage, error)
-	if prepare || mutatingResources || step == account.ExistingBrokerCheckRefundUpgrade || step == account.ExistingBrokerInspectRefundUpgrade || step == account.ExistingBrokerCheckTokenUpgrade || step == account.ExistingBrokerVerify || step == account.FreshApprovalActivate || step == account.FreshApprovalResume || step == account.ExistingBrokerInspectTokenUpgrade || step == account.ExistingBrokerInspect {
+	if prepare || mutatingResources || step == account.ExistingBrokerCheckRefundRecovery || step == account.ExistingBrokerCheckRefundUpgrade || step == account.ExistingBrokerInspectRefundUpgrade || step == account.ExistingBrokerCheckTokenUpgrade || step == account.ExistingBrokerVerify || step == account.FreshApprovalActivate || step == account.FreshApprovalResume || step == account.ExistingBrokerInspectTokenUpgrade || step == account.ExistingBrokerInspect {
 		if files.PlanFile == files.ManifestFile || files.PlanFile == files.ReceiptFile {
+			return nil, blocked
+		}
+		if recovery && (originalPlanFile == files.PlanFile || originalPlanFile == files.ManifestFile || originalPlanFile == files.ReceiptFile) {
 			return nil, blocked
 		}
 		if prepare {
@@ -99,7 +115,11 @@ func runExistingBroker(args []string, environment func(string) string) ([]byte, 
 				}
 				var raw []byte
 				var e error
-				if prepareRefund {
+				if prepareRecovery {
+					original := files
+					original.PlanFile, original.PlanSHA256 = originalPlanFile, originalPlanSHA
+					raw, e = events.PrepareRefundRecoveryPlan(ctx, url, cfg, original, facts, *operationID)
+				} else if prepareRefund {
 					raw, e = events.PrepareRefundUpgradePlan(ctx, url, cfg, files.ApprovalConsumerResourceFiles, facts, *operationID)
 				} else {
 					raw, e = events.PrepareExistingBrokerPlan(ctx, url, cfg, files.ApprovalConsumerResourceFiles, facts, *operationID, prepareToken)
@@ -112,8 +132,8 @@ func runExistingBroker(args []string, environment func(string) string) ([]byte, 
 				}
 				return raw, nil
 			}
-			if step == account.ExistingBrokerUpgradeRefund || step == account.ExistingBrokerCheckRefundUpgrade {
-				return events.UpgradeLegacyRefundConsumer(ctx, url, cfg, files, facts, step == account.ExistingBrokerUpgradeRefund, *resume)
+			if step == account.ExistingBrokerUpgradeRefund || step == account.ExistingBrokerCheckRefundUpgrade || step == account.ExistingBrokerUpgradeRefundRecovery || step == account.ExistingBrokerCheckRefundRecovery {
+				return events.UpgradeLegacyRefundConsumer(ctx, url, cfg, files, facts, step == account.ExistingBrokerUpgradeRefund || step == account.ExistingBrokerUpgradeRefundRecovery, *resume)
 			}
 			if step == account.ExistingBrokerInspectRefundUpgrade {
 				return events.InspectLegacyRefundConsumer(ctx, url, cfg, files, facts)
@@ -169,7 +189,12 @@ func runExistingBroker(args []string, environment func(string) string) ([]byte, 
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
 	defer cancel()
-	control, err := account.RunExistingBrokerApprovalStep(ctx, environment("APPROVAL_INITIALIZER_DATABASE_URL"), *version, step, planSHA, callback)
+	var control account.AdminApprovalControl
+	if recovery {
+		control, err = account.RunRefundRecoveryApprovalStep(ctx, environment("APPROVAL_INITIALIZER_DATABASE_URL"), *version, step, originalPlanSHA, planSHA, callback)
+	} else {
+		control, err = account.RunExistingBrokerApprovalStep(ctx, environment("APPROVAL_INITIALIZER_DATABASE_URL"), *version, step, planSHA, callback)
+	}
 	if err != nil {
 		return nil, err
 	}

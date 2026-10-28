@@ -33,7 +33,7 @@ const (
 // or rewrites historical execution, delivery, exclusion or financial evidence.
 // The callback retains the exclusive control lock around broker verification.
 func RunFreshApprovalStep(ctx context.Context, dsn string, expectedVersion int64, step FreshApprovalStep, resources func(context.Context, AdminApprovalControl) (json.RawMessage, error)) (AdminApprovalControl, error) {
-	return runEmptyHistoryApprovalStep(ctx, dsn, expectedVersion, step, resources, false, "")
+	return runEmptyHistoryApprovalStep(ctx, dsn, expectedVersion, step, resources, false, "", "")
 }
 
 // ExistingBrokerPrepare captures a hash-bound plan while the same exclusive
@@ -54,12 +54,13 @@ const ExistingBrokerInspect FreshApprovalStep = "inspect-consumers"
 // records the distinct existing-broker operation rather than claiming a fresh
 // broker initialization. The original entry point cannot select this mode.
 func RunExistingBrokerApprovalStep(ctx context.Context, dsn string, expectedVersion int64, step FreshApprovalStep, planSHA256 string, resources func(context.Context, AdminApprovalControl) (json.RawMessage, error)) (AdminApprovalControl, error) {
-	return runEmptyHistoryApprovalStep(ctx, dsn, expectedVersion, step, resources, true, planSHA256)
+	return runEmptyHistoryApprovalStep(ctx, dsn, expectedVersion, step, resources, true, planSHA256, "")
 }
 
-func runEmptyHistoryApprovalStep(ctx context.Context, dsn string, expectedVersion int64, step FreshApprovalStep, resources func(context.Context, AdminApprovalControl) (json.RawMessage, error), existingBroker bool, planSHA256 string) (AdminApprovalControl, error) {
+func runEmptyHistoryApprovalStep(ctx context.Context, dsn string, expectedVersion int64, step FreshApprovalStep, resources func(context.Context, AdminApprovalControl) (json.RawMessage, error), existingBroker bool, planSHA256, recoveryOriginalSHA256 string) (AdminApprovalControl, error) {
 	auditStep := step
-	if existingBroker && (step == ExistingBrokerPrepare || step == ExistingBrokerPrepareRefundUpgrade || step == ExistingBrokerUpgradeRefund || step == ExistingBrokerCheckRefundUpgrade || step == ExistingBrokerInspectRefundUpgrade || step == ExistingBrokerPrepareTokenUpgrade || step == ExistingBrokerUpgradeToken || step == ExistingBrokerCheckTokenUpgrade || step == ExistingBrokerVerify || step == ExistingBrokerInspectTokenUpgrade || step == ExistingBrokerInspect) {
+	recovery := existingBroker && recoveryOriginalSHA256 != "" && refundRecoveryStep(step)
+	if existingBroker && (recovery || step == ExistingBrokerPrepare || step == ExistingBrokerPrepareRefundUpgrade || step == ExistingBrokerUpgradeRefund || step == ExistingBrokerCheckRefundUpgrade || step == ExistingBrokerInspectRefundUpgrade || step == ExistingBrokerPrepareTokenUpgrade || step == ExistingBrokerUpgradeToken || step == ExistingBrokerCheckTokenUpgrade || step == ExistingBrokerVerify || step == ExistingBrokerInspectTokenUpgrade || step == ExistingBrokerInspect) {
 		step = FreshApprovalResources
 	}
 	queryCurrent := existingBroker && step == FreshApprovalStatus && expectedVersion == 0
@@ -123,7 +124,7 @@ func runEmptyHistoryApprovalStep(ctx context.Context, dsn string, expectedVersio
 	if _, err = approvalpolicy.VerifyPolicySet(ctx, tx); err != nil {
 		return AdminApprovalControl{}, ErrApprovalFreshInitialization
 	}
-	if existingBroker {
+	if existingBroker && !recovery {
 		prepare := ExistingBrokerPrepare
 		needsPlan := step == FreshApprovalResources || step == FreshApprovalActivate || step == FreshApprovalResume
 		if auditStep == ExistingBrokerPrepare || auditStep == ExistingBrokerPrepareRefundUpgrade || auditStep == ExistingBrokerPrepareTokenUpgrade {
@@ -156,6 +157,14 @@ func runEmptyHistoryApprovalStep(ctx context.Context, dsn string, expectedVersio
 	if err != nil || history {
 		return AdminApprovalControl{}, ErrApprovalFreshInitialization
 	}
+	if recovery {
+		if verifyRefundRecoveryContext(ctx, tx, control, auditStep, recoveryOriginalSHA256, planSHA256) != nil {
+			return AdminApprovalControl{}, ErrApprovalFreshInitialization
+		}
+		if auditStep == ExistingBrokerUpgradeRefundRecovery && recordRefundRecoveryAttempt(ctx, dsn, control, recoveryOriginalSHA256, planSHA256) != nil {
+			return AdminApprovalControl{}, ErrApprovalFreshInitialization
+		}
+	}
 	// A separate committed audit record is the one-shot send barrier. Account's
 	// exclusive control lock serializes competing attempts; the independent
 	// commit survives rollback or loss of the later broker response.
@@ -179,7 +188,7 @@ func runEmptyHistoryApprovalStep(ctx context.Context, dsn string, expectedVersio
 			return AdminApprovalControl{}, ErrApprovalFreshInitialization
 		}
 	}
-	if existingBroker && (auditStep == ExistingBrokerInspectRefundUpgrade || auditStep == ExistingBrokerCheckRefundUpgrade || auditStep == ExistingBrokerInspectTokenUpgrade || auditStep == ExistingBrokerInspect || auditStep == ExistingBrokerCheckTokenUpgrade || auditStep == ExistingBrokerVerify) {
+	if existingBroker && (auditStep == ExistingBrokerCheckRefundRecovery || auditStep == ExistingBrokerInspectRefundUpgrade || auditStep == ExistingBrokerCheckRefundUpgrade || auditStep == ExistingBrokerInspectTokenUpgrade || auditStep == ExistingBrokerInspect || auditStep == ExistingBrokerCheckTokenUpgrade || auditStep == ExistingBrokerVerify) {
 		if tx.Commit(ctx) != nil {
 			return AdminApprovalControl{}, ErrApprovalFreshInitialization
 		}
@@ -209,7 +218,11 @@ func runEmptyHistoryApprovalStep(ctx context.Context, dsn string, expectedVersio
 		return AdminApprovalControl{}, ErrApprovalFreshInitialization
 	}
 	digest := sha256.Sum256(receipt)
-	summary, _ := json.Marshal(map[string]any{"step": auditStep, "control_version": control.Version, "approval_epoch": control.ApprovalEpoch, "authorization_relay_epoch": control.AuthorizationRelayEpoch, "resource_receipt_sha256": hex.EncodeToString(digest[:])})
+	change := map[string]any{"step": auditStep, "control_version": control.Version, "approval_epoch": control.ApprovalEpoch, "authorization_relay_epoch": control.AuthorizationRelayEpoch, "resource_receipt_sha256": hex.EncodeToString(digest[:])}
+	if recovery {
+		change["recovery_original_sha256"] = recoveryOriginalSHA256
+	}
+	summary, _ := json.Marshal(change)
 	action := "APPROVAL_FRESH_INITIALIZATION"
 	if existingBroker {
 		action = "APPROVAL_EXISTING_BROKER_INITIALIZATION"
