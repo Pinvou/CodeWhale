@@ -4,6 +4,8 @@ import { constants as fsConstants } from "node:fs";
 import * as nodeFs from "node:fs/promises";
 import { promisify } from "node:util";
 import { basename, dirname, isAbsolute, join, parse, relative, resolve, sep } from "node:path";
+import { RELAY_CONTROLLER_GUARD_FILENAME, RELAY_CONTROLLER_GUARD_JOURNAL, RelayStateGuard, requireControllerLockRuntime } from "./relay-state-guard.js";
+import { WINDOWS_ACL_VERIFY_SCRIPT, buildGuardJournalAclScript } from "./windows-guard-acl.js";
 
 export const RELAY_CONTROLLER_STATE_SCHEMA = "pinvou-relay-controller-state";
 export const RELAY_CONTROLLER_STATE_VERSION = 1;
@@ -60,28 +62,6 @@ foreach ($rule in $actual) {
   if ($rule.AccessControlType -ne [System.Security.AccessControl.AccessControlType]::Allow) { throw 'deny ACL present' }
   $sid = $rule.IdentityReference.Translate([System.Security.Principal.SecurityIdentifier]).Value
   if ($sids.Value -notcontains $sid) { throw 'unexpected ACL principal' }
-  if (($rule.FileSystemRights -band [System.Security.AccessControl.FileSystemRights]::FullControl) -ne [System.Security.AccessControl.FileSystemRights]::FullControl) { throw 'insufficient ACL rights' }
-  if ($kind -eq 'directory' -and $rule.InheritanceFlags -ne [System.Security.AccessControl.InheritanceFlags]'ContainerInherit, ObjectInherit') { throw 'directory ACL inheritance mismatch' }
-  if ($kind -eq 'file' -and $rule.InheritanceFlags -ne [System.Security.AccessControl.InheritanceFlags]::None) { throw 'file ACL inheritance mismatch' }
-}
-[Console]::Out.Write('ok')
-`;
-
-const WINDOWS_ACL_VERIFY_SCRIPT = `
-$ErrorActionPreference = 'Stop'
-$target = $env:PINVOU_ACL_TARGET
-$kind = $env:PINVOU_ACL_KIND
-$current = [System.Security.Principal.WindowsIdentity]::GetCurrent().User
-$allowed = @($current.Value, 'S-1-5-18', 'S-1-5-32-544') | Microsoft.PowerShell.Utility\\Select-Object -Unique
-$acl = Microsoft.PowerShell.Security\\Get-Acl -LiteralPath $target
-if (-not $acl.AreAccessRulesProtected) { throw 'ACL inheritance enabled' }
-if ($acl.Owner -ne $current.Value -and $acl.Owner -ne $current.Translate([System.Security.Principal.NTAccount]).Value) { throw 'unexpected ACL owner' }
-$actual = @($acl.Access)
-if ($actual.Count -ne $allowed.Count) { throw 'unexpected ACL entry count' }
-foreach ($rule in $actual) {
-  if ($rule.AccessControlType -ne [System.Security.AccessControl.AccessControlType]::Allow) { throw 'deny ACL present' }
-  $sid = $rule.IdentityReference.Translate([System.Security.Principal.SecurityIdentifier]).Value
-  if ($allowed -notcontains $sid) { throw 'unexpected ACL principal' }
   if (($rule.FileSystemRights -band [System.Security.AccessControl.FileSystemRights]::FullControl) -ne [System.Security.AccessControl.FileSystemRights]::FullControl) { throw 'insufficient ACL rights' }
   if ($kind -eq 'directory' -and $rule.InheritanceFlags -ne [System.Security.AccessControl.InheritanceFlags]'ContainerInherit, ObjectInherit') { throw 'directory ACL inheritance mismatch' }
   if ($kind -eq 'file' -and $rule.InheritanceFlags -ne [System.Security.AccessControl.InheritanceFlags]::None) { throw 'file ACL inheritance mismatch' }
@@ -187,6 +167,18 @@ export async function protectWindowsPath(target, kind) {
 
 export async function verifyWindowsPath(target, kind) {
   await runWindowsAclScript(WINDOWS_ACL_VERIFY_SCRIPT, target, kind);
+}
+
+async function verifyWindowsGuardJournal(target) {
+  // SQLite-created empty guards and rollback journals inherit the verified
+  // private directory ACL. Their owner may be an already trusted private
+  // principal (User, SYSTEM or Administrators), including after the same User
+  // restarts with a different elevation token. Owner equality is not provenance.
+  // Empty bootstrap is normalized to User after all identity/ACL checks;
+  // ready/nonempty guards remain strict User-owned. Never modify a live journal.
+  const script = buildGuardJournalAclScript();
+  if (script === null) fail("relay_state_acl_unverified");
+  await runWindowsAclScript(script, target, "file");
 }
 
 async function defaultProcessIdentity(pid) {
@@ -417,6 +409,8 @@ function pathWithin(child, parent) {
 function validateStateFilename(path) {
   const name = basename(path);
   if (comparablePath(name) === comparablePath(DIRECTORY_MARKER)
+    || comparablePath(name) === comparablePath(RELAY_CONTROLLER_GUARD_FILENAME)
+    || comparablePath(name) === comparablePath(RELAY_CONTROLLER_GUARD_JOURNAL)
     || /(?:^|\.)(?:bak|lock|tmp|stale)(?:\.|$)/iu.test(name)) {
     fail("relay_state_filename_reserved");
   }
@@ -436,6 +430,8 @@ function fileIdentityKey(identity) {
 function openError(error) {
   const result = error instanceof RelayStateStoreError
     ? error
+    : error?.code === "relay_state_lock_runtime_unavailable"
+      ? new RelayStateStoreError(error.code, error.code, { cause: error })
     : new RelayStateStoreError("relay_state_unavailable", "relay_state_unavailable", { cause: error });
   if (error?.cleanupErrors && !result.cleanupErrors) {
     Object.defineProperty(result, "cleanupErrors", {
@@ -525,6 +521,9 @@ export class RelayStateStore {
   #backupPath;
   #lockPath;
   #markerPath;
+  #guardPath;
+  #guard = null;
+  #processReserved = false;
   #legacyStatePath;
   #maxBytes;
   #randomBytes;
@@ -571,6 +570,7 @@ export class RelayStateStore {
     this.#backupPath = `${this.#path}.bak`;
     this.#lockPath = `${this.#path}.lock`;
     this.#markerPath = join(dirname(this.#path), DIRECTORY_MARKER);
+    this.#guardPath = join(dirname(this.#path), RELAY_CONTROLLER_GUARD_FILENAME);
     this.#maxBytes = maxBytes;
     this.#fs = fs;
     this.#randomBytes = randomBytes;
@@ -583,7 +583,21 @@ export class RelayStateStore {
 
   async #open() {
     try {
+      const Database = await requireControllerLockRuntime();
+      await this.#reserveProcessPath();
       await this.#prepareDedicatedDirectory();
+      await this.#rejectLegacyAliases();
+      this.#guard = new RelayStateGuard({
+        path: this.#guardPath, fs: this.#fs, Database, fail,
+        protect: (path, kind) => this.#protectFilesystemPath(path, kind),
+        verify: (path, kind) => this.#verifyFilesystemPath(path, kind),
+        verifyJournal: (path) => process.platform === "win32" && this.#verifyPath === verifyWindowsPath
+          ? verifyWindowsGuardJournal(path) : this.#verifyFilesystemPath(path, "file"),
+        verifyBootstrap: (path, metadata) => this.#verifyEmptyGuardBootstrap(path, metadata),
+        assertAncestors: () => this.#assertAncestorSnapshot(),
+        syncDirectory: (path) => this.#syncDirectory(path),
+      });
+      await this.#guard.acquire();
       await this.#rejectLegacyAliases();
       await this.#acquireLock();
       const primary = await this.#loadCandidate(this.#path);
@@ -616,7 +630,7 @@ export class RelayStateStore {
       try {
         await this.#releaseLock();
       } catch (releaseError) {
-        if (this.#lockOwner) {
+        if (this.#processReserved) {
           this.#markAbandonedOpen();
         }
         throw attachReleaseError(primaryError, releaseError);
@@ -682,6 +696,8 @@ export class RelayStateStore {
       basename(this.#backupPath),
       basename(this.#lockPath),
       DIRECTORY_MARKER,
+      RELAY_CONTROLLER_GUARD_FILENAME,
+      RELAY_CONTROLLER_GUARD_JOURNAL,
     ]);
     const escaped = [basename(this.#path), basename(this.#backupPath), basename(this.#lockPath)]
       .map((value) => value.replace(/[.*+?^${}()|[\]\\]/gu, "\\$&"));
@@ -773,6 +789,20 @@ export class RelayStateStore {
     }
   }
 
+  async #verifyEmptyGuardBootstrap(target, metadata) {
+    if (process.platform === "win32") {
+      // Only existing private principals may own this empty bootstrap. Keep
+      // the full rights/ACE checks; protect then restores strict User ownership.
+      if (this.#verifyPath === verifyWindowsPath) return verifyWindowsGuardJournal(target);
+      return this.#verifyFilesystemPath(target, "file");
+    }
+    const mode = Number(metadata.mode) & 0o7777;
+    if (typeof process.getuid !== "function" || metadata.uid !== BigInt(process.getuid())
+      || (mode & ~0o044) !== 0o600) fail("relay_state_permissions_unsafe");
+    // Only SQLite's possible extra read bits may be removed. Never repair
+    // foreign ownership, executable/writable sharing or nonempty protocols.
+  }
+
   async #canonicalCandidate(target) {
     try {
       return await this.#fs.realpath(target);
@@ -832,7 +862,7 @@ export class RelayStateStore {
   }
 
   async #managementPaths() {
-    const paths = [this.#path, this.#backupPath, this.#lockPath, this.#markerPath];
+    const paths = [this.#path, this.#backupPath, this.#lockPath, this.#markerPath, this.#guardPath, `${this.#guardPath}-journal`];
     const stateName = basename(this.#path).replace(/[.*+?^${}()|[\]\\]/gu, "\\$&");
     const managed = new RegExp(`^${stateName}(?:\\.bak|\\.lock)(?:\\.|$)|^${stateName}\\.[0-9]+\\.[a-f0-9]{16}\\.tmp$`, "u");
     for (const entry of await this.#fs.readdir(dirname(this.#path), { withFileTypes: true })) {
@@ -878,6 +908,7 @@ export class RelayStateStore {
   }
 
   async #legacyAliasGuardedWrite(path, contents) {
+    await this.#guard.assertIdentity();
     await this.#assertAncestorSnapshot();
     const transaction = { protectedIdentities: new Set(), legacyBeforeIdentity: null };
     await this.#captureManagementIdentities(transaction.protectedIdentities);
@@ -951,10 +982,21 @@ export class RelayStateStore {
     if (this.#ancestorSnapshot) await this.#assertAncestorSnapshot();
   }
 
-  async #acquireLock() {
-    const processPathKey = comparablePath(this.#path);
-    await this.#recoverAbandonedOpen(processPathKey);
+  async #reserveProcessPath() {
+    const processPathKey = comparablePath(this.#guardPath);
+    // The uncontended path reserves synchronously before any filesystem await.
+    if (ABANDONED_OPEN_STORES.get(processPathKey)?.recoverable) {
+      await this.#recoverAbandonedOpen(processPathKey);
+    }
     if (PROCESS_HELD_STATE_PATHS.has(processPathKey)) fail("relay_state_locked");
+    PROCESS_HELD_STATE_PATHS.add(processPathKey);
+    this.#processReserved = true;
+    ABANDONED_OPEN_STORES.set(processPathKey, { store: this, cleanup: null, recoverable: false });
+  }
+
+  async #acquireLock() {
+    const processPathKey = comparablePath(this.#guardPath);
+    await this.#guard.assertIdentity();
     const identity = await this.#processIdentity(process.pid);
     if (typeof identity !== "string" || identity.length < 3 || identity.length > 512) {
       fail("relay_state_process_identity_unavailable");
@@ -985,15 +1027,16 @@ export class RelayStateStore {
         handle = null;
         await this.#fs.link(temporaryPath, this.#lockPath);
         publishedIdentity = temporaryIdentity;
+        // Retain both fences even if the first post-publication metadata read
+        // fails. Cleanup failures must remain retryable through this owner.
+        this.#registerProvisionalLock(owner, temporaryPath, temporaryIdentity, processPathKey);
         const published = await this.#fs.lstat(this.#lockPath);
         const publishedPathIdentity = await this.#pathIdentity(this.#lockPath);
         if (published.isSymbolicLink() || !sameFileIdentity(temporaryIdentity, publishedPathIdentity)) {
           fail("relay_state_lock_publish_failed");
         }
-        this.#registerProvisionalLock(owner, temporaryPath, temporaryIdentity, processPathKey);
         await this.#removeOwnedLockTemporary();
         await this.#syncDirectory(dirname(this.#lockPath));
-        this.#clearRecoveryRecord();
         return;
       } catch (error) {
         if (this.#lockOwner === owner) throw error;
@@ -1037,7 +1080,7 @@ export class RelayStateStore {
   }
 
   #markAbandonedOpen() {
-    const processPathKey = comparablePath(this.#path);
+    const processPathKey = comparablePath(this.#guardPath);
     const existing = ABANDONED_OPEN_STORES.get(processPathKey);
     if (existing?.store === this) {
       existing.recoverable = true;
@@ -1052,7 +1095,7 @@ export class RelayStateStore {
   }
 
   #clearRecoveryRecord() {
-    const processPathKey = comparablePath(this.#path);
+    const processPathKey = comparablePath(this.#guardPath);
     if (ABANDONED_OPEN_STORES.get(processPathKey)?.store === this) {
       ABANDONED_OPEN_STORES.delete(processPathKey);
     }
@@ -1134,7 +1177,18 @@ export class RelayStateStore {
   }
 
   async #releaseLock() {
+    if (!this.#processReserved) return;
+    await this.#releaseLegacyLock();
+    await this.#guard?.close();
+    this.#guard = null;
+    PROCESS_HELD_STATE_PATHS.delete(comparablePath(this.#guardPath));
+    this.#processReserved = false;
+    this.#clearRecoveryRecord();
+  }
+
+  async #releaseLegacyLock() {
     if (!this.#lockOwner) return;
+    await this.#guard.assertIdentity();
     if (!this.#lockRemoved) {
       const existing = await this.#inspectLock();
       if (existing.kind !== "valid" || existing.owner.pid !== this.#lockOwner.pid
@@ -1160,10 +1214,8 @@ export class RelayStateStore {
     }
     if (releaseError) throw releaseError;
     await this.#syncDirectory(dirname(this.#lockPath));
-    PROCESS_HELD_STATE_PATHS.delete(comparablePath(this.#path));
     this.#lockOwner = null;
     this.#lockRemoved = false;
-    this.#clearRecoveryRecord();
   }
 
   async #removeOwnedLockTemporary() {

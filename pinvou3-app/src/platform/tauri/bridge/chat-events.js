@@ -1152,6 +1152,10 @@ function finalizeStreamingReasoning(index) { return pinvouSharedtauriChatEvents(
       // html first (including the interrupted retention display) and cancel
       // the pending trailing edge
       flushPendingStreamRender();
+      // The trailing notify() only cancels the visible session's frame; a
+      // background session's terminal must cancel its own pending frame or a
+      // redundant late round fires within 32ms.
+      cancelPendingStreamNotify(sid);
       var terminalStatus = String(e.payload && e.payload.status || "").toLowerCase();
       var interrupted = ["interrupted", "cancelled", "canceled"].includes(terminalStatus);
       if (interrupted) preserveInterruptedAssistantPresentation();
@@ -1537,6 +1541,10 @@ function normalizeMountedCollections(value) { return pinvouSharedtauriChatEvents
       // the pending trailing edge for that sid
       cancelStreamRenderTimers,
       refreshActiveStreamRender,
+      // Called from the chat lane's admission-reject reset: the surviving
+      // post-tool bubble must keep its full html before the stream state
+      // reset (mirrors the web bridge's explicit flush pairing).
+      flushPendingStreamRender,
     };
   };
 })();

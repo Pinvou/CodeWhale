@@ -15,7 +15,82 @@ use super::schema::{MAX_REMOTE_PROXY_FILE_BYTES, RemoteProxyListItem, RemoteProx
 pub(super) struct ArchiveStore {
     path: PathBuf,
     owner: Mutex<()>,
+    #[cfg(test)]
+    test_hook: Mutex<Option<ArchiveTestHook>>,
 }
+
+#[cfg(test)]
+type ArchiveTestHook = Box<dyn FnMut(ArchiveTestPoint) -> Result<()> + Send>;
+
+#[cfg(test)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum ArchiveTestPoint {
+    BeforeSealLock,
+    BeforeBankCreate,
+    BeforeInitialAnchorWrite,
+    BeforeRecoverPending,
+    BeforePendingWrite,
+    AfterPendingWrite,
+    AfterInsertSeal,
+    AfterCompleteAnchorWrite,
+    AfterSealAction,
+}
+
+/// Only the archive boundary can prove that a rejected seal is safe to retry.
+/// Every unclassified error remains indeterminate, including errors after a
+/// successful write whose result could not be verified.
+#[derive(Debug)]
+pub(super) struct SealFailure {
+    before_intent: bool,
+    source: anyhow::Error,
+}
+
+impl SealFailure {
+    // Call only when this action provably returned before any durable write.
+    // This is a boundary proof, not a classification by error kind; the outer
+    // wrapper still upgrades it if initialization or prior recovery wrote.
+    fn before_intent(source: anyhow::Error) -> Self {
+        Self {
+            before_intent: true,
+            source,
+        }
+    }
+
+    fn indeterminate(source: anyhow::Error) -> Self {
+        Self {
+            before_intent: false,
+            source,
+        }
+    }
+
+    pub(super) fn requires_quarantine(&self) -> bool {
+        !self.before_intent
+    }
+
+    pub(super) fn into_error(self) -> anyhow::Error {
+        self.source
+    }
+}
+
+impl std::fmt::Display for SealFailure {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        self.source.fmt(formatter)
+    }
+}
+
+impl From<anyhow::Error> for SealFailure {
+    fn from(source: anyhow::Error) -> Self {
+        Self::indeterminate(source)
+    }
+}
+
+impl From<rusqlite::Error> for SealFailure {
+    fn from(source: rusqlite::Error) -> Self {
+        Self::indeterminate(source.into())
+    }
+}
+
+type SealResult<T> = std::result::Result<T, SealFailure>;
 
 #[cfg(test)]
 mod tests {
@@ -152,6 +227,42 @@ mod tests {
     }
 
     #[test]
+    fn invalid_seal_input_is_rejected_before_durable_work() {
+        let temp = tempfile::tempdir().unwrap();
+        let bank = bank(temp.path());
+        bank.with_connection(true, |_| Ok(())).unwrap();
+        let anchor = std::fs::read(bank.anchor_path()).unwrap();
+        let db = std::fs::read(&bank.path).unwrap();
+        let mut invalid = record("invalid");
+        invalid.local_session_id.clear();
+        assert!(!bank.seal(&invalid).unwrap_err().requires_quarantine());
+        assert_eq!(std::fs::read(bank.anchor_path()).unwrap(), anchor);
+        assert_eq!(std::fs::read(&bank.path).unwrap(), db);
+        bank.seal(&record("valid-after-invalid")).unwrap();
+    }
+
+    #[test]
+    fn lock_open_error_is_indeterminate_and_preserves_bank() {
+        let temp = tempfile::tempdir().unwrap();
+        let bank = bank(temp.path());
+        bank.with_connection(true, |_| Ok(())).unwrap();
+        let anchor = std::fs::read(bank.anchor_path()).unwrap();
+        let db = std::fs::read(&bank.path).unwrap();
+        let lock_path = bank.path.with_extension("lock");
+        std::fs::remove_file(&lock_path).unwrap();
+        std::fs::create_dir(&lock_path).unwrap();
+        assert!(
+            bank.seal(&record("lock-open"))
+                .unwrap_err()
+                .requires_quarantine()
+        );
+        assert_eq!(std::fs::read(bank.anchor_path()).unwrap(), anchor);
+        assert_eq!(std::fs::read(&bank.path).unwrap(), db);
+        std::fs::remove_dir(&lock_path).unwrap();
+        bank.seal(&record("valid-after-open-error")).unwrap();
+    }
+
+    #[test]
     fn competing_bank_owner_cannot_overwrite_seal_intent() {
         let temp = tempfile::tempdir().unwrap();
         let bank = bank(temp.path());
@@ -163,7 +274,12 @@ mod tests {
             .unwrap();
         let mut lock = fd_lock::RwLock::new(file);
         let _owner = lock.try_write().unwrap();
-        assert!(bank.seal(&record("competing")).is_err());
+        assert!(
+            !bank
+                .seal(&record("competing"))
+                .unwrap_err()
+                .requires_quarantine()
+        );
         assert_eq!(bank.read_anchor().unwrap().unwrap().committed_count, 0);
     }
 
@@ -208,7 +324,7 @@ mod tests {
         let mut same_task = record("other-task");
         same_task.retired_requests[0].task_id = sealed.retired_requests[0].task_id.clone();
         for conflict in [changed, same_ref, same_client, same_task] {
-            assert!(bank.seal(&conflict).is_err());
+            assert!(!bank.seal(&conflict).unwrap_err().requires_quarantine());
             assert_eq!(std::fs::read(bank.anchor_path()).unwrap(), before);
             bank.require_present().unwrap();
             assert!(bank.read_anchor().unwrap().unwrap().pending.is_none());
@@ -236,9 +352,46 @@ mod tests {
         let db = Connection::open(&bank.path).unwrap();
         db.execute("DELETE FROM retired_ids", []).unwrap();
         drop(db);
-        assert!(bank.seal(&record).is_err());
+        assert!(bank.seal(&record).unwrap_err().requires_quarantine());
         assert_eq!(std::fs::read(bank.anchor_path()).unwrap(), before);
         assert!(bank.read_anchor().unwrap().unwrap().pending.is_none());
+    }
+
+    #[test]
+    fn prior_recovery_and_postlude_errors_override_safe_conflict() {
+        for prior_pending in [false, true] {
+            let temp = tempfile::tempdir().unwrap();
+            let bank = bank(temp.path());
+            let sealed = record("sealed");
+            if prior_pending {
+                bank.with_connection(true, |_| Ok(())).unwrap();
+                let mut anchor = bank.read_anchor().unwrap().unwrap();
+                anchor.pending = Some(sealed.clone());
+                bank.write_anchor(&anchor).unwrap();
+            } else {
+                bank.seal(&sealed).unwrap();
+                bank.set_test_hook(|point| {
+                    if point == ArchiveTestPoint::AfterSealAction {
+                        bail!("postlude failed after conflict");
+                    }
+                    Ok(())
+                });
+            }
+            let mut changed = sealed.clone();
+            changed.ui.title = "Changed immutable record".into();
+            let error = bank.seal(&changed).unwrap_err();
+            assert!(error.requires_quarantine());
+            assert_eq!(
+                error.to_string(),
+                if prior_pending {
+                    "remote_proxy_archive_conflict"
+                } else {
+                    "postlude failed after conflict"
+                }
+            );
+            assert_eq!(bank.read(&sealed.local_session_id).unwrap(), Some(sealed));
+            assert_eq!(bank.read_anchor().unwrap().unwrap().committed_count, 1);
+        }
     }
 }
 
@@ -261,8 +414,24 @@ impl ArchiveStore {
     pub(super) fn at(path: PathBuf) -> Self {
         Self {
             path,
-            owner: Mutex::new(()),
+            ..Self::default()
         }
+    }
+
+    #[cfg(test)]
+    pub(super) fn set_test_hook(
+        &self,
+        hook: impl FnMut(ArchiveTestPoint) -> Result<()> + Send + 'static,
+    ) {
+        *self.test_hook.lock() = Some(Box::new(hook));
+    }
+
+    #[cfg(test)]
+    fn run_test_hook(&self, point: ArchiveTestPoint) -> Result<()> {
+        if let Some(hook) = self.test_hook.lock().as_mut() {
+            hook(point)?;
+        }
+        Ok(())
     }
 
     fn anchor_path(&self) -> PathBuf {
@@ -411,8 +580,12 @@ impl ArchiveStore {
             bail!("remote_proxy_archive_unavailable");
         }
         if let Some(pending) = anchor.pending.as_ref() {
+            #[cfg(test)]
+            self.run_test_hook(ArchiveTestPoint::BeforeRecoverPending)?;
             if count == anchor.committed_count {
                 Self::insert_seal(db, pending, anchor)?;
+                #[cfg(test)]
+                self.run_test_hook(ArchiveTestPoint::AfterInsertSeal)?;
             } else if Some(count) != anchor.committed_count.checked_add(1) {
                 bail!("remote_proxy_archive_unavailable");
             }
@@ -430,6 +603,8 @@ impl ArchiveStore {
             anchor.committed_count += 1;
             anchor.pending = None;
             self.write_anchor(anchor)?;
+            #[cfg(test)]
+            self.run_test_hook(ArchiveTestPoint::AfterCompleteAnchorWrite)?;
         } else if count != anchor.committed_count {
             bail!("remote_proxy_archive_unavailable");
         }
@@ -446,9 +621,22 @@ impl ArchiveStore {
         create: bool,
         action: impl FnOnce(&mut Connection) -> Result<T>,
     ) -> Result<Option<T>> {
+        self.with_classified_connection(create, |connection| {
+            action(connection).map_err(SealFailure::indeterminate)
+        })
+        .map_err(SealFailure::into_error)
+    }
+
+    fn with_classified_connection<T>(
+        &self,
+        create: bool,
+        action: impl FnOnce(&mut Connection) -> SealResult<T>,
+    ) -> SealResult<Option<T>> {
         let _owner = self.owner.lock();
         if self.path.as_os_str().is_empty() {
-            bail!("remote_proxy_archive_unavailable");
+            return Err(SealFailure::indeterminate(anyhow::anyhow!(
+                "remote_proxy_archive_unavailable"
+            )));
         }
         // Cooperating processes serialize anchor+DB changes, not merely
         // SQLite writes. Never unlink or replace this ownership file.
@@ -458,43 +646,62 @@ impl ArchiveStore {
             .write(true)
             .create(true)
             .truncate(false)
-            .open(&lock_path)?;
+            .open(&lock_path)
+            .map_err(|error| SealFailure::indeterminate(error.into()))?;
         let mut ownership = fd_lock::RwLock::new(lock_file);
-        let _process_owner = ownership.try_write()?;
-        let mut anchor = self.read_anchor()?;
-        let exists = self.path.try_exists()?;
-        if !exists && anchor.is_some() {
-            bail!("remote_proxy_archive_unavailable");
-        }
-        if !exists && !create {
-            return Ok(None);
-        }
-        if exists
-            && std::fs::symlink_metadata(&self.path)?
-                .file_type()
-                .is_symlink()
-        {
-            bail!("remote_proxy_archive_unavailable");
-        }
-        if !exists {
-            filesystem::create_private_file_once(&self.path, b"")?;
-        }
-        // Pin BEFORE opening SQLite. Pinning after open could validate a new
-        // pathname while the SQL connection still uses an old replaced inode.
-        let pinned = filesystem::pin_plain_database_file(&self.path)?;
-        let mut connection = Connection::open(&self.path)?;
-        connection.busy_timeout(std::time::Duration::from_secs(2))?;
-        connection.execute_batch("PRAGMA synchronous=FULL; PRAGMA foreign_keys=ON;")?;
-        let initial_version: u32 =
-            connection.query_row("PRAGMA user_version", [], |row| row.get(0))?;
-        let table_count: i64 = connection.query_row(
-            "SELECT count(*) FROM sqlite_master WHERE type='table'",
-            [],
-            |row| row.get(0),
-        )?;
-        if initial_version == 0 && table_count == 0 && anchor.is_none() {
-            let tx = connection.transaction()?;
-            tx.execute_batch(
+        let _process_owner = ownership.try_write().map_err(|error| {
+            // This exact acquisition did not enter the bank/anchor boundary.
+            // Other I/O failures are deliberately not inferred to be safe.
+            if error.kind() == std::io::ErrorKind::WouldBlock {
+                SealFailure::before_intent(error.into())
+            } else {
+                SealFailure::indeterminate(error.into())
+            }
+        })?;
+        // Set this before every setup write, including recovery of old intent.
+        // New actions must not report before_intent after any durable write.
+        let mut durable_work = false;
+        // Setup and the postlude have their own failure semantics. In
+        // particular, a postlude error must override a safe action rejection.
+        let result = (|| -> Result<SealResult<Option<T>>> {
+            let mut anchor = self.read_anchor()?;
+            let exists = self.path.try_exists()?;
+            if !exists && anchor.is_some() {
+                bail!("remote_proxy_archive_unavailable");
+            }
+            if !exists && !create {
+                return Ok(Ok(None));
+            }
+            if exists
+                && std::fs::symlink_metadata(&self.path)?
+                    .file_type()
+                    .is_symlink()
+            {
+                bail!("remote_proxy_archive_unavailable");
+            }
+            if !exists {
+                durable_work = true;
+                #[cfg(test)]
+                self.run_test_hook(ArchiveTestPoint::BeforeBankCreate)?;
+                filesystem::create_private_file_once(&self.path, b"")?;
+            }
+            // Pin BEFORE opening SQLite. Pinning after open could validate a new
+            // pathname while the SQL connection still uses an old replaced inode.
+            let pinned = filesystem::pin_plain_database_file(&self.path)?;
+            let mut connection = Connection::open(&self.path)?;
+            connection.busy_timeout(std::time::Duration::from_secs(2))?;
+            connection.execute_batch("PRAGMA synchronous=FULL; PRAGMA foreign_keys=ON;")?;
+            let initial_version: u32 =
+                connection.query_row("PRAGMA user_version", [], |row| row.get(0))?;
+            let table_count: i64 = connection.query_row(
+                "SELECT count(*) FROM sqlite_master WHERE type='table'",
+                [],
+                |row| row.get(0),
+            )?;
+            if initial_version == 0 && table_count == 0 && anchor.is_none() {
+                durable_work = true;
+                let tx = connection.transaction()?;
+                tx.execute_batch(
                     "CREATE TABLE archives (
                     sequence INTEGER PRIMARY KEY AUTOINCREMENT,
                     local_id TEXT NOT NULL UNIQUE, remote_ref TEXT NOT NULL UNIQUE,
@@ -505,49 +712,70 @@ impl ArchiveStore {
                     CREATE TABLE archive_meta(singleton INTEGER PRIMARY KEY CHECK(singleton=1),id TEXT NOT NULL);
                     PRAGMA user_version=2;",
                 )?;
-            tx.execute(
-                "INSERT INTO archive_meta(singleton,id) VALUES(1,?1)",
-                [uuid::Uuid::new_v4().to_string()],
-            )?;
-            tx.commit()?;
-        }
-        let version: u32 = connection.query_row("PRAGMA user_version", [], |row| row.get(0))?;
-        if version != 2 {
-            bail!("remote_proxy_archive_unavailable");
-        }
-        let (id, count) = Self::bank_state(&connection)?;
-        if anchor.is_none() {
-            let tombstones: i64 =
-                connection.query_row("SELECT count(*) FROM retired_ids", [], |row| row.get(0))?;
-            if count != 0 || tombstones != 0 {
+                tx.execute(
+                    "INSERT INTO archive_meta(singleton,id) VALUES(1,?1)",
+                    [uuid::Uuid::new_v4().to_string()],
+                )?;
+                tx.commit()?;
+            }
+            let version: u32 = connection.query_row("PRAGMA user_version", [], |row| row.get(0))?;
+            if version != 2 {
                 bail!("remote_proxy_archive_unavailable");
             }
-            if create {
-                let initial = ArchiveAnchor {
-                    id,
-                    committed_count: 0,
-                    pending: None,
-                };
-                filesystem::create_private_file_once(
-                    &self.anchor_path(),
-                    &serde_json::to_vec(&initial)?,
-                )?;
-                anchor = Some(initial);
+            let (id, count) = Self::bank_state(&connection)?;
+            if anchor.is_none() {
+                let tombstones: i64 =
+                    connection
+                        .query_row("SELECT count(*) FROM retired_ids", [], |row| row.get(0))?;
+                if count != 0 || tombstones != 0 {
+                    bail!("remote_proxy_archive_unavailable");
+                }
+                if create {
+                    durable_work = true;
+                    #[cfg(test)]
+                    self.run_test_hook(ArchiveTestPoint::BeforeInitialAnchorWrite)?;
+                    let initial = ArchiveAnchor {
+                        id,
+                        committed_count: 0,
+                        pending: None,
+                    };
+                    filesystem::create_private_file_once(
+                        &self.anchor_path(),
+                        &serde_json::to_vec(&initial)?,
+                    )?;
+                    anchor = Some(initial);
+                }
             }
-        }
-        if let Some(anchor) = &mut anchor {
-            self.finish_pending(&mut connection, anchor)?;
-        }
-        let result = action(&mut connection);
-        if !filesystem::reserved_target_is_unchanged(&pinned, &self.path) {
-            bail!("remote_proxy_archive_unavailable");
-        }
-        // Includes recovery of a newly written seal intent. This completes
-        // before any caller can use the normal active-record authority.
-        if let Some(mut anchor) = self.read_anchor()? {
-            self.finish_pending(&mut connection, &mut anchor)?;
-        }
-        result.map(Some)
+            if let Some(anchor) = &mut anchor {
+                durable_work |= anchor.pending.is_some();
+                self.finish_pending(&mut connection, anchor)?;
+            }
+            let result = action(&mut connection);
+            #[cfg(test)]
+            if create {
+                self.run_test_hook(ArchiveTestPoint::AfterSealAction)?;
+            }
+            if !filesystem::reserved_target_is_unchanged(&pinned, &self.path) {
+                bail!("remote_proxy_archive_unavailable");
+            }
+            // Includes recovery of a newly written seal intent. This completes
+            // before any caller can use the normal active-record authority.
+            if let Some(mut anchor) = self.read_anchor()? {
+                self.finish_pending(&mut connection, &mut anchor)?;
+            }
+            // Even successful recovery of a prior intent is durable work. Keep
+            // that case conservative rather than treating this call as read-only.
+            Ok(result
+                .map_err(|error| {
+                    if durable_work {
+                        SealFailure::indeterminate(error.into_error())
+                    } else {
+                        error
+                    }
+                })
+                .map(Some))
+        })();
+        result.map_err(SealFailure::indeterminate)?
     }
 
     pub(super) fn contains(&self, id: &str) -> Result<bool> {
@@ -582,16 +810,22 @@ impl ArchiveStore {
             .flatten())
     }
 
-    pub(super) fn seal(&self, record: &RemoteProxyRecord) -> Result<()> {
-        record.validate_stored()?;
-        if !record.pending.is_empty() {
-            bail!("remote_proxy_archive_pending");
-        }
-        let bytes = serde_json::to_vec(record)?;
-        if bytes.len() > MAX_REMOTE_PROXY_FILE_BYTES {
-            bail!("remote_proxy_byte_budget");
-        }
-        self.with_connection(true, |db| {
+    pub(super) fn seal(&self, record: &RemoteProxyRecord) -> SealResult<()> {
+        let bytes = (|| -> Result<Vec<u8>> {
+            record.validate_stored()?;
+            if !record.pending.is_empty() {
+                bail!("remote_proxy_archive_pending");
+            }
+            let bytes = serde_json::to_vec(record)?;
+            if bytes.len() > MAX_REMOTE_PROXY_FILE_BYTES {
+                bail!("remote_proxy_byte_budget");
+            }
+            Ok(bytes)
+        })()
+        .map_err(SealFailure::before_intent)?;
+        #[cfg(test)]
+        self.run_test_hook(ArchiveTestPoint::BeforeSealLock)?;
+        self.with_classified_connection(true, |db| {
             // The caller's earlier contains() is not authority across processes.
             // Check both identity and replay domains under this same fd-lock,
             // before writing an irreversible pending intent. A deterministic
@@ -605,7 +839,9 @@ impl ArchiveStore {
                 .optional()?;
             if let Some(existing) = existing {
                 if existing != bytes {
-                    bail!("remote_proxy_archive_conflict");
+                    return Err(SealFailure::before_intent(anyhow::anyhow!(
+                        "remote_proxy_archive_conflict"
+                    )));
                 }
                 Self::verify_retired_ids(db, record)?;
                 return Ok(());
@@ -619,7 +855,9 @@ impl ArchiveStore {
                 .optional()?
                 .is_some();
             if ref_exists {
-                bail!("remote_proxy_archive_conflict");
+                return Err(SealFailure::before_intent(anyhow::anyhow!(
+                    "remote_proxy_archive_conflict"
+                )));
             }
             for retired in &record.retired_requests {
                 let reused = db
@@ -631,14 +869,20 @@ impl ArchiveStore {
                     .optional()?
                     .is_some();
                 if reused {
-                    bail!("remote_proxy_archive_conflict");
+                    return Err(SealFailure::before_intent(anyhow::anyhow!(
+                        "remote_proxy_archive_conflict"
+                    )));
                 }
             }
             let mut anchor = self
                 .read_anchor()?
                 .ok_or_else(|| anyhow::anyhow!("missing archive anchor"))?;
             anchor.pending = Some(record.clone());
+            #[cfg(test)]
+            self.run_test_hook(ArchiveTestPoint::BeforePendingWrite)?;
             self.write_anchor(&anchor)?;
+            #[cfg(test)]
+            self.run_test_hook(ArchiveTestPoint::AfterPendingWrite)?;
             Ok(())
         })?;
         Ok(())
