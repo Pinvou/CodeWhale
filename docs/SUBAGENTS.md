@@ -455,6 +455,12 @@ their original object and never follow a retry. For example, if B is named
 after A's returned id, `agent_id=A.id` still selects A while `name=A.id`
 selects B, subject to B's own session and hierarchy permissions.
 
+The continuation field `resume_from` accepts an issued id or an unambiguous
+ordinary session name. It has no explicit name selector: if a source's name
+looks like an issued id, pass that source's actual receipt id in `resume_from`.
+The `name` field on `action=start` names the new child, not the continuation
+source. A missing issued id never falls back to a same-named source.
+
 Records hydrated from an older boot remain history for name resolution: they
 never outrank the current boot's live child. Two live holders of one name are
 ambiguous; use the exact `agent_id` rather than guessing a holder.

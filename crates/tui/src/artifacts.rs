@@ -184,12 +184,8 @@ pub fn write_session_relative_immutable(
             ))
         };
     }
-    let file_name = absolute_path
-        .file_name()
-        .and_then(|name| name.to_str())
-        .unwrap_or("artifact");
     let temp_path = absolute_path.with_file_name(format!(
-        ".{file_name}.{}.{}.tmp",
+        ".artifact.{}.{}.tmp",
         std::process::id(),
         uuid::Uuid::new_v4()
     ));

@@ -3352,6 +3352,9 @@ pub struct SubAgentManager {
     /// Follow-ups handed to a running child's live input channel that the
     /// child has not yet taken at a round boundary. Read by the rail rows.
     pending_follow_ups: HashMap<String, Arc<std::sync::atomic::AtomicUsize>>,
+    /// Close a test receiver after an exact successful send, without scheduler races.
+    #[cfg(test)]
+    followup_delivery_hook: Option<Box<dyn Fn(usize) + Send + Sync>>,
     /// Test/observability: agent ids that received a live wake via followup.
     woken_agents: HashMap<String, bool>,
     /// Test/observability: the workspace root set each spawned child was
@@ -3486,6 +3489,8 @@ impl SubAgentManager {
             last_cleanup_at: None,
             queued_mail: HashMap::new(),
             pending_follow_ups: HashMap::new(),
+            #[cfg(test)]
+            followup_delivery_hook: None,
             woken_agents: HashMap::new(),
             #[cfg(test)]
             spawned_workspace_roots: HashMap::new(),
@@ -5669,6 +5674,10 @@ impl SubAgentManager {
                             .is_ok()
                         {
                             delivered = delivered.saturating_add(1);
+                            #[cfg(test)]
+                            if let Some(hook) = &self.followup_delivery_hook {
+                                hook(delivered);
+                            }
                         } else {
                             counter.fetch_sub(1, std::sync::atomic::Ordering::AcqRel);
                             undelivered.push_back(mail);
@@ -8808,7 +8817,7 @@ impl ToolSpec for AgentTool {
                 },
                 "resume_from": {
                     "type": "string",
-                    "description": "Settled child agent_id or session name to continue. The source must not be running. Its full transcript is loaded and prepended as the new child's context (fork_context=true), continuing the transcript lineage under a new role or profile (e.g. explore → implement → test). Mutually exclusive with fork_context=false. Cross-workspace or missing sources are rejected with a clear error."
+                    "description": "Settled child's issued agent_id or unambiguous ordinary session name to continue. For an id-shaped session name, use that child's actual issued agent_id from its receipt; this field has no explicit name selector, and missing issued ids never fall back to names. The source must not be running. Its full transcript is loaded and prepended as the new child's context (fork_context=true), continuing the transcript lineage under a new role or profile (e.g. explore → implement → test). Mutually exclusive with fork_context=false. Cross-workspace or missing sources are rejected with a clear error."
                 }
             },
             "dependentSchemas": {

@@ -2,6 +2,78 @@ use super::*;
 use std::future::Future;
 use std::task::Poll;
 
+#[tokio::test]
+async fn forkguard_agent_identity_partial_delivery_does_not_claim_the_current_message() {
+    for operator_surface in [false, true] {
+        let tmp = tempdir().unwrap();
+        let mut inner = SubAgentManager::new(tmp.path().into(), 8);
+        let (id, receiver) = inner.insert_test_running_agent_with_input("7e2950c4", tmp.path());
+        inner
+            .queue_running_parent_message_for_session("workspace", &id, "older mail".into())
+            .unwrap();
+        let receiver = std::sync::Mutex::new(Some(receiver));
+        inner.followup_delivery_hook = Some(Box::new(move |delivered| {
+            assert_eq!(delivered, 1);
+            let mut receiver = receiver.lock().unwrap().take().unwrap();
+            assert_eq!(receiver.try_recv().unwrap().text, "older mail");
+            drop(receiver);
+        }));
+        let manager = Arc::new(tokio::sync::RwLock::new(inner));
+        let mut guard = manager.write().await;
+        if operator_surface {
+            let outcome = guard
+                .continue_child_from_user_for_session(
+                    "workspace",
+                    manager.clone(),
+                    None,
+                    &id,
+                    "current mail",
+                )
+                .unwrap();
+            assert!(!outcome.delivered);
+            assert!(!outcome.resumed);
+        } else {
+            let receipt = guard
+                .followup_child_for_session("workspace", &id, "current mail".into())
+                .unwrap();
+            assert!(receipt.woke, "the older message was genuinely delivered");
+            assert_eq!(receipt.queue_depth, 1);
+        }
+        let delivery = guard.worker_records[&id]
+            .follow_up
+            .latest_delivery
+            .as_ref()
+            .unwrap();
+        assert!(!delivery.delivered);
+        assert_eq!(delivery.message_preview.as_deref(), Some("current mail"));
+        assert!(delivery.reason.as_deref().unwrap().contains("partially"));
+        assert_eq!(guard.queued_mail[&id].len(), 1);
+        assert_eq!(guard.queued_mail[&id][0].text, "current mail");
+
+        // Reconnect without losing the undelivered current message; the next
+        // call must drain it before reporting success for the new message.
+        guard.followup_delivery_hook = None;
+        let (sender, mut receiver) = mpsc::unbounded_channel();
+        guard.agents.get_mut(&id).unwrap().input_tx = Some(sender);
+        let receipt = guard
+            .followup_child_for_session("workspace", &id, "healthy next".into())
+            .unwrap();
+        assert!(receipt.woke);
+        assert_eq!(receipt.queue_depth, 0);
+        assert_eq!(receiver.try_recv().unwrap().text, "current mail");
+        assert_eq!(receiver.try_recv().unwrap().text, "healthy next");
+        assert!(receiver.try_recv().is_err());
+        assert!(
+            guard.worker_records[&id]
+                .follow_up
+                .latest_delivery
+                .as_ref()
+                .unwrap()
+                .delivered
+        );
+    }
+}
+
 fn alias_chain(
     manager: &mut SubAgentManager,
     workspace: &Path,

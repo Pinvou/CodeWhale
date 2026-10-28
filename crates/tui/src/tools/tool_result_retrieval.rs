@@ -524,7 +524,7 @@ fn resolve_spillover_reference(
         if let Some(found) = try_path(root.join(stripped), &mut tried) {
             return Ok(found);
         }
-        return Err(not_found(reference, tried));
+        return Err(not_found(reference, tried, legacy_call_id));
     }
 
     if let Some(sa_root) = session_artifacts_root.as_ref() {
@@ -547,7 +547,7 @@ fn resolve_spillover_reference(
         {
             return Ok(found);
         }
-        return Err(not_found(reference, tried));
+        return Err(not_found(reference, tried, legacy_call_id));
     }
 
     // `sha:<hex>` or bare 64-hex resolves only as legacy-global evidence and
@@ -578,12 +578,19 @@ fn resolve_spillover_reference(
         return Ok(found);
     }
 
-    Err(not_found(reference, tried))
+    Err(not_found(reference, tried, legacy_call_id))
 }
 
 /// Missing evidence is distinct without revealing storage roots or generated
 /// session identifiers to the model.
-fn not_found(reference: &str, tried: usize) -> ToolError {
+fn not_found(reference: &str, tried: usize, raw_call_id: Option<&str>) -> ToolError {
+    if let Some(call_id) = raw_call_id {
+        return ToolError::execution_failed(format!(
+            "retained evidence for tool call {call_id:?} was not found for the active session \
+             ({tried} bounded candidate forms checked). Retry with the exact ref from the \
+             original recovery hint and ref_kind=\"tool_call_id\"."
+        ));
+    }
     ToolError::execution_failed(format!(
         "retained evidence `{reference}` was not found for the active session \
          ({tried} bounded candidate forms checked). Use the session-owned \
@@ -1014,6 +1021,101 @@ mod tests {
         )
         .unwrap();
         (sha, path)
+    }
+
+    #[test]
+    fn typed_art_prefixed_call_ids_do_not_alias_default_artifact_handles() {
+        let _spill = test_lock();
+        let _artifacts = crate::artifacts::TEST_ARTIFACT_SESSIONS_GUARD
+            .lock()
+            .unwrap_or_else(|err| err.into_inner());
+        let tmp = tempdir().unwrap();
+        let _root = set_spillover_root(tmp.path().join("tool_outputs"));
+        let _restore = scopeguard_for_test(crate::artifacts::set_test_artifact_sessions_root(
+            Some(tmp.path().join("sessions")),
+        ));
+        let raw_call_id = "art_prefixed_call";
+        let handle = crate::artifacts::artifact_id_for_tool_call(raw_call_id);
+        for storage in ["adaptive", "classic-session", "classic-global"] {
+            let session = format!("typed-prefix-{storage}");
+            publish_test_evidence_for_call(
+                &session,
+                raw_call_id,
+                "prefixed_call",
+                b"DEFAULT ARTIFACT",
+                false,
+            );
+            match storage {
+                "adaptive" => {
+                    publish_test_evidence_for_call(
+                        &session,
+                        &handle,
+                        raw_call_id,
+                        b"EXACT TYPED CALL",
+                        false,
+                    );
+                }
+                "classic-session" => {
+                    let (path, _) = crate::artifacts::write_session_artifact(
+                        &session,
+                        &handle,
+                        "EXACT TYPED CALL",
+                    )
+                    .unwrap();
+                    crate::tools::truncate::publish_spillover_ownership_for_call(
+                        &path,
+                        &session,
+                        raw_call_id,
+                        b"EXACT TYPED CALL",
+                    )
+                    .unwrap();
+                }
+                _ => {
+                    write_owned_legacy(raw_call_id, "EXACT TYPED CALL", &session);
+                }
+            }
+            let default = execute_tool_in_session(json!({"ref":raw_call_id}), &session).unwrap();
+            assert!(default.content.contains("DEFAULT ARTIFACT"), "{storage}");
+            let typed = execute_tool_in_session(
+                json!({"ref":raw_call_id,"ref_kind":"tool_call_id"}),
+                &session,
+            )
+            .unwrap();
+            let typed: Value = serde_json::from_str(&typed.content).unwrap();
+            assert!(typed.to_string().contains("EXACT TYPED CALL"), "{storage}");
+            assert!(!typed.to_string().contains("DEFAULT ARTIFACT"), "{storage}");
+            assert_eq!(typed["ref"], raw_call_id);
+            assert_eq!(typed["ref_kind"], "tool_call_id");
+            let reused = execute_tool_in_session(
+                json!({"ref":typed["ref"],"ref_kind":typed["ref_kind"],"mode":"metadata"}),
+                &session,
+            )
+            .unwrap();
+            assert!(reused.content.contains("available"));
+        }
+    }
+
+    #[test]
+    fn typed_missing_evidence_preserves_the_raw_call_namespace_in_recovery_advice() {
+        let _spill = test_lock();
+        let _artifacts = crate::artifacts::TEST_ARTIFACT_SESSIONS_GUARD
+            .lock()
+            .unwrap_or_else(|err| err.into_inner());
+        let tmp = tempdir().unwrap();
+        let _root = set_spillover_root(tmp.path().join("tool_outputs"));
+        let _restore = scopeguard_for_test(crate::artifacts::set_test_artifact_sessions_root(
+            Some(tmp.path().join("sessions")),
+        ));
+        let error = execute_tool_in_session(
+            json!({"ref":"art_missing.call","ref_kind":"tool_call_id"}),
+            "missing-typed-call-owner",
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(error.contains("art_missing.call"), "{error}");
+        assert!(error.contains("ref_kind=\"tool_call_id\""), "{error}");
+        assert!(!error.contains("art_art_missing_call"), "{error}");
+        assert!(!error.contains("session-owned `art_<id>`"), "{error}");
     }
 
     #[test]

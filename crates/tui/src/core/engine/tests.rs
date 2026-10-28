@@ -20169,9 +20169,25 @@ fn forkguard_classic_legacy_hint_recovers_after_session_artifact_write_failure()
 }
 
 #[test]
-fn forkguard_classic_typed_recovery_rejects_replaced_call_identity() {
+fn forkguard_classic_generated_recovery_never_reads_a_replacement_call() {
     use crate::tools::large_output_router::WorkshopConfig;
     use crate::tools::spec::ToolSpec;
+    fn request_from_preview(preview: &str) -> Value {
+        let (_, hint) = preview
+            .split_once("retrieve_tool_result with ref=")
+            .expect("the real writer must supply its recovery instruction");
+        let reference = serde_json::Deserializer::from_str(hint)
+            .into_iter::<String>()
+            .next()
+            .unwrap()
+            .unwrap();
+        let kind = if hint.contains("ref_kind=\"tool_call_id\"") {
+            "tool_call_id"
+        } else {
+            "artifact"
+        };
+        json!({"ref":reference,"ref_kind":kind,"mode":"tail","line_count":1})
+    }
     let _environment = crate::test_support::lock_test_env();
     let _classic = crate::test_support::EnvVarGuard::set("CODEWHALE_CLASSIC_OUTPUT_ROUTING", "1");
     let _workshop = crate::tools::large_output_router::active_workshop_test_guard();
@@ -20217,8 +20233,6 @@ fn forkguard_classic_typed_recovery_rejects_replaced_call_identity() {
                 );
             }
             let context = crate::tools::spec::ToolContext::new(home).with_state_namespace(session);
-            let request =
-                json!({"ref":first_id,"ref_kind":"tool_call_id","mode":"tail","line_count":1});
             let mut first =
                 ToolResult::success(format!("OLD\n{}OLD END", "payload\n".repeat(20_000)));
             crate::tools::truncate::apply_spillover_with_artifact(
@@ -20228,6 +20242,7 @@ fn forkguard_classic_typed_recovery_rejects_replaced_call_identity() {
                 session,
             )
             .unwrap();
+            let request = request_from_preview(&first.content);
             let before = runtime
                 .block_on(
                     crate::tools::tool_result_retrieval::RetrieveToolResultTool
@@ -20237,14 +20252,31 @@ fn forkguard_classic_typed_recovery_rejects_replaced_call_identity() {
             assert!(before.content.contains("OLD END"));
             let mut second =
                 ToolResult::success(format!("NEW\n{}NEW END", "payload\n".repeat(20_000)));
+            let raw_second = second.content.clone();
             let saved = crate::tools::truncate::apply_spillover_with_artifact(
                 &mut second,
                 second_id,
                 "generic_result",
                 session,
-            )
-            .unwrap();
-            assert!(fs::read_to_string(saved).unwrap().contains("NEW END"));
+            );
+            if !legacy_only {
+                assert!(saved.is_none(), "a session handle cannot replace old bytes");
+                assert_eq!(second.content, raw_second, "the colliding call keeps raw");
+                let original = runtime
+                    .block_on(
+                        crate::tools::tool_result_retrieval::RetrieveToolResultTool
+                            .execute(request, &context),
+                    )
+                    .unwrap();
+                assert!(original.content.contains("OLD END"));
+                assert!(!original.content.contains("NEW END"));
+                continue;
+            }
+            assert!(
+                fs::read_to_string(saved.unwrap())
+                    .unwrap()
+                    .contains("NEW END")
+            );
             let wrong = runtime
                 .block_on(
                     crate::tools::tool_result_retrieval::RetrieveToolResultTool
@@ -20253,9 +20285,12 @@ fn forkguard_classic_typed_recovery_rejects_replaced_call_identity() {
                 .unwrap_err()
                 .to_string();
             assert!(wrong.contains("tool-call identity"), "{session}: {wrong}");
-            let next = runtime.block_on(crate::tools::tool_result_retrieval::RetrieveToolResultTool.execute(
-                json!({"ref":second_id,"ref_kind":"tool_call_id","mode":"tail","line_count":1}), &context,
-            )).unwrap();
+            let next = runtime
+                .block_on(
+                    crate::tools::tool_result_retrieval::RetrieveToolResultTool
+                        .execute(request_from_preview(&second.content), &context),
+                )
+                .unwrap();
             assert!(next.content.contains("NEW END") && !next.content.contains("OLD END"));
         }
     });

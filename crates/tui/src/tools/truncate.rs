@@ -619,15 +619,15 @@ fn apply_spillover_inner(
     let mut artifact_path = None;
     if let Some(context) = artifact_context {
         let artifact_id = crate::artifacts::artifact_id_for_tool_call(tool_id);
-        match crate::artifacts::write_session_artifact(
+        match crate::artifacts::write_session_artifact_immutable(
             context.session_id,
             &artifact_id,
-            &original_content,
+            original_content.as_bytes(),
         ) {
             Ok((absolute_path, relative_path)) => {
-                // Classic session files use the same non-injective naming as
-                // before. Bind the current bytes to their exact call so typed
-                // recovery cannot silently return another call's replacement.
+                // Keep the artifact handle immutable as well as binding typed
+                // recovery. The original preview and later context refits may
+                // use the default artifact handle rather than a raw call id.
                 if let Err(err) = publish_spillover_ownership_for_call(
                     &absolute_path,
                     context.session_id,
@@ -656,6 +656,22 @@ fn apply_spillover_inner(
                     tool_id,
                 );
                 artifact_path = Some((absolute_path, relative_path, record));
+            }
+            Err(err)
+                if err.kind() == io::ErrorKind::AlreadyExists
+                    && crate::artifacts::session_artifact_absolute_path(
+                        context.session_id,
+                        &crate::artifacts::session_artifact_relative_path(&artifact_id),
+                    )
+                    .is_some_and(|path| fs::symlink_metadata(path).is_ok()) =>
+            {
+                // A normalized-name collision must not replace an earlier
+                // receipt's bytes or advertise an alias that resolves to them.
+                // Preserve this call's full raw result instead.
+                // An unavailable ancestor can also report AlreadyExists on
+                // Windows; without a destination entry, keep the global fallback.
+                tracing::warn!(target: "spillover", tool_id, "classic session artifact identity conflicts with retained bytes");
+                return None;
             }
             Err(err) => {
                 tracing::warn!(
