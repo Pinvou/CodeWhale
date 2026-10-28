@@ -157,8 +157,10 @@ func resolvePriceCandidate(ctx context.Context, tx pgx.Tx, selected priceCandida
 			return PriceVersion{}, ErrPriceMissing
 		}
 		var unit ResolvedUnitPrice
-		if err := tx.QueryRow(ctx, `SELECT unit_code,version,minimum_precision,price_denominator,rounding_rule FROM metering_unit_definitions WHERE id=$1`, unitID).Scan(&unit.UnitCode, &unit.UnitVersion, &unit.MinimumPrecision, &unit.PriceDenominator, &unit.RoundingRule); err != nil {
+		if err := tx.QueryRow(ctx, `SELECT unit_code,version,minimum_precision,price_denominator,rounding_rule FROM metering_unit_definitions WHERE id=$1`, unitID).Scan(&unit.UnitCode, &unit.UnitVersion, &unit.MinimumPrecision, &unit.PriceDenominator, &unit.RoundingRule); errors.Is(err, pgx.ErrNoRows) {
 			return PriceVersion{}, ErrPriceMissing
+		} else if err != nil {
+			return PriceVersion{}, err
 		}
 		unit.UnitDefinitionID, unit.ResolvedPrice, unit.ConfigurationType, unit.PriceSourceScope, unit.SourcePriceVersionID = unitID, *price, configuration.configType, source.scopeType, source.id
 		result.Units = append(result.Units, unit)
