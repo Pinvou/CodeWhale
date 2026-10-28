@@ -20035,6 +20035,21 @@ fn a_network_denied_child_cannot_address_a_remote_location_through_any_tool() {
             "Bash",
             json!({"action": "run", "command": "gh issue view 5287"}),
         ),
+        // A gh read inside a compound or carrying a `*` reaches the network
+        // exactly like the bare one; the whole-command parallel classifier
+        // used to answer "not a gh read" for all three and let them through.
+        (
+            "bash",
+            json!({"action": "run", "command": "pwd; gh repo view"}),
+        ),
+        (
+            "bash",
+            json!({"action": "run", "command": "gh pr list --search '*'"}),
+        ),
+        (
+            "exec_shell",
+            json!({"action": "run", "command": "gh repo view | head -n 3"}),
+        ),
     ] {
         assert!(
             reject_network_reaching_input(name, &input).is_err(),
@@ -20060,6 +20075,10 @@ fn a_network_denied_child_cannot_address_a_remote_location_through_any_tool() {
         ("review", json!({"target": "crates/tui/src/main.rs"})),
         ("Git", json!({"action": "diff"})),
         ("clone", json!({"url": "git@github.com:o/r.git"})),
+        (
+            "bash",
+            json!({"action": "run", "command": "pwd; cat gh-notes.md | wc -l"}),
+        ),
     ] {
         assert!(
             reject_network_reaching_input(name, &input).is_ok(),

@@ -623,7 +623,7 @@ pub fn is_agent_readonly_shell_command(command: &str) -> bool {
 }
 
 /// Upper bound on `;`/`&&`/`||` segments in one admitted read-only command.
-const MAX_READONLY_SEQUENCE_SEGMENTS: usize = 32;
+pub(crate) const MAX_READONLY_SEQUENCE_SEGMENTS: usize = 32;
 
 /// Admit one sequence segment: every pipeline stage must be an admitted
 /// read-only command (`a | b` is two read-only commands, while `a | | b`,
@@ -634,13 +634,44 @@ const MAX_READONLY_SEQUENCE_SEGMENTS: usize = 32;
 /// precisely because an unpiped `cd` does persist — and a `cd` stage would
 /// otherwise end the gate's token walk before the operands after the `|`.
 fn readonly_segment_stages_admitted(segment: &str) -> bool {
-    let stages: Vec<&str> = segment.split('|').collect();
+    let stages = readonly_pipeline_stages(segment);
     let piped = stages.len() > 1;
     stages.into_iter().all(|stage| {
         if piped && shell_words(stage).first().is_some_and(|word| word == "cd") {
             return false;
         }
         is_agent_readonly_segment(stage)
+    })
+}
+
+/// Split one sequence segment on the pipeline separator `|`.
+///
+/// The one stage split every read-only judge uses — the classifier above,
+/// the execution seam's operand gate, its network guard, and its git stage
+/// hardening — so no two of them can ever disagree about where a stage
+/// begins. The split is naive byte scanning like [`readonly_sequence_segments`]
+/// (a quoted `|` mis-splits into a stage that fails classification, or fails
+/// the seam's stricter `shlex` parse: fail closed either way). Empty stages
+/// are returned, not dropped; refusing them is the caller's contract.
+pub(crate) fn readonly_pipeline_stages(segment: &str) -> Vec<&str> {
+    segment.split('|').collect()
+}
+
+/// Whether any pipeline stage of any sequence segment of `command` is an
+/// admitted GitHub read ([`is_github_readonly_stage`]), i.e. whether running
+/// the command reaches `api.github.com`. `pwd; gh repo view`, `gh repo view |
+/// head`, and `gh pr list --search '*'` reach the network exactly like a bare
+/// `gh repo view`, so every network ceiling judges them with this one
+/// predicate instead of the whole-command parallel classifier, whose charset
+/// gate would see a compound or a `*` and answer "not a gh read". A bare `&`
+/// never classifies and answers `false` here; the grammar refuses it anyway.
+#[must_use]
+pub(crate) fn command_reaches_github_readonly(command: &str) -> bool {
+    readonly_sequence_segments(command).is_some_and(|segments| {
+        segments
+            .iter()
+            .flat_map(|segment| readonly_pipeline_stages(segment))
+            .any(is_github_readonly_stage)
     })
 }
 
@@ -1097,29 +1128,15 @@ fn is_agent_readonly_od(tokens: &[String]) -> bool {
     true
 }
 
-/// Return `true` only for the networked GitHub CLI subset admitted by
-/// [`is_parallel_readonly_command`].
-///
-/// Fleet uses this second predicate to apply its independent network ceiling
-/// and the configured per-host network policy. Keeping it derived from the
-/// full read-only classifier means a separator, redirect, background marker,
-/// executable flag, or unsupported `gh` verb can never be mislabeled merely
-/// because its first token is `gh`.
-#[must_use]
-pub fn is_github_readonly_command(command: &str) -> bool {
-    if !is_parallel_readonly_command(command) {
-        return false;
-    }
-    is_github_readonly_tokens(&shell_words(command.trim()))
-}
-
 /// Token-level recognition of one command as an admitted GitHub read, without
 /// the parallel classifier's charset gate. The agent read-only grammar admits
 /// `*` (glob operands judged at the execution seam), so a stage like
-/// `gh pr list --search '*'` is admitted and reaches the network while the
-/// whole-command predicate refuses its `*` — a per-stage guard keyed on that
-/// predicate would silently skip the network policy for exactly those stages.
-/// Over-recognition is harmless: the caller only consults the network decider.
+/// `gh pr list --search '*'` is admitted and reaches the network while a
+/// whole-command charset-gated predicate refuses its `*` — a per-stage guard
+/// keyed on that predicate would silently skip the network policy for exactly
+/// those stages. Over-recognition is harmless: every caller only consults the
+/// network decider or refuses the call for an agent that holds no network, and
+/// the grammar refuses the over-recognized spellings before any guard runs.
 pub(crate) fn is_github_readonly_tokens(tokens: &[String]) -> bool {
     let Some(start) = primary_token_index(tokens) else {
         return false;
@@ -2645,8 +2662,8 @@ mod tests {
                 "{stage} must be agent-admitted (the guard pin is then non-vacuous)"
             );
             assert!(
-                !is_github_readonly_command(stage),
-                "{stage}: the whole-command parallel predicate must stay strict on `*`"
+                !is_parallel_readonly_command(stage),
+                "{stage}: the whole-command parallel classifier must stay strict on `*`"
             );
             assert!(
                 is_github_readonly_stage(stage),
@@ -2839,31 +2856,59 @@ mod tests {
         }
     }
 
+    /// The one gh-reach predicate every network ceiling consults (seam guard,
+    /// no-network subagent precheck, fleet envelope): it recognizes the gh
+    /// read inside any sequence segment or pipeline stage, and it does NOT
+    /// re-validate options or charset — the grammar refuses those spellings
+    /// before any ceiling runs, and a ceiling that under-recognized them
+    /// would be the bypass.
     #[test]
-    fn github_readonly_classifier_only_marks_the_networked_read_subset() {
+    fn command_reaches_github_readonly_recognizes_gh_reads_per_stage() {
         for command in [
             "gh issue list",
             "gh issue view 5287 --json title,state",
             "gh issue view 5287 -R owner/repo",
             "gh issue view 5287 -R github.com/owner/repo",
+            "pwd; gh repo view",
+            "gh repo view | head -n 3",
+            "ls && gh pr list --search '*'",
+            "cat notes.md; gh issue view 5287 | wc -l",
         ] {
             assert!(
-                is_github_readonly_command(command),
-                "{command} should be a read-only GitHub network command"
+                command_reaches_github_readonly(command),
+                "{command} reaches api.github.com through an admitted gh read"
             );
         }
         for command in [
             "git status",
+            "cat gh issue list",
             "gh issue edit 5287 --title changed",
+            "bash -lc 'gh pr checks 42'",
+            "bash -lc 'gh issue view 5287 && touch pwned'",
+            "pwd; ls | wc -l",
+            "gh issue list & cat f",
+        ] {
+            assert!(
+                !command_reaches_github_readonly(command),
+                "{command} must not be recognized as a gh read"
+            );
+        }
+        // Over-recognition by design: these never pass the grammar, and a
+        // ceiling that saw a redirect, a foreign host, or a refused flag and
+        // answered "not a gh read" would let the network through on the one
+        // path that does not re-run the grammar first.
+        for command in [
             "gh issue view 5287 > issue.txt",
             "gh issue view 5287 -R git.example.com/owner/repo",
             "gh pr checks 42 --watch",
-            "bash -lc 'gh pr checks 42'",
-            "bash -lc 'gh issue view 5287 && touch pwned'",
         ] {
             assert!(
-                !is_github_readonly_command(command),
-                "{command} must not be classified as read-only GitHub access"
+                command_reaches_github_readonly(command),
+                "{command} is a gh read for ceiling purposes even though the grammar refuses it"
+            );
+            assert!(
+                !is_parallel_readonly_command(command),
+                "{command} must stay refused by the grammar"
             );
         }
     }

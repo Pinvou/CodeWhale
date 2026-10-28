@@ -3922,20 +3922,12 @@ fn enforce_readonly_github_network_policy(
     // Judge every pipeline stage of every sequence segment with the same
     // splits the classifier used: `pwd; gh repo view` and `gh repo view |
     // head` reach the network exactly like a bare `gh repo view`, so they
-    // must consult the decider exactly like it. Judging the whole command
-    // would see a compound, classify it as "not a gh read", and skip the
-    // policy for the gh stage inside it. The per-stage predicate is
-    // token-level (`is_github_readonly_stage`), not the whole-command
-    // parallel classifier: the agent grammar admits `*` operands, and a
-    // stage like `gh pr list --search '*'` reaches the network while a
-    // charset-gated predicate would un-admit it and skip the policy.
-    let reaches_github = readonly_sequence_segments(command).is_some_and(|segments| {
-        segments
-            .iter()
-            .flat_map(|segment| segment.split('|'))
-            .any(crate::command_safety::is_github_readonly_stage)
-    });
-    if !reaches_github {
+    // must consult the decider exactly like it. The shared predicate is
+    // token-level per stage, not the whole-command parallel classifier: the
+    // agent grammar admits `*` operands, and a stage like `gh pr list
+    // --search '*'` reaches the network while a charset-gated predicate
+    // would un-admit it and skip the policy.
+    if !crate::command_safety::command_reaches_github_readonly(command) {
         return Ok(());
     }
     let Some(decider) = context.network_policy.as_ref() else {

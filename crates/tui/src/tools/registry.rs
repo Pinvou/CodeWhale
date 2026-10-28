@@ -570,10 +570,12 @@ fn enforce_tool_authority(
                     authority.owner
                 )));
             }
+            // Per stage, like the execution seam's network guard: a compound
+            // or glob-bearing gh read reaches the network like a bare one.
             let networked_read = input
                 .get("command")
                 .and_then(Value::as_str)
-                .is_some_and(crate::command_safety::is_github_readonly_command);
+                .is_some_and(crate::command_safety::command_reaches_github_readonly);
             if networked_read && authority.network_access != Some(true) {
                 return Err(ToolError::permission_denied(format!(
                     "worker '{}' cannot use read-only GitHub CLI access: its machine-readable authority envelope does not grant network access",
