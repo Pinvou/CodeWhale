@@ -944,6 +944,10 @@ pub fn run() {
     // 碰任何 GUI/TLS/异步运行时之前分流出去——它跑在卡片脚本的 pty 里，等不起
     // 一整个应用的启动链，而且同进程里那些全局副作用（rustls provider、环境
     // 变量）对它只有干扰。
+    // CLI 分流进程本就要以子命令的退出码结束进程（与旧 LMM main.rs 的 worker
+    // 分流同构）；crate 里另一处豁免（build_tauri_context）是宏行为，这里是
+    // 我们自己的 CLI 语义，都属 exit 语义上正确的位置。
+    #[allow(clippy::exit)]
     if std::env::args().nth(1).as_deref() == Some("model-store-worker") {
         let rest: Vec<String> = std::env::args().skip(2).collect();
         std::process::exit(features::model_store::platform::worker_cli(&rest));
