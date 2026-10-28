@@ -124,7 +124,7 @@ controller 环境文件使用本预检支持的裸 `KEY=value`：值不加引号
 
 身份与状态必须位于整体替换的代码目录之外。已有身份验证后复用，旧代码目录的身份仅作一次性只读迁移；已有状态或公钥痕迹而身份丢失时失败关闭，不重新铸钥。私钥/HMAC 环境文件为 0600，父目录为 0700；代码回滚、普通 teardown 不回收该持久身份。
 
-内置测试 profile 的公开信任根为 `relay-test-key-1` / `otRocTSuXfkyfUKA6Gx71zvxII60UdxGK5h/dJ8aOIg=`。首次空安装生成的新公钥不会自动等于此 pin；必须取回实际公钥并成对显式配置同一 key ID/public key 才能演练。脚本尚未自动交叉校验内置 pin（#1507），不能用删身份或状态解决失配。
+内置测试 profile 的公开信任根为 `relay-test-key-1` / `otRocTSuXfkyfUKA6Gx71zvxII60UdxGK5h/dJ8aOIg=`。首次空安装生成的新公钥不会自动等于此 pin；必须取回实际公钥并成对显式配置同一 key ID/public key 才能演练。启用 controller 时，脚本在部署及公网验证后分别比较当前源码中的 Test profile 和 Windows launcher 默认值，失配或无法核对时给出提示；这不证明已安装客户端或其环境覆盖使用相同值。不能用删身份或状态解决失配。
 
 公开客户端入口继续使用 `https://pinvou.com/pinvou3/remote-test` 与 `wss://pinvou.com/pinvou3/remote-test/ws`；它们是随包发布的用户访问合同，不是 SSH 管理入口。
 

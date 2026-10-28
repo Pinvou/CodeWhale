@@ -771,6 +771,41 @@ if ! public_verify; then
   exit 1
 fi
 
+# Compare the deployed public identity against both defaults in this checkout.
+# This cannot establish which application binary or environment a client uses.
+report_test_controller_pin_status() {
+  local public_key="$1" key_id="$2" source_root="$3"
+  local manager="$source_root/pinvou3-app/src-tauri/src/features/remote_control/manager/mod.rs"
+  local launcher="$source_root/scripts/run-remote-control-endpoint.ps1"
+  local profile manager_id manager_key launcher_id launcher_key
+  if ! profile="$(sed -n '/^pub(crate) const TEST_PROFILE:/,/^};/p' "$manager")"; then
+    profile=""
+  fi
+  manager_id="$(printf '%s\n' "$profile" | sed -nE 's/^[[:space:]]*signing_key_id: "([A-Za-z0-9._~-]+)",[[:space:]]*$/\1/p')"
+  manager_key="$(printf '%s\n' "$profile" | sed -nE 's/^[[:space:]]*signing_public_key_b64: "([A-Za-z0-9+\/=]+)",[[:space:]]*$/\1/p')"
+  if [ -r "$launcher" ]; then
+    if ! launcher_id="$(sed -nE "s/^[[:space:]]*\\[string\\][\$]SigningKeyId = '([A-Za-z0-9._~-]+)',[[:space:]]*$/\\1/p" "$launcher")"; then launcher_id=""; fi
+    if ! launcher_key="$(sed -nE "s/^[[:space:]]*\\[string\\][\$]SigningPublicKeyB64 = '([A-Za-z0-9+\\/=]+)',[[:space:]]*$/\\1/p" "$launcher")"; then launcher_key=""; fi
+  else
+    launcher_id=""; launcher_key=""
+  fi
+  echo "  信任根检查仅针对当前源码的默认值；已安装客户端和进程覆盖须另行核对。"
+  if ! [[ "$manager_id" =~ ^[A-Za-z0-9._~-]+$ && "$manager_key" =~ ^[A-Za-z0-9+/]{42}[AEIMQUYcgkosw048]=$ ]]; then
+    echo "  ⚠ 无法确认当前源码内置 Test profile 的默认信任根。" >&2
+  elif [ "$manager_id" != "$key_id" ] || [ "$manager_key" != "$public_key" ]; then
+    echo "  ⚠ 部署身份与当前源码内置 Test profile 不一致；请在客户端成对配置实际 key ID 和公钥。" >&2
+  else
+    echo "  当前源码内置 Test profile 的默认信任根与部署身份一致。"
+  fi
+  if ! [[ "$launcher_id" =~ ^[A-Za-z0-9._~-]+$ && "$launcher_key" =~ ^[A-Za-z0-9+/]{42}[AEIMQUYcgkosw048]=$ ]]; then
+    echo "  ⚠ 无法确认当前源码 Windows launcher 的默认信任根。" >&2
+  elif [ "$launcher_id" != "$key_id" ] || [ "$launcher_key" != "$public_key" ]; then
+    echo "  ⚠ 部署身份与当前源码 Windows launcher 的默认信任根不一致；请用 SigningKeyId 和 SigningPublicKeyB64 成对指定实际值。" >&2
+  else
+    echo "  当前源码 Windows launcher 的默认信任根与部署身份一致。"
+  fi
+}
+
 STAGE="完成"
 echo "部署完成: $PUBLIC_URL"
 echo "桌面端指向测试端点:"
@@ -782,8 +817,13 @@ if [ "$ENABLE_DESKTOP_CONTROLLER" = "1" ]; then
     echo "✗ 未取到持久 controller 签名公钥，无法为客户端提供信任根" >&2
     exit 1
   fi
+  if ! [[ "$controller_public_key" =~ ^[A-Za-z0-9+/]{42}[AEIMQUYcgkosw048]=$ ]]; then
+    echo "✗ 已部署服务的 controller 公钥格式无效，无法验证客户端信任根；请检查现有身份，不要重置。" >&2
+    exit 1
+  fi
   echo "Windows 双端远控(controller-v1)已启用:"
   echo "  PINVOU_REMOTE_RELAY_SIGNING_KEY_ID=\"relay-test-key-1\""
   echo "  PINVOU_REMOTE_RELAY_SIGNING_PUBLIC_KEY_B64=\"$controller_public_key\""
+  report_test_controller_pin_status "$controller_public_key" "relay-test-key-1" "$ROOT"
   echo "  (development + TOFU 模式,仅供测试端点;生产需按 ENROLLMENT.md 走正式注册)"
 fi
