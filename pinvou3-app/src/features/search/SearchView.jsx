@@ -158,6 +158,7 @@ export const SearchView = ({ theme, history, t, language, archived = EMPTY_ARCHI
           key={chat.id}
           role="button"
           tabIndex={0}
+          aria-pressed={selected}
           onClick={() => toggleSelect(chat.id)}
           onKeyDown={(event) => { if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); toggleSelect(chat.id); } }}
           className="flex items-center gap-3 px-4 py-[10px] cursor-pointer rounded-[16px] transition-colors hover:bg-[#F0F4F9] dark:hover:bg-[#1E1F20]"

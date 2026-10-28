@@ -428,7 +428,6 @@ const ArtifactTileIcon = ({ name, tileCls = 'w-9 h-9 rounded-[10px]', glyphCls =
             if (!cancelled) setExternalUpdateBlocked(ok ? false : 'modified');
             return;
           }
-          if (cancelled) return;
           if (sel) await preview(sel);
         })();
         return () => { cancelled = true; };
