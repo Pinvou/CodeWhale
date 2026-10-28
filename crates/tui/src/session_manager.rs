@@ -1750,9 +1750,7 @@ impl SessionManager {
         // Metadata wasn't extractable from the prefix (truncated mid-block,
         // unusual key ordering, etc.). Read the rest and try again with the
         // full buffer before giving up.
-        let mut rest = Vec::new();
-        file.read_to_end(&mut rest)?;
-        buf.extend_from_slice(&rest);
+        file.read_to_end(&mut buf)?;
         extract_top_level_metadata(&buf).ok_or_else(|| {
             std::io::Error::new(
                 std::io::ErrorKind::InvalidData,
@@ -4698,6 +4696,48 @@ mod tests {
             err.to_string().contains("newer than supported"),
             "unexpected error: {err}"
         );
+    }
+
+    #[test]
+    fn load_session_metadata_full_file_fallback_preserves_metadata() {
+        const PREFIX_BYTES: usize = 64 * 1024;
+        let dir = tempfile::tempdir().expect("temp dir");
+        let session = create_saved_session_with_id_and_mode(
+            "fallback".to_string(),
+            &[],
+            "test-model",
+            dir.path(),
+            0,
+            None,
+            None,
+        );
+        let metadata = serde_json::to_string(&session.metadata).expect("serialize metadata");
+        let prefix = format!(r#"{{"metadata":{metadata},"messages":[],"payload":""#);
+        let split_utf8 = format!(
+            "{prefix}{}🙂\"}}",
+            "x".repeat(PREFIX_BYTES - 1 - prefix.len())
+        );
+        let metadata_last = format!(
+            r#"{{"messages":[],"payload":"{}","metadata":{metadata}}}"#,
+            "x".repeat(PREFIX_BYTES)
+        );
+        assert!(std::str::from_utf8(&split_utf8.as_bytes()[..PREFIX_BYTES]).is_err());
+
+        for (name, document) in [("split-utf8", split_utf8), ("metadata-last", metadata_last)] {
+            // Both are valid sessions with an unknown legacy field, but the
+            // prefix alone cannot yield metadata. The full read must retain it.
+            let saved: SavedSession = serde_json::from_str(&document).expect("valid session");
+            assert_eq!(saved.metadata.id, session.metadata.id);
+            assert!(extract_top_level_metadata(&document.as_bytes()[..PREFIX_BYTES]).is_none());
+            let path = dir.path().join(format!("{name}.json"));
+            fs::write(&path, document.as_bytes()).expect("write session");
+            let loaded = SessionManager::load_session_metadata(&path).expect("load metadata");
+            assert_eq!(
+                serde_json::to_value(loaded).expect("loaded metadata"),
+                serde_json::to_value(&session.metadata).expect("expected metadata")
+            );
+            assert_eq!(fs::read(&path).expect("read session"), document.as_bytes());
+        }
     }
 
     /// Regression for #337: metadata extraction skips the (potentially
