@@ -2160,6 +2160,152 @@ fn readonly_shell_lane_decisions_per_shell_kind() {
     );
 }
 
+/// The shell lane splices the same in-process hardening flags into every
+/// Git `log`/`show`/`diff` stage that the direct-argv lane splices into a
+/// bare one, re-emitting the stage from the argv the gate parsed and copying
+/// the separators through untouched; stages of other programs and the Git
+/// subcommands that render no diff are left byte for byte.
+#[test]
+fn readonly_shell_lane_hardens_git_diff_rendering_stages() {
+    let cases = [
+        (
+            "pwd; git log --oneline | wc -l",
+            "pwd; git log --no-ext-diff --no-textconv --no-show-signature --oneline | wc -l",
+        ),
+        (
+            "git show HEAD | cat",
+            "git show --no-ext-diff --no-textconv --no-show-signature HEAD | cat",
+        ),
+        (
+            "git -C sub --no-pager diff --stat && ls",
+            "git -C sub --no-pager diff --no-ext-diff --no-textconv --stat && ls",
+        ),
+        // Whitespace around separators and a quoted argument survive.
+        (
+            "ls  ;  git log --grep 'fix bug'  |  head -3",
+            "ls  ;  git log --no-ext-diff --no-textconv --no-show-signature --grep \"fix bug\"  |  head -3",
+        ),
+        // A glob stays bare so the shell still expands what the gate judged.
+        (
+            "git log --oneline -- *.rs | wc -l",
+            "git log --no-ext-diff --no-textconv --no-show-signature --oneline -- *.rs | wc -l",
+        ),
+        // Nothing to harden: untouched, including the Git reads that render no
+        // diff.
+        ("git status | cat", "git status | cat"),
+        (
+            "git blame f; git grep -n x | head",
+            "git blame f; git grep -n x | head",
+        ),
+        ("cat f | wc -l", "cat f | wc -l"),
+    ];
+    for (command, expected) in cases {
+        assert_eq!(
+            harden_readonly_shell_git_stages(command).expect(command),
+            expected,
+            "{command}"
+        );
+    }
+    // Re-quoting is portable or refused, never silently different. A `~` is
+    // quoted (it is literal mid-word anyway and leading `~` operands never
+    // reach the seam), which cmd.exe and POSIX shells read back identically.
+    assert_eq!(readonly_shell_word("--oneline").unwrap(), "--oneline");
+    assert_eq!(readonly_shell_word("HEAD^..main").unwrap(), "HEAD^..main");
+    assert_eq!(readonly_shell_word("HEAD~2").unwrap(), "\"HEAD~2\"");
+    assert_eq!(readonly_shell_word("fix bug").unwrap(), "\"fix bug\"");
+    assert_eq!(readonly_shell_word("it's").unwrap(), "\"it's\"");
+    for token in [
+        "say \"hi\"",
+        "back\\slash",
+        "a$b",
+        "x`y`",
+        "line\nbreak",
+        "bang!",
+    ] {
+        let error = readonly_shell_word(token).expect_err(token).to_string();
+        assert!(error.contains("git.unquotable_stage"), "{token}: {error}");
+    }
+    let error = harden_readonly_shell_git_stages("git log --grep 'say \"hi\"' | wc -l")
+        .expect_err("an unquotable Git stage argument refuses the compound")
+        .to_string();
+    assert!(error.contains("git.unquotable_stage"), "{error}");
+}
+
+/// End to end: a repository whose own configuration names a textconv filter
+/// must not get it executed by an admitted read-only compound. `git show
+/// HEAD` on the direct-argv lane was always spliced; `git show HEAD | cat`
+/// reached the shell unspliced and ran the filter — the `GIT_*` environment
+/// hardening pins global and system configuration, not the repository's own.
+/// The fixture is proven live first (a raw shell runs the filter), so the
+/// pin cannot pass vacuously.
+#[cfg(unix)]
+#[tokio::test]
+async fn readonly_shell_lane_git_show_does_not_run_repository_textconv() {
+    let workspace = tempdir().expect("workspace");
+    let outside = tempdir().expect("outside");
+    let marker = outside.path().join("textconv-ran");
+    let git = |args: &[&str]| {
+        let output = std::process::Command::new("git")
+            .args(["-c", "user.name=t", "-c", "user.email=t@example.invalid"])
+            .args(args)
+            .current_dir(workspace.path())
+            .output()
+            .expect("git runs");
+        assert!(
+            output.status.success(),
+            "git {args:?} failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    };
+    git(&["init", "-q"]);
+    git(&[
+        "config",
+        "diff.evil.textconv",
+        &format!("touch {}", marker.display()),
+    ]);
+    std::fs::write(workspace.path().join(".gitattributes"), "*.bin diff=evil\n")
+        .expect("attributes");
+    std::fs::write(workspace.path().join("blob.bin"), b"\x00\x01payload").expect("blob");
+    git(&["add", "."]);
+    git(&["commit", "-q", "-m", "seed"]);
+
+    // Positive control: the fixture really executes the filter when a shell
+    // runs the unhardened compound.
+    let control = std::process::Command::new("sh")
+        .args(["-c", "git show HEAD | cat"])
+        .current_dir(workspace.path())
+        .output()
+        .expect("control shell runs");
+    assert!(
+        control.status.success(),
+        "{}",
+        String::from_utf8_lossy(&control.stderr)
+    );
+    assert!(
+        marker.exists(),
+        "the fixture's textconv must fire under a raw shell"
+    );
+    std::fs::remove_file(&marker).expect("reset marker");
+
+    let context = ToolContext::new(workspace.path())
+        .with_shell_policy(crate::worker_profile::ShellPolicy::ReadOnly);
+    for command in [
+        "git show HEAD | cat",
+        "pwd; git show HEAD",
+        "ls && git show HEAD",
+    ] {
+        let output = LowercaseBashTool
+            .execute(json!({"command": command}), &context)
+            .await
+            .unwrap_or_else(|error| panic!("{command} must execute: {error}"));
+        assert!(output.success, "{command}: {}", output.content);
+        assert!(
+            !marker.exists(),
+            "{command} ran the repository's textconv filter from the shell lane"
+        );
+    }
+}
+
 #[test]
 fn exec_shell_interact_requires_approval() {
     let tool = BashTool::alias("exec_shell_interact", "interact");

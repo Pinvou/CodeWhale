@@ -2179,11 +2179,15 @@ impl ShellManager {
                 // expansions, or subshells — only `|` between validated
                 // pipeline stages and `;`/`&&`/`||` between validated
                 // segments), so a shell is needed to bind them; pipefail
-                // additionally reports a failed stage. Single commands keep
-                // the shell-free direct-argv lane below.
+                // additionally reports a failed stage. Git stages receive the
+                // same in-process hardening flags the direct-argv lane
+                // splices, because the shell would otherwise run whatever
+                // diff driver or textconv the repository configures. Single
+                // commands keep the shell-free direct-argv lane below.
+                let hardened = harden_readonly_shell_git_stages(command)?;
                 let shell_bound = readonly_shell_bound_command(
                     crate::shell_dispatcher::global_dispatcher().kind(),
-                    command,
+                    &hardened,
                 );
                 CommandSpec::shell(
                     &shell_bound,
@@ -4042,59 +4046,155 @@ fn hardened_readonly_argv(command: &str) -> Result<(String, Vec<String>)> {
     if argv.is_empty() {
         return Err(anyhow!("classifier-approved read command was empty"));
     }
-
-    // Even when repository/user configuration names a diff or signature
-    // helper, these flags make Git keep the read inside its own process.
-    if argv.first().is_some_and(|program| program == "git") {
-        // The agent read-only classifier admits `git -C <dir>` and
-        // `git --no-pager` before the subcommand; keep the preamble but
-        // locate the subcommand after it so the hardening flags splice in
-        // the right place. `-C` targets were already workspace-checked by
-        // `enforce_readonly_workspace_operands`.
-        let mut subcommand_index = 1;
-        while let Some(flag) = argv.get(subcommand_index) {
-            match flag.as_str() {
-                "--no-pager" => subcommand_index += 1,
-                "-C" => subcommand_index += 2,
-                _ => break,
-            }
-        }
-        let subcommand = argv
-            .get(subcommand_index)
-            .map(String::as_str)
-            .ok_or_else(|| {
-                anyhow!("classifier-approved Git read was missing its literal subcommand")
-            })?;
-        match subcommand {
-            "diff" => {
-                let at = subcommand_index + 1;
-                argv.splice(
-                    at..at,
-                    ["--no-ext-diff".to_string(), "--no-textconv".to_string()],
-                );
-            }
-            "log" | "show" => {
-                let at = subcommand_index + 1;
-                argv.splice(
-                    at..at,
-                    [
-                        "--no-ext-diff".to_string(),
-                        "--no-textconv".to_string(),
-                        "--no-show-signature".to_string(),
-                    ],
-                );
-            }
-            "status" | "ls-files" | "blame" | "grep" => {}
-            _ => {
-                return Err(anyhow!(
-                    "classifier-approved Git read did not keep its subcommand in argv[1]"
-                ));
-            }
-        }
-    }
-
+    splice_git_read_hardening(&mut argv)?;
     let program = argv.remove(0);
     Ok((program, argv))
+}
+
+/// Splice the flags that keep a classifier-admitted Git read inside Git's own
+/// process into `argv`, in place: repository or user configuration may name a
+/// diff driver (`diff.<driver>.command`), a textconv filter, or a signature
+/// helper, and `log`/`show`/`diff` would otherwise run it. Returns whether
+/// anything was spliced — the remaining admitted subcommands render no diff.
+/// `argv` that is not a Git command is left untouched. One table for both
+/// execution lanes: the direct-argv lane splices into the argv it execs, and
+/// the shell lane splices into every Git stage of a compound before the shell
+/// sees it ([`harden_readonly_shell_git_stages`]).
+fn splice_git_read_hardening(argv: &mut Vec<String>) -> Result<bool> {
+    if !argv.first().is_some_and(|program| program == "git") {
+        return Ok(false);
+    }
+    // The agent read-only classifier admits `git -C <dir>` and
+    // `git --no-pager` before the subcommand; keep the preamble but locate
+    // the subcommand after it so the hardening flags splice in the right
+    // place. `-C` targets were already workspace-checked by
+    // `enforce_readonly_workspace_operands`.
+    let mut subcommand_index = 1;
+    while let Some(flag) = argv.get(subcommand_index) {
+        match flag.as_str() {
+            "--no-pager" => subcommand_index += 1,
+            "-C" => subcommand_index += 2,
+            _ => break,
+        }
+    }
+    let subcommand = argv
+        .get(subcommand_index)
+        .map(String::as_str)
+        .ok_or_else(|| {
+            anyhow!("classifier-approved Git read was missing its literal subcommand")
+        })?;
+    let at = subcommand_index + 1;
+    match subcommand {
+        "diff" => {
+            argv.splice(
+                at..at,
+                ["--no-ext-diff".to_string(), "--no-textconv".to_string()],
+            );
+            Ok(true)
+        }
+        "log" | "show" => {
+            argv.splice(
+                at..at,
+                [
+                    "--no-ext-diff".to_string(),
+                    "--no-textconv".to_string(),
+                    "--no-show-signature".to_string(),
+                ],
+            );
+            Ok(true)
+        }
+        "status" | "ls-files" | "blame" | "grep" => Ok(false),
+        _ => Err(anyhow!(
+            "classifier-approved Git read did not keep its subcommand in argv[1]"
+        )),
+    }
+}
+
+/// The shell-lane text of an admitted read-only compound with every Git
+/// `log`/`show`/`diff` stage hardened like the direct-argv lane hardens a
+/// bare one. A compound hands the shell the raw command text, so without
+/// this `git show HEAD | cat` ran whatever `diff.<driver>.textconv` the
+/// repository's own configuration named — arbitrary execution from an
+/// admitted read — while bare `git show HEAD` was spliced and safe; the
+/// `GIT_*` environment hardening pins global and system configuration, not
+/// the repository's. Every stage is re-emitted from the argv the operand gate
+/// already parsed (so the rewrite can never see a different token boundary
+/// than the gate judged), spliced in place of the trimmed stage text, with the
+/// separators between stages copied through byte for byte. A stage whose
+/// tokens cannot be re-quoted portably refuses rather than running unhardened.
+fn harden_readonly_shell_git_stages(command: &str) -> Result<String> {
+    let Some(segments) = readonly_sequence_segments(command) else {
+        return Err(anyhow!(
+            "read-only compound contains a bare `&` and matches no admitted shape"
+        ));
+    };
+    let base = command.as_ptr() as usize;
+    let mut hardened = String::with_capacity(command.len() + 64);
+    let mut copied_up_to = 0;
+    for segment in segments {
+        for stage in crate::command_safety::readonly_pipeline_stages(segment) {
+            let trimmed = stage.trim();
+            let Some(replacement) = hardened_readonly_git_stage(trimmed)? else {
+                continue;
+            };
+            let start = trimmed.as_ptr() as usize - base;
+            hardened.push_str(&command[copied_up_to..start]);
+            hardened.push_str(&replacement);
+            copied_up_to = start + trimmed.len();
+        }
+    }
+    hardened.push_str(&command[copied_up_to..]);
+    Ok(hardened)
+}
+
+/// One stage of [`harden_readonly_shell_git_stages`]: `Some(text)` for a Git
+/// stage that received hardening flags, `None` for every other stage.
+fn hardened_readonly_git_stage(stage: &str) -> Result<Option<String>> {
+    let Some(mut argv) = shlex::split(&normalize_windows_command_paths(stage)) else {
+        return Err(anyhow!(
+            "could not parse classifier-approved read-only stage"
+        ));
+    };
+    if !splice_git_read_hardening(&mut argv)? {
+        return Ok(None);
+    }
+    let mut words = Vec::with_capacity(argv.len());
+    for token in &argv {
+        words.push(readonly_shell_word(token)?);
+    }
+    Ok(Some(words.join(" ")))
+}
+
+/// Re-emit one parsed token as shell text that every supported shell kind
+/// reads back as the same single word: bare when it is made only of
+/// characters no shell interprets (`*` stays bare on purpose — the operand
+/// gate judged its expansion and the shell must still perform it), wrapped
+/// in double quotes when it merely carries whitespace or single quotes, and
+/// refused when it holds a character whose quoting rules differ between sh,
+/// cmd.exe, and PowerShell. The charset gate already refuses `$`, backticks,
+/// and newlines; the remaining refusals are rare spellings of a probe that
+/// runs fine as a single command on the direct-argv lane.
+fn readonly_shell_word(token: &str) -> Result<String> {
+    let bare = !token.is_empty()
+        && token.chars().all(|ch| {
+            ch.is_ascii_alphanumeric()
+                || matches!(
+                    ch,
+                    '_' | '-' | '.' | '/' | ':' | '=' | '%' | ',' | '+' | '@' | '^' | '*'
+                )
+        });
+    if bare {
+        return Ok(token.to_string());
+    }
+    if token
+        .chars()
+        .any(|ch| matches!(ch, '"' | '\\' | '$' | '`' | '\n' | '\r' | '!'))
+    {
+        return Err(anyhow!(
+            "[shell.readonly.git.unquotable_stage] Read-only Git stage argument {token:?} cannot be re-quoted portably for the shell lane; run the Git read as a single command instead."
+        ));
+    }
+    Ok(format!("\"{token}\""))
 }
 
 /// Canonical boundary set for the read-only Scout shell: every declared
