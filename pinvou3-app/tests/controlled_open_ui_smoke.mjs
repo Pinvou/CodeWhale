@@ -1,15 +1,32 @@
 import puppeteer from 'puppeteer-core';
 import fs from 'node:fs';
 import path from 'node:path';
+import os from 'node:os';
+import { spawn } from 'node:child_process';
 import { preview } from 'vite';
 const chrome = process.env.CHROME || ['C:/Program Files/Google/Chrome/Application/chrome.exe', 'C:/Program Files (x86)/Microsoft/Edge/Application/msedge.exe', '/usr/bin/chromium', '/usr/bin/google-chrome'].find(file => fs.existsSync(file));
 if (!chrome) { console.error('SKIP: Chrome/Edge unavailable'); process.exit(2); }
 const server = await preview({ preview: { host: '127.0.0.1', port: 0, strictPort: false } });
 const base = `http://127.0.0.1:${server.httpServer.address().port}`;
-const profileRoot = fs.realpathSync(process.cwd());
-const profile = fs.mkdtempSync(path.join(profileRoot, '.pinvou-controlled-open-'));
-const browser = await puppeteer.launch({ executablePath: chrome, headless: true, userDataDir: profile, args: ['--no-sandbox', '--disable-gpu', '--no-first-run'] });
+// Some Windows Edge versions relaunch their process before exposing CDP.
+// Connect to this test profile's DevTools port instead of depending on the
+// original launcher process remaining alive.
+let profileRoot, profile, browser, browserProcess, spawnFailure, testFailure;
 try {
+profileRoot = fs.realpathSync(os.tmpdir());
+profile = fs.mkdtempSync(path.join(profileRoot, '.pinvou-controlled-open-'));
+browserProcess = spawn(chrome, ['--headless=new', '--no-sandbox', '--disable-gpu', '--no-first-run', '--remote-debugging-port=0', `--user-data-dir=${profile}`, 'about:blank'], { windowsHide: true, stdio: 'ignore' });
+browserProcess.on('error', error => { spawnFailure = error; });
+for (let i = 0; i < 100 && !browser; i += 1) {
+  if (spawnFailure) throw spawnFailure;
+  try {
+    const port = fs.readFileSync(path.join(profile, 'DevToolsActivePort'), 'utf8').split('\n')[0].trim();
+    browser = await puppeteer.connect({ browserURL: `http://127.0.0.1:${port}` });
+  } catch (_) { await new Promise(resolve => setTimeout(resolve, 200)); }
+}
+if (!browser) {
+  throw new Error('test browser CDP did not start');
+}
  const page=await browser.newPage();
  const errors=[]; page.on('pageerror',e=>errors.push(e.message));
  await page.setRequestInterception(true);
@@ -51,7 +68,34 @@ try {
    }
    window.TauriBridge=bridge;
    window.testBridge={setAllow:v=>{allow=v},setExitAllow:v=>{exitAllow=v},getSwitches:()=>switches,getExits:()=>exits,getTaskSubmissions:()=>taskSubmissions,getResolved:()=>resolvedSwitches,getOldSettled:()=>oldSwitchSettled,hasPendingExit:()=>typeof releaseExit==='function'&&!exitSettled,releaseExit:()=>releaseExit(false),getExitSettled:()=>exitSettled,hasPendingOldLoad:()=>typeof releaseSwitch==='function'&&!oldSwitchSettled,switchRealNew:()=>bridge.sessions.switchToControlledSession('session-new',bridge.sessions.captureControlledNavigationOwner('g2')),switchRealSame:()=>bridge.sessions.switchToControlledSession('session-new',bridge.sessions.captureControlledNavigationOwner('g1')),replaceSame:()=>{s.controlledSession={sessionId:'session-new',generation:'g1'};s.desktopRemoteControl={...s.desktopRemoteControl,controlledSession:s.controlledSession};allow=true;notify({...s})},replace:()=>{s.controlledNavigationIntent+=1;s.controlledDevice={status:'connected',generation:'g2'};s.controlledSession={sessionId:'session-new',generation:'g2'};allow=false;notify({...s})},replaceReal:()=>{s.controlledNavigationIntent+=1;s.controlledDevice={status:'connected',generation:'g2'};s.controlledSession={sessionId:'session-new',generation:'g2'};s.desktopRemoteControl={controlledDevice:s.controlledDevice,controlledSession:s.controlledSession,controlledTasks:[],intents:{controlled:s.controlledNavigationIntent}};allow=true;notify({...s})},releaseSwitch:v=>releaseSwitch?.(v),rejectSwitch:()=>rejectSwitch?.(new Error('late mock failure')),stop:()=>{s.controlledNavigationIntent+=1;s.controlledDevice={status:'stopped',generation:null};if(s.desktopRemoteControl)s.desktopRemoteControl={...s.desktopRemoteControl,controlledDevice:s.controlledDevice,intents:{controlled:s.controlledNavigationIntent}};notify({...s})},failRefresh:async()=>{s.controlledNavigationIntent+=1;s.controlledNavigationPending=true;notify({...s});await new Promise(r=>setTimeout(r,20));s.controlledNavigationPending=false;notify({...s})},setDevice:v=>{s.controlledDevice=v;notify({...s})},state:s};
+   window.testBridge.replaceSession = (id, nextAllow = false, pending = false) => {
+     s.controlledSession = { sessionId: id, generation: s.controlledDevice.generation };
+     s.controlledNavigationPending = pending;
+     if (s.desktopRemoteControl) s.desktopRemoteControl = { ...s.desktopRemoteControl, controlledSession: s.controlledSession };
+     allow = nextAllow;
+     notify({ ...s });
+   };
  }, {sharedSource,sessionsSource});
+ await page.goto(`${base}/?lang=zh`,{waitUntil:'domcontentloaded'});
+ await page.waitForFunction(()=>window.testBridge.getSwitches()===1 && document.body.innerText.includes('无法自动打开收到任务的会话。'),{timeout:8000});
+ await page.evaluate(()=>window.testBridge.replaceSession('session-next'));
+ await page.waitForFunction(()=>window.testBridge.getSwitches()===2 && document.body.innerText.includes('无法自动打开收到任务的会话。'),{timeout:8000});
+ await page.evaluate(()=>window.testBridge.replaceSession('session-b', 'defer'));
+ await page.waitForFunction(()=>window.testBridge.getSwitches()===3 && window.testBridge.hasPendingOldLoad(),{timeout:8000});
+ if (await page.evaluate(()=>document.body.innerText.includes('无法自动打开收到任务的会话。'))) throw new Error('old session failure returned before the new attempt settled');
+ await page.evaluate(()=>window.testBridge.releaseSwitch(false));
+ await page.waitForFunction(()=>window.testBridge.getResolved()===1 && document.body.innerText.includes('无法自动打开收到任务的会话。'),{timeout:8000});
+ if (errors.length) throw new Error(JSON.stringify({scenario:'session-failure-replacement',errors}));
+ console.log(JSON.stringify({scenario:'session-failure-replacement',errors}));
+ await page.goto(`${base}/?lang=zh`,{waitUntil:'domcontentloaded'});
+ await page.waitForFunction(()=>window.testBridge.getSwitches()===1 && document.body.innerText.includes('无法自动打开收到任务的会话。'),{timeout:8000});
+ await page.evaluate(()=>window.testBridge.replaceSession('session-next', false, true));
+ await page.waitForFunction(()=>!document.body.innerText.includes('无法自动打开收到任务的会话。'),{timeout:8000});
+ await page.evaluate(()=>window.testBridge.replaceSession('session-b', false, true));
+ await new Promise(resolve=>setTimeout(resolve,100));
+ if (await page.evaluate(()=>window.testBridge.getSwitches()!==1)) throw new Error('a new session open started while navigation was pending');
+ if (await page.evaluate(()=>document.body.innerText.includes('无法自动打开收到任务的会话。'))) throw new Error('old session failure revived after an ABA change while navigation was pending');
+ console.log(JSON.stringify({scenario:'session-failure-aba-pending',errors}));
  for (const [lang, expected] of [['zh','无法自动打开收到任务的会话。'], ['en','Could not open the session that received the task.'], ['ja','タスクを受信した会話を自動で開けませんでした。']]) {
    errors.length=0;
    await page.goto(`${base}/?lang=${lang}`,{waitUntil:'domcontentloaded'});
@@ -104,6 +148,21 @@ try {
  if(await page.evaluate(()=>window.testBridge.getTaskSubmissions())!==0 || errors.length) throw new Error(JSON.stringify({scenario:'local-navigation',outcome,errors}));
  console.log(JSON.stringify({scenario:'local-navigation-invalidates-controlled-open',outcome,errors}));
  }
+ errors.length=0;
+ // A local selection retires the failed controlled open, including on refresh.
+ await page.goto(`${base}/?lang=zh&scenario=local-nav-after-failure`,{waitUntil:'domcontentloaded'});
+ await page.waitForFunction(()=>window.testBridge.getSwitches()===1 && document.body.innerText.includes('无法自动打开收到任务的会话。'),{timeout:8000});
+ await page.evaluate(()=>window.testBridge.setAllow(true));
+ await page.click('[data-sidebar-toggle]');
+ await page.waitForFunction(()=>[...document.querySelectorAll('[data-testid=regular-sidebar-item]')].some(e=>e.textContent.includes('Local B')),{timeout:8000});
+ await page.evaluate(()=>[...document.querySelectorAll('[data-testid=regular-sidebar-item]')].find(e=>e.textContent.includes('Local B')).click());
+ await page.waitForFunction(()=>window.testBridge.state.activeSessionId==='local-b' && !document.body.innerText.includes('无法自动打开收到任务的会话。'),{timeout:8000});
+ const afterLocalSwitches=await page.evaluate(()=>window.testBridge.getSwitches());
+ await page.evaluate(()=>window.testBridge.failRefresh());
+ await new Promise(resolve=>setTimeout(resolve,500));
+ const afterRefresh=await page.evaluate(()=>({active:window.testBridge.state.activeSessionId,switches:window.testBridge.getSwitches(),submissions:window.testBridge.getTaskSubmissions(),alert:document.body.innerText.includes('无法自动打开收到任务的会话。')}));
+ if(afterLocalSwitches!==1 || afterRefresh.active!=='local-b' || afterRefresh.switches!==afterLocalSwitches || afterRefresh.submissions!==0 || afterRefresh.alert || errors.length) throw new Error(JSON.stringify({scenario:'failed-open-local-navigation-refresh',afterLocalSwitches,afterRefresh,errors}));
+ console.log(JSON.stringify({scenario:'failed-open-local-navigation-refresh',afterRefresh,errors}));
  errors.length=0;
  await page.goto(`${base}/?lang=zh&scenario=real-bridge`,{waitUntil:'domcontentloaded'});
  await page.waitForFunction(()=>document.body.innerText.includes('无法自动打开收到任务的会话。'),{timeout:8000});
@@ -165,6 +224,8 @@ try {
    const alerts=[...document.querySelectorAll('[role=alert]')];
    return alerts.some(a=>a.textContent.includes('无法自动打开远程会话页面。')) && alerts.some(a=>a.textContent.includes('无法自动打开收到任务的会话。'));
  },{timeout:8000});
+ const recoveryLabels=await page.evaluate(()=>[...document.querySelectorAll('[role=alert]')].filter(a=>a.textContent.includes('无法自动打开')).map(a=>({text:a.querySelector('span').textContent, label:a.querySelector('button').getAttribute('aria-label'), action:a.querySelector('button').textContent})));
+ if(recoveryLabels.length!==2 || new Set(recoveryLabels.map(a=>a.label)).size!==2 || !recoveryLabels.every(a=>a.label?.includes(a.text) && a.label.includes(a.action))) throw new Error(JSON.stringify({scenario:'recovery-accessible-names',recoveryLabels}));
  await page.evaluate(()=>window.testBridge.setExitAllow('defer'));
  await page.evaluate(()=>[...document.querySelectorAll('[role=alert]')].find(a=>a.textContent.includes('无法自动打开收到任务的会话。')).querySelector('button').click());
  await page.waitForFunction(()=>window.testBridge.hasPendingExit(),{timeout:8000});
@@ -218,12 +279,22 @@ try {
  if(autoRejectExits!==4 || await page.evaluate(()=>window.testBridge.getTaskSubmissions())!==0 || errors.length) throw new Error(JSON.stringify({scenario:'chat-auto-reject',autoRejectExits,errors}));
  console.log(JSON.stringify({scenario:'chat-auto-reject-then-manual-success',exits:autoRejectExits,errors}));
 
+} catch (error) {
+  testFailure = error;
 } finally {
-  await browser.close();
-  await new Promise(resolve => server.httpServer.close(resolve));
-  const resolved = fs.realpathSync(profile);
-  if (path.dirname(resolved) !== profileRoot || !path.basename(resolved).startsWith('.pinvou-controlled-open-')) {
-    console.error('refusing to remove a profile outside the test workspace');
-    process.exitCode = 1;
-  } else fs.rmSync(resolved, { recursive: true, force: true });
+  const cleanupErrors = [];
+  try { if (browser) await browser.close(); else browserProcess?.kill(); } catch (error) { cleanupErrors.push(error); }
+  try { await new Promise((resolve, reject) => server.httpServer.close(error => error ? reject(error) : resolve())); } catch (error) { cleanupErrors.push(error); }
+  try { if (profile) {
+    const resolved = fs.realpathSync(profile);
+    if (path.dirname(resolved) !== profileRoot || !path.basename(resolved).startsWith('.pinvou-controlled-open-')) {
+      throw new Error('refusing to remove a profile outside the temporary directory');
+    }
+    fs.rmSync(resolved, { recursive: true, force: true, maxRetries: 10, retryDelay: 300 });
+  } } catch (error) { cleanupErrors.push(error); }
+  if (testFailure) {
+    for (const error of cleanupErrors) console.error('test cleanup failed:', error);
+    throw testFailure;
+  }
+  if (cleanupErrors.length) throw new AggregateError(cleanupErrors, 'test cleanup failed');
 }

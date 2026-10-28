@@ -385,6 +385,10 @@ function rollbackScheduledOpenActivation(snapshot) { return pinvouSharedtauriSes
     localNavigationListeners.add(listener);
     return function () { localNavigationListeners.delete(listener); };
   }
+  function getLocalNavigationEpoch() {
+    return Number.isSafeInteger(state.controlledLocalNavigationEpoch)
+      ? state.controlledLocalNavigationEpoch : 0;
+  }
   function publishLocalSessionNavigation() {
     localNavigationPending = true;
     if (notifyingLocalSessionNavigation) return;
@@ -1536,6 +1540,7 @@ function recentScheduledRunForSession(id) { return pinvouSharedtauriSessions().r
       captureControlledNavigationOwner: captureControlledNavigationOwner,
       beginLocalNavigationIntent: beginLocalNavigationIntent,
       onLocalNavigation: onLocalNavigation,
+      getLocalNavigationEpoch: getLocalNavigationEpoch,
       isControlledNavigationOwnerCurrent: isControlledNavigationOwnerCurrent,
       exitControlledScheduledRunChat: exitControlledScheduledRunChat,
       openScheduledRunChatOnce: openScheduledRunChatOnce,

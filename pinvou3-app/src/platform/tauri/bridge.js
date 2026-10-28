@@ -2621,6 +2621,7 @@ function composePlanMarkdown(snapshots) { return pinvouSharedtauriMain().compose
       captureControlledNavigationOwner: captureControlledNavigationOwner,
       beginLocalNavigationIntent: beginLocalNavigationIntent,
       onLocalNavigation: sessionsFeature.onLocalNavigation,
+      getLocalNavigationEpoch: sessionsFeature.getLocalNavigationEpoch,
       isControlledNavigationOwnerCurrent: isControlledNavigationOwnerCurrent,
       exitControlledScheduledRunChat: exitControlledScheduledRunChat,
       deleteSession: deleteSession,

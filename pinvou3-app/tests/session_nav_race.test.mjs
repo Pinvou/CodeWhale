@@ -387,6 +387,27 @@ test('a later scheduled intent starts a new open after the first commits but its
   assert.equal(rt.calls.invoke.filter(name => name === 'load_session').length, 2);
 });
 
+test('controlled session from an older generation cannot be opened by the new owner', async () => {
+  const rt = loadSessionsFeature();
+  rt.state.desktopRemoteControl = {
+    controlledDevice: { status: 'connected', generation: 'g2' },
+    controlledSession: { sessionId: 'session-b', generation: 'g1' },
+    controlledTasks: [], intents: { controlled: 1 },
+  };
+  const owner = rt.api.captureControlledNavigationOwner('g2');
+  assert.ok(owner);
+  assert.equal(await rt.api.switchToControlledSession('session-b', owner), false);
+  assert.ok(!rt.calls.invoke.includes('load_session'));
+});
+
+test('local navigation epoch getter reads only its scalar state', () => {
+  const rt = loadSessionsFeature();
+  Object.defineProperty(rt.state, 'sessions', { get() { throw new Error('sessions must not be cloned'); } });
+  assert.equal(rt.api.getLocalNavigationEpoch(), 0);
+  rt.api.beginLocalNavigationIntent();
+  assert.equal(rt.api.getLocalNavigationEpoch(), 1);
+});
+
 test('controlled session load cannot commit after remote stop or refresh intent', async () => {
   for (const replacement of ['stop', 'refresh']) {
     const rt = loadSessionsFeature();

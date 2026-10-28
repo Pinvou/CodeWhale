@@ -2,6 +2,94 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import { retryControlledChatOpen, retryControlledSessionOpen } from '../src/features/remote-control/controlled-open-recovery.mjs';
 
+function deferred() {
+  let resolve;
+  const promise = new Promise(done => { resolve = done; });
+  return { promise, resolve };
+}
+
+test('manual chat retry does not clear failure when ownership changes during navigation', async () => {
+  let current = true;
+  const gate = deferred();
+  const opened = { current: null };
+  let cleared = false;
+  const owner = { generation: 'g1', intent: 1, navigationIsCurrent: () => current };
+  const task = retryControlledChatOpen({
+    failure: { generation: 'g1', originView: 'settings', owner },
+    controlledDeviceAutoOpenInFlightRef: { current: null }, controlledRecoveryBusy: false,
+    bsRef: { current: { controlledDevice: { status: 'connected', generation: 'g1' } } },
+    currentViewRef: { current: 'settings' },
+    bridge: { sessions: { isControlledNavigationOwnerCurrent: () => current } },
+    setControlledRecoveryBusy() {}, navigateFromScheduledRun: () => gate.promise,
+    controlledDeviceAutoOpenRef: opened, setControlledChatOpenFailure: () => { cleared = true; },
+  });
+  current = false;
+  gate.resolve(true);
+  await task;
+  assert.equal(opened.current, null);
+  assert.equal(cleared, false);
+});
+
+for (const stage of ['exit', 'switch']) {
+  test(`manual session retry preserves failure when ownership changes during ${stage}`, async () => {
+    let current = true;
+    const gate = deferred();
+    const entered = deferred();
+    const opened = { current: null };
+    let cleared = false;
+    let activated = false;
+    const owner = { generation: 'g1', intent: 1, navigationIsCurrent: () => current };
+    const task = retryControlledSessionOpen({
+      failure: { generation: 'g1', sessionId: 'session-b', owner },
+      controlledSessionAutoOpenInFlightRef: { current: null }, controlledRecoveryBusy: false,
+      bsRef: { current: { controlledDevice: { status: 'connected', generation: 'g1' }, controlledSession: { sessionId: 'session-b' }, scheduledRunContext: stage === 'exit' ? {} : null } },
+      bridge: { available: true, sessions: {
+        isControlledNavigationOwnerCurrent: () => current,
+        exitControlledScheduledRunChat: () => { entered.resolve(); return gate.promise; },
+        switchToControlledSession: () => { entered.resolve(); return gate.promise; },
+      } },
+      setControlledRecoveryBusy() {}, runBrowserUiTransition: fn => fn({ isCurrent: () => true }),
+      setCodeModeOn() {}, setCurrentView() {}, setActiveChat() { activated = true; }, closeMobileSidebar() {},
+      controlledSessionAutoOpenRef: opened, setControlledSessionOpenFailure: () => { cleared = true; },
+    });
+    await entered.promise;
+    current = false;
+    gate.resolve(true);
+    await task;
+    assert.equal(opened.current, null);
+    assert.equal(cleared, false);
+    assert.equal(activated, false);
+  });
+}
+
+test('manual session retry does not mark an old owner open after the outer transition settles', async () => {
+  let current = true;
+  const gate = deferred();
+  const entered = deferred();
+  const opened = { current: null };
+  let cleared = false;
+  const owner = { generation: 'g1', intent: 1, navigationIsCurrent: () => current };
+  const task = retryControlledSessionOpen({
+    failure: { generation: 'g1', sessionId: 'session-b', owner },
+    controlledSessionAutoOpenInFlightRef: { current: null }, controlledRecoveryBusy: false,
+    bsRef: { current: { controlledDevice: { status: 'connected', generation: 'g1' }, controlledSession: { sessionId: 'session-b' } } },
+    bridge: { available: true, sessions: {
+      isControlledNavigationOwnerCurrent: () => current,
+      switchToControlledSession: async () => true,
+    } },
+    setControlledRecoveryBusy() {},
+    runBrowserUiTransition: async fn => { const result = await fn({ isCurrent: () => true }); entered.resolve(); await gate.promise; return result; },
+    setCodeModeOn() {}, setCurrentView() {}, setActiveChat() {}, closeMobileSidebar() {},
+    controlledSessionAutoOpenRef: opened, setControlledSessionOpenFailure: () => { cleared = true; },
+  });
+  await entered.promise;
+  current = false;
+  gate.resolve();
+  await task;
+  assert.equal(opened.current, null);
+  assert.equal(cleared, false);
+});
+
 test('manual chat recovery is owner bound and does not start a task', async () => {
   const owner = { generation: 'g1', intent: 1 };
   const inFlight = { current: null };

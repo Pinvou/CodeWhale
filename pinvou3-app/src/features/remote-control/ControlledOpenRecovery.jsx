@@ -3,11 +3,14 @@ import { openControlledDeviceChatWithRetry } from './remote-control-logic.mjs';
 import ControlledOpenAlerts from './ControlledOpenAlerts.jsx';
 import { retryControlledChatOpen as retryChat, retryControlledSessionOpen as retrySession } from './controlled-open-recovery.mjs';
 
+const noNavigationSubscription = () => () => {};
+const initialNavigationEpoch = () => 0;
+
 export default function ControlledOpenRecovery({ bs, bsRef, bridge, currentView, currentViewRef, controlledDeviceStatus, controlledDeviceGeneration, controlledTaskSessionId, localNavigationEpoch, captureLocalNavigation, navigateFromScheduledRun, runBrowserUiTransition, setCodeModeOn, setCurrentView, setActiveChat, setRemoteConversationOpen, closeMobileSidebar, copy }) {
       const bridgeNavigationEpoch = useSyncExternalStore(
-        bridge.sessions?.onLocalNavigation || (() => () => {}),
-        () => bridge.state?.get?.('sessions')?.controlledLocalNavigationEpoch || 0,
-        () => 0,
+        bridge.sessions?.onLocalNavigation || noNavigationSubscription,
+        bridge.sessions?.getLocalNavigationEpoch || initialNavigationEpoch,
+        initialNavigationEpoch,
       );
       const controlledDeviceAutoOpenRef = useRef(null);
       const controlledDeviceAutoOpenInFlightRef = useRef(null);
@@ -24,6 +27,9 @@ export default function ControlledOpenRecovery({ bs, bsRef, bridge, currentView,
         setControlledChatOpenFailure(null);
         setControlledSessionOpenFailure(null);
       }, [controlledDeviceGeneration, controlledDeviceStatus]);
+      useEffect(() => {
+        setControlledSessionOpenFailure(null);
+      }, [controlledTaskSessionId]);
       // B 端建立连接后进入普通会话页，便于立即看到远程请求及执行过程。
       // 以 remote-control generation 去重：liveness 更新和链路恢复不会反复抢走用户当前页面。
       useEffect(() => {
@@ -114,6 +120,7 @@ export default function ControlledOpenRecovery({ bs, bsRef, bridge, currentView,
             && latestSessionId === controlledTaskSessionId
             && owner.navigationIsCurrent() && bridge.sessions?.isControlledNavigationOwnerCurrent?.(owner);
         };
+        // Local navigation retires this attempt, even if the intent later refreshes.
         if (controlledSessionAttemptedRef.current?.key === sessionKey) {
           if (controlledSessionAttemptedRef.current.navigationEpoch !== navigation.epoch
             || controlledSessionAttemptedRef.current.bridgeNavigationEpoch !== owner.bridgeNavigationEpoch) return undefined;
