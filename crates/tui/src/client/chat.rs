@@ -9684,7 +9684,7 @@ mod local_template_regression {
                 model,
                 Some("high"),
             );
-            assert_eq!(body["reasoning_effort"], "xhigh");
+            assert!(body.get("reasoning_effort").is_none());
             assert_eq!(body["chat_template_kwargs"]["reasoning_effort"], "xhigh");
             assert_eq!(body["model"], model);
             assert_eq!(body["max_tokens"], 99);
