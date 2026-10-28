@@ -4204,7 +4204,7 @@ fn readonly_shell_word(token: &str) -> Result<String> {
     Ok(format!("\"{token}\""))
 }
 
-/// Canonical boundary set for the read-only Scout shell: every declared
+/// Canonical boundary set for the read-only shell: every declared
 /// workspace root (primary first), canonicalized. Attached roots carry the
 /// same trust weight as the primary — they are agent-writable, so a program
 /// or PATH entry under any of them is untrusted, while operands under them
@@ -4251,7 +4251,7 @@ fn enforce_readonly_workspace_operands(
     })?;
     if !roots.iter().any(|root| effective_cwd.starts_with(root)) {
         return Err(ToolError::permission_denied(
-            "[shell.readonly.cwd.outside_workspace] Read-only Scout shell working directory resolves outside the workspace.",
+            "[shell.readonly.cwd.outside_workspace] Read-only shell working directory resolves outside the workspace.",
         ));
     }
 
@@ -4381,7 +4381,7 @@ fn enforce_readonly_argv_operands(
     for token in argv.iter().skip(1) {
         if token.starts_with('-') && (token.contains('/') || token.contains('\\')) {
             return Err(ToolError::permission_denied(format!(
-                "[shell.readonly.option.attached_path] Read-only Scout shell options may not carry attached paths; refused {token:?}. Use the bounded File read/search actions for project evidence."
+                "[shell.readonly.option.attached_path] Read-only shell options may not carry attached paths; refused {token:?}. Use the bounded File read/search actions for project evidence."
             )));
         }
         // zsh's default EQUALS option resolves an operand spelled `=cmd` to
@@ -4391,7 +4391,7 @@ fn enforce_readonly_argv_operands(
         // file named `=ls` is read through the bounded File actions instead.
         if token.starts_with('=') {
             return Err(ToolError::permission_denied(format!(
-                "[shell.readonly.operand.shape] Read-only Scout shell operands may not start with `=` (shell command-path expansion); refused {token:?}. Use the bounded File read/search actions for project evidence."
+                "[shell.readonly.operand.shape] Read-only shell operands may not start with `=` (shell command-path expansion); refused {token:?}. Use the bounded File read/search actions for project evidence."
             )));
         }
         // Only an option carries its path after an `=` (`--file=notes.md`).
@@ -4444,7 +4444,7 @@ fn enforce_readonly_argv_operands(
             })?;
             if !roots.iter().any(|root| resolved.starts_with(root)) {
                 return Err(ToolError::permission_denied(format!(
-                    "[shell.readonly.operand.outside_workspace] Read-only Scout shell operand {value:?} resolves outside the workspace. Use the bounded File read/search actions for project evidence."
+                    "[shell.readonly.operand.outside_workspace] Read-only shell operand {value:?} resolves outside the workspace. Use the bounded File read/search actions for project evidence."
                 )));
             }
             continue;
@@ -4459,7 +4459,7 @@ fn enforce_readonly_argv_operands(
                 .any(|component| matches!(component, std::path::Component::ParentDir))
         {
             return Err(ToolError::permission_denied(format!(
-                "[shell.readonly.operand.shape] Read-only Scout shell operands must stay inside the workspace; refused {value:?}. Use the bounded File read/search actions for project evidence."
+                "[shell.readonly.operand.shape] Read-only shell operands must stay inside the workspace; refused {value:?}. Use the bounded File read/search actions for project evidence."
             )));
         }
 
@@ -4477,7 +4477,7 @@ fn enforce_readonly_argv_operands(
             })?;
             if !roots.iter().any(|root| resolved.starts_with(root)) {
                 return Err(ToolError::permission_denied(format!(
-                    "[shell.readonly.operand.outside_workspace] Read-only Scout shell operand {value:?} resolves outside the workspace. Use the bounded File read/search actions for project evidence."
+                    "[shell.readonly.operand.outside_workspace] Read-only shell operand {value:?} resolves outside the workspace. Use the bounded File read/search actions for project evidence."
                 )));
             }
         }
@@ -4602,7 +4602,7 @@ impl ReadonlyGlobWalk<'_> {
         })?;
         if !self.roots.iter().any(|root| resolved.starts_with(root)) {
             return Err(ToolError::permission_denied(format!(
-                "[shell.readonly.operand.outside_workspace] Read-only Scout shell glob operand {operand:?} expands to {matched:?}, which resolves outside the workspace. Use the bounded File read/search actions for project evidence.",
+                "[shell.readonly.operand.outside_workspace] Read-only shell glob operand {operand:?} expands to {matched:?}, which resolves outside the workspace. Use the bounded File read/search actions for project evidence.",
                 operand = self.operand
             )));
         }
@@ -5817,7 +5817,7 @@ impl ToolSpec for BashTool {
             }
             if matches!(context.shell_policy, ShellPolicy::ReadOnly) {
                 return Err(ToolError::permission_denied(
-                    "Read-only Scout shell cannot use an external sandbox backend because that interface accepts a raw command string rather than the classifier-approved argv. Use File read/search, or run this Scout without the external backend.",
+                    "Read-only shell cannot use an external sandbox backend because that interface accepts a raw command string rather than the classifier-approved argv. Use File read/search, or run this Scout without the external backend.",
                 ));
             }
             if interactive {
