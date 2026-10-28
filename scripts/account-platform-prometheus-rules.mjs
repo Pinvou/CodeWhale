@@ -22,7 +22,8 @@ function run(executable, args) {
     let bytes = 0; let exhausted = false;
     const timer = setTimeout(() => { exhausted = true; child.kill(); }, 30000);
     const collect = chunk => { bytes += chunk.length; if (bytes > 1024 * 1024) { exhausted = true; child.kill(); } };
-    child.stdout.on('data', collect); child.stderr.on('data', collect);
+    child.stdout.on('data', chunk => { collect(chunk); if (!exhausted) process.stdout.write(chunk); });
+    child.stderr.on('data', chunk => { collect(chunk); if (!exhausted) process.stderr.write(chunk); });
     child.once('error', () => { clearTimeout(timer); reject(new Error('offline fixture tool could not start')); });
     child.once('close', code => { clearTimeout(timer); if (code === 0 && !exhausted) resolve(); else reject(new Error('offline fixture tool failed; no acceptance result')); });
   });
@@ -31,7 +32,7 @@ function run(executable, args) {
 if (isMainModule(import.meta.url)) {
   try {
     for (const [executable, args] of prometheusRuleCommands(process.argv.slice(2))) await run(executable, args);
-    console.log('actual rendered Prometheus rules and eight isolated promtool cases passed (five alerting cases and three non-alert controls); NOT_DEPLOYED');
+    console.log('actual rendered Prometheus rules and validated promtool fixture suite passed; NOT_DEPLOYED');
   } catch {
     console.error('offline Prometheus validation failed; supply a new output directory, a real Helm render and an installed promtool');
     process.exitCode = 1;

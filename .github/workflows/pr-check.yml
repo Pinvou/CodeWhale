@@ -1266,8 +1266,27 @@ jobs:
             https://github.com/docker/compose/releases/download/v5.4.0/docker-compose-linux-x86_64 -o "$tools/docker-compose"
           printf '%s  %s\n' 837fd1d35bf6a494f41b5b5988269a7be79de337cf1a1a6ff0e45ab51bb4e9be "$tools/docker-compose" | sha256sum --check --strict
           chmod 0755 "$tools/docker-compose"
+          # Test-only promtool; does not start or upgrade a Prometheus server.
+          # SHA256 published at https://prometheus.io/download/ (3.13.5 LTS).
+          curl --fail --location --proto '=https' --proto-redir '=https' --retry 3 --connect-timeout 15 --max-time 180 \
+            https://github.com/prometheus/prometheus/releases/download/v3.13.5/prometheus-3.13.5.linux-amd64.tar.gz -o "$tools/prometheus.tar.gz"
+          printf '%s  %s\n' 0388822ace519c5a3a8ef556a541ce1b536e21d872f82deded465bd27a5a0699 "$tools/prometheus.tar.gz" | sha256sum --check --strict
+          tar -xzf "$tools/prometheus.tar.gz" -C "$tools" prometheus-3.13.5.linux-amd64/promtool
+          printf 'PINVOU_TEST_PROMTOOL_BINARY=%s\n' "$tools/prometheus-3.13.5.linux-amd64/promtool" >> "$GITHUB_ENV"
           printf 'PINVOU_TEST_KMS_HELM_BINARY=%s\n' "$tools/linux-amd64/helm" >> "$GITHUB_ENV"
           printf 'PINVOU_TEST_KMS_COMPOSE_BINARY=%s\n' "$tools/docker-compose" >> "$GITHUB_ENV"
+
+      - name: Account Platform rendered Prometheus rule scenarios
+        shell: bash
+        run: |
+          set -euo pipefail
+          fixture="$(mktemp -d "$RUNNER_TEMP/account-prometheus.XXXXXX")"
+          chart="$GITHUB_WORKSPACE/account-platform/deploy/helm/account-platform"
+          "$PINVOU_TEST_KMS_HELM_BINARY" template prometheus-ci "$chart" \
+            -f "$chart/values-model-token-test.yaml" \
+            --set observability.prometheusRulesEnabled=true --set availability.enabled=true > "$fixture/rendered.yaml"
+          npm --prefix account-platform run test:prometheus-rules -- \
+            --rendered "$fixture/rendered.yaml" --output "$fixture/cases" --promtool "$PINVOU_TEST_PROMTOOL_BINARY"
 
       - name: Account Platform optional backup tool contracts
         shell: bash

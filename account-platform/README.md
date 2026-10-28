@@ -22,6 +22,8 @@
 
 普通 relay 的真实 TLS/NATS/PG 用例需要显式 `PINVOU_TEST_NATS_SERVER_BINARY` 与 `PINVOU_TEST_EVENTS_DATABASE_URL`；测试仅启动独有 loopback NATS、生成临时测试密钥并创建独有数据库 schema，结束后核对自身进程、监听器和 schema 已清理。它验证实际 broker ACK、SQL 标记和同代次去重，不等同生产部署或完整 E2E 验收。
 
+PR Check 的 `account-platform-test` 还会复用固定 Helm 3.16.4，以 `values-model-token-test.yaml`、`observability.prometheusRulesEnabled=true` 和 `availability.enabled=true` 离线渲染，再通过 `npm run test:prometheus-rules` 执行现有八个 relay 告警场景（五个告警、三个非告警控制）。仅测试工具固定为 promtool 3.13.5，下载归档经过官方 SHA256 校验；不启动 Prometheus 服务。夹具缺失、场景减少、渲染或规则执行失败都会阻断门禁，结果仅表示离线规则验证，不代表部署验收。
+
 PR Check 对账号平台路径改动在 Draft、Ready 和 Merge Queue 均执行 Go race 测试与 vet，逐个发现主模块及嵌套工具模块；使用主模块 `go.mod` 锁定的工具链与 `-tags=nomsgpack -mod=readonly`，Linux runner 开启 CGO。相关检查失败、取消或意外跳过均阻断 `required-gate`。本地未提供 C 编译器的 Windows 环境不能证明 race 检测通过，须以实际 Linux CI 结果验证。此门禁不配置真实服务凭据，不替代显式集成测试或部署验收。
 
 密码和真实密钥仅由保管人在受控本机终端输入，不能通过 Agent 或聊天提供。PKI/NKey 的 READY 标记只描述生成制品；解封成功只描述 KMS 状态，均不代表业务部署或发布完成。
