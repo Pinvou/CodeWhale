@@ -580,8 +580,9 @@ fn readonly_tokens_admitted(trimmed: &str) -> bool {
 ///   remainder re-enters the existing per-subcommand option tables;
 /// - `find` without any mutating primary (`-delete`, `-exec`, `-execdir`,
 ///   `-ok`, `-okdir`, `-fprintf`, `-fls`, `-fprint`, `-fprint0`);
-/// - `sed -n '<range>p` — numeric line-range print only, no script verbs
-///   (`w`/`r`/`e`/`s`) can appear in a two-token range script;
+/// - `sed -n '<range>p <files…>` — one numeric line-range print script (no
+///   script verbs `w`/`r`/`e`/`s`), every later token a plain input file: a
+///   later `-e`/`-f` script would escape the range-only contract;
 /// - `npm view|show|info <pkg>` — registry reads, matching the scout role's
 ///   network-capable read-only posture;
 /// - pure text filters `sort`, `uniq`, `cut`, `tr`, `comm` as pipeline
@@ -984,12 +985,23 @@ fn is_agent_readonly_find(tokens: &[String]) -> bool {
 }
 
 fn is_agent_readonly_sed(tokens: &[String]) -> bool {
+    // The script is pinned to the third token, and every later token must be
+    // a plain input file: GNU sed's option permutation parses a later
+    // `-e <script>`/`-f <file>` as a second script whose verbs (`w`, `r`,
+    // `e`) read, write, or execute outside the workspace, and an unflagged
+    // verb glued into a "path" (`w/tmp/x`) hides from the operand gate. BSD
+    // sed treats the extras as input files and fails closed, but the Linux
+    // hosts are the exposed ones. Multiple input files stay admitted; the
+    // operand gate judges each of them.
     if tokens.len() < 3 || tokens[1] != "-n" {
+        return false;
+    }
+    if tokens[3..].iter().any(|token| token.starts_with('-')) {
         return false;
     }
     // Numeric line-range print scripts only: `10p`, `1,5p`, `p`. Script
     // verbs that write or execute (`w`, `r`, `e`, `s///w`) cannot appear in
-    // a two-token range script, and separators like `;` were already
+    // the single range script, and separators like `;` were already
     // rejected at the charset gate.
     let script = tokens[2].as_str();
     let Some(head) = script.strip_suffix(['p', 'P']) else {
@@ -2326,6 +2338,9 @@ mod tests {
             "find crates -type f -name *.toml | head",
             "sed -n 10p Cargo.toml",
             "sed -n 1,5p README.md",
+            // Multiple plain input files stay admitted; only flag-shaped
+            // tokens after the script refuse.
+            "sed -n 10p Cargo.toml README.md",
             "npm view codewhale version",
             "sort deps.txt | uniq -c",
             "ls -la *.md",
@@ -2377,6 +2392,13 @@ mod tests {
             "sed -n 1,5w /tmp/out Cargo.toml",
             "sed -i s/a/b/ file",
             "sed -n e true Cargo.toml",
+            // Tokens after the script would be unchecked, and GNU sed parses
+            // a later -e as a second script (write/read/exec verbs).
+            "sed -n 5p -e w/tmp/owned Cargo.toml",
+            "sed -n 5p -e r/etc/shadow Cargo.toml",
+            "sed -n 5p -e e Cargo.toml",
+            "sed -n -e 5p Cargo.toml",
+            "sed -n 5p -f script.sed Cargo.toml",
             "npm install left-pad",
             "npm run build",
             "FOO=1 git log",
