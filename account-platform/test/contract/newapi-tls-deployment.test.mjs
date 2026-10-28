@@ -3,9 +3,9 @@ import { readFileSync } from 'node:fs'
 import { createRequire } from 'node:module'
 import { test } from 'node:test'
 
-const require = createRequire(new URL('../../pinvou3-app/package.json', import.meta.url))
+const require = createRequire(new URL('../../package.json', import.meta.url))
 const { parseAllDocuments } = require('yaml')
-const root = new URL('../../', import.meta.url)
+const root = new URL('../../../', import.meta.url)
 const read = (path) => readFileSync(new URL(path, root), 'utf8')
 const docs = parseAllDocuments(read('account-platform/deploy/production/newapi.yaml.template'))
 for (const doc of docs) assert.equal(doc.errors.length, 0)

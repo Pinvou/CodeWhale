@@ -7,7 +7,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { readFile } from "node:fs/promises";
-import { existsSync, mkdtempSync, mkdirSync, writeFileSync, readFileSync, rmSync } from "node:fs";
+import { existsSync, mkdtempSync, mkdirSync, writeFileSync, readFileSync, readdirSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, matchesGlob } from "node:path";
 import { spawnSync } from "node:child_process";
@@ -970,4 +970,34 @@ test("Account Platform task tests run for their own inputs without bypassing pro
   const name = "Verify Account Platform task contracts";
   assert.doesNotMatch(namedStep(job, name), /^ {8}(?:if|continue-on-error|working-directory|env):/m);
   assert.equal(stepRun(job, name).trim(), "node --test scripts/check-account-platform-tasks.test.mjs");
+});
+
+test("NewAPI TLS deployment contracts are discovered by the Account-only CI dependency boundary", () => {
+  const relative = "account-platform/test/contract/newapi-tls-deployment.test.mjs";
+  assert.ok(inputSelects(workflow, "account_platform", relative));
+  assert.ok(inputSelects(workflow, "account_platform", "account-platform/deploy/production/newapi.yaml.template"));
+  const directory = new URL("../../account-platform/", import.meta.url);
+  const contracts = JSON.parse(readFileSync(new URL("package.json", directory), "utf8"));
+  const command = contracts.scripts["test:contracts"];
+  assert.equal(command, "node --test test/contract/*.test.mjs");
+  const glob = command.split(" ").at(-1);
+  const discovered = readdirSync(new URL("test/contract/", directory))
+    .map(name => `test/contract/${name}`).filter(path => matchesGlob(path, glob));
+  assert.ok(discovered.includes(relative.slice("account-platform/".length)),
+    "the NewAPI TLS contract must be an actual file matched by the package and CI glob");
+  const job = jobBlock("account-platform-test");
+  const install = namedStep(job, "Install Account Platform contract dependencies");
+  const nodeStep = namedStep(job, "Account Platform Node contracts");
+  assert.match(install, /^ {8}working-directory: account-platform$/m);
+  assert.match(install, /^ {8}run: npm ci --ignore-scripts --prefer-offline --no-audit$/m);
+  assert.doesNotMatch(install, /^ {8}(?:if|continue-on-error):/m);
+  assert.ok(job.indexOf(install) < job.indexOf(nodeStep));
+  assert.match(nodeStep, /^ {8}working-directory: account-platform$/m);
+  assert.doesNotMatch(nodeStep, /^ {8}(?:if|continue-on-error):/m);
+  assert.match(stepRun(job, "Account Platform Node contracts"),
+    /^node --test --test-reporter=tap test\/contract\/\*\.test\.mjs \| tee /m);
+  assert.ok(contracts.devDependencies.yaml, "YAML parser belongs to the installed Account package");
+  const source = readFileSync(new URL(`../../${relative}`, import.meta.url), "utf8");
+  assert.match(source, /createRequire\(new URL\('\.\.\/\.\.\/package\.json', import\.meta\.url\)\)/);
+  assert.doesNotMatch(source, /pinvou3-app/);
 });
