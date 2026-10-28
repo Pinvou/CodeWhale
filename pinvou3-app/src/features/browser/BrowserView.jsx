@@ -964,6 +964,10 @@ export function BrowserView({
                 title={browserTabLabel(tab, t.browserEmptyTab)}
                 onClick={() => activateTab(tab.target_id)}
                 onKeyDown={(event) => {
+                  // 行内嵌着真 <button>（关闭标签）：键盘事件先判来源，否则冒泡
+                  // 到这里的 preventDefault 会吞掉嵌套按钮的原生 Enter/Space
+                  // 激活并误触切换标签。
+                  if (event.target !== event.currentTarget) return;
                   if (event.key !== 'Enter' && event.key !== ' ') return;
                   event.preventDefault();
                   activateTab(tab.target_id);
@@ -983,7 +987,7 @@ export function BrowserView({
                 {tabs.length > 1 && <button
                   type="button"
                   aria-label={t.browserTabClose}
-                  className={`shrink-0 rounded p-0.5 opacity-0 group-hover:opacity-100 ${
+                  className={`shrink-0 rounded p-0.5 opacity-0 group-hover:opacity-100 group-focus-within:opacity-100 ${
                     isDark ? 'hover:bg-[#3A3B3F]' : 'hover:bg-[#DCDCDC]'
                   }`}
                   title={t.browserTabClose}

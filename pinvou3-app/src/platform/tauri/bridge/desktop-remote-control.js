@@ -43,6 +43,7 @@
     var controllerTerminalSequence = 0;
     var proxyListIntent = 0;
     var proxyReadIntents = Object.create(null);
+    var proxyReadResults = new WeakMap();
     var proxyReadEpoch = 0;
     var proxyOpenIntent = 0;
     var proxyRefreshTimer = null;
@@ -902,31 +903,67 @@
       if (!requiredOpaqueId(localSessionId) || !localSessionId.startsWith("remote-")) {
         return Promise.reject(invalidTaskIntent());
       }
-      var intent = (proxyReadIntents[localSessionId] || 0) + 1;
-      proxyReadIntents[localSessionId] = intent;
-      var epoch = proxyReadEpoch;
       var navigationRead = options && options.navigation === true;
+      var kind = navigationRead ? "navigation" : options && options.view === true ? "view" : "background";
+      var intents = proxyReadIntents[localSessionId];
+      if (!intents) intents = proxyReadIntents[localSessionId] = Object.create(null);
+      // Navigation, isolated view and background refresh supersede only their own kind.
+      // The bucket identity also fences every kind after delete/archive,
+      // including when the same ID is read again before old replies arrive.
+      var intent = {};
+      intents[kind] = intent;
+      var epoch = proxyReadEpoch;
       return invoke("desktop_remote_proxy_history_read", { localSessionId: localSessionId })
         .then(function (record) {
-          if (epoch !== proxyReadEpoch || intent !== proxyReadIntents[localSessionId]
+          if (epoch !== proxyReadEpoch || intents !== proxyReadIntents[localSessionId]
+            || intent !== intents[kind]
             || !record || record.localSessionId !== localSessionId) return null;
           var before = current();
           var after = logic.projectRemoteProxyRead(before, record);
           if (after === before) throw asBoundedError("remote_proxy_projection_invalid");
+          var read = { intents: intents, intent: intent, kind: kind, epoch: epoch };
+          proxyReadResults.set(after.remoteProxyHistory, read);
           // Navigation consumes this verified value directly and publishes it
           // only after sessions adopts the ID. A background read of another
           // proxy must never replace the selected ChatView projection.
-          if (!navigationRead && state.activeSessionId === localSessionId) publish(after);
+          if (kind === "background" && state.activeSessionId === localSessionId) publishProxyRead(after);
           return after.remoteProxyHistory;
         }).catch(function (failure) { throw asBoundedError(failure); });
     }
 
+    function isRemoteProxyReadCurrent(record) {
+      var read = record && proxyReadResults.get(record);
+      return !!read && read.epoch === proxyReadEpoch
+        && read.intents === proxyReadIntents[record.localSessionId]
+        && read.intent === read.intents[read.kind];
+    }
+
+    function publishProxyRead(after) {
+      // Blocking Rust reads can execute in a different order from invocation.
+      // Only comparable authenticated cursors establish a journal regression.
+      // Equal cursors can carry changed metadata; opaque epochs have no order.
+      var selected = current().remoteProxyHistory;
+      var candidate = after.remoteProxyHistory;
+      var previousCursor = selected && selected.localSessionId === candidate.localSessionId
+        && selected.authenticatedCursor;
+      var nextCursor = candidate.authenticatedCursor;
+      // None is the initial empty journal, never a reset of this same ID.
+      // Its delayed snapshot must not erase an authenticated journal.
+      if (previousCursor && !nextCursor) return;
+      var comparable = previousCursor && nextCursor
+        && previousCursor.journalEpoch === nextCursor.journalEpoch;
+      if (comparable && nextCursor.sequence < previousCursor.sequence) return;
+      publish(after);
+    }
+
     function selectRemoteProxyHistory(record) {
-      if (!record || state.activeSessionId !== record.localSessionId) return false;
+      if (!isRemoteProxyReadCurrent(record) || state.activeSessionId !== record.localSessionId) return false;
       var before = current();
       var after = logic.projectRemoteProxyRead(before, record);
       if (after === before) return false;
-      publish(after);
+      publishProxyRead(after);
+      // True means the current record was accepted; a comparable older cursor
+      // can leave the already published projection unchanged.
       return true;
     }
 
@@ -938,7 +975,7 @@
       return invoke("desktop_remote_proxy_history_delete", { localSessionId: localSessionId })
         .then(function () {
           ++proxyListIntent;
-          proxyReadIntents[localSessionId] = (proxyReadIntents[localSessionId] || 0) + 1;
+          delete proxyReadIntents[localSessionId];
           publish(logic.hideRemoteProxyHistory(current(), localSessionId));
           listRemoteProxyHistory().catch(function () {});
         }).catch(function (failure) { throw asBoundedError(failure); });
@@ -980,7 +1017,7 @@
       return invoke("desktop_remote_proxy_archive", { localSessionId: localSessionId })
         .then(function (cleaned) {
           ++proxyListIntent;
-          proxyReadIntents[localSessionId] = (proxyReadIntents[localSessionId] || 0) + 1;
+          delete proxyReadIntents[localSessionId];
           var selected = current().remoteProxyHistory;
           if (selected && selected.localSessionId === localSessionId) {
             publish(logic.projectRemoteProxyRead(current(), Object.assign({}, selected, {
@@ -1366,6 +1403,7 @@
       listRemoteProxyHistory: listRemoteProxyHistory,
       openLiveRemoteProxy: openLiveRemoteProxy,
       readRemoteProxyHistory: readRemoteProxyHistory,
+      isRemoteProxyReadCurrent: isRemoteProxyReadCurrent,
       selectRemoteProxyHistory: selectRemoteProxyHistory,
       deleteRemoteProxyHistory: deleteRemoteProxyHistory,
       archiveRemoteProxyHistory: archiveRemoteProxyHistory,

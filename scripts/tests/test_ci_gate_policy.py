@@ -3130,6 +3130,15 @@ class CiGatePolicyTests(unittest.TestCase):
             with self.subTest(job=job):
                 self.assert_required_gate_wiring(job, result_env)
 
+    def test_relay_test_keeps_the_ten_minute_cap_that_justifies_draft_runs(self):
+        # relay-test runs drafts as well (GATE_JOB_LEVEL_IFS pins the
+        # draft-inclusive if); that tradeoff only holds while the suite
+        # stays short. A silent timeout bump would invalidate it with no red.
+        job = self.pr_workflow.split("\n  relay-test:", maxsplit=1)[1].split(
+            "\n  windows-relay-dacl:", maxsplit=1
+        )[0]
+        self.assertIn("timeout-minutes: 10", job)
+
     def test_fast_gate_checkout_has_no_ref_indirection(self):
         # Round-52 review: fast-gate RUNS this suite (the runner line is
         # pinned above), so a `ref:` under its actions/checkout makes the
