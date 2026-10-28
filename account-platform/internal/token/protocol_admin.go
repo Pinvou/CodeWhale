@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/Pinvou/pinvou3/account-platform/internal/platform/api"
+	"github.com/Pinvou/pinvou3/account-platform/internal/platform/httpserver"
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 )
@@ -318,6 +319,7 @@ func (s *Service) adminProtocols(w http.ResponseWriter, r *http.Request) {
 		ListProtocolsAndFormulas(context.Context) ([]ProtocolDefinition, []ProtocolFormulaVersion, error)
 	})
 	if !ok {
+		api.WriteError(w, http.StatusServiceUnavailable, "ADMIN_UNAVAILABLE", "token administration is unavailable", httpserver.RequestID(r.Context()))
 		return
 	}
 	protocols, formulas, err := repo.ListProtocolsAndFormulas(r.Context())
@@ -333,10 +335,11 @@ func (s *Service) adminPreviewFormula(w http.ResponseWriter, r *http.Request) {
 		FormulaDraft(context.Context, uuid.UUID) (ProtocolFormulaVersion, error)
 	})
 	if !ok {
+		api.WriteError(w, http.StatusServiceUnavailable, "ADMIN_UNAVAILABLE", "token administration is unavailable", httpserver.RequestID(r.Context()))
 		return
 	}
-	id, err := uuid.Parse(r.PathValue("formula_version_id"))
-	if err != nil {
+	id, ok := adminUUID(w, r, "formula_version_id")
+	if !ok {
 		return
 	}
 	item, err := repo.FormulaDraft(r.Context(), id)
