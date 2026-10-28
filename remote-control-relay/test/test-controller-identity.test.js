@@ -9,6 +9,8 @@ import { test } from "node:test";
 const deploy = readFileSync(new URL("../../scripts/deploy-remote-relay-test.sh", import.meta.url), "utf8").replaceAll("\r\n", "\n");
 const identity = deploy.match(/<<'CONTROLLER_IDENTITY'\n([^]*?)\nCONTROLLER_IDENTITY/);
 assert.ok(identity, "test must execute the actual deployment identity block");
+const pinReport = deploy.match(/^report_test_controller_pin_status\(\) \{[^]*?^\}/m);
+assert.ok(pinReport, "test must execute the actual deployment pin report");
 
 function fixture(t) {
   const root = mkdtempSync(join(realpathSync(tmpdir()), "pinvou-test-identity-"));
@@ -29,6 +31,103 @@ function passed(f) {
   assert.equal(result.status, 0, "identity preparation should succeed without exposing key material");
   assert.equal(result.stdout, "");
 }
+
+test("actual deployment pin report distinguishes fresh and reused identities from both checkout defaults", (t) => {
+  const f = fixture(t);
+  const bash = process.platform === "win32" ? "C:/Program Files/Git/bin/bash.exe" : "bash";
+  assert.ok(process.platform !== "win32" || existsSync(bash), "Git Bash is required");
+  const sourceRoot = fileURLToPath(new URL("../..", import.meta.url));
+  const managerPath = "pinvou3-app/src-tauri/src/features/remote_control/manager/mod.rs";
+  const launcherPath = "scripts/run-remote-control-endpoint.ps1";
+  const manager = readFileSync(join(sourceRoot, managerPath), "utf8");
+  const launcher = readFileSync(join(sourceRoot, launcherPath), "utf8");
+  const managerFile = join(f.root, managerPath);
+  const launcherFile = join(f.root, launcherPath);
+  mkdirSync(join(f.root, "pinvou3-app/src-tauri/src/features/remote_control/manager"), { recursive: true });
+  mkdirSync(join(f.root, "scripts"), { recursive: true });
+  writeFileSync(managerFile, manager);
+  writeFileSync(launcherFile, launcher);
+  const toShellPath = (value) => process.platform === "win32"
+    ? value.replaceAll("\\", "/").replace(/^([A-Za-z]):/, (_, drive) => "/" + drive.toLowerCase())
+    : value;
+  const report = (key) => {
+    const shell = "set -euo pipefail\n" + pinReport[0] + '\nreport_test_controller_pin_status "$1" "$2" "$3"\n';
+    const result = spawnSync(bash, ["-c", shell, "pin-report-test", key, "relay-test-key-1", toShellPath(f.root)], {
+      encoding: "utf8", timeout: 10_000,
+    });
+    assert.equal(result.status, 0, result.stderr);
+    return result.stdout + result.stderr;
+  };
+  const defaultKey = manager.match(/pub\(crate\) const TEST_PROFILE:[^]*?signing_public_key_b64: "([^"]+)"/)?.[1];
+  assert.ok(defaultKey);
+  assert.match(report(defaultKey), /内置 Test profile 的默认信任根与部署身份一致/);
+  assert.match(report(defaultKey), /Windows launcher 的默认信任根与部署身份一致/);
+
+  passed(f);
+  const freshKey = readFileSync(f.pub, "utf8").trim();
+  assert.notEqual(freshKey, defaultKey);
+  const fresh = report(freshKey);
+  assert.match(fresh, /内置 Test profile 不一致/);
+  assert.match(fresh, /Windows launcher 的默认信任根不一致/);
+  passed(f);
+  assert.equal(readFileSync(f.pub, "utf8").trim(), freshKey);
+  assert.match(report(freshKey), /内置 Test profile 不一致/);
+
+  writeFileSync(managerFile, manager.replace(defaultKey, freshKey));
+  const managerMatch = report(freshKey);
+  assert.match(managerMatch, /内置 Test profile 的默认信任根与部署身份一致/);
+  assert.match(managerMatch, /Windows launcher 的默认信任根不一致/);
+  writeFileSync(launcherFile, launcher.replace(defaultKey, freshKey));
+  const bothMatch = report(freshKey);
+  assert.match(bothMatch, /内置 Test profile 的默认信任根与部署身份一致/);
+  assert.match(bothMatch, /Windows launcher 的默认信任根与部署身份一致/);
+  const matchedManager = manager.replace(defaultKey, freshKey);
+  const matchedLauncher = launcher.replace(defaultKey, freshKey);
+  const changedManagerId = matchedManager.replace('signing_key_id: "relay-test-key-1"', 'signing_key_id: "other-test-key"');
+  assert.notEqual(changedManagerId, matchedManager);
+  writeFileSync(managerFile, changedManagerId);
+  const managerIdMismatch = report(freshKey);
+  assert.match(managerIdMismatch, /内置 Test profile 不一致/);
+  assert.match(managerIdMismatch, /Windows launcher 的默认信任根与部署身份一致/);
+  writeFileSync(managerFile, matchedManager);
+  const changedLauncherId = matchedLauncher.replace("$SigningKeyId = 'relay-test-key-1'", "$SigningKeyId = 'other-test-key'");
+  assert.notEqual(changedLauncherId, matchedLauncher);
+  writeFileSync(launcherFile, changedLauncherId);
+  const launcherIdMismatch = report(freshKey);
+  assert.match(launcherIdMismatch, /内置 Test profile 的默认信任根与部署身份一致/);
+  assert.match(launcherIdMismatch, /Windows launcher 的默认信任根不一致/);
+  writeFileSync(launcherFile, matchedLauncher);
+
+  const tail = deploy.slice(deploy.indexOf('\nSTAGE="完成"\n') + 1);
+  assert.ok(tail.startsWith('STAGE="完成"\n'));
+  const runTail = (key, enabled) => {
+    const shell = "set -euo pipefail\n" + pinReport[0]
+      + '\nROOT="$1"; FIXTURE_KEY="$2"; ENABLE_DESKTOP_CONTROLLER="$3"; PUBLIC_URL="https://example.invalid"; BASE_PATH="/test"\n'
+      + 'relay_ssh() { printf "%s" "$FIXTURE_KEY"; }\n' + tail;
+    return spawnSync(bash, ["-c", shell, "pin-tail-test", toShellPath(f.root), key, enabled], {
+      encoding: "utf8", timeout: 10_000,
+    });
+  };
+  const success = runTail(freshKey, "1");
+  assert.equal(success.status, 0, success.stderr);
+  assert.match(success.stdout, /内置 Test profile 的默认信任根与部署身份一致/);
+  assert.match(success.stdout, /Windows launcher 的默认信任根与部署身份一致/);
+  const invalidKey = "A".repeat(42) + "B=";
+  const invalid = runTail(invalidKey, "1");
+  assert.notEqual(invalid.status, 0);
+  assert.match(invalid.stderr, /已部署服务的 controller 公钥格式无效/);
+  assert.doesNotMatch(invalid.stdout + invalid.stderr, new RegExp(invalidKey));
+  const disabled = runTail(invalidKey, "0");
+  assert.equal(disabled.status, 0);
+  assert.doesNotMatch(disabled.stdout + disabled.stderr, /信任根检查|公钥格式无效/);
+  rmSync(launcherFile);
+  assert.match(report(freshKey), /无法确认当前源码 Windows launcher 的默认信任根/);
+  rmSync(managerFile);
+  const bothUnavailable = report(freshKey);
+  assert.match(bothUnavailable, /无法确认当前源码内置 Test profile 的默认信任根/);
+  assert.match(bothUnavailable, /无法确认当前源码 Windows launcher 的默认信任根/);
+  assert.match(deploy, /report_test_controller_pin_status "\$controller_public_key" "relay-test-key-1" "\$ROOT"/);
+});
 
 test("test redeploy keeps exact signing and both HMAC identities outside the replaced code", (t) => {
   const f = fixture(t);

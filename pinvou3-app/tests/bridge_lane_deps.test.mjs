@@ -192,11 +192,10 @@ let m;
 while ((m = clusterRe.exec(helpers)) !== null) {
   snapshot.clusters[m[1]] = [...m[2].matchAll(/([\w$]+): b\.([\w$]+)/g)].map((p) => `${p[1]}:${p[2]}`);
 }
-// Combined base: main T4b 313 (裁决③ clearVoiceInput 整删后的 Official 形态)
-// + Account 组合新增公共 compactNow(+loadEffectiveModelConfig 视实测)。合并树
-// 实测值见下行；applyToolItemResult 为私有、仅参数依赖。
+// Combined main adds the two internal-message classifiers; Account retains
+// compactNow. All are local calls without new cluster dependency keys.
 const EXPECTED_SURFACE = {
-  sharedFnCount: 314,
+  sharedFnCount: 316,
 };
 
 assert.equal(

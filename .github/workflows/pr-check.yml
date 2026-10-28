@@ -274,6 +274,7 @@ jobs:
               - 'scripts/tests/pr-check-routing.test.mjs'
             rust_code:
               - '**/*.rs'
+              - 'pinvou3-app/src-tauri/src/features/updater/platform/windows_handoff.cs'
               - '**/Cargo.toml'
               - '**/Cargo.lock'
               - '**/build.rs'
@@ -325,6 +326,7 @@ jobs:
               # run the leg that executes the guard it pins.
               - 'scripts/tests/test_registry_guard.py'
               - 'pinvou3-app/src-tauri/**/*.rs'
+              - 'pinvou3-app/src-tauri/src/features/updater/platform/windows_handoff.cs'
               # diagnostics.rs 在生产校验中 include_str! v1 schema，
               # behavior_telemetry_tests.rs 同时嵌入 schema 与 registries。
               # 精确登记编译输入，schema-only Ready PR/MQ 也须执行 Rust 回归
@@ -708,6 +710,9 @@ jobs:
               - 'docs/windows-update-release-console.md'
               - '.github/workflows/pr-check.yml'
             acp_runtime:
+              # 开发启动器。开源侧把 run-dev.sh 变更路由进 acp_runtime 门禁,
+              # 本仓同路由:launcher-only PR 不再静默跳过运行时门禁。
+              - 'pinvou3-app/run-dev.sh'
               - 'pinvou3-app/scripts/codex-bridge-runtime/**'
               - 'pinvou3-app/scripts/prepare-codex-bridge-runtime.sh'
               - 'pinvou3-app/scripts/tauri/build.js'
@@ -761,6 +766,9 @@ jobs:
               - 'pinvou3-app/src-tauri/rust-toolchain.toml'
               - 'pinvou3-app/package.json'
             windows_static_updater:
+              - 'pinvou3-app/src-tauri/src/features/updater/platform/windows.rs'
+              - 'pinvou3-app/src-tauri/src/features/updater/platform/windows_handoff.cs'
+              - 'scripts/tests/windows-handoff.test.ps1'
               - 'scripts/prepare-windows-release.ps1'
               - 'scripts/verify-windows-release-online.ps1'
               - 'pinvou3-app/tests/windows_static_update_contract.test.js'
@@ -905,6 +913,16 @@ jobs:
 
       - name: fork-guard 指纹层 (秒级,不编译)
         run: ./scripts/fork-guard.sh --fast
+
+      # 合并提交 authored 标识披露审计（仅披露,恒以 0 退出,不阻断）：枚举
+      # 分支上每个 merge commit 的 resolution-authored 标识并打印，让
+      # 「resolution 内容已进树」在每个 PR 上持续可见，而不是依赖每轮手工运行。
+      - name: Merge authored audit (seconds)
+        if: ${{ github.event_name != 'push' }}
+        run: |
+          base_ref="${{ github.event_name == 'merge_group' && github.event.merge_group.base_ref || github.base_ref }}"
+          base_ref="${base_ref#refs/heads/}"
+          python3 scripts/audit-merge-authored.py "origin/$base_ref"
 
       - name: fork 合规联动 (gitlink ↔ fork-modifications)
         run: |
@@ -2232,6 +2250,11 @@ jobs:
       # 已经很大的 pinvou3_lib 测试二进制。local-embed 覆盖没有删除：
       # knowledge-rust 仍以 --all-features 测试 pinvou-knowledge，rust-lint 与原生
       # Windows 门禁仍按默认 features 编译应用集成路径。
+      # benchmark-hooks 则显式开启（与开源 Linux 腿同口径）：headless-bridge
+      # 合同回归只存在于该 feature 下，仅编译不执行会漏掉运行期断言。该 feature
+      # 只拉 workspace 内 agent-backend-api 与 deepseek-tui/benchmark-eval-controls，
+      # 不引入 local-embed 的 fastembed/ORT 重依赖；可编译性已由 rust-lint 的
+      # all-targets check 先行钉住。
       # 编译链接与测试执行拆成两个 step:该 job 在标准 hosted runner 上多次在
       # 本环节被打到 runner 失联(日志全丢,只剩 step 状态可查),拆开后失联时
       # 能定位是编译/链接期还是测试执行期。内存压力现由 job 开头的
@@ -2245,7 +2268,7 @@ jobs:
       # 只有下方超出单进程内存预算的 behavior-telemetry 测试使用独立目标。
       - name: cargo test --lib --no-run（编译链接测试二进制）
         if: ${{ github.event_name != 'push' }}
-        run: /usr/bin/time -v cargo test --manifest-path pinvou3-app/src-tauri/Cargo.toml --no-default-features --lib --locked --no-run
+        run: /usr/bin/time -v cargo test --manifest-path pinvou3-app/src-tauri/Cargo.toml --no-default-features --lib --features benchmark-hooks --locked --no-run
 
       # Test registry guard: a duplicated #[test] registers one case twice and
       # swallows the adjacent case's attributes (happened twice on upstream PR
@@ -2267,7 +2290,7 @@ jobs:
           chrome="$(command -v google-chrome || command -v chromium || command -v chromium-browser)"
           export CHROME="$chrome"
           export PINVOU_REQUIRE_REMOTE_E2E=1
-          cargo test --manifest-path pinvou3-app/src-tauri/Cargo.toml --no-default-features --lib --locked -- --test-threads=1
+          cargo test --manifest-path pinvou3-app/src-tauri/Cargo.toml --no-default-features --lib --features benchmark-hooks --locked -- --test-threads=1
 
       # The behavior-telemetry state-machine tests intentionally use a separate
       # harness. Linking their 2,300+ source lines into the already-large lib
@@ -2314,7 +2337,7 @@ jobs:
       # 故恢复只编译设计;不要在 push 上重新打开测试执行。
       - name: cargo test --lib --no-run (push main 仅编译暖 cache)
         if: ${{ github.event_name == 'push' }}
-        run: /usr/bin/time -v cargo test --manifest-path pinvou3-app/src-tauri/Cargo.toml --no-default-features --lib --locked --no-run
+        run: /usr/bin/time -v cargo test --manifest-path pinvou3-app/src-tauri/Cargo.toml --no-default-features --lib --features benchmark-hooks --locked --no-run
 
   # pinvou-cli contract tests: since PR #478 the product CLI surface (~20k
   # lines + ~340 contract tests) has no other automated execution leg (the
@@ -2518,6 +2541,10 @@ jobs:
       - name: Windows 静态更新契约
         run: npm --prefix pinvou3-app run test:windows-static-updater
 
+      - name: Windows 安装交接进程测试
+        shell: pwsh
+        run: ./scripts/tests/windows-handoff.test.ps1
+
   # pinvou-cli lint leg (round 18, review §3 "The CI leg doesn't lint the
   # CLI"): until now ~50k lines of CLI Rust had no clippy on any lane, and
   # the src-tauri [lints] table (unwrap/expect kept at warn there) does not apply
@@ -2579,6 +2606,15 @@ jobs:
         with:
           submodules: false
 
+      # main twice exhausted this shared disk during cache post-metadata,
+      # after both Cargo checks passed. Reuse only the base SDK allowlist;
+      # reserve 24 GiB before swap and dependency/toolchain writes.
+      - name: Prepare CLI disk capacity before swap
+        run: |
+          sudo env GITHUB_WORKSPACE="$GITHUB_WORKSPACE" \
+            RUNNER_ENVIRONMENT="$RUNNER_ENVIRONMENT" \
+            python3 scripts/ci-rust-disk.py --min-free-gib 24
+
       - name: Set up zram and swap
         # Best effort: timeouts or failures only warn and never block (falls back to stock runner memory).
         run: timeout --kill-after=15 240 sudo --preserve-env=GITHUB_ACTIONS,PINVOU3_CI_DISABLE_ZRAM bash "${{ github.workspace }}/scripts/ci-memory-setup.sh" || echo "::warning::ci-memory-setup did not finish; continuing with stock runner memory"
@@ -2636,18 +2672,33 @@ jobs:
       # which is exactly the rust-lint case ("clippy/check" target caching in
       # the repo's cache policy). Own key: clippy artifacts differ from the
       # rustc artifacts of the cli-test cache and would evict each other.
+      # Swap and installed dependencies can consume the initial reserve.
+      # Refuse a runner already below the default 12 GiB before restoring.
+      - name: Check CLI disk capacity before cache
+        run: |
+          sudo env GITHUB_WORKSPACE="$GITHUB_WORKSPACE" \
+            RUNNER_ENVIRONMENT="$RUNNER_ENVIRONMENT" \
+            python3 scripts/ci-rust-disk.py
+
       - name: Cargo cache
-        uses: Swatinem/rust-cache@v2
+        id: cli_lint_cache
+        # Pin the reviewed implementation to prevent action behavior drift;
+        # the final disk gate enables failure caching only when safe to try.
+        uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0
         with:
           workspaces: pinvou-cli
           shared-key: cli-lint
-          # cache-on-failure matches the sibling legs (rust-test,
-          # windows-rust-test, macos-rust-check, macos-cli-check):
-          # save-on-success-only means one failed main push drops the
-          # namespace fully cold and every later run pays the full cold
-          # compile. Saves stay main-only (save-if below).
-          cache-on-failure: true
+          cache-on-failure: false
           save-if: ${{ github.ref == 'refs/heads/main' }}
+
+      # Check actual remaining space after cache restore, before Cargo.
+      # Failure remains visible; the post-save gate below leaves failure
+      # caching disabled if space cannot be recovered.
+      - name: Check CLI disk capacity after cache
+        run: |
+          sudo env GITHUB_WORKSPACE="$GITHUB_WORKSPACE" \
+            RUNNER_ENVIRONMENT="$RUNNER_ENVIRONMENT" \
+            python3 scripts/ci-rust-disk.py
 
       # Warn-visible by design (see the job comment); --all-targets so tests
       # are linted too (they carry their own share of the measured debt).
@@ -2674,6 +2725,18 @@ jobs:
         run: >-
           cargo check --manifest-path pinvou-cli/Cargo.toml
           --workspace --all-targets --no-default-features --locked
+
+      # A successful build can consume the earlier reserve. If this gate
+      # fails, the job fails and the pinned cache post is skipped. When it
+      # passes, preserve main's failure-cache warming for earlier failures.
+      # This sample cannot reserve space or guarantee a later save succeeds.
+      - name: Guard CLI cache post-save
+        if: ${{ always() && !cancelled() && steps.cli_lint_cache.outcome == 'success' }}
+        run: |
+          sudo env GITHUB_WORKSPACE="$GITHUB_WORKSPACE" \
+            RUNNER_ENVIRONMENT="$RUNNER_ENVIRONMENT" \
+            python3 scripts/ci-rust-disk.py
+          printf '%s\n' 'CACHE_ON_FAILURE=true' >> "$GITHUB_ENV"
 
   windows-rust-test:
     name: windows-rust-test (${{ matrix.phase }})
@@ -3219,6 +3282,8 @@ jobs:
             'features::remote_control::platform::windows::tests::' \
             'app::commands::remote_control::reader_resume_tests::' \
             'features::remote_control::controller::transfer::staging::tests::' \
+            'features::remote_control::controller::relay_transport::tests::' \
+            'features::remote_control::controller::controlling_service::tests::connect_attempt_' \
             'features::computer_use::platform::windows::tests::' \
             'failed_probe_never_deletes_an_existing_store_windows' \
             'features::voice_shortcut::platform::tests::' \

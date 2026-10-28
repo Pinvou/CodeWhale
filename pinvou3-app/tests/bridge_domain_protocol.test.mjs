@@ -253,9 +253,10 @@ const expectedProtocolHashes = {
   // the set_global_shortcut_config invoke (the dedicated command owns both
   // the plugin registration and the prefs persistence; update_settings
   // stays untouched).
-// (merged: builtin feature toggles from F-series + set_global_shortcut_config from main)
+  // Retain Account builtin toggles and typed voice references; updater also
+  // inherits main's Windows progress event and installation lifecycle.
   settings: '5fadac6005cb2f3c179925fbf0511b445350dd19789254c5383ac193624fc3fd',
-  updater: 'e5d3ffaed0548bca3a40ee4c8138a59f9a2add9474477d924d4ecd7b8efd73e6',
+  updater: 'cfe92470008c2dade64f891c36a5fa70930478f803d4d2a6d100e68d9c29392b',
   // Voice draft preparation now carries its typed source/model reference;
   // session bindings remain authoritative and the command set is unchanged.
   voice: '79c031f1039f8b8cb46d47c37ec9946706d1ec5378cf06c1f7f4654cdf21bd37',
@@ -347,6 +348,7 @@ assert.deepEqual(Object.keys(api).sort(), ['available', ...Object.keys(desktopBr
 for (const [domain, methods] of Object.entries(desktopBridgeApi)) {
   assert.deepEqual(Object.keys(api[domain]).sort(), methods.sort(), `${domain} API surface changed`);
 }
+assert.equal(typeof api.desktopRemoteControl.getRemoteProxyLoadStatus, 'function', 'diagnostic must reach the assembled desktop bridge');
 assert.equal(api.sendMessage, undefined, 'flat compatibility facade must not return');
 assert.equal(api.getState, undefined, 'flat state facade must not return');
 

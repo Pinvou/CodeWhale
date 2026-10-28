@@ -27,3 +27,19 @@ above `SessionKeys` in the production crypto source and run the same command.
 Compilation must fail at `AmbiguousIfClone<_>`. Restore the source and rerun;
 the regular key ownership, directional cipher and sequence tests must pass.
 Never commit the mutation. This guard does not change nonce generation.
+
+The harness also links the production controller transport. Run its deadline,
+cancellation, queue and loopback WebSocket regressions with:
+
+```sh
+cargo test --locked --manifest-path pinvou3-app/src-tauri/tests/controller-crypto-harness/Cargo.toml relay_transport::tests:: -- --test-threads=1
+```
+
+The harness substitutes Tokio for Tauri task spawning and does not include
+`controlling_service`. The real A port/handshake integration is a separate
+application test, selected by
+`features::remote_control::controller::controlling_service::tests::connect_attempt_`.
+Windows native CI executes that selector and the transport selector against the
+compiled application test executable, requiring a nonzero match. These tests
+use a loopback Relay fixture and real handshake cryptography, not a deployed
+Relay or two physical devices.
