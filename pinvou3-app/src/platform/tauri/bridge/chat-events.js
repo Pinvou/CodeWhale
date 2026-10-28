@@ -104,7 +104,29 @@ function pinvouSharedtauriChatEvents() {
       pendingStreamNotifications[sid] = pending;
       function publish() {
         if (pendingStreamNotifications[sid] !== pending) return;
+        // r8 P1：cancel-all 置换的**其它**会话的武装条目也要补章——它的内容
+        // 已随本次 immediateNotify() 一同发布上屏（一次发布覆盖全部快照），
+        // 滞留不章的话：活跃会话的条目会被 180ms 渲染腿补章成假 stall
+        // （recv_to_dispatch≈180ms，真实派发在 16ms）并烧掉该会话的 10s
+        // 节流配额——同窗口的真实冻结被静默丢弃（受控时钟亲证）。
+        // 活跃会话补 markDispatched（探针的 P2-A 新鲜度/P2-B 隐藏豁免等
+        // 既有门自然适用）；后台会话补 markThrottled（r7 P2-2 同款——
+        // 合并竞速出来的时差不是冻结，不上报、留 snapshot）。
+        var displaced = Object.keys(pendingStreamNotifications).filter(
+          function (other) { return other !== sid && pendingStreamNotifications[other]; }
+        );
         Object.keys(pendingStreamNotifications).forEach(cancelPendingStreamNotify);
+        if (window.RenderStageProbe) {
+          try {
+            for (var d = 0; d < displaced.length; d++) {
+              if (displaced[d] === state.activeSessionId) {
+                window.RenderStageProbe.markDispatched(displaced[d]);
+              } else {
+                window.RenderStageProbe.markThrottled(displaced[d]);
+              }
+            }
+          } catch (_) {}
+        }
         // The synchronous event router has already saved every affected
         // buffer and restored the visible working set before this callback.
         // Publish that coherent host snapshot once, even if one of the
