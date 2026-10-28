@@ -765,6 +765,86 @@ test('remote attachment, permission and artifact facades use only desktop_remote
   assert.equal(JSON.stringify(calls).includes('connectionId'), false);
 });
 
+test('unknown attachment actions are fenced rather than replayed as new uploads', async () => {
+  const { feature, calls } = installFeature(command => {
+    if (command === 'desktop_remote_action_a') return Promise.reject(new Error('result_unknown'));
+    return undefined;
+  });
+  const digest = 'a'.repeat(64);
+  const actions = [
+    () => feature.attachmentBegin('remote-1', 'ref-1', 'task-1', 'a.txt', 'text/plain', 1, digest),
+    () => feature.attachmentChunk('remote-1', 'ref-1', 'task-1', 'transfer-1', 0, 'YQ==', 1),
+    () => feature.attachmentAbort('remote-1', 'ref-1', 'task-1', 'transfer-1'),
+  ];
+  for (const action of actions) {
+    const before = calls.filter(call => call.command === 'desktop_remote_action_a').length;
+    await assert.rejects(action(), { code: 'result_unknown' });
+    await assert.rejects(action(), { code: 'result_unknown' });
+    assert.equal(calls.filter(call => call.command === 'desktop_remote_action_a').length, before + 1);
+  }
+  const before = calls.length;
+  await assert.rejects(feature.attachmentBegin('remote-1', 'ref-1', 'task-2', 'big.bin', 'application/octet-stream', 20 * 1024 * 1024 + 1, digest), { code: 'remote_attachment_size_invalid' });
+  assert.equal(calls.length, before);
+});
+
+test('attachment action saturation blocks the same lease and resets on a new lease', async () => {
+  let succeed = false;
+  const { feature, calls, state } = installFeature(command => {
+    if (command !== 'desktop_remote_action_a') return undefined;
+    return succeed ? Promise.resolve({ transfer_id: 'fresh', chunk_bytes: 1, total_bytes: 1 }) : Promise.reject(new Error('result_unknown'));
+  });
+  await new Promise(resolve => setTimeout(resolve, 0));
+  const lease = id => ({ connectionId: id, controllerLeaseId: 'lease', leaseEpoch: '1', relayEpoch: 'relay', generation: id });
+  state.desktopRemoteControl.controllerConnection = lease('saturated-old');
+  for (let i = 0; i < 130; i += 1) {
+    await assert.rejects(feature.attachmentBegin('remote-1', 'ref-1', 'task-' + i, 'a.txt', 'text/plain', 1, 'a'.repeat(64)), { code: 'result_unknown' });
+  }
+  assert.equal(calls.filter(call => call.command === 'desktop_remote_action_a').length, 129);
+  state.desktopRemoteControl.controllerConnection = lease('saturated-new');
+  succeed = true;
+  assert.equal((await feature.attachmentBegin('remote-1', 'ref-1', 'new-task', 'a.txt', 'text/plain', 1, 'a'.repeat(64))).transferId, 'fresh');
+});
+
+test('attachment uncertainty is retired only when the actual lease changes', async () => {
+  let succeed = false;
+  const { feature, calls, state } = installFeature(command => {
+    if (command !== 'desktop_remote_action_a') return undefined;
+    return succeed ? Promise.resolve({ transfer_id: 'new-transfer', chunk_bytes: 1, total_bytes: 1 }) : Promise.reject(new Error('result_unknown'));
+  });
+  await new Promise(resolve => setTimeout(resolve, 0));
+  const lease = id => ({ connectionId: id, controllerLeaseId: 'lease', leaseEpoch: '1', relayEpoch: 'relay', generation: id });
+  state.desktopRemoteControl.controllerConnection = lease('old-connection');
+  const begin = () => feature.attachmentBegin('remote-1', 'ref-1', 'task-1', 'a.txt', 'text/plain', 1, 'a'.repeat(64));
+  await assert.rejects(begin(), { code: 'result_unknown' });
+  assert.equal(state.desktopRemoteControl.controllerConnection.connectionId, 'old-connection');
+  await assert.rejects(begin(), { code: 'result_unknown' });
+  assert.equal(calls.filter(call => call.command === 'desktop_remote_action_a').length, 1);
+  state.desktopRemoteControl.controllerConnection = lease('new-connection');
+  succeed = true;
+  assert.equal((await begin()).transferId, 'new-transfer');
+  assert.equal(calls.filter(call => call.command === 'desktop_remote_action_a').length, 2);
+});
+
+test('a late unknown reply from a retired lease cannot fence the new lease', async () => {
+  const old = Promise.withResolvers();
+  let first = true;
+  const { feature, state } = installFeature(command => {
+    if (command !== 'desktop_remote_action_a') return undefined;
+    if (first) { first = false; return old.promise; }
+    return Promise.resolve({ transfer_id: 'new-transfer', chunk_bytes: 1, total_bytes: 1 });
+  });
+  await new Promise(resolve => setTimeout(resolve, 0));
+  const lease = id => ({ connectionId: id, controllerLeaseId: 'lease', leaseEpoch: '1', relayEpoch: 'relay', generation: id });
+  state.desktopRemoteControl.controllerConnection = lease('old-connection');
+  const begin = () => feature.attachmentBegin('remote-1', 'ref-1', 'task-1', 'a.txt', 'text/plain', 1, 'a'.repeat(64));
+  const pending = begin();
+  state.desktopRemoteControl.controllerConnection = lease('new-connection');
+  assert.equal((await begin()).transferId, 'new-transfer');
+  old.reject('result_unknown');
+  await assert.rejects(pending, { code: 'result_unknown' });
+  assert.equal((await begin()).transferId, 'new-transfer');
+});
+
 test('remote actions reuse one request id across uncertain retry and later reconciliation', async () => {
   let attempts = 0;
   const { feature, calls } = installFeature((command) => {
