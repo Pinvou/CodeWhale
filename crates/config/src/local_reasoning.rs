@@ -55,6 +55,11 @@ pub fn local_reasoning_spec(model: &str) -> Option<&'static LocalReasoningSpec> 
     });
     let normalized = model.trim().to_ascii_lowercase().replace(['_', ' '], "-");
     let name = normalized.rsplit('/').next()?;
+    // Separately named Thinking variants can be always-on and have a
+    // different template; the reviewed base-family fact does not cover them.
+    if name.contains("thinking") {
+        return None;
+    }
     specs.iter().find(|spec| {
         spec.prefixes.iter().any(|prefix| {
             name.strip_prefix(prefix.as_str())
@@ -222,6 +227,8 @@ mod tests {
         for model in [
             "Qwen3.8-27B2",
             "Qwen3.8-235B",
+            "Qwen3.8-27B-Thinking",
+            "Qwen3.6-35B-A3B-Thinking",
             "DeepSeek-V4.1-Flash-1017",
             "custom-model",
         ] {
