@@ -1063,6 +1063,13 @@ pub struct BackgroundShell {
     stderr_cursor: usize,
     completion_reported: bool,
     stdin: Option<StdinWriter>,
+    /// Set when the stdin *pipe* was closed through `write_stdin`, i.e. the
+    /// child has really been handed end-of-file. Stays false when the task
+    /// never exposed a writable stdin (persistent services spawn with a null
+    /// stdin, PTY lanes keep the slave open through the reader) or when the
+    /// handle was simply released after completion, so `interact` can state
+    /// the true reason stdin is unavailable.
+    stdin_closed_at_eof: bool,
     child: Option<ShellChild>,
     #[cfg(windows)]
     windows_job: Option<WindowsJob>,
@@ -1369,6 +1376,10 @@ impl BackgroundShell {
                 stdin.flush().ok();
             }
             if close {
+                // Only a dropped pipe delivers end-of-file; dropping a PTY
+                // writer is invisible to the child (the reader holds the
+                // master), so it must not be reported as EOF later.
+                self.stdin_closed_at_eof = matches!(self.stdin, Some(StdinWriter::Pipe(_)));
                 self.stdin = None;
             }
             return Ok(());
@@ -1378,8 +1389,14 @@ impl BackgroundShell {
             return Ok(());
         }
 
+        if self.stdin_closed_at_eof {
+            return Err(anyhow!(
+                "stdin is not available for task {}: its stdin is already at end-of-file (foreground commands run that way so stdin readers exit instead of hanging); start input-driven work with background=true and feed it with action=\"interact\"",
+                self.id
+            ));
+        }
         Err(anyhow!(
-            "stdin is not available for task {}: its stdin is already at end-of-file (foreground commands run that way so stdin readers exit instead of hanging); start input-driven work with background=true and feed it with action=\"interact\"",
+            "stdin is not available for task {}: no writable stdin handle is attached to it (interactive, combined-output, and persistent commands never expose one, and a finished command has released it); start input-driven work with background=true and feed it with action=\"interact\"",
             self.id
         ))
     }
@@ -1927,6 +1944,7 @@ impl ShellManager {
                 stderr_cursor: 0,
                 completion_reported: false,
                 stdin: None,
+                stdin_closed_at_eof: false,
                 child: None,
                 #[cfg(windows)]
                 windows_job: None,
@@ -2857,6 +2875,7 @@ impl ShellManager {
             stderr_cursor: 0,
             completion_reported: false,
             stdin,
+            stdin_closed_at_eof: false,
             child: Some(child),
             #[cfg(windows)]
             windows_job,

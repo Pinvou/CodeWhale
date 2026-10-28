@@ -568,7 +568,7 @@ fn start_background_gates(
                 .shell_manager
                 .lock()
                 .map_err(|_| ToolError::execution_failed("shell manager lock poisoned"))?;
-            manager.execute_with_options_env_for_session(
+            let spawned = manager.execute_with_options_env_for_session(
                 &command,
                 Some(&cwd),
                 BACKGROUND_GATE_TIMEOUT_MS,
@@ -578,7 +578,20 @@ fn start_background_gates(
                 context.elevated_sandbox_policy.clone(),
                 env,
                 &context.state_namespace,
-            )
+            );
+            // A gate job is machine-launched with nobody to feed its stdin,
+            // so hand the child end-of-file at once: a gate that reads stdin
+            // then exits instead of idling on an open pipe until the
+            // background timeout kills it. Idempotent-safe if the job already
+            // finished.
+            if let Some(task_id) = spawned
+                .as_ref()
+                .ok()
+                .and_then(|result| result.task_id.as_deref())
+            {
+                manager.write_stdin(task_id, "", true).ok();
+            }
+            spawned
         };
 
         match spawn_result {
