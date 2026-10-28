@@ -4166,9 +4166,13 @@ fn enforce_readonly_workspace_operands(
             "Read-only command contains a bare `&` and matches no admitted shape.".to_string(),
         ));
     };
+    // One glob budget for the whole command: the caps bound the host-side
+    // walk, and a per-operand budget would let a command multiply it by
+    // however many `*` operands fit in the command text.
+    let mut glob_budget = ReadonlyGlobBudget::default();
     let mut live_cwd = effective_cwd;
     for segment in segments {
-        live_cwd = enforce_readonly_segment_operands(segment, &roots, &live_cwd)?;
+        live_cwd = enforce_readonly_segment_operands(segment, &roots, &live_cwd, &mut glob_budget)?;
     }
     Ok(())
 }
@@ -4194,8 +4198,9 @@ fn enforce_readonly_segment_operands(
     segment: &str,
     roots: &[PathBuf],
     effective_cwd: &std::path::Path,
+    glob_budget: &mut ReadonlyGlobBudget,
 ) -> Result<std::path::PathBuf, ToolError> {
-    let stages: Vec<&str> = segment.split('|').collect();
+    let stages = crate::command_safety::readonly_pipeline_stages(segment);
     if stages.len() > 1 {
         for stage in stages {
             let argv = readonly_segment_argv(stage)?;
@@ -4206,7 +4211,7 @@ fn enforce_readonly_segment_operands(
                     )));
                 }
                 Some("gh") => {}
-                _ => enforce_readonly_argv_operands(&argv, roots, effective_cwd)?,
+                _ => enforce_readonly_argv_operands(&argv, roots, effective_cwd, glob_budget)?,
             }
         }
         return Ok(effective_cwd.to_path_buf());
@@ -4233,9 +4238,22 @@ fn enforce_readonly_segment_operands(
                 "[shell.readonly.cwd.outside_workspace] Read-only `cd` operand {target:?} resolves outside the workspace."
             )));
         }
+        // The fold below is only exact while the shell's `cd` succeeds. A
+        // destination that exists but is not a directory (`cd notes.txt`)
+        // canonicalizes fine, yet the shell's `cd` fails on it and a `;`/`||`
+        // sequence continues in the ORIGINAL directory — while the gate would
+        // resolve every later operand under a path nothing exists beneath,
+        // skipping each one, and `cd notes.txt; cat link` would read a
+        // planted outside symlink at the root unjudged. Refuse before the
+        // fold can lie.
+        if !resolved.is_dir() {
+            return Err(ToolError::permission_denied(format!(
+                "[shell.readonly.cwd.not_a_directory] Read-only `cd` operand {target:?} is not a directory; the sequence would continue in the original working directory while the gate judged it under {target:?}."
+            )));
+        }
         return Ok(resolved);
     }
-    enforce_readonly_argv_operands(&argv, roots, effective_cwd)?;
+    enforce_readonly_argv_operands(&argv, roots, effective_cwd, glob_budget)?;
     Ok(effective_cwd.to_path_buf())
 }
 
@@ -4251,6 +4269,7 @@ fn enforce_readonly_argv_operands(
     argv: &[String],
     roots: &[PathBuf],
     effective_cwd: &std::path::Path,
+    glob_budget: &mut ReadonlyGlobBudget,
 ) -> Result<(), ToolError> {
     for token in argv.iter().skip(1) {
         if token.starts_with('-') && (token.contains('/') || token.contains('\\')) {
@@ -4260,18 +4279,28 @@ fn enforce_readonly_argv_operands(
         }
         // zsh's default EQUALS option resolves an operand spelled `=cmd` to
         // that command's absolute path, so `cat =ls | wc -l` reads /bin/ls on
-        // the shell lane while the `=`-split below sees a relative value that
-        // does not exist and skips it. Refuse the spelling outright; a real
+        // the shell lane while a path check would see a relative value that
+        // does not exist and skip it. Refuse the spelling outright; a real
         // file named `=ls` is read through the bounded File actions instead.
         if token.starts_with('=') {
             return Err(ToolError::permission_denied(format!(
                 "[shell.readonly.operand.shape] Read-only Scout shell operands may not start with `=` (shell command-path expansion); refused {token:?}. Use the bounded File read/search actions for project evidence."
             )));
         }
-        let value = token
-            .split_once('=')
-            .map_or(token.as_str(), |(_, value)| value)
-            .trim();
+        // Only an option carries its path after an `=` (`--file=notes.md`).
+        // A bare operand is the whole word: the shell opens — and pathname-
+        // expands — `x=y` as one name, so judging only `y` would read a
+        // symlink spelled `x=y` under a name that does not exist, and walk
+        // the glob `a*=b*` as `b*`, which matches nothing while the shell
+        // matched `ax=b.out`.
+        let value = if token.starts_with('-') {
+            token
+                .split_once('=')
+                .map_or(token.as_str(), |(_, value)| value)
+        } else {
+            token.as_str()
+        }
+        .trim();
         // Windows `Path::canonicalize` returns verbatim device paths
         // (`\\?\C:\...`), which `Path::is_absolute` does not recognize; without
         // stripping the prefix the operand falls into the shape refusal and
@@ -4326,7 +4355,7 @@ fn enforce_readonly_argv_operands(
         }
 
         if value.contains('*') {
-            enforce_readonly_glob_operand(value, roots, effective_cwd)?;
+            enforce_readonly_glob_operand(value, roots, effective_cwd, glob_budget)?;
             continue;
         }
 
@@ -4371,11 +4400,22 @@ fn enforce_readonly_argv_operands(
 /// keyed on the directory identity plus the *remaining pattern length*: a
 /// re-entry with the same remaining pattern is a byte-for-byte repeated
 /// expansion (safe to skip), while every distinct remaining pattern is still
-/// explored, so no match the shell would produce goes unjudged.
+/// explored, so no match the shell would produce goes unjudged. The node and
+/// match counters live in the command-wide [`ReadonlyGlobBudget`], so a
+/// command cannot buy the caps once per `*` operand; the re-entry set is per
+/// operand, because its keys include that operand's remaining pattern.
+///
+/// Design note: a simpler contract — admit a glob only in the final path
+/// component, refuse `*` anywhere else — would need about half of this
+/// walker (no dedup, no node budget, no dot synthesis above the leaf). Full
+/// shell parity was kept so `cat */Cargo.toml`-shaped probes stay admitted;
+/// the price is the cycle handling above, which the measured 10 s blowup on
+/// an ancestor-pointing symlink made mandatory rather than optional.
 fn enforce_readonly_glob_operand(
     value: &str,
     roots: &[PathBuf],
     effective_cwd: &std::path::Path,
+    glob_budget: &mut ReadonlyGlobBudget,
 ) -> Result<(), ToolError> {
     let components: Vec<&str> = value
         .split('/')
@@ -4385,8 +4425,7 @@ fn enforce_readonly_glob_operand(
     let mut walk = ReadonlyGlobWalk {
         roots,
         operand: value,
-        matches: 0,
-        nodes: 0,
+        budget: glob_budget,
         #[cfg(unix)]
         entered: std::collections::HashSet::new(),
         #[cfg(not(unix))]
@@ -4395,18 +4434,30 @@ fn enforce_readonly_glob_operand(
     collect_readonly_glob_matches(effective_cwd, &components, &mut walk)
 }
 
-/// Hard bounds for one glob operand's expansion. 4096 matches covers any real
+/// Hard bounds for the glob expansion of one whole command, shared by every
+/// `*` operand in every segment and stage. 4096 matches covers any real
 /// reconnaissance probe; 50 000 visited nodes bounds patterns that descend
 /// widely but match narrowly (a deep `*/*/…/zz` over a symlink cycle would
-/// otherwise explore exponentially without producing a single match).
+/// otherwise explore exponentially without producing a single match). Shared
+/// rather than per operand because the walk is host work done before any
+/// child exists to time out: with a fresh budget per operand, a ~1 KB
+/// command of 500 `*` tokens over a 2000-entry directory bought ~25 s of
+/// admitted host CPU.
 const MAX_READONLY_GLOB_MATCHES: usize = 4096;
 const MAX_READONLY_GLOB_NODES: usize = 50_000;
+
+/// Match and node counters for one command's glob expansion, see
+/// [`MAX_READONLY_GLOB_MATCHES`].
+#[derive(Default)]
+struct ReadonlyGlobBudget {
+    matches: usize,
+    nodes: usize,
+}
 
 struct ReadonlyGlobWalk<'a> {
     roots: &'a [PathBuf],
     operand: &'a str,
-    matches: usize,
-    nodes: usize,
+    budget: &'a mut ReadonlyGlobBudget,
     /// `(device, inode, remaining-pattern-length)` of every directory entered,
     /// so a symlink cycle re-enters each `(directory, suffix)` pair once.
     #[cfg(unix)]
@@ -4421,10 +4472,10 @@ impl ReadonlyGlobWalk<'_> {
     /// the match cap. Every branch returns on the first failure, so the walk
     /// stops at the first match that cannot be proven inside the workspace.
     fn judge(&mut self, matched: &std::path::Path) -> Result<(), ToolError> {
-        self.matches += 1;
-        if self.matches > MAX_READONLY_GLOB_MATCHES {
+        self.budget.matches += 1;
+        if self.budget.matches > MAX_READONLY_GLOB_MATCHES {
             return Err(ToolError::permission_denied(format!(
-                "[shell.readonly.operand.glob_too_broad] Read-only glob operand {operand:?} expands past {MAX_READONLY_GLOB_MATCHES} matches; narrow the pattern. Use the bounded File read/search actions for project evidence.",
+                "[shell.readonly.operand.glob_too_broad] Read-only glob operand {operand:?} takes this command's glob expansion past {MAX_READONLY_GLOB_MATCHES} matches in total; narrow the pattern or use fewer glob operands. Use the bounded File read/search actions for project evidence.",
                 operand = self.operand
             )));
         }
@@ -4451,10 +4502,10 @@ impl ReadonlyGlobWalk<'_> {
     /// same keys. Non-unix hosts have no portable `(dev, ino)`; the path text
     /// stands in (junction cycles are then bounded by the node budget alone).
     fn enter(&mut self, dir: &std::path::Path, remaining: usize) -> Result<bool, ToolError> {
-        self.nodes += 1;
-        if self.nodes > MAX_READONLY_GLOB_NODES {
+        self.budget.nodes += 1;
+        if self.budget.nodes > MAX_READONLY_GLOB_NODES {
             return Err(ToolError::permission_denied(format!(
-                "[shell.readonly.operand.glob_too_broad] Read-only glob operand {operand:?} walks past {MAX_READONLY_GLOB_NODES} directories without resolving; narrow the pattern. Use the bounded File read/search actions for project evidence.",
+                "[shell.readonly.operand.glob_too_broad] Read-only glob operand {operand:?} takes this command's glob expansion past {MAX_READONLY_GLOB_NODES} directories without resolving; narrow the pattern or use fewer glob operands. Use the bounded File read/search actions for project evidence.",
                 operand = self.operand
             )));
         }

@@ -563,12 +563,14 @@ fn readonly_tokens_admitted(trimmed: &str) -> bool {
 ///   must itself be an admitted read-only command (an empty segment —
 ///   including `;;` or a trailing `;` — rejects); a bare `&` still refuses;
 ///   at most `MAX_READONLY_SEQUENCE_SEGMENTS` segments;
-/// - `cd <one relative path>` as a standalone segment or sequence prefix —
+/// - `cd <one relative path>` as any whole, unpiped sequence segment
+///   (standalone, leading, or later in the sequence; the execution seam
+///   folds each one into the working directory of the segments after it) —
 ///   never a pipeline stage, where it would run in a subshell and persist
 ///   nowhere the operand gate could follow, and never a wildcard, because
 ///   the shell would enter the first expansion while the seam judged the
 ///   spelling — with the operand additionally resolved against the
-///   workspace at the execution seam;
+///   workspace, and required to be a directory, at the execution seam;
 /// - read-only `od` dump forms (display radices plus numeric `-j`/`-N`),
 ///   piped in either direction like any other segment on BSD and GNU hosts;
 /// - pipelines `a | b`, where **every** segment must itself be an admitted

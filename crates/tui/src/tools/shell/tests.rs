@@ -1548,12 +1548,15 @@ fn readonly_glob_walk_is_bounded_by_the_match_and_node_caps() {
     let workspace = tempdir().expect("workspace");
     let big = workspace.path().join("big");
     std::fs::create_dir(&big).expect("big dir");
-    for index in 0..=super::MAX_READONLY_GLOB_MATCHES {
+    // One past the 4096-match cap, spelled as a literal on purpose: sizing
+    // the fixture from the constant would make a raised cap hang this test
+    // instead of reddening it.
+    for index in 0..4097 {
         std::fs::write(big.join(format!("f{index:05}.txt")), "x").expect("fixture file");
     }
     let roots = [workspace.path().to_path_buf()];
     let error = enforce_readonly_workspace_operands("cat big/*", &roots, workspace.path())
-        .expect_err("a 4100-match expansion must be refused by the match cap")
+        .expect_err("a 4097-match expansion must be refused by the match cap")
         .to_string();
     assert!(error.contains("glob_too_broad"), "{error}");
 
@@ -1589,6 +1592,177 @@ fn readonly_glob_walk_is_bounded_by_the_match_and_node_caps() {
         .expect_err("a walk past the node budget must be refused")
         .to_string();
     assert!(error.contains("glob_too_broad"), "{error}");
+}
+
+/// The glob caps bound the whole command, not one operand: with a fresh
+/// budget per operand, a command of many `*` tokens over a modest directory
+/// bought the caps once per token (measured at ~25 s of admitted host work
+/// for 500 tokens over 2000 entries). Each operand here expands to 70
+/// matches — far under the 4096-match cap on its own — and 60 of them
+/// together must still refuse, while 50 (3500 matches) stay admitted.
+#[test]
+fn readonly_glob_budget_is_shared_across_operands() {
+    let workspace = tempdir().expect("workspace");
+    let many = workspace.path().join("many");
+    std::fs::create_dir(&many).expect("many dir");
+    for index in 0..70 {
+        std::fs::write(many.join(format!("f{index:02}.txt")), "x").expect("fixture file");
+    }
+    let roots = [workspace.path().to_path_buf()];
+
+    let admitted = format!("cat {}", vec!["many/f*"; 50].join(" "));
+    enforce_readonly_workspace_operands(&admitted, &roots, workspace.path())
+        .expect("3500 matches across 50 operands stay under the shared budget");
+
+    let started = std::time::Instant::now();
+    let refused = format!("cat {}", vec!["many/f*"; 60].join(" "));
+    let error = enforce_readonly_workspace_operands(&refused, &roots, workspace.path())
+        .expect_err("4200 matches across 60 operands must exhaust the shared match budget")
+        .to_string();
+    assert!(error.contains("glob_too_broad"), "{error}");
+    assert!(
+        error.contains("in total"),
+        "the refusal must name the command-wide budget: {error}"
+    );
+    assert!(
+        started.elapsed() < std::time::Duration::from_secs(5),
+        "exhausting the budget must stop the walk promptly, took {:?}",
+        started.elapsed()
+    );
+
+    // The budget is one per command across segments and stages too.
+    let across = format!(
+        "cat {} | wc -l; wc -c {}",
+        vec!["many/f*"; 30].join(" "),
+        vec!["many/f*"; 30].join(" ")
+    );
+    let error = enforce_readonly_workspace_operands(&across, &roots, workspace.path())
+        .expect_err("the budget must not reset at a `|` or `;`")
+        .to_string();
+    assert!(error.contains("glob_too_broad"), "{error}");
+}
+
+/// A `cd` destination that exists but is not a directory must refuse at the
+/// gate: the shell's `cd` fails on it and `;`/`||` continue in the ORIGINAL
+/// directory, while the fold would have resolved every later operand under
+/// `notes.txt/…`, found nothing there, and skipped it — `cd notes.txt; cat
+/// link` then read a planted outside symlink at the root unjudged.
+#[cfg(unix)]
+#[test]
+fn readonly_operand_gate_refuses_cd_onto_a_regular_file() {
+    let workspace = tempdir().expect("workspace");
+    let outside = tempdir().expect("outside");
+    std::fs::write(workspace.path().join("notes.txt"), "notes").expect("regular file");
+    std::fs::write(outside.path().join("secret.txt"), "secret").expect("outside file");
+    std::os::unix::fs::symlink(
+        outside.path().join("secret.txt"),
+        workspace.path().join("link"),
+    )
+    .expect("outside symlink at the root");
+    let roots = [workspace.path().to_path_buf()];
+
+    for command in [
+        "cd notes.txt",
+        "cd notes.txt; cat link",
+        "cd notes.txt || cat link",
+        "cd notes.txt && cat link",
+        "cd notes.txt; head -c 40 link *",
+        "pwd; cd notes.txt; cat link",
+    ] {
+        let error = enforce_readonly_workspace_operands(command, &roots, workspace.path())
+            .expect_err("a non-directory cd destination must be refused before the fold")
+            .to_string();
+        assert!(
+            error.contains("cwd.not_a_directory"),
+            "{command}: expected the not-a-directory refusal, got: {error}"
+        );
+    }
+    // Positive control: the same operand under a real directory destination
+    // is judged there and admitted.
+    let sub = workspace.path().join("sub");
+    std::fs::create_dir(&sub).expect("subdir");
+    std::fs::write(sub.join("link"), "inside").expect("inside file named like the symlink");
+    enforce_readonly_workspace_operands("cd sub; cat link", &roots, workspace.path())
+        .expect("a directory destination folds and admits the inside operand");
+}
+
+/// A bare operand is judged as the whole word the shell opens. The gate used
+/// to judge only the text after the first `=`, so a symlink spelled
+/// `ax=b.out` was judged as the inside decoy `b.out` (or, with no decoy, as a
+/// nonexistent name and skipped), and the glob `a*=b*` was walked as `b*`,
+/// which matched nothing while the shell matched `ax=b.out`. Only options
+/// keep the `=` split, because `--file=path` really does carry its path after
+/// the `=`.
+#[cfg(unix)]
+#[test]
+fn readonly_operand_gate_judges_equals_bearing_operands_as_whole_words() {
+    let workspace = tempdir().expect("workspace");
+    let outside = tempdir().expect("outside");
+    std::fs::write(outside.path().join("secret.txt"), "secret").expect("outside file");
+    std::fs::write(workspace.path().join("b.out"), "decoy").expect("inside decoy");
+    std::fs::write(workspace.path().join("inside=1.txt"), "inside").expect("inside `=` name");
+    for name in ["ax=b.out", "x=nope", "x=y=z"] {
+        std::os::unix::fs::symlink(
+            outside.path().join("secret.txt"),
+            workspace.path().join(name),
+        )
+        .expect("outside symlink spelled with `=`");
+    }
+    let roots = [workspace.path().to_path_buf()];
+
+    for command in [
+        "cat ax=b.out",
+        "cat x=nope",
+        "cat x=y=z",
+        "sed -n 1p x=nope",
+        "cat a*=b* | head -c 40",
+        "pwd; cat a*=b*",
+        "cat --from=ax=b.out",
+    ] {
+        let error = enforce_readonly_workspace_operands(command, &roots, workspace.path())
+            .expect_err("an `=`-bearing operand must be judged as the word the shell opens")
+            .to_string();
+        assert!(
+            error.contains("operand.outside_workspace"),
+            "{command}: expected the outside-workspace refusal, got: {error}"
+        );
+    }
+    for command in [
+        "cat inside=1.txt",
+        "cat b.out",
+        "cat inside=1.txt | wc -l",
+        "head --lines=2 inside=1.txt",
+        "cat --from=inside=1.txt",
+    ] {
+        enforce_readonly_workspace_operands(command, &roots, workspace.path()).unwrap_or_else(
+            |error| panic!("{command}: an inside `=` name stays admitted: {error}"),
+        );
+    }
+}
+
+/// The sequence and stage splitters are deliberately naive, so a quoted
+/// separator mis-splits at the classifier; the seam's stricter `shlex` parse
+/// then rejects the unbalanced quote in one of the halves. This pins the
+/// fail-closed half of that invariant: no quoted-separator spelling reaches a
+/// shell through the operand gate.
+#[test]
+fn readonly_operand_gate_fails_closed_on_quoted_separators() {
+    let workspace = tempdir().expect("workspace");
+    std::fs::write(workspace.path().join("x"), "x").expect("inside file");
+    std::fs::write(workspace.path().join("y"), "y").expect("inside file");
+    let roots = [workspace.path().to_path_buf()];
+    for command in [
+        "cat \"x;cat y\"",
+        "wc 'x&&y'",
+        "cat \"x|cat y\"",
+        "cat 'x||y'",
+        "cat \"x;y",
+    ] {
+        enforce_readonly_workspace_operands(command, &roots, workspace.path())
+            .expect_err("a quoted separator must fail the seam's parse, never reach a shell");
+    }
+    enforce_readonly_workspace_operands("cat x; cat y", &roots, workspace.path())
+        .expect("the unquoted sequence over the same files stays admitted");
 }
 
 /// The gate refuses `cd` as a pipeline stage in its own right (the stage
@@ -1659,6 +1833,17 @@ async fn readonly_shell_refuses_pipeline_cd_and_glob_escapes_end_to_end() {
         workspace.path().join("link"),
     )
     .expect("outside symlink at the root");
+    // Round 4: a regular file as a `cd` destination (the shell's `cd` fails
+    // and `;`/`||` continue in the original directory), and an `=`-bearing
+    // name the gate used to judge by its right-hand side only — `b.out` is
+    // an inside decoy so the wrong-name judgement would have admitted it.
+    std::fs::write(workspace.path().join("notes.txt"), "notes\n").expect("regular file");
+    std::fs::write(workspace.path().join("b.out"), "decoy\n").expect("inside decoy");
+    std::os::unix::fs::symlink(
+        outside.path().join("secret.txt"),
+        workspace.path().join("ax=b.out"),
+    )
+    .expect("outside symlink spelled with `=`");
     let context = ToolContext::new(workspace.path())
         .with_shell_policy(crate::worker_profile::ShellPolicy::ReadOnly);
 
@@ -1669,6 +1854,12 @@ async fn readonly_shell_refuses_pipeline_cd_and_glob_escapes_end_to_end() {
         "cd sub && cat *",
         "cat * | head -3",
         "cat */link",
+        "cd notes.txt; cat link",
+        "cd notes.txt || cat link",
+        "cd notes.txt; head -c 40 link *",
+        "cat ax=b.out",
+        "cat a*=b* | head -c 40",
+        "pwd; cat a*=b*",
     ] {
         let result = LowercaseBashTool
             .execute(json!({"command": command}), &context)
