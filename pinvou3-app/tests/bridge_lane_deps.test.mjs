@@ -197,8 +197,11 @@ while ((m = clusterRe.exec(helpers)) !== null) {
 // a7-f-registry §6）。#746 新增 replay 结果写入器 applyToolItemResult：私有、
 // 仅参数依赖。AST 范围审计：updateToolItem 只新增该 helper；replay 另加标准
 // Map。无新簇依赖/导出/转发，REQUIRED 不变。
+// 313 → 315：isInternalUserMessage + isKnownInternalMetadataBlock 只读
+// window.PinvouBridgeMessages 经典全局与自身参数，无簇字面量新增依赖；
+// userMessageDisplayText 以 base 本地声明调用二者（回流 #782）。
 const EXPECTED_SURFACE = {
-  sharedFnCount: 313,
+  sharedFnCount: 315,
 };
 
 assert.equal(

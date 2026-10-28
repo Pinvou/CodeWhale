@@ -17,6 +17,32 @@ use std::path::PathBuf;
 use binding::LiveRemoteBinding;
 use schema::RemoteProxyRecord;
 
+/// Stable, non-sensitive failure categories; never expose paths or file bytes.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum RemoteProxyLoadFailure {
+    Unreadable,
+    Oversized,
+    Malformed,
+    UnsupportedVersion,
+    InvalidRecords,
+    ArchiveUnavailable,
+}
+
+impl std::fmt::Display for RemoteProxyLoadFailure {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            Self::Unreadable => "remote_proxy_unreadable",
+            Self::Oversized => "remote_proxy_oversized",
+            Self::Malformed => "remote_proxy_malformed",
+            Self::UnsupportedVersion => "remote_proxy_version_unsupported",
+            Self::InvalidRecords => "remote_proxy_invalid_records",
+            Self::ArchiveUnavailable => "remote_proxy_archive_unavailable",
+        })
+    }
+}
+
+impl std::error::Error for RemoteProxyLoadFailure {}
+
 #[derive(Default)]
 pub(crate) struct RemoteProxyState {
     pub(crate) records: HashMap<String, RemoteProxyRecord>,
@@ -29,6 +55,7 @@ pub(crate) struct RemoteProxyState {
     /// A failed load disables remote writes for this process. Keep the original
     /// file untouched rather than replacing unreadable history with an empty map.
     pub(super) load_failed: bool,
+    pub(super) load_failure: Option<RemoteProxyLoadFailure>,
     pub(super) archives: archive::ArchiveStore,
     /// Last successfully durable reservation total. Legacy files may exceed
     /// new admission headroom; recovery writes may reduce, never increase it.

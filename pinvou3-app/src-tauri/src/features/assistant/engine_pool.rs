@@ -1803,7 +1803,7 @@ fn entry_is_fresh(
 
 #[cfg(test)]
 #[path = "engine_pool_remote_tests.rs"]
-mod remote_snapshot_tests;
+pub(super) mod remote_snapshot_tests;
 
 #[cfg(test)]
 #[path = "engine_pool_vision_tests.rs"]

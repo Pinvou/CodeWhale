@@ -828,3 +828,177 @@ async fn fixed_remote_cancel_never_targets_a_successor_generation() {
         assert!(successor.ensure_active().is_ok());
     }
 }
+
+// Engine-only publication fixture for the adapter's joint service regression.
+// Keep protocol/service composition at remote_turn's existing boundary.
+pub(in crate::features::assistant) mod panic_owner_fixture {
+    use super::*;
+    use std::sync::atomic::AtomicUsize;
+
+    pub(in crate::features::assistant) struct PublishedEngine {
+        workspace: std::path::PathBuf,
+        store: SessionStore,
+        lifecycle: Arc<TurnLifecycle>,
+        entries: Mutex<HashMap<String, EngineEntry>>,
+        roots: SyncMutex<Vec<std::path::PathBuf>>,
+        panic_next: AtomicBool,
+        releases: AtomicUsize,
+        submissions: AtomicUsize,
+        home: TestHome,
+    }
+
+    impl PublishedEngine {
+        pub(in crate::features::assistant) fn new() -> Self {
+            let home = TestHome::new();
+            Self {
+                workspace: home.directory.path().to_owned(),
+                store: SessionStore::boot().unwrap(),
+                lifecycle: Arc::new(TurnLifecycle::default()),
+                entries: Mutex::new(HashMap::new()),
+                roots: SyncMutex::new(Vec::new()),
+                panic_next: AtomicBool::new(true),
+                releases: AtomicUsize::new(0),
+                submissions: AtomicUsize::new(0),
+                home,
+            }
+        }
+
+        pub(in crate::features::assistant) fn ledger_path(
+            &self,
+            source: &str,
+        ) -> std::path::PathBuf {
+            self.home
+                .directory
+                .path()
+                .join(format!("{source}-ledger.json"))
+        }
+
+        pub(in crate::features::assistant) async fn submit(
+            &self,
+            session_id: &str,
+            temporary: bool,
+            content: String,
+            skill_ids: Vec<String>,
+            owner: Arc<RemoteTurnOwner>,
+        ) -> std::result::Result<(), String> {
+            // The narrow adapter's default reservation seam is None. Reserve
+            // the actual lifecycle here and commit it through the production
+            // AppEngine sender, so unwind cannot pass via unsubmitted Drop.
+            let reservation = self.lifecycle.reserve().unwrap();
+            let mut model = SavedModel::builtin_llmapi();
+            model.preset = crate::platform::prefs::ModelPreset::Deepseek;
+            model.id = "panic-owner-model".into();
+            model.model = "panic-owner-wire".into();
+            model.base_url = "https://example.invalid/v1".into();
+            model.api_key = "fixture-temporary-key".into();
+            let bundle = temporary.then(|| RemoteRuntimeModelBundle::new(model, None).unwrap());
+            let options = prepare_remote_send(session_id, skill_ids, bundle, owner.clone())
+                .await
+                .unwrap();
+            let path = options.skills.as_ref().unwrap().path().to_owned();
+            self.roots.lock().push(path.clone());
+            let observed = Arc::new(SyncMutex::new(None));
+            let received = observed.clone();
+            submit_prepared_turn(
+                session_id,
+                ReservedTurnSubmission {
+                    content,
+                    mode: AppMode::Agent,
+                    persona_conversational: false,
+                    caller_restrict: false,
+                    persona_reminder: None,
+                    expert_snapshot: None,
+                    expert_candidates: vec![],
+                    reservation,
+                },
+                options,
+                |options| async move {
+                    let credentials =
+                        crate::platform::credential_store::MemoryCredentialStore::default();
+                    let (bridge, prepared, pins) = EnginePool::prepare_runtime_model_with(
+                        &self.store,
+                        &JointRuntimeProvider,
+                        &credentials,
+                        Pinvou3Bridge::test_fixture(Some(SavedModel::builtin_llmapi())),
+                        session_id,
+                        false,
+                        RuntimeModelOverrides {
+                            freeze_remote_credentials: options.policy.require_model_credentials,
+                            explicit_model: options.model,
+                            explicit_credential: options.credential,
+                            remote_bundle: options.bundle,
+                        },
+                    )
+                    .await?;
+                    let mut bridge =
+                        EnginePool::finalize_runtime_bridge(bridge, &prepared, pins).await;
+                    bridge.workspace = self.workspace.clone();
+                    bridge.remote_turn_skills = options.skills;
+                    let mut engine = AppEngine::spawn_headless(bridge).await?;
+                    // Stop the idle core before replacing only the op sender;
+                    // no fixture model turn can reach an external provider.
+                    engine.handle.send(Op::Shutdown).await?;
+                    let (sender, receiver) = tokio::sync::mpsc::channel(8);
+                    engine.handle.tx_op = sender;
+                    engine.bind_test_session(session_id, self.lifecycle.clone());
+                    let (forwarder, _) = super::forwarder();
+                    let published = publish_cold_entry(
+                        &self.entries,
+                        session_id,
+                        ColdEngineCustody::new(engine, forwarder),
+                        |engine, forwarder| super::entry(engine, forwarder, owner),
+                    )
+                    .await?;
+                    *received.lock() = Some(receiver);
+                    Ok(published)
+                },
+            )
+            .await
+            .unwrap();
+            let mut receiver = observed.lock().take().unwrap();
+            assert!(matches!(
+                receiver.recv().await,
+                Some(Op::SendMessage { .. })
+            ));
+            assert!(self.lifecycle.is_current_turn_submitted());
+            assert!(self.entries.lock().await.contains_key(session_id));
+            assert!(path.is_dir(), "published engine retains its private root");
+            self.submissions.fetch_add(1, Ordering::SeqCst);
+            if self.panic_next.swap(false, Ordering::SeqCst) {
+                panic!("fixture panic after published reserved send");
+            }
+            // A controlled terminal replaces only the absent provider/forwarder.
+            assert!(self.lifecycle.finish_once(|| {}).is_some());
+            Ok(())
+        }
+
+        pub(in crate::features::assistant) fn is_active(&self) -> bool {
+            self.lifecycle.is_active()
+        }
+
+        pub(in crate::features::assistant) async fn release(
+            &self,
+            session_id: &str,
+            owner: &Arc<RemoteTurnOwner>,
+        ) {
+            let entry = take_remote_owned_entry(&mut *self.entries.lock().await, session_id, owner)
+                .expect("the adapter must release the exact owner it published");
+            self.releases.fetch_add(1, Ordering::SeqCst);
+            // Real exact-owner selection/custody; the AppHandle-dependent
+            // terminal emitter is replaced by the real lifecycle's test seam.
+            self.lifecycle.finish_once(|| {});
+            drop(ColdEngineCustody::new(entry.engine, entry.forwarder));
+        }
+
+        pub(in crate::features::assistant) async fn assert_retired(&self) {
+            assert!(!self.lifecycle.is_active());
+            assert!(self.entries.lock().await.is_empty());
+            assert!(self.roots.lock().iter().all(|root| !root.exists()));
+        }
+
+        pub(in crate::features::assistant) fn assert_attempts(&self, count: usize) {
+            assert_eq!(self.submissions.load(Ordering::SeqCst), count);
+            assert_eq!(self.releases.load(Ordering::SeqCst), count);
+        }
+    }
+}

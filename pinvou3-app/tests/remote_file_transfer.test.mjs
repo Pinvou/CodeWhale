@@ -12,6 +12,30 @@ function file(name, content, type = 'text/plain') {
   return { name, type, size: bytes.length, arrayBuffer: async () => bytes.buffer.slice(0) };
 }
 
+// Validation consumes File metadata before reading or uploading any bytes.
+// These fixtures exercise that public validator boundary, not file transfer.
+const metadataFile = size => ({ name: 'boundary.bin', type: 'application/octet-stream', size });
+
+test('remote attachment validation accepts exactly 32 MiB in one file', () => {
+  const selected = [metadataFile(32 * 1024 * 1024)];
+  assert.deepEqual(validateRemoteFiles(selected), selected);
+});
+
+test('remote attachment validation rejects 32 MiB plus one byte in one file', () => {
+  assert.throws(() => validateRemoteFiles([metadataFile(32 * 1024 * 1024 + 1)]),
+    /remote_attachment_size_invalid/);
+});
+
+test('remote attachment validation accepts exactly 64 MiB across valid files', () => {
+  const selected = [metadataFile(32 * 1024 * 1024), metadataFile(32 * 1024 * 1024)];
+  assert.deepEqual(validateRemoteFiles(selected), selected);
+});
+
+test('remote attachment validation rejects 64 MiB plus one byte across valid files', () => {
+  const selected = [metadataFile(32 * 1024 * 1024), metadataFile(32 * 1024 * 1024), metadataFile(1)];
+  assert.throws(() => validateRemoteFiles(selected), /remote_attachment_total_size_invalid/);
+});
+
 test('failed uploads clear their own loading state without clearing a newer attempt', async () => {
   const guard = createRemoteTransferGuard();
   const first = guard.start('lease/revision-1');

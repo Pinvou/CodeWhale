@@ -804,6 +804,7 @@ async function modalWidth(page, headingText) {
   await sleep(500);
   const beforeDownloadCalls = await callCount(page, 'download_update');
   await page.click('#settings-version-update [data-settings-update-action="true"]');
+  await page.evaluate(() => window.__SETTINGS_TEST__.emit('update:progress', { downloaded: 37, total: 100 }));
   await sleep(500);
   const updateDownloadState = await page.evaluate(() => {
     const root = document.querySelector('#settings-version-update');
@@ -815,16 +816,12 @@ async function modalWidth(page, headingText) {
     };
   });
   const afterDownloadCalls = await callCount(page, 'download_update');
-  // Download progress no longer rides the update:progress frontend event (the
-  // listener was deleted); the downloading state only asserts the button
-  // entering "取消下载" and the description entering "正在下载更新" copy,
-  // without asserting a specific percentage.
-  rec('①b 设置页下载按钮进入下载态后可取消',
+  rec('①b 设置页显示下载进度并可取消',
     beforeDownloadCalls === 0
     && afterDownloadCalls === 1
     && !updateDownloadState.disabled
     && updateDownloadState.text.includes('取消下载')
-    && updateDownloadState.desc.includes('正在下载更新'),
+    && updateDownloadState.desc.includes('正在下载更新 37%'),
     JSON.stringify(updateDownloadState));
   await page.click('[data-testid="settings-section-update"]');
   await page.waitForFunction(() => !!document.querySelector('#settings-version-update'));
