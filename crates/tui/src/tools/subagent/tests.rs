@@ -8226,6 +8226,24 @@ async fn read_only_inspection_roles_cannot_write_through_text_filters() {
             posture_refusal.contains("[shell.readonly.command]"),
             "{role:?} posture refusal did not identify its failed rule: {posture_refusal}"
         );
+        // The copy is the model's only map of the grammar, and the one
+        // literal a sibling branch also rewrites: pin the load-bearing claims
+        // so a merge union that drops them reddens.
+        for claim in [
+            "Admitted families:",
+            "every segment of a sequence must individually be admitted",
+            &format!(
+                "at most {} segments",
+                crate::command_safety::MAX_READONLY_SEQUENCE_SEGMENTS
+            ),
+            "must be a directory the shell can enter",
+            "recursive `**/`",
+        ] {
+            assert!(
+                posture_refusal.contains(claim),
+                "{role:?} refusal copy lost {claim:?}: {posture_refusal}"
+            );
+        }
         assert!(
             !output_path.exists(),
             "{role:?} read-only filter created {} from {}",

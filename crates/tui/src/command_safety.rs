@@ -739,11 +739,12 @@ pub(crate) fn readonly_sequence_segments(command: &str) -> Option<Vec<&str>> {
 /// Whether an admitted read-only command must run under a shell because it
 /// names the `cd` builtin. The direct-argv lane execs a real binary, and
 /// `cd` exists as one only on some hosts (macOS ships `/usr/bin/cd`; most
-/// Linux systems do not), so any command whose leading segment is `cd` takes
-/// the shell lane pipelines already use, where the builtin always resolves.
-/// Pipeline-bearing commands route to the shell anyway; this covers a
-/// standalone or sequence-leading `cd`, whose admission would otherwise end
-/// in a not-found exec error.
+/// Linux systems do not), so any command with a `cd`-leading segment — at
+/// any position in the sequence — takes the shell lane pipelines already
+/// use, where the builtin always resolves. Pipeline-bearing and
+/// multi-segment commands route to the shell anyway; the term is
+/// load-bearing for the standalone `cd`, whose admission would otherwise
+/// end in a not-found exec error.
 pub(crate) fn agent_readonly_command_needs_shell_for_cd(command: &str) -> bool {
     readonly_sequence_segments(command).is_some_and(|segments| {
         segments.iter().any(|segment| {
@@ -1111,7 +1112,6 @@ pub(crate) fn readonly_cd_operand_admitted(target: &str) -> bool {
     }
     let candidate = std::path::Path::new(target);
     !candidate.is_absolute()
-        && !target.starts_with('~')
         && candidate
             .components()
             .all(|component| !matches!(component, std::path::Component::ParentDir))
@@ -1168,7 +1168,7 @@ fn is_agent_readonly_od(tokens: &[String]) -> bool {
 /// those stages. Over-recognition is harmless: every caller only consults the
 /// network decider or refuses the call for an agent that holds no network, and
 /// the grammar refuses the over-recognized spellings before any guard runs.
-pub(crate) fn is_github_readonly_tokens(tokens: &[String]) -> bool {
+fn is_github_readonly_tokens(tokens: &[String]) -> bool {
     let Some(start) = primary_token_index(tokens) else {
         return false;
     };
@@ -1187,7 +1187,7 @@ pub(crate) fn is_github_readonly_tokens(tokens: &[String]) -> bool {
 /// admitted GitHub read (see [`is_github_readonly_tokens`]). The execution
 /// seam's network guard splits commands into stages with the same splitters
 /// the classifier used, then consults this per stage.
-pub(crate) fn is_github_readonly_stage(stage: &str) -> bool {
+fn is_github_readonly_stage(stage: &str) -> bool {
     is_github_readonly_tokens(&shell_words(stage.trim()))
 }
 

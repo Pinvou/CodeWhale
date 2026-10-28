@@ -90,7 +90,7 @@ builder) is a supported escape hatch for *work capacity* — the child brings
 its own model, route, and step budget — but the child's authority is clamped
 against the delegating parent's live posture, not the operator's: a scout's
 builder child lands read-only with raw shell and mutating tools denied, and
-canonical `Bash` is denied to it too (only bounded-inspection roles keep the
+canonical `Bash` is denied to it too (only the bounded-inspection roles and the verifier keep the
 classified read-only shell). Delegating to obtain shell is therefore
 mechanically useless — the scout's own bounded shell (`git -C … log`,
 `find … | head`, `npm view …`, classifier-gated) is the only shell path a
@@ -98,7 +98,7 @@ read-only parent has. The bounded grammar also admits compound probes of
 those families — segments joined by `;`, `&&`, `||`, or `|`, where every
 segment must individually be admitted (e.g. `wc -c f; wc -l f`,
 `cd sub && wc -c notes.md`, `cat x | od -c`) — and a workspace-confined
-`cd <one relative path>`, standalone or as a sequence prefix.
+`cd <one relative path>` at any position in the sequence.
 Read-only is transitive through any delegation chain:
 the clamp (`ChildAuthority::clamp` in `fleet/exact.rs`) intersects every
 field with the narrower side, the deny-list union means a descendant can

@@ -1926,8 +1926,8 @@ async fn readonly_shell_refuses_pipeline_cd_and_glob_escapes_end_to_end() {
         workspace.path().join("link"),
     )
     .expect("outside symlink at the root");
-    // Round 4: a regular file as a `cd` destination (the shell's `cd` fails
-    // and `;`/`||` continue in the original directory), and an `=`-bearing
+    // A regular file as a `cd` destination (the shell's `cd` fails and
+    // `;`/`||` continue in the original directory), and an `=`-bearing
     // name the gate used to judge by its right-hand side only — `b.out` is
     // an inside decoy so the wrong-name judgement would have admitted it.
     std::fs::write(workspace.path().join("notes.txt"), "notes\n").expect("regular file");
