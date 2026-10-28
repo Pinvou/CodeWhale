@@ -16,6 +16,35 @@ SPEC.loader.exec_module(RUNNER)
 
 
 class FinancialPostgresRunnerTests(unittest.TestCase):
+    def test_registration_compensation_selects_every_database_and_business_case(self):
+        root = "TestRegistrationCompensationDatabaseErrorIdentityPostgres"
+        required = {
+            "operation-read", "absence-proof-read", "completion-write",
+            "missing-completion-remains-business-rejection",
+            "noncompensable-registration-remains-rejected",
+        }
+        self.assertIn(root, RUNNER.ACCOUNT_REQUIRED)
+        self.assertEqual(RUNNER.EXACT_REQUIRED_CHILDREN.get(root), required)
+        self.run_main_fixture()
+        command = self.fixture_commands[self.fixture_phases.index("owner-account")]
+        self.assertIn(root, command[command.index("-run") + 1])
+        package = RUNNER.ACCOUNT_PACKAGE
+        events = self.events({root}, package, children=True)
+        options = {"package": package, "require_children": True, "exact_roots": True}
+        RUNNER.verify_results(events, {root}, **options)
+        invalid_events = [
+            [],
+            [e for e in events if not (e.get("Test") == root and e.get("Action") == "run")],
+            [e for e in events if "/" not in e.get("Test", "")],
+            events + [{"Action": "skip", "Package": package, "Test": root}],
+            events + [{"Action": "skip", "Package": package, "Test": root + "/operation-read"}],
+            events + [{"Action": "fail", "Package": package, "Test": root + "/operation-read"}],
+        ]
+        invalid_events.extend([e for e in events if e.get("Test") != root + "/" + child] for child in required)
+        for invalid in invalid_events:
+            with self.subTest(events=len(invalid)), self.assertRaises(RuntimeError):
+                RUNNER.verify_results(invalid, {root}, **options)
+
     def test_duplicate_forced_refund_requires_all_four_order_and_proof_cases(self):
         root = "TestLedgerRepairAuthorityDuplicateForcedRefundPostgres"
         self.assertIn(root, RUNNER.BILLING_CHILD_REQUIRED)
@@ -919,6 +948,7 @@ class FinancialPostgresRunnerTests(unittest.TestCase):
             "TestRegistrationCreateDispatchRuntimePostgres",
     "TestRegistrationUnknownInspectionPostgres",
             "TestRegistrationIdentityRejectionRuntimePostgres",
+            "TestRegistrationCompensationDatabaseErrorIdentityPostgres",
             "TestPlatformRoleManagementRuntimePostgres",
             "TestUserCodeLookupRuntimePostgres",
             "TestAuditSearchOriginalMigrationRuntimePostgres",

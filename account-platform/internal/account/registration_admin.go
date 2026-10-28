@@ -203,7 +203,13 @@ func (r *PostgresRepository) CompleteRegistrationCompensation(ctx context.Contex
 		return err
 	}
 	operation, err := compensationProof(ctx, tx, operationID, r.now())
-	if err != nil || operation.Status != "COMPENSATION_PENDING" {
+	if errors.Is(err, ErrNotFound) {
+		return ErrRegistrationCompensationForbidden
+	}
+	if err != nil {
+		return err
+	}
+	if operation.Status != "COMPENSATION_PENDING" {
 		return ErrRegistrationCompensationForbidden
 	}
 	now := r.now()
@@ -211,7 +217,10 @@ func (r *PostgresRepository) CompleteRegistrationCompensation(ctx context.Contex
 UPDATE registration_operations SET status='COMPENSATED',lease_expires_at=NULL,next_retry_at=$2,
 last_error_code='IDENTITY_DISABLED_AND_PROOF_CONFIRMED',version=version+1,updated_at=$2
 WHERE id=$1 AND status='COMPENSATION_PENDING'`, operationID, now)
-	if err != nil || command.RowsAffected() != 1 {
+	if err != nil {
+		return err
+	}
+	if command.RowsAffected() != 1 {
 		return ErrRegistrationCompensationForbidden
 	}
 	if err := appendAudit(ctx, tx, actorID, principal.SessionID, nil, "registration.compensation.complete", "registration_operation", operationID.String(), "SUCCEEDED", map[string]any{"identity_disabled": true, "reservation_released": true}); err != nil {
@@ -234,7 +243,10 @@ func compensationProof(ctx context.Context, tx pgx.Tx, operationID uuid.UUID, no
  OR EXISTS(SELECT 1 FROM identities WHERE subject=$4)
  OR EXISTS(SELECT 1 FROM wallet_provisioning_jobs WHERE user_id=$1)
  OR EXISTS(SELECT 1 FROM outbox_events WHERE aggregate_id=$1)`, operation.CandidateUserID, operation.Username, operation.Mobile, operation.IdentitySubject).Scan(&factsExist)
-	if err != nil || factsExist {
+	if err != nil {
+		return RegistrationOperation{}, err
+	}
+	if factsExist {
 		return RegistrationOperation{}, ErrRegistrationCompensationForbidden
 	}
 	return operation, nil

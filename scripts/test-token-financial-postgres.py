@@ -66,6 +66,7 @@ ACCOUNT_REQUIRED = {
     "TestRegistrationCreateDispatchRuntimePostgres",
     "TestRegistrationUnknownInspectionPostgres",
     "TestRegistrationIdentityRejectionRuntimePostgres",
+    "TestRegistrationCompensationDatabaseErrorIdentityPostgres",
     "TestPlatformRoleManagementRuntimePostgres",
     "TestUserCodeLookupRuntimePostgres",
     "TestAuditSearchOriginalMigrationRuntimePostgres",
@@ -196,6 +197,13 @@ BILLING_LEAF_REQUIRED = {
 }
 BILLING_CHILD_REQUIRED = RETAINED_REQUIRED - BILLING_LEAF_REQUIRED
 EXACT_REQUIRED_CHILDREN = {
+    "TestRegistrationCompensationDatabaseErrorIdentityPostgres": {
+        "operation-read",
+        "absence-proof-read",
+        "completion-write",
+        "missing-completion-remains-business-rejection",
+        "noncompensable-registration-remains-rejected",
+    },
     "TestLedgerRepairAuthorityDuplicateForcedRefundPostgres": {
         "reverse=false/available=false",
         "reverse=false/available=true",
