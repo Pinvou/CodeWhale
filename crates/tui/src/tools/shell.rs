@@ -5303,7 +5303,7 @@ impl ToolSpec for BashTool {
 
     fn description(&self) -> &'static str {
         if self.read_only {
-            "Inspect the workspace with the bounded read-only command subset. Single commands run directly as argv; pipelines (`a | b`), `;`/`&&`/`||` sequences, and cd-prefixed commands run through the detected shell instead (a `set -o pipefail` prefix is prepended on POSIX shells; a standalone `cd` affects only that one command). Only action=run plus command, cwd, and timeout_ms are accepted."
+            "Inspect the workspace with the bounded read-only command subset. Single commands run directly as argv; pipelines (`a | b`), `;`/`&&`/`||` sequences, and cd-prefixed commands run through the detected shell instead (a `set -o pipefail` prefix is prepended on POSIX shells; `;`-sequences are refused on a cmd.exe host, which cannot bind them; a standalone `cd` affects only that one command). Only action=run plus command, cwd, and timeout_ms are accepted."
         } else {
             guidance::description()
         }

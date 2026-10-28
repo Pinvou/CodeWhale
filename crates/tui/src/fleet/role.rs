@@ -193,7 +193,7 @@ impl FleetRole {
                 "Lands focused code changes cleanly with the minimum surrounding edit."
             }
             Self::Verifier => {
-                "Runs the built-in verification gates with test-selection arguments, plus a bounded read-only shell for evidence gathering; cannot execute custom commands — use a write-capable role for those."
+                "Runs the built-in verification gates with test-selection arguments, plus — for in-session delegations — a bounded read-only shell for evidence gathering; cannot execute custom commands — use a write-capable role for those."
             }
             Self::Consultant => {
                 "Read-only high-reasoning counsel for judgement calls and design critique."
