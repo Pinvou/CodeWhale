@@ -72,6 +72,7 @@ ACCOUNT_REQUIRED = {
     "TestDeliveredPlatformPermissionsPostgres",
     "TestTokenApprovalRecentAuthenticationPostgres",
     "TestTokenApprovalRecentAuthenticationLegacyWriterPostgres",
+    "TestTokenAuthorizationWriterToBillingNonTargetPostgres",
     "TestOwnerCombinedActualHTTPPostgres",
     "TestApprovalRecoveryQueryAllRegisteredCommandsPostgres",
     "TestApprovalRecoveryQueryForwardMigrationPostgres",

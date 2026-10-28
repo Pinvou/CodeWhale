@@ -225,6 +225,15 @@ continuity, and service readiness. Preserve existing rules and credentials;
 adding proxy trust is a separate decision. Full release acceptance also checks
 the database ledgers, governance and credential boundaries.
 
+The authorization subject is shared by Billing and Token. Each Billing durable
+must acknowledge a verified Token authorization as a non-target delivery,
+without observing or executing Billing domain state. Verify the authoritative
+Account route, wire binding, digest and delivery metadata before that ACK;
+Billing-specific target checks apply only to Billing commands. An invalid route
+or mismatched digest must remain pending rather than being acknowledged. Check
+this cross-workload behavior as well as ordinary container readiness: a healthy
+process alone does not show that the shared authorization stream can drain.
+
 ## Isolated acceptance
 
 Point `PINVOU_TEST_SCHEMA_DATABASE_URL` at an explicitly owned, disposable
