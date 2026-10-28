@@ -6663,6 +6663,10 @@ async function checkDependencies() { return pinvouSharedweb().checkDependencies(
     var current = state.voiceInput || {};
     var operation = voiceOperations.get(current.operationId);
     if (!operation || operation.telemetryTerminal) return;
+    // Clearing the viewed session's composer must not terminate a result
+    // recorded for another materialized session: its notice and adoption
+    // provenance would silently vanish on return.
+    if (operation.sessionId && operation.sessionId !== state.activeSessionId) return;
     trackVoiceTerminal("voice_cancelled", operation, {
       stage: stage || "recognition", durationMs: voiceDurationMs(operation),
     });
@@ -6875,6 +6879,13 @@ function downsamplePcm(samples, sourceRate, targetRate) { return pinvouSharedweb
         durationMs: Math.max(0, Date.now() - Number(session.recognitionStartedAt || session.startedAt)),
         recognizerType: "local",
       });
+      if (session.telemetryTerminal) {
+        // Abandoned mid-pipeline (the composer draft was cleared): the result
+        // must neither land in the cleared draft nor leave the UI stuck on an
+        // active status until the next recording.
+        setVoiceInputStatus("idle", { message: "", operationId: null });
+        return;
+      }
       session.voiceResultReady = true;
       if (typeof session.writeback === "function") {
         await session.writeback(text, session.draftBeforeStart, {
@@ -6906,7 +6917,10 @@ function downsamplePcm(samples, sourceRate, targetRate) { return pinvouSharedweb
         // that terminal cancelled state with completed.
         if (activeVoiceInput !== session) return;
       }
-      if (session.telemetryTerminal) return;
+      if (session.telemetryTerminal) {
+        setVoiceInputStatus("idle", { message: "", operationId: null });
+        return;
+      }
       setVoiceInputStatus("completed", {
         message: mode === "task" ? (bt("voiceTaskSent") || bt("voiceWritten")) : bt("voiceWritten"),
         mode,
