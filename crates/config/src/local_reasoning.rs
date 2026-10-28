@@ -194,7 +194,7 @@ mod tests {
             (
                 "DeepSeek-V4-Flash-Vision-Exp",
                 [
-                    Some("low"),
+                    None,
                     Some("low"),
                     Some("high"),
                     Some("high"),
