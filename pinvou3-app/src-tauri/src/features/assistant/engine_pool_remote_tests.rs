@@ -865,7 +865,7 @@ pub(in crate::features::assistant) mod panic_owner_fixture {
             // the actual lifecycle here and commit it through the production
             // AppEngine sender, so unwind cannot pass via unsubmitted Drop.
             let reservation = self.lifecycle.reserve().unwrap();
-            let mut model = SavedModel::builtin_llmapi();
+            let mut model = SavedModel::builtin_account_platform();
             model.preset = crate::platform::prefs::ModelPreset::Deepseek;
             model.id = "panic-owner-model".into();
             model.model = "panic-owner-wire".into();
@@ -899,7 +899,7 @@ pub(in crate::features::assistant) mod panic_owner_fixture {
                         &self.store,
                         &JointRuntimeProvider,
                         &credentials,
-                        Pinvou3Bridge::test_fixture(Some(SavedModel::builtin_llmapi())),
+                        Pinvou3Bridge::test_fixture(Some(SavedModel::builtin_account_platform())),
                         session_id,
                         false,
                         RuntimeModelOverrides {
