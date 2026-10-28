@@ -9,6 +9,9 @@ use super::schema::{
 };
 use crate::features::sessions::{SessionKind, SessionStore};
 
+#[path = "archive_lifecycle_tests.rs"]
+mod archive_lifecycle;
+
 fn context() -> LiveRemoteContext {
     LiveRemoteContext {
         peer_id: "authenticated-peer".into(),
