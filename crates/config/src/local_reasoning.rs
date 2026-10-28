@@ -141,18 +141,58 @@ mod tests {
     #[test]
     fn every_reviewed_tier_and_legacy_alias_has_a_valid_wire_value() {
         let fixtures = [
-            ("Qwen3.8-27B-NVFP4", vec!["low", "medium", "xhigh"]),
-            ("GLM-5.3-Flash-NVFP4", vec!["low", "high", "max"]),
-            ("DeepSeek-V4-Flash-Vision-Exp", vec!["low", "high", "max"]),
+            (
+                "Qwen3.8-27B-NVFP4",
+                [
+                    None,
+                    Some("low"),
+                    Some("medium"),
+                    Some("xhigh"),
+                    Some("xhigh"),
+                    Some("xhigh"),
+                ],
+            ),
+            (
+                "GLM-5.3-Flash-NVFP4",
+                [
+                    Some("low"),
+                    Some("low"),
+                    Some("high"),
+                    Some("high"),
+                    Some("max"),
+                    Some("max"),
+                ],
+            ),
+            (
+                "DeepSeek-V4-Flash-Vision-Exp",
+                [
+                    Some("low"),
+                    Some("low"),
+                    Some("high"),
+                    Some("high"),
+                    Some("max"),
+                    Some("max"),
+                ],
+            ),
         ];
-        for (model, supported) in fixtures {
-            for effort in ["off", "low", "medium", "high", "max", "xhigh"] {
+        for (model, expected) in fixtures {
+            for (effort, wire) in ["off", "low", "medium", "high", "max", "xhigh"]
+                .into_iter()
+                .zip(expected)
+            {
                 let mut body = json!({});
                 apply_local_reasoning_controls(&mut body, ProviderKind::Vllm, model, Some(effort));
                 assert!(body.get("reasoning_effort").is_none());
-                if let Some(wire) = body["chat_template_kwargs"]["reasoning_effort"].as_str() {
-                    assert!(supported.contains(&wire), "{model}: {effort} -> {wire}");
-                }
+                assert_eq!(
+                    body["chat_template_kwargs"]["reasoning_effort"].as_str(),
+                    wire,
+                    "{model}: {effort}"
+                );
+                assert_eq!(
+                    body["chat_template_kwargs"]["enable_thinking"],
+                    wire.is_some(),
+                    "{model}: {effort}"
+                );
             }
         }
     }
