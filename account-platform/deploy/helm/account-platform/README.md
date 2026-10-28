@@ -155,15 +155,49 @@ The three SQL migration hooks do not provision it, and
 it is not a first-install bootstrap switch. Keycloak's management readiness
 probe alone does not establish that application login or JWKS is available.
 
-For a fresh Keycloak database, complete the separately authorized first import
-using the reviewed realm object from the
-[offline production realm bootstrap bundle](../../keycloak/README.md#offline-production-realm-bootstrap-bundle),
-then follow that document's controlled realm/client provisioning and readback.
-Keep the upgrade hook disabled until its existing-realm prerequisites are met.
-Do not expose application login until this handoff is complete. The bundle
-wrapper and development realm are not production import documents; do not
-overwrite a retained realm or import development users. Existing and external
-Keycloak installations retain their reviewed realm and provisioning workflow.
+For `production-new`, keep `keycloak.realmUpgradeEnabled=true` as required by
+its schema. Complete this independently authorized bootstrap **before
+`helm install`**; missing prerequisites or readback must stop installation.
+The default `keycloak.enabled=true` bundled topology remains unchanged.
+
+1. Bind the private bootstrap instance to the same existing PostgreSQL database
+   and reviewed `images.keycloak.repository:tag` image as the release. Use this
+   repository's SPI/theme image and `KC_DB=postgres`. Its `KC_DB_URL`,
+   `KC_DB_USERNAME` and `KC_DB_PASSWORD` must match `global.runtimeSecret` keys
+   `keycloak-database-url`, `keycloak-database-username` and
+   `keycloak-database-password`. Obtain them from their existing controlled
+   source; the chart-owned ExternalSecret may not exist before installation.
+   Credentials remain in private configuration, not arguments or logs.
+2. Only for an independently verified fresh database with no retained `pinvou`
+   realm, review the
+   [offline production realm bootstrap bundle](../../keycloak/README.md#offline-production-realm-bootstrap-bundle).
+   Match its client IDs, audience and Portal origin to the release values;
+   extract only its `realm` object to a controlled `pinvou-realm.json` file.
+   With no other instance using that fresh database, mount it read-only at
+   `/opt/keycloak/data/import/pinvou-realm.json` in the approved image. Apply the
+   existing private first-bootstrap administrator, hostname and TLS settings,
+   then run `/opt/keycloak/bin/kc.sh start --optimized --import-realm` in an
+   independently controlled private instance, without exposing application
+   traffic. The pinned
+   [Keycloak startup import](https://github.com/keycloak/keycloak/blob/26.7.0/docs/guides/server/importExport.adoc)
+   skips an existing realm; a skip is not evidence that its state is correct.
+   The bundle wrapper and development realm are not production import documents.
+3. On that private instance, complete the existing
+   [realm/client provisioning and readback](../../keycloak/README.md#realm-and-client-provisioning)
+   with the controlled administrator/client-secret files. Explicitly match
+   desktop/Portal client IDs, audiences and origin to the release values; verify
+   the `pinvou` realm, desktop client and provisioning readback. Stop only the
+   temporary instance, retaining the same database and evidence. Only then
+   install the release with the hook enabled. Its `post-install,post-upgrade`
+   updater consumes runtime Secret keys `keycloak-realm-upgrade-admin-username`,
+   `keycloak-realm-upgrade-admin-password` and `keycloak-provisioner-client-secret`
+   from the corresponding controlled bootstrap inputs. It updates an existing
+   realm and does not replace this pre-install import/readback.
+
+Retained and external Keycloak realms keep their existing controlled update and
+readback workflow: do not run a fresh import, recreate the database, overwrite
+retained realms or import development users. No application traffic may be
+exposed before the handoff and acceptance below are complete.
 
 Before enabling application traffic, verify that the public discovery issuer
 exactly matches `oidc.issuer`, the configured JWKS endpoint serves the intended
