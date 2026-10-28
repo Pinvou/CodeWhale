@@ -14,12 +14,20 @@ const remoteTaskCommandSource = fs.readFileSync(
   'utf8',
 );
 
-function installFeature(onInvoke, timers = { setTimeout, clearTimeout }) {
+function installFeature(onInvoke, withUploadLimit = true, timers = { setTimeout, clearTimeout }) {
+  // Union of two test-helper extensions: this branch passes `false` to skip the
+  // shared upload-limit sandbox, while main's capability-retry tests pass the
+  // timers object positionally.
+  if (withUploadLimit && typeof withUploadLimit === 'object') {
+    timers = withUploadLimit;
+    withUploadLimit = true;
+  }
   const root = { __PINVOU_TAURI_BRIDGE_FEATURES__: {} };
   const sandbox = { window: root, TextEncoder, Date: timers.Date || Date,
     setTimeout: timers.setTimeout, clearTimeout: timers.clearTimeout };
   vm.createContext(sandbox);
   vm.runInContext(read('features/remote-control/remote-control-state.js'), sandbox);
+  if (withUploadLimit) vm.runInContext(read('shared/chunked-file-upload.js'), sandbox);
   vm.runInContext(read('platform/tauri/bridge/desktop-remote-control.js'), sandbox);
   const calls = [];
   const listeners = new Map();
@@ -44,6 +52,21 @@ function installFeature(onInvoke, timers = { setTimeout, clearTimeout }) {
   });
   return { feature, calls, state, listeners, logic: root.__PINVOU_REMOTE_CONTROL_STATE__ };
 }
+
+test('attachment bridge uses the shared boundary and fails closed without it', async () => {
+  const onInvoke = command => command === 'desktop_remote_action_a'
+    ? Promise.resolve({ transfer_id: 't', chunk_bytes: 1, total_bytes: 20 * 1024 * 1024 }) : undefined;
+  const { feature, calls } = installFeature(onInvoke);
+  const args = ['remote-1', 'ref-1', 'task-1', 'a.bin', 'application/octet-stream'];
+  const digest = 'a'.repeat(64);
+  await feature.attachmentBegin(...args, 20 * 1024 * 1024, digest);
+  assert.equal(calls.filter(call => call.command === 'desktop_remote_action_a').length, 1);
+  await assert.rejects(feature.attachmentBegin(...args, 32 * 1024 * 1024, digest), { code: 'remote_attachment_size_invalid' });
+  assert.equal(calls.filter(call => call.command === 'desktop_remote_action_a').length, 1);
+  const missing = installFeature(onInvoke, false);
+  await assert.rejects(missing.feature.attachmentBegin(...args, 1, digest), { code: 'remote_attachment_size_invalid' });
+  assert.equal(missing.calls.filter(call => call.command === 'desktop_remote_action_a').length, 0);
+});
 
 function bindProxy(logic, state, remoteRef, sessionId) {
   const live = state.controllerConnection;
@@ -785,6 +808,23 @@ test('unknown attachment actions are fenced rather than replayed as new uploads'
   const before = calls.length;
   await assert.rejects(feature.attachmentBegin('remote-1', 'ref-1', 'task-2', 'big.bin', 'application/octet-stream', 20 * 1024 * 1024 + 1, digest), { code: 'remote_attachment_size_invalid' });
   assert.equal(calls.length, before);
+});
+
+test('unconfirmed begin IPC result fences the upload batch across task identities', async () => {
+  const { uploadRemoteFiles } = await import('../src/features/remote-control/remote-file-transfer.mjs');
+  const { feature, calls, state } = installFeature(command => {
+    if (command === 'desktop_remote_action_a') return Promise.reject('result_unknown');
+    return undefined;
+  });
+  await new Promise(resolve => setTimeout(resolve, 0));
+  state.desktopRemoteControl.controllerConnection = { connectionId: 'ipc-begin', controllerLeaseId: 'lease', leaseEpoch: '1', relayEpoch: 'relay', generation: 'generation' };
+  const bytes = new TextEncoder().encode('x');
+  const file = { name: 'a.txt', type: 'text/plain', size: 1, arrayBuffer: async () => bytes.buffer.slice(0) };
+  const binding = { localSessionId: 'ipc-local', remoteRef: 'ipc-ref' };
+  const options = { ownerIdentity: 'owner', leaseIdentity: 'ipc-begin-lease', isCurrent: () => true };
+  await assert.rejects(uploadRemoteFiles(feature, binding, 'task-1', [file], () => {}, options), { code: 'result_unknown' });
+  await assert.rejects(uploadRemoteFiles(feature, binding, 'task-2', [file], () => {}, options), { code: 'remote_attachment_fenced' });
+  assert.equal(calls.filter(call => call.command === 'desktop_remote_action_a').length, 1);
 });
 
 test('attachment action saturation blocks the same lease and resets on a new lease', async () => {

@@ -186,11 +186,11 @@ impl DesktopRemoteActionState {
         if ok && pending.operation == "attachment_begin" {
             let (Some(task_id), Some(transfer_id)) = (
                 pending.task_id.as_deref(),
-                body.get("transfer_id").and_then(Value::as_str),
+                body.get("transfer_id")
+                    .and_then(Value::as_str)
+                    .filter(|id| !id.is_empty()),
             ) else {
-                let _ = pending
-                    .reply
-                    .send(Err("remote_attachment_unconfirmed".into()));
+                let _ = pending.reply.send(Err("result_unknown".into()));
                 return true;
             };
             if inner.uploads.len() < MAX_UPLOAD_RECEIPTS && !inner.uploads.contains_key(transfer_id)

@@ -2603,6 +2603,8 @@ dictJa["remoteConversation"] = {
   addAttachment: "リモート添付を追加",
   attachmentCountInvalid: "リモート添付を 1～8 個選択してください。",
   attachmentSizeInvalid: "各添付は空でなく、20 MiB 以下である必要があります。",
+  attachmentFenced: "このセッションの以前の添付アップロードは未確認のため、今回のアップロードは開始されませんでした。操作対象端末を確認してから切断し、新しい接続を確立して再試行してください。",
+  attachmentCapacity: "添付アップロードの記録が上限に達したため、今回は開始されませんでした。以前のアップロードを確認してから再接続してください。",
   chatOpenFailed: "リモート会話を自動で開けませんでした。",
   sessionOpenFailed: "タスクを受信した会話を自動で開けませんでした。",
   openAgain: "もう一度開く",

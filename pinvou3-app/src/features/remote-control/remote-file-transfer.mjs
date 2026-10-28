@@ -1,6 +1,8 @@
-// B's staged attachment ingestion has a 20 MiB per-file bound. Artifact
+import '../../shared/chunked-file-upload.js';
+
+// B's staged attachment ingestion shares the device upload limit. Artifact
 // downloads use an independent transfer limit below.
-const MAX_FILE_BYTES = 20 * 1024 * 1024;
+const MAX_FILE_BYTES = (typeof window !== 'undefined' ? window : globalThis).PinvouChunkedFileUpload.MAX_FILE_BYTES;
 const MAX_TOTAL_BYTES = 64 * 1024 * 1024;
 const MAX_FILES = 8;
 // Downloads have their own 32 MiB transfer bound. Without it a misbehaving or compromised B
@@ -124,9 +126,20 @@ export async function uploadRemoteFiles(api, binding, taskId, files, onProgress 
   // Abandoning a task does not prove an uncertain upload was absent. Fence the
   // binding across task IDs, including reselected File objects, until the
   // connection changes or the exact completed batch is safely retired.
-  if (previous || Array.from(uploadAttempts.values()).some(attempt =>
+  const matching = Array.from(uploadAttempts.values()).find(attempt =>
     attempt.lease === lease && attempt.localSessionId === binding.localSessionId
-    && attempt.remoteRef === binding.remoteRef) || uploadAttempts.size >= MAX_UPLOAD_ATTEMPTS) throw uncertainUpload();
+    && attempt.remoteRef === binding.remoteRef);
+  if (previous?.state === 'unknown' || matching?.state === 'unknown') {
+    const error = new Error('remote_attachment_fenced');
+    error.code = 'remote_attachment_fenced';
+    throw error;
+  }
+  if (previous || matching) throw uncertainUpload();
+  if (uploadAttempts.size >= MAX_UPLOAD_ATTEMPTS) {
+    const error = new Error('remote_attachment_capacity');
+    error.code = 'remote_attachment_capacity';
+    throw error;
+  }
   const attempt = { state: 'uploading', knownIds: [], files: selected, lease,
     localSessionId: binding.localSessionId, remoteRef: binding.remoteRef };
   uploadAttempts.set(key, attempt);

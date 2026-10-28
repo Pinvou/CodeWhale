@@ -1359,7 +1359,11 @@
     }
 
     function attachmentBegin(localSessionId, remoteRef, taskId, fileName, mimeType, totalBytes, sha256) {
-      if (Number.isSafeInteger(totalBytes) && totalBytes > 20 * 1024 * 1024) {
+      var maxFileBytes = root.PinvouChunkedFileUpload && root.PinvouChunkedFileUpload.MAX_FILE_BYTES;
+      if (!Number.isSafeInteger(maxFileBytes) || maxFileBytes <= 0) {
+        return Promise.reject(asBoundedError("remote_attachment_size_invalid"));
+      }
+      if (Number.isSafeInteger(totalBytes) && totalBytes > maxFileBytes) {
         return Promise.reject(asBoundedError("remote_attachment_size_invalid"));
       }
       if (!requiredOpaqueId(taskId) || typeof fileName !== "string" || typeof mimeType !== "string"

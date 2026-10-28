@@ -2604,6 +2604,8 @@ dictEn["remoteConversation"] = {
   addAttachment: "Add remote attachment",
   attachmentCountInvalid: "Select 1–8 remote attachments.",
   attachmentSizeInvalid: "Each attachment must be nonempty and no larger than 20 MiB.",
+  attachmentFenced: "A previous attachment upload for this session is unconfirmed; this upload did not start. Check the controlled device, then disconnect and establish a new connection before trying again.",
+  attachmentCapacity: "The attachment upload record limit has been reached; this upload did not start. Check earlier uploads before reconnecting.",
   chatOpenFailed: "Could not open the remote conversation automatically.",
   sessionOpenFailed: "Could not open the session that received the task.",
   openAgain: "Open again",

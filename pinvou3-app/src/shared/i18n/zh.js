@@ -2577,6 +2577,8 @@ dictZh["remoteConversation"] = {
   addAttachment: "添加远程附件",
   attachmentCountInvalid: "请选择 1–8 个远程附件。",
   attachmentSizeInvalid: "每个附件必须非空且不超过 20 MiB。",
+  attachmentFenced: "此会话的附件上传结果尚未确认，新上传未开始。请先在被控端核对，再断开并建立新连接后重试。",
+  attachmentCapacity: "附件上传记录已达上限，本次上传未开始。请先核对之前的上传，再重新连接。",
   chatOpenFailed: "无法自动打开远程会话页面。",
   sessionOpenFailed: "无法自动打开收到任务的会话。",
   openAgain: "重新打开",

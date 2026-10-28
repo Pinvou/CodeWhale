@@ -214,7 +214,9 @@ function remoteActionFailureCode(failure) {
 function remoteActionFailureCopyKey(code) {
   switch (code) {
     case 'result_unknown': return 'actionResultUnknown';
+    case 'remote_attachment_fenced': return 'attachmentFenced';
     case 'remote_attachment_count_invalid': return 'attachmentCountInvalid';
+    case 'remote_attachment_capacity': return 'attachmentCapacity';
     case 'remote_attachment_size_invalid': return 'attachmentSizeInvalid';
     case 'transfer_size_invalid': return 'attachmentSizeInvalid';
     case 'remote_attachment_total_size_invalid': return 'attachmentTotalSizeInvalid';

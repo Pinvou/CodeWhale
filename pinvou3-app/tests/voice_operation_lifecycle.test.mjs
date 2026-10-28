@@ -762,7 +762,7 @@ for (const lane of ['desktop', 'web']) {
           controlledSession: { sessionId: null },
           remoteChatActive: false, remoteConnection: null, remoteLinkReady: false,
           remoteSessionBusy: false, remoteTranscriptActive: false,
-          remoteSendIdentity: '', remoteComposerIdentity: '',
+          remoteSendIdentity: '', remoteComposerIdentity: '', remoteUploadLeaseIdentity: null,
           remoteTransferGuard: null, effectiveRemoteModelSource: null, remoteBinding: null,
           remoteFiles: [], remoteNewDispatchReady: false, remoteProxyHistory: null,
           remoteModelError: null, remoteModelSource: 'controlled_device',

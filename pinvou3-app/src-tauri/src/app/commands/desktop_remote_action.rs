@@ -544,6 +544,29 @@ mod tests {
     }
 
     #[test]
+    fn accepted_begin_without_transfer_id_is_unknown() {
+        for body in [
+            json!({}),
+            json!({"transfer_id": ""}),
+            json!({"transfer_id": 42}),
+        ] {
+            let state = DesktopRemoteActionState::default();
+            let mut reply = register(
+                &state,
+                "request-missing-id",
+                "attachment_begin",
+                Some("task-1"),
+                None,
+            );
+            settle(
+                &state,
+                json!({"request_id":"request-missing-id", "session_id":"remote-0001", "operation":"attachment_begin", "ok":true, "body":body}),
+            );
+            assert_eq!(reply.try_recv().unwrap(), Err("result_unknown".into()));
+        }
+    }
+
+    #[test]
     fn clear_all_drops_pending_waiters() {
         let state = DesktopRemoteActionState::default();
         let mut receiver = register(&state, "request-1", "permission_list", Some("task-1"), None);
