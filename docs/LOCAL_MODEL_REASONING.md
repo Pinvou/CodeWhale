@@ -16,7 +16,9 @@ Qwen3.8's `high` preference is a legacy name for its deepest tier and now sends
 thinking switch no longer receive fictitious effort levels. GLM and DeepSeek
 legacy `medium` preferences use their middle supported level, `high`. A stale
 `off` preference on the latter always-thinking ladders normalizes to `low`.
-The registry records source revisions and legacy aliases; normalization does
+Model-specific effort travels in `chat_template_kwargs.reasoning_effort`; the
+top-level effort is omitted so older OpenAI schemas cannot reject xhigh/max
+before the template is rendered. The registry records source revisions and legacy aliases; normalization does
 not rewrite saved settings.
 
 The canonical served model ID must match a reviewed name family (an optional

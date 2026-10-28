@@ -98,14 +98,10 @@ pub fn apply_local_reasoning_controls(
             kwargs.remove("reasoning_effort");
         }
     }
-    match &spec.wire[tier] {
-        Some(wire) => {
-            object.insert("reasoning_effort".into(), json!(wire));
-        }
-        None => {
-            object.remove("reasoning_effort");
-        }
-    }
+    // Template effort is an extension, not a promise about the server's
+    // top-level OpenAI enum. Older vLLM schemas reject max/xhigh before
+    // rendering. Both reviewed vLLM/SGLang routes accept template kwargs.
+    object.remove("reasoning_effort");
 }
 
 #[cfg(test)]
@@ -133,7 +129,7 @@ mod tests {
             let mut body = json!({"model":model,"messages":[{"role":"user","content":"hello"}],"max_tokens":123,"stream":true,"tools":[{"type":"function"}],"chat_template_kwargs":{"custom":42},"reasoning_effort":"high"});
             let before = body.clone();
             apply_local_reasoning_controls(&mut body, ProviderKind::Vllm, model, Some("high"));
-            assert_eq!(body["reasoning_effort"], "xhigh");
+            assert!(body.get("reasoning_effort").is_none());
             assert_eq!(body["chat_template_kwargs"]["reasoning_effort"], "xhigh");
             assert_eq!(body["chat_template_kwargs"]["custom"], 42);
             for field in ["model", "messages", "max_tokens", "stream", "tools"] {
@@ -153,7 +149,8 @@ mod tests {
             for effort in ["off", "low", "medium", "high", "max", "xhigh"] {
                 let mut body = json!({});
                 apply_local_reasoning_controls(&mut body, ProviderKind::Vllm, model, Some(effort));
-                if let Some(wire) = body["reasoning_effort"].as_str() {
+                assert!(body.get("reasoning_effort").is_none());
+                if let Some(wire) = body["chat_template_kwargs"]["reasoning_effort"].as_str() {
                     assert!(supported.contains(&wire), "{model}: {effort} -> {wire}");
                 }
             }
