@@ -278,14 +278,21 @@ fn forward_controlling_event(
 /// 绑定一条真实 Relay transport，并把入站事件投影为端口事件。generation 以
 /// 空串启动：A 端只有验签 transcript 之后才会通过 `bind_generation` 绑定它。
 fn spawn_controlling_lane(relay_url: &str) -> (ControllerTransportSender, ControllerTransportPort) {
+    spawn_controlling_lane_with_config(ControllerTransportConfig::new(
+        relay_url,
+        ControllerRole::ControllerA,
+        String::new(),
+    ))
+}
+
+fn spawn_controlling_lane_with_config(
+    config: ControllerTransportConfig,
+) -> (ControllerTransportSender, ControllerTransportPort) {
     let (inbound_tx, inbound_rx) = mpsc::unbounded_channel();
     let sink = Arc::new(move |event: ControllerTransportEvent| {
         forward_controlling_event(&inbound_tx, event);
     });
-    let sender = spawn_controller_transport(
-        ControllerTransportConfig::new(relay_url, ControllerRole::ControllerA, String::new()),
-        sink,
-    );
+    let sender = spawn_controller_transport(config, sink);
     let port = ControllerTransportPort {
         sender: sender.clone(),
         inbound: inbound_rx,
@@ -2294,6 +2301,319 @@ mod tests {
     /// 状态所有者的私有字段。
     fn projection(status: &ControllingStatus) -> Value {
         serde_json::to_value(status).unwrap()
+    }
+
+    #[tokio::test]
+    async fn connect_attempt_retry_reaches_connected_through_the_real_a_port() {
+        use super::super::test_support::ControllerReaderProtocol;
+        use futures_util::{SinkExt, StreamExt};
+        use tokio::io::AsyncReadExt;
+        use tokio::net::TcpListener;
+        use tokio_tungstenite::{accept_hdr_async, tungstenite::Message};
+
+        let PairingFixture {
+            relay,
+            reservation,
+            joined,
+            a_keys,
+            b_keys,
+            ..
+        } = pairing_fixture(RELAY_KEY_ID);
+        let mut peer = ControlledHandshake::new(&reservation, b_keys, &relay.trust).unwrap();
+        let mut handshake = a_handshake(&reservation, a_keys, relay.trust.clone());
+        let expected_request = reservation["request_id"].clone();
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let config = ControllerTransportConfig::new(
+            format!("ws://{}", listener.local_addr().unwrap()),
+            ControllerRole::ControllerA,
+            "",
+        )
+        .with_connect_timeout(Duration::from_millis(250));
+        let (release, held) = tokio::sync::oneshot::channel::<()>();
+        let mut server = tokio::spawn(async move {
+            let (mut first, _) = listener.accept().await.unwrap();
+            let mut bytes = [0_u8; 2048];
+            let mut received = 0;
+            loop {
+                let n = first.read(&mut bytes).await.unwrap();
+                if n == 0 {
+                    break;
+                }
+                received += n;
+            }
+            assert!(received > 0, "attempt must reach upgrade then be dropped");
+            let (stream, _) = listener.accept().await.unwrap();
+            let mut socket = accept_hdr_async(stream, ControllerReaderProtocol)
+                .await
+                .unwrap();
+            let Message::Text(claim) = socket.next().await.unwrap().unwrap() else {
+                panic!("claim");
+            };
+            let claim: Value = serde_json::from_str(&claim).unwrap();
+            assert_eq!(claim["type"], "controller_pairing_claim");
+            assert_eq!(claim["request_id"], expected_request);
+            socket
+                .send(Message::Text(reservation.to_string().into()))
+                .await
+                .unwrap();
+            let Message::Text(commit) = socket.next().await.unwrap().unwrap() else {
+                panic!("A commit");
+            };
+            let commit: Value = serde_json::from_str(&commit).unwrap();
+            assert_eq!(commit["type"], "finished_receipt_commit");
+            // Match the Relay's sender echo before delivering B's real output.
+            socket
+                .send(Message::Text(commit.to_string().into()))
+                .await
+                .unwrap();
+            socket
+                .send(Message::Text(peer.commit().unwrap().to_string().into()))
+                .await
+                .unwrap();
+            peer.accept_peer_commitment(&commit).unwrap();
+            socket
+                .send(Message::Text(peer.finished().unwrap().to_string().into()))
+                .await
+                .unwrap();
+            let Message::Text(finished) = socket.next().await.unwrap().unwrap() else {
+                panic!("A finished");
+            };
+            let ack = peer
+                .accept_peer_finished(&serde_json::from_str::<Value>(&finished).unwrap())
+                .unwrap();
+            assert_eq!(ack["receiver_role"], "B");
+            let Message::Text(receipt) = socket.next().await.unwrap().unwrap() else {
+                panic!("A receipt ack");
+            };
+            assert_eq!(
+                serde_json::from_str::<Value>(&receipt).unwrap()["type"],
+                "finished_receipt_ack"
+            );
+            socket
+                .send(Message::Text(joined.to_string().into()))
+                .await
+                .unwrap();
+            let _ = held.await;
+        });
+        let (sender, mut port) = spawn_controlling_lane_with_config(config);
+        let manager = ControllingDeviceManager::default();
+        let operation = manager.connect("234-4567").unwrap();
+        let business = ControllingLaneState::default();
+        manager
+            .replace_owned_transport(&operation, sender.clone(), &business)
+            .unwrap();
+        let mut statuses = Vec::new();
+        let result = tokio::time::timeout(
+            Duration::from_secs(10),
+            run_controlling_connection(
+                &manager,
+                operation,
+                &mut port,
+                &mut handshake,
+                &sender,
+                &business,
+                Duration::from_secs(8),
+                &mut |s| statuses.push(projection(s)["status"].clone()),
+            ),
+        )
+        .await;
+        let installed = sender.authenticated_lease();
+        let manager_owned_sender_running = manager.is_running();
+        sender.stop();
+        let _ = release.send(());
+        if !matches!(&result, Ok(Ok(_))) {
+            server.abort();
+        }
+        let server_result = tokio::time::timeout(Duration::from_secs(1), &mut server).await;
+        if server_result.is_err() {
+            server.abort();
+            let _ = server.await;
+        }
+        let status = result
+            .expect("A scenario must finish within its independent hard limit")
+            .expect("first attempt expiry must not end the actual A handshake");
+        server_result
+            .expect("test server must finish after release")
+            .unwrap();
+        assert_eq!(projection(&status)["status"], "connected");
+        assert_eq!(projection(&manager.status())["status"], "connected");
+        assert_eq!(
+            statuses,
+            vec![json!("safety_handshake"), json!("connected")]
+        );
+        assert_eq!(installed.unwrap().context, manager.live_lease().unwrap());
+        assert!(manager_owned_sender_running);
+        assert!(!port.lane_disconnected());
+    }
+
+    #[tokio::test]
+    async fn connect_attempt_retries_cannot_extend_the_a_operation_budget() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use tokio::io::AsyncReadExt;
+        use tokio::net::TcpListener;
+
+        let PairingFixture {
+            relay,
+            reservation,
+            a_keys,
+            ..
+        } = pairing_fixture(RELAY_KEY_ID);
+        let mut handshake = a_handshake(&reservation, a_keys, relay.trust.clone());
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let config = ControllerTransportConfig::new(
+            format!("ws://{}", listener.local_addr().unwrap()),
+            ControllerRole::ControllerA,
+            "",
+        )
+        .with_connect_timeout(Duration::from_millis(250));
+        let attempts = Arc::new(AtomicUsize::new(0));
+        let count = attempts.clone();
+        let server = tokio::spawn(async move {
+            loop {
+                let (mut socket, _) = listener.accept().await.unwrap();
+                count.fetch_add(1, Ordering::SeqCst);
+                let mut bytes = [0_u8; 2048];
+                while socket.read(&mut bytes).await.unwrap() != 0 {}
+            }
+        });
+        let (sender, mut port) = spawn_controlling_lane_with_config(config);
+        let manager = ControllingDeviceManager::default();
+        let operation = manager.connect("234-4567").unwrap();
+        let business = ControllingLaneState::default();
+        manager
+            .replace_owned_transport(&operation, sender.clone(), &business)
+            .unwrap();
+        let mut statuses = Vec::new();
+        let budget = Duration::from_millis(1400);
+        let start = tokio::time::Instant::now();
+        let result = tokio::time::timeout(
+            Duration::from_secs(3),
+            run_controlling_connection(
+                &manager,
+                operation.clone(),
+                &mut port,
+                &mut handshake,
+                &sender,
+                &business,
+                budget,
+                &mut |s| statuses.push(projection(s)),
+            ),
+        )
+        .await;
+        let elapsed_at_return = start.elapsed();
+        let stopped_by_driver = sender.is_stopped();
+        let count_at_stop = attempts.load(Ordering::SeqCst);
+        tokio::time::sleep(Duration::from_millis(700)).await;
+        let count_after_stop = attempts.load(Ordering::SeqCst);
+        sender.stop(); // Failure cleanup, never evidence of the production Stop.
+        server.abort();
+        let _ = server.await;
+        assert_eq!(
+            result
+                .expect("outer budget must finish before the independent hard limit")
+                .unwrap_err(),
+            PEER_UNAVAILABLE_ERROR
+        );
+        assert!(elapsed_at_return >= budget && elapsed_at_return < budget + Duration::from_secs(1));
+        assert!(
+            stopped_by_driver,
+            "outer budget failure must stop the production sender"
+        );
+        assert!(
+            count_at_stop >= 2,
+            "attempt timeout must permit a real second connection"
+        );
+        assert_eq!(
+            count_at_stop, count_after_stop,
+            "outer failure stops future retries"
+        );
+        assert!(sender.is_stopped());
+        assert!(sender.authenticated_lease().is_none());
+        assert!(manager.live_lease().is_err());
+        assert!(manager.pending_code(operation).is_err());
+        assert_eq!(statuses.len(), 1);
+        assert_eq!(statuses[0]["status"], "error");
+        assert!(
+            !port.lane_disconnected(),
+            "outer timer, not a first-attempt Disconnected"
+        );
+        assert!(manager.connect("234-4567").is_ok());
+    }
+
+    #[tokio::test]
+    async fn connect_attempt_replacement_stops_pending_old_upgrade_without_reviving_owner() {
+        use tokio::io::AsyncReadExt;
+        use tokio::net::TcpListener;
+
+        let PairingFixture {
+            relay,
+            reservation,
+            a_keys,
+            ..
+        } = pairing_fixture(RELAY_KEY_ID);
+        let mut handshake = a_handshake(&reservation, a_keys, relay.trust.clone());
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let config = ControllerTransportConfig::new(
+            format!("ws://{}", listener.local_addr().unwrap()),
+            ControllerRole::ControllerA,
+            "",
+        )
+        .with_connect_timeout(Duration::from_secs(2));
+        let (sender, mut port) = spawn_controlling_lane_with_config(config);
+        let manager = ControllingDeviceManager::default();
+        let business = ControllingLaneState::default();
+        let operation = manager.connect("234-4567").unwrap();
+        manager
+            .replace_owned_transport(&operation, sender.clone(), &business)
+            .unwrap();
+        let mut statuses = Vec::new();
+        let mut on_status = |s: &ControllingStatus| statuses.push(projection(s));
+        let old_driver = run_controlling_connection(
+            &manager,
+            operation.clone(),
+            &mut port,
+            &mut handshake,
+            &sender,
+            &business,
+            Duration::from_secs(5),
+            &mut on_status,
+        );
+        let replacement = async {
+            let (mut pending, _) = listener.accept().await.unwrap();
+            let mut bytes = [0_u8; 2048];
+            assert!(pending.read(&mut bytes).await.unwrap() > 0);
+            // The public manager entry invalidates the old intent and stops
+            // its registered real transport while upgrade is still pending.
+            let next = manager.connect("345-5678").unwrap();
+            let (next_sender, next_receiver) =
+                transport_channels(ControllerRole::ControllerA, "", 2, 2, 8192, 1024);
+            manager
+                .replace_owned_transport(&next, next_sender.clone(), &business)
+                .unwrap();
+            while pending.read(&mut bytes).await.unwrap() != 0 {}
+            (next, next_sender, next_receiver)
+        };
+        let result = tokio::time::timeout(Duration::from_secs(3), async {
+            tokio::join!(old_driver, replacement)
+        })
+        .await;
+        sender.stop(); // Cleanup only; the next-owner assertions do not depend on it.
+        let (old_result, (next, next_sender, _next_receiver)) =
+            result.expect("replacement must cancel pending upgrade promptly");
+        let new_running = manager.is_running() && !next_sender.is_stopped();
+        let new_status = projection(&manager.status());
+        let new_code_retained = manager.pending_code(next).is_ok();
+        manager.stop();
+        assert!(old_result.is_err());
+        assert!(
+            statuses.is_empty(),
+            "old failure cannot publish over the new intent"
+        );
+        assert!(new_running);
+        assert_eq!(new_status["status"], "connecting");
+        assert!(new_code_retained);
+        assert!(manager.pending_code(operation).is_err());
+        assert!(sender.authenticated_lease().is_none());
     }
 
     #[test]

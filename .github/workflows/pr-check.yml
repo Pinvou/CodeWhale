@@ -2991,6 +2991,8 @@ jobs:
             'features::remote_control::platform::windows::tests::' \
             'app::commands::remote_control::reader_resume_tests::' \
             'features::remote_control::controller::transfer::staging::tests::' \
+            'features::remote_control::controller::relay_transport::tests::' \
+            'features::remote_control::controller::controlling_service::tests::connect_attempt_' \
             'features::computer_use::platform::windows::tests::' \
             'failed_probe_never_deletes_an_existing_store_windows' \
             'features::voice_shortcut::platform::tests::' \

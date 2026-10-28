@@ -3853,6 +3853,10 @@ class CiGatePolicyTests(unittest.TestCase):
             _extract_job_block(self.pr_workflow, "windows-rust-test")
         )
         for needle in [
+            # Keep the transport and actual A-port connect-deadline
+            # regressions in the executable Windows loop.
+            "'features::remote_control::controller::relay_transport::tests::' \\",
+            "'features::remote_control::controller::controlling_service::tests::connect_attempt_' \\",
             "'failed_probe_never_deletes_an_existing_store_windows' \\",
             "'features::voice_shortcut::platform::tests::' \\",
             "'app::commands::dependencies::platform::windows::tests::' \\",
