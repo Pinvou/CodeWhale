@@ -4054,12 +4054,15 @@ fn hardened_readonly_argv(command: &str) -> Result<(String, Vec<String>)> {
 /// Splice the flags that keep a classifier-admitted Git read inside Git's own
 /// process into `argv`, in place: repository or user configuration may name a
 /// diff driver (`diff.<driver>.command`), a textconv filter, or a signature
-/// helper, and `log`/`show`/`diff` would otherwise run it. Returns whether
-/// anything was spliced — the remaining admitted subcommands render no diff.
-/// `argv` that is not a Git command is left untouched. One table for both
-/// execution lanes: the direct-argv lane splices into the argv it execs, and
-/// the shell lane splices into every Git stage of a compound before the shell
-/// sees it ([`harden_readonly_shell_git_stages`]).
+/// helper, and `log`/`show`/`diff` would otherwise run it — as would `blame`,
+/// which applies textconv filters by default. Returns whether anything was
+/// spliced — the remaining admitted subcommands (`status`, `ls-files`, and
+/// `grep`, whose textconv is opt-in and whose option table admits no
+/// `--textconv`) consult no driver. `argv` that is not a Git command is left
+/// untouched. One table for both execution lanes: the direct-argv lane
+/// splices into the argv it execs, and the shell lane splices into every Git
+/// stage of a compound before the shell sees it
+/// ([`harden_readonly_shell_git_stages`]).
 fn splice_git_read_hardening(argv: &mut Vec<String>) -> Result<bool> {
     if !argv.first().is_some_and(|program| program == "git") {
         return Ok(false);
@@ -4103,7 +4106,11 @@ fn splice_git_read_hardening(argv: &mut Vec<String>) -> Result<bool> {
             );
             Ok(true)
         }
-        "status" | "ls-files" | "blame" | "grep" => Ok(false),
+        "blame" => {
+            argv.splice(at..at, ["--no-textconv".to_string()]);
+            Ok(true)
+        }
+        "status" | "ls-files" | "grep" => Ok(false),
         _ => Err(anyhow!(
             "classifier-approved Git read did not keep its subcommand in argv[1]"
         )),
@@ -4111,7 +4118,7 @@ fn splice_git_read_hardening(argv: &mut Vec<String>) -> Result<bool> {
 }
 
 /// The shell-lane text of an admitted read-only compound with every Git
-/// `log`/`show`/`diff` stage hardened like the direct-argv lane hardens a
+/// `log`/`show`/`diff`/`blame` stage hardened like the direct-argv lane hardens a
 /// bare one. A compound hands the shell the raw command text, so without
 /// this `git show HEAD | cat` ran whatever `diff.<driver>.textconv` the
 /// repository's own configuration named — arbitrary execution from an

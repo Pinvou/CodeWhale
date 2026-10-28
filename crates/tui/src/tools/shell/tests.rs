@@ -2213,10 +2213,10 @@ fn readonly_shell_lane_decisions_per_shell_kind() {
 }
 
 /// The shell lane splices the same in-process hardening flags into every
-/// Git `log`/`show`/`diff` stage that the direct-argv lane splices into a
-/// bare one, re-emitting the stage from the argv the gate parsed and copying
-/// the separators through untouched; stages of other programs and the Git
-/// subcommands that render no diff are left byte for byte.
+/// Git `log`/`show`/`diff`/`blame` stage that the direct-argv lane splices
+/// into a bare one, re-emitting the stage from the argv the gate parsed and
+/// copying the separators through untouched; stages of other programs and
+/// the Git subcommands that consult no driver are left byte for byte.
 #[test]
 fn readonly_shell_lane_hardens_git_diff_rendering_stages() {
     let cases = [
@@ -2232,6 +2232,11 @@ fn readonly_shell_lane_hardens_git_diff_rendering_stages() {
             "git -C sub --no-pager diff --stat && ls",
             "git -C sub --no-pager diff --no-ext-diff --no-textconv --stat && ls",
         ),
+        // `blame` applies textconv filters by default, so it is hardened too.
+        (
+            "pwd; git blame -w f | head",
+            "pwd; git blame --no-textconv -w f | head",
+        ),
         // Whitespace around separators and a quoted argument survive.
         (
             "ls  ;  git log --grep 'fix bug'  |  head -3",
@@ -2242,12 +2247,12 @@ fn readonly_shell_lane_hardens_git_diff_rendering_stages() {
             "git log --oneline -- *.rs | wc -l",
             "git log --no-ext-diff --no-textconv --no-show-signature --oneline -- *.rs | wc -l",
         ),
-        // Nothing to harden: untouched, including the Git reads that render no
-        // diff.
+        // Nothing to harden: untouched, including the Git reads that consult
+        // no driver.
         ("git status | cat", "git status | cat"),
         (
-            "git blame f; git grep -n x | head",
-            "git blame f; git grep -n x | head",
+            "git ls-files; git grep -n x | head",
+            "git ls-files; git grep -n x | head",
         ),
         ("cat f | wc -l", "cat f | wc -l"),
     ];
@@ -2258,6 +2263,10 @@ fn readonly_shell_lane_hardens_git_diff_rendering_stages() {
             "{command}"
         );
     }
+    // The direct-argv lane uses the same table.
+    let (program, args) = hardened_readonly_argv("git blame f").expect("direct lane");
+    assert_eq!(program, "git");
+    assert_eq!(args, ["blame", "--no-textconv", "f"]);
     // Re-quoting is portable or refused, never silently different. A `~` is
     // quoted (it is literal mid-word anyway and leading `~` operands never
     // reach the seam), which cmd.exe and POSIX shells read back identically.
@@ -2322,22 +2331,25 @@ async fn readonly_shell_lane_git_show_does_not_run_repository_textconv() {
     git(&["commit", "-q", "-m", "seed"]);
 
     // Positive control: the fixture really executes the filter when a shell
-    // runs the unhardened compound.
-    let control = std::process::Command::new("sh")
-        .args(["-c", "git show HEAD | cat"])
-        .current_dir(workspace.path())
-        .output()
-        .expect("control shell runs");
-    assert!(
-        control.status.success(),
-        "{}",
-        String::from_utf8_lossy(&control.stderr)
-    );
-    assert!(
-        marker.exists(),
-        "the fixture's textconv must fire under a raw shell"
-    );
-    std::fs::remove_file(&marker).expect("reset marker");
+    // runs the unhardened compound — through the diff renderer and through
+    // `blame`, which applies textconv by default.
+    for control_command in ["git show HEAD | cat", "git blame blob.bin"] {
+        let control = std::process::Command::new("sh")
+            .args(["-c", control_command])
+            .current_dir(workspace.path())
+            .output()
+            .expect("control shell runs");
+        assert!(
+            control.status.success(),
+            "{control_command}: {}",
+            String::from_utf8_lossy(&control.stderr)
+        );
+        assert!(
+            marker.exists(),
+            "{control_command}: the fixture's textconv must fire under a raw shell"
+        );
+        std::fs::remove_file(&marker).expect("reset marker");
+    }
 
     let context = ToolContext::new(workspace.path())
         .with_shell_policy(crate::worker_profile::ShellPolicy::ReadOnly);
@@ -2345,6 +2357,8 @@ async fn readonly_shell_lane_git_show_does_not_run_repository_textconv() {
         "git show HEAD | cat",
         "pwd; git show HEAD",
         "ls && git show HEAD",
+        "git blame blob.bin",
+        "pwd; git blame blob.bin | cat",
     ] {
         let output = LowercaseBashTool
             .execute(json!({"command": command}), &context)
