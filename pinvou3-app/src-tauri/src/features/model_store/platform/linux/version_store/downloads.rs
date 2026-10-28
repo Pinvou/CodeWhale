@@ -84,15 +84,16 @@ fn retained_roots(card_id: Option<&str>) -> Result<Vec<PathBuf>, String> {
         .map_err(|e| e.to_string())
 }
 
-fn lease_file(card_id: &str) -> Result<std::fs::File, String> {
-    let safe = super::super::config::safe_path_component(card_id)?;
-    let directory = super::super::config::data_dir().join("download-locks");
-    std::fs::create_dir_all(&directory).map_err(|e| e.to_string())?;
-    crate::platform::filesystem::open_private_lock_file(&directory.join(format!("{safe}.lock")))
-        .map_err(|e| e.to_string())
+pub(super) fn has_pending_plan(card_id: &str) -> Result<bool, String> {
+    let conn = connection()?;
+    table(&conn).map_err(|e| e.to_string())?;
+    conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM model_download_reservations WHERE card_id=?1 AND downloading=1)",
+        [card_id], |row| row.get(0),
+    ).map_err(|e| e.to_string())
 }
 
-fn release_plan(card_id: &str) -> Result<(), String> {
+pub(super) fn release_plan(card_id: &str) -> Result<(), String> {
     let mut conn = connection()?;
     table(&conn).map_err(|e| e.to_string())?;
     let tx = conn
@@ -129,7 +130,7 @@ fn release_plan(card_id: &str) -> Result<(), String> {
 pub struct DownloadReservation {
     card_id: String,
     pub root: PathBuf,
-    _lease: std::fs::File,
+    lease: super::DownloadLease,
     finished: bool,
     preserve_target: bool,
 }
@@ -141,25 +142,8 @@ impl DownloadReservation {
         cancelled: impl Fn() -> bool,
         mut on_wait: impl FnMut(),
     ) -> Result<Self, String> {
-        let lease = lease_file(card_id)?;
-        let mut reported = false;
-        loop {
-            if cancelled() {
-                return Err("已取消等待下载配额登记".into());
-            }
-            match lease.try_lock() {
-                Ok(()) => break,
-                Err(std::fs::TryLockError::WouldBlock) => {
-                    if !reported {
-                        on_wait();
-                        reported = true;
-                    }
-                    std::thread::sleep(std::time::Duration::from_millis(50));
-                }
-                Err(std::fs::TryLockError::Error(e)) => return Err(e.to_string()),
-            }
-        }
-        // Owning the lease proves any previous process has stopped. Recover
+        let lease = super::acquire_download_lease(card_id, cancelled, &mut on_wait)?;
+        // Owning the lease excludes previous local fd-holding writers. Recover
         // an unstarted first attempt before choosing the current target.
         release_plan(card_id)?;
         let stored = db::get_store_model(card_id).map_err(|e| e.to_string())?;
@@ -202,10 +186,18 @@ impl DownloadReservation {
         Ok(Self {
             card_id: card_id.into(),
             root,
-            _lease: lease,
+            lease,
             finished: false,
             preserve_target,
         })
+    }
+
+    pub(in super::super) fn script_lease(&mut self) -> &mut super::DownloadLease {
+        &mut self.lease
+    }
+
+    pub(in super::super) fn confirm_stopped(&mut self) -> Result<(), String> {
+        self.lease.confirm_stopped()
     }
 
     /// Publish under version-quota.lock, then check admission before any script.
@@ -251,6 +243,7 @@ impl DownloadReservation {
     /// atomically registered the model and fixed root. Keep this non-active
     /// row so extra caches remain charged even after successful completion.
     pub fn complete(&mut self) -> Result<(), String> {
+        self.confirm_stopped()?;
         release_plan(&self.card_id)?;
         self.finished = true;
         Ok(())
@@ -260,7 +253,10 @@ impl DownloadReservation {
 impl Drop for DownloadReservation {
     fn drop(&mut self) {
         if !self.finished {
-            if let Err(error) = release_plan(&self.card_id) {
+            if let Err(error) = self
+                .confirm_stopped()
+                .and_then(|()| release_plan(&self.card_id))
+            {
                 eprintln!("[model-store] 保留下载配额记录，等待下次恢复：{error}");
             }
         }
@@ -290,16 +286,11 @@ pub fn retained_download_bytes() -> Result<u64, String> {
         roots.entry(root).or_default();
     }
     for mut download in all {
-        if download.downloading {
-            let lease = lease_file(&download.card_id)?;
-            match lease.try_lock() {
-                Ok(()) => {
-                    release_plan(&download.card_id)?;
-                    download.downloading = false;
-                }
-                Err(std::fs::TryLockError::WouldBlock) => {}
-                Err(std::fs::TryLockError::Error(e)) => return Err(e.to_string()),
-            }
+        if download.downloading
+            && let Some(_lease) = super::try_download_lease(&download.card_id)?
+        {
+            release_plan(&download.card_id)?;
+            download.downloading = false;
         }
         let covered = records
             .iter()
