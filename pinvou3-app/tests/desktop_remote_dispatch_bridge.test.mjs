@@ -376,6 +376,31 @@ test('narrow authenticated capability result settles only its matching RemotePro
   feature.stop();
 });
 
+test('capability send failure keeps the capability error after bounded retries', async () => {
+  let attempts = 0;
+  const timers = {
+    setTimeout(fn) { queueMicrotask(fn); return 1; },
+    clearTimeout() {},
+  };
+  const { feature, state, logic } = installFeature(command => {
+    if (command === 'desktop_remote_controller_capability_send') {
+      attempts += 1;
+      return Promise.reject('capability_snapshot_unavailable');
+    }
+    return undefined;
+  }, timers);
+  state.desktopRemoteControl = logic.beginControllerIntent(state.desktopRemoteControl, true);
+  state.desktopRemoteControl = logic.applyControllerStatus(state.desktopRemoteControl, {
+    intent: state.desktopRemoteControl.intents.controller, status: 'connected', connectionId: 'connection-1',
+    controllerLeaseId: 'lease-1', leaseEpoch: '2', relayEpoch: 'relay-1', generation: 'generation-1',
+  });
+  state.desktopRemoteControl = bindProxy(logic, state.desktopRemoteControl, 'ref-1', 'session-1');
+  await assert.rejects(feature.controllerCapabilitySend('ref-1'), { code: 'capability_snapshot_unavailable' });
+  assert.equal(attempts, 3);
+  assert.equal(state.desktopRemoteControl.controllerConnection.capabilityError, 'capability_snapshot_unavailable');
+  feature.stop();
+});
+
 test('a timed-out capability reply cannot settle the newer retry', async () => {
   const scheduled = new Map();
   let timerId = 0;

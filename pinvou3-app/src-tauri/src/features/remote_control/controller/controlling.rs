@@ -879,20 +879,6 @@ impl ControllingDeviceManager {
         Ok((lease.context.clone(), lease.negotiated_capabilities.clone()))
     }
 
-    /// 发送一条已认证明文载荷对应的密文帧（E2E-04）。租约未安装或 transport
-    /// 已停止时失败关闭，绝不退回未加密通道。
-    pub(crate) fn send_authenticated_business(
-        &self,
-        frame: &serde_json::Value,
-    ) -> std::result::Result<(), ControllerSendError> {
-        let inner = self.inner.lock();
-        let transport = inner
-            .transport
-            .as_ref()
-            .ok_or(ControllerSendError::Unauthenticated)?;
-        transport.try_send_business(frame)
-    }
-
     /// The A task/cancel path may enqueue only on the exact authenticated
     /// lease for which it sealed the frame. Identity comparison and enqueue
     /// share the manager lock, so disconnect/rebind cannot interleave there.
@@ -1249,7 +1235,7 @@ mod tests {
     fn capability_send_uses_real_lane_and_preserves_pending_on_full_transport() {
         use super::super::controlling_session::ControllingSessionManager;
         use super::super::crypto::ControllerRole as CryptoRole;
-        use super::super::encrypted_lane::ControllingLaneState;
+        use super::super::encrypted_lane::{ControllingLaneState, EncryptedLane};
         use super::super::relay_transport::{
             AuthenticatedLease, ControllerRole, transport_channels,
         };
@@ -1258,8 +1244,11 @@ mod tests {
         };
         let fixture = pairing_fixture("relay-key-capability-1433");
         let context = lease_context(&fixture.reservation);
-        let (keys, _) = paired_session_keys(fixture.a_keys, fixture.b_keys, &fixture.reservation);
+        let (keys, peer_keys) =
+            paired_session_keys(fixture.a_keys, fixture.b_keys, &fixture.reservation);
         let manager = ControllingDeviceManager::default();
+        // A second connect supersedes the first attempt before a lease exists.
+        let stale_operation = manager.connect("2345678").unwrap();
         let operation = manager.connect("2345678").unwrap();
         manager.complete_reserved(operation.clone()).unwrap();
         let connected = ControllerLease {
@@ -1270,7 +1259,7 @@ mod tests {
         manager
             .complete_connected(operation.clone(), connected)
             .unwrap();
-        let (sender, _receiver) = transport_channels(
+        let (sender, mut receiver) = transport_channels(
             ControllerRole::ControllerA,
             context.remote_control_generation.clone(),
             1,
@@ -1284,9 +1273,10 @@ mod tests {
                 negotiated_capabilities: capabilities.clone(),
             })
             .unwrap();
-        manager.replace_transport(sender);
+        manager.replace_transport(sender.clone());
         let lane = ControllingLaneState::default();
         lane.install(CryptoRole::A, &context, keys).unwrap();
+        let mut peer = EncryptedLane::new(CryptoRole::B, &context, peer_keys).unwrap();
         let expected = manager.authenticated_remote_proxy_identity().unwrap();
         let sessions = ControllingSessionManager::default();
         let (session, _) = sessions
@@ -1298,19 +1288,199 @@ mod tests {
                 &capabilities,
             )
             .unwrap();
+        let earlier = sessions
+            .capability_request_with_send(&session.session_ref, &context, |payload| {
+                manager.send_capability_for_owner(&operation, &expected, &lane, payload, |_| {
+                    "send_failed".into()
+                })
+            })
+            .unwrap();
+        let earlier_frame: serde_json::Value = serde_json::from_str(
+            &receiver
+                .take_business_for_test()
+                .expect("earlier frame queued"),
+        )
+        .unwrap();
+        let (earlier_kind, earlier_opened) = peer.open(&earlier_frame, &capabilities).unwrap();
+        assert_eq!(earlier_kind, "capability_snapshot_request");
+        assert_eq!(earlier_opened, earlier.payload);
+        let previous_pending = sessions
+            .pending_capability_ids_for_test(&session.session_ref)
+            .unwrap();
+        assert_eq!(previous_pending, vec![earlier.request_id]);
+        // Even when the current lease, lane and transport all match, an old
+        // operation must not reserve a request or put a frame on the queue.
+        assert_eq!(
+            sessions
+                .capability_request_with_send(&session.session_ref, &context, |payload| {
+                    manager.send_capability_for_owner(
+                        &stale_operation,
+                        &expected,
+                        &lane,
+                        payload,
+                        |_| "send_failed".into(),
+                    )
+                })
+                .unwrap_err()
+                .into_code(),
+            "controller_not_connected"
+        );
+        assert_eq!(
+            sessions
+                .pending_capability_ids_for_test(&session.session_ref)
+                .unwrap(),
+            previous_pending
+        );
+        assert!(receiver.take_business_for_test().is_none());
+        // A request sealed for another owner must never enter this transport.
+        // The valid request below also proves rejected attempts did not fill it.
+        for field in 0..3 {
+            let mut stale = expected.clone();
+            match field {
+                0 => stale.0.lease_epoch = "stale-epoch".into(),
+                1 => stale.1 = "stale-peer".into(),
+                _ => stale.2 = "stale-reservation".into(),
+            }
+            assert_eq!(
+                sessions
+                    .capability_request_with_send(&session.session_ref, &context, |payload| {
+                        manager.send_capability_for_owner(
+                            &operation,
+                            &stale,
+                            &lane,
+                            payload,
+                            |_| "send_failed".into(),
+                        )
+                    })
+                    .unwrap_err()
+                    .into_code(),
+                "controller_not_connected"
+            );
+        }
+        let other_fixture = pairing_fixture("relay-key-capability-other");
+        let mut other_context = lease_context(&other_fixture.reservation);
+        other_context.remote_control_generation = "other-generation".into();
+        let (other_keys, _) = paired_session_keys(
+            other_fixture.a_keys,
+            other_fixture.b_keys,
+            &other_fixture.reservation,
+        );
+        let other_lane = ControllingLaneState::default();
+        other_lane
+            .install(CryptoRole::A, &other_context, other_keys)
+            .unwrap();
+        assert_eq!(
+            sessions
+                .capability_request_with_send(&session.session_ref, &context, |payload| {
+                    manager.send_capability_for_owner(
+                        &operation,
+                        &expected,
+                        &other_lane,
+                        payload,
+                        |_| "send_failed".into(),
+                    )
+                })
+                .unwrap_err()
+                .into_code(),
+            "controller_lane_unavailable"
+        );
+        assert_eq!(
+            sessions
+                .pending_capability_ids_for_test(&session.session_ref)
+                .unwrap(),
+            previous_pending
+        );
+        assert!(receiver.take_business_for_test().is_none());
+        // The transport's authenticated lease may differ from the manager's
+        // captured lease. Its validator must reject the sealed frame without
+        // publishing a pending request or sending anything to the queue.
+        let mut transport_context = context.clone();
+        transport_context.lease_epoch = "999".into();
+        sender
+            .install_authenticated_lease(AuthenticatedLease {
+                context: transport_context,
+                negotiated_capabilities: capabilities.clone(),
+            })
+            .unwrap();
+        assert_eq!(
+            sessions
+                .capability_request_with_send(&session.session_ref, &context, |payload| {
+                    manager.send_capability_for_owner(
+                        &operation,
+                        &expected,
+                        &lane,
+                        payload,
+                        |error| match error {
+                            ControllerSendError::InvalidFrame(_) => "transport_invalid".into(),
+                            _ => "unexpected_send_error".into(),
+                        },
+                    )
+                })
+                .unwrap_err()
+                .into_code(),
+            "transport_invalid"
+        );
+        assert_eq!(
+            sessions
+                .pending_capability_ids_for_test(&session.session_ref)
+                .unwrap(),
+            previous_pending
+        );
+        assert!(receiver.take_business_for_test().is_none());
+        sender
+            .install_authenticated_lease(AuthenticatedLease {
+                context: context.clone(),
+                negotiated_capabilities: capabilities.clone(),
+            })
+            .unwrap();
         let send = |payload: &serde_json::Value| {
-            manager.send_capability_for_owner(&operation, &expected, &lane, payload, |_| {
-                "queue_full".to_owned()
+            manager.send_capability_for_owner(&operation, &expected, &lane, payload, |error| {
+                match error {
+                    ControllerSendError::QueueFull(_) => "queue_full".to_owned(),
+                    _ => "unexpected_send_error".to_owned(),
+                }
             })
         };
         let first = sessions
             .capability_request_with_send(&session.session_ref, &context, send)
             .unwrap();
+        let before_full = sessions
+            .pending_capability_ids_for_test(&session.session_ref)
+            .unwrap();
         let error = sessions
             .capability_request_with_send(&session.session_ref, &context, send)
             .unwrap_err();
         assert_eq!(error.into_code(), "queue_full");
+        assert_eq!(
+            sessions
+                .pending_capability_ids_for_test(&session.session_ref)
+                .unwrap(),
+            before_full
+        );
         assert!(first.payload.get("request_id").is_some());
+        // A failed seal/enqueue can consume a sequence. The paired peer must
+        // still open the next successfully queued frame across that gap.
+        let frame: serde_json::Value = serde_json::from_str(
+            &receiver
+                .take_business_for_test()
+                .expect("valid frame queued"),
+        )
+        .unwrap();
+        let (kind, opened) = peer.open(&frame, &capabilities).unwrap();
+        assert_eq!(kind, "capability_snapshot_request");
+        assert_eq!(opened, first.payload);
+        let after_full = sessions
+            .capability_request_with_send(&session.session_ref, &context, send)
+            .unwrap();
+        let next_frame: serde_json::Value = serde_json::from_str(
+            &receiver
+                .take_business_for_test()
+                .expect("retry frame queued"),
+        )
+        .unwrap();
+        let (kind, opened) = peer.open(&next_frame, &capabilities).unwrap();
+        assert_eq!(kind, "capability_snapshot_request");
+        assert_eq!(opened, after_full.payload);
         lane.suspend();
         let error = sessions
             .capability_request_with_send(&session.session_ref, &context, send)
@@ -1326,7 +1496,7 @@ mod tests {
             .unwrap();
         assert_eq!(
             rejected.capability_request_id.as_deref(),
-            Some(first.request_id.as_str())
+            Some(after_full.request_id.as_str())
         );
     }
 

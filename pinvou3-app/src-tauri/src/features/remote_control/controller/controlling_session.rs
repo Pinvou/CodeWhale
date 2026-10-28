@@ -540,9 +540,8 @@ impl ControllingSessionManager {
         })
     }
 
-    /// Relay 在已连接阶段拒绝业务帧时，外层错误帧不携带加密载荷里的 request_id。
-    /// 只有当前租约恰好存在一个待处理能力会话时才允许关联；并发会话保持原状，
-    /// 避免把传输层错误误投影到错误的会话。
+    /// Test-only helper for exercising guarded retirement of a single pending
+    /// capability request. Uncorrelated relay errors do not call this helper.
     #[cfg(test)]
     pub(crate) fn fail_pending_capability_for_lease(
         &self,

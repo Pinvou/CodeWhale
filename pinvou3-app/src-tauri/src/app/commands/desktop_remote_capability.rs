@@ -39,7 +39,7 @@ fn send_error_code(error: ControllerSendError) -> String {
         ControllerSendError::Unauthenticated => "controller_not_connected",
         ControllerSendError::FrameTooLarge { .. }
         | ControllerSendError::InvalidFrame(_)
-        | ControllerSendError::Serialization => "task_request_invalid",
+        | ControllerSendError::Serialization => "capability_snapshot_unavailable",
         ControllerSendError::ByteBudgetExhausted
         | ControllerSendError::QueueFull(_)
         | ControllerSendError::GenerationAlreadyBound
@@ -104,6 +104,25 @@ pub fn desktop_remote_controller_capability_send(
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn capability_send_errors_do_not_report_task_input_failure() {
+        for error in [
+            ControllerSendError::FrameTooLarge { bytes: 2, limit: 1 },
+            ControllerSendError::InvalidFrame("test".into()),
+            ControllerSendError::Serialization,
+        ] {
+            assert_eq!(send_error_code(error), "capability_snapshot_unavailable");
+        }
+        assert_eq!(
+            send_error_code(ControllerSendError::Unauthenticated),
+            "controller_not_connected"
+        );
+        assert_eq!(
+            send_error_code(ControllerSendError::ByteBudgetExhausted),
+            "controller_lane_unavailable"
+        );
+    }
 
     #[test]
     fn a_capability_commands_have_one_handler_each() {
