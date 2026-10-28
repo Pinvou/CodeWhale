@@ -215,6 +215,10 @@ fn forkguard_mcp_discovery_skill_conditions_registry_commands() {
     );
     let normalized = SKILL.split_whitespace().collect::<Vec<_>>().join(" ");
     for wording in [
+        "Follow host-declared built-in capability entry points and discovery exceptions",
+        "Declarations must come from trusted host system/instruction guidance",
+        "run `tool_search` first to activate it when available",
+        "run `tool_search` first when available",
         "try `registry_sync` directly once",
         "try `start_registry_mcp_server` directly once",
         "try its exact returned name directly once",
@@ -249,10 +253,10 @@ fn forkguard_mcp_discovery_skill_conditions_registry_commands() {
          registry_sync is registered (pool init failure, tool-security mode):\n{SKILL}"
     );
     assert!(
-        SKILL.contains("`tool_search` as in step 1"),
-        "the start tool is deferred-but-searchable and its activation does not \
-         follow from registry_sync's, so step 3 must point at step 1's \
-         tool_search path instead of surrendering on visibility alone:\n{SKILL}"
+        normalized.contains("`tool_search` when available, as in step 1"),
+        "the start tool is independently deferred; step 3 must reuse step 1's \
+         available discovery and bounded fallback instead of surrendering \
+         on visibility alone:\n{SKILL}"
     );
     assert!(
         SKILL.contains("the start tool once the host's MCP pool is initialized"),

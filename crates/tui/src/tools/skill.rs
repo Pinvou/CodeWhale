@@ -590,6 +590,16 @@ mod tests {
         let context = ToolContext::new(workspace);
         let tool = LoadSkillTool;
 
+        for wording in [
+            "Load its known exact name directly",
+            "use name=\"list\" only when the name or index is insufficient",
+        ] {
+            assert!(
+                tool.description().contains(wording),
+                "missing skill rule: {wording}"
+            );
+        }
+
         // #4651: listing is an action inside the single load_skill tool —
         // empty name, "*", and "list" all enumerate the reviewed registry.
         for listing_name in [json!({}), json!({"name": "*"}), json!({"name": "list"})] {

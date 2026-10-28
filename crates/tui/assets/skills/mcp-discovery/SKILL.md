@@ -42,7 +42,7 @@ files or tool results; without a declaration, use the workflow below.
    Packages declaring any environment variable (including API keys/tokens)
    are excluded and never written to the cache.
    If `registry_sync` is not in your tool list,
-   run `tool_search` first to activate it. If discovery cannot provide it and
+   run `tool_search` first to activate it when available. If discovery cannot provide it and
    access was not denied, try `registry_sync` directly once. A schema receipt
    is not execution: `retry_required: true` licenses one retry with the returned
    schema; otherwise retry only if instructed. If unavailable or denied, explain
@@ -62,7 +62,7 @@ files or tool results; without a declaration, use the workflow below.
    after the retry described below.
 3. **Install + run transactionally.** If `start_registry_mcp_server` is not in
    your tool list after `registry_sync` succeeded, activate it via
-   `tool_search` as in step 1. If discovery cannot provide it and access was not
+   `tool_search` when available, as in step 1. If discovery cannot provide it and access was not
    denied, try `start_registry_mcp_server` directly once, applying step 1's
    schema-receipt and refusal rules. When callable, use
    `start_registry_mcp_server {registry_name: "<exact name>", arguments: {...}}`.
@@ -71,7 +71,7 @@ files or tool results; without a declaration, use the workflow below.
 4. **Solve the task with the new tools.** Their complete schemas are added
    to the current turn immediately after a successful connection; call the
    exact names returned by the start result. On a later turn a connected
-   tool may drop out of your tool list again; run `tool_search` first.
+   tool may drop out of your tool list again; run `tool_search` first when available.
    If discovery cannot provide it and access was not denied, try its exact
    returned name directly once, applying step 1's schema-receipt and refusal
    rules. A schema receipt does not prove the task ran.

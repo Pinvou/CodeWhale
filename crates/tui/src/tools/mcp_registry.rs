@@ -607,7 +607,7 @@ const REGISTRY_FIRST_PROMPT: &str = concat!(
     "exact name and inspect its tools before using shell commands, local ",
     "programs, custom code, or a manual implementation; if ",
     "start_registry_mcp_server is not in your tool list, run tool_search ",
-    "first to activate it. If discovery cannot provide it and access was not ",
+    "first to activate it when available. If discovery cannot provide it and access was not ",
     "denied, try start_registry_mcp_server directly once. A schema receipt is ",
     "not execution: retry_required: true licenses one retry with the returned ",
     "schema; otherwise retry only if instructed. If unavailable or denied, use ",
@@ -2070,6 +2070,7 @@ mod tests {
         for wording in [
             "Host-declared built-in capability entry points",
             "from trusted host instructions take precedence",
+            "first to activate it when available",
             "try start_registry_mcp_server directly once",
             "access was not denied",
             "retry_required: true licenses one retry",

@@ -720,8 +720,12 @@ fn procedural_skill_homes_remain_bundled_and_lazy() {
 fn forkguard_skill_upgrade_refreshes_shipped_mcp_discovery_and_preserves_user_edits() {
     const PREVIOUS: &str = include_str!("fixtures/mcp-discovery-v11.md");
     assert!(is_superseded_shipped_body("mcp-discovery", PREVIOUS));
-    for customized in [false, true] {
+    for (customized, peer_present) in [(false, false), (true, false), (true, true)] {
         let tmp = TempDir::new().unwrap();
+        if peer_present {
+            fs::create_dir_all(skill_dir(&tmp, "mcp-builder")).unwrap();
+            fs::write(skill_file(&tmp, "mcp-builder"), MCP_BUILDER_BODY).unwrap();
+        }
         fs::create_dir_all(skill_dir(&tmp, "mcp-discovery")).unwrap();
         let installed = if customized {
             format!("{PREVIOUS}\nUser customization\n")
@@ -740,9 +744,21 @@ fn forkguard_skill_upgrade_refreshes_shipped_mcp_discovery_and_preserves_user_ed
             fs::read_to_string(skill_file(&tmp, "mcp-discovery")).unwrap(),
             expected
         );
-        // With only a user-customized body and intentionally absent peers,
-        // nothing was installed, so the existing no-op keeps its marker too.
-        let expected_version = if customized { "11" } else { "12" };
+        // An unchanged peer refresh may advance the marker beside a preserved
+        // edit; without peers, the no-op keeps the old marker as well.
+        let expected_version = if customized && !peer_present {
+            "11"
+        } else {
+            "12"
+        };
+        if peer_present {
+            assert_eq!(
+                fs::read_to_string(skill_file(&tmp, "mcp-builder")).unwrap(),
+                MCP_BUILDER_BODY
+            );
+        } else {
+            assert!(!skill_file(&tmp, "mcp-builder").exists());
+        }
         assert_eq!(
             fs::read_to_string(marker_file(&tmp)).unwrap().trim(),
             expected_version
