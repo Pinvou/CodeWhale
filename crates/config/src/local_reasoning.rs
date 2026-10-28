@@ -30,10 +30,11 @@ impl LocalReasoningSpec {
     pub fn normalize(&self, effort: &str) -> Option<&str> {
         let effort = effort.trim().to_ascii_lowercase();
         let effort = match effort.as_str() {
-            "minimal" => "low",
+            "minimal" | "minimum" | "light" => "low",
             "mid" => "medium",
             "disabled" | "none" | "false" => "off",
-            "" => "high",
+            "maximum" | "ultra" | "ultracode" => "max",
+            "" => return Some(&self.default),
             other => other,
         };
         self.tiers
@@ -140,6 +141,28 @@ mod tests {
             for field in ["model", "messages", "max_tokens", "stream", "tools"] {
                 assert_eq!(body[field], before[field]);
             }
+        }
+    }
+
+    #[test]
+    fn legacy_preference_spellings_keep_their_effective_tier() {
+        let spec = local_reasoning_spec("Qwen3.8-27B-NVFP4").unwrap();
+        for (saved, expected) in [
+            ("maximum", "max"),
+            ("ultra", "max"),
+            ("ultracode", "max"),
+            ("xhigh", "max"),
+            ("minimum", "low"),
+            ("minimal", "low"),
+            ("light", "low"),
+            ("mid", "medium"),
+            ("disabled", "off"),
+            ("none", "off"),
+            ("false", "off"),
+            ("", "low"),
+            (" HIGH ", "max"),
+        ] {
+            assert_eq!(spec.normalize(saved), Some(expected), "{saved}");
         }
     }
 
