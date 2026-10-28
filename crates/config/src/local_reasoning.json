@@ -35,10 +35,10 @@
   {
     "id": "deepseek_v4_vision",
     "prefixes": ["deepseek-v4-flash-vision-exp"],
-    "tiers": ["low", "high", "max"],
+    "tiers": ["off", "low", "high", "max"],
     "default": "low",
-    "aliases": {"off": "low", "medium": "high", "xhigh": "max"},
-    "wire": {"low": "low", "high": "high", "max": "max"},
+    "aliases": {"medium": "high", "xhigh": "max"},
+    "wire": {"off": null, "low": "low", "high": "high", "max": "max"},
     "sources": ["https://huggingface.co/deepseek-ai/DeepSeek-V4-Flash-Vision-Exp/tree/86f746b36186f0e567729a5c06a8c918caba82a9"]
   }
 ]
