@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
 import crypto from "node:crypto";
-import { chmod, lstat, mkdtemp, readFile, realpath, rm, writeFile } from "node:fs/promises";
+import { chmod, link, lstat, mkdtemp, readFile, realpath, rm, writeFile } from "node:fs/promises";
 import http from "node:http";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
@@ -19,6 +19,7 @@ import {
 } from "../enrollment-migration-handler.js";
 import { protectWindowsPath, RelayStateStore, verifyWindowsPath } from "../relay-state-store.js";
 import { main as migrationCli } from "../scripts/enrollment-migrate.js";
+import { RELAY_CONTROLLER_GUARD_FILENAME, RELAY_CONTROLLER_GUARD_JOURNAL } from "../relay-state-guard.js";
 import { requireCompleteCoverage } from "../../scripts/check-enrollment-gated-v2-rollback.mjs";
 
 const relayDir = dirname(dirname(fileURLToPath(import.meta.url)));
@@ -565,6 +566,88 @@ test("self-hosted CLI is machine-readable, private-file only, and never prints c
   assert.equal(await migrationCli(["--restore", "--input", backup, "--request-id", "cli-restore-operation-0001"], environment(root, "self_hosted"), io), 0);
   assert.equal(JSON.parse(output.at(-1)).replayed, true);
   assert.equal(JSON.parse(output.at(-1)).applied, false);
+});
+
+test("maintenance CLI refuses controller input/output and aliases before opening a writer", async (t) => {
+  const root = await realpath(await mkdtemp(join(tmpdir(), "pinvou-cli-guard-path-")));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const env = environment(root, "self_hosted");
+  const statePath = env.PINVOU_REMOTE_CONTROLLER_STATE_PATH;
+  const store = await RelayStateStore.open({ statePath,
+    legacyStatePath: env.PINVOU_REMOTE_STATE_PATH, ...testStoreSecurityOptions() });
+  await store.close();
+  const guard = join(dirname(statePath), RELAY_CONTROLLER_GUARD_FILENAME);
+  const before = { metadata: await lstat(guard, { bigint: true }), bytes: await readFile(guard),
+    state: await readFile(statePath) };
+  // Only metadata path validation is permitted for these requests. If a writer
+  // is opened, the path rejection arrived too late, even if Store later refuses.
+  const originalOpen = RelayStateStore.open;
+  let opens = 0;
+  RelayStateStore.open = async () => { opens += 1; throw new Error("unexpected_writer_open"); };
+  t.after(() => { RelayStateStore.open = originalOpen; });
+  const output = [], errors = [];
+  const io = { log: value => output.push(JSON.parse(value)), error: value => errors.push(JSON.parse(value)) };
+  const paths = [guard, join(dirname(statePath), RELAY_CONTROLLER_GUARD_JOURNAL), statePath,
+    join(dirname(statePath), "operator-output.json"), env.PINVOU_REMOTE_STATE_PATH];
+  for (const path of paths) {
+    for (const args of [["--backup", "--output", path], ["--coverage", "--input", path]]) {
+      assert.equal(await migrationCli(args, env, io), 1);
+      assert.equal(errors.at(-1).code, "operator_path_aliases_state");
+    }
+  }
+  // A differently named hard link must not bypass namespace checks.
+  const alias = join(root, "external-input.json");
+  await link(guard, alias);
+  try {
+    for (const args of [["--backup", "--output", alias], ["--coverage", "--input", alias]]) {
+      assert.equal(await migrationCli(args, env, io), 1);
+      assert.equal(errors.at(-1).code, "operator_path_aliases_state");
+    }
+  } finally { await rm(alias); }
+  RelayStateStore.open = originalOpen;
+  assert.equal(opens, 0);
+  assert.deepEqual(output, []);
+  const after = await lstat(guard, { bigint: true });
+  assert.equal(after.dev, before.metadata.dev);
+  assert.equal(after.ino, before.metadata.ino);
+  assert.deepEqual(await readFile(guard), before.bytes);
+  assert.deepEqual(await readFile(statePath), before.state);
+  const reopened = await RelayStateStore.open({ statePath,
+    legacyStatePath: env.PINVOU_REMOTE_STATE_PATH, ...testStoreSecurityOptions() });
+  try { await reopened.compareAndSwap("cli_path_regression", "0", { recovered: true }); }
+  finally { await reopened.close(); }
+});
+
+test("maintenance CLI reports close failure without publishing backup success", async (t) => {
+  const root = await realpath(await mkdtemp(join(tmpdir(), "pinvou-cli-close-")));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const originalOpen = RelayStateStore.open;
+  const closes = [];
+  RelayStateStore.open = async options => {
+    const store = await originalOpen.call(RelayStateStore, { ...options, ...testStoreSecurityOptions() });
+    const close = store.close.bind(store);
+    let first = true;
+    store.close = async () => {
+      closes.push("close");
+      if (first) { first = false; throw Object.assign(new Error("close_failed"), { code: "close_failed" }); }
+      await close();
+    };
+    return store;
+  };
+  t.after(() => { RelayStateStore.open = originalOpen; });
+  const output = [], errors = [], backup = join(root, "backup.json");
+  const result = await migrationCli(["--backup", "--output", backup], environment(root, "self_hosted"), {
+    log: value => output.push(JSON.parse(value)), error: value => errors.push(JSON.parse(value)),
+  });
+  RelayStateStore.open = originalOpen;
+  assert.equal(result, 1);
+  assert.deepEqual(output, []);
+  assert.equal(errors.at(-1).code, "close_failed");
+  assert.equal(closes.length, 2); // failure reported; finally still attempts cleanup
+  await assert.rejects(lstat(backup), { code: "ENOENT" });
+  const reopened = await RelayStateStore.open({ statePath: environment(root).PINVOU_REMOTE_CONTROLLER_STATE_PATH,
+    legacyStatePath: environment(root).PINVOU_REMOTE_STATE_PATH, ...testStoreSecurityOptions() });
+  await reopened.close();
 });
 
 // DEV-02 审核修复：回滚门禁的验收是“未满足门禁时自动失败”，但此前测试只做了

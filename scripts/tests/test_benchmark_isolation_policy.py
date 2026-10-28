@@ -87,7 +87,49 @@ class BenchmarkIsolationPolicyTests(unittest.TestCase):
             timing,
         )
 
-    def test_benchmark_feature_surface_stays_feature_gated_in_product_runtime(self):
+    def test_ready_ci_compiles_and_executes_the_benchmark_feature_surface(self):
+        # 开源侧同口径（2026-10 parity）：可编译性由 rust-lint 的 all-targets
+        # check 硬门禁钉住，可执行性由 Linux rust-test 的 lib 腿承载——合同
+        # 回归在 `#[cfg(all(test, feature = "benchmark-hooks"))]` 下只随 lib
+        # 测试执行，任何一条腿的 feature/命令缩水都应在此变红。
+        workflow = self.read(".github/workflows/pr-check.yml")
+        compile_marker = (
+            "- name: benchmark-hooks + product backend compile checks (hard gate)"
+        )
+        self.assertIn(compile_marker, workflow)
+        compile_step = workflow.split(compile_marker, 1)[1].split(
+            "\n      - name:", 1
+        )[0]
+
+        self.assertIn(
+            "if: ${{ env.RUN_HEAVY_RUST_CHECKS == 'true' }}", compile_step
+        )
+        self.assertIn(
+            "working-directory: pinvou3-app/src-tauri", compile_step
+        )
+        self.assertIn(
+            "cargo check --all-targets --features benchmark-hooks --locked",
+            compile_step,
+        )
+        self.assertIn(
+            "CARGO_TARGET_DIR=target cargo check --manifest-path ../../pinvou-cli/Cargo.toml --package pinvou-product-backend --locked",
+            compile_step,
+        )
+        self.assertNotIn("cargo test", compile_step)
+
+        rust_test = workflow.split("\n  rust-test:", 1)[1].split(
+            "\n  windows-rust-test:", 1
+        )[0]
+        self.assertIn(
+            "cargo test --manifest-path pinvou3-app/src-tauri/Cargo.toml "
+            "--no-default-features --lib --features benchmark-hooks --locked "
+            "-- --test-threads=1",
+            rust_test,
+        )
+        self.assertNotIn(
+            "--test headless_bridge_contract",
+            rust_test,
+        )
         product_runtime = self.read(
             "pinvou3-app/src-tauri/src/features/assistant/product_runtime/mod.rs"
         )

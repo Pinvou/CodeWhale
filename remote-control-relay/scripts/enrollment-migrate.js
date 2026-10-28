@@ -1,7 +1,8 @@
 #!/usr/bin/env node
 import { constants as fsConstants } from "node:fs";
-import { lstat, open, rename, rm } from "node:fs/promises";
-import { dirname, join, parse, resolve } from "node:path";
+import { lstat, open, readdir, realpath, rename, rm } from "node:fs/promises";
+import { basename, dirname, isAbsolute, join, parse, relative, resolve, sep } from "node:path";
+import { RELAY_CONTROLLER_GUARD_FILENAME, RELAY_CONTROLLER_GUARD_JOURNAL, requireControllerLockRuntime } from "../relay-state-guard.js";
 import { isDirectCliEntry } from "../cli-entrypoint.js";
 import { loadEnrollmentRegistryConfig, EnrollmentRegistry } from "../enrollment-registry.js";
 import { requestEnrollmentCapacity } from "../enrollment-coverage-control.js";
@@ -61,6 +62,7 @@ function parseArguments(argv) {
 }
 
 async function secureReadJson(path) {
+  rejectGuardFilename(path, "input_file_unsafe");
   await verifyPrivateAncestors(path);
   const metadata = await lstat(path);
   if (!metadata.isFile() || metadata.isSymbolicLink() || metadata.size > MAX_INPUT_BYTES) {
@@ -108,6 +110,7 @@ async function verifyPrivateAncestors(path) {
 }
 
 async function atomicWriteJson(path, value) {
+  rejectGuardFilename(path, "output_file_unsafe");
   await verifyPrivateAncestors(path);
   try {
     const existing = await lstat(path);
@@ -152,6 +155,61 @@ function publicFailure(error) {
   return { ok: false, code: error?.code || "migration_failed" };
 }
 
+function comparable(path) {
+  const absolute = resolve(path);
+  return process.platform === "win32" ? absolute.toLowerCase() : absolute;
+}
+
+function inside(path, directory) {
+  const suffix = relative(comparable(directory), comparable(path));
+  return suffix === "" || (suffix !== ".." && !suffix.startsWith(`..${sep}`) && !isAbsolute(suffix));
+}
+
+function rejectGuardFilename(path, code) {
+  if ([RELAY_CONTROLLER_GUARD_FILENAME, RELAY_CONTROLLER_GUARD_JOURNAL]
+    .some(name => comparable(basename(path)) === comparable(name))) throw cliError(code);
+}
+
+async function optionalMetadata(path) {
+  try { return await lstat(path, { bigint: true }); }
+  catch (error) { if (error?.code === "ENOENT") return null; throw error; }
+}
+
+async function canonicalCandidate(path) {
+  try { return await realpath(path); }
+  catch (error) {
+    if (error?.code !== "ENOENT") throw error;
+    return join(await realpath(dirname(path)), basename(path));
+  }
+}
+
+async function assertOperatorPathsSeparate(args, config) {
+  const directory = dirname(config.controller_state_path);
+  const paths = [args.input, args.output].filter(Boolean);
+  for (const path of paths) {
+    rejectGuardFilename(path, "operator_path_aliases_state");
+    if (inside(path, directory) || comparable(path) === comparable(config.legacy_web_state_path)) {
+      throw cliError("operator_path_aliases_state");
+    }
+  }
+  const canonicalDirectory = await canonicalCandidate(directory);
+  const managed = [config.legacy_web_state_path];
+  try { for (const name of await readdir(directory)) managed.push(join(directory, name)); }
+  catch (error) { if (error?.code !== "ENOENT") throw error; }
+  // Metadata only: never ordinary-open any controller file to identify aliases.
+  const identities = (await Promise.all(managed.map(optionalMetadata))).filter(Boolean);
+  for (const path of paths) {
+    const canonical = await canonicalCandidate(path);
+    if (inside(canonical, canonicalDirectory)
+      || comparable(canonical) === comparable(await canonicalCandidate(config.legacy_web_state_path))) {
+      throw cliError("operator_path_aliases_state");
+    }
+    const metadata = await optionalMetadata(path);
+    if (metadata && identities.some(identity => identity.dev === metadata.dev && identity.ino === metadata.ino
+      && (identity.dev !== 0n || identity.ino !== 0n))) throw cliError("operator_path_aliases_state");
+  }
+}
+
 export async function main(argv = process.argv.slice(2), env = process.env, io = console) {
   let store;
   try {
@@ -178,39 +236,50 @@ export async function main(argv = process.argv.slice(2), env = process.env, io =
       && (!args.input || args.output)) {
       throw cliError("self_registration_cleanup_arguments_invalid");
     }
+    if (args.mode === "coverage" && (!args.input || args.output)) throw cliError("coverage_arguments_invalid");
+    if (args.mode === "backup" && (!args.output || args.input)) throw cliError("backup_arguments_invalid");
+    if (args.mode === "restore" && (!args.input || args.output || args.requestId === undefined)) throw cliError("restore_arguments_invalid");
+    if (["dry-run", "apply"].includes(args.mode) && (!args.input || args.output)) throw cliError("batch_arguments_invalid");
     const config = loadEnrollmentRegistryConfig(env);
     if (["dry-run", "apply", "list-self-registrations", "check-self-registration-cleanup", "apply-self-registration-cleanup"].includes(args.mode)
       && config.deployment !== "self_hosted") {
       throw cliError("self_hosted_mode_required");
     }
+    await requireControllerLockRuntime();
+    await assertOperatorPathsSeparate(args, config);
+    // No operator file IO while this command owns a SQLite connection. Reading
+    // first also prevents a malformed input from initializing a new store.
+    const input = args.input ? (args.mode === "coverage"
+      ? await readEnrollmentInventory(args.input) : await secureReadJson(args.input)) : null;
     store = await RelayStateStore.open({
       statePath: config.controller_state_path,
       legacyStatePath: config.legacy_web_state_path,
     });
     const registry = EnrollmentRegistry.open({ stateStore: store, config });
     let result;
+    let output = null;
     if (args.mode === "list-self-registrations") {
       const inventory = registry.listSelfRegistrations();
-      await atomicWriteJson(args.output, inventory);
+      output = inventory;
       result = { ok: true, inventory_written: true, namespace_revision: inventory.namespace_revision,
         capacity: registry.getSelfRegistrationCapacity() };
     } else if (["check-self-registration-cleanup", "apply-self-registration-cleanup"].includes(args.mode)) {
       result = { ok: true, ...(await registry.cleanupSelfRegistrations({
-        inventory: await secureReadJson(args.input), dryRun: args.mode === "check-self-registration-cleanup",
+        inventory: input, dryRun: args.mode === "check-self-registration-cleanup",
       })), capacity: registry.getSelfRegistrationCapacity() };
     } else if (args.mode === "coverage") {
       if (!args.input || args.output) throw cliError("coverage_arguments_invalid");
-      const document = await readEnrollmentInventory(args.input);
+      const document = input;
       const handler = new EnrollmentMigrationHandler({ registry });
       result = { ok: true, ...handler.coverage(document.endpoint_ids) };
     } else if (args.mode === "backup") {
       if (!args.output || args.input) throw cliError("backup_arguments_invalid");
       result = createEnrollmentBackup(registry);
-      await atomicWriteJson(args.output, result);
+      output = result;
       result = { ok: true, backup_written: true, namespace_revision: result.namespace_revision };
     } else if (args.mode === "restore") {
       if (!args.input || args.output || args.requestId === undefined) throw cliError("restore_arguments_invalid");
-      const backup = await secureReadJson(args.input);
+      const backup = input;
       result = {
         ok: true,
         ...(await restoreEnrollmentBackup({
@@ -221,7 +290,7 @@ export async function main(argv = process.argv.slice(2), env = process.env, io =
       };
     } else {
       if (!args.input || args.output) throw cliError("batch_arguments_invalid");
-      const document = await secureReadJson(args.input);
+      const document = input;
       exactDocument(document, ["schema", "version", "request_id", "operations"], "batch_document_invalid");
       if (document?.schema !== "pinvou-enrollment-migration-batch" || document?.version !== 1
         || typeof document?.request_id !== "string") {
@@ -236,6 +305,14 @@ export async function main(argv = process.argv.slice(2), env = process.env, io =
           requestId: document.request_id,
         })),
       };
+    }
+    // Do not acknowledge success while owner cleanup failed, or write an
+    // operator-selected output while the guard is held in this process.
+    await store.close();
+    store = null;
+    if (output) {
+      await assertOperatorPathsSeparate(args, config);
+      await atomicWriteJson(args.output, output);
     }
     io.log(JSON.stringify(result));
     return 0;

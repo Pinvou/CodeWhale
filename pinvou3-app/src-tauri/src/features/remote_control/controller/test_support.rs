@@ -131,6 +131,19 @@ pub(crate) struct PairingFixture {
     pub(crate) resume_token: [u8; 32],
 }
 
+/// Bind a fixture to a genuine manager operation before signing it. Reuse the
+/// production transcript preimage, so no post-sign tuple edit is accepted.
+pub(crate) fn bind_pairing_generation(fixture: &mut PairingFixture, generation: &str) {
+    fixture.reservation["remote_control_generation"] = json!(generation);
+    fixture.reservation["transcript"]["remote_control_generation"] = json!(generation);
+    let preimage = build_pairing_transcript_preimage(&fixture.reservation["transcript"]).unwrap();
+    fixture.reservation["transcript_hash"] = json!(hex_lower(&Sha256::digest(&preimage)));
+    fixture.reservation["relay_signature_b64"] = json!(
+        base64::engine::general_purpose::STANDARD
+            .encode(fixture.relay.key_pair.sign(&preimage).as_ref())
+    );
+}
+
 pub(crate) fn pairing_fixture(key_id: &str) -> PairingFixture {
     let relay = signed_relay(key_id);
     let a_keys = HandshakeKeyPair::generate().unwrap();
