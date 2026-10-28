@@ -6206,3 +6206,289 @@ fn forkguard_powershell_retry_keeps_the_first_result_when_it_cannot_start() {
         annotated.stderr
     );
 }
+
+#[cfg(unix)]
+#[test]
+fn readonly_operand_gate_refuses_cd_operands_the_shell_reinterprets() {
+    // zsh's EQUALS expansion turns `cd =ls` into `cd /bin/ls`: the shell's
+    // `cd` fails and a `;`/`||` sequence continues in the original directory,
+    // while the seam would have canonicalized a literal `=ls` directory and
+    // folded every later operand under it. The shape rule is the
+    // classifier's own, shared in one place, so both layers refuse.
+    let workspace = tempdir().expect("workspace");
+    let outside = tempdir().expect("outside");
+    std::fs::write(outside.path().join("secret.txt"), "secret").expect("outside file");
+    std::fs::create_dir(workspace.path().join("=ls")).expect("equals directory");
+    std::fs::create_dir(workspace.path().join("sub")).expect("sub");
+    std::fs::write(workspace.path().join("sub").join("ok.txt"), "ok").expect("ok file");
+    std::os::unix::fs::symlink(
+        outside.path().join("secret.txt"),
+        workspace.path().join("link"),
+    )
+    .expect("outside root symlink");
+    let roots = [workspace.path().to_path_buf()];
+
+    for command in ["cd =ls; cat link", "cd =ls || cat link"] {
+        let error = enforce_readonly_workspace_operands(command, &roots, workspace.path())
+            .expect_err("an `=`-bearing cd operand must be refused at the seam")
+            .to_string();
+        assert!(error.contains("cwd.shape"), "{command}: {error}");
+        assert!(
+            !crate::command_safety::is_agent_readonly_shell_command(command),
+            "{command} must refuse at the classifier too"
+        );
+    }
+    // Admitted neighbours stay admitted.
+    enforce_readonly_workspace_operands("cd sub; cat ok.txt", &roots, workspace.path())
+        .expect("a plain relative cd sequence stays admitted");
+}
+
+#[cfg(unix)]
+#[test]
+fn readonly_operand_gate_refuses_cd_destinations_the_shell_cannot_enter() {
+    use std::os::unix::fs::PermissionsExt;
+    struct ChmodGuard<'a>(&'a std::path::Path);
+    impl Drop for ChmodGuard<'_> {
+        fn drop(&mut self) {
+            let _ = std::fs::set_permissions(self.0, std::fs::Permissions::from_mode(0o755));
+        }
+    }
+    // A mode-000 directory canonicalizes and `is_dir`s (stat needs search
+    // permission only on the ancestors), but the shell's `cd` fails on it and
+    // a `;`/`||` sequence continues in the original directory — the same
+    // fold-lies-when-cd-fails shape as a regular-file destination.
+    let workspace = tempdir().expect("workspace");
+    let outside = tempdir().expect("outside");
+    std::fs::write(outside.path().join("secret.txt"), "secret").expect("outside file");
+    let vault = workspace.path().join("vault");
+    std::fs::create_dir(&vault).expect("vault");
+    std::os::unix::fs::symlink(
+        outside.path().join("secret.txt"),
+        workspace.path().join("link"),
+    )
+    .expect("outside root symlink");
+    let roots = [workspace.path().to_path_buf()];
+    {
+        let _guard = ChmodGuard(&vault);
+        std::fs::set_permissions(&vault, std::fs::Permissions::from_mode(0o000))
+            .expect("chmod 000");
+        for command in ["cd vault; cat link", "cd vault || cat link"] {
+            let error = enforce_readonly_workspace_operands(command, &roots, workspace.path())
+                .expect_err("an unsearchable cd destination must be refused")
+                .to_string();
+            assert!(error.contains("cwd.unsearchable"), "{command}: {error}");
+        }
+    }
+    // Searchable again, the fold is exact and the sequence admits.
+    enforce_readonly_workspace_operands("cd vault; pwd", &roots, workspace.path())
+        .expect("a searchable destination folds and admits");
+}
+
+#[cfg(unix)]
+#[test]
+fn readonly_operand_gate_refuses_recursive_glob_components() {
+    // zsh expands `**/` recursively while the walker — like bash without
+    // `globstar`, sh, and dash — consumes one directory level per component,
+    // so a recursive spelling would produce matches nothing ever judged.
+    let workspace = tempdir().expect("workspace");
+    let outside = tempdir().expect("outside");
+    std::fs::write(outside.path().join("secret.txt"), "secret").expect("outside file");
+    std::fs::create_dir_all(workspace.path().join("sub").join("deep")).expect("sub/deep");
+    std::fs::write(workspace.path().join("top.txt"), "inside").expect("inside file");
+    std::os::unix::fs::symlink(
+        outside.path().join("secret.txt"),
+        workspace.path().join("sub").join("deep").join("evil.txt"),
+    )
+    .expect("outside symlink at depth two");
+    let roots = [workspace.path().to_path_buf()];
+
+    for command in [
+        "cat **/*.txt",
+        "pwd; cat **/*.txt",
+        "cat **/evil.txt",
+        "cat **/*.txt | head -3",
+    ] {
+        let error = enforce_readonly_workspace_operands(command, &roots, workspace.path())
+            .expect_err("a recursive glob spelling must be refused")
+            .to_string();
+        assert!(error.contains("operand.shape"), "{command}: {error}");
+    }
+    // A trailing `**` is a plain `*` on every supported shell.
+    enforce_readonly_workspace_operands("cat sub/**", &roots, workspace.path())
+        .expect("a trailing `**` stays a one-level glob");
+    // The recursion depth is bounded by the component count, so a deep
+    // `.*` chain is refused before the walk instead of recursing per level.
+    let deep = format!("cat {}", vec![".*"; 33].join("/"));
+    let error = enforce_readonly_workspace_operands(&deep, &roots, workspace.path())
+        .expect_err("a 33-component glob must hit the component cap")
+        .to_string();
+    assert!(error.contains("glob_too_broad"), "{error}");
+    let borderline = format!("cat {}", vec!["sub"; 32].join("/"));
+    let _ = enforce_readonly_workspace_operands(&borderline, &roots, workspace.path());
+}
+
+#[cfg(unix)]
+#[test]
+fn readonly_operand_gate_judges_dash_prefixed_glob_operands_as_whole_words() {
+    // The shell pathname-expands the whole word, not the part after the `=`:
+    // `--exclude-from=zz*` matches a planted `--exclude-from=zzq` while a
+    // walk of `zz*` alone matches nothing.
+    let workspace = tempdir().expect("workspace");
+    let outside = tempdir().expect("outside");
+    std::fs::write(outside.path().join("secret.txt"), "secret").expect("outside file");
+    std::os::unix::fs::symlink(
+        outside.path().join("secret.txt"),
+        workspace.path().join("--exclude-from=zzq"),
+    )
+    .expect("outside symlink spelled as an option");
+    let roots = [workspace.path().to_path_buf()];
+    let error = enforce_readonly_workspace_operands(
+        "git ls-files --exclude-from=zz*",
+        &roots,
+        workspace.path(),
+    )
+    .expect_err("the whole-word expansion must be judged")
+    .to_string();
+    assert!(error.contains("outside_workspace"), "{error}");
+    // Without a planted match the spelling stays admitted.
+    let clean = tempdir().expect("clean workspace");
+    std::fs::write(clean.path().join("inside.txt"), "inside").expect("inside file");
+    enforce_readonly_workspace_operands(
+        "git ls-files --exclude-from=zz*",
+        &[clean.path().to_path_buf()],
+        clean.path(),
+    )
+    .expect("a zero-match whole-word glob stays admitted");
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn readonly_shell_refuses_judged_and_run_name_divergences_end_to_end() {
+    let workspace = tempdir().expect("workspace");
+    let outside = tempdir().expect("outside");
+    std::fs::write(outside.path().join("secret.txt"), "TOPSECRET-OUTSIDE\n").expect("secret");
+    std::fs::write(workspace.path().join("Cargo.toml"), "[package]\n").expect("manifest");
+    std::fs::write(workspace.path().join("top.txt"), "inside\n").expect("inside file");
+    std::fs::create_dir_all(workspace.path().join("sub").join("deep")).expect("sub/deep");
+    std::os::unix::fs::symlink(
+        outside.path().join("secret.txt"),
+        workspace.path().join("a\\?b"),
+    )
+    .expect("outside symlink spelled with an escaped wildcard");
+    // A POSIX file name that merely starts with a backslash (clippy reads the
+    // literal as a Windows separator; on unix it is an ordinary byte).
+    let leading_escape_name = String::from("\\?secret");
+    std::os::unix::fs::symlink(
+        outside.path().join("secret.txt"),
+        workspace.path().join(leading_escape_name),
+    )
+    .expect("outside symlink spelled with a leading escaped wildcard");
+    std::os::unix::fs::symlink(
+        outside.path().join("secret.txt"),
+        workspace.path().join("link"),
+    )
+    .expect("outside root symlink");
+    std::fs::create_dir(workspace.path().join("=ls")).expect("equals directory");
+    std::os::unix::fs::symlink(
+        outside.path().join("secret.txt"),
+        workspace.path().join("sub").join("deep").join("evil.txt"),
+    )
+    .expect("outside symlink at depth two");
+    let context = ToolContext::new(workspace.path())
+        .with_shell_policy(crate::worker_profile::ShellPolicy::ReadOnly);
+
+    for command in [
+        // The `\\?\` verbatim strip used to run before the charset gate, so
+        // the gate judged `ab` while the shell parsed `a\?b` — a live glob.
+        r"pwd; cat a\\?\b",
+        r"cat a\\?\b; pwd",
+        r"cat Cargo.toml | cat a\\?\b",
+        r"pwd; cat \\?\secret",
+        // zsh's EQUALS expansion makes the shell's `cd` fail so the sequence
+        // continues at the root, where `link` points outside.
+        "cd =ls; cat link",
+        "cd =ls || cat link",
+        // zsh recurses `**/` while the walker judged one level per component.
+        "pwd; cat **/*.txt",
+        "cat **/evil.txt | head -3",
+        "grep -n TOPSECRET **/*.txt | head -3",
+    ] {
+        let result = LowercaseBashTool
+            .execute(json!({"command": command}), &context)
+            .await;
+        let content = match &result {
+            Ok(output) => {
+                assert!(
+                    !output.success,
+                    "{command} must not succeed: {}",
+                    output.content
+                );
+                output.content.clone()
+            }
+            Err(error) => error.to_string(),
+        };
+        assert!(
+            content.contains("shell.readonly") || content.contains("read-only"),
+            "{command} must refuse through the read-only boundary: {content}"
+        );
+        assert!(
+            !content.contains("TOPSECRET-OUTSIDE"),
+            "{command} leaked outside content: {content}"
+        );
+    }
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn readonly_shell_refuses_unsearchable_cd_destinations_end_to_end() {
+    use std::os::unix::fs::PermissionsExt;
+    struct ChmodGuard<'a>(&'a std::path::Path);
+    impl Drop for ChmodGuard<'_> {
+        fn drop(&mut self) {
+            let _ = std::fs::set_permissions(self.0, std::fs::Permissions::from_mode(0o755));
+        }
+    }
+    let workspace = tempdir().expect("workspace");
+    let outside = tempdir().expect("outside");
+    std::fs::write(outside.path().join("secret.txt"), "TOPSECRET-OUTSIDE\n").expect("secret");
+    let vault = workspace.path().join("vault");
+    std::fs::create_dir(&vault).expect("vault");
+    std::os::unix::fs::symlink(
+        outside.path().join("secret.txt"),
+        workspace.path().join("link"),
+    )
+    .expect("outside root symlink");
+    let context = ToolContext::new(workspace.path())
+        .with_shell_policy(crate::worker_profile::ShellPolicy::ReadOnly);
+    let _guard = ChmodGuard(&vault);
+    std::fs::set_permissions(&vault, std::fs::Permissions::from_mode(0o000)).expect("chmod 000");
+
+    for command in [
+        "cd vault; cat link",
+        "cd vault || cat link",
+        "cd vault; cat *",
+    ] {
+        let result = LowercaseBashTool
+            .execute(json!({"command": command}), &context)
+            .await;
+        let content = match &result {
+            Ok(output) => {
+                assert!(
+                    !output.success,
+                    "{command} must not succeed: {}",
+                    output.content
+                );
+                output.content.clone()
+            }
+            Err(error) => error.to_string(),
+        };
+        assert!(
+            content.contains("shell.readonly") || content.contains("read-only"),
+            "{command} must refuse through the read-only boundary: {content}"
+        );
+        assert!(
+            !content.contains("TOPSECRET-OUTSIDE"),
+            "{command} leaked outside content: {content}"
+        );
+    }
+}
