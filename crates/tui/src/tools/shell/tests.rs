@@ -1781,6 +1781,11 @@ fn readonly_github_shell_calls_obey_the_host_network_policy_before_spawn() {
         "ls && gh issue view 5287",
         "gh issue list | head -n 3",
         "git status || gh pr view 7",
+        // `*` operands are admitted by the agent grammar but refused by the
+        // whole-command parallel predicate; the per-stage guard must not use
+        // that predicate or these stages would silently skip the policy.
+        "gh pr list --search '*'",
+        "pwd; gh repo view *",
     ] {
         let denied = enforce_readonly_github_network_policy(compound, &deny)
             .expect_err("a gh stage inside a compound must consult the policy")

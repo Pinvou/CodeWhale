@@ -1097,9 +1097,18 @@ pub fn is_github_readonly_command(command: &str) -> bool {
     if !is_parallel_readonly_command(command) {
         return false;
     }
+    is_github_readonly_tokens(&shell_words(command.trim()))
+}
 
-    let tokens = shell_words(command.trim());
-    let Some(start) = primary_token_index(&tokens) else {
+/// Token-level recognition of one command as an admitted GitHub read, without
+/// the parallel classifier's charset gate. The agent read-only grammar admits
+/// `*` (glob operands judged at the execution seam), so a stage like
+/// `gh pr list --search '*'` is admitted and reaches the network while the
+/// whole-command predicate refuses its `*` — a per-stage guard keyed on that
+/// predicate would silently skip the network policy for exactly those stages.
+/// Over-recognition is harmless: the caller only consults the network decider.
+pub(crate) fn is_github_readonly_tokens(tokens: &[String]) -> bool {
+    let Some(start) = primary_token_index(tokens) else {
         return false;
     };
     let command_tokens = &tokens[start..];
@@ -1111,6 +1120,14 @@ pub fn is_github_readonly_command(command: &str) -> bool {
     GITHUB_READONLY_PREFIXES
         .iter()
         .any(|prefix| *prefix == canonical)
+}
+
+/// Whether one pipeline stage of an admitted read-only compound is an
+/// admitted GitHub read (see [`is_github_readonly_tokens`]). The execution
+/// seam's network guard splits commands into stages with the same splitters
+/// the classifier used, then consults this per stage.
+pub(crate) fn is_github_readonly_stage(stage: &str) -> bool {
+    is_github_readonly_tokens(&shell_words(stage.trim()))
 }
 
 #[rustfmt::skip] // Keep one auditable policy row per command instead of vertically exploding strings.
@@ -2587,6 +2604,34 @@ mod tests {
                 "{command} must stay denied: a cluster may not smuggle an unknown letter"
             );
         }
+    }
+
+    /// The per-stage network guard recognizes gh stages on tokens, not on
+    /// the parallel classifier's charset: the agent grammar admits `*`
+    /// operands, so a stage the whole-command predicate would un-admit is
+    /// still recognized and the network policy is consulted for it.
+    #[test]
+    fn github_stage_predicate_sees_glob_operand_stages() {
+        for stage in [
+            "gh pr list --search '*'",
+            "gh repo view *",
+            "gh issue list --limit '*'",
+        ] {
+            assert!(
+                is_agent_readonly_shell_command(stage),
+                "{stage} must be agent-admitted (the guard pin is then non-vacuous)"
+            );
+            assert!(
+                !is_github_readonly_command(stage),
+                "{stage}: the whole-command parallel predicate must stay strict on `*`"
+            );
+            assert!(
+                is_github_readonly_stage(stage),
+                "{stage}: the token-level stage predicate must recognize the gh read"
+            );
+        }
+        assert!(!is_github_readonly_stage("git status"));
+        assert!(!is_github_readonly_stage("cat gh issue list"));
     }
 
     /// The parent-side parallel auto-approve classifier keeps its whole-
