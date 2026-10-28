@@ -141,6 +141,31 @@ any_swap_active() {
   swapon --show=NAME --noheadings 2>/dev/null | grep -q .
 }
 
+# A killed or interrupted apt-get leaves dpkg with half-configured packages,
+# and from then on EVERY later apt-get in the job exits 100 ("E: dpkg was
+# interrupted, you must manually run 'sudo dpkg --configure -a'") — the 2026-
+# 10-28 queue failure (run 40633531468) was exactly this: a timeout kill mid
+# install poisoned rust-test's own system-dependency step ~40s later. Best-
+# effort repair: configure -a first waits for any dpkg still holding the lock
+# (e.g. the orphan from a timeout kill) to finish. No-op on a clean admin
+# state (dpkg --audit prints nothing), so repeat and trap calls stay cheap.
+repair_dpkg_state() {
+  if [[ -z $(dpkg --audit 2>/dev/null) ]]; then
+    return 0
+  fi
+  warn "dpkg was left in an interrupted state; running 'dpkg --configure -a' so later apt-get steps in this job do not fail"
+  if ! run_to 60 dpkg --configure -a >/dev/null 2>&1; then
+    warn "dpkg --configure -a did not finish in time; later apt-get steps in this job may still fail until it is run manually"
+  fi
+}
+# EXIT trap is the backstop for kill paths outside setup_zram. The workflow-
+# side `timeout 240` wrapper TERM's sudo->bash; route TERM through exit so
+# the trap engages within the wrapper's 15s kill grace. This script itself no
+# longer installs kernel packages (main's no-install policy), but any dpkg
+# state dirtied elsewhere in the job still gets repaired before later steps.
+trap repair_dpkg_state EXIT
+trap 'exit 143' TERM
+
 # sysctl tuning: each knob is independent and non-fatal.
 sysctl -w vm.swappiness=130 >/dev/null 2>&1 \
   || warn "vm.swappiness=130 rejected by the running kernel"

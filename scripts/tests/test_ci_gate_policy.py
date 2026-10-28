@@ -3941,6 +3941,12 @@ class CiGatePolicyTests(unittest.TestCase):
             'log "provisioning the mandatory /mnt disk swap"\nsetup_disk_swap',
             source,
         )
+        # 2026-10-28 修订(冲突消解):主分支已定案"镜像自带模块、本脚本不装
+        # 内核包",原 install 路径的等锁/单次尝试钉子随路径一并退役;dpkg 修复
+        # 兜底仍是全 job 契约——修复函数与退出路径 trap 必须存在。
+        self.assertIn("def repair_dpkg_state()", source)
+        self.assertIn("trap repair_dpkg_state EXIT", source)
+        self.assertIn("trap 'exit 143' TERM", source)
 
     def test_memory_setup_module_failure_does_not_poison_dependency_install(self):
         source = (ROOT / "scripts" / "ci-memory-setup.sh").read_text(encoding="utf-8")
