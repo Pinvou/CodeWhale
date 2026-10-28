@@ -2161,14 +2161,6 @@ impl ShellManager {
 
         // Create command spec and prepare sandboxed environment
         let spec = if let Some(roots) = readonly_roots {
-            if readonly_sequence_refused_by_shell_kind(
-                crate::shell_dispatcher::global_dispatcher().kind(),
-                command,
-            ) {
-                return Err(anyhow!(
-                    "[shell.readonly.sequence.unsupported_shell] `;`-sequences are not executable by this host's cmd.exe shell; run each read-only probe as its own command."
-                ));
-            }
             if command.contains('|')
                 || readonly_sequence_segments(command).is_some_and(|segments| segments.len() > 1)
                 || agent_readonly_command_needs_shell_for_cd(command)
@@ -2179,16 +2171,20 @@ impl ShellManager {
                 // expansions, or subshells — only `|` between validated
                 // pipeline stages and `;`/`&&`/`||` between validated
                 // segments), so a shell is needed to bind them; pipefail
-                // additionally reports a failed stage. Git stages receive the
-                // same in-process hardening flags the direct-argv lane
-                // splices, because the shell would otherwise run whatever
-                // diff driver or textconv the repository configures. Single
-                // commands keep the shell-free direct-argv lane below.
+                // additionally reports a failed stage where the shell speaks
+                // it. The resolved shell must be able to run the compound as
+                // written (cmd.exe cannot), checked before anything is bound.
+                // Git stages receive the same in-process hardening flags the
+                // direct-argv lane splices, because the shell would otherwise
+                // run whatever diff driver or textconv the repository
+                // configures. Single commands keep the shell-free direct-argv
+                // lane below.
+                let kind = crate::shell_dispatcher::global_dispatcher().kind();
+                if let Some(reason) = readonly_compound_refused_by_shell_kind(kind, command) {
+                    return Err(anyhow!("{reason}"));
+                }
                 let hardened = harden_readonly_shell_git_stages(command)?;
-                let shell_bound = readonly_shell_bound_command(
-                    crate::shell_dispatcher::global_dispatcher().kind(),
-                    &hardened,
-                );
+                let shell_bound = readonly_shell_bound_command(kind, &hardened);
                 CommandSpec::shell(
                     &shell_bound,
                     work_dir.clone(),
@@ -3882,41 +3878,75 @@ fn attach_shell_owner_metadata(metadata: &mut serde_json::Value, context: &ToolC
     metadata["owner_agent_name"] = json!(owner.agent_name);
 }
 
-/// Whether the resolved shell kind can bind an admitted `;`-sequence at all:
+/// Whether the resolved shell kind can bind an admitted compound at all.
 /// `cmd.exe` treats `;` as an argument delimiter, not a command separator, so
-/// the sequence could neither run nor fail as a sequence there. PowerShell
-/// executes `;`-sequences, and `&&`/`||` are parsed by every supported
-/// Windows shell (an old PowerShell parse error is still a safe nothing-ran
-/// failure). Pure so the platform-dependent decision is unit-testable on
-/// every host.
-fn readonly_sequence_refused_by_shell_kind(
+/// a `;`-sequence could neither run nor fail as a sequence there; and it
+/// expands `%NAME%` from the environment before any program sees the word,
+/// so an operand spelled `%USERPROFILE%\secret` would run under a name the
+/// operand gate never judged (the cmd.exe twin of zsh's `=cmd` expansion,
+/// which the gate refuses outright). PowerShell executes `;`-sequences and
+/// reads `%` literally; `&&`/`||` parse on PowerShell 7+, and the Windows
+/// PowerShell 5.1 parse error is a safe nothing-ran failure. Pure so the
+/// platform-dependent decision is unit-testable on every host.
+fn readonly_compound_refused_by_shell_kind(
     kind: &crate::shell_dispatcher::ShellKind,
     command: &str,
-) -> bool {
-    matches!(kind, crate::shell_dispatcher::ShellKind::Cmd)
-        && readonly_sequence_segments(command).is_some_and(|segments| segments.len() > 1)
+) -> Option<&'static str> {
+    if !matches!(kind, crate::shell_dispatcher::ShellKind::Cmd) {
+        return None;
+    }
+    if command.contains('%') {
+        return Some(
+            "[shell.readonly.sequence.unsupported_shell] cmd.exe expands `%NAME%` before the command runs, so a read-only probe containing `%` cannot be judged on this shell; run it through PowerShell or as a single command without `%`.",
+        );
+    }
+    if readonly_sequence_segments(command).is_some_and(|segments| segments.len() > 1) {
+        return Some(
+            "[shell.readonly.sequence.unsupported_shell] cmd.exe cannot execute a `;`-separated sequence as a sequence; run the probes one at a time or through PowerShell.",
+        );
+    }
+    None
 }
 
 /// The shell-lane command text for one admitted read-only compound: the
-/// POSIX `set -o pipefail` prefix is prepended only when a pipeline is
-/// present AND the resolved shell speaks POSIX pipefail — cmd.exe mangles
-/// the `;`-bearing fragment and PowerShell errors on the statement, while
-/// every non-Windows kind (sh/bash/`$SHELL`) honors it. Pure for tests.
+/// `set -o pipefail` prefix is prepended only when a pipeline is present AND
+/// the resolved shell binary is known to speak it. The decision is keyed on
+/// the binary, not the kind: `/bin/sh` is bash on macOS but dash on Debian
+/// and Ubuntu, and dash (like busybox ash) exits the whole `-c` payload on
+/// `set -o pipefail` — the prefix would turn every admitted pipeline into a
+/// nothing-ran failure there. bash, zsh, and the ksh family honor it; every
+/// other binary runs the compound unprefixed and reports the last stage's
+/// status, which is reporting fidelity, not a boundary. cmd.exe mangles the
+/// `;`-bearing fragment and PowerShell errors on the statement, so Windows
+/// kinds never receive it. Pure for tests.
 fn readonly_shell_bound_command(
     kind: &crate::shell_dispatcher::ShellKind,
     command: &str,
 ) -> String {
-    let posix_pipefail = !matches!(
-        kind,
-        crate::shell_dispatcher::ShellKind::Cmd
-            | crate::shell_dispatcher::ShellKind::Pwsh
-            | crate::shell_dispatcher::ShellKind::WindowsPowerShell
-    );
-    if command.contains('|') && posix_pipefail {
+    if command.contains('|') && shell_binary_speaks_pipefail(kind) {
         format!("set -o pipefail; {command}")
     } else {
         command.to_string()
     }
+}
+
+/// Whether the shell binary behind `kind` accepts `set -o pipefail`: keyed on
+/// the executable's file name, since `$SHELL` and `/bin/sh` can resolve to
+/// anything.
+fn shell_binary_speaks_pipefail(kind: &crate::shell_dispatcher::ShellKind) -> bool {
+    if matches!(
+        kind,
+        crate::shell_dispatcher::ShellKind::Cmd
+            | crate::shell_dispatcher::ShellKind::Pwsh
+            | crate::shell_dispatcher::ShellKind::WindowsPowerShell
+    ) {
+        return false;
+    }
+    let binary = std::path::Path::new(kind.binary())
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or_default();
+    matches!(binary, "bash" | "zsh" | "ksh" | "ksh93" | "mksh")
 }
 
 fn enforce_readonly_github_network_policy(
@@ -4174,20 +4204,23 @@ fn hardened_readonly_git_stage(stage: &str) -> Result<Option<String>> {
 
 /// Re-emit one parsed token as shell text that every supported shell kind
 /// reads back as the same single word: bare when it is made only of
-/// characters no shell interprets (`*` stays bare on purpose — the operand
-/// gate judged its expansion and the shell must still perform it), wrapped
-/// in double quotes when it merely carries whitespace or single quotes, and
-/// refused when it holds a character whose quoting rules differ between sh,
-/// cmd.exe, and PowerShell. The charset gate already refuses `$`, backticks,
-/// and newlines; the remaining refusals are rare spellings of a probe that
-/// runs fine as a single command on the direct-argv lane.
+/// characters that read back unchanged on sh, cmd.exe, and PowerShell alike
+/// (`*` deliberately stays bare — the operand gate judged its expansion and
+/// the shell must still perform it; `%` and `^` do not qualify, since cmd.exe
+/// expands `%NAME%` in bare words and consumes a bare `^` as its escape),
+/// wrapped in double quotes when it merely carries whitespace, single
+/// quotes, or those cmd.exe-sensitive characters, and refused when it holds a
+/// character whose quoting rules differ between sh, cmd.exe, and PowerShell.
+/// The charset gate already refuses `$`, backticks, and newlines; the
+/// remaining refusals are rare spellings of a probe that runs fine as a
+/// single command on the direct-argv lane.
 fn readonly_shell_word(token: &str) -> Result<String> {
     let bare = !token.is_empty()
         && token.chars().all(|ch| {
             ch.is_ascii_alphanumeric()
                 || matches!(
                     ch,
-                    '_' | '-' | '.' | '/' | ':' | '=' | '%' | ',' | '+' | '@' | '^' | '*'
+                    '_' | '-' | '.' | '/' | ':' | '=' | ',' | '+' | '@' | '*'
                 )
         });
     if bare {
@@ -5413,7 +5446,7 @@ impl ToolSpec for BashTool {
 
     fn description(&self) -> &'static str {
         if self.read_only {
-            "Inspect the workspace with the bounded read-only command subset. Single commands run directly as argv; pipelines (`a | b`), `;`/`&&`/`||` sequences, and cd-prefixed commands run through the detected shell instead (a `set -o pipefail` prefix is prepended on POSIX shells; `;`-sequences are refused on a cmd.exe host, which cannot bind them; a standalone `cd` affects only that one command). Only action=run plus command, cwd, and timeout_ms are accepted."
+            "Inspect the workspace with the bounded read-only command subset. Single commands run directly as argv; pipelines (`a | b`), `;`/`&&`/`||` sequences, and commands with a `cd` segment run through the detected shell instead (pipelines additionally get a `set -o pipefail` prefix where the detected binary speaks it — bash, zsh, ksh — never on cmd.exe or PowerShell; `;`-sequences and `%` are refused on a cmd.exe host; a standalone `cd` affects only that one command). Only action=run plus command, cwd, and timeout_ms are accepted."
         } else {
             guidance::description()
         }

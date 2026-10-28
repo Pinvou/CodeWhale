@@ -518,8 +518,9 @@ fn forkguard_shell_catalog_guidance_matches_execution() {
     let readonly = BashTool::read_only("Bash");
     // Forkguard: the read-only description must match execution — argv for
     // single commands, the shell for pipelines, `;`/`&&`/`||` sequences, and
-    // cd-prefixed commands, with the pipefail prefix scoped to POSIX shells
-    // and a standalone `cd` scoped to its own command.
+    // commands with a `cd` segment, with the pipefail prefix scoped to
+    // pipefail-capable binaries, cmd.exe refusals stated, and a standalone
+    // `cd` scoped to its own command.
     assert!(
         readonly
             .description()
@@ -531,8 +532,18 @@ fn forkguard_shell_catalog_guidance_matches_execution() {
             .contains("run through the detected shell instead")
     );
     assert!(readonly.description().contains("`&&`/`||` sequences"));
-    assert!(readonly.description().contains("cd-prefixed commands"));
+    assert!(
+        readonly
+            .description()
+            .contains("commands with a `cd` segment")
+    );
     assert!(readonly.description().contains("set -o pipefail"));
+    assert!(readonly.description().contains("bash, zsh, ksh"));
+    assert!(
+        readonly
+            .description()
+            .contains("`%` are refused on a cmd.exe host")
+    );
     assert!(
         readonly
             .description()
@@ -2260,25 +2271,36 @@ fn readonly_shell_lane_decisions_per_shell_kind() {
     let cmd = ShellKind::Cmd;
     let pwsh = ShellKind::Pwsh;
     let sh = ShellKind::Sh;
-    let custom = ShellKind::Custom {
+    let bash = ShellKind::Bash;
+    let zsh = ShellKind::Custom {
         binary: "/bin/zsh".to_string(),
         flag: "-c".to_string(),
     };
-    // cmd.exe cannot bind an admitted `;`-sequence; single commands and every
-    // other kind can.
-    assert!(readonly_sequence_refused_by_shell_kind(&cmd, "pwd; pwd"));
-    assert!(!readonly_sequence_refused_by_shell_kind(&cmd, "pwd"));
-    assert!(!readonly_sequence_refused_by_shell_kind(&pwsh, "pwd; pwd"));
-    assert!(!readonly_sequence_refused_by_shell_kind(&sh, "pwd; pwd"));
-    // The pipefail prefix rides only POSIX pipes: cmd and PowerShell must not
-    // receive the `;`-bearing fragment at all.
-    for kind in [&cmd, &pwsh] {
+    let dash = ShellKind::Custom {
+        binary: "/bin/dash".to_string(),
+        flag: "-c".to_string(),
+    };
+    // cmd.exe cannot bind an admitted `;`-sequence, and it expands `%NAME%`
+    // from the environment before any program sees the word, so a compound
+    // containing `%` could run under a name the gate never judged; single
+    // commands without `%` and every other kind run as written.
+    assert!(readonly_compound_refused_by_shell_kind(&cmd, "pwd; pwd").is_some());
+    assert!(readonly_compound_refused_by_shell_kind(&cmd, "cat 50%off.txt").is_some());
+    assert!(readonly_compound_refused_by_shell_kind(&cmd, "pwd").is_none());
+    assert!(readonly_compound_refused_by_shell_kind(&pwsh, "pwd; pwd").is_none());
+    assert!(readonly_compound_refused_by_shell_kind(&pwsh, "cat 50%off.txt | wc -c").is_none());
+    assert!(readonly_compound_refused_by_shell_kind(&sh, "pwd; pwd").is_none());
+    // The pipefail prefix rides only binaries that speak it. `/bin/sh` stays
+    // unprefixed because that path is bash on macOS but dash on Debian and
+    // Ubuntu, where the prefix aborts the whole `-c` payload before anything
+    // runs; dash spelled directly is excluded for the same reason.
+    for kind in [&cmd, &pwsh, &sh, &dash] {
         assert_eq!(
             readonly_shell_bound_command(kind, "git log | head -3"),
             "git log | head -3"
         );
     }
-    for kind in [&sh, &custom] {
+    for kind in [&bash, &zsh] {
         assert_eq!(
             readonly_shell_bound_command(kind, "git log | head -3"),
             "set -o pipefail; git log | head -3"
@@ -2286,7 +2308,7 @@ fn readonly_shell_lane_decisions_per_shell_kind() {
     }
     // Sequences without a pipe bind without the prefix on every kind.
     assert_eq!(
-        readonly_shell_bound_command(&sh, "pwd; wc -c f"),
+        readonly_shell_bound_command(&bash, "pwd; wc -c f"),
         "pwd; wc -c f"
     );
 }
@@ -2350,7 +2372,14 @@ fn readonly_shell_lane_hardens_git_diff_rendering_stages() {
     // quoted (it is literal mid-word anyway and leading `~` operands never
     // reach the seam), which cmd.exe and POSIX shells read back identically.
     assert_eq!(readonly_shell_word("--oneline").unwrap(), "--oneline");
-    assert_eq!(readonly_shell_word("HEAD^..main").unwrap(), "HEAD^..main");
+    // cmd.exe expands a bare `%NAME%` and consumes a bare `^` as its escape,
+    // so those characters move into double quotes, which every supported
+    // shell reads back literally.
+    assert_eq!(
+        readonly_shell_word("HEAD^..main").unwrap(),
+        "\"HEAD^..main\""
+    );
+    assert_eq!(readonly_shell_word("a%PATH%b").unwrap(), "\"a%PATH%b\"");
     assert_eq!(readonly_shell_word("HEAD~2").unwrap(), "\"HEAD~2\"");
     assert_eq!(readonly_shell_word("fix bug").unwrap(), "\"fix bug\"");
     assert_eq!(readonly_shell_word("it's").unwrap(), "\"it's\"");
