@@ -4547,20 +4547,26 @@ fn enforce_readonly_glob_operand(
 /// `*` operand in every segment and stage. 4096 matches covers any real
 /// reconnaissance probe; 50 000 visited nodes bounds patterns that descend
 /// widely but match narrowly (a deep `*/*/…/zz` over a symlink cycle would
-/// otherwise explore exponentially without producing a single match). Shared
-/// rather than per operand because the walk is host work done before any
-/// child exists to time out: with a fresh budget per operand, a ~1 KB
-/// command of 500 `*` tokens over a 2000-entry directory bought ~25 s of
-/// admitted host CPU.
+/// otherwise explore exponentially without producing a single match); 500 000
+/// examined directory entries bounds the work that produces neither — a
+/// pattern that matches nothing enters no directory and judges no match, yet
+/// still reads every entry of the directory it scans, so without this third
+/// counter 8000 `zz*` operands (a 32 KB command) over a 2000-entry directory
+/// read 16 million entries for free. Shared rather than per operand because
+/// the walk is host work done before any child exists to time out: with a
+/// fresh budget per operand, a ~1 KB command of 500 `*` tokens over a
+/// 2000-entry directory bought ~25 s of admitted host CPU.
 const MAX_READONLY_GLOB_MATCHES: usize = 4096;
 const MAX_READONLY_GLOB_NODES: usize = 50_000;
+const MAX_READONLY_GLOB_ENTRIES: usize = 500_000;
 
-/// Match and node counters for one command's glob expansion, see
-/// [`MAX_READONLY_GLOB_MATCHES`].
+/// Match, node, and examined-entry counters for one command's glob
+/// expansion, see [`MAX_READONLY_GLOB_MATCHES`].
 #[derive(Default)]
 struct ReadonlyGlobBudget {
     matches: usize,
     nodes: usize,
+    entries: usize,
 }
 
 struct ReadonlyGlobWalk<'a> {
@@ -4634,6 +4640,21 @@ impl ReadonlyGlobWalk<'_> {
             Ok(self.entered_paths.insert(key))
         }
     }
+
+    /// Count one directory entry examined against the entry budget. This is
+    /// the counter that bounds a pattern matching nothing: it neither enters
+    /// a directory nor judges a match, yet scans every entry it is compared
+    /// against.
+    fn examine(&mut self) -> Result<(), ToolError> {
+        self.budget.entries += 1;
+        if self.budget.entries > MAX_READONLY_GLOB_ENTRIES {
+            return Err(ToolError::permission_denied(format!(
+                "[shell.readonly.operand.glob_too_broad] Read-only glob operand {operand:?} takes this command's glob expansion past {MAX_READONLY_GLOB_ENTRIES} examined directory entries; narrow the pattern or use fewer glob operands. Use the bounded File read/search actions for project evidence.",
+                operand = self.operand
+            )));
+        }
+        Ok(())
+    }
 }
 
 fn collect_readonly_glob_matches(
@@ -4683,6 +4704,7 @@ fn collect_readonly_glob_matches(
         return Ok(());
     };
     for entry in entries.flatten() {
+        walk.examine()?;
         let name = entry.file_name();
         // A name that is not UTF-8 cannot be matched textually; count it as a
         // match so its location is still judged (fail closed).

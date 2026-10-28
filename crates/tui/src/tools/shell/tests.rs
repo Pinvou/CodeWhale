@@ -1642,6 +1642,43 @@ fn readonly_glob_budget_is_shared_across_operands() {
     assert!(error.contains("glob_too_broad"), "{error}");
 }
 
+/// A pattern that matches nothing enters no directory and judges no match,
+/// so the node and match counters never moved for it — yet it still read
+/// every entry of the directory it scanned, and 8000 such operands over a
+/// 2000-entry directory cost 8 s of host CPU. Examined entries are now the
+/// third command-wide counter: 400 zero-match operands over 1000 entries
+/// (400 000) stay admitted, 600 (600 000) refuse promptly.
+#[test]
+fn readonly_glob_budget_counts_examined_entries() {
+    let workspace = tempdir().expect("workspace");
+    let many = workspace.path().join("many");
+    std::fs::create_dir(&many).expect("many dir");
+    for index in 0..1000 {
+        std::fs::write(many.join(format!("f{index:04}.txt")), "x").expect("fixture file");
+    }
+    let roots = [workspace.path().to_path_buf()];
+
+    let admitted = format!("cat {}", vec!["many/zz*"; 400].join(" "));
+    enforce_readonly_workspace_operands(&admitted, &roots, workspace.path())
+        .expect("400 000 examined entries stay under the entry budget");
+
+    let started = std::time::Instant::now();
+    let refused = format!("cat {}", vec!["many/zz*"; 600].join(" "));
+    let error = enforce_readonly_workspace_operands(&refused, &roots, workspace.path())
+        .expect_err("600 000 examined entries must exhaust the entry budget")
+        .to_string();
+    assert!(error.contains("glob_too_broad"), "{error}");
+    assert!(
+        error.contains("examined directory entries"),
+        "the refusal must name the entry budget: {error}"
+    );
+    assert!(
+        started.elapsed() < std::time::Duration::from_secs(5),
+        "exhausting the entry budget must stop promptly, took {:?}",
+        started.elapsed()
+    );
+}
+
 /// A `cd` destination that exists but is not a directory must refuse at the
 /// gate: the shell's `cd` fails on it and `;`/`||` continue in the ORIGINAL
 /// directory, while the fold would have resolved every later operand under
