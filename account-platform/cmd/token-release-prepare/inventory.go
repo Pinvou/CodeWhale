@@ -5,6 +5,8 @@ import (
 	"slices"
 
 	"github.com/Pinvou/pinvou3/account-platform/internal/platform/migrations"
+	"github.com/Pinvou/pinvou3/account-platform/internal/platform/postgrescontrol"
+	"github.com/Pinvou/pinvou3/account-platform/internal/tokenschema"
 	"github.com/jackc/pgx/v5"
 )
 
@@ -21,7 +23,7 @@ type installation struct {
 
 // Includes NOINHERIT members able to SET ROLE, direct grants and executable
 // SECURITY DEFINER functions. Roles are NOT silently altered from this query.
-const writerInventorySQL = `SELECT r.rolname,r.rolcanlogin,r.rolsuper,
+const writerInventorySQL = `SELECT r.rolname,r.rolcanlogin,` + postgrescontrol.TrustedAdministratorSQL + `,
  (SELECT count(*) FROM pg_catalog.pg_stat_activity a WHERE a.usesysid=r.oid AND a.datname=current_database() AND a.pid<>pg_backend_pid())
  FROM pg_catalog.pg_roles r WHERE r.rolsuper OR EXISTS(SELECT 1 FROM pg_catalog.pg_roles gateway WHERE gateway.rolname='token_gateway' AND pg_catalog.pg_has_role(r.oid,gateway.oid,'MEMBER')) OR EXISTS (
  SELECT 1 FROM pg_catalog.pg_roles g WHERE (g.oid=r.oid OR pg_catalog.pg_has_role(r.oid,g.oid,'MEMBER')) AND (
@@ -63,6 +65,10 @@ func installationSnapshot(ctx context.Context, tx pgx.Tx, directory string, lock
 		}
 	}
 	if len(applied) == 0 || result.Version != applied[len(applied)-1].Version {
+		return result, coded("MIGRATION_LEDGER_INVALID")
+	}
+	applied, err = tokenschema.ExpectedHistory(ctx, tx.Conn(), applied)
+	if err != nil {
 		return result, coded("MIGRATION_LEDGER_INVALID")
 	}
 	if _, err = migrations.VerifyApplied(ctx, tx.Conn(), applied); err != nil {
@@ -168,7 +174,7 @@ func lockDomainTables(ctx context.Context, tx pgx.Tx) error {
 
 // A role is cluster-global. Inspect other connectable databases read-only;
 // inability to inspect is a blocker, never permission to mutate a shared role.
-func rejectCrossDatabaseRoles(ctx context.Context, connection *pgx.Conn, names []string) error {
+func rejectCrossDatabaseRoles(ctx context.Context, connection *pgx.Conn, names []string, managed ...bool) error {
 	var unavailable bool
 	if err := connection.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM pg_catalog.pg_database WHERE NOT datistemplate AND NOT datallowconn)`).Scan(&unavailable); err != nil || unavailable {
 		return coded("CROSS_DATABASE_INVENTORY_UNAVAILABLE")
@@ -192,6 +198,12 @@ func rejectCrossDatabaseRoles(ctx context.Context, connection *pgx.Conn, names [
 		return coded("CROSS_DATABASE_INVENTORY_UNAVAILABLE")
 	}
 	for _, database := range databases {
+		if database == "rdsadmin" && len(managed) == 1 && managed[0] {
+			if err := verifyRDSPlatformBoundary(ctx, connection, names); err != nil {
+				return err
+			}
+			continue
+		}
 		config := connection.Config().Copy()
 		config.Database = database
 		other, err := pgx.ConnectConfig(ctx, config)

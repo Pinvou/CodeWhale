@@ -6,6 +6,8 @@
 
 `/health/session-lineage` 如实返回 `schema_version=1, capable=true, enabled=true`。登录记录前驱 session 与 lineage root；OIDC callback 经原子 `CommitLoginSession` 验证前驱注销标记再保存；显式注销经 `LogoutSession` 原子标记整条 lineage，并删除所有代际 session 及其 approval-wire。刷新写入同时验证 refresh 锁 owner、未变化旧 session 和 logout 标记，不能重新创建已删除 session。
 
+Portal 的生产 Redis ACL 必须允许上述命名空间内的 `PTTL`：登录、刷新及注销脚本会读取现存有效期，保证不会缩短 lineage 映射或注销标记。仅有 `PING`、网页跳转或身份提供方登录成功，不能证明 callback 已持久化会话。变更 ACL 模板时同时更新 `scripts/account-platform-project-dependencies.py` 的模板摘要；在独立 Redis 上加载渲染后的实际生产 ACL，以该受限 Portal 用户设置 `PINVOU_PORTAL_TEST_REDIS_URL`，运行 `go test -count=1 -run '^TestRealRedis' ./internal/portal`，包括签名 callback 创建及替换会话、注销后迟到 callback 拒绝的回归。测试使用本地身份提供方，不代替生产真实登录验收；禁止用不受限的 default 用户结果替代 ACL 验证。
+
 当前 `PORTAL_SESSION_LINEAGE_LOGOUT_ENABLED` / Helm `portal.sessionLineageLogoutEnabled` 从未被这套 Config/启动入口消费，原 false 值不会关闭保护。本轮从 Compose、Helm deployment、默认 values 与严格 schema 移除这些误导项。应用始终启用的 Go 实现和 capability 不变。更新部署输入时应移除自己的旧 values 覆盖；严格 schema 会拒绝仍携带旧键的 values，而不会悄悄接受一个无效安全开关。外部自定义清单也不能把该环境变量当作停用机制。既有 Helm release 保存的 values 或 `--reuse-values` 也可能携带旧键；只改仓库默认值不会清除这类输入。授权操作方应在受控输入中明确移除旧 release 覆盖并先校验最终合并 values，未消除旧键时停止升级；本页不自动修改 release 或给出可能展开秘密的命令。
 
 ## 安全版本回滚的检查责任

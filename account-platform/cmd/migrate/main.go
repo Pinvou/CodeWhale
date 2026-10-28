@@ -110,6 +110,10 @@ func main() {
 			var verification migrations.Verification
 			if domain == "billing" {
 				verification, err = billingschema.VerifyApplied(ctx, connection, loaded)
+			} else if domain == "account" {
+				verification, err = accountschema.VerifyApplied(ctx, connection, loaded)
+			} else if domain == "token" {
+				verification, err = tokenschema.VerifyApplied(ctx, connection, loaded)
 			} else {
 				verification, err = migrations.VerifyApplied(ctx, connection, loaded)
 			}

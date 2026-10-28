@@ -115,6 +115,9 @@ func TestFreshApprovalOperatorActualPGTLSNATS(t *testing.T) {
 	if _, err = account.RunFreshApprovalStep(ctx, historyDSN, 1, account.FreshApprovalQuiesce, nil); err == nil {
 		t.Fatal("historical approval accepted fresh initialization")
 	}
+	if _, err = account.RunExistingBrokerApprovalStep(ctx, historyDSN, 1, account.FreshApprovalQuiesce, "", nil); err == nil {
+		t.Fatal("existing-broker compatibility bypassed historical approval rejection")
+	}
 	if before != stageValue(t, ctx, history, `SELECT jsonb_agg(to_jsonb(r))::text FROM approval_requests r`) || stageValue(t, ctx, history, `SELECT mode||':'||version FROM account_approval_control.admin_approval_control`) != "LEGACY:1" {
 		t.Fatal("blocked fresh initializer changed historical facts/control")
 	}
@@ -123,6 +126,9 @@ func TestFreshApprovalOperatorActualPGTLSNATS(t *testing.T) {
 func freshActualResources(t *testing.T, ctx context.Context, binary string) func(context.Context, account.AdminApprovalControl) (json.RawMessage, error) {
 	t.Helper()
 	public, resources, private, owned := t.TempDir(), t.TempDir(), t.TempDir(), t.TempDir()
+	if os.Chmod(private, 0700) != nil {
+		t.Fatal("private credential directory mode failed")
+	}
 	write := func(dir, name string, raw []byte) string {
 		t.Helper()
 		p := filepath.Join(dir, name)
@@ -232,13 +238,28 @@ func freshActualResources(t *testing.T, ctx context.Context, binary string) func
 		t.Fatal("owned TLS server unavailable")
 	}
 	t.Cleanup(observerConnection.Close)
-	_, err = jetstream.New(observerConnection)
+	observerJS, err := jetstream.New(observerConnection)
 	if err != nil {
 		t.Fatal("observer API failed")
 	}
 	cfg := events.NATSConfig{Environment: "production", ResourceMode: "provisioned", RequireExplicitAuthentication: true, CAFile: caPath, SeedFile: opPath}
 	if events.ManageNATSResources(ctx, url, cfg, true) != nil {
-		t.Fatal("real fixed stream create failed")
+		stream, inspectErr := observerJS.Stream(ctx, "ACCOUNT_PLATFORM")
+		if inspectErr != nil {
+			t.Fatalf("real fixed stream create failed; owned observer: %v", inspectErr)
+		}
+		encoded, _ := json.Marshal(stream.CachedInfo())
+		t.Logf("owned stream metadata: %s", encoded)
+		for _, name := range []string{"billing-refund-executor-v1", "billing-member-lifecycle-v1"} {
+			c, e := stream.Consumer(ctx, name)
+			if e != nil {
+				t.Logf("owned consumer %s: %v", name, e)
+				continue
+			}
+			encoded, _ := json.Marshal(c.CachedInfo())
+			t.Logf("owned consumer metadata: %s", encoded)
+		}
+		t.Fatal("real fixed stream/ordinary consumer create failed")
 	}
 	ordinaryConfig := cfg
 	ordinaryConfig.SeedFile = ordinaryPath

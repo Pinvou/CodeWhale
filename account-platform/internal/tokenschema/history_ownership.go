@@ -125,7 +125,7 @@ func bridgeHistoryDefiners(ctx context.Context, tx pgx.Tx, restore bool) error {
 		if err := tx.QueryRow(ctx, `SELECT p.prosrc,pg_get_userbyid(p.proowner),l.lanname,p.proconfig FROM pg_proc p JOIN pg_language l ON l.oid=p.prolang WHERE p.oid=to_regprocedure($1)`, expected.signature).Scan(&body, &owner, &language, &config); err != nil {
 			return err
 		}
-		if body != expected.body || owner != "token_schema_owner" || language != "plpgsql" || len(config) != 1 || config[0] != "search_path=pg_catalog" {
+		if sqlChecksum(body) != sqlChecksum(expected.body) || owner != "token_schema_owner" || language != "plpgsql" || len(config) != 1 || config[0] != "search_path=pg_catalog" {
 			return fmt.Errorf("unreviewed Token history definer identity")
 		}
 		mode := "INVOKER"

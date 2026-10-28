@@ -128,7 +128,8 @@ func validAuthorizationRoute(route ApprovalAuthorizationRoute) bool {
 	if descriptor.Workload == approvalconsumer.BillingWorkload {
 		return binding.SerializationVersion == approvalencoding.ApprovalSerializationVersion
 	}
-	return false
+	return descriptor.Workload == approvalconsumer.TokenWorkload &&
+		(binding.SerializationVersion == approvalencoding.LegacySerializationVersion || binding.SerializationVersion == approvalencoding.ApprovalSerializationVersion)
 }
 
 func (consumer *AuthorizationCommandConsumer) advance(ctx context.Context, delivery events.AuthorizationRawDelivery, binding ApprovalAuthorizationBinding, event approvalencoding.AuthorizationEvent, state ApprovalAuthorizationDeliveryState) error {
@@ -335,7 +336,9 @@ func (consumer *AuthorizationCommandConsumer) validDecoded(binding ApprovalAutho
 		decoded.AggregateVersion != binding.ApprovedRequestVersion || decoded.SerializationVersion != binding.SerializationVersion || event.CommandType != binding.CommandType || event.PolicyVersion != binding.PolicyVersion || event.ExecutorIdentity != binding.ExecutorIdentity {
 		return false
 	}
-	if !validAuthorizationCommandTarget(event) {
+	// Shared-subject Token deliveries are verified above and by their immutable
+	// digest below. Billing target rules apply only to Billing-owned commands.
+	if binding.Workload == approvalconsumer.BillingWorkload && !validAuthorizationCommandTarget(event) {
 		return false
 	}
 	var digestBytes []byte

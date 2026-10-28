@@ -1167,6 +1167,20 @@ jobs:
           --health-interval 10s
           --health-timeout 5s
           --health-retries 5
+      existing-broker-postgres:
+        # Dedicated disposable PG18.4, matching the supported production-history
+        # contract. The acceptance creates and removes only its own actors/DBs.
+        image: postgres:18.4-alpine@sha256:9a8afca54e7861fd90fab5fdf4c42477a6b1cb7d293595148e674e0a3181de15
+        env:
+          POSTGRES_HOST_AUTH_METHOD: trust
+          POSTGRES_DB: postgres
+        ports:
+          - 127.0.0.1:5434:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres -d postgres"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 12
       financial-postgres:
         # Same immutable PostgreSQL image already used by team-relay-hub-test.
         # Disposable runner only; trust is never a deployment configuration.
@@ -1314,6 +1328,36 @@ jobs:
               go vet -tags=nomsgpack -mod=readonly ./...
             )
           done < <(find account-platform -name vendor -prune -o -name go.mod -print0 | sort -z)
+
+      - name: Production history and managed PostgreSQL release contracts
+        shell: bash
+        env:
+          PINVOU_DEPLOYMENT_TEST_MODULE_CACHE: ${{ runner.temp }}/deployment-contracts-gomod
+          PINVOU_DEPLOYMENT_TEST_BUILD_CACHE: ${{ runner.temp }}/deployment-contracts-gobuild
+        run: |
+          set -euo pipefail
+          python3 -m unittest discover -s scripts/tests -p test_deployment_contracts.py
+          for postgres_version in 17 18.4; do
+            python3 scripts/account-platform-deployment-contracts.py --postgres-version "$postgres_version" --artifacts "$RUNNER_TEMP/account-platform-deployment-contracts-$postgres_version"
+          done
+
+      - name: Existing broker compatibility on owned PostgreSQL and TLS NATS
+        timeout-minutes: 12
+        shell: bash
+        env:
+          PINVOU_TEST_SCHEMA_DATABASE_URL: postgres://postgres@127.0.0.1:5434/postgres?sslmode=disable
+        run: |
+          set -euo pipefail
+          # Extract only the pinned public server executable. The test itself
+          # starts a private loopback broker with its own TLS keys and store.
+          fixture_container="$(docker create --network none nats@sha256:ad7a43eb7e3337c3c38ce5d784d1461791f95f730f252d2b25eee699752a0ca3)"
+          trap 'docker rm "$fixture_container" >/dev/null' EXIT
+          docker cp "$fixture_container:/nats-server" "$RUNNER_TEMP/pinvou-test-nats-server" 2>/dev/null || \
+            docker cp "$fixture_container:/usr/local/bin/nats-server" "$RUNNER_TEMP/pinvou-test-nats-server"
+          printf '%s  %s\n' 2d0dc83e0547185a6820377114215d6a7c645f607aeb31728fffaf3d84e77c10 "$RUNNER_TEMP/pinvou-test-nats-server" | sha256sum --check --strict
+          chmod 0700 "$RUNNER_TEMP/pinvou-test-nats-server"
+          export PINVOU_TEST_NATS_SERVER_BINARY="$RUNNER_TEMP/pinvou-test-nats-server"
+          npm --prefix account-platform run test:existing-broker
 
       - name: Audit export finite PostgreSQL rollback and persisted boundaries
         working-directory: account-platform

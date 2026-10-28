@@ -39,6 +39,30 @@ test('safe and original-result query do not depend on Account and cannot replay 
   }
 });
 
+test('published policy expansion is explicit, closed and reaches only SAFE-to-ACTIVE operations', async () => {
+  const expansion = { ...transition, expected_state: 'SAFE_ROLLBACK', expected_epoch: 2, policy_upgrade: 'billing-policy-set-v1' };
+  for (const operation of ['governance-active-check', 'governance-activate']) {
+    let calls = 0;
+    const input = request(operation, expansion);
+    await executeOperation(input, { runner: async () => { calls++; } });
+    assert.equal(calls, 0);
+    await executeOperation(input, { execute: true, environment, runner: async (_exe, args, env) => {
+      calls++;
+      assert.equal(args[args.indexOf('--policy-upgrade') + 1], 'billing-policy-set-v1');
+      assert.equal(args.includes('--apply'), operation === 'governance-activate');
+      assert.deepEqual(Object.keys(env).sort(), ['ACCOUNT_POLICY_DATABASE_URL', 'TOKEN_MIGRATOR_DATABASE_URL']);
+      return { ok: true, output_sha256: 'a'.repeat(64) };
+    } });
+    assert.equal(calls, 1);
+  }
+  for (const input of [request('governance-safe', { ...expansion, expected_state: 'ACTIVE' }),
+    request('governance-active-check', { ...expansion, policy_upgrade: 'unknown' }),
+    request('governance-activate', { ...transition, policy_upgrade: expansion.policy_upgrade }),
+    request('governance-result', { request_id: transition.request_id, policy_upgrade: expansion.policy_upgrade })]) {
+    assert.throws(() => validateOperation(input), /MODEL_TOKEN_OPERATION_(GOVERNANCE_POLICY_UPGRADE_INVALID|FIELDS_INVALID)/);
+  }
+});
+
 test('operation inputs are closed and preserve exact state, role and cap constraints', () => {
   for (const input of [{ ...request(), apply: true }, request('unknown'), request('cap-readiness', { mode: 'bootstrap' }), request('governance-activate', { ...transition, expected_state: 'ACTIVE', expected_epoch: 1 }), request('governance-activate', { ...transition, runtime_roles: ['gateway_release', 'credential_release'] }), request('governance-activate', { ...transition, runtime_roles: ['token_migrator', 'token_schema_owner'] }), request('cap-bootstrap', { max_per_owner: 0, expected_version: -1, idempotency_key: 'short', reason: '' })]) {
     assert.throws(() => validateOperation(input), /MODEL_TOKEN_OPERATION_/);

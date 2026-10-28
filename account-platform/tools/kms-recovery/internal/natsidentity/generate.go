@@ -27,12 +27,13 @@ const identityOverlapMinimum = 5 * time.Minute
 const identityOverlapMaximum = 7 * 24 * time.Hour
 
 type Config struct {
-	RecipientFile     string `json:"recipient_file"`
-	RecipientSHA256   string `json:"recipient_sha256"`
-	OutputDirectory   string `json:"output_directory"`
-	ArtifactVersion   int    `json:"artifact_version,omitempty"`
-	PreviousDirectory string `json:"previous_directory,omitempty"`
-	OverlapExpiresAt  string `json:"overlap_expires_at,omitempty"`
+	RecipientFile                      string `json:"recipient_file"`
+	RecipientSHA256                    string `json:"recipient_sha256"`
+	OutputDirectory                    string `json:"output_directory"`
+	ArtifactVersion                    int    `json:"artifact_version,omitempty"`
+	PreviousDirectory                  string `json:"previous_directory,omitempty"`
+	OverlapExpiresAt                   string `json:"overlap_expires_at,omitempty"`
+	DirectCutoverPreserveAccountOutbox bool   `json:"direct_cutover_preserve_account_outbox,omitempty"`
 }
 type PublicKeys struct {
 	Version          int               `json:"version"`
@@ -298,7 +299,7 @@ func generateAt(cfg Config, now time.Time) error {
 		if relativeErr != nil || relative == "." || (relative != ".." && !strings.HasPrefix(relative, ".."+string(filepath.Separator))) {
 			return ErrIdentity
 		}
-	} else if version != 1 || cfg.PreviousDirectory != "" || cfg.OverlapExpiresAt != "" {
+	} else if version != 1 || cfg.PreviousDirectory != "" || cfg.OverlapExpiresAt != "" || cfg.DirectCutoverPreserveAccountOutbox {
 		return ErrIdentity
 	}
 	if privateDirectory(filepath.Dir(cfg.OutputDirectory)) != nil || !filepath.IsAbs(cfg.OutputDirectory) || filepath.Clean(cfg.OutputDirectory) != cfg.OutputDirectory || os.Mkdir(cfg.OutputDirectory, 0700) != nil || syncDirectory(filepath.Dir(cfg.OutputDirectory)) != nil {
@@ -316,6 +317,11 @@ func generateAt(cfg Config, now time.Time) error {
 	}()
 	seen := map[string]bool{}
 	shared := map[string]bool{"billing-outbox-relay": true, "token-outbox-relay": true, "billing-command-executor": true, "token-command-executor": true, "event-resource-operator": true}
+	if version == 2 && cfg.DirectCutoverPreserveAccountOutbox {
+		// Explicit direct cutover retains the verified old Account seed. No
+		// previous-v1 overlap projection can be deployed with this artifact.
+		shared["account-outbox-relay"] = true
+	}
 	for _, role := range selectedRoles {
 		if version == 2 && shared[role] {
 			seed := bytes.Clone(previousSeeds[role])

@@ -36,6 +36,9 @@ var retainedPermissions = map[int64][]permissionFact{
 // original versions remain in their order; no applied version is skipped based
 // on MAX(version). Every following delivery carries the same seed bytes.
 func Ordered(input []migrations.Migration) ([]migrations.Migration, error) {
+	if err := validateOutboxGeneration(input); err != nil {
+		return nil, err
+	}
 	if err := validateRegistrationDispatch(input); err != nil {
 		return nil, err
 	}
@@ -128,6 +131,20 @@ func Ordered(input []migrations.Migration) ([]migrations.Migration, error) {
 	if !inserted {
 		result = append(result, *seed)
 	}
+	// Original 094 consumes this column when upgrading the published pre-column
+	// 003. Original 051 must transfer outbox ownership before this bridge.
+	// Supplemental versions are not chronological anchors for ordinary 094.
+	for i, m := range result {
+		if m.Version == outboxGenerationVersion {
+			result = slices.Delete(result, i, i+1)
+			at := slices.IndexFunc(result, func(m migrations.Migration) bool { return m.Version == 94 })
+			if at < 0 {
+				at = len(result)
+			}
+			result = slices.Insert(result, at, m)
+			break
+		}
+	}
 	return result, nil
 }
 
@@ -136,6 +153,14 @@ func Ordered(input []migrations.Migration) ([]migrations.Migration, error) {
 // These hooks install no future business endpoint, executor or capability.
 func Up(ctx context.Context, connection *pgx.Conn, input []migrations.Migration) error {
 	ordered, err := Ordered(input)
+	if err != nil {
+		return err
+	}
+	if _, err = connection.Exec(ctx, `SELECT pg_advisory_lock(hashtext('pinvou_account_platform_migrations'))`); err != nil {
+		return err
+	}
+	defer migrations.Unlock(context.Background(), connection)
+	ordered, err = expectedEventDeliveryHistory(ctx, connection, ordered)
 	if err != nil {
 		return err
 	}

@@ -25,6 +25,7 @@ func executeRelease(ctx context.Context, connection *pgx.Conn, r releaseRequest)
 	defer tx.Rollback(context.Background())
 	var database, session, current string
 	var super bool
+	var selectedCredentials managedCredentials
 	if err = tx.QueryRow(ctx, `SELECT current_database(),session_user,current_user,rolsuper FROM pg_catalog.pg_roles WHERE rolname=session_user`).Scan(&database, &session, &current, &super); err != nil || database != r.Database || session != current || session != connection.Config().User {
 		return result, coded("DATABASE_OR_IDENTITY_MISMATCH")
 	}
@@ -41,7 +42,11 @@ func executeRelease(ctx context.Context, connection *pgx.Conn, r releaseRequest)
 		result.State = "ACCOUNT_POLICY_LOCK_VERIFIED"
 		return result, nil // Always rollback, including the successful SHARE lock.
 	}
-	if !super {
+	if r.managedRDS() {
+		if err = verifyManagedDBA(ctx, connection, tx, r); err != nil {
+			return result, err
+		}
+	} else if !super {
 		return result, coded("DBA_IDENTITY_REQUIRED")
 	}
 	if r.Operation != "inventory" {
@@ -95,7 +100,7 @@ func executeRelease(ctx context.Context, connection *pgx.Conn, r releaseRequest)
 	if r.Operation == "prepare" {
 		names = append(names, "token_schema_owner", "token_cap_policy_deployer", "token_migrator", "token_policy_operator")
 	}
-	if err = rejectCrossDatabaseRoles(ctx, connection, names); err != nil {
+	if err = rejectCrossDatabaseRoles(ctx, connection, names, r.managedRDS()); err != nil {
 		return result, err
 	}
 	switch r.Operation {
@@ -105,8 +110,19 @@ func executeRelease(ctx context.Context, connection *pgx.Conn, r releaseRequest)
 		err = prepareRoles(ctx, tx, r, installed)
 	case "enable":
 		var already bool
-		already, err = enableRoles(ctx, tx, r)
+		if r.managedRDS() {
+			selectedCredentials, err = readManagedCredentials(r)
+			if err != nil {
+				return result, err
+			}
+		}
+		already, err = enableRoles(ctx, tx, r, selectedCredentials)
 		if already && err == nil {
+			if r.managedRDS() {
+				if err = probeManagedCredentials(ctx, connection, selectedCredentials); err != nil {
+					return result, err
+				}
+			}
 			result.Decision = "ALREADY_ENABLED"
 			return result, nil
 		}
@@ -121,6 +137,14 @@ func executeRelease(ctx context.Context, connection *pgx.Conn, r releaseRequest)
 		return result, coded("COMMIT_UNKNOWN_QUERY_INVENTORY")
 	}
 	result.Applied = true
+	if r.Operation == "enable" && r.managedRDS() {
+		// A failure here is explicitly post-commit. Do not launch business
+		// services or blindly replay writes; inspect this epoch and fence via
+		// the normal SAFE procedure if authentication cannot be confirmed.
+		if err = probeManagedCredentials(ctx, connection, selectedCredentials); err != nil {
+			return result, err
+		}
+	}
 	if r.Operation == "fence" {
 		if r.Terminate {
 			// Role-name-bound fresh lookup, not stale PIDs; refuse other databases.
@@ -188,7 +212,7 @@ func prepareRoles(ctx context.Context, tx pgx.Tx, r releaseRequest, installed in
 		inherit bool
 		parents []string
 	}
-	desired := []desiredRole{{"token_gateway", true, nil}, {"token_schema_owner", true, nil}, {"token_cap_policy_deployer", true, nil}, {"token_migrator", false, []string{"pg_read_all_stats", "token_cap_policy_deployer", "token_gateway", "token_schema_owner"}}, {"token_policy_operator", false, nil}}
+	desired := []desiredRole{{"token_gateway", true, nil}, {"token_schema_owner", true, []string{"token_gateway"}}, {"token_cap_policy_deployer", true, nil}, {"token_migrator", false, []string{"pg_read_all_stats", "token_cap_policy_deployer", "token_gateway", "token_schema_owner"}}, {"token_policy_operator", false, nil}}
 	for _, name := range r.Candidates {
 		desired = append(desired, desiredRole{name, true, []string{"token_gateway"}})
 	}
@@ -216,7 +240,7 @@ func prepareRoles(ctx context.Context, tx pgx.Tx, r releaseRequest, installed in
 			}
 		}
 		var delegated bool
-		if err := tx.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM pg_catalog.pg_auth_members m JOIN pg_catalog.pg_roles child ON child.oid=m.member WHERE child.rolname=$1 AND m.admin_option)`, role.name).Scan(&delegated); err != nil || delegated {
+		if err := tx.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM pg_catalog.pg_auth_members m JOIN pg_catalog.pg_roles child ON child.oid=m.member WHERE child.rolname=$1 AND (m.admin_option OR NOT m.set_option OR m.inherit_option<>$2))`, role.name, role.inherit).Scan(&delegated); err != nil || delegated {
 			return coded("EXISTING_ROLE_MEMBERSHIP_CONFLICT")
 		}
 		if slices.Contains(r.Candidates, role.name) {
@@ -254,11 +278,18 @@ func prepareRoles(ctx context.Context, tx pgx.Tx, r releaseRequest, installed in
 		}
 	}
 	// Activation must inspect every writer session without a superuser login.
-	if _, err := tx.Exec(ctx, `GRANT token_gateway,token_cap_policy_deployer,token_schema_owner,pg_read_all_stats TO token_migrator`); err != nil {
+	for _, parent := range []string{"token_gateway", "token_cap_policy_deployer", "token_schema_owner", "pg_read_all_stats"} {
+		if err := grantMissingMembership(ctx, tx, parent, "token_migrator", false); err != nil {
+			return coded("MIGRATOR_PREPARATION_FAILED")
+		}
+	}
+	// The trusted owner can adopt runtime-owned objects during forward
+	// hardening; the business group never inherits either protected owner.
+	if err := grantMissingMembership(ctx, tx, "token_gateway", "token_schema_owner", true); err != nil {
 		return coded("MIGRATOR_PREPARATION_FAILED")
 	}
 	for _, name := range r.Candidates {
-		if _, err := tx.Exec(ctx, "GRANT token_gateway TO "+pgx.Identifier{name}.Sanitize()); err != nil {
+		if err := grantMissingMembership(ctx, tx, "token_gateway", name, true); err != nil {
 			return coded("CANDIDATE_PREPARATION_FAILED")
 		}
 	}
@@ -280,11 +311,11 @@ func prepareRoles(ctx context.Context, tx pgx.Tx, r releaseRequest, installed in
 	return nil
 }
 
-func enableRoles(ctx context.Context, tx pgx.Tx, r releaseRequest) (bool, error) {
+func enableRoles(ctx context.Context, tx pgx.Tx, r releaseRequest, managed managedCredentials) (bool, error) {
 	logins := 0
 	sessions := 0
 	for _, name := range r.Candidates {
-		var safe, login, credential bool
+		var safe, login bool
 		// Every installed privileged entry point must still have its reviewed
 		// catalog identity. This positive check intentionally runs separately from
 		// the catch-all scan below: changing an expected function to SECURITY
@@ -296,9 +327,10 @@ func enableRoles(ctx context.Context, tx pgx.Tx, r releaseRequest) (bool, error)
  AND (SELECT count(*) FROM pg_catalog.pg_auth_members m WHERE m.member=r.oid)=1
  AND NOT EXISTS(SELECT 1 FROM pg_catalog.pg_roles p WHERE p.rolname IN ('token_schema_owner','token_cap_policy_deployer','token_migrator','token_policy_operator') AND pg_has_role(r.oid,p.oid,'MEMBER'))
  AND NOT pg_has_role(r.oid,(SELECT datdba FROM pg_catalog.pg_database WHERE datname=current_database()),'MEMBER')
+ AND NOT EXISTS(SELECT 1 FROM pg_catalog.pg_shdepend d WHERE d.refclassid='pg_catalog.pg_authid'::regclass AND d.refobjid=r.oid AND d.deptype='o' AND d.dbid=(SELECT oid FROM pg_catalog.pg_database WHERE datname=current_database()))
  AND NOT has_schema_privilege(r.oid,'public','CREATE')
  AND NOT has_table_privilege(r.oid,'public.token_command_governance_activation','INSERT,UPDATE,DELETE,TRUNCATE')
- AND NOT EXISTS(SELECT 1 FROM pg_catalog.pg_class c JOIN pg_catalog.pg_namespace n ON n.oid=c.relnamespace JOIN pg_catalog.pg_roles owner ON owner.oid=c.relowner CROSS JOIN (VALUES('INSERT'),('UPDATE'),('DELETE'),('TRUNCATE')) AS rights(privilege) WHERE n.nspname='public' AND c.relkind IN ('r','p') AND owner.rolname IN ('token_schema_owner','token_cap_policy_deployer') AND has_table_privilege(r.oid,c.oid,rights.privilege) AND NOT (owner.rolname='token_cap_policy_deployer' AND c.relname IN ('token_account_provisioning_reservations','token_account_provisioning_recovery_actions') AND rights.privilege IN ('INSERT','UPDATE')))
+ AND NOT EXISTS(SELECT 1 FROM pg_catalog.pg_class c JOIN pg_catalog.pg_namespace n ON n.oid=c.relnamespace JOIN pg_catalog.pg_roles owner ON owner.oid=c.relowner CROSS JOIN (VALUES('INSERT'),('UPDATE'),('DELETE'),('TRUNCATE')) AS rights(privilege) WHERE n.nspname='public' AND c.relkind IN ('r','p') AND owner.rolname IN ('token_schema_owner','token_cap_policy_deployer') AND has_table_privilege(r.oid,c.oid,rights.privilege) AND NOT ((owner.rolname='token_cap_policy_deployer' AND c.relname IN ('token_account_provisioning_reservations','token_account_provisioning_recovery_actions') AND rights.privilege IN ('INSERT','UPDATE')) OR `+hardenedRuntimeDMLAllowanceSQL+`))
  AND (NOT EXISTS(SELECT 1 FROM public.schema_migrations WHERE version=31) OR EXISTS(
    SELECT 1 FROM pg_catalog.pg_proc p
    JOIN pg_catalog.pg_namespace n ON n.oid=p.pronamespace
@@ -351,13 +383,20 @@ func enableRoles(ctx context.Context, tx pgx.Tx, r releaseRequest) (bool, error)
        AND EXISTS(SELECT 1 FROM public.schema_migrations WHERE version=34))
    )
  ) AND has_function_privilege(r.oid,p.oid,'EXECUTE'))
- AND NOT EXISTS(SELECT 1 FROM public.token_command_governance_transitions WHERE state='ACTIVE' AND epoch<>$2 AND $1::text=ANY(approved_runtime_roles)),
- coalesce(a.rolpassword ~ '^SCRAM-SHA-256\$[1-9][0-9]*:[A-Za-z0-9+/]+={0,2}\$[A-Za-z0-9+/]+={0,2}:[A-Za-z0-9+/]+={0,2}$' AND a.rolvaliduntil IS NOT NULL AND isfinite(a.rolvaliduntil) AND a.rolvaliduntil>clock_timestamp(),false)
- FROM pg_catalog.pg_roles r JOIN pg_catalog.pg_authid a ON a.oid=r.oid WHERE r.rolname=$1`, name, r.ExpectedEpoch).Scan(&login, &safe, &credential); err != nil || !safe {
+ AND NOT EXISTS(SELECT 1 FROM public.token_command_governance_transitions WHERE state='ACTIVE' AND epoch<>$2 AND $1::text=ANY(approved_runtime_roles))
+ FROM pg_catalog.pg_roles r WHERE r.rolname=$1`, name, r.ExpectedEpoch).Scan(&login, &safe); err != nil || !safe {
 			return false, coded("CANDIDATE_ROLE_UNSAFE")
 		}
-		if !credential {
-			return false, coded("CANDIDATE_CREDENTIAL_UNCONFIRMED")
+		if !r.managedRDS() {
+			var credential bool
+			if err := tx.QueryRow(ctx, `SELECT coalesce(rolpassword ~ '^SCRAM-SHA-256\$[1-9][0-9]*:[A-Za-z0-9+/]+={0,2}\$[A-Za-z0-9+/]+={0,2}:[A-Za-z0-9+/]+={0,2}$' AND rolvaliduntil IS NOT NULL AND isfinite(rolvaliduntil) AND rolvaliduntil>clock_timestamp(),false) FROM pg_catalog.pg_authid WHERE rolname=$1`, name).Scan(&credential); err != nil || !credential {
+				return false, coded("CANDIDATE_CREDENTIAL_UNCONFIRMED")
+			}
+		} else if login {
+			var currentCredential bool
+			if err := tx.QueryRow(ctx, `SELECT rolvaliduntil=$2::timestamptz AND rolvaliduntil>clock_timestamp() FROM pg_catalog.pg_roles WHERE rolname=$1`, name, managed.ExpiresAt).Scan(&currentCredential); err != nil || !currentCredential {
+				return false, coded("CANDIDATE_CREDENTIAL_UNCONFIRMED")
+			}
 		}
 		var count int
 		if err := tx.QueryRow(ctx, `SELECT count(*) FROM pg_catalog.pg_stat_activity WHERE usename=$1 AND pid<>pg_backend_pid()`, name).Scan(&count); err != nil {
@@ -377,8 +416,16 @@ func enableRoles(ctx context.Context, tx pgx.Tx, r releaseRequest) (bool, error)
 	if sessions != 0 {
 		return false, coded("CANDIDATE_SESSION_UNCONFIRMED")
 	}
+	if r.managedRDS() && managed.ExpiresAt.Before(time.Now().Add(time.Minute)) {
+		return false, coded("CREDENTIAL_BINDING_INVALID")
+	}
 	if !r.Apply {
 		return false, nil
+	}
+	if r.managedRDS() {
+		if err := installManagedCredentials(ctx, tx, managed); err != nil {
+			return false, err
+		}
 	}
 	for _, name := range r.Candidates {
 		if _, err := tx.Exec(ctx, "ALTER ROLE "+pgx.Identifier{name}.Sanitize()+" LOGIN"); err != nil {
