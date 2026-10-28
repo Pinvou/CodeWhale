@@ -1844,7 +1844,7 @@ pub(crate) use remote_control::{
 };
 
 #[cfg(all(test, feature = "behavior-telemetry-test"))]
-mod tests {
+pub(crate) mod tests {
     include!(concat!(
         env!("CARGO_MANIFEST_DIR"),
         "/src/features/behavior_telemetry_tests.rs"

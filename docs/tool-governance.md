@@ -23,14 +23,14 @@ Pinvou disallowed_tools（模式、连接器、技能空态等动态拒绝）
 - `allowed_tools` 同时约束首轮目录、`tool_search` 结果和实际执行，不在白名单中的工具不能通过搜索重新激活。
 - `disallowed_tools` 只能继续收窄白名单；模式差量、连接器停用集和运行期空态均走这条通道，下轮请求生效。
 - Plan / Agent / Operate 的注册面和 sandbox 仍由 CodeWhale 决定。白名单允许一个工具或工具族，不代表每种模式都注册其全部写操作。
-- `PINVOU3_ALWAYS_LOADED_TOOLS` 现有 7 项（`request_user_input`、`image_analyze`、`load_skill`、`file_search`、`registry_sync`、`start_registry_mcp_server`、`computer_use`），均要求首轮直接可见；其余允许工具可按底座策略延迟加载。
+- `PINVOU3_ALWAYS_LOADED_TOOLS` 现有 12 项（`request_user_input`、`image_analyze`、`load_skill`、`file_search`、`registry_sync`、`start_registry_mcp_server`、`computer_use`，另有 5 个 `mcp_app-automations_*` 定时任务工具——共享指令直接点名该 MCP 工具族），均要求首轮直接可见；其余允许工具可按底座策略延迟加载。
 
 关键实现：
 
 | 职责 | 文件 |
 |---|---|
 | Pinvou 正向白名单 | `pinvou3-app/src-tauri/src/features/assistant/tool_policy.rs` |
-| 白名单正反向测试 | `pinvou3-app/src-tauri/src/lib.rs`（`mod tool_allowlist_contract`，约 :2174-2392）、`pinvou3-app/src-tauri/src/features/assistant/multiagent_regression_tests.rs`（真实 bridge 回合目录逐项校验，约 :535） |
+| 白名单正反向测试 | `pinvou3-app/src-tauri/src/lib.rs`（`mod tool_allowlist_contract`，约 :2668-2886）、`pinvou3-app/src-tauri/src/features/assistant/multiagent_regression_tests.rs`（真实 bridge 回合目录逐项校验，约 :503-513） |
 | 模式能力静态表 | `pinvou3-app/src-tauri/src/features/assistant/session_policy.rs` 的 `MODE_TABLE` |
 | 模式与动态拒绝整形 | `pinvou3-app/src-tauri/src/features/assistant/session_policy.rs`、`features/assistant/platform/bridge.rs::shape_disallowed_tools` |
 | 能力包与 scope 治理 | `docs/capability-governance.md` |
@@ -59,7 +59,7 @@ Pinvou disallowed_tools（模式、连接器、技能空态等动态拒绝）
 - 持久终端五个工具使用精确名而非 `terminal/*`：避免未来新增的执行原语仅凭共享前缀就自动穿透产品白名单（`tool_policy.rs:13-15` 注释；反向测试断言 `terminal/future-capability` 被拒，lib.rs）。
 - 大小写不敏感使隐藏回放名 `Bash` 能命中 `bash` 规则、在历史回放中继续可执行（新会话目录只教 canonical `bash`）；`File` 没有任何可命中的规则、不可执行（lib.rs `tool_allowlist_contract` 的对应断言）。
 
-`PINVOU3_ALWAYS_LOADED_TOOLS`（`tool_policy.rs:105-113`）现有 7 项：`request_user_input`、`image_analyze`、`load_skill`、`file_search`、`registry_sync`、`start_registry_mcp_server`、`computer_use`。这些工具要求首轮直接可见，不能依赖模型先调用 `tool_search`（always-load 只影响延迟加载，不绕过 `disallowed`，拒绝优先）。
+`PINVOU3_ALWAYS_LOADED_TOOLS`（`tool_policy.rs:105-119`）现有 12 项：`request_user_input`、`image_analyze`、`load_skill`、`file_search`、`registry_sync`、`start_registry_mcp_server`、`computer_use`，以及底座共享指令直接点名的 5 个 `mcp_app-automations_*` 定时任务工具。这些工具要求首轮直接可见，不能依赖模型先调用 `tool_search`（always-load 只影响延迟加载，不绕过 `disallowed`，拒绝优先）。
 
 新增白名单项必须同步更新白名单正反向测试（lib.rs `tool_allowlist_contract`、`multiagent_regression_tests.rs`）和 fork guard。
 
@@ -100,7 +100,7 @@ v0.9.12 的模型侧名称以 model-visible canonical 名称为准（§2 白名�
 | `load_skill` | 按正常技能状态 | 会话组合技能目录为空时隐藏 |
 | 项目规则与代码层指令 | 不绑定 | 绑定项目并使用 code instructions |
 
-能力包默认策略两模式均为 DenyAll：plain 侧已随工具开关收敛自 AllowAll 翻为 DenyAll（存量开关状态经 scope 读时迁移保留，见 capability-governance §3.2；开源同文此行仍为 AllowAll，回流时需双侧同修）。
+能力包默认策略两模式均为 DenyAll：plain 侧已随工具开关收敛自 AllowAll 翻为 DenyAll（存量开关状态经 scope 读时迁移保留，见 capability-governance §3.2）。
 
 因此，#238 在 v0.9.0 上“逐个 include 8 个旧工具名”的产品目标，由公共正向白名单承接；那批旧名在 v0.9.12 已是隐藏 replay 别名或彻底移除的拼写（见 §3）。底座能力是产品承诺，plain 与 code 均允许 `Git` family；两种模式的外部能力风险姿态则由各自 scope 的默认策略和用户选择控制。
 
@@ -108,9 +108,9 @@ code 会话默认 Plan 时，最终可用 action 仍受 Plan 注册面与只读 
 
 ## 5. 动态拒绝与优先级
 
-`shape_disallowed_tools`（`features/assistant/platform/bridge.rs:860`）在持久禁用集上按以下顺序叠加：
+`shape_disallowed_tools`（`features/assistant/platform/bridge.rs:1031`）在持久禁用集上按以下顺序叠加：
 
-1. 当前模式 `MODE_TABLE` 的 `unavailable_tools`（先并入；缺席名单不得与连接器禁用全名重叠，否则会被后续 retain 误删——`bridge.rs:864-870` 顺序约束）；
+1. 当前模式 `MODE_TABLE` 的 `unavailable_tools`（先并入；缺席名单不得与连接器禁用全名重叠，否则会被后续 retain 误删——`bridge.rs:1035-1039` 顺序约束）；
 2. 对应模式 scope 的连接器禁用工具（非 plain 模式先剔除 plain scope 禁用集、再并入本 scope 禁用集）；
 3. 当前模式要求且技能组合目录为空时的 `load_skill`（表字段 `skills_empty_hides_load_skill` 门控）；
 4. 知识库、会话或产品状态产生的其他动态拒绝项。
@@ -140,7 +140,7 @@ code 会话默认 Plan 时，最终可用 action 仍受 Plan 注册面与只读 
 - `tool_search` 只能发现白名单内且未被拒绝的工具：`allowed_tools` 同时约束首轮目录、`tool_search` 结果和实际执行（`tool_policy.rs:3-5`；lib.rs `conditional_allowlist_rules_match_model_visible_registry_entries` 以 v0.9.12 真实 registry 投影验证条件性宿主/MCP 条目均有白名单规则）。
 - canonical `write` 单次内容有 64 KiB 硬上限（`CodeWhale/crates/tui/src/tools/file_tool.rs:121`；`file/tests.rs` 断言超限写入在触盘前失败），并继续受工作区边界和审批/claim 约束。
 - canonical `bash` 执行前经命令安全分析（`CodeWhale/crates/tui/src/command_safety.rs`：命令前缀分类与危险模式预检）；破坏性命令不能被自动批准绕过。
-- 宿主额外工具经 `spawn_for_session` 的单一注入路径进入引擎（`engine_pool.rs` 的 `extra_tools` 组装与 `AppEngine::spawn_for_session` 调用，约 :2594-2646；如 `kb_tool.rs` 经 `EngineConfig.extra_tools` 注入），并继续受白名单（lib.rs、`multiagent_regression_tests.rs` 对真实 bridge 回合目录的逐项校验）和拒绝集约束。
+- 宿主额外工具经 `spawn_for_session` 的单一注入路径进入引擎（`engine_pool.rs` 的 `extra_tools` 组装与 `AppEngine::spawn_for_session` 调用，约 :3162-3227；如 `kb_tool.rs` 经 `EngineConfig.extra_tools` 注入），并继续受白名单（lib.rs、`multiagent_regression_tests.rs` 对真实 bridge 回合目录的逐项校验）和拒绝集约束。
 - 宿主产生的结构化产出与审计文件写声明过的位置（会话执行根与应用审计根，见 `SessionStore::session_roots` 与 `bridge.rs::audit_workspace`）；工具不应借 canonical `write`/`edit` 扩大权限。原「三省六部」结构化产出子系统已随 bundle 0.21 完整移除（`runtime_bundle/platform/mod.rs` 变更记录），不再是安全边界的承载者。
 
 ## 8. 迁移记录

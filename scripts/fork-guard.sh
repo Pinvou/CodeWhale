@@ -1,16 +1,16 @@
 #!/usr/bin/env bash
-# CodeWhale v0.9.12 clean re-fork guard: 79 maintenance commits, ten maintained themes (r3 closed at pinvou-v0.9.12-r3; inside a transition window the head may lead the tag).
+# CodeWhale v0.9.12 clean re-fork guard: 84 maintenance commits, ten maintained themes (r3 closed at pinvou-v0.9.12-r3; inside a transition window the head may lead the tag).
 set -uo pipefail
 
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 CODEWHALE="$REPO/CodeWhale"
 APP="$REPO/pinvou3-app/src-tauri"
 EXPECTED_UPSTREAM="dcd4c200f72f0c1ffd60d8e7f6850313db879fc5"
-# Public maintenance after CodeWhale#115 and #116 merged.
-EXPECTED_HEAD="ea9fdc90f1c90335554833195eeeb847c83d82dd"
-EXPECTED_COMMITS=79
+# Public maintenance after CodeWhale#118–#122 merged.
+EXPECTED_HEAD="6e1ee88ee8f8ea28eec7be3d8add3a591468412a"
+EXPECTED_COMMITS=84
 # Published maintenance base of this integration.
-MAINTENANCE_BASE="ea9fdc90f1c90335554833195eeeb847c83d82dd"
+MAINTENANCE_BASE="6e1ee88ee8f8ea28eec7be3d8add3a591468412a"
 # The immutable r1 closure must remain an ancestor of the registered head.
 # A review candidate may lead public maintenance; this does not waive the
 # separate public-head gate or change the immutable r3 transition baseline.
@@ -70,9 +70,41 @@ fi
 bold "── 第 1 层：登记主题与父仓适配指纹 ──"
 # 格式：主题|说明|文件（相对父仓根）|grep -F 固定串
 fingerprints=(
+  # 2026-10-27 批次：回流 pinvou-agent#757，登记公开 #118（a96fdec8e，含于当前 gitlink 6e1ee88ee）
+  # 已集成的输出恢复边界与守护指纹。
+  "T2|Test metadata summary loss requests recovery|CodeWhale/crates/tui/src/core/engine/tests.rs|fn forkguard_run_tests_metadata_summary_cut_requests_recovery"
+  "T2|Child report artifact retains exact bytes and ids|CodeWhale/crates/tui/src/tools/subagent/tests.rs|fn forkguard_subagent_report_artifact_keeps_exact_bytes"
+  "T2|Deferred subagent report names explicit activation fallback|CodeWhale/crates/tui/src/tools/subagent/tests.rs|fn stamp_subagent_summary_truncates_when_over_budget"
+  "T2|Legacy spillover names explicit activation fallback|CodeWhale/crates/tui/src/tools/truncate.rs|fn truncation_footer_without_an_artifact_names_the_legacy_retrieval_route"
+  "T2|Preserved output activates only available and policy-allowed retrieval schema|CodeWhale/crates/tui/src/core/engine/tool_catalog/tests.rs|fn forkguard_preserved_output_activates_only_available_retrieval_schema"
+  "T2|Fetch full envelope survives context cut and one-hop recovery|CodeWhale/crates/tui/src/tools/fetch_url/tests.rs|fn forkguard_fetch_url_full_envelope_round_trips_before_context_cut"
+  "T2|Small fetch JSON stays artifact-free|CodeWhale/crates/tui/src/tools/fetch_url/tests.rs|fn forkguard_fetch_url_small_envelope_stays_parseable_and_artifact_free"
+  "T2|Immutable artifacts are private before publication|CodeWhale/crates/tui/src/artifacts.rs|fn forkguard_immutable_artifacts_are_private_and_replay_safe"
+  "T2|Aggregate envelope preserves original before fan-out|CodeWhale/crates/tui/src/core/engine/output_recovery_tests.rs|fn forkguard_turn_loop_envelope_preserves_output_before_fanout"
+  "T2|Serial complete output stays artifact-free|CodeWhale/crates/tui/src/core/engine/output_recovery_tests.rs|fn forkguard_turn_loop_serial_keeps_complete_output_artifact_free"
+  "T2|Parallel complete output stays artifact-free|CodeWhale/crates/tui/src/core/engine/output_recovery_tests.rs|fn forkguard_turn_loop_parallel_keeps_complete_output_artifact_free"
+  "T2|Envelope complete output stays artifact-free|CodeWhale/crates/tui/src/core/engine/output_recovery_tests.rs|fn forkguard_turn_loop_envelope_keeps_complete_output_artifact_free"
+  "T2|Parallel dispatch preserves original before fan-out|CodeWhale/crates/tui/src/core/engine/output_recovery_tests.rs|fn forkguard_turn_loop_parallel_preserves_output_before_fanout"
+  "T2|Gate stream DTO omissions are recoverable|CodeWhale/crates/tui/src/core/engine/tests.rs|fn forkguard_task_stream_summaries_are_inline_or_recoverable"
+  "T2|Interrupted coordination field omissions are recoverable|CodeWhale/crates/tui/src/core/engine/tests.rs|fn forkguard_short_coordination_fields_are_inline_or_recoverable"
+  "T2|Real taskless gate retains both output streams|CodeWhale/crates/tui/src/tools/tasks.rs|fn forkguard_gate_without_active_task_keeps_both_streams_recoverable"
+  "T2|Taskless gate recovery declares producer boundary|CodeWhale/crates/tui/src/tools/tasks.rs|fn forkguard_taskless_gate_recovery_names_returned_summaries"
+  "T2|Engine recovery names the complete returned result|CodeWhale/crates/tui/src/core/engine/context.rs|complete returned tool result at"
+  "T2|Real interrupted child retains checkpoint recovery|CodeWhale/crates/tui/src/tools/subagent/tests.rs|fn forkguard_interrupted_snapshot_preserves_checkpoint_recovery"
+  "T2|Complete structured output has no false recovery|CodeWhale/crates/tui/src/core/engine/tests.rs|fn forkguard_complete_structured_results_do_not_request_recovery"
+  "T2|Structured field omissions retain recovery|CodeWhale/crates/tui/src/core/engine/tests.rs|fn forkguard_structured_field_cuts_still_request_recovery"
+  "T2|Adaptive evidence keeps original line totals|CodeWhale/crates/tui/src/tools/truncate.rs|fn adaptive_evidence_footer_names_artifact_path_and_recovery"
+  "T2|Preview metadata overflow fails closed|CodeWhale/crates/tui/src/tools/truncate.rs|fn refit_spilled_preview_rejects_overflowing_metadata"
+  "T2|Unsaved wire previews are not full-content refs|CodeWhale/crates/tui/src/client/chat/tests/stream_decoder.rs|fn request_builder_never_deduplicates_unsaved_output_previews"
   "T2|Web JSONPath schema agrees with parser results|CodeWhale/crates/tui/src/tools/web/contract.rs|fn forkguard_web_fields_description_matches_parser"
   "T2|Document the Web JSONPath subset|CodeWhale/crates/tui/src/tools/web_tool.rs|Recursive descent (..) and filters are not supported"
   "T2|Preserve failed tool-result flags|CodeWhale/crates/tui/src/core/engine/tests.rs|fn forkguard_tool_failure_flag_survives_recording_and_round_trip"
+  # 2026-10-26 批次：#118 回移上游 recoverable output-budget 切片、#119 重钉 wait 超时面与会话名生命周期，
+  # 指纹钉住各自的结果式行为回归（父仓随 gitlink 批次一并登记）。
+  "T2|完整输出在 fanout 前保留|CodeWhale/crates/tui/src/core/engine/output_recovery_tests.rs|fn forkguard_turn_loop_serial_preserves_output_before_fanout"
+  "T2|Web 正文在 header 重响应中存活|CodeWhale/crates/tui/src/core/engine/tests.rs|fn forkguard_web_body_and_json_fields_survive_header_padding"
+  "T1|wait timeout 别名保持可解析|CodeWhale/crates/tui/src/tools/subagent/tests.rs|fn wait_timeout_alias_stays_parse_accepted"
+  "T1|settled 后会话名释放|CodeWhale/crates/tui/src/tools/subagent/tests.rs|fn spawn_session_name_released_once_same_session_holder_settles"
   "T2|Unix shell guidance preservation test|CodeWhale/crates/tui/src/tools/shell/guidance.rs|fn shell_guidance_preserves_unix_shell_contracts"
   "T2|Windows PowerShell policy bypass flags|CodeWhale/crates/tui/src/shell_dispatcher.rs|fn powershell_build_command_includes_no_profile_and_command_flags"
   "T2|Windows PowerShell encoded fallback builder|CodeWhale/crates/tui/src/shell_dispatcher.rs|fn forkguard_powershell_encoded_fallback_avoids_the_script_file"
