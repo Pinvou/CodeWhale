@@ -370,6 +370,7 @@ export const dictEn = {
           removeWeightsPath:path=>`Weights directory to delete: ${path}`,
           removeIrreversible:'Deletion is irreversible. Confirm this really is a model weights directory first.',
           linkDisabledUnreachable:'Currently unreachable. Confirm the service is running, then try linking again.',
+          linkDisabledStoreUnknown:'The Model Store list is not ready, so it is unknown whether the store manages this model. Wait for the store read to recover before linking.',
           linkFailed:(e)=>`Link failed: ${e}`,
           doctorSendFailed:'The troubleshooting chat did not start. Please retry.',
           doctorFailed:(e)=>`Diagnosis failed: ${e}`,

@@ -11,6 +11,8 @@
  * - 商店库/外部模型读取失败面：常驻错误行 + 前往商店/重试恢复（第五轮评审）
  * - 旧行在场的刷新失败常驻陈旧行、交错读取按世代消费错误状态（round-30 评审）
  * - 非温度传感器越线出通用临界文案、不误指温度（round-30 评审）
+ * - 商店归属未知（读取中/失败）时接入禁用、恢复解禁（round-31 评审）
+ * - 同端点跨行身份：移除只回收有效模型身份的配置（round-31 评审）
  * 依赖:puppeteer-core + 系统 chromium（或 env CHROME 指定）。缺依赖 → exit 2（SKIP 行）。
  */
 const fs = require('fs');
@@ -159,6 +161,19 @@ function externalModelsFixture() {
   };
 }
 
+// ⑥-g 同端点跨行身份（round-31 review P2）：同一回环端点上两行合法并存——
+// A 的展示名恰是 B 的有效模型。移除 A 只能回收 A 的配置（model=model-a），
+// B 的配置（model=model-b）必须存活；把展示名喂进关联匹配会把 B 的一起删掉。
+function collisionExternalFixture() {
+  return {
+    models: [
+      { id: 'm-coll-a', name: 'model-b', kind: 'openai_endpoint', base_url: 'http://127.0.0.1:7777/v1', model: 'model-a', weights_path: null, note: '', status: 'available', registered: true, source: 'registry' },
+      { id: 'm-coll-b', name: 'other-label', kind: 'openai_endpoint', base_url: 'http://127.0.0.1:7777/v1', model: 'model-b', weights_path: null, note: '', status: 'available', registered: true, source: 'registry' },
+    ],
+    warnings: [],
+  };
+}
+
 function injectSource() {
   return `(function () {
     var handlers = Object.create(null);
@@ -226,6 +241,12 @@ function injectSource() {
           models = models.filter(function (m) { return m.id !== saved.id; }).concat(saved);
           return Promise.resolve(null);
         case 'set_active_model': activeModelId = args.id; return Promise.resolve(null);
+        // 移除回收的真实落库效果（round-31 review P3 前置）：此前桩只记录调用
+        // 不改 models，⑥-g 的“B 的配置必须存活”断言在旧桩下恒真——桩必须
+        // 真删，跨行误删才可被观察。
+        case 'delete_model':
+          models = models.filter(function (m) { return m.id !== (args && args.id); });
+          return Promise.resolve(null);
         case 'list_sessions': return Promise.resolve([]);
         case 'create_session':
           // ⑥-e 互斥场景开关：挂住物化，让 doctorBusy 跨过一个可观察窗口；
@@ -288,6 +309,8 @@ function injectSource() {
         case 'get_external_models':
           if (window.__DEVICE_MGR_TEST__.failExternalModels) return Promise.reject(new Error('external models down (smoke)'));
           if (window.__DEVICE_MGR_TEST__.emptyExternalModels) return Promise.resolve({ models: [], warnings: [] });
+          // ⑥-g 同端点跨行身份（round-31 review P2）：换上碰撞列表，测完还原。
+          if (window.__DEVICE_MGR_TEST__.collisionExternalModels) return Promise.resolve(${JSON.stringify(collisionExternalFixture())});
           // ⑩-f 交错读取（round-30 review P3）：挂住后由测试按世代顺序决算，
           // 制造"较新失败在先、较旧成败后到"的真实交错。
           if (window.__DEVICE_MGR_TEST__.hangExternalModels) {
@@ -328,6 +351,8 @@ function injectSource() {
       failMonitor: false,
       // 接入主动作的失败面（round-21 review P3）：此前只有读取面有 fail 开关。
       failSaveModel: false,
+      // ⑥-g 同端点跨行身份（round-31 review P2）：换成碰撞列表用。
+      collisionExternalModels: false,
       // ⑩-e/⑩-f 外部模型读取面（round-30 review P3）：旧行在场的常驻陈旧行 +
       // 交错读取的世代消费；fixture 原样暴露供挂住门决算时还原真实列表。
       hangExternalModels: false,
@@ -703,11 +728,89 @@ async function clickTestId(page, testId) {
     removed_registry: true, removed_weights: false, ollama_deleted: true, warnings: [],
   }));
 
+  // ⑥-g 同端点跨行身份（round-31 review P2）：A(model=model-a, name=model-b)
+  // 与 B(model=model-b, name=other-label) 在同一端点合法并存。接入两行后移除
+  // A：关联/回收只认有效模型身份——只回收 A 的配置，B 的配置存活、B 的
+  // 「已接入」徽标不灭。把展示名喂进匹配（旧行为）会把 B 的配置一起交给
+  // delete_model，delete_model 桩真删后两个方向都可观察。
+  await page.evaluate(() => { window.__DEVICE_MGR_TEST__.collisionExternalModels = true; });
+  await clickTestId(page, 'device-manager-models-refresh');
+  await page.waitForFunction(() => document.querySelectorAll('[data-testid="device-manager-external-row"]').length === 2, { timeout: 8000 });
+  const collSavesBaseline = await page.evaluate(() => window.__DEVICE_MGR_TEST__.callsOf('save_model').length);
+  const linkCollisionRow = async headerPrefix => {
+    const before = await page.evaluate(() => window.__DEVICE_MGR_TEST__.callsOf('save_model').length);
+    await page.evaluate(prefix => {
+      const row = [...document.querySelectorAll('[data-testid="device-manager-external-row"]')]
+        .find(node => (node.innerText || '').startsWith(prefix));
+      row?.querySelector('[data-testid="device-manager-link"]')?.click();
+    }, headerPrefix);
+    await page.waitForFunction(
+      expected => window.__DEVICE_MGR_TEST__.callsOf('save_model').length > expected,
+      { timeout: 8000 }, before);
+  };
+  await linkCollisionRow('model-b');
+  await linkCollisionRow('other-label');
+  const collIds = await page.evaluate(() => ({
+    idA: window.__DEVICE_MGR_TEST__.callsOf('save_model')
+      .map(call => call.args?.model).filter(model => model?.model === 'model-a').slice(-1)[0]?.id || null,
+    idB: window.__DEVICE_MGR_TEST__.callsOf('save_model')
+      .map(call => call.args?.model).filter(model => model?.model === 'model-b').slice(-1)[0]?.id || null,
+  }));
+  const collDeletesBaseline = await page.evaluate(() => window.__DEVICE_MGR_TEST__.callsOf('delete_model').length);
+  // 移除 A（已登记行，无需静默登记）：两段式确认，确认按钮受 400ms 死区门禁
+  // ——与 ⑥ 同款 in-page 轮询抓门禁放开时机。
+  await page.evaluate(() => {
+    const row = [...document.querySelectorAll('[data-testid="device-manager-external-row"]')]
+      .find(node => (node.innerText || '').startsWith('model-b'));
+    row?.querySelector('[data-testid="device-manager-remove"]')?.click();
+  });
+  await page.waitForFunction(() => {
+    const row = [...document.querySelectorAll('[data-testid="device-manager-external-row"]')]
+      .find(node => (node.innerText || '').startsWith('model-b'));
+    const confirm = row?.querySelector('[data-testid="device-manager-remove-confirm"]');
+    return !!confirm && !confirm.disabled;
+  }, { timeout: 8000 });
+  await page.evaluate(() => {
+    const row = [...document.querySelectorAll('[data-testid="device-manager-external-row"]')]
+      .find(node => (node.innerText || '').startsWith('model-b'));
+    row?.querySelector('[data-testid="device-manager-remove-confirm"]')?.click();
+  });
+  await page.waitForFunction(
+    baseline => window.__DEVICE_MGR_TEST__.callsOf('delete_model').length > baseline,
+    { timeout: 8000 }, collDeletesBaseline);
+  const collState = await page.evaluate(({ idA, idB, baseline }) => ({
+    deletedIds: window.__DEVICE_MGR_TEST__.callsOf('delete_model').slice(baseline)
+      .map(call => call.args?.id),
+    idA, idB,
+    rowBStillLinked: [...document.querySelectorAll('[data-testid="device-manager-external-row"]')]
+      .find(node => (node.innerText || '').startsWith('other-label'))
+      ?.querySelector('[data-testid="device-manager-linked-badge"]') != null,
+    rowARelinquished: (() => {
+      const row = [...document.querySelectorAll('[data-testid="device-manager-external-row"]')]
+        .find(node => (node.innerText || '').startsWith('model-b'));
+      return !!row && row.querySelector('[data-testid="device-manager-link"]') != null;
+    })(),
+  }), { ...collIds, baseline: collDeletesBaseline });
+  rec('⑥-g 移除只回收有效模型身份的配置（展示名不充当模型 ID）',
+    collIds.idA && collIds.idB && collIds.idA !== collIds.idB
+    && collState.deletedIds.length === 1
+    && collState.deletedIds[0] === collIds.idA && collState.deletedIds[0] !== collIds.idB
+    && collState.rowBStillLinked && collState.rowARelinquished,
+    JSON.stringify({ collIds, collState }));
+  // 还原常规列表（碰撞行不参与后续步骤）。
+  await page.evaluate(() => { window.__DEVICE_MGR_TEST__.collisionExternalModels = false; });
+  await clickTestId(page, 'device-manager-models-refresh');
+  await page.waitForFunction(() => document.querySelectorAll('[data-testid="device-manager-external-row"]').length === 4, { timeout: 8000 });
+
   // ⑥-b 带权重的登记行：armed 态回显权重目录完整路径 + 显示删除勾选框 +
   //     勾选后出现不可撤销提示（删除后果必须让用户看见，评审 P2）。
   // 点击与首见观察放在同一个 in-page Promise 里：React 离散事件同步渲染后
   // 5ms 粒度轮询，确定性地抓到 400ms 死区内的禁用态——跨 CDP 往返的两次
   // evaluate 会错过窗口（evaluate 返回时门禁可能已开）。
+  // remove 调用计数取本步武装前的基线（⑥-g 已合法发起过一次移除，绝对计数
+  // 不再是 1）；⑥-c 只断言“取消窗口内不新增 remove 命令”。
+  const removeCallsBeforeCancel = await page.evaluate(
+    () => window.__DEVICE_MGR_TEST__.callsOf('device_remove_external_model').length);
   const checkboxGatedAtFirstSight = await page.evaluate(() => new Promise(resolve => {
     const rows = [...document.querySelectorAll('[data-testid="device-manager-external-row"]')];
     const target = rows.find(candidate => (candidate.innerText || '').includes('my-endpoint'));
@@ -770,11 +873,11 @@ async function clickTestId(page, testId) {
       .some(row => row.querySelector('[data-testid="device-manager-remove-confirm"]')),
     { timeout: 4000 },
   );
-  const cancelOutcome = await page.evaluate(() => ({
+  const cancelOutcome = await page.evaluate(baseline => ({
     armedClosed: ![...document.querySelectorAll('[data-testid="device-manager-external-row"]')]
       .some(row => row.querySelector('[data-testid="device-manager-remove-confirm"]')),
-    removeCallsStillOne: window.__DEVICE_MGR_TEST__.callsOf('device_remove_external_model').length === 1,
-  }));
+    removeCallsStillOne: window.__DEVICE_MGR_TEST__.callsOf('device_remove_external_model').length === baseline,
+  }), removeCallsBeforeCancel);
   rec('⑥-b 登记行 armed 态回显权重路径+勾选框+不可撤销提示',
     armedEndpoint.pathEcho && armedEndpoint.weightsToggle && armedEndpoint.irreversibleShown
     && checkboxGatedAtFirstSight?.toggleDisabled === true
@@ -959,13 +1062,21 @@ async function clickTestId(page, testId) {
   await clickNavByLabel(page, '设备管理');
   await page.waitForFunction(() => document.querySelector('[data-testid="app-root"]')?.getAttribute('data-current-view') === 'monitor', { timeout: 8000 });
   await page.waitForFunction(() => !!document.querySelector('[data-testid="device-manager-store-error"]'), { timeout: 8000 });
+  // 归属未知的接入断言要等外部行渲染（挂载初读与商店读并发，落地无先后保证）。
+  await page.waitForFunction(() => !!document.querySelector('[data-testid="device-manager-external-row"] [data-testid="device-manager-link"]'), { timeout: 8000 });
   const storeErrorState = await page.evaluate(() => {
     const row = document.querySelector('[data-testid="device-manager-store-error"]');
+    // 商店归属未知（round-31 review P2）：库读取失败时外部行的接入必须禁用并
+    // 说明原因——空 storeRows 不得被当成"非商店管理"。取 qwen3:30b 行（⑥ 已
+    // 回收其配置，未接入、非远端、非商店管理，禁用只能来自归属未知）。
+    const linkButton = document.querySelector('[data-testid="device-manager-external-row"] [data-testid="device-manager-link"]');
     return {
       text: row?.innerText || '',
       retryButton: !!document.querySelector('[data-testid="device-manager-store-retry"]'),
       gotoStore: !!row && [...(row.querySelectorAll('button') || [])]
         .some(button => (button.innerText || '').includes('前往模型商店')),
+      linkDisabledWhileUnknown: !!linkButton && linkButton.disabled,
+      linkUnknownTitle: (linkButton?.title || '').includes('尚未就绪'),
     };
   });
   await page.evaluate(() => { window.__DEVICE_MGR_TEST__.failStoreLibrary = false; });
@@ -973,9 +1084,17 @@ async function clickTestId(page, testId) {
   // DOM 序（重试/前往商店换位即误红）。
   await page.evaluate(() => document.querySelector('[data-testid="device-manager-store-retry"]')?.click());
   await page.waitForFunction(() => !!document.querySelector('[data-testid="device-manager-store-row"]'), { timeout: 8000 });
+  // 归属恢复后接入必须立刻解禁（同一行的禁用只由归属未知引起）。
+  const linkRecovered = await page.evaluate(() => {
+    const linkButton = document.querySelector('[data-testid="device-manager-external-row"] [data-testid="device-manager-link"]');
+    return !!linkButton && !linkButton.disabled && !linkButton.title;
+  });
   rec('⑩-b 商店库读取失败出错误行+前往商店入口+重试恢复',
     storeErrorState.text.includes('加载失败') && storeErrorState.retryButton && storeErrorState.gotoStore,
     JSON.stringify(storeErrorState));
+  rec('⑩-b2 商店归属未知时接入禁用且说明原因、恢复后解禁',
+    storeErrorState.linkDisabledWhileUnknown && storeErrorState.linkUnknownTitle && linkRecovered,
+    JSON.stringify({ storeErrorState, linkRecovered }));
 
   // ⑩-c 外部模型读取失败（商店行仍在、外部区块为空）：失败此前只剩 3.2s 的
   // toast，外部区块需要自己的常驻错误行 + 重试（round-5 review P3）。先把外部
@@ -1021,11 +1140,12 @@ async function clickTestId(page, testId) {
     && staleRow.text.includes('刷新失败') && staleRow.text.includes('最近一次成功读取'),
     JSON.stringify(staleRow));
 
-  // ⑩-f 交错读取按世代消费错误状态（round-30 review P3）：bridge 已按 seq 丢
-  // 过期数据包，但过期的成功/失败仍会 resolve/reject 到视图——"任何成功清错、
-  // 任何失败置错"会让新旧读取互相覆盖错误状态。挂两拍读取、按世代反序决算：
-  // 较新失败落错误行后，较旧的成功不得清掉它；较新成功清场后，较旧的失败不得
-  // 把已了结的错误重新翻出来。删掉视图世代闸门两个方向都必红。
+  // ⑩-f 交错读取按世代消费错误状态（round-30 review P3；round-31 起槽在
+  // bridge）：错误槽与数据包同在 bridge、按同一把 seq 尺子消费——过期的成功
+  // 不发布、过期的失败静默 resolve，"任何成功清错、任何失败置错"的互相覆盖
+  // 不可能发生。挂两拍读取、按世代反序决算：较新失败落错误行后，较旧的成功
+  // 不得清掉它；较新成功清场后，较旧的失败不得把已了结的错误重新翻出来。
+  // 删掉 fetchExternalModels 的世代闸门或槽消费两个方向都必红。
   await page.evaluate(() => {
     window.__DEVICE_MGR_TEST__.hangExternalModels = true;
     window.__DEVICE_MGR_TEST__.externalModelGates.length = 0;

@@ -520,20 +520,14 @@ const DeviceManagerView = ({ theme, t, bs, onOpenChat, onOpenModelStore }) => {
     // "nothing installed" hint, which reads as a fact instead of the read
     // failure it is (same surface rule as the manual Refresh button). The
     // alive guard matches the store effect: a slow reply after unmount must not
-    // setState or re-toast (round-21 review P3). The generation guard below
-    // keeps an overlapped older read from consuming the error state.
+    // setState or re-toast (round-21 review P3). The error slot itself is the
+    // bridge's (bs.externalModelsError, consumed there by issue-time seq —
+    // round-31 review P3), so the view only toasts.
     if (typeof dev.fetchExternalModels === 'function') {
-      const gen = ++externalRefreshGenRef.current;
-      dev.fetchExternalModels()
-        .then(() => {
-          if (alive && gen === externalRefreshGenRef.current) setExternalFetchError(null);
-        })
-        .catch((error) => {
-          if (!alive || gen !== externalRefreshGenRef.current) return;
-          const message = String(error?.message || error);
-          setExternalFetchError(message);
-          showToast(copyRef.current.refreshFailed(message));
-        });
+      dev.fetchExternalModels().catch((error) => {
+        if (!alive) return;
+        showToast(copyRef.current.refreshFailed(String(error?.message || error)));
+      });
     }
     return () => {
       alive = false;
@@ -554,16 +548,6 @@ const DeviceManagerView = ({ theme, t, bs, onOpenChat, onOpenModelStore }) => {
   const mountedRef = useRef(true);
   useEffect(() => () => { mountedRef.current = false; }, []);
 
-  // Error-state consumption generation for external-model reads. The bridge
-  // already drops superseded data by seq, but a stale read still resolves or
-  // rejects normally — "any success clears, any failure sets" would let
-  // interleaved reads overwrite each other's error state (a newer failure
-  // wiped by an older success, an older failure resurrected over a newer
-  // success). Only the most recently issued read may consume the slot; the
-  // remove flow bumps the generation too when it lands its refresh_error
-  // there (round-30 review P3).
-  const externalRefreshGenRef = useRef(0);
-
   const retryPoll = useCallback(() => {
     const dev = bridge?.device;
     if (!dev) return;
@@ -579,19 +563,14 @@ const DeviceManagerView = ({ theme, t, bs, onOpenChat, onOpenModelStore }) => {
   const refreshExternal = useCallback(() => {
     const dev = bridge?.device;
     if (!dev?.fetchExternalModels) return;
-    // Swallowing the rejection makes Refresh look dead: surface a human-readable failure.
-    // Same generation guard as the mount effect above.
-    const gen = ++externalRefreshGenRef.current;
-    dev.fetchExternalModels()
-      .then(() => {
-        if (mountedRef.current && gen === externalRefreshGenRef.current) setExternalFetchError(null);
-      })
-      .catch((error) => {
-        if (!mountedRef.current || gen !== externalRefreshGenRef.current) return;
-        const message = String(error?.message || error);
-        setExternalFetchError(message);
-        showToast(copy.refreshFailed(message));
-      });
+    // Swallowing the rejection makes Refresh look dead: surface a human-readable
+    // failure. The error slot is the bridge's (consumed there by issue-time
+    // seq, round-31 review P3) — the view only toasts, and the mounted guard
+    // keeps an unmount-crossing reply from toasting.
+    dev.fetchExternalModels().catch((error) => {
+      if (!mountedRef.current) return;
+      showToast(copy.refreshFailed(String(error?.message || error)));
+    });
   }, [copy, showToast]);
 
   // ── Model store (read-only here) ─────────────────────────────────
@@ -630,6 +609,15 @@ const DeviceManagerView = ({ theme, t, bs, onOpenChat, onOpenModelStore }) => {
     };
   }, [storeReloadKey]);
   const storeRows = storeState === 'available' ? library : [];
+  // Ownership UNKNOWN is not "not managed" (round-31 review P2): while the
+  // store library is loading or its read failed, a store-managed model passes
+  // every managedByStore check below as a false negative, and the link flow
+  // would save a custom config for it and make it the new-chat default — a
+  // contract the store page enforces and this page must not silently bypass
+  // while the authoritative list is absent. A store-less platform
+  // ('unavailable') is a fact, so external linking stays legitimate there;
+  // 'loading'/'error' wait for the store read (retry in the store group).
+  const storeOwnershipUnknown = storeState === 'loading' || storeState === 'error';
 
   // ── External models: link into Pinvou / guarded removal ──────────
   const [busyKey, setBusyKey] = useState(null);
@@ -646,8 +634,14 @@ const DeviceManagerView = ({ theme, t, bs, onOpenChat, onOpenModelStore }) => {
   useEffect(() => () => { if (confirmGateTimerRef.current) clearTimeout(confirmGateTimerRef.current); }, []);
   // Initial fetch failure must not read as the "nothing installed" fact: keep
   // an error slot so the empty area can show the real read failure + retry
-  // (round-4 review P3).
-  const [externalFetchError, setExternalFetchError] = useState(null);
+  // (round-4 review P3). The slot lives in the bridge (bs.externalModelsError)
+  // so EVERY external read — manual refresh and the register/remove internal
+  // read-backs — consumes it by the same issue-time seq: a stale read's
+  // failure resolves silently instead of overwriting a newer read's outcome,
+  // and any fresh success (including an operation read-back) clears it
+  // (round-31 review P3; a view-side generation cannot see when the operation
+  // read-backs were issued, which is exactly the order the slot needs).
+  const externalFetchError = bs?.externalModelsError || null;
 
   // armed/busy/list identity: kind + effective model + (non-ollama) endpoint,
   // shared with the backend's registry_identity ruler. Full contract and the
@@ -657,9 +651,15 @@ const DeviceManagerView = ({ theme, t, bs, onOpenChat, onOpenModelStore }) => {
 
   // Endpoint-precise button state (round-10 review P2): two inference
   // services on one machine can serve the same model name, so "linked" only
-  // looks at rows saved from THIS record's endpoint.
-  const isRowLinked = (row) =>
-    findLinkedRowsForEndpoint(bs?.savedModels, linkTargetOf(row).baseUrl, row.model, row.name).length > 0;
+  // looks at rows saved from THIS record's endpoint. Association is the
+  // EFFECTIVE model only (round-31 review P2): the display name is not a model
+  // identity — the backend legally keeps (name=model-b, model=model-a) next to
+  // (name=other-label, model=model-b) on one endpoint, so feeding the name
+  // into the matcher would show this row linked off a sibling's config.
+  const isRowLinked = (row) => {
+    const target = linkTargetOf(row);
+    return findLinkedRowsForEndpoint(bs?.savedModels, target.baseUrl, target.model).length > 0;
+  };
 
   // Same shape as ModelDetailDialog.useInPinvou: build a SavedModel via the
   // shared pinvou-model-link helpers, save it, and make it the active model
@@ -692,15 +692,27 @@ const DeviceManagerView = ({ theme, t, bs, onOpenChat, onOpenModelStore }) => {
       showToast(copy.linkDisabledUnreachable);
       return;
     }
+    // Store ownership unknown (library loading / read failed) must not
+    // degrade into "not managed": the click can land while the store read is
+    // in flight or after it failed, and linking would save a custom config —
+    // and set the new-chat default — for a model the store may own. The store
+    // read recovering later does not undo that (round-31 review P2).
+    if (storeOwnershipUnknown) {
+      showToast(copy.linkDisabledStoreUnknown);
+      return;
+    }
     setBusyKey(`link:${rowIdentity(row)}`);
     try {
-      // findLinkedRowsForEndpoint takes (...names): pass both the registry
-      // model and the listing name so a relink updates THIS record's row in
-      // place (existingId) instead of duplicating it — endpoint-precise, so a
-      // same-name model on another loopback port keeps its own row untouched
-      // (round-10 review P2).
+      // Relink updates THIS record's row in place (existingId) instead of
+      // duplicating it; endpoint-precise, so a same-name model on another
+      // loopback port keeps its own row untouched (round-10 review P2). The
+      // matcher takes the saved identity — exactly what buildSavedModel below
+      // stores (model = target.model at this endpoint): passing the display
+      // name too would adopt a sibling's config whose MODEL equals this row's
+      // NAME, and the backend legally keeps such rows side by side on one
+      // endpoint (round-31 review P2).
       const existing =
-        findLinkedRowsForEndpoint(bs?.savedModels, target.baseUrl, row.model, row.name)[0] || null;
+        findLinkedRowsForEndpoint(bs?.savedModels, target.baseUrl, target.model)[0] || null;
       const saved = buildSavedModel({
         modelName: target.model,
         displayName: row.name,
@@ -721,7 +733,7 @@ const DeviceManagerView = ({ theme, t, bs, onOpenChat, onOpenModelStore }) => {
       // (round-7 review P3 alignment).
       setBusyKey((current) => (current === `link:${rowIdentity(row)}` ? null : current));
     }
-  }, [bs, busyKey, copy, showToast, t]);
+  }, [bs, busyKey, copy, showToast, storeOwnershipUnknown, t]);
 
   // Identity for busy/armed keys: the row NAME, not the id. Unregistered
   // Ollama rows swap their synthetic `ollama-*` id for a registry id the
@@ -797,12 +809,16 @@ const DeviceManagerView = ({ theme, t, bs, onOpenChat, onOpenModelStore }) => {
         // Endpoint-precise recycle (round-10 review P2): only rows linked from
         // THIS record's endpoint go to deleteModel — a same-name model linked
         // from another loopback service is an independent config that must
-        // survive this removal.
+        // survive this removal. The scope is the saved identity — effective
+        // model + endpoint — NOT the display name: a sibling row whose MODEL
+        // equals this row's NAME is an independent config too, and feeding the
+        // name into the matcher would recycle both rows' configs on this
+        // removal (round-31 review P2).
+        const target = linkTargetOf(row);
         const linkedRows = findLinkedRowsForEndpoint(
           bs.savedModels,
-          linkTargetOf(row).baseUrl,
-          row.model,
-          row.name
+          target.baseUrl,
+          target.model
         );
         const liveBridge = bridge;
         // Assign the OUTER variable (an inner `let` here used to shadow it and
@@ -853,14 +869,13 @@ const DeviceManagerView = ({ theme, t, bs, onOpenChat, onOpenModelStore }) => {
       }
       if (outcome?.refresh_error) {
         // The removal itself succeeded; only the registry read-back failed.
-        // Report it as its own line (round-29 review P2) and keep the failure
-        // in the persistent error slot so the stale listing stays marked until
-        // the next successful refresh. Bump the consumption generation: any
-        // read issued before this point is older than the failure now in the
-        // slot and must consume neither way (round-30 review P3).
+        // Report it as its own line (round-29 review P2). The failure is
+        // already in the bridge's seq-gated slot — the bridge only attaches
+        // refresh_error when the read-back was still the newest read — so the
+        // stale listing stays marked until a newer read succeeds, and no
+        // view-side bump can overwrite a newer read's outcome with it
+        // (round-31 review P3).
         notices.push(copy.refreshFailed(outcome.refresh_error));
-        externalRefreshGenRef.current += 1;
-        setExternalFetchError(outcome.refresh_error);
       }
       showToast(notices.join('\n'));
     } catch (error) {
@@ -1409,11 +1424,19 @@ const DeviceManagerView = ({ theme, t, bs, onOpenChat, onOpenModelStore }) => {
                               // them (the store owns their lifecycle), so a
                               // link created from this row could never be
                               // recycled and would linger as a dead default
-                              // once the daemon model goes away.
-                              disabled={rowBusy || otherRowBusy || !!doctorBusy || managedByStore || row.status === 'unreachable'}
+                              // once the daemon model goes away. While store
+                              // ownership is merely UNKNOWN (library loading
+                              // or its read failed) the link blocks as well:
+                              // a store-managed model must not gain a custom
+                              // config behind the store's back while the
+                              // authoritative list is absent (round-31
+                              // review P2).
+                              disabled={rowBusy || otherRowBusy || !!doctorBusy || managedByStore || storeOwnershipUnknown || row.status === 'unreachable'}
                               title={managedByStore
                                 ? copy.storeManaged
-                                : (row.status === 'unreachable' ? copy.linkDisabledUnreachable : undefined)}
+                                : (storeOwnershipUnknown
+                                  ? copy.linkDisabledStoreUnknown
+                                  : (row.status === 'unreachable' ? copy.linkDisabledUnreachable : undefined))}
                               onClick={() => linkExternal(row)}
                               data-testid="device-manager-link"
                             >

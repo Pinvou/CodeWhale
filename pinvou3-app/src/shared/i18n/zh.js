@@ -371,6 +371,7 @@ export const dictZh = {
           removeWeightsPath:path=>`将删除的权重目录：${path}`,
           removeIrreversible:'删除不可恢复，请先确认这确实是模型权重目录。',
           linkDisabledUnreachable:'当前探测不可达，暂不能接入；请先确认服务已启动再试。',
+          linkDisabledStoreUnknown:'模型商店列表尚未就绪，暂时无法确认该模型是否由商店管理；请等商店读取恢复后再接入。',
           linkFailed:e=>`接入失败：${e}`,
           doctorSendFailed:'排查会话没有发出去，请重试。',
           doctorFailed:e=>`排查失败：${e}`,

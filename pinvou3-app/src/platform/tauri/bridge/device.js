@@ -503,20 +503,48 @@
   // 发起，seq 严格大于操作前发起的任何回读：操作前的慢回读无论多晚到都会被
   // 丢弃——被删的行不会复活、新登记的行不会消失；后发起的调用永远持更高
   // seq、永远胜出，其回读在时间上必然不早于被丢弃者（round-9 review P1）。
+  //
+  // 错误槽也按同一把 seq 尺子消费，且必须放 bridge（round-31 review P3）：
+  // 操作回读的发起时刻只有这里知道，视图世代闸门看不见它——删除回读先发、
+  // 手刷后发且成功、旧回读失败迟到时，视图侧无法区分"这次失败属于哪次发起"，
+  // 旧失败仍会把新成功倒灌成"刷新失败"；反向地，操作回读的成功也不参与视图
+  // 世代，旧错误清不掉。槽放进来之后，"过期失败静默、过期成功不发布、任何
+  // 新鲜成功清槽"对手刷与操作回读一致成立。
   var externalModelsFetchSeq = 0;
   async function fetchExternalModels() {
     var seq = ++externalModelsFetchSeq;
-    var view = await invoke("get_external_models");
+    var view;
+    try {
+      view = await invoke("get_external_models");
+    } catch (e) {
+      // stale 世代的失败：与 stale 成功数据同权丢弃——它已不属于当下，写入
+      // 错误槽只会把后发读取已决算的结果倒灌覆盖。新鲜失败落槽并继续抛出：
+      // 手刷路径靠它弹 toast，登记/移除的内部回读靠它把 refresh_error 附上
+      // 回执（同代消息不重复发布，兼作失败路径的节流）。
+      if (seq !== externalModelsFetchSeq) return state.externalModels;
+      var message = e && e.message ? e.message : String(e || "external models refresh failed");
+      if (state.externalModelsError !== message) {
+        state.externalModelsError = message;
+        notify();
+      }
+      throw e;
+    }
     if (seq !== externalModelsFetchSeq) {
       return state.externalModels;
     }
     // 无变化不下发（登记/移除后的回读常常逐字节一致，不值得一次全域重渲染）。
     // 结构比较而非 JSON.stringify：键序翻转不再击穿抑制（第四轮评审 P3）。
+    // 清旗本身必须发布：恢复拍若内容恰好没变，常驻错误行会一直挂在页面上
+    // （与 services 通道同一处理）。
+    var hadError = state.externalModelsError !== null;
+    state.externalModelsError = null;
+    var changed = hadError;
     var next = view || null;
     if (!structuralEqual(next, state.externalModels || null)) {
       state.externalModels = next;
-      notify();
+      changed = true;
     }
+    if (changed) notify();
     return state.externalModels;
   }
 
@@ -524,7 +552,9 @@
   // 回读失败不能把整个调用打成拒绝：操作 invoke 已决算成功，整体 reject 会
   // 吞掉 record/outcome（含 warnings），调用方只能按"操作失败"呈现并跳过
   // 关联配置清理（round-29 review P2）。失败以 refresh_error 附加在回执上由
-  // 调用方分开报告；成功路径保持原对象身份（既有契约测试钉 ===）。
+  // 调用方分开报告；成功路径保持原对象身份（既有契约测试钉 ===）。到这里的
+  // 失败必然是新鲜的：stale 世代的回读失败已在 fetchExternalModels 内按世代
+  // 丢弃（resolve 而非 reject），不会给回执附上过期失败（round-31 review P3）。
   async function registerExternalModel(payload) {
     var record = await invoke("device_register_external_model", payload || {});
     try {

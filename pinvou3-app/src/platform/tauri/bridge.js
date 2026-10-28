@@ -252,6 +252,9 @@ function renderMarkdown(text) { return pinvouSharedtauriMain().renderMarkdown(te
     deviceServices: null,
     deviceServicesError: null,
     externalModels: null,
+    // 外部模型读取错误槽：bridge 持有并按回读世代消费（手刷与登记/移除的
+    // 内部回读同一把 seq 尺子；device.js fetchExternalModels 边缘触发 notify）。
+    externalModelsError: null,
     backendOnline: null, // null=checking, true, false
     platformCapabilities: {
       loaded: false,

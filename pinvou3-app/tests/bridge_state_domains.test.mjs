@@ -115,10 +115,10 @@ test('device domain is fully wired (feature -> slice -> app)', () => {
   const featureWrites = [...feature.matchAll(/state\.(\w+)\s*=/g)].map((entry) => entry[1]);
   assert.deepEqual(
     [...new Set(featureWrites)].sort((a, b) => a.localeCompare(b)),
-    ['device', 'deviceError', 'deviceServices', 'deviceServicesError', 'deviceStale', 'externalModels'],
+    ['device', 'deviceError', 'deviceServices', 'deviceServicesError', 'deviceStale', 'externalModels', 'externalModelsError'],
     'device feature must only write the fields its domain declares',
   );
-  for (const field of ['device', 'deviceStale', 'deviceError', 'deviceServices', 'deviceServicesError', 'externalModels']) {
+  for (const field of ['device', 'deviceStale', 'deviceError', 'deviceServices', 'deviceServicesError', 'externalModels', 'externalModelsError']) {
     assert.ok(
       sliceFields.device.includes(field),
       `STATE_SLICE_FIELDS.device must declare ${field}`,

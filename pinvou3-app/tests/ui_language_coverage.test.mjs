@@ -241,6 +241,8 @@ for (const language of ['zh', 'en', 'ja']) {
       'kindOllama', 'kindEndpoint', 'kindWeights', 'kindOther',
       'registeredBadge', 'statusAvailable', 'statusUnreachable',
       'linked', 'link', 'linkDone', 'linkDisabledRemote', 'linkFailed',
+      // round-31 评审 P2：商店归属未知（读取中/失败）时接入禁用的说明文案。
+      'linkDisabledStoreUnknown',
       'remove', 'removeArmed', 'removeCancel', 'removeConfirmIntro', 'deleteWeights',
       'removeWeightsPath', 'removeIrreversible', 'linkDisabledUnreachable',
       'doctorSendFailed', 'doctorFailed', 'refreshFailed', 'linkRowStale', 'linkRowRecycled', 'removeDone', 'removeFailed', 'warn',
@@ -261,8 +263,8 @@ for (const language of ['zh', 'en', 'ja']) {
     // Count guard：清单看不到新增——加键必须同步更新计数（见 uiAuxChat round-36 同款）。
     assert.equal(
       Object.keys(dict[language].uiDeviceMgr).length,
-      119,
-      `${language}.uiDeviceMgr must hold exactly the 119 pinned keys`,
+      120,
+      `${language}.uiDeviceMgr must hold exactly the 120 pinned keys`,
     );
     // Single-language whole-section loss guard（十九轮评审 P2）：dictJa 以
     // `...dictEn` 铺底，整段删掉 `jaBase.uiDeviceMgr` / `jaBase.deviceMgr` 时

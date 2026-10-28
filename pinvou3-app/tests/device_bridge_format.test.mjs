@@ -38,7 +38,7 @@ function loadDeviceFeature() {
       if (index !== -1) { intervals.splice(index, 1); clearedCount += 1; }
     },
   });
-  const state = { device: null, deviceStale: false, deviceError: null, deviceServices: null, deviceServicesError: null, externalModels: null };
+  const state = { device: null, deviceStale: false, deviceError: null, deviceServices: null, deviceServicesError: null, externalModels: null, externalModelsError: null };
   let notifyCount = 0;
   const invokes = [];
   let respond = async () => null;
@@ -841,6 +841,77 @@ assert.doesNotMatch(
   assert.equal(await preRemoveFetch, postRemoveList, 'stale pre-remove fetch must be discarded');
   assert.equal(env.state.externalModels, postRemoveList, 'removed row must not resurrect');
   assert.equal(env.notifyCount(), 1, 'only the post-remove refetch may publish');
+}
+
+// ── 外部模型错误槽按世代消费（round-31 review P3）：新鲜失败落槽、新鲜成功
+// 清槽（数据不变也要发布清旗）、stale 失败静默不倒灌 ──
+{
+  const env = loadDeviceFeature();
+  const list = { models: [{ id: 'm-1', name: 'qwen3-30b', kind: 'ollama', registered: true, source: 'registry' }], warnings: [] };
+  env.setRespond(command => command === 'get_external_models' ? list : null);
+  await env.api.fetchExternalModels();
+  assert.equal(env.state.externalModelsError, null, 'a successful first read keeps the slot clear');
+  env.setRespond(async () => { throw new Error('registry down'); });
+  await assert.rejects(() => env.api.fetchExternalModels(), /registry down/);
+  assert.equal(env.state.externalModelsError, 'registry down', 'a fresh failure must raise the slot');
+  assert.equal(env.notifyCount(), 2, 'initial data publish + failure publish');
+  // 恢复拍返回与在展数据一致的内容也必须发布：常驻错误行要能退场。
+  env.setRespond(command => command === 'get_external_models' ? list : null);
+  const back = await env.api.fetchExternalModels();
+  assert.equal(env.state.externalModelsError, null, 'a fresh success must clear the slot');
+  assert.equal(back, list);
+  assert.equal(env.notifyCount(), 3, 'slot clear must publish even when the data is unchanged');
+}
+
+// ── stale 世代的失败按无发生处理（round-31 review P3）：先发读取迟到失败，
+// 不得覆盖后发失败已落的槽，也不得向调用方抛出 ──
+{
+  const env = loadDeviceFeature();
+  let releaseA;
+  let fetchCount = 0;
+  env.setRespond(command => {
+    if (command !== 'get_external_models') return null;
+    fetchCount += 1;
+    if (fetchCount === 1) return new Promise((_, reject) => { releaseA = () => reject(new Error('old read down')); });
+    return Promise.reject(new Error('new read down'));
+  });
+  const pendingA = env.api.fetchExternalModels();
+  await assert.rejects(() => env.api.fetchExternalModels(), /new read down/, 'the newer read fails while fresh');
+  assert.equal(env.state.externalModelsError, 'new read down');
+  releaseA();
+  const settled = await pendingA;
+  assert.equal(settled, env.state.externalModels, 'stale failure resolves silently for caller compatibility');
+  assert.equal(env.state.externalModelsError, 'new read down', 'stale failure must not overwrite the newer failure');
+  assert.equal(env.notifyCount(), 1, 'only the fresh failure may publish');
+}
+
+// ── remove 内部回读先发、手刷后发且成功：回读的迟到失败不得给回执附
+// refresh_error、不得动槽（round-31 review P3 的原始交错）──
+{
+  const env = loadDeviceFeature();
+  const outcome = { removed_registry: true, removed_weights: false, ollama_deleted: true, warnings: [] };
+  const postRemoveList = { models: [], warnings: [] };
+  let releaseReadback;
+  let fetchCount = 0;
+  env.setRespond(command => {
+    if (command === 'device_remove_external_model') return outcome;
+    if (command !== 'get_external_models') return null;
+    fetchCount += 1;
+    if (fetchCount === 1) return new Promise((_, reject) => { releaseReadback = () => reject(new Error('readback down')); });
+    return postRemoveList;
+  });
+  const removedPromise = env.api.removeExternalModel({ id: 'm-9', deleteWeights: false, confirmName: 'qwen3-30b' });
+  // 等内部回读发起（它持有更低的 seq），再发手刷。
+  while (!env.invokes.some(([command]) => command === 'get_external_models')) {
+    await new Promise(resolve => setTimeout(resolve, 0));
+  }
+  await env.api.fetchExternalModels();
+  releaseReadback();
+  const removed = await removedPromise;
+  assert.equal(removed, outcome, 'a read-back already superseded by a newer read must not degrade the receipt');
+  assert.equal(removed.refresh_error, undefined, 'no refresh_error may travel with a stale read-back failure');
+  assert.equal(env.state.externalModels, postRemoveList, 'the manual read wins the data channel');
+  assert.equal(env.state.externalModelsError, null, 'the successful manual read keeps the slot clear');
 }
 
 // ── 快照轮询世代：startDevicePolling 重启作废在飞旧拍（round-9 P2）──

@@ -368,6 +368,7 @@ const jaBase = {
           removeWeightsPath:path=>`削除する重みディレクトリ：${path}`,
           removeIrreversible:'削除は元に戻せません。モデルの重みディレクトリであることを先に確認してください。',
           linkDisabledUnreachable:'現在到達できないため接続できません。サービスの起動を確認してから再試行してください。',
+          linkDisabledStoreUnknown:'モデルストアの一覧がまだ取得できていないため、このモデルをストアが管理しているか判定できません。ストアの読み取りが復旧してから接続してください。',
           linkFailed:(e)=>`接続に失敗しました：${e}`,
           doctorSendFailed:'トラブルシューティング用チャットを開始できませんでした。再試行してください。',
           doctorFailed:(e)=>`診断に失敗しました：${e}`,
