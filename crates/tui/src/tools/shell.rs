@@ -4415,11 +4415,19 @@ fn enforce_readonly_argv_operands(
         // stripping the prefix the operand falls into the shape refusal and
         // every canonical absolute read is denied on Windows. The stripped
         // form resolves to the same location, so location-based judgement is
-        // unchanged. On unix hosts such spellings stay fail-closed below.
-        let value = value
-            .strip_prefix(r"\\?\")
-            .or_else(|| value.strip_prefix(r"\\.\"))
-            .unwrap_or(value);
+        // unchanged. On unix the strip stays off: a `\\?\`-prefixed word there
+        // is a plain (odd) POSIX file name, and stripping it would judge a
+        // different name than the program opens (`cat '\\.\secret'` read a
+        // planted outside symlink as `secret`); the shape gate below fails
+        // such spellings closed instead.
+        let value = if cfg!(windows) {
+            value
+                .strip_prefix(r"\\?\")
+                .or_else(|| value.strip_prefix(r"\\.\"))
+                .unwrap_or(value)
+        } else {
+            value
+        };
         if value.is_empty() || value == "-" {
             continue;
         }

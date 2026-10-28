@@ -418,7 +418,25 @@ const GITHUB_READONLY_PREFIXES: &[&str] = &[
 ///
 /// Words that do not look like Windows absolute paths are untouched, so POSIX
 /// escapes and unix hosts are unaffected.
-pub(crate) fn normalize_windows_command_paths(command: &str) -> String {
+///
+/// The transform is applied only on Windows hosts. A judged spelling and the
+/// bytes a POSIX shell actually parses must be the same string: the strip
+/// runs *before* the glob-charset gate, so on unix a `\\?\`-bearing word would
+/// slip past the `?` refusal and reach the shell as a live one-character glob
+/// (`cat a\\?\b` judged as `ab` while the shell expands `a\?b`), and a
+/// doubled-backslash word would be judged under a spelling the program never
+/// receives. On unix those spellings are plain (odd) POSIX file names and
+/// fail closed at the charset and shape gates instead. The inner transform is
+/// exposed unconditionally for tests.
+pub(crate) fn normalize_windows_command_paths(command: &str) -> std::borrow::Cow<'_, str> {
+    if cfg!(windows) {
+        std::borrow::Cow::Owned(protected_windows_command_paths(command))
+    } else {
+        std::borrow::Cow::Borrowed(command)
+    }
+}
+
+pub(crate) fn protected_windows_command_paths(command: &str) -> String {
     let stripped = command.replace(r"\\?\", "");
     let mut out = String::with_capacity(stripped.len());
     let mut word_start = 0;
@@ -2372,13 +2390,16 @@ mod tests {
         }
     }
 
+    #[cfg(windows)]
     #[test]
     fn agent_readonly_shell_admits_windows_verbatim_paths() {
         // `Path::canonicalize` on Windows embeds `\\?\` verbatim prefixes whose
         // `?` trips the glob-charset gate and whose backslashes POSIX splitters
-        // eat as escapes. The normalize step must admit the same commands with
-        // either spelling (the classifier is pure string logic, so this is
-        // platform-independent).
+        // eat as escapes. The normalize step (Windows hosts only) must admit
+        // the same commands with either spelling; drive paths admit without
+        // it. On unix the same verbatim spelling is a plain odd POSIX file
+        // name and refuses at the `?` of the charset gate instead, pinned by
+        // `windows_path_normalization_stays_off_unix_lanes`.
         for command in [
             r"git -C \\?\C:\Users\foo log --oneline -20",
             r"git -C C:\Users\foo log --oneline -20",
@@ -2389,6 +2410,22 @@ mod tests {
                 "{command} should be agent read-only"
             );
         }
+    }
+
+    #[cfg(not(windows))]
+    #[test]
+    fn agent_readonly_shell_refuses_verbatim_spellings_unix_lanes() {
+        // The verbatim strip would delete the `?` before the charset gate and
+        // let the shell parse a wildcard the gate never saw; on unix the
+        // spelling is refused outright, and the drive spelling — harmless
+        // backslashes — still admits.
+        assert!(!is_agent_readonly_shell_command(
+            r"git -C \\?\C:\Users\foo log --oneline -20"
+        ));
+        assert!(!is_agent_readonly_shell_command(r"cat \\?\secret"));
+        assert!(is_agent_readonly_shell_command(
+            r"git -C C:\Users\foo log --oneline -20"
+        ));
     }
 
     #[test]

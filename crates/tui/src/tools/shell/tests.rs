@@ -2101,14 +2101,17 @@ fn windows_verbatim_and_drive_operands_survive_posix_split() {
     // `C:Users...`) and mangles the `\\?\` verbatim prefix before operand
     // classification can see it. The protection doubles those backslashes so
     // the splitter round-trips the real path (the `\\?\` cases that the
-    // verbatim strip alone could never reach).
+    // verbatim strip alone could never reach). Pinned against the
+    // unconditional transform; the shipped entry point applies it on Windows
+    // hosts only, so a POSIX lane never judges text the shell does not run.
     for (raw, expected) in [
         (r"\\?\C:\Users\foo\inside.txt", r"C:\Users\foo\inside.txt"),
         (r"C:\Users\foo\inside.txt", r"C:\Users\foo\inside.txt"),
         (r"\\server\share\secret", r"\\server\share\secret"),
         (r"\\.\device\path", r"\\.\device\path"),
     ] {
-        let protected = normalize_windows_command_paths(&format!("cat {raw}"));
+        let protected =
+            crate::command_safety::protected_windows_command_paths(&format!("cat {raw}"));
         let argv = shlex::split(&protected).expect("split must succeed");
         assert_eq!(
             argv,
@@ -2123,17 +2126,56 @@ fn windows_path_protection_leaves_other_words_untouched() {
     // POSIX escapes, drive-relative spellings, and plain relative operands
     // are not Windows absolute paths and must round-trip unchanged.
     assert_eq!(
-        normalize_windows_command_paths("echo a\\ b && cat inside.txt"),
+        crate::command_safety::protected_windows_command_paths("echo a\\ b && cat inside.txt"),
         "echo a\\ b && cat inside.txt"
     );
     assert_eq!(
-        normalize_windows_command_paths("cat C:secret"),
+        crate::command_safety::protected_windows_command_paths("cat C:secret"),
         "cat C:secret"
+    );
+    assert_eq!(
+        crate::command_safety::protected_windows_command_paths("cat inside.txt"),
+        "cat inside.txt"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn windows_path_normalization_stays_off_unix_lanes() {
+    // On unix, `Path::canonicalize` never yields verbatim or drive spellings,
+    // and normalizing would make the gate judge text the POSIX shell never
+    // runs: the `\\?\` strip deletes the `?` the charset refuses, and a raw
+    // `?` then reaches the shell as a live one-character glob (`cat a\\?\b`
+    // judged as `ab` while the shell expanded `a\?b` over a planted symlink).
+    assert_eq!(
+        normalize_windows_command_paths(r"pwd; cat a\\?\b"),
+        r"pwd; cat a\\?\b"
+    );
+    assert_eq!(
+        normalize_windows_command_paths(r"cat \\.\secret"),
+        r"cat \\.\secret"
     );
     assert_eq!(
         normalize_windows_command_paths("cat inside.txt"),
         "cat inside.txt"
     );
+    assert!(!crate::command_safety::is_agent_readonly_shell_command(
+        r"pwd; cat a\\?\b"
+    ));
+    assert!(!crate::command_safety::is_agent_readonly_shell_command(
+        r"cat \\?\secret"
+    ));
+    // The operand gate's own verbatim-prefix strip stays off too: a quoted
+    // spelling reaches it with the prefix intact and must fall into the
+    // shape refusal, not be judged under the stripped name.
+    let workspace = tempdir().expect("workspace");
+    let roots = [workspace.path().to_path_buf()];
+    for command in [r"cat '\\.\secret'", r"cat '\\?\secret'"] {
+        let error = enforce_readonly_workspace_operands(command, &roots, workspace.path())
+            .expect_err("a verbatim-prefixed operand must be refused on unix")
+            .to_string();
+        assert!(error.contains("operand.shape"), "{command}: {error}");
+    }
 }
 
 #[test]
