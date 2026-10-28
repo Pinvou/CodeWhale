@@ -55,6 +55,8 @@ const LEGACY_SPILLOVER_OWNER_SCHEMA_VERSION: u32 = 1;
 pub(crate) struct LegacySpilloverOwnership {
     pub schema_version: u32,
     pub origin_session: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tool_call_id_digest: Option<String>,
     pub digest: String,
     pub size_bytes: u64,
 }
@@ -122,7 +124,21 @@ pub fn spillover_path(id: &str) -> Option<PathBuf> {
 
 #[must_use]
 pub(crate) fn legacy_spillover_ownership_path(payload_path: &Path) -> PathBuf {
-    payload_path.with_extension("owner.json")
+    let ordinary = payload_path.with_extension("owner.json");
+    if ordinary
+        .file_name()
+        .is_some_and(|name| name.as_encoded_bytes().len() > 255)
+    {
+        // Payload names are sanitized ASCII. A valid long payload component
+        // must not become invalid merely because its proof has a longer suffix.
+        let name = payload_path
+            .file_name()
+            .map(|name| name.as_encoded_bytes())
+            .unwrap_or_default();
+        payload_path.with_file_name(format!("owner-{}.json", crate::hashing::sha256_hex(name)))
+    } else {
+        ordinary
+    }
 }
 
 /// Publish the proof needed to retrieve a legacy-global spillover safely.
@@ -130,9 +146,32 @@ pub(crate) fn legacy_spillover_ownership_path(payload_path: &Path) -> PathBuf {
 /// Payload publication happens first. If this atomic sidecar write fails, the
 /// payload is deliberately left unowned and therefore inaccessible through
 /// `retrieve_tool_result`; callers must not advertise a retrieval hint.
+#[cfg(test)]
 pub(crate) fn publish_legacy_spillover_ownership(
     payload_path: &Path,
     session_id: &str,
+    bytes: &[u8],
+) -> io::Result<PathBuf> {
+    publish_spillover_ownership(payload_path, session_id, None, bytes)
+}
+
+pub(crate) fn tool_call_identity_digest(call_id: &str) -> String {
+    crate::hashing::sha256_hex(format!("tool-call-identity\0{call_id}").as_bytes())
+}
+
+pub(crate) fn publish_spillover_ownership_for_call(
+    payload_path: &Path,
+    session_id: &str,
+    call_id: &str,
+    bytes: &[u8],
+) -> io::Result<PathBuf> {
+    publish_spillover_ownership(payload_path, session_id, Some(call_id), bytes)
+}
+
+fn publish_spillover_ownership(
+    payload_path: &Path,
+    session_id: &str,
+    call_id: Option<&str>,
     bytes: &[u8],
 ) -> io::Result<PathBuf> {
     if session_id.trim().is_empty() {
@@ -144,6 +183,7 @@ pub(crate) fn publish_legacy_spillover_ownership(
     let ownership = LegacySpilloverOwnership {
         schema_version: LEGACY_SPILLOVER_OWNER_SCHEMA_VERSION,
         origin_session: session_id.to_string(),
+        tool_call_id_digest: call_id.map(tool_call_identity_digest),
         digest: crate::hashing::sha256_hex(bytes),
         size_bytes: bytes.len().try_into().unwrap_or(u64::MAX),
     };
@@ -367,12 +407,15 @@ pub const SPILLOVER_RECOVERY_HINT: &str = "omitted range recovery:";
 /// The distinction that matters is retrievability, not tidiness. An adaptive
 /// session artifact carries an `art_<id>` the retrieval tool resolves, so name
 /// it. A legacy global spillover is authorized by an ownership sidecar
-/// published at spill time (see [`publish_legacy_spillover_ownership`]);
-/// `retrieve_tool_result` resolves the bare call id, the sha, or the printed
-/// path and reads it back through that sidecar, so the classic footer names
-/// that route and keeps the narrower rerun as the fallback for the rare case
-/// the best-effort sidecar write failed.
-pub(crate) fn spillover_recovery_instruction(retrieval_ref: Option<&str>) -> String {
+/// published at spill time (see [`publish_spillover_ownership_for_call`]);
+/// Typed raw-call retrieval uses that writer's exact namespace and sidecar,
+/// avoiding ambiguous artifact/path interpretation of IDs beginning `art_`.
+/// The classic footer teaches this route explicitly, with a narrower rerun
+/// when the retrieval tool itself cannot be activated.
+pub(crate) fn spillover_recovery_instruction(
+    retrieval_ref: Option<&str>,
+    tool_call_id: Option<&str>,
+) -> String {
     match retrieval_ref {
         Some(reference) => format!(
             "{SPILLOVER_RECOVERY_HINT} call retrieve_tool_result with ref=\"{reference}\" \
@@ -381,13 +424,21 @@ pub(crate) fn spillover_recovery_instruction(retrieval_ref: Option<&str>) -> Str
              If retrieve_tool_result is absent, activate it via tool_search first; if neither \
              route is available, use a narrower rerun"
         ),
-        None => format!(
-            "{SPILLOVER_RECOVERY_HINT} full copy kept out of context; read it back with \
-             retrieve_tool_result using this call's id or the spillover path — re-run the \
+        None => {
+            // Adapters may namespace the storage ID independently of the
+            // provider's tool_use_id. Initial previews must name the writer's
+            // exact ID; root context refits can still refer to the current call.
+            let reference = tool_call_id
+                .map(|id| serde_json::Value::String(id.to_owned()).to_string())
+                .unwrap_or_else(|| "<this call's id>".to_owned());
+            format!(
+                "{SPILLOVER_RECOVERY_HINT} full copy kept out of context; read it back with \
+             retrieve_tool_result with ref={reference}, ref_kind=\"tool_call_id\" — re-run the \
              command with narrower output (a tighter filter, or head/tail) if you need it fresh. \
              If retrieve_tool_result is absent, activate it via tool_search first; if neither \
              route is available, use the narrower rerun"
-        ),
+            )
+        }
     }
 }
 
@@ -406,11 +457,12 @@ fn spillover_preview_footer(
     omitted_lines: usize,
     recovery_path: &str,
     retrieval_ref: Option<&str>,
+    tool_call_id: Option<&str>,
 ) -> String {
     format!(
         "… {} of output omitted ({omitted_lines} lines) — full output at {recovery_path}; {}",
         crate::artifacts::format_byte_size(omitted_bytes.try_into().unwrap_or(u64::MAX)),
-        spillover_recovery_instruction(retrieval_ref)
+        spillover_recovery_instruction(retrieval_ref, tool_call_id)
     )
 }
 
@@ -441,6 +493,7 @@ fn truncated_preview(
     original: &str,
     recovery_path: &str,
     retrieval_ref: Option<&str>,
+    tool_call_id: &str,
 ) -> String {
     let omitted = original.len().saturating_sub(head.len() + tail.len());
     if omitted == 0 {
@@ -451,7 +504,13 @@ fn truncated_preview(
         .count();
     format!(
         "{head}\n\n{}\n\n…\n{tail}",
-        spillover_preview_footer(omitted, omitted_lines, recovery_path, retrieval_ref)
+        spillover_preview_footer(
+            omitted,
+            omitted_lines,
+            recovery_path,
+            retrieval_ref,
+            Some(tool_call_id)
+        )
     )
 }
 
@@ -500,6 +559,11 @@ fn apply_spillover_inner(
         return None;
     }
     let original_content = result.content.clone();
+    if let Some(context) = artifact_context
+        && !session_evidence_allows_output(context.session_id, tool_id, &original_content)
+    {
+        return None;
+    }
     let outcome = match maybe_spillover(
         tool_id,
         &original_content,
@@ -530,30 +594,52 @@ fn apply_spillover_inner(
     // Keep publishing the legacy ownership proof even though the model-facing
     // footer no longer mentions retrieval: the tool-details pager authorizes
     // legacy spillover reads through this sidecar.
-    if let Some(context) = artifact_context
-        && let Err(err) = publish_legacy_spillover_ownership(
+    let legacy_recovery_available = if let Some(context) = artifact_context {
+        match publish_spillover_ownership_for_call(
             &path,
             context.session_id,
+            tool_id,
             original_content.as_bytes(),
-        )
-    {
-        tracing::warn!(
-            target: "spillover",
-            ?err,
-                tool_id,
-                "legacy spillover ownership publication failed"
-        );
-    }
+        ) {
+            Ok(_) => true,
+            Err(err) => {
+                tracing::warn!(
+                target: "spillover",
+                ?err,
+                    tool_id,
+                    "legacy spillover ownership publication failed"
+                    );
+                false
+            }
+        }
+    } else {
+        true
+    };
 
     let mut artifact_path = None;
     if let Some(context) = artifact_context {
         let artifact_id = crate::artifacts::artifact_id_for_tool_call(tool_id);
-        match crate::artifacts::write_session_artifact(
+        match crate::artifacts::write_session_artifact_immutable(
             context.session_id,
             &artifact_id,
-            &original_content,
+            original_content.as_bytes(),
         ) {
             Ok((absolute_path, relative_path)) => {
+                // Keep the artifact handle immutable as well as binding typed
+                // recovery. The original preview and later context refits may
+                // use the default artifact handle rather than a raw call id.
+                if let Err(err) = publish_spillover_ownership_for_call(
+                    &absolute_path,
+                    context.session_id,
+                    tool_id,
+                    original_content.as_bytes(),
+                ) {
+                    tracing::warn!(target: "spillover", ?err, "session artifact ownership publication failed");
+                    // No preview or artifact metadata has been published yet.
+                    // Leave the original result intact so context budgeting can
+                    // retry retention or explicitly report unavailable output.
+                    return None;
+                }
                 let record = crate::artifacts::record_tool_output_artifact(
                     context.session_id,
                     tool_id,
@@ -567,8 +653,25 @@ fn apply_spillover_inner(
                     &original_content,
                     &crate::artifacts::format_artifact_relative_path(&absolute_path),
                     Some(artifact_id.as_str()),
+                    tool_id,
                 );
                 artifact_path = Some((absolute_path, relative_path, record));
+            }
+            Err(err)
+                if err.kind() == io::ErrorKind::AlreadyExists
+                    && crate::artifacts::session_artifact_absolute_path(
+                        context.session_id,
+                        &crate::artifacts::session_artifact_relative_path(&artifact_id),
+                    )
+                    .is_some_and(|path| fs::symlink_metadata(path).is_ok()) =>
+            {
+                // A normalized-name collision must not replace an earlier
+                // receipt's bytes or advertise an alias that resolves to them.
+                // Preserve this call's full raw result instead.
+                // An unavailable ancestor can also report AlreadyExists on
+                // Windows; without a destination entry, keep the global fallback.
+                tracing::warn!(target: "spillover", tool_id, "classic session artifact identity conflicts with retained bytes");
+                return None;
             }
             Err(err) => {
                 tracing::warn!(
@@ -582,9 +685,15 @@ fn apply_spillover_inner(
     }
 
     if artifact_path.is_none() {
+        if !legacy_recovery_available {
+            // Both stores failed to publish a recoverable copy. Keep the raw
+            // result rather than advertise an unowned compatibility payload.
+            return None;
+        }
         // Legacy fallback: no session artifact was written, so there is no
-        // `art_<id>` ref to hand over — only the on-disk path.
-        result.content = truncated_preview(head, tail, &original_content, &path_str, None);
+        // `art_<id>` ref to hand over. Name the exact writer ID, which may
+        // differ from the provider tool_use_id in a child worker.
+        result.content = truncated_preview(head, tail, &original_content, &path_str, None, tool_id);
     }
 
     let obj = metadata_object_mut(result);
@@ -693,6 +802,9 @@ pub(crate) fn preserve_full_output_for_model_context(
     {
         return true;
     }
+    if !session_evidence_allows_output(session_id, tool_id, &result.content) {
+        return false;
+    }
     let artifact_id = crate::artifacts::artifact_id_for_tool_call(tool_id);
     match crate::artifacts::write_session_artifact_immutable(
         session_id,
@@ -700,6 +812,15 @@ pub(crate) fn preserve_full_output_for_model_context(
         result.content.as_bytes(),
     ) {
         Ok((absolute_path, relative_path)) => {
+            if let Err(err) = publish_spillover_ownership_for_call(
+                &absolute_path,
+                session_id,
+                tool_id,
+                result.content.as_bytes(),
+            ) {
+                tracing::warn!(target: "spillover", ?err, "full output ownership publication failed");
+                return false;
+            }
             let record = crate::artifacts::record_tool_output_artifact(
                 session_id,
                 tool_id,
@@ -725,6 +846,35 @@ pub(crate) fn preserve_full_output_for_model_context(
     }
 }
 
+/// Evidence is the reader's authority whenever it exists. A compatibility
+/// producer must not replace its payload or advertise an own-proof route that
+/// this authority would reject, even when a normalized handle has equal bytes.
+fn session_evidence_allows_output(session_id: &str, call_id: &str, content: &str) -> bool {
+    let handle = crate::artifacts::artifact_id_for_tool_call(call_id);
+    match crate::tools::large_output_router::read_evidence_metadata(session_id, &handle) {
+        Ok(evidence) => {
+            evidence.handle == handle
+                && evidence.origin_session == session_id
+                && evidence.call_id == call_id
+                && evidence.size_bytes == u64::try_from(content.len()).unwrap_or(u64::MAX)
+                && evidence.digest == crate::hashing::sha256_hex(content.as_bytes())
+                && !evidence.redacted
+                && !crate::tools::large_output_router::evidence_is_expired(
+                    &evidence,
+                    crate::tools::large_output_router::unix_millis_now(),
+                )
+        }
+        // An absent file, or an ancestor that is not a directory, cannot
+        // contain this session's Evidence. Actual storage/proof publication
+        // must still succeed; classic may use its separately owned global
+        // copy when the session directory is unavailable. Other errors deny.
+        Err(error) => matches!(
+            error.kind(),
+            io::ErrorKind::NotFound | io::ErrorKind::NotADirectory
+        ),
+    }
+}
+
 /// Bytes reserved beside the footer for the preview's blank lines and the
 /// `…` separator, plus slack for the omitted-size text changing length.
 const PREVIEW_FRAME_BYTES: usize = 32;
@@ -738,13 +888,126 @@ fn preview_footer(
     retrieval_ref: Option<&str>,
 ) -> String {
     match recovery_path {
-        Some(path) => spillover_preview_footer(omitted_bytes, omitted_lines, path, retrieval_ref),
+        Some(path) => {
+            spillover_preview_footer(omitted_bytes, omitted_lines, path, retrieval_ref, None)
+        }
         None => format!(
             "… {} of output omitted ({omitted_lines} lines) — the full output could not be saved; {}",
             crate::artifacts::format_byte_size(omitted_bytes.try_into().unwrap_or(u64::MAX)),
             unsaved_output_recovery_instruction()
         ),
     }
+}
+
+// Select a footer form once, then recompute its counts from the final raw
+// windows. Neither shorter counts nor a long reference may change that form.
+#[derive(Clone, Copy)]
+enum PreviewFooterForm {
+    Full,
+    CompactRef,
+    CompactCallId,
+}
+
+fn compact_recovery_footer(recovery_path: Option<&str>, retrieval_ref: Option<&str>) -> String {
+    match (recovery_path, retrieval_ref) {
+        (Some(_), Some(reference)) => format!(
+            "[{SPILLOVER_RECOVERY_HINT} retrieve_tool_result ref=\"{reference}\"; use tool_search if absent, otherwise a narrower rerun.]"
+        ),
+        (Some(_), None) => format!(
+            "[{SPILLOVER_RECOVERY_HINT} retrieve_tool_result ref=<call id>,ref_kind=tool_call_id; tool_search if absent; else narrower rerun.]"
+        ),
+        (None, _) => format!(
+            "[the full output could not be saved; {SPILLOVER_RECOVERY_HINT} no tool call reaches this copy; re-run with narrower output.]"
+        ),
+    }
+}
+
+fn preview_footer_with_form(
+    form: PreviewFooterForm,
+    omitted_bytes: usize,
+    omitted_lines: usize,
+    recovery_path: Option<&str>,
+    retrieval_ref: Option<&str>,
+) -> String {
+    match form {
+        PreviewFooterForm::Full => {
+            preview_footer(omitted_bytes, omitted_lines, recovery_path, retrieval_ref)
+        }
+        PreviewFooterForm::CompactRef | PreviewFooterForm::CompactCallId => format!(
+            "… {} of output omitted ({omitted_lines} lines); {}",
+            crate::artifacts::format_byte_size(omitted_bytes.try_into().unwrap_or(u64::MAX)),
+            compact_recovery_footer(
+                recovery_path,
+                if matches!(form, PreviewFooterForm::CompactRef) {
+                    retrieval_ref
+                } else {
+                    None
+                }
+            )
+        ),
+    }
+}
+
+fn budgeted_preview_footer(
+    omitted_bytes: usize,
+    omitted_lines: usize,
+    recovery_path: Option<&str>,
+    retrieval_ref: Option<&str>,
+    budget: usize,
+) -> (String, PreviewFooterForm) {
+    for form in [PreviewFooterForm::Full, PreviewFooterForm::CompactRef] {
+        let footer = preview_footer_with_form(
+            form,
+            omitted_bytes,
+            omitted_lines,
+            recovery_path,
+            retrieval_ref,
+        );
+        if footer.len().saturating_add(PREVIEW_FRAME_BYTES) <= budget {
+            return (footer, form);
+        }
+    }
+    let form = PreviewFooterForm::CompactCallId;
+    (
+        preview_footer_with_form(
+            form,
+            omitted_bytes,
+            omitted_lines,
+            recovery_path,
+            retrieval_ref,
+        ),
+        form,
+    )
+}
+
+/// Structured summaries do not know the omitted raw byte count. Keep their
+/// original full receipt when it fits; share only the complete recovery hint.
+pub(crate) fn model_context_recovery_footer(
+    recovery_path: Option<&str>,
+    retrieval_ref: Option<&str>,
+    budget: usize,
+) -> String {
+    let full = match recovery_path {
+        Some(path) => format!(
+            "[complete returned tool result at {path}; {}]",
+            spillover_recovery_instruction(retrieval_ref, None)
+        ),
+        None => format!(
+            "[the full output could not be saved; {}]",
+            unsaved_output_recovery_instruction()
+        ),
+    };
+    if full.chars().count() <= budget {
+        return full;
+    }
+    let compact = compact_recovery_footer(recovery_path, retrieval_ref);
+    if compact.chars().count() <= budget {
+        return compact;
+    }
+    compact_recovery_footer(recovery_path, None)
+        .chars()
+        .take(budget)
+        .collect()
 }
 
 /// Fit `content` into `budget` characters for the model: nothing changes when
@@ -760,11 +1023,12 @@ pub(crate) fn fit_to_inline_budget(
     if content.chars().count() <= budget {
         return content.to_string();
     }
-    let footer = preview_footer(
+    let (footer, form) = budgeted_preview_footer(
         content.len(),
         content.lines().count(),
         recovery_path,
         retrieval_ref,
+        budget,
     );
     if footer.len().saturating_add(PREVIEW_FRAME_BYTES) > budget {
         return footer.chars().take(budget).collect();
@@ -778,8 +1042,41 @@ pub(crate) fn fit_to_inline_budget(
         .count();
     format!(
         "{head}\n\n{}\n\n…\n{tail}",
-        preview_footer(omitted, omitted_lines, recovery_path, retrieval_ref)
+        preview_footer_with_form(form, omitted, omitted_lines, recovery_path, retrieval_ref)
     )
+}
+
+/// Add optional framing to an oversized result only when it leaves room for
+/// the complete recovery footer. Both share one budget; the existing preview
+/// keeps its original head/footer/tail order and counts only raw result bytes.
+pub(crate) fn fit_to_inline_budget_with_lead(
+    content: &str,
+    lead: &str,
+    budget: usize,
+    recovery_path: Option<&str>,
+    retrieval_ref: Option<&str>,
+) -> String {
+    let (footer, _) = budgeted_preview_footer(
+        content.len(),
+        content.lines().count(),
+        recovery_path,
+        retrieval_ref,
+        budget,
+    );
+    let lead = if lead.chars().count()
+        <= budget.saturating_sub(footer.len().saturating_add(PREVIEW_FRAME_BYTES))
+    {
+        lead
+    } else {
+        ""
+    };
+    let body = fit_to_inline_budget(
+        content,
+        budget - lead.chars().count(),
+        recovery_path,
+        retrieval_ref,
+    );
+    format!("{lead}{body}")
 }
 
 /// Re-fit a spillover preview (head, footer, tail) to `budget` characters.
@@ -817,11 +1114,12 @@ pub(crate) fn refit_spilled_preview(
     let head_window = &preview[..head_len];
     let tail_window = &preview[preview.len() - tail_len..];
 
-    let footer = preview_footer(
+    let (footer, form) = budgeted_preview_footer(
         original_len,
         field("original_line_count").unwrap_or(0),
         recovery_path,
         retrieval_ref,
+        budget,
     );
     if footer.len().saturating_add(PREVIEW_FRAME_BYTES) > budget {
         return Some(footer.chars().take(budget).collect());
@@ -846,7 +1144,7 @@ pub(crate) fn refit_spilled_preview(
     };
     Some(format!(
         "{head}\n\n{}\n\n…\n{tail}",
-        preview_footer(omitted, omitted_lines, recovery_path, retrieval_ref)
+        preview_footer_with_form(form, omitted, omitted_lines, recovery_path, retrieval_ref)
     ))
 }
 
@@ -929,7 +1227,10 @@ fn apply_adaptive_evidence_inner(
             if existing.digest == proposed_artifact.digest
                 && existing.size_bytes == proposed_artifact.size_bytes
                 && existing.call_id == proposed_artifact.call_id
-                && existing.origin_session == proposed_artifact.origin_session =>
+                && existing.origin_session == proposed_artifact.origin_session
+                && existing.handle == proposed_artifact.handle
+                && !existing.redacted
+                && !crate::tools::large_output_router::evidence_is_expired(&existing, now_ms) =>
         {
             existing
         }
@@ -981,6 +1282,7 @@ fn apply_adaptive_evidence_inner(
         &original,
         &crate::artifacts::format_artifact_relative_path(&absolute_path),
         Some(artifact_id.as_str()),
+        tool_id,
     );
     let metadata = result.metadata.get_or_insert_with(|| serde_json::json!({}));
     if let Some(object) = metadata.as_object_mut() {
@@ -1102,6 +1404,7 @@ mod tests {
             120,
             "/tmp/artifacts/art_call-1.txt",
             Some("art_call-1"),
+            None,
         );
 
         assert!(footer.contains("retrieve_tool_result"), "{footer}");
@@ -1111,16 +1414,22 @@ mod tests {
     }
 
     /// The legacy global copy is authorized by an ownership sidecar published
-    /// at spill time; `retrieve_tool_result` resolves the bare call id or the
-    /// printed path through it. The footer must teach that working route and
+    /// at spill time; typed `retrieve_tool_result` resolves the writer's exact
+    /// call id through it. The footer must teach that working route and
     /// keep the narrower rerun as the fallback.
     #[test]
     fn truncation_footer_without_an_artifact_names_the_legacy_retrieval_route() {
-        let footer = spillover_preview_footer(4096, 120, "/tmp/tool_outputs/call-1.txt", None);
+        let footer = spillover_preview_footer(
+            4096,
+            120,
+            "/tmp/tool_outputs/call-1.txt",
+            None,
+            Some("call-1"),
+        );
 
         assert!(footer.contains("retrieve_tool_result"), "{footer}");
         assert!(
-            footer.contains("this call's id or the spillover path"),
+            footer.contains("ref=\"call-1\", ref_kind=\"tool_call_id\""),
             "{footer}"
         );
         assert!(footer.contains("re-run the command"), "{footer}");
@@ -1138,7 +1447,7 @@ mod tests {
     #[test]
     fn every_footer_variant_carries_the_ui_detection_marker() {
         for reference in [Some("art_call-1"), None] {
-            let footer = spillover_preview_footer(4096, 120, "/tmp/x.txt", reference);
+            let footer = spillover_preview_footer(4096, 120, "/tmp/x.txt", reference, None);
             assert!(footer.contains(SPILLOVER_RECOVERY_HINT), "{footer}");
         }
     }
@@ -1751,7 +2060,8 @@ mod tests {
     #[test]
     fn truncated_preview_returns_content_unchanged_when_nothing_omitted() {
         let original = "line one\nline two\nline three\n";
-        let preview = truncated_preview(original, "", original, "/tmp/artifact.txt", None);
+        let preview =
+            truncated_preview(original, "", original, "/tmp/artifact.txt", None, "call-1");
         assert_eq!(preview, original);
         assert!(
             !preview.contains("of output omitted"),
@@ -1876,6 +2186,31 @@ mod tests {
             "original_byte_count": usize::MAX,
         });
         assert!(refit_spilled_preview(&"x".repeat(4_000), &metadata, 1_000, None, None).is_none());
+    }
+
+    #[test]
+    fn compact_preview_counts_describe_only_the_final_raw_windows() {
+        let raw = format!("BEGIN\n{}END", "row\n".repeat(4000));
+        for saved in [false, true] {
+            let preview = fit_to_inline_budget(
+                &raw,
+                245,
+                saved.then_some("/saved/result.txt"),
+                saved.then_some("art_short"),
+            );
+            assert!(preview.chars().count() <= 245);
+            let (head, rest) = preview.split_once("\n\n").expect("raw head retained");
+            let (footer, tail) = rest.rsplit_once("\n\n…\n").expect("raw tail retained");
+            assert!(raw.starts_with(head) && raw.ends_with(tail));
+            let omitted = &raw[head.len()..raw.len() - tail.len()];
+            let expected = format!(
+                "{} of output omitted ({} lines)",
+                crate::artifacts::format_byte_size(omitted.len() as u64),
+                omitted.lines().count()
+            );
+            assert!(footer.contains(&expected), "{preview}");
+            assert!(!head.is_empty() && !tail.is_empty());
+        }
     }
 
     #[test]

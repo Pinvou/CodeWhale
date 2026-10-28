@@ -46,6 +46,11 @@ impl ToolSpec for RetrieveToolResultTool {
                     "type": "string",
                     "description": "Session-owned artifact id (`art_<id>`) or validated artifact-relative path. Legacy call-id/SHA references work only when origin-session ownership was recorded."
                 },
+                "ref_kind": {
+                    "type": "string",
+                    "enum": ["artifact", "tool_call_id"],
+                    "description": "Defaults to artifact (existing id/path/legacy reference rules). tool_call_id interprets ref as the exact call id supplied to the output writer (use the ref in the recovery hint), using its session artifact writer first and its classic spillover writer on fallback, including ids starting with art_. The returned ref/ref_kind can be reused."
+                },
                 "mode": {
                     "type": "string",
                     "enum": ["metadata", "summary", "head", "tail", "lines", "query", "bytes"],
@@ -112,7 +117,25 @@ impl ToolSpec for RetrieveToolResultTool {
     }
 
     async fn execute(&self, input: Value, context: &ToolContext) -> Result<ToolResult, ToolError> {
-        let reference = required_str(&input, "ref")?.trim();
+        let raw_reference = required_str(&input, "ref")?;
+        if raw_reference.is_empty() {
+            return Err(ToolError::invalid_input("ref cannot be empty"));
+        }
+        let reference_kind = optional_str(&input, "ref_kind")?.unwrap_or("artifact");
+        if !matches!(reference_kind, "artifact" | "tool_call_id") {
+            return Err(ToolError::invalid_input(
+                "ref_kind must be artifact or tool_call_id",
+            ));
+        }
+        // A raw call id is not an artifact handle: it may already start with
+        // art_ or contain characters the writer replaced. Keep the old ref
+        // grammar unchanged and make that interpretation explicit.
+        let call_reference = (reference_kind == "tool_call_id")
+            .then(|| crate::artifacts::artifact_id_for_tool_call(raw_reference));
+        let legacy_call_id = call_reference.as_ref().map(|_| raw_reference);
+        let reference = call_reference
+            .as_deref()
+            .unwrap_or_else(|| raw_reference.trim());
         if reference.is_empty() {
             return Err(ToolError::invalid_input("ref cannot be empty"));
         }
@@ -126,11 +149,13 @@ impl ToolSpec for RetrieveToolResultTool {
             1,
             HARD_MAX_BYTES,
         );
-        let resolved = resolve_spillover_reference(reference, &context.state_namespace)?;
+        let resolved =
+            resolve_spillover_reference(reference, &context.state_namespace, legacy_call_id)?;
         let legacy_ownership = if resolved.kind == ResolvedReferenceKind::LegacyGlobal {
             Some(authorize_legacy_spillover(
                 &resolved.path,
                 &context.state_namespace,
+                legacy_call_id,
             )?)
         } else {
             None
@@ -139,30 +164,54 @@ impl ToolSpec for RetrieveToolResultTool {
             ToolError::execution_failed("evidence is missing or no longer retained")
         })?;
         if let Some(ownership) = legacy_ownership {
-            let size = u64::try_from(bytes.len()).unwrap_or(u64::MAX);
-            if ownership.size_bytes != size
-                || ownership.digest != crate::hashing::sha256_hex(&bytes)
-            {
-                return Err(ToolError::execution_failed(
-                    "legacy evidence content is corrupt",
-                ));
+            validate_owned_spillover_content(&ownership, &bytes)?;
+        }
+        // An exact classic call-id has its own writer namespace. Its origin
+        // and digest were checked above; metadata under the modern normalized
+        // handle can be unrelated (or unavailable with the failed writer).
+        // Existing artifact/path reference metadata rules remain unchanged.
+        let evidence =
+            if resolved.kind == ResolvedReferenceKind::LegacyGlobal && legacy_call_id.is_some() {
+                None
+            } else {
+                validate_evidence_if_present(
+                    reference,
+                    &resolved.path,
+                    &bytes,
+                    &context.state_namespace,
+                    &input,
+                )?
+            };
+        if resolved.kind == ResolvedReferenceKind::ActiveSession
+            && let Some(call_id) = legacy_call_id
+        {
+            if let Some(metadata) = evidence.as_ref() {
+                if metadata.call_id != call_id {
+                    return Err(ToolError::permission_denied(
+                        "evidence belongs to another tool call",
+                    ));
+                }
+            } else {
+                // Classic session artifacts have no adaptive evidence record.
+                // Their own sidecar must bind this copy, not a global alias.
+                let ownership = authorize_legacy_spillover(
+                    &resolved.path,
+                    &context.state_namespace,
+                    Some(call_id),
+                )?;
+                validate_owned_spillover_content(&ownership, &bytes)?;
             }
         }
-        let evidence = validate_evidence_if_present(
-            reference,
-            &resolved.path,
-            &bytes,
-            &context.state_namespace,
-            &input,
-        )?;
         if mode == "metadata" {
-            return ToolResult::json(&json!({
-                "ref": reference,
-                "available": true,
-                "total_bytes": bytes.len(),
-                "evidence": evidence,
-            }))
-            .map_err(|err| ToolError::execution_failed(err.to_string()));
+            return retrieved_result(
+                json!({
+                    "ref": reference,
+                    "available": true,
+                    "total_bytes": bytes.len(),
+                    "evidence": evidence,
+                }),
+                legacy_call_id,
+            );
         }
         if mode == "bytes" {
             use base64::Engine as _;
@@ -175,16 +224,18 @@ impl ToolSpec for RetrieveToolResultTool {
                 .saturating_add(requested.min(max_bytes))
                 .min(bytes.len());
             let slice = bytes.get(offset.min(bytes.len())..end).unwrap_or_default();
-            return ToolResult::json(&json!({
-                "ref": reference,
-                "mode": "bytes",
-                "offset": offset,
-                "returned_bytes": slice.len(),
-                "total_bytes": bytes.len(),
-                "encoding": "base64",
-                "data": base64::engine::general_purpose::STANDARD.encode(slice),
-            }))
-            .map_err(|err| ToolError::execution_failed(err.to_string()));
+            return retrieved_result(
+                json!({
+                    "ref": reference,
+                    "mode": "bytes",
+                    "offset": offset,
+                    "returned_bytes": slice.len(),
+                    "total_bytes": bytes.len(),
+                    "encoding": "base64",
+                    "data": base64::engine::general_purpose::STANDARD.encode(slice),
+                }),
+                legacy_call_id,
+            );
         }
         let content = String::from_utf8(bytes).map_err(|_| {
             ToolError::execution_failed(
@@ -206,10 +257,25 @@ impl ToolSpec for RetrieveToolResultTool {
             }
         };
 
-        ToolResult::json(&payload).map_err(|err| {
-            ToolError::execution_failed(format!("failed to serialize result: {err}"))
-        })
+        retrieved_result(payload, legacy_call_id)
     }
+}
+
+// Replaces execute's three direct serializers so every mode returns the same
+// reusable typed reference. A modern artifact handle cannot name a classic
+// copy whose filename used a different call-id normalization.
+fn retrieved_result(
+    mut payload: Value,
+    raw_call_id: Option<&str>,
+) -> Result<ToolResult, ToolError> {
+    if let Some(raw_call_id) = raw_call_id
+        && let Some(object) = payload.as_object_mut()
+    {
+        object.insert("ref".into(), Value::String(raw_call_id.to_owned()));
+        object.insert("ref_kind".into(), Value::String("tool_call_id".into()));
+    }
+    ToolResult::json(&payload)
+        .map_err(|err| ToolError::execution_failed(format!("failed to serialize result: {err}")))
 }
 
 fn validate_evidence_if_present(
@@ -291,6 +357,7 @@ struct ResolvedSpilloverReference {
 fn authorize_legacy_spillover(
     path: &std::path::Path,
     session_id: &str,
+    call_id: Option<&str>,
 ) -> Result<crate::tools::truncate::LegacySpilloverOwnership, ToolError> {
     if session_id.trim().is_empty() {
         return Err(ToolError::permission_denied(
@@ -320,7 +387,29 @@ fn authorize_legacy_spillover(
             "legacy evidence belongs to another session",
         ));
     }
+    if let Some(call_id) = call_id
+        && ownership.tool_call_id_digest.as_deref()
+            != Some(crate::tools::truncate::tool_call_identity_digest(call_id).as_str())
+    {
+        return Err(ToolError::permission_denied(
+            "evidence has no matching tool-call identity",
+        ));
+    }
     Ok(ownership)
+}
+
+fn validate_owned_spillover_content(
+    ownership: &crate::tools::truncate::LegacySpilloverOwnership,
+    bytes: &[u8],
+) -> Result<(), ToolError> {
+    if ownership.size_bytes != u64::try_from(bytes.len()).unwrap_or(u64::MAX)
+        || ownership.digest != crate::hashing::sha256_hex(bytes)
+    {
+        return Err(ToolError::execution_failed(
+            "legacy evidence content is corrupt",
+        ));
+    }
+    Ok(())
 }
 
 /// Resolve a tool-result ref without weakening its ownership boundary.
@@ -331,6 +420,7 @@ fn authorize_legacy_spillover(
 fn resolve_spillover_reference(
     reference: &str,
     session_id: &str,
+    legacy_call_id: Option<&str>,
 ) -> Result<ResolvedSpilloverReference, ToolError> {
     let root = crate::tools::truncate::spillover_root()
         .ok_or_else(|| ToolError::execution_failed("retained evidence storage is unavailable"))?;
@@ -434,7 +524,7 @@ fn resolve_spillover_reference(
         if let Some(found) = try_path(root.join(stripped), &mut tried) {
             return Ok(found);
         }
-        return Err(not_found(reference, tried));
+        return Err(not_found(reference, tried, legacy_call_id));
     }
 
     if let Some(sa_root) = session_artifacts_root.as_ref() {
@@ -446,6 +536,18 @@ fn resolve_spillover_reference(
         if let Some(found) = try_path(sa_root.join(file_name), &mut tried) {
             return Ok(found);
         }
+    }
+
+    if let Some(raw_call_id) = legacy_call_id {
+        // Classic spillover drops unsupported characters; the session writer
+        // replaces them. Resolve the exact original id through that writer,
+        // never through modern aliases or the default artifact grammar.
+        if let Some(path) = crate::tools::truncate::spillover_path(raw_call_id)
+            && let Some(found) = try_path(path, &mut tried)
+        {
+            return Ok(found);
+        }
+        return Err(not_found(reference, tried, legacy_call_id));
     }
 
     // `sha:<hex>` or bare 64-hex resolves only as legacy-global evidence and
@@ -476,12 +578,19 @@ fn resolve_spillover_reference(
         return Ok(found);
     }
 
-    Err(not_found(reference, tried))
+    Err(not_found(reference, tried, legacy_call_id))
 }
 
 /// Missing evidence is distinct without revealing storage roots or generated
 /// session identifiers to the model.
-fn not_found(reference: &str, tried: usize) -> ToolError {
+fn not_found(reference: &str, tried: usize, raw_call_id: Option<&str>) -> ToolError {
+    if let Some(call_id) = raw_call_id {
+        return ToolError::execution_failed(format!(
+            "retained evidence for tool call {call_id:?} was not found for the active session \
+             ({tried} bounded candidate forms checked). Retry with the exact ref from the \
+             original recovery hint and ref_kind=\"tool_call_id\"."
+        ));
+    }
     ToolError::execution_failed(format!(
         "retained evidence `{reference}` was not found for the active session \
          ({tried} bounded candidate forms checked). Use the session-owned \
@@ -846,6 +955,22 @@ mod tests {
         bytes: &[u8],
         expired: bool,
     ) -> crate::tools::large_output_router::EvidenceArtifact {
+        publish_test_evidence_for_call(
+            session_id,
+            handle,
+            handle.trim_start_matches("art_"),
+            bytes,
+            expired,
+        )
+    }
+
+    fn publish_test_evidence_for_call(
+        session_id: &str,
+        handle: &str,
+        call_id: &str,
+        bytes: &[u8],
+        expired: bool,
+    ) -> crate::tools::large_output_router::EvidenceArtifact {
         let relative = crate::artifacts::session_artifact_relative_path(handle);
         crate::artifacts::write_session_relative_immutable(session_id, &relative, bytes).unwrap();
         let now = crate::tools::large_output_router::unix_millis_now();
@@ -855,7 +980,7 @@ mod tests {
             size_bytes: bytes.len() as u64,
             content_type: "application/octet-stream".to_string(),
             tool_name: "exec_shell".to_string(),
-            call_id: handle.trim_start_matches("art_").to_string(),
+            call_id: call_id.to_string(),
             origin_session: session_id.to_string(),
             generation: 1,
             redacted: false,
@@ -876,9 +1001,10 @@ mod tests {
 
     fn write_owned_legacy(id: &str, content: &str, session_id: &str) -> PathBuf {
         let path = crate::tools::truncate::write_spillover(id, content).unwrap();
-        crate::tools::truncate::publish_legacy_spillover_ownership(
+        crate::tools::truncate::publish_spillover_ownership_for_call(
             &path,
             session_id,
+            id,
             content.as_bytes(),
         )
         .unwrap();
@@ -895,6 +1021,256 @@ mod tests {
         )
         .unwrap();
         (sha, path)
+    }
+
+    #[test]
+    fn typed_art_prefixed_call_ids_do_not_alias_default_artifact_handles() {
+        let _spill = test_lock();
+        let _artifacts = crate::artifacts::TEST_ARTIFACT_SESSIONS_GUARD
+            .lock()
+            .unwrap_or_else(|err| err.into_inner());
+        let tmp = tempdir().unwrap();
+        let _root = set_spillover_root(tmp.path().join("tool_outputs"));
+        let _restore = scopeguard_for_test(crate::artifacts::set_test_artifact_sessions_root(
+            Some(tmp.path().join("sessions")),
+        ));
+        let raw_call_id = "art_prefixed_call";
+        let handle = crate::artifacts::artifact_id_for_tool_call(raw_call_id);
+        for storage in ["adaptive", "classic-session", "classic-global"] {
+            let session = format!("typed-prefix-{storage}");
+            publish_test_evidence_for_call(
+                &session,
+                raw_call_id,
+                "prefixed_call",
+                b"DEFAULT ARTIFACT",
+                false,
+            );
+            match storage {
+                "adaptive" => {
+                    publish_test_evidence_for_call(
+                        &session,
+                        &handle,
+                        raw_call_id,
+                        b"EXACT TYPED CALL",
+                        false,
+                    );
+                }
+                "classic-session" => {
+                    let (path, _) = crate::artifacts::write_session_artifact(
+                        &session,
+                        &handle,
+                        "EXACT TYPED CALL",
+                    )
+                    .unwrap();
+                    crate::tools::truncate::publish_spillover_ownership_for_call(
+                        &path,
+                        &session,
+                        raw_call_id,
+                        b"EXACT TYPED CALL",
+                    )
+                    .unwrap();
+                }
+                _ => {
+                    write_owned_legacy(raw_call_id, "EXACT TYPED CALL", &session);
+                }
+            }
+            let default = execute_tool_in_session(json!({"ref":raw_call_id}), &session).unwrap();
+            assert!(default.content.contains("DEFAULT ARTIFACT"), "{storage}");
+            let typed = execute_tool_in_session(
+                json!({"ref":raw_call_id,"ref_kind":"tool_call_id"}),
+                &session,
+            )
+            .unwrap();
+            let typed: Value = serde_json::from_str(&typed.content).unwrap();
+            assert!(typed.to_string().contains("EXACT TYPED CALL"), "{storage}");
+            assert!(!typed.to_string().contains("DEFAULT ARTIFACT"), "{storage}");
+            assert_eq!(typed["ref"], raw_call_id);
+            assert_eq!(typed["ref_kind"], "tool_call_id");
+            let reused = execute_tool_in_session(
+                json!({"ref":typed["ref"],"ref_kind":typed["ref_kind"],"mode":"metadata"}),
+                &session,
+            )
+            .unwrap();
+            assert!(reused.content.contains("available"));
+        }
+    }
+
+    #[test]
+    fn typed_missing_evidence_preserves_the_raw_call_namespace_in_recovery_advice() {
+        let _spill = test_lock();
+        let _artifacts = crate::artifacts::TEST_ARTIFACT_SESSIONS_GUARD
+            .lock()
+            .unwrap_or_else(|err| err.into_inner());
+        let tmp = tempdir().unwrap();
+        let _root = set_spillover_root(tmp.path().join("tool_outputs"));
+        let _restore = scopeguard_for_test(crate::artifacts::set_test_artifact_sessions_root(
+            Some(tmp.path().join("sessions")),
+        ));
+        let error = execute_tool_in_session(
+            json!({"ref":"art_missing.call","ref_kind":"tool_call_id"}),
+            "missing-typed-call-owner",
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(error.contains("art_missing.call"), "{error}");
+        assert!(error.contains("ref_kind=\"tool_call_id\""), "{error}");
+        assert!(!error.contains("art_art_missing_call"), "{error}");
+        assert!(!error.contains("session-owned `art_<id>`"), "{error}");
+    }
+
+    #[test]
+    fn typed_call_id_keeps_exact_legacy_namespace_and_session_artifact_priority() {
+        let _spill = test_lock();
+        let _artifacts = crate::artifacts::TEST_ARTIFACT_SESSIONS_GUARD
+            .lock()
+            .unwrap_or_else(|err| err.into_inner());
+        let tmp = tempdir().unwrap();
+        let _root = set_spillover_root(tmp.path().join("tool_outputs"));
+        let _restore = scopeguard_for_test(crate::artifacts::set_test_artifact_sessions_root(
+            Some(tmp.path().join("sessions")),
+        ));
+        let session = "typed-classic-owner";
+        write_owned_legacy("call_legacy", "WRONG NORMALIZED ALIAS", session);
+        let input = json!({"ref":"call.legacy","ref_kind":"tool_call_id","mode":"tail"});
+        let missing = execute_tool_in_session(input.clone(), session)
+            .unwrap_err()
+            .to_string();
+        assert!(missing.contains("not found"), "{missing}");
+        write_owned_legacy("call.legacy", "EXACT CLASSIC END", session);
+        let legacy = execute_tool_in_session(input.clone(), session).unwrap();
+        assert!(legacy.content.contains("EXACT CLASSIC END"));
+        assert!(!legacy.content.contains("WRONG"));
+        // A current session artifact still wins over the exact classic copy,
+        // and its metadata generation checks cannot fall back after failure.
+        let handle = crate::artifacts::artifact_id_for_tool_call("call.legacy");
+        publish_test_evidence_for_call(
+            session,
+            &handle,
+            "call.legacy",
+            b"CURRENT SESSION END",
+            false,
+        );
+        let current = execute_tool_in_session(input, session).unwrap();
+        let current: Value = serde_json::from_str(&current.content).unwrap();
+        assert!(current.to_string().contains("CURRENT SESSION END"));
+        assert!(!current.to_string().contains("EXACT CLASSIC"));
+        assert_eq!(current["ref"], "call.legacy");
+        assert_eq!(current["ref_kind"], "tool_call_id");
+        let mismatch = execute_tool_in_session(
+            json!({"ref":current["ref"],"ref_kind":current["ref_kind"],"generation":2}),
+            session,
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(mismatch.contains("generation"), "{mismatch}");
+        let next = execute_tool_in_session(
+            json!({"ref":current["ref"],"ref_kind":current["ref_kind"],"mode":"metadata"}),
+            session,
+        )
+        .unwrap();
+        assert!(next.content.contains("available"));
+    }
+
+    #[test]
+    fn typed_call_identity_is_checked_for_every_mode_and_storage_kind() {
+        let _spill = test_lock();
+        let _artifacts = crate::artifacts::TEST_ARTIFACT_SESSIONS_GUARD
+            .lock()
+            .unwrap_or_else(|err| err.into_inner());
+        let tmp = tempdir().unwrap();
+        let _root = set_spillover_root(tmp.path().join("tool_outputs"));
+        let _restore = scopeguard_for_test(crate::artifacts::set_test_artifact_sessions_root(
+            Some(tmp.path().join("sessions")),
+        ));
+        let owner_id = "call.legacy";
+        let handle = crate::artifacts::artifact_id_for_tool_call(owner_id);
+        for storage in ["global", "classic-session", "adaptive-session"] {
+            let session = format!("bound-{storage}");
+            let other_id = if storage == "global" {
+                "calllegacy"
+            } else {
+                "call_legacy"
+            };
+            match storage {
+                "global" => {
+                    write_owned_legacy(owner_id, "NEW\nEND", &session);
+                }
+                "classic-session" => {
+                    let (path, _) =
+                        crate::artifacts::write_session_artifact(&session, &handle, "NEW\nEND")
+                            .unwrap();
+                    crate::tools::truncate::publish_spillover_ownership_for_call(
+                        &path,
+                        &session,
+                        owner_id,
+                        b"NEW\nEND",
+                    )
+                    .unwrap();
+                }
+                _ => {
+                    publish_test_evidence_for_call(&session, &handle, owner_id, b"NEW\nEND", false);
+                }
+            }
+            for mode in [
+                "metadata", "bytes", "summary", "head", "tail", "lines", "query",
+            ] {
+                let wrong = execute_tool_in_session(
+                    json!({"ref":other_id,"ref_kind":"tool_call_id","mode":mode,"query":"NEW","lines":"1-2"}),
+                    &session,
+                )
+                .unwrap_err()
+                .to_string();
+                assert!(
+                    wrong.contains("tool-call identity") || wrong.contains("another tool call"),
+                    "{storage}/{mode}: {wrong}"
+                );
+                let next = execute_tool_in_session(
+                    json!({"ref":owner_id,"ref_kind":"tool_call_id","mode":mode,"query":"NEW","lines":"1-2"}),
+                    &session,
+                )
+                .unwrap();
+                let value: Value = serde_json::from_str(&next.content).unwrap();
+                assert_eq!(value["ref"], owner_id, "{storage}/{mode}");
+                assert_eq!(value["ref_kind"], "tool_call_id", "{storage}/{mode}");
+            }
+        }
+    }
+
+    #[test]
+    fn typed_call_requires_binding_while_default_legacy_reference_keeps_its_contract() {
+        let _spill = test_lock();
+        let _artifacts = crate::artifacts::TEST_ARTIFACT_SESSIONS_GUARD
+            .lock()
+            .unwrap_or_else(|err| err.into_inner());
+        let tmp = tempdir().unwrap();
+        let _root = set_spillover_root(tmp.path().join("tool_outputs"));
+        let _restore = scopeguard_for_test(crate::artifacts::set_test_artifact_sessions_root(
+            Some(tmp.path().join("sessions")),
+        ));
+        let session = "unbound-classic";
+        let path = crate::tools::truncate::write_spillover("call-unbound", "NEW END").unwrap();
+        crate::tools::truncate::publish_legacy_spillover_ownership(&path, session, b"NEW END")
+            .unwrap();
+        let error = execute_tool_in_session(
+            json!({"ref":"call-unbound","ref_kind":"tool_call_id"}),
+            session,
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(error.contains("tool-call identity"), "{error}");
+        let default = execute_tool_in_session(json!({"ref":"call-unbound"}), session).unwrap();
+        assert!(default.content.contains("NEW END"));
+        let handle = crate::artifacts::artifact_id_for_tool_call("call-session-unbound");
+        crate::artifacts::write_session_artifact(session, &handle, "NEW SESSION END").unwrap();
+        let error = execute_tool_in_session(
+            json!({"ref":"call-session-unbound","ref_kind":"tool_call_id"}),
+            session,
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(error.contains("no verifiable session owner"), "{error}");
+        let default = execute_tool_in_session(json!({"ref":handle}), session).unwrap();
+        assert!(default.content.contains("NEW SESSION END"));
     }
 
     #[test]

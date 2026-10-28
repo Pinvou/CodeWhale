@@ -367,7 +367,19 @@ pub fn classic_output_routing_enabled() -> bool {
 
 #[must_use]
 pub fn evidence_metadata_relative_path(handle: &str) -> PathBuf {
-    PathBuf::from(crate::artifacts::ARTIFACTS_DIR_NAME).join(format!("{handle}.evidence.json"))
+    let ordinary = format!("{handle}.evidence.json");
+    let name = if ordinary.len() > 255 {
+        // A valid payload component can be shorter than its metadata suffix.
+        // Both publisher and reader use this bounded name; short names retain
+        // their existing location and metadata errors still fail closed.
+        format!(
+            "evidence-{}.json",
+            crate::hashing::sha256_hex(handle.as_bytes())
+        )
+    } else {
+        ordinary
+    };
+    PathBuf::from(crate::artifacts::ARTIFACTS_DIR_NAME).join(name)
 }
 
 pub fn publish_evidence_metadata(

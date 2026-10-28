@@ -3349,6 +3349,9 @@ pub struct SubAgentManager {
     /// Follow-ups handed to a running child's live input channel that the
     /// child has not yet taken at a round boundary. Read by the rail rows.
     pending_follow_ups: HashMap<String, Arc<std::sync::atomic::AtomicUsize>>,
+    /// Close a test receiver after an exact successful send, without scheduler races.
+    #[cfg(test)]
+    followup_delivery_hook: Option<Box<dyn Fn(usize) + Send + Sync>>,
     /// Test/observability: agent ids that received a live wake via followup.
     woken_agents: HashMap<String, bool>,
     /// Test/observability: the workspace root set each spawned child was
@@ -3483,6 +3486,8 @@ impl SubAgentManager {
             last_cleanup_at: None,
             queued_mail: HashMap::new(),
             pending_follow_ups: HashMap::new(),
+            #[cfg(test)]
+            followup_delivery_hook: None,
             woken_agents: HashMap::new(),
             #[cfg(test)]
             spawned_workspace_roots: HashMap::new(),
@@ -5469,6 +5474,11 @@ impl SubAgentManager {
 
     pub fn cancel_agent(&mut self, agent_ref: &str) -> Result<SubAgentResult> {
         let agent_id = self.resolve_agent_ref(agent_ref)?;
+        self.cancel_agent_by_id(&agent_id)
+    }
+
+    fn cancel_agent_by_id(&mut self, agent_id: &str) -> Result<SubAgentResult> {
+        let agent_id = agent_id.to_owned();
         let mut terminal = {
             let agent = self
                 .agents
@@ -5496,7 +5506,7 @@ impl SubAgentManager {
         // Resolution and mutation share this manager write borrow, so an alias
         // cannot be rebound between the owner check and the exact-id action.
         let agent_id = self.resolve_agent_ref_for_session(active_session_id, agent_ref)?;
-        self.cancel_agent(&agent_id)
+        self.cancel_agent_by_id(&agent_id)
     }
 
     /// Cancel all running children owned by one engine session.
@@ -5512,7 +5522,7 @@ impl SubAgentManager {
             .collect::<Vec<_>>();
         running
             .into_iter()
-            .filter(|id| self.cancel_agent(id).is_ok())
+            .filter(|id| self.cancel_agent_by_id(id).is_ok())
             .count()
     }
 
@@ -5524,6 +5534,16 @@ impl SubAgentManager {
         wake: bool,
     ) -> Result<ParentMailReceipt> {
         let agent_id = self.resolve_agent_ref(agent_ref)?;
+        self.queue_parent_message_by_id(&agent_id, text, wake)
+    }
+
+    fn queue_parent_message_by_id(
+        &mut self,
+        agent_id: &str,
+        text: String,
+        wake: bool,
+    ) -> Result<ParentMailReceipt> {
+        let agent_id = agent_id.to_owned();
         let status = self
             .agents
             .get(&agent_id)
@@ -5557,6 +5577,15 @@ impl SubAgentManager {
         text: String,
     ) -> Result<ParentMailReceipt> {
         let agent_id = self.resolve_agent_ref(agent_ref)?;
+        self.queue_running_parent_message_by_id(&agent_id, text)
+    }
+
+    fn queue_running_parent_message_by_id(
+        &mut self,
+        agent_id: &str,
+        text: String,
+    ) -> Result<ParentMailReceipt> {
+        let agent_id = agent_id.to_owned();
         let status = self
             .agents
             .get(&agent_id)
@@ -5568,7 +5597,7 @@ impl SubAgentManager {
                 subagent_status_name(&status)
             ));
         }
-        self.queue_parent_message(&agent_id, text, false)
+        self.queue_parent_message_by_id(&agent_id, text, false)
     }
 
     pub(crate) fn queue_running_parent_message_for_session(
@@ -5578,12 +5607,17 @@ impl SubAgentManager {
         text: String,
     ) -> Result<ParentMailReceipt> {
         let agent_id = self.resolve_agent_ref_for_session(active_session_id, agent_ref)?;
-        self.queue_running_parent_message(&agent_id, text)
+        self.queue_running_parent_message_by_id(&agent_id, text)
     }
 
     /// Queue mail and attempt a live wake (`agents/followup`).
     pub fn followup_child(&mut self, agent_ref: &str, text: String) -> Result<ParentMailReceipt> {
         let agent_id = self.resolve_agent_ref(agent_ref)?;
+        self.followup_child_by_id(&agent_id, text)
+    }
+
+    fn followup_child_by_id(&mut self, agent_id: &str, text: String) -> Result<ParentMailReceipt> {
+        let agent_id = agent_id.to_owned();
         let status = self
             .agents
             .get(&agent_id)
@@ -5601,7 +5635,7 @@ impl SubAgentManager {
                 subagent_status_name(&status)
             ));
         }
-        let mut receipt = self.queue_parent_message(&agent_id, text.clone(), true)?;
+        let mut receipt = self.queue_parent_message_by_id(&agent_id, text.clone(), true)?;
         let has_input_tx = self
             .agents
             .get(&agent_id)
@@ -5637,6 +5671,10 @@ impl SubAgentManager {
                             .is_ok()
                         {
                             delivered = delivered.saturating_add(1);
+                            #[cfg(test)]
+                            if let Some(hook) = &self.followup_delivery_hook {
+                                hook(delivered);
+                            }
                         } else {
                             counter.fetch_sub(1, std::sync::atomic::Ordering::AcqRel);
                             undelivered.push_back(mail);
@@ -5667,14 +5705,15 @@ impl SubAgentManager {
                 } else {
                     "queued; running child's live input channel is closed".to_string()
                 };
-                if receipt.woke
-                    && let Some(record) = self.worker_records.get_mut(&agent_id)
-                {
+                if let Some(record) = self.worker_records.get_mut(&agent_id) {
+                    // The current message is last in this FIFO batch. Waking
+                    // an older message does not mean this message was sent.
+                    let current_delivered = receipt.woke && receipt.queue_depth == 0;
                     record.follow_up.latest_delivery = Some(AgentRunFollowUpDelivery {
-                        delivered: true,
+                        delivered: current_delivered,
                         timestamp_ms: epoch_millis_now(),
                         message_preview: Some(truncate_preview(&text, 120)),
-                        reason: None,
+                        reason: (!current_delivered).then(|| receipt.note.clone()),
                         interrupt: false,
                         continued_from_checkpoint: false,
                     });
@@ -5732,7 +5771,7 @@ impl SubAgentManager {
         text: String,
     ) -> Result<ParentMailReceipt> {
         let agent_id = self.resolve_agent_ref_for_session(active_session_id, agent_ref)?;
-        self.followup_child(&agent_id, text)
+        self.followup_child_by_id(&agent_id, text)
     }
 
     /// Resume an `interrupted_continuable` child by re-dispatching a fresh
@@ -5748,6 +5787,7 @@ impl SubAgentManager {
     /// Callers must hold the manager write lock (same contract as
     /// `spawn_background_with_assignment_options`); `manager_handle` is passed
     /// through to the spawn machinery, which takes no further lock.
+    #[cfg(test)]
     pub(crate) fn resume_from_checkpoint(
         &mut self,
         manager_handle: SharedSubAgentManager,
@@ -5755,13 +5795,15 @@ impl SubAgentManager {
         agent_ref: &str,
         followup_text: &str,
     ) -> Result<SubAgentResult> {
-        self.resume_from_checkpoint_with_policy(
+        let agent_id = self.resolve_agent_ref(agent_ref)?;
+        let receipt = self.resume_from_checkpoint_with_policy_by_id(
             manager_handle,
             runtime,
-            agent_ref,
+            &agent_id,
             followup_text,
             ResumePolicy::InterruptedOnly,
-        )
+        )?;
+        self.get_result(&receipt.agent_id)
     }
 
     pub(crate) fn resume_from_checkpoint_for_session(
@@ -5771,9 +5813,15 @@ impl SubAgentManager {
         runtime: SubAgentRuntime,
         agent_ref: &str,
         followup_text: &str,
-    ) -> Result<SubAgentResult> {
+    ) -> Result<ParentMailReceipt> {
         let agent_id = self.resolve_agent_ref_for_session(active_session_id, agent_ref)?;
-        self.resume_from_checkpoint(manager_handle, runtime, &agent_id, followup_text)
+        self.resume_from_checkpoint_with_policy_by_id(
+            manager_handle,
+            runtime,
+            &agent_id,
+            followup_text,
+            ResumePolicy::InterruptedOnly,
+        )
     }
 
     /// Continue a child on its own fork from the user's side of the shell.
@@ -5784,6 +5832,7 @@ impl SubAgentManager {
     /// from that checkpoint under a new agent id (the terminal record stays an
     /// immutable receipt and `resume_targets` links the fork). Failed,
     /// cancelled, and budget-exhausted children cannot be continued.
+    #[cfg(test)]
     pub(crate) fn continue_child_from_user(
         &mut self,
         manager_handle: SharedSubAgentManager,
@@ -5792,6 +5841,17 @@ impl SubAgentManager {
         text: &str,
     ) -> Result<UserFollowUpOutcome> {
         let agent_id = self.resolve_agent_ref(agent_ref)?;
+        self.continue_child_from_user_by_id(manager_handle, runtime, &agent_id, text)
+    }
+
+    fn continue_child_from_user_by_id(
+        &mut self,
+        manager_handle: SharedSubAgentManager,
+        runtime: Option<SubAgentRuntime>,
+        agent_id: &str,
+        text: &str,
+    ) -> Result<UserFollowUpOutcome> {
+        let agent_id = agent_id.to_owned();
         let status = self
             .agents
             .get(&agent_id)
@@ -5799,11 +5859,11 @@ impl SubAgentManager {
             .ok_or_else(|| anyhow!("Agent {agent_id} not found"))?;
         match status {
             SubAgentStatus::Running => {
-                let receipt = self.followup_child(&agent_id, text.to_string())?;
+                let receipt = self.followup_child_by_id(&agent_id, text.to_string())?;
                 Ok(UserFollowUpOutcome {
                     agent_id: agent_id.clone(),
                     target_agent_id: agent_id,
-                    delivered: receipt.woke,
+                    delivered: receipt.woke && receipt.queue_depth == 0,
                     resumed: false,
                     note: receipt.note,
                 })
@@ -5814,7 +5874,7 @@ impl SubAgentManager {
                         "Cannot continue agent {agent_id}: no runtime is available to resume it"
                     ));
                 };
-                let resumed = self.resume_from_checkpoint_with_policy(
+                let resumed = self.resume_from_checkpoint_with_policy_by_id(
                     manager_handle,
                     runtime,
                     &agent_id,
@@ -5824,9 +5884,9 @@ impl SubAgentManager {
                 let target = resumed.agent_id.clone();
                 Ok(UserFollowUpOutcome {
                     agent_id,
-                    delivered: true,
-                    resumed: true,
-                    note: format!("continued from checkpoint as {target}"),
+                    delivered: resumed.woke && resumed.queue_depth == 0,
+                    resumed: resumed.continued_from_checkpoint,
+                    note: resumed.note,
                     target_agent_id: target,
                 })
             }
@@ -5846,27 +5906,27 @@ impl SubAgentManager {
         text: &str,
     ) -> Result<UserFollowUpOutcome> {
         let agent_id = self.resolve_agent_ref_for_session(active_session_id, agent_ref)?;
-        self.continue_child_from_user(manager_handle, runtime, &agent_id, text)
+        self.continue_child_from_user_by_id(manager_handle, runtime, &agent_id, text)
     }
 
-    fn resume_from_checkpoint_with_policy(
+    fn resume_from_checkpoint_with_policy_by_id(
         &mut self,
         manager_handle: SharedSubAgentManager,
         runtime: SubAgentRuntime,
-        agent_ref: &str,
+        agent_id: &str,
         followup_text: &str,
         policy: ResumePolicy,
-    ) -> Result<SubAgentResult> {
-        let agent_id = self.resolve_agent_ref(agent_ref)?;
+    ) -> Result<ParentMailReceipt> {
+        let agent_id = agent_id.to_owned();
         // Idempotency: a second resume on the same interrupted id returns the
         // already-resumed target instead of spawning a duplicate agent loop
         // that would concurrently write the same workspace.
         if let Some(existing) = self.resume_targets.get(&agent_id).cloned() {
-            // Forward the follow-up to the already-resumed target (best
-            // effort; a terminal target simply cannot receive it) so a
-            // retried followup is never silently dropped.
-            let _ = self.followup_child(&existing, followup_text.to_string());
-            return self.get_result(&existing);
+            // Keep the existing target identity; terminal/pruned delivery fails
+            // instead of starting a duplicate or returning a false wake receipt.
+            let mut receipt = self.followup_child_by_id(&existing, followup_text.to_string())?;
+            receipt.note = format!("existing checkpoint target {existing}; {}", receipt.note);
+            return Ok(receipt);
         }
         let (
             agent_type,
@@ -6027,9 +6087,20 @@ impl SubAgentManager {
             allowed_tools,
             options,
         )?;
-        self.resume_targets
-            .insert(agent_id, resumed.agent_id.clone());
-        Ok(resumed)
+        let receipt = ParentMailReceipt {
+            agent_id: resumed.agent_id.clone(),
+            status: subagent_status_name(&resumed.status).to_string(),
+            queue_depth: 0,
+            woke: true,
+            continued_from_checkpoint: true,
+            continuation_handle: None,
+            note: format!(
+                "resumed from checkpoint as new agent {} ({}); prior terminal record {} stays intact",
+                resumed.agent_id, resumed.model, agent_id
+            ),
+        };
+        self.resume_targets.insert(agent_id, resumed.agent_id);
+        Ok(receipt)
     }
 
     /// Interrupt a child, preserve checkpoint, fail closed on root/self.
@@ -6045,9 +6116,23 @@ impl SubAgentManager {
             ));
         }
         let agent_id = self.resolve_agent_ref(agent_ref)?;
-        self.ensure_caller_controls_descendant(&agent_id, caller_agent_id, "agents/interrupt")?;
+        self.interrupt_child_by_id(&agent_id, caller_agent_id, reason)
+    }
 
-        let prior = self.get_result_by_ref(&agent_id)?;
+    fn interrupt_child_by_id(
+        &mut self,
+        agent_id: &str,
+        caller_agent_id: Option<&str>,
+        reason: String,
+    ) -> Result<(SubAgentResult, SubAgentResult)> {
+        let agent_id = agent_id.to_owned();
+        self.ensure_caller_controls_descendant_by_id(
+            &agent_id,
+            caller_agent_id,
+            "agents/interrupt",
+        )?;
+
+        let prior = self.get_result(&agent_id)?;
         if prior.status != SubAgentStatus::Running
             || self
                 .agents
@@ -6089,8 +6174,13 @@ impl SubAgentManager {
         caller_agent_id: Option<&str>,
         reason: String,
     ) -> Result<(SubAgentResult, SubAgentResult)> {
-        let agent_id = self.resolve_agent_ref_for_session(active_session_id, agent_ref)?;
-        self.interrupt_child(&agent_id, caller_agent_id, reason)
+        let agent_id = self.ensure_caller_controls_descendant_for_session(
+            active_session_id,
+            agent_ref,
+            caller_agent_id,
+            "agents/interrupt",
+        )?;
+        self.interrupt_child_by_id(&agent_id, caller_agent_id, reason)
     }
 
     /// Follow-ups per running child that were handed to its live input
@@ -6150,7 +6240,16 @@ impl SubAgentManager {
         recent_limit: usize,
     ) -> Result<AgentCoordSummary> {
         let agent_id = self.resolve_agent_ref(agent_ref)?;
-        let snap = self.get_result_by_ref(&agent_id)?;
+        self.coordination_summary_for_id(&agent_id, recent_limit)
+    }
+
+    fn coordination_summary_for_id(
+        &self,
+        agent_id: &str,
+        recent_limit: usize,
+    ) -> Result<AgentCoordSummary> {
+        let agent_id = agent_id.to_owned();
+        let snap = self.get_result(&agent_id)?;
         let record = self.worker_records.get(&agent_id);
         let recent_progress = record
             .map(|r| {
@@ -6214,7 +6313,7 @@ impl SubAgentManager {
         recent_limit: usize,
     ) -> Result<AgentCoordSummary> {
         let agent_id = self.resolve_agent_ref_for_session(active_session_id, agent_ref)?;
-        self.coordination_summary_for(&agent_id, recent_limit)
+        self.coordination_summary_for_id(&agent_id, recent_limit)
     }
 
     #[allow(dead_code)] // coord list/wait surfaces; wired when agents/list hosts go live
@@ -6886,11 +6985,24 @@ impl SubAgentManager {
         self.get_result(&agent_id)
     }
 
+    /// Observe a fixed issued identity; disappearance is never name reuse.
+    pub(crate) fn get_result_for_session(
+        &self,
+        active_session_id: &str,
+        agent_id: &str,
+    ) -> Result<SubAgentResult> {
+        if !self.agent_id_is_owned_by_session(agent_id, active_session_id) {
+            return Err(anyhow!("Agent not found in the active session"));
+        }
+        self.get_result(agent_id)
+    }
+
     /// Get an agent snapshot only when it belongs to the active root session.
     ///
     /// The error deliberately does not distinguish a foreign agent from a
     /// missing one. User- and model-facing callers must not gain an existence
     /// oracle for another conversation by guessing a durable id or name.
+    #[cfg(test)]
     pub(crate) fn get_result_by_ref_for_session(
         &self,
         active_session_id: &str,
@@ -7001,6 +7113,34 @@ impl SubAgentManager {
         active_session_id: Option<&str>,
     ) -> Result<String> {
         let agent_ref = agent_ref.trim();
+        if let Some(agent) = self.agents.get(agent_ref) {
+            return if active_session_id
+                .is_none_or(|session_id| self.agent_is_owned_by_session(agent, session_id))
+            {
+                Ok(agent.id.clone())
+            } else {
+                Err(anyhow!("Agent session {agent_ref} not found"))
+            };
+        }
+        // Production-issued SubAgent IDs have exactly eight hex digits. Retained
+        // worker/resume identities are also exact, even if loaded from history.
+        // Explicit name selectors still permit id-shaped names.
+        if agent_ref.strip_prefix("agent_").is_some_and(|suffix| {
+            suffix.len() == 8 && suffix.bytes().all(|byte| byte.is_ascii_hexdigit())
+        }) || self.worker_records.contains_key(agent_ref)
+            || self.resume_targets.contains_key(agent_ref)
+        {
+            return Err(anyhow!("Agent session {agent_ref} not found"));
+        }
+        self.resolve_agent_name_inner(agent_ref, active_session_id)
+    }
+
+    fn resolve_agent_name_inner(
+        &self,
+        agent_ref: &str,
+        active_session_id: Option<&str>,
+    ) -> Result<String> {
+        let agent_ref = agent_ref.trim();
         let matches = self
             .agents
             .values()
@@ -7034,20 +7174,6 @@ impl SubAgentManager {
             _ => {}
         }
 
-        // The exact-id fast path only applies when the ref is not any
-        // child's session name: `validate_session_name` accepts id-shaped
-        // names and an unnamed child takes `session_name = id`, so an id
-        // string that is also a name must follow the name rules above — a
-        // settled record must not shadow the child that name now means,
-        // live or newest-settled. A ref that names no child still reaches
-        // its own record by id (a named child stays reachable by its id).
-        if matches.is_empty()
-            && let Some(agent) = self.agents.get(agent_ref)
-            && active_session_id
-                .is_none_or(|session_id| self.agent_is_owned_by_session(agent, session_id))
-        {
-            return Ok(agent.id.clone());
-        }
         matches
             .iter()
             .max_by_key(|agent| agent.started_at)
@@ -7070,13 +7196,13 @@ impl SubAgentManager {
     /// (or the literal `root`) and retain authority over every child. This
     /// prevents a child from messaging, waking, or interrupting a sibling or
     /// ancestor and then claiming the ownership that target released.
-    pub(super) fn ensure_caller_controls_descendant(
+    fn ensure_caller_controls_descendant_by_id(
         &self,
-        agent_ref: &str,
+        agent_id: &str,
         caller_agent_id: Option<&str>,
         action: &str,
     ) -> Result<String> {
-        let agent_id = self.resolve_agent_ref(agent_ref)?;
+        let agent_id = agent_id.to_owned();
         let Some(caller) = caller_agent_id
             .map(str::trim)
             .filter(|caller| !caller.is_empty() && *caller != "root")
@@ -7131,9 +7257,11 @@ impl SubAgentManager {
             .map(str::trim)
             .filter(|caller| !caller.is_empty() && *caller != "root")
         {
-            self.resolve_agent_ref_for_session(active_session_id, caller)?;
+            if !self.agent_id_is_owned_by_session(caller, active_session_id) {
+                return Err(anyhow!("Agent not found in the active session"));
+            }
         }
-        self.ensure_caller_controls_descendant(&agent_id, caller_agent_id, action)
+        self.ensure_caller_controls_descendant_by_id(&agent_id, caller_agent_id, action)
     }
 
     /// List all agents and their status.
@@ -8483,13 +8611,39 @@ fn agent_claim_coordinate_input(input: &Value) -> Result<Value, ToolError> {
     }))
 }
 
-fn parse_agent_ref(input: &Value) -> Result<Option<String>, ToolError> {
-    Ok(
-        optional_input_str(input, &["agent_id", "id", "session_name", "name"])?
-            .map(str::trim)
-            .filter(|value| !value.is_empty())
-            .map(str::to_string),
-    )
+/// Keep selector provenance until resolution under the manager lock.
+enum AgentRef {
+    IdOrLegacyName(String),
+    Name(String),
+}
+
+impl AgentRef {
+    fn resolve_for_session(
+        &self,
+        manager: &SubAgentManager,
+        active_session_id: &str,
+    ) -> Result<String, ToolError> {
+        match self {
+            Self::IdOrLegacyName(reference) => {
+                manager.resolve_agent_ref_for_session(active_session_id, reference)
+            }
+            Self::Name(name) => manager.resolve_agent_name_inner(name, Some(active_session_id)),
+        }
+        .map_err(|_| ToolError::invalid_input("Agent not found in the active session".to_string()))
+    }
+}
+
+fn parse_agent_ref(input: &Value) -> Result<Option<AgentRef>, ToolError> {
+    if let Some(id) = optional_input_str(input, &["agent_id", "id"])?
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        return Ok(Some(AgentRef::IdOrLegacyName(id.to_string())));
+    }
+    Ok(optional_input_str(input, &["session_name", "name"])?
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(|name| AgentRef::Name(name.to_string())))
 }
 
 /// #5186: whether an `agent action=start` call asks for exactly a canonical
@@ -8618,7 +8772,7 @@ impl ToolSpec for AgentTool {
                 },
                 "agent_id": {
                     "type": "string",
-                    "description": "Agent id or session name for any action except start and unscoped status/wait."
+                    "description": "Durable agent id for any action except start and unscoped status/wait. Exact IDs stay fixed even when a name is reused. Unambiguous ordinary legacy names are accepted; use name for explicit name selection."
                 },
                 "message": {
                     "type": "string",
@@ -8626,7 +8780,7 @@ impl ToolSpec for AgentTool {
                 },
                 "name": {
                     "type": "string",
-                    "description": "For action=start, optional stable session name. For status/peek/cancel, accepted as an alias for agent_id."
+                    "description": "For action=start, optional reusable session name. For targeted actions, explicitly select the current holder of this name, including an id-shaped name. agent_id/id takes precedence if also supplied."
                 },
                 "prompt": {
                     "type": "string",
@@ -8660,7 +8814,7 @@ impl ToolSpec for AgentTool {
                 },
                 "resume_from": {
                     "type": "string",
-                    "description": "Settled child agent_id or session name to continue. The source must not be running. Its full transcript is loaded and prepended as the new child's context (fork_context=true), continuing the transcript lineage under a new role or profile (e.g. explore → implement → test). Mutually exclusive with fork_context=false. Cross-workspace or missing sources are rejected with a clear error."
+                    "description": "Settled child's issued agent_id or unambiguous ordinary session name to continue. For an id-shaped session name, use that child's actual issued agent_id from its receipt; this field has no explicit name selector, and missing issued ids never fall back to names. The source must not be running. Its full transcript is loaded and prepended as the new child's context (fork_context=true), continuing the transcript lineage under a new role or profile (e.g. explore → implement → test). Mutually exclusive with fork_context=false. Cross-workspace or missing sources are rejected with a clear error."
                 }
             },
             "dependentSchemas": {
@@ -9010,7 +9164,10 @@ const PEEK_UNCHANGED_THROTTLE_WINDOW: Duration = Duration::from_secs(30);
 /// Stable change fingerprint for a running child's model-visible state.
 /// Volatile fields (durations, timestamps) are deliberately excluded so an
 /// idle child fingerprints identically across back-to-back peeks.
-fn inspect_fingerprint(snapshot: &SubAgentResult) -> u64 {
+fn inspect_fingerprint(
+    snapshot: &SubAgentResult,
+    worker_record: Option<&AgentWorkerRecord>,
+) -> u64 {
     use std::hash::{Hash, Hasher};
     let mut hasher = std::collections::hash_map::DefaultHasher::new();
     subagent_status_name(&snapshot.status).hash(&mut hasher);
@@ -9018,6 +9175,21 @@ fn inspect_fingerprint(snapshot: &SubAgentResult) -> u64 {
     snapshot.result.is_some().hash(&mut hasher);
     snapshot.needs_input.is_some().hash(&mut hasher);
     snapshot.checkpoint.is_some().hash(&mut hasher);
+    // A changed delivery receipt is model-visible progress even when the
+    // child's turn has not advanced. Keep only its semantic fields: an idle
+    // timestamp must not defeat the unchanged-status polling guard.
+    worker_record
+        .and_then(|record| record.follow_up.latest_delivery.as_ref())
+        .map(|delivery| {
+            (
+                delivery.delivered,
+                &delivery.message_preview,
+                &delivery.reason,
+                delivery.interrupt,
+                delivery.continued_from_checkpoint,
+            )
+        })
+        .hash(&mut hasher);
     hasher.finish()
 }
 
@@ -9041,13 +9213,14 @@ async fn inspect_agent_from_input(
             .await;
             let mut manager = manager.write().await;
             manager.cleanup_for_session(&context.state_namespace, COMPLETED_AGENT_RETENTION);
-            let evicted_ids =
-                manager.drain_pending_handle_evictions_for_session(&context.state_namespace);
+            let agent_ref = agent_ref.resolve_for_session(&manager, &context.state_namespace)?;
             let snapshot = manager
-                .get_result_by_ref_for_session(&context.state_namespace, &agent_ref)
+                .get_result_for_session(&context.state_namespace, &agent_ref)
                 .map_err(|err| ToolError::invalid_input(err.to_string()))?;
             let worker_record =
                 manager.get_worker_record_for_session(&context.state_namespace, &snapshot.agent_id);
+            let evicted_ids =
+                manager.drain_pending_handle_evictions_for_session(&context.state_namespace);
             (snapshot, worker_record, evicted_ids)
         };
         // Evict retired handles outside the manager lock (#3885).
@@ -9065,7 +9238,7 @@ async fn inspect_agent_from_input(
         if snapshot.status == SubAgentStatus::Running
             && let Some(memo_map) = inspect_memo
         {
-            let fingerprint = inspect_fingerprint(&snapshot);
+            let fingerprint = inspect_fingerprint(&snapshot, worker_record.as_ref());
             let now = Instant::now();
             let unchanged = {
                 let mut memo_map = memo_map.lock().expect("inspect memo lock");
@@ -9235,6 +9408,7 @@ async fn cancel_agent_from_input(
     let agent_ref = parse_agent_ref(input)?.ok_or_else(|| ToolError::missing_field("agent_id"))?;
     let (snapshot, worker_record) = {
         let mut manager = manager.write().await;
+        let agent_ref = agent_ref.resolve_for_session(&manager, &context.state_namespace)?;
         manager
             .ensure_caller_controls_descendant_for_session(
                 &context.state_namespace,
@@ -9326,13 +9500,14 @@ async fn wait_for_subagents_from_input(
     let watched: Vec<String> = {
         let manager = manager.read().await;
         if let Some(agent_ref) = &agent_ref {
+            let agent_id = agent_ref.resolve_for_session(&manager, &context.state_namespace)?;
             let snapshot = manager
-                .get_result_by_ref_for_session(&context.state_namespace, agent_ref)
+                .get_result_for_session(&context.state_namespace, &agent_id)
                 .map_err(|err| ToolError::invalid_input(err.to_string()))?;
             if snapshot.status != SubAgentStatus::Running {
                 let running = manager.running_count_for_session(&context.state_namespace);
                 drop(manager);
-                return wait_result_payload(&[snapshot], running, 0, false).await;
+                return wait_result_payload(&[snapshot], &[], running, 0, false).await;
             }
             vec![snapshot.agent_id]
         } else {
@@ -9368,29 +9543,39 @@ async fn wait_for_subagents_from_input(
     tokio::pin!(cancelled);
 
     loop {
-        let (settled, running) = {
+        let (settled, gone, running) = {
             let manager = manager.read().await;
             let mut settled = Vec::new();
+            let mut gone = Vec::new();
             for agent_id in &watched {
-                if let Ok(snapshot) =
-                    manager.get_result_by_ref_for_session(&context.state_namespace, agent_id)
-                    && snapshot.status != SubAgentStatus::Running
-                {
-                    settled.push(snapshot);
+                match manager.get_result_for_session(&context.state_namespace, agent_id) {
+                    Ok(snapshot) if snapshot.status != SubAgentStatus::Running => {
+                        settled.push(snapshot)
+                    }
+                    Ok(_) => {}
+                    Err(_) => gone.push(agent_id.clone()),
                 }
             }
             (
                 settled,
+                gone,
                 manager.running_count_for_session(&context.state_namespace),
             )
         };
 
-        if !settled.is_empty() || running == 0 {
-            return wait_result_payload(&settled, running, started.elapsed().as_millis(), false)
-                .await;
+        if !settled.is_empty() || !gone.is_empty() || running == 0 {
+            return wait_result_payload(
+                &settled,
+                &gone,
+                running,
+                started.elapsed().as_millis(),
+                false,
+            )
+            .await;
         }
         if started.elapsed() >= timeout {
-            return wait_result_payload(&[], running, started.elapsed().as_millis(), true).await;
+            return wait_result_payload(&[], &[], running, started.elapsed().as_millis(), true)
+                .await;
         }
 
         tokio::select! {
@@ -9409,11 +9594,12 @@ async fn wait_for_subagents_from_input(
 /// carry the full payload; duplicating it here would double token cost.
 async fn wait_result_payload(
     settled: &[SubAgentResult],
+    gone: &[String],
     running: usize,
     waited_ms: u128,
     timed_out: bool,
 ) -> Result<ToolResult, ToolError> {
-    let settled_entries: Vec<Value> = settled
+    let mut settled_entries: Vec<Value> = settled
         .iter()
         .map(|snapshot| {
             json!({
@@ -9423,7 +9609,14 @@ async fn wait_result_payload(
             })
         })
         .collect();
-    let note = if timed_out {
+    settled_entries.extend(
+        gone.iter()
+            .map(|id| json!({"agent_id": id, "status": "gone"})),
+    );
+    let settled_count = settled_entries.len();
+    let note = if !gone.is_empty() {
+        "A watched sub-agent record expired; its full result may be unavailable."
+    } else if timed_out {
         "Wait timed out with children still running. Do not poll — wait again (until=\"all\" blocks for the whole batch), continue independent work, or end your turn; results arrive automatically as <codewhale:subagent.done> sentinels."
     } else if settled_entries.is_empty() {
         "No sub-agents are running anymore."
@@ -9445,7 +9638,7 @@ async fn wait_result_payload(
         ToolResult::json(&payload).map_err(|err| ToolError::execution_failed(err.to_string()))?;
     tool_result.metadata = Some(json!({
         "action": "wait",
-        "settled": settled.len(),
+        "settled": settled_count,
         "running": running,
         "timed_out": timed_out,
     }));
