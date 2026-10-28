@@ -1323,6 +1323,7 @@ fn admit_and_dispatch(
     local_attachment_cleanup: LocalAttachmentCleanup,
     budget: crate::features::remote_control::controller::turn_budget::TurnBudget,
 ) -> Result<Value, String> {
+    let local_submission = local_attachments.is_some();
     let request =
         RemoteTaskRequest::from_payload(validated).map_err(|error| error.code.to_owned())?;
     budget.checkpoint(&CancellationToken::new())?;
@@ -1451,9 +1452,22 @@ fn admit_and_dispatch(
     let (outcome, mut admission_cleanup) =
         finish_prepared_admission_owned(&service, prepared_admission)?;
     match outcome {
-        AdmissionOutcome::Replay(record) => service
-            .status_payload(&record.task_id)
-            .map_err(|error| error.code.to_owned()),
+        AdmissionOutcome::Replay(record) => {
+            let mut status = service
+                .status_payload(&record.task_id)
+                .map_err(|error| error.code.to_owned())?;
+            if local_submission {
+                if service
+                    .status(&record.task_id)
+                    .map(|current| current.sequence != record.sequence)
+                    .unwrap_or(true)
+                {
+                    return Err("task_generation_stale".to_owned());
+                }
+                status["sequence"] = json!(record.sequence.to_string());
+            }
+            Ok(status)
+        }
         AdmissionOutcome::Admitted(ticket) => {
             let task_id = ticket.record.task_id.clone();
             let task_sequence = ticket.record.sequence;
@@ -1588,7 +1602,19 @@ fn admit_and_dispatch(
                 &mut admission_cleanup.handed_off,
             )? {
                 AdmittedTaskReady::Ready(ready) => ready,
-                AdmittedTaskReady::Failed(status) => return Ok(status),
+                AdmittedTaskReady::Failed(mut status) => {
+                    if local_submission {
+                        if service
+                            .status(&task_id)
+                            .map(|current| current.sequence != task_sequence)
+                            .unwrap_or(true)
+                        {
+                            return Err("task_generation_stale".to_owned());
+                        }
+                        status["sequence"] = json!(task_sequence.to_string());
+                    }
+                    return Ok(status);
+                }
             };
             if model_source == TASK_MODEL_SOURCE_TEMPORARY {
                 crate::features::remote_control::controller::relay_runtime::log_controlled_event(
@@ -1606,6 +1632,7 @@ fn admit_and_dispatch(
                         "taskId": &task_id,
                         "sessionId": session_id,
                         "generation": &lease.remote_control_generation,
+                        "sequence": task_sequence.to_string(),
                         "modelSource": projected_model_source.as_str(),
                         "status": "admitted",
                         "text": &prompt,
@@ -1731,6 +1758,17 @@ fn admit_and_dispatch(
                 }
             });
             admission_cleanup.handed_off = true;
+            let mut status = status;
+            if local_submission {
+                if service
+                    .status(&task_id)
+                    .map(|current| current.sequence != task_sequence)
+                    .unwrap_or(true)
+                {
+                    return Err("task_generation_stale".to_owned());
+                }
+                status["sequence"] = json!(task_sequence.to_string());
+            }
             Ok(status)
         }
     }

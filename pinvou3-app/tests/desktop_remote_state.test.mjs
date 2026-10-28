@@ -678,6 +678,85 @@ test('B-side projections reject stale sessions and reset with the controlled gen
   assert.equal(state.controlledTranscript.length, 0);
 });
 
+test('late B failure reason enriches only the same admission and generation', () => {
+  let state = logic.createState();
+  state = logic.applyControlledStatus(state, { status: 'connected', generation: 'generation-1' });
+  state = logic.applyControlledSession(state, {
+    sessionId: 'session-b', sessionRef: 'remote-session-b', generation: 'generation-1', lane: 'chat',
+  });
+  const base = { taskId: 'task-1', sessionId: 'session-b', generation: 'generation-1', sequence: '42', status: 'failed' };
+  state = logic.applyControlledTaskEvent(state, base);
+  for (const event of [
+    { ...base, sequence: '43', terminalReason: 'task_generation_stale' },
+    { ...base, generation: 'generation-2', terminalReason: 'task_generation_stale' },
+    { ...base, sessionId: 'session-other', terminalReason: 'task_generation_stale' },
+    { ...base, terminalReason: 'secret/path' },
+    { ...base, status: 'succeeded', terminalReason: 'task_generation_stale' },
+  ]) {
+    assert.equal(logic.applyControlledTaskEvent(state, event), state);
+  }
+  state = logic.applyControlledTaskEvent(state, { ...base, terminalReason: 'task_generation_stale' });
+  assert.equal(state.controlledTasks[0].terminalReason, 'task_generation_stale');
+  assert.equal(logic.applyControlledTaskEvent(state, { ...base, terminalReason: 'task_attachments_invalid' }), state);
+});
+
+test('late terminal prompt enriches only the exact admission without rewriting terminal facts', () => {
+  let state = logic.createState();
+  state = logic.applyControlledStatus(state, { status: 'connected', generation: 'generation-1' });
+  state = logic.applyControlledSession(state, { sessionId: 'session-b', sessionRef: 'ref-b', generation: 'generation-1', lane: 'chat' });
+  const base = { taskId: 'task-1', sessionId: 'session-b', generation: 'generation-1', sequence: '42', status: 'failed' };
+  state = logic.applyControlledTaskEvent(state, { ...base, terminalReason: 'task_attachments_invalid' });
+  for (const event of [
+    { ...base, sequence: '43', text: 'wrong' },
+    { ...base, generation: 'generation-2', text: 'wrong' },
+    { ...base, sessionId: 'session-other', text: 'wrong' },
+    { ...base, generation: null, text: 'wrong' },
+    { ...base, status: 'succeeded', text: 'wrong' },
+  ]) assert.equal(logic.applyControlledTaskEvent(state, event), state);
+  state = logic.applyControlledTaskEvent(state, { ...base, text: 'original prompt' });
+  assert.equal(state.controlledTasks[0].text, 'original prompt');
+  assert.equal(state.controlledTasks[0].status, 'failed');
+  assert.equal(state.controlledTasks[0].terminalReason, 'task_attachments_invalid');
+  assert.equal(logic.applyControlledTaskEvent(state, { ...base, text: 'replacement' }), state);
+});
+
+test('B local task projections preserve exactly the Rust closed set of terminal reasons', () => {
+  const rustPath = path.join(root, 'src-tauri/src/features/remote_control/controller/task.rs');
+  const rust = fs.readFileSync(rustPath, 'utf8');
+  const start = rust.indexOf('pub(crate) fn display_terminal_reason(');
+  const end = rust.indexOf('\n#[derive', start);
+  assert.ok(start >= 0 && end > start, 'Rust display whitelist must be discoverable');
+  const rustCodes = [...rust.slice(start, end).matchAll(/"([a-z_]+)"/g)].map(match => match[1]);
+  assert.equal(rustCodes.length, 39, 'review an intentional Rust whitelist change');
+  assert.equal(new Set(rustCodes).size, rustCodes.length);
+  const js = fs.readFileSync(logicPath, 'utf8');
+  const arrayStart = js.indexOf('var DISPLAY_TERMINAL_REASONS = [');
+  const arrayEnd = js.indexOf('];', arrayStart);
+  assert.ok(arrayStart >= 0 && arrayEnd > arrayStart, 'JS display whitelist must be discoverable');
+  const jsCodes = [...js.slice(arrayStart, arrayEnd).matchAll(/"([a-z_]+)"/g)].map(match => match[1]);
+  assert.deepEqual(jsCodes.slice().sort(), rustCodes.slice().sort(), 'JS and Rust must accept the same reason set');
+
+  function deliver(status, reason, snakeCase = false) {
+    let state = logic.createState();
+    state = logic.applyControlledStatus(state, { status: 'connected', generation: 'generation-1' });
+    state = logic.applyControlledSession(state, { sessionId: 'session-b', sessionRef: 'remote-session-b', generation: 'generation-1', lane: 'chat' });
+    const event = { taskId: 'task-1', sessionId: 'session-b', generation: 'generation-1', sequence: '42', status };
+    event[snakeCase ? 'terminal_reason' : 'terminalReason'] = reason;
+    return logic.applyControlledTaskEvent(state, event).controlledTasks[0];
+  }
+  for (const reason of rustCodes) {
+    const status = reason === 'completed' ? 'succeeded' : reason === 'cancelled' ? 'cancelled'
+      : ['interrupted', 'process_restart'].includes(reason) ? 'interrupted' : 'failed';
+    assert.equal(deliver(status, reason).terminalReason, reason, reason);
+    assert.equal(deliver(status, reason, true).terminalReason, reason, reason + ' snake_case');
+  }
+  for (const reason of ['task_generation_stale_extra', 'TASK_GENERATION_STALE', 'task_attachments_invalid ', 'secret/path', 'tokenvalue', '__proto__', '', { value: 'task_generation_stale' }]) {
+    const item = deliver('failed', reason);
+    assert.equal(item.terminalReason, null, 'unknown or malformed value must not be exposed');
+    assert.equal(item.status, 'failed', 'filtering must not change terminal status');
+  }
+});
+
 test('B-side task content remains visible after a terminal failure', () => {
   let state = logic.createState();
   state = logic.applyControlledStatus(state, { status: 'connected', generation: 'generation-1' });

@@ -727,6 +727,7 @@ fn projection_entry(sequence: u64, body: &str) -> ProjectionEntry {
         kind: ProjectionKind::AssistantMessage,
         task_id: Some("task-1".into()),
         body: Some(body.into()),
+        terminal_reason: None,
         attachments: Vec::new(),
     }
 }
