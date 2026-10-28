@@ -920,7 +920,24 @@ jobs:
       - name: Gate policy test suite (scripts/tests)
         run: python3 -m unittest discover -s scripts/tests -p 'test_*.py'
 
+      # Keep the other fast checks independent of the changes job. This filter
+      # runs only after them and uses the same PR / merge-group diff semantics.
+      - uses: dorny/paths-filter@v4
+        id: mcp-filter
+        with:
+          filters: |
+            mcp_contract:
+              - 'pinvou3-app/resources/mcp-servers/**'
+              - 'scripts/mcp-server-contract-smoke.py'
+              - 'scripts/tests/test_mcp_schema_contract.py'
+              - 'CodeWhale'
+              - '.gitmodules'
+              - '.github/workflows/pr-check.yml'
+
       - name: Python MCP server 测试 (mcp-servers/*/test_*.py)
+        # GitHub's PR files API returns at most 3000 files; do not trust a
+        # negative result when the list may be truncated or its size is unknown.
+        if: ${{ steps.mcp-filter.outputs.mcp_contract != 'false' || (github.event_name == 'pull_request' && (github.event.pull_request.changed_files == null || github.event.pull_request.changed_files >= 3000)) }}
         run: |
           python3 -m pip install --quiet python-pptx python-docx
           fail=0
@@ -932,6 +949,7 @@ jobs:
           [ "$fail" -eq 0 ]
 
       - name: 内置 MCP 协议与产物契约
+        if: ${{ steps.mcp-filter.outputs.mcp_contract != 'false' || (github.event_name == 'pull_request' && (github.event.pull_request.changed_files == null || github.event.pull_request.changed_files >= 3000)) }}
         run: python3 scripts/mcp-server-contract-smoke.py
 
   frontend-test:
@@ -2131,10 +2149,23 @@ jobs:
             RUNNER_ENVIRONMENT="$RUNNER_ENVIRONMENT" \
             python3 scripts/ci-rust-disk.py
 
+      # Probe the test cache without downloading it. An exact hit makes the
+      # separate lint-cache extraction redundant; a miss still takes the
+      # existing lint fallback before restoring the test cache.
+      - name: 检查 Rust test 缓存是否精确命中
+        id: rust-test-cache-probe
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: pinvou3-app/src-tauri
+          shared-key: rust-test-v2
+          lookup-only: true
+          save-if: false
+
       # rust-test 的独立缓存缺失时，全冷测试会超过当前 runner 的执行窗口。
       # 先只读恢复同一工具链与锁文件下已由 main 保存的 rust-lint 目标缓存，
       # 再恢复/保存独立 rust-test 缓存；不降低测试范围，也不让 PR 写缓存。
       - name: 恢复 Rust lint 暖缓存
+        if: ${{ steps.rust-test-cache-probe.outputs.cache-hit != 'true' }}
         uses: Swatinem/rust-cache@v2
         with:
           workspaces: pinvou3-app/src-tauri
@@ -2143,6 +2174,7 @@ jobs:
           save-if: false
 
       - name: Cargo test cache
+        id: rust-test-cache
         uses: Swatinem/rust-cache@v2
         with:
           workspaces: pinvou3-app/src-tauri
@@ -2169,6 +2201,19 @@ jobs:
           # forever).
           cache-on-failure: true
           save-if: ${{ github.ref == 'refs/heads/main' }}
+
+      # An entry can be evicted between lookup and restore. In that case the
+      # skipped lint restore must still be attempted before compilation.
+      - name: 恢复被淘汰缓存的 Rust lint 回退
+        if: ${{ steps.rust-test-cache-probe.outputs.cache-hit == 'true' && steps.rust-test-cache.outputs.cache-hit != 'true' }}
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: pinvou3-app/src-tauri
+          shared-key: rust-lint-v2
+          # rust-cache exports CACHE_ON_FAILURE globally; preserve the test
+          # cache writer's failure behavior even though this step is read-only.
+          cache-on-failure: true
+          save-if: false
 
 
       # PR #988 started a cold build with only 7.3 GiB free. All 2,100 lib

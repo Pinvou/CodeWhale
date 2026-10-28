@@ -428,6 +428,7 @@ function timeStr() { return pinvouSharedtauriChat().timeStr(); }
           state.chatItems = state.chatItems.filter(function (item) {
             return item.id !== submittedUserItemId && item.id !== submittedStreamId;
           });
+          flushPendingStreamRender(); // admission reject mid-stream: emit final html before the reset
           if (sessionStates[sid] === turnOwnerBuffer && turnOwnerBuffer && turnOwnerBuffer.timelineTurnAnchor === submittedTimelineAnchor && submittedTimelineAnchor) {
             var localId = submittedTimelineAnchor.localTurnId;
             if ((state.turnTimeline || []).some(function (event) { return event && event.event === "user_start" && event.turn_id === localId; })
@@ -440,7 +441,6 @@ function timeStr() { return pinvouSharedtauriChat().timeStr(); }
             }
             if (state.activeTurnTimelineId === localId) state.activeTurnTimelineId = null;
           }
-          flushPendingStreamRender(); // admission reject mid-stream: emit final html before the reset
           resetPendingAssistant();
           state.busy = false;
           stopThinking();
