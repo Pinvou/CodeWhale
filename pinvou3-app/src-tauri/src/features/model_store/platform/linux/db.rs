@@ -1076,7 +1076,14 @@ pub fn get_store_model_by_name(model_name: &str) -> rusqlite::Result<Option<Stor
 /// 界面能看见，也没有任何入口能清掉。
 pub fn delete_store_model(card_id: &str) -> rusqlite::Result<()> {
     let mut conn = connect()?;
-    let tx = conn.transaction()?;
+    delete_store_model_on(&mut conn, card_id)
+}
+
+fn delete_store_model_on(conn: &mut Connection, card_id: &str) -> rusqlite::Result<()> {
+    // Obtain the writer lock before reading the retained-version guard. In WAL
+    // mode a deferred read-to-write upgrade can fail without honoring the busy
+    // timeout; waiting here also makes the guard see the preceding writer.
+    let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
     let retained: i64 = tx.query_row(
         "SELECT COUNT(*) FROM model_versions WHERE card_id=?1
          AND version_id != COALESCE((SELECT active_version_id FROM store_models WHERE card_id=?1), '')",
@@ -1228,6 +1235,8 @@ pub fn find_api_key(key_value: &str) -> rusqlite::Result<Option<ApiKeyRecord>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    mod delete_concurrency;
 
     /// db 测试用环境变量（HOME）切换各自的临时数据库目录，但环境
     /// 变量是进程全局的，而 Rust 测试默认同进程多线程并行——两个 db 测试并发
