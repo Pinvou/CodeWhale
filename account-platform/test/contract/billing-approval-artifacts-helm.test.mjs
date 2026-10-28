@@ -16,7 +16,7 @@ function render(profile) {
     '--set-string', `images.newApiTLS.digest=sha256:${'0'.repeat(64)}`,
   ] : ['-f', path.join(chart, 'values-model-token-test.yaml'),
     ...(profile === 'native' ? ['-f', path.join(chart, 'values-kms-native-test.yaml')] : [])];
-  const result = spawnSync(process.env.PINVOU_TEST_KMS_HELM_BINARY || 'helm', ['template', 'fixture', chart, ...args],
+  const result = spawnSync(process.env.PINVOU_TEST_KMS_HELM_BINARY || 'helm', ['template', 'fixture', chart, ...args, '--set-json', 'workloadIdentity.kubernetesApiServerPorts=[443]', '--set-json', 'external.workloadJwksCidrs=["192.0.2.40/32"]'],
     { encoding: 'utf8', timeout: 30000, maxBuffer: 4 * 1024 * 1024,
       env: Object.fromEntries(Object.entries(process.env).filter(([key]) =>
         ['PATH', 'HOME', 'USERPROFILE', 'SYSTEMROOT', 'TEMP', 'TMP'].includes(key.toUpperCase()))) });

@@ -176,7 +176,14 @@ spec:
   egress:
     {{- range $cidr := $rule.cidrs }}
     - to: [{ ipBlock: { cidr: {{ $cidr | quote }} } }]
+      {{- if and (eq $rule.name "workload-verifiers") (include "pinvou.kubernetesJWKS" $) }}
+      ports:
+        {{- range $port := $.Values.workloadIdentity.kubernetesApiServerPorts }}
+        - { protocol: TCP, port: {{ $port }} }
+        {{- end }}
+      {{- else }}
       ports: [{ protocol: TCP, port: {{ $rule.port }} }]
+      {{- end }}
     {{- end }}
 {{- end }}
 {{- end }}

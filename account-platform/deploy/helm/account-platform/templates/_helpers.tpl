@@ -61,4 +61,5 @@ topologySpreadConstraints:
 {{- fail "Billing and event relays require authenticated external TLS NATS: set nats.enabled=false and dependencies.natsUrl=tls://<approved-host>:4222; provision per-service credentials and JetStream resources before install" -}}
 {{- end -}}
 {{- if and (not .Values.keycloak.enabled) (or (eq .Values.oidc.jwksUrl "") (eq .Values.oidc.tokenUrl "")) -}}{{ fail "external Keycloak requires explicit OIDC JWKS and token backchannel URLs" }}{{- end -}}
+{{- include "pinvou.validateKubernetesJWKS" . -}}
 {{- end -}}

@@ -62,7 +62,7 @@ spec:
       {{- with $root.Values.global.imagePullSecrets }}
       imagePullSecrets: {{ toYaml . | nindent 8 }}
       {{- end }}
-      {{- if or $natsClient (and (eq $app.name "identity-service") $identityFiles) (and (eq $app.name "token-gateway") (eq $root.Values.tokenGateway.secretProvider "vault-transit")) }}
+      {{- if or $natsClient (and (ne $app.name "token-portal") (include "pinvou.kubernetesJWKS" $root)) (and (eq $app.name "identity-service") $identityFiles) (and (eq $app.name "token-gateway") (eq $root.Values.tokenGateway.secretProvider "vault-transit")) }}
       securityContext: { runAsNonRoot: true, runAsUser: 65532, runAsGroup: 65532, fsGroup: 65532, seccompProfile: { type: RuntimeDefault } }
       {{- else }}
       securityContext: { runAsNonRoot: true, seccompProfile: { type: RuntimeDefault } }
@@ -125,6 +125,7 @@ spec:
             - { name: WORKLOAD_IDENTITY_ISSUER, value: {{ $root.Values.workloadIdentity.issuer | quote }} }
             - { name: WORKLOAD_IDENTITY_JWKS_URL, value: {{ $root.Values.workloadIdentity.jwksUrl | quote }} }
             - { name: WORKLOAD_IDENTITY_AUDIENCE, value: {{ $root.Values.workloadIdentity.audience | quote }} }
+            {{- include "pinvou.kubernetesJWKSEnv" (dict "root" $root "component" $app.name) | nindent 12 }}
             {{- if eq $app.name "account-service" }}
             - name: WORKLOAD_IDENTITY_RULES_JSON
               value: {{ toJson (list (dict "subject" (printf "system:serviceaccount:%s:%s-billing-service" $root.Release.Namespace $fullname) "service" "billing-service" "permissions" (list "internal.authorization.check" "internal.approval-authorization.consume" "internal.account.ledger-repair-proof.read" "internal.approval-execution.begin" "internal.approval-execution.complete" "internal.account.closure.read" "internal.registration-bonus-eligibility.read")) (dict "subject" (printf "system:serviceaccount:%s:%s-token-gateway" $root.Release.Namespace $fullname) "service" "token-gateway" "permissions" (list "internal.authorization.check" "internal.authorization.delegate" "internal.client-compatibility.read" "internal.token-owner-candidates.read" "internal.account.token-owner-authority.check")) (dict "subject" (printf "system:serviceaccount:%s:%s-token-command-executor" $root.Release.Namespace $fullname) "service" "token-command-executor" "permissions" (list "internal.authorization.check" "internal.approval-authorization.consume" "internal.approval-execution.begin" "internal.approval-execution.complete")) (dict "subject" (printf "system:serviceaccount:%s:%s-account-approval-recovery" $root.Release.Namespace $fullname) "service" "account-approval-recovery" "permissions" (list "internal.approval-recovery.plan" "internal.approval-recovery.confirm" "internal.approval-recovery.zero-effect")) (dict "subject" (printf "system:serviceaccount:%s:%s-token-credential-portal" $root.Release.Namespace $fullname) "service" "token-credential-portal" "permissions" (list "internal.authorization.check")) (dict "subject" (printf "system:serviceaccount:%s:%s-keycloak" $root.Release.Namespace $fullname) "service" "keycloak-mobile-authenticator" "permissions" (list "internal.auth.sms.verify" "internal.authorization.check")) (dict "subject" (printf "system:serviceaccount:%s:%s-identity-service" $root.Release.Namespace $fullname) "service" "identity-service" "permissions" (list "internal.auth.password-preparation.claim"))) | quote }}
@@ -343,6 +344,7 @@ spec:
             {{- end }}
             {{- if ne $app.name "token-portal" }}
             - { name: workload-identity, mountPath: /var/run/secrets/pinvou/workload, readOnly: true }
+            {{- include "pinvou.kubernetesJWKSMounts" $root | nindent 12 }}
             {{- else }}
             - { name: portal-handoff-oidc, mountPath: /var/run/secrets/pinvou/portal-handoff, readOnly: true }
             {{- end }}
@@ -376,6 +378,7 @@ spec:
         {{- end }}
         - { name: tmp, emptyDir: { sizeLimit: 16Mi } }
         {{- if ne $app.name "token-portal" }}
+        {{- include "pinvou.kubernetesJWKSVolumes" $root | nindent 8 }}
         - name: workload-identity
           projected:
             sources:

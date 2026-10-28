@@ -112,6 +112,7 @@
         "issuer": { "type": "string", "pattern": "^https://" },
         "jwksUrl": { "type": "string", "pattern": "^https://" },
         "audience": { "type": "string", "minLength": 1 },
+        "kubernetesApiServerPorts": { "type": "array", "uniqueItems": true, "items": { "type": "integer", "minimum": 1, "maximum": 65535 } },
         "tokenExpirationSeconds": { "type": "integer", "minimum": 300, "maximum": 900 }
       }
     },

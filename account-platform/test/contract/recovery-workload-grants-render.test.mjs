@@ -68,7 +68,13 @@ function renderHelm(native, chartPath = chart, dockerConfig) {
     const value = main.env.find(env => env.name === 'WORKLOAD_IDENTITY_RULES_JSON');
     if (name !== 'token-command-executor') { assert.equal(typeof value?.value, 'string'); rules[name] = JSON.parse(value.value); }
     if (name !== 'token-command-executor') assert.equal(main.env.find(env => env.name === 'WORKLOAD_IDENTITY_AUDIENCE')?.value, audience);
-    const projected = pod.volumes.flatMap(volume => volume.projected?.sources || []).map(source => source.serviceAccountToken).filter(Boolean);
+    const allProjected = pod.volumes.flatMap(volume => volume.projected?.sources || []).map(source => source.serviceAccountToken).filter(Boolean);
+    const projected = allProjected.filter(token => token.audience === audience);
+    const api = allProjected.filter(token => !Object.hasOwn(token, 'audience'));
+    const nativeJWKS = main.env.find(env => env.name === 'WORKLOAD_IDENTITY_JWKS_AUTH_MODE')?.value === 'kubernetes';
+    assert.equal(allProjected.length, nativeJWKS ? 2 : 1, 'no unaccounted caller credential');
+    assert.equal(api.length, nativeJWKS ? 1 : 0, 'API credential remains distinct from the business token');
+    if (nativeJWKS) assert.equal(api[0].expirationSeconds, 600);
     assert.equal(projected.length, 1, `one projected caller token for ${name}`);
     assert.equal(projected[0].audience, audience);
     assert.ok(projected[0].expirationSeconds > 0 && projected[0].expirationSeconds <= 900);

@@ -219,6 +219,54 @@ neither a successful Helm render nor a healthy Keycloak process proves this.
 Keep credentials in the existing controlled files and out of values, argv and
 logs. TLS, workload identities and egress prerequisites below remain required.
 
+### Built-in Kubernetes workload JWKS
+
+The exact `workloadIdentity.jwksUrl=https://kubernetes.default.svc/openid/v1/jwks`
+selects authenticated Kubernetes API key retrieval for Account, Identity, Billing
+and Token Gateway. The configured `workloadIdentity.issuer` must match the actual
+cluster ServiceAccount token issuer and signing keys. Changing this value does
+not change Kubernetes TokenRequest's issuer. Independently verify the cluster's
+configured issuer, projected tokens and serving certificate SAN/chain before
+installation; do not substitute an unrelated Keycloak or external IdP issuer.
+
+Each verifier receives the namespace's existing `kube-root-ca.crt` ConfigMap as
+a read-only regular `subPath` CA file, isolated from public OIDC/payment roots.
+Verify that its `ca.crt` actually trusts the API server certificate. CA replacement
+requires a controlled Pod rollout. A separate read-only projected directory holds
+a 600-second API credential; its projection deliberately omits `audience` so
+Kubernetes chooses the API server's default API audience. The existing internal
+business-audience token remains separate. The client reopens each current atomic
+projection during key fetches, rejects missing/malformed/expired or mismatched
+issuer/ServiceAccount credentials, and does not cache the API token. Local
+credential failures reject the fetch without permanently disabling the verifier:
+the same middleware retries with the current projection on a later request.
+Local credential shape/time checks do not replace API-server signature and audience
+authentication. Credentials exceeding the existing 15-minute bound are rejected.
+
+The chart binds only these four ServiceAccounts to `GET /openid/v1/jwks` using
+an exact non-resource ClusterRole/Binding. The dedicated client permits only this
+fixed HTTPS URL and GET, disables ambient proxies, refuses redirects (including
+discovery), and never sends Kubernetes credentials to an external JWKS URL.
+It retains go-oidc's shared trusted-key cache; caller cancellation stops its wait,
+while a shared fetch remains bounded by the existing ten-second client timeout.
+A failed refresh cannot invent keys or grant business permissions.
+
+With NetworkPolicy enabled, explicitly supply `external.workloadJwksCidrs` and
+`workloadIdentity.kubernetesApiServerPorts` for the actual API/CNI DNAT path;
+missing inputs fail rendering. Use reviewed bounded CIDRs and the precise TCP
+port set, for example 443 or 6443 only when that is the site's actual route.
+The chart does not infer API IPs, enable an all-address rule, or automatically
+add 443 to a different selected port set. Verify runtime egress and RBAC; render
+success is not a cluster connectivity or rotation acceptance result.
+
+Other JWKS URLs retain the existing external/public-key endpoint contract and
+receive neither the Kubernetes credential/CA mounts nor this RBAC binding. The
+endpoint must still verify the actual projected token's issuer and signing keys;
+a public URL alone does not prove that chain. Existing Compose transports are
+unchanged. NATS/Redis private-CA support is not added by this workload-only change.
+The Kubernetes projection/default-audience contract is documented in the
+[official projected-volume guide](https://kubernetes.io/docs/concepts/storage/projected-volumes/#serviceaccounttoken-projected-volumes).
+
 ### Identity Keycloak backchannel
 
 When mobile authentication is enabled in a `production*` environment, Identity

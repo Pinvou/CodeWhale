@@ -15,7 +15,7 @@ function render(overrides = [], staging = true) {
     `images.newApiTLS.digest=sha256:${'0'.repeat(64)}`];
   return spawnSync(process.env.PINVOU_TEST_KMS_HELM_BINARY || 'helm',
     ['template', 'fixture', chart, ...(staging ? ['-f', path.join(chart, 'values-staging.yaml')] : []),
-      ...inputs.flatMap(value => ['--set-string', value]), ...overrides],
+      ...inputs.flatMap(value => ['--set-string', value]), '--set-json', 'workloadIdentity.kubernetesApiServerPorts=[443]', '--set-json', 'external.workloadJwksCidrs=["192.0.2.40/32"]', ...overrides],
     { encoding: 'utf8', timeout: 30000, maxBuffer: 4 * 1024 * 1024, env: publicEnvironment() });
 }
 
