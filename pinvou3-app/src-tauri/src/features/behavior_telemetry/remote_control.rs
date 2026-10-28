@@ -298,6 +298,7 @@ impl RemoteControlEvent {
                 event.diagnostic_hint = Some(super::diagnostics::DiagnosticHint {
                     code: code.into(),
                     http,
+                    exit: None,
                     site: if self.stage == RemoteStage::TaskTerminal {
                         "remote_terminal"
                     } else {

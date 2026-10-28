@@ -31,6 +31,55 @@ function reportDigest(report) {
 }
 export const diagnosticFingerprint = event => hash([event.diagnostic_component, event.stage || "unknown", event.diagnostic_code].join("|"));
 
+/** A bounded incident window, plus the latest terminal for that same lifecycle.
+ * Correlation IDs remain private; this projection only returns registered facts.
+ */
+export function failureTimeline(events, incident) {
+  const executionKey = incident.execution_task_key || incident.remote_task_key;
+  const remote = typeof executionKey === "string" && /^[a-f0-9]{64}$/.test(executionKey);
+  const remoteTerminal = event => event.event_name === "remote_control_event"
+    && event.remote_role === "controlled" && event.remote_stage === "task_terminal"
+    && ["success", "failed", "interrupted", "cancelled"].includes(event.remote_task_status);
+  const sameLifecycle = event => event.device_id === incident.device_id
+    && event.collection_period_id === incident.collection_period_id
+    && (remote ? Boolean(incident.device_id && incident.collection_period_id)
+      && (event.execution_task_key === executionKey
+        || (event.remote_task_key === executionKey && event.remote_role === "controlled"))
+      : incident.turn_id ? event.turn_id === incident.turn_id
+      && (!incident.attempt_id || !event.attempt_id || event.attempt_id === incident.attempt_id)
+      : incident.attempt_id ? event.attempt_id === incident.attempt_id
+      : incident.operation_id ? event.operation_id === incident.operation_id : event === incident);
+  const unique = new Map();
+  for (const event of events) {
+    if (sameLifecycle(event)) unique.set(event.event_id, event);
+  }
+  unique.set(incident.event_id, incident);
+  const ordered = [...unique.values()].sort((a,b) => a.occurred_at - b.occurred_at);
+  const anchor = ordered.indexOf(incident);
+  const terminal = ordered.findLast(event => (remote ? remoteTerminal(event) : event.event_name === "task_finished")
+    && event.occurred_at >= incident.occurred_at);
+  const budget = 32;
+  const start = Math.max(0, Math.min(anchor - 15, ordered.length - budget));
+  const selected = new Set(ordered.slice(start, start + budget));
+  if (terminal) selected.add(terminal);
+  if (selected.size > budget) {
+    const furthest = [...selected].filter(event => event !== incident && event !== terminal)
+      .sort((a,b) => Math.abs(b.occurred_at - incident.occurred_at) - Math.abs(a.occurred_at - incident.occurred_at))[0];
+    selected.delete(furthest);
+  }
+  const fields = ["event_name", "occurred_at", "status", "success", "stage", "error_category",
+    "provider_key", "model_key", "tool_key", "tool_name", "tool_type", "duration_ms",
+    "diagnostic_code", "diagnostic_exit_code", "diagnostic_http_status",
+    "remote_role", "remote_stage", "remote_task_status", "remote_outcome", "remote_reason"];
+  return {
+    timeline: [...selected].sort((a,b) => a.occurred_at - b.occurred_at)
+      .map(event => Object.fromEntries(fields.filter(key => event[key] !== undefined).map(key => [key,event[key]]))),
+    timeline_context: { total_events: ordered.length, returned_events: selected.size,
+      truncated: selected.size < ordered.length, incident_included: selected.has(incident),
+      task_terminal_included: Boolean(terminal && selected.has(terminal)) },
+  };
+}
+
 // Only for comparing retries of pre-field-redaction stored reports. Never stores material.
 function legacyRedactDiagnosticText(value) {
   return String(value || "")

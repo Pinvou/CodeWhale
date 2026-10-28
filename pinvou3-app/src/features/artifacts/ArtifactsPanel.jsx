@@ -547,7 +547,7 @@ const ArtifactTileIcon = ({ name, tileCls = 'w-9 h-9 rounded-[10px]', glyphCls =
                           type="button"
                           title={t.apBtnLocate}
                           onClick={(event) => { event.preventDefault(); event.stopPropagation(); bridge.artifacts.openContainingFolder(a.path); }}
-                          className={`mr-1 flex h-7 w-7 shrink-0 items-center justify-center rounded-full opacity-0 transition-opacity group-hover:opacity-100 hover:bg-white text-[#6E6E73] dark:hover:bg-white/10 dark:text-[#D1D1D6]`}
+                          className={`mr-1 flex h-7 w-7 shrink-0 items-center justify-center rounded-full opacity-0 transition-opacity group-hover:opacity-100 group-focus-within:opacity-100 hover:bg-white text-[#6E6E73] dark:hover:bg-white/10 dark:text-[#D1D1D6]`}
                         >
                           <FolderOpen size={14} />
                         </button>

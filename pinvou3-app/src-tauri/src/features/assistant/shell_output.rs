@@ -136,9 +136,7 @@ enum MonitorEmission {
     },
 }
 
-pub(super) fn is_shell_execution_tool(name: &str) -> bool {
-    matches!(name, "bash" | "exec_shell" | "task_shell_start" | "Bash")
-}
+pub(super) use super::shell_diagnostics::is_shell_execution_tool;
 
 impl ShellOutputMonitor {
     pub(crate) fn spawn(
