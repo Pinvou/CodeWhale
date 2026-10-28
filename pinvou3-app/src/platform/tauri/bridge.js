@@ -1123,6 +1123,9 @@ function pinvouSceneForMessagePos(pos) { return pinvouSharedtauriMain().pinvouSc
     selectRemoteProxyHistory: function (record) {
       return desktopRemoteControlFeature.selectRemoteProxyHistory(record);
     },
+    isRemoteProxyReadCurrent: function (record) {
+      return desktopRemoteControlFeature.isRemoteProxyReadCurrent(record);
+    },
     deleteRemoteProxyHistory: function (id) {
       return desktopRemoteControlFeature.deleteRemoteProxyHistory(id);
     },
