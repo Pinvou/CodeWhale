@@ -510,8 +510,10 @@ func (r *PostgresRepository) PreviewPriceVersion(ctx context.Context, id uuid.UU
 
 func validatePriceUnitConfigurations(ctx context.Context, tx pgx.Tx, scopeType, protocol string, formulaID uuid.UUID, units []PriceUnitConfiguration) error {
 	var required []uuid.UUID
-	if err := tx.QueryRow(ctx, `SELECT required_unit_definition_ids FROM billing_protocol_formula_bindings WHERE formula_version_id=$1 AND protocol_code=$2`, formulaID, protocol).Scan(&required); err != nil {
+	if err := tx.QueryRow(ctx, `SELECT required_unit_definition_ids FROM billing_protocol_formula_bindings WHERE formula_version_id=$1 AND protocol_code=$2`, formulaID, protocol).Scan(&required); errors.Is(err, pgx.ErrNoRows) {
 		return ErrPriceMissing
+	} else if err != nil {
+		return err
 	}
 	configured := make(map[uuid.UUID]PriceUnitConfiguration, len(units))
 	for _, unit := range units {
