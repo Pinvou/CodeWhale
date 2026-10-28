@@ -8458,6 +8458,51 @@ fn verifier_child_keeps_the_default_and_selection_bounded_run_surface() {
     );
 }
 
+/// A Verifier child of a read-only role parent (its shell was clamped by the
+/// parent, not narrowed by the Verifier role) regains nothing through the
+/// carve-out: the built-in gate runner stays refused at posture and envelope
+/// and off the catalog, while the classifier-bounded bash evidence lane —
+/// which the read-only parent holds too — keeps working. Delegation moves
+/// work, never authority.
+#[tokio::test]
+async fn clamped_verifier_child_of_read_only_parent_holds_no_run_surface() {
+    let (_tmp, registry) = read_only_shell_child_registry(FleetRole::Verifier);
+    for input in [
+        json!({}),
+        json!({"action": "tests"}),
+        json!({"action": "tests", "args": "-p codewhale-tui"}),
+    ] {
+        assert!(
+            !registry.posture_permits_tool("Run", Some(&input)),
+            "a clamped verifier must not run gates: {input}"
+        );
+        assert!(
+            registry.envelope_refusal("Run", &input).is_some(),
+            "the envelope must refuse the gate for a clamped verifier: {input}"
+        );
+    }
+    let tools = registry.tools_for_model(&FleetRole::Verifier);
+    let names: Vec<&str> = tools.iter().map(|tool| tool.name.as_str()).collect();
+    assert!(
+        !names.contains(&"Run"),
+        "the clamped verifier catalog must not offer the gate: {names:?}"
+    );
+    assert!(
+        names.contains(&"bash"),
+        "the clamped verifier keeps the shared bash evidence lane: {names:?}"
+    );
+    assert!(
+        registry
+            .posture_permits_tool("bash", Some(&json!({"command": "pwd"}))),
+        "the shared evidence lane admits read-only probes"
+    );
+    assert!(
+        !registry
+            .posture_permits_tool("bash", Some(&json!({"command": "rm -rf src"}))),
+        "the evidence lane stays classifier-bounded"
+    );
+}
+
 /// The verifier intro tells the child about its bounded read-only shell and
 /// the custom-command refusal.
 #[test]

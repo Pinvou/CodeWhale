@@ -14575,6 +14575,14 @@ struct SubAgentToolRegistry {
     accept_edits: bool,
     agent_type: FleetRole,
     runtime_profile: WorkerRuntimeProfile,
+    /// Whether the child's requested shell was a full shell *after the parent
+    /// clamp but before the role's own narrowing* — i.e. the read-only shell
+    /// it now runs under came from its role's own narrowing, not from a
+    /// parent that itself held no shell authority. Keys the Verifier's
+    /// verification-surface carve-out in [`Self::holds_shell_authority`] so a
+    /// read-only role parent cannot obtain gate execution it never had by
+    /// delegating to `test`.
+    parent_shell_authority: bool,
     // Depth is the only special authority governing nested `agent` calls.
     can_spawn_child: bool,
     // Every mutation is attributed to the child and checked against its live
@@ -14647,6 +14655,12 @@ impl SubAgentToolRegistry {
         // has a full shell.
         let parent_shell = ShellPolicy::from_legacy_allow_shell(runtime.allow_shell);
         let mut child_shell = runtime.worker_profile.shell.min_with(parent_shell);
+        // Capture the grant before the role narrowing below: a Full shell
+        // here means the parent itself could run processes, so the role's
+        // read-only downgrade is the child's own posture. A clamped
+        // (read-only-parent) child must not regain authority through a
+        // role carve-out it merely shares the name of.
+        let parent_shell_authority = matches!(child_shell, ShellPolicy::Full);
         if crate::fleet::role::role_requires_read_only_shell(&agent_type)
             && child_shell.allows_shell()
         {
@@ -14691,6 +14705,7 @@ impl SubAgentToolRegistry {
             accept_edits: runtime.accept_edits,
             agent_type,
             runtime_profile: effective_profile,
+            parent_shell_authority,
             can_spawn_child,
             owner_agent_id,
             owner_agent_name,
@@ -15414,19 +15429,24 @@ impl SubAgentToolRegistry {
 
     /// Shell *authority* — the right to start the processes the built-in
     /// verification surface runs. A full runtime shell holds it. The one
-    /// narrowed exception is the Verifier: `role_requires_read_only_shell`
-    /// downgrades its raw-command policy to the classifier-bounded probe lane,
-    /// and running the workspace's own gates is the role's entire purpose, so
-    /// the downgrade must not take the gates away (`reject_unbounded_
-    /// verification` and the envelope still bound every concrete call). No
-    /// other role regains authority through a narrowed shell: a Builder or
-    /// Custom child of a read-only parent inherits `ShellPolicy::ReadOnly` and
-    /// must not start the test runner its parent cannot — keying this on the
-    /// role's *default* posture would hand exactly that to every role whose
-    /// default shell is full, and widen authority through delegation.
+    /// narrowed exception is the Verifier whose *parent granted a full
+    /// shell* (`parent_shell_authority`): `role_requires_read_only_shell`
+    /// downgrades the Verifier's raw-command policy to the classifier-bounded
+    /// probe lane, and running the workspace's own gates is the role's entire
+    /// purpose, so that role-own downgrade must not take the gates away
+    /// (`reject_unbounded_verification` and the envelope still bound every
+    /// concrete call). The grant cannot travel through delegation: a Verifier
+    /// child of a read-only role parent was clamped by that parent, holds no
+    /// authority of its own, and stays refused — delegation moves work, never
+    /// authority. No other role regains authority through a narrowed shell: a
+    /// Builder or Custom child of a read-only parent inherits
+    /// `ShellPolicy::ReadOnly` and must not start the test runner its parent
+    /// cannot — keying this on the role's *default* posture would hand
+    /// exactly that to every role whose default shell is full.
     fn holds_shell_authority(&self) -> bool {
         matches!(self.runtime_profile.shell, ShellPolicy::Full)
-            || (matches!(self.agent_type, FleetRole::Verifier)
+            || (self.parent_shell_authority
+                && matches!(self.agent_type, FleetRole::Verifier)
                 && !matches!(self.runtime_profile.shell, ShellPolicy::None))
     }
 
