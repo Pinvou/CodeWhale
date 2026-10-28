@@ -22913,22 +22913,20 @@ fn forkguard_subagent_skill_catalog_uses_tool_search_discovery() {
         "child has no load_skill in its wire catalog; discovery must go through tool_search:\n{catalog}"
     );
     assert!(
-        catalog.contains("activating it via `tool_search` first if it is not in your tool list"),
+        catalog.contains("activate it via `tool_search` if available"),
         "child has no load_skill in its first-turn active set; the header must \
          teach the tool_search activation path:\n{catalog}"
     );
     assert!(
-        catalog.contains("if `tool_search` is absent or does not surface `load_skill`"),
+        catalog.contains("If discovery cannot provide it"),
         "header must stay honest for tool-free and allowlist children that \
          lack tool_search or load_skill:\n{catalog}"
     );
     assert!(
-        catalog.contains("try `load_skill` directly anyway"),
-        "tool_search being absent does not make load_skill unreachable — a \
-         registered deferred tool hydrates on demand when called directly; \
-         the header must teach the direct-call fallback instead of declaring \
-         Skills unloadable:\n{catalog}"
+        catalog.contains("try `load_skill` directly once"),
+        "restricted children must not be told to guess unavailable tool calls:\n{catalog}"
     );
+    assert!(!catalog.contains("try `load_skill` directly anyway"));
 }
 
 // Worker records, takeover targets, and transcript artifact descriptions all
@@ -22943,6 +22941,9 @@ fn forkguard_worker_record_hints_teach_handle_read_activation() {
         HANDLE_READ_ACTIVATION_HINT.contains("`tool_search`"),
         "shared hint must name the activation tool:\n{HANDLE_READ_ACTIVATION_HINT}"
     );
+    assert!(HANDLE_READ_ACTIVATION_HINT.contains("try calling `handle_read` directly once"));
+    assert!(HANDLE_READ_ACTIVATION_HINT.contains("do not repeat failed probes"));
+    assert!(HANDLE_READ_ACTIVATION_HINT.contains("a schema receipt is not transcript evidence"));
 
     let instructions = agent_transcript_inspect_instructions("worker_1");
     assert!(

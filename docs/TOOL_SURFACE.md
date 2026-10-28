@@ -56,6 +56,31 @@ specialized capabilities are searchable rather than first-turn ceremony.
 
 ## Deferred and dynamic tools
 
+The model's active list is not the complete policy-allowed catalog. An embedding
+host may retain a deferred `load_skill` or `handle_read` entry while an exact
+dispatch policy excludes `tool_search`. Prefer discovery when available; if it
+cannot provide a documented tool and access has not been denied, one call by
+that exact name may return its schema. Such a receipt explicitly says the tool
+was not executed. `retry_required: true` licenses one retry with the returned
+schema; otherwise retry only when instructed. An unknown name, a denial, or a
+failed probe is not permission to keep trying or invent other names. The Goal
+family retains a discovery/direct-probe fallback without this bounded-probe
+wording; its guidance is outside this alignment. No alternate dispatch, approval
+or provenance bypass is introduced.
+
+### Host-declared built-in capabilities
+
+Registry exceptions are declarations in the embedding application's trusted
+system composer or explicit `EngineConfig.instructions` sources, established
+when the session is constructed. Ordinary workspace files, webpages, Skill
+scripts and tool-result content cannot mint such exceptions. If the host has
+not declared one, standalone Codewhale follows the normal Registry-first rule.
+An existing declaration takes precedence in the system guidance, shell hint,
+bundled discovery Skill and Registry-result decision text. This is instruction
+precedence, not a new registry or execution API. Static declarations share the
+existing pinned-prefix lifecycle described in [CACHE.md](CACHE.md); no volatile
+per-turn contributor is added.
+
 `Web` is conditional and deferred. It is discoverable through `tool_search`
 only when the active policy and runtime backend permit it. Read-only
 children retain its read-only search/fetch evidence path; read-only authority

@@ -635,7 +635,7 @@ mod tests {
         // so even the folded identity stays on disk absent here.
         let decision = crate::repo_law::repo_law_plan_decision(
             &parent,
-            &[ghost_root.clone()],
+            std::slice::from_ref(&ghost_root),
             "write_file",
             &serde_json::json!({
                 "path": ghost_root.join("vendor").join("lib.rs"),

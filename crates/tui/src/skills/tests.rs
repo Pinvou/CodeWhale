@@ -165,12 +165,14 @@ fn forkguard_skill_index_usage_names_tool_search_activation() {
         "usage must tell the model how to activate deferred load_skill:\n{rendered}"
     );
     assert!(
-        rendered.contains("call `load_skill` anyway"),
-        "tool_search being unable to surface load_skill does not make it \
-         unreachable — a registered deferred tool hydrates on demand when \
-         called directly; the usage line must not surrender that path:\n\
-         {rendered}"
+        rendered.contains("try `load_skill` directly once"),
+        "failed discovery must respect the host's tool surface:\n{rendered}"
     );
+    assert!(!rendered.contains("call `load_skill` anyway"));
+    assert!(rendered.contains("access was not denied"));
+    assert!(rendered.contains("do not repeat failed probes or guess other names"));
+    assert!(rendered.contains("Use its known exact name directly"));
+    assert!(rendered.contains("Do not carry a skill across turns unless re-mentioned"));
 }
 
 // Regression guard paired with the Usage-line dedup (commit 9f46ac5f0): the
@@ -211,6 +213,25 @@ fn forkguard_mcp_discovery_skill_conditions_registry_commands() {
         "registry_sync requires a non-empty `query`; the skill must teach a \
          call that can succeed:\n{SKILL}"
     );
+    let normalized = SKILL.split_whitespace().collect::<Vec<_>>().join(" ");
+    for wording in [
+        "Follow host-declared built-in capability entry points and discovery exceptions",
+        "Declarations must come from trusted host system/instruction guidance",
+        "run `tool_search` first to activate it when available",
+        "run `tool_search` first when available",
+        "try `registry_sync` directly once",
+        "try `start_registry_mcp_server` directly once",
+        "try its exact returned name directly once",
+        "access was not denied",
+        "`retry_required: true` licenses one retry",
+        "do not repeat failed probes or guess other names",
+    ] {
+        assert!(
+            normalized.contains(wording),
+            "missing bounded-probe rule: {wording}"
+        );
+    }
+    assert!(!normalized.contains("instead of following the rest of this workflow"));
     assert!(
         SKILL.contains("eight scored matches"),
         "the skill must describe the scored-matches contract, not a complete \
@@ -232,10 +253,10 @@ fn forkguard_mcp_discovery_skill_conditions_registry_commands() {
          registry_sync is registered (pool init failure, tool-security mode):\n{SKILL}"
     );
     assert!(
-        SKILL.contains("`tool_search` as in step 1"),
-        "the start tool is deferred-but-searchable and its activation does not \
-         follow from registry_sync's, so step 3 must point at step 1's \
-         tool_search path instead of surrendering on visibility alone:\n{SKILL}"
+        normalized.contains("`tool_search` when available, as in step 1"),
+        "the start tool is independently deferred; step 3 must reuse step 1's \
+         available discovery and bounded fallback instead of surrendering \
+         on visibility alone:\n{SKILL}"
     );
     assert!(
         SKILL.contains("the start tool once the host's MCP pool is initialized"),

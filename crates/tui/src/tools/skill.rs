@@ -37,8 +37,9 @@ impl ToolSpec for LoadSkillTool {
 
     fn description(&self) -> &'static str {
         "Load a skill (SKILL.md body + companion file list) into the next turn's context. \
-         Use name=\"list\" to discover the complete enabled catalogue, then load an exact \
-         skill when the user names it or the task clearly matches its description. Faster \
+         Load its known exact name directly when the user names it or the task clearly \
+         matches its description; use name=\"list\" only when the name or index is \
+         insufficient. Faster \
          than separate `read` and `list_dir` calls."
     }
 
@@ -588,6 +589,16 @@ mod tests {
 
         let context = ToolContext::new(workspace);
         let tool = LoadSkillTool;
+
+        for wording in [
+            "Load its known exact name directly",
+            "use name=\"list\" only when the name or index is insufficient",
+        ] {
+            assert!(
+                tool.description().contains(wording),
+                "missing skill rule: {wording}"
+            );
+        }
 
         // #4651: listing is an action inside the single load_skill tool —
         // empty name, "*", and "list" all enumerate the reviewed registry.
