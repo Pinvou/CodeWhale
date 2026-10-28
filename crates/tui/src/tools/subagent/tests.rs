@@ -3571,6 +3571,53 @@ fn scoped_mutation_paths_accept_absolute_targets_inside_the_workspace() {
     .expect_err("absolute traversal out of the workspace is refused")
     .to_string();
     assert!(err.contains("repo-relative"), "{err}");
+
+    // Whitespace-padded spellings are judged EXACTLY as the write tool
+    // resolves them — the raw string, never trimmed. A padded absolute is
+    // NOT absolute to the tool (it joins onto the workspace as
+    // `<ws>/␣␣/<abs-ws>/…`), so the claim lane validates that literal
+    // space-led spelling, never the trimmed absolute target the tool does
+    // not touch. (The pre-round-4 trim made this spelling validate as
+    // `fixture/calc/padded.txt` while the tool wrote the space-led path.)
+    let padded_relative_target = "fixture/calc/padded.txt";
+    let padded_absolute = format!(
+        "  {}",
+        canonical.join(padded_relative_target).to_string_lossy()
+    );
+    let paths = mutation_paths("write", &json!({ "path": padded_absolute }), &workspace)
+        .expect("a padded spelling still normalizes");
+    assert_eq!(
+        paths,
+        vec![format!(
+            "  {}",
+            canonical.join(padded_relative_target).to_string_lossy()
+        )],
+        "the claim lane judges the raw spelling: the padded path is not absolute, \
+         so it validates as the literal space-led components the tool would \
+         join onto the workspace"
+    );
+
+    // A padded relative spelling keeps its literal form for the same
+    // reason: trimming here would validate one path and write another.
+    let paths = mutation_paths(
+        "write",
+        &json!({ "path": "fixture/calc/ tail.txt " }),
+        &workspace,
+    )
+    .expect("a padded relative spelling still normalizes");
+    assert_eq!(paths, vec!["fixture/calc/ tail.txt ".to_string()]);
+
+    // Whitespace-only spellings refuse outright instead of normalizing to
+    // "." — the whole-workspace scope no write input ever meant.
+    for path in ["   ", "\t"] {
+        let err = mutation_paths("write", &json!({ "path": path }), &workspace)
+            .expect_err("a whitespace-only path is refused")
+            .to_string();
+        assert!(
+            err.contains("non-empty repo-relative path"),
+            "{path}: {err}"
+        );
+    }
 }
 
 #[test]
@@ -13743,6 +13790,16 @@ async fn write_capable_grandchild_of_a_worktree_child_inherits_isolation() {
             },
         )
         .expect("worktree child admitted");
+    // Mark the parent live: a stub-spawned background child never enters
+    // its runtime loop, so without this its claim is inactive and NOTHING
+    // in this test observes exemption removal — the grandchild admission
+    // leg was contention-blind (the round-4 mutation lab proved the ignore-
+    // exemptions mutation survived exactly this pin). With the parent live,
+    // the grandchild is admitted only through its ancestor exemption, and
+    // an exemption kill turns this admission into a contention refusal.
+    if let Some(agent) = guard.agents.get_mut(&parent.agent_id) {
+        agent.status = SubAgentStatus::Running;
+    }
 
     // Its grandchild: issued from inside the worktree with no worktree/cwd
     // request of its own, so the runtime carries the worktree as workspace
@@ -13897,6 +13954,14 @@ async fn worktree_sibling_grandchildren_contend_while_a_descendant_chain_does_no
             },
         )
         .expect("worktree child admitted");
+    // Mark the parent live: a stub-spawned background child has not entered
+    // its runtime loop yet, so without this the parent's claim is inactive
+    // and the sibling predicate below never fires — the test would pass
+    // even with the ancestor exemption removed entirely (the round-4
+    // mutation lab proved exactly that blind spot).
+    if let Some(agent) = guard.agents.get_mut(&parent.agent_id) {
+        agent.status = SubAgentStatus::Running;
+    }
 
     let first = {
         let mut child_runtime = stub_runtime();
@@ -24453,6 +24518,35 @@ async fn cwd_narrowed_scoped_worktree_child_validates_paths_in_its_own_frame() {
     assert!(
         refused.contains(r#"roots: ["docs"]"#),
         "unexpected refusal shape: {refused}"
+    );
+}
+
+/// The re-anchor join accepts either separator on both sides: the offset
+/// comes from a platform path `Display` (backslashes on Windows) while the
+/// ledger frame is forward-slash, so a mixed-spelling join must still land
+/// on the forward-slash worktree-frame path.
+#[test]
+fn lexically_under_joins_mixed_separator_spellings_into_the_forward_slash_frame() {
+    assert_eq!(
+        lexically_under("crates\\app", "main.rs"),
+        Some("crates/app/main.rs".to_string()),
+        "a backslash offset joins into the forward-slash frame"
+    );
+    assert_eq!(
+        lexically_under("crates/app", "src\\lib.rs"),
+        Some("crates/app/src/lib.rs".to_string()),
+        "a backslash tool path is joined the same way"
+    );
+    assert_eq!(
+        lexically_under("crates\\app", "..\\sibling.txt"),
+        Some("crates/sibling.txt".to_string()),
+        "`..` resolves across the separator boundary"
+    );
+    assert_eq!(lexically_under("crates", ".."), Some(".".to_string()));
+    assert_eq!(
+        lexically_under("crates", "../.."),
+        None,
+        "escaping above the offset keeps the raw spelling for containment to refuse"
     );
 }
 

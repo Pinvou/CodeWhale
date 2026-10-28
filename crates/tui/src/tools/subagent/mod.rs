@@ -1541,7 +1541,10 @@ pub(crate) struct SubAgentSpawnOptions {
     /// under. A root-session resume has no ancestor chain to resolve
     /// containment from, so the recorded key keeps the claim in its original
     /// serialization domain instead of falling back to the child's own
-    /// (possibly `cwd`-narrowed) workspace.
+    /// (possibly `cwd`-narrowed) workspace. Honored by the spawn seam for
+    /// ANY isolated child, not only resumed ones — only resume sets it
+    /// today; a future non-resume caller must be sure its recorded key is
+    /// authoritative before setting it.
     pub write_claim_worktree_root: Option<String>,
     /// Checkpoint resume: preserve the interrupted child's runtime posture
     /// instead of rebuilding it from the caller's role.
@@ -3792,7 +3795,7 @@ impl SubAgentManager {
                 break;
             }
             chain.push(worker_id);
-            cursor = record.parent_run_id.clone();
+            cursor = worker_parent_ref(record).map(str::to_string);
         }
         if !chain.iter().any(|entry| entry == "root") {
             chain.push("root".to_string());
@@ -13529,15 +13532,28 @@ fn parse_coordination_paths(input: &Value, key: &str) -> Result<Vec<String>, Too
 }
 
 fn normalize_claim_path(path: &str) -> Result<String, String> {
+    // The claim lane must judge the exact string the mutating tool resolves:
+    // trimming here once made `" x.txt"` validate as `x.txt` while the tool
+    // wrote `<ws>/ x.txt`, and a whitespace-only root normalized to `.` — a
+    // whole-workspace claim from an empty spelling. Backslash replacement is
+    // kept (Windows spellings land in the forward-slash ledger frame).
     let path = path.replace('\\', "/");
-    let trimmed = path.trim();
-    if trimmed.len() > 4096 || trimmed.chars().any(|ch| matches!(ch, '\0' | '\r' | '\n')) {
+    if path.len() > 4096 || path.chars().any(|ch| matches!(ch, '\0' | '\r' | '\n')) {
         return Err("write scope path must be one bounded repo-relative line".to_string());
     }
-    if trimmed.is_empty() || trimmed == "." {
+    if path.is_empty() {
+        // The identity mapping: an internal prefix computation
+        // (`coordination_workspace_prefix`) yields "" when the worker
+        // workspace IS the coordination root, and that is the root scope.
         return Ok(".".to_string());
     }
-    let candidate = Path::new(trimmed);
+    if path.chars().all(|ch| ch.is_whitespace()) {
+        return Err("write scope path must be a non-empty repo-relative path".to_string());
+    }
+    if path == "." {
+        return Ok(".".to_string());
+    }
+    let candidate = Path::new(&path);
     if candidate.is_absolute() {
         return Err(format!(
             "write scope path must be repo-relative without traversal: {path}"
@@ -13568,9 +13584,10 @@ fn normalize_claim_path(path: &str) -> Result<String, String> {
 }
 
 /// The parent reference a worker record records: the live pointer wins, the
-/// launch spec's is the durable fallback. Both ancestry walks
-/// (`worktree_claim_exemptions`, `ensure_caller_controls_descendant`) must
-/// resolve it identically or they disagree about who delegated to whom.
+/// launch spec's is the durable fallback. Every ancestry walk
+/// (`worktree_claim_exemptions`, `worker_ancestry`,
+/// `ensure_caller_controls_descendant`) must resolve it identically or they
+/// disagree about who delegated to whom.
 fn worker_parent_ref(record: &AgentWorkerRecord) -> Option<&str> {
     record
         .parent_run_id
@@ -13579,15 +13596,19 @@ fn worker_parent_ref(record: &AgentWorkerRecord) -> Option<&str> {
 }
 
 /// Join `offset` and `path` under one lexical spelling, resolving `.` and
-/// `..` components. Returns `None` when `path` escapes above `offset`
-/// entirely; the caller then keeps the raw spelling and lets the claim's
-/// own containment check refuse it.
+/// `..` components. Both sides may carry either separator: the offset comes
+/// from a platform path `Display` (backslashes on Windows) while the ledger
+/// frame is forward-slash, and a mixed-spelling join would produce
+/// `crates\app/main.rs` against forward-slash claim roots and fail closed
+/// for every cwd-narrowed Windows child. Returns `None` when `path` escapes
+/// above `offset` entirely; the caller then keeps the raw spelling and lets
+/// the claim's own containment check refuse it.
 fn lexically_under(offset: &str, path: &str) -> Option<String> {
     let mut components: Vec<&str> = offset
-        .split('/')
+        .split(['/', '\\'])
         .filter(|component| !component.is_empty() && *component != ".")
         .collect();
-    for component in path.split('/') {
+    for component in path.split(['/', '\\']) {
         match component {
             "" | "." => {}
             ".." => {
@@ -16556,10 +16577,13 @@ fn mutation_paths(name: &str, input: &Value, workspace: &Path) -> Result<Vec<Str
     } else {
         Vec::new()
     };
+    // One normalization per batch, not per path: every absolute spelling
+    // below strips against the same canonical workspace.
+    let workspace = normalize_subagent_workspace(workspace);
     raw_paths
         .into_iter()
         .map(|path| {
-            let path = workspace_relative_mutation_path(workspace, &path);
+            let path = workspace_relative_mutation_path(&workspace, &path);
             normalize_claim_path(&path).map_err(anyhow::Error::msg)
         })
         .collect()
@@ -16570,22 +16594,28 @@ fn mutation_paths(name: &str, input: &Value, workspace: &Path) -> Result<Vec<Str
 /// the claim ledger speaks repo-relative paths, so strip the workspace
 /// prefix before scope validation instead of refusing the spelling. A target
 /// outside the workspace is handed to the validator untouched and refused
-/// there, as before. The deepest-existing walk delegates to the core's
-/// single implementation — the same one behind the write tool's own
-/// boundary (`tools::spec::resolve_nonexistent_path`) — so this lane cannot
-/// drift from it on symlinked or partially-existing spellings.
+/// there, as before. The string is judged exactly as the tool receives it —
+/// no trimming: a padded spelling is not absolute, so it validates under the
+/// literal `<space>/…` components the tool would join onto the workspace,
+/// never under the trimmed absolute target it does not touch. The
+/// deepest-existing walk delegates to the core's single implementation — the
+/// same one behind the write tool's own boundary
+/// (`tools::spec::resolve_nonexistent_path`) — so this lane cannot drift
+/// from it on symlinked or partially-existing spellings.
+///
+/// `workspace` arrives already normalized from `mutation_paths`.
 fn workspace_relative_mutation_path(workspace: &Path, path: &str) -> String {
-    let candidate = Path::new(path.trim());
+    let candidate = Path::new(path);
     if !candidate.is_absolute() {
         return path.to_string();
     }
-    let workspace = normalize_subagent_workspace(workspace);
     // The crate's single deepest-existing delegation point — the exact walk
     // the write tool's boundary resolves through — so the claim lane cannot
-    // drift from it.
+    // drift from it. The walk always composes a path, so this only guards a
+    // future signature change of the shared core walk.
     let resolved = crate::core::authority::resolve_deepest_existing(candidate)
         .unwrap_or_else(|| candidate.to_path_buf());
-    match resolved.strip_prefix(&workspace) {
+    match resolved.strip_prefix(workspace) {
         Ok(relative) => relative.to_string_lossy().into_owned(),
         Err(_) => path.to_string(),
     }

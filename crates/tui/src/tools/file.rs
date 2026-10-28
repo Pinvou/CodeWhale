@@ -646,12 +646,14 @@ fn primitive_image_mime(bytes: &[u8]) -> Option<&'static str> {
 /// A payload the text reader must refuse rather than decode lossily. Any NUL
 /// in the sniffed head marks a binary container (zip-based Office documents,
 /// OLE2, executables, images without a sniffable magic) or UTF-16 text, whose
-/// ASCII range carries a NUL per code unit; a leading UTF-16/UTF-32 BOM is
-/// recognized even when the text that follows happens to avoid NULs. The
+/// ASCII range carries a NUL per code unit; a leading UTF-16 BOM is
+/// recognized even when the text that follows happens to avoid NULs (the
+/// UTF-32 BOMs carry NULs themselves and are caught by the NUL arm). The
 /// sniff is a heuristic, not a format detector: a binary whose first 8 KiB
-/// happen to be NUL-free passes — most PDFs and zips carry a NUL early, an
-/// ASCII-headed one does not. Single stray high bytes are left to the lossy
-/// decode — Latin-1 text with `ÿ` is still text.
+/// happen to be NUL-free passes — most zips carry a NUL early; a PDF's magic
+/// is ASCII and only its inner objects are binary, so an ASCII-headed one can
+/// pass too. Single stray high bytes are left to the lossy decode — Latin-1
+/// text with `ÿ` is still text.
 fn contract_read_payload_is_binary(bytes: &[u8]) -> bool {
     const SNIFF_BYTES: usize = 8192;
     let head = &bytes[..bytes.len().min(SNIFF_BYTES)];
@@ -785,10 +787,12 @@ impl ReadFileTool {
         // is for text with a stray bad byte, not for binary containers: a .pptx/.docx/.zip
         // or an executable decoded this way fills the whole read budget with mojibake and
         // tells the model nothing. Refuse those up front and point at an extractor. The
-        // extraction commands below need a role whose shell allows them; `file` is read-only.
+        // commands below assume a role whose shell admits them (`file` is read-only;
+        // `unzip` needs a role that permits it) — a role with no shell at all can only
+        // delegate, so the message says so instead of naming unreachable commands.
         if contract_read_payload_is_binary(&bytes) {
             return Err(ToolError::execution_failed(format!(
-                "{path_str} is a binary file ({}); read returns text only. Use `file` to identify it; if it is a zip-based document (.pptx/.docx/.xlsx/.zip), read its members with `unzip -l`/`unzip -p` using a role that permits it.",
+                "{path_str} is a binary file ({}); read returns text only. Identify it with `file` if your role has a shell; if it is a zip-based document (.pptx/.docx/.xlsx/.zip), list its members with `unzip -l` and read them with `unzip -p` under a role that permits unzip. If neither command is available to you, hand the file to a role that can extract it instead of re-reading.",
                 contract_format_size(bytes.len())
             )));
         }

@@ -164,8 +164,10 @@ pub struct PersistedWriteClaim {
     /// `isolated_worktree`. Claims sharing a root contend with each other
     /// (ancestors exempted at registration); claims in different worktrees
     /// never do. `None` on records persisted before the field existed, which
-    /// keeps those on the legacy never-contending footing.
-    #[serde(default)]
+    /// keeps those on the legacy never-contending footing — and `None` is
+    /// omitted from the persisted shape (like the neighboring optional
+    /// receipt fields), so only rooted claims carry the key on disk.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub worktree_root: Option<String>,
 }
 
@@ -1773,5 +1775,59 @@ mod records_tests {
             .unwrap_err();
         assert!(error.contains("unsupported coordination schema"), "{error}");
         assert!(ledger.write_claims.is_empty());
+    }
+
+    /// The serialization key round-trips both ways across the field's
+    /// introduction: a record persisted before the field existed (no
+    /// `worktree_root` key) deserializes onto the legacy never-contending
+    /// footing, a rooted record carries its key, and an unrooted record
+    /// omits the key from the persisted shape instead of writing an
+    /// explicit null.
+    #[test]
+    fn persisted_write_claim_worktree_root_round_trips_across_the_field_introduction() {
+        let claim = |owner: &str| WriteScopeClaim {
+            owner: owner.to_string(),
+            roots: vec![".".into()],
+            exact_files: vec![],
+            contracts: vec![],
+        };
+        let legacy: PersistedWriteClaim = serde_json::from_value(json!({
+            "claim": { "owner": "legacy-worker", "roots": ["."], "exact_files": [], "contracts": [] },
+            "sequence": 1,
+            "isolated_worktree": true,
+        }))
+        .expect("a pre-field record deserializes");
+        assert_eq!(
+            legacy.worktree_root, None,
+            "a missing key keeps the legacy footing"
+        );
+        assert_eq!(
+            serde_json::to_value(&legacy)
+                .expect("serialize legacy")
+                .to_string(),
+            r#"{"claim":{"owner":"legacy-worker","roots":["."],"exact_files":[],"contracts":[]},"sequence":1,"isolated_worktree":true}"#,
+            "an unrooted record omits the key instead of writing null"
+        );
+
+        let rooted = PersistedWriteClaim {
+            claim: claim("rooted-worker"),
+            sequence: 2,
+            isolated_worktree: true,
+            worktree_root: Some("/wt".into()),
+        };
+        assert_eq!(
+            serde_json::to_value(&rooted).expect("serialize rooted"),
+            json!({
+                "claim": { "owner": "rooted-worker", "roots": ["."], "exact_files": [], "contracts": [] },
+                "sequence": 2,
+                "isolated_worktree": true,
+                "worktree_root": "/wt",
+            }),
+            "a rooted record carries its key"
+        );
+        let parsed: PersistedWriteClaim =
+            serde_json::from_value(serde_json::to_value(&rooted).expect("serialize rooted"))
+                .expect("round trip");
+        assert_eq!(parsed, rooted);
     }
 }

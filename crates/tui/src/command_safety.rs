@@ -824,29 +824,18 @@ fn is_agent_readonly_git(tokens: &[String]) -> bool {
     readonly_tokens_admitted(&reduced.join(" "))
 }
 
-/// `git branch` in listing form only: bare, `--show-current`, flag-only
-/// spellings of known read-only switches (`git branch -a`), or
-/// `--list`/`-l` (then every positional is a match pattern, not a new
-/// branch). A bare `git branch <name>` stays refused — without `--list`
-/// a positional would create a branch. `-l` has meant
-/// `--list` only since git 2.20; on the pre-2018 gits where it meant
-/// `--create-reflog` this parser would be wrong, but every supported
-/// toolchain ships ≥ 2.20.
 /// Classify an attached-value token `--flag=value`: read-only exactly when
 /// the flag part is a known value flag of this subcommand or one of its
 /// OPTARG-style switches (`--column=<style>`, `--color=<when>`), whose
 /// attached form git consumes without touching the next word — so there is
 /// no dash-value ambiguity for the checker to resolve.
-fn attached_readonly_value<'a>(
-    token: &'a str,
-    value_flags: &[&str],
-    optarg_switches: &[&str],
-) -> Option<&'a str> {
-    let (flag, value) = token.split_once('=')?;
-    if !token.starts_with("--") || value.is_empty() {
-        return None;
-    }
-    (value_flags.contains(&flag) || optarg_switches.contains(&flag)).then_some(flag)
+fn attached_readonly_value(token: &str, value_flags: &[&str], optarg_switches: &[&str]) -> bool {
+    let Some((flag, value)) = token.split_once('=') else {
+        return false;
+    };
+    token.starts_with("--")
+        && !value.is_empty()
+        && (value_flags.contains(&flag) || optarg_switches.contains(&flag))
 }
 
 /// A combined short-flag cluster `-arv` is read-only exactly when every
@@ -861,6 +850,14 @@ fn is_combined_readonly_shorts(token: &str, singles: &str) -> bool {
     flags.len() > 1 && flags.iter().all(|ch| singles.contains(*ch))
 }
 
+/// `git branch` in listing form only: bare, `--show-current`, flag-only
+/// spellings of known read-only switches (`git branch -a`), or
+/// `--list`/`-l` (then every positional is a match pattern, not a new
+/// branch). A bare `git branch <name>` stays refused — without `--list`
+/// a positional would create a branch. `-l` has meant
+/// `--list` only since git 2.20; on the pre-2018 gits where it meant
+/// `--create-reflog` this parser would be wrong, but every supported
+/// toolchain ships ≥ 2.20.
 fn is_agent_readonly_git_branch(args: &[String]) -> bool {
     if args.is_empty() {
         // Bare `git branch` lists local branches; nothing to inspect.
@@ -902,7 +899,7 @@ fn is_agent_readonly_git_branch(args: &[String]) -> bool {
         // flag without `--list` stays refused (fail-closed).
         return args.iter().all(|token| {
             switches.contains(&token.as_str())
-                || attached_readonly_value(token, value_flags, optarg_switches).is_some()
+                || attached_readonly_value(token, value_flags, optarg_switches)
                 || is_combined_readonly_shorts(token, "arlvq")
         });
     }
@@ -914,7 +911,7 @@ fn is_agent_readonly_git_branch(args: &[String]) -> bool {
                 index += 1;
                 continue;
             }
-            if attached_readonly_value(token, value_flags, optarg_switches).is_some() {
+            if attached_readonly_value(token, value_flags, optarg_switches) {
                 // `--sort=-committerdate` and friends: the value is bound to
                 // the flag in the same token, so there is no next word to
                 // swallow and no dash-value ambiguity.
@@ -965,7 +962,7 @@ fn is_agent_readonly_git_worktree(args: &[String]) -> bool {
             index += 1;
             continue;
         }
-        if attached_readonly_value(token, value_flags, &[]).is_some()
+        if attached_readonly_value(token, value_flags, &[])
             || is_combined_readonly_shorts(token, "vz")
         {
             index += 1;

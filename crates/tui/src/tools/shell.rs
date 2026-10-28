@@ -4007,7 +4007,15 @@ fn hardened_readonly_argv(command: &str) -> Result<(String, Vec<String>)> {
                     ],
                 );
             }
-            "status" | "ls-files" | "blame" | "grep" => {}
+            // These subcommands' read-only forms spawn no configured helper
+            // (external diff/textconv/signature verification are the
+            // process-spawning hazards, and they belong to diff/log/show
+            // only), so containment needs no spliced flags. The read-only
+            // SHAPE of each subcommand — `rev-parse`'s bounded flag table,
+            // `branch`'s listing forms, `worktree list`'s flag-only
+            // arguments — is the classifier's contract; this hardener only
+            // keeps the read inside git's own process.
+            "status" | "ls-files" | "blame" | "grep" | "rev-parse" | "branch" | "worktree" => {}
             _ => {
                 return Err(anyhow!(
                     "classifier-approved Git read did not keep its subcommand in argv[1]"

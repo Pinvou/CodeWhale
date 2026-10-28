@@ -1052,6 +1052,41 @@ fn readonly_argv_is_shell_free_and_disables_git_helpers() {
     assert_eq!(args, ["$PATTERN", "."]);
 }
 
+#[test]
+fn readonly_argv_executes_the_git_orientation_probes_without_a_shell() {
+    // The probes a worktree child needs to orient itself, in their bare
+    // (non-piped) spellings: admitted by the classifier and executed here
+    // as argv, not through a shell. This pins the execution seam — the
+    // classifier alone used to admit these while the hardener refused them.
+    for (command, subcommand) in [
+        ("git rev-parse --show-toplevel", "rev-parse"),
+        ("git rev-parse --abbrev-ref HEAD", "rev-parse"),
+        ("git -C crates/tui rev-parse --short HEAD", "rev-parse"),
+        ("git branch --show-current", "branch"),
+        ("git branch --list 'feat-*'", "branch"),
+        ("git worktree list", "worktree"),
+        ("git worktree list --porcelain", "worktree"),
+    ] {
+        let (program, args) = hardened_readonly_argv(command)
+            .unwrap_or_else(|error| panic!("bare probe must execute: {command}: {error}"));
+        assert_eq!(program, "git", "{command}");
+        assert!(
+            args.contains(&subcommand.to_string()),
+            "the subcommand survives in argv (a `-C` preamble stays in place): \
+             {command} -> {args:?}"
+        );
+    }
+
+    // Non-read-only git subcommands keep failing closed at the execution
+    // seam even if a future classifier change ever admitted them.
+    let error = hardened_readonly_argv("git push origin main")
+        .expect_err("a mutating subcommand never executes");
+    assert!(
+        error.to_string().contains("did not keep its subcommand"),
+        "{error}"
+    );
+}
+
 #[cfg(any(unix, windows))]
 #[test]
 fn readonly_program_resolution_ignores_workspace_shadow_executables() {

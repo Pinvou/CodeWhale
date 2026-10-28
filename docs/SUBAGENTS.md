@@ -190,15 +190,23 @@ a real isolated worktree may proceed in parallel.
 A child that a worktree child spawns without its own `worktree`/`cwd` request
 runs inside that same worktree, and its claim is registered on the same
 isolated footing (worktree-relative roots) rather than against the shared
-coordination root. An interrupted child holds no live claim: its loop is gone
-and a resume runs under a new id with its own claim, so later writers — and the
-resume itself — are not gated by it.
+coordination root. A `cwd`-narrowed child keys its claim on the containing
+worktree — the nearest ancestor claim that records that worktree, or, once
+the ledger row is swept or evicted, the launch manifest recorded at spawn —
+not on its own subdirectory, and a claim-less worktree parent confers the
+footing and records the key the same way. An interrupted child holds no live
+claim: its loop is gone and a resume runs under a new id with its own claim,
+so later writers — and the resume itself — are not gated by it.
 Within one worktree the ledger still serializes unrelated writers: a claim may
 overlap its ancestors' (the work was delegated downward), but two unrelated
 descendants — parallel siblings — with overlapping scope contend, exactly as
-they would in the shared root. A resumed loop is only serialized against
-writers still live at resume time; it must re-orient to whatever completed
-while it was parked.
+they would in the shared root. The exemption runs along the new claimant's
+ancestor chain only: a parent that later registers or expands an overlapping
+claim of its own is refused by its live descendant. Records persisted before
+claims carried a worktree key keep a never-contending footing. A resumed loop
+is only serialized against writers still live at resume time; the ledger does
+not surface what completed while it was parked, so re-read the affected paths
+before writing.
 
 Optional fields:
 

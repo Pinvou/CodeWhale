@@ -144,8 +144,9 @@ async fn contract_read_refuses_binary_payloads_but_keeps_lossy_text() {
         assert!(
             error.contains(name)
                 && error.contains("binary file")
-                && error.contains("Use `file`")
-                && error.contains("unzip"),
+                && error.contains("Identify it with `file`")
+                && error.contains("unzip")
+                && error.contains("hand the file to a role that can extract it"),
             "{name}: {error}"
         );
     }

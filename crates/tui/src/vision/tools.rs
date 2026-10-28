@@ -93,6 +93,18 @@ impl ImageAnalyzeTool {
         // the model absolute paths, and refusing those outright sent it
         // through a failed call to learn the relative form.
         let candidate = if image_path_buf.is_absolute() {
+            // The same lexical traversal guard the relative branch applies
+            // (minus `RootDir`, which is inherent to an absolute spelling):
+            // judged before canonicalize so a non-existent escaping target
+            // gets the containment refusal too, not a resolve error.
+            if image_path_buf
+                .components()
+                .any(|c| matches!(c, Component::Prefix(_) | Component::ParentDir))
+            {
+                return Err(ToolError::execution_failed(
+                    "image_path must resolve within the workspace and cannot escape it.",
+                ));
+            }
             image_path_buf.to_path_buf()
         } else {
             // `RootDir` cannot appear in a Unix-relative path but can in a
@@ -621,6 +633,18 @@ mod tests {
         let err = ImageAnalyzeTool::resolve_image_path(tmp.path(), &traversed.to_string_lossy())
             .expect_err("absolute traversal out of the workspace is refused");
         assert!(err.to_string().contains("within the workspace"), "{err}");
+
+        // A traversal whose target does NOT exist must get the same
+        // containment refusal (judged lexically before canonicalize), not
+        // a resolve error — the boundary message is what tells the model
+        // how to fix the spelling.
+        let missing = tmp.path().join("..").join("no-such-dir").join("x.png");
+        let err = ImageAnalyzeTool::resolve_image_path(tmp.path(), &missing.to_string_lossy())
+            .expect_err("absolute traversal to a missing file is refused");
+        assert!(
+            err.to_string().contains("within the workspace"),
+            "the containment message fires even when canonicalize would fail: {err}"
+        );
     }
 
     #[tokio::test]

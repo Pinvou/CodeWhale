@@ -12420,9 +12420,10 @@ fn tool_error_messages_include_actionable_hints() {
 
 /// A validation receipt echoes the input schema so the model can repair a
 /// malformed call, but a kilobytes-long schema replayed on every semantic
-/// refusal (live session 2026-10-24: the `agent` schema, ~4.5KB, appended to
-/// eight "agent not found"/contention errors) drowns the one-line cause. Large
-/// schemas are reduced to their field inventory; small ones stay verbatim.
+/// refusal (live session 2026-10-24: the `agent` schema — ~6.7KB on the
+/// current tree — appended to eight "agent not found"/contention errors)
+/// drowns the one-line cause. Large schemas are reduced to their field
+/// inventory; small ones stay verbatim.
 #[test]
 fn tool_validation_feedback_bounds_oversized_schemas_to_their_field_inventory() {
     let error = ToolError::invalid_input("Agent not found in the active session");
@@ -12518,6 +12519,10 @@ fn tool_validation_feedback_bounds_oversized_schemas_to_their_field_inventory() 
         formatted.contains("\"properties\":[]") && formatted.contains("omitted from this receipt"),
         "a no-properties schema reduces with an empty inventory: {formatted}"
     );
+    assert!(
+        !formatted.contains("\"type\":"),
+        "a schema that declares no type must not be mis-typed as object in the receipt: {formatted}"
+    );
 
     // The reduced receipt carries the schema's DECLARED type, not a
     // hardcoded \"object\": a composition-free string schema must say so.
@@ -12560,6 +12565,34 @@ fn tool_validation_feedback_bounds_oversized_schemas_to_their_field_inventory() 
     assert!(
         formatted.contains("\"field_39\"") && !formatted.contains("\"field_40\""),
         "the inventory truncates at the cap: {formatted}"
+    );
+
+    // The reduction honors the byte budget it enforces: few-but-long
+    // property names are each skipped into the omitted tail, so the
+    // receipt stays under the budget even when the cap alone would not
+    // bound it.
+    let long_names = (0..3)
+        .map(|index| {
+            (
+                format!("very_long_property_name_{index}_{}", "x".repeat(800)),
+                json!({}),
+            )
+        })
+        .collect::<serde_json::Map<_, _>>();
+    let long_name_schema = json!({
+        "type": "object",
+        "properties": long_names,
+        "required": ["very_long_property_name_0"]
+    });
+    let formatted = format_tool_error_with_schema(&error, "long", Some(&long_name_schema));
+    assert!(
+        formatted.contains("... and 3 more properties"),
+        "over-long names are counted as omitted: {formatted}"
+    );
+    assert!(
+        formatted.len() < 2048,
+        "the reduced receipt stays under the budget regardless of name lengths ({} bytes)",
+        formatted.len()
     );
 }
 
@@ -20963,9 +20996,10 @@ fn forkguard_subagent_hint_gates_on_visible_rows_only() {
 // snapshot shape, so they must keep passing through bounded — the scope is
 // the payload the model needs to reason about its own write permissions.
 // The fixture mirrors the real receipt: `PersistedWriteClaim` serializes as
-// {claim, sequence, isolated_worktree} with no `action` key (the translated
-// `action: "claim"` only exists on the tool-call input), so it survives via
-// the summarizer's shape fall-through, not the action rule.
+// {claim, sequence, isolated_worktree} (plus `worktree_root` when an
+// isolated claim records its serialization key) with no `action` key (the
+// translated `action: "claim"` only exists on the tool-call input), so it
+// survives via the summarizer's shape fall-through, not the action rule.
 #[test]
 fn forkguard_agent_claim_receipt_passes_through_to_context() {
     let claim = json!({
