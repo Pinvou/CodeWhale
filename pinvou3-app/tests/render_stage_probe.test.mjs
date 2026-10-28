@@ -203,7 +203,10 @@ test('同一周期二次 markDispatched 时旧 rAF 句柄被取消（P2-5 行为
   // r6 P2-B：先章有效——已有 t_dispatch 的二次 markDispatched 直接收尾，
   // 不重臂 rAF、不堆积句柄
   h.probe.markDispatched('dbl');
-  assert.ok(h.rafCount() <= 1, '二次派发不堆积 rAF（finalize 后可能为 0）');
+  // r8 P2-3：先章有效分支必 finalize——finalize 取消刚武装的 rAF，句柄应为
+  // 恒 0（原 <=1 断言对任何回归都不红；「覆盖前取消」的防御分支已随死代码
+  // 删除，变异亲证删除后全套件绿）。
+  assert.equal(h.rafCount(), 0, '先章有效：二次 markDispatched finalize 并取消 rAF');
   assert.ok(h.probe._liveEntry('dbl') === null || h.probe._liveEntry('dbl').finalized,
     '先章有效：二次 markDispatched 应 finalize 而非覆盖');
 });

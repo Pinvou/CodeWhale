@@ -388,3 +388,38 @@ test('后台渲染腿给探针条目打节流标记（r7 P2-2 接线锁）', () 
     '后台渲染腿必须打节流标记（删掉该接线此断言必红）',
   );
 });
+
+// r8 P1 行为锁：跨会话 publish 的 cancel-all 置换活跃会话的武装条目时，
+// **当场补章**——活跃条目补 markDispatched（其内容确随本次发布上屏），
+// 后台条目补 markThrottled。不补章的后果（受控时钟亲证）：活跃条目滞留，
+// 被 180ms 渲染腿补成假 stall（recv_to_dispatch≈180ms，真实派发 16ms），
+// 还烧掉该会话 10s 节流配额。删掉补章循环此测试必红。
+test('publish 置换活跃会话条目时当场补章（r8 P1 行为锁）', () => {
+  const stamps = [];
+  const h = createNativeStreamHarness({
+    count: 2,
+    probe: {
+      begin(sid) { stamps.push(['begin', sid]); },
+      markScheduled(sid) { stamps.push(['markScheduled', sid]); },
+      markThrottled(sid) { stamps.push(['markThrottled', sid]); },
+      markDispatched(sid) { stamps.push(['markDispatched', sid]); },
+    },
+  });
+  // 后台 s1 的首条 delta：抑制态直发被压掉→落到合并帧（先武装）；
+  // 活跃 s0 的第二条 delta：再武装一个合并帧（后武装）。
+  h.emit('s1', 'chat:delta', { text: 'bg' });
+  h.emit('s0', 'chat:delta', { text: 'first' });
+  h.emit('s0', 'chat:delta', { text: ' latest' });
+  // s0 首条 delta 的直发路径会合法地盖第一个条目——记录此刻的章数，
+  // 只把 advance 之后新出现的 s0 派发章算作「置换补章」。
+  const before = stamps
+    .filter(([k, sid]) => k === 'markDispatched' && sid === 's0').length;
+  // 帧窗口内：先武装的 s1 publish 先落，cancel-all 杀掉 s0 的 pend。
+  h.advance(48);
+  const displacedStamp = stamps
+    .filter(([k, sid]) => k === 'markDispatched' && sid === 's0').length - before;
+  assert.equal(displacedStamp, 1,
+    's0 被置换的条目必须在 s1 publish 当场补 markDispatched（内容已随该次发布上屏；不补章=180ms 渲染腿造假 stall 并烧 10s 配额）');
+  assert.ok(stamps.some(([k, sid]) => k === 'markDispatched' && sid === 's1'),
+    's1 自己的 publish 正常盖章');
+});

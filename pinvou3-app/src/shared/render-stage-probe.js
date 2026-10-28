@@ -26,10 +26,15 @@
  *     transitionFinalized 标记绕过隐藏豁免；武装条目按 supersede 先例补章
  *     t_frame。用户的自然冻结反应就是切走窗口——这些恰是最有价值的记录。
  *   - >5s 的真实派发冻结被 P2-A 上界静默吞——5s 新鲜度上界的已知取舍。
- *   - 后台会话经 1s 预览腿发布的条目**不上报**（r7 P2-2）：其 recv→dispatch
- *     ≈1000ms+32ms 的量级是应用自己的合并节流（LLM 思考间隙常态），不是
- *     冻结；打 throttledOrigin 标记后只进 snapshot。可见会话的 180ms 渲染
- *     合并腿低于 120ms 上报阈值，不构成同类噪音。
+ *   - 合并竞速噪音（r7 P2-2 + r8 P1）：跨会话 publish 的 cancel-all 会杀掉
+ *     其它会话已武装的合并帧，而被置换条目的内容其实已随该次发布上屏。
+ *     活跃会话的滞留条目若不补章，会被 180ms 渲染腿补成假 stall 并烧掉该
+ *     会话的 10s 节流配额（r8 P1：publish 现当场对被置换的活跃条目补
+ *     markDispatched）；后台会话的同类条目打 throttledOrigin 只进 snapshot
+ *     （r7 P2-2）。可见会话平日无此噪音的机理：32ms 合并发布腿先盖章，
+ *     渲染腿落到已 finalize 的条目上是 no-op——不是"180ms 低于阈值"
+ *     （180>120，原句是算术错误）；后台 ~1000ms 条目也只在跨会话竞速杀
+ *     pend 时出现，独流后台会话会被自己的 32ms 帧在 ~16ms 盖章。
  *   - 先章有效分支对等待超阈值的条目补章 t_frame（r7 P2-3）：冻结中排队的
  *     终态 notify 解冻后先于 rAF 执行，不补章则该条 dispatch→frame 为 null、
  *     真实冻结零记录。t_dispatch 首章有效，归因不颠倒。
@@ -258,12 +263,9 @@
         entry.t_frame = entry.t_dispatch;
         finalize(entry);
       } else if (typeof window !== "undefined" && typeof window.requestAnimationFrame === "function") {
-        // P2-4：隐藏窗口的合并帧走 ~1s 定时器腿会反复 markDispatched——不取消
-        // 旧句柄就覆盖，流在隐藏中结束后每次 notify 都再武装一个 rAF，恢复可见
-        // 一帧全触发。
-        if (entry.rafHandle != null && typeof window.cancelAnimationFrame === "function") {
-          window.cancelAnimationFrame(entry.rafHandle);
-        }
+        // r8 P2-3：r6 先章有效后，rafHandle 非空蕴含 t_dispatch 非空、条目已在
+        // 上面的先章分支 return——「覆盖前取消旧句柄」的分支不可达（变异亲证：
+        // 删除后全套件绿），随防御性代码删除。
         entry.rafHandle = window.requestAnimationFrame(markFrame(entry));
       } else {
         entry.t_frame = entry.t_dispatch;
