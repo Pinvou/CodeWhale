@@ -1463,6 +1463,96 @@ fn readonly_operand_gate_judges_glob_expansions_by_resolved_location() {
     assert!(error.contains("operand.outside_workspace"), "{error}");
 }
 
+/// bash expands a dot-glob to `.` and `..` (zsh refuses them) and `read_dir`
+/// never yields them, so the walker synthesizes both candidates at every
+/// level a dot-component matches and judges them by resolved location:
+/// `cat .*/secret.txt` must not read `../secret.txt` on a bash host, and a
+/// final `cat .*` must be judged against the outside parent directory.
+#[cfg(unix)]
+#[test]
+fn readonly_glob_walker_judges_the_dot_and_dotdot_candidates() {
+    let workspace = tempdir().expect("workspace");
+    let outside = tempdir().expect("outside");
+    let hidden = workspace.path().join(".d");
+    std::fs::create_dir(&hidden).expect("hidden dir");
+    std::fs::write(hidden.join("ok.txt"), "inside").expect("inside file");
+    std::fs::write(workspace.path().join(".top"), "top").expect("top-level hidden file");
+    std::fs::write(outside.path().join("secret.txt"), "secret").expect("outside file");
+    std::os::unix::fs::symlink(outside.path().join("secret.txt"), hidden.join("link"))
+        .expect("outside symlink in the hidden dir");
+    let roots = [workspace.path().to_path_buf()];
+
+    // Via the hidden entry: the walker follows `.d` (a `read_dir` entry) and
+    // judges the link's resolved location.
+    let error = enforce_readonly_workspace_operands("cat .*/link", &roots, workspace.path())
+        .expect_err("a dot-glob reaching an outside location must be refused")
+        .to_string();
+    assert!(error.contains("operand.outside_workspace"), "{error}");
+    // A final dot-glob includes the parent directory itself on bash/sh.
+    let error = enforce_readonly_workspace_operands("cat .*", &roots, workspace.path())
+        .expect_err("`. .*` includes `..`, which is outside the workspace")
+        .to_string();
+    assert!(error.contains("operand.outside_workspace"), "{error}");
+    // Expansions that stay inside keep working.
+    for command in ["cat .*/ok.txt", "cat .top", "cat .d/.*/ok.txt"] {
+        enforce_readonly_workspace_operands(command, &roots, workspace.path())
+            .unwrap_or_else(|error| panic!("{command} must stay admitted: {error}"));
+    }
+}
+
+/// The walk runs in the host before any child exists to time out, so both of
+/// its bounds refuse instead of exploring: more matches than the cap, or a
+/// symlink cycle that a deep pattern re-enters at every level without ever
+/// producing a match.
+#[cfg(unix)]
+#[test]
+fn readonly_glob_walk_is_bounded_by_the_match_and_node_caps() {
+    let workspace = tempdir().expect("workspace");
+    let big = workspace.path().join("big");
+    std::fs::create_dir(&big).expect("big dir");
+    for index in 0..=super::MAX_READONLY_GLOB_MATCHES {
+        std::fs::write(big.join(format!("f{index:05}.txt")), "x").expect("fixture file");
+    }
+    let roots = [workspace.path().to_path_buf()];
+    let error = enforce_readonly_workspace_operands("cat big/*", &roots, workspace.path())
+        .expect_err("a 4100-match expansion must be refused by the match cap")
+        .to_string();
+    assert!(error.contains("glob_too_broad"), "{error}");
+
+    // A symlink cycle collapses onto one `(directory, remaining pattern)`
+    // key per level, so a deep pattern over it is still fully explored (the
+    // dead-end `zz` matches nothing) and must finish promptly rather than
+    // re-walking the directory exponentially.
+    std::os::unix::fs::symlink(".", workspace.path().join("loop1")).expect("self link");
+    std::os::unix::fs::symlink(".", workspace.path().join("loop2")).expect("self link");
+    let cycled = format!("cat {}", vec!["*"; 24].join("/")) + "/zz";
+    let started = std::time::Instant::now();
+    enforce_readonly_workspace_operands(&cycled, &roots, workspace.path())
+        .unwrap_or_else(|error| panic!("the collapsed cycle walk must stay complete: {error}"));
+    assert!(
+        started.elapsed() < std::time::Duration::from_secs(5),
+        "the re-entry dedup must collapse the cycle, took {:?}",
+        started.elapsed()
+    );
+
+    // The node budget still refuses when the deduplicated walk is genuinely
+    // wide: 2000 sibling self-linked directories are each entered once per
+    // resolvable remaining pattern length (the kernel caps symlink chains),
+    // together past the node cap.
+    let fan = workspace.path().join("fan");
+    std::fs::create_dir(&fan).expect("fan dir");
+    for level in 0..2000 {
+        let leaf = fan.join(format!("f{level:04}"));
+        std::fs::create_dir(&leaf).expect("fan leaf");
+        std::os::unix::fs::symlink(".", leaf.join("s")).expect("self link");
+    }
+    let chained = format!("cat fan/{}", vec!["*"; 40].join("/")) + "/zz";
+    let error = enforce_readonly_workspace_operands(&chained, &roots, workspace.path())
+        .expect_err("a walk past the node budget must be refused")
+        .to_string();
+    assert!(error.contains("glob_too_broad"), "{error}");
+}
+
 /// The escapes end to end: none of these may return the outside content
 /// under `ShellPolicy::ReadOnly`, whichever lane they would have taken.
 #[cfg(unix)]
@@ -5465,3 +5555,4 @@ fn forkguard_powershell_retry_keeps_the_first_result_when_it_cannot_start() {
         annotated.stderr
     );
 }
+

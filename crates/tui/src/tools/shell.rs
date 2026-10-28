@@ -4321,8 +4321,23 @@ fn enforce_readonly_argv_operands(
 /// disk. Walk the pattern the way the shell does (component by component,
 /// `*` matching within one name, hidden entries only when the component asks
 /// for them, symlinked directories followed) and judge every match by its
-/// resolved location. No match is inert: the shell either errors (zsh
-/// `nomatch`) or hands the literal spelling to a program that finds no file.
+/// resolved location the moment it is produced. No match is inert: the shell
+/// either errors (zsh `nomatch`) or hands the literal spelling to a program
+/// that finds no file.
+///
+/// bash expands a dot-glob (`.*`) to include `.` and `..` (zsh does not), and
+/// `read_dir` never yields them, so those two candidates are synthesized at
+/// every level a dot-component matches and judged like any other match.
+///
+/// The walk is bounded because it runs in the host before any child exists to
+/// time out: a symlinked directory pointing at an ancestor makes a deep
+/// pattern re-enter the same directory at every level, so re-entries,
+/// visited nodes, and judged matches are all capped and exceeding any of
+/// them refuses (fail closed, like the rest of the gate). Re-entry dedup is
+/// keyed on the directory identity plus the *remaining pattern length*: a
+/// re-entry with the same remaining pattern is a byte-for-byte repeated
+/// expansion (safe to skip), while every distinct remaining pattern is still
+/// explored, so no match the shell would produce goes unjudged.
 fn enforce_readonly_glob_operand(
     value: &str,
     roots: &[PathBuf],
@@ -4332,31 +4347,109 @@ fn enforce_readonly_glob_operand(
         .split('/')
         .filter(|component| !component.is_empty() && *component != ".")
         .collect();
-    let mut matches = Vec::new();
-    collect_readonly_glob_matches(effective_cwd, &components, &mut matches);
-    for matched in matches {
-        let resolved = matched.canonicalize().map_err(|error| {
-            ToolError::permission_denied(format!(
-                "[shell.readonly.operand.unresolved] Could not prove glob operand {value:?} match {matched:?} stays in the workspace: {error}"
-            ))
-        })?;
-        if !roots.iter().any(|root| resolved.starts_with(root)) {
+    #[cfg_attr(not(unix), allow(unused_mut))]
+    let mut walk = ReadonlyGlobWalk {
+        roots,
+        operand: value,
+        matches: 0,
+        nodes: 0,
+        #[cfg(unix)]
+        entered: std::collections::HashSet::new(),
+        #[cfg(not(unix))]
+        entered_paths: std::collections::HashSet::new(),
+    };
+    collect_readonly_glob_matches(effective_cwd, &components, &mut walk)
+}
+
+/// Hard bounds for one glob operand's expansion. 4096 matches covers any real
+/// reconnaissance probe; 50 000 visited nodes bounds patterns that descend
+/// widely but match narrowly (a deep `*/*/…/zz` over a symlink cycle would
+/// otherwise explore exponentially without producing a single match).
+const MAX_READONLY_GLOB_MATCHES: usize = 4096;
+const MAX_READONLY_GLOB_NODES: usize = 50_000;
+
+struct ReadonlyGlobWalk<'a> {
+    roots: &'a [PathBuf],
+    operand: &'a str,
+    matches: usize,
+    nodes: usize,
+    /// `(device, inode, remaining-pattern-length)` of every directory entered,
+    /// so a symlink cycle re-enters each `(directory, suffix)` pair once.
+    #[cfg(unix)]
+    entered: std::collections::HashSet<(u64, u64, usize)>,
+    /// Path-text stand-in for the unix identity key (no portable dev/ino).
+    #[cfg(not(unix))]
+    entered_paths: std::collections::HashSet<(String, usize)>,
+}
+
+impl ReadonlyGlobWalk<'_> {
+    /// Judge one final match by its resolved location, counting it against
+    /// the match cap. Every branch returns on the first failure, so the walk
+    /// stops at the first match that cannot be proven inside the workspace.
+    fn judge(&mut self, matched: &std::path::Path) -> Result<(), ToolError> {
+        self.matches += 1;
+        if self.matches > MAX_READONLY_GLOB_MATCHES {
             return Err(ToolError::permission_denied(format!(
-                "[shell.readonly.operand.outside_workspace] Read-only Scout shell glob operand {value:?} expands to {matched:?}, which resolves outside the workspace. Use the bounded File read/search actions for project evidence."
+                "[shell.readonly.operand.glob_too_broad] Read-only glob operand {operand:?} expands past {MAX_READONLY_GLOB_MATCHES} matches; narrow the pattern. Use the bounded File read/search actions for project evidence.",
+                operand = self.operand
             )));
         }
+        let resolved = matched.canonicalize().map_err(|error| {
+            ToolError::permission_denied(format!(
+                "[shell.readonly.operand.unresolved] Could not prove glob operand {operand:?} match {matched:?} stays in the workspace: {error}",
+                operand = self.operand
+            ))
+        })?;
+        if !self.roots.iter().any(|root| resolved.starts_with(root)) {
+            return Err(ToolError::permission_denied(format!(
+                "[shell.readonly.operand.outside_workspace] Read-only Scout shell glob operand {operand:?} expands to {matched:?}, which resolves outside the workspace. Use the bounded File read/search actions for project evidence.",
+                operand = self.operand
+            )));
+        }
+        Ok(())
     }
-    Ok(())
+
+    /// Count one directory descent against the node budget before recursing,
+    /// deduplicated by directory identity and remaining pattern length: `Ok`
+    /// carries `true` when this `(directory, suffix)` pair is new and the
+    /// recursion should proceed. The identity is the *followed* metadata (the
+    /// directory a symlink lands on), so sibling self-links collapse onto the
+    /// same keys. Non-unix hosts have no portable `(dev, ino)`; the path text
+    /// stands in (junction cycles are then bounded by the node budget alone).
+    fn enter(&mut self, dir: &std::path::Path, remaining: usize) -> Result<bool, ToolError> {
+        self.nodes += 1;
+        if self.nodes > MAX_READONLY_GLOB_NODES {
+            return Err(ToolError::permission_denied(format!(
+                "[shell.readonly.operand.glob_too_broad] Read-only glob operand {operand:?} walks past {MAX_READONLY_GLOB_NODES} directories without resolving; narrow the pattern. Use the bounded File read/search actions for project evidence.",
+                operand = self.operand
+            )));
+        }
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::MetadataExt;
+            if let Ok(metadata) = dir.metadata() {
+                let key = (metadata.dev(), metadata.ino(), remaining);
+                return Ok(self.entered.insert(key));
+            }
+            // Unresolvable directory: proceed; the walk's own read_dir misses.
+            Ok(true)
+        }
+        #[cfg(not(unix))]
+        {
+            let key = (dir.to_string_lossy().into_owned(), remaining);
+            Ok(self.entered_paths.insert(key))
+        }
+    }
 }
 
 fn collect_readonly_glob_matches(
     base: &std::path::Path,
     components: &[&str],
-    matches: &mut Vec<PathBuf>,
-) {
+    walk: &mut ReadonlyGlobWalk<'_>,
+) -> Result<(), ToolError> {
     let Some((component, rest)) = components.split_first() else {
-        matches.push(base.to_path_buf());
-        return;
+        walk.judge(base)?;
+        return Ok(());
     };
     if !component.contains('*') {
         let next = base.join(component);
@@ -4364,15 +4457,36 @@ fn collect_readonly_glob_matches(
             // `symlink_metadata` so a dangling symlink still counts as a
             // match the shell would hand to the program.
             if next.symlink_metadata().is_ok() {
-                matches.push(next);
+                walk.judge(&next)?;
             }
-        } else if next.is_dir() {
-            collect_readonly_glob_matches(&next, rest, matches);
+        } else if next.is_dir() && walk.enter(&next, rest.len())? {
+            collect_readonly_glob_matches(&next, rest, walk)?;
         }
-        return;
+        return Ok(());
+    }
+    // bash expands a dot-glob to `.` and `..` (zsh refuses them), and
+    // `read_dir` never yields them, so synthesize the two candidates the
+    // shell would produce and judge them exactly like a directory entry.
+    if component.starts_with('.') {
+        for (name, candidate) in [
+            (".", Some(base.to_path_buf())),
+            ("..", base.parent().map(std::path::Path::to_path_buf)),
+        ] {
+            let Some(candidate) = candidate else {
+                continue;
+            };
+            if !readonly_star_match(component, name) {
+                continue;
+            }
+            if rest.is_empty() {
+                walk.judge(&candidate)?;
+            } else if candidate.is_dir() && walk.enter(&candidate, rest.len())? {
+                collect_readonly_glob_matches(&candidate, rest, walk)?;
+            }
+        }
     }
     let Ok(entries) = std::fs::read_dir(base) else {
-        return;
+        return Ok(());
     };
     for entry in entries.flatten() {
         let name = entry.file_name();
@@ -4387,11 +4501,12 @@ fn collect_readonly_glob_matches(
         }
         let next = base.join(&name);
         if rest.is_empty() {
-            matches.push(next);
-        } else if next.is_dir() {
-            collect_readonly_glob_matches(&next, rest, matches);
+            walk.judge(&next)?;
+        } else if next.is_dir() && walk.enter(&next, rest.len())? {
+            collect_readonly_glob_matches(&next, rest, walk)?;
         }
     }
+    Ok(())
 }
 
 /// Match one path component against a pattern whose only wildcard is `*`
@@ -5372,7 +5487,22 @@ impl ToolSpec for BashTool {
                 .as_deref()
                 .map(std::path::Path::new)
                 .unwrap_or(&context.workspace);
-            enforce_readonly_workspace_operands(command, roots, effective_cwd)?;
+            // The gate walks the filesystem (glob expansion) in the host
+            // before any child exists to time out, so it runs on the blocking
+            // pool instead of stalling this executor, and its cost stays
+            // bounded by the walker's match/node caps.
+            let command = command.to_string();
+            let roots = roots.to_vec();
+            let effective_cwd = effective_cwd.to_path_buf();
+            tokio::task::spawn_blocking(move || {
+                enforce_readonly_workspace_operands(&command, &roots, &effective_cwd)
+            })
+            .await
+            .map_err(|error| {
+                ToolError::execution_failed(format!(
+                    "the read-only operand check could not be scheduled: {error}"
+                ))
+            })??;
         }
 
         // #456 — collect env from any configured `shell_env` hooks. Runs
