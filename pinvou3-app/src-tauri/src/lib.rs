@@ -952,6 +952,22 @@ pub fn run() {
         let rest: Vec<String> = std::env::args().skip(2).collect();
         std::process::exit(features::model_store::platform::worker_cli(&rest));
     }
+    // 防呆闸（10-28 双机验证 P0 的教训）：本进程若是在卡片脚本环境里被拉起的
+    // （$LMM_WORKER 已设），那它只可能是被当作 worker 助手调用的——此时 argv[1]
+    // 不是 model-store-worker 就意味着调用方在用错误的契约（比如拿裸 exe 当
+    // 老式 LMM 二进制调子命令）。此前这种情况会一路启动整个 GUI，再被单实例
+    // 插件静默 exit 0——调用方只看到空输出，死因完全不可见。快速报错退出，
+    // 把正确用法说在错误里。
+    #[allow(clippy::exit)]
+    if std::env::var_os("LMM_WORKER").is_some() {
+        let arg1 = std::env::args().nth(1).unwrap_or_default();
+        eprintln!(
+            "ERROR: 检测到本进程在 $LMM_WORKER 环境下以参数「{arg1}」被调用。\
+             从机控制助手需要子命令层：请调 `\"$LMM_WORKER\" <子命令>`（wrapper 已注入），\
+             或 `pinvou3-tauri model-store-worker <子命令>`。不启动 GUI。"
+        );
+        std::process::exit(2);
+    }
     let component_args: Vec<String> = std::env::args().skip(1).collect();
     if component_args == ["--cmsd-store-inventory"] {
         match features::model_store::cmsd_inventory() {

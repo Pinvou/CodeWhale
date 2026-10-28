@@ -161,12 +161,44 @@ pub fn forget_password(a: &WorkerAccess) {
     let _ = fs::remove_file(password_fallback_file(a));
 }
 
-/// 交给双机卡片脚本的环境变量。
+/// 交给双机卡片脚本的环境变量：`LMM_WORKER` 指向一个 wrapper 脚本。
+///
+/// 卡片脚本按老 LMM 契约调 `"$LMM_WORKER" <子命令>`（quoted 调用，deploy.sh
+/// 里 9 处）；本体的分发入口是 `pinvou3-tauri model-store-worker <子命令>`
+/// ——中间差一层子命令。直接注入 exe 路径的话，`"$LMM_WORKER" connect` 会
+/// 变成「以 connect 为首参启动整个 GUI」（.10 真机实锤：单实例插件让它静默
+/// exit 0，info 输出空串，init 拦下「非法 worker 用户名」——10-28 双机验证
+/// P0）。这里生成 `exec <exe> model-store-worker "$@"` 的 wrapper，卡片的
+/// quoted 调用契约原样保留，一行都不用改。每次部署重写一遍（exe 可能随
+/// 升级换路径），幂等。
 pub fn script_env() -> Vec<(String, String)> {
-    let exe = std::env::current_exe()
-        .map(|p| p.to_string_lossy().to_string())
-        .unwrap_or_else(|_| "/usr/bin/pinvou3-tauri".to_string());
-    vec![(ENV_CLI.into(), exe)]
+    use std::io::Write as _;
+    // 拿不到自身路径时不注入——deploy.sh 对 $LMM_WORKER 缺失有明确的
+    // 「请升级 LMM」报错，比注入一个会起 GUI 的假路径好。
+    let Ok(exe) = std::env::current_exe() else {
+        return Vec::new();
+    };
+    let dir = config::config_dir().join("bin");
+    if fs::create_dir_all(&dir).is_err() {
+        return Vec::new();
+    }
+    let wrapper = dir.join("pinvou3-model-store-worker");
+    let script = format!(
+        "#!/bin/sh\nexec {} model-store-worker \"$@\"\n",
+        shell_quote(&exe.to_string_lossy())
+    );
+    let written = fs::OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .mode(0o755)
+        .open(&wrapper)
+        .and_then(|mut f| f.write_all(script.as_bytes()))
+        .and_then(|_| fs::set_permissions(&wrapper, fs::Permissions::from_mode(0o755)));
+    match written {
+        Ok(()) => vec![(ENV_CLI.into(), wrapper.to_string_lossy().to_string())],
+        Err(_) => Vec::new(),
+    }
 }
 
 // ---------------------------------------------------------------- 基础动作
@@ -966,6 +998,41 @@ mod tests {
     fn quoting_survives_single_quotes() {
         assert_eq!(shell_quote("a b"), "'a b'");
         assert_eq!(shell_quote("it's"), r"'it'\''s'");
+    }
+
+    /// 10-28 双机验证 P0：script_env 必须注入 wrapper 而非裸 exe——裸 exe 会让
+    /// 卡片的 `"$LMM_WORKER" connect`（quoted 调用契约，deploy.sh 九处）变成
+    /// 「以 connect 为首参启动整个 GUI」，再被单实例插件静默 exit 0。
+    /// 这里钉住 wrapper 的内容与可执行位；幂等（重写不报错）一并钉。
+    #[test]
+    fn script_env_generates_a_wrapper_not_the_bare_exe() {
+        let _iso = isolated();
+        let env = script_env();
+        assert_eq!(
+            env.len(),
+            1,
+            "生成失败时应为空（脚本有明确报错），这里不该失败"
+        );
+        assert_eq!(env[0].0, ENV_CLI);
+        let wrapper = std::path::Path::new(&env[0].1);
+        assert_ne!(
+            wrapper,
+            std::env::current_exe().unwrap().as_path(),
+            "注入的必须是 wrapper 路径，不能是裸 exe"
+        );
+        let content = fs::read_to_string(wrapper).unwrap();
+        assert!(
+            content.contains("model-store-worker \"$@\""),
+            "wrapper 必须补上子命令层：{content}"
+        );
+        assert!(content.starts_with("#!/bin/sh"));
+        use std::os::unix::fs::PermissionsExt as _;
+        let mode = fs::metadata(wrapper).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o755, "卡片脚本要直接执行它，必须可执行");
+        // 幂等：再生成一遍不报错、内容不变
+        let again = script_env();
+        assert_eq!(again[0].1, env[0].1);
+        assert_eq!(fs::read_to_string(wrapper).unwrap(), content);
     }
 
     /// 接着别的局域网的口一直有底噪，不能因为它涨得多就选它。
