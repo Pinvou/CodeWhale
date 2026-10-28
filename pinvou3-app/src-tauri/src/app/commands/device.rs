@@ -633,7 +633,7 @@ mod tests {
             configured_model: Some("qwen3".to_string()),
             target_kind: "local".to_string(),
             metrics_applicable: true,
-            health_status: "verified".to_string(),
+            health_status: crate::features::monitor::HealthStatus::Verified,
             diagnostic: None,
             metric_diagnostics: Vec::new(),
             max_model_len: Some(32768),
