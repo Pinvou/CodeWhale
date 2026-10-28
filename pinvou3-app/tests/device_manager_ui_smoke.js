@@ -9,6 +9,8 @@
  * - 外部模型「移除」的两段式确认：先登记（ollama 未登记行）再走守卫移除命令
  * - 故障排查快捷卡：device_doctor_prompt → 新建普通会话（create_session）→ chat 携带提示词
  * - 商店库/外部模型读取失败面：常驻错误行 + 前往商店/重试恢复（第五轮评审）
+ * - 旧行在场的刷新失败常驻陈旧行、交错读取按世代消费错误状态（round-30 评审）
+ * - 非温度传感器越线出通用临界文案、不误指温度（round-30 评审）
  * 依赖:puppeteer-core + 系统 chromium（或 env CHROME 指定）。缺依赖 → exit 2（SKIP 行）。
  */
 const fs = require('fs');
@@ -71,6 +73,9 @@ function deviceSnapshotFixture() {
         { kind: 'temperature', name: 'critical_zone', value: 86, critical: 85, max: null },
       ] },
       { chip: 'acpi_fan', entries: [{ kind: 'fan', name: 'fan1', value: 1200, critical: null, max: null }] },
+      // 非温度量越线（round-30 review P3）：电压越过 critical 走 crit 档，
+      // 告警文案必须用不误指温度的通用表述（④-d）。
+      { chip: 'ina3221', entries: [{ kind: 'voltage', name: 'in0', value: 13.2, critical: 12.6, max: null }] },
     ],
     disks: [
       { name: 'nvme0n1p2', mount_point: '/', fs_type: 'ext4', kind: 'ssd', total_bytes: 322122547200, available_bytes: 161061273600, is_removable: false },
@@ -283,6 +288,13 @@ function injectSource() {
         case 'get_external_models':
           if (window.__DEVICE_MGR_TEST__.failExternalModels) return Promise.reject(new Error('external models down (smoke)'));
           if (window.__DEVICE_MGR_TEST__.emptyExternalModels) return Promise.resolve({ models: [], warnings: [] });
+          // ⑩-f 交错读取（round-30 review P3）：挂住后由测试按世代顺序决算，
+          // 制造"较新失败在先、较旧成败后到"的真实交错。
+          if (window.__DEVICE_MGR_TEST__.hangExternalModels) {
+            return new Promise((resolve, reject) => {
+              window.__DEVICE_MGR_TEST__.externalModelGates.push({ resolve: resolve, reject: reject });
+            });
+          }
           return Promise.resolve(${JSON.stringify(externalModelsFixture())});
         case 'model_store_availability': return Promise.resolve({ available: true, reason: null });
         case 'model_store_library':
@@ -316,6 +328,11 @@ function injectSource() {
       failMonitor: false,
       // 接入主动作的失败面（round-21 review P3）：此前只有读取面有 fail 开关。
       failSaveModel: false,
+      // ⑩-e/⑩-f 外部模型读取面（round-30 review P3）：旧行在场的常驻陈旧行 +
+      // 交错读取的世代消费；fixture 原样暴露供挂住门决算时还原真实列表。
+      hangExternalModels: false,
+      externalModelGates: [],
+      externalModelsFixture: ${JSON.stringify(externalModelsFixture())},
       setRemoveOutcome: function (next) { removeOutcome = next; },
     };
     window.__TAURI__ = {
@@ -438,6 +455,13 @@ async function clickTestId(page, testId) {
       sensorChips: document.querySelectorAll('[data-testid="device-manager-sensor-chip"]').length,
       nvmeChip: text.includes('固态硬盘') && text.includes('45°C'),
       critAdvice: text.includes('已达临界温度'),
+      // ④-d 非温度量越线（round-30 review P3）：crit 档文案必须不误指温度。
+      voltageCritAdvice: (() => {
+        const chip = [...document.querySelectorAll('[data-testid="device-manager-sensor-chip"]')]
+          .find(node => (node.innerText || '').includes('in0'));
+        const chipText = chip?.innerText || '';
+        return chipText.includes('已达临界阈值') && !chipText.includes('临界温度');
+      })(),
       healthChips: document.querySelectorAll('[data-testid="device-manager-health-chip"]').length,
       embeddedMonitor: text.includes('pinvou3-app'),
       netRows: document.querySelectorAll('[data-testid="device-manager-net-row"]').length,
@@ -450,8 +474,8 @@ async function clickTestId(page, testId) {
   const procGpuRendered = await page.evaluate(() => !!document.querySelector('[data-testid="device-manager-proc-gpu"]'));
   rec('④ 快照驱动头部/磁盘/传感器/内嵌概览渲染',
     headerState.deviceName && headerState.osLine && headerState.rootBadge
-    && headerState.diskRows === 2 && headerState.sensorChips === 3 && headerState.nvmeChip
-    && headerState.critAdvice && headerState.healthChips === 5 && procGpuRendered && headerState.embeddedMonitor
+    && headerState.diskRows === 2 && headerState.sensorChips === 4 && headerState.nvmeChip
+    && headerState.critAdvice && headerState.voltageCritAdvice && headerState.healthChips === 5 && procGpuRendered && headerState.embeddedMonitor
     && headerState.netRows === 2 && headerState.noErrorBanner,
     JSON.stringify({ ...headerState, procGpuRendered }));
 
@@ -972,6 +996,75 @@ async function clickTestId(page, testId) {
   await page.waitForFunction(() => !document.querySelector('[data-testid="device-manager-external-error"]'), { timeout: 8000 });
   rec('⑩-c 外部模型读取失败常驻错误行+重试恢复', externalErrorShown,
     JSON.stringify({ externalErrorShown }));
+
+  // ⑩-e 列表尚有旧行时的刷新失败（round-30 review P3）：bridge 失败拍保留
+  // 旧行，错误此前只活在 3.2s toast 里——旧行会继续冒充实时的。必须有常驻
+  // 陈旧行（点名列表是最近一次成功读取的结果）+ 重试，成功读才退场。
+  await page.evaluate(() => { window.__DEVICE_MGR_TEST__.failExternalModels = true; });
+  await clickTestId(page, 'device-manager-models-refresh');
+  await page.waitForFunction(() => !!document.querySelector('[data-testid="device-manager-external-stale"]'), { timeout: 8000 });
+  const staleRow = await page.evaluate(() => {
+    const row = document.querySelector('[data-testid="device-manager-external-stale"]');
+    return {
+      text: row?.innerText || '',
+      rowsKept: document.querySelectorAll('[data-testid="device-manager-external-row"]').length > 0,
+      retry: !!row?.querySelector('[data-testid="device-manager-external-retry"]'),
+    };
+  });
+  await page.evaluate(() => { window.__DEVICE_MGR_TEST__.failExternalModels = false; });
+  await page.evaluate(() => {
+    document.querySelector('[data-testid="device-manager-external-stale"] [data-testid="device-manager-external-retry"]')?.click();
+  });
+  await page.waitForFunction(() => !document.querySelector('[data-testid="device-manager-external-stale"]'), { timeout: 8000 });
+  rec('⑩-e 旧行在场的刷新失败出常驻陈旧行+重试、成功读后退场',
+    staleRow.rowsKept && staleRow.retry
+    && staleRow.text.includes('刷新失败') && staleRow.text.includes('最近一次成功读取'),
+    JSON.stringify(staleRow));
+
+  // ⑩-f 交错读取按世代消费错误状态（round-30 review P3）：bridge 已按 seq 丢
+  // 过期数据包，但过期的成功/失败仍会 resolve/reject 到视图——"任何成功清错、
+  // 任何失败置错"会让新旧读取互相覆盖错误状态。挂两拍读取、按世代反序决算：
+  // 较新失败落错误行后，较旧的成功不得清掉它；较新成功清场后，较旧的失败不得
+  // 把已了结的错误重新翻出来。删掉视图世代闸门两个方向都必红。
+  await page.evaluate(() => {
+    window.__DEVICE_MGR_TEST__.hangExternalModels = true;
+    window.__DEVICE_MGR_TEST__.externalModelGates.length = 0;
+  });
+  // 交错 A：较新失败在先，较旧成功后到 → 错误必须保留。
+  await clickTestId(page, 'device-manager-models-refresh');
+  await page.waitForFunction(() => window.__DEVICE_MGR_TEST__.externalModelGates.length === 1, { timeout: 8000 });
+  await clickTestId(page, 'device-manager-models-refresh');
+  await page.waitForFunction(() => window.__DEVICE_MGR_TEST__.externalModelGates.length === 2, { timeout: 8000 });
+  await page.evaluate(() => {
+    window.__DEVICE_MGR_TEST__.externalModelGates.pop().reject(new Error('newer read down (smoke)'));
+  });
+  await page.waitForFunction(() => !!document.querySelector('[data-testid="device-manager-external-stale"]'), { timeout: 8000 });
+  await page.evaluate(() => {
+    window.__DEVICE_MGR_TEST__.externalModelGates.pop().resolve({ models: [], warnings: [] });
+  });
+  await sleep(300);
+  const olderSuccessKeptError = await page.evaluate(
+    () => !!document.querySelector('[data-testid="device-manager-external-stale"]'));
+  // 交错 B：较新成功清场，较旧失败后到 → 错误不得复现。
+  await clickTestId(page, 'device-manager-models-refresh');
+  await page.waitForFunction(() => window.__DEVICE_MGR_TEST__.externalModelGates.length === 1, { timeout: 8000 });
+  await clickTestId(page, 'device-manager-models-refresh');
+  await page.waitForFunction(() => window.__DEVICE_MGR_TEST__.externalModelGates.length === 2, { timeout: 8000 });
+  await page.evaluate(() => {
+    const fixture = window.__DEVICE_MGR_TEST__.externalModelsFixture;
+    window.__DEVICE_MGR_TEST__.externalModelGates.pop().resolve({ models: fixture.models.slice(), warnings: [] });
+  });
+  await page.waitForFunction(() => !document.querySelector('[data-testid="device-manager-external-stale"]'), { timeout: 8000 });
+  await page.evaluate(() => {
+    window.__DEVICE_MGR_TEST__.externalModelGates.pop().reject(new Error('older read down (smoke)'));
+  });
+  await sleep(300);
+  const olderFailureIgnored = await page.evaluate(
+    () => !document.querySelector('[data-testid="device-manager-external-stale"]'));
+  await page.evaluate(() => { window.__DEVICE_MGR_TEST__.hangExternalModels = false; });
+  rec('⑩-f 交错读取按世代消费错误状态（过期成功不清错、过期失败不置错）',
+    olderSuccessKeptError && olderFailureIgnored,
+    JSON.stringify({ olderSuccessKeptError, olderFailureIgnored }));
 
   // ⑩ 后半窗：⑨ 的预期注入失败（transition 基建的 console.error）与 ⑩-b/⑩-c
   // 故意注入的读取失败都在上面收尾了——清空后走一段**真实交互**（模型区刷新 →

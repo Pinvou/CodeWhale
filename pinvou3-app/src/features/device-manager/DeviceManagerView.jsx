@@ -264,7 +264,14 @@ const SensorGroupCard = ({ group, copy }) => (
                   entry.level === 'crit' ? 'text-[#FF3B30] dark:text-[#FF453A]' : 'text-[#A15C07] dark:text-[#FDD663]'
                 }`}
               >
-                {entry.level === 'crit' ? copy.sensorCritAdvice : copy.sensorWarnAdvice}
+                {/* The warn band exists only on the temperature side (bridge
+                    sensorLevel), so sensorWarnAdvice may stay thermal. A crit
+                    voltage/current/power/fan channel is not a temperature
+                    problem — the thermal copy would misdirect triage
+                    (round-30 review P3). */}
+                {entry.level === 'crit'
+                  ? (entry.kind === 'temperature' ? copy.sensorCritAdvice : copy.sensorCritAdviceNonTemp)
+                  : copy.sensorWarnAdvice}
               </div>
             )}
           </div>
@@ -513,14 +520,16 @@ const DeviceManagerView = ({ theme, t, bs, onOpenChat, onOpenModelStore }) => {
     // "nothing installed" hint, which reads as a fact instead of the read
     // failure it is (same surface rule as the manual Refresh button). The
     // alive guard matches the store effect: a slow reply after unmount must not
-    // setState or re-toast (round-21 review P3).
+    // setState or re-toast (round-21 review P3). The generation guard below
+    // keeps an overlapped older read from consuming the error state.
     if (typeof dev.fetchExternalModels === 'function') {
+      const gen = ++externalRefreshGenRef.current;
       dev.fetchExternalModels()
         .then(() => {
-          if (alive) setExternalFetchError(null);
+          if (alive && gen === externalRefreshGenRef.current) setExternalFetchError(null);
         })
         .catch((error) => {
-          if (!alive) return;
+          if (!alive || gen !== externalRefreshGenRef.current) return;
           const message = String(error?.message || error);
           setExternalFetchError(message);
           showToast(copyRef.current.refreshFailed(message));
@@ -545,6 +554,16 @@ const DeviceManagerView = ({ theme, t, bs, onOpenChat, onOpenModelStore }) => {
   const mountedRef = useRef(true);
   useEffect(() => () => { mountedRef.current = false; }, []);
 
+  // Error-state consumption generation for external-model reads. The bridge
+  // already drops superseded data by seq, but a stale read still resolves or
+  // rejects normally — "any success clears, any failure sets" would let
+  // interleaved reads overwrite each other's error state (a newer failure
+  // wiped by an older success, an older failure resurrected over a newer
+  // success). Only the most recently issued read may consume the slot; the
+  // remove flow bumps the generation too when it lands its refresh_error
+  // there (round-30 review P3).
+  const externalRefreshGenRef = useRef(0);
+
   const retryPoll = useCallback(() => {
     const dev = bridge?.device;
     if (!dev) return;
@@ -561,12 +580,14 @@ const DeviceManagerView = ({ theme, t, bs, onOpenChat, onOpenModelStore }) => {
     const dev = bridge?.device;
     if (!dev?.fetchExternalModels) return;
     // Swallowing the rejection makes Refresh look dead: surface a human-readable failure.
+    // Same generation guard as the mount effect above.
+    const gen = ++externalRefreshGenRef.current;
     dev.fetchExternalModels()
       .then(() => {
-        if (mountedRef.current) setExternalFetchError(null);
+        if (mountedRef.current && gen === externalRefreshGenRef.current) setExternalFetchError(null);
       })
       .catch((error) => {
-        if (!mountedRef.current) return;
+        if (!mountedRef.current || gen !== externalRefreshGenRef.current) return;
         const message = String(error?.message || error);
         setExternalFetchError(message);
         showToast(copy.refreshFailed(message));
@@ -834,8 +855,11 @@ const DeviceManagerView = ({ theme, t, bs, onOpenChat, onOpenModelStore }) => {
         // The removal itself succeeded; only the registry read-back failed.
         // Report it as its own line (round-29 review P2) and keep the failure
         // in the persistent error slot so the stale listing stays marked until
-        // the next successful refresh.
+        // the next successful refresh. Bump the consumption generation: any
+        // read issued before this point is older than the failure now in the
+        // slot and must consume neither way (round-30 review P3).
         notices.push(copy.refreshFailed(outcome.refresh_error));
+        externalRefreshGenRef.current += 1;
         setExternalFetchError(outcome.refresh_error);
       }
       showToast(notices.join('\n'));
@@ -1515,6 +1539,25 @@ const DeviceManagerView = ({ theme, t, bs, onOpenChat, onOpenModelStore }) => {
                 >
                   <span className="min-w-0 break-words">{copy.refreshFailed(externalFetchError)}</span>
                   <MsButton tone="ghost" onClick={refreshExternal} data-testid="device-manager-external-retry">{copy.retry}</MsButton>
+                </div>
+              )}
+              {/* Same persistent rule when old rows stay on screen: the bridge
+                  keeps last-good rows on a failed refresh, and without a marker
+                  they read as live data once the toast fades (round-30 review
+                  P3). Name the staleness, keep the failure + retry until a
+                  successful read clears it. */}
+              {externalModels.length > 0 && externalFetchError && (
+                <div
+                  data-testid="device-manager-external-stale"
+                  className="flex flex-col items-center gap-1 py-3 text-center text-[13px] text-[#A15C07] dark:text-[#FDD663]"
+                >
+                  <span className="text-[11px] leading-4 text-black/45 dark:text-white/45">
+                    {copy.externalStaleRowsHint}
+                  </span>
+                  <span className="flex flex-wrap items-center justify-center gap-2">
+                    <span className="min-w-0 break-words">{copy.refreshFailed(externalFetchError)}</span>
+                    <MsButton tone="ghost" onClick={refreshExternal} data-testid="device-manager-external-retry">{copy.retry}</MsButton>
+                  </span>
                 </div>
               )}
             </div>

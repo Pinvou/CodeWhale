@@ -228,6 +228,9 @@ for (const language of ['zh', 'en', 'ja']) {
       'sectionProcesses', 'sectionModels', 'sectionDoctor',
       'sensorEmpty', 'chipNvme', 'chipWifi', 'chipFan', 'chipBoard', 'chipPower',
       'sensorWarnAdvice', 'sensorCritAdvice', 'critLimit', 'peakLabel',
+      // round-30 评审 P3：非温度量的 crit 建议不得误指温度（sensorCritAdviceNonTemp）；
+      // 旧行在场的刷新失败常驻陈旧行提示（externalStaleRowsHint）。
+      'sensorCritAdviceNonTemp', 'externalStaleRowsHint',
       'storageEmpty', 'diskSystemBadge', 'diskWarnAdvice', 'diskCritAdvice',
       'networkEmpty', 'netTypeEthernet', 'netTypeWifi', 'netTypeLoopback',
       'netTypeBridge', 'netTypeVirtual', 'netTypeOther',
@@ -258,8 +261,8 @@ for (const language of ['zh', 'en', 'ja']) {
     // Count guard：清单看不到新增——加键必须同步更新计数（见 uiAuxChat round-36 同款）。
     assert.equal(
       Object.keys(dict[language].uiDeviceMgr).length,
-      117,
-      `${language}.uiDeviceMgr must hold exactly the 117 pinned keys`,
+      119,
+      `${language}.uiDeviceMgr must hold exactly the 119 pinned keys`,
     );
     // Single-language whole-section loss guard（十九轮评审 P2）：dictJa 以
     // `...dictEn` 铺底，整段删掉 `jaBase.uiDeviceMgr` / `jaBase.deviceMgr` 时
