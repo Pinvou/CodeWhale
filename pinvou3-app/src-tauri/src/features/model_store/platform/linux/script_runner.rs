@@ -319,7 +319,14 @@ fn redirect_is_refused(url: &reqwest::Url, previous_hops: usize) -> bool {
     previous_hops >= 10 || url.scheme() != "https"
 }
 
+#[cfg(test)]
+pub(super) mod test_loopback_fetch;
+
 fn http_get_text(url: &str) -> Result<String, ScriptError> {
+    #[cfg(test)]
+    if let Some(response) = test_loopback_fetch::get(url) {
+        return response;
+    }
     let client = reqwest::blocking::Client::builder()
         .connect_timeout(Duration::from_secs(10))
         .timeout(Duration::from_secs(60))

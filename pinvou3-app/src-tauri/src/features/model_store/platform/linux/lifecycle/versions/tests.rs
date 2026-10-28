@@ -1,5 +1,7 @@
 use super::*;
 
+mod stage_admission;
+
 fn blob(content: &str) -> db::ScriptBlob {
     db::ScriptBlob {
         content: content.into(),
