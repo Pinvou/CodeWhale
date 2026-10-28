@@ -8493,13 +8493,11 @@ async fn clamped_verifier_child_of_read_only_parent_holds_no_run_surface() {
         "the clamped verifier keeps the shared bash evidence lane: {names:?}"
     );
     assert!(
-        registry
-            .posture_permits_tool("bash", Some(&json!({"command": "pwd"}))),
+        registry.posture_permits_tool("bash", Some(&json!({"command": "pwd"}))),
         "the shared evidence lane admits read-only probes"
     );
     assert!(
-        !registry
-            .posture_permits_tool("bash", Some(&json!({"command": "rm -rf src"}))),
+        !registry.posture_permits_tool("bash", Some(&json!({"command": "rm -rf src"}))),
         "the evidence lane stays classifier-bounded"
     );
 }

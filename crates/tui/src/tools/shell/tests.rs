@@ -533,7 +533,11 @@ fn forkguard_shell_catalog_guidance_matches_execution() {
     assert!(readonly.description().contains("`&&`/`||` sequences"));
     assert!(readonly.description().contains("cd-prefixed commands"));
     assert!(readonly.description().contains("set -o pipefail"));
-    assert!(readonly.description().contains("a standalone `cd` affects only that one command"));
+    assert!(
+        readonly
+            .description()
+            .contains("a standalone `cd` affects only that one command")
+    );
     assert!(
         !readonly
             .input_schema()
@@ -1202,11 +1206,7 @@ fn readonly_operands_are_workspace_bounded_and_symlink_aware() {
     // zsh's EQUALS expansion resolves `=cmd` operands to the command's
     // absolute path on the shell lane; the spelling is refused outright
     // instead of being skipped as a nonexistent relative path.
-    for command in [
-        "cat =ls | wc -l",
-        "pwd; cat =ls",
-        "wc -c =sh",
-    ] {
+    for command in ["cat =ls | wc -l", "pwd; cat =ls", "wc -c =sh"] {
         let error = enforce_readonly_workspace_operands(command, &roots, workspace.path())
             .expect_err("an `=cmd` operand must be refused")
             .to_string();
@@ -1605,10 +1605,7 @@ fn readonly_operand_gate_refuses_piped_cd_with_all_inside_operands() {
         let error = enforce_readonly_workspace_operands(command, &roots, workspace.path())
             .expect_err("a piped cd must be refused outright")
             .to_string();
-        assert!(
-            error.contains("cwd.pipeline_stage"),
-            "{command}: {error}"
-        );
+        assert!(error.contains("cwd.pipeline_stage"), "{command}: {error}");
     }
 }
 
@@ -1725,7 +1722,10 @@ async fn readonly_shell_executes_admitted_compound_sequence() {
     // A read-only `od` stage executes end to end (its file operands flow
     // through the same gate).
     let dumped = LowercaseBashTool
-        .execute(json!({"command": "cat sub/notes.md | od -c | head -2"}), &context)
+        .execute(
+            json!({"command": "cat sub/notes.md | od -c | head -2"}),
+            &context,
+        )
         .await
         .expect("admitted od pipeline runs");
     assert!(dumped.success, "{}", dumped.content);
@@ -1963,7 +1963,10 @@ fn readonly_shell_lane_decisions_per_shell_kind() {
         );
     }
     // Sequences without a pipe bind without the prefix on every kind.
-    assert_eq!(readonly_shell_bound_command(&sh, "pwd; wc -c f"), "pwd; wc -c f");
+    assert_eq!(
+        readonly_shell_bound_command(&sh, "pwd; wc -c f"),
+        "pwd; wc -c f"
+    );
 }
 
 #[test]
@@ -5721,4 +5724,3 @@ fn forkguard_powershell_retry_keeps_the_first_result_when_it_cannot_start() {
         annotated.stderr
     );
 }
-
