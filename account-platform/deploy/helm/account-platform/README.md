@@ -529,11 +529,13 @@ event-cluster wiring, and always retains ENV_PENDING/NOT_DEPLOYED. For productio
 rendering use the matching production origin pair and explicit provider/Secret
 references; do not weaken production image, HA or identity validation.
 
-The real Helm/Compose cases are opt-in and are not currently enabled by the
-repository workflows. Default contract success therefore does not prove either
-renderer ran. Record the exact command, input and result for an explicit run;
-local isolated rendering is not proof of a successful remote Actions run or
-production rollout. See [release validation and environment boundaries](../../runbooks/model-token-release.md#9-g6-持续门禁与环境交接).
+The real Helm/Compose cases remain opt-in for local runs. When selected, the
+Account Platform Node contracts step in `.github/workflows/pr-check.yml` enables
+both renderers with `PINVOU_TEST_KMS_HELM=1` and `PINVOU_TEST_KMS_COMPOSE=1`.
+This wiring does not prove that a particular commit or job ran those cases:
+check its input, logs and skip counts. Record the exact command, input and result
+for an explicit run; local isolated rendering is not proof of a successful remote
+Actions run or production rollout. See [release validation and environment boundaries](../../runbooks/model-token-release.md#9-g6-持续门禁与环境交接).
 
 ### Production on-call escalation chain
 
