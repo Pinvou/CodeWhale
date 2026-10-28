@@ -827,16 +827,9 @@ impl ModelManager {
         // 用 `ps -a` 而不是只看运行中的：无 container_name 的 docker 卡要按
         // 「容器存在与否 + 状态」认领（见下方 owned_running 分支）， exited 的
         // 容器也得能看见。
-        let docker_rows = proc_timeout::query(
-            "docker",
-            &[
-                "ps",
-                "-a",
-                "--format",
-                "{{.Names}}\t{{.Image}}\t{{.State}}\t{{.Label \"com.docker.compose.project\"}}",
-            ],
-        )
-        .map(|stdout| parse_docker_ps_a(&stdout));
+        let docker_rows =
+            proc_timeout::query("docker", &["ps", "-a", "--format", DOCKER_PS_A_FORMAT])
+                .map(|stdout| parse_docker_ps_a(&stdout));
         let mut live_images: std::collections::HashSet<String> = std::collections::HashSet::new();
         let mut live_names: std::collections::HashSet<String> = std::collections::HashSet::new();
         if let Some(rows) = docker_rows.as_ref() {
@@ -2153,10 +2146,11 @@ impl ModelManager {
                     // 更新 Qwen 卡被误拦——纯脚本更新/卸载不碰引擎，跨引擎风险
                     // 跨引擎场景由部署时的引擎补装把关）。归属无法确认（进程无
                     // --model-id）的保守起见仍然拦。
-                    match process.model_id.as_deref() {
-                        None => true,
-                        Some(id) => Some(id) == Some(rec.model_name.as_str()),
-                    }
+                    native_process_owned_by_card(
+                        process.model_id.as_deref(),
+                        rec.endpoint_model.as_deref(),
+                        &rec.model_name,
+                    )
                 })
             {
                 return Err(ModelManagerError::new(format!(
@@ -2166,6 +2160,26 @@ impl ModelManager {
         } else if rec.status == "deployed" {
             // Unknown deployment must not be treated as safely stopped just
             // because a stale database flag says false.
+            //
+            // r19 P1-2：ollama 卡不走下面的 docker 判据——它既没有
+            // container_name 也没有 docker 镜像，docker_owned_container_state
+            // 只会得到 Absent，又因 ollama 引擎登记不出 docker_image 兜不回
+            // 来，必落 _ 臂拒绝；而这个分支提前 return，下面的端口探测不可达。
+            // 停用后 status 仍是 deployed，更新/卸载从此全部必拒。判据与
+            // reconcile_running_status 的 ollama 分支同口径：ollama 服务不在 =
+            // 这台机器上任何 ollama 模型都不可能在服务 = 已停；服务还在则本卡
+            // 无法确认没在服务，保守拒绝。
+            if matches!(
+                deployed_stopped_evidence(&rec.engine_name),
+                DeployedStoppedEvidence::OllamaService
+            ) {
+                if ollama_alive(&self.settings.ollama_host) {
+                    return Err(ModelManagerError::new(format!(
+                        "Ollama 服务仍在运行，请先停用再{action}。"
+                    )));
+                }
+                return Ok(());
+            }
             // 例外（2026-10-27 真机实锤）：无 container_name 的 docker 卡——
             // z-image-turbo 停用五天后点「更新脚本」，一路落到这里被「无法确认」
             // 拦死，设备从此没有自助出路。docker 卡的运行形态只有容器：按
@@ -3839,6 +3853,16 @@ fn parse_docker_ps_a(stdout: &str) -> Vec<DockerPsRow> {
         .collect()
 }
 
+/// `docker ps -a` 喂给 [`parse_docker_ps_a`] 的四字段格式（名字、镜像、状态、
+/// compose 项目名）——解析端按这个顺序 splitn(4)。
+///
+/// 抽成常量给所有查询共用是 r19 P1-3 的教训：此前「自有容器判停」带镜像
+/// 字段、「详情页容器名」没带，后者的三个字段被 splitn(4) 整体左移解析
+/// （state 吃到项目标签、compose_project 恒 None），compose 卡（容器名 ≠
+/// card_id）在详情页拿不到自己的容器名。共用一份，格式再漂移单测就能抓住。
+const DOCKER_PS_A_FORMAT: &str =
+    "{{.Names}}\t{{.Image}}\t{{.State}}\t{{.Label \"com.docker.compose.project\"}}";
+
 /// `require_actually_stopped` 对「无 container_name 的 docker 卡」的结论。
 enum DockerOwnedContainerState {
     /// 找到本卡容器且有运行中的。
@@ -3852,17 +3876,9 @@ enum DockerOwnedContainerState {
 }
 
 fn docker_owned_container_state(card_id: &str) -> DockerOwnedContainerState {
-    // 字段顺序与 parse_docker_ps_a 对齐（名字、镜像、状态、compose 项目名），
-    // 多带一个镜像字段不亏——两条查询用同一套解析，格式改一处就够了。
-    let Some(stdout) = proc_timeout::query(
-        "docker",
-        &[
-            "ps",
-            "-a",
-            "--format",
-            "{{.Names}}\t{{.Image}}\t{{.State}}\t{{.Label \"com.docker.compose.project\"}}",
-        ],
-    ) else {
+    // 四字段格式与 parse_docker_ps_a 的解析顺序对齐，见 DOCKER_PS_A_FORMAT。
+    let Some(stdout) = proc_timeout::query("docker", &["ps", "-a", "--format", DOCKER_PS_A_FORMAT])
+    else {
         return DockerOwnedContainerState::Unknown;
     };
     let rows = parse_docker_ps_a(&stdout);
@@ -3889,6 +3905,50 @@ fn owned_container_state_from_rows(
         DockerOwnedContainerState::Running
     } else {
         DockerOwnedContainerState::Stopped
+    }
+}
+
+/// 原生引擎进程是否属于本卡（r19 P1-1）。
+///
+/// 进程命令行里的 `--model-id` 是推理服务真正认的模型 id——对应记录里的
+/// `endpoint_model`，**不是**展示名 `model_name`（两者六张卡里没有一张相等，
+/// 见 `ForcedRemoval::endpoint_model` 的注释；内存准入喂给 matching_pid 的
+/// 也是 endpoint_model）。此前拿 model_name 比对，驭光卡 stop 半成功（DB 已
+/// running=0、进程还活）时活实例被判「非本卡」放行，purge 会在活进程脚下
+/// 删权重。两者任一命中都算本卡：老记录可能没有 endpoint_model，留展示名
+/// 兜底。
+fn native_process_owned_by_card(
+    process_model_id: Option<&str>,
+    endpoint_model: Option<&str>,
+    model_name: &str,
+) -> bool {
+    let Some(id) = process_model_id else {
+        // 归属无法确认（进程无 --model-id）：保守起见仍然拦。
+        return true;
+    };
+    Some(id) == endpoint_model || Some(id) == Some(model_name)
+}
+
+/// deployed 态、无 container_name 的卡该用哪条判停依据（r19 P1-2）。
+///
+/// ollama 卡既不是容器也没有 docker 镜像：走 docker 自有容器判据只会得到
+/// Absent，再因 ollama 引擎登记不出 docker_image 兜不回来，恒被「无法确认」
+/// 拒绝，停用后更新/卸载全部必拒。抽成纯函数是为了钉住「ollama 不落 docker
+/// 分支」这条路径——ollama_alive 要真发 HTTP，单测里 mock 不了。
+enum DeployedStoppedEvidence {
+    /// ollama 卡：判据是 ollama 服务本身在不在（与 reconcile_running_status
+    /// 的 ollama 分支同口径：服务不在 = 任何 ollama 模型都不可能在服务）。
+    OllamaService,
+    /// 其余（docker 形态）卡：判据是 compose 项目名/容器名 == card_id 的
+    /// 容器状态（[`docker_owned_container_state`]）。
+    OwnedContainer,
+}
+
+fn deployed_stopped_evidence(engine_name: &str) -> DeployedStoppedEvidence {
+    if engine_name == "ollama" {
+        DeployedStoppedEvidence::OllamaService
+    } else {
+        DeployedStoppedEvidence::OwnedContainer
     }
 }
 
@@ -4077,20 +4137,21 @@ fn owned_container_name(rec: &db::StoreModelRecord) -> Option<String> {
     {
         return Some(name.to_string());
     }
-    let stdout = proc_timeout::query(
-        "docker",
-        &[
-            "ps",
-            "-a",
-            "--format",
-            "{{.Names}}\t{{.State}}\t{{.Label \"com.docker.compose.project\"}}",
-        ],
-    )?;
+    // r19 P1-3：这里的查询此前只有 Names/State/Label 三个 tab 字段，喂给
+    // splitn(4) 的 parse_docker_ps_a 后字段整体左移一位——state 吃到项目标签
+    // （永远不是 "running"）、compose_project 恒 None，find 判据只剩
+    // name == card_id 一条路，compose 卡（容器名 ≠ card_id）在详情页拿不到
+    // 容器名。补上 {{.Image}} 对齐 docker_owned_container_state 的四字段。
+    let stdout = proc_timeout::query("docker", &["ps", "-a", "--format", DOCKER_PS_A_FORMAT])?;
     let rows = parse_docker_ps_a(&stdout);
+    owned_container_name_from_rows(&rows, &rec.card_id)
+}
+
+/// 与 [`owned_container_state_from_rows`] 同一套身份判据（compose 项目名/
+/// 容器名 == card_id），返回命中的容器名。
+fn owned_container_name_from_rows(rows: &[DockerPsRow], card_id: &str) -> Option<String> {
     rows.iter()
-        .find(|row| {
-            row.compose_project.as_deref() == Some(rec.card_id.as_str()) || row.name == rec.card_id
-        })
+        .find(|row| row.compose_project.as_deref() == Some(card_id) || row.name == card_id)
         .map(|row| row.name.clone())
 }
 
@@ -4314,6 +4375,90 @@ mod tests {
             owned_container_state_from_rows(&rows, "ornith15-35b-a3b-nvfp4"),
             DockerOwnedContainerState::Absent
         ));
+    }
+
+    /// r19 P1-1：原生进程归属判定。进程 `--model-id` 是推理服务真正认的模型
+    /// id（= endpoint_model），不是展示名 model_name——此前拿 model_name 比对，
+    /// 六张卡没有一个能命中，驭光卡 stop 半成功（DB running=0、进程还活）时
+    /// 活实例被判「非本卡」放行，purge 在活进程脚下删权重。
+    #[test]
+    fn native_process_ownership_matches_endpoint_model_first() {
+        let endpoint_model = Some("ornith15-bf16");
+        let model_name = "Ornith-1.5-35B-A3B";
+        // 进程报的正是推理服务认的 id → 本卡（修复前这里恒 false）
+        assert!(native_process_owned_by_card(
+            Some("ornith15-bf16"),
+            endpoint_model,
+            model_name
+        ));
+        // 老记录没有 endpoint_model：展示名兜底命中，不算「非本卡」
+        assert!(native_process_owned_by_card(
+            Some(model_name),
+            None,
+            model_name
+        ));
+        // 别的卡的实例（两个 id 都对不上）→ 非本卡，放行跨卡更新
+        assert!(!native_process_owned_by_card(
+            Some("qwen38fn"),
+            endpoint_model,
+            model_name
+        ));
+        // 归属无法确认（进程无 --model-id）→ 保守起见视为本卡（拦）
+        assert!(native_process_owned_by_card(
+            None,
+            endpoint_model,
+            model_name
+        ));
+    }
+
+    /// r19 P1-2：deployed 态无 container_name 的卡，ollama 不许落 docker 判据
+    /// ——它既无容器也无镜像，docker 分支只会得到 Absent 再被恒拒。ollama_alive
+    /// 要真发 HTTP、mock 不了，这里钉住路径选择这一层。
+    #[test]
+    fn deployed_stopped_evidence_routes_ollama_away_from_docker() {
+        assert!(matches!(
+            deployed_stopped_evidence("ollama"),
+            DeployedStoppedEvidence::OllamaService
+        ));
+        // docker 形态的引擎照旧走自有容器判据
+        assert!(matches!(
+            deployed_stopped_evidence("vllm"),
+            DeployedStoppedEvidence::OwnedContainer
+        ));
+    }
+
+    /// r19 P1-3：详情页容器名按 compose 项目名命中（compose 卡容器名 ≠
+    /// card_id），并钉住查询格式与 splitn(4) 解析器的字段对齐。
+    #[test]
+    fn owned_container_name_matches_compose_project() {
+        let rows = parse_docker_ps_a(
+            "ornith15-api\tvllm:v0.27.1\trunning\tornith15-bf16\n\
+             z-image-turbo\tz-image:diffusers\texited\tz-image-turbo\n",
+        );
+        // compose 卡：容器名 ornith15-api ≠ card_id，靠项目名命中
+        assert_eq!(
+            owned_container_name_from_rows(&rows, "ornith15-bf16"),
+            Some("ornith15-api".into())
+        );
+        // docker run 形态：容器名 == card_id
+        assert_eq!(
+            owned_container_name_from_rows(&rows, "z-image-turbo"),
+            Some("z-image-turbo".into())
+        );
+        // 谁的容器都不是
+        assert_eq!(owned_container_name_from_rows(&rows, "other-card"), None);
+        // 查询格式必须与解析器对齐：四个 tab 分隔字段，顺序名字/镜像/状态/项目
+        let fields = DOCKER_PS_A_FORMAT.split('\t').collect::<Vec<_>>();
+        assert_eq!(fields.len(), 4, "字段数漂移会让 parse_docker_ps_a 错位");
+        assert!(fields[0].contains("Names"));
+        assert!(fields[1].contains("Image"));
+        assert!(fields[2].contains("State"));
+        assert!(fields[3].contains("com.docker.compose.project"));
+        // 错位实况（钉住为什么必须四字段）：三字段行的项目标签落进 state、
+        // compose_project 恒 None，compose 卡从此只能靠容器名碰运气。
+        let misaligned = parse_docker_ps_a("ornith15-api\trunning\tornith15-bf16");
+        assert_eq!(misaligned[0].compose_project, None);
+        assert!(!misaligned[0].running);
     }
 
     /// GB10 统一内存设备上 nvidia-smi 的显存两行是 [N/A]，过滤后不再出现空数据。
