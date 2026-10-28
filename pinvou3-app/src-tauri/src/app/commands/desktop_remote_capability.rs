@@ -78,22 +78,25 @@ pub fn desktop_remote_controller_capability_send(
     remote_ref: String,
 ) -> Result<CapabilitySendAck, String> {
     ensure_supported(&manager)?;
-    let (lease, capabilities) = manager
-        .live_runtime_context()
+    // Capture the operation before the lease: any replacement between the
+    // reads is rejected by the final owner guard inside synchronous enqueue.
+    let operation = manager
+        .current_operation()
+        .ok_or_else(|| "controller_not_connected".to_owned())?;
+    let expected = manager
+        .authenticated_remote_proxy_identity()
         .map_err(|error| error.code.to_owned())?;
     let intent = sessions
-        .capability_request(&remote_ref, &lease)
-        .map_err(|error| error.code.to_owned())?;
-    let frame = business
-        .seal(
-            "capability_snapshot_request",
-            &intent.payload,
-            &capabilities,
-        )
-        .map_err(|error| error.code().to_owned())?;
-    manager
-        .send_authenticated_business(&frame)
-        .map_err(send_error_code)?;
+        .capability_request_with_send(&remote_ref, &expected.0, |payload| {
+            manager.send_capability_for_owner(
+                &operation,
+                &expected,
+                &business,
+                payload,
+                send_error_code,
+            )
+        })
+        .map_err(|error| error.into_code())?;
     Ok(intent.into())
 }
 

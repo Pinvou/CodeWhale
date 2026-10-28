@@ -762,6 +762,14 @@ pub(crate) struct ControllerTransportReceiver {
 }
 
 impl ControllerTransportReceiver {
+    #[cfg(test)]
+    pub(crate) fn take_business_for_test(&mut self) -> Option<String> {
+        self.business_rx
+            .try_recv()
+            .ok()
+            .map(|frame| frame.text().to_owned())
+    }
+
     async fn recv_prioritized(&mut self) -> Option<QueuedFrame> {
         tokio::select! {
             biased;
