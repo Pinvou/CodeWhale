@@ -701,7 +701,8 @@ pub fn test_store_state() -> Result<Value, String> {
 ///
 /// 口令不对不是错误：调用方要能区分「口令输错了」和「配置没写进去」——前者提示
 /// 用户重输，后者得让用户去看磁盘/权限。都压成 Err 的话这两件事在界面上长得
-/// 一模一样。真的写不进配置文件才返回 Err。
+/// 一模一样。配置读不出来（哪怕只是瞬态 I/O 故障，读不到就不改，二十八轮评审
+/// P1）或写不进配置文件才返回 Err。
 pub fn unlock_test_store(password: String) -> Result<Value, String> {
     if !test_store_password_matches(&password) {
         return Ok(json!({ "ok": false }));
@@ -717,11 +718,17 @@ pub fn disable_test_store() -> Result<Value, String> {
 
 fn set_test_store_enabled(enabled: bool) -> Result<(), String> {
     // 先读再改再整体写回：配置里还有 store_url / models_dir 等一堆字段，
-    // 只写自己关心的那个会把其余的全清掉。写回被 save_settings 拒绝的情形
-    // （严格读取过不去的"保护范围未知"态：缺失+隔离留存、在但不可读、解析
-    // 坏，二十六/二十七轮评审 P1）原样上报，错误信息里带恢复/放弃出路。
-    let mut settings = config::load_settings();
+    // 只写自己关心的那个会把其余的全清掉。首读必须走严格读取（二十八轮评审
+    // P1）：宽松读取在瞬态 I/O 失败（fd 耗尽、一拍 EIO）时回退完整默认值，
+    // 而 save_settings 闸门的重读可能已恢复、只判 Err/Ok 就把这份默认快照
+    // 放行固化——真实 config.json（自定义 models_dir 等未知保护范围）被一次
+    // 普通开关整体洗掉。所以读不到就不改：错误原样上报（隔离/不可读等态的
+    // 恢复/放弃出路都在严格读取的报错里），本轮不落盘。
+    let mut settings =
+        config::try_load_settings().map_err(|e| format!("读取当前配置失败，未做任何修改：{e}"))?;
     settings.test_mode_enabled = enabled;
+    // 写回被 save_settings 拒绝的情形（首读之后、落盘之前配置又被弄坏的
+    // TOCTOU 窗口）原样上报，错误信息里带恢复/放弃出路。
     config::save_settings(&settings).map_err(|e| format!("保存设置失败：{e}"))
 }
 
@@ -822,8 +829,12 @@ pub fn set_storage_settings(
     models_dir: Option<String>,
     import_scan_dirs: Option<Vec<String>>,
 ) -> Result<Value, String> {
-    // 先读再改再整体写回，理由同 set_test_store_enabled
-    let mut settings = config::load_settings();
+    // 先读再改再整体写回，理由同 set_test_store_enabled；首读同样必须走严格
+    // 读取（二十八轮评审 P1）——瞬态失败时宽松读取给出的默认快照，会在保存端
+    // 闸门重读已恢复的那一拍被放行固化，真实配置（含 models_dir_history 的
+    // 保护留痕）被一次普通保存整体洗掉。
+    let mut settings =
+        config::try_load_settings().map_err(|e| format!("读取当前配置失败，未做任何修改：{e}"))?;
     if let Some(dir) = models_dir {
         let dir = dir.trim().to_string();
         if dir.is_empty() {
@@ -1060,5 +1071,77 @@ mod tests {
         let settings = set_storage_settings(None, Some(vec![format!("  {ok}  "), String::new()]))
             .expect("absolute dirs accepted");
         assert_eq!(settings["import_scan_dirs"], serde_json::json!([ok]));
+    }
+
+    /// 「首读瞬态失败、保存端重读已恢复」不得把默认快照固化成配置（二十八轮评审
+    /// P1 的剩余分支）。
+    ///
+    /// 评审点名的时序：普通设置入口首拍宽松读取赶上瞬态 I/O 故障（fd 耗尽、一拍
+    /// EIO——过一下自己就好）拿到完整默认值；同一拍里 `save_settings` 闸门的重读
+    /// 已恢复，只判 Err/Ok 就把默认快照放行——真实 config.json（自定义
+    /// `models_dir` 等未知保护范围）被一次普通开关整体洗成默认，后续严格读取把它
+    /// 当合法配置接受，权重根保护失效。修复后两个入口首读走
+    /// [`super::config::try_load_settings`]、读不到就不改。权限位（mode 000）构造
+    /// 不出这个时序——权限失败到重读时仍在，所以用 config 的测试注入缝受控打出
+    /// 「首读 Err → 重读 Ok」，两个入口各打一遍再各验证一次恢复后的正常路径。
+    #[test]
+    fn transient_first_read_failure_must_not_persist_the_default_snapshot() {
+        let ctx = super::config::TempHome::new();
+        let path = super::config::config_dir().join("config.json");
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        // 真实配置：自定义权重目录 + 非默认并发数——两者在默认快照里都会变成
+        // 默认值，是"覆盖是否发生"的判别标记。
+        let original =
+            r#"{"models_dir": "/home/u/ai/shared/weights", "max_concurrent_downloads": 3}"#;
+        std::fs::write(&path, original).unwrap();
+
+        // 注入恰好 1 次：入口首读 Err、保存端闸门重读 Ok——正是评审点名的恢复时序。
+        super::config::arm_transient_read_failure(1);
+        let error = set_test_store_enabled(true).expect_err("首读失败不得拿默认快照落盘");
+        assert!(
+            error.contains("读取当前配置失败"),
+            "报错应说明读取失败、未做任何修改：{error}"
+        );
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            original,
+            "失败的调用不得动真实配置：默认快照落盘就是不可恢复的重置"
+        );
+
+        // 存储入口同样的时序：改的只是补充扫描目录，真实设置必须原样保留。
+        super::config::arm_transient_read_failure(1);
+        let scan = ctx.path().join("scan-more");
+        let error = set_storage_settings(None, Some(vec![scan.to_string_lossy().to_string()]))
+            .expect_err("首读失败不得拿默认快照落盘");
+        assert!(
+            error.contains("读取当前配置失败"),
+            "unexpected error: {error}"
+        );
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            original,
+            "失败的调用不得动真实配置"
+        );
+
+        // 注入耗尽后的下一次调用走真实设置：改动生效、自定义 models_dir 与真实
+        // 字段不丢——若默认快照曾被固化，这里读到的就是默认值了。
+        set_test_store_enabled(true).expect("恢复后普通开关放行");
+        set_storage_settings(None, Some(vec![scan.to_string_lossy().to_string()]))
+            .expect("恢复后普通保存放行");
+        let settings = super::config::try_load_settings().expect("恢复后严格读取应接受写回的配置");
+        assert!(settings.test_mode_enabled, "开关改动要落进新配置");
+        assert_eq!(
+            settings.models_dir, "/home/u/ai/shared/weights",
+            "自定义权重目录不得被默认值覆盖"
+        );
+        assert_eq!(
+            settings.max_concurrent_downloads, 3,
+            "真实配置的其他字段原样保留"
+        );
+        assert_eq!(
+            settings.import_scan_dirs,
+            vec![scan.to_string_lossy().to_string()],
+            "存储入口的改动要落进新配置"
+        );
     }
 }

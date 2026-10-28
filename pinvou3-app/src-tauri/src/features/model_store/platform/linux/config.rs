@@ -296,7 +296,7 @@ fn apply_settings_defaults(mut settings: Settings) -> Settings {
 pub fn try_load_settings() -> Result<Settings, String> {
     let mut settings = Settings::default();
     let cfg_file = config_file();
-    match fs::read_to_string(&cfg_file) {
+    match read_config_text(&cfg_file) {
         // 整体反序列化。老配置文件里缺掉的字段靠结构体上的 `#[serde(default)]`
         // （见 `Settings` 定义）取 Default 给的值，而不是各类型的零值——注意这
         // **不是**逐字段合并：任一字段类型不符，整个文件就废掉，走下面的留存分支。
@@ -333,9 +333,49 @@ pub fn try_load_settings() -> Result<Settings, String> {
     Ok(apply_settings_defaults(settings))
 }
 
+/// 配置文本的唯一读取口。生产上就是 [`fs::read_to_string`]。
+///
+/// 抽出来只有一个理由：测试要能注入**瞬态**读取失败（见下方
+/// `arm_transient_read_failure`）。权限位（mode 000）构造不出「同一拍里首读
+/// 失败、保存端重读已恢复」的时序——权限失败到重读时仍在；而 fd 耗尽（EMFILE）、
+/// 一拍 EIO 这类真实瞬态故障恰恰是"过一下自己就好了"。二十八轮评审 P1 的回归
+/// 需要能受控地打出这个时序。
+fn read_config_text(cfg_file: &Path) -> std::io::Result<String> {
+    #[cfg(test)]
+    {
+        let left = TEST_TRANSIENT_READ_FAILURES.load(std::sync::atomic::Ordering::Relaxed);
+        if left > 0 {
+            TEST_TRANSIENT_READ_FAILURES.store(left - 1, std::sync::atomic::Ordering::Relaxed);
+            // 错误类别只要不是 NotFound 就会走 `try_load_settings` 的"读取失败"
+            // 分支（报错、不隔离）——正是瞬态 I/O 故障的形态。
+            return Err(std::io::Error::other("注入的瞬态读取失败（测试）"));
+        }
+    }
+    fs::read_to_string(cfg_file)
+}
+
+/// 注入接下来 `times` 次配置读取的瞬态失败。仅测试存在（`#[cfg(test)]`），
+/// 由 `TempHome` 的全局测试锁串行化，计数器无并发竞争。
+#[cfg(test)]
+pub fn arm_transient_read_failure(times: usize) {
+    TEST_TRANSIENT_READ_FAILURES.store(times, std::sync::atomic::Ordering::Relaxed);
+}
+
+#[cfg(test)]
+static TEST_TRANSIENT_READ_FAILURES: std::sync::atomic::AtomicUsize =
+    std::sync::atomic::AtomicUsize::new(0);
+
 pub fn load_settings() -> Settings {
-    // 宽松消费方（商店页 / ollama_base_url 等）：读取失败回默认设置，历史行为
-    // 不变；隔离改名与日志副作用已在 [`try_load_settings`] 内发生。
+    // 宽松消费方（商店页 / ollama_base_url / 并发上限 / 开关状态等**只读展示**
+    // 消费方）：读取失败回默认设置，历史行为不变；隔离改名与日志副作用已在
+    // [`try_load_settings`] 内发生。
+    //
+    // **会落盘的消费方不在此列**（二十八轮评审 P1）：读-改-整体写回的普通设置
+    // 入口若从本函数拿快照，瞬态读取失败时拿到的是默认值，而 `save_settings`
+    // 闸门的重读可能已恢复——闸门只判 Err/Ok，放行的就是这份默认快照，真实
+    // 配置被一次普通开关整体洗掉。所以这类入口（service.rs 的
+    // `set_test_store_enabled` / `set_storage_settings`）首读必须走
+    // [`try_load_settings`] 并传播错误。
     try_load_settings().unwrap_or_else(|_| apply_settings_defaults(Settings::default()))
 }
 
@@ -372,6 +412,14 @@ pub fn load_settings() -> Settings {
 /// 确认放弃后按提示清理残留。配置可读可解析就放行——包括用户已显式恢复、
 /// 历史留存还在的态，不能让留存永久阻断已恢复的有效配置；全新安装（缺失且
 /// 无留存）同样放行。
+///
+/// 闸门有一处自己罩不住的盲区（二十八轮评审 P1 的剩余分支）：它重读成功时
+/// **只判 Err/Ok，读到的真实 `Settings` 被丢弃**，落盘的仍是调用方传进来的
+/// 对象。若调用方的首读走宽松 [`load_settings`] 赶上瞬态失败拿到默认值、到
+/// 这一拍瞬态已恢复，闸门放行的就是那份默认快照——真实 config.json 被洗成
+/// 默认。所以这个盲区不在写端修（那需要把两次读取缝成一次事务），而是在
+/// 上游入口把首读改成 [`try_load_settings`]：读不到就不改、不保存（service.rs
+/// 的两个普通设置入口，回归见 `transient_first_read_failure_must_not_persist_the_default_snapshot`）。
 pub fn save_settings(settings: &Settings) -> std::io::Result<()> {
     use std::io::Write as _;
 
@@ -754,8 +802,10 @@ mod tests {
         assert!(bad.exists(), "坏文件应已隔离留存");
         assert!(!path.exists(), "原文件应已改名让位");
 
-        // 第二拍：普通 setter 的"读-改-整体写回"。宽松读取拿到默认值，保存
-        // 必须拒绝，而不是把默认值固化成合法配置。
+        // 第二拍：写端闸门（纵深防御）。生产 setter 的首读现在就走严格读取、
+        // 还没到保存就会报错（二十八轮评审 P1）；本拍打的是首读之后、落盘之前
+        // 配置才进入本态的窗口——`save_settings` 自己的严格重读必须兜住，不能
+        // 把宽松口径的默认值固化成合法配置。
         let mut toggled = load_settings();
         toggled.test_mode_enabled = true;
         let error = save_settings(&toggled).expect_err("隔离态普通保存必须被拒绝");
@@ -842,8 +892,10 @@ mod tests {
             "不可读分支不产生隔离留存"
         );
 
-        // 第二拍：普通 setter 的"读-改-整体写回"。宽松读取拿到默认值，保存必须
-        // 被拒，而不是 rename 覆盖掉读不出来的原文件。
+        // 第二拍：写端闸门（纵深防御，框架同隔离测试的第二拍）：生产 setter 的
+        // 首读走严格读取在这里之前就报错；本拍钉住 `save_settings` 自己的严格
+        // 重读兜住首读之后才变坏的窗口。宽松读取拿到默认值，保存必须被拒，
+        // 而不是 rename 覆盖掉读不出来的原文件。
         let mut toggled = load_settings();
         toggled.test_mode_enabled = true;
         let error = save_settings(&toggled).expect_err("不可读配置的普通保存必须被拒绝");
