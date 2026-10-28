@@ -238,6 +238,7 @@ jobs:
           filters: |
             rust_code:
               - '**/*.rs'
+              - 'pinvou3-app/src-tauri/src/features/updater/platform/windows_handoff.cs'
               - '**/Cargo.toml'
               - '**/Cargo.lock'
               - '**/build.rs'
@@ -289,6 +290,7 @@ jobs:
               # run the leg that executes the guard it pins.
               - 'scripts/tests/test_registry_guard.py'
               - 'pinvou3-app/src-tauri/**/*.rs'
+              - 'pinvou3-app/src-tauri/src/features/updater/platform/windows_handoff.cs'
               # diagnostics.rs 在生产校验中 include_str! v1 schema，
               # behavior_telemetry_tests.rs 同时嵌入 schema 与 registries。
               # 精确登记编译输入，schema-only Ready PR/MQ 也须执行 Rust 回归
@@ -655,6 +657,9 @@ jobs:
               - 'docs/windows-update-release-console.md'
               - '.github/workflows/pr-check.yml'
             acp_runtime:
+              # 开发启动器。开源侧把 run-dev.sh 变更路由进 acp_runtime 门禁,
+              # 本仓同路由:launcher-only PR 不再静默跳过运行时门禁。
+              - 'pinvou3-app/run-dev.sh'
               - 'pinvou3-app/scripts/codex-bridge-runtime/**'
               - 'pinvou3-app/scripts/prepare-codex-bridge-runtime.sh'
               - 'pinvou3-app/scripts/tauri/build.js'
@@ -708,6 +713,9 @@ jobs:
               - 'pinvou3-app/src-tauri/rust-toolchain.toml'
               - 'pinvou3-app/package.json'
             windows_static_updater:
+              - 'pinvou3-app/src-tauri/src/features/updater/platform/windows.rs'
+              - 'pinvou3-app/src-tauri/src/features/updater/platform/windows_handoff.cs'
+              - 'scripts/tests/windows-handoff.test.ps1'
               - 'scripts/prepare-windows-release.ps1'
               - 'scripts/verify-windows-release-online.ps1'
               - 'pinvou3-app/tests/windows_static_update_contract.test.js'
@@ -853,6 +861,16 @@ jobs:
       - name: fork-guard 指纹层 (秒级,不编译)
         run: ./scripts/fork-guard.sh --fast
 
+      # 合并提交 authored 标识披露审计（仅披露,恒以 0 退出,不阻断）：枚举
+      # 分支上每个 merge commit 的 resolution-authored 标识并打印，让
+      # 「resolution 内容已进树」在每个 PR 上持续可见，而不是依赖每轮手工运行。
+      - name: Merge authored audit (seconds)
+        if: ${{ github.event_name != 'push' }}
+        run: |
+          base_ref="${{ github.event_name == 'merge_group' && github.event.merge_group.base_ref || github.base_ref }}"
+          base_ref="${base_ref#refs/heads/}"
+          python3 scripts/audit-merge-authored.py "origin/$base_ref"
+
       - name: fork 合规联动 (gitlink ↔ fork-modifications)
         run: |
           base_ref="${{ github.event_name == 'merge_group' && github.event.merge_group.base_ref || github.base_ref }}"
@@ -867,7 +885,24 @@ jobs:
       - name: Gate policy test suite (scripts/tests)
         run: python3 -m unittest discover -s scripts/tests -p 'test_*.py'
 
+      # Keep the other fast checks independent of the changes job. This filter
+      # runs only after them and uses the same PR / merge-group diff semantics.
+      - uses: dorny/paths-filter@v4
+        id: mcp-filter
+        with:
+          filters: |
+            mcp_contract:
+              - 'pinvou3-app/resources/mcp-servers/**'
+              - 'scripts/mcp-server-contract-smoke.py'
+              - 'scripts/tests/test_mcp_schema_contract.py'
+              - 'CodeWhale'
+              - '.gitmodules'
+              - '.github/workflows/pr-check.yml'
+
       - name: Python MCP server 测试 (mcp-servers/*/test_*.py)
+        # GitHub's PR files API returns at most 3000 files; do not trust a
+        # negative result when the list may be truncated or its size is unknown.
+        if: ${{ steps.mcp-filter.outputs.mcp_contract != 'false' || (github.event_name == 'pull_request' && (github.event.pull_request.changed_files == null || github.event.pull_request.changed_files >= 3000)) }}
         run: |
           python3 -m pip install --quiet python-pptx python-docx
           fail=0
@@ -879,6 +914,7 @@ jobs:
           [ "$fail" -eq 0 ]
 
       - name: 内置 MCP 协议与产物契约
+        if: ${{ steps.mcp-filter.outputs.mcp_contract != 'false' || (github.event_name == 'pull_request' && (github.event.pull_request.changed_files == null || github.event.pull_request.changed_files >= 3000)) }}
         run: python3 scripts/mcp-server-contract-smoke.py
 
   frontend-test:
@@ -1840,10 +1876,23 @@ jobs:
             RUNNER_ENVIRONMENT="$RUNNER_ENVIRONMENT" \
             python3 scripts/ci-rust-disk.py
 
+      # Probe the test cache without downloading it. An exact hit makes the
+      # separate lint-cache extraction redundant; a miss still takes the
+      # existing lint fallback before restoring the test cache.
+      - name: 检查 Rust test 缓存是否精确命中
+        id: rust-test-cache-probe
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: pinvou3-app/src-tauri
+          shared-key: rust-test-v2
+          lookup-only: true
+          save-if: false
+
       # rust-test 的独立缓存缺失时，全冷测试会超过当前 runner 的执行窗口。
       # 先只读恢复同一工具链与锁文件下已由 main 保存的 rust-lint 目标缓存，
       # 再恢复/保存独立 rust-test 缓存；不降低测试范围，也不让 PR 写缓存。
       - name: 恢复 Rust lint 暖缓存
+        if: ${{ steps.rust-test-cache-probe.outputs.cache-hit != 'true' }}
         uses: Swatinem/rust-cache@v2
         with:
           workspaces: pinvou3-app/src-tauri
@@ -1852,6 +1901,7 @@ jobs:
           save-if: false
 
       - name: Cargo test cache
+        id: rust-test-cache
         uses: Swatinem/rust-cache@v2
         with:
           workspaces: pinvou3-app/src-tauri
@@ -1879,6 +1929,19 @@ jobs:
           cache-on-failure: true
           save-if: ${{ github.ref == 'refs/heads/main' }}
 
+      # An entry can be evicted between lookup and restore. In that case the
+      # skipped lint restore must still be attempted before compilation.
+      - name: 恢复被淘汰缓存的 Rust lint 回退
+        if: ${{ steps.rust-test-cache-probe.outputs.cache-hit == 'true' && steps.rust-test-cache.outputs.cache-hit != 'true' }}
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: pinvou3-app/src-tauri
+          shared-key: rust-lint-v2
+          # rust-cache exports CACHE_ON_FAILURE globally; preserve the test
+          # cache writer's failure behavior even though this step is read-only.
+          cache-on-failure: true
+          save-if: false
+
 
       # PR #988 started a cold build with only 7.3 GiB free. All 2,100 lib
       # tests passed, but the separate telemetry library exhausted the disk.
@@ -1896,6 +1959,11 @@ jobs:
       # 已经很大的 pinvou3_lib 测试二进制。local-embed 覆盖没有删除：
       # knowledge-rust 仍以 --all-features 测试 pinvou-knowledge，rust-lint 与原生
       # Windows 门禁仍按默认 features 编译应用集成路径。
+      # benchmark-hooks 则显式开启（与开源 Linux 腿同口径）：headless-bridge
+      # 合同回归只存在于该 feature 下，仅编译不执行会漏掉运行期断言。该 feature
+      # 只拉 workspace 内 agent-backend-api 与 deepseek-tui/benchmark-eval-controls，
+      # 不引入 local-embed 的 fastembed/ORT 重依赖；可编译性已由 rust-lint 的
+      # all-targets check 先行钉住。
       # 编译链接与测试执行拆成两个 step:该 job 在标准 hosted runner 上多次在
       # 本环节被打到 runner 失联(日志全丢,只剩 step 状态可查),拆开后失联时
       # 能定位是编译/链接期还是测试执行期。内存压力现由 job 开头的
@@ -1909,7 +1977,7 @@ jobs:
       # 只有下方超出单进程内存预算的 behavior-telemetry 测试使用独立目标。
       - name: cargo test --lib --no-run（编译链接测试二进制）
         if: ${{ github.event_name != 'push' }}
-        run: /usr/bin/time -v cargo test --manifest-path pinvou3-app/src-tauri/Cargo.toml --no-default-features --lib --locked --no-run
+        run: /usr/bin/time -v cargo test --manifest-path pinvou3-app/src-tauri/Cargo.toml --no-default-features --lib --features benchmark-hooks --locked --no-run
 
       # Test registry guard: a duplicated #[test] registers one case twice and
       # swallows the adjacent case's attributes (happened twice on upstream PR
@@ -1931,7 +1999,7 @@ jobs:
           chrome="$(command -v google-chrome || command -v chromium || command -v chromium-browser)"
           export CHROME="$chrome"
           export PINVOU_REQUIRE_REMOTE_E2E=1
-          cargo test --manifest-path pinvou3-app/src-tauri/Cargo.toml --no-default-features --lib --locked -- --test-threads=1
+          cargo test --manifest-path pinvou3-app/src-tauri/Cargo.toml --no-default-features --lib --features benchmark-hooks --locked -- --test-threads=1
 
       # The behavior-telemetry state-machine tests intentionally use a separate
       # harness. Linking their 2,300+ source lines into the already-large lib
@@ -1978,7 +2046,7 @@ jobs:
       # 故恢复只编译设计;不要在 push 上重新打开测试执行。
       - name: cargo test --lib --no-run (push main 仅编译暖 cache)
         if: ${{ github.event_name == 'push' }}
-        run: /usr/bin/time -v cargo test --manifest-path pinvou3-app/src-tauri/Cargo.toml --no-default-features --lib --locked --no-run
+        run: /usr/bin/time -v cargo test --manifest-path pinvou3-app/src-tauri/Cargo.toml --no-default-features --lib --features benchmark-hooks --locked --no-run
 
   # pinvou-cli contract tests: since PR #478 the product CLI surface (~20k
   # lines + ~340 contract tests) has no other automated execution leg (the
@@ -2182,6 +2250,10 @@ jobs:
       - name: Windows 静态更新契约
         run: npm --prefix pinvou3-app run test:windows-static-updater
 
+      - name: Windows 安装交接进程测试
+        shell: pwsh
+        run: ./scripts/tests/windows-handoff.test.ps1
+
   # pinvou-cli lint leg (round 18, review §3 "The CI leg doesn't lint the
   # CLI"): until now ~50k lines of CLI Rust had no clippy on any lane, and
   # the src-tauri [lints] table (unwrap/expect kept at warn there) does not apply
@@ -2243,10 +2315,10 @@ jobs:
         with:
           submodules: false
 
-      # PR #1995 exhausted the runner disk while restoring the Cargo cache,
-      # before clippy started. Free the same unused SDKs as rust-lint before
-      # swap, dependencies and cache extraction consume the initial space.
-      - name: Prepare Rust disk capacity
+      # main twice exhausted this shared disk during cache post-metadata,
+      # after both Cargo checks passed. Reuse only the base SDK allowlist;
+      # reserve 24 GiB before swap and dependency/toolchain writes.
+      - name: Prepare CLI disk capacity before swap
         run: |
           sudo env GITHUB_WORKSPACE="$GITHUB_WORKSPACE" \
             RUNNER_ENVIRONMENT="$RUNNER_ENVIRONMENT" \
@@ -2309,22 +2381,29 @@ jobs:
       # which is exactly the rust-lint case ("clippy/check" target caching in
       # the repo's cache policy). Own key: clippy artifacts differ from the
       # rustc artifacts of the cli-test cache and would evict each other.
+      # Swap and installed dependencies can consume the initial reserve.
+      # Refuse a runner already below the default 12 GiB before restoring.
+      - name: Check CLI disk capacity before cache
+        run: |
+          sudo env GITHUB_WORKSPACE="$GITHUB_WORKSPACE" \
+            RUNNER_ENVIRONMENT="$RUNNER_ENVIRONMENT" \
+            python3 scripts/ci-rust-disk.py
+
       - name: Cargo cache
-        uses: Swatinem/rust-cache@v2
+        id: cli_lint_cache
+        # Pin the reviewed implementation to prevent action behavior drift;
+        # the final disk gate enables failure caching only when safe to try.
+        uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0
         with:
           workspaces: pinvou-cli
           shared-key: cli-lint
-          # cache-on-failure matches the sibling legs (rust-test,
-          # windows-rust-test, macos-rust-check, macos-cli-check):
-          # save-on-success-only means one failed main push drops the
-          # namespace fully cold and every later run pays the full cold
-          # compile. Saves stay main-only (save-if below).
-          cache-on-failure: true
+          cache-on-failure: false
           save-if: ${{ github.ref == 'refs/heads/main' }}
 
-      # The preflight floor precedes cache extraction; check the remaining
-      # capacity again before either compiler mode starts producing artifacts.
-      - name: Check Rust disk capacity after cache restore
+      # Check actual remaining space after cache restore, before Cargo.
+      # Failure remains visible; the post-save gate below leaves failure
+      # caching disabled if space cannot be recovered.
+      - name: Check CLI disk capacity after cache
         run: |
           sudo env GITHUB_WORKSPACE="$GITHUB_WORKSPACE" \
             RUNNER_ENVIRONMENT="$RUNNER_ENVIRONMENT" \
@@ -2355,6 +2434,18 @@ jobs:
         run: >-
           cargo check --manifest-path pinvou-cli/Cargo.toml
           --workspace --all-targets --no-default-features --locked
+
+      # A successful build can consume the earlier reserve. If this gate
+      # fails, the job fails and the pinned cache post is skipped. When it
+      # passes, preserve main's failure-cache warming for earlier failures.
+      # This sample cannot reserve space or guarantee a later save succeeds.
+      - name: Guard CLI cache post-save
+        if: ${{ always() && !cancelled() && steps.cli_lint_cache.outcome == 'success' }}
+        run: |
+          sudo env GITHUB_WORKSPACE="$GITHUB_WORKSPACE" \
+            RUNNER_ENVIRONMENT="$RUNNER_ENVIRONMENT" \
+            python3 scripts/ci-rust-disk.py
+          printf '%s\n' 'CACHE_ON_FAILURE=true' >> "$GITHUB_ENV"
 
   windows-rust-test:
     name: windows-rust-test (${{ matrix.phase }})

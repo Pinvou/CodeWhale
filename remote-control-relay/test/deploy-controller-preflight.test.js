@@ -345,7 +345,7 @@ test("production CLI checks every fixed state ancestor before install mutates it
   for (const path of ["/", "/var", "/var/lib", "/var/lib/pinvou-remote-relay", "/var/lib/pinvou-remote-relay/state"]) {
     assert.ok(source.includes(`{ path: "${path}", privateDirectory:`));
   }
-  assert.match(source, /validateControllerEnvironmentFile\(process\.argv\[2\] \|\| "", \{ expectedFeatureFlag \}\)\s*\.then\(\(\) => validateControllerStateDirectories\(\)\)/u);
+  assert.match(source, /validateControllerEnvironmentFile\(process\.argv\[2\] \|\| "", \{ expectedFeatureFlag \}\)\s*\.then\(\(\) => expectedFeatureFlag === "1" \? requireControllerLockRuntime\(\) : undefined\)\s*\.then\(\(\) => validateControllerStateDirectories\(\)\)/u);
   const deploy = await readFile(new URL("../../scripts/deploy-remote-relay.sh", import.meta.url), "utf8");
   assert.ok(deploy.indexOf('node "$code_stage/scripts/deploy-controller-preflight.mjs" "$controller_env"')
     < deploy.indexOf('install -d -o root -g root -m 700 "$controller_state_root"'));
