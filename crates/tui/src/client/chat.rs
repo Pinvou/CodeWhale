@@ -585,6 +585,14 @@ pub(super) fn apply_route_reasoning_controls(
     effort: Option<&str>,
 ) {
     apply_reasoning_effort(body, effort, provider);
+    if provider == ApiProvider::Vllm {
+        codewhale_config::local_reasoning::apply_local_reasoning_controls(
+            body,
+            codewhale_config::ProviderKind::Vllm,
+            model,
+            effort,
+        );
+    }
     apply_modelstudio_route_reasoning_controls(body, provider, base_url, model, effort);
     apply_minimax_route_reasoning_controls(body, provider, base_url, model, effort);
     apply_inkling_reasoning_effort(body, provider, model, effort);
@@ -9658,5 +9666,28 @@ mod google_thought_signature_tests {
             !leaked_to_text,
             "reasoning_content must not leak into answer text: {events:?}"
         );
+    }
+}
+
+#[cfg(test)]
+mod local_template_regression {
+    use super::*;
+
+    #[test]
+    fn forkguard_vllm_model_template_effort_survives_route_shaping() {
+        for model in ["Qwen3.8-27B-NVFP4", "nvidia/Qwen3.8-Flash-Next-NVFP4"] {
+            let mut body = json!({"model":model,"messages":[],"max_tokens":99});
+            apply_route_reasoning_controls(
+                &mut body,
+                ApiProvider::Vllm,
+                "http://localhost:8000/v1",
+                model,
+                Some("high"),
+            );
+            assert_eq!(body["reasoning_effort"], "xhigh");
+            assert_eq!(body["chat_template_kwargs"]["reasoning_effort"], "xhigh");
+            assert_eq!(body["model"], model);
+            assert_eq!(body["max_tokens"], 99);
+        }
     }
 }
