@@ -4392,15 +4392,17 @@ fn enforce_readonly_argv_operands(
         // expands — `x=y` as one name, so judging only `y` would read a
         // symlink spelled `x=y` under a name that does not exist, and walk
         // the glob `a*=b*` as `b*`, which matches nothing while the shell
-        // matched `ax=b.out`.
+        // matched `ax=b.out`. The spelling is judged exactly as parsed, never
+        // trimmed: whitespace survives into a token only through quoting, so
+        // `cat ' x '` names a file called ` x ` and a trimmed judgement
+        // would look up `x` instead, find nothing, and skip the real name.
         let value = if token.starts_with('-') {
             token
                 .split_once('=')
                 .map_or(token.as_str(), |(_, value)| value)
         } else {
             token.as_str()
-        }
-        .trim();
+        };
         // Windows `Path::canonicalize` returns verbatim device paths
         // (`\\?\C:\...`), which `Path::is_absolute` does not recognize; without
         // stripping the prefix the operand falls into the shape refusal and

@@ -1765,6 +1765,51 @@ fn readonly_operand_gate_fails_closed_on_quoted_separators() {
         .expect("the unquoted sequence over the same files stays admitted");
 }
 
+/// An operand is judged exactly as parsed. Whitespace survives into a token
+/// only through quoting, so `cat ' x '` names a file called ` x `; the gate
+/// used to trim the spelling, look up `x`, find nothing, and skip — while
+/// the shell (and the direct-argv lane) opened ` x `, an outside symlink.
+/// Trimming also undid the whole-word `=` judgement (`cat 'ax=b.out '`).
+#[cfg(unix)]
+#[test]
+fn readonly_operand_gate_judges_the_parsed_spelling_without_trimming() {
+    let workspace = tempdir().expect("workspace");
+    let outside = tempdir().expect("outside");
+    std::fs::write(outside.path().join("secret.txt"), "secret").expect("outside file");
+    for name in [" x ", "x ", " x", "ax=b.out "] {
+        std::os::unix::fs::symlink(
+            outside.path().join("secret.txt"),
+            workspace.path().join(name),
+        )
+        .expect("outside symlink with surrounding whitespace");
+    }
+    std::fs::write(workspace.path().join("x"), "inside decoy").expect("trimmed-name decoy");
+    std::fs::write(workspace.path().join(" in "), "inside").expect("inside spaced name");
+    let roots = [workspace.path().to_path_buf()];
+
+    for command in [
+        "cat ' x '",
+        "cat 'x '",
+        "cat ' x'",
+        "pwd; cat ' x '",
+        "cat ' x ' | head -c 40",
+        "cat 'ax=b.out '",
+        "cat --from=' x '",
+    ] {
+        let error = enforce_readonly_workspace_operands(command, &roots, workspace.path())
+            .expect_err("a whitespace-bearing spelling must be judged as the shell opens it")
+            .to_string();
+        assert!(
+            error.contains("operand.outside_workspace"),
+            "{command}: expected the outside-workspace refusal, got: {error}"
+        );
+    }
+    enforce_readonly_workspace_operands("cat ' in '", &roots, workspace.path())
+        .expect("an inside file with a spaced name stays admitted");
+    enforce_readonly_workspace_operands("cat x", &roots, workspace.path())
+        .expect("the trimmed-name decoy itself is an ordinary inside file");
+}
+
 /// The gate refuses `cd` as a pipeline stage in its own right (the stage
 /// runs in a subshell, so the fold would lie), with every operand inside the
 /// workspace — the assertion pins the specific `cwd.pipeline_stage` tag
@@ -1844,6 +1889,11 @@ async fn readonly_shell_refuses_pipeline_cd_and_glob_escapes_end_to_end() {
         workspace.path().join("ax=b.out"),
     )
     .expect("outside symlink spelled with `=`");
+    std::os::unix::fs::symlink(
+        outside.path().join("secret.txt"),
+        workspace.path().join(" x "),
+    )
+    .expect("outside symlink spelled with surrounding spaces");
     let context = ToolContext::new(workspace.path())
         .with_shell_policy(crate::worker_profile::ShellPolicy::ReadOnly);
 
@@ -1860,6 +1910,8 @@ async fn readonly_shell_refuses_pipeline_cd_and_glob_escapes_end_to_end() {
         "cat ax=b.out",
         "cat a*=b* | head -c 40",
         "pwd; cat a*=b*",
+        "cat ' x '",
+        "pwd; cat ' x '",
     ] {
         let result = LowercaseBashTool
             .execute(json!({"command": command}), &context)
