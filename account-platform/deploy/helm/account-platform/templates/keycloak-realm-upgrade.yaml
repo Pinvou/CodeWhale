@@ -38,6 +38,8 @@ spec:
             - { name: HOME, value: /tmp }
             - { name: KEYCLOAK_ADMIN_SERVER, value: {{ printf "http://%s-keycloak:8080" (include "pinvou.fullname" .) | quote }} }
             - { name: PINVOU_OIDC_CLIENT_ID, value: {{ .Values.keycloak.oidcClientId | quote }} }
+            - { name: PINVOU_OIDC_AUDIENCE, value: {{ .Values.oidc.audience | quote }} }
+            - { name: PORTAL_OIDC_CLIENT_ID, value: {{ .Values.oidc.portalClientId | quote }} }
             - { name: PORTAL_PUBLIC_URL, value: {{ .Values.public.portalUrl | quote }} }
             - name: KEYCLOAK_ADMIN_USERNAME
               valueFrom: { secretKeyRef: { name: {{ .Values.global.runtimeSecret }}, key: keycloak-realm-upgrade-admin-username } }

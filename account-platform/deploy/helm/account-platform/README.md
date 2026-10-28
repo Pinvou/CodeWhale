@@ -155,15 +155,61 @@ The three SQL migration hooks do not provision it, and
 it is not a first-install bootstrap switch. Keycloak's management readiness
 probe alone does not establish that application login or JWKS is available.
 
-For a fresh Keycloak database, complete the separately authorized first import
-using the reviewed realm object from the
-[offline production realm bootstrap bundle](../../keycloak/README.md#offline-production-realm-bootstrap-bundle),
-then follow that document's controlled realm/client provisioning and readback.
-Keep the upgrade hook disabled until its existing-realm prerequisites are met.
-Do not expose application login until this handoff is complete. The bundle
-wrapper and development realm are not production import documents; do not
-overwrite a retained realm or import development users. Existing and external
-Keycloak installations retain their reviewed realm and provisioning workflow.
+The realm updater accepts `oidc.audience` and `oidc.portalClientId` only as
+nonempty ASCII letters, digits, dots, underscores and hyphens. The chart rejects
+other characters during schema validation, before rendering resources. This is
+the updater's existing alphabet, not the offline generator's full identifier
+contract: that generator additionally requires an alphanumeric first character
+and at most 64 characters. Follow each tool's applicable constraints.
+
+Existing values outside the updater alphabet now fail rendering. Operators must
+review their identity/client compatibility and plan any required configuration
+transition separately before release; this chart does not migrate or rename
+realm data. Do not bypass the schema or widen the updater to force installation.
+
+For `production-new`, keep `keycloak.realmUpgradeEnabled=true` as required by
+its schema. Complete this independently authorized bootstrap **before
+`helm install`**; missing prerequisites or readback must stop installation.
+The default `keycloak.enabled=true` bundled topology remains unchanged.
+
+1. Bind the private bootstrap instance to the same existing PostgreSQL database
+   and reviewed `images.keycloak.repository:tag` image as the release. Use this
+   repository's SPI/theme image and `KC_DB=postgres`. Its `KC_DB_URL`,
+   `KC_DB_USERNAME` and `KC_DB_PASSWORD` must match `global.runtimeSecret` keys
+   `keycloak-database-url`, `keycloak-database-username` and
+   `keycloak-database-password`. Obtain them from their existing controlled
+   source; the chart-owned ExternalSecret may not exist before installation.
+   Credentials remain in private configuration, not arguments or logs.
+2. Only for an independently verified fresh database with no retained `pinvou`
+   realm, review the
+   [offline production realm bootstrap bundle](../../keycloak/README.md#offline-production-realm-bootstrap-bundle).
+   Match its client IDs, audience and Portal origin to the release values;
+   extract only its `realm` object to a controlled `pinvou-realm.json` file.
+   With no other instance using that fresh database, mount it read-only at
+   `/opt/keycloak/data/import/pinvou-realm.json` in the approved image. Apply the
+   existing private first-bootstrap administrator, hostname and TLS settings,
+   then run `/opt/keycloak/bin/kc.sh start --optimized --import-realm` in an
+   independently controlled private instance, without exposing application
+   traffic. The pinned
+   [Keycloak startup import](https://github.com/keycloak/keycloak/blob/26.7.0/docs/guides/server/importExport.adoc)
+   skips an existing realm; a skip is not evidence that its state is correct.
+   The bundle wrapper and development realm are not production import documents.
+3. On that private instance, complete the existing
+   [realm/client provisioning and readback](../../keycloak/README.md#realm-and-client-provisioning)
+   with the controlled administrator/client-secret files. Explicitly match
+   desktop/Portal client IDs, audiences and origin to the release values; verify
+   the `pinvou` realm, desktop client and provisioning readback. Stop only the
+   temporary instance, retaining the same database and evidence. Only then
+   install the release with the hook enabled. Its `post-install,post-upgrade`
+   updater consumes runtime Secret keys `keycloak-realm-upgrade-admin-username`,
+   `keycloak-realm-upgrade-admin-password` and `keycloak-provisioner-client-secret`
+   from the corresponding controlled bootstrap inputs. It updates an existing
+   realm and does not replace this pre-install import/readback.
+
+Retained and external Keycloak realms keep their existing controlled update and
+readback workflow: do not run a fresh import, recreate the database, overwrite
+retained realms or import development users. No application traffic may be
+exposed before the handoff and acceptance below are complete.
 
 Before enabling application traffic, verify that the public discovery issuer
 exactly matches `oidc.issuer`, the configured JWKS endpoint serves the intended
@@ -172,6 +218,54 @@ the provisioning readback. Complete real login, refresh and logout acceptance;
 neither a successful Helm render nor a healthy Keycloak process proves this.
 Keep credentials in the existing controlled files and out of values, argv and
 logs. TLS, workload identities and egress prerequisites below remain required.
+
+### Built-in Kubernetes workload JWKS
+
+The exact `workloadIdentity.jwksUrl=https://kubernetes.default.svc/openid/v1/jwks`
+selects authenticated Kubernetes API key retrieval for Account, Identity, Billing
+and Token Gateway. The configured `workloadIdentity.issuer` must match the actual
+cluster ServiceAccount token issuer and signing keys. Changing this value does
+not change Kubernetes TokenRequest's issuer. Independently verify the cluster's
+configured issuer, projected tokens and serving certificate SAN/chain before
+installation; do not substitute an unrelated Keycloak or external IdP issuer.
+
+Each verifier receives the namespace's existing `kube-root-ca.crt` ConfigMap as
+a read-only regular `subPath` CA file, isolated from public OIDC/payment roots.
+Verify that its `ca.crt` actually trusts the API server certificate. CA replacement
+requires a controlled Pod rollout. A separate read-only projected directory holds
+a 600-second API credential; its projection deliberately omits `audience` so
+Kubernetes chooses the API server's default API audience. The existing internal
+business-audience token remains separate. The client reopens each current atomic
+projection during key fetches, rejects missing/malformed/expired or mismatched
+issuer/ServiceAccount credentials, and does not cache the API token. Local
+credential failures reject the fetch without permanently disabling the verifier:
+the same middleware retries with the current projection on a later request.
+Local credential shape/time checks do not replace API-server signature and audience
+authentication. Credentials exceeding the existing 15-minute bound are rejected.
+
+The chart binds only these four ServiceAccounts to `GET /openid/v1/jwks` using
+an exact non-resource ClusterRole/Binding. The dedicated client permits only this
+fixed HTTPS URL and GET, disables ambient proxies, refuses redirects (including
+discovery), and never sends Kubernetes credentials to an external JWKS URL.
+It retains go-oidc's shared trusted-key cache; caller cancellation stops its wait,
+while a shared fetch remains bounded by the existing ten-second client timeout.
+A failed refresh cannot invent keys or grant business permissions.
+
+With NetworkPolicy enabled, explicitly supply `external.workloadJwksCidrs` and
+`workloadIdentity.kubernetesApiServerPorts` for the actual API/CNI DNAT path;
+missing inputs fail rendering. Use reviewed bounded CIDRs and the precise TCP
+port set, for example 443 or 6443 only when that is the site's actual route.
+The chart does not infer API IPs, enable an all-address rule, or automatically
+add 443 to a different selected port set. Verify runtime egress and RBAC; render
+success is not a cluster connectivity or rotation acceptance result.
+
+Other JWKS URLs retain the existing external/public-key endpoint contract and
+receive neither the Kubernetes credential/CA mounts nor this RBAC binding. The
+endpoint must still verify the actual projected token's issuer and signing keys;
+a public URL alone does not prove that chain. Existing Compose transports are
+unchanged. NATS/Redis private-CA support is not added by this workload-only change.
+The Kubernetes projection/default-audience contract is documented in the
+[official projected-volume guide](https://kubernetes.io/docs/concepts/storage/projected-volumes/#serviceaccounttoken-projected-volumes).
 
 ### Identity Keycloak backchannel
 
@@ -435,11 +529,13 @@ event-cluster wiring, and always retains ENV_PENDING/NOT_DEPLOYED. For productio
 rendering use the matching production origin pair and explicit provider/Secret
 references; do not weaken production image, HA or identity validation.
 
-The real Helm/Compose cases are opt-in and are not currently enabled by the
-repository workflows. Default contract success therefore does not prove either
-renderer ran. Record the exact command, input and result for an explicit run;
-local isolated rendering is not proof of a successful remote Actions run or
-production rollout. See [release validation and environment boundaries](../../runbooks/model-token-release.md#9-g6-持续门禁与环境交接).
+The real Helm/Compose cases remain opt-in for local runs. When selected, the
+Account Platform Node contracts step in `.github/workflows/pr-check.yml` enables
+both renderers with `PINVOU_TEST_KMS_HELM=1` and `PINVOU_TEST_KMS_COMPOSE=1`.
+This wiring does not prove that a particular commit or job ran those cases:
+check its input, logs and skip counts. Record the exact command, input and result
+for an explicit run; local isolated rendering is not proof of a successful remote
+Actions run or production rollout. See [release validation and environment boundaries](../../runbooks/model-token-release.md#9-g6-持续门禁与环境交接).
 
 ### Production on-call escalation chain
 

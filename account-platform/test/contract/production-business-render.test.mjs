@@ -72,6 +72,26 @@ test('actual current personal Compose preflight binds fixed templates and real p
     f.updatePrivate('BILLING_SERVICE_PRIVATE_ENV_FILE', 'MANUAL_REVIEW_ON_CALL_USER_IDS', undefined); f.rerender();
     rejected(f, undefined, /production_render_private_value_missing/);
   });
+  await fixtureCase(t, 'compose', 'personal', 'base Billing receives the existing user realm without the finance overlay', f => {
+    const env = f.render.config.services['billing-service'].environment;
+    assert.equal(env.OIDC_ISSUER, f.env.USER_OIDC_ISSUER);
+    assert.equal(env.OIDC_JWKS_URL, f.env.USER_OIDC_JWKS_URL);
+    assert.equal(env.OIDC_AUDIENCE, f.env.USER_OIDC_AUDIENCE);
+    assert.equal(checkProductionBusiness(f.render, f.inventory).environment_status, 'ENV_PENDING');
+  });
+  await fixtureCase(t, 'compose', 'personal', 'Billing preflight rejects absent and blank user OIDC inputs', f => {
+    for (const key of ['OIDC_ISSUER', 'OIDC_JWKS_URL', 'OIDC_AUDIENCE']) {
+      for (const value of [undefined, '', '   ']) {
+        // Isolate the checker from the renderer's earlier required-value guard.
+        const render = structuredClone(f.render);
+        for (const source of [render.config, render.template]) {
+          const env = source.services['billing-service'].environment;
+          if (value === undefined) delete env[key]; else env[key] = value;
+        }
+        assert.throws(() => checkProductionBusiness(render, f.inventory), /production_render_billing_oidc_missing/);
+      }
+    }
+  });
   await fixtureCase(t, 'compose', 'personal', 'one canonical on-call owner remains a valid production schedule', f => {
     for (const key of ['ACCOUNT_SERVICE_PRIVATE_ENV_FILE', 'BILLING_SERVICE_PRIVATE_ENV_FILE'])
       f.updatePrivate(key, 'MANUAL_REVIEW_ON_CALL_USER_IDS', f.subjects['account-service']);

@@ -75,8 +75,8 @@
         "issuer": { "type": "string", "format": "uri" },
         "jwksUrl": { "type": "string" },
         "tokenUrl": { "type": "string" },
-        "audience": { "type": "string", "minLength": 1 },
-        "portalClientId": { "type": "string", "minLength": 1 },
+        "audience": { "type": "string", "minLength": 1, "not": { "pattern": "[^A-Za-z0-9._-]" } },
+        "portalClientId": { "type": "string", "minLength": 1, "not": { "pattern": "[^A-Za-z0-9._-]" } },
         "portalHandoffClientId": { "type": "string", "minLength": 1, "not": { "const": "pinvou-token-portal" } }
       }
     },
@@ -112,6 +112,7 @@
         "issuer": { "type": "string", "pattern": "^https://" },
         "jwksUrl": { "type": "string", "pattern": "^https://" },
         "audience": { "type": "string", "minLength": 1 },
+        "kubernetesApiServerPorts": { "type": "array", "uniqueItems": true, "items": { "type": "integer", "minimum": 1, "maximum": 65535 } },
         "tokenExpirationSeconds": { "type": "integer", "minimum": 300, "maximum": 900 }
       }
     },

@@ -1,3 +1,4 @@
+import { isImeComposing } from '../../shared/ime-guard.mjs';
 import { TokenAccountGovernanceActions } from './TokenAccountGovernanceActions.jsx';
 import { secureRequestID } from './request-id.js';
 import React, { useEffect, useMemo, useRef, useState } from 'react';
@@ -195,7 +196,7 @@ function CredentialLaunchDialog({ client, copy, account, action, credential, ena
     setState('CANCELLING');
     void cancelLaunch('CREDENTIAL_LAUNCH_CANCELLED');
   };
-  return <div className="adm-protocol-dialog-backdrop"><div ref={root} className="adm-protocol-dialog" role="dialog" aria-modal="true" aria-labelledby="credential-launch-title" onKeyDown={(event) => { trapCredentialDialogFocus(event, root.current); if (event.key === 'Escape' && !locked) closeSafely(); }}>
+  return <div className="adm-protocol-dialog-backdrop"><div ref={root} className="adm-protocol-dialog" role="dialog" aria-modal="true" aria-labelledby="credential-launch-title" onKeyDown={(event) => { trapCredentialDialogFocus(event, root.current); if (event.key === 'Escape' && !isImeComposing(event) && !locked) closeSafely(); }}>
     <header><div><h3 id="credential-launch-title">{action === 'ENROLL' ? copy.enrollCredential : copy.rotateCredential}</h3><p>{copy.credentialIsolationLead}</p></div><button ref={first} type="button" disabled={locked} onClick={closeSafely} aria-label={copy.close}>×</button></header>
     {error && <div className="adm-inline-message error" role="alert">{copy.commandErrors?.[error] || copy.credentialOperationFailed}</div>}
     {!launch && <form onSubmit={prepare}><label>{copy.reason}<textarea required minLength="10" maxLength="2000" disabled={state === 'PREPARING' || state === 'UNKNOWN'} value={reason} onChange={(event) => setReason(event.target.value)} /></label><footer><button type="button" disabled={state === 'PREPARING' || state === 'UNKNOWN'} onClick={closeSafely}>{copy.cancel}</button><button type="submit" disabled={state === 'PREPARING'}>{state === 'PREPARING' ? copy.submitting : state === 'UNKNOWN' ? copy.actionRecoverSameKey : copy.prepareSecureWindow}</button></footer></form>}

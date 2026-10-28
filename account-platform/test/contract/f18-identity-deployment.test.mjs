@@ -18,7 +18,7 @@ function render(overrides = [], production = true) {
     // The base profile also uses strict provisioned NATS consumers. Keep this
     // Identity fixture valid without reviving the unauthenticated legacy server.
     ...(!production ? ['--set', 'nats.enabled=false', '--set-string',
-      'dependencies.natsUrl=tls://nats.example.invalid:4222'] : []),
+      'dependencies.natsUrl=tls://nats.example.invalid:4222', '--set-json', 'workloadIdentity.kubernetesApiServerPorts=[443]', '--set-json', 'external.workloadJwksCidrs=["192.0.2.40/32"]'] : []),
     // Config-only fixture member; production values require real deployed on-call users.
     ...(production ? ['--set-json', 'global.manualReviewOnCallUserIds=["00000000-0000-4000-8000-000000000707"]'] : []),
     ...[...newApi, ...overrides].flatMap(value =>

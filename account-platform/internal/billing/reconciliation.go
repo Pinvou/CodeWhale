@@ -161,23 +161,25 @@ ON CONFLICT(provider_id,provider_version,evidence_type,evidence_key,payload_dige
 }
 
 type ReconciliationInternalFact struct {
-	EntryType           string
-	ProviderReferenceID string
-	MerchantOrderNo     string
-	PaymentOrderID      uuid.UUID
-	AmountFen           int64
-	Currency            string
-	InternalSnapshot    json.RawMessage
-	RefundSnapshot      json.RawMessage
-	LedgerSnapshot      json.RawMessage
-	LedgerPresent       bool
-	LedgerValid         bool
-	IntegrityCaseType   string
-	IntegrityDigest     string
-	EventDateVerified   bool
-	EventDateConflict   bool
-	EventDateDigest     string
-	EventDateSnapshot   json.RawMessage
+	EntryType                    string
+	ProviderReferenceID          string
+	MerchantOrderNo              string
+	PaymentOrderID               uuid.UUID
+	AmountFen                    int64
+	Currency                     string
+	InternalSnapshot             json.RawMessage
+	RefundSnapshot               json.RawMessage
+	LedgerSnapshot               json.RawMessage
+	LedgerPresent                bool
+	LedgerValid                  bool
+	IntegrityCaseType            string
+	IntegrityDigest              string
+	ledgerRepairAuthorityStatus  string
+	ledgerRepairProofUnavailable bool
+	EventDateVerified            bool
+	EventDateConflict            bool
+	EventDateDigest              string
+	EventDateSnapshot            json.RawMessage
 }
 
 func normalizedBillEntryType(item ProviderBillEntry) string {
@@ -241,6 +243,9 @@ func CompareFourWayReconciliation(provider []ProviderBillEntry, internal []Recon
 		key := fact.EntryType + "|" + fact.ProviderReferenceID
 		if _, exists := internalByKey[key]; exists {
 			differences = append(differences, differenceFromFact(fact, "DUPLICATE_TRANSACTION", "P0", nil))
+			if fact.ledgerRepairAuthorityStatus != "" || fact.ledgerRepairProofUnavailable {
+				differences = appendReconciliationIntegrityDifferences(differences, fact)
+			}
 			continue
 		}
 		internalByKey[key] = fact
@@ -260,16 +265,7 @@ func CompareFourWayReconciliation(provider []ProviderBillEntry, internal []Recon
 			copy := providerItem
 			differences = append(differences, differenceFromFact(fact, caseType, "P0", &copy))
 		}
-		if fact.EventDateConflict {
-			differences = append(differences, differenceFromFact(fact, fact.EntryType+"_DATE_UNVERIFIED", "P1", nil))
-		}
-		if fact.IntegrityCaseType != "" {
-			differences = append(differences, differenceFromFact(fact, fact.IntegrityCaseType, "P0", nil))
-		}
-		if !fact.LedgerPresent {
-			caseType := map[string]string{"PAYMENT": "PAYMENT_LEDGER_MISSING", "REFUND": "REFUND_LEDGER_MISSING", "CHARGEBACK": "CHARGEBACK_LEDGER_MISSING"}[fact.EntryType]
-			differences = append(differences, differenceFromFact(fact, caseType, "P0", nil))
-		}
+		differences = appendReconciliationFactDifferences(differences, fact)
 	}
 	for key, item := range providerByKey {
 		if fact, exists := internalByKey[key]; exists && fact.MerchantOrderNo == item.MerchantOrderNo {
@@ -279,6 +275,35 @@ func CompareFourWayReconciliation(provider []ProviderBillEntry, internal []Recon
 		caseType := map[string]string{"PAYMENT": "PROVIDER_PAID_INTERNAL_MISSING", "REFUND": "PROVIDER_REFUND_INTERNAL_MISSING", "CHARGEBACK": "PROVIDER_CHARGEBACK_INTERNAL_MISSING"}[entryType]
 		copy := item
 		differences = append(differences, ReconciliationDifference{MerchantOrderNo: item.MerchantOrderNo, CaseType: caseType, Severity: "P0", Provider: &copy})
+	}
+	return differences
+}
+
+func appendReconciliationFactDifferences(differences []ReconciliationDifference, fact ReconciliationInternalFact) []ReconciliationDifference {
+	if fact.EventDateConflict {
+		differences = append(differences, differenceFromFact(fact, fact.EntryType+"_DATE_UNVERIFIED", "P1", nil))
+	}
+	differences = appendReconciliationIntegrityDifferences(differences, fact)
+	if !fact.LedgerPresent {
+		caseType := map[string]string{"PAYMENT": "PAYMENT_LEDGER_MISSING", "REFUND": "REFUND_LEDGER_MISSING", "CHARGEBACK": "CHARGEBACK_LEDGER_MISSING"}[fact.EntryType]
+		differences = append(differences, differenceFromFact(fact, caseType, "P0", nil))
+	}
+	return differences
+}
+
+func appendReconciliationIntegrityDifferences(differences []ReconciliationDifference, fact ReconciliationInternalFact) []ReconciliationDifference {
+	if fact.IntegrityCaseType != "" {
+		severity := "P0"
+		if fact.IntegrityCaseType == ledgerRepairProofUnavailableCase {
+			severity = "P1"
+		}
+		differences = append(differences, differenceFromFact(fact, fact.IntegrityCaseType, severity, nil))
+	}
+	if fact.ledgerRepairAuthorityStatus == "INVALID" && fact.IntegrityCaseType != fact.EntryType+"_LEDGER_INVALID" {
+		differences = append(differences, differenceFromFact(fact, fact.EntryType+"_LEDGER_INVALID", "P0", nil))
+	}
+	if fact.ledgerRepairProofUnavailable && fact.IntegrityCaseType != ledgerRepairProofUnavailableCase {
+		differences = append(differences, differenceFromFact(fact, ledgerRepairProofUnavailableCase, "P1", nil))
 	}
 	return differences
 }

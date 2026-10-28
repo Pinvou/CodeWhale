@@ -28,6 +28,7 @@
       "internal.approval-execution.begin",
       "internal.approval-execution.complete",
       "internal.approval-authorization.consume",
+      "internal.account.ledger-repair-proof.read",
       "internal.account.closure.read"
     ]
   },

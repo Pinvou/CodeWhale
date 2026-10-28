@@ -124,6 +124,9 @@ workloadIdentity:
   jwksUrl: https://kubernetes.default.svc/openid/v1/jwks
   audience: pinvou-account-platform-internal
   tokenExpirationSeconds: 600
+  # Required for the built-in API JWKS when NetworkPolicy is enabled.
+  # Supply the actual API/CNI destination ports; never infer them from DNS.
+  kubernetesApiServerPorts: []
 
 sms:
   enabled: false

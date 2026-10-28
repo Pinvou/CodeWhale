@@ -16,6 +16,10 @@ import tempfile
 
 ROOT = Path(__file__).resolve().parents[1]
 local_database_url = runpy.run_path(str(ROOT / "scripts/test-token-financial-postgres.py"))["local_database_url"]
+LEDGER_REPAIR_APPROVAL_ROOT = "TestLedgerRepairCrossDomainActivationPostgresIntegration"
+LEDGER_REPAIR_PAYMENT_E2E_ROOT = "TestLedgerRepairPaymentAuthorityE2EPostgresIntegration"
+LEDGER_REPAIR_APPROVAL_ROOTS = {LEDGER_REPAIR_APPROVAL_ROOT, LEDGER_REPAIR_PAYMENT_E2E_ROOT}
+BILLING_ACTORS = {"billing_migrator", "billing_schema_owner", "billing_service"}
 BILLING_ROOTS = {
     "TestClosedGrantPublishedOwnerEffects",
     "TestAccountClosureIsolationPreservesPriorAuditFacts",
@@ -61,6 +65,7 @@ CONTRACTS = [
       for name, parent, roots in CLOSED_GRANT_GROUPS),
     ("gift-closure", "./internal/billingschema", {"TestGiftClosurePublicHarness"},
      {"": {"TestGiftClosureProducerBoundaries"}, ".billing": {"TestClosedGrantPublishedOwnerEffects"}}),
+    ("ledger-repair-approval-proof", "./internal/account", LEDGER_REPAIR_APPROVAL_ROOTS, {}),
     ("account-anonymization", "./internal/account",
      {"TestAccountClosureAnonymizesOwnedHistoricalContacts", "TestAccountClosureRollbackPreservesEvidence",
       "TestAccountClosureSelfServiceRecoveryPostgres", "TestF08ClosureAdvanceFailureIsScheduledPostgres"}, {}),
@@ -68,6 +73,9 @@ CONTRACTS = [
 
 
 def validate_closed_grant_contracts(contracts):
+    ledger = ("ledger-repair-approval-proof", "./internal/account", LEDGER_REPAIR_APPROVAL_ROOTS, {})
+    if [row for row in contracts if row[0] == ledger[0]] != [ledger]:
+        raise RuntimeError("ledger repair approval proof phase is required exactly once")
     seen, names, parents = set(), set(), set()
     for name, parent, roots in CLOSED_GRANT_GROUPS:
         if not roots or seen & roots or name in names or parent in parents:
@@ -159,10 +167,13 @@ def main():
     databases = "postgres\ntemplate0\ntemplate1"
     user = query("SELECT current_user")
 
-    def require_empty():
-        if (query("SELECT datname FROM pg_database ORDER BY datname") != databases
-                or query("SELECT rolname FROM pg_roles WHERE rolname !~ '^pg_' ORDER BY rolname") != user):
-            raise RuntimeError("database or actors exist; retain them for diagnosis, no setup writes permitted")
+    def require_instance(billing=False):
+        expected = {user} | (BILLING_ACTORS if billing else set())
+        roles = set(query("SELECT rolname FROM pg_roles WHERE rolname !~ '^pg_' ORDER BY rolname").splitlines())
+        if query("SELECT datname FROM pg_database ORDER BY datname") != databases or roles != expected:
+            raise RuntimeError("database or actors differ; retain them for diagnosis, no setup writes permitted")
+        if query("SELECT count(*) FROM pg_stat_activity WHERE backend_type='client backend' AND pid<>pg_backend_pid()") != "0":
+            raise RuntimeError("another client is active; exclusive fixture required")
         objects = query("""SELECT
             (SELECT count(*) FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace
              WHERE n.nspname !~ '^pg_' AND n.nspname <> 'information_schema') +
@@ -171,7 +182,7 @@ def main():
         if objects != "0":
             raise RuntimeError("bootstrap database contains user objects; no setup writes permitted")
 
-    require_empty()
+    require_instance()
     if int(query("SHOW server_version_num")) < 160000:
         raise RuntimeError("PostgreSQL 16 or newer is required by existing actor grants")
     artifact_root = os.environ.get("PINVOU_ACCOUNT_CLOSURE_TEST_ARTIFACT_DIR")
@@ -184,12 +195,26 @@ def main():
     env.update(PINVOU_TEST_SCHEMA_DATABASE_URL=raw, PINVOU_TEST_ACCOUNT_DATABASE_URL=raw,
                PINVOU_TEST_BILLING_DATABASE_URL=raw, F08_TEST_GO=go)
     for name, package, roots, children in CONTRACTS:
-        require_empty()
+        require_instance()
+        owns_billing = False
         child_log = artifacts / (name + ".child.jsonl")
         race_enabled = sys.platform != "win32"
         argv = [go, "test", "-p=1", *(["-race"] if race_enabled else []), "-tags=nomsgpack", "-mod=readonly", "-count=1",
                 "-timeout=8m", "-json", package, "-run", "^(" + "|".join(sorted(roots)) + ")$"]
         try:
+            if name == "ledger-repair-approval-proof":
+                # This root's public Account fixture creates its own Account
+                # roles; the separate Billing fixture needs these three roles.
+                # The absence check above occurs before any actor is created.
+                query("""BEGIN;
+CREATE ROLE billing_schema_owner NOLOGIN NOINHERIT NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS;
+CREATE ROLE billing_migrator LOGIN NOINHERIT NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS;
+CREATE ROLE billing_service LOGIN INHERIT NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS;
+GRANT billing_service,billing_schema_owner TO billing_migrator;
+GRANT billing_service TO billing_schema_owner WITH INHERIT TRUE,SET TRUE;
+COMMIT;""")
+                owns_billing = True
+                require_instance(billing=True)
             parent_log = artifacts / (name + ".parent.jsonl")
             stderr_log = artifacts / (name + ".stderr.log")
             try:
@@ -223,8 +248,21 @@ def main():
                               "child_named_passes": child_counts, "race_enabled": race_enabled,
                               "artifacts": str(artifacts)}))
         finally:
-            # Go fixtures own cleanup. Unknown remnants are never force-removed.
-            require_empty()
+            # Go fixtures own their UUID database and Account-role cleanup.
+            # Never remove an unknown actor or a role with external dependencies.
+            if owns_billing:
+                require_instance(billing=True)
+                if query("""SELECT
+                    EXISTS(SELECT 1 FROM pg_shdepend WHERE refclassid='pg_authid'::regclass
+                      AND refobjid IN(SELECT oid FROM pg_roles WHERE rolname IN('billing_migrator','billing_schema_owner','billing_service')) AND dbid<>0)
+                    OR EXISTS(SELECT 1 FROM pg_auth_members
+                      WHERE (roleid IN(SELECT oid FROM pg_roles WHERE rolname IN('billing_migrator','billing_schema_owner','billing_service'))
+                             OR member IN(SELECT oid FROM pg_roles WHERE rolname IN('billing_migrator','billing_schema_owner','billing_service')))
+                        AND NOT(roleid IN(SELECT oid FROM pg_roles WHERE rolname IN('billing_migrator','billing_schema_owner','billing_service'))
+                                AND member IN(SELECT oid FROM pg_roles WHERE rolname IN('billing_migrator','billing_schema_owner','billing_service'))))""") != "f":
+                    raise RuntimeError("external Billing dependencies; owned roles retained for diagnosis")
+                query("BEGIN; DROP ROLE billing_migrator; DROP ROLE billing_schema_owner; DROP ROLE billing_service; COMMIT;")
+            require_instance()
 
 
 if __name__ == "__main__":

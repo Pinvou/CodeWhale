@@ -61,6 +61,8 @@ function checkRequiredPrivate(workload, render) {
   const env = workload.environment;
   for (const key of requiredPrivate[name] || []) check(typeof env[key] === 'string' && env[key].trim().length > 0, 'private_value_missing');
   if (name === 'billing-service') {
+    for (const key of ['OIDC_ISSUER', 'OIDC_JWKS_URL', 'OIDC_AUDIENCE'])
+      check(typeof env[key] === 'string' && env[key].trim().length > 0, 'billing_oidc_missing');
     check(['h3c_mall', 'development_simulator'].includes(env.BILLING_PAYMENT_PROVIDER), 'payment_provider');
     if (env.BILLING_PAYMENT_PROVIDER === 'development_simulator') https(env.PAYMENT_PROVIDER_BASE_URL);
     else {

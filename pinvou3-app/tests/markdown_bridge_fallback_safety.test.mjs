@@ -23,7 +23,9 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import path from 'node:path';
 import vm from 'node:vm';
+import { test } from 'node:test';
 import { fileURLToPath } from 'node:url';
+import { renderMarkdown, renderMarkdownMarkup } from '../src/shared/markdown-renderer.js';
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const readApp = (...parts) => fs.readFileSync(path.join(root, ...parts), 'utf8');
@@ -84,6 +86,60 @@ function buildWebBridgeContext() {
   });
   return { context, windowObject };
 }
+
+function installWebBridge(context) {
+  vm.runInContext(readApp('src', 'shared', 'bridge-shared-helpers.js'), context);
+  vm.runInContext(readApp('src', 'platform', 'web', 'bridge.js'), context);
+}
+
+test('public renderer contains a real deeply nested Markdown failure and remains usable', () => {
+  const source = '> '.repeat(6000) + '<img src=x onerror="unsafe()">&';
+  // This process has no DOM purifier: both a parser failure and missing DOM
+  // must produce escaped text. No assertion requires marked to retain its bug.
+  const expected = '&gt; '.repeat(6000) + '&lt;img src=x onerror=&quot;unsafe()&quot;&gt;&amp;';
+  assert.equal(renderMarkdown(source), expected);
+  assert.match(renderMarkdownMarkup('**next request**'), /<strong>next request<\/strong>/u);
+});
+
+test('real bridge contains a failed installed renderer without trying another parser', () => {
+  const { context, windowObject } = buildWebBridgeContext();
+  let fallbackCalls = 0;
+  windowObject.PinvouMarkdownRenderer = { renderMarkdown() { throw new RangeError('fixture parser failure'); } };
+  windowObject.PinvouMarkdownBridgeFallback = { renderMarkdown() { fallbackCalls++; return '<img src=x>'; } };
+  installWebBridge(context);
+  assert.equal(windowObject.TauriBridge.renderMarkdown('<img src=x> & "quoted"'), '&lt;img src=x&gt; &amp; &quot;quoted&quot;');
+  assert.equal(fallbackCalls, 0, 'do not amplify a failed render by retrying a second parser');
+  windowObject.PinvouMarkdownRenderer.renderMarkdown = () => '<p>healthy next request</p>';
+  assert.equal(windowObject.TauriBridge.renderMarkdown('next'), '<p>healthy next request</p>');
+});
+
+test('real bridge isolates the early vendor fallback parser and can recover', () => {
+  const { context, windowObject } = buildWebBridgeContext();
+  let sanitizeCalls = 0;
+  windowObject.marked = { parse() { throw new RangeError('fixture vendor parser failure'); }, setOptions() {} };
+  windowObject.DOMPurify = { sanitize(html) { sanitizeCalls++; return html; } };
+  vm.runInContext(readApp('src', 'shared', 'markdown-bridge-fallback.js'), context);
+  installWebBridge(context);
+  assert.equal(windowObject.TauriBridge.renderMarkdown('<script>unsafe()</script>'), '&lt;script&gt;unsafe()&lt;/script&gt;');
+  assert.equal(sanitizeCalls, 0);
+  windowObject.marked.parse = () => '<p>healthy next request</p>';
+  assert.equal(windowObject.TauriBridge.renderMarkdown('next'), '<p>healthy next request</p>');
+  assert.equal(sanitizeCalls, 1);
+});
+
+test('real bridge discards unsanitized partial HTML when the vendor purifier fails', () => {
+  const { context, windowObject } = buildWebBridgeContext();
+  let sanitizeCalls = 0;
+  windowObject.marked = { parse: () => '<img src=x onerror="unsafe()">', setOptions() {} };
+  windowObject.DOMPurify = { sanitize() { sanitizeCalls++; throw new Error('fixture purifier failure'); } };
+  vm.runInContext(readApp('src', 'shared', 'markdown-bridge-fallback.js'), context);
+  installWebBridge(context);
+  assert.equal(windowObject.TauriBridge.renderMarkdown('<img src=x onerror="unsafe()">'), '&lt;img src=x onerror=&quot;unsafe()&quot;&gt;');
+  assert.equal(sanitizeCalls, 1);
+  windowObject.DOMPurify.sanitize = () => { sanitizeCalls++; return '<p>healthy next request</p>'; };
+  assert.equal(windowObject.TauriBridge.renderMarkdown('next'), '<p>healthy next request</p>');
+  assert.equal(sanitizeCalls, 2);
+});
 
 // ── Case 1: 真实 web/bridge.js，两个渲染器都不存在 → 最末级 fallback 必须转义 ──
 {

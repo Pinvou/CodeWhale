@@ -39,15 +39,16 @@ type AdminReconciliationCase struct {
 }
 
 type ReconciliationCaseCommand struct {
-	Action                  string
-	OwnerID                 *uuid.UUID
-	RepairAction            string
-	ReviewResult            string
-	Reason                  string
-	IdempotencyKey          string
-	ActorID                 uuid.UUID
-	verificationRunID       uuid.UUID
-	verificationCaseVersion int64
+	Action                   string
+	OwnerID                  *uuid.UUID
+	RepairAction             string
+	ReviewResult             string
+	Reason                   string
+	IdempotencyKey           string
+	ActorID                  uuid.UUID
+	verificationRunID        uuid.UUID
+	verificationCaseVersion  int64
+	verificationRepairProofs ledgerRepairProofSet
 }
 
 func (s *Service) adminImportReconciliation(w http.ResponseWriter, r *http.Request) {
@@ -174,12 +175,12 @@ func (s *Service) adminUpdateReconciliationCase(w http.ResponseWriter, r *http.R
 	command := ReconciliationCaseCommand{Action: body.Action, OwnerID: body.OwnerID, RepairAction: body.RepairAction, ReviewResult: body.ReviewResult, Reason: body.Reason, IdempotencyKey: idempotencyKey, ActorID: adminActor(adminPrincipal(r))}
 	operationCtx, cancel := reconciliationCaseOperationContext(r.Context(), body.Action)
 	defer cancel()
-	if strings.EqualFold(strings.TrimSpace(body.Action), "RESOLVE") {
+	if strings.EqualFold(strings.TrimSpace(body.Action), "RESOLVE") || strings.EqualFold(strings.TrimSpace(body.Action), "IGNORE") && s.payments != nil {
 		if s.payments == nil {
 			s.writeReconciliationError(w, r, ErrConflict)
 			return
 		}
-		if err := s.payments.prepareReconciliationResolution(operationCtx, caseID, &command); err != nil {
+		if err := s.payments.prepareReconciliationCaseCommand(operationCtx, caseID, &command); err != nil {
 			s.writeReconciliationError(w, r, err)
 			return
 		}
@@ -316,6 +317,8 @@ func (r *PostgresRepository) updateReconciliationCaseOnce(ctx context.Context, c
 			if err := r.validateReconciliationResolution(ctx, tx, item, command); err != nil {
 				return AdminReconciliationCase{}, err
 			}
+		} else if err := r.validateReconciliationIgnoreAuthority(ctx, tx, item, command.verificationRepairProofs); err != nil {
+			return AdminReconciliationCase{}, err
 		}
 		item.ReviewResult, item.Resolution = &command.ReviewResult, &command.Reason
 		item.Status = map[bool]string{true: "RESOLVED", false: "IGNORED"}[command.Action == "RESOLVE"]

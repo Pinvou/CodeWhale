@@ -15,6 +15,8 @@
 
 ## 必需站点配置
 
+基础 personal 组合的 Billing 也必须验证用户令牌。站点配置须提供与 Account 相同的 `USER_OIDC_ISSUER`、`USER_OIDC_JWKS_URL` 和 `USER_OIDC_AUDIENCE`；模板将它们显式映射为 Billing 的 `OIDC_ISSUER`、`OIDC_JWKS_URL` 和 `OIDC_AUDIENCE`。issuer 与 JWKS 必须使用 HTTPS，且实际证书由下述信任 bundle 验证。无需叠加 Finance 即应具备这项启动配置；不得通过 Billing 私有文件另行覆盖用户 realm。
+
 `INFRA_CA_DIRECTORY/ca.crt` 必须为已验证完整信任 bundle：同时包含私有依赖 CA 与实际公开 OIDC、SMS 和 OTLP endpoint 所需的受信任根，不可只有私有 CA。scratch 镜像的 `SSL_CERT_FILE` 使用该 bundle；每个显式私有 CA 参数继续严格验证对应证书，不关闭 TLS。agent 独立配置目录内的 CA 同样必须覆盖其真实 issuer/JWKS。
 
 全部挂载源必须预先存在，使用各进程专属目录，并满足运行 UID 的读取权限；Compose 不自动创建宿主目录。数据库 pgpass 不与其他进程共享，密钥和密码文件使用仅所属运行身份可读取的权限。`env_file` 使用 `format: raw`。禁止将这些文件传给会展开秘密的 `compose config` 或输出原环境。

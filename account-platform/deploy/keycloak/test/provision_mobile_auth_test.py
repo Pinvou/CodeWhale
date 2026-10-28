@@ -75,9 +75,9 @@ esac
 if [ "$1" = get ]; then
   case "$2" in
     clients)
-      printf 'desktop-id,desktop-test\nrealm-management-id,realm-management\n'
+      printf 'desktop-id,%s\nrealm-management-id,realm-management\n' "${CONTROL_DESKTOP_CLIENT:-desktop-test}"
       if [ "${CONTROL_EXISTING:-false}" = true ]; then
-        printf 'provisioner-id,provisioner-test\nportal-id,portal-test\nhandoff-id,handoff-test\n'
+        printf 'provisioner-id,provisioner-test\nportal-id,%s\nhandoff-id,handoff-test\n' "${CONTROL_PORTAL_CLIENT:-portal-test}"
       fi ;;
     */service-account-user) printf 'service-user-id\n' ;;
     authentication/flows) printf 'direct-flow-id,pinvou-mobile-direct-grant\nbrowser-flow-id,pinvou-browser\n' ;;
@@ -97,6 +97,7 @@ case " $* " in
         *'"clientId":"provisioner-test"'*) printf 'provisioner-id\n' ;;
         *'"clientId":"portal-test"'*) printf 'portal-id\n' ;;
         *'"clientId":"handoff-test"'*) printf 'handoff-id\n' ;;
+        *'"publicClient":true'*) printf 'unexpected-public-client-id\n' ;;
         *) exit 1 ;;
       esac
     fi ;;
@@ -141,7 +142,13 @@ class ProvisioningContractTest(unittest.TestCase):
                 "CONTROL_MISSING_EVENT": "false",
                 "TMPDIR": root.as_posix(),
             })
-            env.update(changes or {})
+            # A missing rendered variable must exercise the real shell default,
+            # rather than inherit this fixture's normal explicit client values.
+            for name, value in (changes or {}).items():
+                if value is None:
+                    env.pop(name, None)
+                else:
+                    env[name] = value
             if truststore:
                 store = root / "controlled-truststore"
                 store.write_bytes(b"inert fixture; the CLI double does not open a real truststore")

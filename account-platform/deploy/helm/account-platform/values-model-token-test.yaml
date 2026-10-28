@@ -34,5 +34,8 @@ tokenCommandExecutor:
 tokenGovernanceCheck:
   enabled: true
   operationsSecret: fixture-token-governance-operations
+workloadIdentity:
+  kubernetesApiServerPorts: [443]
 external:
+  workloadJwksCidrs: [192.0.2.40/32]
   postgresCidrs: [192.0.2.20/32]

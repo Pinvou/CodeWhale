@@ -13,7 +13,23 @@ const server = await createServer({
     name: 'private-admin-ime-component-fixture', enforce: 'pre',
     // Test-only exports append aliases to the intact source module. No handler,
     // state hook, or imported dependency is replaced by the test transform.
+    configureServer(vite) {
+      vite.middlewares.use((request, response, next) => {
+        if (request.url !== '/credential-handoff') return next();
+        // Controlled same-origin popup runs the actual handoff MessagePort
+        // protocol. Imported handoff/launch helpers remain intact.
+        response.setHeader('Content-Type', 'text/html');
+        response.end(`<script>window.addEventListener('message', event => {
+          const port = event.ports[0], nonce = event.data.nonce;
+          port.onmessage = () => { if (!window.opener.adminIme.lostAck) port.postMessage({ version: 1, type: 'HANDOFF_ACCEPTED', nonce }); };
+          port.postMessage({ version: 1, type: 'HANDOFF_BOUND', nonce });
+        }, { once: true });
+        window.opener.postMessage({ version: 1, type: 'HANDOFF_READY' }, location.origin);</script>`);
+      });
+    },
     transform(source, id) {
+      if (id.endsWith('/src/features/account-platform/AdminTokenAccountDetailWorkspace.jsx')) return source + '\nexport { CredentialLaunchDialog as ImeCredentialLaunchDialog };';
+      if (id.endsWith('/src/features/account-platform/TokenAccountGovernanceActions.jsx')) return source + '\nexport { RouteDialog as ImeRouteDialog };';
       if (id.endsWith('/src/features/account-platform/AdminProtocolFormulaWorkspace.jsx')) return source + '\nexport { Dialog as ImeProtocolDialog };';
       if (id.endsWith('/src/features/account-platform/AdminTokenResourcesWorkspace.jsx')) return source + '\nexport { OwnerDialog as ImeOwnerDialog, TokenAccountRecoveryDialog as ImeRecoveryDialog };';
     },
@@ -25,7 +41,7 @@ await server.listen();
 let browser;
 const results = [];
 const draft = 'Controlled draft 中文入力';
-const selector = kind => kind === 'owner' ? 'input[maxlength="120"]' : kind === 'protocol' ? 'textarea[rows="4"]' : 'textarea';
+const selector = kind => kind === 'closure' ? '[data-testid="closure-opener"]' : kind === 'route' ? 'input[type="search"]' : kind === 'owner' ? 'input[maxlength="120"]' : kind === 'protocol' ? 'textarea[rows="4"]' : 'textarea';
 async function key(page, target, name, variant = 'ordinary') {
   return page.$eval(target, (element, input) => {
     element.focus();
@@ -38,8 +54,8 @@ async function remains(page, target, expected = draft) {
   assert.equal(await page.evaluate(() => window.adminIme.closed), 0);
   assert.equal(await page.$eval(target, element => element.value), expected);
 }
-async function trustedSearchEnter(page, variant) {
-  await page.focus('input[type="search"]');
+async function trustedSearchEnter(page, variant, target = 'input[type="search"]') {
+  await page.focus(target);
   await page.evaluate(value => {
     // Keep the browser's trusted key/default action, controlling only the two
     // composition fields consumed by the application. This models the guard's
@@ -73,7 +89,7 @@ async function run(name, kind, action) {
 }
 try {
   browser = await puppeteer.launch({ executablePath: browserPath, headless: true, args: ['--disable-gpu', '--no-sandbox'] });
-  for (const kind of ['high-risk', 'protocol', 'recovery', 'owner']) {
+  for (const kind of ['high-risk', 'protocol', 'recovery', 'owner', 'credential', 'route']) {
     await run(kind + ': composing Escape retains draft; Tab wraps; ordinary Escape closes', kind, async page => {
       const target = selector(kind);
       await page.type(target, draft);
@@ -144,6 +160,96 @@ try {
       if (variant === 'ordinary') assert.equal(observed.queries[0].q, draft);
     });
   }
+  for (const variant of ['composing', '229', 'ordinary']) {
+    await run('route: trusted ' + variant + ' Enter searches only after composition and never submits', 'route', async page => {
+      await page.waitForFunction(() => window.adminIme.queries.length === 1);
+      await page.type('input[type="search"]', draft);
+      const event = await trustedSearchEnter(page, variant);
+      assert.equal(event.trusted, true);
+      assert.equal(event.prevented, true);
+      assert.equal(event.isComposing, variant === 'composing');
+      assert.equal(event.keyCode, variant === '229' ? 229 : 13);
+      const observed = await page.evaluate(() => ({ queries: window.adminIme.queries, submits: window.adminIme.formSubmits }));
+      assert.deepEqual(observed.submits, []);
+      assert.equal(observed.queries.length, variant === 'ordinary' ? 2 : 1);
+      if (variant === 'ordinary') assert.equal(observed.queries[1].q, draft);
+      await remains(page, 'input[type="search"]');
+    });
+    await run('closure: trusted ' + variant + ' Enter dispatches consent only after composition', 'closure', async page => {
+      await page.click('[data-testid="closure-opener"]');
+      await page.waitForSelector('[role="alertdialog"] input');
+      await page.type('[role="alertdialog"] input', 'CLOSE_MY_ACCOUNT');
+      const event = await trustedSearchEnter(page, variant, '[role="alertdialog"] input');
+      assert.equal(event.trusted, true);
+      assert.equal(event.isComposing, variant === 'composing');
+      assert.equal(event.keyCode, variant === '229' ? 229 : 13);
+      assert.equal(event.prevented, variant !== 'ordinary');
+      const observed = await page.evaluate(() => ({ confirms: window.adminIme.confirms, submits: window.adminIme.formSubmits, text: document.querySelector('[role="alertdialog"] input').value }));
+      assert.equal(observed.text, 'CLOSE_MY_ACCOUNT');
+      assert.deepEqual(observed.confirms, variant === 'ordinary' ? ['CLOSE_MY_ACCOUNT'] : []);
+      assert.equal(observed.submits.length, variant === 'ordinary' ? 1 : 0);
+      if (variant === 'ordinary') assert.equal(observed.submits[0].trusted, true);
+    });
+  }
+  await run('closure: composing Escape retains consent; Tab wraps; ordinary Escape restores opener', 'closure', async page => {
+    await page.click('[data-testid="closure-opener"]');
+    await page.waitForSelector('[role="alertdialog"] input');
+    assert.equal(await page.$eval('[role="alertdialog"] input', element => element === document.activeElement), true);
+    await page.type('[role="alertdialog"] input', draft);
+    for (const variant of ['composing', '229']) {
+      await key(page, '[role="alertdialog"] input', 'Escape', variant);
+      await remains(page, '[role="alertdialog"] input');
+    }
+    await page.focus('[role="alertdialog"] button[type="submit"]');
+    await page.keyboard.press('Tab');
+    assert.equal(await page.$eval('[role="alertdialog"] input', element => element === document.activeElement), true);
+    await page.keyboard.down('Shift'); await page.keyboard.press('Tab'); await page.keyboard.up('Shift');
+    assert.equal(await page.$eval('[role="alertdialog"] button[type="submit"]', element => element === document.activeElement), true);
+    await key(page, '[role="alertdialog"] input', 'Escape');
+    await page.waitForFunction(() => !document.querySelector('[role="alertdialog"]'));
+    assert.equal(await page.$eval('[data-testid="closure-opener"]', element => element === document.activeElement), true);
+    assert.equal(await page.evaluate(() => window.adminIme.closed), 1);
+    assert.deepEqual(await page.evaluate(() => window.adminIme.confirms), []);
+  });
+  for (const lostAck of [false, true]) {
+    await run('credential: ' + (lostAck ? 'unknown handoff' : 'waiting handoff') + ' preserves busy/cancellation and immutable result recovery', 'credential', async page => {
+      await page.type('textarea', draft);
+      await page.evaluate(value => { window.adminIme.lostAck = value; document.querySelector('form').requestSubmit(); }, lostAck);
+      await page.waitForFunction(() => window.adminIme.submissions === 1);
+      // PREPARING remains locked even for an ordinary Escape.
+      await key(page, '[role="dialog"]', 'Escape');
+      assert.equal(await page.evaluate(() => window.adminIme.closed), 0);
+      assert.deepEqual(await page.evaluate(() => window.adminIme.revokes), []);
+      await page.evaluate(() => window.adminIme.resolveLaunch());
+      await page.waitForFunction(value => !document.querySelector('[role="dialog"] header button').disabled && (value ? window.adminIme.revokes.length === 1 : !document.querySelector('textarea')), {}, lostAck);
+      const priorRevokes = lostAck ? 1 : 0;
+      for (const variant of ['composing', '229']) {
+        await key(page, '[role="dialog"]', 'Escape', variant);
+        assert.equal(await page.evaluate(() => window.adminIme.closed), 0);
+        assert.equal(await page.evaluate(() => window.adminIme.revokes.length), priorRevokes);
+        assert.equal(await page.$eval('[role="dialog"] header button', element => element.disabled), false);
+      }
+      // An ordinary Escape follows the existing cancellation path; a lost
+      // revoke acknowledgement cannot close the dialog or recreate a launch.
+      await key(page, '[role="dialog"]', 'Escape');
+      await page.waitForFunction(() => document.querySelector('[role="dialog"] header button').disabled && window.adminIme.revokes.length === 1);
+      await key(page, '[role="dialog"]', 'Escape');
+      assert.equal(await page.evaluate(() => window.adminIme.closed), 0);
+      const observed = await page.evaluate(() => ({ revokes: window.adminIme.revokes, results: window.adminIme.resultQueries, submissions: window.adminIme.submissions }));
+      assert.equal(observed.submissions, 1);
+      assert.deepEqual(observed.revokes, [{ reference: '33333333-3333-4333-8333-333333333333', reason: 'CREDENTIAL_LAUNCH_CANCELLED' }]);
+      assert.ok(observed.results.length > 0);
+      assert.ok(observed.results.every(reference => reference === observed.revokes[0].reference));
+      await page.evaluate(() => { window.adminIme.terminal = true; });
+      await page.waitForFunction(() => !document.querySelector('[role="dialog"] header button').disabled);
+      await key(page, '[role="dialog"]', 'Escape');
+      await page.waitForSelector('[data-testid="closed"]');
+      assert.equal(await page.evaluate(() => window.adminIme.closed), 1);
+      assert.equal(await page.evaluate(() => window.adminIme.revokes.length), 1);
+      assert.equal(await page.evaluate(() => window.adminIme.submissions), 1);
+    });
+  }
+
 } finally {
   await browser?.close(); await server.close();
 }

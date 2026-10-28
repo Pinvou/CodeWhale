@@ -79,6 +79,7 @@ type PaymentOrderHistoryItem struct {
 
 type PaymentCoordinator struct {
 	repository                  *PostgresRepository
+	ledgerRepairAuthority       ledgerRepairProofAuthority
 	provider                    PaymentProvider
 	secrets                     map[string][]byte
 	merchantID                  string
@@ -88,6 +89,13 @@ type PaymentCoordinator struct {
 	normalRefundCreationEnabled bool
 	allowTestOnlyCollection     bool
 	breaker                     *resilience.Breaker
+}
+
+// WithLedgerRepairProofAuthority installs the authenticated, read-only Account
+// authority for reconciliation, scheduled and recovery workers alike.
+func (p *PaymentCoordinator) WithLedgerRepairProofAuthority(authority ledgerRepairProofAuthority) *PaymentCoordinator {
+	p.ledgerRepairAuthority = authority
+	return p
 }
 
 type ProviderOrder = payment.ProviderOrder

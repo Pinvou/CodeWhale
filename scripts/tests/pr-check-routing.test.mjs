@@ -37,9 +37,8 @@ function filterPaths(text, name) {
 // Extract the `if:` condition of a named workflow step.
 function stepCondition(text, stepName) {
   const escaped = stepName.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-  const match = text.match(
-    new RegExp(`- name: ${escaped}\\r?\\n[\\s\\S]*?if: \\$\\{\\{ (.*?) \\}\\}`, "m"),
-  );
+  const block = text.match(new RegExp(`^ {6}- name: ${escaped}\\r?\\n((?:(?! {6}- ).*\\r?\\n)*)`, "m"));
+  const match = block?.[1].match(/^\s*if: \$\{\{ (.*?) \}\}/m);
   if (!match) throw new Error(`step '${stepName}' or its if-condition not found`);
   return match[1];
 }
@@ -566,6 +565,54 @@ test("required-gate rejects skipped applicable Go checks and permits unrelated s
 test("rust_code filter covers plain Rust source changes", () => {
   const paths = filterPaths(workflow, "rust_code");
   assert.ok(paths.includes("**/*.rs"), "rust_code must match '*.rs' files");
+});
+
+test("MCP checks are selected by their inputs and fail closed on unknown routing", () => {
+  const paths = filterPaths(workflow, "mcp_contract");
+  for (const input of [
+    "pinvou3-app/resources/mcp-servers/**",
+    "scripts/mcp-server-contract-smoke.py",
+    "scripts/tests/test_mcp_schema_contract.py",
+    "CodeWhale",
+    ".gitmodules",
+    ".github/workflows/pr-check.yml",
+  ]) assert.ok(paths.includes(input), `MCP input ${input} must select its tests`);
+
+  const job = workflow.split("\n  fast-gate:")[1].split("\n  frontend-test:")[0];
+  assert.doesNotMatch(job, /\n    needs: changes\s*\n/);
+  const condition = "steps.mcp-filter.outputs.mcp_contract != 'false' || (github.event_name == 'pull_request' && (github.event.pull_request.changed_files == null || github.event.pull_request.changed_files >= 3000))";
+  for (const name of [
+    "Python MCP server 测试 (mcp-servers/*/test_*.py)",
+    "内置 MCP 协议与产物契约",
+  ]) {
+    assert.equal(stepCondition(job, name), condition);
+  }
+  const firstIfRemoved = job.replace(`if: \${{ ${condition} }}`, "# condition removed");
+  assert.throws(() => stepCondition(firstIfRemoved, "Python MCP server 测试 (mcp-servers/*/test_*.py)"));
+});
+
+test("an exact Rust test cache hit skips only the redundant lint restore", () => {
+  const job = workflow.split("\n  rust-test:")[1].split("\n  cli-test:")[0];
+  const probe = job.split("- name: 检查 Rust test 缓存是否精确命中")[1]
+    .split("\n      - name:")[0];
+  const testCache = job.split("- name: Cargo test cache")[1]
+    .split("\n      - name:")[0];
+  for (const setting of ["workspaces: pinvou3-app/src-tauri", "shared-key: rust-test-v2"]) {
+    assert.ok(probe.includes(setting) && testCache.includes(setting), `probe and restore must agree on ${setting}`);
+  }
+  assert.match(probe, /lookup-only: true/);
+  assert.match(probe, /save-if: false/);
+  assert.equal(stepCondition(job, "恢复 Rust lint 暖缓存"), "steps.rust-test-cache-probe.outputs.cache-hit != 'true'");
+  assert.equal(stepCondition(job, "恢复被淘汰缓存的 Rust lint 回退"), "steps.rust-test-cache-probe.outputs.cache-hit == 'true' && steps.rust-test-cache.outputs.cache-hit != 'true'");
+  const recovery = job.split("- name: 恢复被淘汰缓存的 Rust lint 回退")[1].split("\n      - name:")[0];
+  assert.match(recovery, /uses: Swatinem\/rust-cache@v2/);
+  assert.match(recovery, /workspaces: pinvou3-app\/src-tauri/);
+  assert.match(recovery, /shared-key: rust-lint-v2/);
+  assert.match(recovery, /cache-on-failure: true/);
+  assert.match(recovery, /save-if: false/);
+  assert.ok(job.indexOf("检查 Rust test 缓存是否精确命中") < job.indexOf("恢复 Rust lint 暖缓存"));
+  assert.ok(job.indexOf("恢复 Rust lint 暖缓存") < job.indexOf("Cargo test cache"));
+  assert.ok(job.indexOf("Cargo test cache") < job.indexOf("恢复被淘汰缓存的 Rust lint 回退"));
 });
 
 test("cargo-shear gate routes on rust_code so orphan .rs files cannot bypass it", () => {

@@ -38,9 +38,97 @@ fn sanitize_environment(environment: &mut serde_json::Map<String, Value>) {
 pub(super) struct DiagnosticHint {
     pub(super) code: String,
     pub(super) http: Option<u16>,
+    pub(super) exit: Option<i64>,
     pub(super) site: &'static str,
 }
 impl BehaviorEvent {
+    /// Project only typed technical facts. Never retain metadata, command text,
+    /// stdout/stderr or arbitrary error codes in the automatic witness.
+    pub(super) fn diagnostic_tool_metadata(mut self, metadata: Option<&Value>) -> Self {
+        if self.fields.get("success").and_then(Value::as_bool) != Some(false) {
+            return self;
+        }
+        let Some(metadata) = metadata.and_then(Value::as_object) else {
+            return self;
+        };
+        let http = metadata
+            .get("http_status")
+            .and_then(Value::as_u64)
+            .filter(|n| (100..=599).contains(n))
+            .map(|n| n as u16);
+        let explicit = metadata
+            .get("error_code")
+            .and_then(Value::as_str)
+            .filter(|code| {
+                matches!(
+                    *code,
+                    "permission_denied"
+                        | "permission_required"
+                        | "authentication_failed"
+                        | "configuration_missing"
+                        | "network_unavailable"
+                        | "connection_reset"
+                        | "dns_failed"
+                        | "tls_failed"
+                        | "request_timeout"
+                        | "rate_limited"
+                        | "quota_exhausted"
+                        | "provider_unavailable"
+                        | "response_invalid"
+                        | "process_failed"
+                        | "unsupported"
+                        | "validation_failed"
+                        | "internal_error"
+                )
+            });
+        // Shell metadata has a defined status/exit protocol. Do not interpret
+        // a custom tool's unrelated `status` or `exit_code` as a process result.
+        let shell = self.fields.get("tool_key").and_then(Value::as_str) == Some("shell");
+        let exit = shell
+            .then(|| {
+                metadata
+                    .get("exit_code")
+                    .and_then(Value::as_i64)
+                    .filter(|n| (i64::from(i32::MIN)..=i64::from(u32::MAX)).contains(n))
+            })
+            .flatten();
+        let shell_code =
+            if shell && metadata.get("sandbox_denied").and_then(Value::as_bool) == Some(true) {
+                Some("permission_denied")
+            } else if shell && metadata.get("status").and_then(Value::as_str) == Some("TimedOut") {
+                Some("request_timeout")
+            } else if exit.is_some_and(|code| code != 0) {
+                Some("process_failed")
+            } else {
+                None
+            };
+        let http_code = http
+            .filter(|status| *status >= 400)
+            .map(|status| match status {
+                401 | 403 => "authentication_failed",
+                408 | 504 => "request_timeout",
+                429 => "rate_limited",
+                500..=599 => "provider_unavailable",
+                _ => "response_invalid",
+            });
+        let code = explicit.or(shell_code).or(http_code);
+        if code.is_some() || http.is_some() || exit.is_some() {
+            let hint = self.diagnostic_hint.get_or_insert(DiagnosticHint {
+                code: "unknown".into(),
+                http: None,
+                exit: None,
+                site: "tool_result",
+            });
+            // Do not combine a structural process failure with an unrelated
+            // HTTP status found in command output by the text fallback.
+            if code.is_some() || http.is_some() {
+                hint.code = code.unwrap_or("unknown").into();
+                hint.http = http;
+            }
+            hint.exit = exit;
+        }
+        self
+    }
     pub(super) fn diagnostic_cancellation(mut self, cancelled: bool) -> Self {
         self.diagnostic_cancelled = cancelled;
         self
@@ -50,6 +138,7 @@ impl BehaviorEvent {
         self.diagnostic_hint = Some(DiagnosticHint {
             code: code.into(),
             http,
+            exit: None,
             site,
         });
         self
@@ -146,7 +235,9 @@ pub(super) fn validate(event: &BehaviorEvent) -> Result<()> {
                 "invalid HTTP status"
             ),
             "diagnostic_exit_code" => anyhow::ensure!(
-                value.as_i64().is_some_and(|n| i32::try_from(n).is_ok()),
+                value
+                    .as_i64()
+                    .is_some_and(|n| (i64::from(i32::MIN)..=i64::from(u32::MAX)).contains(&n)),
                 "invalid process code"
             ),
             "diagnostic_steps" => {
@@ -778,6 +869,11 @@ pub(super) fn enrich(
             .fields
             .insert("diagnostic_trace_id".into(), json!(context.trace));
         event.fields.insert("diagnostic_code".into(), json!(code));
+        if let Some(exit) = hint.and_then(|h| h.exit) {
+            event
+                .fields
+                .insert("diagnostic_exit_code".into(), json!(exit));
+        }
         event
             .fields
             .insert("diagnostic_component".into(), json!(component));
@@ -1274,6 +1370,106 @@ pub(super) async fn run_report_worker(mut rx: mpsc::Receiver<()>, telemetry: Beh
 #[cfg(test)]
 mod tests {
     use super::*;
+    fn failed_shell() -> BehaviorEvent {
+        BehaviorEvent::new("tool_call_completed")
+            .tool("shell", "bash", "cli")
+            .success(false)
+            .diagnostic_error("private command output HTTP 429", "tool_result")
+    }
+
+    #[test]
+    fn structured_tool_facts_override_command_output_without_retaining_content() {
+        for (metadata, code, exit) in [
+            (
+                json!({"status":"Failed","exit_code":7}),
+                "process_failed",
+                Some(7_i64),
+            ),
+            (
+                json!({"status":"Failed","exit_code":3221225477_i64}),
+                "process_failed",
+                Some(3221225477),
+            ),
+            (
+                json!({"status":"TimedOut","exit_code":1}),
+                "request_timeout",
+                Some(1),
+            ),
+            (
+                json!({"sandbox_denied":true,"exit_code":1}),
+                "permission_denied",
+                Some(1),
+            ),
+            (
+                json!({"error_code":"authentication_failed","http_status":401}),
+                "authentication_failed",
+                None,
+            ),
+            (json!({"http_status":503}), "provider_unavailable", None),
+        ] {
+            let mut metadata = metadata;
+            metadata["command"] = json!("PRIVATE_COMMAND");
+            metadata["stderr"] = json!("PRIVATE_STDERR");
+            let event = failed_shell().diagnostic_tool_metadata(Some(&metadata));
+            assert_eq!(event.diagnostic_hint.as_ref().unwrap().code, code);
+            assert_eq!(
+                event.diagnostic_hint.as_ref().unwrap().http,
+                metadata
+                    .get("http_status")
+                    .and_then(Value::as_u64)
+                    .map(|n| n as u16)
+            );
+            assert_eq!(
+                event.diagnostic_hint.as_ref().and_then(|hint| hint.exit),
+                exit
+            );
+            let serialized = serde_json::to_string(&event).unwrap();
+            assert!(!serialized.contains("PRIVATE_"));
+            assert!(!serialized.contains("private command output"));
+        }
+    }
+
+    #[test]
+    fn tool_metadata_rejects_untyped_private_or_out_of_range_values() {
+        for metadata in [
+            json!(null),
+            json!([]),
+            json!({"exit_code":"7","http_status":"401","error_code":"PRIVATE_CODE"}),
+            json!({"exit_code":4294967296_i64,"http_status":600}),
+            json!({"exit_code":-2147483649_i64,"http_status":99}),
+            json!({"exit_code":1.5,"http_status":401.5}),
+        ] {
+            let event = failed_shell().diagnostic_tool_metadata(Some(&metadata));
+            assert!(event.fields.get("diagnostic_exit_code").is_none());
+            assert!(
+                event
+                    .diagnostic_hint
+                    .as_ref()
+                    .and_then(|hint| hint.exit)
+                    .is_none()
+            );
+            assert_eq!(event.diagnostic_hint.as_ref().unwrap().code, "rate_limited");
+            assert_eq!(event.diagnostic_hint.as_ref().unwrap().http, Some(429));
+        }
+        let event = BehaviorEvent::new("tool_call_completed")
+            .tool("custom", "custom", "unknown")
+            .success(false)
+            .diagnostic_tool_metadata(Some(&json!({"exit_code":7,"status":"TimedOut"})));
+        assert!(event.diagnostic_hint.is_none());
+        assert!(event.fields.get("diagnostic_exit_code").is_none());
+        let success = failed_shell()
+            .success(true)
+            .diagnostic_tool_metadata(Some(&json!({"exit_code":7})));
+        assert!(success.fields.get("diagnostic_exit_code").is_none());
+        assert!(
+            success
+                .diagnostic_hint
+                .as_ref()
+                .and_then(|hint| hint.exit)
+                .is_none()
+        );
+    }
+
     #[test]
     fn report_size_limit_includes_the_actual_wire_envelope() {
         let empty = report_request_body("device", "period", &json!({"notes":""})).unwrap();

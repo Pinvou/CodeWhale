@@ -1,3 +1,4 @@
+import { isImeComposing } from '../../shared/ime-guard.mjs';
 import React, { useId, useLayoutEffect, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
 
@@ -13,6 +14,10 @@ export function AccountClosureConfirmation({ copy, mismatch, onCancel, onConfirm
     return () => { if (previous?.isConnected && element.contains(document.activeElement) && restoreAllowed.current()) previous.focus(); };
   }, []);
   const keyDown = event => {
+    if ((event.key === 'Enter' || event.key === 'Escape') && isImeComposing(event)) {
+      if (event.key === 'Enter') event.preventDefault();
+      return;
+    }
     if (event.key === 'Escape') { event.preventDefault(); event.stopPropagation(); onCancel(); return; }
     if (event.key !== 'Tab') return;
     const controls = [...dialog.current.querySelectorAll('input:not(:disabled), button:not(:disabled)')], first = controls[0], last = controls[controls.length - 1];

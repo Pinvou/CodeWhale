@@ -1588,7 +1588,7 @@ cargo test -p pinvou3-tauri engine_pool --no-run
 - 当前本机 Rust 测试二进制曾出现 `STATUS_ENTRYPOINT_NOT_FOUND`，因此至少要求 `--no-run` 编译通过。
 - （时点注：CI 现已实际运行 Rust 单测——`rust-test` / `windows-rust-test`
   串行回归已固化为标准步骤；本机动态库环境修复后再要求本机全量单测通过。
-  根因与缓解见 `docs/windows-rust-ci.md` §What the job runs 第 11-13 步。）
+  根因与缓解见 `docs/windows-rust-ci.md` §What the job runs 第 11-13、16 步。）
 
 ## 实施顺序
 
@@ -1772,7 +1772,7 @@ cd src-tauri
 cargo check --locked
 ```
 
-说明：`cargo check --locked` 不编译 `#[cfg(test)]`，要覆盖新增的后端命令测试需 `cargo check --locked --tests`。本机实际运行 Rust 测试二进制可能撞 `STATUS_ENTRYPOINT_NOT_FOUND`，根因与缓解步骤见 `docs/windows-rust-ci.md`（§What the job runs 第 11-13 步）。
+说明：`cargo check --locked` 不编译 `#[cfg(test)]`，要覆盖新增的后端命令测试需 `cargo check --locked --tests`。本机实际运行 Rust 测试二进制可能撞 `STATUS_ENTRYPOINT_NOT_FOUND`，根因与缓解步骤见 `docs/windows-rust-ci.md`（§What the job runs 第 11-13、16 步）。
 
 ### 六、交接风险
 

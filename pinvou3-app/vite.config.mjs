@@ -523,7 +523,6 @@ function enforceLazyChunks() {
 // overlay role cards riding main). Measured desktop 490,984 B and web
 // 493,288 B; 496_000 keeps ~2.7 kB headroom over the larger web entry; the
 // next entry feature again needs a deliberate bump with fresh measurements.
-export const MAIN_ENTRY_BUDGET_BYTES = 496_000;
 // #484 backflow note: the upstream branch raised its own ceiling to 505_000 for
 // the picker/grouping entry weight; on this tree the raise must be re-measured
 // (desktop + web, per policy) before landing, so the current budget stands.
@@ -534,6 +533,30 @@ export const MAIN_ENTRY_BUDGET_BYTES = 496_000;
 // before and after the port (same-base builds on this macOS toolchain; the
 // chat-view chunk itself grew ~340 B web, far inside the informational
 // 500 kB chunk warning). No raise needed; the current budget stands.
+// 2026-10-27 496_000 (single ceiling) → 159_000 desktop / 161_000 web
+// (community backflow pinvou-agent#787, measured on this tree): the single
+// ceiling predates the web vendor/markdown-vendor/chat-view splitting, so it
+// sat ≈3× above both real entries (desktop 156,638 B, web 158,889 B on this
+// macOS toolchain, node 22, including this port's NAV_PREFETCH browser entry)
+// and would never fire again — a dead shared ceiling gives web-specific
+// regressions a free ride. Each mode now gets its own ceiling, measured
+// + ~2 kB (the historical headroom floor above; it also absorbs the 0–17 B
+// typical node 22 vs CI node 24 delta and the one recorded ~0.9 kB spike).
+// Raising a ceiling still requires measured desktop + web before/after sizes
+// and an explicit review decision.
+// 2026-10-28 account-platform integration: 159_000 / 161_000 -> 173_000 /
+// 175_000, explicitly approved after same-host Windows / Node 24 builds.
+// Frozen main f1f1286d measured desktop 156,637 B / web 158,885 B; the merged
+// account-platform tree measured 170,915 B / 173,102 B. Resolved dependency
+// versions were identical. Keep about 2 kB headroom and both strict gates;
+// do not defer the account client or alter its synchronous identity capture
+// merely to meet an entry-file budget. Chunk groups remain unchanged.
+export const MAIN_ENTRY_BUDGET_BYTES = 173_000;
+export const WEB_MAIN_ENTRY_BUDGET_BYTES = 175_000;
+
+function mainEntryBudgetBytesFor(mode) {
+  return mode === 'web' ? WEB_MAIN_ENTRY_BUDGET_BYTES : MAIN_ENTRY_BUDGET_BYTES;
+}
 
 export function assertMainEntryBudget(bundle, budgetBytes = MAIN_ENTRY_BUDGET_BYTES) {
   const mainEntry = Object.values(bundle).find(output => (
@@ -547,7 +570,7 @@ export function assertMainEntryBudget(bundle, budgetBytes = MAIN_ENTRY_BUDGET_BY
   return bytes;
 }
 
-function enforceMainEntryBudget() {
+function enforceMainEntryBudget(mode) {
   return {
     name: 'pinvou-enforce-main-entry-budget',
     apply: 'build',
@@ -555,7 +578,7 @@ function enforceMainEntryBudget() {
     // hooks. writeBundle sees the final code that is written to disk, so the
     // reported byte count matches the built asset exactly.
     writeBundle(_options, bundle) {
-      assertMainEntryBudget(bundle);
+      assertMainEntryBudget(bundle, mainEntryBudgetBytesFor(mode));
     },
   };
 }
@@ -576,7 +599,7 @@ export default defineConfig(({ mode }) => {
   },
   plugins: [
     react(),
-    ...(accountPortalBuild ? [] : [copyRuntimeAssets(), enforceLazyChunks(), enforceMainEntryBudget(), conditionalPlatformScripts(webBuild), bundleClassicStartup(webBuild)]),
+    ...(accountPortalBuild ? [] : [copyRuntimeAssets(), enforceLazyChunks(), enforceMainEntryBudget(mode), conditionalPlatformScripts(webBuild), bundleClassicStartup(webBuild)]),
   ],
   build: {
     outDir: accountPortalBuild ? '../../account-platform/internal/portal/static' : webBuild ? '../../remote-control-relay/web/dist' : '../dist',

@@ -120,9 +120,17 @@ func GinMiddleware(expectedToken string) gin.HandlerFunc {
 }
 
 func newAuthenticator(expectedToken string) authenticator {
-	issuer := strings.TrimRight(strings.TrimSpace(os.Getenv("WORKLOAD_IDENTITY_ISSUER")), "/")
+	issuer := strings.TrimSpace(os.Getenv("WORKLOAD_IDENTITY_ISSUER"))
+	// Native Kubernetes issuer identity is exact, including any trailing slash.
+	// Preserve the existing external/Compose normalization outside this opt-in.
+	if strings.TrimSpace(os.Getenv("WORKLOAD_IDENTITY_JWKS_AUTH_MODE")) != "kubernetes" {
+		issuer = strings.TrimRight(issuer, "/")
+	}
 	caFile := strings.TrimSpace(os.Getenv("WORKLOAD_IDENTITY_CA_FILE"))
 	if issuer == "" {
+		if strings.TrimSpace(os.Getenv("WORKLOAD_IDENTITY_JWKS_AUTH_MODE")) != "" || strings.TrimSpace(os.Getenv("WORKLOAD_IDENTITY_JWKS_API_TOKEN_FILE")) != "" || strings.TrimSpace(os.Getenv("WORKLOAD_IDENTITY_JWKS_API_SUBJECT")) != "" {
+			return invalidAuthenticator("WORKLOAD_ISSUER_REQUIRED_FOR_JWKS_AUTH", errKubernetesJWKS)
+		}
 		if caFile != "" {
 			return invalidAuthenticator("WORKLOAD_ISSUER_REQUIRED_FOR_CA", errWorkloadTrust)
 		}
@@ -155,7 +163,7 @@ func newAuthenticator(expectedToken string) authenticator {
 	if caFile != "" && (!canonicalWorkloadHTTPS(issuer) || !canonicalWorkloadHTTPS(jwksURL)) {
 		return invalidAuthenticator("WORKLOAD_TRUST_URL_INVALID", errWorkloadTrust)
 	}
-	client, err := workloadHTTPClient(caFile)
+	client, err := workloadJWKSHTTPClient(caFile, issuer, jwksURL)
 	if err != nil {
 		return invalidAuthenticator("WORKLOAD_TRUST_INVALID", err)
 	}

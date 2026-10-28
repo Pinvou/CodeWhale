@@ -163,7 +163,7 @@ components:
       in: query
       schema:
         type: string
-        enum: [PROVIDER_PAID_INTERNAL_MISSING, INTERNAL_PAID_PROVIDER_MISSING, AMOUNT_MISMATCH, DUPLICATE_TRANSACTION, PROVIDER_REFUND_INTERNAL_MISSING, INTERNAL_REFUND_PROVIDER_MISSING, REFUND_AMOUNT_MISMATCH, PROVIDER_CHARGEBACK_INTERNAL_MISSING, INTERNAL_CHARGEBACK_PROVIDER_MISSING, PAYMENT_LEDGER_MISSING, REFUND_LEDGER_MISSING, CHARGEBACK_LEDGER_MISSING, UNSUPPORTED_PROVIDER_ENTRY, PAYMENT_LEDGER_INVALID, REFUND_LEDGER_INVALID, CHARGEBACK_LEDGER_INVALID, PAYMENT_PACKAGE_INVALID, REFUND_DATE_UNVERIFIED, CHARGEBACK_DATE_UNVERIFIED]
+        enum: [PROVIDER_PAID_INTERNAL_MISSING, INTERNAL_PAID_PROVIDER_MISSING, AMOUNT_MISMATCH, DUPLICATE_TRANSACTION, PROVIDER_REFUND_INTERNAL_MISSING, INTERNAL_REFUND_PROVIDER_MISSING, REFUND_AMOUNT_MISMATCH, PROVIDER_CHARGEBACK_INTERNAL_MISSING, INTERNAL_CHARGEBACK_PROVIDER_MISSING, PAYMENT_LEDGER_MISSING, REFUND_LEDGER_MISSING, CHARGEBACK_LEDGER_MISSING, UNSUPPORTED_PROVIDER_ENTRY, PAYMENT_LEDGER_INVALID, REFUND_LEDGER_INVALID, CHARGEBACK_LEDGER_INVALID, PAYMENT_PACKAGE_INVALID, REFUND_DATE_UNVERIFIED, CHARGEBACK_DATE_UNVERIFIED, LEDGER_REPAIR_PROOF_UNAVAILABLE]
   responses:
     InvalidList:
       description: INVALID_FILTER for invalid limits or filters; INVALID_REQUEST for invalid run scope; PAGINATION_CURSOR_INVALID for a cursor mismatching actor, resource, scope or filter facts. Cursor errors require rereading facts, not relabeling them as editable input.
@@ -279,7 +279,7 @@ components:
         merchant_order_no: {type: string}
         case_type:
           type: string
-          description: REFUND_DATE_UNVERIFIED and CHARGEBACK_DATE_UNVERIFIED request manual occurrence-date verification when trusted supplier date evidence is absent; they do not assert missing funds or trigger financial disposal.
+          description: REFUND_DATE_UNVERIFIED and CHARGEBACK_DATE_UNVERIFIED request manual occurrence-date verification when trusted supplier date evidence is absent; they do not assert missing funds or trigger financial disposal. LEDGER_REPAIR_PROOF_UNAVAILABLE indicates that the authorization proof for a ledger repair could not be verified; it does not assert that a financial ledger is incorrect. Retry after the proof authority recovers or investigate missing evidence. While proof for a repair is unavailable, neither this case nor other affected cases for the same order can be ignored or resolved. Unrelated orders without a repair proof requirement continue normally. Once the authority recovers, a fresh verification permits the affected cases to be reviewed through the existing resolution flow.
         status: {type: string, enum: [OPEN, IN_REVIEW, RESOLVED, IGNORED]}
         severity: {type: string, enum: [P0, P1, P2]}
         owner_id: {type: string, format: uuid}

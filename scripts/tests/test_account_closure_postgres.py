@@ -93,11 +93,12 @@ class ClosurePostgresResults(unittest.TestCase):
         """Exercise the actual entry point with controlled process/PG replies."""
         calls = []
         last_group = None
+        owned_billing = False
         contracts = {"^(" + "|".join(sorted(roots)) + ")$": (name, roots, children)
                      for name, _, roots, children in runner.CONTRACTS}
 
         def process(argv, **kwargs):
-            nonlocal last_group
+            nonlocal last_group, owned_billing
             if argv[0] != "fixture-go":
                 sql = argv[-1]
                 calls.append(("query", sql))
@@ -108,7 +109,18 @@ class ClosurePostgresResults(unittest.TestCase):
                     if failure == "cleanup" and last_group == bad_group:
                         output += "\nretained_for_diagnosis"
                 elif "SELECT rolname FROM pg_roles" in sql:
-                    output = "fixture_owner"
+                    roles = {"fixture_owner"} | (runner.BILLING_ACTORS if owned_billing else set())
+                    if failure == "actor-conflict" and not owned_billing:
+                        roles.add("foreign_actor")
+                    output = "\n".join(sorted(roles))
+                elif sql.startswith("BEGIN;\nCREATE ROLE billing_schema_owner"):
+                    owned_billing = True
+                    output = ""
+                elif sql.startswith("BEGIN; DROP ROLE billing_migrator"):
+                    owned_billing = False
+                    output = ""
+                elif "pg_shdepend" in sql:
+                    output = "t" if failure == "role-dependency" else "f"
                 elif sql == "SHOW server_version_num":
                     output = "170011"
                 else:
@@ -165,7 +177,9 @@ class ClosurePostgresResults(unittest.TestCase):
                     # The finally cleanup check and the next invocation's
                     # absence guard both precede the next process launch.
                     self.assertEqual(sum(call == ("query", "SELECT datname FROM pg_database ORDER BY datname")
-                                         for call in calls[current + 1:following]), 2)
+                                         for call in calls[current + 1:following]), 2
+                                     + (actual[positions.index(current)][1] == "ledger-repair-approval-proof")
+                                     + (actual[positions.index(following)][1] == "ledger-repair-approval-proof"))
 
     def test_public_entry_rejects_each_missing_owner_child_root(self):
         for group, _, roots in runner.CLOSED_GRANT_GROUPS:
@@ -182,6 +196,42 @@ class ClosurePostgresResults(unittest.TestCase):
                     error, calls = self.run_public_wrapper(bad_group=group, failure=failure)
                     self.assertIsNotNone(error)
                     self.assertEqual([call[1] for call in calls if call[0] == "go"][-1], group)
+
+    def test_ledger_repair_public_phase_and_result_cannot_be_omitted_or_skipped(self):
+        roots = runner.LEDGER_REPAIR_APPROVAL_ROOTS
+        self.assertEqual(roots, {runner.LEDGER_REPAIR_APPROVAL_ROOT, runner.LEDGER_REPAIR_PAYMENT_E2E_ROOT})
+        self.assertEqual([x for x in runner.CONTRACTS if x[0] == "ledger-repair-approval-proof"],
+                         [("ledger-repair-approval-proof", "./internal/account", roots, {})])
+        for missing in roots:
+            retained = roots - {missing}
+            events = stream(*({"Action": "pass", "Test": name} for name in sorted(retained)))
+            with self.subTest(missing=missing), self.assertRaises(RuntimeError):
+                runner.verify_results(events, roots)
+        for skipped in roots:
+            events = stream(*([{"Action": "pass", "Test": name} for name in sorted(roots)] + [{"Action": "skip", "Test": skipped}]))
+            with self.subTest(skipped=skipped), self.assertRaises(RuntimeError):
+                runner.verify_results(events, roots)
+        row = next(x for x in runner.CONTRACTS if x[0] == "ledger-repair-approval-proof")
+        for invalid in ([x for x in runner.CONTRACTS if x is not row], runner.CONTRACTS + [row]):
+            with self.assertRaises(RuntimeError):
+                runner.validate_closed_grant_contracts(invalid)
+        root = runner.LEDGER_REPAIR_APPROVAL_ROOT
+        for raw in ("", stream({"Action": "skip", "Test": root}),
+                    stream({"Action": "skip", "Test": root + "/proof"}, {"Action": "pass", "Test": root})):
+            with self.assertRaises(RuntimeError):
+                runner.verify_results(raw, {root})
+        error, calls = self.run_public_wrapper(bad_group="ledger-repair-approval-proof", failure="missing-parent-process")
+        self.assertIsNotNone(error)
+        self.assertTrue(any(call[0] == "query" and call[1].startswith("BEGIN; DROP ROLE billing_migrator") for call in calls))
+
+    def test_billing_actor_conflict_and_dependencies_are_not_force_removed(self):
+        error, calls = self.run_public_wrapper(failure="actor-conflict")
+        self.assertIsNotNone(error)
+        self.assertFalse(any(call[0] == "query" and "CREATE ROLE billing_schema_owner" in call[1] for call in calls))
+        error, calls = self.run_public_wrapper(failure="role-dependency")
+        self.assertIsNotNone(error)
+        self.assertTrue(any(call[0] == "query" and "CREATE ROLE billing_schema_owner" in call[1] for call in calls))
+        self.assertFalse(any(call[0] == "query" and call[1].startswith("BEGIN; DROP ROLE billing_migrator") for call in calls))
 
     def test_anonymization_advance_failure_root_cannot_silently_drop(self):
         expected = {"TestAccountClosureAnonymizesOwnedHistoricalContacts",

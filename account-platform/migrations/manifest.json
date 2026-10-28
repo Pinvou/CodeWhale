@@ -2154,6 +2154,16 @@
         "file": "900031_direct_payment_repair_commands.up.sql",
         "version": 900031,
         "sha256": "3e9eb2e93d22e52b5c8fbf162e5c5d63761129de449c3df10dd43d9ac1f10f02"
+      },
+      {
+        "file": "900032_ledger_repair_history_proof.down.sql",
+        "version": 900032,
+        "sha256": "0cededc75875d69618d2bd33bcc2e3fd17c76926a10a0f351c0a10fe0e048f12"
+      },
+      {
+        "file": "900032_ledger_repair_history_proof.up.sql",
+        "version": 900032,
+        "sha256": "74beb8e84a6bd58ac04c5cf2d628023a5a66fea6eb46d081e1b4c5ea7982f5d6"
       }
     ],
     "payment-simulator": [

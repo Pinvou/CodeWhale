@@ -74,6 +74,11 @@ func main() {
 	if err != nil {
 		log.Fatal("BILLING_PAYMENT_CONFIGURATION_INVALID")
 	}
+	ledgerRepairAuthority, err := billing.NewHTTPLedgerRepairProofAuthority(os.Getenv("ACCOUNT_HTTP_URL"), credential, cfg.Environment)
+	if err != nil {
+		log.Fatal("BILLING_LEDGER_REPAIR_AUTHORITY_CONFIGURATION_INVALID")
+	}
+	payments.WithLedgerRepairProofAuthority(ledgerRepairAuthority)
 	authorizer, err := authorization.NewClient(os.Getenv("ACCOUNT_HTTP_URL"), credential)
 	if err != nil {
 		log.Fatal("BILLING_AUTHORIZATION_CONFIGURATION_INVALID")

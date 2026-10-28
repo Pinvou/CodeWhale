@@ -17,6 +17,7 @@ import (
 	"github.com/Pinvou/pinvou3/account-platform/internal/platform/approvalpolicy"
 	"github.com/Pinvou/pinvou3/account-platform/internal/platform/billinggovernance"
 	"github.com/Pinvou/pinvou3/account-platform/internal/platform/events"
+	"github.com/Pinvou/pinvou3/account-platform/internal/platform/serviceauth"
 	"github.com/google/uuid"
 )
 
@@ -472,6 +473,92 @@ JOIN account_approval_authorization.approval_delivery_states d ON d.approval_req
 	}
 	if _, err := accountConnection.Exec(ctx, `RESET ROLE; SET ROLE account_service`); err != nil {
 		t.Fatal(err)
+	}
+
+	// The Account history proof is a read-only projection of the same real,
+	// event-bound approval, not a fabricated repository-level authorization.
+	proofID := ledgerRepairProofIdentity{ApprovalRequestID: requestID.String(), AuthorizationEventID: eventID.String(), ApprovalEpoch: binding.ApprovalEpoch}
+	inputs := []ledgerRepairProofIdentity{proofID,
+		{ApprovalRequestID: uuid.NewString(), AuthorizationEventID: eventID.String(), ApprovalEpoch: binding.ApprovalEpoch},
+		{ApprovalRequestID: requestID.String(), AuthorizationEventID: uuid.NewString(), ApprovalEpoch: binding.ApprovalEpoch},
+		{ApprovalRequestID: requestID.String(), AuthorizationEventID: eventID.String(), ApprovalEpoch: binding.ApprovalEpoch + 1},
+	}
+	proofs, err := repository.ReadLedgerRepairAuthorizationProofs(ctx, inputs)
+	if err != nil || len(proofs) != 4 || proofs[0].Status != "VERIFIED" || proofs[1].Status != "UNAVAILABLE" || proofs[2].Status != "UNAVAILABLE" || proofs[3].Status != "UNAVAILABLE" {
+		t.Fatal("bound proof or negative identities invalid", err)
+	}
+	var keyDigest, commandDigest, snapshotDigest, revision string
+	if err = billingPool.QueryRow(ctx, `SELECT c.execution_key_digest,p.command_digest,p.snapshot_digest,p.domain_revision FROM ledger_repair_cases c JOIN billing_approval_proof_claims p ON p.approval_request_id=c.approval_request_id WHERE c.approval_request_id=$1`, requestID).Scan(&keyDigest, &commandDigest, &snapshotDigest, &revision); err != nil || proofs[0].ExecutionKeyDigest != keyDigest || proofs[0].CommandDigest != commandDigest || proofs[0].SnapshotDigest != snapshotDigest || proofs[0].DomainRevision != revision {
+		t.Fatal("Account proof does not match authoritative Billing claim", err)
+	}
+	var originalKey, originalEventDigest string
+	var originalCritical []byte
+	if err = accountConnection.QueryRow(ctx, `SELECT execution_idempotency_key,authorization_event_digest,critical_resource_versions FROM public.approval_executions WHERE approval_request_id=$1`, requestID).Scan(&originalKey, &originalEventDigest, &originalCritical); err != nil {
+		t.Fatal("execution evidence unavailable", err)
+	}
+	proofBody, _ := json.Marshal(ledgerRepairProofRequest{SchemaVersion: 1, Items: []ledgerRepairProofIdentity{proofID}})
+	caller, err := serviceauth.ContextForJob(ctx, "billing-service", "CONTROLLED_PROOF", uuid.NewString())
+	if err != nil {
+		t.Fatal(err)
+	}
+	proofRequest := httptest.NewRequest("POST", "/internal/v1/ledger-repair/authorization-proofs:batch", bytes.NewReader(proofBody)).WithContext(caller)
+	proofResponse := httptest.NewRecorder()
+	NewService(repository, nil).ledgerRepairAuthorizationProofBatch(proofResponse, proofRequest)
+	var projection ledgerRepairProofResponse
+	if proofResponse.Code != 200 || json.Unmarshal(proofResponse.Body.Bytes(), &projection) != nil || len(projection.Items) != 1 || projection.Items[0].Status != "VERIFIED" || bytes.Contains(proofResponse.Body.Bytes(), []byte(originalKey)) {
+		t.Fatal("HTTP proof absent or leaked execution key", proofResponse.Code)
+	}
+	canceled, stop := context.WithCancel(ctx)
+	stop()
+	if _, err = repository.ReadLedgerRepairAuthorizationProofs(canceled, []ledgerRepairProofIdentity{proofID}); err == nil {
+		t.Fatal("unavailable storage was accepted")
+	}
+	// Alter immutable execution facts only in this fixture's owned UUID database.
+	// Triggers are restored in the same transaction for both corruption and restore.
+	updateEvidence := func(column string, value any) {
+		t.Helper()
+		tx, e := accountConnection.Begin(ctx)
+		if e != nil {
+			t.Fatal(e)
+		}
+		defer tx.Rollback(ctx)
+		if _, e = tx.Exec(ctx, `ALTER TABLE public.approval_executions DISABLE TRIGGER approval_executions_identity_immutable; ALTER TABLE public.approval_executions DISABLE TRIGGER approval_executions_authorization_guard`); e != nil {
+			t.Fatal("fixture guard disable", e)
+		}
+		switch column {
+		case "key":
+			_, e = tx.Exec(ctx, `UPDATE public.approval_executions SET execution_idempotency_key=$2 WHERE approval_request_id=$1`, requestID, value)
+		case "digest":
+			_, e = tx.Exec(ctx, `UPDATE public.approval_executions SET authorization_event_digest=$2 WHERE approval_request_id=$1`, requestID, value)
+		case "critical":
+			_, e = tx.Exec(ctx, `UPDATE public.approval_executions SET critical_resource_versions=$2::jsonb WHERE approval_request_id=$1`, requestID, value)
+		default:
+			t.Fatal("invalid test field")
+		}
+		if e != nil {
+			t.Fatal("fixture evidence alteration", e)
+		}
+		if _, e = tx.Exec(ctx, `ALTER TABLE public.approval_executions ENABLE TRIGGER approval_executions_identity_immutable; ALTER TABLE public.approval_executions ENABLE TRIGGER approval_executions_authorization_guard`); e != nil {
+			t.Fatal("fixture guard restore", e)
+		}
+		if e = tx.Commit(ctx); e != nil {
+			t.Fatal("fixture evidence commit", e)
+		}
+	}
+	for _, tc := range []struct {
+		name          string
+		bad, original any
+	}{{"key", originalKey + "-damaged", originalKey}, {"digest", strings.Repeat("a", 64), originalEventDigest}, {"critical", `{}`, string(originalCritical)}} {
+		updateEvidence(tc.name, tc.bad)
+		changed, e := repository.ReadLedgerRepairAuthorizationProofs(ctx, []ledgerRepairProofIdentity{proofID})
+		updateEvidence(tc.name, tc.original)
+		if e != nil || len(changed) != 1 || changed[0].Status != "UNAVAILABLE" {
+			t.Fatal("corrupt proof accepted", tc.name, e)
+		}
+	}
+	unchanged, err := repository.ReadLedgerRepairAuthorizationProofs(ctx, []ledgerRepairProofIdentity{proofID})
+	if err != nil || len(unchanged) != 1 || unchanged[0].Status != "VERIFIED" {
+		t.Fatal("restored proof unavailable", err)
 	}
 
 	// Re-delivering the same authorized event must read back the same effect and

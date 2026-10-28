@@ -1835,7 +1835,7 @@ fn entry_is_fresh(
 
 #[cfg(test)]
 #[path = "engine_pool_remote_tests.rs"]
-mod remote_snapshot_tests;
+pub(super) mod remote_snapshot_tests;
 
 fn remote_owner_matches(
     resident: Option<&Arc<super::skill_materialization::RemoteTurnOwner>>,
