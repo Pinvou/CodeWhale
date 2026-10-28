@@ -9,13 +9,15 @@ template facts in `crates/config/src/local_reasoning.json` refine this route:
 | Qwen3.8-27B, Qwen3.8-Flash-Next | off, low, medium, max | thinking switch; low, medium, xhigh |
 | Ornith-1.5-35B-A3B, Qwen3.6-35B-A3B | off, high (on) | thinking switch only |
 | GLM-5.3-Flash | low, high, max | low, high, max |
-| DeepSeek-V4-Flash-Vision-Exp | low, high, max | low, high, max |
+| DeepSeek-V4-Flash-Vision-Exp | off, low, high, max | prior thinking switch; low, high, max |
 
 Qwen3.8's `high` preference is a legacy name for its deepest tier and now sends
 `xhigh`; its template rejects the literal `high`. Templates that only consume a
 thinking switch no longer receive fictitious effort levels. GLM and DeepSeek
 legacy `medium` preferences use their middle supported level, `high`. A stale
-`off` preference on the latter always-thinking ladders normalizes to `low`.
+`off` preference on the GLM always-thinking ladder normalizes to `low`.
+DeepSeek-V4-Vision retains its existing Off request spelling; this compatibility
+change does not infer a new inability to turn thinking off from an effort enum.
 Model-specific effort travels in `chat_template_kwargs.reasoning_effort`; the
 top-level effort is omitted so older OpenAI schemas cannot reject xhigh/max
 before the template is rendered. The registry records source revisions and legacy aliases; normalization does
