@@ -7,7 +7,7 @@ export const desktopBridgeApi = {
   voice: ['abandonVoiceResult', 'appendVoiceText', 'beginVoiceSubmission', 'cancelVoiceAsrSetup', 'cancelVoiceInput', 'clearVoiceInput', 'closeVoiceAsrSetup', 'completeVoiceSubmission', 'dismissVoiceInput', 'getVoiceOperationId', 'hasVoiceSubmissionPending', 'installVoiceAsr', 'setVoiceShortcutEnabled', 'startVoiceInput', 'syncVoiceShortcutRecording'],
   knowledge: ['downloadKbModel', 'kbModelStatus', 'listCollections', 'loadKnowledgeEmbedderAfterFirstFrame', 'mountCollection', 'mountRemoteCollection', 'removeCollection', 'removeRemoteCollection', 'setCollectionEnabled', 'setRemoteCollectionEnabled', 'unmountCollection'],
   scheduled: ['clearScheduledTaskSelection', 'createScheduledTask', 'deleteScheduledTask', 'dismissScheduledTaskError', 'exitScheduledRunChat', 'loadScheduledTaskRecentRuns', 'loadScheduledTaskRuns', 'loadScheduledTasks', 'openScheduledRunChat', 'pauseScheduledTask', 'readScheduledTask', 'refreshScheduledTaskData', 'resumeScheduledTask', 'runScheduledTaskNow', 'selectScheduledTask', 'startScheduledTaskChat', 'toggleScheduledTaskPinned', 'updateScheduledTask'],
-  sessions: ['archiveSession', 'createNewSession', 'deleteSession', 'exportSessionArchive', 'getSessionWorkspaceBinding', 'materializeSession', 'onSessionDeleted', 'boundDraftMode', 'pickDraftWorkspace', 'rememberDraftWorkspaceRecent', 'renameSession', 'restoreArchivedSession', 'setDraftWorkspace', 'switchToSession', 'toggleSessionPinned'],
+  sessions: ['archiveSession', 'beginLocalNavigationIntent', 'onLocalNavigation', 'captureControlledNavigationOwner', 'createNewSession', 'deleteSession', 'exitControlledScheduledRunChat', 'exportSessionArchive', 'isControlledNavigationOwnerCurrent', 'getSessionWorkspaceBinding', 'materializeSession', 'onSessionDeleted', 'boundDraftMode', 'pickDraftWorkspace', 'rememberDraftWorkspaceRecent', 'renameSession', 'restoreArchivedSession', 'setDraftWorkspace', 'switchToControlledSession', 'switchToSession', 'toggleSessionPinned'],
   monitor: ['clearMonitorStats', 'startMonitorPolling', 'stopMonitorPolling'],
   settings: ['listBuiltinFeatures', 'loadBehaviorTelemetryStatus', 'saveSearchSettings', 'saveSearchSettingsAndRestart', 'saveSettings', 'saveSettingsAndRestart', 'setBehaviorTelemetryEnabled', 'setBuiltinFeatureEnabled', 'setGlobalShortcutConfig', 'setSelectedPet', 'testSearchProvider'],
   feedback: ['submitFeedback', 'listFailureDiagnostics', 'previewFailureDiagnostic', 'submitFailureDiagnostic', 'pickDiagnosticFiles'],
@@ -71,7 +71,8 @@ export const desktopOnlyBridgeApi = {
   // rememberDraftWorkspaceRecent (round-18 M3) records the single-entry
   // picker's pick into the recents list; without the desktop staging channel
   // there is nothing to record, so it rides the same desktop-only lane.
-  sessions: ['exportSessionArchive', 'pickDraftWorkspace', 'rememberDraftWorkspaceRecent', 'setDraftWorkspace', 'boundDraftMode'],
+  // Controlled-device navigation is exposed only by the desktop remote-control lane.
+  sessions: ['beginLocalNavigationIntent', 'onLocalNavigation', 'captureControlledNavigationOwner', 'exitControlledScheduledRunChat', 'exportSessionArchive', 'isControlledNavigationOwnerCurrent', 'pickDraftWorkspace', 'rememberDraftWorkspaceRecent', 'setDraftWorkspace', 'switchToControlledSession', 'boundDraftMode'],
   // The steer channel (remote control / other hosts) and the queued chip's
   // zap-send go through the foundation EnginePool and need the Tauri command
   // channel; web has no such backend.

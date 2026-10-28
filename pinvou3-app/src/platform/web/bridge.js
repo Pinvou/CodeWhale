@@ -287,6 +287,8 @@ function pinvouSharedweb() {
     // 保证 getMany 不抛 unknown slice；真正的 UI 入口由 desktopRemoteControl
     // capability=false 隐藏。
     controlledDevice: null,
+    controlledNavigationIntent: 0,
+    controlledNavigationPending: false,
     controlledSession: { sessionId: null, sessionRef: null, generation: null },
     controllerConnection: null,
     remoteCapabilities: null,
