@@ -200,7 +200,15 @@ const expectedProtocolHashes = {
   // T0-d (#701 桥接面对齐, FFE4-1) 重算：remote_control:tools_changed 监听体
   // 的内联 CustomEvent 派发改经 window.PinvouToolStoreEvents
   // .notifyComposerToolsChanged()（shared/tool-store-events.js），命令面无增删。
-  chat: '9f3c8bdd3de2de2d366f6090eb537dbf7a236377b84ad7a04331e12ac004261b',
+  // Recomputed for the #2135 review fix wave: the chat:done listener body in
+  // chat-events.js gains cancelPendingStreamNotify(sid) (with its trailing
+  // comment) so a background session's terminal cancels its own pending
+  // stream notify frame — the wave's only digest-input change. The desktop
+  // admission-reject flush pairing and its context parameter (chat.js) and
+  // the chat-events cluster export entry all sit outside every invoke/listen
+  // call span, so they ride along hash-neutral — no invoke or listen call-set
+  // change.
+  chat: 'ec6881aa20351e3c5bf29beefb89b859f543b80ed647ca8224eb54f66d23157a',
   dependencies: 'd39f5a46b8e34c1c30d8f8e08ef62baccfe822ffb7fad8dbf3301c69c566e31c',
   // Recomputed for #445: the YOLO gate threads an adjudicated session id
   // through exitPlanToYolo and planStuckGo.
