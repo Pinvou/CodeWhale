@@ -238,6 +238,7 @@ jobs:
           filters: |
             rust_code:
               - '**/*.rs'
+              - 'pinvou3-app/src-tauri/src/features/updater/platform/windows_handoff.cs'
               - '**/Cargo.toml'
               - '**/Cargo.lock'
               - '**/build.rs'
@@ -289,6 +290,7 @@ jobs:
               # run the leg that executes the guard it pins.
               - 'scripts/tests/test_registry_guard.py'
               - 'pinvou3-app/src-tauri/**/*.rs'
+              - 'pinvou3-app/src-tauri/src/features/updater/platform/windows_handoff.cs'
               # diagnostics.rs 在生产校验中 include_str! v1 schema，
               # behavior_telemetry_tests.rs 同时嵌入 schema 与 registries。
               # 精确登记编译输入，schema-only Ready PR/MQ 也须执行 Rust 回归
@@ -711,6 +713,9 @@ jobs:
               - 'pinvou3-app/src-tauri/rust-toolchain.toml'
               - 'pinvou3-app/package.json'
             windows_static_updater:
+              - 'pinvou3-app/src-tauri/src/features/updater/platform/windows.rs'
+              - 'pinvou3-app/src-tauri/src/features/updater/platform/windows_handoff.cs'
+              - 'scripts/tests/windows-handoff.test.ps1'
               - 'scripts/prepare-windows-release.ps1'
               - 'scripts/verify-windows-release-online.ps1'
               - 'pinvou3-app/tests/windows_static_update_contract.test.js'
@@ -2244,6 +2249,10 @@ jobs:
 
       - name: Windows 静态更新契约
         run: npm --prefix pinvou3-app run test:windows-static-updater
+
+      - name: Windows 安装交接进程测试
+        shell: pwsh
+        run: ./scripts/tests/windows-handoff.test.ps1
 
   # pinvou-cli lint leg (round 18, review §3 "The CI leg doesn't lint the
   # CLI"): until now ~50k lines of CLI Rust had no clippy on any lane, and

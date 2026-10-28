@@ -46,7 +46,7 @@ assert.match(windowsUpdater, /\.create_new\(true\)/);
 assert.match(windowsUpdater, /-EncodedCommand','\{encoded_script\}'\) -Verb RunAs/);
 assert.match(windowsUpdater, /\[IO\.FileShare\]::Read/);
 assert.match(windowsUpdater, /installer SHA-256 does not match manifest/);
-assert.match(windowsUpdater, /@\('\/P','\/UPDATE','\/R'\)/);
+assert.match(windowsUpdater, /'\/P \/UPDATE \/R'/);
 assert.match(windowsUpdater, /static APPROVED_ASSET: Mutex<Option<ApprovedAsset>>/);
 assert.match(windowsUpdater, /approval_receipt/);
 assert.match(windowsUpdater, /mark_approved_downloaded/);

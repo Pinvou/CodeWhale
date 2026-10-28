@@ -316,6 +316,22 @@ pub async fn download_update(
         .inspect_err(|e| log::warn!("[updater] download failed: {e}"))
 }
 
+struct CancelPendingInstallHandoff {
+    owner: String,
+    cancelled: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    armed: bool,
+}
+
+impl Drop for CancelPendingInstallHandoff {
+    fn drop(&mut self) {
+        if self.armed {
+            self.cancelled
+                .store(true, std::sync::atomic::Ordering::SeqCst);
+            platform::cancel_install_handoff(&self.owner);
+        }
+    }
+}
+
 /// 安装下载好的更新包。Linux 走 pkexec apt；Windows 启动 MSI/NSIS 安装器，成功启动后退出进程。
 pub async fn install_update(
     deb_path: Option<String>,
@@ -327,10 +343,21 @@ pub async fn install_update(
         .try_lock()
         .map_err(|_| "已有更新下载或安装正在进行".to_string())?;
     let pending_target = info.as_ref().map(|value| value.latest_version.clone());
+    let immediate_target = pending_target.clone();
+    let mut cancellation = CancelPendingInstallHandoff {
+        owner: uuid::Uuid::new_v4().simple().to_string(),
+        cancelled: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        armed: true,
+    };
+    let owner = cancellation.owner.clone();
+    let cancelled = cancellation.cancelled.clone();
     let exit_after_start = tokio::task::spawn_blocking(move || {
-        let result = platform::install_downloaded_update(deb_path, installer_path, info);
-        if result.is_ok()
-            && let Some(target_version) = pending_target
+        let result = platform::install_update_for_operation(deb_path, installer_path, info, &owner);
+        if cancelled.load(std::sync::atomic::Ordering::SeqCst) {
+            platform::cancel_install_handoff(&owner);
+        }
+        if matches!(result, Ok(false))
+            && let Some(target_version) = immediate_target
             && let Err(error) = health::record_pending_update(
                 env!("CARGO_PKG_VERSION"),
                 &target_version,
@@ -352,9 +379,21 @@ pub async fn install_update(
     })?
     .inspect_err(|e| log::warn!("[updater] install failed: {e}"))?;
     if exit_after_start {
+        platform::commit_install_handoff(&cancellation.owner)?;
+        cancellation.armed = false;
+        if let Some(target_version) = pending_target
+            && let Err(error) = health::record_pending_update(
+                env!("CARGO_PKG_VERSION"),
+                &target_version,
+                std::env::consts::OS,
+            )
+        {
+            log::warn!("[updater] installed update but could not persist health marker: {error}");
+        }
         crate::platform::startup::mark_lifecycle_clean_exit("restart");
         app.exit(0);
     }
+    cancellation.armed = false;
     Ok(())
 }
 
