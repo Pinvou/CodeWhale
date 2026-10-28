@@ -1655,6 +1655,17 @@ impl ModelManager {
             // 用户点了取消、磁盘满这类错误，提权重跑一遍也是一样的结果，
             // 别拿一个多余的密码框去骚扰用户。
             Err(e) if Self::is_fatal_failure(&e.to_string()) => Err(e),
+            // 网络类失败同样不提权（.48 真机案例，见 network_unreachable_failure
+            // 的注释）——密码框解决不了路由不通，只会把明确失败拖成授权挂死。
+            // 这里把"为什么不再重试/用户该做什么"说在错误里，而不是让用户
+            // 对着一个没出现的弹窗等半小时。
+            Err(e) if Self::network_unreachable_failure(&e.to_string()) => {
+                on_line("失败原因是网络不可达，管理员权限解决不了，不再弹授权窗口。");
+                Err(ModelManagerError::new(format!(
+                    "{e}\n提示：设备当前无法访问外网（或镜像源不可达）。请把设备接入可出网的网络后重试；\
+                     或在有外网的机器上 docker save 导出引擎镜像，用 U 盘拷到本机 docker load 导入后再试。"
+                )))
+            }
             Err(e) => {
                 eprintln!("[download] 普通用户身份安装引擎失败，改用管理员权限重试：{e}");
                 on_line(
@@ -1743,6 +1754,41 @@ impl ModelManager {
             "系统找不到授权代理",
         ];
         FATAL.iter().any(|k| msg.contains(k))
+    }
+
+    /// 网络类失败：**提权解决不了**，兜底 pkexec 重跑前必须拦下。
+    ///
+    /// 192.168.10.48 真机实锤（2026-10-27）：设备无默认路由（出不了外网），
+    /// digest 钉死的引擎镜像不在本地 → docker pull 超时失败 → 这里没把网络类
+    /// 失败归为"别提权"→ 弹 pkexec 重试 → 现场没人输密码 → 1800 秒无输出被
+    /// idle 判死。一个明确的两分钟失败被拖成半小时挂死，且死因文案（"判定为
+    /// 卡死"）与真相（在等授权）完全脱节。
+    ///
+    /// 注意与 [`Self::is_fatal_failure`] 的分工：网络失败**可以**走断点续传重试
+    /// （网络抖一下就该重试），所以不进 FATAL 清单；它只是**不配**触发提权——
+    /// 权限给得再高，路由也不通。
+    pub(crate) fn network_unreachable_failure(msg: &str) -> bool {
+        // 小写比对：docker/DNS 的报错在句首会大写（"Temporary failure resolving"），
+        // 中文标记不受影响。
+        const MARKERS: &[&str] = &[
+            // docker / registry 原文（docker pull、dial 系列）
+            "i/o timeout",
+            "dial tcp",
+            "no route to host",
+            "network is unreachable",
+            "failed to resolve reference",
+            "connection refused",
+            "context deadline exceeded",
+            // DNS 原文
+            "could not resolve host",
+            "temporary failure resolving",
+            // 客户端已 humanize 的中文形态（errors.rs / store_client.rs）
+            "连接超时",
+            "网络连接失败",
+            "请检查设备能不能访问外网",
+        ];
+        let lowered = msg.to_lowercase();
+        MARKERS.iter().any(|k| lowered.contains(k))
     }
 
     /// 跑卡片脚本；网络类失败自动从断点续传，最多 [`DOWNLOAD_RESUME_LIMIT`] 次。
@@ -4450,6 +4496,37 @@ mod tests {
                 "这类失败绝不能触发自动提权重跑：{msg}"
             );
         }
+    }
+
+    /// 网络类失败不得触发兜底提权（.48 真机案例，2026-10-27）：无外网设备上
+    /// docker pull 超时 → 自动弹 pkexec 重试 → 没人输密码 → 1800 秒 idle 判死。
+    /// 样本取自该真机的实际失败文案（英文原文 + humanize 中文形态各一）。
+    #[test]
+    fn network_failures_never_escalate_to_root() {
+        for msg in [
+            // .48 run log 原文：docker pull 的 registry 请求超时
+            "脚本执行失败（退出码 1）：failed to do request: Head \"https://registry-1.docker.io/v2/\": dial tcp: lookup registry-1.docker.io: i/o timeout",
+            "脚本执行失败（退出码 1）：Error response from daemon: failed to resolve reference vllm/vllm-openai: no route to host",
+            "脚本执行失败（退出码 1）：Temporary failure resolving 'hf-mirror.com'",
+            // 客户端 humanize 形态
+            "脚本执行失败（退出码 1）：连接超时，请检查网络（或尝试在设置里切换镜像地址）（请检查设备能不能访问外网）",
+        ] {
+            assert!(
+                ModelManager::network_unreachable_failure(msg),
+                "网络类失败必须拦下兜底提权：{msg}"
+            );
+            assert!(
+                !ModelManager::is_fatal_failure(msg),
+                "网络类失败应保留断点续传重试（不进致命清单）：{msg}"
+            );
+        }
+        // 反例：与网络无关的普通失败不受影响（仍走既有兜底提权路径）
+        assert!(!ModelManager::network_unreachable_failure(
+            "脚本执行失败（退出码 1）：Error response from daemon: No such image: vllm/x"
+        ));
+        assert!(!ModelManager::network_unreachable_failure(
+            "脚本执行失败（退出码 2）：some card-specific error"
+        ));
     }
 
     /// install_engine 是六个入口脚本里唯一会走 pkexec 的，所以只有它按

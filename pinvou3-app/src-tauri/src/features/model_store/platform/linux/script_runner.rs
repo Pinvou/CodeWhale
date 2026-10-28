@@ -1236,8 +1236,22 @@ pub fn run_script(
     if timed_out {
         reap_child(child);
         cleanup_temp_files(&cancel_file, script_path);
+        // 死因要带上"死前最后在说什么"（.48 真机案例：脚本在等 pkexec 授权、
+        // 30 分钟无人输入被 idle 判死，错误只说"判定为卡死"，用户无从知道
+        // 该去看授权弹窗）。这里取最后一条非空行——停摆语境下"最后说过的话"
+        // 就是它当时在做的事；失败摘要那套 pick_failure_line 的教训不适用
+        // （那边要跳过好心附加的变通建议，这边恰恰要原样呈现停摆现场）。
+        let last_line = output_lines
+            .iter()
+            .rev()
+            .find(|l| !l.trim().is_empty())
+            .map(|l| l.chars().take(120).collect::<String>());
+        let suffix = match last_line {
+            Some(line) => format!("；最后输出：{line}"),
+            None => String::new(),
+        };
         return Err(ScriptError::new(format!(
-            "脚本执行超时：{}（{timeout_reason}）",
+            "脚本执行超时：{}（{timeout_reason}{suffix}）",
             script_path
                 .file_name()
                 .and_then(|s| s.to_str())

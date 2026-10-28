@@ -753,9 +753,12 @@ pub fn start_download(service: &Arc<ModelStoreService>, card_id: String) -> Resu
                     if !announced {
                         announced = true;
                         let ahead = queue.position(ticket);
+                        // 不说"引擎已就绪"——这条只是排队位的播报，引擎检查/安装
+                        // 在轮到之后才做（.48 真机反馈：排队时说就绪、轮到后装
+                        // 引擎失败，前后矛盾让用户以为是误判）。
                         log_gate.push(&format!(
-                            "引擎已就绪。当前有模型正在下载，本任务排队中（前面还有 {ahead} 个）\
-                         ——可以放着不管，轮到它会自动开始下载"
+                            "已进入下载队列（前面还有 {ahead} 个）\
+                         ——可以放着不管，轮到它会自动检查引擎并开始下载"
                         ));
                     }
                     std::thread::sleep(Duration::from_millis(500));
