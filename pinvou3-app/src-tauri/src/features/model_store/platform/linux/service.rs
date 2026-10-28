@@ -383,6 +383,9 @@ fn card_operation_lock(card_id: &str) -> Result<std::fs::File, String> {
     operation_lock
         .try_lock()
         .map_err(|_| "该模型正在其他窗口操作，请稍后重试".to_string())?;
+    // No previous operation can still own this card. Recover its stale plans
+    // before a new revision starts and the card lock becomes deliberately busy.
+    super::version_store::recover_interrupted_while_locked(card_id, &operation_lock)?;
     Ok(operation_lock)
 }
 
@@ -1082,6 +1085,7 @@ pub fn force_remove(
 
 #[cfg(test)]
 mod tests {
+    mod recovery;
     use super::*;
 
     #[tokio::test]
@@ -1235,6 +1239,7 @@ mod tests {
     #[test]
     fn cancellation_after_a_successful_commit_is_reported_as_success() {
         let _home = config::TempHome::new();
+        db::init_db().unwrap();
         let service = Arc::new(ModelStoreService::new());
         let started = spawn_op(&service, "committed-card", OP_DEPLOY, |_, control, _| {
             control
@@ -1309,6 +1314,7 @@ mod tests {
     #[test]
     fn card_operation_lock_is_shared_by_independent_service_instances() {
         let _home = config::TempHome::new();
+        db::init_db().unwrap();
         let first = Arc::new(ModelStoreService::new());
         let second = Arc::new(ModelStoreService::new());
         let (release, wait) = std::sync::mpsc::channel();
@@ -1337,6 +1343,7 @@ mod tests {
     fn card_operation_lock_refuses_symlinks_and_tightens_existing_permissions() {
         use std::os::unix::fs::{PermissionsExt, symlink};
         let _home = config::TempHome::new();
+        db::init_db().unwrap();
         let lock_dir = config::data_dir().join("operation-locks");
         std::fs::create_dir_all(&lock_dir).unwrap();
         let target = lock_dir.join("unrelated");

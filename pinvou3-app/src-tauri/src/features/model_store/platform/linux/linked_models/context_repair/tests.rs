@@ -1,4 +1,5 @@
 use super::*;
+mod linked_settings;
 use crate::features::model_store::platform::linux::{config, script_runner, service, store_client};
 use std::{
     io::{Read, Write},

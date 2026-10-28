@@ -1,5 +1,7 @@
 use super::*;
 
+mod lease_completion;
+mod recovery_admission;
 mod stage_admission;
 
 fn blob(content: &str) -> db::ScriptBlob {
@@ -2159,6 +2161,15 @@ fn parallel_stages_reserve_quota_before_scripts_and_release_after_failure() {
     let (entered_tx, entered_rx) = mpsc::channel();
     let (release_tx, release_rx) = mpsc::channel();
     let first_thread = std::thread::spawn(move || {
+        // Production staging runs under the service's canonical card lock.
+        // Keep that ownership here so quota recovery recognizes this live run.
+        let lock_dir = config::data_dir().join("operation-locks");
+        fs::create_dir_all(&lock_dir).unwrap();
+        let operation_lock = crate::platform::filesystem::open_private_lock_file(
+            &lock_dir.join(format!("{}.lock", first.card_id)),
+        )
+        .unwrap();
+        operation_lock.try_lock().unwrap();
         let manager = ModelManager::new(Some(settings), None);
         manager.stage_verified(
             &first,

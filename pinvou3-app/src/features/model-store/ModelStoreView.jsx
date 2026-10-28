@@ -23,6 +23,7 @@ import {
   startVersionAction,
   disableTestStore,
   fetchLibrary,
+  fetchSavedModels,
   fetchStoreCards,
   fetchTestStoreState,
   forceRemoveModel,
@@ -445,21 +446,19 @@ const ModelStoreView = ({ theme, t, bs, startupUpdates = EMPTY_STARTUP_UPDATES, 
     // 名字和回环地址不足以授权删除用户配置，关联迁移由后端精确判断。
     async (cardId, displayName, { quiet = false } = {}) => {
       const bridge = tryGetTauriBridge();
-      // **先分清「查过了没有」和「根本没查成」**。
-      //
-      // `findCardLinkedRows` 对 `undefined` 和空数组返回的都是 `[]`，下面那句
-      // `rows.length === 0 → return true` 于是会在**我们压根没能力查看**的情况下
-      // 宣告清理成功。品悟模型列表那一行照样留着，而调用方拿到 true、提示语说
-      // 「已卸载」，用户毫不知情——2026-09-22 真机上驭光卡删除后留下的那行死数据
-      // 就是这么来的（卸载本身成功、清理这步悄悄放过）。
-      //
-      // 拿不到快照时返回 false：宁可让用户看见一句「没能自动清掉，请手动删」，
-      // 也不能让他以为清干净了。
-      if (!Array.isArray(bs?.savedModels)) {
-        showToast(copy.linkBridgeMissing);
+      // 卸载可能等待很久；启动 handler 的 React props 即使之后刷新也仍是旧快照。
+      // 关联迁移会在后台写入设置，必须在操作完成后重新读取，不能把加载失败当空表。
+      let savedModels;
+      try {
+        savedModels = (await fetchSavedModels())?.models;
+      } catch {
+        // Both transport failures and invalid responses use the same recovery notice.
+      }
+      if (!Array.isArray(savedModels)) {
+        showToast(copy.linkRowStale(displayName, copy.linkSnapshotReadFailed));
         return false;
       }
-      const rows = findCardLinkedRows(bs.savedModels, cardId);
+      const rows = findCardLinkedRows(savedModels, cardId);
       // 真的没有死行要清:这是最常见的情况(用户从没接入过这个模型),不必出声。
       if (rows.length === 0) return true;
       // 有死行、但拿不到条件删除能力。这两个条件**不能**合并成一句 return:合并之后
@@ -484,7 +483,7 @@ const ModelStoreView = ({ theme, t, bs, startupUpdates = EMPTY_STARTUP_UPDATES, 
       if (!quiet && removed > 0) showToast(copy.linkRowRemoved(displayName, removed));
       return true;
     },
-    [bs, copy, showToast]
+    [copy, showToast]
   );
 
   const handleDownload = useCallback(
@@ -729,10 +728,7 @@ const ModelStoreView = ({ theme, t, bs, startupUpdates = EMPTY_STARTUP_UPDATES, 
     } finally {
       setForceRemoveBusy(false);
     }
-    // cleanLinkedRows 必须在依赖里。它依赖 bs（品悟的模型列表快照），漏掉的话
-    // bs 一变它就重建、而这里不重建，强制移除会拿着旧快照去 findLinkedRows：
-    // 要么漏清刚接入的那几行，要么对着已经不存在的 id 调 deleteModel、把一次
-    // 成功清理报成失败。残留路径结果页是用户清磁盘的唯一凭据,不能被闭包竞态吞掉。
+    // 清理回调读取操作完成后的设置；保留依赖以使用当前语言的恢复提示。
   }, [cleanLinkedRows, copy, forceRemove, loadAll, showToast]);
 
   const confirmProfileDeploy = useCallback(() => {

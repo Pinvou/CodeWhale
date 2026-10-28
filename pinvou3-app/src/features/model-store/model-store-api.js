@@ -71,6 +71,11 @@ function fetchLibrary() {
   return invokeTauri('model_store_library');
 }
 
+/** Read authoritative settings after a lifecycle operation; failures must not look empty. */
+export function fetchSavedModels() {
+  return invokeTauri('list_models', { requireReadable: true });
+}
+
 /**
  * 单个模型的详情（运行时信息、端点、脚本正文等）。
  * @param {string} cardId - 卡片 ID。

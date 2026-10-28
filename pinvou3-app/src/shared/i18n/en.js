@@ -498,6 +498,7 @@ export const dictEn = {
           linkNoModelName: 'This model has no model name and cannot be connected.',
           linkNoKey: 'Could not obtain an API key',
           linkBridgeMissing: 'Writing model settings is not supported here',
+          linkSnapshotReadFailed: 'Could not read the latest model settings',
           linkSyncFailed: (error) => `Model settings could not be synced: ${error}. Refresh the Model Store to retry.`,
           linkKeyLabel: 'PINVOU',
           linkModelName: (name) => `Local · ${name}`,

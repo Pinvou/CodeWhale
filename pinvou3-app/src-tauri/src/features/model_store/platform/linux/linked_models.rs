@@ -170,7 +170,9 @@ pub(super) fn sync_routes(card_id: Option<&str>) -> Result<Vec<String>, String> 
 }
 
 fn sync_inner(card_id: Option<&str>, repair_context: bool) -> Result<Vec<String>, String> {
-    let mut preview = UserPrefs::load();
+    // Automatic route repair must neither migrate unrelated credentials nor
+    // mistake unreadable settings for an empty/default model list.
+    let mut preview = UserPrefs::load_read_only_model_snapshot().map_err(str::to_owned)?;
     if preview.advanced.saved_models.is_empty() {
         return Ok(Vec::new());
     }
@@ -194,18 +196,23 @@ fn sync_inner(card_id: Option<&str>, repair_context: bool) -> Result<Vec<String>
     if changed.is_empty() {
         return Ok(Vec::new());
     }
-    UserPrefs::update_transaction(|prefs| {
-        // A concurrent enable may have committed a different deployment while
-        // this pass probed or waited for the settings lock. Revalidate its stamp.
-        let routes = self::routes()?;
-        changed = reconcile(&mut prefs.advanced.saved_models, &routes, card_id);
-        if repair_context {
-            changed.extend(context_repair::apply(prefs, &routes, &proofs, card_id));
-        }
-        changed.sort();
-        changed.dedup();
-        Ok(())
-    })?;
+    // The probe ran without settings locks. Strictly re-read under both locks
+    // so a concurrent truncation/removal cannot become a default-file save.
+    UserPrefs::update_readable_model_transaction_with_post_commit(
+        |prefs| {
+            // A concurrent enable may have committed a different deployment while
+            // this pass probed or waited for the settings lock. Revalidate its stamp.
+            let routes = self::routes()?;
+            changed = reconcile(&mut prefs.advanced.saved_models, &routes, card_id);
+            if repair_context {
+                changed.extend(context_repair::apply(prefs, &routes, &proofs, card_id));
+            }
+            changed.sort();
+            changed.dedup();
+            Ok(())
+        },
+        || (),
+    )?;
     Ok(changed)
 }
 
@@ -232,18 +239,23 @@ pub(super) fn current_linked_ids(card_id: &str) -> Vec<String> {
 /// Explicitly restore automatic probing, without resaving a stale editor snapshot
 /// or touching credentials, manual limits on other rows, or model selection.
 pub(super) fn follow_deployment_context(card_id: &str, model_id: &str) -> Result<(), String> {
-    UserPrefs::update_transaction(|prefs| {
-        let row = prefs
-            .advanced
-            .saved_models
-            .iter_mut()
-            .find(|row| row.id == model_id && is_current_link(row, card_id))
-            .ok_or("model store endpoint changed or is unavailable; refresh the card and retry")?;
-        // None is the existing automatic-mode representation. Probe results must
-        // never be persisted here: that would turn a runtime fact into a fixed cap.
-        row.context_window_tokens = None;
-        Ok(())
-    })
+    UserPrefs::update_readable_model_transaction_with_post_commit(
+        |prefs| {
+            let row = prefs
+                .advanced
+                .saved_models
+                .iter_mut()
+                .find(|row| row.id == model_id && is_current_link(row, card_id))
+                .ok_or(
+                    "model store endpoint changed or is unavailable; refresh the card and retry",
+                )?;
+            // None is the existing automatic-mode representation. Probe results must
+            // never be persisted here: that would turn a runtime fact into a fixed cap.
+            row.context_window_tokens = None;
+            Ok(())
+        },
+        || (),
+    )
     .map(|_| ())
 }
 

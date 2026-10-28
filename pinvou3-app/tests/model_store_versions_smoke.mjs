@@ -7,6 +7,7 @@ import react from '@vitejs/plugin-react';
 import puppeteer from 'puppeteer-core';
 import { createServer } from 'vite';
 import { matchesViteModule } from './helpers/vite-fixture-module.mjs';
+import { exerciseLatestLinkedCleanup } from './helpers/model-store-cleanup-smoke.mjs';
 
 const appRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const chrome = process.env.CHROME || [
@@ -57,6 +58,7 @@ try {
   const errors = [];
   page.on('pageerror', (error) => errors.push(error.message));
   await page.goto(`http://127.0.0.1:${vite.httpServer.address().port}/versions.html`);
+  await exerciseLatestLinkedCleanup(page);
   await page.evaluate(async () => {
     // These imports execute in the browser and are served by the Vite fixture.
     /* eslint-disable import-x/no-unresolved, n/no-missing-import */
@@ -229,6 +231,8 @@ try {
       if (command === 'model_store_availability') return { available: true };
       if (command === 'model_store_cards' || command === 'model_store_active_runs') return [];
       if (command === 'model_store_library') return { models: window.uninstallFinished ? [] : [record], corrected: [] };
+      if (command === 'list_models') return { models: [{ id: 'isolated-linked-row', model_store_card_id: record.card_id,
+        base_url: 'http://127.0.0.1:8911/v1' }] };
       if (command === 'model_store_test_store_state') return { enabled: false };
       if (command === 'model_store_take_startup_cleanup') return null;
       if (command === 'model_store_start_lifecycle' && payload.action === 'uninstall') return { run_id: 'isolated-uninstall' };
@@ -291,6 +295,7 @@ try {
         window.versionLibraryLoads += 1;
         return { models: records, corrected: [] };
       }
+      if (command === 'list_models') return { models: [] };
       if (command === 'model_store_test_store_state') return { enabled: false };
       if (command === 'model_store_take_startup_cleanup') return null;
       if (command === 'model_store_check_card_update') return { changed: true, revision: 'new',

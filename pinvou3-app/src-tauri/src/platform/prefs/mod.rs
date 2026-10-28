@@ -1118,16 +1118,62 @@ impl UserPrefs {
     /// must be handled by the normal settings flow before task submission.
     pub(crate) fn load_read_only_model_snapshot() -> Result<Self, &'static str> {
         let _guard = lock_user_prefs();
+        Self::load_read_only_model_snapshot_unlocked()
+    }
+
+    /// Cleanup admission requires an existing settings file. Preserve the same
+    /// model-only projection as remote task preparation, but never interpret a
+    /// removed settings file as a successful empty/default candidate list.
+    pub(crate) fn load_existing_read_only_model_snapshot() -> Result<Self, &'static str> {
+        let _guard = lock_user_prefs();
+        let raw = Self::read_model_settings_unlocked()?.ok_or("model_settings_unavailable")?;
+        let prefs = serde_json::from_str(&raw).map_err(|_| "model_settings_invalid")?;
+        Self::prepare_read_only_model_snapshot(prefs)
+    }
+
+    /// The caller owns `USER_PREFS_LOCK`; read bytes only once, so validation
+    /// and use cannot select different settings snapshots.
+    fn read_model_settings_unlocked() -> Result<Option<String>, &'static str> {
         let path = super::paths::settings_path();
-        let raw = match std::fs::read_to_string(&path) {
-            Ok(raw) => Some(raw),
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
-            Err(_) => return Err("model_settings_unavailable"),
-        };
-        let mut prefs: Self = match raw {
+        match std::fs::read_to_string(&path) {
+            Ok(raw) => Ok(Some(raw)),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+            Err(_) => Err("model_settings_unavailable"),
+        }
+    }
+
+    /// Model-only projection used by remote task preparation. Preserve its
+    /// original in-memory model normalization and first-run defaults; it does
+    /// not perform whole-preferences legacy migrations or write anything.
+    fn load_read_only_model_snapshot_unlocked() -> Result<Self, &'static str> {
+        let prefs = match Self::read_model_settings_unlocked()? {
             Some(raw) => serde_json::from_str(&raw).map_err(|_| "model_settings_invalid")?,
             None => Self::default(),
         };
+        Self::prepare_read_only_model_snapshot(prefs)
+    }
+
+    /// A whole-preferences write must retain the same legacy interpretation as
+    /// an ordinary settings transaction, without its fallback or credential I/O.
+    /// Missing settings are rejected here instead of recreating a removed file.
+    fn load_readable_model_transaction_snapshot_unlocked() -> Result<Self, &'static str> {
+        let raw = Self::read_model_settings_unlocked()?.ok_or("model_settings_unavailable")?;
+        let system_locale = crate::platform::os::current_system_locale();
+        let mut prefs = Self::parse_existing_settings(&raw, system_locale.as_deref())
+            .map_err(|_| "model_settings_invalid")?
+            .prefs;
+        if prefs.has_unmigrated_credentials() {
+            return Err("model_credential_migration_required");
+        }
+        // Keep the ordinary transaction's migration order: the one-time local
+        // thinking predicate sees original metadata before model normalization.
+        prefs.migrate_legacy_local_thinking_default();
+        let mut prefs = Self::prepare_read_only_model_snapshot(prefs)?;
+        prefs.enforce_memory_locale_policy();
+        Ok(prefs)
+    }
+
+    fn prepare_read_only_model_snapshot(mut prefs: Self) -> Result<Self, &'static str> {
         if prefs.has_unmigrated_credentials() {
             return Err("model_credential_migration_required");
         }
@@ -1176,27 +1222,11 @@ impl UserPrefs {
         }
     }
 
-    fn parse_settings_with_state(raw: Option<&str>, system_locale: Option<&str>) -> ParsedSettings {
-        let Some(raw) = raw else {
-            return ParsedSettings {
-                prefs: Self::defaults_for_system_locale(system_locale),
-                allow_normalization_persist: false,
-                color_scheme_derived: false,
-            };
-        };
-        let value: serde_json::Value = match serde_json::from_str(raw) {
-            Ok(value) => value,
-            Err(error) => {
-                eprintln!(
-                    "[pinvou3-app] settings.json parse failed ({error}), using system-language defaults"
-                );
-                return ParsedSettings {
-                    prefs: Self::defaults_for_system_locale(system_locale),
-                    allow_normalization_persist: false,
-                    color_scheme_derived: false,
-                };
-            }
-        };
+    fn parse_existing_settings(
+        raw: &str,
+        system_locale: Option<&str>,
+    ) -> Result<ParsedSettings, serde_json::Error> {
+        let value: serde_json::Value = serde_json::from_str(raw)?;
         let has_language = value
             .as_object()
             .is_some_and(|settings| settings.contains_key("language"));
@@ -1205,24 +1235,12 @@ impl UserPrefs {
         // lack the key we cannot tell "the user explicitly picked theme" from
         // "never touched (default genesis, dark)", so derive from the legacy
         // effective appearance to keep the upgrade invisible; only a true
-        // fresh install (no settings.json, handled by the default branch
-        // above) stays on System and follows the OS.
+        // fresh install (no settings.json, handled by the caller's default
+        // branch) stays on System and follows the OS.
         let has_color_scheme = value
             .as_object()
             .is_some_and(|settings| settings.contains_key("color_scheme"));
-        let mut prefs: Self = match serde_json::from_value(value) {
-            Ok(prefs) => prefs,
-            Err(error) => {
-                eprintln!(
-                    "[pinvou3-app] settings.json parse failed ({error}), using system-language defaults"
-                );
-                return ParsedSettings {
-                    prefs: Self::defaults_for_system_locale(system_locale),
-                    allow_normalization_persist: false,
-                    color_scheme_derived: false,
-                };
-            }
-        };
+        let mut prefs: Self = serde_json::from_value(value)?;
         if !has_language {
             prefs.language = Language::from_system_locale(system_locale);
         }
@@ -1234,10 +1252,26 @@ impl UserPrefs {
             };
             color_scheme_derived = true;
         }
-        ParsedSettings {
+        Ok(ParsedSettings {
             prefs,
             allow_normalization_persist: true,
             color_scheme_derived,
+        })
+    }
+
+    fn parse_settings_with_state(raw: Option<&str>, system_locale: Option<&str>) -> ParsedSettings {
+        if let Some(raw) = raw {
+            match Self::parse_existing_settings(raw, system_locale) {
+                Ok(parsed) => return parsed,
+                Err(error) => eprintln!(
+                    "[pinvou3-app] settings.json parse failed ({error}), using system-language defaults"
+                ),
+            }
+        }
+        ParsedSettings {
+            prefs: Self::defaults_for_system_locale(system_locale),
+            allow_normalization_persist: false,
+            color_scheme_derived: false,
         }
     }
 
@@ -1491,6 +1525,31 @@ impl UserPrefs {
         post_commit();
         // 返回再次从磁盘解析的规范化结果，保证桥接层内存状态与实际持久化内容一致。
         Ok(Self::load_unlocked_with_migration(false).0)
+    }
+
+    /// Conditional model cleanup must never replace missing, unreadable or
+    /// invalid user settings with defaults, or migrate credentials as a side
+    /// effect. Keep both transaction locks through the disk commit and deferred
+    /// credential cleanup, then return the normalized persisted snapshot.
+    pub(crate) fn update_readable_model_transaction_with_post_commit<F, C>(
+        mutate: F,
+        post_commit: C,
+    ) -> Result<Self, String>
+    where
+        F: FnOnce(&mut Self) -> Result<(), String>,
+        C: FnOnce(),
+    {
+        let _guard = lock_user_prefs();
+        let _file_lock = lock_settings_file()
+            .map_err(|error| format!("acquire settings lock failed: {error}"))?;
+        let mut prefs =
+            Self::load_readable_model_transaction_snapshot_unlocked().map_err(str::to_owned)?;
+        mutate(&mut prefs)?;
+        prefs
+            .save_unlocked()
+            .map_err(|error| format!("save settings failed: {error:#}"))?;
+        post_commit();
+        Self::load_readable_model_transaction_snapshot_unlocked().map_err(str::to_owned)
     }
 
     /// Test-only probe for the deferred-delete barrier test: reports whether

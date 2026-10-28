@@ -799,6 +799,7 @@ impl ModelManager {
         })).collect::<Vec<_>>()))
     }
 
+    /// The service retains the public card's operation lock for this entire run.
     pub fn stage_version(
         &self,
         card_id: &str,
@@ -944,6 +945,12 @@ impl ModelManager {
         if files.len() != 1 {
             return Err(fail("暂不支持多文件隔离升级"));
         }
+        let mut download_lease = version_store::acquire_download_lease(
+            card_id,
+            || control.cancelled(),
+            || on_progress("等待上次下载脚本退出，完整存储预留保持不变，可取消…"),
+        )
+        .map_err(fail)?;
         let reservation = version_store::wait_quota_reservation_lock(
             || control.cancelled(),
             || on_progress("等待其他新版下载登记存储配额，可取消…"),
@@ -961,6 +968,7 @@ impl ModelManager {
         // Exclude only this candidate's old reservation, retaining its actual
         // files. Refuse unreadable retained trees before creating a new one.
         let retained = if self.settings.storage_quota_gb.is_some() {
+            version_store::recover_interrupted_for_quota().map_err(fail)?;
             version_store::retained_bytes_without_reservation(card_id, revision).map_err(fail)?
         } else {
             0
@@ -1120,11 +1128,10 @@ impl ModelManager {
             .map_err(|e| fail(e.to_string()))?;
             self.run_card_script_with_retry(
                 &source,
-                "download_model",
                 &env,
                 on_progress,
                 control.clone(),
-                false,
+                &mut download_lease,
             )?;
             on_progress("独立校验新版权重 SHA-256；通过后才允许切换。");
             for (name, hash) in &files {
@@ -1177,6 +1184,15 @@ impl ModelManager {
             version.error = None;
             Ok(())
         })();
+        // Retain the fresh parent OFD across DB finalization. The barrier
+        // covers local download descendants retaining that fd; external daemon
+        // work still depends on the card script's synchronous completion contract.
+        download_lease.confirm_stopped().map_err(fail)?;
+        let _quota = version_store::wait_quota_reservation_lock(
+            || control.cancelled(),
+            || on_progress("等待提交新版下载状态，可取消…"),
+        )
+        .map_err(fail)?;
         if let Err(error) = result {
             version.state = "failed".into();
             version.planned_bytes = 0;
