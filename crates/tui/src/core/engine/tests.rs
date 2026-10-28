@@ -23447,6 +23447,7 @@ fn tool_state(initial: serde_json::Value, buffer: &str) -> ToolUseState {
         thought_signature: None,
         input_buffer: buffer.into(),
         input_parse_error: None,
+        input_parse_proof: Default::default(),
     }
 }
 
@@ -29923,6 +29924,7 @@ async fn hydration_receipt_audit_payload_carries_the_executed_marker() {
         thought_signature: None,
         input_buffer: String::new(),
         input_parse_error: None,
+        input_parse_proof: Default::default(),
     }];
     let mut active = HashSet::new();
     let mut budget = crate::tools::tool_call_budget::ToolCallBudget::new(surface.max_tool_calls);
@@ -30242,3 +30244,6 @@ fn composer_bang_ask_rule_site_forwards_session_workspace_roots() {
         "the engine.rs composer-bang call site must forward the session's workspace_roots"
     );
 }
+
+#[path = "partial_input_differential_tests.rs"]
+mod partial_input_differential_tests;
