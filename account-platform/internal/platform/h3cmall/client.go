@@ -205,7 +205,7 @@ func normalizeOrderResponse(order *Order) error {
 	order.SKU = strings.TrimSpace(order.SKU)
 	order.Status = strings.ToUpper(strings.TrimSpace(order.Status))
 	if strings.TrimSpace(order.Mobile) != "" {
-		mobile, err := canonicalMainlandMobile(order.Mobile)
+		mobile, err := CanonicalMainlandMobile(order.Mobile)
 		if err != nil {
 			return err
 		}
@@ -233,7 +233,8 @@ func mallRequestMobile(value string) (string, error) {
 	return value, nil
 }
 
-func canonicalMainlandMobile(value string) (string, error) {
+// CanonicalMainlandMobile returns the canonical identity for the mobile formats accepted by the Mall SDK.
+func CanonicalMainlandMobile(value string) (string, error) {
 	mobile, err := mallRequestMobile(value)
 	if err != nil {
 		return "", err

@@ -50,7 +50,8 @@ func (p *Provider) Create(ctx context.Context, order payment.Order, _ string) (p
 	}
 	if err := p.client.CreateOrder(ctx, order.MerchantOrderNo, order.MerchantCustomerKey, order.Mobile, order.ExternalSKU); err != nil {
 		existing, queryErr := p.client.QueryOrder(ctx, order.MerchantOrderNo)
-		if queryErr != nil || existing.MerchantCustomerKey != order.MerchantCustomerKey || existing.Mobile != order.Mobile || existing.SKU != order.ExternalSKU {
+		mobile, mobileErr := h3cmall.CanonicalMainlandMobile(order.Mobile)
+		if queryErr != nil || mobileErr != nil || existing.MerchantCustomerKey != order.MerchantCustomerKey || existing.Mobile != mobile || existing.SKU != order.ExternalSKU {
 			return payment.ProviderOrder{}, err
 		}
 		return p.mapOrder(ctx, existing)

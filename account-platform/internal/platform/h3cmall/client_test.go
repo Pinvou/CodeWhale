@@ -104,12 +104,18 @@ func TestMallRequestMobileConvertsE164ToMallFormat(t *testing.T) {
 }
 
 func TestCanonicalMainlandMobileUsesE164(t *testing.T) {
-	actual, err := canonicalMainlandMobile("13800138000")
-	if err != nil || actual != "+8613800138000" {
-		t.Fatalf("canonicalMainlandMobile() = %q, %v", actual, err)
+	for _, input := range []string{"13800138000", "+8613800138000", " \t13800138000\n", " \t+8613800138000\n"} {
+		actual, err := CanonicalMainlandMobile(input)
+		if err != nil || actual != "+8613800138000" {
+			t.Fatalf("CanonicalMainlandMobile(%q) = %q, %v", input, actual, err)
+		}
+	}
+	for _, input := range []string{"+85213800138000", "8613800138000", "1380013800", "1380013800x", "+86 13800138000", ""} {
+		if _, err := CanonicalMainlandMobile(input); !errors.Is(err, ErrRejected) {
+			t.Fatalf("CanonicalMainlandMobile(%q) error = %v; want ErrRejected", input, err)
+		}
 	}
 }
-
 func TestMallAuthorityTransportRequiresCompleteBoundedJSON(t *testing.T) {
 	for _, response := range []string{
 		`{"code":200,"success":true,"content":{"tokenValue":"controlled"}} {}`,
