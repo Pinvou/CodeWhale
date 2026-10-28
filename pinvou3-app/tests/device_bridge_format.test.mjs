@@ -745,6 +745,34 @@ assert.doesNotMatch(
     'remove must refetch the external models registry',
   );
 
+  // 回执保护（round-29 review P2）：删除已决算成功后回读注册表失败，不得把
+  // 整个调用打成拒绝——那会吞掉 outcome/warnings，让调用方按"移除失败"呈现
+  // 并跳过关联配置清理。失败必须以 refresh_error 附加在回执上返回。
+  {
+    const env2 = loadDeviceFeature();
+    const guardedOutcome = { removed_registry: true, removed_weights: true, ollama_deleted: false, warnings: ['weights busy'] };
+    env2.setRespond(async command => {
+      if (command === 'device_remove_external_model') return guardedOutcome;
+      if (command === 'get_external_models') throw new Error('registry read down');
+      return null;
+    });
+    const degraded = await env2.api.removeExternalModel({ id: 'm-9', deleteWeights: false, confirmName: 'qwen3-30b' });
+    assert.equal(degraded.removed_registry, true, 'outcome must survive the refresh failure');
+    assert.deepEqual(degraded.warnings, ['weights busy'], 'backend warnings must survive the refresh failure');
+    assert.equal(degraded.refresh_error, 'registry read down');
+    // 登记同类：record（调用方要取 id 继续收尾）同样不许被回读失败吞掉。
+    const env3 = loadDeviceFeature();
+    const guardedRecord = { id: 'm-8', name: 'qwen3-30b' };
+    env3.setRespond(async command => {
+      if (command === 'device_register_external_model') return guardedRecord;
+      if (command === 'get_external_models') throw new Error('registry read down');
+      return null;
+    });
+    const degradedRecord = await env3.api.registerExternalModel({ name: 'qwen3-30b', kind: 'ollama' });
+    assert.equal(degradedRecord.id, 'm-8');
+    assert.equal(degradedRecord.refresh_error, 'registry read down');
+  }
+
   // 故障排查提示词：kind/question 透传后端组装，返回拼好的文本；缺省问题置 null。
   env.setRespond(async (command, args) => command === 'device_doctor_prompt' ? `提示词:${args.kind}` : null);
   const prompt = await env.api.buildDoctorPrompt('custom', '  风扇为什么一直响  ');

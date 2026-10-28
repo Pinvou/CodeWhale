@@ -260,7 +260,11 @@ function injectSource() {
           if (window.__DEVICE_MGR_TEST__.failChatSend) return Promise.reject(new Error('send down (smoke)'));
           return Promise.resolve(null);
         // 内嵌运行状态页每秒轮询；给一份最小快照，避免错误轮刷屏（内存 chip 也随 bs.monitor._fmt 生效）。
-        case 'get_monitor_snapshot': return Promise.resolve({
+        case 'get_monitor_snapshot':
+          // 监控通道失败面（round-29 review P2）：已有成功快照后轮询失败，
+          // 内嵌页必须出陈旧标记而不是把旧值当实时值。
+          if (window.__DEVICE_MGR_TEST__.failMonitor) return Promise.reject(new Error('monitor down (smoke)'));
+          return Promise.resolve({
           cpu: { name: 'NVIDIA GB10', total_usage_pct: 12 },
           ram: { total_kib: ${MONITOR_RAM_TOTAL_KIB}, used_kib: ${MONITOR_RAM_USED_KIB}, swap_total_kib: 0, swap_used_kib: 0 },
           gpu: null, vllm: null, self_perf: null,
@@ -308,6 +312,8 @@ function injectSource() {
       // 场景开关：读取失败横幅/重试与发送失败路径此前零覆盖（第四轮评审）。
       nullGpuCompute: false,
       failServices: false,
+      // 监控通道失败面（round-29 review P2）：内嵌页陈旧标记用。
+      failMonitor: false,
       // 接入主动作的失败面（round-21 review P3）：此前只有读取面有 fail 开关。
       failSaveModel: false,
       setRemoveOutcome: function (next) { removeOutcome = next; },
@@ -874,6 +880,19 @@ async function clickTestId(page, testId) {
   rec('⑧ 快照失败出横幅、重试按钮真实重发命令、放开后恢复面板',
     bannerText.includes('设备状态读取失败') && retryVisible && retryFired,
     JSON.stringify({ bannerText, retryVisible, retryFired }));
+
+  // ⑧-b 内嵌监控通道失败（round-29 review P2）：设备通道正常、监控轮询失败时，
+  // 已有成功快照的旧指标继续展示但必须带陈旧标记——否则旧 CPU/内存值看起来
+  // 仍像实时值。无快照的失败臂由各卡 loading 文案覆盖，这里钉"有数据"半边；
+  // 放开后 hadMonitorError 强制发布恢复，标记消失。
+  await page.evaluate(() => { window.__DEVICE_MGR_TEST__.failMonitor = true; });
+  await page.waitForFunction(() => !!document.querySelector('[data-testid="monitor-embedded-stale"]'), { timeout: 8000 });
+  const staleBadge = await page.evaluate(() => document.querySelector('[data-testid="monitor-embedded-stale"]')?.innerText || '');
+  await page.evaluate(() => { window.__DEVICE_MGR_TEST__.failMonitor = false; });
+  await page.waitForFunction(() => !document.querySelector('[data-testid="monitor-embedded-stale"]'), { timeout: 8000 });
+  rec('⑧-b 内嵌监控轮询失败出陈旧标记、恢复后消失',
+    staleBadge.includes('读取失败'),
+    JSON.stringify({ staleBadge }));
 
   // ⑨ 自定义提问：计数/禁用态、发送失败保留输入（「问题已保留」的承诺此前
   // 无覆盖）、成功直达会话并携带问题原文。

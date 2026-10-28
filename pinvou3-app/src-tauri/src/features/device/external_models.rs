@@ -947,7 +947,20 @@ pub async fn remove_external_model(
                             // 同类，陈旧 NFS/FUSE 挂载上可能阻塞数秒，不能占住
                             // async worker（第七轮评审 P2；原先 exists() 留在
                             // async 侧，与本文件"文件 IO 全入池"的纪律相悖）。
-                            if !Path::new(&weights_for_task).exists() {
+                            // 预检必须区分"确认不存在"与"读不了"：Path::exists()
+                            // 把权限/IO 错误折叠成 false，仍存在的目录会被按
+                            // "已删除"收敛并删掉登记，丢失重试入口（round-29
+                            // review P2；与 read_registry 的同族修法同口径）。
+                            // 仅确认 NotFound 走幂等收尾，其余错误按失败返回、
+                            // 登记保留。
+                            if !weights_dir_presence(Path::new(&weights_for_task)).map_err(
+                                |error| {
+                                    format!(
+                                        "权重目录存在性检查失败（{}）：{error}；为防误删已拒绝并保留登记",
+                                        truncate_path_echo(&weights_for_task)
+                                    )
+                                },
+                            )? {
                                 return Ok(None);
                             }
                             // 守卫（含 canonicalize）与整目录删除同一池执行：
@@ -1757,6 +1770,19 @@ async fn weights_dir_present(path: &str) -> bool {
     tokio::task::spawn_blocking(move || Path::new(&path).is_dir())
         .await
         .unwrap_or(false)
+}
+
+/// 权重目录存在性三分类：`Ok(true)`=存在可继续删除；`Ok(false)`=确认
+/// NotFound（幂等收尾臂）；`Err`=读不了（权限/IO/挂载异常）。移除臂的
+/// 存在性预检必须走本函数而不是 `Path::exists()`：后者把 `Err` 折叠成
+/// false，仍存在的目录会被按"已删除"收敛并删掉登记，丢失重试入口
+/// （round-29 review P2；与 `read_registry` 的同族修法同口径）。
+fn weights_dir_presence(path: &Path) -> Result<bool, std::io::Error> {
+    match std::fs::metadata(path) {
+        Ok(_) => Ok(true),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
+        Err(error) => Err(error),
+    }
 }
 
 /// `http://host:port/v1` → `http://host:port/v1/models`（已带 /models 则原样）。
@@ -2725,6 +2751,54 @@ mod tests {
             .expect("lookup ok")
             .expect("empty content id tolerates the filename contract");
         assert_eq!(record.name, "legacy-empty-id");
+    }
+
+    #[test]
+    fn weights_dir_presence_keeps_io_faults_distinct_from_not_found() {
+        // 真 NotFound：幂等收尾臂（上次删除成功、登记残留的对照面）。
+        let dir = TempDir::new("presence-missing");
+        assert!(matches!(
+            weights_dir_presence(&dir.path().join("gone")),
+            Ok(false)
+        ));
+        // 存在：继续删除臂。
+        assert!(matches!(weights_dir_presence(dir.path()), Ok(true)));
+
+        // 权限故障：父目录失去搜索权限时 stat 报 PermissionDenied——旧的
+        // Path::exists() 把它折叠成 false（仍存在的目录按"已删除"收敛并删
+        // 掉登记），新分类必须原样上抛让移除失败、登记保留（round-29
+        // review P2）。
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let parent = TempDir::new("presence-denied");
+            let child = parent.path().join("weights");
+            std::fs::create_dir_all(&child).expect("create weights dir");
+            std::fs::set_permissions(parent.path(), std::fs::Permissions::from_mode(0o000))
+                .expect("chmod parent");
+            let classification = weights_dir_presence(&child);
+            let folded_exists = Path::new(&child).exists();
+            std::fs::set_permissions(parent.path(), std::fs::Permissions::from_mode(0o755))
+                .expect("restore parent permissions");
+            if folded_exists {
+                // root 越过权限位（容器内以 root 跑测试时 000 模式仍可 stat），
+                // 该环境构造不出 PermissionDenied：退而断言分类至少没有折叠
+                // 成 NotFound。
+                assert!(
+                    matches!(classification, Ok(true)),
+                    "root bypasses mode bits; classification must not fold to NotFound"
+                );
+            } else {
+                match classification {
+                    Err(error) => {
+                        assert_eq!(error.kind(), std::io::ErrorKind::PermissionDenied);
+                    }
+                    Ok(exists) => {
+                        panic!("permission fault must not classify as exists={exists}")
+                    }
+                }
+            }
+        }
     }
 
     #[tokio::test]

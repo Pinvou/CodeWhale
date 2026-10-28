@@ -521,14 +521,28 @@
   }
 
   // 注册/移除成功后回读注册表，保证 state.externalModels 与磁盘一致。
+  // 回读失败不能把整个调用打成拒绝：操作 invoke 已决算成功，整体 reject 会
+  // 吞掉 record/outcome（含 warnings），调用方只能按"操作失败"呈现并跳过
+  // 关联配置清理（round-29 review P2）。失败以 refresh_error 附加在回执上由
+  // 调用方分开报告；成功路径保持原对象身份（既有契约测试钉 ===）。
   async function registerExternalModel(payload) {
     var record = await invoke("device_register_external_model", payload || {});
-    await fetchExternalModels();
+    try {
+      await fetchExternalModels();
+    } catch (e) {
+      var registerMessage = e && e.message ? e.message : String(e || "external models refresh failed");
+      return Object.assign({}, record || null, { refresh_error: registerMessage });
+    }
     return record || null;
   }
   async function removeExternalModel(payload) {
     var outcome = await invoke("device_remove_external_model", payload || {});
-    await fetchExternalModels();
+    try {
+      await fetchExternalModels();
+    } catch (e) {
+      var removeMessage = e && e.message ? e.message : String(e || "external models refresh failed");
+      return Object.assign({}, outcome || null, { refresh_error: removeMessage });
+    }
     return outcome || null;
   }
 

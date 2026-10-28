@@ -830,6 +830,14 @@ const DeviceManagerView = ({ theme, t, bs, onOpenChat, onOpenModelStore }) => {
         // Cleanup failure must be surfaced, not drowned by a plain success toast.
         notices.push(copy.linkRowStale(row.name, cleanupErrorText || copy.linkReasonUnknown));
       }
+      if (outcome?.refresh_error) {
+        // The removal itself succeeded; only the registry read-back failed.
+        // Report it as its own line (round-29 review P2) and keep the failure
+        // in the persistent error slot so the stale listing stays marked until
+        // the next successful refresh.
+        notices.push(copy.refreshFailed(outcome.refresh_error));
+        setExternalFetchError(outcome.refresh_error);
+      }
       showToast(notices.join('\n'));
     } catch (error) {
       // Backend guard failures carry a human-readable message already.

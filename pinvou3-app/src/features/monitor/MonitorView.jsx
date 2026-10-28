@@ -435,6 +435,21 @@ const MONITOR_CLOCK_LOCALE = { zh: 'zh-CN', en: 'en-US', ja: 'ja-JP' };
               </header>
               )}
 
+              {/* embedded 页首被隐藏后,监控通道的读取失败不能再无处安放:
+                  已有一份成功快照时旧指标继续展示,但必须带陈旧标记,否则
+                  MegaCube 上"监控失败、设备通道正常"时旧值看起来仍像实时值
+                  (round-29 review P2)。无快照的失败臂由各卡的 loading 文案
+                  (readFailed)覆盖,这里只补"有数据"的半边。恢复后下一拍
+                  (hadMonitorError 强制发布)标记消失。 */}
+              {embedded && monitorError && fmt && (
+                <div
+                  data-testid="monitor-embedded-stale"
+                  className="flex w-fit items-center gap-2 rounded-full bg-rose-50 px-3 py-1.5 dark:bg-rose-500/10"
+                >
+                  <span className="text-[12px] font-medium text-rose-700 dark:text-rose-300">{t.uiMonitor.staleHint}</span>
+                </div>
+              )}
+
               <div className="grid grid-cols-1 md:grid-cols-12 gap-6">
                 <MonitorCard className="md:col-span-12 lg:col-span-4">
                   <MonitorSectionHeader icon={Database} title={t.ram} value={`${t.totalMemory} ${ramTotal}`} />
