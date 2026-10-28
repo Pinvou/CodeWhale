@@ -4506,6 +4506,14 @@ fn enforce_readonly_argv_operands(
             )));
         }
 
+        // The shell pathname-expands the whole word, not the part after the
+        // `=`: `--exclude-from=zz*` matches a planted `--exclude-from=zzq`
+        // while a walk of `zz*` alone matches nothing. Judge the full
+        // spelling too whenever an option carries a wildcard anywhere; the
+        // union over-approximates every shell's expansion.
+        if token.starts_with('-') && token.as_str() != value && token.contains('*') {
+            enforce_readonly_glob_operand(token, roots, effective_cwd, glob_budget)?;
+        }
         if value.contains('*') {
             enforce_readonly_glob_operand(value, roots, effective_cwd, glob_budget)?;
             continue;
@@ -4573,6 +4581,30 @@ fn enforce_readonly_glob_operand(
         .split('/')
         .filter(|component| !component.is_empty() && *component != ".")
         .collect();
+    // zsh expands a `**/` (or `***/`) component recursively to every depth
+    // by default, while this walker — like bash without `globstar`, sh, and
+    // dash — consumes one directory level per component. A recursive
+    // expansion would produce matches the walker never judged, so the
+    // spelling is refused outright wherever more pattern follows it; a
+    // trailing `**` is a plain `*` on every supported shell and stays
+    // admitted.
+    if components
+        .iter()
+        .take(components.len().saturating_sub(1))
+        .any(|component| component.len() >= 2 && component.chars().all(|ch| ch == '*'))
+    {
+        return Err(ToolError::permission_denied(format!(
+            "[shell.readonly.operand.shape] Read-only shell globs may not recurse (`**/`); refused {value:?}. Name the directory levels explicitly, or use the bounded File search actions."
+        )));
+    }
+    // The walk recurses once per component (every `.*` level also enters the
+    // synthesized `..`), so the component count bounds the stack; real probes
+    // name a handful of levels.
+    if components.len() > MAX_READONLY_GLOB_COMPONENTS {
+        return Err(ToolError::permission_denied(format!(
+            "[shell.readonly.operand.glob_too_broad] Read-only shell glob {value:?} names more than {MAX_READONLY_GLOB_COMPONENTS} path components; name fewer levels or use the bounded File search actions."
+        )));
+    }
     #[cfg_attr(not(unix), allow(unused_mut))]
     let mut walk = ReadonlyGlobWalk {
         roots,
@@ -4585,6 +4617,10 @@ fn enforce_readonly_glob_operand(
     };
     collect_readonly_glob_matches(effective_cwd, &components, &mut walk)
 }
+
+/// Upper bound on `/`-separated components in one glob operand, see
+/// [`enforce_readonly_glob_operand`].
+const MAX_READONLY_GLOB_COMPONENTS: usize = 32;
 
 /// Hard bounds for the glob expansion of one whole command, shared by every
 /// `*` operand in every segment and stage. 4096 matches covers any real
