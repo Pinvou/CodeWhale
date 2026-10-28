@@ -344,6 +344,7 @@ assert.deepEqual(Object.keys(api).sort(), ['available', ...Object.keys(desktopBr
 for (const [domain, methods] of Object.entries(desktopBridgeApi)) {
   assert.deepEqual(Object.keys(api[domain]).sort(), methods.sort(), `${domain} API surface changed`);
 }
+assert.equal(typeof api.desktopRemoteControl.getRemoteProxyLoadStatus, 'function', 'diagnostic must reach the assembled desktop bridge');
 assert.equal(api.sendMessage, undefined, 'flat compatibility facade must not return');
 assert.equal(api.getState, undefined, 'flat state facade must not return');
 

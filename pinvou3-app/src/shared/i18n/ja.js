@@ -2617,6 +2617,12 @@ dictJa.uiSettings.remoteControl = 'デスクトップ遠隔操作';
 dictJa.uiSettingsDetail.desktopRemoteControlEntryDesc = '接続コードを入力して相手の端末から本機に接続し、本機のモデルでタスクを実行できます。いつでも確認して切断できます。';
 dictJa.uiSettingsDetail.desktopRemoteControlBack = '一般に戻る';
 dictJa.remoteArchive = {
+  remote_proxy_unreadable: 'リモート記録を読み取れません。リモート書き込みは無効です。',
+  remote_proxy_oversized: 'リモート記録が対応するサイズまたは件数を超えています。リモート書き込みは無効です。',
+  remote_proxy_malformed: 'リモート記録を現在の形式で読み取れません。破損またはバージョンの非互換が考えられます。リモート書き込みは無効です。',
+  remote_proxy_version_unsupported: 'リモート記録のバージョンに対応していません。リモート書き込みは無効です。',
+  remote_proxy_invalid_records: 'リモート記録の検証に失敗しました。リモート書き込みは無効です。',
+  remote_proxy_archive_unavailable: 'リモートアーカイブを利用できないか、有効な記録と競合しています。リモート書き込みは無効です。',
   byteBudget: 'リモート会話の容量がいっぱいです。「設定 → リモート操作 → リモート会話のアーカイブ」で接続を解除し、未解決のタスクを処理してから、オフライン会話を永久にアーカイブして容量を解放してください。',
   title: 'リモート会話のアーカイブ', active: '有効な記録', archived: 'アーカイブ済み履歴',
   hint: 'オフラインの会話をアーカイブすると有効な記録の容量を解放できます。履歴とリプレイ防止記録は保持されますが、タスクの実行や再接続はできません。接続中の会話と未確定のタスクは先に終了してください。',
