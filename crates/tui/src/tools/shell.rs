@@ -4238,6 +4238,16 @@ fn enforce_readonly_argv_operands(
                 "[shell.readonly.option.attached_path] Read-only Scout shell options may not carry attached paths; refused {token:?}. Use the bounded File read/search actions for project evidence."
             )));
         }
+        // zsh's default EQUALS option resolves an operand spelled `=cmd` to
+        // that command's absolute path, so `cat =ls | wc -l` reads /bin/ls on
+        // the shell lane while the `=`-split below sees a relative value that
+        // does not exist and skips it. Refuse the spelling outright; a real
+        // file named `=ls` is read through the bounded File actions instead.
+        if token.starts_with('=') {
+            return Err(ToolError::permission_denied(format!(
+                "[shell.readonly.operand.shape] Read-only Scout shell operands may not start with `=` (shell command-path expansion); refused {token:?}. Use the bounded File read/search actions for project evidence."
+            )));
+        }
         let value = token
             .split_once('=')
             .map_or(token.as_str(), |(_, value)| value)

@@ -1196,6 +1196,20 @@ fn readonly_operands_are_workspace_bounded_and_symlink_aware() {
     .to_string();
     assert!(error.contains("operand.outside_workspace"), "{error}");
 
+    // zsh's EQUALS expansion resolves `=cmd` operands to the command's
+    // absolute path on the shell lane; the spelling is refused outright
+    // instead of being skipped as a nonexistent relative path.
+    for command in [
+        "cat =ls | wc -l",
+        "pwd; cat =ls",
+        "wc -c =sh",
+    ] {
+        let error = enforce_readonly_workspace_operands(command, &roots, workspace.path())
+            .expect_err("an `=cmd` operand must be refused")
+            .to_string();
+        assert!(error.contains("operand.shape"), "{command}: {error}");
+    }
+
     for command in [
         "cat ../secret.txt",
         "cat ~/.ssh/id_rsa",
