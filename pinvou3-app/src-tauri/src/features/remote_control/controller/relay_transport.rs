@@ -4,6 +4,7 @@
 //! Pairing, liveness, resume and task semantics remain in their dedicated modules.
 
 use std::fmt;
+use std::future::Future;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
@@ -34,6 +35,7 @@ const CONTROL_RESERVED_BYTES: usize = 128 * 1024;
 // independent 30s authenticated-evidence budget. Pongs never extend it.
 const HEARTBEAT_INTERVAL: Duration = Duration::from_secs(5);
 const WRITE_TIMEOUT: Duration = Duration::from_secs(10);
+const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 const CLOSE_TIMEOUT: Duration = Duration::from_millis(250);
 const MAX_CONTROLLER_INBOUND_TEXT_BYTES: usize = if MAX_ENCRYPTED_WIRE_BYTES < MAX_RELAY_FRAME_BYTES
 {
@@ -108,6 +110,7 @@ pub(crate) struct ControllerTransportConfig {
     /// `bind_generation` 绑定结果对两侧同时生效。
     pub(crate) remote_control_generation: Arc<RwLock<String>>,
     pub(crate) clock: Arc<dyn TransportClock>,
+    connect_timeout: Duration,
 }
 
 impl ControllerTransportConfig {
@@ -123,6 +126,7 @@ impl ControllerTransportConfig {
             role,
             remote_control_generation: Arc::new(RwLock::new(remote_control_generation.into())),
             clock: Arc::new(MonotonicTransportClock::default()),
+            connect_timeout: CONNECT_TIMEOUT,
         }
     }
 
@@ -130,6 +134,40 @@ impl ControllerTransportConfig {
     pub(crate) fn generation(&self) -> String {
         self.remote_control_generation.read().clone()
     }
+
+    #[cfg(test)]
+    pub(crate) fn with_connect_timeout(mut self, timeout: Duration) -> Self {
+        self.connect_timeout = timeout;
+        self
+    }
+}
+
+/// A local queue identity, never accepted from the wire. Each new transport
+/// allocates its own epoch Arc; socket resume retains the same sender and Arc.
+/// Holding the original Arc keeps its allocation alive, so a replacement cannot
+/// reuse its identity. Sharing an epoch Arc across transports breaks this fence.
+#[derive(Clone)]
+pub(crate) struct ControllerTransportOwner(Arc<AtomicU64>);
+
+impl PartialEq for ControllerTransportOwner {
+    fn eq(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.0, &other.0)
+    }
+}
+
+impl Eq for ControllerTransportOwner {}
+
+impl fmt::Debug for ControllerTransportOwner {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("ControllerTransportOwner([REDACTED])")
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct ControllerDisconnectContext {
+    pub(crate) owner: ControllerTransportOwner,
+    pub(crate) generation: String,
+    pub(crate) lease: Option<LeaseContext>,
 }
 
 #[derive(Clone, Eq, PartialEq)]
@@ -141,6 +179,7 @@ pub(crate) enum ControllerTransportEvent {
     Disconnected {
         remote_control_generation: String,
         lease_epoch: Option<String>,
+        context: ControllerDisconnectContext,
         error: String,
     },
     Frame {
@@ -170,6 +209,7 @@ impl fmt::Debug for ControllerTransportEvent {
                 remote_control_generation,
                 lease_epoch,
                 error,
+                ..
             } => f
                 .debug_struct("Disconnected")
                 .field("remote_control_generation", remote_control_generation)
@@ -343,6 +383,27 @@ pub(crate) struct ControllerTransportSender {
 }
 
 impl ControllerTransportSender {
+    pub(crate) fn owner(&self) -> ControllerTransportOwner {
+        ControllerTransportOwner(self.transport_epoch.clone())
+    }
+
+    /// Capture before suspension: a disconnected active lease becomes only a
+    /// saved resume binding. None is a pre-authentication identity, not a lease
+    /// wildcard, and must never match an authenticated keeper.
+    pub(crate) fn disconnect_context(&self) -> ControllerDisconnectContext {
+        let generation = self.generation();
+        let active = self.lease.read();
+        let saved = self.resume_lease.read();
+        ControllerDisconnectContext {
+            owner: self.owner(),
+            generation,
+            lease: active
+                .as_ref()
+                .or(saved.as_ref())
+                .map(|lease| lease.context.clone()),
+        }
+    }
+
     /// E2E-02 受控绑定：A 端在验签 transcript 之后才有权把 transport 的
     /// generation 固定为 B 的 generation。只允许一次，且必须在安装租约之前；
     /// 空值、非法 id、重复绑定或已安装租约都失败关闭，绝不覆盖既有绑定。
@@ -770,6 +831,11 @@ impl ControllerTransportReceiver {
             .map(|frame| frame.text().to_owned())
     }
 
+    #[cfg(test)]
+    pub(super) fn pending_control_for_test(&self) -> usize {
+        self.control_rx.len()
+    }
+
     async fn recv_prioritized(&mut self) -> Option<QueuedFrame> {
         tokio::select! {
             biased;
@@ -869,6 +935,37 @@ async fn run_transport(
     run_transport_with_heartbeat(config, sink, sender, receiver, HEARTBEAT_INTERVAL).await;
 }
 
+enum ConnectAttempt<T> {
+    Completed(T),
+    TimedOut,
+    Cancelled,
+}
+
+/// One absolute limit covers request construction, DNS, TCP, TLS and upgrade.
+/// Async cancellation is cooperative; a synchronous poll cannot be preempted.
+async fn await_connect_attempt_until<F: Future>(
+    connection: F,
+    shutdown: &CancellationToken,
+    deadline: tokio::time::Instant,
+) -> ConnectAttempt<F::Output> {
+    tokio::pin!(connection);
+    let result = tokio::select! {
+        biased;
+        _ = shutdown.cancelled() => return ConnectAttempt::Cancelled,
+        _ = tokio::time::sleep_until(deadline) => return ConnectAttempt::TimedOut,
+        result = &mut connection => result,
+    };
+    // A single poll can cross the deadline or trigger Stop before returning
+    // Ready. Reject and drop even a successful socket in either case.
+    if shutdown.is_cancelled() {
+        ConnectAttempt::Cancelled
+    } else if tokio::time::Instant::now() >= deadline {
+        ConnectAttempt::TimedOut
+    } else {
+        ConnectAttempt::Completed(result)
+    }
+}
+
 async fn run_transport_with_heartbeat(
     config: ControllerTransportConfig,
     sink: Arc<dyn ControllerEventSink>,
@@ -878,6 +975,7 @@ async fn run_transport_with_heartbeat(
 ) {
     let mut liveness = ConnectedTransportLiveness::new(heartbeat_period);
     loop {
+        let deadline = tokio::time::Instant::now() + config.connect_timeout;
         let connection = async {
             let request = controller_websocket_request(&config.relay_url)?;
             connect_async_with_config(
@@ -887,12 +985,20 @@ async fn run_transport_with_heartbeat(
             )
             .await
         };
-        tokio::pin!(connection);
-        let connected = tokio::select! {
-            biased;
-            _ = sender.shutdown.cancelled() => return,
-            result = &mut connection => result,
-        };
+        let connected =
+            match await_connect_attempt_until(connection, &sender.shutdown, deadline).await {
+                ConnectAttempt::Cancelled => return,
+                ConnectAttempt::TimedOut => {
+                    // No upgraded socket or wire pairing yet. Retain queued frames
+                    // and epoch, and retry inside the caller's unchanged budget.
+                    // Disconnected would instead terminate A's initial handshake.
+                    if !wait_reconnect(&sender.shutdown, &mut liveness.reconnect).await {
+                        return;
+                    }
+                    continue;
+                }
+                ConnectAttempt::Completed(result) => result,
+            };
         let (socket, _) = match connected {
             Ok(value) => value,
             Err(error) => {
@@ -901,6 +1007,7 @@ async fn run_transport_with_heartbeat(
                 sink.emit(ControllerTransportEvent::Disconnected {
                     remote_control_generation: config.generation(),
                     lease_epoch: current_lease_epoch(&sender),
+                    context: sender.disconnect_context(),
                     error: format!("connect Relay: {error}"),
                 });
                 if !wait_reconnect(&sender.shutdown, &mut liveness.reconnect).await {
@@ -1172,6 +1279,7 @@ fn emit_disconnected(
     let event = ControllerTransportEvent::Disconnected {
         remote_control_generation: config.generation(),
         lease_epoch: current_lease_epoch(sender),
+        context: sender.disconnect_context(),
         error,
     };
     sender.suspend_authenticated_lease();
@@ -1257,9 +1365,17 @@ fn dispatch_inbound(
 /// they never manufacture or directly install reader authority.
 #[cfg(test)]
 pub(super) fn disconnect_test_transport(sender: &ControllerTransportSender) {
+    disconnect_test_transport_to(sender, &|_| {});
+}
+
+#[cfg(test)]
+pub(super) fn disconnect_test_transport_to(
+    sender: &ControllerTransportSender,
+    sink: &dyn ControllerEventSink,
+) {
     let config =
         ControllerTransportConfig::new("ws://127.0.0.1:1", sender.role, sender.generation());
-    emit_disconnected(&config, sender, &|_| {}, "test socket closed".into());
+    emit_disconnected(&config, sender, sink, "test socket closed".into());
 }
 
 #[cfg(test)]
@@ -1364,6 +1480,245 @@ mod tests {
         controlled::ControlledDeviceManager, controlling::ControllingDeviceManager,
     };
 
+    #[tokio::test(start_paused = true)]
+    async fn connect_attempt_pending_and_stage_progress_share_one_deadline() {
+        let token = CancellationToken::new();
+        let start = tokio::time::Instant::now();
+        let stages = Arc::new(AtomicU64::new(0));
+        let progress = stages.clone();
+        let connection = async move {
+            for _ in 0..4 {
+                tokio::time::sleep(Duration::from_secs(1)).await;
+                progress.fetch_add(1, Ordering::SeqCst);
+            }
+        };
+        assert!(matches!(
+            await_connect_attempt_until(connection, &token, start + Duration::from_secs(3)).await,
+            ConnectAttempt::TimedOut
+        ));
+        assert_eq!(tokio::time::Instant::now() - start, Duration::from_secs(3));
+        assert_eq!(stages.load(Ordering::SeqCst), 2);
+        let start = tokio::time::Instant::now();
+        assert!(matches!(
+            await_connect_attempt_until(
+                std::future::pending::<()>(),
+                &token,
+                start + Duration::from_secs(3)
+            )
+            .await,
+            ConnectAttempt::TimedOut
+        ));
+        assert_eq!(tokio::time::Instant::now() - start, Duration::from_secs(3));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn connect_attempt_stop_then_expiry_take_precedence_over_ready_result() {
+        let token = CancellationToken::new();
+        let now = tokio::time::Instant::now();
+        token.cancel();
+        assert!(matches!(
+            await_connect_attempt_until(std::future::ready(()), &token, now).await,
+            ConnectAttempt::Cancelled
+        ));
+        assert!(matches!(
+            await_connect_attempt_until(std::future::ready(()), &CancellationToken::new(), now)
+                .await,
+            ConnectAttempt::TimedOut
+        ));
+        assert!(matches!(
+            await_connect_attempt_until(
+                std::future::ready(17),
+                &CancellationToken::new(),
+                now + Duration::from_secs(1)
+            )
+            .await,
+            ConnectAttempt::Completed(17)
+        ));
+    }
+
+    struct DroppedConnection(Arc<AtomicU64>);
+
+    impl Drop for DroppedConnection {
+        fn drop(&mut self) {
+            self.0.fetch_add(1, Ordering::SeqCst);
+        }
+    }
+
+    #[tokio::test]
+    async fn connect_attempt_rechecks_stop_and_deadline_after_a_ready_poll() {
+        for stop in [false, true] {
+            let token = CancellationToken::new();
+            let drops = Arc::new(AtomicU64::new(0));
+            let result = DroppedConnection(drops.clone());
+            let deadline = tokio::time::Instant::now() + Duration::from_millis(100);
+            let polls = AtomicU64::new(0);
+            let connection = std::future::poll_fn(|_| {
+                polls.fetch_add(1, Ordering::SeqCst);
+                // Deliberately synchronous only to exercise the Ready-poll
+                // boundary. No claim of preempting this work is made.
+                if stop {
+                    token.cancel();
+                } else {
+                    while tokio::time::Instant::now() < deadline {
+                        std::thread::yield_now();
+                    }
+                }
+                std::task::Poll::Ready(())
+            });
+            let outcome = await_connect_attempt_until(
+                async {
+                    connection.await;
+                    result
+                },
+                &token,
+                deadline,
+            )
+            .await;
+            assert!(if stop {
+                matches!(outcome, ConnectAttempt::Cancelled)
+            } else {
+                matches!(outcome, ConnectAttempt::TimedOut)
+            });
+            assert_eq!(
+                polls.load(Ordering::SeqCst),
+                1,
+                "exercise the Ready-poll boundary"
+            );
+            assert_eq!(
+                drops.load(Ordering::SeqCst),
+                1,
+                "late socket must be dropped"
+            );
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn connect_attempt_pending_stop_drops_future_without_waiting_for_expiry() {
+        let token = CancellationToken::new();
+        let drops = Arc::new(AtomicU64::new(0));
+        let owned = DroppedConnection(drops.clone());
+        let start = tokio::time::Instant::now();
+        let connection = async {
+            let _owned = owned;
+            std::future::pending::<()>().await;
+        };
+        let attempt =
+            await_connect_attempt_until(connection, &token, start + Duration::from_secs(10));
+        tokio::pin!(attempt);
+        assert!(futures_util::poll!(attempt.as_mut()).is_pending());
+        token.cancel();
+        assert!(matches!(attempt.await, ConnectAttempt::Cancelled));
+        assert_eq!(tokio::time::Instant::now(), start);
+        assert_eq!(drops.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn connect_attempt_stalled_upgrade_retries_and_preserves_queued_pairing() {
+        use tokio::io::AsyncReadExt;
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let config = ControllerTransportConfig::new(
+            format!("ws://{}", listener.local_addr().unwrap()),
+            ControllerRole::ControllerA,
+            "",
+        )
+        .with_connect_timeout(Duration::from_millis(100));
+        let (sender, receiver) =
+            transport_channels(ControllerRole::ControllerA, "", 2, 2, 8192, 1024);
+        let queued = control("request-connect-deadline");
+        sender.try_send_sensitive_control(&queued).unwrap();
+        let (events, mut event_rx) = mpsc::unbounded_channel();
+        let sink: Arc<dyn ControllerEventSink> = Arc::new(move |event| {
+            let _ = events.send(event);
+        });
+        let started = Instant::now();
+        let mut task = tokio::spawn(run_transport(config, sink, sender.clone(), receiver));
+        let server = async {
+            let mut bytes = [0_u8; 2048];
+            for attempt in 0..3 {
+                let (mut stalled, _) = listener.accept().await.unwrap();
+                let mut count = 0;
+                loop {
+                    let read = stalled.read(&mut bytes).await.unwrap();
+                    if read == 0 {
+                        break;
+                    }
+                    count += read;
+                }
+                assert!(count > 0, "attempt {attempt} must reach upgrade then close");
+            }
+            let (next, _) = listener.accept().await.unwrap();
+            assert!(
+                started.elapsed() >= Duration::from_millis(3100),
+                "three timeouts plus minimum exponential backoffs 400+800+1600ms"
+            );
+            let mut socket = accept_hdr_async(next, ControllerSubprotocolCallback)
+                .await
+                .unwrap();
+            let Message::Text(text) = socket.next().await.unwrap().unwrap() else {
+                panic!("queued pairing frame");
+            };
+            assert_eq!(serde_json::from_str::<Value>(&text).unwrap(), queued);
+            assert!(matches!(
+                event_rx.recv().await.unwrap(),
+                ControllerTransportEvent::Connected { .. }
+            ));
+            assert!(
+                event_rx.try_recv().is_err(),
+                "attempt expiry must not emit Disconnected"
+            );
+        };
+        let result = tokio::time::timeout(Duration::from_secs(8), server).await;
+        sender.stop();
+        let joined = tokio::time::timeout(Duration::from_secs(1), &mut task).await;
+        if joined.is_err() {
+            task.abort();
+            let _ = task.await;
+        }
+        result.expect("stalled upgrade must be retried");
+        joined.expect("transport must finish after Stop").unwrap();
+    }
+
+    #[tokio::test]
+    async fn connect_attempt_stop_during_upgrade_and_backoff_ends_the_real_loop() {
+        use tokio::io::AsyncReadExt;
+        for stop_in_backoff in [false, true] {
+            let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let config = ControllerTransportConfig::new(
+                format!("ws://{}", listener.local_addr().unwrap()),
+                ControllerRole::ControllerA,
+                "",
+            )
+            .with_connect_timeout(Duration::from_millis(100));
+            let (sender, receiver) =
+                transport_channels(ControllerRole::ControllerA, "", 2, 2, 8192, 1024);
+            let task = tokio::spawn(run_transport(
+                config,
+                Arc::new(|_| {}),
+                sender.clone(),
+                receiver,
+            ));
+            let scenario = async {
+                let (mut socket, _) = listener.accept().await.unwrap();
+                let mut bytes = [0_u8; 2048];
+                assert!(socket.read(&mut bytes).await.unwrap() > 0);
+                if stop_in_backoff {
+                    while socket.read(&mut bytes).await.unwrap() != 0 {}
+                }
+                sender.stop();
+                task.await.unwrap();
+                assert!(
+                    tokio::time::timeout(Duration::from_millis(650), listener.accept())
+                        .await
+                        .is_err(),
+                    "Stop cannot start another attempt"
+                );
+            };
+            let result = tokio::time::timeout(Duration::from_secs(3), scenario).await;
+            sender.stop();
+            result.expect("real transport Stop scenario must finish before its hard limit");
+        }
+    }
+
     #[test]
     fn inbound_debug_redacts_frame_without_changing_reader_input() {
         for kind in [
@@ -1415,6 +1770,14 @@ mod tests {
 
     #[test]
     fn inbound_debug_keeps_normal_lifecycle_diagnostics() {
+        let (sender, _receiver) = transport_channels(
+            ControllerRole::ControllerA,
+            "generation-diagnostic",
+            2,
+            2,
+            4096,
+            1024,
+        );
         let events = [
             ControllerTransportEvent::Connected {
                 remote_control_generation: "generation-diagnostic".to_owned(),
@@ -1423,6 +1786,7 @@ mod tests {
             ControllerTransportEvent::Disconnected {
                 remote_control_generation: "generation-diagnostic".to_owned(),
                 lease_epoch: Some("epoch-diagnostic".to_owned()),
+                context: sender.disconnect_context(),
                 error: "read deadline".to_owned(),
             },
             ControllerTransportEvent::RttSample {

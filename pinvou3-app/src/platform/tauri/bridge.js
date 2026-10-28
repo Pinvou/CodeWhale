@@ -537,6 +537,8 @@ function authoritySyncBufferSnapshot(sid, buf) { return pinvouSharedtauriMain().
       voiceRecordingTooLong: "Recording is too long. Please shorten it and try again.",
       voiceAudioInvalid: "The recorded audio is invalid. Please record again.",
       voiceMicUnavailable: "The microphone is in use by another app. Close it or pick another microphone, then try again.",
+      voiceMicBusyOtherWindow: "Voice input is already recording in another app window. Stop it there, then try again.",
+      voiceMicOwnershipUnavailable: "Recording ownership could not be verified (start failed closed). Please try again.",
       voiceWrittenBack: "Transcribed text inserted into the input box",
       voiceTaskSent: "Voice task sent",
       voiceEditPreviewReady: "Voice edit ready to review",
@@ -648,6 +650,8 @@ function authoritySyncBufferSnapshot(sid, buf) { return pinvouSharedtauriMain().
       voiceRecordingTooLong: "録音が長すぎます。短くして再試行してください。",
       voiceAudioInvalid: "録音データが無効です。もう一度録音してください。",
       voiceMicUnavailable: "マイクは他のアプリで使用中です。使用中のアプリを終了するか、別のマイクを選んでから再試行してください。",
+      voiceMicBusyOtherWindow: "別のアプリウィンドウで音声入力が進行中です。そちらを停止してから再試行してください。",
+      voiceMicOwnershipUnavailable: "録音の所有権を確認できなかったため、開始を中止しました。もう一度お試しください。",
       voiceWrittenBack: "音声を入力ボックスに書き込みました",
       voiceTaskSent: "音声タスクを送信しました",
       voiceEditPreviewReady: "音声編集を確認してください",
@@ -759,6 +763,8 @@ function authoritySyncBufferSnapshot(sid, buf) { return pinvouSharedtauriMain().
       voiceRecordingTooLong: "录音过长，请缩短后重试。",
       voiceAudioInvalid: "录音数据无效，请重新录制。",
       voiceMicUnavailable: "麦克风被其他应用占用，请关闭占用它的应用或更换麦克风后重试。",
+      voiceMicBusyOtherWindow: "另一个应用窗口正在进行语音输入，请先在那里停止后再试。",
+      voiceMicOwnershipUnavailable: "无法确认录音所有权，为避免冲突已停止本次启动，请重试。",
       voiceWrittenBack: "语音已写入输入框",
       voiceTaskSent: "语音任务已发送",
       voiceEditPreviewReady: "语音编辑待确认",
@@ -883,27 +889,35 @@ function loadPinvouSceneEventsForSession(sid) { return pinvouSharedtauriMain().l
   function reportSidecarReadFailure(kind, sid, error) {
     console.warn(`[sidecar] ${kind} read failed for session ${sid}; falling back to the local cache`, error);
   }
-
+  function reportSidecarWriteFailure(kind, sid, error) {
+    console.warn(`[sidecar] ${kind} migration write failed for session ${sid}; keeping the local cache`, error);
+  }
   async function syncPinvouSceneEventsForSession(sid) {
     var cached = loadPinvouSceneEventsForSession(sid);
     if (!sid) return cached;
+    var remote;
     try {
-      var remote = normalizePinvouSceneEvents(
+      remote = normalizePinvouSceneEvents(
         await invoke("get_session_pinvou_scene_events", { sessionId: sid })
       );
-      if (remote.length) {
-        try {
-          window.localStorage.setItem(pinvouSceneStorageKey(sid), JSON.stringify(remote));
-        } catch (_) {}
-        return remote;
-      }
-      if (cached.length) {
-        await invoke("save_session_pinvou_scene_events", { sessionId: sid, events: cached });
-      }
-      return cached;
-    } catch (_) {
+    } catch (error) {
+      reportSidecarReadFailure("pinvou scene", sid, error);
       return cached;
     }
+    if (remote.length) {
+      try {
+        window.localStorage.setItem(pinvouSceneStorageKey(sid), JSON.stringify(remote));
+      } catch (_) { /* fall back to the remote data when the localStorage write fails */ }
+      return remote;
+    }
+    if (cached.length) {
+      try {
+        await invoke("save_session_pinvou_scene_events", { sessionId: sid, events: cached });
+      } catch (error) {
+        reportSidecarWriteFailure("pinvou scene", sid, error);
+      }
+    }
+    return cached;
   }
 function recordPinvouSceneForMessage(sid, pos, scene) { return pinvouSharedtauriMain().recordPinvouSceneForMessage(sid, pos, scene); }
 function pinvouSceneForMessagePos(pos) { return pinvouSharedtauriMain().pinvouSceneForMessagePos(pos); }
@@ -956,23 +970,29 @@ function pinvouSceneForMessagePos(pos) { return pinvouSharedtauriMain().pinvouSc
   async function syncSteeredMessagesForSession(sid) {
     var cached = loadSteeredMessagesForSession(sid);
     if (!sid) return cached;
+    var remote;
     try {
-      var remote = normalizeSteeredMessages(
+      remote = normalizeSteeredMessages(
         await invoke("get_session_steered_messages", { sessionId: sid })
       );
-      if (remote.length) {
-        try {
-          window.localStorage.setItem(steeredMessagesStorageKey(sid), JSON.stringify(remote));
-        } catch (_) { /* fall back to the remote data when the localStorage write fails */ }
-        return remote;
-      }
-      if (cached.length) {
-        await invoke("save_session_steered_messages", { sessionId: sid, events: cached });
-      }
-      return cached;
-    } catch (_) {
+    } catch (error) {
+      reportSidecarReadFailure("steered messages", sid, error);
       return cached;
     }
+    if (remote.length) {
+      try {
+        window.localStorage.setItem(steeredMessagesStorageKey(sid), JSON.stringify(remote));
+      } catch (_) { /* fall back to the remote data when the localStorage write fails */ }
+      return remote;
+    }
+    if (cached.length) {
+      try {
+        await invoke("save_session_steered_messages", { sessionId: sid, events: cached });
+      } catch (error) {
+        reportSidecarWriteFailure("steered messages", sid, error);
+      }
+    }
+    return cached;
   }
   // 合并写入一批 {pos, text}（同 pos 后写覆盖），并同步当前内存态（活动
   // session 写 state，后台 session 写其 buffer）。返回归一化后的完整列表。
@@ -1041,6 +1061,10 @@ function pinvouSceneForMessagePos(pos) { return pinvouSharedtauriMain().pinvouSc
     isDefaultChatTitle: isDefaultChatTitle,
     notify: function () { return notify.apply(null, arguments); },
     runSyncOnSession: function () { return runSyncOnSession.apply(null, arguments); },
+    // 惰性转发（chat-events 在其后安装）：准入拒绝在重置流状态前同步冲刷幸存
+    // post-tool 气泡的 html，与 web 桥同形；chat lane 不直接依赖 chat-events
+    // 内部表，经宿主转交。
+    flushPendingStreamRender: function () { return chatEventsFeature && chatEventsFeature.flushPendingStreamRender(); },
     // 壳化（#701 T0-c）：chat 域 sendMessageToSession 委托 helpers 后，共享实现
     // 需要触碰 LRU 时钟；惰性转发（sessionsFeature 在其后安装）。
     touchSessionBuffer: function () { return touchSessionBuffer.apply(null, arguments); },
@@ -2750,6 +2774,7 @@ function composePlanMarkdown(snapshots) { return pinvouSharedtauriMain().compose
       archiveRemoteProxyHistory: desktopRemoteControlFeature.archiveRemoteProxyHistory,
       listRemoteProxyArchives: desktopRemoteControlFeature.listRemoteProxyArchives,
       listRemoteProxyArchiveCandidates: desktopRemoteControlFeature.listRemoteProxyArchiveCandidates,
+      getRemoteProxyLoadStatus: desktopRemoteControlFeature.getRemoteProxyLoadStatus,
       reserveRemoteTask: desktopRemoteControlFeature.reserveRemoteTask,
       commitRemoteTask: desktopRemoteControlFeature.commitRemoteTask,
       cancelRemoteTask: desktopRemoteControlFeature.cancelRemoteTask,

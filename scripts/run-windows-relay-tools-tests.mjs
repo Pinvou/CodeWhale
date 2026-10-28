@@ -9,6 +9,8 @@ const files = [
   'local-selftest-ownership.test.js',
   'local-selftest-identity.test.js',
   'endpoint-launcher.test.js',
+  'controller-state-guard.test.js',
+  'controller-lock-rollout.test.js',
 ];
 
 function run() {
@@ -17,7 +19,8 @@ function run() {
   for (const file of files) {
     const result = spawnSync(process.execPath, ['--test', '--test-reporter=tap',
       resolve(root, 'remote-control-relay/test', file)],
-    { cwd: root, encoding: 'utf8', timeout: 90_000, maxBuffer: 4 * 1024 * 1024 });
+    { cwd: root, encoding: 'utf8', timeout: file === 'controller-state-guard.test.js' ? 240_000 : 90_000,
+      maxBuffer: 4 * 1024 * 1024 });
     process.stdout.write(result.stdout ?? '');
     process.stderr.write(result.stderr ?? '');
     if (result.error || result.status !== 0) throw new Error(`Windows relay regression failed: ${file}`);
