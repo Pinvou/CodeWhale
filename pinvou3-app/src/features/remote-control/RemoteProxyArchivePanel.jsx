@@ -65,7 +65,7 @@ export default function RemoteProxyArchivePanel({ t }) {
     setBusy(true);
     setStatus(null);
     try {
-      const record = await api.readRemoteProxyHistory(id, { navigation: true });
+      const record = await api.readRemoteProxyHistory(id, { view: true });
       if (request.current !== intent) return;
       if (!record || !record.archived) throw new Error('remote_proxy_archive_unavailable');
       setHistory(record);
