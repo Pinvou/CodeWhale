@@ -565,8 +565,10 @@ fn readonly_tokens_admitted(trimmed: &str) -> bool {
 ///   at most `MAX_READONLY_SEQUENCE_SEGMENTS` segments;
 /// - `cd <one relative path>` as a standalone segment or sequence prefix —
 ///   never a pipeline stage, where it would run in a subshell and persist
-///   nowhere the operand gate could follow — with the operand additionally
-///   resolved against the workspace at the execution seam;
+///   nowhere the operand gate could follow, and never a wildcard, because
+///   the shell would enter the first expansion while the seam judged the
+///   spelling — with the operand additionally resolved against the
+///   workspace at the execution seam;
 /// - read-only `od` dump forms (display radices plus numeric `-j`/`-N`),
 ///   piped in either direction like any other segment;
 /// - pipelines `a | b`, where **every** segment must itself be an admitted
@@ -1009,9 +1011,14 @@ fn is_agent_readonly_npm(tokens: &[String]) -> bool {
 }
 
 /// Admit exactly `cd <one relative path>`: one operand, relative, no `..`,
-/// no flags. Bare `cd` (home directory), absolute targets, `~`/drive shapes,
-/// and every flag spelling refuse here. The operand is additionally resolved
-/// against the workspace by the execution seam
+/// no flags, no wildcard. Bare `cd` (home directory), absolute targets,
+/// `~`/drive shapes, a `*` anywhere in the operand, and every flag spelling
+/// refuse here. The wildcard refusal is load-bearing: the execution seam
+/// canonicalizes the operand *spelling*, while a POSIX shell expands `cd a*`
+/// and `cd` takes the first match (the rest are ignored) — a literal `a*`
+/// directory next to an earlier-sorting `a -> ..` symlink would be judged
+/// inside and entered outside. The operand is additionally resolved against
+/// the workspace by the execution seam
 /// (`enforce_readonly_workspace_operands`, which reuses the
 /// `[shell.readonly.cwd.outside_workspace]` refusal), so a relative
 /// directory whose destination escapes the workspace — a symlink, say — is
@@ -1021,7 +1028,10 @@ fn is_agent_readonly_cd(tokens: &[String]) -> bool {
         return false;
     }
     let target = &tokens[1];
-    if target.starts_with('-') || target.contains('\\') || looks_like_windows_absolute_path(target)
+    if target.starts_with('-')
+        || target.contains('\\')
+        || target.contains('*')
+        || looks_like_windows_absolute_path(target)
     {
         return false;
     }
@@ -2473,6 +2483,12 @@ mod tests {
             "cd -L sub",
             "cd sub extra",
             "cd ~/x",
+            // A wildcard operand would be judged by its spelling at the seam
+            // while the shell enters the first expansion.
+            "cd sub*",
+            "cd *",
+            "cd su* && wc -c notes.md",
+            "pwd; cd s*/deeper",
             // A pipeline stage runs in a subshell: its `cd` persists nowhere
             // and would end the gate's operand walk at the `|`.
             "cd sub | cat /etc/passwd",
