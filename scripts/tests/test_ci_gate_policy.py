@@ -1,6 +1,8 @@
 import re
 import os
 import subprocess
+import tempfile
+import textwrap
 import tomllib
 import unittest
 from fnmatch import fnmatchcase
@@ -691,7 +693,11 @@ PINNED_GATE_STEP_NAMES = {
         "cargo compile check (push, adapter-gaia test-support)",
     ),
     "cli-lint": (
+        "Prepare CLI disk capacity before swap",
+        "Check CLI disk capacity before cache",
+        "Check CLI disk capacity after cache",
         "Install Tauri Linux system dependencies",
+        "Guard CLI cache post-save",
     ),
     "rust-test": (
         "cargo test --lib --no-run（编译链接测试二进制）",
@@ -2696,6 +2702,122 @@ class CiGatePolicyTests(unittest.TestCase):
         # links nothing (rmeta-size artifacts). Regressing to false would
         # silently re-introduce the cold compile this round removed.
         self.assertNotIn("cache-targets:", cache_step)
+
+    def test_cli_lint_disk_capacity_is_admitted_at_each_writing_stage(self):
+        # A successful Clippy/check is insufficient when main's cache post
+        # still needs disk. Pin executable recipes and order in this job,
+        # not a comment, a similarly named decoy, or a sibling's cleanup.
+        job = _extract_job_block(self.pr_workflow, "cli-lint")
+        initial = "Prepare CLI disk capacity before swap"
+        precache = "Check CLI disk capacity before cache"
+        postcache = "Check CLI disk capacity after cache"
+        stages = ((initial, " --min-free-gib 24"), (precache, ""), (postcache, ""))
+        for name, arguments in stages:
+            body = _without_inline_comments(_step_named(job, name))
+            self.assertEqual(
+                [line.strip() for line in body.splitlines() if line.strip()],
+                [
+                    "- name: " + name,
+                    "run: |",
+                    'sudo env GITHUB_WORKSPACE="$GITHUB_WORKSPACE" \\',
+                    'RUNNER_ENVIRONMENT="$RUNNER_ENVIRONMENT" \\',
+                    "python3 scripts/ci-rust-disk.py" + arguments,
+                ],
+                name + ": keep the unconditional base-tier, fail-closed recipe",
+            )
+        names = [name for name, _ in _steps_of(job)]
+        self.assertEqual(names[:2], ["Checkout", initial])
+        expected = [
+            "Checkout", initial, "Set up zram and swap",
+            "Init CodeWhale submodule", "Install Tauri Linux system dependencies",
+            "Build PipeWire 1.0.7 dev prefix (jammy SPA headers too old)",
+            "Rust toolchain", "Align the toolchain pinned by rust-toolchain.toml",
+            precache, "Cargo cache", postcache,
+            "cargo clippy (workspace, all targets)",
+            "cargo check (workspace, no default features, all targets)",
+        ]
+        self.assertEqual([name for name in names if name in expected], expected)
+        self.assertEqual(names.index("Set up zram and swap"), names.index(initial) + 1)
+        self.assertEqual(names.index("Cargo cache"), names.index(precache) + 1)
+        self.assertEqual(names.index(postcache), names.index("Cargo cache") + 1)
+        self.assertEqual(
+            names.index("cargo clippy (workspace, all targets)"),
+            names.index(postcache) + 1,
+        )
+
+    def test_cli_lint_cache_post_is_gated_after_cargo(self):
+        job = _extract_job_block(self.pr_workflow, "cli-lint")
+        cache = _without_inline_comments(_step_named(job, "Cargo cache"))
+        self.assertEqual([line.strip() for line in cache.splitlines() if line.strip()], [
+            "- name: Cargo cache",
+            "id: cli_lint_cache",
+            "uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0",
+            "with:", "workspaces: pinvou-cli", "shared-key: cli-lint",
+            "cache-on-failure: false", "save-if: ${{ github.ref == 'refs/heads/main' }}",
+        ])
+        guard = _without_inline_comments(_step_named(job, "Guard CLI cache post-save"))
+        lines = [line.strip() for line in guard.splitlines() if line.strip()]
+        self.assertEqual(lines, [
+            "- name: Guard CLI cache post-save",
+            "if: ${{ always() && !cancelled() && steps.cli_lint_cache.outcome == 'success' }}",
+            "run: |",
+            'sudo env GITHUB_WORKSPACE="$GITHUB_WORKSPACE" \\',
+            'RUNNER_ENVIRONMENT="$RUNNER_ENVIRONMENT" \\',
+            "python3 scripts/ci-rust-disk.py",
+            "printf '%s\\n' 'CACHE_ON_FAILURE=true' >> \"$GITHUB_ENV\"",
+        ])
+        names = [name for name, _ in _steps_of(job)]
+        self.assertEqual(names[-1], "Guard CLI cache post-save")
+        self.assertGreater(names.index("Guard CLI cache post-save"), names.index("cargo check (workspace, no default features, all targets)"))
+        self.assertNotIn("continue-on-error", guard)
+        uncommented = _without_yaml_comments(job)
+        self.assertEqual(uncommented.count("CACHE_ON_FAILURE"), 1)
+        self.assertEqual(uncommented.count("GITHUB_ENV"), 1)
+        # Job/step env overrides GITHUB_ENV for the post condition. This job
+        # currently has no env mapping; pin that fact, including quoted keys.
+        self.assertNotRegex(uncommented, r"(?m)^\s*(?:env|['\"]env['\"])\s*:")
+
+    def test_cli_lint_cache_guard_rejects_step_env_override(self):
+        original = self.pr_workflow
+        self.test_cli_lint_cache_post_is_gated_after_cargo()
+        try:
+            marker = "        id: cli_lint_cache\n"
+            self.assertEqual(original.count(marker), 1)
+            for added in (
+                '        env:\n          CACHE_ON_FAILURE: "true"\n',
+                '        env: { CACHE_ON_FAILURE: "true" }\n',
+                '        env:\n          "CACHE_ON_FAILURE": "true"\n',
+                '        "env": { CACHE_ON_FAILURE: "true" }\n',
+            ):
+                self.pr_workflow = original.replace(marker, marker + added, 1)
+                with self.assertRaises(AssertionError, msg=added):
+                    self.test_cli_lint_cache_post_is_gated_after_cargo()
+        finally:
+            self.pr_workflow = original
+
+    def test_cli_lint_cache_guard_enables_failure_cache_only_after_disk_check(self):
+        job = _extract_job_block(self.pr_workflow, "cli-lint")
+        guard = _step_named(job, "Guard CLI cache post-save")
+        script = textwrap.dedent(guard.split("run: |", maxsplit=1)[1]).strip()
+        with tempfile.TemporaryDirectory() as directory:
+            env_file = Path(directory) / "github-env"
+            env = dict(os.environ, GITHUB_ENV=env_file.as_posix(),
+                       GITHUB_WORKSPACE=directory, RUNNER_ENVIRONMENT="github-hosted")
+            for disk_exit in (0, 7):
+                env_file.unlink(missing_ok=True)
+                env["FAKE_DISK_EXIT"] = str(disk_exit)
+                # The real workflow commands and shell failure semantics run;
+                # only the privileged disk helper is replaced by this probe.
+                result = subprocess.run(
+                    ["bash", "-eo", "pipefail", "-c",
+                     'sudo() { return "$FAKE_DISK_EXIT"; }\n' + script],
+                    env=env, capture_output=True, text=True, timeout=10,
+                )
+                self.assertEqual(result.returncode, disk_exit, result.stderr)
+                if disk_exit == 0:
+                    self.assertEqual(env_file.read_text(encoding="utf-8"), "CACHE_ON_FAILURE=true\n")
+                else:
+                    self.assertFalse(env_file.exists(), "failure must not enable cache post")
 
     def test_cli_lint_job_is_wired_into_required_gate(self):
         # Round-18 review §3: "The CI leg doesn't lint the CLI" — no clippy on
@@ -4914,10 +5036,6 @@ class CiGatePolicyTests(unittest.TestCase):
             # (same main-only namespace death-loop exposure) but not this
             # pin — the flag could be dropped with the suite green.
             ("macos-cli-check", "\n  required-gate:"),
-            # Round-51 review: cli-lint joined the flag for the same
-            # "one failed main push drops the namespace fully cold" reason
-            # as its siblings; pin it so it cannot rot the same way.
-            ("cli-lint", "\n  windows-rust-test:"),
             # 2026-10 audit followups (PR #745): knowledge-rust/rust-lint/
             # cli-test joined the flag when their main-push unconditional
             # runs landed — same "one failed main push drops the namespace
