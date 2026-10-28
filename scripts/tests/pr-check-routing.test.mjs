@@ -1001,3 +1001,55 @@ test("NewAPI TLS deployment contracts are discovered by the Account-only CI depe
   assert.match(source, /createRequire\(new URL\('\.\.\/\.\.\/package\.json', import\.meta\.url\)\)/);
   assert.doesNotMatch(source, /pinvou3-app/);
 });
+
+test("credential origin browser matrix runs after browser preparation without accepting skips", () => {
+  const job = jobBlock("frontend-test");
+  assert.match(job, /defaults:\r?\n {6}run:\r?\n {8}working-directory: pinvou3-app/);
+  const setup = namedStep(job, "准备浏览器");
+  const name = "Credential origin real browser scope matrix";
+  const gate = namedStep(job, name);
+  assert.ok(job.indexOf(setup) < job.indexOf(gate), "browser matrix must follow CHROME preparation");
+  const ready = "github.event_name == 'merge_group' || github.event.pull_request.draft == false";
+  assert.equal(stepCondition(job, "准备浏览器"), ready);
+  assert.equal(stepCondition(job, name), ready);
+  assert.doesNotMatch(gate, /^ {8}(?:continue-on-error|working-directory|env):/m);
+  assert.match(gate, /^ {8}shell: bash$/m);
+  const run = stepRun(job, name);
+  assert.match(run, /^set -euo pipefail$/m);
+  assert.match(run, /^test -x "\$\{CHROME:\?browser preparation must provide CHROME\}"$/m);
+  assert.match(run, /^node --test --test-reporter=tap tests\/credential_origin_scope_probe\.test\.mjs \| tee "\$report"$/m);
+  assert.match(run, /^grep -Eq '\^# pass \[1-9\]\[0-9\]\*\$' "\$report"$/m);
+  assert.match(run, /^grep -Fxq '# fail 0' "\$report"$/m);
+  assert.match(run, /^grep -Fxq '# skipped 0' "\$report"$/m);
+});
+
+
+test("credential origin browser matrix shell rejects failed, empty or skipped results", () => {
+  const run = stepRun(jobBlock("frontend-test"), "Credential origin real browser scope matrix");
+  const directory = mkdtempSync(join(tmpdir(), "pinvou-credential-matrix-gate-"));
+  try {
+    // Controlled Node output exercises the exact workflow shell, not Chromium.
+    for (const [passed, failed, skipped, exit, expected] of [
+      [2, 0, 0, 0, 0], [0, 0, 0, 0, 1], [1, 0, 1, 0, 1],
+      [2, 1, 0, 0, 1], [2, 0, 0, 7, 7], [2, 0, null, 0, 1],
+    ]) {
+      const summary = `# pass ${passed}\n# fail ${failed}\n${skipped === null ? "" : `# skipped ${skipped}\n`}`;
+      const prefix = `CHROME="$(command -v bash)"; node() { printf '%s' '${summary}'; return ${exit}; };\n`;
+      const result = spawnSync(bash, ["-c", prefix + run], {
+        cwd: directory, encoding: "utf8", timeout: 30_000, windowsHide: true,
+        env: { ...process.env, RUNNER_TEMP: directory.replaceAll("\\", "/") },
+      });
+      assert.equal(result.status, expected, `${passed}/${failed}/${skipped}/${exit}: ${result.stderr}`);
+    }
+    for (const prefix of ['unset CHROME;\n', 'CHROME="/missing-credential-browser";\n']) {
+      const result = spawnSync(bash, ["-c", prefix + run], {
+        cwd: directory, encoding: "utf8", timeout: 30_000, windowsHide: true,
+        env: { ...process.env, RUNNER_TEMP: directory.replaceAll("\\", "/") },
+      });
+      assert.notEqual(result.status, 0, "missing/non-executable CHROME must reject the gate");
+    }
+  } finally {
+    assert.ok(directory.startsWith(join(tmpdir(), "pinvou-credential-matrix-gate-")));
+    rmSync(directory, { recursive: true, force: true });
+  }
+});

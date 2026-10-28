@@ -1085,6 +1085,20 @@ jobs:
           test -n "$chrome"
           echo "CHROME=$chrome" >> "$GITHUB_ENV"
 
+      # npm test precedes browser preparation; run this real-browser matrix
+      # explicitly after CHROME exists, only on the existing Ready/queue leg.
+      - name: Credential origin real browser scope matrix
+        if: ${{ github.event_name == 'merge_group' || github.event.pull_request.draft == false }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -x "${CHROME:?browser preparation must provide CHROME}"
+          report="$RUNNER_TEMP/credential-origin-scope.tap"
+          node --test --test-reporter=tap tests/credential_origin_scope_probe.test.mjs | tee "$report"
+          grep -Eq '^# pass [1-9][0-9]*$' "$report"
+          grep -Fxq '# fail 0' "$report"
+          grep -Fxq '# skipped 0' "$report"
+
       # The runner retries each selected smoke once so a transient runner
       # flake (headless Chrome missing its 30 s DevTools-endpoint launch
       # window) cannot evict a healthy PR from the merge queue; it fails
