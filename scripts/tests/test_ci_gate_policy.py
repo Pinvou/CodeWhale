@@ -3942,11 +3942,18 @@ class CiGatePolicyTests(unittest.TestCase):
             source,
         )
         # 2026-10-28 修订(冲突消解):主分支已定案"镜像自带模块、本脚本不装
-        # 内核包",原 install 路径的等锁/单次尝试钉子随路径一并退役;dpkg 修复
-        # 兜底仍是全 job 契约——修复函数与退出路径 trap 必须存在。
-        self.assertIn("def repair_dpkg_state()", source)
-        self.assertIn("trap repair_dpkg_state EXIT", source)
+        # 内核包",原 install 路径的等锁/单次尝试/in-flow 调用点钉子随路径
+        # 一并退役;dpkg 修复兜底仍是全 job 契约:修复函数、60s×3 等锁重试
+        # 与 stderr 透传、updates 残留 journal 门、TERM 与 EXIT 双兜底。
+        self.assertGreaterEqual(source.count("repair_dpkg_state"), 2)
+        self.assertIn("run_to 60 dpkg --configure -a", source)
+        self.assertIn(
+            'warn "dpkg --configure -a (attempt ${attempt}/3) failed, retrying${configure_err:+: ${configure_err}}"',
+            source,
+        )
+        self.assertIn("updates/[0-9]*", source)
         self.assertIn("trap 'exit 143' TERM", source)
+        self.assertIn("trap repair_dpkg_state EXIT", source)
 
     def test_memory_setup_module_failure_does_not_poison_dependency_install(self):
         source = (ROOT / "scripts" / "ci-memory-setup.sh").read_text(encoding="utf-8")

@@ -146,23 +146,45 @@ any_swap_active() {
 # interrupted, you must manually run 'sudo dpkg --configure -a'") — the 2026-
 # 10-28 queue failure (run 40633531468) was exactly this: a timeout kill mid
 # install poisoned rust-test's own system-dependency step ~40s later. Best-
-# effort repair: configure -a first waits for any dpkg still holding the lock
-# (e.g. the orphan from a timeout kill) to finish. No-op on a clean admin
-# state (dpkg --audit prints nothing), so repeat and trap calls stay cheap.
+# effort repair. dpkg does NOT wait for a busy frontend lock (it fails in
+# milliseconds, unlike apt's DPkg::Lock::Timeout), and the dpkg orphaned by a
+# timeout kill can hold that lock a few seconds longer, so configure is
+# retried across short sleeps instead of failing on the first attempt; the
+# EXIT-trap re-entry below re-checks the state and covers any longer
+# straggler. Once the lock is free the remaining configure work is mostly the
+# initramfs regen, ~21-25s on runners. No-op on a clean admin state: audit
+# silent AND no leftover all-digit journal under updates/ — the same leftover
+# journal apt's own "dpkg was interrupted" check keys on (audit alone misses
+# the journal-applied-but-unconsolidated window). An audit that cannot run
+# also falls through to the repair, where configure -a no-ops on a genuinely
+# clean state.
 repair_dpkg_state() {
-  if [[ -z $(dpkg --audit 2>/dev/null) ]]; then
+  local attempt audit_out configure_err
+  if ! audit_out="$(dpkg --audit 2>/dev/null)"; then
+    audit_out="unavailable"
+  fi
+  if [[ -z ${audit_out} ]] && ! compgen -G '/var/lib/dpkg/updates/[0-9]*' >/dev/null; then
     return 0
   fi
   warn "dpkg was left in an interrupted state; running 'dpkg --configure -a' so later apt-get steps in this job do not fail"
-  if ! run_to 60 dpkg --configure -a >/dev/null 2>&1; then
-    warn "dpkg --configure -a did not finish in time; later apt-get steps in this job may still fail until it is run manually"
-  fi
+  for attempt in 1 2 3; do
+    if configure_err="$(run_to 60 dpkg --configure -a 2>&1)"; then
+      return 0
+    fi
+    warn "dpkg --configure -a (attempt ${attempt}/3) failed, retrying${configure_err:+: ${configure_err}}"
+    (( attempt < 3 )) && sleep 5
+  done
+  warn "dpkg --configure -a did not succeed; later apt-get steps in this job may still fail until it is run manually"
 }
 # EXIT trap is the backstop for kill paths outside setup_zram. The workflow-
 # side `timeout 240` wrapper TERM's sudo->bash; route TERM through exit so
-# the trap engages within the wrapper's 15s kill grace. This script itself no
-# longer installs kernel packages (main's no-install policy), but any dpkg
-# state dirtied elsewhere in the job still gets repaired before later steps.
+# the trap still runs the repair once the in-flight run_to command returns.
+# Best effort: bash runs no traps while a foreground command is active, so
+# the repair only starts when the inner run_to cap expires, and it fits in
+# the wrapper's 15s SIGKILL grace only if TERM lands near that expiry. This
+# script itself no longer installs kernel packages (main's no-install
+# policy), but any dpkg state dirtied elsewhere in the job is still repaired
+# here before later steps run.
 trap repair_dpkg_state EXIT
 trap 'exit 143' TERM
 
