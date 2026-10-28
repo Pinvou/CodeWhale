@@ -223,11 +223,14 @@ func (m *Manager) activate(ctx context.Context, deploymentIdentity, credential, 
 	var generation int64
 	deploymentIdentity = strings.TrimSpace(deploymentIdentity)
 	err = tx.QueryRow(ctx, `SELECT id,user_id,identity_subject,status,verifier,expires_at,delivery_consumed_at,failed_attempts,deployment_generation FROM super_admin_bootstrap_credentials WHERE deployment_identity=$1 AND mode=$2 ORDER BY deployment_generation DESC LIMIT 1 FOR UPDATE`, deploymentIdentity, mode).Scan(&id, &userID, &subject, &status, &verifier, &expiresAt, &deliveredAt, &failures, &generation)
-	if errors.Is(err, pgx.ErrNoRows) || status != "PENDING" {
+	if errors.Is(err, pgx.ErrNoRows) {
 		return ErrCredentialInvalid
 	}
 	if err != nil {
 		return err
+	}
+	if status != "PENDING" {
+		return ErrCredentialInvalid
 	}
 	now := m.now()
 	if !expiresAt.After(now) {
