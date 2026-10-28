@@ -517,9 +517,9 @@ fn forkguard_shell_catalog_guidance_matches_execution() {
     assert!(tool.description().contains("background=true"));
     let readonly = BashTool::read_only("Bash");
     // Forkguard: the read-only description must match execution — argv for
-    // single commands, and the shell only for the explicitly disclosed
-    // pipeline exception, whose pipefail prefix is conditional on the
-    // detected shell actually supporting it.
+    // single commands, the shell for pipelines, `;`/`&&`/`||` sequences, and
+    // cd-prefixed commands, with the pipefail prefix scoped to POSIX shells
+    // and a standalone `cd` scoped to its own command.
     assert!(
         readonly
             .description()
@@ -528,9 +528,12 @@ fn forkguard_shell_catalog_guidance_matches_execution() {
     assert!(
         readonly
             .description()
-            .contains("runs through the detected shell")
+            .contains("run through the detected shell instead")
     );
+    assert!(readonly.description().contains("`&&`/`||` sequences"));
+    assert!(readonly.description().contains("cd-prefixed commands"));
     assert!(readonly.description().contains("set -o pipefail"));
+    assert!(readonly.description().contains("a standalone `cd` affects only that one command"));
     assert!(
         !readonly
             .input_schema()
@@ -1453,6 +1456,13 @@ fn readonly_operand_gate_judges_glob_expansions_by_resolved_location() {
             "{command}: {error}"
         );
     }
+    // A dangling symlink that a glob matches is refused as unresolved (the
+    // shell would hand the program a path that fails at open time).
+    std::os::unix::fs::symlink("nowhere-at-all", sub.join("dangl")).expect("dangling link");
+    let error = enforce_readonly_workspace_operands("cat sub/dangl*", &roots, workspace.path())
+        .expect_err("a dangling glob match cannot be proven inside")
+        .to_string();
+    assert!(error.contains("operand.unresolved"), "{error}");
     // Expansions that stay inside, and globs that match nothing, are admitted.
     for command in [
         "cat clean/*",
@@ -1471,6 +1481,20 @@ fn readonly_operand_gate_judges_glob_expansions_by_resolved_location() {
         .expect("hidden outside symlink");
     enforce_readonly_workspace_operands("cat sub/*.txt", &roots, workspace.path())
         .expect("`*` does not expand hidden entries");
+    // ...and the exclusion itself is load-bearing: without it, a bare `*`
+    // would pick up the hidden outside symlink and refuse a legitimate read.
+    enforce_readonly_workspace_operands("cat sub/*", &roots, workspace.path())
+        .expect_err("the glob still covers the visible outside link")
+        .to_string();
+    let only_hidden = tempdir().expect("only-hidden workspace");
+    std::os::unix::fs::symlink(
+        outside.path().join("secret.txt"),
+        only_hidden.path().join(".sneak"),
+    )
+    .expect("only hidden entry is an outside symlink");
+    let only_hidden_roots = [only_hidden.path().to_path_buf()];
+    enforce_readonly_workspace_operands("cat *", &only_hidden_roots, only_hidden.path())
+        .expect("a bare `*` must not match hidden entries");
     let error = enforce_readonly_workspace_operands("cat sub/.*", &roots, workspace.path())
         .expect_err("`.*` does")
         .to_string();
@@ -1567,6 +1591,59 @@ fn readonly_glob_walk_is_bounded_by_the_match_and_node_caps() {
     assert!(error.contains("glob_too_broad"), "{error}");
 }
 
+/// The gate refuses `cd` as a pipeline stage in its own right (the stage
+/// runs in a subshell, so the fold would lie), with every operand inside the
+/// workspace — the assertion pins the specific `cwd.pipeline_stage` tag
+/// instead of a disjunction with the operand refusal.
+#[test]
+fn readonly_operand_gate_refuses_piped_cd_with_all_inside_operands() {
+    let workspace = tempdir().expect("workspace");
+    std::fs::create_dir(workspace.path().join("sub")).expect("subdir");
+    std::fs::write(workspace.path().join("sub").join("notes.md"), "data").expect("notes");
+    let roots = [workspace.path().to_path_buf()];
+    for command in ["cd sub | cat notes.md", "pwd; cd sub | wc -c notes.md"] {
+        let error = enforce_readonly_workspace_operands(command, &roots, workspace.path())
+            .expect_err("a piped cd must be refused outright")
+            .to_string();
+        assert!(
+            error.contains("cwd.pipeline_stage"),
+            "{command}: {error}"
+        );
+    }
+}
+
+/// The `cd` fold resolves each destination against the LIVE cwd, not the
+/// workspace root: with a cwd nested under the root, `cd deeper; cat x` must
+/// judge `root/cwd/deeper/x` even when a same-named decoy exists (or not)
+/// directly under the root.
+#[test]
+fn readonly_cd_fold_resolves_against_the_live_cwd() {
+    let workspace = tempdir().expect("workspace");
+    let outside = tempdir().expect("outside");
+    let cwd = workspace.path().join("session");
+    std::fs::create_dir(&cwd).expect("session cwd");
+    std::fs::create_dir(cwd.join("deeper")).expect("nested deeper");
+    std::fs::write(cwd.join("deeper").join("x.txt"), "nested").expect("nested file");
+    std::fs::write(outside.path().join("decoy.txt"), "outside").expect("outside decoy");
+    let roots = [workspace.path().to_path_buf()];
+
+    // Resolved against the root, `deeper/x.txt` would not exist and the
+    // command would be admitted unjudged; against the live cwd it is proven
+    // inside.
+    enforce_readonly_workspace_operands("cd deeper; cat x.txt", &roots, &cwd)
+        .expect("the fold must resolve against the live cwd");
+
+    // A decoy planted at the root proves the opposite direction: resolved
+    // against the root, the fold would hit the outside decoy and refuse an
+    // inside command.
+    let root_decoy = workspace.path().join("deeper");
+    std::fs::create_dir(&root_decoy).expect("root decoy dir");
+    std::os::unix::fs::symlink(outside.path().join("decoy.txt"), root_decoy.join("x.txt"))
+        .expect("outside decoy symlink");
+    enforce_readonly_workspace_operands("cd session/deeper; cat x.txt", &roots, workspace.path())
+        .expect("the fold must use the live cwd, not the root decoy");
+}
+
 /// The escapes end to end: none of these may return the outside content
 /// under `ShellPolicy::ReadOnly`, whichever lane they would have taken.
 #[cfg(unix)]
@@ -1611,6 +1688,10 @@ async fn readonly_shell_refuses_pipeline_cd_and_glob_escapes_end_to_end() {
             Err(error) => error.to_string(),
         };
         assert!(
+            content.contains("shell.readonly") || content.contains("read-only"),
+            "{command} must refuse through the read-only boundary: {content}"
+        );
+        assert!(
             !content.contains("TOPSECRET-OUTSIDE") && !content.contains("User Database"),
             "{command} leaked outside content: {content}"
         );
@@ -1639,6 +1720,19 @@ async fn readonly_shell_executes_admitted_compound_sequence() {
         result.content.contains("notes.md"),
         "expected real `wc -c` output, got: {}",
         result.content
+    );
+
+    // A read-only `od` stage executes end to end (its file operands flow
+    // through the same gate).
+    let dumped = LowercaseBashTool
+        .execute(json!({"command": "cat sub/notes.md | od -c | head -2"}), &context)
+        .await
+        .expect("admitted od pipeline runs");
+    assert!(dumped.success, "{}", dumped.content);
+    assert!(
+        dumped.content.contains('\0') || dumped.content.contains('d'),
+        "expected od dump output, got: {}",
+        dumped.content
     );
 
     // A standalone `cd` names a shell builtin: it must take the shell lane,
@@ -1817,6 +1911,59 @@ fn readonly_github_shell_calls_obey_the_host_network_policy_before_spawn() {
         .expect_err("headless Scout cannot prompt interactively")
         .to_string();
     assert!(prompted.contains("requires network approval"));
+}
+
+/// The tool description states the foreground stdin contract; the sentence is
+/// the model-facing contract for why stdin readers exit, so it is pinned.
+#[test]
+fn guidance_states_the_foreground_stdin_contract() {
+    let description = super::guidance::description();
+    assert!(
+        description.contains("Foreground commands without `interactive` or `combined_output` run without a terminal stdin"),
+        "guidance must state the bounded foreground stdin: {description}"
+    );
+    assert!(
+        description.contains("action=\"interact\""),
+        "guidance must point at background interact for input-driven work: {description}"
+    );
+}
+
+/// The shell-lane binding decisions are pure and platform-independent so the
+/// Windows-only refusal (cmd.exe cannot bind `;`-sequences) and the POSIX
+/// pipefail scoping are pinned on every host, not just where the dispatcher
+/// resolves to that kind.
+#[test]
+fn readonly_shell_lane_decisions_per_shell_kind() {
+    use crate::shell_dispatcher::ShellKind;
+    let cmd = ShellKind::Cmd;
+    let pwsh = ShellKind::Pwsh;
+    let sh = ShellKind::Sh;
+    let custom = ShellKind::Custom {
+        binary: "/bin/zsh".to_string(),
+        flag: "-c".to_string(),
+    };
+    // cmd.exe cannot bind an admitted `;`-sequence; single commands and every
+    // other kind can.
+    assert!(readonly_sequence_refused_by_shell_kind(&cmd, "pwd; pwd"));
+    assert!(!readonly_sequence_refused_by_shell_kind(&cmd, "pwd"));
+    assert!(!readonly_sequence_refused_by_shell_kind(&pwsh, "pwd; pwd"));
+    assert!(!readonly_sequence_refused_by_shell_kind(&sh, "pwd; pwd"));
+    // The pipefail prefix rides only POSIX pipes: cmd and PowerShell must not
+    // receive the `;`-bearing fragment at all.
+    for kind in [&cmd, &pwsh] {
+        assert_eq!(
+            readonly_shell_bound_command(kind, "git log | head -3"),
+            "git log | head -3"
+        );
+    }
+    for kind in [&sh, &custom] {
+        assert_eq!(
+            readonly_shell_bound_command(kind, "git log | head -3"),
+            "set -o pipefail; git log | head -3"
+        );
+    }
+    // Sequences without a pipe bind without the prefix on every kind.
+    assert_eq!(readonly_shell_bound_command(&sh, "pwd; wc -c f"), "pwd; wc -c f");
 }
 
 #[test]

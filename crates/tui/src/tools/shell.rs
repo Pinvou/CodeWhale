@@ -2161,22 +2161,10 @@ impl ShellManager {
 
         // Create command spec and prepare sandboxed environment
         let spec = if let Some(roots) = readonly_roots {
-            // Windows asymmetry: `cmd.exe` treats `;` as an argument
-            // delimiter, not a command separator, so an admitted
-            // `;`-sequence could neither run nor fail as a sequence there.
-            // PowerShell executes `;`-sequences, and `&&`/`||` are parsed by
-            // every supported Windows shell (an old PowerShell parse error is
-            // still a safe nothing-ran failure). Refuse exactly the shape the
-            // resolved executor cannot bind; never admit a form the executor
-            // cannot run safely. Non-Windows hosts run sequences under a
-            // POSIX shell and keep every admitted form.
-            #[cfg(windows)]
-            if readonly_sequence_segments(command).is_some_and(|segments| segments.len() > 1)
-                && matches!(
-                    crate::shell_dispatcher::global_dispatcher().kind(),
-                    crate::shell_dispatcher::ShellKind::Cmd
-                )
-            {
+            if readonly_sequence_refused_by_shell_kind(
+                crate::shell_dispatcher::global_dispatcher().kind(),
+                command,
+            ) {
                 return Err(anyhow!(
                     "[shell.readonly.sequence.unsupported_shell] `;`-sequences are not executable by this host's cmd.exe shell; run each read-only probe as its own command."
                 ));
@@ -2193,12 +2181,15 @@ impl ShellManager {
                 // segments), so a shell is needed to bind them; pipefail
                 // additionally reports a failed stage. Single commands keep
                 // the shell-free direct-argv lane below.
-                let piped = if command.contains('|') {
-                    format!("set -o pipefail; {command}")
-                } else {
-                    command.to_string()
-                };
-                CommandSpec::shell(&piped, work_dir.clone(), Duration::from_millis(timeout_ms))
+                let shell_bound = readonly_shell_bound_command(
+                    crate::shell_dispatcher::global_dispatcher().kind(),
+                    command,
+                );
+                CommandSpec::shell(
+                    &shell_bound,
+                    work_dir.clone(),
+                    Duration::from_millis(timeout_ms),
+                )
             } else {
                 let (program, args) = hardened_readonly_argv(command)?;
                 let program = resolve_readonly_program(&program, roots)?;
@@ -3887,6 +3878,43 @@ fn attach_shell_owner_metadata(metadata: &mut serde_json::Value, context: &ToolC
     metadata["owner_agent_name"] = json!(owner.agent_name);
 }
 
+/// Whether the resolved shell kind can bind an admitted `;`-sequence at all:
+/// `cmd.exe` treats `;` as an argument delimiter, not a command separator, so
+/// the sequence could neither run nor fail as a sequence there. PowerShell
+/// executes `;`-sequences, and `&&`/`||` are parsed by every supported
+/// Windows shell (an old PowerShell parse error is still a safe nothing-ran
+/// failure). Pure so the platform-dependent decision is unit-testable on
+/// every host.
+fn readonly_sequence_refused_by_shell_kind(
+    kind: &crate::shell_dispatcher::ShellKind,
+    command: &str,
+) -> bool {
+    matches!(kind, crate::shell_dispatcher::ShellKind::Cmd)
+        && readonly_sequence_segments(command).is_some_and(|segments| segments.len() > 1)
+}
+
+/// The shell-lane command text for one admitted read-only compound: the
+/// POSIX `set -o pipefail` prefix is prepended only when a pipeline is
+/// present AND the resolved shell speaks POSIX pipefail — cmd.exe mangles
+/// the `;`-bearing fragment and PowerShell errors on the statement, while
+/// every non-Windows kind (sh/bash/`$SHELL`) honors it. Pure for tests.
+fn readonly_shell_bound_command(
+    kind: &crate::shell_dispatcher::ShellKind,
+    command: &str,
+) -> String {
+    let posix_pipefail = !matches!(
+        kind,
+        crate::shell_dispatcher::ShellKind::Cmd
+            | crate::shell_dispatcher::ShellKind::Pwsh
+            | crate::shell_dispatcher::ShellKind::WindowsPowerShell
+    );
+    if command.contains('|') && posix_pipefail {
+        format!("set -o pipefail; {command}")
+    } else {
+        command.to_string()
+    }
+}
+
 fn enforce_readonly_github_network_policy(
     command: &str,
     context: &ToolContext,
@@ -4757,7 +4785,8 @@ async fn execute_foreground_via_background(
     // its stdin stays at EOF — `interact` reports the closed stdin and points
     // at background=true, which is the lane for input-driven work. The
     // manager-side close is idempotent-safe after natural completion and on
-    // lanes that carry no pipe handle (PTY/persistent).
+    // lanes where the handle is absent (persistent) or its drop is inert
+    // (PTY: the reader holds the master).
     {
         let mut manager = context
             .shell_manager
@@ -5131,7 +5160,7 @@ impl ToolSpec for BashTool {
 
     fn description(&self) -> &'static str {
         if self.read_only {
-            "Inspect the workspace with the bounded read-only command subset. Single commands run directly as argv; a pipeline (`a | b`) is the one exception and runs through the detected shell with a `set -o pipefail` prefix (bash-like shells honor it; shells without pipefail may reject the prefix outright). Only action=run plus command, cwd, and timeout_ms are accepted."
+            "Inspect the workspace with the bounded read-only command subset. Single commands run directly as argv; pipelines (`a | b`), `;`/`&&`/`||` sequences, and cd-prefixed commands run through the detected shell instead (a `set -o pipefail` prefix is prepended on POSIX shells; a standalone `cd` affects only that one command). Only action=run plus command, cwd, and timeout_ms are accepted."
         } else {
             guidance::description()
         }

@@ -8273,6 +8273,7 @@ fn verifier_roster_description_states_the_bounded_contract() {
 /// `bash` — `wc -c` on a fixture — with the raw-shell deny list still
 /// installed, reaching the lane *through* it via
 /// `allows_bounded_readonly_bash`.
+#[cfg_attr(not(unix), ignore = "wc and unix paths")]
 #[tokio::test]
 async fn verifier_child_executes_a_bounded_readonly_bash_probe_for_evidence() {
     let (tmp, registry) = read_only_with_shell_registry();

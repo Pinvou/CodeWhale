@@ -86,9 +86,9 @@ pub(super) fn description() -> &'static str {
          \"interact\" sends stdin to a background task; \"cancel\" kills a background task. \
          Pass wait=false for a nonblocking task snapshot. Foreground mode is for bounded \
          commands; use background=true for work expected to take >5 seconds. Foreground \
-         commands run without a terminal stdin — interactive programs and a bare \
-         `$SHELL` receive EOF and exit; use background=true plus action=\"interact\" \
-         for input-driven workflows. \
+         commands without `interactive` or `combined_output` run without a terminal \
+         stdin — interactive programs and a bare `$SHELL` receive EOF and exit; use \
+         background=true plus action=\"interact\" for input-driven workflows. \
          Output is truncated per stream (~30KB: head/tail kept, middle summarized; \
          see metadata flags).",
             runtime_command_guidance()

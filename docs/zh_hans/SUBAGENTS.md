@@ -120,7 +120,7 @@ OUTPUT: VERDICT、EVIDENCE、GAPS、NEXT。
 - **`planner`** —— 当父代理有目标但没有可执行的分解。planner 写工件（`todo_write` 条目、响应体里的策略），但不执行它们。
 - **`reviewer`** —— 当已经有一个变更，父代理想要它被评分。reviewer 不打补丁——他们在发现里描述修复方案，这样如果判定是"修它"，父代理可以派一个 builder。
 - **`builder`** —— 当变更已经被明确指定、只需要落地。builder 保持严格的范围：最小改动，不做顺手重构，交回前跑一次快速验证。
-- **`verifier`** —— 当父代理需要测试套件或其他验证上的权威通过/失败结论。verifier 不修失败；他们记录失败的断言 + 栈，把修复候选放在 RISKS 下。
+- **`verifier`** —— 当父代理需要测试套件或其他验证上的权威通过/失败结论。verifier 不修失败；他们记录失败的断言 + 栈，把修复候选放在 RISKS 下。verifier 姿态从不写入；其 shell 是有界内置验证面，加上与检查角色相同的分类器门控只读探针通道（`wc`、`ls`、`cat`、`grep` 管道）用于取证。写入上限是只读，无界 shell 形式被拒绝（#5186），自定义命令也被拒绝——请改用具备写能力的角色。
 - **`consultant`** —— 当操作者想在更便宜的执行继续之前得到一个高杠杆的第二意见。consultant 读足够的材料来支撑一条建议，但不能写，也不能运行 shell 命令。`oracle` 和 `advisor` 只在加载更老的请求或持久化记录时被接受；新的提示词、回执和 UI 使用 `consultant`。
 - **`custom`** —— 只有当父代理需要显式约束工具集时。通过 legacy/internal 子代理记录上的 `allowed_tools` 字段传 allowlist；面向模型的 `agent` 工具刻意保持公共 schema 很小。
 

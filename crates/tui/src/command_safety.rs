@@ -570,7 +570,7 @@ fn readonly_tokens_admitted(trimmed: &str) -> bool {
 ///   spelling — with the operand additionally resolved against the
 ///   workspace at the execution seam;
 /// - read-only `od` dump forms (display radices plus numeric `-j`/`-N`),
-///   piped in either direction like any other segment;
+///   piped in either direction like any other segment on BSD and GNU hosts;
 /// - pipelines `a | b`, where **every** segment must itself be an admitted
 ///   read-only command (an empty segment — including `||` — rejects);
 /// - glob `*` arguments, the only wildcard the charset admits; the operand
@@ -579,14 +579,14 @@ fn readonly_tokens_admitted(trimmed: &str) -> bool {
 /// - `git -C <dir> <subcommand>` and `git --no-pager <subcommand>`, whose
 ///   remainder re-enters the existing per-subcommand option tables;
 /// - `find` without any mutating primary (`-delete`, `-exec`, `-execdir`,
-///   `-ok`, `-okdir`, `-fprintf`, `-fls`, `-fprint`, `-fprint0`);
+///   `-ok`, `-okdir`, `-truncate`, `-fprintf`, `-fls`, `-fprint`, `-fprint0`);
 /// - `sed -n '<range>p <files…>` — one numeric line-range print script (no
 ///   script verbs `w`/`r`/`e`/`s`), every later token a plain input file: a
 ///   later `-e`/`-f` script would escape the range-only contract;
 /// - `npm view|show|info <pkg>` — registry reads, matching the scout role's
 ///   network-capable read-only posture;
 /// - pure text filters `sort`, `uniq`, `cut`, `tr`, `comm` as pipeline
-///   stages.
+///   stages or standalone segments;
 ///
 /// Everything else keeps the parallel classifier's posture: no bare `&`
 /// backgrounding, redirects, command/parameter expansion, subshells, or
@@ -623,7 +623,7 @@ pub fn is_agent_readonly_shell_command(command: &str) -> bool {
 }
 
 /// Upper bound on `;`/`&&`/`||` segments in one admitted read-only command.
-pub(crate) const MAX_READONLY_SEQUENCE_SEGMENTS: usize = 32;
+const MAX_READONLY_SEQUENCE_SEGMENTS: usize = 32;
 
 /// Admit one sequence segment: every pipeline stage must be an admitted
 /// read-only command (`a | b` is two read-only commands, while `a | | b`,
@@ -1056,9 +1056,10 @@ fn is_agent_readonly_cd(tokens: &[String]) -> bool {
 }
 
 /// Admit read-only `od` (octal/hex dump) forms via the segment dispatcher.
-/// Only pure-read display options: the type selectors BSD/GNU `od` shares
-/// (`-b -c -d -o -s -x -h`) plus `-v`, the address radix `-A` restricted to
-/// its fixed value set, and the numeric skip/count pair `-j`/`-N`. `-w` and
+/// Only pure-read display options: the type selectors BSD `od` documents
+/// (`-b -c -d -o -s -x`, legacy `-h`) plus `-v`, the address radix `-A`
+/// restricted to its fixed value set, and the numeric skip/count pair
+/// `-j`/`-N`. `-w` and
 /// every output-affecting or GNU-extension flag stays out on purpose, and
 /// file operands flow through the normal workspace operand gate.
 fn is_agent_readonly_od(tokens: &[String]) -> bool {
@@ -1165,19 +1166,19 @@ fn readonly_options_are_allowed(canonical: &str, tokens: &[&str]) -> bool {
         "grep" => (1, "-n -i -v -E -F -w -x -l -L -c --line-number --ignore-case --invert-match --extended-regexp --fixed-strings --word-regexp --line-regexp --files-with-matches --files-without-match --count", "-m --max-count -A --after-context -B --before-context -C --context"),
         "rg" => (1, "-n --line-number -i --ignore-case -S --smart-case -F --fixed-strings -w --word-regexp -l --files-with-matches --hidden --no-ignore --no-heading --heading --stats --count --count-matches", "-g --glob -t --type -T --type-not -m --max-count -A --after-context -B --before-context -C --context --sort"),
         "fd" => (1, "-H --hidden -I --no-ignore -s --case-sensitive -i --ignore-case --strip-cwd-prefix", "-e --extension -t --type -d --max-depth -E --exclude"),
-        "gh issue list" => (3, "", "--json --assignee --author --jq --label --limit --mention --milestone --search --state --template -R --repo"),
-        "gh issue status" => (3, "", "--json --jq --template -R --repo"),
-        "gh issue view" | "gh pr view" => (3, "--comments", "--json --jq --template -R --repo"),
-        "gh pr checks" => (3, "--fail-fast --required", "--json --jq --template -R --repo"),
+        "gh issue list" => (3, "", "--json --assignee --author --jq -q --label --limit --mention --milestone --search --state --template -R --repo"),
+        "gh issue status" => (3, "", "--json --jq -q --template -R --repo"),
+        "gh issue view" | "gh pr view" => (3, "--comments", "--json --jq -q --template -R --repo"),
+        "gh pr checks" => (3, "--fail-fast --required", "--json --jq -q --template -R --repo"),
         "gh pr diff" => (3, "--name-only --patch", "--color -R --repo"),
-        "gh pr list" => (3, "--draft", "--json --app --assignee --author --base --head --jq --label --limit --search --state --template -R --repo"),
-        "gh pr status" => (3, "", "--json --conflict-status --jq --template -R --repo"),
-        "gh release list" => (3, "--exclude-drafts --exclude-pre-releases", "--json --jq --limit --order --template -R --repo"),
-        "gh release view" => (3, "", "--json --jq --template -R --repo"),
-        "gh repo view" => (3, "", "--json --branch --jq --template -R --repo"),
-        "gh run list" => (3, "", "--json --branch --commit --created --event --jq --limit --status --template --user --workflow -R --repo"),
-        "gh run view" => (3, "--exit-status --log --log-failed --verbose", "--json --attempt --job --jq --template -R --repo"),
-        "gh workflow list" => (3, "--all", "--json --jq --limit --template -R --repo"),
+        "gh pr list" => (3, "--draft", "--json --app --assignee --author --base --head --jq -q --label --limit --search --state --template -R --repo"),
+        "gh pr status" => (3, "", "--json --conflict-status --jq -q --template -R --repo"),
+        "gh release list" => (3, "--exclude-drafts --exclude-pre-releases", "--json --jq -q --limit --order --template -R --repo"),
+        "gh release view" => (3, "", "--json --jq -q --template -R --repo"),
+        "gh repo view" => (3, "", "--json --branch --jq -q --template -R --repo"),
+        "gh run list" => (3, "", "--json --branch --commit --created --event --jq -q --limit --status --template --user --workflow -R --repo"),
+        "gh run view" => (3, "--exit-status --log --log-failed --verbose", "--json --attempt --job --jq -q --template -R --repo"),
+        "gh workflow list" => (3, "--all", "--json --jq -q --limit --template -R --repo"),
         "gh workflow view" => (3, "--yaml", "--ref -R --repo"),
         _ => return false,
     };
