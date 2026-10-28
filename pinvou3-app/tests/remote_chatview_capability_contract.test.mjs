@@ -338,10 +338,19 @@ test('remote artifact preview is a keyboard-contained dialog and restores its tr
 });
 
 test('an uncertain remote action uses dedicated non-retry safety guidance', () => {
-  assert.match(chat, /function remoteActionFailureCode\(failure\)[\s\S]*?failure\?\.code \|\| failure\?\.message \|\| failure[\s\S]*?=== 'result_unknown'/,
-    'error objects and plain bridge rejections must preserve the uncertain-outcome code');
+  const helpers = sourceSection(chat, 'function remoteActionFailureCode', 'function constrainDialogFocus');
+  const { remoteActionFailureCode, remoteActionFailureCopyKey } = new Function(`${helpers};
+    return {remoteActionFailureCode, remoteActionFailureCopyKey};`)();
+  for (const failure of ['result_unknown', { code: 'result_unknown' }, { message: 'result_unknown' }]) {
+    assert.equal(remoteActionFailureCode(failure), 'result_unknown');
+    assert.equal(remoteActionFailureCopyKey(remoteActionFailureCode(failure)), 'actionResultUnknown');
+  }
+  for (const failure of ['private failure details', '__proto__', new Error('private error text')]) {
+    assert.equal(remoteActionFailureCode(failure), 'errorGeneric');
+    assert.equal(remoteActionFailureCopyKey(remoteActionFailureCode(failure)), 'actionFailed');
+  }
   assert.match(chat, /setRemoteActionError\(remoteActionFailureCode\(failure\)\)/);
-  assert.match(chat, /remoteActionError === 'result_unknown'[\s\S]*?t\.remoteConversation\.actionResultUnknown/);
+  assert.match(chat, /t\.remoteConversation\[remoteActionFailureCopyKey\(remoteActionError\)\]/);
   assert.match(chat, /remoteChatActive && remoteActionError[\s\S]*?<div role="alert"/,
     'the uncertain-outcome guidance must be announced as an alert');
   for (const language of ['zh', 'en', 'ja']) {
