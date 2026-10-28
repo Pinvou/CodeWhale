@@ -4332,8 +4332,20 @@ fn enforce_readonly_segment_operands(
         // operand against the workspace exactly like the shell's own working
         // directory and reuse the same refusal tag, so a destination outside
         // the workspace (absolute, or a relative symlink pointing out) fails
-        // with the boundary the model already knows.
+        // with the boundary the model already knows. The classifier's shape
+        // rule (`readonly_cd_operand_admitted`) is then applied here again so
+        // the seam never folds onto a spelling the shell reinterprets —
+        // `cd =ls` on zsh expands to `/bin/ls`, the shell's `cd` fails, and a
+        // `;`/`||` sequence continues in the original directory while a fold
+        // onto a literal `=ls` directory would have judged every later
+        // operand somewhere the shell never went.
         let target = argv.get(1).map(String::as_str).unwrap_or_default();
+        if argv.len() != 2 {
+            return Err(ToolError::permission_denied(format!(
+                "[shell.readonly.cwd.shape] Read-only `cd` takes exactly one relative directory operand; refused {:?}.",
+                argv[1..].join(" ")
+            )));
+        }
         let joined = effective_cwd.join(target);
         let resolved = joined.canonicalize().map_err(|error| {
             ToolError::permission_denied(format!(
@@ -4343,6 +4355,14 @@ fn enforce_readonly_segment_operands(
         if !roots.iter().any(|root| resolved.starts_with(root)) {
             return Err(ToolError::permission_denied(format!(
                 "[shell.readonly.cwd.outside_workspace] Read-only `cd` operand {target:?} resolves outside the workspace."
+            )));
+        }
+        // Judged after containment so an outside destination keeps the
+        // boundary message; what remains are inside-resolving spellings the
+        // shell would still reinterpret.
+        if !crate::command_safety::readonly_cd_operand_admitted(target) {
+            return Err(ToolError::permission_denied(format!(
+                "[shell.readonly.cwd.shape] Read-only `cd` takes exactly one relative directory operand without `..`, `~`, `=`, `\\`, or a wildcard; refused {target:?}."
             )));
         }
         // The fold below is only exact while the shell's `cd` succeeds. A
@@ -4356,6 +4376,21 @@ fn enforce_readonly_segment_operands(
         if !resolved.is_dir() {
             return Err(ToolError::permission_denied(format!(
                 "[shell.readonly.cwd.not_a_directory] Read-only `cd` operand {target:?} is not a directory; the sequence would continue in the original working directory while the gate judged it under {target:?}."
+            )));
+        }
+        // A directory the process cannot enter fails the shell's `cd` just as
+        // deterministically (`chdir` needs search permission on the
+        // destination itself, while `canonicalize`/`is_dir` need it only on
+        // the ancestors), so a mode-000 or foreign-owned directory would lie
+        // to the fold the same way. Resolving `<dir>/.` forces a lookup
+        // inside the directory — the exact permission `chdir` needs — without
+        // listing it, so a directory that is searchable but unreadable stays
+        // admitted exactly as the shell admits it. The remaining gap is the
+        // race between this probe and the shell's `cd`, which no pre-spawn
+        // check can close.
+        if std::fs::metadata(resolved.join(".")).is_err() {
+            return Err(ToolError::permission_denied(format!(
+                "[shell.readonly.cwd.unsearchable] Read-only `cd` operand {target:?} is a directory the shell could not enter; the sequence would continue in the original working directory while the gate judged it under {target:?}."
             )));
         }
         return Ok(resolved);

@@ -1074,24 +1074,35 @@ fn is_agent_readonly_npm(tokens: &[String]) -> bool {
 }
 
 /// Admit exactly `cd <one relative path>`: one operand, relative, no `..`,
-/// no flags, no wildcard. Bare `cd` (home directory), absolute targets,
-/// `~`/drive shapes, a `*` anywhere in the operand, and every flag spelling
-/// refuse here. The wildcard refusal is load-bearing: the execution seam
-/// canonicalizes the operand *spelling*, while a POSIX shell expands `cd a*`
-/// and `cd` takes the first match (the rest are ignored) — a literal `a*`
-/// directory next to an earlier-sorting `a -> ..` symlink would be judged
-/// inside and entered outside. The operand is additionally resolved against
-/// the workspace by the execution seam
+/// no flags, no wildcard, no zsh command-path (`=`) spelling. Bare `cd` (home
+/// directory), absolute targets, `~`/drive shapes, a `*` anywhere in the
+/// operand, and every flag spelling refuse here. The wildcard refusal is
+/// load-bearing: the execution seam canonicalizes the operand *spelling*,
+/// while a POSIX shell expands `cd a*` and `cd` takes the first match (the
+/// rest are ignored) — a literal `a*` directory next to an earlier-sorting
+/// `a -> ..` symlink would be judged inside and entered outside. The `=`
+/// refusal is the cd-shaped twin of the operand gate's rule: zsh expands
+/// `=cmd` (its default EQUALS option) to the command's absolute path, so a
+/// directory literally named `=ls` would be canonicalized and folded by the
+/// seam while the shell's `cd` fails on `/bin/ls` and a `;`/`||` sequence
+/// continues in the original directory. The operand is additionally resolved
+/// against the workspace by the execution seam
 /// (`enforce_readonly_workspace_operands`, which reuses the
 /// `[shell.readonly.cwd.outside_workspace]` refusal), so a relative
 /// directory whose destination escapes the workspace — a symlink, say — is
 /// still refused before any shell runs.
 fn is_agent_readonly_cd(tokens: &[String]) -> bool {
-    if tokens.len() != 2 {
-        return false;
-    }
-    let target = &tokens[1];
-    if target.starts_with('-')
+    tokens.len() == 2 && readonly_cd_operand_admitted(&tokens[1])
+}
+
+/// The `cd` operand shape rule, shared by the classifier and the execution
+/// seam so the two layers cannot drift: a spelling the classifier admits must
+/// be a spelling the seam is willing to canonicalize.
+pub(crate) fn readonly_cd_operand_admitted(target: &str) -> bool {
+    if target.is_empty()
+        || target.starts_with('-')
+        || target.starts_with('=')
+        || target.starts_with('~')
         || target.contains('\\')
         || target.contains('*')
         || looks_like_windows_absolute_path(target)
@@ -2585,6 +2596,13 @@ mod tests {
             "cd *",
             "cd su* && wc -c notes.md",
             "pwd; cd s*/deeper",
+            // zsh's EQUALS expansion turns `cd =ls` into `cd /bin/ls`: the
+            // shell's `cd` fails while the seam would have folded onto a
+            // literal `=ls` directory.
+            "cd =ls; cat link",
+            "cd =ls || cat link",
+            "pwd; cd =sh",
+            "cd ''",
             // A pipeline stage runs in a subshell: its `cd` persists nowhere
             // and would end the gate's operand walk at the `|`.
             "cd sub | cat /etc/passwd",
