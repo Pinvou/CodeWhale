@@ -532,7 +532,7 @@ state.artifactChange = {
 要求：
 
 - 每次收到有效 `artifact:disk` 事件都递增 `seq`，即使 `state.artifacts` 列表没有新增条目也要 `notify()`。
-- `path` 使用事件 payload 的绝对路径；比较前用现有 `normalizedPath()`（现居 `artifact-tracker.js`）统一分隔符和大小写策略。
+- `path` 使用事件 payload 的绝对路径；比较前用现有 `normalizedPath()`（入口壳在 `artifact-tracker.js`、实现在 `shared/bridge-shared-helpers.js`）统一分隔符——它只做 `\` → `/` 归一、不含大小写；大小写由面板侧本地比较另行处理（现行 `ArtifactsPanel.jsx` 的 `normalizeArtifactPath` 在归一分隔符后再 `toLowerCase()`）。
 - `sessionId` 来自 payload，用于避免后台 session 的文件变化刷新当前 session 面板。
 - `event === "removed"` 时也要发出变更，让当前预览能处理删除态。
 
