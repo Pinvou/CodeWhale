@@ -73,11 +73,10 @@ mod eval;
 mod install;
 #[path = "../support/llm_client.rs"]
 mod llm_client;
-#[path = "../../src/model_catalog.rs"]
-mod model_catalog;
-#[path = "../../src/models.rs"]
-#[allow(dead_code)]
-mod models;
+// Shared canned events must use the same types as the public Engine boundary.
+mod models {
+    pub use codewhale_tui::models::*;
+}
 #[path = "../../src/network_policy.rs"]
 mod network_policy;
 #[path = "../../src/skills/package_digest.rs"]
@@ -102,6 +101,7 @@ mod exec_turn_usage;
 mod integration_mock_llm;
 mod lifecycle_outbox_exec;
 mod palette_audit;
+mod partial_input_engine;
 mod protocol_recovery;
 mod skill_cli;
 mod telemetry_contract;
