@@ -1,6 +1,7 @@
 import re
 from ci_routing_test_support import default_ci_routing
 import os
+import shutil
 import subprocess
 import tempfile
 import textwrap
@@ -3947,11 +3948,25 @@ class CiGatePolicyTests(unittest.TestCase):
         # 与 stderr 透传、updates 残留 journal 门、TERM 与 EXIT 双兜底。
         self.assertGreaterEqual(source.count("repair_dpkg_state"), 2)
         self.assertIn("run_to 60 dpkg --configure -a", source)
+        self.assertIn("wait_deadline=$(( $(date +%s) + 40 ))", source)
         self.assertIn(
-            'warn "dpkg --configure -a (attempt ${attempt}/3) failed, retrying${configure_err:+: ${configure_err}}"',
+            "    if (( attempt_secs >= 2 )) || (( $(date +%s) >= wait_deadline )); then",
             source,
         )
-        self.assertIn("updates/[0-9]*", source)
+        self.assertIn("    sleep 5\n  done", source)
+        self.assertIn(
+            'warn "dpkg --configure -a (attempt ${attempt}) failed after ${attempt_secs}s, retrying${configure_err:+: ${configure_err}}"',
+            source,
+        )
+        self.assertIn('log "dpkg admin state repaired (configure attempt ${attempt})"', source)
+        self.assertIn(
+            'compgen -G "${PINVOU3_CI_DPKG_UPDATES_DIR:-/var/lib/dpkg/updates}/[0-9]*" >/dev/null',
+            source,
+        )
+        self.assertIn(
+            'warn "dpkg --configure -a did not succeed; later apt-get steps in this job may still fail until it is run manually${audit_out:+ (dpkg --audit still reports: ${audit_out})}"',
+            source,
+        )
         self.assertIn("trap 'exit 143' TERM", source)
         self.assertIn("trap repair_dpkg_state EXIT", source)
 
@@ -5690,6 +5705,229 @@ class ReleaseDiskAndImagePolicyTests(unittest.TestCase):
                     " must not be added back (pulled in transitively by"
                     " libwebkit2gtk-4.1-dev or not needed by the build)",
                 )
+
+
+@unittest.skipUnless(shutil.which("bash"), "bash is required to run the script")
+@unittest.skipIf(hasattr(os, "geteuid") and os.geteuid() == 0,
+                 "the host-touching script must not be exercised as root")
+class CiMemorySetupRepairBehaviorTests(unittest.TestCase):
+    """repair_dpkg_state 的行为级回归(2026-10-28 评审轮 3)。
+
+    合同断言只钉文本:把修复函数清成空实现、保留注释,静态钉仍可能全绿。
+    这里以桩替身端到端运行真实脚本(仅中和 root guard),用假时钟 + 假
+    sleep 把 40s 等锁预算压缩到毫秒级,覆盖:忙锁快败按钟重试、预算内
+    (>20s)释放原地恢复、预算外由 EXIT 再入兜住、真实失败早停不烧预算、
+    干净状态零 configure、journal-only 与 audit 不可用也进修复。生产修复
+    行为失效(函数体被清空等)时,本类必红。
+    """
+
+    # 假时钟基准:脚本启动到 repair 之间没有真实 sleep,桩时钟仍在此值。
+    BASE = 1000000000
+
+    @classmethod
+    def setUpClass(cls):
+        cls.src = (ROOT / "scripts" / "ci-memory-setup.sh").read_text(encoding="utf-8")
+        guard = "if [[ ${EUID} -ne 0 ]]; then"
+        if guard not in cls.src:
+            raise AssertionError("root guard drifted; the behavior harness must be updated")
+
+    def setUp(self):
+        tmp = Path(tempfile.mkdtemp(prefix="memory-setup-repair-"))
+        self.addCleanup(shutil.rmtree, tmp, ignore_errors=True)
+        self.state = tmp / "state"
+        self.state.mkdir()
+        self.bin = tmp / "bin"
+        self.bin.mkdir()
+        self.updates = tmp / "updates"
+        self.updates.mkdir()
+        self.clock = self.state / "clock"
+        self.clock.write_text(str(self.BASE))
+        for name, body in self.STUBS.items():
+            stub = self.bin / name
+            stub.write_text(body)
+            stub.chmod(0o755)
+
+    # dpkg 桩的行为:--audit 按 state/audit-dirty、state/audit-fail 给出
+    # 脏/不可用;--configure -a 在 release-at 之前模拟忙锁毫秒级快败
+    # (rc 2),slow-fail 模拟真实失败(推进假时钟 30s 后 rc 1);成功即
+    # 清理脏标记与残留 journal,对应真实 dpkg 修复后的收敛状态。
+    STUBS = {
+        "date": """#!/usr/bin/env bash
+# Fake clock: the script only ever asks for +%s (epoch seconds).
+if [[ ${1:-} == "+%s" ]]; then
+  cat "$REPAIR_TEST_STATE/clock"
+  exit 0
+fi
+exit 0
+""",
+        "sleep": """#!/usr/bin/env bash
+# Fake sleep: advance the fake clock instead of really sleeping.
+case ${1:-} in
+  (*[!0-9]*|"") exit 0 ;;
+esac
+echo $(( $(cat "$REPAIR_TEST_STATE/clock") + $1 )) > "$REPAIR_TEST_STATE/clock"
+""",
+        "timeout": """#!/usr/bin/env bash
+# run_to invokes `timeout -k 15 SECS CMD...`; pass-through keeps the call
+# shape while the fake clock governs all timing.
+shift 3
+exec "$@"
+""",
+        "sysctl": """#!/usr/bin/env bash
+exit 0
+""",
+        "modprobe": """#!/usr/bin/env bash
+echo "modprobe: FATAL: Module zram not found in directory /lib/modules/$(uname -r)" >&2
+exit 1
+""",
+        "apt-get": """#!/usr/bin/env bash
+echo "E: could not get lock /var/lib/dpkg/lock-frontend - open" >&2
+exit 100
+""",
+        "swapon": """#!/usr/bin/env bash
+case ${1:-} in
+  (--show*) exit 0 ;;
+esac
+echo "swapon: ${1:-}: Invalid argument" >&2
+exit 1
+""",
+        "swapoff": """#!/usr/bin/env bash
+exit 1
+""",
+        "findmnt": """#!/usr/bin/env bash
+exit 1
+""",
+        "df": """#!/usr/bin/env bash
+exit 1
+""",
+        "fallocate": """#!/usr/bin/env bash
+exit 1
+""",
+        "mkswap": """#!/usr/bin/env bash
+exit 1
+""",
+        "dpkg": """#!/usr/bin/env bash
+state="${REPAIR_TEST_STATE:?}"
+echo "dpkg $* @$(cat "$state/clock")" >> "$state/dpkg-calls.log"
+if [[ ${1:-} == --audit ]]; then
+  if [[ -f "$state/audit-fail" ]]; then
+    exit 42
+  fi
+  if [[ -f "$state/audit-dirty" ]]; then
+    echo "The following packages have been kept back:"
+    echo "  linux-image-6.8.0-999-generic"
+  fi
+  exit 0
+fi
+if [[ ${1:-} == --configure ]]; then
+  if [[ -f "$state/release-at" ]]; then
+    now="$(cat "$state/clock")"
+    if (( now < $(cat "$state/release-at") )); then
+      echo "dpkg frontend lock was locked by another process with pid 2374" >&2
+      exit 2
+    fi
+  fi
+  if [[ -f "$state/slow-fail" ]]; then
+    now="$(cat "$state/clock")"
+    echo $(( now + 30 )) > "$state/clock"
+    echo "dpkg: error processing archive" >&2
+    exit 1
+  fi
+  rm -f "$state/audit-dirty" "$state/audit-fail"
+  if [[ -n ${PINVOU3_CI_DPKG_UPDATES_DIR:-} ]]; then
+    rm -f "${PINVOU3_CI_DPKG_UPDATES_DIR}"/[0-9]* 2>/dev/null
+  fi
+  exit 0
+fi
+exit 0
+""",
+    }
+
+    def _configure_calls(self):
+        log = self.state / "dpkg-calls.log"
+        if not log.exists():
+            return []
+        return [line for line in log.read_text().splitlines() if "--configure" in line]
+
+    def _run_script(self):
+        env = dict(os.environ)
+        env["PATH"] = f"{self.bin}{os.pathsep}{env.get('PATH', '')}"
+        env["REPAIR_TEST_STATE"] = str(self.state)
+        env["PINVOU3_CI_DPKG_UPDATES_DIR"] = str(self.updates)
+        env.pop("GITHUB_ACTIONS", None)
+        script = self.state / "ci-memory-setup.sh"
+        script.write_text(self.src.replace(
+            "if [[ ${EUID} -ne 0 ]]; then", "if [[ 0 -ne 0 ]]; then"
+        ))
+        proc = subprocess.run(
+            ["bash", str(script)], capture_output=True, text=True, env=env, timeout=60,
+        )
+        self.assertEqual(proc.returncode, 0, f"script failed; stderr:\n{proc.stderr}")
+        return proc
+
+    def test_busy_lock_released_after_20s_is_repaired_in_flow(self):
+        # 评审轮 3 回归:忙锁在 ~25s(>20s)后释放,按钟重试必须原地恢复,
+        # 而不是像 3 次×5s 固定重试那样 ~10s 就耗尽等锁窗口。
+        (self.state / "audit-dirty").write_text("1")
+        (self.state / "release-at").write_text(str(self.BASE + 25))
+        proc = self._run_script()
+        calls = self._configure_calls()
+        # 尝试落在假时钟 0,5,10,15,20,25 —— 25s 那次锁已释放并成功。
+        self.assertEqual(len(calls), 6, calls)
+        self.assertIn("dpkg admin state repaired (configure attempt 6)", proc.stdout)
+        self.assertNotIn("did not succeed", proc.stderr)
+        # EXIT 再入重新过门:状态已收敛,不产生额外 configure。
+        self.assertEqual(len(calls), 6, calls)
+
+    def test_lock_held_past_budget_gives_up_loudly_and_exit_round_still_recovers(self):
+        (self.state / "audit-dirty").write_text("1")
+        (self.state / "release-at").write_text(str(self.BASE + 45))
+        proc = self._run_script()
+        calls = self._configure_calls()
+        # in-flow 尝试落在 0..40 共 9 次(40s 预算耗尽,响亮放弃并上报
+        # 仍脏的 audit);EXIT 再入自 40s 起新预算,45s 释放后第 2 次恢复。
+        self.assertEqual(len(calls), 11, calls)
+        self.assertTrue(
+            all(int(c.rsplit("@", 1)[1]) < self.BASE + 41 for c in calls[:9]), calls,
+        )
+        self.assertEqual(int(calls[9].rsplit("@", 1)[1]), self.BASE + 40, calls)
+        self.assertEqual(int(calls[10].rsplit("@", 1)[1]), self.BASE + 45, calls)
+        self.assertIn("dpkg --configure -a did not succeed", proc.stderr)
+        self.assertIn("dpkg --audit still reports", proc.stderr)
+        self.assertIn("dpkg admin state repaired (configure attempt 2)", proc.stdout)
+
+    def test_real_configure_failure_stops_early_without_burning_the_budget(self):
+        (self.state / "audit-dirty").write_text("1")
+        (self.state / "slow-fail").write_text("1")
+        proc = self._run_script()
+        calls = self._configure_calls()
+        # 尝试本身跑了 30s 仍失败 = 真实错误,等待无益:每轮 1 次即早停,
+        # in-flow + EXIT 再入共 2 次,而不是把 40s 等锁预算烧满。
+        self.assertEqual(len(calls), 2, calls)
+        self.assertIn("failed after 30s", proc.stderr)
+        self.assertIn("did not succeed", proc.stderr)
+
+    def test_clean_state_never_invokes_configure(self):
+        proc = self._run_script()
+        self.assertEqual(self._configure_calls(), [])
+        self.assertNotIn("interrupted state", proc.stderr)
+        self.assertNotIn("repaired", proc.stdout)
+
+    def test_leftover_updates_journal_alone_triggers_repair(self):
+        # audit 静默但 updates/ 残留全数字 journal —— apt 判 interrupted 的
+        # 同款依据,必须进修复;成功后 journal 被真实收敛(桩同步清理)。
+        (self.updates / "12345").write_text("journal\n")
+        proc = self._run_script()
+        calls = self._configure_calls()
+        self.assertEqual(len(calls), 1, calls)
+        self.assertIn("dpkg admin state repaired (configure attempt 1)", proc.stdout)
+
+    def test_unrunnable_audit_falls_through_to_repair(self):
+        (self.state / "audit-fail").write_text("1")
+        proc = self._run_script()
+        calls = self._configure_calls()
+        self.assertEqual(len(calls), 1, calls)
+        self.assertIn("dpkg admin state repaired (configure attempt 1)", proc.stdout)
 
 
 if __name__ == "__main__":

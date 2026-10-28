@@ -68,6 +68,10 @@
 #                                  PINVOU3_CI_ENABLE_ZRAM opt-in; zram is
 #                                  now default-on. There is no disk-swap
 #                                  switch: the /mnt swapfile is mandatory.
+# PINVOU3_CI_DPKG_UPDATES_DIR     override the dpkg updates/ spool that
+#                                 repair_dpkg_state's journal gate checks;
+#                                 test-only hook, production keeps the
+#                                 real /var/lib/dpkg/updates.
 #
 # Kernel tunables (each knob independent, failure only warns):
 #   vm.swappiness=130 (>=100 shifts reclaim towards anonymous pages, i.e.
@@ -148,33 +152,58 @@ any_swap_active() {
 # install poisoned rust-test's own system-dependency step ~40s later. Best-
 # effort repair. dpkg does NOT wait for a busy frontend lock (it fails in
 # milliseconds, unlike apt's DPkg::Lock::Timeout), and the dpkg orphaned by a
-# timeout kill can hold that lock a few seconds longer, so configure is
-# retried across short sleeps instead of failing on the first attempt; the
-# EXIT-trap re-entry below re-checks the state and covers any longer
-# straggler. Once the lock is free the remaining configure work is mostly the
-# initramfs regen, ~21-25s on runners. No-op on a clean admin state: audit
-# silent AND no leftover all-digit journal under updates/ — the same leftover
-# journal apt's own "dpkg was interrupted" check keys on (audit alone misses
-# the journal-applied-but-unconsolidated window). An audit that cannot run
-# also falls through to the repair, where configure -a no-ops on a genuinely
-# clean state.
+# timeout kill keeps that lock while it winds down — in the incident it was
+# still held 26ms after the kill and free within 40s — so a fast-failing
+# configure is retried on a clock (up to 40s of waiting), not against a
+# fixed attempt count. An attempt that ran for >=2s already did real work
+# and hit a real error; waiting cannot fix that, so the loop stops early.
+# Every attempt keeps the full 60s cap, so once the lock frees, the
+# remaining configure work (mostly the initramfs regen, ~21-25s on runners)
+# is never squeezed by the waiting budget. Lock files are never removed or
+# preempted — recovery only waits for release. The EXIT-trap re-entry below
+# re-checks the state and covers any longer straggler. No-op on a clean
+# admin state: audit silent AND no leftover all-digit journal under
+# updates/ — the same leftover journal apt's own "dpkg was interrupted"
+# check keys on (audit alone misses the journal-applied-but-unconsolidated
+# window). An audit that cannot run also falls through to the repair, where
+# configure -a no-ops on a genuinely clean state.
 repair_dpkg_state() {
-  local attempt audit_out configure_err
+  local attempt=0 audit_out configure_err attempt_start attempt_secs wait_deadline
   if ! audit_out="$(dpkg --audit 2>/dev/null)"; then
     audit_out="unavailable"
   fi
-  if [[ -z ${audit_out} ]] && ! compgen -G '/var/lib/dpkg/updates/[0-9]*' >/dev/null; then
+  # PINVOU3_CI_DPKG_UPDATES_DIR exists only so isolated behavior tests can
+  # point the gate at a spool they own; production uses the real dpkg path.
+  if [[ -z ${audit_out} ]] && ! compgen -G "${PINVOU3_CI_DPKG_UPDATES_DIR:-/var/lib/dpkg/updates}/[0-9]*" >/dev/null; then
     return 0
   fi
   warn "dpkg was left in an interrupted state; running 'dpkg --configure -a' so later apt-get steps in this job do not fail"
-  for attempt in 1 2 3; do
+  # 40s matches the observed bound on how long the orphaned dpkg held the
+  # frontend lock after its parent was killed (26ms-40s in the incident).
+  # Wrapper math stays honest: this script no longer installs kernel
+  # packages (main's no-install policy), so the repair's own worst case is
+  # the wait budget plus one 60s-capped configure — it only approaches the
+  # workflow-side 240s wrapper when configure itself hangs repeatedly,
+  # which is the documented wrapper-kill residual.
+  wait_deadline=$(( $(date +%s) + 40 ))
+  while :; do
+    attempt=$((attempt + 1))
+    attempt_start="$(date +%s)"
     if configure_err="$(run_to 60 dpkg --configure -a 2>&1)"; then
+      log "dpkg admin state repaired (configure attempt ${attempt})"
       return 0
     fi
-    warn "dpkg --configure -a (attempt ${attempt}/3) failed, retrying${configure_err:+: ${configure_err}}"
-    (( attempt < 3 )) && sleep 5
+    attempt_secs=$(( $(date +%s) - attempt_start ))
+    warn "dpkg --configure -a (attempt ${attempt}) failed after ${attempt_secs}s, retrying${configure_err:+: ${configure_err}}"
+    if (( attempt_secs >= 2 )) || (( $(date +%s) >= wait_deadline )); then
+      break
+    fi
+    sleep 5
   done
-  warn "dpkg --configure -a did not succeed; later apt-get steps in this job may still fail until it is run manually"
+  # Make the give-up verifiable: surface what dpkg still reports so the log
+  # shows exactly what a later manual repair has to handle.
+  audit_out="$(dpkg --audit 2>/dev/null || true)"
+  warn "dpkg --configure -a did not succeed; later apt-get steps in this job may still fail until it is run manually${audit_out:+ (dpkg --audit still reports: ${audit_out})}"
 }
 # EXIT trap is the backstop for kill paths outside setup_zram. The workflow-
 # side `timeout 240` wrapper TERM's sudo->bash; route TERM through exit so
