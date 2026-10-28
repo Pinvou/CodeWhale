@@ -3342,11 +3342,16 @@
 
   // web+tauriMain 共享（FE14 wave 6）
   function renderMarkdown(text) {
-    if (window.PinvouMarkdownRenderer && typeof window.PinvouMarkdownRenderer.renderMarkdown === "function") {
-      return window.PinvouMarkdownRenderer.renderMarkdown(text);
-    }
-    if (window.PinvouMarkdownBridgeFallback && typeof window.PinvouMarkdownBridgeFallback.renderMarkdown === "function") {
-      return window.PinvouMarkdownBridgeFallback.renderMarkdown(text);
+    try {
+      if (window.PinvouMarkdownRenderer && typeof window.PinvouMarkdownRenderer.renderMarkdown === "function") {
+        return window.PinvouMarkdownRenderer.renderMarkdown(text);
+      }
+      if (window.PinvouMarkdownBridgeFallback && typeof window.PinvouMarkdownBridgeFallback.renderMarkdown === "function") {
+        return window.PinvouMarkdownBridgeFallback.renderMarkdown(text);
+      }
+    } catch (_) {
+      // A failed renderer must not escape into stream/timeline cleanup or
+      // retry another parser. Never expose partially rendered, unsanitized HTML.
     }
     return escapeHtml(text || "");
   }
