@@ -46,6 +46,7 @@ SELECT 'CREATE ROLE token_cap_policy_deployer NOLOGIN'
 WHERE NOT EXISTS (SELECT FROM pg_roles WHERE rolname = 'token_cap_policy_deployer') \gexec
 SELECT 'CREATE ROLE token_schema_owner NOLOGIN'
 WHERE NOT EXISTS (SELECT FROM pg_roles WHERE rolname = 'token_schema_owner') \gexec
+GRANT token_gateway TO token_schema_owner WITH INHERIT TRUE, SET TRUE;
 SELECT format('CREATE ROLE token_migrator LOGIN NOINHERIT PASSWORD %L', :'token_migration_password')
 WHERE NOT EXISTS (SELECT FROM pg_roles WHERE rolname = 'token_migrator') \gexec
 SELECT format('CREATE ROLE token_policy_operator LOGIN NOINHERIT PASSWORD %L', :'token_policy_password')
@@ -55,6 +56,7 @@ SELECT 'CREATE ROLE billing_wallet_receipt_deployer NOLOGIN'
 WHERE NOT EXISTS (SELECT FROM pg_roles WHERE rolname = 'billing_wallet_receipt_deployer') \gexec
 SELECT 'CREATE ROLE billing_schema_owner NOLOGIN'
 WHERE NOT EXISTS (SELECT FROM pg_roles WHERE rolname = 'billing_schema_owner') \gexec
+GRANT billing_service TO billing_schema_owner WITH INHERIT TRUE, SET TRUE;
 SELECT format('CREATE ROLE billing_migrator LOGIN NOINHERIT PASSWORD %L', :'billing_migration_password')
 WHERE NOT EXISTS (SELECT FROM pg_roles WHERE rolname = 'billing_migrator') \gexec
 GRANT billing_service, billing_wallet_receipt_deployer, billing_schema_owner TO billing_migrator;
