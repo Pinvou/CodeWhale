@@ -313,8 +313,15 @@ pub struct ModelsView {
 }
 
 #[tauri::command]
-pub async fn list_models() -> Result<ModelsView, String> {
-    let prefs = refresh_safe_prefs(UserPrefs::load());
+pub async fn list_models(require_readable: Option<bool>) -> Result<ModelsView, String> {
+    // Destructive follow-up actions must distinguish unreadable settings from
+    // the compatible default list used by ordinary model selectors. The strict
+    // snapshot never writes normalization or touches the credential store.
+    let prefs = if require_readable == Some(true) {
+        UserPrefs::load_existing_read_only_model_snapshot().map_err(str::to_owned)?
+    } else {
+        refresh_safe_prefs(UserPrefs::load())
+    };
     Ok(ModelsView {
         models: prefs
             .advanced
@@ -676,7 +683,7 @@ pub(super) fn delete_model_if_store_link_inner(
 ) -> Result<bool, String> {
     let removed = std::cell::Cell::new(false);
     let reference = std::cell::RefCell::new(None);
-    UserPrefs::update_transaction_with_post_commit(
+    UserPrefs::update_readable_model_transaction_with_post_commit(
         |prefs| {
             let Some(model) = prefs.model_by_id(id) else {
                 return Ok(());
@@ -1753,6 +1760,9 @@ pub async fn save_search_settings_and_restart(
 }
 // 凭据状态迁移(`mark_*` / `clear_plaintext_key`)自 prefs 的密封 trait 提供。
 use crate::platform::prefs::CredentialStateOps;
+
+#[cfg(test)]
+mod model_snapshot_tests;
 
 #[cfg(test)]
 mod tests {

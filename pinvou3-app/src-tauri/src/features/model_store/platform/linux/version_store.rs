@@ -3,7 +3,12 @@ use super::{card_update, db};
 use rusqlite::{OptionalExtension, params};
 use serde::{Deserialize, Serialize};
 
+mod download_lease;
 mod downloads;
+pub(super) use download_lease::{
+    BUSY as DOWNLOAD_STILL_RUNNING, DownloadLease, acquire as acquire_download_lease,
+    try_acquire as try_download_lease,
+};
 pub use downloads::{DownloadReservation, download_paths};
 
 pub(super) fn retire_download_on(
@@ -106,6 +111,8 @@ fn wait_operation_lock(
     }
 }
 
+#[cfg(test)]
+mod recovery_tests;
 #[cfg(test)]
 mod resource_lock_tests;
 
@@ -427,17 +434,76 @@ pub fn recover_interrupted(card_id: &str) -> Result<(), String> {
     let file =
         crate::platform::filesystem::open_private_lock_file(&lock_dir.join(format!("{safe}.lock")))
             .map_err(|e| e.to_string())?;
-    if file.try_lock().is_err() {
+    match file.try_lock() {
+        Ok(()) => {
+            if !has_interrupted_versions(card_id)? {
+                return Ok(());
+            }
+            let Some(_download) = try_download_lease(card_id)? else {
+                return Ok(());
+            };
+            recover_interrupted_records(card_id)
+        }
+        Err(std::fs::TryLockError::WouldBlock) => Ok(()),
+        Err(std::fs::TryLockError::Error(error)) => Err(error.to_string()),
+    }
+}
+
+/// The service calls this immediately after acquiring the canonical card lock,
+/// before starting any new work. Its own lock would otherwise make quota
+/// recovery skip stale revisions of the card being retried.
+/// The caller must retain that exclusively locked file throughout this call.
+pub(super) fn recover_interrupted_while_locked(
+    card_id: &str,
+    _operation_lock: &std::fs::File,
+) -> Result<(), String> {
+    // An unrelated legacy receipt must not block a card with no stale plan.
+    // Ordinary plans also matter: an orphan writer must prevent same-card
+    // deployment/deletion even when it did not create an isolated version.
+    if !has_interrupted_versions(card_id)? && !downloads::has_pending_plan(card_id)? {
         return Ok(());
     }
-    for mut version in list(Some(card_id))?
+    let _download = try_download_lease(card_id)?.ok_or(DOWNLOAD_STILL_RUNNING)?;
+    // The newly started isolated download will hold this same card's lease.
+    // Retire the old ordinary plan now, before that live lease can hide a
+    // crashed ordinary writer from retained_download_bytes' recovery probe.
+    downloads::release_plan(card_id)?;
+    recover_interrupted_records(card_id)
+}
+
+fn has_interrupted_versions(card_id: &str) -> Result<bool, String> {
+    connection()?
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM model_versions WHERE card_id=?1 AND state='downloading')",
+            [card_id],
+            |row| row.get(0),
+        )
+        .map_err(|e| e.to_string())
+}
+
+fn recover_interrupted_records(card_id: &str) -> Result<(), String> {
+    connection()?
+        .execute(
+            "UPDATE model_versions SET state='failed', planned_bytes=0,
+             error='version_download_interrupted' WHERE card_id=?1 AND state='downloading'",
+            [card_id],
+        )
+        .map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+/// Call while holding the quota reservation lock, before measuring retained
+/// bytes. The normal order is card -> resource -> download -> quota. Recovery only tries
+/// other card locks and never waits for them, so active operations keep their
+/// reservations without introducing an inverse lock wait.
+pub fn recover_interrupted_for_quota() -> Result<(), String> {
+    let cards = list(None)?
         .into_iter()
-        .filter(|v| v.state == "downloading")
-    {
-        version.state = "failed".into();
-        version.planned_bytes = 0;
-        version.error = Some("version_download_interrupted".into());
-        put(&version)?;
+        .filter(|version| version.state == "downloading")
+        .map(|version| version.card_id)
+        .collect::<std::collections::BTreeSet<_>>();
+    for card in cards {
+        recover_interrupted(&card)?;
     }
     Ok(())
 }

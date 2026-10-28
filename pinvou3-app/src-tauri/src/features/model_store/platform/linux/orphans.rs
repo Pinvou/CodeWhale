@@ -29,6 +29,9 @@ use serde::{Deserialize, Serialize};
 
 use super::config;
 
+mod recovery;
+pub(super) use recovery::is_recovery_blocked;
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RunRecord {
     pub pid: i32,
@@ -54,6 +57,10 @@ pub struct RunRecord {
     pub app_pid: i32,
     #[serde(default)]
     pub app_starttime: u64,
+    /// Public card identity supplied by the host, never inferred from labels.
+    /// Older receipts have no identity and must conservatively match any card.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub card_id: Option<String>,
 }
 
 /// 登记文件的读-改-写不是原子的，多个下载/部署同时跑时要互斥。
@@ -149,7 +156,17 @@ impl RunGuard {
         self.keep = true;
     }
 
+    #[cfg(test)]
     pub fn register(pid: i32, need_root: bool, label: &str) -> Self {
+        Self::register_for_card(pid, need_root, label, None)
+    }
+
+    pub fn register_for_card(
+        pid: i32,
+        need_root: bool,
+        label: &str,
+        card_id: Option<&str>,
+    ) -> Self {
         let _lk = lock();
         if let Some((pgid, starttime)) = proc_stat(pid) {
             let app_pid = std::process::id() as i32;
@@ -165,6 +182,7 @@ impl RunGuard {
                 need_root,
                 app_pid,
                 app_starttime,
+                card_id: card_id.filter(|id| !id.is_empty()).map(str::to_owned),
             });
             store_unlocked(&records);
         }
@@ -487,6 +505,7 @@ mod tests {
                 need_root: false,
                 app_pid: 0,
                 app_starttime: 0,
+                card_id: None,
             }]);
 
             let report = cleanup_on_startup();
@@ -519,6 +538,7 @@ mod tests {
                 need_root: false,
                 app_pid: owner_pid,
                 app_starttime: owner_starttime,
+                card_id: None,
             }]);
 
             let report = cleanup_on_startup();
@@ -554,6 +574,7 @@ mod tests {
                 need_root: false,
                 app_pid: 0,
                 app_starttime: 0,
+                card_id: None,
             }]);
 
             let report = cleanup_on_startup();

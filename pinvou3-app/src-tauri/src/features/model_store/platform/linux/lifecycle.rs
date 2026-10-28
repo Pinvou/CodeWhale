@@ -1104,6 +1104,8 @@ impl ModelManager {
             .publish(card.summary.size_bytes)
             .map_err(ModelManagerError::new)?;
         let retained = if self.settings.storage_quota_gb.is_some() {
+            super::version_store::recover_interrupted_for_quota()
+                .map_err(ModelManagerError::new)?;
             super::version_store::retained_bytes().map_err(ModelManagerError::new)?
         } else {
             0
@@ -1287,12 +1289,16 @@ impl ModelManager {
         on_progress("检查模型权重…");
         self.run_card_script_with_retry(
             &source,
-            "download_model",
             &env,
             &mut |line| on_progress(&format!("[下载模型] {line}")),
             control.clone(),
-            false,
+            reservation.script_lease(),
         )?;
+        // A script can return while a forked downloader still owns its lease.
+        // Refuse success before registering any installed/deployed state.
+        reservation
+            .confirm_stopped()
+            .map_err(ModelManagerError::new)?;
 
         // 已经在库里的话保留原有状态（比如已部署过），不要因为重新走了一遍
         // 下载就把状态退回"仅下载"；只有全新记录才用 "downloaded" 起步。
@@ -1479,6 +1485,27 @@ impl ModelManager {
         control: script_runner::RunControl,
         need_root: bool,
     ) -> Result<Vec<String>, ModelManagerError> {
+        self.run_card_script_options(
+            source,
+            script_type,
+            env,
+            on_line,
+            RunScriptOptions {
+                control,
+                need_root,
+                ..Default::default()
+            },
+        )
+    }
+
+    fn run_card_script_options(
+        &self,
+        source: &ScriptsSource,
+        script_type: &str,
+        env: &HashMap<String, String>,
+        on_line: &mut dyn FnMut(&str),
+        options: RunScriptOptions<'_>,
+    ) -> Result<Vec<String>, ModelManagerError> {
         // Local 来源直接落盘本地副本执行，全程不联网；Remote 才会下载+校验哈希。
         // 多文件卡片会把整棵文件树落到卡片目录，并以该目录为工作目录执行。
         let card_id = env
@@ -1498,8 +1525,9 @@ impl ModelManager {
             env,
             RunScriptOptions {
                 on_progress: Some(&mut relay),
-                control,
-                need_root,
+                control: options.control,
+                need_root: options.need_root,
+                download_lease: options.download_lease,
                 label: Some(label),
                 cwd: prepared.cwd,
                 idle_timeout: idle_timeout_for(script_type),
@@ -1565,22 +1593,33 @@ impl ModelManager {
     fn run_card_script_with_retry(
         &self,
         source: &ScriptsSource,
-        script_type: &str,
         env: &HashMap<String, String>,
         on_line: &mut dyn FnMut(&str),
         control: script_runner::RunControl,
-        need_root: bool,
+        download_lease: &mut super::version_store::DownloadLease,
     ) -> Result<Vec<String>, ModelManagerError> {
         let mut attempt = 0u32;
         loop {
-            let result = self.run_card_script(
+            let result = self.run_card_script_options(
                 source,
-                script_type,
+                "download_model",
                 env,
                 on_line,
-                control.clone(),
-                need_root,
+                RunScriptOptions {
+                    control: control.clone(),
+                    download_lease: Some(
+                        download_lease
+                            .script_file()
+                            .map_err(ModelManagerError::new)?,
+                    ),
+                    ..Default::default()
+                },
             );
+            // Even an error can leave a forked writer alive. Prove that the
+            // previous attempt exited before retrying or reporting success.
+            download_lease
+                .confirm_stopped()
+                .map_err(ModelManagerError::new)?;
             let error = match result {
                 Ok(lines) => return Ok(lines),
                 Err(e) => e,
@@ -2953,6 +2992,9 @@ fn write_temp_script(content: &str) -> Result<PathBuf, ModelManagerError> {
 mod tests {
     use super::*;
     use std::fs;
+
+    mod download_leases;
+    mod recovery_admission;
 
     fn make_card(name: &str, quant: Option<&str>) -> StoreCardDetail {
         StoreCardDetail {

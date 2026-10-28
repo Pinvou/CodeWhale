@@ -528,6 +528,7 @@ export const dictZh = {
           linkNoModelName: '这个模型缺少模型名，无法接入',
           linkNoKey: '没能拿到 API Key',
           linkBridgeMissing: '当前环境不支持写入模型配置',
+          linkSnapshotReadFailed: '无法读取最新模型配置',
           linkSyncFailed: (error) => `模型配置同步失败：${error}。请刷新模型商店重试。`,
           linkKeyLabel: '品悟',
           linkModelName: (name) => `本地 · ${name}`,
