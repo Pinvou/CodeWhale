@@ -82,7 +82,7 @@
 - `pinvou3-app/resources/mcp-servers/iwencai/` 对应的 `lorek666/iwencai-mcp`（README 明确声明 MIT）：保留上游链接和 MIT 声明，锁定源码 revision，标注 Pinvou 修改；数据调用遵守同花顺问财服务条款，只支持用户自带 Key，不公开共享 Key。
 - `agency-agents.json` 对应的 `jnMetaCode/agency-agents-zh`（MIT）。
 - 三套桌宠 `spritesheet.webp`/`cover.webp`、`sansheng-banner.png`、7 张工具商店 `banner-*.jpg`、7 张 `skill-*.jpg` 和 `scheduled/` 下 3 张 JPG 为 Pinvou 自行生成的自有视觉素材，在公开仓库和社区版中保留。
-- MegaCube 为 Pinvou 自有能力；保留 `megacube-icon.png`、MegaCube 网页访问入口及相关通用集成代码，不归入 H3C/内部功能裁剪范围。
+- MegaCube 产品入口、图标与集成为 Official 私有能力（2026-10-25 确认），社区版不包含，不适用本节保留口径；真实访问地址与官方集成只存在于官方构建。
 - 56 个内置头像：50 个 CC BY 4.0、6 个 CC0 1.0；保留 SVG 内已有元数据，并在 `THIRD_PARTY_NOTICES.md` 汇总署名。
 - 可证明来自 `lobehub/lobe-icons` 的模型服务商图标（MIT）；改为锁定 npm 包版本或记录确切上游文件，同时保留品牌归属说明。
 - BGE-M3（MIT）和 SenseVoice.cpp（MIT）可保留集成；SenseVoice 模型权重另按 FunASR Model License 归因并保留模型名称。
@@ -122,6 +122,7 @@
 ### 运行服务器与远程控制处理口径（已确认）
 
 - 手机远程控制客户端、Web 页面、中继服务器、测试和通用部署能力全部开源，不裁掉功能。
+- 桌面双端远程控制（controller 协议、主控/受控生命周期、任务权限、文件传输、enrollment gateway、pairing、controller relay 面与 Windows 发布证据）为闭源独有，不开源（已确认 2026-10-25）；手机远程控制一期口径不变。
 - 公开源码默认不得连接 Pinvou 生产中继；社区用户通过配置使用本地或自建中继，官方发行版可在构建/发布环境中注入官方服务地址。
 - Pinvou 运行中的所有服务器信息均不得进入公开源码和 Git 历史，包括访问地址、域名/IP、端口组合、服务器账号、远程目录、SSH key 路径、代理/隧道拓扑、内部设备配置和管理凭证。
 - 公开 GitHub Release 可以同时提供由公开源码构建的社区包，以及包含私有功能和官方服务地址的 Pinvou 官方包；官方包必须明确标注其不能由公开源码完整复现。服务器地址允许存在于官方二进制，但可复用密钥、客户端 Secret、SSH 凭证和管理 Token 仍不得内置。
@@ -134,7 +135,7 @@
 
 - 社区版完整移除 H3C EIP、知道、Windows 域环境引导、SmartHub OTA，以及相关 Skills、源码、预编译二进制、Rust/前端接线、测试、文档、品牌和内部场景。
 - 已删除基于 `/opt/.h3c/...` 预装目录、固定模型路径和启动脚本的一键启用能力；通用本地推理能力保留为用户自行启动服务后，通过设置页发现或手动配置 vLLM、Ollama、LM Studio 端点。
-- MegaCube 属于 Pinvou 自有能力：名称、图标、产品入口、本地模型与通用集成全部保留；访问地址由官方构建/运行配置注入，社区源码不包含真实地址。
+- MegaCube 产品入口、图标和集成经组织复核确认为 Official 私有能力（2026-10-25）：社区版不包含，与 H3C 内容一同不进入公开仓库。
 - 官方私有版可继续保留其他 H3C 自动引导和 MegaCube 配置；预装本地模型自动启动能力不再由 Pinvou 应用提供。
 - 社区版删除 `feedback.rs` 中固定设备 SN、`H3cFeedbackUploader` 及相关 H3C 反馈上传接线；反馈入口改为打开 `Pinvou/pinvou-agent` 的 GitHub Issue，不自动上传日志、设备信息或附件。官方私有版反馈行为维持现状。
 
@@ -213,7 +214,7 @@
 - `pinvou3-app/run-dev.sh`：移除生产远控 HTTP/WebSocket 默认地址，开发环境默认使用本地服务或要求显式配置。
 - Rust/前端默认值：远控、OTA、知识库模型下载等模块中存在运行地址常量，必须统一改为构建/运行时配置；测试中的同值副本一并替换为 `.example` 域名和 RFC 保留测试 IP。
 - 社区遥测删除范围：`pinvou3-app/src-tauri/src/telemetry.rs` 及其初始化/事件接线、`remote-control-relay/telemetry-service.js`、统计管理页面、Nginx 配置、部署步骤和相关测试；同时确认公开文件树中不再出现生产地址、enrollment token、device pepper、管理员密码或硬件标识上报逻辑。
-- MegaCube：图标、入口和通用集成保留；真实访问地址从前端源码移除，由官方构建或运行配置注入，社区构建未配置时给出明确提示。
+- MegaCube：入口、图标和集成为 Official 私有能力（2026-10-25 确认），社区快照整体移除，不再采用地址注入方案。
 - `.github/workflows/` 继续纳入最终密钥与地址扫描；只允许 GitHub/上游公共地址和 secret 变量引用，不允许出现 Pinvou 服务器信息或真实 secret 值。
 - 全仓定向扫描已定位 24 个 Pinvou/MegaCube 运行 URL 候选文件，除上述脚本和源码外还包括远控架构/E2E 文档及多份测试；公开快照必须同步清理文档和测试副本，不能只改生产代码。
 - `com.pinvou...` 一类应用包名、反向域名标识和品牌名称不是访问地址，可保留；判定标准是是否能实际定位或连接 Pinvou 运行基础设施。
