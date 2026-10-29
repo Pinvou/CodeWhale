@@ -108,7 +108,7 @@ jobs:
   commit-message:
     name: commit-message
     if: ${{ (github.event_name == 'pull_request' && github.event.action != 'closed') || github.event_name == 'push' }}
-    runs-on: ubuntu-22.04
+    runs-on: ${{ fromJSON(vars.PINVOU_LINUX_RUNNER || '["ubuntu-22.04"]') }}
     timeout-minutes: 5
     steps:
       - name: Checkout
@@ -118,7 +118,7 @@ jobs:
 
       - name: Set up zram and swap
         # 内存扩容为尽力而为:超时/失败只告警不阻断(回退 runner 默认内存)。
-        run: timeout --kill-after=15 240 sudo --preserve-env=GITHUB_ACTIONS,PINVOU3_CI_DISABLE_ZRAM bash "${{ github.workspace }}/scripts/ci-memory-setup.sh" || echo "::warning::ci-memory-setup 未完成,继续使用 runner 默认内存"
+        run: timeout --kill-after=15 240 sudo --preserve-env=GITHUB_ACTIONS,PINVOU3_CI_DISABLE_ZRAM,RUNNER_ENVIRONMENT bash "${{ github.workspace }}/scripts/ci-memory-setup.sh" || echo "::warning::ci-memory-setup 未完成,继续使用 runner 默认内存"
 
       - name: 校验 commit 信息规范
         run: |
@@ -135,7 +135,7 @@ jobs:
   version-consistency:
     name: version-consistency
     if: ${{ (github.event_name == 'pull_request' && github.event.action != 'closed') || github.event_name == 'merge_group' || github.event_name == 'push' }}
-    runs-on: ubuntu-22.04
+    runs-on: ${{ fromJSON(vars.PINVOU_LINUX_RUNNER || '["ubuntu-22.04"]') }}
     timeout-minutes: 5
     steps:
       - name: Checkout
@@ -143,7 +143,7 @@ jobs:
 
       - name: Set up zram and swap
         # 内存扩容为尽力而为:超时/失败只告警不阻断(回退 runner 默认内存)。
-        run: timeout --kill-after=15 240 sudo --preserve-env=GITHUB_ACTIONS,PINVOU3_CI_DISABLE_ZRAM bash "${{ github.workspace }}/scripts/ci-memory-setup.sh" || echo "::warning::ci-memory-setup 未完成,继续使用 runner 默认内存"
+        run: timeout --kill-after=15 240 sudo --preserve-env=GITHUB_ACTIONS,PINVOU3_CI_DISABLE_ZRAM,RUNNER_ENVIRONMENT bash "${{ github.workspace }}/scripts/ci-memory-setup.sh" || echo "::warning::ci-memory-setup 未完成,继续使用 runner 默认内存"
 
       - name: Node.js
         uses: actions/setup-node@v7
@@ -174,7 +174,7 @@ jobs:
   changes:
     name: changes
     if: ${{ (github.event_name == 'pull_request' && github.event.action != 'closed') || github.event_name == 'merge_group' || github.event_name == 'push' }}
-    runs-on: ubuntu-22.04
+    runs-on: ${{ fromJSON(vars.PINVOU_LINUX_RUNNER || '["ubuntu-22.04"]') }}
     # 10min: fetch-depth:0 checkout plus the memory-setup wrapper's worst case
     # (240s + 15s kill grace) must not turn the intended non-fatal degradation
     # into a hard job timeout. Since 2026-10 the fold makes this job's
@@ -215,7 +215,7 @@ jobs:
           fetch-depth: 0
       - name: Set up zram and swap
         # 内存扩容为尽力而为:超时/失败只告警不阻断(回退 runner 默认内存)。
-        run: timeout --kill-after=15 240 sudo --preserve-env=GITHUB_ACTIONS,PINVOU3_CI_DISABLE_ZRAM bash "${{ github.workspace }}/scripts/ci-memory-setup.sh" || echo "::warning::ci-memory-setup 未完成,继续使用 runner 默认内存"
+        run: timeout --kill-after=15 240 sudo --preserve-env=GITHUB_ACTIONS,PINVOU3_CI_DISABLE_ZRAM,RUNNER_ENVIRONMENT bash "${{ github.workspace }}/scripts/ci-memory-setup.sh" || echo "::warning::ci-memory-setup 未完成,继续使用 runner 默认内存"
 
 
 
@@ -765,9 +765,10 @@ jobs:
     if: ${{ !cancelled() && github.event.action != 'closed' && (github.event_name == 'pull_request' || github.event_name == 'merge_group') && (needs.changes.outputs.trusted_backflow == 'true' || needs.changes.outputs.backflow_infra == 'true') }}
     strategy:
       fail-fast: false
-      matrix:
-        os: [ubuntu-22.04, windows-latest, macos-15]
-    runs-on: ${{ matrix.os }}
+      # Windows/macOS 腿受 PINVOU_WINDOWS_MAC_ENABLED 总闸控制(matrix 上下文
+      # 不可用于 job 级 if,故在矩阵生成处过滤)。
+      matrix: ${{ fromJSON(vars.PINVOU_WINDOWS_MAC_ENABLED != 'false' && '{"include":[{"os":"ubuntu-22.04"},{"os":"windows-latest"},{"os":"macos-15"}]}' || '{"include":[{"os":"ubuntu-22.04"}]}') }}
+    runs-on: ${{ matrix.os == 'ubuntu-22.04' && fromJSON(vars.PINVOU_LINUX_RUNNER || '["ubuntu-22.04"]') || matrix.os }}
     timeout-minutes: 5
     steps:
       - name: Checkout
@@ -803,7 +804,7 @@ jobs:
   fast-gate:
     name: fast-gate
     if: ${{ (github.event_name == 'pull_request' && github.event.action != 'closed') || github.event_name == 'merge_group' }}
-    runs-on: ubuntu-22.04
+    runs-on: ${{ fromJSON(vars.PINVOU_LINUX_RUNNER || '["ubuntu-22.04"]') }}
     timeout-minutes: 10
     steps:
       - name: Checkout (含 submodule,fork 为 public 直接拉)
@@ -830,7 +831,7 @@ jobs:
 
       - name: Set up zram and swap
         # 内存扩容为尽力而为:超时/失败只告警不阻断(回退 runner 默认内存)。
-        run: timeout --kill-after=15 240 sudo --preserve-env=GITHUB_ACTIONS,PINVOU3_CI_DISABLE_ZRAM bash "${{ github.workspace }}/scripts/ci-memory-setup.sh" || echo "::warning::ci-memory-setup 未完成,继续使用 runner 默认内存"
+        run: timeout --kill-after=15 240 sudo --preserve-env=GITHUB_ACTIONS,PINVOU3_CI_DISABLE_ZRAM,RUNNER_ENVIRONMENT bash "${{ github.workspace }}/scripts/ci-memory-setup.sh" || echo "::warning::ci-memory-setup 未完成,继续使用 runner 默认内存"
 
       - name: 架构边界门禁
         run: |
@@ -935,7 +936,7 @@ jobs:
     # covers setup plus one full pass and a single rerun of the biggest smoke,
     # while a run with several independent flakes hits the cap and fails.
     if: ${{ !cancelled() && github.event.action != 'closed' && needs.changes.outputs.pure_release_backflow != 'true' && (github.event_name == 'pull_request' || github.event_name == 'merge_group') && (needs.changes.outputs.frontend == 'true' || needs.changes.outputs.pet == 'true') }}
-    runs-on: ubuntu-22.04
+    runs-on: ${{ fromJSON(vars.PINVOU_LINUX_RUNNER || '["ubuntu-22.04"]') }}
     timeout-minutes: 25
     defaults:
       run:
@@ -947,12 +948,13 @@ jobs:
       - name: Set up zram and swap
         # 内存扩容为尽力而为:超时/失败只告警不阻断(回退 runner 默认内存)。
         # 本 job 只跑 ubuntu,无需 runner.os 门控;曾出现重复 step,已收敛为单个。
-        run: timeout --kill-after=15 240 sudo --preserve-env=GITHUB_ACTIONS,PINVOU3_CI_DISABLE_ZRAM bash "${{ github.workspace }}/scripts/ci-memory-setup.sh" || echo "::warning::ci-memory-setup 未完成,继续使用 runner 默认内存"
+        run: timeout --kill-after=15 240 sudo --preserve-env=GITHUB_ACTIONS,PINVOU3_CI_DISABLE_ZRAM,RUNNER_ENVIRONMENT bash "${{ github.workspace }}/scripts/ci-memory-setup.sh" || echo "::warning::ci-memory-setup 未完成,继续使用 runner 默认内存"
 
       - uses: actions/setup-node@v7
         with:
           node-version: "24"
-          cache: npm
+          cache: ${{ runner.environment == 'github-hosted' && 'npm' || '' }}
+          package-manager-cache: ${{ runner.environment == 'github-hosted' }}
           cache-dependency-path: |
             pinvou3-app/package-lock.json
             remote-control-relay/package-lock.json
@@ -1050,14 +1052,14 @@ jobs:
     name: relay-test
     needs: changes
     if: ${{ !cancelled() && needs.changes.outputs.relay == 'true' && (github.event_name == 'merge_group' || github.event_name == 'pull_request') }}
-    runs-on: ubuntu-22.04
+    runs-on: ${{ fromJSON(vars.PINVOU_LINUX_RUNNER || '["ubuntu-22.04"]') }}
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@v7
 
       - name: Set up zram and swap
         # 内存扩容为尽力而为:超时/失败只告警不阻断(回退 runner 默认内存)。
-        run: timeout --kill-after=15 240 sudo --preserve-env=GITHUB_ACTIONS,PINVOU3_CI_DISABLE_ZRAM bash "${{ github.workspace }}/scripts/ci-memory-setup.sh" || echo "::warning::ci-memory-setup 未完成,继续使用 runner 默认内存"
+        run: timeout --kill-after=15 240 sudo --preserve-env=GITHUB_ACTIONS,PINVOU3_CI_DISABLE_ZRAM,RUNNER_ENVIRONMENT bash "${{ github.workspace }}/scripts/ci-memory-setup.sh" || echo "::warning::ci-memory-setup 未完成,继续使用 runner 默认内存"
 
       - uses: actions/setup-node@v7
         with:
@@ -1078,7 +1080,7 @@ jobs:
   windows-relay-dacl:
     name: windows-relay-dacl
     needs: changes
-    if: ${{ !cancelled() && needs.changes.outputs.relay == 'true' && (github.event_name == 'merge_group' || github.event_name == 'pull_request') }}
+    if: ${{ !cancelled() && needs.changes.outputs.relay == 'true' && (github.event_name == 'merge_group' || github.event_name == 'pull_request')  && vars.PINVOU_WINDOWS_MAC_ENABLED != 'false' }}
     runs-on: windows-latest
     timeout-minutes: 10
     steps:
@@ -1086,7 +1088,8 @@ jobs:
       - uses: actions/setup-node@v7
         with:
           node-version: "24"
-          cache: npm
+          cache: ${{ runner.environment == 'github-hosted' && 'npm' || '' }}
+          package-manager-cache: ${{ runner.environment == 'github-hosted' }}
           cache-dependency-path: remote-control-relay/package-lock.json
       - name: Install Relay dependencies
         run: npm --prefix remote-control-relay ci --prefer-offline --no-audit
@@ -1096,7 +1099,7 @@ jobs:
   windows-relay-tools-test:
     name: windows-relay-tools-test
     needs: changes
-    if: ${{ !cancelled() && github.event.action != 'closed' && needs.changes.outputs.relay == 'true' && (github.event_name == 'merge_group' || github.event_name == 'pull_request') }}
+    if: ${{ !cancelled() && github.event.action != 'closed' && needs.changes.outputs.relay == 'true' && (github.event_name == 'merge_group' || github.event_name == 'pull_request')  && vars.PINVOU_WINDOWS_MAC_ENABLED != 'false' }}
     runs-on: windows-latest
     timeout-minutes: 10
     steps:
@@ -1104,7 +1107,8 @@ jobs:
       - uses: actions/setup-node@v7
         with:
           node-version: "24"
-          cache: npm
+          cache: ${{ runner.environment == 'github-hosted' && 'npm' || '' }}
+          package-manager-cache: ${{ runner.environment == 'github-hosted' }}
           cache-dependency-path: remote-control-relay/package-lock.json
       - name: 安装 relay 依赖
         run: npm --prefix remote-control-relay ci --prefer-offline --no-audit
@@ -1115,7 +1119,7 @@ jobs:
     name: team-relay-hub-test
     needs: changes
     if: ${{ !cancelled() && github.event.action != 'closed' && needs.changes.outputs.team_relay_hub == 'true' && (github.event_name == 'pull_request' || github.event_name == 'merge_group') }}
-    runs-on: ubuntu-22.04
+    runs-on: ${{ fromJSON(vars.PINVOU_LINUX_RUNNER || '["ubuntu-22.04"]') }}
     timeout-minutes: 10
     services:
       postgres:
@@ -1136,13 +1140,14 @@ jobs:
       - uses: actions/checkout@v7
       - name: Set up zram and swap
         # 内存扩容为尽力而为:超时/失败只告警不阻断(回退 runner 默认内存)。
-        run: timeout --kill-after=15 240 sudo --preserve-env=GITHUB_ACTIONS,PINVOU3_CI_DISABLE_ZRAM bash "${{ github.workspace }}/scripts/ci-memory-setup.sh" || echo "::warning::ci-memory-setup 未完成,继续使用 runner 默认内存"
+        run: timeout --kill-after=15 240 sudo --preserve-env=GITHUB_ACTIONS,PINVOU3_CI_DISABLE_ZRAM,RUNNER_ENVIRONMENT bash "${{ github.workspace }}/scripts/ci-memory-setup.sh" || echo "::warning::ci-memory-setup 未完成,继续使用 runner 默认内存"
 
 
       - uses: actions/setup-node@v7
         with:
           node-version: "24"
-          cache: npm
+          cache: ${{ runner.environment == 'github-hosted' && 'npm' || '' }}
+          package-manager-cache: ${{ runner.environment == 'github-hosted' }}
           cache-dependency-path: team-relay-hub/package-lock.json
 
       - name: 安装 Hub 依赖
@@ -1158,7 +1163,7 @@ jobs:
     name: update-release-console-test (Node ${{ matrix.node-version }})
     needs: changes
     if: ${{ !cancelled() && github.event.action != 'closed' && needs.changes.outputs.update_release_console == 'true' && (github.event_name == 'pull_request' || github.event_name == 'merge_group') }}
-    runs-on: ubuntu-22.04
+    runs-on: ${{ fromJSON(vars.PINVOU_LINUX_RUNNER || '["ubuntu-22.04"]') }}
     timeout-minutes: 10
     strategy:
       fail-fast: false
@@ -1169,12 +1174,13 @@ jobs:
 
       - name: Set up zram and swap
         # 内存扩容为尽力而为:超时/失败只告警不阻断(回退 runner 默认内存)。
-        run: timeout --kill-after=15 240 sudo --preserve-env=GITHUB_ACTIONS,PINVOU3_CI_DISABLE_ZRAM bash "${{ github.workspace }}/scripts/ci-memory-setup.sh" || echo "::warning::ci-memory-setup 未完成,继续使用 runner 默认内存"
+        run: timeout --kill-after=15 240 sudo --preserve-env=GITHUB_ACTIONS,PINVOU3_CI_DISABLE_ZRAM,RUNNER_ENVIRONMENT bash "${{ github.workspace }}/scripts/ci-memory-setup.sh" || echo "::warning::ci-memory-setup 未完成,继续使用 runner 默认内存"
 
       - uses: actions/setup-node@v7
         with:
           node-version: ${{ matrix.node-version }}
-          cache: npm
+          cache: ${{ runner.environment == 'github-hosted' && 'npm' || '' }}
+          package-manager-cache: ${{ runner.environment == 'github-hosted' }}
           cache-dependency-path: update-release-console/package-lock.json
 
       - name: 安装发布台依赖
@@ -1231,9 +1237,8 @@ jobs:
     if: ${{ !cancelled() && github.event.action != 'closed' && needs.changes.outputs.release_contract == 'true' && (github.event_name != 'pull_request' || github.event.pull_request.draft == false) }}
     strategy:
       fail-fast: false
-      matrix:
-        os: [ubuntu-22.04, windows-latest]
-    runs-on: ${{ matrix.os }}
+      matrix: ${{ fromJSON(vars.PINVOU_WINDOWS_MAC_ENABLED != 'false' && '{"include":[{"os":"ubuntu-22.04"},{"os":"windows-latest"}]}' || '{"include":[{"os":"ubuntu-22.04"}]}') }}
+    runs-on: ${{ matrix.os == 'ubuntu-22.04' && fromJSON(vars.PINVOU_LINUX_RUNNER || '["ubuntu-22.04"]') || matrix.os }}
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@v7
@@ -1241,7 +1246,7 @@ jobs:
       - name: Set up zram and swap
         if: ${{ runner.os == 'Linux' }}
         # 内存扩容为尽力而为:超时/失败只告警不阻断(回退 runner 默认内存)。
-        run: timeout --kill-after=15 240 sudo --preserve-env=GITHUB_ACTIONS,PINVOU3_CI_DISABLE_ZRAM bash "${{ github.workspace }}/scripts/ci-memory-setup.sh" || echo "::warning::ci-memory-setup 未完成,继续使用 runner 默认内存"
+        run: timeout --kill-after=15 240 sudo --preserve-env=GITHUB_ACTIONS,PINVOU3_CI_DISABLE_ZRAM,RUNNER_ENVIRONMENT bash "${{ github.workspace }}/scripts/ci-memory-setup.sh" || echo "::warning::ci-memory-setup 未完成,继续使用 runner 默认内存"
       - uses: actions/setup-node@v7
         with:
           node-version: "24"
@@ -1305,7 +1310,7 @@ jobs:
           needs.changes.outputs.knowledge_dependencies == 'true'
         )
       }}
-    runs-on: ubuntu-22.04
+    runs-on: ${{ fromJSON(vars.PINVOU_LINUX_RUNNER || '["ubuntu-22.04"]') }}
     # 冷跑时长未实测(~/.cargo 存档命中的运行 3–6min;cache-targets: false,
     # 编译每轮全冷)。工具链滚动触发冷跑且逼近 30m 时 job 被超时判败,
     # cache-on-failure 的 post 步会保存 ~/.cargo(registry/git 等,不含
@@ -1319,7 +1324,7 @@ jobs:
 
       - name: Set up zram and swap
         # 内存扩容为尽力而为:超时/失败只告警不阻断(回退 runner 默认内存)。
-        run: timeout --kill-after=15 240 sudo --preserve-env=GITHUB_ACTIONS,PINVOU3_CI_DISABLE_ZRAM bash "${{ github.workspace }}/scripts/ci-memory-setup.sh" || echo "::warning::ci-memory-setup 未完成,继续使用 runner 默认内存"
+        run: timeout --kill-after=15 240 sudo --preserve-env=GITHUB_ACTIONS,PINVOU3_CI_DISABLE_ZRAM,RUNNER_ENVIRONMENT bash "${{ github.workspace }}/scripts/ci-memory-setup.sh" || echo "::warning::ci-memory-setup 未完成,继续使用 runner 默认内存"
 
       - name: Rust toolchain
         uses: dtolnay/rust-toolchain@stable
@@ -1448,7 +1453,7 @@ jobs:
           needs.changes.outputs.rust_dependencies == 'true'
         )
       }}
-    runs-on: ubuntu-22.04
+    runs-on: ${{ fromJSON(vars.PINVOU_LINUX_RUNNER || '["ubuntu-22.04"]') }}
     # 30m 上限在缓存冷启动下不够:Cargo cache 是 save-if main-only(PR 永不保存)。
     # 2026-10 起本 job 在 main push 上无条件运行以刷新存档(此前非 rust 合并会
     # 整体跳过、存档老化),但工具链滚动或缓存池淘汰仍可能让 PR 端
@@ -1485,13 +1490,16 @@ jobs:
       - name: Prepare Rust disk capacity
         if: ${{ env.RUN_HEAVY_RUST_CHECKS == 'true' }}
         run: |
+          if [[ "$RUNNER_ENVIRONMENT" == self-hosted ]]; then
+            exec python3 scripts/ci-rust-disk.py --check-only --min-free-gib 24
+          fi
           sudo env GITHUB_WORKSPACE="$GITHUB_WORKSPACE" \
             RUNNER_ENVIRONMENT="$RUNNER_ENVIRONMENT" \
             python3 scripts/ci-rust-disk.py --min-free-gib 24
 
       - name: Set up zram and swap
         # 内存扩容为尽力而为:超时/失败只告警不阻断(回退 runner 默认内存)。
-        run: timeout --kill-after=15 240 sudo --preserve-env=GITHUB_ACTIONS,PINVOU3_CI_DISABLE_ZRAM bash "${{ github.workspace }}/scripts/ci-memory-setup.sh" || echo "::warning::ci-memory-setup 未完成,继续使用 runner 默认内存"
+        run: timeout --kill-after=15 240 sudo --preserve-env=GITHUB_ACTIONS,PINVOU3_CI_DISABLE_ZRAM,RUNNER_ENVIRONMENT bash "${{ github.workspace }}/scripts/ci-memory-setup.sh" || echo "::warning::ci-memory-setup 未完成,继续使用 runner 默认内存"
 
       - name: 初始化公共底座 submodule
         run: git submodule update --init --recursive -- CodeWhale
@@ -1543,9 +1551,11 @@ jobs:
             libpipewire-0.3-dev libdrm-dev libgbm-dev libegl-dev \
             build-essential pkg-config cmake
           # 孤儿依赖、apt 缓存包与索引清单不留在构建盘上(单盘 runner 磁盘紧张)。
-          sudo apt-get autoremove -y --purge
-          sudo apt-get clean
-          sudo rm -rf /var/lib/apt/lists/*
+          if [[ "$RUNNER_ENVIRONMENT" == github-hosted ]]; then
+            sudo apt-get autoremove -y --purge
+            sudo apt-get clean
+            sudo rm -rf /var/lib/apt/lists/*
+          fi
 
       # pipewire-rs 0.10 (computer_use Wayland capture, direct + via xcap) needs SPA
       # static inline helpers that ubuntu-22.04's libpipewire 0.3.48 headers lack
@@ -1694,7 +1704,7 @@ jobs:
           )
         )
       }}
-    runs-on: ubuntu-22.04
+    runs-on: ${{ fromJSON(vars.PINVOU_LINUX_RUNNER || '["ubuntu-22.04"]') }}
     # Tauri + fastembed + aws-lc-sys 全冷编译耗时长;设上限避免卡死 runner 占用。
     # High-risk PR, combined-tree, and main runs retain a 120-minute safety limit.
     timeout-minutes: 120
@@ -1757,13 +1767,16 @@ jobs:
       # 大体积写入前先清掉明确不用的预装 SDK，并要求至少 24 GiB 初始余量。
       - name: 在 swap 与缓存前准备 Rust 磁盘空间
         run: |
+          if [[ "$RUNNER_ENVIRONMENT" == self-hosted ]]; then
+            exec python3 scripts/ci-rust-disk.py --check-only --min-free-gib 24
+          fi
           sudo env GITHUB_WORKSPACE="$GITHUB_WORKSPACE" \
             RUNNER_ENVIRONMENT="$RUNNER_ENVIRONMENT" \
             python3 scripts/ci-rust-disk.py --min-free-gib 24
 
       - name: Set up zram and swap
         # 内存扩容为尽力而为:超时/失败只告警不阻断(回退 runner 默认内存)。
-        run: timeout --kill-after=15 240 sudo --preserve-env=GITHUB_ACTIONS,PINVOU3_CI_DISABLE_ZRAM bash "${{ github.workspace }}/scripts/ci-memory-setup.sh" || echo "::warning::ci-memory-setup 未完成,继续使用 runner 默认内存"
+        run: timeout --kill-after=15 240 sudo --preserve-env=GITHUB_ACTIONS,PINVOU3_CI_DISABLE_ZRAM,RUNNER_ENVIRONMENT bash "${{ github.workspace }}/scripts/ci-memory-setup.sh" || echo "::warning::ci-memory-setup 未完成,继续使用 runner 默认内存"
 
       - name: 初始化公共底座 submodule
         run: git submodule update --init --recursive -- CodeWhale
@@ -1793,9 +1806,11 @@ jobs:
             build-essential pkg-config cmake lld \
             time
           # 孤儿依赖、apt 缓存包与索引清单不留在构建盘上(单盘 runner 磁盘紧张)。
-          sudo apt-get autoremove -y --purge
-          sudo apt-get clean
-          sudo rm -rf /var/lib/apt/lists/*
+          if [[ "$RUNNER_ENVIRONMENT" == github-hosted ]]; then
+            sudo apt-get autoremove -y --purge
+            sudo apt-get clean
+            sudo rm -rf /var/lib/apt/lists/*
+          fi
 
       # bge-m3 是 gitignored 大资源(559M),CI 干净 checkout 没有它,而 tauri_build::build()
       # 会校验 tauri.conf resources 路径存在。单测用 mem()=embedder None、不加载真模型,真
@@ -1853,7 +1868,8 @@ jobs:
         uses: actions/setup-node@v7
         with:
           node-version: "24"
-          cache: npm
+          cache: ${{ runner.environment == 'github-hosted' && 'npm' || '' }}
+          package-manager-cache: ${{ runner.environment == 'github-hosted' }}
           # Same two-lockfile key as frontend-test/windows-codex-runtime-test:
           # one shared npm cache namespace instead of per-job keys fragmenting
           # the 10GB quota with duplicate 107MB entries.
@@ -1877,6 +1893,9 @@ jobs:
       # 恢复后的容量检查仍保留，保证缓存落盘后有足够空间执行两轮测试。
       - name: 缓存恢复前准备 Rust 磁盘空间
         run: |
+          if [[ "$RUNNER_ENVIRONMENT" == self-hosted ]]; then
+            exec python3 scripts/ci-rust-disk.py --check-only
+          fi
           sudo env GITHUB_WORKSPACE="$GITHUB_WORKSPACE" \
             RUNNER_ENVIRONMENT="$RUNNER_ENVIRONMENT" \
             python3 scripts/ci-rust-disk.py
@@ -1954,6 +1973,9 @@ jobs:
       # only unused SDKs on this disposable hosted runner are removed.
       - name: 在缓存后确认两轮 Rust 测试磁盘空间
         run: |
+          if [[ "$RUNNER_ENVIRONMENT" == self-hosted ]]; then
+            exec python3 scripts/ci-rust-disk.py --check-only
+          fi
           sudo env GITHUB_WORKSPACE="$GITHUB_WORKSPACE" \
             RUNNER_ENVIRONMENT="$RUNNER_ENVIRONMENT" \
             python3 scripts/ci-rust-disk.py
@@ -2085,7 +2107,7 @@ jobs:
       }}
     # 镜像按全仓单一镜像公约钉到发布基线(守卫:
     # test_ci_gate_policy.test_all_linux_jobs_pin_the_release_runner_image)。
-    runs-on: ubuntu-22.04
+    runs-on: ${{ fromJSON(vars.PINVOU_LINUX_RUNNER || '["ubuntu-22.04"]') }}
     timeout-minutes: 90
     env:
       # The CLI workspace compiles pinvou3-tauri plus its own targets. Disable
@@ -2103,6 +2125,9 @@ jobs:
       # (no on-disk swapfile is created — single-disk runner).
       - name: Prepare Rust disk capacity
         run: |
+          if [[ "$RUNNER_ENVIRONMENT" == self-hosted ]]; then
+            exec python3 scripts/ci-rust-disk.py --check-only
+          fi
           sudo env GITHUB_WORKSPACE="$GITHUB_WORKSPACE" \
             RUNNER_ENVIRONMENT="$RUNNER_ENVIRONMENT" \
             python3 scripts/ci-rust-disk.py
@@ -2111,7 +2136,7 @@ jobs:
       # first (enforced by the gate policy).
       - name: Set up zram and swap
         # 内存扩容为尽力而为:超时/失败只告警不阻断(回退 runner 默认内存)。
-        run: timeout --kill-after=15 240 sudo --preserve-env=GITHUB_ACTIONS,PINVOU3_CI_DISABLE_ZRAM bash "${{ github.workspace }}/scripts/ci-memory-setup.sh" || echo "::warning::ci-memory-setup 未完成,继续使用 runner 默认内存"
+        run: timeout --kill-after=15 240 sudo --preserve-env=GITHUB_ACTIONS,PINVOU3_CI_DISABLE_ZRAM,RUNNER_ENVIRONMENT bash "${{ github.workspace }}/scripts/ci-memory-setup.sh" || echo "::warning::ci-memory-setup 未完成,继续使用 runner 默认内存"
 
       - name: Init CodeWhale submodule
         run: git submodule update --init --recursive -- CodeWhale
@@ -2146,9 +2171,11 @@ jobs:
           # setup block below (round-45 review: the two blocks are copies;
           # an entry that goes stale in one hides which are load-bearing).
           # 孤儿依赖、apt 缓存包与索引清单不留在构建盘上(单盘 runner 磁盘紧张)。
-          sudo apt-get autoremove -y --purge
-          sudo apt-get clean
-          sudo rm -rf /var/lib/apt/lists/*
+          if [[ "$RUNNER_ENVIRONMENT" == github-hosted ]]; then
+            sudo apt-get autoremove -y --purge
+            sudo apt-get clean
+            sudo rm -rf /var/lib/apt/lists/*
+          fi
 
       - name: bge-m3 placeholder (tauri-build resource check)
         run: |
@@ -2240,7 +2267,7 @@ jobs:
   windows-static-updater-contract:
     name: windows-static-updater-contract
     needs: changes
-    if: ${{ !cancelled() && github.event.action != 'closed' && needs.changes.outputs.windows_static_updater == 'true' }}
+    if: ${{ !cancelled() && github.event.action != 'closed' && needs.changes.outputs.windows_static_updater == 'true'  && vars.PINVOU_WINDOWS_MAC_ENABLED != 'false' }}
     runs-on: windows-latest
     timeout-minutes: 10
     steps:
@@ -2312,7 +2339,7 @@ jobs:
           )
         )
       }}
-    runs-on: ubuntu-22.04
+    runs-on: ${{ fromJSON(vars.PINVOU_LINUX_RUNNER || '["ubuntu-22.04"]') }}
     timeout-minutes: 90
     steps:
       - name: Checkout
@@ -2325,13 +2352,16 @@ jobs:
       # reserve 24 GiB before swap and dependency/toolchain writes.
       - name: Prepare CLI disk capacity before swap
         run: |
+          if [[ "$RUNNER_ENVIRONMENT" == self-hosted ]]; then
+            exec python3 scripts/ci-rust-disk.py --check-only --min-free-gib 24
+          fi
           sudo env GITHUB_WORKSPACE="$GITHUB_WORKSPACE" \
             RUNNER_ENVIRONMENT="$RUNNER_ENVIRONMENT" \
             python3 scripts/ci-rust-disk.py --min-free-gib 24
 
       - name: Set up zram and swap
         # Best effort: timeouts or failures only warn and never block (falls back to stock runner memory).
-        run: timeout --kill-after=15 240 sudo --preserve-env=GITHUB_ACTIONS,PINVOU3_CI_DISABLE_ZRAM bash "${{ github.workspace }}/scripts/ci-memory-setup.sh" || echo "::warning::ci-memory-setup did not finish; continuing with stock runner memory"
+        run: timeout --kill-after=15 240 sudo --preserve-env=GITHUB_ACTIONS,PINVOU3_CI_DISABLE_ZRAM,RUNNER_ENVIRONMENT bash "${{ github.workspace }}/scripts/ci-memory-setup.sh" || echo "::warning::ci-memory-setup did not finish; continuing with stock runner memory"
 
       - name: Init CodeWhale submodule
         run: git submodule update --init --recursive -- CodeWhale
@@ -2356,9 +2386,11 @@ jobs:
             build-essential pkg-config cmake \
             libpipewire-0.3-dev libdrm-dev libgbm-dev libegl-dev
           # Reduce footprint at the source: orphan dependencies, apt cache packages, and index lists do not stay on the build disk.
-          sudo apt-get autoremove -y --purge
-          sudo apt-get clean
-          sudo rm -rf /var/lib/apt/lists/*
+          if [[ "$RUNNER_ENVIRONMENT" == github-hosted ]]; then
+            sudo apt-get autoremove -y --purge
+            sudo apt-get clean
+            sudo rm -rf /var/lib/apt/lists/*
+          fi
 
       # pipewire-rs 0.10 (computer_use Wayland capture, direct + via xcap) needs SPA
       # static inline helpers that ubuntu-22.04's libpipewire 0.3.48 headers lack
@@ -2390,6 +2422,9 @@ jobs:
       # Refuse a runner already below the default 12 GiB before restoring.
       - name: Check CLI disk capacity before cache
         run: |
+          if [[ "$RUNNER_ENVIRONMENT" == self-hosted ]]; then
+            exec python3 scripts/ci-rust-disk.py --check-only
+          fi
           sudo env GITHUB_WORKSPACE="$GITHUB_WORKSPACE" \
             RUNNER_ENVIRONMENT="$RUNNER_ENVIRONMENT" \
             python3 scripts/ci-rust-disk.py
@@ -2410,6 +2445,9 @@ jobs:
       # caching disabled if space cannot be recovered.
       - name: Check CLI disk capacity after cache
         run: |
+          if [[ "$RUNNER_ENVIRONMENT" == self-hosted ]]; then
+            exec python3 scripts/ci-rust-disk.py --check-only
+          fi
           sudo env GITHUB_WORKSPACE="$GITHUB_WORKSPACE" \
             RUNNER_ENVIRONMENT="$RUNNER_ENVIRONMENT" \
             python3 scripts/ci-rust-disk.py
@@ -2447,9 +2485,13 @@ jobs:
       - name: Guard CLI cache post-save
         if: ${{ always() && !cancelled() && steps.cli_lint_cache.outcome == 'success' }}
         run: |
-          sudo env GITHUB_WORKSPACE="$GITHUB_WORKSPACE" \
-            RUNNER_ENVIRONMENT="$RUNNER_ENVIRONMENT" \
-            python3 scripts/ci-rust-disk.py
+          if [[ "$RUNNER_ENVIRONMENT" == self-hosted ]]; then
+            python3 scripts/ci-rust-disk.py --check-only
+          else
+            sudo env GITHUB_WORKSPACE="$GITHUB_WORKSPACE" \
+              RUNNER_ENVIRONMENT="$RUNNER_ENVIRONMENT" \
+              python3 scripts/ci-rust-disk.py
+          fi
           printf '%s\n' 'CACHE_ON_FAILURE=true' >> "$GITHUB_ENV"
 
   windows-rust-test:
@@ -2465,6 +2507,7 @@ jobs:
     # so skipped cannot mask uncertainty.
     if: >-
       ${{
+        vars.PINVOU_WINDOWS_MAC_ENABLED != 'false' &&
         !cancelled() &&
         (
           github.event_name == 'push' ||
@@ -3077,7 +3120,7 @@ jobs:
   windows-rustup-repair-test:
     name: windows-rustup-repair-test
     needs: changes
-    if: ${{ !cancelled() && github.event.action != 'closed' && needs.changes.outputs.pure_release_backflow != 'true' && needs.changes.outputs.windows_rustup_repair == 'true' && (github.event_name != 'pull_request' || github.event.pull_request.draft == false) }}
+    if: ${{ !cancelled() && github.event.action != 'closed' && needs.changes.outputs.pure_release_backflow != 'true' && needs.changes.outputs.windows_rustup_repair == 'true' && (github.event_name != 'pull_request' || github.event.pull_request.draft == false)  && vars.PINVOU_WINDOWS_MAC_ENABLED != 'false' }}
     runs-on: windows-latest
     # smoke 保留引擎生产环境的 1500s 修复预算;"所有下载源都僵死"的病态情形
     # 必须在引擎自身的诊断输出之后再截断,而不是提前,因此上限要盖过
@@ -3165,6 +3208,7 @@ jobs:
     # and does not extend this job's applicability.
     if: >-
       ${{
+        vars.PINVOU_WINDOWS_MAC_ENABLED != 'false' &&
         !cancelled() &&
         (
           github.event_name == 'push' ||
@@ -3644,7 +3688,7 @@ jobs:
   windows-codex-runtime-test:
     name: windows-codex-runtime-test
     needs: changes
-    if: ${{ !cancelled() && github.event.action != 'closed' && needs.changes.outputs.pure_release_backflow != 'true' && (needs.changes.outputs.windows_codex == 'true' || needs.changes.outputs.acp_runtime == 'true') && (github.event_name != 'pull_request' || github.event.pull_request.draft == false) }}
+    if: ${{ !cancelled() && github.event.action != 'closed' && needs.changes.outputs.pure_release_backflow != 'true' && (needs.changes.outputs.windows_codex == 'true' || needs.changes.outputs.acp_runtime == 'true') && (github.event_name != 'pull_request' || github.event.pull_request.draft == false)  && vars.PINVOU_WINDOWS_MAC_ENABLED != 'false' }}
     runs-on: windows-latest
     timeout-minutes: 15
     steps:
@@ -3655,7 +3699,8 @@ jobs:
         uses: actions/setup-node@v7
         with:
           node-version: "24"
-          cache: npm
+          cache: ${{ runner.environment == 'github-hosted' && 'npm' || '' }}
+          package-manager-cache: ${{ runner.environment == 'github-hosted' }}
           # Same two-lockfile key as frontend-test/rust-test: one shared npm
           # cache namespace instead of per-job keys.
           cache-dependency-path: |
@@ -3695,7 +3740,7 @@ jobs:
   windows-runtime-test:
     name: windows-runtime-test
     needs: changes
-    if: ${{ !cancelled() && github.event.action != 'closed' && needs.changes.outputs.pure_release_backflow != 'true' && needs.changes.outputs.windows_runtime == 'true' && (github.event_name != 'pull_request' || github.event.pull_request.draft == false) }}
+    if: ${{ !cancelled() && github.event.action != 'closed' && needs.changes.outputs.pure_release_backflow != 'true' && needs.changes.outputs.windows_runtime == 'true' && (github.event_name != 'pull_request' || github.event.pull_request.draft == false)  && vars.PINVOU_WINDOWS_MAC_ENABLED != 'false' }}
     runs-on: windows-latest
     timeout-minutes: 10
     steps:
@@ -3708,7 +3753,7 @@ jobs:
   macos-codex-runtime-test:
     name: macos-codex-runtime-test
     needs: changes
-    if: ${{ !cancelled() && github.event.action != 'closed' && needs.changes.outputs.pure_release_backflow != 'true' && needs.changes.outputs.acp_runtime == 'true' && (github.event_name != 'pull_request' || github.event.pull_request.draft == false) }}
+    if: ${{ !cancelled() && github.event.action != 'closed' && needs.changes.outputs.pure_release_backflow != 'true' && needs.changes.outputs.acp_runtime == 'true' && (github.event_name != 'pull_request' || github.event.pull_request.draft == false)  && vars.PINVOU_WINDOWS_MAC_ENABLED != 'false' }}
     runs-on: macos-15
     timeout-minutes: 20
     steps:
@@ -3757,6 +3802,7 @@ jobs:
     needs: changes
     if: >-
       ${{
+        vars.PINVOU_WINDOWS_MAC_ENABLED != 'false' &&
         !cancelled() &&
         github.event.action != 'closed' &&
         (
@@ -3878,7 +3924,7 @@ jobs:
           )
         )
       }}
-    runs-on: ubuntu-22.04
+    runs-on: ${{ fromJSON(vars.PINVOU_LINUX_RUNNER || '["ubuntu-22.04"]') }}
     # 冷缓存要交叉编译三个 workspace(含 700+ crate 的 src-tauri)加下载
     # 工具链/sysroot,120 分钟覆盖冷编译与 runner 抖动(同 macos-cli-check
     # 的"上限=冷编译预算"原则)。
@@ -3902,6 +3948,9 @@ jobs:
       # 同 cli-test:冷交叉编译 + 工具链/sysroot 会逼近宿主 ~13 GiB。
       - name: Prepare Rust disk capacity
         run: |
+          if [[ "$RUNNER_ENVIRONMENT" == self-hosted ]]; then
+            exec python3 scripts/ci-rust-disk.py --check-only
+          fi
           sudo env GITHUB_WORKSPACE="$GITHUB_WORKSPACE" \
             RUNNER_ENVIRONMENT="$RUNNER_ENVIRONMENT" \
             python3 scripts/ci-rust-disk.py
@@ -3910,7 +3959,7 @@ jobs:
       # non-fatal; only the wrapper structure is enforced by the gate policy.
       - name: Set up zram and swap
         # Best effort: timeouts or failures only warn and never block (falls back to stock runner memory).
-        run: timeout --kill-after=15 240 sudo --preserve-env=GITHUB_ACTIONS,PINVOU3_CI_DISABLE_ZRAM bash "${{ github.workspace }}/scripts/ci-memory-setup.sh" || echo "::warning::ci-memory-setup did not finish; continuing with stock runner memory"
+        run: timeout --kill-after=15 240 sudo --preserve-env=GITHUB_ACTIONS,PINVOU3_CI_DISABLE_ZRAM,RUNNER_ENVIRONMENT bash "${{ github.workspace }}/scripts/ci-memory-setup.sh" || echo "::warning::ci-memory-setup did not finish; continuing with stock runner memory"
 
       - name: Init CodeWhale submodule
         run: git submodule update --init --recursive -- CodeWhale
@@ -3942,9 +3991,11 @@ jobs:
           sudo apt-get install -y --no-install-recommends \
             build-essential pkg-config cmake libclang-18-dev file
           # Reduce footprint at the source: orphan dependencies, apt cache packages, and index lists do not stay on the build disk.
-          sudo apt-get autoremove -y --purge
-          sudo apt-get clean
-          sudo rm -rf /var/lib/apt/lists/*
+          if [[ "$RUNNER_ENVIRONMENT" == github-hosted ]]; then
+            sudo apt-get autoremove -y --purge
+            sudo apt-get clean
+            sudo rm -rf /var/lib/apt/lists/*
+          fi
           # clang-sys probes several default locations; pin the discovery to
           # the LoongArch-capable libclang this step just installed.
           echo "LIBCLANG_PATH=/usr/lib/llvm-18/lib" >> "$GITHUB_ENV"
@@ -4093,7 +4144,7 @@ jobs:
       - windows-runtime-test
       - windows-rustup-repair-test
     if: ${{ always() && ((github.event_name == 'pull_request' && github.event.action != 'closed') || github.event_name == 'merge_group') }}
-    runs-on: ubuntu-22.04
+    runs-on: ${{ fromJSON(vars.PINVOU_LINUX_RUNNER || '["ubuntu-22.04"]') }}
     timeout-minutes: 5
     steps:
       - name: Checkout
@@ -4101,7 +4152,7 @@ jobs:
 
       - name: Set up zram and swap
         # 内存扩容为尽力而为:超时/失败只告警不阻断(回退 runner 默认内存)。
-        run: timeout --kill-after=15 240 sudo --preserve-env=GITHUB_ACTIONS,PINVOU3_CI_DISABLE_ZRAM bash "${{ github.workspace }}/scripts/ci-memory-setup.sh" || echo "::warning::ci-memory-setup 未完成,继续使用 runner 默认内存"
+        run: timeout --kill-after=15 240 sudo --preserve-env=GITHUB_ACTIONS,PINVOU3_CI_DISABLE_ZRAM,RUNNER_ENVIRONMENT bash "${{ github.workspace }}/scripts/ci-memory-setup.sh" || echo "::warning::ci-memory-setup 未完成,继续使用 runner 默认内存"
 
       - name: 汇总所有适用检查
         env:
@@ -4114,6 +4165,7 @@ jobs:
           RELAY_RESULT: ${{ needs.relay-test.result }}
           WINDOWS_RELAY_DACL_RESULT: ${{ needs.windows-relay-dacl.result }}
           WINDOWS_RELAY_RESULT: ${{ needs.windows-relay-tools-test.result }}
+          WINDOWS_MAC_ENABLED: ${{ vars.PINVOU_WINDOWS_MAC_ENABLED != 'false' }}
           RELAY_REQUIRED_BY_POLICY: ${{ needs.changes.outputs.relay == 'true' }}
           TEAM_RELAY_HUB_RESULT: ${{ needs.team-relay-hub-test.result }}
           UPDATE_RELEASE_CONSOLE_RESULT: ${{ needs.update-release-console-test.result }}
@@ -4133,7 +4185,7 @@ jobs:
           WINDOWS_RUNTIME_RESULT: ${{ needs.windows-runtime-test.result }}
           WINDOWS_RUSTUP_REPAIR_RESULT: ${{ needs.windows-rustup-repair-test.result }}
           BACKFLOW_MODE: ${{ needs.changes.outputs.backflow_mode }}
-          WINDOWS_RUST_REQUIRED_BY_POLICY: ${{ (github.event_name == 'merge_group' && needs.changes.outputs.backflow_mode == 'full') || (github.event_name == 'pull_request' && github.event.pull_request.draft == false && (needs.changes.outputs.backflow_mode == 'full' || needs.changes.outputs.backflow_mode == 'windows_full')) }}
+          WINDOWS_RUST_REQUIRED_BY_POLICY: ${{ vars.PINVOU_WINDOWS_MAC_ENABLED != 'false' && ((github.event_name == 'merge_group' && needs.changes.outputs.backflow_mode == 'full') || (github.event_name == 'pull_request' && github.event.pull_request.draft == false && (needs.changes.outputs.backflow_mode == 'full' || needs.changes.outputs.backflow_mode == 'windows_full'))) }}
         run: |
           if [[ "$GITHUB_EVENT_NAME" == "merge_group" ]]; then
             # 队列提交由 GitHub 生成，不重复校验人工 commit message；
@@ -4152,12 +4204,17 @@ jobs:
             exit 1
           fi
 
-          if [[ "$RELAY_REQUIRED_BY_POLICY" == "true" && ( "$RELAY_RESULT" != success || "$WINDOWS_RELAY_RESULT" != success ) ]]; then
-            echo "Relay 变更要求 Linux 与 Windows 实际回归成功: relay=$RELAY_RESULT windows-relay=$WINDOWS_RELAY_RESULT" >&2
+          if [[ "$RELAY_REQUIRED_BY_POLICY" == "true" && "$RELAY_RESULT" != success ]]; then
+            echo "Relay 变更要求 Linux 实际回归成功: relay=$RELAY_RESULT" >&2
             exit 1
           fi
 
-          if [[ "$RELAY_REQUIRED_BY_POLICY" == "true" && "$WINDOWS_RELAY_DACL_RESULT" != success ]]; then
+          if [[ "${WINDOWS_MAC_ENABLED:-true}" != false && "$RELAY_REQUIRED_BY_POLICY" == true && "$WINDOWS_RELAY_RESULT" != success ]]; then
+            echo "Relay 变更要求已启用的 Windows 实际回归成功: windows-relay=$WINDOWS_RELAY_RESULT" >&2
+            exit 1
+          fi
+
+          if [[ "${WINDOWS_MAC_ENABLED:-true}" != false && "$RELAY_REQUIRED_BY_POLICY" == "true" && "$WINDOWS_RELAY_DACL_RESULT" != success ]]; then
             echo "Relay 变更要求真实 Windows DACL 验证成功: windows-relay-dacl=$WINDOWS_RELAY_DACL_RESULT" >&2
             exit 1
           fi

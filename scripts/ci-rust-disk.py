@@ -1,5 +1,8 @@
 #!/usr/bin/env python3
-"""Reserve disk for Rust jobs on disposable GitHub Linux runners.
+"""Reserve disk for Rust jobs; self-hosted runners use --check-only.
+
+Check-only mode enforces the same free-space floor without sudo or SDK removal.
+It never scans the cleanup allowlist and cannot be combined with --aggressive.
 
 Unused preinstalled SDKs may only be removed from two strict allowlist tiers:
 
@@ -79,8 +82,9 @@ def _du_size(path: Path) -> str:
     return "unknown size"
 
 
-def prepare_disk(workspace: Path, *, aggressive: bool = False, min_free_gib: int = DEFAULT_MIN_FREE_GIB) -> None:
-    if sys.platform != "linux" or os.environ.get("RUNNER_ENVIRONMENT") != "github-hosted":
+def prepare_disk(workspace: Path, *, aggressive: bool = False, min_free_gib: int = DEFAULT_MIN_FREE_GIB, check_only: bool = False) -> None:
+    environment = os.environ.get("RUNNER_ENVIRONMENT")
+    if sys.platform != "linux" or (environment != "github-hosted" and not (environment == "self-hosted" and check_only)):
         raise RuntimeError("Disk preparation is restricted to GitHub-hosted Linux runners")
     if min_free_gib < 1:
         # A zero/negative threshold would silently disable the ENOSPC gate.
@@ -88,6 +92,15 @@ def prepare_disk(workspace: Path, *, aggressive: bool = False, min_free_gib: int
     workspace = workspace.resolve(strict=True)
     if not workspace.is_dir() or not (workspace / ".github/workflows/pr-check.yml").is_file():
         raise RuntimeError("GITHUB_WORKSPACE must be the checked-out repository")
+
+    if check_only:
+        if aggressive:
+            raise RuntimeError("--check-only cannot be combined with --aggressive")
+        free = shutil.disk_usage(workspace).free
+        print(f"Rust CI disk available without cleanup: {free / 1024**3:.1f} GiB", flush=True)
+        if free < min_free_gib * 1024**3:
+            raise RuntimeError(f"Rust jobs require at least {min_free_gib} GiB free; self-hosted SDKs were not removed")
+        return
 
     # Validate the entire allowlist (fixed and glob-resolved paths alike)
     # before deleting anything, including parent symlinks and overlapping
@@ -143,6 +156,7 @@ def main(argv=None) -> int:
         help="also remove /opt/hostedtoolcache, /opt/google/chrome and /opt/microsoft/msedge; "
         "only valid before any setup-* action has run in the job",
     )
+    parser.add_argument("--check-only", action="store_true", help="enforce free space without deleting SDKs; safe for self-hosted Linux")
     parser.add_argument(
         "--min-free-gib",
         type=_min_free_gib_arg,
@@ -154,7 +168,7 @@ def main(argv=None) -> int:
         workspace = os.environ.get("GITHUB_WORKSPACE", "").strip()
         if not workspace:
             raise RuntimeError("GITHUB_WORKSPACE is required")
-        prepare_disk(Path(workspace), aggressive=args.aggressive, min_free_gib=args.min_free_gib)
+        prepare_disk(Path(workspace), aggressive=args.aggressive, min_free_gib=args.min_free_gib, check_only=args.check_only)
     except (OSError, RuntimeError) as error:
         print(f"Rust CI disk preparation failed: {error}", file=sys.stderr)
         return 1
