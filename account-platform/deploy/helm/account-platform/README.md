@@ -425,7 +425,9 @@ its schema owner; runtime and policy-operator logins must not own the database o
 schema or be members of those owner roles. Existing business-table ownership is
 retained. For first installation, provision Token's `pgcrypto` extension as DBA;
 grant runtime schema USAGE/CREATE only for the earlier migrations. Token 000029
-and Billing 000053 revoke runtime/PUBLIC CREATE after assuming the schema owner.
+and Billing 900003 runtime-ownership hardening revoke runtime/PUBLIC CREATE.
+The current Billing migration chain installs wallet receipts through 900023;
+its migration hooks reapply ownership hardening after each protected migration.
 On existing volumes, perform this ownership preparation during the writer-fenced
 maintenance window; changing the Compose init script or Secret alone does not
 modify an existing database. Do not reopen old write-capable binaries afterward.
@@ -442,8 +444,13 @@ in place after the check, enabling only the migration/operator roles needed for
 each controlled deployment step. This check is read-only and does not revoke
 privileges or terminate sessions automatically.
 
-Hook order is Billing migration 000053, Token migration 000029, then explicit
-policy bootstrap. Creation remains unavailable until APT-138 activation 000031
+Hook order is the complete current Billing migration chain (including 900023
+wallet receipts), then the Token chain (including 000029), then explicit
+policy bootstrap. New databases must not install or fabricate historical 000053;
+existing original 053 receipts require the exact retained-history and ownership
+checks described in [wallet receipts](../../../docs/token-wallet-receipts.md).
+Migration 900023 is forward-only, even when its receipt table is empty.
+Creation remains unavailable until APT-138 activation 000031
 is ACTIVE and its polling worker is ready. Initial migration quiescence drains
 the legacy creation queue; SAFE recovery preserves historical pending/manual
 work instead of repeating that initial drain requirement. During rollback, fence
