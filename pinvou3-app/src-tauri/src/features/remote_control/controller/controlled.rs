@@ -2301,8 +2301,14 @@ mod tests {
             context.clone(),
             capabilities.clone(),
         );
+        let now_b = material.connected_at_b;
         let (_, old) = manager
-            .complete_connected_with_install(operation.clone(), material, || Ok(Arc::new(sender)))
+            .complete_connected_with_install(
+                operation.clone(),
+                material,
+                || now_b,
+                || Ok(Arc::new(sender)),
+            )
             .unwrap();
         let successor = super::super::test_support::resume_reader_transport(
             super::super::relay_transport::ControllerRole::ControlledB,
