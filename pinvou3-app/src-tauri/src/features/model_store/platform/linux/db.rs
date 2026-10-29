@@ -1220,6 +1220,41 @@ pub fn get_store_model(card_id: &str) -> rusqlite::Result<Option<StoreModelRecor
     .optional()
 }
 
+/// LAN 网关路由检查专用的轻量行（r19 评审 P2-5）。
+///
+/// `lan_store::route` 在每秒一次的轮询路径上核对一张卡能不能转发，此前借
+/// [`get_store_model`] 拉**整行**——包括 scripts/assets 两个 MB 级正文列，
+/// 而 route 只消费 5 个小字段，正文读了就扔。这里只取实际消费的那几列，
+/// 宁少勿多：新增消费字段时再往两边加，别顺手多带。
+pub struct StoreModelRouteFields {
+    pub running: bool,
+    pub status: String,
+    pub endpoint_url: Option<String>,
+    pub endpoint_model: Option<String>,
+    pub container_name: Option<String>,
+}
+
+pub fn get_store_model_route_fields(
+    card_id: &str,
+) -> rusqlite::Result<Option<StoreModelRouteFields>> {
+    let conn = connect()?;
+    conn.query_row(
+        "SELECT running, status, endpoint_url, endpoint_model, container_name
+           FROM store_models WHERE card_id = ?1",
+        params![card_id],
+        |row| {
+            Ok(StoreModelRouteFields {
+                running: row.get::<_, i64>("running")? != 0,
+                status: row.get("status")?,
+                endpoint_url: row.get("endpoint_url")?,
+                endpoint_model: row.get("endpoint_model")?,
+                container_name: row.get("container_name")?,
+            })
+        },
+    )
+    .optional()
+}
+
 pub fn get_store_model_by_name(model_name: &str) -> rusqlite::Result<Option<StoreModelRecord>> {
     let conn = connect()?;
     conn.query_row(
@@ -1388,6 +1423,42 @@ mod tests {
         // 常规字段照常可读（顺带覆盖显式列清单没有漏列）。
         assert_eq!(rows[0].record.card_id, "card-light");
         assert!(!rows[0].record.running);
+    }
+
+    /// 轻量路由查询必须真的能在 SQLite 上执行并读对字段（r19 评审 P2-5）。
+    /// SQL 语法错误只有真跑一遍才拦得住（见上一条测试的教训），而这条查询
+    /// 服务的是 LAN 网关每秒一次的轮询路径。
+    #[test]
+    fn route_fields_query_executes_and_returns_consumed_columns() {
+        let _ctx = setup_temp_db();
+        let conn = connect().unwrap();
+        conn.execute(
+            "INSERT INTO store_models
+                 (card_id, model_name, card_name, engine_name, status, running,
+                  container_name, endpoint_url, endpoint_model, downloaded_at)
+             VALUES ('card-route', 'qwen-route', 'Qwen Route', 'vllm', 'deployed', 1,
+                     'qwen-api', 'http://127.0.0.1:30000/v1/chat/completions',
+                     '/models/qwen', '2026-10-23T00:00:00Z')",
+            [],
+        )
+        .unwrap();
+
+        let row = get_store_model_route_fields("card-route")
+            .unwrap_or_else(|e| panic!("轻量路由查询执行失败（SQL 语法错误会在这里暴露）：{e}"))
+            .expect("记录存在");
+        assert!(row.running);
+        assert_eq!(row.status, "deployed");
+        assert_eq!(
+            row.endpoint_url.as_deref(),
+            Some("http://127.0.0.1:30000/v1/chat/completions")
+        );
+        assert_eq!(row.endpoint_model.as_deref(), Some("/models/qwen"));
+        assert_eq!(row.container_name.as_deref(), Some("qwen-api"));
+
+        assert!(
+            get_store_model_route_fields("card-missing").unwrap().is_none(),
+            "不存在的卡应返回 None，由调用方转成 lan_model_unavailable"
+        );
     }
 
     #[test]
