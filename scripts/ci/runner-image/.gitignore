@@ -1,0 +1,3 @@
+artifacts/
+extra-ca/*
+!extra-ca/.gitkeep
