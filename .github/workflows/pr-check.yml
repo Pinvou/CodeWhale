@@ -108,8 +108,9 @@ jobs:
   commit-message:
     name: commit-message
     if: ${{ (github.event_name == 'pull_request' && github.event.action != 'closed') || github.event_name == 'push' }}
-    runs-on: ${{ fromJSON(vars.PINVOU_LINUX_RUNNER || '["ubuntu-22.04"]') }}
-    timeout-minutes: 5
+    runs-on: ${{ fromJSON(vars.PINVOU_LINUX_LIGHT_RUNNER || vars.PINVOU_LINUX_RUNNER || '["ubuntu-22.04"]') }}
+    # Full-history cold fetches on self-hosted runners can exceed five minutes.
+    timeout-minutes: 15
     steps:
       - name: Checkout
         uses: actions/checkout@v7
@@ -135,7 +136,7 @@ jobs:
   version-consistency:
     name: version-consistency
     if: ${{ (github.event_name == 'pull_request' && github.event.action != 'closed') || github.event_name == 'merge_group' || github.event_name == 'push' }}
-    runs-on: ${{ fromJSON(vars.PINVOU_LINUX_RUNNER || '["ubuntu-22.04"]') }}
+    runs-on: ${{ fromJSON(vars.PINVOU_LINUX_LIGHT_RUNNER || vars.PINVOU_LINUX_RUNNER || '["ubuntu-22.04"]') }}
     timeout-minutes: 5
     steps:
       - name: Checkout
@@ -174,7 +175,7 @@ jobs:
   changes:
     name: changes
     if: ${{ (github.event_name == 'pull_request' && github.event.action != 'closed') || github.event_name == 'merge_group' || github.event_name == 'push' }}
-    runs-on: ${{ fromJSON(vars.PINVOU_LINUX_RUNNER || '["ubuntu-22.04"]') }}
+    runs-on: ${{ fromJSON(vars.PINVOU_LINUX_LIGHT_RUNNER || vars.PINVOU_LINUX_RUNNER || '["ubuntu-22.04"]') }}
     # 10min: fetch-depth:0 checkout plus the memory-setup wrapper's worst case
     # (240s + 15s kill grace) must not turn the intended non-fatal degradation
     # into a hard job timeout. Since 2026-10 the fold makes this job's
@@ -243,6 +244,7 @@ jobs:
               - '**/Cargo.lock'
               - '**/build.rs'
               - 'scripts/ci-libpipewire-build.sh'
+              - 'scripts/ci-cargo-dev-profile.py'
               - 'CodeWhale'
               - '.gitmodules'
               - '.github/workflows/pr-check.yml'
@@ -259,6 +261,7 @@ jobs:
             # isolated leaf-feature boundaries are explicitly low risk; changes
             # to their registration or app command surface still run full tests.
             rust_full:
+              - 'scripts/ci-cargo-dev-profile.py'
               # Round-1 fix wave (PR #715 review): the loong64 cross-pipeline
               # scripts are build inputs of the rust legs — the pr-check
               # rust-loongarch64-check leg executes the toolchain/sysroot
@@ -763,7 +766,7 @@ jobs:
       # Windows/macOS 腿受 PINVOU_WINDOWS_MAC_ENABLED 总闸控制(matrix 上下文
       # 不可用于 job 级 if,故在矩阵生成处过滤)。
       matrix: ${{ fromJSON(vars.PINVOU_WINDOWS_MAC_ENABLED != 'false' && '{"include":[{"os":"ubuntu-22.04"},{"os":"windows-latest"},{"os":"macos-15"}]}' || '{"include":[{"os":"ubuntu-22.04"}]}') }}
-    runs-on: ${{ matrix.os == 'ubuntu-22.04' && fromJSON(vars.PINVOU_LINUX_RUNNER || '["ubuntu-22.04"]') || matrix.os }}
+    runs-on: ${{ matrix.os == 'ubuntu-22.04' && fromJSON(vars.PINVOU_LINUX_LIGHT_RUNNER || vars.PINVOU_LINUX_RUNNER || '["ubuntu-22.04"]') || matrix.os }}
     timeout-minutes: 5
     steps:
       - name: Checkout
@@ -799,8 +802,10 @@ jobs:
   fast-gate:
     name: fast-gate
     if: ${{ (github.event_name == 'pull_request' && github.event.action != 'closed') || github.event_name == 'merge_group' }}
-    runs-on: ${{ fromJSON(vars.PINVOU_LINUX_RUNNER || '["ubuntu-22.04"]') }}
-    timeout-minutes: 10
+    runs-on: ${{ fromJSON(vars.PINVOU_LINUX_LIGHT_RUNNER || vars.PINVOU_LINUX_RUNNER || '["ubuntu-22.04"]') }}
+    # Cold public-submodule/Python downloads can consume most of ten minutes.
+    # Allow cold setup without starving the complete guard/test suite.
+    timeout-minutes: 20
     steps:
       - name: Checkout (含 submodule,fork 为 public 直接拉)
         uses: actions/checkout@v7
@@ -881,10 +886,10 @@ jobs:
       - name: Setup Python
         uses: actions/setup-python@v7
         with:
-          python-version: "3.x"
+          python-version: "3.12"
 
       - name: Gate policy test suite (scripts/tests)
-        run: python3 -m unittest discover -s scripts/tests -p 'test_*.py'
+        run: python3 -m unittest discover -s scripts/tests -p 'test_*.py' -v
 
       # Keep the other fast checks independent of the changes job. This filter
       # runs only after them and uses the same PR / merge-group diff semantics.
@@ -931,7 +936,7 @@ jobs:
     # covers setup plus one full pass and a single rerun of the biggest smoke,
     # while a run with several independent flakes hits the cap and fails.
     if: ${{ !cancelled() && github.event.action != 'closed' && needs.changes.outputs.pure_release_backflow != 'true' && (github.event_name == 'pull_request' || github.event_name == 'merge_group') && (needs.changes.outputs.frontend == 'true' || needs.changes.outputs.pet == 'true') }}
-    runs-on: ${{ fromJSON(vars.PINVOU_LINUX_RUNNER || '["ubuntu-22.04"]') }}
+    runs-on: ${{ fromJSON(vars.PINVOU_LINUX_MEDIUM_RUNNER || vars.PINVOU_LINUX_RUNNER || '["ubuntu-22.04"]') }}
     timeout-minutes: 25
     defaults:
       run:
@@ -1047,7 +1052,7 @@ jobs:
     name: relay-test
     needs: changes
     if: ${{ !cancelled() && needs.changes.outputs.relay == 'true' && (github.event_name == 'merge_group' || github.event_name == 'pull_request') }}
-    runs-on: ${{ fromJSON(vars.PINVOU_LINUX_RUNNER || '["ubuntu-22.04"]') }}
+    runs-on: ${{ fromJSON(vars.PINVOU_LINUX_MEDIUM_RUNNER || vars.PINVOU_LINUX_RUNNER || '["ubuntu-22.04"]') }}
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@v7
@@ -1114,7 +1119,7 @@ jobs:
     name: team-relay-hub-test
     needs: changes
     if: ${{ !cancelled() && github.event.action != 'closed' && needs.changes.outputs.team_relay_hub == 'true' && (github.event_name == 'pull_request' || github.event_name == 'merge_group') }}
-    runs-on: ${{ fromJSON(vars.PINVOU_LINUX_RUNNER || '["ubuntu-22.04"]') }}
+    runs-on: ${{ fromJSON(vars.PINVOU_LINUX_MEDIUM_RUNNER || vars.PINVOU_LINUX_RUNNER || '["ubuntu-22.04"]') }}
     timeout-minutes: 10
     services:
       postgres:
@@ -1123,14 +1128,14 @@ jobs:
           POSTGRES_PASSWORD: team_relay_ci_only
           POSTGRES_DB: team_relay_ci_test
         ports:
-          - 5432:5432
+          - 5432/tcp
         options: >-
           --health-cmd "pg_isready -U postgres -d team_relay_ci_test"
           --health-interval 5s
           --health-timeout 5s
           --health-retries 10
-    env:
-      TEAM_RELAY_TEST_DATABASE_URL: postgres://postgres:team_relay_ci_only@127.0.0.1:5432/team_relay_ci_test
+          --cpus 2
+          --memory 2g
     steps:
       - uses: actions/checkout@v7
       - name: Set up zram and swap
@@ -1149,6 +1154,8 @@ jobs:
         run: npm --prefix team-relay-hub ci --prefer-offline --no-audit
 
       - name: Hub 完整测试
+        env:
+          TEAM_RELAY_TEST_DATABASE_URL: postgres://postgres:team_relay_ci_only@127.0.0.1:${{ job.services.postgres.ports['5432'] }}/team_relay_ci_test
         run: npm --prefix team-relay-hub test
 
       - name: Hub 依赖审计
@@ -1158,7 +1165,7 @@ jobs:
     name: update-release-console-test (Node ${{ matrix.node-version }})
     needs: changes
     if: ${{ !cancelled() && github.event.action != 'closed' && needs.changes.outputs.update_release_console == 'true' && (github.event_name == 'pull_request' || github.event_name == 'merge_group') }}
-    runs-on: ${{ fromJSON(vars.PINVOU_LINUX_RUNNER || '["ubuntu-22.04"]') }}
+    runs-on: ${{ fromJSON(vars.PINVOU_LINUX_MEDIUM_RUNNER || vars.PINVOU_LINUX_RUNNER || '["ubuntu-22.04"]') }}
     timeout-minutes: 10
     strategy:
       fail-fast: false
@@ -1191,38 +1198,13 @@ jobs:
         if: ${{ matrix.node-version == '20' }}
         env:
           PINVOU_UPDATE_ADMIN_TOKEN: ci-only-token-that-is-at-least-32-characters
-        run: |
-          docker build --file update-release-console/Dockerfile update-release-console
-          docker compose --file update-release-console/deploy/compose.yaml config --quiet
-          docker run --rm \
-            -v "$PWD/update-release-console/deploy/nginx-test.conf:/etc/nginx/nginx.conf:ro" \
-            -v "$PWD/update-release-console/deploy/nginx-location.conf:/etc/nginx/pinvou3-release-location.conf:ro" \
-            nginx:1.27-alpine nginx -t
-          sudo mkdir -p /var/www/pinvou3
-          printf '%s\n' '{"platforms":{"linux-x86_64":{"version":"0.10.4"},"macos-universal":{"version":"0.10.4"}}}' \
-            | sudo tee /var/www/pinvou3/latest.json >/dev/null
-          sudo chown -R 1000:1000 /var/www/pinvou3
-          docker compose --file update-release-console/deploy/compose.yaml up --detach --build
-          for attempt in {1..30}; do
-            if curl --fail --silent --show-error \
-              http://127.0.0.1:8792/pinvou3/release-console/healthz; then
-              break
-            fi
-            if [[ "$attempt" == 30 ]]; then
-              docker compose --file update-release-console/deploy/compose.yaml logs
-              exit 1
-            fi
-            sleep 2
-          done
-          curl --fail --silent --show-error \
-            --header "Authorization: Bearer $PINVOU_UPDATE_ADMIN_TOKEN" \
-            http://127.0.0.1:8792/pinvou3/release-console/api/status
+        run: bash scripts/ci-update-release-console-container.sh
 
       - name: 清理发布台容器
         if: ${{ always() && matrix.node-version == '20' }}
         env:
           PINVOU_UPDATE_ADMIN_TOKEN: ci-only-token-that-is-at-least-32-characters
-        run: docker compose --file update-release-console/deploy/compose.yaml down --volumes --remove-orphans
+        run: bash scripts/ci-update-release-console-container.sh --cleanup
 
   release-contract-test:
     name: release-contract-test
@@ -1233,7 +1215,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix: ${{ fromJSON(vars.PINVOU_WINDOWS_MAC_ENABLED != 'false' && '{"include":[{"os":"ubuntu-22.04"},{"os":"windows-latest"}]}' || '{"include":[{"os":"ubuntu-22.04"}]}') }}
-    runs-on: ${{ matrix.os == 'ubuntu-22.04' && fromJSON(vars.PINVOU_LINUX_RUNNER || '["ubuntu-22.04"]') || matrix.os }}
+    runs-on: ${{ matrix.os == 'ubuntu-22.04' && fromJSON(vars.PINVOU_LINUX_MEDIUM_RUNNER || vars.PINVOU_LINUX_RUNNER || '["ubuntu-22.04"]') || matrix.os }}
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@v7
@@ -1305,7 +1287,7 @@ jobs:
           needs.changes.outputs.knowledge_dependencies == 'true'
         )
       }}
-    runs-on: ${{ fromJSON(vars.PINVOU_LINUX_RUNNER || '["ubuntu-22.04"]') }}
+    runs-on: ${{ fromJSON(vars.PINVOU_LINUX_HEAVY_RUNNER || vars.PINVOU_LINUX_RUNNER || '["ubuntu-22.04"]') }}
     # 冷跑时长未实测(~/.cargo 存档命中的运行 3–6min;cache-targets: false,
     # 编译每轮全冷)。工具链滚动触发冷跑且逼近 30m 时 job 被超时判败,
     # cache-on-failure 的 post 步会保存 ~/.cargo(registry/git 等,不含
@@ -1448,7 +1430,7 @@ jobs:
           needs.changes.outputs.rust_dependencies == 'true'
         )
       }}
-    runs-on: ${{ fromJSON(vars.PINVOU_LINUX_RUNNER || '["ubuntu-22.04"]') }}
+    runs-on: ${{ fromJSON(vars.PINVOU_LINUX_HEAVY_RUNNER || vars.PINVOU_LINUX_RUNNER || '["ubuntu-22.04"]') }}
     # 30m 上限在缓存冷启动下不够:Cargo cache 是 save-if main-only(PR 永不保存)。
     # 2026-10 起本 job 在 main push 上无条件运行以刷新存档(此前非 rust 合并会
     # 整体跳过、存档老化),但工具链滚动或缓存池淘汰仍可能让 PR 端
@@ -1699,7 +1681,7 @@ jobs:
           )
         )
       }}
-    runs-on: ${{ fromJSON(vars.PINVOU_LINUX_RUNNER || '["ubuntu-22.04"]') }}
+    runs-on: ${{ fromJSON(vars.PINVOU_LINUX_HEAVY_RUNNER || vars.PINVOU_LINUX_RUNNER || '["ubuntu-22.04"]') }}
     # Tauri + fastembed + aws-lc-sys 全冷编译耗时长;设上限避免卡死 runner 占用。
     # High-risk PR, combined-tree, and main runs retain a 120-minute safety limit.
     timeout-minutes: 120
@@ -1847,12 +1829,12 @@ jobs:
       - name: dev profile 内存边界覆盖(codewhale-tui O0,仅本 job)
         run: |
           config="${CARGO_HOME:-$HOME/.cargo}/config.toml"
-          cat >> "$config" <<'EOF'
+          python3 scripts/ci-cargo-dev-profile.py "$config" <<'EOF'
 
           [profile.dev.package.codewhale-tui]
           opt-level = 0
           EOF
-          echo "appended codewhale-tui dev O0 override to $config"
+          echo "configured codewhale-tui dev O0 override in $config"
           tail -n 4 "$config"
 
       # remote_control 的真实 relay 下载 e2e 需要 node + relay 依赖,缺 node_modules/ws 时
@@ -2102,7 +2084,7 @@ jobs:
       }}
     # 镜像按全仓单一镜像公约钉到发布基线(守卫:
     # test_ci_gate_policy.test_all_linux_jobs_pin_the_release_runner_image)。
-    runs-on: ${{ fromJSON(vars.PINVOU_LINUX_RUNNER || '["ubuntu-22.04"]') }}
+    runs-on: ${{ fromJSON(vars.PINVOU_LINUX_HEAVY_RUNNER || vars.PINVOU_LINUX_RUNNER || '["ubuntu-22.04"]') }}
     timeout-minutes: 90
     env:
       # The CLI workspace compiles pinvou3-tauri plus its own targets. Disable
@@ -2334,7 +2316,7 @@ jobs:
           )
         )
       }}
-    runs-on: ${{ fromJSON(vars.PINVOU_LINUX_RUNNER || '["ubuntu-22.04"]') }}
+    runs-on: ${{ fromJSON(vars.PINVOU_LINUX_HEAVY_RUNNER || vars.PINVOU_LINUX_RUNNER || '["ubuntu-22.04"]') }}
     timeout-minutes: 90
     steps:
       - name: Checkout
@@ -3894,8 +3876,10 @@ jobs:
   rust-loongarch64-check:
     name: rust-loongarch64-check
     needs: changes
+    # Temporary operational switch; unset/true restores the existing routing.
     if: >-
       ${{
+        vars.PINVOU_LOONGARCH64_CHECK_ENABLED != 'false' &&
         !cancelled() &&
         github.event.action != 'closed' &&
         (
@@ -3919,7 +3903,7 @@ jobs:
           )
         )
       }}
-    runs-on: ${{ fromJSON(vars.PINVOU_LINUX_RUNNER || '["ubuntu-22.04"]') }}
+    runs-on: ${{ fromJSON(vars.PINVOU_LINUX_HEAVY_RUNNER || vars.PINVOU_LINUX_RUNNER || '["ubuntu-22.04"]') }}
     # 冷缓存要交叉编译三个 workspace(含 700+ crate 的 src-tauri)加下载
     # 工具链/sysroot,120 分钟覆盖冷编译与 runner 抖动(同 macos-cli-check
     # 的"上限=冷编译预算"原则)。
@@ -4139,7 +4123,7 @@ jobs:
       - windows-runtime-test
       - windows-rustup-repair-test
     if: ${{ always() && ((github.event_name == 'pull_request' && github.event.action != 'closed') || github.event_name == 'merge_group') }}
-    runs-on: ${{ fromJSON(vars.PINVOU_LINUX_RUNNER || '["ubuntu-22.04"]') }}
+    runs-on: ${{ fromJSON(vars.PINVOU_LINUX_LIGHT_RUNNER || vars.PINVOU_LINUX_RUNNER || '["ubuntu-22.04"]') }}
     timeout-minutes: 5
     steps:
       - name: Checkout
@@ -4176,12 +4160,16 @@ jobs:
           MACOS_CODEX_RESULT: ${{ needs.macos-codex-runtime-test.result }}
           MACOS_CLI_RESULT: ${{ needs.macos-cli-check.result }}
           RUST_LOONGARCH64_CHECK_RESULT: ${{ needs.rust-loongarch64-check.result }}
+          LOONGARCH64_CHECK_ENABLED: ${{ vars.PINVOU_LOONGARCH64_CHECK_ENABLED != 'false' }}
           WINDOWS_CODEX_RESULT: ${{ needs.windows-codex-runtime-test.result }}
           WINDOWS_RUNTIME_RESULT: ${{ needs.windows-runtime-test.result }}
           WINDOWS_RUSTUP_REPAIR_RESULT: ${{ needs.windows-rustup-repair-test.result }}
           BACKFLOW_MODE: ${{ needs.changes.outputs.backflow_mode }}
           WINDOWS_RUST_REQUIRED_BY_POLICY: ${{ vars.PINVOU_WINDOWS_MAC_ENABLED != 'false' && ((github.event_name == 'merge_group' && needs.changes.outputs.backflow_mode == 'full') || (github.event_name == 'pull_request' && github.event.pull_request.draft == false && (needs.changes.outputs.backflow_mode == 'full' || needs.changes.outputs.backflow_mode == 'windows_full'))) }}
         run: |
+          if [[ "${LOONGARCH64_CHECK_ENABLED:-true}" == false ]]; then
+            echo "::notice::LoongArch64 cross check temporarily disabled by PINVOU_LOONGARCH64_CHECK_ENABLED=false"
+          fi
           if [[ "$GITHUB_EVENT_NAME" == "merge_group" ]]; then
             # 队列提交由 GitHub 生成，不重复校验人工 commit message；
             # 其余基础与产品门禁必须验证当前组合提交。

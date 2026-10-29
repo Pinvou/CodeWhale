@@ -22,8 +22,11 @@ try {
   vite = await createServer({ root, configFile: false, appType: 'mpa', logLevel: 'error',
     plugins: [react()], server: { host: '127.0.0.1', port: 0, watch: null } });
   await vite.listen();
+  // CI containers cannot create Chrome's nested namespaces. This smoke loads
+  // only the local mock fixture; keep Chrome's sandbox enabled outside CI.
+  const ciArgs = process.env.CI === 'true' ? ['--no-sandbox'] : [];
   browser = await puppeteer.launch({ executablePath: chrome, headless: true,
-    userDataDir: profile, args: ['--disable-gpu', '--no-first-run', '--no-default-browser-check'] });
+    userDataDir: profile, args: [...ciArgs, '--disable-gpu', '--no-first-run', '--no-default-browser-check'] });
   const page = await browser.newPage();
   const errors = [];
   page.on('pageerror', error => errors.push(error.message));
