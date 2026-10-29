@@ -314,6 +314,15 @@ FROM entitlement_components WHERE package_id=$1 ORDER BY id`, plan.PackageID)
 	if journalExists || receivableExists || caseExists || conflictCase {
 		return ChargebackFinancialRepairPlan{}, ErrApprovalSnapshotMismatch
 	}
+	// A new case is not a new principal budget. Use the normal chargeback
+	// source gate in both the proof read and the locked execution recheck.
+	budget, err := readForcedRefundBudget(ctx, source, plan.PaymentTransactionID, plan.PackageID, plan.PaymentOrderID, plan.WalletID, uuid.Nil, plan.ChargebackCaseID)
+	if errors.Is(err, ErrConflict) || err == nil && budget.cash != 0 {
+		return ChargebackFinancialRepairPlan{}, ErrApprovalSnapshotMismatch
+	}
+	if err != nil {
+		return ChargebackFinancialRepairPlan{}, err
+	}
 	if err := source.QueryRow(ctx, `SELECT id,financial_action_status,version FROM payment_anomaly_cases
 WHERE chargeback_case_id=$1 AND anomaly_type='CHARGEBACK'`, plan.ChargebackCaseID).
 		Scan(&plan.AnomalyCaseID, &plan.AnomalyStatus, &plan.AnomalyVersion); err != nil {
