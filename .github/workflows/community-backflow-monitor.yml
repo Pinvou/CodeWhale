@@ -17,7 +17,7 @@ concurrency:
 jobs:
   scan:
     name: 扫描新合并 PR
-    runs-on: ${{ fromJSON(vars.PINVOU_LINUX_RUNNER || '["ubuntu-22.04"]') }}
+    runs-on: ${{ fromJSON(vars.PINVOU_LINUX_LIGHT_RUNNER || vars.PINVOU_LINUX_RUNNER || '["ubuntu-22.04"]') }}
     timeout-minutes: 5
     steps:
       - name: Checkout
