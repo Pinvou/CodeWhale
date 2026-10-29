@@ -630,7 +630,7 @@ pub fn is_agent_readonly_shell_command(command: &str) -> bool {
     // A bare `&` refuses. Quoted separators inside an argument mis-split
     // here, which only ever makes a segment fail classification (fail
     // closed).
-    let Some(segments) = readonly_sequence_segments(trimmed) else {
+    let Some(segments) = readonly_sequence_segments_with_connectors(trimmed) else {
         return false;
     };
     // The execution seam resolves one `cd` destination per segment against
@@ -639,7 +639,25 @@ pub fn is_agent_readonly_shell_command(command: &str) -> bool {
     if segments.len() > MAX_READONLY_SEQUENCE_SEGMENTS {
         return false;
     }
-    segments.into_iter().all(readonly_segment_stages_admitted)
+    segments.into_iter().all(|(segment, connector)| {
+        // A `cd` joined by `&&`/`||` runs only when the predecessor's exit
+        // status allows it — a runtime fact the gate cannot know — while the
+        // seam folds every admitted `cd` unconditionally. The fold would
+        // judge later operands in a directory the shell never entered,
+        // skipping whatever exists only at the real cwd (`cat nope && cd
+        // sub; cat link` reads a root symlink unjudged). Refuse the shape
+        // statically; the seam re-checks it at the fold.
+        if matches!(
+            connector,
+            ReadonlySequenceConnector::AndThen | ReadonlySequenceConnector::OrElse
+        ) && shell_words(segment)
+            .first()
+            .is_some_and(|word| word == "cd")
+        {
+            return false;
+        }
+        readonly_segment_stages_admitted(segment)
+    })
 }
 
 /// Upper bound on `;`/`&&`/`||` segments in one admitted read-only command.
@@ -695,7 +713,26 @@ pub(crate) fn command_reaches_github_readonly(command: &str) -> bool {
     })
 }
 
-/// Split a command on the sequence separators `;`, `&&`, and `||`.
+/// How a sequence segment is joined to its predecessor. The distinction is
+/// load-bearing for the execution seam's `cd` fold: `;` runs the segment
+/// whatever the predecessor returned, while `&&`/`||` run it only when the
+/// predecessor succeeded/failed — a runtime fact no pre-spawn gate can
+/// evaluate, so a `cd` joined by a conditional connector must never fold
+/// the working directory (the shell may never enter it).
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(crate) enum ReadonlySequenceConnector {
+    /// The first segment: always runs.
+    Start,
+    /// Joined by `;`: runs whatever the predecessor returned.
+    Sequence,
+    /// Joined by `&&`: runs only when the predecessor succeeded.
+    AndThen,
+    /// Joined by `||`: runs only when the predecessor failed.
+    OrElse,
+}
+
+/// Split a command on the sequence separators `;`, `&&`, and `||`, keeping
+/// the connector each segment was joined with.
 ///
 /// Returns `None` when a bare `&` (backgrounding) appears: `&&` separates a
 /// sequence, a lone `&` refuses. The split is deliberately naive — straight
@@ -708,8 +745,11 @@ pub(crate) fn command_reaches_github_readonly(command: &str) -> bool {
 /// execution. The destructive-command pass keeps its own
 /// `split_command_segments`, which folds `|` and a bare `&` into the same
 /// level and drops empty segments — the opposite contract from this gate.
-pub(crate) fn readonly_sequence_segments(command: &str) -> Option<Vec<&str>> {
+pub(crate) fn readonly_sequence_segments_with_connectors(
+    command: &str,
+) -> Option<Vec<(&str, ReadonlySequenceConnector)>> {
     let mut segments = Vec::new();
+    let mut connector = ReadonlySequenceConnector::Start;
     let bytes = command.as_bytes();
     let mut start = 0;
     let mut index = 0;
@@ -717,11 +757,17 @@ pub(crate) fn readonly_sequence_segments(command: &str) -> Option<Vec<&str>> {
         let byte = bytes[index];
         let doubled = index + 1 < bytes.len() && bytes[index + 1] == byte;
         if byte == b';' {
-            segments.push(&command[start..index]);
+            segments.push((&command[start..index], connector));
+            connector = ReadonlySequenceConnector::Sequence;
             index += 1;
             start = index;
         } else if doubled && (byte == b'&' || byte == b'|') {
-            segments.push(&command[start..index]);
+            segments.push((&command[start..index], connector));
+            connector = if byte == b'&' {
+                ReadonlySequenceConnector::AndThen
+            } else {
+                ReadonlySequenceConnector::OrElse
+            };
             index += 2;
             start = index;
         } else if byte == b'&' {
@@ -732,8 +778,17 @@ pub(crate) fn readonly_sequence_segments(command: &str) -> Option<Vec<&str>> {
             index += 1;
         }
     }
-    segments.push(&command[start..]);
+    segments.push((&command[start..], connector));
     Some(segments)
+}
+
+/// Split a command on the sequence separators, dropping the connectors (for
+/// consumers that judge every segment the same way regardless of when the
+/// shell runs it). The `cd` fold at the execution seam must use
+/// [`readonly_sequence_segments_with_connectors`] instead.
+pub(crate) fn readonly_sequence_segments(command: &str) -> Option<Vec<&str>> {
+    readonly_sequence_segments_with_connectors(command)
+        .map(|segments| segments.into_iter().map(|(segment, _)| segment).collect())
 }
 
 /// Whether an admitted read-only command must run under a shell because it
@@ -2639,6 +2694,41 @@ mod tests {
         assert!(!is_agent_readonly_shell_command(&nested_cd));
     }
 
+    /// A `cd` joined by `&&`/`||` may never run — the predecessor's exit
+    /// status decides — while the seam folds every admitted `cd`
+    /// unconditionally, so the fold would judge later operands in a
+    /// directory the shell never entered (`cat nope && cd sub; cat link`
+    /// reads a root symlink unjudged; probed live on bash and sh). The
+    /// connector-aware classifier refuses the shape statically; the seam
+    /// re-checks it at the fold with its own `[cwd.conditional]` tag.
+    #[test]
+    fn agent_readonly_shell_rejects_conditionally_gated_cd() {
+        for command in [
+            "cat nope && cd sub; cat link",
+            "true || cd sub; cat link",
+            "wc -c f && cd sub",
+            "wc -c f || cd sub",
+            "pwd && cd sub; pwd",
+        ] {
+            assert!(
+                !is_agent_readonly_shell_command(command),
+                "a `cd` its connector may not run must refuse: {command}"
+            );
+        }
+        // A `cd` that always runs keeps folding: as the first segment of a
+        // conditional sequence, or joined by `;`.
+        for command in [
+            "cd sub && wc -c f",
+            "cd sub || wc -c f",
+            "wc -c f; cd sub; wc -c sub/f",
+        ] {
+            assert!(
+                is_agent_readonly_shell_command(command),
+                "a `cd` that always runs stays admitted: {command}"
+            );
+        }
+    }
+
     /// The shell-lane routing term is classifier-level, not host-dependent:
     /// any segment whose first word is the `cd` builtin must route to the
     /// shell lane. Pinned here because on macOS `/usr/bin/cd` exists, so a
@@ -2771,6 +2861,24 @@ mod tests {
             assert!(
                 !is_parallel_readonly_command(command),
                 "{command} must stay parallel-strict"
+            );
+            assert!(is_agent_readonly_shell_command(command));
+        }
+    }
+
+    /// The gh `-q`/`--jq` admission rode the gh option table SHARED with the
+    /// parent-side parallel auto-approve classifier, so that classifier's
+    /// admitted set grew even though its source is byte-for-byte unchanged —
+    /// the "unchanged" claim is true of the source, not of the behavior.
+    /// Pin the delta deliberately: these are read-only gh reads (`-q` is
+    /// `--jq`), so the widened auto-approve surface is safe, and charset
+    /// brackets mean only jq filters without them pass either classifier.
+    #[test]
+    fn parallel_classifier_admits_gh_jq_reads_through_the_shared_gh_table() {
+        for command in ["gh pr list --jq .", "gh pr view 5 --json title -q .title"] {
+            assert!(
+                is_parallel_readonly_command(command),
+                "the shared gh table admits {command} for parent auto-approve too"
             );
             assert!(is_agent_readonly_shell_command(command));
         }

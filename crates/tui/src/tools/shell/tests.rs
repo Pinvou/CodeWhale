@@ -1351,18 +1351,92 @@ fn readonly_operand_gate_refuses_relative_operands_after_cd_cwd_drift() {
     }
 }
 
+/// A `cd` its connector may not run must not fold: `cat nope && cd sub; cat
+/// link` leaves the shell at the original cwd (the failed `cat` short-
+/// circuits the `&&`, `;` continues there), where a planted root symlink
+/// awaits — while an unconditional fold judged `link` under `sub/`, found
+/// nothing, skipped it, and admitted. Proven live on bash and sh before the
+/// fix: both commands printed the outside file's contents. The seam refuses
+/// the shape with its own `[shell.readonly.cwd.conditional]` tag (the
+/// classifier refuses it first; the classifier-side pin is
+/// `agent_readonly_shell_rejects_conditionally_gated_cd`).
+#[cfg(unix)]
+#[test]
+fn readonly_operand_gate_refuses_a_cd_its_connector_may_not_run() {
+    let workspace = tempdir().expect("workspace");
+    let outside = tempdir().expect("outside");
+    let sub = workspace.path().join("sub");
+    std::fs::create_dir(&sub).expect("subdir");
+    std::fs::write(outside.path().join("secret.txt"), "TOPSECRET-OUTSIDE").expect("outside file");
+    std::os::unix::fs::symlink(
+        outside.path().join("secret.txt"),
+        workspace.path().join("link"),
+    )
+    .expect("outside root symlink");
+    std::os::unix::fs::symlink(outside.path().join("secret.txt"), sub.join("link"))
+        .expect("outside symlink under sub");
+    let roots = [workspace.path().to_path_buf()];
+
+    for command in [
+        "cat nope && cd sub; cat link",
+        "true || cd sub; cat link",
+        "wc -c f && cd sub",
+        "pwd || cd sub",
+    ] {
+        let error = enforce_readonly_workspace_operands(command, &roots, workspace.path())
+            .expect_err("a `cd` its connector may not run must not fold")
+            .to_string();
+        assert!(error.contains("cwd.conditional"), "{command}: {error}");
+    }
+    // A `cd` that always runs keeps folding: `;` runs it whatever came
+    // before, so `link` is judged under `sub/` and refused for resolving
+    // outside — and that refusal must be the containment one, not the
+    // conditional-connector one.
+    let error =
+        enforce_readonly_workspace_operands("cat nope; cd sub; cat link", &roots, workspace.path())
+            .expect_err("a `;`-joined cd folds, so the operand is judged under sub/")
+            .to_string();
+    assert!(
+        error.contains("outside_workspace") && !error.contains("cwd.conditional"),
+        "{error}"
+    );
+    // The advertised workflow keeps working: the `cd` first, the probe
+    // after `&&` — the cd folds (Start connector) and the probe is judged
+    // under it, so the refusal is containment, never the conditional tag.
+    let error =
+        enforce_readonly_workspace_operands("cd sub && wc -c link", &roots, workspace.path())
+            .expect_err("cd-first conditional sequence still folds and judges")
+            .to_string();
+    assert!(
+        error.contains("outside_workspace") && !error.contains("cwd.conditional"),
+        "{error}"
+    );
+}
+
 /// Positive control for the cwd fold: a legitimate post-`cd` probe keeps
 /// running. The second segment resolves against the FIRST `cd`'s
 /// destination — `notes.txt` exists only under `sub/`, not at the workspace
 /// root — so the fold must admit it, and a second `cd` must be folded
-/// against the first destination too.
+/// against the first destination too. The multi-hop case is pinned with a
+/// discriminating fixture (`sub/deep/link` → outside): without the genuine
+/// two-`cd` fold the gate would judge `link` at the root, find nothing
+/// there, skip it, and admit.
+#[cfg(unix)]
 #[test]
 fn readonly_operand_gate_keeps_admitting_operands_under_cd_destination() {
     let workspace = tempdir().expect("workspace");
+    let outside = tempdir().expect("outside");
     let sub = workspace.path().join("sub");
     std::fs::create_dir(&sub).expect("subdir");
     std::fs::write(sub.join("real.txt"), "inside").expect("inside file");
     std::fs::write(sub.join("notes.txt"), "notes").expect("notes file");
+    std::fs::create_dir(sub.join("deep")).expect("nested dir");
+    std::fs::write(outside.path().join("secret.txt"), "secret").expect("outside file");
+    std::os::unix::fs::symlink(
+        outside.path().join("secret.txt"),
+        sub.join("deep").join("link"),
+    )
+    .expect("outside symlink under sub/deep");
     let roots = [workspace.path().to_path_buf()];
 
     enforce_readonly_workspace_operands("cd sub; cat real.txt", &roots, workspace.path())
@@ -1371,6 +1445,13 @@ fn readonly_operand_gate_keeps_admitting_operands_under_cd_destination() {
         .expect("sequence operand resolves against the cd destination");
     enforce_readonly_workspace_operands("cd sub; cd .; cat notes.txt", &roots, workspace.path())
         .expect("a second cd folds against the first destination");
+    enforce_readonly_workspace_operands("cd sub; cd deep; cat real.txt", &roots, workspace.path())
+        .expect("a genuine two-cd fold resolves the operand under sub/deep");
+    let error =
+        enforce_readonly_workspace_operands("cd sub; cd deep; cat link", &roots, workspace.path())
+            .expect_err("the two-cd fold must judge `link` under sub/deep, not skip it at the root")
+            .to_string();
+    assert!(error.contains("outside_workspace"), "{error}");
 }
 
 /// A pipeline stage runs in a subshell, so a `cd` or `gh` stage must exempt
@@ -1411,6 +1492,9 @@ fn readonly_operand_gate_judges_every_pipeline_stage_on_its_own() {
         format!("gh issue list | cat {outside_path}"),
         "gh issue list | cat link".to_string(),
         format!("ls | gh issue list | cat {outside_path}"),
+        // Sequence forms: the gh stage exempts only itself there too.
+        format!("gh issue list; cat {outside_path}"),
+        "pwd; gh issue list; cat link".to_string(),
     ] {
         let error = enforce_readonly_workspace_operands(&command, &roots, workspace.path())
             .expect_err("a gh stage exempts only itself")
@@ -1426,6 +1510,17 @@ fn readonly_operand_gate_judges_every_pipeline_stage_on_its_own() {
         .expect("gh stage keeps its exemption");
     enforce_readonly_workspace_operands("ls sub | wc -l", &roots, workspace.path())
         .expect("plain pipelines stay admitted");
+    // An empty stage refuses in the gate's own pass too (the classifier
+    // already refuses it; this is defense in depth for the gate's doc that
+    // every stage is judged).
+    let error = enforce_readonly_workspace_operands(
+        "cat real.txt | | wc -c real.txt",
+        &roots,
+        workspace.path(),
+    )
+    .expect_err("an empty pipeline stage must refuse")
+    .to_string();
+    assert!(error.contains("empty stage"), "{error}");
 }
 
 /// Glob operands are judged by what they expand to, not by their spelling:
@@ -1512,11 +1607,14 @@ fn readonly_operand_gate_judges_glob_expansions_by_resolved_location() {
     assert!(error.contains("operand.outside_workspace"), "{error}");
 }
 
-/// bash expands a dot-glob to `.` and `..` (zsh refuses them) and `read_dir`
-/// never yields them, so the walker synthesizes both candidates at every
-/// level a dot-component matches and judges them by resolved location:
-/// `cat .*/secret.txt` must not read `../secret.txt` on a bash host, and a
-/// final `cat .*` must be judged against the outside parent directory.
+/// sh/dash expand a dot-glob to `.` and `..` (modern bash and zsh do not)
+/// and `read_dir` never yields them, so the walker synthesizes both
+/// candidates at every level a dot-component matches and judges them by
+/// resolved location: `cat .*/secret.txt` must not read `../secret.txt` on
+/// an sh/dash host, and a final `cat .*` must be judged against the outside
+/// parent directory. Synthesizing for the laxest admitted shell is a
+/// conservative over-approximation on bash/zsh (false-refusal direction
+/// only).
 #[cfg(unix)]
 #[test]
 fn readonly_glob_walker_judges_the_dot_and_dotdot_candidates() {
@@ -2280,16 +2378,24 @@ fn readonly_shell_lane_decisions_per_shell_kind() {
         binary: "/bin/dash".to_string(),
         flag: "-c".to_string(),
     };
-    // cmd.exe cannot bind an admitted `;`-sequence, and it expands `%NAME%`
-    // from the environment before any program sees the word, so a compound
-    // containing `%` could run under a name the gate never judged; single
-    // commands without `%` and every other kind run as written.
+    // cmd.exe cannot bind an admitted `;`-sequence; it expands `%NAME%`
+    // from the environment and consumes a bare `^` as an escape before any
+    // program sees the word, so a compound containing either could run
+    // under a name the gate never judged; single commands without `%`/`^`
+    // and every other kind run as written.
     assert!(readonly_compound_refused_by_shell_kind(&cmd, "pwd; pwd").is_some());
     assert!(readonly_compound_refused_by_shell_kind(&cmd, "cat 50%off.txt").is_some());
+    // The runtime-reachable shape (single commands route direct-argv, where
+    // `%`/`^` are literal argv and never reach this function).
+    assert!(readonly_compound_refused_by_shell_kind(&cmd, "pwd; cat 50%off.txt").is_some());
+    assert!(readonly_compound_refused_by_shell_kind(&cmd, "pwd; cat a^b").is_some());
+    assert!(readonly_compound_refused_by_shell_kind(&cmd, "cat a^b.txt").is_some());
     assert!(readonly_compound_refused_by_shell_kind(&cmd, "pwd").is_none());
     assert!(readonly_compound_refused_by_shell_kind(&pwsh, "pwd; pwd").is_none());
     assert!(readonly_compound_refused_by_shell_kind(&pwsh, "cat 50%off.txt | wc -c").is_none());
+    assert!(readonly_compound_refused_by_shell_kind(&pwsh, "pwd; cat a^b").is_none());
     assert!(readonly_compound_refused_by_shell_kind(&sh, "pwd; pwd").is_none());
+    assert!(readonly_compound_refused_by_shell_kind(&bash, "pwd; cat a^b").is_none());
     // The pipefail prefix rides only binaries that speak it. `/bin/sh` stays
     // unprefixed because that path is bash on macOS but dash on Debian and
     // Ubuntu, where the prefix aborts the whole `-c` payload before anything
@@ -6513,6 +6619,54 @@ async fn readonly_shell_refuses_unsearchable_cd_destinations_end_to_end() {
         };
         assert!(
             content.contains("shell.readonly") || content.contains("read-only"),
+            "{command} must refuse through the read-only boundary: {content}"
+        );
+        assert!(
+            !content.contains("TOPSECRET-OUTSIDE"),
+            "{command} leaked outside content: {content}"
+        );
+    }
+}
+
+/// A `cd` its connector may not run must not fold, end to end through the
+/// tool: `cat nope && cd sub; cat link` and `true || cd sub; cat link` read
+/// a planted root symlink on a real shell (the failed/succeeded first
+/// segment short-circuits the `&&`/`||`, so the `cd` never runs and `;`
+/// continues at the original cwd — probed live on bash and sh before the
+/// fix), while the gate folded onto `sub/` and skipped `link` at the
+/// exists() miss. The command now refuses at admission.
+#[cfg(unix)]
+#[tokio::test]
+async fn readonly_shell_refuses_short_circuit_cd_escape_end_to_end() {
+    let workspace = tempdir().expect("workspace");
+    let outside = tempdir().expect("outside");
+    std::fs::create_dir(workspace.path().join("sub")).expect("subdir");
+    std::fs::write(outside.path().join("secret.txt"), "TOPSECRET-OUTSIDE\n").expect("secret");
+    std::os::unix::fs::symlink(
+        outside.path().join("secret.txt"),
+        workspace.path().join("link"),
+    )
+    .expect("outside root symlink");
+    let context = ToolContext::new(workspace.path())
+        .with_shell_policy(crate::worker_profile::ShellPolicy::ReadOnly);
+
+    for command in ["cat nope && cd sub; cat link", "true || cd sub; cat link"] {
+        let result = LowercaseBashTool
+            .execute(json!({"command": command}), &context)
+            .await;
+        let content = match &result {
+            Ok(output) => {
+                assert!(
+                    !output.success,
+                    "{command} must not succeed: {}",
+                    output.content
+                );
+                output.content.clone()
+            }
+            Err(error) => error.to_string(),
+        };
+        assert!(
+            content.contains("read-only"),
             "{command} must refuse through the read-only boundary: {content}"
         );
         assert!(

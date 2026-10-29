@@ -8238,6 +8238,7 @@ async fn read_only_inspection_roles_cannot_write_through_text_filters() {
             ),
             "must be a directory the shell can enter",
             "recursive `**/`",
+            "joined by `&&`/`||`",
         ] {
             assert!(
                 posture_refusal.contains(claim),

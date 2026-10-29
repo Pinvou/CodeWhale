@@ -1396,7 +1396,7 @@ impl BackgroundShell {
             ));
         }
         Err(anyhow!(
-            "stdin is not available for task {}: no writable stdin handle is attached to it (interactive, combined-output, and persistent commands never expose one, and a finished command has released it); start input-driven work with background=true and feed it with action=\"interact\"",
+            "stdin is not available for task {}: no writable stdin handle is attached to it (a finished command has released its stdin, a persistent command never exposes one, and a terminal command exposes one only while it runs and only until its stdin is closed); start input-driven work with background=true and feed it with action=\"interact\"",
             self.id
         ))
     }
@@ -3604,6 +3604,7 @@ use crate::command_safety::{
     SafetyLevel, agent_readonly_command_needs_shell_for_cd, analyze_command,
     extract_primary_command, is_agent_readonly_shell_command, is_parallel_readonly_command,
     normalize_windows_command_paths, readonly_sequence_segments,
+    readonly_sequence_segments_with_connectors,
 };
 use crate::execpolicy::{ExecPolicyDecision, load_default_policy};
 use crate::features::Feature;
@@ -3899,14 +3900,16 @@ fn attach_shell_owner_metadata(metadata: &mut serde_json::Value, context: &ToolC
 
 /// Whether the resolved shell kind can bind an admitted compound at all.
 /// `cmd.exe` treats `;` as an argument delimiter, not a command separator, so
-/// a `;`-sequence could neither run nor fail as a sequence there; and it
-/// expands `%NAME%` from the environment before any program sees the word,
-/// so an operand spelled `%USERPROFILE%\secret` would run under a name the
-/// operand gate never judged (the cmd.exe twin of zsh's `=cmd` expansion,
-/// which the gate refuses outright). PowerShell executes `;`-sequences and
-/// reads `%` literally; `&&`/`||` parse on PowerShell 7+, and the Windows
-/// PowerShell 5.1 parse error is a safe nothing-ran failure. Pure so the
-/// platform-dependent decision is unit-testable on every host.
+/// a `;`-sequence could neither run nor fail as a sequence there; it expands
+/// `%NAME%` from the environment before any program sees the word; and it
+/// consumes a bare `^` as an escape character in the same pre-parse, so
+/// `cat a^b` opens `ab` — a spelling the operand gate judged as a
+/// nonexistent name it could skip (`%`'s twin is zsh's `=cmd` expansion,
+/// which the gate refuses outright; `^`'s is the `=` family too). PowerShell
+/// executes `;`-sequences, reads `%`/`^` literally, and `&&`/`||` parse on
+/// PowerShell 7+; the Windows PowerShell 5.1 parse error is a safe
+/// nothing-ran failure. Pure so the platform-dependent decision is
+/// unit-testable on every host.
 fn readonly_compound_refused_by_shell_kind(
     kind: &crate::shell_dispatcher::ShellKind,
     command: &str,
@@ -3914,14 +3917,14 @@ fn readonly_compound_refused_by_shell_kind(
     if !matches!(kind, crate::shell_dispatcher::ShellKind::Cmd) {
         return None;
     }
-    if command.contains('%') {
+    if command.contains('%') || command.contains('^') {
         return Some(
-            "[shell.readonly.sequence.unsupported_shell] cmd.exe expands `%NAME%` before the command runs, so a read-only probe containing `%` cannot be judged on this shell; run it through PowerShell or as a single command without `%`.",
+            "[shell.readonly.sequence.unsupported_shell] cmd.exe expands `%NAME%` and consumes `^` before the command runs, so a read-only probe containing either could run under a spelling the gate never judged; run one command at a time without `%` or `^`.",
         );
     }
     if readonly_sequence_segments(command).is_some_and(|segments| segments.len() > 1) {
         return Some(
-            "[shell.readonly.sequence.unsupported_shell] cmd.exe cannot execute a `;`-separated sequence as a sequence; run the probes one at a time or through PowerShell.",
+            "[shell.readonly.sequence.unsupported_shell] cmd.exe cannot execute a `;`-separated sequence as a sequence; run the probes one at a time.",
         );
     }
     None
@@ -4319,8 +4322,11 @@ fn enforce_readonly_workspace_operands(
     // canonicalized destination, and relative operands resolve exactly where
     // the shell will resolve them — a symlink that exists only under the
     // `cd` destination can otherwise slip past the dispatch-cwd check while
-    // the shell still dereferences it.
-    let Some(segments) = readonly_sequence_segments(command) else {
+    // the shell still dereferences it. The fold only mirrors the shell while
+    // the `cd` actually runs, which the connector carries: a `cd` joined by
+    // `&&`/`||` may never execute at all, and the segment fn refuses it
+    // before it could fold.
+    let Some(segments) = readonly_sequence_segments_with_connectors(command) else {
         return Err(ToolError::invalid_input(
             "Read-only command contains a bare `&` and matches no admitted shape.".to_string(),
         ));
@@ -4330,8 +4336,14 @@ fn enforce_readonly_workspace_operands(
     // however many `*` operands fit in the command text.
     let mut glob_budget = ReadonlyGlobBudget::default();
     let mut live_cwd = effective_cwd;
-    for segment in segments {
-        live_cwd = enforce_readonly_segment_operands(segment, &roots, &live_cwd, &mut glob_budget)?;
+    for (segment, connector) in segments {
+        live_cwd = enforce_readonly_segment_operands(
+            segment,
+            connector,
+            &roots,
+            &live_cwd,
+            &mut glob_budget,
+        )?;
     }
     Ok(())
 }
@@ -4355,6 +4367,7 @@ fn enforce_readonly_workspace_operands(
 /// `cd`.
 fn enforce_readonly_segment_operands(
     segment: &str,
+    connector: crate::command_safety::ReadonlySequenceConnector,
     roots: &[PathBuf],
     effective_cwd: &std::path::Path,
     glob_budget: &mut ReadonlyGlobBudget,
@@ -4370,16 +4383,46 @@ fn enforce_readonly_segment_operands(
                     )));
                 }
                 Some("gh") => {}
+                // An empty stage (`a | | b`) refuses too: the classifier
+                // rejects it, and this gate's doc promises every stage is
+                // judged — an empty argv would otherwise pass silently.
+                None => {
+                    return Err(ToolError::invalid_input(format!(
+                        "Read-only pipeline carries an empty stage; refused {segment:?}."
+                    )));
+                }
                 _ => enforce_readonly_argv_operands(&argv, roots, effective_cwd, glob_budget)?,
             }
         }
         return Ok(effective_cwd.to_path_buf());
     }
     let argv = readonly_segment_argv(segment)?;
+    if argv.is_empty() {
+        return Err(ToolError::invalid_input(format!(
+            "Read-only sequence carries an empty segment; refused {segment:?}."
+        )));
+    }
     if argv.first().is_some_and(|program| program == "gh") {
         return Ok(effective_cwd.to_path_buf());
     }
     if argv.first().is_some_and(|program| program == "cd") {
+        // A `cd` after `&&`/`||` runs only when the predecessor's exit status
+        // allows it — a runtime fact no pre-spawn gate can evaluate — while
+        // the fold below is unconditional. `cat nope && cd sub; cat link`
+        // would leave the shell in the original directory (where a planted
+        // root symlink awaits) while the gate judged `link` under `sub/` and
+        // skipped it at the exists() miss. `;` and the sequence start run
+        // their `cd` whatever came before, so only those fold.
+        if matches!(
+            connector,
+            crate::command_safety::ReadonlySequenceConnector::AndThen
+                | crate::command_safety::ReadonlySequenceConnector::OrElse
+        ) {
+            return Err(ToolError::permission_denied(
+                "[shell.readonly.cwd.conditional] Read-only `cd` joined by `&&`/`||` may never run at all, so the gate refuses to fold later operands onto its destination; put the `cd` first or join the sequence with `;`."
+                    .to_string(),
+            ));
+        }
         // `cd` is admitted only as `cd <one relative path>`. Resolve the
         // operand against the workspace exactly like the shell's own working
         // directory and reuse the same refusal tag, so a destination outside
@@ -4600,9 +4643,10 @@ fn enforce_readonly_argv_operands(
 /// either errors (zsh `nomatch`) or hands the literal spelling to a program
 /// that finds no file.
 ///
-/// bash expands a dot-glob (`.*`) to include `.` and `..` (zsh does not), and
-/// `read_dir` never yields them, so those two candidates are synthesized at
-/// every level a dot-component matches and judged like any other match.
+/// sh/dash expand a dot-glob (`.*`) to include `.` and `..` (modern bash and
+/// zsh do not), and `read_dir` never yields them, so those two candidates are
+/// synthesized at every level a dot-component matches and judged like any
+/// other match.
 ///
 /// The walk is bounded because it runs in the host before any child exists to
 /// time out: a symlinked directory pointing at an ancestor makes a deep
@@ -4810,9 +4854,10 @@ fn collect_readonly_glob_matches(
         }
         return Ok(());
     }
-    // bash expands a dot-glob to `.` and `..` (zsh refuses them), and
-    // `read_dir` never yields them, so synthesize the two candidates the
-    // shell would produce and judge them exactly like a directory entry.
+    // sh/dash expand a dot-glob to `.` and `..` (modern bash and zsh do
+    // not), and `read_dir` never yields them, so synthesize the two
+    // candidates the laxest admitted shell would produce and judge them
+    // exactly like a directory entry.
     if component.starts_with('.') {
         for (name, candidate) in [
             (".", Some(base.to_path_buf())),
@@ -5897,12 +5942,23 @@ impl ToolSpec for BashTool {
             extra_env.insert("PAGER".to_string(), String::new());
             extra_env.insert("ENV".to_string(), String::new());
             extra_env.insert("BASH_ENV".to_string(), String::new());
+            // Non-interactive zsh sources `$ZDOTDIR/.zshenv`, where
+            // operator-set options such as EXTENDED_GLOB could turn
+            // charset-admitted characters into live globs; bash's
+            // GLOBIGNORE could likewise widen what a pattern matches.
+            extra_env.insert("ZDOTDIR".to_string(), String::new());
+            extra_env.insert("GLOBIGNORE".to_string(), String::new());
             extra_env.insert("CDPATH".to_string(), String::new());
             extra_env.insert("RIPGREP_CONFIG_PATH".to_string(), String::new());
             // Ignore user/system Git configuration and replace any repository
             // external diff helper with a fixed inert executable. Repository
             // config and attributes are attacker-controlled evidence inputs;
             // a nominal `git diff/log/show` must not turn them into programs.
+            // Note the GIT_CONFIG_COUNT mechanism needs git >= 2.31: on an
+            // older git the fsmonitor/hooksPath overrides below silently do
+            // not exist, and the argv splice — not this block — is the only
+            // wall for the subcommands it covers (status/ls-files/grep are
+            // covered by nothing but this block).
             extra_env.insert("GIT_CONFIG_NOSYSTEM".to_string(), "1".to_string());
             extra_env.insert("GIT_CONFIG_GLOBAL".to_string(), null_device.to_string());
             extra_env.insert("GIT_CONFIG_PARAMETERS".to_string(), String::new());
