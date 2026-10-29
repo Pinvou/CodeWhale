@@ -30,7 +30,10 @@ impl Store for LocalStore {
     async fn route(&self, card: &str) -> Result<Route, String> {
         let card = card.to_string();
         tokio::task::spawn_blocking(move || {
-            let record = db::get_store_model(&card)
+            // 只取路由检查实际消费的 5 个小字段（r19 评审 P2-5）：此前借
+            // get_store_model 拉整行，scripts/assets 两个 MB 级正文列在这条
+            // 每秒一次的轮询路径上读一次扔一次。
+            let record = db::get_store_model_route_fields(&card)
                 .map_err(|_| "lan_unavailable")?
                 .ok_or("lan_model_unavailable")?;
             if !record.running || record.status != "deployed" {
