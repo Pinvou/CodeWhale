@@ -704,6 +704,25 @@ static CONTRACT_SYNC_FAILED_CARDS: std::sync::OnceLock<
     std::sync::Mutex<std::collections::HashSet<String>>,
 > = std::sync::OnceLock::new();
 
+/// reconcile 端点探测的正结果缓存（r19 评审 P2-7）：card_id -> 最近一次探到
+/// 端点活着的时刻。
+///
+/// `reconcile_running_status` 是 `library()` 的第一步（service.rs 每次 library()
+/// 都触发），反向认领要对每张 deployed + OpenAI 端点的未运行卡逐张探
+/// `/v1/models`——串行、单张最长蹲满一个超时，K 张卡 = K×超时/刷新，卡多的
+/// 设备上商店列表就是K 个超时叠出来的转圈。缓存**只记成功**（端点活着），
+/// 60 秒内直接复用；失败不缓存——死讯会挡住刚恢复的服务，宁可下一秒再探。
+/// 放行方向本来也只是「不改状态」，60 秒的陈旧度换掉 K 次串行探测是划算的。
+///
+/// 与 CONTRACT_SYNC_FAILED_CARDS 同款进程级 static：ModelManager 每次调用都
+/// 是新实例，只有进程级状态能跨调用记住；键是 card_id，条目数上界就是卡数。
+static RECONCILE_ALIVE_ENDPOINTS: std::sync::OnceLock<
+    std::sync::Mutex<HashMap<String, Instant>>,
+> = std::sync::OnceLock::new();
+
+/// [`RECONCILE_ALIVE_ENDPOINTS`] 的有效期。
+const RECONCILE_PROBE_CACHE_TTL: Duration = Duration::from_secs(60);
+
 /// 存量设备的目录链安全迁移（2026-10-22 根治）。
 ///
 /// 旧客户端用不带 mode 的 `create_dir_all` 在 umask 0002 下把模型商店自有目录
@@ -935,7 +954,10 @@ impl ModelManager {
             // 永远显示未启用。非 OpenAI 端点不做主动探测，落到下面的镜像比对。
             if let Some(endpoint) = rec.endpoint_url.as_deref() {
                 if endpoint_path_is_openai_style(endpoint) {
-                    if rec.running && !openai_compatible_endpoint_alive(endpoint) {
+                    // 探测走 60s TTL 缓存（r19 评审 P2-7，见
+                    // openai_endpoint_alive_cached）：本函数每次刷新列表都会跑，
+                    // 不能让 K 张卡各蹲一次串行超时。
+                    if rec.running && !openai_endpoint_alive_cached(&rec.card_id, endpoint) {
                         let _ = db::set_running(&rec.card_id, false);
                         corrected.push(rec.card_name);
                         continue;
@@ -947,7 +969,7 @@ impl ModelManager {
                     // 已实锤）。身份核验确保不把外来服务误认为自己的实例。
                     if !rec.running
                         && rec.status == "deployed"
-                        && openai_compatible_endpoint_alive(endpoint)
+                        && openai_endpoint_alive_cached(&rec.card_id, endpoint)
                     {
                         let card_dir = config::data_dir()
                             .join("cards")
@@ -3937,7 +3959,13 @@ fn openai_compatible_endpoint_alive(endpoint_url: &str) -> bool {
     url.set_path("/v1/models");
     url.set_query(None);
     let ok = reqwest::blocking::Client::builder()
-        .timeout(std::time::Duration::from_secs(5))
+        // 2 秒（r19 评审 P2-7，由 5 秒收敛）：这个探测串行发生在 reconcile
+        // （library() 的第一步）里，K 张卡就是 K×超时。/v1/models 是本机或
+        // 局域网推理端点的轻量请求，正常路径毫秒级返回，2 秒已经足够覆盖
+        // 「确实没响应」之外的一切慢。而超时属于"不确定"失败，
+        // probe_failure_means_nothing_listening 判它为活着、保留原状态——
+        // 收紧超时不会把重负载下响应慢的端点误纠正成已停止。
+        .timeout(Duration::from_secs(2))
         .no_proxy()
         .build()
         .and_then(|client| client.get(url).send())
@@ -3946,6 +3974,29 @@ fn openai_compatible_endpoint_alive(endpoint_url: &str) -> bool {
         Ok(alive) => alive,
         Err(error) => !probe_failure_means_nothing_listening(&error),
     }
+}
+
+/// [`openai_compatible_endpoint_alive`] 的带缓存包装（r19 评审 P2-7）。
+///
+/// 命中缓存（60 秒内探到过端点活着）直接返回 true；**只有探测成功才写
+/// 缓存**，失败不缓存——一条过期的死讯会把刚恢复的服务挡到 TTL 到期，
+/// 而多探一次的成本只是一次毫秒级的 /v1/models。
+fn openai_endpoint_alive_cached(card_id: &str, endpoint_url: &str) -> bool {
+    let cache = RECONCILE_ALIVE_ENDPOINTS.get_or_init(Default::default);
+    if let Ok(cached) = cache.lock() {
+        if let Some(seen_at) = cached.get(card_id) {
+            if seen_at.elapsed() < RECONCILE_PROBE_CACHE_TTL {
+                return true;
+            }
+        }
+    }
+    let alive = openai_compatible_endpoint_alive(endpoint_url);
+    if alive {
+        if let Ok(mut cached) = cache.lock() {
+            cached.insert(card_id.to_string(), Instant::now());
+        }
+    }
+    alive
 }
 
 /// 任务 G（收编）：读卡片 `.runtime/serve.identity.json` 核验进程身份。
@@ -6205,6 +6256,47 @@ echo '权重就绪'
         let alive = ollama_alive(&format!("http://127.0.0.1:{port}"));
         let _ = server.join();
         assert!(alive, "对面好端端地回了 200，不能判成服务不在");
+    }
+
+    /// r19 评审 P2-7：成功的端点探测必须进 60s TTL 缓存——同一张卡在同一
+    /// 刷新窗口内被 reconcile 反复过问时（library() 每次都触发），第二次
+    /// 起直接复用，不再各蹲一次串行超时。服务端只应看到**一次**请求。
+    #[test]
+    fn successful_endpoint_probe_is_cached_within_ttl() {
+        use std::io::{Read as _, Write as _};
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("本机总能绑上");
+        let port = listener.local_addr().unwrap().port();
+        let hits = std::sync::Arc::new(AtomicUsize::new(0));
+        let counter = hits.clone();
+        std::thread::spawn(move || {
+            while let Ok((mut socket, _)) = listener.accept() {
+                let mut buf = [0_u8; 1024];
+                let _ = socket.read(&mut buf);
+                counter.fetch_add(1, Ordering::SeqCst);
+                let _ = socket.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n");
+                let _ = socket.flush();
+            }
+        });
+
+        // card_id 用端口号唯一化，避免撞上其他测试（缓存是进程级 static）留在
+        // 缓存里的同名卡。
+        let card_id = format!("probe-cache-test-{port}");
+        let endpoint = format!("http://127.0.0.1:{port}/v1/chat/completions");
+        assert!(
+            openai_endpoint_alive_cached(&card_id, &endpoint),
+            "对面回了 200，探测应判活"
+        );
+        assert!(
+            openai_endpoint_alive_cached(&card_id, &endpoint),
+            "60 秒内的重复探测应命中缓存并同样判活"
+        );
+        assert_eq!(
+            hits.load(Ordering::SeqCst),
+            1,
+            "第二次探测必须命中缓存，服务端只能看到一个请求"
+        );
     }
 
     /// 卡片打印的 `LMM_ENDPOINT_URL=` 内容完全不可信，而它会被原样写成品悟里
