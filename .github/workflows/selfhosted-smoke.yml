@@ -1,0 +1,28 @@
+name: Self-hosted Runner Smoke
+# 冒烟验证：确认 PINVOU_LINUX_RUNNER 变量路由的 self-hosted runner
+# 真正接到流量且环境可用（docker/磁盘/工具链）。仅在本文件变化时触发。
+on:
+  pull_request:
+    paths:
+      - '.github/workflows/selfhosted-smoke.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  smoke:
+    runs-on: ${{ fromJSON(vars.PINVOU_LINUX_RUNNER || '["ubuntu-22.04"]') }}
+    timeout-minutes: 10
+    steps:
+      - name: Runner 环境信息
+        run: |
+          echo "runner=${RUNNER_NAME:-unknown} os=${RUNNER_OS} arch=${RUNNER_ARCH}"
+          uname -a
+          echo "--- docker ---"
+          docker version --format 'server={{.Server.Os}}/{{.Server.Arch}} {{.Server.Version}}' 2>&1 || true
+          echo "--- 磁盘 ---"
+          df -h / | tail -1
+          echo "--- 工具 ---"
+          git --version
+          node --version 2>/dev/null || echo "node 未安装(将由 setup-node 提供)"
+          cargo --version 2>/dev/null || echo "cargo 未安装(将由 dtolnay/rust-toolchain 提供)"

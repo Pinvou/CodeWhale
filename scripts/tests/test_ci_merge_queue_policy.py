@@ -1,4 +1,5 @@
 import unittest
+from ci_routing_test_support import default_ci_routing
 from pathlib import Path
 
 
@@ -9,7 +10,7 @@ WORKFLOW = ROOT / ".github/workflows/pr-check.yml"
 class MergeQueuePolicyTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
-        cls.workflow = WORKFLOW.read_text(encoding="utf-8")
+        cls.workflow = default_ci_routing(WORKFLOW.read_text(encoding="utf-8"))
 
     def _job(self, name, next_name):
         return self.workflow.split(f"\n  {name}:", maxsplit=1)[1].split(
