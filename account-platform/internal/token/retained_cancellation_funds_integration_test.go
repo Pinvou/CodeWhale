@@ -179,7 +179,10 @@ func retainedManagementBillingRepository(t *testing.T) (*billing.PostgresReposit
 		t.Fatal(err)
 	}
 	t.Cleanup(func() {
-		cleanup, done := context.WithTimeout(context.Background(), 10*time.Second)
+		// DROP DATABASE checkpoints may exceed ten seconds on a Windows test disk.
+		// Keep cleanup bounded while retaining the exact UUID/owner/zero-client
+		// guards below; this budget applies only to this disposable fixture.
+		cleanup, done := context.WithTimeout(context.Background(), 30*time.Second)
 		defer done()
 		var owner string
 		var active int
