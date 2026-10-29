@@ -1,3 +1,4 @@
+import { createPricingUnknownRecoveryGate, archivePricingUnknown, readPricingUnknownConfiguration, readPricingUnknownHistory } from './pricing-unknown-recovery.js';
 import { integerMoney } from './finance-contract.js';
 import { pricingUnknownStorageKey, replayPricingMutation } from './pricing-mutation.js';
 import { secureRequestID } from './request-id.js';
@@ -38,12 +39,15 @@ function fieldError(labels, value) {
 }
 
 export function PricingLifecycleWorkspace({ copy, client, permissions, owner, contextModel = null, contextFormula = null, onExit = null, onOpenModel = null }) {
-  const unknownStorageKey = pricingUnknownStorageKey(owner, client.financeSessionEpoch);
+  const recoveryEpoch = client.financeSessionEpoch;
+  const unknownStorageKey = pricingUnknownStorageKey(owner, recoveryEpoch);
+  const [unknownStateScope, setUnknownStateScope] = useState(unknownStorageKey);
+  const recoveryScopeCurrent = unknownStateScope === unknownStorageKey;
   const retainUnknown = (value) => storeUnknown(unknownStorageKey, value);
   const labels = copy.billing.pricingLifecycle;
   const contextual = Boolean(contextModel?.model_id && contextFormula?.formula_version_id);
   const [priceAccessDenied, setPriceAccessDenied] = useState(false);
-  const canManage = new Set(permissions || []).has('platform.pricing.manage') && !priceAccessDenied;
+  const canManage = new Set(permissions || []).has('platform.pricing.manage') && !priceAccessDenied && recoveryScopeCurrent;
   const canReadModels = new Set(permissions || []).has('platform.models.read');
   const [prices, setPrices] = useState([]);
   const [pricePage, setPricePage] = useState({ cursors: [''], index: 0, has_more: false, next_cursor: '' });
@@ -72,6 +76,13 @@ export function PricingLifecycleWorkspace({ copy, client, permissions, owner, co
   const [unitForm, setUnitForm] = useState(null);
   const [preview, setPreview] = useState(null);
   const [pendingAction, setPendingAction] = useState(null);
+  const recoveryGate = useRef(null);
+  if (!recoveryGate.current) recoveryGate.current = createPricingUnknownRecoveryGate();
+  const [unknownConfiguration, setUnknownConfiguration] = useState(null);
+  const [unknownHistory, setUnknownHistory] = useState(() => { try { return readPricingUnknownHistory(unknownStorageKey); } catch { return []; } });
+  const recoveryIdentity = useRef({ value: '', generation: 0 });
+  const recoveryIdentityValue = JSON.stringify([priceContext, canManage, formulaAccessDenied, formulaAuthority.current.generation]);
+  if (recoveryIdentity.current.value !== recoveryIdentityValue) recoveryIdentity.current = { value: recoveryIdentityValue, generation: recoveryIdentity.current.generation + 1 };
   const [unknownMutation, setUnknownMutationState] = useState(() => readRetainedUnknown(unknownStorageKey));
   const setUnknownMutation = (value) => { retainUnknown(value); if (mounted.current) setUnknownMutationState(value); };
   const generations = useRef({ prices: 0, units: 0, formulas: 0, models: 0 });
@@ -90,6 +101,14 @@ export function PricingLifecycleWorkspace({ copy, client, permissions, owner, co
   }, [protocols, selectedFormula]);
   const latestFacts = useRef({ canManage, canReadModels, models, formulas });
   latestFacts.current = { canManage, canReadModels, models, formulas, unknownMutation };
+  const recoveryBoundary = () => JSON.stringify([recoveryIdentity.current, generations.current, client.financeSessionEpoch, recoveryGate.current.generation]);
+  useEffect(() => {
+    setUnknownConfiguration(null);
+    setUnknownStateScope(unknownStorageKey);
+    setUnknownMutationState(readRetainedUnknown(unknownStorageKey));
+    try { setUnknownHistory(readPricingUnknownHistory(unknownStorageKey)); } catch { setUnknownHistory([]); }
+    setEditor(null); setUnitForm(null); setPendingAction(null);
+  }, [unknownStorageKey]);
   useEffect(() => () => {
     mounted.current = false;
     for (const controller of preflights.current) controller.abort();
@@ -98,6 +117,13 @@ export function PricingLifecycleWorkspace({ copy, client, permissions, owner, co
     sourceControllers.current.clear();
     abortTransientReads();
   }, [abortTransientReads]);
+  useEffect(() => {
+    setUnknownConfiguration(null);
+    recoveryGate.current.retire();
+    setLoading(current => ({ ...current, unknownConfiguration: false }));
+    transientControllers.current.get('unknownConfiguration')?.abort();
+    transientGenerations.current.set('unknownConfiguration', (transientGenerations.current.get('unknownConfiguration') || 0) + 1);
+  }, [priceContext, canManage, formulaAccessDenied]);
   const unitByID = useMemo(() => new Map(units.map((unit) => [unit.unit_definition_id, unit])), [units]);
   const editorFormula = formulas.find((item) => item.formula_version_id === editor?.formula_version_id);
   const compatibleModels = models.filter((item) => item.protocol_code === editorFormula?.protocol_code);
@@ -510,25 +536,68 @@ export function PricingLifecycleWorkspace({ copy, client, permissions, owner, co
   };
   const openDeactivate = (item) => setPendingAction({ type: 'DEACTIVATE', item, idempotencyKey: mutationKey('unit-deactivate'), error: '' });
 
+  const reloadUnknownConfiguration = async () => {
+    if (!unknownMutation || !canManage || client.financeSessionEpoch !== recoveryEpoch || recoveryGate.current.replaying || loading.recovery || loading.unknownConfiguration) return;
+    const ticket = recoveryGate.current.beginRead();
+    const operation = unknownMutation;
+    const boundary = recoveryBoundary();
+    setUnknownConfiguration(null);
+    setLoading(current => ({ ...current, unknownConfiguration: true }));
+    try {
+      const facts = await readTransient('unknownConfiguration', signal => readPricingUnknownConfiguration(client, operation, signal));
+      if (!mounted.current || !recoveryGate.current.readIsCurrent(ticket) || recoveryBoundary() !== boundary || !latestFacts.current.canManage || latestFacts.current.unknownMutation !== operation) return;
+      setUnknownConfiguration({ operation, boundary, facts, ticket });
+    } catch (error) {
+      if (mounted.current && recoveryGate.current.readIsCurrent(ticket) && error?.name !== 'AbortError') setNotice(labels.unknownReloadFailed);
+    } finally {
+      if (mounted.current && recoveryGate.current.readIsCurrent(ticket)) setLoading(current => ({ ...current, unknownConfiguration: false }));
+    }
+  };
+  const startAfterUnknown = () => {
+    if (!canManage || client.financeSessionEpoch !== recoveryEpoch || recoveryGate.current.replaying || loading.recovery || loading.unknownConfiguration || !unknownConfiguration || !recoveryGate.current.readIsCurrent(unknownConfiguration.ticket) || unknownConfiguration.operation !== unknownMutation || unknownConfiguration.boundary !== recoveryBoundary()) {
+      setUnknownConfiguration(null); setNotice(labels.unknownReloadFailed); return;
+    }
+    try {
+      const history = archivePricingUnknown(unknownStorageKey, unknownMutation);
+      setUnknownHistory(history);
+      setUnknownMutationState(null);
+      setUnknownConfiguration(null);
+      // This explicit acknowledgement never dispatches or reuses a stale form.
+      setEditor(null); setUnitForm(null); setPendingAction(null); setPreview(null);
+      setNotice(labels.unknownPreserved);
+      void loadPrices().catch(() => {}); void loadUnits().catch(() => {});
+    } catch { setNotice(labels.unknownStorageFailed); }
+  };
+
   const verifyUnknown = async () => {
-    if (!unknownMutation || loading.recovery || !pricingLifecycleMutationLock.tryAcquire()) return;
+    if (!unknownMutation || client.financeSessionEpoch !== recoveryEpoch || loading.recovery || !pricingLifecycleMutationLock.tryAcquire()) return;
     if (!latestFacts.current.canManage) { setNotice(labels.permissionLost); pricingLifecycleMutationLock.release(); return; }
-    setLoading((current) => ({ ...current, recovery: true }));
+    const ticket = recoveryGate.current.beginReplay();
+    transientControllers.current.get('unknownConfiguration')?.abort();
+    transientGenerations.current.set('unknownConfiguration', (transientGenerations.current.get('unknownConfiguration') || 0) + 1);
+    const operation = unknownMutation;
+    const boundary = recoveryBoundary();
+    setUnknownConfiguration(null);
+    setLoading((current) => ({ ...current, recovery: true, unknownConfiguration: false }));
     try {
       // The original key recovers the durable receipt even after a lost response.
-      await replayPricingMutation(client, unknownMutation);
-      if (!mounted.current) return;
+      await replayPricingMutation(client, operation);
+      if (!mounted.current || recoveryBoundary() !== boundary || latestFacts.current.unknownMutation !== operation || !latestFacts.current.canManage) return;
       setUnknownMutation(null);
       setNotice(labels.recoveryConfirmed);
       setEditor(null); setUnitForm(null); setPendingAction(null);
       void loadPrices().catch(() => {}); void loadUnits().catch(() => {});
     } catch (error) {
-      if (mounted.current && error?.name !== 'AbortError') setNotice(labels.errors[error?.code] || labels.recoveryFailed);
+      if (mounted.current && recoveryBoundary() === boundary && error?.name !== 'AbortError') setNotice(labels.errors[error?.code] || labels.recoveryFailed);
     } finally {
+      recoveryGate.current.endReplay(ticket);
       pricingLifecycleMutationLock.release();
       if (mounted.current) setLoading((current) => ({ ...current, recovery: false }));
     }
   };
+
+  // Hide every previous-owner presenter until the retained state is rebound.
+  if (!recoveryScopeCurrent) return <div className="adm-pricing-workspace" aria-busy="true">{labels.verifying}</div>;
 
   return (
     <div className="adm-pricing-workspace">
@@ -540,7 +609,8 @@ export function PricingLifecycleWorkspace({ copy, client, permissions, owner, co
           <button type="button" onClick={() => { void loadPrices().catch(() => {}); void loadUnits().catch(() => {}); void loadProtocols({ q: activeFormulaQuery }).catch(() => {}); void loadModels().catch(() => {}); }} disabled={Boolean(priceNavigationLocked || loading.prices || loading.units || loading.formulas || loading.models)}>{copy.refresh}</button>
         </div>
       </div>
-      {unknownMutation && <div className="adm-inline-message error" role="alert">{labels.resultUnknown}<button type="button" onClick={() => void verifyUnknown()} disabled={loading.recovery}>{loading.recovery ? labels.verifying : labels.verifyResult}</button></div>}
+      {recoveryScopeCurrent && unknownMutation && <div className="adm-inline-message error" role="alert">{labels.resultUnknown}<code>{unknownMutation.idempotencyKey}</code><button type="button" onClick={() => void verifyUnknown()} disabled={loading.recovery}>{loading.recovery ? labels.verifying : labels.verifyResult}</button><details><summary>{labels.unknownOriginal}</summary><pre>{JSON.stringify(unknownMutation, null, 2)}</pre></details><p>{labels.unknownNewOperationLead}</p><button type="button" onClick={() => void reloadUnknownConfiguration()} disabled={!canManage || loading.recovery || loading.unknownConfiguration}>{labels.unknownReload}</button>{unknownConfiguration && <><pre>{JSON.stringify(unknownConfiguration.facts, null, 2)}</pre><button type="button" onClick={startAfterUnknown} disabled={!canManage || loading.recovery || loading.unknownConfiguration || unknownConfiguration.boundary !== recoveryBoundary()}>{labels.unknownStartNew}</button></>}</div>}
+      {recoveryScopeCurrent && unknownHistory.length > 0 && <details className="adm-unknown-history"><summary>{labels.unknownHistory}</summary><p>{labels.unknownLocalOnly}</p>{unknownHistory.map(record => <details key={record.operation.idempotencyKey}><summary>UNKNOWN · {record.operation.kind} · {record.operation.idempotencyKey}</summary><pre>{JSON.stringify(record.operation, null, 2)}</pre></details>)}</details>}
       {notice && <div className="adm-inline-message ok" role="status">{notice}</div>}
       {Object.entries(errors).map(([key, error]) => <div key={key} className="adm-inline-message error" role="alert">{error}</div>)}
       {!contextual && formulaPage.mode !== 'aggregate' && <section className="adm-finance-subpanel" aria-label={labels.formulaDirectory}>
