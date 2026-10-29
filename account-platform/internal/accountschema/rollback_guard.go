@@ -10,6 +10,9 @@ import (
 
 // retainedRollbackGuard composes frozen closure, governance and append-only policy checks.
 func retainedRollbackGuard(ctx context.Context, tx pgx.Tx, migration migrations.Migration) error {
+	if migration.Version == threeScopeVersion {
+		return guardThreeScopeRollback(ctx, tx, migration)
+	}
 	if migration.Version == 28 {
 		// Keep the original SQL identity. Even a legacy database whose latest
 		// applied version is 028 must retain cleanup proofs, lifecycle fences

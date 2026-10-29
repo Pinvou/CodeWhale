@@ -79,6 +79,13 @@ func guardGovernancePermissionsRollback(ctx context.Context, tx pgx.Tx, m migrat
 
 func applyAccountRollbackSQL(ctx context.Context, tx pgx.Tx, m migrations.Migration) error {
 	sql := m.DownSQL
+	if m.Version == threeScopeVersion {
+		var err error
+		sql, err = compatibleThreeScopeRollback(m)
+		if err != nil {
+			return err
+		}
+	}
 	if m.Version == governancePermissionsVersion {
 		if err := validateGovernancePermissionsRollback(m); err != nil {
 			return err

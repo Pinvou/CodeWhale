@@ -20,7 +20,7 @@ func TestRetainedPolicyRollbackGuard(t *testing.T) {
 			}
 		})
 	}
-	for _, version := range []int64{18, 31, 32, 34, 41, 44, 900001, 900002} {
+	for _, version := range []int64{18, 31, 32, 41, 44, 900001, 900002} {
 		if err := retainedRollbackGuard(context.Background(), nil, migrations.Migration{Version: version}); err != nil {
 			t.Fatalf("unrelated migration %d was blocked: %v", version, err)
 		}

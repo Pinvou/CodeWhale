@@ -29,6 +29,9 @@ func TestAuditExportPublicDownRetainsOriginalHistory(t *testing.T) {
 	if err != nil {
 		t.Fatal("LOAD_ORIGINAL_SQL")
 	}
+	t.Run("three_scope_public_down", func(t *testing.T) {
+		testThreeScopePublicRollback(t, ctx, f, loaded)
+	})
 	// Reproduce the retained historical boundary using the original 1..32
 	// package, not a fabricated audit schema or a destructive ledger rewrite.
 	var historical []migrations.Migration
