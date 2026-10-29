@@ -1,4 +1,7 @@
+import { PortalDialogScope } from './portal-dialog-scope.jsx';
 import React, { useEffect, useMemo, useRef, useState } from 'react';
+import { createPortal } from 'react-dom';
+import { OrganizationCreditOverview } from './OrganizationCreditOverview.jsx';
 import { organizationCopy, financeCopy } from '../../shared/i18n.js';
 import { organizationLabel } from './organization-labels.js';
 import { OrganizationClient, organizationID, organizationVersion, organizationPaymentChannels } from './organization-client.js';
@@ -14,7 +17,7 @@ import { createRechargeOrderReader, refreshPaidRechargeRead, startRechargeOrderP
 import { useRechargePaymentDialog } from './useRechargePaymentDialog.js';
 import { RechargePaymentDialog } from './RechargePaymentDialog.jsx';
 
-export function OrganizationFinanceWorkspace({ client, me, language }) {
+export function OrganizationFinanceWorkspace({ client, me, language, presentationTargets }) {
  const copy = organizationCopy[language], org = me.active_context.organization_id;
  const api = useMemo(() => new OrganizationClient(client), [client]);
  const sessionEpoch = client.financeSessionEpoch || 0;
@@ -24,6 +27,7 @@ export function OrganizationFinanceWorkspace({ client, me, language }) {
   get financeSessionEpoch() { return client.financeSessionEpoch || 0; },
   rechargeOrder(id, signal) { return api.order(org, id, signal); },
  }), [client, api, org]);
+ const [dataReady, setDataReady] = useState(false);
  const [data, setData] = useState({ packages: [], grants: [], products: [] });
  const memberPage = useOrganizationMemberPages({ api, org, owner, enabled: hasPermission(me, 'org.quota.allocate'), quota: true });
  const [order, setOrder] = useState(null), [orderID, setOrderID] = useState(''), [batch, setBatch] = useState(null);
@@ -70,12 +74,12 @@ export function OrganizationFinanceWorkspace({ client, me, language }) {
    can('org.entitlements.purchase') ? purchaseRead(api.products(org, signal), stamp) : [],
    can('org.entitlements.purchase') ? purchaseRead(api.capabilities(org, signal), stamp) : null,
   ]);
-  if (ownsView(stamp)) setData({ balance, packages, grants, products, capabilities });
+  if (ownsView(stamp)) { setData({ balance, packages, grants, products, capabilities }); setDataReady(true); }
  };
  const refresh = async () => { void memberPage.refresh(); const stamp = ++generation.current; resetReader(stamp); payment.dismiss(); setBusy(true); setError(''); try { await load(stamp); } catch (reason) { if (ownsView(stamp)) setError(reason.status === 403 ? copy.permissions : copy.unavailable); } finally { if (ownsView(stamp)) setBusy(false); } };
  useEffect(() => {
   const stamp = ++generation.current, controller = new AbortController(); mounted.current = true; readDenied.current = false; withdrawnOrders.current.clear(); payment.dismiss(); resetReader(stamp);
-  setData({ packages: [], grants: [], products: [] }); setOrder(null); setOrderID(''); setBatch(null); setError(''); setBusy(true);
+  setDataReady(false); setData({ packages: [], grants: [], products: [] }); setOrder(null); setOrderID(''); setBatch(null); setError(''); setBusy(true);
   void load(stamp, controller.signal).catch(reason => { if (ownsView(stamp) && reason.name !== 'AbortError') setError(reason.status === 403 ? copy.permissions : copy.unavailable); }).finally(() => { if (ownsView(stamp)) setBusy(false); });
   return () => { mounted.current = false; generation.current++; withdrawnOrders.current.clear(); orderReader.current?.dispose(); orderReader.current = null; controller.abort(); };
  }, [api, owner, sessionEpoch, canPurchase]); // eslint-disable-line react-hooks/exhaustive-deps
@@ -119,8 +123,8 @@ export function OrganizationFinanceWorkspace({ client, me, language }) {
   });
  }, [orderClient, owner, sessionEpoch, canPurchase, busy, payment.order?.order_id, payment.order?.status, payment.order?.close_status, payment.order?.expires_at]); // eslint-disable-line react-hooks/exhaustive-deps
  const purchaseProducts = data.products.filter(product => organizationPaymentChannels(product, data.capabilities).length > 0);
- return <section tabIndex={-1}>{payment.order && <RechargePaymentDialog order={payment.order} copy={financeCopy[language]} language={language} now={now} busy={busy} onDismiss={payment.dismiss} onQuery={() => void query(false)} canRestoreFocus={payment.canRestoreFocus} returnFocus={payment.trigger} />}<h3>{copy.balance}</h3><button disabled={busy} onClick={() => void refresh()}>{copy.refresh}</button>{error && <p role="alert">{error}</p>}{busy && <p role="status">{copy.loading}</p>}
-  {data.balance && <dl><dt>{copy.available}</dt><dd>{formatBalance(data.balance.available_microcredits, language)}</dd><dt>{copy.reserved}</dt><dd>{formatBalance(data.balance.reserved_microcredits, language)}</dd></dl>}
+ const workspace = <section tabIndex={-1}>{payment.order && <RechargePaymentDialog error={error} order={payment.order} copy={financeCopy[language]} language={language} now={now} busy={busy} onDismiss={payment.dismiss} onQuery={() => void query(false)} canRestoreFocus={payment.canRestoreFocus} returnFocus={payment.trigger} />}<h3>{copy.balance}</h3><button disabled={busy} onClick={() => void refresh()}>{copy.refresh}</button>{!presentationTargets && error && <p role="alert">{error}</p>}{!presentationTargets && busy && <p role="status">{copy.loading}</p>}
+  {can('org.wallet.read') && data.balance && <dl><dt>{copy.available}</dt><dd>{formatBalance(data.balance.available_microcredits, language)}</dd><dt>{copy.reserved}</dt><dd>{formatBalance(data.balance.reserved_microcredits, language)}</dd></dl>}
   {can('org.wallet.read') && <section><h4>{copy.packages}</h4>{data.packages.map(item => <div key={item.package_id}><p>{item.plan_name} · {item.package_id} · {organizationLabel(copy, 'Status', item.status)} · {formatBalance(item.points_remaining_microcredits, language)}</p><ul>{item.components?.map(component => <li key={component.component_id}>{component.component_id} · {organizationLabel(copy, 'Component', component.component_type)} · {organizationLabel(copy, 'Status', component.status)} · {formatBalance(component.available_microcredits, language)}</li>)}</ul></div>)}</section>}
   {can('org.entitlements.purchase') && <section>{data.capabilities && <p role="status">{data.capabilities.test_only ? copy.testCollection : data.capabilities.formal_collection_admitted ? copy.formalCollection : copy.collectionUnavailable}</p>}{!busy && !purchaseProducts.length && <p>{copy.noPurchaseChannel}</p>}<OrganizationActionForm disabled={!purchaseProducts.length} client={client} owner={owner} copy={copy} scope="organization-purchase" title={copy.purchase} fields={[{ name: 'product', options: purchaseProducts.map(product => ({ value: product.product_id, label: `${localizedProductDisplayName(product, language)} · ${formatFen(product.amount_fen, language)}` })) }, { name: 'channel', options: values => organizationPaymentChannels(purchaseProducts.find(product => product.product_id === values.product), data.capabilities).map(value => ({ value, label: organizationLabel(copy, 'Channel', value) })) }]} prepare={values => { const product = purchaseProducts.find(item => item.product_id === values.product); const channel = effectivePaymentChannel(organizationPaymentChannels(product, data.capabilities), values.channel); if (!product || !channel || channel !== values.channel) throw new Error('INVALID_ORGANIZATION_INPUT'); return { product_id: product.product_id, channel }; }} action={(facts, key) => { purchasePresentation.current = payment.begin(); return api.createOrder(org, facts, key); }} onConfirmed={result => { if (ownsView(generation.current) && currentView.current.canPurchase) { const latest = rememberOrder(result); setOrder(paymentOrderFacts(latest)); setOrderID(latest.order_id); payment.accept(purchasePresentation.current, latest); } }} />
    <form onSubmit={event => { event.preventDefault(); void query(); }}><label>{copy.order}<input value={orderID} onChange={event => setOrderID(event.target.value)} /></label><button disabled={busy || !orderID}>{copy.queryOrder}</button></form>
@@ -131,4 +135,10 @@ export function OrganizationFinanceWorkspace({ client, me, language }) {
    {batch && <div>{batch.items.some(item => item.status === 'FAILED') && <p role="alert">{copy.partial}</p>}<ul>{batch.items.map(item => <li key={item.index}>{item.index + 1} · {organizationLabel(copy, 'Status', item.status)} · {item.grant?.grant_id || (organizationLabel(copy, 'Code', item.code) === item.code ? item.code : `${organizationLabel(copy, 'Code', item.code)} (${item.code})`)}</li>)}</ul></div>}
   </section>}
  </section>;
+ if (!presentationTargets) return workspace;
+ return <>
+  {presentationTargets.credits && createPortal(<PortalDialogScope active={presentationTargets.section === 'creditsUsage'}><OrganizationCreditOverview me={me} data={data} language={language} ready={dataReady} error={error} now={now} /></PortalDialogScope>, presentationTargets.credits)}
+  {presentationTargets.management && createPortal(<PortalDialogScope active={presentationTargets.section === 'myOrganization'}>{workspace}</PortalDialogScope>, presentationTargets.management)}
+  {presentationTargets.feedback && createPortal(<>{error && <p className="ap-alert error" role="alert">{error}</p>}{busy && <p role="status">{copy.loading}</p>}</>, presentationTargets.feedback)}
+ </>;
 }

@@ -1,8 +1,11 @@
+import { usePortalDialogScope } from './portal-dialog-scope.jsx';
 import React, { useLayoutEffect, useId, useRef } from 'react';
 import { createPortal } from 'react-dom';
 
 // Feature confirmation is independent of the native async window.confirm shim.
-export function PersonalOrderCloseConfirmation({ copy, orderID, amount, canRestoreFocus, onCancel, onConfirm }) {
+export function PersonalOrderCloseConfirmation({ copy, orderID, amount, canRestoreFocus, onCancel, onConfirm, active = true }) {
+  const scopeActive = usePortalDialogScope();
+  const visible = scopeActive && active;
   const titleID = useId();
   const descriptionID = useId();
   const dialog = useRef(null);
@@ -10,13 +13,14 @@ export function PersonalOrderCloseConfirmation({ copy, orderID, amount, canResto
   const restoreAllowed = useRef(canRestoreFocus);
   restoreAllowed.current = canRestoreFocus;
   useLayoutEffect(() => {
+    if (!visible) return undefined;
     const previous = document.activeElement;
     const element = dialog.current;
     cancelButton.current?.focus();
     return () => {
-      if (previous?.isConnected && element.contains(document.activeElement) && restoreAllowed.current()) previous.focus();
+      if (previous?.isConnected && element?.contains(document.activeElement) && !previous.closest('[hidden]') && restoreAllowed.current()) previous.focus();
     };
-  }, []);
+  }, [visible]);
   const keyDown = event => {
     if (event.key === 'Escape') { event.preventDefault(); event.stopPropagation(); onCancel(); return; }
     if (event.key !== 'Tab') return;
@@ -25,6 +29,7 @@ export function PersonalOrderCloseConfirmation({ copy, orderID, amount, canResto
     if (event.shiftKey && document.activeElement === first) { event.preventDefault(); last.focus(); }
     else if (!event.shiftKey && document.activeElement === last) { event.preventDefault(); first.focus(); }
   };
+  if (!visible) return null;
   return createPortal(<div className="ap-order-close-backdrop" onMouseDown={event => { if (event.target === event.currentTarget) onCancel(); }}>
     <div className="ap-order-close-dialog" ref={dialog} role="alertdialog" aria-modal="true" aria-labelledby={titleID} aria-describedby={descriptionID} onKeyDown={keyDown}>
       <h3 id={titleID}>{copy.close}</h3><p id={descriptionID}>{copy.confirmClose}</p>

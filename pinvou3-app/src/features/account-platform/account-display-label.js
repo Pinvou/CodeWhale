@@ -8,3 +8,10 @@ export function accountDisplayLabel(account, fallback = '') {
   const displayName = String(account?.display_name || '').trim();
   return displayName || fallback;
 }
+
+export function maskedAccountMobile(value) {
+  const text = String(value || '').trim();
+  if (!text) return '—';
+  if (text.length <= 7) return '••••';
+  return `${text.slice(0, -8)}••••${text.slice(-4)}`;
+}

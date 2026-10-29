@@ -978,6 +978,17 @@
     {
       "source": "account-platform/internal/account/organization_routes.go",
       "receiver": "admin",
+      "method": "GET",
+      "path": "/organizations/:organization_id",
+      "scope": "platform",
+      "permissions": [
+        "platform.organizations.read"
+      ],
+      "strategy": "domain.platform-organization-detail-read"
+    },
+    {
+      "source": "account-platform/internal/account/organization_routes.go",
+      "receiver": "admin",
       "method": "POST",
       "path": "/organizations",
       "scope": "platform",

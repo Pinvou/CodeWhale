@@ -42,7 +42,7 @@ func billingAdminPathAllowed(method, resource string) bool {
 	}
 	if method == http.MethodGet {
 		switch resource {
-		case "/admin/v1/reconciliation-runs", "/admin/v1/reconciliation-cases", "/admin/v1/overview", "/admin/v1/finance-overviews/accounts", "/admin/v1/finance-overviews/payments", "/admin/v1/finance-overviews/products", "/admin/v1/wallets", "/admin/v1/receivables", "/admin/v1/recharge-products", "/admin/v1/recharge-product-create-options", "/admin/v1/payment-orders", "/admin/v1/refunds", "/admin/v1/payment-provider-controls", "/admin/v1/late-payment-reviews", "/admin/v1/payment-anomalies", "/admin/v1/adjustments":
+		case "/admin/v1/reconciliation-runs", "/admin/v1/reconciliation-cases", "/admin/v1/overview", "/admin/v1/finance-overviews/accounts", "/admin/v1/finance-overviews/payments", "/admin/v1/finance-overviews/products", "/admin/v1/finance-overviews/pricing", "/admin/v1/wallets", "/admin/v1/receivables", "/admin/v1/recharge-products", "/admin/v1/recharge-product-create-options", "/admin/v1/payment-orders", "/admin/v1/refunds", "/admin/v1/payment-provider-controls", "/admin/v1/late-payment-reviews", "/admin/v1/payment-anomalies", "/admin/v1/adjustments":
 			return true
 		}
 	}

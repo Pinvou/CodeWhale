@@ -389,6 +389,20 @@ export class AdminPlatformClient {
     return item;
   }
 
+  async userDetail(userID, signal) {
+    requireFinanceID(userID);
+    const item = await this.request('account', `/admin/v1/users/${encodeURIComponent(userID)}`, signal);
+    if (item?.user_id !== userID || typeof item.status !== 'string' || !item.status || item.email != null) throw new Error('INVALID_USER_DETAIL_ACK');
+    return item;
+  }
+
+  async userMemberships(userID, signal) {
+    requireFinanceID(userID);
+    const page = await this.request('account', `/admin/v1/users/${encodeURIComponent(userID)}/memberships`, signal);
+    if (!Array.isArray(page?.items)) throw new Error('INVALID_USER_MEMBERSHIPS');
+    return page;
+  }
+
   setUserStatus(userID, status) {
     if (!['ACTIVE', 'DISABLED'].includes(status)) return Promise.reject(new Error('INVALID_USER_STATUS'));
     return this.mutate('account', `/admin/v1/users/${encodeURIComponent(userID)}/status`, 'PATCH', { status }, '', undefined, 204);
@@ -716,7 +730,7 @@ export class AdminPlatformClient {
   }
   latePaymentReviews(filters = {}, signal) {
     const query = billingCollectionQuery(filters, {
-      keys: ['q', 'status', 'severity', 'provider_id', 'owner_id'],
+      keys: ['q', 'status', 'severity', 'provider_id', 'owner_id', 'overdue'],
       dateTimeKeys: ['created_from', 'created_to', 'entered_from', 'entered_to', 'next_review_before'],
     });
     return this.request('billing', `/admin/v1/late-payment-reviews?${query}`, signal);
@@ -780,10 +794,10 @@ export class AdminPlatformClient {
   }
 
   wallets(filters = {}, signal) { return this.request('billing', `/admin/v1/wallets?${billingCollectionQuery(filters, { keys: ['q', 'status', 'owner_type'] })}`, signal); }
-  walletLedger(walletID, filters = {}, signal) { return this.request('billing', `/admin/v1/wallets/${encodeURIComponent(walletID)}/ledger?${billingCollectionQuery(filters)}`, signal); }
-  receivables(filters = {}, signal) { return this.request('billing', `/admin/v1/receivables?${billingCollectionQuery(filters, { keys: ['wallet_id', 'status'] })}`, signal); }
+  walletLedger(walletID, filters = {}, signal) { return this.request('billing', `/admin/v1/wallets/${encodeURIComponent(walletID)}/ledger?${billingCollectionQuery(filters, { keys: ['entry_type', 'business_reference'], dateTimeKeys: ['created_from', 'created_to'] })}`, signal); }
+  receivables(filters = {}, signal) { return this.request('billing', `/admin/v1/receivables?${billingCollectionQuery(filters, { keys: ['wallet_id', 'status', 'source_type'], dateTimeKeys: ['created_from', 'created_to'] })}`, signal); }
   receivableAllocations(id, signal) { return this.request('billing', `/admin/v1/receivables/${encodeURIComponent(id)}/allocations`, signal); }
-  financeOverview(surface, signal) { return this.request('billing', `/admin/v1/finance-overviews/${surface}`, signal); }
+  financeOverview(surface, signal) { if (!['accounts', 'payments', 'products', 'pricing'].includes(surface)) throw new Error('INVALID_FINANCE_SURFACE'); return this.request('billing', `/admin/v1/finance-overviews/${surface}`, signal, text => parseFinanceJSON(text, { overviewIntegers: true })); }
   async syncOrder(orderID) { return requirePaymentOrder(await this.syncPaymentOrder(orderID), orderID); }
   rechargeProducts(filters = {}, signal) { return this.request('billing', `/admin/v1/recharge-products?${billingCollectionQuery(filters, { keys: ['q', 'lifecycle_status', 'include_deleted'] })}`, signal); }
   rechargeProductCreateOptions(signal) { return this.request('billing', '/admin/v1/recharge-product-create-options', signal); }

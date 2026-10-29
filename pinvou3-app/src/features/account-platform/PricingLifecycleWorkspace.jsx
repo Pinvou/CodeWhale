@@ -1,8 +1,9 @@
 import { createPricingUnknownRecoveryGate, archivePricingUnknown, readPricingUnknownConfiguration, readPricingUnknownHistory } from './pricing-unknown-recovery.js';
 import { integerMoney } from './finance-contract.js';
 import { pricingUnknownStorageKey, replayPricingMutation } from './pricing-mutation.js';
+import { pricingUnknownSnapshot, pricingUnknownStateSnapshot, storePricingUnknown, subscribePricingUnknown } from './pricing-unknown-state.js';
 import { secureRequestID } from './request-id.js';
-import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react';
 import { buildPriceDraftInput, matchingContinuationDrafts, newModelPriceAllowed, priceDraftForm, priceSpaceQuery, priceTransitionModes, pricingLifecycleMutationLock, publishedPricingFormulas } from './pricing-lifecycle.js';
 
 const shortID = (value) => {
@@ -13,17 +14,6 @@ const formatDate = (value) => value ? new Date(value).toLocaleString() : '—';
 const mutationKey = (prefix) => `${prefix}:${secureRequestID()}`;
 const outcomeUnknown = (error) => !Number.isFinite(error?.status) || error.status >= 500;
 const stableUUID = (value) => /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(String(value || ''));
-const readRetainedUnknown = (unknownStorageKey) => {
-  try {
-    const value = JSON.parse(globalThis.sessionStorage?.getItem(unknownStorageKey) || 'null');
-    if (value?.phase === 'PREPARING') { globalThis.sessionStorage?.removeItem(unknownStorageKey); return null; }
-    return ['DRAFT_CREATE', 'DRAFT_UPDATE', 'UNIT_CREATE', 'UNIT_DEACTIVATE', 'PRICE_PUBLISH', 'PRICE_TRANSITION'].includes(value?.kind) ? value : null;
-  } catch { return null; }
-};
-const storeUnknown = (unknownStorageKey, value) => {
-  try { if (value) globalThis.sessionStorage?.setItem(unknownStorageKey, JSON.stringify(value)); else globalThis.sessionStorage?.removeItem(unknownStorageKey); } catch { /* storage is optional */ }
-  return value;
-};
 
 function PricingStatus({ value }) {
   const normalized = String(value || '—');
@@ -41,9 +31,10 @@ function fieldError(labels, value) {
 export function PricingLifecycleWorkspace({ copy, client, permissions, owner, contextModel = null, contextFormula = null, onExit = null, onOpenModel = null }) {
   const recoveryEpoch = client.financeSessionEpoch;
   const unknownStorageKey = pricingUnknownStorageKey(owner, recoveryEpoch);
+  const intentRevision = pricingUnknownStateSnapshot(unknownStorageKey).revision;
   const [unknownStateScope, setUnknownStateScope] = useState(unknownStorageKey);
   const recoveryScopeCurrent = unknownStateScope === unknownStorageKey;
-  const retainUnknown = (value) => storeUnknown(unknownStorageKey, value);
+  const retainUnknown = value => storePricingUnknown(unknownStorageKey, value, null);
   const labels = copy.billing.pricingLifecycle;
   const contextual = Boolean(contextModel?.model_id && contextFormula?.formula_version_id);
   const [priceAccessDenied, setPriceAccessDenied] = useState(false);
@@ -71,11 +62,17 @@ export function PricingLifecycleWorkspace({ copy, client, permissions, owner, co
   const [errors, setErrors] = useState({});
   const [updatedAt, setUpdatedAt] = useState({});
   const [notice, setNotice] = useState('');
-  const [editor, setEditor] = useState(null);
+  const [editorState, setEditorState] = useState(null);
+  const editor = editorState?.revision === intentRevision ? editorState.value : null;
+  const setEditor = value => setIntent(setEditorState, value);
   const [editorErrors, setEditorErrors] = useState({});
-  const [unitForm, setUnitForm] = useState(null);
+  const [unitFormState, setUnitFormState] = useState(null);
+  const unitForm = unitFormState?.revision === intentRevision ? unitFormState.value : null;
+  const setUnitForm = value => setIntent(setUnitFormState, value);
   const [preview, setPreview] = useState(null);
-  const [pendingAction, setPendingAction] = useState(null);
+  const [pendingActionState, setPendingActionState] = useState(null);
+  const pendingAction = pendingActionState?.revision === intentRevision ? pendingActionState.value : null;
+  const setPendingAction = value => setIntent(setPendingActionState, value);
   const recoveryGate = useRef(null);
   if (!recoveryGate.current) recoveryGate.current = createPricingUnknownRecoveryGate();
   const [unknownConfiguration, setUnknownConfiguration] = useState(null);
@@ -83,8 +80,27 @@ export function PricingLifecycleWorkspace({ copy, client, permissions, owner, co
   const recoveryIdentity = useRef({ value: '', generation: 0 });
   const recoveryIdentityValue = JSON.stringify([priceContext, canManage, formulaAccessDenied, formulaAuthority.current.generation]);
   if (recoveryIdentity.current.value !== recoveryIdentityValue) recoveryIdentity.current = { value: recoveryIdentityValue, generation: recoveryIdentity.current.generation + 1 };
-  const [unknownMutation, setUnknownMutationState] = useState(() => readRetainedUnknown(unknownStorageKey));
-  const setUnknownMutation = (value) => { retainUnknown(value); if (mounted.current) setUnknownMutationState(value); };
+  const subscribeUnknown = useCallback(listener => subscribePricingUnknown(unknownStorageKey, listener), [unknownStorageKey]);
+  const getUnknown = useCallback(() => pricingUnknownStateSnapshot(unknownStorageKey), [unknownStorageKey]);
+  const unknownMutation = useSyncExternalStore(subscribeUnknown, getUnknown, getUnknown).value;
+  const setUnknownMutation = (value, expected = null, options) => storePricingUnknown(unknownStorageKey, value, expected, options);
+  const latestUnknownScope = useRef(unknownStorageKey);
+  latestUnknownScope.current = unknownStorageKey;
+  // Recovery/archive retires prior form intent synchronously across presenters.
+  // Old closures and queued React state updaters must check the shared revision,
+  // even before the external-store notification has produced a new render.
+  const intentCurrent = () => latestUnknownScope.current === unknownStorageKey
+    && pricingUnknownStateSnapshot(unknownStorageKey).revision === intentRevision;
+  const setIntent = (setState, value) => {
+    if (!intentCurrent()) return;
+    setState(current => {
+      if (!intentCurrent()) return current;
+      const next = typeof value === 'function' ? value(current?.revision === intentRevision ? current.value : null) : value;
+      return next == null ? null : { revision: intentRevision, value: next };
+    });
+  };
+  // Local generations cannot fence another presenter replacing the shared record.
+  const sharedOperationCurrent = operation => latestUnknownScope.current === unknownStorageKey && pricingUnknownSnapshot(unknownStorageKey) === operation;
   const generations = useRef({ prices: 0, units: 0, formulas: 0, models: 0 });
   const mounted = useRef(true);
   const preflights = useRef(new Set());
@@ -105,10 +121,14 @@ export function PricingLifecycleWorkspace({ copy, client, permissions, owner, co
   useEffect(() => {
     setUnknownConfiguration(null);
     setUnknownStateScope(unknownStorageKey);
-    setUnknownMutationState(readRetainedUnknown(unknownStorageKey));
     try { setUnknownHistory(readPricingUnknownHistory(unknownStorageKey)); } catch { setUnknownHistory([]); }
     setEditor(null); setUnitForm(null); setPendingAction(null);
   }, [unknownStorageKey]);
+  useEffect(() => {
+    // A peer may recover/archive/replace this record without changing local generations.
+    setUnknownConfiguration(null);
+    try { setUnknownHistory(readPricingUnknownHistory(unknownStorageKey)); } catch { setUnknownHistory([]); }
+  }, [unknownStorageKey, unknownMutation]);
   useEffect(() => () => {
     mounted.current = false;
     for (const controller of preflights.current) controller.abort();
@@ -229,7 +249,7 @@ export function PricingLifecycleWorkspace({ copy, client, permissions, owner, co
       }
       throw error;
     });
-  }, [client, contextFormula, contextual, labels.formulaPageFailed, loadResource]);
+  }, [client, contextFormula, contextual, labels.formulaPageFailed, loadResource, unknownStorageKey, intentRevision]);
   const loadModels = useCallback(() => {
     if (contextual) {
       generations.current.models += 1;
@@ -262,6 +282,7 @@ export function PricingLifecycleWorkspace({ copy, client, permissions, owner, co
   }, [canReadModels, formulas, models]);
 
   const openCreate = () => {
+    if (!intentCurrent() || pricingUnknownSnapshot(unknownStorageKey)) return;
     const form = priceDraftForm();
     const formula = formulas[0];
     const compatibleModels = models.filter((item) => item.protocol_code === formula?.protocol_code);
@@ -278,7 +299,7 @@ export function PricingLifecycleWorkspace({ copy, client, permissions, owner, co
   };
 
   const openEdit = async (item) => {
-    if (!canManage || formulaAccessDenied || loading.formulaSelection || unknownMutation) return;
+    if (!intentCurrent() || pricingUnknownSnapshot(unknownStorageKey) || !canManage || formulaAccessDenied || loading.formulaSelection || unknownMutation) return;
     const generation = generations.current.formulas + 1;
     let locatedPage = null;
     try {
@@ -295,7 +316,7 @@ export function PricingLifecycleWorkspace({ copy, client, permissions, owner, co
         if (!formula || formula.status !== 'PUBLISHED' || formula.protocol_code !== item.protocol_code
           || !/^[1-9]\d*$/.test(String(formula.version)) || !Object.keys(formula.required_unit_versions || {}).length
           || !Object.values(formula.required_unit_versions).every(stableUUID)) throw new Error('FORMULA_SELECTION_UNAVAILABLE');
-        if (!latestFacts.current.canManage || latestFacts.current.unknownMutation) {
+        if (!intentCurrent() || !latestFacts.current.canManage || pricingUnknownSnapshot(unknownStorageKey)) {
           throw Object.assign(new Error('FORMULA_SELECTION_RETIRED'), { name: 'AbortError' });
         }
         if (locatedPage) {
@@ -335,7 +356,7 @@ export function PricingLifecycleWorkspace({ copy, client, permissions, owner, co
 
   const submitDraft = async (event) => {
     event.preventDefault();
-    if (!editor || formulaAuthority.current.denied || loading.formulaSelection || loading.mutation || unknownMutation || !pricingLifecycleMutationLock.tryAcquire()) return;
+    if (!intentCurrent() || !editor || formulaAuthority.current.denied || loading.formulaSelection || loading.mutation || pricingUnknownSnapshot(unknownStorageKey) || !pricingLifecycleMutationLock.tryAcquire()) return;
     const formulaAuthorizationGeneration = formulaAuthority.current.generation;
     retainUnknown({ phase: 'PREPARING', kind: editor.price_version_id ? 'DRAFT_UPDATE' : 'DRAFT_CREATE' });
     if (!canManage) { setEditorErrors({ form: labels.permissionLost }); retainUnknown(null); pricingLifecycleMutationLock.release(); return; }
@@ -376,25 +397,29 @@ export function PricingLifecycleWorkspace({ copy, client, permissions, owner, co
     }
     const currentFacts = latestFacts.current;
     const currentFormula = currentFacts.formulas.find((item) => item.formula_version_id === editor.formula_version_id);
-    if (!mounted.current || formulaAuthority.current.denied || formulaAuthority.current.generation !== formulaAuthorizationGeneration || !currentFacts.canManage || !currentFormula || !newModelPriceAllowed(editor, currentFacts.canReadModels, currentFacts.models, currentFormula)) {
+    if (!intentCurrent() || !mounted.current || latestUnknownScope.current !== unknownStorageKey || formulaAuthority.current.denied || formulaAuthority.current.generation !== formulaAuthorizationGeneration || !currentFacts.canManage || !currentFormula || !newModelPriceAllowed(editor, currentFacts.canReadModels, currentFacts.models, currentFormula)) {
       if (mounted.current) { setEditorErrors({ form: currentFacts.canManage ? labels.modelSelectionInvalid : labels.permissionLost }); setLoading((current) => ({ ...current, mutation: false })); }
       retainUnknown(null);
       pricingLifecycleMutationLock.release();
       return;
     }
     const dispatched = { phase: 'DISPATCHED', kind: editor.price_version_id ? 'DRAFT_UPDATE' : 'DRAFT_CREATE', targetID: editor.price_version_id, input, idempotencyKey: mutationKey('price-draft'), beforeIDs: editor.price_version_id ? [] : spaceBeforeIDs };
-    setUnknownMutation(dispatched);
+    if (!setUnknownMutation(dispatched)) {
+      pricingLifecycleMutationLock.release();
+      setLoading(current => ({ ...current, mutation: false }));
+      return;
+    }
     setNotice('');
     try {
       await replayPricingMutation(client, dispatched);
-      if (!mounted.current) return;
-      setUnknownMutation(null);
+      if (!mounted.current || !sharedOperationCurrent(dispatched) || !setUnknownMutation(null, dispatched)) return;
       setEditor(null);
       setNotice(labels.draftSaved);
       void loadPrices().catch(() => {});
     } catch (error) {
+      if (!mounted.current || !sharedOperationCurrent(dispatched)) return;
       setEditorErrors({ form: labels.errors[error?.code] || labels.actionFailed });
-      if (!outcomeUnknown(error)) setUnknownMutation(null);
+      if (!outcomeUnknown(error)) setUnknownMutation(null, dispatched);
     } finally {
       pricingLifecycleMutationLock.release();
       setLoading((current) => ({ ...current, mutation: false }));
@@ -403,7 +428,7 @@ export function PricingLifecycleWorkspace({ copy, client, permissions, owner, co
 
   const submitUnit = async (event) => {
     event.preventDefault();
-    if (!unitForm || loading.mutation || unknownMutation || !pricingLifecycleMutationLock.tryAcquire()) return;
+    if (!intentCurrent() || !unitForm || loading.mutation || pricingUnknownSnapshot(unknownStorageKey) || !pricingLifecycleMutationLock.tryAcquire()) return;
     retainUnknown({ phase: 'PREPARING', kind: 'UNIT_CREATE' });
     if (!canManage) { setErrors((current) => ({ ...current, unitMutation: labels.permissionLost })); retainUnknown(null); pricingLifecycleMutationLock.release(); return; }
     setLoading((current) => ({ ...current, mutation: true }));
@@ -431,7 +456,7 @@ export function PricingLifecycleWorkspace({ copy, client, permissions, owner, co
     try {
       baseline = await client.meteringUnits(baselineController.signal);
       preflights.current.delete(baselineController);
-      if (!mounted.current || !latestFacts.current.canManage) {
+      if (!intentCurrent() || !mounted.current || latestUnknownScope.current !== unknownStorageKey || !latestFacts.current.canManage) {
         retainUnknown(null);
         pricingLifecycleMutationLock.release();
         if (mounted.current) setLoading((current) => ({ ...current, mutation: false }));
@@ -447,18 +472,22 @@ export function PricingLifecycleWorkspace({ copy, client, permissions, owner, co
       return;
     }
     const dispatched = { phase: 'DISPATCHED', kind: 'UNIT_CREATE', input, idempotencyKey: mutationKey('metering-unit'), beforeIDs: (baseline.items || []).map((item) => item.unit_definition_id) };
-    setUnknownMutation(dispatched);
+    if (!setUnknownMutation(dispatched)) {
+      pricingLifecycleMutationLock.release();
+      setLoading(current => ({ ...current, mutation: false }));
+      return;
+    }
     setNotice('');
     try {
       await replayPricingMutation(client, dispatched);
-      if (!mounted.current) return;
-      setUnknownMutation(null);
+      if (!mounted.current || !sharedOperationCurrent(dispatched) || !setUnknownMutation(null, dispatched)) return;
       setUnitForm(null);
       setNotice(labels.unitCreated);
       void loadUnits().catch(() => {});
     } catch (error) {
+      if (!mounted.current || !sharedOperationCurrent(dispatched)) return;
       setErrors((current) => ({ ...current, unitMutation: labels.errors[error?.code] || labels.actionFailed }));
-      if (!outcomeUnknown(error)) setUnknownMutation(null);
+      if (!outcomeUnknown(error)) setUnknownMutation(null, dispatched);
     } finally {
       pricingLifecycleMutationLock.release();
       setLoading((current) => ({ ...current, mutation: false }));
@@ -480,7 +509,7 @@ export function PricingLifecycleWorkspace({ copy, client, permissions, owner, co
 
   const runPendingAction = async (event) => {
     event.preventDefault();
-    if (!pendingAction || loading.mutation || unknownMutation || !pricingLifecycleMutationLock.tryAcquire()) return;
+    if (!intentCurrent() || !pendingAction || loading.mutation || pricingUnknownSnapshot(unknownStorageKey) || !pricingLifecycleMutationLock.tryAcquire()) return;
     if (!canManage) { setPendingAction((current) => ({ ...current, error: labels.permissionLost })); pricingLifecycleMutationLock.release(); return; }
     const { type, item } = pendingAction;
     const reason = String(pendingAction.reason || '').trim();
@@ -498,17 +527,21 @@ export function PricingLifecycleWorkspace({ copy, client, permissions, owner, co
         ...(item.derived_status === 'ACTIVE' ? { mode: pendingAction.mode } : {}), reason,
         ...(pendingAction.mode === 'CONTINUATION' ? { replacement_price_version_id: pendingAction.replacementID } : {}),
       } : {} };
-    setUnknownMutation(dispatched);
+    if (!setUnknownMutation(dispatched)) {
+      pricingLifecycleMutationLock.release();
+      setLoading(current => ({ ...current, mutation: false }));
+      return;
+    }
     try {
       await replayPricingMutation(client, dispatched);
-      if (!mounted.current) return;
-      setUnknownMutation(null);
+      if (!mounted.current || !sharedOperationCurrent(dispatched) || !setUnknownMutation(null, dispatched)) return;
       setPendingAction(null);
       setNotice(labels.actionCompleted);
       if (type === 'DEACTIVATE') void loadUnits().catch(() => {}); else void loadPrices().catch(() => {});
     } catch (error) {
+      if (!mounted.current || !sharedOperationCurrent(dispatched)) return;
       setPendingAction((current) => ({ ...current, error: labels.errors[error?.code] || labels.actionFailed }));
-      if (!outcomeUnknown(error)) { setUnknownMutation(null); setPendingAction(current => ({ ...current, idempotencyKey: mutationKey('price-action') })); }
+      if (!outcomeUnknown(error)) { setUnknownMutation(null, dispatched); setPendingAction(current => ({ ...current, idempotencyKey: mutationKey('price-action') })); }
     } finally {
       pricingLifecycleMutationLock.release();
       setLoading((current) => ({ ...current, mutation: false }));
@@ -517,6 +550,7 @@ export function PricingLifecycleWorkspace({ copy, client, permissions, owner, co
 
   const openPublish = (item) => setPendingAction({ type: 'PUBLISH', item, idempotencyKey: mutationKey('price-publish'), error: '' });
   const openTransition = async (item) => {
+    if (!intentCurrent() || pricingUnknownSnapshot(unknownStorageKey)) return;
     const modes = priceTransitionModes(item);
     let candidates = [];
     if (item.derived_status === 'ACTIVE') {
@@ -537,58 +571,66 @@ export function PricingLifecycleWorkspace({ copy, client, permissions, owner, co
   const openDeactivate = (item) => setPendingAction({ type: 'DEACTIVATE', item, idempotencyKey: mutationKey('unit-deactivate'), error: '' });
 
   const reloadUnknownConfiguration = async () => {
-    if (!unknownMutation || !canManage || client.financeSessionEpoch !== recoveryEpoch || recoveryGate.current.replaying || loading.recovery || loading.unknownConfiguration) return;
+    const operation = pricingUnknownSnapshot(unknownStorageKey);
+    if (!operation || !canManage || client.financeSessionEpoch !== recoveryEpoch || pricingLifecycleMutationLock.isLocked() || recoveryGate.current.replaying || loading.recovery || loading.unknownConfiguration) return;
     const ticket = recoveryGate.current.beginRead();
-    const operation = unknownMutation;
     const boundary = recoveryBoundary();
     setUnknownConfiguration(null);
     setLoading(current => ({ ...current, unknownConfiguration: true }));
     try {
       const facts = await readTransient('unknownConfiguration', signal => readPricingUnknownConfiguration(client, operation, signal));
-      if (!mounted.current || !recoveryGate.current.readIsCurrent(ticket) || recoveryBoundary() !== boundary || !latestFacts.current.canManage || latestFacts.current.unknownMutation !== operation) return;
+      if (!mounted.current || !recoveryGate.current.readIsCurrent(ticket) || recoveryBoundary() !== boundary || !latestFacts.current.canManage || !sharedOperationCurrent(operation)) return;
       setUnknownConfiguration({ operation, boundary, facts, ticket });
     } catch (error) {
-      if (mounted.current && recoveryGate.current.readIsCurrent(ticket) && error?.name !== 'AbortError') setNotice(labels.unknownReloadFailed);
+      if (mounted.current && sharedOperationCurrent(operation) && recoveryGate.current.readIsCurrent(ticket) && error?.name !== 'AbortError') setNotice(labels.unknownReloadFailed);
     } finally {
       if (mounted.current && recoveryGate.current.readIsCurrent(ticket)) setLoading(current => ({ ...current, unknownConfiguration: false }));
     }
   };
   const startAfterUnknown = () => {
-    if (!canManage || client.financeSessionEpoch !== recoveryEpoch || recoveryGate.current.replaying || loading.recovery || loading.unknownConfiguration || !unknownConfiguration || !recoveryGate.current.readIsCurrent(unknownConfiguration.ticket) || unknownConfiguration.operation !== unknownMutation || unknownConfiguration.boundary !== recoveryBoundary()) {
+    if (!canManage || client.financeSessionEpoch !== recoveryEpoch || recoveryGate.current.replaying || loading.recovery || loading.unknownConfiguration || !unknownConfiguration || !recoveryGate.current.readIsCurrent(unknownConfiguration.ticket) || !sharedOperationCurrent(unknownConfiguration.operation) || unknownConfiguration.boundary !== recoveryBoundary()) {
       setUnknownConfiguration(null); setNotice(labels.unknownReloadFailed); return;
     }
+    if (!pricingLifecycleMutationLock.tryAcquire()) return;
     try {
-      const history = archivePricingUnknown(unknownStorageKey, unknownMutation);
+      const operation = unknownConfiguration.operation;
+      if (!sharedOperationCurrent(operation)) return;
+      const history = archivePricingUnknown(unknownStorageKey, operation);
+      if (!setUnknownMutation(null, operation, { retireIntents: true })) return;
       setUnknownHistory(history);
-      setUnknownMutationState(null);
       setUnknownConfiguration(null);
       // This explicit acknowledgement never dispatches or reuses a stale form.
       setEditor(null); setUnitForm(null); setPendingAction(null); setPreview(null);
       setNotice(labels.unknownPreserved);
       void loadPrices().catch(() => {}); void loadUnits().catch(() => {});
     } catch { setNotice(labels.unknownStorageFailed); }
+    finally { pricingLifecycleMutationLock.release(); }
   };
 
   const verifyUnknown = async () => {
-    if (!unknownMutation || client.financeSessionEpoch !== recoveryEpoch || loading.recovery || !pricingLifecycleMutationLock.tryAcquire()) return;
+    const retained = pricingUnknownSnapshot(unknownStorageKey);
+    if (!retained || client.financeSessionEpoch !== recoveryEpoch || loading.recovery || !pricingLifecycleMutationLock.tryAcquire()) return;
     if (!latestFacts.current.canManage) { setNotice(labels.permissionLost); pricingLifecycleMutationLock.release(); return; }
+    // Publish a fresh shared identity before any await. Peer configuration reads
+    // must retire even if this replay remains UNKNOWN with identical facts/key.
+    const operation = { ...retained };
+    if (!setUnknownMutation(operation, retained)) { pricingLifecycleMutationLock.release(); return; }
     const ticket = recoveryGate.current.beginReplay();
     transientControllers.current.get('unknownConfiguration')?.abort();
     transientGenerations.current.set('unknownConfiguration', (transientGenerations.current.get('unknownConfiguration') || 0) + 1);
-    const operation = unknownMutation;
     const boundary = recoveryBoundary();
     setUnknownConfiguration(null);
     setLoading((current) => ({ ...current, recovery: true, unknownConfiguration: false }));
     try {
       // The original key recovers the durable receipt even after a lost response.
       await replayPricingMutation(client, operation);
-      if (!mounted.current || recoveryBoundary() !== boundary || latestFacts.current.unknownMutation !== operation || !latestFacts.current.canManage) return;
-      setUnknownMutation(null);
+      if (!mounted.current || recoveryBoundary() !== boundary || !sharedOperationCurrent(operation) || !latestFacts.current.canManage) return;
+      if (!setUnknownMutation(null, operation, { retireIntents: true })) return;
       setNotice(labels.recoveryConfirmed);
       setEditor(null); setUnitForm(null); setPendingAction(null);
       void loadPrices().catch(() => {}); void loadUnits().catch(() => {});
     } catch (error) {
-      if (mounted.current && recoveryBoundary() === boundary && error?.name !== 'AbortError') setNotice(labels.errors[error?.code] || labels.recoveryFailed);
+      if (mounted.current && sharedOperationCurrent(operation) && recoveryBoundary() === boundary && error?.name !== 'AbortError') setNotice(labels.errors[error?.code] || labels.recoveryFailed);
     } finally {
       recoveryGate.current.endReplay(ticket);
       pricingLifecycleMutationLock.release();

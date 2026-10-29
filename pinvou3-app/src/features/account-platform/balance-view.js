@@ -54,3 +54,11 @@ export function formatBalance(value, language = 'zh') {
   const decimal = (1.1).toLocaleString(locale).replace(/\d/g, '');
   return `${amount < 0n ? '-' : ''}${(absolute / 10000n).toLocaleString(locale)}${fraction ? decimal + fraction : ''}`;
 }
+
+export function formatWholeBalance(value, language = 'zh') {
+  if (typeof value === 'number' && !Number.isSafeInteger(value)) return '—';
+  if (!/^-?\d+$/.test(String(value ?? ''))) return '—';
+  const amount = BigInt(value);
+  const whole = amount / 10000n - (amount < 0n && amount % 10000n !== 0n ? 1n : 0n);
+  return whole.toLocaleString({ zh: 'zh-CN', en: 'en-US', ja: 'ja-JP' }[language] || 'en-US');
+}

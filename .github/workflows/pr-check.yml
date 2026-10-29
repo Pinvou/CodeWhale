@@ -249,6 +249,7 @@ jobs:
               - 'pinvou3-app/src/app/portal-session-handoff-main.js'
               - 'pinvou3-app/src/portal-session-handoff.html'
               - 'pinvou3-app/src/shared/account-platform-i18n.js'
+              - 'pinvou3-app/src/shared/account-layout-i18n.js'
               - 'pinvou3-app/src/shared/admin-platform-i18n.js'
               - 'pinvou3-app/src/shared/supported-locales.js'
               - 'pinvou3-app/src/shared/account-closure-i18n.js'

@@ -12,8 +12,9 @@ import { createRechargeOrderReader, refreshPaidRechargeRead, startRechargeOrderP
 
 import { useRechargePaymentDialog } from './useRechargePaymentDialog.js';
 import { RechargePaymentDialog } from './RechargePaymentDialog.jsx';
+import { PersonalFinancePortalSections } from './PersonalFinancePortalSections.jsx';
 
-export function PersonalFinanceWorkspace({ client, me, language, onPaid }) {
+export function PersonalFinanceWorkspace({ client, me, language, onPaid, presentationTargets }) {
   const copy = financeCopy[language];
   const [data, setData] = useState(null);
   const [productID, setProductID] = useState('');
@@ -296,6 +297,16 @@ export function PersonalFinanceWorkspace({ client, me, language, onPaid }) {
   const payable = isPayablePaymentOrder(order, now);
   const duration = orderDurationDays(order);
   if (!canRead) return null;
+  if (presentationTargets) return <>
+    {payment.order && <RechargePaymentDialog active={presentationTargets.section === 'creditsUsage'} error={error ? copy[error] : ''} notice={notice ? copy[notice] : ''} order={payment.order} copy={copy} language={language} now={now} busy={busy} onDismiss={payment.dismiss} onQuery={() => void queryPayment()} canRestoreFocus={payment.canRestoreFocus} returnFocus={payment.trigger} />}
+    {closeConfirmation && closeIsCurrent(closeConfirmation) && <PersonalOrderCloseConfirmation active={presentationTargets.section === 'ordersInvoices'} copy={copy} orderID={closeConfirmation.orderID} amount={formatFen(closeConfirmation.order.amount_fen, language)} canRestoreFocus={() => closeIsCurrent(closeConfirmation)} onCancel={() => cancelClose(closeConfirmation)} onConfirm={() => void confirmClose(closeConfirmation)} />}
+    <PersonalFinancePortalSections language={language} targets={presentationTargets} view={{ copy, data, order, busy, error, notice, unknown, recoveryBlocked, canCreate, canManage, selected, selectedChannel, hasPending, now, payable, statement, paymentOpen: Boolean(payment.order),
+      onCreate: () => void create(), onRefresh: () => void run(async () => { refreshRecovery(); }),
+      onProduct: id => { setProductID(id); setChannel(''); }, onChannel: setChannel,
+      onSelectOrder: (id, showPayment) => void selectOrder(requireFinanceID(id), showPayment),
+      onQuery: () => void query(), onCloseOrder: close, onClaim: () => void claim(), onStatement: setStatement,
+    }} />
+  </>;
   return <section tabIndex={-1} className="ap-finance" aria-label={copy.title}>
     {payment.order && <RechargePaymentDialog order={payment.order} copy={copy} language={language} now={now} busy={busy} onDismiss={payment.dismiss} onQuery={() => void queryPayment()} canRestoreFocus={payment.canRestoreFocus} returnFocus={payment.trigger} />}
     {closeConfirmation && closeIsCurrent(closeConfirmation) && <PersonalOrderCloseConfirmation copy={copy} orderID={closeConfirmation.orderID} amount={formatFen(closeConfirmation.order.amount_fen, language)} canRestoreFocus={() => closeIsCurrent(closeConfirmation)} onCancel={() => cancelClose(closeConfirmation)} onConfirm={() => void confirmClose(closeConfirmation)} />}

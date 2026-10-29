@@ -14,7 +14,7 @@ import { PersonalUsageWorkspace } from './PersonalUsageWorkspace.jsx';
 const optionalID = value => value ? organizationID(value) : null;
 const time = value => { if (!value) return null; const parsed = new Date(value); if (!Number.isFinite(parsed.getTime())) throw new Error('INVALID_ORGANIZATION_INPUT'); return parsed.toISOString(); };
 const text = value => { if (!value.trim()) throw new Error('INVALID_ORGANIZATION_INPUT'); return value.trim(); };
-export function OrganizationWorkspace({ client, me, language, onChanged }) {
+export function OrganizationWorkspace({ client, me, language, onChanged, includeFinance = true, includeUsage = true, dialogActions = false }) {
  const copy = organizationCopy[language], org = me.active_context.organization_id;
  const roleOptions = ['MEMBER', 'ORG_ADMIN', 'BILLING_ADMIN', 'AUDITOR', 'UNIT_ADMIN'].map(value => ({ value, label: organizationLabel(copy, 'Role', value) }));
  const grantRoleOptions = [...roleOptions, { value: 'ORG_MODEL_ADMIN', label: organizationLabel(copy, 'Role', 'ORG_MODEL_ADMIN') }];
@@ -36,7 +36,7 @@ export function OrganizationWorkspace({ client, me, language, onChanged }) {
  useEffect(() => { const stamp = ++generation.current, controller = new AbortController(); setData({ units: [], bindings: [], structure: 0 }); setInvitation(null); setError(''); setLoading(true); void load(stamp, controller.signal).catch(reason => { if (stamp === generation.current && reason.name !== 'AbortError') setError(reason.status === 403 ? copy.permissions : copy.unavailable); }).finally(() => { if (stamp === generation.current) setLoading(false); }); return () => { generation.current++; controller.abort(); }; }, [api, owner]); // eslint-disable-line react-hooks/exhaustive-deps
  const units = data.units.filter(unit => unit.status === 'ACTIVE').map(unit => ({ value: unit.unit_id, label: unit.name }));
  const members = memberPage.items.filter(member => member.status === 'ACTIVE').map(member => ({ value: member.user_id, label: member.display_name || member.user_code || member.user_id }));
- const action = (scope, title, fields, prepare, execute, confirm = false, confirmed, target = org) => <OrganizationActionForm key={scope} client={client} owner={owner} copy={copy} scope={scope} title={title} fields={fields} prepare={prepare} action={execute} confirm={confirm} confirmationTarget={target} onConfirmed={result => { confirmed?.(result); void refresh(); void onChanged(); }} />;
+ const action = (scope, title, fields, prepare, execute, confirm = false, confirmed, target = org) => <OrganizationActionForm dialog={dialogActions} key={scope} client={client} owner={owner} copy={copy} scope={scope} title={title} fields={fields} prepare={prepare} action={execute} confirm={confirm} confirmationTarget={target} onConfirmed={result => { confirmed?.(result); void refresh(); void onChanged(); }} />;
  return <section><h2>{copy.title}</h2><p>{org}</p><button disabled={loading} onClick={() => void refresh()}>{copy.refresh}</button>{error && <p role="alert">{error}</p>}{loading && <p role="status">{copy.loading}</p>}
   {can('org.units.read') && <section><h3>{copy.units}</h3><ul>{data.units.map(unit => <li key={unit.unit_id}>{unit.name} · {unit.parent_id || copy.root} · {organizationLabel(copy, 'Status', unit.status)}</li>)}</ul></section>}
   {can('org.units.manage') && <div>{action('create-unit', copy.createUnit, [{ name: 'name' }, { name: 'parent', optional: true, options: units }], values => ({ name: text(values.name), parent_id: optionalID(values.parent) }), (facts, key) => api.createUnit(org, facts, key))}
@@ -51,9 +51,9 @@ export function OrganizationWorkspace({ client, me, language, onChanged }) {
   {can('org.roles.assign') && action('grant-role', copy.grantRole, [{ name: 'user', options: members }, { name: 'role', options: grantRoleOptions }, { name: 'unit', optional: true, options: units }, { name: 'starts', type: 'datetime-local', optional: true }, { name: 'expires', type: 'datetime-local', optional: true }, { name: 'reason' }], values => { if ((values.role === 'UNIT_ADMIN') !== Boolean(values.unit)) throw new Error('INVALID_ORGANIZATION_INPUT'); return { user_id: organizationID(values.user), role_code: text(values.role), unit_id: optionalID(values.unit), starts_at: time(values.starts), expires_at: time(values.expires), reason: text(values.reason) }; }, (facts, key) => api.grantRole(org, facts, key))}
   {can('org.owner.transfer') && action('transfer-owner', copy.transfer, [{ name: 'user', label: 'newOwner', options: members }], values => ({ user: organizationID(values.user) }), (facts, key) => api.transfer(org, facts.user, key), true)}
   {(!can('org.units.manage') || !can('org.members.manage')) && <OrganizationUnitWorkspace api={api} me={me} owner={owner} language={language} onChanged={onChanged} />}
-  <OrganizationFinanceWorkspace client={client} me={me} language={language} />
+  {includeFinance && <OrganizationFinanceWorkspace client={client} me={me} language={language} />}
   <OrganizationClosedGrantsWorkspace key={owner} client={client} me={me} language={language} />
   <OrganizationModelPolicyWorkspace client={client} me={me} language={language} />
-  <PersonalUsageWorkspace client={client} me={me} language={language} />
+  {includeUsage && <PersonalUsageWorkspace client={client} me={me} language={language} />}
  </section>;
 }

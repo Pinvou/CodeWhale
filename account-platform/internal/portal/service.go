@@ -828,7 +828,7 @@ func accountAdminPathAllowed(method, resource string) bool {
 	if method == http.MethodHead {
 		method = http.MethodGet
 	}
-	if method == http.MethodGet && resource == "/admin/v1/users" {
+	if method == http.MethodGet && (resource == "/admin/v1/users" || resource == "/admin/v1/overview") {
 		return true
 	}
 	if resource == "/admin/v1/sms-configuration" {
@@ -845,6 +845,9 @@ func accountAdminPathAllowed(method, resource string) bool {
 		return method == http.MethodPost
 	}
 	if len(parts) >= 4 && parts[0] == "admin" && parts[1] == "v1" && pathUUID(parts[3]) {
+		if parts[2] == "users" && len(parts) == 4 {
+			return method == http.MethodGet
+		}
 		if parts[2] == "audit-logs" {
 			return len(parts) == 4 && method == http.MethodGet
 		}

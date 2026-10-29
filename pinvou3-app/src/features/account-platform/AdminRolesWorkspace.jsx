@@ -2,14 +2,14 @@ import React, { useEffect, useRef, useState } from 'react';
 import { platformRoleCopy } from '../../shared/i18n.js';
 import { grantablePlatformRole, platformRoleGrantIntent, platformRolePending, platformRoleFreshAuthority, platformRoleFailureState } from './platform-role-management.js';
 
-export function AdminRolesWorkspace({ client, me, language, onAuthorizationChange }) {
+export function AdminRolesWorkspace({ client, me, language, onAuthorizationChange, initialTarget = '' }) {
   const copy = platformRoleCopy[language];
   const owner = me?.user_id || '';
   const canRead = me?.platform_permissions?.includes('platform.roles.read');
   const canAssign = me?.platform_permissions?.includes('platform.roles.assign');
   const [roles, setRoles] = useState(null);
   const [bindings, setBindings] = useState(null);
-  const [target, setTarget] = useState('');
+  const [target, setTarget] = useState(initialTarget);
   const [roleCode, setRoleCode] = useState('');
   const [starts, setStarts] = useState('');
   const [expires, setExpires] = useState('');
@@ -38,8 +38,8 @@ export function AdminRolesWorkspace({ client, me, language, onAuthorizationChang
   };
   useEffect(() => {
     generation.current++; setRoles(null); setBindings(null); setPending(platformRolePending(client, owner));
-    setTarget(''); setRoleCode(''); setStarts(''); setExpires(''); setReason('');
-    if (canRead) void load('');
+    setTarget(initialTarget); setRoleCode(''); setStarts(''); setExpires(''); setReason('');
+    if (canRead) void load(initialTarget);
     return () => { generation.current++; reads.current?.abort(); };
   }, [client, owner, canRead]); // eslint-disable-line react-hooks/exhaustive-deps
   useEffect(() => client.onAuthorizationVersion?.(() => {
@@ -48,6 +48,7 @@ export function AdminRolesWorkspace({ client, me, language, onAuthorizationChang
     generation.current++; reads.current?.abort(); setRoles(null); setBindings(null);
     setBusy(false); onAuthorizationChange?.();
   }), [client, onAuthorizationChange]);
+  useEffect(() => { if (initialTarget && initialTarget !== target && !actionInFlight.current && !pending) { setTarget(initialTarget); if (canRead) void load(initialTarget); } }, [initialTarget]); // Read-only deep links preserve any accepted role command.
   const execute = async command => {
     if (actionInFlight.current || busy || !canAssign || command.owner !== owner) return;
     actionInFlight.current = true;

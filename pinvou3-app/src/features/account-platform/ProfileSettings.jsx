@@ -2,6 +2,9 @@ import React, { useEffect, useState } from 'react';
 import { localizedAccountPlatformError } from './error-localization.js';
 import { profileCaptchaSubmissionOffset } from './profile-captcha-state.js';
 import { useAccountOwner } from './useAccountOwner.js';
+import { ProfileSettingsPortal } from './ProfileSettingsPortal.jsx';
+import { PortalDialog } from './PortalDialog.jsx';
+import { accountLayoutCopy } from '../../shared/i18n.js';
 function Field({ label, children }) {
   return (
     <label className="ap-field">
@@ -108,7 +111,7 @@ export function ProfileCaptcha({ challenge, offset, busy, error = '', copy, onOf
   );
 }
 
-export function ProfileSettings({ copy, client, me, onError, onChanged, onRecovering, embedded = false }) {
+export function ProfileSettings({ copy, client, me, onError, onChanged, onRecovering, embedded = false, portalPresentation = false, active = true, language = 'zh', portalError = '', portalNotice = '' }) {
   const [username, setUsername] = useState(me?.username || '');
   const [mobile, setMobile] = useState(me?.mobile || '');
   const [requestId, setRequestId] = useState('');
@@ -119,23 +122,29 @@ export function ProfileSettings({ copy, client, me, onError, onChanged, onRecove
   const [deliveryUncertain, setDeliveryUncertain] = useState(false);
   const [busy, setBusy] = useState(false);
   const [captchaError, setCaptchaError] = useState('');
+  const [profileError, setProfileError] = useState(null);
+  const [profileRecovering, setProfileRecovering] = useState(false);
 
   const owner = useAccountOwner(client);
   const perform = async (action, { captchaScoped = false } = {}) => {
     const token = owner.capture();
     setBusy(true);
     if (captchaScoped) setCaptchaError('');
+    else { setProfileError(null); setProfileRecovering(false); }
     try {
       await action(() => owner.current(token));
     } catch (reason) {
       if (!owner.current(token)) return;
       if (captchaScoped) setCaptchaError(localizedError(copy, reason));
-      else onError(reason);
+      else { setProfileError(reason); onError(reason); }
     } finally {
       if (owner.current(token)) setBusy(false);
     }
   };
-  const finish = (result) => (result?.status === 'COMPLETED' ? onChanged(result) : onRecovering());
+  const finish = result => {
+    setProfileRecovering(result?.status !== 'COMPLETED');
+    return result?.status === 'COMPLETED' ? onChanged(result) : onRecovering();
+  };
   const changeUsername = (event) => {
     event.preventDefault();
     void perform(async (current) => {
@@ -189,42 +198,15 @@ export function ProfileSettings({ copy, client, me, onError, onChanged, onRecove
       if (current()) await finish(result);
     });
   };
-  const reauthenticate = () => client.reauthenticate('/?section=accountSettings');
+  const reauthenticate = profile => client.reauthenticate(`/?section=accountSettings${['username', 'mobile'].includes(profile) ? `&profile=${profile}` : ''}`);
 
-  const Heading = embedded ? 'h3' : 'h2';
-  return (
-    <section className={embedded ? 'ap-combined-section' : undefined}>
-      {!embedded && <p className="ap-eyebrow">{copy.sections.profile}</p>}
-      <Heading>{copy.profileSettings}</Heading>
-      <p className="ap-lead">{copy.profileSettingsLead}</p>
-      <article className="ap-card ap-profile-reauth">
-        <div>
-          <h3>{copy.reauthenticateTitle}</h3>
-          <p className="ap-muted">{copy.reauthenticateLead}</p>
-        </div>
-        <button type="button" className="ap-primary" onClick={reauthenticate}>
-          {copy.reauthenticate}
-        </button>
-      </article>
-      <div className="ap-grid">
-        <article className="ap-card">
-          <h3>{copy.changeUsername}</h3>
-          <p className="ap-muted">
-            {copy.currentUsername}: {me?.username || '—'}
-          </p>
-          <form className="ap-stack" onSubmit={changeUsername}>
+  const usernameForm = (<form className="ap-stack" onSubmit={changeUsername}>
             <Field label={copy.newUsername}>
               <input value={username} onChange={(event) => setUsername(event.target.value)} disabled={busy} autoComplete="username" />
             </Field>
             <button disabled={busy || !username.trim() || username.trim() === (me?.username || '')}>{copy.confirmChange}</button>
-          </form>
-        </article>
-        <article className="ap-card">
-          <h3>{copy.changeMobile}</h3>
-          <p className="ap-muted">
-            {copy.currentMobile}: {me?.mobile || '—'}
-          </p>
-          <form className="ap-stack" onSubmit={completeMobile}>
+          </form>);
+  const mobileForm = (<form className="ap-stack" onSubmit={completeMobile}>
             <Field label={copy.newMobile}>
               <input
                 value={mobile}
@@ -257,7 +239,38 @@ export function ProfileSettings({ copy, client, me, onError, onChanged, onRecove
                 {copy.sendCode}
               </button>
             )}
-          </form>
+          </form>);
+  const portalCaptchaDialog = captcha ? <PortalDialog title={copy.captchaTitle} closeLabel={accountLayoutCopy[language].closeDialog} busy={busy} onClose={() => { if (!busy) { setCaptcha(null); setCaptchaOffset(0); setCaptchaError(''); } }}><ProfileCaptcha challenge={captcha} offset={captchaOffset} busy={busy} error={captchaError} copy={copy} onOffset={setCaptchaOffset} onConfirm={sendMobileCode} onRefresh={openMobileCaptcha} onClose={() => { if (!busy) { setCaptcha(null); setCaptchaOffset(0); setCaptchaError(''); } }} /></PortalDialog> : null;
+  if (portalPresentation) return <ProfileSettingsPortal copy={copy} language={language} me={me} active={active} busy={busy} error={profileError ? localizedError(copy, profileError) : portalError} notice={profileRecovering ? copy.profileChangeRecovering : portalNotice} onReauthenticate={reauthenticate} usernameForm={usernameForm} mobileForm={mobileForm} captchaDialog={portalCaptchaDialog} />;
+  const Heading = embedded ? 'h3' : 'h2';
+  return (
+    <section className={embedded ? 'ap-combined-section' : undefined}>
+      {!embedded && <p className="ap-eyebrow">{copy.sections.profile}</p>}
+      <Heading>{copy.profileSettings}</Heading>
+      <p className="ap-lead">{copy.profileSettingsLead}</p>
+      <article className="ap-card ap-profile-reauth">
+        <div>
+          <h3>{copy.reauthenticateTitle}</h3>
+          <p className="ap-muted">{copy.reauthenticateLead}</p>
+        </div>
+        <button type="button" className="ap-primary" onClick={reauthenticate}>
+          {copy.reauthenticate}
+        </button>
+      </article>
+      <div className="ap-grid">
+        <article className="ap-card">
+          <h3>{copy.changeUsername}</h3>
+          <p className="ap-muted">
+            {copy.currentUsername}: {me?.username || '—'}
+          </p>
+          {usernameForm}
+        </article>
+        <article className="ap-card">
+          <h3>{copy.changeMobile}</h3>
+          <p className="ap-muted">
+            {copy.currentMobile}: {me?.mobile || '—'}
+          </p>
+          {mobileForm}
         </article>
       </div>
       {captcha && (
