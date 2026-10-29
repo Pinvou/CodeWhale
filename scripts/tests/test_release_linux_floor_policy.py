@@ -75,9 +75,9 @@ class ReleaseLinuxFloorPolicyTests(unittest.TestCase):
         # self-hosted route keeps the exact x64 Jammy fallback; ARM remains
         # hosted. Do not normalize whole jobs and erase their disk branches.
         for job, expected in (
-            (self.x64_job, 'runs-on: ${{ fromJSON(vars.PINVOU_LINUX_RUNNER || \'["ubuntu-22.04"]\') }}'),
+            (self.x64_job, 'runs-on: ${{ fromJSON(vars.PINVOU_LINUX_HEAVY_RUNNER || vars.PINVOU_LINUX_RUNNER || \'["ubuntu-22.04"]\') }}'),
             (self.arm64_job, 'runs-on: ubuntu-22.04-arm'),
-            (self.loong64_job, 'runs-on: ${{ fromJSON(vars.PINVOU_LINUX_RUNNER || \'["ubuntu-22.04"]\') }}'),
+            (self.loong64_job, 'runs-on: ${{ fromJSON(vars.PINVOU_LINUX_HEAVY_RUNNER || vars.PINVOU_LINUX_RUNNER || \'["ubuntu-22.04"]\') }}'),
         ):
             header = _without_inline_comments(job).split("\n    steps:", 1)[0]
             self.assertEqual(
