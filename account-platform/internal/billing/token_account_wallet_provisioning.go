@@ -51,6 +51,7 @@ func (s *Service) provisionTokenAccountWallet(w http.ResponseWriter, r *http.Req
 		RequestDigest    string    `json:"request_digest"`
 	}
 	if err := api.DecodeJSON(w, r, &body); err != nil {
+		api.WriteError(w, http.StatusUnprocessableEntity, "INVALID_WALLET_PROVISIONING_REQUEST", "wallet provisioning request is invalid", httpserver.RequestID(r.Context()))
 		return
 	}
 	body.OwnerType = strings.ToUpper(strings.TrimSpace(body.OwnerType))
