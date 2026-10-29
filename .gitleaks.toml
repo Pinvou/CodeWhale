@@ -122,14 +122,6 @@ regexes = ['''xox[ar]-shortexample''']
 # 每组说明命中为何不是真实凭据;出现真实凭据样式的命中时不得进此表,须先剔除。
 
 [[allowlists]]
-description = "远控日志脱敏单元测试使用合成 sk-live 示例值,且断言该值必须被脱敏"
-targetRules = ["generic-api-key"]
-condition = "AND"
-regexTarget = "line"
-paths = ['''^pinvou3-app/src-tauri/src/features/remote_control/controller/journal\.rs$''']
-regexes = ['''sk-live-123''']
-
-[[allowlists]]
 description = "权限预览测试使用合成 curl 示例头演示脱敏行为"
 targetRules = ["curl-auth-header"]
 condition = "AND"
@@ -146,12 +138,12 @@ paths = ['''^pinvou3-app/src-tauri/src/features/behavior_telemetry/remote_contro
 regexes = ['''sk-live-123456789''']
 
 [[allowlists]]
-description = "relay 存活探针中 signingPrivateKeyB64 是解构参数名,不是凭据"
+description = "relay 存活探针中 signingPrivateKeyB64 是解构参数名与缺省回退表达式,不是凭据(仅豁免参数名形态,不给赋值行开洞)"
 targetRules = ["generic-api-key"]
 condition = "AND"
 regexTarget = "line"
 paths = ['''^remote-control-relay/controller-liveness\.js$''']
-regexes = ['''signingPrivateKeyB64''']
+regexes = ['''signingPrivateKeyB64\s*\?\?|\{\s*signingKeyId,\s*signingPrivateKeyB64''']
 
 [[allowlists]]
 description = "relay 诊断脱敏测试使用 AWS 文档通用的示例 AKIA 字面量"
@@ -177,7 +169,7 @@ regexes = [
 ]
 
 [[allowlists]]
-description = "协议一致性测试夹具为确定性测试向量(私钥取 0101…/0202… 等序列),字段限定为 *_secret_hex/derived_key_hex 的 64 位 hex 派生输出"
+description = "协议一致性测试夹具为确定性测试向量(私钥取 0101…/0202… 等序列),字段限定为 resume_secret_hex/shared_secret_hex/derived_key_hex 的 64 位 hex 派生输出"
 targetRules = ["generic-api-key"]
 condition = "AND"
 regexTarget = "line"
