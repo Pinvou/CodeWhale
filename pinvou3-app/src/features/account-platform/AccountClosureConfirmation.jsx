@@ -33,7 +33,7 @@ export function AccountClosureConfirmation({ copy, mismatch, onCancel, onConfirm
       <h3 id={titleID}>{copy.title}</h3><p id={descriptionID}>{copy.confirmPrompt}</p>
       {mismatch && <p role="alert">{copy.confirmMismatch}</p>}
       <label htmlFor={inputID}>{copy.confirmInput}</label><input id={inputID} ref={input} value={text} onChange={event => setText(event.target.value)} autoComplete="off" autoCapitalize="off" spellCheck={false} />
-      <footer><button type="button" onClick={onCancel}>{copy.cancelConfirmation}</button><button type="submit">{copy.confirmAction}</button></footer>
+      <footer><button type="button" onClick={onCancel}>{copy.cancelConfirmation}</button><button className="ap-danger" type="submit">{copy.confirmAction}</button></footer>
     </form>
   </div>, document.body);
 }
