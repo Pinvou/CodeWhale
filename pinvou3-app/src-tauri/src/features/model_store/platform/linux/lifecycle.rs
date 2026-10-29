@@ -3055,11 +3055,21 @@ impl ModelManager {
     /// 仅 8 位前缀猜测：只有卡片自己锁定的完整 SHA-256 才足以说明两者是同一
     /// 个原生二进制。
     fn migrate_native_engine_identities(&self) {
-        let Ok(models) = db::list_store_models() else {
+        // r19 评审 P2-6：这里只做指纹提取，改走只取 install_engine/common.sh
+        // 两段的轻量查询，不再为整张表把六类脚本+附属文件正文拉出库。
+        let Ok(models) = db::list_store_models_install_columns() else {
             return;
         };
         for model in models {
-            let Some(version) = native_tachyon_version(&model) else {
+            let Some(install) = model.install_engine.as_deref() else {
+                continue;
+            };
+            let Some(version) = native_tachyon_identity(
+                install,
+                model.common_sh.as_deref(),
+                model.engine_version.as_deref(),
+            )
+            .map(|(version, _)| version) else {
                 continue;
             };
             if let Err(error) = db::migrate_engine_identity(
@@ -3082,11 +3092,22 @@ impl ModelManager {
     /// 可选契约，老记录自然没有。只同步它本身（并强制校验商店下发的哈希），不
     /// 重跑安装、不会碰权重、不会改变部署状态。
     fn refresh_native_engine_cleanup_contracts(&self) {
-        let Ok(models) = db::list_store_models() else {
+        // r19 评审 P2-6：同 migrate_native_engine_identities——指纹比对只要
+        // install_engine/common.sh 两段，走轻量查询。
+        let Ok(models) = db::list_store_models_install_columns() else {
             return;
         };
         for model in models {
-            let Some(version) = native_tachyon_version(&model) else {
+            let Some(install) = model.install_engine.as_deref() else {
+                continue;
+            };
+            // 指纹（显示版本 + 完整 SHA-256）一次算出：开头判要不要补契约、
+            // 后面跟商店脚本比对用的都是这一份，不再对同一段正文算两遍。
+            let Some((version, local_sha)) = native_tachyon_identity(
+                install,
+                model.common_sh.as_deref(),
+                model.engine_version.as_deref(),
+            ) else {
                 continue;
             };
             let already_present =
@@ -3138,21 +3159,8 @@ impl ModelManager {
             };
             // 显示版本可能被服务器复用；必须再比对完整二进制指纹，不能仅凭
             // 相同的卡片名/版本给历史引擎装上另一套二进制的删除脚本。
-            let local_sha = model
-                .scripts_content
-                .get("install_engine")
-                .and_then(|install| {
-                    native_tachyon_identity(
-                        &install.content,
-                        model
-                            .assets_content
-                            .get("common.sh")
-                            .map(|blob| blob.content.as_str()),
-                        model.engine_version.as_deref(),
-                    )
-                    .map(|(_, sha)| sha)
-                });
-            if local_sha.is_none() || declared_native_sha(&cleanup_script.content) != local_sha {
+            // （指纹 local_sha 已在循环开头与 version 一次算出。）
+            if declared_native_sha(&cleanup_script.content) != Some(local_sha) {
                 eprintln!(
                     "[model-store] 原生引擎清理契约与本地二进制指纹不符（{}），保留现有记录",
                     model.card_id

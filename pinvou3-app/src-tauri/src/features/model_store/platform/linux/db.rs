@@ -1265,6 +1265,59 @@ pub fn get_store_model_by_name(model_name: &str) -> rusqlite::Result<Option<Stor
     .optional()
 }
 
+/// 原生引擎指纹提取专用的轻量行（r19 评审 P2-6）。
+///
+/// `migrate_native_engine_identities` / `refresh_native_engine_cleanup_contracts`
+/// 每次打开引擎管理页都要全表过一遍做指纹比对，此前各自 [`list_store_models`]
+/// 拉**全部**六类脚本 + 附属文件正文（两个 MB 级列），而指纹提取
+/// （`native_tachyon_identity`）只看 install_engine 入口与 common.sh 两段。
+/// 这里由 json_extract 在库内提取这两段，其余正文一个字节不出库；坏 JSON /
+/// 非 object 的值由 json_valid + json_type 守门成 NULL——跟 `from_row` 里
+/// 「serde 解析失败 = 空」的语义对齐。
+pub struct StoreModelInstallColumns {
+    pub card_id: String,
+    pub engine_version: Option<String>,
+    /// 固化的 install_engine 入口脚本正文（没有固化副本的行是 None）。
+    pub install_engine: Option<String>,
+    /// 固化的 common.sh 附属文件正文（单文件卡没有它，None）。
+    pub common_sh: Option<String>,
+}
+
+pub fn list_store_models_install_columns() -> rusqlite::Result<Vec<StoreModelInstallColumns>> {
+    let conn = connect()?;
+    // common.sh 的键名带点，JSON 路径必须给它加引号；install_engine 是普通
+    // 标识符不用引号。SELECT 列名与结构体字段一一对应。
+    //
+    // 守门条件对齐 list_store_models_light 那条查询：json_valid 只保证「是
+    // 合法 JSON」，不保证是对象——一个合法的裸标量（'5'）会让 json_extract
+    // 报错砸掉整个查询，所以再卡一道 json_type = 'object'。守门失败的列降级
+    // 为 NULL，与 from_row 的「serde 解析失败 = 空」语义一致。
+    let mut stmt = conn.prepare(
+        "SELECT m.card_id, m.engine_version,
+                CASE WHEN json_valid(m.scripts_content_json)
+                          AND json_type(m.scripts_content_json) = 'object'
+                     THEN json_extract(m.scripts_content_json, '$.install_engine.content')
+                     ELSE NULL END AS install_engine,
+                CASE WHEN json_valid(m.assets_content_json)
+                          AND json_type(m.assets_content_json) = 'object'
+                     THEN json_extract(m.assets_content_json, '$.\"common.sh\".content')
+                     ELSE NULL END AS common_sh
+           FROM store_models m
+          WHERE m.scripts_content_json IS NOT NULL",
+    )?;
+    let rows = stmt
+        .query_map([], |row| {
+            Ok(StoreModelInstallColumns {
+                card_id: row.get("card_id")?,
+                engine_version: row.get("engine_version")?,
+                install_engine: row.get("install_engine")?,
+                common_sh: row.get("common_sh")?,
+            })
+        })?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    Ok(rows)
+}
+
 /// 删掉一个模型的库记录，连同它专属的 API Key。
 ///
 /// **两条 DELETE 必须在同一个事务里。** 分开执行时，第二条失败会留下一个
@@ -1458,6 +1511,69 @@ mod tests {
         assert!(
             get_store_model_route_fields("card-missing").unwrap().is_none(),
             "不存在的卡应返回 None，由调用方转成 lan_model_unavailable"
+        );
+    }
+
+    /// 指纹轻量查询必须真的能在 SQLite 上执行、且只带出指纹比对消费的两段
+    /// 正文（r19 评审 P2-6）。坏 JSON 行降级为 None，不许砸掉整个查询——
+    /// 语义与 from_row 的「serde 解析失败 = 空」对齐。
+    #[test]
+    fn install_columns_query_extracts_only_fingerprint_inputs() {
+        let _ctx = setup_temp_db();
+        let conn = connect().unwrap();
+        conn.execute(
+            "INSERT INTO store_models
+                 (card_id, model_name, card_name, engine_name, engine_version,
+                  downloaded_at, scripts_content_json, assets_content_json)
+             VALUES ('card-fp', 'tachyon', 'Tachyon', 'tachyon-serve', 'v1.2',
+                     '2026-10-23T00:00:00Z',
+                     '{\"install_engine\":{\"content\":\"ENGINE_BIN_SHA256=\\\"abc\\\"\",\"sha256\":\"aa\"},\"deploy\":{\"content\":\"other\",\"sha256\":\"bb\"}}',
+                     '{\"common.sh\":{\"content\":\"lib\",\"sha256\":\"cc\"},\"logo.png\":{\"content\":\"img\",\"sha256\":\"dd\"}}')",
+            [],
+        )
+        .unwrap();
+        // 坏 JSON：json_valid 守门后这一行 install_engine 为 None，而不是报错
+        conn.execute(
+            "INSERT INTO store_models
+                 (card_id, model_name, card_name, engine_name, downloaded_at,
+                  scripts_content_json)
+             VALUES ('card-fp-broken', 'broken', 'Broken', 'tachyon-serve',
+                     '2026-10-22T00:00:00Z', '{broken-json')",
+            [],
+        )
+        .unwrap();
+        // 合法 JSON 但不是对象（裸标量）：json_type 守门同样降级为 None——
+        // 只卡 json_valid 的话 json_extract 会报错砸掉整个查询
+        conn.execute(
+            "INSERT INTO store_models
+                 (card_id, model_name, card_name, engine_name, downloaded_at,
+                  scripts_content_json)
+             VALUES ('card-fp-scalar', 'scalar', 'Scalar', 'tachyon-serve',
+                     '2026-10-21T00:00:00Z', '5')",
+            [],
+        )
+        .unwrap();
+
+        let rows = list_store_models_install_columns()
+            .unwrap_or_else(|e| panic!("指纹轻量查询执行失败（SQL 语法错误会在这里暴露）：{e}"));
+        assert_eq!(rows.len(), 3, "三个非 NULL scripts_content_json 的行都在");
+        let fp = rows.iter().find(|r| r.card_id == "card-fp").unwrap();
+        assert_eq!(
+            fp.install_engine.as_deref(),
+            Some("ENGINE_BIN_SHA256=\"abc\""),
+            "install_engine 正文提取失败"
+        );
+        assert_eq!(fp.common_sh.as_deref(), Some("lib"), "common.sh 正文提取失败");
+        assert_eq!(fp.engine_version.as_deref(), Some("v1.2"));
+        let broken = rows.iter().find(|r| r.card_id == "card-fp-broken").unwrap();
+        assert!(
+            broken.install_engine.is_none(),
+            "坏 JSON 行应降级为 None，而不是砸掉整个查询"
+        );
+        let scalar = rows.iter().find(|r| r.card_id == "card-fp-scalar").unwrap();
+        assert!(
+            scalar.install_engine.is_none(),
+            "合法 JSON 裸标量行同样应降级为 None（json_type 守门）"
         );
     }
 
