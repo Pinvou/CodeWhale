@@ -1306,6 +1306,25 @@ fn finish_prepared_admission_owned(
         .map_err(|error| error.code.to_owned())
 }
 
+// A local status response may only claim the exact admission it describes.
+// A missing record is also stale: it may have been pruned or replaced.
+fn attach_current_local_sequence(
+    service: &RemoteTaskService,
+    task_id: &str,
+    sequence: u64,
+    status: &mut Value,
+) -> Result<(), String> {
+    if service
+        .status(task_id)
+        .map(|current| current.sequence != sequence)
+        .unwrap_or(true)
+    {
+        return Err("task_generation_stale".to_owned());
+    }
+    status["sequence"] = json!(sequence.to_string());
+    Ok(())
+}
+
 /// 接纳并派发一条已通过冻结校验、且会话已在远程映射中的 `task_submit`。
 /// 命令入口与 wire 入口共用，避免两条实现漂移。
 #[allow(clippy::too_many_arguments)]
@@ -1457,14 +1476,12 @@ fn admit_and_dispatch(
                 .status_payload(&record.task_id)
                 .map_err(|error| error.code.to_owned())?;
             if local_submission {
-                if service
-                    .status(&record.task_id)
-                    .map(|current| current.sequence != record.sequence)
-                    .unwrap_or(true)
-                {
-                    return Err("task_generation_stale".to_owned());
-                }
-                status["sequence"] = json!(record.sequence.to_string());
+                attach_current_local_sequence(
+                    &service,
+                    &record.task_id,
+                    record.sequence,
+                    &mut status,
+                )?;
             }
             Ok(status)
         }
@@ -1604,14 +1621,12 @@ fn admit_and_dispatch(
                 AdmittedTaskReady::Ready(ready) => ready,
                 AdmittedTaskReady::Failed(mut status) => {
                     if local_submission {
-                        if service
-                            .status(&task_id)
-                            .map(|current| current.sequence != task_sequence)
-                            .unwrap_or(true)
-                        {
-                            return Err("task_generation_stale".to_owned());
-                        }
-                        status["sequence"] = json!(task_sequence.to_string());
+                        attach_current_local_sequence(
+                            &service,
+                            &task_id,
+                            task_sequence,
+                            &mut status,
+                        )?;
                     }
                     return Ok(status);
                 }
@@ -1760,14 +1775,7 @@ fn admit_and_dispatch(
             admission_cleanup.handed_off = true;
             let mut status = status;
             if local_submission {
-                if service
-                    .status(&task_id)
-                    .map(|current| current.sequence != task_sequence)
-                    .unwrap_or(true)
-                {
-                    return Err("task_generation_stale".to_owned());
-                }
-                status["sequence"] = json!(task_sequence.to_string());
+                attach_current_local_sequence(&service, &task_id, task_sequence, &mut status)?;
             }
             Ok(status)
         }
@@ -3079,6 +3087,107 @@ mod tests {
             "input": {"text": "hello", "attachment_ids": [], "skill_ids": []}
         });
         (manager, service, context, payload)
+    }
+
+    #[test]
+    fn local_sequence_requires_the_exact_current_admission() {
+        let (_, service, context, payload) = task_admission_fixture();
+        let prepared = service
+            .prepare_bound_admission(&context, &payload, 3_500, Some("a-ref-admission"), |_| {
+                Ok(())
+            })
+            .unwrap();
+        let admitted = service.finish_bound_admission(prepared).unwrap();
+        let AdmissionOutcome::Admitted(ticket) = admitted else {
+            panic!("expected admission")
+        };
+        let sequence = ticket.record.sequence;
+        let mut status = json!({"state": "admitted"});
+        attach_current_local_sequence(&service, "task-admission", sequence, &mut status).unwrap();
+        assert_eq!(status["sequence"], json!(sequence.to_string()));
+        for (task, stale_sequence) in [("task-admission", sequence + 1), ("task-missing", sequence)]
+        {
+            let mut stale_status = json!({"state": "admitted"});
+            assert_eq!(
+                attach_current_local_sequence(&service, task, stale_sequence, &mut stale_status)
+                    .unwrap_err(),
+                "task_generation_stale"
+            );
+            assert_eq!(stale_status, json!({"state": "admitted"}));
+        }
+        assert_eq!(service.status("task-admission").unwrap().sequence, sequence);
+    }
+
+    #[test]
+    fn local_sequence_rejects_a_pruned_and_reused_task_id() {
+        use crate::features::remote_control::controller::task::{
+            RemoteTaskRequest, RemoteTaskTerminal,
+        };
+        let (_, service, context, payload) = task_admission_fixture();
+        let request = RemoteTaskRequest::from_payload(&payload).unwrap();
+        let ledger = service.ledger();
+        let AdmissionOutcome::Admitted(first) = ledger.admit(&context, &request, 3_500).unwrap()
+        else {
+            panic!("expected first admission")
+        };
+        let original_sequence = first.record.sequence;
+        ledger
+            .complete("task-admission", RemoteTaskTerminal::Failed, None, 3_501)
+            .unwrap();
+        // Fill the real bounded ledger so its own terminal pruning removes the
+        // original identity, rather than constructing an impossible fixture.
+        for index in 0..256 {
+            let mut next = payload.clone();
+            let task = format!("task-fill-{index}");
+            next["task_id"] = json!(task);
+            next["client_request_id"] = json!(format!("client-fill-{index}"));
+            let next_request = RemoteTaskRequest::from_payload(&next).unwrap();
+            ledger
+                .admit(&context, &next_request, 3_600 + index)
+                .unwrap();
+            ledger
+                .complete(&task, RemoteTaskTerminal::Failed, None, 3_600 + index)
+                .unwrap();
+        }
+        assert_eq!(
+            service.status("task-admission").unwrap_err().code,
+            "task_not_found"
+        );
+        let mut stale = json!({"state": "failed"});
+        assert_eq!(
+            attach_current_local_sequence(
+                &service,
+                "task-admission",
+                original_sequence,
+                &mut stale
+            )
+            .unwrap_err(),
+            "task_generation_stale"
+        );
+        let AdmissionOutcome::Admitted(reused) = ledger.admit(&context, &request, 4_000).unwrap()
+        else {
+            panic!("expected new admission after pruning")
+        };
+        assert_ne!(reused.record.sequence, original_sequence);
+        assert_eq!(
+            attach_current_local_sequence(
+                &service,
+                "task-admission",
+                original_sequence,
+                &mut stale
+            )
+            .unwrap_err(),
+            "task_generation_stale"
+        );
+        assert_eq!(stale, json!({"state": "failed"}));
+        attach_current_local_sequence(
+            &service,
+            "task-admission",
+            reused.record.sequence,
+            &mut stale,
+        )
+        .unwrap();
+        assert_eq!(stale["sequence"], json!(reused.record.sequence.to_string()));
     }
 
     #[test]

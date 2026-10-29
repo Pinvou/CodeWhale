@@ -175,6 +175,28 @@ mod tests {
     }
 
     #[test]
+    fn terminal_reason_validation_rejects_unknown_codes_and_non_failed_entries() {
+        let legacy = failed();
+        assert!(legacy.validate().is_ok());
+        for code in ["task_generation_stale", "task_attachments_invalid"] {
+            let mut entry = legacy.clone();
+            entry.terminal_reason = Some(code.into());
+            assert!(entry.validate().is_ok(), "valid reason {code}");
+        }
+        let mut unknown = legacy.clone();
+        unknown.terminal_reason = Some("unexpected_remote_reason".into());
+        assert!(unknown.validate().is_err());
+        let mut wrong_state = legacy.clone();
+        wrong_state.body = Some("completed".into());
+        wrong_state.terminal_reason = Some("task_generation_stale".into());
+        assert!(wrong_state.validate().is_err());
+        let mut wrong_kind = legacy;
+        wrong_kind.kind = ProjectionKind::AssistantMessage;
+        wrong_kind.terminal_reason = Some("task_generation_stale".into());
+        assert!(wrong_kind.validate().is_err());
+    }
+
+    #[test]
     fn authenticated_reason_enriches_and_legacy_replay_never_erases() {
         let old = failed();
         for reason in ["task_generation_stale", "task_attachments_invalid"] {

@@ -112,8 +112,10 @@ impl SessionStore {
         )
     }
 
-    /// One event key has one immutable content. Repeated authenticated delivery
-    /// is a no-op, not another disk write or UI notification.
+    /// One event key has immutable content apart from an authenticated,
+    /// closed-set reason that may enrich an otherwise identical older event.
+    /// Identical deliveries are no-ops; enrichment is persisted and triggers
+    /// a UI notification attempt.
     pub(crate) fn project_authenticated_remote_entry(
         &self,
         local_session_id: &str,
