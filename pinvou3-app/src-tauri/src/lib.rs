@@ -930,6 +930,28 @@ pub(crate) fn remove_agents_index_entry(
     }
 }
 
+/// 进程入口的命令行分发（评审 R2：判定提成纯函数，钉住四种形态）。
+#[derive(Debug, PartialEq, Eq)]
+enum EntryRoute {
+    /// `model-store-worker <子命令>`——双机从机控制助手，走 CLI 出口。
+    WorkerCli,
+    /// `$LMM_WORKER` 环境在场 + argv[1] 是别的子命令——错误契约调用，拒绝启动。
+    WorkerGuard,
+    /// 正常 GUI 启动（含环境变量残留但无参启动——那是用户在拉界面，不是脚本）。
+    Gui,
+}
+
+fn route_args(argv1: Option<&str>, lmm_worker_set: bool) -> EntryRoute {
+    match argv1 {
+        Some("model-store-worker") => EntryRoute::WorkerCli,
+        // 闸只拦「带子命令但契约不对」：错误契约的调用必然带 argv[1]（裸 exe
+        // 被当老式 LMM 调子命令）；「环境变量残留 + 无参启动」更可能是用户正常
+        // 拉起 GUI——原先只要 env 在场就拒绝，误伤半径大（评审 R2）。
+        Some(_) if lmm_worker_set => EntryRoute::WorkerGuard,
+        _ => EntryRoute::Gui,
+    }
+}
+
 /// Headless modes are separate CLI processes selected before desktop startup.
 /// Their error status must reach the caller; no GUI/runtime state exists here.
 #[allow(clippy::exit)]
@@ -947,26 +969,34 @@ pub fn run() {
     // CLI 分流进程本就要以子命令的退出码结束进程（与旧 LMM main.rs 的 worker
     // 分流同构）；crate 里另一处豁免（build_tauri_context）是宏行为，这里是
     // 我们自己的 CLI 语义，都属 exit 语义上正确的位置。
-    #[allow(clippy::exit)]
-    if std::env::args().nth(1).as_deref() == Some("model-store-worker") {
-        let rest: Vec<String> = std::env::args().skip(2).collect();
-        std::process::exit(features::model_store::platform::worker_cli(&rest));
-    }
-    // 防呆闸（10-28 双机验证 P0 的教训）：本进程若是在卡片脚本环境里被拉起的
-    // （$LMM_WORKER 已设），那它只可能是被当作 worker 助手调用的——此时 argv[1]
-    // 不是 model-store-worker 就意味着调用方在用错误的契约（比如拿裸 exe 当
-    // 老式 LMM 二进制调子命令）。此前这种情况会一路启动整个 GUI，再被单实例
-    // 插件静默 exit 0——调用方只看到空输出，死因完全不可见。快速报错退出，
-    // 把正确用法说在错误里。
-    #[allow(clippy::exit)]
-    if std::env::var_os("LMM_WORKER").is_some() {
-        let arg1 = std::env::args().nth(1).unwrap_or_default();
-        eprintln!(
-            "ERROR: 检测到本进程在 $LMM_WORKER 环境下以参数「{arg1}」被调用。\
-             从机控制助手需要子命令层：请调 `\"$LMM_WORKER\" <子命令>`（wrapper 已注入），\
-             或 `pinvou3-tauri model-store-worker <子命令>`。不启动 GUI。"
-        );
-        std::process::exit(2);
+    let route = route_args(
+        std::env::args().nth(1).as_deref(),
+        std::env::var_os("LMM_WORKER").is_some(),
+    );
+    match route {
+        EntryRoute::WorkerCli => {
+            #[allow(clippy::exit)]
+            {
+                let rest: Vec<String> = std::env::args().skip(2).collect();
+                std::process::exit(features::model_store::platform::worker_cli(&rest));
+            }
+        }
+        // 防呆闸（10-28 双机验证 P0 的教训）：本进程若是在卡片脚本环境里被以
+        // 错误契约拉起的（$LMM_WORKER 已设 + argv[1] 不是 model-store-worker，
+        // 比如拿裸 exe 当老式 LMM 二进制调子命令），此前会一路启动整个 GUI，
+        // 再被单实例插件静默 exit 0——调用方只看到空输出，死因完全不可见。
+        // 快速报错退出，把正确用法说在错误里。
+        EntryRoute::WorkerGuard => {
+            let arg1 = std::env::args().nth(1).unwrap_or_default();
+            eprintln!(
+                "ERROR: 检测到本进程在 $LMM_WORKER 环境下以参数「{arg1}」被调用。\
+                 从机控制助手需要子命令层：请调 `\"$LMM_WORKER\" <子命令>`（wrapper 已注入），\
+                 或 `pinvou3-tauri model-store-worker <子命令>`。不启动 GUI。"
+            );
+            #[allow(clippy::exit)]
+            std::process::exit(2);
+        }
+        EntryRoute::Gui => {}
     }
     let component_args: Vec<String> = std::env::args().skip(1).collect();
     if component_args == ["--cmsd-store-inventory"] {
@@ -4306,6 +4336,46 @@ mod knowledge_service_failure_tests {
         );
 
         let _ = std::fs::remove_dir_all(&root);
+    }
+}
+
+#[cfg(test)]
+mod entry_route_tests {
+    use super::{EntryRoute, route_args};
+
+    /// 评审 R2 钉住的四种形态 + 基线：错误契约的调用必带 argv[1]，
+    /// 「环境变量残留 + 无参启动」是用户在拉 GUI，不得误伤。
+    #[test]
+    fn worker_cli_route_wins_even_with_env_set() {
+        // wrapper 注入环境下 `"$LMM_WORKER" connect` 展开后的合法调用形态
+        assert_eq!(
+            route_args(Some("model-store-worker"), true),
+            EntryRoute::WorkerCli
+        );
+    }
+
+    #[test]
+    fn wrong_subcommand_with_env_is_guarded() {
+        // 裸 exe 被当老式 LMM 二进制调子命令——10-28 双机 P0 的原始形态
+        assert_eq!(route_args(Some("connect"), true), EntryRoute::WorkerGuard);
+        assert_eq!(
+            route_args(Some("model-store-workerx"), true),
+            EntryRoute::WorkerGuard
+        );
+    }
+
+    #[test]
+    fn env_residue_without_args_still_launches_gui() {
+        // R2 核心：$LMM_WORKER 残留（比如从卡片脚本的 shell 里继承）+ 用户
+        // 双击图标/桌面启动——这是正常 GUI，闸不得拦。
+        assert_eq!(route_args(None, true), EntryRoute::Gui);
+    }
+
+    #[test]
+    fn no_env_unknown_args_fall_through_to_gui() {
+        // 无 env 时未知参数不归这道闸管，交给后续 GUI 逻辑
+        assert_eq!(route_args(Some("anything"), false), EntryRoute::Gui);
+        assert_eq!(route_args(None, false), EntryRoute::Gui);
     }
 }
 
