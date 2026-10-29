@@ -1263,6 +1263,357 @@ fn readonly_operands_are_workspace_bounded_and_symlink_aware() {
     }
 }
 
+/// A `.gitattributes` filter assignment only executes when the repository's
+/// own config defines the filter, and repo config is the one config source
+/// the read-only env block does not pin away — so discovery must return
+/// exactly the armed names, and nothing for a repository whose attributes
+/// name an undefined filter.
+#[test]
+fn readonly_filter_discovery_pins_declared_filters() {
+    let repo = tempdir().expect("repo");
+    let gitdir = repo.path().join(".git");
+    std::fs::create_dir_all(&gitdir).expect("gitdir");
+    std::fs::write(
+        gitdir.join("config"),
+        "[core]\n\trepositoryformatversion = 0\n[filter \"lfs\"]\n\tclean = git-lfs clean -- %f\n\tsmudge = git-lfs smudge -- %f\n\tprocess = git-lfs filter-process\n",
+    )
+    .expect("config");
+    let pins = discover_readonly_git_filter_pins("git status -s", repo.path())
+        .expect("an armed filter is discoverable");
+    assert_eq!(pins.len(), 1, "{pins:?}");
+    assert_eq!(pins[0].name, "lfs");
+    assert!(
+        pins[0].clean && pins[0].smudge && pins[0].process,
+        "{pins:?}"
+    );
+
+    // An attribute naming an undefined filter runs nothing: no config
+    // declaration, no pin.
+    std::fs::remove_file(gitdir.join("config")).expect("drop config");
+    let pins = discover_readonly_git_filter_pins("git status -s", repo.path())
+        .expect("no config declares nothing");
+    assert!(pins.is_empty(), "undefined filters are inert: {pins:?}");
+
+    // A repository defines nothing for a command with no git stage; the
+    // scan stays off the filesystem entirely.
+    let pins = discover_readonly_git_filter_pins("wc -c f", repo.path())
+        .expect("no git stage scans nothing");
+    assert!(pins.is_empty(), "{pins:?}");
+
+    // A `[filter]` section without a subsection builds two-part keys no
+    // `filter.<driver>.<key>` lookup ever reads: inert.
+    std::fs::write(
+        gitdir.join("config"),
+        "[filter]\n\tprocess = convert-lite filter\n",
+    )
+    .expect("config");
+    let pins = discover_readonly_git_filter_pins("git diff HEAD", repo.path())
+        .expect("a bare filter section is inert, not an error");
+    assert!(pins.is_empty(), "{pins:?}");
+
+    // A partial declaration arms only its own keys: `required` alone never
+    // executes a conversion, so nothing is pinned for it.
+    std::fs::write(
+        gitdir.join("config"),
+        "[filter \"lfs\"]\n\tclean = git-lfs clean -- %f\n",
+    )
+    .expect("config");
+    let pins = discover_readonly_git_filter_pins("git status -s", repo.path())
+        .expect("a clean-only filter is discoverable");
+    assert_eq!(pins.len(), 1, "{pins:?}");
+    assert!(
+        pins[0].clean && !pins[0].smudge && !pins[0].process,
+        "{pins:?}"
+    );
+
+    // A linked worktree's `commondir` points at the shared config.
+    let worktree_gitdir = gitdir.join("worktrees").join("w");
+    std::fs::create_dir_all(&worktree_gitdir).expect("worktree gitdir");
+    std::fs::write(worktree_gitdir.join("commondir"), "../..").expect("commondir");
+    std::fs::write(
+        gitdir.join("config"),
+        "[filter \"shared\"]\n\tclean = cat\n",
+    )
+    .expect("shared config");
+    let link = repo.path().join(".git-file");
+    std::fs::write(&link, format!("gitdir: {}", worktree_gitdir.display())).expect("link");
+    let pins = discover_readonly_git_filter_pins("git status", repo.path())
+        .expect("commondir config scanned");
+    assert_eq!(pins.len(), 1, "{pins:?}");
+    assert_eq!(pins[0].name, "shared", "{pins:?}");
+}
+
+/// Anything that could hide a filter from the config scan refuses instead of
+/// pinning a partial set: `include` directives, the worktree-config
+/// extension, unspellable filter names, and more names than the pin set
+/// bounds.
+#[test]
+fn readonly_filter_discovery_refuses_configs_it_cannot_enumerate() {
+    let repo = tempdir().expect("repo");
+    let gitdir = repo.path().join(".git");
+    std::fs::create_dir_all(&gitdir).expect("gitdir");
+    let refusal = |config: &str, label: &str| {
+        std::fs::write(gitdir.join("config"), config).expect("config");
+        let error = discover_readonly_git_filter_pins("git status -s", repo.path())
+            .expect_err(label)
+            .to_string();
+        assert!(
+            error.contains("shell.readonly.git.filter_config"),
+            "{label}: {error}"
+        );
+    };
+    refusal(
+        "[include]\n\tpath = ../evil.config\n",
+        "an include directive can declare filters outside the scan",
+    );
+    refusal(
+        "[includeIf \"gitdir:~/\"]\n\tpath = ../evil.config\n",
+        "a conditional include hides config the same way",
+    );
+    refusal(
+        "[extensions]\n\tworktreeConfig = true\n",
+        "the worktree-config extension adds a config file the scan does not read",
+    );
+    refusal(
+        "[filter \"bad name\"]\n\tclean = evil\n",
+        "a filter name this lane cannot spell into a config key refuses",
+    );
+    let many = (0..9)
+        .map(|index| format!("[filter \"f{index}\"]\n\tclean = evil\n"))
+        .collect::<String>();
+    refusal(&many, "more filters than the pin set bounds refuse");
+    // Eight names still pin.
+    let eight = (0..8)
+        .map(|index| format!("[filter \"f{index}\"]\n\tclean = evil\n"))
+        .collect::<String>();
+    std::fs::write(gitdir.join("config"), eight).expect("config");
+    let pins = discover_readonly_git_filter_pins("git status -s", repo.path())
+        .expect("the pin set bound is inclusive");
+    assert_eq!(pins.len(), 8, "{pins:?}");
+}
+
+/// A git stage inside a nested repository must scan the repository it will
+/// actually run under: the walk folds each admitted `cd` exactly like the
+/// operand gate, so `cd sub; git status` discovers the nested repo's
+/// filters, not only the outer repository's.
+#[test]
+fn readonly_filter_discovery_follows_the_cd_fold_into_nested_repositories() {
+    let outer = tempdir().expect("outer");
+    let nested = outer.path().join("sub");
+    std::fs::create_dir_all(nested.join(".git")).expect("nested gitdir");
+    std::fs::create_dir_all(outer.path().join(".git")).expect("outer gitdir");
+    std::fs::write(
+        outer.path().join(".git").join("config"),
+        "[core]\n\tbare = false\n",
+    )
+    .expect("outer config");
+    std::fs::write(
+        nested.join(".git").join("config"),
+        "[filter \"inner\"]\n\tclean = evil\n",
+    )
+    .expect("nested config");
+
+    let pins = discover_readonly_git_filter_pins("git status -s", outer.path())
+        .expect("outer repo scanned");
+    assert!(pins.is_empty(), "the outer repo declares nothing: {pins:?}");
+
+    let pins = discover_readonly_git_filter_pins("cd sub; git status -s", outer.path())
+        .expect("the fold carries the stage into the nested repo");
+    assert_eq!(pins.len(), 1, "{pins:?}");
+    assert_eq!(pins[0].name, "inner", "{pins:?}");
+
+    // The nested repo is also the nearest repo for a stage piped inside it.
+    let pins = discover_readonly_git_filter_pins("cd sub; git status -s | cat", outer.path())
+        .expect("piped git stage scans the folded repository");
+    assert_eq!(pins.len(), 1, "{pins:?}");
+    assert_eq!(pins[0].name, "inner", "{pins:?}");
+
+    // A `-C` preamble redirects git's repository without moving the shell:
+    // the stage must scan the `-C` target, not the live cwd.
+    let pins = discover_readonly_git_filter_pins("git -C sub status -s", outer.path())
+        .expect("a -C stage scans the redirected repository");
+    assert_eq!(pins.len(), 1, "{pins:?}");
+    assert_eq!(pins[0].name, "inner", "{pins:?}");
+
+    // …and `cd` plus a compensating `-C` lands back on the outer repository.
+    let pins = discover_readonly_git_filter_pins("cd sub; git -C .. status", outer.path())
+        .expect("a -C .. stage after cd scans the parent repository");
+    assert!(pins.is_empty(), "the outer repo declares nothing: {pins:?}");
+
+    // The `--no-pager` preamble interleaves with `-C` like the splice
+    // table's walk.
+    let pins = discover_readonly_git_filter_pins("git --no-pager -C sub log -n 1", outer.path())
+        .expect("a --no-pager/-C stage scans the redirected repository");
+    assert_eq!(pins.len(), 1, "{pins:?}");
+    assert_eq!(pins[0].name, "inner", "{pins:?}");
+}
+
+/// The gh stage exemption is literal-operand-only: a `*` after the program
+/// word would let the shell expand a workspace entry into a
+/// `HOST/OWNER/REPO` position at runtime, past the host the network policy
+/// evaluated.
+#[test]
+fn readonly_operand_gate_refuses_glob_operands_on_gh_stages() {
+    let workspace = tempdir().expect("workspace");
+    std::fs::write(workspace.path().join("inside.txt"), "inside").expect("inside file");
+    let roots = [workspace.path().to_path_buf()];
+
+    for command in [
+        "pwd; gh repo view */*/*",
+        "pwd | gh repo view */*/*",
+        "gh pr list -R */*/*",
+        "gh repo view owner/*",
+        "gh issue list --search '*'",
+        "gh issue list; gh repo view */*/*",
+    ] {
+        let error = enforce_readonly_workspace_operands(command, &roots, workspace.path())
+            .expect_err("a wildcard gh operand must refuse")
+            .to_string();
+        assert!(
+            error.contains("operand.gh_glob"),
+            "{command} must refuse at the gh-glob wall: {error}"
+        );
+    }
+
+    // The exemption itself keeps holding for literal operands, and non-gh
+    // stages are unaffected.
+    enforce_readonly_workspace_operands("pwd; gh repo view", &roots, workspace.path())
+        .expect("a literal gh read stays exempt from operand judgment");
+    enforce_readonly_workspace_operands(
+        "gh issue list; wc -c inside.txt",
+        &roots,
+        workspace.path(),
+    )
+    .expect("unrelated stages keep their own judgment");
+}
+
+/// The caps bound the walk's work but not its wall time; a spent budget
+/// refuses the expansion outright so a slow or network-backed filesystem
+/// cannot stretch one admitted command past any watchdog.
+#[test]
+fn readonly_glob_walk_refuses_once_its_deadline_has_passed() {
+    let workspace = tempdir().expect("workspace");
+    std::fs::write(workspace.path().join("inside.txt"), "inside").expect("inside file");
+    let roots = [workspace.path().to_path_buf()];
+
+    let mut budget = ReadonlyGlobBudget::expired();
+    let error = enforce_readonly_glob_operand("inside*", &roots, workspace.path(), &mut budget)
+        .expect_err("an expired walk budget must refuse");
+    assert!(
+        error.to_string().contains("operand.glob_deadline"),
+        "{error}"
+    );
+
+    let mut budget = ReadonlyGlobBudget::default();
+    enforce_readonly_glob_operand("inside*", &roots, workspace.path(), &mut budget)
+        .expect("an unexpired budget walks normally");
+}
+
+/// A read-only shell holds no task surface: `interact`/`cancel`/`wait`
+/// dispatch before the run-path shape gate, so the policy is checked at the
+/// top — a task addressed under the read-only policy could belong to another
+/// agent in the session.
+#[tokio::test]
+async fn readonly_shell_refuses_task_actions_at_the_policy() {
+    let workspace = tempdir().expect("workspace");
+    let context = ToolContext::new(workspace.path()).with_shell_policy(ShellPolicy::ReadOnly);
+    for action in ["interact", "cancel", "wait"] {
+        let error = BashTool::new("Bash")
+            .execute(
+                json!({"action": action, "task_id": "some-other-agents-task", "data": "x"}),
+                &context,
+            )
+            .await
+            .expect_err("task actions must refuse under the read-only policy");
+        assert!(
+            error.to_string().contains("shell.readonly.action"),
+            "{action} must refuse at the policy wall: {error}"
+        );
+    }
+}
+
+/// The money pin for repository content filters: a repo whose `.gitattributes`
+/// assigns `filter=evil` and whose config defines `filter.evil.clean` runs
+/// that command whenever `git status`/`git diff` converts worktree content —
+/// under a raw shell, outside content crosses and the command executes. The
+/// read-only lane discovers the declared filter and pins it to inert
+/// helpers, so the same admitted commands run without either effect.
+#[tokio::test]
+async fn readonly_shell_lane_git_status_does_not_run_repository_content_filters() {
+    let workspace = tempdir().expect("workspace");
+    let outside = tempdir().expect("outside");
+    let marker = outside.path().join("filter-ran");
+    let secret = outside.path().join("secret.txt");
+    std::fs::write(&secret, "TOPSECRET-FILTER").expect("outside secret");
+    let git = |args: &[&str]| {
+        let output = std::process::Command::new("git")
+            .args(["-c", "user.name=t", "-c", "user.email=t@example.invalid"])
+            .args(args)
+            .current_dir(workspace.path())
+            .output()
+            .expect("git runs");
+        assert!(
+            output.status.success(),
+            "git {args:?} failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    };
+    git(&["init", "-q"]);
+    git(&[
+        "config",
+        "filter.evil.clean",
+        &format!(
+            "sh -c 'touch {}; cat {} >&2; cat'",
+            marker.display(),
+            secret.display()
+        ),
+    ]);
+    std::fs::write(workspace.path().join(".gitattributes"), "* filter=evil\n").expect("attributes");
+    std::fs::write(workspace.path().join("note.txt"), "seed\n").expect("note");
+    git(&["add", "."]);
+    git(&["commit", "-q", "-m", "seed"]);
+    // A stat-dirty worktree file is what makes a nominal read convert
+    // content — and run the filter.
+    std::fs::write(workspace.path().join("note.txt"), "seed\nworktree change\n")
+        .expect("dirty the worktree");
+
+    // Positive control: the fixture really executes the filter — and returns
+    // outside content — when a raw shell runs a nominal read. `git diff`
+    // always converts the worktree side for display, unlike `git status`,
+    // which may decide "modified" from a raw content compare without ever
+    // converting.
+    let control = std::process::Command::new("sh")
+        .args(["-c", "git diff 2>&1"])
+        .current_dir(workspace.path())
+        .output()
+        .expect("control shell runs");
+    assert!(
+        String::from_utf8_lossy(&control.stdout).contains("TOPSECRET-FILTER"),
+        "the armed clean filter must fire under a raw shell: {}",
+        String::from_utf8_lossy(&control.stdout)
+    );
+    assert!(marker.exists(), "the armed clean filter must execute");
+    std::fs::remove_file(&marker).expect("reset marker");
+
+    let context = ToolContext::new(workspace.path())
+        .with_shell_policy(crate::worker_profile::ShellPolicy::ReadOnly);
+    for command in ["git diff", "pwd; git diff", "git status -s"] {
+        let output = LowercaseBashTool
+            .execute(json!({"command": command}), &context)
+            .await
+            .unwrap_or_else(|error| panic!("{command} must execute: {error}"));
+        assert!(output.success, "{command}: {}", output.content);
+        assert!(
+            !output.content.contains("TOPSECRET-FILTER"),
+            "{command} returned content converted through the repository's filter"
+        );
+        assert!(
+            !marker.exists(),
+            "{command} ran the repository's content filter"
+        );
+    }
+}
+
 /// The operand gate judges compound probe sequences segment by segment and
 /// resolves an admitted `cd` operand against the workspace, refusing an
 /// escape with the same `[shell.readonly.cwd.outside_workspace]` tag the
@@ -1418,9 +1769,10 @@ fn readonly_operand_gate_refuses_a_cd_its_connector_may_not_run() {
 /// destination — `notes.txt` exists only under `sub/`, not at the workspace
 /// root — so the fold must admit it, and a second `cd` must be folded
 /// against the first destination too. The multi-hop case is pinned with a
-/// discriminating fixture (`sub/deep/link` → outside): without the genuine
-/// two-`cd` fold the gate would judge `link` at the root, find nothing
-/// there, skip it, and admit.
+/// discriminating fixture (`sub/deep/link` → outside): a mutation that
+/// folds only the first `cd` (or judges `link` at the root) admits, while a
+/// mutation that discards the fold entirely refuses earlier, at the second
+/// `cd`'s own canonicalize — either way this pair of assertions moves.
 #[cfg(unix)]
 #[test]
 fn readonly_operand_gate_keeps_admitting_operands_under_cd_destination() {
@@ -2352,6 +2704,11 @@ fn guidance_states_the_foreground_stdin_contract() {
     assert!(
         description.contains("Foreground commands without `interactive` or `combined_output` run without a terminal stdin"),
         "guidance must state the bounded foreground stdin: {description}"
+    );
+    assert!(
+        description
+            .contains("combined_output` runs on a terminal lane whose stdin no one can write to"),
+        "guidance must state the combined_output foreground stdin contract: {description}"
     );
     assert!(
         description.contains("action=\"interact\""),
@@ -6666,8 +7023,8 @@ async fn readonly_shell_refuses_short_circuit_cd_escape_end_to_end() {
             Err(error) => error.to_string(),
         };
         assert!(
-            content.contains("read-only"),
-            "{command} must refuse through the read-only boundary: {content}"
+            content.contains("shell.readonly") || content.contains("read-only"),
+            "{command} must refuse through the read-only boundary, whichever wall fires: {content}"
         );
         assert!(
             !content.contains("TOPSECRET-OUTSIDE"),

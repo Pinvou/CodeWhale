@@ -1391,7 +1391,7 @@ impl BackgroundShell {
 
         if self.stdin_closed_at_eof {
             return Err(anyhow!(
-                "stdin is not available for task {}: its stdin is already at end-of-file (foreground commands run that way so stdin readers exit instead of hanging); start input-driven work with background=true and feed it with action=\"interact\"",
+                "stdin is not available for task {}: its stdin pipe was closed, so stdin readers have seen end-of-file; start input-driven work with background=true and feed it with action=\"interact\"",
                 self.id
             ));
         }
@@ -4289,6 +4289,385 @@ fn canonical_readonly_roots(roots: &[PathBuf]) -> std::io::Result<Vec<PathBuf>> 
     Ok(canonical)
 }
 
+/// Upper bound on distinct git content-filter names one command may ask the
+/// child env to neutralize; beyond it the gate refuses instead of pinning a
+/// partial set.
+const MAX_READONLY_GIT_FILTER_PINS: usize = 8;
+
+/// Read bound for one repository config file during filter discovery.
+const READONLY_GIT_CONFIG_SCAN_CAP: usize = 256 * 1024;
+
+/// One declared git content filter and the conversion keys it arms. Each
+/// armed key gets its own env pin — and only the armed keys: pinning
+/// `process` for a repo that declared none would *introduce* a protocol
+/// filter (git prefers it over clean/smudge) and turn a working read into a
+/// protocol failure.
+#[derive(Debug)]
+struct ReadonlyGitFilterPin {
+    name: String,
+    clean: bool,
+    smudge: bool,
+    process: bool,
+}
+
+impl ReadonlyGitFilterPin {
+    fn new(name: String) -> Self {
+        Self {
+            name,
+            clean: false,
+            smudge: false,
+            process: false,
+        }
+    }
+
+    fn arms_a_conversion(&self) -> bool {
+        self.clean || self.smudge || self.process
+    }
+}
+
+/// Discover the git content filters the repositories a command's git stages
+/// run under, so the child env can pin each armed conversion key to an inert
+/// helper. A `.gitattributes` filter assignment only executes when the
+/// repository's own config defines `filter.<name>.clean`/`smudge`/`process`
+/// — an attribute naming an undefined filter is inert, git skips the
+/// conversion — and repository config is the one configuration source the
+/// read-only env block does not already pin away. Scanning the config of
+/// every repository a stage can reach is therefore complete: every returned
+/// key is pinned with `filter.<name>.<key>`, which is command-scoped config
+/// and outranks the repository's own value, turning a declared filter into
+/// a byte-for-byte pass-through (`cat`) or — for the protocol (`process`)
+/// form, which cannot be pinned inert (`filter.<name>.process=` does not
+/// take) — into a helper whose handshake fails loudly, so a protocol filter
+/// degrades its repository's conversions to errors rather than ever running
+/// its configured command. Anything the scan cannot confidently enumerate —
+/// config `include` directives, the worktree-config extension, unspellable
+/// filter names, too many names — refuses the command instead of pinning a
+/// partial set.
+///
+/// The walk mirrors the operand gate's `cd` fold so a git stage that runs
+/// inside a nested repository (`cd sub; git status`) scans the repository it
+/// will actually run under. Run after the operand gate passed, so every `cd`
+/// is one canonicalizable relative directory joined by `;` or the sequence
+/// start.
+fn discover_readonly_git_filter_pins(
+    command: &str,
+    effective_cwd: &std::path::Path,
+) -> Result<Vec<ReadonlyGitFilterPin>, ToolError> {
+    // No git stage, nothing to scan: keep the no-repository dispatch at
+    // zero filesystem reads.
+    let has_git_stage =
+        readonly_sequence_segments_with_connectors(command).is_some_and(|segments| {
+            segments.iter().any(|(segment, _)| {
+                crate::command_safety::readonly_pipeline_stages(segment)
+                    .iter()
+                    .any(|stage| {
+                        readonly_segment_argv(stage)
+                            .map(|argv| argv.first().is_some_and(|program| program == "git"))
+                            .unwrap_or(false)
+                    })
+            })
+        });
+    if !has_git_stage {
+        return Ok(Vec::new());
+    }
+    let mut pins: Vec<ReadonlyGitFilterPin> = Vec::new();
+    let mut scanned: std::collections::HashSet<PathBuf> = std::collections::HashSet::new();
+    let mut live_cwd = effective_cwd.to_path_buf();
+    let Some(segments) = readonly_sequence_segments_with_connectors(command) else {
+        return Ok(Vec::new());
+    };
+    for (segment, connector) in segments {
+        let stages = crate::command_safety::readonly_pipeline_stages(segment);
+        for stage in &stages {
+            let Ok(argv) = readonly_segment_argv(stage) else {
+                continue;
+            };
+            if !argv.first().is_some_and(|program| program == "git") {
+                continue;
+            }
+            scan_readonly_repository_at(
+                &readonly_git_stage_repository_dir(&argv, &live_cwd),
+                &mut pins,
+                &mut scanned,
+            )?;
+        }
+        if stages.len() > 1 {
+            continue;
+        }
+        let Ok(argv) = readonly_segment_argv(segment) else {
+            continue;
+        };
+        match argv.first().map(String::as_str) {
+            // A `cd` its connector may not run refuses at the gate, so every
+            // `cd` that reaches this walk always runs; fold exactly where the
+            // gate folds.
+            Some("cd")
+                if !matches!(
+                    connector,
+                    crate::command_safety::ReadonlySequenceConnector::AndThen
+                        | crate::command_safety::ReadonlySequenceConnector::OrElse
+                ) =>
+            {
+                if let Some(target) = argv.get(1) {
+                    if let Ok(resolved) = live_cwd.join(target).canonicalize() {
+                        live_cwd = resolved;
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    if pins.len() > MAX_READONLY_GIT_FILTER_PINS {
+        return Err(ToolError::permission_denied(format!(
+            "[shell.readonly.git.filter_config] The repositories this command's git stages run in declare more than {MAX_READONLY_GIT_FILTER_PINS} content filters, more than the read-only lane can pin inert; use a workspace without filter declarations for repository evidence."
+        )));
+    }
+    Ok(pins)
+}
+
+/// The directory a git stage's repository resolves from: git applies each
+/// `-C <dir>` cumulatively from the stage's working directory, so the last
+/// one wins (`git -C sub status` runs against `sub`'s repository even though
+/// the shell never `cd`'d; `cd sub; git -C .. status` runs against the
+/// parent's). The preamble walk mirrors `splice_git_read_hardening`'s, and
+/// every `-C` operand was already canonicalized inside the workspace by the
+/// operand gate.
+fn readonly_git_stage_repository_dir(
+    argv: &[String],
+    live_cwd: &std::path::Path,
+) -> std::path::PathBuf {
+    let mut dir = live_cwd.to_path_buf();
+    let mut index = 1;
+    while let Some(flag) = argv.get(index) {
+        match flag.as_str() {
+            "--no-pager" => index += 1,
+            "-C" => {
+                let Some(target) = argv.get(index + 1) else {
+                    break;
+                };
+                let joined = if std::path::Path::new(target).is_absolute() {
+                    std::path::PathBuf::from(target)
+                } else {
+                    dir.join(target)
+                };
+                dir = joined.canonicalize().unwrap_or(joined);
+                index += 2;
+            }
+            _ => break,
+        }
+    }
+    dir
+}
+
+/// Scan the repository at (or above) `cwd` once per command, accumulating
+/// its armed filter declarations into `pins`.
+fn scan_readonly_repository_at(
+    cwd: &std::path::Path,
+    pins: &mut Vec<ReadonlyGitFilterPin>,
+    scanned: &mut std::collections::HashSet<PathBuf>,
+) -> Result<(), ToolError> {
+    let Some(gitdir) = readonly_git_dir_for(cwd) else {
+        return Ok(());
+    };
+    let key = gitdir.canonicalize().unwrap_or_else(|_| gitdir.clone());
+    if !scanned.insert(key) {
+        return Ok(());
+    }
+    let names = readonly_git_config_filter_names(&gitdir).map_err(|reason| {
+        ToolError::permission_denied(format!(
+            "[shell.readonly.git.filter_config] Read-only git stages run in a repository whose configuration this lane cannot safely neutralize: {reason}"
+        ))
+    })?;
+    for name in names {
+        if let Some(pinned) = pins
+            .iter_mut()
+            .find(|pinned| pinned.name.eq_ignore_ascii_case(&name.name))
+        {
+            pinned.clean |= name.clean;
+            pinned.smudge |= name.smudge;
+            pinned.process |= name.process;
+        } else {
+            pins.push(name);
+        }
+    }
+    Ok(())
+}
+
+/// The git directory git itself would use from `cwd`: the first `.git`
+/// entry at or above it, resolved through the worktree/submodule `gitdir:`
+/// link form.
+fn readonly_git_dir_for(cwd: &std::path::Path) -> Option<PathBuf> {
+    let mut dir = cwd.to_path_buf();
+    loop {
+        let candidate = dir.join(".git");
+        if candidate.is_dir() {
+            return Some(candidate);
+        }
+        if candidate.is_file() {
+            let link = std::fs::read_to_string(&candidate).ok()?;
+            let target = link.lines().next()?.strip_prefix("gitdir:")?.trim();
+            let gitdir = if std::path::Path::new(target).is_absolute() {
+                PathBuf::from(target)
+            } else {
+                dir.join(target)
+            };
+            return Some(gitdir);
+        }
+        dir = dir.parent()?.to_path_buf();
+    }
+}
+
+/// Filter declarations armed by one git directory's config files: its own
+/// `config` plus the shared config a linked worktree points at through
+/// `commondir`.
+fn readonly_git_config_filter_names(
+    gitdir: &std::path::Path,
+) -> Result<Vec<ReadonlyGitFilterPin>, String> {
+    let mut config_paths = vec![gitdir.join("config")];
+    if let Ok(common) = std::fs::read_to_string(gitdir.join("commondir")) {
+        let target = common.lines().next().unwrap_or("").trim();
+        if !target.is_empty() {
+            let common_dir = if std::path::Path::new(target).is_absolute() {
+                PathBuf::from(target)
+            } else {
+                gitdir.join(target)
+            };
+            config_paths.push(common_dir.join("config"));
+        }
+    }
+    let mut names = Vec::new();
+    for path in config_paths {
+        let bytes = match std::fs::read(&path) {
+            Ok(bytes) => bytes,
+            // A repository without a config file there declares nothing.
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(error) => {
+                return Err(format!("{} could not be read: {error}", path.display()));
+            }
+        };
+        if bytes.len() > READONLY_GIT_CONFIG_SCAN_CAP {
+            return Err(format!(
+                "{} is larger than the {}-byte filter-discovery scan bound",
+                path.display(),
+                READONLY_GIT_CONFIG_SCAN_CAP
+            ));
+        }
+        names.extend(armed_git_filter_names(&String::from_utf8_lossy(&bytes))?);
+    }
+    Ok(names)
+}
+
+/// Parse one git config text for filter declarations. Returns one entry per
+/// filter name with the conversion keys it arms, or a refusal reason for
+/// anything that could hide a filter from this scan.
+fn armed_git_filter_names(config_text: &str) -> Result<Vec<ReadonlyGitFilterPin>, String> {
+    let mut names: Vec<ReadonlyGitFilterPin> = Vec::new();
+    // (section, subsection) of the last `[...]` header; `None` before one.
+    let mut section: Option<(String, Option<String>)> = None;
+    // A git config logical line can continue over several physical lines
+    // (value ends in `\`); continuation text is value, not key, and must not
+    // be read as one.
+    let mut continuation = false;
+    for raw in config_text.lines() {
+        let line = raw.trim();
+        if continuation {
+            continuation = raw.trim_end().ends_with('\\');
+            continue;
+        }
+        continuation = raw.trim_end().ends_with('\\');
+        if line.is_empty() || line.starts_with('#') || line.starts_with(';') {
+            continue;
+        }
+        if line.starts_with('[') {
+            let Some(close) = line.find(']') else {
+                return Err("a section header is not terminated".to_string());
+            };
+            let header = line[1..close].trim();
+            let (base, subsection) = match header.find('"') {
+                Some(quote) => {
+                    let Some(name) = header[quote + 1..].strip_suffix('"') else {
+                        return Err("a filter subsection is not terminated".to_string());
+                    };
+                    (header[..quote].trim(), Some(name.to_string()))
+                }
+                None => (header, None),
+            };
+            let base = base.trim().to_ascii_lowercase();
+            // An `include`d file can declare filters outside this scan.
+            if base == "include" || base == "includeif" {
+                return Err("the repository config carries `include` directives".to_string());
+            }
+            section = Some((base, subsection));
+            continue;
+        }
+        let Some((base, subsection)) = &section else {
+            continue;
+        };
+        let key = line
+            .split('=')
+            .next()
+            .unwrap_or(line)
+            .trim()
+            .to_ascii_lowercase();
+        if base == "extensions" && key == "worktreeconfig" {
+            return Err(
+                "the repository enables the worktree-config extension, which adds a config file this scan does not read".to_string(),
+            );
+        }
+        if base != "filter" {
+            continue;
+        }
+        let armed_key = match key.as_str() {
+            "clean" => Some(0),
+            "smudge" => Some(1),
+            "process" => Some(2),
+            // `required` alone never executes a conversion command: with no
+            // clean/smudge/process defined, git's own conversion failure is
+            // the wall, so there is nothing to pin.
+            _ => None,
+        };
+        let Some(armed_key) = armed_key else {
+            continue;
+        };
+        // A `[filter]` section without a subsection builds two-part keys
+        // (`filter.clean`), which no `filter.<driver>.<key>` driver lookup
+        // ever reads — inert, nothing to pin.
+        let Some(name) = subsection else {
+            continue;
+        };
+        let pinned = if let Some(pinned) = names
+            .iter_mut()
+            .find(|pinned| pinned.name.eq_ignore_ascii_case(name))
+        {
+            pinned
+        } else {
+            names.push(ReadonlyGitFilterPin::new(name.clone()));
+            names.last_mut().expect("just pushed")
+        };
+        match armed_key {
+            0 => pinned.clean = true,
+            1 => pinned.smudge = true,
+            _ => pinned.process = true,
+        }
+    }
+    for pin in &names {
+        if pin.name.is_empty()
+            || pin.name.len() > 64
+            || !pin
+                .name
+                .chars()
+                .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '.' | '_' | '-'))
+        {
+            return Err(format!(
+                "the repository declares a filter named {:?}, whose spelling this lane does not pin",
+                pin.name
+            ));
+        }
+    }
+    names.retain(ReadonlyGitFilterPin::arms_a_conversion);
+    Ok(names)
+}
+
 fn enforce_readonly_workspace_operands(
     command: &str,
     roots: &[PathBuf],
@@ -4348,11 +4727,28 @@ fn enforce_readonly_workspace_operands(
     Ok(())
 }
 
+/// The gh exemption skips every operand judgment for a gh stage, on the
+/// rationale that high-level gh reads consume no workspace path operands.
+/// They do, however, accept `HOST/OWNER/REPO` operands the classifier
+/// host-checks by their literal spelling — and a `*` in such a token would
+/// let the shell expand a workspace entry into that position at runtime,
+/// pointing gh at a host the network policy never evaluated. The exemption
+/// therefore holds only for literal operands; a wildcard anywhere after the
+/// program word refuses.
+fn refuse_gh_stage_glob_operands(argv: &[String]) -> Result<(), ToolError> {
+    if let Some(token) = argv.iter().skip(1).find(|token| token.contains('*')) {
+        return Err(ToolError::permission_denied(format!(
+            "[shell.readonly.operand.gh_glob] Read-only gh stages are judged by their literal operands, and {token:?} carries a wildcard the shell would expand at runtime — the expansion could name a repository target the network policy never approved. Spell the operand literally or drop it."
+        )));
+    }
+    Ok(())
+}
+
 /// Operand containment for one sequence segment of a read-only command.
 ///
 /// A segment with a pipeline is judged stage by stage, because every stage
 /// runs in its own subshell against the same working directory: a `gh`
-/// stage exempts only itself (high-level gh reads do not consume local path
+/// stage exempts only itself (high-level gh reads consume no local path
 /// operands; their host is pinned and evaluated separately by the
 /// network-policy guard), and a `cd` stage is refused outright — it persists
 /// nowhere, so there is no destination to fold and nothing a later stage
@@ -4382,7 +4778,7 @@ fn enforce_readonly_segment_operands(
                         "[shell.readonly.cwd.pipeline_stage] Read-only `cd` is admitted only as a whole sequence segment, never as a pipeline stage; refused {stage:?}."
                     )));
                 }
-                Some("gh") => {}
+                Some("gh") => refuse_gh_stage_glob_operands(&argv)?,
                 // An empty stage (`a | | b`) refuses too: the classifier
                 // rejects it, and this gate's doc promises every stage is
                 // judged — an empty argv would otherwise pass silently.
@@ -4403,6 +4799,7 @@ fn enforce_readonly_segment_operands(
         )));
     }
     if argv.first().is_some_and(|program| program == "gh") {
+        refuse_gh_stage_glob_operands(&argv)?;
         return Ok(effective_cwd.to_path_buf());
     }
     if argv.first().is_some_and(|program| program == "cd") {
@@ -4735,13 +5132,45 @@ const MAX_READONLY_GLOB_MATCHES: usize = 4096;
 const MAX_READONLY_GLOB_NODES: usize = 50_000;
 const MAX_READONLY_GLOB_ENTRIES: usize = 500_000;
 
+/// Wall-clock bound on one command's whole glob expansion. The match, node,
+/// and entry caps bound the walk's work but not its wall time: on a cold
+/// cache or a network-backed workspace, scanning up to a cap can take orders
+/// of magnitude longer than the same walk locally, and no child process
+/// exists yet for a watchdog to end.
+const READONLY_GLOB_WALK_DEADLINE: Duration = Duration::from_secs(10);
+
 /// Match, node, and examined-entry counters for one command's glob
 /// expansion, see [`MAX_READONLY_GLOB_MATCHES`].
-#[derive(Default)]
 struct ReadonlyGlobBudget {
     matches: usize,
     nodes: usize,
     entries: usize,
+    deadline: Instant,
+}
+
+impl Default for ReadonlyGlobBudget {
+    fn default() -> Self {
+        Self {
+            matches: 0,
+            nodes: 0,
+            entries: 0,
+            deadline: Instant::now() + READONLY_GLOB_WALK_DEADLINE,
+        }
+    }
+}
+
+#[cfg(test)]
+impl ReadonlyGlobBudget {
+    /// A budget whose walk budget is already spent, for pinning the
+    /// deadline refusal without waiting on real time.
+    fn expired() -> Self {
+        Self {
+            matches: 0,
+            nodes: 0,
+            entries: 0,
+            deadline: Instant::now() - Duration::from_secs(1),
+        }
+    }
 }
 
 struct ReadonlyGlobWalk<'a> {
@@ -4758,10 +5187,24 @@ struct ReadonlyGlobWalk<'a> {
 }
 
 impl ReadonlyGlobWalk<'_> {
+    /// The caps bound the walk's work; this bounds its wall time, so a slow
+    /// or network-backed filesystem cannot stretch one expansion past any
+    /// watchdog (no child exists yet to time out).
+    fn within_deadline(&self) -> Result<(), ToolError> {
+        if Instant::now() >= self.budget.deadline {
+            return Err(ToolError::permission_denied(format!(
+                "[shell.readonly.operand.glob_deadline] Read-only glob operand {operand:?} outlasted this command's {READONLY_GLOB_WALK_DEADLINE:?} expansion budget — the pattern scans more of the workspace than the caps alone reveal on this filesystem. Narrow the pattern or use fewer glob operands.",
+                operand = self.operand
+            )));
+        }
+        Ok(())
+    }
+
     /// Judge one final match by its resolved location, counting it against
     /// the match cap. Every branch returns on the first failure, so the walk
     /// stops at the first match that cannot be proven inside the workspace.
     fn judge(&mut self, matched: &std::path::Path) -> Result<(), ToolError> {
+        self.within_deadline()?;
         self.budget.matches += 1;
         if self.budget.matches > MAX_READONLY_GLOB_MATCHES {
             return Err(ToolError::permission_denied(format!(
@@ -4792,6 +5235,7 @@ impl ReadonlyGlobWalk<'_> {
     /// same keys. Non-unix hosts have no portable `(dev, ino)`; the path text
     /// stands in (junction cycles are then bounded by the node budget alone).
     fn enter(&mut self, dir: &std::path::Path, remaining: usize) -> Result<bool, ToolError> {
+        self.within_deadline()?;
         self.budget.nodes += 1;
         if self.budget.nodes > MAX_READONLY_GLOB_NODES {
             return Err(ToolError::permission_denied(format!(
@@ -4821,6 +5265,7 @@ impl ReadonlyGlobWalk<'_> {
     /// a directory nor judges a match, yet scans every entry it is compared
     /// against.
     fn examine(&mut self) -> Result<(), ToolError> {
+        self.within_deadline()?;
         self.budget.entries += 1;
         if self.budget.entries > MAX_READONLY_GLOB_ENTRIES {
             return Err(ToolError::permission_denied(format!(
@@ -5685,6 +6130,17 @@ impl ToolSpec for BashTool {
             Some(forced) => forced,
             None => optional_str(&input, "action")?.unwrap_or("run"),
         };
+        // The task actions drive pre-existing manager tasks, which the
+        // read-only shape gate below never sees. A read-only shell holds no
+        // task surface of its own — the shape gate refuses `background`, so
+        // it can never have created one — and a task addressed here could
+        // belong to another agent in the session, so the policy is checked
+        // before the dispatch rather than after it.
+        if action != "run" && matches!(context.shell_policy, ShellPolicy::ReadOnly) {
+            return Err(ToolError::permission_denied(
+                "[shell.readonly.action] A read-only shell holds no background task surface; only `run` with a bounded inspection command is available.",
+            ));
+        }
         match action {
             "wait" => return self.execute_wait(&input, context).await,
             "interact" => return self.execute_interact(&input, context).await,
@@ -5875,6 +6331,7 @@ impl ToolSpec for BashTool {
         let readonly_roots = read_only_shell.then(|| {
             codewhale_core::normalize_workspace_roots(&context.workspace, &context.workspace_roots)
         });
+        let mut readonly_git_filter_pins = Vec::new();
         if let Some(roots) = readonly_roots.as_deref() {
             let effective_cwd = working_dir
                 .as_deref()
@@ -5887,8 +6344,9 @@ impl ToolSpec for BashTool {
             let command = command.to_string();
             let roots = roots.to_vec();
             let effective_cwd = effective_cwd.to_path_buf();
-            tokio::task::spawn_blocking(move || {
-                enforce_readonly_workspace_operands(&command, &roots, &effective_cwd)
+            readonly_git_filter_pins = tokio::task::spawn_blocking(move || {
+                enforce_readonly_workspace_operands(&command, &roots, &effective_cwd)?;
+                discover_readonly_git_filter_pins(&command, &effective_cwd)
             })
             .await
             .map_err(|error| {
@@ -5970,7 +6428,38 @@ impl ToolSpec for BashTool {
             if let Some(path) = readonly_sanitized_path(readonly_roots.as_deref().unwrap_or(&[])) {
                 extra_env.insert("PATH".to_string(), path);
             }
-            extra_env.insert("GIT_CONFIG_COUNT".to_string(), "3".to_string());
+            // A `.gitattributes` filter assignment executes only when the
+            // repository config defines the filter, so every conversion key
+            // discovered for this command's repositories is pinned to an
+            // inert helper here: `cat` for the worktree-side clean/smudge
+            // conversions an admitted read performs, and the inert helper
+            // for the protocol (`process`) form, whose handshake then fails
+            // loudly instead of running its configured command. These are
+            // command-scoped git config, which outranks the repository's own
+            // values; an empty `process` override does not take, so the
+            // inert helper is the honest wall — and only keys the repository
+            // itself declared are pinned, since introducing a `process` key
+            // git would otherwise not see breaks a working clean/smudge
+            // filter.
+            let mut git_config_count = 3usize;
+            for pin in &readonly_git_filter_pins {
+                for (armed, key, value) in [
+                    (pin.clean, "clean", "cat".to_string()),
+                    (pin.smudge, "smudge", "cat".to_string()),
+                    (pin.process, "process", inert_git_helper.to_string()),
+                ] {
+                    if !armed {
+                        continue;
+                    }
+                    extra_env.insert(
+                        format!("GIT_CONFIG_KEY_{git_config_count}"),
+                        format!("filter.{}.{}", pin.name, key),
+                    );
+                    extra_env.insert(format!("GIT_CONFIG_VALUE_{git_config_count}"), value);
+                    git_config_count += 1;
+                }
+            }
+            extra_env.insert("GIT_CONFIG_COUNT".to_string(), git_config_count.to_string());
             extra_env.insert("GIT_CONFIG_KEY_0".to_string(), "core.fsmonitor".to_string());
             extra_env.insert("GIT_CONFIG_VALUE_0".to_string(), "false".to_string());
             extra_env.insert("GIT_CONFIG_KEY_1".to_string(), "core.hooksPath".to_string());

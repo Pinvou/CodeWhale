@@ -8339,6 +8339,16 @@ async fn verifier_child_still_refuses_raw_shell_custom_commands_and_writes() {
         raw.contains("not available") || raw.contains("not allowed"),
         "raw Bash refusal did not identify the wall: {raw}"
     );
+    // The second legacy-`Bash` wall is the posture's classifier-lane rule: a
+    // command the classifier cannot prove read-only must not re-enter
+    // through the alias, pinned here on this Verifier-labeled registry (the
+    // sibling pin covers the same wall through a Scout fixture). A
+    // proven-read-only shape passes this wall and is caught by the role wall
+    // above.
+    assert!(
+        !registry.posture_permits_tool("Bash", Some(&json!({"command": "rm -rf src"}))),
+        "the posture wall must refuse unprovable commands through the legacy `Bash` alias for a Verifier"
+    );
 
     let custom_command = json!({
         "action": "verifiers",

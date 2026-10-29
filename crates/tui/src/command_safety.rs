@@ -617,6 +617,9 @@ pub fn is_agent_readonly_shell_command(command: &str) -> bool {
     if trimmed.is_empty() {
         return false;
     }
+    if trimmed.len() > MAX_READONLY_COMMAND_LEN {
+        return false;
+    }
     if trimmed.chars().any(|ch| {
         matches!(
             ch,
@@ -662,6 +665,14 @@ pub fn is_agent_readonly_shell_command(command: &str) -> bool {
 
 /// Upper bound on `;`/`&&`/`||` segments in one admitted read-only command.
 pub(crate) const MAX_READONLY_SEQUENCE_SEGMENTS: usize = 32;
+
+/// Upper bound on the text length of one admitted read-only command. The
+/// grammar's refusals are checked in linear passes that allocate transiently
+/// (the segment split, the shell-lane hardening copy), so an uncapped command
+/// would buy host memory and parse work at dispatch time for text no legitimate
+/// bounded probe needs. The execution seam runs only after this admission, so
+/// this one check bounds both layers.
+const MAX_READONLY_COMMAND_LEN: usize = 64 * 1024;
 
 /// Admit one sequence segment: every pipeline stage must be an admitted
 /// read-only command (`a | b` is two read-only commands, while `a | | b`,
@@ -1157,7 +1168,12 @@ fn is_agent_readonly_cd(tokens: &[String]) -> bool {
 pub(crate) fn readonly_cd_operand_admitted(target: &str) -> bool {
     if target.is_empty()
         || target.starts_with('-')
+        // zsh's `=cmd` EQUALS expansion and `+N` directory-stack selection
+        // both reinterpret a spelling that canonicalizes as a plain relative
+        // name: the shell's `cd` fails (or lands elsewhere) while the fold
+        // assumes the destination was entered.
         || target.starts_with('=')
+        || target.starts_with('+')
         || target.starts_with('~')
         || target.contains('\\')
         || target.contains('*')
@@ -1199,9 +1215,12 @@ fn is_agent_readonly_od(tokens: &[String]) -> bool {
                 }
                 "-j" | "-N" => {
                     index += 1;
-                    let numeric = tokens.get(index).is_some_and(|value| {
-                        !value.is_empty() && value.bytes().all(|byte| byte.is_ascii_digit())
-                    });
+                    // Parse, not just digit-scan: a 200-digit spelling is
+                    // digit-admitted but past every real skip/count, so the
+                    // bound belongs here rather than at od's runtime error.
+                    let numeric = tokens
+                        .get(index)
+                        .is_some_and(|value| !value.is_empty() && value.parse::<u64>().is_ok());
                     if !numeric {
                         return false;
                     }
@@ -1250,11 +1269,11 @@ fn is_github_readonly_stage(stage: &str) -> bool {
 fn readonly_options_are_allowed(canonical: &str, tokens: &[&str]) -> bool {
     let (start, switches, values): (usize, &str, &str) = match canonical {
         "git status" => (2, "-s --short -b --branch --ignored --porcelain", "--untracked-files"),
-        "git diff" => (2, "--cached --staged --stat --numstat --shortstat --name-only --name-status --check --no-renames --color --no-color --word-diff", "-U --unified --diff-filter"),
-        "git log" => (2, "--oneline --decorate --graph --stat --numstat --shortstat --name-only --name-status --no-patch --all --branches --tags --remotes --first-parent --reverse --color --no-color", "-n --max-count --since --until --author --grep"),
-        "git show" => (2, "--stat --numstat --shortstat --name-only --name-status --no-patch -s --color --no-color", "-U --unified"),
+        "git diff" => (2, "--cached --staged --stat --numstat --shortstat --name-only --name-status --check --no-renames --color --no-color --word-diff --no-ext-diff --no-textconv", "-U --unified --diff-filter"),
+        "git log" => (2, "--oneline --decorate --graph --stat --numstat --shortstat --name-only --name-status --no-patch --all --branches --tags --remotes --first-parent --reverse --color --no-color --no-ext-diff --no-textconv --no-show-signature", "-n --max-count --since --until --author --grep"),
+        "git show" => (2, "--stat --numstat --shortstat --name-only --name-status --no-patch -s --color --no-color --no-ext-diff --no-textconv --no-show-signature", "-U --unified"),
         "git ls-files" => (2, "-c --cached -d --deleted -m --modified -o --others -i --ignored --stage --unmerged --killed --exclude-standard --deduplicate", "--exclude --exclude-from"),
-        "git blame" => (2, "-w --line-porcelain --porcelain --show-stats --show-name --show-number --reverse --first-parent", "-L --since"),
+        "git blame" => (2, "-w --line-porcelain --porcelain --show-stats --show-name --show-number --reverse --first-parent --no-textconv", "-L --since"),
         "git grep" => (2, "-n --line-number -i --ignore-case -I -l --files-with-matches -L --files-without-match -w --word-regexp -F --fixed-strings -E --extended-regexp --cached --untracked --exclude-standard", "-e --max-depth"),
         "ls" => (1, "-a -A -l -la -al -h -lh -hl -lah -alh -R -d -1 --all --almost-all --long --human-readable --recursive --directory", ""),
         "pwd" => (1, "-L -P --logical --physical", ""),
@@ -1335,6 +1354,13 @@ fn options_match_allowlist(tokens: &[&str], switches: &str, values: &str) -> boo
 fn github_command_targets_unsupported_host(tokens: &[&str]) -> bool {
     let explicit_host_is_unsupported = |value: &str| {
         let value = value.trim();
+        // A `..`-leading repo operand is never a real repository path, and
+        // the host heuristic below needs two `/` parts to fire — a single
+        // suffix like `../foo` would otherwise slip through where
+        // `../../x` refuses.
+        if value.starts_with("..") {
+            return true;
+        }
         let host = value
             .strip_prefix("https://")
             .or_else(|| value.strip_prefix("http://"))
@@ -2657,6 +2683,12 @@ mod tests {
             "cd =ls; cat link",
             "cd =ls || cat link",
             "pwd; cd =sh",
+            // zsh's directory-stack `cd +N` has the same shape: empty stack
+            // off-session, the `cd` fails, and a `;` sequence continues at
+            // the original directory while the fold assumed the destination.
+            "cd +2; cat link",
+            "cd +2 || cat link",
+            "pwd; cd +1",
             "cd ''",
             // A pipeline stage runs in a subshell: its `cd` persists nowhere
             // and would end the gate's operand walk at the `|`.
@@ -2727,6 +2759,85 @@ mod tests {
                 "a `cd` that always runs stays admitted: {command}"
             );
         }
+    }
+
+    /// `*` is the only wildcard the charset admits, because it is the only
+    /// one the operand gate can expand exactly like the shell; every other
+    /// glob metacharacter must refuse at the classifier so the walker never
+    /// has to model it.
+    #[test]
+    fn agent_readonly_shell_refuses_non_star_glob_metacharacters() {
+        for command in ["cat a?b", "cat a[b]c", "cat notes.{md,txt}", "cat (a)"] {
+            assert!(
+                !is_agent_readonly_shell_command(command),
+                "{command} carries a non-`*` wildcard and must refuse at the charset"
+            );
+        }
+    }
+
+    /// The `gh` host check reads operands by their literal spelling, so a
+    /// relative traversal that hides a repo target behind a single suffix
+    /// must refuse like its multi-suffix sibling already does.
+    #[test]
+    fn agent_readonly_shell_rejects_gh_repo_path_traversals() {
+        for command in [
+            "gh repo view ../foo",
+            "gh pr list -R ../secret",
+            "gh repo view --repo=../o",
+            "gh pr list -R ../../x",
+        ] {
+            assert!(
+                !is_agent_readonly_shell_command(command),
+                "{command} traverses behind the repo-operand host check"
+            );
+        }
+        assert!(is_agent_readonly_shell_command("gh repo view owner/repo"));
+        assert!(is_agent_readonly_shell_command("gh pr list -R owner/repo"));
+    }
+
+    /// `-j`/`-N` take real counts: a digit string past `u64` admits nowhere
+    /// and must refuse here instead of leaning on od's runtime error.
+    #[test]
+    fn agent_readonly_shell_bounds_od_skip_and_count_values() {
+        assert!(is_agent_readonly_shell_command("od -j 4294967296 -c x"));
+        assert!(is_agent_readonly_shell_command(
+            "od -N 18446744073709551615 -c x"
+        ));
+        assert!(!is_agent_readonly_shell_command(
+            "od -j 99999999999999999999999 -c x"
+        ));
+        assert!(!is_agent_readonly_shell_command(
+            "od -N 99999999999999999999999 -c x"
+        ));
+    }
+
+    /// The flags the seam's git hardening splices in must be spellable by a
+    /// defensive command too: refusing them while admitting the bare form
+    /// would punish the safer spelling.
+    #[test]
+    fn agent_readonly_shell_admits_the_flags_the_git_hardening_splices() {
+        for command in [
+            "git diff --no-ext-diff --no-textconv HEAD",
+            "git log --no-ext-diff --no-textconv --no-show-signature -n 1",
+            "git show --no-textconv HEAD",
+            "git blame --no-textconv note.txt",
+        ] {
+            assert!(
+                is_agent_readonly_shell_command(command),
+                "{command} spells the hardening the seam adds anyway and must admit"
+            );
+        }
+    }
+
+    /// The read-only grammar bounds the command text itself: every refusal
+    /// pass is linear with transient allocations, so an oversized command
+    /// must refuse at admission instead of buying host memory at dispatch.
+    #[test]
+    fn agent_readonly_shell_rejects_oversized_commands() {
+        let within = format!("wc -c {}", "a/".repeat(100));
+        assert!(is_agent_readonly_shell_command(&within));
+        let over = format!("wc -c {}", "a/".repeat(64 * 1024));
+        assert!(!is_agent_readonly_shell_command(&over));
     }
 
     /// The shell-lane routing term is classifier-level, not host-dependent:
