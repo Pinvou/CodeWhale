@@ -2,6 +2,7 @@ name: Self-hosted Runner Smoke
 # 冒烟验证：确认 PINVOU_LINUX_RUNNER 变量路由的 self-hosted runner
 # 真正接到流量且环境可用（docker/磁盘/工具链）。仅在本文件变化时触发。
 on:
+  workflow_dispatch:
   pull_request:
     paths:
       - '.github/workflows/selfhosted-smoke.yml'
@@ -11,18 +12,30 @@ permissions:
 
 jobs:
   smoke:
-    runs-on: ${{ fromJSON(vars.PINVOU_LINUX_RUNNER || '["ubuntu-22.04"]') }}
+    strategy:
+      fail-fast: false
+      matrix:
+        pool: [light, medium, heavy]
+    runs-on: ${{ fromJSON(matrix.pool == 'heavy' && (vars.PINVOU_LINUX_HEAVY_RUNNER || vars.PINVOU_LINUX_RUNNER || '["ubuntu-22.04"]') || matrix.pool == 'medium' && (vars.PINVOU_LINUX_MEDIUM_RUNNER || vars.PINVOU_LINUX_RUNNER || '["ubuntu-22.04"]') || vars.PINVOU_LINUX_LIGHT_RUNNER || vars.PINVOU_LINUX_RUNNER || '["ubuntu-22.04"]') }}
     timeout-minutes: 10
     steps:
       - name: Runner 环境信息
+        env:
+          EXPECTED_POOL: ${{ matrix.pool }}
         run: |
           echo "runner=${RUNNER_NAME:-unknown} os=${RUNNER_OS} arch=${RUNNER_ARCH}"
+          if [[ -n "${CI_RUNNER_POOL:-}" ]]; then
+            [[ "$CI_RUNNER_POOL" == "$EXPECTED_POOL" ]]
+          fi
           uname -a
           echo "--- docker ---"
-          docker version --format 'server={{.Server.Os}}/{{.Server.Arch}} {{.Server.Version}}' 2>&1 || true
+          docker version --format 'server={{.Server.Os}}/{{.Server.Arch}} {{.Server.Version}}'
           echo "--- 磁盘 ---"
           df -h / | tail -1
           echo "--- 工具 ---"
           git --version
-          node --version 2>/dev/null || echo "node 未安装(将由 setup-node 提供)"
-          cargo --version 2>/dev/null || echo "cargo 未安装(将由 dtolnay/rust-toolchain 提供)"
+          node --version
+          cargo --version
+          if [[ -f /sys/fs/cgroup/memory.max ]]; then
+            echo "memory.max=$(cat /sys/fs/cgroup/memory.max) cpu.max=$(cat /sys/fs/cgroup/cpu.max)"
+          fi
