@@ -16,6 +16,52 @@ SPEC.loader.exec_module(RUNNER)
 
 
 class FinancialPostgresRunnerTests(unittest.TestCase):
+    def test_local_cancellation_handshake_requires_all_http_interleavings(self):
+        root = "TestLocalModelCancellationHandshakeHTTP"
+        children = {"before_registration", "during_persistent_read", "after_persistent_read",
+                    "read_failure_preserves_funds", "normal", "user_stop_preserves_generation",
+                    "emergency_then_user_before_registration"}
+        self.assertIn(root, RUNNER.REQUIRED)
+        self.assertIn(root, RUNNER.TOKEN_CHILD_REQUIRED)
+        self.assertEqual(RUNNER.EXACT_REQUIRED_CHILDREN[root], children)
+        self.run_main_fixture()
+        command = self.fixture_commands[self.fixture_phases.index("retained-token")]
+        self.assertNotIn("-run", command)
+        self.assertIsNone(re.fullmatch(command[command.index("-skip") + 1], root))
+        events = self.events({root}, RUNNER.TOKEN_PACKAGE, children=True)
+        options = {"package": RUNNER.TOKEN_PACKAGE, "require_children": True}
+        RUNNER.verify_results(events, {root}, **options)
+        for child in children:
+            for invalid in (
+                [event for event in events if event.get("Test") != root + "/" + child],
+                events + [{"Action": "skip", "Package": RUNNER.TOKEN_PACKAGE, "Test": root + "/" + child}],
+            ):
+                with self.subTest(child=child), self.assertRaises(RuntimeError):
+                    RUNNER.verify_results(invalid, {root}, **options)
+
+    def test_remote_cancellation_requires_owner_loop_transport_cases(self):
+        root = "TestRemoteModelCancellationOwnerLoopTransport"
+        children = {"remote_emergency", "remote_emergency_then_user", "user_only",
+                    "read_failure", "lease_failure", "natural_terminal",
+                    "initial_requested", "initial_read_failure", "initial_lease_failure"}
+        self.assertIn(root, RUNNER.REQUIRED)
+        self.assertIn(root, RUNNER.TOKEN_CHILD_REQUIRED)
+        self.assertEqual(RUNNER.EXACT_REQUIRED_CHILDREN[root], children)
+        self.run_main_fixture()
+        command = self.fixture_commands[self.fixture_phases.index("retained-token")]
+        self.assertNotIn("-run", command)
+        self.assertIsNone(re.fullmatch(command[command.index("-skip") + 1], root))
+        events = self.events({root}, RUNNER.TOKEN_PACKAGE, children=True)
+        options = {"package": RUNNER.TOKEN_PACKAGE, "require_children": True}
+        RUNNER.verify_results(events, {root}, **options)
+        for child in children:
+            for invalid in (
+                [event for event in events if event.get("Test") != root + "/" + child],
+                events + [{"Action": "skip", "Package": RUNNER.TOKEN_PACKAGE, "Test": root + "/" + child}],
+            ):
+                with self.subTest(child=child), self.assertRaises(RuntimeError):
+                    RUNNER.verify_results(invalid, {root}, **options)
+
     def test_registration_compensation_selects_every_database_and_business_case(self):
         root = "TestRegistrationCompensationDatabaseErrorIdentityPostgres"
         required = {
@@ -626,16 +672,16 @@ class FinancialPostgresRunnerTests(unittest.TestCase):
             if children:
                 result += [{"Action": "run", "Package": package, "Test": name + "/actual"},
                            {"Action": "pass", "Package": package, "Test": name + "/actual"}]
-                for child in RUNNER.EXACT_REQUIRED_CHILDREN.get(name, ()):
-                    result += [{"Action": "run", "Package": package, "Test": name + "/" + child},
-                               {"Action": "pass", "Package": package, "Test": name + "/" + child}]
+            for child in RUNNER.EXACT_REQUIRED_CHILDREN.get(name, ()):
+                result += [{"Action": "run", "Package": package, "Test": name + "/" + child},
+                           {"Action": "pass", "Package": package, "Test": name + "/" + child}]
             result += [{"Action": "pass", "Package": package, "Test": name}]
         if package is not None:
             result.append({"Action": "pass", "Package": package})
         return result
 
     def test_actual_required_suites(self):
-        self.assertEqual(RUNNER.verify_results(self.events()), len(RUNNER.REQUIRED))
+        self.assertEqual(RUNNER.verify_results(self.events()), len(RUNNER.REQUIRED) + sum(len(RUNNER.EXACT_REQUIRED_CHILDREN.get(root, ())) for root in RUNNER.REQUIRED))
 
     def test_context_and_reconciliation_storage_regressions_are_required(self):
         required = {
@@ -669,7 +715,7 @@ class FinancialPostgresRunnerTests(unittest.TestCase):
     def test_optional_external_skip_is_disclosed_and_allowed(self):
         self.assertEqual(
             RUNNER.verify_results(self.events() + [{"Action": "skip", "Test": "TestLiveExternalIssuer"}]),
-            len(RUNNER.REQUIRED),
+            len(RUNNER.REQUIRED) + sum(len(RUNNER.EXACT_REQUIRED_CHILDREN.get(root, ())) for root in RUNNER.REQUIRED),
         )
 
     def run_main_fixture(self, *, existing_roles=False, user_objects=False, leftover=False,
@@ -729,8 +775,9 @@ class FinancialPostgresRunnerTests(unittest.TestCase):
                 events = self.events(required, package, children=phase != "retained-token")
                 if phase == "retained-token" and not missing_token_children:
                     for name in RUNNER.TOKEN_CHILD_REQUIRED:
-                        events += [{"Action": "run", "Package": package, "Test": name + "/actual"},
-                                   {"Action": "pass", "Package": package, "Test": name + "/actual"}]
+                        for child in sorted(RUNNER.EXACT_REQUIRED_CHILDREN.get(name, {"actual"})):
+                            events += [{"Action": "run", "Package": package, "Test": name + "/" + child},
+                                       {"Action": "pass", "Package": package, "Test": name + "/" + child}]
                 if phase == "owner-account" and platform_role_evidence:
                     name = "TestPlatformRoleManagementRuntimePostgres"
                     if platform_role_evidence == "missing-root":
@@ -1036,7 +1083,7 @@ class FinancialPostgresRunnerTests(unittest.TestCase):
     def test_actual_main_requires_token_waiver_children(self):
         self.assertEqual(
             RUNNER.TOKEN_CHILD_REQUIRED,
-            {"TestHoldAcknowledgementSurvivesDispatchPersistenceFailurePostgres", "TestUsageWaiverCoordinatorRecoveryPostgres", "TestPersonalZeroBudgetCancellationAndExpiryPostgres", "TestCredentialRotationWindowReceiptPostgres", "TestCredentialFailurePersistenceBoundariesPostgres", "TestCircuitFailureBeforeDispatchPostgres", "TestPreparationFailurePreservesAcceptedUsagePostgres"},
+            {'TestLocalModelCancellationHandshakeHTTP', 'TestRemoteModelCancellationOwnerLoopTransport', "TestHoldAcknowledgementSurvivesDispatchPersistenceFailurePostgres", "TestUsageWaiverCoordinatorRecoveryPostgres", "TestPersonalZeroBudgetCancellationAndExpiryPostgres", "TestCredentialRotationWindowReceiptPostgres", "TestCredentialFailurePersistenceBoundariesPostgres", "TestCircuitFailureBeforeDispatchPostgres", "TestPreparationFailurePreservesAcceptedUsagePostgres"},
         )
         with self.assertRaisesRegex(RuntimeError, "no completed child"):
             self.run_main_fixture(missing_token_children=True)

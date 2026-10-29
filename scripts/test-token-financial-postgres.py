@@ -18,6 +18,8 @@ from urllib.parse import parse_qs, urlsplit
 ROOT = Path(__file__).resolve().parents[1]
 ACTORS = {"billing_migrator", "billing_schema_owner", "billing_service"}
 REQUIRED = {
+    'TestLocalModelCancellationHandshakeHTTP',
+    'TestRemoteModelCancellationOwnerLoopTransport',
     "TestPreparationFailurePreservesAcceptedUsagePostgres",
     "TestCircuitFailureBeforeDispatchPostgres",
     "TestCredentialRotationWindowReceiptPostgres",
@@ -87,6 +89,8 @@ ACCOUNT_REQUIRED = {
 }
 TOKEN_PACKAGE = "github.com/Pinvou/pinvou3/account-platform/internal/token"
 TOKEN_CHILD_REQUIRED = {
+    'TestLocalModelCancellationHandshakeHTTP',
+    'TestRemoteModelCancellationOwnerLoopTransport',
     "TestPreparationFailurePreservesAcceptedUsagePostgres",
     "TestCircuitFailureBeforeDispatchPostgres",
     "TestCredentialRotationWindowReceiptPostgres",
@@ -199,6 +203,8 @@ BILLING_LEAF_REQUIRED = {
 }
 BILLING_CHILD_REQUIRED = RETAINED_REQUIRED - BILLING_LEAF_REQUIRED
 EXACT_REQUIRED_CHILDREN = {
+    'TestLocalModelCancellationHandshakeHTTP': {'after_persistent_read', 'before_registration', 'during_persistent_read', 'emergency_then_user_before_registration', 'normal', 'read_failure_preserves_funds', 'user_stop_preserves_generation'},
+    'TestRemoteModelCancellationOwnerLoopTransport': {'initial_lease_failure', 'initial_read_failure', 'initial_requested', 'lease_failure', 'natural_terminal', 'read_failure', 'remote_emergency', 'remote_emergency_then_user', 'user_only'},
     "TestRegistrationCompensationDatabaseErrorIdentityPostgres": {
         "operation-read",
         "absence-proof-read",

@@ -117,12 +117,20 @@ func (r *PostgresRepository) checkDispatchLeaseOwnerTx(ctx context.Context, tx p
 // and this same service loop to be exercised without waiting two wall-clock hours.
 func (s *Service) renewDispatchLease(parent context.Context, cancelUpstream context.CancelFunc, usageID uuid.UUID, owner string, ticks <-chan time.Time) (<-chan struct{}, func(), error) {
 	ctx, cancel := context.WithCancel(parent)
-	renew := func() (bool, error) {
+	renew := func() (active, emergencyRequested bool, err error) {
 		writeContext, stop := context.WithTimeout(ctx, dispatchLeaseWriteTimeout)
 		defer stop()
-		return s.repository.RenewDispatchLease(writeContext, usageID, owner)
+		active, err = s.repository.RenewDispatchLease(writeContext, usageID, owner)
+		if err != nil || !active {
+			return active, false, err
+		}
+		// The dispatch owner can differ from the emergency worker replica. Observe
+		// its durable request within the existing renewal budget and cadence; a
+		// local registry miss must not permanently lose the cancellation signal.
+		usage, err := s.repository.GetUsage(writeContext, usageID)
+		return true, usage.EmergencyCancellationRequested, err
 	}
-	active, err := renew()
+	active, emergencyRequested, err := renew()
 	if err != nil || !active {
 		cancel()
 		if err == nil {
@@ -131,6 +139,13 @@ func (s *Service) renewDispatchLease(parent context.Context, cancelUpstream cont
 		return nil, func() {}, err
 	}
 	failed := make(chan struct{})
+	if emergencyRequested {
+		// This is a requested local cancellation, not lease loss, release proof,
+		// or provider confirmation. The existing dispatch error path reconciles.
+		cancelUpstream()
+		cancel()
+		return failed, func() {}, nil
+	}
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
@@ -142,7 +157,7 @@ func (s *Service) renewDispatchLease(parent context.Context, cancelUpstream cont
 				if !open || ctx.Err() != nil {
 					return
 				}
-				active, err := renew()
+				active, emergencyRequested, err := renew()
 				if err != nil {
 					if ctx.Err() == nil {
 						close(failed)
@@ -151,6 +166,10 @@ func (s *Service) renewDispatchLease(parent context.Context, cancelUpstream cont
 					return
 				}
 				if !active {
+					return
+				}
+				if emergencyRequested {
+					cancelUpstream()
 					return
 				}
 			}

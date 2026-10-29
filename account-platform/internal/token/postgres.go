@@ -117,21 +117,29 @@ type Repository interface {
 }
 
 func (r *PostgresRepository) GetUsage(ctx context.Context, usageID uuid.UUID) (UsageRequest, error) {
-	query := `SELECT ` + usageSelectColumns + ` FROM usage_requests WHERE id=$1`
+	// Keep the shared column list strictly positional: other locked readers
+	// qualify it by splitting commas. Only this public read projects the durable
+	// emergency fact, using the existing per-usage and evidence timeline indexes.
+	query := `SELECT ` + usageSelectColumns + `,EXISTS(
+ SELECT 1 FROM model_emergency_cancellations cancellation
+ JOIN model_emergency_cancellation_evidence evidence ON evidence.emergency_cancellation_id=cancellation.id
+ WHERE cancellation.usage_request_id=usage_requests.id AND evidence.evidence_type='REQUESTED'
+) FROM usage_requests WHERE id=$1`
 	var usage UsageRequest
-	err := scanUsage(r.pool.QueryRow(ctx, query, usageID), &usage)
+	err := scanUsage(r.pool.QueryRow(ctx, query, usageID), &usage, &usage.EmergencyCancellationRequested)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return UsageRequest{}, ErrNotFound
 	}
 	return usage, err
 }
 
-const usageSelectColumns = `id,idempotency_key_digest,idempotency_namespace,canonicalization_version,request_fingerprint,user_id,session_id,organization_id,token_account_id,credential_id,wallet_id,price_version_id,hold_id,model,model_id,catalog_version,model_capability_version_id,protocol_definition_id,route_generation,model_snapshot,request_snapshot,usage_snapshot,status,execution_status,execution_version,delivery_status,cancel_status,settlement_status,cancel_requested_at,user_stopped_at,provider_terminal_at,final_usage_observed_at,last_persisted_sequence,last_client_confirmed_sequence,maximum_microcredits,actual_microcredits,error_class,started_at,updated_at`
+const usageSelectColumns = `id,idempotency_key_digest,idempotency_namespace,canonicalization_version,request_fingerprint,user_id,session_id,organization_id,token_account_id,credential_id,wallet_id,price_version_id,hold_id,model,model_id,catalog_version,model_capability_version_id,protocol_definition_id,route_generation,model_snapshot,request_snapshot,usage_snapshot,status,execution_status,execution_version,delivery_status,cancel_status,settlement_status,cancel_requested_at,user_stopped_at,provider_terminal_at,final_usage_observed_at,last_persisted_sequence,last_client_confirmed_sequence,maximum_microcredits,actual_microcredits,error_class,started_at,updated_at,cancellation_origin`
 
 type rowScanner interface{ Scan(...any) error }
 
-func scanUsage(row rowScanner, usage *UsageRequest) error {
-	return row.Scan(&usage.ID, &usage.IdempotencyKeyDigest, &usage.IdempotencyNamespace, &usage.CanonicalVersion, &usage.RequestFingerprint, &usage.UserID, &usage.SessionID, &usage.OrganizationID, &usage.TokenAccountID, &usage.CredentialID, &usage.WalletID, &usage.PriceVersionID, &usage.HoldID, &usage.Model, &usage.ModelID, &usage.CatalogVersion, &usage.CapabilityVersionID, &usage.ProtocolDefinitionID, &usage.RouteGeneration, &usage.ModelSnapshot, &usage.RequestSnapshot, &usage.UsageSnapshot, &usage.Status, &usage.ExecutionStatus, &usage.ExecutionVersion, &usage.DeliveryStatus, &usage.CancelStatus, &usage.SettlementStatus, &usage.CancelRequestedAt, &usage.UserStoppedAt, &usage.ProviderTerminalAt, &usage.FinalUsageObservedAt, &usage.LastPersistedSequence, &usage.LastClientConfirmedSequence, &usage.MaximumMicrocredits, &usage.ActualMicrocredits, &usage.ErrorClass, &usage.StartedAt, &usage.UpdatedAt)
+func scanUsage(row rowScanner, usage *UsageRequest, additional ...any) error {
+	destinations := []any{&usage.ID, &usage.IdempotencyKeyDigest, &usage.IdempotencyNamespace, &usage.CanonicalVersion, &usage.RequestFingerprint, &usage.UserID, &usage.SessionID, &usage.OrganizationID, &usage.TokenAccountID, &usage.CredentialID, &usage.WalletID, &usage.PriceVersionID, &usage.HoldID, &usage.Model, &usage.ModelID, &usage.CatalogVersion, &usage.CapabilityVersionID, &usage.ProtocolDefinitionID, &usage.RouteGeneration, &usage.ModelSnapshot, &usage.RequestSnapshot, &usage.UsageSnapshot, &usage.Status, &usage.ExecutionStatus, &usage.ExecutionVersion, &usage.DeliveryStatus, &usage.CancelStatus, &usage.SettlementStatus, &usage.CancelRequestedAt, &usage.UserStoppedAt, &usage.ProviderTerminalAt, &usage.FinalUsageObservedAt, &usage.LastPersistedSequence, &usage.LastClientConfirmedSequence, &usage.MaximumMicrocredits, &usage.ActualMicrocredits, &usage.ErrorClass, &usage.StartedAt, &usage.UpdatedAt, &usage.CancellationOrigin}
+	return row.Scan(append(destinations, additional...)...)
 }
 
 func NewPostgresRepository(ctx context.Context, databaseURL string, secrets SecretProvider) (*PostgresRepository, error) {

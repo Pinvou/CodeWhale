@@ -41,45 +41,49 @@ type RouteRequest struct {
 }
 
 type UsageRequest struct {
-	ID                          uuid.UUID
-	IdempotencyKeyDigest        string
-	IdempotencyNamespace        string
-	CanonicalVersion            int
-	RequestFingerprint          string
-	UserID                      uuid.UUID
-	SessionID                   string
-	OrganizationID              *uuid.UUID
-	TokenAccountID              uuid.UUID
-	CredentialID                uuid.UUID
-	WalletID                    uuid.UUID
-	PriceVersionID              *uuid.UUID
-	HoldID                      *uuid.UUID
-	Model                       string
-	ModelID                     *uuid.UUID
-	CatalogVersion              *int64
-	CapabilityVersionID         *uuid.UUID
-	ProtocolDefinitionID        *uuid.UUID
-	RouteGeneration             *int64
-	ModelSnapshot               json.RawMessage
-	RequestSnapshot             json.RawMessage
-	UsageSnapshot               json.RawMessage
-	Status                      string
-	ExecutionStatus             string
-	ExecutionVersion            int64
-	DeliveryStatus              string
-	CancelStatus                string
-	SettlementStatus            string
-	CancelRequestedAt           *time.Time
-	UserStoppedAt               *time.Time
-	ProviderTerminalAt          *time.Time
-	FinalUsageObservedAt        *time.Time
-	LastPersistedSequence       int64
-	LastClientConfirmedSequence int64
-	MaximumMicrocredits         int64
-	ActualMicrocredits          *int64
-	ErrorClass                  *string
-	StartedAt                   time.Time
-	UpdatedAt                   time.Time
+	ID                   uuid.UUID
+	IdempotencyKeyDigest string
+	IdempotencyNamespace string
+	CanonicalVersion     int
+	RequestFingerprint   string
+	UserID               uuid.UUID
+	SessionID            string
+	OrganizationID       *uuid.UUID
+	TokenAccountID       uuid.UUID
+	CredentialID         uuid.UUID
+	WalletID             uuid.UUID
+	PriceVersionID       *uuid.UUID
+	HoldID               *uuid.UUID
+	Model                string
+	ModelID              *uuid.UUID
+	CatalogVersion       *int64
+	CapabilityVersionID  *uuid.UUID
+	ProtocolDefinitionID *uuid.UUID
+	RouteGeneration      *int64
+	ModelSnapshot        json.RawMessage
+	RequestSnapshot      json.RawMessage
+	UsageSnapshot        json.RawMessage
+	Status               string
+	ExecutionStatus      string
+	ExecutionVersion     int64
+	DeliveryStatus       string
+	CancelStatus         string
+	// Internal cancellation authority, never added to a serialized usage DTO.
+	CancellationOrigin string `json:"-"`
+	// Immutable emergency REQUESTED evidence survives later USER delivery stops.
+	EmergencyCancellationRequested bool `json:"-"`
+	SettlementStatus               string
+	CancelRequestedAt              *time.Time
+	UserStoppedAt                  *time.Time
+	ProviderTerminalAt             *time.Time
+	FinalUsageObservedAt           *time.Time
+	LastPersistedSequence          int64
+	LastClientConfirmedSequence    int64
+	MaximumMicrocredits            int64
+	ActualMicrocredits             *int64
+	ErrorClass                     *string
+	StartedAt                      time.Time
+	UpdatedAt                      time.Time
 }
 
 type CancellationResult struct {

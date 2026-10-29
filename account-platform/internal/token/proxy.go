@@ -463,8 +463,24 @@ func (s *Service) dispatchUsage(w http.ResponseWriter, r *http.Request, usageReq
 	upstreamContext, cancelUpstream := context.WithTimeout(dispatchContext, 2*time.Hour)
 	defer cancelUpstream()
 	defer s.registerActiveUpstream(usageRequest.ID, cancelUpstream)()
+	// Register before observing the durable request. If the emergency worker
+	// committed before registration, this read delivers that cancellation. If it
+	// commits after the read, its existing post-commit abort sees this registry.
+	// The immutable REQUESTED fact survives a later USER stop overwriting origin.
+	// Ordinary USER-only stops remain delivery-only; this is not provider confirmation.
+	cancellation, cancellationErr := s.repository.GetUsage(upstreamContext, usageRequest.ID)
+	if cancellationErr != nil || cancellation.EmergencyCancellationRequested {
+		cancelUpstream()
+	}
 	renewalFailed := s.renewHold(upstreamContext, cancelUpstream, usageRequest.ID, holdID)
-	response, err := s.executionUpstream.Do(upstreamContext, envelope.BaseURL, envelope.Credential, envelope.RequestBody, usageRequest.ID)
+	var response *http.Response
+	err = cancellationErr
+	if err == nil {
+		err = upstreamContext.Err()
+	}
+	if err == nil {
+		response, err = s.executionUpstream.Do(upstreamContext, envelope.BaseURL, envelope.Credential, envelope.RequestBody, usageRequest.ID)
+	}
 	if err != nil {
 		s.breaker.Record(resilience.Key(envelope.Provider, "MODEL_DISPATCH", envelope.BaseURL), resilience.UncertainResult)
 		select {
