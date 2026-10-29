@@ -303,6 +303,10 @@ function stripCssCommentsAndStrings(code) {
       out += ' '.repeat(stop - i);
       i = stop;
     } else if (ch === '"' || ch === "'") {
+      // Divergence from CSS bad-string tokens (which end at an unescaped
+      // newline): a string whose quote never closes blanks to EOF. Minified
+      // dist CSS never ships a raw newline inside a string, and over-blanking
+      // only fails safe (a later survivor is hidden, never invented).
       let j = i + 1;
       while (j < code.length && code[j] !== ch) {
         if (code[j] === '\\') j += 1;
@@ -317,22 +321,27 @@ function stripCssCommentsAndStrings(code) {
       && (i === 0 || !/[-\w\\]/.test(code[i - 1]))
     ) {
       // Copy `url(` and its leading whitespace, blank the token body, copy
-      // the closer (an escape may hide that paren from the scan).
+      // the closer (an escape may hide that paren from the scan). The body
+      // span is padded from its own start (after the copied whitespace), so
+      // the masked copy keeps indexing the original 1:1 — padding measured
+      // from `url(` would double-count the whitespace and shift every later
+      // line/excerpt attribution.
       out += code.slice(i, i + 4);
       let j = i + 4;
       while (j < code.length && /\s/.test(code[j])) j += 1;
       out += code.slice(i + 4, j);
+      const bodyStart = j;
       if (code[j] !== '"' && code[j] !== "'") {
         while (j < code.length && code[j] !== ')') {
           if (code[j] === '\\') j += 1;
           j += 1;
         }
         if (j < code.length) {
-          out += ' '.repeat(j - i - 4);
+          out += ' '.repeat(j - bodyStart);
           out += ')';
           i = j + 1;
         } else {
-          out += ' '.repeat(code.length - i - 4);
+          out += ' '.repeat(code.length - bodyStart);
           i = code.length;
         }
       } else {

@@ -445,3 +445,46 @@ test('the audit fails closed when a dist layer is absent or empty', () => {
     fs.rmSync(emptyDist, { recursive: true, force: true });
   }
 });
+
+test('the url() lexer keeps 1:1 offsets and a discriminative ident boundary', () => {
+  // Three pins over the shared stripper, each discriminating a specific
+  // mutation of `stripCssCommentsAndStrings`:
+  // 1. ident boundary: `svg-url(` must not tokenize as a url() token — its
+  //    body stays visible, so the at-rule inside the (invalid-CSS) function
+  //    value still fires; dropping the boundary check would mask it away.
+  // 2. import URL peel: `url(…)layer(…)` with no whitespace before the clause
+  //    must fire — the fallback `(?:^|\s)layer` cannot see `)layer(`, so only
+  //    the explicit URL-token peel makes "clause in any position" true.
+  // 3. offset attribution: whitespace after `url(` must not be double-counted
+  //    (padded from the body start, not from `url(`), or the masked copy
+  //    drifts against the original and the violation's line number moves.
+  const distDir = fs.mkdtempSync(path.join(os.tmpdir(), 'compat-audit-lexer-'));
+  try {
+    fs.mkdirSync(path.join(distDir, 'assets'), { recursive: true });
+
+    fs.writeFileSync(path.join(distDir, 'assets', 'main.css'), '.i{mask-image:svg-url(data:@layer x{})}\n');
+    const boundary = hermeticAudit({ distDir });
+    assert.equal(boundary.length, 1, `the at-rule inside an svg-url() function value must still fire; got: ${JSON.stringify(boundary)}`);
+    assert.match(boundary[0], /^dist:main\.css:1: @layer survives the build/);
+
+    fs.writeFileSync(path.join(distDir, 'assets', 'main.css'), [
+      '@import url("./a.css")layer(nav);',
+      '@media (min-width:640px){.ok{display:block}}',
+    ].join('\n'));
+    const noSpaceClause = hermeticAudit({ distDir });
+    assert.equal(noSpaceClause.length, 1, `the import layer clause with no whitespace before it must fire; got: ${JSON.stringify(noSpaceClause)}`);
+    assert.match(noSpaceClause[0], /^dist:main\.css:1: @import layer survives the build/);
+
+    // Whitespace inside the url() token + `@layer` as the first token of the
+    // next line followed by its own newline: a double-counted pad shifts the
+    // match index past line 2's newline and reports line 3.
+    const drifted = 'a{background:url(        x)}\n@layer\ndemo{b{color:red}}\n';
+    fs.writeFileSync(path.join(distDir, 'assets', 'main.css'), drifted);
+    const trueLine = drifted.split('\n').findIndex((line) => /@layer/i.test(line)) + 1;
+    const attributed = hermeticAudit({ distDir });
+    assert.equal(attributed.length, 1, `exactly the surviving @layer must be reported; got: ${JSON.stringify(attributed)}`);
+    assert.match(attributed[0], new RegExp(`^dist:main\\.css:${trueLine}: @layer survives the build`), 'line attribution must survive whitespace inside url() tokens');
+  } finally {
+    fs.rmSync(distDir, { recursive: true, force: true });
+  }
+});
