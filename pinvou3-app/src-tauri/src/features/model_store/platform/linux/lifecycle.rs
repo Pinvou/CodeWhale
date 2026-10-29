@@ -1381,7 +1381,13 @@ impl ModelManager {
             // install_engine 可以打印 LMM_ENGINE_IMAGE= 这一行告诉 LMM 这个引擎
             // 实际用的 docker 镜像是哪个（不是所有引擎都是 docker 镜像，比如
             // ollama 就没有），供"已安装引擎"的删除功能精确 docker rmi。
-            docker_image = extract_marker(&install_lines, "LMM_ENGINE_IMAGE=");
+            // stdout 是卡片作者可控的输入，先过形式白名单、且不覆盖共享行里
+            // 已登记的不同镜像名（r19 评审 P2-1，判据见 engine_image_to_record）。
+            docker_image = engine_image_to_record(
+                &card.summary.engine_name,
+                card.summary.engine_version.as_deref(),
+                extract_marker(&install_lines, "LMM_ENGINE_IMAGE="),
+            );
         }
         // 独立清理脚本不是下载前提：老卡片没有它、或弱网下一次补取失败，都不能
         // 让已经验证好的模型权重下载功亏一篑。缺失时只是不开放“删除原生引擎”。
@@ -2386,10 +2392,17 @@ impl ModelManager {
             ));
         }
         let cleanup_script = source.optional_script_blob("uninstall_engine")?;
+        // 同 download 路径：自报镜像名先过白名单、不覆盖已登记的不同值
+        // （r19 评审 P2-1）。
+        let docker_image = engine_image_to_record(
+            &rec.engine_name,
+            rec.engine_version.as_deref(),
+            extract_marker(&lines, "LMM_ENGINE_IMAGE="),
+        );
         db::mark_engine_installed(
             &rec.engine_name,
             rec.engine_version.as_deref(),
-            extract_marker(&lines, "LMM_ENGINE_IMAGE=").as_deref(),
+            docker_image.as_deref(),
             source.script_hash("install_engine").as_deref(),
             cleanup_script.as_ref(),
         )
@@ -3604,6 +3617,67 @@ fn extract_marker(output_lines: &[String], prefix: &str) -> Option<String> {
         }
     }
     found
+}
+
+/// `LMM_ENGINE_IMAGE=` 自报值的形式判据（r19 评审 P2-1）。
+///
+/// 这个值最终会写进 installed_engines 里 (name,version) 相同的共享行，并由
+/// `delete_engine` 拿去拼 `docker rmi <image>`——而 install_engine 的 stdout 是
+/// 卡片作者可控的输入，一行伪造的 marker 就能把别的卡正在用的镜像名覆盖掉，
+/// 之后的「删除引擎」会 rmi 掉被冒名的镜像。白名单收口：
+///
+/// - 首字符必须是字母数字：`-` 开头会被 docker 当成选项吞掉（`docker rmi -f`
+///   就是这么拼出来的），`/`、`:`、`@`、`.` 开头说明没有 repo 名；
+/// - 字符集只放行镜像引用（`registry/repo:tag@sha256:…`）会用到的
+///   `[A-Za-z0-9._:/@-]`：空白、引号、`$`、`;`、`|` 一律出局——镜像引用是
+///   一个 token，混进这些字符它就不是镜像名而是别的什么东西了。
+///
+/// 刻意停在「形式像不像」这一层，不去联网验证镜像真的存在：那要花几十秒，
+/// 不该挡在下载主流程上；形式不合法的值先挡在门外，合法但编造的值由
+/// [`engine_image_to_record`] 的不覆盖规则兜住。
+fn engine_image_marker_is_wellformed(value: &str) -> bool {
+    if !value.starts_with(|c: char| c.is_ascii_alphanumeric()) {
+        return false;
+    }
+    value
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-' | '/' | ':' | '@'))
+}
+
+/// 算出这次要登记进 installed_engines 的镜像名（r19 评审 P2-1）。
+///
+/// 两道保守防线：
+/// 1. 形式不合法的 marker 直接丢弃并留日志，绝不让它靠近 docker rmi；
+/// 2. 引擎行已有**不同**的镜像名时不覆盖、保留旧值——两个名字都是卡片脚本
+///    自报的、没有第三方权威，但旧值至少跟着这行记录被用过，新值可能只是
+///    另一张卡的脚本在抢写共享行。返回 None 即可：`mark_engine_installed`
+///    的 COALESCE 会保留库里的旧值。这比弹框让用户裁决侵入性小，先做保守版。
+///
+/// 空值（ollama、厂商二进制引擎都不报镜像）维持原行为，同样交给 COALESCE。
+fn engine_image_to_record(
+    engine_name: &str,
+    engine_version: Option<&str>,
+    marker: Option<String>,
+) -> Option<String> {
+    let candidate = marker?;
+    if !engine_image_marker_is_wellformed(&candidate) {
+        eprintln!(
+            "[engine] 丢弃形式不合法的 LMM_ENGINE_IMAGE 标记（{engine_name}）：{candidate:?}"
+        );
+        return None;
+    }
+    if let Ok(Some(existing)) = db::get_installed_engine(engine_name, engine_version) {
+        if let Some(old) = existing.docker_image {
+            if old != candidate {
+                eprintln!(
+                    "[engine] 引擎 {engine_name} 已登记镜像 {old}，忽略脚本自报的不同镜像 \
+                     {candidate}，保留原记录"
+                );
+                return None;
+            }
+        }
+    }
+    Some(candidate)
 }
 
 /// 用厂商随引擎提供的独立清理脚本做只读探测。
@@ -4956,6 +5030,85 @@ exit 0
             Some("/models/target")
         );
         assert_eq!(extract_marker(&lines, "LMM_ENGINE_IMAGE="), None);
+    }
+
+    /// r19 评审 P2-1：install_engine 的 stdout 是卡片作者可控的输入，伪造的
+    /// `LMM_ENGINE_IMAGE=` 经 mark_engine_installed 的 COALESCE 能覆盖共享引擎
+    /// 行、再借 delete_engine 驱动 `docker rmi`。形式白名单先挡掉注入形状。
+    #[test]
+    fn engine_image_marker_whitelist_rejects_injection_shapes() {
+        // 合法形态：裸 repo、repo:tag、带 registry 端口、摘要引用
+        for ok in [
+            "example/img",
+            "vllm/vllm-openai:v0.8.5",
+            "registry.internal:5000/team/app:latest",
+            "registry.internal:5000/team/app@sha256:0f2a9c11d4e5f6a7b8c9d0e1f2a3b4c5d6e7f8a9",
+            "ghcr.io/org/repo",
+        ] {
+            assert!(engine_image_marker_is_wellformed(ok), "应放行：{ok}");
+        }
+        // `-` 开头（docker 选项）、空白/引号/元字符（不是一个 token）、没有
+        // repo 名的纯 tag/纯摘要、空串——全部出局
+        for bad in [
+            "",
+            "-f",
+            "--",
+            "a b",
+            "'quoted'",
+            "$evIL",
+            "example/img;rm -rf /",
+            "a||b",
+            "a\nb",
+            ":just-a-tag",
+            "/repo",
+            "@sha256:0f2a9c",
+        ] {
+            assert!(!engine_image_marker_is_wellformed(bad), "应拒绝：{bad:?}");
+        }
+    }
+
+    /// r19 评审 P2-1：同名同版本的引擎行是共享的。脚本自报一个**不同**的镜像
+    /// 名时必须保留旧值（返回 None 让 COALESCE 生效），形式不合法的 marker
+    /// 直接丢弃；新引擎行没有旧值时照常登记。
+    #[test]
+    fn differing_engine_image_marker_never_overwrites_existing_row() {
+        let _home = setup_temp_db();
+        db::mark_engine_installed("vllm", Some("v1"), Some("old/img:1"), None, None).unwrap();
+
+        // 不同镜像名：不覆盖
+        assert_eq!(
+            engine_image_to_record("vllm", Some("v1"), Some("new/img:2".into())),
+            None,
+            "共享行已有镜像名时，自报的不同值不该覆盖旧值"
+        );
+        // 相同镜像名：等值登记，无害
+        assert_eq!(
+            engine_image_to_record("vllm", Some("v1"), Some("old/img:1".into())),
+            Some("old/img:1".into())
+        );
+        // 形式不合法：丢弃
+        assert_eq!(
+            engine_image_to_record("vllm", Some("v1"), Some("-f".into())),
+            None
+        );
+        // 新引擎行（库里没有旧值）：正常登记
+        assert_eq!(
+            engine_image_to_record("sglang", None, Some("s/img:9".into())),
+            Some("s/img:9".into())
+        );
+
+        // 走完 mark_engine_installed 全链路，库里仍是旧镜像名（COALESCE 那条腿）
+        let recorded = engine_image_to_record("vllm", Some("v1"), Some("new/img:2".into()));
+        db::mark_engine_installed("vllm", Some("v1"), recorded.as_deref(), None, None).unwrap();
+        assert_eq!(
+            db::get_installed_engine("vllm", Some("v1"))
+                .unwrap()
+                .unwrap()
+                .docker_image
+                .as_deref(),
+            Some("old/img:1"),
+            "覆盖被拒后落库的必须是旧镜像名"
+        );
     }
 
     #[test]

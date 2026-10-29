@@ -507,7 +507,9 @@ export const dictEn = {
           enginesBound:(names)=>`Bound to: ${names}. Handle these models first.`,
           enginesNoCleanup:'This engine has no safe standalone cleanup path; automatic removal is unavailable.',
           enginesDelete:'Delete',
-          enginesConfirm:(name)=>`Delete “${name}”? This frees the engine's disk space; model weights are not removed.`,
+          // r19 P2-1：镜像名来自卡片脚本自报的 LMM_ENGINE_IMAGE，宿主没有独立
+          // 核实渠道；删除按这个名字 docker rmi，说清楚它未必可信。
+          enginesConfirm:(name)=>`Delete “${name}”? This frees the engine's disk space; model weights are not removed. The image name is self-reported by the card script and has not been independently verified.`,
           enginesConfirmDelete:'Delete now',
           scriptUpdateBadge:'Update available',
           detail:'Details',

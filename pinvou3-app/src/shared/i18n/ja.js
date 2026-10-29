@@ -505,7 +505,9 @@ const jaBase = {
           enginesBound:(names)=>`バインド中：${names}。先にこれらのモデルを処理してください。`,
           enginesNoCleanup:'このエンジンには安全な単独クリーンアップ手段がないため、自動削除は提供しません。',
           enginesDelete:'削除',
-          enginesConfirm:(name)=>`「${name}」を削除しますか？エンジンの容量を解放します。モデルの重みは削除されません。`,
+          // r19 P2-1：镜像名来自卡片脚本自报的 LMM_ENGINE_IMAGE，宿主没有独立
+          // 核实渠道；删除按这个名字 docker rmi，说清楚它未必可信。
+          enginesConfirm:(name)=>`「${name}」を削除しますか？エンジンの容量を解放します。モデルの重みは削除されません。イメージ名はカードスクリプトの自己申告によるもので、独立した検証は行われていません。`,
           enginesConfirmDelete:'削除を実行',
           scriptUpdateBadge:'更新あり',
           detail:'詳細',

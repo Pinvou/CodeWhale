@@ -540,7 +540,9 @@ export const dictZh = {
           enginesBound:(names)=>`已绑定：${names}。请先处理这些模型。`,
           enginesNoCleanup:'该引擎没有安全的独立清理方式，暂不提供自动删除。',
           enginesDelete:'删除',
-          enginesConfirm:(name)=>`删除“${name}”？此操作会释放引擎空间；模型权重不会被删除。`,
+          // r19 P2-1：镜像名来自卡片脚本自报的 LMM_ENGINE_IMAGE，宿主没有独立
+          // 核实渠道；删除按这个名字 docker rmi，说清楚它未必可信。
+          enginesConfirm:(name)=>`删除“${name}”？此操作会释放引擎空间；模型权重不会被删除。镜像名由卡片脚本自报，未经独立核实。`,
           enginesConfirmDelete:'确认删除',
           scriptUpdateBadge:'有可用更新',
           detail:'详情',
