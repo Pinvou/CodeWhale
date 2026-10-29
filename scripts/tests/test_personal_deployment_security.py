@@ -21,6 +21,22 @@ def nginx_active_text(text):
 
 
 class PersonalDeploymentSecurityTests(unittest.TestCase):
+    def test_personal_redis_acl_covers_existing_session_cleanup(self):
+        acl = (DEPLOY / "production/redis-personal.acl.template").read_text(encoding="utf-8")
+        portal = next(line.split() for line in acl.splitlines() if line.startswith("user portal "))
+        store = (ROOT / "account-platform/internal/portal/store.go").read_text(encoding="utf-8")
+        wire = (ROOT / "account-platform/internal/portal/approval_wire_store.go").read_text(encoding="utf-8")
+        prefix = re.search(r'func approvalWireKey\(id string\) string \{ return "([^"]+)" \+ id \}', wire).group(1)
+        # These operations clean up wire state even when personal approvals are
+        # disabled, or when no corresponding Redis key has ever been created.
+        for name in ["DeleteSession", "LogoutSession", "ReplaceSessionFromHandoff"]:
+            with self.subTest(operation=name):
+                body = re.search(rf"func \(s \*RedisStore\) {name}\([^\n]+\{{(.*?)(?=\nfunc |\Z)", store, re.S).group(1)
+                self.assertTrue("approvalWireKey(" in body or f"'{prefix}'" in body)
+                self.assertIn(f"~{prefix}*", portal)
+        self.assertNotIn("~portal:*", portal)
+        self.assertNotIn("~*", portal)
+
     def test_keycloak_applies_and_verifies_hardening(self):
         text = (DEPLOY / "keycloak/provision-mobile-auth.sh").read_text(encoding="utf-8")
         block = text.split("# BEGIN PINVOU_REALM_HARDENING", 1)[1].split("# END PINVOU_REALM_HARDENING", 1)[0]

@@ -65,7 +65,7 @@ Account 的 `ACCOUNT_TRUSTED_SOURCE_PEER_IPS` 只包含固定入口、Portal 和
 
 ## Redis 与普通事件资源
 
-为单独的账户 Redis 使用 `redis.conf` 和渲染后的 `redis-personal.acl.template`，保持 TLS、default user disabled 与 noeviction。Portal 和 Identity 使用不同 ACL 用户；模板只包含实际 session/lineage/handoff/refresh 及风险计数命名空间和实际 Lua 所需命令。`redis-health.sh` 仅证明匿名连接无法 PING，并不证明业务权限正确；上线前必须实际验证 Portal 的刷新、logout/lineage 与 Identity 风险写入。
+为单独的账户 Redis 使用 `redis.conf` 和渲染后的 `redis-personal.acl.template`，保持 TLS、default user disabled 与 noeviction。Portal 和 Identity 使用不同 ACL 用户；模板只包含实际 session/lineage/handoff/refresh、会话清理所需的 `portal:approval-wire:*` 及风险计数命名空间和实际 Lua 所需命令。个人模式未启用审批时，注销、删除会话及桌面交接仍会清理 approval wire，不应移除此键权限。`redis-health.sh` 仅证明匿名连接无法 PING，并不证明业务权限正确；上线前必须实际验证 Portal 的刷新、logout/lineage 与 Identity 风险写入。
 
 NATS 使用现有 `nats.conf`、`authorization.conf` 和 `runbooks/nats-resources.md`。独立 operator 首先显式创建缺失固定 stream，然后严格检查。普通 relay 只使用专属 publisher NKey；已有 stream drift 必须拒绝，不自动覆盖或借 operator 身份执行。relay 与 operator 不共享 seed，不添加未来 Billing/Token consumer 或审批 subject。
 
