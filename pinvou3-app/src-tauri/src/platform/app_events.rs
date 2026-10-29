@@ -43,7 +43,7 @@ impl AppEventBus {
 
 /// Forward an event to optional non-UI transports. Missing state is allowed in
 /// headless tests and during partial application startup.
-pub fn forward_app_event(app: &AppHandle, event: &str, payload: Value) {
+pub fn forward_app_event<R: tauri::Runtime>(app: &AppHandle<R>, event: &str, payload: Value) {
     if let Some(events) = app.try_state::<AppEventBus>() {
         events.forward(event, payload);
     }
