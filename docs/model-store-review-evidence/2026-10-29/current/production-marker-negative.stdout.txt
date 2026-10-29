@@ -1,0 +1,93 @@
+   Compiling pinvou3-tauri v0.10.16 (<WORKTREE>/pinvou3-app/src-tauri)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 41.25s
+     Running unittests src/lib.rs (<CARGO_TARGET>/debug/deps/pinvou3_lib-56d581e9f143824d)
+
+running 1 test
+test app::model_store_events::platform_tests::linux_live_pool_tests::identical_enable_rebuilds_real_pool_and_next_turn_preserves_history ...
+thread 'app::model_store_events::platform_tests::linux_live_pool_tests::identical_enable_rebuilds_real_pool_and_next_turn_preserves_history' (972686) panicked at src/app/model_store_events/platform/linux_live_pool_tests.rs:560:5:
+real Wry child failed:
+running 1 test
+test app::model_store_events::platform_tests::linux_live_pool_tests::identical_enable_rebuilds_real_pool_and_next_turn_preserves_history ... FAILED
+
+failures:
+
+failures:
+    app::model_store_events::platform_tests::linux_live_pool_tests::identical_enable_rebuilds_real_pool_and_next_turn_preserves_history
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 5421 filtered out; finished in 1.37s
+
+
+
+(pinvou3_lib-56d581e9f143824d:972687): dbind-WARNING **: 19:05:35.019: Couldn't connect to accessibility bus: Failed to connect to socket <XDG_RUNTIME_DIR>/at-spi/bus_1: No such file or directory
+[startup] 2026-10-29T11:05:35.044Z +     0.000ms [run=unknown] [rust] bridge_boot:prompt_overrides:start
+[startup] 2026-10-29T11:05:35.044Z +     0.640ms [run=unknown] [rust] bridge_boot:prompt_overrides:done
+[startup] 2026-10-29T11:05:35.044Z +     0.647ms [run=unknown] [rust] bridge_boot:ensure_dirs:start
+[startup] 2026-10-29T11:05:35.044Z +     0.787ms [run=unknown] [rust] bridge_boot:ensure_dirs:done
+[startup] 2026-10-29T11:05:35.044Z +     0.877ms [run=unknown] [rust] bridge_boot:bundle_extract:start
+[startup] 2026-10-29T11:05:35.045Z +     0.987ms [run=unknown] [rust] bundle_extract:cleanup_retired:start
+[startup] 2026-10-29T11:05:35.045Z +     1.622ms [run=unknown] [rust] bundle_extract:cleanup_retired:done
+[startup] 2026-10-29T11:05:35.045Z +     1.632ms [run=unknown] [rust] bundle_extract:migrate_mcp_secrets:start
+[startup] 2026-10-29T11:05:35.045Z +     1.734ms [run=unknown] [rust] bundle_extract:migrate_mcp_secrets:done
+[startup] 2026-10-29T11:05:35.045Z +     1.741ms [run=unknown] [rust] bundle_extract:write_builtin_skills:start
+[startup] 2026-10-29T11:05:35.045Z +     1.783ms [run=unknown] [rust] bundle_extract:write_builtin_skills:done
+[startup] 2026-10-29T11:05:35.045Z +     1.791ms [run=unknown] [rust] bundle_extract:write_connector_cli_bins:start
+[startup] 2026-10-29T11:05:35.057Z +    13.544ms [run=unknown] [rust] bundle_extract:write_connector_cli_bins:done
+[startup] 2026-10-29T11:05:35.057Z +    13.573ms [run=unknown] [rust] bundle_extract:bundle_store_import:start
+[startup] 2026-10-29T11:05:35.065Z +    21.675ms [run=unknown] [rust] bundle_extract:bundle_store_import:done | already=false imported=0 kept=0 degraded=0
+[startup] 2026-10-29T11:05:35.134Z +    90.074ms [run=unknown] [rust] bundle_extract:skills_migration:done | moved=0 stale=0
+[startup] 2026-10-29T11:05:35.134Z +    90.153ms [run=unknown] [rust] bundle_extract:skills_self_heal:done | rehomed=0 deduped=0 orphan=0 stale_records=0 converged=0
+[startup] 2026-10-29T11:05:35.134Z +    90.168ms [run=unknown] [rust] bundle_extract:apply_skill_gates:start
+[startup] 2026-10-29T11:05:35.134Z +    90.183ms [run=unknown] [rust] bundle_extract:feishu_cached_gate | show=false
+[startup] 2026-10-29T11:05:35.134Z +    90.206ms [run=unknown] [rust] bundle_extract:wecom_cached_gate | show=false
+[startup] 2026-10-29T11:05:35.134Z +    90.234ms [run=unknown] [rust] bundle_extract:dingtalk_cached_gate | show=false
+[startup] 2026-10-29T11:05:35.134Z +    90.250ms [run=unknown] [rust] bundle_extract:tmeet_cached_gate | show=false
+[startup] 2026-10-29T11:05:35.134Z +    90.260ms [run=unknown] [rust] bundle_extract:apply_skill_gates:done
+[startup] 2026-10-29T11:05:35.134Z +    90.266ms [run=unknown] [rust] bundle_extract:write_mcp_servers:start
+[startup] 2026-10-29T11:05:35.135Z +    91.135ms [run=unknown] [rust] mcp_reconcile | tool 'app-automations' mcp.json entry (dead path [REDACTED] not rebuilt: package script [REDACTED] is missing
+[startup] 2026-10-29T11:05:35.135Z +    91.317ms [run=unknown] [rust] bundle_extract:mcp_upsert:locked:start
+[startup] 2026-10-29T11:05:35.143Z +    99.478ms [run=unknown] [rust] bundle_extract:mcp_upsert:locked:done
+[startup] 2026-10-29T11:05:35.143Z +    99.489ms [run=unknown] [rust] bundle_extract:write_mcp_servers:done
+[pinvou3-app] bundle extracted to <TMP_05>/.pinvou3/bundle (version 0.37-4f71cfd3c854a430-7cf8f617ff6da566)
+[startup] 2026-10-29T11:05:35.144Z +    99.950ms [run=unknown] [rust] bridge_boot:bundle_extract:done
+[startup] 2026-10-29T11:05:35.144Z +   100.031ms [run=unknown] [rust] bridge_boot:mcp_secret_sync:start
+[startup] 2026-10-29T11:05:35.144Z +   100.166ms [run=unknown] [rust] bridge_boot:mcp_secret_sync:done
+[startup] 2026-10-29T11:05:35.144Z +   100.173ms [run=unknown] [rust] bridge_boot:prefs_load:start
+[startup] 2026-10-29T11:05:35.144Z +   100.261ms [run=unknown] [rust] bridge_boot:prefs_load:done
+[startup] 2026-10-29T11:05:35.144Z +   100.282ms [run=unknown] [rust] bridge_boot:legacy_cleanup:start
+[startup] 2026-10-29T11:05:35.144Z +   100.321ms [run=unknown] [rust] bridge_boot:legacy_cleanup:done
+pci id for fd 31: 10de:2e12, driver (null)
+pci id for fd 33: 10de:2e12, driver (null)
+pci id for fd 34: 10de:2e12, driver (null)
+pci id for fd 33: 10de:2e12, driver (null)
+pci id for fd 34: 10de:2e12, driver (null)
+
+** (process:972770): WARNING **: 19:05:35.341: Can't connect to a11y bus: Could not connect: No such file or directory
+pci id for fd 16: 10de:2e12, driver (null)
+pci id for fd 17: 10de:2e12, driver (null)
+pci id for fd 20: 10de:2e12, driver (null)
+pci id for fd 17: 10de:2e12, driver (null)
+pci id for fd 20: 10de:2e12, driver (null)
+[pinvou3-app] spawn_engine session=2zkvb5iu9hmd0 model=wire workspace=<TMP_05>/.pinvou3/sessions/2zkvb5iu9hmd0/workspace instructions=inline:pinvou3:instructions,<TMP_05>/.pinvou3/user/memory/runtime/2zkvb5iu9hmd0.md
+[pinvou3-app] spawn_engine session=964eq5iu9hmd0 model=wire workspace=<TMP_05>/.pinvou3/sessions/964eq5iu9hmd0/workspace instructions=inline:pinvou3:instructions,<TMP_05>/.pinvou3/user/memory/runtime/964eq5iu9hmd0.md
+[pinvou3-app] spawn_engine session=2zkvb5iu9hmd0 model=wire workspace=<TMP_05>/.pinvou3/sessions/2zkvb5iu9hmd0/workspace instructions=inline:pinvou3:instructions,<TMP_05>/.pinvou3/user/memory/runtime/2zkvb5iu9hmd0.md
+
+thread 'tokio-rt-worker' (972704) panicked at src/app/model_store_events/platform/linux_live_pool_tests.rs:301:5:
+an identical successful enable must rebuild the actual cached engine
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+thread 'app::model_store_events::platform_tests::linux_live_pool_tests::identical_enable_rebuilds_real_pool_and_next_turn_preserves_history' (972688) panicked at src/app/model_store_events/platform/linux_live_pool_tests.rs:508:10:
+called `Result::unwrap()` on an `Err` value: "task 3 panicked with message \"an identical successful enable must rebuild the actual cached engine\""
+[pinvou3-app] event forwarder stopped for session 964eq5iu9hmd0 (engine shut down?)
+[pinvou3-app] event forwarder stopped for session 2zkvb5iu9hmd0 (engine shut down?)
+
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+FAILED
+
+failures:
+
+failures:
+    app::model_store_events::platform_tests::linux_live_pool_tests::identical_enable_rebuilds_real_pool_and_next_turn_preserves_history
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 5421 filtered out; finished in 1.43s
+
+error: test failed, to rerun pass `--lib`

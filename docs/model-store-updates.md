@@ -187,3 +187,18 @@ python3 scripts/test-native-engine-launch-receipt.py /path/to/publisher-package/
 切换时当前与目标权重的完整 SHA-256 校验及目标部署脚本执行处于跨卡片资源独占锁内，清理也需要独占保护。大权重校验或部署较慢时，其他卡片的下载、暂存等操作会排队；等待过程显示进度并可取消，不能据此中断已经开始的不可逆删除。此取舍保留共享引用、配额和内容完整性保证，当前未提供大文件或大量小文件的实机耗时基准。
 
 模型库刷新在存在待修复上下文、部署运行中且本机路由就绪时，还可能触发上述有界 HTTP 能力探测，整轮最多增加 3 秒等待；仅离线或未运行的卡片不会触发该探测。
+
+## 开发验证记录
+
+PR #1995 的命令、原始输出摘要及验证边界见 [可复跑的执行记录](model-store-review-evidence/2026-10-29/README.md)。
+
+真实 Linux Wry 回归需已配置的图形显示环境及 WebKit，默认 lib 测试中单独忽略；必须显式执行并核对实际通过 1 项：
+
+```sh
+cd pinvou3-app/src-tauri
+cargo test --locked --no-default-features --lib --features benchmark-hooks \
+  app::model_store_events::platform_tests::linux_live_pool_tests::identical_enable_rebuilds_real_pool_and_next_turn_preserves_history \
+  -- --ignored --exact --nocapture --test-threads=1
+```
+
+该测试创建隐藏 Wry 窗口，在隔离子进程及临时数据目录中，通过生成的 Rust IPC 分发执行启用命令，再用同一应用管理的真实 EnginePool 验证引擎复用和重建，并向本机 HTTP/SSE 夹具发送下一轮、核对历史持久化。HTTP 夹具代替模型服务；不需要 GPU 或权重，也不覆盖浏览器 JavaScript 传输、Windows/macOS 或真实模型性能。缺少显示环境会失败，不能记为通过。

@@ -1,0 +1,13 @@
+test_200_real_child_launch_receipt_and_stop_cycles (__main__.NativeLaunchReceiptTests.test_200_real_child_launch_receipt_and_stop_cycles) ... ok
+test_delayed_proc_identity_records_only_the_direct_child (__main__.NativeLaunchReceiptTests.test_delayed_proc_identity_records_only_the_direct_child) ... ok
+test_existing_unrecorded_process_is_neither_adopted_nor_stopped (__main__.NativeLaunchReceiptTests.test_existing_unrecorded_process_is_neither_adopted_nor_stopped) ... ok
+test_exited_child_does_not_get_a_receipt (__main__.NativeLaunchReceiptTests.test_exited_child_does_not_get_a_receipt) ... ok
+test_identity_timeout_keeps_the_child_unowned_and_unsignalled (__main__.NativeLaunchReceiptTests.test_identity_timeout_keeps_the_child_unowned_and_unsignalled) ... ok
+test_oversized_argv_of_an_unrelated_executable_does_not_block_discovery (__main__.NativeLaunchReceiptTests.test_oversized_argv_of_an_unrelated_executable_does_not_block_discovery) ... ok
+test_oversized_argv_of_the_same_executable_requires_proven_different_weights (__main__.NativeLaunchReceiptTests.test_oversized_argv_of_the_same_executable_requires_proven_different_weights) ... ok
+test_rust_repair_matches_the_real_published_controller_and_fixed_result (__main__.NativeLaunchReceiptTests.test_rust_repair_matches_the_real_published_controller_and_fixed_result) ... ok
+
+----------------------------------------------------------------------
+Ran 8 tests in 8.760s
+
+OK

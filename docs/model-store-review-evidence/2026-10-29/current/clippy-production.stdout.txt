@@ -1,0 +1,2 @@
+   Compiling pinvou3-tauri v0.10.16 (<WORKTREE>/pinvou3-app/src-tauri)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 20.47s
