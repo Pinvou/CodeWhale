@@ -3,14 +3,14 @@ import fs from 'node:fs';
 import path from 'node:path';
 import http from 'node:http';
 import * as puppeteer from 'puppeteer-core';
-import { accountPlatformCopy, organizationCopy } from '../src/shared/i18n.js';
+import { accountPlatformCopy, organizationCopy, adminRolePresentationCopy } from '../src/shared/i18n.js';
 
 const staticRoot = path.resolve(import.meta.dirname, '../../account-platform/internal/portal/static');
 const chrome = [process.env.CHROME, 'C:/Program Files (x86)/Microsoft/Edge/Application/msedge.exe', 'C:/Program Files/Microsoft/Edge/Application/msedge.exe', '/usr/bin/chromium', '/usr/bin/google-chrome', '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome'].find(value => value && fs.existsSync(value));
 assert.ok(chrome, 'Chromium required; built-entry verification cannot be skipped');
 const id = '11111111-1111-4111-8111-111111111111', orgID = '33333333-3333-4333-8333-333333333333';
 const calls = [];
-const me = { user_id: id, username: 'sample-account', mobile: '+8613800000000', status: 'ACTIVE', personal_permissions: ['personal.billing.read', 'personal.profile.update'], platform_permissions: ['platform.users.read', 'platform.organizations.read', 'platform.organizations.create'], active_context: { context_type: 'PERSONAL', context_version: 1, permissions: [] } };
+const me = { user_id: id, username: 'sample-account', mobile: '+8613800000000', status: 'ACTIVE', personal_permissions: ['personal.billing.read', 'personal.profile.update'], platform_permissions: ['platform.users.read', 'platform.organizations.read', 'platform.organizations.create', 'platform.roles.read', 'platform.roles.assign'], active_context: { context_type: 'PERSONAL', context_version: 1, permissions: [] } };
 const server = http.createServer(async (request, response) => {
   const url = new URL(request.url, 'http://127.0.0.1');
   const send = (value, status = 200) => { response.writeHead(status, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' }); response.end(JSON.stringify(value)); };
@@ -27,6 +27,8 @@ const server = http.createServer(async (request, response) => {
     if (url.pathname === '/api/token/v1/payment-capabilities') return send({});
     if (['/api/token/v1/recharge/orders', '/api/token/v1/me/entitlement-packages', '/api/account/v1/me/organizations'].includes(url.pathname)) return send({ items: [] });
     if (url.pathname === '/api/admin/account/admin/v1/users') return send({ items: [{ user_id: id, username: 'sample-account', user_code: 'SAMPLE-001', status: 'ACTIVE' }], next_cursor: null });
+    if (url.pathname === '/api/admin/account/admin/v1/roles') return send({ items: [{ code: 'PLATFORM_AUDITOR', scope: 'PLATFORM', assignable: true, permissions: ['platform.audit.read', 'platform.users.read', 'platform.models.read', 'platform.billing.ledger.read'] }, { code: 'PLATFORM_SUPER_ADMIN', scope: 'PLATFORM', assignable: false, permissions: ['platform.roles.assign'] }] });
+    if (url.pathname === '/api/admin/account/admin/v1/role-bindings') return send({ items: [] });
     if (url.pathname === `/api/admin/account/admin/v1/users/${id}`) return send({ user_id: id, username: 'sample-account', user_code: 'SAMPLE-001', status: 'ACTIVE', created_at: '2026-10-01T00:00:00Z' });
     if (url.pathname === `/api/admin/account/admin/v1/users/${id}/memberships`) return send({ items: [] });
     if (url.pathname === '/api/admin/account/admin/v1/organizations') return send({ items: [{ organization_id: orgID, name: 'Sample organization', status: 'ACTIVE', member_count: 1 }], next_cursor: null });
@@ -79,6 +81,24 @@ try {
   for (const width of [1440, 390]) { await page.setViewport({ width, height: 1000 }); assert.ok(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth + 1)); }
   assert.deepEqual(errors, []); assert.ok(!calls.some(call => call.method !== 'GET' && call.path !== '/api/account/v1/account/bootstrap'));
   passed++; console.log('PASS actual admin.html bundle: independent CSS, original frame, organization modal and zero business writes');
+  await page.goto(base + '/admin.html?section=roles', { waitUntil: 'domcontentloaded' });
+  await page.waitForSelector('.adm-role-table tbody tr');
+  const words = adminRolePresentationCopy.zh;
+  assert.equal(await page.$eval('.adm-role-detail h3', node => node.textContent), words.names.PLATFORM_AUDITOR);
+  assert.equal(await page.$$eval('.adm-role-permission-groups details', nodes => nodes.length), 4);
+  for (const width of [1300, 390]) {
+    await page.setViewport({ width, height: 907 });
+    const layout = await page.evaluate(() => ({ overflow: document.documentElement.scrollWidth > innerWidth + 1, input: document.querySelector('.adm-role-toolbar input').getBoundingClientRect().height, heading: document.querySelector('.adm-page-head').getBoundingClientRect().top, header: document.querySelector('.adm-topbar').getBoundingClientRect().bottom }));
+    assert.equal(layout.overflow, false); assert.ok(layout.input <= 48); assert.ok(layout.heading >= layout.header);
+  }
+  const grant = await page.evaluateHandle(text => [...document.querySelectorAll('.adm-role-workspace-head button')].find(node => node.textContent === text), words.newGrant);
+  await grant.asElement().click(); await grant.dispose(); await page.waitForSelector('[role=dialog] .adm-role-grant');
+  assert.equal(await page.$eval('.ap-restored-drawer-backdrop', node => getComputedStyle(node).position), 'fixed');
+  assert.ok(await page.$eval('.ap-restored-drawer', node => node.getBoundingClientRect().right <= innerWidth + 1));
+  await page.keyboard.press('Escape'); await page.waitForFunction(() => !document.querySelector('[role=dialog]'));
+  assert.equal(await page.evaluate(() => document.activeElement.textContent), words.newGrant);
+  assert.deepEqual(errors, []); assert.ok(!calls.some(call => call.method !== 'GET' && call.path !== '/api/account/v1/account/bootstrap'));
+  passed++; console.log('PASS actual admin.html roles: catalog, permission groups, header, responsive sizing, drawer focus and zero business writes');
   assert.ok(accountPlatformCopy.zh.sections.accountSettings);
   console.log(`RESULT ${passed} PASS 0 FAIL 0 SKIP`);
 } catch (error) { console.error(error); process.exitCode = 1; }

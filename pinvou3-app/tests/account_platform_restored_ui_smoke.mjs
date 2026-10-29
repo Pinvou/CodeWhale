@@ -412,6 +412,273 @@ try {
     await page.waitForFunction(before => window.restored.calls.filter(call => call.url.endsWith('/account/bootstrap')).length >= before + 2 && document.querySelector('[data-workspace=myorg]')?.textContent.includes('66666666-6666-4666-8666-666666666666'), {}, before);
     assert.ok(!(await page.$eval('[data-workspace=myorg]', node => node.textContent)).includes('33333333-3333-4333-8333-333333333333'));
   });
+  const roleWords = () => page.evaluate(() => window.restored.copy().rolePresentation);
+  const readyRoles = async () => { await fresh('?mode=admin&section=roles'); await page.waitForSelector('.adm-role-table tbody tr'); };
+  const openRoleReview = async (target = '22222222-2222-4222-8222-222222222222', role = 'PLATFORM_BILLING_OPERATOR', expires = '') => {
+    const words = await roleWords();
+    await click('.adm-role-workspace-head button', words.newGrant);
+    await page.waitForSelector('[role=dialog] .adm-role-grant');
+    await page.type('[role=dialog] .adm-role-field input', target);
+    await click('[role=dialog] button', words.next);
+    await page.select('[role=dialog] select', role);
+    if (expires) await page.$$eval('[role=dialog] input[type=datetime-local]', (nodes, value) => {
+      const node = nodes.at(-1);
+      Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value').set.call(node, value);
+      node.dispatchEvent(new Event('input', { bubbles: true }));
+    }, expires);
+    await page.type('[role=dialog] textarea', 'Controlled role review');
+    await click('[role=dialog] button', words.next);
+    await page.waitForSelector('[role=dialog] .adm-role-preview');
+    return words;
+  };
+  await run('roles: original catalog and permission groups fit desktop and narrow viewports', async () => {
+    await readyRoles();
+    for (const language of ['zh', 'en', 'ja']) {
+      await page.select('.adm-sidebar-foot select', language);
+      const words = await roleWords();
+      assert.equal(await page.$eval('.adm-role-detail h3', node => node.textContent), words.names.PLATFORM_AUDITOR);
+      assert.equal(await page.$$eval('.adm-role-permission-groups details', nodes => nodes.length), 4);
+      await click('.adm-role-table button', words.names.PLATFORM_SUPER_ADMIN);
+      assert.equal(await page.$('.adm-role-detail>.adm-role-primary'), null, 'protected superadmin gained a grant control');
+      await click('.adm-role-table button', words.names.PLATFORM_AUDITOR);
+      for (const width of [1300, 768, 390]) {
+        await page.setViewport({ width, height: 907 }); await noOverflow();
+        const measured = await page.evaluate(() => {
+          const input = document.querySelector('.adm-role-toolbar input').getBoundingClientRect();
+          const table = document.querySelector('.adm-role-table').getBoundingClientRect();
+          const wrap = document.querySelector('.adm-role-catalog-layout>.adm-table-wrap').getBoundingClientRect();
+          return { inputHeight: input.height, tableWidth: table.width, wrapWidth: wrap.width };
+        });
+        assert.ok(measured.inputHeight <= 48 && measured.tableWidth <= measured.wrapWidth + 1, JSON.stringify(measured));
+        if (process.env.UI_ARTIFACT_DIR && language === 'zh' && [1300, 390].includes(width)) {
+          fs.mkdirSync(process.env.UI_ARTIFACT_DIR, { recursive: true });
+          await page.screenshot({ path: path.join(process.env.UI_ARTIFACT_DIR, `roles-${width === 1300 ? 'desktop' : 'mobile'}.png`) });
+        }
+      }
+    }
+    await page.type('.adm-role-toolbar input[type=search]', 'billing.ledger');
+    assert.equal(await page.$$eval('.adm-role-table tbody tr', nodes => nodes.length), 2);
+    assert.equal(await page.evaluate(() => window.restored.calls.filter(call => call.method !== 'GET' && !call.url.endsWith('/account/bootstrap')).length), 0);
+  });
+  await run('roles: long workspace navigation resets the heading below the fixed top bar', async () => {
+    await readyRoles();
+    await page.evaluate(() => window.scrollTo(0, document.documentElement.scrollHeight));
+    await adminTab('billing'); await page.waitForSelector('[data-workspace=wallets]:not([hidden])');
+    await page.evaluate(() => window.scrollTo(0, document.documentElement.scrollHeight));
+    await adminTab('roles'); await page.waitForSelector('.adm-role-table tbody tr');
+    const position = await page.evaluate(() => ({ scroll: scrollY, heading: document.querySelector('.adm-page-head').getBoundingClientRect().top, header: document.querySelector('.adm-topbar').getBoundingClientRect().bottom }));
+    assert.equal(position.scroll, 0); assert.ok(position.heading >= position.header, JSON.stringify(position));
+  });
+  await run('roles: guided user lookup, reviewed grant, and cancellation preserve real HTTP boundaries', async () => {
+    await readyRoles(); const words = await roleWords();
+    await click('.adm-role-workspace-head button', words.newGrant);
+    await page.type('[role=dialog] input[type=search]', 'remote');
+    await click('[role=dialog] button', words.searchAction);
+    await page.waitForFunction(() => [...document.querySelectorAll('[role=dialog] option')].some(option => option.textContent.startsWith('remote-user')));
+    await page.select('[role=dialog] select', '22222222-2222-4222-8222-222222222222');
+    await click('[role=dialog] button', words.next);
+    assert.ok(!(await page.$$eval('[role=dialog] option', nodes => nodes.map(node => node.value))).includes('PLATFORM_SUPER_ADMIN'));
+    await page.keyboard.press('Escape'); await page.waitForFunction(() => !document.querySelector('[role=dialog]'));
+    assert.equal(await page.evaluate(() => document.activeElement.textContent), words.newGrant);
+    assert.equal(await page.evaluate(() => window.restored.roleReceipts.size), 0);
+    await openRoleReview();
+    if (process.env.UI_ARTIFACT_DIR) {
+      fs.mkdirSync(process.env.UI_ARTIFACT_DIR, { recursive: true });
+      await page.screenshot({ path: path.join(process.env.UI_ARTIFACT_DIR, 'role-grant-review.png') });
+    }
+    assert.ok((await page.$eval('[role=dialog] .adm-role-preview', node => node.textContent)).includes('22222222-2222-4222-8222-222222222222'));
+    assert.equal(await page.$$eval('[role=dialog] .adm-role-preview>div', (nodes, label) => nodes.find(node => node.querySelector('dt').textContent === label)?.querySelector('dd').textContent, words.permissionCount), '2');
+    assert.equal(await page.evaluate(() => window.restored.calls.filter(call => call.method === 'POST' && call.url.endsWith('/role-bindings')).length), 0);
+    await click('[role=dialog] button', words.confirmAndGrant);
+    await page.waitForFunction(() => !document.querySelector('[role=dialog]') && new URL(location.href).searchParams.get('role_view') === 'bindings' && document.querySelector('.adm-role-binding-table tbody tr'));
+    assert.equal(await page.evaluate(() => window.restored.roleReceipts.size), 1);
+    assert.equal(new URL(page.url()).searchParams.get('role_user_id'), '22222222-2222-4222-8222-222222222222');
+  });
+  await run('roles: unknown grant retains one original command through outer navigation and recovery', async () => {
+    await readyRoles(); const words = await openRoleReview();
+    await page.evaluate(() => { window.restored.roleUnknown = true; });
+    await click('[role=dialog] button', words.confirmAndGrant);
+    await page.waitForFunction(() => !document.querySelector('[role=dialog]') && document.querySelector('.adm-role-risk-note button'));
+    assert.ok(await page.$eval('.adm-role-workspace-head .adm-role-primary', button => button.disabled));
+    await adminTab('users'); await page.waitForSelector('[data-workspace=users]:not([hidden])');
+    await adminTab('roles'); await page.waitForSelector('.adm-role-risk-note button:not(:disabled)');
+    await page.evaluate(() => { const url = new URL(location.href); url.searchParams.set('role_user_id', '11111111-1111-4111-8111-111111111111'); url.searchParams.set('role_view', 'bindings'); history.pushState({}, '', url); dispatchEvent(new PopStateEvent('popstate')); });
+    await page.waitForFunction(() => document.querySelector('.adm-role-toolbar input:not([type])')?.value === '11111111-1111-4111-8111-111111111111');
+    assert.ok((await page.$eval('.adm-role-risk-note>p:nth-child(2)', node => node.textContent)).includes('22222222-2222-4222-8222-222222222222'));
+    await page.waitForSelector('.adm-role-risk-note button:not(:disabled)');
+    await page.click('.adm-role-risk-note button');
+    await page.waitForFunction(() => !document.querySelector('.adm-role-risk-note') && window.restored.calls.filter(call => call.method === 'POST' && call.url.endsWith('/role-bindings')).length === 2);
+    const state = await page.evaluate(() => ({ requests: window.restored.calls.filter(call => call.method === 'POST' && call.url.endsWith('/role-bindings')), effects: window.restored.roleReceipts.size }));
+    assert.equal(state.requests[0].key, state.requests[1].key); assert.equal(state.requests[0].body, state.requests[1].body); assert.equal(state.effects, 1);
+  });
+  for (const status of ['REVOKED', 'EXPIRED']) await run(`roles: replayed grant reports its current ${status} projection`, async () => {
+    await readyRoles();
+    const expires = status === 'EXPIRED' ? await page.evaluate(() => { const value = new Date(Date.now() + 120000); return new Date(value.getTime() - value.getTimezoneOffset() * 60000).toISOString().slice(0, 16); }) : '';
+    const words = await openRoleReview(undefined, undefined, expires);
+    await page.evaluate(() => { window.restored.roleUnknown = true; });
+    await click('[role=dialog] button', words.confirmAndGrant);
+    await page.waitForSelector('.adm-role-risk-note button:not(:disabled)');
+    await page.evaluate(status => { for (const receipt of window.restored.roleReceipts.values()) {
+      if (status === 'REVOKED') { receipt.status = status; receipt.revoked_by = window.restored.user; }
+      else window.restored.roleClockMs = Date.parse(receipt.expires_at) + 1;
+    } }, status);
+    await page.click('.adm-role-risk-note button');
+    await page.waitForSelector('.adm-inline-message.ok');
+    assert.equal(await page.$eval('.adm-inline-message.ok', node => node.textContent), status === 'REVOKED' ? words.revokedNotice : words.expiredNotice);
+    const result = await page.evaluate(() => ({ effects: window.restored.roleReceipts.size, calls: window.restored.calls.filter(call => call.method === 'POST' && call.url.endsWith('/role-bindings')) }));
+    assert.equal(result.effects, 1); assert.equal(result.calls.length, 2);
+    assert.equal(result.calls[0].key, result.calls[1].key); assert.equal(result.calls[0].body, result.calls[1].body);
+    if (status === 'EXPIRED') assert.ok(JSON.parse(result.calls[0].body).expires_at);
+  });
+  await run('roles: complete user codes use the dedicated lookup contract', async () => {
+    await readyRoles(); const words = await roleWords();
+    await click('.adm-role-workspace-head button', words.newGrant);
+    await page.type('[role=dialog] input[type=search]', 'USR-0123-4567-89AB-CDEF-MV');
+    await click('[role=dialog] button', words.searchAction);
+    await page.waitForFunction(() => [...document.querySelectorAll('[role=dialog] option')].some(node => node.textContent.startsWith('coded-user')));
+    await page.select('[role=dialog] select', '22222222-2222-4222-8222-222222222222');
+    assert.equal(await page.$eval('[role=dialog] .adm-role-field input', node => node.value), '22222222-2222-4222-8222-222222222222');
+    const lookups = await page.evaluate(() => window.restored.calls.filter(call => call.url.includes('/user-code-lookups/')));
+    assert.equal(lookups.length, 1); assert.ok(decodeURIComponent(lookups[0].url).endsWith('/USR-0123-4567-89AB-CDEF-MV'));
+    await page.keyboard.press('Escape'); await page.waitForFunction(() => !document.querySelector('[role=dialog]'));
+    assert.equal(await page.evaluate(() => window.restored.roleReceipts.size), 0);
+  });
+  await run('roles: target filtering follows URL history including removal and manual submission', async () => {
+    await fresh('?mode=admin&section=roles&role_view=bindings&role_user_id=22222222-2222-4222-8222-222222222222');
+    await page.waitForSelector('.adm-role-binding-table tbody tr');
+    await page.evaluate(() => {
+      window.restored.roleBindings.push({ ...window.restored.roleBindings[0], binding_id: '88888888-8888-4888-8888-888888888888', user_id: '11111111-1111-4111-8111-111111111111' });
+      const url = new URL(location.href); url.searchParams.delete('role_user_id'); history.pushState({}, '', url); dispatchEvent(new PopStateEvent('popstate'));
+    });
+    await page.waitForFunction(() => document.querySelector('.adm-role-toolbar input:not([type])')?.value === '' && document.querySelectorAll('.adm-role-binding-table tbody tr').length === 2);
+    await page.type('.adm-role-toolbar input:not([type])', '22222222-2222-4222-8222-222222222222');
+    await page.click('form.adm-role-toolbar button');
+    await page.waitForFunction(() => new URL(location.href).searchParams.get('role_user_id') === '22222222-2222-4222-8222-222222222222' && document.querySelectorAll('.adm-role-binding-table tbody tr').length === 1);
+    await page.goBack();
+    await page.waitForFunction(() => document.querySelector('.adm-role-toolbar input:not([type])')?.value === '' && document.querySelectorAll('.adm-role-binding-table tbody tr').length === 2);
+    await page.goForward();
+    await page.waitForFunction(() => document.querySelector('.adm-role-toolbar input:not([type])')?.value === '22222222-2222-4222-8222-222222222222' && document.querySelectorAll('.adm-role-binding-table tbody tr').length === 1);
+    assert.equal(await page.evaluate(() => window.restored.calls.filter(call => call.method === 'POST' && call.url.endsWith('/role-bindings')).length), 0);
+  });
+  await run('roles: user detail shortcut overrides a remembered catalog tab', async () => {
+    await fresh('?mode=admin&section=roles&role_view=catalog');
+    await page.waitForSelector('.adm-role-table tbody tr'); await adminTab('users');
+    await page.waitForSelector('[data-workspace=users] tbody button');
+    await click('[data-workspace=users] tbody button', 'sample-account');
+    await page.waitForSelector('[data-workspace=users] .adm-user-details');
+    await click('[data-workspace=users] .adm-panel button', await page.evaluate(() => window.restored.copy().adminLayout.nav.roles));
+    await page.waitForFunction(() => new URL(location.href).searchParams.get('role_view') === 'bindings' && document.querySelector('.adm-role-toolbar input:not([type])')?.value === '11111111-1111-4111-8111-111111111111');
+    assert.equal(new URL(page.url()).searchParams.get('role_user_id'), '11111111-1111-4111-8111-111111111111');
+  });
+  await run('roles: a confirmed grant survives a failed list refresh without a second mutation', async () => {
+    await readyRoles(); const words = await openRoleReview();
+    await page.evaluate(() => { window.restored.roleReadFail = true; });
+    await click('[role=dialog] button', words.confirmAndGrant);
+    await page.waitForFunction(() => document.querySelector('.adm-role-workspace .adm-inline-message.ok') && document.querySelector('.adm-role-workspace [role=alert]'));
+    assert.equal(await page.$eval('.adm-role-workspace .adm-inline-message.ok', node => node.textContent), words.grantedNotice);
+    assert.equal(await page.$eval('.adm-role-workspace [role=alert]', node => node.textContent), await page.evaluate(() => window.restored.copy().roles.loadFailed));
+    assert.equal(await page.$('.adm-role-risk-note'), null, 'read failure made an acknowledged write unknown');
+    await page.evaluate(() => { window.restored.roleReadFail = false; });
+    await click('.adm-role-workspace-head button', await page.evaluate(() => window.restored.copy().roles.refresh));
+    await page.waitForSelector('.adm-role-binding-table tbody tr');
+    assert.equal(await page.evaluate(() => window.restored.roleReceipts.size), 1);
+    assert.equal(await page.evaluate(() => window.restored.calls.filter(call => call.method === 'POST' && call.url.endsWith('/role-bindings')).length), 1);
+  });
+  await run('roles: a late recovery ACK does not navigate away from another workspace', async () => {
+    await readyRoles(); const words = await openRoleReview();
+    await page.evaluate(() => { window.restored.roleUnknown = true; });
+    await click('[role=dialog] button', words.confirmAndGrant);
+    await page.waitForSelector('.adm-role-risk-note button:not(:disabled)');
+    await page.evaluate(() => { window.restored.roleHoldGrant = true; });
+    await page.click('.adm-role-risk-note button');
+    await page.waitForFunction(() => typeof window.restored.releaseRoleGrantAck === 'function');
+    await adminTab('users'); await page.waitForSelector('[data-workspace=users]:not([hidden])');
+    await page.evaluate(() => window.restored.releaseRoleGrantAck());
+    await page.waitForFunction(() => !document.querySelector('.adm-role-risk-note'));
+    assert.equal(new URL(page.url()).searchParams.get('section'), 'users');
+    assert.equal(await page.evaluate(() => window.restored.roleReceipts.size), 1);
+  });
+  await run('roles: list filter navigation cannot discard a same-session command ACK', async () => {
+    await readyRoles(); const words = await openRoleReview();
+    await page.evaluate(() => { window.restored.roleUnknown = true; });
+    await click('[role=dialog] button', words.confirmAndGrant);
+    await page.waitForSelector('.adm-role-risk-note button:not(:disabled)');
+    await page.evaluate(() => { window.restored.roleHoldGrant = true; });
+    await page.click('.adm-role-risk-note button');
+    await page.waitForFunction(() => typeof window.restored.releaseRoleGrantAck === 'function');
+    await page.evaluate(() => { const url = new URL(location.href); url.searchParams.set('role_view', 'bindings'); url.searchParams.set('role_user_id', '11111111-1111-4111-8111-111111111111'); history.pushState({}, '', url); dispatchEvent(new PopStateEvent('popstate')); });
+    await page.waitForFunction(() => document.querySelector('.adm-role-toolbar input:not([type])')?.value === '11111111-1111-4111-8111-111111111111' && [...window.restored.calls].reverse().find(call => call.method === 'GET' && call.url.includes('/role-bindings'))?.url.includes('user_id=11111111-1111-4111-8111-111111111111'));
+    await page.evaluate(() => window.restored.releaseRoleGrantAck());
+    await page.waitForFunction(() => !document.querySelector('.adm-role-risk-note') && document.querySelector('.adm-inline-message.ok') && !document.querySelector('.adm-role-workspace-head .adm-role-primary').disabled);
+    assert.equal(await page.$eval('.adm-inline-message.ok', node => node.textContent), words.grantedNotice);
+    assert.equal(new URL(page.url()).searchParams.get('role_user_id'), '11111111-1111-4111-8111-111111111111');
+    assert.equal(await page.$eval('.adm-role-toolbar input:not([type])', node => node.value), '11111111-1111-4111-8111-111111111111');
+    const state = await page.evaluate(() => ({ calls: window.restored.calls.filter(call => call.method === 'POST' && call.url.endsWith('/role-bindings')), effects: window.restored.roleReceipts.size }));
+    assert.equal(state.calls.length, 2); assert.equal(state.effects, 1); assert.equal(state.calls[0].key, state.calls[1].key); assert.equal(state.calls[0].body, state.calls[1].body);
+    assert.equal(await page.$$eval('.adm-role-binding-table tbody tr', nodes => nodes.length), 0);
+  });
+  await run('roles: missing user-read permission and lost assignment authority cannot dispatch a grant', async () => {
+    await readyRoles();
+    await page.evaluate(() => { window.restored.permissions = ['platform.roles.read', 'platform.roles.assign']; window.restored.reload(); });
+    await page.waitForSelector('.adm-role-table tbody tr');
+    const words = await openRoleReview();
+    assert.equal(await page.$('[role=dialog] input[type=search]'), null);
+    await page.evaluate(() => { window.restored.permissions = ['platform.roles.read']; });
+    await click('[role=dialog] button', words.confirmAndGrant);
+    await page.waitForFunction(() => !document.querySelector('[role=dialog]') && !document.querySelector('.adm-role-workspace-head .adm-role-primary'));
+    assert.equal(await page.evaluate(() => window.restored.roleReceipts.size), 0);
+    assert.equal(await page.evaluate(() => window.restored.calls.filter(call => call.method === 'POST' && call.url.endsWith('/role-bindings')).length), 0);
+  });
+  await run('roles: binding detail and revoke retain the exact binding and read-only boundary', async () => {
+    await readyRoles(); const words = await roleWords();
+    await click('.adm-role-workspace-head button', words.bindingManagement);
+    await page.waitForSelector('.adm-role-binding-table tbody tr');
+    await click('.adm-role-binding-table button', words.view);
+    await page.waitForSelector('[role=dialog] .adm-role-preview');
+    const details = await page.$eval('[role=dialog]', node => node.textContent);
+    assert.ok(details.includes('66666666-6666-4666-8666-666666666666') && details.includes('22222222-2222-4222-8222-222222222222'));
+    page.once('dialog', dialog => { void dialog.accept(); });
+    await click('[role=dialog] button', await page.evaluate(() => window.restored.copy().roles.revoke));
+    await page.waitForFunction(() => !document.querySelector('[role=dialog]') && document.querySelector('.adm-inline-message.ok'));
+    assert.equal(await page.$eval('.adm-inline-message.ok', node => node.textContent), words.revokedNotice);
+    const mutations = await page.evaluate(() => window.restored.calls.filter(call => call.method === 'DELETE'));
+    assert.equal(mutations.length, 1); assert.ok(mutations[0].url.endsWith('/66666666-6666-4666-8666-666666666666'));
+    await page.evaluate(() => { window.restored.permissions = ['platform.roles.read']; window.restored.reload(); });
+    await page.waitForSelector('.adm-role-binding-table tbody tr');
+    await click('.adm-role-binding-table button', words.view);
+    assert.equal(await page.$('[role=dialog] .adm-role-drawer-foot button'), null);
+    await page.keyboard.press('Escape'); await page.waitForFunction(() => !document.querySelector('[role=dialog]'));
+    assert.equal(await page.evaluate(() => window.restored.calls.filter(call => call.method === 'DELETE').length), 1);
+  });
+  await run('roles: temporary sensitive export cannot bypass expiry and reason validation in the wizard', async () => {
+    await readyRoles(); const words = await roleWords();
+    await click('.adm-role-workspace-head button', words.newGrant);
+    await page.type('[role=dialog] .adm-role-field input', '22222222-2222-4222-8222-222222222222');
+    await click('[role=dialog] button', words.next);
+    await page.select('[role=dialog] select', 'PLATFORM_AUDIT_PII_EXPORT');
+    await click('[role=dialog] button', words.next);
+    await page.waitForSelector('[role=dialog] [role=alert]');
+    assert.equal(await page.$('[role=dialog] .adm-role-preview'), null);
+    assert.equal(await page.evaluate(() => window.restored.calls.filter(call => call.method === 'POST' && call.url.endsWith('/role-bindings')).length), 0);
+    await page.keyboard.press('Escape'); await page.waitForFunction(() => !document.querySelector('[role=dialog]'));
+  });
+  await run('roles: grant filtering and twenty-row pagination remain read-only across catalog tabs', async () => {
+    await readyRoles(); const words = await roleWords();
+    await page.evaluate(() => { const base = window.restored.roleBindings[0]; window.restored.roleBindings = Array.from({ length: 45 }, (_, i) => ({ ...base, binding_id: `66666666-6666-4666-8666-${String(i + 1).padStart(12, '0')}`, role_code: i < 22 ? 'PLATFORM_AUDITOR' : 'PLATFORM_BILLING_OPERATOR' })); });
+    await click('.adm-role-workspace-head button', await page.evaluate(() => window.restored.copy().roles.refresh));
+    await click('.adm-role-workspace-head button', words.bindingManagement);
+    await page.waitForFunction(() => document.querySelectorAll('.adm-role-binding-table tbody tr').length === 20);
+    await click('.adm-role-panel .adm-pagination button', words.nextPage);
+    assert.equal(await page.$$eval('.adm-role-binding-table tbody tr', nodes => nodes.length), 20);
+    await click('.adm-role-panel .adm-pagination button', words.nextPage);
+    assert.equal(await page.$$eval('.adm-role-binding-table tbody tr', nodes => nodes.length), 5);
+    await page.type('.adm-role-panel>div:not([hidden]) input[type=search][placeholder]', 'PLATFORM_AUDITOR');
+    assert.equal(await page.$$eval('.adm-role-binding-table tbody tr', nodes => nodes.length), 20);
+    await click('.adm-role-workspace-head button', words.catalog);
+    await click('.adm-role-workspace-head button', words.bindingManagement);
+    assert.equal(await page.$eval('.adm-role-panel>div:not([hidden]) input[type=search]', node => node.value), 'PLATFORM_AUDITOR');
+    assert.equal(await page.evaluate(() => window.restored.calls.filter(call => call.method !== 'GET' && !call.url.endsWith('/account/bootstrap')).length), 0);
+  });
   for (const kind of ['account', 'admin']) for (const language of ['zh', 'en', 'ja']) await run(`${kind} ${language}: responsive original frame, localized navigation`, async () => {
     await fresh(`?mode=${kind}&section=${kind === 'admin' ? 'users' : 'creditsUsage'}`);
     await page.select(kind === 'admin' ? '.adm-sidebar-foot select' : '.ap-sidebar-foot select', language);

@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useLayoutEffect, useRef, useState } from 'react';
 import { adminRouteLocation, resolveAdminRoute, visibleAdminSections } from './admin-sections.js';
 
 function modalOpen() {
@@ -10,6 +10,9 @@ export function useAdminSections({ me, flags, ready }) {
   const available = ready ? visibleAdminSections(me, flags) : [];
   const route = resolveAdminRoute(search, flags, available);
   const section = available.includes(route.section) ? route.section : route.section === 'overview' && !new URLSearchParams(search).has('section') ? available[0] : route.section;
+  // A new workspace starts below the fixed top bar. Long pages otherwise retain
+  // the previous page's scroll anchor and can place the new heading behind it.
+  useLayoutEffect(() => { if (ready) globalThis.scrollTo?.(0, 0); }, [ready, section]);
   useEffect(() => {
     const changed = () => {
       if (modalOpen()) { globalThis.history.replaceState({}, '', accepted.current); return; }

@@ -5,10 +5,21 @@ import { once } from 'node:events';
 import { AdminPlatformClient } from '../src/features/account-platform/admin-client.js';
 import { platformRoleGrantIntent, grantablePlatformRole, requirePlatformRoles, requirePlatformRoleBinding, platformRoleFreshAuthority, platformRolePending, platformRoleFailureState } from '../src/features/account-platform/platform-role-management.js';
 import { platformRoleCopy } from '../src/shared/platform-role-i18n.js';
+import { adminRolePresentationCopy } from '../src/shared/admin-role-presentation-i18n.js';
 const owner = '0199a100-0001-7000-8000-000000000101';
 const user = '0199a100-0001-7000-8000-000000000202';
 const role = { code: 'PLATFORM_MODEL_ADMIN', scope: 'PLATFORM', assignable: true, permissions: ['platform.models.read'] };
 const now = new Date('2026-10-22T00:00:00Z');
+test('restored role presentation has complete three-language labels without fallback', () => {
+  const leaves = (value, prefix = '') => Object.entries(value).flatMap(([key, child]) => child && typeof child === 'object' ? leaves(child, `${prefix}${key}.`) : `${prefix}${key}`);
+  const expected = leaves(adminRolePresentationCopy.zh).sort();
+  for (const language of ['zh', 'en', 'ja']) {
+    assert.deepEqual(leaves(adminRolePresentationCopy[language]).sort(), expected);
+    assert.ok(adminRolePresentationCopy[language].names.PLATFORM_SUPER_ADMIN);
+    assert.ok(adminRolePresentationCopy[language].permissionTokens.ledger);
+    assert.ok(adminRolePresentationCopy[language].permissionActions.unpublish);
+  }
+});
 function intent(fields = {}, selected = role) { return platformRoleGrantIntent(owner, { user_id: user, role_code: selected.code, ...fields }, selected, now); }
 function binding(body, extra = {}) { return { binding_id: '0199a100-0001-7000-8000-000000000303', ...body, grant_source: 'ADMIN', created_by: owner, scope: 'PLATFORM', status: 'ACTIVE', ...extra }; }
 

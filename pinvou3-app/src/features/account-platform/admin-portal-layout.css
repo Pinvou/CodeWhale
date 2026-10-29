@@ -26,7 +26,7 @@
 .adm-restored-shell .adm-brand>div:last-child{display:grid;gap:2px}
 .adm-restored-shell .adm-brand strong{color:var(--adm-text);font-size:15px;font-weight:780;letter-spacing:.08em}
 .adm-restored-shell .adm-brand span{color:var(--adm-muted);font-size:10px;letter-spacing:.08em}
-.adm-restored-shell .adm-sidebar nav{display:grid;flex:1;gap:4px;margin-top:12px;padding:4px;overflow:auto;scrollbar-width:thin}
+.adm-restored-shell .adm-sidebar nav{display:grid;align-content:start;flex:1;gap:4px;margin-top:12px;padding:4px;overflow:auto;scrollbar-width:thin}
 .adm-restored-shell .adm-nav-group{display:grid;align-content:start;gap:3px;margin:8px 0 2px}
 .adm-restored-shell .adm-nav-label{padding:7px 10px 5px;color:var(--adm-faint);font-size:10px;font-weight:700;letter-spacing:.12em;text-transform:uppercase}
 .adm-restored-shell .adm-sidebar nav button{display:flex;width:100%;min-height:42px;align-items:center;gap:10px;padding:0 11px;border:0;border-radius:10px;color:var(--adm-muted);background:transparent;cursor:pointer;text-align:left;transition:color .15s,background .15s}
