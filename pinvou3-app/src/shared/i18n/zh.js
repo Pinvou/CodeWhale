@@ -2564,6 +2564,11 @@ dictZh["remoteConversation"] = {
   errorGeneric: "操作失败，请稍后重试。",
   attachmentOnlyPrompt: "请处理随任务提交的附件。",
   addAttachment: "添加远程附件",
+  attachmentCountInvalid: "请选择 1–8 个远程附件。",
+  attachmentSizeInvalid: "每个附件必须非空且不超过 32 MiB。",
+  attachmentTotalSizeInvalid: "附件总大小不能超过 64 MiB。",
+  attachmentMetadataInvalid: "附件名称或类型无效或过长，请重新选择文件。",
+  capabilityNotReady: "远程任务能力尚未就绪，请等待准备完成或刷新后再发送。",
   removeAttachment: name => `移除附件 ${name}`,
   uploadingAttachment: (name, received, total) => `正在上传 ${name}（${received}/${total} 字节）`,
   taskActions: "远程任务操作",
@@ -2585,6 +2590,12 @@ dictZh.uiSettings.remoteControl = '桌面远程控制';
 dictZh.uiSettingsDetail.desktopRemoteControlEntryDesc = '允许他人输入连接码连接本机，使用本机模型执行任务；可随时查看并断开。';
 dictZh.uiSettingsDetail.desktopRemoteControlBack = '返回通用';
 dictZh.remoteArchive = {
+  remote_proxy_unreadable: '无法读取远控记录；远控写入已停用。',
+  remote_proxy_oversized: '远控记录超过支持的大小或数量；远控写入已停用。',
+  remote_proxy_malformed: '远控记录无法按当前格式读取，可能损坏或版本不兼容；远控写入已停用。',
+  remote_proxy_version_unsupported: '远控记录版本不受支持；远控写入已停用。',
+  remote_proxy_invalid_records: '远控记录未通过完整性检查；远控写入已停用。',
+  remote_proxy_archive_unavailable: '远控归档不可用或与活动记录冲突；远控写入已停用。',
   byteBudget: '远控会话容量已满。请打开“设置 → 远程控制 → 远控会话归档”，先断开会话并处理未决任务，再永久归档离线会话以释放容量。',
   title: '远控会话归档', active: '活动台账', archived: '已归档历史',
   hint: '归档离线会话可释放活动容量，历史与反重放记录仍会保留。归档后不可执行任务或重新连接；在线会话及未决任务须先收口。',

@@ -2288,6 +2288,132 @@ mod tests {
     }
 
     #[test]
+    fn replaced_transport_cannot_disconnect_or_resume_the_successor() {
+        let manager = ControlledDeviceManager::default();
+        let operation = manager.start(None, Vec::new()).unwrap();
+        register(&manager, &operation);
+        enter_handshake(&manager, &operation);
+        let material = lease(operation.generation());
+        let context = material.context.clone();
+        let capabilities = material.negotiated_capabilities.clone();
+        let sender = super::super::test_support::resume_reader_transport(
+            super::super::relay_transport::ControllerRole::ControlledB,
+            context.clone(),
+            capabilities.clone(),
+        );
+        let (_, old) = manager
+            .complete_connected_with_install(operation.clone(), material, || Ok(Arc::new(sender)))
+            .unwrap();
+        let successor = super::super::test_support::resume_reader_transport(
+            super::super::relay_transport::ControllerRole::ControlledB,
+            context.clone(),
+            capabilities,
+        );
+        manager.replace_transport(successor.clone());
+        let current = manager.transport_owner_for_test(&operation).unwrap();
+        assert_eq!(manager.current_operation(), Some(operation.clone()));
+        assert_eq!(manager.live_lease().unwrap(), context);
+        let effects = AtomicUsize::new(0);
+        assert_eq!(
+            manager
+                .mark_owned_transport_disconnected(&old, 5_000, || {
+                    effects.fetch_add(1, Ordering::SeqCst);
+                })
+                .unwrap_err()
+                .code,
+            "desktop_remote_stale_transport"
+        );
+        assert_eq!(effects.load(Ordering::SeqCst), 0);
+        assert_eq!(manager.status().kind(), ControlledStatusKind::Connected);
+        assert_eq!(manager.live_lease().unwrap(), context);
+        super::super::relay_transport::disconnect_test_transport(&successor);
+        manager
+            .mark_owned_transport_disconnected(&current, 5_000, || {
+                effects.fetch_add(1, Ordering::SeqCst);
+            })
+            .unwrap();
+        assert_eq!(effects.load(Ordering::SeqCst), 1);
+        assert_eq!(manager.status().kind(), ControlledStatusKind::Reconnecting);
+        assert_eq!(
+            manager.begin_owned_resume(&old, 6_000).unwrap_err().code,
+            "desktop_remote_stale_transport"
+        );
+        assert_eq!(manager.status().kind(), ControlledStatusKind::Reconnecting);
+        manager.begin_owned_resume(&current, 6_000).unwrap();
+        let activation = "activation-0001";
+        for (step, now) in [
+            (
+                ControlledResumeStep::Provisional {
+                    activation_id: activation,
+                },
+                7_000,
+            ),
+            (
+                ControlledResumeStep::Confirmed {
+                    activation_id: activation,
+                },
+                8_000,
+            ),
+            (
+                ControlledResumeStep::ActivationAcknowledged {
+                    activation_id: activation,
+                },
+                9_000,
+            ),
+            (
+                ControlledResumeStep::PostActivationLiveness {
+                    activation_id: activation,
+                    liveness_epoch_b: "live-b-2",
+                },
+                10_000,
+            ),
+            (
+                ControlledResumeStep::ReadyAcknowledged {
+                    activation_id: activation,
+                },
+                11_000,
+            ),
+        ] {
+            manager.advance_owned_resume(&current, step, now).unwrap();
+        }
+        super::super::relay_transport::dispatch_test_transport_frame(
+            &successor,
+            &super::super::test_support::resume_final_frame(
+                &context,
+                activation,
+                "request-resume-final",
+            ),
+        );
+        let finish = |owner: &ControlledTransportOwner| {
+            manager.complete_owned_resume(
+                owner,
+                activation,
+                "request-resume-final",
+                12_000,
+                "live:a-2",
+                [3; 32],
+                [4; 32],
+                1_700_000_030_000,
+                || {
+                    effects.fetch_add(1, Ordering::SeqCst);
+                },
+            )
+        };
+        assert_eq!(
+            finish(&old).unwrap_err().code,
+            "desktop_remote_stale_transport"
+        );
+        assert_eq!(effects.load(Ordering::SeqCst), 1);
+        assert_eq!(
+            manager.status().kind(),
+            ControlledStatusKind::ResumeActivatedPendingLiveness
+        );
+        finish(&current).unwrap();
+        assert_eq!(effects.load(Ordering::SeqCst), 2);
+        assert_eq!(manager.status().kind(), ControlledStatusKind::Connected);
+    }
+
+    #[test]
     fn stale_connected_install_never_runs_its_shared_side_effect() {
         let manager = ControlledDeviceManager::default();
         let old = manager.start(None, Vec::new()).unwrap();

@@ -17,9 +17,29 @@ function pinvouSharedtauriUpdater() {
   const state = context.state;
   const notify = context.notify;
   const invoke = context.invoke;
+  const listen = context.listen;
+  let progressTimer = null;
+  let windowsDownload = false;
+  function clearProgressTimer() {
+    if (progressTimer !== null) root.clearTimeout(progressTimer);
+    progressTimer = null;
+  }
+  listen("update:progress", function (event) {
+    if (!windowsDownload || !state.updateDownloading || state.updateCancelling || state.updateProgress >= 100) return;
+    const payload = event && event.payload || {};
+    const total = Number(payload.total), downloaded = Number(payload.downloaded);
+    if (!Number.isFinite(total) || total <= 0 || !Number.isFinite(downloaded) || downloaded < 0) return;
+    const progress = Math.min(99, Math.floor(downloaded / total * 100));
+    if (progress <= state.updateProgress) return;
+    state.updateProgress = progress;
+    if (progressTimer === null) progressTimer = root.setTimeout(function () {
+      progressTimer = null;
+      notify();
+    }, 200);
+  });
   // ── 应用内升级 ───────────────────────────────────────────────────
   // Chain: check_for_update (compares the server's latest.json) → download_update (streamed download + sha256)
-  // → install_update (pkexec apt) → restart_app. Download progress emits no separate frontend event.
+  // → update:progress → install_update → restart_app.
   async function loadAppVersion() {
     try {
       state.appVersion = await invoke("get_app_version");
@@ -36,21 +56,21 @@ function pinvouSharedtauriUpdater() {
   }
   // 设置页手动检查: 错误和「已是最新」都要反馈。
 async function checkForUpdate() { return pinvouSharedtauriUpdater().checkForUpdate(); }
-  // 下载+安装一条龙: Linux 下载 deb 后 pkexec apt 并自动重启;Windows 下载 zip 后解析 MSI,
-  // 安装器启动成功后 Windows 退出当前进程；Linux/macOS 在安装后由前端重启。
+  // Windows 使用清单中的 NSIS/MSI 安装器；Linux/macOS 安装后由前端重启。
   async function downloadAndInstallUpdate() {
     if (!state.updateInfo || !state.updateInfo.available || state.updateDownloading) return false;
     // 入口捕获发起时的更新信息：下载/安装期间静默检查可能替换 updateInfo，
-    // download/install 参数须仍指向发起时的版本（审计）。当前基线的 install_update
-    // 为 unsupported 桩（info 未参与行为），此配对为面向完整平台实现的防御性修复。
-    // invoke 文本保持原样。
+    // download/install 参数须仍指向发起时的版本。
     const info = state.updateInfo;
     const shouldRestartAfterInstall = info.platform !== "windows";
     let installed = false;
     state.updateDownloading = true; state.updateCancelling = false;
+    windowsDownload = info.platform === "windows";
+    clearProgressTimer();
     state.updateProgress = 0; state.updateError = null; notify();
     try {
       const downloadResult = await invoke("download_update", { info: state.updateInfo });
+      clearProgressTimer();
       state.updateProgress = 100; notify();
       state.updateInfo = info; // 复原：install 用发起时的版本元数据，不随静默检查漂移
       if (downloadResult && typeof downloadResult === "object" && downloadResult.installer_path) {
@@ -65,6 +85,8 @@ async function checkForUpdate() { return pinvouSharedtauriUpdater().checkForUpda
       if (state.updateCancelling) state.updateProgress = 0;
       else state.updateError = String(e);
     }
+    clearProgressTimer();
+    windowsDownload = false;
     state.updateDownloading = false; state.updateCancelling = false; notify();
     if (installed && shouldRestartAfterInstall) restartApp();
     return installed;
@@ -73,6 +95,7 @@ async function checkForUpdate() { return pinvouSharedtauriUpdater().checkForUpda
   // 已进入 install(pkexec/apt)则无效(系统接管,装一半不能停)。
   function cancelUpdate() {
     if (!state.updateDownloading || state.updateCancelling) return;
+    clearProgressTimer();
     state.updateCancelling = true; notify();
     invoke("cancel_download").catch(function () { /* 忽略,下载循环超时也会退 */ });
   }

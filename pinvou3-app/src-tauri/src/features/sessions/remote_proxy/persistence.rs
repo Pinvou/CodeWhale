@@ -5,11 +5,11 @@ use std::fs;
 use std::io::{ErrorKind, Read};
 use std::path::{Path, PathBuf};
 
-use super::RemoteProxyState;
 use super::schema::{
     MAX_PROJECTION_BYTES, MAX_REMOTE_PROXY_FILE_BYTES, MAX_REMOTE_PROXY_RECORDS,
     REMOTE_PROXY_SCHEMA_VERSION, RemoteProxyFile, RemoteProxyRecord,
 };
+use super::{RemoteProxyLoadFailure, RemoteProxyState};
 use anyhow::{Context, Result, bail};
 
 impl RemoteProxyState {
@@ -19,11 +19,17 @@ impl RemoteProxyState {
     pub(crate) fn load_for_startup(path: PathBuf, sessions_dir: &Path) -> Self {
         match Self::load(path.clone(), sessions_dir) {
             Ok(state) => state,
-            Err(_) => {
+            Err(error) => {
                 eprintln!("[sessions] RemoteProxy cache unavailable; remote writes disabled");
                 Self {
                     path,
                     load_failed: true,
+                    load_failure: Some(
+                        error
+                            .downcast_ref::<RemoteProxyLoadFailure>()
+                            .copied()
+                            .unwrap_or(RemoteProxyLoadFailure::InvalidRecords),
+                    ),
                     ..Self::default()
                 }
             }
@@ -49,25 +55,24 @@ impl RemoteProxyState {
                     path,
                     ..Self::default()
                 };
-                state.require_available()?;
+                state
+                    .require_available()
+                    .context(RemoteProxyLoadFailure::ArchiveUnavailable)?;
                 return Ok(state);
             }
-            Err(error) => return Err(error).with_context(|| format!("read {}", path.display())),
+            Err(error) => return Err(error).context(RemoteProxyLoadFailure::Unreadable),
         };
         let mut bytes = Vec::new();
         file.take(MAX_REMOTE_PROXY_FILE_BYTES as u64 + 1)
             .read_to_end(&mut bytes)
-            .with_context(|| format!("read {}", path.display()))?;
+            .context(RemoteProxyLoadFailure::Unreadable)?;
         if bytes.len() > MAX_REMOTE_PROXY_FILE_BYTES {
-            bail!("RemoteProxy file exceeds byte budget");
+            return Err(RemoteProxyLoadFailure::Oversized.into());
         }
         let file: RemoteProxyFile =
-            serde_json::from_slice(&bytes).with_context(|| format!("parse {}", path.display()))?;
+            serde_json::from_slice(&bytes).context(RemoteProxyLoadFailure::Malformed)?;
         if file.schema_version != REMOTE_PROXY_SCHEMA_VERSION {
-            bail!(
-                "unsupported RemoteProxy schema version {}",
-                file.schema_version
-            );
+            return Err(RemoteProxyLoadFailure::UnsupportedVersion.into());
         }
         let records = file.records;
         let mut state = Self {
@@ -76,17 +81,24 @@ impl RemoteProxyState {
             ..Self::default()
         };
         let mut references = HashSet::new();
-        state.require_available()?;
+        state
+            .require_available()
+            .context(RemoteProxyLoadFailure::ArchiveUnavailable)?;
         if records.len() > MAX_REMOTE_PROXY_RECORDS {
-            bail!("RemoteProxy record capacity exceeded");
+            return Err(RemoteProxyLoadFailure::Oversized.into());
         }
         for record in records {
             record.validate_stored()?;
-            if state.archives.contains(&record.local_session_id)? {
+            if state
+                .archives
+                .contains(&record.local_session_id)
+                .context(RemoteProxyLoadFailure::ArchiveUnavailable)?
+            {
                 let archived = state
                     .archives
-                    .read(&record.local_session_id)?
-                    .ok_or_else(|| anyhow::anyhow!("remote archive unavailable"))?;
+                    .read(&record.local_session_id)
+                    .context(RemoteProxyLoadFailure::ArchiveUnavailable)?
+                    .ok_or(RemoteProxyLoadFailure::ArchiveUnavailable)?;
                 // A committed seal may survive interrupted JSON cleanup. Only
                 // an identical immutable record permits dropping that residue.
                 let mut comparable = archived;
@@ -114,7 +126,8 @@ impl RemoteProxyState {
         state.validate_global_request_ids()?;
         state
             .archives
-            .require_active_records(state.records.values())?;
+            .require_active_records(state.records.values())
+            .context(RemoteProxyLoadFailure::ArchiveUnavailable)?;
         let active_bytes = serde_json::to_vec(&RemoteProxyFile {
             schema_version: REMOTE_PROXY_SCHEMA_VERSION,
             records: state.records.values().cloned().collect(),
