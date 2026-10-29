@@ -1,0 +1,10 @@
+# CI overrides keep parallel jobs away from the host's production paths/ports.
+services:
+  console:
+    user: "${PINVOU_UPDATE_CI_UID:?}:${PINVOU_UPDATE_CI_GID:?}"
+    ports: !override
+      - "127.0.0.1::8792"
+    volumes: !override
+      - ${PINVOU_UPDATE_CI_PUBLIC_ROOT:?set a job-specific temporary directory}/public:/srv/pinvou3
+      - ${PINVOU_UPDATE_CI_PUBLIC_ROOT:?}/state:/var/lib/pinvou-update-console
+    cpus: 2
