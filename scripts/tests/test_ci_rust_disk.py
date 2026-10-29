@@ -386,9 +386,14 @@ class RustDiskTests(unittest.TestCase):
 
 
 class CliLintDiskPolicyTests(unittest.TestCase):
-    def test_cli_lint_reserves_disk_before_swap_and_after_cache(self):
+    def _cli_lint_job(self):
         workflow = (ROOT / ".github/workflows/pr-check.yml").read_text(encoding="utf-8")
-        job = workflow.split("\n  cli-lint:", 1)[1].split("\n  windows-rust-test:", 1)[0]
+        return workflow.split("\n  cli-lint:", 1)[1].split("\n  windows-rust-test:", 1)[0]
+
+    def _step(self, job, marker):
+        return job.split(marker, 1)[1].split("\n      - name:", 1)[0]
+
+    def _assert_disk_preparation_recipe(self, job):
         pre = "- name: Prepare CLI disk capacity before swap"
         precache = "- name: Check CLI disk capacity before cache"
         post = "- name: Check CLI disk capacity after cache"
@@ -408,22 +413,91 @@ class CliLintDiskPolicyTests(unittest.TestCase):
         self.assertLess(job.index(post), job.index(clippy))
         self.assertLess(job.index(post), job.index(featureless))
         self.assertLess(job.index(featureless), job.index(postsave))
-        self.assertEqual(job.count("python3 scripts/ci-rust-disk.py"), 4)
+        self.assertEqual(job.count("python3 scripts/ci-rust-disk.py"), 8)
 
         # Keep the existing safe base allowlist and hard capacity floor. An
         # exact recipe also rejects if:false, swallowed failures or aggressive
         # deletion of setup-action tools; none of these checks may become optional.
         expected = (
-            'run: |\n'
             '          sudo env GITHUB_WORKSPACE="$GITHUB_WORKSPACE" \\\n'
             '            RUNNER_ENVIRONMENT="$RUNNER_ENVIRONMENT" \\\n'
             '            python3 scripts/ci-rust-disk.py'
         )
         for marker, suffix in ((pre, " --min-free-gib 24"), (precache, ""), (post, "")):
-            step = job.split(marker, 1)[1].split("\n      - name:", 1)[0]
+            step = self._step(job, marker)
             body = "\n".join(line for line in step.splitlines() if not line.lstrip().startswith("#"))
-            self.assertEqual(body.strip(), expected + suffix)
+            self_hosted = (
+                'run: |\n'
+                '          if [[ "$RUNNER_ENVIRONMENT" == self-hosted ]]; then\n'
+                '            exec python3 scripts/ci-rust-disk.py --check-only' + suffix + '\n'
+                '          fi\n'
+            )
+            self.assertEqual(body.strip(), self_hosted + expected + suffix)
+        post_save = (
+            "if: ${{ always() && !cancelled() && steps.cli_lint_cache.outcome == 'success' }}\n"
+            '        run: |\n'
+            '          if [[ "$RUNNER_ENVIRONMENT" == self-hosted ]]; then\n'
+            '            python3 scripts/ci-rust-disk.py --check-only\n'
+            '          else\n'
+            + "\n".join("  " + line for line in expected.splitlines()) + '\n'
+            '          fi\n'
+            "          printf '%s\\n' 'CACHE_ON_FAILURE=true' >> \"$GITHUB_ENV\""
+        )
+        self.assertEqual(self._step(job, postsave).strip(), post_save)
         self.assertNotIn("continue-on-error", job)
+
+    def test_cli_lint_reserves_disk_before_swap_and_after_cache(self):
+        self._assert_disk_preparation_recipe(self._cli_lint_job())
+
+    def test_cli_lint_rejects_weakened_capacity_checks_for_either_runner(self):
+        job = self._cli_lint_job()
+        command = "python3 scripts/ci-rust-disk.py"
+        markers = (
+            ("- name: Prepare CLI disk capacity before swap", " --min-free-gib 24"),
+            ("- name: Check CLI disk capacity before cache", ""),
+            ("- name: Check CLI disk capacity after cache", ""),
+            ("- name: Guard CLI cache post-save", ""),
+        )
+        for marker, suffix in markers:
+            step = self._step(job, marker)
+            for check_only in (False, True):
+                prefix = "exec " if check_only and marker != markers[-1][0] else ""
+                actual = prefix + command + (" --check-only" if check_only else "") + suffix
+                line = next(line for line in step.splitlines() if line.strip() == actual)
+                weakened = actual.replace("24", "1") if suffix else actual + " --min-free-gib 1"
+                for replacement in ("", weakened, actual + " || true", actual + " --aggressive", "echo " + actual):
+                    changed_step = step.replace(line, line.replace(actual, replacement), 1)
+                    changed = job.replace(marker + step, marker + changed_step, 1)
+                    with self.subTest(step=marker, check_only=check_only, replacement=replacement), self.assertRaises(AssertionError):
+                        self._assert_disk_preparation_recipe(changed)
+            for bypass in ("\n        if: false", "\n        continue-on-error: true"):
+                with self.subTest(step=marker, bypass=bypass), self.assertRaises(AssertionError):
+                    self._assert_disk_preparation_recipe(job.replace(marker, marker + bypass, 1))
+
+    def test_cli_lint_rejects_missing_or_reordered_checks_and_early_cache_save(self):
+        job = self._cli_lint_job()
+        markers = (
+            "- name: Prepare CLI disk capacity before swap",
+            "- name: Check CLI disk capacity before cache",
+            "- name: Check CLI disk capacity after cache",
+            "- name: Guard CLI cache post-save",
+        )
+        for marker in markers:
+            block = "      " + marker + self._step(job, marker)
+            without = job.replace(block, "", 1)
+            with self.subTest(missing=marker), self.assertRaises((AssertionError, ValueError)):
+                self._assert_disk_preparation_recipe(without)
+        pre = "      " + markers[1] + self._step(job, markers[1])
+        post = "      " + markers[2]
+        without_pre = job.replace(pre, "", 1)
+        changed = without_pre.replace(post, pre + post, 1)
+        with self.assertRaises(AssertionError):
+            self._assert_disk_preparation_recipe(changed)
+        post_save = self._step(job, markers[-1])
+        flag = next(line for line in post_save.splitlines() if "CACHE_ON_FAILURE=true" in line)
+        changed_step = post_save.replace(flag, "", 1).replace('        run: |', '        run: |\n' + flag, 1)
+        with self.assertRaises(AssertionError):
+            self._assert_disk_preparation_recipe(job.replace(markers[-1] + post_save, markers[-1] + changed_step, 1))
 
 
 if __name__ == "__main__":
