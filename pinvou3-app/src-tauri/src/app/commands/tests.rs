@@ -3098,6 +3098,75 @@ fn save_model_inner_commits_prefs_before_the_deferred_delete() {
     });
 }
 
+#[test]
+fn delete_model_deferred_delete_serializes_with_a_concurrent_replacement() {
+    crate::platform::test_support::with_temp_home("delete-model-replace-race", || {
+        // Same reviewer interleaving as the search/web barrier tests, on the
+        // model path: A deletes model m-race (its post-commit keyring delete
+        // parks at the gate), B saves a replacement for the same model id,
+        // whose keyring write runs inside B's transaction. Without the
+        // prefs-lock serialization B's set would land in the commit→delete
+        // window and A's stale delete would destroy B's fresh secret.
+        seed_model_deletion_prefs(&[
+            model_deletion_test_model("m-keep", false),
+            model_deletion_test_model("m-race", true),
+        ]);
+        let reference = model_deletion_test_model("m-race", true).credential_reference();
+        let inner = MemoryCredentialStore::default();
+        inner
+            .set(&reference, BARRIER_ORIGINAL_KEY)
+            .expect("seed the original model keyring secret");
+        let (delete_started, delete_started_rx) = std::sync::mpsc::channel();
+        let gate = DeleteGate::default();
+        let store = std::sync::Arc::new(GatedDeleteStore {
+            inner,
+            delete_started,
+            gate: gate.clone(),
+        });
+        let a_store = store.clone();
+        let b_store = store.clone();
+        let mut replacement = model_deletion_test_model("m-race", true);
+        replacement.api_key = BARRIER_REPLACEMENT_KEY.to_string();
+        replacement.credential_action = Some(CredentialEditAction::Replace);
+
+        run_delete_replacement_barrier(
+            "delete_model",
+            |store, label| {
+                let secret = store.inner.get(&reference).unwrap();
+                assert_eq!(
+                    secret.as_deref(),
+                    Some(BARRIER_REPLACEMENT_KEY),
+                    "{label}: B's committed secret must survive A's deferred delete"
+                );
+                let prefs = UserPrefs::load();
+                let saved = prefs
+                    .model_by_id("m-race")
+                    .expect("the replacement must re-add the model");
+                assert_eq!(
+                    saved.credential_state,
+                    CredentialState::Configured,
+                    "{label}: the replacement must leave the model configured in prefs"
+                );
+                assert!(
+                    saved.credential_ref.is_some(),
+                    "{label}: the replacement must keep the credential reference"
+                );
+            },
+            move || {
+                super::settings::delete_model_inner("m-race", a_store.as_ref())
+                    .map(|()| UserPrefs::load())
+            },
+            move || {
+                super::settings::save_model_inner(replacement, b_store.as_ref())
+                    .map(|()| UserPrefs::load())
+            },
+            store,
+            gate,
+            delete_started_rx,
+        );
+    });
+}
+
 // ---- search credential deletion ordering (search settings save commits before the keyring) ----
 
 use crate::platform::prefs::{SearchCredential, SearchProvider};
@@ -3414,13 +3483,13 @@ fn barrier_store() -> (
 /// is forced, not raced.
 fn run_delete_replacement_barrier(
     label: &str,
+    verify: impl FnOnce(&GatedDeleteStore, &str),
     save_a_delete: impl FnOnce() -> Result<UserPrefs, String> + Send + 'static,
     save_b_replace: impl FnOnce() -> Result<UserPrefs, String> + Send + 'static,
     store: std::sync::Arc<GatedDeleteStore>,
     gate: DeleteGate,
     delete_started: std::sync::mpsc::Receiver<()>,
 ) {
-    let reference = SearchProvider::Tavily.credential_reference();
     let a = std::thread::spawn(save_a_delete);
     // Deterministic pause: this returns only once A's save committed and its
     // deferred delete is blocked before the keyring removal.
@@ -3449,22 +3518,7 @@ fn run_delete_replacement_barrier(
     }
     a.join().unwrap().expect("A's delete save must succeed");
 
-    let secret = store.inner.get(&reference).unwrap();
-    let configured = UserPrefs::load()
-        .search
-        .credentials
-        .get(&SearchProvider::Tavily)
-        .map(|credential| credential.credential_state == CredentialState::Configured)
-        .unwrap_or(false);
-    assert_eq!(
-        secret.as_deref(),
-        Some(BARRIER_REPLACEMENT_KEY),
-        "{label}: B's committed secret must survive A's deferred delete"
-    );
-    assert!(
-        configured,
-        "{label}: the replacement must leave the provider configured in prefs"
-    );
+    verify(&store, label);
 }
 
 #[test]
@@ -3477,6 +3531,27 @@ fn search_settings_deferred_delete_serializes_with_a_concurrent_replacement() {
 
         run_delete_replacement_barrier(
             "save_search_settings",
+            |store, label| {
+                let secret = store
+                    .inner
+                    .get(&SearchProvider::Tavily.credential_reference())
+                    .unwrap();
+                let configured = UserPrefs::load()
+                    .search
+                    .credentials
+                    .get(&SearchProvider::Tavily)
+                    .map(|credential| credential.credential_state == CredentialState::Configured)
+                    .unwrap_or(false);
+                assert_eq!(
+                    secret.as_deref(),
+                    Some(BARRIER_REPLACEMENT_KEY),
+                    "{label}: B's committed secret must survive A's deferred delete"
+                );
+                assert!(
+                    configured,
+                    "{label}: the replacement must leave the provider configured in prefs"
+                );
+            },
             move || {
                 super::settings::persist_search_settings_inner(
                     search_deletion_payload(Some(CredentialEditAction::Delete)),
@@ -3506,6 +3581,27 @@ fn web_settings_deferred_delete_serializes_with_a_concurrent_replacement() {
 
         run_delete_replacement_barrier(
             "save_web_settings",
+            |store, label| {
+                let secret = store
+                    .inner
+                    .get(&SearchProvider::Tavily.credential_reference())
+                    .unwrap();
+                let configured = UserPrefs::load()
+                    .search
+                    .credentials
+                    .get(&SearchProvider::Tavily)
+                    .map(|credential| credential.credential_state == CredentialState::Configured)
+                    .unwrap_or(false);
+                assert_eq!(
+                    secret.as_deref(),
+                    Some(BARRIER_REPLACEMENT_KEY),
+                    "{label}: B's committed secret must survive A's deferred delete"
+                );
+                assert!(
+                    configured,
+                    "{label}: the replacement must leave the provider configured in prefs"
+                );
+            },
             move || {
                 super::settings::persist_web_settings_inner(
                     web_patch(search_deletion_payload(Some(CredentialEditAction::Delete))),
