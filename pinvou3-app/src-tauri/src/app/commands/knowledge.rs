@@ -176,12 +176,15 @@ pub async fn session_unmount_collection(
     Ok(snapshot)
 }
 
-/// Build + fan out the `remote_control:kb_mount_changed` payload shared by the
-/// local and remote knowledge mount commands. `remote_collections` is the
-/// remote-specific drift: local-only emitters pass `None`, which keeps the
-/// historic local payload shape (no `remote_collections` key). The warn tail is
-/// unified too — remote callers previously logged a `[remote-knowledge]`
-/// variant; the single revision-aware diagnostic now covers both.
+/// Build + fan out the `remote_control:kb_mount_changed` payload for the local
+/// knowledge mount commands. The remote-knowledge commands emit via their own
+/// `publish_remote_kb_mount_change` builder in `remote_knowledge.rs`, so no
+/// caller currently passes `Some`: `remote_collections` keeps this helper
+/// forward-compatible with a remote caller while local-only emitters pass
+/// `None`, which preserves the historic local payload shape (no
+/// `remote_collections` key). The warn tail is unified too — remote callers
+/// previously logged a `[remote-knowledge]` variant; the single
+/// revision-aware diagnostic now covers both.
 pub(super) fn publish_kb_mount_change_with_remote(
     app: &AppHandle,
     session_id: &str,
