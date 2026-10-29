@@ -253,7 +253,7 @@ jobs:
   # 首次 push 或 before commit 不可达时直接放行,宁可多构建也不漏构建。
   check-version-bump:
     name: 检测发布链路变更
-    runs-on: ubuntu-22.04
+    runs-on: ${{ fromJSON(vars.PINVOU_LINUX_RUNNER || '["ubuntu-22.04"]') }}
     timeout-minutes: 10
     outputs:
       build_required: ${{ steps.diff.outputs.build_required }}
@@ -270,7 +270,7 @@ jobs:
 
       - name: Set up zram and swap
         # 内存扩容为尽力而为:超时/失败只告警不阻断(回退 runner 默认内存)。
-        run: timeout --kill-after=15 240 sudo --preserve-env=GITHUB_ACTIONS,PINVOU3_CI_DISABLE_ZRAM bash "${{ github.workspace }}/scripts/ci-memory-setup.sh" || echo "::warning::ci-memory-setup 未完成,继续使用 runner 默认内存"
+        run: timeout --kill-after=15 240 sudo --preserve-env=GITHUB_ACTIONS,PINVOU3_CI_DISABLE_ZRAM,RUNNER_ENVIRONMENT bash "${{ github.workspace }}/scripts/ci-memory-setup.sh" || echo "::warning::ci-memory-setup 未完成,继续使用 runner 默认内存"
 
       - name: Node.js
         uses: actions/setup-node@v7
@@ -312,6 +312,7 @@ jobs:
     name: Windows 远控真实证据门禁
     needs: check-version-bump
     if: >-
+      vars.PINVOU_WINDOWS_MAC_ENABLED != 'false' &&
       needs.check-version-bump.outputs.build_required == 'true' &&
       (github.event_name == 'workflow_dispatch' ||
        (github.event_name == 'push' && github.ref == 'refs/heads/main'))
@@ -439,7 +440,7 @@ jobs:
        (github.event_name == 'push' && github.ref == 'refs/heads/main'))
     # 较新的 Ubuntu runner 可能引入 22.04 不具备的 glibc 符号，导致启动崩溃。
     # runner 固定为 ubuntu-22.04；升级前必须调整并验证配套 glibc 下限守卫。
-    runs-on: ubuntu-22.04
+    runs-on: ${{ fromJSON(vars.PINVOU_LINUX_RUNNER || '["ubuntu-22.04"]') }}
     timeout-minutes: 90
     env:
       VERSION: ${{ needs.check-version-bump.outputs.version }}
@@ -497,7 +498,7 @@ jobs:
 
       - name: Set up zram and swap
         # 内存扩容为尽力而为:超时/失败只告警不阻断(回退 runner 默认内存)。
-        run: timeout --kill-after=15 240 sudo --preserve-env=GITHUB_ACTIONS,PINVOU3_CI_DISABLE_ZRAM bash "${{ github.workspace }}/scripts/ci-memory-setup.sh" || echo "::warning::ci-memory-setup 未完成,继续使用 runner 默认内存"
+        run: timeout --kill-after=15 240 sudo --preserve-env=GITHUB_ACTIONS,PINVOU3_CI_DISABLE_ZRAM,RUNNER_ENVIRONMENT bash "${{ github.workspace }}/scripts/ci-memory-setup.sh" || echo "::warning::ci-memory-setup 未完成,继续使用 runner 默认内存"
 
       # hosted runner 是单盘布局(/ 与 /mnt 同一 ext4)。ENOSPC 时期的记录
       # (2026-09-15 探针:x64 镜像开机仅 ~13-14G 可用):发布冷编译(700+ crate,
@@ -506,6 +507,9 @@ jobs:
       # 在任何工具链/缓存/依赖落盘之前删掉未使用的预装 SDK。
       - name: 为发布构建准备磁盘空间
         run: |
+          if [[ "$RUNNER_ENVIRONMENT" == self-hosted ]]; then
+            exec python3 scripts/ci-rust-disk.py --check-only --min-free-gib 24
+          fi
           sudo env GITHUB_WORKSPACE="$GITHUB_WORKSPACE" \
             RUNNER_ENVIRONMENT="$RUNNER_ENVIRONMENT" \
             python3 scripts/ci-rust-disk.py --aggressive --min-free-gib 24
@@ -541,9 +545,11 @@ jobs:
             libpipewire-0.3-dev libdrm-dev libgbm-dev libegl-dev \
             build-essential pkg-config cmake lld
           # 从源头减负:孤儿依赖、apt 缓存包与索引清单不留在构建盘上。
-          sudo apt-get autoremove -y --purge
-          sudo apt-get clean
-          sudo rm -rf /var/lib/apt/lists/*
+          if [[ "$RUNNER_ENVIRONMENT" == github-hosted ]]; then
+            sudo apt-get autoremove -y --purge
+            sudo apt-get clean
+            sudo rm -rf /var/lib/apt/lists/*
+          fi
 
       # pipewire-rs 0.10 (computer_use Wayland capture, direct + via xcap) needs
       # SPA static inline helpers that ubuntu-22.04's libpipewire 0.3.48 headers
@@ -687,7 +693,7 @@ jobs:
 
       - name: Set up zram and swap
         # 内存扩容为尽力而为:超时/失败只告警不阻断(回退 runner 默认内存)。
-        run: timeout --kill-after=15 240 sudo --preserve-env=GITHUB_ACTIONS,PINVOU3_CI_DISABLE_ZRAM bash "${{ github.workspace }}/scripts/ci-memory-setup.sh" || echo "::warning::ci-memory-setup 未完成,继续使用 runner 默认内存"
+        run: timeout --kill-after=15 240 sudo --preserve-env=GITHUB_ACTIONS,PINVOU3_CI_DISABLE_ZRAM,RUNNER_ENVIRONMENT bash "${{ github.workspace }}/scripts/ci-memory-setup.sh" || echo "::warning::ci-memory-setup 未完成,继续使用 runner 默认内存"
 
       # hosted runner 是单盘布局(/ 与 /mnt 同一 ext4)。ENOSPC 时期的记录
       # (2026-09-15 探针:x64 镜像开机仅 ~13-14G 可用):发布冷编译(700+ crate,
@@ -698,6 +704,9 @@ jobs:
       # (与 x64 的 aggressive 档不同)。
       - name: 为发布构建准备磁盘空间
         run: |
+          if [[ "$RUNNER_ENVIRONMENT" == self-hosted ]]; then
+            exec python3 scripts/ci-rust-disk.py --check-only --min-free-gib 24
+          fi
           sudo env GITHUB_WORKSPACE="$GITHUB_WORKSPACE" \
             RUNNER_ENVIRONMENT="$RUNNER_ENVIRONMENT" \
             python3 scripts/ci-rust-disk.py --min-free-gib 24
@@ -725,9 +734,11 @@ jobs:
             libpipewire-0.3-dev libdrm-dev libgbm-dev libegl-dev \
             build-essential pkg-config cmake lld
           # 从源头减负:孤儿依赖、apt 缓存包与索引清单不留在构建盘上。
-          sudo apt-get autoremove -y --purge
-          sudo apt-get clean
-          sudo rm -rf /var/lib/apt/lists/*
+          if [[ "$RUNNER_ENVIRONMENT" == github-hosted ]]; then
+            sudo apt-get autoremove -y --purge
+            sudo apt-get clean
+            sudo rm -rf /var/lib/apt/lists/*
+          fi
 
       # pipewire-rs 0.10 (computer_use Wayland capture, direct + via xcap) needs
       # SPA static inline helpers that ubuntu-22.04's libpipewire 0.3.48 headers
@@ -819,7 +830,7 @@ jobs:
     # 实测上界(46m22s)的 ~1.2x——"交叉构建显著慢于原生"的旧假设偏悲观。
     # timeout 仍按 arm64 上限的 ~1.5x 放大(120 → 180,policy test 按联动
     # 公式钉住),对实测 ~3.3x 余量;样本尚少(n=1),先保持策略比率。
-    runs-on: ubuntu-22.04
+    runs-on: ${{ fromJSON(vars.PINVOU_LINUX_RUNNER || '["ubuntu-22.04"]') }}
     timeout-minutes: 180
     env:
       VERSION: ${{ needs.check-version-bump.outputs.version }}
@@ -856,13 +867,16 @@ jobs:
 
       - name: Set up zram and swap
         # Best effort: timeouts or failures only warn and never block (falls back to stock runner memory).
-        run: timeout --kill-after=15 240 sudo --preserve-env=GITHUB_ACTIONS,PINVOU3_CI_DISABLE_ZRAM bash "${{ github.workspace }}/scripts/ci-memory-setup.sh" || echo "::warning::ci-memory-setup did not finish; continuing with stock runner memory"
+        run: timeout --kill-after=15 240 sudo --preserve-env=GITHUB_ACTIONS,PINVOU3_CI_DISABLE_ZRAM,RUNNER_ENVIRONMENT bash "${{ github.workspace }}/scripts/ci-memory-setup.sh" || echo "::warning::ci-memory-setup did not finish; continuing with stock runner memory"
 
       # 同 build-linux-x64:ENOSPC 时期(2026-09-15 探针)x86_64 镜像仅 ~13-14G
       # 空闲(2026-10-01 复测开机空闲 79-102G,见 ci-memory-setup.sh);
       # 交叉构建的工具链 + sysroot + 两个 cargo target 目录全部落在工作区内,先腾空间。
       - name: Prepare disk space for the release build
         run: |
+          if [[ "$RUNNER_ENVIRONMENT" == self-hosted ]]; then
+            exec python3 scripts/ci-rust-disk.py --check-only --min-free-gib 24
+          fi
           sudo env GITHUB_WORKSPACE="$GITHUB_WORKSPACE" \
             RUNNER_ENVIRONMENT="$RUNNER_ENVIRONMENT" \
             python3 scripts/ci-rust-disk.py --aggressive --min-free-gib 24
@@ -923,9 +937,11 @@ jobs:
           sudo apt-get install -y --no-install-recommends \
             build-essential pkg-config cmake libclang-18-dev file
           # Reduce footprint at the source: orphan dependencies, apt cache packages, and index lists do not stay on the build disk.
-          sudo apt-get autoremove -y --purge
-          sudo apt-get clean
-          sudo rm -rf /var/lib/apt/lists/*
+          if [[ "$RUNNER_ENVIRONMENT" == github-hosted ]]; then
+            sudo apt-get autoremove -y --purge
+            sudo apt-get clean
+            sudo rm -rf /var/lib/apt/lists/*
+          fi
           # clang-sys probes several default locations; pin the discovery to
           # the LoongArch-capable libclang this step just installed.
           echo "LIBCLANG_PATH=/usr/lib/llvm-18/lib" >> "$GITHUB_ENV"
@@ -990,7 +1006,7 @@ jobs:
   validate-windows-runtime-pr:
     name: 验证 Windows 私有运行时契约
     needs: check-version-bump
-    if: github.event_name == 'pull_request' && needs.check-version-bump.outputs.build_required == 'true'
+    if: github.event_name == 'pull_request' && needs.check-version-bump.outputs.build_required == 'true' && vars.PINVOU_WINDOWS_MAC_ENABLED != 'false'
     runs-on: windows-latest
     timeout-minutes: 20
     defaults:
@@ -1021,7 +1037,7 @@ jobs:
   build-windows-x64:
     name: 构建 Windows x86_64 nsis
     needs: [check-version-bump, remote-control-release-gate]
-    if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main' && needs.check-version-bump.outputs.build_required == 'true' && needs.remote-control-release-gate.result == 'success'
+    if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main' && needs.check-version-bump.outputs.build_required == 'true' && needs.remote-control-release-gate.result == 'success' && vars.PINVOU_WINDOWS_MAC_ENABLED != 'false'
     runs-on: windows-latest
     # 0.10.5 的 nsis 构建耗时 ~86min,90min 上限在 post cache save 阶段被撞掉。
     timeout-minutes: 150
@@ -1199,6 +1215,7 @@ jobs:
     name: 构建 macOS universal dmg
     needs: check-version-bump
     if: >-
+      vars.PINVOU_WINDOWS_MAC_ENABLED != 'false' &&
       needs.check-version-bump.outputs.build_required == 'true' &&
       (github.event_name == 'workflow_dispatch' ||
        (github.event_name == 'push' && github.ref == 'refs/heads/main'))
