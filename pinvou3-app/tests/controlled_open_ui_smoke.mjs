@@ -12,6 +12,7 @@ const base = `http://127.0.0.1:${server.httpServer.address().port}`;
 // Connect to this test profile's DevTools port instead of depending on the
 // original launcher process remaining alive.
 let profileRoot, profile, browser, browserProcess, spawnFailure, testFailure;
+const cleanupErrors = [];
 try {
 profileRoot = fs.realpathSync(os.tmpdir());
 profile = fs.mkdtempSync(path.join(profileRoot, '.pinvou-controlled-open-'));
@@ -282,19 +283,19 @@ if (!browser) {
 } catch (error) {
   testFailure = error;
 } finally {
-  const cleanupErrors = [];
   try { if (browser) await browser.close(); else browserProcess?.kill(); } catch (error) { cleanupErrors.push(error); }
   try { await new Promise((resolve, reject) => server.httpServer.close(error => error ? reject(error) : resolve())); } catch (error) { cleanupErrors.push(error); }
   try { if (profile) {
     const resolved = fs.realpathSync(profile);
     if (path.dirname(resolved) !== profileRoot || !path.basename(resolved).startsWith('.pinvou-controlled-open-')) {
-      throw new Error('refusing to remove a profile outside the temporary directory');
+      cleanupErrors.push(new Error('refusing to remove a profile outside the temporary directory'));
+    } else {
+      await fs.promises.rm(resolved, { recursive: true, force: true, maxRetries: 10, retryDelay: 300 });
     }
-    fs.rmSync(resolved, { recursive: true, force: true, maxRetries: 10, retryDelay: 300 });
   } } catch (error) { cleanupErrors.push(error); }
-  if (testFailure) {
-    for (const error of cleanupErrors) console.error('test cleanup failed:', error);
-    throw testFailure;
-  }
-  if (cleanupErrors.length) throw new AggregateError(cleanupErrors, 'test cleanup failed');
 }
+if (testFailure) {
+  for (const error of cleanupErrors) console.error('test cleanup failed:', error);
+  throw testFailure;
+}
+if (cleanupErrors.length) throw new AggregateError(cleanupErrors, 'test cleanup failed');
