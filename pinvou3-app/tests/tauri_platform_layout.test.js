@@ -199,27 +199,52 @@ for (const stalePath of [
 // prefs was split into the platform/prefs/ directory by #142; the pet filter anchors on the directory.
 assert.match(workflow, /src\/platform\/prefs\//);
 assert.match(connectorWorkflow, /resources\/platforms\/\*\*\/bundle\/connectors\/\*\*/);
-const connectorMatrices = connectorWorkflow.match(
-  /fromJSON\(vars\.PINVOU_WINDOWS_MAC_ENABLED != 'false' && '([^']+)' \|\| '([^']+)'\)/,
-);
-assert.ok(connectorMatrices, "connector workflow must declare both platform-switch matrices");
-const [allPlatforms, linuxOnly] = connectorMatrices.slice(1).map((value) => {
-  const matrix = JSON.parse(value);
-  assert.deepEqual(Object.keys(matrix), ["include"], "strategy.matrix must be an include map");
-  assert.ok(Array.isArray(matrix.include) && matrix.include.length > 0, "platform matrix must have rows");
-  return matrix.include;
-});
-for (const resources of ["linux/aarch64", "linux/x86_64", "macos/aarch64", "macos/x86_64", "windows/x86_64"]) {
-  assert.ok(
-    allPlatforms.some((row) => row.resources === resources),
-    `connector verify matrix must cover ${resources}`,
+function assertConnectorMatrix(source) {
+  // This workflow uses one known expression shape. Decode its JSON arguments;
+  // never evaluate workflow expressions or let comments satisfy the contract.
+  const lines = source.split(/\r?\n/).filter((line) => !/^\s*(?:#|$)/.test(line));
+  assert.equal(lines.filter((line) => /^jobs:/.test(line)).length, 1, "one live jobs map");
+  const jobsStart = lines.findIndex((line) => line === "jobs:");
+  assert.ok(jobsStart >= 0, "canonical live jobs map");
+  const jobsEnd = lines.findIndex((line, index) => index > jobsStart && /^\S/.test(line));
+  const jobs = lines.slice(jobsStart + 1, jobsEnd < 0 ? undefined : jobsEnd);
+  const headers = jobs.flatMap((line, index) => /^  verify-connectors:/.test(line) ? [index] : []);
+  assert.equal(headers.length, 1, "one live verify-connectors job");
+  const start = headers[0];
+  assert.equal(jobs[start], "  verify-connectors:", "canonical connector job header");
+  const end = jobs.findIndex((line, index) => index > start && /^ {0,2}\S/.test(line));
+  const job = jobs.slice(start + 1, end < 0 ? undefined : end);
+  assert.equal(job.filter((line) => /^    strategy:/.test(line)).length, 1, "one live connector strategy");
+  const strategyStart = job.indexOf("    strategy:");
+  assert.ok(strategyStart >= 0, "canonical connector strategy");
+  const strategyEnd = job.findIndex((line, index) => index > strategyStart && /^ {0,4}\S/.test(line));
+  const strategy = job.slice(strategyStart + 1, strategyEnd < 0 ? undefined : strategyEnd);
+  const matrixLines = job.filter((line) => /^\s+matrix:/.test(line));
+  assert.equal(matrixLines.length, 1, "one live connector matrix");
+  assert.ok(strategy.includes(matrixLines[0]), "matrix belongs to the connector strategy");
+  const expression = matrixLines[0].match(
+    /^      matrix: \$\{\{ fromJSON\(vars\.PINVOU_WINDOWS_MAC_ENABLED != 'false' && '([^']+)' \|\| '([^']+)'\) \}\}$/,
   );
+  assert.ok(expression, "known connector matrix condition and two JSON branches");
+  const enabled = JSON.parse(expression[1]);
+  const disabled = JSON.parse(expression[2]);
+  const linuxRows = [
+    { platform: "linux-arm64", "runs-on": "ubuntu-22.04-arm", resources: "linux/aarch64", suffix: "", can_run: true },
+    { platform: "linux-x64", "runs-on": "ubuntu-22.04", resources: "linux/x86_64", suffix: "", can_run: true },
+  ];
+  assert.deepEqual(enabled, { include: [
+    ...linuxRows,
+    { platform: "darwin-arm64", "runs-on": "macos-15", resources: "macos/aarch64", suffix: "", can_run: true },
+    { platform: "darwin-x64", "runs-on": "macos-15-intel", resources: "macos/x86_64", suffix: "", can_run: true },
+    { platform: "windows-x64", "runs-on": "windows-latest", resources: "windows/x86_64", suffix: ".exe", can_run: true },
+  ] }, "enabled/default connector matrix preserves all five platform mappings");
+  assert.deepEqual(disabled, { include: linuxRows }, "disabled native platforms retain exactly both Linux mappings");
+  const runners = job.filter((line) => /^    runs-on:/.test(line));
+  assert.deepEqual(runners, [
+    "    runs-on: ${{ matrix.runs-on == 'ubuntu-22.04' && fromJSON(vars.PINVOU_LINUX_LIGHT_RUNNER || vars.PINVOU_LINUX_RUNNER || '[\"ubuntu-22.04\"]') || matrix.runs-on }}",
+  ], "connector matrix runner mapping retains LIGHT/legacy/default routing");
 }
-assert.deepEqual(
-  linuxOnly.map((row) => row.resources).sort(),
-  ["linux/aarch64", "linux/x86_64"],
-  "disabling Windows/macOS must retain both Linux architectures",
-);
+assertConnectorMatrix(connectorWorkflow);
 assert.match(connectorWorkflow, /src\/platform\/paths\.rs/);
 
 console.log("tauri platform layout contract: ok");
