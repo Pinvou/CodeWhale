@@ -302,7 +302,9 @@ impl InboundReceiver {
                     let Some(frame) = queue.control.pop_front() else {
                         break;
                     };
-                    if let Some((before, _)) = queue.pending_disconnects.front_mut() {
+                    // Each pending prefix counts this same queued control.
+                    // The disconnect cap bounds this work to at most 8 items.
+                    for (before, _) in &mut queue.pending_disconnects {
                         *before -= 1;
                     }
                     return Some(frame.into_delivery());
@@ -729,6 +731,98 @@ mod tests {
             next(&mut receiver).await.event,
             ControllerLaneEvent::Frame("b".repeat(10))
         );
+    }
+
+    #[tokio::test]
+    async fn each_disconnect_precedes_controls_accepted_after_its_own_prefix() {
+        let (sender, mut receiver) = inbound_channel(limits());
+        let first = context_for("first-disconnect");
+        let second = context_for("second-disconnect");
+        sender.enqueue(frame(FramePriority::Control, b'a', 1));
+        sender.enqueue(disconnected(first.clone()));
+        sender.enqueue(frame(FramePriority::Control, b'b', 1));
+        sender.enqueue(disconnected(second.clone()));
+        sender.enqueue(frame(FramePriority::Control, b'c', 1));
+        for expected in [
+            ControllerLaneEvent::Frame("a".into()),
+            ControllerLaneEvent::Disconnected(first),
+            ControllerLaneEvent::Frame("b".into()),
+            ControllerLaneEvent::Disconnected(second),
+            ControllerLaneEvent::Frame("c".into()),
+        ] {
+            assert_eq!(next(&mut receiver).await.event, expected);
+        }
+    }
+
+    #[tokio::test]
+    async fn disconnect_prefixes_track_partial_consumption_and_shared_boundaries() {
+        let (sender, mut receiver) = inbound_channel(limits());
+        let first = context_for("first-disconnect");
+        let second = context_for("second-disconnect");
+        let third = context_for("third-disconnect");
+        sender.enqueue(frame(FramePriority::Control, b'a', 1));
+        sender.enqueue(frame(FramePriority::Control, b'b', 1));
+        sender.enqueue(disconnected(first.clone()));
+        assert_eq!(
+            next(&mut receiver).await.event,
+            ControllerLaneEvent::Frame("a".into())
+        );
+        sender.enqueue(frame(FramePriority::Control, b'c', 1));
+        sender.enqueue(disconnected(second.clone()));
+        sender.enqueue(disconnected(third.clone()));
+        sender.enqueue(frame(FramePriority::Control, b'd', 1));
+        for expected in [
+            ControllerLaneEvent::Frame("b".into()),
+            ControllerLaneEvent::Disconnected(first),
+            ControllerLaneEvent::Frame("c".into()),
+            ControllerLaneEvent::Disconnected(second),
+            ControllerLaneEvent::Disconnected(third),
+            ControllerLaneEvent::Frame("d".into()),
+        ] {
+            assert_eq!(next(&mut receiver).await.event, expected);
+        }
+    }
+
+    #[tokio::test]
+    async fn evicting_oldest_disconnect_preserves_all_surviving_control_prefixes() {
+        let (sender, mut receiver) = inbound_channel(InboundLimits {
+            control_items: PENDING_DISCONNECT_CAP + 2,
+            ..limits()
+        });
+        let contexts: Vec<_> = (0..=PENDING_DISCONNECT_CAP)
+            .map(|index| context_for(&format!("disconnect-{index}")))
+            .collect();
+        for (index, context) in contexts.iter().enumerate() {
+            sender.enqueue(frame(FramePriority::Control, b'a' + index as u8, 1));
+            sender.enqueue(disconnected(context.clone()));
+        }
+        sender.enqueue(frame(FramePriority::Control, b'z', 1));
+        assert_eq!(receiver.failure(), None);
+        assert_eq!(
+            receiver.state.queue.lock().pending_disconnects.len(),
+            PENDING_DISCONNECT_CAP
+        );
+        assert_eq!(
+            next(&mut receiver).await.event,
+            ControllerLaneEvent::Frame("a".into())
+        );
+        // Only the oldest context was evicted. Its preceding control still
+        // precedes the first surviving disconnect, as do all later prefixes.
+        for (index, context) in contexts.into_iter().enumerate().skip(1) {
+            assert_eq!(
+                next(&mut receiver).await.event,
+                ControllerLaneEvent::Frame(char::from(b'a' + index as u8).to_string())
+            );
+            assert_eq!(
+                next(&mut receiver).await.event,
+                ControllerLaneEvent::Disconnected(context)
+            );
+        }
+        assert_eq!(
+            next(&mut receiver).await.event,
+            ControllerLaneEvent::Frame("z".into())
+        );
+        assert_eq!(receiver.remaining_bytes(), limits().total_bytes);
     }
 
     #[tokio::test]
