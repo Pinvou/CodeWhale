@@ -11,6 +11,7 @@ import { existsSync, mkdtempSync, mkdirSync, writeFileSync, readFileSync, readdi
 import { tmpdir } from "node:os";
 import { join, matchesGlob } from "node:path";
 import { spawnSync } from "node:child_process";
+import { fileURLToPath } from "node:url";
 
 const workflow = await readFile(
   new URL("../../.github/workflows/pr-check.yml", import.meta.url),
@@ -237,28 +238,62 @@ test("container CI uses immutable official cache images without losing either bu
   assert.match(relay, /image: mirror\.gcr\.io\/library\/postgres@sha256:[a-f0-9]{64}/);
   assert.match(relay, /--health-cmd "pg_isready/);
   const consoleJob = jobBlock("update-release-console-test");
-  const selected = consoleJob.match(/PINVOU_UPDATE_NODE_IMAGE: (mirror\.gcr\.io\/library\/node@sha256:[a-f0-9]{64})/)[1];
   const step = namedStep(consoleJob, "发布台容器与 Compose 配置校验");
+  const selectedMatch = step.match(/PINVOU_UPDATE_NODE_IMAGE: (mirror\.gcr\.io\/library\/node@sha256:[a-f0-9]{64})/);
+  assert.ok(selectedMatch, "the real container step must select an immutable image");
+  const selected = selectedMatch[1];
   assert.match(step, /if: \$\{\{ matrix\.node-version == '20' \}\}/);
-  const run = stepRun(consoleJob, "发布台容器与 Compose 配置校验");
+  assert.match(step, /^ {8}run: bash scripts\/ci-update-release-console-container\.sh$/m);
+  assert.doesNotMatch(step, /continue-on-error|\|\| true/);
+  const cleanupStep = namedStep(consoleJob, "清理发布台容器");
+  const cleanupSelection = cleanupStep.match(/PINVOU_UPDATE_NODE_IMAGE: (mirror\.gcr\.io\/library\/node@sha256:[a-f0-9]{64})/);
+  assert.ok(cleanupSelection, "cleanup must receive an immutable image selection");
+  assert.equal(cleanupSelection[1], selected, "execution and cleanup must receive the same selected image");
+  assert.match(cleanupStep, /if: \$\{\{ always\(\) && matrix\.node-version == '20' \}\}/);
+  assert.match(cleanupStep, /^ {8}run: bash scripts\/ci-update-release-console-container\.sh --cleanup$/m);
+
+  const scriptPath = fileURLToPath(new URL("../ci-update-release-console-container.sh", import.meta.url));
+  const script = readFileSync(scriptPath, "utf8");
+  assert.match(script, /for attempt in \{1\.\.30\}/);
+  assert.match(script, /exit 1/);
+  assert.match(script, /Authorization: Bearer \$PINVOU_UPDATE_ADMIN_TOKEN/);
+  assert.doesNotMatch(script, /\/var\/www\/pinvou3/);
   const directory = mkdtempSync(join(tmpdir(), "pinvou-container-routing-"));
+  const shellPath = value => value.replaceAll("\\", "/");
+  const prefix = `
+    docker() {
+      printf '%s|%s\\n' "$PINVOU_UPDATE_NODE_IMAGE" "$*" >> "$LOG"
+      if [[ "$1" == build && "$BUILD_STATUS" != 0 ]]; then return "$BUILD_STATUS"; fi
+      if [[ "$*" == *'port console 8792'* ]]; then printf '%s\\n' '127.0.0.1:43781'; fi
+      return 0
+    }
+    curl() { printf 'CURL|%s\\n' "$*" >> "$LOG"; }
+    python3() { command "$CI_PYTHON" "$@"; }
+    source "$CI_SCRIPT"
+  `;
   try {
-    const log = join(directory, "calls");
-    const prefix = 'docker() { printf "%s|%s\\n" "$PINVOU_UPDATE_NODE_IMAGE" "$*" >> "$LOG"; }; sudo() { return 0; }; curl() { return 0; };\n';
-    const result = spawnSync(bash, ["-e", "-c", prefix + run], { cwd: directory, encoding: "utf8", timeout: 30_000, windowsHide: true, env: { ...process.env, LOG: log, PINVOU_UPDATE_NODE_IMAGE: selected } });
-    assert.equal(result.status, 0, result.stderr);
-    const calls = readFileSync(log, "utf8").trim().split("\n");
-    assert.ok(calls.some(line => line.includes(`build --build-arg NODE_IMAGE=${selected} --file`)), "direct build must receive the selected base");
-    assert.ok(calls.some(line => line.startsWith(selected + "|compose ") && line.includes("up --detach --build")), "Compose rebuild must inherit the same selection");
-    assert.ok(calls.some(line => /mirror\.gcr\.io\/library\/nginx@sha256:[a-f0-9]{64} nginx -t/.test(line)));
-    assert.match(run, /for attempt in \{1\.\.30\}/);
-    assert.match(run, /exit 1/);
-    assert.match(run, /release-console\/healthz/);
-    assert.match(run, /Authorization: Bearer \$PINVOU_UPDATE_ADMIN_TOKEN/);
-    assert.match(consoleJob, /always\(\)[\s\S]*down --volumes --remove-orphans/);
-    assert.doesNotMatch(step, /continue-on-error|\|\| true/);
-    const rejected = spawnSync(bash, ["-e", "-c", 'docker() { return 7; }; sudo() { return 0; }; curl() { return 0; };\n' + run], { cwd: directory, encoding: "utf8", timeout: 30_000, windowsHide: true, env: { ...process.env, PINVOU_UPDATE_NODE_IMAGE: selected } });
-    assert.equal(rejected.status, 7, "image build failure must fail the gate before later checks");
+    for (const status of [0, 7]) {
+      const log = join(directory, `calls-${status}`);
+      const result = spawnSync(bash, ["-e", "-c", prefix], {
+        cwd: fileURLToPath(new URL("../../", import.meta.url)), encoding: "utf8", timeout: 30_000, windowsHide: true,
+        env: { ...process.env, LOG: shellPath(log), RUNNER_TEMP: shellPath(directory), GITHUB_RUN_ID: `710${status}`, GITHUB_RUN_ATTEMPT: "1",
+          CI_SCRIPT: shellPath(scriptPath), CI_PYTHON: shellPath(process.env.PYTHON || "python3"), BUILD_STATUS: String(status),
+          PINVOU_UPDATE_NODE_IMAGE: selected, PINVOU_UPDATE_ADMIN_TOKEN: "ci-only-synthetic-routing-token" },
+      });
+      assert.equal(result.status, status, result.stderr || String(result.error || ""));
+      const calls = readFileSync(log, "utf8").trim().split("\n");
+      assert.ok(calls.some(line => line.includes(`build --build-arg NODE_IMAGE=${selected} --file`)), "direct build must receive the selected base");
+      assert.ok(calls.some(line => line.includes("down --volumes --remove-orphans")), "success and build failure must clean their job project");
+      if (status === 0) {
+        assert.ok(calls.some(line => line.startsWith(selected + "|compose ") && line.includes("up --detach --build")), "Compose must inherit the selected base");
+        assert.ok(calls.some(line => /mirror\.gcr\.io\/library\/nginx@sha256:[a-f0-9]{64} nginx -t/.test(line)));
+        assert.ok(calls.some(line => line.startsWith("CURL|") && line.includes("http://127.0.0.1:43781/pinvou3/release-console/healthz")));
+        assert.ok(calls.some(line => line.startsWith("CURL|") && line.includes("Authorization: Bearer ci-only-synthetic-routing-token") && line.includes("/api/status")));
+      } else {
+        assert.ok(!calls.some(line => line.includes("up --detach --build") || line.startsWith("CURL|")), "build failure must precede runtime requests");
+      }
+      assert.deepEqual(readdirSync(directory).filter(name => name.startsWith("release-console.") || name.endsWith(".path")), [], "the real cleanup must remove temporary state");
+    }
   } finally {
     assert.ok(directory.startsWith(join(tmpdir(), "pinvou-container-routing-")));
     rmSync(directory, { recursive: true, force: true });
