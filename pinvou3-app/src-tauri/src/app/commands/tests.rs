@@ -3475,12 +3475,14 @@ fn barrier_store() -> (
 }
 
 /// Drives the reviewer's interleaving deterministically: A's deferred delete
-/// is observed paused after its save committed, B's replacement of the same
-/// provider reference then runs, and the gate is released in the order each
-/// ordering allows — replacement first on the racy ordering (which must fail
-/// the final assertions red), delete first under the fixed serialization.
-/// Channel signal + gate, no timing: whichever branch runs, the interleaving
-/// is forced, not raced.
+/// is observed paused after its save committed, the prefs lock is probed at
+/// that exact moment (before B exists, so A is the only thread that can hold
+/// it), and B's replacement of the same provider reference then runs with the
+/// gate released in the order each ordering allows — replacement first on the
+/// racy ordering (which must fail the final assertions red), delete first
+/// under the fixed serialization. Channel signal + gate + a lock probe that
+/// cannot be confused by B: whichever branch runs, the interleaving is
+/// forced, not raced.
 fn run_delete_replacement_barrier(
     label: &str,
     verify: impl FnOnce(&GatedDeleteStore, &str),
@@ -3497,8 +3499,17 @@ fn run_delete_replacement_barrier(
         .recv()
         .expect("the deferred delete must start once A's save committed");
 
+    // Branch on the lock state while A is parked at the gate and B does not
+    // exist yet, so A is the only possible holder of USER_PREFS_LOCK: "held"
+    // proves the deferred delete runs inside the transaction's critical
+    // section, "free" proves the commit released the lock before the delete
+    // started. Probing after B was spawned would be ambiguous — under the
+    // racy ordering B could win the lock first, and "held" would then
+    // misroute the run down the fixed branch, where the old
+    // delete-after-release implementation passes all the same assertions.
+    let prefs_lock_free = crate::platform::prefs::UserPrefs::user_prefs_lock_free_for_test();
     let b = std::thread::spawn(save_b_replace);
-    if crate::platform::prefs::UserPrefs::user_prefs_lock_free_for_test() {
+    if prefs_lock_free {
         // Racy ordering: the deferred delete runs OUTSIDE the prefs lock, so
         // B's replacement commits first; resuming A's delete afterwards then
         // destroys B's fresh secret and the final assertions fail red.
