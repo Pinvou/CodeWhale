@@ -25,7 +25,7 @@ use crate::config::{
 // The bounded response-header wait (`stream_open_timeout`) and its env
 // override live in the shared stream-entry seam; every streaming adapter
 // (Chat Completions / Anthropic Messages / Responses) uses the same policy.
-use super::stream_entry::stream_open_timeout;
+use super::stream_entry::stream_open_timeout_for;
 
 fn stream_idle_timeout_message(
     idle: Duration,
@@ -1343,7 +1343,8 @@ impl DeepSeekClient {
         body: &Value,
     ) -> Result<(reqwest::Response, Duration)> {
         let open_req = super::stream_entry::StreamOpenRequest::new(
-            stream_open_timeout(),
+            // 本地模型端点按 base_url 放宽（冷 prefill 可静默数十秒），云保持 45s
+            stream_open_timeout_for(&self.base_url),
             self.stream_idle_timeout,
         );
         let idle_timeout = open_req.idle_timeout;
