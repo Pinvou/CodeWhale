@@ -4485,7 +4485,10 @@ mod tests {
         );
     }
 
-    #[cfg(unix)]
+    // Darwin rejects invalid-UTF-8 names at creation (EILSEQ), so the
+    // squatter fixture can only exist on Linux — same gate as
+    // `non_utf8_spool_names_are_quarantined`.
+    #[cfg(target_os = "linux")]
     #[tokio::test]
     async fn non_utf8_squatters_do_not_starve_legitimate_records() {
         use std::os::unix::ffi::OsStringExt;
