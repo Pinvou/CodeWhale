@@ -58,7 +58,7 @@ jobs:
   # diff；无关 PR 入队时跳过后续三个平台 runner。PR/push 的事件级 paths 仍
   # 保留，避免这些事件连轻量路由 job 都启动。
   changes:
-    runs-on: ubuntu-22.04
+    runs-on: ${{ fromJSON(vars.PINVOU_LINUX_RUNNER || '["ubuntu-22.04"]') }}
     # The workflow default (360 min) would let a hung job burn runner minutes;
     # both jobs are minutes of work when healthy.
     timeout-minutes: 10
@@ -71,7 +71,7 @@ jobs:
 
       - name: Set up zram and swap
         # 内存扩容为尽力而为:超时/失败只告警不阻断(回退 runner 默认内存)。
-        run: timeout --kill-after=15 240 sudo --preserve-env=GITHUB_ACTIONS,PINVOU3_CI_DISABLE_ZRAM bash "${{ github.workspace }}/scripts/ci-memory-setup.sh" || echo "::warning::ci-memory-setup 未完成,继续使用 runner 默认内存"
+        run: timeout --kill-after=15 240 sudo --preserve-env=GITHUB_ACTIONS,PINVOU3_CI_DISABLE_ZRAM,RUNNER_ENVIRONMENT bash "${{ github.workspace }}/scripts/ci-memory-setup.sh" || echo "::warning::ci-memory-setup 未完成,继续使用 runner 默认内存"
 
       - uses: dorny/paths-filter@v4
         id: filter
@@ -90,9 +90,8 @@ jobs:
     if: ${{ needs.changes.outputs.wrapper == 'true' }}
     strategy:
       fail-fast: false
-      matrix:
-        os: [macos-15, ubuntu-22.04, windows-latest]
-    runs-on: ${{ matrix.os }}
+      matrix: ${{ fromJSON(vars.PINVOU_WINDOWS_MAC_ENABLED != 'false' && '{"include":[{"os":"macos-15"},{"os":"ubuntu-22.04"},{"os":"windows-latest"}]}' || '{"include":[{"os":"ubuntu-22.04"}]}') }}
+    runs-on: ${{ matrix.os == 'ubuntu-22.04' && fromJSON(vars.PINVOU_LINUX_RUNNER || '["ubuntu-22.04"]') || matrix.os }}
     # Minutes of work when healthy (init a tiny crate, compile, run the
     # wrapper probes); the cap keeps a hung cargo from burning the 360-minute
     # default, including on the scarce macOS runner.
@@ -103,7 +102,7 @@ jobs:
       - name: Set up zram and swap
         if: runner.os == 'Linux'
         # 内存扩容为尽力而为:超时/失败只告警不阻断(回退 runner 默认内存)。
-        run: timeout --kill-after=15 240 sudo --preserve-env=GITHUB_ACTIONS,PINVOU3_CI_DISABLE_ZRAM bash "${{ github.workspace }}/scripts/ci-memory-setup.sh" || echo "::warning::ci-memory-setup 未完成,继续使用 runner 默认内存"
+        run: timeout --kill-after=15 240 sudo --preserve-env=GITHUB_ACTIONS,PINVOU3_CI_DISABLE_ZRAM,RUNNER_ENVIRONMENT bash "${{ github.workspace }}/scripts/ci-memory-setup.sh" || echo "::warning::ci-memory-setup 未完成,继续使用 runner 默认内存"
 
       - name: Rust toolchain
         uses: dtolnay/rust-toolchain@stable
