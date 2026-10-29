@@ -612,6 +612,14 @@ fn readonly_tokens_admitted(trimmed: &str) -> bool {
 /// backgrounding, redirects, command/parameter expansion, subshells, or
 /// env-assignment prefixes.
 pub fn is_agent_readonly_shell_command(command: &str) -> bool {
+    // On Windows the normalize below copies the text, so the length bound
+    // fires before that allocation (a giant command is refused without
+    // paying for its copy). Backslash doubling can still grow the text past
+    // the bound, so the post-normalize check stays load-bearing.
+    #[cfg(windows)]
+    if command.len() > MAX_READONLY_COMMAND_LEN {
+        return false;
+    }
     let trimmed = normalize_windows_command_paths(command);
     let trimmed = trimmed.trim();
     if trimmed.is_empty() {
@@ -709,11 +717,15 @@ pub(crate) fn readonly_pipeline_stages(segment: &str) -> Vec<&str> {
 /// Whether any pipeline stage of any sequence segment of `command` is an
 /// admitted GitHub read ([`is_github_readonly_stage`]), i.e. whether running
 /// the command reaches `api.github.com`. `pwd; gh repo view`, `gh repo view |
-/// head`, and `gh pr list --search '*'` reach the network exactly like a bare
-/// `gh repo view`, so every network ceiling judges them with this one
+/// head`, and `gh pr list --search '*'` classify as gh reads exactly like a
+/// bare `gh repo view`, so every network ceiling judges them with this one
 /// predicate instead of the whole-command parallel classifier, whose charset
-/// gate would see a compound or a `*` and answer "not a gh read". A bare `&`
-/// never classifies and answers `false` here; the grammar refuses it anyway.
+/// gate would see a compound or a `*` and answer "not a gh read". At the
+/// execution seam the operand gate additionally refuses the wildcard-bearing
+/// gh stages outright; this predicate over-recognizes them so the network
+/// pre-checks (a child with no network, the fleet envelope) still fail
+/// closed. A bare `&` never classifies and answers `false` here; the grammar
+/// refuses it anyway.
 #[must_use]
 pub(crate) fn command_reaches_github_readonly(command: &str) -> bool {
     readonly_sequence_segments(command).is_some_and(|segments| {
@@ -1236,12 +1248,15 @@ fn is_agent_readonly_od(tokens: &[String]) -> bool {
 /// Token-level recognition of one command as an admitted GitHub read, without
 /// the parallel classifier's charset gate. The agent read-only grammar admits
 /// `*` (glob operands judged at the execution seam), so a stage like
-/// `gh pr list --search '*'` is admitted and reaches the network while a
+/// `gh pr list --search '*'` classifies as a gh read here while a
 /// whole-command charset-gated predicate refuses its `*` — a per-stage guard
 /// keyed on that predicate would silently skip the network policy for exactly
-/// those stages. Over-recognition is harmless: every caller only consults the
-/// network decider or refuses the call for an agent that holds no network, and
-/// the grammar refuses the over-recognized spellings before any guard runs.
+/// those stages. The seam's operand gate refuses the wildcard-bearing gh
+/// stages outright; this predicate's over-recognition keeps the network
+/// pre-checks failing closed behind it. Over-recognition is harmless: every
+/// caller only consults the network decider or refuses the call for an agent
+/// that holds no network, and the grammar refuses the over-recognized
+/// spellings before any guard runs.
 fn is_github_readonly_tokens(tokens: &[String]) -> bool {
     let Some(start) = primary_token_index(tokens) else {
         return false;
@@ -1368,8 +1383,20 @@ fn github_command_targets_unsupported_host(tokens: &[&str]) -> bool {
             .or_else(|| {
                 let mut parts = value.split('/');
                 let first = parts.next()?;
-                (parts.clone().count() >= 2 && (first.contains('.') || first.contains(':')))
-                    .then_some(first)
+                let remaining = parts.count();
+                // gh reads `HOST/OWNER/REPO` — three slash components — as
+                // an explicit host, single-label ones included (a DNS search
+                // domain resolves them away from github.com), and
+                // `OWNER/REPO` — two components — as a github.com
+                // repository. A dot/colon-bearing first component is a host
+                // spelling even with two components.
+                if remaining >= 2
+                    || (remaining == 1 && (first.contains('.') || first.contains(':')))
+                {
+                    Some(first)
+                } else {
+                    None
+                }
             });
         host.is_some_and(|host| !host.eq_ignore_ascii_case("github.com"))
     };
@@ -2554,6 +2581,8 @@ mod tests {
             "env PAGER=cat git log",
             "git --git-dir=/tmp/x.git log",
             "git -c core.fsmonitor=./hook log",
+            "git -c filter.evil.clean=evil status",
+            "git -c filter.evil.clean=evil diff",
             "git log (modified)",
             "git log | (head)",
             "git push origin main",
@@ -2777,7 +2806,10 @@ mod tests {
 
     /// The `gh` host check reads operands by their literal spelling, so a
     /// relative traversal that hides a repo target behind a single suffix
-    /// must refuse like its multi-suffix sibling already does.
+    /// must refuse like its multi-suffix sibling already does, and a
+    /// three-component operand is what gh reads as `HOST/OWNER/REPO` —
+    /// single-label hosts included, which a DNS search domain resolves away
+    /// from github.com.
     #[test]
     fn agent_readonly_shell_rejects_gh_repo_path_traversals() {
         for command in [
@@ -2785,6 +2817,9 @@ mod tests {
             "gh pr list -R ../secret",
             "gh repo view --repo=../o",
             "gh pr list -R ../../x",
+            "gh repo view myhost/owner/repo",
+            "gh pr list -R myhost/o/r",
+            "gh repo view a/b/c",
         ] {
             assert!(
                 !is_agent_readonly_shell_command(command),
@@ -2793,6 +2828,12 @@ mod tests {
         }
         assert!(is_agent_readonly_shell_command("gh repo view owner/repo"));
         assert!(is_agent_readonly_shell_command("gh pr list -R owner/repo"));
+        assert!(is_agent_readonly_shell_command(
+            "gh repo view github.com/owner/repo"
+        ));
+        // A two-component operand is `OWNER/REPO` even when it spells a
+        // branch or tag with a slash-free first component.
+        assert!(is_agent_readonly_shell_command("gh pr view feature/x"));
     }
 
     /// `-j`/`-N` take real counts: a digit string past `u64` admits nowhere
