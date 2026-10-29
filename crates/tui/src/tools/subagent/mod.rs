@@ -5266,6 +5266,7 @@ impl SubAgentManager {
     /// admission), so of two racing writers whichever reserves second sees
     /// the first and exactly one of them is refused.
     pub(crate) fn open_in_flight_unbounded(&mut self, owner: &str, lane: CoordinationLane) -> u64 {
+        self.prune_dead_in_flight_unbounded();
         self.in_flight_unbounded_seq = self.in_flight_unbounded_seq.wrapping_add(1);
         let token = self.in_flight_unbounded_seq;
         self.in_flight_unbounded.push(InFlightUnboundedWork {
@@ -5282,6 +5283,17 @@ impl SubAgentManager {
     pub(crate) fn cancel_in_flight_unbounded(&mut self, token: u64) {
         self.in_flight_unbounded
             .retain(|entry| entry.token != token);
+    }
+
+    /// Drop reservations whose work is observably over: a consult would skip
+    /// them, so keeping them only grows the frame list a long session has to
+    /// rescan. Runs on the mutating legs only (`open`/`complete`), so a
+    /// shared-lock consult stays read-only; the predicate is the consult's
+    /// own, so a prune racing a consult cannot change its answer.
+    fn prune_dead_in_flight_unbounded(&mut self) {
+        let mut survivors = std::mem::take(&mut self.in_flight_unbounded);
+        survivors.retain(|entry| self.in_flight_entry_holds_a_writer(entry));
+        self.in_flight_unbounded = survivors;
     }
 
     /// The surviving reservations as `(owner, stamped task ids)` — the
@@ -5302,6 +5314,7 @@ impl SubAgentManager {
     /// against the shell manager from now on); with nothing running the
     /// dispatch is over and the entry goes.
     pub(crate) fn complete_in_flight_unbounded(&mut self, token: u64, owner: &str) {
+        self.prune_dead_in_flight_unbounded();
         let stamped = self
             .shell_jobs
             .as_ref()
@@ -5358,8 +5371,8 @@ impl SubAgentManager {
     /// in `lane`: a different owner, not exempt (the claimant's ancestor
     /// chain is exempt — the work was delegated downward), the same frame,
     /// and still holding a writer. Dead entries are skipped here; they are
-    /// only pruned by the mutating paths so a shared-lock consult stays
-    /// read-only.
+    /// pruned by the mutating legs (`open`/`complete_in_flight_unbounded`)
+    /// so a shared-lock consult stays read-only.
     fn in_flight_unbounded_conflicts(
         &self,
         claimant: &str,

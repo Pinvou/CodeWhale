@@ -4975,3 +4975,146 @@ fn forkguard_powershell_retry_keeps_the_first_result_when_it_cannot_start() {
         annotated.stderr
     );
 }
+
+// Stop-sent vs exit-confirmed: the kill path's bounded reap can time out
+// (child in uninterruptible sleep), and claim coordination must keep
+// treating such a job as a potential writer until a later poll observes
+// the exit.
+
+/// The real escalation primitive's confirmed half: a child that ignores
+/// SIGTERM is still reaped by the SIGKILL escalation within the production
+/// graces, and the primitive reports the exit as confirmed.
+#[cfg(unix)]
+#[test]
+fn escalation_confirms_a_term_ignoring_child_exit() {
+    use std::os::unix::process::CommandExt;
+    let mut child = Command::new("sh")
+        .arg("-c")
+        .arg("trap \"\" TERM; sleep 30")
+        .process_group(0)
+        .spawn()
+        .expect("spawn TERM-ignoring child");
+    let confirmed = terminate_child_process_group(&mut child).expect("escalation");
+    assert!(
+        confirmed,
+        "a SIGKILLable child must be reaped within the production graces"
+    );
+    assert!(
+        child.try_wait().expect("reap status").is_some(),
+        "a confirmed escalation leaves the direct child reaped"
+    );
+}
+
+/// The real primitive's unconfirmed half, driven through a controllable
+/// grace expiry: a live child with an already-expired grace reports false —
+/// exactly the outcome a kill must not silently turn into "no writer".
+/// (A child that survives SIGKILL for the full reap grace needs an
+/// uninterruptible sleep and cannot be spawned portably; this exercises
+/// the same false branch the kill path consumes.)
+#[cfg(unix)]
+#[test]
+fn bounded_reap_reports_grace_expiry_while_the_child_lives() {
+    let mut child = Command::new("sleep").arg("30").spawn().expect("spawn");
+    assert!(
+        !wait_child_bounded(&mut child, Duration::from_millis(50)),
+        "a live child must report the exit as unconfirmed within the grace"
+    );
+    let _ = child.kill();
+    let _ = child.wait();
+}
+
+/// An unconfirmed stop keeps its write scope across every coordination
+/// query — until a later poll reaps the real child and clears the
+/// uncertainty. The flag models the un-reaped state; the confirmation cycle
+/// runs against a real child the OS ends.
+#[cfg(unix)]
+#[test]
+fn unconfirmed_stop_keeps_the_write_scope_until_the_child_is_reaped() {
+    let tmp = tempdir().expect("tempdir");
+    let mut manager = ShellManager::new(tmp.path().to_path_buf());
+    manager.seed_running_shell_for_test("job-1", "agent-1");
+    let child = Command::new("sleep").arg("30").spawn().expect("spawn");
+    let pid = child.id();
+    {
+        let shell = manager.processes.get_mut("job-1").expect("seeded job");
+        shell.status = ShellStatus::Killed;
+        shell.stop_unconfirmed = true;
+        shell.child = Some(ShellChild::Process(child));
+    }
+
+    let task_ids = vec!["job-1".to_string()];
+    assert!(
+        manager.any_running_job(&task_ids),
+        "an unconfirmed stop must still count as a potential writer"
+    );
+    assert_eq!(
+        manager.running_task_ids_for_owner("agent-1"),
+        vec!["job-1".to_string()],
+        "the owner's task list keeps the unconfirmed job"
+    );
+    assert!(manager.owner_has_running_job("agent-1"));
+    assert!(
+        manager.any_running_job(&task_ids),
+        "the hold survives repeated consults while the child lives"
+    );
+
+    // The OS ends the child; the next consult's confirmation reaps it and
+    // releases the scope.
+    assert_eq!(unsafe { libc::kill(pid as libc::pid_t, libc::SIGKILL) }, 0);
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        if !manager.any_running_job(&task_ids) {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "the unconfirmed stop never confirmed after the child died"
+        );
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    assert!(!manager.owner_has_running_job("agent-1"));
+    assert!(
+        !manager
+            .processes
+            .get("job-1")
+            .expect("job kept in the map")
+            .stop_unconfirmed,
+        "the confirmation cleared the flag"
+    );
+}
+
+/// A real escalation through `ShellManager::kill` records a confirmed exit:
+/// no unconfirmed state lingers and the child handle is released exactly as
+/// before.
+#[cfg(unix)]
+#[test]
+fn kill_confirms_a_normal_escalation_exit() {
+    use std::os::unix::process::CommandExt;
+    let tmp = tempdir().expect("tempdir");
+    let mut manager = ShellManager::new(tmp.path().to_path_buf());
+    manager.seed_running_shell_for_test("job-1", "agent-1");
+    let child = Command::new("sh")
+        .arg("-c")
+        .arg("trap \"\" TERM; sleep 30")
+        .process_group(0)
+        .spawn()
+        .expect("spawn TERM-ignoring child");
+    manager
+        .processes
+        .get_mut("job-1")
+        .expect("seeded job")
+        .child = Some(ShellChild::Process(child));
+
+    let killed = manager.kill("job-1").expect("kill");
+    assert_eq!(killed.status, ShellStatus::Killed);
+    let shell = manager.processes.get("job-1").expect("job kept");
+    assert!(
+        !shell.stop_unconfirmed,
+        "a reaped exit must not stay flagged unconfirmed"
+    );
+    assert!(
+        shell.child.is_none(),
+        "a confirmed kill still releases the child handle"
+    );
+    assert!(!manager.any_running_job(&["job-1".to_string()]));
+}

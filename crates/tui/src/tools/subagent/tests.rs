@@ -25430,8 +25430,9 @@ async fn unbounded_dispatch_holds_a_reservation_against_later_arrivals() {
         .await
         .expect("B's unbounded dispatch is admitted once the job is gone");
 
-    // A foreground dispatch releases its reservation at completion: nothing
-    // is left holding the frame after `echo` returned.
+    // A foreground dispatch releases its reservation at completion, and its
+    // mutating legs prune the dead job's entry: nothing is left holding the
+    // frame after `echo` returned.
     registry_a
         .execute(
             "agent_a",
@@ -25442,8 +25443,8 @@ async fn unbounded_dispatch_holds_a_reservation_against_later_arrivals() {
         .expect("the foreground dispatch runs");
     assert_eq!(
         manager.read().await.in_flight_unbounded_for_test(),
-        vec![("agent_a".to_string(), stamped_ids)],
-        "the foreground dispatch re-opened and released its own reservation; only the dead job's entry is left, and the admitted writer above proved it no longer blocks"
+        vec![],
+        "the foreground dispatch re-opened and released its own reservation; the mutating legs pruned the dead job's entry, and the admitted writer above proved it no longer blocks"
     );
     assert!(
         shell_jobs
@@ -25452,6 +25453,246 @@ async fn unbounded_dispatch_holds_a_reservation_against_later_arrivals() {
             .running_owner_agent_ids()
             .is_empty(),
         "no real process outlives the test"
+    );
+}
+
+/// The stop-unconfirmed half of the kill path, through the real pipeline:
+/// a stamped reservation survives a stop whose exit was never observed —
+/// both arrival directions refuse — and a real child death, observed by a
+/// later poll's confirmation, releases both. The flag models the state only
+/// an uninterruptible-sleep child produces; the child here is real and its
+/// death is real.
+#[cfg(unix)]
+#[tokio::test]
+async fn unconfirmed_stop_keeps_a_real_reservation_until_the_child_is_confirmed_dead() {
+    let tmp = tempdir().expect("tempdir");
+    let manager = new_shared_subagent_manager(tmp.path().to_path_buf(), 8);
+    let shell_jobs = crate::tools::shell::new_shared_shell_manager(tmp.path().to_path_buf());
+    let claim = |owner: &str, roots: &[&str]| WriteScopeClaim {
+        owner: owner.to_string(),
+        roots: roots.iter().map(|root| (*root).to_string()).collect(),
+        exact_files: vec![],
+        contracts: vec![],
+    };
+
+    let mut guard = manager.write().await;
+    guard.set_shell_job_source(Arc::clone(&shell_jobs));
+    guard
+        .coordination
+        .register_claim(claim("agent_a", &["src"]), false, None, &[], |_| false)
+        .expect("A's claim registered");
+    guard.insert_test_running_agent("a", tmp.path());
+    drop(guard);
+
+    let build_registry = |owner: &str| {
+        let mut runtime = stub_runtime();
+        runtime.manager = Arc::clone(&manager);
+        runtime.context = ToolContext::new(tmp.path());
+        runtime.context.execution.shell_manager = Arc::clone(&shell_jobs);
+        runtime.context.auto_approve = true;
+        runtime.worker_profile = WorkerRuntimeProfile::for_role(FleetRole::Builder);
+        SubAgentToolRegistry::new_with_owner(
+            runtime,
+            FleetRole::Builder,
+            owner.to_string(),
+            "implementer".into(),
+            Some(vec!["Bash".into()]),
+            Arc::new(Mutex::new(TodoList::new())),
+            Arc::new(Mutex::new(PlanState::default())),
+        )
+    };
+    let registry_a = build_registry("agent_a");
+    registry_a
+        .execute(
+            "agent_a",
+            "Bash",
+            serde_json::json!({"action": "run", "command": "sleep 30", "background": true}),
+        )
+        .await
+        .expect("a lone writer's unbounded background command dispatches");
+    let in_flight = manager.read().await.in_flight_unbounded_for_test();
+    assert_eq!(in_flight.len(), 1, "exactly one reservation: {in_flight:?}");
+    assert!(
+        !in_flight[0].1.is_empty(),
+        "the background job's task id is stamped"
+    );
+    let task_id = in_flight[0].1[0].clone();
+
+    // Model the kill path's unconfirmed outcome: signal delivered, exit
+    // unobserved. The real child stays alive, so every consult must keep
+    // treating A's frame as occupied.
+    let child_pid = shell_jobs
+        .lock()
+        .expect("shell jobs")
+        .background_child_pid_for_test(&task_id)
+        .expect("the job tracks a real child");
+    shell_jobs
+        .lock()
+        .expect("shell jobs")
+        .mark_stop_unconfirmed_for_test(&task_id);
+
+    // (a) A later spawn on a DISJOINT claim is refused.
+    let refused = {
+        let mut guard = manager.write().await;
+        let mut runtime_b = stub_runtime();
+        runtime_b.manager = Arc::clone(&manager);
+        runtime_b.context = ToolContext::new(tmp.path());
+        guard
+            .spawn_background_with_assignment_options(
+                Arc::clone(&manager),
+                runtime_b,
+                FleetRole::Builder,
+                "write elsewhere".into(),
+                make_assignment(),
+                Some(vec![]),
+                SubAgentSpawnOptions {
+                    name: Some("writer-b".into()),
+                    write_claim: Some(claim("", &["docs"])),
+                    ..Default::default()
+                },
+            )
+            .expect_err("the unconfirmed stop must still block a later arrival")
+    };
+    let refused = refused.to_string();
+    assert!(
+        refused.contains("still in flight") && refused.contains("agent_a"),
+        "the refusal names the in-flight owner: {refused}"
+    );
+
+    // (b) Another agent's unbounded dispatch is refused by the gate.
+    let registry_b = build_registry("agent_b");
+    let gate_refused = registry_b
+        .execute(
+            "agent_b",
+            "Bash",
+            serde_json::json!({"action": "run", "command": "echo from-b > b.txt"}),
+        )
+        .await
+        .expect_err("B's unbounded dispatch must wait for the unconfirmed stop");
+    let gate_refused = gate_refused.to_string();
+    assert!(
+        gate_refused.contains("still in flight") && gate_refused.contains("agent_a"),
+        "the gate refusal names the in-flight owner: {gate_refused}"
+    );
+
+    // The OS ends the child the way an uninterruptible job ends: only the
+    // kernel can. The next consult's confirmation reaps it and releases the
+    // frame for both directions.
+    assert_eq!(
+        unsafe { libc::kill(child_pid as libc::pid_t, libc::SIGKILL) },
+        0
+    );
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    loop {
+        let held = shell_jobs
+            .lock()
+            .expect("shell jobs")
+            .any_running_job(std::slice::from_ref(&task_id));
+        if !held {
+            break;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the unconfirmed stop never confirmed after the child died"
+        );
+        std::thread::sleep(Duration::from_millis(20));
+    }
+
+    {
+        let mut guard = manager.write().await;
+        guard
+            .spawn_background_with_assignment_options(
+                Arc::clone(&manager),
+                {
+                    let mut runtime_b = stub_runtime();
+                    runtime_b.manager = Arc::clone(&manager);
+                    runtime_b.context = ToolContext::new(tmp.path());
+                    runtime_b
+                },
+                FleetRole::Builder,
+                "write elsewhere".into(),
+                make_assignment(),
+                Some(vec![]),
+                SubAgentSpawnOptions {
+                    name: Some("writer-b2".into()),
+                    write_claim: Some(claim("", &["docs"])),
+                    ..Default::default()
+                },
+            )
+            .expect("the disjoint writer is admitted once the exit is confirmed");
+    }
+    registry_b
+        .execute(
+            "agent_b",
+            "Bash",
+            serde_json::json!({"action": "run", "command": "echo from-b > b.txt"}),
+        )
+        .await
+        .expect("B's unbounded dispatch is admitted once the exit is confirmed");
+    assert_eq!(
+        manager.read().await.in_flight_unbounded_for_test(),
+        vec![],
+        "the confirmed stop releases A's entry — pruned by B's mutating legs — and B's foreground dispatch releases its own"
+    );
+    assert!(
+        shell_jobs
+            .lock()
+            .expect("shell jobs")
+            .running_owner_agent_ids()
+            .is_empty(),
+        "no real process outlives the test"
+    );
+}
+
+/// Dead reservations are pruned by the mutating legs (`open`/`complete`)
+/// instead of piling up for a long session to rescan; live work — a live
+/// owner's in-flight dispatch — is never pruned.
+#[tokio::test]
+async fn mutating_legs_prune_dead_in_flight_reservations() {
+    let tmp = tempdir().expect("tempdir");
+    let manager = new_shared_subagent_manager(tmp.path().to_path_buf(), 8);
+    let mut guard = manager.write().await;
+
+    // No agent records and no shell jobs: nothing can hold a writer.
+    let _ghost_a = guard.open_in_flight_unbounded("ghost-a", CoordinationLane::SharedCheckout);
+    assert_eq!(
+        guard.in_flight_unbounded_for_test().len(),
+        1,
+        "the first reservation is recorded"
+    );
+
+    let _ghost_b = guard.open_in_flight_unbounded("ghost-b", CoordinationLane::SharedCheckout);
+    assert_eq!(
+        guard.in_flight_unbounded_for_test(),
+        vec![("ghost-b".to_string(), Vec::<String>::new())],
+        "the dead ghost-a reservation is pruned by the next mutating leg"
+    );
+
+    // A live owner's unstamped dispatch holds its frame.
+    guard.insert_test_running_agent("a", tmp.path());
+    let _live = guard.open_in_flight_unbounded("agent_a", CoordinationLane::SharedCheckout);
+    let _ghost_c = guard.open_in_flight_unbounded("ghost-c", CoordinationLane::SharedCheckout);
+    let owners_after_c = guard
+        .in_flight_unbounded_for_test()
+        .into_iter()
+        .map(|(owner, _)| owner)
+        .collect::<Vec<_>>();
+    assert!(
+        owners_after_c.contains(&"agent_a".to_string())
+            && !owners_after_c.contains(&"ghost-b".to_string()),
+        "the live dispatch and the in-flight leg survive; the dead ghost-b was pruned: {owners_after_c:?}"
+    );
+
+    // The next leg prunes the now-finished ghost-c but never the live work.
+    let _ghost_d = guard.open_in_flight_unbounded("ghost-d", CoordinationLane::SharedCheckout);
+    let owners = guard
+        .in_flight_unbounded_for_test()
+        .into_iter()
+        .map(|(owner, _)| owner)
+        .collect::<Vec<_>>();
+    assert!(
+        owners.contains(&"agent_a".to_string()) && !owners.contains(&"ghost-c".to_string()),
+        "the live dispatch survives every prune; finished ghosts do not: {owners:?}"
     );
 }
 

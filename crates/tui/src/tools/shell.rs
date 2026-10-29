@@ -458,20 +458,36 @@ fn wait_child_bounded(child: &mut Child, grace: Duration) -> bool {
 /// returned whenever the command's descendants felt like exiting — observed
 /// as a 120s foreground timeout returning after 300s. Every step here is
 /// bounded: the tool returns at ~timeout + grace.
+///
+/// `Ok(true)` means the direct child's exit was observed (reaped, or the
+/// wait errored). `Ok(false)` means the stop was sent but the direct child
+/// was not reaped within the reap grace — it may still be alive (e.g.
+/// uninterruptible sleep) and must keep counting as a potential writer
+/// until a later observation confirms the exit.
 #[cfg(unix)]
-fn terminate_child_process_group(child: &mut Child) -> std::io::Result<()> {
+fn terminate_child_process_group(child: &mut Child) -> std::io::Result<bool> {
+    escalate_child_process_group(child, KILL_TERM_GRACE, KILL_REAP_GRACE)
+}
+
+/// The escalation with injectable graces so tests can drive each expiry
+/// without waiting out the production constants.
+#[cfg(unix)]
+fn escalate_child_process_group(
+    child: &mut Child,
+    term_grace: Duration,
+    reap_grace: Duration,
+) -> std::io::Result<bool> {
     // Cooperative stop first so shells and their children can run traps and
     // clean up; bounded so a SIGTERM-ignoring command cannot stall the caller.
     let _ = signal_child_process_group(child, libc::SIGTERM);
-    if wait_child_bounded(child, KILL_TERM_GRACE) {
+    if wait_child_bounded(child, term_grace) {
         // The leader exited on SIGTERM; descendants may linger, so SIGKILL
         // the rest of the group (ESRCH when it is already empty).
         kill_child_process_group(child)?;
-        return Ok(());
+        return Ok(true);
     }
     kill_child_process_group(child)?;
-    let _ = wait_child_bounded(child, KILL_REAP_GRACE);
-    Ok(())
+    Ok(wait_child_bounded(child, reap_grace))
 }
 
 /// Configure parent-death signaling so shell-spawned children are reaped when
@@ -1064,6 +1080,13 @@ pub struct BackgroundShell {
     completion_reported: bool,
     stdin: Option<StdinWriter>,
     child: Option<ShellChild>,
+    /// A stop was delivered but the direct child's exit was never observed:
+    /// the bounded reap grace elapsed first (e.g. uninterruptible sleep), so
+    /// the child may still be alive and writing. Claim coordination must keep
+    /// treating the job as a potential writer until a later poll reaps the
+    /// child; `collect_output` therefore keeps the handle instead of dropping
+    /// it while this is set.
+    stop_unconfirmed: bool,
     #[cfg(windows)]
     windows_job: Option<WindowsJob>,
     stdout_thread: Option<std::thread::JoinHandle<()>>,
@@ -1238,6 +1261,32 @@ impl BackgroundShell {
         completed
     }
 
+    /// Reap an unconfirmed stop once the child has actually exited. Bounded:
+    /// a single `try_wait`, so a still-uninterruptible child keeps its
+    /// uncertainty and is re-asked on the next observation.
+    fn confirm_stop_when_reaped(&mut self) {
+        if !self.stop_unconfirmed {
+            return;
+        }
+        let confirmed = match self.child.as_mut() {
+            Some(ShellChild::Process(child)) => matches!(child.try_wait(), Ok(Some(_)) | Err(_)),
+            // The PTY stop waits synchronously, and a dropped handle leaves
+            // nothing observable to hold the frame for.
+            _ => true,
+        };
+        if confirmed {
+            self.stop_unconfirmed = false;
+        }
+    }
+
+    /// Whether the job still occupies its write scope: running, or stopped
+    /// with the direct child's exit unconfirmed. "Signal delivered" and
+    /// "exit observed" are different states, and claim coordination may only
+    /// hand the scope to a successor once the latter holds.
+    fn holds_write_scope(&self) -> bool {
+        self.status == ShellStatus::Running || self.stop_unconfirmed
+    }
+
     fn publish_lifecycle(&mut self) -> Result<()> {
         let bytes = self.observed_output_len();
         if self.last_lifecycle_status.as_ref() == Some(&self.status)
@@ -1357,7 +1406,9 @@ impl BackgroundShell {
             finish_background_reader(handle, &self.status, self.stderr_buffer.as_ref());
         }
         self.stdin = None;
-        self.child = None;
+        if !self.stop_unconfirmed {
+            self.child = None;
+        }
     }
 
     fn write_stdin(&mut self, input: &str, close: bool) -> Result<()> {
@@ -1505,8 +1556,14 @@ impl BackgroundShell {
                     {
                         // Bounded SIGTERM → SIGKILL escalation against the
                         // whole process group; returns within ~grace even if
-                        // the command ignores SIGTERM (#52).
-                        terminate_child_process_group(proc).context("Failed to kill process")?;
+                        // the command ignores SIGTERM (#52). A false return
+                        // means the stop was sent but the direct child's exit
+                        // is unconfirmed — record that so coordination keeps
+                        // treating the job as a potential writer until a
+                        // later poll observes the exit.
+                        let reaped = terminate_child_process_group(proc)
+                            .context("Failed to kill process")?;
+                        self.stop_unconfirmed = !reaped;
                     }
                     #[cfg(all(not(windows), not(unix)))]
                     {
@@ -1925,6 +1982,7 @@ impl ShellManager {
                 completion_reported: false,
                 stdin: None,
                 child: None,
+                stop_unconfirmed: false,
                 #[cfg(windows)]
                 windows_job: None,
                 stdout_thread: None,
@@ -1979,6 +2037,7 @@ impl ShellManager {
                 completion_reported: false,
                 stdin: None,
                 child: None,
+                stop_unconfirmed: false,
                 #[cfg(windows)]
                 windows_job: None,
                 stdout_thread: None,
@@ -1999,6 +2058,28 @@ impl ShellManager {
             shell.exit_code = Some(0);
             shell.finished_at = Some(Instant::now());
         }
+    }
+
+    /// Model the state only an un-reaped stopped child can produce (see
+    /// `stop_unconfirmed`): no portable test can spawn a child that survives
+    /// SIGKILL, so tests set the flag the kill path would have recorded and
+    /// drive the real confirmation against a real child.
+    #[cfg(test)]
+    pub(crate) fn mark_stop_unconfirmed_for_test(&mut self, id: &str) {
+        if let Some(shell) = self.processes.get_mut(id) {
+            shell.stop_unconfirmed = true;
+        }
+    }
+
+    /// The real direct child's pid, for tests that must end the job from
+    /// outside the manager — the way an uninterruptible process ends: only
+    /// the OS can.
+    #[cfg(all(test, unix))]
+    pub(crate) fn background_child_pid_for_test(&self, id: &str) -> Option<u32> {
+        self.processes
+            .get(id)
+            .and_then(|shell| shell.child.as_ref())
+            .and_then(ShellChild::process_id)
     }
 
     /// Test-only observation of the workspace selected by runtime rebuilds.
@@ -2891,6 +2972,7 @@ impl ShellManager {
             completion_reported: false,
             stdin,
             child: Some(child),
+            stop_unconfirmed: false,
             #[cfg(windows)]
             windows_job,
             stdout_thread,
@@ -3457,17 +3539,20 @@ impl ShellManager {
         self.running_owner_agent_ids_inner(Some(active_session_id))
     }
 
-    /// Task ids of `owner_agent_id`'s tracked jobs that are still running, in
-    /// stable order. Coordination reservations validate an owner's in-flight
-    /// unbounded work against this, so it polls first like every reader: a
-    /// job that exited since the last look must not keep holding a frame.
+    /// Task ids of `owner_agent_id`'s tracked jobs that still hold their
+    /// write scope, in stable order. Coordination reservations validate an
+    /// owner's in-flight unbounded work against this, so it polls first like
+    /// every reader: a job that exited since the last look must not keep
+    /// holding a frame — and one whose stop was sent but never confirmed
+    /// must, until a poll observes the exit.
     pub fn running_task_ids_for_owner(&mut self, owner_agent_id: &str) -> Vec<String> {
         let mut ids = self
             .processes
             .values_mut()
             .filter_map(|shell| {
                 shell.poll();
-                (shell.status == ShellStatus::Running
+                shell.confirm_stop_when_reaped();
+                (shell.holds_write_scope()
                     && shell
                         .owner_agent
                         .as_ref()
@@ -3480,14 +3565,17 @@ impl ShellManager {
         ids
     }
 
-    /// Whether any of `task_ids` still tracks a running job. Reservations
+    /// Whether any of `task_ids` still holds its write scope. Reservations
     /// stamp the ids they saw at dispatch and re-ask here, so an interrupted
-    /// owner's job keeps its frame occupied exactly as long as the job lives.
+    /// owner's job keeps its frame occupied exactly as long as the job
+    /// lives — and a killed job whose exit was never confirmed keeps it
+    /// until a poll observes the child is gone.
     pub(crate) fn any_running_job(&mut self, task_ids: &[String]) -> bool {
         task_ids.iter().any(|task_id| {
             self.processes.get_mut(task_id).is_some_and(|shell| {
                 shell.poll();
-                shell.status == ShellStatus::Running
+                shell.confirm_stop_when_reaped();
+                shell.holds_write_scope()
             })
         })
     }
