@@ -36,6 +36,7 @@ def default_ci_routing(source, *, native_enabled=True):
                 lines.append(indent + ('    - ' if index == 0 else '      ') + key + ': ' + scalar)
         return '\n'.join(lines)
     source = MATRIX.sub(expand, source)
+    source = re.sub(r"vars\.PINVOU_LINUX_(?:HEAVY|MEDIUM|LIGHT)_RUNNER \|\| ", '', source)
     source = re.sub(r"runs-on: \$\{\{ fromJSON\(vars\.PINVOU_LINUX_RUNNER \|\| '\[\"ubuntu-22.04\"\]'\) \}\}", 'runs-on: ubuntu-22.04', source)
     source = re.sub(r"runs-on: \$\{\{ matrix\.(os|runs-on) == 'ubuntu-22.04' && fromJSON\(vars\.PINVOU_LINUX_RUNNER \|\| '\[\"ubuntu-22.04\"\]'\) \|\| matrix\.\1 \}\}", lambda m: 'runs-on: ${{ matrix.' + m.group(1) + ' }}', source)
     if native_enabled:
