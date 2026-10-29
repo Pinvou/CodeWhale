@@ -457,7 +457,13 @@ pub fn sanitize_for_disk(line: &str) -> String {
         // r6 P1-5 + r7 P1-4：bare 键检查大小写不敏感，且并入 SECRET_QUERY_KEYS
         // （token / x-api-key / access_token 等 URL query 表已有的名字，此前
         // 裸键漏检：`token: ab12cd34` / `> x-api-key: abcdef012` 落盘+导出）。
+        // r19 P2-8：scheme 词同样有裸形态。`-H` 两段式那分支（上面 HeaderExpect）
+        // 早就认 basic+bearer 两个 scheme，这里却只认 bearer——脚本手动
+        // `export Authorization: Basic dXNlcjpwYXNz`（无 -H 上下文）时 basic
+        // 后面的 base64 凭据原样落盘+导出。对齐 bearer 的既有语义：scheme 词
+        // 标记下一个词整值脱敏。
         if bare.eq_ignore_ascii_case("bearer")
+            || bare.eq_ignore_ascii_case("basic")
             || SECRET_ENV_KEYS
                 .iter()
                 .any(|known| bare.eq_ignore_ascii_case(known))
@@ -1138,6 +1144,29 @@ mod tests {
             let disk = sanitize_for_disk(line);
             assert!(!disk.contains("dXNlcjpwYXNz"), "{line} -> {disk}");
             assert!(!disk.contains("eyJhbGciOi"), "{line} -> {disk}");
+        }
+    }
+
+    /// r19 P2-8：没有 `-H` 上下文的裸 scheme 形态——脚本手动
+    /// `export Authorization: Basic <base64>` / `echo '… Basic <base64>'` 时，
+    /// bare 检查此前只认 bearer 不认 basic，base64 凭据整词落盘+导出
+    /// （它不够 24 位时导出侧的粗尺也拦不住）。
+    ///
+    /// 误伤面与 bearer 完全同款（"Basic usage" 会把 usage 抹掉）：redact-next
+    /// 本来就是「宁可错抹一个词、不放凭据过门」的取舍，两个 scheme 保持同一
+    /// 副作用比各持一套判据更可维护。
+    #[test]
+    fn bare_basic_scheme_redacts_following_credential_without_header_context() {
+        for line in [
+            "+ export Authorization: Basic dXNlcjpwYXNzOndyb25n",
+            "+ echo 'Authorization: Basic dXNlcjpwYXNzOndyb25n'",
+            "Authorization: basic 4oKk4oK0dXNlcjpwYXNz",
+        ] {
+            let disk = sanitize_for_disk(line);
+            assert!(!disk.contains("dXNlcjpwYXNz"), "{line} -> {disk}");
+            // 导出走 sanitize_for_disk 之后再上通用尺子，同一道定向层先拦
+            let export = sanitize_for_export(line);
+            assert!(!export.contains("dXNlcjpwYXNz"), "{line} -> {export}");
         }
     }
 
