@@ -385,6 +385,8 @@ test('capability send failure keeps the capability error after bounded retries',
   const { feature, state, logic } = installFeature(command => {
     if (command === 'desktop_remote_controller_capability_send') {
       attempts += 1;
+      // Tauri IPC rejects with strings; keep that error-normalization contract covered.
+      // eslint-disable-next-line prefer-promise-reject-errors
       return Promise.reject('capability_snapshot_unavailable');
     }
     return undefined;
