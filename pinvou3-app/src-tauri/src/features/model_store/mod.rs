@@ -46,6 +46,10 @@
 mod linked_model_route;
 mod platform;
 
+#[cfg(test)]
+#[path = "platform/ipc_fixture.rs"]
+pub(crate) mod ipc_fixture;
+
 /// Called after linked model routes commit. The app invalidates engine caches and
 /// publishes a model-list refresh; the store does not depend on assistant internals.
 pub type ModelsChangedHandler = std::sync::Arc<dyn Fn(&[String]) + Send + Sync>;

@@ -2145,6 +2145,10 @@ impl PreparedRuntimeState {
     }
 }
 
+#[cfg(test)]
+#[path = "engine_pool_model_update_test_support.rs"]
+pub(crate) mod model_update_test_support;
+
 pub type EngineToolFactory =
     Arc<dyn Fn(&AppHandle, &str) -> Vec<Arc<dyn ToolSpec>> + Send + Sync + 'static>;
 pub type ToolPolicy = Arc<dyn Fn(&AppHandle) -> Vec<String> + Send + Sync + 'static>;

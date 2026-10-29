@@ -265,6 +265,17 @@ fn background_download(exit_code: i32) -> String {
 printf x >> "$LMM_MODELS_DIR/attempts"
 sh -c 'trap "" HUP; i=0; while [ "$i" -lt 600 ]; do printf x >> "$LMM_MODELS_DIR/partial"; i=$((i+1)); sleep 0.05; done' >/dev/null 2>&1 &
 printf '%s\n' "$!" > "$LMM_MODELS_DIR/background.pid"
+# Establish child readiness before parent exit can deliver PTY SIGHUP.
+# Further writes after the runner exits remain asserted by the Rust test.
+ready_waits=0
+while [ ! -s "$LMM_MODELS_DIR/partial" ]; do
+  ready_waits=$((ready_waits+1))
+  if [ "$ready_waits" -ge 500 ]; then
+    printf '%s\n' 'fixture background writer readiness timeout' >&2
+    exit 97
+  fi
+  sleep 0.01
+done
 exit {exit_code}
 "#
     )
