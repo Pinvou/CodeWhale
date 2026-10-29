@@ -20,7 +20,8 @@ use super::import_scan;
 use super::proc_timeout;
 use super::script_runner::{self, RunScriptOptions, ScriptProgress};
 use super::store_client::{
-    DeployProfile, DeployTopology, StoreCardDetail, StoreCardSummary, StoreClient, StoreSource,
+    DeployProfile, DeployTopology, HINT_CHECK_INTERNET_ACCESS, HINT_CONNECT_FAILED,
+    HINT_CONNECT_TIMEOUT, StoreCardDetail, StoreCardSummary, StoreClient, StoreSource,
 };
 use crate::features::monitor::current_ram_snapshot;
 use crate::platform::process_resources::ProcessResourceSampler;
@@ -1863,10 +1864,12 @@ impl ModelManager {
             // DNS 原文
             "could not resolve host",
             "temporary failure resolving",
-            // 客户端已 humanize 的中文形态（errors.rs / store_client.rs）
-            "连接超时",
-            "网络连接失败",
-            "请检查设备能不能访问外网",
+            // 客户端已 humanize 的中文形态（errors.rs / store_client.rs）。
+            // 引用 store_client 的常量而不是在这里抄字面量：文案与判据分家后，
+            // 那边改一个字、这边还在匹配旧文本，守卫就静默失效（r19 评审 P2-2）。
+            HINT_CONNECT_TIMEOUT,
+            HINT_CONNECT_FAILED,
+            HINT_CHECK_INTERNET_ACCESS,
         ];
         let lowered = msg.to_lowercase();
         MARKERS.iter().any(|k| lowered.contains(k))
@@ -4835,7 +4838,10 @@ mod tests {
             "脚本执行失败（退出码 1）：failed to do request: Head \"https://registry-1.docker.io/v2/\": dial tcp: lookup registry-1.docker.io: i/o timeout",
             "脚本执行失败（退出码 1）：Error response from daemon: failed to resolve reference vllm/vllm-openai: no route to host",
             "脚本执行失败（退出码 1）：Temporary failure resolving 'hf-mirror.com'",
-            // 客户端 humanize 形态
+            // 客户端 humanize 形态。这条**刻意保留 .48 真机原文的字面量**、不
+            // 引用 store_client 的 HINT_* 常量：守卫（MARKERS）那侧已经引用
+            // 常量了，这里从真机文案那一侧把两边一起钉住——常量若被改得与
+            // 真实文案分家，本用例会先红（r19 评审 P2-2 的双侧钉）。
             "脚本执行失败（退出码 1）：连接超时，请检查网络（或尝试在设置里切换镜像地址）（请检查设备能不能访问外网）",
         ] {
             assert!(

@@ -396,8 +396,11 @@ impl StoreClient {
                             .unwrap_or_else(|| e.to_string());
                         return Err(StoreError::new(cause));
                     }
-                    last_err =
-                        format!("{}（请检查设备能不能访问外网）", humanize_reqwest_error(&e));
+                    last_err = format!(
+                        "{}（{}）",
+                        humanize_reqwest_error(&e),
+                        HINT_CHECK_INTERNET_ACCESS
+                    );
                     if e.is_timeout() || attempt == STORE_API_ATTEMPTS {
                         break;
                     }
@@ -428,13 +431,27 @@ impl StoreSource for StoreClient {
     }
 }
 
+/// 「客户端已 humanize 的网络失败文案」的判别片段（r19 评审 P2-2）。
+///
+/// lifecycle.rs 的 `network_unreachable_failure` 靠 contains 这三个片段识别
+/// 「路不通」类失败（.48 无外网真机案例的守卫：网络失败不得触发兜底提权）。
+/// 此前那边是把这些文案逐字**复述**进 MARKERS 的——这里改一个字、那边还在
+/// 匹配旧文本，守卫就静默失效。抽成常量、两侧引用同一份。
+///
+/// 常量存的是完整文案的**判别片段**（开头/内嵌部分），完整句子在下面各用法
+/// 处拼出，原文逐字不变；守卫匹配片段而不是整句，是为了别把「脚本自己打印
+/// 了一句 连接超时」这类半截文案漏掉。
+pub(crate) const HINT_CONNECT_TIMEOUT: &str = "连接超时";
+pub(crate) const HINT_CONNECT_FAILED: &str = "网络连接失败";
+pub(crate) const HINT_CHECK_INTERNET_ACCESS: &str = "请检查设备能不能访问外网";
+
 /// 把 reqwest 的英文错误转成用户能看懂的中文提示（对应 Python 版
 /// errors.humanize_error 里针对 requests 异常类型的分支）。
 pub fn humanize_reqwest_error(e: &reqwest::Error) -> String {
     if e.is_timeout() {
-        "连接超时，请检查网络（或尝试在设置里切换镜像地址）".to_string()
+        format!("{HINT_CONNECT_TIMEOUT}，请检查网络（或尝试在设置里切换镜像地址）")
     } else if e.is_connect() {
-        "网络连接失败，请检查网络是否可用".to_string()
+        format!("{HINT_CONNECT_FAILED}，请检查网络是否可用")
     } else if e.is_request() {
         "网络请求失败，请检查网络连接后重试".to_string()
     } else {
