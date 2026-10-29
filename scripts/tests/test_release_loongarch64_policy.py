@@ -325,7 +325,11 @@ class ReleaseLoongArch64PolicyTests(unittest.TestCase):
         # to the x86_64 jammy image the toolchain asset's sha256 pin was
         # recorded for (never the arm base image, never latest). Judged on
         # comment-stripped job text, like every live-configuration pin.
-        self.assertIn("runs-on: ubuntu-22.04\n", self.job_code)
+        self.assertEqual(
+            [line.strip() for line in self.job_code.split("\n    steps:", 1)[0].splitlines()
+             if line.startswith("    runs-on:")],
+            ['runs-on: ${{ fromJSON(vars.PINVOU_LINUX_RUNNER || \'["ubuntu-22.04"]\') }}'],
+        )
         self.assertNotIn("runs-on: ubuntu-22.04-arm", self.job_code)
         self.assertNotIn("ubuntu-latest", self.job_code.split("\n    steps:", maxsplit=1)[0])
 
@@ -2157,7 +2161,11 @@ class ReleaseLoongArch64PolicyTests(unittest.TestCase):
         return _without_comments(block).split("run: |", maxsplit=1)[1].strip()
 
     def test_pr_check_leg_checks_all_three_workspaces(self):
-        self.assertIn("runs-on: ubuntu-22.04\n", self.pr_job)
+        self.assertEqual(
+            [line.strip() for line in self.pr_job.split("\n    steps:", 1)[0].splitlines()
+             if line.startswith("    runs-on:")],
+            ['runs-on: ${{ fromJSON(vars.PINVOU_LINUX_RUNNER || \'["ubuntu-22.04"]\') }}'],
+        )
         self.assertIn(
             "--manifest-path pinvou3-app/src-tauri/Cargo.toml --target "
             "loongarch64-unknown-linux-gnu --locked",
