@@ -140,6 +140,11 @@ func (r *PostgresRepository) requestEmergencyCancellation(ctx context.Context, c
 		return false, false, err
 	}
 	if cancellationOrigin == "MODEL_EMERGENCY" && requestAlreadyRecorded {
+		if usage.ExecutionStatus == "REVIEW" && usage.HoldID != nil {
+			if err := r.restoreEmergencyPreDispatchReview(ctx, tx, usage, cancellationID); err != nil {
+				return false, false, err
+			}
+		}
 		preDispatch := usage.CancelStatus == "CANCEL_REQUESTED" || usage.CancelStatus == "LOCAL_CONFIRMED" || usage.ExecutionStatus == "CANCELLED_BEFORE_DISPATCH"
 		return preDispatch, false, tx.Commit(ctx)
 	}
@@ -169,6 +174,60 @@ func (r *PostgresRepository) requestEmergencyCancellation(ctx context.Context, c
 		return false, false, err
 	}
 	return preDispatch, terminal, tx.Commit(ctx)
+}
+
+// A failed release acknowledgement moves the usage into REVIEW. Only the
+// original immutable local pre-dispatch request may resume that release; a
+// review label or a missing dispatch row alone is never sufficient evidence.
+// The caller holds the usage lock, which also fences dispatch persistence.
+func (r *PostgresRepository) restoreEmergencyPreDispatchReview(ctx context.Context, tx pgx.Tx, usage UsageRequest, cancellationID uuid.UUID) error {
+	if usage.ErrorClass == nil || *usage.ErrorClass != "cancel_hold_recovery_unconfirmed" || usage.CancelStatus != "CANCEL_REQUESTED" || usage.HoldID == nil || *usage.HoldID == uuid.Nil || usage.PriceVersionID == nil || *usage.PriceVersionID == uuid.Nil || usage.WalletID == uuid.Nil || usage.MaximumMicrocredits < 0 || usage.ProviderTerminalAt != nil || usage.FinalUsageObservedAt != nil || usage.ActualMicrocredits != nil || usage.LastPersistedSequence != 0 || usage.LastClientConfirmedSequence != 0 {
+		return ErrForbidden
+	}
+	var fenced bool
+	err := tx.QueryRow(ctx, `SELECT request.cancellation_origin='MODEL_EMERGENCY'
+ AND request.delivery_status='USER_STOPPED'
+ AND request.cancel_requested_at=request.user_stopped_at
+ AND NOT EXISTS(SELECT 1 FROM usage_dispatch_intents intent WHERE intent.usage_request_id=request.id)
+ AND NOT EXISTS(SELECT 1 FROM usage_execution_transitions dispatched WHERE dispatched.usage_request_id=request.id AND dispatched.to_status IN ('DISPATCH_INTENT_PERSISTED','UPSTREAM_DISPATCHING','STREAMING','SETTLEMENT_PENDING','SUCCEEDED','FAILED'))
+ AND EXISTS(SELECT 1 FROM usage_execution_transitions review
+ JOIN usage_execution_transitions ack ON ack.usage_request_id=review.usage_request_id
+ WHERE review.usage_request_id=request.id AND review.from_status='HOLD_RESERVED' AND review.to_status='REVIEW'
+ AND review.reason='cancel_hold_recovery_unconfirmed' AND review.to_version=request.execution_version
+ AND ack.from_status IN ('HOLD_RESERVING','REVIEW') AND ack.to_status='HOLD_RESERVED'
+ AND ack.reason='billing ensured one hold' AND ack.to_version<=review.from_version)
+ AND EXISTS(SELECT 1 FROM model_emergency_cancellations cancellation
+ JOIN model_emergency_cancellation_policies policy ON policy.id=cancellation.policy_id
+ JOIN model_emergency_cancellation_evidence original ON original.emergency_cancellation_id=cancellation.id AND original.evidence_type='REQUESTED'
+ JOIN usage_cancellation_evidence evidence ON evidence.usage_request_id=request.id AND evidence.evidence_type='MODEL_EMERGENCY_REQUESTED'
+ WHERE cancellation.id=$2 AND cancellation.usage_request_id=request.id AND policy.model_id=request.model_id
+ AND policy.effective_at<=original.created_at AND request.started_at<policy.effective_at
+ AND evidence.occurred_at=original.created_at
+ AND (original.created_at=request.cancel_requested_at OR (original.created_at>request.cancel_requested_at
+ AND EXISTS(SELECT 1 FROM usage_cancel_commands command
+ JOIN usage_cancellation_evidence user_evidence ON user_evidence.usage_request_id=command.usage_request_id
+ WHERE command.usage_request_id=request.id AND command.user_id=request.user_id
+ AND command.cancellation_version=1 AND command.request_fingerprint=$3
+ AND command.created_at=request.cancel_requested_at AND user_evidence.occurred_at=command.created_at
+ AND user_evidence.evidence_type='CANCEL_REQUESTED' AND btrim(user_evidence.adapter_version)<>''
+ AND user_evidence.provider_id IS NULL AND user_evidence.upstream_reference_digest IS NULL
+ AND user_evidence.sanitized_evidence=jsonb_build_object('capability','LOCAL_PRE_DISPATCH','pre_dispatch',true))))
+ AND evidence.provider_id IS NULL AND evidence.upstream_reference_digest IS NULL AND btrim(evidence.adapter_version)<>''
+ AND original.snapshot=evidence.sanitized_evidence
+ AND original.snapshot=jsonb_build_object('origin','MODEL_EMERGENCY','capability',original.snapshot->>'capability','pre_dispatch',true,'already_terminal',false,'provider_success_inferred',false))
+ FROM usage_requests request WHERE request.id=$1`, usage.ID, cancellationID, cancellationFingerprint(usage.ID)).Scan(&fenced)
+	if err != nil {
+		return err
+	}
+	if !fenced {
+		return ErrForbidden
+	}
+	now := r.now()
+	if err := transitionExecutionTx(ctx, tx, usage.ID, []string{"REVIEW"}, "HOLD_RESERVED", "retry fenced model emergency release", now); err != nil {
+		return err
+	}
+	_, err = tx.Exec(ctx, `UPDATE usage_requests SET status='RESERVED',settlement_status='HOLD_ACTIVE',updated_at=$2 WHERE id=$1`, usage.ID, now)
+	return err
 }
 
 func (r *PostgresRepository) recordEmergencyCancellationAttempt(ctx context.Context, cancellationID uuid.UUID, capability ProviderCancelCapability, aborted, preDispatch, terminal bool) error {
