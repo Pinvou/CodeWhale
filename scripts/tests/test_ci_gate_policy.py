@@ -5437,12 +5437,11 @@ class DependencyReviewWarnOnlyGateTests(unittest.TestCase):
         workflow = (ROOT / ".github/workflows/dependency-review.yml").read_text(
             encoding="utf-8"
         )
-        self.assertNotIn(
-            "continue-on-error: true",
-            workflow,
-            "dependency-review 不得无条件 continue-on-error：降级必须由 "
-            "vars.DEPENDENCY_REVIEW_WARN_ONLY 门控，依赖图开启后把该 variable "
-            "设为 'false' 即恢复强制门禁",
+        self.assertIsNone(
+            re.search(r"continue-on-error:\s*['\"]?true['\"]?", workflow),
+            "dependency-review 不得无条件 continue-on-error（含引号形式 "
+            "`continue-on-error: 'true'`）：降级必须由 vars.DEPENDENCY_REVIEW_WARN_ONLY "
+            "门控，依赖图开启后把该 variable 设为 'false' 即恢复强制门禁",
         )
         self.assertIn(
             "vars.DEPENDENCY_REVIEW_WARN_ONLY",
@@ -5453,6 +5452,95 @@ class DependencyReviewWarnOnlyGateTests(unittest.TestCase):
             "fail-on-severity: high",
             workflow,
             "dependency-review 必须保留 fail-on-severity: high 强度阈值",
+        )
+
+
+class SecurityGateEnforcementPinsTests(unittest.TestCase):
+    """secret-scan / dco / .gitleaks.toml 的承重形态钉（round-2 评审收口）。
+
+    变异实证：把 dco 的 core.setFailed 降级为 core.warning、删除 secret-scan
+    的「commits scanned」防空扫守卫、甚至整文件删除 secret-scan.yml，原有
+    套件全部保持绿色——门禁的强制力此前没有任何测试保护。本类以存在性
+    断言钉住各承重点；改动这些形态时必须显式评估并同步更新对应断言。
+    """
+
+    def test_secret_scan_workflow_keeps_fail_closed_guard(self):
+        workflow = (ROOT / ".github/workflows/secret-scan.yml").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn(
+            'grep -Eq "[1-9][0-9]* commits scanned"',
+            workflow,
+            "secret-scan 的防空扫守卫不得删除：gitleaks 的 exit code 在坏 git "
+            "区间下不可信（可 exit 0 且打印 0 commits）",
+        )
+        self.assertIn(
+            "fetch-depth: 0",
+            workflow,
+            "全量历史扫描需要完整 checkout（fetch-depth: 0）",
+        )
+        self.assertIn(
+            "sha256sum -c -",
+            workflow,
+            "gitleaks 安装必须保留校验和验证",
+        )
+        self.assertIn(
+            "--diff-merges=first-parent",
+            workflow,
+            "git log -p 默认不输出 merge 补丁；扫描必须显式纳入 merge diff，"
+            "否则 evil merge / 绕队列手工 merge 引入的泄漏对本门禁不可见",
+        )
+
+    def test_secret_scan_cutoff_matches_commit_message_gate(self):
+        validator = (ROOT / "scripts/validate-commit-msg.py").read_text(
+            encoding="utf-8"
+        )
+        match = re.search(
+            r"LEGACY_HISTORY_CUTOFF\s*=\s*[\"']([0-9a-f]{40})[\"']", validator
+        )
+        self.assertIsNotNone(
+            match, "validate-commit-msg.py 必须定义 40 位 hex 的 LEGACY_HISTORY_CUTOFF"
+        )
+        workflow = (ROOT / ".github/workflows/secret-scan.yml").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn(
+            match.group(1),
+            workflow,
+            "secret-scan 的 --log-opts 扫描起点必须与 LEGACY_HISTORY_CUTOFF 一致，"
+            "两道门禁的信任边界不得漂移",
+        )
+
+    def test_dco_workflow_stays_enforcing(self):
+        workflow = (ROOT / ".github/workflows/dco.yml").read_text(encoding="utf-8")
+        self.assertIn(
+            "core.setFailed(",
+            workflow,
+            "dco 必须以 core.setFailed 强制失败；降级为 core.warning 会让门禁静默失效",
+        )
+        self.assertIn(
+            "/^Signed-off-by:",
+            workflow,
+            "dco 的签署存在性正则不得移除或弱化",
+        )
+        self.assertIn('"dependabot[bot]"', workflow)
+        self.assertIn('"github-actions[bot]"', workflow)
+
+    def test_gitleaks_config_keeps_default_rules_and_allowlist_surface(self):
+        config_path = ROOT / ".gitleaks.toml"
+        self.assertTrue(config_path.exists(), ".gitleaks.toml 不得删除")
+        config = tomllib.loads(config_path.read_text(encoding="utf-8"))
+        self.assertEqual(
+            config.get("extend", {}).get("useDefault"),
+            True,
+            "必须扩展 gitleaks 默认规则集（useDefault = true），不得整体替换",
+        )
+        allowlists = config.get("allowlists", [])
+        self.assertEqual(
+            len(allowlists),
+            18,
+            "allowlist 组数被钉死（cargo-deny 精确集合同款公约）：新增或删除豁免组"
+            "属于扫描面安全变化，必须显式更新本断言并逐组说明理由",
         )
 
 

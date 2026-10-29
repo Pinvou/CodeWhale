@@ -7,6 +7,15 @@ useDefault = true
 # with --log-opts starting at the same legacy cutoff as
 # scripts/validate-commit-msg.py (LEGACY_HISTORY_CUTOFF), so pre-baseline
 # history is out of scope here by design.
+#
+# Version coupling: the targetRules IDs below are calibrated against the
+# gitleaks release pinned in .github/workflows/secret-scan.yml; bumping that
+# version requires re-validating every group here (unknown IDs fail closed
+# with exit 1, but renamed default rules would silently stop matching).
+# This file has materially diverged from the open repo (closed-specific
+# groups at the bottom); backflow batches must not treat it as a
+# community-only file — reconcile manually when shared-directory
+# allowlists change on either side.
 
 [[allowlists]]
 description = "Pinned upstream connector documentation uses synthetic IDs and tokens"
@@ -127,7 +136,7 @@ targetRules = ["curl-auth-header"]
 condition = "AND"
 regexTarget = "line"
 paths = ['''^pinvou3-app/src-tauri/src/features/remote_control/controller/permission\.rs$''']
-regexes = ['''Bearer sk-live-123''']
+regexes = ["Bearer sk-live-123['\"]"]
 
 [[allowlists]]
 description = "遥测测试夹具用合成 token 构造错误字符串,非真实凭据"
@@ -135,7 +144,7 @@ targetRules = ["generic-api-key"]
 condition = "AND"
 regexTarget = "line"
 paths = ['''^pinvou3-app/src-tauri/src/features/behavior_telemetry/remote_control\.rs$''']
-regexes = ['''sk-live-123456789''']
+regexes = ["sk-live-123456789['\"]"]
 
 [[allowlists]]
 description = "relay 存活探针中 signingPrivateKeyB64 是解构参数名与缺省回退表达式,不是凭据(仅豁免参数名形态,不给赋值行开洞)"

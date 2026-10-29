@@ -24,12 +24,20 @@ jobs:
     timeout-minutes: 10
     steps:
       # Checkout exists only so the shared memory setup script can run; the
-      # dependency review itself works purely through the API.
+      # dependency review itself works purely through the API. Running
+      # ci-memory-setup here is a repo-wide convention for ubuntu jobs, not a
+      # memory need of this job.
       - uses: actions/checkout@v7
 
       - name: Set up zram and swap
         # Best effort: timeouts or failures only warn and never block (falls back to stock runner memory).
         run: timeout --kill-after=15 240 sudo --preserve-env=GITHUB_ACTIONS,PINVOU3_CI_DISABLE_ZRAM bash "${{ github.workspace }}/scripts/ci-memory-setup.sh" || echo "::warning::ci-memory-setup did not finish; continuing with stock runner memory"
+
+      # 运行期可见性：告警/强制的生效模式只取决于服务端 variable 值，在日志里
+      # 显式回显，防止设成 'False'/带空白等写法静默停留在告警模式。
+      - name: Report effective dependency-review mode
+        if: github.event_name == 'pull_request'
+        run: echo "DEPENDENCY_REVIEW_WARN_ONLY='${{ vars.DEPENDENCY_REVIEW_WARN_ONLY }}' — strict gate only when exactly 'false'"
 
       - name: 确认队列中的 PR 已通过依赖审查
         if: github.event_name == 'merge_group'

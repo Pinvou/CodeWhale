@@ -26,7 +26,9 @@ jobs:
     timeout-minutes: 10
     steps:
       # Checkout exists only so the shared memory setup script can run; DCO
-      # verification itself works purely through the API.
+      # verification itself works purely through the API. Running
+      # ci-memory-setup here is a repo-wide convention for ubuntu jobs, not a
+      # memory need of this job.
       - uses: actions/checkout@v7
 
       - name: Set up zram and swap

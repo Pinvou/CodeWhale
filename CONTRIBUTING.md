@@ -183,7 +183,10 @@ change, inspect the preparation step's free-space report instead of bypassing
 the capacity check or skipping either test harness.
 
 The merge queue runs the applicable product gates against the actual combined tree
-of the queued pull request and the latest `main`. Rust changes run formatting,
+of the queued pull request and the latest `main`. Lightweight metadata gates (DCO,
+secret-scan, dependency-review) instead validate on each pull request before
+enqueue and echo their pre-validated result in merge_group; that echo is sound
+only while the server-side required-check set includes them. Rust changes run formatting,
 Clippy, compile, and dependency-policy checks there. High-blast-radius Rust changes
 also run the full Linux behavior regression on the combined tree; Windows coverage
 already ran on the ready PR and is not repeated unless the fail-closed policy

@@ -110,7 +110,10 @@ API/diff 失败、版本内容异常、Release 混合改动或未知策略状态
 deb、dmg、nsis 安装包仅在 `VERSION` 改动进入 `main` 后，或人工明确触发
 `workflow_dispatch` 时构建。
 
-Merge Queue 在入队 PR 与最新 `main` 的实际组合树上运行适用门禁：Rust 改动
+Merge Queue 在入队 PR 与最新 `main` 的实际组合树上运行适用门禁（轻量元数据门禁
+DCO、secret-scan、dependency-review 例外：它们在各 PR 入队前验证，merge_group
+仅回报已验证结果；该回声有效的前提是服务端 required check 集合包含三者）：
+Rust 改动
 运行格式、Clippy、编译和依赖策略检查；高爆炸半径 Rust 改动还会在组合树上执行
 完整 Linux 行为回归，Windows 已在 Ready PR 验证，除上述 fail-closed 情况外不在
 队列重复。前端改动按
