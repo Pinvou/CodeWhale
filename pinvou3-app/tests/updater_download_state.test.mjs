@@ -11,11 +11,12 @@ const updaterSource = fs.readFileSync(
   'utf8',
 );
 
-// Slim revival of the former updater_progress_state.test.mjs coverage: the
-// 200 ms progress-coalescing machinery it pinned was removed alongside the
-// `update:progress` event (the Rust backend never emitted it), but the
-// download/install state machine on the tauri updater domain still needs a
-// direct unit pin for its failure, cancel, and completion transitions.
+// Unit pin for the tauri updater domain's download/install state machine:
+// failure, cancel, and completion transitions. `updater.js` subscribes to
+// `update:progress` (with 200 ms coalescing) at construction time — that
+// event wiring is pinned separately by updater_progress_events.test.mjs —
+// so this context stubs `listen` as a no-op to exercise the state machine
+// alone.
 function loadUpdaterFeature(options = {}) {
   const root = { __PINVOU_TAURI_BRIDGE_FEATURES__: {} };
   vm.runInNewContext(updaterSource, { window: root });
@@ -34,6 +35,7 @@ function loadUpdaterFeature(options = {}) {
   const factory = root.__PINVOU_TAURI_BRIDGE_FEATURES__.updater;
   const updater = factory({
     state,
+    listen() {},
     notify() {
       notifications.push(state.updateProgress);
     },
