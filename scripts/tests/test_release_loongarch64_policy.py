@@ -329,7 +329,7 @@ class ReleaseLoongArch64PolicyTests(unittest.TestCase):
         self.assertEqual(
             [line.strip() for line in self.job_code.split("\n    steps:", 1)[0].splitlines()
              if line.startswith("    runs-on:")],
-            ['runs-on: ${{ fromJSON(vars.PINVOU_LINUX_RUNNER || \'["ubuntu-22.04"]\') }}'],
+            ['runs-on: ${{ fromJSON(vars.PINVOU_LINUX_HEAVY_RUNNER || vars.PINVOU_LINUX_RUNNER || \'["ubuntu-22.04"]\') }}'],
         )
         self.assertNotIn("runs-on: ubuntu-22.04-arm", self.job_code)
         self.assertNotIn("ubuntu-latest", self.job_code.split("\n    steps:", maxsplit=1)[0])
@@ -2165,7 +2165,7 @@ class ReleaseLoongArch64PolicyTests(unittest.TestCase):
         self.assertEqual(
             [line.strip() for line in self.pr_job.split("\n    steps:", 1)[0].splitlines()
              if line.startswith("    runs-on:")],
-            ['runs-on: ${{ fromJSON(vars.PINVOU_LINUX_RUNNER || \'["ubuntu-22.04"]\') }}'],
+            ['runs-on: ${{ fromJSON(vars.PINVOU_LINUX_HEAVY_RUNNER || vars.PINVOU_LINUX_RUNNER || \'["ubuntu-22.04"]\') }}'],
         )
         self.assertIn(
             "--manifest-path pinvou3-app/src-tauri/Cargo.toml --target "
