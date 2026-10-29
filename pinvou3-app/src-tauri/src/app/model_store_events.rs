@@ -3,6 +3,23 @@
 use crate::features::model_store::ModelsChangedHandler;
 use tauri::{AppHandle, Emitter, Runtime};
 
+/// The desktop composition uses its managed pool, including when commands are
+/// exercised by the real Wry integration test.
+pub(crate) fn live_models_changed_handler(app: AppHandle) -> ModelsChangedHandler {
+    use tauri::Manager;
+
+    let pool_app = app.clone();
+    models_changed_handler(app, move |ids| {
+        if let Some(pool) =
+            pool_app.try_state::<crate::features::assistant::engine_pool::EnginePool>()
+        {
+            for id in ids {
+                pool.mark_model_updated(id);
+            }
+        }
+    })
+}
+
 /// Mark engine dependencies before either UI or remote consumers see the event.
 /// The composition root supplies the existing live EnginePool lookup; keeping
 /// that port separate also permits real command/service tests without a Wry UI.
