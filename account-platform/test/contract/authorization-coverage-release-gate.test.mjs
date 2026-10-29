@@ -25,7 +25,7 @@ async function rejectedMutation(mutate, expected) {
 
 test('authorization release gate classifies every HTTP task event callback and CLI entrypoint', async () => {
   const catalog = JSON.parse(await readFile(catalogURL, 'utf8'));
-  // The six existing Portal transports use Any, alongside the 393 verb-specific
+  // The six existing Portal transports use Any, alongside the 396 verb-specific
   // registrations. Keep the expected complete graph independent of its parser.
   const wildcardPaths = [
     '/api/account/*resource', '/api/token/*resource',
@@ -39,7 +39,7 @@ test('authorization release gate classifies every HTTP task event callback and C
   for (const route of wildcardPaths) assert.ok(portal.includes(`router.Any("${route}",`), `missing existing Portal transport ${route}`);
   // The real checker still rejects missing, stale, duplicate or mis-scoped
   // entries before returning these exact inventory sizes.
-  assert.deepEqual(await runAuthorizationCoverage(), { routes: 399, tasks: 32, events: 18, cli: 26 });
+  assert.deepEqual(await runAuthorizationCoverage(), { routes: 402, tasks: 32, events: 18, cli: 26 });
 });
 
 function assertLedgerRepairProofAuthorization(service, handler) {
@@ -356,4 +356,164 @@ test('decision receipt adds exactly two versioned GETs with the existing current
   const reader = await readFile(new URL('../../internal/account/approval_decision_receipts.go', import.meta.url), 'utf8');
   for (const bound of ['humanApprovalPrincipal(principal)', 'approvalRequestVisibilityForActor', 'requireApprovalDraftCloseControl', 'item.RequesterUserID == *actor', 'policy.ApproverPermission', 'readApprovalDecisionReceipt']) assert.ok(reader.includes(bound), `missing existing decision receipt boundary ${bound}`);
   await rejectedMutation(catalog => { catalog.http_policies = catalog.http_policies.filter(item => !(item.path === routePath && item.receiver === 'adminV2')); }, /unclassified_http_entrypoint:account-platform\/internal\/account\/service\.go\|adminV2\|GET\|\/approval-requests\/:approval_request_id\/actions\/decision-result/);
+});
+const restoredReadEntries = [
+  { source: 'account-platform/internal/account/service.go', receiver: 'admin', method: 'GET', path: '/overview',
+    registration: 'admin.GET("/overview", s.requireAnyPermission(PermissionPlatformUsersRead, PermissionPlatformOrganizationsRead), httpserver.AdaptFunc(s.adminOverview))' },
+  { source: 'account-platform/internal/account/service.go', receiver: 'admin', method: 'GET', path: '/users/:user_id',
+    registration: 'admin.GET("/users/:user_id", s.requirePermission(PermissionPlatformUsersRead), httpserver.AdaptFunc(s.adminUserDetail))' },
+  { source: 'account-platform/internal/account/organization_routes.go', receiver: 'admin', method: 'GET', path: '/organizations/:organization_id',
+    registration: 'admin.GET("/organizations/:organization_id", s.requirePermission(PermissionPlatformOrganizationsRead), httpserver.AdaptFunc(s.adminOrganizationDetail))' },
+];
+const organizationDetailPolicy = {
+  source: 'account-platform/internal/account/organization_routes.go', receiver: 'admin', method: 'GET',
+  path: '/organizations/:organization_id', scope: 'platform', permissions: ['platform.organizations.read'],
+  strategy: 'domain.platform-organization-detail-read',
+};
+
+// Require live Go expressions, not comments or strings which happen to quote one.
+function assertLiveOnce(text, expression) {
+  const {code, masked} = goSource(text);
+  const offsets = [];
+  for (let offset = code.indexOf(expression); offset !== -1; offset = code.indexOf(expression, offset + 1)) {
+    if (masked[offset] !== ' ') offsets.push(offset);
+  }
+  assert.equal(offsets.length, 1, expression);
+  return offsets[0];
+}
+
+async function restoredReadSources() {
+  const paths = {
+    service: 'service.go', organizations: 'organization_routes.go', authorization: 'authorization.go',
+    organizationPermissions: 'organization_permissions.go', overview: 'admin_overview.go',
+    user: 'admin_user_detail.go', organization: 'organization_admin_detail.go',
+  };
+  return Object.fromEntries(await Promise.all(Object.entries(paths).map(async ([name, file]) =>
+    [name, (await readFile(new URL(`../../internal/account/${file}`, import.meta.url), 'utf8')).replace(/\r\n/g, '\n')])));
+}
+
+function assertRestoredReadAuthorization(sources, catalog) {
+  for (const entry of restoredReadEntries) {
+    assert.equal(catalog.http_sources.filter(source => source === entry.source).length, 1);
+    const text = entry.source.endsWith('/service.go') ? sources.service : sources.organizations;
+    // Match the entire tuple; other legitimate verbs use the same resource path.
+    const matches = authorizationRoutes(entry.source, text).filter(route => route.receiver === entry.receiver && route.method === entry.method && route.path === entry.path);
+    assert.equal(matches.length, 1, entry.path);
+    assert.equal(matches[0].method, entry.method);
+    assert.equal(matches[0].registration.trim(), entry.registration);
+    const policies = catalog.http_policies.filter(policy => policy.source === entry.source &&
+      policy.receiver === entry.receiver && policy.method === entry.method && policy.path === entry.path);
+    // Overview and user detail are inline; duplicating their fallback would be stale.
+    assert.deepEqual(policies, entry.path.startsWith('/organizations/') ? [organizationDetailPolicy] : []);
+  }
+  assertLiveOnce(sources.service, 'protected := router.Group("")');
+  assertLiveOnce(sources.service, 'protected.Use(identity.GinMiddleware(verify), s.contextVersionHeaders())');
+  assertLiveOnce(sources.service, 'admin := protected.Group("/admin/v1")');
+  assertLiveOnce(sources.service, 's.registerOrganizationRoutes(protected, admin)');
+  const enabledGroup = assertLiveOnce(sources.organizations, 'admin = admin.Group("", s.requireOrganizationsEnabled())');
+  const detailRoute = assertLiveOnce(sources.organizations, restoredReadEntries[2].registration);
+  assert.ok(enabledGroup < detailRoute, 'the live organization enabled group must precede the live detail route');
+  assert.match(goSource(sources.authorization).code, /\bPermissionPlatformUsersRead\s*=\s*"platform\.users\.read"/);
+  assert.match(goSource(sources.organizationPermissions).code, /\bPermissionPlatformOrganizationsRead\s*=\s*"platform\.organizations\.read"/);
+  // Both permissions are platform-scoped, regardless of a detail's path parameter.
+  const anyPermission = goSource(sources.authorization).code.split('func (s *Service) requireAnyPermission(')[1]?.split('\nfunc ')[0];
+  assert.ok(anyPermission, 'the real OR authorization middleware must exist');
+  assertLiveOnce(anyPermission, 'repository.Authorize(c.Request.Context(), principal, permission, nil, nil)');
+  assertLiveOnce(anyPermission, 'platformauthorization.WithGrantedPermissions(c.Request.Context(), granted...)');
+  assertLiveOnce(sources.overview, 'if platformauthorization.GrantedPermission(r.Context(), PermissionPlatformUsersRead) {\n\t\tresponse["users"], response["active_users"], response["disabled_users"] = result.Users, result.ActiveUsers, result.DisabledUsers\n\t}');
+  assertLiveOnce(sources.overview, 'if platformauthorization.GrantedPermission(r.Context(), PermissionPlatformOrganizationsRead) {\n\t\tresponse["organizations"], response["active_memberships"], response["pending_invitations"] = result.Organizations, result.ActiveMemberships, result.PendingInvitations\n\t}');
+  for (const [key, handler, parameter, reader] of [
+    ['user', 'adminUserDetail', 'user_id', 'AdminUserDetail'],
+    ['organization', 'adminOrganizationDetail', 'organization_id', 'AdminOrganizationDetail'],
+  ]) {
+    assertLiveOnce(sources[key], `func (s *Service) ${handler}(w http.ResponseWriter, r *http.Request) {`);
+    assertLiveOnce(sources[key], `id, valid := pathUUID(w, r, "${parameter}")`);
+    assertLiveOnce(sources[key], `item, err := repository.${reader}(r.Context(), id)`);
+    assertLiveOnce(sources[key], 'w.Header().Set("Cache-Control", "no-store")');
+  }
+}
+
+test('three restored admin reads retain exact tuples, platform permissions, grouping and domain projection', async () => {
+  const sources = await restoredReadSources();
+  const catalog = JSON.parse(await readFile(catalogURL, 'utf8'));
+  assertRestoredReadAuthorization(sources, catalog);
+  for (const entry of restoredReadEntries) {
+    const key = entry.source.endsWith('/service.go') ? 'service' : 'organizations';
+    for (const replacement of [
+      '', `// ${entry.registration}`, `var quotedRoute = \`${entry.registration}\``,
+      entry.registration.replace('admin.GET', 'admin.POST'),
+      entry.registration.replace('admin.GET', 'protected.GET'),
+      entry.registration.replace(entry.path, `${entry.path}/other`),
+      entry.registration.replace(/s\.admin(?:Overview|UserDetail|OrganizationDetail)/, 's.otherHandler'),
+      entry.registration.replace('PermissionPlatformUsersRead', 'PermissionPlatformAuditRead').replace('PermissionPlatformOrganizationsRead', 'PermissionPlatformUsersRead'),
+    ]) {
+      const mutated = sources[key].replace(entry.registration, replacement);
+      assert.notEqual(mutated, sources[key]);
+      assert.throws(() => assertRestoredReadAuthorization({...sources, [key]: mutated}, catalog));
+    }
+  }
+  const mutations = [
+    ['service', 's.requireAnyPermission(PermissionPlatformUsersRead, PermissionPlatformOrganizationsRead)', 's.requirePermission(PermissionPlatformUsersRead)'],
+    ['service', 's.requireAnyPermission(PermissionPlatformUsersRead, PermissionPlatformOrganizationsRead)', 's.requireAnyPermission(PermissionPlatformOrganizationsRead)'],
+    ['service', 's.requireAnyPermission(PermissionPlatformUsersRead, PermissionPlatformOrganizationsRead)', 's.requireAnyPermission(PermissionPlatformUsersRead)'],
+    ['service', 'admin := protected.Group("/admin/v1")', 'admin := router.Group("/other")'],
+    ['service', 'protected.Use(identity.GinMiddleware(verify), s.contextVersionHeaders())', ''],
+    ['service', 's.registerOrganizationRoutes(protected, admin)', 's.registerOrganizationRoutes(admin, protected)'],
+    ['organizations', 'admin = admin.Group("", s.requireOrganizationsEnabled())', ''],
+    ['authorization', '"platform.users.read"', '"platform.audit.read"'],
+    ['organizationPermissions', '"platform.organizations.read"', '"org.members.read"'],
+    ['overview', 'GrantedPermission(r.Context(), PermissionPlatformUsersRead)', 'GrantedPermission(r.Context(), PermissionPlatformOrganizationsRead)'],
+    ['overview', 'GrantedPermission(r.Context(), PermissionPlatformOrganizationsRead)', 'GrantedPermission(r.Context(), PermissionPlatformUsersRead)'],
+    ['user', 'pathUUID(w, r, "user_id")', 'pathUUID(w, r, "organization_id")'],
+    ['organization', 'repository.AdminOrganizationDetail(r.Context(), id)', 'repository.AdminUserDetail(r.Context(), id)'],
+  ];
+  for (const [key, original, replacement] of mutations) {
+    const mutated = sources[key].replace(original, replacement);
+    assert.notEqual(mutated, sources[key]);
+    assert.throws(() => assertRestoredReadAuthorization({...sources, [key]: mutated}, catalog));
+  }
+});
+
+test('organization grouping order uses live positions despite comment decoys', async () => {
+  const sources = await restoredReadSources();
+  const catalog = JSON.parse(await readFile(catalogURL, 'utf8'));
+  const group = 'admin = admin.Group("", s.requireOrganizationsEnabled())';
+  const route = restoredReadEntries[2].registration;
+  // An earlier route comment must not make a correctly ordered live pair fail.
+  const commentedRoute = `// ${route}\n${sources.organizations}`;
+  assertRestoredReadAuthorization({...sources, organizations: commentedRoute}, catalog);
+  // Keep a comment at the old group location, but move the actual middleware
+  // registration after the real route. A raw indexOf comparison misses this.
+  const movedGroup = sources.organizations.replace(group, `// ${group}`)
+    .replace(route, `${route}\n\t${group}`);
+  assert.notEqual(movedGroup, sources.organizations);
+  assert.ok(assertLiveOnce(movedGroup, group) > assertLiveOnce(movedGroup, route));
+  assert.throws(() => assertRestoredReadAuthorization({...sources, organizations: movedGroup}, catalog),
+    /the live organization enabled group must precede the live detail route/);
+});
+
+test('organization detail fallback rejects missing, incorrect, duplicate and inline-stale policies', async () => {
+  const isDetail = row => row.source === organizationDetailPolicy.source && row.receiver === 'admin' && row.method === 'GET' && row.path === organizationDetailPolicy.path;
+  for (const [change, expected] of [
+    [catalog => { catalog.http_policies = catalog.http_policies.filter(row => !isDetail(row)); }, /unclassified_http_entrypoint:.*organization_routes\.go\|admin\|GET\|\/organizations\/:organization_id/],
+    [catalog => { catalog.http_policies.find(isDetail).scope = 'organization'; }, /permission_scope_mismatch/],
+    [catalog => { catalog.http_policies.find(isDetail).permissions = ['platform.unknown.read']; }, /unknown_human_permission/],
+    [catalog => { catalog.http_policies.push({...catalog.http_policies.find(isDetail)}); }, /duplicate_http_policy/],
+    [catalog => { catalog.http_policies.find(isDetail).method = 'POST'; }, /unclassified_http_entrypoint/],
+    ...restoredReadEntries.slice(0, 2).map(({registration, ...tuple}) => [catalog => {
+      catalog.http_policies.push({...tuple, scope: 'platform', permissions: ['platform.users.read'], strategy: 'domain.incorrect-inline-fallback'});
+    }, /stale_http_policy/]),
+  ]) {
+    await rejectedMutation(catalog => {
+      const original = JSON.stringify(catalog);
+      change(catalog);
+      assert.notEqual(JSON.stringify(catalog), original);
+    }, expected);
+  }
+  // A different known platform permission is syntactically legal to the general
+  // checker; the exact contract above must still reject the wrong domain binding.
+  const sources = await restoredReadSources();
+  const catalog = JSON.parse(await readFile(catalogURL, 'utf8'));
+  catalog.http_policies.find(isDetail).permissions = ['platform.users.read'];
+  assert.throws(() => assertRestoredReadAuthorization(sources, catalog));
 });
