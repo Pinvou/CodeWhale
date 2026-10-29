@@ -1,5 +1,6 @@
 import json
 import re
+from ci_routing_test_support import default_ci_routing
 import os
 import subprocess
 import tempfile
@@ -748,9 +749,9 @@ PINNED_GATE_STEP_NAMES = {
 class CiGatePolicyTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
-        cls.workflow = PR_WORKFLOW.read_text(encoding="utf-8")
+        cls.workflow = default_ci_routing(PR_WORKFLOW.read_text(encoding="utf-8"))
         cls.pr_workflow = cls.workflow
-        cls.release_workflow = RELEASE_WORKFLOW.read_text(encoding="utf-8")
+        cls.release_workflow = default_ci_routing(RELEASE_WORKFLOW.read_text(encoding="utf-8"))
 
     def test_dynamic_directory_globs_do_not_hide_dead_literal_directory_entries(self):
         original = self.pr_workflow
@@ -1604,32 +1605,18 @@ class CiGatePolicyTests(unittest.TestCase):
             "--registry=https://registry.npmjs.org --audit-level=high",
             console_job,
         )
-        self.assertIn(
-            'docker build --build-arg NODE_IMAGE="$PINVOU_UPDATE_NODE_IMAGE" '
-            "--file update-release-console/Dockerfile "
-            "update-release-console",
-            console_job,
-        )
-        self.assertIn(
-            "docker compose --file update-release-console/deploy/compose.yaml "
-            "config --quiet",
-            console_job,
-        )
-        self.assertRegex(console_job, r"mirror\.gcr\.io/library/nginx@sha256:[a-f0-9]{64} nginx -t")
-        self.assertIn("/var/www/pinvou3/latest.json", console_job)
-        self.assertIn(
-            "docker compose --file update-release-console/deploy/compose.yaml "
-            "up --detach --build",
-            console_job,
-        )
-        self.assertIn("release-console/healthz", console_job)
-        self.assertIn("release-console/api/status", console_job)
-        self.assertIn(
-            "docker compose --file update-release-console/deploy/compose.yaml "
-            "down --volumes --remove-orphans",
-            console_job,
-        )
+        self.assertIn("bash scripts/ci-update-release-console-container.sh", console_job)
+        self.assertIn("bash scripts/ci-update-release-console-container.sh --cleanup", console_job)
         self.assertIn("always() && matrix.node-version == '20'", console_job)
+        script = (ROOT / "scripts/ci-update-release-console-container.sh").read_text(encoding="utf-8")
+        for command in ("compose config --quiet", "compose up --detach --build", "compose down --volumes --remove-orphans"):
+            self.assertIn(command, script)
+        self.assertIn('docker build --build-arg NODE_IMAGE="$PINVOU_UPDATE_NODE_IMAGE" ', script)
+        self.assertIn("PINVOU_UPDATE_NODE_IMAGE: mirror.gcr.io/library/node@sha256:", console_job)
+        self.assertRegex(script, r"mirror\.gcr\.io/library/nginx@sha256:[a-f0-9]{64} nginx -t")
+        self.assertIn("$base/healthz", script)
+        self.assertIn("$base/api/status", script)
+        self.assertNotIn("/var/www/pinvou3", script)
 
     def test_trusted_backflow_has_parallel_three_platform_light_gate(self):
         portability = self.workflow.split(
@@ -3630,7 +3617,7 @@ class CiGatePolicyTests(unittest.TestCase):
         # by GATE_JOB_LEVEL_IFS["rust-test"]; the asserts below keep the
         # step-level pins that `if:` cannot cover.
         self.assertIn(
-            "cargo test --manifest-path pinvou3-app/src-tauri/Cargo.toml --no-default-features --lib --features benchmark-hooks --locked -- --test-threads=1",
+            "cargo --config 'profile.dev.package.codewhale-tui.opt-level=0' test --manifest-path pinvou3-app/src-tauri/Cargo.toml --no-default-features --lib --features benchmark-hooks --locked -- --test-threads=1",
             rust_test,
         )
         # 开源侧同口径：Linux lib 腿显式开启 benchmark-hooks，headless-bridge
@@ -3708,7 +3695,7 @@ class CiGatePolicyTests(unittest.TestCase):
         )
         self.assertIn(
             'sudo --preserve-env=GITHUB_ACTIONS,'
-            'PINVOU3_CI_DISABLE_ZRAM bash "${{ github.workspace }}'
+            'PINVOU3_CI_DISABLE_ZRAM,RUNNER_ENVIRONMENT bash "${{ github.workspace }}'
             '/scripts/ci-memory-setup.sh"',
             rust_test,
         )
@@ -3771,7 +3758,7 @@ class CiGatePolicyTests(unittest.TestCase):
             # 在此强制每个调用点结构一致。
             self.assertIn(
                 'run: timeout --kill-after=15 240 sudo --preserve-env='
-                'GITHUB_ACTIONS,PINVOU3_CI_DISABLE_ZRAM'
+                'GITHUB_ACTIONS,PINVOU3_CI_DISABLE_ZRAM,RUNNER_ENVIRONMENT'
                 ' bash "${{ github.workspace }}/scripts/ci-memory-setup.sh"',
                 job_exec,
                 f"ubuntu job '{job_name}' must hard-cap ci-memory-setup with"
@@ -3797,7 +3784,7 @@ class CiGatePolicyTests(unittest.TestCase):
         )
         call_line = (
             "run: timeout --kill-after=15 240 sudo --preserve-env="
-            "GITHUB_ACTIONS,PINVOU3_CI_DISABLE_ZRAM"
+            "GITHUB_ACTIONS,PINVOU3_CI_DISABLE_ZRAM,RUNNER_ENVIRONMENT"
             ' bash "${{ github.workspace }}/scripts/ci-memory-setup.sh"'
         )
         total_call_sites = 0
@@ -5262,18 +5249,26 @@ class CiGatePolicyTests(unittest.TestCase):
         # the decision record above mentions the old value historically.
         self.assertNotIn("cache-targets:", rust_test_cache)
 
+    def test_console_container_script_only_diff_selects_its_actual_job(self):
+        changes = _without_yaml_comments(
+            self.pr_workflow.split("            update_release_console:", 1)[1].split(
+                "            acp_runtime:", 1
+            )[0]
+        )
+        paths = _extract_quoted_paths(changes)
+        self.assertTrue(_matches_paths_filter("scripts/ci-update-release-console-container.sh", paths))
+        self.assertNotIn("scripts/**", paths)
+        console = _without_yaml_comments(_extract_job_block(self.pr_workflow, "update-release-console-test"))
+        self.assertEqual(
+            _extract_job_level_if(console),
+            "${{ !cancelled() && github.event.action != 'closed' && needs.changes.outputs.update_release_console == 'true' && (github.event_name == 'pull_request' || github.event_name == 'merge_group') }}",
+        )
+        self.assertRegex(console, r"(?m)^        run: bash scripts/ci-update-release-console-container\.sh$")
+
     def test_dev_profile_o0_guard_stays_on_all_three_heavy_legs(self):
-        # rust-test's codewhale-tui dev-O0 memory guard defuses the
-        # documented ~7 GB single-rustc dev thin-LTO OOM; the 2026-10 audit
-        # followups (PR #745) ported it to the 7 GB no-swap macOS runner
-        # beside the existing Windows twin. The override is a silent policy
-        # knob — dropping a leg's step or gutting the TOML section
-        # resurfaces the cold-run OOM with no runtime error — so pin the
-        # shared payload in every leg. Windows speaks pwsh (Add-Content
-        # here-string), the others a bash heredoc; the TOML section is the
-        # contract they share. Judged on comment-stripped text: commenting
-        # the TOML section out is inert in the written config.toml and must
-        # red this pin exactly like deletion (round-3 review of PR #745).
+        # Linux may reuse a runner with a persistent Cargo home. Keep O0 on
+        # each actual invocation, without writing administrator configuration.
+        # Windows/macOS retain their existing hosted-runner payloads.
         for job_name, end_marker in (
             ("rust-test", "\n  cli-test:"),
             ("windows-rust-test", "\n  macos-rust-check:"),
@@ -5284,26 +5279,22 @@ class CiGatePolicyTests(unittest.TestCase):
                     end_marker, maxsplit=1
                 )[0]
             )
-            self.assertIn("codewhale-tui O0", job, job_name)
-            self.assertIn("[profile.dev.package.codewhale-tui]", job, job_name)
-            self.assertIn("opt-level = 0", job, job_name)
-        # The bash twins append to the cargo-home config; rust-cache's
-        # cachePaths never include config.toml, so warm runs cannot
-        # accumulate duplicate TOML tables.
-        for job_name, end_marker in (
-            ("rust-test", "\n  cli-test:"),
-            ("macos-rust-check", "\n  windows-codex-runtime-test:"),
-        ):
-            job = _without_yaml_comments(
-                self.pr_workflow.split(f"\n  {job_name}:", maxsplit=1)[1].split(
-                    end_marker, maxsplit=1
-                )[0]
-            )
-            self.assertIn(
-                'config="${CARGO_HOME:-$HOME/.cargo}/config.toml"',
-                job,
-                job_name,
-            )
+            if job_name == "rust-test":
+                executable = re.findall(
+                    r"(?m)^ +(?:run: )?(?:/usr/bin/time -v )?cargo (.+)$", job
+                )
+                test_commands = [line for line in executable if re.search(r"(?:^| )test(?: |$)", line)]
+                self.assertEqual(len(test_commands), 4)
+                for command in test_commands:
+                    self.assertTrue(command.startswith("--config 'profile.dev.package.codewhale-tui.opt-level=0' test"), command)
+                self.assertNotIn('config="${CARGO_HOME:-$HOME/.cargo}/config.toml"', job)
+                self.assertNotIn('cat >> "$config"', job)
+            else:
+                self.assertIn("codewhale-tui O0", job, job_name)
+                self.assertIn("[profile.dev.package.codewhale-tui]", job, job_name)
+                self.assertIn("opt-level = 0", job, job_name)
+                if job_name == "macos-rust-check":
+                    self.assertIn('config="${CARGO_HOME:-$HOME/.cargo}/config.toml"', job)
 
     def test_frontend_test_webui_smoke_reuses_the_prebuilt_dist(self):
         # frontend-test builds the web dist unconditionally (the web index
@@ -5418,9 +5409,9 @@ class CiGatePolicyTests(unittest.TestCase):
         # leaving sha256/file checks only — a hash-matching but broken binary
         # shipped green. macos-15-intel is the Intel image (sunset ~2027 with
         # the macos-15 generation; the re-homing note lives in the matrix).
-        workflow = (
+        workflow = default_ci_routing((
             ROOT / ".github/workflows/connector-verify.yml"
-        ).read_text(encoding="utf-8")
+        ).read_text(encoding="utf-8"))
         darwin_x64 = workflow.split(
             "- platform: darwin-x64", maxsplit=1
         )[1].split("- platform:", maxsplit=1)[0]
@@ -5438,9 +5429,9 @@ class CiGatePolicyTests(unittest.TestCase):
         # entering the three-platform matrix, so wrapper-unrelated PRs do not
         # run the full three-platform smoke.
         # Folded in from scripts/tests/test_ci_trigger_routing_policy.py.
-        workflow = (
+        workflow = default_ci_routing((
             ROOT / ".github/workflows/rustc-wrapper-smoke.yml"
-        ).read_text(encoding="utf-8")
+        ).read_text(encoding="utf-8"))
         trigger = workflow.split("\non:", maxsplit=1)[1].split(
             "\npermissions:", maxsplit=1
         )[0]
@@ -5484,9 +5475,9 @@ class CiGatePolicyTests(unittest.TestCase):
         # step in round 11. Pin the step name and the two load-bearing
         # probe assertions on executable lines, so the smoke can silently
         # lose its delegation contract no more.
-        workflow = (
+        workflow = default_ci_routing((
             ROOT / ".github/workflows/rustc-wrapper-smoke.yml"
-        ).read_text(encoding="utf-8")
+        ).read_text(encoding="utf-8"))
         self.assertIn(
             "- name: 链式 wrapper —— 完整 argv 委托链上命令且仍注入 16 MiB",
             workflow,

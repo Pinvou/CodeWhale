@@ -111,6 +111,11 @@ fi
 # Unrecovered failures still use warn.
 warn_recoverable() { echo "[memory-setup] WARNING: $*" >&2; }
 
+if [[ ${RUNNER_ENVIRONMENT:-} == self-hosted ]]; then
+  log "self-hosted runner: preserving administrator-provisioned memory and swap"
+  exit 0
+fi
+
 if [[ ${EUID} -ne 0 ]]; then
   warn "must run as root (invoke as: sudo --preserve-env=GITHUB_ACTIONS,PINVOU3_CI_DISABLE_ZRAM bash scripts/ci-memory-setup.sh)"
   exit 0

@@ -109,6 +109,33 @@ class RustDiskTests(unittest.TestCase):
                         DISK.prepare_disk(self.workspace)
                 self.assertTrue(self.sdk.exists())
 
+    def test_self_hosted_check_only_preserves_sdks_and_build_outputs(self):
+        with patch.dict(os.environ, {"RUNNER_ENVIRONMENT": "self-hosted"}), patch.object(DISK, "resolve_sdk_paths") as scan, patch.object(DISK.shutil, "rmtree") as remove:
+            DISK.prepare_disk(self.workspace, check_only=True)
+            scan.assert_not_called()
+            remove.assert_not_called()
+        self.assertTrue(self.sdk.exists())
+        self.assertEqual(self.keep.read_bytes(), b"keep")
+
+    def test_self_hosted_check_only_still_rejects_insufficient_capacity(self):
+        with patch.dict(os.environ, {"RUNNER_ENVIRONMENT": "self-hosted"}), patch.object(DISK.shutil, "rmtree") as remove:
+            with self.assertRaisesRegex(RuntimeError, "at least 24 GiB"):
+                DISK.prepare_disk(self.workspace, check_only=True, min_free_gib=24)
+            remove.assert_not_called()
+        self.assertTrue(self.sdk.exists())
+
+    def test_check_only_refuses_aggressive_cleanup(self):
+        with patch.dict(os.environ, {"RUNNER_ENVIRONMENT": "self-hosted"}):
+            with self.assertRaisesRegex(RuntimeError, "cannot be combined"):
+                DISK.prepare_disk(self.workspace, check_only=True, aggressive=True)
+        self.assertTrue(self.sdk.exists())
+
+    def test_check_only_cli_enforces_capacity_without_deletion(self):
+        with patch.dict(os.environ, {"RUNNER_ENVIRONMENT": "self-hosted", "GITHUB_WORKSPACE": str(self.workspace)}):
+            self.assertEqual(DISK.main(["--check-only"]), 0)
+            self.assertEqual(DISK.main(["--check-only", "--min-free-gib", "24"]), 1)
+        self.assertTrue(self.sdk.exists())
+
     def test_rejects_workspace_overlap_before_any_deletion(self):
         for unsafe in (self.workspace, self.workspace / "target", self.root):
             with self.subTest(unsafe=unsafe), patch.object(DISK, "BASE_SDK_PATHS", (self.sdk, unsafe)):
@@ -255,7 +282,7 @@ class RustDiskTests(unittest.TestCase):
         pre_swap = "- name: 在 swap 与缓存前准备 Rust 磁盘空间"
         pre = "- name: 缓存恢复前准备 Rust 磁盘空间"
         post = "- name: 在缓存后确认两轮 Rust 测试磁盘空间"
-        self.assertEqual(job.count("python3 scripts/ci-rust-disk.py"), 3)
+        self.assertEqual(job.count("python3 scripts/ci-rust-disk.py"), 6)
         self.assertLess(job.index(pre_swap), job.index("Set up zram and swap"))
         self.assertLess(job.index("Set up zram and swap"), job.index(pre))
         self.assertLess(job.index(pre), job.index("- name: 恢复 Rust lint 暖缓存"))
@@ -273,10 +300,16 @@ class RustDiskTests(unittest.TestCase):
         for marker in (pre_swap, pre, post):
             step = job.split(marker, 1)[1].split("\n      - name:", 1)[0]
             body = "\n".join(line for line in step.splitlines() if not line.lstrip().startswith("#"))
-            # Exact unconditional recipe: no aggressive SDK removal, reduced
+            # Both explicit runner modes enforce the same threshold: no aggressive SDK removal, reduced
             # threshold, skipped gate or swallowed failure after tools install.
             suffix = " --min-free-gib 24" if marker == pre_swap else ""
-            self.assertEqual(body.strip(), expected + suffix)
+            self_hosted = (
+                'run: |\n'
+                '          if [[ "$RUNNER_ENVIRONMENT" == self-hosted ]]; then\n'
+                '            exec python3 scripts/ci-rust-disk.py --check-only' + suffix + '\n'
+                '          fi\n'
+            )
+            self.assertEqual(body.strip(), self_hosted + expected.split('run: |\n', 1)[1] + suffix)
         self.assertNotIn("continue-on-error", job)
 
     def test_workflow_prepares_disk_before_swap_and_rechecks_after_caches(self):
@@ -313,7 +346,7 @@ class RustDiskTests(unittest.TestCase):
         # The earlier 24 GiB admission cannot replace the post-swap 12 GiB
         # guard: zram failure can allocate 16 GiB of swap before dependencies.
         self.assertEqual(DISK.DEFAULT_MIN_FREE_GIB, 12)
-        self.assertEqual(job.count("python3 scripts/ci-rust-disk.py"), 3)
+        self.assertEqual(job.count("python3 scripts/ci-rust-disk.py"), 6)
         self.assertLess(preflight, swap)
         self.assertLess(swap, dependencies)
         self.assertLess(dependencies, before_cache)
