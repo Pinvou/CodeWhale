@@ -853,8 +853,19 @@ export class AdminPlatformClient {
     return payload;
   }
 
-managedPrices(signal) {
-    return this.request('billing', '/admin/v1/pricing?limit=100', signal);
+async managedPrices(filters = {}, signal) {
+    const cursor = String(filters.cursor || '');
+    const query = new URLSearchParams({ limit: '100' });
+    if (cursor) query.set('cursor', cursor);
+    const epoch = this.financeSessionEpoch;
+    const payload = await this.request('billing', `/admin/v1/pricing?${query}`, signal);
+    this.requireCurrentSession(epoch, signal);
+    if (!Array.isArray(payload?.items) || typeof payload.has_more !== 'boolean'
+      || (payload.has_more && (typeof payload.next_cursor !== 'string' || !payload.next_cursor || payload.next_cursor === cursor))
+      || (!payload.has_more && payload.next_cursor != null && payload.next_cursor !== '')) {
+      throw Object.assign(new Error('INVALID_MANAGED_PRICES_RESPONSE'), { code: 'INVALID_MANAGED_PRICES_RESPONSE' });
+    }
+    return payload;
   }
 
 managedPrice(priceVersionID, signal) {

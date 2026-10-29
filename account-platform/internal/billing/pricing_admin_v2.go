@@ -279,48 +279,63 @@ func (r *PostgresRepository) CreatePriceDraft(ctx context.Context, command Price
 	return item, r.completePricingCommand(ctx, tx, actor, idempotencyKey, "PRICE_DRAFT_CREATE", fingerprint, item)
 }
 
-func (r *PostgresRepository) ListManagedPrices(ctx context.Context, limit int) ([]ManagedPriceVersion, error) {
+func (r *PostgresRepository) ListManagedPrices(ctx context.Context, limit int, cursor string) (ManagedPricePage, error) {
 	if limit < 1 || limit > 200 {
-		return nil, ErrConflict
+		return ManagedPricePage{}, ErrConflict
+	}
+	boundary, err := decodeManagedPriceCursor(cursor, limit)
+	if err != nil {
+		return ManagedPricePage{}, err
 	}
 	tx, err := r.pool.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.RepeatableRead})
 	if err != nil {
-		return nil, err
+		return ManagedPricePage{}, err
 	}
 	defer tx.Rollback(ctx)
-	rows, err := tx.Query(ctx, `SELECT id FROM pricing_versions ORDER BY created_at DESC,id DESC LIMIT $1`, limit)
+	rows, err := tx.Query(ctx, `SELECT id,created_at FROM pricing_versions
+WHERE ($2::timestamptz IS NULL OR (created_at,id)<($2::timestamptz,$3::uuid))
+ORDER BY created_at DESC,id DESC LIMIT $1`, limit+1, boundary.timeParameter(), boundary.ID)
 	if err != nil {
-		return nil, err
+		return ManagedPricePage{}, err
 	}
 	ids := make([]uuid.UUID, 0)
+	times := make([]time.Time, 0)
 	for rows.Next() {
 		var id uuid.UUID
-		if err := rows.Scan(&id); err != nil {
+		var created time.Time
+		if err := rows.Scan(&id, &created); err != nil {
 			rows.Close()
-			return nil, err
+			return ManagedPricePage{}, err
 		}
 		ids = append(ids, id)
+		times = append(times, created)
 	}
 	rows.Close()
 	if err := rows.Err(); err != nil {
-		return nil, err
+		return ManagedPricePage{}, err
+	}
+	hasMore := len(ids) > limit
+	next := ""
+	if hasMore {
+		ids = ids[:limit]
+		next = encodeManagedPriceCursor(times[limit-1], ids[limit-1], limit)
 	}
 	items := make([]ManagedPriceVersion, 0, len(ids))
 	for _, id := range ids {
 		item, scopeKey, err := loadManagedPrice(ctx, tx, id, false)
 		if err != nil {
-			return nil, err
+			return ManagedPricePage{}, err
 		}
 		if err := tx.QueryRow(ctx, `SELECT etag FROM pricing_space_versions WHERE scope_type=$1 AND scope_key=$2 AND protocol_code=$3 AND formula_version_id=$4 AND credit_unit=$5`, item.ScopeType, scopeKey, item.ProtocolCode, item.FormulaVersionID, item.CreditUnit).Scan(&item.CurrentSpaceETag); err != nil {
-			return nil, err
+			return ManagedPricePage{}, err
 		}
 		item.DerivedStatus = derivePriceStatus(item, r.now())
 		items = append(items, item)
 	}
 	if err := tx.Commit(ctx); err != nil {
-		return nil, err
+		return ManagedPricePage{}, err
 	}
-	return items, nil
+	return ManagedPricePage{Items: items, HasMore: hasMore, NextCursor: next}, nil
 }
 
 func normalizeManagedPriceSpaceQuery(query ManagedPriceSpaceQuery) (ManagedPriceSpaceQuery, string, error) {
@@ -896,6 +911,18 @@ func (s *Service) adminMeteringUnits(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Service) adminManagedPrices(w http.ResponseWriter, r *http.Request) {
+	query := r.URL.Query()
+	if _, present := query["cursor"]; present {
+		if len(query["cursor"]) != 1 || query.Get("cursor") == "" || query.Get("scope_type") != "" || query.Get("price_version_id") != "" {
+			s.writeError(w, r, ErrConflict)
+			return
+		}
+	}
+	if len(query["limit"]) > 1 {
+		s.writeError(w, r, ErrConflict)
+		return
+	}
+
 	if rawID := strings.TrimSpace(r.URL.Query().Get("price_version_id")); rawID != "" {
 		repository, ok := s.repository.(interface {
 			ReadManagedPrice(context.Context, uuid.UUID) (ManagedPriceVersion, error)
@@ -943,18 +970,37 @@ func (s *Service) adminManagedPrices(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	repository, ok := s.repository.(interface {
-		ListManagedPrices(context.Context, int) ([]ManagedPriceVersion, error)
+		ListManagedPrices(context.Context, int, string) (ManagedPricePage, error)
 	})
 	if !ok {
 		api.WriteError(w, http.StatusServiceUnavailable, "ADMIN_UNAVAILABLE", "pricing administration is unavailable", httpserver.RequestID(r.Context()))
 		return
 	}
-	items, err := repository.ListManagedPrices(r.Context(), billingAdminLimit(r))
+	limit := billingAdminLimit(r)
+	if raw := r.URL.Query().Get("limit"); raw != "" {
+		value, err := strconv.Atoi(raw)
+		if err != nil || value < 1 || value > 200 {
+			s.writeError(w, r, ErrConflict)
+			return
+		}
+		limit = value
+	}
+	for name := range query {
+		if name != "limit" && name != "cursor" {
+			s.writeError(w, r, ErrConflict)
+			return
+		}
+	}
+	if _, err := decodeManagedPriceCursor(query.Get("cursor"), limit); err != nil {
+		s.writeError(w, r, err)
+		return
+	}
+	page, err := repository.ListManagedPrices(r.Context(), limit, r.URL.Query().Get("cursor"))
 	if err != nil {
 		s.writeError(w, r, err)
 		return
 	}
-	api.WriteJSON(w, http.StatusOK, map[string]any{"items": managedPriceResponses(items)})
+	api.WriteJSON(w, http.StatusOK, map[string]any{"items": managedPriceResponses(page.Items), "has_more": page.HasMore, "next_cursor": page.NextCursor})
 }
 
 func (s *Service) adminUpdatePriceDraft(w http.ResponseWriter, r *http.Request) {

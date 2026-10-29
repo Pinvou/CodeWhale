@@ -42,9 +42,14 @@ export function PricingLifecycleWorkspace({ copy, client, permissions, owner, co
   const retainUnknown = (value) => storeUnknown(unknownStorageKey, value);
   const labels = copy.billing.pricingLifecycle;
   const contextual = Boolean(contextModel?.model_id && contextFormula?.formula_version_id);
-  const canManage = new Set(permissions || []).has('platform.pricing.manage');
+  const [priceAccessDenied, setPriceAccessDenied] = useState(false);
+  const canManage = new Set(permissions || []).has('platform.pricing.manage') && !priceAccessDenied;
   const canReadModels = new Set(permissions || []).has('platform.models.read');
   const [prices, setPrices] = useState([]);
+  const [pricePage, setPricePage] = useState({ cursors: [''], index: 0, has_more: false, next_cursor: '' });
+  const pricePosition = useRef({ cursors: [''], index: 0 });
+  const priceAttempt = useRef({ cursors: [''], index: 0 });
+  const priceContext = JSON.stringify([owner, client.financeSessionEpoch, contextModel?.model_id, contextFormula?.formula_version_id, contextFormula?.protocol_code, [...(permissions || [])].sort()]);
   const [units, setUnits] = useState([]);
   const [protocols, setProtocols] = useState(() => contextual ? { protocols: [], formulas: [contextFormula] } : { protocols: [], formulas: [] });
   const [formulaQuery, setFormulaQuery] = useState('');
@@ -140,9 +145,32 @@ export function PricingLifecycleWorkspace({ copy, client, permissions, owner, co
       if (transientGenerations.current.get(key) === generation) transientControllers.current.delete(key);
     }
   }, []);
-  const loadPrices = useCallback(() => loadResource('prices', (signal) => contextual
-    ? client.managedPriceSpace({ scope_type: 'MODEL', scope_id: contextModel.model_id, protocol_code: contextFormula.protocol_code, formula_version_id: contextFormula.formula_version_id, credit_unit: 'MICROCREDIT' }, signal)
-    : client.managedPrices(signal), (payload) => setPrices(payload.items || []), labels.loadPricesFailed), [client, contextFormula, contextModel, contextual, labels.loadPricesFailed, loadResource]);
+  useEffect(() => {
+    pricePosition.current = { cursors: [''], index: 0 };
+    setPricePage({ ...pricePosition.current, has_more: false, next_cursor: '' });
+    setPrices([]);
+    generations.current.prices += 1;
+    sourceControllers.current.get('prices')?.abort();
+  }, [priceContext]);
+  const loadPrices = useCallback((position = pricePosition.current) => {
+    priceAttempt.current = position;
+    const generation = generations.current.prices + 1;
+    return loadResource('prices', signal => contextual
+      ? client.managedPriceSpace({ scope_type: 'MODEL', scope_id: contextModel.model_id, protocol_code: contextFormula.protocol_code, formula_version_id: contextFormula.formula_version_id, credit_unit: 'MICROCREDIT' }, signal)
+      : client.managedPrices({ cursor: position.cursors[position.index] }, signal), payload => {
+        setPrices(payload.items || []);
+        setPriceAccessDenied(false);
+        pricePosition.current = position;
+        setPricePage({ ...position, has_more: Boolean(payload.has_more), next_cursor: payload.next_cursor || '' });
+      }, labels.loadPricesFailed).catch(error => {
+        if (mounted.current && generations.current.prices === generation && [401, 403].includes(error?.status)) {
+          setPrices([]);
+          setPriceAccessDenied(true);
+        }
+        throw error;
+      });
+  }, [client, contextFormula, contextModel, contextual, labels.loadPricesFailed, loadResource, priceContext]);
+  const priceNavigationLocked = Boolean(editor || unitForm || pendingAction || unknownMutation || loading.mutation || loading.recovery);
   const loadUnits = useCallback(() => loadResource('units', (signal) => client.meteringUnits(signal), (payload) => setUnits(payload.items || []), labels.loadUnitsFailed), [client, labels.loadUnitsFailed, loadResource]);
   const loadProtocols = useCallback((filters = {}) => {
     if (contextual) {
@@ -509,7 +537,7 @@ export function PricingLifecycleWorkspace({ copy, client, permissions, owner, co
         <div className="adm-row-actions">
           {canManage && <button type="button" onClick={openCreate} disabled={loading.formulaSelection || loading.mutation || unknownMutation || formulaAccessDenied || !formulas.length}>{labels.createDraft}</button>}
           {onExit && <button type="button" onClick={onExit}>{labels.readOnlySummary}</button>}
-          <button type="button" onClick={() => { void loadPrices().catch(() => {}); void loadUnits().catch(() => {}); void loadProtocols({ q: activeFormulaQuery }).catch(() => {}); void loadModels().catch(() => {}); }} disabled={Boolean(loading.recovery || loading.prices || loading.units || loading.formulas || loading.models)}>{copy.refresh}</button>
+          <button type="button" onClick={() => { void loadPrices().catch(() => {}); void loadUnits().catch(() => {}); void loadProtocols({ q: activeFormulaQuery }).catch(() => {}); void loadModels().catch(() => {}); }} disabled={Boolean(priceNavigationLocked || loading.prices || loading.units || loading.formulas || loading.models)}>{copy.refresh}</button>
         </div>
       </div>
       {unknownMutation && <div className="adm-inline-message error" role="alert">{labels.resultUnknown}<button type="button" onClick={() => void verifyUnknown()} disabled={loading.recovery}>{loading.recovery ? labels.verifying : labels.verifyResult}</button></div>}
@@ -558,10 +586,17 @@ export function PricingLifecycleWorkspace({ copy, client, permissions, owner, co
       )}
 
       <section className="adm-finance-subpanel">
-        <header className="adm-pricing-panel-head"><div><h3>{labels.priceVersions}</h3><p>{contextual ? labels.modelPriceVersionsLead : labels.priceVersionsLead}</p></div><div className="adm-row-actions"><span>{labels.returnedCount(prices.length)}</span>{updatedAt.prices && <small>{labels.lastUpdated} {updatedAt.prices.toLocaleString()}</small>}<button type="button" onClick={() => void loadPrices().catch(() => {})} disabled={loading.prices || loading.recovery}>{copy.refresh}</button></div></header>
+        <header className="adm-pricing-panel-head"><div><h3>{labels.priceVersions}</h3><p>{contextual ? labels.modelPriceVersionsLead : labels.priceVersionsLead}</p></div><div className="adm-row-actions"><span>{labels.returnedCount(prices.length)}</span>{updatedAt.prices && <small>{labels.lastUpdated} {updatedAt.prices.toLocaleString()}</small>}<button type="button" onClick={() => void loadPrices().catch(() => {})} disabled={loading.prices || priceNavigationLocked}>{copy.refresh}</button></div></header>
+        {!contextual && <nav className="adm-row-actions" aria-label={labels.pricePages}>
+          <button type="button" disabled={loading.prices || priceNavigationLocked || pricePage.index === 0} onClick={() => void loadPrices({ cursors: pricePage.cursors.slice(0, pricePage.index), index: pricePage.index - 1 }).catch(() => {})}>{labels.pricePrevious}</button>
+          <button type="button" disabled={loading.prices || priceNavigationLocked || !pricePage.has_more} onClick={() => void loadPrices({ cursors: [...pricePage.cursors.slice(0, pricePage.index + 1), pricePage.next_cursor], index: pricePage.index + 1 }).catch(() => {})}>{labels.priceNext}</button>
+          <button type="button" disabled={loading.prices || priceNavigationLocked} onClick={() => void loadPrices({ cursors: [''], index: 0 }).catch(() => {})}>{labels.priceRestart}</button>
+          {errors.prices && <button type="button" disabled={loading.prices || priceNavigationLocked} onClick={() => void loadPrices(priceAttempt.current).catch(() => {})}>{labels.priceRetry}</button>}
+          <small>{pricePage.has_more ? labels.priceMore : labels.priceEnd}</small>
+        </nav>}
         {/* biome-ignore lint/a11y/noNoninteractiveTabindex: This named overflow region needs keyboard focus for native table scrolling. */}
         <div className="adm-table-wrap" tabIndex="0" role="region" aria-label={labels.priceVersions}><table className="adm-table"><thead><tr><th>{labels.scope}</th><th>{labels.protocolFormula}</th><th>{labels.version}</th><th>{copy.accounts.status}</th><th>{labels.effectivity}</th><th>{labels.etag}</th><th>{copy.accounts.actions}</th></tr></thead><tbody>
-          {prices.map((item) => <tr key={item.price_version_id}><td><strong>{item.scope_type}</strong><br />{onOpenModel && item.scope_type === 'MODEL' && stableUUID(item.scope_id) ? <button type="button" className="adm-name-link" onClick={() => onOpenModel(item.scope_id)}>{item.scope_id}</button> : <small>{item.scope_id || labels.global}</small>}</td><td>{item.protocol_code}<br /><code title={item.formula_version_id}>{shortID(item.formula_version_id)}</code></td><td>v{item.version}</td><td><PricingStatus value={item.derived_status} /></td><td>{formatDate(item.effective_from)}<br /><small>{item.effective_to ? formatDate(item.effective_to) : labels.openEnded}</small></td><td>{item.lifecycle_status === 'DRAFT' ? item.space_etag : item.current_space_etag || item.space_etag}</td><td><div className="adm-row-actions"><button type="button" onClick={() => void showPreview(item)} disabled={loading.preview}>{labels.preview}</button>{canManage && item.lifecycle_status === 'DRAFT' && <button type="button" onClick={() => void openEdit(item)} disabled={loading.mutation || unknownMutation || formulaAccessDenied || loading.formulaSelection}>{labels.editDraft}</button>}{canManage && item.lifecycle_status === 'DRAFT' && <button type="button" onClick={() => openPublish(item)} disabled={loading.mutation || unknownMutation}>{labels.publish}</button>}{canManage && ['PUBLISHED', 'ACTIVE'].includes(item.derived_status) && <button type="button" className={item.derived_status === 'ACTIVE' ? 'danger' : ''} onClick={() => void openTransition(item)} disabled={loading.mutation || unknownMutation}>{item.derived_status === 'PUBLISHED' ? labels.cancelFuture : labels.endActive}</button>}</div></td></tr>)}
+          {prices.map((item) => <tr key={item.price_version_id}><td><strong>{item.scope_type}</strong><br />{onOpenModel && item.scope_type === 'MODEL' && stableUUID(item.scope_id) ? <button type="button" className="adm-name-link" onClick={() => onOpenModel(item.scope_id)}>{item.scope_id}</button> : <small>{item.scope_id || labels.global}</small>}</td><td>{item.protocol_code}<br /><code title={item.formula_version_id}>{shortID(item.formula_version_id)}</code></td><td>v{item.version}</td><td><PricingStatus value={item.derived_status} /></td><td>{formatDate(item.effective_from)}<br /><small>{item.effective_to ? formatDate(item.effective_to) : labels.openEnded}</small></td><td>{item.lifecycle_status === 'DRAFT' ? item.space_etag : item.current_space_etag || item.space_etag}</td><td><div className="adm-row-actions"><button type="button" onClick={() => void showPreview(item)} disabled={loading.preview}>{labels.preview}</button>{canManage && item.lifecycle_status === 'DRAFT' && <button type="button" onClick={() => void openEdit(item)} disabled={loading.prices || loading.mutation || unknownMutation || formulaAccessDenied || loading.formulaSelection}>{labels.editDraft}</button>}{canManage && item.lifecycle_status === 'DRAFT' && <button type="button" onClick={() => openPublish(item)} disabled={loading.prices || loading.mutation || unknownMutation}>{labels.publish}</button>}{canManage && ['PUBLISHED', 'ACTIVE'].includes(item.derived_status) && <button type="button" className={item.derived_status === 'ACTIVE' ? 'danger' : ''} onClick={() => void openTransition(item)} disabled={loading.prices || loading.mutation || unknownMutation}>{item.derived_status === 'PUBLISHED' ? labels.cancelFuture : labels.endActive}</button>}</div></td></tr>)}
           {!prices.length && !loading.prices && <tr><td colSpan="7" className="adm-empty">{contextual ? labels.noModelPrices : labels.noPrices}</td></tr>}
         </tbody></table></div>
       </section>

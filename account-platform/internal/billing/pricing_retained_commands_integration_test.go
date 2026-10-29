@@ -288,7 +288,8 @@ func TestRetainedPricingNamespaceRecoveryAfterRealUpdate(t *testing.T) {
 	if err != nil || read.SpaceETag != 3 || read.CurrentSpaceETag != 3 {
 		t.Fatalf("recovery read did not project latest published facts: %v", err)
 	}
-	items, err := repo.ListManagedPrices(ctx, 20)
+	page, err := repo.ListManagedPrices(ctx, 20, "")
+	items := page.Items
 	if err != nil || len(items) != 1 || items[0].PriceVersionID != draft.PriceVersionID || items[0].CurrentSpaceETag != 3 {
 		t.Fatalf("managed listing did not retain latest published namespace: %v", err)
 	}
