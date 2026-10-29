@@ -1,4 +1,5 @@
 import re
+from ci_routing_test_support import default_ci_routing
 import os
 import subprocess
 import tempfile
@@ -747,9 +748,9 @@ PINNED_GATE_STEP_NAMES = {
 class CiGatePolicyTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
-        cls.workflow = PR_WORKFLOW.read_text(encoding="utf-8")
+        cls.workflow = default_ci_routing(PR_WORKFLOW.read_text(encoding="utf-8"))
         cls.pr_workflow = cls.workflow
-        cls.release_workflow = RELEASE_WORKFLOW.read_text(encoding="utf-8")
+        cls.release_workflow = default_ci_routing(RELEASE_WORKFLOW.read_text(encoding="utf-8"))
 
     def test_dynamic_directory_globs_do_not_hide_dead_literal_directory_entries(self):
         original = self.pr_workflow
@@ -3532,7 +3533,7 @@ class CiGatePolicyTests(unittest.TestCase):
         )
         self.assertIn(
             'sudo --preserve-env=GITHUB_ACTIONS,'
-            'PINVOU3_CI_DISABLE_ZRAM bash "${{ github.workspace }}'
+            'PINVOU3_CI_DISABLE_ZRAM,RUNNER_ENVIRONMENT bash "${{ github.workspace }}'
             '/scripts/ci-memory-setup.sh"',
             rust_test,
         )
@@ -3595,7 +3596,7 @@ class CiGatePolicyTests(unittest.TestCase):
             # 在此强制每个调用点结构一致。
             self.assertIn(
                 'run: timeout --kill-after=15 240 sudo --preserve-env='
-                'GITHUB_ACTIONS,PINVOU3_CI_DISABLE_ZRAM'
+                'GITHUB_ACTIONS,PINVOU3_CI_DISABLE_ZRAM,RUNNER_ENVIRONMENT'
                 ' bash "${{ github.workspace }}/scripts/ci-memory-setup.sh"',
                 job_exec,
                 f"ubuntu job '{job_name}' must hard-cap ci-memory-setup with"
@@ -3621,7 +3622,7 @@ class CiGatePolicyTests(unittest.TestCase):
         )
         call_line = (
             "run: timeout --kill-after=15 240 sudo --preserve-env="
-            "GITHUB_ACTIONS,PINVOU3_CI_DISABLE_ZRAM"
+            "GITHUB_ACTIONS,PINVOU3_CI_DISABLE_ZRAM,RUNNER_ENVIRONMENT"
             ' bash "${{ github.workspace }}/scripts/ci-memory-setup.sh"'
         )
         total_call_sites = 0
@@ -5242,9 +5243,9 @@ class CiGatePolicyTests(unittest.TestCase):
         # leaving sha256/file checks only — a hash-matching but broken binary
         # shipped green. macos-15-intel is the Intel image (sunset ~2027 with
         # the macos-15 generation; the re-homing note lives in the matrix).
-        workflow = (
+        workflow = default_ci_routing((
             ROOT / ".github/workflows/connector-verify.yml"
-        ).read_text(encoding="utf-8")
+        ).read_text(encoding="utf-8"))
         darwin_x64 = workflow.split(
             "- platform: darwin-x64", maxsplit=1
         )[1].split("- platform:", maxsplit=1)[0]
@@ -5262,9 +5263,9 @@ class CiGatePolicyTests(unittest.TestCase):
         # entering the three-platform matrix, so wrapper-unrelated PRs do not
         # run the full three-platform smoke.
         # Folded in from scripts/tests/test_ci_trigger_routing_policy.py.
-        workflow = (
+        workflow = default_ci_routing((
             ROOT / ".github/workflows/rustc-wrapper-smoke.yml"
-        ).read_text(encoding="utf-8")
+        ).read_text(encoding="utf-8"))
         trigger = workflow.split("\non:", maxsplit=1)[1].split(
             "\npermissions:", maxsplit=1
         )[0]
@@ -5308,9 +5309,9 @@ class CiGatePolicyTests(unittest.TestCase):
         # step in round 11. Pin the step name and the two load-bearing
         # probe assertions on executable lines, so the smoke can silently
         # lose its delegation contract no more.
-        workflow = (
+        workflow = default_ci_routing((
             ROOT / ".github/workflows/rustc-wrapper-smoke.yml"
-        ).read_text(encoding="utf-8")
+        ).read_text(encoding="utf-8"))
         self.assertIn(
             "- name: 链式 wrapper —— 完整 argv 委托链上命令且仍注入 16 MiB",
             workflow,
