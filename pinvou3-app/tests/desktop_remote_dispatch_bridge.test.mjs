@@ -813,6 +813,8 @@ test('unknown attachment actions are fenced rather than replayed as new uploads'
 test('unconfirmed begin IPC result fences the upload batch across task identities', async () => {
   const { uploadRemoteFiles } = await import('../src/features/remote-control/remote-file-transfer.mjs');
   const { feature, calls, state } = installFeature(command => {
+    // Tauri IPC rejects with strings; keep that error-normalization contract covered.
+    // eslint-disable-next-line prefer-promise-reject-errors
     if (command === 'desktop_remote_action_a') return Promise.reject('result_unknown');
     return undefined;
   });
