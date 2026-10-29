@@ -1,0 +1,7 @@
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.34s
+     Running unittests src/lib.rs (<CARGO_TARGET>/debug/deps/pinvou3_lib-56d581e9f143824d)
+
+running 1 test
+test app::model_store_events::platform_tests::linux_live_pool_tests::identical_enable_rebuilds_real_pool_and_next_turn_preserves_history ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 5421 filtered out; finished in 1.59s
