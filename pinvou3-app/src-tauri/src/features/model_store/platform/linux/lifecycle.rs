@@ -2935,6 +2935,16 @@ impl ModelManager {
         if let Ok(safe_id) = config::safe_path_component(&rec.card_id) {
             candidates.push(config::data_dir().join("cards").join(safe_id));
         }
+        // ollama 卡的权重不落 models_dir，blob 全在 `~/.ollama/models` 下（常有
+        // 几十 GB）。漏掉它的话：`residual_paths` 对强制移除报"没有残留"，
+        // `uninstall` 前后差值也量不到真实释放——用户听到的"已清干净/释放 0 字节"
+        // 都是假的（r19 评审 P2-4）。目录解析跟 `ollama_size` 同一份逻辑
+        // （`ollama_home_dir`），不能各写各的 HOME 拼法。
+        if rec.engine_name == "ollama" {
+            if let Some(ollama_dir) = ollama_home_dir() {
+                candidates.push(ollama_dir);
+            }
+        }
 
         let mut out: Vec<PathBuf> = Vec::new();
         for p in candidates {
@@ -4191,6 +4201,15 @@ fn docker_container_pid(container_name: &str) -> Option<u32> {
     .filter(|pid| *pid > 0)
 }
 
+/// ollama 的引擎与全部模型数据（权重 blob 在 `models/` 子目录）都放在
+/// `$HOME/.ollama` 下。统计大小（`ollama_size`）和残留测量
+/// （`candidate_paths`）都要落到这一个目录上，解析逻辑只此一份。
+fn ollama_home_dir() -> Option<PathBuf> {
+    std::env::var("HOME")
+        .ok()
+        .map(|home| PathBuf::from(home).join(".ollama"))
+}
+
 fn ollama_size() -> u64 {
     let mut total = 0u64;
     for p in ["/usr/local/bin/ollama", "/usr/bin/ollama"] {
@@ -4198,8 +4217,7 @@ fn ollama_size() -> u64 {
             total += meta.len();
         }
     }
-    if let Ok(home) = std::env::var("HOME") {
-        let ollama_dir = PathBuf::from(home).join(".ollama");
+    if let Some(ollama_dir) = ollama_home_dir() {
         if ollama_dir.is_dir() {
             total += disk::dir_size_bytes(&ollama_dir);
         }
@@ -5301,6 +5319,50 @@ exit 0
             removal.warning.contains("只删记录") && removal.warning.contains("自行核实"),
             "扫不到残留时也必须说清楚「没删文件、请自己核实」：{}",
             removal.warning
+        );
+    }
+
+    /// r19 评审 P2-4：ollama 卡的权重 blob 在 `~/.ollama/models`，不在 models_dir。
+    /// candidate_paths 漏掉它的话，强制移除一张 ollama 卡会报"没有残留"——
+    /// 几十 GB 权重从此变成谁也不知道的孤儿。
+    #[test]
+    fn ollama_card_residue_measurement_includes_dot_ollama() {
+        let tmp = setup_temp_db();
+        let models_dir = tmp.path().join("models");
+        // TempHome 已把 HOME 指到临时目录：在这里造出 ollama 的真实布局
+        let ollama_models = tmp.path().join(".ollama").join("models").join("blobs");
+        std::fs::create_dir_all(&ollama_models).unwrap();
+        std::fs::write(ollama_models.join("sha256-weights"), [0u8; 64]).unwrap();
+
+        db::add_store_model(db::AddStoreModelParams {
+            card_id: "card-ollama",
+            model_name: "qwen3:32b",
+            card_name: "Qwen3 32B",
+            org: None,
+            description: None,
+            engine_name: "ollama",
+            engine_version: None,
+            size_bytes: 20_000_000_000,
+            quantization: None,
+            source_repo_id: None,
+            source_filename: None,
+            scripts: &Default::default(),
+            status: "downloaded",
+            profiles: &[],
+            deploy_topology: DeployTopology::Single,
+        })
+        .unwrap();
+
+        let removal = manager_with_models_dir(&models_dir)
+            .force_remove_record("card-ollama")
+            .expect("应当能强制移除");
+        assert!(
+            removal
+                .residual_paths
+                .iter()
+                .any(|p| p.ends_with(".ollama")),
+            "ollama 的权重目录必须被点名，否则几十 GB 就成了谁也看不见的孤儿：{:?}",
+            removal.residual_paths
         );
     }
 
