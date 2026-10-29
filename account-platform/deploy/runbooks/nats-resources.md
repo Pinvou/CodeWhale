@@ -10,6 +10,8 @@ F02 构建 `cmd/approval-resources` 和 `cmd/event-relay`，先按下节生成�
 
 两入口均使用 `NATS_URL`（单个 `tls://` 地址）、可选 `NATS_CA_FILE`，以及严格互斥且恰有一个的 `NATS_NKEY_SEED_FILE` / `NATS_CREDENTIALS_FILE`。凭据和 CA 为受控绝对路径的普通非链接文件。CA 只含当前有效 CA，保持 TLS 域名验证；种子不能超过 4 KiB，POSIX 仅本角色访问且父目录私有，Windows 投递必须另保 ACL。不要把私密值、URL 用户信息、凭据内容写进参数或日志。
 
+CA 文件按完整 PEM 证书包校验：每一块都必须是可解析、当前有效且允许签发证书的 CA；首部、中间或末尾有损坏、未闭合或其它内容时，整包拒绝，不跳过坏块建立部分信任。轮换期间可同时保留多个有效 CA，支持 LF、CRLF 和块间空白；文件仍受既有 1 MiB、路径及权限限制。此校验不是现场证书投递或 broker TLS 连接验收。
+
 `deploy/production/nats.conf` 指向挂载的服务端证书和私钥。F02 broker 必须使用上述独立核验的五身份渲染配置；同目录原 `authorization.conf` 是 F01 双身份历史模板（只有 `NATS_EVENT_RESOURCE_OPERATOR_PUBLIC_KEY` 与 `NATS_ACCOUNT_OUTBOX_RELAY_PUBLIC_KEY`），不得直接拿它运行 F02。用已有离线 `nats-identities` 工具生成保管包，再经独立公开清单核验选取对应角色。只给 broker 投递公开 key，不能把私钥目录挂给 broker 或另一个运行角色。TLS 私钥、JetStream 数据目录和配置目录均由部署者控制；管理 HTTP 只绑定容器 loopback，不对外发布。
 
 F01 基线操作员只获固定 stream INFO/CREATE 和自己的回复收件箱；F02 渲染配置另外仅给固定退款及当前三审批 consumer 的 INFO/CREATE 和 consumer 名称读取。运行 relay 只获对应 Account 或 Billing 发布、对应死信、固定 stream INFO 和自己的收件箱。不要扩展为 `$JS.API.>`、`_INBOX.>` 或给运行角色 CREATE 权限。先用操作员只读检查；首次初始化显式 create-only；确认成功后退出操作员部署窗口。只读或创建失败均不得自动改成宽权限重试。
