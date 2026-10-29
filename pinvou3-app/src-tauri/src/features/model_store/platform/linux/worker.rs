@@ -90,7 +90,53 @@ pub fn load_access() -> Option<WorkerAccess> {
 
 pub fn save_access(a: &WorkerAccess) -> std::io::Result<()> {
     let json = serde_json::to_string_pretty(a).unwrap_or_default();
-    fs::write(access_file(), json)
+    atomic_write(&access_file(), json.as_bytes(), 0o600)
+}
+
+/// 原子落盘：写 `<name>.tmp.<pid>.<seq>` → chmod → sync_all → rename。
+///
+/// 为什么不能 truncate+write 原地改（评审 R1，.10 实测：原地写并发读 3000 次
+/// 79 次读到空文件 exit 0；temp+rename 0 次）：`$LMM_WORKER` 是全局单一路径，
+/// `env_for_record` 在每张双机卡的 deploy/enable/stop/uninstall 开头都会重写
+/// 它——按卡互斥挡不住**另一张**卡。脚本恰在窗口期 `exec` 这个文件时读到空
+/// 文件，sh 按空脚本跑出 exit 0 空输出，正是 261a9d2 修的「双机 P0」复刻。
+/// rename 前必须 sync_all：否则掉电后 rename 生效而内容还在页缓存，得到
+/// 「文件在、内容空」的更隐蔽形态（同 config.rs `save_settings` 的配方）。
+/// 临时名带 pid+序号：重写方既可能是**同进程**的另一张卡（线程级并发，pid
+/// 相同，必须再加序号），也可能是另一进程；序号保证任何两次落盘互不共享
+/// tmp——共享 tmp 会让先 rename 的一方把后 chmod 的一方脚下抽走。
+fn atomic_write(path: &Path, contents: &[u8], mode: u32) -> std::io::Result<()> {
+    use std::io::Write as _;
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static TMP_SEQ: AtomicU64 = AtomicU64::new(0);
+    let seq = TMP_SEQ.fetch_add(1, Ordering::Relaxed);
+    let tmp = path.with_extension(format!("tmp.{}.{}", std::process::id(), seq));
+    let written = (|| {
+        let mut f = fs::OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .mode(mode)
+            .open(&tmp)?;
+        f.write_all(contents)?;
+        f.sync_all()?;
+        // chmod 放在写完之后：OpenOptions 的 mode 会被 umask 削，显式
+        // set_permissions 才是最终权限（wrapper 需要 0755 可执行）。
+        fs::set_permissions(&tmp, fs::Permissions::from_mode(mode))
+    })();
+    match written {
+        Ok(()) => {
+            let renamed = fs::rename(&tmp, path);
+            if renamed.is_err() {
+                let _ = fs::remove_file(&tmp);
+            }
+            renamed
+        }
+        Err(e) => {
+            let _ = fs::remove_file(&tmp);
+            Err(e)
+        }
+    }
 }
 
 fn keyring_user(a: &WorkerAccess) -> String {
@@ -172,7 +218,6 @@ pub fn forget_password(a: &WorkerAccess) {
 /// quoted 调用契约原样保留，一行都不用改。每次部署重写一遍（exe 可能随
 /// 升级换路径），幂等。
 pub fn script_env() -> Vec<(String, String)> {
-    use std::io::Write as _;
     // 拿不到自身路径时不注入——deploy.sh 对 $LMM_WORKER 缺失有明确的
     // 「请升级 LMM」报错，比注入一个会起 GUI 的假路径好。
     let Ok(exe) = std::env::current_exe() else {
@@ -187,14 +232,9 @@ pub fn script_env() -> Vec<(String, String)> {
         "#!/bin/sh\nexec {} model-store-worker \"$@\"\n",
         shell_quote(&exe.to_string_lossy())
     );
-    let written = fs::OpenOptions::new()
-        .write(true)
-        .create(true)
-        .truncate(true)
-        .mode(0o755)
-        .open(&wrapper)
-        .and_then(|mut f| f.write_all(script.as_bytes()))
-        .and_then(|_| fs::set_permissions(&wrapper, fs::Permissions::from_mode(0o755)));
+    // 原子替换（评审 R1）：另一张双机卡的操作可能正同时重写这个全局唯一的
+    // wrapper，原地 truncate 会让 exec 它的脚本读到空文件跑出 exit 0 空输出。
+    let written = atomic_write(&wrapper, script.as_bytes(), 0o755);
     match written {
         Ok(()) => vec![(ENV_CLI.into(), wrapper.to_string_lossy().to_string())],
         Err(_) => Vec::new(),
@@ -1037,6 +1077,66 @@ mod tests {
         let again = script_env();
         assert_eq!(again[0].1, env[0].1);
         assert_eq!(fs::read_to_string(wrapper).unwrap(), content);
+    }
+
+    /// 评审 R1 回归钉：wrapper 是全局单一路径，另一张双机卡的操作可能正在
+    /// 重写它，而卡片脚本随时 `exec` 这个文件。原地 truncate+write 的窗口期
+    /// 里读者会拿到空文件（评审实测 3000 次读 79 次 exit 0 空输出）；原子
+    /// temp+rename 下，任何时刻读到的都必须是**完整**的 wrapper——旧版或
+    /// 新版都行，就是不能有第三种中间态。
+    #[test]
+    fn concurrent_wrapper_rewrites_never_expose_partial_content() {
+        use std::sync::Arc;
+        let _iso = isolated();
+        let env = script_env();
+        let wrapper = Arc::new(std::path::PathBuf::from(&env[0].1));
+        let done = Arc::new(std::sync::atomic::AtomicBool::new(false));
+
+        let mut writers = Vec::new();
+        for w in 0..4 {
+            let wrapper = Arc::clone(&wrapper);
+            let done = Arc::clone(&done);
+            writers.push(std::thread::spawn(move || {
+                let exe = format!("/tmp/writer-{w}-pinvou3-tauri");
+                for _ in 0..250 {
+                    let script = format!(
+                        "#!/bin/sh\nexec '{}' model-store-worker \"$@\"\n",
+                        exe
+                    );
+                    // 直接调被测的落盘路径语义：与 script_env 里同一 helper
+                    atomic_write(&wrapper, script.as_bytes(), 0o755).unwrap();
+                }
+                done.store(true, std::sync::atomic::Ordering::SeqCst);
+            }));
+        }
+
+        let mut reads = 0u32;
+        let mut empties = 0u32;
+        while !done.load(std::sync::atomic::Ordering::SeqCst) {
+            let text = fs::read_to_string(wrapper.as_path()).unwrap_or_default();
+            reads += 1;
+            let complete = text.starts_with("#!/bin/sh\n")
+                && text.contains("model-store-worker \"$@\"")
+                && text.ends_with("\"\n");
+            if !complete {
+                empties += 1;
+            }
+        }
+        for w in writers {
+            w.join().unwrap();
+        }
+        assert!(reads > 50, "读循环要真的跑起来才有意义：{reads}");
+        assert_eq!(empties, 0, "原子替换下不该出现任何中间态读取");
+        // 收尾不留 tmp 残留
+        let dir = wrapper.parent().unwrap().read_dir().unwrap();
+        let leftovers: Vec<_> = dir
+            .filter_map(|e| e.ok())
+            .filter(|e| {
+                let n = e.file_name().to_string_lossy().to_string();
+                n.starts_with("pinvou3-model-store-worker.tmp")
+            })
+            .collect();
+        assert!(leftovers.is_empty(), "rename 成功后不该留 tmp：{leftovers:#?}");
     }
 
     /// 接着别的局域网的口一直有底噪，不能因为它涨得多就选它。
