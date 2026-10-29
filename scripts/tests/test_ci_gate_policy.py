@@ -3440,7 +3440,7 @@ class CiGatePolicyTests(unittest.TestCase):
         # by GATE_JOB_LEVEL_IFS["rust-test"]; the asserts below keep the
         # step-level pins that `if:` cannot cover.
         self.assertIn(
-            "cargo test --manifest-path pinvou3-app/src-tauri/Cargo.toml --no-default-features --lib --features benchmark-hooks --locked -- --test-threads=1",
+            "cargo --config 'profile.dev.package.codewhale-tui.opt-level=0' test --manifest-path pinvou3-app/src-tauri/Cargo.toml --no-default-features --lib --features benchmark-hooks --locked -- --test-threads=1",
             rust_test,
         )
         # 开源侧同口径：Linux lib 腿显式开启 benchmark-hooks，headless-bridge
@@ -5073,17 +5073,9 @@ class CiGatePolicyTests(unittest.TestCase):
         self.assertNotIn("cache-targets:", rust_test_cache)
 
     def test_dev_profile_o0_guard_stays_on_all_three_heavy_legs(self):
-        # rust-test's codewhale-tui dev-O0 memory guard defuses the
-        # documented ~7 GB single-rustc dev thin-LTO OOM; the 2026-10 audit
-        # followups (PR #745) ported it to the 7 GB no-swap macOS runner
-        # beside the existing Windows twin. The override is a silent policy
-        # knob — dropping a leg's step or gutting the TOML section
-        # resurfaces the cold-run OOM with no runtime error — so pin the
-        # shared payload in every leg. Windows speaks pwsh (Add-Content
-        # here-string), the others a bash heredoc; the TOML section is the
-        # contract they share. Judged on comment-stripped text: commenting
-        # the TOML section out is inert in the written config.toml and must
-        # red this pin exactly like deletion (round-3 review of PR #745).
+        # Linux may reuse a runner with a persistent Cargo home. Keep O0 on
+        # each actual invocation, without writing administrator configuration.
+        # Windows/macOS retain their existing hosted-runner payloads.
         for job_name, end_marker in (
             ("rust-test", "\n  cli-test:"),
             ("windows-rust-test", "\n  macos-rust-check:"),
@@ -5094,26 +5086,22 @@ class CiGatePolicyTests(unittest.TestCase):
                     end_marker, maxsplit=1
                 )[0]
             )
-            self.assertIn("codewhale-tui O0", job, job_name)
-            self.assertIn("[profile.dev.package.codewhale-tui]", job, job_name)
-            self.assertIn("opt-level = 0", job, job_name)
-        # The bash twins append to the cargo-home config; rust-cache's
-        # cachePaths never include config.toml, so warm runs cannot
-        # accumulate duplicate TOML tables.
-        for job_name, end_marker in (
-            ("rust-test", "\n  cli-test:"),
-            ("macos-rust-check", "\n  windows-codex-runtime-test:"),
-        ):
-            job = _without_yaml_comments(
-                self.pr_workflow.split(f"\n  {job_name}:", maxsplit=1)[1].split(
-                    end_marker, maxsplit=1
-                )[0]
-            )
-            self.assertIn(
-                'config="${CARGO_HOME:-$HOME/.cargo}/config.toml"',
-                job,
-                job_name,
-            )
+            if job_name == "rust-test":
+                executable = re.findall(
+                    r"(?m)^ +(?:run: )?(?:/usr/bin/time -v )?cargo (.+)$", job
+                )
+                test_commands = [line for line in executable if re.search(r"(?:^| )test(?: |$)", line)]
+                self.assertEqual(len(test_commands), 4)
+                for command in test_commands:
+                    self.assertTrue(command.startswith("--config 'profile.dev.package.codewhale-tui.opt-level=0' test"), command)
+                self.assertNotIn('config="${CARGO_HOME:-$HOME/.cargo}/config.toml"', job)
+                self.assertNotIn('cat >> "$config"', job)
+            else:
+                self.assertIn("codewhale-tui O0", job, job_name)
+                self.assertIn("[profile.dev.package.codewhale-tui]", job, job_name)
+                self.assertIn("opt-level = 0", job, job_name)
+                if job_name == "macos-rust-check":
+                    self.assertIn('config="${CARGO_HOME:-$HOME/.cargo}/config.toml"', job)
 
     def test_frontend_test_webui_smoke_reuses_the_prebuilt_dist(self):
         # frontend-test builds the web dist unconditionally (the web index

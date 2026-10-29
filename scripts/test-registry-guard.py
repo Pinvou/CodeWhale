@@ -132,8 +132,15 @@ def list_tests():
     # that way; this fork's memory-constrained leg does not, and no
     # REQUIRED_PIN is feature-gated (two are #[cfg(unix)]-gated, which is
     # expected to resolve on the Linux CI where this guard is wired).
-    cmd = [
-        "cargo",
+    # Match the CI job's process-scoped memory override without modifying the
+    # persistent Cargo home. Unset retains ordinary local/other-job behavior.
+    override = os.environ.get("PINVOU_CI_CODEWHALE_DEV_O0")
+    if override not in (None, "1"):
+        raise SystemExit("test-registry-guard: PINVOU_CI_CODEWHALE_DEV_O0 must be 1 or unset")
+    cmd = ["cargo"]
+    if override == "1":
+        cmd += ["--config", "profile.dev.package.codewhale-tui.opt-level=0"]
+    cmd += [
         "test",
         "--manifest-path",
         MANIFEST,
