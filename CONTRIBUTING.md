@@ -159,6 +159,20 @@ and disable setup-node's remote cache upload. Set `PINVOU_WINDOWS_MAC_ENABLED`
 to the literal `false` to disable Windows/macOS jobs and their corresponding
 required results; Linux checks remain required. Unset or any other value keeps
 the existing three-platform policy. ARM release jobs keep their hosted ARM label.
+Optional `PINVOU_LINUX_HEAVY_RUNNER`, `PINVOU_LINUX_MEDIUM_RUNNER`, and
+`PINVOU_LINUX_LIGHT_RUNNER` arrays override that default for compilation,
+application/integration tests, and fast policy checks respectively. Each falls
+back to `PINVOU_LINUX_RUNNER`, then to the hosted 22.04 image. Distinct pool labels
+keep large Rust compilations away from small policy runners.
+
+Hosts use Ubuntu 26.04 while runner containers use the Ubuntu 22.04 image in
+`scripts/ci/runner-image/`. This retains the existing release glibc compatibility
+baseline. Each runner has independent writable state and resource limits.
+PostgreSQL allocates dynamic CI ports; release-console container tests use a
+job-specific Compose project, port, and temporary public directory instead of
+the host production directory. The image preinstalls Chrome and the verified
+PipeWire prefix. `PINVOU_PIPEWIRE_SOURCE_ARCHIVE` supplies a cached source archive
+with the same upstream SHA256 check; it does not bypass integrity verification.
 All Linux jobs pin the release runner image (`ubuntu-22.04` /
 `ubuntu-22.04-arm`): release binaries link the build machine's glibc, so
 tests must run on the same system. The image is upgraded repo-wide in one
