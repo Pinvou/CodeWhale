@@ -1195,15 +1195,19 @@ pub fn run() {
             let model_store =
                 std::sync::Arc::new(features::model_store::ModelStoreService::default());
             let model_store_app = app.handle().clone();
-            model_store.set_models_changed_handler(std::sync::Arc::new(move |ids| {
-                if let Some(pool) = model_store_app.try_state::<features::assistant::engine_pool::EnginePool>() {
-                    for id in ids { pool.mark_model_updated(id); }
-                }
-                use tauri::Emitter;
-                let payload = serde_json::json!({"model_ids": ids});
-                let _ = model_store_app.emit("models:changed", &payload);
-                platform::app_events::forward_app_event(&model_store_app, "models:changed", payload);
-            }));
+            let model_store_pool_app = model_store_app.clone();
+            model_store.set_models_changed_handler(app::model_store_events::models_changed_handler(
+                model_store_app,
+                move |ids| {
+                    if let Some(pool) = model_store_pool_app
+                        .try_state::<features::assistant::engine_pool::EnginePool>()
+                    {
+                        for id in ids {
+                            pool.mark_model_updated(id);
+                        }
+                    }
+                },
+            ));
             // 收掉上次没收干净的脚本进程。**这一步必须在这里真的被调用**：应用被强杀
             // 或崩溃之后，hf download 之类的子进程还活着、占着权重目录的文件锁，用户
             // 下一次下载会一直卡住且没有任何提示——真机上这么僵持过 16 小时。
