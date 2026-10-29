@@ -66,7 +66,7 @@ func organizationAdminPathAllowed(method, resource string) bool {
 		return false
 	}
 	if len(p) == 4 {
-		return method == http.MethodPatch || method == http.MethodDelete
+		return method == http.MethodGet || method == http.MethodPatch || method == http.MethodDelete
 	}
 	if len(p) == 5 {
 		if method == http.MethodGet {

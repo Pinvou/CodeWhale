@@ -243,3 +243,11 @@ test("personal and organization recharge presentation keeps the real browser gat
   }
   assert.ok(fullLabels.includes("npm:test:account-platform-recharge-ui"));
 });
+
+test("restored Account and Admin real-entry browsers run once for feature and shared inputs", () => {
+  const target = "npm:test:account-platform-restored-ui";
+  for (const paths of [["pinvou3-app/src/features/account-platform/AdminUsersWorkspace.jsx"], ["pinvou3-app/src/shared/account-layout-i18n.js"], ["pinvou3-app/tests/account_platform_restored_ui_smoke.mjs"]]) {
+    assert.equal(labels(selectFrontendSmokes(paths)).filter(value => value === target).length, 1);
+  }
+  assert.equal(fullLabels.filter(value => value === target).length, 1);
+});

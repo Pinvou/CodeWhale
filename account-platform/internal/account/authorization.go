@@ -353,13 +353,13 @@ func (s *Service) requireAnyPermission(permissions ...string) gin.HandlerFunc {
 		var lastDecision AuthorizationDecision
 		for _, permission := range permissions {
 			decision, err := repository.Authorize(c.Request.Context(), principal, permission, nil, nil)
-			if err != nil {
+			if err != nil && !errors.Is(err, ErrForbidden) {
 				api.WriteError(c.Writer, http.StatusServiceUnavailable, "AUTHORIZATION_UNAVAILABLE", "authorization is temporarily unavailable", httpserver.RequestID(c.Request.Context()))
 				c.Abort()
 				return
 			}
-			lastDecision = decision
-			if decision.Allowed {
+			if err == nil && decision.Allowed {
+				lastDecision = decision
 				granted = append(granted, permission)
 			}
 		}

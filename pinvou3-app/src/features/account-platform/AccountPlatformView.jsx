@@ -3,17 +3,22 @@ import { PersonalFinanceWorkspace } from './PersonalFinanceWorkspace.jsx';
 import { PersonalUsageWorkspace } from './PersonalUsageWorkspace.jsx';
 import { OrganizationDirectory } from './OrganizationDirectory.jsx';
 import { OrganizationWorkspace } from './OrganizationWorkspace.jsx';
+import { OrganizationFinanceWorkspace } from './OrganizationFinanceWorkspace.jsx';
 import { requirePersonalAccount } from './personal-contract.js';
 import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { capturePersonalRechargeReauthentication, authorizePersonalRechargeReauthentication } from './personal-recharge-reauthentication.js';
 import { createDesktopReauthenticationCoordinator } from './desktop-reauthentication.js';
 import { supportedLocales, localeNames } from '../../shared/supported-locales.js';
 import { hasPermission } from './authorization-ui.js';
-import { formatBalance } from './balance-view.js';
-import { accountDisplayLabel } from './account-display-label.js';
+import { formatBalance, formatWholeBalance } from './balance-view.js';
+import { accountDisplayLabel, maskedAccountMobile } from './account-display-label.js';
 import { localizedAccountPlatformError } from './error-localization.js';
 import { ProfileSettings } from './ProfileSettings.jsx';
 import { AccountLogin } from './AccountLogin.jsx';
+import { AccountPortalLayout, AccountPortalPanel } from './AccountPortalLayout.jsx';
+import { usePortalSections } from './usePortalSections.js';
+import { portalLoginLocation } from './portal-sections.js';
+import { accountLayoutCopy } from '../../shared/i18n.js';
 import './account-platform.css';
 
 export function AccountPlatformView({ client, copy, language, onLanguageChange, portal = false, onClose, onAuthenticated }) {
@@ -25,6 +30,11 @@ export function AccountPlatformView({ client, copy, language, onLanguageChange, 
   const [notice, setNotice] = useState('');
   const [busy, setBusy] = useState(false);
   const [reauthentication, setReauthentication] = useState(null);
+  const [creditTarget, setCreditTarget] = useState(null);
+  const [ordersTarget, setOrdersTarget] = useState(null);
+  const [financeFeedbackTarget, setFinanceFeedbackTarget] = useState(null);
+  const [organizationFinanceTarget, setOrganizationFinanceTarget] = useState(null);
+  const navigation = usePortalSections({ enabled: portal, ready: auth === 'ready' && profileOwner === client, me });
   const coordinatorRef = useRef(null);
   const identity = useRef(null);
   const copyRef = useRef(copy);
@@ -158,10 +168,35 @@ export function AccountPlatformView({ client, copy, language, onLanguageChange, 
   if (auth !== 'ready') return <div className="ap-shell ap-login">
     {error && <div className="ap-alert error" role="alert">{error}</div>}
     {auth === 'error' && <button disabled={busy} onClick={() => void refresh()}>{copy.retry}</button>}
-    {portal ? <a href="/auth/login?return_to=%2F">{copy.login}</a> : <AccountLogin key={auth} client={client} copy={copy} onAuthenticated={async () => { const profile = await refresh(); if (profile) onAuthenticated?.(profile); }} />}
+    {portal ? <a href={portalLoginLocation(globalThis.location?.pathname, globalThis.location?.search)}>{copy.login}</a> : <AccountLogin key={auth} client={client} copy={copy} onAuthenticated={async () => { const profile = await refresh(); if (profile) onAuthenticated?.(profile); }} />}
     {onClose && <button onClick={onClose}>{copy.close}</button>}
   </div>;
   const renderedEpoch = epoch.current;
+  if (portal) return <AccountPortalLayout me={me} copy={copy} language={language} onLanguageChange={onLanguageChange} navigation={navigation} busy={busy} onRefresh={() => void refresh()} onLogout={logout}>
+    {error && <div className="ap-alert error" role="alert">{error}</div>}
+    {notice && <div className="ap-alert" role="status">{notice}</div>}
+    <div className="ap-finance-feedback-target" ref={setFinanceFeedbackTarget} />
+    <AccountPortalPanel section="creditsUsage" active={navigation.section === 'creditsUsage'}>
+      {me.active_context?.context_type !== 'ORGANIZATION' && hasPermission(me, 'personal.billing.read') && <section className="ap-balance-hero"><span>{copy.availableCredits}</span><strong>{formatWholeBalance(balance?.available_microcredits, language)}</strong><small>{copy.reservedCredits}: {formatBalance(balance?.reserved_microcredits, language)}</small></section>}
+      <div ref={setCreditTarget} />
+      <PersonalUsageWorkspace key={`portal-usage:${me.user_id}`} client={client} me={me} language={language} />
+    </AccountPortalPanel>
+    <AccountPortalPanel section="ordersInvoices" active={navigation.section === 'ordersInvoices'}><div ref={setOrdersTarget} /></AccountPortalPanel>
+    <AccountPortalPanel section="myOrganization" active={navigation.section === 'myOrganization'}>
+      {navigation.sections.includes('myOrganization') && <OrganizationWorkspace key={`${me.user_id}:${me.active_context.organization_id}:${me.active_context.context_version}`} client={client} me={me} language={language} includeFinance={false} includeUsage={false} dialogActions onChanged={() => refresh(false)} />}
+      <div ref={setOrganizationFinanceTarget} />
+    </AccountPortalPanel>
+    <AccountPortalPanel section="accountSettings" active={navigation.section === 'accountSettings'}>
+      <section className="ap-account-information"><h2>{accountDisplayLabel(me, copy.user)}</h2><dl><div><dt>{copy.username}</dt><dd>{me.username || '—'}</dd></div><div><dt>{copy.mobile}</dt><dd>{maskedAccountMobile(me.mobile)}</dd></div><div><dt>{copy.accountStatus}</dt><dd>{accountLayoutCopy[language].statuses[me.status] || me.status}</dd></div></dl></section>
+      <OrganizationDirectory key={`${me.user_id}:${client.financeSessionEpoch || 0}`} client={client} me={me} language={language} portalPresentation onChanged={() => refresh(false)} />
+      {hasPermission(me, 'personal.profile.update') && <ProfileSettings key={me.user_id} copy={copy} me={me} client={client} portalPresentation portalError={error} portalNotice={notice} active={navigation.section === 'accountSettings'} language={language} onError={reason => { if (renderedEpoch === epoch.current) setError(localizedAccountPlatformError(copy, reason)); }} onChanged={result => changed(result, renderedEpoch)} onRecovering={() => { if (renderedEpoch === epoch.current) setNotice(copy.profileChangeRecovering); }} />}
+      <AccountClosureWorkspace key={`${me.user_id}:${me.personal_authorization_version || me.active_context?.personal_authorization_version || 0}:${client.financeSessionEpoch || 0}`} client={client} me={me} language={language} />
+      {hasPermission(me, 'personal.security.manage') && <a href="/auth/login?reauthenticate=1&return_to=%2F%3Fsection%3DaccountSettings">{copy.reauthenticate}</a>}
+      {me.platform_permissions?.some(permission => permission.startsWith('platform.')) && <a href="/admin.html">{copy.adminCenter}</a>}
+    </AccountPortalPanel>
+    {me.active_context?.context_type !== 'ORGANIZATION' && <PersonalFinanceWorkspace key={`portal-finance:${me.user_id}`} client={client} me={me} language={language} presentationTargets={{ section: navigation.section, credits: creditTarget, orders: ordersTarget, feedback: financeFeedbackTarget }} onPaid={() => { if (renderedEpoch === epoch.current) return refresh(false); }} />}
+    {me.active_context?.context_type === 'ORGANIZATION' && <OrganizationFinanceWorkspace key={`${me.user_id}:${me.active_context.organization_id}:${me.active_context.context_version}`} client={client} me={me} language={language} presentationTargets={{ section: navigation.section, credits: creditTarget, management: organizationFinanceTarget, feedback: financeFeedbackTarget }} />}
+  </AccountPortalLayout>;
   return <main className={`ap-shell ap-app ${portal ? 'ap-portal' : 'ap-desktop'}`}>
     <header><h1>{copy.title}</h1><select aria-label={copy.language} value={language} onChange={event => onLanguageChange(event.target.value)}>{supportedLocales.map(locale => <option key={locale} value={locale}>{localeNames[locale]}</option>)}</select><button disabled={busy} onClick={() => void refresh()}>{copy.refresh}</button><button disabled={busy} onClick={logout}>{copy.logout}</button></header>
     {error && <div className="ap-alert error" role="alert">{error}</div>}

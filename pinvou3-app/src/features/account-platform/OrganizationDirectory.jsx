@@ -2,8 +2,9 @@ import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { organizationCopy } from '../../shared/i18n.js';
 import { OrganizationClient } from './organization-client.js';
 import { hasPermission } from './authorization-ui.js';
+import { OrganizationDirectoryPortal } from './OrganizationDirectoryPortal.jsx';
 
-export function OrganizationDirectory({ client, me, language, onChanged }) {
+export function OrganizationDirectory({ client, me, language, onChanged, portalPresentation = false }) {
  const copy = organizationCopy[language];
  const api = useMemo(() => new OrganizationClient(client), [client]);
  const [organizations, setOrganizations] = useState([]);
@@ -39,6 +40,10 @@ export function OrganizationDirectory({ client, me, language, onChanged }) {
   }
   finally { if (stamp === generation.current) setBusy(false); }
  };
+ if (portalPresentation) return <OrganizationDirectoryPortal copy={copy} language={language} me={me} organizations={organizations} invitations={invitations} busy={busy} error={error} token={token} onToken={setToken}
+  canSwitch={hasPermission(me, 'personal.context.switch')} canReadInvitations={hasPermission(me, 'personal.invitations.read')} canAccept={hasPermission(me, 'personal.invitations.accept')}
+  onSwitch={id => void perform(() => api.switchContext(id, me.active_context.context_version), 'context')}
+  onAccept={id => void perform(() => api.acceptInvitation(id), 'invitation')} onAcceptLink={() => void perform(() => api.acceptLink(token), 'invitation')} onRefresh={() => void onChanged()} />;
  return <section><h2>{copy.context}</h2>{error && <p role="alert">{error}<button onClick={() => void onChanged()} disabled={busy}>{copy.refresh}</button></p>}
   {hasPermission(me, 'personal.context.switch') && <><button disabled={busy || me.active_context.context_type === 'PERSONAL'} onClick={() => void perform(() => api.switchContext(null, me.active_context.context_version), 'context')}>{copy.personal}</button>{organizations.map(org => <button key={org.organization_id} disabled={busy || org.status !== 'ACTIVE' || org.organization_id === me.active_context.organization_id} onClick={() => void perform(() => api.switchContext(org.organization_id, me.active_context.context_version), 'context')}>{org.name}</button>)}</>}
   {hasPermission(me, 'personal.invitations.read') && <div><h3>{copy.invitations}</h3>{invitations.map(invite => <p key={invite.invitation_id}>{invite.organization_name} · {invite.target_hint} · {invite.expires_at}{hasPermission(me, 'personal.invitations.accept') && <button disabled={busy} onClick={() => void perform(() => api.acceptInvitation(invite.invitation_id), 'invitation')}>{copy.accept}</button>}</p>)}{!invitations.length && <p>{copy.empty}</p>}</div>}

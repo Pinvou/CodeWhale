@@ -1,20 +1,24 @@
+import { usePortalDialogScope } from './portal-dialog-scope.jsx';
 import React, { useId, useLayoutEffect, useRef } from 'react';
 import { createPortal } from 'react-dom';
 import { formatFen, safePaymentQR, safePaymentURL } from './finance-contract.js';
 import { paymentOrderRemainingSeconds, paymentScanPrompt } from './order-view.js';
 
-export function RechargePaymentDialog({ order, copy, language, now, busy, onDismiss, onQuery, canRestoreFocus, returnFocus }) {
+export function RechargePaymentDialog({ order, copy, language, now, busy, onDismiss, onQuery, canRestoreFocus, returnFocus, active = true, error = '', notice = '' }) {
+  const scopeActive = usePortalDialogScope();
+  const visible = scopeActive && active;
   const titleID = useId(), dialog = useRef(null), closeButton = useRef(null), restore = useRef(canRestoreFocus);
   restore.current = canRestoreFocus;
   useLayoutEffect(() => {
+    if (!visible) return undefined;
     const previous = returnFocus || document.activeElement, element = dialog.current;
     closeButton.current?.focus();
     return () => {
-      if (previous?.isConnected && element.contains(document.activeElement) && restore.current()) {
+      if (previous?.isConnected && element?.contains(document.activeElement) && !previous.closest('[hidden]') && restore.current()) {
         const target = previous.disabled ? previous.closest('section[tabindex]') : previous; target?.focus();
       }
     };
-  }, []);
+  }, [visible]);
   const keyDown = event => {
     if (event.key === 'Escape') { event.preventDefault(); event.stopPropagation(); onDismiss(); return; }
     if (event.key !== 'Tab') return;
@@ -24,9 +28,10 @@ export function RechargePaymentDialog({ order, copy, language, now, busy, onDism
     else if (!event.shiftKey && document.activeElement === last) { event.preventDefault(); first.focus(); }
   };
   const qr = safePaymentQR(order.qr_data), url = safePaymentURL(order.payment_url);
+  if (!visible) return null;
   return createPortal(<div className="ap-order-close-backdrop" onMouseDown={event => { if (event.target === event.currentTarget) onDismiss(); }}>
     <div className="ap-order-close-dialog ap-payment-dialog" ref={dialog} role="dialog" aria-modal="true" aria-labelledby={titleID} onKeyDown={keyDown}>
-      <h3 id={titleID}>{copy.paymentDialog}</h3>
+      <h3 id={titleID}>{copy.paymentDialog}</h3>{error && <p role="alert">{error}</p>}{notice && <p role="status">{notice}</p>}
       <dl><dt>{copy.orderID}</dt><dd>{order.order_id}</dd><dt>{copy.amount}</dt><dd>{formatFen(order.amount_fen, language)}</dd><dt>{copy.channel}</dt><dd>{copy.channels?.[order.channel] || order.channel || '—'}</dd></dl>
       <p>{copy.countdown(paymentOrderRemainingSeconds(order, now))}</p>
       {qr && <><img src={qr} alt={copy.providerQR} width="240" height="240" /><p>{paymentScanPrompt(copy, order.qr_scan_apps)}</p></>}

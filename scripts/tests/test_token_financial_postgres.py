@@ -16,6 +16,19 @@ SPEC.loader.exec_module(RUNNER)
 
 
 class FinancialPostgresRunnerTests(unittest.TestCase):
+    def test_restored_reads_require_real_public_migration_postgres_execution(self):
+        name = "TestRestoredAdminReadsWithPublicMigrationsAndRuntimeActor"
+        self.assertIn(name, RUNNER.ACCOUNT_REQUIRED)
+        self.run_main_fixture()
+        command = self.fixture_commands[self.fixture_phases.index("owner-account")]
+        self.assertIn(name, command[command.index("-run") + 1])
+        events = self.events(RUNNER.ACCOUNT_REQUIRED, RUNNER.ACCOUNT_PACKAGE, children=True)
+        options = {"package": RUNNER.ACCOUNT_PACKAGE, "exact_roots": True, "require_children": True}
+        self.assertGreater(RUNNER.verify_results(events, RUNNER.ACCOUNT_REQUIRED, **options), 0)
+        for action in ["skip", "fail"]:
+            with self.subTest(action=action), self.assertRaises(RuntimeError):
+                RUNNER.verify_results(events + [{"Action": action, "Package": RUNNER.ACCOUNT_PACKAGE, "Test": name}], RUNNER.ACCOUNT_REQUIRED, **options)
+
     def test_duplicate_forced_refund_requires_all_four_order_and_proof_cases(self):
         root = "TestLedgerRepairAuthorityDuplicateForcedRefundPostgres"
         self.assertIn(root, RUNNER.BILLING_CHILD_REQUIRED)
@@ -909,6 +922,7 @@ class FinancialPostgresRunnerTests(unittest.TestCase):
 
     def test_account_phase_requires_real_cas_lifecycle_and_review_governance_roots(self):
         self.assertEqual(RUNNER.ACCOUNT_REQUIRED, {
+            "TestRestoredAdminReadsWithPublicMigrationsAndRuntimeActor",
             "TestMemberUnitsReceiptSurvivesLegalUnitDeletion",
             "TestF06OrganizationStatusProjectionVersionPublicPostgres",
             "TestF06OrganizationDeletionVersionAndTerminalScope",

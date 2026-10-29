@@ -1,4 +1,6 @@
-import React, { useEffect, useRef, useState } from 'react';
+import { OrganizationUserPicker } from './OrganizationUserPicker.jsx';
+import { PortalDialog } from './PortalDialog.jsx';
+import React, { useEffect, useLayoutEffect, useRef, useState } from 'react';
 import { useFinanceOperation } from './useFinanceOperation.js';
 import { OrganizationActionConfirmation } from './OrganizationActionConfirmation.jsx';
 
@@ -13,7 +15,9 @@ const currentSelections = (fields, values) => fields.every(field => {
 
 // Each displayed action owns one immutable invocation. Unknown outcomes retain
 // the original hook facts/key; only fresh invocations require user confirmation.
-export function OrganizationActionForm({ client, owner, copy, title, scope, fields, prepare, action, onConfirmed, confirm = false, disabled = false, confirmationTarget = '', editBeforeSubmit = false, editDrafts, useOperation = useFinanceOperation }) {
+export function OrganizationActionForm({ client, owner, copy, title, scope, fields, prepare, action, onConfirmed, confirm = false, disabled = false, confirmationTarget = '', editBeforeSubmit = false, editDrafts, useOperation = useFinanceOperation, dialog = false }) {
+ const [dialogOpen, setDialogOpen] = useState(false);
+ const opener = useRef(null), wasOpen = useRef(false);
  const draftIdentity = `${owner}:${scope}`;
  const [values, setValues] = useState(() => editDrafts?.get(draftIdentity) || initialValues(fields));
  const [invalid, setInvalid] = useState(false);
@@ -55,7 +59,7 @@ export function OrganizationActionForm({ client, owner, copy, title, scope, fiel
   const marker = {}; dispatching.current = marker;
   try {
    const result = await live.current.operation.mutate(facts, live.current.action);
-   if (result !== undefined && sameIdentity(snapshot)) { if (live.current.editBeforeSubmit) { live.current.editDrafts?.delete(live.current.draftIdentity); setEditing(false); } live.current.onConfirmed?.(result); }
+   if (result !== undefined && sameIdentity(snapshot)) { if (live.current.editBeforeSubmit) { live.current.editDrafts?.delete(live.current.draftIdentity); setEditing(false); } live.current.onConfirmed?.(result); setDialogOpen(false); }
   } finally { if (dispatching.current === marker) dispatching.current = null; }
  };
  const accept = snapshot => {
@@ -97,6 +101,10 @@ export function OrganizationActionForm({ client, owner, copy, title, scope, fiel
   if (current.editing) current.editDrafts?.set(current.draftIdentity, next);
   setValues(next);
  };
+ const open = dialogOpen || operation.unknown || Boolean(operation.pendingFacts);
+ useLayoutEffect(() => { if (!open && wasOpen.current && !opener.current?.closest('[hidden]')) opener.current?.focus(); wasOpen.current = open; }, [open]);
+ const trigger = dialog && <button ref={opener} type="button" aria-expanded={open} disabled={open || disabled || operation.blocked || !renderedReady || operation.busy} onClick={() => { if (editBeforeSubmit) changeEditing(true); setDialogOpen(true); }}>{title}</button>;
+ if (dialog && !open) return <>{trigger}</>;
  if (editBeforeSubmit && !editing && !operation.busy && !operation.unknown && !operation.pendingFacts) return <div className="ap-org-action"><h4>{title}</h4><p>{fields[0]?.initial}</p>
   {operation.error && <p role="alert">{operation.error}</p>}{operation.message && <p role="status">{operation.message}</p>}
   <button type="button" disabled={disabled || operation.blocked || !renderedReady} onClick={() => changeEditing(true)}>{title}</button>
@@ -104,13 +112,16 @@ export function OrganizationActionForm({ client, owner, copy, title, scope, fiel
  const displayed = confirmation && freshCurrent(confirmation);
  const details = displayed ? fields.map(field => {
   const selected = field.multiple ? confirmation.values[field.name] : [confirmation.values[field.name]];
-  return { name: field.name, label: copy[field.label || field.name], value: selected.map(value => value === '' && field.optional ? copy.root : fieldOptions(field, confirmation.values)?.find(option => option.value === value)?.label || value).join(', ') };
+  return { name: field.name, label: copy[field.labelKey || field.label || field.name], value: selected.map(value => value === '' && field.optional ? copy.root : fieldOptions(field, confirmation.values)?.find(option => option.value === value)?.label || value).join(', ') };
  }) : [];
- return <form className="ap-org-action" onSubmit={submit}><h4>{title}</h4>
+ const form = <form className="ap-org-action" onSubmit={submit}><h4>{title}</h4>
   {displayed && <OrganizationActionConfirmation copy={copy} title={title} target={confirmation.confirmationTarget} details={details} onCancel={() => cancel(confirmation)} onConfirm={() => void accept(confirmation)} canRestoreFocus={() => freshCurrent(confirmation)} />}
-  <fieldset disabled={operation.busy || operation.unknown || operation.blocked || disabled}>{fields.map(field => <label key={field.name}>{copy[field.label || field.name]}{field.options ? <select multiple={field.multiple || false} value={editBeforeSubmit ? operation.pendingFacts?.[field.name] ?? values[field.name] : values[field.name]} onChange={event => { const value = field.multiple ? [...event.target.selectedOptions].map(option => option.value) : event.target.value; changeValue(field.name, value); }}>{!field.multiple && <option value="">{field.optional ? copy.root : '—'}</option>}{fieldOptions(field, values).map(option => <option key={option.value} value={option.value}>{option.label}</option>)}</select> : <input type={field.type || 'text'} autoComplete="off" value={editBeforeSubmit ? operation.pendingFacts?.[field.name] ?? values[field.name] : values[field.name]} onChange={event => changeValue(field.name, event.target.value)} required={!field.optional} />}{field.multiple && <small>{copy.unscopedUnits}</small>}</label>)}</fieldset>
+  <fieldset disabled={operation.busy || operation.unknown || operation.blocked || disabled}>{fields.map(field => <label key={field.name}>{copy[field.labelKey || field.label || field.name]}{field.lookup ? <OrganizationUserPicker client={client} copy={copy} value={values[field.name]} disabled={operation.busy || operation.unknown || operation.blocked || disabled} onChange={value => changeValue(field.name, value)} /> : field.options ? <select multiple={field.multiple || false} value={editBeforeSubmit ? operation.pendingFacts?.[field.name] ?? values[field.name] : values[field.name]} onChange={event => { const value = field.multiple ? [...event.target.selectedOptions].map(option => option.value) : event.target.value; changeValue(field.name, value); }}>{!field.multiple && <option value="">{field.optional ? copy.root : '—'}</option>}{fieldOptions(field, values).map(option => <option key={option.value} value={option.value}>{option.label}</option>)}</select> : <input type={field.type || 'text'} autoComplete="off" value={editBeforeSubmit ? operation.pendingFacts?.[field.name] ?? values[field.name] : values[field.name]} onChange={event => changeValue(field.name, event.target.value)} required={!field.optional} />}{field.multiple && <small>{copy.unscopedUnits}</small>}</label>)}</fieldset>
   {invalid && <p role="alert">{copy.invalid}</p>}{operation.error && <p role="alert">{operation.error}</p>}{operation.message && <p role="status">{operation.message}</p>}
   <button disabled={operation.busy || operation.blocked || (disabled && !operation.unknown)} type="submit">{operation.unknown ? copy.retry : editBeforeSubmit ? copy.save : title}</button>
   {editBeforeSubmit && <button type="button" disabled={operation.busy || operation.unknown || operation.blocked || Boolean(operation.pendingFacts) || disabled} onClick={() => changeEditing(false)}>{copy.cancelConfirmation}</button>}
  </form>;
+ if (!dialog) return form;
+ if (displayed) return <>{trigger}<div hidden>{form}</div></>;
+ return <>{trigger}<PortalDialog title={title} closeLabel={copy.cancelConfirmation} busy={operation.busy || operation.unknown || Boolean(operation.pendingFacts)} onClose={() => { if (editBeforeSubmit) changeEditing(false); setDialogOpen(false); }}>{form}</PortalDialog></>;
 }

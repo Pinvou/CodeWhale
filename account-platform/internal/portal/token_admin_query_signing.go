@@ -14,7 +14,7 @@ func tokenPageQuerySigningPath(method, resource string) bool {
 		return false
 	}
 	switch resource {
-	case "/admin/v1/overviews/model-catalog", "/admin/v1/overviews/token-resources", "/admin/v1/overviews/model-operations":
+	case "/admin/v1/overview", "/admin/v1/overviews/model-catalog", "/admin/v1/overviews/token-resources", "/admin/v1/overviews/model-operations":
 		return true
 	}
 	return false

@@ -7,6 +7,7 @@ import { fileURLToPath } from 'node:url';
 import { accountPlatformCopy } from '../pinvou3-app/src/shared/account-platform-i18n.js';
 import { adminPlatformCopy } from '../pinvou3-app/src/shared/admin-platform-i18n.js';
 import { platformRoleCopy } from '../pinvou3-app/src/shared/platform-role-i18n.js';
+import { accountLayoutCopy, adminLayoutCopy } from '../pinvou3-app/src/shared/account-layout-i18n.js';
 import { supportedLocales } from '../pinvou3-app/src/shared/supported-locales.js';
 
 const repositoryRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
@@ -17,6 +18,24 @@ const userInterfaceSources = [
   'pinvou3-app/src/features/account-platform/AccountPlatformView.jsx',
   'pinvou3-app/src/features/account-platform/AdminPlatformView.jsx',
   'pinvou3-app/src/features/account-platform/AdminRolesWorkspace.jsx',
+  'pinvou3-app/src/features/account-platform/AccountPortalLayout.jsx',
+  'pinvou3-app/src/features/account-platform/AdminPortalLayout.jsx',
+  'pinvou3-app/src/features/account-platform/AdminRestoredPages.jsx',
+  'pinvou3-app/src/features/account-platform/AdminUsersWorkspace.jsx',
+  'pinvou3-app/src/features/account-platform/AdminFinanceFilters.jsx',
+  'pinvou3-app/src/features/account-platform/AdminWalletLedger.jsx',
+  'pinvou3-app/src/features/account-platform/AdminFinanceReadWorkspace.jsx',
+  'pinvou3-app/src/features/account-platform/AdminFinanceOverview.jsx',
+  'pinvou3-app/src/features/account-platform/RechargeProductWorkspace.jsx',
+  'pinvou3-app/src/features/account-platform/AdminOverviewWorkspace.jsx',
+  'pinvou3-app/src/features/account-platform/PersonalFinancePortalSections.jsx',
+  'pinvou3-app/src/features/account-platform/ProfileSettingsPortal.jsx',
+  'pinvou3-app/src/features/account-platform/OrganizationDirectoryPortal.jsx',
+  'pinvou3-app/src/features/account-platform/OrganizationAdminPortalWorkspace.jsx',
+  'pinvou3-app/src/features/account-platform/OrganizationUserPicker.jsx',
+  'pinvou3-app/src/features/account-platform/PortalDialog.jsx',
+  'pinvou3-app/src/features/account-platform/PortalBenefits.jsx',
+  'pinvou3-app/src/features/account-platform/OrganizationCreditOverview.jsx',
   'pinvou3-app/src/app/account-main.jsx',
   'pinvou3-app/src/app/admin-main.jsx',
   'pinvou3-app/src/portal-session-handoff.html',
@@ -172,6 +191,8 @@ export async function checkAccountPlatformI18n({ artifacts = true } = {}) {
     ['account', accountPlatformCopy],
     ['admin', adminPlatformCopy],
     ['platform-roles', platformRoleCopy],
+    ['account-layout', accountLayoutCopy],
+    ['admin-layout', adminLayoutCopy],
   ];
   const validated = catalogs.map(([name, catalog]) => [name, validateCatalog(name, catalog)]);
   // The canonical handoff entry consumes this catalog directly. Vite emits

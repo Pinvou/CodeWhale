@@ -42,6 +42,7 @@ export function AdminSystemStatusWorkspace({
   copy,
   language,
   permissions = NO_PERMISSIONS,
+  compact = false,
 }) {
   const allowed = permissions.includes("platform.system.status.read");
   const [state, setState] = useState({ owner: null, status: null, loading: false, error: null });
@@ -86,6 +87,12 @@ export function AdminSystemStatusWorkspace({
   const date = (value) =>
     value && Number.isFinite(Date.parse(value)) ? new Date(value).toLocaleString(language) : "—";
   const status = visible.status;
+  if (compact) return <section className="adm-panel adm-health-strip" aria-label={copy.nav.system}>
+    <header><h3>{copy.nav.system}</h3><button disabled={visible.loading} onClick={() => setRefresh(value => value + 1)}>{copy.refresh}</button></header>
+    {visible.loading && <p role="status">{copy.loading}</p>}
+    {visible.error && <p role="alert">{localizedAccountPlatformError(copy, visible.error)}<button onClick={() => setRefresh(value => value + 1)}>{copy.retry}</button></p>}
+    {status && <div className="adm-metrics">{[[labels.healthyServices, `${count(status.services.filter(item => item.status === 'HEALTHY').length)} / ${count(status.services.length)}`], [labels.pendingReconciliation, count(status.reconciliation.pending)], [labels.stoppedReconciliation, count(status.reconciliation.stopped)]].map(([label, value]) => <article key={label}><span>{label}</span><strong>{value}</strong></article>)}</div>}
+  </section>;
   return (
     <section className="adm-system-workspace">
       <h1>{copy.nav.system}</h1>

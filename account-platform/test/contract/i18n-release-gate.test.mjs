@@ -14,7 +14,7 @@ import {
 } from '../../../scripts/check-account-platform-i18n.mjs';
 
 test('account platform source catalogs and UI surfaces pass the release gate', async () => {
-  assert.deepEqual(await checkAccountPlatformI18n({ artifacts: false }), { catalogs: 4, sources: 8 });
+  assert.deepEqual(await checkAccountPlatformI18n({ artifacts: false }), { catalogs: 6, sources: 26 });
 });
 
 test('a missing, extra, empty, or fallback translation blocks release', () => {

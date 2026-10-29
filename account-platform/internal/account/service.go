@@ -143,7 +143,9 @@ func (s *Service) Handler(verify identity.VerifyFunc) http.Handler {
 	}
 	// Exact-code lookup owns permission, digest-only denial audit and limits in its repository.
 	admin.GET("/user-code-lookups/:user_code", httpserver.AdaptFunc(s.adminUserByCode))
+	admin.GET("/overview", s.requireAnyPermission(PermissionPlatformUsersRead, PermissionPlatformOrganizationsRead), httpserver.AdaptFunc(s.adminOverview))
 	admin.GET("/users", s.requirePermission(PermissionPlatformUsersRead), httpserver.AdaptFunc(s.adminUsers))
+	admin.GET("/users/:user_id", s.requirePermission(PermissionPlatformUsersRead), httpserver.AdaptFunc(s.adminUserDetail))
 	admin.PATCH("/users/:user_id/status", s.requirePermission(PermissionPlatformUsersStatusManage), approvalpolicy.Require("ACCOUNT_USER_STATUS_CHANGE", approvalpolicy.AuditOnly), httpserver.AdaptFunc(s.adminSetUserStatus))
 	admin.GET("/account-closure-requests", s.requirePermission(PermissionPlatformAccountClosuresRead), httpserver.AdaptFunc(s.adminAccountClosures))
 	admin.POST("/account-closure-requests/:closure_request_id/actions/retry", s.requirePermission(PermissionPlatformAccountClosuresRepair), approvalpolicy.Require("ACCOUNT_CLOSURE_RETRY", approvalpolicy.AuditOnly), httpserver.AdaptFunc(s.adminRetryAccountClosure))

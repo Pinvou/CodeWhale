@@ -1,10 +1,10 @@
-import React, { useEffect, useMemo, useState } from 'react';
+import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { financeCopy } from '../../shared/i18n.js';
 import { Approvals } from './AdminFinanceWorkspace.jsx';
 import { approvalCommands, approvalViews, approvalStatuses, executionStatuses, approvalQuery, readApprovalRoute } from './admin-approval-actions.js';
 import './admin-approval-workspace.css';
 
-export function AdminApprovalWorkspace({ client, copy, language, me, onNavigate }) {
+export function AdminApprovalWorkspace({ client, copy, language, me, onNavigate, routeSearch, onRouteChange }) {
   const c = copy.approvalCenter;
   const [route, setRoute] = useState(() => readApprovalRoute(globalThis.location?.search));
   const [command, setCommand] = useState(route.commandType);
@@ -14,17 +14,35 @@ export function AdminApprovalWorkspace({ client, copy, language, me, onNavigate 
   const [directoryState, setDirectoryState] = useState('loading');
   const [refresh, setRefresh] = useState(0);
   const owner = `${me.user_id}:${me.platform_authorization_version || me.active_context?.platform_authorization_version || 0}`;
+  const localRoute = useRef(null);
+  const externalRoute = useRef({ search: routeSearch, applied: true });
+  useEffect(() => {
+    if (routeSearch === undefined) return;
+    if (externalRoute.current.search !== routeSearch) externalRoute.current = { search: routeSearch, applied: false };
+    if (!blocked && !externalRoute.current.applied) {
+      externalRoute.current.applied = true;
+      const next = readApprovalRoute(routeSearch);
+      const echo = localRoute.current && ['view', 'commandType', 'target', 'status', 'requestID'].every(key => next[key] === localRoute.current[key]);
+      localRoute.current = null;
+      setRoute(next);
+      // Parent URL acknowledgement must not erase filters the user has typed
+      // but not submitted; an actual external route restores all its fields.
+      if (!echo) { setCommand(next.commandType); setTarget(next.target); }
+    }
+  }, [routeSearch, blocked]);
   const query = useMemo(() => approvalQuery(route, me.user_id), [route, me.user_id]);
   const changeRoute = patch => {
     if (blocked) return;
     const next = { ...route, ...patch };
+    localRoute.current = next;
     const params = new URLSearchParams(globalThis.location?.search || '');
     for (const [key, value] of Object.entries({ approval_view: next.view, approval_command_type: next.commandType,
       approval_target: next.target, approval_status: next.status, approval_request_id: next.requestID })) {
       if (value) params.set(key, value); else params.delete(key);
     }
     params.delete('approval_cursor');
-    globalThis.history?.replaceState(null, '', `${globalThis.location?.pathname || ''}?${params}${globalThis.location?.hash || ''}`);
+    if (onRouteChange) onRouteChange({ approval_view: next.view || null, approval_command_type: next.commandType || null, approval_target: next.target || null, approval_status: next.status || null, approval_request_id: next.requestID || null, approval_cursor: null });
+    else globalThis.history?.replaceState(null, '', `${globalThis.location?.pathname || ''}?${params}${globalThis.location?.hash || ''}`);
     setRoute(next);
   };
   useEffect(() => {

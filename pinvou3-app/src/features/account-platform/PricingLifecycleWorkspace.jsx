@@ -1,7 +1,8 @@
 import { integerMoney } from './finance-contract.js';
 import { pricingUnknownStorageKey, replayPricingMutation } from './pricing-mutation.js';
+import { pricingUnknownSnapshot, storePricingUnknown, subscribePricingUnknown } from './pricing-unknown-state.js';
 import { secureRequestID } from './request-id.js';
-import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react';
 import { buildPriceDraftInput, matchingContinuationDrafts, newModelPriceAllowed, priceDraftForm, priceSpaceQuery, priceTransitionModes, pricingLifecycleMutationLock, publishedPricingFormulas } from './pricing-lifecycle.js';
 
 const shortID = (value) => {
@@ -12,17 +13,6 @@ const formatDate = (value) => value ? new Date(value).toLocaleString() : '—';
 const mutationKey = (prefix) => `${prefix}:${secureRequestID()}`;
 const outcomeUnknown = (error) => !Number.isFinite(error?.status) || error.status >= 500;
 const stableUUID = (value) => /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(String(value || ''));
-const readRetainedUnknown = (unknownStorageKey) => {
-  try {
-    const value = JSON.parse(globalThis.sessionStorage?.getItem(unknownStorageKey) || 'null');
-    if (value?.phase === 'PREPARING') { globalThis.sessionStorage?.removeItem(unknownStorageKey); return null; }
-    return ['DRAFT_CREATE', 'DRAFT_UPDATE', 'UNIT_CREATE', 'UNIT_DEACTIVATE', 'PRICE_PUBLISH', 'PRICE_TRANSITION'].includes(value?.kind) ? value : null;
-  } catch { return null; }
-};
-const storeUnknown = (unknownStorageKey, value) => {
-  try { if (value) globalThis.sessionStorage?.setItem(unknownStorageKey, JSON.stringify(value)); else globalThis.sessionStorage?.removeItem(unknownStorageKey); } catch { /* storage is optional */ }
-  return value;
-};
 
 function PricingStatus({ value }) {
   const normalized = String(value || '—');
@@ -39,7 +29,7 @@ function fieldError(labels, value) {
 
 export function PricingLifecycleWorkspace({ copy, client, permissions, owner, contextModel = null, contextFormula = null, onExit = null, onOpenModel = null }) {
   const unknownStorageKey = pricingUnknownStorageKey(owner, client.financeSessionEpoch);
-  const retainUnknown = (value) => storeUnknown(unknownStorageKey, value);
+  const retainUnknown = value => storePricingUnknown(unknownStorageKey, value);
   const labels = copy.billing.pricingLifecycle;
   const contextual = Boolean(contextModel?.model_id && contextFormula?.formula_version_id);
   const canManage = new Set(permissions || []).has('platform.pricing.manage');
@@ -67,8 +57,10 @@ export function PricingLifecycleWorkspace({ copy, client, permissions, owner, co
   const [unitForm, setUnitForm] = useState(null);
   const [preview, setPreview] = useState(null);
   const [pendingAction, setPendingAction] = useState(null);
-  const [unknownMutation, setUnknownMutationState] = useState(() => readRetainedUnknown(unknownStorageKey));
-  const setUnknownMutation = (value) => { retainUnknown(value); if (mounted.current) setUnknownMutationState(value); };
+  const subscribeUnknown = useCallback(listener => subscribePricingUnknown(unknownStorageKey, listener), [unknownStorageKey]);
+  const getUnknown = useCallback(() => pricingUnknownSnapshot(unknownStorageKey), [unknownStorageKey]);
+  const unknownMutation = useSyncExternalStore(subscribeUnknown, getUnknown, getUnknown);
+  const setUnknownMutation = value => storePricingUnknown(unknownStorageKey, value);
   const generations = useRef({ prices: 0, units: 0, formulas: 0, models: 0 });
   const mounted = useRef(true);
   const preflights = useRef(new Set());
@@ -281,7 +273,7 @@ export function PricingLifecycleWorkspace({ copy, client, permissions, owner, co
 
   const submitDraft = async (event) => {
     event.preventDefault();
-    if (!editor || formulaAuthority.current.denied || loading.formulaSelection || loading.mutation || unknownMutation || !pricingLifecycleMutationLock.tryAcquire()) return;
+    if (!editor || formulaAuthority.current.denied || loading.formulaSelection || loading.mutation || pricingUnknownSnapshot(unknownStorageKey) || !pricingLifecycleMutationLock.tryAcquire()) return;
     const formulaAuthorizationGeneration = formulaAuthority.current.generation;
     retainUnknown({ phase: 'PREPARING', kind: editor.price_version_id ? 'DRAFT_UPDATE' : 'DRAFT_CREATE' });
     if (!canManage) { setEditorErrors({ form: labels.permissionLost }); retainUnknown(null); pricingLifecycleMutationLock.release(); return; }
@@ -349,7 +341,7 @@ export function PricingLifecycleWorkspace({ copy, client, permissions, owner, co
 
   const submitUnit = async (event) => {
     event.preventDefault();
-    if (!unitForm || loading.mutation || unknownMutation || !pricingLifecycleMutationLock.tryAcquire()) return;
+    if (!unitForm || loading.mutation || pricingUnknownSnapshot(unknownStorageKey) || !pricingLifecycleMutationLock.tryAcquire()) return;
     retainUnknown({ phase: 'PREPARING', kind: 'UNIT_CREATE' });
     if (!canManage) { setErrors((current) => ({ ...current, unitMutation: labels.permissionLost })); retainUnknown(null); pricingLifecycleMutationLock.release(); return; }
     setLoading((current) => ({ ...current, mutation: true }));
@@ -426,7 +418,7 @@ export function PricingLifecycleWorkspace({ copy, client, permissions, owner, co
 
   const runPendingAction = async (event) => {
     event.preventDefault();
-    if (!pendingAction || loading.mutation || unknownMutation || !pricingLifecycleMutationLock.tryAcquire()) return;
+    if (!pendingAction || loading.mutation || pricingUnknownSnapshot(unknownStorageKey) || !pricingLifecycleMutationLock.tryAcquire()) return;
     if (!canManage) { setPendingAction((current) => ({ ...current, error: labels.permissionLost })); pricingLifecycleMutationLock.release(); return; }
     const { type, item } = pendingAction;
     const reason = String(pendingAction.reason || '').trim();
@@ -483,14 +475,15 @@ export function PricingLifecycleWorkspace({ copy, client, permissions, owner, co
   const openDeactivate = (item) => setPendingAction({ type: 'DEACTIVATE', item, idempotencyKey: mutationKey('unit-deactivate'), error: '' });
 
   const verifyUnknown = async () => {
-    if (!unknownMutation || loading.recovery || !pricingLifecycleMutationLock.tryAcquire()) return;
+    const retained = pricingUnknownSnapshot(unknownStorageKey);
+    if (!retained || loading.recovery || !pricingLifecycleMutationLock.tryAcquire()) return;
     if (!latestFacts.current.canManage) { setNotice(labels.permissionLost); pricingLifecycleMutationLock.release(); return; }
     setLoading((current) => ({ ...current, recovery: true }));
     try {
       // The original key recovers the durable receipt even after a lost response.
-      await replayPricingMutation(client, unknownMutation);
+      await replayPricingMutation(client, retained);
       if (!mounted.current) return;
-      setUnknownMutation(null);
+      storePricingUnknown(unknownStorageKey, null, retained);
       setNotice(labels.recoveryConfirmed);
       setEditor(null); setUnitForm(null); setPendingAction(null);
       void loadPrices().catch(() => {}); void loadUnits().catch(() => {});

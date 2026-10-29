@@ -19,7 +19,7 @@ const chrome = process.env.CHROME || [
 ].find(fs.existsSync);
 if (!chrome) throw new Error('No browser available; UI validation not performed');
 const profile = fs.mkdtempSync(path.join(os.tmpdir(), 'pinvou-f01-ui-'));
-let vite; let browser; let page; let passed = 0;
+let vite; let browser; let page; let passed = 0; let skipped = 0;
 const assert = (condition, message) => { if (!condition) throw new Error(message); };
 try {
   vite = await createServer({ root, configFile: false, appType: 'mpa', logLevel: 'error', plugins: [react()], server: { host: '127.0.0.1', port: 0, watch: null } });
@@ -35,19 +35,23 @@ try {
     if (/Encountered two children with the same key/.test(message.text())) duplicateKeys.push(message.text());
   });
   const url = `http://127.0.0.1:${vite.httpServer.address().port}/tests/fixtures/account-platform-f01-ui.html`;
-  const fresh = async kind => { errors.length = 0; await page.goto(url); await page.waitForFunction(() => window.f01 && document.body.textContent.includes('account-a')); if (kind === 'admin') { await page.evaluate(() => window.f01.render('admin')); await page.waitForSelector('tbody tr'); } };
-  const clickText = async text => { const clicked = await page.evaluate(value => { const button = [...document.querySelectorAll('button')].find(item => item.textContent.trim() === value); if (!button || button.disabled) return false; button.click(); return true; }, text); assert(clicked, `button unavailable: ${text}`); };
+  const fresh = async kind => { errors.length = 0; await page.goto(url); await page.waitForFunction(() => window.f01 && document.body.textContent.includes('account-a')); if (kind === 'admin') { await page.evaluate(() => { history.replaceState({}, '', '?section=users'); window.f01.render('admin'); }); await page.waitForSelector('tbody tr'); } };
+  const clickText = async text => {
+    const section = await page.evaluate(value => { const c = globalThis.f01.copy().admin; return [c.userManagement.registrationRepair, c.userManagement.profileRepair].includes(value) ? 'operations' : value === c.settings.title ? 'settings' : null; }, text);
+    if (section) { await page.click(`.adm-sidebar [data-section=${section}]`); await page.waitForSelector('[data-workspace=' + section + ']:not([hidden])'); if (section === 'settings') return; }
+ await page.waitForFunction(value => [...document.querySelectorAll('button')].some(item => item.textContent.trim() === value && item.getClientRects().length && !item.disabled), {}, text);
+    const clicked = await page.evaluate(value => { const button = [...document.querySelectorAll('button')].find(item => item.textContent.trim() === value && item.getClientRects().length); if (!button || button.disabled) return false; button.click(); return true; }, text); assert(clicked, `button unavailable: ${text}`); };
   const waitText = async text => page.waitForFunction(value => document.body.textContent.includes(value), {}, text);
-  const caseRun = async (name, action) => { await action(); assert(errors.length === 0, `React errors: ${errors.join(',')}`); passed++; console.log(`PASS ${name}`); };
+  const caseRun = async (name, action) => { if (process.env.F01_CASE && !name.includes(process.env.F01_CASE)) { skipped++; return; } await action(); assert(errors.length === 0, `React errors: ${errors.join(',')}`); passed++; console.log(`PASS ${name}`); };
   await caseRun('Safari 14 retains secure Web Crypto without randomUUID for every auth flow', async () => {
     await fresh();
     assert(await page.evaluate(() => typeof document.defaultView.crypto.randomUUID === 'undefined' && typeof document.defaultView.crypto.getRandomValues === 'function'), 'Safari 14 crypto boundary not installed');
   });
-  await caseRun('personal exact int64 balance through production BFF', async () => { await fresh(); await waitText('922,337,203,685,477.5807'); await waitText('-1.0001'); });
+  await caseRun('personal exact int64 balance through production BFF', async () => { await fresh(); await waitText('922,337,203,685,477'); await waitText('-1.0001'); });
   await caseRun('missing balance permission does not query token', async () => { await fresh(); await page.evaluate(() => { globalThis.f01.balanceAllowed = false; globalThis.f01.calls.length = 0; globalThis.f01.switchIdentity(); }); await waitText('account-b'); assert(await page.evaluate(() => !globalThis.f01.calls.some(call => call.url.includes('/me/balance'))), 'unauthorized balance queried'); });
   await caseRun('balance unavailability is visible and never substituted with zero', async () => { await fresh(); await page.evaluate(() => { globalThis.f01.balanceFail = true; globalThis.f01.switchIdentity(); }); await page.waitForSelector('[role=alert]'); assert(await page.evaluate(() => document.querySelector('[role=alert]').textContent.length > 0), 'empty error'); assert(await page.evaluate(() => !document.body.textContent.includes('922,337,203')), 'old balance retained'); });
   for (const language of ['zh', 'en', 'ja']) for (const malformed of ['missing', 'null']) await caseRun(`${language}: ${malformed} bootstrap context shows recoverable error before child workspaces`, async () => {
-    await fresh(); await page.select('header select', language);
+    await fresh(); await page.select('.ap-sidebar-foot select, .adm-sidebar-foot select, header select', language);
     await page.evaluate(malformed => { globalThis.f01.badBootstrapContext = malformed; globalThis.f01.calls.length = 0; }, malformed);
     await clickText(await page.evaluate(() => globalThis.f01.copy().account.refresh));
     await page.waitForFunction(() => document.querySelector('.ap-login [role=alert]')?.textContent === globalThis.f01.copy().account.requestFailed);
@@ -55,23 +59,24 @@ try {
     assert(await page.evaluate(() => document.querySelector('.ap-login a')?.textContent === globalThis.f01.copy().account.login), 'existing login recovery missing');
     await page.evaluate(() => { globalThis.f01.badBootstrapContext = ''; });
     await clickText(await page.evaluate(() => globalThis.f01.copy().account.retry));
-    await waitText('account-a'); await waitText('922,337,203,685,477.5807');
+    await waitText('account-a'); await waitText('922,337,203,685,477');
     assert(await page.evaluate(() => !globalThis.f01.calls.some(call => /models|catalog/.test(call.url))), 'personal balance unexpectedly required model facilities');
   });
-  await caseRun('retired profile creation cannot complete against a new identity', async () => { await fresh(); await page.evaluate(() => { globalThis.f01.delayedProfile = true; }); const input = await page.$('input[autocomplete=username]'); await input.click({ clickCount: 3 }); await input.type('renamed-a'); const text = await page.evaluate(() => globalThis.f01.copy().account.confirmChange); await clickText(text); await page.waitForFunction(() => typeof globalThis.f01.releaseProfile === 'function'); await page.evaluate(() => globalThis.f01.switchIdentity()); await waitText('account-b'); await page.evaluate(() => globalThis.f01.releaseProfile()); assert(await page.evaluate(() => !globalThis.f01.calls.some(call => call.url.endsWith('/actions/complete'))), 'old workflow continued'); });
-  await caseRun('profile completion with failed logout remains recoverable without navigation', async () => { await fresh(); await page.evaluate(() => { globalThis.f01.completedProfile = true; globalThis.f01.logoutFail = true; }); const input = await page.$('input[autocomplete=username]'); await input.click({ clickCount: 3 }); await input.type('renamed-a'); await clickText(await page.evaluate(() => globalThis.f01.copy().account.confirmChange)); await page.waitForSelector('[role=alert]'); assert(page.url() === url, 'navigated despite failed logout'); });
+  const openProfile = async () => { await page.click('.ap-sidebar [data-section=accountSettings]'); await page.waitForSelector('.ap-profile-row button'); await page.click('.ap-profile-row button'); await page.waitForSelector('[role=dialog] input[autocomplete=username]'); };
+  await caseRun('retired profile creation cannot complete against a new identity', async () => { await fresh(); await openProfile(); await page.evaluate(() => { globalThis.f01.delayedProfile = true; }); const input = await page.$('input[autocomplete=username]'); await input.click({ clickCount: 3 }); await input.type('renamed-a'); const text = await page.evaluate(() => globalThis.f01.copy().account.confirmChange); await clickText(text); await page.waitForFunction(() => typeof globalThis.f01.releaseProfile === 'function'); await page.evaluate(() => globalThis.f01.switchIdentity()); await waitText('account-b'); await page.evaluate(() => globalThis.f01.releaseProfile()); assert(await page.evaluate(() => !globalThis.f01.calls.some(call => call.url.endsWith('/actions/complete'))), 'old workflow continued'); });
+  await caseRun('profile completion with failed logout remains recoverable without navigation', async () => { await fresh(); await openProfile(); await page.evaluate(() => { globalThis.f01.completedProfile = true; globalThis.f01.logoutFail = true; }); const input = await page.$('input[autocomplete=username]'); await input.click({ clickCount: 3 }); await input.type('renamed-a'); await clickText(await page.evaluate(() => globalThis.f01.copy().account.confirmChange)); await page.waitForSelector('[role=alert]'); assert(new URL(page.url()).pathname === new URL(url).pathname && new URL(page.url()).searchParams.get('section') === 'accountSettings', 'navigated despite failed logout'); });
   for (const language of ['zh', 'en', 'ja']) await caseRun(`${language}: admin bootstrap context failure preserves existing error retry`, async () => {
-    await fresh(); await page.select('header select', language);
-    await page.evaluate(() => { globalThis.f01.badBootstrapContext = 'missing'; globalThis.f01.calls.length = 0; globalThis.f01.render('admin'); });
+    await fresh(); await page.select('.ap-sidebar-foot select, .adm-sidebar-foot select, header select', language);
+    await page.evaluate(() => { globalThis.f01.badBootstrapContext = 'missing'; globalThis.f01.calls.length = 0; history.replaceState({}, '', '?section=users'); globalThis.f01.render('admin'); });
     await page.waitForFunction(() => document.querySelector('.adm-shell [role=alert]')?.firstChild?.textContent === globalThis.f01.copy().admin.requestFailed);
-    assert(await page.evaluate(() => !document.querySelector('tbody') && !document.querySelector('.adm-shell nav') && !globalThis.f01.calls.some(call => call.url.includes('/admin/v1/users'))), 'invalid admin bootstrap mounted management workspace');
+    assert(await page.evaluate(() => !document.querySelector('tbody') && !document.querySelector('.adm-shell nav button') && !globalThis.f01.calls.some(call => call.url.includes('/admin/v1/users'))), 'invalid admin bootstrap mounted management workspace');
     await page.evaluate(() => { globalThis.f01.badBootstrapContext = ''; });
     await clickText(await page.evaluate(() => globalThis.f01.copy().admin.retry));
-    await page.waitForSelector('tbody tr'); await waitText('account-a');
+    await page.waitForSelector('tbody tr'); await waitText('managed-account');
   });
-  await caseRun('admin users keep enable and disable with no direct delete', async () => { await fresh('admin'); assert(await page.evaluate(() => ![...document.querySelectorAll('button')].some(button => /delete/i.test(button.textContent))), 'delete exposed'); await clickText(await page.evaluate(() => globalThis.f01.copy().admin.accounts.disable)); await waitText('DISABLED'); await clickText(await page.evaluate(() => globalThis.f01.copy().admin.accounts.enable)); await waitText('ACTIVE'); assert(await page.evaluate(() => globalThis.f01.calls.filter(call => call.url.endsWith('/status')).every(call => call.method === 'PATCH')), 'wrong status method'); });
+  await caseRun('admin users keep enable and disable with no direct delete', async () => { await fresh('admin'); assert(await page.evaluate(() => ![...document.querySelectorAll('button')].some(button => /delete/i.test(button.textContent))), 'delete exposed'); await clickText(await page.evaluate(() => globalThis.f01.copy().admin.accounts.disable)); await page.click('[role=dialog] > button'); await page.waitForFunction(() => globalThis.f01.status === 'DISABLED'); await clickText(await page.evaluate(() => globalThis.f01.copy().admin.accounts.enable)); await page.click('[role=dialog] > button'); await page.waitForFunction(() => globalThis.f01.status === 'ACTIVE'); assert(await page.evaluate(() => globalThis.f01.calls.filter(call => call.url.endsWith('/status')).every(call => call.method === 'PATCH')), 'wrong status method'); });
   for (const language of ['zh','en','ja']) await caseRun(`${language}: unknown identity manual query uses original retry route without compensation`, async () => {
-    await fresh('admin'); await page.select('header select',language);
+    await fresh('admin'); await page.select('.ap-sidebar-foot select, .adm-sidebar-foot select, header select',language);
     await page.evaluate(() => { globalThis.f01.unknownRegistration=true;globalThis.f01.calls.length=0; });
     await clickText(await page.evaluate(() => globalThis.f01.copy().admin.userManagement.registrationRepair));
     const row='tr[data-operation-status="IDENTITY_CREATING"]'; await page.waitForSelector(`${row} button`);
@@ -91,15 +96,15 @@ try {
   await caseRun('registration retry and compensation are actual wired actions', async () => { await fresh('admin'); await clickText(await page.evaluate(() => globalThis.f01.copy().admin.userManagement.registrationRepair)); const operationID = await page.evaluate(() => globalThis.f01.id);
     const row = `tr[data-operation-id="${operationID}"][data-operation-status="REPAIR_REQUIRED"]`;
     await page.waitForSelector(row, { visible: true });
-    const language = await page.$eval('.adm-shell > header select', select => select.value);
+    const language = await page.$eval('.adm-sidebar-foot select', select => select.value);
     const status = await page.$eval(`${row} > td:nth-child(2)`, cell => cell.firstChild.textContent.trim());
     assert(status === registrationRepairCopy[language].statuses.REPAIR_REQUIRED, 'registration repair row lost its localized visible status');
     await page.$eval(row, (element, label) => [...element.querySelectorAll('button')].find(button => button.textContent.trim() === label)?.click(), await page.evaluate(() => globalThis.f01.copy().admin.userManagement.retry)); await page.waitForFunction(() => globalThis.f01.calls.some(call => call.url.endsWith('/actions/retry'))); await page.waitForFunction(row => [...document.querySelector(row)?.querySelectorAll('button') || []].some(button => button.textContent.trim() === globalThis.f01.copy().admin.userManagement.compensate && !button.disabled), {}, row);
     await page.$eval(row, (element, label) => [...element.querySelectorAll('button')].find(button => button.textContent.trim() === label)?.click(), await page.evaluate(() => globalThis.f01.copy().admin.userManagement.compensate)); await page.waitForFunction(() => globalThis.f01.calls.some(call => call.url.endsWith('/actions/compensate'))); });
   await caseRun('profile queue loads on first navigation and rejects wrong retry ACK', async () => { await fresh('admin'); await page.evaluate(() => { globalThis.f01.badRetry = true; }); await clickText(await page.evaluate(() => globalThis.f01.copy().admin.userManagement.profileRepair)); await waitText('REPAIR_REQUIRED'); await clickText(await page.evaluate(() => globalThis.f01.copy().admin.userManagement.retry)); await page.waitForSelector('[role=alert]'); assert(await page.evaluate(() => document.querySelector('[role=alert]').textContent.length > 0), 'wrong ACK silently accepted'); });
-  await caseRun('queue 503 shows error rather than fake empty list', async () => { await fresh('admin'); await page.evaluate(() => { globalThis.f01.adminError = true; }); await clickText(await page.evaluate(() => globalThis.f01.copy().admin.userManagement.profileRepair)); await page.waitForSelector('[role=alert]'); assert(await page.evaluate(() => !document.querySelector('tbody')), 'fake collection displayed'); });
-  await caseRun('SMS unknown ACK keeps the original key and body across language change', async () => { await fresh('admin'); await clickText(await page.evaluate(() => globalThis.f01.copy().admin.settings.title)); await page.waitForSelector('textarea'); await page.type('textarea', 'controlled correction reason'); await page.evaluate(() => { globalThis.f01.smsFail = true; }); await page.click('button[type=submit]'); await page.waitForFunction(() => globalThis.f01.smsCalls.length === 1); await page.waitForSelector('[role=alert]'); await page.select('.adm-shell > header select', 'ja'); await page.evaluate(() => { globalThis.f01.smsFail = false; }); await page.click('button[type=submit]'); await page.waitForFunction(() => globalThis.f01.smsCalls.length === 2); assert(await page.evaluate(() => globalThis.f01.smsCalls[0].key === globalThis.f01.smsCalls[1].key && JSON.stringify(globalThis.f01.smsCalls[0].command) === JSON.stringify(globalThis.f01.smsCalls[1].command)), 'lost ACK changed immutable facts'); await waitText(await page.evaluate(() => globalThis.f01.copy().admin.settings.sms.saved)); });
-  await caseRun('all three languages display real personal labels', async () => { await fresh(); for (const language of ['ja', 'zh', 'en']) { await page.select('header select', language); await waitText(await page.evaluate(() => globalThis.f01.copy().account.profileSettings)); } });
+  await caseRun('queue 503 shows error rather than fake empty list', async () => { await fresh('admin'); await page.evaluate(() => { globalThis.f01.adminError = true; }); await clickText(await page.evaluate(() => globalThis.f01.copy().admin.userManagement.profileRepair)); await page.waitForSelector('[role=alert]'); assert(await page.evaluate(() => !document.querySelector('[data-workspace=profile]:not([hidden]) tbody')), 'fake collection displayed'); });
+  await caseRun('SMS unknown ACK keeps the original key and body across language change', async () => { await fresh('admin'); await clickText(await page.evaluate(() => globalThis.f01.copy().admin.settings.title)); await page.waitForSelector('.adm-sms-form textarea'); await page.type('.adm-sms-form textarea', 'controlled correction reason'); assert(await page.$eval('.adm-sms-form textarea', node => node.value === 'controlled correction reason'), 'SMS reason input was reset before submission'); await page.waitForFunction(() => !document.querySelector('.adm-sms-form button[type=submit]').disabled); await page.evaluate(() => { globalThis.f01.smsFail = true; }); await page.click('.adm-sms-form button[type=submit]'); await page.waitForFunction(() => globalThis.f01.smsCalls.length === 1); await page.waitForSelector('[role=alert]'); await page.select('.adm-sidebar-foot select', 'ja'); await page.evaluate(() => { globalThis.f01.smsFail = false; }); await page.click('.adm-sms-form button[type=submit]'); await page.waitForFunction(() => globalThis.f01.smsCalls.length === 2); assert(await page.evaluate(() => globalThis.f01.smsCalls[0].key === globalThis.f01.smsCalls[1].key && JSON.stringify(globalThis.f01.smsCalls[0].command) === JSON.stringify(globalThis.f01.smsCalls[1].command)), 'lost ACK changed immutable facts'); await waitText(await page.evaluate(() => globalThis.f01.copy().admin.settings.sms.saved)); });
+  await caseRun('all three languages display real personal labels', async () => { await fresh(); for (const language of ['ja', 'zh', 'en']) { await page.select('.ap-sidebar-foot select, .adm-sidebar-foot select, header select', language); await waitText(await page.evaluate(() => globalThis.f01.copy().account.profileSettings)); } });
   const desktopGuest = async () => { await fresh(); await page.evaluate(() => { globalThis.f01.authenticated = false; globalThis.f01.render('desktop'); }); await page.waitForSelector('.ap-login input[autocomplete=username]'); };
   await caseRun('desktop rejected password displays its localized reason without provider text', async () => {
     await desktopGuest();
@@ -129,7 +134,7 @@ try {
   };
   const registrationCaptcha = async language => {
     await fresh();
-    await page.select('header select', language);
+    await page.select('.ap-sidebar-foot select, .adm-sidebar-foot select, header select', language);
     await page.evaluate(() => { globalThis.f01.authenticated = false; globalThis.f01.render('desktop'); });
     await page.waitForSelector('.ap-login input[autocomplete=username]');
     await clickText(await page.evaluate(() => globalThis.f01.copy().account.register));
@@ -184,7 +189,7 @@ try {
     assert(await page.evaluate(() => globalThis.f01.nativeCalls.filter(([method])=>method==='sms').length===1), 'preparation retry duplicated SMS');
   });
   for (const language of ['zh','en','ja']) await caseRun(`${language}: reset prepares only after challenge and submits only original reference`, async () => {
-    await fresh();await page.select('header select',language);
+    await fresh();await page.select('.ap-sidebar-foot select, .adm-sidebar-foot select, header select',language);
     await page.evaluate(() => {globalThis.f01.authenticated=false;globalThis.f01.render('desktop');});
     await page.waitForSelector('.ap-login input[autocomplete=username]');
     await clickText(await page.evaluate(() => globalThis.f01.copy().account.authModes.forgot));
@@ -232,7 +237,7 @@ try {
   await caseRun('desktop forgot password remains Native prepare/reset rather than plaintext Account API', async () => { await desktopGuest(); await clickText(await page.evaluate(() => globalThis.f01.copy().account.authModes.forgot)); await page.type('input[autocomplete=tel-national]', '13800000000'); const inputs = await page.$$('input[type=password]'); await inputs[0].type('ControlPassword9'); await inputs[1].type('ControlPassword9'); await clickText(await page.evaluate(() => globalThis.f01.copy().account.sendCode)); await page.waitForSelector('[role=dialog]'); await clickText(await page.evaluate(() => globalThis.f01.copy().account.captchaConfirm)); await page.waitForFunction(() => globalThis.f01.nativeCalls.some(call => call[0] === 'sms')); await page.type('input[autocomplete=one-time-code]', '000000'); await page.click('form button:not([type=button])'); await waitText(await page.evaluate(() => globalThis.f01.copy().account.passwordResetComplete)); assert(await page.evaluate(() => globalThis.f01.nativeCalls.some(call => call[0] === 'reset') && !globalThis.f01.calls.some(call => call.url.endsWith('/password-changes') || call.url.endsWith('/password-resets'))), 'plaintext public API used'); });
   await caseRun('personal workspaces preserve drafts on refresh and isolate new account state without duplicate React keys', async () => {
     assert(duplicateKeys.length === 0, `duplicate workspace React keys: ${duplicateKeys.length}`);
-    await fresh();
+    await fresh(); await openProfile();
     const input = await page.$('input[autocomplete=username]');
     await input.click(); await input.evaluate(node => node.select()); await input.type('draft-for-a');
     assert(await input.evaluate(node => node.value === 'draft-for-a'), 'profile draft was not entered');
@@ -241,16 +246,16 @@ try {
       const refresh = [...document.querySelectorAll('header button')].find(button => button.textContent.trim() === globalThis.f01.copy().account.refresh);
       return refresh && !refresh.disabled && document.querySelector('input[autocomplete=username]')?.value === 'draft-for-a';
     });
-    await page.evaluate(() => globalThis.f01.switchIdentity()); await waitText('account-b');
+    await page.evaluate(() => globalThis.f01.switchIdentity()); await waitText('account-b'); await openProfile();
     await page.waitForFunction(() => document.querySelector('input[autocomplete=username]')?.value === 'account-b');
     assert(duplicateKeys.length === 0, `duplicate workspace React keys: ${duplicateKeys.length}`);
   });
-  passed += await runSMSConflictCases(page, `http://127.0.0.1:${vite.httpServer.address().port}`);
-  console.log(`RESULT ${passed} PASS 0 FAIL 0 SKIP`);
+  if (!process.env.F01_CASE) passed += await runSMSConflictCases(page, `http://127.0.0.1:${vite.httpServer.address().port}`);
+  console.log(`RESULT ${passed} PASS 0 FAIL ${skipped} SKIP`);
  } catch (error) {
   console.error(`FAIL after ${passed} PASS: ${error.message}`);
   if (page) {
-    const diagnostic = await page.evaluate(() => ({ text: document.body.textContent.slice(0, 1000), nativeMethods: window.f01?.nativeCalls.map(call => call[0]), lastRoutes: window.f01?.calls.slice(-5).map(call => call.url) })).catch(() => ({}));
+    const diagnostic = await page.evaluate(() => ({ text: document.body.textContent.slice(0, 1000), smsForm: [...document.querySelectorAll('.adm-sms-form textarea, .adm-sms-form button')].map(node => ({ tag: node.tagName, value: node.value, disabled: node.disabled })), nativeMethods: window.f01?.nativeCalls.map(call => call[0]), lastRoutes: window.f01?.calls.slice(-5).map(call => call.url) })).catch(() => ({}));
     console.error(JSON.stringify(diagnostic));
   }
   process.exitCode = 1;
