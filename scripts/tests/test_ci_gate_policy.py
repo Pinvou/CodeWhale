@@ -5072,6 +5072,22 @@ class CiGatePolicyTests(unittest.TestCase):
         # the decision record above mentions the old value historically.
         self.assertNotIn("cache-targets:", rust_test_cache)
 
+    def test_console_container_script_only_diff_selects_its_actual_job(self):
+        changes = _without_yaml_comments(
+            self.pr_workflow.split("            update_release_console:", 1)[1].split(
+                "            acp_runtime:", 1
+            )[0]
+        )
+        paths = _extract_quoted_paths(changes)
+        self.assertTrue(_matches_paths_filter("scripts/ci-update-release-console-container.sh", paths))
+        self.assertNotIn("scripts/**", paths)
+        console = _without_yaml_comments(_extract_job_block(self.pr_workflow, "update-release-console-test"))
+        self.assertEqual(
+            _extract_job_level_if(console),
+            "${{ !cancelled() && github.event.action != 'closed' && needs.changes.outputs.update_release_console == 'true' && (github.event_name == 'pull_request' || github.event_name == 'merge_group') }}",
+        )
+        self.assertRegex(console, r"(?m)^        run: bash scripts/ci-update-release-console-container\.sh$")
+
     def test_dev_profile_o0_guard_stays_on_all_three_heavy_legs(self):
         # Linux may reuse a runner with a persistent Cargo home. Keep O0 on
         # each actual invocation, without writing administrator configuration.

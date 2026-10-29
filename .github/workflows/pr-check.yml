@@ -652,6 +652,7 @@ jobs:
               - '.github/workflows/pr-check.yml'
             update_release_console:
               - 'update-release-console/**'
+              - 'scripts/ci-update-release-console-container.sh'
               - 'deploy/nginx-pinvou3-updates.conf'
               - 'docs/windows-static-update-release.md'
               - 'docs/windows-update-release-console.md'
