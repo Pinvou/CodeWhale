@@ -43,6 +43,48 @@ try {
     try { await action(); assert.deepEqual(errors, [], 'uncaught UI error'); console.log(`PASS ${name}`); passed++; }
     catch (error) { console.error(JSON.stringify({ case: name, pageErrors: errors, dialog: await page.evaluate(() => document.querySelector('[role=dialog]')?.textContent.slice(0, 1200)) })); throw error; }
   };
+  await run('personal original visual semantics distinguish closure, query, cancel and recharge', async () => {
+    for (const language of ['zh', 'en', 'ja']) {
+      await fresh();
+      await page.evaluate(language => {
+        window.restored.language = language;
+        window.restored.personal = ['personal.billing.read', 'personal.recharge.create', 'personal.usage.read', 'personal.profile.update', 'personal.account.close.read', 'personal.account.close.request'];
+        window.restored.reload();
+      }, language);
+      await page.waitForSelector('.ap-product-picker label.selected');
+      assert.equal(await page.$eval('.ap-balance-hero', node => getComputedStyle(node).marginTop), '36px');
+      const recharge = await page.$eval('.ap-recharge-controls > button', node => ({ color: getComputedStyle(node).color, background: getComputedStyle(node).backgroundColor }));
+      assert.deepEqual(recharge, { color: 'rgb(32, 33, 36)', background: 'rgb(236, 236, 236)' });
+      await accountTab('accountSettings');
+      await page.waitForSelector('.ap-danger-section button.ap-danger:not(:disabled)');
+      const dangerStyle = async selector => page.$eval(selector, node => ({ color: getComputedStyle(node).color, border: getComputedStyle(node).borderTopColor, background: getComputedStyle(node).backgroundColor }));
+      assert.deepEqual(await dangerStyle('.ap-danger-section button.ap-danger'), { color: 'rgb(217, 48, 37)', border: 'rgb(242, 197, 193)', background: 'rgb(255, 255, 255)' });
+      assert.equal(await page.$eval('.ap-danger-section', node => getComputedStyle(node).borderTopColor), 'rgb(241, 216, 213)');
+      const neutral = await page.$eval('.ap-danger-section > button:not(.ap-danger)', node => getComputedStyle(node).color);
+      assert.notEqual(neutral, 'rgb(217, 48, 37)', 'read-only query must remain neutral');
+      for (const width of [1440, 768, 390]) {
+        await page.setViewport({ width, height: 1000 }); await noOverflow();
+        assert.equal((await dangerStyle('.ap-danger-section button.ap-danger')).color, 'rgb(217, 48, 37)');
+      }
+      await page.click('.ap-danger-section button.ap-danger');
+      await page.waitForSelector('.ap-closure-confirm-dialog');
+      assert.equal(await page.$eval('.ap-closure-confirm-dialog', node => Boolean(node.closest('.ap-shell'))), false, 'confirmation really renders outside the shell');
+      assert.deepEqual(await dangerStyle('.ap-closure-confirm-dialog button.ap-danger'), { color: 'rgb(217, 48, 37)', border: 'rgb(242, 197, 193)', background: 'rgb(255, 255, 255)' });
+      assert.notEqual(await page.$eval('.ap-closure-confirm-dialog button[type=button]', node => getComputedStyle(node).color), 'rgb(217, 48, 37)', 'cancel must remain neutral');
+      await page.focus('.ap-closure-confirm-dialog input');
+      await page.keyboard.press('Tab'); await page.keyboard.press('Tab');
+      assert.equal(await page.$eval('.ap-closure-confirm-dialog button.ap-danger', node => node === document.activeElement), true);
+      assert.equal(await page.$eval('.ap-closure-confirm-dialog button.ap-danger', node => getComputedStyle(node).outlineStyle), 'solid');
+      await page.keyboard.press('Escape'); await page.waitForFunction(() => !document.querySelector('.ap-closure-confirm-dialog'));
+      assert.equal(await page.evaluate(() => window.restored.calls.filter(call => call.method !== 'GET' && !call.url.endsWith('/account/bootstrap')).length), 0, 'visual review never sends a closure request');
+      if (process.env.UI_ARTIFACT_DIR && language === 'zh') {
+        fs.mkdirSync(process.env.UI_ARTIFACT_DIR, { recursive: true });
+        await page.screenshot({ path: path.join(process.env.UI_ARTIFACT_DIR, 'personal-settings-warning-mobile.png'), fullPage: true });
+        await page.setViewport({ width: 1440, height: 1000 });
+        await page.screenshot({ path: path.join(process.env.UI_ARTIFACT_DIR, 'personal-settings-warning-desktop.png'), fullPage: true });
+      }
+    }
+  });
   await run('personal original tabs, five benefits, exact balance and history navigation', async () => {
     await fresh('?section=usage');
     await activeAccount('creditsUsage');

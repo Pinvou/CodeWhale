@@ -131,6 +131,6 @@ export function AccountClosureWorkspace({ client, me, language }) {
     <button disabled={operation.busy} onClick={() => void load()}>{copy.queryRetry}</button>
     {item && <><p>{copy.statuses[item.status]} · {copy.stages[item.stage]}</p><p>{copy.sla}: {item.sla_expires_at}</p>
       {item.blockers.length ? <ul>{item.blockers.map((blocker, index) => <li key={`${blocker.domain}:${blocker.code}:${index}`}>{accountClosureBlockerLabel(blocker, copy)}</li>)}</ul> : <p>{copy.noBlockers}</p>}</>}
-    {canRequest && (presentation.canRequest || operation.unknown) && <><p>{copy.before}</p><button disabled={operation.busy || operation.blocked || !sameIdentity(ready.current)} onClick={() => void request()}>{operation.unknown ? financeCopy[language].retry : copy.start}</button></>}
+    {canRequest && (presentation.canRequest || operation.unknown) && <><p>{copy.before}</p><button className="ap-danger" disabled={operation.busy || operation.blocked || !sameIdentity(ready.current)} onClick={() => void request()}>{operation.unknown ? financeCopy[language].retry : copy.start}</button></>}
   </section>;
 }

@@ -64,6 +64,14 @@
 .ap-closure-confirm-dialog input { box-sizing: border-box; width: 100%; min-height: 40px; padding: 8px; margin-bottom: 16px; }
 .ap-closure-confirm-dialog footer { display: flex; justify-content: flex-end; gap: 12px; }
 .ap-closure-confirm-dialog button { min-height: 40px; padding: 8px 12px; }
+/* Match the pre-rewrite portal danger action; query/cancel remain neutral.
+ * Confirmations are portalled to body and need their own explicit scope. */
+.ap-shell button.ap-danger, .ap-closure-confirm-dialog button.ap-danger {
+  color: #d93025; background: #fff; border: 1px solid #f2c5c1; border-radius: 8px;
+}
+.ap-shell button.ap-danger:hover:not(:disabled), .ap-closure-confirm-dialog button.ap-danger:hover:not(:disabled) { background: #fce8e6; }
+.ap-shell button.ap-danger:focus-visible, .ap-closure-confirm-dialog button.ap-danger:focus-visible { outline: 3px solid #d9302580; outline-offset: 2px; }
+.ap-closure-confirm-dialog button.ap-danger:disabled { opacity: .5; cursor: default; }
 .ap-pending-payments { list-style: none; padding: 0; }
 .ap-pending-payments li { display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 12px; padding: 12px 0; border-bottom: 1px solid #8884; }
 .ap-payment-dialog img { display: block; max-width: 100%; height: auto; margin: 12px auto; }

@@ -25,7 +25,7 @@
 .ap-restored-portal .ap-sidebar-foot { display: grid; gap: 8px; margin-top: auto; padding-top: 16px; border-top: 1px solid var(--ap-border-soft); }
 .ap-restored-portal .ap-sidebar-foot select { width: 100%; color: var(--ap-primary); background: var(--ap-component); border-color: transparent; }
 .ap-restored-portal .ap-sidebar-foot button { border: 0; color: var(--ap-secondary); text-align: left; }
-.ap-restored-portal .ap-main { min-width: 0; padding: 40px 32px 72px; }
+.ap-restored-portal .ap-main { min-width: 0; padding: 40px 24px 72px; }
 .ap-restored-portal .ap-page-header { display: flex; align-items: center; justify-content: space-between; gap: 16px; max-width: 1000px; margin: 0 auto 28px; }
 .ap-restored-portal .ap-page-header h2 { margin: 0; font-size: 32px; font-weight: 600; line-height: 40px; }
 .ap-restored-portal .ap-portal-panel, .ap-restored-portal .ap-alert { max-width: 1000px; margin-left: auto; margin-right: auto; }
@@ -34,7 +34,8 @@
 .ap-restored-portal .ap-portal-panel > section + section { padding-top: 28px; border-top: 1px solid var(--ap-border); }
 .ap-restored-portal .ap-portal-panel h2 { font-size: 22px; line-height: 1.4; }
 .ap-restored-portal .ap-portal-panel h3 { font-size: 18px; font-weight: 500; }
-.ap-restored-portal .ap-balance-hero { padding: 28px 32px !important; border: 1px solid var(--ap-border); border-radius: 20px; background: #fff !important; }
+.ap-restored-portal .ap-portal-panel > .ap-balance-hero { margin: 36px auto 24px; }
+.ap-restored-portal .ap-balance-hero { padding: 40px !important; border: 1px solid var(--ap-border); border-radius: 24px; background: #fff !important; }
 .ap-restored-portal .ap-balance-hero strong { font-size: 40px; font-weight: 500; overflow-wrap: anywhere; }
 .ap-restored-portal button:focus-visible, .ap-restored-portal a:focus-visible, .ap-restored-portal input:focus-visible, .ap-restored-portal select:focus-visible { outline: 3px solid #1e8e3e80; outline-offset: 2px; }
 .ap-restored-portal table { width: 100%; border-collapse: collapse; }
@@ -44,14 +45,16 @@
 .ap-restored-portal .ap-section-heading { display: flex; align-items: center; justify-content: space-between; gap: 16px; margin-bottom: 16px; }
 .ap-restored-portal .ap-section-heading h3 { margin: 0; }
 .ap-restored-portal .ap-section-heading button { border: 0; background: transparent; }
-.ap-restored-portal .ap-product-picker { display: grid; grid-template-columns: repeat(auto-fit, minmax(175px, 1fr)); gap: 12px; }
-.ap-restored-portal .ap-product-picker label { display: grid; position: relative; gap: 10px; padding: 22px; border: 1px solid var(--ap-border); border-radius: 16px; background: #fff; cursor: pointer; }
-.ap-restored-portal .ap-product-picker label.selected { border-color: #1e8e3e; box-shadow: 0 0 0 1px #1e8e3e; }
+.ap-restored-portal .ap-product-picker { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 10px; }
+.ap-restored-portal .ap-product-picker label { display: grid; position: relative; gap: 5px; min-width: 0; padding: 12px; border: 1px solid transparent; border-radius: 8px; background: var(--ap-component); cursor: pointer; overflow-wrap: anywhere; }
+.ap-restored-portal .ap-product-picker label:hover { border-color: var(--ap-border); }
+.ap-restored-portal .ap-product-picker label.selected { border-color: #dcdfe3; background: #ececec; }
 .ap-restored-portal .ap-product-picker input { width: 18px; height: 18px; padding: 0; margin: 0; }
-.ap-restored-portal .ap-product-picker span { font-size: 22px; font-weight: 600; }
+.ap-restored-portal .ap-product-picker span { color: var(--ap-secondary); font-size: 12px; }
 .ap-restored-portal .ap-recharge-controls { display: flex; align-items: flex-end; gap: 16px; flex-wrap: wrap; margin: 20px 0 28px; }
 .ap-restored-portal .ap-recharge-controls > label { display: grid; gap: 6px; }
-.ap-restored-portal .ap-recharge-controls > button { padding: 10px 24px; background: #202124; color: #fff; }
+.ap-restored-portal .ap-recharge-controls > button { padding: 8px 24px; border-color: #ececec; background: #ececec; color: var(--ap-primary); font-weight: 500; }
+.ap-restored-portal .ap-recharge-controls > button:hover:not(:disabled) { background: #e4e4e4; }
 .ap-restored-portal .ap-benefits { padding: 28px 0; margin: 28px 0 0; border-top: 1px solid var(--ap-border); border-radius: 0; background: transparent; }
 .ap-benefit-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); gap: 16px; }
 .ap-benefit-card { display: grid; gap: 14px; padding: 22px; border: 1px solid #eceef2; border-radius: 16px; background: #fff; }
@@ -75,6 +78,9 @@
 .ap-restored-portal .ap-status { display: inline-block; padding: 3px 8px; border-radius: 8px; background: #f0f1f3; white-space: nowrap; }
 .ap-restored-portal .ap-invoice-notice { margin-top: 32px; padding: 24px 0 0; border-top: 1px solid var(--ap-border); border-radius: 0; background: transparent; }
 .ap-finance-feedback-target { max-width: 1000px; margin: 0 auto; }
+.ap-restored-portal .ap-portal-panel > .ap-danger-section { padding: 28px 32px; margin-top: 28px; border: 1px solid #f1d8d5; border-radius: 20px; background: #fff; }
+.ap-restored-portal .ap-danger-section h2 { font-size: 20px; font-weight: 500; }
+.ap-restored-portal .ap-danger-section > p { color: var(--ap-secondary); line-height: 1.7; }
 @media (max-width: 850px) {
   .ap-shell.ap-restored-portal { grid-template-columns: minmax(0, 1fr); }
   .ap-restored-portal .ap-sidebar { position: static; height: auto; padding: 16px; gap: 16px; border-right: 0; border-bottom: 1px solid var(--ap-border); }
@@ -85,6 +91,8 @@
   .ap-restored-portal .ap-sidebar-foot { display: flex; align-items: center; margin: 0; padding-top: 12px; }
   .ap-restored-portal .ap-sidebar-foot select { width: auto; }
   .ap-restored-portal .ap-main { padding: 28px 20px 48px; }
+  .ap-restored-portal .ap-product-picker { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .ap-restored-portal .ap-balance-hero { padding: 24px !important; }
 }
 @media (max-width: 560px) {
   .ap-restored-portal .ap-main { padding: 24px 16px 40px; }
@@ -92,6 +100,8 @@
   .ap-restored-portal .ap-page-header h2 { font-size: 26px; line-height: 34px; }
   .ap-restored-portal .ap-page-header > button { max-width: 120px; }
   .ap-restored-portal .ap-grid { grid-template-columns: minmax(0, 1fr); }
+  .ap-restored-portal .ap-product-picker { grid-template-columns: minmax(0, 1fr); }
+  .ap-restored-portal .ap-portal-panel > .ap-danger-section { padding: 24px 20px; }
   .ap-restored-portal .ap-profile-row { grid-template-columns: minmax(0, 1fr) auto; gap: 8px; }
   .ap-restored-portal .ap-profile-row > span { grid-column: 1; }
   .ap-restored-portal .ap-profile-row > strong { grid-column: 1; }
