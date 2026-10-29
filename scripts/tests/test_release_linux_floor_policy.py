@@ -70,15 +70,24 @@ class ReleaseLinuxFloorPolicyTests(unittest.TestCase):
         )[1].split("\n  validate-windows-runtime-pr:", maxsplit=1)[0]
 
     def test_linux_builds_pin_ubuntu_22_04_runners(self):
-        # 带换行断言,避免 x64 段误匹配 ubuntu-22.04-arm 这类更长标签。
-        self.assertIn("runs-on: ubuntu-22.04\n", self.x64_job)
-        self.assertIn("runs-on: ubuntu-22.04-arm\n", self.arm64_job)
+        # Only the live job header may establish the runner. The optional
+        # self-hosted route keeps the exact x64 Jammy fallback; ARM remains
+        # hosted. Do not normalize whole jobs and erase their disk branches.
+        for job, expected in (
+            (self.x64_job, 'runs-on: ${{ fromJSON(vars.PINVOU_LINUX_RUNNER || \'["ubuntu-22.04"]\') }}'),
+            (self.arm64_job, 'runs-on: ubuntu-22.04-arm'),
+            (self.loong64_job, 'runs-on: ${{ fromJSON(vars.PINVOU_LINUX_RUNNER || \'["ubuntu-22.04"]\') }}'),
+        ):
+            header = _without_inline_comments(job).split("\n    steps:", 1)[0]
+            self.assertEqual(
+                [line.strip() for line in header.splitlines() if line.startswith("    runs-on:")],
+                [expected],
+            )
         self.assertNotIn("ubuntu-latest", self.x64_job.split("\n    steps:")[0])
         self.assertNotIn("ubuntu-24.04", self.arm64_job.split("\n    steps:")[0])
         # loongarch64 没有 GitHub 托管 loong64 runner:交叉构建必须钉在
         # x86_64 ubuntu-22.04(工具链资产按宿主架构 sha256 钉死),不允许
         # 漂到 arm 基座或 latest。
-        self.assertIn("runs-on: ubuntu-22.04\n", self.loong64_job)
         self.assertNotIn("runs-on: ubuntu-22.04-arm", self.loong64_job)
         self.assertNotIn("ubuntu-latest", self.loong64_job.split("\n    steps:")[0])
         self.assertNotIn("ubuntu-24.04", self.loong64_job.split("\n    steps:")[0])
