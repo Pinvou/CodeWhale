@@ -31,7 +31,7 @@ ENABLE_DESKTOP_CONTROLLER=1 bash scripts/deploy-remote-relay-test.sh
 
 Relay 先暂存解包、装依赖才替换目录；新版本健康失败或公网验证失败回滚 Relay 侧并非零退出。nginx 与 sshd 分别使用暂存、原子替换、验证和局部回滚；跨主机失败需按阶段排查，可重跑收敛。默认执行 npm test / Web 构建，仅已有对应实际证据时允许显式 skip。
 
-Controller 私钥、HMAC 与状态位于代码目录之外的独立持久目录；0600 文件、0700 目录，重部署复用。已有安装丢身份但仍有状态/公钥痕迹时拒绝重新生成；legacy 身份只作一次性只读迁移。首次生成的公钥可能不等于内置 test pin，须取回实际公钥并成对配置；自动交叉校验仍见 #1507。
+Controller 私钥、HMAC 与状态位于代码目录之外的独立持久目录；0600 文件、0700 目录，重部署复用。已有安装丢身份但仍有状态/公钥痕迹时拒绝重新生成；legacy 身份只作一次性只读迁移。首次生成的公钥可能不等于内置 test pin，须取回实际公钥并成对配置。启用 controller 时，部署及公网验证完成后，脚本读取有效公钥并分别核对当前源码的 Test profile 和 Windows launcher 默认信任根，提示不一致；已安装客户端及其环境覆盖仍须另行核对。
 
 ### 桌面 app 指向测试端点
 
@@ -75,6 +75,6 @@ bash scripts/deploy-remote-relay-test.sh --teardown
 - 当前 Windows B 端恢复接线回归的宿主入口是 `pinvou3-app/src-tauri/src/app/commands/remote_control/reader_resume_tests.rs` 的 `real_reader_manager_worker_resume_round_trip()`；它调用 `features/remote_control/controller/relay_runtime/reader_resume_tests.rs` 的共享 `resume_round_trip()` 夹具：
   走真实 WebSocket reader、manager 与 worker，但 Relay 是本地协议模拟端；不替代 Web v2 mobile、真实三角色或双 Windows 验收。
 
-`node scripts/run-windows-relay-tools-tests.mjs` 在原生 Windows PowerShell 5.1 执行属主、身份与 launcher 三组测试，CI 的 `windows-relay-tools-test` 同样执行且禁止零计数或 skip。健康片段覆盖有界重试/请求超时和恢复旧 unit，不代表完整故障矩阵（#1429）。以上检查不执行真实 SSH、生产部署、线上回滚或双 Windows 验收。
+`node scripts/run-windows-relay-tools-tests.mjs` 在原生 Windows PowerShell 5.1 执行属主、身份、launcher、controller guard 与锁协议部署回滚测试，CI 的 `windows-relay-tools-test` 同样执行且禁止零计数或 skip。guard 用例分别记录通用安全替身与原生权限验证；部署回滚辅助函数使用真实 Bash 和模拟 systemctl，不代表实际服务部署。启用 controller 的入口要求 Node.js 24，首次跨锁协议升级必须先按 [迁移规程](../remote-control-relay/CONTROLLER-LOCK-MIGRATION.md) 停止全部 writer 并确认；新锁激活后旧版本不支持协议时保持停服，不能只回代码后重启。健康片段覆盖有界重试/请求超时和恢复旧 unit，不代表完整故障矩阵（#1429）。以上检查不执行真实 SSH、生产部署、线上回滚或双 Windows 验收。
 
 真实双机旅程与发布门禁见 [部署说明](Windows双端远程控制服务部署说明.md) 和 [发布与回滚](Windows双端远程控制发布与回滚.md)。敏感信息或未修漏洞按 CONTRIBUTING.md 中的私密安全报告通道处理，不在公开 Issue 粘贴实例值。
