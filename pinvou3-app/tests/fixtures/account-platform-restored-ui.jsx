@@ -4,15 +4,29 @@ import { AccountPlatformView } from '../../src/features/account-platform/Account
 import { AdminPlatformView } from '../../src/features/account-platform/AdminPlatformView.jsx';
 import { AccountPlatformBffClient } from '../../src/features/account-platform/bff-client.js';
 import { AdminPlatformClient } from '../../src/features/account-platform/admin-client.js';
-import { accountPlatformCopy, adminPlatformCopy, financeCopy, accountLayoutCopy, adminLayoutCopy, organizationCopy } from '../../src/shared/i18n.js';
+import { accountPlatformCopy, adminPlatformCopy, financeCopy, accountLayoutCopy, adminLayoutCopy, organizationCopy, adminRolePresentationCopy, platformRoleCopy } from '../../src/shared/i18n.js';
 const id = '11111111-1111-4111-8111-111111111111';
 const orgID = '33333333-3333-4333-8333-333333333333', unitID = '44444444-4444-4444-8444-444444444444', otherID = '22222222-2222-4222-8222-222222222222';
 const root = createRoot(document.querySelector('#root'));
 const c = window.restored = { calls: [], effects: new Set(), user: id, language: 'zh', flags: {}, unknown: false, kind: new URLSearchParams(location.search).get('mode') || 'account' };
 const json = (value, status = 200) => new Response(status === 204 ? null : JSON.stringify(value), { status, headers: { 'Content-Type': 'application/json' } });
+const roleCatalog = [
+  { code: 'PLATFORM_AUDITOR', scope: 'PLATFORM', assignable: true, permissions: ['platform.audit.read', 'platform.audit.export', 'platform.billing.ledger.read', 'platform.billing.wallets.read', 'platform.models.read', 'platform.organizations.read', 'platform.roles.read', 'platform.system.status.read', 'platform.users.read', 'platform.usage.read'] },
+  { code: 'PLATFORM_BILLING_OPERATOR', scope: 'PLATFORM', assignable: true, permissions: ['platform.billing.wallets.read', 'platform.billing.ledger.read'] },
+  { code: 'PLATFORM_AUDIT_PII_EXPORT', scope: 'PLATFORM', assignable: true, permissions: ['platform.audit.pii.export'] },
+  { code: 'PLATFORM_SUPER_ADMIN', scope: 'PLATFORM', assignable: false, permissions: ['platform.roles.read', 'platform.roles.assign'] },
+];
+c.roleBindings = [{ binding_id: '66666666-6666-4666-8666-666666666666', user_id: otherID, role_code: 'PLATFORM_AUDITOR', scope: 'PLATFORM', grant_source: 'ADMIN', status: 'ACTIVE', starts_at: '2026-10-01T00:00:00Z', expires_at: null }];
+c.roleReceipts = new Map();
+// The service computes the current projection on each read/replay. A controlled
+// server clock makes expiry reachable without changing the accepted intent.
+const roleProjection = binding => {
+  const now = c.roleClockMs ?? Date.now();
+  return { ...binding, status: binding.status === 'REVOKED' ? 'REVOKED' : binding.expires_at && Date.parse(binding.expires_at) <= now ? 'EXPIRED' : Date.parse(binding.starts_at) > now ? 'SCHEDULED' : 'ACTIVE' };
+};
 const account = () => ({ user_id: c.user, username: 'sample-account', mobile: '+8613800000000', status: 'ACTIVE', personal_authorization_version: 1, platform_authorization_version: 1,
   personal_permissions: c.personal || ['personal.billing.read', 'personal.recharge.create', 'personal.recharge.manage', 'personal.usage.read', 'personal.profile.update'],
-  platform_permissions: c.permissions || ['platform.users.read', 'platform.users.status.manage', 'platform.billing.wallets.read', 'platform.billing.ledger.read', 'platform.billing.repairs.request', 'platform.products.read', 'platform.models.read', 'platform.tokens.read', 'platform.pricing.read', 'platform.usage.read', 'platform.registrations.repair', 'platform.profile-changes.repair', 'platform.organizations.read', 'platform.organizations.create', 'platform.organizations.profile.manage', 'platform.organizations.status.manage', 'platform.organizations.units.manage', 'platform.organizations.members.manage', 'platform.organizations.delete'],
+  platform_permissions: c.permissions || ['platform.roles.read', 'platform.roles.assign', 'platform.users.read', 'platform.users.status.manage', 'platform.billing.wallets.read', 'platform.billing.ledger.read', 'platform.billing.repairs.request', 'platform.products.read', 'platform.models.read', 'platform.tokens.read', 'platform.pricing.read', 'platform.usage.read', 'platform.registrations.repair', 'platform.profile-changes.repair', 'platform.organizations.read', 'platform.organizations.create', 'platform.organizations.profile.manage', 'platform.organizations.status.manage', 'platform.organizations.units.manage', 'platform.organizations.members.manage', 'platform.organizations.delete'],
   active_context: c.context || { context_type: 'PERSONAL', context_version: 1, permissions: [] } });
 const order = (index = 1) => ({ order_id: `00000000-0000-4000-8000-${String(index).padStart(12, '0')}`, product_id: 'sample-points', amount_fen: '990', status: index === 1 ? 'PENDING' : ['PAID', 'EXPIRED', 'MANUAL_REVIEW', 'CLOSED'][index % 4], fulfillment_status: index === 2 ? 'CREDITED' : 'PENDING', close_status: 'OPEN', expires_at: '2099-01-01T00:00:00Z', created_at: '2026-10-10T12:00:00Z', paid_at: '2026-10-10T12:00:00Z' });
 const packages = Array.from({ length: 7 }, (_, i) => ({ package_id: `00000000-0000-4000-8000-${String(i + 20).padStart(12, '0')}`, plan_id: 'sample-points', current_plan_name_zh_cn: '积分权益', current_plan_name_en: 'Points benefit', current_plan_name_ja: 'ポイント特典', source_type: 'PAYMENT', status: 'ACTIVE', points_remaining_microcredits: '9007199254740993', points_used_microcredits: '10000', valid_until: `2099-01-${String(i + 1).padStart(2, '0')}T00:00:00Z`, components: [{ component_type: 'BASE' }] }));
@@ -27,6 +41,28 @@ globalThis.fetch = async (input, options = {}) => {
 
   if (url === '/api/session') return json({ authenticated: true, csrf_token: 'CONTROL_SYNTHETIC_CSRF', feature_flags: c.flags });
   if (url.endsWith('/account/bootstrap')) return json(account());
+  if (url.endsWith('/admin/v1/roles') && method === 'GET') return json({ items: roleCatalog });
+  if (url.includes('/admin/v1/role-bindings') && method === 'GET') {
+    if (c.roleReadFail && c.roleReceipts.size) return json({ code: 'UPSTREAM_UNAVAILABLE' }, 503);
+    const target = new URL(url, location.origin).searchParams.get('user_id');
+    return json({ items: c.roleBindings.filter(binding => !target || binding.user_id === target).map(roleProjection) });
+  }
+  if (url.endsWith('/admin/v1/role-bindings') && method === 'POST') {
+    const body = JSON.parse(options.body);
+    if (!c.roleReceipts.has(call.key)) {
+      const binding = { ...body, binding_id: `77777777-7777-4777-8777-${String(c.roleReceipts.size + 1).padStart(12, '0')}`, scope: 'PLATFORM', grant_source: 'ADMIN', created_by: c.user, status: Date.parse(body.starts_at) > Date.now() ? 'SCHEDULED' : 'ACTIVE' };
+      c.roleReceipts.set(call.key, binding); c.roleBindings.push(binding);
+    }
+    if (c.roleUnknown) { c.roleUnknown = false; return json({ code: 'COMMAND_RESULT_UNKNOWN' }, 503); }
+    if (c.roleHoldGrant) { c.roleHoldGrant = false; return new Promise(resolve => { c.releaseRoleGrantAck = () => resolve(json(roleProjection(c.roleReceipts.get(call.key)), 201)); }); }
+    return json(roleProjection(c.roleReceipts.get(call.key)), 201);
+  }
+  if (/\/admin\/v1\/role-bindings\/[a-f0-9-]+$/.test(url) && method === 'DELETE') {
+    const binding = c.roleBindings.find(item => item.binding_id === url.split('/').pop());
+    if (!binding) return json({ code: 'NOT_FOUND' }, 404);
+    binding.status = 'REVOKED'; binding.revoked_by = c.user;
+    return json(binding);
+  }
   if (url.endsWith('/v1/me/organizations')) return json({ items: [] });
   if (url.includes('/v1/me/balance?')) return new Response('{"available_microcredits":9223372036854775807,"reserved_microcredits":10001}', { headers: { 'Content-Type': 'application/json' } });
   if (/\/v1\/me\/usage-(requests|turns)/.test(url)) return json({ items: [], next_cursor: null });
@@ -38,7 +74,14 @@ globalThis.fetch = async (input, options = {}) => {
   if (url.endsWith('/v1/recharge/orders') && method === 'POST') { c.effects.add(call.key); const receipt = () => c.unknown ? json({ code: 'COMMAND_RESULT_UNKNOWN' }, 503) : json(order(), 201); if (c.delayCreate) return new Promise(resolve => { c.releaseCreate = () => resolve(receipt()); }); return receipt(); }
   if (url.endsWith('/v1/recharge/orders')) return json({ items: Array.from({ length: 6 }, (_, i) => order(i + 1)) });
   if (/\/v1\/recharge\/orders\/[^/?]+$/.test(url)) return json(order(Number(url.split('-').at(-1))));
-  if (url.includes('/admin/v1/users?')) return json({ items: [{ user_id: url.includes('q=remote') ? otherID : id, username: url.includes('q=remote') ? 'remote-user' : 'sample-account', user_code: 'SAMPLE-001', status: 'ACTIVE' }], next_cursor: null });
+  if (url.includes('/admin/v1/user-code-lookups/')) {
+    const code = decodeURIComponent(url.split('/').at(-1)).replaceAll('-', '').toUpperCase();
+    return code === 'USR0123456789ABCDEFMV' ? json({ user_id: otherID, username: 'coded-user', user_code: 'USR-0123-4567-89AB-CDEF-MV', status: 'ACTIVE' }) : json({ code: 'NOT_FOUND' }, 404);
+  }
+  if (url.includes('/admin/v1/users?')) {
+    const query = new URL(url, location.origin).searchParams.get('q') || '';
+    return json({ items: query.replaceAll('-', '').toUpperCase().startsWith('USR') ? [] : [{ user_id: query === 'remote' ? otherID : id, username: query === 'remote' ? 'remote-user' : 'sample-account', user_code: 'SAMPLE-001', status: 'ACTIVE' }], next_cursor: null });
+  }
   if (/\/admin\/v1\/users\/[a-f0-9-]+\/memberships$/.test(url) && c.failMemberships) return json({ code: 'ORGANIZATIONS_DISABLED' }, 503);
   if (/\/admin\/v1\/users\/[a-f0-9-]+\/memberships$/.test(url)) return json({ items: [{ organization_id: orgID, organization_name: 'Sample organization', membership_status: 'ACTIVE', roles: ['MEMBER'], unit_admin_unit_ids: [] }] });
   if (/\/admin\/v1\/users\/[a-f0-9-]+$/.test(url)) return json({ user_id: url.split('/').at(-1), username: 'sample-account', user_code: 'SAMPLE-001', status: 'ACTIVE', created_at: '2026-10-01T00:00:00Z' });
@@ -102,5 +145,5 @@ function render() {
   root.render(c.kind === 'admin' ? <AdminPlatformView client={client} copy={adminPlatformCopy[c.language]} language={c.language} onLanguageChange={value => { c.language = value; render(); }} /> : <AccountPlatformView client={client} copy={accountPlatformCopy[c.language]} language={c.language} portal onLanguageChange={value => { c.language = value; render(); }} />);
 }
 c.reload = () => { client = c.kind === 'admin' ? new AdminPlatformClient() : new AccountPlatformBffClient(); render(); };
-c.copy = () => ({ account: accountPlatformCopy[c.language], admin: adminPlatformCopy[c.language], finance: financeCopy[c.language], accountLayout: accountLayoutCopy[c.language], adminLayout: adminLayoutCopy[c.language], organization: organizationCopy[c.language] });
+c.copy = () => ({ account: accountPlatformCopy[c.language], admin: adminPlatformCopy[c.language], finance: financeCopy[c.language], accountLayout: accountLayoutCopy[c.language], adminLayout: adminLayoutCopy[c.language], organization: organizationCopy[c.language], rolePresentation: adminRolePresentationCopy[c.language], roles: platformRoleCopy[c.language] });
 c.reload();

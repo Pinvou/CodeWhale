@@ -147,5 +147,6 @@ export { accountClosedGrantCopy } from './account-closed-grants-i18n.js';
 export { auditWorkspaceCopy } from './audit-i18n.js';
 
 export { platformRoleCopy } from './platform-role-i18n.js';
+export { adminRolePresentationCopy } from './admin-role-presentation-i18n.js';
 
 export { registrationRepairCopy } from './registration-repair-i18n.js';

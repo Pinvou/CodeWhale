@@ -18,7 +18,7 @@ function UserDetails({ client, userID, copy, language, route }) {
     {error && <p role="alert">{localizedAccountPlatformError(copy, error)}<button onClick={() => setRevision(value => value + 1)}>{copy.retry}</button></p>}
     {!profile && !error && <p role="status">{copy.loading}</p>}
     {profile && <><h3>{profile.username || profile.display_name || profile.user_code}</h3><dl className="adm-user-details">{[[words.userID, profile.user_id], [copy.userManagement.exactCode, profile.user_code], [copy.accounts.status, accountLayoutCopy[language].statuses[profile.status] || profile.status], [words.createdAt, date(profile.created_at)], [words.lastSeen, date(profile.last_seen_at)]].map(([label, value]) => <React.Fragment key={label}><dt>{label}</dt><dd>{value || '—'}</dd></React.Fragment>)}</dl>
-      {route.available.includes('roles') && <button onClick={() => route.navigate('roles', { role_user_id: userID })}>{words.nav.roles}</button>}
+      {route.available.includes('roles') && <button onClick={() => route.navigate('roles', { role_user_id: userID, role_view: 'bindings' })}>{words.nav.roles}</button>}
       <h4>{words.memberships}</h4>
       {membershipError && <p role="alert">{localizedAccountPlatformError(copy, membershipError)}<button onClick={() => setRevision(value => value + 1)}>{copy.retry}</button></p>}
       {!memberships && !membershipError && <p role="status">{copy.loading}</p>}
