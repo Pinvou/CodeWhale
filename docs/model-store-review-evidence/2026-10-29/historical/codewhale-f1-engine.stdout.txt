@@ -1,0 +1,13 @@
+   Compiling codewhale-tui v0.9.12 (<WORKTREE>/CodeWhale/crates/tui)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 1m 29s
+     Running tests/integration/main.rs (<CARGO_TARGET>/debug/deps/integration-5fad7acd3726b9e2)
+
+running 6 tests
+test partial_input_engine::partial_input_engine_cancel_then_new_attempt_resets_reused_tool_id ... ok
+test partial_input_engine::partial_input_engine_headless_resume_discards_partial_history_and_resets_tool_id ... ok
+test partial_input_engine::partial_input_engine_interleaved_tools_keep_complete_arguments_and_history ... ok
+test partial_input_engine::partial_input_engine_malformed_final_preserves_raw_arguments_and_does_not_write ... ok
+test partial_input_engine::partial_input_engine_network_error_before_any_content_can_retry ... ok
+test partial_input_engine::partial_input_engine_network_error_preserves_partial_tool_feedback ... ok
+
+test result: ok. 6 passed; 0 failed; 0 ignored; 0 measured; 229 filtered out; finished in 0.31s
