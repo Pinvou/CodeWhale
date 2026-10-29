@@ -3285,6 +3285,46 @@ impl Drop for CoordinationProcessLock {
     }
 }
 
+/// Which checkout frame a writer occupies. Shared writers all contend for
+/// the coordination workspace; worktree writers only contend inside the
+/// worktree their claim is keyed to — the same split the claim rows use.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum CoordinationLane {
+    SharedCheckout,
+    Worktree(String),
+}
+
+/// One gate-covered unbounded dispatch whose writes may still be landing.
+///
+/// The peer gate is evaluated when a command dispatches, but the command's
+/// writes outlive that instant — most consequentially for an explicitly
+/// backgrounded shell, which stays in the shared `ShellManager` after the
+/// owning agent's loop is interrupted, cancelled, or completed (aborting the
+/// loop never touches the job). An entry is the reservation that keeps the
+/// owner's frame occupied for as long as that work could still write:
+///
+/// - once the dispatch returns, the entry is stamped with the owner's
+///   still-running shell jobs and answers to the shell manager alone — an
+///   interrupted owner's zombie job keeps its frame exactly as long as the
+///   job lives, and a cancelled or finished job releases it without anyone
+///   assuming anything, no matter whether the owner is still Running;
+/// - before that, a live owner holds the entry (the dispatch is in
+///   flight), and a terminal owner keeps an unstamped entry only while it
+///   has some running job — the loop was aborted after the job spawned but
+///   before the stamping completion could run.
+///
+/// Entries are deliberately transient: they model occupancy by live work,
+/// not durable history, so a restart clears them along with the processes.
+#[derive(Debug)]
+struct InFlightUnboundedWork {
+    token: u64,
+    owner: String,
+    lane: CoordinationLane,
+    /// Shell task ids captured when the dispatching call returned; empty
+    /// until then (and forever, when the call never returned).
+    shell_task_ids: Vec<String>,
+}
+
 pub struct SubAgentManager {
     agents: HashMap<String, SubAgent>,
     worker_records: HashMap<String, AgentWorkerRecord>,
@@ -3387,6 +3427,15 @@ pub struct SubAgentManager {
     /// waiting on is dropped, never applied to a different call.
     child_approvals: HashMap<String, tokio::sync::oneshot::Sender<ChildApprovalOutcome>>,
     child_approval_seq: u64,
+    /// Transient occupancy held by gate-covered unbounded work that may
+    /// still be writing; see [`InFlightUnboundedWork`]. Not persisted.
+    in_flight_unbounded: Vec<InFlightUnboundedWork>,
+    in_flight_unbounded_seq: u64,
+    /// The shared shell manager consulted for in-flight shell truth. Wired
+    /// by the engine after construction; `None` (tests, surfaces without
+    /// shells) falls back to owner liveness only, which keeps every entry
+    /// the executor released and drops the rest at the next consult.
+    shell_jobs: Option<SharedShellManager>,
 }
 
 /// A person's answer to an approval prompt raised for a child's tool call.
@@ -3501,6 +3550,9 @@ impl SubAgentManager {
             resume_targets: HashMap::new(),
             child_approvals: HashMap::new(),
             child_approval_seq: 0,
+            in_flight_unbounded: Vec::new(),
+            in_flight_unbounded_seq: 0,
+            shell_jobs: None,
         }
     }
 
@@ -4095,6 +4147,14 @@ impl SubAgentManager {
         // The shared lane never consults exemptions — plain overlap alone
         // decides there, as it always has.
         let exempt_owners = self.worktree_claim_exemptions(Some(owner));
+        let lane = match existing.worktree_root.clone() {
+            Some(root) if existing.isolated_worktree => CoordinationLane::Worktree(root),
+            _ => CoordinationLane::SharedCheckout,
+        };
+        let conflicts = self.in_flight_unbounded_conflicts(owner, &lane, &exempt_owners);
+        if !conflicts.is_empty() {
+            return Err(Self::in_flight_unbounded_refusal(&conflicts));
+        }
         self.coordination.register_claim(
             claim,
             existing.isolated_worktree,
@@ -4152,7 +4212,17 @@ impl SubAgentManager {
             return paths.to_vec();
         };
         let normalized = normalize_subagent_workspace(&workspace);
-        let Ok(offset) = normalized.strip_prefix(Path::new(root)) else {
+        // Both sides of the offset computation are folded into the claim
+        // ledger's frame — NFC per component, the form `normalize_claim_path`
+        // gives every registered root. A worktree whose on-disk name is a
+        // different Unicode form (macOS records NFD) would otherwise fail
+        // the lexical prefix here, or produce an offset whose joined paths
+        // fail the ledger's strict string containment, and every natural
+        // in-scope spelling of a cwd-narrowed child would be refused. Only
+        // the comparison frame folds; the OS spellings on disk are untouched.
+        let workspace_frame = nfc_ledger_path_string(&normalized.to_string_lossy());
+        let root_frame = nfc_ledger_path_string(root);
+        let Ok(offset) = Path::new(&workspace_frame).strip_prefix(Path::new(&root_frame)) else {
             return paths.to_vec();
         };
         let offset = offset.to_string_lossy();
@@ -4171,7 +4241,7 @@ impl SubAgentManager {
                 // tool path must land on its true worktree-frame target, not
                 // prefix-match past the scoped root.
                 match lexically_under(&offset, path) {
-                    Some(joined) => joined,
+                    Some(joined) => nfc_ledger_path_string(&joined),
                     None => path.clone(),
                 }
             })
@@ -4937,6 +5007,18 @@ impl SubAgentManager {
         });
         let exempt_owners = self.worktree_claim_exemptions(spec.parent_run_id.as_deref());
         let active_owners = self.active_coordination_owners();
+        // A reservation conflict is transient by construction — the
+        // in-flight job finishes or is cancelled — so it refuses early
+        // without the receipt-on-authoritative dance below: a durable
+        // contention receipt would outlive its cause across a restart.
+        let lane = worktree_root
+            .clone()
+            .map(CoordinationLane::Worktree)
+            .unwrap_or(CoordinationLane::SharedCheckout);
+        let conflicts = self.in_flight_unbounded_conflicts(&claim.owner, &lane, &exempt_owners);
+        if !conflicts.is_empty() {
+            return Err(Self::in_flight_unbounded_refusal(&conflicts));
+        }
         let mut probe = self.coordination.clone();
         match probe.register_claim(
             claim.clone(),
@@ -4996,6 +5078,15 @@ impl SubAgentManager {
                 });
                 let exempt_owners = self.worktree_claim_exemptions(spec.parent_run_id.as_deref());
                 let active_owners = self.active_coordination_owners();
+                let lane = worktree_root
+                    .clone()
+                    .map(CoordinationLane::Worktree)
+                    .unwrap_or(CoordinationLane::SharedCheckout);
+                let conflicts =
+                    self.in_flight_unbounded_conflicts(&claim.owner, &lane, &exempt_owners);
+                if !conflicts.is_empty() {
+                    return Err(Self::in_flight_unbounded_refusal(&conflicts));
+                }
                 self.coordination.register_claim(
                     claim,
                     isolated_worktree,
@@ -5108,6 +5199,210 @@ impl SubAgentManager {
             // as a permanent gate on every later writer.
             !record.status.is_terminal() && record.status != AgentWorkerStatus::WaitingForUser
         })
+    }
+
+    /// Wire the shared shell manager consulted for in-flight shell truth.
+    /// The engine calls this once after constructing both handles so a
+    /// reservation can validate its stamped job ids against the same
+    /// manager the shells actually live in.
+    pub fn set_shell_job_source(&mut self, shell_jobs: SharedShellManager) {
+        self.shell_jobs = Some(shell_jobs);
+    }
+
+    /// The checkout frame `agent_id`'s unbounded work occupies: its own
+    /// claim's worktree key when it holds one, its launch manifest's root
+    /// when it is a claim-less worktree child, the containing worktree when
+    /// an isolated ancestor delegated it, else the shared checkout. Same
+    /// precedence order the resume path uses for the isolation flag.
+    fn coordination_lane_of(&self, agent_id: &str) -> CoordinationLane {
+        if let Some(root) = self
+            .coordination
+            .write_claims
+            .iter()
+            .find(|record| record.claim.owner == agent_id && record.isolated_worktree)
+            .and_then(|record| record.worktree_root.clone())
+        {
+            return CoordinationLane::Worktree(root);
+        }
+        if let Some(root) = self
+            .worker_records
+            .get(agent_id)
+            .and_then(|record| record.spec.launch_manifest.as_ref())
+            .and_then(|manifest| manifest.worktree_root.clone())
+        {
+            return CoordinationLane::Worktree(root);
+        }
+        if self.parent_runs_in_isolated_worktree(agent_id) {
+            let workspace = self
+                .worker_records
+                .get(agent_id)
+                .map(|record| record.spec.workspace.clone())
+                .or_else(|| {
+                    self.agents
+                        .get(agent_id)
+                        .map(|agent| agent.workspace.clone())
+                });
+            if let Some(workspace) = workspace {
+                let parent = self
+                    .worker_records
+                    .get(agent_id)
+                    .and_then(worker_parent_ref)
+                    .map(str::to_string);
+                let root = self.containing_worktree_root(
+                    parent.as_deref(),
+                    normalize_subagent_workspace(&workspace)
+                        .to_string_lossy()
+                        .into_owned(),
+                );
+                return CoordinationLane::Worktree(root);
+            }
+        }
+        CoordinationLane::SharedCheckout
+    }
+
+    /// Open a reservation for one gate-covered unbounded dispatch. The
+    /// executor opens it BEFORE its peer checks and releases it on refusal:
+    /// registration precedes checking on both sides (here and at claim
+    /// admission), so of two racing writers whichever reserves second sees
+    /// the first and exactly one of them is refused.
+    pub(crate) fn open_in_flight_unbounded(&mut self, owner: &str, lane: CoordinationLane) -> u64 {
+        self.in_flight_unbounded_seq = self.in_flight_unbounded_seq.wrapping_add(1);
+        let token = self.in_flight_unbounded_seq;
+        self.in_flight_unbounded.push(InFlightUnboundedWork {
+            token,
+            owner: owner.to_string(),
+            lane,
+            shell_task_ids: Vec::new(),
+        });
+        token
+    }
+
+    /// Drop a reservation whose dispatch was refused (or aborted) before it
+    /// could stamp anything.
+    pub(crate) fn cancel_in_flight_unbounded(&mut self, token: u64) {
+        self.in_flight_unbounded
+            .retain(|entry| entry.token != token);
+    }
+
+    /// The surviving reservations as `(owner, stamped task ids)` — the
+    /// observable an executor-level pin asserts against.
+    #[cfg(test)]
+    pub(crate) fn in_flight_unbounded_for_test(&self) -> Vec<(String, Vec<String>)> {
+        let mut entries = self
+            .in_flight_unbounded
+            .iter()
+            .map(|entry| (entry.owner.clone(), entry.shell_task_ids.clone()))
+            .collect::<Vec<_>>();
+        entries.sort();
+        entries
+    }
+
+    /// Stamp a completed dispatch's reservation with the owner's still-
+    /// running shell jobs. Background work keeps the entry (validated
+    /// against the shell manager from now on); with nothing running the
+    /// dispatch is over and the entry goes.
+    pub(crate) fn complete_in_flight_unbounded(&mut self, token: u64, owner: &str) {
+        let stamped = self
+            .shell_jobs
+            .as_ref()
+            .and_then(|shell_jobs| {
+                shell_jobs
+                    .lock()
+                    .ok()
+                    .map(|mut jobs| jobs.running_task_ids_for_owner(owner))
+            })
+            .unwrap_or_default();
+        if let Some(entry) = self
+            .in_flight_unbounded
+            .iter_mut()
+            .find(|entry| entry.token == token)
+        {
+            entry.shell_task_ids = stamped;
+        } else {
+            return;
+        }
+        self.in_flight_unbounded
+            .retain(|entry| !(entry.token == token && entry.shell_task_ids.is_empty()));
+    }
+
+    /// Whether the entry still models work that could write. A stamped
+    /// entry answers to the shell manager alone — the dispatch that would
+    /// have stamped already returned, so a live-but-idle owner must not
+    /// keep a finished dispatch's frame occupied. An unstamped entry is a
+    /// dispatch still in flight (a live owner) or one aborted after its
+    /// job spawned but before the stamping completion ran (a terminal
+    /// owner with some owned running job).
+    fn in_flight_entry_holds_a_writer(&self, entry: &InFlightUnboundedWork) -> bool {
+        if !entry.shell_task_ids.is_empty() {
+            let Some(shell_jobs) = self.shell_jobs.as_ref() else {
+                return false;
+            };
+            let Ok(mut jobs) = shell_jobs.lock() else {
+                return false;
+            };
+            return jobs.any_running_job(&entry.shell_task_ids);
+        }
+        if self.is_live_coordination_owner(&entry.owner) {
+            return true;
+        }
+        let Some(shell_jobs) = self.shell_jobs.as_ref() else {
+            return false;
+        };
+        let Ok(mut jobs) = shell_jobs.lock() else {
+            return false;
+        };
+        jobs.owner_has_running_job(&entry.owner)
+    }
+
+    /// Owners whose in-flight unbounded work conflicts with a new claimant
+    /// in `lane`: a different owner, not exempt (the claimant's ancestor
+    /// chain is exempt — the work was delegated downward), the same frame,
+    /// and still holding a writer. Dead entries are skipped here; they are
+    /// only pruned by the mutating paths so a shared-lock consult stays
+    /// read-only.
+    fn in_flight_unbounded_conflicts(
+        &self,
+        claimant: &str,
+        lane: &CoordinationLane,
+        exempt: &[String],
+    ) -> Vec<String> {
+        self.in_flight_unbounded
+            .iter()
+            .filter(|entry| {
+                entry.owner != claimant
+                    && !exempt.iter().any(|exempt| exempt == &entry.owner)
+                    && match (&entry.lane, lane) {
+                        (CoordinationLane::Worktree(left), CoordinationLane::Worktree(right)) => {
+                            left == right
+                        }
+                        (CoordinationLane::SharedCheckout, CoordinationLane::SharedCheckout) => {
+                            true
+                        }
+                        _ => false,
+                    }
+                    && self.in_flight_entry_holds_a_writer(entry)
+            })
+            .map(|entry| entry.owner.clone())
+            .collect()
+    }
+
+    /// The peers whose in-flight unbounded work gates `owner`'s own
+    /// unbounded dispatch — the same exemptions as the claim peer gate,
+    /// extended to work that already passed the gate and is still running.
+    fn live_in_flight_unbounded_peers(&self, owner: &str) -> Vec<String> {
+        let lane = self.coordination_lane_of(owner);
+        let exempt = self.worktree_claim_exemptions(Some(owner));
+        self.in_flight_unbounded_conflicts(owner, &lane, &exempt)
+    }
+
+    /// The refusal for a writer that would share a frame with in-flight
+    /// unbounded work. It names the peers and the same remediations the
+    /// peer gate receipts name — wait, cancel the job, or isolate.
+    fn in_flight_unbounded_refusal(conflicts: &[String]) -> String {
+        format!(
+            "write-scope contention with {} (unbounded shell work is still in flight in this checkout; wait for the job to finish, cancel it with exec_shell_cancel, or relaunch the work with worktree isolation)",
+            conflicts.join(", ")
+        )
     }
 
     // Worker records carry no boot id of their own, so the per-id predicate
@@ -6974,6 +7269,15 @@ impl SubAgentManager {
                     let worktree_root = claimed_worktree_root.clone();
                     let exempt_owners =
                         self.worktree_claim_exemptions(runtime.parent_agent_id.as_deref());
+                    let lane = worktree_root
+                        .clone()
+                        .map(CoordinationLane::Worktree)
+                        .unwrap_or(CoordinationLane::SharedCheckout);
+                    let conflicts =
+                        self.in_flight_unbounded_conflicts(&claim.owner, &lane, &exempt_owners);
+                    if !conflicts.is_empty() {
+                        return Err(Self::in_flight_unbounded_refusal(&conflicts));
+                    }
                     self.coordination.register_claim(
                         claim,
                         isolated_worktree,
@@ -13665,6 +13969,18 @@ fn lexically_under(offset: &str, path: &str) -> Option<String> {
     Some(components.join("/"))
 }
 
+/// Fold a forward-slash path into the claim ledger's comparison frame: NFC
+/// per component, the same fold `normalize_claim_path` applies to every
+/// registered root, so containment is judged on equal spellings rather than
+/// byte-equal ones. Separator-shaped bytes stay separators; only component
+/// text is normalized.
+fn nfc_ledger_path_string(path: &str) -> String {
+    path.split('/')
+        .map(|component| component.nfc().collect::<String>())
+        .collect::<Vec<_>>()
+        .join("/")
+}
+
 fn coordination_workspace_prefix(
     manager_workspace: &Path,
     worker_workspace: &Path,
@@ -16135,6 +16451,7 @@ impl SubAgentToolRegistry {
         {
             return Err(anyhow!(reason));
         }
+        let mut reservation_token: Option<u64> = None;
         reject_subagent_terminal_takeover(name, &input)?;
         if self.network_is_denied() {
             reject_network_reaching_input(name, &input)?;
@@ -16268,48 +16585,106 @@ impl SubAgentToolRegistry {
                                 })))
                 }))
         {
-            let manager = self.coordination_manager.read().await;
+            // The reservation opens BEFORE the peer checks: registration
+            // precedes checking on both sides — here and at claim admission,
+            // which consults reservations — so of two racing writers whoever
+            // reserves second sees the first and exactly one is refused.
+            // The peer gate alone cannot order two dispatches that way: A
+            // alone passes it, and B arriving later finds no live claim to
+            // contend with even though A's command may write B's share.
+            let lane = {
+                let manager = self.coordination_manager.read().await;
+                manager.coordination_lane_of(&self.owner_agent_id)
+            };
+            let opened_token = {
+                let mut manager = self.coordination_manager.write().await;
+                manager.open_in_flight_unbounded(&self.owner_agent_id, lane)
+            };
             // Only a *contended* checkout needs this gate. The claim
             // exists so concurrent children cannot overwrite each other; a lone
             // writer has no peer to collide with, and blocking it there bought
             // no safety while making a builder unable to run ordinary shell
             // work in the workspace the operator actually watches — worktree
             // isolation "fixes" that by writing somewhere they never see.
-            if manager.shared_write_claim(&self.owner_agent_id).is_some() {
-                let blocking_peers =
-                    manager.live_peer_shared_write_claim_owners(&self.owner_agent_id);
-                if !blocking_peers.is_empty() {
-                    return Err(anyhow!(
-                        "Tool {name} cannot prove a bounded file target, and another child is writing in this shared checkout (blocking peers: {}). Wait for the peer to finish, ask the parent to cancel it, run agents/coordinate action=release to clear a stale claim, or relaunch the children with worktree isolation.",
-                        blocking_peers.join(", ")
-                    ));
+            let peer_refusal: Option<String> = {
+                let manager = self.coordination_manager.read().await;
+                let claim_peer_refusal = if manager
+                    .shared_write_claim(&self.owner_agent_id)
+                    .is_some()
+                {
+                    let blocking_peers =
+                        manager.live_peer_shared_write_claim_owners(&self.owner_agent_id);
+                    if blocking_peers.is_empty() {
+                        None
+                    } else {
+                        Some(format!(
+                            "Tool {name} cannot prove a bounded file target, and another child is writing in this shared checkout (blocking peers: {}). Wait for the peer to finish, ask the parent to cancel it, run agents/coordinate action=release to clear a stale claim, or relaunch the children with worktree isolation.",
+                            blocking_peers.join(", ")
+                        ))
+                    }
+                } else {
+                    // The isolated lane carries the same premise: admission now
+                    // lets several unrelated writers share one worktree on
+                    // disjoint claims, and an unbounded command cannot prove it
+                    // stays inside the owner's share, so a live same-worktree
+                    // peer (ancestor chain exempt, exactly as at admission)
+                    // blocks it too.
+                    let blocking_peers =
+                        manager.live_peer_same_worktree_claim_owners(&self.owner_agent_id);
+                    if blocking_peers.is_empty() {
+                        None
+                    } else {
+                        Some(format!(
+                            "Tool {name} cannot prove a bounded file target, and another agent holds a write claim in this same worktree (blocking peers: {}). Wait for the peer to finish, ask the parent to cancel it, run agents/coordinate action=release to clear a stale claim, or relaunch the peers with separate worktrees.",
+                            blocking_peers.join(", ")
+                        ))
+                    }
+                };
+                if claim_peer_refusal.is_some() {
+                    claim_peer_refusal
+                } else {
+                    // In-flight reservations carry the premise past dispatch:
+                    // another agent's unbounded work that already passed this
+                    // gate (including an interrupted owner's still-running
+                    // background job) blocks a new unbounded dispatch in the
+                    // same frame, exactly as its claim would have.
+                    let in_flight_peers =
+                        manager.live_in_flight_unbounded_peers(&self.owner_agent_id);
+                    if in_flight_peers.is_empty() {
+                        None
+                    } else {
+                        Some(format!(
+                            "Tool {name} cannot prove a bounded file target, and unbounded shell work is still in flight in this checkout (in-flight owners: {}). Wait for the job to finish, cancel it with exec_shell_cancel, or relaunch the peers with separate worktrees.",
+                            in_flight_peers.join(", ")
+                        ))
+                    }
                 }
-            } else {
-                // The isolated lane carries the same premise: admission now
-                // lets several unrelated writers share one worktree on
-                // disjoint claims, and an unbounded command cannot prove it
-                // stays inside the owner's share, so a live same-worktree
-                // peer (ancestor chain exempt, exactly as at admission)
-                // blocks it too.
-                let blocking_peers =
-                    manager.live_peer_same_worktree_claim_owners(&self.owner_agent_id);
-                if !blocking_peers.is_empty() {
-                    return Err(anyhow!(
-                        "Tool {name} cannot prove a bounded file target, and another agent holds a write claim in this same worktree (blocking peers: {}). Wait for the peer to finish, ask the parent to cancel it, run agents/coordinate action=release to clear a stale claim, or relaunch the peers with separate worktrees.",
-                        blocking_peers.join(", ")
-                    ));
-                }
+            };
+            if let Some(refusal) = peer_refusal {
+                let mut manager = self.coordination_manager.write().await;
+                manager.cancel_in_flight_unbounded(opened_token);
+                return Err(anyhow!(refusal));
             }
+            reservation_token = Some(opened_token);
         }
         let context = self
             .registry
             .context()
             .clone()
             .with_owner_agent(self.owner_agent_id.clone(), self.owner_agent_name.clone());
-        self.registry
+        let result = self
+            .registry
             .execute_rich_full_with_context(name, input, Some(&context))
-            .await
-            .map_err(|e| anyhow!(e))
+            .await;
+        if let Some(token) = reservation_token {
+            // Stamp the reservation with the owner's still-running shell
+            // jobs: a background job keeps it alive through the shell
+            // manager; with nothing running the dispatch is over and the
+            // entry is released here.
+            let mut manager = self.coordination_manager.write().await;
+            manager.complete_in_flight_unbounded(token, &self.owner_agent_id);
+        }
+        result.map_err(|e| anyhow!(e))
     }
 
     #[cfg(test)]

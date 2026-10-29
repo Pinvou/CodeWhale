@@ -24956,3 +24956,732 @@ async fn child_write_tool_resolves_absolute_spellings_against_the_childs_workspa
         "the out-of-workspace write must not land"
     );
 }
+
+/// The in-flight half of the interrupt fix (review 5697466967/5697735654
+/// P2, arrival order 1): a `general` child's explicitly backgrounded shell
+/// keeps running in the shared `ShellManager` after `agents/interrupt`
+/// aborts its loop, and the interrupted child immediately stops counting as
+/// a live coordination owner — so without an occupancy record, an
+/// overlapping writer into the same worktree is admitted while the zombie
+/// job can still write. The reservation the dispatching executor opens
+/// keeps the frame occupied exactly as long as the job lives, with the
+/// shell manager as the truth source.
+#[tokio::test]
+async fn interrupted_child_background_shell_keeps_the_worktree_occupied() {
+    let tmp = tempdir().expect("tempdir");
+    let coordination_root = tmp.path().join("workspace");
+    let worktree = tmp
+        .path()
+        .join(".codewhale-worktrees")
+        .join("workspace")
+        .join("codex-agent-a");
+    let other_worktree = tmp
+        .path()
+        .join(".codewhale-worktrees")
+        .join("workspace")
+        .join("codex-agent-b");
+    for dir in [&coordination_root, &worktree, &other_worktree] {
+        std::fs::create_dir_all(dir).expect("mkdir");
+    }
+    let manager = new_shared_subagent_manager(coordination_root.clone(), 8);
+    let shell_jobs = crate::tools::shell::new_shared_shell_manager(worktree.clone());
+    let claim = || WriteScopeClaim {
+        owner: String::new(),
+        roots: vec![".".into()],
+        exact_files: vec![],
+        contracts: vec![],
+    };
+
+    let mut guard = manager.write().await;
+    guard.set_shell_job_source(Arc::clone(&shell_jobs));
+
+    let mut parent_runtime = stub_runtime();
+    parent_runtime.manager = Arc::clone(&manager);
+    parent_runtime.context = ToolContext::new(&worktree);
+    let owner = guard
+        .spawn_background_with_assignment_options(
+            Arc::clone(&manager),
+            parent_runtime,
+            FleetRole::Builder,
+            "run shell work in the worktree".into(),
+            make_assignment(),
+            Some(vec![]),
+            SubAgentSpawnOptions {
+                name: Some("shell-owner".into()),
+                write_claim: Some(claim()),
+                isolated_worktree: true,
+                ..Default::default()
+            },
+        )
+        .expect("worktree child admitted");
+    if let Some(agent) = guard.agents.get_mut(&owner.agent_id) {
+        agent.status = SubAgentStatus::Running;
+    }
+
+    // The dispatching executor opens its reservation before its own peer
+    // checks and stamps it when the call returns; replay that seam here so
+    // the job's lifetime, not the agent's liveness, decides validity.
+    let lane = guard.coordination_lane_of(&owner.agent_id);
+    assert!(
+        matches!(lane, CoordinationLane::Worktree(_)),
+        "the worktree child's unbounded work keys on its worktree"
+    );
+    let token = guard.open_in_flight_unbounded(&owner.agent_id, lane);
+    shell_jobs
+        .lock()
+        .expect("shell jobs")
+        .seed_running_shell_for_test("job_a1", &owner.agent_id);
+    guard.complete_in_flight_unbounded(token, &owner.agent_id);
+    assert_eq!(
+        guard.in_flight_unbounded_for_test(),
+        vec![(owner.agent_id.clone(), vec!["job_a1".to_string()])],
+        "the completed dispatch keeps its reservation while the job runs"
+    );
+
+    // Interrupt the owner: its loop is gone and its parked claim no longer
+    // gates anyone — but the background job is still a real writer.
+    guard
+        .agents
+        .get_mut(&owner.agent_id)
+        .expect("agent")
+        .checkpoint = Some(build_subagent_checkpoint(
+        &owner.agent_id,
+        "parent_interrupt",
+        &[Message {
+            role: Role::User,
+            content: vec![ContentBlock::Text {
+                text: "prior work".to_string(),
+                cache_control: None,
+            }],
+        }],
+        1,
+        true,
+    ));
+    let (_, interrupted) = guard
+        .interrupt_child(&owner.agent_id, None, "interrupted by parent".into())
+        .expect("interrupt");
+    assert!(matches!(interrupted.status, SubAgentStatus::Interrupted(_)));
+    assert!(
+        !guard.is_live_coordination_owner(&owner.agent_id),
+        "the interrupted child stops being a live claimant"
+    );
+
+    // A root-level overlapping writer into the SAME worktree is refused,
+    // naming the owner whose job is still in flight.
+    let mut late_runtime = stub_runtime();
+    late_runtime.manager = Arc::clone(&manager);
+    late_runtime.context = ToolContext::new(&worktree);
+    let refused = guard
+        .spawn_background_with_assignment_options(
+            Arc::clone(&manager),
+            late_runtime,
+            FleetRole::Builder,
+            "overwrite the same checkout".into(),
+            make_assignment(),
+            Some(vec![]),
+            SubAgentSpawnOptions {
+                name: Some("late-writer".into()),
+                write_claim: Some(claim()),
+                isolated_worktree: true,
+                ..Default::default()
+            },
+        )
+        .expect_err("the still-running job must keep the worktree occupied");
+    let refused = refused.to_string();
+    assert!(
+        refused.contains("still in flight") && refused.contains(&owner.agent_id),
+        "the refusal names the in-flight owner: {refused}"
+    );
+
+    // A peer keyed on a DIFFERENT worktree never shared this checkout and
+    // stays admitted.
+    let mut other_runtime = stub_runtime();
+    other_runtime.manager = Arc::clone(&manager);
+    other_runtime.context = ToolContext::new(&other_worktree);
+    guard
+        .spawn_background_with_assignment_options(
+            Arc::clone(&manager),
+            other_runtime,
+            FleetRole::Builder,
+            "work elsewhere".into(),
+            make_assignment(),
+            Some(vec![]),
+            SubAgentSpawnOptions {
+                name: Some("other-worktree".into()),
+                write_claim: Some(claim()),
+                isolated_worktree: true,
+                ..Default::default()
+            },
+        )
+        .expect("a different-worktree peer never shared this checkout");
+
+    // The ancestor exemption mirrors admission: a consult for a claimant
+    // whose chain includes the in-flight owner is not blocked (delegation
+    // downward keeps working), while a non-exempt claimant is.
+    let same_lane = guard.coordination_lane_of(&owner.agent_id);
+    assert!(
+        guard
+            .in_flight_unbounded_conflicts(
+                "agent_descendant",
+                &same_lane,
+                std::slice::from_ref(&owner.agent_id),
+            )
+            .is_empty(),
+        "the in-flight owner's descendants stay exempt"
+    );
+    assert_eq!(
+        guard.in_flight_unbounded_conflicts("agent_stranger", &same_lane, &[]),
+        vec![owner.agent_id.clone()],
+        "a non-exempt claimant in the same frame is blocked"
+    );
+
+    // The release leg: when the job actually exits, the frame opens up —
+    // nobody assumed the writer was gone before this point.
+    shell_jobs
+        .lock()
+        .expect("shell jobs")
+        .finish_seeded_shell_for_test("job_a1");
+    let mut retry_runtime = stub_runtime();
+    retry_runtime.manager = Arc::clone(&manager);
+    retry_runtime.context = ToolContext::new(&worktree);
+    guard
+        .spawn_background_with_assignment_options(
+            Arc::clone(&manager),
+            retry_runtime,
+            FleetRole::Builder,
+            "overwrite the same checkout".into(),
+            make_assignment(),
+            Some(vec![]),
+            SubAgentSpawnOptions {
+                name: Some("late-writer-2".into()),
+                write_claim: Some(claim()),
+                isolated_worktree: true,
+                ..Default::default()
+            },
+        )
+        .expect("the frame opens once the job is gone");
+}
+
+/// The transfer half of the same P2: resuming the interrupted child
+/// re-dispatches under a new id and registers that id's claim — which must
+/// wait for the predecessor's still-running background job, exactly like
+/// any other overlapping writer. Once the job is gone, the resume's claim
+/// restore works as the round-2 fix pinned it.
+#[tokio::test]
+async fn resume_of_interrupted_child_waits_for_its_running_background_shell() {
+    let tmp = tempdir().expect("tempdir");
+    let manager = new_shared_subagent_manager(tmp.path().to_path_buf(), 4);
+    let shell_jobs = crate::tools::shell::new_shared_shell_manager(tmp.path().to_path_buf());
+    let mut runtime = stub_runtime();
+    runtime.manager = Arc::clone(&manager);
+    runtime.context = ToolContext::new(tmp.path());
+
+    let mut guard = manager.write().await;
+    guard.set_shell_job_source(Arc::clone(&shell_jobs));
+    let first = guard
+        .spawn_background_with_assignment_options(
+            Arc::clone(&manager),
+            runtime.clone(),
+            FleetRole::Builder,
+            "edit the workspace".into(),
+            make_assignment(),
+            Some(vec![]),
+            SubAgentSpawnOptions {
+                name: Some("writer-a".into()),
+                write_claim: Some(WriteScopeClaim {
+                    owner: String::new(),
+                    roots: vec!["fixture/calc".into()],
+                    exact_files: vec![],
+                    contracts: vec![],
+                }),
+                ..Default::default()
+            },
+        )
+        .expect("writer admitted");
+    if let Some(agent) = guard.agents.get_mut(&first.agent_id) {
+        agent.status = SubAgentStatus::Running;
+    }
+    guard
+        .agents
+        .get_mut(&first.agent_id)
+        .expect("agent")
+        .checkpoint = Some(build_subagent_checkpoint(
+        &first.agent_id,
+        "parent_interrupt",
+        &[Message {
+            role: Role::User,
+            content: vec![ContentBlock::Text {
+                text: "prior work".to_string(),
+                cache_control: None,
+            }],
+        }],
+        1,
+        true,
+    ));
+    guard
+        .interrupt_child(&first.agent_id, None, "interrupted by parent".into())
+        .expect("interrupt");
+    // The recovery the contention receipts recommend swept the parked row;
+    // the background job it left behind is what the reservation now holds.
+    guard
+        .release_stale_write_claims(None)
+        .expect("the stale-claim sweep runs");
+    let lane = guard.coordination_lane_of(&first.agent_id);
+    let token = guard.open_in_flight_unbounded(&first.agent_id, lane);
+    shell_jobs
+        .lock()
+        .expect("shell jobs")
+        .seed_running_shell_for_test("job_resume", &first.agent_id);
+    guard.complete_in_flight_unbounded(token, &first.agent_id);
+
+    let refused = guard
+        .resume_from_checkpoint(
+            Arc::clone(&manager),
+            runtime.clone(),
+            &first.agent_id,
+            "continue",
+        )
+        .expect_err("the resume must wait for the predecessor's running job");
+    let refused = refused.to_string();
+    assert!(
+        refused.contains("still in flight") && refused.contains(&first.agent_id),
+        "the resume refusal names the in-flight predecessor: {refused}"
+    );
+
+    shell_jobs
+        .lock()
+        .expect("shell jobs")
+        .finish_seeded_shell_for_test("job_resume");
+    let resumed = guard
+        .resume_from_checkpoint(Arc::clone(&manager), runtime, &first.agent_id, "continue")
+        .expect("the resume proceeds once the job is gone");
+    let resumed_claim = guard
+        .coordination_snapshot()
+        .write_claims
+        .into_iter()
+        .find(|record| record.claim.owner == resumed.agent_id)
+        .expect("the resumed child holds its restored claim");
+    assert_eq!(
+        resumed_claim.claim.roots,
+        vec!["fixture/calc".to_string()],
+        "the manifest scope still survives the sweep after the reservation cleared"
+    );
+    assert!(guard.is_live_coordination_owner(&resumed.agent_id));
+}
+
+/// Arrival order 2 of the same P2, driven through the real dispatch seam:
+/// A passes the peer gate while alone and starts an unbounded background
+/// command; the reservation its dispatch opened must (a) refuse a later
+/// spawn whose claim is disjoint from A's — disjoint claims share nothing,
+/// but A's unbounded command may write B's share — and (b) refuse another
+/// agent's unbounded dispatch in the same frame, the gate extended past
+/// dispatch. Cancelling the job releases both.
+#[cfg(unix)]
+#[tokio::test]
+async fn unbounded_dispatch_holds_a_reservation_against_later_arrivals() {
+    let tmp = tempdir().expect("tempdir");
+    let manager = new_shared_subagent_manager(tmp.path().to_path_buf(), 8);
+    let shell_jobs = crate::tools::shell::new_shared_shell_manager(tmp.path().to_path_buf());
+    let claim = |owner: &str, roots: &[&str]| WriteScopeClaim {
+        owner: owner.to_string(),
+        roots: roots.iter().map(|root| (*root).to_string()).collect(),
+        exact_files: vec![],
+        contracts: vec![],
+    };
+
+    let mut guard = manager.write().await;
+    guard.set_shell_job_source(Arc::clone(&shell_jobs));
+    guard
+        .coordination
+        .register_claim(claim("agent_a", &["src"]), false, None, &[], |_| false)
+        .expect("A's claim registered");
+    guard.insert_test_running_agent("a", tmp.path());
+    drop(guard);
+
+    let build_registry = |owner: &str| {
+        let mut runtime = stub_runtime();
+        runtime.manager = Arc::clone(&manager);
+        runtime.context = ToolContext::new(tmp.path());
+        runtime.context.execution.shell_manager = Arc::clone(&shell_jobs);
+        runtime.context.auto_approve = true;
+        runtime.worker_profile = WorkerRuntimeProfile::for_role(FleetRole::Builder);
+        SubAgentToolRegistry::new_with_owner(
+            runtime,
+            FleetRole::Builder,
+            owner.to_string(),
+            "implementer".into(),
+            Some(vec!["Bash".into()]),
+            Arc::new(Mutex::new(TodoList::new())),
+            Arc::new(Mutex::new(PlanState::default())),
+        )
+    };
+    let registry_a = build_registry("agent_a");
+    registry_a
+        .execute(
+            "agent_a",
+            "Bash",
+            serde_json::json!({"action": "run", "command": "sleep 30", "background": true}),
+        )
+        .await
+        .expect("a lone writer's unbounded background command dispatches");
+    let in_flight = manager.read().await.in_flight_unbounded_for_test();
+    assert_eq!(
+        in_flight.len(),
+        1,
+        "the dispatch left exactly one reservation: {in_flight:?}"
+    );
+    assert_eq!(
+        in_flight[0].0, "agent_a",
+        "the reservation is attributed to the dispatching owner"
+    );
+    assert!(
+        !in_flight[0].1.is_empty(),
+        "the background job's task id is stamped so the shell manager can answer for it"
+    );
+    let stamped_ids = in_flight[0].1.clone();
+
+    // (a) A later spawn on a DISJOINT claim is refused: disjoint claims
+    // share nothing, but A's unbounded command may write B's share.
+    let refused = {
+        let mut guard = manager.write().await;
+        let mut runtime_b = stub_runtime();
+        runtime_b.manager = Arc::clone(&manager);
+        runtime_b.context = ToolContext::new(tmp.path());
+        guard
+            .spawn_background_with_assignment_options(
+                Arc::clone(&manager),
+                runtime_b,
+                FleetRole::Builder,
+                "write elsewhere".into(),
+                make_assignment(),
+                Some(vec![]),
+                SubAgentSpawnOptions {
+                    name: Some("writer-b".into()),
+                    write_claim: Some(claim("", &["docs"])),
+                    ..Default::default()
+                },
+            )
+            .expect_err("a disjoint claim must still wait for in-flight unbounded work")
+    };
+    let refused = refused.to_string();
+    assert!(
+        refused.contains("still in flight") && refused.contains("agent_a"),
+        "the refusal names the in-flight owner: {refused}"
+    );
+
+    // (b) Another agent's unbounded dispatch is refused by the gate — the
+    // same-worktree/shared peer checks only see claims, and B holds none.
+    let registry_b = build_registry("agent_b");
+    let gate_refused = registry_b
+        .execute(
+            "agent_b",
+            "Bash",
+            serde_json::json!({"action": "run", "command": "echo from-b > b.txt"}),
+        )
+        .await
+        .expect_err("B's unbounded dispatch must wait for A's in-flight work");
+    let gate_refused = gate_refused.to_string();
+    assert!(
+        gate_refused.contains("still in flight") && gate_refused.contains("agent_a"),
+        "the gate refusal names the in-flight owner: {gate_refused}"
+    );
+
+    // Cancelling the job releases both directions: the truth source is the
+    // shell manager, not the agent's liveness.
+    let killed = shell_jobs.lock().expect("shell jobs").kill_running();
+    assert!(
+        killed.is_ok() && !killed.expect("kill results").is_empty(),
+        "the background job was cancelled"
+    );
+    assert_eq!(
+        manager.read().await.in_flight_unbounded_for_test(),
+        vec![("agent_a".to_string(), stamped_ids.clone())],
+        "the dead job's entry stays recorded until a mutating leg touches it; its validity now comes from the shell manager"
+    );
+    {
+        let mut guard = manager.write().await;
+        guard
+            .spawn_background_with_assignment_options(
+                Arc::clone(&manager),
+                {
+                    let mut runtime_b = stub_runtime();
+                    runtime_b.manager = Arc::clone(&manager);
+                    runtime_b.context = ToolContext::new(tmp.path());
+                    runtime_b
+                },
+                FleetRole::Builder,
+                "write elsewhere".into(),
+                make_assignment(),
+                Some(vec![]),
+                SubAgentSpawnOptions {
+                    name: Some("writer-b2".into()),
+                    write_claim: Some(claim("", &["docs"])),
+                    ..Default::default()
+                },
+            )
+            .expect("the disjoint writer is admitted once the job is gone");
+    }
+    registry_b
+        .execute(
+            "agent_b",
+            "Bash",
+            serde_json::json!({"action": "run", "command": "echo from-b > b.txt"}),
+        )
+        .await
+        .expect("B's unbounded dispatch is admitted once the job is gone");
+
+    // A foreground dispatch releases its reservation at completion: nothing
+    // is left holding the frame after `echo` returned.
+    registry_a
+        .execute(
+            "agent_a",
+            "Bash",
+            serde_json::json!({"action": "run", "command": "echo fg"}),
+        )
+        .await
+        .expect("the foreground dispatch runs");
+    assert_eq!(
+        manager.read().await.in_flight_unbounded_for_test(),
+        vec![("agent_a".to_string(), stamped_ids)],
+        "the foreground dispatch re-opened and released its own reservation; only the dead job's entry is left, and the admitted writer above proved it no longer blocks"
+    );
+    assert!(
+        shell_jobs
+            .lock()
+            .expect("shell jobs")
+            .running_owner_agent_ids()
+            .is_empty(),
+        "no real process outlives the test"
+    );
+}
+
+/// The NFD half of the ledger-frame fix (review P3): claim roots are NFC
+/// per component (`normalize_claim_path`), a worktree subdirectory the OS
+/// spelled NFD keeps those bytes through the canonical workspace, and the
+/// ledger's containment check is strict string comparison — so the
+/// re-anchor must fold both sides into the ledger's frame or every natural
+/// in-scope spelling of a cwd-narrowed child under an NFD directory is
+/// refused. NFC and ASCII spellings keep working, and out-of-scope
+/// negatives refuse exactly as before.
+#[tokio::test]
+async fn nfd_cwd_narrowed_scoped_child_validates_in_the_ledger_frame() {
+    // The fold itself: NFD bytes in, NFC frame out; separators untouched.
+    assert_eq!(
+        nfc_ledger_path_string("crates/cafe\u{0301}/main.rs"),
+        "crates/caf\u{00e9}/main.rs",
+        "NFD components fold into the ledger's NFC frame"
+    );
+    assert_eq!(
+        nfc_ledger_path_string("crates/caf\u{00e9}/main.rs"),
+        "crates/caf\u{00e9}/main.rs",
+        "NFC spellings pass through unchanged"
+    );
+    assert_eq!(
+        nfc_ledger_path_string("crates/app/main.rs"),
+        "crates/app/main.rs",
+        "ASCII spellings are their own fixed point"
+    );
+
+    let tmp = tempdir().expect("tempdir");
+    let coordination_root = tmp.path().join("workspace");
+    let worktree = tmp
+        .path()
+        .join(".codewhale-worktrees")
+        .join("workspace")
+        .join("codex-agent-parent");
+    // The on-disk name is NFD (`cafe` + U+0301), the form macOS records.
+    let nfd_narrowed = worktree.join("crates").join("cafe\u{0301}");
+    let ascii_narrowed = worktree.join("docs");
+    for dir in [
+        &coordination_root,
+        &worktree,
+        &nfd_narrowed,
+        &ascii_narrowed,
+    ] {
+        std::fs::create_dir_all(dir).expect("mkdir");
+    }
+    let manager = new_shared_subagent_manager(coordination_root.clone(), 4);
+    let mut guard = manager.write().await;
+
+    let mut parent_runtime = stub_runtime();
+    parent_runtime.manager = Arc::clone(&manager);
+    parent_runtime.context = ToolContext::new(&worktree);
+    let parent = guard
+        .spawn_background_with_assignment_options(
+            Arc::clone(&manager),
+            parent_runtime,
+            FleetRole::Builder,
+            "work in the worktree".into(),
+            make_assignment(),
+            Some(vec![]),
+            SubAgentSpawnOptions {
+                name: Some("worktree-parent".into()),
+                write_claim: Some(WriteScopeClaim {
+                    owner: String::new(),
+                    roots: vec![".".into()],
+                    exact_files: vec![],
+                    contracts: vec![],
+                }),
+                isolated_worktree: true,
+                ..Default::default()
+            },
+        )
+        .expect("worktree child admitted");
+
+    // The scoped root is spelled NFC — what a model naturally emits.
+    let child = {
+        let mut child_runtime = stub_runtime();
+        child_runtime.manager = Arc::clone(&manager);
+        child_runtime.context = ToolContext::new(&nfd_narrowed);
+        child_runtime.parent_agent_id = Some(parent.agent_id.clone());
+        guard
+            .spawn_background_with_assignment_options(
+                Arc::clone(&manager),
+                child_runtime,
+                FleetRole::Builder,
+                "edit the caf\u{00e9} crate".into(),
+                make_assignment(),
+                Some(vec![]),
+                SubAgentSpawnOptions {
+                    name: Some("nfd-child".into()),
+                    write_claim: Some(WriteScopeClaim {
+                        owner: String::new(),
+                        roots: vec!["crates/caf\u{00e9}".into()],
+                        exact_files: vec![],
+                        contracts: vec![],
+                    }),
+                    ..Default::default()
+                },
+            )
+            .expect("the scoped NFC claim under the NFD directory is admitted")
+    };
+
+    // The natural cwd-relative spelling — judged against the child's
+    // workspace, whose offset carries the OS's NFD bytes — validates in the
+    // ledger's frame instead of failing the strict string containment.
+    guard
+        .validate_write_scope(&child.agent_id, &["main.rs".into()])
+        .expect("an in-scope write under the NFD subdirectory validates");
+    let ascii = {
+        let mut ascii_runtime = stub_runtime();
+        ascii_runtime.manager = Arc::clone(&manager);
+        ascii_runtime.context = ToolContext::new(&ascii_narrowed);
+        ascii_runtime.parent_agent_id = Some(parent.agent_id.clone());
+        guard
+            .spawn_background_with_assignment_options(
+                Arc::clone(&manager),
+                ascii_runtime,
+                FleetRole::Builder,
+                "edit the docs".into(),
+                make_assignment(),
+                Some(vec![]),
+                SubAgentSpawnOptions {
+                    name: Some("ascii-child".into()),
+                    write_claim: Some(WriteScopeClaim {
+                        owner: String::new(),
+                        roots: vec!["docs".into()],
+                        exact_files: vec![],
+                        contracts: vec![],
+                    }),
+                    ..Default::default()
+                },
+            )
+            .expect("the ASCII-scoped sibling is admitted")
+    };
+    guard
+        .validate_write_scope(&ascii.agent_id, &["readme.md".into()])
+        .expect("the ASCII control still validates");
+
+    // The frame fold must not widen the declaration: traversal and
+    // non-covering scope refuse exactly as before.
+    let escape = guard
+        .validate_write_scope(&child.agent_id, &["../escape.txt".into()])
+        .expect_err("traversal out of the scoped root must refuse");
+    assert!(
+        escape.contains("outside agent"),
+        "unexpected refusal shape: {escape}"
+    );
+    let outside = guard
+        .validate_write_scope(&ascii.agent_id, &["../crates/caf\u{00e9}/main.rs".into()])
+        .expect_err("the ASCII sibling's traversal out of its scope must refuse");
+    assert!(
+        outside.contains("outside agent"),
+        "unexpected refusal shape: {outside}"
+    );
+    let absolute = guard
+        .validate_write_scope(&child.agent_id, &["/etc/hosts".into()])
+        .expect_err("absolute spellings stay outside the claim's repo-relative frame");
+    assert!(
+        absolute.contains("outside agent"),
+        "unexpected refusal shape: {absolute}"
+    );
+}
+
+/// The lane the reservation consult keys on follows the same precedence the
+/// resume path uses for isolation: the owner's own claim row, its durable
+/// launch manifest, its containing worktree, else the shared checkout.
+#[test]
+fn coordination_lane_precedence_matches_the_isolation_seam() {
+    let tmp = tempdir().expect("tempdir");
+    let coordination_root = tmp.path().join("workspace");
+    let worktree = tmp
+        .path()
+        .join(".codewhale-worktrees")
+        .join("workspace")
+        .join("codex-agent-lane");
+    std::fs::create_dir_all(&coordination_root).expect("mkdir coordination");
+    std::fs::create_dir_all(&worktree).expect("mkdir worktree");
+    let mut manager = SubAgentManager::new(coordination_root.clone(), 4);
+    let worktree_root = worktree.canonicalize().expect("canonical worktree");
+
+    // No row, no manifest: the shared checkout.
+    manager.insert_test_running_agent("shared", &coordination_root);
+    let shared_id = format!("agent_{}", "shared");
+    assert_eq!(
+        manager.coordination_lane_of(&shared_id),
+        CoordinationLane::SharedCheckout
+    );
+
+    // A registered isolated claim row keys on its recorded root.
+    manager
+        .coordination
+        .register_claim(
+            WriteScopeClaim {
+                owner: shared_id.clone(),
+                roots: vec![".".into()],
+                exact_files: vec![],
+                contracts: vec![],
+            },
+            true,
+            Some(worktree_root.to_string_lossy().into_owned()),
+            &[],
+            |_| false,
+        )
+        .expect("isolated row registered");
+    assert_eq!(
+        manager.coordination_lane_of(&shared_id),
+        CoordinationLane::Worktree(worktree_root.to_string_lossy().into_owned())
+    );
+
+    // A claim-less worktree child falls back to its launch manifest's root.
+    let manifest_id = format!("agent_{}", "manifest-only");
+    let mut record = AgentWorkerRecord::new_for_session(
+        make_write_worker_spec(&manifest_id, worktree.clone(), "src"),
+        0,
+        "session".to_string(),
+    );
+    let mut manifest = record
+        .spec
+        .launch_manifest
+        .take()
+        .expect("the write spec stamps a launch manifest");
+    manifest.worktree = true;
+    manifest.worktree_root = Some(worktree_root.to_string_lossy().into_owned());
+    record.spec.launch_manifest = Some(manifest);
+    manager.worker_records.insert(manifest_id.clone(), record);
+    assert_eq!(
+        manager.coordination_lane_of(&manifest_id),
+        CoordinationLane::Worktree(worktree_root.to_string_lossy().into_owned()),
+        "the manifest leg covers a claim-less worktree child"
+    );
+}

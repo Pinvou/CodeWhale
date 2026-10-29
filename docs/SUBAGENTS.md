@@ -207,11 +207,26 @@ premise one gate deeper: a command the read-only classifier cannot prove
 bounded refuses while an unrelated live writer holds a claim in the same
 worktree, since it cannot prove it stays inside the claimant's share — the
 ancestor chain stays exempt, and a writer keyed on a different worktree is
-unaffected. Records persisted before
+unaffected. That shell gate also holds a transient reservation for the
+command it admits, so the same frame stays occupied for as long as the
+command's writes could still land: an explicitly backgrounded shell keeps its
+owner's worktree (or the shared checkout) reserved after the owner is
+interrupted, cancelled, or completed — the loop abort never touches the job —
+and both the peer gate and claim admission refuse with an "unbounded shell
+work is still in flight" receipt naming the owner until the job actually
+exits or is cancelled (`exec_shell_cancel`). The shell manager is the truth
+source: a job that finished releases the frame without anyone assuming a
+writer is gone. Ancestors stay exempt, different worktrees are unaffected,
+and a resume waits the same way before its new claim registers.
+Records persisted before
 claims carried a worktree key keep a never-contending footing. A resumed loop
 is only serialized against writers still live at resume time; the ledger does
 not surface what completed while it was parked, so re-read the affected paths
-before writing.
+before writing. Scoped paths are compared in the claim ledger's frame (NFC
+per path component): a scoped, cwd-narrowed child whose worktree subdirectory
+the OS spelled in a different Unicode form (macOS records NFD) validates its
+natural in-scope spellings against the same folded frame instead of failing
+byte-equality; the on-disk spellings themselves are untouched.
 
 Optional fields:
 

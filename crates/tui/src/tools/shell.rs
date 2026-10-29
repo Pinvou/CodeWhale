@@ -1937,6 +1937,70 @@ impl ShellManager {
         );
     }
 
+    /// Insert a record that looks like a live job owned by an agent, without
+    /// spawning. Reservation tests drive the job's lifetime by hand: flip the
+    /// status to `Completed` to model the job exiting.
+    #[cfg(test)]
+    pub(crate) fn seed_running_shell_for_test(
+        &mut self,
+        id: impl Into<String>,
+        owner_agent_id: &str,
+    ) {
+        let now = Instant::now();
+        let id = id.into();
+        self.processes.insert(
+            id.clone(),
+            BackgroundShell {
+                id,
+                command: String::new(),
+                working_dir: self.default_workspace.clone(),
+                status: ShellStatus::Running,
+                exit_code: None,
+                started_at: now,
+                finished_at: None,
+                last_output_at: now,
+                last_observed_output_len: 0,
+                sandbox_type: SandboxType::None,
+                linked_task_id: None,
+                owner_agent: Some(ShellJobOwner {
+                    agent_id: owner_agent_id.to_string(),
+                    agent_name: "implementer".to_string(),
+                }),
+                owner_session_id: String::new(),
+                origin_tool_call_id: None,
+                origin_turn_id: None,
+                ownership: ShellOwnership::Managed,
+                stdout_buffer: new_shared_raw_output(),
+                stderr_buffer: Some(new_shared_raw_output()),
+                bounded_output: None,
+                heavy_permit: None,
+                stdout_cursor: 0,
+                stderr_cursor: 0,
+                completion_reported: false,
+                stdin: None,
+                child: None,
+                #[cfg(windows)]
+                windows_job: None,
+                stdout_thread: None,
+                stderr_thread: None,
+                work_lifecycle: None,
+                lifecycle_seq: 0,
+                last_lifecycle_status: None,
+                last_lifecycle_bytes: 0,
+            },
+        );
+    }
+
+    /// Model a seeded job exiting: reservations consulting it must release.
+    #[cfg(test)]
+    pub(crate) fn finish_seeded_shell_for_test(&mut self, id: &str) {
+        if let Some(shell) = self.processes.get_mut(id) {
+            shell.status = ShellStatus::Completed;
+            shell.exit_code = Some(0);
+            shell.finished_at = Some(Instant::now());
+        }
+    }
+
     /// Test-only observation of the workspace selected by runtime rebuilds.
     #[cfg(test)]
     pub(crate) fn default_workspace(&self) -> &Path {
@@ -3391,6 +3455,49 @@ impl ShellManager {
 
     pub fn running_owner_agent_ids_for_session(&mut self, active_session_id: &str) -> Vec<String> {
         self.running_owner_agent_ids_inner(Some(active_session_id))
+    }
+
+    /// Task ids of `owner_agent_id`'s tracked jobs that are still running, in
+    /// stable order. Coordination reservations validate an owner's in-flight
+    /// unbounded work against this, so it polls first like every reader: a
+    /// job that exited since the last look must not keep holding a frame.
+    pub fn running_task_ids_for_owner(&mut self, owner_agent_id: &str) -> Vec<String> {
+        let mut ids = self
+            .processes
+            .values_mut()
+            .filter_map(|shell| {
+                shell.poll();
+                (shell.status == ShellStatus::Running
+                    && shell
+                        .owner_agent
+                        .as_ref()
+                        .is_some_and(|owner| owner.agent_id == owner_agent_id))
+                .then(|| shell.id.clone())
+            })
+            .collect::<Vec<_>>();
+        ids.sort();
+        ids.dedup();
+        ids
+    }
+
+    /// Whether any of `task_ids` still tracks a running job. Reservations
+    /// stamp the ids they saw at dispatch and re-ask here, so an interrupted
+    /// owner's job keeps its frame occupied exactly as long as the job lives.
+    pub(crate) fn any_running_job(&mut self, task_ids: &[String]) -> bool {
+        task_ids.iter().any(|task_id| {
+            self.processes.get_mut(task_id).is_some_and(|shell| {
+                shell.poll();
+                shell.status == ShellStatus::Running
+            })
+        })
+    }
+
+    /// Whether `owner_agent_id` has any running job at all. The fallback for
+    /// a reservation stamped before its job got an id (the dispatch that
+    /// would have stamped it was aborted mid-call): hold the frame while any
+    /// owned job runs rather than guess which one is unfinished.
+    pub(crate) fn owner_has_running_job(&mut self, owner_agent_id: &str) -> bool {
+        !self.running_task_ids_for_owner(owner_agent_id).is_empty()
     }
 
     fn running_owner_agent_ids_inner(&mut self, active_session_id: Option<&str>) -> Vec<String> {

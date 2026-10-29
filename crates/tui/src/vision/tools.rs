@@ -685,12 +685,16 @@ mod tests {
 
         // The outside-workspace negative survives the prefix admission: a
         // real file outside the workspace still gets the containment
-        // refusal, not a lexical one.
-        let outside = ImageAnalyzeTool::resolve_image_path(
-            tmp.path(),
-            r"C:\Windows\System32\drivers\etc\hosts",
-        )
-        .expect_err("absolute path outside the workspace must reject");
+        // refusal, not a lexical one. The fixture is a second tempdir —
+        // outside the workspace by construction — so the negative hits the
+        // containment check deterministically instead of depending on a
+        // system file existing for `canonicalize` to reach.
+        let outside_dir = tempdir().expect("outside tempdir");
+        let outside_image = outside_dir.path().join("outside.png");
+        std::fs::write(&outside_image, b"not a real png").expect("outside fixture");
+        let outside =
+            ImageAnalyzeTool::resolve_image_path(tmp.path(), &outside_image.to_string_lossy())
+                .expect_err("absolute path outside the workspace must reject");
         assert!(
             outside.to_string().contains("within the workspace"),
             "{outside}"
