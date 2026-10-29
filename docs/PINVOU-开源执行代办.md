@@ -36,7 +36,7 @@
 
 - [x] 开源目标：做生态、提高知名度、为企业版引流。
 - [x] 社区版是完整可用的产品，不做阉割后的演示壳。
-- [x] 当前 Pinvou 除确实不能公开的 H3C/内部资产、凭证和无再分发授权内容外，其他功能和源代码全部开源。
+- [x] 当前 Pinvou 除确实不能公开的 H3C/内部资产、凭证、无再分发授权内容和 Official 私有独有能力（桌面双端远程控制、model_store 模型商店、MegaCube 入口等，见 M0 §11 与 fork-modifications §12）外，其他功能和源代码全部开源。
 - [x] 未来企业专属的组织管理、安全合规、私有化交付和企业服务可保持私有，但不因此阉割现有通用社区版。
 - [x] 不直接将当前私有仓库改为 Public，使用清理后的全新公开仓库。
 - [x] GitHub 公开入口英文优先，产品完整支持英文和简体中文。
@@ -83,6 +83,7 @@
 - `agency-agents.json` 对应的 `jnMetaCode/agency-agents-zh`（MIT）。
 - 三套桌宠 `spritesheet.webp`/`cover.webp`、`sansheng-banner.png`、7 张工具商店 `banner-*.jpg`、7 张 `skill-*.jpg` 和 `scheduled/` 下 3 张 JPG 为 Pinvou 自行生成的自有视觉素材，在公开仓库和社区版中保留。
 - MegaCube 产品入口、图标与集成为 Official 私有能力（2026-10-25 确认），社区版不包含，不适用本节保留口径；真实访问地址与官方集成只存在于官方构建。
+- model_store 模型商店为 Official 私有能力（2026-10-25 确认），依赖官方模型分发服务与账号体系，社区版不包含，不适用本节保留口径；归属详见 M0 §11 与 fork-modifications §12.9。
 - 56 个内置头像：50 个 CC BY 4.0、6 个 CC0 1.0；保留 SVG 内已有元数据，并在 `THIRD_PARTY_NOTICES.md` 汇总署名。
 - 可证明来自 `lobehub/lobe-icons` 的模型服务商图标（MIT）；改为锁定 npm 包版本或记录确切上游文件，同时保留品牌归属说明。
 - BGE-M3（MIT）和 SenseVoice.cpp（MIT）可保留集成；SenseVoice 模型权重另按 FunASR Model License 归因并保留模型名称。
@@ -121,13 +122,13 @@
 
 ### 运行服务器与远程控制处理口径（已确认）
 
-- 手机远程控制客户端、Web 页面、中继服务器、测试和通用部署能力全部开源，不裁掉功能。
-- 桌面双端远程控制（controller 协议、主控/受控生命周期、任务权限、文件传输、enrollment gateway、pairing、controller relay 面与 Windows 发布证据）为闭源独有，不开源（已确认 2026-10-25）；手机远程控制一期口径不变。
+- 手机远程控制客户端、Web 页面、中继服务器、测试和通用部署能力全部开源，不裁掉功能（此处“中继”指手机/Web 一期设备中继；controller relay 面——`controller-*`、`enrollment-*`、`pairing-*`——已随桌面双端远程控制闭源，见下一条）。
+- 桌面双端远程控制（controller 协议、主控/受控生命周期、任务权限、文件传输、enrollment gateway、pairing、controller relay 面与 Windows 发布证据）为闭源独有，不开源（已确认 2026-10-25）；手机/QR 远程控制一期口径不变。
 - 公开源码默认不得连接 Pinvou 生产中继；社区用户通过配置使用本地或自建中继，官方发行版可在构建/发布环境中注入官方服务地址。
 - Pinvou 运行中的所有服务器信息均不得进入公开源码和 Git 历史，包括访问地址、域名/IP、端口组合、服务器账号、远程目录、SSH key 路径、代理/隧道拓扑、内部设备配置和管理凭证。
 - 公开 GitHub Release 可以同时提供由公开源码构建的社区包，以及包含私有功能和官方服务地址的 Pinvou 官方包；官方包必须明确标注其不能由公开源码完整复现。服务器地址允许存在于官方二进制，但可复用密钥、客户端 Secret、SSH 凭证和管理 Token 仍不得内置。
 - 部署、发布、OTA、Nginx、证书、CI/CD 和测试脚本必须逐项检查；真实值改为必填环境变量、命令行参数或明确占位符，并提供安全的 `.env.example` 与自建说明。
-- 社区公开快照完全移除 Pinvou 遥测能力；官方私有版维持现状。远程控制中继本身仍开源，只拆除设备统计、上报和统计管理后台。
+- 社区公开快照完全移除 Pinvou 遥测能力；官方私有版维持现状。远程控制中继（手机/Web 一期设备中继）本身仍开源，只拆除设备统计、上报和统计管理后台；controller relay 面不在此列，随桌面双端远程控制闭源（见上）。
 - Community 首版不提供应用内自动更新，只通过 `Pinvou/pinvou-agent` GitHub Releases 手动下载安装；Official 维持现有更新服务。公开快照不得包含 Pinvou OTA 地址、服务器配置或部署路径；后续如恢复 Community 自动更新，必须使用公开 Release 通道和独立更新签名验签。
 - 社区版知识库 BGE-M3 模型包改由 `Pinvou/pinvou-agent` GitHub Releases 分发，保留 SHA-256 校验与可复现的生成说明；SenseVoice 继续使用其官方上游 ModelScope/GitHub 下载源。官方私有版维持现有模型分发服务。
 

@@ -1,6 +1,6 @@
 [submodule "CodeWhale"]
 	path = CodeWhale
-	url = https://github.com/Pinvou/CodeWhale.git
+	url = /home/asto/Documents/pinvou3/CodeWhale
 [submodule "private-runtimes/windows"]
 	path = private-runtimes/windows
 	url = https://github.com/Pinvou/pinvou3-windows-runtime.git
