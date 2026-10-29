@@ -85,6 +85,7 @@ tokio-util = { version = "0.7.16", features = ["io"] }
 unicode-width = "0.2"
 unicode-segmentation = "1.12"
 unicode-normalization = "0.1"
+url = "2"
 urlencoding = "2.1"
 uuid.workspace = true
 chrono.workspace = true
