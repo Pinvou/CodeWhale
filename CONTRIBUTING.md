@@ -129,8 +129,10 @@ packages are built only after a
 The Linux Rust jobs prepare disk with `scripts/ci-rust-disk.py`, which removes
 only the unused preinstalled SDK directories (Android, .NET, Haskell/ghcup,
 Julia by default; optionally the hostedtoolcache and browser bundles with
-`--aggressive`) on disposable GitHub-hosted Linux runners; it refuses
-self-hosted runners, redirected paths, and an undersized disk
+`--aggressive`) on disposable GitHub-hosted Linux runners; deletion refuses
+self-hosted runners and redirected paths. On self-hosted Linux, workflows use
+`--check-only`, which checks the same capacity floor without scanning or deleting
+SDKs. Both modes refuse an undersized disk
 (`--min-free-gib`, default 12). The pr-check rust-test job calls it before the
 swap file and caches land with a 24 GiB floor, again before the cache
 restores, and again after them (12 GiB floor); rust-lint uses the same
@@ -144,6 +146,19 @@ capped at 70% of RAM), a mandatory 8 GiB `/mnt/swapfile` as the unbounded
 overflow (on the shared single disk this costs 8 GiB of build disk; it is
 skipped only when /mnt is RAM-backed or has too little free space), then
 zswap and the image swap as fallbacks.
+Self-hosted runners retain their administrator-provisioned memory and swap;
+the memory setup script leaves them unchanged, and apt cleanup is hosted-only.
+
+Repository administrators can set `PINVOU_LINUX_RUNNER` to a JSON label array
+(for example `["self-hosted","Linux","pinvou3"]`) to route x64 Linux jobs to
+a dedicated Ubuntu 22.04 runner. Without that variable they use `ubuntu-22.04`.
+The runner needs passwordless sudo for dependency setup, Docker with Compose and
+Buildx, GitHub CLI, and access to the required package registries. It must be
+reserved for trusted repository code. Self-hosted jobs retain local npm caches
+and disable setup-node's remote cache upload. Set `PINVOU_WINDOWS_MAC_ENABLED`
+to the literal `false` to disable Windows/macOS jobs and their corresponding
+required results; Linux checks remain required. Unset or any other value keeps
+the existing three-platform policy. ARM release jobs keep their hosted ARM label.
 All Linux jobs pin the release runner image (`ubuntu-22.04` /
 `ubuntu-22.04-arm`): release binaries link the build machine's glibc, so
 tests must run on the same system. The image is upgraded repo-wide in one
