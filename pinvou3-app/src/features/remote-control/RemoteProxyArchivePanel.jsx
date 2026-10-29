@@ -9,6 +9,7 @@ export default function RemoteProxyArchivePanel({ t }) {
   const [page, setPage] = useState([null]);
   const [history, setHistory] = useState(null);
   const [status, setStatus] = useState(null);
+  const [hasLoaded, setHasLoaded] = useState(false);
   const [busy, setBusy] = useState(false);
   const request = useRef(0);
   const supported = typeof api?.listRemoteProxyArchives === 'function';
@@ -17,7 +18,19 @@ export default function RemoteProxyArchivePanel({ t }) {
     const intent = ++request.current;
     setBusy(true);
     setStatus(null);
+    setHasLoaded(false);
     try {
+      if (typeof api.getRemoteProxyLoadStatus === 'function') {
+        const failure = await api.getRemoteProxyLoadStatus();
+        if (request.current !== intent) return false;
+        if (failure) {
+          setActive([]);
+          setArchives([]);
+          setHistory(null);
+          setStatus(failure);
+          return false;
+        }
+      }
       const [current, archived] = await Promise.all([
         api.listRemoteProxyArchiveCandidates(), api.listRemoteProxyArchives(cursors.at(-1)),
       ]);
@@ -25,6 +38,7 @@ export default function RemoteProxyArchivePanel({ t }) {
       setActive(current);
       setArchives(archived);
       setPage(cursors);
+      setHasLoaded(true);
       return true;
     } catch {
       if (request.current === intent) setStatus('unavailable');
@@ -85,6 +99,7 @@ export default function RemoteProxyArchivePanel({ t }) {
       </div>
       <p className="text-[11px] leading-5">{copy.hint}</p>
       {status && <p role={['completed', 'cleanupPending', 'completedRefreshPending'].includes(status) ? 'status' : 'alert'}>{copy[status]}</p>}
+      {hasLoaded && <>
       <h4>{copy.active}</h4>
       {active.length === 0 && <p>{copy.empty}</p>}
       {active.map(item => (
@@ -102,7 +117,8 @@ export default function RemoteProxyArchivePanel({ t }) {
         <button type="button" disabled={busy || archives.length < 256}
           onClick={() => refresh([...page, archives.at(-1).archiveCursor])}>{copy.next}</button>
       </div>
-      {history && <section aria-label={copy.readOnly} className="max-h-80 space-y-2 overflow-auto">
+      </>}
+      {hasLoaded && history && <section aria-label={copy.readOnly} className="max-h-80 space-y-2 overflow-auto">
         <h4>{copy.readOnly}: {history.title || copy.untitled}</h4>
         {history.entries.map(entry => <div key={`${entry.journalEpoch}:${entry.sequence}`}>
           <p className="whitespace-pre-wrap break-words">{entry.body}</p>

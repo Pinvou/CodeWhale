@@ -9,6 +9,9 @@ use super::schema::{
 };
 use crate::features::sessions::{SessionKind, SessionStore};
 
+#[path = "archive_lifecycle_tests.rs"]
+mod archive_lifecycle;
+
 fn context() -> LiveRemoteContext {
     LiveRemoteContext {
         peer_id: "authenticated-peer".into(),
@@ -665,15 +668,22 @@ fn missing_archive_bank_disables_remote_authority_without_blocking_local_session
 
 #[test]
 fn malformed_and_oversized_remote_cache_do_not_block_local_startup() {
-    for bytes in [
-        b"{broken".to_vec(),
-        vec![b' '; super::schema::MAX_REMOTE_PROXY_FILE_BYTES + 1],
+    for (bytes, expected) in [
+        (b"{broken".to_vec(), "remote_proxy_malformed"),
+        (
+            vec![b' '; super::schema::MAX_REMOTE_PROXY_FILE_BYTES + 1],
+            "remote_proxy_oversized",
+        ),
     ] {
         let temp = tempfile::tempdir().unwrap();
         let store = make_store(temp.path());
         drop(store);
         std::fs::write(temp.path().join("sessions/_remote_proxies.json"), bytes).unwrap();
         assert_invalid_cache_is_isolated(temp.path());
+        assert_eq!(
+            make_store(temp.path()).remote_proxy_load_failure_code(),
+            Some(expected)
+        );
     }
 }
 
@@ -1112,6 +1122,10 @@ fn unsupported_schema_versions_fail_without_rewriting_disk() {
         let bytes = serde_json::to_vec(&unsupported).unwrap();
         std::fs::write(&path, &bytes).unwrap();
         assert_invalid_cache_is_isolated(temp.path());
+        assert_eq!(
+            make_store(temp.path()).remote_proxy_load_failure_code(),
+            Some("remote_proxy_version_unsupported")
+        );
         assert_eq!(std::fs::read(&path).unwrap(), bytes);
     }
 }

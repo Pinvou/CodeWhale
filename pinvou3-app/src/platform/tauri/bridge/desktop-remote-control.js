@@ -983,6 +983,16 @@
         }).catch(function (failure) { throw asBoundedError(failure); });
     }
 
+    function getRemoteProxyLoadStatus() {
+      ensureAvailable();
+      return invoke("desktop_remote_proxy_load_status", {}).then(function (value) {
+        const allowed = ["remote_proxy_unreadable", "remote_proxy_oversized", "remote_proxy_malformed",
+          "remote_proxy_version_unsupported", "remote_proxy_invalid_records", "remote_proxy_archive_unavailable"];
+        if (value !== null && !allowed.includes(value)) throw asBoundedError("remote_proxy_projection_invalid");
+        return value;
+      }).catch(function (failure) { throw asBoundedError(failure); });
+    }
+
     function listRemoteProxyArchiveCandidates() {
       ensureAvailable();
       return invoke("desktop_remote_proxy_archive_candidates", {})
@@ -1411,6 +1421,7 @@
       archiveRemoteProxyHistory: archiveRemoteProxyHistory,
       listRemoteProxyArchives: listRemoteProxyArchives,
       listRemoteProxyArchiveCandidates: listRemoteProxyArchiveCandidates,
+      getRemoteProxyLoadStatus: getRemoteProxyLoadStatus,
       reserveRemoteTask: reserveRemoteTask,
       commitRemoteTask: commitRemoteTask,
       cancelRemoteTask: cancelRemoteTask,

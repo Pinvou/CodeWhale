@@ -204,6 +204,7 @@ struct HandshakeFiles {
     pending: PathBuf,
     claimed: PathBuf,
     aborted: PathBuf,
+    approved: PathBuf,
 }
 
 impl Drop for HandshakeFiles {
@@ -213,6 +214,150 @@ impl Drop for HandshakeFiles {
         let _ = std::fs::remove_dir(&self.pending);
         let _ = std::fs::remove_dir(&self.claimed);
         let _ = std::fs::remove_dir(&self.aborted);
+    }
+}
+
+struct HelperHandle(usize);
+
+impl HelperHandle {
+    fn open(pid: u32, expected_creation: i64) -> Result<Self, String> {
+        use windows_sys::Win32::System::Threading::{
+            OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION, PROCESS_SYNCHRONIZE,
+        };
+        let handle = unsafe {
+            OpenProcess(
+                PROCESS_QUERY_LIMITED_INFORMATION | PROCESS_SYNCHRONIZE,
+                0,
+                pid,
+            )
+        };
+        if handle.is_null() {
+            return Err(format!(
+                "helper process unavailable: {}",
+                std::io::Error::last_os_error()
+            ));
+        }
+        let helper = Self(handle as usize);
+        if process_creation_time(handle)? != expected_creation || !helper.is_running() {
+            return Err("helper identity changed or exited".to_string());
+        }
+        Ok(helper)
+    }
+
+    fn is_running(&self) -> bool {
+        use windows_sys::Win32::System::Threading::WaitForSingleObject;
+        unsafe {
+            WaitForSingleObject(self.0 as _, 0) == windows_sys::Win32::Foundation::WAIT_TIMEOUT
+        }
+    }
+}
+
+impl Drop for HelperHandle {
+    fn drop(&mut self) {
+        unsafe {
+            windows_sys::Win32::Foundation::CloseHandle(self.0 as _);
+        }
+    }
+}
+
+struct PendingHandoff {
+    markers: HandshakeFiles,
+    helper: HelperHandle,
+    deadline: Instant,
+    owner: String,
+}
+static INSTALL_HANDOFF: std::sync::Mutex<Option<PendingHandoff>> = std::sync::Mutex::new(None);
+
+fn commit_handoff_slot(slot: &mut Option<PendingHandoff>) -> Result<(), String> {
+    use std::io::Write;
+    commit_handoff_slot_with_writer(slot, |path, nonce| {
+        let mut file = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(path)?;
+        file.write_all(nonce.as_bytes())?;
+        file.sync_all()
+    })
+}
+
+fn commit_handoff_slot_with_writer(
+    slot: &mut Option<PendingHandoff>,
+    writer: impl FnOnce(&Path, &str) -> std::io::Result<()>,
+) -> Result<(), String> {
+    let pending = slot
+        .take()
+        .ok_or_else(|| "没有待确认的安装交接".to_string())?;
+    let valid = || Instant::now() < pending.deadline && pending.helper.is_running();
+    if !valid() {
+        return Err("安装交接已超时或助手已退出".to_string());
+    }
+    let path = &pending.markers.approved;
+    let result = writer(path, &pending.markers.nonce);
+    if let Err(error) = result {
+        let _ = std::fs::remove_file(path);
+        return Err(format!("无法确认安装交接: {error}"));
+    }
+    if !valid() {
+        let _ = std::fs::remove_file(path);
+        return Err("安装交接已超时或助手已退出".to_string());
+    }
+    Ok(())
+}
+
+pub fn commit_install_handoff(owner: &str) -> Result<(), String> {
+    let mut slot = INSTALL_HANDOFF
+        .lock()
+        .map_err(|_| "安装交接状态不可用".to_string())?;
+    if slot.as_ref().is_some_and(|pending| pending.owner != owner) {
+        return Err("安装交接不属于当前操作".to_string());
+    }
+    commit_handoff_slot(&mut slot)
+}
+
+fn cancel_handoff_slot(slot: &mut Option<PendingHandoff>, owner: &str) {
+    if slot.as_ref().is_some_and(|pending| pending.owner == owner) {
+        *slot = None;
+    }
+}
+
+pub fn cancel_install_handoff(owner: &str) {
+    if let Ok(mut slot) = INSTALL_HANDOFF.lock() {
+        cancel_handoff_slot(&mut slot, owner);
+    }
+}
+
+fn cleanup_stale_handoff_approvals(directory: &Path, now: SystemTime) {
+    let Ok(entries) = std::fs::read_dir(directory) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let name = entry.file_name();
+        let Some(name) = name.to_str() else {
+            continue;
+        };
+        let Some(id) = name
+            .strip_prefix(".pinvou3-install-")
+            .and_then(|v| v.strip_suffix(".approved"))
+        else {
+            continue;
+        };
+        if id.len() != 32 || !id.bytes().all(|b| b.is_ascii_hexdigit()) {
+            continue;
+        }
+        let Ok(metadata) = std::fs::symlink_metadata(entry.path()) else {
+            continue;
+        };
+        if !metadata.file_type().is_file() {
+            continue;
+        }
+        if metadata
+            .modified()
+            .ok()
+            .and_then(|modified| now.duration_since(modified).ok())
+            .is_some_and(|age| age >= Duration::from_secs(24 * 60 * 60))
+        {
+            let _ = std::fs::remove_file(entry.path());
+        }
     }
 }
 
@@ -527,6 +672,7 @@ pub fn install_downloaded_update(
     _deb_path: Option<String>,
     _installer_path: Option<String>,
     info: Option<super::super::UpdateInfo>,
+    owner: &str,
 ) -> Result<bool, String> {
     let info = info.ok_or_else(|| "缺少 Windows 更新信息".to_string())?;
     let approved = approved_asset_from_ipc(&info, true)?;
@@ -572,6 +718,7 @@ pub fn install_downloaded_update(
         &expected_name,
         approved.size,
         &approved.sha256,
+        owner,
     )?;
     Ok(true)
 }
@@ -583,8 +730,10 @@ fn install_update_package(
     expected_name: &str,
     expected_size: u64,
     expected_sha256: &str,
+    owner: &str,
 ) -> Result<(), String> {
     let trusted_tools = trusted_system_tools()?;
+    cleanup_stale_handoff_approvals(updates_dir, SystemTime::now());
     let nonce = uuid::Uuid::new_v4().simple().to_string();
     let markers = HandshakeFiles {
         nonce: nonce.clone(),
@@ -593,6 +742,7 @@ fn install_update_package(
         pending: updates_dir.join(format!(".pinvou3-install-{nonce}.pending")),
         claimed: updates_dir.join(format!(".pinvou3-install-{nonce}.claimed")),
         aborted: updates_dir.join(format!(".pinvou3-install-{nonce}.aborted")),
+        approved: updates_dir.join(format!(".pinvou3-install-{nonce}.approved")),
     };
     create_empty_marker(&markers.started)?;
     create_empty_marker(&markers.error)?;
@@ -604,6 +754,7 @@ fn install_update_package(
         .map(|value| value.as_secs())
         .ok_or_else(|| "无法计算安装启动批准有效期".to_string())?;
 
+    let (old_pid, old_created) = current_process_identity()?;
     let elevated_script = elevated_installer_script(
         kind,
         &windows_tool_path(&trusted_tools.msiexec),
@@ -617,8 +768,11 @@ fn install_update_package(
         &windows_tool_path(&markers.pending),
         &windows_tool_path(&markers.claimed),
         &windows_tool_path(&markers.aborted),
+        &windows_tool_path(&markers.approved),
         &markers.nonce,
         expires_at,
+        old_pid,
+        old_created,
     );
     let encoded_script = powershell_encoded_command(&elevated_script);
     let broker_script = elevation_broker_script(
@@ -627,6 +781,7 @@ fn install_update_package(
         &windows_tool_path(&markers.error),
         &markers.nonce,
     );
+    let started_at = Instant::now();
     let mut child = crate::platform::process::HiddenCommand::new(&trusted_tools.powershell)
         .args([
             "-NoProfile",
@@ -644,15 +799,30 @@ fn install_update_package(
         .spawn()
         .map_err(|e| format!("Windows 安装器提权代理启动失败: {e}"))?;
 
-    let started_at = Instant::now();
     let mut launch_claimed = false;
     loop {
-        if marker_payload(&markers.started, &markers.nonce)
-            .and_then(|value| value.parse::<u32>().ok())
-            .is_some_and(|pid| pid > 0)
-        {
-            let _ = child.try_wait();
-            return Ok(());
+        if let Some(payload) = marker_payload(&markers.started, &markers.nonce) {
+            if let Some((helper, creation)) = parse_started_payload(&payload) {
+                let handle = HelperHandle::open(helper, creation)?;
+                let deadline = started_at + Duration::from_secs(240);
+                if Instant::now() >= deadline {
+                    return Err("安装交接已超时".to_string());
+                }
+                let mut handoff = INSTALL_HANDOFF
+                    .lock()
+                    .map_err(|_| "安装交接状态不可用".to_string())?;
+                if handoff.is_some() {
+                    return Err("已有待确认的安装交接".to_string());
+                }
+                *handoff = Some(PendingHandoff {
+                    markers,
+                    helper: handle,
+                    deadline,
+                    owner: owner.to_string(),
+                });
+                let _ = child.try_wait();
+                return Ok(());
+            }
         }
         if let Some(error) = marker_payload(&markers.error, &markers.nonce) {
             let _ = child.wait();
@@ -677,6 +847,10 @@ fn install_update_package(
                 // 路径并等待 elevated helper 给出 started/error 明确终态。
                 Err(_) => launch_claimed = true,
             }
+        }
+        if launch_claimed && started_at.elapsed() >= INSTALL_START_TIMEOUT + Duration::from_secs(30)
+        {
+            return Err("安装交接未完成，应用将继续运行".to_string());
         }
         let _ = child.try_wait();
         std::thread::sleep(Duration::from_millis(50));
@@ -897,6 +1071,17 @@ fn marker_payload(path: &Path, nonce: &str) -> Option<String> {
         .filter(|value| !value.is_empty())
 }
 
+fn parse_started_payload(payload: &str) -> Option<(u32, i64)> {
+    let parts: Vec<_> = payload.split(':').collect();
+    let [installer, helper, creation, "ready"] = parts.as_slice() else {
+        return None;
+    };
+    let installer = installer.parse::<u32>().ok()?;
+    let helper = helper.parse::<u32>().ok()?;
+    let creation = creation.parse::<i64>().ok()?;
+    (installer > 0 && helper > 0).then_some((helper, creation))
+}
+
 fn powershell_encoded_command(script: &str) -> String {
     let utf16le = script
         .encode_utf16()
@@ -915,7 +1100,7 @@ fn elevation_broker_script(
     let error_marker = powershell_single_quoted(&error_marker.to_string_lossy());
     let error_prefix = powershell_single_quoted(&format!("{nonce}:"));
     format!(
-        "$ErrorActionPreference = 'Stop'; try {{ Start-Process -FilePath {system_powershell} -ArgumentList @('-NoProfile','-NonInteractive','-ExecutionPolicy','Bypass','-WindowStyle','Hidden','-EncodedCommand','{encoded_script}') -Verb RunAs | Out-Null }} catch {{ [IO.File]::WriteAllText({error_marker}, {error_prefix} + $_.Exception.Message, [Text.UTF8Encoding]::new($false)) }}"
+        "$ErrorActionPreference = 'Stop'; try {{ $p = Start-Process -FilePath {system_powershell} -ArgumentList @('-NoProfile','-NonInteractive','-ExecutionPolicy','Bypass','-WindowStyle','Hidden','-EncodedCommand','{encoded_script}') -Verb RunAs -PassThru; $p.WaitForExit(); if ($p.ExitCode -ne 0 -and (Get-Item -LiteralPath {error_marker}).Length -eq 0) {{ [IO.File]::WriteAllText({error_marker}, {error_prefix} + 'elevated helper exited before handoff', [Text.UTF8Encoding]::new($false)) }} }} catch {{ [IO.File]::WriteAllText({error_marker}, {error_prefix} + $_.Exception.Message, [Text.UTF8Encoding]::new($false)) }}"
     )
 }
 
@@ -933,8 +1118,11 @@ fn elevated_installer_script(
     pending_state: &Path,
     claimed_state: &Path,
     aborted_state: &Path,
+    approved_state: &Path,
     nonce: &str,
     expires_at: u64,
+    old_pid: u32,
+    old_created: i64,
 ) -> String {
     let system_msiexec = powershell_single_quoted(&system_msiexec.to_string_lossy());
     let installer = powershell_single_quoted(&installer.to_string_lossy());
@@ -947,15 +1135,19 @@ fn elevated_installer_script(
     let claimed_state = powershell_single_quoted(&claimed_state.to_string_lossy());
     let aborted_state = powershell_single_quoted(&aborted_state.to_string_lossy());
     let nonce_prefix = powershell_single_quoted(&format!("{nonce}:"));
-    let start_installer = match kind {
-        WindowsInstallerKind::NsisExe => {
-            "$p = Start-Process -FilePath $installer -ArgumentList @('/P','/UPDATE','/R') -PassThru; "
-                .to_string()
-        }
-        WindowsInstallerKind::Msi => format!(
-            "$msiArguments = '/i \"' + $installer + '\" REINSTALLMODE=vamus /passive /norestart'; $p = Start-Process -FilePath {system_msiexec} -ArgumentList $msiArguments -PassThru; "
+    let approved_state = powershell_single_quoted(&approved_state.to_string_lossy());
+    let (executable, arguments) = match kind {
+        WindowsInstallerKind::NsisExe => ("$installer".to_string(), "'/P /UPDATE /R'".to_string()),
+        WindowsInstallerKind::Msi => (
+            system_msiexec,
+            r#"('/i "' + $installer + '" REINSTALLMODE=vamus /passive /norestart')"#.to_string(),
         ),
     };
+    let handoff_source = powershell_single_quoted(include_str!("windows_handoff.cs"));
+    let start_installer = format!(
+        "Add-Type -TypeDefinition {handoff_source}; [PinvouInstallHandoff]::Run({old_pid}, {old_created}, {executable}, {arguments}, {started_marker}, {approved_state}, {nonce}, 300000); ",
+        nonce = powershell_single_quoted(nonce),
+    );
 
     format!(
         concat!(
@@ -976,12 +1168,8 @@ fn elevated_installer_script(
             "if ([DateTimeOffset]::UtcNow.ToUnixTimeSeconds() -gt [int64]{expires_at}) {{ throw 'installer launch approval expired' }}; ",
             "try {{ Move-Item -LiteralPath {pending_state} -Destination {claimed_state} -ErrorAction Stop }} catch {{ if (Test-Path -LiteralPath {aborted_state}) {{ throw 'installer launch approval was revoked' }}; throw }}; ",
             "{start_installer}",
-            "if ($null -eq $p -or $p.Id -le 0) {{ throw 'installer process was not created' }}; ",
-            "[IO.File]::WriteAllText({started_marker}, {nonce_prefix} + [string]$p.Id, [Text.UTF8Encoding]::new($false)); ",
-            "$installerStarted = $true; ",
-            "$p.WaitForExit(); ",
             "}} finally {{ $stream.Dispose() }}; ",
-            "}} catch {{ if (-not $installerStarted) {{ [IO.File]::WriteAllText({error_marker}, {nonce_prefix} + $_.Exception.Message, [Text.UTF8Encoding]::new($false)) }}; exit 1 }}"
+            "}} catch {{ [IO.File]::WriteAllText({error_marker}, {nonce_prefix} + $_.Exception.Message, [Text.UTF8Encoding]::new($false)); exit 1 }}"
         ),
         installer = installer,
         updates_dir = updates_dir,
@@ -989,7 +1177,6 @@ fn elevated_installer_script(
         expected_size = expected_size,
         expected_sha256 = expected_sha256,
         start_installer = start_installer,
-        started_marker = started_marker,
         pending_state = pending_state,
         claimed_state = claimed_state,
         aborted_state = aborted_state,
@@ -999,6 +1186,28 @@ fn elevated_installer_script(
     )
 }
 
+fn process_creation_time(handle: windows_sys::Win32::Foundation::HANDLE) -> Result<i64, String> {
+    use windows_sys::Win32::Foundation::FILETIME;
+    use windows_sys::Win32::System::Threading::GetProcessTimes;
+    let mut created = FILETIME::default();
+    let mut exited = FILETIME::default();
+    let mut kernel = FILETIME::default();
+    let mut user = FILETIME::default();
+    let ok = unsafe { GetProcessTimes(handle, &mut created, &mut exited, &mut kernel, &mut user) };
+    if ok == 0 {
+        return Err(format!(
+            "cannot read process identity: {}",
+            std::io::Error::last_os_error()
+        ));
+    }
+    Ok((((created.dwHighDateTime as u64) << 32) | created.dwLowDateTime as u64) as i64)
+}
+
+fn current_process_identity() -> Result<(u32, i64), String> {
+    let current = unsafe { windows_sys::Win32::System::Threading::GetCurrentProcess() };
+    Ok((std::process::id(), process_creation_time(current)?))
+}
+
 fn powershell_single_quoted(value: &str) -> String {
     format!("'{}'", value.replace('\'', "''"))
 }
@@ -1006,6 +1215,172 @@ fn powershell_single_quoted(value: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn started_payload_requires_complete_record() {
+        let record = "123:456:133700000000000000:ready";
+        for end in 0..record.len() {
+            assert!(
+                parse_started_payload(&record[..end]).is_none(),
+                "prefix {end}"
+            );
+        }
+        assert_eq!(
+            parse_started_payload(record),
+            Some((456, 133700000000000000))
+        );
+        for invalid in [
+            "0:456:1:ready",
+            "123:0:1:ready",
+            "123:456:1:ready:extra",
+            "123:456:1:READY",
+        ] {
+            assert!(parse_started_payload(invalid).is_none(), "{invalid}");
+        }
+    }
+
+    fn test_handoff(directory: &Path, deadline: Instant) -> PendingHandoff {
+        let (pid, created) = current_process_identity().unwrap();
+        let nonce = uuid::Uuid::new_v4().simple().to_string();
+        let path = |suffix: &str| directory.join(format!("{nonce}.{suffix}"));
+        PendingHandoff {
+            markers: HandshakeFiles {
+                nonce: nonce.clone(),
+                started: path("started"),
+                error: path("error"),
+                pending: path("pending"),
+                claimed: path("claimed"),
+                aborted: path("aborted"),
+                approved: path("approved"),
+            },
+            helper: HelperHandle::open(pid, created).unwrap(),
+            deadline,
+            owner: "test-owner".to_string(),
+        }
+    }
+
+    #[test]
+    fn failed_confirmation_releases_slot_for_retry() {
+        let dir = tempfile::tempdir().unwrap();
+        let pending = test_handoff(dir.path(), Instant::now() + Duration::from_secs(60));
+        std::fs::create_dir(&pending.markers.approved).unwrap();
+        let mut slot = Some(pending);
+        assert!(commit_handoff_slot(&mut slot).is_err());
+        assert!(slot.is_none());
+        let partial = test_handoff(dir.path(), Instant::now() + Duration::from_secs(60));
+        let partial_path = partial.markers.approved.clone();
+        slot = Some(partial);
+        assert!(
+            commit_handoff_slot_with_writer(&mut slot, |path, _| {
+                std::fs::write(path, "partial")?;
+                Err(std::io::Error::other("simulated write failure"))
+            })
+            .is_err()
+        );
+        assert!(slot.is_none());
+        assert!(!partial_path.exists());
+        let next = test_handoff(dir.path(), Instant::now() + Duration::from_secs(60));
+        let approval = next.markers.approved.clone();
+        slot = Some(next);
+        assert!(commit_handoff_slot(&mut slot).is_ok());
+        assert!(approval.is_file());
+        assert!(slot.is_none());
+    }
+
+    #[test]
+    fn expired_or_exited_helper_cannot_be_confirmed() {
+        use std::os::windows::io::AsRawHandle;
+        let dir = tempfile::tempdir().unwrap();
+        let mut pending = test_handoff(dir.path(), Instant::now() - Duration::from_secs(1));
+        let approval = pending.markers.approved.clone();
+        assert!(commit_handoff_slot(&mut Some(pending)).is_err());
+        assert!(!approval.exists());
+        let mut child = std::process::Command::new("powershell.exe")
+            .args(["-NoProfile", "-Command", "Start-Sleep -Seconds 120"])
+            .spawn()
+            .unwrap();
+        let creation = process_creation_time(child.as_raw_handle() as _).unwrap();
+        let helper = HelperHandle::open(child.id(), creation).unwrap();
+        child.kill().unwrap();
+        child.wait().unwrap();
+        pending = test_handoff(dir.path(), Instant::now() + Duration::from_secs(60));
+        pending.helper = helper;
+        let approval = pending.markers.approved.clone();
+        assert!(commit_handoff_slot(&mut Some(pending)).is_err());
+        assert!(!approval.exists());
+    }
+
+    #[test]
+    fn cleanup_only_removes_old_owned_approval_files() {
+        let dir = tempfile::tempdir().unwrap();
+        let old = dir
+            .path()
+            .join(format!(".pinvou3-install-{}.approved", "a".repeat(32)));
+        let fresh = dir
+            .path()
+            .join(format!(".pinvou3-install-{}.approved", "b".repeat(32)));
+        let other = dir.path().join(".pinvou3-install-unrelated.approved");
+        for path in [&old, &fresh, &other] {
+            std::fs::write(path, "test").unwrap();
+        }
+        let now = SystemTime::now();
+        let file = std::fs::OpenOptions::new().write(true).open(&old).unwrap();
+        file.set_times(
+            std::fs::FileTimes::new().set_modified(now - Duration::from_secs(24 * 60 * 60 + 1)),
+        )
+        .unwrap();
+        cleanup_stale_handoff_approvals(dir.path(), now);
+        assert!(!old.exists());
+        assert!(fresh.exists());
+        assert!(other.exists());
+    }
+
+    #[test]
+    fn cancellation_clears_its_own_late_or_ready_handoff() {
+        use std::sync::{
+            Arc, Barrier, Mutex,
+            atomic::{AtomicBool, Ordering},
+        };
+        for cancel_before_publish in [true, false] {
+            let dir = tempfile::tempdir().unwrap();
+            let pending = test_handoff(dir.path(), Instant::now() + Duration::from_secs(60));
+            let slot = Arc::new(Mutex::new(None));
+            let cancelled = Arc::new(AtomicBool::new(false));
+            let gate = Arc::new(Barrier::new(2));
+            let worker_slot = slot.clone();
+            let worker_cancelled = cancelled.clone();
+            let worker_gate = gate.clone();
+            let worker = std::thread::spawn(move || {
+                if cancel_before_publish {
+                    worker_gate.wait();
+                }
+                *worker_slot.lock().unwrap() = Some(pending);
+                if worker_cancelled.load(Ordering::SeqCst) {
+                    cancel_handoff_slot(&mut worker_slot.lock().unwrap(), "test-owner");
+                }
+                if !cancel_before_publish {
+                    worker_gate.wait();
+                }
+            });
+            if !cancel_before_publish {
+                gate.wait();
+            }
+            cancelled.store(true, Ordering::SeqCst);
+            cancel_handoff_slot(&mut slot.lock().unwrap(), "test-owner");
+            if cancel_before_publish {
+                gate.wait();
+            }
+            worker.join().unwrap();
+            assert!(slot.lock().unwrap().is_none());
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let mut slot = Some(test_handoff(
+            dir.path(),
+            Instant::now() + Duration::from_secs(60),
+        ));
+        cancel_handoff_slot(&mut slot, "other-owner");
+        assert!(slot.is_some());
+    }
 
     fn asset(format: &str, url: &str) -> super::super::super::PlatformAsset {
         super::super::super::PlatformAsset {
@@ -1145,15 +1520,18 @@ mod tests {
             Path::new(r"C:\updates\.pending"),
             Path::new(r"C:\updates\.claimed"),
             Path::new(r"C:\updates\.aborted"),
+            Path::new(r"C:\updates\.approved"),
             "test-nonce",
             4_102_444_800,
+            42,
+            1234,
         );
         assert!(rendered.contains("[IO.FileShare]::Read"));
         assert!(rendered.contains("SHA-256 does not match manifest"));
-        assert!(rendered.contains("installer process was not created"));
+        assert!(rendered.contains("[PinvouInstallHandoff]::Run(42, 1234"));
         assert!(rendered.contains("Move-Item -LiteralPath 'C:\\updates\\.pending'"));
-        assert!(rendered.contains("'test-nonce:' + [string]$p.Id"));
-        assert!(rendered.contains("@('/P','/UPDATE','/R')"));
+        assert!(rendered.contains("'test-nonce'"));
+        assert!(rendered.contains("'/P /UPDATE /R'"));
         assert!(!rendered.contains("Microsoft.Win32.Registry"));
         assert!(!rendered.contains("CurrentUser"));
         assert!(!rendered.contains("LocalMachine"));
@@ -1162,7 +1540,7 @@ mod tests {
         assert!(!rendered.contains("pinvou3-tauri.exe"));
         assert!(rendered.contains("pinvou3''s-setup.exe"));
         assert!(
-            rendered.find("$p.WaitForExit()").unwrap()
+            rendered.find("[PinvouInstallHandoff]::Run").unwrap()
                 < rendered.find("$stream.Dispose()").unwrap()
         );
     }
@@ -1182,17 +1560,18 @@ mod tests {
             Path::new(r"C:\updates with space\.pending"),
             Path::new(r"C:\updates with space\.claimed"),
             Path::new(r"C:\updates with space\.aborted"),
+            Path::new(r"C:\updates with space\.approved"),
             "test-nonce",
             4_102_444_800,
+            42,
+            1234,
         );
         assert!(rendered.contains(
             "$installer = [IO.Path]::GetFullPath('C:\\updates with space\\pinvou3''s package.msi')"
         ));
+        assert!(rendered.contains("REINSTALLMODE=vamus /passive /norestart"));
         assert!(rendered.contains(
-            "$msiArguments = '/i \"' + $installer + '\" REINSTALLMODE=vamus /passive /norestart'"
-        ));
-        assert!(rendered.contains(
-            "Start-Process -FilePath 'C:\\Windows\\System32\\msiexec.exe' -ArgumentList $msiArguments -PassThru"
+            "[PinvouInstallHandoff]::Run(42, 1234, 'C:\\Windows\\System32\\msiexec.exe'"
         ));
         assert!(!rendered.contains("pinvou3-tauri.exe"));
         assert!(!rendered.contains("Microsoft.Win32.Registry"));

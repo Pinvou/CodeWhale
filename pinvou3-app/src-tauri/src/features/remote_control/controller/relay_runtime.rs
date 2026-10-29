@@ -26,7 +26,8 @@ use crate::features::remote_control::manager::RemoteControlManager;
 
 use super::controlled::{
     ControlledDeviceManager, ControlledLease, ControlledOperation, ControlledRegistration,
-    ControlledResumeStep, ControlledStatus, ControlledStatusKind,
+    ControlledResumeMaterial, ControlledResumeStep, ControlledStateError, ControlledStatus,
+    ControlledStatusKind, ControlledTransportAuthority, ControlledTransportOwner,
 };
 use super::controlled_handshake::ControlledHandshake;
 use super::controlling_handshake::JoinedLease;
@@ -784,6 +785,7 @@ pub(crate) fn controlled_monotonic_millis() -> u64 {
 }
 
 pub(crate) struct ControlledRelayWorker {
+    transport_owner: Option<ControlledTransportOwner>,
     app: AppHandle,
     relay: RemoteControlManager,
     operation: ControlledOperation,
@@ -799,6 +801,27 @@ pub(crate) struct ControlledRelayWorker {
     business_epoch: std::sync::Arc<AtomicU64>,
     #[cfg(test)]
     processed_frames: Option<tokio::sync::mpsc::Sender<Value>>,
+    #[cfg(test)]
+    before_frame_effect: Option<WorkerFrameHook>,
+    #[cfg(test)]
+    activation_probe: Option<Box<dyn FnOnce() + Send + Sync>>,
+    #[cfg(test)]
+    evidence_hooks: Option<ControlledEvidenceHooks>,
+}
+
+// These observe the actual poll tail before it can mutate a watchdog.
+// They never replace manager/transport checks or escape a child test process.
+#[cfg(test)]
+struct ControlledEvidenceHooks {
+    now_b: std::sync::Arc<AtomicU64>,
+    before_pump: Mutex<Option<Box<dyn FnOnce() + Send + Sync>>>,
+    after_registration: Mutex<Option<Box<dyn FnOnce(Result<(), &'static str>) + Send + Sync>>>,
+}
+
+#[cfg(test)]
+struct WorkerFrameHook {
+    predicate: fn(&Value) -> bool,
+    action: Box<dyn FnOnce(Value) + Send + Sync>,
 }
 
 /// Test-only completion observation: follows the exact production branch,
@@ -1046,6 +1069,7 @@ impl ControlledRelayWorker {
         log_controlled_event("worker_started", "channel_ready");
         let (done_tx, done_rx) = oneshot::channel();
         let mut worker = Self {
+            transport_owner: None,
             app,
             relay,
             operation,
@@ -1057,6 +1081,12 @@ impl ControlledRelayWorker {
             business_epoch: std::sync::Arc::new(AtomicU64::new(0)),
             #[cfg(test)]
             processed_frames: None,
+            #[cfg(test)]
+            before_frame_effect: None,
+            #[cfg(test)]
+            activation_probe: None,
+            #[cfg(test)]
+            evidence_hooks: None,
         };
         tauri::async_runtime::spawn(async move {
             let result = worker.register_pairing().await;
@@ -1175,6 +1205,10 @@ impl ControlledRelayWorker {
         let mut heartbeat = super::controlled_heartbeat::ControlledHeartbeat::default();
         let mut evidence = LivenessEvidenceState::default();
         let mut resume = ControlledResumeAttempt::default();
+        #[cfg(test)]
+        {
+            resume.activation_probe = self.activation_probe.take();
+        }
         let business_worker = self.business_worker();
         let mut poll =
             tokio::time::interval(std::time::Duration::from_millis(LIVENESS_EVIDENCE_POLL_MS));
@@ -1205,6 +1239,13 @@ impl ControlledRelayWorker {
                             self.fail_runtime(&code);
                             break 'serve;
                         }
+                        #[cfg(test)]
+                        if let Some(hooks) = &self.evidence_hooks {
+                            let action = hooks.before_pump.lock().take();
+                            if let Some(action) = action {
+                                action();
+                            }
+                        }
                         self.pump_liveness_evidence(&mut evidence);
                     }
                     continue 'serve;
@@ -1227,6 +1268,13 @@ impl ControlledRelayWorker {
                         sink: self.processed_frames.clone(),
                         frame: message.clone(),
                     };
+                    #[cfg(test)]
+                    if self.before_frame_effect.as_ref()
+                        .is_some_and(|hook| (hook.predicate)(&message))
+                    {
+                        let hook = self.before_frame_effect.take().unwrap();
+                        (hook.action)(message.clone());
+                    }
                     if message.get("type").and_then(Value::as_str) == Some("desktop_controller_stop") {
                         break 'serve;
                     }
@@ -1312,19 +1360,21 @@ impl ControlledRelayWorker {
                                     // before it caches its result. Retain one executor so
                                     // resumed retries cannot overtake it; discard only
                                     // unstarted work and fence old-epoch response frames.
-                                    if manager.with_local_cancel_lease(|_| {
-                                        self.business_epoch.fetch_add(1, Ordering::AcqRel);
-                                        lane.suspend();
-                                    }).is_err() {
-                                        self.business_epoch.fetch_add(1, Ordering::AcqRel);
-                                        lane.suspend();
-                                    }
-                                    business_worker.clear_pending();
-                                    if !begin_controlled_resume(
+                                    let Some(owner) = self.transport_owner.as_ref() else {
+                                        break 'serve;
+                                    };
+                                    let started = begin_owned_controlled_resume(
                                         &self.channel,
                                         manager.inner(),
+                                        owner,
                                         &mut resume,
-                                    ) {
+                                        || {
+                                            self.business_epoch.fetch_add(1, Ordering::AcqRel);
+                                            lane.suspend();
+                                        },
+                                    );
+                                    business_worker.clear_pending();
+                                    if !started {
                                         break 'serve;
                                     }
                                 }
@@ -1354,9 +1404,10 @@ impl ControlledRelayWorker {
                             .map_err(str::to_owned),
                         Some("controller_joined") => {
                             match self.complete_handshake(&message, &mut driver) {
-                                Ok(()) => {
-                                    let manager = self.app.state::<ControlledDeviceManager>();
-                                    let Ok((lease, _)) = manager.liveness_runtime_context() else { return };
+                                Ok(owner) => {
+                                    let lease = owner.lease().clone();
+                                    self.operation = self.operation.clone().for_lane(&owner);
+                                    self.transport_owner = Some(owner);
                                     let epoch = message.get("liveness_epoch_b").and_then(Value::as_str).unwrap_or_default();
                                     if heartbeat.install(lease, epoch).is_err() {
                                         self.fail_runtime(HANDSHAKE_FAILED);
@@ -1410,16 +1461,28 @@ impl ControlledRelayWorker {
     /// E2E-06：按 watchdog 需求发起挑战 / 升级到 Relay 签名兜底 / 作废超时挑战。
     fn pump_liveness_evidence(&self, evidence: &mut LivenessEvidenceState) {
         let manager = self.app.state::<ControlledDeviceManager>();
+        let Some(owner) = self.transport_owner.as_ref() else {
+            return;
+        };
         let now_b = controlled_monotonic_millis();
+        #[cfg(test)]
+        let now_b = self
+            .evidence_hooks
+            .as_ref()
+            .map_or(now_b, |hooks| hooks.now_b.load(Ordering::Acquire));
         let needs = manager.liveness_evidence_needed(now_b);
         match liveness_evidence_action(needs, evidence, now_b) {
             LivenessEvidenceAction::Idle => {}
             LivenessEvidenceAction::Challenge => {
-                let Ok((lease, _)) = manager.liveness_runtime_context() else {
-                    return;
-                };
-                let Ok((challenge_id, challenge_b64)) = manager.begin_liveness_challenge(now_b)
-                else {
+                let registered = manager.begin_owned_liveness_challenge(owner, now_b);
+                #[cfg(test)]
+                if let Some(hooks) = &self.evidence_hooks {
+                    let action = hooks.after_registration.lock().take();
+                    if let Some(action) = action {
+                        action(registered.as_ref().map(|_| ()).map_err(|error| error.code));
+                    }
+                }
+                let Ok((lease, challenge_id, challenge_b64)) = registered else {
                     return;
                 };
                 let request_id = format!("request-liveness-{}", uuid::Uuid::new_v4().simple());
@@ -1429,7 +1492,7 @@ impl ControlledRelayWorker {
                     &challenge_id,
                     &challenge_b64,
                 ) else {
-                    manager.cancel_liveness_challenge(&challenge_id);
+                    let _ = manager.cancel_owned_liveness_challenge(owner, &challenge_id);
                     return;
                 };
                 if self.channel.try_send(frame).is_ok() {
@@ -1438,20 +1501,18 @@ impl ControlledRelayWorker {
                     evidence.attestation_sent_at_b = None;
                     log_controlled_event("liveness_challenge", "sent");
                 } else {
-                    manager.cancel_liveness_challenge(&challenge_id);
+                    let _ = manager.cancel_owned_liveness_challenge(owner, &challenge_id);
                     log_controlled_event("liveness_challenge", "send_failed");
                 }
             }
             LivenessEvidenceAction::Escalate => {
-                let Ok((lease, _)) = manager.liveness_runtime_context() else {
-                    return;
-                };
+                let lease = owner.lease();
                 let Some((challenge_id, challenge_b64, _)) = evidence.outstanding.clone() else {
                     return;
                 };
                 let request_id = format!("request-attest-{}", uuid::Uuid::new_v4().simple());
                 let Ok(frame) = super::liveness::build_liveness_attestation_request(
-                    &lease,
+                    lease,
                     &request_id,
                     &challenge_id,
                     &challenge_b64,
@@ -1465,7 +1526,7 @@ impl ControlledRelayWorker {
             }
             LivenessEvidenceAction::Reset => {
                 if let Some((challenge_id, _, _)) = evidence.outstanding.take() {
-                    manager.cancel_liveness_challenge(&challenge_id);
+                    let _ = manager.cancel_owned_liveness_challenge(owner, &challenge_id);
                 }
                 evidence.escalated = false;
                 evidence.attestation_sent_at_b = None;
@@ -1591,7 +1652,7 @@ impl ControlledRelayWorker {
         &self,
         message: &Value,
         driver: &mut ControlledHandshakeDriver,
-    ) -> Result<(), String> {
+    ) -> Result<ControlledTransportOwner, String> {
         let outcome = driver
             .accept_joined(message)
             .map_err(|code| code.to_owned())?;
@@ -1603,38 +1664,42 @@ impl ControlledRelayWorker {
             return Err(self.fail_completed_handshake(&manager));
         };
         let business = self.app.state::<ControlledLaneState>();
-        business.clear();
-        if business
-            .install(super::crypto::ControllerRole::B, &lease.context, session)
-            .is_err()
-        {
-            return Err(self.fail_completed_handshake(&manager));
-        }
-        // 出站旁路（journal 事件回传）与通道一起就位。
         let outbound = self.app.state::<ControlledOutboundState>();
-        let transport = self
-            .channel
-            .authenticated_transport(&lease.context, lease.negotiated_capabilities.clone())
-            .map_err(|_| self.fail_completed_handshake(&manager))?;
-        manager
-            .replace_authenticated_transport(self.operation.clone(), transport)
-            .map_err(|_| self.fail_completed_handshake(&manager))?;
-        outbound.install(self.channel.sender());
-        let status = manager
-            .complete_connected(self.operation.clone(), lease)
-            .map_err(|error| error.code.to_owned())?;
+        let context = lease.context.clone();
+        let capabilities = lease.negotiated_capabilities.clone();
+        let result = manager.complete_connected_with_install(self.operation.clone(), lease, || {
+            // C -> R -> S keeps the real joined receipt and this worker's
+            // registration continuous with the lane/outbound/Connected commit.
+            // Errors leave this closure before any manager failure callback.
+            let transport = self
+                .channel
+                .authenticated_transport(&context, capabilities)
+                .map_err(|_| ControlledStateError {
+                    code: HANDSHAKE_FAILED,
+                })?;
+            business.clear();
+            business
+                .install(super::crypto::ControllerRole::B, &context, session)
+                .map_err(|_| ControlledStateError {
+                    code: HANDSHAKE_FAILED,
+                })?;
+            outbound.install(self.channel.sender());
+            Ok(std::sync::Arc::new(transport) as std::sync::Arc<dyn ControlledTransportAuthority>)
+        });
+        let (status, owner) = result.map_err(|_| self.fail_completed_handshake(&manager))?;
         emit_controlled_status(&self.app, &status);
-        Ok(())
+        Ok(owner)
     }
 
     /// 握手成功后本地收尾失败（无权安装会话密钥/状态竞争）：失败关闭并返回
     /// 有界错误码，绝不留下「connected 但无业务通道」的状态。
     fn fail_completed_handshake(&self, manager: &ControlledDeviceManager) -> String {
         let business = self.app.state::<ControlledLaneState>();
-        business.clear();
-        if let Ok(status) =
-            manager.fail_operation(self.operation.clone(), HANDSHAKE_FAILED.to_owned())
-        {
+        if let Ok(status) = manager.fail_operation_with_cleanup(
+            self.operation.clone(),
+            HANDSHAKE_FAILED.to_owned(),
+            || business.clear(),
+        ) {
             emit_controlled_status(&self.app, &status);
         }
         HANDSHAKE_FAILED.to_owned()
@@ -1659,7 +1724,11 @@ impl ControlledRelayWorker {
         let manager = self.app.state::<ControlledDeviceManager>();
         // Exact operation validation precedes all cleanup. A retired worker
         // must not clear the replacement generation's keys or projection.
-        if let Ok(status) = manager.fail_operation(self.operation.clone(), sanitize_error(error)) {
+        let result = match self.transport_owner.as_ref() {
+            Some(owner) => manager.fail_owned_transport(owner, sanitize_error(error)),
+            None => manager.fail_operation(self.operation.clone(), sanitize_error(error)),
+        };
+        if let Ok(status) = result {
             emit_controlled_status(&self.app, &status);
         }
     }
@@ -2386,6 +2455,9 @@ impl ControlledOutboundState {
 #[derive(Default)]
 pub(crate) struct ControlledResumeAttempt {
     operation: Option<ControlledOperation>,
+    owner: Option<ControlledTransportOwner>,
+    #[cfg(test)]
+    activation_probe: Option<Box<dyn FnOnce() + Send + Sync>>,
     // Five actual send points in the frozen resume exchange, never peer IDs.
     request_ids: Vec<String>,
     lease: Option<LeaseContext>,
@@ -2426,19 +2498,32 @@ pub(crate) enum ControlledResumeOutcome {
 /// `desktop_remote_controlled::spawn_watchdog_reaper`（应用 setup 注册、独立每秒轮询）
 /// 有界收口；它独立于本 worker 的两秒 poll，不随本 worker 退出而停止。
 /// 不表示所有返回 false 的路径都已经完成清理，也不会因恢复而延长截止。
-pub(crate) fn begin_controlled_resume<P: ControlledRelayPort + ?Sized>(
+fn begin_owned_controlled_resume<P: ControlledRelayPort + ?Sized>(
     port: &P,
     manager: &ControlledDeviceManager,
+    owner: &ControlledTransportOwner,
     resume: &mut ControlledResumeAttempt,
+    suspend: impl FnOnce(),
 ) -> bool {
-    let Some(operation) = manager.current_operation() else {
-        return false;
-    };
     let now_b = controlled_monotonic_millis();
-    let _ = manager.mark_transport_disconnected(now_b);
-    let Ok(material) = manager.begin_resume(operation.clone(), now_b) else {
+    if manager
+        .mark_owned_transport_disconnected(owner, now_b, suspend)
+        .is_err()
+    {
+        return false;
+    }
+    let Ok(material) = manager.begin_owned_resume(owner, now_b) else {
         return false;
     };
+    prepare_controlled_resume(port, resume, owner, material)
+}
+
+fn prepare_controlled_resume<P: ControlledRelayPort + ?Sized>(
+    port: &P,
+    resume: &mut ControlledResumeAttempt,
+    owner: &ControlledTransportOwner,
+    material: ControlledResumeMaterial,
+) -> bool {
     let Ok(challenge) = new_resume_challenge() else {
         return false;
     };
@@ -2456,7 +2541,8 @@ pub(crate) fn begin_controlled_resume<P: ControlledRelayPort + ?Sized>(
     if port.try_send(frame).is_err() {
         return false;
     }
-    resume.operation = Some(operation);
+    resume.operation = Some(owner.operation().clone());
+    resume.owner = Some(owner.clone());
     resume.request_ids = vec![request_id];
     resume.lease = Some(material.lease);
     resume.challenge_b64 = challenge;
@@ -2484,15 +2570,19 @@ pub(crate) fn handle_controlled_resume_frame<P: ControlledRelayPort + ?Sized>(
     let Some(kind) = message.get("type").and_then(Value::as_str) else {
         return ControlledResumeOutcome::Ignored;
     };
-    let Some(operation) = manager.current_operation() else {
+    let Some(owner) = resume.owner.clone() else {
         return ControlledResumeOutcome::Failed;
     };
     let Some(lease) = resume.lease.clone() else {
         return ControlledResumeOutcome::Failed;
     };
-    if resume.operation.as_ref() != Some(&operation) {
+    if resume.operation.as_ref() != Some(owner.operation())
+        || owner.lease() != &lease
+        || manager.with_transport_owner(&owner, || ()).is_err()
+    {
         return ControlledResumeOutcome::Ignored;
     }
+    let advance = |step, now| manager.advance_owned_resume(&owner, step, now);
     // Relay errors deliberately have no lease tuple. Authority comes from
     // strict protocol validation and this operation's locally sent request.
     if kind == "error" {
@@ -2522,18 +2612,13 @@ pub(crate) fn handle_controlled_resume_frame<P: ControlledRelayPort + ?Sized>(
             if resume.activation_id.is_some() {
                 return ControlledResumeOutcome::Ignored;
             }
-            if manager
-                .advance_resume(
-                    operation.clone(),
-                    ControlledResumeStep::Provisional { activation_id },
-                    now_b,
-                )
-                .is_err()
-            {
+            if advance(ControlledResumeStep::Provisional { activation_id }, now_b).is_err() {
                 return ControlledResumeOutcome::Failed;
             }
             let sent_id = request_id();
-            let Ok(confirm) = lane.seal_resume_confirm(&sent_id, activation_id) else {
+            let Ok(Ok(confirm)) = manager
+                .with_transport_owner(&owner, || lane.seal_resume_confirm(&sent_id, activation_id))
+            else {
                 return ControlledResumeOutcome::Failed;
             };
             if port.try_send(confirm).is_err() {
@@ -2546,7 +2631,9 @@ pub(crate) fn handle_controlled_resume_frame<P: ControlledRelayPort + ?Sized>(
         "encrypted_resume_confirm" => {
             if message.get("activation_id").and_then(Value::as_str)
                 != resume.activation_id.as_deref()
-                || lane.open_resume_confirm(message).is_err()
+                || !manager
+                    .with_transport_owner(&owner, || lane.open_resume_confirm(message))
+                    .is_ok_and(|result| result.is_ok())
                 || resume.ack_sent
             {
                 return ControlledResumeOutcome::Ignored;
@@ -2559,14 +2646,7 @@ pub(crate) fn handle_controlled_resume_frame<P: ControlledRelayPort + ?Sized>(
             // verified A confirm authorizes B's local acceptance and ACK.
             resume.peer_confirmed = true;
             if !resume.confirmed {
-                if manager
-                    .advance_resume(
-                        operation.clone(),
-                        ControlledResumeStep::Confirmed { activation_id },
-                        now_b,
-                    )
-                    .is_err()
-                {
+                if advance(ControlledResumeStep::Confirmed { activation_id }, now_b).is_err() {
                     return ControlledResumeOutcome::Failed;
                 }
                 resume.confirmed = true;
@@ -2580,13 +2660,11 @@ pub(crate) fn handle_controlled_resume_frame<P: ControlledRelayPort + ?Sized>(
             ) else {
                 return ControlledResumeOutcome::Failed;
             };
-            if manager
-                .advance_resume(
-                    operation.clone(),
-                    ControlledResumeStep::ActivationAcknowledged { activation_id },
-                    now_b,
-                )
-                .is_err()
+            if advance(
+                ControlledResumeStep::ActivationAcknowledged { activation_id },
+                now_b,
+            )
+            .is_err()
             {
                 return ControlledResumeOutcome::Failed;
             }
@@ -2604,16 +2682,14 @@ pub(crate) fn handle_controlled_resume_frame<P: ControlledRelayPort + ?Sized>(
             if !resume.ack_sent || !resume.peer_confirmed || resume.liveness_sent {
                 return ControlledResumeOutcome::Ignored;
             }
-            if manager
-                .advance_resume(
-                    operation,
-                    ControlledResumeStep::PostActivationLiveness {
-                        activation_id,
-                        liveness_epoch_b: &resume.liveness_epoch_b,
-                    },
-                    now_b,
-                )
-                .is_err()
+            if advance(
+                ControlledResumeStep::PostActivationLiveness {
+                    activation_id,
+                    liveness_epoch_b: &resume.liveness_epoch_b,
+                },
+                now_b,
+            )
+            .is_err()
             {
                 return ControlledResumeOutcome::Failed;
             }
@@ -2660,13 +2736,11 @@ pub(crate) fn handle_controlled_resume_frame<P: ControlledRelayPort + ?Sized>(
             ) else {
                 return ControlledResumeOutcome::Failed;
             };
-            if manager
-                .advance_resume(
-                    operation,
-                    ControlledResumeStep::ReadyAcknowledged { activation_id },
-                    now_b,
-                )
-                .is_err()
+            if advance(
+                ControlledResumeStep::ReadyAcknowledged { activation_id },
+                now_b,
+            )
+            .is_err()
             {
                 return ControlledResumeOutcome::Failed;
             }
@@ -2706,15 +2780,19 @@ pub(crate) fn handle_controlled_resume_frame<P: ControlledRelayPort + ?Sized>(
             let Ok(token) = <[u8; 32]>::try_from(decoded.as_slice()) else {
                 return ControlledResumeOutcome::Ignored;
             };
-            let Ok(fingerprint) = lane.resume_fingerprint(activation_id) else {
+            let Ok(Ok(fingerprint)) =
+                manager.with_transport_owner(&owner, || lane.resume_fingerprint(activation_id))
+            else {
                 return ControlledResumeOutcome::Failed;
             };
             let Some(resume_request_id) = message.get("request_id").and_then(Value::as_str) else {
                 return ControlledResumeOutcome::Ignored;
             };
+            #[cfg(test)]
+            let activation_probe = resume.activation_probe.take();
             if manager
-                .complete_resumed(
-                    operation,
+                .complete_owned_resume(
+                    &owner,
                     activation_id,
                     resume_request_id,
                     now_b,
@@ -2722,12 +2800,18 @@ pub(crate) fn handle_controlled_resume_frame<P: ControlledRelayPort + ?Sized>(
                     token,
                     fingerprint,
                     relay_deadline,
+                    || {
+                        #[cfg(test)]
+                        if let Some(probe) = activation_probe {
+                            probe();
+                        }
+                        lane.activate();
+                    },
                 )
                 .is_err()
             {
                 return ControlledResumeOutcome::Failed;
             }
-            lane.activate();
             resume.reset();
             ControlledResumeOutcome::Completed
         }
@@ -2858,6 +2942,9 @@ fn sanitize_error(value: &str) -> String {
 // unsupported desktop-control platforms do not run a simulated Wry adapter.
 #[cfg(test)]
 pub(crate) mod reader_resume_tests;
+
+#[cfg(test)]
+mod owner_interleaving_tests;
 
 #[cfg(test)]
 mod tests {
@@ -4544,7 +4631,14 @@ mod tests {
         let mut resume = ControlledResumeAttempt::default();
         lane.suspend();
         super::super::relay_transport::disconnect_test_transport(&transport);
-        assert!(begin_controlled_resume(&port, &manager, &mut resume));
+        let owner = manager.transport_owner_for_test(&operation).unwrap();
+        assert!(begin_owned_controlled_resume(
+            &port,
+            &manager,
+            &owner,
+            &mut resume,
+            || lane.suspend(),
+        ));
         heartbeat
             .pump(&manager, &operation, resume.is_active(), &heartbeat_port)
             .unwrap();
