@@ -262,7 +262,7 @@ func testManagedRDSReleaseActualPostgres(t *testing.T, legacyUpgrade bool) {
 	})
 	// Seed the published release through the actual activation/audit triggers;
 	// later checks execute the real new governance CLI through its wrapper.
-	exec(managed, `SET ROLE token_schema_owner; UPDATE public.token_command_governance_activation SET state='ACTIVE',epoch=1,policy_set_digest='d9a329010b29c105785ade35fbffcdd5b9816ebcdd84693616a795532d0c2783',handler_set_digest='ee635163dca48eefc89961762ee6815eb745c9225b2cef54406b0a9cebb97a08',approved_runtime_roles=ARRAY['test_credential','test_gateway'],operator_id='fixture',reason='actual enable boundary fixture',request_id='11111111-1111-4111-8111-111111111111',updated_at=clock_timestamp() WHERE singleton; RESET ROLE`)
+	exec(managed, `SET ROLE token_schema_owner; UPDATE public.token_command_governance_activation SET state='ACTIVE',epoch=1,policy_set_digest='f2b71d1b118a69974dad6154dcd50dd1ec06f36c20f8c1cf4316ecd799ab74ee',handler_set_digest='ee635163dca48eefc89961762ee6815eb745c9225b2cef54406b0a9cebb97a08',approved_runtime_roles=ARRAY['test_credential','test_gateway'],operator_id='fixture',reason='actual enable boundary fixture',request_id='11111111-1111-4111-8111-111111111111',updated_at=clock_timestamp() WHERE singleton; RESET ROLE`)
 	credentials := managedCredentials{Version: 1, Host: managedConfig.Host, Database: database, ExpiresAt: time.Now().UTC().Add(time.Hour).Truncate(time.Second), Credentials: []managedCredential{{Role: "test_credential", Password: strings.Repeat("fixture-only-a", 3)}, {Role: "test_gateway", Password: strings.Repeat("fixture-only-b", 3)}}}
 	file := filepath.Join(t.TempDir(), "credentials.json")
 	writeCredentials := func() {

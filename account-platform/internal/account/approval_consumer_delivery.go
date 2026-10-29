@@ -221,6 +221,9 @@ func validApprovalAuthorizationBinding(binding ApprovalAuthorizationBinding) boo
 	if binding.SerializationVersion != "LEGACY_TYPED_V1" && binding.SerializationVersion != "APPROVAL_RFC8785_DECIMAL_V1" {
 		return false
 	}
+	if binding.CommandType == "TOKEN_MODEL_LIFECYCLE_CHANGE" && binding.PolicyVersion == 3 && binding.SerializationVersion != "APPROVAL_RFC8785_DECIMAL_V1" {
+		return false
+	}
 	if binding.DigestKind == "DELIVERY_BYTES" {
 		return binding.Provenance == "FROZEN_AT_APPROVAL" || binding.Provenance == "RECONSTRUCTED_FOR_DELIVERY"
 	}

@@ -57,7 +57,7 @@ export function validateOperation(request) {
       const safe = request.operation.startsWith('governance-safe');
       const expansion = options && Object.hasOwn(options, 'policy_upgrade');
       fields(options, ['expected_state', 'expected_epoch', 'request_id', 'operator', 'reason', 'runtime_roles', ...(expansion ? ['policy_upgrade'] : [])]);
-      if (expansion) check(!safe && options.expected_state === 'SAFE_ROLLBACK' && options.policy_upgrade === 'billing-policy-set-v1', 'GOVERNANCE_POLICY_UPGRADE_INVALID');
+      if (expansion) check(!safe && options.expected_state === 'SAFE_ROLLBACK' && ['billing-policy-set-v1', 'model-lifecycle-force-cancel-v1'].includes(options.policy_upgrade), 'GOVERNANCE_POLICY_UPGRADE_INVALID');
       check(Number.isSafeInteger(options.expected_epoch) && options.expected_epoch >= 0 && uuid(options.request_id) && reference(options.operator)
         && typeof options.reason === 'string' && options.reason.trim() === options.reason && options.reason.length > 0 && options.reason.length <= 500
         && (safe ? options.expected_state === 'ACTIVE' && options.expected_epoch > 0 : options.expected_state === 'PRE_ACTIVATION' && options.expected_epoch === 0 || options.expected_state === 'SAFE_ROLLBACK' && options.expected_epoch > 0)

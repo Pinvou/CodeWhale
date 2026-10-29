@@ -125,7 +125,7 @@ func testGovernanceExpansionPostgres(t *testing.T, ctx context.Context, admin *p
 	rootToken.Close(context.Background())
 	migratorConfig := tokenConfig.Copy()
 	migratorConfig.User = "token_migrator"
-	request := token.GovernanceTransitionRequest{ExpectedState: "SAFE_ROLLBACK", ExpectedEpoch: 2, TargetState: "ACTIVE", OperatorID: "fixture", Reason: "explicit verified published policy expansion", RequestID: uuid.New(), ApprovedRuntimeRoles: newRoles, PolicyUpgrade: approvalpolicy.BillingPolicySetUpgradeV1}
+	request := token.GovernanceTransitionRequest{ExpectedState: "SAFE_ROLLBACK", ExpectedEpoch: 2, TargetState: "ACTIVE", OperatorID: "fixture", Reason: "explicit verified lifecycle policy upgrade", RequestID: uuid.New(), ApprovedRuntimeRoles: newRoles, PolicyUpgrade: approvalpolicy.LifecyclePolicySetUpgradeV1}
 	runGovernanceExpansionWrapper(t, ctx, migratorConfig, accountConfig, request, false)
 	tokenPool := openPool(migratorConfig)
 	defer tokenPool.Close()
@@ -236,7 +236,7 @@ func testGovernanceExpansionPostgres(t *testing.T, ctx context.Context, admin *p
 		}
 		defer tx.Rollback(context.Background())
 		var preserved bool
-		if err := tx.QueryRow(ctx, `SELECT (SELECT count(*) FROM public.token_command_governance_transitions)=3 AND (SELECT count(*) FROM public.token_command_governance_transitions WHERE epoch IN(1,2) AND policy_set_digest='d9a329010b29c105785ade35fbffcdd5b9816ebcdd84693616a795532d0c2783')=2 AND (SELECT count(*) FROM public.outbox_events WHERE event_id='22222222-2222-4222-8222-222222222222')=1`).Scan(&preserved); err != nil {
+		if err := tx.QueryRow(ctx, `SELECT (SELECT count(*) FROM public.token_command_governance_transitions)=3 AND (SELECT count(*) FROM public.token_command_governance_transitions WHERE epoch IN(1,2) AND policy_set_digest='f2b71d1b118a69974dad6154dcd50dd1ec06f36c20f8c1cf4316ecd799ab74ee')=2 AND (SELECT count(*) FROM public.outbox_events WHERE event_id='22222222-2222-4222-8222-222222222222')=1`).Scan(&preserved); err != nil {
 			t.Fatalf("trusted audit verification query failed: %v", err)
 		}
 		if !preserved {

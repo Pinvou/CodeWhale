@@ -35,7 +35,7 @@ export function validApprovalRequest(value, expected, statuses) {
   if (!value || typeof value !== 'object' || Array.isArray(value)) return false;
   if (!uuidPattern.test(String(value.approval_request_id || '').toLowerCase()) || !uuidPattern.test(String(value.requester_user_id || '').toLowerCase())) return false;
   if (value.command_type !== expected.command_type || value.target_resource_type !== expected.target_resource_type || value.target_resource_id !== expected.target_resource_id || value.reason !== expected.reason) return false;
-	const expectedPolicyVersion = ['PAYMENT_PROVIDER_RESUME', 'TOKEN_MODEL_LIFECYCLE_CHANGE', 'TOKEN_MODEL_CATALOG_ROLLBACK'].includes(expected.command_type) ? 2 : 1;
+	const expectedPolicyVersion = expected.command_type === 'TOKEN_MODEL_LIFECYCLE_CHANGE' && typeof expected.normalized_command?.force_cancel_inflight === 'boolean' ? 3 : ['PAYMENT_PROVIDER_RESUME', 'TOKEN_MODEL_LIFECYCLE_CHANGE', 'TOKEN_MODEL_CATALOG_ROLLBACK'].includes(expected.command_type) ? 2 : 1;
   if (!['WALLET_ADJUSTMENT', 'PAYMENT_PROVIDER_RESUME', 'PAYMENT_PRODUCT_RESUME', 'TOKEN_MODEL_LIFECYCLE_CHANGE', 'TOKEN_MODEL_CATALOG_ROLLBACK', 'TOKEN_CREDENTIAL_REVOKE'].includes(expected.command_type)) return false;
 	if (value.policy_version !== expectedPolicyVersion || value.approval_mode !== 'APPROVAL_REQUIRED' || !statuses.includes(value.status) || !Number.isInteger(value.version) || value.version < 1) return false;
   if (!fingerprintPattern.test(String(value.command_fingerprint || '')) || Number.isNaN(Date.parse(String(value.expires_at || ''))) || Number.isNaN(Date.parse(String(value.created_at || ''))) || Number.isNaN(Date.parse(String(value.updated_at || '')))) return false;
@@ -182,12 +182,13 @@ export function requireTokenApprovalImpact(value, expected) {
 	if (!validImpactPrecheck(value, expected.action)) throw Object.assign(new Error('invalid approval impact'), { code: 'INVALID_IMPACT_RESPONSE' });
 	const snapshot = value.critical_resource_versions;
 	const financial = value.financial_snapshot;
-	const fields = approvalSnapshotFields[expected.commandType] || [];
+	const lifecycleV3 = expected.commandType === 'TOKEN_MODEL_LIFECYCLE_CHANGE' && snapshot?.policy_version === 3;
+ const fields = [...(approvalSnapshotFields[expected.commandType] || []), ...(lifecycleV3 ? ['force_cancel_inflight'] : [])];
 	const credentialRevoke = expected.commandType === 'TOKEN_CREDENTIAL_REVOKE';
 	if (!hasExactFields(snapshot, fields) || (credentialRevoke ? !hasExactFields(financial, []) : !hasExactFields(financial, financialSnapshotFields))) throw Object.assign(new Error('incomplete approval snapshot'), { code: 'INVALID_IMPACT_RESPONSE' });
 	const hashes = fields.filter((field) => field.endsWith('_fingerprint'));
 	if (hashes.some((field) => !fingerprintPattern.test(String(snapshot[field] || '')))
-		|| !Number.isInteger(snapshot.policy_version) || snapshot.policy_version !== (credentialRevoke ? 1 : 2)
+		|| !Number.isInteger(snapshot.policy_version) || snapshot.policy_version !== (credentialRevoke ? 1 : lifecycleV3 ? 3 : 2)
 		|| credentialRevoke && (!uuidPattern.test(String(snapshot.token_account_id || '').toLowerCase())
 			|| !uuidPattern.test(String(snapshot.credential_id || '').toLowerCase()) || snapshot.credential_id !== expected.targetResourceID
 			|| !Number.isInteger(snapshot.token_account_version) || snapshot.token_account_version < 1
@@ -202,6 +203,8 @@ export function requireTokenApprovalImpact(value, expected) {
 		|| financial.fully_covered !== true || financial.models_covered !== financial.models_checked
 		|| Number.isNaN(Date.parse(String(financial.billing_as_of || ''))))) throw Object.assign(new Error('invalid approval snapshot'), { code: 'INVALID_IMPACT_RESPONSE' });
 	if (expected.commandType === 'TOKEN_MODEL_LIFECYCLE_CHANGE') {
+ if (expected.forceCancelInflight === true && !lifecycleV3) throw Object.assign(new Error('cancellation requires lifecycle v3 facts'), { code: 'INVALID_IMPACT_RESPONSE' });
+ if (lifecycleV3 && (typeof snapshot.force_cancel_inflight !== 'boolean' || snapshot.force_cancel_inflight && snapshot.target_lifecycle !== 'REMOVED' || expected.forceCancelInflight !== undefined && snapshot.force_cancel_inflight !== expected.forceCancelInflight)) throw Object.assign(new Error('mismatched lifecycle cancellation intent'), { code: 'INVALID_IMPACT_RESPONSE' });
 		if (!uuidPattern.test(String(snapshot.model_id || '').toLowerCase()) || snapshot.model_id !== expected.targetResourceID || snapshot.target_lifecycle !== expected.targetStatus
 			|| !['DRAFT', 'PUBLISHED', 'DEPRECATED', 'REMOVED'].includes(snapshot.current_lifecycle)
 			|| !Number.isInteger(snapshot.catalog_version) || snapshot.catalog_version < 1

@@ -74,6 +74,7 @@ func (s *Service) approvalCommandPrecheck(ctx context.Context, request ApprovalS
 			return ApprovalSnapshotProjection{}, ErrTokenCommandInvalid
 		}
 		var command struct {
+			ForceCancelInflight     *bool      `json:"force_cancel_inflight,omitempty"`
 			ModelID                 uuid.UUID  `json:"model_id"`
 			LifecyclePlanID         *uuid.UUID `json:"lifecycle_plan_id,omitempty"`
 			LifecyclePlanVersion    *int64     `json:"lifecycle_plan_version,omitempty"`
@@ -92,6 +93,9 @@ func (s *Service) approvalCommandPrecheck(ctx context.Context, request ApprovalS
 		if command.TargetLifecycle == "REMOVED" && (command.ReplacementModelID == nil || command.ExistingSessionCutoffAt == nil || !command.ExistingSessionCutoffAt.Equal(command.EffectiveAt)) || command.TargetLifecycle == "DEPRECATED" && command.ExistingSessionCutoffAt != nil && command.ExistingSessionCutoffAt.Before(command.EffectiveAt) {
 			return ApprovalSnapshotProjection{}, ErrTokenCommandInvalid
 		}
+		if command.ForceCancelInflight != nil && (*command.ForceCancelInflight && command.TargetLifecycle != "REMOVED" || command.LifecyclePlanID == nil) {
+			return ApprovalSnapshotProjection{}, ErrTokenCommandInvalid
+		}
 		planVersion := int64(0)
 		if command.LifecyclePlanID != nil {
 			if *command.LifecyclePlanID == uuid.Nil || command.LifecyclePlanVersion == nil || *command.LifecyclePlanVersion < 1 {
@@ -105,7 +109,7 @@ func (s *Service) approvalCommandPrecheck(ctx context.Context, request ApprovalS
 			if err != nil {
 				return ApprovalSnapshotProjection{}, err
 			}
-			if !containsString([]string{"PENDING_APPROVAL", "SCHEDULED", "EXECUTING"}, plan.Status) || plan.PlanVersion != *command.LifecyclePlanVersion || plan.TargetLifecycle != command.TargetLifecycle || !plan.EffectiveAt.Equal(command.EffectiveAt.UTC()) || !sameOptionalTime(plan.ExistingSessionCutoffAt, command.ExistingSessionCutoffAt) || !sameOptionalUUID(plan.ReplacementModelID, command.ReplacementModelID) {
+			if !containsString([]string{"PENDING_APPROVAL", "SCHEDULED", "EXECUTING"}, plan.Status) || plan.PlanVersion != *command.LifecyclePlanVersion || plan.TargetLifecycle != command.TargetLifecycle || !plan.EffectiveAt.Equal(command.EffectiveAt.UTC()) || !sameOptionalTime(plan.ExistingSessionCutoffAt, command.ExistingSessionCutoffAt) || !sameOptionalUUID(plan.ReplacementModelID, command.ReplacementModelID) || !lifecyclePlanFlagMatches(plan, command.ForceCancelInflight) {
 				return ApprovalSnapshotProjection{}, ErrCatalogVersionConflict
 			}
 			planVersion = plan.PlanVersion
@@ -135,10 +139,21 @@ func (s *Service) approvalCommandPrecheck(ctx context.Context, request ApprovalS
 		if command.ReplacementModelID != nil && (evidence.ReplacementReady == nil || !*evidence.ReplacementReady) {
 			result.Blockers = append(result.Blockers, "REPLACEMENT_MODEL_UNAVAILABLE")
 		}
-		if command.TargetLifecycle == "REMOVED" && evidence.Dependencies.InflightRequests > 0 {
+		if command.TargetLifecycle == "REMOVED" && evidence.Dependencies.InflightRequests > 0 && (command.ForceCancelInflight == nil || !*command.ForceCancelInflight) {
 			result.Blockers = append(result.Blockers, "INFLIGHT_REQUESTS_PRESENT")
 		}
+		if command.ForceCancelInflight != nil {
+			if command.ExistingSessionCutoffAt != nil {
+				cutoff := command.ExistingSessionCutoffAt.UTC()
+				result.CriticalResourceVersions["existing_session_cutoff_at"] = &cutoff
+			}
+			result.CriticalResourceVersions["force_cancel_inflight"] = *command.ForceCancelInflight
+			result.CriticalResourceVersions["policy_version"] = int64(3)
+		}
 		finalizeImpactResult(&result, "target_status="+command.TargetLifecycle, "lifecycle_plan_version="+strconv.FormatInt(planVersion, 10), "effective_at="+command.EffectiveAt.UTC().Format(time.RFC3339Nano), "existing_session_cutoff_at="+valueTime(command.ExistingSessionCutoffAt), "replacement_model_id="+valueUUID(command.ReplacementModelID))
+		if command.ForceCancelInflight != nil {
+			finalizeImpactResult(&result, "target_status="+command.TargetLifecycle, "lifecycle_plan_version="+strconv.FormatInt(planVersion, 10), "effective_at="+command.EffectiveAt.UTC().Format(time.RFC3339Nano), "existing_session_cutoff_at="+valueTime(command.ExistingSessionCutoffAt), "replacement_model_id="+valueUUID(command.ReplacementModelID), "force_cancel_inflight="+strconv.FormatBool(*command.ForceCancelInflight))
+		}
 	case "TOKEN_MODEL_CATALOG_ROLLBACK":
 		if request.TargetResourceType != "MODEL_CATALOG" {
 			return ApprovalSnapshotProjection{}, ErrTokenCommandInvalid

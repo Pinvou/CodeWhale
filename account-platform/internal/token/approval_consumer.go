@@ -109,6 +109,9 @@ func (c *TokenApprovalConsumer) Handle(ctx context.Context, event events.Event) 
 		return events.ErrInvalidEvent
 	}
 	policy, err := approvalpolicy.Lookup(selected.CommandType)
+	if selected.CommandType == "TOKEN_MODEL_LIFECYCLE_CHANGE" {
+		policy, err = approvalpolicy.LookupVersion(selected.CommandType, selected.PolicyVersion, int(selected.PolicyVersion))
+	}
 	if err != nil || !approvalpolicy.Executable(selected.CommandType) || policy.Mode != approvalpolicy.ApprovalRequired || policy.PolicyVersion != selected.PolicyVersion || policy.ExecutorIdentity != selected.ExecutorIdentity {
 		return events.ErrInvalidEvent
 	}

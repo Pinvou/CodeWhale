@@ -1062,6 +1062,16 @@
         "file": "900012_outbox_generation_upgrade.up.sql",
         "version": 900012,
         "sha256": "d69bc590c056a3d99ad86e206323bd0f288b5297fe0b2c08883ab1ee68f0bd74"
+      },
+      {
+        "file": "900013_model_lifecycle_force_cancel_policy.down.sql",
+        "version": 900013,
+        "sha256": "2dad5596cff9c4579fa927554285d7d71bb663325b3d2ab14eadd35ad4e5b430"
+      },
+      {
+        "file": "900013_model_lifecycle_force_cancel_policy.up.sql",
+        "version": 900013,
+        "sha256": "2518d6a465a8bd33175d334aa2914c0939ce4066f49f29f2925c2601b677238d"
       }
     ],
     "billing": [

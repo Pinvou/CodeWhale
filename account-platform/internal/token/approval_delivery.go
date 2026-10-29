@@ -163,6 +163,9 @@ func validTokenAuthorizationRoute(route tokenAuthorizationRoute) bool {
 	if descriptor.Workload == approvalconsumer.BillingWorkload {
 		return binding.SerializationVersion == approvalencoding.ApprovalSerializationVersion
 	}
+	if binding.CommandType == "TOKEN_MODEL_LIFECYCLE_CHANGE" && binding.PolicyVersion == 3 {
+		return binding.SerializationVersion == approvalencoding.ApprovalSerializationVersion
+	}
 	return descriptor.Workload == approvalconsumer.TokenWorkload &&
 		(binding.SerializationVersion == approvalencoding.LegacySerializationVersion || binding.SerializationVersion == approvalencoding.ApprovalSerializationVersion)
 }
@@ -301,6 +304,7 @@ func (consumer *TokenAuthorizationCommandConsumer) validBinding(binding tokenAut
 	return ok && descriptor.Workload == approvalconsumer.TokenWorkload && binding.EventID != uuid.Nil && binding.Durable == consumer.durable &&
 		binding.Workload == approvalconsumer.TokenWorkload && binding.ApprovalRequestID != uuid.Nil && binding.ApprovedRequestVersion > 0 && binding.ApprovalEpoch > 0 &&
 		(binding.SerializationVersion == approvalencoding.LegacySerializationVersion || binding.SerializationVersion == approvalencoding.ApprovalSerializationVersion) &&
+		(binding.CommandType != "TOKEN_MODEL_LIFECYCLE_CHANGE" || binding.PolicyVersion != 3 || binding.SerializationVersion == approvalencoding.ApprovalSerializationVersion) &&
 		approvalconsumer.Match(descriptor, binding.CommandType, binding.PolicyVersion, binding.ExecutorIdentity)
 }
 

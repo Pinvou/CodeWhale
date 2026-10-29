@@ -83,6 +83,7 @@ type approvalEntitlementCorrectionSummary struct {
 }
 
 type approvalLifecycleSummary struct {
+	ForceCancelInflight     *bool      `json:"force_cancel_inflight,omitempty"`
 	ModelID                 uuid.UUID  `json:"model_id"`
 	TargetLifecycle         string     `json:"target_lifecycle"`
 	EffectiveAt             *string    `json:"effective_at"`
@@ -120,7 +121,9 @@ func approvalPresenterAvailable(command string, policyVersion int64, snapshotVer
 		return policyVersion == 1 && snapshotVersion == 1
 	case "PAYMENT_PROVIDER_RESUME":
 		return policyVersion == 2 && snapshotVersion == 1
-	case "TOKEN_MODEL_LIFECYCLE_CHANGE", "TOKEN_MODEL_CATALOG_ROLLBACK":
+	case "TOKEN_MODEL_LIFECYCLE_CHANGE":
+		return policyVersion == 2 && snapshotVersion == 2 || policyVersion == 3 && snapshotVersion == 3
+	case "TOKEN_MODEL_CATALOG_ROLLBACK":
 		return policyVersion == 2 && snapshotVersion == 2
 	default:
 		return false
@@ -322,6 +325,7 @@ func approvalV2Detail(item ApprovalRequest, controlVersion int64) (ApprovalV2Det
 			ProviderID                string     `json:"provider_id"`
 			ProviderControlVersion    string     `json:"provider_control_version"`
 			ProductControlVersion     string     `json:"product_control_version"`
+			ForceCancelInflight       *bool      `json:"force_cancel_inflight"`
 			ModelID                   uuid.UUID  `json:"model_id"`
 			TargetLifecycle           string     `json:"target_lifecycle"`
 			EffectiveAt               *string    `json:"effective_at"`
@@ -394,6 +398,7 @@ func approvalV2Detail(item ApprovalRequest, controlVersion int64) (ApprovalV2Det
 		if proof.Normalized.ModelID != target.ModelID {
 			return ApprovalV2Detail{}, ErrApprovalDetailPresentationUnavailable
 		}
+		target.ForceCancelInflight = proof.Normalized.ForceCancelInflight
 		target.TargetLifecycle = proof.Normalized.TargetLifecycle
 		target.EffectiveAt = proof.Normalized.EffectiveAt
 		target.LifecyclePlanID = proof.Normalized.LifecyclePlanID

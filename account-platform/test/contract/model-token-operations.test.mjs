@@ -39,27 +39,33 @@ test('safe and original-result query do not depend on Account and cannot replay 
   }
 });
 
-test('published policy expansion is explicit, closed and reaches only SAFE-to-ACTIVE operations', async () => {
-  const expansion = { ...transition, expected_state: 'SAFE_ROLLBACK', expected_epoch: 2, policy_upgrade: 'billing-policy-set-v1' };
-  for (const operation of ['governance-active-check', 'governance-activate']) {
-    let calls = 0;
-    const input = request(operation, expansion);
-    await executeOperation(input, { runner: async () => { calls++; } });
-    assert.equal(calls, 0);
-    await executeOperation(input, { execute: true, environment, runner: async (_exe, args, env) => {
-      calls++;
-      assert.equal(args[args.indexOf('--policy-upgrade') + 1], 'billing-policy-set-v1');
-      assert.equal(args.includes('--apply'), operation === 'governance-activate');
-      assert.deepEqual(Object.keys(env).sort(), ['ACCOUNT_POLICY_DATABASE_URL', 'TOKEN_MIGRATOR_DATABASE_URL']);
-      return { ok: true, output_sha256: 'a'.repeat(64) };
-    } });
-    assert.equal(calls, 1);
+test('published policy expansions stay closed and reach only strict SAFE-to-ACTIVE', async () => {
+  for (const policyUpgrade of ['billing-policy-set-v1', 'model-lifecycle-force-cancel-v1']) {
+    const expansion = { ...transition, expected_state: 'SAFE_ROLLBACK', expected_epoch: 2, policy_upgrade: policyUpgrade };
+    for (const operation of ['governance-active-check', 'governance-activate']) {
+      let calls = 0;
+      const input = request(operation, expansion);
+      await executeOperation(input, { runner: async () => { calls++; } });
+      assert.equal(calls, 0);
+      await executeOperation(input, { execute: true, environment, runner: async (_exe, args, env) => {
+        calls++;
+        assert.equal(args[args.indexOf('--policy-upgrade') + 1], policyUpgrade);
+        assert.equal(args.includes('--apply'), operation === 'governance-activate');
+        assert.deepEqual(Object.keys(env).sort(), ['ACCOUNT_POLICY_DATABASE_URL', 'TOKEN_MIGRATOR_DATABASE_URL']);
+        return { ok: true, output_sha256: 'a'.repeat(64) };
+      } });
+      assert.equal(calls, 1);
+    }
+    for (const input of [
+      request('governance-safe', { ...expansion, expected_state: 'ACTIVE' }),
+      request('governance-safe-check', { ...expansion, expected_state: 'ACTIVE' }),
+      request('governance-activate', { ...transition, policy_upgrade: policyUpgrade }),
+      request('governance-activate', { ...expansion, expected_state: 'ACTIVE' }),
+      request('governance-result', { request_id: transition.request_id, policy_upgrade: policyUpgrade }),
+    ]) assert.throws(() => validateOperation(input), /MODEL_TOKEN_OPERATION_(GOVERNANCE_POLICY_UPGRADE_INVALID|FIELDS_INVALID)/);
   }
-  for (const input of [request('governance-safe', { ...expansion, expected_state: 'ACTIVE' }),
-    request('governance-active-check', { ...expansion, policy_upgrade: 'unknown' }),
-    request('governance-activate', { ...transition, policy_upgrade: expansion.policy_upgrade }),
-    request('governance-result', { request_id: transition.request_id, policy_upgrade: expansion.policy_upgrade })]) {
-    assert.throws(() => validateOperation(input), /MODEL_TOKEN_OPERATION_(GOVERNANCE_POLICY_UPGRADE_INVALID|FIELDS_INVALID)/);
+  for (const policyUpgrade of ['unknown', 'model-lifecycle-force-cancel-v2', 'billing-policy-set-v2', null]) {
+    assert.throws(() => validateOperation(request('governance-activate', { ...transition, expected_state: 'SAFE_ROLLBACK', expected_epoch: 2, policy_upgrade: policyUpgrade })), /GOVERNANCE_POLICY_UPGRADE_INVALID/);
   }
 });
 

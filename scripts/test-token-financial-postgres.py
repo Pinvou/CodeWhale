@@ -18,8 +18,6 @@ from urllib.parse import parse_qs, urlsplit
 ROOT = Path(__file__).resolve().parents[1]
 ACTORS = {"billing_migrator", "billing_schema_owner", "billing_service"}
 REQUIRED = {
-    'TestLocalModelCancellationHandshakeHTTP',
-    'TestRemoteModelCancellationOwnerLoopTransport',
     "TestPreparationFailurePreservesAcceptedUsagePostgres",
     "TestCircuitFailureBeforeDispatchPostgres",
     "TestCredentialRotationWindowReceiptPostgres",
@@ -51,10 +49,14 @@ REQUIRED = {
     "TestPersonalExecutionPublicPostgresFundsAndReplay",
     "TestManagementCancellationFundsRemainTruthful",
     "TestManagementEmergencyCancellationRecoversLostReserveACK",
+    "TestLifecycleForceCancelApprovalPostgres",
+    "TestLocalModelCancellationHandshakeHTTP",
+    "TestRemoteModelCancellationOwnerLoopTransport",
     "TestManagementCancellationHoldRecoveryRequiresRecordedProof",
 }
 
 ACCOUNT_PACKAGE = "github.com/Pinvou/pinvou3/account-platform/internal/account"
+LIFECYCLE_RECONCILIATION_REQUIRED = {"TestLifecycleV3ApprovalReconciliationPostgres"}
 ACCOUNT_REQUIRED = {
     "TestApprovalDecisionOriginalReceiptPostgres",
     "TestApprovalDecisionLegacyConcurrentReceiptPostgres",
@@ -89,8 +91,9 @@ ACCOUNT_REQUIRED = {
 }
 TOKEN_PACKAGE = "github.com/Pinvou/pinvou3/account-platform/internal/token"
 TOKEN_CHILD_REQUIRED = {
-    'TestLocalModelCancellationHandshakeHTTP',
-    'TestRemoteModelCancellationOwnerLoopTransport',
+    "TestLifecycleForceCancelApprovalPostgres",
+    "TestLocalModelCancellationHandshakeHTTP",
+    "TestRemoteModelCancellationOwnerLoopTransport",
     "TestPreparationFailurePreservesAcceptedUsagePostgres",
     "TestCircuitFailureBeforeDispatchPostgres",
     "TestCredentialRotationWindowReceiptPostgres",
@@ -203,8 +206,28 @@ BILLING_LEAF_REQUIRED = {
 }
 BILLING_CHILD_REQUIRED = RETAINED_REQUIRED - BILLING_LEAF_REQUIRED
 EXACT_REQUIRED_CHILDREN = {
-    'TestLocalModelCancellationHandshakeHTTP': {'after_persistent_read', 'before_registration', 'during_persistent_read', 'emergency_then_user_before_registration', 'normal', 'read_failure_preserves_funds', 'user_stop_preserves_generation'},
-    'TestRemoteModelCancellationOwnerLoopTransport': {'initial_lease_failure', 'initial_read_failure', 'initial_requested', 'lease_failure', 'natural_terminal', 'read_failure', 'remote_emergency', 'remote_emergency_then_user', 'user_only'},
+    "TestRemoteModelCancellationOwnerLoopTransport": {
+        "remote_emergency", "remote_emergency_then_user", "user_only",
+        "read_failure", "lease_failure", "natural_terminal",
+        "initial_requested", "initial_read_failure", "initial_lease_failure",
+    },
+    "TestLocalModelCancellationHandshakeHTTP": {
+        "before_registration", "during_persistent_read", "after_persistent_read",
+        "read_failure_preserves_funds", "normal", "user_stop_preserves_generation",
+        "emergency_then_user_before_registration",
+    },
+    "TestLifecycleV3ApprovalReconciliationPostgres": {
+        "wrong_durable_fail_closed",
+        "safe_v3_false_true_and_v2_dry_apply_next_tick",
+        "expired_approved_v3_missing_history",
+        "expired_execution_failed_v3_missing_history",
+        "unknown_version_fail_closed",
+    },
+    "TestLifecycleForceCancelApprovalPostgres": {
+        "v2-false-compatibility", "v3-false", "v3-true-removed",
+        "v3-true-removed/emergency-then-user-origin-retains-authority",
+        "v3-true-removed/emergency-then-user-origin-retains-authority/owner-heartbeat-observes-remote-request",
+    },
     "TestRegistrationCompensationDatabaseErrorIdentityPostgres": {
         "operation-read",
         "absence-proof-read",
@@ -330,6 +353,13 @@ def main():
             env["PINVOU_TEST_BILLING_DATABASE_URL"] = raw
         if target == "./internal/token":
             env["PINVOU_TEST_TOKEN_DATABASE_URL"] = raw
+        if label == "retained-token":
+            env["PINVOU_TEST_ACCOUNT_DATABASE_URL"] = raw
+        if label == "lifecycle-reconciliation":
+            # A separate exact Account root owns/restores its absent actors.
+            # Never run the whole Account package in the Token/Billing phase.
+            env["PINVOU_TEST_TOKEN_DATABASE_URL"] = raw
+            env["PINVOU_TEST_BILLING_DATABASE_URL"] = raw
         # The 59 retained Billing roots create about 250 isolated migration
         # fixtures. Other phases retain their existing finite 20-minute bound.
         timeout = "75m" if label == "retained-billing" else "20m"
@@ -371,6 +401,12 @@ def main():
         assert_instance({user})
     try:
         run_phase("owner-provisioning", "./internal/token", TOKEN_PACKAGE, PROVISIONING_REQUIRED, scoped=True)
+    finally:
+        assert_instance({user})
+
+    try:
+        run_phase("lifecycle-reconciliation", "./internal/account", ACCOUNT_PACKAGE,
+                  LIFECYCLE_RECONCILIATION_REQUIRED, scoped=True)
     finally:
         assert_instance({user})
 

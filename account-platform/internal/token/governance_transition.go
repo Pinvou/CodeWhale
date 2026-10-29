@@ -89,10 +89,10 @@ func CheckOrTransitionTokenGovernance(ctx context.Context, tokenPool, accountPoo
 	if current.UpdatedAt.IsZero() || (current.State == "PRE_ACTIVATION" && (current.Epoch != 0 || current.PolicySetDigest != "" || current.HandlerSetDigest != "" || len(current.ApprovedRuntimeRoles) != 0)) || (current.State != "PRE_ACTIVATION" && current.State != "ACTIVE" && current.State != "SAFE_ROLLBACK") {
 		return current, errors.New("persistent governance state is invalid")
 	}
-	policyUpgrade := input.PolicyUpgrade == approvalpolicy.BillingPolicySetUpgradeV1 &&
+	policyUpgrade := (input.PolicyUpgrade == approvalpolicy.BillingPolicySetUpgradeV1 && approvalpolicy.CanExpandGovernancePolicySet(current.PolicySetDigest, policyDigest) ||
+		input.PolicyUpgrade == approvalpolicy.LifecyclePolicySetUpgradeV1 && approvalpolicy.CanUpgradeLifecyclePolicySet(current.PolicySetDigest, policyDigest)) &&
 		input.TargetState == "ACTIVE" && input.ExpectedState == "SAFE_ROLLBACK" &&
-		current.State == "SAFE_ROLLBACK" && current.HandlerSetDigest == handlerDigest &&
-		approvalpolicy.CanExpandGovernancePolicySet(current.PolicySetDigest, policyDigest)
+		current.State == "SAFE_ROLLBACK" && current.HandlerSetDigest == handlerDigest
 	if input.PolicyUpgrade != "" && !policyUpgrade {
 		return current, errors.New("the explicitly selected governance policy upgrade is not applicable")
 	}

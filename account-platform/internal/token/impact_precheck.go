@@ -238,7 +238,7 @@ func (s *Service) adminModelLifecycleImpact(w http.ResponseWriter, r *http.Reque
 	if replacement != nil && (evidence.ReplacementReady == nil || !*evidence.ReplacementReady) {
 		result.Blockers = append(result.Blockers, "REPLACEMENT_MODEL_UNAVAILABLE")
 	}
-	if target == "REMOVED" && evidence.Dependencies.InflightRequests > 0 {
+	if target == "REMOVED" && evidence.Dependencies.InflightRequests > 0 && (plan == nil || !plan.ForceCancelInflight) {
 		result.Blockers = append(result.Blockers, "INFLIGHT_REQUESTS_PRESENT")
 	}
 	if target == "REMOVED" && replacement == nil {
@@ -267,7 +267,14 @@ func (s *Service) adminModelLifecycleImpact(w http.ResponseWriter, r *http.Reque
 		"policy_version": int64(2),
 	}
 	result.FinancialSnapshot = financialImpactSnapshot(price)
+	if plan != nil && lifecyclePlanApprovalFlag(*plan) != nil {
+		result.CriticalResourceVersions["force_cancel_inflight"] = plan.ForceCancelInflight
+		result.CriticalResourceVersions["policy_version"] = int64(3)
+	}
 	finalizeImpactResult(&result, "target_status="+target, "lifecycle_plan_version="+strconv.FormatInt(planVersion, 10), "effective_at="+effectiveAt.UTC().Format(time.RFC3339Nano), "existing_session_cutoff_at="+valueTime(existingSessionCutoff), "replacement_model_id="+valueUUID(replacement))
+	if plan != nil && lifecyclePlanApprovalFlag(*plan) != nil {
+		finalizeImpactResult(&result, "target_status="+target, "lifecycle_plan_version="+strconv.FormatInt(planVersion, 10), "effective_at="+effectiveAt.UTC().Format(time.RFC3339Nano), "existing_session_cutoff_at="+valueTime(existingSessionCutoff), "replacement_model_id="+valueUUID(replacement), "force_cancel_inflight="+strconv.FormatBool(plan.ForceCancelInflight))
+	}
 	api.WriteJSON(w, http.StatusOK, result)
 }
 

@@ -2,6 +2,7 @@
 function completeTokenManagementCopy(translations) {
   const additions = {
     zh: {
+      forceCancelInflight: '在生效时请求取消在途调用', forceCancelInflightHelp: '此选项作为审批事实冻结，仅在移除计划批准并生效后请求取消。供应商可能不支持取消；实际用量仍按原价格结算。', forceCancelEnabled: '启用', forceCancelDisabled: '关闭',
       runtimeProtocol: "运行协议", runtimeProtocolMissing: "尚未配置；桌面调用已阻止，请发布明确的运行协议",
       pricingControls: { cancel: '取消', save: '保存', reason: '操作原因', lastUpdated: '最后更新' },
       sourceMissingPolicy: '来源缺失会标记为不可用，不会自动弃用模型或改写会话截止时间。弃用和移除仍须通过受控生命周期审批；来源恢复不会撤销人工设置的生命周期。',
@@ -26,6 +27,7 @@ function completeTokenManagementCopy(translations) {
       },
     },
     en: {
+      forceCancelInflight: 'Request cancellation of inflight calls at the effective time', forceCancelInflightHelp: 'This choice is frozen for approval. Cancellation is requested only after the removal plan is approved and effective. Providers may not support cancellation; actual usage is still charged at its original price.', forceCancelEnabled: 'Enabled', forceCancelDisabled: 'Disabled',
       runtimeProtocol: "Runtime protocol", runtimeProtocolMissing: "Not configured; desktop invocation is blocked until an explicit runtime protocol is published",
       pricingControls: { cancel: 'Cancel', save: 'Save', reason: 'Reason', lastUpdated: 'Last updated' },
       sourceMissingPolicy: 'A missing source is marked unavailable without automatically deprecating the model or changing session cutoffs. Deprecation and removal still require governed lifecycle approval; source recovery does not undo the manually selected lifecycle.',
@@ -50,6 +52,7 @@ function completeTokenManagementCopy(translations) {
       },
     },
     ja: {
+      forceCancelInflight: '適用時に実行中の呼び出しのキャンセルを要求', forceCancelInflightHelp: 'この選択は承認事実として固定されます。削除計画が承認され適用された後にのみキャンセルを要求します。プロバイダーが対応しない場合があります。実際の使用量は元の価格で精算されます。', forceCancelEnabled: '有効', forceCancelDisabled: '無効',
       runtimeProtocol: "実行プロトコル", runtimeProtocolMissing: "未設定のためデスクトップからの呼び出しは拒否されます。明示的な実行プロトコルを公開してください",
       pricingControls: { cancel: 'キャンセル', save: '保存', reason: '操作理由', lastUpdated: '最終更新' },
       sourceMissingPolicy: 'ソースの欠落は利用不可として記録し、モデルの自動非推奨化やセッション期限の変更は行いません。非推奨化と削除には引き続き管理されたライフサイクル承認が必要です。ソースが復旧しても手動で設定したライフサイクルは取り消しません。',

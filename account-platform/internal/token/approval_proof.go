@@ -244,14 +244,11 @@ func (s *Service) tokenExecutionProof(ctx context.Context, command string, body 
 	if len(parts) != 2 || parts[0] != strconv.FormatInt(activation.Epoch, 10) || !validImpactFingerprint(parts[1]) {
 		return errTokenApprovalProofUnavailable
 	}
-	policy, err := approvalpolicy.Lookup(command)
+	policy, err := approvalpolicy.ForCommand(command, body.Envelope.Command)
 	if err != nil {
 		return errTokenApprovalProofUnavailable
 	}
-	schemaVersion := 1
-	if command == "TOKEN_MODEL_LIFECYCLE_CHANGE" || command == "TOKEN_MODEL_CATALOG_ROLLBACK" {
-		schemaVersion = 2
-	}
+	schemaVersion := policy.SnapshotSchemaVersion
 	frozen := approvalencoding.LegacyProofInput{
 		CommandType: command, PolicyVersion: policy.PolicyVersion, SnapshotSchemaVersion: schemaVersion,
 		TargetResourceType: body.Envelope.TargetResourceType, TargetResourceID: body.Envelope.TargetResourceID,

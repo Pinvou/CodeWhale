@@ -286,10 +286,10 @@ func addTokenGovernancePolicies(result map[string]Policy) {
 	audit("TOKEN_MODEL_DRAFT_SAVE", 2, "platform.models.manage", 2, "model_id", "expected_catalog_version", "expected_draft_version", "precheck_fingerprint", "request_fingerprint")
 	audit("TOKEN_MODEL_PUBLISH", 2, "platform.models.manage", 2, "model_id", "expected_catalog_version", "expected_draft_version", "precheck_fingerprint", "request_fingerprint")
 	result["TOKEN_MODEL_LIFECYCLE_CHANGE"] = Policy{
-		CommandType: "TOKEN_MODEL_LIFECYCLE_CHANGE", PolicyVersion: 2, Mode: ApprovalRequired,
+		CommandType: "TOKEN_MODEL_LIFECYCLE_CHANGE", PolicyVersion: 3, Mode: ApprovalRequired,
 		RequesterPermission: "platform.models.lifecycle.request", ApproverPermission: "platform.models.lifecycle.approve",
 		RiskClass: "GOVERNANCE_OR_NORMAL_STATE_MACHINE", ApprovalCount: 1, SelfApprovalForbidden: true,
-		SnapshotSchemaVersion: 2, CriticalResourceFields: []string{"model_id", "catalog_version", "current_lifecycle", "target_lifecycle", "lifecycle_plan_version", "effective_at", "existing_session_cutoff_at", "replacement_model_id", "billing_price_version", "route_set_fingerprint", "provisioning_set_fingerprint", "inflight_request_set_fingerprint", "policy_version"},
+		SnapshotSchemaVersion: 3, CriticalResourceFields: []string{"model_id", "catalog_version", "current_lifecycle", "target_lifecycle", "lifecycle_plan_version", "effective_at", "existing_session_cutoff_at", "replacement_model_id", "billing_price_version", "route_set_fingerprint", "provisioning_set_fingerprint", "inflight_request_set_fingerprint", "policy_version", "force_cancel_inflight"},
 		ExpiresAfter: 24 * time.Hour, ExecutionWindow: 5 * time.Minute, ExecutorIdentity: "token-command-executor",
 	}
 	audit("TOKEN_MODEL_CATALOG_SYNC", 2, "platform.models.sync", 2, "expected_catalog_version", "adapter_observed_version", "catalog_diff_fingerprint", "request_fingerprint")

@@ -1293,6 +1293,9 @@ func humanApprovalPrincipal(principal identity.Principal) bool {
 
 func approvalPolicyForItem(item ApprovalRequest) (approvalpolicy.Policy, error) {
 	policy, err := approvalpolicy.Lookup(item.CommandType)
+	if item.CommandType == "TOKEN_MODEL_LIFECYCLE_CHANGE" {
+		policy, err = approvalpolicy.LookupVersion(item.CommandType, item.PolicyVersion, item.SnapshotSchemaVersion)
+	}
 	if err != nil || item.PolicyVersion != policy.PolicyVersion || item.SnapshotSchemaVersion != policy.SnapshotSchemaVersion || policy.Mode != approvalpolicy.ApprovalRequired || item.RequesterPermission != policy.RequesterPermission || item.ApproverPermission != policy.ApproverPermission {
 		return approvalpolicy.Policy{}, ErrApprovalInvalidated
 	}
@@ -1300,7 +1303,7 @@ func approvalPolicyForItem(item ApprovalRequest) (approvalpolicy.Policy, error) 
 }
 
 func normalizeApprovalDraft(draft ApprovalDraft) (approvalpolicy.Policy, []byte, [32]byte, error) {
-	policy, err := approvalpolicy.Lookup(draft.CommandType)
+	policy, err := approvalpolicy.ForCommand(draft.CommandType, draft.NormalizedCommand)
 	if err != nil {
 		return approvalpolicy.Policy{}, nil, [32]byte{}, err
 	}
@@ -1310,7 +1313,7 @@ func normalizeApprovalDraft(draft ApprovalDraft) (approvalpolicy.Policy, []byte,
 	if len(strings.TrimSpace(draft.IdempotencyKey)) < 8 || len(draft.IdempotencyKey) > 120 || len(strings.TrimSpace(draft.TargetResourceType)) < 1 || len(strings.TrimSpace(draft.TargetResourceType)) > 80 || len(strings.TrimSpace(draft.TargetResourceID)) < 1 || len(strings.TrimSpace(draft.TargetResourceID)) > 160 || len(strings.TrimSpace(draft.Reason)) < 10 || len(strings.TrimSpace(draft.Reason)) > 2000 {
 		return approvalpolicy.Policy{}, nil, [32]byte{}, ErrConflict
 	}
-	normalized, err := canonicalSafeJSON(draft.NormalizedCommand)
+	normalized, err := canonicalApprovalCommand(policy.CommandType, draft.NormalizedCommand)
 	if err != nil {
 		return approvalpolicy.Policy{}, nil, [32]byte{}, err
 	}
@@ -1337,7 +1340,7 @@ func normalizeApprovalDraft(draft ApprovalDraft) (approvalpolicy.Policy, []byte,
 // resource snapshots are deliberately excluded so an idempotent replay can be
 // proven from the original request without another downstream read.
 func validateApprovalDraftRequest(draft ApprovalDraft) (approvalpolicy.Policy, [32]byte, error) {
-	policy, err := approvalpolicy.Lookup(strings.ToUpper(strings.TrimSpace(draft.CommandType)))
+	policy, err := approvalpolicy.ForCommand(strings.ToUpper(strings.TrimSpace(draft.CommandType)), draft.NormalizedCommand)
 	if err != nil || policy.Mode != approvalpolicy.ApprovalRequired || !approvalpolicy.Executable(policy.CommandType) {
 		return approvalpolicy.Policy{}, [32]byte{}, ErrConflict
 	}
@@ -1365,7 +1368,7 @@ func approvalRequestOriginalFingerprint(item ApprovalRequest) ([32]byte, error) 
 }
 
 func approvalDraftOriginalFingerprint(commandType string, draft ApprovalDraft) ([32]byte, error) {
-	normalized, err := canonicalSafeJSON(draft.NormalizedCommand)
+	normalized, err := canonicalApprovalCommand(commandType, draft.NormalizedCommand)
 	if err != nil {
 		return [32]byte{}, err
 	}
@@ -1397,6 +1400,23 @@ func approvalDraftOriginalFingerprint(commandType string, draft ApprovalDraft) (
 	}
 
 	return sha256.Sum256(bytes.Join(parts, []byte{0})), nil
+}
+
+func canonicalApprovalCommand(commandType string, raw json.RawMessage) ([]byte, error) {
+	if strings.EqualFold(strings.TrimSpace(commandType), "TOKEN_MODEL_LIFECYCLE_CHANGE") {
+		policy, err := approvalpolicy.ForCommand(commandType, raw)
+		if err != nil {
+			return nil, ErrConflict
+		}
+		if policy.PolicyVersion == 3 {
+			normalized, err := approvalencoding.NormalizeLifecycleV3DomainCommand(raw)
+			if err != nil {
+				return nil, ErrConflict
+			}
+			raw = normalized
+		}
+	}
+	return canonicalSafeJSON(raw)
 }
 
 func canonicalApprovalFinancialSnapshot(policy approvalpolicy.Policy, raw json.RawMessage) ([]byte, error) {
@@ -1773,6 +1793,10 @@ func tokenApprovalSnapshotsAligned(critical, financial []byte) bool {
 }
 
 func validTokenApprovalCriticalValue(policy approvalpolicy.Policy, name string, value any) bool {
+	if name == "force_cancel_inflight" {
+		_, ok := value.(bool)
+		return ok && policy.CommandType == "TOKEN_MODEL_LIFECYCLE_CHANGE" && policy.PolicyVersion == 3
+	}
 	if value == nil {
 		switch name {
 		case "existing_session_cutoff_at", "replacement_model_id", "replacement_credential_version":

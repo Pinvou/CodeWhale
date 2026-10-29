@@ -164,8 +164,7 @@ ORDER BY r.execution_deadline,r.id LIMIT $3`, commands, control.Mode == AdminApp
 
 func reconciliationDescriptorMatches(descriptors []approvalconsumer.Descriptor, candidate ApprovalReconciliationCandidate) bool {
 	for _, descriptor := range descriptors {
-		if descriptor.CommandType == candidate.CommandType && descriptor.PolicyVersion == candidate.PolicyVersion &&
-			descriptor.ExecutorIdentity == candidate.ExecutorIdentity {
+		if approvalconsumer.Match(descriptor, candidate.CommandType, candidate.PolicyVersion, candidate.ExecutorIdentity) {
 			return true
 		}
 	}

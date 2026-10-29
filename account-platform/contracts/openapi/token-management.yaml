@@ -5683,9 +5683,7 @@
           },
           "force_cancel_inflight": {
             "type": "boolean",
-            "enum": [
-              false
-            ]
+            "default": false
           },
           "reason": {
             "type": "string"
@@ -5699,7 +5697,28 @@
         ],
         "additionalProperties": false,
         "x-go-type": "LifecyclePlanInput",
-        "x-go-source": "internal/token/lifecycle_plans.go"
+        "x-go-source": "internal/token/lifecycle_plans.go",
+        "allOf": [
+          {
+            "if": {
+              "properties": {
+                "force_cancel_inflight": {
+                  "const": true
+                }
+              },
+              "required": [
+                "force_cancel_inflight"
+              ]
+            },
+            "then": {
+              "properties": {
+                "target_lifecycle": {
+                  "const": "REMOVED"
+                }
+              }
+            }
+          }
+        ]
       },
       "TokenAccountRecoveryActionResult": {
         "type": "object",

@@ -139,7 +139,7 @@ func (r *PostgresRepository) BeginTokenCommand(ctx context.Context, input tokenC
 	if err != nil || input.ActorUserID == uuid.Nil || input.AuthorizationVersion < 1 || strings.TrimSpace(input.ActorPermission) == "" || strings.TrimSpace(input.AuditRequestID) == "" || containsSensitiveCommandField(input.BeforeState) {
 		return TokenCommandResult{}, false, ErrTokenCommandInvalid
 	}
-	policy, err := approvalpolicy.Lookup(canonical.CommandType)
+	policy, err := approvalpolicy.ForCommand(canonical.CommandType, canonical.Command)
 	if err != nil || (input.ApprovalRequestID == uuid.Nil) != (strings.TrimSpace(input.ApprovalFingerprint) == "") {
 		return TokenCommandResult{}, false, ErrTokenCommandInvalid
 	}
@@ -347,7 +347,7 @@ func normalizeTokenCommand(envelope TokenCommandEnvelope, key, approvalFingerpri
 	key = strings.TrimSpace(key)
 	approvalFingerprint = strings.ToLower(strings.TrimSpace(approvalFingerprint))
 	spec, ok := tokenCommandSpecs[envelope.CommandType]
-	policy, policyErr := approvalpolicy.Lookup(envelope.CommandType)
+	policy, policyErr := approvalpolicy.ForCommand(envelope.CommandType, envelope.Command)
 	maximumKeyLength := 128
 	if approvalFingerprint != "" {
 		maximumKeyLength = 512
@@ -1071,7 +1071,7 @@ func (s *Service) executeApprovedTokenCommand(w http.ResponseWriter, r *http.Req
 		api.WriteError(w, http.StatusConflict, "TOKEN_GOVERNANCE_ACTIVATION_CHANGED", "the approved Token command activation changed", httpserver.RequestID(r.Context()))
 		return
 	}
-	policy, err := approvalpolicy.Lookup(commandType)
+	policy, err := approvalpolicy.ForCommand(commandType, body.Envelope.Command)
 	expectedExecutionKey := fmt.Sprintf("approval:%s:%s:%s", body.ApprovalRequestID, commandType, strings.ToLower(strings.TrimSpace(body.CommandFingerprint)))
 	if err != nil || !approvalpolicy.Executable(commandType) || policy.Mode != approvalpolicy.ApprovalRequired || policy.ExecutorIdentity != workload.Service || body.Envelope.CommandType != commandType || body.ApprovalRequestID == uuid.Nil || body.RequesterUserID == uuid.Nil || body.AuthorizationVersion < 1 || len(strings.TrimSpace(body.CommandFingerprint)) != 64 || strings.TrimSpace(body.ExecutionIdempotencyKey) != expectedExecutionKey {
 		api.WriteError(w, http.StatusBadRequest, "INVALID_APPROVED_COMMAND", "the approved Token command is invalid", httpserver.RequestID(r.Context()))

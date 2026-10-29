@@ -72,6 +72,7 @@ type LifecyclePlanInput struct {
 }
 
 type lifecyclePlanCommand struct {
+	ForceCancelInflight     *bool      `json:"force_cancel_inflight,omitempty"`
 	ModelID                 uuid.UUID  `json:"model_id"`
 	LifecyclePlanID         uuid.UUID  `json:"lifecycle_plan_id"`
 	LifecyclePlanVersion    int64      `json:"lifecycle_plan_version"`
@@ -82,6 +83,7 @@ type lifecyclePlanCommand struct {
 }
 
 type lifecyclePlanCritical struct {
+	ForceCancelInflight           *bool      `json:"force_cancel_inflight,omitempty"`
 	ModelID                       uuid.UUID  `json:"model_id"`
 	CatalogVersion                int64      `json:"catalog_version"`
 	CurrentLifecycle              string     `json:"current_lifecycle"`
@@ -155,7 +157,7 @@ func normalizeLifecyclePlanInput(modelID uuid.UUID, input LifecyclePlanInput) (L
 		value := input.ExistingSessionCutoffAt.UTC()
 		input.ExistingSessionCutoffAt = &value
 	}
-	if modelID == uuid.Nil || input.ExpectedCatalogVersion < 1 || input.ExpectedPlanVersion < 0 || len([]rune(input.Reason)) < 10 || len([]rune(input.Reason)) > 2000 || input.EffectiveAt.IsZero() || input.ForceCancelInflight || (input.TargetLifecycle != "DEPRECATED" && input.TargetLifecycle != "REMOVED") || input.ReplacementModelID != nil && (*input.ReplacementModelID == uuid.Nil || *input.ReplacementModelID == modelID) {
+	if modelID == uuid.Nil || input.ExpectedCatalogVersion < 1 || input.ExpectedPlanVersion < 0 || len([]rune(input.Reason)) < 10 || len([]rune(input.Reason)) > 2000 || input.EffectiveAt.IsZero() || input.ForceCancelInflight && input.TargetLifecycle != "REMOVED" || (input.TargetLifecycle != "DEPRECATED" && input.TargetLifecycle != "REMOVED") || input.ReplacementModelID != nil && (*input.ReplacementModelID == uuid.Nil || *input.ReplacementModelID == modelID) {
 		return LifecyclePlanInput{}, ErrTokenCommandInvalid
 	}
 	if input.TargetLifecycle != "REMOVED" && input.ReplacementModelID != nil {
@@ -686,7 +688,7 @@ func writeLifecyclePlanError(w http.ResponseWriter, r *http.Request, err error) 
 func parseLifecyclePlanEnvelope(envelope TokenCommandEnvelope) (lifecyclePlanCommand, lifecyclePlanCritical, error) {
 	var command lifecyclePlanCommand
 	var expected lifecyclePlanCritical
-	if envelope.CommandType != "TOKEN_MODEL_LIFECYCLE_CHANGE" || envelope.TargetResourceType != "MODEL" || decodeCommand(envelope.Command, &command) != nil || decodeCommand(envelope.ExpectedVersions, &expected) != nil || command.ModelID == uuid.Nil || command.ModelID.String() != envelope.TargetResourceID || command.LifecyclePlanID == uuid.Nil || command.LifecyclePlanVersion < 1 || expected.ModelID != command.ModelID || expected.LifecyclePlanVersion != command.LifecyclePlanVersion || expected.TargetLifecycle != command.TargetLifecycle || expected.EffectiveAt.UTC() != command.EffectiveAt.UTC() || !sameOptionalTime(expected.ExistingSessionCutoffAt, command.ExistingSessionCutoffAt) || !sameOptionalUUID(expected.ReplacementModelID, command.ReplacementModelID) || expected.PolicyVersion != 2 {
+	if envelope.CommandType != "TOKEN_MODEL_LIFECYCLE_CHANGE" || envelope.TargetResourceType != "MODEL" || decodeCommand(envelope.Command, &command) != nil || decodeCommand(envelope.ExpectedVersions, &expected) != nil || command.ModelID == uuid.Nil || command.ModelID.String() != envelope.TargetResourceID || command.LifecyclePlanID == uuid.Nil || command.LifecyclePlanVersion < 1 || expected.ModelID != command.ModelID || expected.LifecyclePlanVersion != command.LifecyclePlanVersion || expected.TargetLifecycle != command.TargetLifecycle || expected.EffectiveAt.UTC() != command.EffectiveAt.UTC() || !sameOptionalTime(expected.ExistingSessionCutoffAt, command.ExistingSessionCutoffAt) || !sameOptionalUUID(expected.ReplacementModelID, command.ReplacementModelID) || !lifecycleProtocolFlagsMatch(command.ForceCancelInflight, expected.ForceCancelInflight, expected.PolicyVersion, command.TargetLifecycle) {
 		return lifecyclePlanCommand{}, lifecyclePlanCritical{}, ErrTokenCommandInvalid
 	}
 	validTransition := expected.CurrentLifecycle == "PUBLISHED" && (command.TargetLifecycle == "DEPRECATED" || command.TargetLifecycle == "REMOVED") || expected.CurrentLifecycle == "DEPRECATED" && command.TargetLifecycle == "REMOVED"
@@ -718,7 +720,7 @@ func (e *PostgresApprovedCredentialExecutor) precheckApprovedLifecyclePlan(ctx c
 	if err != nil {
 		return nil, err
 	}
-	if !containsString([]string{"PENDING_APPROVAL", "SCHEDULED", "EXECUTING"}, plan.Status) || plan.PlanVersion != command.LifecyclePlanVersion || plan.ExpectedCatalogVersion != expected.CatalogVersion || plan.CurrentLifecycle != expected.CurrentLifecycle || plan.TargetLifecycle != command.TargetLifecycle || !plan.EffectiveAt.Equal(command.EffectiveAt.UTC()) || !sameOptionalTime(plan.ExistingSessionCutoffAt, command.ExistingSessionCutoffAt) || !sameOptionalUUID(plan.ReplacementModelID, command.ReplacementModelID) {
+	if !containsString([]string{"PENDING_APPROVAL", "SCHEDULED", "EXECUTING"}, plan.Status) || plan.PlanVersion != command.LifecyclePlanVersion || plan.ExpectedCatalogVersion != expected.CatalogVersion || plan.CurrentLifecycle != expected.CurrentLifecycle || plan.TargetLifecycle != command.TargetLifecycle || !plan.EffectiveAt.Equal(command.EffectiveAt.UTC()) || !sameOptionalTime(plan.ExistingSessionCutoffAt, command.ExistingSessionCutoffAt) || !sameOptionalUUID(plan.ReplacementModelID, command.ReplacementModelID) || !lifecyclePlanFlagMatches(plan, command.ForceCancelInflight) {
 		return nil, ErrCatalogVersionConflict
 	}
 	evidence, err := e.repository.ModelLifecycleImpact(ctx, command.ModelID, command.ReplacementModelID)
@@ -770,7 +772,7 @@ func (e *PostgresApprovedCredentialExecutor) ExecuteApprovedModelLifecycle(ctx c
 		}
 		return completed, e.repository.commitGovernedMutation(ctx, tx)
 	}
-	if plan.Status != "PENDING_APPROVAL" || plan.PlanVersion != expected.LifecyclePlanVersion || plan.ExpectedCatalogVersion != expected.CatalogVersion || plan.CurrentLifecycle != expected.CurrentLifecycle || plan.TargetLifecycle != expected.TargetLifecycle || !plan.EffectiveAt.Equal(expected.EffectiveAt.UTC()) || !sameOptionalTime(plan.ExistingSessionCutoffAt, expected.ExistingSessionCutoffAt) || !sameOptionalUUID(plan.ReplacementModelID, expected.ReplacementModelID) {
+	if plan.Status != "PENDING_APPROVAL" || plan.PlanVersion != expected.LifecyclePlanVersion || plan.ExpectedCatalogVersion != expected.CatalogVersion || plan.CurrentLifecycle != expected.CurrentLifecycle || plan.TargetLifecycle != expected.TargetLifecycle || !plan.EffectiveAt.Equal(expected.EffectiveAt.UTC()) || !sameOptionalTime(plan.ExistingSessionCutoffAt, expected.ExistingSessionCutoffAt) || !sameOptionalUUID(plan.ReplacementModelID, expected.ReplacementModelID) || !lifecyclePlanFlagMatches(plan, expected.ForceCancelInflight) {
 		return TokenCommandResult{}, ErrCatalogVersionConflict
 	}
 	evidence, err := modelImpactInTx(ctx, tx, command.ModelID, command.ReplacementModelID)

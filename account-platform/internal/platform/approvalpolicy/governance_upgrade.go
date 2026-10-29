@@ -26,6 +26,9 @@ var addedBillingGovernanceCommands = []string{
 // still verified by VerifyPolicySet under the caller's Account SHARE lock.
 func CanExpandGovernancePolicySet(from, to string) bool {
 	policies, err := governancePolicies()
+	if prior, ok := lifecyclePreviousPolicies(policies); ok {
+		policies = prior
+	}
 	return err == nil && canExpandGovernancePolicySet(from, to, policies)
 }
 

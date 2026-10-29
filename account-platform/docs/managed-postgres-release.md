@@ -51,7 +51,7 @@ RDS 不允许读取 `pg_authid`。因此受管 `enable` 必须额外提供 `--ca
 
 操作仍由专用 token_migrator 执行：锁定并核验 Account 的完整新策略集合，保持该 SHARE 锁至 Token 操作结束；Token 侧锁 activation、核对精确 epoch、锁定领域表并盘点 writer，然后通过既有 CAS 和真实触发器产生新 epoch/审计。旧 CLI 应先以匹配旧摘要的制品完成 SAFE。原 request-id 查询用于确认未知结果，不能盲重 apply。
 
-model-token operations 包装器仅在 `governance-active-check` / `governance-activate` 且 expected_state 为 SAFE_ROLLBACK 时接受可选 `policy_upgrade: billing-policy-set-v1` 并透传该 flag；旧六字段请求不变。未知契约、首次 PRE 激活、SAFE 与结果查询均拒绝该字段。默认仅计划检查，写入仍须显式 execute，绑定既有批准引用和精确可执行制品摘要。受管 provider 参数由独立发布准备 CLI 显式提供，不混入治理包装器的凭据。
+model-token operations 包装器仅在 `governance-active-check` / `governance-activate` 且 expected_state 为 SAFE_ROLLBACK 时接受可选 `policy_upgrade: billing-policy-set-v1` 或 `policy_upgrade: model-lifecycle-force-cancel-v1` 并精确透传该 flag；前者仍只核准原 Billing 固定前后摘要，后者只核准生命周期 v2→v3 的固定前后摘要，两者不能互换；旧六字段请求不变。未知契约、首次 PRE 激活、SAFE 与结果查询均拒绝该字段。默认仅计划检查，写入仍须显式 execute，绑定既有批准引用和精确可执行制品摘要。受管 provider 参数由独立发布准备 CLI 显式提供，不混入治理包装器的凭据。
 
 ## 验证边界
 

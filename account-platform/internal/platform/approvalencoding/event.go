@@ -229,8 +229,8 @@ func decodeLegacyAuthorizationEvent(raw []byte, parsed *jsonValue, expected Expe
 	if err != nil {
 		return DecodedAuthorizationEvent{}, err
 	}
-	spec, ok := commandSpecs[commandType]
-	if !ok || policyVersion != spec.policyVersion {
+	spec, ok := commandSpecForVersion(commandType, policyVersion)
+	if !ok || policyVersion != spec.policyVersion || commandType == "TOKEN_MODEL_LIFECYCLE_CHANGE" && policyVersion == 3 {
 		return DecodedAuthorizationEvent{}, ErrUnsupportedVersion
 	}
 	artifacts, err := ConvertLegacyProofInput(LegacyProofInput{
@@ -273,7 +273,7 @@ func validateAuthorizationEvent(event AuthorizationEvent, expected ExpectedAutho
 	if event.EventID == uuid.Nil || event.AggregateID == uuid.Nil || event.ApprovalRequestID == uuid.Nil || event.AggregateID != event.ApprovalRequestID || !canonicalUTC(event.OccurredAt) || !canonicalUTC(event.ExecutionDeadline) || !utf8.ValidString(event.TraceID) || strings.TrimSpace(event.TraceID) == "" {
 		return ErrInvalidDocument
 	}
-	spec, ok := commandSpecs[event.CommandType]
+	spec, ok := commandSpecForVersion(event.CommandType, event.PolicyVersion)
 	if !ok || event.PolicyVersion != spec.policyVersion || event.ExecutorIdentity != spec.executor || event.ProofSchemaVersion != ProofSchemaVersion || !hexString(event.CommandFingerprint) || !hexString(event.CommandDigest) || !hexString(event.SnapshotDigest) || !hexString(event.ProofDigest) || !boundedString(event.DomainRevision, 128) {
 		return ErrInvalidDocument
 	}

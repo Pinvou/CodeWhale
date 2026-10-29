@@ -68,7 +68,9 @@ func LookupDurable(durable string) (Descriptor, bool) {
 func Match(descriptor Descriptor, commandType string, policyVersion int64, executorIdentity string) bool {
 	registered, ok := LookupDurable(descriptor.Durable)
 	return ok && registered == descriptor && descriptor.CommandType != "" && descriptor.CommandType == commandType &&
-		descriptor.PolicyVersion == policyVersion && descriptor.ExecutorIdentity == executorIdentity
+		(descriptor.PolicyVersion == policyVersion ||
+			commandType == "TOKEN_MODEL_LIFECYCLE_CHANGE" && descriptor.Durable == "token-model-lifecycle-executor-v1" && policyVersion == 3) &&
+		descriptor.ExecutorIdentity == executorIdentity
 }
 
 // MatchRoute accepts the historical shared Billing durable's three frozen

@@ -116,7 +116,7 @@ func (c *HTTPApprovalSnapshotSource) PrecheckApprovalSnapshot(ctx context.Contex
 		return ApprovalSnapshotProjection{}, ErrApprovalSnapshotUnavailable
 	}
 	projection := ApprovalSnapshotProjection{CommandType: wire.CommandType, TargetResourceType: wire.TargetResourceType, TargetResourceID: wire.TargetResourceID, CriticalResourceVersions: wire.CriticalResourceVersions, FinancialSnapshot: wire.FinancialSnapshot, PrecheckFingerprint: wire.PrecheckFingerprint, tokenObservedAt: wire.TokenObservedAt, billingObservedAt: wire.BillingObservedAt}
-	policy, err := approvalpolicy.Lookup(wire.CommandType)
+	policy, err := approvalpolicy.ForSnapshot(wire.CommandType, wire.CriticalResourceVersions)
 	if err != nil {
 		return ApprovalSnapshotProjection{}, ErrApprovalSnapshotUnavailable
 	}

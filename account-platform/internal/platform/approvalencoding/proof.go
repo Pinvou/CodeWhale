@@ -162,13 +162,21 @@ func ConvertLegacyProofInput(input LegacyProofInput) (ProofArtifacts, error) {
 	if err != nil {
 		return ProofArtifacts{}, err
 	}
-	spec, ok := commandSpecs[input.CommandType]
+	spec, ok := commandSpecForVersion(input.CommandType, input.PolicyVersion)
 	if !ok {
+		if _, known := commandSpecs[input.CommandType]; known {
+			return ProofArtifacts{}, ErrUnsupportedVersion
+		}
 		return ProofArtifacts{}, ErrUnsupportedCommand
 	}
 
 	if err := convertLegacyIntegers(spec, normalized, critical, financial); err != nil {
 		return ProofArtifacts{}, err
+	}
+	if input.CommandType == "TOKEN_MODEL_LIFECYCLE_CHANGE" && input.PolicyVersion == 3 {
+		if err := normalizeLifecycleV3DomainTimes(normalized, critical, financial); err != nil {
+			return ProofArtifacts{}, err
+		}
 	}
 	return buildProofArtifacts(input.CommandType, input.PolicyVersion, input.SnapshotSchemaVersion, input.TargetResourceType, input.TargetResourceID, normalized, critical, financial)
 }
@@ -187,7 +195,7 @@ func LegacyExecutionInput(decoded DecodedAuthorizationEvent) (LegacyProofInput, 
 		return LegacyProofInput{}, ErrUnsupportedVersion
 	}
 	event := decoded.Payload
-	spec, ok := commandSpecs[event.CommandType]
+	spec, ok := commandSpecForVersion(event.CommandType, event.PolicyVersion)
 	if !ok || event.PolicyVersion != spec.policyVersion {
 		return LegacyProofInput{}, ErrUnsupportedCommand
 	}
@@ -224,7 +232,7 @@ func LegacyProofInputFromArtifacts(artifacts ProofArtifacts) (LegacyProofInput, 
 	if err != nil || !sameArtifactDigests(verified, artifacts) || verified.SnapshotSchemaVersion != artifacts.SnapshotSchemaVersion {
 		return LegacyProofInput{}, ErrInvalidDocument
 	}
-	spec := commandSpecs[artifacts.CommandType]
+	spec, _ := commandSpecForVersion(artifacts.CommandType, artifacts.PolicyVersion)
 	root, err := parseDocument(verified.ProofInputJSON)
 	if err != nil {
 		return LegacyProofInput{}, err
@@ -338,8 +346,11 @@ func DecodeProofInput(commandType string, policyVersion int64, raw []byte) (Proo
 }
 
 func buildProofArtifacts(commandType string, policyVersion int64, snapshotVersion int, targetType, targetID string, normalized, critical, financial *jsonValue) (ProofArtifacts, error) {
-	spec, ok := commandSpecs[commandType]
+	spec, ok := commandSpecForVersion(commandType, policyVersion)
 	if !ok {
+		if _, known := commandSpecs[commandType]; known {
+			return ProofArtifacts{}, ErrUnsupportedVersion
+		}
 		return ProofArtifacts{}, ErrUnsupportedCommand
 	}
 	if spec.policyVersion != policyVersion || spec.snapshotVersion != snapshotVersion {
@@ -471,6 +482,10 @@ func validateProofValues(commandType string, spec commandSpec, targetType, targe
 		}
 	}
 	switch commandType {
+	case "TOKEN_MODEL_LIFECYCLE_CHANGE":
+		if spec.policyVersion == 3 {
+			return validateLifecycleV3(targetID, normalizedObject, criticalObject, financialObject, integers)
+		}
 	case "ENTITLEMENT_COMPONENT_ADJUSTMENT":
 		if !validUUID(targetID) || !equalString(normalizedObject["package_id"], targetID) || !equalString(criticalObject["package_id"], targetID) ||
 			!validUUIDField(normalizedObject["payment_order_id"]) || !sameCanonical(normalizedObject["payment_order_id"], criticalObject["payment_order_id"]) || !boundedStringField(normalizedObject["reason_code"], 80) ||
@@ -646,8 +661,8 @@ func productCommon(object map[string]*jsonValue) bool {
 // local digest. Callers must first apply the command-specific domain proof
 // reason whitelist; the shared DENY union here is not an authorization check.
 func DeriveProofDigest(response ProofResponse) ([32]byte, error) {
-	spec, ok := commandSpecs[response.CommandType]
-	if !ok || response.PolicyVersion != spec.policyVersion || response.ApprovalRequestID == uuid.Nil || response.ProofSchemaVersion != ProofSchemaVersion || !hexString(response.CommandDigest) || !hexString(response.SnapshotDigest) || !boundedString(response.DomainRevision, 128) || !canonicalUTC(response.IssuedAt) || !canonicalUTC(response.ExpiresAt) || !response.ExpiresAt.Equal(response.IssuedAt.Add(time.Minute)) {
+	_, ok := commandSpecForVersion(response.CommandType, response.PolicyVersion)
+	if !ok || response.ApprovalRequestID == uuid.Nil || response.ProofSchemaVersion != ProofSchemaVersion || !hexString(response.CommandDigest) || !hexString(response.SnapshotDigest) || !boundedString(response.DomainRevision, 128) || !canonicalUTC(response.IssuedAt) || !canonicalUTC(response.ExpiresAt) || !response.ExpiresAt.Equal(response.IssuedAt.Add(time.Minute)) {
 		return [32]byte{}, ErrInvalidDocument
 	}
 	if response.Verdict == "ALLOW" {

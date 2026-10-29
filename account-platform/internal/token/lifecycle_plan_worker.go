@@ -108,7 +108,7 @@ func deterministicLifecyclePrecheckError(err error) bool {
 }
 
 func lifecyclePlanCommandFromPlan(plan LifecyclePlan) lifecyclePlanCommand {
-	return lifecyclePlanCommand{ModelID: plan.ModelID, LifecyclePlanID: plan.ID, LifecyclePlanVersion: plan.PlanVersion, TargetLifecycle: plan.TargetLifecycle, EffectiveAt: plan.EffectiveAt, ExistingSessionCutoffAt: plan.ExistingSessionCutoffAt, ReplacementModelID: plan.ReplacementModelID}
+	return lifecyclePlanCommand{ForceCancelInflight: lifecyclePlanApprovalFlag(plan), ModelID: plan.ModelID, LifecyclePlanID: plan.ID, LifecyclePlanVersion: plan.PlanVersion, TargetLifecycle: plan.TargetLifecycle, EffectiveAt: plan.EffectiveAt, ExistingSessionCutoffAt: plan.ExistingSessionCutoffAt, ReplacementModelID: plan.ReplacementModelID}
 }
 
 // ExpirePendingLifecyclePlan records one immutable expiry event per call so
@@ -333,7 +333,7 @@ func (r *PostgresRepository) ApplyClaimedLifecyclePlan(ctx context.Context, plan
 		return ErrCatalogVersionConflict
 	}
 	var expected lifecyclePlanCritical
-	if json.Unmarshal(plan.CriticalResourceVersions, &expected) != nil || expected.ModelID != plan.ModelID || expected.LifecyclePlanVersion != plan.PlanVersion || expected.CatalogVersion != current {
+	if json.Unmarshal(plan.CriticalResourceVersions, &expected) != nil || expected.ModelID != plan.ModelID || expected.LifecyclePlanVersion != plan.PlanVersion || expected.CatalogVersion != current || !lifecyclePlanFlagMatches(plan, expected.ForceCancelInflight) || !lifecycleProtocolFlagsMatch(expected.ForceCancelInflight, expected.ForceCancelInflight, expected.PolicyVersion, plan.TargetLifecycle) {
 		return ErrCatalogVersionConflict
 	}
 	evidence, err := modelImpactInTx(ctx, tx, plan.ModelID, plan.ReplacementModelID)
