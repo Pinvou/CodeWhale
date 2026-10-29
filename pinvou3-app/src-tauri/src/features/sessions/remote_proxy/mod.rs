@@ -52,8 +52,8 @@ pub(crate) struct RemoteProxyState {
     /// bindings cannot authorize writes after re-pair or lease replacement.
     pub(super) current_context: Option<binding::LiveRemoteContext>,
     pub(super) path: PathBuf,
-    /// A failed load disables remote writes for this process. Keep the original
-    /// file untouched rather than replacing unreadable history with an empty map.
+    /// Failed load or indeterminate seal disables protected remote mutations
+    /// for this process. Preserve the original files and durable recovery evidence.
     pub(super) load_failed: bool,
     pub(super) load_failure: Option<RemoteProxyLoadFailure>,
     pub(super) archives: archive::ArchiveStore,

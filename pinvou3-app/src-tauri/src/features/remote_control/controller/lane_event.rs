@@ -4,14 +4,14 @@
 #[derive(Clone, Eq, PartialEq)]
 pub(crate) enum ControllerLaneEvent {
     Frame(String),
-    Disconnected,
+    Disconnected(super::relay_transport::ControllerDisconnectContext),
 }
 
 impl std::fmt::Debug for ControllerLaneEvent {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::Frame(_) => f.debug_tuple("Frame").field(&"[REDACTED]").finish(),
-            Self::Disconnected => f.write_str("Disconnected"),
+            Self::Disconnected(_) => f.write_str("Disconnected"),
         }
     }
 }
@@ -37,8 +37,19 @@ mod tests {
             assert!(diagnostic.contains("[REDACTED]"));
         }
         assert_eq!(event, ControllerLaneEvent::Frame(payload));
+        let (sender, _receiver) = super::super::relay_transport::transport_channels(
+            super::super::relay_transport::ControllerRole::ControllerA,
+            "generation-diagnostic",
+            2,
+            2,
+            4096,
+            1024,
+        );
         assert_eq!(
-            format!("{:?}", ControllerLaneEvent::Disconnected),
+            format!(
+                "{:?}",
+                ControllerLaneEvent::Disconnected(sender.disconnect_context())
+            ),
             "Disconnected"
         );
     }
