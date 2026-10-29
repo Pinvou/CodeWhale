@@ -50,8 +50,8 @@
 - [x] 公开主仓确认为 `Pinvou/pinvou-agent`，以 Pinvou 组织名义开源；现有 `Pinvou/pinvou3` 继续作为私有内部仓库。
 - [x] 底座公开 fork 确认为 `Pinvou/CodeWhale`，保留与上游 `Hmbown/CodeWhale` 的来源关系和授权说明。
 - [x] 英文产品定位确认为：“Pinvou is an open-source, local-first desktop AI workspace that turns conversations into finished work with files, knowledge, tools, and automations.”
-- [x] README 和首发宣传重点展示 7 项核心能力：Agentic desktop workspace、Deliverable-first artifacts、Local knowledge、MCP and Skills ecosystem、Workflows and automations、Bring your own model、Inspectable and controllable execution。其他现有通用功能仍全部开源。
-- [x] 列出必须从公开仓库剔除的内容，剩余现有功能默认全部开源。
+- [x] README 和首发宣传重点展示 7 项核心能力：Agentic desktop workspace、Deliverable-first artifacts、Local knowledge、MCP and Skills ecosystem、Workflows and automations、Bring your own model、Inspectable and controllable execution。其他现有通用功能仍全部开源（Official 私有独有能力除外，见 M0 §6.1 与 §11）。
+- [x] 列出必须从公开仓库剔除的内容，剩余现有功能默认全部开源（Official 私有独有能力除外）。
 
 ### 仓库搜索与品牌表达（已确认）
 
@@ -83,7 +83,7 @@
 - `agency-agents.json` 对应的 `jnMetaCode/agency-agents-zh`（MIT）。
 - 三套桌宠 `spritesheet.webp`/`cover.webp`、`sansheng-banner.png`、7 张工具商店 `banner-*.jpg`、7 张 `skill-*.jpg` 和 `scheduled/` 下 3 张 JPG 为 Pinvou 自行生成的自有视觉素材，在公开仓库和社区版中保留。
 - MegaCube 产品入口、图标与集成为 Official 私有能力（2026-10-25 确认），社区版不包含，不适用本节保留口径；真实访问地址与官方集成只存在于官方构建。
-- model_store 模型商店为 Official 私有能力（2026-10-25 确认），依赖官方模型分发服务与账号体系，社区版不包含，不适用本节保留口径；归属详见 M0 §11 与 fork-modifications §12.9。
+- model_store 模型商店为 Official 私有能力（2026-10-25 确认），依赖官方模型分发服务与账号体系，社区版不包含，不适用本节保留口径；归属详见 M0 §11 与 fork-modifications §12 有意分歧登记第 9 条。
 - 56 个内置头像：50 个 CC BY 4.0、6 个 CC0 1.0；保留 SVG 内已有元数据，并在 `THIRD_PARTY_NOTICES.md` 汇总署名。
 - 可证明来自 `lobehub/lobe-icons` 的模型服务商图标（MIT）；改为锁定 npm 包版本或记录确切上游文件，同时保留品牌归属说明。
 - BGE-M3（MIT）和 SenseVoice.cpp（MIT）可保留集成；SenseVoice 模型权重另按 FunASR Model License 归因并保留模型名称。
@@ -217,7 +217,7 @@
 - 社区遥测删除范围：`pinvou3-app/src-tauri/src/telemetry.rs` 及其初始化/事件接线、`remote-control-relay/telemetry-service.js`、统计管理页面、Nginx 配置、部署步骤和相关测试；同时确认公开文件树中不再出现生产地址、enrollment token、device pepper、管理员密码或硬件标识上报逻辑。
 - MegaCube：入口、图标和集成为 Official 私有能力（2026-10-25 确认），社区快照整体移除，不再采用地址注入方案。
 - `.github/workflows/` 继续纳入最终密钥与地址扫描；只允许 GitHub/上游公共地址和 secret 变量引用，不允许出现 Pinvou 服务器信息或真实 secret 值。
-- 全仓定向扫描已定位 24 个 Pinvou/MegaCube 运行 URL 候选文件，除上述脚本和源码外还包括远控架构/E2E 文档及多份测试；公开快照必须同步清理文档和测试副本，不能只改生产代码。
+- 全仓定向扫描已定位 24 个 Pinvou/MegaCube 运行 URL 候选文件，除上述脚本和源码外还包括远控架构/E2E 文档及多份测试；公开快照必须同步清理文档和测试副本，不能只改生产代码。`docs/Windows端功能清单与测试用例.md` 与 `docs/模型商店-框架与移植基线.md` 中仍有 MegaCube 环境/硬件语境表述，公开快照复核时一并纳入扫描。
 - `com.pinvou...` 一类应用包名、反向域名标识和品牌名称不是访问地址，可保留；判定标准是是否能实际定位或连接 Pinvou 运行基础设施。
 
 - [ ] 先轮换或吊销高德、问财、企查查及历史模型/API Key。

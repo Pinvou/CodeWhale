@@ -409,7 +409,7 @@
 9. `model_store` 企业模型商店整模块闭源：闭源持有 `pinvou3-app/src-tauri/src/app/commands/model_store.rs`、Rust `features/model_store/`、前端 `src/features/model-store/` 与 `uiModelStore` i18n；依赖官方模型分发服务与账号体系，开源侧零残留属预期。对齐/回流批次不得把开源侧缺失当漂移补齐，也不得要求闭源面随社区核心开源。
 10. 桌面双端远程控制闭源独有（PM 2026-10-25 决定，仅开源手机/QR 一期）：闭源面为 `features/remote_control/`（含 `controller/`、`task_permissions.rs`、`relay_client*`）、`app/commands/desktop_remote_*`、`features/sessions/{application,remote_proxy}`、前端 `src/features/remote-control/`、Relay 侧 `controller-*.js`/`enrollment-*`/`pairing-*` 与 `docs/Windows双端远程控制*.md` 发布证据；归属口径见 M0 §11 与代办「运行服务器与远程控制处理口径」。同步/回流时不得把该面当作漂移删除或要求开源侧补齐。
 11. MegaCube 入口/图标闭源独有（PM 2026-10-25 决定）：`show_megacube_site` 能力、`megacubeSite` i18n、`megacube-icon.png` 与产品入口仅存在于闭源仓；M0 §6.1 已同步改为社区版不包含，取代旧「社区版保留名称、图标、产品入口和通用集成，真实官方访问地址通过官方构建或运行环境注入」口径。开源侧零残留属预期，不作为缺失回流。
-12. （已撤销，2026-10-29）原登记「webpki-roots 例外守卫当前闭源独有」已与现状不符：开源仓已于 2026-10-28 经 #783（squash `2ceccb700b`）合入同一守卫（`docs/webpki-roots-exception.md`、`scripts/guard-webpki-roots-exception.py` 与 `deny.toml`/`Cargo.toml` bans），两仓均持有该守卫，不再构成分歧，本条不再作为有意分歧保留；两仓 ban 版本区间暂有差异（闭源封禁 <1.0.10、开源封禁 <1.0.11），后续同步以各自 manifest 为准。
+12. （已退役，2026-10-29 开源仓 Pinvou/pinvou-agent#783 合入同一守卫）原登记「webpki-roots 例外守卫当前闭源独有」已与现状不符：开源仓已于 2026-10-28 经 Pinvou/pinvou-agent#783（squash `2ceccb700b`）合入同一守卫（`docs/webpki-roots-exception.md`、`scripts/guard-webpki-roots-exception.py` 与 `deny.toml`/`Cargo.toml` bans），两仓均持有该守卫，不再构成分歧，本条不再作为有意分歧保留；两仓 ban 版本区间暂有差异（闭源封禁 <1.0.10、开源封禁 <1.0.11），后续同步以各自 manifest 为准。
 13. 应用内更新器/OTA 分歧：闭源保留完整 OTA 实现（`features/updater/`，含 `updater/health.rs` 事务账本）与前端 `src/platform/tauri/update-readiness.js`；开源为文档化 unsupported stub（M0 §8：Community 首版不提供应用内自动更新，走 GitHub Releases 手动安装）。对齐批次不得把闭源 updater 面当漂移删除，开源 stub 也不得被视为缺失。
 
 ## 13. 发布与回退
