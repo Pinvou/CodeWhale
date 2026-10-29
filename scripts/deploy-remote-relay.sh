@@ -10,6 +10,10 @@ if [[ "${PINVOU_CONFIRM_PRODUCTION_DEPLOY:-0}" != "1" ]]; then
   echo "拒绝修改生产 Relay：请在确认发布窗口和回滚负责人后设置 PINVOU_CONFIRM_PRODUCTION_DEPLOY=1。" >&2
   exit 64
 fi
+case "${PINVOU_CONFIRM_CONTROLLER_LOCK_UPGRADE:-0}" in
+  0|1) ;;
+  *) echo "PINVOU_CONFIRM_CONTROLLER_LOCK_UPGRADE must be 0 or 1" >&2; exit 64 ;;
+esac
 
 RELAY_DIR="$ROOT/remote-control-relay"
 # 运维目标与私钥只来自本地受控配置，不在仓库登记实例值。
@@ -141,6 +145,7 @@ tar -czf - -C "$RELAY_DIR" \
   "${relay_modules[@]}" \
   scripts/deploy-controller-preflight.mjs \
   scripts/controller-route-smoke.mjs \
+  scripts/controller-lock-rollout.sh \
   -C "$ROOT" \
   docs/schemas/behavior-telemetry-v1.schema.json \
   docs/schemas/behavior-telemetry-registries.json \
@@ -154,7 +159,7 @@ scp -i "$SSH_KEY" -o BatchMode=yes "$RELAY_DIR/package-lock.json" "$SERVER:$REMO
 scp -i "$SSH_KEY" -o BatchMode=yes "$IPV4_DB_CACHE" "$SERVER:$REMOTE_IPV4_DB_TMP"
 scp -i "$SSH_KEY" -o BatchMode=yes "$IPV6_DB_CACHE" "$SERVER:$REMOTE_IPV6_DB_TMP"
 
-deploy_output="$(ssh -i "$SSH_KEY" -o BatchMode=yes "$SERVER" bash -s -- "$REMOTE_DIR" "$SERVICE" "$STAMP" "$REMOTE_CODE_TMP" "$REMOTE_WEB_TMP" "$REMOTE_STATS_TMP" "$REMOTE_HARDENING_TMP" "$REMOTE_PACKAGE_TMP" "$REMOTE_LOCK_TMP" "$REMOTE_IPV4_DB_TMP" "$REMOTE_IPV6_DB_TMP" <<'REMOTE'
+deploy_output="$(ssh -i "$SSH_KEY" -o BatchMode=yes "$SERVER" bash -s -- "$REMOTE_DIR" "$SERVICE" "$STAMP" "$REMOTE_CODE_TMP" "$REMOTE_WEB_TMP" "$REMOTE_STATS_TMP" "$REMOTE_HARDENING_TMP" "$REMOTE_PACKAGE_TMP" "$REMOTE_LOCK_TMP" "$REMOTE_IPV4_DB_TMP" "$REMOTE_IPV6_DB_TMP" "${PINVOU_CONFIRM_CONTROLLER_LOCK_UPGRADE:-0}" <<'REMOTE'
 set -Eeuo pipefail
 remote_dir="$1"
 service="$2"
@@ -167,6 +172,7 @@ package_tmp="$8"
 lock_tmp="$9"
 ipv4_tmp="${10}"
 ipv6_tmp="${11}"
+lock_upgrade_confirmed="${12}"
 backup="$remote_dir/backups/$stamp"
 code_stage="$remote_dir/code.next-$stamp"
 web_stage="$remote_dir/web/dist.next-$stamp"
@@ -196,6 +202,24 @@ node --check "$code_stage/scripts/controller-route-smoke.mjs"
 # Production desktop control is a required lane. The secret-bearing environment
 # file is provisioned out of band and must never be generated or printed here.
 node "$code_stage/scripts/deploy-controller-preflight.mjs" "$controller_env"
+source "$code_stage/scripts/controller-lock-rollout.sh"
+# Early failures occur before live code or unit configuration changes and may
+# happen before a complete backup exists. Never use that backup for recovery.
+controller_lock_early_arm "$service"
+controller_lock_early_failure() {
+  local status=$?
+  trap - ERR
+  if ! controller_lock_early_recover "$service" "$controller_state_dir" "$remote_dir"; then
+    echo '早期部署恢复失败；服务状态需由运维检查' >&2
+  fi
+  exit "$status"
+}
+trap controller_lock_early_failure ERR
+# Keep a copy with the code backup so later public-check rollback uses the same
+# migration fence even after the staging tree has been removed.
+mkdir -p "$backup"
+cp "$code_stage/scripts/controller-lock-rollout.sh" "$backup/controller-lock-rollout.sh"
+controller_lock_prepare_upgrade "$service" "$controller_state_dir" "$remote_dir" "$backup" "$lock_upgrade_confirmed"
 # The state store deliberately refuses to create missing ancestors. Provision
 # its dedicated root explicitly so a first deployment on a clean host can
 # start without weakening the symlink/ownership checks of the store.
@@ -255,6 +279,7 @@ else
 fi
 
 rollback() {
+  controller_lock_before_rollback "$service" "$controller_state_dir" "$backup/code-js" || return
   if [[ -f "$backup/no-server" ]]; then rm -f "$remote_dir/server.js"; else cp -a "$backup/server.js" "$remote_dir/server.js"; fi
   rm -rf "$remote_dir/web/dist"
   if [[ ! -f "$backup/no-web-dist" ]]; then cp -a "$backup/web-dist" "$remote_dir/web/dist"; fi
@@ -295,6 +320,7 @@ rollback_on_error() {
   fi
   exit "$status"
 }
+controller_lock_early_armed=0
 trap rollback_on_error ERR
 
 install_db() {
@@ -408,6 +434,8 @@ case "$backup" in
   *) echo "拒绝未知备份目录：$backup" >&2; exit 1 ;;
 esac
 test -d "$backup"
+source "$backup/controller-lock-rollout.sh"
+controller_lock_before_rollback "$service" /var/lib/pinvou-remote-relay/state "$backup/code-js"
 if [[ -f "$backup/no-server" ]]; then rm -f "$remote_dir/server.js"; else test -f "$backup/server.js"; cp -a "$backup/server.js" "$remote_dir/server.js"; fi
 rm -rf "$remote_dir/web/dist"
 if [[ ! -f "$backup/no-web-dist" ]]; then test -d "$backup/web-dist"; cp -a "$backup/web-dist" "$remote_dir/web/dist"; fi

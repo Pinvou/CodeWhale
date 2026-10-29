@@ -13,3 +13,11 @@ Relay 的当前周期以 `min(last_liveness_a.at, last_liveness_b.at) + 30000` �
 共享 B 心跳夹具是父仓内 Rust 生产发送格式与 Relay 接收契约的跨端测试，依赖完整 monorepo checkout；不宣称复制 Relay 子目录即可独立运行整套宿主契约。
 
 本文说明代码边界与测试范围；实际通过数量以当前提交的测试输出和 CI 为准，不代替双 Windows 真实部署验收。CodeWhale #97 合并依赖仍单独保留，本轮不修改底座 gitlink。
+
+## A 端单次建连截止
+
+专用 controller transport 每次建连使用固定 10 秒的单调绝对截止，覆盖请求构造、DNS、TCP、TLS 和 WebSocket upgrade，阶段进度不延长本次期限。Stop 优先于到期，到期优先于接纳连接结果；一次同步 poll 内跨过截止或触发 Stop 后返回的 socket 也直接丢弃。该机制依赖异步任务继续被调度，不承诺抢占同步阻塞或操作系统解析器内部工作。
+
+尚未完成 upgrade 的尝试到期后，仅在 transport 内执行原指数退避并重试，保留尚未上 wire 的握手队列，不发送会结束 A 首次握手的 `Disconnected`。确定的快速建连错误和已连接 socket 的断开仍遵循原错误语义。首次连接的 40 秒总期限及已冻结的恢复证据截止保持不变；Stop、总期限失败及被替换操作不会因此取得新的恢复预算。
+
+回归使用生产等待函数和真实 loopback WebSocket，覆盖升级挂起、退避、队列保留及 Stop。真实 A 端口回归组合 `run_controlling_connection`、生产 connector、验签夹具及真实 B 握手状态机，检查重试后安装租约并投影 Connected；Relay 网络端点与远端设备由测试夹具替代，不代表真实双设备或部署验收。退避权威信号、公平性和任务异常监督仍由 #1490 的其余验收追踪，本批不关闭父 issue。

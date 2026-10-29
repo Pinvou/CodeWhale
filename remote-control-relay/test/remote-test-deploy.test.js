@@ -153,6 +153,8 @@ test("remote-test archive uses the script's actual complete runtime module selec
   t.after(() => rmSync(fixtureRoot, { recursive: true, force: true }));
   const fixtureRelay = join(fixtureRoot, "remote-control-relay");
   mkdirSync(join(fixtureRelay, "web", "dist"), { recursive: true });
+  mkdirSync(join(fixtureRelay, "scripts"));
+  copyFileSync(join(relayDir, "scripts/controller-lock-rollout.sh"), join(fixtureRelay, "scripts/controller-lock-rollout.sh"));
   for (const file of [...readdirSync(relayDir).filter((entry) => entry.endsWith(".js")), "package.json", "package-lock.json", "web/stats.html"]) {
     copyFileSync(join(relayDir, file), join(fixtureRelay, file));
   }
@@ -179,7 +181,7 @@ test("remote-test archive uses the script's actual complete runtime module selec
   for (const file of readdirSync(relayDir).filter((entry) => entry.endsWith(".js"))) {
     assert.ok(files.has(file), `runtime module missing from actual archive: ${file}`);
   }
-  for (const file of ["behavior-telemetry-schema.js", "docs/schemas/behavior-telemetry-v1.schema.json", "docs/schemas/behavior-telemetry-registries.json"]) {
+  for (const file of ["behavior-telemetry-schema.js", "scripts/controller-lock-rollout.sh", "docs/schemas/behavior-telemetry-v1.schema.json", "docs/schemas/behavior-telemetry-registries.json"]) {
     assert.ok(files.has(file), `schema dependency missing from actual archive: ${file}`);
   }
 });

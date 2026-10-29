@@ -922,26 +922,35 @@ function savePinvouSceneEventsForSession(sid, events) { return pinvouSharedweb()
   function reportSidecarReadFailure(kind, sid, error) {
     console.warn(`[sidecar] ${kind} read failed for session ${sid}; falling back to the local cache`, error);
   }
+  function reportSidecarWriteFailure(kind, sid, error) {
+    console.warn(`[sidecar] ${kind} migration write failed for session ${sid}; keeping the local cache`, error);
+  }
   async function syncPinvouSceneEventsForSession(sid) {
     var cached = loadPinvouSceneEventsForSession(sid);
     if (!sid) return cached;
+    var remote;
     try {
-      var remote = normalizePinvouSceneEvents(
+      remote = normalizePinvouSceneEvents(
         await invoke("get_session_pinvou_scene_events", { sessionId: sid })
       );
-      if (remote.length) {
-        try {
-          window.localStorage.setItem(pinvouSceneStorageKey(sid), JSON.stringify(remote));
-        } catch (_) {}
-        return remote;
-      }
-      if (cached.length) {
-        await invoke("save_session_pinvou_scene_events", { sessionId: sid, events: cached });
-      }
-      return cached;
-    } catch (_) {
+    } catch (error) {
+      reportSidecarReadFailure("pinvou scene", sid, error);
       return cached;
     }
+    if (remote.length) {
+      try {
+        window.localStorage.setItem(pinvouSceneStorageKey(sid), JSON.stringify(remote));
+      } catch (_) { /* fall back to the remote data when the localStorage write fails */ }
+      return remote;
+    }
+    if (cached.length) {
+      try {
+        await invoke("save_session_pinvou_scene_events", { sessionId: sid, events: cached });
+      } catch (error) {
+        reportSidecarWriteFailure("pinvou scene", sid, error);
+      }
+    }
+    return cached;
   }
   // Persona events and pinvou reviews have no local migration cache, but the
   // backend now fails a corrupt sidecar explicitly (missing stays []). Degrade
@@ -981,6 +990,10 @@ function isProtectedScheduledBuffer(id, buf) { return pinvouSharedweb().isProtec
       var buf = sessionStates[id];
       if (!buf || id === keepId || isProtectedScheduledBuffer(id, buf)) continue;
       if (!stashEvictedSessionDraft(id, buf)) continue; // draft cannot be safely retained; keep the buffer
+      // Defense in depth: protection predicates make live stream timers
+      // unreachable here today, but a stray timer must not outlive its
+      // evicted buffer (purgeSessionBuffer does the same).
+      cancelStreamTimers(id);
       delete sessionStates[id];
       delete turnUsageDirty[id];
       // personaPlaceholderTitles is lightweight session metadata (the marker
@@ -1020,6 +1033,10 @@ function touchSessionBuffer(id, buf, scheduled) { return pinvouSharedweb().touch
       var buf = sessionStates[id];
       if (!buf || id === keepId || isProtectedScheduledBuffer(id, buf)) continue;
       if (!stashEvictedSessionDraft(id, buf)) continue; // draft cannot be safely retained; keep the buffer
+      // Defense in depth: protection predicates make live stream timers
+      // unreachable here today, but a stray timer must not outlive its
+      // evicted buffer (purgeSessionBuffer does the same).
+      cancelStreamTimers(id);
       delete sessionStates[id];
       delete turnUsageDirty[id];
       // personaPlaceholderTitles survives capacity eviction (see the
@@ -3285,6 +3302,7 @@ function formatAttachmentDisplayText(text, attachments) { return pinvouSharedweb
           state.chatItems = state.chatItems.filter(function (item) {
             return item.id !== submittedUserItemId && item.id !== submittedStreamId;
           });
+          flushPendingStreamRender(); // admission reject mid-stream: emit final html before the reset
           resetPendingAssistant();
           state.busy = false;
           stopThinking();
@@ -4764,6 +4782,10 @@ function presentArtifactAbsPath(toolResultContent, fallbackPath) { return pinvou
       var interrupted = terminalStatus === "interrupted" ||
         terminalStatus === "cancelled" || terminalStatus === "canceled";
       flushPendingStreamRender();
+      // The trailing notify() only cancels the visible session's frame; a
+      // background session's terminal must cancel its own pending frame or a
+      // redundant late round fires within 32ms.
+      cancelPendingStreamNotify(sid);
       if (interrupted) preserveInterruptedAssistantPresentation();
       else flushAssistantMessageToHistory();
       // Refresh artifacts written in this turn in place when already presented.
@@ -5279,6 +5301,7 @@ async function revealModelApiKey(id) { return pinvouSharedweb().revealModelApiKe
   async function setActiveModel(id) {
     await invoke("set_active_model", { id: id });
     await loadModels();
+    await loadSettings();
     await loadEffectiveModelConfig();
   }
   // 读某会话当前绑定的模型 id(切会话时刷新 chip)。

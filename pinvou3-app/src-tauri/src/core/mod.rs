@@ -4,6 +4,7 @@ pub mod model_context;
 pub mod model_endpoint;
 pub(crate) mod model_wire;
 pub(crate) mod panic_hooks;
+pub(crate) mod panic_scope;
 pub(crate) mod reaper;
 pub mod reasoning_dialect;
 pub mod session_mode;
