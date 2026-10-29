@@ -40,11 +40,14 @@ jobs:
         # 依赖审查动作依赖仓库设置中的 Dependency graph（私有仓库还需 GitHub
         # Advanced Security）。当前仓库未开启该设置时，动作会直接报
         # "Dependency review is not supported on this repository" 并把整个
-        # job 打红——这是能力缺失而非依赖问题。在组织开启
-        # Settings → Code security → Dependency graph 之前，让本 step 以
-        # 告警模式运行（动作自身仍会把扫描结论打印到日志）；开启后必须
-        # 移除 continue-on-error，恢复强制门禁。
-        continue-on-error: true
+        # job 打红——这是能力缺失而非依赖问题。降级由仓库 variable
+        # DEPENDENCY_REVIEW_WARN_ONLY 门控：未设置或非 'false' 时以告警模式
+        # 运行（动作自身仍会把扫描结论打印到日志）；组织开启
+        # Settings → Code security → Dependency graph 后，把该 variable 设为
+        # 'false' 即恢复强制门禁，无需改代码。禁止改回无条件
+        # continue-on-error：那会在依赖图开启后把真实 high 级漏洞静默吞成
+        # 告警（scripts/tests/test_ci_gate_policy.py 已钉住该门控形态）。
+        continue-on-error: ${{ vars.DEPENDENCY_REVIEW_WARN_ONLY != 'false' }}
         uses: actions/dependency-review-action@a1d282b36b6f3519aa1f3fc636f609c47dddb294 # v5.0.0
         with:
           fail-on-severity: high
