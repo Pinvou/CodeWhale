@@ -40,42 +40,8 @@ jobs:
   verify-connectors:
     strategy:
       fail-fast: false
-      matrix:
-        include:
-          - platform: linux-arm64
-            runs-on: ubuntu-22.04-arm
-            resources: linux/aarch64
-            suffix: ""
-            can_run: true
-          - platform: linux-x64
-            runs-on: ubuntu-22.04
-            resources: linux/x86_64
-            suffix: ""
-            can_run: true
-          - platform: darwin-arm64
-            runs-on: macos-15
-            resources: macos/aarch64
-            suffix: ""
-            can_run: true
-          - platform: darwin-x64
-            # macos-15-intel: the standard Intel image (still free for public
-            # repos) actually executes the pinned x86_64 CLIs. On the arm64
-            # image this leg could only sha256/file-check them (can_run was
-            # false); Rosetta is not guaranteed on hosted images, so a real
-            # Intel runner is the honest way to run them. Transition note:
-            # Intel macOS images end with the macos-15 image generation
-            # (~2027) — before that sunset, re-home this leg (arm64 image
-            # once Rosetta is guaranteed, or fold the execution check away).
-            runs-on: macos-15-intel
-            resources: macos/x86_64
-            suffix: ""
-            can_run: true
-          - platform: windows-x64
-            runs-on: windows-latest
-            resources: windows/x86_64
-            suffix: .exe
-            can_run: true
-    runs-on: ${{ matrix.runs-on }}
+      matrix: ${{ fromJSON(vars.PINVOU_WINDOWS_MAC_ENABLED != 'false' && '{"include":[{"platform":"linux-arm64","runs-on":"ubuntu-22.04-arm","resources":"linux/aarch64","suffix":"","can_run":true},{"platform":"linux-x64","runs-on":"ubuntu-22.04","resources":"linux/x86_64","suffix":"","can_run":true},{"platform":"darwin-arm64","runs-on":"macos-15","resources":"macos/aarch64","suffix":"","can_run":true},{"platform":"darwin-x64","runs-on":"macos-15-intel","resources":"macos/x86_64","suffix":"","can_run":true},{"platform":"windows-x64","runs-on":"windows-latest","resources":"windows/x86_64","suffix":".exe","can_run":true}]}' || '{"include":[{"platform":"linux-arm64","runs-on":"ubuntu-22.04-arm","resources":"linux/aarch64","suffix":"","can_run":true},{"platform":"linux-x64","runs-on":"ubuntu-22.04","resources":"linux/x86_64","suffix":"","can_run":true}]}') }}
+    runs-on: ${{ matrix.runs-on == 'ubuntu-22.04' && fromJSON(vars.PINVOU_LINUX_RUNNER || '["ubuntu-22.04"]') || matrix.runs-on }}
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@v7
@@ -83,7 +49,7 @@ jobs:
       - name: Set up zram and swap
         if: runner.os == 'Linux'
         # 内存扩容为尽力而为:超时/失败只告警不阻断(回退 runner 默认内存)。
-        run: timeout --kill-after=15 240 sudo --preserve-env=GITHUB_ACTIONS,PINVOU3_CI_DISABLE_ZRAM bash "${{ github.workspace }}/scripts/ci-memory-setup.sh" || echo "::warning::ci-memory-setup 未完成,继续使用 runner 默认内存"
+        run: timeout --kill-after=15 240 sudo --preserve-env=GITHUB_ACTIONS,PINVOU3_CI_DISABLE_ZRAM,RUNNER_ENVIRONMENT bash "${{ github.workspace }}/scripts/ci-memory-setup.sh" || echo "::warning::ci-memory-setup 未完成,继续使用 runner 默认内存"
 
       - name: Download pinned connector binaries
         # windows runner 默认 pwsh 无法直接执行 .sh,必须显式走 bash。
