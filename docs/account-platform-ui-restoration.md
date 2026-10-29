@@ -26,3 +26,5 @@
 Account 的 `TestRestoredAdminReadsWithPublicMigrationsAndRuntimeActor` 使用公开迁移和实际非超级用户运行角色验证读取结果，并检查读取不新增审计或事件；必须使用专用的隔离 PostgreSQL 实例。
 
 发布前还应运行受影响的个人、组织、财务、审批、认证回归及架构、国际化检查，并按仓库流程完成独立审核。生产验收使用只读检查，真实支付、退款和账户注销不能作为自动冒烟动作。
+
+构建后运行 `npm --prefix pinvou3-app run audit:compat -- --portal-only`，校验三个 Portal 入口、实际 JS/CSS、内联脚本和本地引用；默认完整兼容审计也包含 Portal。兼容下限沿用项目 Safari 14，带 CSS 变量的固定定位使用明确的物理边界。
