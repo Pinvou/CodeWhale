@@ -1633,6 +1633,14 @@ impl ModelManager {
         // 代价是提权路径失去了断点续传的自动重试。可以接受：install_engine 拉的是
         // 容器镜像，docker 自己就有分层重试和断点续传；真正需要 30 次续传的是
         // download_model 那条几百 GB 的路，它不提权。
+        //
+        // 「拉的是容器镜像」这个假设在 2026-10-29 被 cube-5059 打破：驭光
+        // （tachyon-serve）的 install_engine 是 curl 拉 230MB 的 engine.tar.gz。
+        // 设备换 IP 后出网走客户自装的代理（Clash TUN）路径劣化，普通用户身份
+        // curl 92（HTTP/2 流被 CANCEL）→ 落进兜底提权整段重跑 → root 身份再
+        // curl 18（partial file）→ 终态失败，全程没有一次续传。所以**普通用户
+        // 身份**这条路上的传输中断改为自动断点续传（见下面那个分支）；提权那条
+        // 仍单次——pkexec 授权是一次性的，续传循环弹 N 个密码框比失败本身更糟。
         if need_root {
             return self.run_card_script(source, "install_engine", env, on_line, control, true);
         }
@@ -1659,6 +1667,13 @@ impl ModelManager {
                      或在有外网的机器上 docker save 导出引擎镜像，用 U 盘拷到本机 docker load 导入后再试。"
                 )))
             }
+            // 传输中断（curl 18/92/连接被重置）：路通着但断流，断点就在磁盘上。
+            // 既不是权限问题（提权解决不了，别弹框），也不该终止（重跑即续传），
+            // 按 download_model 同款策略自动续传。见函数头 2026-10-29 复盘。
+            Err(e) if Self::transfer_interrupted_failure(&e.to_string()) => {
+                on_line("失败原因是传输中断（不是权限问题），不弹授权窗口，自动从断点续传…");
+                self.install_engine_resume_after_interrupt(source, env, on_line, control, e)
+            }
             Err(e) => {
                 eprintln!("[download] 普通用户身份安装引擎失败，改用管理员权限重试：{e}");
                 on_line(
@@ -1666,6 +1681,73 @@ impl ModelManager {
                 );
                 // 同样只跑一次：这是**兜底提权**，不是重试循环。理由同上面那段。
                 self.run_card_script(source, "install_engine", env, on_line, control, true)
+            }
+        }
+    }
+
+    /// install_engine 专用的断点续传循环：只在错误**仍是传输中断**时接着跑。
+    ///
+    /// 为什么不直接复用 [`Self::run_card_script_with_retry`]：那个循环对一切
+    /// 非致命错误都续传，而这里非传输类失败（权限、磁盘、脚本自身 bug）要立刻
+    /// 上抛，让下一次用户操作重新走一遍分类——该提权提权、该报错报错，不能拿
+    /// 传输中断的耐心硬扛。循环骨架（上限、退避、取消响应、每轮日志）与那边
+    /// 一致，改动时两边同步。
+    fn install_engine_resume_after_interrupt(
+        &self,
+        source: &ScriptsSource,
+        env: &HashMap<String, String>,
+        on_line: &mut dyn FnMut(&str),
+        control: script_runner::RunControl,
+        first_error: ModelManagerError,
+    ) -> Result<Vec<String>, ModelManagerError> {
+        let mut attempt = 0u32;
+        let mut error = first_error;
+        loop {
+            // 致命错误与用户取消按原样上抛，一次都不多跑。首个错误在进循环前
+            // 已被调用方分过类（致命/网络不可达都到不了这里），这道检查防的是
+            // 续传中途换出的新致命错误。
+            if Self::is_fatal_failure(&error.to_string()) || control.cancelled() {
+                return Err(error);
+            }
+            attempt += 1;
+            if attempt > DOWNLOAD_RESUME_LIMIT {
+                return Err(ModelManagerError::new(format!(
+                    "{}\n\n已自动续传 {DOWNLOAD_RESUME_LIMIT} 次仍未完成。\
+                     已下载的部分都在本地，重新点击「下载」会从断点继续，不会重头开始。",
+                    error.to_string()
+                )));
+            }
+            on_line(&format!(
+                "传输中断（{}），第 {attempt}/{DOWNLOAD_RESUME_LIMIT} 次从断点续传…",
+                error.to_string().lines().next().unwrap_or("原因未知")
+            ));
+            // 指数退避封顶 16 秒，取消信号分片可中断，同 run_card_script_with_retry
+            let backoff = Duration::from_secs(2u64.saturating_pow(attempt.min(4)));
+            let deadline = Instant::now() + backoff;
+            while Instant::now() < deadline {
+                if control.cancelled() {
+                    return Err(error);
+                }
+                std::thread::sleep(Duration::from_millis(200));
+            }
+            match self.run_card_script(
+                source,
+                "install_engine",
+                env,
+                on_line,
+                control.clone(),
+                false,
+            ) {
+                Ok(lines) => return Ok(lines),
+                // 仍是传输中断 → 记下错误进下一轮；换了个不相干的新错误 →
+                // 按原样上抛，交回上层分类处理
+                Err(e) => {
+                    if Self::transfer_interrupted_failure(&e.to_string()) {
+                        error = e;
+                    } else {
+                        return Err(e);
+                    }
+                }
             }
         }
     }
@@ -1779,6 +1861,32 @@ impl ModelManager {
             "连接超时",
             "网络连接失败",
             "请检查设备能不能访问外网",
+        ];
+        let lowered = msg.to_lowercase();
+        MARKERS.iter().any(|k| lowered.contains(k))
+    }
+
+    /// 传输中断类失败：下载**已经在传**、中途被掐断（curl 18/92、连接被重置）。
+    ///
+    /// 与 [`Self::network_unreachable_failure`] 的分工：那边是"路不通"（连不上、
+    /// 解析不了），重试无意义，治法是让用户换网络；这边是"路通着但断流"，断点
+    /// 就在磁盘上，重跑脚本即从断点续传。两类都不配触发提权。
+    ///
+    /// 2026-10-29 cube-5059 实锤：换 IP 后出网走客户自装的代理（Clash TUN），
+    /// 路径劣化成 14KB/s，驭光引擎包（curl 拉的 230MB tarball，不是 docker
+    /// 镜像）先 curl 92（HTTP/2 流被 CANCEL）、兜底提权整段重跑又 curl 18
+    /// （partial file）后终态失败——三次全是传输中断，全都有断点可续。
+    pub(crate) fn transfer_interrupted_failure(msg: &str) -> bool {
+        // 小写比对：curl 原文的 "HTTP/2"、"Transferred" 都在句中大写。
+        const MARKERS: &[&str] = &[
+            // 卡片脚本 humanize 后的中文形态（驭光 install_engine 自己打印的）
+            "curl 退出码 18",
+            "curl 退出码 92",
+            // curl 原文（卡片没 humanize 时直接透出）
+            "transferred a partial file",
+            "http/2 stream",
+            // 同族中断：连接被对端重置（curl 56 / docker read reset）
+            "connection reset by peer",
         ];
         let lowered = msg.to_lowercase();
         MARKERS.iter().any(|k| lowered.contains(k))
@@ -4672,6 +4780,45 @@ mod tests {
         assert!(!ModelManager::network_unreachable_failure(
             "脚本执行失败（退出码 2）：some card-specific error"
         ));
+    }
+
+    /// 传输中断（cube-5059 真机案例，2026-10-29）：换 IP 后出网走代理劣化，
+    /// 驭光引擎包 curl 92 → 兜底提权重跑 → curl 18 → 终态失败。三类判定必须
+    /// 同时成立：是传输中断、不致命、也不是"网络不可达"（治法不同——这边
+    /// 该静默续传，那边该提示换网络）。样本取自该真机 run log 原文。
+    #[test]
+    fn transfer_interrupts_resume_instead_of_escalate_or_die() {
+        for msg in [
+            // .59 run log 原文：卡片脚本 humanize 后的 curl 18
+            "脚本执行失败（退出码 1）：引擎包还没下完整（curl 退出码 18）。已下好的部分保留在 /root/.local/share/local-model-manager/engines/tachyon-serve/engine.tar.gz.ea7605.part，再点一次「安装引擎」会从断点接着传。",
+            // curl 原文（卡片没 humanize 时直接透出）
+            "脚本执行失败（退出码 18）：curl: (18) Transferred a partial file",
+            "脚本执行失败（退出码 92）：curl: (92) HTTP/2 stream 1 was not closed cleanly: CANCEL (err 8)",
+            // 同族：连接被对端重置（curl 56）
+            "脚本执行失败（退出码 56）：脚本返回错误（curl: (56) Recv failure: Connection reset by peer）",
+        ] {
+            assert!(
+                ModelManager::transfer_interrupted_failure(msg),
+                "应判为传输中断（自动续传）：{msg}"
+            );
+            assert!(!ModelManager::is_fatal_failure(msg), "不该判致命：{msg}");
+            assert!(
+                !ModelManager::network_unreachable_failure(msg),
+                "不该判网络不可达（治法是续传不是提示换网）：{msg}"
+            );
+        }
+        // 反例：远端真没有（HTTP 404）、权限不足、超时判死——都不是传输中断，
+        // 不许进续传循环
+        for msg in [
+            "脚本执行失败（退出码 22）：脚本返回错误（curl: (22) The requested URL returned error: 404 Not Found）",
+            "脚本执行失败（退出码 1）：权限不足",
+            "脚本执行超时：install_engine.sh（连续 300 秒没有任何新输出，判定为卡死）",
+        ] {
+            assert!(
+                !ModelManager::transfer_interrupted_failure(msg),
+                "不该判传输中断：{msg}"
+            );
+        }
     }
 
     /// install_engine 是六个入口脚本里唯一会走 pkexec 的，所以只有它按
