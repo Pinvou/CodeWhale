@@ -3586,15 +3586,23 @@ fn scoped_mutation_paths_accept_absolute_targets_inside_the_workspace() {
     );
     let paths = mutation_paths("write", &json!({ "path": padded_absolute }), &workspace)
         .expect("a padded spelling still normalizes");
+    // The expected is the ledger's canonical frame of the raw spelling, built
+    // here independently of the code under test: backslashes fold to forward
+    // slashes and leading separators collapse into the single one the
+    // component join emits (a Windows verbatim `\\?\` prefix reduces to its
+    // literal `?` component), while the space-led first component survives
+    // verbatim — trimming would instead validate the unpadded absolute target
+    // the tool never touches.
+    let ledger_frame = canonical
+        .join(padded_relative_target)
+        .to_string_lossy()
+        .replace('\\', "/");
     assert_eq!(
         paths,
-        vec![format!(
-            "  {}",
-            canonical.join(padded_relative_target).to_string_lossy()
-        )],
-        "the claim lane judges the raw spelling: the padded path is not absolute, \
-         so it validates as the literal space-led components the tool would \
-         join onto the workspace"
+        vec![format!("  /{}", ledger_frame.trim_start_matches('/'))],
+        "the claim lane judges the raw spelling in the forward-slash ledger frame: \
+         the padded path is not absolute, so it validates as the literal \
+         space-led components the tool would join onto the workspace"
     );
 
     // A padded relative spelling keeps its literal form for the same
@@ -3618,6 +3626,24 @@ fn scoped_mutation_paths_accept_absolute_targets_inside_the_workspace() {
             "{path}: {err}"
         );
     }
+}
+
+/// The ledger frame's separator contract, pinned cross-platform: a
+/// Windows-spelled relative path folds to forward slashes and a padded
+/// spelling keeps its space-led first component. This is the contract the
+/// padded-path assertion above relies on for native-Windows equality, where
+/// a verbatim canonical path would otherwise never compare equal to the
+/// raw backslash spelling.
+#[test]
+fn normalize_claim_path_folds_backslashes_into_the_ledger_frame() {
+    assert_eq!(
+        normalize_claim_path(r"fixture\calc\tail.txt").expect("windows-spelled relative path"),
+        "fixture/calc/tail.txt"
+    );
+    assert_eq!(
+        normalize_claim_path(" fixture\\calc\\tail.txt").expect("padded windows spelling"),
+        " fixture/calc/tail.txt"
+    );
 }
 
 #[test]
@@ -13311,6 +13337,236 @@ async fn contended_shared_writer_refusal_names_blocking_peer_and_remediation() {
     assert!(
         !tmp.path().join("src/a2.txt").exists(),
         "the refused command must not have run"
+    );
+}
+
+/// The isolated lane carries the same contention premise as the shared one:
+/// the same-worktree admission chain lets several unrelated writers share ONE
+/// checkout on disjoint claims (overlapping same-root scopes are refused at
+/// admission, so a live peer here always holds a disjoint share), and an
+/// unbounded shell command cannot prove it stays inside the owner's share —
+/// so a live same-worktree peer blocks it, naming that peer. The old
+/// assumption "isolated means sole writer of the worktree" no longer holds
+/// once a worktree parent can fan children out into its own checkout.
+#[tokio::test]
+async fn same_worktree_disjoint_sibling_blocks_unbounded_shell() {
+    let tmp = tempdir().expect("tempdir");
+    let worktree = tmp.path().join("wt-blocked");
+    std::fs::create_dir_all(worktree.join("a-dir")).expect("worktree layout");
+    let canonical_worktree = worktree.canonicalize().expect("canonical worktree");
+    let manager = new_shared_subagent_manager(tmp.path().to_path_buf(), 4);
+    {
+        let mut guard = manager.write().await;
+        assert_eq!(guard.insert_test_running_agent("a", &worktree), "agent_a");
+        assert_eq!(guard.insert_test_running_agent("b", &worktree), "agent_b");
+        let live: HashSet<String> = ["agent_a".to_string(), "agent_b".to_string()]
+            .into_iter()
+            .collect();
+        for (owner, root) in [("agent_a", "a-dir"), ("agent_b", "b-dir")] {
+            guard
+                .coordination
+                .register_claim(
+                    WriteScopeClaim {
+                        owner: owner.into(),
+                        roots: vec![root.into()],
+                        exact_files: vec![],
+                        contracts: vec![],
+                    },
+                    true,
+                    Some(canonical_worktree.to_string_lossy().into_owned()),
+                    &[],
+                    |candidate| live.contains(candidate),
+                )
+                .expect("disjoint same-worktree claims admit both live writers");
+        }
+    }
+    let registry = contended_builder_registry(&manager, &worktree, "agent_a");
+    let err = registry
+        .execute(
+            "agent_a",
+            "Bash",
+            json!({"action": "run", "command": "touch a-dir/unbounded.txt"}),
+        )
+        .await
+        .expect_err("unbounded shell against a live same-worktree peer must be refused")
+        .to_string();
+    assert!(
+        err.contains("cannot prove a bounded file target"),
+        "refusal kind: {err}"
+    );
+    assert!(
+        err.contains("this same worktree") && err.contains("agent_b"),
+        "refusal must name the same-worktree blocking peer: {err}"
+    );
+    assert!(
+        !worktree.join("a-dir/unbounded.txt").exists(),
+        "the refused command must not have run"
+    );
+}
+
+/// The ancestor chain keeps its unbounded shell inside the shared worktree:
+/// admission deliberately admits a descendant overlapping its ancestors (one
+/// delegated work unit), so the parent's live claim must not gate the child
+/// the way an unrelated sibling does. Dropping the exemption turns this into
+/// a contention refusal and a delegation chain could never run ordinary
+/// shell work at all.
+#[tokio::test]
+async fn same_worktree_ancestor_chain_keeps_unbounded_shell() {
+    let tmp = tempdir().expect("tempdir");
+    let coordination_root = tmp.path().join("workspace");
+    let worktree = tmp
+        .path()
+        .join(".codewhale-worktrees")
+        .join("workspace")
+        .join("codex-agent-parent");
+    std::fs::create_dir_all(worktree.join("c-dir")).expect("worktree layout");
+    let manager = new_shared_subagent_manager(coordination_root, 4);
+    let claim = |root: &str| WriteScopeClaim {
+        owner: String::new(),
+        roots: vec![root.into()],
+        exact_files: vec![],
+        contracts: vec![],
+    };
+
+    let mut guard = manager.write().await;
+    let mut parent_runtime = stub_runtime();
+    parent_runtime.manager = Arc::clone(&manager);
+    parent_runtime.context = ToolContext::new(&worktree);
+    let parent = guard
+        .spawn_background_with_assignment_options(
+            Arc::clone(&manager),
+            parent_runtime,
+            FleetRole::Builder,
+            "work in the worktree".into(),
+            make_assignment(),
+            Some(vec![]),
+            SubAgentSpawnOptions {
+                name: Some("shell-worktree-parent".into()),
+                write_claim: Some(claim(".")),
+                isolated_worktree: true,
+                ..Default::default()
+            },
+        )
+        .expect("worktree parent admitted");
+    // Live parent: otherwise the peer never exists and the test passes with
+    // the exemption removed (the round-4 mutation lesson).
+    if let Some(agent) = guard.agents.get_mut(&parent.agent_id) {
+        agent.status = SubAgentStatus::Running;
+    }
+    let child = {
+        let mut child_runtime = stub_runtime();
+        child_runtime.manager = Arc::clone(&manager);
+        child_runtime.context = ToolContext::new(&worktree);
+        child_runtime.parent_agent_id = Some(parent.agent_id.clone());
+        guard
+            .spawn_background_with_assignment_options(
+                Arc::clone(&manager),
+                child_runtime,
+                FleetRole::Builder,
+                "run shell in the delegated share".into(),
+                make_assignment(),
+                Some(vec![]),
+                SubAgentSpawnOptions {
+                    name: Some("shell-child".into()),
+                    write_claim: Some(claim("c-dir")),
+                    ..Default::default()
+                },
+            )
+            .expect("a disjoint descendant of the live worktree parent is admitted")
+    };
+    drop(guard);
+
+    let registry = contended_builder_registry(&manager, &worktree, &child.agent_id);
+    registry
+        .execute(
+            &child.agent_id,
+            "Bash",
+            json!({"action": "run", "command": "touch c-dir/chain.txt"}),
+        )
+        .await
+        .unwrap_or_else(|err| {
+            panic!(
+                "the parent's live claim must not gate the delegated child's unbounded shell: {err}"
+            )
+        });
+    assert!(
+        worktree.join("c-dir/chain.txt").exists(),
+        "the admitted command must actually have run"
+    );
+}
+
+/// Liveness and the worktree boundary stay load-bearing in the isolated gate:
+/// a settled sibling's claim cannot block (a terminal owner cannot write), and
+/// a peer keyed on a DIFFERENT worktree never shared this checkout.
+#[tokio::test]
+async fn same_worktree_gate_ignores_settled_and_foreign_worktree_peers() {
+    let tmp = tempdir().expect("tempdir");
+    let worktree = tmp.path().join("wt-live");
+    let other_worktree = tmp.path().join("wt-other");
+    std::fs::create_dir_all(worktree.join("a-dir")).expect("worktree layout");
+    std::fs::create_dir_all(&other_worktree).expect("other worktree layout");
+    let canonical_worktree = worktree.canonicalize().expect("canonical worktree");
+    let canonical_other = other_worktree.canonicalize().expect("canonical other");
+    let manager = new_shared_subagent_manager(tmp.path().to_path_buf(), 4);
+    {
+        let mut guard = manager.write().await;
+        assert_eq!(guard.insert_test_running_agent("a", &worktree), "agent_a");
+        assert_eq!(guard.insert_test_running_agent("b", &worktree), "agent_b");
+        assert_eq!(guard.insert_test_running_agent("c", &worktree), "agent_c");
+        let live: HashSet<String> = ["agent_a".to_string(), "agent_b".to_string()]
+            .into_iter()
+            .collect();
+        for (owner, scope, root) in [
+            (
+                "agent_a",
+                "a-dir",
+                canonical_worktree.to_string_lossy().into_owned(),
+            ),
+            (
+                "agent_b",
+                "b-dir",
+                canonical_worktree.to_string_lossy().into_owned(),
+            ),
+            (
+                "agent_c",
+                ".",
+                canonical_other.to_string_lossy().into_owned(),
+            ),
+        ] {
+            guard
+                .coordination
+                .register_claim(
+                    WriteScopeClaim {
+                        owner: owner.into(),
+                        roots: vec![scope.into()],
+                        exact_files: vec![],
+                        contracts: vec![],
+                    },
+                    true,
+                    Some(root),
+                    &[],
+                    |candidate| live.contains(candidate),
+                )
+                .expect("same-worktree disjoint-root claims and a foreign-worktree claim admit");
+        }
+        if let Some(agent) = guard.agents.get_mut("agent_b") {
+            agent.status = SubAgentStatus::Completed;
+        }
+    }
+    let registry = contended_builder_registry(&manager, &worktree, "agent_a");
+    registry
+        .execute(
+            "agent_a",
+            "Bash",
+            json!({"action": "run", "command": "touch a-dir/kept.txt"}),
+        )
+        .await
+        .unwrap_or_else(|err| {
+            panic!("a settled sibling and a foreign-worktree peer must not gate the shell: {err}")
+        });
+    assert!(
+        worktree.join("a-dir/kept.txt").exists(),
+        "the admitted command must actually have run"
     );
 }
 

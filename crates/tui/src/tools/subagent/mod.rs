@@ -4245,6 +4245,48 @@ impl SubAgentManager {
             .collect()
     }
 
+    /// The live peers that gate an isolated `owner`'s unbounded mutation:
+    /// writers registered against the SAME worktree root, minus `owner`'s
+    /// ancestor chain.
+    ///
+    /// Admission already serializes same-root OVERLAPPING claims, so a live
+    /// same-root peer always holds a disjoint scope — and an unbounded command
+    /// cannot prove it stays inside `owner`'s share of the checkout, so it
+    /// must not run across that peer. This continues the shared-checkout
+    /// gate's premise through the isolated admission chain, which now admits
+    /// several unrelated writers into ONE worktree. The exemptions mirror
+    /// admission: an ancestor delegated the work downward, so it is exempt; a
+    /// peer keyed on a different worktree never shared this checkout; a
+    /// legacy row with no recorded root predates serialization and keeps the
+    /// documented never-contending footing; and liveness is the same single
+    /// predicate both gates (and claim admission) consult.
+    fn live_peer_same_worktree_claim_owners(&self, owner: &str) -> Vec<String> {
+        let Some(own) = self
+            .coordination
+            .write_claims
+            .iter()
+            .find(|record| record.claim.owner == owner && record.isolated_worktree)
+        else {
+            return Vec::new();
+        };
+        let Some(worktree_root) = own.worktree_root.as_deref() else {
+            return Vec::new();
+        };
+        let exempt = self.worktree_claim_exemptions(Some(owner));
+        self.coordination
+            .write_claims
+            .iter()
+            .filter(|record| {
+                record.claim.owner != owner
+                    && record.isolated_worktree
+                    && record.worktree_root.as_deref() == Some(worktree_root)
+                    && self.is_live_coordination_owner(&record.claim.owner)
+                    && !exempt.contains(&record.claim.owner)
+            })
+            .map(|record| record.claim.owner.clone())
+            .collect()
+    }
+
     /// Classify an agent by its `session_boot_id`: `true` when the
     /// agent was either (a) loaded from disk with no id, or (b) carries
     /// a different id than the manager's current boot. Filters
@@ -16227,7 +16269,7 @@ impl SubAgentToolRegistry {
                 }))
         {
             let manager = self.coordination_manager.read().await;
-            // Only a *contended* shared checkout needs this gate. The claim
+            // Only a *contended* checkout needs this gate. The claim
             // exists so concurrent children cannot overwrite each other; a lone
             // writer has no peer to collide with, and blocking it there bought
             // no safety while making a builder unable to run ordinary shell
@@ -16239,6 +16281,21 @@ impl SubAgentToolRegistry {
                 if !blocking_peers.is_empty() {
                     return Err(anyhow!(
                         "Tool {name} cannot prove a bounded file target, and another child is writing in this shared checkout (blocking peers: {}). Wait for the peer to finish, ask the parent to cancel it, run agents/coordinate action=release to clear a stale claim, or relaunch the children with worktree isolation.",
+                        blocking_peers.join(", ")
+                    ));
+                }
+            } else {
+                // The isolated lane carries the same premise: admission now
+                // lets several unrelated writers share one worktree on
+                // disjoint claims, and an unbounded command cannot prove it
+                // stays inside the owner's share, so a live same-worktree
+                // peer (ancestor chain exempt, exactly as at admission)
+                // blocks it too.
+                let blocking_peers =
+                    manager.live_peer_same_worktree_claim_owners(&self.owner_agent_id);
+                if !blocking_peers.is_empty() {
+                    return Err(anyhow!(
+                        "Tool {name} cannot prove a bounded file target, and another agent holds a write claim in this same worktree (blocking peers: {}). Wait for the peer to finish, ask the parent to cancel it, run agents/coordinate action=release to clear a stale claim, or relaunch the peers with separate worktrees.",
                         blocking_peers.join(", ")
                     ));
                 }

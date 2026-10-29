@@ -202,7 +202,12 @@ overlap its ancestors' (the work was delegated downward), but two unrelated
 descendants — parallel siblings — with overlapping scope contend, exactly as
 they would in the shared root. The exemption runs along the new claimant's
 ancestor chain only: a parent that later registers or expands an overlapping
-claim of its own is refused by its live descendant. Records persisted before
+claim of its own is refused by its live descendant. Shell work runs the same
+premise one gate deeper: a command the read-only classifier cannot prove
+bounded refuses while an unrelated live writer holds a claim in the same
+worktree, since it cannot prove it stays inside the claimant's share — the
+ancestor chain stays exempt, and a writer keyed on a different worktree is
+unaffected. Records persisted before
 claims carried a worktree key keep a never-contending footing. A resumed loop
 is only serialized against writers still live at resume time; the ledger does
 not surface what completed while it was parked, so re-read the affected paths

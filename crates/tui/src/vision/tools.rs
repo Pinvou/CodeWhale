@@ -94,12 +94,14 @@ impl ImageAnalyzeTool {
         // through a failed call to learn the relative form.
         let candidate = if image_path_buf.is_absolute() {
             // The same lexical traversal guard the relative branch applies
-            // (minus `RootDir`, which is inherent to an absolute spelling):
-            // judged before canonicalize so a non-existent escaping target
-            // gets the containment refusal too, not a resolve error.
+            // (minus `Prefix`/`RootDir`, which are inherent to a valid
+            // absolute spelling — a Windows drive or UNC path always
+            // carries a prefix): judged before canonicalize so a
+            // non-existent escaping target gets the containment refusal
+            // too, not a resolve error.
             if image_path_buf
                 .components()
-                .any(|c| matches!(c, Component::Prefix(_) | Component::ParentDir))
+                .any(|c| matches!(c, Component::ParentDir))
             {
                 return Err(ToolError::execution_failed(
                     "image_path must resolve within the workspace and cannot escape it.",
@@ -644,6 +646,54 @@ mod tests {
         assert!(
             err.to_string().contains("within the workspace"),
             "the containment message fires even when canonicalize would fail: {err}"
+        );
+    }
+
+    /// Windows absolute spellings of the same in-workspace file: a
+    /// drive-absolute path and the canonical verbatim (`\\?\`) form both
+    /// necessarily carry a `Prefix` component, so the lexical guard must
+    /// not treat the prefix as an escape attempt — containment stays with
+    /// the canonicalized check, including the outside-workspace negative.
+    /// (Runs natively on Windows only; the non-gated test above exercises
+    /// the same admission with whatever absolute shape the platform
+    /// produces.)
+    #[cfg(windows)]
+    #[test]
+    fn resolve_image_path_accepts_windows_absolute_spellings_inside_the_workspace() {
+        let tmp = tempdir().expect("tempdir");
+        let attachments = tmp.path().join("attachments").join("computer_use");
+        std::fs::create_dir_all(&attachments).expect("attachments dir");
+        let image = attachments.join("shot.png");
+        std::fs::write(&image, b"not a real png").expect("fixture");
+        let canonical_workspace = tmp.path().canonicalize().expect("canonical workspace");
+
+        // Drive-absolute (`C:\…`), the shape screenshot receipts hand over.
+        let via_drive = ImageAnalyzeTool::resolve_image_path(tmp.path(), &image.to_string_lossy())
+            .expect("drive-absolute in-workspace path resolves");
+        assert!(via_drive.starts_with(&canonical_workspace));
+
+        // Canonical verbatim (`\\?\C:\…`), the shape `canonicalize` itself
+        // returns.
+        let verbatim = canonical_workspace
+            .join("attachments")
+            .join("computer_use")
+            .join("shot.png");
+        let via_verbatim =
+            ImageAnalyzeTool::resolve_image_path(tmp.path(), &verbatim.to_string_lossy())
+                .expect("verbatim in-workspace path resolves");
+        assert_eq!(via_verbatim, via_drive);
+
+        // The outside-workspace negative survives the prefix admission: a
+        // real file outside the workspace still gets the containment
+        // refusal, not a lexical one.
+        let outside = ImageAnalyzeTool::resolve_image_path(
+            tmp.path(),
+            r"C:\Windows\System32\drivers\etc\hosts",
+        )
+        .expect_err("absolute path outside the workspace must reject");
+        assert!(
+            outside.to_string().contains("within the workspace"),
+            "{outside}"
         );
     }
 
