@@ -259,7 +259,7 @@ function takeStartupCleanup() {
  * `scan_dirs` 是只读的，含内置位置（当前权重目录、`~/models`、下载/桌面）和当前
  * 挂着的 U 盘；`import_scan_dirs` 才是用户能编辑的那份补充。两者分开是因为用户
  * 真正要问的是「下载前到底找了哪些地方」，只给可编辑的那份答不了这个问题。
- * @returns {Promise<{models_dir:string, import_scan_dirs:string[], scan_dirs:string[], free_bytes:number|null}>} 当前存储设置。
+ * @returns {Promise<{models_dir:string, import_scan_dirs:string[], scan_dirs:string[], free_bytes:number|null, startup_update_check_enabled:boolean}>} 当前存储设置。
  */
 function fetchStorageSettings() {
   return invokeTauri('model_store_storage_settings');
@@ -270,11 +270,11 @@ function fetchStorageSettings() {
  *
  * **不会搬运已下载的权重**：几十上百 GB 的移动可能跨盘、可能中途断电，那得是
  * 一件有独立进度和失败处理的事，不能藏在一次保存设置里悄悄发生。
- * @param {{modelsDir?:string|null, importScanDirs?:string[]|null}} patch - 要改的项。
+ * @param {{modelsDir?:string|null, importScanDirs?:string[]|null, startupUpdateCheckEnabled?:boolean|null}} patch - 要改的项。
  * @returns {Promise<object>} 保存后的设置，形状同 fetchStorageSettings。
  */
-function saveStorageSettings({ modelsDir = null, importScanDirs = null } = {}) {
-  return invokeTauri('model_store_set_storage_settings', { modelsDir, importScanDirs });
+function saveStorageSettings({ modelsDir = null, importScanDirs = null, startupUpdateCheckEnabled = null } = {}) {
+  return invokeTauri('model_store_set_storage_settings', { modelsDir, importScanDirs, startupUpdateCheckEnabled });
 }
 
 export {

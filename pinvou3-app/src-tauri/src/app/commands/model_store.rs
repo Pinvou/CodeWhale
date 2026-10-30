@@ -249,6 +249,7 @@ pub fn model_store_storage_settings() -> Result<Value, String> {
 pub fn model_store_set_storage_settings(
     models_dir: Option<String>,
     import_scan_dirs: Option<Vec<String>>,
+    startup_update_check_enabled: Option<bool>,
 ) -> Result<Value, String> {
-    model_store::set_storage_settings(models_dir, import_scan_dirs)
+    model_store::set_storage_settings(models_dir, import_scan_dirs, startup_update_check_enabled)
 }

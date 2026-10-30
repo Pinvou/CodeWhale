@@ -174,6 +174,7 @@ pub fn storage_settings() -> Result<Value, String> {
 pub fn set_storage_settings(
     _models_dir: Option<String>,
     _import_scan_dirs: Option<Vec<String>>,
+    _startup_update_check_enabled: Option<bool>,
 ) -> Result<Value, String> {
     nope()
 }

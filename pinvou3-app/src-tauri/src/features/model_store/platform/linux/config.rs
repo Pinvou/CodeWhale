@@ -125,6 +125,8 @@ pub struct Settings {
     pub hf_endpoint: String,
     pub store_url: String,
     pub update_url: Option<String>,
+    /// Independent of manual checks, telemetry and application updates.
+    pub startup_update_check_enabled: bool,
     pub gateway_enabled: bool,
     pub gateway_port: u16,
     /// 同时下载几个模型。多个下载并行不会更快——它们抢的是同一条带宽，
@@ -168,6 +170,7 @@ impl Default for Settings {
             // 那台服务器改成了只收隧道流量的私有源站，直连 IP 一律 403。
             store_url: "https://account.pinvou.com/model-store".to_string(),
             update_url: Some("https://pinvou.com/model-cube-update".to_string()),
+            startup_update_check_enabled: true,
             gateway_enabled: false,
             gateway_port: 8090,
             max_concurrent_downloads: 1,
@@ -233,39 +236,98 @@ fn quarantine_broken_config(cfg_file: &Path, reason: &str) {
     }
 }
 
-pub fn load_settings() -> Settings {
+/// All configuration mutation, including quarantine, shares one private file lock.
+/// Hold it only for local reads/patches/atomic writes, never for network work.
+fn settings_lock() -> std::io::Result<fs::File> {
+    let lock =
+        crate::platform::filesystem::open_private_lock_file(&config_dir().join("config.lock"))?;
+    lock.lock()?;
+    Ok(lock)
+}
+
+fn missing_settings_default() -> Settings {
     let mut settings = Settings::default();
-    let cfg_file = config_file();
-    match fs::read_to_string(&cfg_file) {
-        // 整体反序列化。老配置文件里缺掉的字段靠结构体上的 `#[serde(default)]`
-        // （见 `Settings` 定义）取 Default 给的值，而不是各类型的零值——注意这
-        // **不是**逐字段合并：任一字段类型不符，整个文件就废掉，走下面的留存分支。
-        Ok(text) => match serde_json::from_str::<Settings>(&text) {
-            Ok(parsed) => settings = parsed,
-            Err(e) => quarantine_broken_config(&cfg_file, &format!("解析失败（{e}）")),
-        },
-        // 没有配置文件是全新安装的正常状态，不出声。
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
-        // 文件在、却读不出来（权限、磁盘错误）：**不**改名——内容未必是坏的，而且
-        // 连读都读不了多半也 rename 不了。但同样必须出声，否则又是一次无声重置。
-        Err(e) => eprintln!(
-            "[model-store] 配置文件 {} 读取失败（{e}），本次回退默认设置",
-            cfg_file.display()
-        ),
-    }
+    // A quarantined configuration is evidence of an interrupted recovery, not
+    // a fresh install. Unknown prior consent cannot authorize automatic traffic.
+    settings.startup_update_check_enabled = matches!(
+        fs::symlink_metadata(config_file().with_extension("json.bad")),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound
+    );
+    settings
+}
+
+fn normalize_settings(mut settings: Settings) -> Settings {
     if settings.staging_dir.trim().is_empty() {
         settings.staging_dir = data_dir().join("staging").to_string_lossy().to_string();
     }
     if settings.models_dir.trim().is_empty() {
-        // 默认跟其余数据放在一起。LMM 那边默认的是 `~/models`——那是它作为独立
-        // 应用时的取值，在品悟里会在用户主目录下凭空多一个没人认识的目录。
-        // 这个值可配：几十上百 GB 的权重，用户很可能想放到别的盘。
         settings.models_dir = data_dir().join("models").to_string_lossy().to_string();
     }
     if LEGACY_DEFAULT_STORE_URLS.contains(&settings.store_url.trim().trim_end_matches('/')) {
         settings.store_url = Settings::default().store_url;
     }
     settings
+}
+
+/// Strict fresh read while the caller holds settings_lock. Writers must not
+/// turn read/parse failures into a replacement configuration.
+fn read_settings_unlocked() -> std::io::Result<Settings> {
+    let settings = match fs::read_to_string(config_file()) {
+        Ok(text) => serde_json::from_str::<Settings>(&text)
+            .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error))?,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => missing_settings_default(),
+        Err(error) => return Err(error),
+    };
+    Ok(normalize_settings(settings))
+}
+
+pub fn load_settings() -> Settings {
+    let result = (|| {
+        let _lock = settings_lock()?;
+        match read_settings_unlocked() {
+            Ok(settings) => Ok(settings),
+            Err(error) => {
+                if error.kind() == std::io::ErrorKind::InvalidData {
+                    // This rename is inside the same lock as all writers. A
+                    // stale reader can never quarantine a newly saved file.
+                    quarantine_broken_config(&config_file(), "解析失败");
+                }
+                Err(error)
+            }
+        }
+    })();
+    result.unwrap_or_else(|error: std::io::Error| {
+        eprintln!("[model-store] 配置读取失败（{error}），本次回退默认设置并关闭自动检查");
+        let mut settings = Settings::default();
+        settings.startup_update_check_enabled = false;
+        normalize_settings(settings)
+    })
+}
+
+/// Automatic access fails closed on errors or quarantined configuration. A
+/// valid old configuration without the field keeps its original enabled default.
+pub fn startup_update_check_enabled() -> Result<bool, String> {
+    read_settings().map(|settings| settings.startup_update_check_enabled)
+}
+
+/// A coherent settings snapshot for controls that must not save fallback data
+/// after a failed read. Missing quarantined files carry a disabled policy.
+pub fn read_settings() -> Result<Settings, String> {
+    let _lock = settings_lock().map_err(|error| format!("读取模型商店设置失败：{error}"))?;
+    read_settings_unlocked().map_err(|error| format!("读取模型商店设置失败：{error}"))
+}
+
+/// One domain transaction for all production settings patches. Waiting writers
+/// reread after acquiring the cross-process lock; None fields retain that value.
+pub fn update_settings(
+    patch: impl FnOnce(&mut Settings) -> Result<(), String>,
+) -> Result<Settings, String> {
+    let _lock = settings_lock().map_err(|error| format!("锁定模型商店设置失败：{error}"))?;
+    let mut settings =
+        read_settings_unlocked().map_err(|error| format!("读取模型商店设置失败：{error}"))?;
+    patch(&mut settings)?;
+    write_settings_unlocked(&settings).map_err(|error| format!("保存设置失败：{error}"))?;
+    Ok(settings)
 }
 
 /// 写配置。**先写临时文件再 rename**，并且一开始就以 0600 创建。
@@ -281,7 +343,13 @@ pub fn load_settings() -> Settings {
 /// 2. 先写后 `set_permissions` 之间有一个 0644 的窗口，而这个文件里有商店地址
 ///    这类不该给同机其他用户看的东西。用 `OpenOptions::mode` 直接按 0600 建，
 ///    窗口就不存在了。
+#[cfg(test)]
 pub fn save_settings(settings: &Settings) -> std::io::Result<()> {
+    let _lock = settings_lock()?;
+    write_settings_unlocked(settings)
+}
+
+fn write_settings_unlocked(settings: &Settings) -> std::io::Result<()> {
     use std::io::Write as _;
 
     let cfg_file = config_file();
@@ -637,7 +705,40 @@ mod tests {
         assert_eq!(s.gateway_port, 8090);
         assert_eq!(s.min_free_space_gb, 2.0);
         assert!(!s.gateway_enabled);
+        assert!(s.startup_update_check_enabled);
         assert_eq!(s.max_concurrent_downloads(), 1, "默认只允许一个下载");
+    }
+
+    #[test]
+    fn startup_update_policy_preserves_old_defaults_and_persisted_opt_out() {
+        let _home = TempHome::new();
+        assert!(startup_update_check_enabled().unwrap());
+        fs::write(config_file(), "{}").unwrap();
+        assert!(startup_update_check_enabled().unwrap());
+        let mut settings = load_settings();
+        settings.startup_update_check_enabled = false;
+        save_settings(&settings).unwrap();
+        assert!(!startup_update_check_enabled().unwrap());
+        assert!(!load_settings().startup_update_check_enabled);
+        let mut settings = load_settings();
+        settings.test_mode_enabled = true;
+        settings.import_scan_dirs = vec!["/extra/models".into()];
+        save_settings(&settings).unwrap();
+        assert!(!startup_update_check_enabled().unwrap());
+        assert!(load_settings().test_mode_enabled);
+    }
+
+    #[test]
+    fn startup_update_policy_does_not_default_on_unreadable_or_malformed_settings() {
+        let _home = TempHome::new();
+        for text in ["{broken", r#"{"startup_update_check_enabled":"false"}"#] {
+            fs::write(config_file(), text).unwrap();
+            assert!(startup_update_check_enabled().is_err());
+            assert_eq!(fs::read_to_string(config_file()).unwrap(), text);
+        }
+        fs::remove_file(config_file()).unwrap();
+        fs::create_dir(config_file()).unwrap();
+        assert!(startup_update_check_enabled().is_err());
     }
 
     #[test]
@@ -697,3 +798,6 @@ mod tests {
         clear_token_fallback();
     }
 }
+
+#[cfg(test)]
+mod transaction_tests;

@@ -71,7 +71,9 @@ export function CardUpdateDialog({ record, copy, theme, busy, onClose, onUpdate,
               {preview.description ? <p className={`whitespace-pre-wrap leading-6 ${TEXT_SECONDARY}`}>{preview.description}</p> : null}
               {compatibility ? (
                 <div className="space-y-3" data-testid="card-update-compatibility">
-                  <p role="status">{copy.compatibilityKinds[compatibility.kind] || copy.compatibilityKinds.unverified}</p>
+                  <p role="status">{compatibility.reason === 'unchanged_legacy_identity'
+                    ? copy.compatibilityLegacyUnverified
+                    : (copy.compatibilityKinds[compatibility.kind] || copy.compatibilityKinds.unverified)}</p>
                   {!canUpdate ? <p className={TEXT_SECONDARY}>{copy.compatibilityReasons[compatibility.reason] || copy.compatibilityKinds[compatibility.reason] || copy.compatibilityReasonUnknown}</p> : null}
                   {canStage ? <p className={TEXT_SECONDARY}>{copy.versionUpgradeNextStep}</p> : null}
                   {blocked ? <p className={TEXT_SECONDARY}>{copy.versionUpgradeBlocked}</p> : null}

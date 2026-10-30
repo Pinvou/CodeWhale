@@ -25,7 +25,16 @@ pub(super) fn prepare(card: &Path) -> Result<(), String> {
         Err(error) => return Err(error.to_string()),
     }
     let directory = checked_directory(&path, uid)?;
-    if directory.metadata().map_err(|e| e.to_string())?.mode() & 0o022 == 0 {
+    let mode = directory.metadata().map_err(|e| e.to_string())?.mode();
+    if mode & 0o022 == 0 {
+        // Existing owner-controlled receipts may legitimately predate the
+        // private-directory default. Tighten the held directory descriptor,
+        // preserving every receipt and the ability to stop its live process.
+        if mode & 0o077 != 0 {
+            directory
+                .set_permissions(fs::Permissions::from_mode(0o700))
+                .map_err(|e| e.to_string())?;
+        }
         return Ok(());
     }
     // A previous failed first launch may have created only its diagnostic log.
@@ -87,21 +96,60 @@ mod tests {
         );
     }
     #[test]
+    fn readable_owner_runtime_is_tightened_without_rewriting_existing_state() {
+        for parent_mode in [0o700, 0o755] {
+            for runtime_mode in [0o750, 0o755] {
+                let temp = card();
+                fs::set_permissions(temp.path(), fs::Permissions::from_mode(parent_mode)).unwrap();
+                let path = temp.path().join(".runtime");
+                fs::create_dir(&path).unwrap();
+                fs::set_permissions(&path, fs::Permissions::from_mode(runtime_mode)).unwrap();
+                let states = [
+                    "serve.identity.json",
+                    "serve.pid",
+                    "process.lock",
+                    "healthcheck.log",
+                ];
+                for name in states {
+                    fs::write(path.join(name), format!("preserve {name}")).unwrap();
+                    fs::set_permissions(path.join(name), fs::Permissions::from_mode(0o644))
+                        .unwrap();
+                }
+                prepare(temp.path()).unwrap();
+                assert_eq!(fs::metadata(&path).unwrap().mode() & 0o777, 0o700);
+                assert_eq!(
+                    fs::metadata(temp.path()).unwrap().mode() & 0o777,
+                    parent_mode
+                );
+                for name in states {
+                    assert_eq!(
+                        fs::read_to_string(path.join(name)).unwrap(),
+                        format!("preserve {name}")
+                    );
+                    assert_eq!(fs::metadata(path.join(name)).unwrap().mode() & 0o777, 0o644);
+                }
+                prepare(temp.path()).unwrap();
+            }
+        }
+    }
+    #[test]
     fn writable_existing_process_state_is_never_promoted_to_private_ownership() {
-        for name in [
-            "serve.identity.json",
-            "serve.pid",
-            "process.lock",
-            "other-state",
-        ] {
-            let temp = card();
-            let path = temp.path().join(".runtime");
-            fs::create_dir(&path).unwrap();
-            fs::set_permissions(&path, fs::Permissions::from_mode(0o775)).unwrap();
-            fs::write(path.join(name), "untrusted").unwrap();
-            assert!(prepare(temp.path()).is_err());
-            assert_eq!(fs::metadata(&path).unwrap().mode() & 0o777, 0o775);
-            assert_eq!(fs::read_to_string(path.join(name)).unwrap(), "untrusted");
+        for mode in [0o775, 0o777] {
+            for name in [
+                "serve.identity.json",
+                "serve.pid",
+                "process.lock",
+                "other-state",
+            ] {
+                let temp = card();
+                let path = temp.path().join(".runtime");
+                fs::create_dir(&path).unwrap();
+                fs::set_permissions(&path, fs::Permissions::from_mode(mode)).unwrap();
+                fs::write(path.join(name), "untrusted").unwrap();
+                assert!(prepare(temp.path()).is_err());
+                assert_eq!(fs::metadata(&path).unwrap().mode() & 0o777, mode);
+                assert_eq!(fs::read_to_string(path.join(name)).unwrap(), "untrusted");
+            }
         }
     }
     #[test]
@@ -112,12 +160,14 @@ mod tests {
         assert!(prepare(temp.path()).is_err());
         fs::remove_file(temp.path().join(".runtime")).unwrap();
         fs::create_dir(temp.path().join(".runtime")).unwrap();
-        fs::set_permissions(temp.path(), fs::Permissions::from_mode(0o775)).unwrap();
         fs::set_permissions(
             temp.path().join(".runtime"),
             fs::Permissions::from_mode(0o775),
         )
         .unwrap();
-        assert!(prepare(temp.path()).is_err());
+        for parent_mode in [0o755, 0o775] {
+            fs::set_permissions(temp.path(), fs::Permissions::from_mode(parent_mode)).unwrap();
+            assert!(prepare(temp.path()).is_err());
+        }
     }
 }

@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { scheduleStartupUpdateCheck, STARTUP_UPDATE_DELAY_MS, updatesForLibrary, initialStartupUpdateState, reduceStartupUpdates, hasUnreadStartupUpdates } from '../src/features/model-store/startup-update-check.js';
-import { createStartupUpdateController, scheduleDelayedStartupUpdateCheck } from '../src/features/model-store/startup-update-runtime.js';
+import { createStartupUpdateController, scheduleDelayedStartupUpdateCheck, schedulePreferredStartupUpdateCheck } from '../src/features/model-store/startup-update-runtime.js';
 import { prepareAfterStartupPaint } from '../src/features/model-store/startup-update-scheduler.js';
 import { readViewedUpdateSnapshot } from '../src/features/model-store/startup-update-snapshot.js';
 import { VIEWED_UPDATES_STORAGE_KEY, loadViewedUpdateRevisions, saveViewedUpdateRevisions } from '../src/features/model-store/startup-update-read-state.js';
@@ -34,6 +34,91 @@ function fixture(available = true, check = async () => ({ updates: [] }), prepar
   const fire = () => { const batch = [...timers.values()]; timers.clear(); batch.forEach(({ callback }) => callback()); };
   return { frames, timers, reports, cleanup, paint, fire };
 }
+
+function preferredFixture(readSettings) {
+  const timers = new Map();
+  const reports = [];
+  let checks = 0;
+  const cleanup = schedulePreferredStartupUpdateCheck({
+    deadline: 15100, readSettings,
+    host: {
+      performance: { now: () => 100 },
+      setTimeout(callback, delay) { timers.set(1, { callback, delay }); return 1; },
+      clearTimeout(id) { timers.delete(id); },
+    },
+    check: async () => { checks += 1; return { updates: [{ card_id: 'a' }] }; },
+    onReport: (report) => reports.push(report),
+  });
+  return { timers, reports, cleanup, checks: () => checks, fire() { const batch = [...timers.values()]; timers.clear(); batch.forEach(({ callback }) => callback()); } };
+}
+
+test('startup opt-out queues no timer or check and missing old-host fields retain the enabled default', async () => {
+  for (const settings of [{ startup_update_check_enabled: false }, null, [], { startup_update_check_enabled: 'true' }]) {
+    const f = preferredFixture(async () => settings);
+    await new Promise(setImmediate);
+    assert.equal(f.timers.size, 0);
+    assert.equal(f.checks(), 0);
+    f.cleanup();
+  }
+  const f = preferredFixture(async () => ({}));
+  await new Promise(setImmediate);
+  assert.equal(f.timers.get(1).delay, 15000);
+  f.fire(); await new Promise(setImmediate);
+  assert.equal(f.checks(), 1);
+  f.cleanup();
+});
+
+test('a queued startup check rereads a newly saved opt-out before invoking the command', async () => {
+  let enabled = true;
+  let reads = 0;
+  const f = preferredFixture(async () => { reads += 1; return { startup_update_check_enabled: enabled }; });
+  await new Promise(setImmediate);
+  assert.equal(reads, 1);
+  enabled = false;
+  f.fire(); await new Promise(setImmediate);
+  assert.equal(reads, 2);
+  assert.equal(f.checks(), 0);
+  assert.deepEqual(f.reports, [{ updates: [] }]);
+  f.cleanup();
+});
+
+test('failed startup policy reads fail closed without exposing details or retrying', async (t) => {
+  const warning = t.mock.method(console, 'warn', () => {});
+  for (const phase of ['initial', 'queued']) {
+    let reads = 0;
+    const f = preferredFixture(async () => {
+      reads += 1;
+      if (phase === 'initial' || reads === 2) throw Error('private policy path');
+      return { startup_update_check_enabled: true };
+    });
+    await new Promise(setImmediate);
+    if (phase === 'queued') { f.fire(); await new Promise(setImmediate); }
+    assert.equal(f.checks(), 0);
+    assert.equal(f.timers.size, 0);
+    f.cleanup();
+  }
+  assert.deepEqual(warning.mock.calls.map(({ arguments: args }) => args), Array(2).fill(['model_store_startup_update_check failed']));
+});
+
+test('cleanup during either policy read prevents a late timer or request', async () => {
+  for (const phase of ['initial', 'queued']) {
+    let resolve;
+    let reads = 0;
+    const f = preferredFixture(() => {
+      reads += 1;
+      if (phase === 'initial' || reads === 2) return new Promise((done) => { resolve = done; });
+      return { startup_update_check_enabled: true };
+    });
+    await new Promise(setImmediate);
+    if (phase === 'queued') { f.fire(); await new Promise(setImmediate); }
+    f.cleanup();
+    resolve({ startup_update_check_enabled: true });
+    await new Promise(setImmediate);
+    assert.equal(f.timers.size, 0);
+    assert.equal(f.checks(), 0);
+    assert.deepEqual(f.reports, []);
+  }
+});
 
 test('unavailable model stores schedule no frames, timers or requests', () => {
   const f = fixture(false, () => assert.fail('must not request an unavailable feature'));
