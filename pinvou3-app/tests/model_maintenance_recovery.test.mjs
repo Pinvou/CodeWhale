@@ -100,6 +100,25 @@ test('failed installations remain visible without a library row and grant no own
   }
 });
 
+test('active downloads do not render an incomplete-install banner, including queued or cancelling work', () => {
+  for (const copy of copies) {
+    const active = { cardId: 'downloading-card', runId: 'active-run', terminal: false, canPreview: false };
+    const properties = { copy, onRetry() {}, onRefresh() {}, isRetrying: cardId => cardId === active.cardId };
+    assert.equal(renderToStaticMarkup(React.createElement(IncompleteInstallPanel, {
+      ...properties, installations: [active],
+    })), '');
+    const html = renderToStaticMarkup(React.createElement(IncompleteInstallPanel, {
+      ...properties, installations: [active, { cardId: 'failed-card', runId: 'failed-run', terminal: true, canPreview: true }],
+    }));
+    assert.ok(!html.includes(active.cardId));
+    assert.ok(html.includes('failed-card'), 'another failed installation must remain visible');
+    const unavailable = renderToStaticMarkup(React.createElement(IncompleteInstallPanel, {
+      ...properties, installations: [active], error: 'installation_index_unavailable',
+    }));
+    assert.ok(unavailable.includes('role="alert"'), 'filtering active work must not hide index errors');
+  }
+});
+
 test('unfinished tasks and older downloads without source context cannot retry directly', () => {
   for (const copy of copies) {
     for (const terminal of [false, true]) {

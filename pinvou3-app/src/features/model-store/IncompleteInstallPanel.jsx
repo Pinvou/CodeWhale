@@ -19,8 +19,11 @@ export function IncompleteInstallPanel({ installations = EMPTY, error, copy, onR
   // 用户要防的只是手滑，不是没看清后果。
   const [confirmingId, setConfirmingId] = useState(null);
   const [dismissing, setDismissing] = useState(false);
-  const confirmingItem = installations.find(item => item.runId === confirmingId);
-  if (installations.length === 0 && !error) return null;
+  // 库快照可能先于任务状态刷新，旧宿主也可能把尚在下载的回执列为未完成。
+  // 已确认活跃的非终态任务归正常任务卡；终态失败和无运行归属的记录仍保留。
+  const visibleInstallations = installations.filter(item => item.terminal || !isRetrying?.(item.cardId));
+  const confirmingItem = visibleInstallations.find(item => item.runId === confirmingId);
+  if (visibleInstallations.length === 0 && !error) return null;
   const describe = value => describeIncompleteError(copy, value);
   const inspect = async item => {
     setLoading(true);
@@ -60,7 +63,7 @@ export function IncompleteInstallPanel({ installations = EMPTY, error, copy, onR
     <h3 className="text-sm font-semibold">{copy.incompleteTitle}</h3>
     <p className="mt-1 text-xs opacity-75">{copy.incompleteHint}</p>
     {(error || requestError) && <p role="alert" className="mt-2 break-words text-xs">{requestError || describe(error)}</p>}
-    {installations.map(item => <div key={item.runId} className="mt-3 flex flex-wrap items-center justify-between gap-3">
+    {visibleInstallations.map(item => <div key={item.runId} className="mt-3 flex flex-wrap items-center justify-between gap-3">
       <div className="min-w-0 text-xs">
         <div className="font-semibold">{item.cardId}</div>
         <p className="mt-1 break-all opacity-75">{item.runId}</p>

@@ -7,7 +7,7 @@ use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
-use super::{config, db, lifecycle::ModelManager, script_runner};
+use super::{config, db, lifecycle::ModelManager, run_state::ActiveCardOps, script_runner};
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
@@ -216,7 +216,7 @@ pub(super) fn ensure_dismissable(run_id: &str) -> Result<(), String> {
     Ok(())
 }
 
-pub(super) fn summaries() -> Result<Vec<Value>, String> {
+pub(super) fn summaries(active: &ActiveCardOps) -> Result<Vec<Value>, String> {
     let mut items = Vec::new();
     for (_, (id, receipt)) in latest()? {
         // 已放弃的记录整条沉默：这是「不再提示」的全部语义。同卡之后**新的**
@@ -226,6 +226,16 @@ pub(super) fn summaries() -> Result<Vec<Value>, String> {
             || db::get_store_model(&receipt.card_id)
                 .map_err(|error| error.to_string())?
                 .is_some()
+        {
+            continue;
+        }
+        // outcome=None 既可能是中断遗留，也可能只是正常下载尚未完成。
+        // 回执读取后核对当前登记，避免把运行中/排队/取消收尾的任务报为失败。
+        // 只排除同一次运行；没有确切归属的记录仍须保留待核实。
+        if receipt.outcome.is_none()
+            && active
+                .run_for_card(&receipt.card_id)
+                .is_some_and(|run| run.run_id == id && run.kind == receipt.kind)
         {
             continue;
         }
@@ -430,6 +440,98 @@ mod tests {
     }
 
     #[test]
+    fn live_installations_do_not_surface_as_failures_but_lost_runs_still_do() {
+        let _home = config::TempHome::new();
+        db::init_db().unwrap();
+        for (kind, op) in [
+            ("download", super::super::run_state::OP_DOWNLOAD),
+            ("install_local", super::super::run_state::OP_INSTALL_LOCAL),
+        ] {
+            receipt(
+                "older",
+                kind,
+                "2026-10-18T00:00:00Z",
+                json!({"Err":"old failure"}),
+            );
+            receipt("current", kind, "2026-10-18T00:00:01Z", Value::Null);
+            let active = ActiveCardOps::default();
+            active
+                .try_begin("local-fixture", op, Some("current"))
+                .unwrap();
+            // Active registration also owns queued work and cancellation
+            // until cleanup; an absent result is not evidence of failure.
+            for cancelled in [false, true] {
+                let mut current = read("current").unwrap();
+                current.cancelled = cancelled;
+                super::super::execution_fence::private_write(
+                    &config::data_dir().join("runs/current.json"),
+                    &serde_json::to_vec(&current).unwrap(),
+                )
+                .unwrap();
+                assert!(summaries(&active).unwrap().is_empty());
+            }
+            receipt(
+                "current",
+                kind,
+                "2026-10-18T00:00:01Z",
+                json!({"Err":"new failure"}),
+            );
+            let failed = summaries(&active).unwrap();
+            assert_eq!(
+                failed.len(),
+                1,
+                "terminal failure must not be hidden by stale activity"
+            );
+            assert_eq!(failed[0]["runId"], "current");
+            assert_eq!(failed[0]["terminal"], true);
+
+            active.finish("local-fixture");
+            receipt("current", kind, "2026-10-18T00:00:01Z", Value::Null);
+            let lost = summaries(&active).unwrap();
+            assert_eq!(
+                lost.len(),
+                1,
+                "unowned unfinished receipt must remain visible"
+            );
+            assert_eq!(lost[0]["runId"], "current");
+            assert_eq!(lost[0]["terminal"], false);
+            assert_eq!(lost[0]["canPreview"], false);
+            assert!(preview("current").err().unwrap().contains("not_terminal"));
+
+            receipt("current", kind, "2026-10-18T00:00:01Z", json!({"Ok":{}}));
+            assert!(summaries(&active).unwrap().is_empty());
+        }
+    }
+
+    #[test]
+    fn only_the_exact_active_installation_owns_an_unfinished_receipt() {
+        let _home = config::TempHome::new();
+        db::init_db().unwrap();
+        receipt("current", "download", "2026-10-18T00:00:00Z", Value::Null);
+        for (card, id, op) in [
+            (
+                "local-fixture",
+                "another-run",
+                super::super::run_state::OP_DOWNLOAD,
+            ),
+            (
+                "another-card",
+                "current",
+                super::super::run_state::OP_DOWNLOAD,
+            ),
+            (
+                "local-fixture",
+                "current",
+                super::super::run_state::OP_INSTALL_LOCAL,
+            ),
+        ] {
+            let active = ActiveCardOps::default();
+            active.try_begin(card, op, Some(id)).unwrap();
+            assert_eq!(summaries(&active).unwrap().len(), 1);
+        }
+    }
+
+    #[test]
     fn terminal_failures_without_a_row_remain_visible_and_do_not_resurface_after_successful_uninstall()
      {
         let _home = config::TempHome::new();
@@ -440,7 +542,7 @@ mod tests {
             "2026-10-18T00:00:00Z",
             json!({"Err":"fixture failure"}),
         );
-        let items = summaries().unwrap();
+        let items = summaries(&ActiveCardOps::default()).unwrap();
         assert_eq!(items.len(), 1);
         assert_eq!(items[0]["modelWritesGranted"], false);
         receipt(
@@ -449,7 +551,7 @@ mod tests {
             "2026-10-18T00:00:01Z",
             json!({"Ok":{}}),
         );
-        assert!(summaries().unwrap().is_empty());
+        assert!(summaries(&ActiveCardOps::default()).unwrap().is_empty());
         assert!(preview("failure").err().unwrap().contains("superseded"));
     }
 
@@ -490,7 +592,11 @@ mod tests {
             "2026-10-18T00:00:00Z",
             json!({"Err":"fixture failure"}),
         );
-        assert!(!summaries().unwrap()[0]["canPreview"].as_bool().unwrap());
+        assert!(
+            !summaries(&ActiveCardOps::default()).unwrap()[0]["canPreview"]
+                .as_bool()
+                .unwrap()
+        );
         assert!(
             preview("download")
                 .err()
@@ -534,7 +640,10 @@ mod tests {
             "2026-10-21T00:00:00Z",
             json!({"Err":"unique recovery proof"}),
         );
-        assert_eq!(summaries().unwrap()[0]["runId"], "unique-failure");
+        assert_eq!(
+            summaries(&ActiveCardOps::default()).unwrap()[0]["runId"],
+            "unique-failure"
+        );
         assert!(preview("unique-failure").is_ok());
         assert!(read("old-0").is_ok(), "old IDs remain on disk");
         receipt(
@@ -543,7 +652,7 @@ mod tests {
             "2026-10-21T00:00:01Z",
             json!({"Ok":null}),
         );
-        assert!(summaries().unwrap().is_empty());
+        assert!(summaries(&ActiveCardOps::default()).unwrap().is_empty());
         assert!(
             preview("unique-failure")
                 .err()
@@ -590,9 +699,12 @@ mod tests {
             json!({"Err":"fixture failure"}),
         );
         let service = ModelStoreService::new();
-        assert_eq!(summaries().unwrap().len(), 1);
+        assert_eq!(summaries(&ActiveCardOps::default()).unwrap().len(), 1);
         dismiss_incomplete_local(&service, "failure").unwrap();
-        assert!(summaries().unwrap().is_empty(), "放弃后面板必须沉默");
+        assert!(
+            summaries(&ActiveCardOps::default()).unwrap().is_empty(),
+            "放弃后面板必须沉默"
+        );
         assert!(
             preview("failure").err().unwrap().contains("dismissed"),
             "放弃过的记录不能从预览复活"
@@ -651,7 +763,7 @@ mod tests {
             "2026-10-18T00:00:01Z",
             json!({"Err":"new failure"}),
         );
-        let items = summaries().unwrap();
+        let items = summaries(&ActiveCardOps::default()).unwrap();
         assert_eq!(items.len(), 1, "只有最新一条会出现在面板上");
         assert_eq!(items[0]["runId"], "new");
     }

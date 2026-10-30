@@ -1395,7 +1395,7 @@ pub async fn library(service: Arc<ModelStoreService>) -> Result<Value, String> {
             Ok(records) => (records, None),
             Err(error) => (Vec::new(), Some(error)),
         };
-        let (incomplete, incomplete_error) = match super::incomplete::summaries() {
+        let (incomplete, incomplete_error) = match super::incomplete::summaries(&service.active) {
             Ok(items) => (items, None),
             Err(error) => (Vec::new(), Some(error)),
         };
@@ -5293,7 +5293,7 @@ mod durable_history_tests {
                 assert!(Instant::now() < deadline);
                 std::thread::sleep(Duration::from_millis(5));
             }
-            let items = super::super::incomplete::summaries().unwrap();
+            let items = super::super::incomplete::summaries(&service.active).unwrap();
             assert!(items.iter().any(|item| item["runId"] == "unique-failure"));
             assert!(items.iter().any(|item| item["runId"] == run_id));
         }
@@ -5519,7 +5519,7 @@ mod durable_history_tests {
         restarted.restore_runs().unwrap();
         assert!(restarted.runs.lock().is_empty());
         assert_eq!(
-            super::super::incomplete::summaries().unwrap()[0]["runId"],
+            super::super::incomplete::summaries(&restarted.active).unwrap()[0]["runId"],
             "large-install-failure"
         );
         let preview = super::super::incomplete::preview("large-install-failure").unwrap();
