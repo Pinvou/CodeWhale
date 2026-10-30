@@ -39,6 +39,8 @@ Linux Rust 构建的 PipeWire/SPA 绑定生成需要可加载的 libclang；Debi
 
 Relay 的 Linux 真实回滚回归使用 `ss` 检查监听地址；对应 CI 作业显式安装 `iproute2` 并确认命令可执行，保留监听检查失败时拒绝通过的行为。
 
+CLI 夏令时回归使用 `America/New_York` 的真实时区数据；CLI Linux 编译/测试作业显式安装 `tzdata` 并检查该时区文件，避免精简 runner 缺少数据时 chrono 回退 UTC，仍保留不存在时间必须被拒绝的断言。
+
 ```bash
 python3 scripts/architecture-guard.py
 node --test pinvou3-app/tests/*remote*.test.mjs pinvou3-app/tests/controlled_device*.test.mjs pinvou3-app/tests/connect_remote*.test.mjs pinvou3-app/tests/controller_session*.test.mjs
