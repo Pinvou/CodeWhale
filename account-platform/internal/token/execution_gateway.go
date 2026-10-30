@@ -50,6 +50,10 @@ func (c *HTTPUpstreamClient) RejectsBeforeGeneration(statusCode int) bool {
 
 func (c *HTTPUpstreamClient) CopyResponseHeaders(destination, source http.Header) {
 	for key, values := range source {
+		// Billing notices are platform authority, never supplier metadata.
+		if strings.HasPrefix(strings.ToLower(key), "x-pinvou-billing-") {
+			continue
+		}
 		blocked := false
 		for _, referenceHeader := range c.referenceHeaders {
 			if strings.EqualFold(key, referenceHeader) {

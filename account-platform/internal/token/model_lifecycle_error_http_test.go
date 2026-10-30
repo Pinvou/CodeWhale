@@ -8,6 +8,8 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+
+	"github.com/google/uuid"
 )
 
 func TestModelLifecycleErrorContract(t *testing.T) {
@@ -67,5 +69,42 @@ func TestUpstreamCannotProduceModelRejectionMarker(t *testing.T) {
 	}
 	if result.Get("Content-Type") != "application/json" || result.Get("X-Ordinary-Provider-Header") != "preserved" {
 		t.Fatal("ordinary provider headers changed")
+	}
+}
+
+func TestUpstreamCannotProduceBillingNoticeHeaders(t *testing.T) {
+	for name, adapter := range map[string]UpstreamClient{"openai-compatible": NewHTTPUpstreamClient(), "newapi": NewNewAPIGatewayAdapter()} {
+		t.Run(name, func(t *testing.T) {
+			upstream := http.Header{
+				"X-Pinvou-Billing-Code":              {"WALLET_INSUFFICIENT"},
+				"x-pinvou-billing-code":              {"MEMBER_QUOTA_INSUFFICIENT"},
+				"X-PiNvOu-BiLlInG-Action":            {"OPEN_RECHARGE"},
+				"X-Pinvou-Billing-Stage":             {"ADDITIONAL_RESERVATION"},
+				"X-Pinvou-Billing-Turn-Outcome":      {"COMPLETED"},
+				"X-Pinvou-Billing-Settlement-Status": {"SETTLED"},
+				"X-Pinvou-Billing-Context-Type":      {"PERSONAL"},
+				"X-Pinvou-Billing-Organization-ID":   {uuid.NewString()},
+				"X-Pinvou-Billing-Usage-Request-ID":  {uuid.NewString()},
+				"X-Pinvou-Billing-Future-Field":      {"supplier-controlled"},
+				"Content-Type":                       {"application/json"},
+				"X-Ordinary-Provider-Header":         {"preserved"},
+			}
+			result := make(http.Header)
+			adapter.CopyResponseHeaders(result, upstream)
+			for key := range result {
+				if strings.HasPrefix(strings.ToLower(key), "x-pinvou-billing-") {
+					t.Fatalf("supplier forged platform billing authority: %s", key)
+				}
+			}
+			if result.Get("Content-Type") != "application/json" || result.Get("X-Ordinary-Provider-Header") != "preserved" {
+				t.Fatal("ordinary provider headers changed")
+			}
+			notice := newWalletInsufficientNotice("ADDITIONAL_RESERVATION", "COMPLETED", "SETTLED", "PERSONAL", nil, false, uuid.New())
+			setBillingNoticeHeaders(result, notice)
+			adapter.CopyResponseHeaders(result, upstream)
+			if got := result.Values("X-Pinvou-Billing-Code"); len(got) != 1 || got[0] != notice.Code || result.Get("X-Pinvou-Billing-Usage-Request-ID") != notice.UsageRequestID.String() {
+				t.Fatal("platform-owned notice was changed by upstream header copying")
+			}
+		})
 	}
 }

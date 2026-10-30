@@ -814,7 +814,13 @@ func (s *Service) writeStoredUsageSnapshot(w http.ResponseWriter, r *http.Reques
 			setBillingNoticeHeaders(w.Header(), *notice)
 		}
 		w.WriteHeader(snapshot.Result.HTTPStatus)
-		_, _ = w.Write(snapshot.Result.Payload)
+		payload := snapshot.Result.Payload
+		if snapshot.Result.Kind == "JSON" && snapshot.Result.HTTPStatus == http.StatusPaymentRequired && snapshot.Usage.HoldID != nil {
+			// Dispatch persists a hold before any supplier call. Initial platform
+			// reservation failures have no hold and retain their own notice receipt.
+			payload = withoutUpstreamBillingNotice(payload)
+		}
+		_, _ = w.Write(payload)
 		return
 	}
 	if len(snapshot.Events) > 0 {
@@ -1071,6 +1077,24 @@ func billingNoticeFromUsageSnapshot(snapshot json.RawMessage) *billingNotice {
 	return payload.BillingNotice
 }
 
+// Only the reserved platform notice is removed; ordinary provider errors keep
+// their original bytes, and RawMessage preserves all remaining numeric tokens.
+func withoutUpstreamBillingNotice(payload []byte) []byte {
+	var fields map[string]json.RawMessage
+	if json.Unmarshal(payload, &fields) != nil {
+		return payload
+	}
+	if _, present := fields["billing_notice"]; !present {
+		return payload
+	}
+	delete(fields, "billing_notice")
+	filtered, err := json.Marshal(fields)
+	if err != nil {
+		return []byte(`{}`)
+	}
+	return filtered
+}
+
 func (s *Service) handleUpstreamFailure(w http.ResponseWriter, r *http.Request, usageID, holdID uuid.UUID, response *http.Response) {
 	payload, readErr := readBoundedUpstreamBody(response.Body, 2<<20)
 	background := context.WithoutCancel(r.Context())
@@ -1096,6 +1120,9 @@ func (s *Service) handleUpstreamFailure(w http.ResponseWriter, r *http.Request, 
 	}
 	if len(payload) == 0 {
 		payload = []byte(`{"error":{"code":"UPSTREAM_ERROR","message":"the upstream rejected the model request"}}`)
+	}
+	if response.StatusCode == http.StatusPaymentRequired {
+		payload = withoutUpstreamBillingNotice(payload)
 	}
 	contentType := response.Header.Get("Content-Type")
 	if contentType == "" {

@@ -823,6 +823,8 @@ async fn forward(
             .body(Body::from(payload))
             .unwrap_or_else(|_| proxy_error(StatusCode::BAD_GATEWAY, "invalid gateway response"));
     }
+    let notice_emitter =
+        notice_emitter.filter(|_| accepts_sse_billing_notice(status, &upstream_headers));
     let upstream_stream = upstream_response.bytes_stream();
     let body = match (upstream_is_sse, delivery) {
         (true, Some(delivery)) => Body::from_stream(super::model_cancellation::track_delivery(
@@ -1001,6 +1003,15 @@ fn observe_sse_lines(
     notices
 }
 
+fn accepts_sse_billing_notice(status: StatusCode, headers: &reqwest::header::HeaderMap) -> bool {
+    // Gateway framing writes this exact type. Raw supplier MIME aliases must not
+    // gain platform authority; ordinary SSE transport keeps its broader detection.
+    status.is_success()
+        && headers
+            .get(header::CONTENT_TYPE)
+            .is_some_and(|value| value.as_bytes() == b"text/event-stream")
+}
+
 fn billing_notice_from_headers(headers: &reqwest::header::HeaderMap) -> Option<BillingNotice> {
     let value = |name: &str| {
         headers
@@ -1135,8 +1146,9 @@ mod tests {
     use tokio::sync::Mutex;
 
     use super::{
-        ModelGatewayProxy, billing_notice_from_body, billing_notice_from_headers, logical_turn_id,
-        observe_sse_lines, prepare_chat_body, request_idempotency_key, require_sse_done,
+        ModelGatewayProxy, accepts_sse_billing_notice, billing_notice_from_body,
+        billing_notice_from_headers, logical_turn_id, observe_sse_lines, prepare_chat_body,
+        request_idempotency_key, require_sse_done,
     };
 
     #[test]
@@ -1583,6 +1595,27 @@ mod tests {
             }
             task.abort();
         }
+    }
+
+    #[test]
+    fn sse_billing_notice_requires_gateway_framed_success() {
+        for (status, media_type, expected) in [
+            (StatusCode::OK, "text/event-stream", true),
+            (StatusCode::PARTIAL_CONTENT, "text/event-stream", true),
+            (StatusCode::BAD_REQUEST, "text/event-stream", false),
+            (StatusCode::PAYMENT_REQUIRED, "text/event-stream", false),
+            (StatusCode::INTERNAL_SERVER_ERROR, "text/event-stream", false),
+            (StatusCode::OK, "Text/Event-Stream", false),
+            (StatusCode::OK, " text/event-stream", false),
+            (StatusCode::OK, "text/event-stream; charset=utf-8", false),
+            (StatusCode::OK, "text/event-stream-extra", false),
+            (StatusCode::OK, "application/json", false),
+        ] {
+            let mut headers = HeaderMap::new();
+            headers.insert(header::CONTENT_TYPE, media_type.parse().unwrap());
+            assert_eq!(accepts_sse_billing_notice(status, &headers), expected);
+        }
+        assert!(!accepts_sse_billing_notice(StatusCode::OK, &HeaderMap::new()));
     }
 
     #[test]
