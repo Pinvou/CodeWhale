@@ -299,18 +299,34 @@ export async function hideNativeSurfaceWithRetry({
 // 只看动作自己通道的 isCurrent 不够：真实侧栏/设置导航走 `view` 通道（同一
 // sessionId 不换 sid），不会让 `session` 通道的票据过期——晚到的 completion
 // 会把已去设置的用户拽回聊天，违背"不把已离开设备页的用户拽进聊天"的设计
-// 承诺。所以开始时拍下 view 修订号，落定时要求它未变；session 通道自己的
-// 失效（如用户切到别的会话）仍由 isCurrent 负责——两把尺子相与，缺一不可。
+// 承诺。所以开始时拍下相关通道的修订号，落定时要求它们未变；session 通道
+// 自己的失效（如用户切到别的会话）仍由 isCurrent 负责——尺子相与，缺一不可。
 // 已接纳的消息照常送达、照常返回 true（只跳过视图切换），不能因不切页误报
 // 失败而诱发重发。
+//
+// 多通道（三十三轮评审 P2）：单看 view 通道还拦不住两类真实导航——
+// ①侧栏**切会话**走 session 通道（其 publication 内的 setCurrentView 因
+// publishing>0 走直改分支，不会失效 view 修订号），prompt 等待窗口里切到
+// 会话 B 时，晚到的动作照样签发自己的 session 票据并抢回聊天；
+// ②completion 等待窗口里**不经 gate 的直接视图变更**（如更新卡
+// onShowChangelog 的 setCurrentView('settings')——动作自己的 publication
+// 还开着，setCurrentView 走直改分支）同样不动修订号。调用方以
+// ['view','session'] 拍票：kept() 在动作自转 transition 开始**前**决算
+// （覆盖①），keptChannel('view') 配合调用方读真实视图状态覆盖②。
+// 单通道字符串入参维持旧契约（revisionAtStart 为数字、kept() 同义）。
 export function createNavigationOwnership(gateLike, channel = 'view') {
   if (!gateLike || typeof gateLike.revision !== 'function') {
     throw new TypeError('gateLike.revision must be a function');
   }
-  const revisionAtStart = gateLike.revision(channel);
+  const channels = Array.isArray(channel) ? channel : [channel];
+  const revisionAtStart = new Map(channels.map((ch) => [ch, gateLike.revision(ch)]));
+  const keptChannel = (ch) => gateLike.revision(ch) === revisionAtStart.get(ch);
   return {
     channel,
-    revisionAtStart,
-    kept: () => gateLike.revision(channel) === revisionAtStart,
+    revisionAtStart: Array.isArray(channel)
+      ? new Map(revisionAtStart)
+      : revisionAtStart.get(channel),
+    kept: () => channels.every(keptChannel),
+    keptChannel,
   };
 }

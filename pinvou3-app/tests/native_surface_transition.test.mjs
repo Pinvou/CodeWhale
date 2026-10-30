@@ -574,6 +574,55 @@ test('createNavigationOwnership: a newer same-channel session switch still wins 
   assert.equal(ownership.kept(), true, 'view revision untouched by the session-channel switch');
 });
 
+test('createNavigationOwnership: the session-channel switch during the prompt wait retires the intent (三十三轮评审 P2)', () => {
+  const gate = createNativeSurfaceTransitionGate({
+    acquireHide: () => assert.fail('hide must not be called'),
+    getContext: () => ({ sessionId: 'sid-1', hasWorkspace: false, visible: false }),
+  });
+  // 修后生产形态：动作起点拍 ['view','session'] 双通道（captureChatOwnership）。
+  const ownership = createNavigationOwnership(gate, ['view', 'session']);
+  assert.equal(ownership.kept(), true);
+
+  // prompt 挂起期间用户经侧栏切到会话 B：handleSwitchSession 走 session 通道
+  // （run 起手 issue 新修订号；其 publication 内的 setCurrentView 因
+  // publishing>0 走直改分支，view 修订号不动）——单看 view 尺子的旧形态
+  // kept() 恒真，晚到的动作自己再签发 session 票据时 isCurrent 也恒真，
+  // 会把已选会话 B 的用户拽进排查会话。双尺子形态必须在此退役。
+  gate.run(() => true, { channel: 'session', hideMode: 'none', guardSession: false });
+  assert.equal(
+    ownership.kept(),
+    false,
+    'a session-channel navigation during the pre-transition window must retire the intent',
+  );
+  assert.equal(
+    ownership.keptChannel('view'),
+    true,
+    'the view ruler stays independent: the completion check consumes the session ruler via isCurrent',
+  );
+});
+
+test('createNavigationOwnership: multi-channel capture snapshots every channel and validates inputs', () => {
+  const gate = createNativeSurfaceTransitionGate({
+    acquireHide: () => assert.fail('hide must not be called'),
+    getContext: () => ({ sessionId: 'a', hasWorkspace: false, visible: false }),
+  });
+  gate.invalidate('session'); // session 修订号从非零起点开始
+  const ownership = createNavigationOwnership(gate, ['view', 'session']);
+  assert.ok(ownership.revisionAtStart instanceof Map, 'array capture snapshots as a Map');
+  assert.equal(ownership.revisionAtStart.get('view'), 0);
+  assert.equal(ownership.revisionAtStart.get('session'), 1);
+  // 无导航时 kept() 真；view 动、session 不动 → kept() 假、keptChannel('session') 仍真。
+  gate.invalidate('view');
+  assert.equal(ownership.kept(), false);
+  assert.equal(ownership.keptChannel('session'), true);
+  assert.equal(ownership.keptChannel('view'), false);
+  // 未知通道按起点 0 快照，与 gate.revision 的只读语义一致。
+  const fresh = createNavigationOwnership(gate, ['untracked']);
+  assert.equal(fresh.kept(), true);
+  gate.invalidate('untracked');
+  assert.equal(fresh.kept(), false);
+});
+
 test('createNavigationOwnership defaults to the view channel and validates its gate', () => {
   const gate = createNativeSurfaceTransitionGate({
     acquireHide: () => assert.fail('hide must not be called'),

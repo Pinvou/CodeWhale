@@ -3056,9 +3056,15 @@ const App = () => {
         // 晚到的完成仍把用户拽回聊天。视图经 captureChatOwnership 在动作起点
         // 拍好并随 prompt 传入；未传票据的调用方按旧契约退回入口现拍（兼容
         // 兜底，不是产品路径，产品路径由 smoke ⑥-f 钉住）。
+        //
+        // 票据覆盖双通道（三十三轮评审 P2）：侧栏**切会话**走 session 通道
+        // （其 publication 内的 setCurrentView 走直改分支，不动 view 修订号），
+        // prompt 等待窗口里切到会话 B 后，晚到动作自己签发的新 session 票据
+        // isCurrent 恒真、单看 view 尺子也拦不住——所以拍 ['view','session']
+        // 两把尺子，在 self-transition 开始**前**决算（intentIntact，见下）。
         const ownership = (viewOwnership && typeof viewOwnership.kept === 'function')
           ? viewOwnership
-          : createNavigationOwnership(browserUiTransitionGateRef.current, 'view');
+          : createNavigationOwnership(browserUiTransitionGateRef.current, ['view', 'session']);
         let usedSid = null;
         try {
           // 复用前先确认失败会话仍存在（round-22 review P2）：用户可能在两次
@@ -3077,6 +3083,12 @@ const App = () => {
           lastFailedDoctorSidRef.current = null;
           if (!sid) return false;
           usedSid = sid;
+          // prompt/materialize 窗口的导航意图决算（三十三轮评审 P2）：本动作
+          // 自己的 session 票据尚未签发，此刻双通道修订号仍与动作起点可比——
+          // 期间任何侧栏切会话/去设置导航都让 intentIntact 变 false，晚到的
+          // 完成只送达、不切换（进入本 transition 后 session 修订号被自己
+          // 顶掉，kept() 不再可比，只能在这里拍板）。
+          const intentIntact = ownership.kept();
           const sent = await runBrowserUiTransition(async ({ isCurrent }) => {
             if (!isCurrent()) return false;
             // 先发送再跳转：发送失败时用户还留在设备管理页，「请重试」的
@@ -3103,10 +3115,15 @@ const App = () => {
             // 只剩一次闪跳）（第八轮评审 P3）。此复查只跳过视图切换：消息此时
             // 已真实送达新会话（侧栏历史可见），返回值必须如实报 true——原实现
             // 在这里返回 false，设备页会对已存在的消息再弹「没发出去」并保留
-            // 输入（第九轮评审 P1）。isCurrent 之外还要求 view 修订号未变：
-            // 同会话的去设置导航不走 session 通道，光看 isCurrent 拦不住
-            // （三十二轮评审 P2）。
-            if (isCurrent() && ownership.kept()) {
+            // 输入（第九轮评审 P1）。isCurrent 之外还有三把尺子（三十三轮评审
+            // P2）：prompt/materialize 窗口的 intentIntact；completion 窗口
+            // 同会话去设置导航不走 session 通道、光看 isCurrent 拦不住的
+            // view 修订号；以及**不经 gate 的直接视图变更**（如更新卡
+            // onShowChangelog 的 setCurrentView——本动作 publication 还开着，
+            // setCurrentView 走直改分支不动修订号），只能读真实视图状态兜底：
+            // 用户只要离开了设备页（currentView !== 'monitor'），归属即退役。
+            if (intentIntact && isCurrent() && ownership.keptChannel('view')
+              && currentViewRef.current === 'monitor') {
               setCodeModeOn(false);
               closeMobileSidebar();
               setCurrentView('chat');
@@ -3141,7 +3158,7 @@ const App = () => {
       // 传下去，动作在 buildDoctorPrompt 等待之前拍；不把 gate 对象本身暴露给
       // feature 层。browserUiTransitionGateRef 是稳定 ref，依赖为空即可。
       const captureDeviceChatOwnership = useCallback(
-        () => createNavigationOwnership(browserUiTransitionGateRef.current, 'view'),
+        () => createNavigationOwnership(browserUiTransitionGateRef.current, ['view', 'session']),
         [],
       );
 
