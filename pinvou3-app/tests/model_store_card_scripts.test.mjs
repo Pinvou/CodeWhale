@@ -322,3 +322,40 @@ test('服务端空的 script_sha256 不产生「有可用更新」徽标', async
     '服务端空的 script_sha256 时，详情弹窗不得给「更新脚本」入口'
   );
 });
+
+// 评审 P2-6：deployed 但 weights_ready_at 缺失的记录（升级前的老库、部署时发现
+// 权重缺失被清掉凭据），列表行卡按 libraryStateOf 判成 incomplete 显示「需继续
+// 下载」，详情弹窗却曾按 raw status==='deployed' 摆出「卸载部署」+「重新部署」；
+// 点「卸载部署」后卸载确认框又按 delete-only 只剩「彻底删除」。弹窗与行卡必须
+// 同一判据。
+test('deployed+缺 weights_ready_at：弹窗显示「需继续下载」且无「卸载部署」', async (t) => {
+  const ui = await fixture(t, { status: 'deployed', running: false });
+  ui.record.weights_ready_at = null;
+  const actions = [];
+  await ui.render(React.createElement(ModelDetailDialog, {
+    cardId: 'card', copy: dict.zh.uiModelStore, theme: 'light', scriptUpdates: {},
+    onClose() {},
+    onUninstall: () => actions.push('uninstall'),
+    onRedeploy: () => actions.push('redeploy'),
+  }));
+  // 状态行走 libraryStateOf → incomplete，与行卡徽章同一句文案
+  assert.ok(
+    ui.container.textContent.includes(dict.zh.uiModelStore.statusIncomplete),
+    '状态行必须显示「需继续下载」而不是「已部署」'
+  );
+  assert.equal(
+    ui.container.querySelectorAll('[data-testid="model-store-detail-action-uninstall"]').length,
+    0,
+    '权重未就绪时不得给「卸载部署」'
+  );
+  assert.equal(
+    ui.container.querySelectorAll('[data-testid="model-store-detail-secondary-redeploy"]').length,
+    0,
+    '权重未就绪时不得给「重新部署」'
+  );
+  // 与 downloaded+缺凭据（P2-1）一致：部署按钮禁用、次级动作只剩删除
+  const deploy = ui.container.querySelector('[data-testid="model-store-detail-action-deploy"]');
+  assert.ok(deploy);
+  assert.equal(deploy.disabled, true);
+  assert.deepEqual(actions, []);
+});

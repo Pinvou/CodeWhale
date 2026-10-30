@@ -502,7 +502,18 @@ function ModelDetailDialog({ cardId, copy, theme, onClose, onRedeploy, onToast, 
             <div className="mt-6">
             {(() => {
               const hasUpdate = scriptUpdates?.[record.card_id];
-              const isDeployed = record.status === 'deployed';
+              // 「算不算已部署」必须跟列表行卡用同一把尺子——libraryStateOf（P2-6）。
+              // 此前这里读 raw record.status：status='deployed' 但 weights_ready_at
+              // 缺失（升级前的老库、部署时发现权重缺失被清掉凭据）的记录，行卡判成
+              // incomplete 显示「需继续下载」，弹窗却摆出「卸载部署」+「重新部署」；
+              // 而点「卸载部署」后，卸载确认框又按 libraryStateOf 的 delete-only 只剩
+              // 「彻底删除」——同一份记录两套判据自相矛盾，正是 uninstallOptionsFor
+              // 文档警告过的那个模式。
+              // running 档也计入「已部署」：libraryStateOf 里 running 优先于 deployed，
+              // 运行中的服务当然也是部署过的，「卸载部署/重新部署」对它仍成立
+              // （运行中禁用，行为与原先 raw status==='deployed' 时一致）。
+              const state = libraryStateOf(record);
+              const isDeployed = state === 'deployed' || state === 'running';
               const isRunning = record.running;
               const weightsReady = !!record.weights_ready_at;
               const secondaryDisabled = isRunning || cardBusy;
