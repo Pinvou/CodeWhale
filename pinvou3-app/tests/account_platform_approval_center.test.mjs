@@ -23,8 +23,18 @@ test('drilldown maps only matching authoritative current business targets',()=>{
  for(const value of [{...detail,detail_availability:'DETAIL_PRESENTATION_UNAVAILABLE'},{...detail,command:{adjustment_id:'wrong'}},{...detail,command_type:'TOKEN_CREDENTIAL_REVOKE'}])assert.equal(approvalBusinessRoute(value),null);
 });
 test('center visibility preserves requester/approver/read scope without future permission',()=>{
- assert.ok(approvalCenterVisible(['platform.billing.payment-controls.resume.approve']));assert.ok(approvalCenterVisible(['platform.billing.repairs.request']));assert.ok(approvalCenterVisible(['platform.billing.wallets.read']));assert.equal(approvalCenterVisible(['platform.models.lifecycle.approve']),false);assert.equal(approvalCenterVisible([]),false);
+ assert.ok(approvalCenterVisible(['platform.billing.payment-controls.resume.approve']));assert.ok(approvalCenterVisible(['platform.billing.repairs.request']));assert.ok(approvalCenterVisible(['platform.billing.wallets.read']));assert.equal(approvalCenterVisible(['platform.models.read']),false);assert.equal(approvalCenterVisible([]),false);
 });
+test('existing Token governance requesters and approvers reach exact central command filters',()=>{
+ for(const [command,permission] of [['TOKEN_MODEL_LIFECYCLE_CHANGE','platform.models.lifecycle'],['TOKEN_MODEL_CATALOG_ROLLBACK','platform.models.catalog.rollback'],['TOKEN_CREDENTIAL_REVOKE','platform.tokens.credentials.revoke']]) {
+  for(const action of ['request','approve'])assert.ok(approvalCenterVisible([`${permission}.${action}`]));
+  const route=readApprovalRoute(`?approval_view=pending&approval_command_type=${command}`);
+  assert.equal(route.commandType,command);
+  assert.deepEqual(approvalQuery(route,id),{command_type:command,status:'SUBMITTED'});
+ }
+ assert.equal(approvalCenterVisible(['platform.tokens.credentials.revoke.future']),false);
+});
+
 test('current client sends actual directory and mine filters with control and signal',async()=>{
  const original=globalThis.fetch;const calls=[];const client=new AdminPlatformClient();let bad=false;
  globalThis.fetch=async(url,options)=>{calls.push({url,options});if(url.endsWith('/capability'))return new Response(JSON.stringify({control:{version:1,epoch:1,authorization_relay_epoch:1},session_approval_wire_version:2}));if(url.endsWith('/directory'))return new Response(JSON.stringify({schema_version:1,platform_authorization_version:1,items:[]}),{headers:{'X-Platform-Authorization-Version':bad?'2':'1'}});return new Response('{"items":[]}');};

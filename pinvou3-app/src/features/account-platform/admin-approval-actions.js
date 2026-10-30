@@ -1,4 +1,4 @@
-export const approvalCommands = Object.freeze(['WALLET_ADJUSTMENT', 'PAYMENT_PROVIDER_RESUME', 'PAYMENT_PRODUCT_RESUME', 'LEDGER_REPAIR', 'ENTITLEMENT_COMPONENT_ADJUSTMENT', 'RECEIVABLE_WRITE_OFF', 'PAYMENT_FINANCIAL_REPAIR', 'REFUND_EXCEPTION_REPAIR', 'CHARGEBACK_FINANCIAL_REPAIR', 'RECONCILIATION_FINANCIAL_REPAIR', 'USAGE_SETTLEMENT_REPAIR']);
+export const approvalCommands = Object.freeze(['WALLET_ADJUSTMENT', 'PAYMENT_PROVIDER_RESUME', 'PAYMENT_PRODUCT_RESUME', 'LEDGER_REPAIR', 'ENTITLEMENT_COMPONENT_ADJUSTMENT', 'RECEIVABLE_WRITE_OFF', 'PAYMENT_FINANCIAL_REPAIR', 'REFUND_EXCEPTION_REPAIR', 'CHARGEBACK_FINANCIAL_REPAIR', 'RECONCILIATION_FINANCIAL_REPAIR', 'USAGE_SETTLEMENT_REPAIR', 'TOKEN_MODEL_LIFECYCLE_CHANGE', 'TOKEN_MODEL_CATALOG_ROLLBACK', 'TOKEN_CREDENTIAL_REVOKE']);
 export const approvalViews = Object.freeze(['mine', 'pending', 'execution', 'directory']);
 export const executionStatuses = Object.freeze(['EXECUTION_FAILED', 'EXECUTING', 'APPROVED', 'EXECUTED']);
 export const approvalStatuses = Object.freeze(['DRAFT', 'SUBMITTED', 'APPROVED', 'EXECUTING', 'EXECUTION_FAILED', 'EXECUTED', 'REJECTED', 'WITHDRAWN', 'EXPIRED', 'INVALIDATED']);
@@ -6,7 +6,10 @@ export const approvalStatuses = Object.freeze(['DRAFT', 'SUBMITTED', 'APPROVED',
 export function approvalCenterVisible(permissions) {
   return ['platform.billing.wallets.read', 'platform.billing.repairs.request', 'platform.billing.repairs.approve',
     'platform.billing.adjustments.approve', 'platform.billing.payment-controls.resume.request',
-    'platform.billing.payment-controls.resume.approve'].some(permission => permissions.includes(permission));
+    'platform.billing.payment-controls.resume.approve',
+    'platform.models.lifecycle.request', 'platform.models.lifecycle.approve',
+    'platform.models.catalog.rollback.request', 'platform.models.catalog.rollback.approve',
+    'platform.tokens.credentials.revoke.request', 'platform.tokens.credentials.revoke.approve'].some(permission => permissions.includes(permission));
 }
 
 export function readApprovalRoute(search = '') {
