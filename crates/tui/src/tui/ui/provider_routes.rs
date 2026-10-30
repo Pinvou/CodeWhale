@@ -583,6 +583,7 @@ pub(crate) async fn sync_mode_update(app: &App, engine_handle: &EngineHandle) {
             auto_approve: app_auto_approve_enabled(app),
             approval_mode: app.approval_mode,
             configured_sandbox_mode: app.configured_sandbox_mode.clone(),
+            ask_on_guardrail: None,
         })
         .await;
 }

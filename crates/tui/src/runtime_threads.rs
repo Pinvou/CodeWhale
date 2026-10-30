@@ -4256,6 +4256,7 @@ impl RuntimeThreadManager {
                 auto_approve: policy.auto_approve(),
                 approval_mode: policy.permission,
                 configured_sandbox_mode,
+                ask_on_guardrail: None,
             });
         }
     }
@@ -6048,6 +6049,7 @@ impl RuntimeThreadManager {
                 auto_approve: policy.auto_approve(),
                 approval_mode: policy.permission,
                 configured_sandbox_mode: configured_sandbox_mode.clone(),
+                ask_on_guardrail: None,
             });
         }
 
@@ -7740,6 +7742,7 @@ impl RuntimeThreadManager {
                 auto_approve,
                 policy.permission,
                 configured_sandbox_mode,
+                None,
             );
             let _sender = permit.send(op);
             touch_lru(&mut active.lru, thread_id);
@@ -8056,6 +8059,7 @@ impl RuntimeThreadManager {
                 policy.auto_approve(),
                 policy.permission,
                 configured_sandbox_mode,
+                None,
             );
             let _sender = permit.send(op);
             touch_lru(&mut active.lru, thread_id);

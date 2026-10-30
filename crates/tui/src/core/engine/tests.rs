@@ -10714,6 +10714,7 @@ fn exec_shell_scenario() {
             Path::new("/repo"),
             &[],
             crate::tui::approval::ApprovalMode::Auto,
+            false,
         );
 
         assert_eq!(
@@ -10738,6 +10739,7 @@ fn exec_shell_scenario() {
             Path::new("/repo"),
             &[],
             crate::tui::approval::ApprovalMode::Never,
+            false,
         );
 
         assert_eq!(
@@ -10761,6 +10763,7 @@ fn exec_shell_scenario() {
             Path::new("/repo"),
             &[],
             crate::tui::approval::ApprovalMode::Auto,
+            false,
         );
 
         assert_eq!(decision, None);
@@ -10781,6 +10784,7 @@ fn canonical_bash_run_honors_legacy_typed_ask_rules() {
         Path::new("/repo"),
         &[],
         crate::tui::approval::ApprovalMode::Auto,
+        false,
     );
 
     assert_eq!(
@@ -10810,6 +10814,7 @@ fn exec_shell_allow_rule_decision_allows_only_exact_command_in_scoped_repo() {
             Path::new("/repo"),
             &[],
             crate::tui::approval::ApprovalMode::Suggest,
+            false,
         ),
         Some(ToolAskRuleDecision::Allow)
     );
@@ -10821,6 +10826,7 @@ fn exec_shell_allow_rule_decision_allows_only_exact_command_in_scoped_repo() {
             Path::new("/repo"),
             &[],
             crate::tui::approval::ApprovalMode::Suggest,
+            false,
         ),
         None
     );
@@ -10832,6 +10838,7 @@ fn exec_shell_allow_rule_decision_allows_only_exact_command_in_scoped_repo() {
             Path::new("/other"),
             &[],
             crate::tui::approval::ApprovalMode::Suggest,
+            false,
         ),
         None
     );
@@ -10864,6 +10871,7 @@ fn exec_shell_scoped_allow_rule_does_not_follow_cwd_into_attached_root() {
             Path::new("/repo"),
             &roots,
             crate::tui::approval::ApprovalMode::Suggest,
+            false,
         ),
         Some(ToolAskRuleDecision::Allow)
     );
@@ -10877,6 +10885,7 @@ fn exec_shell_scoped_allow_rule_does_not_follow_cwd_into_attached_root() {
             Path::new("/repo"),
             &roots,
             crate::tui::approval::ApprovalMode::Suggest,
+            false,
         ),
         Some(ToolAskRuleDecision::Allow)
     );
@@ -10890,6 +10899,7 @@ fn exec_shell_scoped_allow_rule_does_not_follow_cwd_into_attached_root() {
             Path::new("/repo"),
             &roots,
             crate::tui::approval::ApprovalMode::Suggest,
+            false,
         ),
         None,
         "a /repo-scoped allow must not auto-approve execution under an attached root"
@@ -10913,6 +10923,7 @@ fn exec_shell_scoped_allow_rule_does_not_follow_cwd_into_attached_root() {
             Path::new("/repo"),
             &roots,
             crate::tui::approval::ApprovalMode::Suggest,
+            false,
         ),
         Some(ToolAskRuleDecision::Allow)
     );
@@ -10924,6 +10935,7 @@ fn exec_shell_scoped_allow_rule_does_not_follow_cwd_into_attached_root() {
             Path::new("/repo"),
             &roots,
             crate::tui::approval::ApprovalMode::Suggest,
+            false,
         ),
         None
     );
@@ -10957,6 +10969,7 @@ fn exec_shell_attached_root_scoped_deny_reaches_rule_decision() {
         Path::new("/repo"),
         &[PathBuf::from("/shared")],
         crate::tui::approval::ApprovalMode::Suggest,
+        false,
     );
     assert!(
         matches!(decision, Some(ToolAskRuleDecision::Block(_))),
@@ -10972,6 +10985,7 @@ fn exec_shell_attached_root_scoped_deny_reaches_rule_decision() {
         Path::new("/repo"),
         &[],
         crate::tui::approval::ApprovalMode::Suggest,
+        false,
     );
     assert_eq!(decision, None);
 }
@@ -10993,6 +11007,7 @@ fn file_ask_scenario() {
             Path::new("/repo"),
             &[],
             crate::tui::approval::ApprovalMode::Auto,
+            false,
         );
 
         assert_eq!(
@@ -11017,6 +11032,7 @@ fn file_ask_scenario() {
             Path::new("/repo"),
             &[],
             crate::tui::approval::ApprovalMode::Auto,
+            false,
         );
 
         assert_eq!(
@@ -11041,6 +11057,7 @@ fn file_ask_scenario() {
             Path::new("/repo"),
             &[],
             crate::tui::approval::ApprovalMode::Never,
+            false,
         );
 
         assert_eq!(
@@ -11064,6 +11081,7 @@ fn file_ask_scenario() {
             Path::new("/repo"),
             &[],
             crate::tui::approval::ApprovalMode::Auto,
+            false,
         );
 
         assert_eq!(decision, None);
@@ -11084,6 +11102,7 @@ fn canonical_file_action_honors_legacy_path_ask_rules() {
         Path::new("/repo"),
         &[],
         crate::tui::approval::ApprovalMode::Auto,
+        false,
     );
 
     assert_eq!(
@@ -11114,6 +11133,7 @@ fn camelCase_file_path_alias_reaches_the_ask_rule_and_carve_out_judgments() {
         Path::new("/repo"),
         &[],
         crate::tui::approval::ApprovalMode::Auto,
+        false,
     );
     assert_eq!(
         camel,
@@ -11130,6 +11150,7 @@ fn camelCase_file_path_alias_reaches_the_ask_rule_and_carve_out_judgments() {
         Path::new("/repo"),
         &[],
         crate::tui::approval::ApprovalMode::Auto,
+        false,
     );
     assert_eq!(
         snake, camel,
@@ -11146,6 +11167,7 @@ fn camelCase_file_path_alias_reaches_the_ask_rule_and_carve_out_judgments() {
         Path::new("/repo"),
         &[],
         crate::tui::approval::ApprovalMode::Auto,
+        false,
     );
     assert_eq!(canonical_wins, None, "path wins; other.rs is not ruled");
 }
@@ -11178,6 +11200,7 @@ fn apply_patch_allow_requires_every_touched_path_to_match() {
         Path::new("/repo"),
         &[],
         crate::tui::approval::ApprovalMode::Suggest,
+        false,
     );
     assert_eq!(fully_allowed, Some(ToolAskRuleDecision::Allow));
 
@@ -11193,6 +11216,7 @@ fn apply_patch_allow_requires_every_touched_path_to_match() {
         Path::new("/repo"),
         &[],
         crate::tui::approval::ApprovalMode::Suggest,
+        false,
     );
     assert_eq!(partially_allowed, None);
 }
@@ -14271,6 +14295,9 @@ async fn yolo_mode_does_not_prompt_for_typed_ask_rule() {
     // stale ApprovalMode::Auto maps to OnFailure in the execpolicy (honors
     // ask-rules). The auto_review safety floor and typed deny rules still
     // apply; only the ask-rule Prompt is suppressed under Full Access.
+    // (Pinvou tri-mode safety: an `ask_on_guardrail`-armed session is the
+    // one exception — the Prompt is honored because the host guaranteed a
+    // person can answer; the unarmed default this test pins is unchanged.)
     let (mut engine, handle) = Engine::new(
         EngineConfig {
             exec_policy_engine: ask_rule_engine("echo"),
@@ -14791,7 +14818,12 @@ async fn full_access_blocks_non_bypassable_registered_tools_without_prompting() 
     // This intentionally reverses upstream v0.9.12's
     // `full_access_auto_approves_non_bypassable_registered_tools`. Pinvou
     // treats a tool that requires an explicit human decision as unavailable
-    // in Full Access, whose posture cannot open an approval prompt.
+    // in Full Access, whose posture cannot open an approval prompt. (Pinvou
+    // tri-mode safety: an `ask_on_guardrail`-armed session is the one
+    // exception — it has guaranteed a person can answer, so the hold raises
+    // an approval instead; pinned by
+    // `forkguard_armed_full_access_hold_prompts_instead_of_blocking`. This
+    // test keeps pinning the unarmed default.)
     let _lock = lock_test_env();
     let workspace = tempdir().expect("tempdir");
     let marker = workspace.path().join("runtime-tool-must-run");
@@ -14887,6 +14919,7 @@ async fn full_access_permission_allow_cannot_bypass_repo_law() {
             workspace.path(),
             &[],
             crate::tui::approval::ApprovalMode::Bypass,
+            false,
         ),
         Some(ToolAskRuleDecision::Allow),
         "precondition: the remembered grant must match before repo law tightens the plan"
@@ -15237,6 +15270,7 @@ async fn full_access_permission_allow_cannot_bypass_background_catastrophic_floo
             workspace.path(),
             &[],
             crate::tui::approval::ApprovalMode::Bypass,
+            false,
         ),
         Some(ToolAskRuleDecision::Allow),
         "precondition: the remembered grant must match before the safety floor tightens the plan"
@@ -17169,6 +17203,7 @@ async fn change_mode_refreshes_session_prompt_and_updates_session() {
             auto_approve: true,
             approval_mode: crate::tui::approval::ApprovalMode::Bypass,
             configured_sandbox_mode: None,
+            ask_on_guardrail: None,
         })
         .await
         .expect("send change mode");
@@ -17256,6 +17291,7 @@ async fn live_runtime_authority_applies_latest_posture_and_sandbox_before_tools(
                 auto_approve,
                 approval_mode: posture,
                 configured_sandbox_mode: sandbox_mode,
+                ask_on_guardrail: None,
             })
             .expect("publish live runtime authority");
 
@@ -17814,6 +17850,7 @@ async fn change_mode_op_updates_current_mode_and_emits_status() {
             auto_approve: true,
             approval_mode: crate::tui::approval::ApprovalMode::Bypass,
             configured_sandbox_mode: None,
+            ask_on_guardrail: None,
         })
         .await
         .expect("send change mode");
@@ -18570,6 +18607,7 @@ async fn edit_last_turn_preserves_current_mode() {
             auto_approve: false,
             approval_mode: crate::tui::approval::ApprovalMode::Suggest,
             configured_sandbox_mode: None,
+            ask_on_guardrail: None,
         })
         .await
         .expect("send plan mode");
@@ -21541,6 +21579,7 @@ fn turn_metadata_is_byte_identical_across_identical_consecutive_turns() {
                 approval_mode: engine.session.approval_mode,
                 working_set: &engine.session.working_set,
                 policy_narrowing: None,
+                authority_transition: None,
             },
         )
     };
@@ -21679,6 +21718,7 @@ fn turn_meta_block_stays_within_measured_ceiling() {
             approval_mode: engine.session.approval_mode,
             working_set: &engine.session.working_set,
             policy_narrowing: None,
+            authority_transition: None,
         },
     );
     let ContentBlock::Text { text, .. } = message.content.last().expect("turn metadata block")
@@ -21730,6 +21770,7 @@ fn turn_metadata_names_the_effective_sandbox_posture() {
                 approval_mode: engine.session.approval_mode,
                 working_set: &engine.session.working_set,
                 policy_narrowing: None,
+                authority_transition: None,
             },
         );
         let ContentBlock::Text { text, .. } = message.content.last().expect("turn metadata block")
@@ -25795,6 +25836,7 @@ fn engine_handle_try_send_does_not_block_when_op_channel_is_full() {
                 false,
                 crate::tui::approval::ApprovalMode::Suggest,
                 None,
+                None,
             ),
         ))),
         steer_control: Arc::new(StdMutex::new(SteerControlState::default())),
@@ -25817,6 +25859,7 @@ fn engine_handle_try_send_does_not_block_when_op_channel_is_full() {
         auto_approve: false,
         approval_mode: crate::tui::approval::ApprovalMode::Auto,
         configured_sandbox_mode: None,
+        ask_on_guardrail: None,
     });
     assert!(result.is_err(), "try_send should fail when channel is full");
     let authority = handle.runtime_permission_authority();
@@ -25859,6 +25902,7 @@ async fn full_mailbox_posture_update_supersedes_queued_change_mode() {
             auto_approve: false,
             approval_mode: ApprovalMode::Suggest,
             configured_sandbox_mode: None,
+            ask_on_guardrail: None,
         })
         .expect("queue older posture");
     for _ in 1..ENGINE_OP_CHANNEL_CAPACITY {
@@ -25874,6 +25918,7 @@ async fn full_mailbox_posture_update_supersedes_queued_change_mode() {
         auto_approve: false,
         approval_mode: ApprovalMode::Auto,
         configured_sandbox_mode: Some("read-only".to_string()),
+        ask_on_guardrail: None,
     });
     assert!(
         result.is_err(),
@@ -30242,6 +30287,7 @@ fn exec_judged_cwd_resolves_symlinks_like_execution() {
             Path::new(&primary),
             &roots,
             crate::tui::approval::ApprovalMode::Suggest,
+            false,
         ),
         Some(ToolAskRuleDecision::Allow)
     );
@@ -30256,6 +30302,7 @@ fn exec_judged_cwd_resolves_symlinks_like_execution() {
             Path::new(&primary),
             &roots,
             crate::tui::approval::ApprovalMode::Suggest,
+            false,
         ),
         Some(ToolAskRuleDecision::Allow)
     );
@@ -30270,6 +30317,7 @@ fn exec_judged_cwd_resolves_symlinks_like_execution() {
             Path::new(&primary),
             &roots,
             crate::tui::approval::ApprovalMode::Suggest,
+            false,
         ),
         Some(ToolAskRuleDecision::Allow)
     );
@@ -30316,6 +30364,7 @@ fn exec_judged_cwd_resolves_absent_interior_behind_symlink() {
             Path::new(&primary),
             &roots,
             crate::tui::approval::ApprovalMode::Suggest,
+            false,
         ),
         Some(ToolAskRuleDecision::Allow)
     );
@@ -30350,6 +30399,440 @@ fn composer_bang_ask_rule_site_forwards_session_workspace_roots() {
         forwarded_all,
         "the engine.rs composer-bang call site must forward the session's workspace_roots"
     );
+}
+
+// ───────────────────────── Pinvou tri-mode safety (ask-on-guardrail) ─────────────────────────
+//
+// These tests pin the host-armed interactive guardrail prompts: unarmed
+// behavior must stay byte-identical to the pre-flag doctrine (the existing
+// `full_access_blocks_non_bypassable_registered_tools_without_prompting`,
+// `yolo_mode_does_not_prompt_for_typed_ask_rule`, and
+// `sandbox_escalation_fails_closed_when_the_posture_cannot_prompt` pins keep
+// enforcing that); armed behavior converts the fail-closed guardrail faces
+// into approval requests because the host has guaranteed a person can answer.
+
+#[test]
+fn forkguard_armed_deny_face_becomes_guardrail_prompt_unarmed_stays_block() {
+    let engine =
+        codewhale_execpolicy::ExecPolicyEngine::new(Vec::new(), vec!["rm -rf".to_string()]);
+    let workspace = Path::new("/repo");
+    let command = "rm -rf /tmp/whatever";
+
+    // Unarmed (the default): the denied-prefix face stays a hard block with
+    // the main-line wording.
+    let unarmed = super::tool_ask_rule_decision_for_context(
+        &engine,
+        "exec_shell",
+        command,
+        None,
+        workspace,
+        workspace,
+        &[],
+        crate::tui::approval::ApprovalMode::Bypass,
+        false,
+    );
+    match unarmed {
+        Some(ToolAskRuleDecision::Block(reason)) => {
+            assert!(
+                reason.contains("denied prefix rule 'rm -rf'"),
+                "unarmed deny face must carry the main-line reason: {reason}"
+            );
+        }
+        other => panic!("unarmed deny face must Block, got {other:?}"),
+    }
+
+    // Armed under Full Access: the same face becomes an approval request
+    // carrying the full matching evidence — the rich denied-prefix matching
+    // face is what makes armed prompting meaningful.
+    let armed = super::tool_ask_rule_decision_for_context(
+        &engine,
+        "exec_shell",
+        command,
+        None,
+        workspace,
+        workspace,
+        &[],
+        crate::tui::approval::ApprovalMode::Bypass,
+        true,
+    );
+    match armed {
+        Some(ToolAskRuleDecision::Prompt(reason)) => {
+            assert!(
+                reason.starts_with("Guardrail approval requested (ask-on-guardrail is armed):"),
+                "armed deny face must be framed as a guardrail approval: {reason}"
+            );
+            assert!(
+                reason.contains("denied prefix rule 'rm -rf'"),
+                "armed prompt must carry the matching evidence: {reason}"
+            );
+        }
+        other => panic!("armed deny face must Prompt, got {other:?}"),
+    }
+
+    // `Never` never prompts, even when armed: nobody is at the card.
+    let never_armed = super::tool_ask_rule_decision_for_context(
+        &engine,
+        "exec_shell",
+        command,
+        None,
+        workspace,
+        workspace,
+        &[],
+        crate::tui::approval::ApprovalMode::Never,
+        true,
+    );
+    assert!(
+        matches!(never_armed, Some(ToolAskRuleDecision::Block(_))),
+        "Never posture keeps the deny face even when armed, got {never_armed:?}"
+    );
+}
+
+#[test]
+fn forkguard_turn_meta_authority_transition_renders_only_on_change() {
+    use crate::core::authority::{AuthorityTransition, TurnMetaPosture};
+    let tmp = tempdir().expect("tempdir");
+    let config = EngineConfig {
+        workspace: tmp.path().to_path_buf(),
+        ..EngineConfig::default()
+    };
+    let (engine, _handle) = Engine::new(config, &Config::default());
+    let prompt_context = NextTurnPromptContext::for_planned_turn(
+        ApiProvider::Deepseek,
+        "deepseek-v4-flash".to_string(),
+        None,
+        AppMode::Agent,
+        None,
+        crate::tools::goal::GoalStatus::Active,
+        None,
+        false,
+        None,
+    );
+    fn snapshot_with<'a>(
+        engine: &'a Engine,
+        prompt_context: &'a NextTurnPromptContext,
+        transition: Option<AuthorityTransition>,
+    ) -> TurnMetadataSnapshot<'a> {
+        TurnMetadataSnapshot {
+            prompt_context,
+            system_prompt: None,
+            approval_mode: engine.session.approval_mode,
+            working_set: &engine.session.working_set,
+            policy_narrowing: None,
+            authority_transition: transition,
+        }
+    }
+    let meta_of = |msg: &Message| -> String {
+        let ContentBlock::Text { text, .. } = msg.content.last().expect("turn metadata block")
+        else {
+            panic!("expected text metadata block");
+        };
+        text.clone()
+    };
+    let message_for = |engine: &Engine, transition: Option<AuthorityTransition>| {
+        engine.user_text_message_from_snapshot(
+            "mode flip context".to_string(),
+            &prompt_context.model,
+            false,
+            None,
+            false,
+            UserInputProvenance::ExternalUser,
+            snapshot_with(engine, &prompt_context, transition),
+        )
+    };
+
+    // No transition: the block carries no transition line at all.
+    let plain_meta = meta_of(&message_for(&engine, None));
+    assert!(
+        !plain_meta.contains("Authority transition"),
+        "blocks must stay transition-free without a host change: {plain_meta}"
+    );
+
+    // A transition renders exactly one explicit line naming both postures.
+    let transition = AuthorityTransition::from_postures(
+        TurnMetaPosture {
+            mode: AppMode::Agent,
+            approval: crate::tui::approval::ApprovalMode::Bypass,
+            ask_on_guardrail: true,
+        },
+        TurnMetaPosture {
+            mode: AppMode::Agent,
+            approval: crate::tui::approval::ApprovalMode::Suggest,
+            ask_on_guardrail: false,
+        },
+    );
+    let changed_meta = meta_of(&message_for(&engine, Some(transition)));
+    assert!(
+        changed_meta.contains(
+            "Authority transition (host): agent (Full Access, guardrail prompts armed) -> agent (Ask, guardrail prompts disarmed); reason: host_authority_change"
+        ),
+        "the transition line must be explicit and self-describing: {changed_meta}"
+    );
+    assert_eq!(
+        changed_meta
+            .lines()
+            .filter(|line| line.contains("Authority transition"))
+            .count(),
+        1,
+        "exactly one transition line"
+    );
+}
+
+#[test]
+fn forkguard_live_turn_meta_builder_reads_the_pending_transition() {
+    use crate::core::authority::{AuthorityTransition, TurnMetaPosture};
+    let tmp = tempdir().expect("tempdir");
+    let config = EngineConfig {
+        workspace: tmp.path().to_path_buf(),
+        ..EngineConfig::default()
+    };
+    let (mut engine, _handle) = Engine::new(config, &Config::default());
+    let block_text = |engine: &Engine| -> String {
+        match engine.turn_metadata_block(
+            "deepseek-v4-flash",
+            false,
+            None,
+            false,
+            UserInputProvenance::ExternalUser,
+            "hello",
+            None,
+        ) {
+            ContentBlock::Text { text, .. } => text,
+            other => panic!("expected text metadata block, got {other:?}"),
+        }
+    };
+
+    // No pending transition: byte-stable ordinary block.
+    engine.pending_authority_transition = None;
+    let plain = block_text(&engine);
+    assert!(!plain.contains("Authority transition"), "{plain}");
+
+    // The turn-start comparison stores the pending transition; the live
+    // builder must render it (this is the wiring between the turn-start
+    // compare and the outbound message).
+    engine.pending_authority_transition = Some(AuthorityTransition::from_postures(
+        TurnMetaPosture {
+            mode: AppMode::Agent,
+            approval: crate::tui::approval::ApprovalMode::Bypass,
+            ask_on_guardrail: true,
+        },
+        TurnMetaPosture {
+            mode: AppMode::Agent,
+            approval: crate::tui::approval::ApprovalMode::Suggest,
+            ask_on_guardrail: false,
+        },
+    ));
+    let armed = block_text(&engine);
+    assert!(
+        armed.contains("Authority transition (host):"),
+        "live builder must render the pending transition: {armed}"
+    );
+}
+
+#[tokio::test]
+async fn forkguard_armed_full_access_hold_prompts_instead_of_blocking() {
+    // The unarmed sibling of this behavior is pinned by
+    // `full_access_blocks_non_bypassable_registered_tools_without_prompting`.
+    // Armed, the same hold must reach the host as an approval request with
+    // `approval_force_prompt` set (no session grant or posture shortcut may
+    // consume it silently), and the deny decision must read as an approval
+    // denial — never as the Full Access block.
+    use wiremock::matchers::{body_string_contains, method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    let _lock = lock_test_env();
+    let workspace = tempdir().expect("tempdir");
+    let engine_config = EngineConfig {
+        model: crate::config::DEFAULT_TEXT_MODEL.to_string(),
+        workspace: workspace.path().to_path_buf(),
+        mcp_config_path: workspace.path().join("mcp.json"),
+        snapshots_enabled: false,
+        subagents_enabled: false,
+        ..EngineConfig::default()
+    };
+
+    let server = MockServer::start().await;
+    let tool_delta = json!({
+        "id": "chatcmpl-armed-hold",
+        "choices": [{
+            "index": 0,
+            "delta": {"tool_calls": [{
+                "index": 0,
+                "id": "call_armed_hold_0",
+                "type": "function",
+                "function": {
+                    "name": "start_mcp_server",
+                    "arguments": json!({"server": "probe-server", "name": "armed-probe"}).to_string(),
+                },
+            }]},
+            "finish_reason": serde_json::Value::Null,
+        }],
+    });
+    let tool_finish = json!({
+        "id": "chatcmpl-armed-hold",
+        "choices": [{"index": 0, "delta": {}, "finish_reason": "tool_calls"}],
+    });
+    let tool_call_sse = format!("data: {tool_delta}\n\ndata: {tool_finish}\n\ndata: [DONE]\n\n");
+    let done_sse = concat!(
+        "data: {\"id\":\"chatcmpl-armed-done\",\"choices\":[{\"index\":0,",
+        "\"delta\":{\"content\":\"done\"},\"finish_reason\":null}]}\n\n",
+        "data: {\"id\":\"chatcmpl-armed-done\",\"choices\":[{\"index\":0,\"delta\":{},",
+        "\"finish_reason\":\"stop\"}]}\n\n",
+        "data: [DONE]\n\n",
+    );
+
+    // `start_mcp_server` is a deferred tool: its first use returns the
+    // schema receipt (discovery, never execution), and the model's retry is
+    // the call the armed hold gates. Three-step wire: (lowest priority)
+    // first request -> tool call; (2) schema-receipt followup -> the same
+    // tool call again, now hydrated; (highest) denial followup -> done.
+    Mock::given(method("POST"))
+        .and(path("/v1/chat/completions"))
+        .and(body_string_contains("denied by user"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .insert_header("content-type", "text/event-stream")
+                .set_body_string(done_sse),
+        )
+        .expect(1)
+        .with_priority(1)
+        .mount(&server)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/v1/chat/completions"))
+        .and(body_string_contains("Retry with the loaded schema"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .insert_header("content-type", "text/event-stream")
+                .set_body_string(tool_call_sse.clone()),
+        )
+        .expect(1)
+        .with_priority(2)
+        .mount(&server)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/v1/chat/completions"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .insert_header("content-type", "text/event-stream")
+                .set_body_string(tool_call_sse),
+        )
+        .expect(1)
+        .with_priority(3)
+        .mount(&server)
+        .await;
+
+    let api_config = Config {
+        api_key: Some("test-key".to_string()),
+        base_url: Some(server.uri()),
+        ..Config::default()
+    };
+    let (engine, handle) = Engine::new(engine_config, &api_config);
+    let handle_for_approval = handle.clone();
+    let run_task = tokio::spawn(engine.run());
+
+    // Arm through the same `ChangeMode` channel hosts use for the toggle.
+    handle
+        .send(Op::ChangeMode {
+            mode: AppMode::Agent,
+            allow_shell: true,
+            trust_mode: true,
+            auto_approve: true,
+            approval_mode: crate::tui::approval::ApprovalMode::Bypass,
+            configured_sandbox_mode: None,
+            ask_on_guardrail: Some(true),
+        })
+        .await
+        .expect("arm guardrail prompts");
+
+    handle
+        .send(Op::SendMessage {
+            content: "exercise the armed Full Access hold".to_string(),
+            mode: AppMode::Agent,
+            route: resolved_route_for_test(&api_config, crate::config::DEFAULT_TEXT_MODEL),
+            compaction: Box::new(CompactionConfig::default()),
+            goal_objective: None,
+            goal_token_budget: None,
+            goal_status: crate::tools::goal::GoalStatus::Active,
+            reasoning_effort: None,
+            reasoning_effort_auto: false,
+            auto_model: false,
+            allow_shell: true,
+            trust_mode: true,
+            auto_approve: true,
+            approval_mode: crate::tui::approval::ApprovalMode::Bypass,
+            translation_enabled: false,
+            allowed_tools: None,
+            dynamic_tools: Vec::new(),
+            hook_executor: None,
+            verbosity: None,
+            provenance: UserInputProvenance::ExternalUser,
+            turn_tool_security: None,
+            submission_id: None,
+        })
+        .await
+        .expect("send armed Full Access model turn");
+
+    let mut saw_prompt = false;
+    let mut saw_complete = false;
+    let mut rx = handle.rx_event.write().await;
+    while let Some(event) = tokio::time::timeout(model_turn_event_timeout(), rx.recv())
+        .await
+        .expect("timed out waiting for armed hold event")
+    {
+        match event {
+            Event::ApprovalRequired {
+                id,
+                tool_name,
+                description,
+                approval_force_prompt,
+                ..
+            } => {
+                assert_eq!(tool_name, "start_mcp_server");
+                assert!(
+                    approval_force_prompt,
+                    "armed hold must carry approval_force_prompt"
+                );
+                assert!(
+                    description.contains("ask-on-guardrail is armed"),
+                    "armed hold description must say why it prompts: {description}"
+                );
+                saw_prompt = true;
+                handle_for_approval
+                    .deny_tool_call(id)
+                    .await
+                    .expect("deny armed hold");
+            }
+            Event::ToolCallComplete { name, result, .. } if name == "start_mcp_server" => {
+                // The first completion is the deferred-tool schema receipt
+                // (an Ok result, never executed); the hold denial is the
+                // error completion after the hydrated retry.
+                let Some(error) = result.as_ref().err() else {
+                    continue;
+                };
+                let error = error.to_string();
+                assert!(
+                    error.contains("denied by user"),
+                    "armed hold denial must read as an approval denial: {error}"
+                );
+                assert!(
+                    !error.contains("blocked in Full Access"),
+                    "armed hold must not be phrased as the Full Access block: {error}"
+                );
+                saw_complete = true;
+            }
+            Event::TurnComplete { status, .. } => {
+                assert_eq!(status, TurnOutcomeStatus::Completed);
+                break;
+            }
+            _ => {}
+        }
+    }
+    drop(rx);
+
+    handle.send(Op::Shutdown).await.expect("shutdown engine");
+    run_task.await.expect("engine task");
+    assert!(saw_prompt, "armed Full Access hold must prompt");
+    assert!(saw_complete, "denied armed hold must complete the turn");
 }
 
 #[path = "partial_input_differential_tests.rs"]

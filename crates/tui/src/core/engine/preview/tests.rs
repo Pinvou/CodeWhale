@@ -314,6 +314,7 @@ fn turn_metadata_uses_planned_cross_route_limits_not_installed_limits() {
             approval_mode: crate::tui::approval::ApprovalMode::Suggest,
             working_set: &engine.session.working_set,
             policy_narrowing: None,
+            authority_transition: None,
         },
     );
     let metadata = message

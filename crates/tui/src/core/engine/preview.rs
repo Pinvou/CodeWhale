@@ -416,6 +416,7 @@ impl Engine {
                 approval_mode: input_policy.approval_mode_for_session(),
                 working_set: &previewed_working_set,
                 policy_narrowing: input_policy.narrowing.as_ref(),
+                authority_transition: self.pending_authority_transition.clone(),
             },
         );
         *self

@@ -294,6 +294,10 @@ pub enum Op {
         approval_mode: String,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         configured_sandbox_mode: Option<String>,
+        /// Host-armed interactive guardrail prompts (Pinvou tri-mode safety).
+        /// Absent leaves the session's current arming unchanged.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        ask_on_guardrail: Option<bool>,
     },
 
     SetDisallowedTools {
@@ -619,6 +623,7 @@ mod tests {
                 auto_approve: false,
                 approval_mode: "bypass".into(),
                 configured_sandbox_mode: Some("workspace-write".into()),
+                ask_on_guardrail: Some(true),
             },
             Op::SetDisallowedTools {
                 tools: Some(vec!["bash".into()]),
