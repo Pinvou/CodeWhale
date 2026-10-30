@@ -15,8 +15,9 @@
 //! 让每张卡各抄一遍，就是让每张卡各踩一遍。只有"跑交付包自己的哪条命令"
 //! （init --role worker、pair、deploy）才跟具体卡片有关，那部分留在卡片里。
 //!
-//! 形态：LMM 给双机卡片的脚本注入 `LMM_WORKER`——就是 LMM 自己的二进制（见
-//! main.rs），卡片脚本调 `"$LMM_WORKER" <子命令>`，见 [`cli`]。
+//! 形态：给双机卡片的脚本注入 `LMM_WORKER`——旧 LMM 里是它自己的二进制（见旧
+//! main.rs）；这里经 [`script_env`] 注入 wrapper 脚本（补上子命令层，卡片契约
+//! 不变），卡片脚本调 `"$LMM_WORKER" <子命令>`。
 //!
 //! **连接是按需的**：卡片确认要引导从机时才调 `connect`，而不是 LMM 在每次部署前都
 //! 先连一遍。已经配对好的集群部署时只走直连线，根本用不到管理网——真机上遇到过
@@ -31,7 +32,6 @@ use std::io::{BufRead, Write};
 use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
-use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
 
@@ -45,6 +45,11 @@ pub const ENV_USER: &str = "LMM_WORKER_USER";
 /// 可选覆盖：存放从机密码的 0600 文件。手动调试时用（SSH 登进设备时没有桌面会话，
 /// 系统密钥环打不开）。
 pub const ENV_SECRET: &str = "LMM_WORKER_SECRET";
+/// 卡片身份。不是 worker 自己的契约：lifecycle `env_for_record` 给每张卡的脚本
+/// 环境都注入 `LMM_CARD_ID`，卡片脚本拉起 worker 子命令时天然继承。全局
+/// worker.json 只有一个槽（见 [`WorkerAccess::card_id`]），靠它区分槽现在属于
+/// 哪张双机卡。
+pub const ENV_CARD_ID: &str = "LMM_CARD_ID";
 
 const KEYRING_SERVICE: &str = "local-model-manager";
 /// 表单最多重填几轮。填错地址、填错密码都会回到表单，但不能无限循环下去。
@@ -56,6 +61,17 @@ pub struct WorkerAccess {
     /// 从机上的交付包配起来，配之前根本不通。
     pub host: String,
     pub user: String,
+    /// 这条连接是哪张双机卡的 `connect` 写入的（lifecycle 注入的 `LMM_CARD_ID`）。
+    ///
+    /// worker.json 是**全局单槽**（评审 round-2 P2）：service 的互斥只到卡片级，
+    /// 两张双机卡并发部署时后 `connect` 的一方会覆盖先连接一方的槽——先部署卡的
+    /// `exec/push/sudo/detect-link` 会静默解析到**别人的从机**（把 A 的交付包
+    /// rsync 到 B 的从机上跑 init）。记下归属卡、每个子命令解析完从机都核对一遍，
+    /// 跨卡就显式报错（见 [`card_binding_error`]）。`None` = 旧版文件或手动
+    /// 调试 connect（没有卡片环境）——无从判定归属，按无绑定放行，LMM 时期
+    /// 遗留的 worker.json 继续可用。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub card_id: Option<String>,
 }
 
 impl WorkerAccess {
@@ -76,6 +92,8 @@ pub enum WorkerError {
 
 // ---------------------------------------------------------------- 持久化
 
+/// 全局唯一的连接槽（所有双机卡共用）。并发覆盖的防呆靠 [`WorkerAccess::card_id`]
+/// 归属校验，不靠应用侧互斥——单卡顺序操作不受影响，见 `card_binding_error`。
 fn access_file() -> PathBuf {
     config::config_dir().join("worker.json")
 }
@@ -587,7 +605,15 @@ fn parse_answer(
     if host.is_empty() || user.is_empty() || pw.is_empty() {
         return Err("从机地址、用户名、密码都要填".to_string());
     }
-    Ok((WorkerAccess { host, user }, pw))
+    // card_id 留空：归属由 connect 成功时的环境（LMM_CARD_ID）决定，表单不填它。
+    Ok((
+        WorkerAccess {
+            host,
+            user,
+            card_id: None,
+        },
+        pw,
+    ))
 }
 
 // ---------------------------------------------------------------- 卡片脚本用的命令行
@@ -602,12 +628,54 @@ const USAGE: &str = "用法（LMM 部署双机卡片时注入 $LMM_WORKER，卡�
   $LMM_WORKER diagnose-link <本机直连网卡> <从机直连地址>";
 
 /// 这次要操作哪台从机：环境变量优先（手动调试时用），否则用上次 connect 成功保存的。
-fn resolve_access() -> Option<WorkerAccess> {
+/// 返回 (从机, 是否来自环境变量覆盖)——覆盖是操作者亲自指定的目标，跳过单槽
+/// 归属校验（见 [`card_binding_error`]）。
+fn resolve_access() -> Option<(WorkerAccess, bool)> {
     let host = std::env::var(ENV_HOST).ok().filter(|s| !s.is_empty());
     let user = std::env::var(ENV_USER).ok().filter(|s| !s.is_empty());
     match (host, user) {
-        (Some(host), Some(user)) => Some(WorkerAccess { host, user }),
-        _ => load_access(),
+        (Some(host), Some(user)) => Some((
+            WorkerAccess {
+                host,
+                user,
+                card_id: None,
+            },
+            true,
+        )),
+        _ => load_access().map(|a| (a, false)),
+    }
+}
+
+/// 本进程继承到的卡片身份（lifecycle 注入的 `LMM_CARD_ID`）；手动调试时没有。
+fn env_card_id() -> Option<String> {
+    std::env::var(ENV_CARD_ID).ok().filter(|s| !s.is_empty())
+}
+
+/// 全局单槽 worker.json 的跨卡防呆（评审 round-2 P2）：`connect` 把当时的
+/// `LMM_CARD_ID` 记进槽；之后**每个**需要从机的子命令解析完从机都先过这里——
+/// 槽的归属卡不是本卡就显式报错退出，绝不把 A 卡的 exec/push/sudo/detect-link
+/// 静默路由到 B 卡连接的从机上去。单卡顺序操作（connect → 后续子命令）永远同卡，
+/// 不受影响。
+///
+/// 放行三类：环境变量手动覆盖（操作者亲自指定目标，责任在操作者）、槽无归属
+/// （旧版文件 / 手动 connect 写入，无从判定）、非卡片环境（无 `LMM_CARD_ID`，
+/// 手动调试）。
+fn card_binding_error(
+    env_card: Option<&str>,
+    slot_card: Option<&str>,
+    from_env_override: bool,
+) -> Option<String> {
+    if from_env_override {
+        return None;
+    }
+    match (env_card, slot_card) {
+        (Some(env), Some(slot)) if env != slot => Some(format!(
+            "这条操作属于双机卡 {env}，但已保存的从机连接是另一张双机卡 {slot} 的部署\
+             写入的（两张双机卡共用唯一的连接记录，并发部署时后连接的会覆盖先连接的），\
+             不能在这台从机上继续执行。请等 {slot} 的操作结束、或确认本卡要连的从机后，\
+             重新执行本卡的部署（\"$LMM_WORKER\" connect 会重写连接记录）"
+        )),
+        _ => None,
     }
 }
 
@@ -645,10 +713,17 @@ pub fn cli(args: &[String]) -> i32 {
         }
         _ => {}
     }
-    let Some(a) = resolve_access() else {
+    let Some((a, from_env)) = resolve_access() else {
         eprintln!("ERROR: 还没有连接过从机。请先调用 \"$LMM_WORKER\" connect");
         return 2;
     };
+    // 单槽归属校验（评审 round-2 P2）：在碰从机**之前**拦下跨卡调用，错误用法
+    // 直接说清楚，不能静默落到别人的从机上。
+    if let Some(err) = card_binding_error(env_card_id().as_deref(), a.card_id.as_deref(), from_env)
+    {
+        eprintln!("ERROR: {err}");
+        return 2;
+    }
     match sub {
         "info" => {
             println!("{}", a.target());
@@ -706,8 +781,13 @@ fn cli_connect() -> i32 {
         };
         match connect(&a, &pw, &mut log) {
             Ok(()) => {
-                let _ = save_access(&a);
-                save_password(&a, &pw);
+                // 把这次连接绑定到发起它的卡上（评审 round-2 P2）：之后本卡脚本里
+                // 的每个子命令都靠它核对单槽没被另一张双机卡覆盖。手动调试
+                // （无 LMM_CARD_ID）时保持无绑定，与旧文件同形态。
+                let mut bound = a;
+                bound.card_id = env_card_id();
+                let _ = save_access(&bound);
+                save_password(&bound, &pw);
                 return 0;
             }
             // 不以 "ERROR:" 开头：这不是最终结论，接下来会回到表单
@@ -844,34 +924,40 @@ fn parse_counters(text: &str) -> Vec<(String, u64)> {
 /// 三次快照 → 哪个口在 ping 期间多收了包。
 ///
 /// 只看"ping 期间涨了多少"不够：从机的其它有线口可能接着别的局域网，那边本来就
-/// 一直有广播。所以先空等一个同样长的窗口量出各口的底噪，再用 ping 窗口的增量减掉
-/// 底噪。阈值只要求 2 个：内核对解析不出来的地址会限速重发 ARP，真机上量到过
-/// 20 个 ping 只出 6 个 ARP。
+/// 一直有广播。所以除 ping 窗口外再量一个等长的安静窗口，用 ping 窗口的增量减掉
+/// 底噪（窗口等长是关键，见 [`cli_detect_link`]）。阈值只要求 2 个：内核对解析
+/// 不出来的地址会限速重发 ARP，真机上量到过 20 个 ping 只出 6 个 ARP。
 ///
 /// 命中多个不是失败：能收到我们广播的口一定跟发送口在同一个二层域里，在它上面配
-/// 地址一定通。多个时优先跟主机同名的那个，图个对称。
+/// 地址一定通。多个时优先跟主机同名的那个（卡片作者与我们对直连口的命名对称），
+/// 其余按「扣除底噪后的增量」幅度降序——不能按字母序：真直连口 `enp3s0` 旁边
+/// 插着办公 LAN 的 `eth1` 只要在活跃窗口多收 ≳2 个广播就会命中，字母序在前，
+/// 直连地址就配到了错口上（评审 round-2 P2）。幅度相同再按名字升序，保证确定性。
 fn pick_link_iface(
-    t0: &[(String, u64)],
-    t1: &[(String, u64)],
-    t2: &[(String, u64)],
+    before_ping: &[(String, u64)],
+    after_ping: &[(String, u64)],
+    after_quiet: &[(String, u64)],
     head_iface: &str,
 ) -> Option<String> {
     let get = |v: &[(String, u64)], n: &str| v.iter().find(|(k, _)| k == n).map(|(_, c)| *c);
-    let mut hits: Vec<&str> = t2
+    // (扣除底噪的增量, 口名)：ping 窗口 [before_ping, after_ping]，
+    // 安静窗口 [after_ping, after_quiet]。
+    let mut hits: Vec<(u64, &str)> = after_ping
         .iter()
-        .filter_map(|(name, c2)| {
-            let c1 = get(t1, name)?;
-            let c0 = get(t0, name).unwrap_or(c1);
-            let noise = c1.saturating_sub(c0);
-            let active = c2.saturating_sub(c1);
-            (active.saturating_sub(noise) >= 2).then_some(name.as_str())
+        .filter_map(|(name, c_active_end)| {
+            let c_active_start = get(before_ping, name)?;
+            let c_quiet_end = get(after_quiet, name)?;
+            let active = c_active_end.saturating_sub(c_active_start);
+            let noise = c_quiet_end.saturating_sub(*c_active_end);
+            let delta = active.saturating_sub(noise);
+            (delta >= 2).then_some((delta, name.as_str()))
         })
         .collect();
-    hits.sort();
-    if hits.contains(&head_iface) {
+    if hits.iter().any(|(_, n)| *n == head_iface) {
         return Some(head_iface.to_string());
     }
-    hits.first().map(|s| s.to_string())
+    hits.sort_by(|a, b| b.0.cmp(&a.0).then_with(|| a.1.cmp(b.1)));
+    hits.first().map(|(_, n)| n.to_string())
 }
 
 /// 从机上的候选口：插着线、不是管理网那张（它一直在收我们自己的 SSH 流量，真机上
@@ -913,16 +999,21 @@ fn cli_detect_link(a: &WorkerAccess, head_iface: &str, peer_ip: &str, given: &[S
         }
         Some(parse_counters(&out))
     };
-    let Some(t0) = snap() else { return 1 };
-    if t0.is_empty() {
+    let Some(before_ping) = snap() else { return 1 };
+    if before_ping.is_empty() {
         eprintln!("ERROR: 从机上没有插着线的候选网口");
         return 1;
     }
-    // 底噪窗口，跟下面 ping 的时长一样（20 × 0.3 秒）
-    std::thread::sleep(Duration::from_secs(6));
-    let Some(t1) = snap() else { return 1 };
     // 从机那侧还没配地址时 ARP 解析不出来，内核会反复广播 ARP 请求——正是要的。
     // 目标必须在同一个直连子网里，否则没有路由，一个包都发不出去。
+    //
+    // 先跑 ping、用 Instant 量出它的**实际墙钟**，再睡一样长的窗口量底噪——两个
+    // 窗口按构造等长（评审 round-2 P2：原先固定 sleep(6s)，而 `ping -c 20 -i 0.3
+    // -W 1` 无应答时最后一次探测要等满 1s 超时，实测墙钟 ≈6.9s，每轮系统性
+    // ~15% 低估底噪——办公 LAN 口只要 ≳2.3 pps 广播就能过 `active−noise ≥ 2`
+    // 的门槛）。按实测对齐之后，ping 参数（-c/-i/-W）再怎么改，两个窗口都相等，
+    // 不需要人记得同步改另一个魔数。
+    let started = std::time::Instant::now();
     let _ = Command::new("ping")
         .args([
             "-c", "20", "-i", "0.3", "-W", "1", "-I", head_iface, peer_ip,
@@ -930,8 +1021,11 @@ fn cli_detect_link(a: &WorkerAccess, head_iface: &str, peer_ip: &str, given: &[S
         .stdout(Stdio::null())
         .stderr(Stdio::null())
         .status();
-    let Some(t2) = snap() else { return 1 };
-    match pick_link_iface(&t0, &t1, &t2, head_iface) {
+    let ping_took = started.elapsed();
+    let Some(after_ping) = snap() else { return 1 };
+    std::thread::sleep(ping_took);
+    let Some(after_quiet) = snap() else { return 1 };
+    match pick_link_iface(&before_ping, &after_ping, &after_quiet, head_iface) {
         Some(iface) => {
             println!("{iface}");
             0
@@ -1005,6 +1099,7 @@ mod tests {
         _home: config::TempHome,
         prev_host: Option<std::ffi::OsString>,
         prev_user: Option<std::ffi::OsString>,
+        prev_card: Option<std::ffi::OsString>,
     }
     impl Drop for Isolated {
         fn drop(&mut self) {
@@ -1019,6 +1114,10 @@ mod tests {
                     Some(v) => std::env::set_var(ENV_USER, v),
                     None => std::env::remove_var(ENV_USER),
                 }
+                match self.prev_card.take() {
+                    Some(v) => std::env::set_var(ENV_CARD_ID, v),
+                    None => std::env::remove_var(ENV_CARD_ID),
+                }
             }
         }
     }
@@ -1026,15 +1125,18 @@ mod tests {
         let home = config::TempHome::new();
         let prev_host = std::env::var_os(ENV_HOST);
         let prev_user = std::env::var_os(ENV_USER);
+        let prev_card = std::env::var_os(ENV_CARD_ID);
         // SAFETY: TempHome 已持有模型商店测试的 ENV_TEST_LOCK。
         unsafe {
             std::env::remove_var(ENV_HOST);
             std::env::remove_var(ENV_USER);
+            std::env::remove_var(ENV_CARD_ID);
         }
         Isolated {
             _home: home,
             prev_host,
             prev_user,
+            prev_card,
         }
     }
 
@@ -1099,10 +1201,7 @@ mod tests {
             writers.push(std::thread::spawn(move || {
                 let exe = format!("/tmp/writer-{w}-pinvou3-tauri");
                 for _ in 0..250 {
-                    let script = format!(
-                        "#!/bin/sh\nexec '{}' model-store-worker \"$@\"\n",
-                        exe
-                    );
+                    let script = format!("#!/bin/sh\nexec '{}' model-store-worker \"$@\"\n", exe);
                     // 直接调被测的落盘路径语义：与 script_env 里同一 helper
                     atomic_write(&wrapper, script.as_bytes(), 0o755).unwrap();
                 }
@@ -1136,26 +1235,68 @@ mod tests {
                 n.starts_with("pinvou3-model-store-worker.tmp")
             })
             .collect();
-        assert!(leftovers.is_empty(), "rename 成功后不该留 tmp：{leftovers:#?}");
+        assert!(
+            leftovers.is_empty(),
+            "rename 成功后不该留 tmp：{leftovers:#?}"
+        );
     }
 
     /// 接着别的局域网的口一直有底噪，不能因为它涨得多就选它。
     #[test]
     fn link_detection_subtracts_background_noise() {
-        let t0 = c(&[("eth1", 100), ("rdma0", 10), ("rdma1", 10)]);
-        let t1 = c(&[("eth1", 140), ("rdma0", 10), ("rdma1", 10)]); // eth1 底噪 +40
-        let t2 = c(&[("eth1", 181), ("rdma0", 16), ("rdma1", 10)]); // eth1 +41，rdma0 +6
-        assert_eq!(pick_link_iface(&t0, &t1, &t2, "enp1"), Some("rdma0".into()));
+        // ping 窗口 [before, after_ping]，安静窗口 [after_ping, after_quiet]——
+        // 与 cli_detect_link 的实际顺序一致。
+        // eth1（办公 LAN）：ping 窗口 +41，安静窗口底噪 +40 → 残差 1，出局；
+        // rdma0（真直连口）：ping 窗口 +6，安静窗口 0 → 残差 6，命中。
+        let before = c(&[("eth1", 140), ("rdma0", 10), ("rdma1", 10)]);
+        let after_ping = c(&[("eth1", 181), ("rdma0", 16), ("rdma1", 10)]);
+        let after_quiet = c(&[("eth1", 221), ("rdma0", 16), ("rdma1", 10)]);
+        assert_eq!(
+            pick_link_iface(&before, &after_ping, &after_quiet, "enp1"),
+            Some("rdma0".into())
+        );
+    }
+
+    /// 评审 round-2 P2：不能按字母序取 first——真直连口 `enp3s0` 旁边插着办公
+    /// LAN 的 `eth1`（底噪扣除后仍有小幅残留命中）时，字母序会把直连地址配到
+    /// 错口上。必须按扣除底噪后的增量幅度降序取。
+    #[test]
+    fn link_detection_picks_the_strongest_signal_not_the_alphabetical_first() {
+        // eth1：ping 窗口 +9，安静窗口 +6 → 残差 3（办公 LAN 广播的抖动）
+        // enp3s0：ping 窗口 +14，安静窗口 +1 → 残差 13（真正的直连口）
+        let before = c(&[("eth1", 100), ("enp3s0", 50)]);
+        let after_ping = c(&[("eth1", 109), ("enp3s0", 64)]);
+        let after_quiet = c(&[("eth1", 115), ("enp3s0", 65)]);
+        assert_eq!(
+            pick_link_iface(&before, &after_ping, &after_quiet, "wlp3s0"),
+            Some("enp3s0".into())
+        );
+        // 幅度相同 → 名字升序，保持确定性
+        let before = c(&[("b", 0), ("a", 0)]);
+        let after_ping = c(&[("b", 5), ("a", 5)]);
+        let after_quiet = c(&[("b", 5), ("a", 5)]);
+        assert_eq!(
+            pick_link_iface(&before, &after_ping, &after_quiet, "zz"),
+            Some("a".into())
+        );
     }
 
     #[test]
     fn link_detection_prefers_the_same_name_and_reports_nothing_when_silent() {
-        let t0 = c(&[("a", 0), ("b", 0)]);
-        let t2 = c(&[("a", 5), ("b", 5)]);
-        assert_eq!(pick_link_iface(&t0, &t0, &t2, "b"), Some("b".into()));
-        assert_eq!(pick_link_iface(&t0, &t0, &t2, "zz"), Some("a".into()));
+        let before = c(&[("a", 0), ("b", 0)]);
+        let after_ping = c(&[("a", 5), ("b", 5)]);
+        let after_quiet = c(&[("a", 5), ("b", 5)]);
         assert_eq!(
-            pick_link_iface(&t0, &t0, &c(&[("a", 1), ("b", 0)]), "a"),
+            pick_link_iface(&before, &after_ping, &after_quiet, "b"),
+            Some("b".into())
+        );
+        assert_eq!(
+            pick_link_iface(&before, &after_ping, &after_quiet, "zz"),
+            // 同名优先被排除后按幅度取；两者幅度相同 → 字母序 a
+            Some("a".into())
+        );
+        assert_eq!(
+            pick_link_iface(&before, &c(&[("a", 1), ("b", 0)]), &after_quiet, "a"),
             None
         );
     }
@@ -1173,6 +1314,7 @@ mod tests {
         let prev = WorkerAccess {
             host: "10.0.0.2".into(),
             user: "sky".into(),
+            card_id: Some("card-a".into()),
         };
         let spec: serde_json::Value =
             serde_json::from_str(&access_form(Some(&prev), Some("密码不对"), false)).unwrap();
@@ -1198,7 +1340,8 @@ mod tests {
             a,
             WorkerAccess {
                 host: "1.2.3.4".into(),
-                user: "u".into()
+                user: "u".into(),
+                card_id: None
             }
         );
         assert_eq!(pw, "old");
@@ -1217,10 +1360,11 @@ mod tests {
         let saved = WorkerAccess {
             host: "192.168.10.42".into(),
             user: "sky".into(),
+            card_id: Some("card-a".into()),
         };
         save_access(&saved).unwrap();
         assert_eq!(load_access(), Some(saved.clone()));
-        assert_eq!(resolve_access(), Some(saved.clone()));
+        assert_eq!(resolve_access(), Some((saved.clone(), false)));
 
         // SAFETY: isolated() 持有 ENV_TEST_LOCK；改完在断言后立即还原。
         unsafe {
@@ -1229,16 +1373,92 @@ mod tests {
         }
         assert_eq!(
             resolve_access(),
-            Some(WorkerAccess {
-                host: "10.9.9.9".into(),
-                user: "other".into()
-            })
+            Some((
+                WorkerAccess {
+                    host: "10.9.9.9".into(),
+                    user: "other".into(),
+                    card_id: None
+                },
+                true
+            ))
         );
         unsafe {
             std::env::remove_var(ENV_HOST);
             std::env::remove_var(ENV_USER);
         }
-        assert_eq!(resolve_access(), Some(saved));
+        assert_eq!(resolve_access(), Some((saved, false)));
+    }
+
+    /// 旧版（无 card_id 字段）的 worker.json 必须还能读——LMM 时期遗留文件续用。
+    #[test]
+    fn legacy_access_file_without_card_id_still_loads() {
+        let _iso = isolated();
+        let path = access_file();
+        fs::write(&path, r#"{"host":"192.168.10.42","user":"sky"}"#).unwrap();
+        assert_eq!(
+            load_access(),
+            Some(WorkerAccess {
+                host: "192.168.10.42".into(),
+                user: "sky".into(),
+                card_id: None
+            })
+        );
+        // 无绑定的槽对任何卡都放行（无从判定归属）
+        assert_eq!(card_binding_error(Some("card-a"), None, false), None);
+    }
+
+    /// 评审 round-2 P2：全局单槽被另一张双机卡的 connect 覆盖后，本卡的子命令
+    /// 必须显式报错（exit 2），不能静默解析到别人的从机。
+    #[test]
+    fn card_binding_error_gates_cross_card_use_of_the_single_slot() {
+        // 归属不一致 → 拦，报错里两张卡都要点名
+        let err = card_binding_error(Some("card-a"), Some("card-b"), false).unwrap();
+        assert!(err.contains("card-a") && err.contains("card-b"), "{err}");
+        // 同卡放行
+        assert_eq!(
+            card_binding_error(Some("card-a"), Some("card-a"), false),
+            None
+        );
+        // 手动调试（无卡片环境）与槽无归属：放行
+        assert_eq!(card_binding_error(None, Some("card-b"), false), None);
+        assert_eq!(card_binding_error(Some("card-a"), None, false), None);
+        // 环境变量手动指定目标：操作者亲自负责，即使槽归属别卡也放行
+        assert_eq!(
+            card_binding_error(Some("card-a"), Some("card-b"), true),
+            None
+        );
+    }
+
+    /// 端到端钉住 cli() 的校验位置：跨卡时在碰任何 ssh 之前就拒绝。
+    /// `info` 是唯一不触网就能走通的子命令，用它验证同卡路径仍通。
+    #[test]
+    fn cli_rejects_subcommands_when_the_slot_belongs_to_another_card() {
+        let _iso = isolated();
+        save_access(&WorkerAccess {
+            host: "192.168.10.42".into(),
+            user: "sky".into(),
+            card_id: Some("card-a".into()),
+        })
+        .unwrap();
+        // SAFETY: isolated() 持有 ENV_TEST_LOCK；卡片环境变量在离开作用域时还原。
+        unsafe {
+            std::env::set_var(ENV_CARD_ID, "card-b");
+        }
+        assert_eq!(cli(&["info".into()]), 2);
+        assert_eq!(cli(&["exec".into(), "true".into()]), 2);
+        // 手动覆盖目标（ENV_HOST/ENV_USER）优先于槽，跨卡也放行
+        unsafe {
+            std::env::set_var(ENV_HOST, "10.9.9.9");
+            std::env::set_var(ENV_USER, "sky");
+        }
+        assert_eq!(cli(&["info".into()]), 0);
+        unsafe {
+            std::env::remove_var(ENV_HOST);
+            std::env::remove_var(ENV_USER);
+            std::env::set_var(ENV_CARD_ID, "card-a");
+        }
+        // 归属一致：info 正常返回 0（不触网）
+        assert_eq!(cli(&["info".into()]), 0);
     }
 
     #[test]

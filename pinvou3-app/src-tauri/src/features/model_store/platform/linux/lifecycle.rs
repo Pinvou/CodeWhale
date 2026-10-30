@@ -1391,8 +1391,11 @@ impl ModelManager {
         );
         // 双机卡片（主机 + 从机）要靠 `$LMM_WORKER` 这个命令行工具去操作从机
         // （连从机、投公钥、推文件、测直连网口——见 platform/linux/worker.rs，
-        // 2026-10-27 自 LMM 移植）。指向本二进制：lib.rs 的 run() 会把
-        // `model-store-worker <子命令>` 在任何 GUI 初始化之前分流给它。
+        // 2026-10-27 自 LMM 移植）。注入的是 wrapper 脚本路径（补上
+        // `model-store-worker` 子命令层，见 worker::script_env）：lib.rs 的 run()
+        // 会把该子命令在任何 GUI 初始化之前分流给它。worker 的全局单槽
+        // worker.json 防跨卡覆盖也依赖上面注入的 LMM_CARD_ID（worker.rs 的
+        // card_binding_error），重构 env 时别把它落掉。
         if rec.deploy_topology == DeployTopology::Dual {
             for (key, value) in super::worker::script_env() {
                 env.insert(key, value);
