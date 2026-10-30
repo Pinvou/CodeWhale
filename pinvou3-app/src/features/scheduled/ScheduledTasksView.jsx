@@ -1554,7 +1554,7 @@ import memoryOrganizeImage from '../../assets/scheduled/memory-organize.jpg';
                               <span data-testid="scheduled-run-running" aria-hidden="true"
                                 className="h-3 w-3 shrink-0 animate-spin rounded-full border-2 border-[#007AFF] border-t-transparent dark:border-[#0A84FF]" />
                             ) : item.unread ? (
-                              <span data-testid="scheduled-run-unread" aria-hidden="true"
+                              <span data-testid="scheduled-run-unread" role="img" aria-label={scheduledCopy.unread}
                                 className="h-2.5 w-2.5 shrink-0 rounded-full bg-[#007AFF] dark:bg-[#0A84FF]" />
                             ) : (
                               <span className="h-2.5 w-2.5 shrink-0 rounded-full" style={{ background: item.status === 'failed' ? '#FF3B30' : '#8E8E93' }} />
