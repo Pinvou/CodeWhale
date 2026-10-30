@@ -12,7 +12,15 @@ const receipt = { closure_request_id: id(9), status: 'IN_PROGRESS', stage: 'CLOS
 const personalPermissions = () => ['personal.account.close.read', 'personal.account.close.request', ...(state.recharge ? ['personal.billing.read', ...(!state.permissionsChanged ? ['personal.recharge.create'] : [])] : [])];
 const profile = () => ({ user_id: state.user, status: 'ACTIVE', personal_permissions: personalPermissions(), platform_permissions: [], personal_authorization_version: 1, active_context: { context_type: 'PERSONAL', organization_id: null, context_version: state.contextVersion, personal_authorization_version: 1, permissions: personalPermissions() } });
 const transport = {
-  session: async () => ({ authenticated: state.authenticated }),
+  session: async () => {
+    const first = !state.sessionCalls; state.sessionCalls = (state.sessionCalls || 0) + 1;
+    const status = { authenticated: !query.has('session-guest') && state.authenticated,
+      ...(query.has('session-guest') && query.has('session-expired') ? { errorCode: 'authentication_required' } : {}) };
+    if (first && query.has('session-error')) Object.assign(status, { authenticated: false, errorCode: query.get('session-error') });
+    if (first && query.has('session-delay')) await new Promise(resolve => { state.resolveSession = resolve; });
+    state.sessionDelivered = (state.sessionDelivered || 0) + 1;
+    return status;
+  },
   registrationStatus: async () => null,
   openPortal: async () => { throw new Error('Unexpected Portal reauthentication'); },
   logout: async () => { state.logoutCalls++; state.authenticated = false; },
@@ -53,6 +61,12 @@ const root = createRoot(document.getElementById('root'));
 state.client = new AccountPlatformDesktopClient(transport);
 state.rechargeProof = () => recoverPersonalRechargeReauthentication(state.client, personalRechargeOwner(profile()));
 state.proof = () => readClosureIntent(state.originalUser, 'account-closure');
-state.render = () => root.render(<AccountPlatformView client={state.client} copy={accountPlatformCopy[state.language]} language={state.language} onLanguageChange={value => { state.language = value; state.render(); }} />);
+state.render = () => root.render(<>
+  {query.has('session-probe') && <aside aria-label="Session probe controls">
+    <button onClick={() => state.replaceClient()}>Replace client</button>
+    <button onClick={event => { state.resolveSession?.(); event.currentTarget.disabled = true; }}>Release old session</button>
+  </aside>}
+  <AccountPlatformView client={state.client} copy={accountPlatformCopy[state.language]} language={state.language} onLanguageChange={value => { state.language = value; state.render(); }} />
+</>);
 state.replaceClient = () => { state.user = id(2); state.client = new AccountPlatformDesktopClient(transport); state.authenticated = true; state.render(); };
 state.render();

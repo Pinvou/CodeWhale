@@ -35,13 +35,14 @@ async function unknownRecharge(page) {
   await recharge(page);
   await page.waitForFunction(() => [...document.querySelectorAll('.ap-finance button')].some(value => value.textContent === window.nativeReauth.financeCopy[window.nativeReauth.language].retry && !value.disabled));
 }
-async function run(name, query, action, before) {
+async function run(name, query, action, before, closure = true) {
   const page = await browser.newPage(); page.setDefaultTimeout(6000);
   const errors = []; page.on('pageerror', reason => errors.push(reason.message));
   try {
     await page.goto(server.resolvedUrls.local[0] + 'tests/fixtures/f10-desktop-reauthentication.html?' + query);
     if (before) await before(page);
-    await begin(page); await action(page); assert.deepEqual(errors, []);
+    if (closure) await begin(page);
+    await action(page); assert.deepEqual(errors, []);
     pass++; results.push({ name, pass: true });
   } catch (reason) {
     fail++; results.push({ name, pass: false, error: reason.message, diagnostic: await page.evaluate(() => ({ text: document.body.innerText, calls: window.nativeReauth?.calls, proof: window.nativeReauth?.proof() })).catch(() => null) });
@@ -49,6 +50,27 @@ async function run(name, query, action, before) {
 }
 try {
   browser = await puppeteer.launch({ executablePath: browserPath, headless: true, args: ['--disable-gpu'] });
+  for (const code of ['credential_store_unavailable', 'oidc_token_endpoint_unavailable']) await run('session recovery error retries without signing in: ' + code, 'session-error=' + code, async page => {
+    await page.waitForSelector('.ap-login [role="alert"]');
+    assert.equal(await page.$eval('.ap-login [role="alert"]', node => node.textContent), await page.evaluate(() => window.nativeReauth.copy.zh.requestFailed));
+    await click(page, '.ap-login', await page.evaluate(() => window.nativeReauth.copy.zh.retry));
+    await page.waitForSelector('main .ap-danger-section');
+    assert.equal(await page.evaluate(() => window.nativeReauth.loginCalls), 0);
+  }, undefined, false);
+  for (const expired of [false, true]) await run('guest session stays a login without recovery error: ' + expired, 'session-guest=1' + (expired ? '&session-expired=1' : ''), async page => {
+    await page.waitForSelector('.ap-login form');
+    assert.equal(await page.$('.ap-login [role="alert"]'), null);
+    assert.equal(await page.evaluate(() => [...document.querySelectorAll('.ap-login button')].some(button => button.textContent === window.nativeReauth.copy.zh.retry)), false);
+  }, undefined, false);
+  await run('late recovery failure cannot contaminate a replacement client', 'session-probe=1&session-delay=1&session-error=credential_store_unavailable', async page => {
+    await page.waitForFunction(() => typeof window.nativeReauth.resolveSession === 'function');
+    await click(page, 'aside', 'Replace client');
+    await page.waitForSelector('main .ap-danger-section');
+    await click(page, 'aside', 'Release old session');
+    await page.waitForFunction(() => window.nativeReauth.sessionDelivered === 2);
+    assert.equal(await page.$('.ap-login [role="alert"]'), null);
+    assert.ok(await page.$('main .ap-danger-section'));
+  }, undefined, false);
   for (const language of ['zh', 'en', 'ja']) await run('same actor retains first closure intent and waits for explicit retry ' + language, 'language=' + language, async page => {
     await page.waitForSelector('.ap-login form');
     assert.equal(await page.$('main'), null, 'the old business view retires before native login');

@@ -48,7 +48,12 @@ export function AccountPlatformView({ client, copy, language, onLanguageChange, 
   const load = async (generation, signal) => {
     const session = await client.session(signal);
     if (generation !== epoch.current) return;
-    if (!session.authenticated) { setAuth('guest'); return; }
+    if (!session.authenticated) {
+      if (session.errorCode && session.errorCode !== 'authentication_required') {
+        throw Object.assign(new Error(session.errorCode), { code: session.errorCode });
+      }
+      setAuth('guest'); return;
+    }
     const profile = requirePersonalAccount(await client.bootstrap(signal));
     if (generation !== epoch.current) return;
     authorizePersonalRechargeReauthentication(client, profile);
