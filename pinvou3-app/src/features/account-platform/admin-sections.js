@@ -52,6 +52,8 @@ export function adminRouteLocation(search, section, updates = {}, pathname = '/a
   const params = new URLSearchParams(search);
   const previousSection = params.get('section');
   params.set('section', section);
+  // Canonicalizing an existing operations alias must keep its selected tab.
+  if (section === 'operations' && ['registration', 'profile', 'closures'].includes(previousSection) && !Object.prototype.hasOwnProperty.call(updates, 'operations_page')) params.set('operations_page', previousSection);
   if (section !== previousSection && ['billing', 'payments', 'products'].includes(section) && !Object.prototype.hasOwnProperty.call(updates, 'finance_tab')) params.set('finance_tab', { billing: 'wallets', payments: 'orders', products: 'catalog' }[section]);
   // Detail filters remain in the URL, but a stale approval selector must not win
   // over an explicit navigation to another page.

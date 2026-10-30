@@ -35,6 +35,31 @@ test('canonical admin gates and permissions do not substitute unrelated pages', 
   }
   assert.equal(resolveAdminRoute('?section=tokens&model_id=sample', { admin_model_token_ia: true }, ['tokenResources']).section, 'models');
 });
+test('existing operations aliases survive canonical URL round trips and explicit tab updates', () => {
+  const available = visibleAdminSections({ platform_permissions: ['platform.registration-bonus.read', 'platform.account-closures.read', 'platform.registrations.repair', 'platform.profile-changes.repair'] });
+  for (const alias of ['closures', 'registration', 'profile']) {
+    const search = `?section=${alias}&user_q=retained&approval_request_id=receipt`;
+    const route = resolveAdminRoute(search, {}, available);
+    // Match the canonicalization call in useAdminSections, including its empty updates.
+    const canonical = new URL(adminRouteLocation(search, route.section, route.tab ? { finance_tab: route.tab } : {}, '/admin.html'), 'https://example.test');
+    const restored = resolveAdminRoute(canonical.search, {}, available);
+    assert.equal(restored.section, 'operations');
+    assert.equal(restored.operationsTab, alias);
+    assert.equal(canonical.searchParams.get('user_q'), 'retained');
+    assert.equal(canonical.searchParams.get('approval_request_id'), 'receipt');
+    const explicit = new URL(adminRouteLocation(search, 'operations', { operations_page: 'policy' }), 'https://example.test');
+    assert.equal(resolveAdminRoute(explicit.search, {}, available).operationsTab, 'policy');
+    for (const clear of [null, undefined, '']) {
+      const cleared = new URL(adminRouteLocation(search, 'operations', { operations_page: clear }), 'https://example.test');
+      assert.equal(cleared.searchParams.has('operations_page'), false);
+      assert.equal(resolveAdminRoute(cleared.search, {}, available).operationsTab, 'policy');
+    }
+    const elsewhere = new URL(adminRouteLocation(search, 'users'), 'https://example.test');
+    assert.equal(elsewhere.searchParams.has('operations_page'), false);
+  }
+  assert.equal(new URL(adminRouteLocation('?section=operations', 'operations'), 'https://example.test').searchParams.has('operations_page'), false);
+});
+
 test('explicit navigation defeats stale approval view and preserves unrelated deep filters', () => {
   const url = new URL(adminRouteLocation('?approval_view=mine&model_q=test&finance_tab=ledger', 'payments', { finance_tab: 'orders' }), 'https://example.test');
   assert.equal(url.searchParams.has('approval_view'), false);
