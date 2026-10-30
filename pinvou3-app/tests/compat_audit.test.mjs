@@ -534,6 +534,63 @@ test('escaped idents neither mask a real layer nor fire as one', () => {
   }
 });
 
+test('custom-property value contexts never fire and real layers around them still do', () => {
+  // Minified dist keeps custom-property values verbatim (lightningcss does
+  // not rewrite their tokens at cssTarget safari14), and CSS Variables §2.1
+  // lets such values carry balanced `{}` component blocks, escaped
+  // characters, and `;` inside function blocks — none of them ends the
+  // declaration, so an `@layer` token inside the value is content, not a
+  // cascade layer, and must not fail the audit. The fixtures are the real
+  // minified safari14 output so the pins hold against the same producer the
+  // audit gates. Symmetrically, the declaration's own rule still ends at
+  // its `}` and the top-level layer after it, layers nested in layers, and
+  // a layer nested in a style rule (lowered by the minifier into a real
+  // layer) must all stay reported.
+  const distDir = fs.mkdtempSync(path.join(os.tmpdir(), 'compat-audit-declctx-'));
+  try {
+    fs.mkdirSync(path.join(distDir, 'assets'), { recursive: true });
+    const minify = (css) => transformCss({
+      filename: 'main.css',
+      code: Buffer.from(css),
+      targets: browserslistToTargets(['safari 14']),
+      minify: true,
+    }).code.toString();
+
+    const blockValue = minify('a{--token:{@layer demo{b{color:red}}};}');
+    assert.match(blockValue, /--token:\{@layer demo\{b\{color:red\}\}\}/, 'minifier fixture must keep the custom-property block value');
+    const escapedSemicolon = minify('a{--x:red\\;@layer demo{b{color:red}}}');
+    assert.match(escapedSemicolon, /--x:red\\;/, 'minifier fixture must keep the escaped semicolon');
+    const parenSemicolon = minify('a{--x:f(;@layer demo{b{color:red}})}');
+    assert.match(parenSemicolon, /--x:f\(;/, 'minifier fixture must keep the semicolon inside the function block');
+    fs.writeFileSync(path.join(distDir, 'assets', 'main.css'), [
+      blockValue,
+      escapedSemicolon,
+      parenSemicolon,
+    ].join('\n'));
+    assert.deepEqual(
+      hermeticAudit({ distDir }),
+      [],
+      '@layer tokens inside custom-property value contexts must not fire',
+    );
+
+    fs.writeFileSync(path.join(distDir, 'assets', 'main.css'), [
+      minify('a{--x:red\\;}@layer demo{b{color:red}}'),
+      minify('@layer a{@layer b{c{color:red}}}'),
+      minify('a{color:red;@layer b{c{color:red}}}'),
+    ].join('\n'));
+    const violations = hermeticAudit({ distDir });
+    // 1 (layer after the escaped-semicolon declaration) + 2 (nested layers
+    // both fire) + 1 (the style-rule layer the minifier lowers into a real
+    // top-level layer).
+    assert.equal(violations.length, 4, `the real layers around the value contexts must be reported; got: ${JSON.stringify(violations)}`);
+    for (const violation of violations) {
+      assert.match(violation, / @layer survives the build/);
+    }
+  } finally {
+    fs.rmSync(distDir, { recursive: true, force: true });
+  }
+});
+
 test('a layer() token inside import supports() conditions is not a layer clause', () => {
   // `supports(display: layer(x))` carries the `layer(` token as a feature
   // argument, not as the import's layer clause — the import stays

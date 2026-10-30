@@ -373,6 +373,8 @@ function stripCssCommentsAndStrings(code) {
 // blanked regions verbatim, so any non-space byte before the `@` is real
 // syntax — a `\` (escape content) or `:` / ident character (selector or
 // declaration value) means this `@layer` substring is not an at-rule.
+// This is only the byte-level gate; findLayerAtRulePositions additionally
+// tracks block and declaration context around it.
 function isAtRulePosition(scan, index) {
   for (let k = index - 1; k >= 0; k -= 1) {
     const prev = scan[k];
@@ -381,6 +383,109 @@ function isAtRulePosition(scan, index) {
     }
   }
   return true;
+}
+
+// One linear pass over the stripped copy reporting every offset where the
+// `@layer` at-keyword starts a cascade layer at-rule. A rule-start byte
+// alone is not enough: minified dist keeps custom-property values verbatim
+// (lightningcss does not touch their tokens at cssTarget safari14), and
+// CSS Variables §2.1 lets such values carry balanced `(`/`[`/`{` component
+// blocks and escaped characters — `a{--token:{@layer demo{b{color:red}}}}`,
+// `a{--x:red\;@layer demo{…}}`, and `a{--x:f(;@layer demo{…})}` are all
+// legal non-layer CSS whose `@layer` substrings sit right after a `{`/`;`
+// byte. The walk therefore tracks context:
+//   - `(`/`[` always open component context — no at-rule starts inside;
+//   - a `{` opens a rule body at the stylesheet top level, inside a rule
+//     body with no declaration open, or after a non-custom `ident:` (CSS
+//     nesting re-opens a rule there, so nested real layers stay detected);
+//     inside a `--*` declaration it is a value block — `@layer` inside any
+//     non-rule frame or open declaration is value content;
+//   - a declaration opens when an ident is followed by `:` in a rule body
+//     and closes at `;` — an escaped `\;` is ident content, not a
+//     terminator (consumed like the stripper does), and the declaration
+//     ends with its frame.
+// Escapes are consumed as `\` + next character; hex escapes keep their
+// remaining digits as ordinary ident characters, which cannot produce a
+// structural byte at that position. Residual divergence: a selector
+// compound ending in a `--`-ident (`.--x:hover`) classifies the following
+// `{` as a value block — real dist has no nested rules at the safari14
+// target (lightningcss lowers nesting), so only hand-written input can
+// land there and the miss stays bounded to that prefix.
+function findLayerAtRulePositions(scan) {
+  const hits = [];
+  const stack = [];
+  let identLen = 0;
+  let identCustom = false;
+  let firstIdentChar = '';
+  const resetIdent = () => {
+    identLen = 0;
+    identCustom = false;
+  };
+  for (let i = 0; i < scan.length; i += 1) {
+    const ch = scan[i];
+    if (ch === '\\' && i + 1 < scan.length) {
+      identLen += 1;
+      i += 1;
+      continue;
+    }
+    if (ch === '@') {
+      const top = stack[stack.length - 1];
+      if (
+        scan.slice(i, i + 6).toLowerCase() === '@layer'
+        && /[\s{]/.test(scan[i + 6] ?? '')
+        && isAtRulePosition(scan, i)
+        && (!top || (top.rule && top.decl === null))
+      ) {
+        hits.push(i);
+      }
+      resetIdent();
+      continue;
+    }
+    if (ch === ':') {
+      const top = stack[stack.length - 1];
+      if (top && top.rule && top.decl === null) {
+        top.decl = identLen === 0 ? '' : identCustom ? 'custom' : 'plain';
+      }
+      resetIdent();
+      continue;
+    }
+    if (ch === ';') {
+      const top = stack[stack.length - 1];
+      if (top && top.rule) top.decl = null;
+      resetIdent();
+      continue;
+    }
+    if (ch === '{') {
+      const top = stack[stack.length - 1];
+      stack.push({ rule: !top || (top.rule && top.decl !== 'custom'), decl: null });
+      resetIdent();
+      continue;
+    }
+    if (ch === '}') {
+      stack.pop();
+      resetIdent();
+      continue;
+    }
+    if (ch === '(' || ch === '[') {
+      stack.push({ rule: false, decl: null });
+      resetIdent();
+      continue;
+    }
+    if (ch === ')' || ch === ']') {
+      stack.pop();
+      resetIdent();
+      continue;
+    }
+    if (/\s/.test(ch)) continue;
+    if (/[-\w]/.test(ch) || ch.charCodeAt(0) > 127) {
+      if (identLen === 0) firstIdentChar = ch;
+      else if (identLen === 1) identCustom = firstIdentChar === '-' && ch === '-';
+      identLen += 1;
+      continue;
+    }
+    resetIdent();
+  }
+  return hits;
 }
 
 // Removes every `supports(…)` region from an @import prelude so the clause
@@ -435,11 +540,13 @@ export function auditDistCss(assetsDir) {
     // verbatim and `content` strings can quote at-rule syntax, so both scans
     // run over the stripped copy. The replacement is space-padded, preserving
     // offsets for the excerpt/line attribution. A survivor must be the
-    // complete at-keyword in a rule-start position — the previous
-    // non-whitespace scan byte is `{`, `}`, or `;`, or the stylesheet starts
-    // here — so escaped selector characters (`.\@layer`) and declaration
-    // values (`a{--token:@layer}`) do not fire, and `@layered` is an ident,
-    // not the at-keyword. Covers the block/anonymous/statement `@layer`
+    // complete at-keyword at a real rule position — findLayerAtRulePositions
+    // combines the rule-start byte check (escaped selector characters
+    // (`.\@layer`) and declaration values (`a{--token:@layer}`) do not fire;
+    // `@layered` is an ident) with block/declaration-context tracking, so
+    // `@layer` tokens inside custom-property value blocks, behind escaped
+    // terminators, or after a `;` inside function blocks do not fire either.
+    // Covers the block/anonymous/statement `@layer`
     // forms, case-insensitively (CSS at-keywords are ASCII case-insensitive).
     // The import form (`@import … layer|layer(name)`) carries no `@layer`
     // substring, so the @import preludes are parsed separately: the prelude
@@ -451,14 +558,10 @@ export function auditDistCss(assetsDir) {
     // the clause is caught in any position (after supports(), before/after
     // the media query, bare or named).
     const scan = stripCssCommentsAndStrings(code);
-    const layerPattern = /@layer/gi;
-    let layerMatch;
-    while ((layerMatch = layerPattern.exec(scan)) !== null) {
-      if (!isAtRulePosition(scan, layerMatch.index)) continue;
-      if (!/[\s{]/.test(scan[layerMatch.index + '@layer'.length] ?? '')) continue;
-      const excerpt = code.slice(Math.max(0, layerMatch.index - 30), layerMatch.index + 50).replaceAll(/\s+/g, ' ');
+    for (const at of findLayerAtRulePositions(scan)) {
+      const excerpt = code.slice(Math.max(0, at - 30), at + 50).replaceAll(/\s+/g, ' ');
       violations.push(
-        `dist:${name}:${lineOfOffset(code, layerMatch.index).line}: @layer survives the build — cascade layers need Safari 15.4, below the Safari 14.0 floor; context: …${excerpt}…`,
+        `dist:${name}:${lineOfOffset(code, at).line}: @layer survives the build — cascade layers need Safari 15.4, below the Safari 14.0 floor; context: …${excerpt}…`,
       );
     }
     // The prelude is read with the same single-pass shape as the stripper,
