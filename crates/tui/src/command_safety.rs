@@ -1131,8 +1131,11 @@ fn is_agent_readonly_sed(tokens: &[String]) -> bool {
     }
     // Numeric line-range print scripts only: `10p`, `1,5p`, `p`. Script
     // verbs that write or execute (`w`, `r`, `e`, `s///w`) cannot appear in
-    // the single range script, and separators like `;` were already
-    // rejected at the charset gate.
+    // the single range script, and a `;`-bearing script never reaches this
+    // check at all: the sequence split mis-reads a quoted separator into a
+    // segment that fails classification, and a bare one is caught because
+    // the execution seam re-parses every admitted stage with strict shlex
+    // before running it.
     let script = tokens[2].as_str();
     let Some(head) = script.strip_suffix(['p', 'P']) else {
         return false;
@@ -1204,10 +1207,12 @@ pub(crate) fn readonly_cd_operand_admitted(target: &str) -> bool {
 /// Only pure-read display options: the type selectors BSD `od` documents
 /// (`-b -c -d -o -s -x`, legacy `-h`) plus `-v`, the address radix `-A`
 /// restricted to its fixed value set, and the numeric skip/count pair
-/// `-j`/`-N`. `-w` and
+/// `-j`/`-N`. Glued single-token spellings (`-An`, `-j8`) admit exactly
+/// like their separated forms, with the same value validation. `-w` and
 /// every output-affecting or GNU-extension flag stays out on purpose, and
 /// file operands flow through the normal workspace operand gate.
 fn is_agent_readonly_od(tokens: &[String]) -> bool {
+    const ADDRESS_RADIX_VALUES: [&str; 5] = ["d", "o", "x", "n", "none"];
     let mut index = 1;
     let mut options = true;
     while index < tokens.len() {
@@ -1220,8 +1225,15 @@ fn is_agent_readonly_od(tokens: &[String]) -> bool {
                 "-A" => {
                     index += 1;
                     if index >= tokens.len()
-                        || !matches!(tokens[index].as_str(), "d" | "o" | "x" | "n" | "none")
+                        || !ADDRESS_RADIX_VALUES.contains(&tokens[index].as_str())
                     {
+                        return false;
+                    }
+                }
+                _ if token.starts_with("-A") => {
+                    // Glued `-A<value>`: the same fixed value set as the
+                    // separated form.
+                    if !ADDRESS_RADIX_VALUES.contains(&&token[2..]) {
                         return false;
                     }
                 }
@@ -1234,6 +1246,13 @@ fn is_agent_readonly_od(tokens: &[String]) -> bool {
                         .get(index)
                         .is_some_and(|value| !value.is_empty() && value.parse::<u64>().is_ok());
                     if !numeric {
+                        return false;
+                    }
+                }
+                _ if token.starts_with("-j") || token.starts_with("-N") => {
+                    // Glued `-j<u64>`/`-N<u64>`: the same parse, not
+                    // digit-scan, bound as the separated form.
+                    if token[2..].is_empty() || token[2..].parse::<u64>().is_err() {
                         return false;
                     }
                 }
@@ -2852,6 +2871,41 @@ mod tests {
         ));
     }
 
+    /// Glued single-token spellings admit exactly like their separated
+    /// forms: `-A<value>` with the same fixed value set and `-j`/`-N` with
+    /// the same parsed (not digit-scanned) u64 bound. A glued value outside
+    /// the sets refuses like its separated spelling.
+    #[test]
+    fn agent_readonly_shell_admits_glued_od_forms() {
+        for command in [
+            "od -An -c x",
+            "od -Ao x",
+            "od -Ax x",
+            "od -Ad x",
+            "od -Anone -c x",
+            "od -j8 -c x",
+            "od -N32 x",
+            "od -j8 -N32 -c x",
+        ] {
+            assert!(
+                is_agent_readonly_shell_command(command),
+                "{command} should admit as a glued read-only od form"
+            );
+        }
+        for command in [
+            "od -Azz f",
+            "od -A9 f",
+            "od -jx f",
+            "od -Nx f",
+            "od -j99999999999999999999999 -c x",
+        ] {
+            assert!(
+                !is_agent_readonly_shell_command(command),
+                "{command} must stay denied as a glued od form"
+            );
+        }
+    }
+
     /// The flags the seam's git hardening splices in must be spellable by a
     /// defensive command too: refusing them while admitting the bare form
     /// would punish the safer spelling.
@@ -2879,6 +2933,19 @@ mod tests {
         assert!(is_agent_readonly_shell_command(&within));
         let over = format!("wc -c {}", "a/".repeat(64 * 1024));
         assert!(!is_agent_readonly_shell_command(&over));
+    }
+
+    /// Newline separators refuse at the charset gate outright: a `\n` (or
+    /// `\r`) never reaches the sequence split, so `cat f\ncd /` cannot
+    /// classify as two admitted segments — the second line would run under
+    /// a name no segment judge ever saw.
+    #[test]
+    fn agent_readonly_shell_rejects_newline_separators() {
+        assert!(!is_agent_readonly_shell_command("cat f\ncd /"));
+        assert!(!is_agent_readonly_shell_command("pwd\nls"));
+        assert!(!is_agent_readonly_shell_command("wc -c f\rg x"));
+        // The admitted spelling of the same probe, for contrast.
+        assert!(is_agent_readonly_shell_command("cat f; cd sub"));
     }
 
     /// The shell-lane routing term is classifier-level, not host-dependent:

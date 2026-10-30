@@ -4307,11 +4307,19 @@ const READONLY_GIT_CONFIG_SCAN_CAP: usize = 256 * 1024;
 /// longer is not a file git would parse.
 const READONLY_GIT_META_SCAN_CAP: usize = 4 * 1024;
 
+/// Read bound for one `git ls-files --stage` listing during filter
+/// discovery: a repository's index enumerates every tracked path, so the
+/// honest bound is generous — and one byte over it refuses rather than
+/// trusting a truncated submodule set.
+const READONLY_GIT_INDEX_SCAN_CAP: usize = 16 * 1024 * 1024;
+
 /// Oldest git release whose config can be fed through `GIT_CONFIG_KEY_n` /
 /// `GIT_CONFIG_VALUE_n` / `GIT_CONFIG_COUNT`; 2.31.0 introduced them. On an
-/// older git the environment block silently does not exist, and the
-/// discovered filter pins are the only wall for `status`/`ls-files`/`grep`,
-/// so the lane refuses instead of admitting under pins that would not take.
+/// older git the environment block silently does not exist — the fixed
+/// fsmonitor/hooksPath pins AND the discovered filter pins alike — and for
+/// `status`/`ls-files`/`grep` those pins are the only wall, so the lane
+/// version-checks the host git for every command with a read-only git
+/// stage instead of admitting under pins that would not take.
 const MIN_GIT_ENV_CONFIG_VERSION: (u64, u64) = (2, 31);
 
 /// Total-bytes bound on the path-text directory-identity keys a non-unix
@@ -4371,19 +4379,30 @@ impl ReadonlyGitFilterPin {
 /// repositories than the scan bounds.
 ///
 /// The enumeration covers more than the stage's own repository: git forks
-/// its own `git status`/`git diff` child into each initialized submodule,
-/// and that child converts content under the submodule's repository config —
-/// probe-pinned, it fires even when the superproject's `git status` reports
-/// a clean tree, and it inherits these env pins intact — so every submodule
-/// a scanned repository registers through `.gitmodules` is scanned too.
+/// its own `git status`/`git diff` child into any index gitlink whose path
+/// holds a repository, and that child converts content under the
+/// submodule's repository config — probe-pinned, it fires even when
+/// `.gitmodules` is gone from the worktree (the file is only a label on
+/// git's fork; the index's gitlink is the criterion) and even when the
+/// superproject reports a clean tree, and it inherits these env pins
+/// intact — so every repository the scanned repo's index registers as a
+/// gitlink is scanned too, through one hardened helper (`run_discovery_git`)
+/// that execs git with the same environment the read-only child runs under.
 /// Filter names are matched byte-exactly the way git matches an attribute
 /// value against a config subsection (`Mix` and `mix` are two drivers), and
-/// the config parser mirrors git's own: keys on a section-header line parse,
-/// a value continues over the next physical lines only when it ends in an
-/// odd number of backslashes, and comments end at the newline. When pins are
-/// armed, the host git is version-checked: the env-config mechanism the
-/// pins ride needs git >= 2.31, and on an older git they would silently not
-/// exist.
+/// the config parser mirrors git's own: a leading UTF-8 BOM is skipped, one
+/// trailing `\r` per line (CRLF) is stripped, `;`/`#` start comments outside
+/// double quotes anywhere in a line (the quote state carrying across
+/// continuation lines), keys on a section-header line parse, a line can
+/// re-target the section with further `[...]` headers before its key
+/// (`[a] [b] k = v` parses `b.k`), headers parse in all four git shapes
+/// (`[base]`, the dotted `[base.subsection]` with a case-folded subsection,
+/// the quoted `[base "Sub"]` byte-exact, and the combined `[filter.x "y"]`
+/// = subsection `x.y`), and a value continues over the next physical lines
+/// only when the comment-stripped text ends in an odd number of
+/// backslashes. When a command reaches a git stage at all, the host git is
+/// version-checked: the env-config mechanism the whole block rides needs
+/// git >= 2.31, and on an older git it would silently not exist.
 ///
 /// The walk mirrors the operand gate's `cd` fold so a git stage that runs
 /// inside a nested repository (`cd sub; git status`) scans the repository it
@@ -4400,6 +4419,7 @@ impl ReadonlyGitFilterPin {
 fn discover_readonly_git_filter_pins(
     command: &str,
     effective_cwd: &std::path::Path,
+    roots: &[PathBuf],
 ) -> Result<Vec<ReadonlyGitFilterPin>, ToolError> {
     // No git stage, nothing to scan: keep the no-repository dispatch at
     // zero filesystem reads.
@@ -4422,6 +4442,9 @@ fn discover_readonly_git_filter_pins(
     let mut scanned: std::collections::HashSet<PathBuf> = std::collections::HashSet::new();
     let mut repos_remaining = MAX_READONLY_GIT_REPOS_SCANNED;
     let mut live_cwd = effective_cwd.to_path_buf();
+    // The raw PATH the discovery git's sanitized environment is built from,
+    // read once per pass so every exec in the walk sees the same search set.
+    let env_path = std::env::var_os("PATH");
     let Some(segments) = readonly_sequence_segments_with_connectors(command) else {
         return Ok(Vec::new());
     };
@@ -4434,11 +4457,23 @@ fn discover_readonly_git_filter_pins(
             if !argv.first().is_some_and(|program| program == "git") {
                 continue;
             }
+            // The stage root through the same helper the operand gate used,
+            // so the repository scanned is exactly the one git runs under —
+            // a chained `-C A -C escape` resolves cumulatively, not against
+            // the flat cwd.
+            let stage_root = readonly_git_stage_root(&argv, &live_cwd, roots)
+                .map_err(|reason| {
+                    ToolError::permission_denied(format!(
+                        "[shell.readonly.git.filter_config] A git stage's `-C` preamble could not be resolved inside the workspace: {reason}"
+                    ))
+                })?;
             scan_readonly_repository_at(
-                &readonly_git_stage_repository_dir(&argv, &live_cwd),
+                &stage_root,
                 &mut pins,
                 &mut scanned,
                 &mut repos_remaining,
+                roots,
+                env_path.as_deref(),
             )?;
         }
         if stages.len() > 1 {
@@ -4458,10 +4493,10 @@ fn discover_readonly_git_filter_pins(
                         | crate::command_safety::ReadonlySequenceConnector::OrElse
                 ) =>
             {
-                if let Some(target) = argv.get(1) {
-                    if let Ok(resolved) = live_cwd.join(target).canonicalize() {
-                        live_cwd = resolved;
-                    }
+                if let Some(target) = argv.get(1)
+                    && let Ok(resolved) = live_cwd.join(target).canonicalize()
+                {
+                    live_cwd = resolved;
                 }
             }
             _ => {}
@@ -4472,21 +4507,43 @@ fn discover_readonly_git_filter_pins(
             "[shell.readonly.git.filter_config] The repositories this command's git stages run in declare more than {MAX_READONLY_GIT_FILTER_PINS} content filters, more than the read-only lane can pin inert; use a workspace without filter declarations for repository evidence."
         )));
     }
-    if !pins.is_empty() {
-        ensure_git_supports_env_config_pins()?;
-    }
+    // The env block writes the fixed core.fsmonitor/core.hooksPath/
+    // log.showSignature pins for EVERY read-only git stage, unconditionally,
+    // so the version gate fires for every command with a git stage — not
+    // only when discovery armed filter pins: on an old git none of those
+    // pins would take.
+    ensure_git_supports_env_config_pins(roots)?;
     Ok(pins)
 }
 
-/// The env-config mechanism the filter pins ride needs git >= 2.31, and for
-/// `status`/`ls-files`/`grep` those pins are the only wall — on an older git
-/// the environment block silently does not exist and the repository's
-/// filters would run under an admitted read. When discovery armed any pin,
-/// the host git is checked first: a refusal names the version gap instead of
-/// admitting under protection that would not take.
-fn ensure_git_supports_env_config_pins() -> Result<(), ToolError> {
-    let output = std::process::Command::new("git")
-        .arg("--version")
+/// The env-config mechanism the whole read-only git env block rides needs
+/// git >= 2.31, and for `status`/`ls-files`/`grep` those pins are the only
+/// wall — on an older git the environment block silently does not exist and
+/// the repository's filters would run under an admitted read. The block
+/// emits `GIT_CONFIG_COUNT` for every read-only git stage (the fixed
+/// fsmonitor/hooksPath/log.showSignature pins are unconditional), so the
+/// host git is checked for every command with a git stage, before any child
+/// exists: a refusal names the version gap instead of admitting under
+/// protection that would not take. The probe itself runs the way the
+/// read-only child runs — cleared environment, sanitized PATH, git
+/// configuration pinned off — so the binary it measures is the trusted host
+/// git, never an agent-planted `git` shim from a workspace PATH entry.
+fn ensure_git_supports_env_config_pins(roots: &[PathBuf]) -> Result<(), ToolError> {
+    let path = std::env::var_os("PATH");
+    ensure_git_supports_env_config_pins_with_path(roots, path.as_deref())
+}
+
+/// [`ensure_git_supports_env_config_pins`] with the PATH the probe resolves
+/// git through supplied explicitly; the seam exists so tests can plant a
+/// PATH without mutating the live process environment.
+fn ensure_git_supports_env_config_pins_with_path(
+    roots: &[PathBuf],
+    path: Option<&std::ffi::OsStr>,
+) -> Result<(), ToolError> {
+    let mut command = std::process::Command::new("git");
+    command.arg("--version");
+    apply_discovery_git_env(&mut command, roots, path);
+    let output = command
         .output()
         .map_err(|error| {
             ToolError::permission_denied(format!(
@@ -4529,51 +4586,248 @@ fn git_env_config_supported(version_output: &str) -> bool {
     (major, minor) >= MIN_GIT_ENV_CONFIG_VERSION
 }
 
-/// The directory a git stage's repository resolves from: git applies each
-/// `-C <dir>` cumulatively from the stage's working directory, so the last
-/// one wins (`git -C sub status` runs against `sub`'s repository even though
-/// the shell never `cd`'d; `cd sub; git -C .. status` runs against the
-/// parent's). The preamble walk mirrors `splice_git_read_hardening`'s, and
-/// every `-C` operand was already canonicalized inside the workspace by the
-/// operand gate.
-fn readonly_git_stage_repository_dir(
-    argv: &[String],
-    live_cwd: &std::path::Path,
-) -> std::path::PathBuf {
-    let mut dir = live_cwd.to_path_buf();
+/// Where a git stage's `--no-pager`/`-C <dir>` preamble ends: the same walk
+/// the classifier admits and [`splice_git_read_hardening`] uses to locate
+/// the subcommand. The operand gate slices the operands off after it, so
+/// the `-C` values themselves are judged only by [`readonly_git_stage_root`]
+/// — never twice, and never under the wrong root.
+fn readonly_git_preamble_len(argv: &[String]) -> usize {
     let mut index = 1;
     while let Some(flag) = argv.get(index) {
         match flag.as_str() {
             "--no-pager" => index += 1,
+            "-C" => index += 2,
+            _ => break,
+        }
+    }
+    index
+}
+
+/// The directory one git stage's operands resolve against and the repository
+/// it runs under: git applies each `-C <dir>` cumulatively from the stage's
+/// working directory, so the last one wins (`git -C sub status` runs against
+/// `sub`'s repository even though the shell never `cd`'d; `cd sub; git -C ..
+/// status` runs against the parent's). This is the ONE walk for both
+/// consumers — the operand gate's per-stage operand judgment and the
+/// discovery pass's repository scan — so the two can never diverge: each
+/// `-C` takes the next token (absent → refuse), resolves relative values
+/// against the accumulated root, and must canonicalize to a directory
+/// inside the workspace before the root updates. A chain like
+/// `git -C A -C escape` therefore behaves exactly like the flat
+/// `git A/escape` it executes as. Failure names the reason; callers attach
+/// their own refusal tag.
+fn readonly_git_stage_root(
+    stage_argv: &[String],
+    base: &std::path::Path,
+    roots: &[PathBuf],
+) -> Result<std::path::PathBuf, String> {
+    let mut dir = base.to_path_buf();
+    let mut index = 1;
+    while let Some(flag) = stage_argv.get(index) {
+        match flag.as_str() {
+            "--no-pager" => index += 1,
             "-C" => {
-                let Some(target) = argv.get(index + 1) else {
-                    break;
+                let Some(target) = stage_argv.get(index + 1) else {
+                    return Err(
+                        "the git stage carries a `-C` without its directory operand".to_string()
+                    );
                 };
                 let joined = if std::path::Path::new(target).is_absolute() {
                     std::path::PathBuf::from(target)
                 } else {
                     dir.join(target)
                 };
-                dir = joined.canonicalize().unwrap_or(joined);
+                let resolved = joined.canonicalize().map_err(|error| {
+                    format!("read-only git `-C` operand {target:?} could not be resolved inside the workspace: {error}")
+                })?;
+                if !resolved.is_dir() {
+                    return Err(format!(
+                        "read-only git `-C` operand {target:?} does not resolve to a directory inside the workspace"
+                    ));
+                }
+                if !roots.iter().any(|root| resolved.starts_with(root)) {
+                    return Err(format!(
+                        "read-only git `-C` operand {target:?} resolves outside the workspace"
+                    ));
+                }
+                dir = resolved;
                 index += 2;
             }
             _ => break,
         }
     }
-    dir
+    Ok(dir)
+}
+
+/// The discovery git's environment, shared by every git invocation this lane
+/// makes before a child exists (the submodule enumeration and the version
+/// probe alike): a cleared environment plus the same sanitized PATH the
+/// read-only child runs under — entries under any declared workspace root
+/// are dropped by the exact construction the child env block uses
+/// (`readonly_sanitized_path`), so an agent-planted `git` shim is never the
+/// binary discovery execs — git configuration pinned off, prompts disabled,
+/// and a locale-stable C locale. `path` is the raw PATH value the sanitizing
+/// construction consumes; the production callers supply the live process
+/// PATH read once at discovery entry, and tests supply their own.
+fn apply_discovery_git_env(
+    command: &mut std::process::Command,
+    roots: &[PathBuf],
+    path: Option<&std::ffi::OsStr>,
+) {
+    command.env_clear();
+    if let Some(path) = path
+        .and_then(|path| readonly_sanitized_path_from(roots, path))
+        .map(|value| value.to_string_lossy().into_owned())
+    {
+        command.env("PATH", path);
+    }
+    let null_device = if cfg!(windows) { "NUL" } else { "/dev/null" };
+    command.env("GIT_CONFIG_NOSYSTEM", "1");
+    command.env("GIT_CONFIG_GLOBAL", null_device);
+    command.env("GIT_TERMINAL_PROMPT", "0");
+    command.env("LC_ALL", "C");
+}
+
+/// Run one read-only discovery `git` invocation and return its stdout.
+/// stdout is read under `stdout_cap` — one byte more refuses rather than
+/// trusting a truncated listing — and any spawn failure, non-zero status, or
+/// cap overflow refuses with the reason: a listing this lane cannot fully
+/// read is a submodule set it cannot prove. `path` is the raw PATH the
+/// hardened environment sanitizes, supplied by the caller.
+fn run_discovery_git(
+    dir: &std::path::Path,
+    args: &[&str],
+    stdout_cap: usize,
+    roots: &[PathBuf],
+    path: Option<&std::ffi::OsStr>,
+) -> Result<Vec<u8>, String> {
+    let mut command = std::process::Command::new("git");
+    command
+        .current_dir(dir)
+        .args(args)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::null());
+    apply_discovery_git_env(&mut command, roots, path);
+    let mut child = command
+        .spawn()
+        .map_err(|error| format!("git could not be started for discovery: {error}"))?;
+    let read_result = match child.stdout.take() {
+        Some(mut pipe) => {
+            let mut bytes = Vec::new();
+            let mut chunk = [0u8; 64 * 1024];
+            loop {
+                match pipe.read(&mut chunk) {
+                    Ok(0) => break Ok(bytes),
+                    Ok(read) => {
+                        bytes.extend_from_slice(&chunk[..read]);
+                        if bytes.len() > stdout_cap {
+                            break Err(format!(
+                                "the git listing is larger than the {stdout_cap}-byte discovery bound"
+                            ));
+                        }
+                    }
+                    Err(error) => break Err(format!("the git listing could not be read: {error}")),
+                }
+            }
+        }
+        None => Err("git discovery produced no readable stdout".to_string()),
+    };
+    // Reap in every path, including a refusal: no zombie is left behind.
+    let _ = child.kill();
+    let status = child.wait();
+    match read_result {
+        Ok(bytes) => {
+            let status = status
+                .map_err(|error| format!("git discovery did not report a status: {error}"))?;
+            if !status.success() {
+                return Err(format!("git exited with {status}"));
+            }
+            Ok(bytes)
+        }
+        Err(reason) => Err(reason),
+    }
+}
+
+/// The gitlink paths one repository's index records (`git ls-files --stage`,
+/// the listing git consults when it forks its dirty-check child; mode
+/// `160000` is a gitlink, and plain blobs and directories never fork). Every
+/// path is lossy-decoded — git reads bytes — and a path carrying a
+/// replacement marker or any spelling this lane cannot resolve refuses via
+/// [`validated_git_metadata_path`], because a silently skipped submodule is
+/// a repository whose filters would run unpinned.
+fn readonly_gitlink_paths(
+    worktree_dir: &std::path::Path,
+    roots: &[PathBuf],
+    path: Option<&std::ffi::OsStr>,
+) -> Result<Vec<String>, String> {
+    let bytes = run_discovery_git(
+        worktree_dir,
+        &["ls-files", "--stage", "-z"],
+        READONLY_GIT_INDEX_SCAN_CAP,
+        roots,
+        path,
+    )?;
+    let mut paths = Vec::new();
+    for record in bytes.split(|byte| *byte == 0) {
+        if record.is_empty() {
+            // The final record's terminator.
+            continue;
+        }
+        let Some(tab) = record.iter().position(|byte| *byte == b'\t') else {
+            return Err(
+                "an index record carries no path after its mode/sha/stage header".to_string(),
+            );
+        };
+        let mode = String::from_utf8_lossy(&record[..tab]);
+        if mode.split(' ').next() != Some("160000") {
+            continue;
+        }
+        let path = String::from_utf8_lossy(&record[tab + 1..]).into_owned();
+        validated_git_metadata_path(&path)?;
+        paths.push(path);
+    }
+    Ok(paths)
+}
+
+/// One path this lane resolves out of git metadata (an index gitlink record;
+/// the same rules the `.gitmodules` reader applied, now applied to the index
+/// listing that actually decides git's fork). Quoted or escaped spellings,
+/// undecodable bytes, and path components leaving the worktree refuse — a
+/// silently skipped submodule is a repository whose filters would run
+/// unpinned.
+fn validated_git_metadata_path(path: &str) -> Result<(), String> {
+    if path.is_empty()
+        || path.contains('"')
+        || path.contains('\\')
+        || path.contains(char::REPLACEMENT_CHARACTER)
+    {
+        return Err(format!(
+            "git metadata declares a path {path:?} whose spelling this lane does not resolve"
+        ));
+    }
+    if path.starts_with('/') || path.split('/').any(|component| component == "..") || path == "." {
+        return Err(format!(
+            "git metadata declares a path {path:?} outside the worktree this lane bounds"
+        ));
+    }
+    Ok(())
 }
 
 /// Scan the repository at (or above) `cwd` once per command, accumulating
-/// its armed filter declarations into `pins`, then scan every submodule it
-/// registers — git forks its own `git status`/`git diff` child into each
-/// initialized submodule, and that child converts content under the
-/// submodule's repository config, so a filter declared there runs under an
-/// admitted superproject read and must be pinned the same way.
+/// its armed filter declarations into `pins`, then scan every submodule its
+/// index registers — git forks its own `git status`/`git diff` child into
+/// any index gitlink whose path holds a repository, and that child converts
+/// content under the submodule's repository config, so a filter declared
+/// there runs under an admitted superproject read and must be pinned the
+/// same way.
 fn scan_readonly_repository_at(
     cwd: &std::path::Path,
     pins: &mut Vec<ReadonlyGitFilterPin>,
     scanned: &mut std::collections::HashSet<PathBuf>,
     repos_remaining: &mut usize,
+    roots: &[PathBuf],
+    env_path: Option<&std::ffi::OsStr>,
 ) -> Result<(), ToolError> {
     let refuse = |reason: String| {
         ToolError::permission_denied(format!(
@@ -4608,44 +4862,21 @@ fn scan_readonly_repository_at(
             pins.push(name);
         }
     }
-    let modules = worktree_dir.join(".gitmodules");
-    // Bound before reading: a crafted .gitmodules of any size would
-    // otherwise buy a full-size transient allocation per scanned repository.
-    match std::fs::metadata(&modules) {
-        // No registered submodules: nothing further to scan.
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
-        Err(error) => {
-            return Err(refuse(format!(
-                "{} could not be read: {error}",
-                modules.display()
-            )));
-        }
-        Ok(metadata) => {
-            if metadata.len() > READONLY_GIT_CONFIG_SCAN_CAP as u64 {
-                return Err(refuse(format!(
-                    "{} is larger than the {}-byte filter-discovery scan bound",
-                    modules.display(),
-                    READONLY_GIT_CONFIG_SCAN_CAP
-                )));
-            }
-        }
-    }
-    let bytes = std::fs::read(&modules)
-        .map_err(|error| refuse(format!("{} could not be read: {error}", modules.display())))?;
-    if bytes.len() > READONLY_GIT_CONFIG_SCAN_CAP {
-        return Err(refuse(format!(
-            "{} is larger than the {}-byte filter-discovery scan bound",
-            modules.display(),
-            READONLY_GIT_CONFIG_SCAN_CAP
-        )));
-    }
-    // The .gitmodules text may hold bytes no Rust string can carry where git
-    // reads bytes; lossy decoding marks them, and any path carrying such a
-    // marker is one this lane cannot resolve, so it refuses below instead of
-    // silently skipping the submodule.
-    let text = String::from_utf8_lossy(&bytes);
-    for path in gitmodules_submodule_paths(&text).map_err(refuse)? {
-        scan_readonly_repository_at(&worktree_dir.join(&path), pins, scanned, repos_remaining)?;
+    // Enumeration is index-driven: git forks its own dirty-check child into
+    // ANY index gitlink whose path holds a repository, and `.gitmodules` is
+    // only a label on that fork (probe-pinned: with `.gitmodules` deleted
+    // from the worktree but the gitlink still in the index, git still forks
+    // and the submodule's filter still fires), so the registered submodule
+    // set comes from the index itself.
+    for gitlink in readonly_gitlink_paths(&worktree_dir, roots, env_path).map_err(refuse)? {
+        scan_readonly_repository_at(
+            &worktree_dir.join(std::path::Path::new(&gitlink)),
+            pins,
+            scanned,
+            repos_remaining,
+            roots,
+            env_path,
+        )?;
     }
     Ok(())
 }
@@ -4653,9 +4884,15 @@ fn scan_readonly_repository_at(
 /// The git directory git itself would use from `cwd` — paired with the
 /// directory the `.git` entry was found in, the repository's worktree root
 /// — walking up through the worktree/submodule `gitdir:` link form. git
-/// parses a `.git` link byte-wise and consumes its first line; anything the
-/// lane cannot decode or read is a repository git would still run (its
-/// filters included), so it refuses instead of reporting "no repository".
+/// parses a `.git` link byte-wise: the literal lowercase prefix `gitdir:`
+/// plus EXACTLY ONE space, then a byte-exact first-line value (one trailing
+/// newline optional, any content after the first line ignored). Every other
+/// spelling is the `invalid gitfile format` git itself fatals on, and a
+/// value that is empty or ends in whitespace or `\r` is one git rejects —
+/// this lane refuses those instead of silently trimming a target git would
+/// never open, because guessing at a spelling this lane cannot mirror is
+/// how a repository escapes the scan. Anything the lane cannot decode or
+/// read refuses the same way.
 fn readonly_git_dir_for(cwd: &std::path::Path) -> Result<Option<(PathBuf, PathBuf)>, String> {
     let mut dir = cwd.to_path_buf();
     loop {
@@ -4702,12 +4939,33 @@ fn readonly_git_dir_for(cwd: &std::path::Path) -> Result<Option<(PathBuf, PathBu
                     candidate.display()
                 )
             })?;
-            let Some(target) = text.trim().strip_prefix("gitdir:") else {
-                // A malformed link makes git itself fatal before any
-                // conversion runs; no repository, nothing to scan.
-                return Ok(None);
+            // git requires the literal lowercase prefix plus EXACTLY ONE
+            // space — no space, a tab, or two spaces is `fatal: invalid
+            // gitfile format` there. Refuse those spellings instead of
+            // reporting "no repository": the scan walks UP the tree, and a
+            // link it cannot mirror is one it must not guess at.
+            let Some(target) = text.strip_prefix("gitdir: ") else {
+                return Err(format!(
+                    "the .git link at {} is not a spelling git accepts (invalid gitfile format)",
+                    candidate.display()
+                ));
             };
-            let target = target.trim();
+            // The value is byte-exact to the end of the first line; a value
+            // that is empty or carries trailing whitespace (or a trailing
+            // `\r` git strips at the newline) fatals in git before anything
+            // runs — refuse rather than trim it into a target git would
+            // never open.
+            if target.is_empty()
+                || target.starts_with([' ', '\t'])
+                || target.ends_with([' ', '\t', '\r'])
+            {
+                return Err(format!(
+                    "the .git link at {} names a target git itself rejects",
+                    candidate.display()
+                ));
+            }
+            // Content after the first line is ignored, exactly like git
+            // consuming one line.
             let gitdir = if std::path::Path::new(target).is_absolute() {
                 PathBuf::from(target)
             } else {
@@ -4727,13 +4985,21 @@ fn readonly_git_dir_for(cwd: &std::path::Path) -> Result<Option<(PathBuf, PathBu
 /// `commondir`. Both the pointer files and the config are read with the
 /// same byte-wise fidelity git applies — an undecodable or oversized file
 /// refuses instead of scanning a partial set, and a config is size-checked
-/// before it is read into memory.
+/// before it is read into memory. `core.worktree` is validated only for a
+/// main git directory: git resolves a linked worktree from its gitdir
+/// back-pointer and IGNORES `core.worktree` even when the shared config
+/// declares it (probe-pinned: the toplevel is the linked worktree while the
+/// filter in the shared config still fires), and the shared config already
+/// reaches this scan through the `commondir` chain.
 fn readonly_git_config_filter_names(
     gitdir: &std::path::Path,
     worktree_dir: &std::path::Path,
 ) -> Result<Vec<ReadonlyGitFilterPin>, String> {
     let mut config_paths = vec![gitdir.join("config")];
     let commondir_path = gitdir.join("commondir");
+    // A git directory carrying a `commondir` pointer is a linked worktree;
+    // its configs skip the `core.worktree` validation git itself skips.
+    let mut linked_worktree = false;
     match std::fs::metadata(&commondir_path) {
         // A git directory without a commondir pointer shares nothing.
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
@@ -4744,6 +5010,7 @@ fn readonly_git_config_filter_names(
             ));
         }
         Ok(metadata) => {
+            linked_worktree = true;
             if metadata.len() > READONLY_GIT_META_SCAN_CAP as u64 {
                 return Err(format!(
                     "the commondir pointer at {} is larger than the {}-byte discovery bound",
@@ -4814,7 +5081,9 @@ fn readonly_git_config_filter_names(
             ));
         }
         let text = String::from_utf8_lossy(&bytes);
-        validated_core_worktree(&text, gitdir, worktree_dir)?;
+        if !linked_worktree {
+            validated_core_worktree(&text, gitdir, worktree_dir)?;
+        }
         names.extend(armed_git_filter_names(&text)?);
     }
     Ok(names)
@@ -4833,8 +5102,10 @@ struct ParsedGitConfigSetting {
 /// A physical git config line continues its value onto the next one iff it
 /// ends in an odd number of backslashes — each pair is an escaped literal
 /// backslash, so an even count ends the value (probe-pinned against git's
-/// own parser). Comments never continue: a comment ends at the newline,
-/// backslash or not, and git parses the next line normally.
+/// own parser). The input is the COMMENT-STRIPPED text of the line
+/// ([`strip_git_config_comment`]): a comment ends the logical line, so a
+/// backslash inside a comment never continues it, and a trailing `\r` (git
+/// strips one per line) must already be gone.
 fn git_config_line_continues(raw: &str) -> bool {
     let trimmed = raw.trim_end();
     let mut trailing = 0usize;
@@ -4848,63 +5119,209 @@ fn git_config_line_continues(raw: &str) -> bool {
     trailing % 2 == 1
 }
 
+/// Cut one physical config line at its first unquoted comment marker,
+/// mirroring git: `#`/`;` start a comment anywhere outside double quotes —
+/// in a value or after a header's `]` — and the rest of the line is dropped
+/// with the logical line ending there (a backslash inside a comment never
+/// continues it). A `"` toggles quote state unless an odd run of preceding
+/// backslashes escapes it, and `in_quotes` carries that state in from the
+/// caller (continuation lines keep the opening line's state) and back out.
+/// Returns the comment-stripped text, the quote state at the cut (or at end
+/// of line when no comment was found), and whether a comment was found.
+fn strip_git_config_comment(line: &str, mut in_quotes: bool) -> (&str, bool, bool) {
+    let mut backslash_run = 0usize;
+    for (index, ch) in line.char_indices() {
+        if ch == '\\' {
+            backslash_run += 1;
+            continue;
+        }
+        let escaped = backslash_run % 2 == 1;
+        backslash_run = 0;
+        if ch == '"' && !escaped {
+            in_quotes = !in_quotes;
+        } else if (ch == '#' || ch == ';') && !in_quotes {
+            return (&line[..index], in_quotes, true);
+        }
+    }
+    (line, in_quotes, false)
+}
+
+/// The byte index of the `]` closing a section header on one line, found
+/// with a quote-aware scan: a `]` inside a double-quoted subsection name is
+/// literal (git accepts it; this scanner later refuses such names
+/// fail-closed, but must find the real close rather than mis-parse).
+fn git_config_header_close(line: &str) -> Option<usize> {
+    let mut in_quotes = false;
+    let mut backslash_run = 0usize;
+    for (index, ch) in line.char_indices() {
+        if ch == '\\' {
+            backslash_run += 1;
+            continue;
+        }
+        let escaped = backslash_run % 2 == 1;
+        backslash_run = 0;
+        if ch == '"' && !escaped {
+            in_quotes = !in_quotes;
+        } else if ch == ']' && !in_quotes {
+            return Some(index);
+        }
+    }
+    None
+}
+
+/// Split a header's base text into the section and optional dotted
+/// subsection, both lowercased the way git folds them. The split lands on
+/// the FIRST dot, so `[base.sub]` is section `base` and subsection `sub`,
+/// `[FILTER.EV]` arms driver `ev` (the subsection is case-folded), and
+/// `[filter.a.b]` is section `filter` with subsection `a.b`.
+fn split_git_header_base(base_text: &str) -> (String, Option<String>) {
+    let base_text = base_text.trim();
+    match base_text.split_once('.') {
+        Some((base, dotted)) => (
+            base.trim().to_ascii_lowercase(),
+            Some(dotted.trim().to_ascii_lowercase()),
+        ),
+        None => (base_text.to_ascii_lowercase(), None),
+    }
+}
+
+/// Whether a quoted header name closes early: the caller strips the suffix
+/// `"` expecting it to be the closer, so that holds only while the
+/// escape-aware scan never toggles out of the opening quote. An interior
+/// unescaped quote toggles out early and leaves the suffix to re-open
+/// instead of close — that shape (and an escaped `\"`, which the name
+/// charset refuses downstream) is not a spelling this scanner resolves, so
+/// it refuses instead of mis-parsing the header.
+fn git_quoted_name_unterminated(name: &str) -> bool {
+    // The opening quote was consumed by the caller.
+    let mut in_quotes = true;
+    let mut backslash_run = 0usize;
+    for ch in name.chars() {
+        if ch == '\\' {
+            backslash_run += 1;
+            continue;
+        }
+        let escaped = backslash_run % 2 == 1;
+        backslash_run = 0;
+        if ch == '"' && !escaped {
+            in_quotes = !in_quotes;
+        }
+    }
+    // Still inside at the end: every quote char the name carried was
+    // escaped, and the stripped suffix closes the opening. Toggled out:
+    // the suffix re-opens, so the name never closed.
+    !in_quotes
+}
+
+/// Parse one `[...]` section header's text (between `[` and the unquoted
+/// `]`) into its base section and optional subsection, mirroring git's four
+/// shapes: `[base]`, the dotted `[base.subsection]` (split at the FIRST
+/// dot, the subsection case-folded), the quoted `[base "Sub"]` (the name
+/// byte-exact), and the combined `[filter.x "y"]` (section `filter`,
+/// subsection `x.y` with the dotted part lowercased and the quoted name
+/// appended). Base and dotted parts are lowercased the way git folds them.
+fn parse_git_config_header(header: &str) -> Result<(String, Option<String>), String> {
+    let Some(quote) = header.find('"') else {
+        let (base, dotted) = split_git_header_base(header);
+        return Ok((base, dotted));
+    };
+    let Some(name) = header[quote + 1..].strip_suffix('"') else {
+        return Err("a filter subsection is not terminated".to_string());
+    };
+    if git_quoted_name_unterminated(name) {
+        return Err("a filter subsection is not terminated".to_string());
+    }
+    let (base, dotted) = split_git_header_base(&header[..quote]);
+    let subsection = match dotted {
+        Some(dotted) => Some(format!("{dotted}.{name}")),
+        None => Some(name.to_string()),
+    };
+    Ok((base, subsection))
+}
+
 /// Parse every key setting of one git config text, mirroring the parts of
-/// git's own parser this lane depends on: keys on a section-header line
-/// parse (a same-line `[filter "x"] clean = v` arms a filter git runs while
-/// a header-only skip would hide it — probe-pinned), `include`/`includeIf`
-/// headers refuse (an included file can declare filters outside this scan),
-/// and a value continues over the next physical lines only while those
+/// git's own parser this lane depends on: a leading UTF-8 BOM is skipped
+/// (git skips it too; a mid-file BOM makes git fatal, so no setting can
+/// hide behind one), one trailing `\r` per physical line (CRLF) is
+/// stripped, `#`/`;` start comments outside double quotes anywhere in a
+/// line with the quote state carrying across continuation lines, keys on a
+/// section-header line parse (a same-line `[filter "x"] clean = v` arms a
+/// filter git runs while a header-only skip would hide it — probe-pinned),
+/// a line re-targets the section at every `[` after a header's `]`
+/// (`[a] [b] k = v` parses `b.k`), headers parse in all four git shapes
+/// ([`parse_git_config_header`]), `include`/`includeIf` headers refuse (an
+/// included file can declare filters outside this scan), and a value
+/// continues over the next physical lines only while the comment-stripped
 /// lines are continuations. Returns a refusal reason for anything that
 /// could hide a setting from the caller's scan.
 fn parse_git_config_settings(config_text: &str) -> Result<Vec<ParsedGitConfigSetting>, String> {
+    let config_text = config_text.strip_prefix('\u{feff}').unwrap_or(config_text);
     let mut settings = Vec::new();
     // (section, subsection) of the last `[...]` header; `None` before one.
     let mut section: Option<(String, Option<String>)> = None;
     let mut continuation = false;
-    for raw in config_text.lines() {
+    // Quote state carried across the continuation lines of the current
+    // logical line; every fresh logical line starts unquoted.
+    let mut in_quotes = false;
+    for raw_line in config_text.lines() {
+        // git strips ONE trailing `\r`, so a CRLF file parses like an LF one.
+        let raw = raw_line.strip_suffix('\r').unwrap_or(raw_line);
+        let (text, quotes_after, comment_found) = strip_git_config_comment(raw, in_quotes);
         if continuation {
             // Continuation text is value, not key, and must never be read
-            // as one; the value keeps going while lines keep ending in an
-            // unescaped backslash.
-            continuation = git_config_line_continues(raw);
+            // as one. The value keeps going while lines keep ending in an
+            // unescaped backslash; an unquoted comment ends the logical
+            // line there (a backslash inside a comment never continues
+            // it), and the quote state carried from the opening line
+            // decides whether that line's `#`/`;` even is a comment.
+            if comment_found {
+                continuation = false;
+                in_quotes = false;
+            } else {
+                continuation = git_config_line_continues(text);
+                in_quotes = if continuation { quotes_after } else { false };
+            }
             continue;
         }
-        let line = raw.trim();
-        if line.is_empty() || line.starts_with('#') || line.starts_with(';') {
-            // Comments end at the newline: a trailing backslash on one does
-            // not continue it.
+        in_quotes = false;
+        let line = text.trim();
+        if line.is_empty() {
+            // A whole-line comment or a blank line; comments end at the
+            // newline, so nothing can dangle here.
             continue;
         }
         let key_text = if line.starts_with('[') {
-            let Some(close) = line.find(']') else {
-                return Err("a section header is not terminated".to_string());
-            };
-            let header = line[1..close].trim();
-            let (base, subsection) = match header.find('"') {
-                Some(quote) => {
-                    let Some(name) = header[quote + 1..].strip_suffix('"') else {
-                        return Err("a filter subsection is not terminated".to_string());
-                    };
-                    (header[..quote].trim(), Some(name.to_string()))
+            let mut rest = line;
+            loop {
+                // The closing `]` is found with a quote-aware scan (a `]`
+                // inside a quoted subsection name is literal), then git's
+                // same-line re-targeting loops: another `[` after a
+                // header's `]` starts a new section immediately.
+                let Some(close) = git_config_header_close(rest) else {
+                    return Err("a section header is not terminated".to_string());
+                };
+                let (base, subsection) = parse_git_config_header(&rest[1..close])?;
+                // An `include`d file can declare filters outside this scan.
+                if base == "include" || base == "includeif" {
+                    return Err("the repository config carries `include` directives".to_string());
                 }
-                None => (header, None),
-            };
-            let base = base.trim().to_ascii_lowercase();
-            // An `include`d file can declare filters outside this scan.
-            if base == "include" || base == "includeif" {
-                return Err("the repository config carries `include` directives".to_string());
+                section = Some((base, subsection));
+                rest = rest[close + 1..].trim_start();
+                if !rest.starts_with('[') {
+                    break;
+                }
             }
-            section = Some((base, subsection));
-            // git accepts keys on the header line; the remainder after `]`
-            // is that key, not noise.
-            let remainder = line[close + 1..].trim();
-            if remainder.is_empty() {
-                if git_config_line_continues(raw) {
+            if rest.is_empty() {
+                if comment_found {
+                    // A comment ends the logical line; nothing dangles.
+                    continue;
+                }
+                if git_config_line_continues(text) {
                     return Err("a section header line ends in a dangling continuation".to_string());
                 }
                 continue;
             }
-            remainder
+            rest
         } else {
             line
         };
@@ -4932,8 +5349,11 @@ fn parse_git_config_settings(config_text: &str) -> Result<Vec<ParsedGitConfigSet
         });
         // The value may continue over the next physical lines (an odd
         // trailing-backslash count on the header line continues a same-line
-        // key's value too).
-        continuation = git_config_line_continues(raw);
+        // key's value too). A comment already ended the logical line, and
+        // the quote state carries into continuations only when the line
+        // actually continues.
+        continuation = !comment_found && git_config_line_continues(text);
+        in_quotes = if continuation { quotes_after } else { false };
     }
     Ok(settings)
 }
@@ -5011,7 +5431,9 @@ fn armed_git_filter_names(config_text: &str) -> Result<Vec<ReadonlyGitFilterPin>
 /// exactly the discovered worktree admits; anything else — a redirect
 /// outside the workspace or merely elsewhere in it — refuses, because an
 /// admitted read would list and display files outside the tree this lane
-/// scanned and bounded.
+/// scanned and bounded. git applies the LAST value of a duplicated
+/// `core.worktree`, so the last declaration is the one validated — taking
+/// the first would admit a worktree a later duplicate relocates.
 fn validated_core_worktree(
     config_text: &str,
     gitdir: &std::path::Path,
@@ -5019,6 +5441,7 @@ fn validated_core_worktree(
 ) -> Result<(), String> {
     let Some(declared) = parse_git_config_settings(config_text)?
         .into_iter()
+        .rev()
         .find(|setting| setting.base == "core" && setting.key == "worktree")
         .and_then(|setting| setting.value)
     else {
@@ -5044,46 +5467,6 @@ fn validated_core_worktree(
         ));
     }
     Ok(())
-}
-
-/// The submodule worktree paths one repository's `.gitmodules` registers.
-/// Values follow git's plain unquoted spelling; anything this lane cannot
-/// resolve byte-faithfully — quoted or escaped spellings, path components
-/// leaving the worktree, undecodable bytes — refuses, because a silently
-/// skipped submodule is a repository whose filters would run unpinned.
-fn gitmodules_submodule_paths(config_text: &str) -> Result<Vec<String>, String> {
-    let settings = parse_git_config_settings(config_text)?;
-    let mut paths = Vec::new();
-    for setting in &settings {
-        if setting.base != "submodule" || setting.key != "path" {
-            continue;
-        }
-        let Some(value) = &setting.value else {
-            continue;
-        };
-        if value.is_empty() {
-            continue;
-        }
-        if value.starts_with('"')
-            || value.contains('"')
-            || value.contains('\\')
-            || value.contains(char::REPLACEMENT_CHARACTER)
-        {
-            return Err(format!(
-                "the .gitmodules declares a submodule path {value:?} whose spelling this lane does not resolve"
-            ));
-        }
-        if value.starts_with('/')
-            || value.split('/').any(|component| component == "..")
-            || value == "."
-        {
-            return Err(format!(
-                "the .gitmodules declares a submodule path {value:?} outside the worktree this lane bounds"
-            ));
-        }
-        paths.push(value.clone());
-    }
-    Ok(paths)
 }
 
 fn enforce_readonly_workspace_operands(
@@ -5148,15 +5531,15 @@ fn enforce_readonly_workspace_operands(
 /// The gh exemption skips every operand judgment for a gh stage, on the
 /// rationale that high-level gh reads consume no workspace path operands.
 /// They do, however, accept `HOST/OWNER/REPO` operands the classifier
-/// host-checks by their literal spelling — and a `*` in such a token would
-/// let the shell expand a workspace entry into that position at runtime,
-/// pointing gh at a host the network policy never evaluated. The exemption
-/// therefore holds only for literal operands; a wildcard anywhere after the
-/// program word refuses.
+/// host-checks by their literal spelling, and those operands are strings
+/// gh consumes itself — not workspace paths — so there is no workspace walk
+/// that could bound a wildcard's expansion host-side. The exemption
+/// therefore holds only for literal operands: ANY wildcard token after the
+/// program word — quoted or bare — refuses.
 fn refuse_gh_stage_glob_operands(argv: &[String]) -> Result<(), ToolError> {
     if let Some(token) = argv.iter().skip(1).find(|token| token.contains('*')) {
         return Err(ToolError::permission_denied(format!(
-            "[shell.readonly.operand.gh_glob] Read-only gh stages are judged by their literal operands, and {token:?} carries a wildcard the shell would expand at runtime — the expansion could name a repository target the network policy never approved. Spell the operand literally or drop it."
+            "[shell.readonly.operand.gh_glob] Read-only gh stages are judged by their literal operands, and {token:?} carries a wildcard; the lane refuses any wildcard token on a gh stage — quoted or bare — because a gh stage's operand scope cannot be bounded host-side. Spell the operand literally or drop it."
         )));
     }
     Ok(())
@@ -5197,6 +5580,26 @@ fn enforce_readonly_segment_operands(
                     )));
                 }
                 Some("gh") => refuse_gh_stage_glob_operands(&argv)?,
+                Some("git") => {
+                    // git's `-C` preamble accumulates: the stage's operands
+                    // resolve against the directory the stage actually runs
+                    // under, through the same helper the discovery pass
+                    // walks, so `git -C A -C escape` is judged exactly like
+                    // the flat `git A/escape` it executes as. The `-C`
+                    // values themselves are judged inside the helper.
+                    let stage_root =
+                        readonly_git_stage_root(&argv, effective_cwd, roots).map_err(|reason| {
+                            ToolError::permission_denied(format!(
+                                "[shell.readonly.operand.outside_workspace] {reason}"
+                            ))
+                        })?;
+                    enforce_readonly_argv_operands(
+                        &argv[readonly_git_preamble_len(&argv)..],
+                        roots,
+                        &stage_root,
+                        glob_budget,
+                    )?;
+                }
                 // An empty stage (`a | | b`) refuses too: the classifier
                 // rejects it, and this gate's doc promises every stage is
                 // judged — an empty argv would otherwise pass silently.
@@ -5304,6 +5707,24 @@ fn enforce_readonly_segment_operands(
             )));
         }
         return Ok(resolved);
+    }
+    if argv.first().is_some_and(|program| program == "git") {
+        // Same accumulated-root judgment as a piped git stage: a chained
+        // `-C` re-targets the directory every operand of the stage resolves
+        // against, and the helper judges the `-C` values themselves.
+        let stage_root =
+            readonly_git_stage_root(&argv, effective_cwd, roots).map_err(|reason| {
+                ToolError::permission_denied(format!(
+                    "[shell.readonly.operand.outside_workspace] {reason}"
+                ))
+            })?;
+        enforce_readonly_argv_operands(
+            &argv[readonly_git_preamble_len(&argv)..],
+            roots,
+            &stage_root,
+            glob_budget,
+        )?;
+        return Ok(effective_cwd.to_path_buf());
     }
     enforce_readonly_argv_operands(&argv, roots, effective_cwd, glob_budget)?;
     Ok(effective_cwd.to_path_buf())
@@ -5996,14 +6417,13 @@ async fn execute_foreground_via_background(
     let task_id = spawned
         .task_id
         .ok_or_else(|| anyhow!("foreground shell did not return a process id"))?;
-    if let Some(permit) = heavy_permit {
-        let mut manager = context
-            .shell_manager
-            .lock()
-            .map_err(|_| anyhow!("shell manager lock poisoned"))?;
-        manager.attach_heavy_permit(&task_id, permit)?;
-    }
-
+    // The stdin write end must close BEFORE any fallible step between spawn
+    // and close: a future step that can fail here (the heavy-permit attach
+    // below) would otherwise return early and leak an open write end,
+    // wedging stdin-reading commands until the foreground watchdog killed
+    // them. The close is ordered first so no intermediate failure can leave
+    // the pipe open.
+    //
     // Foreground has no operator at the keyboard, so whatever the command
     // will ever read from stdin must be bounded now. With stdin data the
     // payload was delivered at spawn and closing the write end turns the
@@ -6024,6 +6444,13 @@ async fn execute_foreground_via_background(
             .lock()
             .map_err(|_| anyhow!("shell manager lock poisoned"))?;
         manager.write_stdin(&task_id, "", true)?;
+    }
+    if let Some(permit) = heavy_permit {
+        let mut manager = context
+            .shell_manager
+            .lock()
+            .map_err(|_| anyhow!("shell manager lock poisoned"))?;
+        manager.attach_heavy_permit(&task_id, permit)?;
     }
 
     let deadline = timeout_ms.map(|timeout| Instant::now() + Duration::from_millis(timeout));
@@ -6782,7 +7209,7 @@ impl ToolSpec for BashTool {
             let effective_cwd = effective_cwd.to_path_buf();
             readonly_git_filter_pins = tokio::task::spawn_blocking(move || {
                 enforce_readonly_workspace_operands(&command, &roots, &effective_cwd)?;
-                discover_readonly_git_filter_pins(&command, &effective_cwd)
+                discover_readonly_git_filter_pins(&command, &effective_cwd, &roots)
             })
             .await
             .map_err(|error| {
@@ -6838,9 +7265,12 @@ impl ToolSpec for BashTool {
             extra_env.insert("BASH_ENV".to_string(), String::new());
             // Non-interactive zsh sources `$ZDOTDIR/.zshenv`, where
             // operator-set options such as EXTENDED_GLOB could turn
-            // charset-admitted characters into live globs; bash's
-            // GLOBIGNORE could likewise widen what a pattern matches.
-            extra_env.insert("ZDOTDIR".to_string(), String::new());
+            // charset-admitted characters into live globs. An EMPTY ZDOTDIR
+            // makes zsh fall back to `$HOME/.zshenv` — the exact file this
+            // pin exists to bypass — so the override points at `/`, a
+            // directory outside agent control; bash's GLOBIGNORE could
+            // likewise widen what a pattern matches.
+            extra_env.insert("ZDOTDIR".to_string(), "/".to_string());
             extra_env.insert("GLOBIGNORE".to_string(), String::new());
             extra_env.insert("CDPATH".to_string(), String::new());
             extra_env.insert("RIPGREP_CONFIG_PATH".to_string(), String::new());
@@ -6849,11 +7279,11 @@ impl ToolSpec for BashTool {
             // config and attributes are attacker-controlled evidence inputs;
             // a nominal `git diff/log/show` must not turn them into programs.
             // Note the GIT_CONFIG_COUNT mechanism needs git >= 2.31: on an
-            // older git this block silently does not exist. Filter pins are
-            // gated on a version check exactly when they are armed
-            // (`ensure_git_supports_env_config_pins`); the fsmonitor/hooksPath
-            // overrides below have the same floor and lean on the argv splice
-            // as their other wall for the subcommands it covers (status/
+            // older git this block silently does not exist. The fixed pins
+            // below are written for EVERY read-only git stage, so discovery
+            // version-checks the host git for every command with a git
+            // stage (`ensure_git_supports_env_config_pins`); the argv splice
+            // is the other wall for the subcommands it covers (status/
             // ls-files/grep are covered by nothing but this block).
             extra_env.insert("GIT_CONFIG_NOSYSTEM".to_string(), "1".to_string());
             extra_env.insert("GIT_CONFIG_GLOBAL".to_string(), null_device.to_string());

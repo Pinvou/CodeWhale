@@ -1263,6 +1263,27 @@ fn readonly_operands_are_workspace_bounded_and_symlink_aware() {
     }
 }
 
+/// Discovery with the scanned repository itself as the sole workspace root —
+/// the shape every fixture uses (the production lane passes the full
+/// declared root set and runs the operand gate first).
+fn discover_pins(
+    command: &str,
+    cwd: &std::path::Path,
+) -> Result<Vec<ReadonlyGitFilterPin>, ToolError> {
+    let roots = vec![cwd.to_path_buf()];
+    super::discover_readonly_git_filter_pins(command, cwd, &roots)
+}
+
+/// A minimal on-disk git directory git itself accepts — HEAD plus the
+/// objects/ and refs/ directories — enough for the enumeration's
+/// `git ls-files --stage` to report an empty index without a real
+/// `git init`, so hand-built config fixtures stay scanned end to end.
+fn seed_minimal_gitdir(gitdir: &std::path::Path) {
+    std::fs::create_dir_all(gitdir.join("objects")).expect("objects dir");
+    std::fs::create_dir_all(gitdir.join("refs")).expect("refs dir");
+    std::fs::write(gitdir.join("HEAD"), "ref: refs/heads/main\n").expect("HEAD");
+}
+
 /// A `.gitattributes` filter assignment only executes when the repository's
 /// own config defines the filter, and repo config is the one config source
 /// the read-only env block does not pin away — so discovery must return
@@ -1273,13 +1294,14 @@ fn readonly_filter_discovery_pins_declared_filters() {
     let repo = tempdir().expect("repo");
     let gitdir = repo.path().join(".git");
     std::fs::create_dir_all(&gitdir).expect("gitdir");
+    seed_minimal_gitdir(&gitdir);
     std::fs::write(
         gitdir.join("config"),
         "[core]\n\trepositoryformatversion = 0\n[filter \"lfs\"]\n\tclean = git-lfs clean -- %f\n\tsmudge = git-lfs smudge -- %f\n\tprocess = git-lfs filter-process\n",
     )
     .expect("config");
-    let pins = discover_readonly_git_filter_pins("git status -s", repo.path())
-        .expect("an armed filter is discoverable");
+    let pins =
+        discover_pins("git status -s", repo.path()).expect("an armed filter is discoverable");
     assert_eq!(pins.len(), 1, "{pins:?}");
     assert_eq!(pins[0].name, "lfs");
     assert!(
@@ -1290,14 +1312,12 @@ fn readonly_filter_discovery_pins_declared_filters() {
     // An attribute naming an undefined filter runs nothing: no config
     // declaration, no pin.
     std::fs::remove_file(gitdir.join("config")).expect("drop config");
-    let pins = discover_readonly_git_filter_pins("git status -s", repo.path())
-        .expect("no config declares nothing");
+    let pins = discover_pins("git status -s", repo.path()).expect("no config declares nothing");
     assert!(pins.is_empty(), "undefined filters are inert: {pins:?}");
 
     // A repository defines nothing for a command with no git stage; the
     // scan stays off the filesystem entirely.
-    let pins = discover_readonly_git_filter_pins("wc -c f", repo.path())
-        .expect("no git stage scans nothing");
+    let pins = discover_pins("wc -c f", repo.path()).expect("no git stage scans nothing");
     assert!(pins.is_empty(), "{pins:?}");
 
     // A `[filter]` section without a subsection builds two-part keys no
@@ -1307,7 +1327,7 @@ fn readonly_filter_discovery_pins_declared_filters() {
         "[filter]\n\tprocess = convert-lite filter\n",
     )
     .expect("config");
-    let pins = discover_readonly_git_filter_pins("git diff HEAD", repo.path())
+    let pins = discover_pins("git diff HEAD", repo.path())
         .expect("a bare filter section is inert, not an error");
     assert!(pins.is_empty(), "{pins:?}");
 
@@ -1318,8 +1338,8 @@ fn readonly_filter_discovery_pins_declared_filters() {
         "[filter \"lfs\"]\n\tclean = git-lfs clean -- %f\n",
     )
     .expect("config");
-    let pins = discover_readonly_git_filter_pins("git status -s", repo.path())
-        .expect("a clean-only filter is discoverable");
+    let pins =
+        discover_pins("git status -s", repo.path()).expect("a clean-only filter is discoverable");
     assert_eq!(pins.len(), 1, "{pins:?}");
     assert!(
         pins[0].clean && !pins[0].smudge && !pins[0].process,
@@ -1335,7 +1355,7 @@ fn readonly_filter_discovery_pins_declared_filters() {
         "[filter \"Mix\"]\n\tclean = cat\n[filter \"mix\"]\n\tclean = evil\n",
     )
     .expect("config");
-    let pins = discover_readonly_git_filter_pins("git status -s", repo.path())
+    let pins = discover_pins("git status -s", repo.path())
         .expect("case-variant filters are two drivers, not one");
     let mut spellings = pins.iter().map(|pin| pin.name.as_str()).collect::<Vec<_>>();
     spellings.sort();
@@ -1349,12 +1369,59 @@ fn readonly_filter_discovery_pins_declared_filters() {
         "[filter \"sl\"] clean = evil\n[filter \"plain\"]\n\tclean = cat\n",
     )
     .expect("config");
-    let pins = discover_readonly_git_filter_pins("git status -s", repo.path())
+    let pins = discover_pins("git status -s", repo.path())
         .expect("same-line section keys parse like git's own");
     let mut spellings = pins.iter().map(|pin| pin.name.as_str()).collect::<Vec<_>>();
     spellings.sort();
     assert_eq!(spellings, ["plain", "sl"], "{pins:?}");
     assert!(pins.iter().all(|pin| pin.clean), "{pins:?}");
+
+    // One line can carry TWO headers: git re-targets the section at every
+    // `[` after a header's `]`, so the following key arms the LAST header's
+    // driver — a parser that stopped at the first header would pin `decoy`
+    // (which git never arms) while `evil` stayed live and unpinned.
+    std::fs::write(
+        gitdir.join("config"),
+        "[filter \"decoy\"] [filter \"evil\"]\nclean = cat\n",
+    )
+    .expect("config");
+    let pins = discover_pins("git status -s", repo.path())
+        .expect("the second header on the line owns the following key");
+    assert_eq!(pins.len(), 1, "{pins:?}");
+    assert_eq!(pins[0].name, "evil", "{pins:?}");
+    assert!(pins[0].clean, "{pins:?}");
+
+    // A `;`/`#` outside quotes starts a comment ANYWHERE in the line — in a
+    // value too — and a comment ends the logical line: the trailing
+    // backslash inside it never continues it, so the next line parses as
+    // the key git treats it as. Both keys arm; a parser that saw the
+    // backslash first would swallow `smudge` into `clean`'s value and leave
+    // it unpinned while git still ran it.
+    std::fs::write(
+        gitdir.join("config"),
+        "[filter \"comment-cut\"]\n\tclean = cat ; note \\\n\tsmudge = evil\n",
+    )
+    .expect("config");
+    let pins = discover_pins("git status -s", repo.path())
+        .expect("a comment ends the logical line before its backslash");
+    assert_eq!(pins.len(), 1, "{pins:?}");
+    assert_eq!(pins[0].name, "comment-cut", "{pins:?}");
+    assert!(pins[0].clean && pins[0].smudge, "{pins:?}");
+
+    // A quote opened on a value line carries its state into the
+    // continuation lines and closes there; the key after the closed quote
+    // still parses and arms. The carried state decides whether a `;` on the
+    // continuation line is even a comment.
+    std::fs::write(
+        gitdir.join("config"),
+        "[filter \"quoted-over-lines\"]\n\tclean = \"multi \\\nline value\"\n[filter \"after-quote\"]\n\tclean = evil\n",
+    )
+    .expect("config");
+    let pins = discover_pins("git status -s", repo.path())
+        .expect("a quote closing on the continuation line keeps the following key armed");
+    let mut spellings = pins.iter().map(|pin| pin.name.as_str()).collect::<Vec<_>>();
+    spellings.sort();
+    assert_eq!(spellings, ["after-quote", "quoted-over-lines"], "{pins:?}");
 
     // A value continues onto the next physical line only when it ends in an
     // odd number of backslashes (an escaped backslash is a pair); the next
@@ -1366,7 +1433,7 @@ fn readonly_filter_discovery_pins_declared_filters() {
         "# changenote \\\n[filter \"after-comment\"]\n\tclean = evil\n[filter \"cont\"]\n\tclean = evil \\\n\t--flag\n[filter \"ends\"]\n\tvalue = a\\\\ \n[filter \"after-pairs\"]\n\tclean = evil\n",
     )
     .expect("config");
-    let pins = discover_readonly_git_filter_pins("git status -s", repo.path())
+    let pins = discover_pins("git status -s", repo.path())
         .expect("continuation handling mirrors git's parser");
     // `ends` declares only a `value` key — no conversion armed, nothing to
     // pin — but its `a\\` spelling is load-bearing: misreading the escaped
@@ -1392,6 +1459,9 @@ fn readonly_filter_discovery_pins_declared_filters() {
     let worktree_gitdir = gitdir.join("worktrees").join("w");
     std::fs::create_dir_all(&worktree_gitdir).expect("worktree gitdir");
     std::fs::write(worktree_gitdir.join("commondir"), "../..").expect("commondir");
+    // A linked worktree gitdir carries its own HEAD (the index and refs
+    // resolve through the commondir chain).
+    std::fs::write(worktree_gitdir.join("HEAD"), "ref: refs/heads/main\n").expect("worktree HEAD");
     std::fs::write(
         gitdir.join("config"),
         "[filter \"shared\"]\n\tclean = cat\n",
@@ -1404,7 +1474,7 @@ fn readonly_filter_discovery_pins_declared_filters() {
         format!("gitdir: {}", worktree_gitdir.display()),
     )
     .expect("gitdir link");
-    let pins = discover_readonly_git_filter_pins("git status", &checkout)
+    let pins = discover_pins("git status", &checkout)
         .expect("the worktree's shared config is scanned through the gitdir link");
     assert_eq!(pins.len(), 1, "{pins:?}");
     assert_eq!(pins[0].name, "shared", "{pins:?}");
@@ -1414,100 +1484,162 @@ fn readonly_filter_discovery_pins_declared_filters() {
 /// `git status`/`git diff` child into, and that child converts content
 /// under the submodule's own repository config — its filters run under an
 /// admitted superproject read, so discovery must scan them too, nested
-/// registration included, while unresolvable or out-of-workspace
-/// registrations refuse instead of silently skipping a repository.
+/// registration included. The registration set comes from the INDEX
+/// (`git ls-files --stage` gitlinks — git's own fork criterion), not from
+/// `.gitmodules`: that file is only a label, and git still forks into the
+/// submodule with it deleted from the worktree and from the index alike,
+/// so the scan must find the gitlink without it. A gitlink whose path holds
+/// no repository is no fork target and scans nothing.
+#[cfg(unix)]
 #[test]
 fn readonly_filter_discovery_scans_registered_submodules() {
     let root = tempdir().expect("superproject");
-    let super_git = root.path().join(".git");
-    std::fs::create_dir_all(&super_git).expect("super gitdir");
-    std::fs::write(
-        super_git.join("config"),
-        "[core]\n\trepositoryformatversion = 0\n",
-    )
-    .expect("super config");
-    let submodule = root.path().join("sub");
-    std::fs::create_dir_all(&submodule).expect("submodule checkout");
-    let modules_dir = super_git.join("modules").join("sub");
-    std::fs::create_dir_all(&modules_dir).expect("absorbed submodule gitdir");
-    // The absorbed layout git itself writes: core.worktree points back at
-    // the checkout, relative to the absorbed gitdir, and discovery must
-    // admit that spelling while refusing a redirect.
-    std::fs::write(
-        modules_dir.join("config"),
-        "[core]\n\tworktree = ../../../sub\n[filter \"inner\"]\n\tclean = evil\n",
-    )
-    .expect("submodule config");
-    std::fs::write(
-        submodule.join(".git"),
-        format!("gitdir: {}", modules_dir.display()),
-    )
-    .expect("submodule gitdir link");
-    std::fs::write(
-        root.path().join(".gitmodules"),
-        "[submodule \"s\"]\n\tpath = sub\n\turl = ../not-used-here\n",
-    )
-    .expect(".gitmodules");
+    let git = |args: &[&str], cwd: &std::path::Path| {
+        let output = std::process::Command::new("git")
+            .args(["-c", "user.name=t", "-c", "user.email=t@example.invalid"])
+            .args(args)
+            .current_dir(cwd)
+            .output()
+            .expect("git runs");
+        assert!(
+            output.status.success(),
+            "git {args:?} failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    };
+    // The submodule source repository.
+    let sub_src = root.path().join("sub-src");
+    std::fs::create_dir(&sub_src).expect("submodule source");
+    git(&["init", "-q", "."], &sub_src);
+    std::fs::write(sub_src.join("file.txt"), "seed\n").expect("submodule file");
+    git(&["add", "."], &sub_src);
+    git(&["commit", "-q", "-m", "seed"], &sub_src);
+    // The superproject registers it; the checkout lands at `sub` with the
+    // absorbed gitdir at `.git/modules/sub`.
+    git(&["init", "-q", "."], root.path());
+    let source = sub_src.to_string_lossy().to_string();
+    git(
+        &[
+            "-c",
+            "protocol.file.allow=always",
+            "submodule",
+            "add",
+            "-q",
+            &source,
+            "sub",
+        ],
+        root.path(),
+    );
+    git(&["commit", "-q", "-m", "register submodule"], root.path());
+    // Arm the filter ONLY in the submodule's own repository config — the
+    // superproject's config declares nothing.
+    git(
+        &[
+            "config",
+            "--file",
+            ".git/modules/sub/config",
+            "filter.inner.clean",
+            "evil",
+        ],
+        root.path(),
+    );
 
-    let pins = discover_readonly_git_filter_pins("git status -s", root.path())
-        .expect("a registered submodule's filters are discovered");
+    // `.gitmodules` deleted from the worktree AND dropped from the index:
+    // the gitlink is still registered, and the scan still finds and pins
+    // the submodule without consulting the file at all.
+    std::fs::remove_file(root.path().join(".gitmodules")).expect("drop .gitmodules");
+    git(&["rm", "--cached", ".gitmodules"], root.path());
+    let pins = discover_pins("git status -s", root.path())
+        .expect("a registered submodule is found through its index gitlink without .gitmodules");
     assert_eq!(pins.len(), 1, "{pins:?}");
     assert_eq!(pins[0].name, "inner", "{pins:?}");
 
     // Registration nests: the forked child git runs inside `sub` forks its
-    // own children into `sub`'s submodules, so their repositories scan too.
-    let nested = submodule.join("subsub");
-    std::fs::create_dir_all(nested.join(".git")).expect("nested checkout gitdir");
-    std::fs::write(
-        nested.join(".git").join("config"),
-        "[filter \"deep\"]\n\tclean = evil\n",
-    )
-    .expect("nested config");
-    std::fs::write(
-        submodule.join(".gitmodules"),
-        "[submodule \"d\"]\n\tpath = subsub\n",
-    )
-    .expect("nested .gitmodules");
-    let pins = discover_readonly_git_filter_pins("git status -s", root.path())
+    // own children into `sub`'s gitlinks, so their repositories scan too.
+    let nested_src = root.path().join("nested-src");
+    std::fs::create_dir(&nested_src).expect("nested source");
+    git(&["init", "-q", "."], &nested_src);
+    std::fs::write(nested_src.join("deep.txt"), "seed\n").expect("nested file");
+    git(&["add", "."], &nested_src);
+    git(&["commit", "-q", "-m", "seed"], &nested_src);
+    let nested_source = nested_src.to_string_lossy().to_string();
+    git(
+        &[
+            "-c",
+            "protocol.file.allow=always",
+            "submodule",
+            "add",
+            "-q",
+            &nested_source,
+            "subsub",
+        ],
+        &root.path().join("sub"),
+    );
+    git(
+        &["commit", "-q", "-m", "register nested"],
+        &root.path().join("sub"),
+    );
+    git(
+        &[
+            "config",
+            "--file",
+            ".git/modules/sub/modules/subsub/config",
+            "filter.deep.clean",
+            "evil",
+        ],
+        root.path(),
+    );
+    let pins = discover_pins("git status -s", root.path())
         .expect("nested submodule filters are discovered");
     let mut spellings = pins.iter().map(|pin| pin.name.as_str()).collect::<Vec<_>>();
     spellings.sort();
     assert_eq!(spellings, ["deep", "inner"], "{pins:?}");
 
-    // An unresolvable registration is not a repository git forks into (no
-    // `.git` to read, nothing to scan): a plain directory registers no scan
-    // and no refusal.
-    std::fs::create_dir_all(submodule.join("plain")).expect("plain dir");
-    std::fs::write(
-        submodule.join(".gitmodules"),
-        "[submodule \"p\"]\n\tpath = plain\n",
-    )
-    .expect(".gitmodules");
-    let pins = discover_readonly_git_filter_pins("git status -s", root.path())
-        .expect("a registration without a repository scans nothing");
-    // `subsub` is no longer registered: the scan follows registrations, not
-    // directory existence, so `deep`'s on-disk repository drops out while a
-    // registration without a repository adds nothing.
+    // A gitlink whose path holds no repository (registered by hand through
+    // the index) is no fork target: nothing to scan, no refusal.
+    git(
+        &[
+            "update-index",
+            "--add",
+            "--cacheinfo",
+            "160000,0123456789012345678901234567890123456789,plain",
+        ],
+        root.path(),
+    );
+    let pins = discover_pins("git status -s", root.path())
+        .expect("a gitlink without a repository scans nothing");
     let mut spellings = pins.iter().map(|pin| pin.name.as_str()).collect::<Vec<_>>();
     spellings.sort();
-    assert_eq!(spellings, ["inner"], "{pins:?}");
+    assert_eq!(spellings, ["deep", "inner"], "{pins:?}");
+}
 
-    // Registrations the lane cannot resolve byte-faithfully refuse: a
-    // silently skipped submodule is a repository whose filters would run
-    // unpinned.
-    for modules in [
-        "[submodule \"q\"]\n\tpath = \"a b\"\n",
-        "[submodule \"r\"]\n\tpath = ../escape\n",
-        "[submodule \"t\"]\n\tpath = a\\\\b\n",
+/// Index gitlink paths the lane cannot resolve byte-faithfully refuse
+/// instead of silently skipping a submodule: quoted or escaped spellings,
+/// undecodable bytes, and path components leaving the worktree all refuse —
+/// the same rules the former `.gitmodules` reader applied, now applied to
+/// the index listing that actually decides git's fork. Plain spellings
+/// (including ones with spaces or nested directories) resolve.
+#[test]
+fn readonly_gitlink_paths_refuse_unresolvable_path_spellings() {
+    for path in [
+        "\"a b\"",
+        "a\\b",
+        "\u{fffd}b",
+        "../escape",
+        "a/../b",
+        "/absolute",
+        ".",
+        "",
     ] {
-        std::fs::write(submodule.join(".gitmodules"), modules).expect(".gitmodules");
-        let error = discover_readonly_git_filter_pins("git status -s", root.path())
-            .expect_err("an unresolvable submodule path must refuse")
-            .to_string();
+        let error = validated_git_metadata_path(path)
+            .expect_err("an unresolvable gitlink path must refuse");
         assert!(
-            error.contains("shell.readonly.git.filter_config"),
-            "{modules}: {error}"
+            error.contains("this lane") || error.contains("this lane bounds"),
+            "{path}: {error}"
         );
+    }
+    for path in ["sub", "deep/nested/sub", "a b"] {
+        validated_git_metadata_path(path).expect("a plain gitlink path resolves");
     }
 }
 
@@ -1540,9 +1672,10 @@ fn readonly_filter_discovery_refuses_configs_it_cannot_enumerate() {
     let repo = tempdir().expect("repo");
     let gitdir = repo.path().join(".git");
     std::fs::create_dir_all(&gitdir).expect("gitdir");
+    seed_minimal_gitdir(&gitdir);
     let refusal = |config: &str, label: &str| {
         std::fs::write(gitdir.join("config"), config).expect("config");
-        let error = discover_readonly_git_filter_pins("git status -s", repo.path())
+        let error = discover_pins("git status -s", repo.path())
             .expect_err(label)
             .to_string();
         assert!(
@@ -1577,6 +1710,22 @@ fn readonly_filter_discovery_refuses_configs_it_cannot_enumerate() {
         "[core]\n\tworktree = ../elsewhere\n",
         "a redirected worktree moves every path the lane bounds",
     );
+    // `core.worktree` given twice: git applies the LAST value — a first
+    // value that resolves back does not admit when a later duplicate
+    // relocates. Validating only the first hit would admit a relocated
+    // worktree.
+    std::fs::write(
+        gitdir.join("config"),
+        "[core]\n\tworktree = ..\n\tworktree = ../elsewhere\n",
+    )
+    .expect("config");
+    let error = discover_pins("git status -s", repo.path())
+        .expect_err("the last core.worktree value must be the one validated")
+        .to_string();
+    assert!(
+        error.contains("shell.readonly.git.filter_config"),
+        "{error}"
+    );
     // One resolving back to the discovered worktree admits: `..` relative
     // to the gitdir is the checkout holding it, and the absorbed submodule
     // layout git itself writes points at its checkout the same way.
@@ -1585,7 +1734,7 @@ fn readonly_filter_discovery_refuses_configs_it_cannot_enumerate() {
         "[core]\n\tworktree = ..\n[filter \"resolvable\"]\n\tclean = cat\n",
     )
     .expect("config");
-    let pins = discover_readonly_git_filter_pins("git status -s", repo.path())
+    let pins = discover_pins("git status -s", repo.path())
         .expect("a core.worktree resolving to the discovered worktree admits");
     assert_eq!(pins.len(), 1, "{pins:?}");
     assert_eq!(pins[0].name, "resolvable", "{pins:?}");
@@ -1614,8 +1763,7 @@ fn readonly_filter_discovery_refuses_configs_it_cannot_enumerate() {
         .map(|index| format!("[filter \"f{index}\"]\n\tclean = evil\n"))
         .collect::<String>();
     std::fs::write(gitdir.join("config"), eight).expect("config");
-    let pins = discover_readonly_git_filter_pins("git status -s", repo.path())
-        .expect("the pin set bound is inclusive");
+    let pins = discover_pins("git status -s", repo.path()).expect("the pin set bound is inclusive");
     assert_eq!(pins.len(), 8, "{pins:?}");
 
     // A `.git` link the lane cannot decode refuses: git parses the file
@@ -1634,7 +1782,7 @@ fn readonly_filter_discovery_refuses_configs_it_cannot_enumerate() {
             .expect("open link for write")
             .write_at(b"\xe9", 8)
             .expect("corrupt the link");
-        let error = discover_readonly_git_filter_pins("git status -s", &undecodable)
+        let error = discover_pins("git status -s", &undecodable)
             .expect_err("an undecodable gitdir link must refuse")
             .to_string();
         assert!(
@@ -1651,7 +1799,7 @@ fn readonly_filter_discovery_refuses_configs_it_cannot_enumerate() {
         "# padding\n".repeat(READONLY_GIT_META_SCAN_CAP / 10 + 8)
     );
     std::fs::write(oversized.join(".git"), padded).expect("oversized link");
-    let error = discover_readonly_git_filter_pins("git status -s", &oversized)
+    let error = discover_pins("git status -s", &oversized)
         .expect_err("an oversized gitdir link must refuse")
         .to_string();
     assert!(
@@ -1670,6 +1818,8 @@ fn readonly_filter_discovery_follows_the_cd_fold_into_nested_repositories() {
     let nested = outer.path().join("sub");
     std::fs::create_dir_all(nested.join(".git")).expect("nested gitdir");
     std::fs::create_dir_all(outer.path().join(".git")).expect("outer gitdir");
+    seed_minimal_gitdir(&nested.join(".git"));
+    seed_minimal_gitdir(&outer.path().join(".git"));
     std::fs::write(
         outer.path().join(".git").join("config"),
         "[core]\n\tbare = false\n",
@@ -1681,39 +1831,345 @@ fn readonly_filter_discovery_follows_the_cd_fold_into_nested_repositories() {
     )
     .expect("nested config");
 
-    let pins = discover_readonly_git_filter_pins("git status -s", outer.path())
-        .expect("outer repo scanned");
+    let pins = discover_pins("git status -s", outer.path()).expect("outer repo scanned");
     assert!(pins.is_empty(), "the outer repo declares nothing: {pins:?}");
 
-    let pins = discover_readonly_git_filter_pins("cd sub; git status -s", outer.path())
+    let pins = discover_pins("cd sub; git status -s", outer.path())
         .expect("the fold carries the stage into the nested repo");
     assert_eq!(pins.len(), 1, "{pins:?}");
     assert_eq!(pins[0].name, "inner", "{pins:?}");
 
     // The nested repo is also the nearest repo for a stage piped inside it.
-    let pins = discover_readonly_git_filter_pins("cd sub; git status -s | cat", outer.path())
+    let pins = discover_pins("cd sub; git status -s | cat", outer.path())
         .expect("piped git stage scans the folded repository");
     assert_eq!(pins.len(), 1, "{pins:?}");
     assert_eq!(pins[0].name, "inner", "{pins:?}");
 
     // A `-C` preamble redirects git's repository without moving the shell:
     // the stage must scan the `-C` target, not the live cwd.
-    let pins = discover_readonly_git_filter_pins("git -C sub status -s", outer.path())
+    let pins = discover_pins("git -C sub status -s", outer.path())
         .expect("a -C stage scans the redirected repository");
     assert_eq!(pins.len(), 1, "{pins:?}");
     assert_eq!(pins[0].name, "inner", "{pins:?}");
 
     // …and `cd` plus a compensating `-C` lands back on the outer repository.
-    let pins = discover_readonly_git_filter_pins("cd sub; git -C .. status", outer.path())
+    let pins = discover_pins("cd sub; git -C .. status", outer.path())
         .expect("a -C .. stage after cd scans the parent repository");
     assert!(pins.is_empty(), "the outer repo declares nothing: {pins:?}");
 
     // The `--no-pager` preamble interleaves with `-C` like the splice
     // table's walk.
-    let pins = discover_readonly_git_filter_pins("git --no-pager -C sub log -n 1", outer.path())
+    let pins = discover_pins("git --no-pager -C sub log -n 1", outer.path())
         .expect("a --no-pager/-C stage scans the redirected repository");
     assert_eq!(pins.len(), 1, "{pins:?}");
     assert_eq!(pins[0].name, "inner", "{pins:?}");
+}
+
+/// Dotted section headers are git's subsection spellings too: `[base.sub]`
+/// splits at the FIRST dot with the subsection case-folded (`[FILTER.EV]`
+/// arms driver `ev`), and a dotted part may itself carry dots
+/// (`[filter.a.b]` is section `filter`, subsection `a.b`). Skipping the
+/// dotted spellings would hide declared drivers from the pins while git
+/// still ran them.
+#[test]
+fn readonly_filter_discovery_pins_dotted_header_filters() {
+    let repo = tempdir().expect("repo");
+    let gitdir = repo.path().join(".git");
+    std::fs::create_dir_all(&gitdir).expect("gitdir");
+    seed_minimal_gitdir(&gitdir);
+    std::fs::write(
+        gitdir.join("config"),
+        "[filter.dotted]\n\tclean = evil\n[FILTER.EV]\n\tclean = evil\n[filter.a.b]\n\tclean = evil\n",
+    )
+    .expect("config");
+    let pins = discover_pins("git status -s", repo.path())
+        .expect("dotted headers arm the drivers git resolves from them");
+    let mut spellings = pins.iter().map(|pin| pin.name.as_str()).collect::<Vec<_>>();
+    spellings.sort();
+    assert_eq!(spellings, ["a.b", "dotted", "ev"], "{pins:?}");
+    assert!(pins.iter().all(|pin| pin.clean), "{pins:?}");
+}
+
+/// A UTF-8 BOM at the start of a config file is skipped by git, so a
+/// BOM-prefixed repository config still arms its drivers and the scan must
+/// pin them — parsing the BOM as content would hide the whole file's
+/// filters behind a driver git runs.
+#[test]
+fn readonly_filter_discovery_parses_bom_prefixed_config() {
+    let repo = tempdir().expect("repo");
+    let gitdir = repo.path().join(".git");
+    std::fs::create_dir_all(&gitdir).expect("gitdir");
+    seed_minimal_gitdir(&gitdir);
+    std::fs::write(
+        gitdir.join("config"),
+        "\u{feff}[filter \"evil\"]\n\tclean = cat\n",
+    )
+    .expect("config");
+    let pins = discover_pins("git status -s", repo.path())
+        .expect("a BOM-prefixed config parses like git's own");
+    assert_eq!(pins.len(), 1, "{pins:?}");
+    assert_eq!(pins[0].name, "evil", "{pins:?}");
+    assert!(pins[0].clean, "{pins:?}");
+}
+
+/// git resolves a linked worktree from its gitdir back-pointer and IGNORES
+/// `core.worktree` even when the shared config declares it — the shared
+/// config is read through the `commondir` chain, and a declaration pointing
+/// at the main checkout must not refuse the linked worktree's scan.
+#[test]
+fn readonly_filter_discovery_admits_linked_submodule_worktrees() {
+    let root = tempdir().expect("repo root");
+    let main = root.path().join("main");
+    let gitdir = main.join(".git");
+    std::fs::create_dir_all(gitdir.join("worktrees").join("w")).expect("gitdir tree");
+    seed_minimal_gitdir(&gitdir);
+    // The linked gitdir carries its own HEAD and the commondir back-pointer.
+    std::fs::write(
+        gitdir.join("worktrees").join("w").join("HEAD"),
+        "ref: refs/heads/main\n",
+    )
+    .expect("worktree HEAD");
+    std::fs::write(
+        gitdir.join("worktrees").join("w").join("commondir"),
+        "../..",
+    )
+    .expect("commondir");
+    // `core.worktree = ../../..` resolves (from the scanned gitdir) to the
+    // MAIN checkout, not the linked one git actually uses there — git
+    // ignores it, so the scan must not refuse on it.
+    std::fs::write(
+        gitdir.join("config"),
+        "[core]\n\tworktree = ../../..\n[filter \"shared\"]\n\tclean = cat\n",
+    )
+    .expect("shared config");
+    let checkout = root.path().join("wt");
+    std::fs::create_dir_all(&checkout).expect("linked checkout");
+    std::fs::write(
+        checkout.join(".git"),
+        format!("gitdir: {}", gitdir.join("worktrees").join("w").display()),
+    )
+    .expect("gitdir link");
+    let pins = discover_pins("git status", &checkout)
+        .expect("a linked worktree admits: git ignores core.worktree there");
+    assert_eq!(pins.len(), 1, "{pins:?}");
+    assert_eq!(pins[0].name, "shared", "{pins:?}");
+    assert!(pins[0].clean, "{pins:?}");
+}
+
+/// The `.git` pointer is parsed byte-exactly the way git does: the literal
+/// lowercase `gitdir:` plus EXACTLY ONE space, then a byte-exact first-line
+/// value with no trailing whitespace. Every other spelling is the
+/// `invalid gitfile format` git itself fatals on, and this lane refuses it
+/// instead of silently trimming a target git would never open.
+#[test]
+fn readonly_git_dir_link_is_parsed_byte_exactly() {
+    let root = tempdir().expect("root");
+    let real = root.path().join("real-target");
+    std::fs::create_dir_all(real.join(".git")).expect("a real target gitdir");
+    seed_minimal_gitdir(&real.join(".git"));
+    let checkout = root.path().join("checkout");
+    std::fs::create_dir(&checkout).expect("checkout");
+
+    // A value with trailing spaces whose TRIMMED spelling names a real
+    // directory: git fatals on the trailing whitespace, so the link refuses
+    // instead of the old trim resolving and scanning it.
+    std::fs::write(
+        checkout.join(".git"),
+        format!("gitdir: {}  \n", real.display()),
+    )
+    .expect("trailing-space link");
+    let error = discover_pins("git status", &checkout)
+        .expect_err("a value git itself rejects must refuse, not trim")
+        .to_string();
+    assert!(
+        error.contains("shell.readonly.git.filter_config"),
+        "{error}"
+    );
+
+    for spelling in [
+        format!("gitdir:  {}", real.display()),
+        format!("gitdir:{}", real.display()),
+        format!("GITDIR: {}", real.display()),
+        format!("gitdir:\t{}", real.display()),
+    ] {
+        std::fs::write(checkout.join(".git"), &spelling).expect("invalid link");
+        let error = discover_pins("git status", &checkout)
+            .expect_err("an invalid gitfile format must refuse")
+            .to_string();
+        assert!(
+            error.contains("shell.readonly.git.filter_config"),
+            "{spelling}: {error}"
+        );
+    }
+
+    // Content after the first line is ignored, exactly like git consuming
+    // one line. Pinned at the link parser: a repository behind such a link
+    // is one the host git itself refuses to run in, so driving the whole
+    // discovery here would refuse downstream for a different (safe) reason.
+    std::fs::write(
+        checkout.join(".git"),
+        format!(
+            "gitdir: {}\ntrailing junk that git ignores\n",
+            real.join(".git").display()
+        ),
+    )
+    .expect("multi-line link");
+    let (gitdir, dir) = readonly_git_dir_for(&checkout)
+        .expect("a decodable link resolves")
+        .expect("a well-formed first line names a repository");
+    assert_eq!(gitdir, real.join(".git"), "the first line names the gitdir");
+    assert_eq!(dir, checkout);
+}
+
+/// git's `-C` accumulates: the operand gate must judge a stage's operands
+/// against the root the CHAIN accumulates, not the flat cwd —
+/// `git -C A -C escape status -s` executes exactly like the flat
+/// `git A/escape status -s` the gate already refuses, and judging every
+/// operand against the flat cwd admits the chained spelling while the
+/// symlink carries it outside the workspace.
+#[cfg(unix)]
+#[test]
+fn readonly_operand_gate_judges_chained_git_c_cumulatively() {
+    let workspace = tempdir().expect("workspace");
+    let outside = tempdir().expect("outside");
+    std::fs::write(outside.path().join("secret.txt"), "secret").expect("outside file");
+    std::fs::create_dir(workspace.path().join("A")).expect("inside dir");
+    // The escape target is a real repository outside the workspace, the
+    // shape the chained spelling actually runs git against.
+    std::fs::create_dir_all(outside.path().join("repo").join(".git")).expect("outside repo");
+    std::os::unix::fs::symlink(
+        outside.path().join("repo"),
+        workspace.path().join("A").join("escape"),
+    )
+    .expect("outside repo symlink under A");
+    // Positive-control target: a real repository inside the chain.
+    std::fs::create_dir_all(workspace.path().join("A").join("sub").join(".git"))
+        .expect("inside repo");
+    std::fs::write(
+        workspace.path().join("A").join("sub").join("inner.txt"),
+        "inside",
+    )
+    .expect("inside file");
+    // An operand that exists only under the accumulated root, symlinked
+    // outside: the flat-cwd judgment skips it at a spelling that exists on
+    // no disk under the cwd.
+    std::os::unix::fs::symlink(
+        outside.path().join("secret.txt"),
+        workspace.path().join("A").join("sub").join("escape-file"),
+    )
+    .expect("outside file symlink under the accumulated root");
+    let roots = [workspace.path().to_path_buf()];
+
+    let error = enforce_readonly_workspace_operands(
+        "git -C A -C escape status -s",
+        &roots,
+        workspace.path(),
+    )
+    .expect_err("the chained -C escape must refuse exactly like the flat spelling")
+    .to_string();
+    assert!(
+        error.contains("shell.readonly.operand.outside_workspace"),
+        "{error}"
+    );
+
+    enforce_readonly_workspace_operands("git -C A -C sub status -s", &roots, workspace.path())
+        .expect("both -C targets inside the workspace stay admitted");
+    let error = enforce_readonly_workspace_operands(
+        "git -C A -C sub diff -- escape-file",
+        &roots,
+        workspace.path(),
+    )
+    .expect_err("operands must resolve under the accumulated root, not the flat cwd")
+    .to_string();
+    assert!(
+        error.contains("shell.readonly.operand.outside_workspace"),
+        "{error}"
+    );
+}
+
+/// The version probe runs the way the read-only child runs: its PATH is the
+/// sanitized one, with every workspace entry stripped — a `git` shim planted
+/// in an agent-writable PATH directory must never be the binary the lane
+/// measures (or the one it execs). The planted PATH is supplied through the
+/// probe's explicit seam, so the live process environment is untouched.
+#[cfg(unix)]
+#[test]
+fn git_version_probe_ignores_host_path_shims() {
+    let workspace = tempdir().expect("workspace");
+    let shim_dir = workspace.path().join("bin");
+    std::fs::create_dir(&shim_dir).expect("shim dir");
+    let marker = workspace.path().join("shim-ran");
+    let shim = shim_dir.join("git");
+    std::fs::write(
+        &shim,
+        format!(
+            "#!/bin/sh\ntouch {}\necho \"git version 9.9.9\"\n",
+            marker.display()
+        ),
+    )
+    .expect("shim script");
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        let mut permissions = shim.metadata().expect("shim metadata").permissions();
+        permissions.set_mode(0o755);
+        std::fs::set_permissions(&shim, permissions).expect("shim mode");
+    }
+
+    // The shim directory comes FIRST on the PATH handed to the probe, so an
+    // unsanitized construction would resolve and exec it before the real
+    // host git. The PATH is supplied through the explicit seam — the live
+    // process environment stays untouched, so no other test can observe the
+    // planted entry.
+    let planted = std::env::join_paths(
+        std::iter::once(shim_dir.clone()).chain(
+            std::env::var_os("PATH")
+                .map(|path| std::env::split_paths(&path).collect::<Vec<_>>())
+                .unwrap_or_default(),
+        ),
+    )
+    .expect("planted PATH");
+    let roots = [workspace.path().to_path_buf()];
+    let decision = ensure_git_supports_env_config_pins_with_path(&roots, Some(planted.as_os_str()));
+
+    decision.expect("the trusted host git passes the version gate");
+    assert!(
+        !marker.exists(),
+        "the planted workspace git shim must not be the probed binary"
+    );
+}
+
+/// The `cd` fold canonicalizes through in-workspace symlinked destinations:
+/// operands under a linked directory resolve against the REAL directory the
+/// shell will run in, so a symlink-to-outside inside it is judged (and
+/// refuses) instead of being skipped at a spelling that exists on no disk.
+#[cfg(unix)]
+#[test]
+fn readonly_operand_gate_folds_through_in_workspace_symlink_destination() {
+    let workspace = tempdir().expect("workspace");
+    let outside = tempdir().expect("outside");
+    std::fs::create_dir(workspace.path().join("realdir")).expect("real dir");
+    std::fs::write(workspace.path().join("realdir").join("realfile"), "inside")
+        .expect("inside file");
+    std::fs::write(outside.path().join("secret.txt"), "secret").expect("outside file");
+    std::os::unix::fs::symlink(
+        outside.path().join("secret.txt"),
+        workspace.path().join("realdir").join("link"),
+    )
+    .expect("outside symlink inside realdir");
+    std::os::unix::fs::symlink(
+        workspace.path().join("realdir"),
+        workspace.path().join("linkdir"),
+    )
+    .expect("in-workspace directory symlink");
+    let roots = [workspace.path().to_path_buf()];
+
+    enforce_readonly_workspace_operands("cd linkdir; cat realfile", &roots, workspace.path())
+        .expect("an inside operand under the linked destination stays admitted");
+    let error =
+        enforce_readonly_workspace_operands("cd linkdir; cat link", &roots, workspace.path())
+            .expect_err("the fold must judge operands under the symlink's real destination")
+            .to_string();
+    assert!(error.contains("outside_workspace"), "{error}");
 }
 
 /// The gh stage exemption is literal-operand-only: a `*` after the program
@@ -1740,6 +2196,13 @@ fn readonly_operand_gate_refuses_glob_operands_on_gh_stages() {
         assert!(
             error.contains("operand.gh_glob"),
             "{command} must refuse at the gh-glob wall: {error}"
+        );
+        // The refusal carries the accurate rationale: ANY wildcard token on
+        // a gh stage — quoted or bare — refuses because the stage's operand
+        // scope cannot be bounded host-side.
+        assert!(
+            error.contains("cannot be bounded host-side"),
+            "{command} must name the host-side bounding gap: {error}"
         );
     }
 
@@ -1805,7 +2268,11 @@ async fn readonly_shell_refuses_task_actions_at_the_policy() {
 /// that command whenever `git status`/`git diff` converts worktree content —
 /// under a raw shell, outside content crosses and the command executes. The
 /// read-only lane discovers the declared filter and pins it to inert
-/// helpers, so the same admitted commands run without either effect.
+/// helpers, so the same admitted commands run without either effect. The
+/// second filter is declared through the dotted header spelling
+/// (`[filter.dotted]`, appended to the config by hand because `git config`
+/// writes the quoted form) — the shape a quoted-only parser silently misses
+/// while git arms it exactly like the quoted one.
 #[cfg(unix)]
 #[tokio::test]
 async fn readonly_shell_lane_git_status_does_not_run_repository_content_filters() {
@@ -1837,9 +2304,32 @@ async fn readonly_shell_lane_git_status_does_not_run_repository_content_filters(
             secret.display()
         ),
     ]);
-    std::fs::write(workspace.path().join(".gitattributes"), "* filter=evil\n").expect("attributes");
+    let dotted_marker = outside.path().join("dotted-filter-ran");
+    // The dotted spelling must be written by hand: `git config` persists the
+    // quoted `[filter "dotted"]` form, and the point of this leg is the
+    // header shape only a git-faithful parser discovers.
+    {
+        use std::io::Write as _;
+        let mut config = std::fs::OpenOptions::new()
+            .append(true)
+            .open(workspace.path().join(".git/config"))
+            .expect("repo config");
+        write!(
+            config,
+            "[filter.dotted]\n\tclean = \"sh -c 'touch {}; cat {} >&2; cat'\"\n",
+            dotted_marker.display(),
+            secret.display()
+        )
+        .expect("append dotted filter section");
+    }
+    std::fs::write(
+        workspace.path().join(".gitattributes"),
+        "* filter=evil\n*.d filter=dotted\n",
+    )
+    .expect("attributes");
     std::fs::write(workspace.path().join("note.txt"), "seed\n").expect("note");
     std::fs::write(workspace.path().join("status.txt"), "st1\n").expect("status note");
+    std::fs::write(workspace.path().join("dotted.d"), "dot1\n").expect("dotted note");
     git(&["add", "."]);
     git(&["commit", "-q", "-m", "seed"]);
     // A stat-dirty worktree file is what makes a nominal read convert
@@ -1871,6 +2361,7 @@ async fn readonly_shell_lane_git_status_does_not_run_repository_content_filters(
     // resolves by hashing — through the filter. Re-dirty after the control:
     // its run settled the index, and a settled entry stops converting.
     std::fs::write(workspace.path().join("status.txt"), "st2\n").expect("dirty for status");
+    std::fs::write(workspace.path().join("dotted.d"), "dot2\n").expect("dirty dotted note");
     let _control = std::process::Command::new("sh")
         .args(["-c", "git status -s 2>&1"])
         .current_dir(workspace.path())
@@ -1880,8 +2371,14 @@ async fn readonly_shell_lane_git_status_does_not_run_repository_content_filters(
         marker.exists(),
         "the armed clean filter must fire under a raw `git status -s`"
     );
+    assert!(
+        dotted_marker.exists(),
+        "the dotted-header filter must fire under a raw `git status -s` too"
+    );
     std::fs::remove_file(&marker).expect("reset marker");
+    std::fs::remove_file(&dotted_marker).expect("reset dotted marker");
     std::fs::write(workspace.path().join("status.txt"), "st3\n").expect("re-dirty for status");
+    std::fs::write(workspace.path().join("dotted.d"), "dot3\n").expect("re-dirty dotted note");
 
     let context = ToolContext::new(workspace.path())
         .with_shell_policy(crate::worker_profile::ShellPolicy::ReadOnly);
@@ -1896,7 +2393,7 @@ async fn readonly_shell_lane_git_status_does_not_run_repository_content_filters(
             "{command} returned content converted through the repository's filter"
         );
         assert!(
-            !marker.exists(),
+            !marker.exists() && !dotted_marker.exists(),
             "{command} ran the repository's content filter"
         );
     }
@@ -1907,7 +2404,10 @@ async fn readonly_shell_lane_git_status_does_not_run_repository_content_filters(
 /// under the submodule's own repository config — a filter armed only in
 /// `super/.git/modules/sub/config` executes under an admitted superproject
 /// read (even while the superproject reports a clean tree). Discovery scans
-/// the registered submodule through `.gitmodules` and pins it the same way.
+/// the registered submodule through its index gitlink — git's fork
+/// criterion — and pins it the same way; `.gitmodules` is only a label, so
+/// the fixture deletes it from the worktree before the tool leg and the
+/// raw-shell control proves git still forks without it.
 #[cfg(unix)]
 #[tokio::test]
 async fn readonly_shell_lane_git_status_does_not_run_submodule_content_filters() {
@@ -1980,6 +2480,12 @@ async fn readonly_shell_lane_git_status_does_not_run_submodule_content_filters()
     // through the submodule's own clean filter.
     std::fs::write(workspace.path().join("sub").join("file.txt"), "sedw\n")
         .expect("dirty the submodule worktree");
+    // `.gitmodules` is only a label on git's submodule fork: delete it from
+    // the worktree (the index keeps the gitlink) so the tool leg proves the
+    // scan finds the submodule through the index alone, while the raw-shell
+    // control below proves git still forks into the submodule without it.
+    std::fs::remove_file(workspace.path().join(".gitmodules"))
+        .expect("drop .gitmodules from the worktree");
 
     // Positive control: the raw superproject read forks into the submodule
     // and runs its filter even though the superproject tree is clean.

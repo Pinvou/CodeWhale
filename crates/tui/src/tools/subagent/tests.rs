@@ -8532,7 +8532,8 @@ async fn clamped_verifier_child_of_read_only_parent_holds_no_run_surface() {
 }
 
 /// The verifier intro tells the child about its bounded read-only shell and
-/// the custom-command refusal.
+/// the custom-command refusal, scoped to in-session delegations the way
+/// `FleetRole`'s roster description scopes the role.
 #[test]
 fn verifier_intro_states_the_evidence_contract() {
     assert!(
@@ -8542,6 +8543,10 @@ fn verifier_intro_states_the_evidence_contract() {
     assert!(
         VERIFIER_AGENT_INTRO.contains("custom commands are refused"),
         "verifier intro must repeat the custom-command refusal: {VERIFIER_AGENT_INTRO}"
+    );
+    assert!(
+        VERIFIER_AGENT_INTRO.contains("in-session delegations"),
+        "the verifier's bounded read-only shell must be scoped to in-session delegations: {VERIFIER_AGENT_INTRO}"
     );
 }
 
