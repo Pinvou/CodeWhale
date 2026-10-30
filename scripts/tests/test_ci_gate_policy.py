@@ -1478,6 +1478,10 @@ class CiGatePolicyTests(unittest.TestCase):
         self.assertNotIn("npm ci", portability)
         self.assertNotIn("cargo ", portability)
         self.assertNotIn("submodule update", portability)
+        self.assertIn("timeout-minutes: 10", portability)
+        self.assertIn("fetch-depth: 1", portability)
+        self.assertNotIn("fetch-depth: 0", portability)
+        self.assertIn('git fetch --no-tags --depth=1 origin "$BASE_SHA" "$HEAD_SHA"', portability)
 
     def test_windows_runtime_gate_tracks_python_mcp_manifests(self):
         changes = self.workflow.split("\n  changes:", maxsplit=1)[1].split(
