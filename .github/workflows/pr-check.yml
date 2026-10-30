@@ -1123,14 +1123,6 @@ jobs:
           # still write a 107MB PR-scoped cache copy per run (invisible to
           # other PRs — pure quota weight). Same policy as release-contract-test.
 
-      - name: 安装 Linux 监听检查依赖
-        # Real rollback tests inspect bound addresses with ss. Keep the check
-        # fail-closed even when a runner image does not preinstall iproute2.
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends iproute2
-          ss -H -ltn > /dev/null
-
       - name: 安装 relay 依赖
         run: npm --prefix remote-control-relay ci --prefer-offline --no-audit
 
