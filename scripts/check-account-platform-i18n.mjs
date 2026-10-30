@@ -125,7 +125,9 @@ export function validateUserInterfaceSource(relative, source) {
 
 export function validatePlatformRoleUserInterfaceSource(source) {
   const active = stripComments(source);
-  if (!/import\s*\{\s*platformRoleCopy\s*\}\s*from\s*['"]\.\.\/\.\.\/shared\/i18n\.js['"]/.test(active)
+  const roleBinding = [...active.matchAll(/\bimport\s*\{([^{}]*)\}\s*from\s*(['"])\.\.\/\.\.\/shared\/i18n\.js\2/g)]
+    .some(([, bindings]) => bindings.split(',').some(binding => /^\s*platformRoleCopy(?:\s+as\s+platformRoleCopy)?\s*$/.test(binding)));
+  if (!roleBinding
     || !/\bconst\s+copy\s*=\s*platformRoleCopy\[language\]\s*;/.test(active)) {
     throw new Error('i18n_platform_roles_source_mismatch');
   }

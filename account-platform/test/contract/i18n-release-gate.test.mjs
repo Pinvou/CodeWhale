@@ -85,6 +85,34 @@ test('actual platform role UI uses the shared locale directly without language o
   assert.throws(() => validateUserInterfaceSource('AdminRolesWorkspace.jsx', source + '\nconst message = reason?.message && reason.message;'), /i18n_raw_error_fallback/);
 });
 
+test('platform role source accepts the original named binding among other imports', () => {
+  for (const bindings of [
+    'platformRoleCopy',
+    'adminRolePresentationCopy, platformRoleCopy',
+    'platformRoleCopy, adminRolePresentationCopy',
+    '\n  adminRolePresentationCopy,\n  platformRoleCopy,\n',
+    'platformRoleCopy as platformRoleCopy,',
+  ]) {
+    assert.doesNotThrow(() => validatePlatformRoleUserInterfaceSource(
+      `import { ${bindings} } from '../../shared/i18n.js';\nconst copy = platformRoleCopy[language];`));
+  }
+});
+
+test('platform role source rejects wrong modules, exported names and renamed local bindings', () => {
+  for (const declaration of [
+    "import { platformRoleCopy } from '../../shared/other-i18n.js';",
+    "import { adminRolePresentationCopy as platformRoleCopy } from '../../shared/i18n.js';",
+    "import { platformRoleCopy as wrongLocal } from '../../shared/i18n.js';",
+    "import { platformRoleCopyExtra } from '../../shared/i18n.js';",
+    "import { adminRolePresentationCopy as platformRoleCopy, platformRoleCopy as wrongLocal } from '../../shared/i18n.js';",
+    "// import { platformRoleCopy } from '../../shared/i18n.js';",
+    "const platformRoleCopy = anotherCatalog;",
+  ]) {
+    assert.throws(() => validatePlatformRoleUserInterfaceSource(
+      `${declaration}\nconst copy = platformRoleCopy[language];`), /i18n_platform_roles_source_mismatch/);
+  }
+});
+
 test('platform role translations must be reachable from the admin HTML chunk graph', async () => {
   const directory = await mkdtemp(path.join(tmpdir(), 'pinvou-role-i18n-carrier-'));
   await mkdir(path.join(directory, 'assets'));
