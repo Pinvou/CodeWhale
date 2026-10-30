@@ -1318,6 +1318,113 @@ pub fn list_store_models_install_columns() -> rusqlite::Result<Vec<StoreModelIns
     Ok(rows)
 }
 
+/// `reconcile_running_status` 状态核对专用的轻量行（本批评审 P2-4）。
+///
+/// 这个函数是 `library()` 的第一步（service.rs 每次刷新模型库都触发），此前
+/// 借 [`list_store_models`] 把六类脚本 + 附属文件两个 MB 级正文列整表拉出库，
+/// 而核对逻辑从头到尾只消费 8 个小字段：容器认领要 running/status/
+/// container_name/endpoint_url，镜像比对要 engine_name/engine_version，纠正
+/// 结果的返回值要 card_id/card_name——正文一个字节都用不上。这里只取实际消费
+/// 的那几列，宁少勿多：新增消费字段时再往两边加，别顺手多带。
+pub struct StoreModelReconcileColumns {
+    pub card_id: String,
+    pub card_name: String,
+    pub container_name: Option<String>,
+    pub engine_name: String,
+    pub engine_version: Option<String>,
+    pub running: bool,
+    pub status: String,
+    pub endpoint_url: Option<String>,
+}
+
+pub fn list_store_models_reconcile_columns() -> rusqlite::Result<Vec<StoreModelReconcileColumns>> {
+    let conn = connect()?;
+    let mut stmt = conn.prepare(
+        "SELECT m.card_id, m.card_name, m.container_name, m.engine_name, m.engine_version,
+                m.running, m.status, m.endpoint_url
+           FROM store_models m
+          ORDER BY m.downloaded_at DESC",
+    )?;
+    let rows = stmt
+        .query_map([], |row| {
+            Ok(StoreModelReconcileColumns {
+                card_id: row.get("card_id")?,
+                card_name: row.get("card_name")?,
+                container_name: row.get("container_name")?,
+                engine_name: row.get("engine_name")?,
+                engine_version: row.get("engine_version")?,
+                running: row.get::<_, i64>("running")? != 0,
+                status: row.get("status")?,
+                endpoint_url: row.get("endpoint_url")?,
+            })
+        })?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    Ok(rows)
+}
+
+/// `memory_admission` 内存准入专用的轻量行（本批评审 P2-4）。
+///
+/// 启用前的准入核对要对**运行中的其他卡**逐张算原生进程指纹和内存预算：指纹
+/// 只看 install_engine 入口与 common.sh 两段（`native_tachyon_identity`），
+/// 预算只看 resource_requirements，外加身份与端点几个小字段。此前这里连同
+/// 它内部的 `reconcile_running_status` 是连续两遍 [`list_store_models`] 全量
+/// 正文读（每次启用前都发生）。两段正文由 json_extract 在库内提取（守门
+/// 条件与 [`list_store_models_install_columns`] 同款：坏 JSON / 非 object 降级
+/// 为 NULL，对齐 from_row「serde 解析失败 = 空」的语义），运行中过滤也推进
+/// 到 SQL 里，正文一个字节不出库。
+pub struct StoreModelAdmissionColumns {
+    pub card_id: String,
+    pub card_name: String,
+    pub container_name: Option<String>,
+    pub engine_version: Option<String>,
+    pub endpoint_model: Option<String>,
+    pub endpoint_url: Option<String>,
+    /// 固化的 install_engine 入口脚本正文（没有固化副本的行是 None）。
+    pub install_engine: Option<String>,
+    /// 固化的 common.sh 附属文件正文（单文件卡没有它，None）。
+    pub common_sh: Option<String>,
+    pub resource_requirements: ResourceRequirements,
+}
+
+pub fn list_running_store_models_admission_columns()
+-> rusqlite::Result<Vec<StoreModelAdmissionColumns>> {
+    let conn = connect()?;
+    let mut stmt = conn.prepare(
+        "SELECT m.card_id, m.card_name, m.container_name, m.engine_version,
+                m.endpoint_model, m.endpoint_url,
+                CASE WHEN json_valid(m.scripts_content_json)
+                          AND json_type(m.scripts_content_json) = 'object'
+                     THEN json_extract(m.scripts_content_json, '$.install_engine.content')
+                     ELSE NULL END AS install_engine,
+                CASE WHEN json_valid(m.assets_content_json)
+                          AND json_type(m.assets_content_json) = 'object'
+                     THEN json_extract(m.assets_content_json, '$.\"common.sh\".content')
+                     ELSE NULL END AS common_sh,
+                m.resource_requirements_json
+           FROM store_models m
+          WHERE m.running != 0",
+    )?;
+    let rows = stmt
+        .query_map([], |row| {
+            Ok(StoreModelAdmissionColumns {
+                card_id: row.get("card_id")?,
+                card_name: row.get("card_name")?,
+                container_name: row.get("container_name")?,
+                engine_version: row.get("engine_version")?,
+                endpoint_model: row.get("endpoint_model")?,
+                endpoint_url: row.get("endpoint_url")?,
+                install_engine: row.get("install_engine")?,
+                common_sh: row.get("common_sh")?,
+                resource_requirements: row
+                    .get::<_, Option<String>>("resource_requirements_json")?
+                    .and_then(|raw| serde_json::from_str(&raw).ok())
+                    .unwrap_or_default(),
+            })
+        })?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    Ok(rows)
+}
+
 /// 删掉一个模型的库记录，连同它专属的 API Key。
 ///
 /// **两条 DELETE 必须在同一个事务里。** 分开执行时，第二条失败会留下一个

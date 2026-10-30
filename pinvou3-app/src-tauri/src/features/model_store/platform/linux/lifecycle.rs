@@ -832,7 +832,11 @@ impl ModelManager {
     /// 引擎仍按各自本机健康端点核对。没有可靠信号就不误纠正，宁可漏判也不能错判。
     pub fn reconcile_running_status(&self) -> Vec<String> {
         let mut corrected = Vec::new();
-        let Ok(records) = db::list_store_models() else {
+        // 本批评审 P2-4：核对逻辑只消费 8 个小字段（容器认领/镜像比对/返回值，
+        // 列集见 list_store_models_reconcile_columns），此前 list_store_models 把
+        // scripts/assets 两个 MB 级正文列整表拉出来又全程不消费——本函数是
+        // library() 的第一步，等于每次刷新模型库都白读一遍全库正文。
+        let Ok(records) = db::list_store_models_reconcile_columns() else {
             return corrected;
         };
         if records.is_empty() {
@@ -3226,10 +3230,14 @@ impl ModelManager {
         // Reconcile store ownership, then sample container trees and native
         // engines by executable fingerprint/model ID, never by a stale PID file.
         self.reconcile_running_status();
-        let running_records = db::list_store_models()
+        // 本批评审 P2-4：这里连同上面的 reconcile 此前是连续两遍 list_store_models
+        // 全量正文读。真正要的是运行中卡片的小字段 + install_engine/common.sh 两段
+        // （算原生进程指纹）+ 内存预算，改走库内 json_extract 的窄投影，且只取
+        // 运行中的卡（running 过滤已推进到 SQL 里）。
+        let running_records = db::list_running_store_models_admission_columns()
             .map_err(|e| ModelManagerError::new(format!("读取运行模型失败：{e}")))?
             .into_iter()
-            .filter(|model| model.running && model.card_id != candidate.card_id)
+            .filter(|model| model.card_id != candidate.card_id)
             .collect::<Vec<_>>();
         let native_snapshot = super::native_process::discover();
         let native_processes = &native_snapshot.processes;
@@ -3239,13 +3247,11 @@ impl ModelManager {
                 let pid = if let Some(name) = model.container_name.as_deref() {
                     docker_container_pid(name)
                 } else {
-                    let install = &model.scripts_content.get("install_engine")?.content;
+                    // 指纹两段正文来自窄投影的库内提取（见上面的查询），
+                    // 语义与整表解析后取 install_engine/common.sh 相同。
                     let (_, fingerprint) = native_tachyon_identity(
-                        install,
-                        model
-                            .assets_content
-                            .get("common.sh")
-                            .map(|blob| blob.content.as_str()),
+                        model.install_engine.as_deref()?,
+                        model.common_sh.as_deref(),
                         model.engine_version.as_deref(),
                     )?;
                     super::native_process::matching_pid(
