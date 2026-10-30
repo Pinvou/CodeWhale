@@ -96,13 +96,13 @@ func (r *PostgresRepository) RetryProfileRepair(ctx context.Context, principal i
 	action := "RETRY_SCHEDULED"
 	auditAction := "account.profile_change.repair_retry_scheduled"
 	if command.RowsAffected() == 0 {
-		command, err = tx.Exec(ctx, `UPDATE password_reset_operations SET status='RETRY',next_attempt_at=$2,updated_at=$2 WHERE id=$1 AND status='REPAIR_REQUIRED' AND last_error_code<>'LEGACY_SESSION_REVOCATION_UNCERTAIN'`, id, now)
+		command, err = tx.Exec(ctx, `UPDATE password_reset_operations SET status='RETRY',next_attempt_at=$2,updated_at=$2 WHERE id=$1 AND status='REPAIR_REQUIRED' AND last_error_code NOT IN ('LEGACY_SESSION_REVOCATION_UNCERTAIN','PASSWORD_SESSION_ORDER_UNPROVEN')`, id, now)
 		if err != nil {
 			return profileRepairRetryResult{}, err
 		}
 		if command.RowsAffected() == 0 {
 			var legacy bool
-			if err = tx.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM password_reset_operations WHERE id=$1 AND status='REPAIR_REQUIRED' AND last_error_code='LEGACY_SESSION_REVOCATION_UNCERTAIN')`, id).Scan(&legacy); err != nil {
+			if err = tx.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM password_reset_operations WHERE id=$1 AND status='REPAIR_REQUIRED' AND last_error_code IN ('LEGACY_SESSION_REVOCATION_UNCERTAIN','PASSWORD_SESSION_ORDER_UNPROVEN'))`, id).Scan(&legacy); err != nil {
 				return profileRepairRetryResult{}, err
 			}
 			if legacy {

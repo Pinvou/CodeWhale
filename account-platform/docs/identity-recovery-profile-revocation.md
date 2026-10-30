@@ -60,3 +60,66 @@ Formal PostgreSQL roots are `TestIdentityRecoveryClaimsRuntimePostgres` and
 and a genuine non-superuser `account_service` runtime, then send the production
 HTTP DTO through the actual adapter handler with a controlled directory side
 effect counter. This is not a live Keycloak/provider or deployed rollout proof.
+
+## Password reset phase cutover (controlled stop required)
+
+The existing operation and identity fence remain unchanged. The first confirmed
+password checkpoint clears only the earlier precautionary session marker.
+Idempotent password checkpoints preserve final logout and terminal/repair state.
+Logout checkpoint and retry writes bind the phase captured before the RPC; a
+late pre-phase callback cannot delete sessions or schedule the post phase into
+repair. No database transaction spans Identity RPC, and this is not an
+exactly-once remote logout protocol.
+
+Do not roll old/new Account password writers together. The authorized operator
+must complete this procedure before starting the new code:
+
+1. Block password-reset and authenticated password-change ingress. Stop every
+   old Account replica/process and its password recovery loop (Compose: use the
+   deployment's existing project/files with `docker compose stop account-service`;
+   Kubernetes: scale the existing Account deployment to zero and wait for all
+   old pods to terminate). Verify no old writer remains and Identity password/
+   logout requests have drained. Waiting for the 30-second claim is insufficient.
+2. Keep ingress blocked. Privately archive IDs/status and the two stage timestamps
+   from the SELECT below, without password handles, subjects or mobile numbers.
+   Execute on the Account database under the authorized operational actor:
+
+```sql
+BEGIN;
+LOCK TABLE password_reset_operations IN SHARE ROW EXCLUSIVE MODE;
+SELECT id,status,password_updated_at,sessions_revoked_at
+FROM password_reset_operations
+WHERE password_updated_at IS NOT NULL AND sessions_revoked_at IS NOT NULL
+  AND status IN ('PASSWORD_UPDATED','RETRY','REPAIR_REQUIRED') FOR UPDATE;
+UPDATE password_reset_operations
+SET status='REPAIR_REQUIRED',last_error_code='PASSWORD_SESSION_ORDER_UNPROVEN',
+    updated_at=clock_timestamp()
+WHERE password_updated_at IS NOT NULL AND sessions_revoked_at IS NOT NULL
+  AND status IN ('PASSWORD_UPDATED','RETRY','REPAIR_REQUIRED');
+SELECT count(*) AS unsafe_pending FROM password_reset_operations
+WHERE password_updated_at IS NOT NULL AND sessions_revoked_at IS NOT NULL
+  AND status IN ('PASSWORD_UPDATED','RETRY','REPAIR_REQUIRED')
+  AND last_error_code IS DISTINCT FROM 'PASSWORD_SESSION_ORDER_UNPROVEN'; -- must be zero
+COMMIT;
+```
+
+3. Those pending rows remain quarantined for human investigation. Do not clear
+   their marker, press the ordinary retry action, reissue a password or logout
+   again automatically: the old data cannot prove whether the logout was pre or
+   post. Separate manual disposition requires independent operation evidence.
+   COMPLETED rows, including migration backfills, are never rewritten by this
+   cutover. Old REPAIR_REQUIRED rows with both markers are equally ambiguous and
+   receive this quarantine reason; leaving their ordinary error code would let
+   the existing retry action revive them. PW-null repairs retain their original
+   manual recovery boundary. This one-time procedure runs before new writers;
+   it must not be rerun over newly confirmed post-phase operations.
+4. Start only the new Account version, verify old writers remain stopped, then
+   reopen the original ingress. A rollback also requires stop/drain; old code
+   must not process new phase-bound work. No migration, permission, public API,
+   SMS, recent-auth or password/login policy change is introduced.
+
+This is an executable operator precondition, not automatic data repair. It
+isolates old PW-non-null/session-marker pending rows before new workers can
+mistake them for final evidence. Already-issued remote requests cannot be
+recalled; completed replays start no new logout, while an unconfirmed post logout
+retains its original retry semantics.

@@ -46,6 +46,8 @@ type ProfileChange struct {
 	LastErrorCode               string     `json:"reason,omitempty"`
 }
 
+var errPasswordResetPhaseAdvanced = errors.New("password reset phase advanced")
+
 type PasswordResetOperation struct {
 	ID                     uuid.UUID
 	UserID                 uuid.UUID
@@ -84,11 +86,11 @@ type ProfileChangeStore interface {
 	CreatePasswordReset(context.Context, string, uuid.UUID, string, bool, string, string) (PasswordResetOperation, error)
 	CreateAuthenticatedPasswordReset(context.Context, identity.Principal, string, string) (PasswordResetOperation, error)
 	MarkPasswordWriteStarted(context.Context, uuid.UUID, uuid.UUID) (bool, error)
-	MarkPasswordUpdated(context.Context, uuid.UUID) error
-	MarkPasswordSessionsRevoked(context.Context, uuid.UUID) error
+	MarkPasswordUpdated(context.Context, uuid.UUID) (PasswordResetOperation, error)
+	MarkPasswordSessionsRevoked(context.Context, uuid.UUID, bool) error
 	CompletePasswordReset(context.Context, uuid.UUID) error
 	FailPasswordReset(context.Context, uuid.UUID, string) error
-	SchedulePasswordResetRetry(context.Context, uuid.UUID, string) error
+	SchedulePasswordResetRetry(context.Context, uuid.UUID, string, bool) error
 	RequirePasswordResetRepair(context.Context, uuid.UUID, string) error
 	ClaimPasswordReset(context.Context) (*PasswordResetOperation, error)
 	ListProfileRepairs(context.Context) ([]profileChangeRepairItem, error)
@@ -342,6 +344,10 @@ func (s *ProfileChangeService) ChangePassword(ctx context.Context, principal ide
 }
 
 func (s *ProfileChangeService) resumePasswordReset(ctx context.Context, operation PasswordResetOperation) error {
+	// Cutover quarantine has no evidence that its marker is post-write.
+	if operation.Status != "COMPLETED" && operation.LastErrorCode == "PASSWORD_SESSION_ORDER_UNPROVEN" {
+		return ErrConflict
+	}
 	switch operation.Status {
 	case "COMPLETED":
 		return nil
@@ -370,30 +376,51 @@ func (s *ProfileChangeService) resumePasswordReset(ctx context.Context, operatio
 				recordProfileRecoveryFailure(ctx, "PASSWORD_RESET_FAILURE_CHECKPOINT_FAILED", s.store.FailPasswordReset(context.WithoutCancel(ctx), operation.ID, passwordResetErrorCode(err)))
 			} else {
 				if revokeErr := s.revokePasswordSessionsAfterUncertainWrite(ctx, operation); revokeErr != nil {
-					recordProfileRecoveryFailure(ctx, "PROFILE_RETRY_SCHEDULE_FAILED", s.store.SchedulePasswordResetRetry(context.WithoutCancel(ctx), operation.ID, "IDENTITY_RESET_UNCERTAIN_SESSION_REVOCATION_FAILED"))
+					if errors.Is(revokeErr, errPasswordResetPhaseAdvanced) {
+						return ErrConflict
+					}
+					recordProfileRecoveryFailure(ctx, "PROFILE_RETRY_SCHEDULE_FAILED", s.store.SchedulePasswordResetRetry(context.WithoutCancel(ctx), operation.ID, "IDENTITY_RESET_UNCERTAIN_SESSION_REVOCATION_FAILED", operation.PasswordUpdatedAt != nil))
 					return errors.Join(err, revokeErr)
 				}
-				recordProfileRecoveryFailure(ctx, "PROFILE_RETRY_SCHEDULE_FAILED", s.store.SchedulePasswordResetRetry(context.WithoutCancel(ctx), operation.ID, "IDENTITY_RESET_UNCERTAIN"))
+				recordProfileRecoveryFailure(ctx, "PROFILE_RETRY_SCHEDULE_FAILED", s.store.SchedulePasswordResetRetry(context.WithoutCancel(ctx), operation.ID, "IDENTITY_RESET_UNCERTAIN", operation.PasswordUpdatedAt != nil))
 			}
 			return err
 		}
-		if err := s.store.MarkPasswordUpdated(ctx, operation.ID); err != nil {
+		updated, err := s.store.MarkPasswordUpdated(ctx, operation.ID)
+		if err != nil {
 			if revokeErr := s.revokePasswordSessionsAfterUncertainWrite(ctx, operation); revokeErr != nil {
-				recordProfileRecoveryFailure(ctx, "PROFILE_RETRY_SCHEDULE_FAILED", s.store.SchedulePasswordResetRetry(context.WithoutCancel(ctx), operation.ID, "PASSWORD_UPDATE_CHECKPOINT_AND_SESSION_REVOCATION_FAILED"))
+				if errors.Is(revokeErr, errPasswordResetPhaseAdvanced) {
+					return ErrConflict
+				}
+				recordProfileRecoveryFailure(ctx, "PROFILE_RETRY_SCHEDULE_FAILED", s.store.SchedulePasswordResetRetry(context.WithoutCancel(ctx), operation.ID, "PASSWORD_UPDATE_CHECKPOINT_AND_SESSION_REVOCATION_FAILED", operation.PasswordUpdatedAt != nil))
 				return errors.Join(err, revokeErr)
 			}
-			recordProfileRecoveryFailure(ctx, "PROFILE_RETRY_SCHEDULE_FAILED", s.store.SchedulePasswordResetRetry(context.WithoutCancel(ctx), operation.ID, "PASSWORD_UPDATE_CHECKPOINT_FAILED"))
+			recordProfileRecoveryFailure(ctx, "PROFILE_RETRY_SCHEDULE_FAILED", s.store.SchedulePasswordResetRetry(context.WithoutCancel(ctx), operation.ID, "PASSWORD_UPDATE_CHECKPOINT_FAILED", operation.PasswordUpdatedAt != nil))
 			return err
 		}
-		operation.PasswordUpdatedAt = ptrTime(s.now())
+		operation = updated
+		if operation.LastErrorCode == "PASSWORD_SESSION_ORDER_UNPROVEN" {
+			return ErrConflict
+		}
+		switch operation.Status {
+		case "COMPLETED":
+			return nil
+		case "FAILED":
+			return passwordResetStoredError(operation.LastErrorCode)
+		case "REPAIR_REQUIRED":
+			return ErrConflict
+		}
 	}
 	if operation.SessionsRevokedAt == nil {
 		if err := s.identities.RevokeSessions(ctx, operation.IdentitySubject); err != nil {
-			recordProfileRecoveryFailure(ctx, "PROFILE_RETRY_SCHEDULE_FAILED", s.store.SchedulePasswordResetRetry(context.WithoutCancel(ctx), operation.ID, "SESSION_REVOCATION_FAILED"))
+			recordProfileRecoveryFailure(ctx, "PROFILE_RETRY_SCHEDULE_FAILED", s.store.SchedulePasswordResetRetry(context.WithoutCancel(ctx), operation.ID, "SESSION_REVOCATION_FAILED", operation.PasswordUpdatedAt != nil))
 			return err
 		}
-		if err := s.store.MarkPasswordSessionsRevoked(ctx, operation.ID); err != nil {
-			recordProfileRecoveryFailure(ctx, "PROFILE_RETRY_SCHEDULE_FAILED", s.store.SchedulePasswordResetRetry(context.WithoutCancel(ctx), operation.ID, "SESSION_REVOCATION_CHECKPOINT_FAILED"))
+		if err := s.store.MarkPasswordSessionsRevoked(ctx, operation.ID, true); err != nil {
+			if errors.Is(err, errPasswordResetPhaseAdvanced) {
+				return ErrConflict
+			}
+			recordProfileRecoveryFailure(ctx, "PROFILE_RETRY_SCHEDULE_FAILED", s.store.SchedulePasswordResetRetry(context.WithoutCancel(ctx), operation.ID, "SESSION_REVOCATION_CHECKPOINT_FAILED", operation.PasswordUpdatedAt != nil))
 			return err
 		}
 	}
@@ -409,7 +436,7 @@ func (s *ProfileChangeService) revokePasswordSessionsAfterUncertainWrite(ctx con
 	if err := s.identities.RevokeSessions(cleanupCtx, operation.IdentitySubject); err != nil {
 		return err
 	}
-	return s.store.MarkPasswordSessionsRevoked(cleanupCtx, operation.ID)
+	return s.store.MarkPasswordSessionsRevoked(cleanupCtx, operation.ID, false)
 }
 
 func (s *ProfileChangeService) recoverUncertainPasswordReset(ctx context.Context, operation PasswordResetOperation, code string) error {
@@ -417,7 +444,10 @@ func (s *ProfileChangeService) recoverUncertainPasswordReset(ctx context.Context
 		code = "PASSWORD_WRITE_UNCERTAIN"
 	}
 	if err := s.revokePasswordSessionsAfterUncertainWrite(ctx, operation); err != nil {
-		recordProfileRecoveryFailure(ctx, "PROFILE_RETRY_SCHEDULE_FAILED", s.store.SchedulePasswordResetRetry(context.WithoutCancel(ctx), operation.ID, code+"_SESSION_REVOCATION_FAILED"))
+		if errors.Is(err, errPasswordResetPhaseAdvanced) {
+			return ErrConflict
+		}
+		recordProfileRecoveryFailure(ctx, "PROFILE_RETRY_SCHEDULE_FAILED", s.store.SchedulePasswordResetRetry(context.WithoutCancel(ctx), operation.ID, code+"_SESSION_REVOCATION_FAILED", operation.PasswordUpdatedAt != nil))
 		return err
 	}
 	if err := s.store.RequirePasswordResetRepair(context.WithoutCancel(ctx), operation.ID, code); err != nil {
@@ -1256,12 +1286,49 @@ FOR UPDATE OF u`, principal.Issuer, principal.Subject, PermissionPersonalSecurit
 	return operation, tx.Commit(ctx)
 }
 
-func (r *PostgresRepository) MarkPasswordUpdated(ctx context.Context, id uuid.UUID) error {
-	command, err := r.pool.Exec(ctx, `UPDATE password_reset_operations SET password_updated_at=COALESCE(password_updated_at,$2),password_handle='',password_policy_version='',status='PASSWORD_UPDATED',last_error_code=NULL,next_attempt_at=$2,updated_at=$2 WHERE id=$1 AND password_write_started_at IS NOT NULL AND status IN ('PASSWORD_STARTED','PASSWORD_UPDATED','RETRY')`, id, r.now())
-	if err == nil && command.RowsAffected() != 1 {
-		return r.passwordResetStageSatisfied(ctx, id, `password_updated_at IS NOT NULL`)
+// Match the existing user -> operation -> sessions lock order.
+func lockPasswordReset(ctx context.Context, tx pgx.Tx, id uuid.UUID) (PasswordResetOperation, error) {
+	var user uuid.UUID
+	if err := tx.QueryRow(ctx, `SELECT user_id FROM password_reset_operations WHERE id=$1`, id).Scan(&user); err != nil {
+		return PasswordResetOperation{}, err
 	}
-	return err
+	if _, err := tx.Exec(ctx, `SELECT id FROM users WHERE id=$1 FOR UPDATE`, user); err != nil {
+		return PasswordResetOperation{}, err
+	}
+	op, err := scanPasswordReset(tx.QueryRow(ctx, passwordResetSelect+` WHERE id=$1 FOR UPDATE`, id))
+	if err == nil && op.UserID != user {
+		return op, ErrConflict
+	}
+	return op, err
+}
+func (r *PostgresRepository) MarkPasswordUpdated(ctx context.Context, id uuid.UUID) (PasswordResetOperation, error) {
+	tx, err := r.pool.Begin(ctx)
+	if err != nil {
+		return PasswordResetOperation{}, err
+	}
+	defer tx.Rollback(ctx)
+	op, err := lockPasswordReset(ctx, tx, id)
+	if err != nil {
+		return op, err
+	}
+	if op.PasswordUpdatedAt == nil {
+		if op.PasswordWriteStartedAt == nil || (op.Status != "PASSWORD_STARTED" && op.Status != "RETRY") {
+			return op, ErrConflict
+		}
+		_, err = tx.Exec(ctx, `UPDATE password_reset_operations SET password_updated_at=$2,sessions_revoked_at=NULL,password_handle='',password_policy_version='',status='PASSWORD_UPDATED',last_error_code=NULL,next_attempt_at=$2,updated_at=$2 WHERE id=$1`, id, r.now())
+		if err != nil {
+			return op, err
+		}
+		op, err = scanPasswordReset(tx.QueryRow(ctx, passwordResetSelect+` WHERE id=$1`, id))
+		if err != nil {
+			return op, err
+		}
+	}
+	// Replays preserve final revocation and terminal/repair state.
+	if err = tx.Commit(ctx); err != nil {
+		return PasswordResetOperation{}, err
+	}
+	return op, nil
 }
 
 func (r *PostgresRepository) MarkPasswordWriteStarted(ctx context.Context, id, owner uuid.UUID) (bool, error) {
@@ -1276,27 +1343,31 @@ func (r *PostgresRepository) MarkPasswordWriteStarted(ctx context.Context, id, o
 	return command.RowsAffected() == 1, nil
 }
 
-func (r *PostgresRepository) MarkPasswordSessionsRevoked(ctx context.Context, id uuid.UUID) error {
+// post is captured before remote logout, never inferred when its ACK arrives.
+func (r *PostgresRepository) MarkPasswordSessionsRevoked(ctx context.Context, id uuid.UUID, post bool) error {
 	tx, err := r.pool.Begin(ctx)
 	if err != nil {
 		return err
 	}
 	defer tx.Rollback(ctx)
-	if _, err = tx.Exec(ctx, `DELETE FROM user_sessions WHERE user_id=(SELECT user_id FROM password_reset_operations WHERE id=$1)`, id); err != nil {
-		return err
-	}
-	command, err := tx.Exec(ctx, `UPDATE password_reset_operations SET sessions_revoked_at=COALESCE(sessions_revoked_at,$2),next_attempt_at=$2,updated_at=$2 WHERE id=$1 AND password_write_started_at IS NOT NULL AND status IN ('PASSWORD_STARTED','PASSWORD_UPDATED','RETRY','REPAIR_REQUIRED')`, id, r.now())
+	op, err := lockPasswordReset(ctx, tx, id)
 	if err != nil {
 		return err
 	}
-	if command.RowsAffected() != 1 {
-		var satisfied bool
-		if err = tx.QueryRow(ctx, `SELECT sessions_revoked_at IS NOT NULL FROM password_reset_operations WHERE id=$1`, id).Scan(&satisfied); err != nil {
-			return err
-		}
-		if !satisfied {
-			return ErrConflict
-		}
+	if (op.PasswordUpdatedAt != nil) != post {
+		return errPasswordResetPhaseAdvanced
+	}
+	if op.Status == "COMPLETED" || op.SessionsRevokedAt != nil {
+		return tx.Commit(ctx)
+	}
+	if op.PasswordWriteStartedAt == nil || (op.Status != "PASSWORD_STARTED" && op.Status != "PASSWORD_UPDATED" && op.Status != "RETRY" && op.Status != "REPAIR_REQUIRED") {
+		return ErrConflict
+	}
+	if _, err = tx.Exec(ctx, `DELETE FROM user_sessions WHERE user_id=$1`, op.UserID); err != nil {
+		return err
+	}
+	if _, err = tx.Exec(ctx, `UPDATE password_reset_operations SET sessions_revoked_at=$2,next_attempt_at=$2,updated_at=$2 WHERE id=$1`, id, r.now()); err != nil {
+		return err
 	}
 	return tx.Commit(ctx)
 }
@@ -1308,7 +1379,7 @@ func (r *PostgresRepository) CompletePasswordReset(ctx context.Context, id uuid.
 	}
 	defer tx.Rollback(ctx)
 	now := r.now()
-	command, err := tx.Exec(ctx, `UPDATE password_reset_operations SET status='COMPLETED',last_error_code=NULL,completed_at=$2,updated_at=$2 WHERE id=$1 AND password_updated_at IS NOT NULL AND sessions_revoked_at IS NOT NULL AND status IN ('PASSWORD_UPDATED','RETRY')`, id, now)
+	command, err := tx.Exec(ctx, `UPDATE password_reset_operations SET status='COMPLETED',last_error_code=NULL,completed_at=$2,updated_at=$2 WHERE id=$1 AND password_updated_at IS NOT NULL AND sessions_revoked_at IS NOT NULL AND last_error_code IS DISTINCT FROM 'PASSWORD_SESSION_ORDER_UNPROVEN' AND status IN ('PASSWORD_UPDATED','RETRY')`, id, now)
 	if err != nil {
 		return err
 	}
@@ -1356,9 +1427,9 @@ func (r *PostgresRepository) FailPasswordReset(ctx context.Context, id uuid.UUID
 	return tx.Commit(ctx)
 }
 
-func (r *PostgresRepository) SchedulePasswordResetRetry(ctx context.Context, id uuid.UUID, code string) error {
+func (r *PostgresRepository) SchedulePasswordResetRetry(ctx context.Context, id uuid.UUID, code string, post bool) error {
 	now := r.now()
-	_, err := r.pool.Exec(ctx, `UPDATE password_reset_operations SET attempts=attempts+1,status=CASE WHEN attempts+1>=10 OR sla_expires_at<=$2 THEN 'REPAIR_REQUIRED' ELSE 'RETRY' END,last_error_code=$3,next_attempt_at=$2+make_interval(secs=>LEAST(300,power(2,LEAST(attempts+1,8))::int)),updated_at=$2 WHERE id=$1 AND status IN ('VERIFIED','PASSWORD_STARTED','PASSWORD_UPDATED','RETRY')`, id, now, code)
+	_, err := r.pool.Exec(ctx, `UPDATE password_reset_operations SET attempts=attempts+1,status=CASE WHEN attempts+1>=10 OR sla_expires_at<=$2 THEN 'REPAIR_REQUIRED' ELSE 'RETRY' END,last_error_code=$3,next_attempt_at=$2+make_interval(secs=>LEAST(300,power(2,LEAST(attempts+1,8))::int)),updated_at=$2 WHERE id=$1 AND (password_updated_at IS NOT NULL)=$4 AND status IN ('VERIFIED','PASSWORD_STARTED','PASSWORD_UPDATED','RETRY')`, id, now, code, post)
 	return err
 }
 
@@ -1398,7 +1469,7 @@ func (r *PostgresRepository) ClaimPasswordReset(ctx context.Context) (*PasswordR
 		return nil, err
 	}
 	defer tx.Rollback(ctx)
-	operation, err := scanPasswordReset(tx.QueryRow(ctx, passwordResetSelect+` WHERE status IN ('VERIFIED','PASSWORD_STARTED','PASSWORD_UPDATED','RETRY') AND next_attempt_at<=$1 ORDER BY next_attempt_at FOR UPDATE SKIP LOCKED LIMIT 1`, r.now()))
+	operation, err := scanPasswordReset(tx.QueryRow(ctx, passwordResetSelect+` WHERE status IN ('VERIFIED','PASSWORD_STARTED','PASSWORD_UPDATED','RETRY') AND last_error_code IS DISTINCT FROM 'PASSWORD_SESSION_ORDER_UNPROVEN' AND next_attempt_at<=$1 ORDER BY next_attempt_at FOR UPDATE SKIP LOCKED LIMIT 1`, r.now()))
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, tx.Commit(ctx)
 	}

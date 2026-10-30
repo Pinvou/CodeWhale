@@ -248,21 +248,29 @@ func (f *profileStoreFake) MarkPasswordWriteStarted(_ context.Context, _ uuid.UU
 	f.calls = append(f.calls, "password-started")
 	return true, nil
 }
-func (f *profileStoreFake) MarkPasswordUpdated(context.Context, uuid.UUID) error {
+func (f *profileStoreFake) MarkPasswordUpdated(context.Context, uuid.UUID) (PasswordResetOperation, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	now := time.Now()
-	f.reset.PasswordUpdatedAt = &now
-	f.reset.Status = "PASSWORD_UPDATED"
-	f.calls = append(f.calls, "password-updated")
-	return nil
+	if f.reset.PasswordUpdatedAt == nil {
+		now := time.Now()
+		f.reset.PasswordUpdatedAt = &now
+		f.reset.SessionsRevokedAt = nil
+		f.reset.Status = "PASSWORD_UPDATED"
+		f.calls = append(f.calls, "password-updated")
+	}
+	return f.reset, nil
 }
-func (f *profileStoreFake) MarkPasswordSessionsRevoked(context.Context, uuid.UUID) error {
+func (f *profileStoreFake) MarkPasswordSessionsRevoked(_ context.Context, _ uuid.UUID, post bool) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	now := time.Now()
-	f.reset.SessionsRevokedAt = &now
-	f.calls = append(f.calls, "password-sessions")
+	if (f.reset.PasswordUpdatedAt != nil) != post {
+		return errPasswordResetPhaseAdvanced
+	}
+	if f.reset.SessionsRevokedAt == nil {
+		now := time.Now()
+		f.reset.SessionsRevokedAt = &now
+		f.calls = append(f.calls, "password-sessions")
+	}
 	return nil
 }
 func (f *profileStoreFake) CompletePasswordReset(context.Context, uuid.UUID) error {
@@ -277,7 +285,10 @@ func (f *profileStoreFake) FailPasswordReset(_ context.Context, _ uuid.UUID, cod
 	f.reset.Status = "FAILED"
 	return nil
 }
-func (f *profileStoreFake) SchedulePasswordResetRetry(_ context.Context, _ uuid.UUID, code string) error {
+func (f *profileStoreFake) SchedulePasswordResetRetry(_ context.Context, _ uuid.UUID, code string, post bool) error {
+	if (f.reset.PasswordUpdatedAt != nil) != post {
+		return nil
+	}
 	f.retryCode = code
 	f.reset.Status = "RETRY"
 	return nil
@@ -897,4 +908,113 @@ func (f *profileStoreFake) StartProfileSessionRevocation(context.Context, uuid.U
 	now := time.Now()
 	f.change.SessionsRevocationStartedAt = &now
 	return first, nil
+}
+
+func TestPasswordResetPrecautionRequiresFinalRevocation(t *testing.T) {
+	store := &profileStoreFake{reset: PasswordResetOperation{ID: uuid.New(), UserID: uuid.New(), IdentitySubject: "subject", Status: "VERIFIED", PasswordHandle: "handle", PasswordPolicyVersion: "policy"}}
+	identities := &profileIdentityFake{resetErr: errors.New("uncertain reset")}
+	service := &ProfileChangeService{store: store, identities: identities, now: time.Now}
+	if err := service.resumePasswordReset(context.Background(), store.reset); err == nil {
+		t.Fatal("uncertain reset accepted")
+	}
+	if store.reset.SessionsRevokedAt == nil || store.reset.PasswordUpdatedAt != nil {
+		t.Fatal("precaution missing")
+	}
+	identities.resetErr = nil
+	if err := service.resumePasswordReset(context.Background(), store.reset); err != nil {
+		t.Fatal(err)
+	}
+	if got := strings.Join(identities.calls, ","); got != "password,sessions,password,sessions" {
+		t.Fatal("pre logout substituted for final logout", got)
+	}
+	before := len(identities.calls)
+	if err := service.resumePasswordReset(context.Background(), store.reset); err != nil || len(identities.calls) != before {
+		t.Fatal("completed replay sent RPC", err)
+	}
+}
+func TestPasswordResetLatePrePhaseCannotScheduleRepair(t *testing.T) {
+	now := time.Now()
+	old := PasswordResetOperation{ID: uuid.New(), UserID: uuid.New(), IdentitySubject: "subject", Status: "PASSWORD_STARTED", PasswordWriteStartedAt: &now}
+	current := old
+	current.PasswordUpdatedAt = &now
+	current.Status = "PASSWORD_UPDATED"
+	store := &profileStoreFake{reset: current}
+	service := &ProfileChangeService{store: store, identities: &profileIdentityFake{resetErr: errors.New("uncertain")}, now: time.Now}
+	if err := service.resumePasswordReset(context.Background(), old); !errors.Is(err, ErrConflict) {
+		t.Fatal(err)
+	}
+	if store.retryCode != "" || store.reset.Status != "PASSWORD_UPDATED" || store.reset.SessionsRevokedAt != nil {
+		t.Fatal("stale stage changed final progress", store.reset)
+	}
+	if err := store.SchedulePasswordResetRetry(context.Background(), old.ID, "old-stage-error", false); err != nil || store.reset.Status != "PASSWORD_UPDATED" {
+		t.Fatal("stale RPC error scheduled new phase", err)
+	}
+}
+
+type passwordPostCheckpointFailure struct {
+	*profileStoreFake
+	fail bool
+}
+
+func (f *passwordPostCheckpointFailure) MarkPasswordSessionsRevoked(ctx context.Context, id uuid.UUID, post bool) error {
+	if post && f.fail {
+		return errors.New("controlled post checkpoint unavailable")
+	}
+	return f.profileStoreFake.MarkPasswordSessionsRevoked(ctx, id, post)
+}
+func TestPasswordResetPostCheckpointRetryKeepsPassword(t *testing.T) {
+	base := &profileStoreFake{reset: PasswordResetOperation{ID: uuid.New(), UserID: uuid.New(), IdentitySubject: "subject", Status: "VERIFIED"}}
+	store := &passwordPostCheckpointFailure{profileStoreFake: base, fail: true}
+	identities := &profileIdentityFake{}
+	service := &ProfileChangeService{store: store, identities: identities, now: time.Now}
+	if err := service.resumePasswordReset(context.Background(), base.reset); err == nil {
+		t.Fatal("checkpoint failure absent")
+	}
+	store.fail = false
+	if err := service.resumePasswordReset(context.Background(), base.reset); err != nil {
+		t.Fatal(err)
+	}
+	if got := strings.Join(identities.calls, ","); got != "password,sessions,sessions" {
+		t.Fatal("post retry repeated password", got)
+	}
+}
+
+func TestPasswordResetQuarantineSnapshotDoesNotLogout(t *testing.T) {
+	now := time.Now()
+	current := PasswordResetOperation{ID: uuid.New(), UserID: uuid.New(), IdentitySubject: "subject", Status: "RETRY", PasswordWriteStartedAt: &now, PasswordUpdatedAt: &now, LastErrorCode: "PASSWORD_SESSION_ORDER_UNPROVEN"}
+	old := current
+	old.PasswordUpdatedAt = nil
+	old.LastErrorCode = ""
+	store := &profileStoreFake{reset: current}
+	identities := &profileIdentityFake{}
+	service := &ProfileChangeService{store: store, identities: identities, now: time.Now}
+	if err := service.resumePasswordReset(context.Background(), old); !errors.Is(err, ErrConflict) {
+		t.Fatal(err)
+	}
+	if got := strings.Join(identities.calls, ","); got != "password" {
+		t.Fatal("quarantine snapshot dispatched logout", got)
+	}
+}
+
+func TestPasswordResetUpdatedSnapshotPreservesTerminalAndRepair(t *testing.T) {
+	for _, status := range []string{"COMPLETED", "REPAIR_REQUIRED"} {
+		t.Run(status, func(t *testing.T) {
+			now := time.Now()
+			current := PasswordResetOperation{ID: uuid.New(), UserID: uuid.New(), IdentitySubject: "subject", Status: status, PasswordWriteStartedAt: &now, PasswordUpdatedAt: &now, SessionsRevokedAt: &now}
+			old := current
+			old.PasswordUpdatedAt = nil
+			old.SessionsRevokedAt = nil
+			old.Status = "PASSWORD_STARTED"
+			store := &profileStoreFake{reset: current}
+			identities := &profileIdentityFake{}
+			service := &ProfileChangeService{store: store, identities: identities, now: time.Now}
+			err := service.resumePasswordReset(context.Background(), old)
+			if status == "COMPLETED" && err != nil || status == "REPAIR_REQUIRED" && !errors.Is(err, ErrConflict) {
+				t.Fatal(status, err)
+			}
+			if got := strings.Join(identities.calls, ","); got != "password" || store.reset.Status != status || store.reset.SessionsRevokedAt == nil {
+				t.Fatal("snapshot replay changed final stage", got, store.reset)
+			}
+		})
+	}
 }
