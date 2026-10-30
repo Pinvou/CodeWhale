@@ -118,6 +118,15 @@ function stepRun(job, name) {
 const goStepName = "Test and vet all Account Platform Go modules";
 const auditPGStepName = "Audit export finite PostgreSQL rollback and persisted boundaries";
 const existingBrokerStepName = "Existing broker compatibility on owned PostgreSQL and TLS NATS";
+const pgPreflightStepName = "Verify account CI PostgreSQL service isolation";
+
+function pgIdentityEnvironment(service) {
+  return [
+    `PINVOU_ACCOUNT_CI_PG_PORT: \${{ steps.account-pg.outputs.${service}_port }}`,
+    `PINVOU_ACCOUNT_CI_PG_SYSTEM_ID: \${{ steps.account-pg.outputs.${service}_system }}`,
+    `PINVOU_ACCOUNT_CI_PG_DIRECTORY: \${{ steps.account-pg.outputs.${service}_directory }}`,
+  ];
+}
 
 function assertFiniteAuditPGSetup(job) {
   const text = job.replaceAll("\r\n", "\n");
@@ -132,8 +141,9 @@ function assertFiniteAuditPGSetup(job) {
     "        env:",
     "          POSTGRES_HOST_AUTH_METHOD: trust",
     "        ports:",
-    "          - 127.0.0.1:5432:5432",
+    '          - "127.0.0.1::5432"',
     "        options: >-",
+    "          --rm",
     "          --health-cmd pg_isready",
     "          --health-interval 10s",
     "          --health-timeout 5s",
@@ -146,8 +156,9 @@ function assertFiniteAuditPGSetup(job) {
     "          POSTGRES_HOST_AUTH_METHOD: trust",
     "          POSTGRES_DB: postgres",
     "        ports:",
-    "          - 127.0.0.1:5434:5432",
+    '          - "127.0.0.1::5432"',
     "        options: >-",
+    "          --rm",
     "          --health-cmd \"pg_isready -U postgres -d postgres\"",
     "          --health-interval 5s",
     "          --health-timeout 5s",
@@ -160,33 +171,56 @@ function assertFiniteAuditPGSetup(job) {
     "          POSTGRES_HOST_AUTH_METHOD: trust",
     "          POSTGRES_DB: postgres",
     "        ports:",
-    "          - 127.0.0.1:5433:5432",
+    '          - "127.0.0.1::5432"',
     "        options: >-",
+    "          --rm",
     "          --health-cmd \"pg_isready -U postgres -d postgres\"",
     "          --health-interval 5s",
     "          --health-timeout 5s",
     "          --health-retries 12",
   ].join("\n"));
   assert.doesNotMatch(job, /secrets\.|continue-on-error:/);
-  const pg = namedStep(job, auditPGStepName);
+  // Admit only read-only verification of this job's actual service metadata.
+  // Every database consumer must use its identity-checked outputs, never a
+  // fixed port or another job's endpoint on the shared runner host.
+  const preflight = namedStep(text, pgPreflightStepName);
+  assert.equal(preflight.trimEnd(), [
+    `      - name: ${pgPreflightStepName}`,
+    "        id: account-pg", "        env:",
+    "          ACCOUNT_CI_SERVICES: ${{ toJSON(job.services) }}",
+    "        run: |",
+    "          python3 -m unittest discover -s scripts/tests -p test_account_ci_postgres.py",
+    "          python3 scripts/account-ci-postgres.py",
+  ].join("\n"));
+  for (const name of [existingBrokerStepName, auditPGStepName,
+    "Token financial contracts on isolated PostgreSQL", "Account closure contracts on isolated PostgreSQL"]) {
+    assert.ok(text.indexOf(preflight) < text.indexOf(namedStep(text, name)),
+      `service identity verification must precede ${name}`);
+  }
+  const pg = namedStep(text, auditPGStepName);
   assert.match(pg, /^ {8}working-directory: account-platform$/m);
+  assert.doesNotMatch(pg, /^ {8}(?:if|continue-on-error):/m,
+    "finite audit PostgreSQL gate must execute unconditionally and fail closed");
   const env = pg.match(/^ {8}env:\n[\s\S]*?(?=^ {8}\S|$(?![\s\S]))/m);
   assert.ok(env, "finite audit test profile not found");
   assert.equal(env[0].trimEnd(), [
-    "        env:", "          F17_TEST_DATABASE_URL: postgres://postgres@127.0.0.1:5432/postgres?sslmode=disable",
+    "        env:", "          F17_TEST_DATABASE_URL: ${{ steps.account-pg.outputs.audit_url }}",
+    ...pgIdentityEnvironment("audit").map(value => `          ${value}`),
     "          F17_TEST_DATABASE_PROFILE: github-actions-service",
+    "          F17_TEST_SERVICE_PORT: ${{ steps.account-pg.outputs.audit_port }}",
   ].join("\n"));
   // F16's two separately bounded suites use only the other ephemeral service.
   // Validate each whole step before removing it from the audit-only env ban;
   // arbitrary env, commands, conditions and extra steps remain rejected.
-  let outsidePGSteps = text.replace(pg, "");
+  let outsidePGSteps = text.replace(pg, "").replace(preflight, "");
   // Admit only this bounded acceptance step before enforcing the job-wide ban
   // on incidental database inputs. The complete step is fixed deliberately.
   const existingBroker = namedStep(text, existingBrokerStepName);
   assert.equal(existingBroker.trimEnd(), [
     `      - name: ${existingBrokerStepName}`,
     "        timeout-minutes: 12", "        shell: bash", "        env:",
-    "          PINVOU_TEST_SCHEMA_DATABASE_URL: postgres://postgres@127.0.0.1:5434/postgres?sslmode=disable",
+    "          PINVOU_TEST_SCHEMA_DATABASE_URL: ${{ steps.account-pg.outputs.broker_url }}",
+    ...pgIdentityEnvironment("broker").map(value => `          ${value}`),
     "        run: |", "          set -euo pipefail",
     "          # Extract only the pinned public server executable. The test itself",
     "          # starts a private loopback broker with its own TLS keys and store.",
@@ -202,10 +236,12 @@ function assertFiniteAuditPGSetup(job) {
   outsidePGSteps = outsidePGSteps.replace(existingBroker, "");
   for (const [name, environment, commands] of [
     ["Token financial contracts on isolated PostgreSQL", [
-      "PINVOU_ACCOUNT_FINANCIAL_TEST_DATABASE_URL: postgres://postgres@127.0.0.1:5433/postgres?sslmode=disable",
+      "PINVOU_ACCOUNT_FINANCIAL_TEST_DATABASE_URL: ${{ steps.account-pg.outputs.financial_url }}",
+      ...pgIdentityEnvironment("financial"),
     ], ["set -euo pipefail", "python3 -m unittest discover -s scripts/tests -p test_token_financial_postgres.py", "python3 scripts/test-token-financial-postgres.py"]],
     ["Account closure contracts on isolated PostgreSQL", [
-      "PINVOU_ACCOUNT_CLOSURE_TEST_DATABASE_URL: postgres://postgres@127.0.0.1:5433/postgres?sslmode=disable",
+      "PINVOU_ACCOUNT_CLOSURE_TEST_DATABASE_URL: ${{ steps.account-pg.outputs.financial_url }}",
+      ...pgIdentityEnvironment("financial"),
       "PINVOU_ACCOUNT_CLOSURE_TEST_ARTIFACT_DIR: ${{ runner.temp }}/account-closure-postgres",
     ], ["set -euo pipefail", "python3 -m unittest discover -s scripts/tests -p test_account_closure_postgres.py", "python3 scripts/test-account-closure-postgres.py"]],
   ]) {
@@ -217,7 +253,7 @@ function assertFiniteAuditPGSetup(job) {
     ].join("\n"));
     outsidePGSteps = outsidePGSteps.replace(step, "");
   }
-  assert.doesNotMatch(outsidePGSteps, /DATABASE_URL|DATABASE_PROFILE|F17_TEST_/);
+  assert.doesNotMatch(outsidePGSteps, /DATABASE_URL|DATABASE_PROFILE|F17_TEST_|PINVOU_ACCOUNT_CI_PG_|ACCOUNT_CI_SERVICES/);
   const defaultStep = namedStep(job, goStepName);
   const jobEnv = text.match(/^ {4}env:\n[\s\S]*?(?=^ {4}\S|$(?![\s\S]))/m);
   assert.ok(jobEnv);
@@ -492,18 +528,24 @@ test("finite audit PostgreSQL exception rejects unsafe or unrelated service and 
   const job = jobBlock("account-platform-test").replaceAll("\r\n", "\n");
   assertFiniteAuditPGSetup(job);
   for (const [before, after] of [
-    ["127.0.0.1:5432:5432", "5432:5432"],
+    ['"127.0.0.1::5432"', '"5432"'],
+    ['"127.0.0.1::5432"', '"0.0.0.0::5432"'],
+    ['"127.0.0.1::5432"', '"127.0.0.1:5432:5432"'],
+    ["          --rm\n", ""],
     ["postgres:16-alpine", "postgres:latest"],
     ["      audit-export-postgres:", "      unrelated-postgres:"],
     ["    env:\n      GOTOOLCHAIN:", "      another-service:\n        image: postgres:16-alpine\n    env:\n      GOTOOLCHAIN:"],
     ["        ports:", "        volumes:\n          - shared-data:/var/lib/postgresql/data\n        ports:"],
     ["F17_TEST_DATABASE_PROFILE: github-actions-service", "F17_TEST_DATABASE_PROFILE: local-owned"],
-    ["postgres://postgres@127.0.0.1:5432/postgres?sslmode=disable", "postgres://postgres@remote.invalid:5432/postgres?sslmode=disable"],
-    ["127.0.0.1:5434:5432", "5434:5432"],
-    ["PINVOU_TEST_SCHEMA_DATABASE_URL: postgres://postgres@127.0.0.1:5434/postgres?sslmode=disable", "PINVOU_TEST_SCHEMA_DATABASE_URL: postgres://postgres@remote.invalid:5434/postgres?sslmode=disable"],
+    ["F17_TEST_DATABASE_URL: ${{ steps.account-pg.outputs.audit_url }}", "F17_TEST_DATABASE_URL: postgres://postgres@remote.invalid:5432/postgres?sslmode=disable"],
+    ["PINVOU_TEST_SCHEMA_DATABASE_URL: ${{ steps.account-pg.outputs.broker_url }}", "PINVOU_TEST_SCHEMA_DATABASE_URL: postgres://postgres@remote.invalid:5434/postgres?sslmode=disable"],
     ["npm --prefix account-platform run test:existing-broker", "npm --prefix account-platform run test:existing-broker || true"],
-    ["PINVOU_ACCOUNT_FINANCIAL_TEST_DATABASE_URL: postgres://postgres@127.0.0.1:5433/postgres?sslmode=disable", "PINVOU_ACCOUNT_FINANCIAL_TEST_DATABASE_URL: postgres://postgres@remote.invalid:5433/postgres?sslmode=disable"],
-    ["PINVOU_ACCOUNT_CLOSURE_TEST_DATABASE_URL: postgres://postgres@127.0.0.1:5433/postgres?sslmode=disable", "PINVOU_ACCOUNT_CLOSURE_TEST_DATABASE_URL: postgres://postgres@127.0.0.1:5432/postgres?sslmode=disable"],
+    ["PINVOU_ACCOUNT_FINANCIAL_TEST_DATABASE_URL: ${{ steps.account-pg.outputs.financial_url }}", "PINVOU_ACCOUNT_FINANCIAL_TEST_DATABASE_URL: postgres://postgres@remote.invalid:5433/postgres?sslmode=disable"],
+    ["PINVOU_ACCOUNT_CLOSURE_TEST_DATABASE_URL: ${{ steps.account-pg.outputs.financial_url }}", "PINVOU_ACCOUNT_CLOSURE_TEST_DATABASE_URL: ${{ steps.account-pg.outputs.audit_url }}"],
+    ["ACCOUNT_CI_SERVICES: ${{ toJSON(job.services) }}", "ACCOUNT_CI_SERVICES: ${{ toJSON(needs.other.outputs.services) }}"],
+    ["        id: account-pg", "        id: unrelated-pg"],
+    ["python3 scripts/account-ci-postgres.py", "python3 scripts/account-ci-postgres.py || true"],
+    ["python3 -m unittest discover -s scripts/tests -p test_account_ci_postgres.py", "true"],
     ["python3 scripts/test-token-financial-postgres.py", "python3 scripts/test-token-financial-postgres.py || true"],
     ["python3 scripts/test-account-closure-postgres.py", "python3 scripts/test-account-closure-postgres.py || true"],
     ["      GOTOOLCHAIN: local", "      F17_TEST_DATABASE_URL: postgres://postgres@127.0.0.1:5432/postgres\n      GOTOOLCHAIN: local"],
@@ -516,10 +558,61 @@ test("finite audit PostgreSQL exception rejects unsafe or unrelated service and 
   ]) {
     assert.ok(job.includes(before), `mutation must hit existing contract: ${before}`);
     const original = before === "        shell: bash" ? namedStep(job, goStepName) : job;
-    const changed = original.replace(before, after);
+    const changed = original.replace(before, () => after);
     assert.notEqual(changed, original, `mutation must change its exact target: ${before}`);
-    const mutatedJob = original === job ? changed : job.replace(original, changed);
+    const mutatedJob = original === job ? changed : job.replace(original, () => changed);
     assert.throws(() => assertFiniteAuditPGSetup(mutatedJob), `must reject: ${after}`);
+  }
+  // Every consumer needs all three identity fields from its own service.
+  const rejectStepMutation = (name, step, changed, expected) => {
+    assert.notEqual(changed, step, `mutation must hit ${name}`);
+    // A complete audit step contains the shell regex suffix $'. Returning the
+    // payload literally prevents String.replace from expanding it as $' (the
+    // original suffix), which would make rejection pass for duplicated steps.
+    const mutated = job.replace(step, () => changed);
+    assert.equal(namedStep(mutated, name), changed, "mutation must preserve the literal step payload");
+    for (const required of [pgPreflightStepName, auditPGStepName, existingBrokerStepName,
+      "Token financial contracts on isolated PostgreSQL", "Account closure contracts on isolated PostgreSQL"]) {
+      namedStep(mutated, required); // Missing/duplicate steps cannot satisfy a negative control.
+    }
+    assert.throws(() => assertFiniteAuditPGSetup(mutated), expected);
+  };
+  for (const [name, service] of [[auditPGStepName, "audit"], [existingBrokerStepName, "broker"],
+    ["Token financial contracts on isolated PostgreSQL", "financial"],
+    ["Account closure contracts on isolated PostgreSQL", "financial"]]) {
+    const step = namedStep(job, name);
+    const miswired = step.replace(`outputs.${service}_url`, "outputs.unrelated_url");
+    assert.notEqual(miswired, step, "URL mutation must hit the selected consumer");
+    rejectStepMutation(name, step, miswired);
+    for (const entry of pgIdentityEnvironment(service)) {
+      for (const replacement of ["", entry.replace(`outputs.${service}_`, "outputs.unrelated_")]) {
+        rejectStepMutation(name, step,
+          step.replace(`          ${entry}\n`, () => replacement ? `          ${replacement}\n` : ""));
+      }
+    }
+    rejectStepMutation(name, step,
+      step.replace("        run:", () => "        if: ${{ false }}\n        run:"),
+      name === auditPGStepName ? /finite audit PostgreSQL gate must execute unconditionally/ : undefined);
+  }
+  const preflight = namedStep(job, pgPreflightStepName);
+  assert.throws(() => assertFiniteAuditPGSetup(job.replace(preflight, "")));
+  rejectStepMutation(pgPreflightStepName, preflight,
+    preflight.replace("        run:", () => "        if: ${{ false }}\n        run:"));
+  assert.throws(() => assertFiniteAuditPGSetup(job.replace(preflight, "") + preflight));
+  assert.throws(() => assertFiniteAuditPGSetup(job.replace("      GOTOOLCHAIN: local",
+    "      PINVOU_ACCOUNT_CI_PG_PORT: ${{ steps.account-pg.outputs.audit_port }}\n      GOTOOLCHAIN: local")));
+});
+
+test("PostgreSQL service preflight propagates admission test and verifier failures", () => {
+  const run = stepRun(jobBlock("account-platform-test"), pgPreflightStepName);
+  for (const [guard, verifier, expected, calls] of [
+    [7, 0, 7, "guard"], [0, 8, 8, "guardverifier"], [0, 0, 0, "guardverifier"],
+  ]) {
+    const prefix = `python3() { if [[ "$1" == -m ]]; then printf guard; return ${guard}; else printf verifier; return ${verifier}; fi; };\n`;
+    const result = spawnSync(bash, ["-e", "-c", prefix + run],
+      { encoding: "utf8", timeout: 30_000, windowsHide: true });
+    assert.equal(result.status, expected, result.stderr);
+    assert.equal(result.stdout, calls);
   }
 });
 
@@ -560,8 +653,8 @@ test("Token financial PostgreSQL gate is required and cannot swallow a failed ru
   const services = job.match(/^    services:\r?\n([\s\S]*?)^    env:/m)?.[1];
   assert.ok(services, "the disposable PostgreSQL service must exist");
   assert.deepEqual([...services.matchAll(/^ {6}([a-z][a-z-]*):\r?$/gm)].map(match => match[1]), ["audit-export-postgres", "existing-broker-postgres", "financial-postgres"]);
-  assert.deepEqual([...services.matchAll(/^ {10}- (.+)\r?$/gm)].map(match => match[1]), ["127.0.0.1:5432:5432", "127.0.0.1:5434:5432", "127.0.0.1:5433:5432"]);
-  assert.match(job, /^          PINVOU_ACCOUNT_FINANCIAL_TEST_DATABASE_URL: postgres:\/\/postgres@127\.0\.0\.1:5433\/postgres\?sslmode=disable\r?$/m);
+  assert.deepEqual([...services.matchAll(/^ {10}- (.+)\r?$/gm)].map(match => match[1]), Array(3).fill('"127.0.0.1::5432"'));
+  assertFiniteAuditPGSetup(job);
   const run = stepRun(job, "Token financial contracts on isolated PostgreSQL");
   for (const failedPhase of ["guard", "postgres"]) {
     const mock = `python3() { case "$*" in *unittest*) ${failedPhase === "guard" ? "return 7" : "return 0"};; *) ${failedPhase === "postgres" ? "return 7" : "return 0"};; esac; }; export -f python3;\n`;
