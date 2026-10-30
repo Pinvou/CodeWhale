@@ -766,29 +766,42 @@ fn cap_output_lines(output_lines: &mut Vec<String>, scanned_lines: &mut usize) {
         return;
     }
     let drop_before = MAX_OUTPUT_LINES / 2;
-    let total = output_lines.len();
+    let cursor = *scanned_lines;
     let last_progress = output_lines
         .iter()
         .rposition(|line| line.trim_start().starts_with(PROGRESS_MARKER));
     let mut kept: Vec<String> = Vec::with_capacity(output_lines.len() - drop_before);
+    let mut dropped_before_cursor = 0usize;
     for (index, line) in output_lines.drain(..).enumerate() {
         // 进度行只保留最后一条（单调计数器，历史值无诊断价值）。
         if Some(index) != last_progress && line.trim_start().starts_with(PROGRESS_MARKER) {
+            if index < cursor {
+                dropped_before_cursor += 1;
+            }
             continue;
         }
         if index >= drop_before || is_control_line(&line) {
             kept.push(line);
+        } else if index < cursor {
+            dropped_before_cursor += 1;
         }
     }
     // 2026-10-16 评审阻塞项 1：cap 丢掉最老一半后 Vec 整体前移，提示扫描用的是
     // 绝对下标游标——不回退的话 scanned_lines 永远大于 len()，之后到达的
     // LMM_PROMPT= 行永不被识别，交互提示静默失效，脚本最终被当"无输出卡死"
-    // 杀掉（docker pull 这类轻松打出 5000+ 行的输出必踩）。按**实际**丢弃数
-    // 回退（协议行被保留的不算丢弃）。
-    let dropped = total - kept.len();
-    if dropped > 0 {
-        *scanned_lines = scanned_lines.saturating_sub(dropped);
+    // 杀掉（docker pull 这类轻松打出 5000+ 行的输出必踩）。
+    //
+    // 回退量必须是「**游标之前**的丢弃数」，不是总丢弃数（2026-10-30 评审
+    // P1-2 实锤）：进度行去重在任意下标生效、协议行在任意下标保留，游标之后
+    // 同样有被丢的行——按总数回退会把游标退过头、落回已扫描区间，已应答的
+    // LMM_PROMPT= 行重新入窗被无条件重挂 600 秒提示超时，用户明明早已作答仍
+    // 被 SIGKILL；反向地，真卡死的 idle 判死也被推迟。游标前的丢弃数恰好等于
+    // 游标位置的前移量，回退后游标仍指向第一条未扫描行，已应答提示不可能
+    // 重现（扫描窗口自然幂等）。
+    if dropped_before_cursor > 0 {
+        *scanned_lines -= dropped_before_cursor;
     }
+    debug_assert!(*scanned_lines <= kept.len());
     *output_lines = kept;
 }
 
@@ -2231,6 +2244,54 @@ printf '[1A[2K7e1f8fb7d4ba: Pulling fs layer
         lines.push("LMM_PROMPT=继续吗？".to_string());
         assert!(scanned < lines.len());
         assert!(is_prompt_line(&lines[scanned..].last().unwrap()));
+    }
+
+    #[test]
+    fn cap_never_retreats_cursor_into_scanned_region() {
+        // 2026-10-30 评审 P1-2 回归钉：游标**之后**同样有被丢的行（非最新进度
+        // 行在任意下标被丢），按总丢弃数回退会把游标退回已扫描区间——已应答
+        // 的 LMM_PROMPT= 行重新入窗、被无条件重挂 600 秒提示超时，用户早已
+        // 作答仍被 SIGKILL。游标只允许按「游标之前的真实丢弃数」回退。
+        let mut lines: Vec<String> = Vec::new();
+        // 2500 行普通垫层（< drop_before，必被丢；全在游标前——这是合法的
+        // 回退来源），随后三行控制行（必保留）+ 一条已扫描的进度行（被丢，
+        // 也在游标前）。游标停在第 2504 行：提示行已应答。
+        for i in 0..2500 {
+            lines.push(format!("filler-{i}"));
+        }
+        lines.push("LMM_ENGINE_IMAGE=example/img:tag".to_string());
+        lines.push("LMM_CONTAINER_NAME=app".to_string());
+        lines.push("LMM_PROMPT=确认继续？".to_string()); // 已应答，绝不允许重扫
+        lines.push("LMM_PROGRESS_BYTES=1/999".to_string());
+        // 游标之后：大批量进度行（除最后一条全丢——原缺陷把游标拉回去的力量
+        // 来源，数量远超游标前的丢弃）+ 一条普通尾行。
+        for i in 0..5000 {
+            lines.push(format!("LMM_PROGRESS_BYTES={i}/999999"));
+        }
+        lines.push("tail-plain".to_string());
+        let mut scanned = 2504usize;
+        cap_output_lines(&mut lines, &mut scanned);
+        // 游标前真实丢弃 = 2500 垫层 + 1 条已扫进度行；游标后的几千条丢弃
+        // 不许参与回退。2504 - 2501 = 3。
+        assert_eq!(scanned, 3, "游标只按游标前丢弃回退：{scanned}");
+        // 已应答提示仍在已扫描侧（kept 序 [ENGINE, CONTAINER, PROMPT, 进度,
+        // tail]，提示 index 2 < 游标 3），未被重扫。
+        assert!(is_prompt_line(&lines[2]));
+        assert!(
+            !lines[scanned..].iter().any(|l| is_prompt_line(l)),
+            "游标后不该有任何提示行进入未扫描区（会被重挂 600s 超时）"
+        );
+        // 进度行只剩最后一条 + 尾行保留，协议语义不回归。
+        let progress_count = lines
+            .iter()
+            .filter(|l| l.trim_start().starts_with(PROGRESS_MARKER))
+            .count();
+        assert_eq!(progress_count, 1);
+        assert!(lines.iter().any(|l| l == "tail-plain"));
+        // 游标之后的新提示行仍会被扫描（既有承诺不破坏）。
+        lines.push("LMM_PROMPT=新问题".to_string());
+        assert!(scanned < lines.len());
+        assert!(is_prompt_line(lines.last().unwrap()));
     }
 
     #[test]
