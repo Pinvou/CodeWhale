@@ -20,6 +20,16 @@ Self-hosted Windows runners require the native MSVC/Windows SDK toolchain and
 independent Cargo/Rustup directories. The dev-profile override is updated
 idempotently so repeated jobs cannot accumulate duplicate TOML tables.
 
+For self-hosted runners on networks with unreliable crates.io access, apply the
+network configuration to each runner's actual `CARGO_HOME/config.toml` rather
+than the administrator's home. A sparse registry mirror and
+`[http] multiplexing = false` avoid repeated index requests over unstable HTTP/2
+connections; keep `Cargo.lock` and its checksums unchanged. Windows Cargo uses
+Schannel, so the runner account must also be able to reach the certificate
+authority's CRL/OCSP endpoints through its configured network route. Keep TLS
+certificate and revocation checks enabled, and verify dependency download and
+native compilation as the runner account before enabling the pool.
+
 Routing is job level and identical for both legs. The job runs on every push
 to `main` (cumulative Windows coverage plus cache warm-up) and on ready,
 non-draft pull requests matching the `rust_full` or `cli_rust` paths filters,
