@@ -174,3 +174,8 @@ pub(crate) fn store_weights_roots_checked() -> Result<Vec<std::path::PathBuf>, S
 pub(crate) fn ollama_base_url() -> String {
     "http://127.0.0.1:11434".to_string()
 }
+
+/// 非 Linux 无 settings 可读失败：恒 Ok 默认地址（与可失败版同口径）。
+pub(crate) fn ollama_base_url_checked() -> Result<String, String> {
+    Ok(ollama_base_url())
+}

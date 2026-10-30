@@ -135,13 +135,28 @@ pub(crate) fn store_weights_roots_checked() -> Result<Vec<std::path::PathBuf>, S
 /// 标签与删除必须与商店的 ollama 生命周期指向**同一**守护进程，否则改配过的机器
 /// 上设备页会读写另一个实例（第三轮评审 P3 对齐项）。空值回填默认。
 pub(crate) fn ollama_base_url() -> String {
-    let host = config::load_settings().ollama_host;
+    finish_ollama_base_url(&config::load_settings().ollama_host)
+}
+
+/// 空值回填默认 + trim + 去尾斜杠（宽松/可失败两版共用的尾段）。
+fn finish_ollama_base_url(host: &str) -> String {
     let host = host.trim();
     if host.is_empty() {
         "http://127.0.0.1:11434".to_string()
     } else {
         host.trim_end_matches('/').to_string()
     }
+}
+
+/// [`ollama_base_url`] 的可失败版：settings 读取失败（解析坏被隔离、读取失败、
+/// 隔离残留）时 `Err` 而不是静默回退默认地址。**破坏性的 daemon 调用（外部模型
+/// 删除）必须走本函数**——非默认 `ollama_host` 的机器上，列表刚从原实例读出、
+/// 确认移除前 settings 恰变得不可读时，宽松回退会把 DELETE 改投默认 11434：
+/// 默认实例上恰有同名非商店模型就会被真删，原实例对象原封不动（三十二轮评审
+/// P2）。只读的探测/展示/标签消费方继续用宽松版。
+pub(crate) fn ollama_base_url_checked() -> Result<String, String> {
+    let host = config::try_load_settings()?.ollama_host;
+    Ok(finish_ollama_base_url(&host))
 }
 
 #[cfg(test)]
@@ -244,6 +259,49 @@ mod tests {
         assert_eq!(ollama_base_url(), "http://192.168.1.5:11434");
         write_config(r#"{"ollama_host": " http://10.0.0.2:11434 "}"#);
         assert_eq!(ollama_base_url(), "http://10.0.0.2:11434");
+    }
+
+    #[test]
+    fn ollama_base_url_checked_matches_lenient_when_readable() {
+        let _ctx = TempHome::new();
+        // 未配置 → 出厂默认，与宽松版同值。
+        assert_eq!(
+            ollama_base_url_checked().ok().as_deref(),
+            Some("http://127.0.0.1:11434")
+        );
+        // 配置了非默认 host：可失败版按同一 trim/去尾斜杠口径返回该 host——
+        // 删除必须指向用户配置的实例。
+        write_config(r#"{"ollama_host": " http://192.168.1.5:11434/ "}"#);
+        assert_eq!(
+            ollama_base_url_checked().ok().as_deref(),
+            Some("http://192.168.1.5:11434")
+        );
+    }
+
+    #[test]
+    fn ollama_base_url_checked_fails_closed_when_settings_unreadable() {
+        let _ctx = TempHome::new();
+        // 配置文件存在但解析坏：严格读取走隔离并返回 Err——删除路径据此拒绝，
+        // 而不是静默改投默认 11434。非默认 ollama_host 的机器上，列表刚从原
+        // 实例读出、确认移除前配置恰坏时，宽松回退会把 DELETE 改投默认实例：
+        // 同名非商店模型会被真删、原实例对象原封不动（三十二轮评审 P2）。
+        write_config("not json at all");
+        let error = ollama_base_url_checked()
+            .expect_err("unreadable settings must fail the destructive endpoint read");
+        assert!(error.contains("配置"), "unexpected error: {error}");
+        // 隔离残留还在时二次严格检查继续拒绝（与 store_weights_roots_checked
+        // 的十六轮评审 P1 口径一致）。
+        let error =
+            ollama_base_url_checked().expect_err("quarantine residue must stay fail-closed");
+        assert!(error.contains("隔离"), "unexpected error: {error}");
+        // 宽松版同场景维持历史行为：回默认地址（只读探测/展示消费方）。
+        assert_eq!(ollama_base_url(), "http://127.0.0.1:11434");
+        // 受控恢复：放回合法配置后放行，配置值回到唯一真相源。
+        write_config(r#"{"ollama_host": "http://10.0.0.2:11434 "}"#);
+        assert_eq!(
+            ollama_base_url_checked().ok().as_deref(),
+            Some("http://10.0.0.2:11434")
+        );
     }
 
     #[test]

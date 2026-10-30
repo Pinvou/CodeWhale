@@ -31,6 +31,6 @@ pub(crate) use unsupported as backend;
 // 同一约定：具体实现住 linux/（boundary.rs）与 unsupported/，这里只做无 cfg 的
 // 转发——第四轮评审前这里曾内联两套 #[cfg] fn，与模块级约定并存成第二套写法。
 pub(crate) use backend::{
-    ollama_base_url, store_model_name, store_model_name_checked, store_weights_roots,
-    store_weights_roots_checked,
+    ollama_base_url, ollama_base_url_checked, store_model_name, store_model_name_checked,
+    store_weights_roots, store_weights_roots_checked,
 };

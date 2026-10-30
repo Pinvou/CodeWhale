@@ -99,3 +99,6 @@ pub(crate) use platform::store_weights_roots_checked;
 // 本机 Ollama 守护进程基地址：设备管理的外部模型探测/标签/删除与商店生命周期
 // 对齐到同一实例。见 platform::ollama_base_url 的说明。
 pub(crate) use platform::ollama_base_url;
+// 可失败版：settings 读取失败时 Err。破坏性的删除调用用（fail-closed，见
+// platform::ollama_base_url_checked 的说明）。
+pub(crate) use platform::ollama_base_url_checked;

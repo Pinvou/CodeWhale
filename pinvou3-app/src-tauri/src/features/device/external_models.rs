@@ -1041,6 +1041,9 @@ pub async fn remove_external_model(
     }
 
     // 守卫 4：Ollama 模型顺带从 Ollama 里删；失败只警告，不阻断注册表清理。
+    // 基地址走可失败解析（三十二轮评审 P2）：settings 恰在此刻读不出来/被隔离
+    // 时按 Err 收进警告，DELETE 不改投默认实例——宁可留下可手动处理的原实例
+    // 模型，不能删错守护进程上的同名对象。
     let mut ollama_deleted = false;
     if let Some(model_name) = &ollama_model_name {
         match ollama_delete(model_name).await {
@@ -1728,11 +1731,22 @@ fn ollama_delete_request(
         .timeout(OLLAMA_DELETE_TIMEOUT)
 }
 
-/// Ollama 删除：`DELETE /api/delete {"name": model}`。
+/// Ollama 删除：`DELETE /api/delete {"name": model}`。基地址走**可失败**解析
+/// （三十二轮评审 P2）：非默认 `ollama_host` 的机器上，列表刚从原实例读出、
+/// 确认移除前 settings 恰变得不可读/损坏被隔离时，宽松回退会把 DELETE 改投
+/// 默认 11434——默认实例上恰有同名非商店模型就会被真删，原实例对象原封不动。
+/// fail-closed 拒绝后由守卫 4 的既有警告通道给出人话原因，恢复配置即可重试；
+/// 破坏性目标未知时宁可少删，不能删错实例。
 async fn ollama_delete(model: &str) -> Result<(), String> {
-    let base = super::ollama_base().await;
+    let base = super::ollama_base_checked().await?;
+    ollama_delete_against(&base, model).await
+}
+
+/// 对**已解析**基地址执行删除（发送与状态判读，测试直打）：删什么、发到哪、
+/// 怎么判读全部由参数决定——解析失败在调用方 `?` 处短路，不会构造任何请求。
+async fn ollama_delete_against(base: &str, model: &str) -> Result<(), String> {
     let client = probe_client().ok_or_else(|| "HTTP 客户端初始化失败".to_string())?;
-    let response = ollama_delete_request(&client, &base, model)
+    let response = ollama_delete_request(&client, base, model)
         .send()
         .await
         .map_err(human_probe_error)?;
@@ -2866,13 +2880,21 @@ mod tests {
         // Ollama 权重由守护进程统一管理（~/.ollama 不在任何保护根内，blobs 目录
         // 深度恰过守卫链）：登记带 weights_path 的 ollama 记录会造出能删光全部
         // 已下载 blob 的记录（第七轮评审 P2）。校验发生在商店边界查询之前，
-        // 本测试不需要临时 HOME。
+        // 本测试不需要临时 HOME。夹具必须从 temp_dir 派生**本平台**绝对路径：
+        // `/home/u/...` 在 Windows 上不带盘符，登记会先撞"权重路径必须是绝对
+        // 路径"臂（:513），到不了本测试要钉的 Ollama weights 拒绝臂（:526），
+        // 断言必红（三十二轮评审 P2）。相对路径的反控由
+        // register_rejects_relative_weights_path_before_touching_the_store 承担。
+        let fake_blobs = std::env::temp_dir()
+            .join("pinvou3-ollama-fixture")
+            .join("models")
+            .join("blobs");
         let error = register_external_model(
             "cleanup".to_string(),
             "ollama".to_string(),
             None,
             None,
-            Some("/home/u/.ollama/models/blobs".to_string()),
+            Some(fake_blobs.to_string_lossy().into_owned()),
         )
         .await
         .expect_err("ollama record with weights_path must be rejected");
@@ -3345,5 +3367,49 @@ mod tests {
             Some(&OLLAMA_DELETE_TIMEOUT),
             "delete must keep its dedicated 30s budget"
         );
+    }
+
+    // 三十二轮评审 P2 正控臂：删除按**解析出的**基地址上线——请求只能打到传入
+    // 的这一个端点（默认 11434 上结构性地零 DELETE：base 是唯一入参，解析失败
+    // 在 `ollama_delete` 的 `?` 处短路、连请求都不构造；读取失败的 fail-closed
+    // 反例由 model_store 的 ollama_base_url_checked 测试钉住）。回归钉法：把
+    // 发送臂改回宽松回退、或旁路 base 改投别处，本测试即红。
+    #[tokio::test]
+    async fn ollama_delete_against_hits_only_the_resolved_base() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        use tokio::net::TcpListener;
+
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind ephemeral listener");
+        let addr = listener.local_addr().expect("listener addr");
+        // 刻意用不存在的模型名：万一回归把请求投到开发机上真实运行的默认
+        // daemon，也只得到 404（幂等成功），不会真删任何模型。
+        let model = "pinvou3-delete-binding-probe-nonexistent";
+
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.expect("delete must connect");
+            let mut buf = [0u8; 1024];
+            let read = socket.read(&mut buf).await.expect("read delete request");
+            let request = String::from_utf8_lossy(&buf[..read]).to_string();
+            socket
+                .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
+                .await
+                .ok();
+            request
+        });
+
+        let base = format!("http://{addr}");
+        let outcome = ollama_delete_against(&base, model).await;
+        let request = server.await.expect("server task");
+        assert!(
+            request.starts_with("DELETE /api/delete"),
+            "request line must target the resolved base: {request}"
+        );
+        assert!(
+            request.contains(model),
+            "delete body must carry the effective model name: {request}"
+        );
+        assert!(outcome.is_ok(), "200 must resolve as deleted: {outcome:?}");
     }
 }

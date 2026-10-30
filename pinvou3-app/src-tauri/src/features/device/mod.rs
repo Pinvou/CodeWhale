@@ -995,6 +995,18 @@ pub(crate) async fn ollama_base() -> String {
         .unwrap_or_else(|_| OLLAMA_BASE.to_string())
 }
 
+/// [`ollama_base`](self) 的可失败版：settings 读取失败（隔离/损坏/IO）时 `Err`
+/// 而不是静默回退默认地址。**破坏性的删除调用必须走本函数**——非默认
+/// `ollama_host` 的机器上，读取失败静默回退会把 DELETE 改投默认 11434，可能
+/// 删掉默认实例上的同名非商店模型（三十二轮评审 P2）。只读的探测/展示/标签
+/// 消费方继续用宽松版。JoinError 按 Err 传播，不像宽松版按默认地址降级。
+pub(crate) async fn ollama_base_checked() -> Result<String, String> {
+    match tokio::task::spawn_blocking(crate::features::model_store::ollama_base_url_checked).await {
+        Ok(inner) => inner,
+        Err(error) => Err(format!("Ollama 守护进程地址解析失败（{error}）")),
+    }
+}
+
 /// 短超时探测客户端（OnceLock 共享）。构建失败（TLS 后端初始化失败等持久性
 /// 故障，极罕见）按 None **负缓存**：进程内不再重试构建，需重启恢复——Client
 /// 构建失败不是暂态抖动，负缓存避免每次探测重付构建成本（注释曾承诺"失败降级
