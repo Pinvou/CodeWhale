@@ -1288,13 +1288,11 @@ jobs:
         )
       }}
     runs-on: ${{ fromJSON(vars.PINVOU_LINUX_HEAVY_RUNNER || vars.PINVOU_LINUX_RUNNER || '["ubuntu-22.04"]') }}
-    # 冷跑时长未实测(~/.cargo 存档命中的运行 3–6min;cache-targets: false,
-    # 编译每轮全冷)。工具链滚动触发冷跑且逼近 30m 时 job 被超时判败,
-    # cache-on-failure 的 post 步会保存 ~/.cargo(registry/git 等,不含
-    # target 编译产物),失败与手动取消都会触发(post-if =
-    # success() || cache-on-failure;取消时 runner 仍执行 post 步),
-    # namespace 不会全冷。冷跑实测逼近上限时再上调。
-    timeout-minutes: 30
+    # cache-targets: false 不缓存 target 编译产物。2026-10-30 的 run 41065378772
+    # 中首轮 Clippy 用时 18m53s，测试已成功，但最后的 cargo-deny 尚未完成
+    # 就触及 30m 总上限。为冷编译及完整安全审计保留有界的 60m 预算；
+    # 所有检查继续执行，cache-on-failure 与仅 main 保存 ~/.cargo 的策略保持。
+    timeout-minutes: 60
     steps:
       - name: Checkout
         uses: actions/checkout@v7
