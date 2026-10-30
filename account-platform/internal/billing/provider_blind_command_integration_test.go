@@ -342,14 +342,7 @@ func providerBlindFixture(t *testing.T, r *PostgresRepository, ctx context.Conte
 	if err != nil {
 		t.Fatal("create actual provider mapping", err)
 	}
-	verification, _, err := r.StartProductAdmissionVerification(ctx, item.CatalogItemID, uuid.New(), nil)
-	if err != nil {
-		t.Fatal("start actual mapping verification", err)
-	}
-	evidence, err := r.CompleteProductAdmissionVerification(ctx, verification.VerificationID, "controlled-verifier", "CONTROLLED", "controlled-blind-mapping", time.Now().Add(time.Hour))
-	if err != nil {
-		t.Fatal("complete controlled provider evidence", err)
-	}
+	evidence := completeManualAdmissionFixture(t, r, ctx, item, time.Now().Add(time.Hour))
 	if _, err := r.TransitionRechargeProduct(ctx, item.CatalogItemID, item.Version, "ON_SALE", &evidence); err != nil {
 		t.Fatal("publish verified mapping", err)
 	}

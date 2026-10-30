@@ -196,6 +196,11 @@ func (s *Service) Handler(serviceToken string, adminVerify ...identity.VerifyFun
 			admin.GET("/recharge-products/:catalog_item_id/admission-materials/:material_id/content", s.authorizer.Require("platform.products.publish"), s.requireRecentProductAuthentication(), httpserver.AdaptFunc(s.adminDownloadProductAdmissionMaterial))
 			admin.GET("/recharge-products/:catalog_item_id/admission-material-receipts/:operation_key", s.authorizer.Require("platform.products.publish"), s.requireRecentProductAuthentication(), httpserver.AdaptFunc(s.adminProductAdmissionMaterialReceipt))
 			admin.POST("/recharge-products/:catalog_item_id/admission-materials/:material_id/legal-hold", s.authorizer.Require("platform.products.publish"), s.requireRecentProductAuthentication(), httpserver.AdaptFunc(s.adminHoldProductAdmissionMaterial))
+			if _, supported := s.catalog.(productManualAdmissionRepository); supported {
+				admin.POST("/recharge-products/:catalog_item_id/manual-admission-submissions", s.authorizer.Require("platform.products.publish"), s.requireRecentProductAuthentication(), httpserver.AdaptFunc(s.adminCreateManualProductAdmission))
+				admin.GET("/recharge-products/:catalog_item_id/manual-admission-submissions/:verification_id", s.authorizer.Require("platform.products.publish"), s.requireRecentProductAuthentication(), httpserver.AdaptFunc(s.adminGetManualProductAdmission))
+				admin.POST("/recharge-products/:catalog_item_id/manual-admission-submissions/:verification_id/decisions", s.authorizer.Require("platform.products.publish"), s.requireRecentProductAuthentication(), httpserver.AdaptFunc(s.adminDecideManualProductAdmission))
+			}
 		}
 		admin.PUT("/registration-bonus-policy", s.authorizer.Require("platform.registration-bonus.manage"), s.requireRecentProductAuthentication(), approvalpolicy.Require("BILLING_REGISTRATION_BONUS_POLICY_UPDATE", approvalpolicy.AuditOnly), httpserver.AdaptFunc(s.adminUpdateRegistrationBonusPolicy))
 		admin.GET("/registration-bonus-policy", s.authorizer.Require("platform.registration-bonus.read"), httpserver.AdaptFunc(s.adminRegistrationBonusPolicy))

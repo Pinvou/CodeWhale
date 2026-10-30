@@ -2184,6 +2184,16 @@
         "file": "900037_product_admission_materials.up.sql",
         "version": 900037,
         "sha256": "7b3ae6f7908de7fdd2e1fd227fb50e85416f3fa64f357133bd796e3465099c10"
+      },
+      {
+        "file": "900038_product_manual_admission.down.sql",
+        "version": 900038,
+        "sha256": "42f86b8e215847c398055a90a8f89d1a02c91fc93d95b2f86f3f03f0aa16cafe"
+      },
+      {
+        "file": "900038_product_manual_admission.up.sql",
+        "version": 900038,
+        "sha256": "458f58680bc1ff48ceb59ec274329e429d5806a07000e0aae3c9551136eaaa70"
       }
     ],
     "payment-simulator": [
