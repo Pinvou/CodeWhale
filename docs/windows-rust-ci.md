@@ -257,6 +257,12 @@ order:
     `private_prediction::tests::windows_` plus `windows_private_acl::tests::`
     (`benchmark-core`).
 
+    The private-ACL regressions include owned files and directories whose
+    access rules omit `WRITE_OWNER`, as on ordinary runner accounts. Hardening
+    must not request an ownership change when the current user already owns
+    the entry. The protected DACL and exact owner/SYSTEM/Administrators grants
+    remain mandatory, including on repeated calls.
+
 ## Related jobs that share this gate
 
 The `windows-rust-test` job is not the only native-Windows or routing entry
