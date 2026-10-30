@@ -1,5 +1,8 @@
 #!/usr/bin/env bash
 set -euo pipefail
+# Keep verified TLS usable through gateways that reset Go's hybrid-MLKEM
+# handshake. This affects the CI Docker clients, not the console containers.
+export GODEBUG="${GODEBUG:+$GODEBUG,}tlsmlkem=0"
 : "${RUNNER_TEMP:?RUNNER_TEMP is required}"
 : "${GITHUB_RUN_ID:?GITHUB_RUN_ID is required}"
 : "${GITHUB_RUN_ATTEMPT:?GITHUB_RUN_ATTEMPT is required}"

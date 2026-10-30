@@ -112,7 +112,8 @@ jobs:
     name: commit-message
     if: ${{ (github.event_name == 'pull_request' && github.event.action != 'closed') || github.event_name == 'push' }}
     runs-on: ${{ fromJSON(vars.PINVOU_LINUX_LIGHT_RUNNER || vars.PINVOU_LINUX_RUNNER || '["ubuntu-22.04"]') }}
-    timeout-minutes: 5
+    # Full-history cold fetches on self-hosted runners can exceed five minutes.
+    timeout-minutes: 15
     steps:
       - name: Checkout
         uses: actions/checkout@v7
@@ -280,6 +281,7 @@ jobs:
               - '**/Cargo.lock'
               - '**/build.rs'
               - 'scripts/ci-libpipewire-build.sh'
+              - 'scripts/ci-cargo-dev-profile.py'
               - 'CodeWhale'
               - '.gitmodules'
               - '.github/workflows/pr-check.yml'
@@ -296,6 +298,7 @@ jobs:
             # isolated leaf-feature boundaries are explicitly low risk; changes
             # to their registration or app command surface still run full tests.
             rust_full:
+              - 'scripts/ci-cargo-dev-profile.py'
               # Round-1 fix wave (PR #715 review): the loong64 cross-pipeline
               # scripts are build inputs of the rust legs — the pr-check
               # rust-loongarch64-check leg executes the toolchain/sysroot
@@ -855,7 +858,9 @@ jobs:
     name: fast-gate
     if: ${{ (github.event_name == 'pull_request' && github.event.action != 'closed') || github.event_name == 'merge_group' }}
     runs-on: ${{ fromJSON(vars.PINVOU_LINUX_LIGHT_RUNNER || vars.PINVOU_LINUX_RUNNER || '["ubuntu-22.04"]') }}
-    timeout-minutes: 10
+    # Cold public-submodule/Python downloads can consume most of ten minutes.
+    # Allow cold setup without starving the complete guard/test suite.
+    timeout-minutes: 20
     steps:
       - name: Checkout (含 submodule,fork 为 public 直接拉)
         uses: actions/checkout@v7
@@ -936,10 +941,10 @@ jobs:
       - name: Setup Python
         uses: actions/setup-python@v7
         with:
-          python-version: "3.x"
+          python-version: "3.12"
 
       - name: Gate policy test suite (scripts/tests)
-        run: python3 -m unittest discover -s scripts/tests -p 'test_*.py'
+        run: python3 -m unittest discover -s scripts/tests -p 'test_*.py' -v
 
       # Keep the other fast checks independent of the changes job. This filter
       # runs only after them and uses the same PR / merge-group diff semantics.
@@ -4227,8 +4232,10 @@ jobs:
   rust-loongarch64-check:
     name: rust-loongarch64-check
     needs: changes
+    # Temporary operational switch; unset/true restores the existing routing.
     if: >-
       ${{
+        vars.PINVOU_LOONGARCH64_CHECK_ENABLED != 'false' &&
         !cancelled() &&
         github.event.action != 'closed' &&
         (
@@ -4512,12 +4519,16 @@ jobs:
           MACOS_CODEX_RESULT: ${{ needs.macos-codex-runtime-test.result }}
           MACOS_CLI_RESULT: ${{ needs.macos-cli-check.result }}
           RUST_LOONGARCH64_CHECK_RESULT: ${{ needs.rust-loongarch64-check.result }}
+          LOONGARCH64_CHECK_ENABLED: ${{ vars.PINVOU_LOONGARCH64_CHECK_ENABLED != 'false' }}
           WINDOWS_CODEX_RESULT: ${{ needs.windows-codex-runtime-test.result }}
           WINDOWS_RUNTIME_RESULT: ${{ needs.windows-runtime-test.result }}
           WINDOWS_RUSTUP_REPAIR_RESULT: ${{ needs.windows-rustup-repair-test.result }}
           BACKFLOW_MODE: ${{ needs.changes.outputs.backflow_mode }}
           WINDOWS_RUST_REQUIRED_BY_POLICY: ${{ vars.PINVOU_WINDOWS_MAC_ENABLED != 'false' && ((github.event_name == 'merge_group' && needs.changes.outputs.backflow_mode == 'full') || (github.event_name == 'pull_request' && github.event.pull_request.draft == false && (needs.changes.outputs.backflow_mode == 'full' || needs.changes.outputs.backflow_mode == 'windows_full'))) }}
         run: |
+          if [[ "${LOONGARCH64_CHECK_ENABLED:-true}" == false ]]; then
+            echo "::notice::LoongArch64 cross check temporarily disabled by PINVOU_LOONGARCH64_CHECK_ENABLED=false"
+          fi
           if [[ "$GITHUB_EVENT_NAME" == "merge_group" ]]; then
             # 队列提交由 GitHub 生成，不重复校验人工 commit message；
             # 其余基础与产品门禁必须验证当前组合提交。
