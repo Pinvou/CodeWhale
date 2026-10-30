@@ -1094,7 +1094,21 @@ jobs:
             sudo apt-get update
             sudo apt-get install -y --no-install-recommends iproute2
           fi
-          ss -H -ltn >/dev/null
+          node --input-type=module <<'NODE'
+          import { inspectLegacyListeners } from "./remote-control-relay/enrollment-gateway.js";
+          try {
+            await inspectLegacyListeners(new URL("ws://127.0.0.1:1"));
+            console.log("Relay listener inspection ready");
+          } catch (error) {
+            const allowed = ["ENOENT", "EACCES", "EPERM", "ETIMEDOUT", "ENOBUFS",
+              "ERR_CHILD_PROCESS_STDIO_MAXBUFFER"];
+            const code = allowed.includes(error.code) ? error.code : "command_failed";
+            const status = Number.isInteger(error.code) ? error.code : null;
+            console.error(JSON.stringify({ stage: "relay_listener_preflight", code, status,
+              killed: error.killed === true }));
+            process.exitCode = 1;
+          }
+          NODE
 
       - name: Relay 与部署脚本回归
         run: |
