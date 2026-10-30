@@ -293,6 +293,29 @@ async fn snapshot_for_model_config(
     configured_context: Option<u32>,
 ) -> Option<VllmSnapshot> {
     let client = shared_probe_client()?;
+    snapshot_for_model_config_with_client(
+        client,
+        upstream,
+        configured_model,
+        preset,
+        model_id,
+        provider,
+        api_key,
+        configured_context,
+    )
+    .await
+}
+
+async fn snapshot_for_model_config_with_client(
+    client: &reqwest::Client,
+    upstream: &str,
+    configured_model: Option<String>,
+    preset: ModelPreset,
+    model_id: Option<String>,
+    provider: String,
+    api_key: Option<&str>,
+    configured_context: Option<u32>,
+) -> Option<VllmSnapshot> {
     let target_kind = if preset == ModelPreset::LocalVllm {
         "local"
     } else {
@@ -1484,16 +1507,40 @@ mod tests {
         );
     }
 
-    /// A hostname that cannot resolve classifies as `dns_failed`, not
-    /// `connection_refused`: hyper-util wraps resolver failures in its
-    /// Connect kind, so `is_connect()` alone mislabels them. `.invalid` is
-    /// reserved by RFC 6761 to never resolve.
+    /// Exercise the real reqwest DNS error chain without relying on system
+    /// DNS or proxies: a proxy can answer even for a reserved `.invalid`
+    /// hostname. The resolver injects the getaddrinfo-style io error consumed
+    /// by the classifier; this does not test the operating system's resolver.
     #[tokio::test]
     async fn snapshot_classifies_dns_failures_as_dns_failed() {
+        use std::sync::{
+            Arc,
+            atomic::{AtomicUsize, Ordering},
+        };
+
+        struct FailingDns(Arc<AtomicUsize>);
+        impl reqwest::dns::Resolve for FailingDns {
+            fn resolve(&self, name: reqwest::dns::Name) -> reqwest::dns::Resolving {
+                assert_eq!(name.as_str(), "pinvou-monitor-probe.invalid");
+                self.0.fetch_add(1, Ordering::SeqCst);
+                Box::pin(std::future::ready(Err(std::io::Error::other(
+                    "failed to lookup address information: controlled resolver failure",
+                )
+                .into())))
+            }
+        }
+
         let _lock = crate::platform::paths::tests::ENV_LOCK
             .lock()
             .unwrap_or_else(|p| p.into_inner());
-        let snap = snapshot_for_model_config(
+        let resolutions = Arc::new(AtomicUsize::new(0));
+        let client = reqwest::Client::builder()
+            .no_proxy()
+            .dns_resolver(Arc::new(FailingDns(Arc::clone(&resolutions))))
+            .build()
+            .unwrap();
+        let snap = snapshot_for_model_config_with_client(
+            &client,
             "http://pinvou-monitor-probe.invalid:1",
             Some("m".to_string()),
             ModelPreset::LocalVllm,
@@ -1504,9 +1551,13 @@ mod tests {
         )
         .await
         .expect("a local-preset target yields a snapshot even when unresolvable");
+        assert!(resolutions.load(Ordering::SeqCst) > 0);
+        assert_eq!(snap.status, VllmStatus::Offline);
+        assert_eq!(snap.health_status, HealthStatus::Offline);
         let diagnostic = snap.diagnostic.expect("offline carries a diagnostic");
         assert_eq!(diagnostic.code, "models_unreachable");
         assert_eq!(diagnostic.transport, Some("dns_failed"));
+        assert_eq!(diagnostic.http_status, None);
         assert_eq!(
             diagnostic.endpoint.as_deref(),
             Some("http://pinvou-monitor-probe.invalid:1")
