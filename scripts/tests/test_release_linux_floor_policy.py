@@ -1,5 +1,4 @@
 import platform
-from ci_routing_test_support import default_ci_routing
 import subprocess
 import sys
 import unittest
@@ -59,7 +58,9 @@ def _without_inline_comments(block):
 
 class ReleaseLinuxFloorPolicyTests(unittest.TestCase):
     def setUp(self):
-        self.workflow = default_ci_routing(RELEASE_WORKFLOW.read_text(encoding="utf-8"))
+        # Inspect the live runner expression and self-hosted disk branches.
+        # Expanding default routing here would erase both contracts below.
+        self.workflow = RELEASE_WORKFLOW.read_text(encoding="utf-8")
         self.x64_job = self.workflow.split("\n  build-linux-x64:", maxsplit=1)[1].split(
             "\n  build-linux-arm64:", maxsplit=1
         )[0]
