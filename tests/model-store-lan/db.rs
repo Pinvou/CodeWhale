@@ -57,3 +57,26 @@ pub fn model_fixture(record: Option<StoreModelRecord>) {
 pub fn get_store_model(_: &str) -> rusqlite::Result<Option<StoreModelRecord>> {
     MODEL.with(|value| Ok(value.borrow().clone()))
 }
+
+/// r19 P2-5 之后 lan_store 走窄投影查询，harness 经 #[path] 逐字编译生产
+/// 代码，桩必须同名同形（评审 P1-1 实锤：漏了它 rust-lint 腿必红）。
+/// 字段与 StoreModelRecord 一一对应，直接从同一个 fixture 映射。
+#[derive(Clone)]
+pub struct StoreModelRouteFields {
+    pub running: bool,
+    pub status: String,
+    pub endpoint_url: Option<String>,
+    pub endpoint_model: Option<String>,
+    pub container_name: Option<String>,
+}
+pub fn get_store_model_route_fields(_: &str) -> rusqlite::Result<Option<StoreModelRouteFields>> {
+    MODEL.with(|value| {
+        Ok(value.borrow().clone().map(|r| StoreModelRouteFields {
+            running: r.running,
+            status: r.status,
+            endpoint_url: r.endpoint_url,
+            endpoint_model: r.endpoint_model,
+            container_name: r.container_name,
+        }))
+    })
+}

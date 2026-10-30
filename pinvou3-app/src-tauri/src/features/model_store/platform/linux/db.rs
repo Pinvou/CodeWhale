@@ -1678,7 +1678,9 @@ mod tests {
         assert_eq!(row.container_name.as_deref(), Some("qwen-api"));
 
         assert!(
-            get_store_model_route_fields("card-missing").unwrap().is_none(),
+            get_store_model_route_fields("card-missing")
+                .unwrap()
+                .is_none(),
             "不存在的卡应返回 None，由调用方转成 lan_model_unavailable"
         );
     }
@@ -1732,7 +1734,11 @@ mod tests {
             Some("ENGINE_BIN_SHA256=\"abc\""),
             "install_engine 正文提取失败"
         );
-        assert_eq!(fp.common_sh.as_deref(), Some("lib"), "common.sh 正文提取失败");
+        assert_eq!(
+            fp.common_sh.as_deref(),
+            Some("lib"),
+            "common.sh 正文提取失败"
+        );
         assert_eq!(fp.engine_version.as_deref(), Some("v1.2"));
         let broken = rows.iter().find(|r| r.card_id == "card-fp-broken").unwrap();
         assert!(

@@ -716,9 +716,8 @@ static CONTRACT_SYNC_FAILED_CARDS: std::sync::OnceLock<
 ///
 /// 与 CONTRACT_SYNC_FAILED_CARDS 同款进程级 static：ModelManager 每次调用都
 /// 是新实例，只有进程级状态能跨调用记住；键是 card_id，条目数上界就是卡数。
-static RECONCILE_ALIVE_ENDPOINTS: std::sync::OnceLock<
-    std::sync::Mutex<HashMap<String, Instant>>,
-> = std::sync::OnceLock::new();
+static RECONCILE_ALIVE_ENDPOINTS: std::sync::OnceLock<std::sync::Mutex<HashMap<String, Instant>>> =
+    std::sync::OnceLock::new();
 
 /// [`RECONCILE_ALIVE_ENDPOINTS`] 的有效期。
 const RECONCILE_PROBE_CACHE_TTL: Duration = Duration::from_secs(60);
@@ -1745,9 +1744,8 @@ impl ModelManager {
             attempt += 1;
             if attempt > DOWNLOAD_RESUME_LIMIT {
                 return Err(ModelManagerError::new(format!(
-                    "{}\n\n已自动续传 {DOWNLOAD_RESUME_LIMIT} 次仍未完成。\
-                     已下载的部分都在本地，重新点击「下载」会从断点继续，不会重头开始。",
-                    error.to_string()
+                    "{error}\n\n已自动续传 {DOWNLOAD_RESUME_LIMIT} 次仍未完成。\
+                     已下载的部分都在本地，重新点击「下载」会从断点继续，不会重头开始。"
                 )));
             }
             on_line(&format!(
