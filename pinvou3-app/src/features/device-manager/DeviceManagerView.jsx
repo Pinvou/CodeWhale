@@ -41,6 +41,7 @@ import { libraryStatusOf } from '../model-store/model-store-logic.js';
 import {
   buildSavedModel,
   findLinkedRowsForEndpoint,
+  findLinkedRowsForOllamaEndpoint,
   isLocalGatewayUrl,
 } from '../model-store/pinvou-model-link.js';
 import { MsButton, MsPill, MsToast } from '../model-store/model-store-ui.jsx';
@@ -200,8 +201,6 @@ const friendlyChipName = (group, copy) => {
   return group?.chip || chipKey;
 };
 
-const limitUnitOfKind = (kind) => (kind === 'temperature' ? '\u00B0C' : (kind === 'fan' ? ' RPM' : ''));
-
 const HealthChip = ({ label, value, level = 'ok' }) => (
   <span
     data-testid="device-manager-health-chip"
@@ -234,13 +233,18 @@ const SensorGroupCard = ({ group, copy }) => (
       // peak), not a threshold — falling back to it rendered a one-off spike
       // as if it were the critical line (round-7 review P2). Peaks get their
       // own honest label; non-temperature maxes (hwmon thresholds for
-      // fans/voltages) keep the original semantics.
-      const limitValue = entry.critical != null ? entry.critical : (entry.kind !== 'temperature' ? entry.max : null);
-      const limitText = limitValue != null
-        ? copy.critLimit(`${Math.round(limitValue)}${limitUnitOfKind(entry.kind)}`)
-        : null;
-      const peakText = entry.kind === 'temperature' && entry.max != null
-        ? copy.peakLabel(`${Math.round(entry.max)}${limitUnitOfKind(entry.kind)}`)
+      // fans/voltages) keep the original semantics. Labels consume the
+      // bridge's *Text fields (round-32 review P3): thresholds share the
+      // reading's per-kind precision/unit ruler, so a 12.7 V reading against
+      // a 12.6 V crit line no longer displays a rounded "13" without a unit,
+      // and electrical quantities keep their V/A/W suffix like the reading.
+      const limitText = entry.criticalText != null
+        ? copy.critLimit(entry.criticalText)
+        : (entry.kind !== 'temperature' && entry.maxText != null
+          ? copy.critLimit(entry.maxText)
+          : null);
+      const peakText = entry.kind === 'temperature' && entry.maxText != null
+        ? copy.peakLabel(entry.maxText)
         : null;
       return (
         <div
@@ -656,10 +660,18 @@ const DeviceManagerView = ({ theme, t, bs, onOpenChat, onOpenModelStore }) => {
   // identity — the backend legally keeps (name=model-b, model=model-a) next to
   // (name=other-label, model=model-b) on one endpoint, so feeding the name
   // into the matcher would show this row linked off a sibling's config.
-  const isRowLinked = (row) => {
+  // Ollama rows additionally compare canonical effective identity (bare name
+  // folds to :latest, ASCII case folded — the backend's registry_identity
+  // ruler): the daemon lists "qwen3:latest" while a legal registration may
+  // carry the bare "qwen3", and raw-string matching reported the same model
+  // unlinked (round-32 review P2). Non-ollama rows keep raw-string matching.
+  const linkedRowsFor = (row) => {
     const target = linkTargetOf(row);
-    return findLinkedRowsForEndpoint(bs?.savedModels, target.baseUrl, target.model).length > 0;
+    return row.kind === 'ollama'
+      ? findLinkedRowsForOllamaEndpoint(bs?.savedModels, target.baseUrl, target.model)
+      : findLinkedRowsForEndpoint(bs?.savedModels, target.baseUrl, target.model);
   };
+  const isRowLinked = (row) => linkedRowsFor(row).length > 0;
 
   // Same shape as ModelDetailDialog.useInPinvou: build a SavedModel via the
   // shared pinvou-model-link helpers, save it, and make it the active model
@@ -710,9 +722,10 @@ const DeviceManagerView = ({ theme, t, bs, onOpenChat, onOpenModelStore }) => {
       // stores (model = target.model at this endpoint): passing the display
       // name too would adopt a sibling's config whose MODEL equals this row's
       // NAME, and the backend legally keeps such rows side by side on one
-      // endpoint (round-31 review P2).
-      const existing =
-        findLinkedRowsForEndpoint(bs?.savedModels, target.baseUrl, target.model)[0] || null;
+      // endpoint (round-31 review P2). Ollama identity folds to :latest so a
+      // relink adopts the row saved from the daemon listing instead of
+      // duplicating it (round-32 review P2).
+      const existing = linkedRowsFor(row)[0] || null;
       const saved = buildSavedModel({
         modelName: target.model,
         displayName: row.name,
@@ -813,13 +826,11 @@ const DeviceManagerView = ({ theme, t, bs, onOpenChat, onOpenModelStore }) => {
         // model + endpoint — NOT the display name: a sibling row whose MODEL
         // equals this row's NAME is an independent config too, and feeding the
         // name into the matcher would recycle both rows' configs on this
-        // removal (round-31 review P2).
-        const target = linkTargetOf(row);
-        const linkedRows = findLinkedRowsForEndpoint(
-          bs.savedModels,
-          target.baseUrl,
-          target.model
-        );
+        // removal (round-31 review P2). linkedRowsFor folds ollama identity to
+        // :latest, so the row saved from the daemon's "qwen3:latest" listing
+        // is still recycled when this removal carries the bare "qwen3"
+        // registration (round-32 review P2).
+        const linkedRows = linkedRowsFor(row);
         const liveBridge = bridge;
         // Assign the OUTER variable (an inner `let` here used to shadow it and
         // every cleanup failure surfaced as "unknown" — round-3 review P2).

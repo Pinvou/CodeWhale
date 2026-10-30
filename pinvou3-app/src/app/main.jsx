@@ -59,6 +59,7 @@ import { installGlobalMarkdownRenderer } from '../shared/markdown-renderer.js';
 import { acquireNativeSurfaceTransitionHide } from '../features/browser/native-surface-coordinator.js';
 import {
   createNativeSurfaceTransitionGate,
+  createNavigationOwnership,
   settleBrowserUiPublicationAfterCommit,
 } from '../features/browser/native-surface-transition.mjs';
 import {
@@ -3042,6 +3043,16 @@ const App = () => {
         // 提示重试，不再静默吞掉失败（评审 P3：失败仅 console、输入被无声清空）。
         if (!bridge.available || !prompt) return false;
         if (!bridge.chat?.sendMessageToSession) return false;
+        // 导航归属（三十二轮评审 P2）：真实侧栏/设置导航走 view 通道，同一
+        // sessionId 不会让本动作 session 通道的票据过期——prompt 采样、
+        // materialize、completion 三个等待中的任何一次去设置操作，都必须让
+        // 晚到的完成失去“把用户拽回聊天”的权利（§3.5：不把已离开设备页的
+        // 用户拽进聊天）。动作开始时拍下 view 修订号，与 isCurrent 相与；
+        // 消息照常送达并按已送达计（返回 true），只跳过视图切换，不诱发重发。
+        const viewOwnership = createNavigationOwnership(
+          browserUiTransitionGateRef.current,
+          'view',
+        );
         let usedSid = null;
         try {
           // 复用前先确认失败会话仍存在（round-22 review P2）：用户可能在两次
@@ -3086,8 +3097,10 @@ const App = () => {
             // 只剩一次闪跳）（第八轮评审 P3）。此复查只跳过视图切换：消息此时
             // 已真实送达新会话（侧栏历史可见），返回值必须如实报 true——原实现
             // 在这里返回 false，设备页会对已存在的消息再弹「没发出去」并保留
-            // 输入（第九轮评审 P1）。
-            if (isCurrent()) {
+            // 输入（第九轮评审 P1）。isCurrent 之外还要求 view 修订号未变：
+            // 同会话的去设置导航不走 session 通道，光看 isCurrent 拦不住
+            // （三十二轮评审 P2）。
+            if (isCurrent() && viewOwnership.kept()) {
               setCodeModeOn(false);
               closeMobileSidebar();
               setCurrentView('chat');

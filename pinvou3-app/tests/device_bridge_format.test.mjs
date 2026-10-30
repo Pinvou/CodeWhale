@@ -184,6 +184,9 @@ const flush = () => new Promise(resolve => setImmediate(resolve));
   assert.equal(nvme.entries[0].level, 'ok');
   assert.equal(nvme.entries[0].critical, 84);
   assert.equal(nvme.entries[0].max, 74);
+  // 阈值/峰值文本与读数同一把 per-kind 精度/单位尺子（三十二轮评审 P3）。
+  assert.equal(nvme.entries[0].criticalText, '84°C');
+  assert.equal(nvme.entries[0].maxText, '74°C');
   // ≥ critical-10 → warn；≥ critical → crit。
   assert.equal(acpitz.chipKey, 'acpitz');
   assert.equal(acpitz.entries[0].valueText, '79°C');
@@ -207,6 +210,9 @@ const flush = () => new Promise(resolve => setImmediate(resolve));
   assert.equal(power.entries[0].level, 'ok');
   assert.equal(power.entries[1].valueText, '13.2 V');
   assert.equal(power.entries[1].level, 'crit');
+  // 电气量阈值带单位、按读数精度显示：13.2V crit 不再是“临界 13”。
+  assert.equal(power.entries[1].criticalText, '13.0 V');
+  assert.equal(power.entries[2].maxText, '12.1 V');
   // 非温度类越过 max（未到 critical，此臂无 critical）必须 crit（round-6 P2）。
   assert.equal(power.entries[2].valueText, '12.6 V');
   assert.equal(power.entries[2].level, 'crit');

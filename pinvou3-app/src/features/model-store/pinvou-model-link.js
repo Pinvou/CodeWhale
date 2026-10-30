@@ -284,19 +284,77 @@ function normalizeLoopbackEndpoint(url) {
  * @param {...(string|null|undefined)} names - 与 findLinkedRows 相同的标识集。
  * @returns {Array<object>} 命中的行（仅限同一端点）。
  */
-function findLinkedRowsForEndpoint(savedModels, baseUrl, ...names) {
+function findLinkedRowsForEndpointWith(savedModels, baseUrl, normalizeName, ...names) {
   const endpoint = normalizeLoopbackEndpoint(baseUrl);
   if (!endpoint) return [];
-  return findLinkedRows(savedModels, ...names).filter(
-    (row) => normalizeLoopbackEndpoint(row?.base_url) === endpoint
-  );
+  // map 后再 filter(Boolean)：规范形可能把纯空白名折叠成空串（空串不允许
+  // 命中任何行，与 filter(Boolean) 的入口纪律同一口径）。
+  const wanted = new Set(names.filter(Boolean).map(normalizeName).filter(Boolean));
+  if (!Array.isArray(savedModels) || wanted.size === 0) return [];
+  return savedModels
+    .filter((row) => wanted.has(normalizeName(row?.model)) && isLocalGatewayUrl(row?.base_url))
+    .filter((row) => normalizeLoopbackEndpoint(row?.base_url) === endpoint);
+}
+
+/**
+ * findLinkedRows 的端点精确版：同名回环行里再要求 base_url 指向同一端点。
+ *
+ * 设备管理的外部模型接入/移除必须用它：同一台机器经常同时跑两个推理服务
+ * （如 8000/v1 与 8001/v1 都挂着 qwen3），按“任意回环”匹配，移除 8000 的
+ * 记录会把 8001 的品悟配置一起交给 deleteModel，接入处复用首个 existingId
+ * 也会顶掉另一端的配置。模型商店卡片继续用宽版 findLinkedRows——卡片的
+ * 端口由脚本版本决定，换一版端口就变，宽尺子才清得掉历史行（见上）。
+ * @param {Array<object>|null} savedModels - 品悟的模型列表（bs.savedModels）。
+ * @param {unknown} baseUrl - 这条记录自己的 base_url（linkTargetOf 的产物）。
+ * @param {...(string|null|undefined)} names - 与 findLinkedRows 相同的标识集。
+ * @returns {Array<object>} 命中的行（仅限同一端点）。
+ */
+function findLinkedRowsForEndpoint(savedModels, baseUrl, ...names) {
+  return findLinkedRowsForEndpointWith(savedModels, baseUrl, (name) => name, ...names);
+}
+
+/**
+ * Ollama 有效模型名的规范形（与 Rust `ollama_canonical_name` +
+ * `ollama_name_matches` 同一把尺子）：末段（最后一个 `/` 之后）不含 tag（`:`）
+ * 时补 `:latest`，显式 tag 原样保留，再整体小写折叠。daemon 把裸名规范化为
+ * `name:latest`，注册表/AI 手写常只有裸名——原串比较会把同端点的
+ * `qwen3:latest` 接入行与合法登记的 `qwen3` 记录判成两个身份（三十二轮评审
+ * P2）。主机端口（registry 形如 `host:port/ns/model`）不算 tag。
+ * @param {unknown} name - 模型标识。
+ * @returns {string} 规范形；非字符串/空串返回空串（与 filter(Boolean) 同收敛）。
+ */
+function canonicalOllamaModelName(name) {
+  if (typeof name !== 'string') return '';
+  const trimmed = name.trim();
+  if (!trimmed) return '';
+  const lastSegment = trimmed.split('/').pop() || '';
+  const canonical = lastSegment.includes(':') ? trimmed : `${trimmed}:latest`;
+  return canonical.toLowerCase();
+}
+
+/**
+ * findLinkedRowsForEndpoint 的 Ollama 版：名字两侧都按
+ * canonicalOllamaModelName 规范身份比较。
+ *
+ * **仅限 ollama 行使用**：显式 tag 是身份（`qwen3:8b` ≠ `qwen3:30b`），端点
+ * 与非 Ollama 模型的原串比较一律不变——OpenAI 兼容端点上裸名与带 tag 名
+ * 就是两个不同的模型字符串。展示名从不参与（三十一轮评审 P2 的口径不变）。
+ * @param {Array<object>|null} savedModels - 品悟的模型列表（bs.savedModels）。
+ * @param {unknown} baseUrl - 这条记录自己的 base_url（linkTargetOf 的产物）。
+ * @param {...(string|null|undefined)} names - 有效模型标识集。
+ * @returns {Array<object>} 命中的行（仅限同一端点、同一规范身份）。
+ */
+function findLinkedRowsForOllamaEndpoint(savedModels, baseUrl, ...names) {
+  return findLinkedRowsForEndpointWith(savedModels, baseUrl, canonicalOllamaModelName, ...names);
 }
 
 export {
   buildSavedModel,
+  canonicalOllamaModelName,
   checkLinkable,
   findLinkedRows,
   findLinkedRowsForEndpoint,
+  findLinkedRowsForOllamaEndpoint,
   isLocalGatewayUrl,
   isOpenAiChatEndpoint,
   makeModelId,

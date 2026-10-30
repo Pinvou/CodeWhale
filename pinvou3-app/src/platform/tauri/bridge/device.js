@@ -67,16 +67,22 @@
     return c || "other";
   }
 
-  // 传感器数值文本：按 kind 定单位与精度（温度/转速取整，电压/电流/功率 1 位小数）。
-  function sensorValueText(kind, value) {
-    var v = typeof value === "number" && isFinite(value) ? value : null;
-    if (v == null) return "—";
+  // 传感器各量的展示策略（精度 + 单位）唯一的家：读数与阈值/峰值共用同一把
+  // per-kind 尺子，两侧永远同精度同单位（三十二轮评审 P3）。
+  function sensorQuantityText(kind, v) {
     if (kind === "temperature") return Math.round(v) + "°C";
     if (kind === "fan") return Math.round(v) + " RPM";
     if (kind === "voltage") return v.toFixed(1) + " V";
     if (kind === "current") return v.toFixed(1) + " A";
     if (kind === "power") return v.toFixed(1) + " W";
     return v.toFixed(1);
+  }
+
+  // 传感器数值文本：按 kind 定单位与精度（温度/转速取整，电压/电流/功率 1 位小数）。
+  function sensorValueText(kind, value) {
+    var v = typeof value === "number" && isFinite(value) ? value : null;
+    if (v == null) return "—";
+    return sensorQuantityText(kind, v);
   }
 
   // 告警档位：≥critical → crit；温度量另有 critical-10 预警带。max 对温度是
@@ -109,9 +115,21 @@
           kind: e.kind || "",
           name: e.name ? String(e.name) : "—",
           valueText: sensorValueText(e.kind, e.value),
-          // critical/max 与 valueText 同口径取整后再进抑制比较：视图按整数渲染
-          // 阈值，12.4→12.6 这类被舍入抹平的抖动不该击穿显示等价抑制
-          // （round-5 review P3）。level 判定仍吃原始值。
+          // 阈值/峰值文本与读数同一把 per-kind 尺子（三十二轮评审 P3）：视图
+          // 此前自己 Math.round 且不给电气量补单位，12.7V 对 12.6V crit 的证据
+          // 行会写“临界 13”、0.4A 对 0.35A 写“临界 0”。criticalText/maxText
+          // 与 valueText 同精度同单位，显示证据不再和档位（原始值判定）矛盾。
+          criticalText:
+            typeof e.critical === "number" && isFinite(e.critical)
+              ? sensorQuantityText(e.kind, e.critical)
+              : null,
+          maxText:
+            typeof e.max === "number" && isFinite(e.max)
+              ? sensorQuantityText(e.kind, e.max)
+              : null,
+          // 取整数字段保留给既有消费方的存在性判断；抑制比较经结构等价自动
+          // 覆盖文本字段——显示分辨率以下的阈值抖动照旧不击穿显示等价抑制
+          // （round-5 review P3 的目标不变）。level 判定仍吃原始值。
           critical:
             typeof e.critical === "number" && isFinite(e.critical) ? Math.round(e.critical) : null,
           max: typeof e.max === "number" && isFinite(e.max) ? Math.round(e.max) : null,

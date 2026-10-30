@@ -72,6 +72,12 @@ export function createNativeSurfaceTransitionGate({
       issue(channel);
     },
 
+    // 当前修订号（只读）：入口动作要在**开始前**拍下别的通道的修订号、落定
+    // 时比对（createNavigationOwnership），跨通道导航归属才有着落。
+    revision(channel = 'default') {
+      return revisions.get(channel) || 0;
+    },
+
     dispose() {
       disposed = true;
       revisions.clear();
@@ -284,4 +290,27 @@ export async function hideNativeSurfaceWithRetry({
       throw retryError;
     }
   }
+}
+
+// 入口动作的导航归属（三十二轮评审 P2）：横跨多个长 await 的动作（设备 AI
+// 排查：prompt 采样 / 会话物化 / completion 各自等待）落定时，是否仍拥有
+// "把用户带进目标视图"的权利。
+//
+// 只看动作自己通道的 isCurrent 不够：真实侧栏/设置导航走 `view` 通道（同一
+// sessionId 不换 sid），不会让 `session` 通道的票据过期——晚到的 completion
+// 会把已去设置的用户拽回聊天，违背"不把已离开设备页的用户拽进聊天"的设计
+// 承诺。所以开始时拍下 view 修订号，落定时要求它未变；session 通道自己的
+// 失效（如用户切到别的会话）仍由 isCurrent 负责——两把尺子相与，缺一不可。
+// 已接纳的消息照常送达、照常返回 true（只跳过视图切换），不能因不切页误报
+// 失败而诱发重发。
+export function createNavigationOwnership(gateLike, channel = 'view') {
+  if (!gateLike || typeof gateLike.revision !== 'function') {
+    throw new TypeError('gateLike.revision must be a function');
+  }
+  const revisionAtStart = gateLike.revision(channel);
+  return {
+    channel,
+    revisionAtStart,
+    kept: () => gateLike.revision(channel) === revisionAtStart,
+  };
 }

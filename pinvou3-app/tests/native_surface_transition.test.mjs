@@ -4,6 +4,7 @@ import test from 'node:test';
 import {
   createDegradedNativeSurfaceHideLease,
   createNativeSurfaceTransitionGate,
+  createNavigationOwnership,
   hideNativeSurfaceWithRetry,
   isFailedNativeSurfaceHideGenerationCurrent,
   settleBrowserUiPublicationAfterCommit,
@@ -478,4 +479,81 @@ test('native surface hide never retries more than once', async () => {
     ['failure 1', { attempt: 1, willRetry: true }],
     ['failure 2', { attempt: 2, willRetry: false }],
   ]);
+});
+
+test('revision reports per-channel counters for cross-channel ownership capture', () => {
+  const gate = createNativeSurfaceTransitionGate({
+    acquireHide: () => assert.fail('hide must not be called'),
+    getContext: () => ({ sessionId: 'a', hasWorkspace: false, visible: false }),
+  });
+  assert.equal(gate.revision('view'), 0);
+  gate.invalidate('view');
+  assert.equal(gate.revision('view'), 1);
+  gate.run(() => true, { channel: 'view' });
+  assert.equal(gate.revision('view'), 2);
+  // 其他通道互不影响。
+  gate.invalidate('session');
+  assert.equal(gate.revision('view'), 2);
+  assert.equal(gate.revision('session'), 1);
+});
+
+test('createNavigationOwnership: same-session view navigation retires a pending session entry (三十二轮评审 P2)', () => {
+  const gate = createNativeSurfaceTransitionGate({
+    acquireHide: () => assert.fail('hide must not be called'),
+    getContext: () => ({ sessionId: 'sid-1', hasWorkspace: false, visible: false }),
+  });
+  // 设备 doctor 的形态：动作开始拍 view 修订号，随后进入 session 通道的长
+  // 等待（prompt 采样 / materialize / completion）。
+  const ownership = createNavigationOwnership(gate, 'view');
+  assert.equal(ownership.kept(), true);
+  let publicationIsCurrent;
+  gate.run(({ isCurrent }) => {
+    publicationIsCurrent = isCurrent;
+    return new Promise(() => {});
+  }, { channel: 'session', hideMode: 'none', guardSession: false });
+
+  // 用户经真实设置导航离开（view 通道，同一 sessionId 不换 sid）：session
+  // 票据仍然有效——光看 isCurrent 拦不住晚到的拽回；view 归属必须单独退役。
+  gate.invalidate('view');
+  assert.equal(
+    publicationIsCurrent(),
+    true,
+    'session-channel ticket alone must miss the same-session view navigation (the reported gap)'
+  );
+  assert.equal(
+    ownership.kept(),
+    false,
+    'view ownership must be retired by the view-channel navigation'
+  );
+});
+
+test('createNavigationOwnership: a newer same-channel session switch still wins through isCurrent', () => {
+  const gate = createNativeSurfaceTransitionGate({
+    acquireHide: () => assert.fail('hide must not be called'),
+    getContext: () => ({ sessionId: 'sid-1', hasWorkspace: false, visible: false }),
+  });
+  const ownership = createNavigationOwnership(gate, 'view');
+  let publicationIsCurrent;
+  gate.run(({ isCurrent }) => {
+    publicationIsCurrent = isCurrent;
+    return true;
+  }, { channel: 'session', hideMode: 'none', guardSession: false });
+
+  // 负控（同通道竞态仍按旧口径胜出）：用户切到别的会话，session 通道失效，
+  // view 修订号没动——isCurrent 那把尺子拦下，归属尺子放行。
+  gate.invalidate('session');
+  assert.equal(publicationIsCurrent(), false, 'same-channel invalidation must still retire the ticket');
+  assert.equal(ownership.kept(), true, 'view revision untouched by the session-channel switch');
+});
+
+test('createNavigationOwnership defaults to the view channel and validates its gate', () => {
+  const gate = createNativeSurfaceTransitionGate({
+    acquireHide: () => assert.fail('hide must not be called'),
+    getContext: () => ({ sessionId: 'a', hasWorkspace: false, visible: false }),
+  });
+  const ownership = createNavigationOwnership(gate);
+  assert.equal(ownership.channel, 'view');
+  assert.equal(ownership.revisionAtStart, 0);
+  assert.throws(() => createNavigationOwnership({}), TypeError);
+  assert.throws(() => createNavigationOwnership(null), TypeError);
 });
