@@ -1,5 +1,10 @@
 import assert from "node:assert/strict";
 import test from "node:test";
+import { execFileSync, spawnSync } from "node:child_process";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { dirname, join, resolve } from "node:path";
+import { fileURLToPath, pathToFileURL } from "node:url";
 
 import {
   buildSchedule,
@@ -12,6 +17,47 @@ import {
   validateChangedPaths,
   verifyPullBody,
 } from "../community-backflow.mjs";
+
+test("轻量预检仅获取两个端点即可在浅克隆中校验真实差异", () => {
+  const root = mkdtempSync(join(tmpdir(), "pinvou-backflow-shallow-"));
+  const origin = join(root, "origin");
+  const checkout = join(root, "checkout");
+  const env = { ...process.env, GIT_TERMINAL_PROMPT: "0" };
+  const git = (cwd, ...args) => execFileSync("git", args, {
+    cwd, env, encoding: "utf8", stdio: ["ignore", "pipe", "pipe"],
+  }).trim();
+  try {
+    git(root, "init", "--initial-branch=main", origin);
+    const commits = [];
+    for (const value of ["base", "middle", "head", "snapshot"]) {
+      writeFileSync(join(origin, "portable.txt"), `${value}\n`);
+      git(origin, "add", "portable.txt");
+      git(origin, "-c", "user.name=Fixture", "-c", "user.email=fixture@example.invalid",
+        "-c", "commit.gpgsign=false", "commit", "-m", value);
+      commits.push(git(origin, "rev-parse", "HEAD"));
+    }
+    const [base, middle, head] = commits;
+    git(root, "clone", "--depth=1", "--no-tags", pathToFileURL(origin).href, checkout);
+    const tool = fileURLToPath(new URL("../community-backflow.mjs", import.meta.url));
+    const preflight = () => spawnSync(process.execPath,
+      [tool, "preflight", "--base", base, "--head", head],
+      { cwd: checkout, env, encoding: "utf8" });
+    assert.notEqual(preflight().status, 0, "missing endpoints must fail closed");
+    git(checkout, "fetch", "--no-tags", "--depth=1", "origin", base, head);
+    const result = preflight();
+    assert.equal(result.status, 0, result.stderr);
+    const provenance = JSON.parse(result.stdout);
+    assert.equal(provenance.base_sha, base);
+    assert.equal(provenance.head_sha, head);
+    assert.equal(provenance.changed_files, 1);
+    assert.equal(git(checkout, "rev-parse", "--is-shallow-repository"), "true");
+    assert.notEqual(spawnSync("git", ["cat-file", "-e", middle],
+      { cwd: checkout, env, stdio: "ignore" }).status, 0, "unneeded history stays absent");
+  } finally {
+    assert.equal(dirname(resolve(root)), resolve(tmpdir()));
+    rmSync(root, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
+  }
+});
 
 test("Issue marker 可以闭环聚合为调度输入", () => {
   const queue = parseQueueIssues([

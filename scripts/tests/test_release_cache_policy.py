@@ -119,14 +119,20 @@ class ReleaseCachePolicyTests(unittest.TestCase):
         rust_test_job = workflow.split("\n  rust-test:", maxsplit=1)[1].split(
             "\n  windows-rust-test:", maxsplit=1
         )[0]
-        lint_cache = rust_test_job.index("shared-key: rust-lint")
-        test_cache = rust_test_job.index("shared-key: rust-test")
+        lint_cache = rust_test_job.index("- name: 恢复 Rust lint 暖缓存")
+        test_cache = rust_test_job.index("- name: Cargo test cache")
         warm_cache_step = rust_test_job.split(
             "- name: 恢复 Rust lint 暖缓存", maxsplit=1
         )[1].split("- name: Cargo test cache", maxsplit=1)[0]
+        test_cache_step = rust_test_job.split(
+            "- name: Cargo test cache", maxsplit=1
+        )[1].split("\n      - name:", maxsplit=1)[0]
 
         self.assertLess(lint_cache, test_cache)
         self.assertIn("save-if: false", warm_cache_step)
+        self.assertIn("shared-key: rust-lint-v2", warm_cache_step)
+        self.assertIn("shared-key: rust-test-v2", test_cache_step)
+        self.assertIn(MAIN_ONLY_SAVE, test_cache_step)
 
     def test_linux_release_jobs_use_hosted_runner_profile(self):
         workflow = RELEASE_WORKFLOW.read_text(encoding="utf-8")

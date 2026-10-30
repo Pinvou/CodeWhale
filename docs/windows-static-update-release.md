@@ -5,6 +5,8 @@ Windows 正式安装包必须在独立签名服务器上构建并签署。发布
 
 ## 客户端更新协议
 
+客户端在下载时显示进度；进入安装阶段后由安装器接管，不能再通过下载取消按钮中止。
+
 客户端固定读取 `https://pinvou.com/pinvou3/latest.json` 的
 `platforms["windows-x86_64"]`：
 
