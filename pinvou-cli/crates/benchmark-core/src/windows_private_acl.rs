@@ -44,15 +44,25 @@ pub fn apply_and_verify(path: &Path, directory: bool) -> Result<(), ()> {
     ];
     let acl = build_acl(&sids, ace_flags(directory))?;
     let previous = SecuritySnapshot::read(&wide)?;
+    // An owner can rewrite its DACL without WRITE_OWNER. Requesting ownership
+    // again would reject ordinary owned files that inherit only Modify access.
+    let change_owner = unsafe { EqualSid(previous.owner, current.as_psid()) } == 0;
+    let owner_information = if change_owner {
+        OWNER_SECURITY_INFORMATION
+    } else {
+        0
+    };
 
     let result = unsafe {
         SetNamedSecurityInfoW(
             wide.as_ptr(),
             SE_FILE_OBJECT,
-            OWNER_SECURITY_INFORMATION
-                | DACL_SECURITY_INFORMATION
-                | PROTECTED_DACL_SECURITY_INFORMATION,
-            current.as_psid(),
+            owner_information | DACL_SECURITY_INFORMATION | PROTECTED_DACL_SECURITY_INFORMATION,
+            if change_owner {
+                current.as_psid()
+            } else {
+                std::ptr::null_mut()
+            },
             std::ptr::null_mut(),
             acl.as_acl(),
             std::ptr::null(),
@@ -383,7 +393,102 @@ fn wide_path(path: &Path) -> Vec<u16> {
 
 #[cfg(test)]
 mod tests {
-    use super::verify_acl_bytes;
+    use super::*;
+    use windows_sys::Win32::Security::GetAce;
+    use windows_sys::Win32::Storage::FileSystem::WRITE_OWNER;
+
+    struct OwnedFixture {
+        root: std::path::PathBuf,
+        path: std::path::PathBuf,
+    }
+
+    impl OwnedFixture {
+        fn without_write_owner(directory: bool) -> Self {
+            let root = std::env::temp_dir().join(format!(
+                "benchmark-private-acl-{}-{:016x}",
+                std::process::id(),
+                rand::random::<u64>()
+            ));
+            std::fs::create_dir(&root).unwrap();
+            let fixture = Self {
+                path: root.join("owned-entry"),
+                root,
+            };
+            if directory {
+                std::fs::create_dir(&fixture.path).unwrap();
+            } else {
+                std::fs::write(&fixture.path, b"private fixture").unwrap();
+            }
+            let current = current_user_sid().unwrap();
+            let system = well_known_sid(WinLocalSystemSid).unwrap();
+            let administrators = well_known_sid(WinBuiltinAdministratorsSid).unwrap();
+            let acl = build_acl(
+                &[
+                    current.as_psid(),
+                    system.as_psid(),
+                    administrators.as_psid(),
+                ],
+                ace_flags(directory),
+            )
+            .unwrap();
+            let mut first = std::ptr::null_mut();
+            assert_ne!(unsafe { GetAce(acl.as_acl(), 0, &mut first) }, 0);
+            let first = first.cast::<ACCESS_ALLOWED_ACE>();
+            unsafe { (*first).Mask &= !WRITE_OWNER };
+            assert_eq!(unsafe { (*first).Mask } & WRITE_OWNER, 0);
+
+            let wide = wide_path(&fixture.path);
+            let previous = SecuritySnapshot::read(&wide).unwrap();
+            let change_owner = unsafe { EqualSid(previous.owner, current.as_psid()) } == 0;
+            assert_eq!(
+                unsafe {
+                    SetNamedSecurityInfoW(
+                        wide.as_ptr(),
+                        SE_FILE_OBJECT,
+                        DACL_SECURITY_INFORMATION
+                            | PROTECTED_DACL_SECURITY_INFORMATION
+                            | if change_owner {
+                                OWNER_SECURITY_INFORMATION
+                            } else {
+                                0
+                            },
+                        if change_owner {
+                            current.as_psid()
+                        } else {
+                            std::ptr::null_mut()
+                        },
+                        std::ptr::null_mut(),
+                        acl.as_acl(),
+                        std::ptr::null(),
+                    )
+                },
+                ERROR_SUCCESS
+            );
+            let snapshot = SecuritySnapshot::read(&wide).unwrap();
+            assert_ne!(unsafe { EqualSid(snapshot.owner, current.as_psid()) }, 0);
+            fixture
+        }
+    }
+
+    impl Drop for OwnedFixture {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.root);
+        }
+    }
+
+    #[test]
+    fn already_owned_directory_without_write_owner_hardens_and_verifies() {
+        let fixture = OwnedFixture::without_write_owner(true);
+        assert_eq!(apply_and_verify(&fixture.path, true), Ok(()));
+        assert_eq!(apply_and_verify(&fixture.path, true), Ok(()));
+    }
+
+    #[test]
+    fn already_owned_file_without_write_owner_hardens_and_verifies() {
+        let fixture = OwnedFixture::without_write_owner(false);
+        assert_eq!(apply_and_verify(&fixture.path, false), Ok(()));
+        assert_eq!(apply_and_verify(&fixture.path, false), Ok(()));
+    }
 
     #[test]
     fn truncated_ace_is_rejected_without_reading_past_the_acl() {
