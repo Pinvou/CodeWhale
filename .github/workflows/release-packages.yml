@@ -542,7 +542,7 @@ jobs:
             libwebkit2gtk-4.1-dev \
             libssl-dev \
             libayatana-appindicator3-dev \
-            libpipewire-0.3-dev libdrm-dev libgbm-dev libegl-dev \
+            libpipewire-0.3-dev libdrm-dev libgbm-dev libegl-dev libclang-dev \
             build-essential pkg-config cmake lld
           # 从源头减负:孤儿依赖、apt 缓存包与索引清单不留在构建盘上。
           if [[ "$RUNNER_ENVIRONMENT" == github-hosted ]]; then
@@ -731,7 +731,7 @@ jobs:
             libwebkit2gtk-4.1-dev \
             libssl-dev \
             libayatana-appindicator3-dev \
-            libpipewire-0.3-dev libdrm-dev libgbm-dev libegl-dev \
+            libpipewire-0.3-dev libdrm-dev libgbm-dev libegl-dev libclang-dev \
             build-essential pkg-config cmake lld
           # 从源头减负:孤儿依赖、apt 缓存包与索引清单不留在构建盘上。
           if [[ "$RUNNER_ENVIRONMENT" == github-hosted ]]; then
