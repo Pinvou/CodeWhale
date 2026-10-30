@@ -2,7 +2,13 @@
 
 本目录保存作者的实际运行输出及完整命令，供审阅者下载、校验和独立复跑。它不表示外部审阅者已经运行，也不代替人工批准或云端门禁。
 
-本次固定源码为 `e768c60efdf52bbae38032bcb0565809aa8183ee`，tree 为 `e3700ee8906eeb2df226d5c14aff8b7e8358de62`，CodeWhale 为 `f1eb10efcfe2468fde42d1724d7f5f19d54b904c`。该签署提交包含本轮五个代码文件。运行期间只有本文目录及 `docs/model-store-updates.md` 在整理；产品不嵌入这两处文档。随后的回执提交只改这两处文档，最终 PR 的产品、测试、锁文件及工作流输入与固定源码保持一致。
+本包的历史固定源码为 `e768c60efdf52bbae38032bcb0565809aa8183ee`，tree 为 `e3700ee8906eeb2df226d5c14aff8b7e8358de62`，CodeWhale 为 `f1eb10efcfe2468fde42d1724d7f5f19d54b904c`。该签署提交包含当轮五个代码文件。运行期间只有本文目录及 `docs/model-store-updates.md` 在整理；产品不嵌入这两处文档。历史回执提交 `a52872c2ddb27aa5df819ab6d954013bece077fb` 只改这两处文档，当时的产品、测试、锁文件及工作流输入与固定源码保持一致。此结论只锚定这两个历史提交，不延伸到此后主线整合或新的 PR head。
+
+## 后续主线整合边界
+
+2026-10-30 为处理真实冲突，将主线 `e41ec811905f8fef72ea412bc7924ede6a8261b9`（#2225）整合到 PR；该主线变更包含 CI、测试入口和 runner 镜像配置。因此，新工作树的全部工作流输入与本包固定源码不再相同。保留本包日志、计数、源码摘要及 manifest 的历史身份，不将重基后的执行结果回填到这些原始输出。
+
+本次整合保留原 PR 更严格的 Connector 矩阵断言，并继续直接检查发布/交叉构建的真实运行器表达式和磁盘分支。产品 Rust、React、资源及 CodeWhale 输入保持原字节；这项源码等价检查不代替新组合的 CI 与测试验证。新组合的实际复跑结果另在 [PR 更新说明](https://github.com/Pinvou/pinvou3/pull/1995) 中记录，不能从下表的历史计数推算。
 
 ## 已执行结果
 
@@ -26,10 +32,10 @@
 
 [manifest.json](manifest.json) 分别记录原始字节与公开字节的 SHA-256、长度、UTC 起始时间、argv、cwd、特定环境变量和边界。全文替换本地工作区、target、生成的临时目录及运行用户目录前缀，并去除行尾空格及末尾多余空行以满足仓库空白检查；测试名和结果保持，公开字节不冒充原始字节；Clippy 测试日志的首尾节选明确标出省略范围。Node gzip 内容解压后仍是全文，另外记录解压后的摘要。作者日志与外部独立执行是不同证据。
 
-在含本目录的干净 checkout 中验证；两条 diff 命令应为空，防止把后续产品改动混入本次源码证明：
+第一条 diff 只验证两个固定历史提交之间除回执文档外没有差异；第二条检查当前 checkout 的产品、测试及工作流目录没有未提交改动。两条都应为空，但不证明当前 HEAD 与历史源码等价。后续主线整合必须单独核对并验证：
 
 ```sh
-git diff --exit-code e768c60efdf52bbae38032bcb0565809aa8183ee HEAD -- . \
+git diff --exit-code e768c60efdf52bbae38032bcb0565809aa8183ee a52872c2ddb27aa5df819ab6d954013bece077fb -- . \
   ':(exclude)docs/model-store-updates.md' \
   ':(exclude)docs/model-store-review-evidence/2026-10-29'
 git diff --exit-code HEAD -- pinvou3-app CodeWhale scripts .github
@@ -55,6 +61,8 @@ PY_HASH
 ## 复跑命令
 
 按 [CONTRIBUTING.md](../../../CONTRIBUTING.md) 准备系统依赖，初始化公共 CodeWhale submodule，并安装 npm 锁定依赖。这些准备会下载公开源码/依赖。以下入口从仓库根执行，使用临时夹具、受控本机进程及回环服务，不需要 GPU、真实权重或外部模型账号。保存输出时须保留真实 exit code，例如 Bash `set -o pipefail` 后使用 `tee`，筛选必须实际匹配非零用例。
+
+复现上表历史结果时，应在单独 checkout 固定到上述历史源码 SHA，并从历史回执提交取得本目录。更新后的工作树也可运行相同入口，但所得结果属于其实际 HEAD，需另记源码版本和输出。
 
 ```sh
 git submodule update --init --recursive
