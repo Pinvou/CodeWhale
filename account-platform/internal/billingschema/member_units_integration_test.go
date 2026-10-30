@@ -14,7 +14,6 @@ import (
 	"github.com/Pinvou/pinvou3/account-platform/internal/platform/identity"
 	"github.com/Pinvou/pinvou3/account-platform/internal/platform/migrations"
 	"github.com/google/uuid"
-	"github.com/jackc/pgx/v5/pgconn"
 )
 
 // Original deployment actors, SQL seeds and actual organization creation are
@@ -300,77 +299,10 @@ func TestOrganizationMemberUnitProducerPublicPostgres(t *testing.T) {
 		}
 	})
 	t.Run("public-down-retains-scope-history", func(t *testing.T) {
-		ordered, err := accountschema.Ordered(m)
-		if err != nil {
-			t.Fatal(err)
-		}
-		var before, after int64
-		if err = c.QueryRow(ctx, `SELECT count(*) FROM membership_units`).Scan(&before); err != nil {
-			t.Fatal(err)
-		}
-		// The unused role CHECK can roll back. This full chain then stops at
-		// the newer cleanup ACK guard; it does not execute the older 900003 scope Down.
-		ledger := func(withoutRoleCheck bool) string {
-			t.Helper()
-			var facts string
-			if err := c.QueryRow(ctx, `SELECT jsonb_agg(to_jsonb(entry) ORDER BY version)::text FROM schema_migrations entry WHERE NOT $1::boolean OR version<>900006`, withoutRoleCheck).Scan(&facts); err != nil {
-				t.Fatal(err)
-			}
-			return facts
-		}
-		scopeFacts := func() string {
-			t.Helper()
-			return stageValue(t, ctx, c, `SELECT jsonb_build_object(
-'memberships',(SELECT jsonb_agg(to_jsonb(f) ORDER BY to_jsonb(f)::text) FROM memberships f),
-'membership_units',(SELECT jsonb_agg(to_jsonb(f) ORDER BY to_jsonb(f)::text) FROM membership_units f),
-'role_bindings',(SELECT jsonb_agg(to_jsonb(f) ORDER BY to_jsonb(f)::text) FROM role_bindings f),
-'role_assignments',(SELECT jsonb_agg(to_jsonb(f) ORDER BY to_jsonb(f)::text) FROM role_assignments f),
-'authorization_versions',(SELECT jsonb_agg(to_jsonb(f) ORDER BY to_jsonb(f)::text) FROM authorization_versions f))::text`)
-		}
-		beforeScope, expectedRemainingLedger := scopeFacts(), ledger(true)
-		var latest int64
-		var modelRoleBindings int
-		if err = c.QueryRow(ctx, `SELECT max(version) FROM schema_migrations`).Scan(&latest); err != nil || latest != 900006 {
-			t.Fatal("expected role CHECK migration before scope rollback", latest, err)
-		}
-		if err = c.QueryRow(ctx, `SELECT count(*) FROM role_bindings WHERE role='ORG_MODEL_ADMIN'`).Scan(&modelRoleBindings); err != nil || modelRoleBindings != 0 {
-			t.Fatal("role CHECK rollback requires no model administrator bindings", modelRoleBindings, err)
-		}
-		if err = migrations.DownOne(ctx, c, ordered); err != nil {
-			t.Fatal("unused role CHECK did not roll back safely", err)
-		}
-		if err = c.QueryRow(ctx, `SELECT count(*) FROM membership_units`).Scan(&after); err != nil || before != after {
-			t.Fatal("role CHECK rollback changed member attachments", err)
-		}
-		var remaining []migrations.Migration
-		for _, migration := range ordered {
-			if migration.Version != 900006 {
-				remaining = append(remaining, migration)
-			}
-		}
-		if len(remaining) != len(ordered)-1 || ledger(false) != expectedRemainingLedger || scopeFacts() != beforeScope {
-			t.Fatal("safe role CHECK rollback changed retained scope or unrelated history")
-		}
-		if _, err = migrations.VerifyApplied(ctx, c, remaining); err != nil {
-			t.Fatal("remaining installed history does not match safe rollback", err)
-		}
-		if err = c.QueryRow(ctx, `SELECT max(version) FROM schema_migrations`).Scan(&latest); err != nil || latest != 900005 {
-			t.Fatal("cleanup ACK guard is not the next public rollback", latest, err)
-		}
-		err = migrations.DownOne(ctx, c, remaining)
-		var pg *pgconn.PgError
-		if !errors.As(err, &pg) || pg.Code != "55000" || pg.Message != "account closure cleanup acknowledgements are forward-only" {
-			t.Fatal("public downgrade did not fail at the actual cleanup ACK guard", err)
-		}
-		if err = c.QueryRow(ctx, `SELECT count(*) FROM membership_units`).Scan(&after); err != nil || before != after {
-			t.Fatal("failed public rollback changed member attachments", err)
-		}
-		if ledger(false) != expectedRemainingLedger || scopeFacts() != beforeScope {
-			t.Fatal("failed cleanup ACK rollback changed scope or remaining ledger")
-		}
-		if _, err = migrations.VerifyApplied(ctx, c, remaining); err != nil {
-			t.Fatal("failed public rollback changed remaining migration facts", err)
-		}
+		assertCurrentAccount900013Down(t, ctx, c, m)
+	})
+	t.Run("historical-900006-down-900005-guard-and-restore", func(t *testing.T) {
+		assertHistoricalAccount900006Down(t, ctx, f, m)
 	})
 	for _, state := range []string{"current", "revoked", "expired"} {
 		for _, explicit := range []bool{false, true} {

@@ -80,73 +80,10 @@ func TestRegistrationBonusPublicSchemaAndInputFacts(t *testing.T) {
 		})
 	}
 	t.Run("account-public-down-preserves-facts", func(t *testing.T) {
-		ordered, err := accountschema.Ordered(account)
-		if err != nil {
-			t.Fatal(err)
-		}
-		var latest int64
-		var incompatibleBindings int
-		if err = ac.QueryRow(ctx, `SELECT max(version) FROM schema_migrations`).Scan(&latest); err != nil || latest != 900006 {
-			t.Fatal("expected unused role CHECK as the installed highest version", latest, err)
-		}
-		if err = ac.QueryRow(ctx, `SELECT count(*) FROM role_bindings WHERE role='ORG_MODEL_ADMIN'`).Scan(&incompatibleBindings); err != nil || incompatibleBindings != 0 {
-			t.Fatal("safe role CHECK rollback requires no incompatible history", incompatibleBindings, err)
-		}
-		bonusInputFacts := func() string {
-			t.Helper()
-			return stageValue(t, ctx, ac, `SELECT jsonb_build_object(
-'registration_operations',(SELECT jsonb_agg(to_jsonb(f) ORDER BY to_jsonb(f)::text) FROM registration_operations f),
-'wallet_provisioning_jobs',(SELECT jsonb_agg(to_jsonb(f) ORDER BY to_jsonb(f)::text) FROM wallet_provisioning_jobs f),
-'eligibility',(SELECT jsonb_agg(to_jsonb(f) ORDER BY to_jsonb(f)::text) FROM registration_bonus_mobile_eligibility f),
-'roles',(SELECT jsonb_agg(to_jsonb(f) ORDER BY to_jsonb(f)::text) FROM roles f),
-'permissions',(SELECT jsonb_agg(to_jsonb(f) ORDER BY to_jsonb(f)::text) FROM permissions f),
-'role_permissions',(SELECT jsonb_agg(to_jsonb(f) ORDER BY to_jsonb(f)::text) FROM role_permissions f),
-'role_bindings',(SELECT jsonb_agg(to_jsonb(f) ORDER BY to_jsonb(f)::text) FROM role_bindings f),
-'authorization_versions',(SELECT jsonb_agg(to_jsonb(f) ORDER BY to_jsonb(f)::text) FROM authorization_versions f),
-'required_facts_check',(SELECT pg_get_constraintdef(oid) FROM pg_constraint WHERE conrelid='wallet_provisioning_jobs'::regclass AND conname='wallet_provisioning_registration_bonus_required_facts_check'))::text`)
-		}
-		// Only the unused 900006 CHECK may roll back. The actual next public
-		// Down stops at 900005 and never executes the older bonus or scope Down.
-		beforeFacts := bonusInputFacts()
-		before := stageValue(t, ctx, ac, `SELECT jsonb_agg(to_jsonb(m) ORDER BY version)::text FROM schema_migrations m WHERE version<>900006`)
-		if err = migrations.DownOne(ctx, ac, ordered); err != nil {
-			t.Fatal("unused role CHECK did not roll back safely", err)
-		}
-		if stageValue(t, ctx, ac, `SELECT jsonb_agg(to_jsonb(m) ORDER BY version)::text FROM schema_migrations m`) != before || bonusInputFacts() != beforeFacts {
-			t.Fatal("safe role CHECK rollback changed bonus, authority or unrelated migration facts")
-		}
-		var remaining []migrations.Migration
-		for _, migration := range ordered {
-			if migration.Version != 900006 {
-				remaining = append(remaining, migration)
-			}
-		}
-		if len(remaining) != len(ordered)-1 {
-			t.Fatal("safe rollback must remove exactly the installed role CHECK version")
-		}
-		if _, err = migrations.VerifyApplied(ctx, ac, remaining); err != nil {
-			t.Fatal("remaining migration facts changed after safe rollback", err)
-		}
-		if err = ac.QueryRow(ctx, `SELECT max(version) FROM schema_migrations`).Scan(&latest); err != nil || latest != 900005 {
-			t.Fatal("expected actual cleanup ACK guard as next public rollback", latest, err)
-		}
-		var pe *pgconn.PgError
-		if err = migrations.DownOne(ctx, ac, remaining); !errors.As(err, &pe) || pe.Code != "55000" || pe.Message != "account closure cleanup acknowledgements are forward-only" {
-			t.Fatal("actual forward-only account cleanup ACK guard was not reached", err)
-		}
-		if after := stageValue(t, ctx, ac, `SELECT jsonb_agg(to_jsonb(m) ORDER BY version)::text FROM schema_migrations m`); after != before {
-			t.Fatal("failed account Down changed ledger")
-		}
-		if bonusInputFacts() != beforeFacts {
-			t.Fatal("failed account Down changed bonus or authority facts")
-		}
-		if _, err = migrations.VerifyApplied(ctx, ac, remaining); err != nil {
-			t.Fatal("failed account Down changed remaining migration facts", err)
-		}
-		var present bool
-		if err = ac.QueryRow(ctx, `SELECT to_regclass('registration_bonus_mobile_eligibility') IS NOT NULL`).Scan(&present); err != nil || !present {
-			t.Fatal("bonus eligibility table lost")
-		}
+		assertCurrentAccount900013Down(t, ctx, ac, account)
+	})
+	t.Run("historical-900006-down-900005-guard-and-restore", func(t *testing.T) {
+		assertHistoricalAccount900006Down(t, ctx, f, account)
 	})
 	{
 		t.Run("public-prior-delivery-data-upgrade", func(t *testing.T) {
