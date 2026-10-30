@@ -11,7 +11,7 @@ RUN sed -i "s|http://archive.ubuntu.com/ubuntu|${APT_MIRROR}|g; s|http://securit
  && printf '#!/bin/sh\nexit 101\n' > /usr/sbin/policy-rc.d \
  && chmod +x /usr/sbin/policy-rc.d \
  && apt-get update \
- && apt-get install -y --no-install-recommends ca-certificates curl git jq sudo python3 python3-pip \
+ && apt-get install -y --no-install-recommends ca-certificates curl git jq sudo python3 python3-pip tzdata iproute2 \
       build-essential pkg-config cmake lld clang libclang-dev file xz-utils unzip zip tini \
       libicu70 libkrb5-3 zlib1g libunwind8 liblttng-ust1 \
       libssl-dev libwebkit2gtk-4.1-dev libayatana-appindicator3-dev \
