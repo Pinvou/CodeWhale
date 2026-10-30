@@ -1604,7 +1604,11 @@ mod tests {
             (StatusCode::PARTIAL_CONTENT, "text/event-stream", true),
             (StatusCode::BAD_REQUEST, "text/event-stream", false),
             (StatusCode::PAYMENT_REQUIRED, "text/event-stream", false),
-            (StatusCode::INTERNAL_SERVER_ERROR, "text/event-stream", false),
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "text/event-stream",
+                false,
+            ),
             (StatusCode::OK, "Text/Event-Stream", false),
             (StatusCode::OK, " text/event-stream", false),
             (StatusCode::OK, "text/event-stream; charset=utf-8", false),
@@ -1615,7 +1619,10 @@ mod tests {
             headers.insert(header::CONTENT_TYPE, media_type.parse().unwrap());
             assert_eq!(accepts_sse_billing_notice(status, &headers), expected);
         }
-        assert!(!accepts_sse_billing_notice(StatusCode::OK, &HeaderMap::new()));
+        assert!(!accepts_sse_billing_notice(
+            StatusCode::OK,
+            &HeaderMap::new()
+        ));
     }
 
     #[test]
