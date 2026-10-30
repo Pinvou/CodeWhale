@@ -2174,6 +2174,16 @@
         "file": "900032_ledger_repair_history_proof.up.sql",
         "version": 900032,
         "sha256": "74beb8e84a6bd58ac04c5cf2d628023a5a66fea6eb46d081e1b4c5ea7982f5d6"
+      },
+      {
+        "file": "900037_product_admission_materials.down.sql",
+        "version": 900037,
+        "sha256": "59d82853b39a25167167c3ef6f8c37c0b2d613960584be0c1678e7b628600c2b"
+      },
+      {
+        "file": "900037_product_admission_materials.up.sql",
+        "version": 900037,
+        "sha256": "7b3ae6f7908de7fdd2e1fd227fb50e85416f3fa64f357133bd796e3465099c10"
       }
     ],
     "payment-simulator": [

@@ -1149,6 +1149,7 @@ func (w *ProductAdmissionExpiryWorker) Run(ctx context.Context) {
 	defer ticker.Stop()
 	for {
 		_, _ = w.repository.ExpireProductAdmissions(ctx, 100)
+		_, _ = w.repository.purgeDueProductAdmissionMaterials(ctx)
 		select {
 		case <-ctx.Done():
 			return
