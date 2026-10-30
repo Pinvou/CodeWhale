@@ -22,8 +22,11 @@ try {
   vite = await createServer({ root, configFile: false, appType: 'mpa', logLevel: 'error',
     plugins: [react()], server: { host: '127.0.0.1', port: 0, watch: null } });
   await vite.listen();
+  // CI containers cannot create Chrome's nested namespaces. This smoke loads
+  // only the local mock fixture; keep Chrome's sandbox enabled outside CI.
+  const ciArgs = process.env.CI === 'true' ? ['--no-sandbox'] : [];
   browser = await puppeteer.launch({ executablePath: chrome, headless: true,
-    userDataDir: profile, args: ['--disable-gpu', '--no-first-run', '--no-default-browser-check'] });
+    userDataDir: profile, args: [...ciArgs, '--disable-gpu', '--no-first-run', '--no-default-browser-check'] });
   const page = await browser.newPage();
   const errors = [];
   page.on('pageerror', error => errors.push(error.message));
@@ -37,6 +40,27 @@ try {
   }, label);
   await page.goto(url, { waitUntil: 'domcontentloaded' });
   await text('Hidden offline');
+  await page.evaluate(() => { window.archiveFixture.loadFailure = 'remote_proxy_malformed'; });
+  await click('刷新'); await text('远控记录无法按当前格式读取');
+  assert.equal(await page.evaluate(() => document.body.innerText.includes('Hidden offline')), false);
+  assert.equal(await page.evaluate(() => document.body.innerText.includes('暂无会话')), false);
+  assert.equal(await page.evaluate(() => [...document.querySelectorAll('button')].some(button => button.textContent === '下一页')), false);
+  await page.evaluate(() => { window.archiveFixture.loadFailure = null; window.archiveFixture.statusFails = true; });
+  let callsBefore = await page.evaluate(() => window.archiveFixture.calls.filter(call => call[0] === 'status').length);
+  await click('刷新');
+  await page.waitForFunction(count => window.archiveFixture.calls.filter(call => call[0] === 'status').length > count &&
+    [...document.querySelectorAll('button')].some(button => button.textContent === '刷新' && !button.disabled), {}, callsBefore);
+  await text('归档存储不可用');
+  assert.equal(await page.evaluate(() => document.body.innerText.includes('暂无会话')), false);
+  await page.evaluate(() => { window.archiveFixture.statusFails = false; window.archiveFixture.refreshFails = true; });
+  callsBefore = await page.evaluate(() => window.archiveFixture.calls.filter(call => call[0] === 'candidates').length);
+  await click('刷新');
+  await page.waitForFunction(count => window.archiveFixture.calls.filter(call => call[0] === 'candidates').length > count &&
+    [...document.querySelectorAll('button')].some(button => button.textContent === '刷新' && !button.disabled), {}, callsBefore);
+  await text('归档存储不可用');
+  assert.equal(await page.evaluate(() => document.body.innerText.includes('暂无会话')), false);
+  await page.evaluate(() => { window.archiveFixture.refreshFails = false; });
+  await click('刷新'); await text('Hidden offline');
   for (const [code, expected] of [['remote_proxy_archive_online', '请先断开再归档'],
     ['remote_proxy_archive_pending', '仍有未决任务']]) {
     await page.evaluate(value => { window.archiveFixture.failure = value; }, code);

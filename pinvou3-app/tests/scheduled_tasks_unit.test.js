@@ -960,6 +960,10 @@ function createBridgeHarness(sharedStorage, runtimeOptions) {
 
   return {
     bridge: bridge,
+    // The web wrapper above only mirrors the few namespaces scheduled-task
+    // scenarios need; tests that must reach the rest of the web bridge's
+    // TauriBridge surface (e.g. models.setActiveModel) use rawBridge directly.
+    rawBridge: rawBridge,
     bridgeKind: bridgeKind,
     handlers: handlers,
     calls: calls,
@@ -1624,15 +1628,119 @@ async function backgroundSessionFirstDeltaPublishesViaFrame(bridgeKind) {
     bridgeKind + ": the background first delta text must survive the coalesced publication");
 }
 
-// Regression anchor (PR #1215 review): the web bridge's chat:tool_end reset
-// branches cleared currentStreamText/currentStreamId without the desktop
-// invariant "the flush must precede the stream state reset", so item.html
-// stayed at the first-delta markdown while item.text already held the whole
-// turn until (or unless) the 180ms trailing-edge render fired.
-async function webToolEndFlushesStreamHtmlBeforeReset() {
-  var harness = createBridgeHarness(null, { bridgeKind: "web" });
+// Regression anchor (PR #2135 review, web lane): a background session's
+// chat:done must cancel that session's own pending 32ms notify frame. The
+// trailing notify() runs after runSyncOnSession has restored the visible
+// session, so it only cancels the visible session's frame — without the
+// terminal's explicit cancelPendingStreamNotify(sid) the coalesced frame
+// fires a redundant late publish round within 32ms (the desktop lane's
+// twin line is anchored by the bridge_domain_protocol chat-domain
+// fingerprint, so this behavioral pin is the web side's only anchor).
+// The 32ms frame clock is intercepted (runtimeOptions.setTimeout idiom) so
+// the late round is observed deterministically, not by wall-clock waits.
+async function backgroundTerminalCancelsPendingStreamFrame() {
+  var frameClock = createAnimationFrameClock();
+  var timers = [];
+  var nextTimerId = 1;
+  var harness = createBridgeHarness(null, {
+    bridgeKind: "web",
+    requestAnimationFrame: frameClock.request,
+    cancelAnimationFrame: frameClock.cancel,
+    setTimeout: function (callback, delay) {
+      timers.push({ id: nextTimerId, callback: callback, delay: delay });
+      return nextTimerId++;
+    },
+    clearTimeout: function () {},
+  });
   var bridge = harness.bridge;
-  var sessionId = "chat-web-tool-end-flush";
+  var activeId = "chat-bg-terminal-active";
+  var backgroundId = "chat-bg-terminal-frame";
+  harness.handlers.load_session = function (args) {
+    return { metadata: { id: args.id, title: "BG " + args.id }, messages: [], artifacts: [] };
+  };
+  assert.strictEqual(await bridge.sessions.switchToSession(activeId), true);
+  var snapshots = [];
+  var unsubscribe = bridge.state.subscribe("chat", function (snapshot) { snapshots.push(snapshot); });
+
+  // Arm the background session's coalesced notify frame exactly like the
+  // first-delta pin above: the suppressed background delta publishes nothing
+  // synchronously and falls through to the bounded 32ms frame.
+  harness.emit("chat:turn_started", { session_id: backgroundId });
+  assert.strictEqual(snapshots.length, 1,
+    "the background turn start should publish its session-list round");
+  harness.emit("chat:delta", { session_id: backgroundId, text: "bg-tail" });
+  assert.strictEqual(snapshots.length, 1,
+    "the background delta must stay inside its coalescing frame");
+
+  // The terminal publishes its own flush rounds; let them settle before
+  // sampling the baseline.
+  await harness.emit("chat:done", { session_id: backgroundId, status: "Completed" });
+  for (var settle = 0; settle < 8; settle++) await tick();
+  var publishedAtTerminal = snapshots.length;
+  assert.ok(publishedAtTerminal >= 2,
+    "the background terminal must publish its flush round");
+
+  // Elapse the 32ms frame budget: with the terminal's own cancel intact the
+  // frame's publish must find its pending entry cancelled and stay silent
+  // (STREAM_NOTIFY_MAX_WAIT_MS is the only 32ms timer the web bridge arms).
+  var frameTimers = timers.filter(function (timer) { return timer.delay === 32; });
+  assert.strictEqual(frameTimers.length, 1,
+    "the background delta must have armed exactly one coalesced 32ms notify frame");
+  frameTimers[0].callback();
+  assert.strictEqual(snapshots.length, publishedAtTerminal,
+    "a background chat:done must cancel its own pending stream notify frame");
+  unsubscribe();
+}
+
+// Regression anchor (PR #2135 review): setActiveModel must re-run
+// loadSettings after the backend switch, otherwise state.settings keeps the
+// previous active model and the UI keeps showing the old selection after a
+// successful switch. Pinned on both lanes: the web bridge and its tauri twin
+// (bridge/settings.js) each carry the call, and this behavioral pin is the
+// only anchor on either side (the domain fingerprints anchor invoke/listen
+// call-graph slices, and a dropped awaited call is a body-internal change).
+async function setActiveModelRefreshesSettingsSnapshot(bridgeKind) {
+  var harness = createBridgeHarness(null, { bridgeKind: bridgeKind });
+  var bridge = harness.bridge;
+  var setActiveModel = bridgeKind === "tauri" ? bridge.models.setActiveModel : harness.rawBridge.setActiveModel;
+  var backendActiveModel = "model-a";
+  harness.handlers.get_settings = function () {
+    return { theme: "genesis", language: "zh-Hans", active_model_id: backendActiveModel };
+  };
+  harness.handlers.set_active_model = function (args) {
+    backendActiveModel = args.id;
+    return true;
+  };
+  harness.handlers.list_models = function () {
+    return { models: [{ id: backendActiveModel, model: "/wire/" + backendActiveModel }], active_model_id: backendActiveModel };
+  };
+  harness.handlers.get_effective_model_config = function () {
+    return { model: "/wire/" + backendActiveModel };
+  };
+
+  // First switch establishes the pre-switch baseline in state.settings.
+  await setActiveModel("model-a");
+  var settingsAfterFirst = (bridgeKind === "tauri" ? bridge.state.get("settings") : bridge.state.get()).settings || {};
+  assert.strictEqual(settingsAfterFirst.active_model_id, "model-a",
+    bridgeKind + ": the first switch must load the backend settings into state");
+
+  // The second switch is the regression probe: after setActiveModel resolves,
+  // state.settings must already reflect the new backend active model.
+  await setActiveModel("model-b");
+  var settingsAfterSecond = (bridgeKind === "tauri" ? bridge.state.get("settings") : bridge.state.get()).settings || {};
+  assert.strictEqual(settingsAfterSecond.active_model_id, "model-b",
+    bridgeKind + ": setActiveModel must refresh state.settings after the backend switch");
+}
+
+// Regression anchor (PR #1215 review): the chat:tool_end reset branches
+// cleared currentStreamText/currentStreamId without the invariant "the flush
+// must precede the stream state reset", so item.html stayed at the
+// first-delta markdown while item.text already held the whole turn until (or
+// unless) the 180ms trailing-edge render fired. Pinned on both lanes.
+async function toolEndFlushesStreamHtmlBeforeReset(bridgeKind) {
+  var harness = createBridgeHarness(null, { bridgeKind: bridgeKind });
+  var bridge = harness.bridge;
+  var sessionId = "chat-" + bridgeKind + "-tool-end-flush";
   harness.handlers.load_session = function () {
     return { metadata: { id: sessionId, title: "Tool end flush" }, messages: [], artifacts: [] };
   };
@@ -1644,18 +1752,146 @@ async function webToolEndFlushesStreamHtmlBeforeReset() {
   // tool_end, so the 180ms trailing-edge render cannot preempt the flush.
   harness.emit("chat:tool_end", {
     session_id: sessionId,
-    id: "web-flush-tool",
+    id: "flush-tool",
     name: "read_file",
     output: "ok",
     success: true,
   });
 
-  var streamedItem = bridge.state.get().chatItems.filter(function (item) {
+  var chatItems = (bridgeKind === "tauri" ? bridge.state.get("chat") : bridge.state.get()).chatItems;
+  var streamedItem = chatItems.filter(function (item) {
     return item.type === "assistant" && item.text === "before tool-end-tail";
   }).pop();
-  assert.ok(streamedItem, "web: the accumulated stream bubble must survive tool_end");
+  assert.ok(streamedItem, bridgeKind + ": the accumulated stream bubble must survive tool_end");
   assert.ok(String(streamedItem.html || "").includes("before tool-end-tail"),
-    "web: tool_end must synchronously flush the full markdown html before the stream state reset");
+    bridgeKind + ": tool_end must synchronously flush the full markdown html before the stream state reset");
+}
+
+// The early-return terminal branches inside chat:tool_end each carry their own
+// flush before the stream reset; a removed flush there is invisible to the
+// general tool_end pin because those branches return before reaching it.
+async function terminalToolEndBranchFlushesStreamHtmlBeforeReset(bridgeKind, toolStartPayload, toolEndPayload, label) {
+  var harness = createBridgeHarness(null, { bridgeKind: bridgeKind });
+  var bridge = harness.bridge;
+  var sessionId = "chat-" + bridgeKind + "-terminal-flush-" + label;
+  harness.handlers.load_session = function () {
+    return { metadata: { id: sessionId, title: "Terminal flush " + label }, messages: [], artifacts: [] };
+  };
+  assert.strictEqual(await bridge.sessions.switchToSession(sessionId), true);
+
+  harness.emit("chat:tool_start", Object.assign({ session_id: sessionId }, toolStartPayload));
+  harness.emit("chat:delta", { session_id: sessionId, text: "before " });
+  harness.emit("chat:delta", { session_id: sessionId, text: label + "-tail" });
+  // Deliberately synchronous: no awaited timer between the deltas and
+  // tool_end, so the 180ms trailing-edge render cannot preempt the flush.
+  harness.emit("chat:tool_end", Object.assign({ session_id: sessionId }, toolEndPayload));
+
+  var tail = "before " + label + "-tail";
+  var chatItems = (bridgeKind === "tauri" ? bridge.state.get("chat") : bridge.state.get()).chatItems;
+  var streamedItem = chatItems.filter(function (item) {
+    return item.type === "assistant" && item.text === tail;
+  }).pop();
+  assert.ok(streamedItem, bridgeKind + "[" + label + "]: the accumulated stream bubble must survive the terminal tool_end branch");
+  assert.ok(String(streamedItem.html || "").includes(tail),
+    bridgeKind + "[" + label + "]: the terminal tool_end branch must synchronously flush the full markdown html before the stream state reset");
+}
+
+// Regression anchor (stream coalescing review): the web admission-reject path
+// filters the optimistic send and resets the remote stream state, so without
+// the synchronous flush the live post-tool bubble's html stayed at its
+// first-delta markdown forever — the trailing-edge render no longer finds the
+// item once currentStreamId has been reset.
+async function webAdmissionRejectFlushesStreamHtmlBeforeReset() {
+  var harness = createBridgeHarness(null, {
+    bridgeKind: "web",
+    webSupportedCommands: ["web_access_chat", "web_access_load_session_chunk",
+      "web_access_list_sessions", "web_access_list_archived_sessions", "web_access_status"],
+  });
+  var bridge = harness.bridge;
+  var sessionId = "chat-admission-flush";
+  harness.handlers.load_session = function () {
+    return { metadata: { id: sessionId, title: "Admission flush" }, messages: [], artifacts: [] };
+  };
+  assert.strictEqual(await bridge.sessions.switchToSession(sessionId), true);
+
+  // An optimistic local send hangs inside the admission RPC while the remote
+  // turn streams past its first delta and crosses a tool boundary, so the live
+  // bubble at reject time is a fresh post-tool bubble, not the removed one.
+  var rejectRpc = null;
+  var rejectedRpc = new Promise(function (resolve) { rejectRpc = resolve; });
+  harness.handlers.web_access_chat = function () {
+    return rejectedRpc.then(function () {
+      return Promise.reject(new Error("session_turn_in_progress"));
+    });
+  };
+  var sendOutcome = bridge.chat.sendMessage("racing send");
+  await tick();
+  await harness.emit("chat:user_message", { session_id: sessionId, content: "remote q" });
+  await harness.emit("chat:delta", { session_id: sessionId, text: "INTO-Y " });
+  await harness.emit("chat:tool_start", { session_id: sessionId, id: "adm-tool", name: "read_file", args: { path: "x" } });
+  await harness.emit("chat:delta", { session_id: sessionId, text: "Z-FIRST" });
+  await harness.emit("chat:delta", { session_id: sessionId, text: "-Z-SECOND" });
+
+  rejectRpc();
+  // sendMessage refuses the racing send (false) once its admission RPC
+  // rejects; the reject path itself must have run — that is exactly the
+  // context the flush under test lives in. The deferred remote user_message
+  // replays afterwards, so busy legitimately returns to the remote turn.
+  assert.strictEqual(await sendOutcome, false,
+    "web: the racing send must be refused once its admission RPC rejects");
+  var postToolBubble = bridge.state.get().chatItems.filter(function (item) {
+    return item.type === "assistant" && String(item.text || "").includes("Z-FIRST");
+  }).pop();
+  assert.ok(postToolBubble, "web: the post-tool remote bubble must survive the admission reject");
+  assert.ok(String(postToolBubble.html || "").includes("Z-SECOND"),
+    "web: the admission reject must synchronously flush the remote bubble's html before the stream reset");
+}
+
+// Desktop twin of webAdmissionRejectFlushesStreamHtmlBeforeReset: the tauri
+// admission-reject catch resets the pending assistant inside the same
+// working-set sync, so without the synchronous flush the surviving post-tool
+// remote bubble's html stayed at its first-delta markdown forever (the
+// trailing-edge render no longer finds the item once currentStreamId is 0).
+async function tauriAdmissionRejectFlushesStreamHtmlBeforeReset() {
+  var harness = createBridgeHarness(null, {});
+  var bridge = harness.bridge;
+  var sessionId = "chat-admission-flush-tauri";
+  harness.handlers.load_session = function () {
+    return { metadata: { id: sessionId, title: "Admission flush tauri" }, messages: [], artifacts: [] };
+  };
+  assert.strictEqual(await bridge.sessions.switchToSession(sessionId), true);
+
+  // An optimistic local send hangs inside the admission RPC while the remote
+  // turn streams past its first delta and crosses a tool boundary, so the
+  // live bubble at reject time is a fresh post-tool bubble, not the removed
+  // optimistic one.
+  var rejectRpc = null;
+  var rejectedRpc = new Promise(function (resolve) { rejectRpc = resolve; });
+  harness.handlers.chat = function () {
+    return rejectedRpc.then(function () {
+      return Promise.reject(new Error("session_turn_in_progress"));
+    });
+  };
+  var sendOutcome = bridge.chat.sendMessage("racing send");
+  await tick();
+  await harness.emit("chat:user_message", { session_id: sessionId, content: "remote q" });
+  await harness.emit("chat:delta", { session_id: sessionId, text: "INTO-Y " });
+  await harness.emit("chat:tool_start", { session_id: sessionId, id: "adm-tool", name: "read_file", args: { path: "x" } });
+  await harness.emit("chat:delta", { session_id: sessionId, text: "Z-FIRST" });
+  await harness.emit("chat:delta", { session_id: sessionId, text: "-Z-SECOND" });
+
+  rejectRpc();
+  // The desktop contract differs from the web bridge: a main-path send
+  // failure still throws to the caller (surfaceFailure) — but only after the
+  // catch has cleaned up the optimistic items and flushed the stream state.
+  await assert.rejects(sendOutcome, /session_turn_in_progress/,
+    "tauri: the racing send must surface the admission failure after the cleanup ran");
+  var postToolBubble = bridge.state.get("chat").chatItems.filter(function (item) {
+    return item.type === "assistant" && String(item.text || "").includes("Z-FIRST");
+  }).pop();
+  assert.ok(postToolBubble, "tauri: the post-tool remote bubble must survive the admission reject");
+  assert.ok(String(postToolBubble.html || "").includes("Z-SECOND"),
+    "tauri: the admission reject must synchronously flush the remote bubble's html before the stream reset");
 }
 
 async function olderDesktopUsesServerGeneratedSessionDownloadId() {
@@ -9197,7 +9433,43 @@ Promise.resolve()
   .then(function () { return streamNotificationTimerFallback("web"); })
   .then(function () { return backgroundSessionFirstDeltaPublishesViaFrame("tauri"); })
   .then(function () { return backgroundSessionFirstDeltaPublishesViaFrame("web"); })
-  .then(function () { return webToolEndFlushesStreamHtmlBeforeReset(); })
+  .then(backgroundTerminalCancelsPendingStreamFrame)
+  .then(function () { return setActiveModelRefreshesSettingsSnapshot("tauri"); })
+  .then(function () { return setActiveModelRefreshesSettingsSnapshot("web"); })
+  .then(function () { return webAdmissionRejectFlushesStreamHtmlBeforeReset(); })
+  .then(function () { return tauriAdmissionRejectFlushesStreamHtmlBeforeReset(); })
+  .then(function () { return toolEndFlushesStreamHtmlBeforeReset("tauri"); })
+  .then(function () { return toolEndFlushesStreamHtmlBeforeReset("web"); })
+  .then(function () { return terminalToolEndBranchFlushesStreamHtmlBeforeReset(
+    "tauri",
+    { id: "tauri-flush-req-input", name: "request_user_input", args: {} },
+    { id: "tauri-flush-req-input", name: "request_user_input", output: "ok", success: true },
+    "req-input"); })
+  .then(function () { return terminalToolEndBranchFlushesStreamHtmlBeforeReset(
+    "tauri",
+    { id: "tauri-flush-artifact-fail", name: "present_artifact", args: { path: "tail.png" } },
+    { id: "tauri-flush-artifact-fail", name: "present_artifact", output: "boom", success: false },
+    "artifact-fail"); })
+  .then(function () { return terminalToolEndBranchFlushesStreamHtmlBeforeReset(
+    "tauri",
+    { id: "tauri-flush-artifact-ok", name: "present_artifact", args: { path: "tail.png" } },
+    { id: "tauri-flush-artifact-ok", name: "present_artifact", output: "tail.png", success: true },
+    "artifact-ok"); })
+  .then(function () { return terminalToolEndBranchFlushesStreamHtmlBeforeReset(
+    "web",
+    { id: "web-flush-req-input", name: "request_user_input", args: {} },
+    { id: "web-flush-req-input", name: "request_user_input", output: "ok", success: true },
+    "req-input"); })
+  .then(function () { return terminalToolEndBranchFlushesStreamHtmlBeforeReset(
+    "web",
+    { id: "web-flush-artifact-fail", name: "present_artifact", args: { path: "tail.png" } },
+    { id: "web-flush-artifact-fail", name: "present_artifact", output: "boom", success: false },
+    "artifact-fail"); })
+  .then(function () { return terminalToolEndBranchFlushesStreamHtmlBeforeReset(
+    "web",
+    { id: "web-flush-artifact-ok", name: "present_artifact", args: { path: "tail.png" } },
+    { id: "web-flush-artifact-ok", name: "present_artifact", output: "tail.png", success: true },
+    "artifact-ok"); })
   .then(multipleKnowledgeMountBehavior)
   .then(queuedKnowledgeMountKeepsOriginalSession)
   .then(staleKnowledgeSnapshotDoesNotCrossSessions)

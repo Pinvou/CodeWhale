@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useId, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
 import { isImeComposing } from '../../shared/ime-guard.mjs';
+import { useAutoResizeTextarea } from '../../hooks/useAutoResizeTextarea.js';
 import {
   Brain, Check, ChevronDown, FileText, FolderOpen, GitBranch, MessageSquare, Monitor, Paperclip,
   Plus, RefreshCw, Send, Sparkles, StopCircle, Upload, User,
@@ -880,6 +881,9 @@ export function CodexAcpView({
   const lastScrollHeightRef = useRef(0);
   const composerRef = useRef(null);
   const voiceComposerTextareaRef = composerRef;
+  // Auto-grow the composer with its content, clamped to the code page's 48-192px band;
+  // the textarea keeps overflow scrolling once the clamp height is reached.
+  useAutoResizeTextarea(voiceComposerTextareaRef, draft, { min: 48, max: 192 });
   const attachmentIdRef = useRef(0);
   const attachmentMenuTriggerRef = useRef(null);
   const deviceFileInputRef = useRef(null);
@@ -4000,9 +4004,19 @@ export function CodexAcpView({
               )}
               <textarea ref={composerRef} value={draft} onChange={event => {
                 const value = event.target.value;
-                if (!value.trim()) {
-                  const operationId = bridge.voice.getVoiceOperationId(activeId || null, isNativeAgent ? 'native' : 'acp');
-                  if (operationId) bridge.voice.abandonVoiceResult(operationId);
+                // Emptying the composer abandons this page's pending voice result —
+                // in-flight through the bridge's live voice state, completed-but-
+                // adoptable through the operation registry (this page books the
+                // native/acp ownerKinds on useComposerVoiceInput) — so the
+                // transcription can neither land in the cleared draft (terminal
+                // operations skip the write-back) nor be adopted by an unrelated
+                // later send.
+                if (!value.trim() && bridge.voice && typeof bridge.voice.abandonVoiceResult === 'function') {
+                  const pendingOperationId = (nativeVoiceActive && nativeVoiceInput.operationId)
+                    || (typeof bridge.voice.getVoiceOperationId === 'function'
+                      ? bridge.voice.getVoiceOperationId(activeId || null, isNativeAgent ? 'native' : 'acp')
+                      : null);
+                  if (pendingOperationId) bridge.voice.abandonVoiceResult(pendingOperationId);
                 }
                 setDraft(value);
               }}
@@ -4028,7 +4042,7 @@ export function CodexAcpView({
                   }
                 }}
                 placeholder={codexCopy.placeholder}
-                rows={1} className="w-full min-h-[48px] max-h-48 resize-none bg-transparent outline-none text-[15px] leading-6 placeholder:text-gray-400" />
+                rows={1} className="w-full min-h-[48px] max-h-48 overflow-y-auto resize-none bg-transparent outline-none text-[15px] leading-6 placeholder:text-gray-400" />
               <div data-testid="codex-composer-footer" className="flex items-center justify-between mt-1">
                 <div className="flex min-w-0 flex-wrap items-center gap-2 text-[10px] text-gray-400">
                   {!activeId && (

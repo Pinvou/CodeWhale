@@ -1,0 +1,146 @@
+name: Windows Self-hosted Runner Validation
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: windows-self-hosted-validation-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  windows:
+    strategy:
+      fail-fast: false
+      max-parallel: 14
+      matrix:
+        runner:
+          - pinvou3-windows-heavy-01
+          - pinvou3-windows-heavy-02
+          - pinvou3-windows-medium-01
+          - pinvou3-windows-medium-02
+          - pinvou3-windows-light-01
+          - pinvou3-windows-light-02
+          - pinvou3-windows-light-03
+          - pinvou3-windows-light-04
+          - pinvou3-windows-light-05
+          - pinvou3-windows-light-06
+          - pinvou3-windows-light-07
+          - pinvou3-windows-light-08
+          - pinvou3-windows-light-09
+          - pinvou3-windows-light-10
+    runs-on: [self-hosted, Windows, X64, '${{ matrix.runner }}']
+    timeout-minutes: 20
+    defaults:
+      run:
+        shell: pwsh -NoLogo -NoProfile -NonInteractive -File "{0}"
+    steps:
+      - name: Verify Windows identity and D-drive paths
+        run: |
+          $ErrorActionPreference = 'Stop'
+          if ($env:RUNNER_OS -ne 'Windows') { throw 'A native Windows runner is required' }
+          $identity = [Security.Principal.WindowsIdentity]::GetCurrent()
+          $principal = [Security.Principal.WindowsPrincipal]::new($identity)
+          if ($principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) {
+            throw 'The runner account must not be an administrator'
+          }
+          foreach ($name in @('RUNNER_TEMP', 'RUNNER_TOOL_CACHE', 'TEMP', 'HOME', 'NPM_CONFIG_CACHE', 'CARGO_HOME', 'RUSTUP_HOME')) {
+            $value = [Environment]::GetEnvironmentVariable($name)
+            if ([string]::IsNullOrEmpty($value) -or -not $value.StartsWith('D:\', [StringComparison]::OrdinalIgnoreCase)) {
+              throw "$name must be configured on D:"
+            }
+          }
+          $probe = Join-Path $env:RUNNER_TEMP ('windows-lock-' + [guid]::NewGuid().ToString('N'))
+          $locked = $false
+          $second = $null
+          $stream = [IO.File]::Open($probe, 'CreateNew', 'ReadWrite', 'None')
+          try {
+            try { $second = [IO.File]::OpenRead($probe) } catch [IO.IOException] { $locked = $true }
+            if ($second) { $second.Dispose() }
+            if (-not $locked) { throw 'Expected native Windows file-sharing semantics' }
+          } finally { $stream.Dispose(); Remove-Item -LiteralPath $probe }
+          Add-Type -Path $env:CI_JOB_HELPER
+          $limits = [PinvouCiJob]::Read($env:CI_RESOURCE_JOB_NAME)
+          if ($limits.MemoryBytes -ne ([uint64]$env:CI_MEMORY_LIMIT_GB * 1GB) -or $limits.CpuRate -ne [uint32]$env:CI_CPU_RATE) {
+            throw 'The native Windows resource limits do not match the runner pool'
+          }
+          if (($limits.CpuFlags -band 5) -ne 5 -or ($limits.LimitFlags -band 8704) -ne 8704) {
+            throw 'CPU hard cap, job memory ceiling and child cleanup must be enabled'
+          }
+          $sharedTools = Split-Path -Parent (Split-Path -Parent $env:CI_JOB_HELPER)
+          $writeProbe = Join-Path $sharedTools ('readonly-' + [guid]::NewGuid().ToString('N'))
+          $writeDenied = $false
+          $handle = $null
+          try { $handle = [IO.File]::Open($writeProbe, 'CreateNew', 'Write', 'None') }
+          catch [UnauthorizedAccessException] { $writeDenied = $true }
+          finally { if ($handle) { $handle.Dispose(); Remove-Item -LiteralPath $writeProbe } }
+          if (-not $writeDenied) { throw 'Shared tools must be read-only to job accounts' }
+          $deploymentRoot = Split-Path -Parent $sharedTools
+          $instanceRoot = [IO.Path]::GetFullPath((Join-Path $env:CARGO_HOME '..\..'))
+          $peerRoot = $deploymentRoot
+          if ($instanceRoot -eq $deploymentRoot) {
+            $peerRoot = Join-Path (Split-Path -Parent $deploymentRoot) 'runners\windows-heavy-01'
+          }
+          if ($peerRoot -eq $instanceRoot) { throw 'The isolation check must target another runner' }
+          # Every configured runner already owns runner\.env. Opening a handle
+          # tests its ACL without reading contents or requiring a probe fixture.
+          $peer = Join-Path $peerRoot 'runner\.env'
+          $readDenied = $false
+          $peerHandle = $null
+          try { $peerHandle = [IO.File]::OpenRead($peer) }
+          catch [UnauthorizedAccessException] { $readDenied = $true }
+          finally { if ($peerHandle) { $peerHandle.Dispose() } }
+          if (-not $readDenied) { throw 'A job account must not read another instance directory' }
+          Write-Output 'Native Windows, non-admin identity, D-drive paths, file locking and resource limits verified.'
+          "Pool: $env:CI_RUNNER_POOL; memory ceiling: $env:CI_MEMORY_LIMIT_GB GB; CPU rate: $env:CI_CPU_RATE/10000" >> $env:GITHUB_STEP_SUMMARY
+
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+          submodules: false
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: '24'
+
+      - name: Verify tools and version consistency
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $PSNativeCommandUseErrorActionPreference = $true
+          git --version
+          python --version
+          node --version
+          npm --version
+          node scripts/sync-version.mjs --check
+
+      - name: Run application contracts on Windows
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $PSNativeCommandUseErrorActionPreference = $true
+          npm --prefix pinvou3-app run test:update-notice
+          npm --prefix pinvou3-app run test:diff-parser
+          node pinvou3-app/tests/windows_runtime_packaging_contract.test.js
+
+      - name: Record verified runner
+        run: |
+          $record = @{
+            runner = $env:RUNNER_NAME
+            os = $env:RUNNER_OS
+            architecture = $env:RUNNER_ARCH
+            commit = $env:GITHUB_SHA
+            run = $env:GITHUB_RUN_ID
+            workspace = $env:GITHUB_WORKSPACE
+            temporary = $env:RUNNER_TEMP
+            toolCache = $env:RUNNER_TOOL_CACHE
+            node = (& node --version)
+            nonAdministrator = $true
+            pool = $env:CI_RUNNER_POOL
+            instance = $env:CI_RUNNER_INSTANCE
+            memoryLimitGB = [int]$env:CI_MEMORY_LIMIT_GB
+            cpuRate = [int]$env:CI_CPU_RATE
+          }
+          $record | ConvertTo-Json | Set-Content -LiteralPath runner-verification.json -Encoding utf8
+
+          "Verified runner: $env:RUNNER_NAME; commit: $env:GITHUB_SHA" >> $env:GITHUB_STEP_SUMMARY

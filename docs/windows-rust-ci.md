@@ -3,13 +3,32 @@
 ## Coverage contract
 
 `windows-rust-test` is the required native-Windows **Rust** job (the required
-gate also has `windows-codex-runtime-test`, which is out of scope here). It is
-a two-leg matrix on `windows-latest` (`fail-fast: false`, `max-parallel: 2`);
+gate also has related native-runtime, rustup-repair, static-updater and
+relay jobs — see the related-jobs section below). It is
+a two-leg matrix on the configured Windows heavy runner pool (default
+`windows-latest`; `fail-fast: false`, `max-parallel: 2`);
 the required gate aggregates the matrix result, so both legs must pass:
 
 - `all-targets-check` runs the metadata-only checks (steps 8-10 below).
 - `regression` links the `pinvou3_lib` test executable and runs everything
   that needs it (steps 11-17 below).
+
+`PINVOU_WINDOWS_ENABLED=false` disables Windows independently of
+`PINVOU_MACOS_ENABLED`. With Windows enabled and macOS disabled, Windows
+failures still fail the required gate; macOS results do not block PR merges.
+Self-hosted Windows runners require the native MSVC/Windows SDK toolchain and
+independent Cargo/Rustup directories. The dev-profile override is updated
+idempotently so repeated jobs cannot accumulate duplicate TOML tables.
+
+For self-hosted runners on networks with unreliable crates.io access, apply the
+network configuration to each runner's actual `CARGO_HOME/config.toml` rather
+than the administrator's home. A sparse registry mirror and
+`[http] multiplexing = false` avoid repeated index requests over unstable HTTP/2
+connections; keep `Cargo.lock` and its checksums unchanged. Windows Cargo uses
+Schannel, so the runner account must also be able to reach the certificate
+authority's CRL/OCSP endpoints through its configured network route. Keep TLS
+certificate and revocation checks enabled, and verify dependency download and
+native compilation as the runner account before enabling the pool.
 
 Routing is job level and identical for both legs. The job runs on every push
 to `main` (cumulative Windows coverage plus cache warm-up) and on ready,
@@ -33,13 +52,23 @@ scheduling, not the set or failure semantics of the checks.
 `rust_full` fails closed: all of `pinvou3-app/src-tauri/**/*.rs` plus shared
 manifests (`**/Cargo.toml`, `**/Cargo.lock`, `**/deny.toml`, `**/build.rs`,
 `pinvou3-app/src-tauri/.cargo/**`, `pinvou3-app/src-tauri/rust-toolchain.toml`,
-the `CodeWhale` submodule, `.gitmodules`) trigger it, except the documented
+the `CodeWhale` submodule, `.gitmodules`) and the loongarch64 cross-pipeline
+build scripts the rust legs execute (`scripts/ci-loongarch64-toolchain.sh`,
+`scripts/ci-loongarch64-sysroot.sh`, `scripts/ci-build-linux-loongarch64.sh`)
+trigger it, except the documented
 low-risk leaf features `feedback`, `personas`, and `pet` (their registration
 or app command surface still matches). `cli_rust` covers `pinvou-cli` Rust
-paths plus the compile inputs the CLI embeds, and keeps all three leaf
-features (`feedback`, `personas`, `pet`) gated through the CLI suite because
-the CLI path-depends on the app crate — they are exempt only from the full
-app suite, never from pre-merge Windows coverage.
+paths plus the compile inputs
+the CLI embeds (`pinvou-cli/.cargo/**`, `pinvou-cli/**/*.manifest`,
+`pinvou3-app/src-tauri/tauri.conf.json`, the `CodeWhale` submodule, the
+connector lock tables `pinvou3-app/src-tauri/resources/platforms/**`, the
+bundle resources `pinvou3-app/src-tauri/resources/common/bundle/**` and
+`pinvou3-app/resources/mcp-servers/**`, and the embedded docs
+`docs/plugin-package-spec.md` / `docs/gaia-benchmark.md`), the pipewire
+setup script its legs run (`scripts/ci-libpipewire-build.sh`), and keeps all
+three leaf features (`feedback`, `personas`, `pet`) gated through the CLI
+suite because the CLI path-depends on the app crate — they are exempt only
+from the full app suite, never from pre-merge Windows coverage.
 
 ## What the job runs
 
@@ -55,7 +84,7 @@ order:
    upgrade, the dev profile's dependency-level `O2` makes rustc/LLVM exceed
    the 16 GB hosted runner while compiling `codewhale-tui` (lib), and
    tightening codegen-units instead pushed the compile past the job cap.
-   This job-only step appends a `[profile.dev.package.codewhale-tui]`
+   This job-only step installs a `[profile.dev.package.codewhale-tui]`
    `opt-level = 0` override to `CARGO_HOME/config.toml` (package-level
    profile overrides can only come from config, not an environment
    variable) without touching the repository `Cargo.toml`; local builds keep
@@ -107,8 +136,11 @@ order:
 13. (`regression`) Run `python scripts/ci-windows-imports-diagnose.py` on `PINVOU3_TEST_EXE`
     — a non-blocking PE import-table diagnostic (`continue-on-error`), after
     step 12 so the embedded manifest exempts SxS DLLs such as `comctl32`.
-14. (`regression`) Run the CodeWhale PowerShell regression filters
-    (`forkguard_powershell` and `forkguard_windows_shell_text`) from the
+14. (`regression`) Run the CodeWhale Windows PowerShell regression filters
+    (`forkguard_powershell`, `forkguard_windows_shell_text`,
+    `command_spec_env_overlays_preserve_existing_values`,
+    `forkguard_windows_shell_env_overlays_keep_python_stdio_utf8`,
+    `windows_shell_env_explicit_override_is_case_insensitive`) from the
     dependency crate itself. The parent application jobs do not execute a
     dependency crate's lib tests. The step pins `RUSTUP_TOOLCHAIN` to the
     aligned toolchain — the env var overrides CodeWhale's own
@@ -144,6 +176,10 @@ order:
     - `before_anything_lands`
     - `preserves_consent_state`
     - `command_bodies_register_deny_first`
+    - `shared_apply_preserves_order`
+    - `production_skill_gate_refusal`
+    - `deny_decision_keeps_lazy_alias`
+    - `app::connector_consent_tests::`
     - `vacuous_uninstall_keeps_fresh_consent_entries`
     - `standalone_tencent_docs_preset_deny_entry_excludes_the_materialized_dir`
     - `restore_of_package_missing_entry_registers_no_deny_entry`
@@ -194,6 +230,8 @@ order:
     - `features::monitor::platform::windows_memory::tests::`
     - `features::monitor::platform::windows_gpu::tests::`
     - `features::remote_control::platform::windows::tests::`
+    - `app::commands::remote_control::reader_resume_tests::`
+    - `features::remote_control::controller::transfer::staging::tests::`
     - `features::computer_use::platform::windows::tests::`
     - `failed_probe_never_deletes_an_existing_store_windows`
     - `features::voice_shortcut::platform::tests::`
@@ -218,6 +256,12 @@ order:
     `dataset_windows` and `fetch_windows_acl` (`adapter-gaia`), and
     `private_prediction::tests::windows_` plus `windows_private_acl::tests::`
     (`benchmark-core`).
+
+    The private-ACL regressions include owned files and directories whose
+    access rules omit `WRITE_OWNER`, as on ordinary runner accounts. Hardening
+    must not request an ownership change when the current user already owns
+    the entry. The protected DACL and exact owner/SYSTEM/Administrators grants
+    remain mandatory, including on repeated calls.
 
 ## Related jobs that share this gate
 

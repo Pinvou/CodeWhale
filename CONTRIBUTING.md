@@ -126,13 +126,19 @@ Release-chain changes run lightweight contract tests only; full deb, dmg, and ns
 packages are built only after a
 `VERSION` change reaches `main`, or through an explicit `workflow_dispatch`.
 
-The Linux Rust job reserves at least 12 GiB of free disk after dependencies and
-caches are prepared. `scripts/ci-rust-disk.py` removes only the unused
-preinstalled SDK directories (Android, .NET, Haskell/ghcup, Julia by default;
-optionally the hostedtoolcache and browser bundles with `--aggressive`) on
-disposable GitHub-hosted Linux runners; it refuses self-hosted runners,
-redirected paths, and an undersized disk (`--min-free-gib`, default 12). The
-release build jobs run the same preparation with a 24 GiB floor. Hosted Linux
+The Linux Rust jobs prepare disk with `scripts/ci-rust-disk.py`, which removes
+only the unused preinstalled SDK directories (Android, .NET, Haskell/ghcup,
+Julia by default; optionally the hostedtoolcache and browser bundles with
+`--aggressive`) on disposable GitHub-hosted Linux runners; deletion refuses
+self-hosted runners and redirected paths. On self-hosted Linux, workflows use
+`--check-only`, which checks the same capacity floor without scanning or deleting
+SDKs. Both modes refuse an undersized disk
+(`--min-free-gib`, default 12). The pr-check rust-test job calls it before the
+swap file and caches land with a 24 GiB floor, again before the cache
+restores, and again after them (12 GiB floor); rust-lint uses the same
+24 GiB pre-swap floor, while cli-test and the loongarch64 cross-check run the
+default floor. The release build jobs run the same preparation once with a
+24 GiB floor. Hosted Linux
 runners use a single disk (`/` and `/mnt` share one ext4 filesystem), so the
 memory expansion step (`scripts/ci-memory-setup.sh`) provisions memory in
 layers: zram (on by default, sized to 2x RAM with a zstd compressor, pool
@@ -140,6 +146,33 @@ capped at 70% of RAM), a mandatory 8 GiB `/mnt/swapfile` as the unbounded
 overflow (on the shared single disk this costs 8 GiB of build disk; it is
 skipped only when /mnt is RAM-backed or has too little free space), then
 zswap and the image swap as fallbacks.
+Self-hosted runners retain their administrator-provisioned memory and swap;
+the memory setup script leaves them unchanged, and apt cleanup is hosted-only.
+
+Repository administrators can set `PINVOU_LINUX_RUNNER` to a JSON label array
+(for example `["self-hosted","Linux","pinvou3"]`) to route x64 Linux jobs to
+a dedicated Ubuntu 22.04 runner. Without that variable they use `ubuntu-22.04`.
+The runner needs passwordless sudo for dependency setup, Docker with Compose and
+Buildx, GitHub CLI, and access to the required package registries. It must be
+reserved for trusted repository code. Self-hosted jobs retain local npm caches
+and disable setup-node's remote cache upload. Set `PINVOU_WINDOWS_MAC_ENABLED`
+to the literal `false` to disable Windows/macOS jobs and their corresponding
+required results; Linux checks remain required. Unset or any other value keeps
+the existing three-platform policy. ARM release jobs keep their hosted ARM label.
+Optional `PINVOU_LINUX_HEAVY_RUNNER`, `PINVOU_LINUX_MEDIUM_RUNNER`, and
+`PINVOU_LINUX_LIGHT_RUNNER` arrays override that default for compilation,
+application/integration tests, and fast policy checks respectively. Each falls
+back to `PINVOU_LINUX_RUNNER`, then to the hosted 22.04 image. Distinct pool labels
+keep large Rust compilations away from small policy runners.
+
+Hosts use Ubuntu 26.04 while runner containers use the Ubuntu 22.04 image in
+`scripts/ci/runner-image/`. This retains the existing release glibc compatibility
+baseline. Each runner has independent writable state and resource limits.
+PostgreSQL allocates dynamic CI ports; release-console container tests use a
+job-specific Compose project, port, and temporary public directory instead of
+the host production directory. The image preinstalls Chrome and the verified
+PipeWire prefix. `PINVOU_PIPEWIRE_SOURCE_ARCHIVE` supplies a cached source archive
+with the same upstream SHA256 check; it does not bypass integrity verification.
 All Linux jobs pin the release runner image (`ubuntu-22.04` /
 `ubuntu-22.04-arm`): release binaries link the build machine's glibc, so
 tests must run on the same system. The image is upgraded repo-wide in one
