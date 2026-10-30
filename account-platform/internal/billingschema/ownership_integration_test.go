@@ -182,7 +182,7 @@ VALUES('aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa','bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbb
 	}
 	assertSQLState(runtime, `UPDATE chargeback_cases SET revoked_base_microcredits=4 WHERE status='RESOLVED'`, "23514")
 	assertSQLState(runtime, `INSERT INTO chargeback_cases SELECT '99999999-9999-4999-8999-999999999999',payment_evidence_id,payment_order_id,payment_transaction_id,entitlement_package_id,wallet_id,'forbidden-new',status,revoked_base_microcredits,revoked_bonus_microcredits,receivable_id,created_at,resolved_at,manual_review_case_id,resolution_code,resolution_reason,version FROM chargeback_cases`, "23514")
-	assertSQLState(fixture, `TRUNCATE ledger_postings`, "55000")
+	assertSQLState(fixture, `TRUNCATE ledger_postings CASCADE`, "55000")
 	if _, err = fixture.Exec(ctx, `BEGIN; SET LOCAL session_replication_role=replica;
 INSERT INTO entitlement_packages(id,user_id,wallet_id,payment_order_id,credit_lot_id,product_id,plan_name,sku_code,amount_fen,points_total,points_remaining,credited_at,valid_from,valid_until,status,created_at,updated_at,source_type,source_reference)
 VALUES('88888888-8888-4888-8888-888888888888',NULL,'ffffffff-ffff-4fff-8fff-ffffffffffff',NULL,'77777777-7777-4777-8777-777777777777','fixture','fixture','fixture',0,1,1,'2026-01-01','2026-01-01','2026-02-01','ACTIVE','2026-01-01','2026-01-01','SYSTEM','fixture-validity');COMMIT;`); err != nil {
@@ -195,7 +195,7 @@ VALUES('88888888-8888-4888-8888-888888888888',NULL,'ffffffff-ffff-4fff-8fff-ffff
 	}
 	// A future lower-numbered wave must be applied despite the higher fence, then
 	// its new table/function and schema authority must be revoked in the same tx.
-	next := migrations.Migration{Version: 70, Name: "owned_incremental_probe", UpSQL: `CREATE TABLE public.owner_incremental_probe(id integer PRIMARY KEY); CREATE FUNCTION public.owner_incremental_trigger() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RETURN NEW; END $$;`}
+	next := migrations.Migration{Version: 800070, Name: "owned_incremental_probe", UpSQL: `CREATE TABLE public.owner_incremental_probe(id integer PRIMARY KEY); CREATE FUNCTION public.owner_incremental_trigger() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RETURN NEW; END $$;`}
 	// Generic source checksum is only metadata; VerifyApplied recomputes SQL bytes.
 	next.Checksum = sqlChecksum(next.UpSQL)
 	expanded := append(append([]migrations.Migration{}, loaded...), next)
@@ -212,10 +212,12 @@ VALUES('88888888-8888-4888-8888-888888888888',NULL,'ffffffff-ffff-4fff-8fff-ffff
 		t.Fatal("repeat migration", err)
 	}
 
-	failing := migrations.Migration{Version: 71, Name: "rollback_owned_probe", UpSQL: `CREATE TABLE public.must_rollback(id integer); SELECT 1/0;`}
+	failing := migrations.Migration{Version: 800071, Name: "rollback_owned_probe", UpSQL: `CREATE TABLE public.must_rollback(id integer); SELECT 1/0;`}
 	failing.Checksum = sqlChecksum(failing.UpSQL)
-	if err = Up(ctx, c, append(append([]migrations.Migration{}, expanded...), failing)); err == nil {
-		t.Fatal("failing future migration unexpectedly passed")
+	err = Up(ctx, c, append(append([]migrations.Migration{}, expanded...), failing))
+	var migrationError *pgconn.PgError
+	if !errors.As(err, &migrationError) || migrationError.Code != "22012" {
+		t.Fatal("failing future migration must reach its division-by-zero fault", err)
 	}
 	var leaked bool
 	if err = fixture.QueryRow(ctx, `SELECT to_regclass('public.must_rollback') IS NOT NULL OR EXISTS(SELECT 1 FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace WHERE n.nspname='public' AND pg_get_userbyid(c.relowner)='billing_service') OR has_schema_privilege('billing_service','public','CREATE')`).Scan(&leaked); err != nil || leaked {
