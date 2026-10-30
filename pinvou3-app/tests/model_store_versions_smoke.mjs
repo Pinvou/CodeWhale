@@ -276,12 +276,17 @@ try {
   await page.waitForSelector('[data-testid="model-version-results"]');
   assert.equal(await page.$$eval('[data-testid="model-version-operation-result"]', (nodes) => nodes.length), 41);
   const region = await page.$eval('[data-testid="model-version-results"]', (node) => ({
-    height: node.clientHeight, content: node.scrollHeight, overflow: getComputedStyle(node).overflowY, focusable: node.tabIndex,
+    height: node.clientHeight, content: node.scrollHeight, overflow: getComputedStyle(node).overflowY,
   }));
   assert.ok(region.height <= 320 && region.content > region.height);
   assert.equal(region.overflow, 'auto');
-  assert.equal(region.focusable, 0);
-  await page.click('[data-testid="model-version-operation-result"]:last-child button');
+  // The semantic region adds no extra tab stop: navigate actual actions and
+  // let the browser scroll the focused acknowledgement into view.
+  await page.focus('[data-testid="model-version-operation-result"] button');
+  for (let index = 0; index < 40; index += 1) await page.keyboard.press('Tab');
+  assert.ok(await page.$eval('[data-testid="model-version-operation-result"]:last-child button', (button) => document.activeElement === button));
+  assert.ok(await page.$eval('[data-testid="model-version-results"]', (node) => node.scrollTop > 0));
+  await page.keyboard.press('Enter');
   assert.equal(await page.$$eval('[data-testid="model-version-operation-result"]', (nodes) => nodes.length), 40);
   assert.equal(await page.$('[data-testid="model-version-cleanup-result"]'), null, 'the last residual acknowledgement must remain reachable by scrolling');
 
