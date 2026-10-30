@@ -336,10 +336,13 @@ fn ensure_release_env() {
 
 /// 进程级选定并安装 rustls 的 CryptoProvider(aws-lc-rs)。
 ///
-/// 幂等:`install_default` 返回 `Err` 表示已装过(本次或之前的 reqwest/tungstenite 调用),
-/// 用 `drop` 吞掉即可,不会二次注册。装在 `run()` 最前,保证后续 reqwest / relay 的
-/// `connect_async` 都用已确定的 provider,避开「aws-lc-rs + ring 同时启用时无参
-/// ClientConfig::builder().expect() panic」(见 Cargo.toml rustls 注释)。
+/// 注意(2026-10-30 评审勘误):应用侧 reqwest 已切 native-tls(见 Cargo.toml 的
+/// TLS 底座记录),这行**不再**覆盖 reqwest;仍需要它的是图里残留的 rustls 腿——
+/// tokio-tungstenite 的 `connect_async`。幂等:`install_default` 返回 `Err` 表示
+/// 已装过(本次或之前的 tungstenite 调用),用 `drop` 吞掉即可,不会二次注册。
+/// 装在 `run()` 最前,保证 relay 的 connect_async 用已确定的 provider,避开
+/// 「aws-lc-rs + ring 同时启用时无参 ClientConfig::builder().expect() panic」
+/// (见 Cargo.toml rustls 注释)。
 fn install_rustls_provider() {
     drop(rustls::crypto::aws_lc_rs::default_provider().install_default());
 }

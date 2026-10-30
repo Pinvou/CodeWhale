@@ -3490,8 +3490,8 @@ impl ModelManager {
             // affected 名单只查本引擎行的绑定，对这种冒名视而不见；真放行 rmi，
             // 受害卡下次部署就得重新拉几十 GB 镜像，界面上还看不出任何异常。
             // 查不到引用名单（库读失败）同样停手：不能把读取失败当成「没人用」。
-            let sharing = db::find_docker_image_users(image, engine_name, engine_version)
-                .map_err(|e| {
+            let sharing =
+                db::find_docker_image_users(image, engine_name, engine_version).map_err(|e| {
                     ModelManagerError::new(format!("无法核对镜像引用，未执行删除：{e}"))
                 })?;
             if !sharing.is_empty() {

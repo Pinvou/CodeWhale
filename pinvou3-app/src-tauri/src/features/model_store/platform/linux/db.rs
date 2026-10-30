@@ -511,9 +511,7 @@ pub fn migrate_engine_identity(
     // 失败不重试（重试也只会再撞一次）。改 IMMEDIATE：BEGIN 就拿写锁，争用
     // 变成可等待的普通 BUSY，由 connect 里那 5 秒 busy_timeout 兜住。写法对齐
     // replace_card_package 的既解。
-    let tx = conn
-        .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
-    let current: Option<(String, Option<String>)> = tx
+    let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
     let current: Option<(String, Option<String>)> = tx
         .query_row(
             "SELECT engine_name, engine_version FROM store_models WHERE card_id = ?1",
@@ -714,7 +712,11 @@ pub fn find_docker_image_users(
     )?;
     let rows = stmt
         .query_map(
-            params![image, exclude_engine_name, engine_key(exclude_engine_version)],
+            params![
+                image,
+                exclude_engine_name,
+                engine_key(exclude_engine_version)
+            ],
             |row| Ok((row.get::<_, String>(0)?, row.get::<_, Option<String>>(1)?)),
         )?
         .collect::<rusqlite::Result<Vec<_>>>()?;
@@ -1494,8 +1496,7 @@ pub fn delete_store_model(card_id: &str) -> rusqlite::Result<()> {
     // 写锁撞上并发写会立刻回 BUSY_SNAPSHOT，busy_timeout 对快照过期不重试；
     // IMMEDIATE 把争用变成可等待的普通 BUSY，交给 connect 的 5 秒
     // busy_timeout。与 replace_card_package / migrate_engine_identity 同款。
-    let tx = conn
-        .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+    let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
     tx.execute(
         "DELETE FROM store_models WHERE card_id = ?1",
         params![card_id],
