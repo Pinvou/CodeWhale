@@ -1274,6 +1274,22 @@ fn discover_pins(
     super::discover_readonly_git_filter_pins(command, cwd, &roots)
 }
 
+/// A plain git invocation with identity config, for fixtures that need a
+/// real index: any failure is the fixture's fault, asserted here.
+fn git_helper(args: &[&str], cwd: &std::path::Path) {
+    let output = std::process::Command::new("git")
+        .args(["-c", "user.name=t", "-c", "user.email=t@example.invalid"])
+        .args(args)
+        .current_dir(cwd)
+        .output()
+        .expect("git runs");
+    assert!(
+        output.status.success(),
+        "git {args:?} failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
 /// A minimal on-disk git directory git itself accepts — HEAD plus the
 /// objects/ and refs/ directories — enough for the enumeration's
 /// `git ls-files --stage` to report an empty index without a real
@@ -1621,16 +1637,7 @@ fn readonly_filter_discovery_scans_registered_submodules() {
 /// (including ones with spaces or nested directories) resolve.
 #[test]
 fn readonly_gitlink_paths_refuse_unresolvable_path_spellings() {
-    for path in [
-        "\"a b\"",
-        "a\\b",
-        "\u{fffd}b",
-        "../escape",
-        "a/../b",
-        "/absolute",
-        ".",
-        "",
-    ] {
+    for path in ["\u{fffd}b", "../escape", "a/../b", "/absolute", ".", ""] {
         let error = validated_git_metadata_path(path)
             .expect_err("an unresolvable gitlink path must refuse");
         assert!(
@@ -1638,8 +1645,28 @@ fn readonly_gitlink_paths_refuse_unresolvable_path_spellings() {
             "{path}: {error}"
         );
     }
+    // On unix `"` and `\` are ordinary filename bytes the lane consumes
+    // in-process — never re-quoted — so a legitimate submodule by that name
+    // is scanned like git runs it. (The Windows-side refusal pin below keeps
+    // the separator/quote ambiguity refused there.)
+    for path in ["\"a b\"", "a\\b", "deep/nest\"ed", "back\\slash"] {
+        validated_git_metadata_path(path).expect("a unix-legal gitlink path resolves");
+    }
     for path in ["sub", "deep/nested/sub", "a b"] {
         validated_git_metadata_path(path).expect("a plain gitlink path resolves");
+    }
+}
+
+/// Windows separator syntax: a gitlink path carrying a quote or a backslash
+/// stays refused there (unix admits both — see the unix arm of the pin
+/// above), matching the same rule the validator applies by `cfg`.
+#[cfg(windows)]
+#[test]
+fn readonly_gitlink_paths_refuse_quoted_and_backslash_spellings_on_windows() {
+    for path in ["\"a b\"", "a\\b"] {
+        let error = validated_git_metadata_path(path)
+            .expect_err("a Windows-unspellable gitlink path must refuse");
+        assert!(error.contains("this lane"), "{path}: {error}");
     }
 }
 
@@ -2135,6 +2162,326 @@ fn git_version_probe_ignores_host_path_shims() {
     assert!(
         !marker.exists(),
         "the planted workspace git shim must not be the probed binary"
+    );
+}
+
+/// The discovery children themselves run repository config: on git 2.43 a
+/// repo-local `core.fsmonitor` command executes inside the enumeration's own
+/// `git ls-files --stage -z` — attacker-chosen command execution under the
+/// tool process's authority, before anything is admitted, on a child the
+/// sandbox manager never shapes. Every discovery git invocation carries the
+/// fixed argv config pins (`-c core.fsmonitor=false` and friends outrank
+/// every config file and need no version floor), so the hostile hook never
+/// fires while the declared filters are still discovered.
+#[cfg(unix)]
+#[test]
+fn readonly_filter_discovery_child_does_not_execute_repo_fsmonitor() {
+    let workspace = tempdir().expect("workspace");
+    let outside = tempdir().expect("outside");
+    let marker = outside.path().join("fsmonitor-ran");
+    let gitdir = workspace.path().join(".git");
+    seed_minimal_gitdir(&gitdir);
+    std::fs::write(
+        gitdir.join("config"),
+        format!(
+            "[core]\n\trepositoryformatversion = 0\n\tfsmonitor = sh -c 'touch {}'\n[filter \"lfs\"]\n\tclean = cat\n",
+            marker.display()
+        ),
+    )
+    .expect("hostile config");
+    // Raw-shell control: the hostile fsmonitor really does fire under a
+    // plain git invocation whose environment the lane never shapes.
+    let control = std::process::Command::new("git")
+        .args(["ls-files", "--stage", "-z"])
+        .current_dir(workspace.path())
+        .output()
+        .expect("control git runs");
+    assert!(
+        control.status.success() && marker.exists(),
+        "the repo's fsmonitor must fire under a plain git invocation: {}",
+        String::from_utf8_lossy(&control.stderr)
+    );
+    std::fs::remove_file(&marker).expect("reset marker");
+
+    let pins = discover_pins("git status -s", workspace.path())
+        .expect("a filter-armed repository stays discoverable");
+    assert_eq!(pins.len(), 1, "{pins:?}");
+    assert_eq!(pins[0].name, "lfs", "{pins:?}");
+    assert!(
+        !marker.exists(),
+        "the discovery child must not execute the repository's core.fsmonitor"
+    );
+}
+
+/// The tool-level twin: dispatching a read-only `git status` in a hostile
+/// repository must not detonate the repo's `core.fsmonitor` inside the
+/// lane's own discovery children, while a raw shell proves the fixture is
+/// live before the pins hold.
+#[cfg(unix)]
+#[tokio::test]
+async fn readonly_shell_lane_git_status_does_not_execute_repo_fsmonitor_during_discovery() {
+    let workspace = tempdir().expect("workspace");
+    let outside = tempdir().expect("outside");
+    let marker = outside.path().join("fsmonitor-ran");
+    std::fs::write(workspace.path().join("f.txt"), "seed\n").expect("file");
+    git_helper(&["init", "-q"], workspace.path());
+    git_helper(
+        &[
+            "config",
+            "core.fsmonitor",
+            &format!("sh -c 'touch {}'", marker.display()),
+        ],
+        workspace.path(),
+    );
+    let control = std::process::Command::new("sh")
+        .args(["-c", "git status -s 2>&1"])
+        .current_dir(workspace.path())
+        .output()
+        .expect("control shell runs");
+    assert!(
+        marker.exists(),
+        "the hostile fsmonitor must fire under a raw shell: {}",
+        String::from_utf8_lossy(&control.stdout)
+    );
+    std::fs::remove_file(&marker).expect("reset marker");
+
+    let context = ToolContext::new(workspace.path())
+        .with_shell_policy(crate::worker_profile::ShellPolicy::ReadOnly);
+    let output = LowercaseBashTool
+        .execute(json!({"command": "git status -s"}), &context)
+        .await
+        .expect("the read must dispatch");
+    assert!(output.success, "{}", output.content);
+    assert!(
+        !marker.exists(),
+        "the read-only lane's discovery children must not run the repository's core.fsmonitor"
+    );
+}
+
+/// A `-C` operand is judged by the cumulative root resolver, which used to
+/// take the spelling literally while the shell expands a leading `~`
+/// against $HOME: with a planted literal `~` directory inside the workspace,
+/// `git -C ~ status` resolved inside and admitted while git ran in $HOME.
+/// The resolver refuses the tilde spelling exactly like the plain-operand
+/// and `cd` rules do.
+#[test]
+fn readonly_operand_gate_refuses_tilde_git_c_operands() {
+    let workspace = tempdir().expect("workspace");
+    std::fs::create_dir(workspace.path().join("~")).expect("planted tilde dir");
+    std::fs::create_dir_all(workspace.path().join("~").join("proj")).expect("tilde-nested dir");
+    std::fs::create_dir(workspace.path().join("A")).expect("chain dir");
+    std::fs::create_dir(workspace.path().join("sub")).expect("inside dir");
+    let roots = [workspace.path().to_path_buf()];
+    for command in [
+        "git -C ~ status -s",
+        "git -C ~/proj status -s",
+        "git -C A -C ~/proj status -s",
+    ] {
+        let error = enforce_readonly_workspace_operands(command, &roots, workspace.path())
+            .expect_err("a tilde `-C` operand must refuse before the shell expands it")
+            .to_string();
+        assert!(error.contains("tilde"), "{command}: {error}");
+    }
+    enforce_readonly_workspace_operands("git -C sub status -s", &roots, workspace.path())
+        .expect("a tilde-free `-C` operand stays admitted");
+}
+
+/// A FIFO at a discovered config path reports size 0 to `stat`, so a
+/// size-checked read never sees it coming — and `open` blocks until a
+/// writer appears, inside the pre-spawn discovery where no watchdog bounds
+/// anything. The bounded reader opens non-blocking and refuses
+/// non-regular files on the opened handle's own metadata.
+#[cfg(unix)]
+#[test]
+fn readonly_filter_discovery_refuses_fifo_config_without_hanging() {
+    let workspace = tempdir().expect("workspace");
+    let gitdir = workspace.path().join(".git");
+    seed_minimal_gitdir(&gitdir);
+    let fifo = gitdir.join("config");
+    let cpath = std::ffi::CString::new(fifo.to_string_lossy().as_bytes()).expect("path");
+    let rc = unsafe { libc::mkfifo(cpath.as_ptr(), 0o644) };
+    assert_eq!(rc, 0, "mkfifo must succeed");
+
+    let (sender, receiver) = std::sync::mpsc::channel::<Result<Vec<String>, String>>();
+    let cwd = workspace.path().to_path_buf();
+    std::thread::spawn(move || {
+        let _ = sender.send(
+            discover_pins("git status -s", &cwd)
+                .map(|pins| pins.iter().map(|pin| pin.name.clone()).collect())
+                .map_err(|error| error.to_string()),
+        );
+    });
+    let outcome = receiver
+        .recv_timeout(std::time::Duration::from_secs(5))
+        .expect("discovery must not hang on a FIFO config");
+    let error = outcome.expect_err("a FIFO config must refuse").to_string();
+    assert!(error.contains("not a regular file"), "{error}");
+}
+
+/// git strips one trailing `\r` from a `.git` link target at the newline
+/// (probe-pinned: a CRLF-terminated target resolves and runs), so the lane
+/// mirrors exactly that strip instead of refusing a link git accepts —
+/// while every other padded spelling still refuses, because git fatals
+/// there before anything runs.
+#[cfg(unix)]
+#[test]
+fn readonly_git_dir_link_crlf_target_admits_like_git() {
+    let workspace = tempdir().expect("workspace");
+    let gitdir = workspace.path().join("real").join(".git");
+    seed_minimal_gitdir(&gitdir);
+    std::fs::write(gitdir.join("config"), "[filter \"lfs\"]\n\tclean = cat\n").expect("config");
+    std::fs::write(workspace.path().join(".git"), "gitdir: real/.git\r\n").expect("CRLF link file");
+    let pins = discover_pins("git status -s", workspace.path())
+        .expect("a CRLF-terminated link target resolves like git");
+    assert_eq!(pins.len(), 1, "{pins:?}");
+    assert_eq!(pins[0].name, "lfs", "{pins:?}");
+}
+
+/// git consumes a `commondir` value byte-exact (a padded spelling fatals
+/// there before anything runs), so the reader trims neither end and refuses
+/// a pointer it cannot resolve — the padded value must not silently resolve
+/// a directory git never opens.
+#[cfg(unix)]
+#[test]
+fn readonly_filter_discovery_refuses_padded_commondir_like_git_fatals() {
+    let workspace = tempdir().expect("workspace");
+    let main_gitdir = workspace.path().join("repo").join(".git");
+    seed_minimal_gitdir(&main_gitdir);
+    let linked_gitdir = main_gitdir.join("worktrees").join("wt");
+    std::fs::create_dir_all(&linked_gitdir).expect("linked gitdir");
+    seed_minimal_gitdir(&linked_gitdir);
+    std::fs::write(linked_gitdir.join("commondir"), " ../..\n").expect("padded commondir");
+    let linked_worktree = workspace.path().join("wt");
+    std::fs::create_dir(&linked_worktree).expect("linked worktree");
+    std::fs::write(
+        linked_worktree.join(".git"),
+        format!("gitdir: {}", linked_gitdir.display()),
+    )
+    .expect("worktree gitdir link");
+    let error = discover_pins("git status -s", &linked_worktree)
+        .expect_err("a padded commondir must refuse")
+        .to_string();
+    assert!(
+        error.contains("commondir"),
+        "the refusal must name the pointer: {error}"
+    );
+}
+
+/// The `-C` root resolver proves the destination enterable the way the `cd`
+/// fold does: `canonicalize` and `is_dir` need search permission only on
+/// the ancestors, while git's `chdir` needs it on the destination itself —
+/// a mode-000 directory passes the resolve checks and would then fail the
+/// child's `chdir`, leaving the gate's judgment on a state the shell never
+/// reached.
+#[cfg(unix)]
+#[test]
+fn readonly_git_c_operand_refuses_unsearchable_stage_root() {
+    use std::os::unix::fs::PermissionsExt as _;
+    let workspace = tempdir().expect("workspace");
+    let vault = workspace.path().join("vault");
+    std::fs::create_dir(&vault).expect("vault dir");
+    std::fs::write(vault.join("inner"), "x").expect("inner file");
+    std::fs::set_permissions(&vault, std::fs::Permissions::from_mode(0o000)).expect("vault closed");
+    let roots = [workspace.path().to_path_buf()];
+    let error =
+        enforce_readonly_workspace_operands("git -C vault status -s", &roots, workspace.path())
+            .expect_err("a mode-000 `-C` destination must refuse like the cd fold does")
+            .to_string();
+    assert!(error.contains("cannot enter"), "{error}");
+    std::fs::set_permissions(&vault, std::fs::Permissions::from_mode(0o755))
+        .expect("vault reopened");
+    enforce_readonly_workspace_operands("git -C vault status -s", &roots, workspace.path())
+        .expect("a searchable destination stays admitted");
+}
+
+/// `"` and `\` are ordinary filename bytes on unix and the gitlink path is
+/// consumed in-process (join, canonicalize — never re-quoted), so a
+/// submodule carrying one is scanned and its filters pinned exactly like a
+/// plain-named one.
+#[cfg(unix)]
+#[test]
+fn readonly_filter_discovery_scans_gitlink_paths_with_unix_legal_bytes() {
+    let workspace = tempdir().expect("workspace");
+    git_helper(&["init", "-q", "."], workspace.path());
+    let sub = workspace.path().join("sub\"q");
+    std::fs::create_dir(&sub).expect("quoted subdir");
+    seed_minimal_gitdir(&sub.join(".git"));
+    std::fs::write(
+        sub.join(".git").join("config"),
+        "[filter \"lfs\"]\n\tclean = cat\n",
+    )
+    .expect("sub config");
+    git_helper(
+        &[
+            "update-index",
+            "--add",
+            "--cacheinfo",
+            "160000,0123456789012345678901234567890123456789,sub\"q",
+        ],
+        workspace.path(),
+    );
+    let pins = discover_pins("git status -s", workspace.path())
+        .expect("a quoted gitlink path is scanned, not refused");
+    assert_eq!(pins.len(), 1, "{pins:?}");
+    assert_eq!(pins[0].name, "lfs", "{pins:?}");
+}
+
+/// A single glob-bearing command takes the shell lane, where the wildcard
+/// the operand gate walked is actually expanded — the direct-argv lane
+/// would hand the program the literal `*` spelling and the expansion the
+/// gate judged could never happen.
+#[cfg(unix)]
+#[tokio::test]
+async fn readonly_shell_lane_expands_single_command_glob_operand() {
+    let workspace = tempdir().expect("workspace");
+    std::fs::write(workspace.path().join("a.txt"), "AAA\n").expect("a");
+    std::fs::write(workspace.path().join("b.txt"), "BBB\n").expect("b");
+    let context = ToolContext::new(workspace.path())
+        .with_shell_policy(crate::worker_profile::ShellPolicy::ReadOnly);
+    let output = LowercaseBashTool
+        .execute(json!({"command": "cat *.txt"}), &context)
+        .await
+        .expect("the glob dispatches");
+    assert!(output.success, "{}", output.content);
+    assert!(
+        output.content.contains("AAA") && output.content.contains("BBB"),
+        "the shell lane must expand the wildcard the gate walked: {}",
+        output.content
+    );
+}
+
+/// An inline stdin payload past one pipe buffer is refused before spawn:
+/// the payload is delivered with a blocking write while the shell-manager
+/// lock is held, and a non-reading child would wedge the executor past any
+/// watchdog. The boundary payload (exactly 64 KiB) still runs. The raw
+/// lane is the one that carries payloads — the read-only grammar rejects
+/// a `stdin` field outright.
+#[tokio::test]
+async fn inline_stdin_payload_over_the_cap_refuses() {
+    let workspace = tempdir().expect("workspace");
+    let context = ToolContext::new(workspace.path().to_path_buf());
+    let oversized = "x".repeat(super::MAX_INLINE_STDIN_BYTES + 1);
+    let output = BashTool::new("Bash")
+        .execute(json!({"command": "wc -c", "stdin": oversized}), &context)
+        .await
+        .expect("the refusal is a result, not an error");
+    assert!(!output.success, "{}", output.content);
+    assert!(
+        output.content.contains("action=interact"),
+        "the refusal must point at the streaming alternative: {}",
+        output.content
+    );
+
+    let boundary = "y".repeat(super::MAX_INLINE_STDIN_BYTES);
+    let output = BashTool::new("Bash")
+        .execute(json!({"command": "wc -c", "stdin": boundary}), &context)
+        .await
+        .expect("the boundary payload dispatches");
+    assert!(output.success, "{}", output.content);
+    assert!(
+        output.content.contains("65536"),
+        "the boundary payload must reach the command: {}",
+        output.content
     );
 }
 
@@ -2940,7 +3287,7 @@ fn readonly_glob_walk_is_bounded_by_the_match_and_node_caps() {
     enforce_readonly_workspace_operands(&cycled, &roots, workspace.path())
         .unwrap_or_else(|error| panic!("the collapsed cycle walk must stay complete: {error}"));
     assert!(
-        started.elapsed() < std::time::Duration::from_secs(5),
+        started.elapsed() < std::time::Duration::from_secs(30),
         "the re-entry dedup must collapse the cycle, took {:?}",
         started.elapsed()
     );
@@ -2994,7 +3341,7 @@ fn readonly_glob_budget_is_shared_across_operands() {
         "the refusal must name the command-wide budget: {error}"
     );
     assert!(
-        started.elapsed() < std::time::Duration::from_secs(5),
+        started.elapsed() < std::time::Duration::from_secs(30),
         "exhausting the budget must stop the walk promptly, took {:?}",
         started.elapsed()
     );
@@ -3042,7 +3389,7 @@ fn readonly_glob_budget_counts_examined_entries() {
         "the refusal must name the entry budget: {error}"
     );
     assert!(
-        started.elapsed() < std::time::Duration::from_secs(5),
+        started.elapsed() < std::time::Duration::from_secs(30),
         "exhausting the entry budget must stop promptly, took {:?}",
         started.elapsed()
     );

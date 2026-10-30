@@ -1244,15 +1244,15 @@ fn is_agent_readonly_od(tokens: &[String]) -> bool {
                     // bound belongs here rather than at od's runtime error.
                     let numeric = tokens
                         .get(index)
-                        .is_some_and(|value| !value.is_empty() && value.parse::<u64>().is_ok());
+                        .is_some_and(|value| is_od_offset_or_count_value(value));
                     if !numeric {
                         return false;
                     }
                 }
                 _ if token.starts_with("-j") || token.starts_with("-N") => {
-                    // Glued `-j<u64>`/`-N<u64>`: the same parse, not
+                    // Glued `-j<value>`/`-N<value>`: the same parse, not
                     // digit-scan, bound as the separated form.
-                    if token[2..].is_empty() || token[2..].parse::<u64>().is_err() {
+                    if !is_od_offset_or_count_value(&token[2..]) {
                         return false;
                     }
                 }
@@ -1262,6 +1262,34 @@ fn is_agent_readonly_od(tokens: &[String]) -> bool {
         index += 1;
     }
     true
+}
+
+/// One od `-j`/`-N` value: digits with GNU coreutils' optional
+/// multiplicative suffix (`b`=512, `k`/`K`=1024, through `e`/`E`=1024⁶),
+/// computed with checked arithmetic — a 200-digit spelling or a
+/// suffix-multiplied overflow refuses here rather than erroring at od.
+fn is_od_offset_or_count_value(value: &str) -> bool {
+    let (digits, suffix) = match value.char_indices().last() {
+        Some((_, last)) if last.is_ascii_digit() => (value, ""),
+        Some((index, _)) => (&value[..index], &value[index..]),
+        None => return false,
+    };
+    let multiplier: u64 = match suffix {
+        "" => 1,
+        "b" => 512,
+        "k" | "K" => 1024,
+        "m" | "M" => 1024 * 1024,
+        "g" | "G" => 1024 * 1024 * 1024,
+        "t" | "T" => 1024 * 1024 * 1024 * 1024,
+        "p" | "P" => 1024 * 1024 * 1024 * 1024 * 1024,
+        "e" | "E" => 1024 * 1024 * 1024 * 1024 * 1024 * 1024,
+        _ => return false,
+    };
+    digits
+        .parse::<u64>()
+        .ok()
+        .and_then(|count| count.checked_mul(multiplier))
+        .is_some()
 }
 
 /// Token-level recognition of one command as an admitted GitHub read, without
@@ -1349,6 +1377,32 @@ fn is_numeric_count_shorthand(token: &str) -> bool {
     !digits.is_empty() && digits.bytes().all(|byte| byte.is_ascii_digit())
 }
 
+/// One glued numeric value option (`-n5`, `-c3`): the flag must be one of
+/// the command row's value options and the rest all digits. GNU's head,
+/// tail, and friends accept the glued spelling; the value stays bound to
+/// its flag inside one argv word, so it cannot introduce an operand, and
+/// the per-row value list decides which flags the glued form rides.
+fn glued_numeric_value_option(token: &str, values: &str) -> bool {
+    if !token.starts_with('-') || token.starts_with("--") {
+        return false;
+    }
+    for flag in values.split_ascii_whitespace() {
+        let Some(flag_name) = flag.strip_prefix('-') else {
+            continue;
+        };
+        if flag_name.starts_with('-') {
+            // Long options take their value after `=`, never glued.
+            continue;
+        }
+        if let Some(value) = token[1..].strip_prefix(flag_name) {
+            if !value.is_empty() && value.bytes().all(|byte| byte.is_ascii_digit()) {
+                return true;
+            }
+        }
+    }
+    false
+}
+
 fn options_match_allowlist(tokens: &[&str], switches: &str, values: &str) -> bool {
     let mut index = 0;
     let mut options = true;
@@ -1368,6 +1422,11 @@ fn options_match_allowlist(tokens: &[&str], switches: &str, values: &str) -> boo
                 // `-n 5` / `-n 20`; only commands whose value flags include a
                 // line-count accept them, and the digit-only form can carry no
                 // attached path or value injection.
+            } else if glued_numeric_value_option(token, values) {
+                // `head -n5` / `tail -c3`: GNU's glued spelling of a numeric
+                // value flag. The value stays bound to its flag inside one
+                // argv word, so it cannot introduce an operand, and only rows
+                // whose value flags include that flag admit it.
             } else if values.split_ascii_whitespace().any(|name| name == token) {
                 index += 1;
                 if index >= tokens.len() || tokens[index].starts_with('-') {
@@ -3100,6 +3159,96 @@ mod tests {
                 "the shared gh table admits {command} for parent auto-approve too"
             );
             assert!(is_agent_readonly_shell_command(command));
+        }
+    }
+
+    /// The same shared-table mechanism, pinned for the git hardening flags
+    /// and the glued numeric value options the round-10 wave added: the
+    /// parent auto-approve set grew by `--no-ext-diff`/`--no-textconv`/
+    /// `--no-show-signature` git reads and by `head -n5`/`tail -c3`
+    /// spellings. All in-process hardening flags and value-bound digits —
+    /// the widened surface is safe, and pinning it keeps the "source
+    /// unchanged, behavior grew" disclosure honest.
+    #[test]
+    fn parallel_classifier_admits_shared_table_growth_through_the_git_and_value_tables() {
+        for command in [
+            "git diff --no-textconv",
+            "git log --no-ext-diff -1",
+            "git show --no-show-signature HEAD",
+            "head -n5 README.md",
+            "tail -c3 README.md",
+        ] {
+            assert!(
+                is_parallel_readonly_command(command),
+                "the shared git/value tables admit {command} for parent auto-approve too"
+            );
+            assert!(is_agent_readonly_shell_command(command));
+        }
+        for command in ["head -x5 f", "tail -c-3 f", "head -nX f"] {
+            assert!(
+                !is_parallel_readonly_command(command),
+                "{command} stays refused on both classifiers"
+            );
+            assert!(!is_agent_readonly_shell_command(command));
+        }
+    }
+
+    /// GNU head/tail accept the glued numeric value spellings (`-n5`,
+    /// `-c3`) their separated forms already admitted; the value stays bound
+    /// to its flag inside one argv word, so nothing new can be introduced.
+    #[test]
+    fn agent_readonly_shell_admits_glued_head_tail_numeric_values() {
+        for command in [
+            "head -n5 f.txt",
+            "head -n 5 f.txt",
+            "tail -c3 f.txt",
+            "tail -c 3 f.txt",
+            "head -n5 -q a.txt b.txt",
+        ] {
+            assert!(
+                is_agent_readonly_shell_command(command),
+                "{command} must admit like its separated form"
+            );
+        }
+        for command in [
+            "head -x5 f.txt",
+            "head -nX f.txt",
+            "head -n-3 f.txt",
+            "tail -q3 f.txt",
+        ] {
+            assert!(
+                !is_agent_readonly_shell_command(command),
+                "{command} stays refused"
+            );
+        }
+    }
+
+    /// od's numeric `-j`/`-N` values accept GNU's multiplicative suffixes
+    /// (`-N4k` dumps like `-N 4096`); the parse stays arithmetic — unknown
+    /// suffixes and suffix-multiplied overflow refuse.
+    #[test]
+    fn agent_readonly_shell_admits_od_suffix_numeric_values() {
+        for command in [
+            "od -N4k f.bin",
+            "od -N 4k f.bin",
+            "od -j1m -N8K f.bin",
+            "od -An -j2b f.bin",
+        ] {
+            assert!(
+                is_agent_readonly_shell_command(command),
+                "{command} must admit like its plain numeric form"
+            );
+        }
+        for command in [
+            "od -N4q f.bin",
+            "od -Nk f.bin",
+            "od -j99e f.bin",
+            "od -N -4k f.bin",
+        ] {
+            assert!(
+                !is_agent_readonly_shell_command(command),
+                "{command} stays refused"
+            );
         }
     }
 

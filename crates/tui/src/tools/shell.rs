@@ -2182,8 +2182,14 @@ impl ShellManager {
             if command.contains('|')
                 || readonly_sequence_segments(command).is_some_and(|segments| segments.len() > 1)
                 || agent_readonly_command_needs_shell_for_cd(command)
+                || command.contains('*')
             {
-                // An agent read-only compound: every sequence segment and
+                // An agent read-only compound — or any glob-bearing command:
+                // a `*` the wildcard walker judged is only real on the shell
+                // lane, which expands it the way the walker's per-match
+                // judgment assumed, while the direct-argv lane would hand
+                // the program the literal spelling and the expansion the
+                // gate walked could never happen. Every sequence segment and
                 // every pipeline stage was admitted by
                 // `is_agent_readonly_shell_command` (no redirects,
                 // expansions, or subshells — only `|` between validated
@@ -2195,8 +2201,8 @@ impl ShellManager {
                 // Git stages receive the same in-process hardening flags the
                 // direct-argv lane splices, because the shell would otherwise
                 // run whatever diff driver or textconv the repository
-                // configures. Single commands keep the shell-free direct-argv
-                // lane below.
+                // configures. Single glob-free commands keep the shell-free
+                // direct-argv lane below.
                 let kind = crate::shell_dispatcher::global_dispatcher().kind();
                 if let Some(reason) = readonly_compound_refused_by_shell_kind(kind, command) {
                     return Err(anyhow!("{reason}"));
@@ -4294,6 +4300,11 @@ fn canonical_readonly_roots(roots: &[PathBuf]) -> std::io::Result<Vec<PathBuf>> 
 /// partial set.
 const MAX_READONLY_GIT_FILTER_PINS: usize = 8;
 
+/// Length bound for one discovered filter name: a name past it refuses at
+/// the unspellable-name wall like any other spelling the child env block
+/// cannot pin faithfully.
+const MAX_DISCOVERED_FILTER_NAME_BYTES: usize = 64;
+
 /// Upper bound on distinct repositories one command's filter discovery may
 /// scan, counting every registered submodule a scanned repository declares;
 /// beyond it the gate refuses instead of pinning a partial set.
@@ -4373,10 +4384,12 @@ impl ReadonlyGitFilterPin {
 /// its configured command. Anything the scan cannot confidently enumerate
 /// refuses the command instead of pinning a partial set: config `include`
 /// directives, the worktree-config extension, a `core.worktree` redirect,
-/// unspellable filter names, a config text or `.git`-link file this lane
-/// cannot decode, a `core.worktree` declaration that does not resolve back
-/// to the worktree the repository was discovered in, and more names or
-/// repositories than the scan bounds.
+/// unspellable filter names, a `core.worktree` declaration that does not
+/// resolve back to the worktree the repository was discovered in, and more
+/// names or repositories than the scan bounds. Non-UTF-8 config bytes
+/// decode lossily like any `str` conversion; a name carrying the
+/// replacement marker then refuses at the unspellable-name wall, so the
+/// decode can never silently mask a driver.
 ///
 /// The enumeration covers more than the stage's own repository: git forks
 /// its own `git status`/`git diff` child into any index gitlink whose path
@@ -4493,6 +4506,13 @@ fn discover_readonly_git_filter_pins(
                         | crate::command_safety::ReadonlySequenceConnector::OrElse
                 ) =>
             {
+                // The silent skip on a failed canonicalize is a guard on a
+                // gate-guaranteed state: the operand gate refused any `cd`
+                // destination it could not canonicalize (and prove
+                // enterable) before this walk runs, so only the tiny
+                // gate->discovery race disclosed at the seam can land here,
+                // and keeping the old cwd matches the shell's failed-`cd`
+                // continuation under `;`.
                 if let Some(target) = argv.get(1)
                     && let Ok(resolved) = live_cwd.join(target).canonicalize()
                 {
@@ -4526,8 +4546,13 @@ fn discover_readonly_git_filter_pins(
 /// exists: a refusal names the version gap instead of admitting under
 /// protection that would not take. The probe itself runs the way the
 /// read-only child runs — cleared environment, sanitized PATH, git
-/// configuration pinned off — so the binary it measures is the trusted host
-/// git, never an agent-planted `git` shim from a workspace PATH entry.
+/// configuration pinned off, and the same argv config pins as every other
+/// discovery invocation — so the binary it measures is the trusted host
+/// git, never an agent-planted `git` shim from a workspace PATH entry, and
+/// the scanned repository's `core.fsmonitor` cannot fire inside the probe
+/// either. The result is memoized per sanitized PATH (the version cannot
+/// change under a running process), so the gate costs one fork per process,
+/// not one per command.
 fn ensure_git_supports_env_config_pins(roots: &[PathBuf]) -> Result<(), ToolError> {
     let path = std::env::var_os("PATH");
     ensure_git_supports_env_config_pins_with_path(roots, path.as_deref())
@@ -4540,28 +4565,69 @@ fn ensure_git_supports_env_config_pins_with_path(
     roots: &[PathBuf],
     path: Option<&std::ffi::OsStr>,
 ) -> Result<(), ToolError> {
+    // The decision is a pure function of the sanitized PATH (same PATH ->
+    // same resolved binary -> same version), and git's version cannot change
+    // under a running process, so one memoized probe per distinct sanitized
+    // PATH removes the per-command fork/exec this gate used to pay. Both
+    // deterministic outcomes are cached — an old-git host refuses with one
+    // probe, not one per command — while a transient spawn failure is
+    // re-probed on the next command rather than cached as permanent.
+    let sanitized_path = path
+        .and_then(|path| readonly_sanitized_path_from(roots, path))
+        .map(|value| value.to_string_lossy().into_owned());
+    {
+        let memo = GIT_VERSION_PROBE
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        match memo.as_ref() {
+            Some((cached_path, decision)) if *cached_path == sanitized_path => {
+                return match decision {
+                    Ok(()) => Ok(()),
+                    Err(reason) => Err(version_gate_refusal(reason.clone())),
+                };
+            }
+            _ => {}
+        }
+    }
     let mut command = std::process::Command::new("git");
+    arm_discovery_git_config_pins(&mut command);
     command.arg("--version");
     apply_discovery_git_env(&mut command, roots, path);
     let output = command
         .output()
         .map_err(|error| {
             ToolError::permission_denied(format!(
-                "[shell.readonly.git.filter_config] The repositories this command's git stages run in declare content filters, and this host's git could not be version-checked to confirm it honors the environment pins ({error}); run repository evidence on a git >= {}.{} host.",
+                "[shell.readonly.git.filter_config] A read-only git stage on this command needs this host's git version-checked before the stage runs, and the version probe could not start ({error}); run repository evidence on a git >= {}.{} host.",
                 MIN_GIT_ENV_CONFIG_VERSION.0, MIN_GIT_ENV_CONFIG_VERSION.1
             ))
         })?;
     let version = String::from_utf8_lossy(&output.stdout);
-    if !git_env_config_supported(&version) {
-        return Err(ToolError::permission_denied(format!(
-            "[shell.readonly.git.filter_config] The repositories this command's git stages run in declare content filters, but this host's git ({}) predates the {}.{} env-config mechanism those pins ride and would silently run them; upgrade git for repository evidence.",
+    let decision = if git_env_config_supported(&version) {
+        Ok(())
+    } else {
+        Err(format!(
+            "this host's git ({}) predates the {}.{} env-config mechanism the read-only git pins ride — repository configuration (content filters, fsmonitor, hooks) would run under an admitted read; upgrade git for repository evidence.",
             version.trim(),
             MIN_GIT_ENV_CONFIG_VERSION.0,
             MIN_GIT_ENV_CONFIG_VERSION.1
-        )));
-    }
-    Ok(())
+        ))
+    };
+    let mut memo = GIT_VERSION_PROBE
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    *memo = Some((sanitized_path, decision.clone()));
+    decision.map_err(version_gate_refusal)
 }
+
+fn version_gate_refusal(reason: String) -> ToolError {
+    ToolError::permission_denied(format!("[shell.readonly.git.filter_config] {reason}"))
+}
+
+/// One memoized version-gate decision, keyed on the sanitized PATH the
+/// probe resolved git through.
+type GitVersionProbeDecision = Result<(), String>;
+static GIT_VERSION_PROBE: std::sync::Mutex<Option<(Option<String>, GitVersionProbeDecision)>> =
+    std::sync::Mutex::new(None);
 
 /// Whether a `git --version` output declares a release that honors
 /// `GIT_CONFIG_KEY_n`/`GIT_CONFIG_VALUE_n`/`GIT_CONFIG_COUNT`
@@ -4632,6 +4698,16 @@ fn readonly_git_stage_root(
                         "the git stage carries a `-C` without its directory operand".to_string()
                     );
                 };
+                // The shell expands a leading `~` against $HOME before git
+                // ever sees the word, while this resolver joins spellings
+                // against the stage's base directory — the same
+                // gate-vs-shell divergence the plain-operand and `cd` rules
+                // refuse `~` for, so a `-C` value gets the same wall.
+                if target.starts_with('~') {
+                    return Err(format!(
+                        "read-only git `-C` operand {target:?} carries a tilde the shell would expand outside the judged location"
+                    ));
+                }
                 let joined = if std::path::Path::new(target).is_absolute() {
                     std::path::PathBuf::from(target)
                 } else {
@@ -4650,6 +4726,17 @@ fn readonly_git_stage_root(
                         "read-only git `-C` operand {target:?} resolves outside the workspace"
                     ));
                 }
+                // Prove the directory enterable the way the `cd` fold does:
+                // canonicalize and is_dir need search permission only on the
+                // ancestors, while git's `chdir` needs it on the destination
+                // itself — a mode-000 directory passes the checks above and
+                // would then fail the child's `chdir`, leaving the gate's
+                // judgment on a state the shell never reached.
+                resolved.join(".").metadata().map_err(|error| {
+                    format!(
+                        "read-only git `-C` operand {target:?} resolves to a directory the shell cannot enter: {error}"
+                    )
+                })?;
                 dir = resolved;
                 index += 2;
             }
@@ -4688,6 +4775,85 @@ fn apply_discovery_git_env(
     command.env("LC_ALL", "C");
 }
 
+/// The fixed configuration pins every discovery git invocation carries as
+/// argv `-c` entries — the same three the admitted child gets from its env
+/// block. Only system/global configuration is pinned off for these children;
+/// repo-local `.git/config` stays fully live, and on git 2.43 a repo-local
+/// `core.fsmonitor` command executes inside a plain `git ls-files --stage -z`
+/// (probe-pinned) — attacker-chosen command execution in the scanned
+/// repository, under the tool process's own authority, before anything is
+/// admitted. argv `-c` entries outrank every config file and work on every
+/// git, unlike the `GIT_CONFIG_COUNT` mechanism the admitted child rides
+/// (which needs >= 2.31), so these pins do not wait on the version gate.
+fn arm_discovery_git_config_pins(command: &mut std::process::Command) {
+    let null_device = if cfg!(windows) { "NUL" } else { "/dev/null" };
+    for (key, value) in [
+        ("core.fsmonitor", "false".to_string()),
+        ("core.hooksPath", null_device.to_string()),
+        ("log.showSignature", "false".to_string()),
+    ] {
+        command.arg("-c").arg(format!("{key}={value}"));
+    }
+}
+
+/// Read one git metadata file the way discovery must. The size cap is
+/// checked on the OPENED handle's metadata — no TOCTOU between a stat and
+/// the read — anything that is not a regular file refuses before it is
+/// read, and on unix the open itself is non-blocking: a FIFO at a
+/// discovered path (`.git/config`, a `commondir` pointer) reports size 0
+/// to `stat`, so a plain size-checked `fs::read` never sees it coming and
+/// blocks in `open` until a writer appears — inside the pre-spawn
+/// discovery, where no watchdog bounds anything. `Ok(None)` is the
+/// caller's signal that the path does not exist.
+fn read_bounded_regular_file(
+    path: &std::path::Path,
+    cap: usize,
+) -> Result<Option<Vec<u8>>, String> {
+    let mut options = std::fs::File::options();
+    options.read(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt as _;
+        options.custom_flags(libc::O_NONBLOCK);
+    }
+    let file = match options.open(path) {
+        Ok(file) => file,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => {
+            return Err(format!(
+                "{} could not be opened for discovery: {error}",
+                path.display()
+            ));
+        }
+    };
+    let metadata = file.metadata().map_err(|error| {
+        format!(
+            "{} could not be stat'd for discovery: {error}",
+            path.display()
+        )
+    })?;
+    if !metadata.is_file() {
+        return Err(format!(
+            "{} is not a regular file; discovery reads only regular files",
+            path.display()
+        ));
+    }
+    if metadata.len() > cap as u64 {
+        return Err(format!(
+            "{} is larger than the {cap}-byte discovery bound",
+            path.display()
+        ));
+    }
+    // Regular files ignore O_NONBLOCK, and take() bounds the read itself so
+    // a file that grows past the cap between the fstat and the read cannot
+    // buy more than one byte over the cap of transient allocation.
+    let mut bytes = Vec::new();
+    file.take((cap + 1) as u64)
+        .read_to_end(&mut bytes)
+        .map_err(|error| format!("{} could not be read: {error}", path.display()))?;
+    Ok(Some(bytes))
+}
+
 /// Run one read-only discovery `git` invocation and return its stdout.
 /// stdout is read under `stdout_cap` — one byte more refuses rather than
 /// trusting a truncated listing — and any spawn failure, non-zero status, or
@@ -4702,6 +4868,7 @@ fn run_discovery_git(
     path: Option<&std::ffi::OsStr>,
 ) -> Result<Vec<u8>, String> {
     let mut command = std::process::Command::new("git");
+    arm_discovery_git_config_pins(&mut command);
     command
         .current_dir(dir)
         .args(args)
@@ -4792,16 +4959,19 @@ fn readonly_gitlink_paths(
 
 /// One path this lane resolves out of git metadata (an index gitlink record;
 /// the same rules the `.gitmodules` reader applied, now applied to the index
-/// listing that actually decides git's fork). Quoted or escaped spellings,
-/// undecodable bytes, and path components leaving the worktree refuse — a
+/// listing that actually decides git's fork). Lexical escapes (absolute
+/// spellings, `..`), undecodable replacement markers, and — on Windows,
+/// where `\` is separator syntax — quoted or backslash spellings refuse: a
 /// silently skipped submodule is a repository whose filters would run
-/// unpinned.
+/// unpinned. On unix `"` and `\` are ordinary filename bytes consumed
+/// in-process (join, canonicalize — never re-quoted), so a legitimate
+/// submodule carrying one is scanned like git runs it; a path whose
+/// COMPONENT is a symlink to an outside repository is also scanned, not
+/// refused — git forks into the repo the symlink resolves to, so its
+/// filters must be pinned there.
 fn validated_git_metadata_path(path: &str) -> Result<(), String> {
-    if path.is_empty()
-        || path.contains('"')
-        || path.contains('\\')
-        || path.contains(char::REPLACEMENT_CHARACTER)
-    {
+    let windows_unspellable = cfg!(windows) && (path.contains('"') || path.contains('\\'));
+    if path.is_empty() || windows_unspellable || path.contains(char::REPLACEMENT_CHARACTER) {
         return Err(format!(
             "git metadata declares a path {path:?} whose spelling this lane does not resolve"
         ));
@@ -4907,28 +5077,16 @@ fn readonly_git_dir_for(cwd: &std::path::Path) -> Result<Option<(PathBuf, PathBu
             // anything the lane cannot decode is a repository git would
             // still run (its filters included), so it refuses instead of
             // reporting "no repository".
-            if let Ok(metadata) = std::fs::metadata(&candidate)
-                && metadata.len() > READONLY_GIT_META_SCAN_CAP as u64
-            {
+            let Some(bytes) = read_bounded_regular_file(&candidate, READONLY_GIT_META_SCAN_CAP)
+                .map_err(|error| format!("the .git link at {error}"))?
+            else {
+                // `is_file` saw the link; if it vanished between that check
+                // and the read, refusing beats guessing at a moving tree.
                 return Err(format!(
-                    "the .git link at {} is larger than the {}-byte discovery bound",
-                    candidate.display(),
-                    READONLY_GIT_META_SCAN_CAP
-                ));
-            }
-            let bytes = std::fs::read(&candidate).map_err(|error| {
-                format!(
-                    "the .git link at {} could not be read: {error}",
+                    "the .git link at {} vanished before it could be read",
                     candidate.display()
-                )
-            })?;
-            if bytes.len() > READONLY_GIT_META_SCAN_CAP {
-                return Err(format!(
-                    "the .git link at {} is larger than the {}-byte discovery bound",
-                    candidate.display(),
-                    READONLY_GIT_META_SCAN_CAP
                 ));
-            }
+            };
             let first_line_end = bytes
                 .iter()
                 .position(|byte| *byte == b'\n')
@@ -4950,14 +5108,14 @@ fn readonly_git_dir_for(cwd: &std::path::Path) -> Result<Option<(PathBuf, PathBu
                     candidate.display()
                 ));
             };
-            // The value is byte-exact to the end of the first line; a value
-            // that is empty or carries trailing whitespace (or a trailing
-            // `\r` git strips at the newline) fatals in git before anything
-            // runs — refuse rather than trim it into a target git would
-            // never open.
-            if target.is_empty()
-                || target.starts_with([' ', '\t'])
-                || target.ends_with([' ', '\t', '\r'])
+            // The value is byte-exact except for the one trailing `\r` git
+            // strips at the newline (probe-pinned: a CRLF-terminated target
+            // resolves and runs); a value that is empty, or carries leading
+            // whitespace or any other trailing space, fatals in git before
+            // anything runs — refuse rather than trim it into a target git
+            // would never open.
+            let target = target.strip_suffix('\r').unwrap_or(target);
+            if target.is_empty() || target.starts_with([' ', '\t']) || target.ends_with([' ', '\t'])
             {
                 return Err(format!(
                     "the .git link at {} names a target git itself rejects",
@@ -4982,10 +5140,11 @@ fn readonly_git_dir_for(cwd: &std::path::Path) -> Result<Option<(PathBuf, PathBu
 
 /// Filter declarations armed by one git directory's config files: its own
 /// `config` plus the shared config a linked worktree points at through
-/// `commondir`. Both the pointer files and the config are read with the
-/// same byte-wise fidelity git applies — an undecodable or oversized file
-/// refuses instead of scanning a partial set, and a config is size-checked
-/// before it is read into memory. `core.worktree` is validated only for a
+/// `commondir`. Both the pointer files and the config are read bounded on
+/// the opened handle — regular files only, non-blocking on unix, size-capped
+/// — and anything else refuses instead of scanning a partial set; non-UTF-8
+/// bytes decode lossily and a name carrying the replacement marker refuses
+/// at the name wall. `core.worktree` is validated only for a
 /// main git directory: git resolves a linked worktree from its gitdir
 /// back-pointer and IGNORES `core.worktree` even when the shared config
 /// declares it (probe-pinned: the toplevel is the linked worktree while the
@@ -5009,28 +5168,17 @@ fn readonly_git_config_filter_names(
                 commondir_path.display()
             ));
         }
-        Ok(metadata) => {
-            linked_worktree = true;
-            if metadata.len() > READONLY_GIT_META_SCAN_CAP as u64 {
+        Ok(_metadata) => {
+            let Some(bytes) =
+                read_bounded_regular_file(&commondir_path, READONLY_GIT_META_SCAN_CAP)
+                    .map_err(|error| format!("the commondir pointer at {error}"))?
+            else {
                 return Err(format!(
-                    "the commondir pointer at {} is larger than the {}-byte discovery bound",
-                    commondir_path.display(),
-                    READONLY_GIT_META_SCAN_CAP
-                ));
-            }
-            let bytes = std::fs::read(&commondir_path).map_err(|error| {
-                format!(
-                    "the commondir pointer at {} could not be read: {error}",
+                    "the commondir pointer at {} vanished before it could be read",
                     commondir_path.display()
-                )
-            })?;
-            if bytes.len() > READONLY_GIT_META_SCAN_CAP {
-                return Err(format!(
-                    "the commondir pointer at {} is larger than the {}-byte discovery bound",
-                    commondir_path.display(),
-                    READONLY_GIT_META_SCAN_CAP
                 ));
-            }
+            };
+            linked_worktree = true;
             let first_line_end = bytes
                 .iter()
                 .position(|byte| *byte == b'\n')
@@ -5041,50 +5189,57 @@ fn readonly_git_config_filter_names(
                     commondir_path.display()
                 )
             })?;
-            let target = text.trim();
-            if !target.is_empty() {
-                let common_dir = if std::path::Path::new(target).is_absolute() {
-                    PathBuf::from(target)
-                } else {
-                    gitdir.join(target)
-                };
-                config_paths.push(common_dir.join("config"));
+            // Byte-exact like the `.git` link, except the one trailing `\r`
+            // git strips at the newline: git resolves the value it consumed
+            // (a padded spelling fatals there before anything runs), so a
+            // trimmed value could resolve a directory git never opens. An
+            // empty pointer names no shared directory in git either.
+            let target = text.strip_suffix('\r').unwrap_or(text);
+            if target.is_empty() {
+                return Err(format!(
+                    "the commondir pointer at {} names no shared directory",
+                    commondir_path.display()
+                ));
             }
+            let common_dir = if std::path::Path::new(target).is_absolute() {
+                PathBuf::from(target)
+            } else {
+                gitdir.join(target)
+            };
+            // git resolves the value it consumed — a padded or dangling
+            // spelling fatals there before anything runs — so a value this
+            // lane cannot resolve refuses instead of silently scanning a
+            // config git never opens.
+            let common_dir = common_dir.canonicalize().map_err(|error| {
+                format!(
+                    "the commondir pointer at {} names a shared directory git could not resolve ({error})",
+                    commondir_path.display()
+                )
+            })?;
+            config_paths.push(common_dir.join("config"));
         }
     }
     let mut names = Vec::new();
     for path in config_paths {
-        // Bound before reading: a crafted config of any size would otherwise
-        // buy a full-size transient allocation per scanned repository.
-        if let Ok(metadata) = std::fs::metadata(&path)
-            && metadata.len() > READONLY_GIT_CONFIG_SCAN_CAP as u64
-        {
-            return Err(format!(
-                "{} is larger than the {}-byte filter-discovery scan bound",
-                path.display(),
-                READONLY_GIT_CONFIG_SCAN_CAP
-            ));
-        }
-        let bytes = match std::fs::read(&path) {
-            Ok(bytes) => bytes,
+        // Bounded on the opened handle: a crafted config of any size would
+        // otherwise buy a full-size transient allocation per scanned
+        // repository, and a FIFO at a config path would otherwise block the
+        // pre-spawn scan in `open` until a writer appears.
+        let Some(bytes) = read_bounded_regular_file(&path, READONLY_GIT_CONFIG_SCAN_CAP)
+            .map_err(|error| format!("filter-discovery config {error}"))?
+        else {
             // A repository without a config file there declares nothing.
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
-            Err(error) => {
-                return Err(format!("{} could not be read: {error}", path.display()));
-            }
+            continue;
         };
-        if bytes.len() > READONLY_GIT_CONFIG_SCAN_CAP {
-            return Err(format!(
-                "{} is larger than the {}-byte filter-discovery scan bound",
-                path.display(),
-                READONLY_GIT_CONFIG_SCAN_CAP
-            ));
-        }
         let text = String::from_utf8_lossy(&bytes);
+        // One parse per config text serves both consumers — `core.worktree`
+        // validation and the filter-name accumulation each re-parsed the
+        // same text before.
+        let settings = parse_git_config_settings(&text)?;
         if !linked_worktree {
-            validated_core_worktree(&text, gitdir, worktree_dir)?;
+            validated_core_worktree(&settings, gitdir, worktree_dir)?;
         }
-        names.extend(armed_git_filter_names(&text)?);
+        names.extend(armed_git_filter_names(&settings)?);
     }
     Ok(names)
 }
@@ -5364,10 +5519,11 @@ fn parse_git_config_settings(config_text: &str) -> Result<Vec<ParsedGitConfigSet
 /// against a config subsection: case-variant subsections are two drivers,
 /// and case-folding one onto the other would pin a spelling git never looks
 /// up while leaving the live one armed.
-fn armed_git_filter_names(config_text: &str) -> Result<Vec<ReadonlyGitFilterPin>, String> {
-    let settings = parse_git_config_settings(config_text)?;
+fn armed_git_filter_names(
+    settings: &[ParsedGitConfigSetting],
+) -> Result<Vec<ReadonlyGitFilterPin>, String> {
     let mut names: Vec<ReadonlyGitFilterPin> = Vec::new();
-    for setting in &settings {
+    for setting in settings {
         if setting.base != "filter" {
             continue;
         }
@@ -5408,7 +5564,7 @@ fn armed_git_filter_names(config_text: &str) -> Result<Vec<ReadonlyGitFilterPin>
     }
     for pin in &names {
         if pin.name.is_empty()
-            || pin.name.len() > 64
+            || pin.name.len() > MAX_DISCOVERED_FILTER_NAME_BYTES
             || !pin
                 .name
                 .chars()
@@ -5435,15 +5591,15 @@ fn armed_git_filter_names(config_text: &str) -> Result<Vec<ReadonlyGitFilterPin>
 /// `core.worktree`, so the last declaration is the one validated — taking
 /// the first would admit a worktree a later duplicate relocates.
 fn validated_core_worktree(
-    config_text: &str,
+    settings: &[ParsedGitConfigSetting],
     gitdir: &std::path::Path,
     worktree_dir: &std::path::Path,
 ) -> Result<(), String> {
-    let Some(declared) = parse_git_config_settings(config_text)?
-        .into_iter()
+    let Some(declared) = settings
+        .iter()
         .rev()
         .find(|setting| setting.base == "core" && setting.key == "worktree")
-        .and_then(|setting| setting.value)
+        .and_then(|setting| setting.value.clone())
     else {
         return Ok(());
     };
@@ -6521,6 +6677,14 @@ async fn execute_foreground_via_background(
 
 const BASH_MAX_TIMEOUT_MS: u64 = i32::MAX as u64;
 
+/// Upper bound for one inline `stdin` payload. The spawn delivers it with a
+/// blocking `write_all` while the shell-manager lock is held; one pipe
+/// buffer (64 KiB on Linux) always completes without the child reading, so
+/// anything at or below this cap can never wedge the executor thread, and a
+/// larger payload is refused with a pointer at background `interact`
+/// streaming instead of hanging the session.
+const MAX_INLINE_STDIN_BYTES: usize = 64 * 1024;
+
 /// Initial cadence for foreground-via-background completion polling. Fast
 /// commands dominate real agent traffic; detection latency on `true`-class
 /// commands drops from ~100ms to ~10ms, while long commands reach the
@@ -6854,7 +7018,8 @@ impl ToolSpec for BashTool {
                 },
                 "stdin": {
                     "type": "string",
-                    "description": "Stdin data to send (action=run: before waiting; action=interact: to the background task). Also accepted as `input` or `data` — send only one."
+                    "maxLength": 65536,
+                    "description": "Stdin data to send (action=run: before waiting; action=interact: to the background task). Also accepted as `input` or `data` — send only one. Inline payloads are capped at 64 KiB: a larger write to a command that is not reading would block the executor; for bigger payloads run the command in the background and feed it through `action=interact` in chunks."
                 },
                 "input": {
                     "type": "string",
@@ -7065,12 +7230,27 @@ impl ToolSpec for BashTool {
         // for misspelled names. A wrong type is an error, never a no-op.
         let stdin_data = match first_present_field(&input, &["stdin", "input", "data"]) {
             None => None,
-            Some((name, value)) => Some(
-                value
+            Some((name, value)) => {
+                let payload = value
                     .as_str()
                     .ok_or_else(|| type_mismatch(name, value, "a string"))?
-                    .to_string(),
-            ),
+                    .to_string();
+                // The spawn delivers the payload with a blocking write while
+                // the caller holds the shell-manager lock: past the pipe
+                // buffer a command that never reads would wedge the
+                // executor thread and every other shell in the session
+                // before any watchdog is reached. The cap is one byte short
+                // of never-wedging (a write that fits the pipe buffer
+                // completes unconditionally); bigger payloads belong on the
+                // background lane, fed through `action=interact` in chunks.
+                if payload.len() > MAX_INLINE_STDIN_BYTES {
+                    return Ok(ToolResult::error(format!(
+                        "The inline stdin payload is {} bytes; the shell tool accepts at most {MAX_INLINE_STDIN_BYTES} inline — run the command with background=true and feed it through action=interact in chunks.",
+                        payload.len()
+                    )));
+                }
+                Some(payload)
+            }
         };
 
         if interactive && background {
