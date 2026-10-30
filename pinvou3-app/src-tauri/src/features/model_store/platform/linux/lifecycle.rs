@@ -2202,6 +2202,34 @@ impl ModelManager {
         self.require_actually_stopped(rec, "更新脚本")
     }
 
+    /// 权重不完整归位前的等价停验（本批评审 P2-1）。
+    ///
+    /// deploy/enable 撞上「权重不完整」时走 [`db::mark_weights_incomplete`] 归位，
+    /// 而它会连 running/container_name/endpoint_url/endpoint_model 一起抹掉。
+    /// reconcile 的两条反向认领臂（容器名认领、端点+身份文件认领）都要求
+    /// status=="deployed" 且这些身份字段还在——容器其实活着却被抹掉身份的卡，
+    /// 从此进程照旧占着内存/端口，应用内却再也没有停止入口。所以抹身份前先做
+    /// 与卸载预检同款的真实验验（复用 [`Self::require_actually_stopped`]：容器
+    /// inspect / 原生进程指纹 / 端口存活三重核验）：真不在才抹；仍在或查不动，
+    /// 就保留原记录，把「权重不完整但实例仍在」如实报给用户并指引自助恢复。
+    /// 认领臂的 status 条件不动——那会放宽认领面，停验才是保守的那一侧。
+    fn require_instance_gone_for_weights_reset(
+        &self,
+        card_id: &str,
+    ) -> Result<(), ModelManagerError> {
+        // 重新读一遍记录：deploy/enable 脚本可能已经跑了很久，落库前按最新
+        // 状态判定，而不是拿进入函数时的旧快照。
+        let rec = self.get_record(card_id)?;
+        if let Err(alive) = self.require_actually_stopped(&rec, "继续下载") {
+            return Err(ModelManagerError::new(format!(
+                "模型文件未完整下载，但该模型仍有实例在运行或无法确认已停止，\
+                 已保留原有运行记录不做改动。请先停用该模型，再点击「继续下载」\
+                 补齐文件后重新部署。（停验未通过：{alive}）"
+            )));
+        }
+        Ok(())
+    }
+
     /// 三重真实核验（容器 inspect / 原生进程指纹 / 端口存活）+ DB 标志，
     /// `action` 只用于错误文案（"更新脚本" / "卸载"）。
     ///
@@ -2489,6 +2517,10 @@ impl ModelManager {
                 //
                 // 绝不删模型目录：下载脚本负责断点续传，清掉分片反而会浪费用户已经
                 // 下完的几十 GB。
+                //
+                // 本批评审 P2-1：归位会连运行身份一起抹掉，抹前先做与卸载预检
+                // 同款的真实验验；实例仍在就保留记录、如实报错。
+                self.require_instance_gone_for_weights_reset(card_id)?;
                 db::mark_weights_incomplete(card_id).map_err(|db_error| {
                     ModelManagerError::new(format!("修复模型下载状态失败：{db_error}"))
                 })?;
@@ -2533,6 +2565,10 @@ impl ModelManager {
             Err(error) if model_weights_are_incomplete(&error.to_string()) => {
                 // 已部署模型同样可能在应用外被清走权重。不能让它一直顶着
                 // “启用”按钮反复失败；跟 deploy 路径一样，归正为可续传的下载状态。
+                //
+                // 本批评审 P2-1：enable 撞权重不完整时这张卡多半刚部署过、
+                // 容器还活着的概率不低，抹身份前的等价停验尤其不能省。
+                self.require_instance_gone_for_weights_reset(card_id)?;
                 db::mark_weights_incomplete(card_id).map_err(|db_error| {
                     ModelManagerError::new(format!("修复模型下载状态失败：{db_error}"))
                 })?;
