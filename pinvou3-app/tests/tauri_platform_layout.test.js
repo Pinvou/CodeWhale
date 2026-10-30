@@ -200,10 +200,10 @@ for (const stalePath of [
 assert.match(workflow, /src\/platform\/prefs\//);
 assert.match(connectorWorkflow, /resources\/platforms\/\*\*\/bundle\/connectors\/\*\*/);
 const connectorMatrices = connectorWorkflow.match(
-  /fromJSON\(vars\.PINVOU_WINDOWS_MAC_ENABLED != 'false' && '([^']+)' \|\| '([^']+)'\)/,
+  /fromJSON\(vars\.PINVOU_WINDOWS_ENABLED != 'false' && \(vars\.PINVOU_MACOS_ENABLED != 'false' && '([^']+)' \|\| '([^']+)'\) \|\| \(vars\.PINVOU_MACOS_ENABLED != 'false' && '([^']+)' \|\| '([^']+)'\)\)/,
 );
-assert.ok(connectorMatrices, "connector workflow must declare both platform-switch matrices");
-const [allPlatforms, linuxOnly] = connectorMatrices.slice(1).map((value) => {
+assert.ok(connectorMatrices, "connector workflow must declare all four platform-switch matrices");
+const [allPlatforms, withWindows, withMacos, linuxOnly] = connectorMatrices.slice(1).map((value) => {
   const matrix = JSON.parse(value);
   assert.deepEqual(Object.keys(matrix), ["include"], "strategy.matrix must be an include map");
   assert.ok(Array.isArray(matrix.include) && matrix.include.length > 0, "platform matrix must have rows");
@@ -220,6 +220,16 @@ assert.deepEqual(
   ["linux/aarch64", "linux/x86_64"],
   "disabling Windows/macOS must retain both Linux architectures",
 );
+for (const [rows, disabledPrefix, enabledResource] of [
+  [withWindows, "macos/", "windows/x86_64"],
+  [withMacos, "windows/", "macos/aarch64"],
+]) {
+  assert.ok(rows.some((row) => row.resources === enabledResource));
+  assert.ok(rows.every((row) => !row.resources.startsWith(disabledPrefix)));
+  for (const resource of ["linux/aarch64", "linux/x86_64"]) {
+    assert.ok(rows.some((row) => row.resources === resource));
+  }
+}
 assert.match(connectorWorkflow, /src\/platform\/paths\.rs/);
 
 console.log("tauri platform layout contract: ok");
