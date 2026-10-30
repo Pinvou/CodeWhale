@@ -971,7 +971,7 @@ func loadCommandPrecheckSnapshot(ctx context.Context, tx pgx.Tx, commandType, ta
 		var highWater int64
 		var updatedAt time.Time
 		var debitProhibited bool
-		err = tx.QueryRow(ctx, `SELECT u.status,u.last_persisted_sequence,u.updated_at,EXISTS(SELECT 1 FROM usage_platform_loss_reviews loss WHERE loss.usage_request_id=u.id AND loss.customer_debit_prohibited) FROM usage_requests u WHERE u.id=$1`, command.ResourceID).Scan(&status, &highWater, &updatedAt, &debitProhibited)
+		err = tx.QueryRow(ctx, `SELECT u.status,u.last_persisted_sequence,u.updated_at,(EXISTS(SELECT 1 FROM usage_platform_loss_reviews loss WHERE loss.usage_request_id=u.id AND loss.customer_debit_prohibited) OR EXISTS(SELECT 1 FROM usage_convergence_evidence evidence WHERE evidence.usage_request_id=u.id AND evidence.evidence_type='CUSTOMER_HOLD_RELEASE' AND evidence.source_type='RECONCILER' AND evidence.decision='REVIEW' AND evidence.evidence_key='missing-upstream-reference-deadline:v1')) FROM usage_requests u WHERE u.id=$1`, command.ResourceID).Scan(&status, &highWater, &updatedAt, &debitProhibited)
 		if errors.Is(err, pgx.ErrNoRows) {
 			return commandPrecheckSnapshot{}, ErrNotFound
 		}

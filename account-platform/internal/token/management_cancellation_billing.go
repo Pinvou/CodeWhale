@@ -1,9 +1,13 @@
 package token
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
+	"github.com/Pinvou/pinvou3/account-platform/internal/platform/serviceauth"
+	"io"
+	"time"
 
 	"math"
 
@@ -118,6 +122,81 @@ func (c *HTTPBillingClient) reserveHold(ctx context.Context, usageID uuid.UUID, 
 
 func (c *HTTPBillingClient) Release(ctx context.Context, usageID, holdID uuid.UUID, reason string) error {
 	return c.call(ctx, http.MethodPost, "/internal/v1/holds/release", map[string]any{"usage_request_id": usageID, "hold_id": holdID, "reason": reason}, nil)
+}
+
+// This is the existing general hold release, without personal pricing proof.
+// A nullable price is compared exactly, never treated as a wildcard.
+func (c *HTTPBillingClient) ReleaseCapturedReference(ctx context.Context, intent capturedReferenceRelease) (capturedReleaseReceipt, error) {
+	var receipt capturedReleaseReceipt
+	if intent.UsageID == uuid.Nil || intent.HoldID == uuid.Nil || intent.WalletID == uuid.Nil || intent.Maximum < 0 {
+		return receipt, ErrForbidden
+	}
+	raw, err := c.capturedPost200(ctx, "/internal/v1/holds/release", map[string]any{"usage_request_id": intent.UsageID, "hold_id": intent.HoldID, "reason": "trusted usage deadline exceeded"})
+	if err != nil {
+		return receipt, err
+	}
+	if !expiryJSONFields(raw, []string{"hold_id", "usage_request_id", "wallet_id", "max_microcredits", "status"}) || json.Unmarshal(raw, &receipt.confirmedReleaseReceipt) != nil || receipt.Maximum < intent.Maximum || receipt.Status != "RELEASED" || receipt.ID != intent.HoldID || receipt.UsageID != intent.UsageID || receipt.WalletID != intent.WalletID || !sameOptionalUUID(receipt.PriceID, intent.PriceID) {
+		return receipt, ErrForbidden
+	}
+	if receipt.Maximum > intent.Maximum {
+		proof := &capturedExtensionProof{OperationID: finalUsageReservationOperationID(intent.UsageID, intent.HoldID), LeaseSeconds: 900, Additional: receipt.Maximum - intent.Maximum}
+		// Only a verified terminal hold makes an unknown operation harmless:
+		// Billing either returns this exact old fingerprint's ACK or refuses it.
+		ack, err := c.capturedPost200(ctx, "/internal/v1/holds/extend", map[string]any{"usage_request_id": intent.UsageID, "hold_id": intent.HoldID, "operation_id": proof.OperationID, "lease_seconds": proof.LeaseSeconds, "additional_microcredits": proof.Additional})
+		if err != nil {
+			return receipt, err
+		}
+		var extra struct {
+			Actual  *int64    `json:"actual_microcredits"`
+			Expires time.Time `json:"expires_at"`
+		}
+		if !expiryJSONFields(ack, []string{"hold_id", "usage_request_id", "wallet_id", "max_microcredits", "status", "expires_at"}) || json.Unmarshal(ack, &proof.Receipt) != nil || json.Unmarshal(ack, &extra) != nil || extra.Actual != nil {
+			return receipt, ErrForbidden
+		}
+		proof.ExpiresAt = extra.Expires
+		receipt.Extension = proof
+	}
+	if !capturedReceiptMatches(receipt, intent) {
+		return receipt, ErrForbidden
+	}
+	return receipt, nil
+}
+
+// The two captured confirmation requests require 200, unlike general POST
+// callers which also accept 201. Keep the existing client, auth and read bound.
+func (c *HTTPBillingClient) capturedPost200(ctx context.Context, path string, input any) (json.RawMessage, error) {
+	encoded, err := json.Marshal(input)
+	if err != nil {
+		return nil, err
+	}
+	q, err := http.NewRequestWithContext(ctx, http.MethodPost, c.baseURL.String()+path, bytes.NewReader(encoded))
+	if err != nil {
+		return nil, err
+	}
+	if err = serviceauth.SetAuthorization(q, c.serviceToken); err != nil {
+		return nil, err
+	}
+	q.Header.Set("Content-Type", "application/json")
+	r, err := c.client.Do(q)
+	if err != nil {
+		return nil, err
+	}
+	defer r.Body.Close()
+	b, err := io.ReadAll(io.LimitReader(r.Body, (2<<20)+1))
+	if err != nil {
+		return nil, err
+	}
+	if len(b) > 2<<20 || !json.Valid(b) {
+		return nil, errors.New("Billing captured receipt is invalid")
+	}
+	if r.StatusCode != http.StatusOK {
+		var p struct {
+			Code string `json:"code"`
+		}
+		_ = json.Unmarshal(b, &p)
+		return nil, &BillingHTTPError{Status: r.StatusCode, Code: p.Code, RetryAfter: r.Header.Get("Retry-After")}
+	}
+	return b, nil
 }
 
 type SnapshotBillingClient interface {

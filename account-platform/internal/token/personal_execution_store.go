@@ -462,11 +462,46 @@ GROUP BY history_organization_id,history_group_key,history_logical_turn_id,histo
 ORDER BY history_head_started_at DESC,history_head_request_id DESC`
 
 func (r *PostgresRepository) RecordConvergenceEvidence(ctx context.Context, usageID uuid.UUID, evidenceType, sourceType, decision, evidenceKey string, snapshot map[string]any) error {
+	evidenceType, sourceType, decision = strings.ToUpper(strings.TrimSpace(evidenceType)), strings.ToUpper(strings.TrimSpace(sourceType)), strings.ToUpper(strings.TrimSpace(decision))
 	tx, err := r.pool.Begin(ctx)
 	if err != nil {
 		return err
 	}
 	defer tx.Rollback(ctx)
+	// Conclusive provider facts publish under the same lock as the deadline.
+	// A rejection is not numeric usage, but also rules out a missing-fact decision.
+	rejection := decision == "RECORDED" && ((evidenceType == "PROVIDER_LOOKUP" && sourceType == "PROVIDER_QUERY" && snapshot["lookup_succeeded"] == true && snapshot["usage_present"] == false && snapshot["rejected"] == true) || (evidenceType == "RESULT_OBSERVED" && sourceType == "GATEWAY" && snapshot["response_disposition"] == responseDispositionRejectedBeforeGeneration))
+	if rejection || evidenceType == "PROVIDER_LOOKUP" && sourceType == "PROVIDER_QUERY" && decision == "RECORDED" && snapshot["lookup_succeeded"] == true && snapshot["usage_present"] == true {
+		raw, err := json.Marshal(snapshot)
+		if err != nil {
+			return err
+		}
+		if numbers, valid := confirmedUsageNumbers(raw); valid || rejection {
+			if pending, err := lockMissingReferenceReleaseTx(ctx, tx, usageID); err != nil {
+				return err
+			} else if pending {
+				key, err := deadlineLateKeyTx(ctx, tx, usageID, "usage")
+				if err != nil {
+					return err
+				}
+				late := map[string]any{"usage": numbers, "content_persisted": false, "customer_debit_prohibited": true}
+				if rejection {
+					delete(late, "usage")
+					late["rejected"] = true
+				}
+				if err := appendUsageConvergenceEvidenceTx(ctx, tx, usageID, "RESULT_OBSERVED", "GATEWAY", "REVIEW", key, late, r.now()); err != nil {
+					return err
+				}
+				if err := tx.Commit(ctx); err != nil {
+					return err
+				}
+				if rejection {
+					return errManualReconciliationRequired
+				}
+				return nil
+			}
+		}
+	}
 	if err := appendUsageConvergenceEvidenceTx(ctx, tx, usageID, evidenceType, sourceType, decision, evidenceKey, snapshot, r.now()); err != nil {
 		return err
 	}

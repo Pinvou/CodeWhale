@@ -23,7 +23,22 @@ func (r *PostgresRepository) MarkReview(ctx context.Context, usageID uuid.UUID, 
 	if err := r.markReviewTx(ctx, tx, usageID, reason, snapshot, r.now()); err != nil {
 		return err
 	}
-	return tx.Commit(ctx)
+	// A late adapter-proven rejection must not authorize the caller's Release.
+	// markReviewTx already holds the usage lock and retains only bounded audit.
+	lateRejection := false
+	if snapshot["response_disposition"] == responseDispositionRejectedBeforeGeneration {
+		lateRejection, err = missingReferenceReleasePendingTx(ctx, tx, usageID)
+		if err != nil {
+			return err
+		}
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return err
+	}
+	if lateRejection {
+		return errManualReconciliationRequired
+	}
+	return nil
 }
 
 func (r *PostgresRepository) markReviewTx(ctx context.Context, tx pgx.Tx, usageID uuid.UUID, reason string, snapshot map[string]any, now time.Time) error {
@@ -41,7 +56,11 @@ func (r *PostgresRepository) markReviewTx(ctx context.Context, tx pgx.Tx, usageI
 	} else if pending {
 		// Preserve the late bounded observation, never replace the owned intent,
 		// terminal decision, next attempt, delivery or cancellation state.
-		if err := appendUsageConvergenceEvidenceTx(ctx, tx, usageID, "UNCERTAINTY", "GATEWAY", "REVIEW", "late-review-after-missing-reference-decision", map[string]any{"reason": reason, "sanitized_observation": snapshot, "customer_debit_prohibited": true}, now); err != nil {
+		lateKey, err := deadlineLateKeyTx(ctx, tx, usageID, "review")
+		if err != nil {
+			return err
+		}
+		if err := appendUsageConvergenceEvidenceTx(ctx, tx, usageID, "UNCERTAINTY", "GATEWAY", "REVIEW", lateKey, map[string]any{"reason": reason, "sanitized_observation": snapshot, "customer_debit_prohibited": true}, now); err != nil {
 			return err
 		}
 		return nil

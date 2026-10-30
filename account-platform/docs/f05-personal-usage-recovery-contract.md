@@ -58,3 +58,17 @@ Token先持久化原 usage/hold 身份的待释放意图，随后在Billing原wa
 滚动升级须先升级 Billing，再启用 Token 的此恢复路径：旧 Billing 会拒绝新的冻结前置条件字段，不能把拒绝当成释放成功。已有待释放意图时，须保留识别该意图及禁迟扣事实的 Token worker 直至恢复闭合，不能回退到不识别这些事实的旧 worker；正常旧释放调用及原迁移身份不变。
 
 取消记录中的 `cancel_reconciliation_deadline` 当前只持久化元数据，没有独立运行时截止消费者；它不触发自动释放，也不替代上述未派发证明或已派发缺引用的 24 小时策略。保留原值及迁移身份，不因字段名称推导新的资金处置规则。到期恢复的慢证据公平调度、串行对账旧领取写回隔离由 Issue #1903 分别跟踪，本轮未修；现有资金证明、幂等与终态围栏保持，尚不能宣称多实例慢批次容量验收通过。
+
+## 已捕获引用的原24小时缺证决定
+
+普通对账已持有上游引用、满原24小时且本轮查询无结论时，必须在同一usage行锁内重读现有可信数字及绑定的历史Lookup证据。领取快照、本轮查询失败和000015复制的普通非数字metadata都不能证明没有可信用量；有效最终数字（包括零）、既有结算或矛盾数字均阻止缺证释放并保留人工核查，不能任选数字扣款。
+
+供应商明确拒绝且无用量的Lookup、适配器已确认的生成前拒绝也在同一行锁下发布。先发布的真实拒绝事实阻止另建缺证决定，保持原拒绝释放及其RPC错误语义；若截止决定先持久化，迟到拒绝仅保留审计并在原Release RPC前停止，不因拒绝结果绕过人工恢复门闩。拒绝事实不伪造零用量，也不授权选数扣款。
+
+无可信用量时，先以原usage/hold/wallet/price/最大额及原provider/adapter/reference摘要持久化独立的captured-reference释放决定，同事务关闭既有stopped门闩，提交成功后本调用才有一次原Hold Release RPC许可。Prepare提交失败或结果未知不得发RPC。读到历史intent本身不授发送权：错误、未知ACK或进程crash（包括持久化后尚未发RPC）都保持人工恢复，不增加后台扫描、自动开闩或ACK重试。原missing-reference的个人完整快照资格及自动ACK恢复仍是独立分支，不能把本决定放进它的循环。
+
+确认只接受原usage/hold/wallet、price的精确nil/非nil语义、最大额及RELEASED状态的完整有界回执，不给ORG或历史格式套用PERSONAL完整pricing证明。成功后仍为原REVIEW/REVIEW及TRUSTED_USAGE_DEADLINE_EXCEEDED平台损失，原用量、投递、取消及财务身份不改；未确认不写已释放损失。迟到数字仅保留审计，不能Extend/Commit、重开对账或被新waiver取代。
+
+人工恢复通过已有TOKEN_USAGE_RECONCILIATION_RETRY权限、预检、当前版本/证据水位CAS及审计，对同一usage/hold和原intent显式重新排队。每个新的受权人工命令最多开闩一次；已完成governed command原键重放只返回原结果，不再次排队。恢复仍失败时需新人工命令继续原决定，不能改成新usage、新本金决定或改选迟到数字扣款。先已存waiver/missing-reference决定与旧loss继续归原所有者，旧loss不回填、不追扣。
+
+若原正额扩额已提交而ACK丢失，Token最大额可能仍旧。仅在严格200同Hold RELEASED回执确认后，若最大额更大，可用原固定final-extension操作ID、lease900和差额发一次既有操作回执验证。Billing必须命中原精确fingerprint，且旧ACK身份及最大额与释放回执相等、减去原additional后精确等于冻结最大额；证明随原确认/loss保存，原intent不改。正常等额不加请求；任何不匹配、旧版本操作事实不同、201、未知或错误仍人工，不枚举或自动重试，不从扩额证明重构可信用量。终态旧操作重放不扩额、续租或新增Billing回执。

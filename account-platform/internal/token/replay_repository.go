@@ -368,10 +368,24 @@ func (r *PostgresRepository) SaveReplayResult(ctx context.Context, usageID uuid.
 		if result.FinalUsage != nil && (result.FinalUsage.InputTokens < 0 || result.FinalUsage.OutputTokens < 0 || result.FinalUsage.CachedInputTokens < 0) {
 			return ErrForbidden
 		}
-		if err := appendUsageConvergenceEvidenceTx(ctx, tx, usageID, "RESULT_OBSERVED", "GATEWAY", "REVIEW", "late-result-after-missing-reference-decision", map[string]any{"usage": result.FinalUsage, "response_kind": result.Kind, "http_status": result.HTTPStatus, "content_persisted": false, "customer_debit_prohibited": true}, now); err != nil {
+		lateKey, err := deadlineLateKeyTx(ctx, tx, usageID, "result")
+		if err != nil {
 			return err
 		}
-		return tx.Commit(ctx)
+		late := map[string]any{"usage": result.FinalUsage, "response_kind": result.Kind, "http_status": result.HTTPStatus, "content_persisted": false, "customer_debit_prohibited": true}
+		if result.ResponseDisposition != "" {
+			late["response_disposition"] = result.ResponseDisposition
+		}
+		if err := appendUsageConvergenceEvidenceTx(ctx, tx, usageID, "RESULT_OBSERVED", "GATEWAY", "REVIEW", lateKey, late, now); err != nil {
+			return err
+		}
+		if err := tx.Commit(ctx); err != nil {
+			return err
+		}
+		if result.ResponseDisposition == responseDispositionRejectedBeforeGeneration {
+			return errManualReconciliationRequired
+		}
+		return nil
 	}
 	if err := r.checkDispatchLeaseOwnerTx(ctx, tx, usageID); err != nil {
 		return err
@@ -489,6 +503,9 @@ func (r *PostgresRepository) SaveReplayResult(ctx context.Context, usageID uuid.
 	bodyPersisted := command.RowsAffected() > 0 && len(ciphertext) > 0
 	if err == nil && (bodyPersisted || !storedHasBody || len(ciphertext) == 0) {
 		observation := map[string]any{"response_kind": result.Kind, "http_status": result.HTTPStatus, "content_type": result.ContentType, "response_payload_digest": responseDigest, "final_usage_present": result.FinalUsage != nil, "settlement_snapshot_present": settlementPresent, "last_sequence": result.LastSequence}
+		if result.ResponseDisposition == responseDispositionRejectedBeforeGeneration {
+			observation["response_disposition"] = result.ResponseDisposition
+		}
 		if !bodyPersisted {
 			observation["content_persisted"] = false
 		}

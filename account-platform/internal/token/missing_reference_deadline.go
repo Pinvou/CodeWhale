@@ -82,7 +82,7 @@ func missingReferenceReleasePendingTx(ctx context.Context, tx pgx.Tx, usageID uu
 	var pending bool
 	err := tx.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM usage_convergence_evidence
  WHERE usage_request_id=$1 AND evidence_type='CUSTOMER_HOLD_RELEASE'
- AND source_type='RECONCILER' AND decision='REVIEW' AND evidence_key=$2)`, usageID, missingReferenceReleaseKey).Scan(&pending)
+ AND source_type='RECONCILER' AND decision='REVIEW' AND evidence_key IN ($2,$3))`, usageID, missingReferenceReleaseKey, capturedReferenceReleaseKey).Scan(&pending)
 	return pending, err
 }
 
@@ -546,7 +546,11 @@ func (r *PostgresRepository) PreserveMissingReferenceLateUsage(ctx context.Conte
 	if usage.InputTokens < 0 || usage.OutputTokens < 0 || usage.CachedInputTokens < 0 {
 		return true, ErrForbidden
 	}
-	if err := appendUsageConvergenceEvidenceTx(ctx, tx, usageID, "RESULT_OBSERVED", "GATEWAY", "REVIEW", "late-usage-after-missing-reference-decision", map[string]any{"usage": usage, "content_persisted": false, "customer_debit_prohibited": true}, r.now()); err != nil {
+	lateKey, err := deadlineLateKeyTx(ctx, tx, usageID, "usage")
+	if err != nil {
+		return true, err
+	}
+	if err := appendUsageConvergenceEvidenceTx(ctx, tx, usageID, "RESULT_OBSERVED", "GATEWAY", "REVIEW", lateKey, map[string]any{"usage": usage, "content_persisted": false, "customer_debit_prohibited": true}, r.now()); err != nil {
 		return true, err
 	}
 	return true, tx.Commit(ctx)

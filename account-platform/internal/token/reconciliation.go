@@ -15,6 +15,7 @@ import (
 
 	"github.com/Pinvou/pinvou3/account-platform/internal/platform/observability"
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5"
 )
 
 type ReconciliationItem struct {
@@ -170,6 +171,22 @@ func (r *PostgresRepository) StopReconciliation(ctx context.Context, usageID uui
 	} else if pending {
 		return tx.Commit(ctx)
 	}
+	changed, err := r.stopReconciliationTx(ctx, tx, usageID, reason, now)
+	if err != nil {
+		return err
+	}
+	if !changed {
+		if err := tx.Rollback(ctx); err != nil {
+			return err
+		}
+		return r.ensureUsageState(ctx, usageID, "COMMITTED", "RELEASED")
+	}
+	return tx.Commit(ctx)
+}
+
+// The captured finisher calls this only after verifying its exact immutable intent.
+// Public StopReconciliation still respects the shared deadline decision fence.
+func (r *PostgresRepository) stopReconciliationTx(ctx context.Context, tx pgx.Tx, usageID uuid.UUID, reason string, now time.Time) (bool, error) {
 	// UPDATE evaluates this ownership predicate under its usage-row lock. A
 	// previously claimed item cannot overwrite a later cancellation recovery or
 	// append RECONCILIATION_STOPPED evidence that invalidates its release proof.
@@ -178,23 +195,20 @@ SET status='REVIEW',settlement_status='REVIEW',cancel_status=CASE WHEN cancel_st
 WHERE id=$1 AND status IN ('SETTLEMENT_PENDING','REVIEW')
   AND error_class IS DISTINCT FROM 'cancel_hold_recovery_unconfirmed'`, usageID, truncateReconciliationError(reason), now)
 	if err != nil {
-		return err
+		return false, err
 	}
 	if command.RowsAffected() == 0 {
-		if err := tx.Rollback(ctx); err != nil {
-			return err
-		}
-		return r.ensureUsageState(ctx, usageID, "COMMITTED", "RELEASED")
+		return false, nil
 	}
 	if trustedUsageDeadlineExceeded(reason) {
 		if _, err := tx.Exec(ctx, `INSERT INTO usage_platform_loss_reviews(id,usage_request_id,cause_code,provider_cost_evidence,created_at) VALUES($1,$2,'TRUSTED_USAGE_DEADLINE_EXCEEDED',jsonb_build_object('customer_hold_released',true,'late_usage_customer_debit_prohibited',true),$3) ON CONFLICT(usage_request_id) DO NOTHING`, uuid.Must(uuid.NewV7()), usageID, now); err != nil {
-			return err
+			return false, err
 		}
 	}
 	if err := appendUsageConvergenceEvidenceTx(ctx, tx, usageID, "RECONCILIATION_STOPPED", "RECONCILER", "REVIEW", truncateReconciliationError(reason), map[string]any{"reason_code": truncateReconciliationError(reason), "automatic_high_risk_retry": false}, now); err != nil {
-		return err
+		return false, err
 	}
-	return tx.Commit(ctx)
+	return true, nil
 }
 
 func trustedUsageDeadlineExceeded(reason string) bool {
@@ -427,6 +441,12 @@ func (r *UsageReconciler) runOnce(ctx context.Context) {
 		return
 	}
 	for _, item := range items {
+		if handled, err := r.reconcileCapturedReferenceDeadline(ctx, item, "", false); handled {
+			if err != nil {
+				r.logger.Error("captured-reference recovery remains manual", "usage_request_id", item.ID, "error", err)
+			}
+			continue
+		}
 		if handled, err := r.reconcileMissingReferenceDeadline(ctx, item); handled {
 			if err != nil {
 				r.logger.Warn("missing-reference release pending", "usage_request_id", item.ID, "error", err)
@@ -451,12 +471,19 @@ func (r *UsageReconciler) runOnce(ctx context.Context) {
 			}
 			if r.now().Sub(item.StartedAt) >= r.maxAge {
 				if item.HoldID != nil {
-					if releaseErr := r.billing.Release(ctx, item.ID, *item.HoldID, "trusted usage deadline exceeded"); releaseErr != nil {
-						_ = r.store.StopReconciliation(ctx, item.ID, "HOLD_RELEASE_UNAVAILABLE:"+errorCode)
+					if handled, writeErr := r.reconcileCapturedReferenceDeadline(ctx, item, errorCode, true); handled {
+						if writeErr != nil {
+							r.logger.Error("captured-reference deadline remains manual", "usage_request_id", item.ID, "error", writeErr)
+						}
 						continue
 					}
+					// Stores without the durable decision contract cannot authorize a release.
+					if writeErr := r.store.StopReconciliation(ctx, item.ID, "HOLD_RELEASE_UNAVAILABLE:"+errorCode); writeErr != nil {
+						r.logger.Error("manual stop failed", "error", writeErr)
+					}
+				} else if writeErr := r.store.StopReconciliation(ctx, item.ID, "MANUAL_RECONCILIATION_REQUIRED"); writeErr != nil {
+					r.logger.Error("manual stop failed", "error", writeErr)
 				}
-				_ = r.store.StopReconciliation(ctx, item.ID, "TRUSTED_USAGE_DEADLINE_EXCEEDED:"+errorCode)
 				continue
 			}
 			_ = r.store.RescheduleReconciliation(ctx, item.ID, errorCode, r.now().Add(reconciliationBackoff(item.Attempts)))
