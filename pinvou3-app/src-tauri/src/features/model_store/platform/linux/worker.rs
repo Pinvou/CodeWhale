@@ -4,7 +4,8 @@
 //! `$LMM_WORKER`。适配三处：config 路径换成品悟模型商店的根目录；密码持久化
 //! 从 keyring 直依赖换成 codewhale_secrets::DefaultKeyringStore（service 与
 //! slot 命名不变，LMM 时期存的密码可续读）；二进制入口从
-//! `pinvou3-tauri model-store-worker` 换成 `pinvou3-tauri model-store-worker`。
+//! `lmm-worker`（LMM 独立二进制）换成 `pinvou3-tauri model-store-worker`
+//! （品悟主程序子命令）。round-3 P3 勘误：上一版两个名字写重了。
 //! 其余逐行保留——注释里的真机坑（askpass 主机密钥确认、无 tty 的 sudo、
 //! 远端 PATH 引号、管理网流量带偏网口检测）一个都不能丢。）
 //!
@@ -200,23 +201,20 @@ pub fn load_password(a: &WorkerAccess) -> Option<String> {
         .filter(|s| !s.is_empty())
 }
 
-pub fn save_password(a: &WorkerAccess, password: &str) {
+pub fn save_password(a: &WorkerAccess, password: &str) -> std::io::Result<()> {
     use codewhale_secrets::KeyringStore as _;
     if keyring_store().set(&keyring_user(a), password).is_ok() {
         let _ = fs::remove_file(password_fallback_file(a));
-        return;
+        return Ok(());
     }
-    let f = password_fallback_file(a);
-    if let Ok(mut file) = fs::OpenOptions::new()
-        .write(true)
-        .create(true)
-        .truncate(true)
-        .mode(0o600)
-        .open(&f)
-    {
-        let _ = file.write_all(password.as_bytes());
-    }
-    let _ = fs::set_permissions(&f, fs::Permissions::from_mode(0o600));
+    save_password_fallback(&password_fallback_file(a), password)
+}
+
+/// 回退文件必须走 atomic_write（round-3 P2-4）：这是本文件里唯一曾用 truncate
+/// 原地写的持久化——半写会被 load_password 当真密码读出来，进 AuthFailed 循环。
+/// 独立成函数是为了 0600 语义可以不碰密钥环/真实配置目录地钉测试。
+fn save_password_fallback(path: &Path, password: &str) -> std::io::Result<()> {
+    atomic_write(path, password.as_bytes(), 0o600)
 }
 
 pub fn forget_password(a: &WorkerAccess) {
@@ -287,6 +285,11 @@ const SSH_OPTS: &[&str] = &[
 fn ssh(a: &WorkerAccess, remote_cmd: &str) -> Command {
     let mut c = Command::new("ssh");
     c.args(SSH_OPTS).arg(a.target()).arg(remote_cmd);
+    // round-3 P2-2：key_login 的 stderr 分类匹配的是 strerror/gai_strerror 文本
+    // （"Connection timed out" 等），zh_CN locale 下这些串会变成中文、全部失配，
+    // 不可达会被误归为「密码错」烧掉 5 轮表单。固定 C locale 让分类可依赖；
+    // REMOTE HOST IDENTIFICATION 一类是 OpenSSH 静态串，本就不受 locale 影响。
+    c.env("LC_ALL", "C");
     c
 }
 
@@ -433,7 +436,11 @@ fn install_key(a: &WorkerAccess, password: &str) -> Result<(), WorkerError> {
     .and_then(|_| fs::set_permissions(&helper, fs::Permissions::from_mode(0o700)))
     .map_err(|e| WorkerError::Other(format!("写临时文件失败：{e}")))?;
 
-    let _ = Command::new("ssh-copy-id")
+    // round-3 P2-3：ssh-copy-id 的真实败因（本机没装、.pub 缺失、远端 authorized_keys
+    // 写不进去）此前被整体丢弃，最终都归进「用户名或密码不正确」，用户对着正确
+    // 密码重填满 5 轮。分开处理：二进制缺失是本机环境问题直接 Other；跑完但失败
+    // 则带上 stderr 让 key_login 之外的路径可诊断。
+    let copy_out = Command::new("ssh-copy-id")
         .args([
             "-o",
             "StrictHostKeyChecking=no",
@@ -449,11 +456,32 @@ fn install_key(a: &WorkerAccess, password: &str) -> Result<(), WorkerError> {
             "DISPLAY",
             std::env::var("DISPLAY").unwrap_or_else(|_| ":0".into()),
         )
+        .env("LC_ALL", "C")
         .stdin(Stdio::null())
         .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status();
+        .stderr(Stdio::piped())
+        .output();
     drop(dir);
+    match copy_out {
+        Err(_) => {
+            return Err(WorkerError::Other(
+                "本机没有 ssh-copy-id（openssh-clients/openssh-client 组件），无法投递公钥".into(),
+            ));
+        }
+        Ok(o) if !o.status.success() => {
+            let err = String::from_utf8_lossy(&o.stderr).trim().to_string();
+            return Err(WorkerError::AuthFailed(format!(
+                "向 {} 投递公钥失败：{}。常见原因：从机密码不对，或从机 sshd 关闭了密码登录",
+                a.target(),
+                if err.is_empty() {
+                    "（ssh-copy-id 无输出）"
+                } else {
+                    &err
+                }
+            )));
+        }
+        Ok(_) => {}
+    }
 
     if key_login(a)? {
         Ok(())
@@ -513,8 +541,33 @@ fn ensure_docker_group(
     password: &str,
     log: &mut dyn FnMut(&str),
 ) -> Result<(), WorkerError> {
-    if ssh_capture(a, "docker info >/dev/null 2>&1", None).0 {
-        return Ok(());
+    // round-3 P2-5：先分清「不在组」和「daemon 挂了」——permission denied 才是
+    // 补组能治的病；daemon 不在跑时盲目 usermod，复查必然还失败，错误文案还让
+    // 用户去手跑我们刚跑过的同一条命令。
+    let (denied, daemon_down) = {
+        let (_, out, err) = ssh_capture(a, "docker info 2>&1 >/dev/null; echo rc=$?", None);
+        let text = format!("{out}{err}");
+        (
+            text.contains("permission denied"),
+            text.contains("Cannot connect to the Docker daemon"),
+        )
+    };
+    if daemon_down && !denied {
+        return Err(WorkerError::Other(format!(
+            "从机 {} 的 docker daemon 没有在运行（docker info 连不上 daemon）。\
+             请在从机上启动 docker 后重试；这不属于用户组问题，自动补组治不了它。",
+            a.target()
+        )));
+    }
+    if !denied {
+        // 说不清原因（比如 docker CLI 缺失由 check_basics 报过、或未知形态）：
+        // 保守起见按原流程走补组，但在失败信息里带上诊断原始串。
+        let (_, out, err) = ssh_capture(a, "docker info 2>&1 >/dev/null | head -c 200", None);
+        log(&format!(
+            "      docker info 异常（{}{}），先按最常见的组缺失处理",
+            out.trim(),
+            err.trim()
+        ));
     }
     log(&format!(
         "      从机的 {} 不在 docker 组，正在把它加入（这相当于授予该用户 root 级别的权限）…",
@@ -522,15 +575,32 @@ fn ensure_docker_group(
     ));
     // 不加 -tt：那样密码会被远端伪终端回显回来、原样打进日志。
     let cmd = format!("sudo -S -p '' usermod -aG docker {}", shell_quote(&a.user));
-    let _ = ssh_capture(a, &cmd, Some(&format!("{password}\n")));
+    // round-3 P2-5：usermod 的结果要接住——sudo 密码错、远端 usermod 失败都被
+    // 丢弃过，复查失败后用户看到的指引是「请手动执行我们刚刚执行失败的那条命令」。
+    let (mod_ok, _, mod_err) = ssh_capture(a, &cmd, Some(&format!("{password}\n")));
+    if !mod_ok {
+        return Err(WorkerError::Other(format!(
+            "把 {} 加入从机 docker 组失败：{}。请核对从机 sudo 密码后重试",
+            a.user,
+            if mod_err.trim().is_empty() {
+                "（usermod 无输出）"
+            } else {
+                mod_err.trim()
+            }
+        )));
+    }
     // 组成员身份要新开一次登录会话才生效——下面这次 ssh 就是新会话
     if ssh_capture(a, "docker info >/dev/null 2>&1", None).0 {
         log("      已加入 docker 组");
         Ok(())
     } else {
+        // round-3 P2-5：走到这里说明 usermod 成功了但新会话仍不可用——常见是
+        // sshd 的会话复用没把新组带进来，或 daemon 又出状况。指引改成可操作的
+        // 下一步，而不是重跑同一条 usermod。
         Err(WorkerError::Other(format!(
-            "从机的 {} 仍然无法使用 docker。请在从机上执行 sudo usermod -aG docker {} 后重试",
-            a.user, a.user
+            "已把 {} 加入 docker 组，但新会话里 docker 仍不可用。\
+             请在从机重启 docker（sudo systemctl restart docker）或重新登录后重试",
+            a.user
         )))
     }
 }
@@ -748,6 +818,16 @@ fn read_answer_line() -> Option<String> {
     }
 }
 
+/// 快速路径的跨卡改绊判定（纯函数，round-3 P1-1 抽出）：已保存槽位绑定的卡与
+/// 当前发起的卡**都有值且不同**时为真。三类放行：同卡、无卡片环境（手动调试）、
+/// 旧版无绑定。
+fn slot_cross_card(access: Option<&WorkerAccess>, current: Option<&str>) -> bool {
+    matches!(
+        (access.and_then(|a| a.card_id.as_deref()), current),
+        (Some(bound), Some(cur)) if bound != cur
+    )
+}
+
 /// 连接从机。第一次会弹一次表单；之后用保存的信息零输入。地址连不上（换了网络）、
 /// 密码失效（从机改了密码）都回到表单并说明原因，而不是直接失败。
 fn cli_connect() -> i32 {
@@ -756,14 +836,35 @@ fn cli_connect() -> i32 {
     let mut message: Option<String> = None;
     let mut log = |l: &str| println!("{l}");
 
+    // round-3 P1-1：已保存的单槽绑定着**另一张卡**时，零输入快速路径必须关闭。
+    // 不关的话：A 卡部署完，用户部署 B 卡，deploy.sh 无条件先调 connect——公钥
+    // 早已投到同一台从机、密码同源，key_login/verify_sudo 全过、零弹窗，槽被
+    // 静默改绑为 B 卡，B 的交付包推到 A 的从机上（rsync 无 --delete，混版
+    // bundle）。这正是 round-2 单槽防呆要拦的跨卡路由，被 connect 自己重新
+    // 打开。三类安全场景不受影响：同卡重部署（绑定相同）、手动调试（无
+    // LMM_CARD_ID）、旧版无绑定文件（bound 为 None）。
+    let slot_bound_to_other_card = slot_cross_card(access.as_ref(), env_card_id().as_deref());
+
     for _ in 0..MAX_ROUNDS {
         let (a, pw) = match (&access, &password, &message) {
-            (Some(a), Some(pw), None) => {
+            (Some(a), Some(pw), None) if !slot_bound_to_other_card => {
                 log(&format!("使用已保存的从机信息：{}", a.target()));
                 (a.clone(), pw.clone())
             }
             _ => {
-                let spec = access_form(access.as_ref(), message.as_deref(), password.is_some());
+                let spec = access_form(
+                    access.as_ref(),
+                    match (&message, slot_bound_to_other_card) {
+                        (Some(m), _) => Some(m.as_str()),
+                        // 快速路径为何没走，得让用户知道——不明说的表单像坏了一样。
+                        (None, true) => Some(
+                            "已保存的从机信息绑定着另一张模型卡。请确认仍要用这台从机，\
+                             或改填新地址；确认后连接将改由本卡使用。",
+                        ),
+                        (None, false) => None,
+                    },
+                    password.is_some(),
+                );
                 // 标记走 stderr：卡片可能用 $( ) 调我们，stdout 会被捕获，LMM 就看不到了
                 eprintln!("LMM_PROMPT_FORM={spec}");
                 let Some(answer) = read_answer_line() else {
@@ -786,8 +887,17 @@ fn cli_connect() -> i32 {
                 // （无 LMM_CARD_ID）时保持无绑定，与旧文件同形态。
                 let mut bound = a;
                 bound.card_id = env_card_id();
-                let _ = save_access(&bound);
-                save_password(&bound, &pw);
+                // round-3 P2-4：持久化失败必须说出口（config.rs write_token_fallback
+                // 的同款原则）——否则 connect 报成功，下一条子命令却「还没有连接过
+                // 从机」。失败不改变退出码：连接本身是好的，只是记不住。
+                if let Err(e) = save_access(&bound) {
+                    eprintln!("WARNING: 连接成功但保存从机信息失败（{e}）；下次部署需要重新输入。");
+                }
+                if let Err(e) = save_password(&bound, &pw) {
+                    eprintln!(
+                        "WARNING: 连接成功但保存从机密码失败（{e}）；下次部署需要重新输入密码。"
+                    );
+                }
                 return 0;
             }
             // 不以 "ERROR:" 开头：这不是最终结论，接下来会回到表单
@@ -843,32 +953,47 @@ fn cli_sudo(a: &WorkerAccess, remote_cmd: &str) -> i32 {
         eprintln!("ERROR: 没有保存的从机密码，请先调用 \"$LMM_WORKER\" connect");
         return 1;
     };
-    // 垫片里要用 sudo 的绝对路径，否则它会顺着 PATH 找回自己，无限递归
+    let script = sudo_script(remote_cmd);
+    // round-3 P2-1：垫片、trap、命令必须在**同一个远端会话**里。此前垫片一个
+    // 会话、命令一个、清理再一个——本地进程被杀（script_runner 按进程组
+    // SIGKILL，见 script_runner.rs 的 process_group(0)）时清理会话永不执行，
+    // 从机 /tmp 每跑一次 sudo 残留一个 0600 密码文件。现在 trap EXIT 让远端
+    // shell 在任何退出路径（含 ssh 连接被本地掐断）上自清。
+    let mut child = match ssh(a, &script).stdin(Stdio::piped()).spawn() {
+        Ok(c) => c,
+        Err(e) => {
+            eprintln!("ERROR: 无法启动 ssh：{e}");
+            return 1;
+        }
+    };
+    if let Some(mut pipe) = child.stdin.take() {
+        // 写完 drop，远端 cat 读到 EOF 继续往下走
+        let _ = pipe.write_all(format!("{password}\n").as_bytes());
+    }
+    exit_code(child.wait())
+}
+
+/// 提权脚本的远端正文（纯函数，round-3 P2-6 抽出便于钉测试：trap 行、PATH 的
+/// 远端展开双引号形态、sudo 绝对路径垫片，三个真机事故位点都在这段文本里）。
+///
+/// stdin 约定：第一段 `cat > "$d/pw"` 把本机喂进来的密码读到 0600 文件。
+fn sudo_script(remote_cmd: &str) -> String {
+    // 垫片里要用 sudo 的绝对路径，否则它会顺着 PATH 找回自己，无限递归。
+    // PATH 必须在**远端**展开：`$PATH` 放在远端 shell 的双引号里。写成单引号的
+    // 话 PATH 会变成字面量，整个系统 PATH 就废了——`sudo -v` 还能过（垫片内部
+    // 用的是绝对路径），紧接着的命令就找不到 bash 了。这个坑真机上踩过一次。
     let setup = r#"set -e
 d="$(mktemp -d)"
 ( umask 077; cat > "$d/pw" )
+trap 'rm -rf "$d"' EXIT INT TERM HUP
 printf '#!/bin/sh\ncat %s\n' "$d/pw" > "$d/askpass"
 mkdir -p "$d/bin"
 printf '#!/bin/sh\nexec %s -A "$@"\n' "$(command -v sudo)" > "$d/bin/sudo"
 chmod 700 "$d/askpass" "$d/bin/sudo"
-printf '%s' "$d""#;
-    let (ok, rdir, err) = ssh_capture(a, setup, Some(&format!("{password}\n")));
-    let rdir = rdir.trim().to_string();
-    if !ok || rdir.is_empty() {
-        eprintln!("ERROR: 无法在从机上准备提权助手：{}", err.trim());
-        return 1;
-    }
-    // PATH 必须在**远端**展开：`$PATH` 放在远端 shell 的双引号里。写成单引号的话
-    // PATH 会变成字面量，整个系统 PATH 就废了——`sudo -v` 还能过（垫片内部用的是
-    // 绝对路径），紧接着的命令就找不到 bash 了。这个坑真机上踩过一次。
-    let wrapped = format!(
-        "export SUDO_ASKPASS={}; export PATH={}:\"$PATH\"; sudo -v && {{ {remote_cmd}\n}}",
-        shell_quote(&format!("{rdir}/askpass")),
-        shell_quote(&format!("{rdir}/bin")),
-    );
-    let code = exit_code(ssh(a, &wrapped).stdin(Stdio::null()).status());
-    let _ = ssh_capture(a, &format!("rm -rf {}", shell_quote(&rdir)), None);
-    code
+export SUDO_ASKPASS="$d/askpass"
+export PATH="$d/bin:$PATH"
+sudo -v && { "#;
+    format!("{setup}{remote_cmd}\n}}\n")
 }
 
 fn cli_push(a: &WorkerAccess, rest: &[String]) -> i32 {
@@ -890,21 +1015,31 @@ fn cli_push(a: &WorkerAccess, rest: &[String]) -> i32 {
         eprintln!("ERROR: 在从机上创建目录 {dst} 失败：{}", err.trim());
         return 1;
     }
+    let args = rsync_args(src, dst, &a.target(), &excludes);
+    exit_code(Command::new("rsync").args(&args).status())
+}
+
+/// rsync 的 argv（纯函数，round-3 P2-6 抽出：`-s` 与「远端路径不 shell_quote」
+/// 是 10-28 真机 P1-② 的修复点，此前零测试钉）。
+///
+/// 远端路径不能再 shell_quote——argv 传进去的引号会被原样保留，远端收到的
+/// 是带字面引号的相对路径（'/home/gann/…'，mkdir ENOENT code 11，真机实锤）。
+/// argv 传参本就不经 shell，特殊字符靠 --protect-args（-s）保护到远端 shell
+/// 之外。
+fn rsync_args(src: &str, dst: &str, target: &str, excludes: &[String]) -> Vec<String> {
     let transport = format!("ssh {}", SSH_OPTS.join(" "));
-    exit_code(
-        Command::new("rsync")
-            .arg("-a")
-            // 10-28 双机验证 P1-②：远端路径不能再 shell_quote——argv 传进去的引号
-            // 会被原样保留，远端收到的是带字面引号的相对路径
-            // （'/home/gann/…'，mkdir ENOENT code 11，真机实锤）。argv 传参本就
-            // 不经 shell，特殊字符靠 --protect-args（-s）保护到远端 shell 之外。
-            .arg("-s")
-            .args(&excludes)
-            .args(["-e", &transport])
-            .arg(format!("{src}/"))
-            .arg(format!("{}:{}/", a.target(), dst))
-            .status(),
-    )
+    [
+        vec![
+            "-a".into(),
+            "-s".into(),
+            "-e".into(),
+            transport,
+            format!("{src}/"),
+            format!("{target}:{dst}/"),
+        ],
+        excludes.to_vec(),
+    ]
+    .concat()
 }
 
 // ---------------------------------------------------------------- 测直连网口
@@ -1257,19 +1392,25 @@ mod tests {
         );
     }
 
-    /// 评审 round-2 P2：不能按字母序取 first——真直连口 `enp3s0` 旁边插着办公
-    /// LAN 的 `eth1`（底噪扣除后仍有小幅残留命中）时，字母序会把直连地址配到
-    /// 错口上。必须按扣除底噪后的增量幅度降序取。
+    /// 评审 round-2 P2：不能按字母序取 first——真直连口旁边插着办公 LAN 的口
+    /// （底噪扣除后仍有小幅残留命中）时，字母序会把直连地址配到错口上。必须按
+    /// 扣除底噪后的增量幅度降序取。
+    ///
+    /// round-3 P1-2：上一版夹具用 `enp3s0`（残差 13）对 `eth1`（残差 3）——两个
+    /// 名字的**字母序恰好与幅度序一致**（enp3s0 < eth1），把 pick 突变成纯字母序
+    /// first 后本测试照样绿，等于零防护（评审实测 15/15 全绿）。现在两个名字的
+    /// 排序方向**相反**：字母序应选 enp2s0、幅度序应选 enp9s0，两种实现必然分歧。
     #[test]
     fn link_detection_picks_the_strongest_signal_not_the_alphabetical_first() {
-        // eth1：ping 窗口 +9，安静窗口 +6 → 残差 3（办公 LAN 广播的抖动）
-        // enp3s0：ping 窗口 +14，安静窗口 +1 → 残差 13（真正的直连口）
-        let before = c(&[("eth1", 100), ("enp3s0", 50)]);
-        let after_ping = c(&[("eth1", 109), ("enp3s0", 64)]);
-        let after_quiet = c(&[("eth1", 115), ("enp3s0", 65)]);
+        // enp2s0：ping 窗口 +9，安静窗口 +6 → 残差 3（办公 LAN 广播的抖动）
+        // enp9s0：ping 窗口 +14，安静窗口 +1 → 残差 13（真正的直连口）
+        let before = c(&[("enp2s0", 100), ("enp9s0", 50)]);
+        let after_ping = c(&[("enp2s0", 109), ("enp9s0", 64)]);
+        let after_quiet = c(&[("enp2s0", 115), ("enp9s0", 65)]);
         assert_eq!(
             pick_link_iface(&before, &after_ping, &after_quiet, "wlp3s0"),
-            Some("enp3s0".into())
+            Some("enp9s0".into()),
+            "幅度序选 enp9s0（残差 13）；字母序会错选 enp2s0——两种实现在此分歧"
         );
         // 幅度相同 → 名字升序，保持确定性
         let before = c(&[("b", 0), ("a", 0)]);
@@ -1307,6 +1448,98 @@ mod tests {
             parse_counters("a 1\nbad\nb 2 x\n c notnum"),
             c(&[("a", 1), ("b", 2)])
         );
+    }
+
+    /// round-3 P1-1：跨卡改绊判定四形态——跨卡拦、同卡放、手动调试放、旧文件放。
+    /// （空钉教训：判定逻辑被内联在 cli_connect 里时连测都测不了。）
+    #[test]
+    fn slot_cross_card_gates_only_a_real_rebind() {
+        let bound_to_a = WorkerAccess {
+            host: "10.0.0.2".into(),
+            user: "sky".into(),
+            card_id: Some("card-a".into()),
+        };
+        assert!(slot_cross_card(Some(&bound_to_a), Some("card-b")));
+        assert!(!slot_cross_card(Some(&bound_to_a), Some("card-a")));
+        // 手动调试（无 LMM_CARD_ID）：无绑定语义，快速路径照走
+        assert!(!slot_cross_card(Some(&bound_to_a), None));
+        // 旧版 worker.json 没有归属字段
+        let legacy = WorkerAccess {
+            card_id: None,
+            ..bound_to_a
+        };
+        assert!(!slot_cross_card(Some(&legacy), Some("card-b")));
+        assert!(!slot_cross_card(None, Some("card-b")));
+    }
+
+    /// round-3 P2-6：rsync argv 钉住 10-28 真机 P1-② 修复点——`-s` 必须在，
+    /// 远端路径**不**带 shell 引号（argv 传参 + protect-args，字面引号会变成
+    /// 远端路径的一部分，真机 mkdir ENOENT code 11 实锤过）。
+    #[test]
+    fn rsync_args_protect_args_and_unquoted_remote_path() {
+        let args = rsync_args(
+            "/src/dir",
+            "/home/gann/dst dir",
+            "gann@192.168.10.16",
+            &["--exclude=data/cache".to_string()],
+        );
+        assert!(args.contains(&"-s".to_string()), "必须带 --protect-args");
+        assert_eq!(
+            args.iter()
+                .find(|a| a.starts_with("gann@"))
+                .expect("远端路径参数必须在 argv 里"),
+            "gann@192.168.10.16:/home/gann/dst dir/",
+            "远端路径原样裸传，含空格也不加引号"
+        );
+        assert!(args.contains(&"--exclude=data/cache".to_string()));
+        assert_eq!(args[0], "-a");
+    }
+
+    /// round-3 P2-1/P2-6：提权脚本钉住三个真机事故/安全位点——trap 自清在
+    /// 任何退出路径上跑、PATH 在远端双引号里展开（单引号会把系统 PATH 变字面量，
+    /// 真机踩过）、sudo 垫片用绝对路径 -A。
+    #[test]
+    fn sudo_script_pins_trap_remote_path_and_askpass_shim() {
+        let s = sudo_script("nmcli con add type ethernet");
+        assert!(
+            s.contains("trap 'rm -rf \"$d\"' EXIT"),
+            "远端自清 trap 必须在，杀进程组也不再残留密码文件"
+        );
+        assert!(
+            s.contains("export PATH=\"$d/bin:$PATH\""),
+            "PATH 必须远端双引号展开；单引号形态是历史真机事故"
+        );
+        assert!(s.contains("exec %s -A \"$@\""));
+        assert!(s.contains("sudo -v && { nmcli con add type ethernet"));
+        // 密码文件 0600（umask 077 生成）
+        assert!(s.contains("( umask 077; cat > \"$d/pw\" )"));
+    }
+
+    /// round-3 P2-4：密码回退文件 0600 + 原子写语义（纯函数落点，不碰密钥环与
+    /// 真实配置目录）。
+    #[test]
+    fn password_fallback_file_is_atomic_and_0600() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("worker-x.secret");
+        save_password_fallback(&path, "s3cret").unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            assert_eq!(
+                fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+                0o600
+            );
+        }
+        assert_eq!(fs::read_to_string(&path).unwrap(), "s3cret");
+        // 覆写不留半截：中途无 tmp 文件残留（atomic_write 的 rename 语义）
+        save_password_fallback(&path, "rotated").unwrap();
+        assert_eq!(fs::read_to_string(&path).unwrap(), "rotated");
+        let leftovers: Vec<_> = std::fs::read_dir(tmp.path())
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .filter(|e| e.file_name().to_string_lossy().contains(".tmp."))
+            .collect();
+        assert!(leftovers.is_empty(), "原子写不该留 tmp：{leftovers:#?}");
     }
 
     #[test]
