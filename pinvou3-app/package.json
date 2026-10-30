@@ -174,7 +174,7 @@
     "test:account-platform-usage-governance": "node --test tests/account_platform_usage_governance.test.mjs",
     "test:account-platform-usage-governance-ui": "node tests/account_platform_f05_usage_governance_ui_smoke.mjs && node tests/account_platform_f05_usage_ui_smoke.mjs && node tests/account_platform_f05_billing_notice_ui_smoke.mjs && node tests/account_platform_f05_model_selection_ui_smoke.mjs && node tests/account_platform_f05_native_code_ui_smoke.mjs",
     "test:account-platform-organization": "node --test tests/account_platform_organization.test.mjs",
-    "test:account-platform-organization-ui": "node tests/account_platform_organization_ui_smoke.mjs && node tests/account_platform_member_units_ui_smoke.mjs && node tests/account_platform_organization_boundaries_ui_smoke.mjs",
+    "test:account-platform-organization-ui": "node tests/account_platform_organization_ui_smoke.mjs && node tests/account_platform_member_units_ui_smoke.mjs && node tests/account_platform_organization_boundaries_ui_smoke.mjs && node tests/account_platform_organization_recharge_ui_smoke.mjs",
     "test:account-platform-closure-ui": "node tests/account_platform_closure_ui_smoke.mjs && node tests/account_platform_closure_production_smoke.mjs",
     "test:account-platform-registration-bonus-ui": "node tests/admin_registration_bonus_ui_smoke.mjs && node tests/admin_registration_bonus_precision_ui_smoke.mjs",
     "test:account-platform-model-selection-ui": "node tests/account_platform_f05_model_selection_ui_smoke.mjs",
