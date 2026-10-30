@@ -1,5 +1,6 @@
 use super::*;
 
+mod digest_paths;
 mod lease_completion;
 mod recovery_admission;
 mod stage_admission;

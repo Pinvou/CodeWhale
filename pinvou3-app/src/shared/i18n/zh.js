@@ -440,6 +440,7 @@ export const dictZh = {
           versionStates:{"current": "当前版本", "ready": "已验证，可切换", "history": "历史版本", "downloading": "下载中", "failed": "下载失败，可清理", "deleting": "清理中，可重试"},
           compatibilityReasons:{"versioning_unsupported":"当前升级流程需要新旧版本均有完整的单文件校验，且新版支持原生隔离部署；此布局暂不支持。","cached_recipe_integrity":"旧版离线配方校验失败，不能保证可靠回退。","missing_cached_recipe": "旧版离线卡片不完整，无法保证回退；请先修复旧版卡片。", "weight_manifest_integrity": "权重清单校验失败，不能据此复用或回退。", "invalid_weight_manifest": "权重清单格式无效。", "invalid_weight_path": "权重清单包含不安全的路径。", "duplicate_weight_path": "权重清单包含重复路径，无法唯一确认文件。", "filename_not_in_manifest": "卡片声明的文件名不在经校验的权重清单中。", "artifact_selection_changed": "新版改为选择清单中的另一份权重，不能直接复用当前部署。", "missing_weight_evidence": "缺少新旧权重的完整校验依据。"},
           compatibilityKinds:{"compatible": "权重身份一致，可以更新卡片。", "weights_changed": "新版权重与当前版本不同，当前版本保留。", "unverified": "现有证据不足以确认权重可复用，当前部署已保留。", "topology_changed": "新版需要不同的设备拓扑，不能直接替换当前部署。", "unsupported": "此卡片不支持从该来源原地更新。"},
+          compatibilityLegacyUnverified:"按旧卡来源匹配，未验证权重；仍可更新卡片配置。",
           compatibilityFields:{"source_repo_id": "模型来源", "source_filename": "权重文件", "quantization": "量化标记", "size_bytes": "权重大小（字节）", "deploy_topology": "设备拓扑"},
           versionTitle:n=>`「${n}」的版本`, versionTask:n=>`管理「${n}」版本`, versionDeleted:n=>`旧版已清理，实际释放 ${n.toFixed(2)} GiB。`, versionDeleteConfirm:(n,s)=>`删除「${n}」（登记权重 ${s}）的独立文件？删除后不可回退到此版本。共享资源不会删除。`,
           cardUpdateCheck:'检查更新', cardUpdateApply:'更新卡片',
@@ -542,6 +543,8 @@ export const dictZh = {
           // 而界面上看不出任何异常。所以这两项必须能看见、能改。
           storageButton: '存储',
           storageTitle: '存储与导入',
+          startupUpdateCheckLabel:"启动时自动检查模型卡片更新",
+          startupUpdateCheckHint:"默认启用。启动后向已配置的模型商店请求已安装卡片的元数据，商店会收到 IP 和卡片 ID；不下载权重或执行脚本。开关保持关闭时不发起新的自动请求，已发出的请求无法撤回；已排队检查会复查最新设置。手动检查仍可使用。已跳过或完成的本轮检查不会因重新启用立即重跑；下次启动按新值检查。",
           storageModelsDirLabel: '模型权重目录',
           // 这两条（storageModelsDirHint / storageScanHint）**不要下任何一个方向的
           // 断言**，因为复用与否根本不由宿主决定。

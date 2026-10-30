@@ -1068,18 +1068,51 @@ pub fn get_store_model_by_name(model_name: &str) -> rusqlite::Result<Option<Stor
     .optional()
 }
 
+/// Distinguish a retained-version refusal from an actual database failure.
+#[derive(Debug)]
+pub enum DeleteStoreModelError {
+    RetainedVersions,
+    Database(rusqlite::Error),
+}
+
+impl std::fmt::Display for DeleteStoreModelError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::RetainedVersions => {
+                formatter.write_str("请先在历史版本中清理保留版本，再卸载或删除当前模型。")
+            }
+            Self::Database(error) => std::fmt::Display::fmt(error, formatter),
+        }
+    }
+}
+
+impl std::error::Error for DeleteStoreModelError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::Database(error) => Some(error),
+            Self::RetainedVersions => None,
+        }
+    }
+}
+
+impl From<rusqlite::Error> for DeleteStoreModelError {
+    fn from(error: rusqlite::Error) -> Self {
+        Self::Database(error)
+    }
+}
+
 /// 删掉一个模型的库记录，连同它专属的 API Key。
 ///
-/// **记录删除与下载目录转存必须在同一个事务里。** 分开执行时，后续删除失败会留下一个
-/// 「模型没了、key 还在」的中间态——而那些 key 仍然能被 `find_api_key` 命中，
-/// 跟下面那句注释说的「模型卸载了 key 也跟着失效」正好相反。这种状态没有任何
-/// 界面能看见，也没有任何入口能清掉。
-pub fn delete_store_model(card_id: &str) -> rusqlite::Result<()> {
+/// 记录删除、下载目录转存及 key 删除必须在同一事务内提交。
+pub fn delete_store_model(card_id: &str) -> Result<(), DeleteStoreModelError> {
     let mut conn = connect()?;
     delete_store_model_on(&mut conn, card_id)
 }
 
-fn delete_store_model_on(conn: &mut Connection, card_id: &str) -> rusqlite::Result<()> {
+fn delete_store_model_on(
+    conn: &mut Connection,
+    card_id: &str,
+) -> Result<(), DeleteStoreModelError> {
     // Obtain the writer lock before reading the retained-version guard. In WAL
     // mode a deferred read-to-write upgrade can fail without honoring the busy
     // timeout; waiting here also makes the guard see the preceding writer.
@@ -1091,7 +1124,7 @@ fn delete_store_model_on(conn: &mut Connection, card_id: &str) -> rusqlite::Resu
         |row| row.get(0),
     )?;
     if retained != 0 {
-        return Err(rusqlite::Error::InvalidQuery);
+        return Err(DeleteStoreModelError::RetainedVersions);
     }
     super::version_store::retire_download_on(&tx, card_id)?;
     tx.execute("DELETE FROM model_versions WHERE card_id=?1", [card_id])?;
@@ -1101,7 +1134,7 @@ fn delete_store_model_on(conn: &mut Connection, card_id: &str) -> rusqlite::Resu
     )?;
     // 模型卸载了，专属它的 key 也跟着失效，不留着占地方
     tx.execute("DELETE FROM api_keys WHERE card_id = ?1", params![card_id])?;
-    tx.commit()
+    tx.commit().map_err(DeleteStoreModelError::Database)
 }
 
 pub fn total_managed_bytes() -> rusqlite::Result<i64> {

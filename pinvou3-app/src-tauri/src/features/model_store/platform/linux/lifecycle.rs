@@ -2182,8 +2182,14 @@ impl ModelManager {
         // 才能重新接管。那不是"保留"，是把东西弄丢在原地。
         if purge_weights {
             versions::purge_current_storage(&rec, &self.settings.models_path())?;
-            db::delete_store_model(card_id)
-                .map_err(|e| ModelManagerError::new(format!("删除模型记录失败：{e}")))?;
+            db::delete_store_model(card_id).map_err(|error| match error {
+                db::DeleteStoreModelError::RetainedVersions => {
+                    ModelManagerError::new(error.to_string())
+                }
+                db::DeleteStoreModelError::Database(error) => {
+                    ModelManagerError::new(format!("删除模型记录失败：{error}"))
+                }
+            })?;
         } else {
             db::mark_uninstalled(card_id)
                 .map_err(|e| ModelManagerError::new(format!("更新模型状态失败：{e}")))?;

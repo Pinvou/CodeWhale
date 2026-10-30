@@ -127,12 +127,34 @@ fn resource_presence(path: &Path) -> Result<bool, ModelManagerError> {
     Ok(!missing)
 }
 
+fn open_digest_file(path: &Path, expected: &fs::Metadata) -> Result<fs::File, ModelManagerError> {
+    let file = fs::OpenOptions::new()
+        .read(true)
+        // A regular file found during traversal can be replaced before open.
+        // Do not follow a substituted link or wait for a FIFO writer.
+        .custom_flags(nix::libc::O_NOFOLLOW | nix::libc::O_NONBLOCK)
+        .open(path)
+        .map_err(|e| fail(e.to_string()))?;
+    let actual = file.metadata().map_err(|e| fail(e.to_string()))?;
+    if !actual.is_file() || (actual.dev(), actual.ino()) != (expected.dev(), expected.ino()) {
+        return Err(fail("校验权重不是原普通文件，请检查路径后重试。"));
+    }
+    Ok(file)
+}
+
 fn file_digest(
     path: &Path,
     control: &script_runner::RunControl,
     on_progress: &mut ProgressFn<'_>,
 ) -> Result<String, ModelManagerError> {
-    let mut file = fs::File::open(path).map_err(|e| fail(e.to_string()))?;
+    if control.cancelled() {
+        return Err(fail("已取消"));
+    }
+    let expected = path.symlink_metadata().map_err(|e| fail(e.to_string()))?;
+    if !expected.is_file() {
+        return Err(fail("校验权重不是普通文件，请检查路径后重试。"));
+    }
+    let mut file = open_digest_file(path, &expected)?;
     let before = file.metadata().map_err(|e| fail(e.to_string()))?;
     let mut hash = Sha256::new();
     let mut read_bytes = 0u64;
@@ -176,6 +198,10 @@ fn file_digest(
         != (after.len(), after.mtime(), after.mtime_nsec())
     {
         return Err(fail("校验期间权重发生变化，请重试。"));
+    }
+    let named = path.symlink_metadata().map_err(|e| fail(e.to_string()))?;
+    if !named.is_file() || (named.dev(), named.ino()) != (before.dev(), before.ino()) {
+        return Err(fail("校验期间权重路径发生变化，请重试。"));
     }
     report(read_bytes, on_progress);
     Ok(crate::platform::encoding::hex_lower(&hash.finalize()))

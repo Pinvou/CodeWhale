@@ -68,9 +68,32 @@ export function scheduleDelayedStartupUpdateCheck({ deadline, host = globalThis,
   return () => { alive = false; host.clearTimeout(timer); };
 }
 
+/** Read the local policy before queuing and again before executing a delayed check. */
+export function schedulePreferredStartupUpdateCheck({ deadline, host = globalThis, readSettings, check, onReport }) {
+  let alive = true;
+  let cleanup;
+  // A missing field belongs to an older compatible host; malformed responses fail closed.
+  const allowed = (settings) => settings && typeof settings === 'object' && !Array.isArray(settings)
+    && (settings.startup_update_check_enabled === undefined || settings.startup_update_check_enabled === true);
+  Promise.resolve().then(readSettings).then((settings) => {
+    if (!alive || !allowed(settings)) return;
+    cleanup = scheduleDelayedStartupUpdateCheck({
+      deadline, host,
+      check: async () => {
+        const current = await readSettings();
+        if (!alive || !allowed(current)) return { updates: [] };
+        return check();
+      },
+      onReport,
+    });
+  }).catch(warnStartupUpdateFailure);
+  return () => { alive = false; cleanup?.(); };
+}
+
 export function startStartupUpdateCheck(context, deadline) {
-  return scheduleDelayedStartupUpdateCheck({
+  return schedulePreferredStartupUpdateCheck({
     deadline,
+    readSettings: () => invokeTauri('model_store_storage_settings'),
     check: () => invokeTauri('model_store_startup_update_check'),
     onReport: (report) => context.controller.send({
       type: 'report', updates: Array.isArray(report?.updates) ? report.updates : [],
