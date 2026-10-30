@@ -3698,6 +3698,7 @@ fn killed_shell_does_not_wait_for_blocked_reader_threads() {
         bounded_output: None,
         stdin: None,
         child: None,
+        stop_unconfirmed: false,
         windows_job: None,
         stdout_thread: Some(stdout_thread),
         stderr_thread: None,
@@ -5117,4 +5118,175 @@ fn kill_confirms_a_normal_escalation_exit() {
         "a confirmed kill still releases the child handle"
     );
     assert!(!manager.any_running_job(&["job-1".to_string()]));
+}
+
+/// Age cleanup must not reclaim a job whose stop was sent but whose exit has
+/// not been observed: evicting the record drops the only child handle, the
+/// scope consult then finds nothing and a successor writer can be admitted
+/// while the old child may still be alive. A zero age bound evicts every
+/// finished record that holds no write scope, so surviving it pins the
+/// retention — and once the exit is confirmed, the same bound reclaims the
+/// record again.
+#[cfg(unix)]
+#[test]
+fn cleanup_keeps_an_unconfirmed_stop_until_the_exit_is_confirmed() {
+    let tmp = tempdir().expect("tempdir");
+    let mut manager = ShellManager::new(tmp.path().to_path_buf());
+    manager.seed_running_shell_for_test("job-1", "agent-1");
+    let child = Command::new("sleep").arg("30").spawn().expect("spawn");
+    let pid = child.id();
+    {
+        let shell = manager.processes.get_mut("job-1").expect("seeded job");
+        shell.status = ShellStatus::Killed;
+        shell.stop_unconfirmed = true;
+        shell.child = Some(ShellChild::Process(child));
+    }
+
+    manager.cleanup(Duration::ZERO);
+    assert!(
+        manager.processes.contains_key("job-1"),
+        "cleanup must retain a job whose stop is unconfirmed"
+    );
+    assert!(
+        manager.any_running_job(&["job-1".to_string()]),
+        "the retained record keeps the scope consult's answer true"
+    );
+
+    // The OS ends the child; the confirm inside the next cleanup reaps it
+    // and releases the record to the same age bound.
+    assert_eq!(unsafe { libc::kill(pid as libc::pid_t, libc::SIGKILL) }, 0);
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        manager.cleanup(Duration::ZERO);
+        if !manager.processes.contains_key("job-1") {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "the unconfirmed stop never confirmed after the child died"
+        );
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    assert!(
+        !manager.any_running_job(&["job-1".to_string()]),
+        "a confirmed exit no longer holds the write scope"
+    );
+    assert_eq!(
+        manager.tracked_job_count(),
+        0,
+        "a confirmed stop is reclaimable by the same age bound"
+    );
+}
+
+/// Capacity cleanup must not count — or evict — a job whose stop has not been
+/// confirmed: it still holds its write scope even though its status is
+/// finished. The production age bound keeps the fresh filler records, so the
+/// ceilings see them plus the unconfirmed record: with the record excluded
+/// the population fits, with it included the oldest record to evict is
+/// exactly the unconfirmed one. Once the exit is confirmed the record
+/// rejoins the finished population and the ceiling reclaims it.
+#[cfg(unix)]
+#[test]
+fn capacity_eviction_spares_an_unconfirmed_stop_until_the_exit_is_confirmed() {
+    let tmp = tempdir().expect("tempdir");
+    let mut manager = ShellManager::new(tmp.path().to_path_buf());
+    manager.seed_running_shell_for_test("job-1", "agent-1");
+    let child = Command::new("sleep").arg("30").spawn().expect("spawn");
+    let pid = child.id();
+    {
+        let shell = manager.processes.get_mut("job-1").expect("seeded job");
+        shell.status = ShellStatus::Killed;
+        shell.stop_unconfirmed = true;
+        shell.child = Some(ShellChild::Process(child));
+    }
+    for i in 0..super::MAX_FINISHED_SHELL_RECORDS {
+        let id = format!("finished-{i}");
+        manager.seed_running_shell_for_test(&id, "agent-1");
+        let shell = manager.processes.get_mut(&id).expect("seeded filler");
+        shell.status = ShellStatus::Completed;
+        shell.finished_at = Some(Instant::now());
+    }
+
+    manager.cleanup(super::FINISHED_SHELL_MAX_AGE);
+    assert!(
+        manager.processes.contains_key("job-1"),
+        "capacity cleanup must not evict a job whose stop is unconfirmed"
+    );
+    assert!(
+        manager.any_running_job(&["job-1".to_string()]),
+        "the spared record keeps the scope consult's answer true"
+    );
+    assert_eq!(
+        manager.tracked_job_count(),
+        1 + super::MAX_FINISHED_SHELL_RECORDS,
+        "the scope holder plus the fillers all stay inside the record ceiling"
+    );
+
+    // The exit is confirmed; the record joins the finished population, the
+    // ceiling is exceeded by one, and the oldest finished record — the one
+    // that was unconfirmed — is what the bound reclaims.
+    assert_eq!(unsafe { libc::kill(pid as libc::pid_t, libc::SIGKILL) }, 0);
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        manager.cleanup(super::FINISHED_SHELL_MAX_AGE);
+        if !manager.processes.contains_key("job-1") {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "the unconfirmed stop never confirmed after the child died"
+        );
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    assert!(
+        !manager.any_running_job(&["job-1".to_string()]),
+        "a confirmed exit no longer holds the write scope"
+    );
+    assert_eq!(
+        manager.tracked_job_count(),
+        super::MAX_FINISHED_SHELL_RECORDS,
+        "the confirmed record took part in the capacity bound again"
+    );
+}
+
+/// Destroying the manager while a job's stop is unconfirmed must still stop
+/// the possibly-live child behind the retained handle: destruction is the
+/// last bounded chance a record gets, and the scope promise must not end by
+/// silently orphaning the old writer. A reaped pid answers `kill(pid, 0)`
+/// with ESRCH, which is observable from outside the dropped manager.
+#[cfg(unix)]
+#[test]
+fn dropping_the_manager_stops_a_child_with_an_unconfirmed_stop() {
+    use std::os::unix::process::CommandExt;
+    let tmp = tempdir().expect("tempdir");
+    let pid = {
+        let mut manager = ShellManager::new(tmp.path().to_path_buf());
+        manager.seed_running_shell_for_test("job-1", "agent-1");
+        let child = Command::new("sleep")
+            .arg("30")
+            .process_group(0)
+            .spawn()
+            .expect("spawn");
+        let pid = child.id();
+        {
+            let shell = manager.processes.get_mut("job-1").expect("seeded job");
+            shell.status = ShellStatus::Killed;
+            shell.stop_unconfirmed = true;
+            shell.child = Some(ShellChild::Process(child));
+        }
+        pid
+    };
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        let gone = unsafe { libc::kill(pid as libc::pid_t, 0) } == -1
+            && std::io::Error::last_os_error().raw_os_error() == Some(libc::ESRCH);
+        if gone {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "the dropped manager left the unconfirmed child alive"
+        );
+        std::thread::sleep(Duration::from_millis(20));
+    }
 }

@@ -1820,8 +1820,13 @@ impl Drop for BackgroundShell {
         {
             unregister_pending_persistent_process_group(process_group_id);
         }
+        // A scope holder is destroyed only when the whole manager goes away
+        // (or a future eviction path regresses): the unconfirmed child may
+        // still be alive behind the retained handle, so give it the same
+        // final bounded stop a Running job gets instead of dropping it
+        // silently.
         if self.ownership != ShellOwnership::Released
-            && self.status == ShellStatus::Running
+            && (self.status == ShellStatus::Running || self.stop_unconfirmed)
             && let Some(ref mut child) = self.child
         {
             #[cfg(windows)]
@@ -2062,11 +2067,14 @@ impl ShellManager {
 
     /// Model the state only an un-reaped stopped child can produce (see
     /// `stop_unconfirmed`): no portable test can spawn a child that survives
-    /// SIGKILL, so tests set the flag the kill path would have recorded and
-    /// drive the real confirmation against a real child.
+    /// SIGKILL, so tests set the flag — and the terminal status — the kill
+    /// path would have recorded, and drive the real confirmation against a
+    /// real child.
     #[cfg(test)]
     pub(crate) fn mark_stop_unconfirmed_for_test(&mut self, id: &str) {
         if let Some(shell) = self.processes.get_mut(id) {
+            shell.status = ShellStatus::Killed;
+            shell.finished_at = Some(Instant::now());
             shell.stop_unconfirmed = true;
         }
     }
@@ -3657,7 +3665,14 @@ impl ShellManager {
     /// records inside one hour were all retained regardless of size (#5472).
     pub fn cleanup(&mut self, max_age: Duration) {
         self.processes.retain(|_, shell| {
-            if shell.status == ShellStatus::Running {
+            // A job whose stop was sent but whose exit is unconfirmed still
+            // holds its write scope, so it survives cleanup exactly like a
+            // Running job: reclaiming its record would drop the only child
+            // handle and let a successor writer be admitted while the old
+            // child may still be alive. The bounded confirm here lets an
+            // already-dead child be reaped and reclaimed in this same pass.
+            shell.confirm_stop_when_reaped();
+            if shell.holds_write_scope() {
                 true
             } else {
                 shell.started_at.elapsed() < max_age
@@ -3682,14 +3697,16 @@ impl ShellManager {
     }
 
     /// Drop the oldest finished records once they exceed either ceiling.
-    /// Running jobs are never evicted — killing the handle would orphan a live
-    /// process — and a job whose completion has not been delivered yet is
-    /// evicted last, since dropping it loses the only copy of its result.
+    /// Running jobs — and jobs whose stop has not been confirmed yet, which
+    /// still hold their write scope — are never evicted, since killing the
+    /// handle would orphan a live or potentially-live process; a job whose
+    /// completion has not been delivered yet is evicted last, since dropping
+    /// it loses the only copy of its result.
     fn enforce_finished_job_bounds(&mut self) {
         let mut finished = self
             .processes
             .iter()
-            .filter(|(_, shell)| shell.status != ShellStatus::Running)
+            .filter(|(_, shell)| !shell.holds_write_scope())
             .map(|(id, shell)| {
                 (
                     id.clone(),

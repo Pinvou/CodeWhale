@@ -25531,6 +25531,23 @@ async fn unconfirmed_stop_keeps_a_real_reservation_until_the_child_is_confirmed_
         .expect("shell jobs")
         .mark_stop_unconfirmed_for_test(&task_id);
 
+    // The retention leg: age and capacity cleanup must also keep the record —
+    // evicting it would drop the only child handle, the consult would find
+    // nothing, and admission below would proceed without an observed exit.
+    // A zero age bound evicts every record that holds no write scope, so
+    // surviving it pins the retention before the arrival directions run.
+    shell_jobs
+        .lock()
+        .expect("shell jobs")
+        .cleanup(Duration::ZERO);
+    assert!(
+        shell_jobs
+            .lock()
+            .expect("shell jobs")
+            .any_running_job(std::slice::from_ref(&task_id)),
+        "cleanup retains the unconfirmed writer; the consult still refuses"
+    );
+
     // (a) A later spawn on a DISJOINT claim is refused.
     let refused = {
         let mut guard = manager.write().await;
