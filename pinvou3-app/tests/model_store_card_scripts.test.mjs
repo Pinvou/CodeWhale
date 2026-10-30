@@ -25,7 +25,7 @@ test('script changes require explicit boolean confirmation', async () => {
   }
 });
 
-async function fixture(t, { running = false, status = 'deployed', activeRuns = [] } = {}) {
+async function fixture(t, { running = false, status = 'deployed', activeRuns = [], scriptSha256 = { enable: 'new' } } = {}) {
   const saved = new Map(['window', 'document', '__TAURI__', 'IS_REACT_ACT_ENVIRONMENT']
     .map((key) => [key, Object.getOwnPropertyDescriptor(globalThis, key)]));
   const window = createWindow('<!doctype html><html><body><div id="root"></div></body></html>');
@@ -47,7 +47,7 @@ async function fixture(t, { running = false, status = 'deployed', activeRuns = [
   globalThis.__TAURI__ = { core: { invoke: async (command, payload) => {
     switch (command) {
       case 'model_store_availability': return { available: true };
-      case 'model_store_cards': return [{ id: 'card', name: record.card_name, script_sha256: { enable: 'new' } }];
+      case 'model_store_cards': return [{ id: 'card', name: record.card_name, script_sha256: scriptSha256 }];
       case 'model_store_library': return { models: [record], corrected: [] };
       case 'model_store_model_detail': return { record, runtime_lines: [] };
       case 'model_store_api_keys': return [];
@@ -300,4 +300,25 @@ test('no update: 权重未就绪时部署按钮禁用（不发起注定失败的
   const btn = ui.container.querySelector('[data-testid="model-store-detail-action-deploy"]');
   assert.ok(btn);
   assert.equal(btn.disabled, true, '权重未就绪：部署按钮必须禁用');
+});
+
+// 评审 P2-2：老后台不下发 script_sha256 时，后端 serde 缺省成空对象 `{}`——truthy，
+// 判空挡不住，放行进比对后本地任何非空哈希都算「服务器版本不同」，该卡全部已装
+// 模型挂上假「有可用更新」；用户确认更新会先停运行中模型、再去一个根本没有脚本
+// 的服务端拉新版。空 map 必须按「无更新」处理（本地与列表的 scriptUpdates 同源）。
+test('服务端空的 script_sha256 不产生「有可用更新」徽标', async (t) => {
+  const ui = await fixture(t, { scriptSha256: {} });
+  await ui.render(React.createElement(ModelStoreView, { theme: 'light', t: dict.zh, bs: {} }));
+  assert.equal(
+    ui.container.querySelectorAll('[data-testid="model-store-script-update-badge"]').length,
+    0,
+    '服务端没有脚本版本信息时，行卡不得挂「有可用更新」徽标'
+  );
+  // 详情弹窗的「更新脚本」入口与徽标共用 scriptUpdates，也不得出现。
+  await ui.click('[data-testid="model-store-open-detail"]');
+  assert.equal(
+    ui.container.querySelectorAll('[data-testid="model-store-detail-action-update"]').length,
+    0,
+    '服务端空的 script_sha256 时，详情弹窗不得给「更新脚本」入口'
+  );
 });
