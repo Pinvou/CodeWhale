@@ -16,6 +16,7 @@ import (
 // The catalog, paid organization order, quota grants and pauses all use actual
 // production producers. Only the external Provider is controlled by the fixture.
 func TestForcedRefundMemberGrantTerminalStatePostgres(t *testing.T) {
+	t.Run("inflight", testFinancialReviewPreservesInFlightMemberGrantPostgres)
 	for _, originalReason := range []string{"ACTIVE", "MEMBER_REMOVED", "ACCOUNT_CLOSED"} {
 		for _, mode := range []string{"full", "partial_remaining", "partial_exhausts_one_grant"} {
 			t.Run("prior_"+originalReason+"/"+mode, func(t *testing.T) {
@@ -184,6 +185,96 @@ func TestForcedRefundMemberGrantTerminalStatePostgres(t *testing.T) {
 					if err = r.pool.QueryRow(ctx, `SELECT resource_snapshot::text FROM payment_anomaly_cases WHERE forced_refund_case_id=$1`, item.ID).Scan(&afterEvidence); err != nil || afterEvidence != evidence {
 						t.Fatal("original evidence lost while clearing terminal reason", err)
 					}
+				}
+			})
+		}
+	}
+}
+
+// The retained paid order uses the supported historical-order fixture; quota,
+// reservation, review, settlement and replay run their production writers under
+// the public migrations and restricted Billing role. No live channel is used.
+func testFinancialReviewPreservesInFlightMemberGrantPostgres(t *testing.T) {
+	for _, review := range []string{"forced_refund", "chargeback"} {
+		for _, settlement := range []string{"release", "commit_zero", "commit_partial"} {
+			t.Run(review+"/"+settlement, func(t *testing.T) {
+				r, ctx := retainedFinanceRepository(t)
+				_, order, transaction, pack := retainedOrganizationFinanceOrder(t, r, ctx, 1000000, true)
+				org, member, actor := *order.BeneficiaryOrganizationID, uuid.New(), uuid.New()
+				if _, err := r.ApplyOrganizationMemberLifecycle(ctx, org, member, "ACTIVE", 1); err != nil {
+					t.Fatal(err)
+				}
+				var component uuid.UUID
+				if err := r.pool.QueryRow(ctx, `SELECT id FROM entitlement_components WHERE package_id=$1 AND component_type='BASE'`, pack).Scan(&component); err != nil {
+					t.Fatal(err)
+				}
+				grant, _, err := r.AllocateMemberQuota(ctx, MemberQuotaAllocation{OrganizationID: org, MemberUserID: member, PackageID: pack, ComponentID: component, ComponentType: "BASE", AmountMicrocredits: 1000000, MembershipVersion: 1, CreatedBy: actor, IdempotencyKey: uuid.NewString()})
+				if err != nil {
+					t.Fatal(err)
+				}
+				hold, err := r.ReserveMemberQuota(ctx, uuid.New(), order.WalletID, org, member, 1, 400000, nil, r.now().Add(time.Hour))
+				if err != nil {
+					t.Fatal(err)
+				}
+				var replayReview func() error
+				reason := "FORCED_REFUND_REVIEW"
+				if review == "forced_refund" {
+					item, err := r.RecordAndFreezeForcedRefund(ctx, transaction, uuid.NewString(), 60, json.RawMessage(`{"controlled":true}`))
+					if err != nil {
+						t.Fatal(err)
+					}
+					replayReview = func() error { _, err := r.ApplyReviewedForcedRefund(ctx, item.ID); return err }
+				} else {
+					reason = "CHARGEBACK_REVIEW"
+					item, err := r.RecordConfirmedChargebackForReview(ctx, transaction, uuid.NewString(), json.RawMessage(`{"controlled":true}`))
+					if err != nil {
+						t.Fatal(err)
+					}
+					replayReview = func() error {
+						_, err := r.ApplyConfirmedChargeback(ctx, item.PaymentEvidenceID, item.ProviderChargebackID)
+						return err
+					}
+				}
+				if err := replayReview(); err != nil {
+					t.Fatal("apply reviewed financial action", err)
+				}
+				var status, pause string
+				var reserved, available, revoked int64
+				if err := r.pool.QueryRow(ctx, `SELECT status,COALESCE(suspension_reason,''),reserved_microcredits,available_microcredits,revoked_microcredits FROM member_quota_grants WHERE id=$1`, grant.ID).Scan(&status, &pause, &reserved, &available, &revoked); err != nil || status != "SUSPENDED" || pause != reason || reserved != 400000 || available != 0 || revoked != 600000 {
+					t.Fatal("review prematurely retired the grant still owned by an in-flight hold", status, pause, reserved, available, revoked, err)
+				}
+				used := int64(0)
+				if settlement == "commit_partial" {
+					used = 100000
+				}
+				finish := func() error {
+					if settlement == "release" {
+						_, err := r.Release(ctx, hold.UsageRequestID, hold.ID, "USER_STOPPED")
+						return err
+					}
+					_, err := r.Commit(ctx, hold.UsageRequestID, hold.ID, used, map[string]any{"controlled": true})
+					return err
+				}
+				if err := finish(); err != nil {
+					t.Fatal("settle original in-flight hold", err)
+				}
+				var active, suspended, componentReserved, componentUsed, grantUsed, posted, walletReserved int64
+				var conserved bool
+				if err := r.pool.QueryRow(ctx, `SELECT g.status,COALESCE(g.suspension_reason,''),g.available_microcredits,g.reserved_microcredits,g.used_microcredits,c.active_grant_microcredits,c.suspended_grant_microcredits,c.reserved_microcredits,c.used_microcredits,w.posted_microcredits,w.reserved_microcredits,
+ g.available_microcredits+g.reserved_microcredits+g.used_microcredits+g.expired_microcredits+g.revoked_microcredits=g.original_microcredits
+ AND c.available_microcredits+c.active_grant_microcredits+c.suspended_grant_microcredits+c.reserved_microcredits+c.used_microcredits+c.expired_microcredits+c.revoked_microcredits+c.reclassified_out_microcredits=c.original_microcredits
+ FROM member_quota_grants g JOIN entitlement_components c ON c.id=g.component_id JOIN wallets w ON w.id=$2 WHERE g.id=$1`, grant.ID, order.WalletID).Scan(&status, &pause, &available, &reserved, &grantUsed, &active, &suspended, &componentReserved, &componentUsed, &posted, &walletReserved, &conserved); err != nil || status != "SUSPENDED" || pause != reason || available != 400000-used || reserved != 0 || grantUsed != used || active != 0 || suspended != available || componentReserved != 0 || componentUsed != used || posted != 400000-used || walletReserved != 0 || !conserved {
+					t.Fatal("unused reservation must remain paused and conserved, never return to an active orphan bucket", status, pause, available, reserved, grantUsed, active, suspended, componentReserved, componentUsed, posted, walletReserved, conserved, err)
+				}
+				before := refundRecoveryMoneySnapshot(t, ctx, r)
+				if err := finish(); err != nil {
+					t.Fatal("terminal hold replay", err)
+				}
+				if err := replayReview(); err != nil {
+					t.Fatal("financial action replay", err)
+				}
+				if !reflect.DeepEqual(before, refundRecoveryMoneySnapshot(t, ctx, r)) {
+					t.Fatal("terminal replay changed financial facts")
 				}
 			})
 		}

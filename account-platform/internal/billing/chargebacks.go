@@ -280,7 +280,8 @@ func (r *PostgresRepository) ApplyConfirmedChargeback(ctx context.Context, evide
 	for _, component := range components {
 		revocable := component.available + component.active + component.suspended
 		if revocable > 0 {
-			if _, err := tx.Exec(ctx, `UPDATE member_quota_grants SET revoked_microcredits=revoked_microcredits+available_microcredits,available_microcredits=0,status='REVOKED',suspension_reason=NULL,allocation_version=allocation_version+1,updated_at=$2 WHERE component_id=$1 AND available_microcredits>0`, component.id, now); err != nil {
+			// Preserve the pause while an existing hold can still return unused credit.
+			if _, err := tx.Exec(ctx, `UPDATE member_quota_grants SET revoked_microcredits=revoked_microcredits+available_microcredits,available_microcredits=0,status=CASE WHEN reserved_microcredits=0 THEN 'REVOKED' ELSE status END,suspension_reason=CASE WHEN reserved_microcredits=0 THEN NULL ELSE suspension_reason END,allocation_version=allocation_version+1,updated_at=$2 WHERE component_id=$1 AND available_microcredits>0`, component.id, now); err != nil {
 				return ChargebackCase{}, err
 			}
 			command, err := tx.Exec(ctx, `UPDATE entitlement_components SET available_microcredits=0,active_grant_microcredits=0,suspended_grant_microcredits=0,revoked_microcredits=revoked_microcredits+$2,updated_at=$3 WHERE id=$1 AND available_microcredits=$4 AND active_grant_microcredits=$5 AND suspended_grant_microcredits=$6`, component.id, revocable, now, component.available, component.active, component.suspended)
