@@ -112,6 +112,7 @@ async fn connect(
     let (tx, mut rx) = tokio::sync::mpsc::channel(128);
     let worker = tokio::spawn(
         ControlledRelayWorker {
+            transport_owner: None,
             app: handle.clone(),
             relay: relay.clone(),
             operation: operation.clone(),
@@ -122,6 +123,9 @@ async fn connect(
             action_results: Arc::new(RemoteActionResultCache::default()),
             business_epoch: Arc::new(AtomicU64::new(0)),
             processed_frames: Some(tx),
+            before_frame_effect: None,
+            activation_probe: None,
+            evidence_hooks: None,
         }
         .serve(),
     );
