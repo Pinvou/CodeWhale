@@ -378,6 +378,7 @@ export const dictEn = {
           linkRowStale:(name,e)=>`"${name}" was removed, but its row in the PINVOU model list could not be removed (${e}). It is now unusable — delete it manually in Settings.`,
           linkReasonBridge:'PINVOU bridge unavailable', linkReasonUnknown:'unknown reason', registerNoId:'The registry did not return a model ID; please retry.',
           linkRowRecycled:name=>`Also removed the PINVOU model entry "${name}"`,
+          linkRowKept:name=>`The "${name}" config was re-homed to another endpoint/model while the removal was in progress — kept as you edited it`,
           removeDone:name=>`Removed "${name}"`, removeFailed:e=>`Remove failed: ${e}`, warn:w=>`Note: ${w}`,
           ollamaOfflineHint:'No manageable models found on this device yet. Click "Install a new model" and let the AI assistant help you install one (for example via Ollama).',
           doctorPackages:'Check system updates', doctorPackagesDesc:'See which system and app updates are available; read-only',

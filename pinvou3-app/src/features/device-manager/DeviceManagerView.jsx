@@ -818,6 +818,16 @@ const DeviceManagerView = ({ theme, t, bs, onOpenChat, captureChatOwnership, onO
       // Rows actually recycled (declared here: the toast assembles after the
       // Array.isArray branch closes).
       const recycledRows = [];
+      // Rows kept because their CURRENT identity no longer matches what this
+      // removal snapshotted (round-33 review P2): while removeExternalModel was
+      // waiting, the user could re-home the same-ID config in Settings (the
+      // save keeps the id; the final transaction writes it by id alone). An
+      // id-only recycle would delete the user's edited config, so the recycle
+      // goes through deleteModelIfMatches — the transaction re-checks the
+      // (base_url, model) strings this snapshot saw and refuses to delete a
+      // row that changed. Each kept row is named in the toast instead of
+      // silently dropping out of the recycle scope.
+      const keptRows = [];
       if (Array.isArray(bs?.savedModels)) {
         // Endpoint-precise recycle (round-10 review P2): only rows linked from
         // THIS record's endpoint go to deleteModel — a same-name model linked
@@ -836,7 +846,7 @@ const DeviceManagerView = ({ theme, t, bs, onOpenChat, captureChatOwnership, onO
         // every cleanup failure surfaced as "unknown" — round-3 review P2).
         // Reasons are localized (round-7 review P3): the raw tokens used to
         // leak into the zh/ja toast on this failure path.
-        cleanupErrorText = liveBridge?.models?.deleteModel ? null : copy.linkReasonBridge;
+        cleanupErrorText = liveBridge?.models?.deleteModelIfMatches ? null : copy.linkReasonBridge;
         // Name each recycled row in the toast (round-12 review suggestion,
         // the last open overall-review item): the rows share the removed
         // record's (endpoint, model) identity, but the display name is
@@ -844,8 +854,18 @@ const DeviceManagerView = ({ theme, t, bs, onOpenChat, captureChatOwnership, onO
         // several rows — listing them lets the user audit the recycle scope.
         for (const linked of cleanupErrorText ? [] : linkedRows) {
           try {
-            await liveBridge.models.deleteModel(linked.id);
-            recycledRows.push(linked);
+            // Conditional recycle (round-33 review P2): the expected identity
+            // travels from THIS snapshot row; `false` means the row at this id
+            // changed identity during the wait (or is already gone) and stays.
+            // Plain deleteModel stays on the Settings page's own delete button,
+            // where the user deletes exactly the row they see.
+            const deleted = await liveBridge.models.deleteModelIfMatches(
+              linked.id,
+              linked.base_url,
+              linked.model,
+            );
+            if (deleted) recycledRows.push(linked);
+            else keptRows.push(linked);
           } catch (error) {
             cleanupErrorText = String(error?.message || error);
             break;
@@ -873,6 +893,12 @@ const DeviceManagerView = ({ theme, t, bs, onOpenChat, captureChatOwnership, onO
         // as an all-clear for the rows it names.
         for (const linked of recycledRows) {
           notices.push(copy.linkRowRecycled(linked.name || linked.model || linked.id));
+        }
+        // A kept row is a full-success outcome too (the removal succeeded and
+        // the re-homed config survived) — but it must not look like the row
+        // was recycled: name it so the toast accounts for every linked row.
+        for (const linked of keptRows) {
+          notices.push(copy.linkRowKept(linked.name || linked.model || linked.id));
         }
       } else {
         // Cleanup failure must be surfaced, not drowned by a plain success toast.

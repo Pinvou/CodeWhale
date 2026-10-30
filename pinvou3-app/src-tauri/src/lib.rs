@@ -2091,6 +2091,7 @@ pub fn run() {
             commands::settings::probe_local_server_kind,
             commands::settings::save_model,
             commands::settings::delete_model,
+            commands::settings::delete_model_if_matches,
             commands::settings::set_active_model,
             commands::settings::set_session_model,
             commands::settings::get_session_model_id,

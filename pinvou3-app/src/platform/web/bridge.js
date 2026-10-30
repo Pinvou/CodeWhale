@@ -5469,6 +5469,18 @@ async function revealModelApiKey(id) { return pinvouSharedweb().revealModelApiKe
    await loadModels();
    await loadEffectiveModelConfig();
   }
+ // 设备管理移除回收专用（三十三轮评审 P2）：最终事务按期望身份核对，
+ // 等待期间被用户改属的同 id 配置保留。true=已删，false=保留。
+ async function deleteModelIfMatches(id, expectedBaseUrl, expectedModel) {
+   const deleted = await invoke("delete_model_if_matches", {
+     id: id,
+     expectedBaseUrl: expectedBaseUrl || null,
+     expectedModel: expectedModel || null,
+   });
+   await loadModels();
+   await loadEffectiveModelConfig();
+   return deleted;
+  }
   async function setActiveModel(id) {
     await invoke("set_active_model", { id: id });
     await loadModels();
@@ -7717,6 +7729,7 @@ function appendVoiceText(base, text) { return pinvouSharedweb().appendVoiceText(
    saveModel: saveModel,
    revealModelApiKey: revealModelApiKey,
    deleteModel: deleteModel,
+   deleteModelIfMatches: deleteModelIfMatches,
     getImageInputCapability: getImageInputCapability,
     testImageInputCapability: testImageInputCapability,
     setActiveModel: setActiveModel,

@@ -248,7 +248,24 @@ function injectSource() {
         case 'delete_model':
           models = models.filter(function (m) { return m.id !== (args && args.id); });
           return Promise.resolve(null);
-        case 'list_sessions': return Promise.resolve([]);
+        // 移除回收的条件删除桩（三十三轮评审 P2）：与生产 delete_model_if_matches
+        // 同一语义——id 在且 base_url/model 原串与期望身份逐字节一致才删并返回
+        // true；改属/缺失返回 false（保留），身份缺参永不匹配。
+        case 'delete_model_if_matches': {
+          var rowIfMatches = models.find(function (m) { return m.id === (args && args.id); });
+          if (!rowIfMatches) return Promise.resolve(false);
+          var matches = rowIfMatches.base_url === ((args && args.expectedBaseUrl) || '')
+            && rowIfMatches.model === ((args && args.expectedModel) || '');
+          if (!matches) return Promise.resolve(false);
+          models = models.filter(function (m) { return m.id !== (args && args.id); });
+          return Promise.resolve(true);
+        }
+        case 'list_sessions':
+          // ⑥-f2 侧栏会话切换（三十三轮评审 P2）：给真实侧栏一条可点击的
+          // 会话行——prompt 挂起窗口里经它走 session 通道切走（handleSwitchSession
+          // 的真实生产路径），晚到的 doctor 完成不得把用户拽进排查会话。
+          var recent = new Date(Date.now() - 60000).toISOString();
+          return Promise.resolve([{ id: 's-other', title: '另一个会话', created_at: recent, updated_at: recent, message_count: 2 }]);
         case 'create_session':
           // ⑥-e 互斥场景开关：挂住物化，让 doctorBusy 跨过一个可观察窗口；
           // 放行时必须以真实会话对象 resolve（否则 ensureSession 拿到
@@ -271,7 +288,14 @@ function injectSource() {
         case 'list_personas': return Promise.resolve([]);
         case 'get_backend_status': return Promise.resolve({ online: true, ok: true, status: 'online' });
         case 'get_app_version': return Promise.resolve('0.0.0-test');
-        case 'check_for_update': return Promise.resolve({ available: false, current_version: '0.0.0-test', latest_version: '0.0.0-test', notes: '', platform: 'linux' });
+        case 'check_for_update':
+          // ⑥-f3（三十三轮评审 P2）：更新卡渲染前提（hasUpdate）——sessionStorage
+          // 扛住 reload，与 __testMegacubeDevice 同一模式。
+          return Promise.resolve({
+            available: sessionStorage.getItem('__testHasUpdate') === '1',
+            current_version: '0.0.0-test', latest_version: '0.0.1-test',
+            notes: '', platform: 'linux',
+          });
         case 'find_resumable_run': return Promise.resolve(null);
         case 'list_scheduled_tasks': return Promise.resolve([]);
         case 'list_scheduled_task_recent_runs': return Promise.resolve([]);
@@ -285,6 +309,13 @@ function injectSource() {
         case 'get_memory_overview': return Promise.resolve(null);
         case 'chat':
           if (window.__DEVICE_MGR_TEST__.failChatSend) return Promise.reject(new Error('send down (smoke)'));
+          // ⑥-f3 completion 窗口开关（三十三轮评审 P2）：挂住已接纳发送的
+          // doSendFor，制造「动作 publication 还开着」的真实完成等待窗口。
+          if (window.__DEVICE_MGR_TEST__.hangDoctorChat) {
+            return new Promise((resolve) => {
+              window.__DEVICE_MGR_TEST__.resolveDoctorChat = function () { resolve(null); };
+            });
+          }
           return Promise.resolve(null);
         // 内嵌运行状态页每秒轮询；给一份最小快照，避免错误轮刷屏（内存 chip 也随 bs.monitor._fmt 生效）。
         case 'get_monitor_snapshot':
@@ -369,7 +400,12 @@ function injectSource() {
       hangExternalModels: false,
       externalModelGates: [],
       externalModelsFixture: ${JSON.stringify(externalModelsFixture())},
+      // ⑥-f3 completion 窗口（三十三轮评审 P2）。
+      hangDoctorChat: false,
       setRemoveOutcome: function (next) { removeOutcome = next; },
+    };
+    window.__testSetHasUpdate = function (value) {
+      sessionStorage.setItem('__testHasUpdate', value ? '1' : '0');
     };
     window.__TAURI__ = {
       core: { invoke: invoke },
@@ -715,7 +751,7 @@ async function clickTestId(page, testId) {
     removed: window.__DEVICE_MGR_TEST__.callsOf('device_remove_external_model')[0]?.args,
     // ⑤-b 已把同一行接入品悟：移除必须回收接入的模型行（cleanLinkedRows 契约）。
     // 整段删掉清理循环此前全测试照绿（round-5 review P3）。
-    deleteModelCalls: window.__DEVICE_MGR_TEST__.callsOf('delete_model').length,
+    deleteModelCalls: window.__DEVICE_MGR_TEST__.callsOf('delete_model_if_matches').length,
   }));
   rec('⑥ ollama 行移除先登记再走守卫命令且带二次确认（无权重勾选框）',
     confirmDisabledAtFirstSight && armedState.intro && !armedState.weightsToggle
@@ -767,7 +803,7 @@ async function clickTestId(page, testId) {
     idB: window.__DEVICE_MGR_TEST__.callsOf('save_model')
       .map(call => call.args?.model).filter(model => model?.model === 'model-b').slice(-1)[0]?.id || null,
   }));
-  const collDeletesBaseline = await page.evaluate(() => window.__DEVICE_MGR_TEST__.callsOf('delete_model').length);
+  const collDeletesBaseline = await page.evaluate(() => window.__DEVICE_MGR_TEST__.callsOf('delete_model_if_matches').length);
   // 移除 A（已登记行，无需静默登记）：两段式确认，确认按钮受 400ms 死区门禁
   // ——与 ⑥ 同款 in-page 轮询抓门禁放开时机。
   await page.evaluate(() => {
@@ -787,10 +823,10 @@ async function clickTestId(page, testId) {
     row?.querySelector('[data-testid="device-manager-remove-confirm"]')?.click();
   });
   await page.waitForFunction(
-    baseline => window.__DEVICE_MGR_TEST__.callsOf('delete_model').length > baseline,
+    baseline => window.__DEVICE_MGR_TEST__.callsOf('delete_model_if_matches').length > baseline,
     { timeout: 8000 }, collDeletesBaseline);
   const collState = await page.evaluate(({ idA, idB, baseline }) => ({
-    deletedIds: window.__DEVICE_MGR_TEST__.callsOf('delete_model').slice(baseline)
+    deletedIds: window.__DEVICE_MGR_TEST__.callsOf('delete_model_if_matches').slice(baseline)
       .map(call => call.args?.id),
     idA, idB,
     rowBStillLinked: [...document.querySelectorAll('[data-testid="device-manager-external-row"]')]
@@ -1030,6 +1066,117 @@ async function clickTestId(page, testId) {
     promptWindowState.view === 'settings' && !promptWindowState.toast
     && promptWindowState.chatCalls > chatCallsBeforePromptWindow,
     JSON.stringify(promptWindowState));
+
+  // ⑥-f2 prompt 采样窗口里**切会话**（三十三轮评审 P2）：侧栏切会话走
+  // session 通道（其 publication 内的 setCurrentView 因 publishing>0 走直改
+  // 分支，不失效 view 修订号）——修后动作只拍 view 一把尺子时，晚到的完成
+  // 自己签发的新 session 票据 isCurrent 恒真、kept() 恒真，把已选中队列里
+  // 会话 B 的用户拽进排查会话。修后拍 ['view','session'] 双尺子在
+  // self-transition 前决算：视图必须留在会话 B 的聊天页、B 仍是活动行，
+  // 消息照常送达（已接受发送照常按成功计）、无失败 toast。
+  await clickNavByLabel(page, '设备管理');
+  await page.waitForFunction(() => document.querySelector('[data-testid="app-root"]')?.getAttribute('data-current-view') === 'monitor', { timeout: 8000 });
+  await page.waitForFunction(() => !!document.querySelector('[data-testid="device-manager-view"]'), { timeout: 8000 });
+  // 会话行住在展开态侧栏的最近列表里（isSidebarOpen 才渲染）：先展开。
+  await page.evaluate(() => { document.querySelector('[data-sidebar-toggle]')?.click(); });
+  await page.waitForFunction(() => !!document.querySelector('[data-testid="regular-sidebar-item"]'), { timeout: 8000 });
+  await page.evaluate(() => { window.__DEVICE_MGR_TEST__.hangDoctorPrompt = true; });
+  const chatCallsBeforeSessionWindow = await page.evaluate(() => window.__DEVICE_MGR_TEST__.callsOf('chat').length);
+  await clickTestId(page, 'device-manager-doctor-packages');
+  await page.waitForFunction(
+    () => typeof window.__DEVICE_MGR_TEST__.resolveDoctorPrompt === 'function',
+    { timeout: 8000 },
+  );
+  // prompt 挂起期间经真实侧栏切到会话 B（handleSwitchSession，session 通道）。
+  await page.evaluate(() => { document.querySelector('[data-testid="regular-sidebar-item"]').click(); });
+  await page.waitForFunction(() => document.querySelector('[data-testid="app-root"]')?.getAttribute('data-current-view') === 'chat', { timeout: 8000 });
+  // 活动态样式在行包装层（RecentItem 外层 div），不在 testid 按钮本体。
+  await page.waitForFunction(() => {
+    const row = document.querySelector('[data-testid="regular-sidebar-item"]');
+    return row && row.parentElement?.className.includes('bg-[#E1E5EA]');
+  }, { timeout: 8000 });
+  await page.evaluate(() => { window.__DEVICE_MGR_TEST__.hangDoctorPrompt = false; });
+  await page.evaluate(() => { window.__DEVICE_MGR_TEST__.resolveDoctorPrompt?.(); });
+  await page.waitForFunction(
+    (before) => window.__DEVICE_MGR_TEST__.callsOf('chat').length > before,
+    { timeout: 15000 },
+    chatCallsBeforeSessionWindow,
+  );
+  await sleep(600);
+  const sessionWindowState = await page.evaluate(() => {
+    const row = document.querySelector('[data-testid="regular-sidebar-item"]');
+    return {
+      view: document.querySelector('[data-testid="app-root"]')?.getAttribute('data-current-view'),
+      otherRowStillActive: !!row && !!row.parentElement?.className.includes('bg-[#E1E5EA]'),
+      chatCalls: window.__DEVICE_MGR_TEST__.callsOf('chat').length,
+      toast: document.querySelector('[data-testid="model-store-toast"]')?.innerText || null,
+    };
+  });
+  if (sessionWindowState.view !== 'chat' || !sessionWindowState.otherRowStillActive || sessionWindowState.toast) {
+    const diag = await page.evaluate(() => ({
+      view: document.querySelector('[data-testid="app-root"]')?.getAttribute('data-current-view'),
+      toast: document.querySelector('[data-testid="model-store-toast"]')?.innerText || null,
+      lastCalls: window.__DEVICE_MGR_TEST__.calls.slice(-8).map(c => c.cmd),
+    }));
+    console.error('[smoke][⑥-f2 diag]', JSON.stringify(diag));
+  }
+  rec('⑥-f2 prompt 采样期间切会话：晚到完成不抢回排查会话、消息照常送达',
+    sessionWindowState.view === 'chat' && sessionWindowState.otherRowStillActive
+    && !sessionWindowState.toast
+    && sessionWindowState.chatCalls > chatCallsBeforeSessionWindow,
+    JSON.stringify(sessionWindowState));
+
+  // ⑥-f3 completion 窗口里**不经 gate 的直接视图变更**（三十三轮评审 P2）：
+  // 动作自己的 publication 还开着（publishing>0），此刻更新卡的
+  // onShowChangelog 直呼 setCurrentView('settings')——走直改分支，view 修订号
+  // 不动，两把修订号尺子都拦不住。修后落定复查加读真实视图状态：用户已离开
+  // 设备页（currentView !== 'monitor'）即退役归属。视图必须留在设置页，
+  // 消息照常送达（回执语义不变）、无失败 toast。修前（无 currentViewRef 检查）
+  // 晚到的完成把用户从设置页拽回聊天——本用例必红。
+  await page.evaluate(() => { window.__testSetHasUpdate(true); });
+  await page.reload({ waitUntil: 'networkidle0' });
+  await page.waitForFunction(() => window.TauriBridge && document.querySelector('[data-testid="app-root"]'), { timeout: 20000 });
+  await clickNavByLabel(page, '设备管理');
+  await page.waitForFunction(() => document.querySelector('[data-testid="app-root"]')?.getAttribute('data-current-view') === 'monitor', { timeout: 8000 });
+  await page.waitForFunction(() => !!document.querySelector('[data-testid="device-manager-view"]'), { timeout: 8000 });
+  await page.waitForFunction(() => !!document.querySelector('[data-update-notes-button="true"]'), { timeout: 8000 });
+  await page.evaluate(() => { window.__DEVICE_MGR_TEST__.hangDoctorChat = true; });
+  const chatCallsBeforeCompletionWindow = await page.evaluate(() => window.__DEVICE_MGR_TEST__.callsOf('chat').length);
+  await clickTestId(page, 'device-manager-doctor-packages');
+  // 已接纳发送进入 completion 等待：chat invoke 已发出且被挂住。
+  await page.waitForFunction(
+    (before) => window.__DEVICE_MGR_TEST__.callsOf('chat').length > before,
+    { timeout: 15000 },
+    chatCallsBeforeCompletionWindow,
+  );
+  // completion 挂起期间经更新卡直达设置（setCurrentView 直改分支）。
+  await page.evaluate(() => { document.querySelector('[data-update-notes-button="true"]').click(); });
+  await page.waitForFunction(() => document.querySelector('[data-testid="app-root"]')?.getAttribute('data-current-view') === 'settings', { timeout: 8000 });
+  await page.evaluate(() => { window.__DEVICE_MGR_TEST__.hangDoctorChat = false; });
+  await page.evaluate(() => { window.__DEVICE_MGR_TEST__.resolveDoctorChat?.(); });
+  // 留出潜在误切窗口后视图必须仍停在设置页（修前这里已被拽回 chat）。
+  await sleep(600);
+  const completionWindowState = await page.evaluate(() => ({
+    view: document.querySelector('[data-testid="app-root"]')?.getAttribute('data-current-view'),
+    chatCalls: window.__DEVICE_MGR_TEST__.callsOf('chat').length,
+    toast: document.querySelector('[data-testid="model-store-toast"]')?.innerText || null,
+  }));
+  if (completionWindowState.view !== 'settings' || completionWindowState.toast) {
+    const diag = await page.evaluate(() => ({
+      view: document.querySelector('[data-testid="app-root"]')?.getAttribute('data-current-view'),
+      toast: document.querySelector('[data-testid="model-store-toast"]')?.innerText || null,
+      lastCalls: window.__DEVICE_MGR_TEST__.calls.slice(-8).map(c => c.cmd),
+    }));
+    console.error('[smoke][⑥-f3 diag]', JSON.stringify(diag));
+  }
+  rec('⑥-f3 completion 期间更新卡直达设置：晚到完成不拽回聊天、消息照常送达',
+    completionWindowState.view === 'settings' && !completionWindowState.toast
+    && completionWindowState.chatCalls > chatCallsBeforeCompletionWindow,
+    JSON.stringify(completionWindowState));
+  // 还原：关掉更新标记并重载，后续场景回到标准形态。
+  await page.evaluate(() => { window.__testSetHasUpdate(false); });
+  await page.reload({ waitUntil: 'networkidle0' });
+  await page.waitForFunction(() => window.TauriBridge && document.querySelector('[data-testid="app-root"]'), { timeout: 20000 });
 
   // ⑧ 后端读取失败面：横幅 + 重试按钮 + 恢复（此前整条失败面只被断言"不存在"，
   // 横幅回归消失全绿——第四轮评审 P2）。重试按钮的接线必须真钉：2s 后台轮询在

@@ -2178,6 +2178,7 @@ function composePlanMarkdown(snapshots) { return pinvouSharedtauriMain().compose
   var saveModel = settingsFeature.saveModel;
   var revealModelApiKey = settingsFeature.revealModelApiKey;
   var deleteModel = settingsFeature.deleteModel;
+  var deleteModelIfMatches = settingsFeature.deleteModelIfMatches;
   var setActiveModel = settingsFeature.setActiveModel;
   var loadSessionModel = settingsFeature.loadSessionModel;
   var switchModel = settingsFeature.switchModel;
@@ -2755,6 +2756,7 @@ function composePlanMarkdown(snapshots) { return pinvouSharedtauriMain().compose
       saveModel: saveModel,
       revealModelApiKey: revealModelApiKey,
       deleteModel: deleteModel,
+      deleteModelIfMatches: deleteModelIfMatches,
       setActiveModel: setActiveModel,
       loadSessionModel: loadSessionModel,
       switchModel: switchModel,

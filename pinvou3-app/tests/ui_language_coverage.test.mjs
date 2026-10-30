@@ -245,6 +245,8 @@ for (const language of ['zh', 'en', 'ja']) {
       'linkDisabledStoreUnknown',
       'remove', 'removeArmed', 'removeCancel', 'removeConfirmIntro', 'deleteWeights',
       'removeWeightsPath', 'removeIrreversible', 'linkDisabledUnreachable',
+      // round-33 评审 P2：改属保留行的 toast 文案（条件删除返回 false）。
+      'linkRowKept',
       'doctorSendFailed', 'doctorFailed', 'refreshFailed', 'linkRowStale', 'linkRowRecycled', 'removeDone', 'removeFailed', 'warn',
       'linkReasonBridge', 'linkReasonUnknown', 'registerNoId',
       'ollamaOfflineHint', 'localSourceHint',
@@ -263,8 +265,8 @@ for (const language of ['zh', 'en', 'ja']) {
     // Count guard：清单看不到新增——加键必须同步更新计数（见 uiAuxChat round-36 同款）。
     assert.equal(
       Object.keys(dict[language].uiDeviceMgr).length,
-      120,
-      `${language}.uiDeviceMgr must hold exactly the 120 pinned keys`,
+      121,
+      `${language}.uiDeviceMgr must hold exactly the 121 pinned keys`,
     );
     // Single-language whole-section loss guard（十九轮评审 P2）：dictJa 以
     // `...dictEn` 铺底，整段删掉 `jaBase.uiDeviceMgr` / `jaBase.deviceMgr` 时

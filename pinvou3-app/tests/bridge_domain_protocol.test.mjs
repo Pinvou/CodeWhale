@@ -265,9 +265,9 @@ const expectedProtocolHashes = {
   // the set_global_shortcut_config invoke (the dedicated command owns both
   // the plugin registration and the prefs persistence; update_settings
   // stays untouched).
-  // Retain Account builtin toggles and typed voice references; updater also
-  // inherits main's Windows progress event and installation lifecycle.
-  settings: '5fadac6005cb2f3c179925fbf0511b445350dd19789254c5383ac193624fc3fd',
+  // 三十三轮评审 P2 重算：settings 域新增 delete_model_if_matches invoke
+  // （设备管理移除回收的条件删除——最终事务按快照 base_url/model 核对）。
+  settings: '10c26a93bdea3a0d5cdca5f667cfaad0a28213b93194ed13e8b6b9ce10b7262d',
   updater: 'cfe92470008c2dade64f891c36a5fa70930478f803d4d2a6d100e68d9c29392b',
   // Voice draft preparation now carries its typed source/model reference;
   // session bindings remain authoritative and the command set is unchanged.
