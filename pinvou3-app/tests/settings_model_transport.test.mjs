@@ -84,4 +84,28 @@ function settings(state, invoke) { return factories.settings({state, invoke, not
  requests[1].resolve({models:[{id:'new'}]});await current;requests[0].resolve({models:[{id:'old'}]});await old;
  assert.equal(state.savedModels[0].id,'new','a late list cannot overwrite the current catalog');
 }
+{
+ const state=baseState(), oldRequests=new Map(), calls=new Map(); let notifications=0;
+ const commands=['get_session_model_id','get_session_model_ref','get_effective_model_config'];
+ for(const command of commands) oldRequests.set(command,deferred());
+ const domain=factories.settings({state, notify(){notifications++;}, listen(){}, invoke(command){
+   const n=(calls.get(command)||0)+1; calls.set(command,n);
+   if(n===1)return oldRequests.get(command).promise;
+   if(command==='get_session_model_id')return Promise.resolve(null);
+   if(command==='get_session_model_ref')return Promise.resolve({source:'ACCOUNT_PLATFORM',model_id:'selected'});
+   return Promise.resolve({model:'selected'});
+ }});
+ const stale=domain.loadSessionModel('session-1');
+ await domain.loadSessionModel('session-1');
+ const published=notifications;
+ oldRequests.get('get_session_model_id').resolve('stale-local');
+ oldRequests.get('get_session_model_ref').resolve({source:'LOCAL_CONFIG',saved_model_id:'stale-local'});
+ oldRequests.get('get_effective_model_config').resolve({model:'stale-local'});
+ assert.equal(await stale,false);
+ assert.equal(state.currentSessionModelId,null);
+ assert.equal(state.currentSessionModelRef.source,'ACCOUNT_PLATFORM');
+ assert.equal(state.currentSessionModelRef.model_id,'selected');
+ assert.equal(state.effectiveModelConfig.model,'selected');
+ assert.equal(notifications,published,'stale tuple must not publish a contradictory selection');
+}
 console.log('settings model transport regressions passed');

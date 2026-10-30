@@ -286,13 +286,12 @@ function pinvouSharedtauriSettings() {
         .then(function (value) { return { ok: true, value: value }; })
         .catch(function () { return { ok: false, value: null }; }),
     ]);
-    if (requestedSessionId !== (state.activeSessionId || null)) return false;
+    if (effectiveSeq !== effectiveModelLoadSeq || requestedSessionId !== (state.activeSessionId || null)) return false;
     state.currentSessionModelId = results[0];
     state.currentSessionModelRef = results[1];
-    var effectiveCurrent = effectiveSeq === effectiveModelLoadSeq;
-    if (effectiveCurrent && results[2].ok) state.effectiveModelConfig = results[2].value;
+    if (results[2].ok) state.effectiveModelConfig = results[2].value;
     notify();
-    return effectiveCurrent && results[2].ok;
+    return results[2].ok;
   }
   // 切当前会话模型；草稿态只寄存到首条消息物化，不改全局默认。
   async function switchModelRef(sessionId, modelRef) {
