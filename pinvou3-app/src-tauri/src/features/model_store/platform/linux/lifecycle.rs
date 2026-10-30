@@ -3456,6 +3456,38 @@ impl ModelManager {
         }
 
         if let Some(image) = &rec.docker_image {
+            // 本批评审 P2-5：rmi 前按镜像字符串反查引用。docker_image 的来源是
+            // install_engine 输出的 LMM_ENGINE_IMAGE= 自报标记——一张被投毒的卡片
+            // 可以让自己的**新**引擎行自报受害者正在用的真实镜像（形式合法就过
+            // 白名单，「不覆盖」只保护同 (name,version) 已有不同值的行）。上面的
+            // affected 名单只查本引擎行的绑定，对这种冒名视而不见；真放行 rmi，
+            // 受害卡下次部署就得重新拉几十 GB 镜像，界面上还看不出任何异常。
+            // 查不到引用名单（库读失败）同样停手：不能把读取失败当成「没人用」。
+            let sharing = db::find_docker_image_users(image, engine_name, engine_version)
+                .map_err(|e| {
+                    ModelManagerError::new(format!("无法核对镜像引用，未执行删除：{e}"))
+                })?;
+            if !sharing.is_empty() {
+                let described = sharing
+                    .iter()
+                    .map(|r| {
+                        let engine = match r.engine_version.as_deref() {
+                            Some(v) if !v.is_empty() => format!("{} {}", r.engine_name, v),
+                            _ => r.engine_name.clone(),
+                        };
+                        if r.model_names.is_empty() {
+                            engine
+                        } else {
+                            format!("{engine}（模型：{}）", r.model_names.join("、"))
+                        }
+                    })
+                    .collect::<Vec<_>>()
+                    .join("；");
+                return Err(ModelManagerError::new(format!(
+                    "镜像 {image} 同时被以下引擎/模型引用，不能删除：{described}。\
+                     请先处理这些模型，或联系卡片提供方修正引擎的镜像声明。"
+                )));
+            }
             let freed = docker_image_size(image);
             // 带时限。这里原来是裸 `Command::output()`，而 `output()` 是无限期
             // 阻塞的：docker daemon 卡死时 `docker rmi` 跟 `docker ps` 一样，
@@ -3704,6 +3736,12 @@ fn extract_marker(output_lines: &[String], prefix: &str) -> Option<String> {
     found
 }
 
+/// `LMM_ENGINE_IMAGE=` marker 的长度上限（本批评审 P2-5）。真实镜像引用最长
+/// 也就 `registry/repo:tag@sha256:<64 hex>` 一两百字节的量级，512 已是数倍
+/// 宽裕；没有上限的话，脚本不小心 echo 出的一整行日志也会被当成候选镜像
+/// 走一遍白名单与查库比对。
+const ENGINE_IMAGE_MARKER_MAX_BYTES: usize = 512;
+
 /// `LMM_ENGINE_IMAGE=` 自报值的形式判据（r19 评审 P2-1）。
 ///
 /// 这个值最终会写进 installed_engines 里 (name,version) 相同的共享行，并由
@@ -3716,12 +3754,20 @@ fn extract_marker(output_lines: &[String], prefix: &str) -> Option<String> {
 /// - 字符集只放行镜像引用（`registry/repo:tag@sha256:…`）会用到的
 ///   `[A-Za-z0-9._:/@-]`：空白、引号、`$`、`;`、`|` 一律出局——镜像引用是
 ///   一个 token，混进这些字符它就不是镜像名而是别的什么东西了。
+/// - 长度不得超过 [`ENGINE_IMAGE_MARKER_MAX_BYTES`]（本批评审 P2-5）。
 ///
 /// 刻意停在「形式像不像」这一层，不去联网验证镜像真的存在：那要花几十秒，
-/// 不该挡在下载主流程上；形式不合法的值先挡在门外，合法但编造的值由
-/// [`engine_image_to_record`] 的不覆盖规则兜住。
+/// 不该挡在下载主流程上。形式不合法的值在这里挡掉；「合法但编造」的值有两道
+/// 后手——同 (name,version) 行已有不同镜像时由 [`engine_image_to_record`] 的
+/// 不覆盖规则保住旧值，**新**引擎行自报别人正在用的镜像则由 `delete_engine`
+/// 删除前的镜像引用反查（`db::find_docker_image_users`，本批评审 P2-5）拦下
+/// rmi。此前注释宣称「由不覆盖规则兜住」，那句话不成立：不覆盖只保护同
+/// (name,version) 已有不同值的行，冒名者开新行就绕开了它。
 fn engine_image_marker_is_wellformed(value: &str) -> bool {
     if !value.starts_with(|c: char| c.is_ascii_alphanumeric()) {
+        return false;
+    }
+    if value.len() > ENGINE_IMAGE_MARKER_MAX_BYTES {
         return false;
     }
     value
@@ -3737,6 +3783,9 @@ fn engine_image_marker_is_wellformed(value: &str) -> bool {
 ///    自报的、没有第三方权威，但旧值至少跟着这行记录被用过，新值可能只是
 ///    另一张卡的脚本在抢写共享行。返回 None 即可：`mark_engine_installed`
 ///    的 COALESCE 会保留库里的旧值。这比弹框让用户裁决侵入性小，先做保守版。
+///    注意这一道只保护同 (name,version) 且已有不同值的行——**新**引擎行自报
+///    别的卡正在用的镜像拦不住，那一路由 `delete_engine` 删除前的镜像引用
+///    反查兜底（本批评审 P2-5，见 [`db::find_docker_image_users`]）。
 ///
 /// 空值（ollama、厂商二进制引擎都不报镜像）维持原行为，同样交给 COALESCE。
 fn engine_image_to_record(

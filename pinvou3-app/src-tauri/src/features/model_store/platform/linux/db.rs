@@ -676,6 +676,54 @@ pub fn set_container_name(card_id: &str, container_name: Option<&str>) -> rusqli
     Ok(())
 }
 
+/// [`find_docker_image_users`] 的返回行：还在引用同一镜像的一个引擎记录，
+/// 以及绑定在它上面的模型名（可能为空——行在、没模型绑着，也照样引用着镜像）。
+pub struct DockerImageReference {
+    pub engine_name: String,
+    pub engine_version: Option<String>,
+    pub model_names: Vec<String>,
+}
+
+/// 反查除指定引擎行外，还有谁在用这个 docker 镜像引用（本批评审 P2-5）。
+///
+/// `delete_engine` 拿 installed_engines.docker_image 拼 `docker rmi`，而这个字段
+/// 的来源是 install_engine 输出里的 `LMM_ENGINE_IMAGE=` 自报标记——一张被投毒
+/// 的卡片可以让自己的**新**引擎行自报受害者正在用的真实镜像（形式合法就能过
+/// 白名单；「不覆盖」规则只保护同 (name,version) 已登记**不同**镜像的行，对
+/// 新行无能为力）。只查本引擎行的绑定名单（list_model_names_using_engine）拦
+/// 不住这种冒名：必须按镜像字符串反查**其他**引擎行，再顺藤摸瓜列出绑在那些
+/// 行上的模型，删除前把受害名单摆出来。
+pub fn find_docker_image_users(
+    image: &str,
+    exclude_engine_name: &str,
+    exclude_engine_version: Option<&str>,
+) -> rusqlite::Result<Vec<DockerImageReference>> {
+    let conn = connect()?;
+    let mut stmt = conn.prepare(
+        "SELECT engine_name, engine_version FROM installed_engines
+          WHERE docker_image = ?1
+            AND NOT (engine_name = ?2 AND engine_version = ?3)",
+    )?;
+    let rows = stmt
+        .query_map(
+            params![image, exclude_engine_name, engine_key(exclude_engine_version)],
+            |row| Ok((row.get::<_, String>(0)?, row.get::<_, Option<String>>(1)?)),
+        )?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    // 绑定模型名单逐行补齐，口径复用 list_model_names_using_engine
+    // （COALESCE(engine_version,'') 与 engine_key 对齐），避免两处判据漂移。
+    let mut users = Vec::with_capacity(rows.len());
+    for (engine_name, engine_version) in rows {
+        let model_names = list_model_names_using_engine(&engine_name, engine_version.as_deref())?;
+        users.push(DockerImageReference {
+            engine_name,
+            engine_version,
+            model_names,
+        });
+    }
+    Ok(users)
+}
+
 // ---------------- 商店模型记录 ----------------
 
 #[derive(Debug, Clone, serde::Serialize)]
