@@ -449,6 +449,12 @@ pub fn fleet_task_to_worker_spec_with_profiles(
         resume_identity: Some(session_name.clone()),
         generation: 1,
         resume_from_agent_id: None,
+        // Fleet specs never enter the inherited-isolation lane: the task cwd
+        // is confined to the coordinating workspace and spawn depth is 0, so
+        // the worker workspace sits inside it, isolation stays false, and
+        // the shared lane keys claims on spec.workspace directly — there is
+        // no containing-worktree root to record here.
+        worktree_root: None,
     };
 
     let max_steps = task_spec

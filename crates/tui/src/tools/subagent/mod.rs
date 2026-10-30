@@ -1537,6 +1537,15 @@ pub(crate) struct SubAgentSpawnOptions {
     /// Checkpoint resume: the claim comes from the coordination ledger and is
     /// already namespaced — skip re-namespacing in the spawn seam.
     pub claim_pre_namespaced: bool,
+    /// Checkpoint resume: the worktree root the restored claim was registered
+    /// under. A root-session resume has no ancestor chain to resolve
+    /// containment from, so the recorded key keeps the claim in its original
+    /// serialization domain instead of falling back to the child's own
+    /// (possibly `cwd`-narrowed) workspace. Honored by the spawn seam for
+    /// ANY isolated child, not only resumed ones — only resume sets it
+    /// today; a future non-resume caller must be sure its recorded key is
+    /// authoritative before setting it.
+    pub write_claim_worktree_root: Option<String>,
     /// Checkpoint resume: preserve the interrupted child's runtime posture
     /// instead of rebuilding it from the caller's role.
     pub preserve_runtime_profile: Option<WorkerRuntimeProfile>,
@@ -3276,6 +3285,46 @@ impl Drop for CoordinationProcessLock {
     }
 }
 
+/// Which checkout frame a writer occupies. Shared writers all contend for
+/// the coordination workspace; worktree writers only contend inside the
+/// worktree their claim is keyed to — the same split the claim rows use.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum CoordinationLane {
+    SharedCheckout,
+    Worktree(String),
+}
+
+/// One gate-covered unbounded dispatch whose writes may still be landing.
+///
+/// The peer gate is evaluated when a command dispatches, but the command's
+/// writes outlive that instant — most consequentially for an explicitly
+/// backgrounded shell, which stays in the shared `ShellManager` after the
+/// owning agent's loop is interrupted, cancelled, or completed (aborting the
+/// loop never touches the job). An entry is the reservation that keeps the
+/// owner's frame occupied for as long as that work could still write:
+///
+/// - once the dispatch returns, the entry is stamped with the owner's
+///   still-running shell jobs and answers to the shell manager alone — an
+///   interrupted owner's zombie job keeps its frame exactly as long as the
+///   job lives, and a cancelled or finished job releases it without anyone
+///   assuming anything, no matter whether the owner is still Running;
+/// - before that, a live owner holds the entry (the dispatch is in
+///   flight), and a terminal owner keeps an unstamped entry only while it
+///   has some running job — the loop was aborted after the job spawned but
+///   before the stamping completion could run.
+///
+/// Entries are deliberately transient: they model occupancy by live work,
+/// not durable history, so a restart clears them along with the processes.
+#[derive(Debug)]
+struct InFlightUnboundedWork {
+    token: u64,
+    owner: String,
+    lane: CoordinationLane,
+    /// Shell task ids captured when the dispatching call returned; empty
+    /// until then (and forever, when the call never returned).
+    shell_task_ids: Vec<String>,
+}
+
 pub struct SubAgentManager {
     agents: HashMap<String, SubAgent>,
     worker_records: HashMap<String, AgentWorkerRecord>,
@@ -3378,6 +3427,15 @@ pub struct SubAgentManager {
     /// waiting on is dropped, never applied to a different call.
     child_approvals: HashMap<String, tokio::sync::oneshot::Sender<ChildApprovalOutcome>>,
     child_approval_seq: u64,
+    /// Transient occupancy held by gate-covered unbounded work that may
+    /// still be writing; see [`InFlightUnboundedWork`]. Not persisted.
+    in_flight_unbounded: Vec<InFlightUnboundedWork>,
+    in_flight_unbounded_seq: u64,
+    /// The shared shell manager consulted for in-flight shell truth. Wired
+    /// by the engine after construction; `None` (tests, surfaces without
+    /// shells) falls back to owner liveness only, which keeps every entry
+    /// the executor released and drops the rest at the next consult.
+    shell_jobs: Option<SharedShellManager>,
 }
 
 /// A person's answer to an approval prompt raised for a child's tool call.
@@ -3492,6 +3550,9 @@ impl SubAgentManager {
             resume_targets: HashMap::new(),
             child_approvals: HashMap::new(),
             child_approval_seq: 0,
+            in_flight_unbounded: Vec::new(),
+            in_flight_unbounded_seq: 0,
+            shell_jobs: None,
         }
     }
 
@@ -3786,7 +3847,7 @@ impl SubAgentManager {
                 break;
             }
             chain.push(worker_id);
-            cursor = record.parent_run_id.clone();
+            cursor = worker_parent_ref(record).map(str::to_string);
         }
         if !chain.iter().any(|entry| entry == "root") {
             chain.push("root".to_string());
@@ -4080,10 +4141,27 @@ impl SubAgentManager {
             }
         }
         let active_owners = self.active_coordination_owners();
-        self.coordination
-            .register_claim(claim, existing.isolated_worktree, |candidate| {
-                active_owners.contains(candidate)
-            })
+        // The owner's own claim is excluded by the ledger (same owner). In
+        // the isolated lane its ancestors stay exempt: growing a claim must
+        // not start contending with the agent the work was delegated from.
+        // The shared lane never consults exemptions — plain overlap alone
+        // decides there, as it always has.
+        let exempt_owners = self.worktree_claim_exemptions(Some(owner));
+        let lane = match existing.worktree_root.clone() {
+            Some(root) if existing.isolated_worktree => CoordinationLane::Worktree(root),
+            _ => CoordinationLane::SharedCheckout,
+        };
+        let conflicts = self.in_flight_unbounded_conflicts(owner, &lane, &exempt_owners);
+        if !conflicts.is_empty() {
+            return Err(Self::in_flight_unbounded_refusal(&conflicts));
+        }
+        self.coordination.register_claim(
+            claim,
+            existing.isolated_worktree,
+            existing.worktree_root.clone(),
+            &exempt_owners,
+            |candidate| active_owners.contains(candidate),
+        )
     }
 
     /// Release write claims whose owner is no longer a live claimant.
@@ -4106,6 +4184,70 @@ impl SubAgentManager {
         Ok(released)
     }
 
+    /// Isolated claims live in the worktree's path frame, but a
+    /// cwd-narrowed child's tool paths resolve against its own workspace.
+    /// Map each relative path into the worktree frame by prefixing the
+    /// child workspace's offset from the claim's recorded root, so the
+    /// natural spelling of an in-scope file validates — the shared lane
+    /// re-anchors through `coordination_workspace_prefix`, and without an
+    /// isolated analogue every natural spelling of a scoped, cwd-narrowed
+    /// worktree child was refused. Absolute spellings, legacy `None`
+    /// roots, and undecidable workspace/root drift are kept as-is and
+    /// still judged in the worktree frame.
+    fn reanchor_isolated_mutation_paths(
+        &self,
+        owner: &str,
+        worktree_root: Option<&str>,
+        paths: &[String],
+    ) -> Vec<String> {
+        let Some(root) = worktree_root else {
+            return paths.to_vec();
+        };
+        let workspace = self
+            .worker_records
+            .get(owner)
+            .map(|record| record.spec.workspace.clone())
+            .or_else(|| self.agents.get(owner).map(|agent| agent.workspace.clone()));
+        let Some(workspace) = workspace else {
+            return paths.to_vec();
+        };
+        let normalized = normalize_subagent_workspace(&workspace);
+        // Both sides of the offset computation are folded into the claim
+        // ledger's frame — NFC per component, the form `normalize_claim_path`
+        // gives every registered root. A worktree whose on-disk name is a
+        // different Unicode form (macOS records NFD) would otherwise fail
+        // the lexical prefix here, or produce an offset whose joined paths
+        // fail the ledger's strict string containment, and every natural
+        // in-scope spelling of a cwd-narrowed child would be refused. Only
+        // the comparison frame folds; the OS spellings on disk are untouched.
+        let workspace_frame = nfc_ledger_path_string(&normalized.to_string_lossy());
+        let root_frame = nfc_ledger_path_string(root);
+        let Ok(offset) = Path::new(&workspace_frame).strip_prefix(Path::new(&root_frame)) else {
+            return paths.to_vec();
+        };
+        let offset = offset.to_string_lossy();
+        if offset.is_empty() {
+            return paths.to_vec();
+        }
+        paths
+            .iter()
+            .map(|path| {
+                if path.starts_with('/') {
+                    // Already outside the repo-relative frame; keep it so
+                    // the containment check refuses it unchanged.
+                    return path.clone();
+                }
+                // Lexically resolve rather than plain-prefix: a `..` in the
+                // tool path must land on its true worktree-frame target, not
+                // prefix-match past the scoped root.
+                match lexically_under(&offset, path) {
+                    Some(joined) => nfc_ledger_path_string(&joined),
+                    None => path.clone(),
+                }
+            })
+            .collect()
+    }
+
     fn validate_write_scope(&self, owner: &str, paths: &[String]) -> Result<(), String> {
         let Some(claim) = self
             .coordination
@@ -4117,11 +4259,16 @@ impl SubAgentManager {
                 "agent '{owner}' has no registered write claim; declare scope at launch before mutation"
             ));
         };
+        let scoped = if claim.isolated_worktree {
+            self.reanchor_isolated_mutation_paths(owner, claim.worktree_root.as_deref(), paths)
+        } else {
+            paths.to_vec()
+        };
         let (_, paths) = self.namespace_claim_paths_for_owner(
             owner,
             claim.isolated_worktree,
             Vec::new(),
-            paths.to_vec(),
+            scoped,
         )?;
         if let Some(path) = paths.iter().find(|path| !claim.claim.contains_path(path)) {
             return Err(format!(
@@ -4164,6 +4311,48 @@ impl SubAgentManager {
             .iter()
             .filter(|record| record.claim.owner != owner && !record.isolated_worktree)
             .filter(|record| self.is_live_coordination_owner(&record.claim.owner))
+            .map(|record| record.claim.owner.clone())
+            .collect()
+    }
+
+    /// The live peers that gate an isolated `owner`'s unbounded mutation:
+    /// writers registered against the SAME worktree root, minus `owner`'s
+    /// ancestor chain.
+    ///
+    /// Admission already serializes same-root OVERLAPPING claims, so a live
+    /// same-root peer always holds a disjoint scope — and an unbounded command
+    /// cannot prove it stays inside `owner`'s share of the checkout, so it
+    /// must not run across that peer. This continues the shared-checkout
+    /// gate's premise through the isolated admission chain, which now admits
+    /// several unrelated writers into ONE worktree. The exemptions mirror
+    /// admission: an ancestor delegated the work downward, so it is exempt; a
+    /// peer keyed on a different worktree never shared this checkout; a
+    /// legacy row with no recorded root predates serialization and keeps the
+    /// documented never-contending footing; and liveness is the same single
+    /// predicate both gates (and claim admission) consult.
+    fn live_peer_same_worktree_claim_owners(&self, owner: &str) -> Vec<String> {
+        let Some(own) = self
+            .coordination
+            .write_claims
+            .iter()
+            .find(|record| record.claim.owner == owner && record.isolated_worktree)
+        else {
+            return Vec::new();
+        };
+        let Some(worktree_root) = own.worktree_root.as_deref() else {
+            return Vec::new();
+        };
+        let exempt = self.worktree_claim_exemptions(Some(owner));
+        self.coordination
+            .write_claims
+            .iter()
+            .filter(|record| {
+                record.claim.owner != owner
+                    && record.isolated_worktree
+                    && record.worktree_root.as_deref() == Some(worktree_root)
+                    && self.is_live_coordination_owner(&record.claim.owner)
+                    && !exempt.contains(&record.claim.owner)
+            })
             .map(|record| record.claim.owner.clone())
             .collect()
     }
@@ -4811,22 +5000,46 @@ impl SubAgentManager {
         if !isolated_worktree {
             self.ensure_coordination_process_lock()?;
         }
+        let worktree_root = isolated_worktree.then(|| {
+            normalize_subagent_workspace(&spec.workspace)
+                .to_string_lossy()
+                .into_owned()
+        });
+        let exempt_owners = self.worktree_claim_exemptions(spec.parent_run_id.as_deref());
         let active_owners = self.active_coordination_owners();
+        // A reservation conflict is transient by construction — the
+        // in-flight job finishes or is cancelled — so it refuses early
+        // without the receipt-on-authoritative dance below: a durable
+        // contention receipt would outlive its cause across a restart.
+        let lane = worktree_root
+            .clone()
+            .map(CoordinationLane::Worktree)
+            .unwrap_or(CoordinationLane::SharedCheckout);
+        let conflicts = self.in_flight_unbounded_conflicts(&claim.owner, &lane, &exempt_owners);
+        if !conflicts.is_empty() {
+            return Err(Self::in_flight_unbounded_refusal(&conflicts));
+        }
         let mut probe = self.coordination.clone();
-        match probe.register_claim(claim.clone(), isolated_worktree, |owner| {
-            active_owners.contains(owner)
-        }) {
+        match probe.register_claim(
+            claim.clone(),
+            isolated_worktree,
+            worktree_root.clone(),
+            &exempt_owners,
+            |owner| active_owners.contains(owner),
+        ) {
             Ok(_) => Ok(()),
             Err(error) => {
                 // Re-run against the authoritative ledger so a real overlap
                 // remains visible after restart. Invalid/schema failures do
                 // not mutate either ledger.
                 let coordination_before = self.coordination.clone();
-                let _ = self
-                    .coordination
-                    .register_claim(claim, isolated_worktree, |owner| {
-                        active_owners.contains(owner)
-                    });
+                let _ = self.coordination.register_claim(
+                    claim,
+                    isolated_worktree,
+                    worktree_root,
+                    &exempt_owners,
+                    |owner| active_owners.contains(owner),
+                );
                 if let Err(persist_error) = self.persist_state_synchronously() {
                     self.coordination = coordination_before;
                     return Err(format!(
@@ -4858,11 +5071,29 @@ impl SubAgentManager {
         let previous_coordination = self.coordination.clone();
         let persisted_claim = claim
             .map(|(claim, isolated_worktree)| {
+                let worktree_root = isolated_worktree.then(|| {
+                    normalize_subagent_workspace(&spec.workspace)
+                        .to_string_lossy()
+                        .into_owned()
+                });
+                let exempt_owners = self.worktree_claim_exemptions(spec.parent_run_id.as_deref());
                 let active_owners = self.active_coordination_owners();
-                self.coordination
-                    .register_claim(claim, isolated_worktree, |owner| {
-                        active_owners.contains(owner)
-                    })
+                let lane = worktree_root
+                    .clone()
+                    .map(CoordinationLane::Worktree)
+                    .unwrap_or(CoordinationLane::SharedCheckout);
+                let conflicts =
+                    self.in_flight_unbounded_conflicts(&claim.owner, &lane, &exempt_owners);
+                if !conflicts.is_empty() {
+                    return Err(Self::in_flight_unbounded_refusal(&conflicts));
+                }
+                self.coordination.register_claim(
+                    claim,
+                    isolated_worktree,
+                    worktree_root,
+                    &exempt_owners,
+                    |owner| active_owners.contains(owner),
+                )
             })
             .transpose()?;
 
@@ -4942,20 +5173,249 @@ impl SubAgentManager {
     /// persist forever and cascade-lock other agents"). A claim cannot contend
     /// for an owner that cannot write.
     fn is_live_coordination_owner(&self, id: &str) -> bool {
-        self.agents.get(id).is_some_and(|agent| {
-            agent.status == SubAgentStatus::Running && !self.is_from_prior_session(agent)
-        }) || self.worker_records.get(id).is_some_and(|record| {
-            let paired_agent = self.agents.get(id);
-            !record.status.is_terminal()
-                // A headless worker (no paired agent entry) that reaches
-                // WaitingForUser can never be answered: no user path will
-                // resume or finalize it, so counting it live leaks its claim
-                // as a permanent gate on every later writer. A *paired*
-                // waiting child keeps its claim — the user can still answer
-                // and the child will write again.
-                && (record.status != AgentWorkerStatus::WaitingForUser || paired_agent.is_some())
-                && paired_agent.is_none_or(|agent| !self.is_from_prior_session(agent))
+        if let Some(agent) = self.agents.get(id) {
+            // A paired record follows its agent: only a Running agent from
+            // this boot can still write under this id. Every other status is
+            // a terminal receipt whose loop has been aborted. That includes
+            // `Interrupted`, even though its worker record parks in
+            // `WaitingForUser` (the checkpoint is continuable): a resume
+            // re-dispatches a fresh loop under a NEW id (`resume_from_checkpoint`)
+            // and registers that id's own claim, so the parked claim can
+            // never be exercised again. Counting it live gated every later
+            // writer — including the child's own resume, which contended
+            // with its predecessor — and `cancel` could not release it
+            // (cancel only touches Running children).
+            //
+            // The interactive case this used to protect is unaffected: a
+            // child parked on an approval prompt is still `Running` and its
+            // record is `WaitingForUser`; it keeps its claim and writes again
+            // once the user answers.
+            return agent.status == SubAgentStatus::Running && !self.is_from_prior_session(agent);
+        }
+        self.worker_records.get(id).is_some_and(|record| {
+            // A headless worker (no paired agent entry) that reaches
+            // WaitingForUser can never be answered: no user path will
+            // resume or finalize it, so counting it live leaks its claim
+            // as a permanent gate on every later writer.
+            !record.status.is_terminal() && record.status != AgentWorkerStatus::WaitingForUser
         })
+    }
+
+    /// Wire the shared shell manager consulted for in-flight shell truth.
+    /// The engine calls this once after constructing both handles so a
+    /// reservation can validate its stamped job ids against the same
+    /// manager the shells actually live in.
+    pub fn set_shell_job_source(&mut self, shell_jobs: SharedShellManager) {
+        self.shell_jobs = Some(shell_jobs);
+    }
+
+    /// The checkout frame `agent_id`'s unbounded work occupies: its own
+    /// claim's worktree key when it holds one, its launch manifest's root
+    /// when it is a claim-less worktree child, the containing worktree when
+    /// an isolated ancestor delegated it, else the shared checkout. Same
+    /// precedence order the resume path uses for the isolation flag.
+    fn coordination_lane_of(&self, agent_id: &str) -> CoordinationLane {
+        if let Some(root) = self
+            .coordination
+            .write_claims
+            .iter()
+            .find(|record| record.claim.owner == agent_id && record.isolated_worktree)
+            .and_then(|record| record.worktree_root.clone())
+        {
+            return CoordinationLane::Worktree(root);
+        }
+        if let Some(root) = self
+            .worker_records
+            .get(agent_id)
+            .and_then(|record| record.spec.launch_manifest.as_ref())
+            .and_then(|manifest| manifest.worktree_root.clone())
+        {
+            return CoordinationLane::Worktree(root);
+        }
+        if self.parent_runs_in_isolated_worktree(agent_id) {
+            let workspace = self
+                .worker_records
+                .get(agent_id)
+                .map(|record| record.spec.workspace.clone())
+                .or_else(|| {
+                    self.agents
+                        .get(agent_id)
+                        .map(|agent| agent.workspace.clone())
+                });
+            if let Some(workspace) = workspace {
+                let parent = self
+                    .worker_records
+                    .get(agent_id)
+                    .and_then(worker_parent_ref)
+                    .map(str::to_string);
+                let root = self.containing_worktree_root(
+                    parent.as_deref(),
+                    normalize_subagent_workspace(&workspace)
+                        .to_string_lossy()
+                        .into_owned(),
+                );
+                return CoordinationLane::Worktree(root);
+            }
+        }
+        CoordinationLane::SharedCheckout
+    }
+
+    /// Open a reservation for one gate-covered unbounded dispatch. The
+    /// executor opens it BEFORE its peer checks and releases it on refusal:
+    /// registration precedes checking on both sides (here and at claim
+    /// admission), so of two racing writers whichever reserves second sees
+    /// the first and exactly one of them is refused.
+    pub(crate) fn open_in_flight_unbounded(&mut self, owner: &str, lane: CoordinationLane) -> u64 {
+        self.prune_dead_in_flight_unbounded();
+        self.in_flight_unbounded_seq = self.in_flight_unbounded_seq.wrapping_add(1);
+        let token = self.in_flight_unbounded_seq;
+        self.in_flight_unbounded.push(InFlightUnboundedWork {
+            token,
+            owner: owner.to_string(),
+            lane,
+            shell_task_ids: Vec::new(),
+        });
+        token
+    }
+
+    /// Drop a reservation whose dispatch was refused (or aborted) before it
+    /// could stamp anything.
+    pub(crate) fn cancel_in_flight_unbounded(&mut self, token: u64) {
+        self.in_flight_unbounded
+            .retain(|entry| entry.token != token);
+    }
+
+    /// Drop reservations whose work is observably over: a consult would skip
+    /// them, so keeping them only grows the frame list a long session has to
+    /// rescan. Runs on the mutating legs only (`open`/`complete`), so a
+    /// shared-lock consult stays read-only; the predicate is the consult's
+    /// own, so a prune racing a consult cannot change its answer.
+    fn prune_dead_in_flight_unbounded(&mut self) {
+        let mut survivors = std::mem::take(&mut self.in_flight_unbounded);
+        survivors.retain(|entry| self.in_flight_entry_holds_a_writer(entry));
+        self.in_flight_unbounded = survivors;
+    }
+
+    /// The surviving reservations as `(owner, stamped task ids)` — the
+    /// observable an executor-level pin asserts against.
+    #[cfg(test)]
+    pub(crate) fn in_flight_unbounded_for_test(&self) -> Vec<(String, Vec<String>)> {
+        let mut entries = self
+            .in_flight_unbounded
+            .iter()
+            .map(|entry| (entry.owner.clone(), entry.shell_task_ids.clone()))
+            .collect::<Vec<_>>();
+        entries.sort();
+        entries
+    }
+
+    /// Stamp a completed dispatch's reservation with the owner's still-
+    /// running shell jobs. Background work keeps the entry (validated
+    /// against the shell manager from now on); with nothing running the
+    /// dispatch is over and the entry goes.
+    pub(crate) fn complete_in_flight_unbounded(&mut self, token: u64, owner: &str) {
+        self.prune_dead_in_flight_unbounded();
+        let stamped = self
+            .shell_jobs
+            .as_ref()
+            .and_then(|shell_jobs| {
+                shell_jobs
+                    .lock()
+                    .ok()
+                    .map(|mut jobs| jobs.running_task_ids_for_owner(owner))
+            })
+            .unwrap_or_default();
+        if let Some(entry) = self
+            .in_flight_unbounded
+            .iter_mut()
+            .find(|entry| entry.token == token)
+        {
+            entry.shell_task_ids = stamped;
+        } else {
+            return;
+        }
+        self.in_flight_unbounded
+            .retain(|entry| !(entry.token == token && entry.shell_task_ids.is_empty()));
+    }
+
+    /// Whether the entry still models work that could write. A stamped
+    /// entry answers to the shell manager alone — the dispatch that would
+    /// have stamped already returned, so a live-but-idle owner must not
+    /// keep a finished dispatch's frame occupied. An unstamped entry is a
+    /// dispatch still in flight (a live owner) or one aborted after its
+    /// job spawned but before the stamping completion ran (a terminal
+    /// owner with some owned running job).
+    fn in_flight_entry_holds_a_writer(&self, entry: &InFlightUnboundedWork) -> bool {
+        if !entry.shell_task_ids.is_empty() {
+            let Some(shell_jobs) = self.shell_jobs.as_ref() else {
+                return false;
+            };
+            let Ok(mut jobs) = shell_jobs.lock() else {
+                return false;
+            };
+            return jobs.any_running_job(&entry.shell_task_ids);
+        }
+        if self.is_live_coordination_owner(&entry.owner) {
+            return true;
+        }
+        let Some(shell_jobs) = self.shell_jobs.as_ref() else {
+            return false;
+        };
+        let Ok(mut jobs) = shell_jobs.lock() else {
+            return false;
+        };
+        jobs.owner_has_running_job(&entry.owner)
+    }
+
+    /// Owners whose in-flight unbounded work conflicts with a new claimant
+    /// in `lane`: a different owner, not exempt (the claimant's ancestor
+    /// chain is exempt — the work was delegated downward), the same frame,
+    /// and still holding a writer. Dead entries are skipped here; they are
+    /// pruned by the mutating legs (`open`/`complete_in_flight_unbounded`)
+    /// so a shared-lock consult stays read-only.
+    fn in_flight_unbounded_conflicts(
+        &self,
+        claimant: &str,
+        lane: &CoordinationLane,
+        exempt: &[String],
+    ) -> Vec<String> {
+        self.in_flight_unbounded
+            .iter()
+            .filter(|entry| {
+                entry.owner != claimant
+                    && !exempt.iter().any(|exempt| exempt == &entry.owner)
+                    && match (&entry.lane, lane) {
+                        (CoordinationLane::Worktree(left), CoordinationLane::Worktree(right)) => {
+                            left == right
+                        }
+                        (CoordinationLane::SharedCheckout, CoordinationLane::SharedCheckout) => {
+                            true
+                        }
+                        _ => false,
+                    }
+                    && self.in_flight_entry_holds_a_writer(entry)
+            })
+            .map(|entry| entry.owner.clone())
+            .collect()
+    }
+
+    /// The peers whose in-flight unbounded work gates `owner`'s own
+    /// unbounded dispatch — the same exemptions as the claim peer gate,
+    /// extended to work that already passed the gate and is still running.
+    fn live_in_flight_unbounded_peers(&self, owner: &str) -> Vec<String> {
+        let lane = self.coordination_lane_of(owner);
+        let exempt = self.worktree_claim_exemptions(Some(owner));
+        self.in_flight_unbounded_conflicts(owner, &lane, &exempt)
+    }
+
+    /// The refusal for a writer that would share a frame with in-flight
+    /// unbounded work. It names the peers and the same remediations the
+    /// peer gate receipts name — wait, cancel the job, or isolate.
+    fn in_flight_unbounded_refusal(conflicts: &[String]) -> String {
+        format!(
+            "write-scope contention with {} (unbounded shell work is still in flight in this checkout; wait for the job to finish, cancel it with exec_shell_cancel, or relaunch the work with worktree isolation)",
+            conflicts.join(", ")
+        )
     }
 
     // Worker records carry no boot id of their own, so the per-id predicate
@@ -4968,6 +5428,113 @@ impl SubAgentManager {
             .filter(|id| self.is_live_coordination_owner(id))
             .cloned()
             .collect()
+    }
+
+    /// Whether `parent_id` is a child running in an isolated worktree, so a
+    /// spawn it issues lands inside that worktree rather than the shared
+    /// coordination root. Same precedence as the resume path: the parent's
+    /// registered claim carries the freshest flag; the launch manifest covers
+    /// a released or never-registered claim. The root session has neither and
+    /// is never isolated.
+    fn parent_runs_in_isolated_worktree(&self, parent_id: &str) -> bool {
+        if let Some(record) = self
+            .coordination
+            .write_claims
+            .iter()
+            .find(|record| record.claim.owner == parent_id)
+        {
+            return record.isolated_worktree;
+        }
+        self.worker_records
+            .get(parent_id)
+            .and_then(|record| record.spec.launch_manifest.as_ref())
+            .is_some_and(|manifest| manifest.worktree)
+    }
+
+    /// Ancestor hops the exemption/containment walk may follow. Generous
+    /// over `MAX_SPAWN_DEPTH_CEILING` (8): a legal delegation chain can
+    /// never exhaust this, so exhausting it means a cycle or corrupted
+    /// records. Raise it together with that ceiling if it ever grows.
+    const WORKTREE_ANCESTOR_WALK_LIMIT: usize = 15;
+
+    /// The claim owner `owner`/`start` may overlap inside one worktree: its
+    /// ancestor chain, nearest first. A parent delegates its work downward,
+    /// so a descendant's claim may cover the ancestor's; unrelated owners in
+    /// the same worktree (parallel siblings) still contend, exactly as they
+    /// would in the shared root. Unresolvable references simply end the
+    /// walk; `start` itself is included so callers can pass either the new
+    /// agent's parent id or the expanding owner.
+    fn worktree_claim_exemptions(&self, start: Option<&str>) -> Vec<String> {
+        let Some(start) = start else {
+            return Vec::new();
+        };
+        let Some((start_id, _)) = self.worker_record_by_ref(start) else {
+            return Vec::new();
+        };
+        let mut chain = vec![start_id.clone()];
+        let mut cursor = start_id;
+        for _ in 0..Self::WORKTREE_ANCESTOR_WALK_LIMIT {
+            let Some(record) = self.worker_records.get(&cursor) else {
+                break;
+            };
+            let Some(parent_ref) = worker_parent_ref(record) else {
+                break;
+            };
+            if parent_ref == "root" {
+                break;
+            }
+            let Some((parent_id, _)) = self.worker_record_by_ref(parent_ref) else {
+                break;
+            };
+            if chain.iter().any(|seen| seen == &parent_id) {
+                break;
+            }
+            chain.push(parent_id.clone());
+            cursor = parent_id;
+        }
+        chain
+    }
+
+    /// The serialization key an isolated claim registers under: the worktree
+    /// the child runs in, not the child's own workspace. A `cwd`-narrowed
+    /// child keeps the parent's full root set, so keying on its workspace
+    /// would hand two children of one worktree disjoint keys and let them
+    /// race the checkout unchecked. The nearest ancestor claim whose root
+    /// contains the child's workspace supplies the key; a child that created
+    /// its own worktree (harness worktrees land outside the parent checkout,
+    /// never inside it) or has no isolated ancestor keys on its own
+    /// workspace.
+    fn containing_worktree_root(&self, parent_id: Option<&str>, workspace_root: String) -> String {
+        let workspace = Path::new(&workspace_root);
+        for owner in self.worktree_claim_exemptions(parent_id) {
+            if let Some(record) = self
+                .coordination
+                .write_claims
+                .iter()
+                .find(|record| record.claim.owner == owner)
+                && record.isolated_worktree
+                && let Some(root) = record.worktree_root.as_deref()
+                && workspace.starts_with(root)
+            {
+                return root.to_string();
+            }
+            // A swept or evicted row leaves the ancestor's launch manifest
+            // as the only durable record of its worktree key — a claim-less
+            // worktree child never had a row at all. Without this leg its
+            // own cwd-narrowed descendants would each key on their
+            // individual workspaces and never serialize against each other.
+            if let Some(record) = self.worker_records.get(&owner)
+                && let Some(root) = record
+                    .spec
+                    .launch_manifest
+                    .as_ref()
+                    .and_then(|manifest| manifest.worktree_root.as_deref())
+                && workspace.starts_with(root)
+            {
+                return root.to_string();
+            }
+        }
+        workspace_root
     }
 
     fn namespace_write_claim(
@@ -5878,6 +6445,7 @@ impl SubAgentManager {
             workspace,
             claim,
             recorded_worktree_isolation,
+            restored_worktree_root,
             preserved_profile,
             child_route,
         ) = {
@@ -5920,16 +6488,46 @@ impl SubAgentManager {
             // stays inside the coordination ledger with the original bounded
             // scope instead of inheriting the caller's unchecked write surface.
             // The ledger claim is already namespaced and carries the isolation
-            // flag; both are passed through to the spawn seam. The claim is
-            // not the isolation authority, though — it can be released or
-            // never have existed for a worktree child — so the worker
-            // record's launch manifest is read below as the durable fallback.
-            let claim = self
+            // flag and its worktree key; all three pass through to the spawn
+            // seam. The claim is not the authority, though — the row can be
+            // released (the sweep the contention receipts recommend), evicted
+            // at ledger capacity, or never have existed for a worktree child —
+            // so the worker record's launch manifest is the durable fallback
+            // for the scope too, not only for the isolation flag. A claim-less
+            // manifest stays claim-less; one carrying scope restores it.
+            let restored_claim = self
                 .coordination
                 .write_claims
                 .iter()
                 .find(|record| record.claim.owner == agent_id)
-                .map(|record| (record.claim.clone(), record.isolated_worktree));
+                .map(|record| {
+                    (
+                        record.claim.clone(),
+                        record.isolated_worktree,
+                        record.worktree_root.clone(),
+                    )
+                });
+            let claim = restored_claim
+                .as_ref()
+                .map(|(claim, isolated, _)| (claim.clone(), *isolated))
+                .or_else(|| {
+                    self.worker_records
+                        .get(&agent_id)
+                        .and_then(|record| worker_coordination_claim(&record.spec).ok().flatten())
+                });
+            // The row's recorded root is the freshest serialization key;
+            // the manifest's is the durable one. A swept or evicted row
+            // must not re-key a cwd-narrowed worktree child on its own
+            // subdirectory — the manifest root keeps the resumed claim in
+            // the worktree's serialization domain.
+            let manifest_worktree_root = self
+                .worker_records
+                .get(&agent_id)
+                .and_then(|record| record.spec.launch_manifest.as_ref())
+                .and_then(|manifest| manifest.worktree_root.clone());
+            let restored_worktree_root = restored_claim
+                .and_then(|(_, _, root)| root)
+                .or(manifest_worktree_root);
             // The spec's launch manifest durably pins that this child was
             // spawned into an isolated worktree, independent of the claim
             // lifecycle. Keying isolation on the claim alone resumed a
@@ -5961,6 +6559,7 @@ impl SubAgentManager {
                 agent.workspace.clone(),
                 claim,
                 recorded_worktree_isolation,
+                restored_worktree_root,
                 preserved_profile,
                 child_route,
             )
@@ -6015,6 +6614,7 @@ impl SubAgentManager {
             write_claim: claim.as_ref().map(|(claim, _)| claim.clone()),
             isolated_worktree,
             claim_pre_namespaced: claim.is_some(),
+            write_claim_worktree_root: restored_worktree_root,
             preserve_runtime_profile: preserved_profile,
             ..Default::default()
         };
@@ -6610,11 +7210,34 @@ impl SubAgentManager {
                 profile
             }
         };
+        // A child spawned from inside an isolated worktree without its own
+        // `worktree`/`cwd` request keeps that worktree (or a path inside it)
+        // as its workspace, so its writes are confined there exactly like its
+        // parent's. Its claim must go on the same isolated footing: namespacing
+        // it against the shared coordination root fails by construction —
+        // worktrees live outside the checkout (`resolve_worktree_path`
+        // refuses any path inside the parent checkout, and harness worktrees
+        // land next to it) — so every write-capable
+        // grandchild of a worktree child was refused with "shared writer
+        // workspace ... must remain inside coordination root". Isolation truth
+        // uses the resume path's precedence: the parent's registered claim
+        // flag, falling back to its durable launch manifest. The claim is
+        // keyed on the containing worktree root — resolved through the
+        // ancestor chain, so a `cwd`-narrowed child serializes against its
+        // worktree rather than its subdirectory, and a resumed claim keeps
+        // its recorded root — so the ledger can still serialize unrelated
+        // writers inside one worktree while exempting the ancestor chain the
+        // work was delegated down through.
+        let isolated_worktree = options.isolated_worktree
+            || runtime
+                .parent_agent_id
+                .as_deref()
+                .is_some_and(|parent| self.parent_runs_in_isolated_worktree(parent));
         let write_capable = runtime_profile.permissions.write;
         if write_capable {
             // Isolated-worktree children mutate their own checkout, so they
             // do not contend for the shared-workspace process lock (#5036).
-            if !options.isolated_worktree {
+            if !isolated_worktree {
                 self.ensure_coordination_process_lock()
                     .map_err(anyhow::Error::msg)?;
             }
@@ -6626,6 +7249,24 @@ impl SubAgentManager {
         }
         let durable_launch_snapshot =
             write_capable.then(|| (self.worker_records.clone(), self.coordination.clone()));
+        // Every isolated child — claim or claim-less — durably records the
+        // serialization key it (or its descendants) must contend under: the
+        // containing worktree, not the child's own (possibly cwd-narrowed)
+        // workspace. The ledger row can be swept or evicted while the child
+        // is parked; the manifest is what survives.
+        let claimed_worktree_root = isolated_worktree.then(|| {
+            options
+                .write_claim_worktree_root
+                .clone()
+                .unwrap_or_else(|| {
+                    self.containing_worktree_root(
+                        runtime.parent_agent_id.as_deref(),
+                        normalize_subagent_workspace(&agent.workspace)
+                            .to_string_lossy()
+                            .into_owned(),
+                    )
+                })
+        });
         let persisted_claim = if write_capable {
             options
                 .write_claim
@@ -6635,17 +7276,28 @@ impl SubAgentManager {
                     let claim = if options.claim_pre_namespaced {
                         claim
                     } else {
-                        self.namespace_write_claim(
-                            &agent.workspace,
-                            options.isolated_worktree,
-                            claim,
-                        )?
+                        self.namespace_write_claim(&agent.workspace, isolated_worktree, claim)?
                     };
                     let active_owners = self.active_coordination_owners();
-                    self.coordination
-                        .register_claim(claim, options.isolated_worktree, |owner| {
-                            active_owners.contains(owner)
-                        })
+                    let worktree_root = claimed_worktree_root.clone();
+                    let exempt_owners =
+                        self.worktree_claim_exemptions(runtime.parent_agent_id.as_deref());
+                    let lane = worktree_root
+                        .clone()
+                        .map(CoordinationLane::Worktree)
+                        .unwrap_or(CoordinationLane::SharedCheckout);
+                    let conflicts =
+                        self.in_flight_unbounded_conflicts(&claim.owner, &lane, &exempt_owners);
+                    if !conflicts.is_empty() {
+                        return Err(Self::in_flight_unbounded_refusal(&conflicts));
+                    }
+                    self.coordination.register_claim(
+                        claim,
+                        isolated_worktree,
+                        worktree_root,
+                        &exempt_owners,
+                        |owner| active_owners.contains(owner),
+                    )
                 })
                 .transpose()
         } else {
@@ -6690,8 +7342,15 @@ impl SubAgentManager {
             agent.prompt = prompt.clone();
         }
         if let Some(claim) = persisted_claim.as_ref().map(|record| &record.claim) {
+            // An isolated claim's roots are worktree-relative; the ledger
+            // never namespaces them against the coordination root.
+            let anchor = if isolated_worktree {
+                "worktree-relative"
+            } else {
+                "coordination-root-relative"
+            };
             prompt.push_str(&format!(
-                "\n\nWrite scope (enforced; coordination-root-relative): roots={:?}; exact_files={:?}; contracts={:?}. Expand it with agent action=claim before mutating anything outside this scope.",
+                "\n\nWrite scope (enforced; {anchor}): roots={:?}; exact_files={:?}; contracts={:?}. Expand it with agent action=claim before mutating anything outside this scope.",
                 claim.roots, claim.exact_files, claim.contracts
             ));
             agent.prompt = prompt.clone();
@@ -6736,7 +7395,7 @@ impl SubAgentManager {
                 profile: runtime_profile,
                 prompt: prompt.clone(),
                 cwd: Some(agent.workspace.display().to_string()),
-                worktree: options.isolated_worktree,
+                worktree: isolated_worktree,
                 writable_roots: persisted_claim
                     .as_ref()
                     .map(|record| record.claim.roots.clone())
@@ -6754,6 +7413,7 @@ impl SubAgentManager {
                 resume_identity: Some(agent.session_name.clone()),
                 generation: 1,
                 resume_from_agent_id: options.resume_from_agent_id.clone(),
+                worktree_root: claimed_worktree_root.clone(),
             }),
         };
         agent.work_lifecycle =
@@ -7095,11 +7755,7 @@ impl SubAgentManager {
             let Some((_, record)) = self.worker_record_by_ref(&cursor) else {
                 break;
             };
-            let Some(parent_ref) = record
-                .parent_run_id
-                .as_deref()
-                .or(record.spec.parent_run_id.as_deref())
-            else {
+            let Some(parent_ref) = worker_parent_ref(record) else {
                 break;
             };
             if parent_ref == caller {
@@ -9783,6 +10439,7 @@ async fn spawn_subagent_from_input(
             expected_artifact: spawn_request.expected_artifact.clone(),
             resume_from_agent_id: resume_from_agent_id.clone(),
             claim_pre_namespaced: false,
+            write_claim_worktree_root: None,
             preserve_runtime_profile: None,
         },
     );
@@ -13234,15 +13891,28 @@ fn parse_coordination_paths(input: &Value, key: &str) -> Result<Vec<String>, Too
 }
 
 fn normalize_claim_path(path: &str) -> Result<String, String> {
+    // The claim lane must judge the exact string the mutating tool resolves:
+    // trimming here once made `" x.txt"` validate as `x.txt` while the tool
+    // wrote `<ws>/ x.txt`, and a whitespace-only root normalized to `.` — a
+    // whole-workspace claim from an empty spelling. Backslash replacement is
+    // kept (Windows spellings land in the forward-slash ledger frame).
     let path = path.replace('\\', "/");
-    let trimmed = path.trim();
-    if trimmed.len() > 4096 || trimmed.chars().any(|ch| matches!(ch, '\0' | '\r' | '\n')) {
+    if path.len() > 4096 || path.chars().any(|ch| matches!(ch, '\0' | '\r' | '\n')) {
         return Err("write scope path must be one bounded repo-relative line".to_string());
     }
-    if trimmed.is_empty() || trimmed == "." {
+    if path.is_empty() {
+        // The identity mapping: an internal prefix computation
+        // (`coordination_workspace_prefix`) yields "" when the worker
+        // workspace IS the coordination root, and that is the root scope.
         return Ok(".".to_string());
     }
-    let candidate = Path::new(trimmed);
+    if path.chars().all(|ch| ch.is_whitespace()) {
+        return Err("write scope path must be a non-empty repo-relative path".to_string());
+    }
+    if path == "." {
+        return Ok(".".to_string());
+    }
+    let candidate = Path::new(&path);
     if candidate.is_absolute() {
         return Err(format!(
             "write scope path must be repo-relative without traversal: {path}"
@@ -13270,6 +13940,58 @@ fn normalize_claim_path(path: &str) -> Result<String, String> {
     } else {
         Ok(components.join("/"))
     }
+}
+
+/// The parent reference a worker record records: the live pointer wins, the
+/// launch spec's is the durable fallback. Every ancestry walk
+/// (`worktree_claim_exemptions`, `worker_ancestry`,
+/// `ensure_caller_controls_descendant`) must resolve it identically or they
+/// disagree about who delegated to whom.
+fn worker_parent_ref(record: &AgentWorkerRecord) -> Option<&str> {
+    record
+        .parent_run_id
+        .as_deref()
+        .or(record.spec.parent_run_id.as_deref())
+}
+
+/// Join `offset` and `path` under one lexical spelling, resolving `.` and
+/// `..` components. Both sides may carry either separator: the offset comes
+/// from a platform path `Display` (backslashes on Windows) while the ledger
+/// frame is forward-slash, and a mixed-spelling join would produce
+/// `crates\app/main.rs` against forward-slash claim roots and fail closed
+/// for every cwd-narrowed Windows child. Returns `None` when `path` escapes
+/// above `offset` entirely; the caller then keeps the raw spelling and lets
+/// the claim's own containment check refuse it.
+fn lexically_under(offset: &str, path: &str) -> Option<String> {
+    let mut components: Vec<&str> = offset
+        .split(['/', '\\'])
+        .filter(|component| !component.is_empty() && *component != ".")
+        .collect();
+    for component in path.split(['/', '\\']) {
+        match component {
+            "" | "." => {}
+            ".." => {
+                components.pop()?;
+            }
+            other => components.push(other),
+        }
+    }
+    if components.is_empty() {
+        return Some(".".to_string());
+    }
+    Some(components.join("/"))
+}
+
+/// Fold a forward-slash path into the claim ledger's comparison frame: NFC
+/// per component, the same fold `normalize_claim_path` applies to every
+/// registered root, so containment is judged on equal spellings rather than
+/// byte-equal ones. Separator-shaped bytes stay separators; only component
+/// text is normalized.
+fn nfc_ledger_path_string(path: &str) -> String {
+    path.split('/')
+        .map(|component| component.nfc().collect::<String>())
+        .collect::<Vec<_>>()
+        .join("/")
 }
 
 fn coordination_workspace_prefix(
@@ -15720,7 +16442,7 @@ impl SubAgentToolRegistry {
         if !self.posture_permits_tool(name, Some(&input)) {
             if self.allows_bounded_readonly_bash(name) {
                 return Err(anyhow!(
-                    "[shell.readonly.command] Tool {name} input did not match the bounded read-only shell grammar for Fleet role `{role}`. Use read-only inspection commands, or an `implement`/`general` role for mutation or arbitrary execution.",
+                    "[shell.readonly.command] Tool {name} input did not match the bounded read-only shell grammar for Fleet role `{role}`. Admitted: a single read-only command or a pipe of them — git status/log/diff/show/ls-files/blame/grep, git rev-parse (bounded read-only flags), git branch (bare/flag-only, --show-current, --list with patterns, attached values like --sort=-committerdate), git worktree list (flags only), ls, pwd, cat, head, tail, wc, stat, file, du, df, which, grep, rg, fd, find (no -delete/-exec/-execdir/-ok/-okdir/-fprintf/-fls/-fprint), sed -n <range>p, sort, uniq, cut, tr, comm, npm view. Not admitted: cd, &&, ;, redirects, $(...), env prefixes, interpreters (python3/node/...), sleep, test. Do not retry variations of a refused shape; use `read`/`file_search` instead, or an `implement`/`general` role for mutation or arbitrary execution.",
                     role = self.agent_type.as_str()
                 ));
             }
@@ -15742,6 +16464,7 @@ impl SubAgentToolRegistry {
         {
             return Err(anyhow!(reason));
         }
+        let mut reservation_token: Option<u64> = None;
         reject_subagent_terminal_takeover(name, &input)?;
         if self.network_is_denied() {
             reject_network_reaching_input(name, &input)?;
@@ -15838,7 +16561,7 @@ impl SubAgentToolRegistry {
                 .is_some_and(|action| matches!(action, "write" | "edit" | "patch")))
             || (name == "pandoc_convert" && input.get("output_path").is_some());
         if scope_aware_write && self.enforce_write_claim {
-            let paths = mutation_paths(name, &input)?;
+            let paths = mutation_paths(name, &input, &self.registry.context().workspace)?;
             if paths.is_empty() {
                 return Err(anyhow!(
                     "Write tool {name} did not expose a bounded repo-relative target for coordination"
@@ -15875,33 +16598,106 @@ impl SubAgentToolRegistry {
                                 })))
                 }))
         {
-            let manager = self.coordination_manager.read().await;
-            // Only a *contended* shared checkout needs this gate. The claim
+            // The reservation opens BEFORE the peer checks: registration
+            // precedes checking on both sides — here and at claim admission,
+            // which consults reservations — so of two racing writers whoever
+            // reserves second sees the first and exactly one is refused.
+            // The peer gate alone cannot order two dispatches that way: A
+            // alone passes it, and B arriving later finds no live claim to
+            // contend with even though A's command may write B's share.
+            let lane = {
+                let manager = self.coordination_manager.read().await;
+                manager.coordination_lane_of(&self.owner_agent_id)
+            };
+            let opened_token = {
+                let mut manager = self.coordination_manager.write().await;
+                manager.open_in_flight_unbounded(&self.owner_agent_id, lane)
+            };
+            // Only a *contended* checkout needs this gate. The claim
             // exists so concurrent children cannot overwrite each other; a lone
             // writer has no peer to collide with, and blocking it there bought
             // no safety while making a builder unable to run ordinary shell
             // work in the workspace the operator actually watches — worktree
             // isolation "fixes" that by writing somewhere they never see.
-            if manager.shared_write_claim(&self.owner_agent_id).is_some() {
-                let blocking_peers =
-                    manager.live_peer_shared_write_claim_owners(&self.owner_agent_id);
-                if !blocking_peers.is_empty() {
-                    return Err(anyhow!(
-                        "Tool {name} cannot prove a bounded file target, and another child is writing in this shared checkout (blocking peers: {}). Wait for the peer to finish, ask the parent to cancel it, run agents/coordinate action=release to clear a stale claim, or relaunch the children with worktree isolation.",
-                        blocking_peers.join(", ")
-                    ));
+            let peer_refusal: Option<String> = {
+                let manager = self.coordination_manager.read().await;
+                let claim_peer_refusal = if manager
+                    .shared_write_claim(&self.owner_agent_id)
+                    .is_some()
+                {
+                    let blocking_peers =
+                        manager.live_peer_shared_write_claim_owners(&self.owner_agent_id);
+                    if blocking_peers.is_empty() {
+                        None
+                    } else {
+                        Some(format!(
+                            "Tool {name} cannot prove a bounded file target, and another child is writing in this shared checkout (blocking peers: {}). Wait for the peer to finish, ask the parent to cancel it, run agents/coordinate action=release to clear a stale claim, or relaunch the children with worktree isolation.",
+                            blocking_peers.join(", ")
+                        ))
+                    }
+                } else {
+                    // The isolated lane carries the same premise: admission now
+                    // lets several unrelated writers share one worktree on
+                    // disjoint claims, and an unbounded command cannot prove it
+                    // stays inside the owner's share, so a live same-worktree
+                    // peer (ancestor chain exempt, exactly as at admission)
+                    // blocks it too.
+                    let blocking_peers =
+                        manager.live_peer_same_worktree_claim_owners(&self.owner_agent_id);
+                    if blocking_peers.is_empty() {
+                        None
+                    } else {
+                        Some(format!(
+                            "Tool {name} cannot prove a bounded file target, and another agent holds a write claim in this same worktree (blocking peers: {}). Wait for the peer to finish, ask the parent to cancel it, run agents/coordinate action=release to clear a stale claim, or relaunch the peers with separate worktrees.",
+                            blocking_peers.join(", ")
+                        ))
+                    }
+                };
+                if claim_peer_refusal.is_some() {
+                    claim_peer_refusal
+                } else {
+                    // In-flight reservations carry the premise past dispatch:
+                    // another agent's unbounded work that already passed this
+                    // gate (including an interrupted owner's still-running
+                    // background job) blocks a new unbounded dispatch in the
+                    // same frame, exactly as its claim would have.
+                    let in_flight_peers =
+                        manager.live_in_flight_unbounded_peers(&self.owner_agent_id);
+                    if in_flight_peers.is_empty() {
+                        None
+                    } else {
+                        Some(format!(
+                            "Tool {name} cannot prove a bounded file target, and unbounded shell work is still in flight in this checkout (in-flight owners: {}). Wait for the job to finish, cancel it with exec_shell_cancel, or relaunch the peers with separate worktrees.",
+                            in_flight_peers.join(", ")
+                        ))
+                    }
                 }
+            };
+            if let Some(refusal) = peer_refusal {
+                let mut manager = self.coordination_manager.write().await;
+                manager.cancel_in_flight_unbounded(opened_token);
+                return Err(anyhow!(refusal));
             }
+            reservation_token = Some(opened_token);
         }
         let context = self
             .registry
             .context()
             .clone()
             .with_owner_agent(self.owner_agent_id.clone(), self.owner_agent_name.clone());
-        self.registry
+        let result = self
+            .registry
             .execute_rich_full_with_context(name, input, Some(&context))
-            .await
-            .map_err(|e| anyhow!(e))
+            .await;
+        if let Some(token) = reservation_token {
+            // Stamp the reservation with the owner's still-running shell
+            // jobs: a background job keeps it alive through the shell
+            // manager; with nothing running the dispatch is over and the
+            // entry is released here.
+            let mut manager = self.coordination_manager.write().await;
+            manager.complete_in_flight_unbounded(token, &self.owner_agent_id);
+        }
+        result.map_err(|e| anyhow!(e))
     }
 
     #[cfg(test)]
@@ -16206,7 +17002,7 @@ fn raw_mutation_target_paths(name: &str, input: &Value) -> Vec<String> {
         .unwrap_or_default()
 }
 
-fn mutation_paths(name: &str, input: &Value) -> Result<Vec<String>> {
+fn mutation_paths(name: &str, input: &Value, workspace: &Path) -> Result<Vec<String>> {
     let raw_paths = if name == "apply_patch"
         || (name == "File" && input.get("action").and_then(Value::as_str) == Some("patch"))
     {
@@ -16226,10 +17022,48 @@ fn mutation_paths(name: &str, input: &Value) -> Result<Vec<String>> {
     } else {
         Vec::new()
     };
+    // One normalization per batch, not per path: every absolute spelling
+    // below strips against the same canonical workspace.
+    let workspace = normalize_subagent_workspace(workspace);
     raw_paths
         .into_iter()
-        .map(|path| normalize_claim_path(&path).map_err(anyhow::Error::msg))
+        .map(|path| {
+            let path = workspace_relative_mutation_path(&workspace, &path);
+            normalize_claim_path(&path).map_err(anyhow::Error::msg)
+        })
         .collect()
+}
+
+/// An absolute target inside the child's workspace names the same file as
+/// its relative form, and that is what the write tool would resolve it to;
+/// the claim ledger speaks repo-relative paths, so strip the workspace
+/// prefix before scope validation instead of refusing the spelling. A target
+/// outside the workspace is handed to the validator untouched and refused
+/// there, as before. The string is judged exactly as the tool receives it —
+/// no trimming: a padded spelling is not absolute, so it validates under the
+/// literal `<space>/…` components the tool would join onto the workspace,
+/// never under the trimmed absolute target it does not touch. The
+/// deepest-existing walk delegates to the core's single implementation — the
+/// same one behind the write tool's own boundary
+/// (`tools::spec::resolve_nonexistent_path`) — so this lane cannot drift
+/// from it on symlinked or partially-existing spellings.
+///
+/// `workspace` arrives already normalized from `mutation_paths`.
+fn workspace_relative_mutation_path(workspace: &Path, path: &str) -> String {
+    let candidate = Path::new(path);
+    if !candidate.is_absolute() {
+        return path.to_string();
+    }
+    // The crate's single deepest-existing delegation point — the exact walk
+    // the write tool's boundary resolves through — so the claim lane cannot
+    // drift from it. The walk always composes a path, so this only guards a
+    // future signature change of the shared core walk.
+    let resolved = crate::core::authority::resolve_deepest_existing(candidate)
+        .unwrap_or_else(|| candidate.to_path_buf());
+    match resolved.strip_prefix(workspace) {
+        Ok(relative) => relative.to_string_lossy().into_owned(),
+        Err(_) => path.to_string(),
+    }
 }
 
 fn reject_subagent_terminal_takeover(name: &str, input: &Value) -> Result<()> {

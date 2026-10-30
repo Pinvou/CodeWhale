@@ -12418,6 +12418,184 @@ fn tool_error_messages_include_actionable_hints() {
     );
 }
 
+/// A validation receipt echoes the input schema so the model can repair a
+/// malformed call, but a kilobytes-long schema replayed on every semantic
+/// refusal (live session 2026-10-24: the `agent` schema — ~6.7KB on the
+/// current tree — appended to eight "agent not found"/contention errors)
+/// drowns the one-line cause. Large schemas are reduced to their field
+/// inventory; small ones stay verbatim.
+#[test]
+fn tool_validation_feedback_bounds_oversized_schemas_to_their_field_inventory() {
+    let error = ToolError::invalid_input("Agent not found in the active session");
+    let big_schema = json!({
+        "type": "object",
+        "properties": {
+            "action": {"type": "string", "description": "x".repeat(3000)},
+            "agent_id": {"type": "string"},
+            "prompt": {"type": "string"}
+        },
+        "required": ["action"]
+    });
+    let formatted = format_tool_error_with_schema(&error, "agent", Some(&big_schema));
+    assert!(
+        formatted.len() < big_schema.to_string().len() / 2,
+        "an oversized schema must not be echoed verbatim ({} bytes)",
+        formatted.len()
+    );
+    assert!(
+        formatted
+            .starts_with("Invalid input for tool 'agent': Agent not found in the active session"),
+        "the cause stays first: {formatted}"
+    );
+    assert!(formatted.contains("\"category\":\"invalid_input\""));
+    for field in [
+        "\"action\"",
+        "\"agent_id\"",
+        "\"prompt\"",
+        "\"required\":[\"action\"]",
+    ] {
+        assert!(
+            formatted.contains(field),
+            "field inventory must survive: {formatted}"
+        );
+    }
+    assert!(
+        formatted.contains("omitted from this receipt"),
+        "{formatted}"
+    );
+    assert!(
+        !formatted.contains(&"x".repeat(100)),
+        "schema prose must be dropped"
+    );
+
+    let small_schema = json!({
+        "type": "object",
+        "properties": {"path": {"type": "string", "description": "workspace-relative"}},
+        "required": ["path"]
+    });
+    let formatted = format_tool_error_with_schema(&error, "read", Some(&small_schema));
+    assert!(
+        formatted.contains("workspace-relative"),
+        "small schemas stay verbatim: {formatted}"
+    );
+    assert!(!formatted.contains("omitted"), "{formatted}");
+
+    // Budget boundary: a schema serialized to exactly 2048 bytes stays
+    // verbatim; one byte more reduces it to the field inventory.
+    let sized_schema = |filler: usize| {
+        json!({
+            "type": "object",
+            "properties": {"path": {"description": "x".repeat(filler)}},
+            "required": ["path"]
+        })
+    };
+    let base_len = sized_schema(0).to_string().len();
+    let at_budget = sized_schema(2048 - base_len);
+    assert_eq!(at_budget.to_string().len(), 2048);
+    let formatted = format_tool_error_with_schema(&error, "boundary", Some(&at_budget));
+    assert!(
+        !formatted.contains("omitted from this receipt"),
+        "a schema at exactly the budget stays verbatim: {formatted}"
+    );
+    let over_budget = sized_schema(2049 - base_len);
+    let formatted = format_tool_error_with_schema(&error, "boundary+1", Some(&over_budget));
+    assert!(
+        formatted.contains("omitted from this receipt")
+            && formatted.contains("\"required\":[\"path\"]"),
+        "one byte over the budget reduces to the inventory: {formatted}"
+    );
+
+    // A composition-only schema has no top-level properties: the reduced
+    // receipt carries an empty inventory plus the pointer back to the
+    // advertised schema, not a misleading shape.
+    let composition = json!({
+        "oneOf": [
+            {"type": "object", "description": "x".repeat(3000)},
+            {"type": "string", "description": "x".repeat(3000)}
+        ]
+    });
+    let formatted = format_tool_error_with_schema(&error, "apply_patch", Some(&composition));
+    assert!(
+        formatted.contains("\"properties\":[]") && formatted.contains("omitted from this receipt"),
+        "a no-properties schema reduces with an empty inventory: {formatted}"
+    );
+    assert!(
+        !formatted.contains("\"type\":"),
+        "a schema that declares no type must not be mis-typed as object in the receipt: {formatted}"
+    );
+
+    // The reduced receipt carries the schema's DECLARED type, not a
+    // hardcoded \"object\": a composition-free string schema must say so.
+    let string_schema = json!({
+        "type": "string",
+        "description": "x".repeat(3000),
+        "minLength": 1
+    });
+    let formatted = format_tool_error_with_schema(&error, "read", Some(&string_schema));
+    assert!(
+        formatted.contains("\"type\":\"string\""),
+        "the declared type must survive the reduction: {formatted}"
+    );
+    assert!(
+        !formatted.contains("\"type\":\"object\""),
+        "the declared type must not be overridden: {formatted}"
+    );
+
+    // The reduction honors its own budget: a schema with more properties
+    // than the inventory cap truncates the list with an explicit marker
+    // instead of echoing an unbounded receipt.
+    let many_properties = (0..60)
+        .map(|index| {
+            (
+                format!("field_{index:02}"),
+                json!({"type": "string", "description": "x".repeat(40)}),
+            )
+        })
+        .collect::<serde_json::Map<_, _>>();
+    let wide_schema = json!({
+        "type": "object",
+        "properties": many_properties,
+        "required": ["field_00"]
+    });
+    let formatted = format_tool_error_with_schema(&error, "wide", Some(&wide_schema));
+    assert!(
+        formatted.contains("... and 20 more properties"),
+        "truncated inventories name their remainder: {formatted}"
+    );
+    assert!(
+        formatted.contains("\"field_39\"") && !formatted.contains("\"field_40\""),
+        "the inventory truncates at the cap: {formatted}"
+    );
+
+    // The reduction honors the byte budget it enforces: few-but-long
+    // property names are each skipped into the omitted tail, so the
+    // receipt stays under the budget even when the cap alone would not
+    // bound it.
+    let long_names = (0..3)
+        .map(|index| {
+            (
+                format!("very_long_property_name_{index}_{}", "x".repeat(800)),
+                json!({}),
+            )
+        })
+        .collect::<serde_json::Map<_, _>>();
+    let long_name_schema = json!({
+        "type": "object",
+        "properties": long_names,
+        "required": ["very_long_property_name_0"]
+    });
+    let formatted = format_tool_error_with_schema(&error, "long", Some(&long_name_schema));
+    assert!(
+        formatted.contains("... and 3 more properties"),
+        "over-long names are counted as omitted: {formatted}"
+    );
+    assert!(
+        formatted.len() < 2048,
+        "the reduced receipt stays under the budget regardless of name lengths ({} bytes)",
+        formatted.len()
+    );
+}
+
 #[test]
 fn execution_failures_are_returned_without_strategy_coaching() {
     let search_error = ToolError::execution_failed("Web search request failed: timeout");
@@ -20818,9 +20996,10 @@ fn forkguard_subagent_hint_gates_on_visible_rows_only() {
 // snapshot shape, so they must keep passing through bounded — the scope is
 // the payload the model needs to reason about its own write permissions.
 // The fixture mirrors the real receipt: `PersistedWriteClaim` serializes as
-// {claim, sequence, isolated_worktree} with no `action` key (the translated
-// `action: "claim"` only exists on the tool-call input), so it survives via
-// the summarizer's shape fall-through, not the action rule.
+// {claim, sequence, isolated_worktree} (plus `worktree_root` when an
+// isolated claim records its serialization key) with no `action` key (the
+// translated `action: "claim"` only exists on the tool-call input), so it
+// survives via the summarizer's shape fall-through, not the action rule.
 #[test]
 fn forkguard_agent_claim_receipt_passes_through_to_context() {
     let claim = json!({

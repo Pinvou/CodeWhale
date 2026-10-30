@@ -237,12 +237,7 @@ pub(super) fn format_tool_error_with_schema(
         ToolError::NotAvailable { .. } => ("tool_not_available", Some("tool_name")),
         _ => return message,
     };
-    let valid_shape = input_schema.cloned().unwrap_or_else(|| {
-        serde_json::json!({
-            "type": "object",
-            "guidance": format!("Use the advertised input schema for '{tool_name}'")
-        })
-    });
+    let valid_shape = bounded_valid_shape(tool_name, input_schema);
     let feedback = serde_json::json!({
         "category": category,
         "bad_field": bad_field,
@@ -251,6 +246,124 @@ pub(super) fn format_tool_error_with_schema(
         "side_effect_status": "not_started"
     });
     format!("{message}\nTool validation feedback: {feedback}")
+}
+
+/// Largest input schema echoed verbatim into a validation receipt. The
+/// `agent` tool's schema alone is several kilobytes of prose; replaying it on
+/// every semantic refusal (unknown agent id, write-scope contention, unknown
+/// profile) buried the one-line cause and cost the parent that much context
+/// per retry. Above the budget the receipt keeps the field inventory — which
+/// is what a shape repair needs — and points back at the advertised schema.
+const VALID_SHAPE_BUDGET_BYTES: usize = 2048;
+const VALID_SHAPE_MAX_PROPERTIES: usize = 40;
+/// Byte budget for the reduced field inventory within the receipt, so the
+/// reduction honors the budget it enforces even when few property names are
+/// individually long.
+const VALID_SHAPE_INVENTORY_BYTES: usize = 1024;
+/// A single name longer than this is skipped from the inventory (counted in
+/// the omitted tail) instead of overflowing the inventory budget alone.
+const VALID_SHAPE_MAX_NAME_BYTES: usize = 200;
+
+/// Keep the leading names that fit `max_items` entries and `budget_bytes`
+/// total (quotes and separators included), skipping any single name over
+/// `VALID_SHAPE_MAX_NAME_BYTES`; everything dropped is counted as omitted.
+fn bounded_name_inventory(names: Vec<String>) -> (Vec<String>, usize) {
+    let mut kept = Vec::new();
+    let mut omitted = 0usize;
+    let mut used = 0usize;
+    for name in names {
+        let cost = name.len() + 4;
+        if name.len() > VALID_SHAPE_MAX_NAME_BYTES
+            || kept.len() >= VALID_SHAPE_MAX_PROPERTIES
+            || used + cost > VALID_SHAPE_INVENTORY_BYTES
+        {
+            omitted += 1;
+            continue;
+        }
+        used += cost;
+        kept.push(name);
+    }
+    (kept, omitted)
+}
+
+fn bounded_valid_shape(
+    tool_name: &str,
+    input_schema: Option<&serde_json::Value>,
+) -> serde_json::Value {
+    let Some(schema) = input_schema else {
+        return serde_json::json!({
+            "type": "object",
+            "guidance": format!("Use the advertised input schema for '{tool_name}'")
+        });
+    };
+    let serialized_len = schema.to_string().len();
+    if serialized_len <= VALID_SHAPE_BUDGET_BYTES {
+        return schema.clone();
+    }
+    let (mut properties, omitted_properties) = bounded_name_inventory(
+        schema
+            .get("properties")
+            .and_then(serde_json::Value::as_object)
+            .map(|properties| properties.keys().cloned().collect::<Vec<_>>())
+            .unwrap_or_default(),
+    );
+    if omitted_properties > 0 {
+        properties.push(format!(
+            "... and {omitted_properties} more properties (see the advertised schema)"
+        ));
+    }
+    let (required, omitted_required) = bounded_name_inventory(
+        schema
+            .get("required")
+            .and_then(serde_json::Value::as_array)
+            .map(|values| {
+                values
+                    .iter()
+                    .filter_map(serde_json::Value::as_str)
+                    .map(str::to_string)
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default(),
+    );
+    // Carry the schema's own type only when it declares one: a
+    // composition-only (oneOf/anyOf) schema may admit non-objects, and a
+    // hardcoded `"type":"object"` would let a model reading only this
+    // receipt infer a shape the tool never promised.
+    let mut reduced = serde_json::Map::new();
+    if let Some(schema_type) = schema.get("type") {
+        reduced.insert("type".to_string(), schema_type.clone());
+    }
+    reduced.insert(
+        "properties".to_string(),
+        serde_json::Value::Array(
+            properties
+                .into_iter()
+                .map(serde_json::Value::String)
+                .collect(),
+        ),
+    );
+    if !required.is_empty() {
+        let mut required_values = required
+            .into_iter()
+            .map(serde_json::Value::String)
+            .collect::<Vec<_>>();
+        if omitted_required > 0 {
+            required_values.push(serde_json::Value::String(format!(
+                "... and {omitted_required} more required fields (see the advertised schema)"
+            )));
+        }
+        reduced.insert(
+            "required".to_string(),
+            serde_json::Value::Array(required_values),
+        );
+    }
+    reduced.insert(
+        "guidance".to_string(),
+        serde_json::json!(format!(
+            "Full schema for '{tool_name}' ({serialized_len} bytes) omitted from this receipt; it is the advertised input schema already in your tool list. Fix the cause named above rather than the shape."
+        )),
+    );
+    serde_json::Value::Object(reduced)
 }
 
 // === Streaming-buffer parsing =========================================

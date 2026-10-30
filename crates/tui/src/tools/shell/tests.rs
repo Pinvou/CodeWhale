@@ -1052,6 +1052,41 @@ fn readonly_argv_is_shell_free_and_disables_git_helpers() {
     assert_eq!(args, ["$PATTERN", "."]);
 }
 
+#[test]
+fn readonly_argv_executes_the_git_orientation_probes_without_a_shell() {
+    // The probes a worktree child needs to orient itself, in their bare
+    // (non-piped) spellings: admitted by the classifier and executed here
+    // as argv, not through a shell. This pins the execution seam — the
+    // classifier alone used to admit these while the hardener refused them.
+    for (command, subcommand) in [
+        ("git rev-parse --show-toplevel", "rev-parse"),
+        ("git rev-parse --abbrev-ref HEAD", "rev-parse"),
+        ("git -C crates/tui rev-parse --short HEAD", "rev-parse"),
+        ("git branch --show-current", "branch"),
+        ("git branch --list 'feat-*'", "branch"),
+        ("git worktree list", "worktree"),
+        ("git worktree list --porcelain", "worktree"),
+    ] {
+        let (program, args) = hardened_readonly_argv(command)
+            .unwrap_or_else(|error| panic!("bare probe must execute: {command}: {error}"));
+        assert_eq!(program, "git", "{command}");
+        assert!(
+            args.contains(&subcommand.to_string()),
+            "the subcommand survives in argv (a `-C` preamble stays in place): \
+             {command} -> {args:?}"
+        );
+    }
+
+    // Non-read-only git subcommands keep failing closed at the execution
+    // seam even if a future classifier change ever admitted them.
+    let error = hardened_readonly_argv("git push origin main")
+        .expect_err("a mutating subcommand never executes");
+    assert!(
+        error.to_string().contains("did not keep its subcommand"),
+        "{error}"
+    );
+}
+
 #[cfg(any(unix, windows))]
 #[test]
 fn readonly_program_resolution_ignores_workspace_shadow_executables() {
@@ -3663,6 +3698,7 @@ fn killed_shell_does_not_wait_for_blocked_reader_threads() {
         bounded_output: None,
         stdin: None,
         child: None,
+        stop_unconfirmed: false,
         windows_job: None,
         stdout_thread: Some(stdout_thread),
         stderr_thread: None,
@@ -4939,4 +4975,318 @@ fn forkguard_powershell_retry_keeps_the_first_result_when_it_cannot_start() {
         "the retry failure must be annotated: {}",
         annotated.stderr
     );
+}
+
+// Stop-sent vs exit-confirmed: the kill path's bounded reap can time out
+// (child in uninterruptible sleep), and claim coordination must keep
+// treating such a job as a potential writer until a later poll observes
+// the exit.
+
+/// The real escalation primitive's confirmed half: a child that ignores
+/// SIGTERM is still reaped by the SIGKILL escalation within the production
+/// graces, and the primitive reports the exit as confirmed.
+#[cfg(unix)]
+#[test]
+fn escalation_confirms_a_term_ignoring_child_exit() {
+    use std::os::unix::process::CommandExt;
+    let mut child = Command::new("sh")
+        .arg("-c")
+        .arg("trap \"\" TERM; sleep 30")
+        .process_group(0)
+        .spawn()
+        .expect("spawn TERM-ignoring child");
+    let confirmed = terminate_child_process_group(&mut child).expect("escalation");
+    assert!(
+        confirmed,
+        "a SIGKILLable child must be reaped within the production graces"
+    );
+    assert!(
+        child.try_wait().expect("reap status").is_some(),
+        "a confirmed escalation leaves the direct child reaped"
+    );
+}
+
+/// The real primitive's unconfirmed half, driven through a controllable
+/// grace expiry: a live child with an already-expired grace reports false —
+/// exactly the outcome a kill must not silently turn into "no writer".
+/// (A child that survives SIGKILL for the full reap grace needs an
+/// uninterruptible sleep and cannot be spawned portably; this exercises
+/// the same false branch the kill path consumes.)
+#[cfg(unix)]
+#[test]
+fn bounded_reap_reports_grace_expiry_while_the_child_lives() {
+    let mut child = Command::new("sleep").arg("30").spawn().expect("spawn");
+    assert!(
+        !wait_child_bounded(&mut child, Duration::from_millis(50)),
+        "a live child must report the exit as unconfirmed within the grace"
+    );
+    let _ = child.kill();
+    let _ = child.wait();
+}
+
+/// An unconfirmed stop keeps its write scope across every coordination
+/// query — until a later poll reaps the real child and clears the
+/// uncertainty. The flag models the un-reaped state; the confirmation cycle
+/// runs against a real child the OS ends.
+#[cfg(unix)]
+#[test]
+fn unconfirmed_stop_keeps_the_write_scope_until_the_child_is_reaped() {
+    let tmp = tempdir().expect("tempdir");
+    let mut manager = ShellManager::new(tmp.path().to_path_buf());
+    manager.seed_running_shell_for_test("job-1", "agent-1");
+    let child = Command::new("sleep").arg("30").spawn().expect("spawn");
+    let pid = child.id();
+    {
+        let shell = manager.processes.get_mut("job-1").expect("seeded job");
+        shell.status = ShellStatus::Killed;
+        shell.stop_unconfirmed = true;
+        shell.child = Some(ShellChild::Process(child));
+    }
+
+    let task_ids = vec!["job-1".to_string()];
+    assert!(
+        manager.any_running_job(&task_ids),
+        "an unconfirmed stop must still count as a potential writer"
+    );
+    assert_eq!(
+        manager.running_task_ids_for_owner("agent-1"),
+        vec!["job-1".to_string()],
+        "the owner's task list keeps the unconfirmed job"
+    );
+    assert!(manager.owner_has_running_job("agent-1"));
+    assert!(
+        manager.any_running_job(&task_ids),
+        "the hold survives repeated consults while the child lives"
+    );
+
+    // The OS ends the child; the next consult's confirmation reaps it and
+    // releases the scope.
+    assert_eq!(unsafe { libc::kill(pid as libc::pid_t, libc::SIGKILL) }, 0);
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        if !manager.any_running_job(&task_ids) {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "the unconfirmed stop never confirmed after the child died"
+        );
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    assert!(!manager.owner_has_running_job("agent-1"));
+    assert!(
+        !manager
+            .processes
+            .get("job-1")
+            .expect("job kept in the map")
+            .stop_unconfirmed,
+        "the confirmation cleared the flag"
+    );
+}
+
+/// A real escalation through `ShellManager::kill` records a confirmed exit:
+/// no unconfirmed state lingers and the child handle is released exactly as
+/// before.
+#[cfg(unix)]
+#[test]
+fn kill_confirms_a_normal_escalation_exit() {
+    use std::os::unix::process::CommandExt;
+    let tmp = tempdir().expect("tempdir");
+    let mut manager = ShellManager::new(tmp.path().to_path_buf());
+    manager.seed_running_shell_for_test("job-1", "agent-1");
+    let child = Command::new("sh")
+        .arg("-c")
+        .arg("trap \"\" TERM; sleep 30")
+        .process_group(0)
+        .spawn()
+        .expect("spawn TERM-ignoring child");
+    manager
+        .processes
+        .get_mut("job-1")
+        .expect("seeded job")
+        .child = Some(ShellChild::Process(child));
+
+    let killed = manager.kill("job-1").expect("kill");
+    assert_eq!(killed.status, ShellStatus::Killed);
+    let shell = manager.processes.get("job-1").expect("job kept");
+    assert!(
+        !shell.stop_unconfirmed,
+        "a reaped exit must not stay flagged unconfirmed"
+    );
+    assert!(
+        shell.child.is_none(),
+        "a confirmed kill still releases the child handle"
+    );
+    assert!(!manager.any_running_job(&["job-1".to_string()]));
+}
+
+/// Age cleanup must not reclaim a job whose stop was sent but whose exit has
+/// not been observed: evicting the record drops the only child handle, the
+/// scope consult then finds nothing and a successor writer can be admitted
+/// while the old child may still be alive. A zero age bound evicts every
+/// finished record that holds no write scope, so surviving it pins the
+/// retention — and once the exit is confirmed, the same bound reclaims the
+/// record again.
+#[cfg(unix)]
+#[test]
+fn cleanup_keeps_an_unconfirmed_stop_until_the_exit_is_confirmed() {
+    let tmp = tempdir().expect("tempdir");
+    let mut manager = ShellManager::new(tmp.path().to_path_buf());
+    manager.seed_running_shell_for_test("job-1", "agent-1");
+    let child = Command::new("sleep").arg("30").spawn().expect("spawn");
+    let pid = child.id();
+    {
+        let shell = manager.processes.get_mut("job-1").expect("seeded job");
+        shell.status = ShellStatus::Killed;
+        shell.stop_unconfirmed = true;
+        shell.child = Some(ShellChild::Process(child));
+    }
+
+    manager.cleanup(Duration::ZERO);
+    assert!(
+        manager.processes.contains_key("job-1"),
+        "cleanup must retain a job whose stop is unconfirmed"
+    );
+    assert!(
+        manager.any_running_job(&["job-1".to_string()]),
+        "the retained record keeps the scope consult's answer true"
+    );
+
+    // The OS ends the child; the confirm inside the next cleanup reaps it
+    // and releases the record to the same age bound.
+    assert_eq!(unsafe { libc::kill(pid as libc::pid_t, libc::SIGKILL) }, 0);
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        manager.cleanup(Duration::ZERO);
+        if !manager.processes.contains_key("job-1") {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "the unconfirmed stop never confirmed after the child died"
+        );
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    assert!(
+        !manager.any_running_job(&["job-1".to_string()]),
+        "a confirmed exit no longer holds the write scope"
+    );
+    assert_eq!(
+        manager.tracked_job_count(),
+        0,
+        "a confirmed stop is reclaimable by the same age bound"
+    );
+}
+
+/// Capacity cleanup must not count — or evict — a job whose stop has not been
+/// confirmed: it still holds its write scope even though its status is
+/// finished. The production age bound keeps the fresh filler records, so the
+/// ceilings see them plus the unconfirmed record: with the record excluded
+/// the population fits, with it included the oldest record to evict is
+/// exactly the unconfirmed one. Once the exit is confirmed the record
+/// rejoins the finished population and the ceiling reclaims it.
+#[cfg(unix)]
+#[test]
+fn capacity_eviction_spares_an_unconfirmed_stop_until_the_exit_is_confirmed() {
+    let tmp = tempdir().expect("tempdir");
+    let mut manager = ShellManager::new(tmp.path().to_path_buf());
+    manager.seed_running_shell_for_test("job-1", "agent-1");
+    let child = Command::new("sleep").arg("30").spawn().expect("spawn");
+    let pid = child.id();
+    {
+        let shell = manager.processes.get_mut("job-1").expect("seeded job");
+        shell.status = ShellStatus::Killed;
+        shell.stop_unconfirmed = true;
+        shell.child = Some(ShellChild::Process(child));
+    }
+    for i in 0..super::MAX_FINISHED_SHELL_RECORDS {
+        let id = format!("finished-{i}");
+        manager.seed_running_shell_for_test(&id, "agent-1");
+        let shell = manager.processes.get_mut(&id).expect("seeded filler");
+        shell.status = ShellStatus::Completed;
+        shell.finished_at = Some(Instant::now());
+    }
+
+    manager.cleanup(super::FINISHED_SHELL_MAX_AGE);
+    assert!(
+        manager.processes.contains_key("job-1"),
+        "capacity cleanup must not evict a job whose stop is unconfirmed"
+    );
+    assert!(
+        manager.any_running_job(&["job-1".to_string()]),
+        "the spared record keeps the scope consult's answer true"
+    );
+    assert_eq!(
+        manager.tracked_job_count(),
+        1 + super::MAX_FINISHED_SHELL_RECORDS,
+        "the scope holder plus the fillers all stay inside the record ceiling"
+    );
+
+    // The exit is confirmed; the record joins the finished population, the
+    // ceiling is exceeded by one, and the oldest finished record — the one
+    // that was unconfirmed — is what the bound reclaims.
+    assert_eq!(unsafe { libc::kill(pid as libc::pid_t, libc::SIGKILL) }, 0);
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        manager.cleanup(super::FINISHED_SHELL_MAX_AGE);
+        if !manager.processes.contains_key("job-1") {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "the unconfirmed stop never confirmed after the child died"
+        );
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    assert!(
+        !manager.any_running_job(&["job-1".to_string()]),
+        "a confirmed exit no longer holds the write scope"
+    );
+    assert_eq!(
+        manager.tracked_job_count(),
+        super::MAX_FINISHED_SHELL_RECORDS,
+        "the confirmed record took part in the capacity bound again"
+    );
+}
+
+/// Destroying the manager while a job's stop is unconfirmed must still stop
+/// the possibly-live child behind the retained handle: destruction is the
+/// last bounded chance a record gets, and the scope promise must not end by
+/// silently orphaning the old writer. A reaped pid answers `kill(pid, 0)`
+/// with ESRCH, which is observable from outside the dropped manager.
+#[cfg(unix)]
+#[test]
+fn dropping_the_manager_stops_a_child_with_an_unconfirmed_stop() {
+    use std::os::unix::process::CommandExt;
+    let tmp = tempdir().expect("tempdir");
+    let pid = {
+        let mut manager = ShellManager::new(tmp.path().to_path_buf());
+        manager.seed_running_shell_for_test("job-1", "agent-1");
+        let child = Command::new("sleep")
+            .arg("30")
+            .process_group(0)
+            .spawn()
+            .expect("spawn");
+        let pid = child.id();
+        {
+            let shell = manager.processes.get_mut("job-1").expect("seeded job");
+            shell.status = ShellStatus::Killed;
+            shell.stop_unconfirmed = true;
+            shell.child = Some(ShellChild::Process(child));
+        }
+        pid
+    };
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        let gone = unsafe { libc::kill(pid as libc::pid_t, 0) } == -1
+            && std::io::Error::last_os_error().raw_os_error() == Some(libc::ESRCH);
+        if gone {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "the dropped manager left the unconfirmed child alive"
+        );
+        std::thread::sleep(Duration::from_millis(20));
+    }
 }
