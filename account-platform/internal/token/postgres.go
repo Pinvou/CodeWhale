@@ -301,16 +301,17 @@ func (r *PostgresRepository) ListCandidates(ctx context.Context, model, protocol
 SELECT ta.id,ta.name,ta.owner_type,ta.owner_id,ta.owner_organization_id,ta.owner_unit_id,ta.wallet_id,ta.status,
        sp.scope,pc.allowed_models,
        ARRAY(SELECT em.user_id FROM token_explicit_members em WHERE em.token_account_id=ta.id ORDER BY em.user_id),
-	       rp.default_scope,rp.priority,rp.health_status,rp.health_expires_at,transaction_timestamp(),pc.id,rp.protocol_code,rp.model_id,rp.protocol_version_id,rp.route_generation,ta.management_mode,pc.provider,pc.version
+	       route.default_scope,route.priority,route.health_status,route.health_expires_at,transaction_timestamp(),pc.id,route.protocol_code,route.model_id,route.protocol_version_id,route.route_generation,ta.management_mode,pc.provider,pc.version
 FROM token_accounts ta
 JOIN token_share_policies sp ON sp.token_account_id=ta.id
 JOIN provider_credentials pc ON pc.token_account_id=ta.id AND pc.status='ACTIVE' AND pc.validation_status='VALID'
-JOIN routing_policies rp ON rp.token_account_id=ta.id AND rp.model_id=$1 AND rp.protocol_version_id=$2 AND rp.reference_status='RESOLVED'
-JOIN model_identities identity ON identity.id=rp.model_id AND pc.provider=identity.provider_id AND identity.upstream_model_ref=ANY(pc.allowed_models)
-LEFT JOIN route_provisionings provision ON provision.active_token_account_id=ta.id AND provision.active_credential_id=pc.id AND provision.model_id=rp.model_id AND provision.protocol_version_id=rp.protocol_version_id AND provision.status='READY' AND provision.actual_generation=rp.route_generation
+JOIN routing_policies route ON route.token_account_id=ta.id AND route.model_id=$1 AND route.protocol_version_id=$2 AND route.reference_status='RESOLVED'
+JOIN model_identities identity ON identity.id=route.model_id AND pc.provider=identity.provider_id AND identity.upstream_model_ref=ANY(pc.allowed_models)
+LEFT JOIN route_provisionings provision ON provision.active_token_account_id=ta.id AND provision.active_credential_id=pc.id AND provision.model_id=route.model_id AND provision.protocol_version_id=route.protocol_version_id AND provision.status='READY' AND provision.actual_generation=route.route_generation
 WHERE ta.status='ACTIVE' AND ta.management_mode='PLATFORM' AND provision.id IS NOT NULL
-  AND rp.health_status='HEALTHY' AND rp.health_expires_at>transaction_timestamp()
-ORDER BY rp.priority DESC,ta.id`, modelID, protocolVersionID)
+  AND NOT `+tokenRouteFinancialHoldSQL+`
+  AND route.health_status='HEALTHY' AND route.health_expires_at>transaction_timestamp()
+ORDER BY route.priority DESC,ta.id`, modelID, protocolVersionID)
 	if err != nil {
 		return nil, err
 	}

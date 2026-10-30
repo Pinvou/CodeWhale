@@ -159,7 +159,10 @@ func (r *PostgresRepository) evaluateTokenStopLoss(ctx context.Context, tx pgx.T
 	if err := tx.QueryRow(ctx, `SELECT token_account_id,model FROM usage_requests WHERE id=$1`, item.resourceID).Scan(&tokenAccountID, &model); err != nil {
 		return err
 	}
-	command, err := tx.Exec(ctx, `UPDATE routing_policies SET health_status='UNHEALTHY',health_diagnostic_code='MANUAL_REVIEW_REQUIRED',health_observed_at=$3,health_expires_at=NULL,next_probe_at=$3,health_version=health_version+1,updated_at=$3 WHERE token_account_id=$1 AND (model=$2 OR model_id::text=$2) AND health_status<>'UNHEALTHY'`, tokenAccountID, model, now)
+	if err := lockTokenFinancialRoutes(ctx, tx, tokenAccountID, model, nil); err != nil {
+		return err
+	}
+	command, err := tx.Exec(ctx, `UPDATE routing_policies SET health_status='UNHEALTHY',health_diagnostic_code='MANUAL_REVIEW_REQUIRED',health_observed_at=$3,health_expires_at=NULL,next_probe_at=$3,probe_lease_owner=NULL,probe_lease_until=NULL,health_version=health_version+1,updated_at=$3 WHERE token_account_id=$1 AND (model=$2 OR model_id::text=$2) `, tokenAccountID, model, now)
 	if err != nil {
 		return err
 	}
@@ -207,4 +210,68 @@ func (worker *ManualReviewSLAWorker) Run(ctx context.Context) {
 			run()
 		}
 	}
+}
+
+// Financial stop-loss ownership outlives mutable health diagnostics. The
+// original domain resolves cases; only then may normal health probes recover.
+const tokenFinancialHoldSourceSQL = `SELECT source.token_account_id,source.model
+FROM manual_review_cases review
+JOIN manual_review_stop_loss_evaluations receipt ON receipt.case_id=review.id
+JOIN usage_requests source ON source.id=review.resource_id
+WHERE review.domain='TOKEN' AND review.case_type='USAGE_RECONCILIATION_REVIEW'
+ AND review.resource_type='USAGE_REQUEST' AND review.status='OPEN'`
+
+const tokenRouteFinancialHoldSQL = `EXISTS(SELECT 1 FROM (` + tokenFinancialHoldSourceSQL + `) financial_hold
+WHERE financial_hold.token_account_id=route.token_account_id
+ AND (financial_hold.model=route.model OR financial_hold.model=route.model_id::text))`
+
+func tokenRouteFinancialHold(ctx context.Context, tx pgx.Tx, routeID uuid.UUID) (bool, error) {
+	var held bool
+	err := tx.QueryRow(ctx, `SELECT `+tokenRouteFinancialHoldSQL+` FROM routing_policies route WHERE route.id=$1`, routeID).Scan(&held)
+	return held, err
+}
+
+func lockNewUsageFinancialHold(ctx context.Context, tx pgx.Tx, request UsageRequest) error {
+	// This is the same route lock stop-loss updates before publishing its receipt.
+	// Read the hold in a second statement: a lock wait must not retain an older
+	// READ COMMITTED statement snapshot and miss the stop-loss just committed.
+	if err := lockTokenFinancialRoutes(ctx, tx, request.TokenAccountID, request.Model, request.ModelID); err != nil {
+		return err
+	}
+	var held bool
+	err := tx.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM (`+tokenFinancialHoldSourceSQL+`) financial_hold WHERE financial_hold.token_account_id=$1 AND (financial_hold.model=$2 OR financial_hold.model=$3::uuid::text)) OR EXISTS(SELECT 1 FROM routing_policies route WHERE route.token_account_id=$1 AND (route.model=$2 OR route.model_id=$3 OR route.model_id::text=$2) AND `+tokenRouteFinancialHoldSQL+`)`, request.TokenAccountID, request.Model, request.ModelID).Scan(&held)
+	if err != nil {
+		return err
+	}
+	if held {
+		return ErrNoEligibleRoute
+	}
+	return nil
+}
+
+// Stop-loss and new admission lock all protocols of the same model in ID order.
+func lockTokenFinancialRoutes(ctx context.Context, tx pgx.Tx, accountID uuid.UUID, model string, modelID *uuid.UUID) error {
+	// Route creation/configuration already owns this account row. Keep an empty
+	// route set from becoming a phantom between stop-loss and new admission.
+	// No account existence requirement is added to legacy usage fixtures.
+	if _, err := tx.Exec(ctx, `SELECT id FROM token_accounts WHERE id=$1 FOR UPDATE`, accountID); err != nil {
+		return err
+	}
+	rows, err := tx.Query(ctx, `SELECT id FROM routing_policies WHERE token_account_id=$1 AND (model=$2 OR model_id=$3 OR model_id::text=$2) ORDER BY id FOR UPDATE`, accountID, model, modelID)
+	if err != nil {
+		return err
+	}
+	for rows.Next() {
+		var id uuid.UUID
+		if err := rows.Scan(&id); err != nil {
+			rows.Close()
+			return err
+		}
+	}
+	err = rows.Err()
+	rows.Close()
+	if err != nil {
+		return err
+	}
+	return nil
 }

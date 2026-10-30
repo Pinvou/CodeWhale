@@ -149,7 +149,7 @@ JOIN LATERAL (
        AND identity.upstream_model_ref=ANY(candidate.allowed_models)
      ORDER BY candidate.version DESC,candidate.id DESC LIMIT 1
 ) credential ON true
-WHERE route.reference_status='RESOLVED'
+WHERE route.reference_status='RESOLVED' AND NOT `+tokenRouteFinancialHoldSQL+`
   AND (route.probe_lease_until IS NULL OR route.probe_lease_until<$1)
   AND (route.next_probe_at IS NULL OR route.next_probe_at<=$1 OR route.health_expires_at<=$1)
 ORDER BY route.next_probe_at NULLS FIRST,route.id
@@ -159,6 +159,9 @@ FOR UPDATE OF route SKIP LOCKED LIMIT 1`, now).Scan(&target.RouteID, &target.Acc
 		return routeProbeTarget{}, false
 	}
 	if err != nil {
+		return routeProbeTarget{}, false
+	}
+	if held, err := tokenRouteFinancialHold(ctx, tx, target.RouteID); err != nil || held {
 		return routeProbeTarget{}, false
 	}
 	target.HealthVersion++
@@ -213,6 +216,13 @@ func (w *RouteHealthWorker) complete(ctx context.Context, target routeProbeTarge
 		return
 	}
 	defer tx.Rollback(ctx)
+	var routeID uuid.UUID
+	if err := tx.QueryRow(ctx, `SELECT id FROM routing_policies WHERE id=$1 FOR UPDATE`, target.RouteID).Scan(&routeID); err != nil {
+		return
+	}
+	if held, err := tokenRouteFinancialHold(ctx, tx, routeID); err != nil || held {
+		return
+	}
 	var now time.Time
 	if err = tx.QueryRow(ctx, `SELECT transaction_timestamp()`).Scan(&now); err != nil {
 		return

@@ -56,6 +56,9 @@ func (r *PostgresRepository) BeginUsage(ctx context.Context, request UsageReques
 			return UsageRequest{}, false, err
 		}
 	}
+	if err := lockNewUsageFinancialHold(ctx, tx, request); err != nil {
+		return UsageRequest{}, false, err
+	}
 	now := r.now()
 	if err := admitUsage(ctx, tx, request, now); err != nil {
 		return UsageRequest{}, false, err
