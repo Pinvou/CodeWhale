@@ -426,6 +426,63 @@ mod tests {
     use super::*;
 
     #[test]
+    fn maintenance_methods_keep_their_long_and_interactive_timeout_contracts() {
+        for method in ["orphan_scan", "orphan_remove"] {
+            assert_eq!(read_timeout_for(method), Duration::from_secs(3600));
+        }
+        for method in ["incomplete_dismiss", "health", "log", "unknown"] {
+            assert_eq!(read_timeout_for(method), Duration::from_secs(35));
+        }
+    }
+
+    #[test]
+    fn maintenance_client_routes_reach_the_host_over_a_real_socket() {
+        let _home = config::TempHome::new();
+        super::super::db::init_db().unwrap();
+        let root = config::data_dir();
+        let orphan = config::load_settings()
+            .models_path()
+            .join("partial-download");
+        std::fs::create_dir_all(&orphan).unwrap();
+        std::fs::write(orphan.join("weights.partial"), b"partial weights").unwrap();
+        let receipt = root.join("runs/failed-install.json");
+        super::super::execution_fence::private_write(
+            &receipt,
+            &serde_json::to_vec(&json!({"card_id":"failed-card", "kind":"download",
+                "created_at":"2026-10-30T00:00:00Z", "lines":[],
+                "outcome":{"Err":"download interrupted"}, "cancelled":false}))
+            .unwrap(),
+        )
+        .unwrap();
+        let service = Arc::new(service::ModelStoreService::new());
+        let _host = LocalService::bind(service, root.join("service.sock"), false).unwrap();
+
+        let report = call("orphan_scan", json!({})).unwrap();
+        assert_eq!(report["entries"].as_array().unwrap().len(), 1);
+        assert_eq!(
+            report["entries"][0]["path"],
+            orphan.to_string_lossy().as_ref()
+        );
+        assert_eq!(
+            call("incomplete_dismiss", json!({"run_id":"failed-install"})).unwrap()["ok"],
+            true
+        );
+        let saved: Value = serde_json::from_slice(&std::fs::read(receipt).unwrap()).unwrap();
+        assert_eq!(saved["dismissed"], true);
+        assert!(
+            orphan.join("weights.partial").exists(),
+            "dismissal must retain files"
+        );
+        assert!(
+            call("orphan_remove", json!({"path":orphan})).unwrap()["freedBytes"]
+                .as_u64()
+                .unwrap()
+                > 0
+        );
+        assert!(!orphan.exists());
+    }
+
+    #[test]
     fn incompatible_host_never_receives_the_requested_operation() {
         let _home = config::TempHome::new();
         let root = config::data_dir();

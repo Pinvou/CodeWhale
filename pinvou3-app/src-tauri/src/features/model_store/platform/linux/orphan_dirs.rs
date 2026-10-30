@@ -215,6 +215,11 @@ fn blocked_dirs(service: Option<&super::service::ModelStoreService>) -> Result<B
             None => blocked.unresolved += 1,
         }
     }
+    // cmsd can accept an install before its receiver creates a local run or
+    // takes the resource lock. Its target is not yet proven by local receipts;
+    // retain the same fail-closed exclusion as incomplete-install dismissal.
+    let (pending, pending_error) = super::delegated_run::pending(None);
+    blocked.unresolved += pending.len() + usize::from(pending_error.is_some());
     Ok(blocked)
 }
 
@@ -555,6 +560,150 @@ mod tests {
             );
             remove(None, &orphan.to_string_lossy()).unwrap();
             assert!(owned.exists());
+        }
+    }
+
+    #[test]
+    fn declared_legacy_weights_are_protected_without_a_matching_model_or_repo_name() {
+        let _home = config::TempHome::new();
+        let (orphan, _) = seed_models_dir();
+        let models = config::load_settings().models_path();
+        seed_record_at_root("owned-model", Some(&models.canonicalize().unwrap()));
+        db::connect().unwrap().execute(
+            "UPDATE store_models SET runtime_card_id='legacy-runtime' WHERE card_id='owned-card'", [],
+        ).unwrap();
+        let actual = models.join("custom-legacy-root").join("revision");
+        std::fs::create_dir_all(&actual).unwrap();
+        std::fs::write(actual.join("weights.bin"), b"registered weights").unwrap();
+        let runtime = config::data_dir().join("cards/legacy-runtime");
+        std::fs::create_dir_all(&runtime).unwrap();
+        std::fs::write(
+            runtime.join(".deploy-env"),
+            format!("MODEL_DIR=\"{}\"\n", actual.display()),
+        )
+        .unwrap();
+
+        let report = scan(None).unwrap();
+        assert_eq!(report["entries"].as_array().unwrap().len(), 1);
+        assert_eq!(
+            report["entries"][0]["path"],
+            orphan.to_string_lossy().as_ref()
+        );
+        assert_eq!(
+            remove(None, &models.join("custom-legacy-root").to_string_lossy()).unwrap_err(),
+            "orphan_directory_owned"
+        );
+        assert_eq!(
+            std::fs::read(actual.join("weights.bin")).unwrap(),
+            b"registered weights"
+        );
+        remove(None, &orphan.to_string_lossy()).unwrap();
+        assert!(!orphan.exists());
+    }
+
+    #[test]
+    fn unmaterialized_delegated_installs_block_removal_until_a_terminal_observation() {
+        use std::io::{BufRead, BufReader, Write};
+        use std::os::unix::net::UnixListener;
+        use std::time::{Duration, Instant};
+
+        for status in [
+            "queued",
+            "running",
+            "succeeded",
+            "missing",
+            "failed",
+            "cancelled",
+        ] {
+            let _home = config::TempHome::new();
+            db::init_db().unwrap();
+            let (orphan, _) = seed_models_dir();
+            let socket = config::data_dir().join("orphan-parent.sock");
+            let listener = UnixListener::bind(&socket).unwrap();
+            listener.set_nonblocking(true).unwrap();
+            let client = crate::features::megacube::Client::at_socket(socket).unwrap();
+            super::super::delegated_run::save(
+                &client,
+                "parent",
+                "retry-card",
+                "download",
+                "device-fixture",
+            )
+            .unwrap();
+            let binding = config::data_dir().join("delegated-runs/cmsd-parent.json");
+            let before = std::fs::read(&binding).unwrap();
+            let worker = std::thread::spawn(move || {
+                let tasks = if status == "missing" {
+                    json!([])
+                } else {
+                    json!([{"id":"parent", "card":"retry-card", "kind":"install",
+                        "store_run_id":"cmsd-parent", "status":status}])
+                };
+                // Both scan and remove must independently observe the device.
+                for _ in 0..2 {
+                    for response in [
+                        json!({"device_id":"device-fixture"}),
+                        json!({"tasks":tasks}),
+                    ] {
+                        let deadline = Instant::now() + Duration::from_secs(3);
+                        let mut stream = loop {
+                            match listener.accept() {
+                                Ok((stream, _)) => break stream,
+                                Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                                    assert!(Instant::now() < deadline);
+                                    std::thread::sleep(Duration::from_millis(5));
+                                }
+                                Err(e) => panic!("{e}"),
+                            }
+                        };
+                        stream
+                            .set_read_timeout(Some(Duration::from_secs(2)))
+                            .unwrap();
+                        let mut reader = BufReader::new(stream.try_clone().unwrap());
+                        let mut line = String::new();
+                        loop {
+                            line.clear();
+                            assert!(reader.read_line(&mut line).unwrap() > 0);
+                            if line == "\r\n" {
+                                break;
+                            }
+                        }
+                        let body = response.to_string();
+                        write!(stream, "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()).unwrap();
+                    }
+                }
+            });
+            let unresolved = !matches!(status, "failed" | "cancelled");
+            let report = scan(None).unwrap();
+            assert_eq!(
+                report["unresolvedInFlight"].as_u64().unwrap() > 0,
+                unresolved,
+                "{status}"
+            );
+            let removed = remove(None, &orphan.to_string_lossy());
+            worker.join().unwrap();
+            if unresolved {
+                assert_eq!(
+                    removed.unwrap_err(),
+                    "orphan_activity_unresolved",
+                    "{status}"
+                );
+                assert_eq!(std::fs::read(orphan.join("config.json")).unwrap(), b"{}");
+                // Losing the parent connection is not a terminal observation.
+                assert_eq!(
+                    remove(None, &orphan.to_string_lossy()).unwrap_err(),
+                    "orphan_activity_unresolved"
+                );
+                assert!(orphan.exists());
+            } else {
+                assert!(removed.unwrap()["freedBytes"].as_u64().unwrap() > 0);
+                assert!(!orphan.exists());
+            }
+            assert_eq!(
+                std::fs::read(binding).unwrap(),
+                before,
+                "binding must remain a durable fact"
+            );
         }
     }
 
