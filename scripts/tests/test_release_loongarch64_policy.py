@@ -26,6 +26,7 @@ moving or renaming a job changes the split points and fails loudly here.
 """
 
 import json
+from ci_routing_test_support import default_ci_routing
 import os
 import re
 import shlex
@@ -288,8 +289,8 @@ def _bash_env_with_gnu_sed(tmp):
 
 class ReleaseLoongArch64PolicyTests(unittest.TestCase):
     def setUp(self):
-        self.release_workflow = RELEASE_WORKFLOW.read_text(encoding="utf-8")
-        self.pr_check_workflow = PR_CHECK_WORKFLOW.read_text(encoding="utf-8")
+        self.release_workflow = default_ci_routing(RELEASE_WORKFLOW.read_text(encoding="utf-8"))
+        self.pr_check_workflow = default_ci_routing(PR_CHECK_WORKFLOW.read_text(encoding="utf-8"))
         self.orchestrator = ORCHESTRATOR.read_text(encoding="utf-8")
         self.toolchain = TOOLCHAIN_SCRIPT.read_text(encoding="utf-8")
         self.sysroot = SYSROOT_SCRIPT.read_text(encoding="utf-8")
