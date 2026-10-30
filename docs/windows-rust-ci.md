@@ -5,12 +5,20 @@
 `windows-rust-test` is the required native-Windows **Rust** job (the required
 gate also has related native-runtime, rustup-repair, static-updater and
 relay jobs — see the related-jobs section below). It is
-a two-leg matrix on `windows-latest` (`fail-fast: false`, `max-parallel: 2`);
+a two-leg matrix on the configured Windows heavy runner pool (default
+`windows-latest`; `fail-fast: false`, `max-parallel: 2`);
 the required gate aggregates the matrix result, so both legs must pass:
 
 - `all-targets-check` runs the metadata-only checks (steps 8-10 below).
 - `regression` links the `pinvou3_lib` test executable and runs everything
   that needs it (steps 11-17 below).
+
+`PINVOU_WINDOWS_ENABLED=false` disables Windows independently of
+`PINVOU_MACOS_ENABLED`. With Windows enabled and macOS disabled, Windows
+failures still fail the required gate; macOS results do not block PR merges.
+Self-hosted Windows runners require the native MSVC/Windows SDK toolchain and
+independent Cargo/Rustup directories. The dev-profile override is updated
+idempotently so repeated jobs cannot accumulate duplicate TOML tables.
 
 Routing is job level and identical for both legs. The job runs on every push
 to `main` (cumulative Windows coverage plus cache warm-up) and on ready,
@@ -66,7 +74,7 @@ order:
    upgrade, the dev profile's dependency-level `O2` makes rustc/LLVM exceed
    the 16 GB hosted runner while compiling `codewhale-tui` (lib), and
    tightening codegen-units instead pushed the compile past the job cap.
-   This job-only step appends a `[profile.dev.package.codewhale-tui]`
+   This job-only step installs a `[profile.dev.package.codewhale-tui]`
    `opt-level = 0` override to `CARGO_HOME/config.toml` (package-level
    profile overrides can only come from config, not an environment
    variable) without touching the repository `Cargo.toml`; local builds keep
