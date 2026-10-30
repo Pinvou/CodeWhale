@@ -266,7 +266,8 @@ impl DeepSeekClient {
         let request_body =
             serde_json::to_vec(&body).context("Failed to serialize Responses API request body")?;
         let open_req = super::stream_entry::StreamOpenRequest::new(
-            super::stream_entry::stream_open_timeout(),
+            // 本地模型端点按 base_url 放宽（冷 prefill 可静默数十秒），云保持 45s
+            super::stream_entry::stream_open_timeout_for(&self.base_url),
             self.stream_idle_timeout,
         );
         let response = super::stream_entry::open_sse_response(&open_req, |policy| {
