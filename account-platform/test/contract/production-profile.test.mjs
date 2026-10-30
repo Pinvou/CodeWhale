@@ -18,6 +18,27 @@ const mode = 'ACCOUNT_PLATFORM_PROFILE';
 const requiredMode = '${ACCOUNT_PLATFORM_PROFILE:?set personal or models matching selected composition}';
 const services = ['account-service', 'token-gateway', 'approval-resources'];
 
+test('development models baseline supplies both strict Account governance expectations', () => {
+  const document = parseDocument(readFileSync(new URL('../compose/compose.yaml', root), 'utf8'));
+  assert.deepEqual(document.errors, []);
+  const account = document.toJSON().services['account-service'];
+  assert.equal(account.environment.ACCOUNT_PLATFORM_PROFILE, undefined, 'retain the runtime models default');
+  for (const [name, message] of Object.entries({ TOKEN_GOVERNANCE_POLICY_SET_DIGEST: 'set same-source verified governance policy digest', TOKEN_GOVERNANCE_HANDLER_SET_DIGEST: 'set same-source verified handler digest' })) {
+    assert.equal(account.environment[name], '${' + name + ':?' + message + '}');
+    const example = readFileSync(new URL('../compose/.env.example', root), 'utf8');
+    assert.match(example, new RegExp(`^${name}=$`, 'm'));
+    const bash = findTestBash();
+    for (const value of [undefined, '', 'a'.repeat(64)]) {
+      const env = { ...process.env }; delete env[name];
+      if (value !== undefined) env[name] = value;
+      const result = spawnSync(bash, ['-c', `printf '%s' "${account.environment[name]}"`], { env, encoding: 'utf8', timeout: 15000 });
+      assert.equal(result.error, undefined);
+      assert.equal(result.status === 0, Boolean(value));
+      if (value) assert.equal(result.stdout, value);
+    }
+  }
+});
+
 // Compose merges environment mappings by key. Only that rule is modeled here;
 // this does not render secrets, start Docker or prove deployment acceptance.
 const mergedModes = (overlays, operatorMode) => Object.fromEntries(services.map(service => {

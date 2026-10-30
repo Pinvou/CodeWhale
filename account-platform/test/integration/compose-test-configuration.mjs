@@ -45,7 +45,14 @@ export function composeTestConfiguration(environment = process.env) {
   // bootstrapped provider credentials are prerequisites, not tested deployment.
   if (url.protocol !== 'http:' || url.hostname !== 'newapi' || url.port !== '3000' || url.username || url.password || url.search || url.hash || !['', '/'].includes(url.pathname)) throw new Error('COMPOSE_TEST_REAL_NEWAPI_PROFILE_REQUIRED');
   if (!/^[1-9][0-9]*$/.test(adminUser) || BigInt(adminUser) > 9223372036854775807n) throw new Error('COMPOSE_TEST_PROVIDER_CONFIGURATION_INVALID');
+  const governance = {};
+  for (const name of ['TOKEN_GOVERNANCE_POLICY_SET_DIGEST', 'TOKEN_GOVERNANCE_HANDLER_SET_DIGEST']) {
+    const value = required(environment, name);
+    if (!/^[0-9a-f]{64}$/.test(value)) throw new Error(`COMPOSE_TEST_CONFIGURATION_INVALID:${name}`);
+    governance[name] = value;
+  }
   return {
+    ...governance,
     OWNER_CANDIDATE_CURSOR_HMAC_KEY_BASE64: randomBytes(32).toString('base64'),
     // Compose consumes the same variable for Token verification and Portal signing.
     TOKEN_ADMIN_PAGINATION_CURSOR_HMAC_KEY_BASE64: randomBytes(32).toString('base64'),

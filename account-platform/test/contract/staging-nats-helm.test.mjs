@@ -9,6 +9,26 @@ const enabled = { skip: process.env.PINVOU_TEST_KMS_HELM !== '1' };
 const publicEnvironment = () => Object.fromEntries(Object.entries(process.env).filter(([key]) =>
   ['PATH', 'HOME', 'USERPROFILE', 'SYSTEMROOT', 'TEMP', 'TMP'].includes(key.toUpperCase())));
 
+test('Account governance expectations use the existing runtime Secret in every Helm profile', enabled, () => {
+  for (const profile of ['base', 'staging', 'models']) {
+    const result = render(['--set', 'nats.enabled=false', '--set-string', 'dependencies.natsUrl=tls://nats.fixture.invalid:4222',
+      '--set-string', 'global.runtimeSecret=fixture-account-runtime',
+      ...(profile === 'models' ? ['-f', path.join(chart, 'values-model-token-test.yaml')] : [])], profile === 'staging');
+    assert.equal(result.error, undefined);
+    assert.equal(result.status, 0, result.stderr);
+    const deployments = YAML.parseAllDocuments(result.stdout).map(document => document.toJSON()).filter(item => item?.kind === 'Deployment');
+    const account = deployments.find(item => item.spec.template.metadata.labels['app.kubernetes.io/component'] === 'account-service');
+    assert.ok(account);
+    for (const [name, key] of Object.entries({ TOKEN_GOVERNANCE_POLICY_SET_DIGEST: 'token-governance-policy-set-digest', TOKEN_GOVERNANCE_HANDLER_SET_DIGEST: 'token-governance-handler-set-digest' })) {
+      const entries = account.spec.template.spec.containers[0].env.filter(item => item.name === name);
+      assert.deepEqual(entries, [{ name, valueFrom: { secretKeyRef: { name: 'fixture-account-runtime', key } } }]);
+      for (const deployment of deployments.filter(item => item !== account)) {
+        for (const container of deployment.spec.template.spec.containers) assert.equal(container.env?.some(item => item.name === name) ?? false, false);
+      }
+    }
+  }
+});
+
 function render(overrides = [], staging = true) {
   const inputs = ['newApi.tlsSecretName=fixture-only-newapi', 'newApi.caConfigMap=fixture-only-newapi-ca',
     'images.newApiTLS.repository=registry.example.invalid/config-only',

@@ -10,6 +10,9 @@ import { composeTestConfiguration } from '../integration/compose-test-configurat
 function controlledInputs() {
   const { privateKey, publicKey } = generateKeyPairSync('ed25519');
   return {
+    // Synthetic format fixtures only, not source registry/release evidence.
+    TOKEN_GOVERNANCE_POLICY_SET_DIGEST: 'a'.repeat(64),
+    TOKEN_GOVERNANCE_HANDLER_SET_DIGEST: 'b'.repeat(64),
     HUMAN_DELEGATION_SIGNING_KEY_ID: 'controlled.test',
     HUMAN_DELEGATION_SIGNING_KEY_BASE64URL: privateKey.export({ format: 'der', type: 'pkcs8' }).subarray(-32).toString('base64url'),
     HUMAN_DELEGATION_VERIFICATION_KEYS_JSON: JSON.stringify({ 'controlled.test': publicKey.export({ format: 'der', type: 'spki' }).subarray(-32).toString('base64url') }),
@@ -61,6 +64,15 @@ test('all required materials fail closed without reflecting supplied secrets', (
   }
 });
 
+test('governance digests reject empty, malformed and config-only inputs without reflecting values', () => {
+  for (const name of ['TOKEN_GOVERNANCE_POLICY_SET_DIGEST', 'TOKEN_GOVERNANCE_HANDLER_SET_DIGEST']) {
+    for (const value of ['', 'NOT_A_DIGEST_CONFIG_ONLY', 'A'.repeat(64), 'a'.repeat(63), 'g'.repeat(64)]) {
+      assert.throws(() => composeTestConfiguration({ ...controlledInputs(), [name]: value }), error =>
+        error.message.endsWith(`:${name}`) && (!value || !error.message.includes(value)));
+    }
+  }
+});
+
 test('actual integration entrypoints reject missing operator configuration before any Docker invocation', async () => {
   const directory = await mkdtemp(path.join(tmpdir(), 'pinvou-compose-input-'));
   try {
@@ -74,6 +86,29 @@ test('actual integration entrypoints reject missing operator configuration befor
       assert.match(result.stderr, /COMPOSE_TEST_CONFIGURATION_REQUIRED:HUMAN_DELEGATION_SIGNING_KEY_ID/);
       assert.equal(result.stdout, '');
       assert.doesNotMatch(result.stderr, /Docker is required|e30\.e30\.c2ln/);
+    }
+  } finally {
+    assert.equal(path.dirname(directory), tmpdir());
+    assert.ok(path.basename(directory).startsWith('pinvou-compose-input-'));
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test('actual integration entrypoints require each governance digest before Docker', async () => {
+  const directory = await mkdtemp(path.join(tmpdir(), 'pinvou-compose-input-'));
+  try {
+    const file = path.join(directory, 'controlled.jwt');
+    await writeFile(file, 'e30.e30.c2ln');
+    for (const name of ['TOKEN_GOVERNANCE_POLICY_SET_DIGEST', 'TOKEN_GOVERNANCE_HANDLER_SET_DIGEST']) {
+      const environment = { ...process.env, ...controlledInputs(), PINVOU_TEST_WORKLOAD_CREDENTIAL_FILE: file };
+      delete environment[name];
+      for (const action of ['integration', 'e2e', 'fault']) {
+        const result = spawnSync(process.execPath, [path.resolve(import.meta.dirname, '../../../scripts/account-platform.mjs'), 'test', action], { env: environment, encoding: 'utf8', shell: false });
+        assert.equal(result.status, 1);
+        assert.match(result.stderr, new RegExp(`COMPOSE_TEST_CONFIGURATION_REQUIRED:${name}`));
+        assert.equal(result.stdout, '');
+        assert.doesNotMatch(result.stderr, /Docker is required|e30\.e30\.c2ln/);
+      }
     }
   } finally {
     assert.equal(path.dirname(directory), tmpdir());

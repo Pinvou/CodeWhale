@@ -152,6 +152,8 @@ services:
       OIDC_AUDIENCE: pinvou-desktop-dev
       BILLING_HTTP_URL: http://billing-service:8080
       TOKEN_HTTP_URL: http://token-gateway:8080
+      TOKEN_GOVERNANCE_POLICY_SET_DIGEST: ${TOKEN_GOVERNANCE_POLICY_SET_DIGEST:?set same-source verified governance policy digest}
+      TOKEN_GOVERNANCE_HANDLER_SET_DIGEST: ${TOKEN_GOVERNANCE_HANDLER_SET_DIGEST:?set same-source verified handler digest}
       INTERNAL_SERVICE_TOKEN: ${INTERNAL_SERVICE_TOKEN:?set INTERNAL_SERVICE_TOKEN}
       MANUAL_REVIEW_ON_CALL_USER_IDS: ${MANUAL_REVIEW_ON_CALL_USER_IDS:-}
       NATS_URL: nats://nats:4222

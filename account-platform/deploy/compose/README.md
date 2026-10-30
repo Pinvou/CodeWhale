@@ -4,7 +4,7 @@ GSA-07 专用审批授权 Relay 的独立凭据、专项就绪与迁移顺序见
 
 本目录的 Compose 基线用于开发、测试和单机部署编排；能够启动这些容器不代表能够从空白主机恢复当前账号平台。完整恢复还需要同一恢复集中的四个 PostgreSQL 数据库、NATS JetStream、独立模型网关、站点 Secret/override、边缘代理/证书/网络配置和不可变制品。生产或灾难恢复必须执行 [`../runbooks/full-redeployment.md`](../runbooks/full-redeployment.md)，不得把新建空卷后的健康检查当作恢复成功。
 
-1. 将 `.env.example` 复制为 `.env`，把每个占位值替换为不同的随机值；`.env` 已被仓库忽略。
+1. 将 `.env.example` 复制为 `.env`，按各字段契约填写：秘密使用独立随机值，身份/provider 等使用真实配置；两个 `TOKEN_GOVERNANCE_*_SET_DIGEST` 必须按下节取得同源 registry 摘要，不能随机生成。`.env` 已被仓库忽略。
 2. 按[开发 NATS 材料与初始化说明](../runbooks/development-nats.md)准备独立 TLS/身份、当前 consumer 制品及真实 fresh 回执，并在进程环境声明 `PINVOU_DEV_NATS_CONFIG_FILE`；已有数据不得自动重新初始化。随后从仓库根执行 `node scripts/account-platform.mjs dev up`，入口固定追加 `compose.dev-nats.yaml`。
 3. Keycloak 开发入口为 `http://127.0.0.1:18080`；Account、Billing、Token Gateway、Payment Simulator、Token Portal、New API 和 Identity Adapter 分别绑定 `18101` 至 `18107` 的对应回环端口。
 4. 真实 New API 通过 `real-newapi` profile 启动，仅绑定 `http://127.0.0.1:18106`；首次启动后需在本机完成管理员、上游 Channel 和最小权限 API Token 初始化，具体见 [`../runbooks/newapi-deployment.md`](../runbooks/newapi-deployment.md)。
@@ -12,6 +12,67 @@ GSA-07 专用审批授权 Relay 的独立凭据、专项就绪与迁移顺序见
 `AUDIT_EXPORT_MASTER_KEY_BASE64` 必须使用32个独立随机字节的标准 Base64 编码，并与注册、认证、支付和模型密钥隔离。它只用于本地受控审计导出任务的文件密钥包裹；不得提交真实值，丢失或无计划轮换会使尚未生成或下载的任务无法恢复。文件解密和验签密钥只通过创建响应或同一幂等请求的恢复响应返回，不通过普通状态查询返回。
 
 启用手机认证或远程密码登录前，必须同时配置 `MOBILE_AUTH_ENABLED=true`、独立的 `AUTH_RISK_HMAC_KEY_BASE64` 和 Redis 地址。远程 Nginx 将精确 Token 路径转发到 Identity 风险门禁；门禁未就绪时登录失败关闭，不得把该路径临时改回 Keycloak 直连。
+
+## Account 治理摘要输入
+
+开发基线保留默认 `models`；Account 在构造 Token 治理 reader 时即要求
+`TOKEN_GOVERNANCE_POLICY_SET_DIGEST` 和 `TOKEN_GOVERNANCE_HANDLER_SET_DIGEST`
+两个64位小写十六进制摘要，PRE_ACTIVATION 或关闭可选执行器也不免除此输入。
+优先使用与本次 Account/Token 源码、镜像及构建输入逐项核验一致的既有发布计划
+`candidate.policy_set_digest` / `candidate.handler_set_digest`，分别填入本机 `.env`。
+已有 ACTIVE/SAFE 数据保留原卷和状态，按既有发布流程核对 installed 与 candidate，
+不为启动重建数据或自动 apply。PRE 的空 installed 摘要不是 candidate 摘要。
+
+首次开发尚无已核验计划时，可在该候选的独立构建副本中执行以下**临时离线片段**。
+它不是已有产品 CLI；使用本机匹配的 Go 1.26.6 和已备齐的 module cache，从仓库根进入
+`account-platform` 后在 Bash 执行。只调用实际导出函数，不连接 DB、不激活治理；缺工具或
+离线依赖时应停止补齐构建前提，不填随机值或从旧版本复制值。
+
+```sh
+(
+set -eu
+cd account-platform
+module_root="$(pwd -P)"
+digest_dir="$(mktemp -d "$module_root/j12-digest.XXXXXXXX")"
+cleanup_digest() {
+  case "$digest_dir" in "$module_root"/j12-digest.*) ;; *) return 1 ;; esac
+  # Refuse to delete unknown files; remove only this snippet and its empty directory.
+  [ "$(ls -A "$digest_dir")" = main.go ] || return 1
+  rm -- "$digest_dir/main.go" && rmdir -- "$digest_dir"
+}
+trap cleanup_digest EXIT
+cat > "$digest_dir/main.go" <<'GO'
+package main
+import (
+  "encoding/json"
+  "os"
+  "github.com/Pinvou/pinvou3/account-platform/internal/platform/approvalpolicy"
+  "github.com/Pinvou/pinvou3/account-platform/internal/token"
+)
+func main() {
+  p, err := approvalpolicy.PolicySetDigest(); if err != nil { panic(err) }
+  h, err := token.TokenCommandHandlerDigest(); if err != nil { panic(err) }
+  if err := json.NewEncoder(os.Stdout).Encode(map[string]string{
+    "policy_set_digest": p, "handler_set_digest": h,
+  }); err != nil { panic(err) }
+}
+GO
+GOTOOLCHAIN=local GOPROXY=off GOSUMDB=off go run -tags=nomsgpack "./${digest_dir##*/}"
+)
+```
+
+保留实际源码 commit、Go版本、构建标签和输出；将两字符串分别填入 `.env` 同名变量。
+它们只是当前源码集合的确定事实，不是发布批准、已安装状态或现场就绪证明。
+若已有发布工件，须与 candidate 两字段逐字比对，并核源码/镜像身份；不一致走原发布核对流程。
+fresh 本地开发可以使用此次真实输出，不伪造只支持 CLOUD_UAT/PRODUCTION 的发布计划。
+现有 `token-governance` 没有摘要导出 flag，不要为取得输入调用 `--apply`。
+
+按原 NATS TLS/独立身份和真实 fresh receipt 步骤准备其余依赖后，先用本机 `.env` 和
+`compose.yaml` + `compose.dev-nats.yaml` 执行既有 Compose `config`，再运行原 `dev up`。
+`config` 输出可能含本机秘密，只在受控目录核查，不上传或写入公开日志。
+集成/e2e/fault 测试也要求操作者通过进程环境提供这两个同源值；现有输入 helper 仅检查
+格式并透传，不随机生成摘要。公开 `compose-render.env` 只供 config，标记不能用于运行。
+PRE_ACTIVATION 仍关闭 governed 写操作；配置可构造不表示完整栈或模型调用已就绪。
 
 ## 平台管理台
 

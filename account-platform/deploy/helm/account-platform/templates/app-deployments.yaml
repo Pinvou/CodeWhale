@@ -114,6 +114,10 @@ spec:
             - { name: ACCOUNT_TRUSTED_SOURCE_PEER_IPS, value: {{ join "," $root.Values.security.passwordPreparationTrustedProxyIPs | quote }} }
             - name: APPROVAL_WRITER_DATABASE_URL
               valueFrom: { secretKeyRef: { name: {{ $root.Values.global.runtimeSecret }}, key: account-approval-writer-database-url, optional: true } }
+            - name: TOKEN_GOVERNANCE_POLICY_SET_DIGEST
+              valueFrom: { secretKeyRef: { name: {{ $root.Values.global.runtimeSecret }}, key: token-governance-policy-set-digest } }
+            - name: TOKEN_GOVERNANCE_HANDLER_SET_DIGEST
+              valueFrom: { secretKeyRef: { name: {{ $root.Values.global.runtimeSecret }}, key: token-governance-handler-set-digest } }
             {{- end }}
             {{- if or (eq $app.name "account-service") (eq $app.name "billing-service") (eq $app.name "token-gateway") }}
             - { name: OIDC_ISSUER, value: {{ $root.Values.oidc.issuer | quote }} }

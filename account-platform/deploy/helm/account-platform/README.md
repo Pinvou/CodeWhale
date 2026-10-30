@@ -4,6 +4,30 @@ This chart deploys Account Service, Billing Service, Token Gateway, Token Portal
 Keycloak, and Redis. NATS, PostgreSQL and payment/model providers stay external so
 their backup, certificate, and merchant controls remain environment-owned.
 
+### Account governance expectations
+
+Account retains its default models assembly, including base/staging installs with
+optional governed workloads disabled. Its Token governance reader requires both
+expected registry digests before startup. In the existing `global.runtimeSecret`,
+supply `token-governance-policy-set-digest` and `token-governance-handler-set-digest`.
+Only Account receives these two required Secret key references; there is no
+literal fallback or new Secret resource. When ExternalSecret is enabled, add these
+fields to the existing `externalSecrets.remoteKey` object: its existing dataFrom
+extract synchronizes them into the same runtime Secret. Otherwise provision the
+same keys out of band using the existing runtime Secret process before rollout.
+
+Use the independently verified same-source release plan's
+`candidate.policy_set_digest` / `candidate.handler_set_digest`, bound to the
+Account/Token commit, images and build inputs. These are registry digests, not
+random secrets or activation evidence. For a fresh local source calculation, see
+the [temporary offline Go procedure](../../compose/README.md#account-治理摘要输入);
+it calls the existing exported functions and does not install governance or
+approve a release. PRE_ACTIVATION's empty installed digests are not expected
+digests. Preserve default models, existing personal deployments and all runtime
+checks; do not activate governance merely to obtain configuration. Rendering only
+checks references, not live Secret synchronization, digest correspondence or Pod
+readiness. Verify those through the existing release/site acceptance process.
+
 ### NATS prerequisite for every profile
 
 Billing Service and the Account/Billing event relays always require provisioned
