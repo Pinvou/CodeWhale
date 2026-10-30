@@ -8461,6 +8461,136 @@ async fn sandbox_escalation_fails_closed_when_the_posture_cannot_prompt() {
 }
 
 #[tokio::test]
+async fn forkguard_armed_sandbox_escalation_prompts_instead_of_failing_closed() {
+    // The unarmed fail-closed faces are pinned by
+    // `sandbox_escalation_fails_closed_when_the_posture_cannot_prompt`.
+    // Armed, the same non-Suggest escalation must reach the host as a
+    // Suggest-style approval (`approval_force_prompt` set, description
+    // naming the armed guardrail approval), and denying it must read as an
+    // approval denial — never as the fail-closed posture block, and never a
+    // silent execution.
+    use crate::llm_client::mock::{MockLlmClient, canned};
+
+    let workspace = tempdir().expect("tempdir");
+    let mock = std::sync::Arc::new(MockLlmClient::new(vec![
+        canned::tool_call_turn(
+            "call-armed-escalation",
+            "bash",
+            r#"{"command":"echo denied > escalation.txt","sandbox_permissions":"workspace-write","justification":"the command needs workspace write access"}"#,
+        ),
+        canned::simple_text_turn("Escalation was denied."),
+    ]));
+    let client: crate::core::model_client::SharedModelClient = mock.clone();
+    let config = Config {
+        sandbox_mode: Some("read-only".to_string()),
+        ..Config::default()
+    };
+    let (engine, handle) = Engine::new_with_model_client(
+        deterministic_engine_config(workspace.path()),
+        &config,
+        client,
+    );
+    let handle_for_approval = handle.clone();
+    let task = tokio::spawn(engine.run());
+
+    // Arm through the same `ChangeMode` channel hosts use for the toggle.
+    // The posture stays Full Access (non-Suggest): exactly the posture whose
+    // escalation face flips from deny to prompt when armed.
+    handle
+        .send(Op::ChangeMode {
+            mode: AppMode::Agent,
+            allow_shell: true,
+            trust_mode: true,
+            auto_approve: true,
+            approval_mode: crate::tui::approval::ApprovalMode::Bypass,
+            configured_sandbox_mode: None,
+            ask_on_guardrail: Some(true),
+        })
+        .await
+        .expect("arm guardrail prompts");
+
+    let mut op = external_user_message_op(
+        "Escalate the sandbox for this one command.",
+        AppMode::Agent,
+        &config,
+    );
+    let Op::SendMessage {
+        approval_mode: op_approval_mode,
+        auto_approve: op_auto_approve,
+        ..
+    } = &mut op
+    else {
+        panic!("user message op")
+    };
+    *op_approval_mode = crate::tui::approval::ApprovalMode::Bypass;
+    *op_auto_approve = true;
+    handle.send(op).await.expect("send armed escalation turn");
+
+    let mut saw_prompt = false;
+    let mut rx = handle.rx_event.write().await;
+    loop {
+        let event = tokio::time::timeout(model_turn_event_timeout(), rx.recv())
+            .await
+            .expect("timed out waiting for armed escalation")
+            .expect("engine event stream closed");
+        match event {
+            Event::ApprovalRequired {
+                id,
+                input,
+                description,
+                approval_force_prompt,
+                ..
+            } if id == "call-armed-escalation" => {
+                assert_eq!(input["sandbox_permissions"], "workspace-write");
+                assert!(
+                    approval_force_prompt,
+                    "armed escalation must carry approval_force_prompt"
+                );
+                assert!(
+                    description.contains("Sandbox escalation to 'workspace-write'"),
+                    "{description}"
+                );
+                assert!(
+                    description.contains("armed guardrail approval"),
+                    "armed escalation description must name the arming: {description}"
+                );
+                saw_prompt = true;
+                handle_for_approval
+                    .deny_tool_call(id)
+                    .await
+                    .expect("deny armed escalation");
+            }
+            Event::ToolCallComplete { id, result, .. } if id == "call-armed-escalation" => {
+                let error = result.expect_err("denied armed escalation must be an error");
+                let error = error.to_string();
+                assert!(
+                    error.contains("denied by user"),
+                    "the armed denial must read as an approval denial: {error}"
+                );
+                assert!(
+                    !error.contains("requires a one-shot user approval"),
+                    "armed escalation must not take the fail-closed deny face: {error}"
+                );
+            }
+            Event::TurnComplete { status, error, .. } => {
+                assert_eq!(status, TurnOutcomeStatus::Completed, "{error:?}");
+                break;
+            }
+            _ => {}
+        }
+    }
+    drop(rx);
+
+    assert!(saw_prompt, "armed non-Suggest escalation must prompt");
+    assert!(
+        !workspace.path().join("escalation.txt").exists(),
+        "a denied armed escalation must not execute"
+    );
+    handle.send(Op::Shutdown).await.expect("shutdown engine");
+    task.await.expect("engine task");
+}
+
+#[tokio::test]
 async fn productive_tool_results_do_not_hit_no_user_input_backstop() {
     use crate::llm_client::mock::{MockLlmClient, canned};
 
@@ -14343,6 +14473,190 @@ async fn yolo_mode_does_not_prompt_for_typed_ask_rule() {
 
 #[tokio::test]
 #[allow(clippy::await_holding_lock)]
+async fn forkguard_armed_full_access_typed_ask_rule_prompts_instead_of_auto_running() {
+    // The unarmed faces are pinned by
+    // `yolo_mode_does_not_prompt_for_typed_ask_rule` (composer `!`
+    // provenance) and
+    // `full_access_subagent_handoff_keeps_model_shell_free_of_approval_prompts`
+    // (model-provenance mainline): in the Full Access posture a typed
+    // ask-rule Prompt is suppressed and the call auto-runs. Armed, the
+    // mainline turn loop must honor that same Prompt — the ask-rule hold
+    // reaches the host as a forced approval even though the session grants
+    // auto-approval, and denying it reads as an approval denial, never as a
+    // silent auto-run.
+    use wiremock::matchers::{body_string_contains, method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    let _lock = lock_test_env();
+    let workspace = tempdir().expect("tempdir");
+    let server = MockServer::start().await;
+
+    let tool_call_sse = concat!(
+        "data: {\"id\":\"chatcmpl-armed-ask-rule\",\"choices\":[{\"index\":0,\"delta\":{\"tool_calls\":[",
+        "{\"index\":0,\"id\":\"call_armed_ask_rule\",\"type\":\"function\",\"function\":{\"name\":\"Bash\",",
+        "\"arguments\":\"{\\\"action\\\":\\\"run\\\",\\\"command\\\":\\\"echo armed-typed-ask-rule\\\"}\"}}",
+        "]},\"finish_reason\":null}]}\n\n",
+        "data: {\"id\":\"chatcmpl-armed-ask-rule\",\"choices\":[{\"index\":0,\"delta\":{},",
+        "\"finish_reason\":\"tool_calls\"}]}\n\n",
+        "data: [DONE]\n\n",
+    );
+    let done_sse = concat!(
+        "data: {\"id\":\"chatcmpl-armed-ask-rule-done\",\"choices\":[{\"index\":0,",
+        "\"delta\":{\"content\":\"done\"},\"finish_reason\":null}]}\n\n",
+        "data: {\"id\":\"chatcmpl-armed-ask-rule-done\",\"choices\":[{\"index\":0,\"delta\":{},",
+        "\"finish_reason\":\"stop\"}]}\n\n",
+        "data: [DONE]\n\n",
+    );
+
+    Mock::given(method("POST"))
+        .and(path("/v1/chat/completions"))
+        .and(body_string_contains("denied by user"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .insert_header("content-type", "text/event-stream")
+                .set_body_string(done_sse),
+        )
+        .expect(1)
+        .with_priority(1)
+        .mount(&server)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/v1/chat/completions"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .insert_header("content-type", "text/event-stream")
+                .set_body_string(tool_call_sse),
+        )
+        .expect(1)
+        .with_priority(2)
+        .mount(&server)
+        .await;
+
+    let api_config = Config {
+        api_key: Some("test-key".to_string()),
+        base_url: Some(server.uri()),
+        ..Config::default()
+    };
+    let (engine, handle) = Engine::new(
+        EngineConfig {
+            model: crate::config::DEFAULT_TEXT_MODEL.to_string(),
+            workspace: workspace.path().to_path_buf(),
+            mcp_config_path: workspace.path().join("mcp.json"),
+            snapshots_enabled: false,
+            subagents_enabled: false,
+            exec_policy_engine: ask_rule_engine("echo"),
+            ..EngineConfig::default()
+        },
+        &api_config,
+    );
+    let handle_for_approval = handle.clone();
+    let run_task = tokio::spawn(engine.run());
+
+    // Arm through the same `ChangeMode` channel hosts use for the toggle.
+    // The posture stays Full Access (auto_approve), so only the arming can
+    // convert the typed ask-rule hold into a prompt.
+    handle
+        .send(Op::ChangeMode {
+            mode: AppMode::Agent,
+            allow_shell: true,
+            trust_mode: true,
+            auto_approve: true,
+            approval_mode: crate::tui::approval::ApprovalMode::Bypass,
+            configured_sandbox_mode: None,
+            ask_on_guardrail: Some(true),
+        })
+        .await
+        .expect("arm guardrail prompts");
+
+    handle
+        .send(Op::SendMessage {
+            content: "exercise the armed typed ask-rule hold".to_string(),
+            mode: AppMode::Agent,
+            route: resolved_route_for_test(&api_config, crate::config::DEFAULT_TEXT_MODEL),
+            compaction: Box::new(CompactionConfig::default()),
+            goal_objective: None,
+            goal_token_budget: None,
+            goal_status: crate::tools::goal::GoalStatus::Active,
+            reasoning_effort: None,
+            reasoning_effort_auto: false,
+            auto_model: false,
+            allow_shell: true,
+            trust_mode: true,
+            auto_approve: true,
+            approval_mode: crate::tui::approval::ApprovalMode::Bypass,
+            translation_enabled: false,
+            allowed_tools: None,
+            dynamic_tools: Vec::new(),
+            hook_executor: None,
+            verbosity: None,
+            provenance: UserInputProvenance::ExternalUser,
+            turn_tool_security: None,
+            submission_id: None,
+        })
+        .await
+        .expect("send armed typed ask-rule turn");
+
+    let mut saw_prompt = false;
+    let mut rx = handle.rx_event.write().await;
+    while let Some(event) = tokio::time::timeout(model_turn_event_timeout(), rx.recv())
+        .await
+        .expect("timed out waiting for armed typed ask-rule event")
+    {
+        match event {
+            Event::ApprovalRequired {
+                id,
+                tool_name,
+                description,
+                approval_force_prompt,
+                ..
+            } => {
+                assert_eq!(tool_name, "Bash");
+                assert!(
+                    approval_force_prompt,
+                    "armed typed ask-rule hold must carry approval_force_prompt"
+                );
+                // The plain typed ask-rule face keeps the main-line reason
+                // (the "ask-on-guardrail is armed" framing belongs to the
+                // rich denied-prefix face); arming only makes this Prompt
+                // honored instead of suppressed under auto_approve.
+                assert!(
+                    description.contains("Typed ask rule")
+                        && description.contains("requires approval"),
+                    "armed typed ask-rule hold must carry the typed rule reason: {description}"
+                );
+                saw_prompt = true;
+                handle_for_approval
+                    .deny_tool_call(id)
+                    .await
+                    .expect("deny armed typed ask-rule hold");
+            }
+            Event::ToolCallComplete { name, result, .. } if name == "Bash" => {
+                let error = result.expect_err("denied ask-rule call must be an error");
+                let error = error.to_string();
+                assert!(
+                    error.contains("denied by user"),
+                    "the armed denial must read as an approval denial: {error}"
+                );
+            }
+            Event::TurnComplete { status, .. } => {
+                assert_eq!(status, TurnOutcomeStatus::Completed);
+                break;
+            }
+            _ => {}
+        }
+    }
+    drop(rx);
+
+    handle.send(Op::Shutdown).await.expect("shutdown engine");
+    run_task.await.expect("engine task");
+    assert!(
+        saw_prompt,
+        "armed Full Access must prompt for a typed ask-rule instead of auto-running"
+    );
+}
+
+#[tokio::test]
+#[allow(clippy::await_holding_lock)]
 async fn operate_model_shell_uses_normal_approval_and_workspace_sandbox() {
     use wiremock::matchers::{body_string_contains, method, path};
     use wiremock::{Mock, MockServer, ResponseTemplate};
@@ -14992,6 +15306,225 @@ async fn full_access_repo_law_holds_writes_under_attached_roots() {
     assert!(
         !target.exists(),
         "repo-law block must prevent the write under the attached root"
+    );
+}
+
+#[tokio::test]
+#[allow(clippy::await_holding_lock)]
+async fn forkguard_armed_repo_law_hold_prompts_instead_of_blocking() {
+    // The unarmed siblings are pinned by
+    // `full_access_permission_allow_cannot_bypass_repo_law` and
+    // `full_access_repo_law_holds_writes_under_attached_roots`: a repo-law
+    // ForcePrompt hold fails closed to the hard deny in a posture that
+    // cannot prompt. Armed, the same hold — even behind a remembered allow
+    // grant — must fall through to a forced approval prompt, and denying it
+    // must read as an approval denial, never as the Full Access law block.
+    use wiremock::matchers::{body_string_contains, method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    let _lock = lock_test_env();
+    let workspace = tempdir().expect("tempdir");
+    let law_dir = workspace.path().join(".codewhale");
+    fs::create_dir_all(&law_dir).expect("create law directory");
+    fs::write(
+        law_dir.join("constitution.json"),
+        r#"{
+            "protected_invariants": [{
+                "text": "Release notes need human review",
+                "paths": ["CHANGELOG.md"]
+            }]
+        }"#,
+    )
+    .expect("write repo law fixture");
+    let target = workspace.path().join("CHANGELOG.md");
+    let allow_rule = codewhale_execpolicy::ToolAskRule::file_path("write_file", "CHANGELOG.md")
+        .into_exact_workspace_allow(workspace.path().to_string_lossy().into_owned());
+    let engine_config = EngineConfig {
+        model: crate::config::DEFAULT_TEXT_MODEL.to_string(),
+        workspace: workspace.path().to_path_buf(),
+        mcp_config_path: workspace.path().join("mcp.json"),
+        snapshots_enabled: false,
+        subagents_enabled: false,
+        exec_policy_engine: codewhale_execpolicy::ExecPolicyEngine::with_rulesets(vec![
+            codewhale_execpolicy::Ruleset::user(vec![], vec![]).with_ask_rules(vec![allow_rule]),
+        ]),
+        ..EngineConfig::default()
+    };
+
+    let server = MockServer::start().await;
+    let tool_delta = json!({
+        "id": "chatcmpl-armed-repo-law",
+        "choices": [{
+            "index": 0,
+            "delta": {"tool_calls": [{
+                "index": 0,
+                "id": "call_armed_repo_law_0",
+                "type": "function",
+                "function": {
+                    "name": "File",
+                    "arguments": json!({
+                        "action": "write",
+                        "path": "CHANGELOG.md",
+                        "content": "must not be written\n"
+                    })
+                    .to_string(),
+                },
+            }]},
+            "finish_reason": serde_json::Value::Null,
+        }],
+    });
+    let tool_finish = json!({
+        "id": "chatcmpl-armed-repo-law",
+        "choices": [{"index": 0, "delta": {}, "finish_reason": "tool_calls"}],
+    });
+    let tool_call_sse = format!("data: {tool_delta}\n\ndata: {tool_finish}\n\ndata: [DONE]\n\n");
+    let done_sse = concat!(
+        "data: {\"id\":\"chatcmpl-armed-repo-law-done\",\"choices\":[{\"index\":0,",
+        "\"delta\":{\"content\":\"done\"},\"finish_reason\":null}]}\n\n",
+        "data: {\"id\":\"chatcmpl-armed-repo-law-done\",\"choices\":[{\"index\":0,\"delta\":{},",
+        "\"finish_reason\":\"stop\"}]}\n\n",
+        "data: [DONE]\n\n",
+    );
+
+    Mock::given(method("POST"))
+        .and(path("/v1/chat/completions"))
+        .and(body_string_contains("denied by user"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .insert_header("content-type", "text/event-stream")
+                .set_body_string(done_sse),
+        )
+        .expect(1)
+        .with_priority(1)
+        .mount(&server)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/v1/chat/completions"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .insert_header("content-type", "text/event-stream")
+                .set_body_string(tool_call_sse),
+        )
+        .expect(1)
+        .with_priority(2)
+        .mount(&server)
+        .await;
+
+    let api_config = Config {
+        api_key: Some("test-key".to_string()),
+        base_url: Some(server.uri()),
+        ..Config::default()
+    };
+    let (engine, handle) = Engine::new(engine_config, &api_config);
+    let handle_for_approval = handle.clone();
+    let run_task = tokio::spawn(engine.run());
+
+    // Arm through the same `ChangeMode` channel hosts use for the toggle;
+    // the posture stays Full Access, whose unarmed face is the hard deny.
+    handle
+        .send(Op::ChangeMode {
+            mode: AppMode::Agent,
+            allow_shell: true,
+            trust_mode: true,
+            auto_approve: true,
+            approval_mode: crate::tui::approval::ApprovalMode::Bypass,
+            configured_sandbox_mode: None,
+            ask_on_guardrail: Some(true),
+        })
+        .await
+        .expect("arm guardrail prompts");
+
+    handle
+        .send(Op::SendMessage {
+            content: "exercise the armed repo-law hold".to_string(),
+            mode: AppMode::Agent,
+            route: resolved_route_for_test(&api_config, crate::config::DEFAULT_TEXT_MODEL),
+            compaction: Box::new(CompactionConfig::default()),
+            goal_objective: None,
+            goal_token_budget: None,
+            goal_status: crate::tools::goal::GoalStatus::Active,
+            reasoning_effort: None,
+            reasoning_effort_auto: false,
+            auto_model: false,
+            allow_shell: true,
+            trust_mode: true,
+            auto_approve: true,
+            approval_mode: crate::tui::approval::ApprovalMode::Bypass,
+            translation_enabled: false,
+            allowed_tools: None,
+            dynamic_tools: Vec::new(),
+            hook_executor: None,
+            verbosity: None,
+            provenance: UserInputProvenance::ExternalUser,
+            turn_tool_security: None,
+            submission_id: None,
+        })
+        .await
+        .expect("send armed repo-law turn");
+
+    let mut saw_prompt = false;
+    let mut saw_complete = false;
+    let mut rx = handle.rx_event.write().await;
+    while let Some(event) = tokio::time::timeout(model_turn_event_timeout(), rx.recv())
+        .await
+        .expect("timed out waiting for armed repo-law event")
+    {
+        match event {
+            Event::ApprovalRequired {
+                id,
+                tool_name,
+                description,
+                approval_force_prompt,
+                ..
+            } => {
+                assert_eq!(tool_name, "File");
+                assert!(
+                    approval_force_prompt,
+                    "armed repo-law hold must carry approval_force_prompt"
+                );
+                assert!(
+                    description.contains("Repo law holds this write"),
+                    "armed hold must carry the repo-law reason: {description}"
+                );
+                assert!(
+                    description.contains("Release notes need human review"),
+                    "armed hold must name the protected invariant: {description}"
+                );
+                saw_prompt = true;
+                handle_for_approval
+                    .deny_tool_call(id)
+                    .await
+                    .expect("deny armed repo-law hold");
+            }
+            Event::ToolCallComplete { name, result, .. } if name == "File" => {
+                let error = result.expect_err("denied repo-law write must be an error");
+                let error = error.to_string();
+                assert!(
+                    error.contains("denied by user"),
+                    "the armed denial must read as an approval denial: {error}"
+                );
+                assert!(
+                    !error.contains("Repository law blocked"),
+                    "armed hold must not be phrased as the hard law block: {error}"
+                );
+                saw_complete = true;
+            }
+            Event::TurnComplete { status, .. } => {
+                assert_eq!(status, TurnOutcomeStatus::Completed);
+                break;
+            }
+            _ => {}
+        }
+    }
+    drop(rx);
+
+    handle.send(Op::Shutdown).await.expect("shutdown engine");
+    run_task.await.expect("engine task");
+    assert!(saw_prompt, "armed repo-law hold must prompt, not block");
+    assert!(saw_complete, "denied armed repo-law hold must complete");
+    assert!(
+        !target.exists(),
+        "a denied armed repo-law hold must not write"
     );
 }
 
@@ -30833,6 +31366,158 @@ async fn forkguard_armed_full_access_hold_prompts_instead_of_blocking() {
     run_task.await.expect("engine task");
     assert!(saw_prompt, "armed Full Access hold must prompt");
     assert!(saw_complete, "denied armed hold must complete the turn");
+}
+
+#[tokio::test]
+async fn forkguard_turn_authority_install_never_rolls_back_published_arming() {
+    // `record_applied_runtime_authority` rebuilds the applied authority via
+    // `from_turn_authority`, whose `ask_on_guardrail` is always `None`
+    // (turn installs carry no arming). The recorder must patch the
+    // session's live arming back in: a turn authority install after a
+    // published arming may not roll the recorded `Some(true)` backward to
+    // `None`, or the equality-based re-record check would flap the
+    // authority state on every turn install.
+    let tmp = tempdir().expect("tempdir");
+    let (mut engine, handle) = Engine::new(
+        EngineConfig {
+            workspace: tmp.path().to_path_buf(),
+            ..EngineConfig::default()
+        },
+        &Config::default(),
+    );
+
+    // The host arms through the same publish channel `Op::ChangeMode` uses.
+    handle.publish_turn_authority(
+        AppMode::Agent,
+        false,
+        false,
+        false,
+        crate::tui::approval::ApprovalMode::Suggest,
+        None,
+        Some(true),
+    );
+    assert!(
+        engine.apply_pending_runtime_authority().await,
+        "the armed publish must reach the session"
+    );
+    assert!(engine.session.ask_on_guardrail, "session must be armed");
+    let published = engine.runtime_authority_snapshot();
+    assert_eq!(published.ask_on_guardrail, Some(true));
+
+    // A later turn installs its arming-free turn authority; the re-record
+    // must keep the published arming and stay quiescent.
+    let turn_authority = TurnAuthority::from_effective_fields(
+        AppMode::Agent,
+        false,
+        false,
+        false,
+        crate::tui::approval::ApprovalMode::Suggest,
+    );
+    engine.record_applied_runtime_authority(&turn_authority);
+
+    let recorded = engine.runtime_authority_snapshot();
+    assert_eq!(
+        recorded.ask_on_guardrail,
+        Some(true),
+        "turn authority install must not roll the published arming back to None"
+    );
+    assert_eq!(
+        recorded, published,
+        "re-record must be a no-op against the published armed authority"
+    );
+    assert!(
+        engine.take_pending_runtime_authority().is_none(),
+        "no spurious re-record may schedule another authority transition"
+    );
+}
+
+#[tokio::test]
+async fn forkguard_apply_change_mode_status_suffixes_report_the_arming_change() {
+    // The mode-changed status event is the user-visible receipt of an
+    // arming toggle: arming and disarming must each append their explicit
+    // suffix, and a change without the ask carrier must stay suffix-free so
+    // it never claims an arming flip that did not happen.
+    async fn status_message(handle: &EngineHandle) -> String {
+        let mut rx = handle.rx_event.write().await;
+        loop {
+            match rx.recv().await {
+                Some(Event::Status { message }) => return message,
+                Some(_) => continue,
+                None => panic!("event stream closed before the status message"),
+            }
+        }
+    }
+
+    let tmp = tempdir().expect("tempdir");
+    let (mut engine, handle) = Engine::new(
+        EngineConfig {
+            workspace: tmp.path().to_path_buf(),
+            ..EngineConfig::default()
+        },
+        &Config::default(),
+    );
+
+    // Arming.
+    engine
+        .apply_change_mode(
+            AppMode::Agent,
+            false,
+            false,
+            false,
+            crate::tui::approval::ApprovalMode::Suggest,
+            None,
+            Some(true),
+        )
+        .await;
+    let armed_status = status_message(&handle).await;
+    assert!(
+        armed_status.starts_with("Runtime policy changed to:"),
+        "{armed_status}"
+    );
+    assert!(
+        armed_status.ends_with(" (guardrail prompts armed)"),
+        "arming must be announced: {armed_status}"
+    );
+
+    // Disarming.
+    engine
+        .apply_change_mode(
+            AppMode::Agent,
+            false,
+            false,
+            false,
+            crate::tui::approval::ApprovalMode::Suggest,
+            None,
+            Some(false),
+        )
+        .await;
+    let disarmed_status = status_message(&handle).await;
+    assert!(
+        disarmed_status.ends_with(" (guardrail prompts disarmed)"),
+        "disarming must be announced: {disarmed_status}"
+    );
+
+    // A mode-only change without the ask carrier carries no suffix.
+    engine
+        .apply_change_mode(
+            AppMode::Plan,
+            false,
+            false,
+            false,
+            crate::tui::approval::ApprovalMode::Suggest,
+            None,
+            None,
+        )
+        .await;
+    let mode_status = status_message(&handle).await;
+    assert!(
+        mode_status.starts_with("Runtime policy changed to:"),
+        "{mode_status}"
+    );
+    assert!(
+        !mode_status.contains("(guardrail prompts"),
+        "a change without the ask carrier must not claim an arming flip: {mode_status}"
+    );
 }
 
 #[path = "partial_input_differential_tests.rs"]

@@ -2556,13 +2556,10 @@ impl Engine {
             // denies, and the sandbox/execpolicy layer stays the real safety
             // boundary. Model-issued shell calls keep the standard approval
             // path; this branch is strictly composer provenance. (Pinvou
-            // tri-mode safety: composer provenance also stays un-armed — the
-            // guardrail deny face blocks a user-typed command in every mode,
-            // because no modal can ask more than the user already did.)
-            // Composer provenance keeps the hard deny face in every posture:
-            // typing the command IS the approval (#5191), and no modal can
-            // ask more than the user already did. Arming affects
-            // model-provenance calls only.
+            // tri-mode safety: composer provenance keeps the hard deny face in
+            // every posture, armed or not — typing the command IS the approval
+            // (#5191), no modal can ask more than the user already did, and
+            // arming affects model-provenance calls only.)
             let ask_rule_decision = exec_shell_ask_rule_decision(
                 &self.config,
                 &tool_name,
