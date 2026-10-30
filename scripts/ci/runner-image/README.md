@@ -36,7 +36,24 @@ runner and configure the corresponding repository variable with that label.
 Do not give small runners the generic legacy label if queued jobs still use it.
 Use `Self-hosted Runner Smoke` to verify all three pools after deployment.
 
+Native Linux Rust builds require `libclang-dev` for PipeWire/SPA bindgen,
+in addition to the PipeWire headers. The PR and release dependency steps
+install it explicitly so older runner images and cold caches work too.
+
+Relay rollback tests inspect real Linux listening sockets with `ss` from
+`iproute2`. The Relay job installs it when missing and probes it before tests;
+listener inspection errors remain blocking.
+
 Set repository variable `PINVOU_LOONGARCH64_CHECK_ENABLED=false` to temporarily
 skip the PR Check LoongArch64 cross-compilation leg. Remove the variable or set
 it to `true` to restore its existing routes. The final gate reports this skip;
 other checks and the LoongArch64 release build remain unchanged.
+
+Windows and macOS use independent repository variables:
+`PINVOU_WINDOWS_ENABLED` and `PINVOU_MACOS_ENABLED`. Each platform is enabled
+unless its variable is exactly `false`. Set Windows to `true` and macOS to
+`false` to run Windows checks while macOS stays outside the PR merge gate.
+Windows pool routes use `PINVOU_WINDOWS_HEAVY_RUNNER`,
+`PINVOU_WINDOWS_MEDIUM_RUNNER`, and `PINVOU_WINDOWS_LIGHT_RUNNER`, with
+`PINVOU_WINDOWS_RUNNER` and then `windows-latest` as fallbacks. Provision the
+native build toolchain before assigning Rust compilation to the heavy pool.
