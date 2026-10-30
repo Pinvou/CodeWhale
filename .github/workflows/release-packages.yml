@@ -312,7 +312,7 @@ jobs:
     name: Windows 远控真实证据门禁
     needs: check-version-bump
     if: >-
-      vars.PINVOU_WINDOWS_MAC_ENABLED != 'false' &&
+      vars.PINVOU_WINDOWS_ENABLED != 'false' &&
       needs.check-version-bump.outputs.build_required == 'true' &&
       (github.event_name == 'workflow_dispatch' ||
        (github.event_name == 'push' && github.ref == 'refs/heads/main'))
@@ -543,7 +543,7 @@ jobs:
             libssl-dev \
             libayatana-appindicator3-dev \
             libpipewire-0.3-dev libdrm-dev libgbm-dev libegl-dev \
-            build-essential pkg-config cmake lld
+            build-essential pkg-config cmake lld libclang-dev
           # 从源头减负:孤儿依赖、apt 缓存包与索引清单不留在构建盘上。
           if [[ "$RUNNER_ENVIRONMENT" == github-hosted ]]; then
             sudo apt-get autoremove -y --purge
@@ -732,7 +732,7 @@ jobs:
             libssl-dev \
             libayatana-appindicator3-dev \
             libpipewire-0.3-dev libdrm-dev libgbm-dev libegl-dev \
-            build-essential pkg-config cmake lld
+            build-essential pkg-config cmake lld libclang-dev
           # 从源头减负:孤儿依赖、apt 缓存包与索引清单不留在构建盘上。
           if [[ "$RUNNER_ENVIRONMENT" == github-hosted ]]; then
             sudo apt-get autoremove -y --purge
@@ -1006,8 +1006,8 @@ jobs:
   validate-windows-runtime-pr:
     name: 验证 Windows 私有运行时契约
     needs: check-version-bump
-    if: github.event_name == 'pull_request' && needs.check-version-bump.outputs.build_required == 'true' && vars.PINVOU_WINDOWS_MAC_ENABLED != 'false'
-    runs-on: windows-latest
+    if: github.event_name == 'pull_request' && needs.check-version-bump.outputs.build_required == 'true' && vars.PINVOU_WINDOWS_ENABLED != 'false'
+    runs-on: ${{ fromJSON(vars.PINVOU_WINDOWS_HEAVY_RUNNER || vars.PINVOU_WINDOWS_RUNNER || '["windows-latest"]') }}
     timeout-minutes: 20
     defaults:
       run:
@@ -1037,8 +1037,8 @@ jobs:
   build-windows-x64:
     name: 构建 Windows x86_64 nsis
     needs: [check-version-bump, remote-control-release-gate]
-    if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main' && needs.check-version-bump.outputs.build_required == 'true' && needs.remote-control-release-gate.result == 'success' && vars.PINVOU_WINDOWS_MAC_ENABLED != 'false'
-    runs-on: windows-latest
+    if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main' && needs.check-version-bump.outputs.build_required == 'true' && needs.remote-control-release-gate.result == 'success' && vars.PINVOU_WINDOWS_ENABLED != 'false'
+    runs-on: ${{ fromJSON(vars.PINVOU_WINDOWS_HEAVY_RUNNER || vars.PINVOU_WINDOWS_RUNNER || '["windows-latest"]') }}
     # 0.10.5 的 nsis 构建耗时 ~86min,90min 上限在 post cache save 阶段被撞掉。
     timeout-minutes: 150
     environment:
@@ -1215,7 +1215,7 @@ jobs:
     name: 构建 macOS universal dmg
     needs: check-version-bump
     if: >-
-      vars.PINVOU_WINDOWS_MAC_ENABLED != 'false' &&
+      vars.PINVOU_MACOS_ENABLED != 'false' &&
       needs.check-version-bump.outputs.build_required == 'true' &&
       (github.event_name == 'workflow_dispatch' ||
        (github.event_name == 'push' && github.ref == 'refs/heads/main'))
