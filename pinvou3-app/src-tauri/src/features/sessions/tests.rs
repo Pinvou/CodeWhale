@@ -6436,12 +6436,10 @@ fn forkguard_session_archive_export_via_store_keeps_full_context() {
     std::fs::create_dir_all(&artifacts_dir).expect("artifacts dir");
     std::fs::write(artifacts_dir.join("note.txt"), b"artifact").expect("artifact file");
 
-    let output_dir = std::env::temp_dir().join(format!(
-        "pinvou3-session-export-test-{}",
-        std::process::id()
-    ));
-    std::fs::create_dir_all(&output_dir).expect("output dir");
-    let output = output_dir.join(format!("{}.tar.xz", session.metadata.id));
+    let output_dir = tempfile::tempdir().expect("output dir");
+    let output = output_dir
+        .path()
+        .join(format!("{}.tar.xz", session.metadata.id));
 
     let summary = store
         .export_archive(&session.metadata.id, &output, true)
@@ -6461,7 +6459,7 @@ fn forkguard_session_archive_export_via_store_keeps_full_context() {
         .expect("artifact member");
     assert_eq!(stored.bytes, "artifact".len() as u64);
 
-    let lean = output_dir.join("lean.tar.xz");
+    let lean = output_dir.path().join("lean.tar.xz");
     let transcript_only = store
         .export_archive(&session.metadata.id, &lean, false)
         .expect("export transcript only");
@@ -6475,11 +6473,9 @@ fn forkguard_session_archive_export_via_store_keeps_full_context() {
 
     // An invalid session id is rejected at the store entry without writing
     // any file to disk.
-    let escape = output_dir.join("escape.tar.xz");
+    let escape = output_dir.path().join("escape.tar.xz");
     assert!(store.export_archive("../escape", &escape, true).is_err());
     assert!(!escape.exists());
-
-    let _ = std::fs::remove_dir_all(&output_dir);
 }
 
 /// ADR-0024 read-surface register: `export_session` keeps its deliberate
@@ -6506,10 +6502,10 @@ fn aux_session_archive_export_reads_any_id_class() {
         )
         .expect("seed aux transcript");
 
-    let output_dir =
-        std::env::temp_dir().join(format!("pinvou3-aux-export-test-{}", std::process::id()));
-    std::fs::create_dir_all(&output_dir).expect("output dir");
-    let output = output_dir.join("aux.tar.xz");
+    let output_dir = tempfile::tempdir().expect("output dir");
+    // AUX remains a reserved Windows device name even with an extension.
+    // Exercise the auxiliary session id, using a portable archive filename.
+    let output = output_dir.path().join("aux-session.tar.xz");
     let summary = store
         .export_archive(&aux.id, &output, false)
         .expect("aux id must export like any persisted session");
@@ -6519,8 +6515,6 @@ fn aux_session_archive_export_reads_any_id_class() {
         "the aux transcript member must land in the archive"
     );
     assert!(output.is_file(), "archive must be written");
-
-    let _ = std::fs::remove_dir_all(&output_dir);
 }
 
 /// Metadata write path for directory rebind (review #463): set_workspace
