@@ -43,6 +43,11 @@
   "ignore": [
     "src/vendor/**"
   ],
+  "paths": {
+    "/features/model-store/ModelStoreOperationResults.jsx": ["./src/features/model-store/ModelStoreOperationResults.jsx"],
+    "/features/model-store/operation-results.js": ["./src/features/model-store/operation-results.js"],
+    "/features/model-store/StorageSettingsDialog.jsx": ["./src/features/model-store/StorageSettingsDialog.jsx"]
+  },
   "ignoreUnresolved": [
     "^/@id/react$",
     "^/@id/react-dom/client$",
