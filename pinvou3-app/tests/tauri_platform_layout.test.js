@@ -223,11 +223,10 @@ function assertConnectorMatrix(source) {
   assert.equal(matrixLines.length, 1, "one live connector matrix");
   assert.ok(strategy.includes(matrixLines[0]), "matrix belongs to the connector strategy");
   const expression = matrixLines[0].match(
-    /^      matrix: \$\{\{ fromJSON\(vars\.PINVOU_WINDOWS_MAC_ENABLED != 'false' && '([^']+)' \|\| '([^']+)'\) \}\}$/,
+    /^      matrix: \$\{\{ fromJSON\(vars\.PINVOU_WINDOWS_ENABLED != 'false' && \(vars\.PINVOU_MACOS_ENABLED != 'false' && '([^']+)' \|\| '([^']+)'\) \|\| \(vars\.PINVOU_MACOS_ENABLED != 'false' && '([^']+)' \|\| '([^']+)'\)\) \}\}$/,
   );
-  assert.ok(expression, "known connector matrix condition and two JSON branches");
-  const enabled = JSON.parse(expression[1]);
-  const disabled = JSON.parse(expression[2]);
+  assert.ok(expression, "known connector matrix condition and four JSON branches");
+  const [enabled, withWindows, withMacos, disabled] = expression.slice(1).map(JSON.parse);
   const linuxRows = [
     { platform: "linux-arm64", "runs-on": "ubuntu-22.04-arm", resources: "linux/aarch64", suffix: "", can_run: true },
     { platform: "linux-x64", "runs-on": "ubuntu-22.04", resources: "linux/x86_64", suffix: "", can_run: true },
@@ -239,9 +238,15 @@ function assertConnectorMatrix(source) {
     { platform: "windows-x64", "runs-on": "windows-latest", resources: "windows/x86_64", suffix: ".exe", can_run: true },
   ] }, "enabled/default connector matrix preserves all five platform mappings");
   assert.deepEqual(disabled, { include: linuxRows }, "disabled native platforms retain exactly both Linux mappings");
+  assert.deepEqual(withWindows, {
+    include: enabled.include.filter((row) => !row.resources.startsWith("macos/")),
+  }, "Windows-only switch preserves Windows and both Linux mappings");
+  assert.deepEqual(withMacos, {
+    include: enabled.include.filter((row) => !row.resources.startsWith("windows/")),
+  }, "macOS-only switch preserves both macOS and both Linux mappings");
   const runners = job.filter((line) => /^    runs-on:/.test(line));
   assert.deepEqual(runners, [
-    "    runs-on: ${{ matrix.runs-on == 'ubuntu-22.04' && fromJSON(vars.PINVOU_LINUX_LIGHT_RUNNER || vars.PINVOU_LINUX_RUNNER || '[\"ubuntu-22.04\"]') || matrix.runs-on }}",
+    "    runs-on: ${{ matrix.runs-on == 'ubuntu-22.04' && fromJSON(vars.PINVOU_LINUX_LIGHT_RUNNER || vars.PINVOU_LINUX_RUNNER || '[\"ubuntu-22.04\"]') || matrix.runs-on == 'windows-latest' && fromJSON(vars.PINVOU_WINDOWS_LIGHT_RUNNER || vars.PINVOU_WINDOWS_RUNNER || '[\"windows-latest\"]') || matrix.runs-on }}",
   ], "connector matrix runner mapping retains LIGHT/legacy/default routing");
 }
 assertConnectorMatrix(connectorWorkflow);
