@@ -53,10 +53,12 @@ test('public and operations contracts expose progress and bounded retry but no d
 });
 
 test('dedicated user and operations views expose closure progress, blockers and retry in all languages', async () => {
-  const [view, closureFlow, adminView, personal, admin, copy, entry] = await Promise.all([
+  const [view, closureFlow, adminView, operationsView, adminNavigation, personal, admin, copy, entry] = await Promise.all([
     read('../pinvou3-app/src/features/account-platform/AccountPlatformView.jsx'),
     read('../pinvou3-app/src/features/account-platform/account-closure-flow.js'),
     read('../pinvou3-app/src/features/account-platform/AdminPlatformView.jsx'),
+    read('../pinvou3-app/src/features/account-platform/AdminRestoredPages.jsx'),
+    read('../pinvou3-app/src/features/account-platform/useAdminSections.js'),
     read('../pinvou3-app/src/features/account-platform/AccountClosureWorkspace.jsx'),
     read('../pinvou3-app/src/features/account-platform/AdminAccountClosureWorkspace.jsx'),
     read('../pinvou3-app/src/shared/account-closure-i18n.js'),
@@ -64,7 +66,23 @@ test('dedicated user and operations views expose closure progress, blockers and 
   ]);
   assert.match(view, /<AccountClosureWorkspace/);
   assert.match(closureFlow, /CLOSE_MY_ACCOUNT/);
-  assert.match(adminView, /<AdminAccountClosureWorkspace/);
+  // The restored operations page owns the closure view; keep both real mounts wired.
+  assert.match(adminView, /^import \{[^}]*\bAdminOperationsPage\b[^}]*\} from '\.\/AdminRestoredPages\.jsx';$/m);
+  assert.match(adminView, /^\s*\{view === 'operations' && <AdminOperationsPage\b[^>]*me=\{authorization\} route=\{operationsRoute\}/m);
+  assert.match(adminView, /const operationsRoute = useLastActiveRoute\(navigation, active === 'operations'\)/);
+  assert.match(operationsView, /^import \{ AdminAccountClosureWorkspace \} from '\.\/AdminAccountClosureWorkspace\.jsx';$/m);
+  assert.match(operationsView, /^\s*\['closures', 'platform\.account-closures\.read',/m);
+  assert.match(operationsView, /^\s*\{view === 'closures' && <AdminAccountClosureWorkspace \{\.\.\.\{ client, me, language \}\} \/>\}/m);
+  assert.match(operationsView, /const active = tabs\.some\(\(\[key\]\) => key === route\.operationsTab\) \? route\.operationsTab/);
+  assert.match(adminNavigation, /const route = resolveAdminRoute\(search, flags, available\)/);
+  assert.match(adminNavigation, /adminRouteLocation\(search, section, route\.tab \? \{ finance_tab: route\.tab \} : \{\}/);
+  const { resolveAdminRoute, visibleAdminSections } = await import('../../../pinvou3-app/src/features/account-platform/admin-sections.js');
+  const available = visibleAdminSections({ platform_permissions: ['platform.account-closures.read'] });
+  assert.ok(available.includes('operations'));
+  assert.equal(visibleAdminSections({ platform_permissions: [] }).includes('operations'), false);
+  const closureRoute = resolveAdminRoute('?section=closures', {}, available);
+  assert.equal(closureRoute.section, 'operations');
+  assert.equal(closureRoute.operationsTab, 'closures');
   assert.match(admin, /retryAccountClosure/);
   assert.match(personal, /accountClosureResumeAction/);
   assert.match(entry, /account-closure-i18n/);
