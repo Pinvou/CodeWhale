@@ -527,6 +527,34 @@ test('createNavigationOwnership: same-session view navigation retires a pending 
   );
 });
 
+test('createNavigationOwnership: the ticket must be taken before the prompt wait, not after it (复核 P2)', () => {
+  const gate = createNativeSurfaceTransitionGate({
+    acquireHide: () => assert.fail('hide must not be called'),
+    getContext: () => ({ sessionId: 'sid-1', hasWorkspace: false, visible: false }),
+  });
+  // 修后生产顺序：runDoctor 在按钮动作里、buildDoctorPrompt 等待**之前**拍票
+  // （captureChatOwnership），onOpenChat 收到的就是这张等待前的票。
+  const ownershipBeforeWait = createNavigationOwnership(gate, 'view');
+  // prompt 采样挂起期间，用户经侧栏去设置（view 通道失效）。
+  gate.invalidate('view');
+  assert.equal(
+    ownershipBeforeWait.kept(),
+    false,
+    'pre-wait ticket must be retired by the navigation that happened during the prompt wait'
+  );
+
+  // 修前顺序回归钉（本轮复核的受控反例 view:settings → send → view:chat）：
+  // onOpenChat 在 prompt resolve 之后才拍，拿到的是去设置之后的新修订号——
+  // kept() 恒真，晚到的完成把用户从设置页拽回聊天。视图层已把拍点提前
+  // （DeviceManagerView runDoctor + smoke ⑥-f），这里钉死「为什么必须提前」。
+  const lateOwnership = createNavigationOwnership(gate, 'view');
+  assert.equal(
+    lateOwnership.kept(),
+    true,
+    'a capture taken after the wait snapshots the post-navigation revision — exactly the reported bug'
+  );
+});
+
 test('createNavigationOwnership: a newer same-channel session switch still wins through isCurrent', () => {
   const gate = createNativeSurfaceTransitionGate({
     acquireHide: () => assert.fail('hide must not be called'),

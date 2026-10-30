@@ -468,7 +468,7 @@ const linkTargetOf = (row) => ({
 // (round-8 review).
 const stripModelTag = (value) => String(value || '').toLowerCase().split(':')[0].trim();
 
-const DeviceManagerView = ({ theme, t, bs, onOpenChat, onOpenModelStore }) => {
+const DeviceManagerView = ({ theme, t, bs, onOpenChat, captureChatOwnership, onOpenModelStore }) => {
   const copy = t.uiDeviceMgr;
   const deviceFmt = bs?.device?._fmt || null;
   const deviceError = bs?.deviceError || null;
@@ -921,8 +921,18 @@ const DeviceManagerView = ({ theme, t, bs, onOpenChat, onOpenModelStore }) => {
     if (doctorBusy || busyKey) return;
     setDoctorBusy(kind);
     try {
+      // Navigation ownership must be captured HERE — before the prompt await,
+      // not inside onOpenChat after it resolves (review P2, prompt-window
+      // recheck). buildDoctorPrompt can stay pending for seconds; a capture
+      // taken after the await would snapshot whatever view the user switched
+      // to meanwhile (e.g. Settings) and treat yanking them back to chat as
+      // the current intent. onOpenChat consumes this pre-captured ticket; a
+      // null (helper not wired) falls back to its own late capture.
+      const viewOwnership = typeof captureChatOwnership === 'function'
+        ? captureChatOwnership()
+        : null;
       const prompt = await dev.buildDoctorPrompt(kind, questionText);
-      const sent = await onOpenChat(prompt);
+      const sent = await onOpenChat(prompt, viewOwnership);
       // onOpenChat returns a boolean by contract: false = not sent (bridge
       // unavailable / navigated away / send failed). Surface it and skip onDone —
       // the custom question stays in the input instead of being silently cleared.
@@ -939,7 +949,7 @@ const DeviceManagerView = ({ theme, t, bs, onOpenChat, onOpenModelStore }) => {
     } finally {
       setDoctorBusy(null);
     }
-  }, [copy, doctorBusy, onOpenChat, showToast, t]);
+  }, [captureChatOwnership, copy, doctorBusy, onOpenChat, showToast, t]);
   const questionInvalid = question.trim().length === 0 || question.length > QUESTION_MAX;
   const sendCustom = useCallback(() => {
     const text = question.trim();

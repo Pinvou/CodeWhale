@@ -8,6 +8,7 @@
  * - 模型商店行呈锁定态（由模型商店管理 + 禁用），外部模型行显示类别/状态徽标
  * - 外部模型「移除」的两段式确认：先登记（ollama 未登记行）再走守卫移除命令
  * - 故障排查快捷卡：device_doctor_prompt → 新建普通会话（create_session）→ chat 携带提示词
+ * - prompt 采样挂起期间经侧栏去设置：晚到的提示词不把用户拽回聊天、消息照常送达（复核 P2）
  * - 商店库/外部模型读取失败面：常驻错误行 + 前往商店/重试恢复（第五轮评审）
  * - 旧行在场的刷新失败常驻陈旧行、交错读取按世代消费错误状态（round-30 评审）
  * - 非温度传感器越线出通用临界文案、不误指温度（round-30 评审）
@@ -333,6 +334,14 @@ function injectSource() {
           corrected: [],
         });
         case 'device_doctor_prompt':
+          // ⑥-f prompt 窗口开关（复核 P2）：挂住采样，制造「用户在采样挂起期间
+          // 去设置」的可观察窗口；放行时以同样的标记串 resolve，不改变后续
+          // 断言口径。
+          if (window.__DEVICE_MGR_TEST__.hangDoctorPrompt) {
+            return new Promise((resolve) => {
+              window.__DEVICE_MGR_TEST__.resolveDoctorPrompt = () => resolve('DEVICE_DOCTOR_MARKER::' + (args && args.kind) + (args && args.question ? '::' + args.question : ''));
+            });
+          }
           return Promise.resolve('DEVICE_DOCTOR_MARKER::' + (args && args.kind) + (args && args.question ? '::' + args.question : ''));
         case 'device_register_external_model':
           return Promise.resolve({ id: 'm-registered-new', name: (args && args.name) || '', kind: (args && args.kind) || 'ollama' });
@@ -347,6 +356,8 @@ function injectSource() {
       // 场景开关：读取失败横幅/重试与发送失败路径此前零覆盖（第四轮评审）。
       nullGpuCompute: false,
       failServices: false,
+      // ⑥-f prompt 窗口（复核 P2）：挂住 device_doctor_prompt 用。
+      hangDoctorPrompt: false,
       // 监控通道失败面（round-29 review P2）：内嵌页陈旧标记用。
       failMonitor: false,
       // 接入主动作的失败面（round-21 review P3）：此前只有读取面有 fail 开关。
@@ -972,6 +983,53 @@ async function clickTestId(page, testId) {
   rec('⑦-b 离开设备页后 2s 轮询停止',
     snapshotCallsAfterNav === snapshotCallsAtNav,
     `at nav=${snapshotCallsAtNav}, after 2.6s=${snapshotCallsAfterNav}`);
+
+  // ⑥-f prompt 采样窗口的导航归属（复核 P2）：修前 openDeviceDoctorChat 在
+  // buildDoctorPrompt resolve 之后才拍 view 归属——用户在采样挂起期间经侧栏
+  // 去设置时，拍到的是设置页的新修订号，kept() 恒真，晚到的提示词把用户从
+  // 设置页拽回聊天（受控反例 view:settings → send → view:chat）。修后视图在
+  // 动作起点、prompt 等待之前拍票并随 prompt 传入：同场景必须留在设置页，
+  // 且消息照常送达（已接受发送的真实回执：无「没发出去」toast、不重发）。
+  await clickNavByLabel(page, '设备管理');
+  await page.waitForFunction(() => document.querySelector('[data-testid="app-root"]')?.getAttribute('data-current-view') === 'monitor', { timeout: 8000 });
+  await page.waitForFunction(() => !!document.querySelector('[data-testid="device-manager-view"]'), { timeout: 8000 });
+  await page.evaluate(() => { window.__DEVICE_MGR_TEST__.hangDoctorPrompt = true; });
+  const chatCallsBeforePromptWindow = await page.evaluate(() => window.__DEVICE_MGR_TEST__.callsOf('chat').length);
+  await clickTestId(page, 'device-manager-doctor-packages');
+  await page.waitForFunction(
+    () => typeof window.__DEVICE_MGR_TEST__.resolveDoctorPrompt === 'function',
+    { timeout: 8000 },
+  );
+  // prompt 挂起期间切去设置（真实侧栏导航，走 view 通道）。
+  await clickNavByLabel(page, '设置');
+  await page.waitForFunction(() => document.querySelector('[data-testid="app-root"]')?.getAttribute('data-current-view') === 'settings', { timeout: 8000 });
+  await page.evaluate(() => { window.__DEVICE_MGR_TEST__.hangDoctorPrompt = false; });
+  await page.evaluate(() => { window.__DEVICE_MGR_TEST__.resolveDoctorPrompt?.(); });
+  // 消息必须照常送达：晚到的提示词按「已接受发送」计，只跳过视图切换。
+  await page.waitForFunction(
+    (before) => window.__DEVICE_MGR_TEST__.callsOf('chat').length > before,
+    { timeout: 15000 },
+    chatCallsBeforePromptWindow,
+  );
+  // 留出潜在误切窗口后视图必须仍停在设置页（修前这里已是 chat）。
+  await sleep(600);
+  const promptWindowState = await page.evaluate(() => ({
+    view: document.querySelector('[data-testid="app-root"]')?.getAttribute('data-current-view'),
+    chatCalls: window.__DEVICE_MGR_TEST__.callsOf('chat').length,
+    toast: document.querySelector('[data-testid="model-store-toast"]')?.innerText || null,
+  }));
+  if (promptWindowState.view !== 'settings' || promptWindowState.toast) {
+    const diag = await page.evaluate(() => ({
+      view: document.querySelector('[data-testid="app-root"]')?.getAttribute('data-current-view'),
+      toast: document.querySelector('[data-testid="model-store-toast"]')?.innerText || null,
+      lastCalls: window.__DEVICE_MGR_TEST__.calls.slice(-8).map(c => c.cmd),
+    }));
+    console.error('[smoke][⑥-f diag]', JSON.stringify(diag));
+  }
+  rec('⑥-f prompt 采样期间去设置：晚到提示词不拽回聊天、消息照常送达',
+    promptWindowState.view === 'settings' && !promptWindowState.toast
+    && promptWindowState.chatCalls > chatCallsBeforePromptWindow,
+    JSON.stringify(promptWindowState));
 
   // ⑧ 后端读取失败面：横幅 + 重试按钮 + 恢复（此前整条失败面只被断言"不存在"，
   // 横幅回归消失全绿——第四轮评审 P2）。重试按钮的接线必须真钉：2s 后台轮询在

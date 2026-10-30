@@ -3036,7 +3036,7 @@ const App = () => {
       // 新建一个空会话并登记进侧栏历史，连续失败会留下 N 个空会话（round-21
       // review P3）。重试直接补发到同一会话；成功后清空。
       const lastFailedDoctorSidRef = useRef(null);
-      const openDeviceDoctorChat = useCallback(async (prompt) => {
+      const openDeviceDoctorChat = useCallback(async (prompt, viewOwnership) => {
         // 返回值契约（设备管理页依赖）：true=提示词已送达新会话（发送成功后无
         // 论视图切换是否被更新的会话转换取代，都按已送达计）；false=没发出去
         // （桥不可用 / 发送前转换已被取代 / 发送失败）。视图据此保留用户输入并
@@ -3047,12 +3047,18 @@ const App = () => {
         // sessionId 不会让本动作 session 通道的票据过期——prompt 采样、
         // materialize、completion 三个等待中的任何一次去设置操作，都必须让
         // 晚到的完成失去“把用户拽回聊天”的权利（§3.5：不把已离开设备页的
-        // 用户拽进聊天）。动作开始时拍下 view 修订号，与 isCurrent 相与；
-        // 消息照常送达并按已送达计（返回 true），只跳过视图切换，不诱发重发。
-        const viewOwnership = createNavigationOwnership(
-          browserUiTransitionGateRef.current,
-          'view',
-        );
+        // 用户拽进聊天）。消息照常送达并按已送达计（返回 true），只跳过视图
+        // 切换，不诱发重发。
+        //
+        // 票据的拍点（复核 P2，prompt 窗口）：必须在设备页按钮动作里、
+        // buildDoctorPrompt 等待**之前**拍——本函数在 prompt resolve 之后才被
+        // 调用，此处再拍会把用户采样期间切去的设置页新修订号当成当前意图，
+        // 晚到的完成仍把用户拽回聊天。视图经 captureChatOwnership 在动作起点
+        // 拍好并随 prompt 传入；未传票据的调用方按旧契约退回入口现拍（兼容
+        // 兜底，不是产品路径，产品路径由 smoke ⑥-f 钉住）。
+        const ownership = (viewOwnership && typeof viewOwnership.kept === 'function')
+          ? viewOwnership
+          : createNavigationOwnership(browserUiTransitionGateRef.current, 'view');
         let usedSid = null;
         try {
           // 复用前先确认失败会话仍存在（round-22 review P2）：用户可能在两次
@@ -3100,7 +3106,7 @@ const App = () => {
             // 输入（第九轮评审 P1）。isCurrent 之外还要求 view 修订号未变：
             // 同会话的去设置导航不走 session 通道，光看 isCurrent 拦不住
             // （三十二轮评审 P2）。
-            if (isCurrent() && viewOwnership.kept()) {
+            if (isCurrent() && ownership.kept()) {
               setCodeModeOn(false);
               closeMobileSidebar();
               setCurrentView('chat');
@@ -3130,6 +3136,14 @@ const App = () => {
           return false;
         }
       }, [closeMobileSidebar, runBrowserUiTransition, setCurrentView]);
+
+      // 设备页在按钮动作起点拍导航归属用（复核 P2，prompt 窗口）：把拍票函数
+      // 传下去，动作在 buildDoctorPrompt 等待之前拍；不把 gate 对象本身暴露给
+      // feature 层。browserUiTransitionGateRef 是稳定 ref，依赖为空即可。
+      const captureDeviceChatOwnership = useCallback(
+        () => createNavigationOwnership(browserUiTransitionGateRef.current, 'view'),
+        [],
+      );
 
       // 设备管理页「前往模型商店」：复用模型商店既有的导航路径（与侧栏点击
       // 同一条 runBrowserUiTransition 通道）。
@@ -5200,6 +5214,7 @@ const App = () => {
               <LazyDeviceManagerView
                 theme={activeTheme} t={t} bs={bs}
                 onOpenChat={openDeviceDoctorChat}
+                captureChatOwnership={captureDeviceChatOwnership}
                 onOpenModelStore={openModelStoreFromDevice}
               />
             ) : (
