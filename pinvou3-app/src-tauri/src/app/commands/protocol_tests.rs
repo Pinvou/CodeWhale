@@ -709,6 +709,8 @@ command_protocol!(
         "reveal_model_api_key",
         "save_model",
         "delete_model",
+        // 三十三轮评审 P2：移除回收的条件删除（最终事务按快照身份核对）。
+        "delete_model_if_matches",
         "set_active_model",
         "set_session_model",
         "get_session_model_id",
