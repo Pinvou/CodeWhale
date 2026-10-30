@@ -243,6 +243,15 @@ const ModelStoreView = ({ theme, t, bs }) => {
       if (!card?.script_sha256) continue;
       const local = model.local_script_hashes || {};
       const server = card.script_sha256;
+      // 服务端空 map 必须整卡跳过（P2-2）。老后台不下发 script_sha256 时，
+      // 后端 serde 缺省成 `{}`（store_client.rs 的注释也承诺「比对逻辑会跳过」），
+      // 而 `{}` 是 truthy，上面那句判空挡不住它；一旦放行进比对，本地任何非空
+      // 哈希都会被算成「服务器版本不同」→ 该卡全部已装模型挂上假「有可用更新」。
+      // 用户确认更新后流程先停运行中模型、再去服务端拉新脚本——服务端根本没有
+      // 脚本，只能失败收场，留下一个被无谓停掉的模型。
+      // 只跳过服务端空的一侧：本地空 map（升级前的老安装没记过哈希）且服务端
+      // 也没下发时，两侧本就无差异、仍按无更新处理；服务端真有脚本时照常比对。
+      if (Object.keys(server).length === 0) continue;
       const types = new Set([...Object.keys(local), ...Object.keys(server)]);
       for (const t of types) {
         if ((local[t] || '') !== (server[t] || '')) {
