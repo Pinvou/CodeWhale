@@ -599,7 +599,7 @@ func TestRetainedManualSLAConcurrentWorkersEscalateOnce(t *testing.T) {
 		t.Fatal(err)
 	}
 	const barrier int64 = 761124085
-	if _, err = r.pool.Exec(ctx, `CREATE FUNCTION fixture_sla_barrier() RETURNS trigger LANGUAGE plpgsql AS $$BEGIN IF NEW.escalation_level<>OLD.escalation_level THEN PERFORM pg_advisory_xact_lock(761124085); END IF; RETURN NEW; END$$; CREATE TRIGGER fixture_sla_barrier BEFORE UPDATE ON manual_review_cases FOR EACH ROW EXECUTE FUNCTION fixture_sla_barrier()`); err != nil {
+	if _, err = retainedFinanceOwnerExec(t, r, ctx, `CREATE FUNCTION fixture_sla_barrier() RETURNS trigger LANGUAGE plpgsql AS $$BEGIN IF NEW.escalation_level<>OLD.escalation_level THEN PERFORM pg_advisory_xact_lock(761124085); END IF; RETURN NEW; END$$; CREATE TRIGGER fixture_sla_barrier BEFORE UPDATE ON manual_review_cases FOR EACH ROW EXECUTE FUNCTION fixture_sla_barrier()`); err != nil {
 		t.Fatal(err)
 	}
 	blocker, err := r.pool.Acquire(ctx)
