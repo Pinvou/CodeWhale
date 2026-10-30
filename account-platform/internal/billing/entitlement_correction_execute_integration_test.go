@@ -396,6 +396,44 @@ JOIN entitlement_components c ON c.package_id=p.id WHERE p.id=$1 GROUP BY p.poin
 		t.Fatalf("package effective total changed: total=%d effective=%d err=%v", packageTotal, effectiveTotal, err)
 	}
 
+	t.Run("runbook-accepts-real-reclassification-without-financial-writes", func(t *testing.T) {
+		audit, err := os.ReadFile("../../deploy/runbooks/sql/billing-ledger-audit.sql")
+		if err != nil {
+			t.Fatal(err)
+		}
+		before := entitlementFinancialFactsSnapshot(t, ctx, repository)
+		tx, err := repository.pool.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.RepeatableRead, AccessMode: pgx.ReadOnly})
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer tx.Rollback(ctx)
+		for _, name := range []string{"entitlement_component_conservation_mismatch", "entitlement_package_projection_mismatch"} {
+			marker := "SELECT '" + name + "' AS check_name,"
+			_, query, found := strings.Cut(string(audit), marker)
+			if !found || strings.Contains(query, marker) {
+				t.Fatalf("runbook check %s must exist exactly once", name)
+			}
+			statement, _, complete := strings.Cut(query, ";")
+			if !complete {
+				t.Fatalf("runbook check %s has no terminator", name)
+			}
+			var label string
+			var violations int64
+			if err := tx.QueryRow(ctx, marker+statement).Scan(&label, &violations); err != nil || label != name || violations != 0 {
+				t.Fatalf("runbook check %s: label=%s violations=%d err=%v", name, label, violations, err)
+			}
+		}
+		if err := tx.Commit(ctx); err != nil {
+			t.Fatal(err)
+		}
+		after := entitlementFinancialFactsSnapshot(t, ctx, repository)
+		for table, rows := range before {
+			if after[table] != rows {
+				t.Fatalf("read-only runbook checks changed %s", table)
+			}
+		}
+	})
+
 	setActivation("INACTIVE")
 	replayed, err := repository.ExecuteEntitlementComponentCorrection(ctx, approvalRequestID, authorizationEventID, 2,
 		packageID, orderID, requesterID, approverID, executionKey, "independent approval completed", reasonCode, frozen)

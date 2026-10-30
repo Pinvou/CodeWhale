@@ -83,7 +83,7 @@ FROM entitlement_components
 WHERE original_microcredits <>
   available_microcredits + reserved_microcredits + used_microcredits +
   active_grant_microcredits + suspended_grant_microcredits +
-  expired_microcredits + revoked_microcredits;
+  expired_microcredits + revoked_microcredits + reclassified_out_microcredits;
 
 SELECT 'entitlement_component_lot_mismatch' AS check_name, count(*) AS violations
 FROM entitlement_components component
@@ -95,7 +95,7 @@ WHERE lot.remaining_microcredits <>
 SELECT 'entitlement_package_projection_mismatch' AS check_name, count(*) AS violations
 FROM entitlement_packages package
 LEFT JOIN (
-  SELECT package_id,sum(original_microcredits) total,
+  SELECT package_id,sum(original_microcredits-reclassified_out_microcredits) total,
     sum(available_microcredits+active_grant_microcredits+suspended_grant_microcredits) remaining,
     sum(reserved_microcredits) reserved,sum(used_microcredits) used,
     sum(expired_microcredits) expired,sum(revoked_microcredits) revoked
