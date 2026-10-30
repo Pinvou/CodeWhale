@@ -72,7 +72,7 @@ func TestPersonalWalletPostgresIntegration(t *testing.T) {
 		for _, value := range []struct {
 			kind string
 			id   uuid.UUID
-		}{{"PERSONAL", uuid.Nil}, {"ORGANIZATION", owner}, {"ORG_UNIT", owner}} {
+		}{{"PERSONAL", uuid.Nil}, {"ORGANIZATION", owner}, {"UNKNOWN", owner}} {
 			if _, _, err := repository.EnsureWallet(ctx, value.kind, value.id); !errors.Is(err, ErrConflict) {
 				t.Errorf("accepted owner %s/%s: %v", value.kind, value.id, err)
 			}
@@ -126,12 +126,14 @@ func TestPersonalWalletPostgresIntegration(t *testing.T) {
 		if unauthorized.Code != 401 {
 			t.Fatalf("missing service credential status=%d", unauthorized.Code)
 		}
-		protectedHold := httptest.NewRecorder()
-		handler.ServeHTTP(protectedHold, httptest.NewRequest(http.MethodPost, "/internal/v1/holds/reserve", nil))
-		if protectedHold.Code != http.StatusUnauthorized {
-			t.Fatalf("registered hold route without service credential status=%d", protectedHold.Code)
+		for _, path := range []string{"/internal/v1/holds/reserve", "/internal/v1/registration-bonus-grants"} {
+			protectedRoute := httptest.NewRecorder()
+			handler.ServeHTTP(protectedRoute, httptest.NewRequest(http.MethodPost, path, nil))
+			if protectedRoute.Code != http.StatusUnauthorized {
+				t.Fatalf("registered route %s without service credential status=%d", path, protectedRoute.Code)
+			}
 		}
-		for _, path := range []string{"/internal/v1/registration-bonus-grants", "/internal/v1/model-mappings", "/internal/v1/organizations"} {
+		for _, path := range []string{"/internal/v1/model-mappings", "/internal/v1/organizations"} {
 			out := httptest.NewRecorder()
 			handler.ServeHTTP(out, httptest.NewRequest(http.MethodPost, path, nil))
 			if out.Code != 404 {
