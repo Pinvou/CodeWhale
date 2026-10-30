@@ -88,11 +88,22 @@ func TestClientReadinessSemVerOriginalSignedIdentity(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		manifest := policy.WithNow(func() time.Time { return time.Date(2026, 9, 1, 0, 0, 0, 0, time.UTC) }).Manifest()
-		readiness.config.Compatibility = manifest
+		clock := time.Date(2026, 9, 1, 0, 0, 0, 0, time.UTC)
+		readiness.config.Compatibility = policy.WithNow(func() time.Time { return clock }).Manifest
 		metadata := readiness.Compatibility()
 		if metadata.CurrentClient != releases[0].Version || metadata.MaximumClient != releases[0].Version || metadata.MinimumClient != releases[2].Version || !reflect.DeepEqual(metadata.Releases, releases) {
 			t.Fatal("actual environment policy to readiness metadata lost exact original versions")
+		}
+		for _, offset := range []time.Duration{-time.Nanosecond, 0, time.Second} {
+			clock = time.Date(2026, 11, 30, 0, 0, 0, 0, time.UTC).Add(offset)
+			metadata = readiness.Compatibility()
+			expected := releases[0].Version
+			if offset < 0 {
+				expected = releases[2].Version
+			}
+			if metadata.MinimumClient != expected || metadata.MinimumSupportedClient != expected || metadata.MaximumClient != releases[0].Version || !reflect.DeepEqual(metadata.Releases, releases) {
+				t.Fatalf("same service did not refresh policy at sunset offset %s: %+v", offset, metadata)
+			}
 		}
 	})
 }

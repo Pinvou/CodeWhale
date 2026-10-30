@@ -108,7 +108,7 @@ type ClientReadinessConfig struct {
 	SigningKeyID    string
 	SigningKey      ed25519.PrivateKey
 	AttestationTTL  time.Duration
-	Compatibility   clientcompat.Manifest
+	Compatibility   func() clientcompat.Manifest
 }
 
 type ClientReadinessService struct {
@@ -190,7 +190,10 @@ func NewClientReadinessService(config ClientReadinessConfig, catalog interface {
 }
 
 func (s *ClientReadinessService) Compatibility() ClientCompatibility {
-	manifest := s.config.Compatibility
+	var manifest clientcompat.Manifest
+	if s.config.Compatibility != nil {
+		manifest = s.config.Compatibility()
+	}
 	result := ClientCompatibility{Environment: s.config.Environment, ServiceVersion: s.config.ServiceVersion, ContractVersion: s.config.ContractVersion, APIContractVersion: manifest.APIContractVersion, CurrentClient: manifest.CurrentClientVersion, MinimumClient: manifest.MinimumSupportedClientVersion, MinimumSupportedClient: manifest.MinimumSupportedClientVersion, MaximumClient: manifest.CurrentClientVersion, SunsetAt: manifest.SunsetAt, UpgradeURL: manifest.UpgradeURL, Releases: manifest.Releases, GeneratedAt: s.now().Format(time.RFC3339)}
 	if result.MinimumClient == "" {
 		result.MinimumClient, result.MinimumSupportedClient, result.MaximumClient = s.config.MinimumClient, s.config.MinimumClient, s.config.MaximumClient

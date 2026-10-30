@@ -44,7 +44,7 @@ func installPersonalExecution(ctx context.Context, service *token.Service, repos
 	if err != nil || ttlSeconds < 60 || ttlSeconds > 900 {
 		return errors.New("client readiness TTL must be between 60 and 900 seconds")
 	}
-	readiness, err := token.NewClientReadinessService(token.ClientReadinessConfig{Environment: environment, ServiceVersion: valueOrDefault("TOKEN_SERVICE_VERSION", "development"), ContractVersion: valueOrDefault("TOKEN_CLIENT_CONTRACT_VERSION", "client-readiness-v1"), MinimumClient: valueOrDefault("TOKEN_MINIMUM_CLIENT_VERSION", "0.8.0"), MaximumClient: valueOrDefault("TOKEN_MAXIMUM_CLIENT_VERSION", "0.8.0"), AccountURL: os.Getenv("ACCOUNT_HTTP_URL"), OIDCIssuer: os.Getenv("OIDC_ISSUER"), ServiceToken: serviceCredential, SigningKeyID: os.Getenv("CLIENT_READINESS_ATTESTATION_KEY_ID"), SigningKey: key, AttestationTTL: time.Duration(ttlSeconds) * time.Second, Compatibility: compatibility.Manifest()}, repository, routes, billing, repository)
+	readiness, err := token.NewClientReadinessService(token.ClientReadinessConfig{Environment: environment, ServiceVersion: valueOrDefault("TOKEN_SERVICE_VERSION", "development"), ContractVersion: valueOrDefault("TOKEN_CLIENT_CONTRACT_VERSION", "client-readiness-v1"), MinimumClient: valueOrDefault("TOKEN_MINIMUM_CLIENT_VERSION", "0.8.0"), MaximumClient: valueOrDefault("TOKEN_MAXIMUM_CLIENT_VERSION", "0.8.0"), AccountURL: os.Getenv("ACCOUNT_HTTP_URL"), OIDCIssuer: os.Getenv("OIDC_ISSUER"), ServiceToken: serviceCredential, SigningKeyID: os.Getenv("CLIENT_READINESS_ATTESTATION_KEY_ID"), SigningKey: key, AttestationTTL: time.Duration(ttlSeconds) * time.Second, Compatibility: compatibility.Manifest}, repository, routes, billing, repository)
 	if err != nil {
 		return err
 	}
