@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"encoding/pem"
 	"errors"
+	"github.com/Pinvou/pinvou3/account-platform/internal/cifixture"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -75,7 +76,7 @@ func walletConsumerBillingActors(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	c, err := pgx.ConnectConfig(context.Background(), config)
+	c, err := cifixture.ConnectConfig(context.Background(), config)
 	if err != nil {
 		t.Fatal(err)
 	}

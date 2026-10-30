@@ -16,6 +16,14 @@ SPEC.loader.exec_module(RUNNER)
 
 
 class FinancialPostgresRunnerTests(unittest.TestCase):
+    def setUp(self):
+        # Mock local-fixture tests must not inherit the live consumer's CI binding.
+        environment = patch.dict(RUNNER.os.environ, {"GITHUB_ACTIONS": "",
+            "PINVOU_ACCOUNT_CI_PG_PORT": "", "PINVOU_ACCOUNT_CI_PG_SYSTEM_ID": "",
+            "PINVOU_ACCOUNT_CI_PG_DIRECTORY": ""})
+        environment.start()
+        self.addCleanup(environment.stop)
+
     def test_remote_cancellation_requires_owner_loop_transport_cases(self):
         root = "TestRemoteModelCancellationOwnerLoopTransport"
         children = {"remote_emergency", "remote_emergency_then_user", "user_only",

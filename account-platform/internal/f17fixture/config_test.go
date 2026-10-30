@@ -38,3 +38,27 @@ func TestOwnedAuditFixtureConfiguration(t *testing.T) {
 		t.Fatal("server directory identity mismatch")
 	}
 }
+
+func TestCIConfigurationAllowed(t *testing.T) {
+	c, err := pgx.ParseConfig("postgres://postgres@127.0.0.1:49173/postgres?sslmode=disable")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !CIConfigurationAllowed(c, "49173", true) {
+		t.Fatal("valid dynamic CI port rejected")
+	}
+	for _, port := range []string{"", "0", "1023", "65536", "049173", "49174", "49173\n", "$(true)"} {
+		if CIConfigurationAllowed(c, port, true) {
+			t.Fatalf("admitted metadata %q", port)
+		}
+	}
+	if CIConfigurationAllowed(c, "49173", false) {
+		t.Fatal("outside Actions admitted")
+	}
+	for _, raw := range []string{"postgres://postgres@localhost:49173/postgres?sslmode=disable", "postgres://postgres@127.0.0.1:49173/deployed?sslmode=disable", "postgres://other@127.0.0.1:49173/postgres?sslmode=disable", "postgres://postgres:secret@127.0.0.1:49173/postgres?sslmode=disable", "postgres://postgres@127.0.0.1:49173/postgres?sslmode=prefer", "postgres://postgres@127.0.0.1:49173/postgres?sslmode=disable&options=-csearch_path=public"} {
+		candidate, err := pgx.ParseConfig(raw)
+		if err == nil && CIConfigurationAllowed(candidate, "49173", true) {
+			t.Fatal("unsafe CI configuration admitted")
+		}
+	}
+}

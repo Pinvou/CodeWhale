@@ -3,6 +3,7 @@ package billing
 import (
 	"context"
 	"errors"
+	"github.com/Pinvou/pinvou3/account-platform/internal/cifixture"
 	"os"
 	"sync"
 	"testing"
@@ -18,7 +19,7 @@ func f06WalletActors(t *testing.T) {
 	if raw == "" {
 		t.Skip("actual dedicated PostgreSQL is required")
 	}
-	c, err := pgx.Connect(context.Background(), raw)
+	c, err := cifixture.Connect(context.Background(), raw)
 	if err != nil {
 		t.Fatal(err)
 	}

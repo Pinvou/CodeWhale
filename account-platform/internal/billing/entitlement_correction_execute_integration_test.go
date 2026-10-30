@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"github.com/Pinvou/pinvou3/account-platform/internal/billingschema"
+	"github.com/Pinvou/pinvou3/account-platform/internal/cifixture"
 	"github.com/Pinvou/pinvou3/account-platform/internal/platform/migrations"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
@@ -567,7 +568,7 @@ func entitlementRepositoryWithStage(t *testing.T, ctx context.Context, raw strin
 	if raw == "" {
 		t.Skip("PINVOU_TEST_BILLING_DATABASE_URL is required for actual PostgreSQL")
 	}
-	control, err := pgx.Connect(ctx, raw)
+	control, err := cifixture.Connect(ctx, raw)
 	if err != nil {
 		t.Fatal("cannot connect to fixture database")
 	}

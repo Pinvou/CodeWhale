@@ -3,6 +3,7 @@ package account
 import (
 	"context"
 	"errors"
+	"github.com/Pinvou/pinvou3/account-platform/internal/cifixture"
 	"os"
 	"strings"
 	"sync/atomic"
@@ -34,7 +35,7 @@ func retainedWalletFenceActors(t *testing.T) *retainedWalletFenceFixture {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
 	t.Cleanup(cancel)
-	admin, err := pgx.Connect(ctx, raw)
+	admin, err := cifixture.Connect(ctx, raw)
 	if err != nil {
 		t.Fatal("open fixture setup actor")
 	}

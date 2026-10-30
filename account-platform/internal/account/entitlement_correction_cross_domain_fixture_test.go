@@ -3,6 +3,7 @@ package account
 import (
 	"context"
 	"encoding/json"
+	"github.com/Pinvou/pinvou3/account-platform/internal/cifixture"
 	"strings"
 	"testing"
 	"time"
@@ -27,7 +28,7 @@ func newEntitlementCrossDomainBillingFixture(t *testing.T, ctx context.Context, 
 	if err != nil {
 		t.Fatal(err)
 	}
-	admin, err := pgx.ConnectConfig(ctx, base)
+	admin, err := cifixture.ConnectConfig(ctx, base)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -50,7 +51,7 @@ func newEntitlementCrossDomainBillingFixture(t *testing.T, ctx context.Context, 
 	})
 	setupConfig := base.Copy()
 	setupConfig.Database = database
-	setup, err := pgx.ConnectConfig(ctx, setupConfig)
+	setup, err := cifixture.ConnectConfig(ctx, setupConfig)
 	if err != nil {
 		t.Fatal(err)
 	}

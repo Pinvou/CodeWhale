@@ -46,3 +46,10 @@ func OwnedDirectoryAllowed(directory string) bool {
 func DirectoryMatches(actual, expected string) bool {
 	return OwnedDirectoryAllowed(expected) && filepath.Clean(filepath.FromSlash(actual)) == filepath.Clean(expected)
 }
+
+// CIConfigurationAllowed binds the client port to the verified Actions service,
+// independently of PostgreSQL's internal port (5432).
+func CIConfigurationAllowed(config *pgx.ConnConfig, port string, githubActions bool) bool {
+	n, err := strconv.ParseUint(port, 10, 16)
+	return githubActions && err == nil && n >= 1024 && strconv.FormatUint(n, 10) == port && config != nil && config.Host == "127.0.0.1" && config.Port == uint16(n) && config.User == "postgres" && config.Password == "" && config.Database == "postgres" && config.TLSConfig == nil && len(config.Fallbacks) == 0 && len(config.RuntimeParams) == 0
+}

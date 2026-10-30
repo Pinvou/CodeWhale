@@ -3,6 +3,7 @@ package accountschema
 import (
 	"context"
 	"github.com/Pinvou/pinvou3/account-platform/internal/account"
+	"github.com/Pinvou/pinvou3/account-platform/internal/cifixture"
 	"github.com/Pinvou/pinvou3/account-platform/internal/f17fixture"
 	"github.com/Pinvou/pinvou3/account-platform/internal/platform/migrations"
 	"github.com/google/uuid"
@@ -89,6 +90,11 @@ func newAuditExportGuardFixture(t *testing.T, ctx context.Context, raw string) *
 	if err != nil {
 		t.Fatal("connect schema setup identity")
 	}
+	if os.Getenv("F17_TEST_DATABASE_PROFILE") == "github-actions-service" {
+		if err := cifixture.Verify(ctx, admin); err != nil {
+			t.Fatal(err)
+		}
+	}
 	// Only this branch's fixtures share the deployment-actor set on their isolated instance.
 	// The session lock serializes those fixtures across Go packages; it grants no authority.
 	t.Cleanup(func() { _ = admin.Close(context.Background()) })
@@ -96,9 +102,13 @@ func newAuditExportGuardFixture(t *testing.T, ctx context.Context, raw string) *
 		t.Fatal("exclusive fixture lock failed")
 	}
 	var directory, session, database string
+	expectedServerPort := config.Port
+	if os.Getenv("F17_TEST_DATABASE_PROFILE") == "github-actions-service" {
+		expectedServerPort = 5432
+	}
 	var port int
 	var super bool
-	if err := admin.QueryRow(ctx, `SELECT current_setting('data_directory'),session_user,current_database(),current_setting('port')::int,(SELECT rolsuper FROM pg_roles WHERE rolname=session_user)`).Scan(&directory, &session, &database, &port, &super); err != nil || session != config.User || database != "postgres" || port != int(config.Port) || !super {
+	if err := admin.QueryRow(ctx, `SELECT current_setting('data_directory'),session_user,current_database(),current_setting('port')::int,(SELECT rolsuper FROM pg_roles WHERE rolname=session_user)`).Scan(&directory, &session, &database, &port, &super); err != nil || session != config.User || database != "postgres" || port != int(expectedServerPort) || !super {
 		t.Fatal("isolated coordinator identity rejected")
 	}
 	if os.Getenv("F17_TEST_DATABASE_PROFILE") == "github-actions-service" {
@@ -118,6 +128,10 @@ func newAuditExportGuardFixture(t *testing.T, ctx context.Context, raw string) *
 	}
 	if err := admin.QueryRow(ctx, `SELECT count(*) FROM pg_roles WHERE rolname !~ '^pg_' AND rolname<>$1`, session).Scan(&outsideActors); err != nil || outsideActors != 0 {
 		t.Fatal("outside actors prohibit fixture writes")
+	}
+	var otherClients int
+	if err := admin.QueryRow(ctx, `SELECT count(*) FROM pg_stat_activity WHERE pid<>pg_backend_pid() AND backend_type='client backend'`).Scan(&otherClients); err != nil || otherClients != 0 {
+		t.Fatal("outside clients prohibit fixture writes")
 	}
 	f := &auditExportGuardFixture{admin: admin, config: config, dbs: make(map[string]string), roles: []string{"account_service", "account_migrator", "account_approval_control_owner", "account_approval_authorization_owner", "account_approval_writer", "account_approval_backfill", "account_approval_relay", "account_approval_recovery", "billing_service", "billing_schema_owner", "billing_migrator"}}
 	var count int
@@ -211,7 +225,7 @@ func auditExportFixtureConfigurationAllowed(config *pgx.ConnConfig, profile stri
 		return f17fixture.OwnedConfigurationAllowed(config, os.Getenv("F17_TEST_OWNED_PORT"), os.Getenv("F17_TEST_OWNED_DATA_DIRECTORY"))
 	}
 	if profile == "github-actions-service" {
-		return githubActions && config.Port == 5432 && config.User == "postgres"
+		return f17fixture.CIConfigurationAllowed(config, os.Getenv("F17_TEST_SERVICE_PORT"), githubActions)
 	}
 	return profile == "" && config.Port == 55504 && config.User == "pinvou_wave_test"
 }

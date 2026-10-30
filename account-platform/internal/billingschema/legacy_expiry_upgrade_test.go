@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"github.com/Pinvou/pinvou3/account-platform/internal/cifixture"
 	"os"
 	"strings"
 	"testing"
@@ -38,7 +39,7 @@ func legacyExpiryDatabase(t *testing.T, ctx context.Context) *pgx.Conn {
 	if raw == "" {
 		t.Skip("actual owned PostgreSQL with provisioned billing actors required")
 	}
-	admin, err := pgx.Connect(ctx, raw)
+	admin, err := cifixture.Connect(ctx, raw)
 	if err != nil {
 		t.Fatal("connect owned expiry fixture")
 	}

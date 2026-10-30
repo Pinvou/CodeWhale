@@ -15,7 +15,9 @@ import sys
 import tempfile
 
 ROOT = Path(__file__).resolve().parents[1]
-local_database_url = runpy.run_path(str(ROOT / "scripts/test-token-financial-postgres.py"))["local_database_url"]
+_financial_helpers = runpy.run_path(str(ROOT / "scripts/test-token-financial-postgres.py"))
+local_database_url = _financial_helpers["local_database_url"]
+ci_identity_guard = _financial_helpers["ci_identity_guard"]
 LEDGER_REPAIR_APPROVAL_ROOT = "TestLedgerRepairCrossDomainActivationPostgresIntegration"
 LEDGER_REPAIR_PAYMENT_E2E_ROOT = "TestLedgerRepairPaymentAuthorityE2EPostgresIntegration"
 LEDGER_REPAIR_APPROVAL_ROOTS = {LEDGER_REPAIR_APPROVAL_ROOT, LEDGER_REPAIR_PAYMENT_E2E_ROOT}
@@ -157,7 +159,7 @@ def main():
 
     def query(sql):
         result = subprocess.run(
-            [psql, raw, "-X", "-A", "-t", "-v", "ON_ERROR_STOP=1", "-c", sql],
+            [psql, raw, "-X", "-q", "-A", "-t", "-v", "ON_ERROR_STOP=1", *ci_identity_guard(raw), "-c", sql],
             capture_output=True, text=True, encoding="utf-8", check=False, timeout=30,
         )
         if result.returncode:

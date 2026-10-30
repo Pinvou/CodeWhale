@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"github.com/Pinvou/pinvou3/account-platform/internal/accountschema"
+	"github.com/Pinvou/pinvou3/account-platform/internal/cifixture"
 	"github.com/Pinvou/pinvou3/account-platform/internal/f17fixture"
 	"github.com/Pinvou/pinvou3/account-platform/internal/platform/httpserver"
 	"github.com/Pinvou/pinvou3/account-platform/internal/platform/identity"
@@ -548,7 +549,11 @@ func newAuditExportBoundaryFixture(t *testing.T, ctx context.Context, raw string
 		if os.Getenv("GITHUB_ACTIONS") != "true" {
 			t.Fatal("CI fixture profile requires GitHub Actions")
 		}
-		expectedPort, expectedUser, expectedDirectory = 5432, "postgres", "/var/lib/postgresql/data"
+		config, err := pgx.ParseConfig(raw)
+		if err != nil || !f17fixture.CIConfigurationAllowed(config, os.Getenv("F17_TEST_SERVICE_PORT"), true) {
+			t.Fatal("CI service configuration rejected")
+		}
+		expectedPort, expectedUser, expectedDirectory = config.Port, "postgres", "/var/lib/postgresql/data"
 	default:
 		t.Fatal("unknown isolated PostgreSQL profile")
 	}
@@ -560,18 +565,27 @@ func newAuditExportBoundaryFixture(t *testing.T, ctx context.Context, raw string
 	if err != nil {
 		t.Fatal("connect schema setup identity")
 	}
+	if os.Getenv("F17_TEST_DATABASE_PROFILE") == "github-actions-service" {
+		if err := cifixture.Verify(ctx, admin); err != nil {
+			t.Fatal(err)
+		}
+	}
 	// Only this branch's fixtures share the deployment-actor set on their isolated instance.
 	// The session lock serializes those fixtures across Go packages; it grants no authority.
 	t.Cleanup(func() { _ = admin.Close(context.Background()) })
 	if _, err := admin.Exec(ctx, `SELECT pg_advisory_lock(hashtext('pinvou.f17.audit-export.boundary.fixture'))`); err != nil {
 		t.Fatal("exclusive fixture lock failed")
 	}
+	expectedServerPort := expectedPort
+	if os.Getenv("F17_TEST_DATABASE_PROFILE") == "github-actions-service" {
+		expectedServerPort = 5432
+	}
 	var session, current, directory string
 	var port, otherSessions, otherDBs int
-	if err := admin.QueryRow(ctx, `SELECT session_user,current_user,inet_server_port(),current_setting('data_directory'),(SELECT count(*) FROM pg_stat_activity WHERE pid<>pg_backend_pid() AND backend_type='client backend'),(SELECT count(*) FROM pg_database WHERE NOT datistemplate AND datname<>'postgres')`).Scan(&session, &current, &port, &directory, &otherSessions, &otherDBs); err != nil || session != expectedUser || current != expectedUser || port != int(expectedPort) || strings.ReplaceAll(directory, "\\", "/") != expectedDirectory || otherSessions != 0 || otherDBs != 0 {
+	if err := admin.QueryRow(ctx, `SELECT session_user,current_user,inet_server_port(),current_setting('data_directory'),(SELECT count(*) FROM pg_stat_activity WHERE pid<>pg_backend_pid() AND backend_type='client backend'),(SELECT count(*) FROM pg_database WHERE NOT datistemplate AND datname<>'postgres')`).Scan(&session, &current, &port, &directory, &otherSessions, &otherDBs); err != nil || session != expectedUser || current != expectedUser || port != int(expectedServerPort) || strings.ReplaceAll(directory, "\\", "/") != expectedDirectory || otherSessions != 0 || otherDBs != 0 {
 		t.Fatal("owned server/identity/exclusive session/database guard failed")
 	}
-	if os.Getenv("F17_TEST_DATABASE_PROFILE") == f17fixture.OwnedProfile {
+	if os.Getenv("F17_TEST_DATABASE_PROFILE") == f17fixture.OwnedProfile || os.Getenv("F17_TEST_DATABASE_PROFILE") == "github-actions-service" {
 		var super bool
 		var outsideActors int
 		if err := admin.QueryRow(ctx, `SELECT (SELECT rolsuper FROM pg_roles WHERE rolname=session_user),(SELECT count(*) FROM pg_roles WHERE rolname !~ '^pg_' AND rolname<>session_user)`).Scan(&super, &outsideActors); err != nil || !super || outsideActors != 0 {

@@ -8,6 +8,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"errors"
+	"github.com/Pinvou/pinvou3/account-platform/internal/cifixture"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -42,7 +43,7 @@ func retainedFinanceRepository(t *testing.T, throughVersion ...int64) (*Postgres
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	t.Cleanup(cancel)
-	control, err := pgx.Connect(ctx, raw)
+	control, err := cifixture.Connect(ctx, raw)
 	if err != nil {
 		t.Fatal("cannot connect to fixture database")
 	}
@@ -678,7 +679,7 @@ func TestRetainedSimulatorCallbackCreditsFrozenMappingExactlyOnce(t *testing.T) 
 		t.Fatal("controlled connection configuration invalid")
 	}
 	schema := "retained_sim_" + strings.ReplaceAll(uuid.NewString(), "-", "")
-	admin, err := pgx.ConnectConfig(ctx, configuration)
+	admin, err := cifixture.ConnectConfig(ctx, configuration)
 	if err != nil {
 		t.Fatal("simulator fixture unavailable")
 	}

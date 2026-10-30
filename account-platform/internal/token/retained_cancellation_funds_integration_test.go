@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"github.com/Pinvou/pinvou3/account-platform/internal/billing"
 	"github.com/Pinvou/pinvou3/account-platform/internal/billingschema"
+	"github.com/Pinvou/pinvou3/account-platform/internal/cifixture"
 	"github.com/Pinvou/pinvou3/account-platform/internal/platform/migrations"
 	"github.com/Pinvou/pinvou3/account-platform/internal/tokenschema"
 	"github.com/google/uuid"
@@ -31,7 +32,7 @@ func retainedManagementTokenRepository(t *testing.T) (*PostgresRepository, conte
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 180*time.Second)
 	t.Cleanup(cancel)
-	admin, err := pgx.Connect(ctx, dsn)
+	admin, err := cifixture.Connect(ctx, dsn)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -163,7 +164,7 @@ func retainedManagementBillingRepository(t *testing.T) (*billing.PostgresReposit
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	t.Cleanup(cancel)
-	control, err := pgx.Connect(ctx, raw)
+	control, err := cifixture.Connect(ctx, raw)
 	if err != nil {
 		t.Fatal("cannot connect to fixture database")
 	}

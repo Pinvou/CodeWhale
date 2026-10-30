@@ -81,3 +81,26 @@ docker stop pinvou-token-financial-ci
 数据库连接，避免其他本地或部署连接进入此门禁。
 
 运行协议回归 `TestRuntimeProtocolPublicationPublicPostgres` 使用公开 Token 迁移与 `token_gateway` 角色，执行实际发现、受控草稿解析/持久化/发布域操作和模型目录 HTTP 序列化，核对显式 profile、改名稳定性、新能力版本、旧事实及回滚拒绝。控制权限服务是测试端点；草稿发布域测试不能代表完整管理审批 UI 或真实部署验收。跨语言验证将该 HTTP 的原始 JSON 直接交给实际桌面目录解码/运行协议选择函数；隔离 Rust harness 不等于整个 Tauri 默认原生构建通过。
+
+
+共享 self-hosted runner 上的 account job 沿用 medium runner 配置与 hosted fallback。
+三个 PostgreSQL 服务分别通过 `127.0.0.1::5432` 原子分配宿主端口，保留现有镜像；
+financial 与 closure 顺序共用同一 financial 服务。仅四个对应消费步骤获得已验证 URL，
+all-Go 步骤不注入数据库 URL。F17 独立核对宿主端口与容器内 5432，缺失元数据不回退。
+
+`scripts/account-ci-postgres.py` 从本 job 的精确 service ID 验证 running/health、实际
+单一 loopback 映射、互异端口与匿名数据卷，并对比 docker exec 与宿主 psql 的只读
+system identifier、目录和 postgres 身份，拒绝不同网络命名空间下的误连。镜像 PG16
+目录为 `/var/lib/postgresql/data`，broker PG18 为 `/var/lib/postgresql/18/docker`。
+CI 安装 `postgresql-client`，Go 仅对本次接入的实例级数据库／固定角色创建协调连接及
+CLI 清理重连核对相同实例；pgx.Conn 不会自动重连。UUID 子库内部的部分 setup 及
+模拟器随机 search_path 连接沿用既有归属／名称围栏，不代表所有 postgres 后端均已
+接入身份 guard。写入与受限清理保留原 ownership/session/dependency 断言。
+Python 每次 psql 调用在同一 backend 上先执行身份 DO guard，通过后才执行原 SQL；
+ON_ERROR_STOP 保证失败即停止，quiet 模式保持标量输出。业务/迁移角色权限不变。
+
+三个 services 的局部 `--rm` 由 Docker 在准确容器被移除时回收其匿名卷，不执行全局
+prune，也不处理其他 job 的资源。容器退出后的 inspect 证据会随自动回收消失；必须
+以 job 初始化/preflight 日志和真实 Linux service 生命周期验收为准。Windows 上的
+纯保护单测和编译不证明 Docker 并发隔离、Actions service context 或完整账户门禁通过；
+仍需真实双组三服务探针及新 head 的完整 account job 验收。

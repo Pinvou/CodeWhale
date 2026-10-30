@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"github.com/Pinvou/pinvou3/account-platform/internal/cifixture"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -135,7 +136,7 @@ func TestBillingLedgerAuditReadOnlyPublicPostgres(t *testing.T) {
 	}
 	adminConfig := r.pool.Config().ConnConfig.Copy()
 	adminConfig.User, adminConfig.Password = "postgres", ""
-	admin, err := pgx.ConnectConfig(ctx, adminConfig)
+	admin, err := cifixture.ConnectConfig(ctx, adminConfig)
 	if err != nil {
 		t.Fatal("owned audit administration connection failed")
 	}

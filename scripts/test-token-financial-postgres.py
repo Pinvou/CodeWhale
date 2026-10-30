@@ -307,6 +307,28 @@ def verify_results(events, required=None, *, package=None, require_children=Fals
     return count
 
 
+def ci_identity_guard(raw):
+    # psql executes this guard and the requested SQL on the SAME backend.
+    port = os.environ.get("PINVOU_ACCOUNT_CI_PG_PORT", "")
+    if not any(os.environ.get(key) for key in ("PINVOU_ACCOUNT_CI_PG_PORT", "PINVOU_ACCOUNT_CI_PG_SYSTEM_ID", "PINVOU_ACCOUNT_CI_PG_DIRECTORY")) and os.environ.get("GITHUB_ACTIONS") != "true":
+        return []
+    expected_url = "postgres://postgres@127.0.0.1:" + port + "/postgres?sslmode=disable"
+    if os.environ.get("GITHUB_ACTIONS") != "true" or not port.isascii() or not port.isdecimal() or str(int(port)) != port or not 1024 <= int(port) <= 65535 or raw != expected_url:
+        raise RuntimeError("CI service endpoint metadata required")
+    system = os.environ.get("PINVOU_ACCOUNT_CI_PG_SYSTEM_ID", "")
+    directory = os.environ.get("PINVOU_ACCOUNT_CI_PG_DIRECTORY", "")
+    if not system.isascii() or not system.isdecimal() or int(system) == 0 or directory not in ("/var/lib/postgresql/data", "/var/lib/postgresql/18/docker"):
+        raise RuntimeError("CI service identity metadata required")
+    guard = """DO $ci$ BEGIN
+    IF NOT (session_user='postgres' AND current_user='postgres' AND current_database()='postgres'
+      AND current_setting('port')='5432' AND current_setting('data_directory')='%s'
+      AND (SELECT rolsuper FROM pg_roles WHERE rolname=session_user)
+      AND (SELECT system_identifier::text FROM pg_control_system())='%s') THEN
+      RAISE EXCEPTION 'CI service identity changed; no writes or cleanup permitted';
+    END IF; END $ci$;""" % (directory, system)
+    return ["-c", guard]
+
+
 def main():
     raw = local_database_url(os.environ.get("PINVOU_ACCOUNT_FINANCIAL_TEST_DATABASE_URL", ""))
     psql = os.environ.get("PINVOU_ACCOUNT_TEST_PSQL", "psql")
@@ -314,7 +336,7 @@ def main():
 
     def query(sql):
         result = subprocess.run(
-            [psql, raw, "-X", "-A", "-t", "-v", "ON_ERROR_STOP=1", "-c", sql],
+            [psql, raw, "-X", "-q", "-A", "-t", "-v", "ON_ERROR_STOP=1", *ci_identity_guard(raw), "-c", sql],
             capture_output=True, text=True, encoding="utf-8", check=False,
         )
         if result.returncode:

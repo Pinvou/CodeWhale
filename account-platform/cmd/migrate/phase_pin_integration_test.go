@@ -4,6 +4,7 @@ import (
 	"context"
 	"flag"
 	"fmt"
+	"github.com/Pinvou/pinvou3/account-platform/internal/cifixture"
 	"net/url"
 	"os"
 	"os/exec"
@@ -38,7 +39,7 @@ func TestPhaseMigrationCLIPinsBeforeDown(t *testing.T) {
 	}
 	ctx, stop := context.WithTimeout(context.Background(), 60*time.Second)
 	defer stop()
-	control, err := pgx.Connect(ctx, raw)
+	control, err := cifixture.Connect(ctx, raw)
 	if err != nil {
 		t.Fatal("connect isolated CLI fixture")
 	}
@@ -65,7 +66,7 @@ func TestPhaseMigrationCLIPinsBeforeDown(t *testing.T) {
 		}
 		clean, stop := context.WithTimeout(context.Background(), 10*time.Second)
 		defer stop()
-		c, err := pgx.ConnectConfig(clean, config)
+		c, err := cifixture.ConnectConfig(clean, config)
 		if err != nil {
 			t.Error("connect CLI fixture identity cleanup")
 			return

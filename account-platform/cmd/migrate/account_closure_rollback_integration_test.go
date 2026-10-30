@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"fmt"
+	"github.com/Pinvou/pinvou3/account-platform/internal/cifixture"
 	"net/url"
 	"os"
 	"os/exec"
@@ -34,7 +35,7 @@ func TestAccountClosureLegacyRollbackCLI(t *testing.T) {
 	if err != nil || (parsed.Scheme != "postgres" && parsed.Scheme != "postgresql") {
 		t.Fatal("account closure CLI fixture requires a PostgreSQL URL")
 	}
-	control, err := pgx.ConnectConfig(ctx, config)
+	control, err := cifixture.ConnectConfig(ctx, config)
 	if err != nil {
 		t.Fatal("connect isolated account closure CLI fixture")
 	}
@@ -48,7 +49,7 @@ func TestAccountClosureLegacyRollbackCLI(t *testing.T) {
 		defer stop()
 		// The test's normal defers close connections before this cleanup. Use
 		// a new control connection because the original control has also closed.
-		cleanupControl, err := pgx.ConnectConfig(clean, config)
+		cleanupControl, err := cifixture.ConnectConfig(clean, config)
 		if err != nil {
 			t.Error("connect owned account closure cleanup control")
 			return

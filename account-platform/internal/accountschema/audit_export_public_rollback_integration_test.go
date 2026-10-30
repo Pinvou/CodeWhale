@@ -269,6 +269,7 @@ func TestAuditExportGuardedRollbackTransactions(t *testing.T) {
 }
 
 func TestAuditExportFixtureConfigurationRejectsDeployment(t *testing.T) {
+	t.Setenv("F17_TEST_SERVICE_PORT", "5432")
 	for _, item := range []struct {
 		name, url, profile string
 		ci, allowed        bool

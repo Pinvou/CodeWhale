@@ -2,6 +2,7 @@ package billingschema
 
 import (
 	"context"
+	"github.com/Pinvou/pinvou3/account-platform/internal/cifixture"
 	"net/url"
 	"os"
 	"slices"
@@ -245,9 +246,17 @@ func newStageFixture(t *testing.T, ctx context.Context, raw string) *stageFixtur
 	if strings.TrimSpace(raw) == "" {
 		t.Skip("explicit isolated PostgreSQL configuration is required")
 	}
-	admin, err := pgx.Connect(ctx, raw)
+	admin, err := cifixture.Connect(ctx, raw)
 	if err != nil {
 		t.Fatal("connect schema setup identity")
+	}
+	// The broker CI service is pristine; a short fixed-actor list alone is not ownership.
+	if os.Getenv("PINVOU_ACCOUNT_CI_PG_DIRECTORY") == "/var/lib/postgresql/18/docker" {
+		var outside int
+		if err := admin.QueryRow(ctx, `SELECT (SELECT count(*) FROM pg_roles WHERE rolname !~ '^pg_' AND rolname<>'postgres') + (SELECT count(*) FROM pg_database WHERE datname NOT IN ('postgres','template0','template1')) + (SELECT count(*) FROM pg_stat_activity WHERE pid<>pg_backend_pid() AND backend_type='client backend') + (SELECT count(*) FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace WHERE n.nspname !~ '^pg_' AND n.nspname<>'information_schema') + (SELECT count(*) FROM pg_proc p JOIN pg_namespace n ON n.oid=p.pronamespace WHERE n.nspname !~ '^pg_' AND n.nspname<>'information_schema')`).Scan(&outside); err != nil || outside != 0 {
+			admin.Close(ctx)
+			t.Fatal("outside actors/databases/clients prohibit broker fixture writes")
+		}
 	}
 	config, err := pgx.ParseConfig(raw)
 	if err != nil {

@@ -3,6 +3,7 @@ package billing
 import (
 	"context"
 	"errors"
+	"github.com/Pinvou/pinvou3/account-platform/internal/cifixture"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -32,7 +33,7 @@ func refundQuerySimulator(t *testing.T, ctx context.Context, interceptors ...fun
 	t.Helper()
 	t.Setenv("APP_ENV", "test")
 	raw := os.Getenv("PINVOU_TEST_BILLING_DATABASE_URL")
-	admin, err := pgx.Connect(ctx, raw)
+	admin, err := cifixture.Connect(ctx, raw)
 	if err != nil {
 		t.Fatal(err)
 	}

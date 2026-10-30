@@ -11,6 +11,7 @@ import (
 	"encoding/json"
 	"encoding/pem"
 	"fmt"
+	"github.com/Pinvou/pinvou3/account-platform/internal/cifixture"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -55,7 +56,7 @@ func forceCancelAccountActors(t *testing.T) *forceCancelAccountFixture {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
 	t.Cleanup(cancel)
-	admin, err := pgx.Connect(ctx, raw)
+	admin, err := cifixture.Connect(ctx, raw)
 	if err != nil {
 		t.Fatal("open fixture setup actor")
 	}
@@ -342,7 +343,7 @@ func forceCancelTokenRepository(t *testing.T) (*PostgresRepository, context.Cont
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 180*time.Second)
 	t.Cleanup(cancel)
-	admin, err := pgx.Connect(ctx, dsn)
+	admin, err := cifixture.Connect(ctx, dsn)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -487,7 +488,7 @@ func forceCancelActivate(t *testing.T, ctx context.Context, r *PostgresRepositor
 	t.Helper()
 	cfg := r.pool.Config().ConnConfig.Copy()
 	r.pool.Close()
-	admin, e := pgx.Connect(ctx, os.Getenv("PINVOU_TEST_TOKEN_DATABASE_URL"))
+	admin, e := cifixture.Connect(ctx, os.Getenv("PINVOU_TEST_TOKEN_DATABASE_URL"))
 	if e != nil {
 		t.Fatal("owned Token bootstrap unavailable")
 	}

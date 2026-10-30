@@ -23,6 +23,14 @@ def stream(*events):
 
 
 class ClosurePostgresResults(unittest.TestCase):
+    def setUp(self):
+        # Mock local-fixture tests must not inherit the live consumer's CI binding.
+        environment = mock.patch.dict(os.environ, {"GITHUB_ACTIONS": "",
+            "PINVOU_ACCOUNT_CI_PG_PORT": "", "PINVOU_ACCOUNT_CI_PG_SYSTEM_ID": "",
+            "PINVOU_ACCOUNT_CI_PG_DIRECTORY": ""})
+        environment.start()
+        self.addCleanup(environment.stop)
+
     def test_real_migration_cli_roots_cannot_silently_drop(self):
         expected = {"TestAccountClosureLegacyRollbackCLI", "TestPhaseMigrationCLIPinsBeforeDown"}
         selected = [row for row in runner.CONTRACTS if row[0] == "migration-cli"]

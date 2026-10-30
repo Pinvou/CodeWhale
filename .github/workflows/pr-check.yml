@@ -259,6 +259,8 @@ jobs:
               - 'scripts/check-account-platform*'
               - 'scripts/build-credential-handoff.mjs'
               - 'scripts/check-recharge-product-document-baseline.mjs'
+              - 'scripts/account-ci-postgres.py'
+              - 'scripts/tests/test_account_ci_postgres.py'
               - 'scripts/test-token-financial-postgres.py'
               - 'scripts/tests/test_token_financial_postgres.py'
               - 'scripts/test-account-closure-postgres.py'
@@ -1173,7 +1175,7 @@ jobs:
     # Draft, Ready and the Merge Queue validate the same Go contracts. No
     # backflow exemption may suppress this independently deployable module.
     if: ${{ !cancelled() && github.event.action != 'closed' && needs.changes.outputs.account_platform == 'true' }}
-    runs-on: ubuntu-22.04
+    runs-on: ${{ fromJSON(vars.PINVOU_LINUX_MEDIUM_RUNNER || vars.PINVOU_LINUX_RUNNER || '["ubuntu-22.04"]') }}
     # Earlier gates took about 41m; retained Billing is bounded to 75m.
     # Six later closure phases retain their 540s process caps (54m total).
     # Keep a finite overall budget without changing other phase limits.
@@ -1184,8 +1186,9 @@ jobs:
         env:
           POSTGRES_HOST_AUTH_METHOD: trust
         ports:
-          - 127.0.0.1:5432:5432
+          - "127.0.0.1::5432"
         options: >-
+          --rm
           --health-cmd pg_isready
           --health-interval 10s
           --health-timeout 5s
@@ -1198,8 +1201,9 @@ jobs:
           POSTGRES_HOST_AUTH_METHOD: trust
           POSTGRES_DB: postgres
         ports:
-          - 127.0.0.1:5434:5432
+          - "127.0.0.1::5432"
         options: >-
+          --rm
           --health-cmd "pg_isready -U postgres -d postgres"
           --health-interval 5s
           --health-timeout 5s
@@ -1212,8 +1216,9 @@ jobs:
           POSTGRES_HOST_AUTH_METHOD: trust
           POSTGRES_DB: postgres
         ports:
-          - 127.0.0.1:5433:5432
+          - "127.0.0.1::5432"
         options: >-
+          --rm
           --health-cmd "pg_isready -U postgres -d postgres"
           --health-interval 5s
           --health-timeout 5s
@@ -1233,11 +1238,13 @@ jobs:
         with:
           go-version-file: account-platform/go.mod
           cache-dependency-path: account-platform/**/go.sum
+          cache: ${{ runner.environment == 'github-hosted' }}
 
       - name: Node.js for Token authorization contracts
         uses: actions/setup-node@v7
         with:
           node-version: "24"
+          package-manager-cache: ${{ runner.environment == 'github-hosted' }}
 
       - name: Verify Account Platform generated inputs and document baseline
         shell: bash
@@ -1350,9 +1357,18 @@ jobs:
           set -euo pipefail
           # Test-only official Ubuntu Lua5.1 CLI; no product Lua dependency.
           sudo apt-get update -qq
-          sudo apt-get install -y --no-install-recommends lua5.1
+          sudo apt-get install -y --no-install-recommends lua5.1 postgresql-client
+          command -v psql
           python3 -m unittest discover -s scripts/tests -p test_auth_quota_lua_check.py
           python3 scripts/account-platform-auth-quota-lua-check.py --race
+
+      - name: Verify account CI PostgreSQL service isolation
+        id: account-pg
+        env:
+          ACCOUNT_CI_SERVICES: ${{ toJSON(job.services) }}
+        run: |
+          python3 -m unittest discover -s scripts/tests -p test_account_ci_postgres.py
+          python3 scripts/account-ci-postgres.py
 
       - name: Test and vet all Account Platform Go modules
         shell: bash
@@ -1387,7 +1403,10 @@ jobs:
         timeout-minutes: 12
         shell: bash
         env:
-          PINVOU_TEST_SCHEMA_DATABASE_URL: postgres://postgres@127.0.0.1:5434/postgres?sslmode=disable
+          PINVOU_TEST_SCHEMA_DATABASE_URL: ${{ steps.account-pg.outputs.broker_url }}
+          PINVOU_ACCOUNT_CI_PG_PORT: ${{ steps.account-pg.outputs.broker_port }}
+          PINVOU_ACCOUNT_CI_PG_SYSTEM_ID: ${{ steps.account-pg.outputs.broker_system }}
+          PINVOU_ACCOUNT_CI_PG_DIRECTORY: ${{ steps.account-pg.outputs.broker_directory }}
         run: |
           set -euo pipefail
           # Extract only the pinned public server executable. The test itself
@@ -1404,8 +1423,12 @@ jobs:
       - name: Audit export finite PostgreSQL rollback and persisted boundaries
         working-directory: account-platform
         env:
-          F17_TEST_DATABASE_URL: postgres://postgres@127.0.0.1:5432/postgres?sslmode=disable
+          F17_TEST_DATABASE_URL: ${{ steps.account-pg.outputs.audit_url }}
+          PINVOU_ACCOUNT_CI_PG_PORT: ${{ steps.account-pg.outputs.audit_port }}
+          PINVOU_ACCOUNT_CI_PG_SYSTEM_ID: ${{ steps.account-pg.outputs.audit_system }}
+          PINVOU_ACCOUNT_CI_PG_DIRECTORY: ${{ steps.account-pg.outputs.audit_directory }}
           F17_TEST_DATABASE_PROFILE: github-actions-service
+          F17_TEST_SERVICE_PORT: ${{ steps.account-pg.outputs.audit_port }}
         run: |
           set -euo pipefail
           # Fixed actor names are exclusive to this ephemeral service. Keep
@@ -1429,7 +1452,10 @@ jobs:
       - name: Token financial contracts on isolated PostgreSQL
         shell: bash
         env:
-          PINVOU_ACCOUNT_FINANCIAL_TEST_DATABASE_URL: postgres://postgres@127.0.0.1:5433/postgres?sslmode=disable
+          PINVOU_ACCOUNT_FINANCIAL_TEST_DATABASE_URL: ${{ steps.account-pg.outputs.financial_url }}
+          PINVOU_ACCOUNT_CI_PG_PORT: ${{ steps.account-pg.outputs.financial_port }}
+          PINVOU_ACCOUNT_CI_PG_SYSTEM_ID: ${{ steps.account-pg.outputs.financial_system }}
+          PINVOU_ACCOUNT_CI_PG_DIRECTORY: ${{ steps.account-pg.outputs.financial_directory }}
         run: |
           set -euo pipefail
           python3 -m unittest discover -s scripts/tests -p test_token_financial_postgres.py
@@ -1438,7 +1464,10 @@ jobs:
       - name: Account closure contracts on isolated PostgreSQL
         shell: bash
         env:
-          PINVOU_ACCOUNT_CLOSURE_TEST_DATABASE_URL: postgres://postgres@127.0.0.1:5433/postgres?sslmode=disable
+          PINVOU_ACCOUNT_CLOSURE_TEST_DATABASE_URL: ${{ steps.account-pg.outputs.financial_url }}
+          PINVOU_ACCOUNT_CI_PG_PORT: ${{ steps.account-pg.outputs.financial_port }}
+          PINVOU_ACCOUNT_CI_PG_SYSTEM_ID: ${{ steps.account-pg.outputs.financial_system }}
+          PINVOU_ACCOUNT_CI_PG_DIRECTORY: ${{ steps.account-pg.outputs.financial_directory }}
           PINVOU_ACCOUNT_CLOSURE_TEST_ARTIFACT_DIR: ${{ runner.temp }}/account-closure-postgres
         run: |
           set -euo pipefail
