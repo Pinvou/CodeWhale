@@ -505,7 +505,15 @@ pub fn migrate_engine_identity(
     canonical_version: Option<&str>,
 ) -> rusqlite::Result<bool> {
     let mut conn = connect()?;
-    let tx = conn.transaction()?;
+    // 整段是「先读 store_models/installed_engines，再写回」的事务（本批评审
+    // P2-7）。DEFERRED 在 BEGIN 时不拿写锁，读完再升级写锁的那一刻若撞上并发
+    // 写，SQLite 直接回 BUSY_SNAPSHOT——busy_timeout 对这种「快照已过期」的
+    // 失败不重试（重试也只会再撞一次）。改 IMMEDIATE：BEGIN 就拿写锁，争用
+    // 变成可等待的普通 BUSY，由 connect 里那 5 秒 busy_timeout 兜住。写法对齐
+    // replace_card_package 的既解。
+    let tx = conn
+        .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+    let current: Option<(String, Option<String>)> = tx
     let current: Option<(String, Option<String>)> = tx
         .query_row(
             "SELECT engine_name, engine_version FROM store_models WHERE card_id = ?1",
@@ -1481,7 +1489,13 @@ pub fn list_running_store_models_admission_columns()
 /// 界面能看见，也没有任何入口能清掉。
 pub fn delete_store_model(card_id: &str) -> rusqlite::Result<()> {
     let mut conn = connect()?;
-    let tx = conn.transaction()?;
+    // IMMEDIATE 而不是默认的 DEFERRED（本批评审 P2-7）：卸载是「下载在写 +
+    // 界面轮询在读」的高并发窗口里用户随时可触发的动作，DEFERRED 事务升级
+    // 写锁撞上并发写会立刻回 BUSY_SNAPSHOT，busy_timeout 对快照过期不重试；
+    // IMMEDIATE 把争用变成可等待的普通 BUSY，交给 connect 的 5 秒
+    // busy_timeout。与 replace_card_package / migrate_engine_identity 同款。
+    let tx = conn
+        .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
     tx.execute(
         "DELETE FROM store_models WHERE card_id = ?1",
         params![card_id],
