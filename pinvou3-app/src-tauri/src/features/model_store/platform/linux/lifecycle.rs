@@ -2550,6 +2550,35 @@ impl ModelManager {
         if rec.status != "deployed" {
             return Err(ModelManagerError::new("该模型尚未部署，请先部署再启用"));
         }
+        // 本批评审 P2-8：启用前的廉价在跑守卫。卸载侧有三重停验，启用此前只有
+        // 内存准入——一张被遗留脚本 fail-open 启过的卡（老版 enable.sh 半途失败
+        // 仍报成功、或运维照卡片文档手工跑过脚本），库里 running=0 而服务真在跑，
+        // 再点「启用」就是第二个实例（sglang 双负载拖垮整机已实锤）。两条判据：
+        // 1) DB 已说在跑 → 拒绝，别在活实例上再叠一个；
+        // 2) 本卡报过 OpenAI 风格端点且探针有响应 → 同样拒绝。口径与
+        //    reconcile 一致：非 OpenAI 路径（z-image 的 /generate）改写探测必
+        //    404，不探；ollama 例外——服务级探针分不清哪张卡在跑，只认 DB 标志。
+        // 这里选择**拒绝**而不是静默按已启用返回成功：enable 没有幂等成功的
+        // 先例，报错并指引自助恢复（先停用再启用）与全库 fail-closed 的风格
+        // 一致，也不会把「探针看走眼」粉饰成成功。
+        if rec.running {
+            return Err(ModelManagerError::new(
+                "该模型已在运行，请勿重复启用；如需重启，请先停用再启用。",
+            ));
+        }
+        if rec.engine_name != "ollama" {
+            if let Some(endpoint) = rec.endpoint_url.as_deref() {
+                if endpoint_path_is_openai_style(endpoint)
+                    && openai_compatible_endpoint_alive(endpoint)
+                {
+                    return Err(ModelManagerError::new(
+                        "该模型的服务端口仍有响应（可能是旧版脚本或手工操作启动的遗留\
+                         实例），已取消本次启用以避免出现双实例。请先停用该模型，\
+                         再重新启用；若确认没有实例在跑，请稍后重试。",
+                    ));
+                }
+            }
+        }
         let env = self.env_for_record(&rec);
         let source = self.local_scripts_source(&rec);
 
