@@ -164,8 +164,8 @@ mod tests {
     use super::super::store_client::DeployTopology;
     use super::config::{self, TempHome};
     use super::{
-        db, ollama_base_url, store_model_name, store_model_name_checked, store_weights_roots,
-        store_weights_roots_checked,
+        db, ollama_base_url, ollama_base_url_checked, store_model_name, store_model_name_checked,
+        store_weights_roots, store_weights_roots_checked,
     };
 
     fn insert_store_model(card_id: &str, model_name: &str) {
