@@ -351,7 +351,13 @@ func (p *PaymentCoordinator) reserveRefund(ctx context.Context, orderID, request
 			return Refund{}, false, ErrConflict
 		}
 		var storedHash string
-		if err := tx.QueryRow(ctx, `SELECT request_hash FROM refunds WHERE id=$1`, refund.ID).Scan(&storedHash); err != nil || storedHash != requestHash {
+		if err := tx.QueryRow(ctx, `SELECT request_hash FROM refunds WHERE id=$1`, refund.ID).Scan(&storedHash); err != nil {
+			if errors.Is(err, pgx.ErrNoRows) {
+				return Refund{}, false, ErrConflict
+			}
+			return Refund{}, false, err
+		}
+		if storedHash != requestHash {
 			return Refund{}, false, ErrConflict
 		}
 		return refund, false, tx.Commit(ctx)
@@ -363,7 +369,10 @@ func (p *PaymentCoordinator) reserveRefund(ctx context.Context, orderID, request
 	if errors.Is(err, pgx.ErrNoRows) || (err == nil && order.RequesterID != requesterID) {
 		return Refund{}, false, ErrNotFound
 	}
-	if err != nil || order.FulfillmentStatus != "CREDITED" || (order.Status != "PAID" && order.Status != "PAID_LATE") {
+	if err != nil {
+		return Refund{}, false, err
+	}
+	if order.FulfillmentStatus != "CREDITED" || (order.Status != "PAID" && order.Status != "PAID_LATE") {
 		return Refund{}, false, ErrConflict
 	}
 	// Refund policy follows the order's frozen commercial facts, never the
@@ -377,7 +386,13 @@ func (p *PaymentCoordinator) reserveRefund(ctx context.Context, orderID, request
 		return Refund{}, false, ErrConflict
 	}
 	wallet, err := getWallet(ctx, tx, order.WalletID, true)
-	if err != nil || wallet.Status != "ACTIVE" || wallet.ReceivableMicrocredits != 0 {
+	if errors.Is(err, pgx.ErrNoRows) {
+		return Refund{}, false, ErrWalletUnavailable
+	}
+	if err != nil {
+		return Refund{}, false, err
+	}
+	if wallet.Status != "ACTIVE" || wallet.ReceivableMicrocredits != 0 {
 		return Refund{}, false, ErrWalletUnavailable
 	}
 	var amountFen int64
