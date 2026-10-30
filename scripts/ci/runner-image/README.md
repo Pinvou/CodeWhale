@@ -35,3 +35,8 @@ Set one pool label (`pinvou3-heavy`, `pinvou3-medium`, or `pinvou3-light`) on ea
 runner and configure the corresponding repository variable with that label.
 Do not give small runners the generic legacy label if queued jobs still use it.
 Use `Self-hosted Runner Smoke` to verify all three pools after deployment.
+
+Set repository variable `PINVOU_LOONGARCH64_CHECK_ENABLED=false` to temporarily
+skip the PR Check LoongArch64 cross-compilation leg. Remove the variable or set
+it to `true` to restore its existing routes. The final gate reports this skip;
+other checks and the LoongArch64 release build remain unchanged.
