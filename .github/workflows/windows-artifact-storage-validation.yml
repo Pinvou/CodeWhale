@@ -1,0 +1,33 @@
+name: Windows Artifact Storage Validation
+
+# Storage is an explicit diagnostic, independent of runner health and PR gates.
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: windows-artifact-storage-validation-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  artifact-storage:
+    name: GitHub artifact storage check
+    runs-on: ${{ fromJSON(vars.PINVOU_WINDOWS_LIGHT_RUNNER || vars.PINVOU_WINDOWS_RUNNER || '["windows-latest"]') }}
+    timeout-minutes: 5
+    defaults:
+      run:
+        shell: pwsh -NoLogo -NoProfile -NonInteractive -File "{0}"
+    steps:
+      - name: Create upload probe
+        run: |
+          $ErrorActionPreference = 'Stop'
+          @{ run = $env:GITHUB_RUN_ID; runner = $env:RUNNER_NAME; os = $env:RUNNER_OS } |
+            ConvertTo-Json | Set-Content -LiteralPath (Join-Path $env:RUNNER_TEMP 'artifact-connectivity.json') -Encoding utf8
+      - uses: actions/upload-artifact@v7
+        with:
+          name: windows-artifact-connectivity-${{ github.run_id }}
+          path: ${{ runner.temp }}/artifact-connectivity.json
+          if-no-files-found: error
+          retention-days: 1
