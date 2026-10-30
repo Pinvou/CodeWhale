@@ -103,15 +103,18 @@ func TestPersonalHandlerRejectsInvalidBodiesWithoutMutation(t *testing.T) {
 			t.Fatalf("installed route lacked bearer protection: %s status=%d", path, response.Code)
 		}
 	}
-	for _, item := range []struct{ method, path string }{
-		{http.MethodDelete, "/admin/v1/users/" + id},
-		{http.MethodPost, "/v1/me/account-closure-requests/force"},
-		{http.MethodGet, "/admin/v1/registration-bonus-policy"},
+	for _, item := range []struct {
+		method, path string
+		status       int
+	}{
+		{http.MethodDelete, "/admin/v1/users/" + id, http.StatusMethodNotAllowed},
+		{http.MethodPost, "/v1/me/account-closure-requests/force", http.StatusNotFound},
+		{http.MethodGet, "/admin/v1/registration-bonus-policy", http.StatusNotFound},
 	} {
 		w := httptest.NewRecorder()
 		handler.ServeHTTP(w, httptest.NewRequest(item.method, item.path, nil))
-		if w.Code != http.StatusNotFound {
-			t.Fatalf("future route became reachable: %s", item.path)
+		if w.Code != item.status {
+			t.Fatalf("unpublished route %s %s: status=%d want=%d", item.method, item.path, w.Code, item.status)
 		}
 	}
 	for _, item := range []struct{ method, path string }{

@@ -65,7 +65,7 @@ func TestClosureActualPersonalAndRepairRouter(t *testing.T) {
 		{"unknownfield", "POST", "/v1/me/account-closure-requests", `{"confirmation":"CLOSE_MY_ACCOUNT","force":true}`, PermissionPersonalAccountClosureRequest, true, true, 400, 0},
 		{"unauthenticated", "POST", "/v1/me/account-closure-requests", `{}`, "", false, true, 401, 0},
 		{"permission-denied", "POST", "/v1/me/account-closure-requests", `{}`, PermissionPersonalAccountClosureRequest, true, false, 403, 0},
-		{"no-admin-delete", "DELETE", "/admin/v1/users/" + id.String(), "", "", true, true, 404, 0},
+		{"no-admin-delete", "DELETE", "/admin/v1/users/" + id.String(), "", "", true, true, 405, 0},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			f := &closureAssemblyRepository{allow: tc.allow, id: id}
