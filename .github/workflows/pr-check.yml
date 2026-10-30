@@ -1830,6 +1830,8 @@ jobs:
       # takes effect on old toolchains and local setups without -B injection;
       # bitcode never reaches the linker, see the RUSTFLAGS mechanism note
       # above).
+      # libclang-dev: libspa-sys uses bindgen at build time. Install its shared
+      # library explicitly rather than relying on a hosted/self-hosted image.
       - name: 装 Tauri + pinvou3 Linux 系统依赖
         run: |
           sudo apt-get update

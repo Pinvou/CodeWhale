@@ -35,6 +35,8 @@ Office、压缩包、MSG、扫描 PDF 的 OCR 和 PDF 预览统一使用独占�
 
 ## 验证
 
+Linux Rust 构建的 PipeWire/SPA 绑定生成需要可加载的 libclang；Debian/Ubuntu 构建环境须安装 `libclang-dev`。PR 检查的应用与 CLI 编译/测试作业显式安装该构建依赖，避免依赖 runner 预装状态；这不增加应用运行时安装要求。
+
 ```bash
 python3 scripts/architecture-guard.py
 node --test pinvou3-app/tests/*remote*.test.mjs pinvou3-app/tests/controlled_device*.test.mjs pinvou3-app/tests/connect_remote*.test.mjs pinvou3-app/tests/controller_session*.test.mjs
