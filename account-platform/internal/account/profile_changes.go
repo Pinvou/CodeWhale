@@ -1269,7 +1269,7 @@ func (r *PostgresRepository) MarkPasswordWriteStarted(ctx context.Context, id, o
 		return false, ErrConflict
 	}
 	now := r.now()
-	command, err := r.pool.Exec(ctx, `UPDATE password_reset_operations SET password_write_started_at=$3,password_write_owner=$2,status='PASSWORD_STARTED',next_attempt_at=$3+interval '30 seconds',updated_at=$3 WHERE id=$1 AND status='VERIFIED' AND password_write_started_at IS NULL`, id, owner, now)
+	command, err := r.pool.Exec(ctx, `UPDATE password_reset_operations SET password_write_started_at=$3,password_write_owner=$2,status='PASSWORD_STARTED',next_attempt_at=$3::timestamptz+interval '30 seconds',updated_at=$3 WHERE id=$1 AND status='VERIFIED' AND password_write_started_at IS NULL`, id, owner, now)
 	if err != nil {
 		return false, err
 	}
