@@ -689,6 +689,38 @@ mod tests {
     /// 放弃的完整契约：面板沉默、预览/重试的侧门堵死、回执只是被打标而不是
     /// 删除——信任校验（属主/权限/链接数）在改写后必须照常通过。
     #[test]
+    fn dismiss_rejects_a_terminal_receipt_whose_installer_is_still_alive() {
+        let _home = config::TempHome::new();
+        db::init_db().unwrap();
+        receipt(
+            "failure",
+            "download",
+            "2026-10-18T00:00:00Z",
+            json!({"Err":"cancelled"}),
+        );
+        let before = std::fs::read(config::data_dir().join("runs/failure.json")).unwrap();
+        let service = ModelStoreService::new();
+        let installer = super::super::orphans::RunGuard::register_with_run_id(
+            std::process::id() as i32,
+            false,
+            "dismiss regression",
+            Some("failure"),
+        );
+        assert!(
+            dismiss_incomplete_local(&service, "failure")
+                .unwrap_err()
+                .contains("installation_process_still_alive")
+        );
+        assert_eq!(
+            std::fs::read(config::data_dir().join("runs/failure.json")).unwrap(),
+            before
+        );
+        drop(installer);
+        dismiss_incomplete_local(&service, "failure").unwrap();
+        assert!(read("failure").unwrap().dismissed);
+    }
+
+    #[test]
     fn dismissed_receipts_leave_summaries_and_cannot_retry() {
         let _home = config::TempHome::new();
         db::init_db().unwrap();

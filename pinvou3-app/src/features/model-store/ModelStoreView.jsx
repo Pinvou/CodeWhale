@@ -74,7 +74,7 @@ import { StoreGuide } from './ModelStoreCards.jsx';
 import { MemoizedModelRow as ModelRow } from './ModelRow.jsx';
 import { CardUpdateDialog } from './CardUpdateDialog.jsx';
 import { ModelStoreTaskPanel } from './ModelStoreTaskPanel.jsx';
-import { DownloadCenterView, activeDownloadTasks, downloadBadgeCount } from './DownloadCenterView.jsx';
+import { DownloadCenterView, floatingDownloadTasks, downloadBadgeCount } from './DownloadCenterView.jsx';
 import { MaintenanceRecoveryPanel } from './MaintenanceRecoveryPanel.jsx';
 import { IncompleteInstallPanel, describeIncompleteError } from './IncompleteInstallPanel.jsx';
 import { ModelDetailDialog } from './ModelDetailDialog.jsx';
@@ -1502,12 +1502,11 @@ const ModelStoreView = ({ theme, t, bs, startupUpdates = EMPTY_STARTUP_UPDATES, 
         ) : null}
       </MsDialog>
 
-      {/* 「下载」视图里活跃下载卡已由 DownloadCenterView 渲染，浮层必须剔除
-          它们——同一张卡两处渲染，日志展开/应答状态就会各走各的。终态卡
-          （失败/取消）仍归浮层，中心视图不收。 */}
+      {/* 普通活跃下载只在中心渲染；等待输入的卡只在抬高的浮层渲染，
+          避免弹窗遮罩挡住表单，也避免一项任务出现两份应答状态。 */}
       <ModelStoreTaskPanel
         tasks={filter === 'downloads'
-          ? tasks.filter((task) => !activeDownloadTasks([task]).length)
+          ? floatingDownloadTasks(tasks)
           : tasks}
         copy={copy}
         onCancel={cancelTask}

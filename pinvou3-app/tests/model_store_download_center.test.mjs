@@ -69,7 +69,7 @@ test('downloads filter switches the whole list and retires duplicate surfaces', 
   assert.match(VIEW, /\{filter === 'downloads' \? null : \(\s*\n\s*<IosSearchField/);
   // 浮层在「下载」视图里必须剔除活跃下载卡：同一张卡两处渲染，日志展开/
   // 应答状态会各走各的。这是双渲染互斥的另一半（中心只列活跃是前一半）。
-  assert.match(VIEW, /tasks=\{filter === 'downloads'\s*\n\s*\? tasks\.filter\(\(task\) => !activeDownloadTasks\(\[task\]\)\.length\)\s*\n\s*: tasks\}/);
+  assert.match(VIEW, /tasks=\{filter === 'downloads'\s*\n\s*\? floatingDownloadTasks\(tasks\)\s*\n\s*: tasks\}/);
   // 徽标挂在筛选胶囊上，且只在有内容时渲染。
   assert.match(VIEW, /model-store-filter-\$\{item\.key\}-badge/);
   assert.match(VIEW, /item\.badge \? \(\s*\n?\s*<span/);
@@ -95,7 +95,7 @@ test('orphan copy exists in all three languages and promises irreversibility', (
       assert.ok(text.includes(key), `${key} 缺失`);
     }
     // 后端拒绝码必须都有人话对应，缺一个界面上就裸奔错误码。
-    for (const code of ['orphan_scan_unavailable', 'orphan_directory_owned', 'orphan_activity_unresolved', 'orphan_path_unsafe', 'orphan_remove_failed', 'orphan_resources_busy']) {
+    for (const code of ['orphan_scan_unavailable', 'orphan_directory_owned', 'orphan_directory_other_user', 'orphan_activity_unresolved', 'orphan_path_unsafe', 'orphan_remove_failed', 'orphan_resources_busy']) {
       assert.ok(text.includes(`${code}:`), `orphanErrors.${code} 缺失`);
     }
   }

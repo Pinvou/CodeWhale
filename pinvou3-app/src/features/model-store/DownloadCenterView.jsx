@@ -37,6 +37,12 @@ export function activeDownloadTasks(tasks) {
   return (tasks || []).filter((task) => DOWNLOAD_KINDS.has(task.kind) && ACTIVE_STATUS.has(task.status));
 }
 
+/** Prompt forms must stay in the floating panel above modal overlays. */
+export function floatingDownloadTasks(tasks) {
+  const inline = new Set(activeDownloadTasks(tasks).filter(task => !task.prompt));
+  return (tasks || []).filter(task => !inline.has(task));
+}
+
 /** 任务 key（`download:<cardId>` / `card:<cardId>`）→ 卡片 ID。 */
 function taskCardId(task) {
   const key = task?.key || '';
@@ -221,7 +227,11 @@ export function DownloadCenterView({
                 <span className="ml-1.5 font-semibold opacity-60">{active.length}</span>
               </h3>
               <div className="grid grid-cols-1 gap-3 lg:grid-cols-2">
-                {active.map((task) => (
+                {active.map((task) => task.prompt ? (
+                  <p key={task.id} data-testid="model-store-download-waiting-input" className="px-3 text-sm">
+                    {task.title} · {copy.taskWaitingInput}
+                  </p>
+                ) : (
                   <ModelStoreTaskCard
                     key={task.id}
                     inline

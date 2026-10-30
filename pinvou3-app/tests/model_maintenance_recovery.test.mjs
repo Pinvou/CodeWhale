@@ -30,6 +30,8 @@ const vite = await createServer({
 const { MaintenanceRecoveryPanel } = await vite.ssrLoadModule('/src/features/model-store/MaintenanceRecoveryPanel.jsx');
 const { ModelRow } = await vite.ssrLoadModule('/src/features/model-store/ModelRow.jsx');
 const { IncompleteInstallPanel } = await vite.ssrLoadModule('/src/features/model-store/IncompleteInstallPanel.jsx');
+const { DownloadCenterView, activeDownloadTasks, downloadBadgeCount, floatingDownloadTasks } = await vite.ssrLoadModule('/src/features/model-store/DownloadCenterView.jsx');
+const { ModelStoreTaskPanel } = await vite.ssrLoadModule('/src/features/model-store/ModelStoreTaskPanel.jsx');
 const api = await vite.ssrLoadModule('/src/features/model-store/model-store-api.js');
 const dictionaries = await Promise.all(['zh', 'en', 'ja'].map((lang) => vite.ssrLoadModule(`/src/shared/i18n/${lang}.js`)));
 const copies = [dictionaries[0].dictZh.uiModelStore, dictionaries[1].dictEn.uiModelStore, dictionaries[2].dictJa.uiModelStore];
@@ -116,6 +118,38 @@ test('active downloads do not render an incomplete-install banner, including que
       ...properties, installations: [active], error: 'installation_index_unavailable',
     }));
     assert.ok(unavailable.includes('role="alert"'), 'filtering active work must not hide index errors');
+  }
+});
+
+test('download prompts render once in the floating panel above dialogs while normal downloads stay inline', () => {
+  const task = (id, kind, status, prompt = null) => ({ id, key: `download:card-${id}`, kind, status, prompt, title: `Task ${id}`, lines: [], expanded: false });
+  const tasks = [task(1, 'download', 'running'), task(2, 'install_local', 'cancelling'),
+    task(3, 'download', 'running', { kind: 'text', message: 'Answer this prompt' }),
+    task(4, 'download', 'cancelled'), task(5, 'deploy', 'running')];
+  assert.deepEqual(activeDownloadTasks(tasks).map(item => item.id), [1, 2, 3]);
+  assert.deepEqual(floatingDownloadTasks(tasks).map(item => item.id), [3, 4, 5]);
+  const installations = [{ cardId: 'card-3', runId: 'older-failure', terminal: true, canPreview: true }];
+  assert.equal(downloadBadgeCount(tasks, installations), 3, 'a prompted download is counted once');
+  for (const copy of copies) {
+    const center = renderToStaticMarkup(React.createElement(DownloadCenterView, { tasks, installations, copy }));
+    const floating = renderToStaticMarkup(React.createElement(ModelStoreTaskPanel, { tasks: floatingDownloadTasks(tasks), copy }));
+    assert.equal((center.match(/data-testid="model-store-task"/g) || []).length, 2);
+    assert.ok(!center.includes('model-store-prompt-text'));
+    assert.ok(!center.includes('older-failure'), 'active card must not also render its old receipt');
+    assert.ok(center.includes('model-store-download-waiting-input'));
+    assert.ok(floating.includes('data-waiting-input="true"'));
+    assert.ok(floating.includes('z-[210]'));
+    assert.equal((floating.match(/data-testid="model-store-prompt-text"/g) || []).length, 1);
+  }
+});
+
+test('download center keeps index errors and healthy empty states distinct', () => {
+  for (const copy of copies) {
+    const empty = renderToStaticMarkup(React.createElement(DownloadCenterView, { tasks: [], copy }));
+    assert.ok(empty.includes('model-store-download-empty'));
+    const failed = renderToStaticMarkup(React.createElement(DownloadCenterView, { tasks: [], copy, incompleteError: 'installation_index_unavailable' }));
+    assert.ok(failed.includes('role="alert"'));
+    assert.ok(!failed.includes('model-store-download-empty'));
   }
 });
 

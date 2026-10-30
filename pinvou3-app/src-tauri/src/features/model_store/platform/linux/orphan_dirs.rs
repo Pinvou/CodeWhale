@@ -12,6 +12,7 @@
 //!     漏掉一个残留目录的代价只是它多躺一会儿。
 
 use std::collections::HashSet;
+use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
 
 use serde_json::{Value, json};
@@ -53,8 +54,18 @@ impl Blocked {
     }
 
     fn insert(&mut self, models_dir: &Path, path: PathBuf) {
-        self.insert_exact(path.clone());
         let canonical = path.canonicalize().ok();
+        // All sources, including the legacy runtime fallback, can return the
+        // shared root. It is not an exclusive model directory.
+        if path == models_dir
+            || canonical
+                .as_ref()
+                .zip(models_dir.canonicalize().ok().as_ref())
+                .is_some_and(|(path, root)| path == root)
+        {
+            return;
+        }
+        self.insert_exact(path.clone());
         if let Some(c) = &canonical {
             self.insert_exact(c.clone());
         }
@@ -148,16 +159,7 @@ fn blocked_dirs(service: Option<&super::service::ModelStoreService>) -> Result<B
         // 共享根，祖先匹配会把所有残留都误判为有主。此类记录仍由下面的
         // 实际目录、HF 仓库名和 model_name 保护。隔离/版本化根继续完整保护。
         if let Some(root) = &rec.models_root {
-            let root = PathBuf::from(root);
-            let shared_root = root == models_dir
-                || root
-                    .canonicalize()
-                    .ok()
-                    .zip(models_dir.canonicalize().ok())
-                    .is_some_and(|(root, models)| root == models);
-            if !shared_root {
-                blocked.insert(&models_dir, root);
-            }
+            blocked.insert(&models_dir, PathBuf::from(root));
         }
         // 旧记录的权威实际目录：部署脚本写在卡片 .deploy-env 里的 MODEL_DIR，
         // 与 candidate_paths 同一份真相，不能在扫描里再猜一遍。
@@ -271,14 +273,28 @@ fn card_weight_dirs(card_id: &str, models_dir: &Path) -> Option<Vec<PathBuf>> {
 /// 软链接整条跳过（不下钻也不列出）：`remove_dir_all` 穿过软链会删掉链接目标
 /// 的内容，这类条目永远不该出现在「可删」列表里。
 pub(super) fn scan(service: Option<&super::service::ModelStoreService>) -> Result<Value, String> {
+    // SAFETY: geteuid has no preconditions. Bind ownership to this process,
+    // never to a caller-supplied API field or the configured shared root.
+    scan_for_user(service, unsafe { libc::geteuid() })
+}
+
+fn scan_for_user(
+    service: Option<&super::service::ModelStoreService>,
+    owner_uid: u32,
+) -> Result<Value, String> {
     let settings = config::load_settings();
     let models_dir = settings.models_path();
     let blocked = blocked_dirs(service)?;
     let mut entries = Vec::new();
     let mut partial = false;
     let read = std::fs::read_dir(&models_dir).map_err(|_| "orphan_scan_unavailable".to_string())?;
-    for entry in read.flatten() {
+    for entry in read {
+        let Ok(entry) = entry else {
+            partial = true;
+            continue;
+        };
         let Ok(file_type) = entry.file_type() else {
+            partial = true;
             continue;
         };
         if file_type.is_symlink() || !file_type.is_dir() {
@@ -288,10 +304,27 @@ pub(super) fn scan(service: Option<&super::service::ModelStoreService>) -> Resul
         // 脚本的权重目录命名形态，整类不出现在列表里——它们由库记录的一级
         // 祖先规则保护（见 Blocked::insert），这里再兜一层。
         let name = entry.file_name();
-        if name.to_str().is_some_and(|value| value.starts_with('.')) {
+        let Some(name) = name.to_str() else {
+            // The public command accepts UTF-8 paths; never offer a lossy path
+            // that cannot identify the same directory when deletion is confirmed.
+            partial = true;
+            continue;
+        };
+        if name.starts_with('.') {
             continue;
         }
         let path = entry.path();
+        let Ok(meta) = std::fs::symlink_metadata(&path) else {
+            partial = true;
+            continue;
+        };
+        if meta.is_symlink() || !meta.is_dir() {
+            continue;
+        }
+        if meta.uid() != owner_uid {
+            partial = true;
+            continue;
+        }
         if blocked.contains(&path) {
             continue;
         }
@@ -300,7 +333,7 @@ pub(super) fn scan(service: Option<&super::service::ModelStoreService>) -> Resul
             break;
         }
         entries.push(json!({
-            "name": entry.file_name().to_string_lossy(),
+            "name": name,
             "path": path.to_string_lossy(),
             "bytes": super::disk::dir_size_bytes(&path),
         }));
@@ -318,6 +351,15 @@ pub(super) fn remove(
     service: Option<&super::service::ModelStoreService>,
     path_text: &str,
 ) -> Result<Value, String> {
+    // SAFETY: geteuid has no preconditions; API callers cannot choose this UID.
+    remove_for_user(service, path_text, unsafe { libc::geteuid() })
+}
+
+fn remove_for_user(
+    service: Option<&super::service::ModelStoreService>,
+    path_text: &str,
+    owner_uid: u32,
+) -> Result<Value, String> {
     let settings = config::load_settings();
     let models_dir = settings.models_path();
     let target = PathBuf::from(path_text);
@@ -328,7 +370,7 @@ pub(super) fn remove(
     let Some(name) = target.file_name().and_then(|value| value.to_str()) else {
         return Err("orphan_path_unsafe".into());
     };
-    if name.starts_with('.') || config::safe_path_component(name).is_err() {
+    if name.starts_with('.') {
         return Err("orphan_path_unsafe".into());
     }
     if target
@@ -342,6 +384,9 @@ pub(super) fn remove(
     let meta = std::fs::symlink_metadata(&target).map_err(|_| "orphan_path_unsafe".to_string())?;
     if meta.is_symlink() || !meta.is_dir() {
         return Err("orphan_path_unsafe".into());
+    }
+    if meta.uid() != owner_uid {
+        return Err("orphan_directory_other_user".into());
     }
 
     // 与下载、本地安装及版本暂存共用资源锁；从归属核查到删除结束始终排他，
@@ -364,6 +409,20 @@ pub(super) fn remove(
     super::orphans::ensure_host_quiet()?;
 
     let bytes = super::disk::dir_size_bytes(&target);
+    // Size traversal may take time. Recheck ownership and directory identity
+    // immediately before deletion, including changes by another profile.
+    let current =
+        std::fs::symlink_metadata(&target).map_err(|_| "orphan_path_unsafe".to_string())?;
+    if current.uid() != owner_uid {
+        return Err("orphan_directory_other_user".into());
+    }
+    if current.is_symlink()
+        || !current.is_dir()
+        || current.dev() != meta.dev()
+        || current.ino() != meta.ino()
+    {
+        return Err("orphan_path_unsafe".into());
+    }
     std::fs::remove_dir_all(&target).map_err(|error| format!("orphan_remove_failed: {error}"))?;
     Ok(json!({ "freedBytes": bytes }))
 }
@@ -461,6 +520,127 @@ mod tests {
             remove(None, &orphan.to_string_lossy()).unwrap();
             assert!(!orphan.exists());
         }
+    }
+
+    #[test]
+    fn legacy_runtime_fallback_does_not_block_the_shared_root() {
+        for linked in [false, true] {
+            let _home = config::TempHome::new();
+            if linked {
+                let real = config::data_dir().join("real-models");
+                std::fs::create_dir_all(&real).unwrap();
+                std::os::unix::fs::symlink(real, config::data_dir().join("models")).unwrap();
+            }
+            let (orphan, owned) = seed_models_dir();
+            let models = config::load_settings().models_path();
+            seed_record_at_root("owned-model", Some(&models.canonicalize().unwrap()));
+            db::connect().unwrap().execute(
+                "UPDATE store_models SET runtime_card_id='legacy-runtime' WHERE card_id='owned-card'", [],
+            ).unwrap();
+            let record = db::get_store_model("owned-card").unwrap().unwrap();
+            assert_eq!(
+                super::super::lifecycle::legacy_resource_dir_for_scan(&record, &models),
+                Some(models.canonicalize().unwrap()),
+                "fixture must exercise the legacy shared-root fallback"
+            );
+            let report = scan(None).unwrap();
+            assert_eq!(report["entries"].as_array().unwrap().len(), 1);
+            assert_eq!(
+                report["entries"][0]["path"],
+                orphan.to_string_lossy().as_ref()
+            );
+            assert_eq!(
+                remove(None, &owned.to_string_lossy()).unwrap_err(),
+                "orphan_directory_owned"
+            );
+            remove(None, &orphan.to_string_lossy()).unwrap();
+            assert!(owned.exists());
+        }
+    }
+
+    #[test]
+    fn utf8_directory_names_are_removable_and_lossy_names_are_not_offered() {
+        use std::os::unix::ffi::OsStringExt;
+        let _home = config::TempHome::new();
+        db::init_db().unwrap();
+        let models = config::load_settings().models_path();
+        std::fs::create_dir_all(&models).unwrap();
+        let invalid = models.join(std::ffi::OsString::from_vec(vec![b'b', 0xff]));
+        std::fs::create_dir(&invalid).unwrap();
+        for name in ["weights with spaces", "模型残留"] {
+            let path = models.join(name);
+            std::fs::create_dir(&path).unwrap();
+            std::fs::write(path.join("partial"), b"keep until confirmed").unwrap();
+        }
+        let report = scan(None).unwrap();
+        assert_eq!(report["partial"], true);
+        assert_eq!(report["entries"].as_array().unwrap().len(), 2);
+        for name in ["weights with spaces", "模型残留"] {
+            let path = models.join(name);
+            assert!(
+                report["entries"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .any(|item| item["name"] == name)
+            );
+            assert!(
+                remove(None, &path.to_string_lossy()).unwrap()["freedBytes"]
+                    .as_u64()
+                    .unwrap()
+                    > 0
+            );
+            assert!(!path.exists());
+        }
+        assert!(invalid.exists());
+    }
+
+    #[test]
+    fn directories_owned_by_another_profile_are_not_listed_or_deleted() {
+        let _home = config::TempHome::new();
+        db::init_db().unwrap();
+        let (orphan, _) = seed_models_dir();
+        // Exercise the full scan/removal paths with another caller identity;
+        // production entry points bind it to geteuid, never an API parameter.
+        let other_uid = std::fs::metadata(&orphan).unwrap().uid().wrapping_add(1);
+        let report = scan_for_user(None, other_uid).unwrap();
+        assert!(report["entries"].as_array().unwrap().is_empty());
+        assert_eq!(report["partial"], true);
+        assert_eq!(
+            remove_for_user(None, &orphan.to_string_lossy(), other_uid).unwrap_err(),
+            "orphan_directory_other_user"
+        );
+        assert!(orphan.join("config.json").exists());
+        assert!(
+            !scan(None).unwrap()["entries"]
+                .as_array()
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn terminal_installation_failures_do_not_permanently_protect_partial_files() {
+        let _home = config::TempHome::new();
+        db::init_db().unwrap();
+        let (orphan, _) = seed_models_dir();
+        for cancelled in [false, true] {
+            write_receipt(
+                "terminal",
+                &json!({"card_id":"unknown-card", "kind":"download", "outcome":{"Err":"failed"}, "cancelled":cancelled}),
+            );
+            let report = scan(None).unwrap();
+            assert_eq!(report["unresolvedInFlight"], 0);
+            assert!(
+                report["entries"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .any(|item| item["path"] == orphan.to_string_lossy().as_ref())
+            );
+        }
+        remove(None, &orphan.to_string_lossy()).unwrap();
+        assert!(!orphan.exists());
     }
 
     #[test]

@@ -43,6 +43,8 @@ test('dismiss copy promises files are kept and resumable in all three languages'
     // 错误码文案同步补齐：放弃后的重试会被后端 installation_dismissed 拒绝。
     assert.ok(text.includes('installation_dismissed:'), 'installation_dismissed 文案缺失');
     assert.ok(text.includes('installation_not_dismissable:'), 'installation_not_dismissable 文案缺失');
+    assert.ok(text.includes('installation_task_active:'), 'installation_task_active 文案缺失');
+    assert.ok(text.includes('invalid_installation_reference:'), 'invalid_installation_reference 文案缺失');
     // 落盘失败与记录缺失也是放弃按钮可直接触达的错误，缺词就是裸奔错误码。
     assert.ok(text.includes('installation_dismiss_persist_failed:'), 'installation_dismiss_persist_failed 文案缺失');
     assert.ok(text.includes('installation_record_unavailable:'), 'installation_record_unavailable 文案缺失');

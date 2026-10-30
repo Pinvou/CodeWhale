@@ -1830,6 +1830,7 @@ pub(super) fn dismiss_incomplete_local(
     service: &ModelStoreService,
     run_id: &str,
 ) -> Result<Value, String> {
+    let _accept = service.accept_gate.lock();
     super::incomplete::ensure_dismissable(run_id)?;
     let log = match service.run(run_id) {
         Some(log) => log,
@@ -1842,6 +1843,22 @@ pub(super) fn dismiss_incomplete_local(
             Arc::new(load_saved_run(&path)?.ok_or("installation_record_unavailable")?)
         }
     };
+    if *log.dismissed.lock() {
+        return Ok(json!({ "ok": true }));
+    }
+    // An accepted cmsd parent can still be waiting for its local receiver.
+    // Unknown hand-offs retain their exclusion until their state is verified.
+    let (pending, pending_error) = super::delegated_run::pending(Some(&log.card_id));
+    if !pending.is_empty() || pending_error.is_some() {
+        return Err("installation_task_active".into());
+    }
+    // A retry owns the same card under a new run ID. Serialize with admission
+    // and the established cross-process card lock, not just the original PID.
+    let _operation =
+        card_operation_lock(&log.card_id).map_err(|_| "installation_task_active".to_string())?;
+    if service.active.run_for_card(&log.card_id).is_some() {
+        return Err("installation_task_active".into());
+    }
     log.dismiss()?;
     Ok(json!({ "ok": true }))
 }
@@ -1902,6 +1919,11 @@ pub fn retry_incomplete(
                 .get("device_id")
                 .and_then(Value::as_str)
                 .ok_or("installation_admission_unconfirmed")?;
+            // cmsd persists the parent before asynchronously invoking the
+            // receiver. Keep dismissal out until its lookup binding is saved;
+            // the receiver uses the same acceptance gate and waits for release.
+            let _accept = service.accept_gate.lock();
+            super::incomplete::retry_request(&run_id)?;
             let accepted = client.retry_install(&card, &run_id, &expected_sha256)?;
             if accepted.get("error").is_some_and(|error| !error.is_null())
                 || accepted
@@ -5671,5 +5693,129 @@ impl ModelStoreService {
     /// 守卫，这条路径必须有测试能驱动到）。
     pub(super) fn active_registry_for_tests(&self) -> &super::run_state::ActiveCardOps {
         &self.active
+    }
+}
+
+#[cfg(test)]
+mod incomplete_dismiss_tests {
+    use super::*;
+
+    #[test]
+    fn accepted_or_unconfirmed_parent_prevents_dismissal_before_receiver_start() {
+        use std::io::{BufRead, BufReader, Write};
+        use std::os::unix::net::UnixListener;
+        for status in ["queued", "running"] {
+            let _home = config::TempHome::new();
+            db::init_db().unwrap();
+            let service = ModelStoreService::new();
+            let original = service
+                .new_run("original", "retry-card", "download")
+                .unwrap();
+            original.finish(Err("original failure".into()), false);
+            let path = config::data_dir().join("runs/original.json");
+            let before = std::fs::read(&path).unwrap();
+            let socket = config::data_dir().join("dismiss-parent.sock");
+            let listener = UnixListener::bind(&socket).unwrap();
+            listener.set_nonblocking(true).unwrap();
+            let client = crate::features::megacube::Client::at_socket(socket).unwrap();
+            super::super::delegated_run::save(
+                &client,
+                "pending-parent",
+                "retry-card",
+                "download",
+                "device-fixture",
+            )
+            .unwrap();
+            let worker = std::thread::spawn(move || {
+                for response in [
+                    json!({"device_id":"device-fixture"}),
+                    json!({"tasks":[{
+                        "id":"pending-parent", "card":"retry-card", "kind":"install",
+                        "store_run_id":"cmsd-pending-parent", "status":status
+                    }]}),
+                ] {
+                    let deadline = Instant::now() + Duration::from_secs(3);
+                    let mut stream = loop {
+                        match listener.accept() {
+                            Ok((stream, _)) => break stream,
+                            Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                                assert!(Instant::now() < deadline);
+                                std::thread::sleep(Duration::from_millis(5));
+                            }
+                            Err(e) => panic!("{e}"),
+                        }
+                    };
+                    stream
+                        .set_read_timeout(Some(Duration::from_secs(2)))
+                        .unwrap();
+                    let mut reader = BufReader::new(stream.try_clone().unwrap());
+                    let mut line = String::new();
+                    loop {
+                        line.clear();
+                        assert!(reader.read_line(&mut line).unwrap() > 0);
+                        if line == "\r\n" {
+                            break;
+                        }
+                    }
+                    let body = response.to_string();
+                    write!(
+                        stream,
+                        "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                        body.len()
+                    )
+                    .unwrap();
+                }
+            });
+            assert!(
+                dismiss_incomplete_local(&service, "original")
+                    .unwrap_err()
+                    .contains("installation_task_active")
+            );
+            worker.join().unwrap();
+            // Offline parent: lack of an observation is not proof of idleness.
+            assert!(
+                dismiss_incomplete_local(&service, "original")
+                    .unwrap_err()
+                    .contains("installation_task_active")
+            );
+            assert_eq!(std::fs::read(&path).unwrap(), before);
+            std::fs::remove_file(
+                config::data_dir().join("delegated-runs/cmsd-pending-parent.json"),
+            )
+            .unwrap();
+            dismiss_incomplete_local(&service, "original").unwrap();
+        }
+    }
+
+    #[test]
+    fn another_service_cannot_dismiss_the_receipt_while_its_card_is_running() {
+        let _home = config::TempHome::new();
+        db::init_db().unwrap();
+        let service = Arc::new(ModelStoreService::new());
+        let original = service
+            .new_run("original", "retry-card", "download")
+            .unwrap();
+        original.finish(Err("original failure".into()), false);
+        let path = config::data_dir().join("runs/original.json");
+        let before = std::fs::read(&path).unwrap();
+        let (release, wait) = std::sync::mpsc::channel();
+        let running = spawn_op(&service, "retry-card", OP_DOWNLOAD, move |_, _, _| {
+            wait.recv_timeout(Duration::from_secs(5))
+                .map_err(|e| e.to_string())?;
+            Ok(Value::Null)
+        })
+        .unwrap();
+        let other_window = ModelStoreService::new();
+        let refused = dismiss_incomplete_local(&other_window, "original");
+        release.send(()).unwrap();
+        assert!(refused.unwrap_err().contains("installation_task_active"));
+        assert_eq!(std::fs::read(&path).unwrap(), before);
+        let run_id = running["run_id"].as_str().unwrap();
+        let deadline = Instant::now() + Duration::from_secs(3);
+        while service.run(run_id).unwrap().outcome.lock().is_none() {
+            assert!(Instant::now() < deadline);
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        dismiss_incomplete_local(&other_window, "original").unwrap();
     }
 }
