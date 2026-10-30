@@ -763,16 +763,31 @@ jobs:
     if: ${{ !cancelled() && github.event.action != 'closed' && (github.event_name == 'pull_request' || github.event_name == 'merge_group') && (needs.changes.outputs.trusted_backflow == 'true' || needs.changes.outputs.backflow_infra == 'true') }}
     strategy:
       fail-fast: false
-      # Windows/macOS 腿受 PINVOU_WINDOWS_MAC_ENABLED 总闸控制(matrix 上下文
+      # Windows/macOS 腿由独立的平台开关控制(matrix 上下文
       # 不可用于 job 级 if,故在矩阵生成处过滤)。
-      matrix: ${{ fromJSON(vars.PINVOU_WINDOWS_MAC_ENABLED != 'false' && '{"include":[{"os":"ubuntu-22.04"},{"os":"windows-latest"},{"os":"macos-15"}]}' || '{"include":[{"os":"ubuntu-22.04"}]}') }}
-    runs-on: ${{ matrix.os == 'ubuntu-22.04' && fromJSON(vars.PINVOU_LINUX_LIGHT_RUNNER || vars.PINVOU_LINUX_RUNNER || '["ubuntu-22.04"]') || matrix.os }}
-    timeout-minutes: 5
+      matrix: ${{ fromJSON(vars.PINVOU_WINDOWS_ENABLED != 'false' && (vars.PINVOU_MACOS_ENABLED != 'false' && '{"include":[{"os":"ubuntu-22.04"},{"os":"windows-latest"},{"os":"macos-15"}]}' || '{"include":[{"os":"ubuntu-22.04"},{"os":"windows-latest"}]}') || (vars.PINVOU_MACOS_ENABLED != 'false' && '{"include":[{"os":"ubuntu-22.04"},{"os":"macos-15"}]}' || '{"include":[{"os":"ubuntu-22.04"}]}')) }}
+    runs-on: ${{ matrix.os == 'ubuntu-22.04' && fromJSON(vars.PINVOU_LINUX_LIGHT_RUNNER || vars.PINVOU_LINUX_RUNNER || '["ubuntu-22.04"]') || matrix.os == 'windows-latest' && fromJSON(vars.PINVOU_WINDOWS_LIGHT_RUNNER || vars.PINVOU_WINDOWS_RUNNER || '["windows-latest"]') || matrix.os }}
+    timeout-minutes: 10
     steps:
       - name: Checkout
         uses: actions/checkout@v7
         with:
-          fetch-depth: 0
+          fetch-depth: 1
+
+      # Preflight compares two endpoint trees; it needs no complete history,
+      # other branches or tags. Keep cold Windows checkouts bounded.
+      - name: Fetch exact preflight endpoints
+        shell: bash
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.merge_group.base_sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha || github.event.merge_group.head_sha }}
+        run: |
+          set -euo pipefail
+          [[ "$BASE_SHA" =~ ^[0-9a-fA-F]{40}$ && "$HEAD_SHA" =~ ^[0-9a-fA-F]{40}$ ]] || {
+            echo 'FAIL: preflight requires exact base and head commit SHAs' >&2
+            exit 1
+          }
+          git fetch --no-tags --depth=1 origin "$BASE_SHA" "$HEAD_SHA"
 
       - name: Node.js
         uses: actions/setup-node@v7
@@ -1071,6 +1086,16 @@ jobs:
       - name: 安装 relay 依赖
         run: npm --prefix remote-control-relay ci --prefer-offline --no-audit
 
+      - name: Prepare Relay listener inspection
+        # Rollback tests inspect real listening sockets; minimal/older runner
+        # images may lack ss even though Node dependencies are installed.
+        run: |
+          if ! command -v ss >/dev/null 2>&1; then
+            sudo apt-get update
+            sudo apt-get install -y --no-install-recommends iproute2
+          fi
+          ss -H -ltn >/dev/null
+
       - name: Relay 与部署脚本回归
         run: |
           bash -n scripts/deploy-remote-relay.sh
@@ -1080,8 +1105,8 @@ jobs:
   windows-relay-dacl:
     name: windows-relay-dacl
     needs: changes
-    if: ${{ !cancelled() && needs.changes.outputs.relay == 'true' && (github.event_name == 'merge_group' || github.event_name == 'pull_request')  && vars.PINVOU_WINDOWS_MAC_ENABLED != 'false' }}
-    runs-on: windows-latest
+    if: ${{ !cancelled() && needs.changes.outputs.relay == 'true' && (github.event_name == 'merge_group' || github.event_name == 'pull_request')  && vars.PINVOU_WINDOWS_ENABLED != 'false' }}
+    runs-on: ${{ fromJSON(vars.PINVOU_WINDOWS_LIGHT_RUNNER || vars.PINVOU_WINDOWS_RUNNER || '["windows-latest"]') }}
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@v7
@@ -1099,8 +1124,8 @@ jobs:
   windows-relay-tools-test:
     name: windows-relay-tools-test
     needs: changes
-    if: ${{ !cancelled() && github.event.action != 'closed' && needs.changes.outputs.relay == 'true' && (github.event_name == 'merge_group' || github.event_name == 'pull_request')  && vars.PINVOU_WINDOWS_MAC_ENABLED != 'false' }}
-    runs-on: windows-latest
+    if: ${{ !cancelled() && github.event.action != 'closed' && needs.changes.outputs.relay == 'true' && (github.event_name == 'merge_group' || github.event_name == 'pull_request')  && vars.PINVOU_WINDOWS_ENABLED != 'false' }}
+    runs-on: ${{ fromJSON(vars.PINVOU_WINDOWS_LIGHT_RUNNER || vars.PINVOU_WINDOWS_RUNNER || '["windows-latest"]') }}
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@v7
@@ -1214,8 +1239,8 @@ jobs:
     if: ${{ !cancelled() && github.event.action != 'closed' && needs.changes.outputs.release_contract == 'true' && (github.event_name != 'pull_request' || github.event.pull_request.draft == false) }}
     strategy:
       fail-fast: false
-      matrix: ${{ fromJSON(vars.PINVOU_WINDOWS_MAC_ENABLED != 'false' && '{"include":[{"os":"ubuntu-22.04"},{"os":"windows-latest"}]}' || '{"include":[{"os":"ubuntu-22.04"}]}') }}
-    runs-on: ${{ matrix.os == 'ubuntu-22.04' && fromJSON(vars.PINVOU_LINUX_MEDIUM_RUNNER || vars.PINVOU_LINUX_RUNNER || '["ubuntu-22.04"]') || matrix.os }}
+      matrix: ${{ fromJSON(vars.PINVOU_WINDOWS_ENABLED != 'false' && (vars.PINVOU_MACOS_ENABLED != 'false' && '{"include":[{"os":"ubuntu-22.04"},{"os":"windows-latest"}]}' || '{"include":[{"os":"ubuntu-22.04"},{"os":"windows-latest"}]}') || (vars.PINVOU_MACOS_ENABLED != 'false' && '{"include":[{"os":"ubuntu-22.04"}]}' || '{"include":[{"os":"ubuntu-22.04"}]}')) }}
+    runs-on: ${{ matrix.os == 'ubuntu-22.04' && fromJSON(vars.PINVOU_LINUX_MEDIUM_RUNNER || vars.PINVOU_LINUX_RUNNER || '["ubuntu-22.04"]') || matrix.os == 'windows-latest' && fromJSON(vars.PINVOU_WINDOWS_MEDIUM_RUNNER || vars.PINVOU_WINDOWS_RUNNER || '["windows-latest"]') || matrix.os }}
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@v7
@@ -1526,7 +1551,7 @@ jobs:
             libssl-dev \
             libayatana-appindicator3-dev \
             libpipewire-0.3-dev libdrm-dev libgbm-dev libegl-dev \
-            build-essential pkg-config cmake
+            build-essential pkg-config cmake libclang-dev
           # 孤儿依赖、apt 缓存包与索引清单不留在构建盘上(单盘 runner 磁盘紧张)。
           if [[ "$RUNNER_ENVIRONMENT" == github-hosted ]]; then
             sudo apt-get autoremove -y --purge
@@ -1780,7 +1805,7 @@ jobs:
             libssl-dev \
             libayatana-appindicator3-dev \
             libpipewire-0.3-dev libdrm-dev libgbm-dev libegl-dev \
-            build-essential pkg-config cmake lld \
+            build-essential pkg-config cmake lld libclang-dev \
             time
           # 孤儿依赖、apt 缓存包与索引清单不留在构建盘上(单盘 runner 磁盘紧张)。
           if [[ "$RUNNER_ENVIRONMENT" == github-hosted ]]; then
@@ -2142,7 +2167,7 @@ jobs:
             libwebkit2gtk-4.1-dev \
             libssl-dev \
             libayatana-appindicator3-dev \
-            build-essential pkg-config cmake \
+            build-essential pkg-config cmake libclang-dev \
             libpipewire-0.3-dev libdrm-dev libgbm-dev libegl-dev
           # Keep this package list byte-identical with the cli-lint job's
           # setup block below (round-45 review: the two blocks are copies;
@@ -2244,8 +2269,8 @@ jobs:
   windows-static-updater-contract:
     name: windows-static-updater-contract
     needs: changes
-    if: ${{ !cancelled() && github.event.action != 'closed' && needs.changes.outputs.windows_static_updater == 'true'  && vars.PINVOU_WINDOWS_MAC_ENABLED != 'false' }}
-    runs-on: windows-latest
+    if: ${{ !cancelled() && github.event.action != 'closed' && needs.changes.outputs.windows_static_updater == 'true'  && vars.PINVOU_WINDOWS_ENABLED != 'false' }}
+    runs-on: ${{ fromJSON(vars.PINVOU_WINDOWS_LIGHT_RUNNER || vars.PINVOU_WINDOWS_RUNNER || '["windows-latest"]') }}
     timeout-minutes: 10
     steps:
       - name: Checkout
@@ -2360,7 +2385,7 @@ jobs:
             libwebkit2gtk-4.1-dev \
             libssl-dev \
             libayatana-appindicator3-dev \
-            build-essential pkg-config cmake \
+            build-essential pkg-config cmake libclang-dev \
             libpipewire-0.3-dev libdrm-dev libgbm-dev libegl-dev
           # Reduce footprint at the source: orphan dependencies, apt cache packages, and index lists do not stay on the build disk.
           if [[ "$RUNNER_ENVIRONMENT" == github-hosted ]]; then
@@ -2484,7 +2509,7 @@ jobs:
     # so skipped cannot mask uncertainty.
     if: >-
       ${{
-        vars.PINVOU_WINDOWS_MAC_ENABLED != 'false' &&
+        vars.PINVOU_WINDOWS_ENABLED != 'false' &&
         !cancelled() &&
         (
           github.event_name == 'push' ||
@@ -2523,7 +2548,7 @@ jobs:
       max-parallel: 2
       matrix:
         phase: [all-targets-check, regression]
-    runs-on: windows-latest
+    runs-on: ${{ fromJSON(vars.PINVOU_WINDOWS_HEAVY_RUNNER || vars.PINVOU_WINDOWS_RUNNER || '["windows-latest"]') }}
     # 状态机回归使用 Bash 循环；job 级固定 shell 也覆盖 merge ref 从 base
     # 带入该步骤的场景。本 job 其余 run 命令均兼容 Bash。
     defaults:
@@ -2637,12 +2662,13 @@ jobs:
           $ErrorActionPreference = "Stop"
           $cargoHome = if ($env:CARGO_HOME) { $env:CARGO_HOME } else { Join-Path $env:USERPROFILE ".cargo" }
           $config = Join-Path $cargoHome "config.toml"
-          Add-Content -Path $config -Value @"
+          @"
 
           [profile.dev.package.codewhale-tui]
           opt-level = 0
-          "@
-          Write-Host "appended codewhale-tui dev O0 override to $config"
+          "@ | python scripts/ci-cargo-dev-profile.py "$config"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          Write-Host "configured codewhale-tui dev O0 override in $config"
           Get-Content -Path $config | Select-Object -Last 4
 
       # 编译 Windows 专用 .exe 栈 wrapper(源码 scripts/rustc-stack-wrapper.rs)。
@@ -3099,8 +3125,8 @@ jobs:
   windows-rustup-repair-test:
     name: windows-rustup-repair-test
     needs: changes
-    if: ${{ !cancelled() && github.event.action != 'closed' && needs.changes.outputs.pure_release_backflow != 'true' && needs.changes.outputs.windows_rustup_repair == 'true' && (github.event_name != 'pull_request' || github.event.pull_request.draft == false)  && vars.PINVOU_WINDOWS_MAC_ENABLED != 'false' }}
-    runs-on: windows-latest
+    if: ${{ !cancelled() && github.event.action != 'closed' && needs.changes.outputs.pure_release_backflow != 'true' && needs.changes.outputs.windows_rustup_repair == 'true' && (github.event_name != 'pull_request' || github.event.pull_request.draft == false)  && vars.PINVOU_WINDOWS_ENABLED != 'false' }}
+    runs-on: ${{ fromJSON(vars.PINVOU_WINDOWS_HEAVY_RUNNER || vars.PINVOU_WINDOWS_RUNNER || '["windows-latest"]') }}
     # smoke 保留引擎生产环境的 1500s 修复预算;"所有下载源都僵死"的病态情形
     # 必须在引擎自身的诊断输出之后再截断,而不是提前,因此上限要盖过
     # checkout + setup + 工具链拷贝、该预算及其文档化的超冲:最后一次预算
@@ -3187,7 +3213,7 @@ jobs:
     # and does not extend this job's applicability.
     if: >-
       ${{
-        vars.PINVOU_WINDOWS_MAC_ENABLED != 'false' &&
+        vars.PINVOU_MACOS_ENABLED != 'false' &&
         !cancelled() &&
         (
           github.event_name == 'push' ||
@@ -3667,8 +3693,8 @@ jobs:
   windows-codex-runtime-test:
     name: windows-codex-runtime-test
     needs: changes
-    if: ${{ !cancelled() && github.event.action != 'closed' && needs.changes.outputs.pure_release_backflow != 'true' && (needs.changes.outputs.windows_codex == 'true' || needs.changes.outputs.acp_runtime == 'true') && (github.event_name != 'pull_request' || github.event.pull_request.draft == false)  && vars.PINVOU_WINDOWS_MAC_ENABLED != 'false' }}
-    runs-on: windows-latest
+    if: ${{ !cancelled() && github.event.action != 'closed' && needs.changes.outputs.pure_release_backflow != 'true' && (needs.changes.outputs.windows_codex == 'true' || needs.changes.outputs.acp_runtime == 'true') && (github.event_name != 'pull_request' || github.event.pull_request.draft == false)  && vars.PINVOU_WINDOWS_ENABLED != 'false' }}
+    runs-on: ${{ fromJSON(vars.PINVOU_WINDOWS_LIGHT_RUNNER || vars.PINVOU_WINDOWS_RUNNER || '["windows-latest"]') }}
     timeout-minutes: 15
     steps:
       - name: Checkout
@@ -3719,8 +3745,8 @@ jobs:
   windows-runtime-test:
     name: windows-runtime-test
     needs: changes
-    if: ${{ !cancelled() && github.event.action != 'closed' && needs.changes.outputs.pure_release_backflow != 'true' && needs.changes.outputs.windows_runtime == 'true' && (github.event_name != 'pull_request' || github.event.pull_request.draft == false)  && vars.PINVOU_WINDOWS_MAC_ENABLED != 'false' }}
-    runs-on: windows-latest
+    if: ${{ !cancelled() && github.event.action != 'closed' && needs.changes.outputs.pure_release_backflow != 'true' && needs.changes.outputs.windows_runtime == 'true' && (github.event_name != 'pull_request' || github.event.pull_request.draft == false)  && vars.PINVOU_WINDOWS_ENABLED != 'false' }}
+    runs-on: ${{ fromJSON(vars.PINVOU_WINDOWS_LIGHT_RUNNER || vars.PINVOU_WINDOWS_RUNNER || '["windows-latest"]') }}
     timeout-minutes: 10
     steps:
       - name: Checkout
@@ -3732,7 +3758,7 @@ jobs:
   macos-codex-runtime-test:
     name: macos-codex-runtime-test
     needs: changes
-    if: ${{ !cancelled() && github.event.action != 'closed' && needs.changes.outputs.pure_release_backflow != 'true' && needs.changes.outputs.acp_runtime == 'true' && (github.event_name != 'pull_request' || github.event.pull_request.draft == false)  && vars.PINVOU_WINDOWS_MAC_ENABLED != 'false' }}
+    if: ${{ !cancelled() && github.event.action != 'closed' && needs.changes.outputs.pure_release_backflow != 'true' && needs.changes.outputs.acp_runtime == 'true' && (github.event_name != 'pull_request' || github.event.pull_request.draft == false)  && vars.PINVOU_MACOS_ENABLED != 'false' }}
     runs-on: macos-15
     timeout-minutes: 20
     steps:
@@ -3781,7 +3807,7 @@ jobs:
     needs: changes
     if: >-
       ${{
-        vars.PINVOU_WINDOWS_MAC_ENABLED != 'false' &&
+        vars.PINVOU_MACOS_ENABLED != 'false' &&
         !cancelled() &&
         github.event.action != 'closed' &&
         (
@@ -4146,7 +4172,8 @@ jobs:
           RELAY_RESULT: ${{ needs.relay-test.result }}
           WINDOWS_RELAY_DACL_RESULT: ${{ needs.windows-relay-dacl.result }}
           WINDOWS_RELAY_RESULT: ${{ needs.windows-relay-tools-test.result }}
-          WINDOWS_MAC_ENABLED: ${{ vars.PINVOU_WINDOWS_MAC_ENABLED != 'false' }}
+          WINDOWS_ENABLED: ${{ vars.PINVOU_WINDOWS_ENABLED != 'false' }}
+          MACOS_ENABLED: ${{ vars.PINVOU_MACOS_ENABLED != 'false' }}
           RELAY_REQUIRED_BY_POLICY: ${{ needs.changes.outputs.relay == 'true' }}
           TEAM_RELAY_HUB_RESULT: ${{ needs.team-relay-hub-test.result }}
           UPDATE_RELEASE_CONSOLE_RESULT: ${{ needs.update-release-console-test.result }}
@@ -4167,7 +4194,7 @@ jobs:
           WINDOWS_RUNTIME_RESULT: ${{ needs.windows-runtime-test.result }}
           WINDOWS_RUSTUP_REPAIR_RESULT: ${{ needs.windows-rustup-repair-test.result }}
           BACKFLOW_MODE: ${{ needs.changes.outputs.backflow_mode }}
-          WINDOWS_RUST_REQUIRED_BY_POLICY: ${{ vars.PINVOU_WINDOWS_MAC_ENABLED != 'false' && ((github.event_name == 'merge_group' && needs.changes.outputs.backflow_mode == 'full') || (github.event_name == 'pull_request' && github.event.pull_request.draft == false && (needs.changes.outputs.backflow_mode == 'full' || needs.changes.outputs.backflow_mode == 'windows_full'))) }}
+          WINDOWS_RUST_REQUIRED_BY_POLICY: ${{ vars.PINVOU_WINDOWS_ENABLED != 'false' && ((github.event_name == 'merge_group' && needs.changes.outputs.backflow_mode == 'full') || (github.event_name == 'pull_request' && github.event.pull_request.draft == false && (needs.changes.outputs.backflow_mode == 'full' || needs.changes.outputs.backflow_mode == 'windows_full'))) }}
         run: |
           if [[ "${LOONGARCH64_CHECK_ENABLED:-true}" == false ]]; then
             echo "::notice::LoongArch64 cross check temporarily disabled by PINVOU_LOONGARCH64_CHECK_ENABLED=false"
@@ -4194,12 +4221,12 @@ jobs:
             exit 1
           fi
 
-          if [[ "${WINDOWS_MAC_ENABLED:-true}" != false && "$RELAY_REQUIRED_BY_POLICY" == true && "$WINDOWS_RELAY_RESULT" != success ]]; then
+          if [[ "${WINDOWS_ENABLED:-true}" != false && "$RELAY_REQUIRED_BY_POLICY" == true && "$WINDOWS_RELAY_RESULT" != success ]]; then
             echo "Relay 变更要求已启用的 Windows 实际回归成功: windows-relay=$WINDOWS_RELAY_RESULT" >&2
             exit 1
           fi
 
-          if [[ "${WINDOWS_MAC_ENABLED:-true}" != false && "$RELAY_REQUIRED_BY_POLICY" == "true" && "$WINDOWS_RELAY_DACL_RESULT" != success ]]; then
+          if [[ "${WINDOWS_ENABLED:-true}" != false && "$RELAY_REQUIRED_BY_POLICY" == "true" && "$WINDOWS_RELAY_DACL_RESULT" != success ]]; then
             echo "Relay 变更要求真实 Windows DACL 验证成功: windows-relay-dacl=$WINDOWS_RELAY_DACL_RESULT" >&2
             exit 1
           fi
@@ -4230,6 +4257,10 @@ jobs:
             "windows-rustup-repair-test:$WINDOWS_RUSTUP_REPAIR_RESULT"; do
             name="${item%%:*}"
             result="${item#*:}"
+            if [[ "$name" == macos-* && "${MACOS_ENABLED:-true}" == false ]]; then
+              echo "$name: disabled; not required for PR merge"
+              continue
+            fi
             case "$result" in
               success|skipped) ;;
               *)

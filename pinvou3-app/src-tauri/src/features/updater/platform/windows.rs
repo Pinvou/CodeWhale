@@ -1329,6 +1329,8 @@ mod tests {
             std::fs::FileTimes::new().set_modified(now - Duration::from_secs(24 * 60 * 60 + 1)),
         )
         .unwrap();
+        // Close the fixture handle so Windows can complete deletion before the assertion.
+        drop(file);
         cleanup_stale_handoff_approvals(dir.path(), now);
         assert!(!old.exists());
         assert!(fresh.exists());
