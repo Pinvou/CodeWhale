@@ -96,15 +96,9 @@ async fn remote_send_joint_preparation_and_reserved_dispatch_freeze_credentials_
                         },
                     )
                     .await?;
+                    let wire_model = prepared.model.model.clone();
                     let mut bridge =
                         EnginePool::finalize_runtime_bridge(bridge, &prepared, pins).await;
-                    // A B-local single-model endpoint may resolve its served
-                    // name during finalization. Compare dispatch with that
-                    // authoritative route, not the pre-probe settings name.
-                    let wire_model = bridge
-                        .effective_model_owned()
-                        .expect("finalized bridge must have an effective model")
-                        .model;
                     bridge.workspace = home_ref.directory.path().to_owned();
                     bridge.remote_turn_skills = options.skills;
                     assert!(

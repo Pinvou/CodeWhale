@@ -5,6 +5,32 @@ import test from 'node:test';
 
 const sourceRoot = new URL('../src/', import.meta.url);
 
+test('app startup loads remote history from the loaded semantic capability on Linux', () => {
+  const source = fs.readFileSync(new URL('app/main.jsx', sourceRoot), 'utf8');
+  const wiring = source.match(/const remoteProxyHistoryAvailable =[\s\S]*?\}, \[remoteProxyHistoryAvailable\]\);/);
+  assert.ok(wiring, 'exercise the production availability expression and startup effect together');
+  for (const [label, platformCapabilities, available, expected] of [
+    ['Linux supported', { os: 'linux', loaded: true, desktopRemoteControl: true }, true, 1],
+    ['Windows supported', { os: 'windows', loaded: true, desktopRemoteControl: true }, true, 1],
+    ['future supported host', { os: 'future-host', loaded: true, desktopRemoteControl: true }, true, 1],
+    ['not loaded', { os: 'linux', loaded: false, desktopRemoteControl: true }, true, 0],
+    ['unsupported', { os: 'linux', loaded: true, desktopRemoteControl: false }, true, 0],
+    ['missing capabilities', undefined, true, 0],
+    ['bridge unavailable', { os: 'linux', loaded: true, desktopRemoteControl: true }, false, 0],
+  ]) {
+    let calls = 0;
+    vm.runInNewContext(wiring[0], {
+      bs: { platformCapabilities },
+      bridge: {
+        available,
+        desktopRemoteControl: { listRemoteProxyHistory() { calls += 1; return Promise.resolve([]); } },
+      },
+      useEffect(effect) { effect(); },
+    });
+    assert.equal(calls, expected, label);
+  }
+});
+
 function loadDesktopBridge() {
   const calls = [];
   let response = null;

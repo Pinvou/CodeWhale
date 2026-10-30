@@ -7,6 +7,7 @@ Linux 桌面端复用 Windows 桌面远控的协议、Relay、配对、Session �
 - 支持项目的 64 位 Linux 目标，包括 x86_64、aarch64、loongarch64；不依赖 X11 按键抓取，Wayland 不另设入口限制。macOS 和其他未适配目标仍返回 `desktop_remote_control_unsupported`。
 - 构建与运行时共用 `PINVOU_DESKTOP_CONTROLLER_ENABLED` 的既有契约：debug 构建默认具备能力；release/custom 构建默认关闭。需要在构建时显式设置为 `1`，运行时才能使用；构建时关闭的产物不能通过运行时环境重新开启。运行时的 `0` 或非法值均关闭入口与命令。
 - 正式构建仍通过项目入口，例如 `PINVOU_DESKTOP_CONTROLLER_ENABLED=1 npm --prefix pinvou3-app run build`。这不代替既有发布资格、Relay enrollment 或双机验收。
+- 当前官方 Linux 发布流水线尚未传入上述构建开关，也没有 Linux 对应的远控构建证据任务，因此官方 Linux 安装包目前无法启用远控；须由独立发布工程变更接线后才具备该能力，本 PR 不修改发布流水线。
 - 在设置的远程控制页选择主控端或被控端。B 手动开启、选择允许的工作区和远程任务权限后才接入 Relay；A 使用 B 的配对码连接。联网、模型请求及附件传输沿用现有用户操作与授权流程，不自动开启被控、上传文件或安装依赖。
 
 Linux 复用统一 ChatView、`RemoteProxy`、模型来源与临时模型、技能选择、审批、附件上传/产物下载和断线恢复。B 始终持有权威 Session、工作区及权限，A 不接收 B 的本地路径或凭据；配对与消息格式不增加平台分支。
@@ -17,7 +18,7 @@ Linux 不以 `chmod 0600` 模拟 Windows 的文件共享锁。上传仍经私有
 
 解析结果在进程内保留只读 owner，供主聊天的图片暂存与 ACP 的二次读取使用；该字段不参与 IPC、JSON 或持久化，不能由前端声明。传输回执撤销后，有活跃读者时延迟释放；最后一个 owner 退出后关闭句柄。清理只处理持有的对象和空目录，保留外来文件。进程崩溃遗留的 staging 目录沿用现有恢复边界，不保证自动清除。
 
-提示词和 ACP 资源 URI 不保存 proc fd 地址：成功提取正文或识别为图片后，在会话 ledger 的 `attachment_references/<uuid>/` 生成独立引用，目录 `0700`、文件 `0600`。图片保留校验过的原始字节与文件名；非图片仅保存摄入后的 UTF-8 正文 `content.md`，不会通过原始压缩包等容器恢复已被成员摄入拒绝的内容。历史消息引用该独立文件，避免原 owner 释放后 fd 编号复用；ACP 链接的 MIME 和大小取该正文副本。被拒绝、转换失败或不支持的非图片不生成副本，ACP 仅发送告警，不给出可绕过摄入结果的资源链接。副本属于普通会话附件，不延续内核 seal；有相应会话文件权限的本地用户或工具可编辑它。删除文件后引用返回文件不存在，不会跟随普通 fd 复用。
+提示词和 ACP 资源 URI 不保存 proc fd 地址：成功提取正文或识别为图片后，在会话 ledger 的 `attachment_references/<uuid>/` 生成独立引用，目录 `0700`、文件 `0600`。图片保留校验过的原始字节与文件名；非图片仅保存摄入后的 UTF-8 正文 `content.md`，不会通过原始压缩包等容器恢复已被成员摄入拒绝的内容。历史消息引用该独立文件，避免原 owner 释放后 fd 编号复用；ACP 链接的 MIME 和大小取该正文副本。被拒绝、转换失败或不支持的非图片不生成副本，ACP 仅发送告警，不给出可绕过摄入结果的资源链接；该拒绝路径收紧同时适用于 Windows 与 Linux。副本属于普通会话附件，不延续内核 seal；有相应会话文件权限的本地用户或工具可编辑它。删除文件后引用返回文件不存在，不会跟随普通 fd 复用。
 
 这些副本与 upload receipt/reaper 分开，按会话删除及保留策略清理，不会让 memfd 常驻到会话结束。转换前固定已存在的会话目录句柄，结束后仅相对该句柄创建引用；慢转换不能重新创建已删除的会话目录。重复摄入、后续提交失败或取消也可能留下副本，最终由同一会话清理策略回收；因此除当轮内存外还需正常的附件磁盘空间。
 
@@ -28,7 +29,7 @@ Office、压缩包、MSG、扫描 PDF 的 OCR 和 PDF 预览统一使用独占�
 - 纯文本、JSON、图片和 XLSX 使用现有解析/输入流程；格式识别与 MIME 取已校验的原始文件名。
 - DOCX/ODT 仍调用 pandoc，显式传入输入格式；PDF、压缩包和邮件继续使用现有有界转换命令。
 - LibreOffice 不直接接受这类匿名源。旧 Office、WPS、演示及表格回退改经本地 UNO `InputStream` 输入封存字节；使用独占临时 profile 和随机本地管道，禁用宏与链接更新，沿用进程树超时与输出限制。
-- Linux 的该转换路径需要系统 `/usr/bin/python3`、`python3-uno` 与 LibreOffice。设置中的依赖检查提供中/英/日文说明和现有手动安装入口；Debian/Ubuntu 可安装 `libreoffice python3-uno`。不自动安装，不开放 TCP UNO 服务。缺桥接依赖返回 `attachment_office_stream_dependency_missing`，设置中的体检项明确提供安装入口；不回退到已实测不能加载封存源的 CLI 路径。成功退出但没有实际转换产物仍判失败。
+- Linux 的该转换路径需要系统 `/usr/bin/python3`、`python3-uno` 与 LibreOffice。设置中的依赖检查提供中/英/日文说明和现有手动安装入口；Debian/Ubuntu 可安装 `libreoffice python3-uno`。不自动安装，不开放 TCP UNO 服务。缺桥接依赖返回 `attachment_office_stream_dependency_missing`，设置中的体检项明确提供安装入口；缺少 UNO 时不改走 CLI 文件路径，以维持封存输入契约。成功退出但没有实际转换产物仍判失败。
 - UNO 冷启动预算为 60 秒，整棵进程树仍受外层 180 秒截止约束。正常退出先关闭文档和 UNO desktop；不另建可逃逸外层超时的子进程组。SIGKILL 无法运行 Python finally，可能遗留无正文内容的 `0700` 本地管道节点，此限制保留，不能宣称绝对无节点残留。
 - 远程摄入的转换器与 IO 错误只输出安全诊断码，覆盖压缩包内成员转换告警；本地普通摄入保留原诊断，成功文档正文不会被路径过滤改写。源消失返回 unavailable，范围、名字或摘要不匹配返回 invalid。
 
@@ -68,6 +69,8 @@ cargo test --locked --manifest-path pinvou3-app/src-tauri/Cargo.toml --lib seale
 | DOCX/pandoc、ZIP、RTF/PDF、演示流及表格流实测 | 通过；使用本机工具与合成数据，无模型回合 |
 
 Linux 新启用路径的本地附件夹具放在用户目录中，继续遵守上传路径策略。远程模型接线测试比较运行时最终生效的模型名，因此本机已启动单模型服务时的既有 served-name 解析不会造成错误的配置名断言；产品模型路由未因测试调整而改变。
+
+2026-10-30 复审后，该模型路由断言调整已从本 PR 净差异中撤回，测试与 main 完全一致，保留对夹具预期模型名的客观断言；以上历史验证不作为新 head 的通过结论。
 
 ## 评审修复后验证（2026-10-26）
 
