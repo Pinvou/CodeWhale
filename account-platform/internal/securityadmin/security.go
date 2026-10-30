@@ -202,7 +202,7 @@ func (m *Manager) Redeem(ctx context.Context, deploymentIdentity, credential, pa
 	return m.activate(ctx, deploymentIdentity, credential, password, "ONE_TIME_BOOTSTRAP")
 }
 
-func (m *Manager) activate(ctx context.Context, deploymentIdentity, credential, password, mode string) error {
+func (m *Manager) activate(ctx context.Context, deploymentIdentity, credential, password, mode string) (err error) {
 	if err := identityadapter.ValidatePrivilegedPassword(password, BootstrapUsername); err != nil {
 		return err
 	}
@@ -266,6 +266,19 @@ func (m *Manager) activate(ctx context.Context, deploymentIdentity, credential, 
 			return ErrCredentialInvalid
 		}
 	}
+	// Preserve the provisioning job -> user lock order before capturing the
+	// authority that existed before this attempt's local effects.
+	if _, err := tx.Exec(ctx, `SELECT user_id FROM wallet_provisioning_jobs WHERE user_id=$1 FOR UPDATE`, userID); err != nil {
+		return err
+	}
+	var lockedUser uuid.UUID
+	if err := tx.QueryRow(ctx, `SELECT id FROM users WHERE id=$1 FOR UPDATE`, userID).Scan(&lockedUser); err != nil {
+		return err
+	}
+	guard, err := m.captureActivationGuard(ctx, tx, userID, subject, id, "bootstrap")
+	if err != nil {
+		return err
+	}
 	if _, err := tx.Exec(ctx, `UPDATE super_admin_bootstrap_credentials SET status='REDEEMING',updated_at=$2 WHERE id=$1`, id, now); err != nil {
 		return err
 	}
@@ -277,7 +290,13 @@ func (m *Manager) activate(ctx context.Context, deploymentIdentity, credential, 
 		if identityActivated && compensationRequired {
 			compensationContext, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 			defer cancel()
-			_ = m.directory.DisableUserAndConfirm(compensationContext, subject)
+			// A database/connection error can already have released the original
+			// locks. Roll back first, then recheck durable authority under fresh
+			// locks; never disable a subject from an old unlocked observation.
+			_ = tx.Rollback(compensationContext)
+			if _, compensationErr := m.activationCommitOutcome(compensationContext, "pinvou-super-admin-bootstrap", guard, ""); compensationErr != nil {
+				err = errors.Join(errors.New("SECURITY_ACTIVATION_COMMIT_UNCERTAIN"), err, compensationErr)
+			}
 		}
 	}()
 	if err := m.directory.ActivateBootstrapAdmin(ctx, subject, BootstrapUsername, password); err != nil {
@@ -300,7 +319,10 @@ func (m *Manager) activate(ctx context.Context, deploymentIdentity, credential, 
 		return err
 	}
 	if err := tx.Commit(ctx); err != nil {
-		confirmed, resolutionErr := m.activationCommitOutcome("pinvou-super-admin-bootstrap", `SELECT EXISTS(
+		compensationRequired = false
+		outcomeContext, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		confirmed, resolutionErr := m.activationCommitOutcome(outcomeContext, "pinvou-super-admin-bootstrap", guard, `SELECT EXISTS(
  SELECT 1 FROM super_admin_bootstrap_credentials credential
  JOIN users account_user ON account_user.id=credential.user_id
  JOIN identities identity_record ON identity_record.user_id=account_user.id AND identity_record.issuer=$4 AND identity_record.subject=$3
@@ -314,7 +336,6 @@ func (m *Manager) activate(ctx context.Context, deploymentIdentity, credential, 
 			// The database may have committed. An irreversible Identity disable
 			// cannot safely be inferred from a lost COMMIT reply. Report uncertainty;
 			// Account authorization still follows the durable database state.
-			compensationRequired = false
 			return errors.Join(errors.New("SECURITY_ACTIVATION_COMMIT_UNCERTAIN"), err, resolutionErr)
 		}
 		if !confirmed {
@@ -325,7 +346,7 @@ func (m *Manager) activate(ctx context.Context, deploymentIdentity, credential, 
 	return nil
 }
 
-func (m *Manager) BreakGlass(ctx context.Context, request BreakGlassRequest) error {
+func (m *Manager) BreakGlass(ctx context.Context, request BreakGlassRequest) (err error) {
 	identity, identityErr := m.breakGlassVerifier.Verify(request.OperatorCredential)
 	if identityErr != nil {
 		return identityErr
@@ -371,6 +392,10 @@ func (m *Manager) BreakGlass(ctx context.Context, request BreakGlassRequest) err
 	if err != nil {
 		return err
 	}
+	guard, err := m.captureActivationGuard(ctx, tx, userID, subject, uuid.Nil, "break-glass")
+	if err != nil {
+		return err
+	}
 	now := m.now()
 	expiresAt := now.Add(request.Duration)
 	if _, err := tx.Exec(ctx, `UPDATE users SET status='ACTIVE',version=version+1,membership_version=membership_version+1,updated_at=$2 WHERE id=$1`, userID, now); err != nil {
@@ -393,6 +418,7 @@ func (m *Manager) BreakGlass(ctx context.Context, request BreakGlassRequest) err
 		return err
 	}
 	operationID := uuid.Must(uuid.NewV7())
+	guard.receiptID = operationID
 	evidenceDigest := sha256.Sum256(request.Evidence)
 	if _, err := tx.Exec(ctx, `INSERT INTO break_glass_operations(id,workload_identity,target_user_id,role_assignment_id,reason,unreachable_evidence_sha256,expires_at,created_at,operator_credential_id,incident_ticket) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)`, operationID, identity.Subject, userID, assignmentID, request.Reason, evidenceDigest[:], expiresAt, now, identity.CredentialID, request.IncidentTicket); err != nil {
 		return err
@@ -412,14 +438,23 @@ func (m *Manager) BreakGlass(ctx context.Context, request BreakGlassRequest) err
 		if identityActivated && compensationRequired {
 			compensationContext, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 			defer cancel()
-			_ = m.directory.DisableUserAndConfirm(compensationContext, subject)
+			// A database/connection error can already have released the original
+			// locks. Roll back first, then recheck durable authority under fresh
+			// locks; never disable a subject from an old unlocked observation.
+			_ = tx.Rollback(compensationContext)
+			if _, compensationErr := m.activationCommitOutcome(compensationContext, "pinvou-super-admin-break-glass", guard, ""); compensationErr != nil {
+				err = errors.Join(errors.New("SECURITY_ACTIVATION_COMMIT_UNCERTAIN"), err, compensationErr)
+			}
 		}
 	}()
 	if err := m.directory.ActivateBootstrapAdmin(ctx, subject, identity.TargetUsername, request.FormalPassword); err != nil {
 		return err
 	}
 	if err := tx.Commit(ctx); err != nil {
-		confirmed, resolutionErr := m.activationCommitOutcome("pinvou-super-admin-break-glass", `SELECT EXISTS(
+		compensationRequired = false
+		outcomeContext, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		confirmed, resolutionErr := m.activationCommitOutcome(outcomeContext, "pinvou-super-admin-break-glass", guard, `SELECT EXISTS(
  SELECT 1 FROM break_glass_operations operation
  JOIN users account_user ON account_user.id=operation.target_user_id AND account_user.status='ACTIVE'
  JOIN identities identity_record ON identity_record.user_id=account_user.id AND identity_record.issuer=$5 AND identity_record.subject=$4
@@ -433,7 +468,6 @@ func (m *Manager) BreakGlass(ctx context.Context, request BreakGlassRequest) err
 			// The database may have committed. An irreversible Identity disable
 			// cannot safely be inferred from a lost COMMIT reply. Report uncertainty;
 			// Account authorization still follows the durable database state.
-			compensationRequired = false
 			return errors.Join(errors.New("SECURITY_ACTIVATION_COMMIT_UNCERTAIN"), err, resolutionErr)
 		}
 		if !confirmed {
@@ -537,12 +571,49 @@ func appendSecurityAlert(ctx context.Context, tx pgx.Tx, severity, eventType, re
 	return err
 }
 
-// A separate transaction waits for the original activation lock to be released,
-// then reads its unique receipt from a fresh snapshot. A network COMMIT error
-// alone cannot distinguish a rollback from a durable commit.
-func (m *Manager) activationCommitOutcome(lock, query string, arguments ...any) (bool, error) {
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
+// These are existing durable receipts and current authority facts, not a new
+// activation generation. In particular an ACTIVE bootstrap can consume a new
+// credential without changing the user version, and break-glass can reuse a role.
+type activationGuard struct {
+	userID    uuid.UUID
+	subject   string
+	receiptID uuid.UUID
+	kind      string
+	authority string
+}
+
+// The caller already holds job -> user locks, before its own local effects.
+func (m *Manager) captureActivationGuard(ctx context.Context, tx pgx.Tx, userID uuid.UUID, subject string, receiptID uuid.UUID, kind string) (activationGuard, error) {
+	guard := activationGuard{userID: userID, subject: subject, receiptID: receiptID, kind: kind}
+	var err error
+	guard.authority, err = m.activationAuthority(ctx, tx, userID, subject)
+	return guard, err
+}
+
+func (m *Manager) activationAuthority(ctx context.Context, tx pgx.Tx, userID uuid.UUID, subject string) (string, error) {
+	var authority string
+	err := tx.QueryRow(ctx, `SELECT jsonb_build_object(
+ 'user',jsonb_build_array(u.version,u.membership_version,u.status),
+ 'identity',jsonb_build_array(i.issuer,i.subject),
+ 'bootstrap',COALESCE((SELECT jsonb_agg(jsonb_build_array(c.id,c.identity_subject,c.status,c.consumed_at) ORDER BY c.id)
+ FROM super_admin_bootstrap_credentials c WHERE c.user_id=u.id AND
+ (c.status='CONSUMED' OR c.consumed_at IS NOT NULL OR EXISTS(SELECT 1 FROM audit_logs a WHERE a.action='security.super-admin.bootstrap.activated' AND a.resource_id=c.id::text))),'[]'::jsonb),
+ 'recovery',COALESCE((SELECT jsonb_agg(jsonb_build_array(o.id,o.role_assignment_id,o.expires_at,
+ EXISTS(SELECT 1 FROM audit_logs a WHERE a.action='security.break-glass.activated' AND a.resource_id=o.id::text),
+ EXISTS(SELECT 1 FROM security_alerts a WHERE a.event_type='BREAK_GLASS_ACTIVATED' AND a.resource_id=o.id::text)) ORDER BY o.id)
+ FROM break_glass_operations o WHERE o.target_user_id=u.id),'[]'::jsonb),
+ 'roles',COALESCE((SELECT jsonb_agg(jsonb_build_array(a.id,a.source,a.grant_source,a.starts_at,a.expires_at,a.revoked_at,
+ a.revoked_at IS NULL AND a.starts_at<=$4 AND (a.expires_at IS NULL OR a.expires_at>$4)) ORDER BY a.id)
+ FROM role_assignments a WHERE a.user_id=u.id AND a.role_code='PLATFORM_SUPER_ADMIN' AND a.organization_id IS NULL),'[]'::jsonb),
+ 'wallet',(SELECT jsonb_build_array(j.status,j.completed_at) FROM wallet_provisioning_jobs j WHERE j.user_id=u.id)
+ )::text FROM users u JOIN identities i ON i.user_id=u.id AND i.issuer=$2 AND i.subject=$3 WHERE u.id=$1`, userID, m.issuer, subject, m.now()).Scan(&authority)
+	return authority, err
+}
+
+// A fresh outcome transaction keeps the original mode's advisory lock and the
+// user lock through any disable. A false current-authority JOIN is not proof
+// that a durable activation rolled back; check its raw receipt separately.
+func (m *Manager) activationCommitOutcome(ctx context.Context, lock string, guard activationGuard, query string, arguments ...any) (bool, error) {
 	tx, err := m.pool.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.ReadCommitted})
 	if err != nil {
 		return false, err
@@ -551,9 +622,45 @@ func (m *Manager) activationCommitOutcome(lock, query string, arguments ...any) 
 	if _, err := tx.Exec(ctx, `SELECT pg_advisory_xact_lock(hashtext($1))`, lock); err != nil {
 		return false, err
 	}
-	var confirmed bool
-	if err := tx.QueryRow(ctx, query, arguments...).Scan(&confirmed); err != nil {
+	var lockedUser uuid.UUID
+	if err := tx.QueryRow(ctx, `SELECT id FROM users WHERE id=$1 FOR UPDATE`, guard.userID).Scan(&lockedUser); err != nil {
 		return false, err
 	}
-	return confirmed, nil
+	if query != "" {
+		var confirmed bool
+		if err := tx.QueryRow(ctx, query, arguments...).Scan(&confirmed); err != nil {
+			return false, err
+		}
+		if confirmed {
+			return true, nil
+		}
+	}
+	var durable bool
+	switch guard.kind {
+	case "bootstrap":
+		err = tx.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM super_admin_bootstrap_credentials WHERE id=$1 AND (status='CONSUMED' OR consumed_at IS NOT NULL)) OR EXISTS(SELECT 1 FROM audit_logs WHERE action='security.super-admin.bootstrap.activated' AND resource_id=$1::text)`, guard.receiptID).Scan(&durable)
+	case "break-glass":
+		err = tx.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM break_glass_operations WHERE id=$1) OR EXISTS(SELECT 1 FROM audit_logs WHERE action='security.break-glass.activated' AND resource_id=$1::text) OR EXISTS(SELECT 1 FROM security_alerts WHERE event_type='BREAK_GLASS_ACTIVATED' AND resource_id=$1::text)`, guard.receiptID).Scan(&durable)
+	default:
+		return false, errors.New("activation receipt type is not recognized")
+	}
+	if err != nil {
+		return false, err
+	}
+	if durable {
+		return false, errors.New("activation has a durable receipt without current complete authority")
+	}
+	current, err := m.activationAuthority(ctx, tx, guard.userID, guard.subject)
+	if err != nil {
+		return false, err
+	}
+	if current != guard.authority {
+		return false, errors.New("activation authority changed after this attempt")
+	}
+	// No own durable receipt and unchanged pre-attempt authority: compensate
+	// while subsequent activations still wait for this same user lock.
+	if err := m.directory.DisableUserAndConfirm(ctx, guard.subject); err != nil {
+		return false, err
+	}
+	return false, nil
 }

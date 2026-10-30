@@ -14,6 +14,8 @@ import (
 	"net/http/httptest"
 	"net/url"
 	"os"
+	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -23,6 +25,7 @@ import (
 	"github.com/Pinvou/pinvou3/account-platform/internal/account"
 	"github.com/Pinvou/pinvou3/account-platform/internal/accountschema"
 	"github.com/Pinvou/pinvou3/account-platform/internal/billing"
+	"github.com/Pinvou/pinvou3/account-platform/internal/billingschema"
 	"github.com/Pinvou/pinvou3/account-platform/internal/platform/identity"
 	"github.com/Pinvou/pinvou3/account-platform/internal/platform/migrations"
 	"github.com/google/uuid"
@@ -60,101 +63,44 @@ func retainedSecuritySetup(t *testing.T) *retainedSecurityFixture {
 	if raw == "" {
 		t.Skip("PINVOU_TEST_ACCOUNT_DATABASE_URL is required for real security Account/Billing PostgreSQL integration")
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 45*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
 	t.Cleanup(cancel)
-	control, err := pgx.Connect(ctx, raw)
-	if err != nil {
-		t.Fatal("fixture database connection failed")
-	}
-	t.Cleanup(func() { control.Close(context.Background()) })
-	database := "history_security_db_" + strings.ReplaceAll(uuid.NewString(), "-", "")
-	databaseIdentifier := pgx.Identifier{database}.Sanitize()
-	if _, err = control.Exec(ctx, "CREATE DATABASE "+databaseIdentifier); err != nil {
-		t.Fatal("owned database creation failed")
-	}
-	t.Cleanup(func() {
-		clean, stop := context.WithTimeout(context.Background(), 15*time.Second)
-		defer stop()
-		if _, e := control.Exec(clean, "DROP DATABASE "+databaseIdentifier); e != nil {
-			t.Error("owned database cleanup failed")
-			return
-		}
-		var exists bool
-		if e := control.QueryRow(clean, `SELECT EXISTS(SELECT 1 FROM pg_database WHERE datname=$1)`, database).Scan(&exists); e != nil || exists {
-			t.Error("owned database remains")
-		}
-	})
-	initial, e := pgx.ParseConfig(raw)
-	if e != nil {
-		t.Fatal("owned database configuration failed")
-	}
-	initial.Database = database
-	admin, err := pgx.ConnectConfig(ctx, initial)
-	if err != nil {
-		t.Fatal("owned database connection failed")
-	}
-	t.Cleanup(func() { admin.Close(context.Background()) })
-	schemas := []string{"history_security_" + strings.ReplaceAll(uuid.NewString(), "-", ""), "history_wallet_" + strings.ReplaceAll(uuid.NewString(), "-", "")}
+	actors := newRetainedSecurityActors(t, ctx, raw)
 	urls := make([]string, 2)
-	for i, schema := range schemas {
-		quoted := pgx.Identifier{schema}.Sanitize()
-		if _, err = admin.Exec(ctx, "CREATE SCHEMA "+quoted); err != nil {
-			t.Fatal("owned schema creation failed")
+	for i, domain := range []string{"account", "billing"} {
+		owner := domain + "_service"
+		if domain == "billing" {
+			owner = "billing_schema_owner"
 		}
-		t.Cleanup(func() {
-			clean, stop := context.WithTimeout(context.Background(), 10*time.Second)
-			defer stop()
-			if _, e := admin.Exec(clean, "DROP SCHEMA "+quoted+" CASCADE"); e != nil {
-				t.Error("owned schema cleanup failed")
-				return
-			}
-			var exists bool
-			if e := admin.QueryRow(clean, `SELECT EXISTS(SELECT 1 FROM pg_namespace WHERE nspname=$1)`, schema).Scan(&exists); e != nil || exists {
-				t.Error("owned schema remains")
-			}
-		})
-		configuration, e := pgx.ParseConfig(raw)
-		if e != nil {
-			t.Fatal("fixture URL configuration failed")
+		c := actors.database(t, ctx, domain, owner)
+		selected, err := migrations.Load("../../migrations/" + domain)
+		if err != nil {
+			t.Fatal(err)
 		}
-		configuration.Database = database
-		configuration.RuntimeParams["search_path"] = schema + ",public"
-		ownedURL, e := url.Parse(raw)
-		if e != nil {
-			t.Fatal("owned URL parse failed")
-		}
-		ownedURL.Path = "/" + database
-		ownedQuery := ownedURL.Query()
-		ownedQuery.Set("search_path", schema+",public")
-		ownedURL.RawQuery = ownedQuery.Encode()
-		urls[i] = ownedURL.String()
-		connection, e := pgx.ConnectConfig(ctx, configuration)
-		if e != nil {
-			t.Fatal("owned schema connection failed")
-		}
-		directory := "../../migrations/account"
-		if i == 1 {
-			directory = "../../migrations/billing"
-		}
-		selected, e := migrations.Load(directory)
-		if e != nil {
-			t.Fatal(e)
-		}
-		if i == 0 {
-			e = accountschema.Up(ctx, connection, selected)
+		if domain == "account" {
+			err = accountschema.Up(ctx, c, selected)
 		} else {
-			e = migrations.Up(ctx, connection, selected)
+			err = billingschema.Up(ctx, c, selected)
 		}
-		connection.Close(context.Background())
-		if e != nil {
-			t.Fatal(e)
+		if err != nil {
+			t.Fatal(err)
 		}
+		if _, err = migrations.VerifyApplied(ctx, c, selected); err != nil {
+			t.Fatal(err)
+		}
+		migrations.Unlock(ctx, c)
+		urls[i] = actors.serviceURL(t, c, domain+"_service")
 	}
 	connection, err := pgx.Connect(ctx, urls[0])
 	if err != nil {
 		t.Fatal("owned account connection failed")
 	}
 	t.Cleanup(func() { connection.Close(context.Background()) })
+	var actor string
+	var privileged bool
+	if err = connection.QueryRow(ctx, `SELECT current_user,(SELECT rolsuper OR rolcreatedb OR rolcreaterole OR rolbypassrls FROM pg_roles WHERE rolname=current_user)`).Scan(&actor, &privileged); err != nil || actor != "account_service" || privileged {
+		t.Fatal("runtime actor is not isolated Account service")
+	}
 	directory := &retainedSecurityDirectory{subject: uuid.NewString()}
 	manager, err := NewManager(ctx, urls[0], "https://history-security.invalid", directory)
 	if err != nil {
@@ -295,6 +241,8 @@ type retainedPartialIdentity struct {
 	mu                                       sync.Mutex
 	enabled, failLogout                      bool
 	resets, enables, disables, failedLogouts int
+	disableEntered                           chan struct{}
+	disableContinue                          <-chan struct{}
 }
 
 func retainedRealIdentity(t *testing.T, f *retainedSecurityFixture) *retainedPartialIdentity {
@@ -339,6 +287,16 @@ func retainedRealIdentity(t *testing.T, f *retainedSecurityFixture) *retainedPar
 				if json.NewDecoder(r.Body).Decode(&body) != nil || body.Enabled == nil {
 					w.WriteHeader(http.StatusBadRequest)
 					return
+				}
+				if !*body.Enabled && state.disableEntered != nil {
+					entered, resume := state.disableEntered, state.disableContinue
+					state.disableEntered = nil
+					close(entered)
+					select {
+					case <-resume:
+					case <-r.Context().Done():
+						return
+					}
 				}
 				state.enabled = *body.Enabled
 				if state.enabled {
@@ -451,6 +409,9 @@ func retainedCommitACKProxyUnavailable(t *testing.T, target string) (string, *at
 	return retainedCommitACKProxyMode(t, target, true)
 }
 func retainedCommitACKProxyMode(t *testing.T, target string, unavailable bool) (string, *atomic.Bool, *atomic.Int32) {
+	return retainedCommitACKProxyHook(t, target, unavailable, nil)
+}
+func retainedCommitACKProxyHook(t *testing.T, target string, unavailable bool, hook func()) (string, *atomic.Bool, *atomic.Int32) {
 	t.Helper()
 	parsed, e := url.Parse(target)
 	if e != nil {
@@ -527,6 +488,9 @@ func retainedCommitACKProxyMode(t *testing.T, target string, unavailable bool) (
 					}
 					if header[0] == 'C' && string(body) == "COMMIT\x00" && armed.CompareAndSwap(true, false) {
 						drops.Add(1)
+						if hook != nil {
+							hook()
+						}
 						if unavailable {
 							listener.Close()
 						}
@@ -687,4 +651,208 @@ func TestRetainedSecurityLostBreakGlassACKUnavailableReadIsNotSuccess(t *testing
 		t.Fatal("unavailable recovery outcome read incorrectly disabled identity or repeated activation")
 	}
 
+}
+
+// Isolated current public migrations use the same deployment actor and cleanup
+// contract as the audit-export rollback fixture; domain writes use service roles.
+type retainedSecurityActors struct {
+	admin       *pgx.Conn
+	config      *pgx.ConnConfig
+	roles       []string
+	dbs         map[string]string
+	connections []*pgx.Conn
+}
+
+func newRetainedSecurityActors(t *testing.T, ctx context.Context, raw string) *retainedSecurityActors {
+	t.Helper()
+	config, err := pgx.ParseConfig(raw)
+	if err != nil || !retainedSecurityConfigurationAllowed(config, os.Getenv("F17_TEST_DATABASE_PROFILE"), os.Getenv("GITHUB_ACTIONS") == "true") {
+		t.Fatal("dedicated isolated fixture configuration required")
+	}
+	admin, err := pgx.ConnectConfig(ctx, config)
+	if err != nil {
+		t.Fatal("connect schema setup identity")
+	}
+	// Only this branch's fixtures share the deployment-actor set on their isolated instance.
+	// The session lock serializes those fixtures across Go packages; it grants no authority.
+	t.Cleanup(func() { _ = admin.Close(context.Background()) })
+	if _, err := admin.Exec(ctx, `SELECT pg_advisory_lock(hashtext('pinvou.security.activation.fixture'))`); err != nil {
+		t.Fatal("exclusive fixture lock failed")
+	}
+	var directory, session, database string
+	var port int
+	var super bool
+	if err := admin.QueryRow(ctx, `SELECT current_setting('data_directory'),session_user,current_database(),current_setting('port')::int,(SELECT rolsuper FROM pg_roles WHERE rolname=session_user)`).Scan(&directory, &session, &database, &port, &super); err != nil || session != config.User || database != "postgres" || port != int(config.Port) || !super {
+		t.Fatal("isolated coordinator identity rejected")
+	}
+	if os.Getenv("F17_TEST_DATABASE_PROFILE") == "github-actions-service" {
+		if directory != "/var/lib/postgresql/data" {
+			t.Fatal("isolated CI service directory rejected")
+		}
+	} else if os.Getenv("F17_TEST_DATABASE_PROFILE") == "local-owned" {
+		if filepath.Clean(filepath.FromSlash(directory)) != filepath.Clean(os.Getenv("PINVOU_TEST_OWNED_DATA_DIRECTORY")) {
+			t.Fatal("owned temporary directory rejected")
+		}
+	} else if strings.ReplaceAll(directory, "\\", "/") != "D:/Projects/pinvou3-account-functional/.cache/parallel-runtimes/f04/data" {
+		t.Fatal("owned local runtime directory rejected")
+	}
+	var outsideDatabases, outsideActors int
+	if err := admin.QueryRow(ctx, `SELECT count(*) FROM pg_database WHERE datname NOT IN ('postgres','template0','template1')`).Scan(&outsideDatabases); err != nil || outsideDatabases != 0 {
+		t.Fatal("outside databases prohibit fixture writes")
+	}
+	if err := admin.QueryRow(ctx, `SELECT count(*) FROM pg_roles WHERE rolname !~ '^pg_' AND rolname<>$1`, session).Scan(&outsideActors); err != nil || outsideActors != 0 {
+		t.Fatal("outside actors prohibit fixture writes")
+	}
+	f := &retainedSecurityActors{admin: admin, config: config, dbs: make(map[string]string), roles: []string{"account_service", "account_migrator", "account_approval_control_owner", "account_approval_authorization_owner", "account_approval_writer", "account_approval_backfill", "account_approval_relay", "account_approval_recovery", "billing_service", "billing_schema_owner", "billing_migrator"}}
+	var count int
+	if err := admin.QueryRow(ctx, `SELECT count(*) FROM pg_roles WHERE rolname=ANY($1)`, f.roles).Scan(&count); err != nil || count != 0 {
+		admin.Close(context.Background())
+		t.Fatal("existing deployment actors: no fixture writes permitted")
+	}
+	tx, err := admin.Begin(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer tx.Rollback(context.Background())
+	for _, role := range f.roles {
+		login, inherit := "LOGIN", "NOINHERIT"
+		if strings.HasSuffix(role, "_owner") || role == "account_approval_recovery" {
+			login = "NOLOGIN"
+		}
+		if role == "account_service" || role == "billing_service" {
+			inherit = "INHERIT"
+		}
+		if _, err := tx.Exec(ctx, "CREATE ROLE "+pgx.Identifier{role}.Sanitize()+" "+login+" "+inherit+" NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS"); err != nil {
+			t.Fatal("exclusive actor creation rejected")
+		}
+	}
+	if _, err := tx.Exec(ctx, `GRANT account_service,account_approval_control_owner TO account_migrator; GRANT account_approval_authorization_owner TO account_migrator WITH INHERIT FALSE,SET TRUE,ADMIN TRUE; GRANT billing_service,billing_schema_owner TO billing_migrator; GRANT billing_service TO billing_schema_owner WITH INHERIT TRUE,SET TRUE`); err != nil {
+		t.Fatal(err)
+	}
+	if err := tx.Commit(ctx); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		clean, stop := context.WithTimeout(context.Background(), 45*time.Second)
+		defer stop()
+		defer admin.Close(clean)
+		for _, c := range f.connections {
+			if err := c.Close(clean); err != nil {
+				t.Error("owned migration connection close failed")
+			}
+		}
+		allGone := true
+		for name, owner := range f.dbs {
+			var got string
+			var active int
+			deadline := time.Now().Add(5 * time.Second)
+			var queryErr error
+			for {
+				queryErr = admin.QueryRow(clean, `SELECT pg_get_userbyid(datdba),(SELECT count(*) FROM pg_stat_activity WHERE datname=$1) FROM pg_database WHERE datname=$1`, name).Scan(&got, &active)
+				if queryErr != nil || got != owner || active == 0 || !time.Now().Before(deadline) {
+					break
+				}
+				time.Sleep(10 * time.Millisecond)
+			}
+			if queryErr != nil || got != owner || active != 0 {
+				t.Error("owned DB cleanup identity/connection guard failed")
+				allGone = false
+				continue
+			}
+			if _, err := admin.Exec(clean, "DROP DATABASE "+pgx.Identifier{name}.Sanitize()); err != nil {
+				t.Error("nonforce owned DB cleanup failed")
+				allGone = false
+			}
+		}
+		if !allGone {
+			t.Error("owned actors retained after incomplete DB cleanup")
+			return
+		}
+		var outside bool
+		if err := admin.QueryRow(clean, `SELECT EXISTS(SELECT 1 FROM pg_shdepend WHERE refclassid='pg_authid'::regclass AND refobjid IN(SELECT oid FROM pg_roles WHERE rolname=ANY($1)) AND dbid<>0) OR EXISTS(SELECT 1 FROM pg_auth_members WHERE (roleid IN(SELECT oid FROM pg_roles WHERE rolname=ANY($1)) OR member IN(SELECT oid FROM pg_roles WHERE rolname=ANY($1))) AND NOT(roleid IN(SELECT oid FROM pg_roles WHERE rolname=ANY($1)) AND member IN(SELECT oid FROM pg_roles WHERE rolname=ANY($1))))`, f.roles).Scan(&outside); err != nil || outside {
+			t.Error("external dependencies forbid actor cleanup")
+			return
+		}
+		for i := len(f.roles) - 1; i >= 0; i-- {
+			if _, err := admin.Exec(clean, "DROP ROLE "+pgx.Identifier{f.roles[i]}.Sanitize()); err != nil {
+				t.Error("nonforce owned actor cleanup failed")
+			}
+		}
+		if err := admin.QueryRow(clean, `SELECT count(*) FROM pg_roles WHERE rolname=ANY($1)`, f.roles).Scan(&count); err != nil || count != 0 {
+			t.Error("owned actors remain after cleanup")
+		}
+	})
+	return f
+}
+
+// CI is a separate ephemeral service profile, never a bypass for an arbitrary
+// deployment URL. Local runs additionally verify their exact owned directory.
+func retainedSecurityConfigurationAllowed(config *pgx.ConnConfig, profile string, githubActions bool) bool {
+	if config == nil || (config.Host != "127.0.0.1" && config.Host != "localhost") || config.Database != "postgres" || len(config.Fallbacks) != 0 {
+		return false
+	}
+	if profile == "local-owned" {
+		n, err := strconv.ParseUint(os.Getenv("PINVOU_TEST_OWNED_PORT"), 10, 16)
+		directory := os.Getenv("PINVOU_TEST_OWNED_DATA_DIRECTORY")
+		return err == nil && n >= 1024 && config.Port == uint16(n) && config.Host == "127.0.0.1" && config.TLSConfig == nil && filepath.IsAbs(directory) && filepath.Base(filepath.Clean(directory)) == "data"
+	}
+	if profile == "github-actions-service" {
+		return githubActions && config.Port == 5432 && config.User == "postgres"
+	}
+	return profile == "" && config.Port == 55504 && config.User == "pinvou_wave_test"
+}
+
+func (f *retainedSecurityActors) database(t *testing.T, ctx context.Context, domain, owner string) *pgx.Conn {
+	t.Helper()
+	name := "retained_security_" + domain + "_" + strings.ReplaceAll(uuid.NewString(), "-", "")
+	if _, err := f.admin.Exec(ctx, "CREATE DATABASE "+pgx.Identifier{name}.Sanitize()+" OWNER "+pgx.Identifier{owner}.Sanitize()); err != nil {
+		t.Fatal("create exclusively owned DB")
+	}
+	f.dbs[name] = owner
+	t.Logf("owned fixture database=%s owner=%s", name, owner)
+	config := f.config.Copy()
+	config.Database = name
+	if domain == "account" {
+		config.User = "account_migrator"
+		config.Password = ""
+		if _, err := f.admin.Exec(ctx, "GRANT CREATE ON DATABASE "+pgx.Identifier{name}.Sanitize()+" TO account_migrator"); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if domain == "billing" {
+		config.User = "billing_migrator"
+		config.Password = ""
+	}
+	c, err := pgx.ConnectConfig(ctx, config)
+	if err != nil {
+		t.Fatal("connect isolated migration actor")
+	}
+	f.connections = append(f.connections, c)
+	if domain == "billing" {
+		if _, err := c.Exec(ctx, `SET ROLE billing_schema_owner; ALTER SCHEMA public OWNER TO billing_schema_owner; REVOKE CREATE ON SCHEMA public FROM PUBLIC; GRANT USAGE,CREATE ON SCHEMA public TO billing_service`); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if domain == "account" || domain == "billing" {
+		if _, err := c.Exec(ctx, "SET ROLE "+pgx.Identifier{domain + "_service"}.Sanitize()); err != nil {
+			t.Fatal(err)
+		}
+		var session, current string
+		var super bool
+		if err := c.QueryRow(ctx, `SELECT session_user,current_user,(SELECT rolsuper FROM pg_roles WHERE rolname=current_user)`).Scan(&session, &current, &super); err != nil || session != domain+"_migrator" || current != domain+"_service" || super {
+			t.Fatal("non-super migration actor contract failed")
+		}
+	}
+	return c
+}
+
+func (f *retainedSecurityActors) serviceURL(t *testing.T, c *pgx.Conn, user string) string {
+	t.Helper()
+	parsed, err := url.Parse(f.config.ConnString())
+	if err != nil || (parsed.Scheme != "postgres" && parsed.Scheme != "postgresql") {
+		t.Fatal("schema fixture requires a PostgreSQL URL")
+	}
+	parsed.User = url.User(user)
+	parsed.Path = "/" + c.Config().Database
+	return parsed.String()
 }
