@@ -8,7 +8,7 @@ import json
 import re
 
 MATRIX = re.compile(
-    r"(?m)^( *)matrix: \$\{\{ fromJSON\(vars\.PINVOU_WINDOWS_MAC_ENABLED != 'false' && '([^']+)' \|\| '([^']+)'\) \}\}$"
+    r"(?m)^( *)matrix: \$\{\{ fromJSON\(vars\.PINVOU_WINDOWS_ENABLED != 'false' && \(vars\.PINVOU_MACOS_ENABLED != 'false' && '([^']+)' \|\| '([^']+)'\) \|\| \(vars\.PINVOU_MACOS_ENABLED != 'false' && '([^']+)' \|\| '([^']+)'\)\) \}\}$"
 )
 
 def matrix_rows(value):
@@ -20,12 +20,14 @@ def matrix_rows(value):
         raise ValueError('The platform matrix must contain nonempty row maps')
     return rows
 
-def default_ci_routing(source, *, native_enabled=True):
+def default_ci_routing(source, *, native_enabled=True, windows_enabled=None, macos_enabled=None):
+    windows_enabled = native_enabled if windows_enabled is None else windows_enabled
+    macos_enabled = native_enabled if macos_enabled is None else macos_enabled
     def expand(match):
-        rows = matrix_rows(match.group(2 if native_enabled else 3))
-        # Validate both settings, even when only the default is being rendered.
-        matrix_rows(match.group(2))
-        matrix_rows(match.group(3))
+        choice = 2 if windows_enabled and macos_enabled else 3 if windows_enabled else 4 if macos_enabled else 5
+        rows = matrix_rows(match.group(choice))
+        for index in range(2, 6):
+            matrix_rows(match.group(index))
         indent = match.group(1)
         if all(set(row) == {'os'} for row in rows):
             return indent + 'matrix:\n' + indent + '  os: [' + ', '.join(row['os'] for row in rows) + ']'
@@ -36,13 +38,16 @@ def default_ci_routing(source, *, native_enabled=True):
                 lines.append(indent + ('    - ' if index == 0 else '      ') + key + ': ' + scalar)
         return '\n'.join(lines)
     source = MATRIX.sub(expand, source)
+    source = re.sub(r"vars\.PINVOU_WINDOWS_(?:HEAVY|MEDIUM|LIGHT)_RUNNER \|\| ", '', source)
+    source = re.sub(r"runs-on: \$\{\{ fromJSON\(vars\.PINVOU_WINDOWS_RUNNER \|\| '\[\"windows-latest\"\]'\) \}\}", 'runs-on: windows-latest', source)
+    source = re.sub(r" \|\| matrix\.(os|runs-on) == 'windows-latest' && fromJSON\(vars\.PINVOU_WINDOWS_RUNNER \|\| '\[\"windows-latest\"\]'\)", '', source)
     source = re.sub(r"vars\.PINVOU_LINUX_(?:HEAVY|MEDIUM|LIGHT)_RUNNER \|\| ", '', source)
     source = re.sub(r"runs-on: \$\{\{ fromJSON\(vars\.PINVOU_LINUX_RUNNER \|\| '\[\"ubuntu-22.04\"\]'\) \}\}", 'runs-on: ubuntu-22.04', source)
     source = re.sub(r"runs-on: \$\{\{ matrix\.(os|runs-on) == 'ubuntu-22.04' && fromJSON\(vars\.PINVOU_LINUX_RUNNER \|\| '\[\"ubuntu-22.04\"\]'\) \|\| matrix\.\1 \}\}", lambda m: 'runs-on: ${{ matrix.' + m.group(1) + ' }}', source)
     if native_enabled:
-        source = re.sub(r"(?m)^ *vars\.PINVOU_WINDOWS_MAC_ENABLED != 'false' &&\n", '', source)
-        source = re.sub(r" *&& vars\.PINVOU_WINDOWS_MAC_ENABLED != 'false'", '', source)
-        source = source.replace("vars.PINVOU_WINDOWS_MAC_ENABLED != 'false' && ", '')
+        source = re.sub(r"(?m)^ *vars\.PINVOU_(?:WINDOWS|MACOS)_ENABLED != 'false' &&\n", '', source)
+        source = re.sub(r" *&& vars\.PINVOU_(?:WINDOWS|MACOS)_ENABLED != 'false'", '', source)
+        source = re.sub(r"vars\.PINVOU_(?:WINDOWS|MACOS)_ENABLED != 'false' && ", '', source)
         source = re.sub(r'(?m)^( *WINDOWS_RUST_REQUIRED_BY_POLICY: \$\{\{ )\((.*)\)( \}\})$', r'\1\2\3', source)
     source = source.replace("cache: ${{ runner.environment == 'github-hosted' && 'npm' || '' }}", 'cache: npm')
     # In the default hosted mode this early self-hosted exec is not entered;
