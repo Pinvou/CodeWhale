@@ -161,8 +161,7 @@ export async function uploadRemoteFiles(api, binding, taskId, files, onProgress 
     attempt.knownIds.push(begin.transferId);
     if (!isCurrent()) throw uncertainUpload();
     let completed = false;
-    try {
-      const chunkBytes = Math.max(1, Math.min(Number(begin.chunkBytes) || 1, 256 * 1024));
+    const chunkBytes = Math.max(1, Math.min(Number(begin.chunkBytes) || 1, 256 * 1024));
       for (let offset = 0, chunkIndex = 0; offset < bytes.length; offset += chunkBytes, chunkIndex += 1) {
         if (!isCurrent()) throw uncertainUpload();
         const chunk = bytes.subarray(offset, Math.min(offset + chunkBytes, bytes.length));
@@ -176,7 +175,7 @@ export async function uploadRemoteFiles(api, binding, taskId, files, onProgress 
       }
       if (!completed) throw new Error('remote_attachment_incomplete');
       attachmentIds.push(begin.transferId);
-    } catch (error) { throw error; }
+
   }
   if (!isCurrent()) throw uncertainUpload();
   attempt.state = 'completed';
