@@ -71,10 +71,10 @@ func TestF02PublicCommerceCustomerLifecycle(t *testing.T) {
 	if me.UserID == uuid.Nil || me.Status != "ACTIVE" {
 		return // Preserve the actual Bootstrap failure; do not manufacture state.
 	}
-	t.Run("current-schema-without-future-closure", func(t *testing.T) {
-		var present, future bool
-		if e := c.QueryRow(ctx, `SELECT to_regclass('commerce_customer_mappings') IS NOT NULL AND to_regclass('commerce_customer_sync_jobs') IS NOT NULL AND to_regclass('commerce_customer_sync_evidence') IS NOT NULL AND to_regclass('mall_user_sync_jobs') IS NULL, EXISTS(SELECT 1 FROM information_schema.columns WHERE table_schema='public' AND table_name='users' AND column_name='subject_lifecycle_version')`).Scan(&present, &future); e != nil || !present || future {
-			t.Fatal("current Commerce tables or future closure boundary incorrect", e)
+	t.Run("current-schema-with-subject-lifecycle", func(t *testing.T) {
+		var present, subjectLifecycle bool
+		if e := c.QueryRow(ctx, `SELECT to_regclass('commerce_customer_mappings') IS NOT NULL AND to_regclass('commerce_customer_sync_jobs') IS NOT NULL AND to_regclass('commerce_customer_sync_evidence') IS NOT NULL AND to_regclass('mall_user_sync_jobs') IS NULL, EXISTS(SELECT 1 FROM information_schema.columns WHERE table_schema='public' AND table_name='users' AND column_name='subject_lifecycle_version')`).Scan(&present, &subjectLifecycle); e != nil || !present || !subjectLifecycle {
+			t.Fatal("current Commerce tables or subject lifecycle column missing", e)
 		}
 		if _, e := migrations.VerifyApplied(ctx, c, all); e != nil {
 			t.Fatal(e)
