@@ -19,6 +19,8 @@ func (v retainedExpiryValidator) Validate(context.Context, string, []byte, []str
 	return nil
 }
 func TestRetainedCredentialExpiryAfterAuthorityWait(t *testing.T) {
+	t.Run("rotation_ready_binding", testCredentialRotationReadyBinding)
+	t.Run("provisioning_lock_order", testCredentialProvisioningLockOrder)
 	r, ctx := retainedManagementTokenRepository(t)
 	var clock atomic.Int64
 	start := time.Now().UTC().Truncate(time.Microsecond)

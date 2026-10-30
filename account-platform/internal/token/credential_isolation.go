@@ -927,6 +927,16 @@ func (r *PostgresRepository) CompleteCredentialSession(ctx context.Context, sess
 			return CredentialIsolationResult{}, err
 		}
 	}
+	if priorActiveID != uuid.Nil {
+		if err = rebindReadyCredentialTx(ctx, tx, item.TokenAccountID, priorActiveID, credentialID); err != nil {
+			return CredentialIsolationResult{}, err
+		}
+		// A credential change invalidates only automatic health evidence. An
+		// outstanding manual financial pause keeps its original owner.
+		if _, err = tx.Exec(ctx, `UPDATE routing_policies SET health_status='UNKNOWN',health_diagnostic_code='CREDENTIAL_CHANGED',health_observed_at=NULL,health_expires_at=NULL,next_probe_at=$2,probe_lease_owner=NULL,probe_lease_until=NULL,health_version=health_version+1,updated_at=$2 WHERE token_account_id=$1 AND reference_status='RESOLVED' AND health_diagnostic_code IS DISTINCT FROM 'MANUAL_REVIEW_REQUIRED'`, item.TokenAccountID, now); err != nil {
+			return CredentialIsolationResult{}, err
+		}
+	}
 	if _, err = tx.Exec(ctx, `UPDATE token_accounts SET management_version=management_version+1,updated_at=$2 WHERE id=$1`, item.TokenAccountID, now); err != nil {
 		return CredentialIsolationResult{}, err
 	}

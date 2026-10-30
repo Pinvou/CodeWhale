@@ -84,15 +84,8 @@ func (p *PostgresDefaultRouteProvisioner) provisionResourcesForAttempt(ctx conte
 		return err
 	}
 	defer tx.Rollback(ctx)
-	if claimed != nil {
-		if claimed.DesiredGeneration != desiredGeneration {
-			return ErrRouteProvisioningPending
-		}
-		if _, live, err := p.lockCompletionLease(ctx, tx, *claimed, attemptID); err != nil {
-			return err
-		} else if !live {
-			return ErrRouteProvisioningPending
-		}
+	if claimed != nil && claimed.DesiredGeneration != desiredGeneration {
+		return ErrRouteProvisioningPending
 	}
 	if err := p.repository.recheckTokenRouteActivation(ctx, tx); err != nil {
 		return err
@@ -109,7 +102,9 @@ func (p *PostgresDefaultRouteProvisioner) provisionResourcesForAttempt(ctx conte
 	}
 	now := p.repository.now()
 	var accountID uuid.UUID
+	existingAccount := true
 	if err := tx.QueryRow(ctx, `SELECT id FROM token_accounts WHERE owner_type=$1 AND owner_id=$2 AND management_mode='PLATFORM' ORDER BY created_at,id LIMIT 1 FOR UPDATE`, ownerType, ownerID).Scan(&accountID); errors.Is(err, pgx.ErrNoRows) {
+		existingAccount = false
 		if !p.accountCreateReady.Load() {
 			return ErrTokenAccountCreateNotActive
 		}
@@ -139,7 +134,18 @@ VALUES($1,$2,$3,$4,NULL,$5,$6,'ACTIVE',$7,$8,$9,$9,'PLATFORM') ON CONFLICT(owner
 		}
 	} else if err != nil {
 		return err
-	} else {
+	}
+	// Completion and credential rotation own the account before provisioning.
+	// Keep that order for both retained and newly inserted accounts; a lost
+	// attempt rolls the new account back before any credential/route effect.
+	if claimed != nil {
+		if _, live, err := p.lockCompletionLease(ctx, tx, *claimed, attemptID); err != nil {
+			return err
+		} else if !live {
+			return ErrRouteProvisioningPending
+		}
+	}
+	if existingAccount {
 		if err := p.provisionFirstModelRoute(ctx, tx, resolved, walletID, accountID, model, desiredGeneration, defaultScope); err != nil {
 			return err
 		}

@@ -254,6 +254,16 @@ func (p *PostgresDefaultRouteProvisioner) execute(ctx context.Context, item Rout
 		return
 	}
 	defer tx.Rollback(ctx)
+	// Rotation owns the same account row before rebinding READY resources.
+	// Re-read after acquiring it: the earlier resource observation may name a
+	// credential retired while this worker was waiting to complete.
+	if account, lockErr := getTokenAccount(ctx, tx, accountID, true); lockErr != nil || account.Status != "ACTIVE" {
+		return
+	}
+	err = tx.QueryRow(ctx, `SELECT ta.id,pc.id,rp.route_generation FROM route_provisionings p JOIN token_accounts ta ON ta.owner_type=CASE p.scope_type WHEN 'PERSONAL' THEN 'USER' ELSE 'ORG' END AND ta.owner_id=p.scope_id AND ta.management_mode='PLATFORM' JOIN routing_policies rp ON rp.token_account_id=ta.id AND rp.model_id=p.model_id AND rp.protocol_version_id=$2 AND rp.reference_status='RESOLVED' JOIN model_identities identity ON identity.id=rp.model_id AND identity.adapter_version=$3 JOIN provider_credentials pc ON pc.token_account_id=ta.id AND pc.provider=identity.provider_id AND identity.upstream_model_ref=ANY(pc.allowed_models) AND pc.status='ACTIVE' AND pc.validation_status='VALID' WHERE p.id=$1 AND ta.id=$4 AND ta.wallet_id=p.wallet_id AND ta.status='ACTIVE'`, item.ID, model.ProtocolDefinitionID, model.AdapterVersion, accountID).Scan(&accountID, &credentialID, &generation)
+	if err != nil || generation != item.DesiredGeneration {
+		return
+	}
 	now, live, err := p.lockCompletionLease(ctx, tx, item, attemptID)
 	if err != nil || !live {
 		return
@@ -529,6 +539,33 @@ func (p *PostgresDefaultRouteProvisioner) ValidateModelReady(ctx context.Context
 	}
 	if !ready {
 		return ErrModelUnavailable
+	}
+	return nil
+}
+
+// The caller holds the account row. Only existing, exactly verified READY
+// coverage can move to a newly validated credential; this never creates READY.
+func rebindReadyCredentialTx(ctx context.Context, tx pgx.Tx, accountID, previousID, replacementID uuid.UUID) error {
+	var expected int64
+	if err := tx.QueryRow(ctx, `SELECT count(*) FROM route_provisionings WHERE status='READY' AND active_token_account_id=$1 AND active_credential_id=$2`, accountID, previousID).Scan(&expected); err != nil {
+		return err
+	}
+	changed, err := tx.Exec(ctx, `UPDATE route_provisionings p SET active_credential_id=$3
+FROM token_accounts a,provider_credentials c,model_identities i,routing_policies route
+WHERE p.status='READY' AND p.active_token_account_id=$1 AND p.active_credential_id=$2
+ AND a.id=$1 AND a.status='ACTIVE' AND a.management_mode='PLATFORM' AND a.wallet_id=p.wallet_id
+ AND ((p.scope_type='PERSONAL' AND a.owner_type='USER' AND a.owner_id=p.scope_id)
+ OR (p.scope_type='ORGANIZATION' AND ((a.owner_type='ORG' AND a.owner_id=p.scope_id) OR (a.owner_type='ORG_UNIT' AND a.owner_organization_id=p.scope_id))))
+ AND c.id=$3 AND c.token_account_id=a.id AND c.status='ACTIVE' AND c.validation_status='VALID'
+ AND i.id=p.model_id AND i.upstream_model_ref=p.upstream_model_ref AND c.provider=i.provider_id AND p.upstream_model_ref=ANY(c.allowed_models)
+ AND route.token_account_id=a.id AND route.model_id=p.model_id AND route.protocol_version_id=p.protocol_version_id
+ AND route.protocol_code=p.protocol_code AND route.reference_status='RESOLVED'
+ AND route.route_generation=p.actual_generation AND p.actual_generation=p.desired_generation`, accountID, previousID, replacementID)
+	if err != nil {
+		return err
+	}
+	if changed.RowsAffected() != expected {
+		return ErrCatalogVersionConflict
 	}
 	return nil
 }
