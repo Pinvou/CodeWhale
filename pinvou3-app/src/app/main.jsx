@@ -5193,6 +5193,7 @@ const App = () => {
                 onLaneDeliveryChange={(limited) => { setCodexLaneDeliveryLimited(limited); setCodexLaneDeliveryReported(true); }}
                 bs={bs}
                 onGotoModelSettings={() => openSettingsSection('model')}
+                onOpenAccountRecharge={chatViewBaseProps.onOpenAccountRecharge}
                 onGotoSettings={() => openSettingsSection('general')}
                 onGotoTools={() => navigateFromScheduledRun('toolStore')}
                 onNotify={setSettingsToast}

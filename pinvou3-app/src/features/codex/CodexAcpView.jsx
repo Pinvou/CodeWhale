@@ -640,6 +640,7 @@ export function CodexAcpView({
   onGotoSettings,
   fixedSession = false,
   accountPlatformClient,
+  onOpenAccountRecharge,
   // The "choose workspace" picker (§2) delivers its result through here:
   // { epoch, path, projectId, roots }; path=null = temporary session.
   // onOpenWorkspacePicker opens the picker (held by the host, main.jsx).
@@ -3850,6 +3851,7 @@ export function CodexAcpView({
             {visibleTurns.length > 0 && (
                   <ConversationTimeline
                     turns={visibleTurns}
+                    onUserErrorAction={onOpenAccountRecharge}
                     sessionId={activeId}
                     scrollElementRef={scroller}
                     busy={busy}
