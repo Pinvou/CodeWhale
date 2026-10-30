@@ -36,6 +36,10 @@ runner and configure the corresponding repository variable with that label.
 Do not give small runners the generic legacy label if queued jobs still use it.
 Use `Self-hosted Runner Smoke` to verify all three pools after deployment.
 
+Native Linux Rust builds require `libclang-dev` for PipeWire/SPA bindgen,
+in addition to the PipeWire headers. The PR and release dependency steps
+install it explicitly so older runner images and cold caches work too.
+
 Set repository variable `PINVOU_LOONGARCH64_CHECK_ENABLED=false` to temporarily
 skip the PR Check LoongArch64 cross-compilation leg. Remove the variable or set
 it to `true` to restore its existing routes. The final gate reports this skip;

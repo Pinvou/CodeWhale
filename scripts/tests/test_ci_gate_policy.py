@@ -2623,6 +2623,21 @@ class CiGatePolicyTests(unittest.TestCase):
         self.assertIn('"cli-test:$CLI_TEST_RESULT"', required_gate)
         self.assert_required_gate_wiring("macos-cli-check", "MACOS_CLI_RESULT")
 
+    def test_native_pipewire_builds_install_libclang(self):
+        # bindgen needs the shared libclang library even when PipeWire headers
+        # and clang itself are present. Hosted images/caches can mask omissions.
+        for workflow in (PR_WORKFLOW, RELEASE_WORKFLOW):
+            blocks = re.findall(
+                r"sudo apt-get install\b.*?(?=\n\s*#|\n\s*if |\n\n)",
+                _without_inline_comments(workflow.read_text(encoding="utf-8")),
+                re.DOTALL,
+            )
+            pipewire_blocks = [b for b in blocks if "libpipewire-0.3-dev" in b]
+            self.assertTrue(pipewire_blocks, workflow.name)
+            for block in pipewire_blocks:
+                with self.subTest(workflow=workflow.name, block=block):
+                    self.assertRegex(block, r"\blibclang-dev\b")
+
     def test_cli_lint_tauri_deps_stay_identical_with_cli_test(self):
         # Round-45 review: cli-test and cli-lint carry the same "Install Tauri
         # Linux system dependencies" setup (the workspaces are identical: the
