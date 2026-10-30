@@ -283,11 +283,16 @@ function collectStaticRuntimeScripts() {
 // don't match either: in both, `inset` is not followed by `:`.
 // Replace CSS comments, quoted strings, and unquoted url() token bodies with
 // same-length space runs so the layer scans cannot fire inside them. Offsets
-// in the stripped copy index the original string 1:1. An unquoted url() token
-// is recognized before the comment arm: CSS consumes a `/*` inside it as
-// token content, so treating it as a comment opener would blank the rest of
-// the stylesheet and hide a real layer behind it (lightningcss emits a URL
-// unquoted whenever it needs no escaping — a quoted source url ships
+// in the stripped copy index the original string 1:1. Default-state escapes
+// are consumed first (`\X` is one token character): CSS tokenizes `.foo\"bar`
+// as the ident `foo"bar`, so an escaped quote must not open a string that
+// blanks the rest of the stylesheet and hides a real layer behind it. Hex
+// escapes are consumed as `\` + first digit — producers emit at-keywords
+// literally, so no escape-decoded form needs to match. An unquoted url()
+// token is recognized before the comment arm: CSS consumes a `/*` inside it
+// as token content, so treating it as a comment opener would blank the rest
+// of the stylesheet and hide a real layer behind it (lightningcss emits a
+// URL unquoted whenever it needs no escaping — a quoted source url ships
 // unquoted in dist). `url(` only starts a token at an ident boundary
 // (`svg-url(` is a function name, not a url token). A quoted body falls
 // through to the string arm; an unterminated comment, string, or url() token
@@ -297,16 +302,23 @@ function stripCssCommentsAndStrings(code) {
   let i = 0;
   while (i < code.length) {
     const ch = code[i];
-    if (ch === '/' && code[i + 1] === '*') {
+    if (ch === '\\' && i + 1 < code.length) {
+      out += code.slice(i, i + 2);
+      i += 2;
+    } else if (ch === '/' && code[i + 1] === '*') {
       const end = code.indexOf('*/', i + 2);
       const stop = end === -1 ? code.length : end + 2;
       out += ' '.repeat(stop - i);
       i = stop;
     } else if (ch === '"' || ch === "'") {
       // Divergence from CSS bad-string tokens (which end at an unescaped
-      // newline): a string whose quote never closes blanks to EOF. Minified
-      // dist CSS never ships a raw newline inside a string, and over-blanking
-      // only fails safe (a later survivor is hidden, never invented).
+      // newline): a string whose quote never closes blanks to EOF. The
+      // default-state escape arm above keeps escaped quotes inside idents
+      // from entering here, so this fires only when the stylesheet really
+      // ships an unclosed quote — a shape minified dist CSS never has.
+      // Over-blanking on such malformed input loses a survivor behind it
+      // (a false negative, bounded to that invalid prefix); it keeps the
+      // single pass linear without ever inventing a violation.
       let j = i + 1;
       while (j < code.length && code[j] !== ch) {
         if (code[j] === '\\') j += 1;
@@ -355,6 +367,50 @@ function stripCssCommentsAndStrings(code) {
   return out;
 }
 
+// True when scan[index] sits where a rule may start: the previous
+// non-whitespace scan byte is a block/declaration delimiter or the
+// stylesheet starts here. The stripped copy keeps every byte outside the
+// blanked regions verbatim, so any non-space byte before the `@` is real
+// syntax — a `\` (escape content) or `:` / ident character (selector or
+// declaration value) means this `@layer` substring is not an at-rule.
+function isAtRulePosition(scan, index) {
+  for (let k = index - 1; k >= 0; k -= 1) {
+    const prev = scan[k];
+    if (prev !== ' ' && prev !== '\t' && prev !== '\n' && prev !== '\r' && prev !== '\f') {
+      return prev === '{' || prev === '}' || prev === ';';
+    }
+  }
+  return true;
+}
+
+// Removes every `supports(…)` region from an @import prelude so the clause
+// scan only sees text outside those parentheses: a `layer(` token inside a
+// condition value (`supports(display: layer(x))`) is a feature argument,
+// not an import layer clause. Strings and url() bodies are already blank,
+// so paren depth is reliable; the cursor jumps to the region's end (an
+// unclosed region consumes the rest of the prelude), keeping the read
+// linear by construction.
+function stripSupportsConditions(prelude) {
+  let out = '';
+  let i = 0;
+  while (i < prelude.length) {
+    if (/^supports\(/i.test(prelude.slice(i, i + 9))) {
+      let depth = 1;
+      let j = i + 9;
+      while (j < prelude.length && depth > 0) {
+        if (prelude[j] === '(') depth += 1;
+        else if (prelude[j] === ')') depth -= 1;
+        j += 1;
+      }
+      i = j;
+    } else {
+      out += prelude[i];
+      i += 1;
+    }
+  }
+  return out;
+}
+
 // Exported for the tests' perf pin only: timing a full runAudit re-parses
 // every static runtime script and drowns the CSS-scan signal.
 export function auditDistCss(assetsDir) {
@@ -374,24 +430,32 @@ export function auditDistCss(assetsDir) {
     // them at cssTarget safari14; a Tailwind 4 build puts ~90% of its output
     // inside @layer blocks, so any survivor means the macOS 11 / Safari 14.0
     // floor renders unstyled (same verdict as the earlier Tailwind 4 deps-bump audit).
-    // Comments, quoted strings, and url() token bodies cannot create layers,
-    // but lightningcss keeps `/*! … */` license headers verbatim and
-    // `content` strings can quote at-rule syntax, so both scans run over the
-    // stripped copy. The replacement is space-padded, preserving offsets for
-    // the excerpt/line attribution. Covers the block/anonymous/statement
-    // `@layer` forms, case-insensitively (CSS at-keywords are ASCII
-    // case-insensitive). The import form (`@import … layer|layer(name)`)
-    // carries no `@layer` substring, so the @import preludes are parsed
-    // separately: the prelude reader consumes through the rule's `;` (an
-    // unquoted data URL may contain `;`, but its body is blanked with the
-    // token) and strips the leading URL token, so only a standalone layer
-    // clause after it fires — `layer(` inside the URL never does and the
-    // clause is caught in any position (after supports(), before/after the
-    // media query, bare or named).
+    // Comments, quoted strings, url() token bodies, and default-state escapes
+    // cannot create layers, but lightningcss keeps `/*! … */` license headers
+    // verbatim and `content` strings can quote at-rule syntax, so both scans
+    // run over the stripped copy. The replacement is space-padded, preserving
+    // offsets for the excerpt/line attribution. A survivor must be the
+    // complete at-keyword in a rule-start position — the previous
+    // non-whitespace scan byte is `{`, `}`, or `;`, or the stylesheet starts
+    // here — so escaped selector characters (`.\@layer`) and declaration
+    // values (`a{--token:@layer}`) do not fire, and `@layered` is an ident,
+    // not the at-keyword. Covers the block/anonymous/statement `@layer`
+    // forms, case-insensitively (CSS at-keywords are ASCII case-insensitive).
+    // The import form (`@import … layer|layer(name)`) carries no `@layer`
+    // substring, so the @import preludes are parsed separately: the prelude
+    // reader consumes through the rule's `;` (an unquoted data URL may
+    // contain `;`, but its body is blanked with the token), strips the
+    // leading URL token, then removes supports() conditions (a `layer(`
+    // feature argument inside them is not a clause), so only a standalone
+    // layer clause after it fires — `layer(` inside the URL never does and
+    // the clause is caught in any position (after supports(), before/after
+    // the media query, bare or named).
     const scan = stripCssCommentsAndStrings(code);
     const layerPattern = /@layer/gi;
     let layerMatch;
     while ((layerMatch = layerPattern.exec(scan)) !== null) {
+      if (!isAtRulePosition(scan, layerMatch.index)) continue;
+      if (!/[\s{]/.test(scan[layerMatch.index + '@layer'.length] ?? '')) continue;
       const excerpt = code.slice(Math.max(0, layerMatch.index - 30), layerMatch.index + 50).replaceAll(/\s+/g, ' ');
       violations.push(
         `dist:${name}:${lineOfOffset(code, layerMatch.index).line}: @layer survives the build — cascade layers need Safari 15.4, below the Safari 14.0 floor; context: …${excerpt}…`,
@@ -419,6 +483,7 @@ export function auditDistCss(assetsDir) {
         const close = rest.indexOf(')');
         rest = close === -1 ? '' : rest.slice(close + 1);
       }
+      rest = stripSupportsConditions(rest);
       if (!/(?:^|\s)layer(?:\s*\(|(?=\s|$))/i.test(rest)) continue;
       const excerpt = code.slice(Math.max(0, importMatch.index - 30), importMatch.index + 50).replaceAll(/\s+/g, ' ');
       violations.push(

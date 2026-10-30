@@ -446,12 +446,16 @@ test('the audit fails closed when a dist layer is absent or empty', () => {
   }
 });
 
-test('the url() lexer keeps 1:1 offsets and a discriminative ident boundary', () => {
-  // Three pins over the shared stripper, each discriminating a specific
-  // mutation of `stripCssCommentsAndStrings`:
-  // 1. ident boundary: `svg-url(` must not tokenize as a url() token — its
-  //    body stays visible, so the at-rule inside the (invalid-CSS) function
-  //    value still fires; dropping the boundary check would mask it away.
+test('the url() lexer keeps 1:1 offsets and value positions never fire', () => {
+  // Three pins over the shared stripper and scan, each discriminating a
+  // specific mutation:
+  // 1. at-rule position: `@layer` inside a declaration value (an svg-url()
+  //    function value's data token) is not an at-rule and must not fire.
+  //    An earlier draft pinned the opposite — "must fire" — as a lexer
+  //    ident-boundary discriminator, but that contract pinned a false
+  //    positive: a declaration value never hosts an at-rule, so verdict
+  //    correctness is owned by the rule-start/context check, not by how
+  //    much of the value the lexer blanks.
   // 2. import URL peel: `url(…)layer(…)` with no whitespace before the clause
   //    must fire — the fallback `(?:^|\s)layer` cannot see `)layer(`, so only
   //    the explicit URL-token peel makes "clause in any position" true.
@@ -463,9 +467,11 @@ test('the url() lexer keeps 1:1 offsets and a discriminative ident boundary', ()
     fs.mkdirSync(path.join(distDir, 'assets'), { recursive: true });
 
     fs.writeFileSync(path.join(distDir, 'assets', 'main.css'), '.i{mask-image:svg-url(data:@layer x{})}\n');
-    const boundary = hermeticAudit({ distDir });
-    assert.equal(boundary.length, 1, `the at-rule inside an svg-url() function value must still fire; got: ${JSON.stringify(boundary)}`);
-    assert.match(boundary[0], /^dist:main\.css:1: @layer survives the build/);
+    assert.deepEqual(
+      hermeticAudit({ distDir }),
+      [],
+      'an @layer token inside a declaration value must not fire',
+    );
 
     fs.writeFileSync(path.join(distDir, 'assets', 'main.css'), [
       '@import url("./a.css")layer(nav);',
@@ -484,6 +490,71 @@ test('the url() lexer keeps 1:1 offsets and a discriminative ident boundary', ()
     const attributed = hermeticAudit({ distDir });
     assert.equal(attributed.length, 1, `exactly the surviving @layer must be reported; got: ${JSON.stringify(attributed)}`);
     assert.match(attributed[0], new RegExp(`^dist:main\\.css:${trueLine}: @layer survives the build`), 'line attribution must survive whitespace inside url() tokens');
+  } finally {
+    fs.rmSync(distDir, { recursive: true, force: true });
+  }
+});
+
+test('escaped idents neither mask a real layer nor fire as one', () => {
+  // Default-state CSS escapes are one token character: `.foo\"bar` is the
+  // ident `foo"bar` (single-quoted ident `foo'bar` alike), so the escaped
+  // quote must not open a string that blanks the rest of the stylesheet —
+  // the previous scanner hid the real `@layer` behind it and returned
+  // clean. Symmetrically, a bare `@layer` substring outside a rule-start
+  // position is not an at-rule: `.\@layer` is a class selector,
+  // `a{--token:@layer}` a custom-property value, and `@layered`/`@layering`
+  // idents — none may fail the audit. The real layer after an escaped
+  // selector must still be reported.
+  const distDir = fs.mkdtempSync(path.join(os.tmpdir(), 'compat-audit-escape-'));
+  try {
+    fs.mkdirSync(path.join(distDir, 'assets'), { recursive: true });
+    fs.writeFileSync(path.join(distDir, 'assets', 'double-quote-ident.css'), '.foo\\"bar{color:red}@layer demo{b{color:red}}');
+    fs.writeFileSync(path.join(distDir, 'assets', 'single-quote-ident.css'), ".a\\'b{color:red}@layer demo{b{color:red}}");
+    fs.writeFileSync(path.join(distDir, 'assets', 'escaped-class.css'), '.\\@layer{color:red}');
+    fs.writeFileSync(path.join(distDir, 'assets', 'custom-prop.css'), 'a{--token:@layer}');
+    fs.writeFileSync(path.join(distDir, 'assets', 'layer-idents.css'), '@layered x{color:red}@layering y{color:red}');
+    const violations = hermeticAudit({ distDir });
+    assert.deepEqual(
+      violations.map((violation) => violation.slice('dist:'.length).replace(/:.*/, '')).sort((a, b) => a.localeCompare(b)),
+      ['double-quote-ident.css', 'single-quote-ident.css'],
+      `exactly the two real layers behind escaped idents must be reported; got: ${JSON.stringify(violations)}`,
+    );
+    for (const file of ['double-quote-ident.css', 'single-quote-ident.css']) {
+      assert.match(violations.find((violation) => violation.includes(file)), /^dist:[^:]+:1: @layer survives the build/);
+    }
+
+    fs.rmSync(path.join(distDir, 'assets'), { recursive: true, force: true });
+    fs.mkdirSync(path.join(distDir, 'assets'), { recursive: true });
+    fs.writeFileSync(path.join(distDir, 'assets', 'both.css'), '.\\@layer{color:red}@layer real{b{color:red}}');
+    const both = hermeticAudit({ distDir });
+    assert.equal(both.length, 1, `the escaped selector must not mask the real layer after it; got: ${JSON.stringify(both)}`);
+    assert.match(both[0], /^dist:both\.css:1: @layer survives the build/);
+  } finally {
+    fs.rmSync(distDir, { recursive: true, force: true });
+  }
+});
+
+test('a layer() token inside import supports() conditions is not a layer clause', () => {
+  // `supports(display: layer(x))` carries the `layer(` token as a feature
+  // argument, not as the import's layer clause — the import stays
+  // layer-free and must not fail the audit. The clause before or after the
+  // condition still fires in any position.
+  const distDir = fs.mkdtempSync(path.join(os.tmpdir(), 'compat-audit-supports-'));
+  try {
+    fs.mkdirSync(path.join(distDir, 'assets'), { recursive: true });
+    fs.writeFileSync(path.join(distDir, 'assets', 'supports-layer-fn.css'), '@import url("./a.css") supports(display: layer(x));');
+    fs.writeFileSync(path.join(distDir, 'assets', 'supports-nested-enclosure.css'), '@import url("./a.css") supports((--t: layer));');
+    fs.writeFileSync(path.join(distDir, 'assets', 'clause-then-supports.css'), '@import url("./a.css") layer(nav) supports(display: layer(x));');
+    fs.writeFileSync(path.join(distDir, 'assets', 'supports-then-clause.css'), '@import url("./a.css") supports(display: grid) layer(real);');
+    const violations = hermeticAudit({ distDir });
+    assert.deepEqual(
+      violations.map((violation) => violation.slice('dist:'.length).replace(/:.*/, '')).sort((a, b) => a.localeCompare(b)),
+      ['clause-then-supports.css', 'supports-then-clause.css'],
+      `only the two imports with a real clause must be reported; got: ${JSON.stringify(violations)}`,
+    );
+    for (const file of ['clause-then-supports.css', 'supports-then-clause.css']) {
+      assert.match(violations.find((violation) => violation.includes(file)), / @import layer survives the build/);
+    }
   } finally {
     fs.rmSync(distDir, { recursive: true, force: true });
   }
