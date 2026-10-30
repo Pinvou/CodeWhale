@@ -425,6 +425,7 @@ const jaBase = {
           versionStates:{"current": "現在のバージョン", "ready": "検証済み・切替可能", "history": "旧バージョン", "downloading": "ダウンロード中", "failed": "失敗・削除可能", "deleting": "削除中断・再試行可能"},
           compatibilityReasons:{"versioning_unsupported":"分離アップグレードには新旧両方の検証済み単一ファイル一覧と、新版のネイティブ分離配置への対応が必要です。この構成は未対応です。","cached_recipe_integrity":"旧版のオフライン構成の整合性を検証できないため、確実な復元を保証できません。","missing_cached_recipe": "旧版のオフラインカードが不完全なため、復元を保証できません。先に修復してください。", "weight_manifest_integrity": "重み一覧の整合性検証に失敗したため、再利用や復元の根拠にできません。", "invalid_weight_manifest": "重み一覧の形式が無効です。", "invalid_weight_path": "重み一覧に安全でないパスが含まれています。", "duplicate_weight_path": "パスが重複しているため、ファイルを一意に確認できません。", "filename_not_in_manifest": "宣言されたファイル名が検証済み一覧にありません。", "artifact_selection_changed": "新版は一覧内の別の重みを選択するため、直接再利用できません。", "missing_weight_evidence": "両バージョンの重みを検証するための完全な証拠がありません。"},
           compatibilityKinds:{"compatible": "重みの同一性を確認しました。カードを更新できます。", "weights_changed": "新版の重みは現在のバージョンと異なります。現在のバージョンは保持します。", "unverified": "重みを再利用できる証拠が不足しています。現在のデプロイを保持します。", "topology_changed": "新版には異なるデバイス構成が必要なため、直接置き換えられません。", "unsupported": "このソースからのカード更新はサポートされていません。"},
+          compatibilityLegacyUnverified:"旧カードのソース情報で一致しました。重みは未検証です。カード設定は引き続き更新できます。",
           compatibilityFields:{"source_repo_id": "モデルのソース", "source_filename": "重みファイル", "quantization": "量子化ラベル", "size_bytes": "重みサイズ（バイト）", "deploy_topology": "デバイス構成"},
           versionTitle:n=>`「${n}」のバージョン`, versionTask:n=>`「${n}」のバージョン管理`, versionDeleted:n=>`旧版を削除し、${n.toFixed(2)} GiB を解放しました。`, versionDeleteConfirm:(n,s)=>`「${n}」（登録済み重み ${s}）の専用ファイルを削除しますか？このバージョンには戻せなくなります。共有リソースは保持します。`,
           cardUpdateCheck:'更新を確認', cardUpdateApply:'カードを更新',
@@ -511,6 +512,8 @@ const jaBase = {
           // 無駄に走るのに画面上は正常に見える。だからこの2つは見えて直せる必要がある。
           storageButton: 'ストレージ',
           storageTitle: 'ストレージと取り込み',
+          startupUpdateCheckLabel:"起動時にモデルカードの更新を自動確認",
+          startupUpdateCheckHint:"初期設定は有効です。起動後、設定済みストアにインストール済みカードのメタデータを要求し、IP とカード ID が送信されます。重みのダウンロードやスクリプト実行は行いません。無効な間は新しい自動要求を行いませんが、送信済みの要求は取り消せません。待機中の確認も最新の設定を再確認します。手動確認は引き続き利用できます。再度有効にしてもスキップ済みや完了済みの確認はすぐに再実行せず、次回起動時は新しい設定で確認します。",
           storageModelsDirLabel: 'モデル重みディレクトリ',
           // この 2 つ（storageModelsDirHint / storageScanHint）は**どちらの方向にも
           // 断定しないこと**。再利用するかどうかはホストではなくカードが決める。

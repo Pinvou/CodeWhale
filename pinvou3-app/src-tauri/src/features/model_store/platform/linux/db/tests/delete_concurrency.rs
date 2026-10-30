@@ -76,7 +76,7 @@ fn fixture() -> (PathBuf, String) {
     (root, key)
 }
 
-fn delete_after_competing_writer(add_retained_version: bool) -> rusqlite::Result<()> {
+fn delete_after_competing_writer(add_retained_version: bool) -> Result<(), DeleteStoreModelError> {
     // Open both connections before acquiring the competing writer lock so this
     // handshake tests the delete transaction, not connect()'s WAL initialization.
     let mut deleting = connect().unwrap();
@@ -158,7 +158,7 @@ fn delete_guard_sees_retained_version_committed_by_preceding_wal_writer() {
     let before = serde_json::to_value(get_store_model("delete-target").unwrap()).unwrap();
     assert!(matches!(
         delete_after_competing_writer(true),
-        Err(rusqlite::Error::InvalidQuery)
+        Err(DeleteStoreModelError::RetainedVersions)
     ));
     assert_eq!(
         serde_json::to_value(get_store_model("delete-target").unwrap()).unwrap(),
@@ -166,6 +166,41 @@ fn delete_guard_sees_retained_version_committed_by_preceding_wal_writer() {
     );
     assert!(find_api_key(&key).unwrap().is_some());
     assert_eq!(reservation_rows("model_versions"), 2);
+    assert_eq!(reservation_rows("model_download_reservations"), 1);
+    assert_eq!(reservation_rows("model_download_retained_roots"), 0);
+    assert_eq!(
+        fs::read(root.join("weights")).unwrap(),
+        b"preserve shared model data"
+    );
+}
+
+#[test]
+fn null_active_retains_versions_with_a_domain_error_and_no_record_or_key_changes() {
+    let _home = setup_temp_db();
+    let (root, key) = fixture();
+    let conn = connect().unwrap();
+    conn.execute(
+        "UPDATE store_models SET active_version_id=NULL WHERE card_id='delete-target'",
+        [],
+    )
+    .unwrap();
+    let rec = get_store_model("delete-target").unwrap().unwrap();
+    let derived = crate::features::model_store::platform::linux::version_store::active_id(&rec);
+    conn.execute(
+        "UPDATE model_versions SET version_id=?1 WHERE card_id='delete-target' AND version_id='active'",
+        [derived],
+    ).unwrap();
+    let before = serde_json::to_value(&rec).unwrap();
+    let error = delete_store_model("delete-target").unwrap_err();
+    assert!(matches!(error, DeleteStoreModelError::RetainedVersions));
+    assert!(error.to_string().contains("先在历史版本中清理保留版本"));
+    assert!(!error.to_string().contains("Query is not read-only"));
+    assert_eq!(
+        serde_json::to_value(get_store_model("delete-target").unwrap().unwrap()).unwrap(),
+        before
+    );
+    assert!(find_api_key(&key).unwrap().is_some());
+    assert_eq!(reservation_rows("model_versions"), 1);
     assert_eq!(reservation_rows("model_download_reservations"), 1);
     assert_eq!(reservation_rows("model_download_retained_roots"), 0);
     assert_eq!(

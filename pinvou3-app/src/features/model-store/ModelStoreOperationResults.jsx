@@ -23,7 +23,7 @@ export function ModelStoreOperationResults({ copy, hiddenResultId = null }) {
   const results = allResults.filter((result) => result.id !== hiddenResultId);
   if (!results.length) return null;
   return (
-    <section className="mb-5 space-y-3" aria-label={copy.operationResultsTitle} data-testid="model-version-results">
+    <section className="mb-5 max-h-80 space-y-3 overflow-y-auto overscroll-contain rounded-xl focus-visible:outline focus-visible:outline-2" tabIndex={0} aria-label={copy.operationResultsTitle} data-testid="model-version-results">
       <h3 className="text-[13px] font-semibold">{copy.operationResultsTitle}</h3>
       {results.map(({ id, title, kind, result }) => (
         <div key={id} className="rounded-xl border border-black/10 p-4 dark:border-white/10" data-testid="model-version-operation-result" data-operation-kind={kind}>

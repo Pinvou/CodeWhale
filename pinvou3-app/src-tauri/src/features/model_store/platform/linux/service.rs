@@ -535,9 +535,10 @@ pub async fn check_card_update(card_id: String) -> Result<Value, String> {
 }
 
 pub async fn startup_update_check(service: Arc<ModelStoreService>) -> Result<Value, String> {
+    let enabled = config::startup_update_check_enabled()?;
     let report = service
         .startup_updates
-        .once(super::available(), super::startup_updates::check)
+        .once(super::available() && enabled, super::startup_updates::check)
         .await;
     serde_json::to_value(report).map_err(|e| e.to_string())
 }
@@ -911,11 +912,11 @@ pub fn disable_test_store() -> Result<Value, String> {
 }
 
 fn set_test_store_enabled(enabled: bool) -> Result<(), String> {
-    // 先读再改再整体写回：配置里还有 store_url / models_dir 等一堆字段，
-    // 只写自己关心的那个会把其余的全清掉。
-    let mut settings = config::load_settings();
-    settings.test_mode_enabled = enabled;
-    config::save_settings(&settings).map_err(|e| format!("保存设置失败：{e}"))
+    config::update_settings(|settings| {
+        settings.test_mode_enabled = enabled;
+        Ok(())
+    })
+    .map(|_| ())
 }
 
 // ------------------------------------------------------ 启动时回收残留进程
@@ -990,7 +991,7 @@ pub fn take_startup_cleanup(service: &Arc<ModelStoreService>) -> Result<Value, S
 /// 列表**，含内置位置和当前挂着的 U 盘。用户真正要问的是"到底找了哪些地方"，
 /// 只回一个补充列表答不了这个问题。
 pub fn storage_settings() -> Result<Value, String> {
-    let settings = config::load_settings();
+    let settings = config::read_settings()?;
     let models_dir = settings.models_path();
     let scan_dirs = import_scan::roots(
         &settings.import_scan_dirs,
@@ -1005,6 +1006,7 @@ pub fn storage_settings() -> Result<Value, String> {
             .map(|p| p.to_string_lossy().to_string())
             .collect::<Vec<_>>(),
         "free_bytes": disk::disk_free_bytes(&models_dir).ok(),
+        "startup_update_check_enabled": settings.startup_update_check_enabled,
     }))
 }
 
@@ -1020,34 +1022,41 @@ pub fn storage_settings() -> Result<Value, String> {
 pub fn set_storage_settings(
     models_dir: Option<String>,
     import_scan_dirs: Option<Vec<String>>,
+    startup_update_check_enabled: Option<bool>,
 ) -> Result<Value, String> {
-    // 先读再改再整体写回，理由同 set_test_store_enabled
-    let mut settings = config::load_settings();
-    if let Some(dir) = models_dir {
-        let dir = dir.trim().to_string();
-        if dir.is_empty() {
-            return Err("权重目录不能为空".into());
+    // Validate potentially slow target-directory work before the configuration
+    // lock. The lock only covers a fresh configuration read, patch and write.
+    let models_dir = models_dir
+        .map(|dir| {
+            let dir = dir.trim().to_string();
+            if dir.is_empty() {
+                return Err("权重目录不能为空".to_string());
+            }
+            if !std::path::Path::new(&dir).is_absolute() {
+                return Err(format!("权重目录要填绝对路径，收到的是「{dir}」"));
+            }
+            std::fs::create_dir_all(&dir).map_err(|e| format!("无法创建权重目录「{dir}」：{e}"))?;
+            Ok(dir)
+        })
+        .transpose()?;
+    let import_scan_dirs = import_scan_dirs.map(|dirs| {
+        dirs.into_iter()
+            .map(|dir| dir.trim().to_string())
+            .filter(|dir| !dir.is_empty())
+            .collect()
+    });
+    config::update_settings(|settings| {
+        if let Some(dir) = models_dir {
+            settings.models_dir = dir;
         }
-        // 相对路径在这里是陷阱：卡片脚本各自在不同的工作目录下跑，"./models"
-        // 是相对谁说不清楚，真出问题时现象是"模型下到了奇怪的地方"。
-        if !std::path::Path::new(&dir).is_absolute() {
-            return Err(format!("权重目录要填绝对路径，收到的是「{dir}」"));
+        if let Some(dirs) = import_scan_dirs {
+            settings.import_scan_dirs = dirs;
         }
-        // 建不出来就不写进配置。否则要等到下次下载才在脚本里炸，那时的报错
-        // （某个 mkdir 失败）离真正的原因——设置页填错了路径——已经很远了。
-        std::fs::create_dir_all(&dir).map_err(|e| format!("无法创建权重目录「{dir}」：{e}"))?;
-        settings.models_dir = dir;
-    }
-    if let Some(dirs) = import_scan_dirs {
-        // 滤掉空白项：界面上多敲一次回车就会留一行空的，而空字符串进了搜索
-        // 根列表只会白占一行。
-        settings.import_scan_dirs = dirs
-            .into_iter()
-            .map(|d| d.trim().to_string())
-            .filter(|d| !d.is_empty())
-            .collect();
-    }
-    config::save_settings(&settings).map_err(|e| format!("保存设置失败：{e}"))?;
+        if let Some(enabled) = startup_update_check_enabled {
+            settings.startup_update_check_enabled = enabled;
+        }
+        Ok(())
+    })?;
     storage_settings()
 }
 
@@ -1310,6 +1319,47 @@ mod tests {
         assert!(is_prompt_line("  LMM_PROMPT_FORM={}  "));
         assert!(!is_prompt_line("LMM_PROMPTX=1"));
         assert!(!is_prompt_line("正在下载 …"));
+    }
+
+    #[test]
+    fn storage_updates_preserve_the_startup_opt_out_and_failed_saves_do_not_apply_it() {
+        let _home = config::TempHome::new();
+        let first = set_storage_settings(None, None, Some(false)).unwrap();
+        assert_eq!(first["startup_update_check_enabled"], false);
+        let second = set_storage_settings(None, Some(vec!["/extra/models".into()]), None).unwrap();
+        assert_eq!(second["startup_update_check_enabled"], false);
+        assert_eq!(
+            second["import_scan_dirs"],
+            serde_json::json!(["/extra/models"])
+        );
+        let temporary = config::data_dir().join("config.json.tmp");
+        std::fs::create_dir(&temporary).unwrap();
+        assert!(set_storage_settings(None, None, Some(true)).is_err());
+        assert!(!config::startup_update_check_enabled().unwrap());
+        std::fs::remove_dir(temporary).unwrap();
+        assert_eq!(
+            set_storage_settings(None, None, Some(true)).unwrap()["startup_update_check_enabled"],
+            true
+        );
+    }
+
+    #[tokio::test]
+    async fn direct_startup_command_respects_opt_out_without_consuming_the_attempt() {
+        let _home = config::TempHome::new();
+        set_storage_settings(None, None, Some(false)).unwrap();
+        let service = Arc::new(ModelStoreService::new());
+        assert_eq!(
+            startup_update_check(Arc::clone(&service)).await.unwrap()["checked"],
+            0
+        );
+        let probe = service
+            .startup_updates
+            .once(true, || super::super::startup_updates::Report {
+                checked: 7,
+                ..Default::default()
+            })
+            .await;
+        assert_eq!(probe.checked, 7);
     }
     #[test]
     fn card_operation_lock_is_shared_by_independent_service_instances() {

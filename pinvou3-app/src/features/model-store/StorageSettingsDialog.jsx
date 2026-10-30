@@ -42,6 +42,8 @@ function StorageSettingsDialog({ open, onClose, copy, theme, onSaved }) {
   const [settings, setSettings] = useState(null);
   const [modelsDir, setModelsDir] = useState('');
   const [importText, setImportText] = useState('');
+  const [startupUpdateCheckEnabled, setStartupUpdateCheckEnabled] = useState(true);
+  const [startupUpdateCheckEdited, setStartupUpdateCheckEdited] = useState(false);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
   // 这一次打开有没有成功读到设置。**保存的前提**，见下面 `canSave`。
@@ -64,6 +66,8 @@ function StorageSettingsDialog({ open, onClose, copy, theme, onSaved }) {
         setSettings(data);
         setModelsDir(data.models_dir || '');
         setImportText((data.import_scan_dirs || []).join('\n'));
+        setStartupUpdateCheckEnabled(data.startup_update_check_enabled !== false);
+        setStartupUpdateCheckEdited(false);
         setLoaded(true);
       })
       .catch((e) => {
@@ -84,6 +88,7 @@ function StorageSettingsDialog({ open, onClose, copy, theme, onSaved }) {
           .split('\n')
           .map((line) => line.trim())
           .filter(Boolean),
+        startupUpdateCheckEnabled: startupUpdateCheckEdited ? startupUpdateCheckEnabled : null,
       });
       setSettings(next);
       onSaved?.(copy.storageSaved);
@@ -177,6 +182,16 @@ function StorageSettingsDialog({ open, onClose, copy, theme, onSaved }) {
         ))}
       </ol>
       <p className={`mt-1 text-[12px] leading-5 ${TEXT_SECONDARY}`}>{copy.storageScanHint}</p>
+
+      <label className="mt-5 flex items-center gap-2 text-[13px] font-medium">
+        <input type="checkbox" data-testid="model-store-startup-update-check" checked={startupUpdateCheckEnabled}
+          disabled={!loaded || busy} onChange={(event) => {
+            setStartupUpdateCheckEnabled(event.target.checked);
+            setStartupUpdateCheckEdited(true);
+          }} />
+        {copy.startupUpdateCheckLabel}
+      </label>
+      <p className={`mt-1 text-[12px] leading-5 ${TEXT_SECONDARY}`}>{copy.startupUpdateCheckHint}</p>
 
       {error ? (
         <p className="mt-3 text-[12px] leading-5 text-red-600 dark:text-red-400" data-testid="model-store-storage-error">

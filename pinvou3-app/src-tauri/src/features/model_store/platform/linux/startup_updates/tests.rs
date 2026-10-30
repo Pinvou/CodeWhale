@@ -148,6 +148,42 @@ fn failures_budget_and_concurrent_changes_do_not_create_false_reminders() {
     assert!(report.updates.is_empty());
 }
 
+#[test]
+fn disabled_policy_skips_queued_work_and_stops_before_the_next_card_request() {
+    let _home = config::TempHome::new();
+    db::init_db().unwrap();
+    let a = install("a", "store");
+    let b = install("b", "store");
+    let store = Cards {
+        cards: BTreeMap::from([("a".into(), a), ("b".into(), b)]),
+        calls: Mutex::new(vec![]),
+        mutate: false,
+    };
+    let ids = db::startup_card_ids().unwrap();
+    let report = check_cards_with_policy(&store, &ids, Duration::from_secs(2), || false);
+    assert_eq!(report.skipped, 2);
+    assert!(store.calls.lock().unwrap().is_empty());
+    let checks = AtomicUsize::new(0);
+    let report = check_cards_with_policy(&store, &ids, Duration::from_secs(2), || {
+        checks.fetch_add(1, Ordering::SeqCst) == 0
+    });
+    assert_eq!(report.checked, 1);
+    assert_eq!(report.skipped, 1);
+    assert_eq!(*store.calls.lock().unwrap(), ["a"]);
+}
+
+#[test]
+fn worker_rechecks_persisted_opt_out_before_opening_the_store_or_database() {
+    let _home = config::TempHome::new();
+    let settings = config::Settings {
+        startup_update_check_enabled: false,
+        ..Default::default()
+    };
+    config::save_settings(&settings).unwrap();
+    assert_eq!(check().checked, 0);
+    assert!(!config::data_dir().join("models.db").exists());
+}
+
 #[tokio::test]
 async fn unavailable_features_do_not_start_a_job_or_consume_the_startup_attempt() {
     let state = StartupUpdates::default();

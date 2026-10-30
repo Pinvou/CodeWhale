@@ -74,7 +74,8 @@ impl StartupUpdates {
 }
 
 pub fn check() -> Report {
-    if !super::available() {
+    // Recheck in the worker: a queued command may have been disabled meanwhile.
+    if !super::available() || !config::startup_update_check_enabled().unwrap_or(false) {
         return Report::default();
     }
     log::info!("[model-store] startup_update_check:start");
@@ -85,7 +86,9 @@ pub fn check() -> Report {
             ..Default::default()
         };
     };
-    let report = check_cards(&store, &ids, Duration::from_secs(30));
+    let report = check_cards_with_policy(&store, &ids, Duration::from_secs(30), || {
+        config::startup_update_check_enabled().unwrap_or(false)
+    });
     log::info!(
         "[model-store] startup_update_check:done checked={} skipped={} updates={}",
         report.checked,
@@ -95,7 +98,17 @@ pub fn check() -> Report {
     report
 }
 
+#[cfg(test)]
 fn check_cards(store: &dyn StoreSource, ids: &[String], budget: Duration) -> Report {
+    check_cards_with_policy(store, ids, budget, || true)
+}
+
+fn check_cards_with_policy(
+    store: &dyn StoreSource,
+    ids: &[String],
+    budget: Duration,
+    enabled: impl Fn() -> bool,
+) -> Report {
     let mut report = Report::default();
     let started = Instant::now();
     for (index, id) in ids.iter().enumerate() {
@@ -107,6 +120,10 @@ fn check_cards(store: &dyn StoreSource, ids: &[String], budget: Duration) -> Rep
             report.skipped += 1;
             continue;
         };
+        if !enabled() {
+            report.skipped += ids.len() - index;
+            break;
+        }
         let Ok(card) = store.get_card(id) else {
             report.skipped += 1;
             continue;

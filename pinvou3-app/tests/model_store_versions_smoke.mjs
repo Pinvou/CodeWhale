@@ -214,6 +214,140 @@ try {
   });
   await page.waitForSelector('[data-testid="card-update-compatibility"]');
   assert.ok(await page.evaluate(() => document.querySelector('[data-testid="card-update-compatibility"]').textContent.includes(window.unknownCompatibilityCopy)));
+  // Legacy source matching intentionally retains configuration-only updates,
+  // including zero/unknown size metadata, without claiming verified weights.
+  const legacyCopies = [];
+  for (const [locale, oldSize, nextSize] of [['zh', 0, 23], ['en', 23, 0], ['ja', 0, 0]]) {
+    await page.reload();
+    const notice = await page.evaluate(async ({ locale, oldSize, nextSize }) => {
+      /* eslint-disable import-x/no-unresolved, n/no-missing-import */
+      const reactModule = await import('/@id/react');
+      const { createElement } = reactModule.default || reactModule;
+      const client = await import('/@id/react-dom/client');
+      const { CardUpdateDialog } = await import('/features/model-store/CardUpdateDialog.jsx');
+      const { dictZh } = await import('/shared/i18n/zh.js');
+      const { dictEn } = await import('/shared/i18n/en.js');
+      const { dictJa } = await import('/shared/i18n/ja.js');
+      /* eslint-enable import-x/no-unresolved, n/no-missing-import */
+      const copy = { zh: dictZh, en: dictEn, ja: dictJa }[locale].uiModelStore;
+      window.legacyUpdate = null;
+      window.__TAURI__ = { core: { invoke: async (command) => {
+        if (command !== 'model_store_check_card_update') throw Error(`Unexpected command: ${command}`);
+        return { changed: true, revision: 'legacy-next', compatibility: {
+          kind: 'compatible', reason: 'unchanged_legacy_identity', can_update: true, can_stage: false,
+          changes: [{ field: 'size_bytes', current: oldSize, next: nextSize }],
+        } };
+      } } };
+      const createRoot = client.createRoot || client.default?.createRoot;
+      createRoot(document.getElementById('root')).render(createElement(CardUpdateDialog, {
+        record: { card_id: 'legacy-card', card_name: 'Legacy', size_bytes: oldSize }, copy,
+        theme: 'light', busy: false, onClose() {}, onUpdate(...args) { window.legacyUpdate = args; }, onStage() {},
+      }));
+      return { unverified: copy.compatibilityLegacyUnverified, verified: copy.compatibilityKinds.compatible };
+    }, { locale, oldSize, nextSize });
+    await page.waitForSelector('[data-testid="card-update-compatibility"]');
+    const text = await page.$eval('[data-testid="card-update-compatibility"]', (node) => node.textContent);
+    assert.ok(text.includes(notice.unverified));
+    assert.ok(!text.includes(notice.verified), `${locale}: legacy metadata must not claim verified weight identity`);
+    assert.equal(await page.$('[data-testid="model-store-stage-version"]'), null);
+    assert.equal(await page.$eval('[data-testid="model-store-apply-card-update"]', (button) => button.disabled), false);
+    await page.click('[data-testid="model-store-apply-card-update"]');
+    assert.deepEqual(await page.evaluate(() => [window.legacyUpdate[0].card_id, window.legacyUpdate[1]]), ['legacy-card', 'legacy-next']);
+    legacyCopies.push(notice.unverified);
+  }
+  assert.equal(new Set(legacyCopies).size, 3);
+
+  await page.reload();
+  await page.evaluate(async () => {
+    /* eslint-disable import-x/no-unresolved, n/no-missing-import */
+    const reactModule = await import('/@id/react');
+    const { createElement } = reactModule.default || reactModule;
+    const client = await import('/@id/react-dom/client');
+    const { ModelStoreOperationResults } = await import('/features/model-store/ModelStoreOperationResults.jsx');
+    const { rememberTaskOperationResult, rememberForceRemoveResult } = await import('/features/model-store/operation-results.js');
+    const { dictZh } = await import('/shared/i18n/zh.js');
+    await import('/styles/tailwind.css');
+    /* eslint-enable import-x/no-unresolved, n/no-missing-import */
+    for (let i = 0; i < 40; i += 1) rememberTaskOperationResult({ runId: `scroll-${i}`, title: `Card ${i}`, kind: 'version_switch' }, { ok: true, result: {} });
+    rememberForceRemoveResult({ taskId: 'scroll-residual', cardName: 'Residual' }, { residual_paths: ['/retained/last.weights'], warning: 'force_remove_residual_paths' });
+    const createRoot = client.createRoot || client.default?.createRoot;
+    createRoot(document.getElementById('root')).render(createElement(ModelStoreOperationResults, { copy: dictZh.uiModelStore }));
+  });
+  await page.waitForSelector('[data-testid="model-version-results"]');
+  assert.equal(await page.$$eval('[data-testid="model-version-operation-result"]', (nodes) => nodes.length), 41);
+  const region = await page.$eval('[data-testid="model-version-results"]', (node) => ({
+    height: node.clientHeight, content: node.scrollHeight, overflow: getComputedStyle(node).overflowY, focusable: node.tabIndex,
+  }));
+  assert.ok(region.height <= 320 && region.content > region.height);
+  assert.equal(region.overflow, 'auto');
+  assert.equal(region.focusable, 0);
+  await page.click('[data-testid="model-version-operation-result"]:last-child button');
+  assert.equal(await page.$$eval('[data-testid="model-version-operation-result"]', (nodes) => nodes.length), 40);
+  assert.equal(await page.$('[data-testid="model-version-cleanup-result"]'), null, 'the last residual acknowledgement must remain reachable by scrolling');
+
+  await page.reload();
+  await page.evaluate(async () => {
+    /* eslint-disable import-x/no-unresolved, n/no-missing-import */
+    const reactModule = await import('/@id/react');
+    const { createElement } = reactModule.default || reactModule;
+    const client = await import('/@id/react-dom/client');
+    const { StorageSettingsDialog } = await import('/features/model-store/StorageSettingsDialog.jsx');
+    const { dictZh } = await import('/shared/i18n/zh.js');
+    /* eslint-enable import-x/no-unresolved, n/no-missing-import */
+    window.settingsPolicy = { models_dir: '/safe/models', import_scan_dirs: ['/keep/import'], scan_dirs: [], startup_update_check_enabled: false };
+    window.settingsSaveFails = true;
+    window.settingsWrites = [];
+    window.__TAURI__ = { core: { invoke: async (command, payload) => {
+      if (command === 'model_store_storage_settings') return { ...window.settingsPolicy };
+      if (command === 'model_store_set_storage_settings') {
+        window.settingsWrites.push(payload);
+        if (window.settingsSaveFails) throw Error('permission denied');
+        window.settingsPolicy = { ...window.settingsPolicy, models_dir: payload.modelsDir, import_scan_dirs: payload.importScanDirs,
+          startup_update_check_enabled: payload.startupUpdateCheckEnabled === null ? window.settingsPolicy.startup_update_check_enabled : payload.startupUpdateCheckEnabled };
+        return { ...window.settingsPolicy };
+      }
+      throw Error(`Unexpected command: ${command}`);
+    } } };
+    const createRoot = client.createRoot || client.default?.createRoot;
+    const root = createRoot(document.getElementById('root'));
+    window.renderStartupSettings = (open) => root.render(createElement(StorageSettingsDialog, {
+      open, copy: dictZh.uiModelStore, theme: 'light', onClose() { window.renderStartupSettings(false); },
+    }));
+    window.renderStartupSettings(true);
+  });
+  await page.waitForFunction(() => { const input = document.querySelector('[data-testid="model-store-startup-update-check"]'); return input && !input.disabled; });
+  assert.equal(await page.$eval('[data-testid="model-store-startup-update-check"]', (input) => input.checked), false);
+  await page.click('[data-testid="model-store-startup-update-check"]');
+  await page.click('[data-testid="model-store-storage-save"]');
+  await page.waitForSelector('[data-testid="model-store-storage-error"]');
+  assert.equal(await page.$eval('[data-testid="model-store-startup-update-check"]', (input) => input.checked), true);
+  assert.equal(await page.$eval('[data-testid="model-store-storage-save"]', (button) => button.disabled), false);
+  await page.evaluate(() => { window.settingsSaveFails = false; });
+  await page.click('[data-testid="model-store-startup-update-check"]');
+  await page.click('[data-testid="model-store-storage-save"]');
+  await page.waitForFunction(() => !document.querySelector('[data-testid="model-store-storage-dialog"]'));
+  assert.deepEqual(await page.evaluate(() => window.settingsWrites.map((entry) => entry.startupUpdateCheckEnabled)), [true, false]);
+  await page.evaluate(() => window.renderStartupSettings(true));
+  await page.waitForFunction(() => { const input = document.querySelector('[data-testid="model-store-startup-update-check"]'); return input && !input.disabled; });
+  assert.equal(await page.$eval('[data-testid="model-store-startup-update-check"]', (input) => input.checked), false);
+  assert.equal(await page.$eval('[data-testid="model-store-import-dirs"]', (input) => input.value), '/keep/import');
+  // Window A loads true; another window saves false before A edits only a path.
+  // A must submit no policy intent and preserve the newer persisted false.
+  await page.evaluate(() => window.renderStartupSettings(false));
+  await page.waitForFunction(() => !document.querySelector('[data-testid="model-store-storage-dialog"]'));
+  await page.evaluate(() => { window.settingsPolicy.startup_update_check_enabled = true; window.renderStartupSettings(true); });
+  await page.waitForFunction(() => { const input = document.querySelector('[data-testid="model-store-startup-update-check"]'); return input && !input.disabled; });
+  assert.equal(await page.$eval('[data-testid="model-store-startup-update-check"]', (input) => input.checked), true);
+  await page.evaluate(() => { window.settingsPolicy.startup_update_check_enabled = false; });
+  await page.click('[data-testid="model-store-models-dir"]', { clickCount: 3 });
+  await page.type('[data-testid="model-store-models-dir"]', '/safe/updated-models');
+  await page.click('[data-testid="model-store-storage-save"]');
+  await page.waitForFunction(() => !document.querySelector('[data-testid="model-store-storage-dialog"]'));
+  assert.equal(await page.evaluate(() => window.settingsWrites.at(-1).startupUpdateCheckEnabled), null);
+  assert.equal(await page.evaluate(() => window.settingsPolicy.startup_update_check_enabled), false);
+  await page.evaluate(() => window.renderStartupSettings(true));
+  await page.waitForFunction(() => { const input = document.querySelector('[data-testid="model-store-startup-update-check"]'); return input && !input.disabled; });
+  assert.equal(await page.$eval('[data-testid="model-store-startup-update-check"]', (input) => input.checked), false);
   await page.reload();
   await page.evaluate(async () => {
     /* eslint-disable import-x/no-unresolved, n/no-missing-import */
@@ -797,13 +931,25 @@ try {
       window.startupCalls = 0;
       window.startupReplies = [];
       window.startupDelays = [];
+      window.startupPolicyEnabled = true;
+      window.startupPolicyReads = 0;
+      window.holdStartupTimer = false;
+      window.queuedStartupCallbacks = [];
       const nativeTimeout = window.setTimeout.bind(window);
       window.setTimeout = (callback, delay, ...args) => {
         window.startupDelays.push(delay);
+        if (window.holdStartupTimer && delay >= 0 && delay <= 15000) {
+          window.queuedStartupCallbacks.push(callback);
+          return 100000 + window.queuedStartupCallbacks.length;
+        }
         // Keep tests fast; exact 15s and deadline arithmetic have Node coverage.
         return nativeTimeout(callback, delay > 10000 && delay <= 15000 ? 20 : delay, ...args);
       };
       window.__TAURI__ = { core: { invoke: (command) => {
+        if (command === 'model_store_storage_settings') {
+          window.startupPolicyReads += 1;
+          return Promise.resolve({ startup_update_check_enabled: window.startupPolicyEnabled });
+        }
         if (command !== 'model_store_startup_update_check') throw Error(`Unexpected command: ${command}`);
         window.startupCalls += 1;
         return new Promise((resolve) => { window.startupReplies.push(resolve); });
@@ -863,6 +1009,30 @@ try {
   assert.deepEqual(await normal.page.evaluate(() => window.startupState.updates), []);
   await normal.page.close();
 
+  for (const queued of [false, true]) {
+    const disabled = await startupProbe({ holdRuntime: true });
+    await waitForStartupProbe(() => disabled.pending.length > 0);
+    await disabled.page.evaluate((queued) => {
+      window.startupPolicyEnabled = queued;
+      window.holdStartupTimer = queued;
+    }, queued);
+    for (const request of disabled.pending.splice(0)) await request.continue();
+    await disabled.page.waitForFunction(() => window.startupPolicyReads === 1);
+    if (queued) {
+      await disabled.page.waitForFunction(() => window.queuedStartupCallbacks.length === 1);
+      await disabled.page.evaluate(() => {
+        window.startupPolicyEnabled = false;
+        window.holdStartupTimer = false;
+        window.queuedStartupCallbacks.shift()();
+      });
+      await disabled.page.waitForFunction(() => window.startupPolicyReads === 2);
+    }
+    await disabled.page.evaluate(() => new Promise((resolve) => { setTimeout(resolve, 80); }));
+    assert.equal(await disabled.page.evaluate(() => window.startupCalls), 0,
+      queued ? 'queued startup timer must reread a newly disabled preference' : 'delayed module loading must obey an already disabled preference');
+    await disabled.page.close();
+  }
+
   const slow = await startupProbe({ holdRuntime: true });
   await waitForStartupProbe(() => slow.pending.length > 0);
   assert.equal(await slow.page.evaluate(() => window.startupCalls), 0);
@@ -908,6 +1078,8 @@ try {
   console.log('PASS: existing settings forms preserve untouched routes after migration; edited routes and new drafts opt out');
   console.log('PASS: alias-only and untouched drafts do not claim context edits; explicit 32K and automatic choices retain their intent');
   console.log('PASS: unknown compatibility reasons remain visible; uninstall cleanup preserves sync failures');
+  console.log('PASS: zero-size legacy metadata retains update actions with translated unverified-weight notices; bounded results keep every completion and scroll to individual residual acknowledgements');
+  console.log('PASS: startup update preference loads persisted false and preserves the draft and retry controls after a failed save');
   console.log('PASS: stale details retain explicit re-link intent and surface rejection without changing the active model');
   console.log('PASS: staging preserves other cards’ dialogs; concurrent cleanup disclosures survive navigation and individual acknowledgement');
   console.log('PASS: force-remove results survive navigation; closing one result preserves other unread cleanup paths');
