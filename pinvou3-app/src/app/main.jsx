@@ -26,7 +26,7 @@ import { useSystemDarkMode } from '../hooks/useSystemDarkMode.js';
 import { useModalIsolation } from '../hooks/useModalIsolation.js';
 import { refreshModelAccessAfterAuthentication } from '../features/settings/model-access.js';
 import { COLOR_SCHEME_STORAGE_KEY, normalizeColorScheme, readStoredColorScheme, resolveTheme } from '../shared/color-scheme.js';
-import { DEFAULT_CHAT_TITLES, dict, createLatestLanguageGate, ensureLanguage, ensureLanguageWithZhFallback, LANG_TO_TAG, initialSystemLanguage, SEARCH_KEY_PROVIDERS, TAG_TO_LANG, zhDict, accountPlatformCopy } from '../shared/i18n.js';
+import { DEFAULT_CHAT_TITLES, dict, createLatestLanguageGate, ensureLanguage, ensureLanguageWithZhFallback, LANG_TO_TAG, initialSystemLanguage, SEARCH_KEY_PROVIDERS, TAG_TO_LANG, zhDict, accountPlatformCopy, organizationCopy } from '../shared/i18n.js';
 import { mountWhenLanguageReady } from '../shared/entry-boot.js';
 import { formatSessionDate, localDateKey, formatDateGroupLabel } from '../shared/date-utils.js';
 import { groupSessionsWithProjects, resolveSessionProjectId, needsAddFolderConfirm, WORKSPACE_KIND_BOUND } from '../features/projects/projectGrouping.js';
@@ -50,6 +50,8 @@ import { classifyRebindError, mergeRebindCarryoverIds } from '../features/projec
 import { filterSessionsByTab, groupSessionsByLocalDate, sessionListComparator } from '../shared/session-list-pipeline.js';
 const LazyAccountPlatformPopover = lazy(() => VIEW_LOADERS.accountPlatformPopover().then(module => ({ default: module.AccountPlatformPopover })));
 import { AccountPlatformDesktopClient } from '../features/account-platform/desktop-client.js';
+import { walletRechargeTarget } from '../features/conversation/billing-notice.js';
+import { organizationRechargeTargetAllowed, requirePersonalAccount } from '../features/account-platform/personal-contract.js';
 import { can, isWeb } from '../shared/platform.js';
 import { errorCode, localizedErrorMessage } from '../shared/user-facing-error.js';
 import { installGlobalMarkdownRenderer } from '../shared/markdown-renderer.js';
@@ -367,6 +369,8 @@ const App = () => {
       const [colorScheme, setColorScheme] = useState(readStoredColorScheme);
       const activeTheme = resolveTheme(colorScheme, systemDark);
       const [personalAccountOpen, setPersonalAccountOpen] = useState(false);
+      const [accountRechargeRequest, setAccountRechargeRequest] = useState(null);
+      const accountRechargeSequence = useRef(0);
       const personalAccountClient = useMemo(() => bridge.available && bridge.accountPlatform
         ? new AccountPlatformDesktopClient(bridge.accountPlatform) : null, []);
       const [modelAccessLoginOpen, setModelAccessLoginOpen] = useState(false);
@@ -4253,10 +4257,29 @@ const App = () => {
         onGotoSettings: () => openSettingsSection('general'),
         onGotoModelSettings: () => openSettingsSection('model'),
         accountPlatformClient: personalAccountClient,
-        onOpenAccountRecharge: userError => {
-          if (personalAccountAvailable && userError?.kind === 'wallet_insufficient'
-            && userError.contextType === 'PERSONAL' && userError.action === 'OPEN_RECHARGE') {
+        onOpenAccountRecharge: async userError => {
+          const target = walletRechargeTarget(userError);
+          if (!personalAccountAvailable || !target) return;
+          const requestId = ++accountRechargeSequence.current;
+          if (target.contextType === 'PERSONAL') {
+            setAccountRechargeRequest(null); setPersonalAccountOpen(true); return;
+          }
+          const client = personalAccountClient, sessionEpoch = client.financeSessionEpoch || 0;
+          try {
+            const session = await client.session();
+            const observationEpoch = client.versionObservationEpoch;
+            if (!session.authenticated) throw new Error('PERMISSION_DENIED');
+            const profile = requirePersonalAccount(await client.bootstrap());
+            if (requestId !== accountRechargeSequence.current) return;
+            if (sessionEpoch !== (client.financeSessionEpoch || 0) || observationEpoch !== client.versionObservationEpoch
+              || client.contextVersion > profile.active_context.context_version
+              || (client.authorizationVersions.organization_authorization_version || 0) > profile.active_context.organization_authorization_version) throw new Error('PERMISSION_DENIED');
+            if (!organizationRechargeTargetAllowed(profile, target)) throw new Error('PERMISSION_DENIED');
+            setAccountRechargeRequest({ ...target, requestId, client, sessionEpoch, actor: profile.user_id,
+              contextVersion: profile.active_context.context_version });
             setPersonalAccountOpen(true);
+          } catch {
+            if (requestId === accountRechargeSequence.current) setSettingsToast(organizationCopy[language].permissions);
           }
         },
         onGotoTools: () => navigateFromScheduledRun('toolStore'),
@@ -4959,14 +4982,14 @@ const App = () => {
             <div className={`p-3 mt-auto ${isSidebarOpen ? 'space-y-2' : 'flex flex-col items-center gap-3 pb-6'}`}>
               {personalAccountAvailable && <div className="relative">
                 <button type="button" data-testid="personal-account-button"
-                  onClick={() => setPersonalAccountOpen(value => !value)}
+                  onClick={() => { accountRechargeSequence.current++; setAccountRechargeRequest(null); setPersonalAccountOpen(value => !value); }}
                   title={accountPlatformCopy[language].title}
                   className={`flex items-center rounded-xl px-2 py-1.5 gap-3 ${isSidebarOpen ? 'w-full' : 'justify-center w-10 h-10'}`}>
                   <User size={18} />{isSidebarOpen && <span>{accountPlatformCopy[language].title}</span>}
                 </button>
-                <Suspense fallback={null}><LazyAccountPlatformPopover open={personalAccountOpen} client={personalAccountClient}
+                <Suspense fallback={null}><LazyAccountPlatformPopover open={personalAccountOpen} client={personalAccountClient} rechargeRequest={accountRechargeRequest}
                   copy={accountPlatformCopy[language]} language={language} onLanguageChange={handleSetLanguage}
-                  onClose={() => setPersonalAccountOpen(false)} /></Suspense>
+                  onClose={() => { accountRechargeSequence.current++; setAccountRechargeRequest(null); setPersonalAccountOpen(false); }} /></Suspense>
               </div>}
               <div className={`${isSidebarOpen ? 'flex items-center justify-between gap-2' : 'flex flex-col items-center gap-3'}`}>
                 {!isSidebarOpen && (

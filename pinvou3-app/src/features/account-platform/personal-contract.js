@@ -18,3 +18,12 @@ export function requireProfileChange(payload, expectedID = '', expectedField = '
   if (!nonzeroUUID(payload?.profile_change_request_id) || expectedID && payload.profile_change_request_id !== expectedID || expectedField && payload.field !== expectedField || typeof payload.status !== 'string' || !payload.status) throw new Error('INVALID_PROFILE_ACK');
   return payload;
 }
+
+// A notice selects a destination; only the current authenticated snapshot grants access.
+export function organizationRechargeTargetAllowed(profile, target) {
+  const context = profile?.active_context;
+  return target?.contextType === 'ORGANIZATION' && target.view === 'organizationRecharge'
+    && nonzeroUUID(target.organizationId) && target.organizationId === target.organizationId.toLowerCase()
+    && context?.context_type === 'ORGANIZATION' && context.organization_id === target.organizationId
+    && Array.isArray(context.permissions) && context.permissions.includes('org.entitlements.purchase');
+}

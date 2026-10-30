@@ -14,7 +14,7 @@ import { PersonalUsageWorkspace } from './PersonalUsageWorkspace.jsx';
 const optionalID = value => value ? organizationID(value) : null;
 const time = value => { if (!value) return null; const parsed = new Date(value); if (!Number.isFinite(parsed.getTime())) throw new Error('INVALID_ORGANIZATION_INPUT'); return parsed.toISOString(); };
 const text = value => { if (!value.trim()) throw new Error('INVALID_ORGANIZATION_INPUT'); return value.trim(); };
-export function OrganizationWorkspace({ client, me, language, onChanged, includeFinance = true, includeUsage = true, dialogActions = false }) {
+export function OrganizationWorkspace({ client, me, language, onChanged, includeFinance = true, includeUsage = true, dialogActions = false, purchaseFocusRequest }) {
  const copy = organizationCopy[language], org = me.active_context.organization_id;
  const roleOptions = ['MEMBER', 'ORG_ADMIN', 'BILLING_ADMIN', 'AUDITOR', 'UNIT_ADMIN'].map(value => ({ value, label: organizationLabel(copy, 'Role', value) }));
  const grantRoleOptions = [...roleOptions, { value: 'ORG_MODEL_ADMIN', label: organizationLabel(copy, 'Role', 'ORG_MODEL_ADMIN') }];
@@ -51,7 +51,7 @@ export function OrganizationWorkspace({ client, me, language, onChanged, include
   {can('org.roles.assign') && action('grant-role', copy.grantRole, [{ name: 'user', options: members }, { name: 'role', options: grantRoleOptions }, { name: 'unit', optional: true, options: units }, { name: 'starts', type: 'datetime-local', optional: true }, { name: 'expires', type: 'datetime-local', optional: true }, { name: 'reason' }], values => { if ((values.role === 'UNIT_ADMIN') !== Boolean(values.unit)) throw new Error('INVALID_ORGANIZATION_INPUT'); return { user_id: organizationID(values.user), role_code: text(values.role), unit_id: optionalID(values.unit), starts_at: time(values.starts), expires_at: time(values.expires), reason: text(values.reason) }; }, (facts, key) => api.grantRole(org, facts, key))}
   {can('org.owner.transfer') && action('transfer-owner', copy.transfer, [{ name: 'user', label: 'newOwner', options: members }], values => ({ user: organizationID(values.user) }), (facts, key) => api.transfer(org, facts.user, key), true)}
   {(!can('org.units.manage') || !can('org.members.manage')) && <OrganizationUnitWorkspace api={api} me={me} owner={owner} language={language} onChanged={onChanged} />}
-  {includeFinance && <OrganizationFinanceWorkspace client={client} me={me} language={language} />}
+  {includeFinance && <OrganizationFinanceWorkspace client={client} me={me} language={language} purchaseFocusRequest={purchaseFocusRequest} />}
   <OrganizationClosedGrantsWorkspace key={owner} client={client} me={me} language={language} />
   <OrganizationModelPolicyWorkspace client={client} me={me} language={language} />
   {includeUsage && <PersonalUsageWorkspace client={client} me={me} language={language} />}

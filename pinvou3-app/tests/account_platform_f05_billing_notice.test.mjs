@@ -15,7 +15,7 @@ test('organization notices retain exact scope and never authorize personal recha
     assert.equal(result.errorCode, code);
     assert.equal(result.organizationId, organization_id);
     assert.equal(result.severity, 'warning');
-    assert.equal(walletRechargeTarget(result), null);
+    assert.deepEqual(walletRechargeTarget(result), code === 'WALLET_INSUFFICIENT' ? {contextType:'ORGANIZATION',organizationId:organization_id,view:'organizationRecharge'} : null);
     assert.equal(timelineUserError({billing_notice:{...input, organization_id:'foreign text'}}), null);
     assert.equal(timelineUserError({billing_notice:{...input, schema_version:2}}), null);
   }

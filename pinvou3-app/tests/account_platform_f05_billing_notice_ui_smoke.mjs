@@ -6,7 +6,7 @@ for(const language of ['zh','en','ja']){for(const code of ['WALLET_INSUFFICIENT'
  await page.evaluate(async({language,code,completed})=>{Object.assign(window.f05,{language,code,completed,contextType:'ORGANIZATION',action:code==='MEMBER_QUOTA_INSUFFICIENT'?'CONTACT_ORG_ADMIN':'OPEN_ORGANIZATION_RECHARGE'});await window.f05.render();},{language,code,completed});
  await page.waitForFunction(()=>document.body.textContent.includes(window.f05.copy()[window.f05.completed?'organizationInsufficientCompletedMessage':window.f05.code==='MEMBER_QUOTA_INSUFFICIENT'?'memberQuotaInsufficientMessage':'organizationWalletInsufficientMessage']));
  assert.equal(await page.evaluate(()=>document.body.textContent.includes(window.f05.copy()[window.f05.code==='MEMBER_QUOTA_INSUFFICIENT'?'memberQuotaInsufficientTitle':'organizationWalletInsufficientTitle'])),true);
- assert.equal(await page.evaluate(()=>[...document.querySelectorAll('button')].some(b=>b.textContent===window.f05.copy().rechargeNow)),false,'organization notice must not open a personal wallet');
+ assert.equal(await page.evaluate(()=>[...document.querySelectorAll('button')].some(b=>b.textContent===window.f05.copy().rechargeNow)),code==='WALLET_INSUFFICIENT','only the authorized organization purchase notice has a CTA');
  passed++;console.log(`PASS organization ${code} completed=${completed} ${language}`);
 }}}
 await page.evaluate(async()=>{window.f05.contextType='PERSONAL';await window.f05.render();});

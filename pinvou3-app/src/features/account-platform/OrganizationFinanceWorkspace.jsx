@@ -17,11 +17,12 @@ import { createRechargeOrderReader, refreshPaidRechargeRead, startRechargeOrderP
 import { useRechargePaymentDialog } from './useRechargePaymentDialog.js';
 import { RechargePaymentDialog } from './RechargePaymentDialog.jsx';
 
-export function OrganizationFinanceWorkspace({ client, me, language, presentationTargets }) {
+export function OrganizationFinanceWorkspace({ client, me, language, presentationTargets, purchaseFocusRequest }) {
  const copy = organizationCopy[language], org = me.active_context.organization_id;
  const api = useMemo(() => new OrganizationClient(client), [client]);
  const sessionEpoch = client.financeSessionEpoch || 0;
  const owner = `${me.user_id}:${org}:${me.active_context.context_version}:${me.active_context.organization_authorization_version}:${sessionEpoch}`;
+ const purchaseSection = useRef(null), focusedPurchase = useRef(null);
  const canPurchase = hasPermission(me, 'org.entitlements.purchase');
  const orderClient = useMemo(() => ({
   get financeSessionEpoch() { return client.financeSessionEpoch || 0; },
@@ -122,11 +123,29 @@ export function OrganizationFinanceWorkspace({ client, me, language, presentatio
    onError: reason => { if (isCurrent()) readFailure(reason); },
   });
  }, [orderClient, owner, sessionEpoch, canPurchase, busy, payment.order?.order_id, payment.order?.status, payment.order?.close_status, payment.order?.expires_at]); // eslint-disable-line react-hooks/exhaustive-deps
+ useEffect(() => {
+  if (!purchaseFocusRequest || focusedPurchase.current === purchaseFocusRequest || !dataReady || !canPurchase
+    || readDenied.current || purchaseFocusRequest.client !== client || purchaseFocusRequest.actor !== me.user_id
+    || purchaseFocusRequest.organizationId !== org || purchaseFocusRequest.contextVersion !== me.active_context.context_version
+    || purchaseFocusRequest.sessionEpoch !== sessionEpoch || (client.financeSessionEpoch || 0) !== sessionEpoch) return;
+  const focus = () => {
+   if (focusedPurchase.current === purchaseFocusRequest || readDenied.current || !currentView.current.canPurchase
+     || currentView.current.owner !== owner || (client.financeSessionEpoch || 0) !== sessionEpoch) return;
+   if (globalThis.document?.querySelector('[role=dialog], [role=alertdialog]')) return;
+   const section = purchaseSection.current;
+   if (!section) return;
+   focusedPurchase.current = purchaseFocusRequest;
+   section.focus(); section.scrollIntoView?.({ block: 'nearest' });
+  };
+  focus();
+  globalThis.document?.addEventListener('focusin', focus);
+  return () => globalThis.document?.removeEventListener('focusin', focus);
+ }, [purchaseFocusRequest, dataReady, canPurchase, client, me.user_id, me.active_context.context_version, org, sessionEpoch, owner]);
  const purchaseProducts = data.products.filter(product => organizationPaymentChannels(product, data.capabilities).length > 0);
  const workspace = <section tabIndex={-1}>{payment.order && <RechargePaymentDialog error={error} order={payment.order} copy={financeCopy[language]} language={language} now={now} busy={busy} onDismiss={payment.dismiss} onQuery={() => void query(false)} canRestoreFocus={payment.canRestoreFocus} returnFocus={payment.trigger} />}<h3>{copy.balance}</h3><button disabled={busy} onClick={() => void refresh()}>{copy.refresh}</button>{!presentationTargets && error && <p role="alert">{error}</p>}{!presentationTargets && busy && <p role="status">{copy.loading}</p>}
   {can('org.wallet.read') && data.balance && <dl><dt>{copy.available}</dt><dd>{formatBalance(data.balance.available_microcredits, language)}</dd><dt>{copy.reserved}</dt><dd>{formatBalance(data.balance.reserved_microcredits, language)}</dd></dl>}
   {can('org.wallet.read') && <section><h4>{copy.packages}</h4>{data.packages.map(item => <div key={item.package_id}><p>{item.plan_name} · {item.package_id} · {organizationLabel(copy, 'Status', item.status)} · {formatBalance(item.points_remaining_microcredits, language)}</p><ul>{item.components?.map(component => <li key={component.component_id}>{component.component_id} · {organizationLabel(copy, 'Component', component.component_type)} · {organizationLabel(copy, 'Status', component.status)} · {formatBalance(component.available_microcredits, language)}</li>)}</ul></div>)}</section>}
-  {can('org.entitlements.purchase') && <section>{data.capabilities && <p role="status">{data.capabilities.test_only ? copy.testCollection : data.capabilities.formal_collection_admitted ? copy.formalCollection : copy.collectionUnavailable}</p>}{!busy && !purchaseProducts.length && <p>{copy.noPurchaseChannel}</p>}<OrganizationActionForm disabled={!purchaseProducts.length} client={client} owner={owner} copy={copy} scope="organization-purchase" title={copy.purchase} fields={[{ name: 'product', options: purchaseProducts.map(product => ({ value: product.product_id, label: `${localizedProductDisplayName(product, language)} · ${formatFen(product.amount_fen, language)}` })) }, { name: 'channel', options: values => organizationPaymentChannels(purchaseProducts.find(product => product.product_id === values.product), data.capabilities).map(value => ({ value, label: organizationLabel(copy, 'Channel', value) })) }]} prepare={values => { const product = purchaseProducts.find(item => item.product_id === values.product); const channel = effectivePaymentChannel(organizationPaymentChannels(product, data.capabilities), values.channel); if (!product || !channel || channel !== values.channel) throw new Error('INVALID_ORGANIZATION_INPUT'); return { product_id: product.product_id, channel }; }} action={(facts, key) => { purchasePresentation.current = payment.begin(); return api.createOrder(org, facts, key); }} onConfirmed={result => { if (ownsView(generation.current) && currentView.current.canPurchase) { const latest = rememberOrder(result); setOrder(paymentOrderFacts(latest)); setOrderID(latest.order_id); payment.accept(purchasePresentation.current, latest); } }} />
+  {can('org.entitlements.purchase') && <section ref={purchaseSection} tabIndex={-1} data-organization-purchase={org}>{data.capabilities && <p role="status">{data.capabilities.test_only ? copy.testCollection : data.capabilities.formal_collection_admitted ? copy.formalCollection : copy.collectionUnavailable}</p>}{!busy && !purchaseProducts.length && <p>{copy.noPurchaseChannel}</p>}<OrganizationActionForm disabled={!purchaseProducts.length} client={client} owner={owner} copy={copy} scope="organization-purchase" title={copy.purchase} fields={[{ name: 'product', options: purchaseProducts.map(product => ({ value: product.product_id, label: `${localizedProductDisplayName(product, language)} · ${formatFen(product.amount_fen, language)}` })) }, { name: 'channel', options: values => organizationPaymentChannels(purchaseProducts.find(product => product.product_id === values.product), data.capabilities).map(value => ({ value, label: organizationLabel(copy, 'Channel', value) })) }]} prepare={values => { const product = purchaseProducts.find(item => item.product_id === values.product); const channel = effectivePaymentChannel(organizationPaymentChannels(product, data.capabilities), values.channel); if (!product || !channel || channel !== values.channel) throw new Error('INVALID_ORGANIZATION_INPUT'); return { product_id: product.product_id, channel }; }} action={(facts, key) => { purchasePresentation.current = payment.begin(); return api.createOrder(org, facts, key); }} onConfirmed={result => { if (ownsView(generation.current) && currentView.current.canPurchase) { const latest = rememberOrder(result); setOrder(paymentOrderFacts(latest)); setOrderID(latest.order_id); payment.accept(purchasePresentation.current, latest); } }} />
    <form onSubmit={event => { event.preventDefault(); void query(); }}><label>{copy.order}<input value={orderID} onChange={event => setOrderID(event.target.value)} /></label><button disabled={busy || !orderID}>{copy.queryOrder}</button></form>
    {order && <div><p>{order.order_id} · {organizationLabel(copy, 'Status', order.status)} · {organizationLabel(copy, 'Status', order.fulfillment_status)} · {formatFen(order.amount_fen, language)}</p></div>}
   </section>}

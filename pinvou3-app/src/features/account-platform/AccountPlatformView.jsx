@@ -4,7 +4,7 @@ import { PersonalUsageWorkspace } from './PersonalUsageWorkspace.jsx';
 import { OrganizationDirectory } from './OrganizationDirectory.jsx';
 import { OrganizationWorkspace } from './OrganizationWorkspace.jsx';
 import { OrganizationFinanceWorkspace } from './OrganizationFinanceWorkspace.jsx';
-import { requirePersonalAccount } from './personal-contract.js';
+import { requirePersonalAccount, organizationRechargeTargetAllowed } from './personal-contract.js';
 import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { capturePersonalRechargeReauthentication, authorizePersonalRechargeReauthentication } from './personal-recharge-reauthentication.js';
 import { createDesktopReauthenticationCoordinator } from './desktop-reauthentication.js';
@@ -18,10 +18,10 @@ import { AccountLogin } from './AccountLogin.jsx';
 import { AccountPortalLayout, AccountPortalPanel } from './AccountPortalLayout.jsx';
 import { usePortalSections } from './usePortalSections.js';
 import { portalLoginLocation } from './portal-sections.js';
-import { accountLayoutCopy } from '../../shared/i18n.js';
+import { accountLayoutCopy, organizationCopy } from '../../shared/i18n.js';
 import './account-platform.css';
 
-export function AccountPlatformView({ client, copy, language, onLanguageChange, portal = false, onClose, onAuthenticated }) {
+export function AccountPlatformView({ client, copy, language, onLanguageChange, portal = false, onClose, onAuthenticated, rechargeRequest }) {
   const [auth, setAuth] = useState('loading');
   const [me, setMe] = useState(null);
   const [profileOwner, setProfileOwner] = useState(client);
@@ -170,12 +170,19 @@ export function AccountPlatformView({ client, copy, language, onLanguageChange, 
     {onClose && <button type="button" onClick={() => { reauthentication.coordinator.cancel(reauthentication.ticket); onClose(); }}>{copy.close}</button>}
   </div>;
   if (auth === 'loading' || profileOwner !== client) return <div className="ap-shell ap-centered" role="status">{copy.loading}</div>;
+  if (rechargeRequest && auth !== 'ready') return <main className="ap-shell ap-app"><p role="alert">{organizationCopy[language].permissions}</p>{onClose && <button onClick={onClose}>{copy.close}</button>}</main>;
   if (auth !== 'ready') return <div className="ap-shell ap-login">
     {error && <div className="ap-alert error" role="alert">{error}</div>}
     {auth === 'error' && <button disabled={busy} onClick={() => void refresh()}>{copy.retry}</button>}
     {portal ? <a href={portalLoginLocation(globalThis.location?.pathname, globalThis.location?.search)}>{copy.login}</a> : <AccountLogin key={auth} client={client} copy={copy} onAuthenticated={async () => { const profile = await refresh(); if (profile) onAuthenticated?.(profile); }} />}
     {onClose && <button onClick={onClose}>{copy.close}</button>}
   </div>;
+  const rechargeAllowed = !rechargeRequest || rechargeRequest.client === client
+    && rechargeRequest.sessionEpoch === (client.financeSessionEpoch || 0)
+    && rechargeRequest.actor === me.user_id && rechargeRequest.contextVersion === me.active_context.context_version
+    && organizationRechargeTargetAllowed(me, rechargeRequest);
+  if (!rechargeAllowed) return <main className="ap-shell ap-app"><p role="alert">{organizationCopy[language].permissions}</p>
+    {onClose && <button onClick={onClose}>{copy.close}</button>}</main>;
   const renderedEpoch = epoch.current;
   if (portal) return <AccountPortalLayout me={me} copy={copy} language={language} onLanguageChange={onLanguageChange} navigation={navigation} busy={busy} onRefresh={() => void refresh()} onLogout={logout}>
     {error && <div className="ap-alert error" role="alert">{error}</div>}
@@ -208,7 +215,7 @@ export function AccountPlatformView({ client, copy, language, onLanguageChange, 
     {notice && <div className="ap-alert" role="status">{notice}</div>}
     <section><h2>{accountDisplayLabel(me, copy.user)}</h2><dl><dt>{copy.username}</dt><dd>{me.username || '—'}</dd><dt>{copy.mobile}</dt><dd>{me.mobile || '—'}</dd><dt>{copy.accountStatus}</dt><dd>{me.status}</dd></dl></section>
     <OrganizationDirectory key={`${me.user_id}:${client.financeSessionEpoch || 0}`} client={client} me={me} language={language} onChanged={() => refresh(false)} />
-    {me.active_context?.context_type === 'ORGANIZATION' ? <OrganizationWorkspace key={`${me.user_id}:${me.active_context.organization_id}:${me.active_context.context_version}`} client={client} me={me} language={language} onChanged={() => refresh(false)} /> : <>
+    {me.active_context?.context_type === 'ORGANIZATION' ? <OrganizationWorkspace key={`${me.user_id}:${me.active_context.organization_id}:${me.active_context.context_version}`} client={client} me={me} language={language} purchaseFocusRequest={rechargeRequest} onChanged={() => refresh(false)} /> : <>
     {hasPermission(me, 'personal.billing.read') && <section className="ap-balance-hero"><span>{copy.availableCredits}</span><strong>{formatBalance(balance?.available_microcredits, language)}</strong><small>{copy.reservedCredits}: {formatBalance(balance?.reserved_microcredits, language)}</small></section>}
     <PersonalFinanceWorkspace key={`personal-finance:${me.user_id}`} client={client} me={me} language={language} onPaid={() => { if (renderedEpoch === epoch.current) return refresh(false); }} />
     <PersonalUsageWorkspace key={`personal-usage:${me.user_id}`} client={client} me={me} language={language} />
