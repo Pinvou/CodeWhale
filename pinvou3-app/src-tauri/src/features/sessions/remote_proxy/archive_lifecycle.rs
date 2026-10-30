@@ -3,6 +3,25 @@ use super::schema::RemoteProxyListItem;
 use anyhow::{Result, bail};
 
 impl super::super::SessionStore {
+    /// Expose only an allowlisted category; the cause may contain paths or
+    /// cache contents and must not cross the WebView boundary.
+    pub(crate) fn remote_proxy_load_failure_code(&self) -> Option<&'static str> {
+        use super::RemoteProxyLoadFailure;
+        match self.remote_proxies.lock().load_failure {
+            None => None,
+            Some(RemoteProxyLoadFailure::Unreadable) => Some("remote_proxy_unreadable"),
+            Some(RemoteProxyLoadFailure::Oversized) => Some("remote_proxy_oversized"),
+            Some(RemoteProxyLoadFailure::Malformed) => Some("remote_proxy_malformed"),
+            Some(RemoteProxyLoadFailure::UnsupportedVersion) => {
+                Some("remote_proxy_version_unsupported")
+            }
+            Some(RemoteProxyLoadFailure::InvalidRecords) => Some("remote_proxy_invalid_records"),
+            Some(RemoteProxyLoadFailure::ArchiveUnavailable) => {
+                Some("remote_proxy_archive_unavailable")
+            }
+        }
+    }
+
     /// Caller holds the controller lifecycle owner while supplying its current
     /// authenticated identity (including resumable/disconnected leases).
     pub(crate) fn archive_remote_proxy(
@@ -84,10 +103,12 @@ impl super::super::SessionStore {
             state.archives.seal(&record)
         };
         if let Err(error) = sealed {
-            // A durable intent may already exist. Never restore execution
-            // authority after ambiguous I/O; startup recovers that exact seal.
-            state.load_failed = true;
-            return Err(error);
+            // A proven rejection before intent is retryable. Ambiguous I/O
+            // still disables remote mutations until strict startup recovery.
+            if error.requires_quarantine() {
+                state.load_failed = true;
+            }
+            return Err(error.into_error());
         }
         // The archive transaction is now permanent. A stale active JSON copy
         // cannot authorize a reopen, even if cleanup fails or the process exits.

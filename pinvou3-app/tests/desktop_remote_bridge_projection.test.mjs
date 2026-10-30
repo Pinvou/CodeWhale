@@ -9,7 +9,7 @@ import { fileURLToPath } from 'node:url';
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const fixtures = JSON.parse(fs.readFileSync(path.join(root, 'tests/fixtures/desktop_remote_status.json'), 'utf8'));
 
-function host() {
+function host(onSessionsPorts) {
   let response = async () => null;
   const localStorage = { getItem: () => null, setItem() {}, removeItem() {} };
   const window = {
@@ -30,9 +30,52 @@ function host() {
   const scripts = [...html.matchAll(/<script src="%BASE_URL%(shared\/(?:bridge-messages|bridge-shared-helpers)\.js|features\/remote-control\/remote-control-state\.js|platform\/tauri\/bridge(?:\.js|\/[^"]+))"[^>]*><\/script>/g)]
     .map(match => match[1]);
   assert.ok(scripts.includes('platform/tauri/bridge.js'));
-  for (const script of scripts) vm.runInContext(fs.readFileSync(path.join(root, 'src', script), 'utf8'), context, { filename: script });
+  for (const script of scripts) {
+    vm.runInContext(fs.readFileSync(path.join(root, 'src', script), 'utf8'), context, { filename: script });
+    if (script === 'platform/tauri/bridge/sessions.js' && onSessionsPorts) {
+      const factory = window.__PINVOU_TAURI_BRIDGE_FEATURES__.sessions;
+      window.__PINVOU_TAURI_BRIDGE_FEATURES__.sessions = ports => {
+        onSessionsPorts(ports);
+        return factory(ports);
+      };
+    }
+  }
   return { window, api: window.TauriBridge, respond(fn) { response = fn; } };
 }
+
+test('production sessions facade keeps navigation distinct from background and view reads', async () => {
+  let sessionsPorts;
+  const h = host(ports => { sessionsPorts = ports; });
+  const reads = [];
+  h.respond((command, args) => {
+    if (command === 'get_platform_capabilities') {
+      return Promise.resolve({ os: 'windows', desktopRemoteControlSupported: true });
+    }
+    if (command === 'desktop_remote_proxy_history_read') {
+      return new Promise(resolve => reads.push({ id: args.localSessionId, resolve }));
+    }
+    return Promise.resolve(null);
+  });
+  await h.api.platform.loadPlatformCapabilities();
+  assert.ok(sessionsPorts, 'the actual facade installs the sessions feature');
+  const navigation = sessionsPorts.readRemoteProxyHistory('remote-local-1');
+  const background = h.api.desktopRemoteControl.readRemoteProxyHistory('remote-local-1');
+  const view = h.api.desktopRemoteControl.readRemoteProxyHistory('remote-local-1', { view: true });
+  assert.equal(reads.length, 3);
+  const complete = index => reads[index].resolve({
+    localSessionId: reads[index].id, title: '', entries: [], authenticatedCursor: null,
+    pendingUnknownCount: 0, unattemptedPending: [],
+  });
+  complete(1);
+  complete(2);
+  assert.equal((await background)?.localSessionId, 'remote-local-1');
+  assert.equal((await view)?.localSessionId, 'remote-local-1');
+  complete(0);
+  const record = await navigation;
+  assert.equal(record?.localSessionId, 'remote-local-1', 'the facade must use the distinct navigation intent');
+  assert.equal(record.title, '');
+  assert.equal(sessionsPorts.isRemoteProxyReadCurrent(record), true);
+});
 
 test('real backend capability projection fails closed until Windows support is loaded', async () => {
   const h = host();

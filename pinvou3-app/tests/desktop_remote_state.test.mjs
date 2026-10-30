@@ -790,7 +790,7 @@ test('bridge feature gates every desktop call behind the Windows capability', ()
     'desktop_remote_permission_deny_task', 'desktop_remote_permission_list_b',
     'desktop_remote_proxy_archive', 'desktop_remote_proxy_archive_candidates', 'desktop_remote_proxy_archive_list',
     'desktop_remote_proxy_history_delete', 'desktop_remote_proxy_history_list',
-    'desktop_remote_proxy_history_read', 'desktop_remote_proxy_open_live', 'desktop_remote_proxy_quarantine',
+    'desktop_remote_proxy_history_read', 'desktop_remote_proxy_load_status', 'desktop_remote_proxy_open_live', 'desktop_remote_proxy_quarantine',
     'desktop_remote_set_endpoint_profile',
     'desktop_remote_task_abandon_prepared_a', 'desktop_remote_task_cancel_a',
     'desktop_remote_task_commit_a', 'desktop_remote_task_reserve_a',
@@ -1150,4 +1150,17 @@ test('authoritative reconnect replaces a terminated old claim without reopening 
   assert.equal(logic.applyControllerStatus(state, {
     ...liveController('old-connection', '1'), claimRequestId: 'claim-1', status: 'error',
   }), state, 'a late old terminal cannot stop the replacement');
+});
+
+
+test('remote proxy load status accepts only bounded categories', async () => {
+  for (const value of [null, 'remote_proxy_malformed', 'remote_proxy_archive_unavailable']) {
+    const { bridge } = makeBridge({ desktop_remote_proxy_load_status: value });
+    assert.equal(await bridge.getRemoteProxyLoadStatus(), value);
+  }
+  for (const value of ['private path', {}, undefined]) {
+    const { bridge } = makeBridge({ desktop_remote_proxy_load_status: value });
+    await assert.rejects(bridge.getRemoteProxyLoadStatus(), error =>
+      error.code === 'remote_proxy_projection_invalid');
+  }
 });

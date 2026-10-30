@@ -22,6 +22,18 @@ test("quarantine confirmation smoke runs in full CI and for its real public faca
   assert.ok(!knip.ignore.includes("tests/remote_quarantine_smoke.mjs"));
 });
 
+test("remote operation ownership regression runs for its product and fixture paths", () => {
+  const smoke = "node:tests/remote_dispatch_ownership_smoke.mjs";
+  for (const path of ["pinvou3-app/src/features/chat/ChatView.jsx",
+    "pinvou3-app/src/shared/i18n/zh.js", "pinvou3-app/tests/remote_dispatch_ownership_smoke.mjs",
+    "pinvou3-app/tests/fixtures/remote_dispatch_ownership_smoke.jsx"]) {
+    assert.ok(labels(selectFrontendSmokes([path])).includes(smoke), path);
+  }
+  const knip = JSON.parse(readFileSync(new URL("../../pinvou3-app/knip.json", import.meta.url), "utf8"));
+  assert.ok(knip.entry.includes("tests/remote_dispatch_ownership_smoke.mjs"));
+  assert.ok(!knip.ignore.includes("tests/remote_dispatch_ownership_smoke.mjs"));
+});
+
 test("the real archive component smoke is included in the full CI suite", () => {
   assert.ok(fullLabels.includes("node:tests/remote_archive_smoke.mjs"));
   assert.ok(labels(selectFrontendSmokes([

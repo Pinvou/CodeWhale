@@ -9,6 +9,7 @@ export default function RemoteProxyArchivePanel({ t }) {
   const [page, setPage] = useState([null]);
   const [history, setHistory] = useState(null);
   const [status, setStatus] = useState(null);
+  const [hasLoaded, setHasLoaded] = useState(false);
   const [busy, setBusy] = useState(false);
   const [quarantineConfirm, setQuarantineConfirm] = useState(null);
   const confirmPanel = useRef(null);
@@ -19,7 +20,19 @@ export default function RemoteProxyArchivePanel({ t }) {
     const intent = ++request.current;
     setBusy(true);
     setStatus(null);
+    setHasLoaded(false);
     try {
+      if (typeof api.getRemoteProxyLoadStatus === 'function') {
+        const failure = await api.getRemoteProxyLoadStatus();
+        if (request.current !== intent) return false;
+        if (failure) {
+          setActive([]);
+          setArchives([]);
+          setHistory(null);
+          setStatus(failure);
+          return false;
+        }
+      }
       const [current, archived] = await Promise.all([
         api.listRemoteProxyArchiveCandidates(), api.listRemoteProxyArchives(cursors.at(-1)),
       ]);
@@ -27,6 +40,7 @@ export default function RemoteProxyArchivePanel({ t }) {
       setActive(current);
       setArchives(archived);
       setPage(cursors);
+      setHasLoaded(true);
       return true;
     } catch {
       if (request.current === intent) setStatus('unavailable');
@@ -75,7 +89,7 @@ export default function RemoteProxyArchivePanel({ t }) {
     setBusy(true);
     setStatus(null);
     try {
-      const record = await api.readRemoteProxyHistory(id, { navigation: true });
+      const record = await api.readRemoteProxyHistory(id, { view: true });
       if (request.current !== intent) return;
       if (!record || !record.archived) throw new Error('remote_proxy_archive_unavailable');
       setHistory(record);
@@ -109,6 +123,7 @@ export default function RemoteProxyArchivePanel({ t }) {
           }}>{copy.quarantineConfirm}</button>
         </div>
       </section>}
+      {hasLoaded && <>
       <h4>{copy.active}</h4>
       {active.length === 0 && <p>{copy.empty}</p>}
       {active.map(item => (
@@ -130,7 +145,8 @@ export default function RemoteProxyArchivePanel({ t }) {
         <button type="button" disabled={busy || !!quarantineConfirm || archives.length < 256}
           onClick={() => refresh([...page, archives.at(-1).archiveCursor])}>{copy.next}</button>
       </div>
-      {history && <section aria-label={copy.readOnly} className="max-h-80 space-y-2 overflow-auto">
+      </>}
+      {hasLoaded && history && <section aria-label={copy.readOnly} className="max-h-80 space-y-2 overflow-auto">
         <h4>{copy.readOnly}: {history.title || copy.untitled}</h4>
         {history.quarantined && <div data-testid="remote-proxy-frozen-facts">
           <p>{copy.quarantinedHint}</p>
