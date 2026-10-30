@@ -17,10 +17,10 @@
 .ap-restored-portal .ap-user-summary > div { display: grid; gap: 2px; min-width: 0; }
 .ap-restored-portal .ap-user-summary strong, .ap-restored-portal .ap-user-summary span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .ap-restored-portal .ap-user-summary > div > span { color: var(--ap-secondary); font-size: 12px; }
-.ap-restored-portal .ap-sidebar nav { display: grid; gap: 6px; }
-.ap-restored-portal .ap-sidebar nav button { display: flex; align-items: center; gap: 12px; min-height: 44px; padding: 10px 13px; border: 0; border-radius: 10px; color: var(--ap-secondary); background: transparent; text-align: left; }
-.ap-restored-portal .ap-sidebar nav button:hover { color: var(--ap-primary); background: #f7f7f7; }
-.ap-restored-portal .ap-sidebar nav button.active { color: var(--ap-primary); background: #f0f0f0; font-weight: 600; }
+.ap-restored-portal .ap-sidebar .ap-portal-tabs { display: grid; gap: 6px; }
+.ap-restored-portal .ap-sidebar .ap-portal-tabs button { display: flex; align-items: center; gap: 12px; min-height: 44px; padding: 10px 13px; border: 0; border-radius: 10px; color: var(--ap-secondary); background: transparent; text-align: left; }
+.ap-restored-portal .ap-sidebar .ap-portal-tabs button:hover { color: var(--ap-primary); background: #f7f7f7; }
+.ap-restored-portal .ap-sidebar .ap-portal-tabs button.active { color: var(--ap-primary); background: #f0f0f0; font-weight: 600; }
 .ap-restored-portal .ap-nav-icon { width: 19px; height: 19px; flex: 0 0 19px; }
 .ap-restored-portal .ap-sidebar-foot { display: grid; gap: 8px; margin-top: auto; padding-top: 16px; border-top: 1px solid var(--ap-border-soft); }
 .ap-restored-portal .ap-sidebar-foot select { width: 100%; color: var(--ap-primary); background: var(--ap-component); border-color: transparent; }
@@ -86,8 +86,8 @@
   .ap-restored-portal .ap-sidebar { position: static; height: auto; padding: 16px; gap: 16px; border-right: 0; border-bottom: 1px solid var(--ap-border); }
   .ap-restored-portal .ap-sidebar-brand { padding-bottom: 12px; }
   .ap-restored-portal .ap-user-summary { display: none; }
-  .ap-restored-portal .ap-sidebar nav { display: flex; flex-wrap: nowrap; overflow-x: auto; }
-  .ap-restored-portal .ap-sidebar nav button { flex: 0 0 auto; }
+  .ap-restored-portal .ap-sidebar .ap-portal-tabs { display: flex; flex-wrap: nowrap; overflow-x: auto; }
+  .ap-restored-portal .ap-sidebar .ap-portal-tabs button { flex: 0 0 auto; }
   .ap-restored-portal .ap-sidebar-foot { display: flex; align-items: center; margin: 0; padding-top: 12px; }
   .ap-restored-portal .ap-sidebar-foot select { width: auto; }
   .ap-restored-portal .ap-main { padding: 28px 20px 48px; }

@@ -34,9 +34,9 @@ export function AccountPortalLayout({ me, copy, language, onLanguageChange, navi
     <aside className="ap-sidebar">
       <div className="ap-sidebar-brand"><span className="ap-brand-mark">P</span><div><p className="ap-eyebrow">PINVOU</p><h1>{copy.title}</h1></div></div>
       <div className="ap-user-summary"><span className="ap-user-avatar" aria-hidden="true">{label.slice(0, 1).toUpperCase()}</span><div><strong>{label}</strong><span>{me.username || copy.user}</span></div></div>
-      <nav role="tablist" aria-label={copy.title} onKeyDown={keydown}>
+      <div className="ap-portal-tabs" role="tablist" aria-label={copy.title} onKeyDown={keydown}>
         {navigation.sections.map(section => <button type="button" role="tab" id={`ap-tab-${section}`} aria-controls={`ap-panel-${section}`} aria-selected={navigation.section === section} tabIndex={navigation.section === section ? 0 : -1} className={navigation.section === section ? 'active' : ''} data-section={section} key={section} onClick={() => navigation.navigate(section)}><NavIcon section={section} /><span>{copy.sections[section]}</span></button>)}
-      </nav>
+      </div>
       <div className="ap-sidebar-foot"><select aria-label={copy.language} value={language} onChange={event => onLanguageChange(event.target.value)}>{supportedLocales.map(locale => <option key={locale} value={locale}>{localeNames[locale]}</option>)}</select><button type="button" disabled={busy} onClick={onLogout}>{copy.logout}</button></div>
     </aside>
     <main className="ap-main"><header className="ap-page-header"><h2>{copy.sections[navigation.section]}</h2><button type="button" disabled={busy} onClick={onRefresh}>{copy.refresh}</button></header>{children}</main>
@@ -44,5 +44,6 @@ export function AccountPortalLayout({ me, copy, language, onLanguageChange, navi
 }
 
 export function AccountPortalPanel({ section, active, children }) {
+  // biome-ignore lint/a11y/noNoninteractiveTabindex: The ARIA tabpanel must be keyboard reachable when its content has no focusable control.
   return <div className="ap-portal-panel" role="tabpanel" id={`ap-panel-${section}`} aria-labelledby={`ap-tab-${section}`} tabIndex={0} hidden={!active}><PortalDialogScope active={active}>{children}</PortalDialogScope></div>;
 }

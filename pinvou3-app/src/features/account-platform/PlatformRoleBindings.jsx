@@ -19,7 +19,8 @@ export function PlatformRoleBindings({ words, copy, bindings, target, blocked, o
       <select aria-label={copy.status} value={status} onChange={event => { setStatus(event.target.value); setPageNumber(1); }}><option value="">{words.allStatuses}</option>{['ACTIVE', 'SCHEDULED', 'EXPIRED', 'REVOKED'].map(value => <option key={value} value={value}>{words.statuses[value]}</option>)}</select>
     </div>
     {bindings && <>
-      <div className="adm-table-wrap" tabIndex={0}>
+      {/* biome-ignore lint/a11y/noNoninteractiveTabindex: This named overflow region needs keyboard focus for native horizontal table scrolling. */}
+      <div className="adm-table-wrap" role="region" aria-label={words.bindingManagement} tabIndex={0}>
         <table className="adm-table adm-role-binding-table">
           <thead><tr>{[words.user, words.role, words.validity, words.source, copy.status, words.view].map((label, index) => <th key={index}>{label}</th>)}</tr></thead>
           <tbody>{items.map(item => <tr key={item.binding_id}>

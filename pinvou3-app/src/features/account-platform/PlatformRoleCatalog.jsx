@@ -11,9 +11,11 @@ export function PlatformRoleCatalog({ roles, words, authorityCopy, canGrant, onG
   return <>
     <div className="adm-role-toolbar"><label><span className="adm-visually-hidden">{words.roleSearchPlaceholder}</span><input type="search" value={query} onChange={event => setQuery(event.target.value)} placeholder={words.roleSearchPlaceholder} /></label><span>{visible.length} / {roles.length}</span></div>
     <div className="adm-role-catalog-layout">
-      <div className="adm-table-wrap" tabIndex={0}><table className="adm-table adm-role-table"><thead><tr><th>{words.role}</th><th>{words.permissionCount}</th></tr></thead><tbody>{visible.map(role => <tr key={role.code} className={selected?.code === role.code ? 'selected' : ''} onClick={() => setSelectedCode(role.code)}>
+      {/* biome-ignore lint/a11y/noNoninteractiveTabindex: This named overflow region needs keyboard focus for native horizontal table scrolling. */}
+      <div className="adm-table-wrap" role="region" aria-label={words.catalog} tabIndex={0}><table className="adm-table adm-role-table"><thead><tr><th>{words.role}</th><th>{words.permissionCount}</th></tr></thead><tbody>{visible.map(role => <tr key={role.code} className={selected?.code === role.code ? 'selected' : ''} onClick={() => setSelectedCode(role.code)}>
         <td><button type="button" className="adm-name-link" aria-pressed={selected?.code === role.code} onClick={() => setSelectedCode(role.code)}>{platformRoleName(words, role.code)}</button><code>{role.code}</code></td><td>{role.permissions.length}</td>
       </tr>)}</tbody></table>{!visible.length && <p className="adm-empty">{words.noRoles}</p>}</div>
+      {/* biome-ignore lint/a11y/noNoninteractiveTabindex: The existing max-height overflow detail region must remain reachable for keyboard scrolling. */}
       {selected ? <aside className="adm-role-detail" tabIndex={0} aria-labelledby={heading}><header><div><h3 id={heading}>{platformRoleName(words, selected.code)}</h3><code>{selected.code}</code></div><span className="adm-role-scope platform">{words.scopes.PLATFORM}</span></header>
         <p>{platformRoleDescription(words, selected)}</p>
         <dl className="adm-role-facts"><div><dt>{words.type}</dt><dd>{words.builtIn}</dd></div><div><dt>{words.permissionCount}</dt><dd>{selected.permissions.length}</dd></div></dl>
