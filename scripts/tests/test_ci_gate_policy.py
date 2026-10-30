@@ -238,6 +238,8 @@ def _evaluate_github_condition(
     rust_full=False,
     rust_code=False,
     cli_rust=False,
+    knowledge_rust=False,
+    loongarch64_check_enabled="",
     full_label=False,
     trusted_backflow=False,
     action="synchronize",
@@ -253,6 +255,8 @@ def _evaluate_github_condition(
         "needs.changes.outputs.rust_full": repr(str(rust_full).lower()),
         "needs.changes.outputs.rust_code": repr(str(rust_code).lower()),
         "needs.changes.outputs.cli_rust": repr(str(cli_rust).lower()),
+        "needs.changes.outputs.knowledge_rust": repr(str(knowledge_rust).lower()),
+        "vars.PINVOU_LOONGARCH64_CHECK_ENABLED": repr(loongarch64_check_enabled),
         "needs.changes.outputs.trusted_backflow": repr(str(trusted_backflow).lower()),
         "contains(github.event.pull_request.labels.*.name, 'ci:full-rust')": repr(
             full_label
@@ -469,6 +473,7 @@ _CLI_LEG_JOB_IF = (
 # 集合:该 leg 交叉检查三个 workspace,所以知识库变更也触发它。
 _LOONGARCH64_JOB_IF = (
     "${{\n"
+    "vars.PINVOU_LOONGARCH64_CHECK_ENABLED != 'false' &&\n"
     "!cancelled() &&\n"
     "github.event.action != 'closed' &&\n"
     "(\n"
@@ -1473,6 +1478,10 @@ class CiGatePolicyTests(unittest.TestCase):
         self.assertNotIn("npm ci", portability)
         self.assertNotIn("cargo ", portability)
         self.assertNotIn("submodule update", portability)
+        self.assertIn("timeout-minutes: 10", portability)
+        self.assertIn("fetch-depth: 1", portability)
+        self.assertNotIn("fetch-depth: 0", portability)
+        self.assertIn('git fetch --no-tags --depth=1 origin "$BASE_SHA" "$HEAD_SHA"', portability)
 
     def test_windows_runtime_gate_tracks_python_mcp_manifests(self):
         changes = self.workflow.split("\n  changes:", maxsplit=1)[1].split(
@@ -2614,6 +2623,21 @@ class CiGatePolicyTests(unittest.TestCase):
         self.assertIn('"cli-test:$CLI_TEST_RESULT"', required_gate)
         self.assert_required_gate_wiring("macos-cli-check", "MACOS_CLI_RESULT")
 
+    def test_native_pipewire_builds_install_libclang(self):
+        # bindgen needs the shared libclang library even when PipeWire headers
+        # and clang itself are present. Hosted images/caches can mask omissions.
+        for workflow in (PR_WORKFLOW, RELEASE_WORKFLOW):
+            blocks = re.findall(
+                r"sudo apt-get install\b.*?(?=\n\s*#|\n\s*if |\n\n)",
+                _without_inline_comments(workflow.read_text(encoding="utf-8")),
+                re.DOTALL,
+            )
+            pipewire_blocks = [b for b in blocks if "libpipewire-0.3-dev" in b]
+            self.assertTrue(pipewire_blocks, workflow.name)
+            for block in pipewire_blocks:
+                with self.subTest(workflow=workflow.name, block=block):
+                    self.assertRegex(block, r"\blibclang-dev\b")
+
     def test_cli_lint_tauri_deps_stay_identical_with_cli_test(self):
         # Round-45 review: cli-test and cli-lint carry the same "Install Tauri
         # Linux system dependencies" setup (the workspaces are identical: the
@@ -3169,6 +3193,27 @@ class CiGatePolicyTests(unittest.TestCase):
             # per-site exemptions that rot. Revisit only if a `set +e`
             # appears WITHOUT its paired restore-plus-explicit-status
             # handling.
+
+    def test_loongarch64_switch_preserves_default_routes_and_disables_only_that_leg(self):
+        expression = _extract_job_level_if(
+            _extract_job_block(self.pr_workflow, "rust-loongarch64-check")
+        )[3:-2]
+        for event in ("push", "pull_request", "merge_group"):
+            for field in ("rust_full", "cli_rust", "knowledge_rust"):
+                for enabled in ("", "true", "false"):
+                    with self.subTest(event=event, field=field, enabled=enabled):
+                        self.assertEqual(_evaluate_github_condition(
+                            expression, event_name=event, draft=False, mode="ordinary",
+                            loongarch64_check_enabled=enabled, **{field: True},
+                        ), enabled != "false")
+        self.assertFalse(_evaluate_github_condition(
+            expression, event_name="pull_request", draft=True, mode="ordinary", rust_full=True))
+        self.assertFalse(_evaluate_github_condition(
+            expression, event_name="pull_request", draft=False, mode="ordinary"))
+        for job in GATE_JOB_LEVEL_IFS:
+            if job != "rust-loongarch64-check":
+                self.assertNotIn("PINVOU_LOONGARCH64_CHECK_ENABLED", _extract_job_level_if(
+                    _extract_job_block(self.pr_workflow, job)))
 
     def test_gate_job_level_ifs_are_pinned_verbatim(self):
         # Round-52 review: a job-level `if: >-` folded block can get
@@ -5142,9 +5187,9 @@ df() { :; }
             self.assertIn("codewhale-tui O0", job, job_name)
             self.assertIn("[profile.dev.package.codewhale-tui]", job, job_name)
             self.assertIn("opt-level = 0", job, job_name)
-        # The bash twins append to the cargo-home config; rust-cache's
-        # cachePaths never include config.toml, so warm runs cannot
-        # accumulate duplicate TOML tables.
+        # Preserve the cargo-home location. Persistent runners must update
+        # the Linux override idempotently; cache exclusion alone cannot stop
+        # duplicate TOML tables from accumulating between jobs.
         for job_name, end_marker in (
             ("rust-test", "\n  cli-test:"),
             ("macos-rust-check", "\n  windows-codex-runtime-test:"),

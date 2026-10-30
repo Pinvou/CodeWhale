@@ -1,0 +1,20 @@
+self-hosted-runner:
+  labels:
+    - pinvou3-windows-primary
+    - pinvou3-windows-light
+    - pinvou3-windows-medium
+    - pinvou3-windows-heavy
+    - pinvou3-windows-heavy-01
+    - pinvou3-windows-heavy-02
+    - pinvou3-windows-medium-01
+    - pinvou3-windows-medium-02
+    - pinvou3-windows-light-01
+    - pinvou3-windows-light-02
+    - pinvou3-windows-light-03
+    - pinvou3-windows-light-04
+    - pinvou3-windows-light-05
+    - pinvou3-windows-light-06
+    - pinvou3-windows-light-07
+    - pinvou3-windows-light-08
+    - pinvou3-windows-light-09
+    - pinvou3-windows-light-10
