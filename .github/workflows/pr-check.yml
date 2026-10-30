@@ -1086,6 +1086,16 @@ jobs:
       - name: 安装 relay 依赖
         run: npm --prefix remote-control-relay ci --prefer-offline --no-audit
 
+      - name: Prepare Relay listener inspection
+        # Rollback tests inspect real listening sockets; minimal/older runner
+        # images may lack ss even though Node dependencies are installed.
+        run: |
+          if ! command -v ss >/dev/null 2>&1; then
+            sudo apt-get update
+            sudo apt-get install -y --no-install-recommends iproute2
+          fi
+          ss -H -ltn >/dev/null
+
       - name: Relay 与部署脚本回归
         run: |
           bash -n scripts/deploy-remote-relay.sh
@@ -1795,7 +1805,7 @@ jobs:
             libssl-dev \
             libayatana-appindicator3-dev \
             libpipewire-0.3-dev libdrm-dev libgbm-dev libegl-dev \
-            build-essential pkg-config cmake libclang-dev lld \
+            build-essential pkg-config cmake lld libclang-dev \
             time
           # 孤儿依赖、apt 缓存包与索引清单不留在构建盘上(单盘 runner 磁盘紧张)。
           if [[ "$RUNNER_ENVIRONMENT" == github-hosted ]]; then
