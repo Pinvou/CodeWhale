@@ -2496,6 +2496,14 @@ pub struct SubAgentRuntime {
     /// Defaults to an empty engine (no rules), which leaves child behavior
     /// unchanged for embedders that never thread one.
     pub exec_policy_engine: codewhale_execpolicy::ExecPolicyEngine,
+    /// Host-armed interactive guardrail prompts (Pinvou tri-mode safety),
+    /// inherited from the parent session. When set, a guardrail hold that
+    /// would fail closed under this child's posture routes to the parent's
+    /// approval surface (when the host can prompt) instead of denying, and a
+    /// delegated typed-ask Prompt refuses instead of silently passing under
+    /// inherited auto-approve: children never run what the armed main line
+    /// would prompt on.
+    pub ask_on_guardrail: bool,
 }
 
 impl SubAgentRuntime {
@@ -2563,6 +2571,7 @@ impl SubAgentRuntime {
             // tool-only runtimes).
             governor: None,
             exec_policy_engine: codewhale_execpolicy::ExecPolicyEngine::new(Vec::new(), Vec::new()),
+            ask_on_guardrail: false,
         }
     }
 
@@ -2610,6 +2619,15 @@ impl SubAgentRuntime {
         exec_policy_engine: codewhale_execpolicy::ExecPolicyEngine,
     ) -> Self {
         self.exec_policy_engine = exec_policy_engine;
+        self
+    }
+
+    /// Carry the parent session's ask-on-guardrail arming into child gates so
+    /// children mirror the armed main line instead of failing closed around
+    /// it (see [`Self::ask_on_guardrail`]).
+    #[must_use]
+    pub fn with_ask_on_guardrail(mut self, ask_on_guardrail: bool) -> Self {
+        self.ask_on_guardrail = ask_on_guardrail;
         self
     }
 
@@ -2909,6 +2927,7 @@ impl SubAgentRuntime {
             parent_can_prompt: self.parent_can_prompt,
             approval_receipt_store: self.approval_receipt_store.clone(),
             exec_policy_engine: self.exec_policy_engine.clone(),
+            ask_on_guardrail: self.ask_on_guardrail,
         }
     }
 
@@ -14593,6 +14612,9 @@ struct SubAgentToolRegistry {
     /// command the parent turn loop would hard-deny cannot be delegated to
     /// this child and run anyway. Empty by default → checks are no-ops.
     exec_policy_engine: codewhale_execpolicy::ExecPolicyEngine,
+    /// Host-armed interactive guardrail prompts inherited from the parent
+    /// session (see [`SubAgentRuntime::ask_on_guardrail`]).
+    ask_on_guardrail: bool,
 }
 
 /// What the child permission gate decided for one held call.
@@ -14684,6 +14706,7 @@ impl SubAgentToolRegistry {
 
         // Copied out before `runtime` moves into `gate_runtime` below.
         let exec_policy_engine = runtime.exec_policy_engine.clone();
+        let ask_on_guardrail = runtime.ask_on_guardrail;
         Self {
             allowed_tools,
             disallowed_tools: effective_profile.denied_tools.clone(),
@@ -14699,6 +14722,7 @@ impl SubAgentToolRegistry {
             registry,
             gate_runtime: runtime,
             exec_policy_engine,
+            ask_on_guardrail,
         }
     }
 
@@ -14855,8 +14879,24 @@ impl SubAgentToolRegistry {
                     ChildGateVerdict::Deny(reason)
                 }
                 // Full Access has no prompt to force; the plan decision
-                // already turned every safety-floor hold into a block.
-                AutoReviewPlanDecision::ForcePrompt(reason) => ChildGateVerdict::Deny(reason),
+                // already turned every safety-floor hold into a block
+                // (`auto_review_plan_decision_for_context` collapses
+                // built-in-gate holds to `Block` under Bypass and ordinary
+                // asks to `NoChange`), so this armed arm is fail-safe
+                // future-proofing, not a live face — today's live armed child
+                // behavior is the delegated typed-ask refusal below. If a
+                // `ForcePrompt` ever reaches this arm, an armed host has
+                // guaranteed a person can answer, so the hold routes to the
+                // parent's approval surface (which fails closed again for
+                // non-prompting hosts).
+                AutoReviewPlanDecision::ForcePrompt(reason) => {
+                    if self.ask_on_guardrail {
+                        self.prompt_parent_for_child_call(agent_id, name, input, &reason, true)
+                            .await
+                    } else {
+                        ChildGateVerdict::Deny(reason)
+                    }
+                }
                 AutoReviewPlanDecision::NoChange
                 | AutoReviewPlanDecision::Allow
                 | AutoReviewPlanDecision::ConsultReviewer(_) => ChildGateVerdict::Proceed,
@@ -15787,6 +15827,10 @@ impl SubAgentToolRegistry {
         // on. The engine handle shares the parent's live rulesets, so a rule
         // installed mid-session binds delegated calls too, and an empty
         // engine (no rules) leaves this check a no-op.
+        // The deny face stays hard here in every posture (`ask_on_guardrail:
+        // false` keeps the Block conversion): an armed parent prompts on this
+        // call in the main conversation, so the correct child answer is the
+        // refusal below that points the model there — never a silent pass.
         let ask_rule_decision = crate::core::engine::exec_shell_ask_rule_decision_for_policy(
             &self.exec_policy_engine,
             name,
@@ -15794,6 +15838,7 @@ impl SubAgentToolRegistry {
             &self.registry.context().workspace,
             &self.registry.context().workspace_roots,
             crate::tui::approval::ApprovalMode::Auto,
+            false,
         )
         .or_else(|| {
             crate::core::engine::file_tool_ask_rule_decision_for_policy(
@@ -15803,6 +15848,7 @@ impl SubAgentToolRegistry {
                 &self.registry.context().workspace,
                 &self.registry.context().workspace_roots,
                 crate::tui::approval::ApprovalMode::Auto,
+                false,
             )
         });
         match ask_rule_decision {
@@ -15818,8 +15864,11 @@ impl SubAgentToolRegistry {
             // held-call gate's "Tool {name} requires approval" refusal so a
             // caller (and a test) can tell which gate spoke.
             Some(crate::core::engine::ToolAskRuleDecision::Prompt(reason))
-                if !self.auto_approve =>
+                if !self.auto_approve || self.ask_on_guardrail =>
             {
+                // Armed hosts: the main line would prompt on this typed ask
+                // even under inherited auto-approve, so the child refuses
+                // instead of silently running what the parent must decide.
                 return Err(anyhow!(format!(
                     "Delegated tool call `{name}` requires approval: {reason}. Sub-agents cannot show an approval prompt; run this tool call in the main conversation so it can be approved."
                 )));

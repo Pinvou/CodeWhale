@@ -1270,6 +1270,15 @@ pub struct Engine {
     /// so doctor and debug surfaces can answer "why is this tool unavailable"
     /// with the same record the user and the model already saw.
     last_policy_narrowing: Option<PolicyNarrowingEvent>,
+    /// The posture the last `<turn_meta>` block reported (Pinvou tri-mode
+    /// safety). Comparison unit for [`Self::pending_authority_transition`].
+    last_turn_meta_authority: Option<crate::core::authority::TurnMetaPosture>,
+    /// Host-driven authority change computed when the turn's metadata block
+    /// is built, against the posture the previous block reported. Consumed
+    /// by that block only and cleared immediately, so a turn whose posture
+    /// did not change emits nothing, ordinary blocks stay byte-stable, and
+    /// steers or mid-turn runtime notices never re-render the same line.
+    pending_authority_transition: Option<crate::core::authority::AuthorityTransition>,
     /// The git snapshot line last emitted in a `<turn_meta>` block this
     /// session (#5187, k3-gap F3). The snapshot re-collects branch/dirty
     /// state every turn, so without change-detection the block's bytes drift
@@ -1300,9 +1309,21 @@ struct LiveRuntimeAuthority {
     auto_approve: bool,
     approval_mode: crate::tui::approval::ApprovalMode,
     configured_sandbox_mode: Option<String>,
+    /// Host-armed interactive guardrail prompts (Pinvou tri-mode safety).
+    /// `None` means "leave the session's current arming unchanged": turn
+    /// installs re-record the session's live value so an arming published
+    /// ahead of the queue is never rolled backward by a stale turn posture.
+    ask_on_guardrail: Option<bool>,
 }
 
 impl LiveRuntimeAuthority {
+    /// Store the op's fields as given. Unlike [`Self::from_turn_authority`]
+    /// this does not renormalize `approval_mode` through
+    /// `approval_mode_for_session`: every producer (`Op::ChangeMode`, the
+    /// UI sync, runtime threads) already sends the canonical shape, and a
+    /// non-canonical publish self-heals at the next
+    /// [`Self::record_applied_runtime_authority`], which re-records from
+    /// the session's normalized state.
     fn from_fields(
         mode: AppMode,
         allow_shell: bool,
@@ -1310,15 +1331,17 @@ impl LiveRuntimeAuthority {
         auto_approve: bool,
         approval_mode: crate::tui::approval::ApprovalMode,
         configured_sandbox_mode: Option<String>,
+        ask_on_guardrail: Option<bool>,
     ) -> Self {
-        let authority = TurnAuthority::from_effective_fields(
+        Self {
             mode,
             allow_shell,
             trust_mode,
             auto_approve,
             approval_mode,
-        );
-        Self::from_turn_authority(&authority, configured_sandbox_mode)
+            configured_sandbox_mode,
+            ask_on_guardrail,
+        }
     }
 
     fn from_turn_authority(
@@ -1334,6 +1357,9 @@ impl LiveRuntimeAuthority {
                 || approval_mode == crate::tui::approval::ApprovalMode::Bypass,
             approval_mode,
             configured_sandbox_mode,
+            // Turn installs never change the arming; the recorder patches the
+            // session's live value so re-recording never rolls it backward.
+            ask_on_guardrail: None,
         }
     }
 
@@ -2115,6 +2141,7 @@ impl Engine {
                 false,
                 crate::tui::approval::ApprovalMode::Suggest,
                 api_config.sandbox_mode.clone(),
+                None,
             ),
         )));
         let compaction_cancellation =
@@ -2396,6 +2423,8 @@ impl Engine {
             current_mode: AppMode::Agent,
             turn_wall_clock: turn_budget::TurnWallClock::start(turn_wall_clock_budget),
             last_policy_narrowing: None,
+            last_turn_meta_authority: None,
+            pending_authority_transition: None,
             last_turn_meta_git_snapshot: StdMutex::new(None),
             token_estimate_cache: TokenEstimateCache::new(),
             shared_paused: shared_paused.clone(),
@@ -2534,7 +2563,11 @@ impl Engine {
             // just typed. Typed exec ask-rules still apply as hard Block
             // denies, and the sandbox/execpolicy layer stays the real safety
             // boundary. Model-issued shell calls keep the standard approval
-            // path; this branch is strictly composer provenance.
+            // path; this branch is strictly composer provenance. (Pinvou
+            // tri-mode safety: composer provenance keeps the hard deny face in
+            // every posture, armed or not — typing the command IS the approval
+            // (#5191), no modal can ask more than the user already did, and
+            // arming affects model-provenance calls only.)
             let ask_rule_decision = exec_shell_ask_rule_decision(
                 &self.config,
                 &tool_name,
@@ -2542,6 +2575,7 @@ impl Engine {
                 &self.session.workspace,
                 &self.session.workspace_roots,
                 self.session.approval_mode,
+                false,
             );
             if let Some(ToolAskRuleDecision::Block(reason)) = ask_rule_decision {
                 Err(ToolError::permission_denied(reason))
@@ -2643,6 +2677,9 @@ impl Engine {
     ///
     /// Single authority source for mode/permission state: both the run loop
     /// and the active turn's typed live-authority drain land here.
+    // Pinvou tri-mode safety added the ask-on-guardrail carrier; the
+    // parameter set mirrors the ChangeMode op it consumes.
+    #[allow(clippy::too_many_arguments)]
     async fn apply_change_mode(
         &mut self,
         mode: AppMode,
@@ -2651,6 +2688,7 @@ impl Engine {
         auto_approve: bool,
         approval_mode: crate::tui::approval::ApprovalMode,
         configured_sandbox_mode: Option<String>,
+        ask_on_guardrail: Option<bool>,
     ) {
         let authority = TurnAuthority::from_effective_fields(
             mode,
@@ -2660,7 +2698,7 @@ impl Engine {
             approval_mode,
         );
         let effective_approval = authority.approval_mode_for_session();
-        let changed = self.current_mode != authority.mode
+        let mut changed = self.current_mode != authority.mode
             || self.session.allow_shell != authority.allow_shell
             || self.session.trust_mode != authority.trust_mode
             || self.session.auto_approve
@@ -2669,19 +2707,30 @@ impl Engine {
             || self.session.approval_mode != effective_approval
             || self.api_config.sandbox_mode != configured_sandbox_mode;
         self.api_config.sandbox_mode = configured_sandbox_mode;
+        if let Some(armed) = ask_on_guardrail
+            && self.session.ask_on_guardrail != armed
+        {
+            self.session.ask_on_guardrail = armed;
+            changed = true;
+        }
         self.apply_runtime_mode_policy(&authority);
         if !changed {
             return;
         }
         self.emit_session_updated().await;
-        let _ = self
-            .tx_event
-            .send(Event::status(format!(
-                "Runtime policy changed to: {} / {}",
-                mode.description(),
-                effective_approval.permission_chip_label(),
-            )))
-            .await;
+        let mut status = format!(
+            "Runtime policy changed to: {} / {}",
+            mode.description(),
+            effective_approval.permission_chip_label(),
+        );
+        if let Some(armed) = ask_on_guardrail {
+            status.push_str(if armed {
+                " (guardrail prompts armed)"
+            } else {
+                " (guardrail prompts disarmed)"
+            });
+        }
+        let _ = self.tx_event.send(Event::status(status)).await;
     }
 
     fn take_pending_runtime_authority(&self) -> Option<LiveRuntimeAuthority> {
@@ -2712,6 +2761,7 @@ impl Engine {
             authority.auto_approve,
             authority.approval_mode,
             authority.configured_sandbox_mode,
+            authority.ask_on_guardrail,
         )
         .await;
     }
@@ -2725,10 +2775,15 @@ impl Engine {
     }
 
     fn record_applied_runtime_authority(&self, authority: &TurnAuthority) {
-        let applied = LiveRuntimeAuthority::from_turn_authority(
+        let mut applied = LiveRuntimeAuthority::from_turn_authority(
             authority,
             self.api_config.sandbox_mode.clone(),
         );
+        // Turn installs never change the arming; re-record the session's live
+        // value so a re-record after a drain can never roll a published
+        // arming backward (the None from `from_turn_authority` would not
+        // compare equal to the applied `Some`).
+        applied.ask_on_guardrail = Some(self.session.ask_on_guardrail);
         let mut state = self
             .live_runtime_authority
             .lock()
@@ -4291,6 +4346,7 @@ impl Engine {
                 approval_mode: self.session.approval_mode,
                 working_set: &self.session.working_set,
                 policy_narrowing,
+                authority_transition: self.pending_authority_transition.clone(),
             },
         )
     }
@@ -4322,6 +4378,7 @@ impl Engine {
             approval_mode,
             working_set,
             policy_narrowing,
+            authority_transition,
         } = snapshot;
         let today = chrono::Local::now().format("%Y-%m-%d").to_string();
         let working_set_summary = working_set
@@ -4415,6 +4472,15 @@ impl Engine {
                 "Approval prompts are disabled; do not request escalation for this turn."
                     .to_string(),
             );
+        }
+        // Pinvou tri-mode safety: when the host changed the mode, permission
+        // posture, or guardrail arming since the last reported turn, say so
+        // explicitly — the standing posture lines above describe the state,
+        // this line describes the change (upstream #6470/#6321 keep the same
+        // receipt doctrine). Present only on a changed turn, so ordinary
+        // blocks stay byte-stable.
+        if let Some(transition) = authority_transition.as_ref() {
+            lines.push(transition.render());
         }
         // On ordinary external turns the user's own message is authoritative by
         // construction, so provenance is redundant. On non-external turns
@@ -5369,6 +5435,7 @@ impl Engine {
                     Arc::clone(&self.shared_auto_review_policy),
                     self.config.terminal_chrome_enabled,
                 )
+                .with_ask_on_guardrail(self.session.ask_on_guardrail)
                 // Typed permission rules must bind delegated calls like they
                 // bind the parent's own; the handle shares the live rulesets,
                 // so mid-session updates stay effective.
@@ -5967,6 +6034,28 @@ impl Engine {
         // Add the user message through the same explicit snapshot constructor
         // preview uses. Route limits and mode in resource metadata therefore
         // belong to this turn even when the previous route was different.
+
+        // Pinvou tri-mode safety: a host-driven authority change between
+        // turns is never silent. Compare the installed posture against the
+        // posture the previous block reported; any number of mid-turn
+        // `ChangeMode` flips collapses into the one transition the next
+        // block reports. The `None` arm keeps the first turn (and restored
+        // sessions) transition-free, so this only ever adds a line when a
+        // change actually happened. Computed here — at the point the block
+        // that reports it is built — so a `NotStarted` failure above can
+        // never record a posture the model never saw; and consumed below,
+        // so steers and mid-turn runtime notices cannot re-render the same
+        // line.
+        let current_posture = crate::core::authority::TurnMetaPosture {
+            mode: input_policy.mode,
+            approval: self.session.approval_mode,
+            ask_on_guardrail: self.session.ask_on_guardrail,
+        };
+        self.pending_authority_transition = crate::core::authority::authority_transition_between(
+            self.last_turn_meta_authority,
+            current_posture,
+        );
+        self.last_turn_meta_authority = Some(current_posture);
         let user_msg = self.user_text_message_from_snapshot(
             content,
             &model,
@@ -5980,9 +6069,12 @@ impl Engine {
                 approval_mode: self.session.approval_mode,
                 working_set: &self.session.working_set,
                 policy_narrowing: self.last_policy_narrowing.as_ref(),
+                authority_transition: self.pending_authority_transition.clone(),
             },
         );
         self.session.add_message(user_msg);
+        // The transition is reported by this block and only this block.
+        self.pending_authority_transition = None;
 
         self.emit_session_updated().await;
 
@@ -6917,6 +7009,7 @@ impl Engine {
             Arc::clone(&self.shared_auto_review_policy),
             self.config.terminal_chrome_enabled,
         )
+        .with_ask_on_guardrail(self.session.ask_on_guardrail)
         // Typed permission rules must bind delegated calls like they bind the
         // parent's own; the handle shares the live rulesets, so mid-session
         // updates stay effective.
@@ -8383,6 +8476,7 @@ pub(super) fn exec_shell_ask_rule_decision(
     workspace: &Path,
     workspace_roots: &[PathBuf],
     approval_mode: crate::tui::approval::ApprovalMode,
+    ask_on_guardrail: bool,
 ) -> Option<ToolAskRuleDecision> {
     exec_shell_ask_rule_decision_for_policy(
         &config.exec_policy_engine,
@@ -8391,6 +8485,7 @@ pub(super) fn exec_shell_ask_rule_decision(
         workspace,
         workspace_roots,
         approval_mode,
+        ask_on_guardrail,
     )
 }
 
@@ -8404,6 +8499,7 @@ pub(crate) fn exec_shell_ask_rule_decision_for_policy(
     workspace: &Path,
     workspace_roots: &[PathBuf],
     approval_mode: crate::tui::approval::ApprovalMode,
+    ask_on_guardrail: bool,
 ) -> Option<ToolAskRuleDecision> {
     let policy_tool_name =
         crate::tools::canonical_action::canonical_action_alias(tool_name, tool_input);
@@ -8439,6 +8535,7 @@ pub(crate) fn exec_shell_ask_rule_decision_for_policy(
         workspace,
         workspace_roots,
         approval_mode,
+        ask_on_guardrail,
     )
 }
 
@@ -8449,6 +8546,7 @@ pub(super) fn file_tool_ask_rule_decision(
     workspace: &Path,
     workspace_roots: &[PathBuf],
     approval_mode: crate::tui::approval::ApprovalMode,
+    ask_on_guardrail: bool,
 ) -> Option<ToolAskRuleDecision> {
     file_tool_ask_rule_decision_for_policy(
         &config.exec_policy_engine,
@@ -8457,6 +8555,7 @@ pub(super) fn file_tool_ask_rule_decision(
         workspace,
         workspace_roots,
         approval_mode,
+        ask_on_guardrail,
     )
 }
 
@@ -8480,6 +8579,7 @@ pub(crate) fn file_tool_ask_rule_decision_for_policy(
     workspace: &Path,
     workspace_roots: &[PathBuf],
     approval_mode: crate::tui::approval::ApprovalMode,
+    ask_on_guardrail: bool,
 ) -> Option<ToolAskRuleDecision> {
     let policy_tool_name =
         crate::tools::canonical_action::canonical_action_alias(tool_name, tool_input);
@@ -8494,6 +8594,7 @@ pub(crate) fn file_tool_ask_rule_decision_for_policy(
             workspace,
             workspace_roots,
             approval_mode,
+            ask_on_guardrail,
         );
     }
 
@@ -8509,6 +8610,7 @@ pub(crate) fn file_tool_ask_rule_decision_for_policy(
             workspace,
             workspace_roots,
             approval_mode,
+            ask_on_guardrail,
         ) {
             Some(ToolAskRuleDecision::Block(reason)) => {
                 return Some(ToolAskRuleDecision::Block(reason));
@@ -8530,6 +8632,9 @@ pub(crate) fn file_tool_ask_rule_decision_for_policy(
     }
 }
 
+// Pinvou tri-mode safety added the ask-on-guardrail carrier alongside the
+// existing judgment context.
+#[allow(clippy::too_many_arguments)]
 fn tool_ask_rule_decision_for_context(
     exec_policy_engine: &codewhale_execpolicy::ExecPolicyEngine,
     tool_name: &str,
@@ -8539,6 +8644,7 @@ fn tool_ask_rule_decision_for_context(
     workspace: &Path,
     workspace_roots: &[PathBuf],
     approval_mode: crate::tui::approval::ApprovalMode,
+    ask_on_guardrail: bool,
 ) -> Option<ToolAskRuleDecision> {
     let judged_cwd = cwd.to_string_lossy();
     let ask_for_approval = match approval_mode {
@@ -8564,7 +8670,27 @@ fn tool_ask_rule_decision_for_context(
         })
         .ok()?;
     if !decision.allow {
-        Some(ToolAskRuleDecision::Block(decision.reason().to_string()))
+        // Pinvou tri-mode safety: when the host has armed interactive
+        // guardrail prompts, it has guaranteed a person can answer, so a
+        // denied-prefix / typed-deny face becomes an approval request with
+        // the full matching evidence instead of a hard block. Unarmed (the
+        // default) keeps the deny face byte-identical to the pre-flag
+        // doctrine; Auto-Review and Never postures keep it in every case —
+        // their denials stay unconditional because nobody can answer the
+        // card there even when armed.
+        if ask_on_guardrail
+            && !matches!(
+                approval_mode,
+                crate::tui::approval::ApprovalMode::Auto | crate::tui::approval::ApprovalMode::Never
+            )
+        {
+            Some(ToolAskRuleDecision::Prompt(format!(
+                "Guardrail approval requested (ask-on-guardrail is armed): {}",
+                decision.reason()
+            )))
+        } else {
+            Some(ToolAskRuleDecision::Block(decision.reason().to_string()))
+        }
     } else if decision.requires_approval {
         Some(ToolAskRuleDecision::Prompt(decision.reason().to_string()))
     } else if decision.matched_action == Some(codewhale_execpolicy::PermissionAction::Allow) {
@@ -8735,6 +8861,7 @@ pub(crate) fn mock_engine_handle() -> MockEngineHandle {
             false,
             crate::tui::approval::ApprovalMode::Suggest,
             None,
+            None,
         ),
     )));
     let compaction_cancellation = Arc::new(StdMutex::new(CompactionCancellationState::default()));
@@ -8778,6 +8905,11 @@ pub(crate) struct TurnMetadataSnapshot<'a> {
     pub(crate) approval_mode: crate::tui::approval::ApprovalMode,
     pub(crate) working_set: &'a crate::working_set::WorkingSet,
     pub(crate) policy_narrowing: Option<&'a PolicyNarrowingEvent>,
+    /// Host-driven authority change since the last reported turn (Pinvou
+    /// tri-mode safety). `None` keeps the block byte-identical to the
+    /// pre-flag shape; both the real turn and `/preview-request` read the
+    /// same engine-computed value, so the preview stays byte-identical.
+    pub(crate) authority_transition: Option<crate::core::authority::AuthorityTransition>,
 }
 
 /// Immutable prompt facts for the next accepted turn.

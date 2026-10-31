@@ -7954,6 +7954,7 @@ async fn mode_change_update_notifies_engine() {
             auto_approve,
             approval_mode,
             configured_sandbox_mode,
+            ask_on_guardrail: None,
         } => {
             // The deprecated YOLO alias lands in Agent mode with full-access
             // compat policies (M6 shim); the engine sees the remapped mode.
@@ -7995,6 +7996,7 @@ async fn mode_change_update_sends_restored_agent_policy() {
             auto_approve,
             approval_mode,
             configured_sandbox_mode,
+            ask_on_guardrail: None,
         } => {
             assert_eq!(mode, crate::tui::app::AppMode::Agent);
             assert!(allow_shell);

@@ -134,6 +134,86 @@ impl PolicyNarrowingEvent {
     }
 }
 
+/// The posture a `<turn_meta>` block reported for a turn: effective mode,
+/// effective approval posture, and the host's ask-on-guardrail arming.
+/// The comparison unit for host-driven authority transitions.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct TurnMetaPosture {
+    pub(crate) mode: AppMode,
+    pub(crate) approval: ApprovalMode,
+    pub(crate) ask_on_guardrail: bool,
+}
+
+/// A host-driven authority change between two turns (Pinvou tri-mode
+/// safety). Before this existed, a mid-session mode or posture flip reached
+/// the model only through the next turn's standing posture lines — the model
+/// could observe the new state but never the change itself, so a behavior
+/// shift (suddenly running commands without approval, or being asked to
+/// approve what previously ran) read as unexplained. The engine computes the
+/// transition when the turn's metadata block is built, against the posture
+/// the previous block reported, and renders one model-visible line there and
+/// only there; a turn whose posture did not change emits nothing, keeping
+/// ordinary blocks byte-stable.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct AuthorityTransition {
+    from_mode: &'static str,
+    from_approval: ApprovalMode,
+    from_armed: bool,
+    to_mode: &'static str,
+    to_approval: ApprovalMode,
+    to_armed: bool,
+}
+
+impl AuthorityTransition {
+    pub(crate) fn from_postures(from: TurnMetaPosture, to: TurnMetaPosture) -> Self {
+        Self {
+            from_mode: from.mode.as_setting(),
+            from_approval: from.approval,
+            from_armed: from.ask_on_guardrail,
+            to_mode: to.mode.as_setting(),
+            to_approval: to.approval,
+            to_armed: to.ask_on_guardrail,
+        }
+    }
+
+    /// Stable machine-readable identifier, shared by the model-visible line
+    /// and any future host surface so the two cannot drift.
+    pub(crate) fn reason(&self) -> &'static str {
+        "host_authority_change"
+    }
+
+    /// The single model-visible sentence. Renders both postures with their
+    /// approval chip and arming state so the change is self-describing.
+    pub(crate) fn render(&self) -> String {
+        fn part(mode: &str, approval: ApprovalMode, armed: bool) -> String {
+            format!(
+                "{mode} ({}, guardrail prompts {})",
+                approval.permission_chip_label(),
+                if armed { "armed" } else { "disarmed" }
+            )
+        }
+        format!(
+            "Authority transition (host): {} -> {}; reason: {}",
+            part(self.from_mode, self.from_approval, self.from_armed),
+            part(self.to_mode, self.to_approval, self.to_armed),
+            self.reason(),
+        )
+    }
+}
+
+/// Collapse any number of host flips between two turns into the one
+/// transition the next block reports: `None` before the first reported
+/// turn, `None` when the posture did not change, otherwise the change.
+pub(crate) fn authority_transition_between(
+    from: Option<TurnMetaPosture>,
+    to: TurnMetaPosture,
+) -> Option<AuthorityTransition> {
+    match from {
+        Some(last) if last != to => Some(AuthorityTransition::from_postures(last, to)),
+        _ => None,
+    }
+}
+
 /// Effective authority for one engine turn after provenance narrowing.
 #[derive(Debug, Clone)]
 pub(crate) struct TurnAuthority {
@@ -142,6 +222,13 @@ pub(crate) struct TurnAuthority {
     pub(crate) trust_mode: bool,
     pub(crate) auto_approve: bool,
     pub(crate) approval_mode: ApprovalMode,
+    /// Host-armed interactive guardrail prompts (Pinvou tri-mode safety).
+    /// When set, the approval-disposition resolver treats a forced
+    /// (non-bypassable) hold under the Full Access posture as a real prompt:
+    /// the host has guaranteed a person can answer, so failing closed would
+    /// deny a decision the user asked to make. Defaults to `false` from both
+    /// constructors, keeping unarmed behavior byte-identical.
+    pub(crate) ask_on_guardrail: bool,
     pub(crate) dynamic_active_tools: Vec<&'static str>,
     /// Structured record of any narrowing applied to this turn (#3947). The
     /// UI status line, `<turn_meta>`, and doctor all render from here, so a
@@ -169,9 +256,22 @@ impl TurnAuthority {
             trust_mode,
             auto_approve,
             approval_mode,
+            ask_on_guardrail: false,
             dynamic_active_tools: Vec::new(),
             narrowing: None,
         }
+    }
+
+    /// Arm (or disarm) interactive guardrail prompts on this authority.
+    /// Hosts that guarantee a person can answer guardrail hits set this
+    /// after construction; every other surface keeps the default `false`.
+    /// Test-only because the engine's gate sites consult the session flag
+    /// directly; the disposition resolver contract below reads the field.
+    #[cfg(test)]
+    #[must_use]
+    pub(crate) fn with_ask_on_guardrail(mut self, ask_on_guardrail: bool) -> Self {
+        self.ask_on_guardrail = ask_on_guardrail;
+        self
     }
 
     #[must_use]
@@ -277,6 +377,7 @@ pub(crate) fn effective_input_policy(
         trust_mode,
         auto_approve,
         approval_mode,
+        ask_on_guardrail: false,
         dynamic_active_tools: Vec::new(),
         narrowing,
     }
@@ -743,7 +844,14 @@ pub(crate) fn resolve_approval_request_disposition(
     // treat an ordinary promptable tool?
     let posture = resolve_tool_permission(authority, ApprovalRequirement::Suggest, false);
     if approval_force_prompt && posture == ToolPermission::Allow {
-        return ApprovalRequestDisposition::AutoDenyFullAccessPolicyHold;
+        // Armed hosts (Pinvou tri-mode safety) have guaranteed a person can
+        // answer, so the forced hold becomes the modal prompt instead of the
+        // fail-closed deny (CW-7495 consent-card shape, generalized). The
+        // Auto-Review and Never denials above stay unconditional: neither
+        // posture has anyone at the card even when armed.
+        if !authority.ask_on_guardrail {
+            return ApprovalRequestDisposition::AutoDenyFullAccessPolicyHold;
+        }
     }
     if !approval_force_prompt && (posture == ToolPermission::Allow || session_approved) {
         return ApprovalRequestDisposition::AutoApprove;
@@ -1423,5 +1531,99 @@ mod tests {
             resolve_approval_request_disposition(&ask, false, false, false),
             ApprovalRequestDisposition::Prompt
         );
+    }
+
+    #[test]
+    fn forkguard_armed_full_access_forced_hold_resolves_to_prompt() {
+        // Pinvou tri-mode safety: an armed host has guaranteed a person can
+        // answer, so a forced (non-bypassable) hold under Full Access
+        // resolves to the modal prompt instead of the fail-closed deny. The
+        // Auto-Review and Never denials stay unconditional — neither posture
+        // has anyone at the card even when armed (CW-7495 consent-card
+        // doctrine, generalized by ask-on-guardrail).
+        let full_access =
+            authority(AppMode::Agent, true, ApprovalMode::Bypass).with_ask_on_guardrail(false);
+        assert_eq!(
+            resolve_approval_request_disposition(&full_access, false, false, true),
+            ApprovalRequestDisposition::AutoDenyFullAccessPolicyHold,
+            "unarmed Full Access keeps the fail-closed hold"
+        );
+        let armed =
+            authority(AppMode::Agent, true, ApprovalMode::Bypass).with_ask_on_guardrail(true);
+        assert_eq!(
+            resolve_approval_request_disposition(&armed, false, false, true),
+            ApprovalRequestDisposition::Prompt,
+            "armed Full Access opens the approval modal for the hold"
+        );
+        // A session grant must NOT silently consume an armed forced hold.
+        assert_eq!(
+            resolve_approval_request_disposition(&armed, true, false, true),
+            ApprovalRequestDisposition::Prompt,
+            "armed forced hold ignores session grants"
+        );
+        let armed_auto_review =
+            authority(AppMode::Agent, false, ApprovalMode::Auto).with_ask_on_guardrail(true);
+        assert_eq!(
+            resolve_approval_request_disposition(&armed_auto_review, false, false, true),
+            ApprovalRequestDisposition::AutoDenyAutoReview,
+            "Auto-Review stays autonomous even when armed"
+        );
+        let armed_never =
+            authority(AppMode::Agent, false, ApprovalMode::Never).with_ask_on_guardrail(true);
+        assert_eq!(
+            resolve_approval_request_disposition(&armed_never, false, false, true),
+            ApprovalRequestDisposition::AutoDenyNeverPosture,
+            "Never stays fail-closed even when armed"
+        );
+    }
+
+    #[test]
+    fn forkguard_authority_transition_between_renders_the_host_change() {
+        let agent_full_armed = TurnMetaPosture {
+            mode: AppMode::Agent,
+            approval: ApprovalMode::Bypass,
+            ask_on_guardrail: true,
+        };
+        // Before the first reported turn there is no transition.
+        assert_eq!(
+            authority_transition_between(None, agent_full_armed),
+            None,
+            "first turn must not render a transition"
+        );
+        // A turn whose posture did not change emits nothing.
+        assert_eq!(
+            authority_transition_between(Some(agent_full_armed), agent_full_armed),
+            None,
+            "unchanged posture must keep the block byte-stable"
+        );
+        // A mode/posture/arming change renders exactly one line, and any
+        // number of mid-turn flips collapses into that one change.
+        let agent_ask_disarmed = TurnMetaPosture {
+            mode: AppMode::Agent,
+            approval: ApprovalMode::Suggest,
+            ask_on_guardrail: false,
+        };
+        let transition = authority_transition_between(Some(agent_full_armed), agent_ask_disarmed)
+            .expect("a posture change must produce a transition");
+        let line = transition.render();
+        assert!(
+            line.contains("Authority transition (host): agent (Full Access, guardrail prompts armed) -> agent (Ask, guardrail prompts disarmed)"),
+            "transition must name both postures with chips and arming: {line}"
+        );
+        assert!(
+            line.ends_with("; reason: host_authority_change"),
+            "transition must carry the stable reason token: {line}"
+        );
+        // An arming-only flip (same mode and posture) is still a transition.
+        let armed_only = authority_transition_between(
+            Some(agent_ask_disarmed),
+            TurnMetaPosture {
+                mode: AppMode::Agent,
+                approval: ApprovalMode::Suggest,
+                ask_on_guardrail: true,
+            },
+        )
+        .expect("an arming flip is a transition");
+        assert!(armed_only.render().contains("guardrail prompts armed"));
     }
 }

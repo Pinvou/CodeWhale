@@ -8762,6 +8762,65 @@ async fn forkguard_subagent_execpolicy_deny_matches_main_line() {
     assert!(!output.starts_with("Error:"), "{output}");
 }
 
+/// Pinvou tri-mode safety: an armed child must refuse a delegated typed-ask
+/// Prompt even under inherited auto-approve — the armed main line would
+/// prompt on this exact call, so silently running it in the child would
+/// bypass the very decision the host asked to make. Unarmed, the #3790
+/// posture authority holds and the same call passes (pinned by
+/// `forkguard_subagent_execpolicy_deny_matches_main_line`).
+#[tokio::test]
+async fn forkguard_armed_child_refuses_delegated_typed_ask_even_under_auto_approve() {
+    let tmp = tempdir().expect("tempdir");
+    let engine = codewhale_execpolicy::ExecPolicyEngine::with_rulesets(vec![
+        codewhale_execpolicy::Ruleset::user(vec![], vec![]).with_ask_rules(vec![
+            codewhale_execpolicy::ToolAskRule::exec_shell("cargo publish"),
+        ]),
+    ]);
+    // Unarmed + auto-approve: passes like the main line's auto-run.
+    let unarmed = worker_registry_with_engine_and_approval(&tmp, engine.clone(), true);
+    unarmed
+        .execute(
+            "agent_policy_unarmed",
+            "Bash",
+            json!({"action": "run", "command": "cargo publish --dry-run"}),
+        )
+        .await
+        .expect("unarmed auto-approved child must pass the typed ask rule");
+
+    // Armed + auto-approve: refuses with the main-conversation pointer.
+    let mut armed_runtime =
+        stub_runtime().with_agent_tool_surface_options(enabled_agent_surface_options());
+    armed_runtime.context = ToolContext::new(tmp.path().to_path_buf());
+    armed_runtime.context.auto_approve = true;
+    armed_runtime.allow_shell = true;
+    armed_runtime.worker_profile = WorkerRuntimeProfile::for_role(FleetRole::Worker);
+    armed_runtime.ask_on_guardrail = true;
+    let armed = SubAgentToolRegistry::new(
+        armed_runtime.with_exec_policy_engine(engine),
+        FleetRole::Worker,
+        None,
+        crate::tools::todo::new_shared_todo_list(),
+        crate::tools::plan::new_shared_plan_state(),
+    );
+    let error = armed
+        .execute(
+            "agent_policy_armed",
+            "Bash",
+            json!({"action": "run", "command": "cargo publish --dry-run"}),
+        )
+        .await
+        .expect_err("armed child must refuse a delegated typed ask under auto-approve")
+        .to_string();
+    assert!(
+        error.contains("requires approval"),
+        "armed refusal must name the approval: {error}"
+    );
+    assert!(
+        error.contains("run this tool call in the main conversation"),
+        "armed refusal must point at the main conversation: {error}"
+    );
+}
+
 /// Without a ruleset the delegated path is byte-identical to the unwired
 /// behavior: the gate is a no-op, and the very same call that a deny rule
 /// blocks runs when the rule is absent.
@@ -14467,6 +14526,7 @@ pub(crate) fn stub_runtime() -> SubAgentRuntime {
         // path treats `None` as "report nothing".
         governor: None,
         exec_policy_engine: codewhale_execpolicy::ExecPolicyEngine::new(Vec::new(), Vec::new()),
+        ask_on_guardrail: false,
     }
 }
 

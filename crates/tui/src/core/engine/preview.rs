@@ -416,6 +416,20 @@ impl Engine {
                 approval_mode: input_policy.approval_mode_for_session(),
                 working_set: &previewed_working_set,
                 policy_narrowing: input_policy.narrowing.as_ref(),
+                // Pinvou tri-mode safety: recompute the transition exactly the
+                // live turn will (recorded posture vs the planned turn's
+                // posture), never read the turn-start leftover — a host that
+                // flips posture between turns previews the line the live body
+                // will send, and an already-consumed change never leaks here.
+                authority_transition:
+                    crate::core::authority::authority_transition_between(
+                        self.last_turn_meta_authority,
+                        crate::core::authority::TurnMetaPosture {
+                            mode: input_policy.mode,
+                            approval: self.session.approval_mode,
+                            ask_on_guardrail: self.session.ask_on_guardrail,
+                        },
+                    ),
             },
         );
         *self

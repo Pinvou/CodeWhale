@@ -70,6 +70,7 @@ impl EngineHandle {
             auto_approve,
             approval_mode,
             configured_sandbox_mode,
+            ask_on_guardrail,
         } = op
         else {
             return None;
@@ -81,6 +82,7 @@ impl EngineHandle {
             *auto_approve,
             *approval_mode,
             configured_sandbox_mode.clone(),
+            *ask_on_guardrail,
         ))
     }
 
@@ -93,6 +95,9 @@ impl EngineHandle {
         state.authority = authority;
     }
 
+    // Pinvou tri-mode safety added the ask-on-guardrail carrier; the
+    // parameter set mirrors LiveRuntimeAuthority::from_fields.
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn publish_turn_authority(
         &self,
         mode: crate::tui::app::AppMode,
@@ -101,6 +106,7 @@ impl EngineHandle {
         auto_approve: bool,
         approval_mode: crate::tui::approval::ApprovalMode,
         configured_sandbox_mode: Option<String>,
+        ask_on_guardrail: Option<bool>,
     ) {
         self.publish_runtime_authority(LiveRuntimeAuthority::from_fields(
             mode,
@@ -109,6 +115,7 @@ impl EngineHandle {
             auto_approve,
             approval_mode,
             configured_sandbox_mode,
+            ask_on_guardrail,
         ));
     }
 

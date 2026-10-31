@@ -702,6 +702,9 @@ fn prepare_acp_tool_admission(
     let approval_mode = crate::tui::approval::ApprovalMode::Suggest;
     let workspace = registry.context().workspace.as_path();
 
+    // ACP admissions carry no arming surface: the Suggest posture here always
+    // prompts through RequestPermission, so the guardrail deny face stays
+    // hard (`ask_on_guardrail: false`).
     let typed_rule = exec_shell_ask_rule_decision_for_policy(
         &config.exec_policy_engine,
         &call.name,
@@ -709,6 +712,7 @@ fn prepare_acp_tool_admission(
         workspace,
         &registry.context().workspace_roots,
         approval_mode,
+        false,
     )
     .or_else(|| {
         file_tool_ask_rule_decision_for_policy(
@@ -718,6 +722,7 @@ fn prepare_acp_tool_admission(
             workspace,
             &registry.context().workspace_roots,
             approval_mode,
+            false,
         )
     });
     match typed_rule {

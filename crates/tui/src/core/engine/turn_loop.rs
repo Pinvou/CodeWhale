@@ -913,6 +913,10 @@ pub(super) fn registered_tool_forces_prompt(
 
 /// Repo-law `ask` rules require a human decision. Only Ask posture can open
 /// that decision; every autonomous or no-prompt posture must fail closed.
+/// (Pinvou tri-mode safety: an `ask_on_guardrail`-armed session is the one
+/// exception for promptable postures — Full Access / auto-approve — because
+/// the host guaranteed a person can answer. Auto-Review and Never keep the
+/// fail-closed block even when armed.)
 pub(super) fn repo_law_must_block_without_prompt(
     approval_mode: crate::tui::approval::ApprovalMode,
     auto_approve: bool,
@@ -3944,24 +3948,47 @@ impl Engine {
             if let Some(prepared) = prepared_policy {
                 let registered_non_bypassable =
                     registered_tool_forces_prompt(&tool_name, prepared.call.approval);
-                if registered_tool_blocked_in_full_access(
+                let full_access_hold = registered_tool_blocked_in_full_access(
                     &tool_name,
                     prepared.call.approval,
                     prepared.auto_approve,
-                ) {
+                );
+                let armed_full_access_hold = full_access_hold && self.session.ask_on_guardrail;
+                if full_access_hold && !armed_full_access_hold {
                     approval_required = false;
                     blocked_error = Some(ToolError::permission_denied(format!(
                         "Tool '{tool_name}' requires explicit approval and is blocked in Full Access because this posture does not open tool-approval prompts. Switch to Ask to review this call."
                     )));
                 } else {
-                    approval_required = registered_tool_approval_required(
-                        &tool_name,
-                        prepared.call.approval,
-                        prepared.auto_approve,
-                    );
-                    approval_force_prompt = registered_non_bypassable;
+                    // Armed (ask-on-guardrail) hosts are the one exception to
+                    // the Full Access hold above: they have guaranteed a
+                    // person can answer, so the hold becomes the approval.
+                    // Set it explicitly rather than falling through to the
+                    // ordinary resolver, which auto-approves non-bypassable
+                    // tools under auto-approve (the #3866 reversal) and
+                    // would silently run exactly what the hold exists to ask
+                    // about. `approval_force_prompt` then keeps session
+                    // grants and posture shortcuts from consuming the event
+                    // silently.
+                    approval_required = if armed_full_access_hold {
+                        true
+                    } else {
+                        registered_tool_approval_required(
+                            &tool_name,
+                            prepared.call.approval,
+                            prepared.auto_approve,
+                        )
+                    };
+                    approval_force_prompt = registered_non_bypassable || armed_full_access_hold;
                 }
-                approval_description = prepared.call.description;
+                approval_description = if armed_full_access_hold {
+                    format!(
+                        "{} — this call requires explicit approval (ask-on-guardrail is armed)",
+                        prepared.call.description
+                    )
+                } else {
+                    prepared.call.description
+                };
                 supports_parallel = prepared.call.supports_parallel;
                 read_only = prepared.call.read_only;
                 detached_start = prepared.call.starts_detached;
@@ -4043,6 +4070,7 @@ impl Engine {
                     &self.session.workspace,
                     &self.session.workspace_roots,
                     self.session.approval_mode,
+                    self.session.ask_on_guardrail,
                 )
                 .or_else(|| {
                     file_tool_ask_rule_decision(
@@ -4052,6 +4080,7 @@ impl Engine {
                         &self.session.workspace,
                         &self.session.workspace_roots,
                         self.session.approval_mode,
+                        self.session.ask_on_guardrail,
                     )
                 });
                 if let Some(decision) = ask_rule_decision {
@@ -4070,8 +4099,10 @@ impl Engine {
                             // #3790: the mode is the sole authority — a typed
                             // ask-rule prompts in Agent/Plan but never in YOLO
                             // (auto_approve). A typed deny rule still blocks
-                            // hard, in every mode.
-                            if !self.session.auto_approve {
+                            // hard, in every mode. Armed hosts are the one
+                            // exception: their ask-on-guardrail guarantee
+                            // converts the hold into a real prompt.
+                            if !self.session.auto_approve || self.session.ask_on_guardrail {
                                 approval_required = true;
                                 approval_description = reason;
                                 approval_force_prompt = true;
@@ -4193,10 +4224,20 @@ impl Engine {
                 );
                 match decision {
                     crate::repo_law::RepoLawPlanDecision::ForcePrompt(reason) => {
+                        // The armed exception applies only where a person can
+                        // actually answer the card (Full Access / auto-approve).
+                        // Auto-Review and Never keep the fail-closed block:
+                        // their denials stay unconditional even when armed.
                         if repo_law_must_block_without_prompt(
                             self.session.approval_mode,
                             self.session.auto_approve,
-                        ) {
+                        ) && !(self.session.ask_on_guardrail
+                            && !matches!(
+                                self.session.approval_mode,
+                                crate::tui::approval::ApprovalMode::Auto
+                                    | crate::tui::approval::ApprovalMode::Never
+                            ))
+                        {
                             approval_required = false;
                             approval_force_prompt = false;
                             blocked_error = Some(ToolError::permission_denied(format!(
@@ -4298,11 +4339,41 @@ impl Engine {
                         approval_required = true;
                         approval_force_prompt = true;
                     }
-                    Ok(Some(_)) => {
+                    Ok(Some(_))
+                        if !self.session.ask_on_guardrail
+                            || matches!(
+                                batch_approval_mode,
+                                crate::tui::approval::ApprovalMode::Auto
+                                    | crate::tui::approval::ApprovalMode::Never
+                            ) =>
+                    {
+                        // Unarmed, or armed under an unattended posture
+                        // (Auto-Review / Never): nobody can answer the card,
+                        // so the escalation keeps its fail-closed deny — the
+                        // arming guarantee does not override the posture.
                         blocked_error = Some(ToolError::permission_denied(format!(
                             "Sandbox escalation requires a one-shot user approval, but the current {} posture cannot provide it. Switch to Ask or continue without escalation.",
                             batch_approval_mode.permission_chip_label()
                         )));
+                    }
+                    // Armed hosts get the same Suggest-path approval flow as
+                    // above, with the model's justification on the card.
+                    Ok(Some((_policy, justification))) => {
+                        let escalation_description = format!(
+                            "Sandbox escalation to '{}' for this exact call: {justification} (armed guardrail approval)",
+                            tool_input["sandbox_permissions"]
+                                .as_str()
+                                .expect("validated sandbox permission")
+                        );
+                        approval_description = if approval_force_prompt {
+                            format!(
+                                "{escalation_description}. Additional approval gate: {approval_description}"
+                            )
+                        } else {
+                            escalation_description
+                        };
+                        approval_required = true;
+                        approval_force_prompt = true;
                     }
                     Ok(None) => {}
                     Err(error) => blocked_error = Some(error),
