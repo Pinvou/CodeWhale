@@ -1210,11 +1210,13 @@ jobs:
         image: postgres:16-alpine
         env:
           POSTGRES_HOST_AUTH_METHOD: trust
+          POSTGRES_USER: postgres
+          POSTGRES_DB: postgres
         ports:
           - "127.0.0.1::5432"
         options: >-
           --rm
-          --health-cmd pg_isready
+          --health-cmd "pg_isready -U postgres -d postgres"
           --health-interval 10s
           --health-timeout 5s
           --health-retries 5
@@ -1421,7 +1423,7 @@ jobs:
           set -euo pipefail
           python3 -m unittest discover -s scripts/tests -p test_deployment_contracts.py
           for postgres_version in 17 18.4; do
-            python3 scripts/account-platform-deployment-contracts.py --postgres-version "$postgres_version" --artifacts "$RUNNER_TEMP/account-platform-deployment-contracts-$postgres_version"
+            env -u DOCKER_HOST python3 scripts/account-platform-deployment-contracts.py --postgres-version "$postgres_version" --artifacts "$RUNNER_TEMP/account-platform-deployment-contracts-$postgres_version"
           done
 
       - name: Existing broker compatibility on owned PostgreSQL and TLS NATS
