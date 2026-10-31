@@ -7,3 +7,6 @@ pub(crate) mod binding {
 mod archive;
 #[path = "../../../src/features/sessions/remote_proxy/schema.rs"]
 pub(crate) mod schema;
+
+#[path = "../../../src/features/sessions/remote_proxy/projection_reason.rs"]
+mod projection_reason;
