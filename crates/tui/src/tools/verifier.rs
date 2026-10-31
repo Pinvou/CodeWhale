@@ -1601,4 +1601,59 @@ mod tests {
             output.stdout
         );
     }
+
+    /// A machine-launched gate job has nobody to feed its stdin, so the
+    /// spawn closes it at once: a gate that reads stdin (`cat`) must
+    /// complete on the delivered end-of-file instead of idling on the
+    /// held-open pipe until the background gate timeout kills it. This
+    /// pins the `write_stdin(task_id, "", true)` close in the
+    /// background-gate spawn loop; without it this test reddens after the
+    /// completion wait finds the job still running.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn run_verifiers_background_gate_jobs_get_stdin_eof_at_spawn() {
+        let tmp = tempdir().expect("tempdir");
+        let ctx = ToolContext::new(tmp.path());
+        let tool = RunVerifiersTool;
+        let result = tool
+            .execute(
+                json!({
+                    "profile": "auto",
+                    "background": true,
+                    "commands": [
+                        {"name": "stdin-reader", "program": "cat", "args": []}
+                    ]
+                }),
+                &ctx,
+            )
+            .await
+            .expect("execute");
+
+        let parsed: RunVerifiersBackgroundOutput =
+            serde_json::from_str(&result.content).expect("background verifier output json");
+        assert!(parsed.success, "result: {}", result.content);
+        assert_eq!(parsed.started, 1);
+        let task_id = parsed.jobs[0]
+            .task_id
+            .as_deref()
+            .expect("background task id");
+
+        let output = wait_for_completed_shell(
+            &mut ctx.shell_manager.lock().expect("shell manager"),
+            task_id,
+        );
+        if output.status == ShellStatus::Running {
+            // Clean up the mutated behavior's wedged job before failing.
+            let _ = ctx
+                .shell_manager
+                .lock()
+                .expect("shell manager")
+                .kill(task_id);
+        }
+        assert_eq!(
+            output.status,
+            ShellStatus::Completed,
+            "a stdin-reading gate must exit on the end-of-file delivered at spawn"
+        );
+    }
 }

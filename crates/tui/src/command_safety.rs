@@ -1394,10 +1394,11 @@ fn glued_numeric_value_option(token: &str, values: &str) -> bool {
             // Long options take their value after `=`, never glued.
             continue;
         }
-        if let Some(value) = token[1..].strip_prefix(flag_name) {
-            if !value.is_empty() && value.bytes().all(|byte| byte.is_ascii_digit()) {
-                return true;
-            }
+        if let Some(value) = token[1..].strip_prefix(flag_name)
+            && !value.is_empty()
+            && value.bytes().all(|byte| byte.is_ascii_digit())
+        {
+            return true;
         }
     }
     false

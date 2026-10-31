@@ -4130,14 +4130,7 @@ fn splice_git_read_hardening(argv: &mut Vec<String>) -> Result<bool> {
     // the subcommand after it so the hardening flags splice in the right
     // place. `-C` targets were already workspace-checked by
     // `enforce_readonly_workspace_operands`.
-    let mut subcommand_index = 1;
-    while let Some(flag) = argv.get(subcommand_index) {
-        match flag.as_str() {
-            "--no-pager" => subcommand_index += 1,
-            "-C" => subcommand_index += 2,
-            _ => break,
-        }
-    }
+    let subcommand_index = readonly_git_preamble_len(argv);
     let subcommand = argv
         .get(subcommand_index)
         .map(String::as_str)
@@ -4234,8 +4227,10 @@ fn hardened_readonly_git_stage(stage: &str) -> Result<Option<String>> {
 /// reads back as the same single word: bare when it is made only of
 /// characters that read back unchanged on sh, cmd.exe, and PowerShell alike
 /// (`*` deliberately stays bare — the operand gate judged its expansion and
-/// the shell must still perform it; `%` and `^` do not qualify, since cmd.exe
-/// expands `%NAME%` in bare words and consumes a bare `^` as its escape),
+/// the shell must still perform it; a `-C` value carrying one never gets
+/// here, it refuses at the root resolver; `%` and `^` do not qualify, since
+/// cmd.exe expands `%NAME%` in bare words and consumes a bare `^` as its
+/// escape),
 /// wrapped in double quotes when it merely carries whitespace, single
 /// quotes, or those cmd.exe-sensitive characters, and refused when it holds a
 /// character whose quoting rules differ between sh, cmd.exe, and PowerShell.
@@ -4324,14 +4319,21 @@ const READONLY_GIT_META_SCAN_CAP: usize = 4 * 1024;
 /// trusting a truncated submodule set.
 const READONLY_GIT_INDEX_SCAN_CAP: usize = 16 * 1024 * 1024;
 
-/// Oldest git release whose config can be fed through `GIT_CONFIG_KEY_n` /
-/// `GIT_CONFIG_VALUE_n` / `GIT_CONFIG_COUNT`; 2.31.0 introduced them. On an
-/// older git the environment block silently does not exist — the fixed
-/// fsmonitor/hooksPath pins AND the discovered filter pins alike — and for
-/// `status`/`ls-files`/`grep` those pins are the only wall, so the lane
-/// version-checks the host git for every command with a read-only git
-/// stage instead of admitting under pins that would not take.
-const MIN_GIT_ENV_CONFIG_VERSION: (u64, u64) = (2, 31);
+/// Oldest git release whose config the child env block can pin exactly the
+/// way this lane needs. 2.31.0 introduced the `GIT_CONFIG_KEY_n` /
+/// `GIT_CONFIG_VALUE_n` / `GIT_CONFIG_COUNT` feed, but the block also turns
+/// the operator's global/system config off with `GIT_CONFIG_GLOBAL` /
+/// `GIT_CONFIG_NOSYSTEM`, and `GIT_CONFIG_GLOBAL` arrived only in 2.32.0 —
+/// on 2.31.x the feed pins would take while the operator's global config
+/// still loaded, so a repo `.gitattributes` could reference a filter
+/// defined only there that the repository-only config scan would never
+/// discover. On an older git the environment block silently does not exist
+/// — the fixed fsmonitor/hooksPath pins AND the discovered filter pins
+/// alike — and for `status`/`ls-files`/`grep` those pins are the only
+/// wall, so the lane version-checks the host git for every command with a
+/// read-only git stage instead of admitting under pins that would not
+/// take.
+const MIN_GIT_ENV_CONFIG_VERSION: (u64, u64) = (2, 32);
 
 /// Total-bytes bound on the path-text directory-identity keys a non-unix
 /// glob walk may store (unix keys are fixed-size `(dev, ino, remaining)`
@@ -4415,7 +4417,9 @@ impl ReadonlyGitFilterPin {
 /// only when the comment-stripped text ends in an odd number of
 /// backslashes. When a command reaches a git stage at all, the host git is
 /// version-checked: the env-config mechanism the whole block rides needs
-/// git >= 2.31, and on an older git it would silently not exist.
+/// git >= 2.32 (the feed pins need 2.31, and turning the operator's global
+/// config off needs 2.32's `GIT_CONFIG_GLOBAL`), and on an older git it
+/// would silently not exist or not take.
 ///
 /// The walk mirrors the operand gate's `cd` fold so a git stage that runs
 /// inside a nested repository (`cd sub; git status`) scans the repository it
@@ -4537,7 +4541,8 @@ fn discover_readonly_git_filter_pins(
 }
 
 /// The env-config mechanism the whole read-only git env block rides needs
-/// git >= 2.31, and for `status`/`ls-files`/`grep` those pins are the only
+/// git >= 2.32 (feed pins 2.31, `GIT_CONFIG_GLOBAL` 2.32), and for
+/// `status`/`ls-files`/`grep` those pins are the only
 /// wall — on an older git the environment block silently does not exist and
 /// the repository's filters would run under an admitted read. The block
 /// emits `GIT_CONFIG_COUNT` for every read-only git stage (the fixed
@@ -4678,10 +4683,16 @@ fn readonly_git_preamble_len(argv: &[String]) -> usize {
 /// discovery pass's repository scan — so the two can never diverge: each
 /// `-C` takes the next token (absent → refuse), resolves relative values
 /// against the accumulated root, and must canonicalize to a directory
-/// inside the workspace before the root updates. A chain like
-/// `git -C A -C escape` therefore behaves exactly like the flat
-/// `git A/escape` it executes as. Failure names the reason; callers attach
-/// their own refusal tag.
+/// inside the workspace before the root updates. A chain of literal
+/// operands like `git -C A -C escape` therefore behaves exactly like the
+/// flat `git A/escape` it executes as. A `-C` value carrying a wildcard
+/// or a leading `=` refuses instead: the shell expands such spellings
+/// against the stage's working directory (glob, or zsh's EQUALS lookup)
+/// before git ever sees the word, while this resolver judges the literal
+/// spelling — the expansion never passes through the plain-operand walker
+/// because `-C` values are sliced off before it runs, so refusal is the
+/// only wall that matches where git actually chdir's. Failure names the
+/// reason; callers attach their own refusal tag.
 fn readonly_git_stage_root(
     stage_argv: &[String],
     base: &std::path::Path,
@@ -4706,6 +4717,34 @@ fn readonly_git_stage_root(
                 if target.starts_with('~') {
                     return Err(format!(
                         "read-only git `-C` operand {target:?} carries a tilde the shell would expand outside the judged location"
+                    ));
+                }
+                // The same divergence, glob flavor: a `-C` value the shell
+                // expands (any wildcard in the word; `*` is the only one
+                // the charset admits) binds git to whichever expansion
+                // entry sorts first, while this resolver canonicalizes the
+                // literal spelling. A planted literal directory satisfies
+                // the gate while the expansion binds elsewhere — proven
+                // end to end with the chained shape `git -C x -C *`, whose
+                // planted `*` lives inside `x/`, outside the expansion
+                // directory, so the leftover entries land in git's
+                // subcommand and rev slots and a hostile repo's HEAD
+                // renders. Refuse any wildcard outright, like the `cd` and
+                // gh-stage rules do.
+                if target.contains('*') {
+                    return Err(format!(
+                        "read-only git `-C` operand {target:?} carries a wildcard the shell would expand outside the judged location"
+                    ));
+                }
+                // zsh's EQUALS expansion is the non-glob member of the same
+                // family: `git -C =pwd status` makes zsh substitute the
+                // resolved path of the `pwd` binary while this resolver
+                // judges a literal `=pwd` spelling (the plain-operand gate
+                // refuses `=`-prefixed operands for exactly this reason,
+                // but never sees `-C` values).
+                if target.starts_with('=') {
+                    return Err(format!(
+                        "read-only git `-C` operand {target:?} starts with `=`, which zsh expands to a command's path outside the judged location"
                     ));
                 }
                 let joined = if std::path::Path::new(target).is_absolute() {
@@ -4784,7 +4823,7 @@ fn apply_discovery_git_env(
 /// repository, under the tool process's own authority, before anything is
 /// admitted. argv `-c` entries outrank every config file and work on every
 /// git, unlike the `GIT_CONFIG_COUNT` mechanism the admitted child rides
-/// (which needs >= 2.31), so these pins do not wait on the version gate.
+/// (which needs >= 2.32), so these pins do not wait on the version gate.
 fn arm_discovery_git_config_pins(command: &mut std::process::Command) {
     let null_device = if cfg!(windows) { "NUL" } else { "/dev/null" };
     for (key, value) in [
@@ -5037,7 +5076,12 @@ fn scan_readonly_repository_at(
     // only a label on that fork (probe-pinned: with `.gitmodules` deleted
     // from the worktree but the gitlink still in the index, git still forks
     // and the submodule's filter still fires), so the registered submodule
-    // set comes from the index itself.
+    // set comes from the index itself. Fail-closed cost, disclosed at this
+    // call site: the `git ls-files --stage -z` child runs once for every
+    // scanned repository — even one whose index holds zero gitlinks, an
+    // admitted git command pays this fork twice (its own repository plus
+    // the scan) — and an index listing past the 16 MiB scan cap refuses
+    // every git evidence command rather than trusting a truncated set.
     for gitlink in readonly_gitlink_paths(&worktree_dir, roots, env_path).map_err(refuse)? {
         scan_readonly_repository_at(
             &worktree_dir.join(std::path::Path::new(&gitlink)),
@@ -5087,34 +5131,42 @@ fn readonly_git_dir_for(cwd: &std::path::Path) -> Result<Option<(PathBuf, PathBu
                     candidate.display()
                 ));
             };
-            let first_line_end = bytes
-                .iter()
-                .position(|byte| *byte == b'\n')
-                .unwrap_or(bytes.len());
-            let text = std::str::from_utf8(&bytes[..first_line_end]).map_err(|_| {
+            // git consumes the WHOLE file, not one line: exactly one
+            // trailing `\n` is stripped (plus one `\r` before it —
+            // probe-pinned: a CRLF-terminated target resolves and runs),
+            // and every remaining byte is the target path, interior
+            // newlines included. Probe-pinned the other way too: a link
+            // whose value carries an interior newline resolves a gitdir
+            // literally named with that newline and runs THAT repository's
+            // content filters, so a first-line cut would scan the decoy
+            // the first line names while git ran a hostile repo this lane
+            // never saw. The whole value is therefore what this lane
+            // resolves — the byte-exact mirror, so the scan reaches the
+            // same repository git runs (pinned end to end by the
+            // multi-line-gitdir-link filter test).
+            let text = std::str::from_utf8(&bytes).map_err(|_| {
                 format!(
                     "the .git link at {} holds bytes this lane does not decode",
                     candidate.display()
                 )
             })?;
-            // git requires the literal lowercase prefix plus EXACTLY ONE
-            // space — no space, a tab, or two spaces is `fatal: invalid
-            // gitfile format` there. Refuse those spellings instead of
-            // reporting "no repository": the scan walks UP the tree, and a
-            // link it cannot mirror is one it must not guess at.
-            let Some(target) = text.strip_prefix("gitdir: ") else {
+            let stripped = text.strip_suffix('\n').unwrap_or(text);
+            let stripped = stripped.strip_suffix('\r').unwrap_or(stripped);
+            // git requires the literal lowercase prefix plus exactly one
+            // space; a missing, doubled, or tab-replaced space fatals
+            // there (`invalid gitfile format`). Extra leading or trailing
+            // whitespace keeps the format valid but rides inside the value
+            // (probe-pinned: git resolves the padded spelling against the
+            // link's directory and fails when it names nothing) — refusing
+            // matches the outcome git reaches without mirroring the
+            // resolution, and the scan must not guess at a link it cannot
+            // mirror.
+            let Some(target) = stripped.strip_prefix("gitdir: ") else {
                 return Err(format!(
                     "the .git link at {} is not a spelling git accepts (invalid gitfile format)",
                     candidate.display()
                 ));
             };
-            // The value is byte-exact except for the one trailing `\r` git
-            // strips at the newline (probe-pinned: a CRLF-terminated target
-            // resolves and runs); a value that is empty, or carries leading
-            // whitespace or any other trailing space, fatals in git before
-            // anything runs — refuse rather than trim it into a target git
-            // would never open.
-            let target = target.strip_suffix('\r').unwrap_or(target);
             if target.is_empty() || target.starts_with([' ', '\t']) || target.ends_with([' ', '\t'])
             {
                 return Err(format!(
@@ -5122,8 +5174,6 @@ fn readonly_git_dir_for(cwd: &std::path::Path) -> Result<Option<(PathBuf, PathBu
                     candidate.display()
                 ));
             }
-            // Content after the first line is ignored, exactly like git
-            // consuming one line.
             let gitdir = if std::path::Path::new(target).is_absolute() {
                 PathBuf::from(target)
             } else {
@@ -5150,6 +5200,23 @@ fn readonly_git_dir_for(cwd: &std::path::Path) -> Result<Option<(PathBuf, PathBu
 /// declares it (probe-pinned: the toplevel is the linked worktree while the
 /// filter in the shared config still fires), and the shared config already
 /// reaches this scan through the `commondir` chain.
+/// Echo a config-derived spelling inside a refusal message without letting
+/// a crafted value buy unbounded error text: a filter name or a
+/// `core.worktree` value can be file-sized, the refusal reaches the model
+/// verbatim, and discovery reads can follow symlinks — so the echoed
+/// spelling is also kept well short of an outside-file read-back channel.
+fn readonly_refusal_echo(value: &str) -> &str {
+    const MAX_REFUSAL_ECHO_BYTES: usize = 200;
+    if value.len() <= MAX_REFUSAL_ECHO_BYTES {
+        return value;
+    }
+    let mut cut = MAX_REFUSAL_ECHO_BYTES;
+    while !value.is_char_boundary(cut) {
+        cut -= 1;
+    }
+    &value[..cut]
+}
+
 fn readonly_git_config_filter_names(
     gitdir: &std::path::Path,
     worktree_dir: &std::path::Path,
@@ -5179,22 +5246,24 @@ fn readonly_git_config_filter_names(
                 ));
             };
             linked_worktree = true;
-            let first_line_end = bytes
-                .iter()
-                .position(|byte| *byte == b'\n')
-                .unwrap_or(bytes.len());
-            let text = std::str::from_utf8(&bytes[..first_line_end]).map_err(|_| {
+            // Byte-exact like the `.git` link: git strips exactly one
+            // trailing `\r\n`/`\n` and resolves the rest as a single path,
+            // interior newlines included — the whole value, so this lane
+            // scans exactly the shared directory git reads. git resolves
+            // the value it consumed (a padded or dangling spelling fatals
+            // there before anything runs), so a value this lane cannot
+            // resolve refuses instead of silently scanning a config git
+            // never opens. An empty pointer names no shared directory in
+            // git either.
+            let text = std::str::from_utf8(&bytes).map_err(|_| {
                 format!(
                     "the commondir pointer at {} holds bytes this lane does not decode",
                     commondir_path.display()
                 )
             })?;
-            // Byte-exact like the `.git` link, except the one trailing `\r`
-            // git strips at the newline: git resolves the value it consumed
-            // (a padded spelling fatals there before anything runs), so a
-            // trimmed value could resolve a directory git never opens. An
-            // empty pointer names no shared directory in git either.
-            let target = text.strip_suffix('\r').unwrap_or(text);
+            let stripped = text.strip_suffix('\n').unwrap_or(text);
+            let stripped = stripped.strip_suffix('\r').unwrap_or(stripped);
+            let target = stripped;
             if target.is_empty() {
                 return Err(format!(
                     "the commondir pointer at {} names no shared directory",
@@ -5572,7 +5641,7 @@ fn armed_git_filter_names(
         {
             return Err(format!(
                 "the repository declares a filter named {:?}, whose spelling this lane does not pin",
-                pin.name
+                readonly_refusal_echo(&pin.name)
             ));
         }
     }
@@ -5611,7 +5680,8 @@ fn validated_core_worktree(
     };
     let declared_worktree = joined.canonicalize().map_err(|error| {
         format!(
-            "the repository config declares `core.worktree` {declared:?}, which does not resolve ({error}); refusing a relocated worktree"
+            "the repository config declares `core.worktree` {:?}, which does not resolve ({error}); refusing a relocated worktree",
+            readonly_refusal_echo(&declared)
         )
     })?;
     let discovered = worktree_dir
@@ -5619,7 +5689,8 @@ fn validated_core_worktree(
         .map_err(|error| format!("the repository worktree could not be resolved: {error}"))?;
     if declared_worktree != discovered {
         return Err(format!(
-            "the repository config declares `core.worktree` {declared:?}, which relocates the worktree away from the tree this lane bounds"
+            "the repository config declares `core.worktree` {:?}, which relocates the worktree away from the tree this lane bounds",
+            readonly_refusal_echo(&declared)
         ));
     }
     Ok(())
@@ -5740,9 +5811,13 @@ fn enforce_readonly_segment_operands(
                     // git's `-C` preamble accumulates: the stage's operands
                     // resolve against the directory the stage actually runs
                     // under, through the same helper the discovery pass
-                    // walks, so `git -C A -C escape` is judged exactly like
-                    // the flat `git A/escape` it executes as. The `-C`
-                    // values themselves are judged inside the helper.
+                    // walks, so a chain of literal operands like
+                    // `git -C A -C escape` is judged exactly like the flat
+                    // `git A/escape` it executes as. The `-C` values are
+                    // judged inside the helper — a value the shell would
+                    // expand (wildcard, tilde, zsh `=`) refuses there,
+                    // because these operands are sliced off before the
+                    // plain-operand walker could expansion-judge them.
                     let stage_root =
                         readonly_git_stage_root(&argv, effective_cwd, roots).map_err(|reason| {
                             ToolError::permission_denied(format!(
@@ -6678,11 +6753,15 @@ async fn execute_foreground_via_background(
 const BASH_MAX_TIMEOUT_MS: u64 = i32::MAX as u64;
 
 /// Upper bound for one inline `stdin` payload. The spawn delivers it with a
-/// blocking `write_all` while the shell-manager lock is held; one pipe
-/// buffer (64 KiB on Linux) always completes without the child reading, so
-/// anything at or below this cap can never wedge the executor thread, and a
-/// larger payload is refused with a pointer at background `interact`
-/// streaming instead of hanging the session.
+/// blocking `write_all` while the shell-manager lock is held; on Linux a
+/// payload equal to one pipe buffer (exactly 64 KiB) always completes
+/// without the child reading, so at this cap the write can never wedge the
+/// executor thread there. Windows and macOS pipe buffers are
+/// system-decided/best-effort and may be smaller — the cap is a strict
+/// improvement over the uncapped base everywhere, and the never-wedge
+/// guarantee as stated is a Linux fact. Anything larger is refused with a
+/// pointer at background `interact` streaming instead of hanging the
+/// session.
 const MAX_INLINE_STDIN_BYTES: usize = 64 * 1024;
 
 /// Initial cadence for foreground-via-background completion polling. Fast
@@ -7023,10 +7102,12 @@ impl ToolSpec for BashTool {
                 },
                 "input": {
                     "type": "string",
+                    "maxLength": 65536,
                     "description": "Alias for `stdin`."
                 },
                 "data": {
                     "type": "string",
+                    "maxLength": 65536,
                     "description": "Alias for `stdin`."
                 },
                 "cwd": {
@@ -7239,10 +7320,10 @@ impl ToolSpec for BashTool {
                 // the caller holds the shell-manager lock: past the pipe
                 // buffer a command that never reads would wedge the
                 // executor thread and every other shell in the session
-                // before any watchdog is reached. The cap is one byte short
-                // of never-wedging (a write that fits the pipe buffer
-                // completes unconditionally); bigger payloads belong on the
-                // background lane, fed through `action=interact` in chunks.
+                // before any watchdog is reached. The cap equals the Linux
+                // pipe buffer, so there a write that passes it completes
+                // unconditionally; bigger payloads belong on the background
+                // lane, fed through `action=interact` in chunks.
                 if payload.len() > MAX_INLINE_STDIN_BYTES {
                     return Ok(ToolResult::error(format!(
                         "The inline stdin payload is {} bytes; the shell tool accepts at most {MAX_INLINE_STDIN_BYTES} inline — run the command with background=true and feed it through action=interact in chunks.",
@@ -7458,8 +7539,10 @@ impl ToolSpec for BashTool {
             // external diff helper with a fixed inert executable. Repository
             // config and attributes are attacker-controlled evidence inputs;
             // a nominal `git diff/log/show` must not turn them into programs.
-            // Note the GIT_CONFIG_COUNT mechanism needs git >= 2.31: on an
-            // older git this block silently does not exist. The fixed pins
+            // Note the GIT_CONFIG_COUNT mechanism needs git >= 2.31 and the
+            // GIT_CONFIG_GLOBAL pin below needs 2.32: on an older git this
+            // block silently does not exist (or leaves the global config
+            // live). The fixed pins
             // below are written for EVERY read-only git stage, so discovery
             // version-checks the host git for every command with a git
             // stage (`ensure_git_supports_env_config_pins`); the argv splice

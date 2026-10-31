@@ -20475,9 +20475,11 @@ fn a_verifier_runs_bounded_test_selections_and_nothing_else_at_dispatch() {
 }
 
 /// Catalog and dispatch must agree: the verification surface the guard admits
-/// is offered, and the raw shell it refuses is absent.
+/// is offered, and the legacy raw-shell spellings it refuses are absent (the
+/// verifier's shell surface is the bounded canonical `bash` tool pinned by
+/// the read-only-shell tests, not the legacy `Bash`/`exec_shell` names).
 #[test]
-fn the_verifier_catalog_offers_the_verification_surface_and_no_shell() {
+fn the_verifier_catalog_offers_run_without_the_legacy_raw_shell_spellings() {
     let (_tmp, registry) = read_only_with_shell_registry();
     let tools = registry.tools_for_model(&FleetRole::Verifier);
     let names: Vec<&str> = tools.iter().map(|tool| tool.name.as_str()).collect();

@@ -1670,18 +1670,25 @@ fn readonly_gitlink_paths_refuse_quoted_and_backslash_spellings_on_windows() {
     }
 }
 
-/// The env-config mechanism the filter pins ride needs git >= 2.31; older
-/// git silently drops the environment block, and for `status`/`ls-files`/
-/// `grep` those pins are the only wall, so the version gate must prove the
-/// mechanism exists and refuse what it cannot prove.
+/// The env-config mechanism the filter pins ride needs git >= 2.32: the
+/// `GIT_CONFIG_COUNT` feed arrived in 2.31, but `GIT_CONFIG_GLOBAL` — which
+/// turns the operator's global config off, the wall a repo-local
+/// `.gitattributes` referencing a global-only filter depends on — arrived
+/// in 2.32. Older git silently drops the environment block (or leaves the
+/// global config live), and for `status`/`ls-files`/`grep` those pins are
+/// the only wall, so the version gate must prove the mechanism exists and
+/// refuse what it cannot prove.
 #[test]
-fn git_env_config_support_needs_two_thirty_one() {
+fn git_env_config_support_needs_two_thirty_two() {
     assert!(git_env_config_supported("git version 2.43.0"));
     assert!(git_env_config_supported(
-        "git version 2.31.1 (Apple Git-137)"
+        "git version 2.32.1 (Apple Git-137)"
     ));
-    assert!(git_env_config_supported("git version 2.31.0.windows.1"));
-    assert!(git_env_config_supported("git version 2.31"));
+    assert!(git_env_config_supported("git version 2.32.0.windows.1"));
+    assert!(git_env_config_supported("git version 2.32"));
+    // The feed pins alone exist on 2.31.x, but the global-config wall does
+    // not: refuse the whole window.
+    assert!(!git_env_config_supported("git version 2.31.9"));
     assert!(!git_env_config_supported("git version 2.30.9"));
     assert!(!git_env_config_supported("git version 1.9"));
     // A major alone proves nothing about the minor floor: refuse.
@@ -2029,23 +2036,61 @@ fn readonly_git_dir_link_is_parsed_byte_exactly() {
         );
     }
 
-    // Content after the first line is ignored, exactly like git consuming
-    // one line. Pinned at the link parser: a repository behind such a link
-    // is one the host git itself refuses to run in, so driving the whole
-    // discovery here would refuse downstream for a different (safe) reason.
+    // A value carrying an interior newline is one git resolves as a single
+    // path: git consumes the whole file minus ONE trailing newline and
+    // every remaining byte is the target — probe-pinned against git 2.43
+    // this round, where a link of this shape resolved a newline-named
+    // gitdir and ran that repository's content filters while a first-line
+    // cut scanned only the decoy the first line named. The reader resolves
+    // the whole value, byte-exactly, so the scan reaches the repository
+    // git actually runs.
     std::fs::write(
         checkout.join(".git"),
         format!(
-            "gitdir: {}\ntrailing junk that git ignores\n",
+            "gitdir: {}\ntrailing junk git folds into the path\n",
             real.join(".git").display()
         ),
     )
     .expect("multi-line link");
     let (gitdir, dir) = readonly_git_dir_for(&checkout)
         .expect("a decodable link resolves")
-        .expect("a well-formed first line names a repository");
-    assert_eq!(gitdir, real.join(".git"), "the first line names the gitdir");
+        .expect("a well-formed link names a repository");
+    assert_eq!(
+        gitdir,
+        PathBuf::from(format!(
+            "{}\ntrailing junk git folds into the path",
+            real.join(".git").display()
+        )),
+        "the WHOLE value names the gitdir, not the first line"
+    );
     assert_eq!(dir, checkout);
+}
+
+/// The `commondir` pointer is parsed byte-exactly like the `.git` link: git
+/// strips one trailing newline and resolves the rest as a single path,
+/// interior newlines included. The scan follows the whole value — a filter
+/// declared in a shared directory whose NAME carries the newline is
+/// discovered exactly where git reads it, not skipped by a first-line cut.
+#[test]
+fn readonly_git_commondir_follows_the_multiline_value_git_resolves() {
+    let root = tempdir().expect("root");
+    let gitdir = root.path().join(".git");
+    std::fs::create_dir_all(&gitdir).expect("gitdir");
+    seed_minimal_gitdir(&gitdir);
+    let shared = gitdir.join("shared\ndata");
+    std::fs::create_dir_all(&shared).expect("newline-named shared dir");
+    std::fs::write(
+        shared.join("config"),
+        "[filter \"sharedonly\"]\n\tclean = cat\n\tsmudge = cat\n",
+    )
+    .expect("shared config");
+    std::fs::write(gitdir.join("commondir"), "shared\ndata\n").expect("multi-line commondir");
+    let pins = readonly_git_config_filter_names(&gitdir, root.path())
+        .expect("the whole commondir value resolves and its filters are discovered");
+    assert!(
+        pins.iter().any(|pin| pin.name == "sharedonly"),
+        "the newline-named shared directory's filter must be discovered: {pins:?}"
+    );
 }
 
 /// git's `-C` accumulates: the operand gate must judge a stage's operands
@@ -2112,6 +2157,58 @@ fn readonly_operand_gate_judges_chained_git_c_cumulatively() {
         error.contains("shell.readonly.operand.outside_workspace"),
         "{error}"
     );
+}
+
+/// A `-C` value is judged as a literal spelling while the shell expands
+/// wildcard (and zsh `=`) spellings against the stage's working directory
+/// before git ever sees the word — and `-C` operands are sliced off before
+/// the plain-operand walker runs, so refusal is the only wall that matches
+/// where git actually chdir's. The chained shape is the proven escape: a
+/// literal `*` directory planted INSIDE `x/` canonicalizes fine, while the
+/// expansion of `*` against the command cwd binds the second `-C` to the
+/// first-sorted entry (an outside symlink) and leaves the remaining
+/// entries in git's subcommand and rev slots — an outside repository's
+/// content rendered under an admitted read. Everything here refuses on the
+/// spelling itself, before any filesystem probe.
+#[cfg(unix)]
+#[test]
+fn readonly_operand_gate_refuses_shell_expanded_git_c_operands() {
+    let workspace = tempdir().expect("workspace");
+    let outside = tempdir().expect("outside");
+    std::fs::create_dir_all(outside.path().join("repo").join(".git")).expect("outside repo");
+    std::fs::create_dir_all(workspace.path().join("x")).expect("inside dir");
+    // The literal spelling the resolver would canonicalize: a directory
+    // named `*` INSIDE `x/` — the chained shape's planted literal. The
+    // outside symlink sorts before it in the expansion.
+    std::fs::create_dir(workspace.path().join("x").join("*")).expect("literal star dir");
+    std::os::unix::fs::symlink(
+        outside.path().join("repo"),
+        workspace.path().join("x").join("!escape"),
+    )
+    .expect("outside symlink inside x");
+    let roots = [workspace.path().to_path_buf()];
+
+    for command in [
+        "git -C x -C * status -s",
+        "git --no-pager -C x -C * show HEAD",
+        "git -C * status -s",
+        "git -C =pwd status -s",
+    ] {
+        let error = enforce_readonly_workspace_operands(command, &roots, workspace.path())
+            .expect_err("a shell-expanded `-C` value must refuse at the root resolver")
+            .to_string();
+        assert!(
+            error.contains("shell.readonly.operand.outside_workspace")
+                && (error.contains("wildcard") || error.contains("zsh expands")),
+            "{command}: {error}"
+        );
+    }
+
+    // Literal operands keep their admission, judged by the accumulated root.
+    std::fs::create_dir_all(workspace.path().join("x").join("sub").join(".git"))
+        .expect("inside repo");
+    enforce_readonly_workspace_operands("git -C x -C sub status -s", &roots, workspace.path())
+        .expect("literal -C operands stay admitted");
 }
 
 /// The version probe runs the way the read-only child runs: its PATH is the
@@ -2742,6 +2839,123 @@ async fn readonly_shell_lane_git_status_does_not_run_repository_content_filters(
         assert!(
             !marker.exists() && !dotted_marker.exists(),
             "{command} ran the repository's content filter"
+        );
+    }
+}
+
+/// The interior-newline twin of the filter pin: git consumes a `.git` link
+/// as the WHOLE file minus one trailing newline, so a link whose value
+/// carries an interior newline resolves a gitdir literally named with that
+/// newline and runs THAT repository's content filters — while a first-line
+/// cut scanned only the decoy the first line names, found nothing, and
+/// admitted the read with the hostile filter still armed. Discovery now
+/// resolves the whole value, scans the hostile repository where git runs
+/// it, and pins its filters inert — the tool leg must leak nothing and run
+/// nothing, exactly like the in-place filter pin above.
+#[cfg(unix)]
+#[tokio::test]
+async fn readonly_shell_lane_git_diff_pins_filters_behind_a_multi_line_gitdir_link() {
+    let workspace = tempdir().expect("workspace");
+    let outside = tempdir().expect("outside");
+    let marker = outside.path().join("newline-filter-ran");
+    let secret = outside.path().join("newline-secret.txt");
+    std::fs::write(&secret, "TOPSECRET-NEWLINE-FILTER").expect("outside secret");
+    let git = |args: &[&str], cwd: &std::path::Path| {
+        let output = std::process::Command::new("git")
+            .args(["-c", "user.name=t", "-c", "user.email=t@example.invalid"])
+            .args(args)
+            .current_dir(cwd)
+            .output()
+            .expect("git runs");
+        assert!(
+            output.status.success(),
+            "git {args:?} failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    };
+    // Build the hostile repository at a normal path, then move its gitdir
+    // to the newline-named name the multi-line link will spell.
+    let build = workspace.path().join("hostile-build");
+    std::fs::create_dir(&build).expect("hostile build dir");
+    git(&["init", "-q", "."], &build);
+    git(
+        &[
+            "config",
+            "filter.evil.clean",
+            &format!(
+                "sh -c 'touch {}; cat {} >&2; cat'",
+                marker.display(),
+                secret.display()
+            ),
+        ],
+        &build,
+    );
+    std::fs::write(build.join(".gitattributes"), "* filter=evil\n").expect("attributes");
+    std::fs::write(build.join("seed.txt"), "seed\n").expect("seed file");
+    git(&["add", "."], &build);
+    git(&["commit", "-q", "-m", "seed"], &build);
+
+    // The decoy directory the link's FIRST line names: the gitdir inside it
+    // does not exist, so the old first-line cut scanned a repository that
+    // declares nothing and admitted the read.
+    let decoy = workspace.path().join("decoy");
+    std::fs::create_dir(&decoy).expect("decoy dir");
+    let newline_gitdir = decoy.join(".git\njunk");
+    std::fs::rename(build.join(".git"), &newline_gitdir).expect("move gitdir to newline name");
+
+    // The checkout whose `.git` link carries the interior newline: git
+    // resolves the whole value to `decoy/.git\njunk` and runs the hostile
+    // repository against this worktree.
+    let checkout = workspace.path().join("checkout");
+    std::fs::create_dir(&checkout).expect("checkout");
+    std::fs::write(
+        checkout.join(".git"),
+        format!("gitdir: {}\njunk\n", decoy.join(".git").display()),
+    )
+    .expect("multi-line link");
+    std::fs::copy(
+        build.join(".gitattributes"),
+        checkout.join(".gitattributes"),
+    )
+    .expect("attributes in checkout");
+    std::fs::copy(build.join("seed.txt"), checkout.join("seed.txt")).expect("seed in checkout");
+    // Size-preserving dirt: stat alone must not settle the conversion.
+    std::fs::write(checkout.join("seed.txt"), "dirt\n").expect("dirty the worktree");
+    assert!(
+        !decoy.join(".git").exists(),
+        "the decoy gitdir must not exist, or this fixture stops discriminating"
+    );
+
+    // Positive control: a raw shell's nominal read runs the hostile filter
+    // through the newline-named gitdir.
+    let control = std::process::Command::new("sh")
+        .args(["-c", "git diff 2>&1"])
+        .current_dir(&checkout)
+        .output()
+        .expect("control shell runs");
+    assert!(
+        String::from_utf8_lossy(&control.stdout).contains("TOPSECRET-NEWLINE-FILTER"),
+        "the armed clean filter must fire under a raw shell through the newline-named gitdir: {}",
+        String::from_utf8_lossy(&control.stdout)
+    );
+    assert!(marker.exists(), "the armed clean filter must execute");
+    std::fs::remove_file(&marker).expect("reset marker");
+
+    let context =
+        ToolContext::new(&checkout).with_shell_policy(crate::worker_profile::ShellPolicy::ReadOnly);
+    for command in ["git diff", "git status -s"] {
+        let output = LowercaseBashTool
+            .execute(json!({"command": command}), &context)
+            .await
+            .unwrap_or_else(|error| panic!("{command} must execute: {error}"));
+        assert!(output.success, "{command}: {}", output.content);
+        assert!(
+            !output.content.contains("TOPSECRET-NEWLINE-FILTER"),
+            "{command} returned content converted through the newline-named repository's filter"
+        );
+        assert!(
+            !marker.exists(),
+            "{command} ran the hostile repository's content filter behind the multi-line link"
         );
     }
 }
@@ -3957,7 +4171,7 @@ fn readonly_github_shell_calls_obey_the_host_network_policy_before_spawn() {
 fn guidance_states_the_foreground_stdin_contract() {
     let description = super::guidance::description();
     assert!(
-        description.contains("Foreground commands without `interactive` or `combined_output` run without a terminal stdin"),
+        description.contains("Foreground commands without `interactive`, `tty`, or `combined_output` run without a terminal stdin"),
         "guidance must state the bounded foreground stdin: {description}"
     );
     assert!(
