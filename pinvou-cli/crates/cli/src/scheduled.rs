@@ -558,7 +558,37 @@ fn validate_rrule(rrule: &str) -> Result<(), CliError> {
         }
     }
     match AutomationSchedule::parse_rrule(rrule) {
-        Ok(_) => Ok(()),
+        Ok(_) => {
+            // The foundation parser accepts the wall-clock shape but does not
+            // resolve it against the process timezone.  Reject a nonexistent
+            // local minute here so a task cannot be persisted with an ONCE
+            // stamp that the scheduler can never execute.  Ambiguous fall-back
+            // minutes remain valid; the scheduler chooses its documented
+            // earliest occurrence.
+            let freq_once = parts
+                .iter()
+                .any(|(key, value)| key == "FREQ" && value.trim().eq_ignore_ascii_case("ONCE"));
+            if freq_once {
+                if let Some((_, at)) = parts.iter().find(|(key, _)| key == "AT") {
+                    let parsed = chrono::NaiveDateTime::parse_from_str(at, "%Y-%m-%dT%H:%M")
+                        .or_else(|_| {
+                            chrono::NaiveDateTime::parse_from_str(at, "%Y-%m-%dT%H:%M:%S")
+                        });
+                    if let Ok(local_time) = parsed {
+                        use chrono::TimeZone;
+                        if matches!(
+                            chrono::Local.from_local_datetime(&local_time),
+                            chrono::LocalResult::None
+                        ) {
+                            return Err(CliError::usage(format!(
+                                "invalid rrule '{rrule}': local time '{at}' does not exist"
+                            )));
+                        }
+                    }
+                }
+            }
+            Ok(())
+        }
         Err(error) => Err(CliError::usage(format!(
             "invalid rrule '{rrule}': {error:#}"
         ))),
