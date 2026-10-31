@@ -204,9 +204,14 @@ DO $$ BEGIN
   REVOKE UPDATE,DELETE,TRUNCATE ON public.product_admission_material_commands,public.product_admission_material_audits FROM billing_service;
  END IF;
  IF to_regclass('public.product_manual_admission_submissions') IS NOT NULL THEN
+  IF to_regprocedure('public.purge_product_manual_admission_facts()') IS NOT NULL THEN
+   ALTER FUNCTION public.purge_product_manual_admission_facts() OWNER TO billing_schema_owner;
+   ALTER FUNCTION public.purge_product_manual_admission_facts() SECURITY DEFINER;
+   ALTER FUNCTION public.purge_product_manual_admission_facts() SET search_path TO pg_catalog,public;
+  END IF;
   REVOKE UPDATE,DELETE,TRUNCATE ON public.product_manual_admission_submissions,public.product_manual_admission_decisions FROM billing_service;
-  GRANT UPDATE(snapshot) ON public.product_manual_admission_submissions TO billing_service;
-  GRANT UPDATE(reason) ON public.product_manual_admission_decisions TO billing_service;
+  REVOKE UPDATE(snapshot) ON public.product_manual_admission_submissions FROM billing_service;
+  REVOKE UPDATE(reason) ON public.product_manual_admission_decisions FROM billing_service;
  END IF;
  IF to_regclass('public.usage_waiver_commands') IS NOT NULL THEN
   REVOKE UPDATE,DELETE,TRUNCATE ON public.usage_waiver_commands,public.usage_waiver_results,public.usage_waiver_rejections FROM billing_service;

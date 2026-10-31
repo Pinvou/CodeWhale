@@ -106,6 +106,20 @@ func TestProductManualAdmissionPostgres(t *testing.T) {
 			t.Fatal("replay bypassed current authority", err)
 		}
 	})
+	t.Run("runtime-cannot-rewrite-frozen-manual-facts", func(t *testing.T) {
+		r, ctx := retainedFinanceRepository(t)
+		item, material, actor := manualAdmissionFixture(t, r, ctx)
+		record, err := r.CreateManualProductAdmission(ctx, ProductManualAdmissionCreate{CatalogItemID: item.CatalogItemID, MaterialID: material.MaterialID, Actor: actor, ExpectedVersion: item.Version, Environment: "controlled", IdempotencyKey: "manual-permission-" + uuid.NewString(), Reason: "permission guard"}, allow)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err = r.pool.Exec(ctx, `UPDATE product_manual_admission_submissions SET snapshot='{}'::jsonb WHERE verification_id=$1`, record.VerificationID); err == nil {
+			t.Fatal("billing_service rewrote the frozen manual submission snapshot")
+		}
+		if _, err = r.pool.Exec(ctx, `UPDATE product_manual_admission_decisions SET reason='rewritten' WHERE verification_id=$1`, record.VerificationID); err == nil {
+			t.Fatal("billing_service rewrote the frozen manual decision reason")
+		}
+	})
 	t.Run("concurrent-second-votes-issue-once-and-audit-failure-rolls-back", func(t *testing.T) {
 		r, ctx := retainedFinanceRepository(t)
 		item, material, actor := manualAdmissionFixture(t, r, ctx)
