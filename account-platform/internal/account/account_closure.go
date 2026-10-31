@@ -321,6 +321,14 @@ func (r *PostgresRepository) SaveAccountClosureBlockers(ctx context.Context, ite
 	if _, err := tx.Exec(ctx, `INSERT INTO account_closure_audit(id,closure_request_id,event_type,from_stage,to_stage,redacted_details,occurred_at) VALUES($1,$2,'BLOCKERS_EVALUATED',$3,'FINANCIAL_CLEARANCE',jsonb_build_object('blocker_codes',(SELECT COALESCE(jsonb_agg(value->>'code'),'[]'::jsonb) FROM jsonb_array_elements($4::jsonb) value),'ready',$5::boolean),$6)`, uuid.Must(uuid.NewV7()), item.ID, item.Stage, encoded, len(blockers) == 0, now); err != nil {
 		return err
 	}
+	if status == "BLOCKED" && !item.SLAExpiresAt.IsZero() && now.After(item.SLAExpiresAt) {
+		digest := closureDigest(string(encoded))
+		if _, err := tx.Exec(ctx, `INSERT INTO account_closure_audit(id,closure_request_id,event_type,from_stage,to_stage,redacted_details,occurred_at)
+SELECT $1,$2,'BLOCKED_SLA_ALERT',$3,'FINANCIAL_CLEARANCE',jsonb_build_object('blocker_digest',$4,'alert_after',$5),$6
+WHERE NOT EXISTS (SELECT 1 FROM account_closure_audit WHERE closure_request_id=$2 AND event_type='BLOCKED_SLA_ALERT' AND redacted_details->>'blocker_digest'=$4)`, uuid.Must(uuid.NewV7()), item.ID, item.Stage, digest, item.SLAExpiresAt, now); err != nil {
+			return err
+		}
+	}
 	return tx.Commit(ctx)
 }
 
