@@ -22,7 +22,7 @@ function render(overrides = [], production = true) {
     // Config-only fixture member; production values require real deployed on-call users.
     ...(production ? ['--set-json', 'global.manualReviewOnCallUserIds=["00000000-0000-4000-8000-000000000707"]'] : []),
     ...[...newApi, ...overrides].flatMap(value =>
-      [/^(keycloak|sms)\.enabled=(true|false)$/.test(value) ? '--set' : '--set-string', value])];
+      [/^(keycloak|sms|ingress)\.enabled=(true|false)$/.test(value) ? '--set' : '--set-string', value])];
   return spawnSync(process.env.PINVOU_TEST_KMS_HELM_BINARY || 'helm', args,
     { encoding: 'utf8', timeout: 30000, maxBuffer: 4 * 1024 * 1024, env: publicEnvironment() });
 }
@@ -128,7 +128,8 @@ test('staging external Keycloak keeps SMS endpoint checks without requiring a CA
 }, async t => {
   const direct = ['global.environment=staging', 'sms.enabled=true', 'keycloak.enabled=false',
     'ingress.enabled=false', 'keycloak.adminApiUrl=http://keycloak-backchannel.example.invalid',
-    'keycloak.provisionerTokenUrl=http://keycloak-backchannel.example.invalid/realms/pinvou/protocol/openid-connect/token'];
+    'keycloak.provisionerTokenUrl=http://keycloak-backchannel.example.invalid/realms/pinvou/protocol/openid-connect/token',
+    'oidc.jwksUrl=https://issuer.example.invalid/certs', 'oidc.tokenUrl=https://issuer.example.invalid/token'];
   await t.test('same_origin_http_is_accepted', () => {
     const items = documents(render(direct, false));
     const env = environment(deployment(items, 'identity-service').spec.template.spec.containers[0]);
@@ -146,7 +147,8 @@ test('staging external Keycloak keeps SMS endpoint checks without requiring a CA
   });
   for (const changes of [
     [...direct, 'keycloak.provisionerTokenUrl=http://other-keycloak.example.invalid/realms/pinvou/protocol/openid-connect/token'],
-    [...direct, 'keycloak.adminApiUrl=http://accounts.staging.example.com', 'keycloak.provisionerTokenUrl=http://accounts.staging.example.com/realms/pinvou/protocol/openid-connect/token', 'ingress.enabled=true'],
+    [...direct, 'keycloak.adminApiUrl=http://accounts.staging.example.com', 'keycloak.provisionerTokenUrl=http://accounts.staging.example.com/realms/pinvou/protocol/openid-connect/token',
+      'ingress.enabled=true', 'ingress.keycloakHost=accounts.staging.example.com'],
   ]) await t.test('invalid_same_origin_or_public_proxy_is_rejected', () => {
     const result = render(changes, false);
     assert.equal(result.error, undefined);
