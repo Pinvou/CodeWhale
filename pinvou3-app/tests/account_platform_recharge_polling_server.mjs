@@ -110,13 +110,31 @@ try {
 
   await vite.listen();
 
-} catch (reason) { if (vite) await vite.close(); throw reason; }
-const cleanup = async () => { for (const r of [...held.keys(), ...heldLists.keys(), ...heldCreates.keys()]) r.destroy(); held.clear(); heldLists.clear(); heldCreates.clear(); await vite.close();
-  if (dirname(resolve(root)) !== resolve(tmpdir()) || !root.split(/[/\\]/).pop().startsWith('pinvou-public-tok03-app-')) throw new Error('FIXTURE_CACHE_TARGET_INVALID');
-  rmSync(root, { recursive: true, force: true }); };
-return { url: `http://127.0.0.1:${vite.httpServer.address().port}/tests/fixtures/account-platform-recharge-polling.html`, close: cleanup };
+} catch (reason) {
+  if (vite) await vite.close();
+  if (dirname(resolve(root)) === resolve(tmpdir()) && root.split(/[/\\]/).pop().startsWith('pinvou-public-tok03-app-')) rmSync(root, { recursive: true, force: true });
+  throw reason;
+}
+let cleanupPromise;
+const cleanup = () => {
+  if (cleanupPromise) return cleanupPromise;
+  cleanupPromise = (async () => {
+    for (const r of [...held.keys(), ...heldLists.keys(), ...heldCreates.keys()]) r.destroy();
+    held.clear(); heldLists.clear(); heldCreates.clear();
+    await vite.close();
+    if (dirname(resolve(root)) !== resolve(tmpdir()) || !root.split(/[/\\]/).pop().startsWith('pinvou-public-tok03-app-')) throw new Error('FIXTURE_CACHE_TARGET_INVALID');
+    rmSync(root, { recursive: true, force: true });
+  })();
+  return cleanupPromise;
+};
+return { url: `http://127.0.0.1:${vite.httpServer.address().port}/tests/fixtures/account-platform-recharge-polling.html`, rootPath: root, close: cleanup };
 }
 if (process.argv[1] && import.meta.url === pathToFileURL(resolve(process.argv[1])).href) {
   const fixture = await startRechargePollingFixture(); console.log(JSON.stringify({ url: fixture.url, scope: 'Actual React and BFF, loopback only' }));
-  for (const signal of ['SIGINT', 'SIGTERM']) process.on(signal, () => { void fixture.close().finally(() => process.exit(0)); });
+  // Vite may install its own signal handlers. Replace them so one awaited
+  // shutdown owns server sockets and the temporary source projection.
+  for (const signal of ['SIGINT', 'SIGTERM']) {
+    process.removeAllListeners(signal);
+    process.once(signal, () => { void fixture.close().then(() => process.exit(0), () => process.exit(1)); });
+  }
 }
