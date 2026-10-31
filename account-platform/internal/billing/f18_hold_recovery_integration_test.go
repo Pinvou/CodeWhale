@@ -6,7 +6,6 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
-	"strings"
 	"testing"
 	"time"
 
@@ -22,16 +21,17 @@ func TestF18HoldRecoveryUsesTrustedFence(t *testing.T) {
 	if raw == "" {
 		t.Skip("explicit owned PostgreSQL required")
 	}
+	config, expectedDirectory, expectedPort := f18OwnedConnectionConfig(t, raw)
 	ctx, cancel := context.WithTimeout(t.Context(), 150*time.Second)
 	defer cancel()
-	admin, e := pgx.Connect(ctx, raw)
+	admin, e := pgx.ConnectConfig(ctx, config)
 	if e != nil {
 		t.Fatal("owned coordinator unavailable")
 	}
 	var user, dir string
 	var port, actors, dbs, sessions int
-	e = admin.QueryRow(ctx, `SELECT session_user,current_setting('data_directory'),current_setting('port')::int,(SELECT count(*) FROM pg_roles WHERE rolname !~ '^pg_' AND rolname<>'pinvou_wave_test'),(SELECT count(*) FROM pg_database WHERE NOT datistemplate AND datname<>'postgres'),(SELECT count(*) FROM pg_stat_activity WHERE pid<>pg_backend_pid() AND backend_type='client backend')`).Scan(&user, &dir, &port, &actors, &dbs, &sessions)
-	if e != nil || user != "pinvou_wave_test" || port != 55504 || strings.ReplaceAll(dir, "\\", "/") != "D:/Projects/pinvou3-account-functional/.cache/parallel-runtimes/f04/data" || actors != 0 || dbs != 0 || sessions != 0 {
+	e = admin.QueryRow(ctx, `SELECT session_user,current_setting('data_directory'),current_setting('port')::int,(SELECT count(*) FROM pg_roles WHERE rolname !~ '^pg_' AND rolname<>$1),(SELECT count(*) FROM pg_database WHERE NOT datistemplate AND datname<>'postgres'),(SELECT count(*) FROM pg_stat_activity WHERE pid<>pg_backend_pid() AND backend_type='client backend')`, config.User).Scan(&user, &dir, &port, &actors, &dbs, &sessions)
+	if e != nil || user != config.User || port != expectedPort || !f18OwnedDirectoryMatches(dir, expectedDirectory) || actors != 0 || dbs != 0 || sessions != 0 {
 		admin.Close(ctx)
 		t.Fatal("owned identity/absence guard")
 	}
