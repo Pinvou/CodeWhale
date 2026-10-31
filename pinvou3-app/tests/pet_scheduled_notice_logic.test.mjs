@@ -20,6 +20,7 @@ copyFileSync(
 copyFileSync(path.join(here, '..', 'src', 'shared', 'i18n.js'), path.join(dir, 'shared', 'i18n.js'));
 copyFileSync(path.join(here, '..', 'src', 'shared', 'connector-i18n.js'), path.join(dir, 'shared', 'connector-i18n.js'));
 copyFileSync(path.join(here, '..', 'src', 'shared', 'account-platform-i18n.js'), path.join(dir, 'shared', 'account-platform-i18n.js')); copyFileSync(path.join(here, '..', 'src', 'shared', 'admin-platform-i18n.js'), path.join(dir, 'shared', 'admin-platform-i18n.js'));
+copyFileSync(path.join(here, '..', 'src', 'shared', 'product-admission-i18n.js'), path.join(dir, 'shared', 'product-admission-i18n.js'));
 copyFileSync(path.join(here, '..', 'src', 'shared', 'registration-bonus-i18n.js'), path.join(dir, 'shared', 'registration-bonus-i18n.js'));
 copyFileSync(path.join(here, '..', 'src', 'shared', 'account-closure-i18n.js'), path.join(dir, 'shared', 'account-closure-i18n.js'));
 copyFileSync(path.join(here, '..', 'src', 'shared', 'account-closed-grants-i18n.js'), path.join(dir, 'shared', 'account-closed-grants-i18n.js'));
