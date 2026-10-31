@@ -45,7 +45,7 @@ globalThis.fetch = async (input, options = {}) => {
   if (url.includes('/admin/v1/role-bindings') && method === 'GET') {
     if (c.roleReadFail && c.roleReceipts.size) return json({ code: 'UPSTREAM_UNAVAILABLE' }, 503);
     const target = new URL(url, location.origin).searchParams.get('user_id');
-    return json({ items: c.roleBindings.filter(binding => !target || binding.user_id === target).map(roleProjection) });
+    return json({ items: c.roleBindings.filter(binding => !target || binding.user_id === target).map(roleProjection), truncated: false });
   }
   if (url.endsWith('/admin/v1/role-bindings') && method === 'POST') {
     const body = JSON.parse(options.body);

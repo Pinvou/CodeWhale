@@ -76,7 +76,14 @@ export class OrganizationClient {
  async units(org, signal, rootUnitID = '') { const query = rootUnitID ? `?${new URLSearchParams({ root_unit_id: organizationID(rootUnitID) })}` : ''; const value = await this.request('account', `${orgPath(org)}/units${query}`, 'GET', undefined, '', [200], signal); organizationVersion(value.structure_version); collection(value, item => owned(item, org, 'unit_id')); return value; }
  async members(org, query = {}, signal) { return memberPage(await this.request('account', `${orgPath(org)}/members?${memberPageQuery(query)}`, 'GET', undefined, '', [200], signal), requireMembership, query.cursor); }
  async quotaMembers(org, query = {}, signal) { return memberPage(await this.request('account', `${orgPath(org)}/quota-members?${memberPageQuery(query)}`, 'GET', undefined, '', [200], signal), item => { organizationID(item.user_id); organizationVersion(item.version); return item; }, query.cursor); }
- async bindings(org, signal) { return collection(await this.request('account', `${orgPath(org)}/role-bindings`, 'GET', undefined, '', [200], signal), item => bindingAck(item, org)); }
+ async bindings(org, signal) {
+  const payload = await this.request('account', `${orgPath(org)}/role-bindings`, 'GET', undefined, '', [200], signal);
+  if (typeof payload?.truncated !== 'boolean') invalid();
+  const items = collection(payload, item => bindingAck(item, org));
+  if (items.length > 500 || payload.truncated !== (items.length === 500)) invalid();
+  Object.defineProperty(items, 'truncated', { value: payload.truncated, enumerable: false });
+  return items;
+ }
  async createUnit(org, body, key) { return unitAck(await this.request('account', `${orgPath(org)}/units`, 'POST', body, key, [200, 201]), org); }
  async moveUnit(org, unit, body, key) { return unitAck(await this.request('account', `${orgPath(org)}/units/${organizationID(unit)}/parent`, 'PATCH', body, key), org, unit); }
  async invite(org, body, key) {
