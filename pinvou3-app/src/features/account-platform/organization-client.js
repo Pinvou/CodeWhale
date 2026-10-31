@@ -80,7 +80,7 @@ export class OrganizationClient {
   const payload = await this.request('account', `${orgPath(org)}/role-bindings`, 'GET', undefined, '', [200], signal);
   if (typeof payload?.truncated !== 'boolean') invalid();
   const items = collection(payload, item => bindingAck(item, org));
-  if (items.length > 500 || payload.truncated !== (items.length === 500)) invalid();
+  if (items.length > 500 || payload.truncated && items.length !== 500) invalid();
   Object.defineProperty(items, 'truncated', { value: payload.truncated, enumerable: false });
   return items;
  }

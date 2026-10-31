@@ -44,8 +44,12 @@ test('scheduled role receipts retain strict owner and request identity checks', 
 });
 test('role binding collection requires and preserves the bounded truncation contract', async () => {
  const value={binding_id:grantID,organization_id:org,user_id:user,role_code:'AUDITOR',unit_id:null,status:'ACTIVE'};
+ const exact=await new OrganizationClient({request:async()=>({items:Array.from({ length: 500 }, () => value),truncated:false})}).bindings(org);
+ assert.equal(exact.length,500);
+ assert.equal(exact.truncated,false);
  const truncated=await new OrganizationClient({request:async()=>({items:Array.from({ length: 500 }, () => value),truncated:true})}).bindings(org);
  assert.equal(truncated.truncated,true);
+ await assert.rejects(new OrganizationClient({request:async()=>({items:Array.from({ length: 499 }, () => value),truncated:true})}).bindings(org),/INVALID_ORGANIZATION_ACK/);
  await assert.rejects(new OrganizationClient({request:async()=>({items:[value]})}).bindings(org),/INVALID_ORGANIZATION_ACK/);
 });
 test('actual Admin list DTO has no fictional version requirement; public collection checks each organization', async()=>{
