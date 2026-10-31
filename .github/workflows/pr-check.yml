@@ -3198,8 +3198,8 @@ jobs:
     # folded push-only legs are: full `cargo test --lib` (native arm64 —
     # supersedes mac-build's check+test core), the release-fast compile smoke,
     # the bundle_chain-gated universal bundle smoke, and the mac verify
-    # script. PR legs are unchanged (check + computer_use only), so PR wall
-    # time does not regress. 2026-10-15: the release-fast smoke and the
+    # script. PR legs run check, computer_use, and the targeted scheduled
+    # spool filename regression. 2026-10-15: the release-fast smoke and the
     # release-profile artifacts were re-scoped (the smoke runs only on
     # bundle_chain/rust_full/cli_rust/knowledge_rust pushes; the release
     # target dirs are pruned from the cache save) after this job's push legs became the
@@ -3489,6 +3489,25 @@ jobs:
           cargo test --lib --features benchmark-hooks --locked computer_use -- --test-threads=1 2>&1 | tee /tmp/macos_computer_use.log
           grep -qE 'running [1-9][0-9]* tests?' /tmp/macos_computer_use.log || {
             echo "FAIL: the computer_use filter matched 0 tests (silent no-op guard)" >&2
+            exit 1
+          }
+
+      # #2166: the affected scheduled-creation regression previously ran only
+      # after merge. Exercise the exact case on PR macOS before main can inherit
+      # a filesystem-specific failure; a zero-match filter is a hard failure.
+      - name: macOS scheduled spool filename regression
+        if: ${{ github.event_name == 'pull_request' }}
+        env:
+          CARGO_PROFILE_DEV_LTO: "thin"
+          RUSTFLAGS: ${{ steps.mac_lld_probe.outputs.flags }}
+        run: |
+          set -euo pipefail
+          cd pinvou3-app/src-tauri
+          cargo test --lib --features benchmark-hooks --locked \
+            features::scheduled::tasks::creation_requests::tests::non_utf8_squatters_do_not_starve_legitimate_records \
+            -- --exact --test-threads=1 2>&1 | tee /tmp/macos_scheduled_spool.log
+          grep -qF 'test result: ok. 1 passed; 0 failed;' /tmp/macos_scheduled_spool.log || {
+            echo "FAIL: the scheduled spool regression did not run exactly once" >&2
             exit 1
           }
 
