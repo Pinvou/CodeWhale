@@ -591,6 +591,96 @@ test('custom-property value contexts never fire and real layers around them stil
   }
 });
 
+test('a pseudo-class sibling rule does not mask the real layer after it', () => {
+  // In a rule-list frame the `:` of `.x:hover` used to record a pending
+  // declaration on the parent frame, and the nested rule's close left that
+  // stale state behind — the previous scanner returned 0 violations for the
+  // media fixture below (and 1 without `:hover`), hiding a real survivor.
+  // Opening a rule body must clear the parent's pending declaration: that
+  // colon was selector syntax, not a declaration opener. The media fixture
+  // is the real minified safari14 output — lightningcss keeps both the
+  // pseudo-class rule and the layer verbatim, so the miss was reachable in
+  // dist.
+  const distDir = fs.mkdtempSync(path.join(os.tmpdir(), 'compat-audit-pseudo-'));
+  try {
+    fs.mkdirSync(path.join(distDir, 'assets'), { recursive: true });
+    const minify = (css) => transformCss({
+      filename: 'main.css',
+      code: Buffer.from(css),
+      targets: browserslistToTargets(['safari 14']),
+      minify: true,
+    }).code.toString();
+    const mediaHover = minify('@media screen{.x:hover{color:red}@layer real{b{color:red}}}');
+    assert.match(mediaHover, /\.x:hover\{color:red\}/, 'minifier fixture must keep the pseudo-class rule');
+    assert.match(mediaHover, /@layer real\{b\{color:red\}\}/, 'minifier fixture must keep the real layer');
+    fs.writeFileSync(path.join(distDir, 'assets', 'media-hover.css'), mediaHover);
+    fs.writeFileSync(path.join(distDir, 'assets', 'raw-hover.css'), '@media screen{.x:hover{color:red}@layer real{b{color:red}}}');
+    // Raw nesting is lowered by the safari14 minifier (the nested layer
+    // becomes a top-level one), so the `&:hover` pin uses the hand-written
+    // form: the scanner must not lose the layer behind the pseudo-class in
+    // unminified input either.
+    fs.writeFileSync(path.join(distDir, 'assets', 'amp-nesting.css'), '.card{ &:hover{color:red} @layer real{b{color:red}} }');
+    fs.writeFileSync(path.join(distDir, 'assets', 'no-layer.css'), '@media screen{.x:hover{color:red}}');
+    const violations = hermeticAudit({ distDir });
+    assert.deepEqual(
+      violations.map((violation) => violation.slice('dist:'.length).replace(/:.*/, '')).sort((a, b) => a.localeCompare(b)),
+      ['amp-nesting.css', 'media-hover.css', 'raw-hover.css'],
+      `exactly the real layers after pseudo-class siblings must be reported; got: ${JSON.stringify(violations)}`,
+    );
+    for (const file of ['amp-nesting.css', 'media-hover.css', 'raw-hover.css']) {
+      assert.match(violations.find((violation) => violation.includes(file)), / @layer survives the build/);
+    }
+  } finally {
+    fs.rmSync(distDir, { recursive: true, force: true });
+  }
+});
+
+test('an @import token outside a rule position is not a layered import', () => {
+  // The import scan shares the at-rule context walk with the @layer scan:
+  // a custom-property value is token content, not a rule list, so the
+  // `@import`/`LAYER(…)` tokens inside it never start a prelude. The
+  // previous scanner failed the audit on the uppercase value (custom
+  // properties keep their tokens verbatim through the real Vite +
+  // lightningcss build), and on a `layer(` token inside a value block.
+  // Real layered imports keep firing — with optional whitespace before the
+  // URL token (`@importurl(a.css)layer(b);` is valid CSS) and beside a
+  // pseudo-class sibling rule.
+  const distDir = fs.mkdtempSync(path.join(os.tmpdir(), 'compat-audit-import-ctx-'));
+  try {
+    fs.mkdirSync(path.join(distDir, 'assets'), { recursive: true });
+    const upperCustom = transformCss({
+      filename: 'main.css',
+      code: Buffer.from('a{--tokens:@IMPORT "x.css" LAYER(fake)}'),
+      targets: browserslistToTargets(['safari 14']),
+      minify: true,
+    }).code.toString();
+    assert.match(upperCustom, /--tokens:@IMPORT "x\.css" LAYER\(fake\)/, 'minifier fixture must keep the uppercase custom-property value');
+    fs.writeFileSync(path.join(distDir, 'assets', 'main.css'), [
+      upperCustom,
+      'a{--tokens:@import "x.css" layer(fake)}',
+      'a{--t:{@import "./a.css" layer(fake);};}',
+    ].join('\n'));
+    assert.deepEqual(
+      hermeticAudit({ distDir }),
+      [],
+      'import tokens inside declaration values must not fire',
+    );
+
+    fs.writeFileSync(path.join(distDir, 'assets', 'main.css'), [
+      '@IMPORT "a.css" LAYER(named);',
+      '@importurl(a.css)layer(b);',
+      '@import url("./c.css") layer(d);@media screen{.x:hover{color:red}}',
+    ].join('\n'));
+    const violations = hermeticAudit({ distDir });
+    assert.equal(violations.length, 3, `exactly the three real layered imports must be reported; got: ${JSON.stringify(violations)}`);
+    for (const violation of violations) {
+      assert.match(violation, / @import layer survives the build/);
+    }
+  } finally {
+    fs.rmSync(distDir, { recursive: true, force: true });
+  }
+});
+
 test('a layer() token inside import supports() conditions is not a layer clause', () => {
   // `supports(display: layer(x))` carries the `layer(` token as a feature
   // argument, not as the import's layer clause — the import stays

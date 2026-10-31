@@ -386,32 +386,50 @@ function isAtRulePosition(scan, index) {
 }
 
 // One linear pass over the stripped copy reporting every offset where the
-// `@layer` at-keyword starts a cascade layer at-rule. A rule-start byte
-// alone is not enough: minified dist keeps custom-property values verbatim
-// (lightningcss does not touch their tokens at cssTarget safari14), and
-// CSS Variables §2.1 lets such values carry balanced `(`/`[`/`{` component
-// blocks and escaped characters — `a{--token:{@layer demo{b{color:red}}}}`,
-// `a{--x:red\;@layer demo{…}}`, and `a{--x:f(;@layer demo{…})}` are all
-// legal non-layer CSS whose `@layer` substrings sit right after a `{`/`;`
-// byte. The walk therefore tracks context:
+// `@layer`/`@import` at-keyword starts an at-rule (complete keyword,
+// case-insensitive). A rule-start byte alone is not enough: minified dist
+// keeps custom-property values verbatim (lightningcss does not touch their
+// tokens at cssTarget safari14), and CSS Variables §2.1 lets such values
+// carry balanced `(`/`[`/`{` component blocks and escaped characters —
+// `a{--token:{@layer demo{b{color:red}}}}`, `a{--x:red\;@layer demo{…}}`,
+// and `a{--x:f(;@layer demo{…})}` are all legal non-layer CSS whose
+// `@layer` substrings sit right after a `{`/`;` byte. The walk therefore
+// tracks context:
 //   - `(`/`[` always open component context — no at-rule starts inside;
 //   - a `{` opens a rule body at the stylesheet top level, inside a rule
 //     body with no declaration open, or after a non-custom `ident:` (CSS
 //     nesting re-opens a rule there, so nested real layers stay detected);
 //     inside a `--*` declaration it is a value block — `@layer` inside any
-//     non-rule frame or open declaration is value content;
+//     non-rule frame or open declaration is value content. Opening a rule
+//     body also closes the parent frame's pending "declaration": in a
+//     rule-list frame a preceding `:` belonged to selector syntax
+//     (`.x:hover`), not a declaration opener, so the stale state must not
+//     suppress a sibling at-rule after that nested rule closes;
 //   - a declaration opens when an ident is followed by `:` in a rule body
 //     and closes at `;` — an escaped `\;` is ident content, not a
 //     terminator (consumed like the stripper does), and the declaration
 //     ends with its frame.
 // Escapes are consumed as `\` + next character; hex escapes keep their
 // remaining digits as ordinary ident characters, which cannot produce a
-// structural byte at that position. Residual divergence: a selector
-// compound ending in a `--`-ident (`.--x:hover`) classifies the following
-// `{` as a value block — real dist has no nested rules at the safari14
-// target (lightningcss lowers nesting), so only hand-written input can
-// land there and the miss stays bounded to that prefix.
-function findLayerAtRulePositions(scan) {
+// structural byte at that position. `@import` is followed by its URL
+// token, and whitespace before it is optional (`@import"a.css"` is valid
+// CSS), so whitespace, a quote, or a `url(` token completes the keyword —
+// `@imports`-style longer at-keywords and a bare `@import` at EOF do not
+// count. Residual divergence: a selector compound ending in a `--`-ident
+// (`.--x:hover`) classifies the following `{` as a value block — real dist
+// has no nested rules at the safari14 target (lightningcss lowers
+// nesting), so only hand-written input can land there and the miss stays
+// bounded to that prefix.
+function findAtRulePositions(scan, keyword) {
+  const at = keyword === 'layer' ? '@layer' : '@import';
+  const isCompleteAt = (i) => {
+    if (scan.slice(i, i + at.length).toLowerCase() !== at) return false;
+    const next = scan[i + at.length] ?? '';
+    if (keyword === 'layer') return /[\s{]/.test(next);
+    if (/[\s"']/.test(next)) return true;
+    return (next === 'u' || next === 'U')
+      && scan.slice(i + at.length, i + at.length + 4).toLowerCase() === 'url(';
+  };
   const hits = [];
   const stack = [];
   let identLen = 0;
@@ -431,8 +449,7 @@ function findLayerAtRulePositions(scan) {
     if (ch === '@') {
       const top = stack[stack.length - 1];
       if (
-        scan.slice(i, i + 6).toLowerCase() === '@layer'
-        && /[\s{]/.test(scan[i + 6] ?? '')
+        isCompleteAt(i)
         && isAtRulePosition(scan, i)
         && (!top || (top.rule && top.decl === null))
       ) {
@@ -457,7 +474,9 @@ function findLayerAtRulePositions(scan) {
     }
     if (ch === '{') {
       const top = stack[stack.length - 1];
-      stack.push({ rule: !top || (top.rule && top.decl !== 'custom'), decl: null });
+      const rule = !top || (top.rule && top.decl !== 'custom');
+      if (rule && top && top.rule) top.decl = null;
+      stack.push({ rule, decl: null });
       resetIdent();
       continue;
     }
@@ -540,7 +559,7 @@ export function auditDistCss(assetsDir) {
     // verbatim and `content` strings can quote at-rule syntax, so both scans
     // run over the stripped copy. The replacement is space-padded, preserving
     // offsets for the excerpt/line attribution. A survivor must be the
-    // complete at-keyword at a real rule position — findLayerAtRulePositions
+    // complete at-keyword at a real rule position — findAtRulePositions
     // combines the rule-start byte check (escaped selector characters
     // (`.\@layer`) and declaration values (`a{--token:@layer}`) do not fire;
     // `@layered` is an ident) with block/declaration-context tracking, so
@@ -558,7 +577,7 @@ export function auditDistCss(assetsDir) {
     // the clause is caught in any position (after supports(), before/after
     // the media query, bare or named).
     const scan = stripCssCommentsAndStrings(code);
-    for (const at of findLayerAtRulePositions(scan)) {
+    for (const at of findAtRulePositions(scan, 'layer')) {
       const excerpt = code.slice(Math.max(0, at - 30), at + 50).replaceAll(/\s+/g, ' ');
       violations.push(
         `dist:${name}:${lineOfOffset(code, at).line}: @layer survives the build — cascade layers need Safari 15.4, below the Safari 14.0 floor; context: …${excerpt}…`,
@@ -567,15 +586,18 @@ export function auditDistCss(assetsDir) {
     // The prelude is read with the same single-pass shape as the stripper,
     // not a repetition regex: alternation arms that can both consume a
     // `url(…)` token backtrack exponentially on an unterminated prelude.
-    // Each prelude consumes through its `;` exactly once and the match
-    // cursor jumps past it, so the scan stays linear by construction.
-    const importPattern = /@import/gi;
-    let importMatch;
-    while ((importMatch = importPattern.exec(scan)) !== null) {
-      const preludeStart = importMatch.index + importMatch[0].length;
+    // Each prelude consumes through its `;` exactly once and the scan stays
+    // linear by construction. The candidate positions come from the same
+    // context walk as the @layer scan, so an `@import` token that is not an
+    // at-rule never starts a prelude: a custom-property value is token
+    // content, not a rule list — `a{--tokens:@IMPORT "x.css" LAYER(fake)}`
+    // (uppercase custom-property values survive the real build verbatim)
+    // must not fail the audit, while `@import` preludes after a sibling
+    // rule keep firing.
+    for (const at of findAtRulePositions(scan, 'import')) {
+      const preludeStart = at + 7;
       const preludeEnd = scan.indexOf(';', preludeStart);
       const stop = preludeEnd === -1 ? scan.length : preludeEnd;
-      importPattern.lastIndex = stop;
       // @import grammar: [ <url> | <string> ] first, then the optional
       // layer clause and import conditions — only a clause after the URL
       // token creates a cascade layer. Bodies of strings and unquoted url()
@@ -588,9 +610,9 @@ export function auditDistCss(assetsDir) {
       }
       rest = stripSupportsConditions(rest);
       if (!/(?:^|\s)layer(?:\s*\(|(?=\s|$))/i.test(rest)) continue;
-      const excerpt = code.slice(Math.max(0, importMatch.index - 30), importMatch.index + 50).replaceAll(/\s+/g, ' ');
+      const excerpt = code.slice(Math.max(0, at - 30), at + 50).replaceAll(/\s+/g, ' ');
       violations.push(
-        `dist:${name}:${lineOfOffset(code, importMatch.index).line}: @import layer survives the build — cascade layers need Safari 15.4, below the Safari 14.0 floor; context: …${excerpt}…`,
+        `dist:${name}:${lineOfOffset(code, at).line}: @import layer survives the build — cascade layers need Safari 15.4, below the Safari 14.0 floor; context: …${excerpt}…`,
       );
     }
   }
