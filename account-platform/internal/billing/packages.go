@@ -2,6 +2,7 @@ package billing
 
 import (
 	"context"
+	"log/slog"
 	"encoding/json"
 	"errors"
 	"time"
@@ -293,7 +294,9 @@ func NewPackageExpiryWorker(repository *PostgresRepository, interval time.Durati
 }
 
 func (w *PackageExpiryWorker) Run(ctx context.Context) {
-	_, _ = w.repository.ExpirePackages(ctx, 100)
+	if _, err := w.repository.ExpirePackages(ctx, 100); err != nil {
+		slog.ErrorContext(ctx, "package expiry scan failed", "component", "package-expiry", "error_code", "PACKAGE_EXPIRY_SCAN_FAILED", "phase", "startup")
+	}
 	ticker := time.NewTicker(w.interval)
 	defer ticker.Stop()
 	for {
@@ -301,7 +304,9 @@ func (w *PackageExpiryWorker) Run(ctx context.Context) {
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			_, _ = w.repository.ExpirePackages(ctx, 100)
+			if _, err := w.repository.ExpirePackages(ctx, 100); err != nil {
+				slog.ErrorContext(ctx, "package expiry scan failed", "component", "package-expiry", "error_code", "PACKAGE_EXPIRY_SCAN_FAILED", "phase", "periodic")
+			}
 		}
 	}
 }
