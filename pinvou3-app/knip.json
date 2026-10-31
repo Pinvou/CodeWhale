@@ -15,6 +15,7 @@
     "tests/account_platform_organization_boundaries_ui_smoke.mjs",
     "tests/account_platform_installed_hosts_ui_smoke.mjs",
     "tests/account_platform_ledger_repair_ui_smoke.mjs",
+    "tests/account_platform_product_admission_ui_smoke.mjs",
     "tests/account_platform_desktop_reauthentication_ui_smoke.mjs",
     "tests/*.js",
     "tests/remote_archive_smoke.mjs",
