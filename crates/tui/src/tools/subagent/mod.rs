@@ -14879,10 +14879,16 @@ impl SubAgentToolRegistry {
                     ChildGateVerdict::Deny(reason)
                 }
                 // Full Access has no prompt to force; the plan decision
-                // already turned every safety-floor hold into a block. An
-                // armed host is the one exception: it has guaranteed a person
-                // can answer, so the hold routes to the parent's approval
-                // surface (which fails closed again for non-prompting hosts).
+                // already turned every safety-floor hold into a block
+                // (`auto_review_plan_decision_for_context` collapses
+                // built-in-gate holds to `Block` under Bypass and ordinary
+                // asks to `NoChange`), so this armed arm is fail-safe
+                // future-proofing, not a live face — today's live armed child
+                // behavior is the delegated typed-ask refusal below. If a
+                // `ForcePrompt` ever reaches this arm, an armed host has
+                // guaranteed a person can answer, so the hold routes to the
+                // parent's approval surface (which fails closed again for
+                // non-prompting hosts).
                 AutoReviewPlanDecision::ForcePrompt(reason) => {
                     if self.ask_on_guardrail {
                         self.prompt_parent_for_child_call(agent_id, name, input, &reason, true)

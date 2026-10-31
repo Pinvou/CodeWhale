@@ -31018,6 +31018,24 @@ fn forkguard_armed_deny_face_becomes_guardrail_prompt_unarmed_stays_block() {
         matches!(never_armed, Some(ToolAskRuleDecision::Block(_))),
         "Never posture keeps the deny face even when armed, got {never_armed:?}"
     );
+
+    // Auto-Review keeps it too: the resolver denies unconditionally there,
+    // so the armed conversion must not even reword the deny face.
+    let auto_armed = super::tool_ask_rule_decision_for_context(
+        &engine,
+        "exec_shell",
+        command,
+        None,
+        workspace,
+        workspace,
+        &[],
+        crate::tui::approval::ApprovalMode::Auto,
+        true,
+    );
+    assert!(
+        matches!(auto_armed, Some(ToolAskRuleDecision::Block(_))),
+        "Auto-Review posture keeps the deny face even when armed, got {auto_armed:?}"
+    );
 }
 
 #[test]
@@ -31440,10 +31458,12 @@ async fn forkguard_apply_change_mode_status_suffixes_report_the_arming_change() 
     async fn status_message(handle: &EngineHandle) -> String {
         let mut rx = handle.rx_event.write().await;
         loop {
-            match rx.recv().await {
-                Some(Event::Status { message }) => return message,
-                Some(_) => continue,
-                None => panic!("event stream closed before the status message"),
+            let event = tokio::time::timeout(model_turn_event_timeout(), rx.recv())
+                .await
+                .expect("timed out waiting for the status message")
+                .expect("event stream closed before the status message");
+            if let Event::Status { message } = event {
+                return message;
             }
         }
     }
@@ -31517,6 +31537,168 @@ async fn forkguard_apply_change_mode_status_suffixes_report_the_arming_change() 
     assert!(
         !mode_status.contains("(guardrail prompts"),
         "a change without the ask carrier must not claim an arming flip: {mode_status}"
+    );
+}
+
+#[tokio::test]
+#[allow(clippy::await_holding_lock)]
+async fn forkguard_turn_start_detector_records_the_posture_and_renders_the_transition_once() {
+    // Pins the production detector end to end (compare → record → render →
+    // consume): the turn that sees a host flip renders the line on its own
+    // block, records the posture it reported, and consumes the pending
+    // change; the next turn under the same posture stays byte-stable.
+    // Deleting the recorder update turns the second request red (the stale
+    // posture re-renders); deleting the consumption reset leaves the pending
+    // transition dangling for mid-turn blocks.
+    use crate::core::authority::TurnMetaPosture;
+    use wiremock::matchers::{method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    let _lock = lock_test_env();
+    let workspace = tempdir().expect("tempdir");
+    let server = MockServer::start().await;
+    let plain_sse = concat!(
+        "data: {\"id\":\"chatcmpl-detector\",\"choices\":[{\"index\":0,",
+        "\"delta\":{\"content\":\"ok\"},\"finish_reason\":null}]}\n\n",
+        "data: {\"id\":\"chatcmpl-detector\",\"choices\":[{\"index\":0,",
+        "\"delta\":{},\"finish_reason\":\"stop\"}]}\n\n",
+        "data: [DONE]\n\n",
+    );
+    Mock::given(method("POST"))
+        .and(path("/v1/chat/completions"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .insert_header("content-type", "text/event-stream")
+                .set_body_string(plain_sse),
+        )
+        .expect(2)
+        .mount(&server)
+        .await;
+
+    let api_config = Config {
+        api_key: Some("test-key".to_string()),
+        base_url: Some(server.uri()),
+        ..Config::default()
+    };
+    let engine_config = EngineConfig {
+        model: crate::config::DEFAULT_TEXT_MODEL.to_string(),
+        workspace: workspace.path().to_path_buf(),
+        mcp_config_path: workspace.path().join("mcp.json"),
+        snapshots_enabled: false,
+        subagents_enabled: false,
+        ..EngineConfig::default()
+    };
+    let (mut engine, _handle) = Engine::new(engine_config, &api_config);
+
+    // The previous block reported Full Access disarmed; this turn runs Full
+    // Access armed, so the arming flip alone must produce the line.
+    engine.last_turn_meta_authority = Some(TurnMetaPosture {
+        mode: AppMode::Agent,
+        approval: crate::tui::approval::ApprovalMode::Bypass,
+        ask_on_guardrail: false,
+    });
+    engine.session.ask_on_guardrail = true;
+
+    async fn send_turn(
+        engine: &mut Engine,
+        api_config: &Config,
+        prompt: &str,
+    ) -> SendMessageOutcome {
+        engine
+            .handle_send_message(
+                prompt.to_string(),
+                AppMode::Agent,
+                *resolved_route_for_test(api_config, crate::config::DEFAULT_TEXT_MODEL),
+                CompactionConfig::default(),
+                None,
+                None,
+                crate::tools::goal::GoalStatus::Active,
+                None,
+                false,
+                false,
+                true,
+                true,
+                true,
+                crate::tui::approval::ApprovalMode::Bypass,
+                false,
+                None,
+                Vec::new(),
+                None,
+                None,
+                UserInputProvenance::ExternalUser,
+                None,
+            )
+            .await
+    }
+
+    let outcome = send_turn(&mut engine, &api_config, "turn one").await;
+    assert!(
+        matches!(
+            outcome,
+            SendMessageOutcome::Finished {
+                status: TurnOutcomeStatus::Completed,
+                ..
+            }
+        ),
+        "turn one must complete without starting"
+    );
+    assert!(
+        engine.pending_authority_transition.is_none(),
+        "the turn's block must consume the transition so steers and runtime notices cannot re-render it"
+    );
+    assert_eq!(
+        engine.last_turn_meta_authority,
+        Some(TurnMetaPosture {
+            mode: AppMode::Agent,
+            approval: crate::tui::approval::ApprovalMode::Bypass,
+            ask_on_guardrail: true,
+        }),
+        "the detector must record the posture the block reported"
+    );
+
+    let outcome = send_turn(&mut engine, &api_config, "turn two").await;
+    assert!(
+        matches!(
+            outcome,
+            SendMessageOutcome::Finished {
+                status: TurnOutcomeStatus::Completed,
+                ..
+            }
+        ),
+        "turn two must complete without starting"
+    );
+
+    let requests = server
+        .received_requests()
+        .await
+        .expect("wire mock records requests");
+    assert_eq!(requests.len(), 2, "each turn makes exactly one provider call");
+    let first = String::from_utf8_lossy(&requests[0].body);
+    assert!(
+        first.contains(
+            "Authority transition (host): agent (Full Access, guardrail prompts disarmed) -> agent (Full Access, guardrail prompts armed); reason: host_authority_change",
+        ),
+        "the changed turn's wire body must carry the exact transition line"
+    );
+    let second = String::from_utf8_lossy(&requests[1].body);
+    assert_eq!(
+        second.matches("Authority transition (host)").count(),
+        1,
+        "turn one's rendered line persists in history exactly once"
+    );
+    let wire_body: serde_json::Value =
+        serde_json::from_slice(&requests[1].body).expect("second request body is JSON");
+    let last_user_message = wire_body["messages"]
+        .as_array()
+        .expect("messages array")
+        .iter()
+        .rev()
+        .find(|message| message["role"] == "user")
+        .expect("a user message exists");
+    let last_user_content = last_user_message["content"].as_str().expect("string content");
+    assert!(
+        !last_user_content.contains("Authority transition"),
+        "an unchanged posture must keep the next turn's own block byte-stable: {last_user_content}"
     );
 }
 

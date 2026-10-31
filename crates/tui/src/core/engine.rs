@@ -1273,10 +1273,11 @@ pub struct Engine {
     /// The posture the last `<turn_meta>` block reported (Pinvou tri-mode
     /// safety). Comparison unit for [`Self::pending_authority_transition`].
     last_turn_meta_authority: Option<crate::core::authority::TurnMetaPosture>,
-    /// Host-driven authority change computed at turn start against the
-    /// posture the previous block reported. Consumed by the turn metadata
-    /// builder; reset every turn start, so a turn whose posture did not
-    /// change emits nothing and ordinary blocks stay byte-stable.
+    /// Host-driven authority change computed when the turn's metadata block
+    /// is built, against the posture the previous block reported. Consumed
+    /// by that block only and cleared immediately, so a turn whose posture
+    /// did not change emits nothing, ordinary blocks stay byte-stable, and
+    /// steers or mid-turn runtime notices never re-render the same line.
     pending_authority_transition: Option<crate::core::authority::AuthorityTransition>,
     /// The git snapshot line last emitted in a `<turn_meta>` block this
     /// session (#5187, k3-gap F3). The snapshot re-collects branch/dirty
@@ -1316,6 +1317,13 @@ struct LiveRuntimeAuthority {
 }
 
 impl LiveRuntimeAuthority {
+    /// Store the op's fields as given. Unlike [`Self::from_turn_authority`]
+    /// this does not renormalize `approval_mode` through
+    /// `approval_mode_for_session`: every producer (`Op::ChangeMode`, the
+    /// UI sync, runtime threads) already sends the canonical shape, and a
+    /// non-canonical publish self-heals at the next
+    /// [`Self::record_applied_runtime_authority`], which re-records from
+    /// the session's normalized state.
     fn from_fields(
         mode: AppMode,
         allow_shell: bool,
@@ -5759,24 +5767,6 @@ impl Engine {
         // after the UI changed modes (#3568).
         self.apply_runtime_mode_policy(&input_policy);
 
-        // Pinvou tri-mode safety: a host-driven authority change between
-        // turns is never silent. Compare the installed posture against the
-        // posture the previous block reported; any number of mid-turn
-        // `ChangeMode` flips collapses into the one transition the next
-        // block reports. The `None` arm keeps the first turn (and restored
-        // sessions) transition-free, so this only ever adds a line when a
-        // change actually happened.
-        let current_posture = crate::core::authority::TurnMetaPosture {
-            mode: input_policy.mode,
-            approval: self.session.approval_mode,
-            ask_on_guardrail: self.session.ask_on_guardrail,
-        };
-        self.pending_authority_transition = crate::core::authority::authority_transition_between(
-            self.last_turn_meta_authority,
-            current_posture,
-        );
-        self.last_turn_meta_authority = Some(current_posture);
-
         // Publish the destination before TurnStarted so hosts can reserve a
         // steer against this exact turn generation.
         let steer_target = self.begin_steer_turn();
@@ -6044,6 +6034,28 @@ impl Engine {
         // Add the user message through the same explicit snapshot constructor
         // preview uses. Route limits and mode in resource metadata therefore
         // belong to this turn even when the previous route was different.
+
+        // Pinvou tri-mode safety: a host-driven authority change between
+        // turns is never silent. Compare the installed posture against the
+        // posture the previous block reported; any number of mid-turn
+        // `ChangeMode` flips collapses into the one transition the next
+        // block reports. The `None` arm keeps the first turn (and restored
+        // sessions) transition-free, so this only ever adds a line when a
+        // change actually happened. Computed here — at the point the block
+        // that reports it is built — so a `NotStarted` failure above can
+        // never record a posture the model never saw; and consumed below,
+        // so steers and mid-turn runtime notices cannot re-render the same
+        // line.
+        let current_posture = crate::core::authority::TurnMetaPosture {
+            mode: input_policy.mode,
+            approval: self.session.approval_mode,
+            ask_on_guardrail: self.session.ask_on_guardrail,
+        };
+        self.pending_authority_transition = crate::core::authority::authority_transition_between(
+            self.last_turn_meta_authority,
+            current_posture,
+        );
+        self.last_turn_meta_authority = Some(current_posture);
         let user_msg = self.user_text_message_from_snapshot(
             content,
             &model,
@@ -6061,6 +6073,8 @@ impl Engine {
             },
         );
         self.session.add_message(user_msg);
+        // The transition is reported by this block and only this block.
+        self.pending_authority_transition = None;
 
         self.emit_session_updated().await;
 
@@ -8661,8 +8675,15 @@ fn tool_ask_rule_decision_for_context(
         // denied-prefix / typed-deny face becomes an approval request with
         // the full matching evidence instead of a hard block. Unarmed (the
         // default) keeps the deny face byte-identical to the pre-flag
-        // doctrine; `Never` posture still denies below regardless.
-        if ask_on_guardrail && approval_mode != crate::tui::approval::ApprovalMode::Never {
+        // doctrine; Auto-Review and Never postures keep it in every case —
+        // their denials stay unconditional because nobody can answer the
+        // card there even when armed.
+        if ask_on_guardrail
+            && !matches!(
+                approval_mode,
+                crate::tui::approval::ApprovalMode::Auto | crate::tui::approval::ApprovalMode::Never
+            )
+        {
             Some(ToolAskRuleDecision::Prompt(format!(
                 "Guardrail approval requested (ask-on-guardrail is armed): {}",
                 decision.reason()

@@ -751,6 +751,12 @@ pub(crate) async fn run_exec_agent(
                 emit_exec_stream_event(&ExecStreamEvent::WorkflowEvent { run_id, event })?;
             }
             Event::ApprovalRequired { id, .. } => {
+                // Pinvou tri-mode safety tripwire: this auto-approve currently
+                // cannot see an armed forced hold because headless runs have
+                // no arming surface — every `ask_on_guardrail` producer sends
+                // `None`/`false`. If arming ever reaches headless runs, this
+                // arm must refuse `approval_force_prompt` events instead of
+                // approving them silently.
                 if auto_approve {
                     let _ = engine_handle.approve_tool_call(id).await;
                 } else {

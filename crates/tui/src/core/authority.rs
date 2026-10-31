@@ -149,11 +149,12 @@ pub(crate) struct TurnMetaPosture {
 /// the model only through the next turn's standing posture lines — the model
 /// could observe the new state but never the change itself, so a behavior
 /// shift (suddenly running commands without approval, or being asked to
-/// approve what previously ran) read as unexplained. The engine records the
-/// transition at turn start against the posture the previous block reported
-/// and renders one model-visible line; a turn whose posture did not change
-/// emits nothing, keeping ordinary blocks byte-stable.
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// approve what previously ran) read as unexplained. The engine computes the
+/// transition when the turn's metadata block is built, against the posture
+/// the previous block reported, and renders one model-visible line there and
+/// only there; a turn whose posture did not change emits nothing, keeping
+/// ordinary blocks byte-stable.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct AuthorityTransition {
     from_mode: &'static str,
     from_approval: ApprovalMode,

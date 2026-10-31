@@ -1299,8 +1299,9 @@ async fn forkguard_preview_manifest_hashes_the_same_authority_transition_line_th
 
     let prompt = "inspect the armed-to-ask handoff";
 
-    // With a transition pending, the previewed body carries the transition.
-    engine.pending_authority_transition = Some(transition.clone());
+    // With the previous block having reported the armed posture, the preview
+    // recomputes the same transition the live turn will render.
+    engine.last_turn_meta_authority = Some(previous);
     let planned = plan(&config, &identity, false, prompt).await;
     let manifest = engine
         .build_request_manifest(inputs(false, Some(planned), prompt))
@@ -1312,10 +1313,10 @@ async fn forkguard_preview_manifest_hashes_the_same_authority_transition_line_th
         .body_sha256
         .clone();
 
-    // Without a pending change the preview output is byte-stable: two
-    // consecutive builds hash identically, and neither carries the
-    // transition.
-    engine.pending_authority_transition = None;
+    // Without a recorded posture (first turn / restored session) the preview
+    // output is byte-stable: two consecutive builds hash identically, and
+    // neither carries the transition.
+    engine.last_turn_meta_authority = None;
     let planned = plan(&config, &identity, false, prompt).await;
     let plain_first = engine
         .build_request_manifest(inputs(false, Some(planned), prompt))
