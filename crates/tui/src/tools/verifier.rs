@@ -568,7 +568,7 @@ fn start_background_gates(
                 .shell_manager
                 .lock()
                 .map_err(|_| ToolError::execution_failed("shell manager lock poisoned"))?;
-            manager.execute_with_options_env_for_session(
+            let spawned = manager.execute_with_options_env_for_session(
                 &command,
                 Some(&cwd),
                 BACKGROUND_GATE_TIMEOUT_MS,
@@ -578,7 +578,20 @@ fn start_background_gates(
                 context.elevated_sandbox_policy.clone(),
                 env,
                 &context.state_namespace,
-            )
+            );
+            // A gate job is machine-launched with nobody to feed its stdin,
+            // so hand the child end-of-file at once: a gate that reads stdin
+            // then exits instead of idling on an open pipe until the
+            // background timeout kills it. Idempotent-safe if the job already
+            // finished.
+            if let Some(task_id) = spawned
+                .as_ref()
+                .ok()
+                .and_then(|result| result.task_id.as_deref())
+            {
+                manager.write_stdin(task_id, "", true).ok();
+            }
+            spawned
         };
 
         match spawn_result {
@@ -1586,6 +1599,61 @@ mod tests {
             output.stdout.lines().any(|line| line.ends_with(": test")),
             "stdout should include the test listing: {:?}",
             output.stdout
+        );
+    }
+
+    /// A machine-launched gate job has nobody to feed its stdin, so the
+    /// spawn closes it at once: a gate that reads stdin (`cat`) must
+    /// complete on the delivered end-of-file instead of idling on the
+    /// held-open pipe until the background gate timeout kills it. This
+    /// pins the `write_stdin(task_id, "", true)` close in the
+    /// background-gate spawn loop; without it this test reddens after the
+    /// completion wait finds the job still running.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn run_verifiers_background_gate_jobs_get_stdin_eof_at_spawn() {
+        let tmp = tempdir().expect("tempdir");
+        let ctx = ToolContext::new(tmp.path());
+        let tool = RunVerifiersTool;
+        let result = tool
+            .execute(
+                json!({
+                    "profile": "auto",
+                    "background": true,
+                    "commands": [
+                        {"name": "stdin-reader", "program": "cat", "args": []}
+                    ]
+                }),
+                &ctx,
+            )
+            .await
+            .expect("execute");
+
+        let parsed: RunVerifiersBackgroundOutput =
+            serde_json::from_str(&result.content).expect("background verifier output json");
+        assert!(parsed.success, "result: {}", result.content);
+        assert_eq!(parsed.started, 1);
+        let task_id = parsed.jobs[0]
+            .task_id
+            .as_deref()
+            .expect("background task id");
+
+        let output = wait_for_completed_shell(
+            &mut ctx.shell_manager.lock().expect("shell manager"),
+            task_id,
+        );
+        if output.status == ShellStatus::Running {
+            // Clean up the mutated behavior's wedged job before failing.
+            let _ = ctx
+                .shell_manager
+                .lock()
+                .expect("shell manager")
+                .kill(task_id);
+        }
+        assert_eq!(
+            output.status,
+            ShellStatus::Completed,
+            "a stdin-reading gate must exit on the end-of-file delivered at spawn"
         );
     }
 }

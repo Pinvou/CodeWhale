@@ -418,7 +418,25 @@ const GITHUB_READONLY_PREFIXES: &[&str] = &[
 ///
 /// Words that do not look like Windows absolute paths are untouched, so POSIX
 /// escapes and unix hosts are unaffected.
-pub(crate) fn normalize_windows_command_paths(command: &str) -> String {
+///
+/// The transform is applied only on Windows hosts. A judged spelling and the
+/// bytes a POSIX shell actually parses must be the same string: the strip
+/// runs *before* the glob-charset gate, so on unix a `\\?\`-bearing word would
+/// slip past the `?` refusal and reach the shell as a live one-character glob
+/// (`cat a\\?\b` judged as `ab` while the shell expands `a\?b`), and a
+/// doubled-backslash word would be judged under a spelling the program never
+/// receives. On unix those spellings are plain (odd) POSIX file names and
+/// fail closed at the charset and shape gates instead. The inner transform is
+/// exposed unconditionally for tests.
+pub(crate) fn normalize_windows_command_paths(command: &str) -> std::borrow::Cow<'_, str> {
+    if cfg!(windows) {
+        std::borrow::Cow::Owned(protected_windows_command_paths(command))
+    } else {
+        std::borrow::Cow::Borrowed(command)
+    }
+}
+
+pub(crate) fn protected_windows_command_paths(command: &str) -> String {
     let stripped = command.replace(r"\\?\", "");
     let mut out = String::with_capacity(stripped.len());
     let mut word_start = 0;
@@ -559,56 +577,260 @@ fn readonly_tokens_admitted(trimmed: &str) -> bool {
 /// untouched for the parent's parallel auto-approve chunks, where its
 /// tightness is load-bearing):
 ///
+/// - compound sequences `a; b`, `a && b`, `a || b`, where **every** segment
+///   must itself be an admitted read-only command (an empty segment —
+///   including `;;` or a trailing `;` — rejects); a bare `&` still refuses;
+///   at most `MAX_READONLY_SEQUENCE_SEGMENTS` segments;
+/// - `cd <one relative path>` as any whole, unpiped sequence segment
+///   (standalone, leading, or later in the sequence; the execution seam
+///   folds each one into the working directory of the segments after it) —
+///   never a pipeline stage, where it would run in a subshell and persist
+///   nowhere the operand gate could follow, and never a wildcard, because
+///   the shell would enter the first expansion while the seam judged the
+///   spelling — with the operand additionally resolved against the
+///   workspace, and required to be a directory, at the execution seam;
+/// - read-only `od` dump forms (display radices plus numeric `-j`/`-N`),
+///   piped in either direction like any other segment on BSD and GNU hosts;
 /// - pipelines `a | b`, where **every** segment must itself be an admitted
 ///   read-only command (an empty segment — including `||` — rejects);
-/// - glob `*` arguments, expanded by the shell only against workspace paths
-///   the operand gate already confines;
+/// - glob `*` arguments, the only wildcard the charset admits; the operand
+///   gate expands each one against the live working directory and judges
+///   every match by its resolved location before any shell runs;
 /// - `git -C <dir> <subcommand>` and `git --no-pager <subcommand>`, whose
 ///   remainder re-enters the existing per-subcommand option tables;
 /// - `find` without any mutating primary (`-delete`, `-exec`, `-execdir`,
-///   `-ok`, `-okdir`, `-fprintf`, `-fls`, `-fprint`, `-fprint0`);
-/// - `sed -n '<range>p` — numeric line-range print only, no script verbs
-///   (`w`/`r`/`e`/`s`) can appear in a two-token range script;
+///   `-ok`, `-okdir`, `-truncate`, `-fprintf`, `-fls`, `-fprint`, `-fprint0`);
+/// - `sed -n '<range>p <files…>` — one numeric line-range print script (no
+///   script verbs `w`/`r`/`e`/`s`), every later token a plain input file: a
+///   later `-e`/`-f` script would escape the range-only contract;
 /// - `npm view|show|info <pkg>` — registry reads, matching the scout role's
 ///   network-capable read-only posture;
 /// - pure text filters `sort`, `uniq`, `cut`, `tr`, `comm` as pipeline
-///   stages.
+///   stages or standalone segments;
 ///
-/// Everything else keeps the parallel classifier's posture: no separators,
-/// redirects, backgrounding, command/parameter expansion, subshells, or
+/// Everything else keeps the parallel classifier's posture: no bare `&`
+/// backgrounding, redirects, command/parameter expansion, subshells, or
 /// env-assignment prefixes.
 pub fn is_agent_readonly_shell_command(command: &str) -> bool {
+    // On Windows the normalize below copies the text, so the length bound
+    // fires before that allocation (a giant command is refused without
+    // paying for its copy). Backslash doubling can still grow the text past
+    // the bound, so the post-normalize check stays load-bearing.
+    #[cfg(windows)]
+    if command.len() > MAX_READONLY_COMMAND_LEN {
+        return false;
+    }
     let trimmed = normalize_windows_command_paths(command);
     let trimmed = trimmed.trim();
     if trimmed.is_empty() {
         return false;
     }
+    if trimmed.len() > MAX_READONLY_COMMAND_LEN {
+        return false;
+    }
     if trimmed.chars().any(|ch| {
         matches!(
             ch,
-            '\n' | '\r'
-                | ';'
-                | '&'
-                | '>'
-                | '<'
-                | '`'
-                | '$'
-                | '?'
-                | '['
-                | ']'
-                | '{'
-                | '}'
-                | '('
-                | ')'
+            '\n' | '\r' | '>' | '<' | '`' | '$' | '?' | '[' | ']' | '{' | '}' | '(' | ')'
         )
     }) {
         return false;
     }
-    // A pipeline is admitted only when every segment is: `a | b` is two
-    // read-only commands, while `a | | b`, `a |`, and `||` all carry an empty
-    // segment and reject. Quoted pipes inside an argument mis-split here,
-    // which only ever makes a segment fail classification (fail closed).
-    trimmed.split('|').all(is_agent_readonly_segment)
+    // A sequence (`;` / `&&` / `||`) is admitted only when every segment is:
+    // the same every-segment rule the pipeline split applies, one level up.
+    // A bare `&` refuses. Quoted separators inside an argument mis-split
+    // here, which only ever makes a segment fail classification (fail
+    // closed).
+    let Some(segments) = readonly_sequence_segments_with_connectors(trimmed) else {
+        return false;
+    };
+    // The execution seam resolves one `cd` destination per segment against
+    // the filesystem, so an unbounded sequence would let a single command
+    // buy O(segments × path depth) of gate work; real probes are a handful.
+    if segments.len() > MAX_READONLY_SEQUENCE_SEGMENTS {
+        return false;
+    }
+    segments.into_iter().all(|(segment, connector)| {
+        // A `cd` joined by `&&`/`||` runs only when the predecessor's exit
+        // status allows it — a runtime fact the gate cannot know — while the
+        // seam folds every admitted `cd` unconditionally. The fold would
+        // judge later operands in a directory the shell never entered,
+        // skipping whatever exists only at the real cwd (`cat nope && cd
+        // sub; cat link` reads a root symlink unjudged). Refuse the shape
+        // statically; the seam re-checks it at the fold.
+        if matches!(
+            connector,
+            ReadonlySequenceConnector::AndThen | ReadonlySequenceConnector::OrElse
+        ) && shell_words(segment)
+            .first()
+            .is_some_and(|word| word == "cd")
+        {
+            return false;
+        }
+        readonly_segment_stages_admitted(segment)
+    })
+}
+
+/// Upper bound on `;`/`&&`/`||` segments in one admitted read-only command.
+pub(crate) const MAX_READONLY_SEQUENCE_SEGMENTS: usize = 32;
+
+/// Upper bound on the text length of one admitted read-only command. The
+/// grammar's refusals are checked in linear passes that allocate transiently
+/// (the segment split, the shell-lane hardening copy), so an uncapped command
+/// would buy host memory and parse work at dispatch time for text no legitimate
+/// bounded probe needs. The execution seam runs only after this admission, so
+/// this one check bounds both layers.
+const MAX_READONLY_COMMAND_LEN: usize = 64 * 1024;
+
+/// Admit one sequence segment: every pipeline stage must be an admitted
+/// read-only command (`a | b` is two read-only commands, while `a | | b`,
+/// `a |`, and a dangling pipe around a separator all carry an empty stage and
+/// reject), and `cd` may only be the whole segment. A pipeline stage runs in
+/// a subshell, so `cd sub | cat f` changes no working directory the operand
+/// gate could follow — the gate folds `cd` into the cwd of later segments
+/// precisely because an unpiped `cd` does persist — and a `cd` stage would
+/// otherwise end the gate's token walk before the operands after the `|`.
+fn readonly_segment_stages_admitted(segment: &str) -> bool {
+    let stages = readonly_pipeline_stages(segment);
+    let piped = stages.len() > 1;
+    stages.into_iter().all(|stage| {
+        if piped && shell_words(stage).first().is_some_and(|word| word == "cd") {
+            return false;
+        }
+        is_agent_readonly_segment(stage)
+    })
+}
+
+/// Split one sequence segment on the pipeline separator `|`.
+///
+/// The one stage split every read-only judge uses — the classifier above,
+/// the execution seam's operand gate, its network guard, and its git stage
+/// hardening — so no two of them can ever disagree about where a stage
+/// begins. The split is naive byte scanning like [`readonly_sequence_segments`]
+/// (a quoted `|` mis-splits into a stage that fails classification, or fails
+/// the seam's stricter `shlex` parse: fail closed either way). Empty stages
+/// are returned, not dropped; refusing them is the caller's contract.
+pub(crate) fn readonly_pipeline_stages(segment: &str) -> Vec<&str> {
+    segment.split('|').collect()
+}
+
+/// Whether any pipeline stage of any sequence segment of `command` is an
+/// admitted GitHub read ([`is_github_readonly_stage`]), i.e. whether running
+/// the command reaches `api.github.com`. `pwd; gh repo view`, `gh repo view |
+/// head`, and `gh pr list --search '*'` classify as gh reads exactly like a
+/// bare `gh repo view`, so every network ceiling judges them with this one
+/// predicate instead of the whole-command parallel classifier, whose charset
+/// gate would see a compound or a `*` and answer "not a gh read". At the
+/// execution seam the operand gate additionally refuses the wildcard-bearing
+/// gh stages outright; this predicate over-recognizes them so the network
+/// pre-checks (a child with no network, the fleet envelope) still fail
+/// closed. A bare `&` never classifies and answers `false` here; the grammar
+/// refuses it anyway.
+#[must_use]
+pub(crate) fn command_reaches_github_readonly(command: &str) -> bool {
+    readonly_sequence_segments(command).is_some_and(|segments| {
+        segments
+            .iter()
+            .flat_map(|segment| readonly_pipeline_stages(segment))
+            .any(is_github_readonly_stage)
+    })
+}
+
+/// How a sequence segment is joined to its predecessor. The distinction is
+/// load-bearing for the execution seam's `cd` fold: `;` runs the segment
+/// whatever the predecessor returned, while `&&`/`||` run it only when the
+/// predecessor succeeded/failed — a runtime fact no pre-spawn gate can
+/// evaluate, so a `cd` joined by a conditional connector must never fold
+/// the working directory (the shell may never enter it).
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(crate) enum ReadonlySequenceConnector {
+    /// The first segment: always runs.
+    Start,
+    /// Joined by `;`: runs whatever the predecessor returned.
+    Sequence,
+    /// Joined by `&&`: runs only when the predecessor succeeded.
+    AndThen,
+    /// Joined by `||`: runs only when the predecessor failed.
+    OrElse,
+}
+
+/// Split a command on the sequence separators `;`, `&&`, and `||`, keeping
+/// the connector each segment was joined with.
+///
+/// Returns `None` when a bare `&` (backgrounding) appears: `&&` separates a
+/// sequence, a lone `&` refuses. The split is deliberately naive — straight
+/// byte scanning with no quote parsing, exactly like the `|` pipeline split
+/// in `readonly_segment_stages_admitted`. Quotes and backslashes pass the
+/// charset gate, so a quoted `;` mis-splits here; a mis-split that still
+/// classifies is refused before any shell runs by the operand gate's stricter
+/// `shlex::split` (`enforce_readonly_workspace_operands`), which rejects the
+/// now-unbalanced quote, so the residual risk is a refusal, never an
+/// execution. The destructive-command pass keeps its own
+/// `split_command_segments`, which folds `|` and a bare `&` into the same
+/// level and drops empty segments — the opposite contract from this gate.
+pub(crate) fn readonly_sequence_segments_with_connectors(
+    command: &str,
+) -> Option<Vec<(&str, ReadonlySequenceConnector)>> {
+    let mut segments = Vec::new();
+    let mut connector = ReadonlySequenceConnector::Start;
+    let bytes = command.as_bytes();
+    let mut start = 0;
+    let mut index = 0;
+    while index < bytes.len() {
+        let byte = bytes[index];
+        let doubled = index + 1 < bytes.len() && bytes[index + 1] == byte;
+        if byte == b';' {
+            segments.push((&command[start..index], connector));
+            connector = ReadonlySequenceConnector::Sequence;
+            index += 1;
+            start = index;
+        } else if doubled && (byte == b'&' || byte == b'|') {
+            segments.push((&command[start..index], connector));
+            connector = if byte == b'&' {
+                ReadonlySequenceConnector::AndThen
+            } else {
+                ReadonlySequenceConnector::OrElse
+            };
+            index += 2;
+            start = index;
+        } else if byte == b'&' {
+            // A single `&` is backgrounding, never admitted: the sequence
+            // split is where the charset gate used to refuse it.
+            return None;
+        } else {
+            index += 1;
+        }
+    }
+    segments.push((&command[start..], connector));
+    Some(segments)
+}
+
+/// Split a command on the sequence separators, dropping the connectors (for
+/// consumers that judge every segment the same way regardless of when the
+/// shell runs it). The `cd` fold at the execution seam must use
+/// [`readonly_sequence_segments_with_connectors`] instead.
+pub(crate) fn readonly_sequence_segments(command: &str) -> Option<Vec<&str>> {
+    readonly_sequence_segments_with_connectors(command)
+        .map(|segments| segments.into_iter().map(|(segment, _)| segment).collect())
+}
+
+/// Whether an admitted read-only command must run under a shell because it
+/// names the `cd` builtin. The direct-argv lane execs a real binary, and
+/// `cd` exists as one only on some hosts (macOS ships `/usr/bin/cd`; most
+/// Linux systems do not), so any command with a `cd`-leading segment — at
+/// any position in the sequence — takes the shell lane pipelines already
+/// use, where the builtin always resolves. Pipeline-bearing and
+/// multi-segment commands route to the shell anyway; the term is
+/// load-bearing for the standalone `cd`, whose admission would otherwise
+/// end in a not-found exec error.
+pub(crate) fn agent_readonly_command_needs_shell_for_cd(command: &str) -> bool {
+    readonly_sequence_segments(command).is_some_and(|segments| {
+        segments.iter().any(|segment| {
+            shell_words(segment)
+                .first()
+                .is_some_and(|word| word == "cd")
+        })
+    })
 }
 
 fn is_agent_readonly_segment(segment: &str) -> bool {
@@ -625,10 +847,12 @@ fn is_agent_readonly_segment(segment: &str) -> bool {
         return false;
     }
     match program.as_str() {
+        "cd" => is_agent_readonly_cd(&tokens),
         "git" => is_agent_readonly_git(&tokens),
         "find" => is_agent_readonly_find(&tokens),
         "sed" => is_agent_readonly_sed(&tokens),
         "npm" => is_agent_readonly_npm(&tokens),
+        "od" => is_agent_readonly_od(&tokens),
         "sort" => agent_text_filter_options_match(
             &tokens,
             &[
@@ -752,14 +976,17 @@ fn is_agent_readonly_segment(segment: &str) -> bool {
 /// Several of these programs have write or helper-execution forms despite
 /// looking like harmless stdout transforms (`sort -o`, `sort
 /// --compress-program`, and uniq's second FILE operand). Keep their accepted
-/// options exact, reject attached/unknown flags, and cap operands where the
-/// command's positional grammar can name an output file.
+/// options exact, reject unknown flags, and cap operands where the command's
+/// positional grammar can name an output file. Clustered short spellings
+/// (`-rn`, `-d,`, `-f1`) are expanded first so that only admitted letters
+/// ever reach the exact match — see [`expand_clustered_short_options`].
 fn agent_text_filter_options_match(
     tokens: &[String],
     switches: &[&str],
     value_options: &[&str],
     max_operands: usize,
 ) -> bool {
+    let tokens = expand_clustered_short_options(tokens, switches, value_options);
     let mut index = 1;
     let mut options = true;
     let mut operands = 0;
@@ -787,6 +1014,57 @@ fn agent_text_filter_options_match(
         index += 1;
     }
     true
+}
+
+/// Expand the clustered short-option spellings POSIX `getopt` accepts and
+/// models reach for first: `-rn` becomes `-r -n`, `-d,` becomes `-d ,`, and
+/// `-f1` becomes `-f 1`. A cluster expands only when its first letter is an
+/// admitted value option (the remainder is its value) or when every letter is
+/// an admitted switch; anything else, every long option, and every token
+/// after `--` is left verbatim so the exact-match grammar refuses it.
+fn expand_clustered_short_options(
+    tokens: &[String],
+    switches: &[&str],
+    value_options: &[&str],
+) -> Vec<String> {
+    let mut expanded = Vec::with_capacity(tokens.len());
+    let mut options = true;
+    for (index, token) in tokens.iter().enumerate() {
+        if index == 0 || !options || !token.starts_with('-') || token.starts_with("--") {
+            if index > 0 && options && token == "--" {
+                options = false;
+            }
+            expanded.push(token.clone());
+            continue;
+        }
+        let mut letters = token.char_indices().skip(1);
+        let Some((_, first_letter)) = letters.next() else {
+            expanded.push(token.clone());
+            continue;
+        };
+        let remainder_start = letters.next().map_or(token.len(), |(offset, _)| offset);
+        let remainder = &token[remainder_start..];
+        if remainder.is_empty() {
+            // A single short option is already in exact-match form.
+            expanded.push(token.clone());
+            continue;
+        }
+        let first = format!("-{first_letter}");
+        if value_options.contains(&first.as_str()) {
+            expanded.push(first);
+            expanded.push(remainder.to_string());
+        } else if switches.contains(&first.as_str())
+            && remainder
+                .chars()
+                .all(|letter| switches.contains(&format!("-{letter}").as_str()))
+        {
+            expanded.push(first);
+            expanded.extend(remainder.chars().map(|letter| format!("-{letter}")));
+        } else {
+            expanded.push(token.clone());
+        }
+    }
+    expanded
 }
 
 fn is_agent_readonly_git(tokens: &[String]) -> bool {
@@ -837,13 +1115,27 @@ fn is_agent_readonly_find(tokens: &[String]) -> bool {
 }
 
 fn is_agent_readonly_sed(tokens: &[String]) -> bool {
+    // The script is pinned to the third token, and every later token must be
+    // a plain input file: GNU sed's option permutation parses a later
+    // `-e <script>`/`-f <file>` as a second script whose verbs (`w`, `r`,
+    // `e`) read, write, or execute outside the workspace, and an unflagged
+    // verb glued into a "path" (`w/tmp/x`) hides from the operand gate. BSD
+    // sed treats the extras as input files and fails closed, but the Linux
+    // hosts are the exposed ones. Multiple input files stay admitted; the
+    // operand gate judges each of them.
     if tokens.len() < 3 || tokens[1] != "-n" {
+        return false;
+    }
+    if tokens[3..].iter().any(|token| token.starts_with('-')) {
         return false;
     }
     // Numeric line-range print scripts only: `10p`, `1,5p`, `p`. Script
     // verbs that write or execute (`w`, `r`, `e`, `s///w`) cannot appear in
-    // a two-token range script, and separators like `;` were already
-    // rejected at the charset gate.
+    // the single range script, and a `;`-bearing script never reaches this
+    // check at all: the sequence split mis-reads a quoted separator into a
+    // segment that fails classification, and a bare one is caught because
+    // the execution seam re-parses every admitted stage with strict shlex
+    // before running it.
     let script = tokens[2].as_str();
     let Some(head) = script.strip_suffix(['p', 'P']) else {
         return false;
@@ -863,22 +1155,157 @@ fn is_agent_readonly_npm(tokens: &[String]) -> bool {
     )
 }
 
-/// Return `true` only for the networked GitHub CLI subset admitted by
-/// [`is_parallel_readonly_command`].
-///
-/// Fleet uses this second predicate to apply its independent network ceiling
-/// and the configured per-host network policy. Keeping it derived from the
-/// full read-only classifier means a separator, redirect, background marker,
-/// executable flag, or unsupported `gh` verb can never be mislabeled merely
-/// because its first token is `gh`.
-#[must_use]
-pub fn is_github_readonly_command(command: &str) -> bool {
-    if !is_parallel_readonly_command(command) {
+/// Admit exactly `cd <one relative path>`: one operand, relative, no `..`,
+/// no flags, no wildcard, no zsh command-path (`=`) spelling. Bare `cd` (home
+/// directory), absolute targets, `~`/drive shapes, a `*` anywhere in the
+/// operand, and every flag spelling refuse here. The wildcard refusal is
+/// load-bearing: the execution seam canonicalizes the operand *spelling*,
+/// while a POSIX shell expands `cd a*` and `cd` takes the first match (the
+/// rest are ignored) — a literal `a*` directory next to an earlier-sorting
+/// `a -> ..` symlink would be judged inside and entered outside. The `=`
+/// refusal is the cd-shaped twin of the operand gate's rule: zsh expands
+/// `=cmd` (its default EQUALS option) to the command's absolute path, so a
+/// directory literally named `=ls` would be canonicalized and folded by the
+/// seam while the shell's `cd` fails on `/bin/ls` and a `;`/`||` sequence
+/// continues in the original directory. The operand is additionally resolved
+/// against the workspace by the execution seam
+/// (`enforce_readonly_workspace_operands`, which reuses the
+/// `[shell.readonly.cwd.outside_workspace]` refusal), so a relative
+/// directory whose destination escapes the workspace — a symlink, say — is
+/// still refused before any shell runs.
+fn is_agent_readonly_cd(tokens: &[String]) -> bool {
+    tokens.len() == 2 && readonly_cd_operand_admitted(&tokens[1])
+}
+
+/// The `cd` operand shape rule, shared by the classifier and the execution
+/// seam so the two layers cannot drift: a spelling the classifier admits must
+/// be a spelling the seam is willing to canonicalize.
+pub(crate) fn readonly_cd_operand_admitted(target: &str) -> bool {
+    if target.is_empty()
+        || target.starts_with('-')
+        // zsh's `=cmd` EQUALS expansion and `+N` directory-stack selection
+        // both reinterpret a spelling that canonicalizes as a plain relative
+        // name: the shell's `cd` fails (or lands elsewhere) while the fold
+        // assumes the destination was entered.
+        || target.starts_with('=')
+        || target.starts_with('+')
+        || target.starts_with('~')
+        || target.contains('\\')
+        || target.contains('*')
+        || looks_like_windows_absolute_path(target)
+    {
         return false;
     }
+    let candidate = std::path::Path::new(target);
+    !candidate.is_absolute()
+        && candidate
+            .components()
+            .all(|component| !matches!(component, std::path::Component::ParentDir))
+}
 
-    let tokens = shell_words(command.trim());
-    let Some(start) = primary_token_index(&tokens) else {
+/// Admit read-only `od` (octal/hex dump) forms via the segment dispatcher.
+/// Only pure-read display options: the type selectors BSD `od` documents
+/// (`-b -c -d -o -s -x`, legacy `-h`) plus `-v`, the address radix `-A`
+/// restricted to its fixed value set, and the numeric skip/count pair
+/// `-j`/`-N`. Glued single-token spellings (`-An`, `-j8`) admit exactly
+/// like their separated forms, with the same value validation. `-w` and
+/// every output-affecting or GNU-extension flag stays out on purpose, and
+/// file operands flow through the normal workspace operand gate.
+fn is_agent_readonly_od(tokens: &[String]) -> bool {
+    const ADDRESS_RADIX_VALUES: [&str; 5] = ["d", "o", "x", "n", "none"];
+    let mut index = 1;
+    let mut options = true;
+    while index < tokens.len() {
+        let token = tokens[index].as_str();
+        if options && token == "--" {
+            options = false;
+        } else if options && token.starts_with('-') && token != "-" {
+            match token {
+                "-b" | "-c" | "-d" | "-o" | "-s" | "-x" | "-h" | "-v" => {}
+                "-A" => {
+                    index += 1;
+                    if index >= tokens.len()
+                        || !ADDRESS_RADIX_VALUES.contains(&tokens[index].as_str())
+                    {
+                        return false;
+                    }
+                }
+                _ if token.starts_with("-A") => {
+                    // Glued `-A<value>`: the same fixed value set as the
+                    // separated form.
+                    if !ADDRESS_RADIX_VALUES.contains(&&token[2..]) {
+                        return false;
+                    }
+                }
+                "-j" | "-N" => {
+                    index += 1;
+                    // Parse, not just digit-scan: a 200-digit spelling is
+                    // digit-admitted but past every real skip/count, so the
+                    // bound belongs here rather than at od's runtime error.
+                    let numeric = tokens
+                        .get(index)
+                        .is_some_and(|value| is_od_offset_or_count_value(value));
+                    if !numeric {
+                        return false;
+                    }
+                }
+                _ if token.starts_with("-j") || token.starts_with("-N") => {
+                    // Glued `-j<value>`/`-N<value>`: the same parse, not
+                    // digit-scan, bound as the separated form.
+                    if !is_od_offset_or_count_value(&token[2..]) {
+                        return false;
+                    }
+                }
+                _ => return false,
+            }
+        }
+        index += 1;
+    }
+    true
+}
+
+/// One od `-j`/`-N` value: digits with GNU coreutils' optional
+/// multiplicative suffix (`b`=512, `k`/`K`=1024, through `e`/`E`=1024⁶),
+/// computed with checked arithmetic — a 200-digit spelling or a
+/// suffix-multiplied overflow refuses here rather than erroring at od.
+fn is_od_offset_or_count_value(value: &str) -> bool {
+    let (digits, suffix) = match value.char_indices().last() {
+        Some((_, last)) if last.is_ascii_digit() => (value, ""),
+        Some((index, _)) => (&value[..index], &value[index..]),
+        None => return false,
+    };
+    let multiplier: u64 = match suffix {
+        "" => 1,
+        "b" => 512,
+        "k" | "K" => 1024,
+        "m" | "M" => 1024 * 1024,
+        "g" | "G" => 1024 * 1024 * 1024,
+        "t" | "T" => 1024 * 1024 * 1024 * 1024,
+        "p" | "P" => 1024 * 1024 * 1024 * 1024 * 1024,
+        "e" | "E" => 1024 * 1024 * 1024 * 1024 * 1024 * 1024,
+        _ => return false,
+    };
+    digits
+        .parse::<u64>()
+        .ok()
+        .and_then(|count| count.checked_mul(multiplier))
+        .is_some()
+}
+
+/// Token-level recognition of one command as an admitted GitHub read, without
+/// the parallel classifier's charset gate. The agent read-only grammar admits
+/// `*` (glob operands judged at the execution seam), so a stage like
+/// `gh pr list --search '*'` classifies as a gh read here while a
+/// whole-command charset-gated predicate refuses its `*` — a per-stage guard
+/// keyed on that predicate would silently skip the network policy for exactly
+/// those stages. The seam's operand gate refuses the wildcard-bearing gh
+/// stages outright; this predicate's over-recognition keeps the network
+/// pre-checks failing closed behind it. Over-recognition is harmless: every
+/// caller only consults the network decider or refuses the call for an agent
+/// that holds no network, and the grammar refuses the over-recognized
+/// spellings before any guard runs.
+fn is_github_readonly_tokens(tokens: &[String]) -> bool {
+    let Some(start) = primary_token_index(tokens) else {
         return false;
     };
     let command_tokens = &tokens[start..];
@@ -892,15 +1319,23 @@ pub fn is_github_readonly_command(command: &str) -> bool {
         .any(|prefix| *prefix == canonical)
 }
 
+/// Whether one pipeline stage of an admitted read-only compound is an
+/// admitted GitHub read (see [`is_github_readonly_tokens`]). The execution
+/// seam's network guard splits commands into stages with the same splitters
+/// the classifier used, then consults this per stage.
+fn is_github_readonly_stage(stage: &str) -> bool {
+    is_github_readonly_tokens(&shell_words(stage.trim()))
+}
+
 #[rustfmt::skip] // Keep one auditable policy row per command instead of vertically exploding strings.
 fn readonly_options_are_allowed(canonical: &str, tokens: &[&str]) -> bool {
     let (start, switches, values): (usize, &str, &str) = match canonical {
         "git status" => (2, "-s --short -b --branch --ignored --porcelain", "--untracked-files"),
-        "git diff" => (2, "--cached --staged --stat --numstat --shortstat --name-only --name-status --check --no-renames --color --no-color --word-diff", "-U --unified --diff-filter"),
-        "git log" => (2, "--oneline --decorate --graph --stat --numstat --shortstat --name-only --name-status --no-patch --all --branches --tags --remotes --first-parent --reverse --color --no-color", "-n --max-count --since --until --author --grep"),
-        "git show" => (2, "--stat --numstat --shortstat --name-only --name-status --no-patch -s --color --no-color", "-U --unified"),
+        "git diff" => (2, "--cached --staged --stat --numstat --shortstat --name-only --name-status --check --no-renames --color --no-color --word-diff --no-ext-diff --no-textconv", "-U --unified --diff-filter"),
+        "git log" => (2, "--oneline --decorate --graph --stat --numstat --shortstat --name-only --name-status --no-patch --all --branches --tags --remotes --first-parent --reverse --color --no-color --no-ext-diff --no-textconv --no-show-signature", "-n --max-count --since --until --author --grep"),
+        "git show" => (2, "--stat --numstat --shortstat --name-only --name-status --no-patch -s --color --no-color --no-ext-diff --no-textconv --no-show-signature", "-U --unified"),
         "git ls-files" => (2, "-c --cached -d --deleted -m --modified -o --others -i --ignored --stage --unmerged --killed --exclude-standard --deduplicate", "--exclude --exclude-from"),
-        "git blame" => (2, "-w --line-porcelain --porcelain --show-stats --show-name --show-number --reverse --first-parent", "-L --since"),
+        "git blame" => (2, "-w --line-porcelain --porcelain --show-stats --show-name --show-number --reverse --first-parent --no-textconv", "-L --since"),
         "git grep" => (2, "-n --line-number -i --ignore-case -I -l --files-with-matches -L --files-without-match -w --word-regexp -F --fixed-strings -E --extended-regexp --cached --untracked --exclude-standard", "-e --max-depth"),
         "ls" => (1, "-a -A -l -la -al -h -lh -hl -lah -alh -R -d -1 --all --almost-all --long --human-readable --recursive --directory", ""),
         "pwd" => (1, "-L -P --logical --physical", ""),
@@ -915,19 +1350,19 @@ fn readonly_options_are_allowed(canonical: &str, tokens: &[&str]) -> bool {
         "grep" => (1, "-n -i -v -E -F -w -x -l -L -c --line-number --ignore-case --invert-match --extended-regexp --fixed-strings --word-regexp --line-regexp --files-with-matches --files-without-match --count", "-m --max-count -A --after-context -B --before-context -C --context"),
         "rg" => (1, "-n --line-number -i --ignore-case -S --smart-case -F --fixed-strings -w --word-regexp -l --files-with-matches --hidden --no-ignore --no-heading --heading --stats --count --count-matches", "-g --glob -t --type -T --type-not -m --max-count -A --after-context -B --before-context -C --context --sort"),
         "fd" => (1, "-H --hidden -I --no-ignore -s --case-sensitive -i --ignore-case --strip-cwd-prefix", "-e --extension -t --type -d --max-depth -E --exclude"),
-        "gh issue list" => (3, "", "--json --assignee --author --jq --label --limit --mention --milestone --search --state --template -R --repo"),
-        "gh issue status" => (3, "", "--json --jq --template -R --repo"),
-        "gh issue view" | "gh pr view" => (3, "--comments", "--json --jq --template -R --repo"),
-        "gh pr checks" => (3, "--fail-fast --required", "--json --jq --template -R --repo"),
+        "gh issue list" => (3, "", "--json --assignee --author --jq -q --label --limit --mention --milestone --search --state --template -R --repo"),
+        "gh issue status" => (3, "", "--json --jq -q --template -R --repo"),
+        "gh issue view" | "gh pr view" => (3, "--comments", "--json --jq -q --template -R --repo"),
+        "gh pr checks" => (3, "--fail-fast --required", "--json --jq -q --template -R --repo"),
         "gh pr diff" => (3, "--name-only --patch", "--color -R --repo"),
-        "gh pr list" => (3, "--draft", "--json --app --assignee --author --base --head --jq --label --limit --search --state --template -R --repo"),
-        "gh pr status" => (3, "", "--json --conflict-status --jq --template -R --repo"),
-        "gh release list" => (3, "--exclude-drafts --exclude-pre-releases", "--json --jq --limit --order --template -R --repo"),
-        "gh release view" => (3, "", "--json --jq --template -R --repo"),
-        "gh repo view" => (3, "", "--json --branch --jq --template -R --repo"),
-        "gh run list" => (3, "", "--json --branch --commit --created --event --jq --limit --status --template --user --workflow -R --repo"),
-        "gh run view" => (3, "--exit-status --log --log-failed --verbose", "--json --attempt --job --jq --template -R --repo"),
-        "gh workflow list" => (3, "--all", "--json --jq --limit --template -R --repo"),
+        "gh pr list" => (3, "--draft", "--json --app --assignee --author --base --head --jq -q --label --limit --search --state --template -R --repo"),
+        "gh pr status" => (3, "", "--json --conflict-status --jq -q --template -R --repo"),
+        "gh release list" => (3, "--exclude-drafts --exclude-pre-releases", "--json --jq -q --limit --order --template -R --repo"),
+        "gh release view" => (3, "", "--json --jq -q --template -R --repo"),
+        "gh repo view" => (3, "", "--json --branch --jq -q --template -R --repo"),
+        "gh run list" => (3, "", "--json --branch --commit --created --event --jq -q --limit --status --template --user --workflow -R --repo"),
+        "gh run view" => (3, "--exit-status --log --log-failed --verbose", "--json --attempt --job --jq -q --template -R --repo"),
+        "gh workflow list" => (3, "--all", "--json --jq -q --limit --template -R --repo"),
         "gh workflow view" => (3, "--yaml", "--ref -R --repo"),
         _ => return false,
     };
@@ -940,6 +1375,33 @@ fn is_numeric_count_shorthand(token: &str) -> bool {
         return false;
     };
     !digits.is_empty() && digits.bytes().all(|byte| byte.is_ascii_digit())
+}
+
+/// One glued numeric value option (`-n5`, `-c3`): the flag must be one of
+/// the command row's value options and the rest all digits. GNU's head,
+/// tail, and friends accept the glued spelling; the value stays bound to
+/// its flag inside one argv word, so it cannot introduce an operand, and
+/// the per-row value list decides which flags the glued form rides.
+fn glued_numeric_value_option(token: &str, values: &str) -> bool {
+    if !token.starts_with('-') || token.starts_with("--") {
+        return false;
+    }
+    for flag in values.split_ascii_whitespace() {
+        let Some(flag_name) = flag.strip_prefix('-') else {
+            continue;
+        };
+        if flag_name.starts_with('-') {
+            // Long options take their value after `=`, never glued.
+            continue;
+        }
+        if let Some(value) = token[1..].strip_prefix(flag_name)
+            && !value.is_empty()
+            && value.bytes().all(|byte| byte.is_ascii_digit())
+        {
+            return true;
+        }
+    }
+    false
 }
 
 fn options_match_allowlist(tokens: &[&str], switches: &str, values: &str) -> bool {
@@ -961,6 +1423,11 @@ fn options_match_allowlist(tokens: &[&str], switches: &str, values: &str) -> boo
                 // `-n 5` / `-n 20`; only commands whose value flags include a
                 // line-count accept them, and the digit-only form can carry no
                 // attached path or value injection.
+            } else if glued_numeric_value_option(token, values) {
+                // `head -n5` / `tail -c3`: GNU's glued spelling of a numeric
+                // value flag. The value stays bound to its flag inside one
+                // argv word, so it cannot introduce an operand, and only rows
+                // whose value flags include that flag admit it.
             } else if values.split_ascii_whitespace().any(|name| name == token) {
                 index += 1;
                 if index >= tokens.len() || tokens[index].starts_with('-') {
@@ -981,6 +1448,13 @@ fn options_match_allowlist(tokens: &[&str], switches: &str, values: &str) -> boo
 fn github_command_targets_unsupported_host(tokens: &[&str]) -> bool {
     let explicit_host_is_unsupported = |value: &str| {
         let value = value.trim();
+        // A `..`-leading repo operand is never a real repository path, and
+        // the host heuristic below needs two `/` parts to fire — a single
+        // suffix like `../foo` would otherwise slip through where
+        // `../../x` refuses.
+        if value.starts_with("..") {
+            return true;
+        }
         let host = value
             .strip_prefix("https://")
             .or_else(|| value.strip_prefix("http://"))
@@ -988,8 +1462,20 @@ fn github_command_targets_unsupported_host(tokens: &[&str]) -> bool {
             .or_else(|| {
                 let mut parts = value.split('/');
                 let first = parts.next()?;
-                (parts.clone().count() >= 2 && (first.contains('.') || first.contains(':')))
-                    .then_some(first)
+                let remaining = parts.count();
+                // gh reads `HOST/OWNER/REPO` — three slash components — as
+                // an explicit host, single-label ones included (a DNS search
+                // domain resolves them away from github.com), and
+                // `OWNER/REPO` — two components — as a github.com
+                // repository. A dot/colon-bearing first component is a host
+                // spelling even with two components.
+                if remaining >= 2
+                    || (remaining == 1 && (first.contains('.') || first.contains(':')))
+                {
+                    Some(first)
+                } else {
+                    None
+                }
             });
         host.is_some_and(|host| !host.eq_ignore_ascii_case("github.com"))
     };
@@ -2088,6 +2574,9 @@ mod tests {
             "find crates -type f -name *.toml | head",
             "sed -n 10p Cargo.toml",
             "sed -n 1,5p README.md",
+            // Multiple plain input files stay admitted; only flag-shaped
+            // tokens after the script refuse.
+            "sed -n 10p Cargo.toml README.md",
             "npm view codewhale version",
             "sort deps.txt | uniq -c",
             "ls -la *.md",
@@ -2099,13 +2588,16 @@ mod tests {
         }
     }
 
+    #[cfg(windows)]
     #[test]
     fn agent_readonly_shell_admits_windows_verbatim_paths() {
         // `Path::canonicalize` on Windows embeds `\\?\` verbatim prefixes whose
         // `?` trips the glob-charset gate and whose backslashes POSIX splitters
-        // eat as escapes. The normalize step must admit the same commands with
-        // either spelling (the classifier is pure string logic, so this is
-        // platform-independent).
+        // eat as escapes. The normalize step (Windows hosts only) must admit
+        // the same commands with either spelling; drive paths admit without
+        // it. On unix the same verbatim spelling is a plain odd POSIX file
+        // name and refuses at the `?` of the charset gate instead, pinned by
+        // `windows_path_normalization_stays_off_unix_lanes`.
         for command in [
             r"git -C \\?\C:\Users\foo log --oneline -20",
             r"git -C C:\Users\foo log --oneline -20",
@@ -2116,6 +2608,22 @@ mod tests {
                 "{command} should be agent read-only"
             );
         }
+    }
+
+    #[cfg(not(windows))]
+    #[test]
+    fn agent_readonly_shell_refuses_verbatim_spellings_unix_lanes() {
+        // The verbatim strip would delete the `?` before the charset gate and
+        // let the shell parse a wildcard the gate never saw; on unix the
+        // spelling is refused outright, and the drive spelling — harmless
+        // backslashes — still admits.
+        assert!(!is_agent_readonly_shell_command(
+            r"git -C \\?\C:\Users\foo log --oneline -20"
+        ));
+        assert!(!is_agent_readonly_shell_command(r"cat \\?\secret"));
+        assert!(is_agent_readonly_shell_command(
+            r"git -C C:\Users\foo log --oneline -20"
+        ));
     }
 
     #[test]
@@ -2139,12 +2647,21 @@ mod tests {
             "sed -n 1,5w /tmp/out Cargo.toml",
             "sed -i s/a/b/ file",
             "sed -n e true Cargo.toml",
+            // Tokens after the script would be unchecked, and GNU sed parses
+            // a later -e as a second script (write/read/exec verbs).
+            "sed -n 5p -e w/tmp/owned Cargo.toml",
+            "sed -n 5p -e r/etc/shadow Cargo.toml",
+            "sed -n 5p -e e Cargo.toml",
+            "sed -n -e 5p Cargo.toml",
+            "sed -n 5p -f script.sed Cargo.toml",
             "npm install left-pad",
             "npm run build",
             "FOO=1 git log",
             "env PAGER=cat git log",
             "git --git-dir=/tmp/x.git log",
             "git -c core.fsmonitor=./hook log",
+            "git -c filter.evil.clean=evil status",
+            "git -c filter.evil.clean=evil diff",
             "git log (modified)",
             "git log | (head)",
             "git push origin main",
@@ -2210,6 +2727,404 @@ mod tests {
         ));
     }
 
+    /// Compound probe sequences (`;` / `&&` / `||`) of admitted read-only
+    /// commands, workspace-confined `cd`, and read-only `od` dumps are
+    /// admitted for ShellPolicy::ReadOnly scouts. Live sessions burned many
+    /// steps rewriting probes like `wc -c f; wc -l f` around the old
+    /// whole-command `;` refusal.
+    #[test]
+    fn agent_readonly_shell_admits_compound_sequences_cd_and_od() {
+        for command in [
+            "wc -c notes.md; wc -l notes.md",
+            "cd sub && wc -c notes.md",
+            "cd sub",
+            "cd sub/deeper",
+            "ls; pwd",
+            "ls || pwd",
+            "ls && cat notes.md | head",
+            "cat x | od -c",
+            "od -c x",
+            "od -c x | head",
+            "od -A d -j 2 -N 8 -c x",
+            // An unpiped `cd` persists, so a later segment may `cd` again
+            // and the operand gate folds both.
+            "cd sub; cd deeper; wc -c notes.md",
+            "pwd; cd sub && ls",
+        ] {
+            assert!(
+                is_agent_readonly_shell_command(command),
+                "{command} should be an admitted compound/cd/od probe"
+            );
+        }
+    }
+
+    /// Every denied compound shape: a bare `&`, empty sequence segments, a
+    /// mutation or expansion in any segment, `cd` shapes that leave the
+    /// workspace shape rules or sit inside a pipeline, redirects anywhere,
+    /// and `od` flags outside the read-only display set.
+    #[test]
+    fn agent_readonly_shell_rejects_unsafe_compound_cd_and_od_shapes() {
+        for command in [
+            "ls & pwd",
+            "ls;;pwd",
+            "ls;",
+            "; ls",
+            "wc -c f; rm -rf g",
+            "ls && rm -rf g",
+            "ls || sh",
+            "cd /etc && ls",
+            "cd ..",
+            "cd ../sub",
+            "cd",
+            "cd -L sub",
+            "cd sub extra",
+            "cd ~/x",
+            // A wildcard operand would be judged by its spelling at the seam
+            // while the shell enters the first expansion.
+            "cd sub*",
+            "cd *",
+            "cd su* && wc -c notes.md",
+            "pwd; cd s*/deeper",
+            // zsh's EQUALS expansion turns `cd =ls` into `cd /bin/ls`: the
+            // shell's `cd` fails while the seam would have folded onto a
+            // literal `=ls` directory.
+            "cd =ls; cat link",
+            "cd =ls || cat link",
+            "pwd; cd =sh",
+            // zsh's directory-stack `cd +N` has the same shape: empty stack
+            // off-session, the `cd` fails, and a `;` sequence continues at
+            // the original directory while the fold assumed the destination.
+            "cd +2; cat link",
+            "cd +2 || cat link",
+            "pwd; cd +1",
+            "cd ''",
+            // A pipeline stage runs in a subshell: its `cd` persists nowhere
+            // and would end the gate's operand walk at the `|`.
+            "cd sub | cat /etc/passwd",
+            "cd sub | cat; cat link",
+            "pwd; cd sub | cat x",
+            "cat x | cd sub",
+            "cat x | \"cd\" sub",
+            "echo hi > f; ls",
+            "a`b`",
+            "wc -c f; cat $(x)",
+            "python3 -c print(1)",
+            "od -w 8 x",
+            "od -j x f",
+            "od --strange f",
+            "od -A z f",
+        ] {
+            assert!(
+                !is_agent_readonly_shell_command(command),
+                "{command} must stay denied for agents"
+            );
+        }
+    }
+
+    /// The sequence count is bounded: the execution seam resolves one `cd`
+    /// per segment against the filesystem, so a pathological chain must not
+    /// buy unbounded gate work.
+    #[test]
+    fn agent_readonly_shell_bounds_the_number_of_sequence_segments() {
+        let at_limit = vec!["pwd"; MAX_READONLY_SEQUENCE_SEGMENTS].join("; ");
+        assert!(is_agent_readonly_shell_command(&at_limit));
+        let over_limit = vec!["pwd"; MAX_READONLY_SEQUENCE_SEGMENTS + 1].join("; ");
+        assert!(!is_agent_readonly_shell_command(&over_limit));
+        let nested_cd = vec!["cd ."; MAX_READONLY_SEQUENCE_SEGMENTS + 1].join(";");
+        assert!(!is_agent_readonly_shell_command(&nested_cd));
+    }
+
+    /// A `cd` joined by `&&`/`||` may never run — the predecessor's exit
+    /// status decides — while the seam folds every admitted `cd`
+    /// unconditionally, so the fold would judge later operands in a
+    /// directory the shell never entered (`cat nope && cd sub; cat link`
+    /// reads a root symlink unjudged; probed live on bash and sh). The
+    /// connector-aware classifier refuses the shape statically; the seam
+    /// re-checks it at the fold with its own `[cwd.conditional]` tag.
+    #[test]
+    fn agent_readonly_shell_rejects_conditionally_gated_cd() {
+        for command in [
+            "cat nope && cd sub; cat link",
+            "true || cd sub; cat link",
+            "wc -c f && cd sub",
+            "wc -c f || cd sub",
+            "pwd && cd sub; pwd",
+        ] {
+            assert!(
+                !is_agent_readonly_shell_command(command),
+                "a `cd` its connector may not run must refuse: {command}"
+            );
+        }
+        // A `cd` that always runs keeps folding: as the first segment of a
+        // conditional sequence, or joined by `;`.
+        for command in [
+            "cd sub && wc -c f",
+            "cd sub || wc -c f",
+            "wc -c f; cd sub; wc -c sub/f",
+        ] {
+            assert!(
+                is_agent_readonly_shell_command(command),
+                "a `cd` that always runs stays admitted: {command}"
+            );
+        }
+    }
+
+    /// `*` is the only wildcard the charset admits, because it is the only
+    /// one the operand gate can expand exactly like the shell; every other
+    /// glob metacharacter must refuse at the classifier so the walker never
+    /// has to model it.
+    #[test]
+    fn agent_readonly_shell_refuses_non_star_glob_metacharacters() {
+        for command in ["cat a?b", "cat a[b]c", "cat notes.{md,txt}", "cat (a)"] {
+            assert!(
+                !is_agent_readonly_shell_command(command),
+                "{command} carries a non-`*` wildcard and must refuse at the charset"
+            );
+        }
+    }
+
+    /// The `gh` host check reads operands by their literal spelling, so a
+    /// relative traversal that hides a repo target behind a single suffix
+    /// must refuse like its multi-suffix sibling already does, and a
+    /// three-component operand is what gh reads as `HOST/OWNER/REPO` —
+    /// single-label hosts included, which a DNS search domain resolves away
+    /// from github.com.
+    #[test]
+    fn agent_readonly_shell_rejects_gh_repo_path_traversals() {
+        for command in [
+            "gh repo view ../foo",
+            "gh pr list -R ../secret",
+            "gh repo view --repo=../o",
+            "gh pr list -R ../../x",
+            "gh repo view myhost/owner/repo",
+            "gh pr list -R myhost/o/r",
+            "gh repo view a/b/c",
+        ] {
+            assert!(
+                !is_agent_readonly_shell_command(command),
+                "{command} traverses behind the repo-operand host check"
+            );
+        }
+        assert!(is_agent_readonly_shell_command("gh repo view owner/repo"));
+        assert!(is_agent_readonly_shell_command("gh pr list -R owner/repo"));
+        assert!(is_agent_readonly_shell_command(
+            "gh repo view github.com/owner/repo"
+        ));
+        // A two-component operand is `OWNER/REPO` even when it spells a
+        // branch or tag with a slash-free first component.
+        assert!(is_agent_readonly_shell_command("gh pr view feature/x"));
+    }
+
+    /// `-j`/`-N` take real counts: a digit string past `u64` admits nowhere
+    /// and must refuse here instead of leaning on od's runtime error.
+    #[test]
+    fn agent_readonly_shell_bounds_od_skip_and_count_values() {
+        assert!(is_agent_readonly_shell_command("od -j 4294967296 -c x"));
+        assert!(is_agent_readonly_shell_command(
+            "od -N 18446744073709551615 -c x"
+        ));
+        assert!(!is_agent_readonly_shell_command(
+            "od -j 99999999999999999999999 -c x"
+        ));
+        assert!(!is_agent_readonly_shell_command(
+            "od -N 99999999999999999999999 -c x"
+        ));
+    }
+
+    /// Glued single-token spellings admit exactly like their separated
+    /// forms: `-A<value>` with the same fixed value set and `-j`/`-N` with
+    /// the same parsed (not digit-scanned) u64 bound. A glued value outside
+    /// the sets refuses like its separated spelling.
+    #[test]
+    fn agent_readonly_shell_admits_glued_od_forms() {
+        for command in [
+            "od -An -c x",
+            "od -Ao x",
+            "od -Ax x",
+            "od -Ad x",
+            "od -Anone -c x",
+            "od -j8 -c x",
+            "od -N32 x",
+            "od -j8 -N32 -c x",
+        ] {
+            assert!(
+                is_agent_readonly_shell_command(command),
+                "{command} should admit as a glued read-only od form"
+            );
+        }
+        for command in [
+            "od -Azz f",
+            "od -A9 f",
+            "od -jx f",
+            "od -Nx f",
+            "od -j99999999999999999999999 -c x",
+        ] {
+            assert!(
+                !is_agent_readonly_shell_command(command),
+                "{command} must stay denied as a glued od form"
+            );
+        }
+    }
+
+    /// The flags the seam's git hardening splices in must be spellable by a
+    /// defensive command too: refusing them while admitting the bare form
+    /// would punish the safer spelling.
+    #[test]
+    fn agent_readonly_shell_admits_the_flags_the_git_hardening_splices() {
+        for command in [
+            "git diff --no-ext-diff --no-textconv HEAD",
+            "git log --no-ext-diff --no-textconv --no-show-signature -n 1",
+            "git show --no-textconv HEAD",
+            "git blame --no-textconv note.txt",
+        ] {
+            assert!(
+                is_agent_readonly_shell_command(command),
+                "{command} spells the hardening the seam adds anyway and must admit"
+            );
+        }
+    }
+
+    /// The read-only grammar bounds the command text itself: every refusal
+    /// pass is linear with transient allocations, so an oversized command
+    /// must refuse at admission instead of buying host memory at dispatch.
+    #[test]
+    fn agent_readonly_shell_rejects_oversized_commands() {
+        let within = format!("wc -c {}", "a/".repeat(100));
+        assert!(is_agent_readonly_shell_command(&within));
+        let over = format!("wc -c {}", "a/".repeat(64 * 1024));
+        assert!(!is_agent_readonly_shell_command(&over));
+    }
+
+    /// Newline separators refuse at the charset gate outright: a `\n` (or
+    /// `\r`) never reaches the sequence split, so `cat f\ncd /` cannot
+    /// classify as two admitted segments — the second line would run under
+    /// a name no segment judge ever saw.
+    #[test]
+    fn agent_readonly_shell_rejects_newline_separators() {
+        assert!(!is_agent_readonly_shell_command("cat f\ncd /"));
+        assert!(!is_agent_readonly_shell_command("pwd\nls"));
+        assert!(!is_agent_readonly_shell_command("wc -c f\rg x"));
+        // The admitted spelling of the same probe, for contrast.
+        assert!(is_agent_readonly_shell_command("cat f; cd sub"));
+    }
+
+    /// The shell-lane routing term is classifier-level, not host-dependent:
+    /// any segment whose first word is the `cd` builtin must route to the
+    /// shell lane. Pinned here because on macOS `/usr/bin/cd` exists, so a
+    /// host-execution probe would pass through the wrong (direct-argv) lane
+    /// and hide a routing regression that breaks on Linux.
+    #[test]
+    fn agent_readonly_cd_routing_covers_every_segment_shape() {
+        for command in ["cd sub", "cd sub && wc -c f", "cd sub; pwd"] {
+            assert!(
+                agent_readonly_command_needs_shell_for_cd(command),
+                "{command} must route to the shell lane for the `cd` builtin"
+            );
+        }
+        for command in ["wc -c f", "cat x | od -c"] {
+            assert!(
+                !agent_readonly_command_needs_shell_for_cd(command),
+                "{command} has no `cd` and may keep the direct-argv lane"
+            );
+        }
+        // The routing term reads the first word exactly like the admitting
+        // classifier (`shell_words`), so a quoted `"cd"` still routes to the
+        // shell lane instead of falling into a direct-argv exec of the
+        // spelling with quotes.
+        assert!(agent_readonly_command_needs_shell_for_cd("\"cd\" sub"));
+    }
+
+    /// Clustered short options — the spellings models reach for first — are
+    /// admitted exactly when every letter is an admitted switch or the first
+    /// letter is an admitted value option; nothing outside the tables slips in
+    /// through a cluster.
+    #[test]
+    fn agent_text_filters_admit_clustered_short_options() {
+        for command in [
+            "cut -d, -f1 notes.csv",
+            "cut -d: -f2,3 notes.csv",
+            "comm -12 a.txt b.txt",
+            "comm -3 a.txt b.txt",
+            "sort -rn notes.txt",
+            "sort -k2 notes.txt",
+            "sort -k2,2n notes.txt",
+            "uniq -ci notes.txt",
+            "tr -ds abc xyz",
+            "cat notes.csv | cut -d, -f1 | sort -u",
+        ] {
+            assert!(
+                is_agent_readonly_shell_command(command),
+                "{command} should be an admitted clustered text filter"
+            );
+        }
+        for command in [
+            "sort -ro out.txt notes.txt",
+            "sort -no out.txt notes.txt",
+            "cut -zq notes.csv",
+            "comm -14 a.txt b.txt",
+            "tr -dq abc xyz",
+            "uniq -cz notes.txt out.txt",
+        ] {
+            assert!(
+                !is_agent_readonly_shell_command(command),
+                "{command} must stay denied: a cluster may not smuggle an unknown letter"
+            );
+        }
+    }
+
+    /// The per-stage network guard recognizes gh stages on tokens, not on
+    /// the parallel classifier's charset: the agent grammar admits `*`
+    /// operands, so a stage the whole-command predicate would un-admit is
+    /// still recognized and the network policy is consulted for it.
+    #[test]
+    fn github_stage_predicate_sees_glob_operand_stages() {
+        for stage in [
+            "gh pr list --search '*'",
+            "gh repo view *",
+            "gh issue list --limit '*'",
+        ] {
+            assert!(
+                is_agent_readonly_shell_command(stage),
+                "{stage} must be agent-admitted (the guard pin is then non-vacuous)"
+            );
+            assert!(
+                !is_parallel_readonly_command(stage),
+                "{stage}: the whole-command parallel classifier must stay strict on `*`"
+            );
+            assert!(
+                is_github_readonly_stage(stage),
+                "{stage}: the token-level stage predicate must recognize the gh read"
+            );
+        }
+        assert!(!is_github_readonly_stage("git status"));
+        assert!(!is_github_readonly_stage("cat gh issue list"));
+    }
+
+    /// The parent-side parallel auto-approve classifier keeps its whole-
+    /// command posture: no separators of any kind and no `cd`/`od`, exactly
+    /// as before the agent-surface relaxations.
+    #[test]
+    fn parallel_classifier_still_refuses_compound_cd_and_od_forms() {
+        for command in [
+            "wc -c f; wc -l f",
+            "cd sub && wc -c f",
+            "cd sub",
+            "ls; pwd",
+            "ls || pwd",
+            "od -c x",
+            "cat x | od -c",
+        ] {
+            assert!(
+                !is_parallel_readonly_command(command),
+                "{command} must stay parallel-strict"
+            );
+            assert!(
+                is_agent_readonly_shell_command(command),
+                "{command} should be agent read-only"
+            );
+        }
+    }
+
     #[test]
     fn parallel_classifier_stays_unchanged_for_parent_auto_approve() {
         // The relaxations belong to the agent surface only; the parent's
@@ -2227,6 +3142,114 @@ mod tests {
                 "{command} must stay parallel-strict"
             );
             assert!(is_agent_readonly_shell_command(command));
+        }
+    }
+
+    /// The gh `-q`/`--jq` admission rode the gh option table SHARED with the
+    /// parent-side parallel auto-approve classifier, so that classifier's
+    /// admitted set grew even though its source is byte-for-byte unchanged —
+    /// the "unchanged" claim is true of the source, not of the behavior.
+    /// Pin the delta deliberately: these are read-only gh reads (`-q` is
+    /// `--jq`), so the widened auto-approve surface is safe, and charset
+    /// brackets mean only jq filters without them pass either classifier.
+    #[test]
+    fn parallel_classifier_admits_gh_jq_reads_through_the_shared_gh_table() {
+        for command in ["gh pr list --jq .", "gh pr view 5 --json title -q .title"] {
+            assert!(
+                is_parallel_readonly_command(command),
+                "the shared gh table admits {command} for parent auto-approve too"
+            );
+            assert!(is_agent_readonly_shell_command(command));
+        }
+    }
+
+    /// The same shared-table mechanism, pinned for the git hardening flags
+    /// and the glued numeric value options the round-10 wave added: the
+    /// parent auto-approve set grew by `--no-ext-diff`/`--no-textconv`/
+    /// `--no-show-signature` git reads and by `head -n5`/`tail -c3`
+    /// spellings. All in-process hardening flags and value-bound digits —
+    /// the widened surface is safe, and pinning it keeps the "source
+    /// unchanged, behavior grew" disclosure honest.
+    #[test]
+    fn parallel_classifier_admits_shared_table_growth_through_the_git_and_value_tables() {
+        for command in [
+            "git diff --no-textconv",
+            "git log --no-ext-diff -1",
+            "git show --no-show-signature HEAD",
+            "head -n5 README.md",
+            "tail -c3 README.md",
+        ] {
+            assert!(
+                is_parallel_readonly_command(command),
+                "the shared git/value tables admit {command} for parent auto-approve too"
+            );
+            assert!(is_agent_readonly_shell_command(command));
+        }
+        for command in ["head -x5 f", "tail -c-3 f", "head -nX f"] {
+            assert!(
+                !is_parallel_readonly_command(command),
+                "{command} stays refused on both classifiers"
+            );
+            assert!(!is_agent_readonly_shell_command(command));
+        }
+    }
+
+    /// GNU head/tail accept the glued numeric value spellings (`-n5`,
+    /// `-c3`) their separated forms already admitted; the value stays bound
+    /// to its flag inside one argv word, so nothing new can be introduced.
+    #[test]
+    fn agent_readonly_shell_admits_glued_head_tail_numeric_values() {
+        for command in [
+            "head -n5 f.txt",
+            "head -n 5 f.txt",
+            "tail -c3 f.txt",
+            "tail -c 3 f.txt",
+            "head -n5 -q a.txt b.txt",
+        ] {
+            assert!(
+                is_agent_readonly_shell_command(command),
+                "{command} must admit like its separated form"
+            );
+        }
+        for command in [
+            "head -x5 f.txt",
+            "head -nX f.txt",
+            "head -n-3 f.txt",
+            "tail -q3 f.txt",
+        ] {
+            assert!(
+                !is_agent_readonly_shell_command(command),
+                "{command} stays refused"
+            );
+        }
+    }
+
+    /// od's numeric `-j`/`-N` values accept GNU's multiplicative suffixes
+    /// (`-N4k` dumps like `-N 4096`); the parse stays arithmetic — unknown
+    /// suffixes and suffix-multiplied overflow refuse.
+    #[test]
+    fn agent_readonly_shell_admits_od_suffix_numeric_values() {
+        for command in [
+            "od -N4k f.bin",
+            "od -N 4k f.bin",
+            "od -j1m -N8K f.bin",
+            "od -An -j2b f.bin",
+        ] {
+            assert!(
+                is_agent_readonly_shell_command(command),
+                "{command} must admit like its plain numeric form"
+            );
+        }
+        for command in [
+            "od -N4q f.bin",
+            "od -Nk f.bin",
+            "od -j99e f.bin",
+            "od -N -4k f.bin",
+        ] {
+            assert!(
+                !is_agent_readonly_shell_command(command),
+                "{command} stays refused"
+            );
         }
     }
 
@@ -2367,31 +3390,59 @@ mod tests {
         }
     }
 
+    /// The one gh-reach predicate every network ceiling consults (seam guard,
+    /// no-network subagent precheck, fleet envelope): it recognizes the gh
+    /// read inside any sequence segment or pipeline stage, and it does NOT
+    /// re-validate options or charset — the grammar refuses those spellings
+    /// before any ceiling runs, and a ceiling that under-recognized them
+    /// would be the bypass.
     #[test]
-    fn github_readonly_classifier_only_marks_the_networked_read_subset() {
+    fn command_reaches_github_readonly_recognizes_gh_reads_per_stage() {
         for command in [
             "gh issue list",
             "gh issue view 5287 --json title,state",
             "gh issue view 5287 -R owner/repo",
             "gh issue view 5287 -R github.com/owner/repo",
+            "pwd; gh repo view",
+            "gh repo view | head -n 3",
+            "ls && gh pr list --search '*'",
+            "cat notes.md; gh issue view 5287 | wc -l",
         ] {
             assert!(
-                is_github_readonly_command(command),
-                "{command} should be a read-only GitHub network command"
+                command_reaches_github_readonly(command),
+                "{command} reaches api.github.com through an admitted gh read"
             );
         }
         for command in [
             "git status",
+            "cat gh issue list",
             "gh issue edit 5287 --title changed",
+            "bash -lc 'gh pr checks 42'",
+            "bash -lc 'gh issue view 5287 && touch pwned'",
+            "pwd; ls | wc -l",
+            "gh issue list & cat f",
+        ] {
+            assert!(
+                !command_reaches_github_readonly(command),
+                "{command} must not be recognized as a gh read"
+            );
+        }
+        // Over-recognition by design: these never pass the grammar, and a
+        // ceiling that saw a redirect, a foreign host, or a refused flag and
+        // answered "not a gh read" would let the network through on the one
+        // path that does not re-run the grammar first.
+        for command in [
             "gh issue view 5287 > issue.txt",
             "gh issue view 5287 -R git.example.com/owner/repo",
             "gh pr checks 42 --watch",
-            "bash -lc 'gh pr checks 42'",
-            "bash -lc 'gh issue view 5287 && touch pwned'",
         ] {
             assert!(
-                !is_github_readonly_command(command),
-                "{command} must not be classified as read-only GitHub access"
+                command_reaches_github_readonly(command),
+                "{command} is a gh read for ceiling purposes even though the grammar refuses it"
+            );
+            assert!(
+                !is_parallel_readonly_command(command),
+                "{command} must stay refused by the grammar"
             );
         }
     }

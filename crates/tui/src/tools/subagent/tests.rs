@@ -7177,6 +7177,7 @@ fn every_named_role_has_one_complete_capability_based_surface() {
         "Web",
         "agent",
         "automation",
+        "bash",
         "diagnostics",
         "file_search",
         "finance",
@@ -8225,6 +8226,25 @@ async fn read_only_inspection_roles_cannot_write_through_text_filters() {
             posture_refusal.contains("[shell.readonly.command]"),
             "{role:?} posture refusal did not identify its failed rule: {posture_refusal}"
         );
+        // The copy is the model's only map of the grammar, and the one
+        // literal a sibling branch also rewrites: pin the load-bearing claims
+        // so a merge union that drops them reddens.
+        for claim in [
+            "Admitted families:",
+            "every segment of a sequence must individually be admitted",
+            &format!(
+                "at most {} segments",
+                crate::command_safety::MAX_READONLY_SEQUENCE_SEGMENTS
+            ),
+            "must be a directory the shell can enter",
+            "recursive `**/`",
+            "joined by `&&`/`||`",
+        ] {
+            assert!(
+                posture_refusal.contains(claim),
+                "{role:?} refusal copy lost {claim:?}: {posture_refusal}"
+            );
+        }
         assert!(
             !output_path.exists(),
             "{role:?} read-only filter created {} from {}",
@@ -8232,6 +8252,302 @@ async fn read_only_inspection_roles_cannot_write_through_text_filters() {
             input_path.display()
         );
     }
+}
+
+// ── Verifier evidence lane ───────────────────────────────────────────────────
+//
+// The `test` role exists to run the built-in verification gates and report
+// pass/fail with evidence. Its shell is narrowed to the same classifier-
+// bounded read-only probes the inspection roles use — so "with evidence"
+// includes evidence the child gathered itself (`wc`, `ls`, `cat`, `grep`) —
+// while custom commands stay refused and the workspace stays read-only.
+
+/// The roster description must promise exactly the surface the role has:
+/// built-in gates plus a bounded read-only evidence shell, no custom commands.
+#[test]
+fn verifier_roster_description_states_the_bounded_contract() {
+    let description = FleetRole::Verifier.description();
+    assert!(
+        description.contains("built-in verification gates"),
+        "roster description must name the built-in gates: {description}"
+    );
+    assert!(
+        description.contains("bounded read-only shell"),
+        "roster description must promise the bounded evidence shell: {description}"
+    );
+    assert!(
+        description.contains("cannot execute custom commands"),
+        "roster description must refuse custom commands: {description}"
+    );
+    // The Agent-tool `type` description carries the same truth, briefly.
+    assert!(
+        SUBAGENT_TYPE_DESCRIPTION.contains("test: runs the built-in verification gates"),
+        "type description must match the roster: {SUBAGENT_TYPE_DESCRIPTION}"
+    );
+}
+
+/// Acceptance for the verifier lane, sibling of
+/// `read_only_inspection_roles_execute_pwd_and_absolute_git_log`: a live
+/// `test` child must execute a bounded read-only probe through canonical
+/// `bash` — `wc -c` on a fixture — with the raw-shell deny list still
+/// installed, reaching the lane *through* it via
+/// `allows_bounded_readonly_bash`.
+#[cfg_attr(not(unix), ignore = "wc and unix paths")]
+#[tokio::test]
+async fn verifier_child_executes_a_bounded_readonly_bash_probe_for_evidence() {
+    let (tmp, registry) = read_only_with_shell_registry();
+    let fixture = tmp.path().join("evidence.txt");
+    std::fs::write(&fixture, "countable\n").expect("fixture");
+
+    let command = format!("wc -c {}", fixture.display());
+    assert!(
+        !registry.role_blocks_unhardened_process_tool("bash"),
+        "canonical bash must reach the bounded lane, not the unhardened wall"
+    );
+    let output = registry
+        .execute(
+            "agent_verifier_evidence",
+            "bash",
+            json!({ "command": command }),
+        )
+        .await
+        .unwrap_or_else(|error| panic!("verifier probe must run `{command}`: {error}"));
+    assert!(
+        output.contains("10"),
+        "verifier probe must report the fixture's byte count: {output}"
+    );
+}
+
+/// The walls around the lane stay up: the legacy raw `Bash` spelling, a
+/// custom `Run` command, and a workspace write are all refused for a
+/// verifier — at dispatch, and with the `reject_unbounded_verification`
+/// contract text for the custom command.
+#[tokio::test]
+async fn verifier_child_still_refuses_raw_shell_custom_commands_and_writes() {
+    let (_tmp, registry) = read_only_with_shell_registry();
+
+    let raw = registry
+        .execute(
+            "agent_verifier_walls",
+            "Bash",
+            json!({"action": "run", "command": "rm -rf src"}),
+        )
+        .await
+        .expect_err("legacy raw Bash must stay refused for a verifier");
+    let raw = raw.to_string();
+    assert!(
+        raw.contains("not available") || raw.contains("not allowed"),
+        "raw Bash refusal did not identify the wall: {raw}"
+    );
+    // The second legacy-`Bash` wall is the posture's classifier-lane rule: a
+    // command the classifier cannot prove read-only must not re-enter
+    // through the alias, pinned here on this Verifier-labeled registry (the
+    // sibling pin covers the same wall through a Scout fixture). A
+    // proven-read-only shape passes this wall and is caught by the role wall
+    // above.
+    assert!(
+        !registry.posture_permits_tool("Bash", Some(&json!({"command": "rm -rf src"}))),
+        "the posture wall must refuse unprovable commands through the legacy `Bash` alias for a Verifier"
+    );
+
+    let custom_command = json!({
+        "action": "verifiers",
+        "commands": [{"name": "x", "program": "bash", "args": ["-lc", "id"]}]
+    });
+    // The contract text, at the guard that owns it: a custom command is the
+    // unbounded form, refused for a write-denied child with or without shell.
+    assert!(
+        super::reject_unbounded_verification("Run", &custom_command, true).is_err()
+            && super::reject_unbounded_verification("Run", &custom_command, false).is_err(),
+        "custom Run commands must be refused by the unbounded-verification guard"
+    );
+    // …and the refusal reaches the real dispatch path too, from one of the
+    // two walls that own it — the approval gate (a Required call with no
+    // session decision) or the unbounded-verification guard — rather than
+    // failing for some unrelated reason.
+    let custom = registry
+        .execute("agent_verifier_walls", "Run", custom_command)
+        .await
+        .expect_err("custom Run commands are refused by design");
+    let custom = custom.to_string();
+    assert!(
+        custom.contains("requires approval") || custom.contains("operator-supplied commands"),
+        "custom command refusal must come from the approval or unbounded wall: {custom}"
+    );
+
+    let write = registry
+        .execute(
+            "agent_verifier_walls",
+            "File",
+            json!({"action": "write", "path": "a.rs", "content": "b"}),
+        )
+        .await
+        .expect_err("a verifier must not mutate the workspace");
+    assert!(
+        write.to_string().contains("not allowed") || write.to_string().contains("read-only"),
+        "workspace-write refusal did not identify the denial: {write}"
+    );
+}
+
+/// A registry for a write-capable role whose parent handed it a read-only
+/// shell and no writes — what `derive_child` produces for a Builder, Worker,
+/// or Custom child of a Scout or Planner on the plain `agent` nesting path,
+/// where no Fleet deny list is installed.
+fn read_only_shell_child_registry(role: FleetRole) -> (tempfile::TempDir, SubAgentToolRegistry) {
+    let tmp = tempdir().expect("tempdir");
+    let mut runtime =
+        stub_runtime().with_agent_tool_surface_options(enabled_agent_surface_options());
+    runtime.context = ToolContext::new(tmp.path().to_path_buf());
+    runtime.allow_shell = true;
+    let mut profile = WorkerRuntimeProfile::for_role(role.clone());
+    profile.permissions = crate::worker_profile::PermissionSet::read_only_with_network();
+    profile.shell = crate::worker_profile::ShellPolicy::ReadOnly;
+    runtime.worker_profile = profile;
+    let registry = SubAgentToolRegistry::new(
+        runtime,
+        role,
+        None,
+        Arc::new(Mutex::new(TodoList::new())),
+        Arc::new(Mutex::new(PlanState::default())),
+    );
+    (tmp, registry)
+}
+
+/// Shell authority is the Verifier's carve-out alone. Every other role whose
+/// runtime shell was narrowed to read-only — the Builder, Worker, or Custom
+/// child of a read-only parent — holds no process authority: the built-in
+/// test runner stays refused at posture and envelope and absent from the
+/// catalog, exactly as before the verifier lane existed, so delegation
+/// cannot widen a read-only parent into a child that runs the suite.
+#[tokio::test]
+async fn read_only_shell_children_of_other_roles_hold_no_shell_authority() {
+    let gate = json!({"action": "tests", "args": "--lib fleet::exact"});
+    for role in [FleetRole::Builder, FleetRole::Worker, FleetRole::Custom] {
+        let (_tmp, registry) = read_only_shell_child_registry(role.clone());
+        assert!(
+            !registry.posture_permits_tool("Run", Some(&gate)),
+            "{role:?} with a read-only shell must not hold the Required surface"
+        );
+        assert!(
+            registry.envelope_refusal("Run", &gate).is_some(),
+            "{role:?} envelope must report no shell authority"
+        );
+        let names: Vec<String> = registry
+            .tools_for_model(&role)
+            .iter()
+            .map(|tool| tool.name.clone())
+            .collect();
+        assert!(
+            !names.iter().any(|name| name == "Run"),
+            "{role:?} catalog must not offer the verification gate: {names:?}"
+        );
+        let refused = registry
+            .execute("agent_read_only_child", "Run", gate.clone())
+            .await
+            .expect_err("the test runner must stay refused for a read-only-shell child");
+        assert!(
+            refused.to_string().contains("not permitted") || refused.to_string().contains("shell"),
+            "{role:?}: {refused}"
+        );
+    }
+    // The carve-out itself: the same narrowed shell on the Verifier keeps the
+    // bounded gates (pinned in detail by
+    // `verifier_child_keeps_the_default_and_selection_bounded_run_surface`).
+    let (_tmp, verifier) = read_only_with_shell_registry();
+    assert!(verifier.posture_permits_tool("Run", Some(&gate)));
+    assert!(verifier.envelope_refusal("Run", &gate).is_none());
+}
+
+/// The purpose survives the narrowing: default gates and test-selection
+/// arguments stay admitted for the verifier at posture and envelope, and the
+/// catalog still offers `Run`.
+#[test]
+fn verifier_child_keeps_the_default_and_selection_bounded_run_surface() {
+    let (_tmp, registry) = read_only_with_shell_registry();
+
+    for input in [
+        json!({}),
+        json!({"action": "tests"}),
+        json!({"action": "tests", "args": "-p codewhale-tui"}),
+        json!({"action": "tests", "args": "--lib fleet::exact"}),
+    ] {
+        assert!(
+            registry.posture_permits_tool("Run", Some(&input)),
+            "verifier posture must admit the bounded gate: {input}"
+        );
+        assert!(
+            registry.envelope_refusal("Run", &input).is_none(),
+            "verifier envelope must admit the bounded gate: {input}"
+        );
+    }
+    let tools = registry.tools_for_model(&FleetRole::Verifier);
+    let names: Vec<&str> = tools.iter().map(|tool| tool.name.as_str()).collect();
+    assert!(
+        names.contains(&"Run"),
+        "catalog must keep offering the verification gate: {names:?}"
+    );
+}
+
+/// A Verifier child of a read-only role parent (its shell was clamped by the
+/// parent, not narrowed by the Verifier role) regains nothing through the
+/// carve-out: the built-in gate runner stays refused at posture and envelope
+/// and off the catalog, while the classifier-bounded bash evidence lane —
+/// which the read-only parent holds too — keeps working. Delegation moves
+/// work, never authority.
+#[tokio::test]
+async fn clamped_verifier_child_of_read_only_parent_holds_no_run_surface() {
+    let (_tmp, registry) = read_only_shell_child_registry(FleetRole::Verifier);
+    for input in [
+        json!({}),
+        json!({"action": "tests"}),
+        json!({"action": "tests", "args": "-p codewhale-tui"}),
+    ] {
+        assert!(
+            !registry.posture_permits_tool("Run", Some(&input)),
+            "a clamped verifier must not run gates: {input}"
+        );
+        assert!(
+            registry.envelope_refusal("Run", &input).is_some(),
+            "the envelope must refuse the gate for a clamped verifier: {input}"
+        );
+    }
+    let tools = registry.tools_for_model(&FleetRole::Verifier);
+    let names: Vec<&str> = tools.iter().map(|tool| tool.name.as_str()).collect();
+    assert!(
+        !names.contains(&"Run"),
+        "the clamped verifier catalog must not offer the gate: {names:?}"
+    );
+    assert!(
+        names.contains(&"bash"),
+        "the clamped verifier keeps the shared bash evidence lane: {names:?}"
+    );
+    assert!(
+        registry.posture_permits_tool("bash", Some(&json!({"command": "pwd"}))),
+        "the shared evidence lane admits read-only probes"
+    );
+    assert!(
+        !registry.posture_permits_tool("bash", Some(&json!({"command": "rm -rf src"}))),
+        "the evidence lane stays classifier-bounded"
+    );
+}
+
+/// The verifier intro tells the child about its bounded read-only shell and
+/// the custom-command refusal, scoped to in-session delegations the way
+/// `FleetRole`'s roster description scopes the role.
+#[test]
+fn verifier_intro_states_the_evidence_contract() {
+    assert!(
+        VERIFIER_AGENT_INTRO.contains("bounded read-only shell"),
+        "verifier intro must name the bounded read-only evidence shell: {VERIFIER_AGENT_INTRO}"
+    );
+    assert!(
+        VERIFIER_AGENT_INTRO.contains("custom commands are refused"),
+        "verifier intro must repeat the custom-command refusal: {VERIFIER_AGENT_INTRO}"
+    );
+    assert!(
+        VERIFIER_AGENT_INTRO.contains("in-session delegations"),
+        "the verifier's bounded read-only shell must be scoped to in-session delegations: {VERIFIER_AGENT_INTRO}"
+    );
 }
 
 #[test]
@@ -8617,17 +8933,31 @@ async fn scout_shell_respects_parent_shell_and_network_ceilings() {
             crate::tools::todo::new_shared_todo_list(),
             crate::tools::plan::new_shared_plan_state(),
         );
-        assert!(
-            !tool_names(registry.tools_for_model(&role)).contains("bash"),
-            "{role:?} must not inherit the read-only inspection bash catalog"
-        );
-        if role == FleetRole::Verifier {
+        if role == FleetRole::Consultant {
             assert!(
-                registry
-                    .execute("agent_verifier", "bash", json!({"command": "pwd"}))
-                    .await
-                    .is_err(),
-                "Verifier keeps bounded Run, never arbitrary Bash"
+                !tool_names(registry.tools_for_model(&role)).contains("bash"),
+                "{role:?} must not inherit the read-only inspection bash catalog"
+            );
+        } else {
+            // The verifier shares the inspection lane: canonical lowercase
+            // `bash` is advertised and classifier-bounded — evidence probes
+            // run, arbitrary shell keeps the bounded-lane refusal.
+            assert!(
+                tool_names(registry.tools_for_model(&role)).contains("bash"),
+                "verifier must advertise the bounded read-only bash lane"
+            );
+            let probe = registry
+                .execute("agent_verifier", "bash", json!({"command": "pwd"}))
+                .await
+                .expect("the verifier's bounded read-only probe runs");
+            assert!(!probe.trim().is_empty(), "pwd must return evidence");
+            let arbitrary = registry
+                .execute("agent_verifier", "bash", json!({"command": "rm -rf src"}))
+                .await
+                .expect_err("arbitrary shell stays refused behind the lane");
+            assert!(
+                arbitrary.to_string().contains("[shell.readonly.command]"),
+                "unexpected refusal: {arbitrary}"
             );
         }
     }
@@ -9016,12 +9346,13 @@ fn every_fleet_role_catalog_advertises_one_executable_load_skill() {
                     "read-only role {role:?} keeps load_skill without gaining {denied}"
                 );
             }
-            // Scout/reviewer/planner expose only canonical lowercase bash,
-            // whose concrete calls are reclassified. Verifier keeps its
-            // bounded Run surface but not raw bash.
+            // Inspection roles and the verifier expose only canonical
+            // lowercase bash, whose concrete calls are reclassified by the
+            // read-only classifier (the verifier's evidence lane). Consultant
+            // is shell-less and gains no bash at all.
             if matches!(
                 &role,
-                FleetRole::Scout | FleetRole::Reviewer | FleetRole::Planner
+                FleetRole::Scout | FleetRole::Reviewer | FleetRole::Planner | FleetRole::Verifier
             ) {
                 assert!(names.contains("bash"), "{role:?} keeps read-only bash");
                 for denied in ["exec_shell", "task_shell_start"] {
@@ -19738,6 +20069,21 @@ fn a_network_denied_child_cannot_address_a_remote_location_through_any_tool() {
             "Bash",
             json!({"action": "run", "command": "gh issue view 5287"}),
         ),
+        // A gh read inside a compound or carrying a `*` reaches the network
+        // exactly like the bare one; the whole-command parallel classifier
+        // used to answer "not a gh read" for all three and let them through.
+        (
+            "bash",
+            json!({"action": "run", "command": "pwd; gh repo view"}),
+        ),
+        (
+            "bash",
+            json!({"action": "run", "command": "gh pr list --search '*'"}),
+        ),
+        (
+            "exec_shell",
+            json!({"action": "run", "command": "gh repo view | head -n 3"}),
+        ),
     ] {
         assert!(
             reject_network_reaching_input(name, &input).is_err(),
@@ -19763,6 +20109,10 @@ fn a_network_denied_child_cannot_address_a_remote_location_through_any_tool() {
         ("review", json!({"target": "crates/tui/src/main.rs"})),
         ("Git", json!({"action": "diff"})),
         ("clone", json!({"url": "git@github.com:o/r.git"})),
+        (
+            "bash",
+            json!({"action": "run", "command": "pwd; cat gh-notes.md | wc -l"}),
+        ),
     ] {
         assert!(
             reject_network_reaching_input(name, &input).is_ok(),
@@ -20125,9 +20475,11 @@ fn a_verifier_runs_bounded_test_selections_and_nothing_else_at_dispatch() {
 }
 
 /// Catalog and dispatch must agree: the verification surface the guard admits
-/// is offered, and the raw shell it refuses is absent.
+/// is offered, and the legacy raw-shell spellings it refuses are absent (the
+/// verifier's shell surface is the bounded canonical `bash` tool pinned by
+/// the read-only-shell tests, not the legacy `Bash`/`exec_shell` names).
 #[test]
-fn the_verifier_catalog_offers_the_verification_surface_and_no_shell() {
+fn the_verifier_catalog_offers_run_without_the_legacy_raw_shell_spellings() {
     let (_tmp, registry) = read_only_with_shell_registry();
     let tools = registry.tools_for_model(&FleetRole::Verifier);
     let names: Vec<&str> = tools.iter().map(|tool| tool.name.as_str()).collect();

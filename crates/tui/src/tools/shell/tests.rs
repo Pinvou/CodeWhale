@@ -517,9 +517,10 @@ fn forkguard_shell_catalog_guidance_matches_execution() {
     assert!(tool.description().contains("background=true"));
     let readonly = BashTool::read_only("Bash");
     // Forkguard: the read-only description must match execution — argv for
-    // single commands, and the shell only for the explicitly disclosed
-    // pipeline exception, whose pipefail prefix is conditional on the
-    // detected shell actually supporting it.
+    // single commands, the shell for pipelines, `;`/`&&`/`||` sequences, and
+    // commands with a `cd` segment, with the pipefail prefix scoped to
+    // pipefail-capable binaries, cmd.exe refusals stated, and a standalone
+    // `cd` scoped to its own command.
     assert!(
         readonly
             .description()
@@ -528,9 +529,26 @@ fn forkguard_shell_catalog_guidance_matches_execution() {
     assert!(
         readonly
             .description()
-            .contains("runs through the detected shell")
+            .contains("run through the detected shell instead")
+    );
+    assert!(readonly.description().contains("`&&`/`||` sequences"));
+    assert!(
+        readonly
+            .description()
+            .contains("commands with a `cd` segment")
     );
     assert!(readonly.description().contains("set -o pipefail"));
+    assert!(readonly.description().contains("bash, zsh, ksh"));
+    assert!(
+        readonly
+            .description()
+            .contains("`%` are refused on a cmd.exe host")
+    );
+    assert!(
+        readonly
+            .description()
+            .contains("a standalone `cd` affects only that one command")
+    );
     assert!(
         !readonly
             .input_schema()
@@ -1196,6 +1214,16 @@ fn readonly_operands_are_workspace_bounded_and_symlink_aware() {
     .to_string();
     assert!(error.contains("operand.outside_workspace"), "{error}");
 
+    // zsh's EQUALS expansion resolves `=cmd` operands to the command's
+    // absolute path on the shell lane; the spelling is refused outright
+    // instead of being skipped as a nonexistent relative path.
+    for command in ["cat =ls | wc -l", "pwd; cat =ls", "wc -c =sh"] {
+        let error = enforce_readonly_workspace_operands(command, &roots, workspace.path())
+            .expect_err("an `=cmd` operand must be refused")
+            .to_string();
+        assert!(error.contains("operand.shape"), "{command}: {error}");
+    }
+
     for command in [
         "cat ../secret.txt",
         "cat ~/.ssh/id_rsa",
@@ -1233,6 +1261,2712 @@ fn readonly_operands_are_workspace_bounded_and_symlink_aware() {
         enforce_readonly_workspace_operands("cat secret-link", &roots, &subdir)
             .expect_err("operands must resolve relative to the effective cwd");
     }
+}
+
+/// Discovery with the scanned repository itself as the sole workspace root —
+/// the shape every fixture uses (the production lane passes the full
+/// declared root set and runs the operand gate first).
+fn discover_pins(
+    command: &str,
+    cwd: &std::path::Path,
+) -> Result<Vec<ReadonlyGitFilterPin>, ToolError> {
+    let roots = vec![cwd.to_path_buf()];
+    super::discover_readonly_git_filter_pins(command, cwd, &roots)
+}
+
+/// A plain git invocation with identity config, for fixtures that need a
+/// real index: any failure is the fixture's fault, asserted here.
+fn git_helper(args: &[&str], cwd: &std::path::Path) {
+    let output = std::process::Command::new("git")
+        .args(["-c", "user.name=t", "-c", "user.email=t@example.invalid"])
+        .args(args)
+        .current_dir(cwd)
+        .output()
+        .expect("git runs");
+    assert!(
+        output.status.success(),
+        "git {args:?} failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+/// A minimal on-disk git directory git itself accepts — HEAD plus the
+/// objects/ and refs/ directories — enough for the enumeration's
+/// `git ls-files --stage` to report an empty index without a real
+/// `git init`, so hand-built config fixtures stay scanned end to end.
+fn seed_minimal_gitdir(gitdir: &std::path::Path) {
+    std::fs::create_dir_all(gitdir.join("objects")).expect("objects dir");
+    std::fs::create_dir_all(gitdir.join("refs")).expect("refs dir");
+    std::fs::write(gitdir.join("HEAD"), "ref: refs/heads/main\n").expect("HEAD");
+}
+
+/// A `.gitattributes` filter assignment only executes when the repository's
+/// own config defines the filter, and repo config is the one config source
+/// the read-only env block does not pin away — so discovery must return
+/// exactly the armed names, and nothing for a repository whose attributes
+/// name an undefined filter.
+#[test]
+fn readonly_filter_discovery_pins_declared_filters() {
+    let repo = tempdir().expect("repo");
+    let gitdir = repo.path().join(".git");
+    std::fs::create_dir_all(&gitdir).expect("gitdir");
+    seed_minimal_gitdir(&gitdir);
+    std::fs::write(
+        gitdir.join("config"),
+        "[core]\n\trepositoryformatversion = 0\n[filter \"lfs\"]\n\tclean = git-lfs clean -- %f\n\tsmudge = git-lfs smudge -- %f\n\tprocess = git-lfs filter-process\n",
+    )
+    .expect("config");
+    let pins =
+        discover_pins("git status -s", repo.path()).expect("an armed filter is discoverable");
+    assert_eq!(pins.len(), 1, "{pins:?}");
+    assert_eq!(pins[0].name, "lfs");
+    assert!(
+        pins[0].clean && pins[0].smudge && pins[0].process,
+        "{pins:?}"
+    );
+
+    // An attribute naming an undefined filter runs nothing: no config
+    // declaration, no pin.
+    std::fs::remove_file(gitdir.join("config")).expect("drop config");
+    let pins = discover_pins("git status -s", repo.path()).expect("no config declares nothing");
+    assert!(pins.is_empty(), "undefined filters are inert: {pins:?}");
+
+    // A repository defines nothing for a command with no git stage; the
+    // scan stays off the filesystem entirely.
+    let pins = discover_pins("wc -c f", repo.path()).expect("no git stage scans nothing");
+    assert!(pins.is_empty(), "{pins:?}");
+
+    // A `[filter]` section without a subsection builds two-part keys no
+    // `filter.<driver>.<key>` lookup ever reads: inert.
+    std::fs::write(
+        gitdir.join("config"),
+        "[filter]\n\tprocess = convert-lite filter\n",
+    )
+    .expect("config");
+    let pins = discover_pins("git diff HEAD", repo.path())
+        .expect("a bare filter section is inert, not an error");
+    assert!(pins.is_empty(), "{pins:?}");
+
+    // A partial declaration arms only its own keys: `required` alone never
+    // executes a conversion, so nothing is pinned for it.
+    std::fs::write(
+        gitdir.join("config"),
+        "[filter \"lfs\"]\n\tclean = git-lfs clean -- %f\n",
+    )
+    .expect("config");
+    let pins =
+        discover_pins("git status -s", repo.path()).expect("a clean-only filter is discoverable");
+    assert_eq!(pins.len(), 1, "{pins:?}");
+    assert!(
+        pins[0].clean && !pins[0].smudge && !pins[0].process,
+        "{pins:?}"
+    );
+
+    // Filter names are matched byte for byte, the way git matches an
+    // attribute value against a config subsection: case-variant sections
+    // are two drivers, and each spelling gets its own pins so the variant
+    // the attributes name is covered whichever casing it uses.
+    std::fs::write(
+        gitdir.join("config"),
+        "[filter \"Mix\"]\n\tclean = cat\n[filter \"mix\"]\n\tclean = evil\n",
+    )
+    .expect("config");
+    let pins = discover_pins("git status -s", repo.path())
+        .expect("case-variant filters are two drivers, not one");
+    let mut spellings = pins.iter().map(|pin| pin.name.as_str()).collect::<Vec<_>>();
+    spellings.sort();
+    assert_eq!(spellings, ["Mix", "mix"], "{pins:?}");
+
+    // git accepts keys on the section-header line (`[filter "x"] clean = v`
+    // is one physical line); skipping the text after `]` would hide an
+    // armed driver from the scan while git still runs it.
+    std::fs::write(
+        gitdir.join("config"),
+        "[filter \"sl\"] clean = evil\n[filter \"plain\"]\n\tclean = cat\n",
+    )
+    .expect("config");
+    let pins = discover_pins("git status -s", repo.path())
+        .expect("same-line section keys parse like git's own");
+    let mut spellings = pins.iter().map(|pin| pin.name.as_str()).collect::<Vec<_>>();
+    spellings.sort();
+    assert_eq!(spellings, ["plain", "sl"], "{pins:?}");
+    assert!(pins.iter().all(|pin| pin.clean), "{pins:?}");
+
+    // One line can carry TWO headers: git re-targets the section at every
+    // `[` after a header's `]`, so the following key arms the LAST header's
+    // driver — a parser that stopped at the first header would pin `decoy`
+    // (which git never arms) while `evil` stayed live and unpinned.
+    std::fs::write(
+        gitdir.join("config"),
+        "[filter \"decoy\"] [filter \"evil\"]\nclean = cat\n",
+    )
+    .expect("config");
+    let pins = discover_pins("git status -s", repo.path())
+        .expect("the second header on the line owns the following key");
+    assert_eq!(pins.len(), 1, "{pins:?}");
+    assert_eq!(pins[0].name, "evil", "{pins:?}");
+    assert!(pins[0].clean, "{pins:?}");
+
+    // A `;`/`#` outside quotes starts a comment ANYWHERE in the line — in a
+    // value too — and a comment ends the logical line: the trailing
+    // backslash inside it never continues it, so the next line parses as
+    // the key git treats it as. Both keys arm; a parser that saw the
+    // backslash first would swallow `smudge` into `clean`'s value and leave
+    // it unpinned while git still ran it.
+    std::fs::write(
+        gitdir.join("config"),
+        "[filter \"comment-cut\"]\n\tclean = cat ; note \\\n\tsmudge = evil\n",
+    )
+    .expect("config");
+    let pins = discover_pins("git status -s", repo.path())
+        .expect("a comment ends the logical line before its backslash");
+    assert_eq!(pins.len(), 1, "{pins:?}");
+    assert_eq!(pins[0].name, "comment-cut", "{pins:?}");
+    assert!(pins[0].clean && pins[0].smudge, "{pins:?}");
+
+    // A quote opened on a value line carries its state into the
+    // continuation lines and closes there; the key after the closed quote
+    // still parses and arms. The carried state decides whether a `;` on the
+    // continuation line is even a comment.
+    std::fs::write(
+        gitdir.join("config"),
+        "[filter \"quoted-over-lines\"]\n\tclean = \"multi \\\nline value\"\n[filter \"after-quote\"]\n\tclean = evil\n",
+    )
+    .expect("config");
+    let pins = discover_pins("git status -s", repo.path())
+        .expect("a quote closing on the continuation line keeps the following key armed");
+    let mut spellings = pins.iter().map(|pin| pin.name.as_str()).collect::<Vec<_>>();
+    spellings.sort();
+    assert_eq!(spellings, ["after-quote", "quoted-over-lines"], "{pins:?}");
+
+    // A value continues onto the next physical line only when it ends in an
+    // odd number of backslashes (an escaped backslash is a pair); the next
+    // line is value text either way, never a key. Comments never continue —
+    // git parses the line after a backslash-terminated comment normally,
+    // and a filter hidden there must be discovered, not skipped.
+    std::fs::write(
+        gitdir.join("config"),
+        "# changenote \\\n[filter \"after-comment\"]\n\tclean = evil\n[filter \"cont\"]\n\tclean = evil \\\n\t--flag\n[filter \"ends\"]\n\tvalue = a\\\\ \n[filter \"after-pairs\"]\n\tclean = evil\n",
+    )
+    .expect("config");
+    let pins = discover_pins("git status -s", repo.path())
+        .expect("continuation handling mirrors git's parser");
+    // `ends` declares only a `value` key — no conversion armed, nothing to
+    // pin — but its `a\\` spelling is load-bearing: misreading the escaped
+    // backslash as a continuation would swallow `[filter "after-pairs"]`
+    // and drop it from this list, and the same misread on the comment line
+    // would swallow `[filter "after-comment"]`.
+    let mut spellings = pins.iter().map(|pin| pin.name.as_str()).collect::<Vec<_>>();
+    spellings.sort();
+    assert_eq!(
+        spellings,
+        ["after-comment", "after-pairs", "cont"],
+        "{pins:?}"
+    );
+    for name in ["after-comment", "after-pairs", "cont"] {
+        let pin = pins.iter().find(|pin| pin.name == name).expect("armed pin");
+        assert!(pin.clean, "{name} must arm clean: {pins:?}");
+    }
+
+    // A linked worktree checkout's `.git` is a *file* pointing at
+    // `<main>/.git/worktrees/<name>`, whose `commondir` points back at the
+    // shared config; discovery must follow both hops, the way git resolves
+    // the repository from inside the checkout.
+    let worktree_gitdir = gitdir.join("worktrees").join("w");
+    std::fs::create_dir_all(&worktree_gitdir).expect("worktree gitdir");
+    std::fs::write(worktree_gitdir.join("commondir"), "../..").expect("commondir");
+    // A linked worktree gitdir carries its own HEAD (the index and refs
+    // resolve through the commondir chain).
+    std::fs::write(worktree_gitdir.join("HEAD"), "ref: refs/heads/main\n").expect("worktree HEAD");
+    std::fs::write(
+        gitdir.join("config"),
+        "[filter \"shared\"]\n\tclean = cat\n",
+    )
+    .expect("shared config");
+    let checkout = repo.path().join("wt-checkout");
+    std::fs::create_dir_all(&checkout).expect("worktree checkout");
+    std::fs::write(
+        checkout.join(".git"),
+        format!("gitdir: {}", worktree_gitdir.display()),
+    )
+    .expect("gitdir link");
+    let pins = discover_pins("git status", &checkout)
+        .expect("the worktree's shared config is scanned through the gitdir link");
+    assert_eq!(pins.len(), 1, "{pins:?}");
+    assert_eq!(pins[0].name, "shared", "{pins:?}");
+}
+
+/// A registered submodule is a repository git itself forks a
+/// `git status`/`git diff` child into, and that child converts content
+/// under the submodule's own repository config — its filters run under an
+/// admitted superproject read, so discovery must scan them too, nested
+/// registration included. The registration set comes from the INDEX
+/// (`git ls-files --stage` gitlinks — git's own fork criterion), not from
+/// `.gitmodules`: that file is only a label, and git still forks into the
+/// submodule with it deleted from the worktree and from the index alike,
+/// so the scan must find the gitlink without it. A gitlink whose path holds
+/// no repository is no fork target and scans nothing.
+#[cfg(unix)]
+#[test]
+fn readonly_filter_discovery_scans_registered_submodules() {
+    let root = tempdir().expect("superproject");
+    let git = |args: &[&str], cwd: &std::path::Path| {
+        let output = std::process::Command::new("git")
+            .args(["-c", "user.name=t", "-c", "user.email=t@example.invalid"])
+            .args(args)
+            .current_dir(cwd)
+            .output()
+            .expect("git runs");
+        assert!(
+            output.status.success(),
+            "git {args:?} failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    };
+    // The submodule source repository.
+    let sub_src = root.path().join("sub-src");
+    std::fs::create_dir(&sub_src).expect("submodule source");
+    git(&["init", "-q", "."], &sub_src);
+    std::fs::write(sub_src.join("file.txt"), "seed\n").expect("submodule file");
+    git(&["add", "."], &sub_src);
+    git(&["commit", "-q", "-m", "seed"], &sub_src);
+    // The superproject registers it; the checkout lands at `sub` with the
+    // absorbed gitdir at `.git/modules/sub`.
+    git(&["init", "-q", "."], root.path());
+    let source = sub_src.to_string_lossy().to_string();
+    git(
+        &[
+            "-c",
+            "protocol.file.allow=always",
+            "submodule",
+            "add",
+            "-q",
+            &source,
+            "sub",
+        ],
+        root.path(),
+    );
+    git(&["commit", "-q", "-m", "register submodule"], root.path());
+    // Arm the filter ONLY in the submodule's own repository config — the
+    // superproject's config declares nothing.
+    git(
+        &[
+            "config",
+            "--file",
+            ".git/modules/sub/config",
+            "filter.inner.clean",
+            "evil",
+        ],
+        root.path(),
+    );
+
+    // `.gitmodules` deleted from the worktree AND dropped from the index:
+    // the gitlink is still registered, and the scan still finds and pins
+    // the submodule without consulting the file at all.
+    std::fs::remove_file(root.path().join(".gitmodules")).expect("drop .gitmodules");
+    git(&["rm", "--cached", ".gitmodules"], root.path());
+    let pins = discover_pins("git status -s", root.path())
+        .expect("a registered submodule is found through its index gitlink without .gitmodules");
+    assert_eq!(pins.len(), 1, "{pins:?}");
+    assert_eq!(pins[0].name, "inner", "{pins:?}");
+
+    // Registration nests: the forked child git runs inside `sub` forks its
+    // own children into `sub`'s gitlinks, so their repositories scan too.
+    let nested_src = root.path().join("nested-src");
+    std::fs::create_dir(&nested_src).expect("nested source");
+    git(&["init", "-q", "."], &nested_src);
+    std::fs::write(nested_src.join("deep.txt"), "seed\n").expect("nested file");
+    git(&["add", "."], &nested_src);
+    git(&["commit", "-q", "-m", "seed"], &nested_src);
+    let nested_source = nested_src.to_string_lossy().to_string();
+    git(
+        &[
+            "-c",
+            "protocol.file.allow=always",
+            "submodule",
+            "add",
+            "-q",
+            &nested_source,
+            "subsub",
+        ],
+        &root.path().join("sub"),
+    );
+    git(
+        &["commit", "-q", "-m", "register nested"],
+        &root.path().join("sub"),
+    );
+    git(
+        &[
+            "config",
+            "--file",
+            ".git/modules/sub/modules/subsub/config",
+            "filter.deep.clean",
+            "evil",
+        ],
+        root.path(),
+    );
+    let pins = discover_pins("git status -s", root.path())
+        .expect("nested submodule filters are discovered");
+    let mut spellings = pins.iter().map(|pin| pin.name.as_str()).collect::<Vec<_>>();
+    spellings.sort();
+    assert_eq!(spellings, ["deep", "inner"], "{pins:?}");
+
+    // A gitlink whose path holds no repository (registered by hand through
+    // the index) is no fork target: nothing to scan, no refusal.
+    git(
+        &[
+            "update-index",
+            "--add",
+            "--cacheinfo",
+            "160000,0123456789012345678901234567890123456789,plain",
+        ],
+        root.path(),
+    );
+    let pins = discover_pins("git status -s", root.path())
+        .expect("a gitlink without a repository scans nothing");
+    let mut spellings = pins.iter().map(|pin| pin.name.as_str()).collect::<Vec<_>>();
+    spellings.sort();
+    assert_eq!(spellings, ["deep", "inner"], "{pins:?}");
+}
+
+/// Index gitlink paths the lane cannot resolve byte-faithfully refuse
+/// instead of silently skipping a submodule: quoted or escaped spellings,
+/// undecodable bytes, and path components leaving the worktree all refuse —
+/// the same rules the former `.gitmodules` reader applied, now applied to
+/// the index listing that actually decides git's fork. Plain spellings
+/// (including ones with spaces or nested directories) resolve.
+#[test]
+fn readonly_gitlink_paths_refuse_unresolvable_path_spellings() {
+    for path in ["\u{fffd}b", "../escape", "a/../b", "/absolute", ".", ""] {
+        let error = validated_git_metadata_path(path)
+            .expect_err("an unresolvable gitlink path must refuse");
+        assert!(
+            error.contains("this lane") || error.contains("this lane bounds"),
+            "{path}: {error}"
+        );
+    }
+    // On unix `"` and `\` are ordinary filename bytes the lane consumes
+    // in-process — never re-quoted — so a legitimate submodule by that name
+    // is scanned like git runs it. (The Windows-side refusal pin below keeps
+    // the separator/quote ambiguity refused there.)
+    for path in ["\"a b\"", "a\\b", "deep/nest\"ed", "back\\slash"] {
+        validated_git_metadata_path(path).expect("a unix-legal gitlink path resolves");
+    }
+    for path in ["sub", "deep/nested/sub", "a b"] {
+        validated_git_metadata_path(path).expect("a plain gitlink path resolves");
+    }
+}
+
+/// Windows separator syntax: a gitlink path carrying a quote or a backslash
+/// stays refused there (unix admits both — see the unix arm of the pin
+/// above), matching the same rule the validator applies by `cfg`.
+#[cfg(windows)]
+#[test]
+fn readonly_gitlink_paths_refuse_quoted_and_backslash_spellings_on_windows() {
+    for path in ["\"a b\"", "a\\b"] {
+        let error = validated_git_metadata_path(path)
+            .expect_err("a Windows-unspellable gitlink path must refuse");
+        assert!(error.contains("this lane"), "{path}: {error}");
+    }
+}
+
+/// The env-config mechanism the filter pins ride needs git >= 2.32: the
+/// `GIT_CONFIG_COUNT` feed arrived in 2.31, but `GIT_CONFIG_GLOBAL` — which
+/// turns the operator's global config off, the wall a repo-local
+/// `.gitattributes` referencing a global-only filter depends on — arrived
+/// in 2.32. Older git silently drops the environment block (or leaves the
+/// global config live), and for `status`/`ls-files`/`grep` those pins are
+/// the only wall, so the version gate must prove the mechanism exists and
+/// refuse what it cannot prove.
+#[test]
+fn git_env_config_support_needs_two_thirty_two() {
+    assert!(git_env_config_supported("git version 2.43.0"));
+    assert!(git_env_config_supported(
+        "git version 2.32.1 (Apple Git-137)"
+    ));
+    assert!(git_env_config_supported("git version 2.32.0.windows.1"));
+    assert!(git_env_config_supported("git version 2.32"));
+    // The feed pins alone exist on 2.31.x, but the global-config wall does
+    // not: refuse the whole window.
+    assert!(!git_env_config_supported("git version 2.31.9"));
+    assert!(!git_env_config_supported("git version 2.30.9"));
+    assert!(!git_env_config_supported("git version 1.9"));
+    // A major alone proves nothing about the minor floor: refuse.
+    assert!(!git_env_config_supported("git version 2"));
+    assert!(!git_env_config_supported(""));
+    assert!(!git_env_config_supported("not a git version output"));
+}
+
+/// Anything that could hide a filter from the config scan refuses instead of
+/// pinning a partial set: `include` directives, the worktree-config
+/// extension, unspellable filter names, and more names than the pin set
+/// bounds.
+#[test]
+fn readonly_filter_discovery_refuses_configs_it_cannot_enumerate() {
+    let repo = tempdir().expect("repo");
+    let gitdir = repo.path().join(".git");
+    std::fs::create_dir_all(&gitdir).expect("gitdir");
+    seed_minimal_gitdir(&gitdir);
+    let refusal = |config: &str, label: &str| {
+        std::fs::write(gitdir.join("config"), config).expect("config");
+        let error = discover_pins("git status -s", repo.path())
+            .expect_err(label)
+            .to_string();
+        assert!(
+            error.contains("shell.readonly.git.filter_config"),
+            "{label}: {error}"
+        );
+    };
+    refusal(
+        "[include]\n\tpath = ../evil.config\n",
+        "an include directive can declare filters outside the scan",
+    );
+    refusal(
+        "[includeIf \"gitdir:~/\"]\n\tpath = ../evil.config\n",
+        "a conditional include hides config the same way",
+    );
+    // git parses keys on a header line too; the same-line spelling must
+    // hit the same walls.
+    refusal(
+        "[include] path = ../evil.config\n",
+        "a same-line include can declare filters outside the scan",
+    );
+    refusal(
+        "[extensions] worktreeConfig = true\n",
+        "a same-line worktree-config extension adds a config file the scan does not read",
+    );
+    // `core.worktree` relocates the worktree git resolves against — an
+    // admitted read would list and display files outside the workspace.
+    // The redirect below resolves (the target exists) but points away from
+    // the worktree the repository was discovered in.
+    std::fs::create_dir(repo.path().join("elsewhere")).expect("redirect target");
+    refusal(
+        "[core]\n\tworktree = ../elsewhere\n",
+        "a redirected worktree moves every path the lane bounds",
+    );
+    // `core.worktree` given twice: git applies the LAST value — a first
+    // value that resolves back does not admit when a later duplicate
+    // relocates. Validating only the first hit would admit a relocated
+    // worktree.
+    std::fs::write(
+        gitdir.join("config"),
+        "[core]\n\tworktree = ..\n\tworktree = ../elsewhere\n",
+    )
+    .expect("config");
+    let error = discover_pins("git status -s", repo.path())
+        .expect_err("the last core.worktree value must be the one validated")
+        .to_string();
+    assert!(
+        error.contains("shell.readonly.git.filter_config"),
+        "{error}"
+    );
+    // One resolving back to the discovered worktree admits: `..` relative
+    // to the gitdir is the checkout holding it, and the absorbed submodule
+    // layout git itself writes points at its checkout the same way.
+    std::fs::write(
+        gitdir.join("config"),
+        "[core]\n\tworktree = ..\n[filter \"resolvable\"]\n\tclean = cat\n",
+    )
+    .expect("config");
+    let pins = discover_pins("git status -s", repo.path())
+        .expect("a core.worktree resolving to the discovered worktree admits");
+    assert_eq!(pins.len(), 1, "{pins:?}");
+    assert_eq!(pins[0].name, "resolvable", "{pins:?}");
+    refusal(
+        "[extensions]\n\tworktreeConfig = true\n",
+        "the worktree-config extension adds a config file the scan does not read",
+    );
+    refusal(
+        "[filter \"bad name\"]\n\tclean = evil\n",
+        "a filter name this lane cannot spell into a config key refuses",
+    );
+    let many = (0..9)
+        .map(|index| format!("[filter \"f{index}\"]\n\tclean = evil\n"))
+        .collect::<String>();
+    refusal(&many, "more filters than the pin set bounds refuse");
+    // A config text too large for the scan bound refuses before it is read.
+    let huge = format!(
+        "# padding\n[core]\n\tbare = false\n{}",
+        (0..(READONLY_GIT_CONFIG_SCAN_CAP / 32))
+            .map(|_| "# padding line to push the config past the scan bound\n")
+            .collect::<String>()
+    );
+    refusal(&huge, "an oversized config refuses without being read");
+    // Eight names still pin.
+    let eight = (0..8)
+        .map(|index| format!("[filter \"f{index}\"]\n\tclean = evil\n"))
+        .collect::<String>();
+    std::fs::write(gitdir.join("config"), eight).expect("config");
+    let pins = discover_pins("git status -s", repo.path()).expect("the pin set bound is inclusive");
+    assert_eq!(pins.len(), 8, "{pins:?}");
+
+    // A `.git` link the lane cannot decode refuses: git parses the file
+    // byte-wise and would still run that repository's filters, so reporting
+    // "no repository" would silently skip the scan.
+    let undecodable = repo.path().join("wt");
+    std::fs::create_dir_all(&undecodable).expect("checkout dir");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::FileExt;
+        let link = undecodable.join(".git");
+        std::fs::write(&link, b"gitdir: /tmp/fine\n").expect("link");
+        std::fs::OpenOptions::new()
+            .write(true)
+            .open(&link)
+            .expect("open link for write")
+            .write_at(b"\xe9", 8)
+            .expect("corrupt the link");
+        let error = discover_pins("git status -s", &undecodable)
+            .expect_err("an undecodable gitdir link must refuse")
+            .to_string();
+        assert!(
+            error.contains("shell.readonly.git.filter_config"),
+            "{error}"
+        );
+    }
+    // A link file too large for the metadata bound refuses before reading
+    // it into memory.
+    let oversized = repo.path().join("wt-big");
+    std::fs::create_dir_all(&oversized).expect("checkout dir");
+    let padded = format!(
+        "gitdir: /tmp/fine\n{}",
+        "# padding\n".repeat(READONLY_GIT_META_SCAN_CAP / 10 + 8)
+    );
+    std::fs::write(oversized.join(".git"), padded).expect("oversized link");
+    let error = discover_pins("git status -s", &oversized)
+        .expect_err("an oversized gitdir link must refuse")
+        .to_string();
+    assert!(
+        error.contains("shell.readonly.git.filter_config"),
+        "{error}"
+    );
+}
+
+/// A git stage inside a nested repository must scan the repository it will
+/// actually run under: the walk folds each admitted `cd` exactly like the
+/// operand gate, so `cd sub; git status` discovers the nested repo's
+/// filters, not only the outer repository's.
+#[test]
+fn readonly_filter_discovery_follows_the_cd_fold_into_nested_repositories() {
+    let outer = tempdir().expect("outer");
+    let nested = outer.path().join("sub");
+    std::fs::create_dir_all(nested.join(".git")).expect("nested gitdir");
+    std::fs::create_dir_all(outer.path().join(".git")).expect("outer gitdir");
+    seed_minimal_gitdir(&nested.join(".git"));
+    seed_minimal_gitdir(&outer.path().join(".git"));
+    std::fs::write(
+        outer.path().join(".git").join("config"),
+        "[core]\n\tbare = false\n",
+    )
+    .expect("outer config");
+    std::fs::write(
+        nested.join(".git").join("config"),
+        "[filter \"inner\"]\n\tclean = evil\n",
+    )
+    .expect("nested config");
+
+    let pins = discover_pins("git status -s", outer.path()).expect("outer repo scanned");
+    assert!(pins.is_empty(), "the outer repo declares nothing: {pins:?}");
+
+    let pins = discover_pins("cd sub; git status -s", outer.path())
+        .expect("the fold carries the stage into the nested repo");
+    assert_eq!(pins.len(), 1, "{pins:?}");
+    assert_eq!(pins[0].name, "inner", "{pins:?}");
+
+    // The nested repo is also the nearest repo for a stage piped inside it.
+    let pins = discover_pins("cd sub; git status -s | cat", outer.path())
+        .expect("piped git stage scans the folded repository");
+    assert_eq!(pins.len(), 1, "{pins:?}");
+    assert_eq!(pins[0].name, "inner", "{pins:?}");
+
+    // A `-C` preamble redirects git's repository without moving the shell:
+    // the stage must scan the `-C` target, not the live cwd.
+    let pins = discover_pins("git -C sub status -s", outer.path())
+        .expect("a -C stage scans the redirected repository");
+    assert_eq!(pins.len(), 1, "{pins:?}");
+    assert_eq!(pins[0].name, "inner", "{pins:?}");
+
+    // …and `cd` plus a compensating `-C` lands back on the outer repository.
+    let pins = discover_pins("cd sub; git -C .. status", outer.path())
+        .expect("a -C .. stage after cd scans the parent repository");
+    assert!(pins.is_empty(), "the outer repo declares nothing: {pins:?}");
+
+    // The `--no-pager` preamble interleaves with `-C` like the splice
+    // table's walk.
+    let pins = discover_pins("git --no-pager -C sub log -n 1", outer.path())
+        .expect("a --no-pager/-C stage scans the redirected repository");
+    assert_eq!(pins.len(), 1, "{pins:?}");
+    assert_eq!(pins[0].name, "inner", "{pins:?}");
+}
+
+/// Dotted section headers are git's subsection spellings too: `[base.sub]`
+/// splits at the FIRST dot with the subsection case-folded (`[FILTER.EV]`
+/// arms driver `ev`), and a dotted part may itself carry dots
+/// (`[filter.a.b]` is section `filter`, subsection `a.b`). Skipping the
+/// dotted spellings would hide declared drivers from the pins while git
+/// still ran them.
+#[test]
+fn readonly_filter_discovery_pins_dotted_header_filters() {
+    let repo = tempdir().expect("repo");
+    let gitdir = repo.path().join(".git");
+    std::fs::create_dir_all(&gitdir).expect("gitdir");
+    seed_minimal_gitdir(&gitdir);
+    std::fs::write(
+        gitdir.join("config"),
+        "[filter.dotted]\n\tclean = evil\n[FILTER.EV]\n\tclean = evil\n[filter.a.b]\n\tclean = evil\n",
+    )
+    .expect("config");
+    let pins = discover_pins("git status -s", repo.path())
+        .expect("dotted headers arm the drivers git resolves from them");
+    let mut spellings = pins.iter().map(|pin| pin.name.as_str()).collect::<Vec<_>>();
+    spellings.sort();
+    assert_eq!(spellings, ["a.b", "dotted", "ev"], "{pins:?}");
+    assert!(pins.iter().all(|pin| pin.clean), "{pins:?}");
+}
+
+/// A UTF-8 BOM at the start of a config file is skipped by git, so a
+/// BOM-prefixed repository config still arms its drivers and the scan must
+/// pin them — parsing the BOM as content would hide the whole file's
+/// filters behind a driver git runs.
+#[test]
+fn readonly_filter_discovery_parses_bom_prefixed_config() {
+    let repo = tempdir().expect("repo");
+    let gitdir = repo.path().join(".git");
+    std::fs::create_dir_all(&gitdir).expect("gitdir");
+    seed_minimal_gitdir(&gitdir);
+    std::fs::write(
+        gitdir.join("config"),
+        "\u{feff}[filter \"evil\"]\n\tclean = cat\n",
+    )
+    .expect("config");
+    let pins = discover_pins("git status -s", repo.path())
+        .expect("a BOM-prefixed config parses like git's own");
+    assert_eq!(pins.len(), 1, "{pins:?}");
+    assert_eq!(pins[0].name, "evil", "{pins:?}");
+    assert!(pins[0].clean, "{pins:?}");
+}
+
+/// git resolves a linked worktree from its gitdir back-pointer and IGNORES
+/// `core.worktree` even when the shared config declares it — the shared
+/// config is read through the `commondir` chain, and a declaration pointing
+/// at the main checkout must not refuse the linked worktree's scan.
+#[test]
+fn readonly_filter_discovery_admits_linked_submodule_worktrees() {
+    let root = tempdir().expect("repo root");
+    let main = root.path().join("main");
+    let gitdir = main.join(".git");
+    std::fs::create_dir_all(gitdir.join("worktrees").join("w")).expect("gitdir tree");
+    seed_minimal_gitdir(&gitdir);
+    // The linked gitdir carries its own HEAD and the commondir back-pointer.
+    std::fs::write(
+        gitdir.join("worktrees").join("w").join("HEAD"),
+        "ref: refs/heads/main\n",
+    )
+    .expect("worktree HEAD");
+    std::fs::write(
+        gitdir.join("worktrees").join("w").join("commondir"),
+        "../..",
+    )
+    .expect("commondir");
+    // `core.worktree = ../../..` resolves (from the scanned gitdir) to the
+    // MAIN checkout, not the linked one git actually uses there — git
+    // ignores it, so the scan must not refuse on it.
+    std::fs::write(
+        gitdir.join("config"),
+        "[core]\n\tworktree = ../../..\n[filter \"shared\"]\n\tclean = cat\n",
+    )
+    .expect("shared config");
+    let checkout = root.path().join("wt");
+    std::fs::create_dir_all(&checkout).expect("linked checkout");
+    std::fs::write(
+        checkout.join(".git"),
+        format!("gitdir: {}", gitdir.join("worktrees").join("w").display()),
+    )
+    .expect("gitdir link");
+    let pins = discover_pins("git status", &checkout)
+        .expect("a linked worktree admits: git ignores core.worktree there");
+    assert_eq!(pins.len(), 1, "{pins:?}");
+    assert_eq!(pins[0].name, "shared", "{pins:?}");
+    assert!(pins[0].clean, "{pins:?}");
+}
+
+/// The `.git` pointer is parsed byte-exactly the way git does: the literal
+/// lowercase `gitdir:` plus EXACTLY ONE space, then a byte-exact first-line
+/// value with no trailing whitespace. Every other spelling is the
+/// `invalid gitfile format` git itself fatals on, and this lane refuses it
+/// instead of silently trimming a target git would never open.
+#[test]
+fn readonly_git_dir_link_is_parsed_byte_exactly() {
+    let root = tempdir().expect("root");
+    let real = root.path().join("real-target");
+    std::fs::create_dir_all(real.join(".git")).expect("a real target gitdir");
+    seed_minimal_gitdir(&real.join(".git"));
+    let checkout = root.path().join("checkout");
+    std::fs::create_dir(&checkout).expect("checkout");
+
+    // A value with trailing spaces whose TRIMMED spelling names a real
+    // directory: git fatals on the trailing whitespace, so the link refuses
+    // instead of the old trim resolving and scanning it.
+    std::fs::write(
+        checkout.join(".git"),
+        format!("gitdir: {}  \n", real.display()),
+    )
+    .expect("trailing-space link");
+    let error = discover_pins("git status", &checkout)
+        .expect_err("a value git itself rejects must refuse, not trim")
+        .to_string();
+    assert!(
+        error.contains("shell.readonly.git.filter_config"),
+        "{error}"
+    );
+
+    for spelling in [
+        format!("gitdir:  {}", real.display()),
+        format!("gitdir:{}", real.display()),
+        format!("GITDIR: {}", real.display()),
+        format!("gitdir:\t{}", real.display()),
+    ] {
+        std::fs::write(checkout.join(".git"), &spelling).expect("invalid link");
+        let error = discover_pins("git status", &checkout)
+            .expect_err("an invalid gitfile format must refuse")
+            .to_string();
+        assert!(
+            error.contains("shell.readonly.git.filter_config"),
+            "{spelling}: {error}"
+        );
+    }
+
+    // A value carrying an interior newline is one git resolves as a single
+    // path: git consumes the whole file minus ONE trailing newline and
+    // every remaining byte is the target — probe-pinned against git 2.43
+    // this round, where a link of this shape resolved a newline-named
+    // gitdir and ran that repository's content filters while a first-line
+    // cut scanned only the decoy the first line named. The reader resolves
+    // the whole value, byte-exactly, so the scan reaches the repository
+    // git actually runs.
+    std::fs::write(
+        checkout.join(".git"),
+        format!(
+            "gitdir: {}\ntrailing junk git folds into the path\n",
+            real.join(".git").display()
+        ),
+    )
+    .expect("multi-line link");
+    let (gitdir, dir) = readonly_git_dir_for(&checkout)
+        .expect("a decodable link resolves")
+        .expect("a well-formed link names a repository");
+    assert_eq!(
+        gitdir,
+        PathBuf::from(format!(
+            "{}\ntrailing junk git folds into the path",
+            real.join(".git").display()
+        )),
+        "the WHOLE value names the gitdir, not the first line"
+    );
+    assert_eq!(dir, checkout);
+}
+
+/// The `commondir` pointer is parsed byte-exactly like the `.git` link: git
+/// strips one trailing newline and resolves the rest as a single path,
+/// interior newlines included. The scan follows the whole value — a filter
+/// declared in a shared directory whose NAME carries the newline is
+/// discovered exactly where git reads it, not skipped by a first-line cut.
+#[test]
+fn readonly_git_commondir_follows_the_multiline_value_git_resolves() {
+    let root = tempdir().expect("root");
+    let gitdir = root.path().join(".git");
+    std::fs::create_dir_all(&gitdir).expect("gitdir");
+    seed_minimal_gitdir(&gitdir);
+    let shared = gitdir.join("shared\ndata");
+    std::fs::create_dir_all(&shared).expect("newline-named shared dir");
+    std::fs::write(
+        shared.join("config"),
+        "[filter \"sharedonly\"]\n\tclean = cat\n\tsmudge = cat\n",
+    )
+    .expect("shared config");
+    std::fs::write(gitdir.join("commondir"), "shared\ndata\n").expect("multi-line commondir");
+    let pins = readonly_git_config_filter_names(&gitdir, root.path())
+        .expect("the whole commondir value resolves and its filters are discovered");
+    assert!(
+        pins.iter().any(|pin| pin.name == "sharedonly"),
+        "the newline-named shared directory's filter must be discovered: {pins:?}"
+    );
+}
+
+/// git's `-C` accumulates: the operand gate must judge a stage's operands
+/// against the root the CHAIN accumulates, not the flat cwd —
+/// `git -C A -C escape status -s` executes exactly like the flat
+/// `git A/escape status -s` the gate already refuses, and judging every
+/// operand against the flat cwd admits the chained spelling while the
+/// symlink carries it outside the workspace.
+#[cfg(unix)]
+#[test]
+fn readonly_operand_gate_judges_chained_git_c_cumulatively() {
+    let workspace = tempdir().expect("workspace");
+    let outside = tempdir().expect("outside");
+    std::fs::write(outside.path().join("secret.txt"), "secret").expect("outside file");
+    std::fs::create_dir(workspace.path().join("A")).expect("inside dir");
+    // The escape target is a real repository outside the workspace, the
+    // shape the chained spelling actually runs git against.
+    std::fs::create_dir_all(outside.path().join("repo").join(".git")).expect("outside repo");
+    std::os::unix::fs::symlink(
+        outside.path().join("repo"),
+        workspace.path().join("A").join("escape"),
+    )
+    .expect("outside repo symlink under A");
+    // Positive-control target: a real repository inside the chain.
+    std::fs::create_dir_all(workspace.path().join("A").join("sub").join(".git"))
+        .expect("inside repo");
+    std::fs::write(
+        workspace.path().join("A").join("sub").join("inner.txt"),
+        "inside",
+    )
+    .expect("inside file");
+    // An operand that exists only under the accumulated root, symlinked
+    // outside: the flat-cwd judgment skips it at a spelling that exists on
+    // no disk under the cwd.
+    std::os::unix::fs::symlink(
+        outside.path().join("secret.txt"),
+        workspace.path().join("A").join("sub").join("escape-file"),
+    )
+    .expect("outside file symlink under the accumulated root");
+    let roots = [workspace.path().to_path_buf()];
+
+    let error = enforce_readonly_workspace_operands(
+        "git -C A -C escape status -s",
+        &roots,
+        workspace.path(),
+    )
+    .expect_err("the chained -C escape must refuse exactly like the flat spelling")
+    .to_string();
+    assert!(
+        error.contains("shell.readonly.operand.outside_workspace"),
+        "{error}"
+    );
+
+    enforce_readonly_workspace_operands("git -C A -C sub status -s", &roots, workspace.path())
+        .expect("both -C targets inside the workspace stay admitted");
+    let error = enforce_readonly_workspace_operands(
+        "git -C A -C sub diff -- escape-file",
+        &roots,
+        workspace.path(),
+    )
+    .expect_err("operands must resolve under the accumulated root, not the flat cwd")
+    .to_string();
+    assert!(
+        error.contains("shell.readonly.operand.outside_workspace"),
+        "{error}"
+    );
+}
+
+/// A `-C` value is judged as a literal spelling while the shell expands
+/// wildcard (and zsh `=`) spellings against the stage's working directory
+/// before git ever sees the word — and `-C` operands are sliced off before
+/// the plain-operand walker runs, so refusal is the only wall that matches
+/// where git actually chdir's. The chained shape is the proven escape: a
+/// literal `*` directory planted INSIDE `x/` canonicalizes fine, while the
+/// expansion of `*` against the command cwd binds the second `-C` to the
+/// first-sorted entry (an outside symlink) and leaves the remaining
+/// entries in git's subcommand and rev slots — an outside repository's
+/// content rendered under an admitted read. Everything here refuses on the
+/// spelling itself, before any filesystem probe.
+#[cfg(unix)]
+#[test]
+fn readonly_operand_gate_refuses_shell_expanded_git_c_operands() {
+    let workspace = tempdir().expect("workspace");
+    let outside = tempdir().expect("outside");
+    std::fs::create_dir_all(outside.path().join("repo").join(".git")).expect("outside repo");
+    std::fs::create_dir_all(workspace.path().join("x")).expect("inside dir");
+    // The literal spelling the resolver would canonicalize: a directory
+    // named `*` INSIDE `x/` — the chained shape's planted literal. The
+    // outside symlink sorts before it in the expansion.
+    std::fs::create_dir(workspace.path().join("x").join("*")).expect("literal star dir");
+    std::os::unix::fs::symlink(
+        outside.path().join("repo"),
+        workspace.path().join("x").join("!escape"),
+    )
+    .expect("outside symlink inside x");
+    let roots = [workspace.path().to_path_buf()];
+
+    for command in [
+        "git -C x -C * status -s",
+        "git --no-pager -C x -C * show HEAD",
+        "git -C * status -s",
+        "git -C =pwd status -s",
+    ] {
+        let error = enforce_readonly_workspace_operands(command, &roots, workspace.path())
+            .expect_err("a shell-expanded `-C` value must refuse at the root resolver")
+            .to_string();
+        assert!(
+            error.contains("shell.readonly.operand.outside_workspace")
+                && (error.contains("wildcard") || error.contains("zsh expands")),
+            "{command}: {error}"
+        );
+    }
+
+    // Literal operands keep their admission, judged by the accumulated root.
+    std::fs::create_dir_all(workspace.path().join("x").join("sub").join(".git"))
+        .expect("inside repo");
+    enforce_readonly_workspace_operands("git -C x -C sub status -s", &roots, workspace.path())
+        .expect("literal -C operands stay admitted");
+}
+
+/// The version probe runs the way the read-only child runs: its PATH is the
+/// sanitized one, with every workspace entry stripped — a `git` shim planted
+/// in an agent-writable PATH directory must never be the binary the lane
+/// measures (or the one it execs). The planted PATH is supplied through the
+/// probe's explicit seam, so the live process environment is untouched.
+#[cfg(unix)]
+#[test]
+fn git_version_probe_ignores_host_path_shims() {
+    let workspace = tempdir().expect("workspace");
+    let shim_dir = workspace.path().join("bin");
+    std::fs::create_dir(&shim_dir).expect("shim dir");
+    let marker = workspace.path().join("shim-ran");
+    let shim = shim_dir.join("git");
+    std::fs::write(
+        &shim,
+        format!(
+            "#!/bin/sh\ntouch {}\necho \"git version 9.9.9\"\n",
+            marker.display()
+        ),
+    )
+    .expect("shim script");
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        let mut permissions = shim.metadata().expect("shim metadata").permissions();
+        permissions.set_mode(0o755);
+        std::fs::set_permissions(&shim, permissions).expect("shim mode");
+    }
+
+    // The shim directory comes FIRST on the PATH handed to the probe, so an
+    // unsanitized construction would resolve and exec it before the real
+    // host git. The PATH is supplied through the explicit seam — the live
+    // process environment stays untouched, so no other test can observe the
+    // planted entry.
+    let planted = std::env::join_paths(
+        std::iter::once(shim_dir.clone()).chain(
+            std::env::var_os("PATH")
+                .map(|path| std::env::split_paths(&path).collect::<Vec<_>>())
+                .unwrap_or_default(),
+        ),
+    )
+    .expect("planted PATH");
+    let roots = [workspace.path().to_path_buf()];
+    let decision = ensure_git_supports_env_config_pins_with_path(&roots, Some(planted.as_os_str()));
+
+    decision.expect("the trusted host git passes the version gate");
+    assert!(
+        !marker.exists(),
+        "the planted workspace git shim must not be the probed binary"
+    );
+}
+
+/// The discovery children themselves run repository config: on git 2.43 a
+/// repo-local `core.fsmonitor` command executes inside the enumeration's own
+/// `git ls-files --stage -z` — attacker-chosen command execution under the
+/// tool process's authority, before anything is admitted, on a child the
+/// sandbox manager never shapes. Every discovery git invocation carries the
+/// fixed argv config pins (`-c core.fsmonitor=false` and friends outrank
+/// every config file and need no version floor), so the hostile hook never
+/// fires while the declared filters are still discovered.
+#[cfg(unix)]
+#[test]
+fn readonly_filter_discovery_child_does_not_execute_repo_fsmonitor() {
+    let workspace = tempdir().expect("workspace");
+    let outside = tempdir().expect("outside");
+    let marker = outside.path().join("fsmonitor-ran");
+    let gitdir = workspace.path().join(".git");
+    seed_minimal_gitdir(&gitdir);
+    std::fs::write(
+        gitdir.join("config"),
+        format!(
+            "[core]\n\trepositoryformatversion = 0\n\tfsmonitor = sh -c 'touch {}'\n[filter \"lfs\"]\n\tclean = cat\n",
+            marker.display()
+        ),
+    )
+    .expect("hostile config");
+    // Raw-shell control: the hostile fsmonitor really does fire under a
+    // plain git invocation whose environment the lane never shapes.
+    let control = std::process::Command::new("git")
+        .args(["ls-files", "--stage", "-z"])
+        .current_dir(workspace.path())
+        .output()
+        .expect("control git runs");
+    assert!(
+        control.status.success() && marker.exists(),
+        "the repo's fsmonitor must fire under a plain git invocation: {}",
+        String::from_utf8_lossy(&control.stderr)
+    );
+    std::fs::remove_file(&marker).expect("reset marker");
+
+    let pins = discover_pins("git status -s", workspace.path())
+        .expect("a filter-armed repository stays discoverable");
+    assert_eq!(pins.len(), 1, "{pins:?}");
+    assert_eq!(pins[0].name, "lfs", "{pins:?}");
+    assert!(
+        !marker.exists(),
+        "the discovery child must not execute the repository's core.fsmonitor"
+    );
+}
+
+/// The tool-level twin: dispatching a read-only `git status` in a hostile
+/// repository must not detonate the repo's `core.fsmonitor` inside the
+/// lane's own discovery children, while a raw shell proves the fixture is
+/// live before the pins hold.
+#[cfg(unix)]
+#[tokio::test]
+async fn readonly_shell_lane_git_status_does_not_execute_repo_fsmonitor_during_discovery() {
+    let workspace = tempdir().expect("workspace");
+    let outside = tempdir().expect("outside");
+    let marker = outside.path().join("fsmonitor-ran");
+    std::fs::write(workspace.path().join("f.txt"), "seed\n").expect("file");
+    git_helper(&["init", "-q"], workspace.path());
+    git_helper(
+        &[
+            "config",
+            "core.fsmonitor",
+            &format!("sh -c 'touch {}'", marker.display()),
+        ],
+        workspace.path(),
+    );
+    let control = std::process::Command::new("sh")
+        .args(["-c", "git status -s 2>&1"])
+        .current_dir(workspace.path())
+        .output()
+        .expect("control shell runs");
+    assert!(
+        marker.exists(),
+        "the hostile fsmonitor must fire under a raw shell: {}",
+        String::from_utf8_lossy(&control.stdout)
+    );
+    std::fs::remove_file(&marker).expect("reset marker");
+
+    let context = ToolContext::new(workspace.path())
+        .with_shell_policy(crate::worker_profile::ShellPolicy::ReadOnly);
+    let output = LowercaseBashTool
+        .execute(json!({"command": "git status -s"}), &context)
+        .await
+        .expect("the read must dispatch");
+    assert!(output.success, "{}", output.content);
+    assert!(
+        !marker.exists(),
+        "the read-only lane's discovery children must not run the repository's core.fsmonitor"
+    );
+}
+
+/// A `-C` operand is judged by the cumulative root resolver, which used to
+/// take the spelling literally while the shell expands a leading `~`
+/// against $HOME: with a planted literal `~` directory inside the workspace,
+/// `git -C ~ status` resolved inside and admitted while git ran in $HOME.
+/// The resolver refuses the tilde spelling exactly like the plain-operand
+/// and `cd` rules do.
+#[test]
+fn readonly_operand_gate_refuses_tilde_git_c_operands() {
+    let workspace = tempdir().expect("workspace");
+    std::fs::create_dir(workspace.path().join("~")).expect("planted tilde dir");
+    std::fs::create_dir_all(workspace.path().join("~").join("proj")).expect("tilde-nested dir");
+    std::fs::create_dir(workspace.path().join("A")).expect("chain dir");
+    std::fs::create_dir(workspace.path().join("sub")).expect("inside dir");
+    let roots = [workspace.path().to_path_buf()];
+    for command in [
+        "git -C ~ status -s",
+        "git -C ~/proj status -s",
+        "git -C A -C ~/proj status -s",
+    ] {
+        let error = enforce_readonly_workspace_operands(command, &roots, workspace.path())
+            .expect_err("a tilde `-C` operand must refuse before the shell expands it")
+            .to_string();
+        assert!(error.contains("tilde"), "{command}: {error}");
+    }
+    enforce_readonly_workspace_operands("git -C sub status -s", &roots, workspace.path())
+        .expect("a tilde-free `-C` operand stays admitted");
+}
+
+/// A FIFO at a discovered config path reports size 0 to `stat`, so a
+/// size-checked read never sees it coming — and `open` blocks until a
+/// writer appears, inside the pre-spawn discovery where no watchdog bounds
+/// anything. The bounded reader opens non-blocking and refuses
+/// non-regular files on the opened handle's own metadata.
+#[cfg(unix)]
+#[test]
+fn readonly_filter_discovery_refuses_fifo_config_without_hanging() {
+    let workspace = tempdir().expect("workspace");
+    let gitdir = workspace.path().join(".git");
+    seed_minimal_gitdir(&gitdir);
+    let fifo = gitdir.join("config");
+    let cpath = std::ffi::CString::new(fifo.to_string_lossy().as_bytes()).expect("path");
+    let rc = unsafe { libc::mkfifo(cpath.as_ptr(), 0o644) };
+    assert_eq!(rc, 0, "mkfifo must succeed");
+
+    let (sender, receiver) = std::sync::mpsc::channel::<Result<Vec<String>, String>>();
+    let cwd = workspace.path().to_path_buf();
+    std::thread::spawn(move || {
+        let _ = sender.send(
+            discover_pins("git status -s", &cwd)
+                .map(|pins| pins.iter().map(|pin| pin.name.clone()).collect())
+                .map_err(|error| error.to_string()),
+        );
+    });
+    let outcome = receiver
+        .recv_timeout(std::time::Duration::from_secs(5))
+        .expect("discovery must not hang on a FIFO config");
+    let error = outcome.expect_err("a FIFO config must refuse").to_string();
+    assert!(error.contains("not a regular file"), "{error}");
+}
+
+/// git strips one trailing `\r` from a `.git` link target at the newline
+/// (probe-pinned: a CRLF-terminated target resolves and runs), so the lane
+/// mirrors exactly that strip instead of refusing a link git accepts —
+/// while every other padded spelling still refuses, because git fatals
+/// there before anything runs.
+#[cfg(unix)]
+#[test]
+fn readonly_git_dir_link_crlf_target_admits_like_git() {
+    let workspace = tempdir().expect("workspace");
+    let gitdir = workspace.path().join("real").join(".git");
+    seed_minimal_gitdir(&gitdir);
+    std::fs::write(gitdir.join("config"), "[filter \"lfs\"]\n\tclean = cat\n").expect("config");
+    std::fs::write(workspace.path().join(".git"), "gitdir: real/.git\r\n").expect("CRLF link file");
+    let pins = discover_pins("git status -s", workspace.path())
+        .expect("a CRLF-terminated link target resolves like git");
+    assert_eq!(pins.len(), 1, "{pins:?}");
+    assert_eq!(pins[0].name, "lfs", "{pins:?}");
+}
+
+/// git consumes a `commondir` value byte-exact (a padded spelling fatals
+/// there before anything runs), so the reader trims neither end and refuses
+/// a pointer it cannot resolve — the padded value must not silently resolve
+/// a directory git never opens.
+#[cfg(unix)]
+#[test]
+fn readonly_filter_discovery_refuses_padded_commondir_like_git_fatals() {
+    let workspace = tempdir().expect("workspace");
+    let main_gitdir = workspace.path().join("repo").join(".git");
+    seed_minimal_gitdir(&main_gitdir);
+    let linked_gitdir = main_gitdir.join("worktrees").join("wt");
+    std::fs::create_dir_all(&linked_gitdir).expect("linked gitdir");
+    seed_minimal_gitdir(&linked_gitdir);
+    std::fs::write(linked_gitdir.join("commondir"), " ../..\n").expect("padded commondir");
+    let linked_worktree = workspace.path().join("wt");
+    std::fs::create_dir(&linked_worktree).expect("linked worktree");
+    std::fs::write(
+        linked_worktree.join(".git"),
+        format!("gitdir: {}", linked_gitdir.display()),
+    )
+    .expect("worktree gitdir link");
+    let error = discover_pins("git status -s", &linked_worktree)
+        .expect_err("a padded commondir must refuse")
+        .to_string();
+    assert!(
+        error.contains("commondir"),
+        "the refusal must name the pointer: {error}"
+    );
+}
+
+/// The `-C` root resolver proves the destination enterable the way the `cd`
+/// fold does: `canonicalize` and `is_dir` need search permission only on
+/// the ancestors, while git's `chdir` needs it on the destination itself —
+/// a mode-000 directory passes the resolve checks and would then fail the
+/// child's `chdir`, leaving the gate's judgment on a state the shell never
+/// reached.
+#[cfg(unix)]
+#[test]
+fn readonly_git_c_operand_refuses_unsearchable_stage_root() {
+    use std::os::unix::fs::PermissionsExt as _;
+    let workspace = tempdir().expect("workspace");
+    let vault = workspace.path().join("vault");
+    std::fs::create_dir(&vault).expect("vault dir");
+    std::fs::write(vault.join("inner"), "x").expect("inner file");
+    std::fs::set_permissions(&vault, std::fs::Permissions::from_mode(0o000)).expect("vault closed");
+    let roots = [workspace.path().to_path_buf()];
+    let error =
+        enforce_readonly_workspace_operands("git -C vault status -s", &roots, workspace.path())
+            .expect_err("a mode-000 `-C` destination must refuse like the cd fold does")
+            .to_string();
+    assert!(error.contains("cannot enter"), "{error}");
+    std::fs::set_permissions(&vault, std::fs::Permissions::from_mode(0o755))
+        .expect("vault reopened");
+    enforce_readonly_workspace_operands("git -C vault status -s", &roots, workspace.path())
+        .expect("a searchable destination stays admitted");
+}
+
+/// `"` and `\` are ordinary filename bytes on unix and the gitlink path is
+/// consumed in-process (join, canonicalize — never re-quoted), so a
+/// submodule carrying one is scanned and its filters pinned exactly like a
+/// plain-named one.
+#[cfg(unix)]
+#[test]
+fn readonly_filter_discovery_scans_gitlink_paths_with_unix_legal_bytes() {
+    let workspace = tempdir().expect("workspace");
+    git_helper(&["init", "-q", "."], workspace.path());
+    let sub = workspace.path().join("sub\"q");
+    std::fs::create_dir(&sub).expect("quoted subdir");
+    seed_minimal_gitdir(&sub.join(".git"));
+    std::fs::write(
+        sub.join(".git").join("config"),
+        "[filter \"lfs\"]\n\tclean = cat\n",
+    )
+    .expect("sub config");
+    git_helper(
+        &[
+            "update-index",
+            "--add",
+            "--cacheinfo",
+            "160000,0123456789012345678901234567890123456789,sub\"q",
+        ],
+        workspace.path(),
+    );
+    let pins = discover_pins("git status -s", workspace.path())
+        .expect("a quoted gitlink path is scanned, not refused");
+    assert_eq!(pins.len(), 1, "{pins:?}");
+    assert_eq!(pins[0].name, "lfs", "{pins:?}");
+}
+
+/// A single glob-bearing command takes the shell lane, where the wildcard
+/// the operand gate walked is actually expanded — the direct-argv lane
+/// would hand the program the literal `*` spelling and the expansion the
+/// gate judged could never happen.
+#[cfg(unix)]
+#[tokio::test]
+async fn readonly_shell_lane_expands_single_command_glob_operand() {
+    let workspace = tempdir().expect("workspace");
+    std::fs::write(workspace.path().join("a.txt"), "AAA\n").expect("a");
+    std::fs::write(workspace.path().join("b.txt"), "BBB\n").expect("b");
+    let context = ToolContext::new(workspace.path())
+        .with_shell_policy(crate::worker_profile::ShellPolicy::ReadOnly);
+    let output = LowercaseBashTool
+        .execute(json!({"command": "cat *.txt"}), &context)
+        .await
+        .expect("the glob dispatches");
+    assert!(output.success, "{}", output.content);
+    assert!(
+        output.content.contains("AAA") && output.content.contains("BBB"),
+        "the shell lane must expand the wildcard the gate walked: {}",
+        output.content
+    );
+}
+
+/// An inline stdin payload past one pipe buffer is refused before spawn:
+/// the payload is delivered with a blocking write while the shell-manager
+/// lock is held, and a non-reading child would wedge the executor past any
+/// watchdog. The boundary payload (exactly 64 KiB) still runs. The raw
+/// lane is the one that carries payloads — the read-only grammar rejects
+/// a `stdin` field outright.
+#[tokio::test]
+async fn inline_stdin_payload_over_the_cap_refuses() {
+    let workspace = tempdir().expect("workspace");
+    let context = ToolContext::new(workspace.path().to_path_buf());
+    let oversized = "x".repeat(super::MAX_INLINE_STDIN_BYTES + 1);
+    let output = BashTool::new("Bash")
+        .execute(json!({"command": "wc -c", "stdin": oversized}), &context)
+        .await
+        .expect("the refusal is a result, not an error");
+    assert!(!output.success, "{}", output.content);
+    assert!(
+        output.content.contains("action=interact"),
+        "the refusal must point at the streaming alternative: {}",
+        output.content
+    );
+
+    let boundary = "y".repeat(super::MAX_INLINE_STDIN_BYTES);
+    let output = BashTool::new("Bash")
+        .execute(json!({"command": "wc -c", "stdin": boundary}), &context)
+        .await
+        .expect("the boundary payload dispatches");
+    assert!(output.success, "{}", output.content);
+    assert!(
+        output.content.contains("65536"),
+        "the boundary payload must reach the command: {}",
+        output.content
+    );
+}
+
+/// The `cd` fold canonicalizes through in-workspace symlinked destinations:
+/// operands under a linked directory resolve against the REAL directory the
+/// shell will run in, so a symlink-to-outside inside it is judged (and
+/// refuses) instead of being skipped at a spelling that exists on no disk.
+#[cfg(unix)]
+#[test]
+fn readonly_operand_gate_folds_through_in_workspace_symlink_destination() {
+    let workspace = tempdir().expect("workspace");
+    let outside = tempdir().expect("outside");
+    std::fs::create_dir(workspace.path().join("realdir")).expect("real dir");
+    std::fs::write(workspace.path().join("realdir").join("realfile"), "inside")
+        .expect("inside file");
+    std::fs::write(outside.path().join("secret.txt"), "secret").expect("outside file");
+    std::os::unix::fs::symlink(
+        outside.path().join("secret.txt"),
+        workspace.path().join("realdir").join("link"),
+    )
+    .expect("outside symlink inside realdir");
+    std::os::unix::fs::symlink(
+        workspace.path().join("realdir"),
+        workspace.path().join("linkdir"),
+    )
+    .expect("in-workspace directory symlink");
+    let roots = [workspace.path().to_path_buf()];
+
+    enforce_readonly_workspace_operands("cd linkdir; cat realfile", &roots, workspace.path())
+        .expect("an inside operand under the linked destination stays admitted");
+    let error =
+        enforce_readonly_workspace_operands("cd linkdir; cat link", &roots, workspace.path())
+            .expect_err("the fold must judge operands under the symlink's real destination")
+            .to_string();
+    assert!(error.contains("outside_workspace"), "{error}");
+}
+
+/// The gh stage exemption is literal-operand-only: a `*` after the program
+/// word would let the shell expand a workspace entry into a
+/// `HOST/OWNER/REPO` position at runtime, past the host the network policy
+/// evaluated.
+#[test]
+fn readonly_operand_gate_refuses_glob_operands_on_gh_stages() {
+    let workspace = tempdir().expect("workspace");
+    std::fs::write(workspace.path().join("inside.txt"), "inside").expect("inside file");
+    let roots = [workspace.path().to_path_buf()];
+
+    for command in [
+        "pwd; gh repo view */*/*",
+        "pwd | gh repo view */*/*",
+        "gh pr list -R */*/*",
+        "gh repo view owner/*",
+        "gh issue list --search '*'",
+        "gh issue list; gh repo view */*/*",
+    ] {
+        let error = enforce_readonly_workspace_operands(command, &roots, workspace.path())
+            .expect_err("a wildcard gh operand must refuse")
+            .to_string();
+        assert!(
+            error.contains("operand.gh_glob"),
+            "{command} must refuse at the gh-glob wall: {error}"
+        );
+        // The refusal carries the accurate rationale: ANY wildcard token on
+        // a gh stage — quoted or bare — refuses because the stage's operand
+        // scope cannot be bounded host-side.
+        assert!(
+            error.contains("cannot be bounded host-side"),
+            "{command} must name the host-side bounding gap: {error}"
+        );
+    }
+
+    // The exemption itself keeps holding for literal operands, and non-gh
+    // stages are unaffected.
+    enforce_readonly_workspace_operands("pwd; gh repo view", &roots, workspace.path())
+        .expect("a literal gh read stays exempt from operand judgment");
+    enforce_readonly_workspace_operands(
+        "gh issue list; wc -c inside.txt",
+        &roots,
+        workspace.path(),
+    )
+    .expect("unrelated stages keep their own judgment");
+}
+
+/// The caps bound the walk's work but not its wall time; a spent budget
+/// refuses the expansion outright so a slow or network-backed filesystem
+/// cannot stretch one admitted command past any watchdog.
+#[test]
+fn readonly_glob_walk_refuses_once_its_deadline_has_passed() {
+    let workspace = tempdir().expect("workspace");
+    std::fs::write(workspace.path().join("inside.txt"), "inside").expect("inside file");
+    let roots = [workspace.path().to_path_buf()];
+
+    let mut budget = ReadonlyGlobBudget::expired();
+    let error = enforce_readonly_glob_operand("inside*", &roots, workspace.path(), &mut budget)
+        .expect_err("an expired walk budget must refuse");
+    assert!(
+        error.to_string().contains("operand.glob_deadline"),
+        "{error}"
+    );
+
+    let mut budget = ReadonlyGlobBudget::default();
+    enforce_readonly_glob_operand("inside*", &roots, workspace.path(), &mut budget)
+        .expect("an unexpired budget walks normally");
+}
+
+/// A read-only shell holds no task surface: `interact`/`cancel`/`wait`
+/// dispatch before the run-path shape gate, so the policy is checked at the
+/// top — a task addressed under the read-only policy could belong to another
+/// agent in the session.
+#[tokio::test]
+async fn readonly_shell_refuses_task_actions_at_the_policy() {
+    let workspace = tempdir().expect("workspace");
+    let context = ToolContext::new(workspace.path()).with_shell_policy(ShellPolicy::ReadOnly);
+    for action in ["interact", "cancel", "wait"] {
+        let error = BashTool::new("Bash")
+            .execute(
+                json!({"action": action, "task_id": "some-other-agents-task", "data": "x"}),
+                &context,
+            )
+            .await
+            .expect_err("task actions must refuse under the read-only policy");
+        assert!(
+            error.to_string().contains("shell.readonly.action"),
+            "{action} must refuse at the policy wall: {error}"
+        );
+    }
+}
+
+/// The money pin for repository content filters: a repo whose `.gitattributes`
+/// assigns `filter=evil` and whose config defines `filter.evil.clean` runs
+/// that command whenever `git status`/`git diff` converts worktree content —
+/// under a raw shell, outside content crosses and the command executes. The
+/// read-only lane discovers the declared filter and pins it to inert
+/// helpers, so the same admitted commands run without either effect. The
+/// second filter is declared through the dotted header spelling
+/// (`[filter.dotted]`, appended to the config by hand because `git config`
+/// writes the quoted form) — the shape a quoted-only parser silently misses
+/// while git arms it exactly like the quoted one.
+#[cfg(unix)]
+#[tokio::test]
+async fn readonly_shell_lane_git_status_does_not_run_repository_content_filters() {
+    let workspace = tempdir().expect("workspace");
+    let outside = tempdir().expect("outside");
+    let marker = outside.path().join("filter-ran");
+    let secret = outside.path().join("secret.txt");
+    std::fs::write(&secret, "TOPSECRET-FILTER").expect("outside secret");
+    let git = |args: &[&str]| {
+        let output = std::process::Command::new("git")
+            .args(["-c", "user.name=t", "-c", "user.email=t@example.invalid"])
+            .args(args)
+            .current_dir(workspace.path())
+            .output()
+            .expect("git runs");
+        assert!(
+            output.status.success(),
+            "git {args:?} failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    };
+    git(&["init", "-q"]);
+    git(&[
+        "config",
+        "filter.evil.clean",
+        &format!(
+            "sh -c 'touch {}; cat {} >&2; cat'",
+            marker.display(),
+            secret.display()
+        ),
+    ]);
+    let dotted_marker = outside.path().join("dotted-filter-ran");
+    // The dotted spelling must be written by hand: `git config` persists the
+    // quoted `[filter "dotted"]` form, and the point of this leg is the
+    // header shape only a git-faithful parser discovers.
+    {
+        use std::io::Write as _;
+        let mut config = std::fs::OpenOptions::new()
+            .append(true)
+            .open(workspace.path().join(".git/config"))
+            .expect("repo config");
+        write!(
+            config,
+            "[filter.dotted]\n\tclean = \"sh -c 'touch {}; cat {} >&2; cat'\"\n",
+            dotted_marker.display(),
+            secret.display()
+        )
+        .expect("append dotted filter section");
+    }
+    std::fs::write(
+        workspace.path().join(".gitattributes"),
+        "* filter=evil\n*.d filter=dotted\n",
+    )
+    .expect("attributes");
+    std::fs::write(workspace.path().join("note.txt"), "seed\n").expect("note");
+    std::fs::write(workspace.path().join("status.txt"), "st1\n").expect("status note");
+    std::fs::write(workspace.path().join("dotted.d"), "dot1\n").expect("dotted note");
+    git(&["add", "."]);
+    git(&["commit", "-q", "-m", "seed"]);
+    // A stat-dirty worktree file is what makes a nominal read convert
+    // content — and run the filter. Size is preserved on purpose: a
+    // size-differing file is decided from stat alone and never converts,
+    // which would green this test even without the pins.
+    std::fs::write(workspace.path().join("note.txt"), "sedw\n").expect("dirty the worktree");
+
+    // Positive control: the fixture really executes the filter — and returns
+    // outside content — when a raw shell runs a nominal read. `git diff`
+    // always converts the worktree side for display, unlike `git status`,
+    // which may decide "modified" from a raw content compare without ever
+    // converting.
+    let control = std::process::Command::new("sh")
+        .args(["-c", "git diff 2>&1"])
+        .current_dir(workspace.path())
+        .output()
+        .expect("control shell runs");
+    assert!(
+        String::from_utf8_lossy(&control.stdout).contains("TOPSECRET-FILTER"),
+        "the armed clean filter must fire under a raw shell: {}",
+        String::from_utf8_lossy(&control.stdout)
+    );
+    assert!(marker.exists(), "the armed clean filter must execute");
+    std::fs::remove_file(&marker).expect("reset marker");
+
+    // The `git status -s` arm gets its own live control: a same-size
+    // content change is stat-dirty with a matching size, which `git status`
+    // resolves by hashing — through the filter. Re-dirty after the control:
+    // its run settled the index, and a settled entry stops converting.
+    std::fs::write(workspace.path().join("status.txt"), "st2\n").expect("dirty for status");
+    std::fs::write(workspace.path().join("dotted.d"), "dot2\n").expect("dirty dotted note");
+    let _control = std::process::Command::new("sh")
+        .args(["-c", "git status -s 2>&1"])
+        .current_dir(workspace.path())
+        .output()
+        .expect("control shell runs");
+    assert!(
+        marker.exists(),
+        "the armed clean filter must fire under a raw `git status -s`"
+    );
+    assert!(
+        dotted_marker.exists(),
+        "the dotted-header filter must fire under a raw `git status -s` too"
+    );
+    std::fs::remove_file(&marker).expect("reset marker");
+    std::fs::remove_file(&dotted_marker).expect("reset dotted marker");
+    std::fs::write(workspace.path().join("status.txt"), "st3\n").expect("re-dirty for status");
+    std::fs::write(workspace.path().join("dotted.d"), "dot3\n").expect("re-dirty dotted note");
+
+    let context = ToolContext::new(workspace.path())
+        .with_shell_policy(crate::worker_profile::ShellPolicy::ReadOnly);
+    for command in ["git diff", "pwd; git diff", "git status -s"] {
+        let output = LowercaseBashTool
+            .execute(json!({"command": command}), &context)
+            .await
+            .unwrap_or_else(|error| panic!("{command} must execute: {error}"));
+        assert!(output.success, "{command}: {}", output.content);
+        assert!(
+            !output.content.contains("TOPSECRET-FILTER"),
+            "{command} returned content converted through the repository's filter"
+        );
+        assert!(
+            !marker.exists() && !dotted_marker.exists(),
+            "{command} ran the repository's content filter"
+        );
+    }
+}
+
+/// The interior-newline twin of the filter pin: git consumes a `.git` link
+/// as the WHOLE file minus one trailing newline, so a link whose value
+/// carries an interior newline resolves a gitdir literally named with that
+/// newline and runs THAT repository's content filters — while a first-line
+/// cut scanned only the decoy the first line names, found nothing, and
+/// admitted the read with the hostile filter still armed. Discovery now
+/// resolves the whole value, scans the hostile repository where git runs
+/// it, and pins its filters inert — the tool leg must leak nothing and run
+/// nothing, exactly like the in-place filter pin above.
+#[cfg(unix)]
+#[tokio::test]
+async fn readonly_shell_lane_git_diff_pins_filters_behind_a_multi_line_gitdir_link() {
+    let workspace = tempdir().expect("workspace");
+    let outside = tempdir().expect("outside");
+    let marker = outside.path().join("newline-filter-ran");
+    let secret = outside.path().join("newline-secret.txt");
+    std::fs::write(&secret, "TOPSECRET-NEWLINE-FILTER").expect("outside secret");
+    let git = |args: &[&str], cwd: &std::path::Path| {
+        let output = std::process::Command::new("git")
+            .args(["-c", "user.name=t", "-c", "user.email=t@example.invalid"])
+            .args(args)
+            .current_dir(cwd)
+            .output()
+            .expect("git runs");
+        assert!(
+            output.status.success(),
+            "git {args:?} failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    };
+    // Build the hostile repository at a normal path, then move its gitdir
+    // to the newline-named name the multi-line link will spell.
+    let build = workspace.path().join("hostile-build");
+    std::fs::create_dir(&build).expect("hostile build dir");
+    git(&["init", "-q", "."], &build);
+    git(
+        &[
+            "config",
+            "filter.evil.clean",
+            &format!(
+                "sh -c 'touch {}; cat {} >&2; cat'",
+                marker.display(),
+                secret.display()
+            ),
+        ],
+        &build,
+    );
+    std::fs::write(build.join(".gitattributes"), "* filter=evil\n").expect("attributes");
+    std::fs::write(build.join("seed.txt"), "seed\n").expect("seed file");
+    git(&["add", "."], &build);
+    git(&["commit", "-q", "-m", "seed"], &build);
+
+    // The decoy directory the link's FIRST line names: the gitdir inside it
+    // does not exist, so the old first-line cut scanned a repository that
+    // declares nothing and admitted the read.
+    let decoy = workspace.path().join("decoy");
+    std::fs::create_dir(&decoy).expect("decoy dir");
+    let newline_gitdir = decoy.join(".git\njunk");
+    std::fs::rename(build.join(".git"), &newline_gitdir).expect("move gitdir to newline name");
+
+    // The checkout whose `.git` link carries the interior newline: git
+    // resolves the whole value to `decoy/.git\njunk` and runs the hostile
+    // repository against this worktree.
+    let checkout = workspace.path().join("checkout");
+    std::fs::create_dir(&checkout).expect("checkout");
+    std::fs::write(
+        checkout.join(".git"),
+        format!("gitdir: {}\njunk\n", decoy.join(".git").display()),
+    )
+    .expect("multi-line link");
+    std::fs::copy(
+        build.join(".gitattributes"),
+        checkout.join(".gitattributes"),
+    )
+    .expect("attributes in checkout");
+    std::fs::copy(build.join("seed.txt"), checkout.join("seed.txt")).expect("seed in checkout");
+    // Size-preserving dirt: stat alone must not settle the conversion.
+    std::fs::write(checkout.join("seed.txt"), "dirt\n").expect("dirty the worktree");
+    assert!(
+        !decoy.join(".git").exists(),
+        "the decoy gitdir must not exist, or this fixture stops discriminating"
+    );
+
+    // Positive control: a raw shell's nominal read runs the hostile filter
+    // through the newline-named gitdir.
+    let control = std::process::Command::new("sh")
+        .args(["-c", "git diff 2>&1"])
+        .current_dir(&checkout)
+        .output()
+        .expect("control shell runs");
+    assert!(
+        String::from_utf8_lossy(&control.stdout).contains("TOPSECRET-NEWLINE-FILTER"),
+        "the armed clean filter must fire under a raw shell through the newline-named gitdir: {}",
+        String::from_utf8_lossy(&control.stdout)
+    );
+    assert!(marker.exists(), "the armed clean filter must execute");
+    std::fs::remove_file(&marker).expect("reset marker");
+
+    let context =
+        ToolContext::new(&checkout).with_shell_policy(crate::worker_profile::ShellPolicy::ReadOnly);
+    for command in ["git diff", "git status -s"] {
+        let output = LowercaseBashTool
+            .execute(json!({"command": command}), &context)
+            .await
+            .unwrap_or_else(|error| panic!("{command} must execute: {error}"));
+        assert!(output.success, "{command}: {}", output.content);
+        assert!(
+            !output.content.contains("TOPSECRET-NEWLINE-FILTER"),
+            "{command} returned content converted through the newline-named repository's filter"
+        );
+        assert!(
+            !marker.exists(),
+            "{command} ran the hostile repository's content filter behind the multi-line link"
+        );
+    }
+}
+
+/// The submodule twin of the filter pin: git forks its own `git status`
+/// child into each initialized submodule, and that child converts content
+/// under the submodule's own repository config — a filter armed only in
+/// `super/.git/modules/sub/config` executes under an admitted superproject
+/// read (even while the superproject reports a clean tree). Discovery scans
+/// the registered submodule through its index gitlink — git's fork
+/// criterion — and pins it the same way; `.gitmodules` is only a label, so
+/// the fixture deletes it from the worktree before the tool leg and the
+/// raw-shell control proves git still forks without it.
+#[cfg(unix)]
+#[tokio::test]
+async fn readonly_shell_lane_git_status_does_not_run_submodule_content_filters() {
+    let workspace = tempdir().expect("workspace");
+    let outside = tempdir().expect("outside");
+    let marker = outside.path().join("sub-filter-ran");
+    let secret = outside.path().join("sub-secret.txt");
+    std::fs::write(&secret, "TOPSECRET-SUBFILTER").expect("outside secret");
+    let git = |args: &[&str], cwd: &std::path::Path| {
+        let output = std::process::Command::new("git")
+            .args(["-c", "user.name=t", "-c", "user.email=t@example.invalid"])
+            .args(args)
+            .current_dir(cwd)
+            .output()
+            .expect("git runs");
+        assert!(
+            output.status.success(),
+            "git {args:?} failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    };
+    // The submodule source repository, with its own attributes filter.
+    let sub_src = workspace.path().join("sub-src");
+    std::fs::create_dir(&sub_src).expect("submodule source");
+    git(&["init", "-q", "."], &sub_src);
+    std::fs::write(sub_src.join("file.txt"), "seed\n").expect("submodule file");
+    std::fs::write(sub_src.join(".gitattributes"), "* filter=evil\n")
+        .expect("submodule attributes");
+    git(&["add", "."], &sub_src);
+    git(&["commit", "-q", "-m", "seed"], &sub_src);
+    // The superproject registers it; the checkout lands at `sub` with the
+    // absorbed gitdir at `.git/modules/sub`.
+    git(&["init", "-q", "."], workspace.path());
+    let source = sub_src.to_string_lossy().to_string();
+    git(
+        &[
+            "-c",
+            "protocol.file.allow=always",
+            "submodule",
+            "add",
+            "-q",
+            &source,
+            "sub",
+        ],
+        workspace.path(),
+    );
+    git(
+        &["commit", "-q", "-m", "register submodule"],
+        workspace.path(),
+    );
+    // Arm the filter ONLY in the submodule's own repository config — the
+    // superproject's config declares nothing.
+    let modules_config = ".git/modules/sub/config";
+    git(
+        &[
+            "config",
+            "--file",
+            modules_config,
+            "filter.evil.clean",
+            &format!(
+                "sh -c 'touch {}; cat {} >&2; cat'",
+                marker.display(),
+                secret.display()
+            ),
+        ],
+        workspace.path(),
+    );
+    // A same-size content change in the submodule's tracked file is
+    // stat-dirty with a matching size: the superproject's status hashes it
+    // through the submodule's own clean filter.
+    std::fs::write(workspace.path().join("sub").join("file.txt"), "sedw\n")
+        .expect("dirty the submodule worktree");
+    // `.gitmodules` is only a label on git's submodule fork: delete it from
+    // the worktree (the index keeps the gitlink) so the tool leg proves the
+    // scan finds the submodule through the index alone, while the raw-shell
+    // control below proves git still forks into the submodule without it.
+    std::fs::remove_file(workspace.path().join(".gitmodules"))
+        .expect("drop .gitmodules from the worktree");
+
+    // Positive control: the raw superproject read forks into the submodule
+    // and runs its filter even though the superproject tree is clean.
+    let _control = std::process::Command::new("sh")
+        .args(["-c", "git status -s 2>&1"])
+        .current_dir(workspace.path())
+        .output()
+        .expect("control shell runs");
+    assert!(
+        marker.exists(),
+        "the submodule's clean filter must fire under a raw superproject `git status -s`"
+    );
+    std::fs::remove_file(&marker).expect("reset marker");
+    // Re-dirty after the control: its run settled the submodule index.
+    std::fs::write(workspace.path().join("sub").join("file.txt"), "sedx\n")
+        .expect("re-dirty the submodule worktree");
+
+    let context = ToolContext::new(workspace.path())
+        .with_shell_policy(crate::worker_profile::ShellPolicy::ReadOnly);
+    for command in ["git status -s", "git diff"] {
+        let output = LowercaseBashTool
+            .execute(json!({"command": command}), &context)
+            .await
+            .unwrap_or_else(|error| panic!("{command} must execute: {error}"));
+        assert!(output.success, "{command}: {}", output.content);
+        assert!(
+            !output.content.contains("TOPSECRET-SUBFILTER"),
+            "{command} returned content converted through the submodule's filter"
+        );
+        assert!(
+            !marker.exists(),
+            "{command} ran the submodule's content filter"
+        );
+    }
+}
+
+/// The operand gate judges compound probe sequences segment by segment and
+/// resolves an admitted `cd` operand against the workspace, refusing an
+/// escape with the same `[shell.readonly.cwd.outside_workspace]` tag the
+/// shell working-directory check uses.
+#[test]
+fn readonly_operand_gate_covers_sequence_segments_and_cd() {
+    let workspace = tempdir().expect("workspace");
+    let outside = tempdir().expect("outside");
+    std::fs::create_dir(workspace.path().join("sub")).expect("subdir");
+    std::fs::write(workspace.path().join("sub").join("notes.md"), "data").expect("notes file");
+    std::fs::write(outside.path().join("secret.txt"), "secret").expect("outside file");
+    let roots = [workspace.path().to_path_buf()];
+
+    // Operands are checked in every segment of a sequence, not just the
+    // first command.
+    let error = enforce_readonly_workspace_operands(
+        &format!(
+            "wc -c notes.md; cat {}",
+            outside.path().join("secret.txt").display()
+        ),
+        &roots,
+        workspace.path(),
+    )
+    .expect_err("operand check must cover the whole sequence")
+    .to_string();
+    assert!(error.contains("operand.outside_workspace"), "{error}");
+
+    // A `cd` operand that stays inside the workspace is admitted, standalone
+    // or as a sequence prefix.
+    enforce_readonly_workspace_operands("cd sub", &roots, workspace.path())
+        .expect("in-workspace cd");
+    enforce_readonly_workspace_operands("cd sub && wc -c notes.md", &roots, workspace.path())
+        .expect("in-workspace cd as a sequence prefix");
+
+    // A `cd` operand resolving outside every declared root reuses the cwd
+    // refusal tag — absolute and symlink spellings alike.
+    let error = enforce_readonly_workspace_operands(
+        &format!("cd {}; ls", outside.path().display()),
+        &roots,
+        workspace.path(),
+    )
+    .expect_err("cd outside the workspace must fail")
+    .to_string();
+    assert!(error.contains("cwd.outside_workspace"), "{error}");
+
+    #[cfg(unix)]
+    {
+        std::os::unix::fs::symlink(outside.path(), workspace.path().join("escape-link"))
+            .expect("outside symlink");
+        let error =
+            enforce_readonly_workspace_operands("cd escape-link && ls", &roots, workspace.path())
+                .expect_err("cd through an outside symlink must fail")
+                .to_string();
+        assert!(error.contains("cwd.outside_workspace"), "{error}");
+    }
+}
+
+/// Regression pin for the `cd` cwd-drift escape: the shell changes its live
+/// working directory at each admitted `cd`, so every later segment's relative
+/// operands must resolve against that destination — exactly where the shell
+/// resolves them — not against the dispatch-time workspace. Without the
+/// fold, `link` exists only under `sub/`, so a gate keyed on the dispatch cwd
+/// never inspects it (`ws/link` does not `exists()`), the gate admits the
+/// sequence, and the shell dereferences a symlink to a file outside the
+/// workspace.
+#[cfg(unix)]
+#[test]
+fn readonly_operand_gate_refuses_relative_operands_after_cd_cwd_drift() {
+    let workspace = tempdir().expect("workspace");
+    let outside = tempdir().expect("outside");
+    let sub = workspace.path().join("sub");
+    std::fs::create_dir(&sub).expect("subdir");
+    std::fs::write(outside.path().join("secret.txt"), "secret").expect("outside file");
+    std::os::unix::fs::symlink(outside.path().join("secret.txt"), sub.join("link"))
+        .expect("outside symlink under sub");
+    let roots = [workspace.path().to_path_buf()];
+
+    for command in ["cd sub; cat link", "cd sub && od -c link"] {
+        let error = enforce_readonly_workspace_operands(command, &roots, workspace.path())
+            .expect_err("cwd drift must not carry a relative operand outside the workspace")
+            .to_string();
+        assert!(
+            error.contains("operand.outside_workspace") || error.contains("cwd.outside_workspace"),
+            "{command}: expected the operand/cwd containment refusal, got: {error}"
+        );
+    }
+}
+
+/// A `cd` its connector may not run must not fold: `cat nope && cd sub; cat
+/// link` leaves the shell at the original cwd (the failed `cat` short-
+/// circuits the `&&`, `;` continues there), where a planted root symlink
+/// awaits — while an unconditional fold judged `link` under `sub/`, found
+/// nothing, skipped it, and admitted. Proven live on bash and sh before the
+/// fix: both commands printed the outside file's contents. The seam refuses
+/// the shape with its own `[shell.readonly.cwd.conditional]` tag (the
+/// classifier refuses it first; the classifier-side pin is
+/// `agent_readonly_shell_rejects_conditionally_gated_cd`).
+#[cfg(unix)]
+#[test]
+fn readonly_operand_gate_refuses_a_cd_its_connector_may_not_run() {
+    let workspace = tempdir().expect("workspace");
+    let outside = tempdir().expect("outside");
+    let sub = workspace.path().join("sub");
+    std::fs::create_dir(&sub).expect("subdir");
+    std::fs::write(outside.path().join("secret.txt"), "TOPSECRET-OUTSIDE").expect("outside file");
+    std::os::unix::fs::symlink(
+        outside.path().join("secret.txt"),
+        workspace.path().join("link"),
+    )
+    .expect("outside root symlink");
+    std::os::unix::fs::symlink(outside.path().join("secret.txt"), sub.join("link"))
+        .expect("outside symlink under sub");
+    let roots = [workspace.path().to_path_buf()];
+
+    for command in [
+        "cat nope && cd sub; cat link",
+        "true || cd sub; cat link",
+        "wc -c f && cd sub",
+        "pwd || cd sub",
+    ] {
+        let error = enforce_readonly_workspace_operands(command, &roots, workspace.path())
+            .expect_err("a `cd` its connector may not run must not fold")
+            .to_string();
+        assert!(error.contains("cwd.conditional"), "{command}: {error}");
+    }
+    // A `cd` that always runs keeps folding: `;` runs it whatever came
+    // before, so `link` is judged under `sub/` and refused for resolving
+    // outside — and that refusal must be the containment one, not the
+    // conditional-connector one.
+    let error =
+        enforce_readonly_workspace_operands("cat nope; cd sub; cat link", &roots, workspace.path())
+            .expect_err("a `;`-joined cd folds, so the operand is judged under sub/")
+            .to_string();
+    assert!(
+        error.contains("outside_workspace") && !error.contains("cwd.conditional"),
+        "{error}"
+    );
+    // The advertised workflow keeps working: the `cd` first, the probe
+    // after `&&` — the cd folds (Start connector) and the probe is judged
+    // under it, so the refusal is containment, never the conditional tag.
+    let error =
+        enforce_readonly_workspace_operands("cd sub && wc -c link", &roots, workspace.path())
+            .expect_err("cd-first conditional sequence still folds and judges")
+            .to_string();
+    assert!(
+        error.contains("outside_workspace") && !error.contains("cwd.conditional"),
+        "{error}"
+    );
+}
+
+/// Positive control for the cwd fold: a legitimate post-`cd` probe keeps
+/// running. The second segment resolves against the FIRST `cd`'s
+/// destination — `notes.txt` exists only under `sub/`, not at the workspace
+/// root — so the fold must admit it, and a second `cd` must be folded
+/// against the first destination too. The multi-hop case is pinned with a
+/// discriminating fixture (`sub/deep/link` → outside): a mutation that
+/// folds only the first `cd` (or judges `link` at the root) admits, while a
+/// mutation that discards the fold entirely refuses earlier, at the second
+/// `cd`'s own canonicalize — either way this pair of assertions moves.
+#[cfg(unix)]
+#[test]
+fn readonly_operand_gate_keeps_admitting_operands_under_cd_destination() {
+    let workspace = tempdir().expect("workspace");
+    let outside = tempdir().expect("outside");
+    let sub = workspace.path().join("sub");
+    std::fs::create_dir(&sub).expect("subdir");
+    std::fs::write(sub.join("real.txt"), "inside").expect("inside file");
+    std::fs::write(sub.join("notes.txt"), "notes").expect("notes file");
+    std::fs::create_dir(sub.join("deep")).expect("nested dir");
+    std::fs::write(outside.path().join("secret.txt"), "secret").expect("outside file");
+    std::os::unix::fs::symlink(
+        outside.path().join("secret.txt"),
+        sub.join("deep").join("link"),
+    )
+    .expect("outside symlink under sub/deep");
+    let roots = [workspace.path().to_path_buf()];
+
+    enforce_readonly_workspace_operands("cd sub; cat real.txt", &roots, workspace.path())
+        .expect("operand under the cd destination stays admitted");
+    enforce_readonly_workspace_operands("cd sub; cat notes.txt", &roots, workspace.path())
+        .expect("sequence operand resolves against the cd destination");
+    enforce_readonly_workspace_operands("cd sub; cd .; cat notes.txt", &roots, workspace.path())
+        .expect("a second cd folds against the first destination");
+    enforce_readonly_workspace_operands("cd sub; cd deep; cat real.txt", &roots, workspace.path())
+        .expect("a genuine two-cd fold resolves the operand under sub/deep");
+    let error =
+        enforce_readonly_workspace_operands("cd sub; cd deep; cat link", &roots, workspace.path())
+            .expect_err("the two-cd fold must judge `link` under sub/deep, not skip it at the root")
+            .to_string();
+    assert!(error.contains("outside_workspace"), "{error}");
+}
+
+/// A pipeline stage runs in a subshell, so a `cd` or `gh` stage must exempt
+/// or fold nothing past its `|`: judging a segment by its first program left
+/// every operand after the pipe unchecked (`cd sub | cat /etc/passwd` read
+/// the file; `gh … | cat <outside>` did too). The gate judges each stage on
+/// its own and refuses `cd` as a stage outright.
+#[cfg(unix)]
+#[test]
+fn readonly_operand_gate_judges_every_pipeline_stage_on_its_own() {
+    let workspace = tempdir().expect("workspace");
+    let outside = tempdir().expect("outside");
+    std::fs::create_dir(workspace.path().join("sub")).expect("subdir");
+    std::fs::write(outside.path().join("secret.txt"), "secret").expect("outside file");
+    std::os::unix::fs::symlink(
+        outside.path().join("secret.txt"),
+        workspace.path().join("link"),
+    )
+    .expect("outside symlink at the workspace root");
+    let roots = [workspace.path().to_path_buf()];
+    let outside_path = outside.path().join("secret.txt").display().to_string();
+
+    for command in [
+        "cd sub | cat /etc/passwd".to_string(),
+        "cd sub | cat; cat link".to_string(),
+        "pwd; cd sub | cat link".to_string(),
+        "cat link | cd sub".to_string(),
+    ] {
+        let error = enforce_readonly_workspace_operands(&command, &roots, workspace.path())
+            .expect_err("a `cd` pipeline stage must be refused")
+            .to_string();
+        assert!(
+            error.contains("cwd.pipeline_stage") || error.contains("operand.outside_workspace"),
+            "{command}: {error}"
+        );
+    }
+    for command in [
+        format!("gh issue list | cat {outside_path}"),
+        "gh issue list | cat link".to_string(),
+        format!("ls | gh issue list | cat {outside_path}"),
+        // Sequence forms: the gh stage exempts only itself there too.
+        format!("gh issue list; cat {outside_path}"),
+        "pwd; gh issue list; cat link".to_string(),
+    ] {
+        let error = enforce_readonly_workspace_operands(&command, &roots, workspace.path())
+            .expect_err("a gh stage exempts only itself")
+            .to_string();
+        assert!(
+            error.contains("operand.outside_workspace"),
+            "{command}: {error}"
+        );
+    }
+    // The exemption still holds for the gh stage's own operands, and an
+    // ordinary pipeline keeps working.
+    enforce_readonly_workspace_operands("gh issue view 5287 | head -n 3", &roots, workspace.path())
+        .expect("gh stage keeps its exemption");
+    enforce_readonly_workspace_operands("ls sub | wc -l", &roots, workspace.path())
+        .expect("plain pipelines stay admitted");
+    // An empty stage refuses in the gate's own pass too (the classifier
+    // already refuses it; this is defense in depth for the gate's doc that
+    // every stage is judged).
+    let error = enforce_readonly_workspace_operands(
+        "cat real.txt | | wc -c real.txt",
+        &roots,
+        workspace.path(),
+    )
+    .expect_err("an empty pipeline stage must refuse")
+    .to_string();
+    assert!(error.contains("empty stage"), "{error}");
+}
+
+/// Glob operands are judged by what they expand to, not by their spelling:
+/// `*` exists on no disk, so the literal check skipped it while the shell
+/// expanded it over an in-workspace symlink to an outside file.
+#[cfg(unix)]
+#[test]
+fn readonly_operand_gate_judges_glob_expansions_by_resolved_location() {
+    let workspace = tempdir().expect("workspace");
+    let outside = tempdir().expect("outside");
+    let sub = workspace.path().join("sub");
+    std::fs::create_dir(&sub).expect("subdir");
+    std::fs::write(sub.join("inner.txt"), "inside").expect("inside file");
+    std::fs::create_dir(workspace.path().join("clean")).expect("clean dir");
+    std::fs::write(workspace.path().join("clean").join("a.txt"), "a").expect("clean file");
+    std::fs::write(outside.path().join("secret.txt"), "secret").expect("outside file");
+    std::os::unix::fs::symlink(outside.path().join("secret.txt"), sub.join("link"))
+        .expect("outside symlink under sub");
+    std::os::unix::fs::symlink(outside.path(), workspace.path().join("dirlink"))
+        .expect("outside directory symlink");
+    let roots = [workspace.path().to_path_buf()];
+
+    for command in [
+        "cd sub; cat *",
+        "cd sub && od -c *",
+        "cat sub/*",
+        "cat sub/l*",
+        "cat */link",
+        "cat */li*",
+        "cat dirlink/*",
+        "cat * | head -3",
+        "wc -c sub/*",
+    ] {
+        let error = enforce_readonly_workspace_operands(command, &roots, workspace.path())
+            .expect_err("a glob expanding to an outside location must be refused")
+            .to_string();
+        assert!(
+            error.contains("operand.outside_workspace"),
+            "{command}: {error}"
+        );
+    }
+    // A dangling symlink that a glob matches is refused as unresolved (the
+    // shell would hand the program a path that fails at open time).
+    std::os::unix::fs::symlink("nowhere-at-all", sub.join("dangl")).expect("dangling link");
+    let error = enforce_readonly_workspace_operands("cat sub/dangl*", &roots, workspace.path())
+        .expect_err("a dangling glob match cannot be proven inside")
+        .to_string();
+    assert!(error.contains("operand.unresolved"), "{error}");
+    // Expansions that stay inside, and globs that match nothing, are admitted.
+    for command in [
+        "cat clean/*",
+        "cat clean/*.txt",
+        "wc -c clean/a*",
+        "cat sub/*.txt",
+        "cat nomatch*",
+        "find . -name *.rs",
+        "cd clean; cat *",
+    ] {
+        enforce_readonly_workspace_operands(command, &roots, workspace.path())
+            .unwrap_or_else(|error| panic!("{command} must stay admitted: {error}"));
+    }
+    // Hidden entries are expanded only when the component asks for them.
+    std::os::unix::fs::symlink(outside.path().join("secret.txt"), sub.join(".hidden-link"))
+        .expect("hidden outside symlink");
+    enforce_readonly_workspace_operands("cat sub/*.txt", &roots, workspace.path())
+        .expect("`*` does not expand hidden entries");
+    // ...and the exclusion itself is load-bearing: without it, a bare `*`
+    // would pick up the hidden outside symlink and refuse a legitimate read.
+    enforce_readonly_workspace_operands("cat sub/*", &roots, workspace.path())
+        .expect_err("the glob still covers the visible outside link")
+        .to_string();
+    let only_hidden = tempdir().expect("only-hidden workspace");
+    std::os::unix::fs::symlink(
+        outside.path().join("secret.txt"),
+        only_hidden.path().join(".sneak"),
+    )
+    .expect("only hidden entry is an outside symlink");
+    let only_hidden_roots = [only_hidden.path().to_path_buf()];
+    enforce_readonly_workspace_operands("cat *", &only_hidden_roots, only_hidden.path())
+        .expect("a bare `*` must not match hidden entries");
+    let error = enforce_readonly_workspace_operands("cat sub/.*", &roots, workspace.path())
+        .expect_err("`.*` does")
+        .to_string();
+    assert!(error.contains("operand.outside_workspace"), "{error}");
+}
+
+/// sh/dash expand a dot-glob to `.` and `..` (modern bash and zsh do not)
+/// and `read_dir` never yields them, so the walker synthesizes both
+/// candidates at every level a dot-component matches and judges them by
+/// resolved location: `cat .*/secret.txt` must not read `../secret.txt` on
+/// an sh/dash host, and a final `cat .*` must be judged against the outside
+/// parent directory. Synthesizing for the laxest admitted shell is a
+/// conservative over-approximation on bash/zsh (false-refusal direction
+/// only).
+#[cfg(unix)]
+#[test]
+fn readonly_glob_walker_judges_the_dot_and_dotdot_candidates() {
+    let workspace = tempdir().expect("workspace");
+    let outside = tempdir().expect("outside");
+    let hidden = workspace.path().join(".d");
+    std::fs::create_dir(&hidden).expect("hidden dir");
+    std::fs::write(hidden.join("ok.txt"), "inside").expect("inside file");
+    std::fs::write(workspace.path().join(".top"), "top").expect("top-level hidden file");
+    std::fs::write(outside.path().join("secret.txt"), "secret").expect("outside file");
+    std::os::unix::fs::symlink(outside.path().join("secret.txt"), hidden.join("link"))
+        .expect("outside symlink in the hidden dir");
+    let roots = [workspace.path().to_path_buf()];
+
+    // Via the hidden entry: the walker follows `.d` (a `read_dir` entry) and
+    // judges the link's resolved location.
+    let error = enforce_readonly_workspace_operands("cat .*/link", &roots, workspace.path())
+        .expect_err("a dot-glob reaching an outside location must be refused")
+        .to_string();
+    assert!(error.contains("operand.outside_workspace"), "{error}");
+    // A final dot-glob includes the parent directory itself on bash/sh.
+    let error = enforce_readonly_workspace_operands("cat .*", &roots, workspace.path())
+        .expect_err("`. .*` includes `..`, which is outside the workspace")
+        .to_string();
+    assert!(error.contains("operand.outside_workspace"), "{error}");
+    // Expansions that stay inside keep working.
+    for command in ["cat .*/ok.txt", "cat .top", "cat .d/.*/ok.txt"] {
+        enforce_readonly_workspace_operands(command, &roots, workspace.path())
+            .unwrap_or_else(|error| panic!("{command} must stay admitted: {error}"));
+    }
+}
+
+/// The walk runs in the host before any child exists to time out, so both of
+/// its bounds refuse instead of exploring: more matches than the cap, or a
+/// symlink cycle that a deep pattern re-enters at every level without ever
+/// producing a match.
+#[cfg(unix)]
+#[test]
+fn readonly_glob_walk_is_bounded_by_the_match_and_node_caps() {
+    let workspace = tempdir().expect("workspace");
+    let big = workspace.path().join("big");
+    std::fs::create_dir(&big).expect("big dir");
+    // One past the 4096-match cap, spelled as a literal on purpose: sizing
+    // the fixture from the constant would make a raised cap hang this test
+    // instead of reddening it.
+    for index in 0..4097 {
+        std::fs::write(big.join(format!("f{index:05}.txt")), "x").expect("fixture file");
+    }
+    let roots = [workspace.path().to_path_buf()];
+    let error = enforce_readonly_workspace_operands("cat big/*", &roots, workspace.path())
+        .expect_err("a 4097-match expansion must be refused by the match cap")
+        .to_string();
+    assert!(error.contains("glob_too_broad"), "{error}");
+
+    // A symlink cycle collapses onto one `(directory, remaining pattern)`
+    // key per level, so a deep pattern over it is still fully explored (the
+    // dead-end `zz` matches nothing) and must finish promptly rather than
+    // re-walking the directory exponentially.
+    std::os::unix::fs::symlink(".", workspace.path().join("loop1")).expect("self link");
+    std::os::unix::fs::symlink(".", workspace.path().join("loop2")).expect("self link");
+    let cycled = format!("cat {}", vec!["*"; 24].join("/")) + "/zz";
+    let started = std::time::Instant::now();
+    enforce_readonly_workspace_operands(&cycled, &roots, workspace.path())
+        .unwrap_or_else(|error| panic!("the collapsed cycle walk must stay complete: {error}"));
+    assert!(
+        started.elapsed() < std::time::Duration::from_secs(30),
+        "the re-entry dedup must collapse the cycle, took {:?}",
+        started.elapsed()
+    );
+
+    // The node budget still refuses when the deduplicated walk is genuinely
+    // wide: 2000 sibling self-linked directories are each entered once per
+    // resolvable remaining pattern length (the kernel caps symlink chains),
+    // together past the node cap.
+    let fan = workspace.path().join("fan");
+    std::fs::create_dir(&fan).expect("fan dir");
+    for level in 0..2000 {
+        let leaf = fan.join(format!("f{level:04}"));
+        std::fs::create_dir(&leaf).expect("fan leaf");
+        std::os::unix::fs::symlink(".", leaf.join("s")).expect("self link");
+    }
+    let chained = format!("cat fan/{}", vec!["*"; 40].join("/")) + "/zz";
+    let error = enforce_readonly_workspace_operands(&chained, &roots, workspace.path())
+        .expect_err("a walk past the node budget must be refused")
+        .to_string();
+    assert!(error.contains("glob_too_broad"), "{error}");
+}
+
+/// The glob caps bound the whole command, not one operand: with a fresh
+/// budget per operand, a command of many `*` tokens over a modest directory
+/// bought the caps once per token (measured at ~25 s of admitted host work
+/// for 500 tokens over 2000 entries). Each operand here expands to 70
+/// matches — far under the 4096-match cap on its own — and 60 of them
+/// together must still refuse, while 50 (3500 matches) stay admitted.
+#[test]
+fn readonly_glob_budget_is_shared_across_operands() {
+    let workspace = tempdir().expect("workspace");
+    let many = workspace.path().join("many");
+    std::fs::create_dir(&many).expect("many dir");
+    for index in 0..70 {
+        std::fs::write(many.join(format!("f{index:02}.txt")), "x").expect("fixture file");
+    }
+    let roots = [workspace.path().to_path_buf()];
+
+    let admitted = format!("cat {}", vec!["many/f*"; 50].join(" "));
+    enforce_readonly_workspace_operands(&admitted, &roots, workspace.path())
+        .expect("3500 matches across 50 operands stay under the shared budget");
+
+    let started = std::time::Instant::now();
+    let refused = format!("cat {}", vec!["many/f*"; 60].join(" "));
+    let error = enforce_readonly_workspace_operands(&refused, &roots, workspace.path())
+        .expect_err("4200 matches across 60 operands must exhaust the shared match budget")
+        .to_string();
+    assert!(error.contains("glob_too_broad"), "{error}");
+    assert!(
+        error.contains("in total"),
+        "the refusal must name the command-wide budget: {error}"
+    );
+    assert!(
+        started.elapsed() < std::time::Duration::from_secs(30),
+        "exhausting the budget must stop the walk promptly, took {:?}",
+        started.elapsed()
+    );
+
+    // The budget is one per command across segments and stages too.
+    let across = format!(
+        "cat {} | wc -l; wc -c {}",
+        vec!["many/f*"; 30].join(" "),
+        vec!["many/f*"; 30].join(" ")
+    );
+    let error = enforce_readonly_workspace_operands(&across, &roots, workspace.path())
+        .expect_err("the budget must not reset at a `|` or `;`")
+        .to_string();
+    assert!(error.contains("glob_too_broad"), "{error}");
+}
+
+/// A pattern that matches nothing enters no directory and judges no match,
+/// so the node and match counters never moved for it — yet it still read
+/// every entry of the directory it scanned, and 8000 such operands over a
+/// 2000-entry directory cost 8 s of host CPU. Examined entries are now the
+/// third command-wide counter: 400 zero-match operands over 1000 entries
+/// (400 000) stay admitted, 600 (600 000) refuse promptly.
+#[test]
+fn readonly_glob_budget_counts_examined_entries() {
+    let workspace = tempdir().expect("workspace");
+    let many = workspace.path().join("many");
+    std::fs::create_dir(&many).expect("many dir");
+    for index in 0..1000 {
+        std::fs::write(many.join(format!("f{index:04}.txt")), "x").expect("fixture file");
+    }
+    let roots = [workspace.path().to_path_buf()];
+
+    let admitted = format!("cat {}", vec!["many/zz*"; 400].join(" "));
+    enforce_readonly_workspace_operands(&admitted, &roots, workspace.path())
+        .expect("400 000 examined entries stay under the entry budget");
+
+    let started = std::time::Instant::now();
+    let refused = format!("cat {}", vec!["many/zz*"; 600].join(" "));
+    let error = enforce_readonly_workspace_operands(&refused, &roots, workspace.path())
+        .expect_err("600 000 examined entries must exhaust the entry budget")
+        .to_string();
+    assert!(error.contains("glob_too_broad"), "{error}");
+    assert!(
+        error.contains("examined directory entries"),
+        "the refusal must name the entry budget: {error}"
+    );
+    assert!(
+        started.elapsed() < std::time::Duration::from_secs(30),
+        "exhausting the entry budget must stop promptly, took {:?}",
+        started.elapsed()
+    );
+}
+
+/// A `cd` destination that exists but is not a directory must refuse at the
+/// gate: the shell's `cd` fails on it and `;`/`||` continue in the ORIGINAL
+/// directory, while the fold would have resolved every later operand under
+/// `notes.txt/…`, found nothing there, and skipped it — `cd notes.txt; cat
+/// link` then read a planted outside symlink at the root unjudged.
+#[cfg(unix)]
+#[test]
+fn readonly_operand_gate_refuses_cd_onto_a_regular_file() {
+    let workspace = tempdir().expect("workspace");
+    let outside = tempdir().expect("outside");
+    std::fs::write(workspace.path().join("notes.txt"), "notes").expect("regular file");
+    std::fs::write(outside.path().join("secret.txt"), "secret").expect("outside file");
+    std::os::unix::fs::symlink(
+        outside.path().join("secret.txt"),
+        workspace.path().join("link"),
+    )
+    .expect("outside symlink at the root");
+    let roots = [workspace.path().to_path_buf()];
+
+    for command in [
+        "cd notes.txt",
+        "cd notes.txt; cat link",
+        "cd notes.txt || cat link",
+        "cd notes.txt && cat link",
+        "cd notes.txt; head -c 40 link *",
+        "pwd; cd notes.txt; cat link",
+    ] {
+        let error = enforce_readonly_workspace_operands(command, &roots, workspace.path())
+            .expect_err("a non-directory cd destination must be refused before the fold")
+            .to_string();
+        assert!(
+            error.contains("cwd.not_a_directory"),
+            "{command}: expected the not-a-directory refusal, got: {error}"
+        );
+    }
+    // Positive control: the same operand under a real directory destination
+    // is judged there and admitted.
+    let sub = workspace.path().join("sub");
+    std::fs::create_dir(&sub).expect("subdir");
+    std::fs::write(sub.join("link"), "inside").expect("inside file named like the symlink");
+    enforce_readonly_workspace_operands("cd sub; cat link", &roots, workspace.path())
+        .expect("a directory destination folds and admits the inside operand");
+}
+
+/// A bare operand is judged as the whole word the shell opens. The gate used
+/// to judge only the text after the first `=`, so a symlink spelled
+/// `ax=b.out` was judged as the inside decoy `b.out` (or, with no decoy, as a
+/// nonexistent name and skipped), and the glob `a*=b*` was walked as `b*`,
+/// which matched nothing while the shell matched `ax=b.out`. Only options
+/// keep the `=` split, because `--file=path` really does carry its path after
+/// the `=`.
+#[cfg(unix)]
+#[test]
+fn readonly_operand_gate_judges_equals_bearing_operands_as_whole_words() {
+    let workspace = tempdir().expect("workspace");
+    let outside = tempdir().expect("outside");
+    std::fs::write(outside.path().join("secret.txt"), "secret").expect("outside file");
+    std::fs::write(workspace.path().join("b.out"), "decoy").expect("inside decoy");
+    std::fs::write(workspace.path().join("inside=1.txt"), "inside").expect("inside `=` name");
+    for name in ["ax=b.out", "x=nope", "x=y=z"] {
+        std::os::unix::fs::symlink(
+            outside.path().join("secret.txt"),
+            workspace.path().join(name),
+        )
+        .expect("outside symlink spelled with `=`");
+    }
+    let roots = [workspace.path().to_path_buf()];
+
+    for command in [
+        "cat ax=b.out",
+        "cat x=nope",
+        "cat x=y=z",
+        "sed -n 1p x=nope",
+        "cat a*=b* | head -c 40",
+        "pwd; cat a*=b*",
+        "cat --from=ax=b.out",
+    ] {
+        let error = enforce_readonly_workspace_operands(command, &roots, workspace.path())
+            .expect_err("an `=`-bearing operand must be judged as the word the shell opens")
+            .to_string();
+        assert!(
+            error.contains("operand.outside_workspace"),
+            "{command}: expected the outside-workspace refusal, got: {error}"
+        );
+    }
+    for command in [
+        "cat inside=1.txt",
+        "cat b.out",
+        "cat inside=1.txt | wc -l",
+        "head --lines=2 inside=1.txt",
+        "cat --from=inside=1.txt",
+    ] {
+        enforce_readonly_workspace_operands(command, &roots, workspace.path()).unwrap_or_else(
+            |error| panic!("{command}: an inside `=` name stays admitted: {error}"),
+        );
+    }
+}
+
+/// The sequence and stage splitters are deliberately naive, so a quoted
+/// separator mis-splits at the classifier; the seam's stricter `shlex` parse
+/// then rejects the unbalanced quote in one of the halves. This pins the
+/// fail-closed half of that invariant: no quoted-separator spelling reaches a
+/// shell through the operand gate.
+#[test]
+fn readonly_operand_gate_fails_closed_on_quoted_separators() {
+    let workspace = tempdir().expect("workspace");
+    std::fs::write(workspace.path().join("x"), "x").expect("inside file");
+    std::fs::write(workspace.path().join("y"), "y").expect("inside file");
+    let roots = [workspace.path().to_path_buf()];
+    for command in [
+        "cat \"x;cat y\"",
+        "wc 'x&&y'",
+        "cat \"x|cat y\"",
+        "cat 'x||y'",
+        "cat \"x;y",
+    ] {
+        enforce_readonly_workspace_operands(command, &roots, workspace.path())
+            .expect_err("a quoted separator must fail the seam's parse, never reach a shell");
+    }
+    enforce_readonly_workspace_operands("cat x; cat y", &roots, workspace.path())
+        .expect("the unquoted sequence over the same files stays admitted");
+}
+
+/// An operand is judged exactly as parsed. Whitespace survives into a token
+/// only through quoting, so `cat ' x '` names a file called ` x `; the gate
+/// used to trim the spelling, look up `x`, find nothing, and skip — while
+/// the shell (and the direct-argv lane) opened ` x `, an outside symlink.
+/// Trimming also undid the whole-word `=` judgement (`cat 'ax=b.out '`).
+#[cfg(unix)]
+#[test]
+fn readonly_operand_gate_judges_the_parsed_spelling_without_trimming() {
+    let workspace = tempdir().expect("workspace");
+    let outside = tempdir().expect("outside");
+    std::fs::write(outside.path().join("secret.txt"), "secret").expect("outside file");
+    for name in [" x ", "x ", " x", "ax=b.out "] {
+        std::os::unix::fs::symlink(
+            outside.path().join("secret.txt"),
+            workspace.path().join(name),
+        )
+        .expect("outside symlink with surrounding whitespace");
+    }
+    std::fs::write(workspace.path().join("x"), "inside decoy").expect("trimmed-name decoy");
+    std::fs::write(workspace.path().join(" in "), "inside").expect("inside spaced name");
+    let roots = [workspace.path().to_path_buf()];
+
+    for command in [
+        "cat ' x '",
+        "cat 'x '",
+        "cat ' x'",
+        "pwd; cat ' x '",
+        "cat ' x ' | head -c 40",
+        "cat 'ax=b.out '",
+        "cat --from=' x '",
+    ] {
+        let error = enforce_readonly_workspace_operands(command, &roots, workspace.path())
+            .expect_err("a whitespace-bearing spelling must be judged as the shell opens it")
+            .to_string();
+        assert!(
+            error.contains("operand.outside_workspace"),
+            "{command}: expected the outside-workspace refusal, got: {error}"
+        );
+    }
+    enforce_readonly_workspace_operands("cat ' in '", &roots, workspace.path())
+        .expect("an inside file with a spaced name stays admitted");
+    enforce_readonly_workspace_operands("cat x", &roots, workspace.path())
+        .expect("the trimmed-name decoy itself is an ordinary inside file");
+}
+
+/// The gate refuses `cd` as a pipeline stage in its own right (the stage
+/// runs in a subshell, so the fold would lie), with every operand inside the
+/// workspace — the assertion pins the specific `cwd.pipeline_stage` tag
+/// instead of a disjunction with the operand refusal.
+#[test]
+fn readonly_operand_gate_refuses_piped_cd_with_all_inside_operands() {
+    let workspace = tempdir().expect("workspace");
+    std::fs::create_dir(workspace.path().join("sub")).expect("subdir");
+    std::fs::write(workspace.path().join("sub").join("notes.md"), "data").expect("notes");
+    let roots = [workspace.path().to_path_buf()];
+    for command in ["cd sub | cat notes.md", "pwd; cd sub | wc -c notes.md"] {
+        let error = enforce_readonly_workspace_operands(command, &roots, workspace.path())
+            .expect_err("a piped cd must be refused outright")
+            .to_string();
+        assert!(error.contains("cwd.pipeline_stage"), "{command}: {error}");
+    }
+}
+
+/// The `cd` fold resolves each destination against the LIVE cwd, not the
+/// workspace root: with a cwd nested under the root, `cd deeper; cat x` must
+/// judge `root/cwd/deeper/x` even when a same-named decoy exists (or not)
+/// directly under the root.
+#[test]
+fn readonly_cd_fold_resolves_against_the_live_cwd() {
+    let workspace = tempdir().expect("workspace");
+    let outside = tempdir().expect("outside");
+    let cwd = workspace.path().join("session");
+    std::fs::create_dir(&cwd).expect("session cwd");
+    std::fs::create_dir(cwd.join("deeper")).expect("nested deeper");
+    std::fs::write(cwd.join("deeper").join("x.txt"), "nested").expect("nested file");
+    std::fs::write(outside.path().join("decoy.txt"), "outside").expect("outside decoy");
+    let roots = [workspace.path().to_path_buf()];
+
+    // Resolved against the root, `deeper/x.txt` would not exist and the
+    // command would be admitted unjudged; against the live cwd it is proven
+    // inside.
+    enforce_readonly_workspace_operands("cd deeper; cat x.txt", &roots, &cwd)
+        .expect("the fold must resolve against the live cwd");
+
+    // A decoy planted at the root proves the opposite direction: resolved
+    // against the root, the fold would hit the outside decoy and refuse an
+    // inside command.
+    let root_decoy = workspace.path().join("deeper");
+    std::fs::create_dir(&root_decoy).expect("root decoy dir");
+    std::os::unix::fs::symlink(outside.path().join("decoy.txt"), root_decoy.join("x.txt"))
+        .expect("outside decoy symlink");
+    enforce_readonly_workspace_operands("cd session/deeper; cat x.txt", &roots, workspace.path())
+        .expect("the fold must use the live cwd, not the root decoy");
+}
+
+/// The escapes end to end: none of these may return the outside content
+/// under `ShellPolicy::ReadOnly`, whichever lane they would have taken.
+#[cfg(unix)]
+#[tokio::test]
+async fn readonly_shell_refuses_pipeline_cd_and_glob_escapes_end_to_end() {
+    let workspace = tempdir().expect("workspace");
+    let outside = tempdir().expect("outside");
+    let sub = workspace.path().join("sub");
+    std::fs::create_dir(&sub).expect("subdir");
+    std::fs::write(sub.join("inner.txt"), "inside\n").expect("inside file");
+    std::fs::write(outside.path().join("secret.txt"), "TOPSECRET-OUTSIDE\n").expect("secret");
+    std::os::unix::fs::symlink(outside.path().join("secret.txt"), sub.join("link"))
+        .expect("outside symlink under sub");
+    std::os::unix::fs::symlink(
+        outside.path().join("secret.txt"),
+        workspace.path().join("link"),
+    )
+    .expect("outside symlink at the root");
+    // A regular file as a `cd` destination (the shell's `cd` fails and
+    // `;`/`||` continue in the original directory), and an `=`-bearing
+    // name the gate used to judge by its right-hand side only — `b.out` is
+    // an inside decoy so the wrong-name judgement would have admitted it.
+    std::fs::write(workspace.path().join("notes.txt"), "notes\n").expect("regular file");
+    std::fs::write(workspace.path().join("b.out"), "decoy\n").expect("inside decoy");
+    std::os::unix::fs::symlink(
+        outside.path().join("secret.txt"),
+        workspace.path().join("ax=b.out"),
+    )
+    .expect("outside symlink spelled with `=`");
+    std::os::unix::fs::symlink(
+        outside.path().join("secret.txt"),
+        workspace.path().join(" x "),
+    )
+    .expect("outside symlink spelled with surrounding spaces");
+    let context = ToolContext::new(workspace.path())
+        .with_shell_policy(crate::worker_profile::ShellPolicy::ReadOnly);
+
+    for command in [
+        "cd sub | cat /etc/passwd",
+        "cd sub | cat; cat link",
+        "cd sub; cat *",
+        "cd sub && cat *",
+        "cat * | head -3",
+        "cat */link",
+        "cd notes.txt; cat link",
+        "cd notes.txt || cat link",
+        "cd notes.txt; head -c 40 link *",
+        "cat ax=b.out",
+        "cat a*=b* | head -c 40",
+        "pwd; cat a*=b*",
+        "cat ' x '",
+        "pwd; cat ' x '",
+    ] {
+        let result = LowercaseBashTool
+            .execute(json!({"command": command}), &context)
+            .await;
+        let content = match &result {
+            Ok(output) => {
+                assert!(
+                    !output.success,
+                    "{command} must not succeed: {}",
+                    output.content
+                );
+                output.content.clone()
+            }
+            Err(error) => error.to_string(),
+        };
+        assert!(
+            content.contains("shell.readonly") || content.contains("read-only"),
+            "{command} must refuse through the read-only boundary: {content}"
+        );
+        assert!(
+            !content.contains("TOPSECRET-OUTSIDE") && !content.contains("User Database"),
+            "{command} leaked outside content: {content}"
+        );
+    }
+}
+
+/// A compound probe admitted by the bounded grammar must actually execute
+/// end to end under `ShellPolicy::ReadOnly`: the sequence routes through the
+/// shell lane (direct argv cannot bind `&&`), `cd` confines to the
+/// workspace, and the real byte count comes back.
+#[cfg(unix)]
+#[tokio::test]
+async fn readonly_shell_executes_admitted_compound_sequence() {
+    let workspace = tempdir().expect("workspace");
+    std::fs::create_dir(workspace.path().join("sub")).expect("subdir");
+    std::fs::write(workspace.path().join("sub").join("notes.md"), "data\n").expect("notes file");
+    let context = ToolContext::new(workspace.path())
+        .with_shell_policy(crate::worker_profile::ShellPolicy::ReadOnly);
+
+    let result = LowercaseBashTool
+        .execute(json!({"command": "cd sub && wc -c notes.md"}), &context)
+        .await
+        .expect("read-only compound sequence runs");
+    assert!(result.success, "{}", result.content);
+    assert!(
+        result.content.contains("notes.md"),
+        "expected real `wc -c` output, got: {}",
+        result.content
+    );
+
+    // A read-only `od` stage executes end to end (its file operands flow
+    // through the same gate).
+    let dumped = LowercaseBashTool
+        .execute(
+            json!({"command": "cat sub/notes.md | od -c | head -2"}),
+            &context,
+        )
+        .await
+        .expect("admitted od pipeline runs");
+    assert!(dumped.success, "{}", dumped.content);
+    assert!(
+        dumped.content.contains('\0') || dumped.content.contains('d'),
+        "expected od dump output, got: {}",
+        dumped.content
+    );
+
+    // A standalone `cd` names a shell builtin: it must take the shell lane,
+    // not the direct-argv lane, or hosts without a `cd` binary (most Linux
+    // systems) would refuse an admitted probe with a not-found exec error.
+    let standalone = LowercaseBashTool
+        .execute(json!({"command": "cd sub"}), &context)
+        .await
+        .expect("standalone cd runs through the shell lane");
+    assert!(
+        standalone.success,
+        "standalone `cd` must execute via the shell builtin: {}",
+        standalone.content
+    );
+
+    let refused = LowercaseBashTool
+        .execute(json!({"command": "cd .. && ls"}), &context)
+        .await
+        .expect("escaping compound is refused as a normal tool result");
+    assert!(
+        !refused.success,
+        "a `cd ..` sequence must not execute: {}",
+        refused.content
+    );
 }
 
 /// B14-1: the operand/cwd gate judges against the full declared root set.
@@ -1297,14 +4031,17 @@ fn windows_verbatim_and_drive_operands_survive_posix_split() {
     // `C:Users...`) and mangles the `\\?\` verbatim prefix before operand
     // classification can see it. The protection doubles those backslashes so
     // the splitter round-trips the real path (the `\\?\` cases that the
-    // verbatim strip alone could never reach).
+    // verbatim strip alone could never reach). Pinned against the
+    // unconditional transform; the shipped entry point applies it on Windows
+    // hosts only, so a POSIX lane never judges text the shell does not run.
     for (raw, expected) in [
         (r"\\?\C:\Users\foo\inside.txt", r"C:\Users\foo\inside.txt"),
         (r"C:\Users\foo\inside.txt", r"C:\Users\foo\inside.txt"),
         (r"\\server\share\secret", r"\\server\share\secret"),
         (r"\\.\device\path", r"\\.\device\path"),
     ] {
-        let protected = normalize_windows_command_paths(&format!("cat {raw}"));
+        let protected =
+            crate::command_safety::protected_windows_command_paths(&format!("cat {raw}"));
         let argv = shlex::split(&protected).expect("split must succeed");
         assert_eq!(
             argv,
@@ -1319,17 +4056,56 @@ fn windows_path_protection_leaves_other_words_untouched() {
     // POSIX escapes, drive-relative spellings, and plain relative operands
     // are not Windows absolute paths and must round-trip unchanged.
     assert_eq!(
-        normalize_windows_command_paths("echo a\\ b && cat inside.txt"),
+        crate::command_safety::protected_windows_command_paths("echo a\\ b && cat inside.txt"),
         "echo a\\ b && cat inside.txt"
     );
     assert_eq!(
-        normalize_windows_command_paths("cat C:secret"),
+        crate::command_safety::protected_windows_command_paths("cat C:secret"),
         "cat C:secret"
+    );
+    assert_eq!(
+        crate::command_safety::protected_windows_command_paths("cat inside.txt"),
+        "cat inside.txt"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn windows_path_normalization_stays_off_unix_lanes() {
+    // On unix, `Path::canonicalize` never yields verbatim or drive spellings,
+    // and normalizing would make the gate judge text the POSIX shell never
+    // runs: the `\\?\` strip deletes the `?` the charset refuses, and a raw
+    // `?` then reaches the shell as a live one-character glob (`cat a\\?\b`
+    // judged as `ab` while the shell expanded `a\?b` over a planted symlink).
+    assert_eq!(
+        normalize_windows_command_paths(r"pwd; cat a\\?\b"),
+        r"pwd; cat a\\?\b"
+    );
+    assert_eq!(
+        normalize_windows_command_paths(r"cat \\.\secret"),
+        r"cat \\.\secret"
     );
     assert_eq!(
         normalize_windows_command_paths("cat inside.txt"),
         "cat inside.txt"
     );
+    assert!(!crate::command_safety::is_agent_readonly_shell_command(
+        r"pwd; cat a\\?\b"
+    ));
+    assert!(!crate::command_safety::is_agent_readonly_shell_command(
+        r"cat \\?\secret"
+    ));
+    // The operand gate's own verbatim-prefix strip stays off too: a quoted
+    // spelling reaches it with the prefix intact and must fall into the
+    // shape refusal, not be judged under the stripped name.
+    let workspace = tempdir().expect("workspace");
+    let roots = [workspace.path().to_path_buf()];
+    for command in [r"cat '\\.\secret'", r"cat '\\?\secret'"] {
+        let error = enforce_readonly_workspace_operands(command, &roots, workspace.path())
+            .expect_err("a verbatim-prefixed operand must be refused on unix")
+            .to_string();
+        assert!(error.contains("operand.shape"), "{command}: {error}");
+    }
 }
 
 #[test]
@@ -1358,12 +4134,282 @@ fn readonly_github_shell_calls_obey_the_host_network_policy_before_spawn() {
     assert!(denied.contains("blocked by the active network policy"));
     enforce_readonly_github_network_policy("git status", &deny)
         .expect("local reads do not consult the network policy");
+    // A gh read reaches the network from inside a compound exactly like a
+    // bare one, so every sequence segment and pipeline stage is judged.
+    for compound in [
+        "pwd; gh issue list",
+        "ls && gh issue view 5287",
+        "gh issue list | head -n 3",
+        "git status || gh pr view 7",
+        // `*` operands are admitted by the agent grammar but refused by the
+        // whole-command parallel predicate; the per-stage guard must not use
+        // that predicate or these stages would silently skip the policy.
+        "gh pr list --search '*'",
+        "pwd; gh repo view *",
+    ] {
+        let denied = enforce_readonly_github_network_policy(compound, &deny)
+            .expect_err("a gh stage inside a compound must consult the policy")
+            .to_string();
+        assert!(
+            denied.contains("blocked by the active network policy"),
+            "{compound}: {denied}"
+        );
+    }
+    enforce_readonly_github_network_policy("git status; wc -l README.md", &deny)
+        .expect("compounds without a gh stage stay local");
 
     let prompt = context(crate::network_policy::DecisionToml::Prompt);
     let prompted = enforce_readonly_github_network_policy("gh issue view 5287", &prompt)
         .expect_err("headless Scout cannot prompt interactively")
         .to_string();
     assert!(prompted.contains("requires network approval"));
+}
+
+/// The tool description states the foreground stdin contract; the sentence is
+/// the model-facing contract for why stdin readers exit, so it is pinned.
+#[test]
+fn guidance_states_the_foreground_stdin_contract() {
+    let description = super::guidance::description();
+    assert!(
+        description.contains("Foreground commands without `interactive`, `tty`, or `combined_output` run without a terminal stdin"),
+        "guidance must state the bounded foreground stdin: {description}"
+    );
+    assert!(
+        description
+            .contains("combined_output` runs on a terminal lane whose stdin no one can write to"),
+        "guidance must state the combined_output foreground stdin contract: {description}"
+    );
+    assert!(
+        description.contains("action=\"interact\""),
+        "guidance must point at background interact for input-driven work: {description}"
+    );
+}
+
+/// The shell-lane binding decisions are pure and platform-independent so the
+/// Windows-only refusal (cmd.exe cannot bind `;`-sequences) and the POSIX
+/// pipefail scoping are pinned on every host, not just where the dispatcher
+/// resolves to that kind.
+#[test]
+fn readonly_shell_lane_decisions_per_shell_kind() {
+    use crate::shell_dispatcher::ShellKind;
+    let cmd = ShellKind::Cmd;
+    let pwsh = ShellKind::Pwsh;
+    let sh = ShellKind::Sh;
+    let bash = ShellKind::Bash;
+    let zsh = ShellKind::Custom {
+        binary: "/bin/zsh".to_string(),
+        flag: "-c".to_string(),
+    };
+    let dash = ShellKind::Custom {
+        binary: "/bin/dash".to_string(),
+        flag: "-c".to_string(),
+    };
+    // cmd.exe cannot bind an admitted `;`-sequence; it expands `%NAME%`
+    // from the environment and consumes a bare `^` as an escape before any
+    // program sees the word, so a compound containing either could run
+    // under a name the gate never judged; single commands without `%`/`^`
+    // and every other kind run as written.
+    assert!(readonly_compound_refused_by_shell_kind(&cmd, "pwd; pwd").is_some());
+    assert!(readonly_compound_refused_by_shell_kind(&cmd, "cat 50%off.txt").is_some());
+    // The runtime-reachable shape (single commands route direct-argv, where
+    // `%`/`^` are literal argv and never reach this function).
+    assert!(readonly_compound_refused_by_shell_kind(&cmd, "pwd; cat 50%off.txt").is_some());
+    assert!(readonly_compound_refused_by_shell_kind(&cmd, "pwd; cat a^b").is_some());
+    assert!(readonly_compound_refused_by_shell_kind(&cmd, "cat a^b.txt").is_some());
+    assert!(readonly_compound_refused_by_shell_kind(&cmd, "pwd").is_none());
+    assert!(readonly_compound_refused_by_shell_kind(&pwsh, "pwd; pwd").is_none());
+    assert!(readonly_compound_refused_by_shell_kind(&pwsh, "cat 50%off.txt | wc -c").is_none());
+    assert!(readonly_compound_refused_by_shell_kind(&pwsh, "pwd; cat a^b").is_none());
+    assert!(readonly_compound_refused_by_shell_kind(&sh, "pwd; pwd").is_none());
+    assert!(readonly_compound_refused_by_shell_kind(&bash, "pwd; cat a^b").is_none());
+    // The pipefail prefix rides only binaries that speak it. `/bin/sh` stays
+    // unprefixed because that path is bash on macOS but dash on Debian and
+    // Ubuntu, where the prefix aborts the whole `-c` payload before anything
+    // runs; dash spelled directly is excluded for the same reason.
+    for kind in [&cmd, &pwsh, &sh, &dash] {
+        assert_eq!(
+            readonly_shell_bound_command(kind, "git log | head -3"),
+            "git log | head -3"
+        );
+    }
+    for kind in [&bash, &zsh] {
+        assert_eq!(
+            readonly_shell_bound_command(kind, "git log | head -3"),
+            "set -o pipefail; git log | head -3"
+        );
+    }
+    // Sequences without a pipe bind without the prefix on every kind.
+    assert_eq!(
+        readonly_shell_bound_command(&bash, "pwd; wc -c f"),
+        "pwd; wc -c f"
+    );
+}
+
+/// The shell lane splices the same in-process hardening flags into every
+/// Git `log`/`show`/`diff`/`blame` stage that the direct-argv lane splices
+/// into a bare one, re-emitting the stage from the argv the gate parsed and
+/// copying the separators through untouched; stages of other programs and
+/// the Git subcommands that consult no driver are left byte for byte.
+#[test]
+fn readonly_shell_lane_hardens_git_diff_rendering_stages() {
+    let cases = [
+        (
+            "pwd; git log --oneline | wc -l",
+            "pwd; git log --no-ext-diff --no-textconv --no-show-signature --oneline | wc -l",
+        ),
+        (
+            "git show HEAD | cat",
+            "git show --no-ext-diff --no-textconv --no-show-signature HEAD | cat",
+        ),
+        (
+            "git -C sub --no-pager diff --stat && ls",
+            "git -C sub --no-pager diff --no-ext-diff --no-textconv --stat && ls",
+        ),
+        // `blame` applies textconv filters by default, so it is hardened too.
+        (
+            "pwd; git blame -w f | head",
+            "pwd; git blame --no-textconv -w f | head",
+        ),
+        // Whitespace around separators and a quoted argument survive.
+        (
+            "ls  ;  git log --grep 'fix bug'  |  head -3",
+            "ls  ;  git log --no-ext-diff --no-textconv --no-show-signature --grep \"fix bug\"  |  head -3",
+        ),
+        // A glob stays bare so the shell still expands what the gate judged.
+        (
+            "git log --oneline -- *.rs | wc -l",
+            "git log --no-ext-diff --no-textconv --no-show-signature --oneline -- *.rs | wc -l",
+        ),
+        // Nothing to harden: untouched, including the Git reads that consult
+        // no driver.
+        ("git status | cat", "git status | cat"),
+        (
+            "git ls-files; git grep -n x | head",
+            "git ls-files; git grep -n x | head",
+        ),
+        ("cat f | wc -l", "cat f | wc -l"),
+    ];
+    for (command, expected) in cases {
+        assert_eq!(
+            harden_readonly_shell_git_stages(command).expect(command),
+            expected,
+            "{command}"
+        );
+    }
+    // The direct-argv lane uses the same table.
+    let (program, args) = hardened_readonly_argv("git blame f").expect("direct lane");
+    assert_eq!(program, "git");
+    assert_eq!(args, ["blame", "--no-textconv", "f"]);
+    // Re-quoting is portable or refused, never silently different. A `~` is
+    // quoted (it is literal mid-word anyway and leading `~` operands never
+    // reach the seam), which cmd.exe and POSIX shells read back identically.
+    assert_eq!(readonly_shell_word("--oneline").unwrap(), "--oneline");
+    // cmd.exe expands a bare `%NAME%` and consumes a bare `^` as its escape,
+    // so those characters move into double quotes, which every supported
+    // shell reads back literally.
+    assert_eq!(
+        readonly_shell_word("HEAD^..main").unwrap(),
+        "\"HEAD^..main\""
+    );
+    assert_eq!(readonly_shell_word("a%PATH%b").unwrap(), "\"a%PATH%b\"");
+    assert_eq!(readonly_shell_word("HEAD~2").unwrap(), "\"HEAD~2\"");
+    assert_eq!(readonly_shell_word("fix bug").unwrap(), "\"fix bug\"");
+    assert_eq!(readonly_shell_word("it's").unwrap(), "\"it's\"");
+    for token in [
+        "say \"hi\"",
+        "back\\slash",
+        "a$b",
+        "x`y`",
+        "line\nbreak",
+        "bang!",
+    ] {
+        let error = readonly_shell_word(token).expect_err(token).to_string();
+        assert!(error.contains("git.unquotable_stage"), "{token}: {error}");
+    }
+    let error = harden_readonly_shell_git_stages("git log --grep 'say \"hi\"' | wc -l")
+        .expect_err("an unquotable Git stage argument refuses the compound")
+        .to_string();
+    assert!(error.contains("git.unquotable_stage"), "{error}");
+}
+
+/// End to end: a repository whose own configuration names a textconv filter
+/// must not get it executed by an admitted read-only compound. `git show
+/// HEAD` on the direct-argv lane was always spliced; `git show HEAD | cat`
+/// reached the shell unspliced and ran the filter — the `GIT_*` environment
+/// hardening pins global and system configuration, not the repository's own.
+/// The fixture is proven live first (a raw shell runs the filter), so the
+/// pin cannot pass vacuously.
+#[cfg(unix)]
+#[tokio::test]
+async fn readonly_shell_lane_git_show_does_not_run_repository_textconv() {
+    let workspace = tempdir().expect("workspace");
+    let outside = tempdir().expect("outside");
+    let marker = outside.path().join("textconv-ran");
+    let git = |args: &[&str]| {
+        let output = std::process::Command::new("git")
+            .args(["-c", "user.name=t", "-c", "user.email=t@example.invalid"])
+            .args(args)
+            .current_dir(workspace.path())
+            .output()
+            .expect("git runs");
+        assert!(
+            output.status.success(),
+            "git {args:?} failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    };
+    git(&["init", "-q"]);
+    git(&[
+        "config",
+        "diff.evil.textconv",
+        &format!("touch {}", marker.display()),
+    ]);
+    std::fs::write(workspace.path().join(".gitattributes"), "*.bin diff=evil\n")
+        .expect("attributes");
+    std::fs::write(workspace.path().join("blob.bin"), b"\x00\x01payload").expect("blob");
+    git(&["add", "."]);
+    git(&["commit", "-q", "-m", "seed"]);
+
+    // Positive control: the fixture really executes the filter when a shell
+    // runs the unhardened compound — through the diff renderer and through
+    // `blame`, which applies textconv by default.
+    for control_command in ["git show HEAD | cat", "git blame blob.bin"] {
+        let control = std::process::Command::new("sh")
+            .args(["-c", control_command])
+            .current_dir(workspace.path())
+            .output()
+            .expect("control shell runs");
+        assert!(
+            control.status.success(),
+            "{control_command}: {}",
+            String::from_utf8_lossy(&control.stderr)
+        );
+        assert!(
+            marker.exists(),
+            "{control_command}: the fixture's textconv must fire under a raw shell"
+        );
+        std::fs::remove_file(&marker).expect("reset marker");
+    }
+
+    let context = ToolContext::new(workspace.path())
+        .with_shell_policy(crate::worker_profile::ShellPolicy::ReadOnly);
+    for command in [
+        "git show HEAD | cat",
+        "pwd; git show HEAD",
+        "ls && git show HEAD",
+        "git blame blob.bin",
+        "pwd; git blame blob.bin | cat",
+    ] {
+        let output = LowercaseBashTool
+            .execute(json!({"command": command}), &context)
+            .await
+            .unwrap_or_else(|error| panic!("{command} must execute: {error}"));
+        assert!(output.success, "{command}: {}", output.content);
+        assert!(
+            !marker.exists(),
+            "{command} ran the repository's textconv filter from the shell lane"
+        );
+    }
 }
 
 #[test]
@@ -2277,6 +5323,129 @@ fn test_write_stdin_streams_output() {
     assert!(delta2.result.stdout.is_empty());
 }
 
+/// A foreground command that reads stdin with NO stdin data used to wedge on
+/// a pipe whose write end the tool kept open: the live repro was `$SHELL`
+/// holding the turn until the foreground watchdog killed it at the full
+/// timeout (`cat` behaves identically). The foreground lane must deliver EOF
+/// at spawn instead. Background keeps the pipe open for deferred
+/// `interact` streaming — that contract is pinned by
+/// `test_write_stdin_streams_output` and must not regress.
+#[tokio::test]
+async fn foreground_without_stdin_data_gives_stdin_readers_eof() {
+    let workspace = tempdir().expect("workspace");
+    let context = ToolContext::new(workspace.path().to_path_buf());
+    // `cat` on Unix, `more` on cmd, `[Console]::In.ReadToEnd()` on PowerShell —
+    // each blocks until stdin reaches EOF.
+    let echo_stdin = echo_stdin_command();
+
+    let started = Instant::now();
+    let result = BashTool::new("Bash")
+        .execute(json!({"command": echo_stdin, "timeout_ms": 3000}), &context)
+        .await
+        .expect("foreground stdin-reader must spawn");
+    let elapsed = started.elapsed();
+
+    assert!(
+        result.success,
+        "a stdin-reading foreground command with no stdin data must see EOF \
+         and exit promptly, not run to the timeout; took {elapsed:?}: {}",
+        result.content
+    );
+    assert!(
+        elapsed < Duration::from_millis(2900),
+        "EOF must be delivered right after spawn, not discovered at the \
+         timeout; took {elapsed:?}: {}",
+        result.content
+    );
+}
+
+#[cfg(unix)]
+const SYNC_STDIN_EOF_HELPER_ENV: &str = "CODEWHALE_SYNC_STDIN_EOF_HELPER";
+#[cfg(unix)]
+const SYNC_STDIN_EOF_RESULT_FILE_ENV: &str = "CODEWHALE_SYNC_STDIN_EOF_RESULT_FILE";
+
+/// Helper half of
+/// `sync_lane_without_stdin_data_gets_eof_not_inherited_stdin`: runs one
+/// synchronous (background=false) stdin-reading command from a process whose
+/// own stdin is a pipe the driver deliberately holds open, and records the
+/// resulting status for the driver to judge.
+#[cfg(unix)]
+#[test]
+fn sync_lane_stdin_eof_helper_process() {
+    if std::env::var(SYNC_STDIN_EOF_HELPER_ENV).ok().as_deref() != Some("1") {
+        return;
+    }
+    let result = ShellManager::new(std::env::temp_dir())
+        .execute_with_options_env(
+            &echo_stdin_command(),
+            None,
+            10_000,
+            false,
+            None,
+            false,
+            None,
+            HashMap::new(),
+        )
+        .expect("sync execute in helper");
+    std::fs::write(
+        PathBuf::from(
+            std::env::var(SYNC_STDIN_EOF_RESULT_FILE_ENV).expect("sync stdin result file"),
+        ),
+        format!("{:?}", result.status),
+    )
+    .expect("write sync stdin result file");
+}
+
+/// The sync lane's old default left the child inheriting the host's stdin
+/// (std's `Stdio::inherit()`), so on a live TTY a stdin-reading command hung
+/// or drew SIGTTIN. Reproduce deterministically: re-exec this test binary as
+/// a helper whose own stdin is a pipe this process holds open, and run the
+/// sync lane inside it. An inherited pipe can never EOF; `Stdio::null()`
+/// gives the child an immediate end-of-file.
+#[cfg(unix)]
+#[test]
+fn sync_lane_without_stdin_data_gets_eof_not_inherited_stdin() {
+    let tmp = tempdir().expect("tempdir");
+    let result_file = tmp.path().join("sync-stdin-result");
+    let test_binary = std::env::current_exe().expect("current test binary");
+    let mut helper = Command::new(&test_binary)
+        .arg("--exact")
+        .arg("tools::shell::tests::sync_lane_stdin_eof_helper_process")
+        .arg("--nocapture")
+        .env(SYNC_STDIN_EOF_HELPER_ENV, "1")
+        .env(SYNC_STDIN_EOF_RESULT_FILE_ENV, &result_file)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .expect("spawn sync stdin helper");
+    // Hold the write end for the whole run: while it is open, an inherited
+    // stdin can never reach EOF, which is exactly the old hang.
+    let held_stdin = helper.stdin.take().expect("helper stdin pipe");
+    let deadline = Instant::now() + Duration::from_secs(60);
+    let status = loop {
+        match helper.try_wait().expect("poll sync stdin helper") {
+            Some(status) => break status,
+            None => {
+                assert!(
+                    Instant::now() < deadline,
+                    "sync-lane helper never finished; the lane is inheriting \
+                     a never-EOF stdin"
+                );
+                std::thread::sleep(Duration::from_millis(50));
+            }
+        }
+    };
+    drop(held_stdin);
+    assert!(status.success(), "sync stdin helper failed: {status}");
+    let outcome = std::fs::read_to_string(&result_file).expect("sync lane result file");
+    assert_eq!(
+        outcome, "Completed",
+        "a sync command reading stdin with no stdin data must get EOF, not \
+         inherited host stdin"
+    );
+}
+
 #[test]
 #[cfg(all(unix, not(target_env = "ohos")))]
 fn background_tty_command_has_controlling_terminal() {
@@ -3112,6 +6281,64 @@ async fn test_exec_shell_foreground_can_move_to_background() {
     let mut manager = shell_manager.lock().expect("shell manager lock");
     let job = manager.inspect_job(&task_id).expect("inspect job");
     assert_eq!(job.snapshot.status, ShellStatus::Running);
+    let killed = manager.kill(&task_id).expect("kill");
+    assert_eq!(killed.status, ShellStatus::Killed);
+}
+
+/// The foreground stdin contract survives a detach: the command keeps
+/// running in the background, but its stdin was put at end-of-file at spawn
+/// (so stdin readers exit instead of wedging), and a later `interact` says so
+/// and points at the background lane instead of failing opaquely.
+#[tokio::test]
+async fn detached_foreground_command_reports_its_closed_stdin_on_interact() {
+    let tmp = tempdir().expect("tempdir");
+    let ctx = ToolContext::new(tmp.path());
+    let shell_manager = ctx.shell_manager.clone();
+    let command = sleep_command(30);
+    let task_ctx = ctx.clone();
+
+    let task = tokio::spawn(async move {
+        BashTool::new("Bash")
+            .execute(
+                json!({"command": command, "timeout_ms": 600_000}),
+                &task_ctx,
+            )
+            .await
+            .expect("execute")
+    });
+    tokio::time::sleep(Duration::from_millis(150)).await;
+    shell_manager
+        .lock()
+        .expect("shell manager lock")
+        .request_foreground_background();
+    let result = tokio::time::timeout(Duration::from_secs(5), task)
+        .await
+        .expect("foreground shell should detach")
+        .expect("task should not panic");
+    let task_id = result
+        .metadata
+        .as_ref()
+        .and_then(|meta| meta.get("task_id"))
+        .and_then(Value::as_str)
+        .expect("task id")
+        .to_string();
+
+    let mut manager = shell_manager.lock().expect("shell manager lock");
+    assert_eq!(
+        manager
+            .inspect_job(&task_id)
+            .expect("inspect job")
+            .snapshot
+            .status,
+        ShellStatus::Running,
+        "the detached command keeps running"
+    );
+    let error = manager
+        .write_stdin(&task_id, "hello\n", false)
+        .expect_err("stdin was closed at spawn by the foreground contract")
+        .to_string();
+    assert!(error.contains("end-of-file"), "{error}");
+    assert!(error.contains("background=true"), "{error}");
     let killed = manager.kill(&task_id).expect("kill");
     assert_eq!(killed.status, ShellStatus::Killed);
 }
@@ -4939,4 +8166,338 @@ fn forkguard_powershell_retry_keeps_the_first_result_when_it_cannot_start() {
         "the retry failure must be annotated: {}",
         annotated.stderr
     );
+}
+
+#[cfg(unix)]
+#[test]
+fn readonly_operand_gate_refuses_cd_operands_the_shell_reinterprets() {
+    // zsh's EQUALS expansion turns `cd =ls` into `cd /bin/ls`: the shell's
+    // `cd` fails and a `;`/`||` sequence continues in the original directory,
+    // while the seam would have canonicalized a literal `=ls` directory and
+    // folded every later operand under it. The shape rule is the
+    // classifier's own, shared in one place, so both layers refuse.
+    let workspace = tempdir().expect("workspace");
+    let outside = tempdir().expect("outside");
+    std::fs::write(outside.path().join("secret.txt"), "secret").expect("outside file");
+    std::fs::create_dir(workspace.path().join("=ls")).expect("equals directory");
+    std::fs::create_dir(workspace.path().join("sub")).expect("sub");
+    std::fs::write(workspace.path().join("sub").join("ok.txt"), "ok").expect("ok file");
+    std::os::unix::fs::symlink(
+        outside.path().join("secret.txt"),
+        workspace.path().join("link"),
+    )
+    .expect("outside root symlink");
+    let roots = [workspace.path().to_path_buf()];
+
+    for command in ["cd =ls; cat link", "cd =ls || cat link"] {
+        let error = enforce_readonly_workspace_operands(command, &roots, workspace.path())
+            .expect_err("an `=`-bearing cd operand must be refused at the seam")
+            .to_string();
+        assert!(error.contains("cwd.shape"), "{command}: {error}");
+        assert!(
+            !crate::command_safety::is_agent_readonly_shell_command(command),
+            "{command} must refuse at the classifier too"
+        );
+    }
+    // Admitted neighbours stay admitted.
+    enforce_readonly_workspace_operands("cd sub; cat ok.txt", &roots, workspace.path())
+        .expect("a plain relative cd sequence stays admitted");
+}
+
+#[cfg(unix)]
+#[test]
+fn readonly_operand_gate_refuses_cd_destinations_the_shell_cannot_enter() {
+    use std::os::unix::fs::PermissionsExt;
+    struct ChmodGuard<'a>(&'a std::path::Path);
+    impl Drop for ChmodGuard<'_> {
+        fn drop(&mut self) {
+            let _ = std::fs::set_permissions(self.0, std::fs::Permissions::from_mode(0o755));
+        }
+    }
+    // A mode-000 directory canonicalizes and `is_dir`s (stat needs search
+    // permission only on the ancestors), but the shell's `cd` fails on it and
+    // a `;`/`||` sequence continues in the original directory — the same
+    // fold-lies-when-cd-fails shape as a regular-file destination.
+    let workspace = tempdir().expect("workspace");
+    let outside = tempdir().expect("outside");
+    std::fs::write(outside.path().join("secret.txt"), "secret").expect("outside file");
+    let vault = workspace.path().join("vault");
+    std::fs::create_dir(&vault).expect("vault");
+    std::os::unix::fs::symlink(
+        outside.path().join("secret.txt"),
+        workspace.path().join("link"),
+    )
+    .expect("outside root symlink");
+    let roots = [workspace.path().to_path_buf()];
+    {
+        let _guard = ChmodGuard(&vault);
+        std::fs::set_permissions(&vault, std::fs::Permissions::from_mode(0o000))
+            .expect("chmod 000");
+        for command in ["cd vault; cat link", "cd vault || cat link"] {
+            let error = enforce_readonly_workspace_operands(command, &roots, workspace.path())
+                .expect_err("an unsearchable cd destination must be refused")
+                .to_string();
+            assert!(error.contains("cwd.unsearchable"), "{command}: {error}");
+        }
+    }
+    // Searchable again, the fold is exact and the sequence admits.
+    enforce_readonly_workspace_operands("cd vault; pwd", &roots, workspace.path())
+        .expect("a searchable destination folds and admits");
+}
+
+#[cfg(unix)]
+#[test]
+fn readonly_operand_gate_refuses_recursive_glob_components() {
+    // zsh expands `**/` recursively while the walker — like bash without
+    // `globstar`, sh, and dash — consumes one directory level per component,
+    // so a recursive spelling would produce matches nothing ever judged.
+    let workspace = tempdir().expect("workspace");
+    let outside = tempdir().expect("outside");
+    std::fs::write(outside.path().join("secret.txt"), "secret").expect("outside file");
+    std::fs::create_dir_all(workspace.path().join("sub").join("deep")).expect("sub/deep");
+    std::fs::write(workspace.path().join("top.txt"), "inside").expect("inside file");
+    std::os::unix::fs::symlink(
+        outside.path().join("secret.txt"),
+        workspace.path().join("sub").join("deep").join("evil.txt"),
+    )
+    .expect("outside symlink at depth two");
+    let roots = [workspace.path().to_path_buf()];
+
+    for command in [
+        "cat **/*.txt",
+        "pwd; cat **/*.txt",
+        "cat **/evil.txt",
+        "cat **/*.txt | head -3",
+    ] {
+        let error = enforce_readonly_workspace_operands(command, &roots, workspace.path())
+            .expect_err("a recursive glob spelling must be refused")
+            .to_string();
+        assert!(error.contains("operand.shape"), "{command}: {error}");
+    }
+    // A trailing `**` is a plain `*` on every supported shell.
+    enforce_readonly_workspace_operands("cat sub/**", &roots, workspace.path())
+        .expect("a trailing `**` stays a one-level glob");
+    // The recursion depth is bounded by the component count, so a deep
+    // `.*` chain is refused before the walk instead of recursing per level.
+    let deep = format!("cat {}", vec![".*"; 33].join("/"));
+    let error = enforce_readonly_workspace_operands(&deep, &roots, workspace.path())
+        .expect_err("a 33-component glob must hit the component cap")
+        .to_string();
+    assert!(error.contains("glob_too_broad"), "{error}");
+    let borderline = format!("cat {}", vec!["sub"; 32].join("/"));
+    let _ = enforce_readonly_workspace_operands(&borderline, &roots, workspace.path());
+}
+
+#[cfg(unix)]
+#[test]
+fn readonly_operand_gate_judges_dash_prefixed_glob_operands_as_whole_words() {
+    // The shell pathname-expands the whole word, not the part after the `=`:
+    // `--exclude-from=zz*` matches a planted `--exclude-from=zzq` while a
+    // walk of `zz*` alone matches nothing.
+    let workspace = tempdir().expect("workspace");
+    let outside = tempdir().expect("outside");
+    std::fs::write(outside.path().join("secret.txt"), "secret").expect("outside file");
+    std::os::unix::fs::symlink(
+        outside.path().join("secret.txt"),
+        workspace.path().join("--exclude-from=zzq"),
+    )
+    .expect("outside symlink spelled as an option");
+    let roots = [workspace.path().to_path_buf()];
+    let error = enforce_readonly_workspace_operands(
+        "git ls-files --exclude-from=zz*",
+        &roots,
+        workspace.path(),
+    )
+    .expect_err("the whole-word expansion must be judged")
+    .to_string();
+    assert!(error.contains("outside_workspace"), "{error}");
+    // Without a planted match the spelling stays admitted.
+    let clean = tempdir().expect("clean workspace");
+    std::fs::write(clean.path().join("inside.txt"), "inside").expect("inside file");
+    enforce_readonly_workspace_operands(
+        "git ls-files --exclude-from=zz*",
+        &[clean.path().to_path_buf()],
+        clean.path(),
+    )
+    .expect("a zero-match whole-word glob stays admitted");
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn readonly_shell_refuses_judged_and_run_name_divergences_end_to_end() {
+    let workspace = tempdir().expect("workspace");
+    let outside = tempdir().expect("outside");
+    std::fs::write(outside.path().join("secret.txt"), "TOPSECRET-OUTSIDE\n").expect("secret");
+    std::fs::write(workspace.path().join("Cargo.toml"), "[package]\n").expect("manifest");
+    std::fs::write(workspace.path().join("top.txt"), "inside\n").expect("inside file");
+    std::fs::create_dir_all(workspace.path().join("sub").join("deep")).expect("sub/deep");
+    std::os::unix::fs::symlink(
+        outside.path().join("secret.txt"),
+        workspace.path().join("a\\?b"),
+    )
+    .expect("outside symlink spelled with an escaped wildcard");
+    // A POSIX file name that merely starts with a backslash (clippy reads the
+    // literal as a Windows separator; on unix it is an ordinary byte).
+    let leading_escape_name = String::from("\\?secret");
+    std::os::unix::fs::symlink(
+        outside.path().join("secret.txt"),
+        workspace.path().join(leading_escape_name),
+    )
+    .expect("outside symlink spelled with a leading escaped wildcard");
+    std::os::unix::fs::symlink(
+        outside.path().join("secret.txt"),
+        workspace.path().join("link"),
+    )
+    .expect("outside root symlink");
+    std::fs::create_dir(workspace.path().join("=ls")).expect("equals directory");
+    std::os::unix::fs::symlink(
+        outside.path().join("secret.txt"),
+        workspace.path().join("sub").join("deep").join("evil.txt"),
+    )
+    .expect("outside symlink at depth two");
+    let context = ToolContext::new(workspace.path())
+        .with_shell_policy(crate::worker_profile::ShellPolicy::ReadOnly);
+
+    for command in [
+        // The `\\?\` verbatim strip used to run before the charset gate, so
+        // the gate judged `ab` while the shell parsed `a\?b` — a live glob.
+        r"pwd; cat a\\?\b",
+        r"cat a\\?\b; pwd",
+        r"cat Cargo.toml | cat a\\?\b",
+        r"pwd; cat \\?\secret",
+        // zsh's EQUALS expansion makes the shell's `cd` fail so the sequence
+        // continues at the root, where `link` points outside.
+        "cd =ls; cat link",
+        "cd =ls || cat link",
+        // zsh recurses `**/` while the walker judged one level per component.
+        "pwd; cat **/*.txt",
+        "cat **/evil.txt | head -3",
+        "grep -n TOPSECRET **/*.txt | head -3",
+    ] {
+        let result = LowercaseBashTool
+            .execute(json!({"command": command}), &context)
+            .await;
+        let content = match &result {
+            Ok(output) => {
+                assert!(
+                    !output.success,
+                    "{command} must not succeed: {}",
+                    output.content
+                );
+                output.content.clone()
+            }
+            Err(error) => error.to_string(),
+        };
+        assert!(
+            content.contains("shell.readonly") || content.contains("read-only"),
+            "{command} must refuse through the read-only boundary: {content}"
+        );
+        assert!(
+            !content.contains("TOPSECRET-OUTSIDE"),
+            "{command} leaked outside content: {content}"
+        );
+    }
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn readonly_shell_refuses_unsearchable_cd_destinations_end_to_end() {
+    use std::os::unix::fs::PermissionsExt;
+    struct ChmodGuard<'a>(&'a std::path::Path);
+    impl Drop for ChmodGuard<'_> {
+        fn drop(&mut self) {
+            let _ = std::fs::set_permissions(self.0, std::fs::Permissions::from_mode(0o755));
+        }
+    }
+    let workspace = tempdir().expect("workspace");
+    let outside = tempdir().expect("outside");
+    std::fs::write(outside.path().join("secret.txt"), "TOPSECRET-OUTSIDE\n").expect("secret");
+    let vault = workspace.path().join("vault");
+    std::fs::create_dir(&vault).expect("vault");
+    std::os::unix::fs::symlink(
+        outside.path().join("secret.txt"),
+        workspace.path().join("link"),
+    )
+    .expect("outside root symlink");
+    let context = ToolContext::new(workspace.path())
+        .with_shell_policy(crate::worker_profile::ShellPolicy::ReadOnly);
+    let _guard = ChmodGuard(&vault);
+    std::fs::set_permissions(&vault, std::fs::Permissions::from_mode(0o000)).expect("chmod 000");
+
+    for command in [
+        "cd vault; cat link",
+        "cd vault || cat link",
+        "cd vault; cat *",
+    ] {
+        let result = LowercaseBashTool
+            .execute(json!({"command": command}), &context)
+            .await;
+        let content = match &result {
+            Ok(output) => {
+                assert!(
+                    !output.success,
+                    "{command} must not succeed: {}",
+                    output.content
+                );
+                output.content.clone()
+            }
+            Err(error) => error.to_string(),
+        };
+        assert!(
+            content.contains("shell.readonly") || content.contains("read-only"),
+            "{command} must refuse through the read-only boundary: {content}"
+        );
+        assert!(
+            !content.contains("TOPSECRET-OUTSIDE"),
+            "{command} leaked outside content: {content}"
+        );
+    }
+}
+
+/// A `cd` its connector may not run must not fold, end to end through the
+/// tool: `cat nope && cd sub; cat link` and `true || cd sub; cat link` read
+/// a planted root symlink on a real shell (the failed/succeeded first
+/// segment short-circuits the `&&`/`||`, so the `cd` never runs and `;`
+/// continues at the original cwd — probed live on bash and sh before the
+/// fix), while the gate folded onto `sub/` and skipped `link` at the
+/// exists() miss. The command now refuses at admission.
+#[cfg(unix)]
+#[tokio::test]
+async fn readonly_shell_refuses_short_circuit_cd_escape_end_to_end() {
+    let workspace = tempdir().expect("workspace");
+    let outside = tempdir().expect("outside");
+    std::fs::create_dir(workspace.path().join("sub")).expect("subdir");
+    std::fs::write(outside.path().join("secret.txt"), "TOPSECRET-OUTSIDE\n").expect("secret");
+    std::os::unix::fs::symlink(
+        outside.path().join("secret.txt"),
+        workspace.path().join("link"),
+    )
+    .expect("outside root symlink");
+    let context = ToolContext::new(workspace.path())
+        .with_shell_policy(crate::worker_profile::ShellPolicy::ReadOnly);
+
+    for command in ["cat nope && cd sub; cat link", "true || cd sub; cat link"] {
+        let result = LowercaseBashTool
+            .execute(json!({"command": command}), &context)
+            .await;
+        let content = match &result {
+            Ok(output) => {
+                assert!(
+                    !output.success,
+                    "{command} must not succeed: {}",
+                    output.content
+                );
+                output.content.clone()
+            }
+            Err(error) => error.to_string(),
+        };
+        assert!(
+            content.contains("shell.readonly") || content.contains("read-only"),
+            "{command} must refuse through the read-only boundary, whichever wall fires: {content}"
+        );
+        assert!(
+            !content.contains("TOPSECRET-OUTSIDE"),
+            "{command} leaked outside content: {content}"
+        );
+    }
 }
