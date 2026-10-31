@@ -3701,8 +3701,8 @@ class CiGatePolicyTests(unittest.TestCase):
         # 读取器同样把孤立 CR 当行终止,可伪造第二条 workflow command)。
         self.assertIn('echo "::warning::[memory-setup] ${*//[', source)
         self.assertIn("${*//[$'\\r\\n']/ }", source)
-        # 预期可恢复的慢路径(modprobe 首失败、镜像 swap 预激活、镜像 swap
-        # as-is 失败后的重试、全层失败后的镜像 swapfile 兜底重试)只进日志,
+        # 预期可恢复的慢路径(镜像 swap as-is 失败后的重试、全层失败后的
+        # 镜像 swapfile 兜底重试)只进日志,
         # 不得注解化,否则每个 job 都会常驻黄标稀释真告警。函数体全文钉死:
         # 改回 ::warning:: 注解即红。
         self.assertIn(
@@ -3710,12 +3710,7 @@ class CiGatePolicyTests(unittest.TestCase):
             source,
         )
         self.assertIn(
-            'warn_recoverable "modprobe zram failed${modprobe_err:+: ${modprobe_err}};',
-            source,
-        )
-        self.assertIn(
-            'warn_recoverable "no swap active; activating the image swapfile'
-            ' before the slow module install"',
+            'warn "modprobe zram failed${modprobe_err:+: ${modprobe_err}};',
             source,
         )
         self.assertIn(
@@ -3943,17 +3938,67 @@ class CiGatePolicyTests(unittest.TestCase):
             source,
         )
         self.assertIn(
-            'warn "apt-get install ${modules_pkg} failed once; retrying"',
-            source,
-        )
-        self.assertIn(
-            'warn "apt-get install ${modules_pkg} failed again; giving up on zram layers"',
-            source,
-        )
-        self.assertIn(
             'log "provisioning the mandatory /mnt disk swap"\nsetup_disk_swap',
             source,
         )
+
+    def test_memory_setup_module_failure_does_not_poison_dependency_install(self):
+        source = (ROOT / "scripts" / "ci-memory-setup.sh").read_text(encoding="utf-8")
+        # Execute the real module loader and main fallback flow with host
+        # operations stubbed. Never change the test machine's swap or sysfs.
+        loader = source.split("setup_zram() {", 1)[1].split("# Mandatory disk swap:", 1)[0]
+        main = source[source.index("if [[ ${PINVOU3_CI_DISABLE_ZRAM:-0}"):]
+        cases = ((1, "0", 0), (124, "0", 0), (1, "1", 0), (1, "0", 1))
+        for status, disabled, swap_status in cases:
+            with self.subTest(modprobe_status=status, disabled=disabled, swap_status=swap_status):
+                harness = r'''
+set -uo pipefail
+log() { echo "$*"; }
+warn() { echo "$*" >&2; }
+warn_recoverable() { warn "$@"; }
+run_to() { shift; "$@"; }
+modprobe() { echo "module unavailable" >&2; return "$MODULE_STATUS"; }
+apt-get() { echo "PACKAGE_MANAGER_CALLED"; return 1; }
+dpkg() { echo "PACKAGE_MANAGER_CALLED"; return 1; }
+swapon() { return 0; }
+any_swap_active() { return "$SWAP_STATUS"; }
+setup_disk_swap() { echo "disk-swap-kib=$DISK_SWAP_SIZE_KIB"; }
+setup_zswap_fallback() { echo "zswap-fallback"; }
+activate_image_swap_fallback() { echo "image-swap-fallback"; }
+zramctl() { :; }
+df() { :; }
+'''
+                shell = (
+                    harness
+                    + f"\nMODULE_STATUS={status}\nPINVOU3_CI_DISABLE_ZRAM={disabled}\n"
+                    + f"SWAP_STATUS={swap_status}\n"
+                    + "setup_zram() {" + loader + main
+                )
+                result = subprocess.run(
+                    ["bash", "-c", shell], capture_output=True, text=True, timeout=10,
+                    encoding="utf-8",
+                )
+                output = result.stdout + result.stderr
+                self.assertEqual(result.returncode, 0, output)
+                self.assertNotIn("PACKAGE_MANAGER_CALLED", output)
+                self.assertIn("disk-swap-kib=16777216", output)
+                self.assertIn("zswap-fallback", output)
+                if swap_status:
+                    self.assertIn("image-swap-fallback", output)
+                if disabled == "0":
+                    self.assertIn("module unavailable", output)
+                    self.assertIn("without installing kernel packages", output)
+
+    def test_memory_setup_changes_select_native_linux_regression(self):
+        for name in ("rust_code", "rust_full", "cli_rust"):
+            with self.subTest(filter=name):
+                block = re.search(
+                    rf"(?ms)^            {name}:\n(.*?)(?=^            \w+:|\Z)",
+                    self.pr_workflow,
+                )
+                self.assertIsNotNone(block)
+                paths = _extract_quoted_paths(_without_yaml_comments(block.group(1)))
+                self.assertIn("scripts/ci-memory-setup.sh", paths)
 
     def test_fetch_connectors_verifies_checksums_with_loud_diagnostics(self):
         # #1155 复审跟进:fetch-connectors.sh 的 verify_file 在 set -e 下被
