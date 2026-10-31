@@ -21,18 +21,19 @@
 {{- define "pinvou.validateIdentityKeycloak" -}}
 {{- if .Values.sms.enabled -}}
 {{- $production := hasPrefix "production" (lower (trim .Values.global.environment)) -}}
+{{- $strictTLS := $production -}}
+{{- if ne (trim .Values.keycloak.caConfigMap) "" -}}{{- $strictTLS = true -}}{{- end -}}
 {{- if and (not .Values.keycloak.enabled) (or (eq .Values.keycloak.adminApiUrl "") (eq .Values.keycloak.provisionerTokenUrl "")) -}}
 {{- fail "Identity external Keycloak requires explicit direct adminApiUrl and provisionerTokenUrl" -}}
 {{- end -}}
 {{- if and $production (or (eq .Values.keycloak.caConfigMap "") (and .Values.keycloak.enabled (eq .Values.keycloak.tlsSecretName ""))) -}}
 {{- fail "Identity production Keycloak requires a public CA and an internal TLS Secret or direct HTTPS backchannel" -}}
 {{- end -}}
-{{- if or $production .Values.keycloak.caConfigMap -}}
 {{- $adminRaw := include "pinvou.identityKeycloakOrigin" . -}}
 {{- $tokenRaw := include "pinvou.identityKeycloakTokenURL" . -}}
 {{- $admin := urlParse $adminRaw -}}{{- $token := urlParse $tokenRaw -}}
-{{- if or (ne $admin.scheme "https") (eq $admin.host "") (ne $token.scheme "https") (ne $admin.host $token.host) (not (has $admin.path (list "" "/"))) (ne $token.path "/realms/pinvou/protocol/openid-connect/token") -}}
-{{- fail "Identity Keycloak requires same-origin HTTPS admin and realm token endpoints" -}}
+{{- if or (eq $admin.scheme "") (eq $token.scheme "") (ne $admin.scheme $token.scheme) (and $strictTLS (ne $admin.scheme "https")) (eq $admin.host "") (ne $admin.host $token.host) (not (has $admin.path (list "" "/"))) (ne $token.path "/realms/pinvou/protocol/openid-connect/token") -}}
+{{- fail "Identity Keycloak requires same-origin admin and realm token endpoints; production and CA-backed connections require HTTPS" -}}
 {{- end -}}
 {{- range $endpoint := list $adminRaw $tokenRaw -}}
 {{- $url := urlParse $endpoint -}}
@@ -45,7 +46,6 @@
 {{- $ingressAuthority := trimSuffix ":443" (lower .Values.ingress.keycloakHost) -}}
 {{- if and (not .Values.keycloak.enabled) .Values.ingress.enabled (has $tokenAuthority (list $issuerAuthority $ingressAuthority)) -}}
 {{- fail "Identity external Keycloak token backchannel must bypass the public Identity token proxy" -}}
-{{- end -}}
 {{- end -}}
 {{- end -}}
 {{- end -}}

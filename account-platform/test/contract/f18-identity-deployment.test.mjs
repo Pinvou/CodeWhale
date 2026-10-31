@@ -123,6 +123,38 @@ test('production Identity chart satisfies its strict Keycloak input and network 
   });
 });
 
+test('staging external Keycloak keeps SMS endpoint checks without requiring a CA ConfigMap', {
+  skip: process.env.PINVOU_TEST_KMS_HELM !== '1',
+}, async t => {
+  const direct = ['global.environment=staging', 'sms.enabled=true', 'keycloak.enabled=false',
+    'ingress.enabled=false', 'keycloak.adminApiUrl=http://keycloak-backchannel.example.invalid',
+    'keycloak.provisionerTokenUrl=http://keycloak-backchannel.example.invalid/realms/pinvou/protocol/openid-connect/token'];
+  await t.test('same_origin_http_is_accepted', () => {
+    const items = documents(render(direct, false));
+    const env = environment(deployment(items, 'identity-service').spec.template.spec.containers[0]);
+    assert.equal(env.KEYCLOAK_ADMIN_API_URL, 'http://keycloak-backchannel.example.invalid');
+    assert.equal(env.KEYCLOAK_PROVISIONER_TOKEN_URL, 'http://keycloak-backchannel.example.invalid/realms/pinvou/protocol/openid-connect/token');
+    assert.equal(env.KEYCLOAK_CA_FILE, undefined);
+  });
+  await t.test('same_origin_https_is_accepted_without_ca', () => {
+    const https = direct.map(value => value.replace('http://keycloak-backchannel.example.invalid', 'https://keycloak-backchannel.example.invalid'));
+    const items = documents(render(https, false));
+    const env = environment(deployment(items, 'identity-service').spec.template.spec.containers[0]);
+    assert.equal(new URL(env.KEYCLOAK_ADMIN_API_URL).protocol, 'https:');
+    assert.equal(new URL(env.KEYCLOAK_PROVISIONER_TOKEN_URL).protocol, 'https:');
+    assert.equal(env.KEYCLOAK_CA_FILE, undefined);
+  });
+  for (const changes of [
+    [...direct, 'keycloak.provisionerTokenUrl=http://other-keycloak.example.invalid/realms/pinvou/protocol/openid-connect/token'],
+    [...direct, 'keycloak.adminApiUrl=http://accounts.staging.example.com', 'keycloak.provisionerTokenUrl=http://accounts.staging.example.com/realms/pinvou/protocol/openid-connect/token', 'ingress.enabled=true'],
+  ]) await t.test('invalid_same_origin_or_public_proxy_is_rejected', () => {
+    const result = render(changes, false);
+    assert.equal(result.error, undefined);
+    assert.notEqual(result.status, 0, result.stderr);
+    assert.match(result.stderr, /Identity .*Keycloak/);
+  });
+});
+
 test('real remote Compose keeps Portal issuer aligned with its authorization and Keycloak issuer', {
   skip: process.env.PINVOU_TEST_KMS_COMPOSE !== '1',
 }, () => {
