@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"syscall"
 	"testing"
 )
@@ -38,6 +39,27 @@ func TestRouterReturnsMethodNotAllowed(t *testing.T) {
 	router.ServeHTTP(response, httptest.NewRequest(http.MethodPost, "/v1/items", nil))
 	if response.Code != http.StatusMethodNotAllowed {
 		t.Fatalf("status = %d, want %d", response.Code, http.StatusMethodNotAllowed)
+	}
+}
+
+func TestRequirePathSuffixRejectsColonActionAliases(t *testing.T) {
+	router := NewRouter()
+	router.POST("/organizations/:organization_id/quota-grants:batch", RequirePathSuffix("/quota-grants:batch"), AdaptFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	for _, path := range []string{
+		"/organizations/00000000-0000-0000-0000-000000000000/quota-grants:batch",
+		"/organizations/00000000-0000-0000-0000-000000000000/quota-grants:batchOther",
+	} {
+		response := httptest.NewRecorder()
+		router.ServeHTTP(response, httptest.NewRequest(http.MethodPost, path, nil))
+		want := http.StatusNoContent
+		if strings.HasSuffix(path, "Other") {
+			want = http.StatusNotFound
+		}
+		if response.Code != want {
+			t.Fatalf("%s status = %d, want %d", path, response.Code, want)
+		}
 	}
 }
 

@@ -22,6 +22,6 @@ func (s *Service) registerOrganizationFinanceRoutes(routes *httpserver.RouteGrou
 	routes.POST("/organizations/:organization_id/recharge/orders", httpserver.AdaptFunc(s.createOrganizationRechargeOrder))
 	routes.GET("/organizations/:organization_id/recharge/orders/:order_id", httpserver.AdaptFunc(s.getOrganizationRechargeOrder))
 	routes.GET("/organizations/:organization_id/quota-grants", httpserver.AdaptFunc(s.listOrganizationQuotaGrants))
-	routes.POST("/organizations/:organization_id/quota-grants:batch", httpserver.AdaptFunc(s.allocateOrganizationQuotaBatch))
+	routes.POST("/organizations/:organization_id/quota-grants:batch", httpserver.RequirePathSuffix("/quota-grants:batch"), httpserver.AdaptFunc(s.allocateOrganizationQuotaBatch))
 	routes.POST("/organizations/:organization_id/quota-grants/:grant_id/revoke", httpserver.AdaptFunc(s.revokeOrganizationQuotaGrant))
 }
