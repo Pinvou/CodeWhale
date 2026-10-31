@@ -8,6 +8,25 @@
 {{- else -}}{{- .Values.keycloak.adminApiUrl -}}{{- end -}}
 {{- end -}}
 
+{{- define "pinvou.identityKeycloakAuthority" -}}
+{{- $url := urlParse . -}}
+{{- $host := $url.hostname -}}
+{{- if contains ":" $host -}}{{- $host = printf "[%s]" $host -}}{{- end -}}
+{{- $port := trimPrefix ":" (trimPrefix $host $url.host) -}}
+{{- $defaultPort := ternary "80" "443" (eq $url.scheme "http") -}}
+{{- if eq $port "" -}}
+{{- $port = $defaultPort -}}
+{{- else -}}
+{{- $port = regexReplaceAll "^0+" $port "" -}}
+{{- if eq $port "" -}}{{- $port = "0" -}}{{- end -}}
+{{- end -}}
+{{- if eq $port $defaultPort -}}
+{{- lower $host -}}
+{{- else -}}
+{{- printf "%s:%s" (lower $host) $port -}}
+{{- end -}}
+{{- end -}}
+
 {{- define "pinvou.identityKeycloakTokenURL" -}}
 {{- if .Values.keycloak.enabled -}}
 {{- printf "%s/realms/pinvou/protocol/openid-connect/token" (include "pinvou.identityKeycloakOrigin" .) -}}
@@ -41,9 +60,9 @@
 {{- fail "Identity Keycloak endpoints must not contain credentials, query, fragment or escaped paths" -}}
 {{- end -}}
 {{- end -}}
-{{- $tokenAuthority := trimSuffix ":443" (lower $token.host) -}}
-{{- $issuerAuthority := trimSuffix ":443" (lower (urlParse .Values.oidc.issuer).host) -}}
-{{- $ingressAuthority := trimSuffix ":443" (lower .Values.ingress.keycloakHost) -}}
+{{- $tokenAuthority := include "pinvou.identityKeycloakAuthority" $tokenRaw -}}
+{{- $issuerAuthority := include "pinvou.identityKeycloakAuthority" .Values.oidc.issuer -}}
+{{- $ingressAuthority := include "pinvou.identityKeycloakAuthority" (printf "https://%s" .Values.ingress.keycloakHost) -}}
 {{- if and (not .Values.keycloak.enabled) .Values.ingress.enabled (has $tokenAuthority (list $issuerAuthority $ingressAuthority)) -}}
 {{- fail "Identity external Keycloak token backchannel must bypass the public Identity token proxy" -}}
 {{- end -}}
