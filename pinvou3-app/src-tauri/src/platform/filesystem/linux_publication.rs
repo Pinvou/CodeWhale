@@ -163,6 +163,24 @@ pub(super) fn cleanup_directory(publication: &mut PublishedPrivateFile) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn assert_source_released(read_path: &Path, original: &std::fs::Metadata) {
+        let original_identity = metadata_file_identity(original).expect("Linux file identity");
+        // Descriptor numbers are process-wide and other tests can reuse this
+        // slot immediately. A surviving proc path is only a leak when it still
+        // refers to the original sealed source; unexpected stat errors must fail.
+        let current_identity = match std::fs::metadata(read_path) {
+            Ok(metadata) => metadata_file_identity(&metadata),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => None,
+            Err(error) => panic!("could not verify source release: {error}"),
+        };
+        assert_ne!(
+            current_identity,
+            Some(original_identity),
+            "the original sealed source is still open at its descriptor"
+        );
+    }
+
     #[test]
     fn sealed_source_survives_path_replacements_and_child_readers() {
         let root = tempfile::tempdir().unwrap();
@@ -190,9 +208,10 @@ mod tests {
         assert_eq!(output.stdout, b"verified bytes");
         assert!(owner.read_bounded(2).is_err());
         let read_path = owner.read_path().to_owned();
+        let original = std::fs::metadata(&read_path).unwrap();
         owner.request_cleanup();
         drop(owner);
-        assert!(!read_path.exists());
+        assert_source_released(&read_path, &original);
         assert_eq!(
             std::fs::read(folder.join("report.txt")).unwrap(),
             b"foreign replacement"
@@ -210,11 +229,12 @@ mod tests {
         )
         .unwrap();
         let read_path = owner.read_path().to_owned();
+        let original = std::fs::metadata(&read_path).unwrap();
         std::fs::rename(&folder, root.path().join("retired")).unwrap();
         std::fs::create_dir(&folder).unwrap();
         assert!(owner.validate_scope(root.path()).is_err());
         assert_eq!(std::fs::read(&read_path).unwrap(), b"private");
         drop(owner);
-        assert!(!read_path.exists());
+        assert_source_released(&read_path, &original);
     }
 }
