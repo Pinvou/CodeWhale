@@ -44,9 +44,9 @@ export function AccountClosureWorkspace({ client, me, language }) {
     ready.current = active; setRenderedReady(active); dispatching.current = null; cancel(); setResumeRequested(null);
     return () => { identityGeneration.current++; ready.current = null; pending.current = null; };
   }, [client, me.user_id, epoch]);
-  const load = async signal => {
+  const load = async (signal, { silent = false } = {}) => {
     const stamp = ++generation.current;
-    setQuery({ status: 'loading', closure: null });
+    if (!silent) setQuery({ status: 'loading', closure: null });
     const result = await queryAccountClosure(client, signal);
     if (stamp !== generation.current) return;
     try {
@@ -68,6 +68,35 @@ export function AccountClosureWorkspace({ client, me, language }) {
     if (canRead) void load(controller.signal);
     return () => { generation.current++; controller.abort(); };
     // Owner and current session are the authority; translated labels do not restart a request.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [client, me.user_id, epoch, canRead]);
+  useEffect(() => {
+    if (!canRead || typeof document === 'undefined') return undefined;
+    const controller = new AbortController();
+    const intervalMs = 15_000;
+    let timer = null;
+    let disposed = false;
+    let inFlight = null;
+    const visible = () => document.visibilityState === 'visible';
+    const terminal = () => {
+      const closure = live.current.query.closure;
+      return Boolean(closure && (closure.status === 'COMPLETED' || closure.stage === 'ANONYMIZED' || closure.stage === 'COMPLETED'));
+    };
+    const stop = () => { if (timer !== null) { clearInterval(timer); timer = null; } };
+    const tick = () => {
+      if (disposed || !visible() || terminal()) { if (terminal()) stop(); return; }
+      if (inFlight) return;
+      inFlight = load(controller.signal, { silent: true }).catch(() => {}).finally(() => { inFlight = null; });
+    };
+    const restart = () => {
+      stop();
+      if (visible() && !terminal()) timer = setInterval(tick, intervalMs);
+    };
+    const onVisibilityChange = () => { if (visible()) { restart(); tick(); } else stop(); };
+    document.addEventListener('visibilitychange', onVisibilityChange);
+    restart();
+    return () => { disposed = true; stop(); controller.abort(); document.removeEventListener('visibilitychange', onVisibilityChange); };
+    // The poll is deliberately read-only and only follows the current identity/session.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [client, me.user_id, epoch, canRead]);
   const presentation = accountClosurePresentation({ queryStatus: query.status, closure: query.closure });
