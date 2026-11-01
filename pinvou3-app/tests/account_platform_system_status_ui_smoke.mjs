@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import { createServer } from 'vite';
 import react from '@vitejs/plugin-react';
+import { adminLayoutCopy } from '../src/shared/account-layout-i18n.js';
 import * as puppeteer from 'puppeteer-core';
 const executablePath = process.env.F18_STATUS_BROWSER_EXECUTABLE || process.env.CHROME || [
   'C:/Program Files/Google/Chrome/Application/chrome.exe', 'C:/Program Files (x86)/Google/Chrome/Application/chrome.exe',
@@ -48,7 +49,7 @@ try {
   for (const language of ['zh', 'en', 'ja']) await run(`actual admin permission navigation, status, int64, readonly runbooks ${language}`, async page => {
     await open(page, `language=${language}`);
     await page.waitForSelector('.adm-system-workspace .adm-metrics');
-    assert.equal(await page.evaluate(() => [...document.querySelectorAll('nav button')].some(button => button.textContent === window.statusFixture.copy.nav.system)), true);
+    assert.equal(await page.$eval('nav button[data-section="system"]', (button, label) => button.getAttribute('aria-current') === 'page' && button.textContent.includes(label), adminLayoutCopy[language].nav.system), true);
     const text = await page.evaluate(() => document.querySelector('.adm-system-workspace').textContent);
     assert.ok(text.includes('9,007,199,254,740,993'));
     assert.ok(text.includes('9,223,372,036,854,775,807'));

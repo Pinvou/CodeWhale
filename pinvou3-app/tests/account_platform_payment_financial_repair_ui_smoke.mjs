@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
+import { adminLayoutCopy } from '../src/shared/account-layout-i18n.js';
 import { createServer } from 'vite';
 import react from '@vitejs/plugin-react';
 import * as puppeteer from 'puppeteer-core';
@@ -20,7 +21,8 @@ async function run(name, query, action) {
   finally { await page.close(); }
 }
 async function openForm(page) {
-  await page.evaluate(() => [...document.querySelectorAll('main > nav button')].find(button => button.textContent === window.f12.financeCopy[window.f12.language].finance).click());
+  await page.waitForSelector('nav button[data-section="billing"]');
+  await page.click('nav button[data-section="billing"]');
   await page.waitForFunction(() => [...document.querySelectorAll('nav button')].some(button => button.textContent === window.f12.ledgerRepairCopy[window.f12.language].paymentRepairTitle));
   await page.evaluate(() => [...document.querySelectorAll('nav button')].find(button => button.textContent === window.f12.ledgerRepairCopy[window.f12.language].paymentRepairTitle).click());
   await page.waitForSelector('.adm-financial-repair-target input');
@@ -37,7 +39,8 @@ async function create(page) {
   await page.click('.adm-financial-repair-draft button');
 }
 async function center(page, view) {
-  await page.evaluate(() => [...document.querySelectorAll('main > nav button')].find(button => button.textContent === window.f12.adminPlatformCopy[window.f12.language].nav.approvals).click());
+  await page.waitForSelector('nav button[data-section="approvals"]');
+  await page.click('nav button[data-section="approvals"]');
   if (view) await page.evaluate(view => [...document.querySelectorAll('.adm-approval-tabs button')].find(button => button.textContent === window.f12.adminPlatformCopy[window.f12.language].approvalCenter[view]).click(), view);
 }
 try {
@@ -74,7 +77,7 @@ try {
     });
   }
   for (const language of ['zh', 'en', 'ja']) await run(`PaymentRepair real host/precheck/create/submit ${language}`, `language=${language}`, async page => {
-    await openForm(page); await create(page); await page.waitForFunction(() => window.f12.status === 'SUBMITTED' && !document.querySelector('.adm-financial-repair'));
+    await openForm(page); await create(page); await page.waitForFunction(() => window.f12.status === 'SUBMITTED' && document.querySelector('nav button[data-section="approvals"][aria-current="page"]') && [...document.querySelectorAll('.adm-financial-repair')].every(form => form.closest('[hidden]')));
     const calls = await page.evaluate(() => window.f12.calls); const precheck = calls.find(call => call.url.endsWith('/approval-command-prechecks'));
     assert.equal(JSON.parse(precheck.body).target_resource_id, await page.evaluate(() => window.f12.id(1))); assert.equal(JSON.parse(precheck.body).payment_evidence_id, await page.evaluate(() => window.f12.id(2)));
     const draft = calls.find(call => call.url === '/api/admin/approvals/requests' && call.method === 'POST'); assert.ok(draft.body.includes('"wallet_version":9223372036854775806')); assert.ok(draft.body.includes('"applied_to_receivables":9007199254740993'));
@@ -97,7 +100,7 @@ try {
     assert.ok(calls.some(call => call.url.includes('command_type=PAYMENT_FINANCIAL_REPAIR') && call.url.includes('target=')));
     await page.waitForFunction(() => [...document.querySelectorAll('article button')].some(button => button.textContent === window.f12.adminPlatformCopy.zh.approvalCenter.openBusinessArea && !button.disabled));
     await page.evaluate(() => [...document.querySelectorAll('article button')].find(button => button.textContent === window.f12.adminPlatformCopy.zh.approvalCenter.openBusinessArea).click());
-    await page.waitForSelector('.adm-financial-repair-target select'); assert.equal(await page.$eval('.adm-financial-repair-target select', select => select.value), 'PAYMENT_FINANCIAL_REPAIR');
+    await page.waitForSelector('[data-workspace="paymentrepair"]:not([hidden]) .adm-financial-repair-target select', { visible: true }); assert.equal(await page.$eval('[data-workspace="paymentrepair"]:not([hidden]) .adm-financial-repair-target select', select => select.value), 'PAYMENT_FINANCIAL_REPAIR');
   });
   await run('PaymentRepair approver-only real detail decide without requester or wallet calls', 'approve=1&existing=1', async page => {
     await page.waitForSelector('tbody tr button'); assert.equal(await page.$('.adm-financial-repair'), null);
@@ -108,7 +111,7 @@ try {
     assert.equal(await page.evaluate(() => window.f12.calls.some(call => call.url.includes('/billing/') || call.url.endsWith('/approval-command-prechecks') || call.method === 'PUT')), false);
   });
   await run('No repair permission hides PaymentRepair and does not call its receiver', 'deny=1', async page => {
-    await page.waitForFunction(() => document.body.textContent.includes(window.f12.adminPlatformCopy.zh.permissionDenied)); assert.equal(await page.$('.adm-financial-repair'), null);
+    await page.waitForFunction(message => document.querySelector('[role="alert"]')?.textContent === message, {}, adminLayoutCopy.zh.unauthorized); assert.equal(await page.$('.adm-financial-repair'), null);
     assert.equal(await page.evaluate(() => window.f12.calls.some(call => call.url.startsWith('/api/admin/'))), false);
   });
   for (const condition of ['unavailable', 'mismatch', 'evidence-mismatch']) await run(`PaymentRepair ${condition} owner facts reject before create`, `${condition}=1`, async page => {
@@ -196,7 +199,7 @@ try {
     await page.evaluate(() => { const release = window.f12.releasePrecheck; window.f12.replaceIdentity(); setTimeout(release, 50); });
     await page.waitForFunction(() => window.f12.calls.filter(call => call.url === '/api/account/v1/account/bootstrap').length === 2);
     // A late old-client error must not prompt authentication for the next owner.
-    await page.waitForFunction(() => window.f12.lateAuthenticationReleased && document.querySelector('main') && document.querySelectorAll('main > nav button').length > 0);
+    await page.waitForFunction(() => window.f12.lateAuthenticationReleased && document.querySelector('main') && document.querySelector('nav button[data-section="billing"][aria-current="page"]'));
     assert.equal(await page.$('.adm-payment-repair-reauthentication'), null);
     assert.equal(await page.$('.adm-financial-repair-draft'), null);
   });
