@@ -55,6 +55,9 @@ model-token operations 包装器仅在 `governance-active-check` / `governance-a
 
 ## 验证边界
 
+依赖准备失败会保留私有 `dependencies.log`，并向 CI 日志输出最后至多 100 行、24,000 字符的脱敏诊断。该失败仍阻断后续契约验证，不生成通过回执；日志中的依赖准备成功也不代表 PostgreSQL 契约已经执行。URL、常见认证字段和已识别的凭据环境值会作脱敏处理。
+
+
 Linux 本地 Docker 的强制验收入口为 `python3 scripts/account-platform-deployment-contracts.py --artifacts <新的私有绝对目录>`。它不接受已有数据库 URL，也不开放宿主端口：两个带本次随机标签的 tmpfs PostgreSQL 与测试进程共享各自独占的无外网网络。仅工具构建/锁定依赖准备联网；需要 Docker、Python 和拉取固定镜像的网络。工具镜像由仓库 `test/Dockerfile.deployment-control` 构建。执行后只清理本次创建且标签匹配的容器。
 
 默认 PostgreSQL 17；使用 `--postgres-version 18.4` 验证已固定镜像的 18.4 场景。参数仅接受这两个已登记配置，分别核对实例实际主版本或精确 `server_version_num=180004`，并将两实例的真实版本写入回执。required CI 对两个配置都执行完整载体，共享当前 job 的校验过的 Go 模块/构建缓存。现场目标版本改变时须另行登记、固定镜像并重新验证，不能把某个大版本的结果冒充另一版本或供应商内核的结果。
