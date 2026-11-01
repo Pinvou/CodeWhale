@@ -1432,11 +1432,12 @@ jobs:
       - name: Production history and managed PostgreSQL release contracts
         shell: bash
         env:
-          PINVOU_DEPLOYMENT_TEST_MODULE_CACHE: ${{ runner.temp }}/deployment-contracts-gomod
           PINVOU_DEPLOYMENT_TEST_BUILD_CACHE: ${{ runner.temp }}/deployment-contracts-gobuild
         run: |
           set -euo pipefail
           python3 -m unittest discover -s scripts/tests -p test_deployment_contracts.py
+          deployment_module_cache="$(mktemp -d "$RUNNER_TEMP/deployment-contracts-gomod.XXXXXX")"
+          export PINVOU_DEPLOYMENT_TEST_MODULE_CACHE="$deployment_module_cache"
           for postgres_version in 17 18.4; do
             env -u DOCKER_HOST python3 scripts/account-platform-deployment-contracts.py --postgres-version "$postgres_version" --artifacts "$RUNNER_TEMP/account-platform-deployment-contracts-$postgres_version-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
           done
