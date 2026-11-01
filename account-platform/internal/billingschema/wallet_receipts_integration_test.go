@@ -56,6 +56,8 @@ func TestTokenWalletReceiptSchemaPostgres(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Run("fresh-public-migration-runtime-append-only-and-forward-only", func(t *testing.T) {
+		ctx, cancel := context.WithTimeout(t.Context(), 180*time.Second)
+		defer cancel()
 		c := f.database(t, ctx, "billing", "billing_schema_owner")
 		if err := Up(ctx, c, loaded); err != nil {
 			t.Fatal(err)
@@ -101,6 +103,8 @@ func TestTokenWalletReceiptSchemaPostgres(t *testing.T) {
 		}
 	})
 	t.Run("original-053-LF-CRLF-and-existing-receipts-preserved", func(t *testing.T) {
+		ctx, cancel := context.WithTimeout(t.Context(), 180*time.Second)
+		defer cancel()
 		// This actor is exclusively owned by this fixture. Never modify a preexisting
 		// deployment role or add runtime membership in the historical table owner.
 		var exists bool
@@ -130,6 +134,8 @@ func TestTokenWalletReceiptSchemaPostgres(t *testing.T) {
 		} {
 			checksum := scenario.checksum
 			t.Run(scenario.owner+"-"+checksum[:8], func(t *testing.T) {
+				ctx, cancel := context.WithTimeout(t.Context(), 180*time.Second)
+				defer cancel()
 				c := f.database(t, ctx, "billing", "billing_schema_owner")
 				var base []migrations.Migration
 				for _, m := range loaded {
@@ -279,6 +285,8 @@ CREATE TRIGGER token_account_wallet_receipt_immutable BEFORE UPDATE OR DELETE ON
 	t.Run("unknown-original053-and-shape-rejected-without-overwrite", func(t *testing.T) {
 		for _, scenario := range []string{"unknown-no-table", "unknown-with-table", "known-wrong-shape"} {
 			t.Run(scenario, func(t *testing.T) {
+				ctx, cancel := context.WithTimeout(t.Context(), 180*time.Second)
+				defer cancel()
 				c := f.database(t, ctx, "billing", "billing_schema_owner")
 				var base []migrations.Migration
 				for _, m := range loaded {
