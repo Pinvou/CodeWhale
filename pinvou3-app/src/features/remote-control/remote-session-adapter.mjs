@@ -139,13 +139,37 @@ export function remoteProjectionLabelKey(kind) {
   return PROJECTION_LABEL_KEYS[kind] || 'projectionEvent';
 }
 
+function exactTerminalErrorCode(entry) {
+  if (entry?.kind !== 'error' || typeof entry.body !== 'string'
+    || (Array.isArray(entry.attachments) && entry.attachments.length)) return null;
+  try {
+    const value = JSON.parse(entry.body);
+    if (!value || typeof value !== 'object' || Array.isArray(value)
+      || Object.keys(value).length !== 1) return null;
+    return value.code === 'task_attachments_invalid' || value.code === 'task_generation_stale'
+      ? value.code : null;
+  } catch { return null; }
+}
+
+function hasPriorTerminalError(entries, index, current, reason) {
+  if (!current.taskId) return false;
+  for (let i = index - 1; i >= 0; i -= 1) {
+    const prior = entries[i];
+    if (!prior || prior.journalEpoch !== current.journalEpoch || prior.taskId !== current.taskId) continue;
+    if (!Number.isSafeInteger(prior.sequence) || prior.sequence >= current.sequence) return false;
+    if (prior.kind === 'status') return false;
+    if (exactTerminalErrorCode(prior) === reason) return true;
+  }
+  return false;
+}
+
 export function remoteProxyChatItems(localSessionId, history) {
   const record = remoteProxyForSession(localSessionId, history);
   if (!record) return [];
   const tasks = remoteTaskProjectionState(record.entries);
   const items = [];
   const tools = new Map();
-  for (const entry of record.entries) {
+  for (const [entryIndex, entry] of record.entries.entries()) {
     if (!entry || typeof entry.journalEpoch !== 'string'
       || !Number.isSafeInteger(entry.sequence) || entry.sequence < 0
       || typeof entry.eventId !== 'string') continue;
@@ -188,10 +212,23 @@ export function remoteProxyChatItems(localSessionId, history) {
     // Task lifecycle and snapshot markers drive projection state, not visible
     // transcript rows. Showing each one as a message produced raw protocol
     // blocks and split one remote turn into multiple visual fragments.
-    if (entry.kind === 'status' || entry.kind === 'snapshot_marker') continue;
+    if (entry.kind === 'status') {
+      const reason = entry.body === 'failed' && (
+        entry.terminalReason === 'task_generation_stale'
+        || entry.terminalReason === 'task_attachments_invalid'
+      ) ? entry.terminalReason : null;
+      if (reason && !hasPriorTerminalError(record.entries, entryIndex, entry, reason)) items.push({
+        id: `remote-proxy:${localSessionId}:${entry.journalEpoch}:${entry.sequence}:${entry.eventId}`,
+        type: 'system', text: reason,
+        remote: true, remoteProxy: true, remoteKind: 'error',
+        remoteTaskId: taskId, remoteAttachments: [], createdAt: entry.sequence,
+      });
+      continue;
+    }
+    if (entry.kind === 'snapshot_marker') continue;
     const type = PROJECTION_TYPES[entry.kind];
     if (!type) continue;
-    const text = (typeof entry.body === 'string' && entry.body)
+    const text = exactTerminalErrorCode(entry) || (typeof entry.body === 'string' && entry.body)
       || attachments.map(item => item?.displayName || '').filter(Boolean).join('\n');
     if (!text && !attachments.length && type !== 'system') continue;
     const taskState = taskId

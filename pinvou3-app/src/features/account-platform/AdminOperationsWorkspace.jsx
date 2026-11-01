@@ -124,6 +124,8 @@ export function AdminOperationsWorkspace({ client, copy, language = 'en', permis
   const [policy, setPolicy] = useState(null);
   const [form, setForm] = useState(() => policyForm());
   const [state, setState] = useState({ loading: true, saving: false, error: '', errorCode: '', notice: '' });
+  const initialPolicyReadPending = useRef(false);
+  initialPolicyReadPending.current = !policy && state.loading;
 
   const load = useCallback(async (signal, { fresh = false } = {}) => {
     const request = ++loadGeneration.current;
@@ -161,6 +163,20 @@ export function AdminOperationsWorkspace({ client, copy, language = 'en', permis
     mountedRef.current = true;
     return () => { mountedRef.current = false; loadGeneration.current++; };
   }, []);
+
+  useEffect(() => {
+    let active = true;
+    const refreshCurrentPolicy = async () => {
+      while (active && authorizationRefreshGuard?.current?.active) {
+        await authorizationRefreshGuard.current.settled;
+      }
+      // Only replace an unfinished first read. A loaded view owns its draft,
+      // even when a retired writer changes the shared policy later.
+      if (active && canRead && !saveInFlight.current && initialPolicyReadPending.current) await load(undefined, { fresh: true });
+    };
+    const unsubscribe = client.onRegistrationBonusPolicySettled?.(() => { void refreshCurrentPolicy(); });
+    return () => { active = false; unsubscribe?.(); };
+  }, [client, canRead, load, authorizationRefreshGuard]);
 
   useEffect(() => {
     if (authorizationRefreshing || (policy && workspaceUserID.current === currentUserID)) return;
