@@ -1,4 +1,5 @@
 const assert = require("node:assert/strict");
+const crypto = require("node:crypto");
 const fs = require("node:fs");
 const os = require("node:os");
 const path = require("node:path");
@@ -63,6 +64,14 @@ test("Windows runtime installer adapter integration", { skip: skipReason }, () =
     });
     assert.equal(staged.vcRedistPath, path.join(outputRoot, "vc_redist", "VC_redist.x64.exe"));
     assert.equal(fs.statSync(staged.vcRedistPath).size, runtime.vcRedist.bytes);
+    // Size alone cannot distinguish a truncated-but-padded copy from the real
+    // payload; pin the staged copy's content identity to the descriptor's
+    // verified SHA-256 (the same fingerprint the source check above enforces).
+    const stagedSha256 = crypto
+      .createHash("sha256")
+      .update(fs.readFileSync(staged.vcRedistPath))
+      .digest("hex");
+    assert.equal(stagedSha256, runtime.vcRedist.sha256);
   } finally {
     fs.rmSync(outputRoot, { recursive: true, force: true });
   }
