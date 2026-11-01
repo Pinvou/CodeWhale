@@ -1,9 +1,17 @@
 import importlib.util
+import contextlib
+import io
 import json
+import os
 from pathlib import Path
 import runpy
+import shutil
+import subprocess
+import sys
 import tempfile
+import textwrap
 import unittest
+from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parents[2]
 spec = importlib.util.spec_from_file_location("deployment_contracts", ROOT / "scripts/account-platform-deployment-contracts.py")
@@ -13,6 +21,123 @@ verify_results = runpy.run_path(str(ROOT / "scripts/test-account-closure-postgre
 
 
 class DeploymentContracts(unittest.TestCase):
+    def run_workflow_cache_fixture(self, fail_allocation=False):
+        workflow = (ROOT / ".github/workflows/pr-check.yml").read_text(encoding="utf-8")
+        start = workflow.index("      - name: Production history and managed PostgreSQL release contracts\n")
+        end = workflow.index("\n      - name:", start + 1)
+        script = textwrap.dedent(workflow[start:end].split("        run: |\n", 1)[1])
+        # Git for Windows prepends its own bin before the supplied PATH.
+        script = 'export PATH="$(cd "$CACHE_TEST_BIN" && pwd -P):$PATH"\n' + script
+        bash = os.environ.get("PINVOU_TEST_BASH") or shutil.which("bash")
+        self.assertTrue(bash, "Bash is required for the real workflow cache producer")
+        with tempfile.TemporaryDirectory(prefix="deployment-cache-contract-") as directory:
+            root = Path(directory)
+            runner = root / "runner-temp"
+            binary = root / "bin"
+            protected = root / "existing-cache"
+            for path in (runner, binary, protected):
+                path.mkdir()
+            sentinel = protected / "preserve"
+            sentinel.write_text("existing cache must stay unchanged\n")
+            events = root / "events"
+            consumer = binary / "python3"
+            consumer.write_text('''#!/usr/bin/env bash
+set -euo pipefail
+if [[ "$1" == -m ]]; then exit 0; fi
+test "$1" = scripts/account-platform-deployment-contracts.py
+cache="${PINVOU_DEPLOYMENT_TEST_MODULE_CACHE:?}"
+test "$cache" != "$PROTECTED_CACHE"
+test -d "$cache"
+printf '%s\\t%s\\n' "$3" "$cache" >> "$CACHE_EVENTS"
+if [[ "$3" == 18.4 ]]; then test -f "$cache/profile-17"; fi
+printf 'owned consumer marker\\n' > "$cache/profile-$3"
+''')
+            consumer.chmod(0o700)
+            if fail_allocation:
+                allocator = binary / "mktemp"
+                allocator.write_text("#!/usr/bin/env bash\nexit 73\n")
+                allocator.chmod(0o700)
+            environment = {**os.environ, "PATH": binary.as_posix() + os.pathsep + os.environ["PATH"],
+                           "RUNNER_TEMP": runner.as_posix(), "GITHUB_RUN_ID": "123", "GITHUB_RUN_ATTEMPT": "1",
+                           "PINVOU_DEPLOYMENT_TEST_MODULE_CACHE": protected.as_posix(),
+                           "PROTECTED_CACHE": protected.as_posix(), "CACHE_EVENTS": events.as_posix(),
+                           "CACHE_TEST_BIN": binary.as_posix()}
+            captures = []
+            for _ in range(1 if fail_allocation else 2):
+                result = subprocess.run([bash, "-c", script], cwd=ROOT, env=environment,
+                                        text=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, timeout=30)
+                self.assertEqual(result.returncode, 73 if fail_allocation else 0, result.stdout)
+            if events.exists():
+                for line in events.read_text().splitlines():
+                    version, name = line.split("\t")
+                    if os.name == "nt" and name.startswith("/") and name[2:3] == "/":
+                        name = name[1].upper() + ":/" + name[3:]
+                    path = Path(name)
+                    self.assertEqual(path.resolve().parent, runner.resolve())
+                    self.assertFalse(path.is_symlink())
+                    if os.name != "nt":
+                        self.assertEqual(path.stat().st_mode & 0o777, 0o700)
+                        self.assertEqual(path.stat().st_uid, os.getuid())
+                    captures.append((version, str(path.resolve())))
+            self.assertEqual(sentinel.read_text(), "existing cache must stay unchanged\n")
+            self.assertEqual(list(protected.iterdir()), [sentinel])
+            return captures
+
+    def test_workflow_uses_fresh_cache_per_step_and_reuses_it_only_for_two_postgres_profiles(self):
+        captures = self.run_workflow_cache_fixture()
+        self.assertEqual([version for version, _ in captures], ["17", "18.4", "17", "18.4"])
+        self.assertEqual(captures[0][1], captures[1][1])
+        self.assertEqual(captures[2][1], captures[3][1])
+        self.assertNotEqual(captures[0][1], captures[2][1])
+
+    def test_workflow_cache_allocation_failure_stops_before_contracts(self):
+        self.assertEqual(self.run_workflow_cache_fixture(fail_allocation=True), [])
+
+    def test_dependency_failure_retains_exit_and_private_log_with_bounded_redacted_diagnostics(self):
+        with tempfile.TemporaryDirectory() as directory:
+            logfile = Path(directory) / "dependencies.log"
+            errors = io.StringIO()
+            secret = "fixture-private-token-not-public"
+            program = "import sys; print('x'*70000); print('registry timeout https://user:password@example.invalid/package?token=private'); print('Authorization: Bearer fixture-header-secret'); print('npm _authToken=fixture-config-secret'); print('env '+sys.argv[1]); sys.exit(7)"
+            with patch.dict(os.environ, {"NPM_TOKEN": secret}), contextlib.redirect_stderr(errors):
+                with self.assertRaisesRegex(RuntimeError, "mandatory contracts did not run") as raised:
+                    deployment.prepare_dependencies([sys.executable, "-c", program, secret], logfile)
+            emitted = errors.getvalue()
+            self.assertIn("DEPENDENCY_PREPARATION_FAILED exit=7 log=dependencies.log", emitted)
+            self.assertIn("registry timeout", emitted)
+            self.assertLessEqual(len(emitted), 24200)
+            for value in (secret, "user:password", "token=private", "fixture-header-secret", "fixture-config-secret"):
+                self.assertNotIn(value, emitted)
+                self.assertNotIn(value, str(raised.exception))
+            self.assertIn(secret, logfile.read_text())
+            self.assertGreater(logfile.stat().st_size, 65536)
+
+    def test_successful_dependency_preparation_is_not_a_contract_pass(self):
+        with tempfile.TemporaryDirectory() as directory:
+            logfile = Path(directory) / "dependencies.log"
+            errors = io.StringIO()
+            with contextlib.redirect_stderr(errors):
+                deployment.prepare_dependencies([sys.executable, "-c", "print('dependencies ready')"], logfile)
+            self.assertEqual(errors.getvalue(), "")
+            self.assertEqual(logfile.read_text().strip(), "dependencies ready")
+
+    def test_truncated_url_cannot_expose_query_credentials_after_its_prefix_is_lost(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            value = "controlled-fixture-query-credential"
+            payload = root / "payload.txt"
+            payload.write_text("https://example.invalid/" + "x" * 70000 + "?auth=" + value + "\n")
+            script = root / "emit.py"
+            script.write_text("from pathlib import Path\nimport sys\nsys.stdout.write(Path(sys.argv[1]).read_text())\nsys.exit(7)\n")
+            logfile = root / "dependencies.log"
+            errors = io.StringIO()
+            with contextlib.redirect_stderr(errors):
+                with self.assertRaisesRegex(RuntimeError, "mandatory contracts did not run"):
+                    deployment.prepare_dependencies([sys.executable, str(script), str(payload)], logfile)
+            self.assertNotIn(value, errors.getvalue())
+            self.assertIn("DEPENDENCY_PREPARATION_FAILED exit=7", errors.getvalue())
+            self.assertIn(value, logfile.read_text())
+
     def test_published_fixture_is_complete_and_uses_frozen_bytes(self):
         with tempfile.TemporaryDirectory() as directory:
             target = Path(directory)

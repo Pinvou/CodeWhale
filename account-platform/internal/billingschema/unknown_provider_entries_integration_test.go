@@ -2,8 +2,10 @@ package billingschema
 
 import (
 	"context"
+	"errors"
 	"github.com/Pinvou/pinvou3/account-platform/internal/platform/migrations"
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5/pgconn"
 	"os"
 	"strings"
 	"testing"
@@ -24,14 +26,24 @@ func TestUnknownProviderEntryPublicMigrationPostgres(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, kind := range []string{"fresh-public-up", "existing-known-row-upgrade"} {
+	for _, kind := range []string{"fresh-public-up", "existing-known-row-upgrade", "historical-forward-only"} {
 		t.Run(kind, func(t *testing.T) {
 			c := f.database(t, ctx, "billing", "billing_schema_owner")
-			input := loaded
-			if kind == "existing-known-row-upgrade" {
-				input = nil
+			target := loaded
+			if kind == "historical-forward-only" {
+				target = nil
 				for _, m := range loaded {
-					if m.Version != unknownProviderEntryVersion {
+					if m.Version <= unknownProviderEntryVersion {
+						target = append(target, m)
+					}
+				}
+			}
+			input := target
+			if kind != "fresh-public-up" {
+				input = nil
+				for _, m := range target {
+					// A predecessor must not contain objects from later migrations.
+					if m.Version < unknownProviderEntryVersion {
 						input = append(input, m)
 					}
 				}
@@ -51,19 +63,19 @@ func TestUnknownProviderEntryPublicMigrationPostgres(t *testing.T) {
 				t.Fatal(err)
 			}
 			known := stageValue(t, ctx, c, `SELECT jsonb_agg(to_jsonb(row) ORDER BY row_number)::text FROM reconciliation_provider_rows row`)
-			ledger := stageValue(t, ctx, c, `SELECT jsonb_agg(to_jsonb(m) ORDER BY version)::text FROM schema_migrations m WHERE version<>900025`)
-			if kind == "existing-known-row-upgrade" {
+			ledger := stageValue(t, ctx, c, `SELECT jsonb_agg(to_jsonb(m) ORDER BY version)::text FROM schema_migrations m WHERE version<900025`)
+			if kind != "fresh-public-up" {
 				if err := insert(2, "FUTURE_FEE"); err == nil {
 					t.Fatal("predecessor unexpectedly accepts future kind")
 				}
-				if err := Up(ctx, c, loaded); err != nil {
+				if err := Up(ctx, c, target); err != nil {
 					t.Fatal("actual public append upgrade", err)
 				}
-				if known != stageValue(t, ctx, c, `SELECT jsonb_agg(to_jsonb(row) ORDER BY row_number)::text FROM reconciliation_provider_rows row`) || ledger != stageValue(t, ctx, c, `SELECT jsonb_agg(to_jsonb(m) ORDER BY version)::text FROM schema_migrations m WHERE version<>900025`) {
+				if known != stageValue(t, ctx, c, `SELECT jsonb_agg(to_jsonb(row) ORDER BY row_number)::text FROM reconciliation_provider_rows row`) || ledger != stageValue(t, ctx, c, `SELECT jsonb_agg(to_jsonb(m) ORDER BY version)::text FROM schema_migrations m WHERE version<900025`) {
 					t.Fatal("append changed prior source facts or ledger")
 				}
 			}
-			if _, err := VerifyApplied(ctx, c, loaded); err != nil {
+			if _, err := VerifyApplied(ctx, c, target); err != nil {
 				t.Fatal("exact applied identity", err)
 			}
 			if err := insert(2, "FUTURE_FEE"); err != nil {
@@ -76,11 +88,32 @@ func TestUnknownProviderEntryPublicMigrationPostgres(t *testing.T) {
 				t.Fatal("empty kind accepted")
 			}
 			before := stageValue(t, ctx, c, `SELECT jsonb_build_object('rows',(SELECT jsonb_agg(to_jsonb(x) ORDER BY row_number) FROM reconciliation_provider_rows x),'ledger',(SELECT jsonb_agg(to_jsonb(x) ORDER BY version) FROM schema_migrations x))::text`)
-			if err := DownOne(ctx, c, loaded); err == nil {
+			if kind == "historical-forward-only" && stageValue(t, ctx, c, `SELECT max(version)::text FROM schema_migrations`) != "900025" {
+				t.Fatal("forward-only probe is not at migration 900025")
+			}
+			downErr := DownOne(ctx, c, target)
+			if downErr == nil {
 				t.Fatal("forward-only evidence rollback accepted")
+			}
+			if kind == "historical-forward-only" {
+				var rejected *pgconn.PgError
+				if !errors.As(downErr, &rejected) || rejected.Code != "P0001" || rejected.Message != "unsupported provider entry evidence is forward-only" {
+					t.Fatal("unexpected 900025 rollback rejection", downErr)
+				}
 			}
 			if before != stageValue(t, ctx, c, `SELECT jsonb_build_object('rows',(SELECT jsonb_agg(to_jsonb(x) ORDER BY row_number) FROM reconciliation_provider_rows x),'ledger',(SELECT jsonb_agg(to_jsonb(x) ORDER BY version) FROM schema_migrations x))::text`) {
 				t.Fatal("rejected rollback left changes")
+			}
+			if kind == "historical-forward-only" {
+				if err := Up(ctx, c, target); err != nil {
+					t.Fatal("public replay after refused rollback", err)
+				}
+				if _, err := VerifyApplied(ctx, c, target); err != nil {
+					t.Fatal("applied identity after refused rollback and replay", err)
+				}
+				if before != stageValue(t, ctx, c, `SELECT jsonb_build_object('rows',(SELECT jsonb_agg(to_jsonb(x) ORDER BY row_number) FROM reconciliation_provider_rows x),'ledger',(SELECT jsonb_agg(to_jsonb(x) ORDER BY version) FROM schema_migrations x))::text`) {
+					t.Fatal("replay after refused rollback changed source facts or ledger")
+				}
 			}
 		})
 	}
