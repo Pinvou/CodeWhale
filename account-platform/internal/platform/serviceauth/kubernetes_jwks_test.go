@@ -47,6 +47,7 @@ type kubeJWKSFixture struct {
 	headers         []string
 	redirect        string
 	status          int
+	handler         http.Handler
 }
 
 func kubeTestSign(t *testing.T, key *rsa.PrivateKey, kid string, claims map[string]any) string {
@@ -99,6 +100,11 @@ func newKubeJWKSFixture(t *testing.T, wrongHost ...bool) *kubeJWKSFixture {
 	f.caFile = trustTestFile(t, pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: caDER}))
 	f.server = httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		f.mu.Lock()
+		if handler := f.handler; handler != nil {
+			f.mu.Unlock()
+			handler.ServeHTTP(w, r)
+			return
+		}
 		defer f.mu.Unlock()
 		f.headers = append(f.headers, r.Header.Get("Authorization"))
 		if r.Method != http.MethodGet || r.URL.Path != "/openid/v1/jwks" || r.Header.Get("Authorization") != "Bearer "+f.apiToken {
@@ -457,27 +463,65 @@ func TestKubernetesJWKSContextCancellationAndTimeout(t *testing.T) {
 	if client.Timeout != 10*time.Second {
 		t.Fatal("production fetch timeout changed")
 	}
+	entered := make(chan struct{}, 2)
+	done := make(chan struct{}, 2)
+	f.mu.Lock()
+	f.handler = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		entered <- struct{}{}
+		<-r.Context().Done()
+		done <- struct{}{}
+	})
+	f.mu.Unlock()
+	// Establish the real TLS request before cancelling it. The short client
+	// timeout below may legitimately expire during TLS before any HTTP handler.
+	ctx, cancel = context.WithCancel(context.Background())
+	defer cancel()
+	r, _ = http.NewRequestWithContext(ctx, http.MethodGet, kubernetesJWKSURL, nil)
+	result := make(chan error, 1)
+	go func() {
+		response, requestErr := client.Do(r)
+		if response != nil {
+			response.Body.Close()
+		}
+		result <- requestErr
+	}()
+	select {
+	case <-entered:
+	case <-time.After(5 * time.Second):
+		t.Fatal("request never reached fixture before explicit cancellation")
+	}
+	cancel()
+	select {
+	case err := <-result:
+		if !errors.Is(err, context.Canceled) {
+			t.Fatal("in-flight request did not respect cancellation", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("cancelled client did not return")
+	}
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("outgoing context did not cancel after reaching the handler")
+	}
 	client.Timeout = 30 * time.Millisecond
-	entered := make(chan struct{})
-	done := make(chan struct{})
-	f.server.Config.Handler = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { close(entered); <-r.Context().Done(); close(done) })
 	r, _ = http.NewRequest(http.MethodGet, kubernetesJWKSURL, nil)
 	start := time.Now()
-	if _, err := client.Do(r); err == nil {
-		t.Fatal("bounded request did not time out")
+	if _, err := client.Do(r); !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatal("bounded request did not return a deadline error", err)
 	}
 	if time.Since(start) > time.Second {
 		t.Fatal("timeout was not bounded")
 	}
 	select {
 	case <-entered:
-	case <-time.After(time.Second):
-		t.Fatal("request never reached fixture")
-	}
-	select {
-	case <-done:
-	case <-time.After(time.Second):
-		t.Fatal("outgoing context did not cancel")
+		select {
+		case <-done:
+		case <-time.After(time.Second):
+			t.Fatal("timeout did not cancel the reached handler")
+		}
+	default:
+		// A handshake timeout is valid; post-entry cancellation was checked above.
 	}
 }
 
