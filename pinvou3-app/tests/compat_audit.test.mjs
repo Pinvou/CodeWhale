@@ -642,9 +642,11 @@ test('an @import token outside a rule position is not a layered import', () => {
   // previous scanner failed the audit on the uppercase value (custom
   // properties keep their tokens verbatim through the real Vite +
   // lightningcss build), and on a `layer(` token inside a value block.
-  // Real layered imports keep firing — with optional whitespace before the
-  // URL token (`@importurl(a.css)layer(b);` is valid CSS) and beside a
-  // pseudo-class sibling rule.
+  // Real layered imports keep firing — beside a pseudo-class sibling rule
+  // and with the required whitespace before the URL token. A keyword-glued
+  // form like `@importurl(a.css)` is one unknown at-rule per the CSS
+  // tokenizer (only `(` ends the ident), so it must NOT be reported as a
+  // layered import; the audit must stay silent on it.
   const distDir = fs.mkdtempSync(path.join(os.tmpdir(), 'compat-audit-import-ctx-'));
   try {
     fs.mkdirSync(path.join(distDir, 'assets'), { recursive: true });
@@ -672,10 +674,11 @@ test('an @import token outside a rule position is not a layered import', () => {
       '@import url("./c.css") layer(d);@media screen{.x:hover{color:red}}',
     ].join('\n'));
     const violations = hermeticAudit({ distDir });
-    assert.equal(violations.length, 3, `exactly the three real layered imports must be reported; got: ${JSON.stringify(violations)}`);
-    for (const violation of violations) {
-      assert.match(violation, / @import layer survives the build/);
-    }
+    assert.equal(violations.length, 2, `exactly the two real layered imports must be reported; got: ${JSON.stringify(violations)}`);
+    // Lines 1 (@IMPORT …) and 3 (@import url …) are real layered imports;
+    // line 2 (@importurl …, one unknown at-rule) must stay silent.
+    assert.match(violations[0], /^dist:main\.css:1: @import layer survives the build/u, violations[0]);
+    assert.match(violations[1], /^dist:main\.css:3: @import layer survives the build/u, violations[1]);
   } finally {
     fs.rmSync(distDir, { recursive: true, force: true });
   }

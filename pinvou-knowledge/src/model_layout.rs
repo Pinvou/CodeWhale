@@ -41,7 +41,7 @@ pub fn read_first_onnx(dir: &Path) -> Result<Vec<u8>, String> {
         }
     }
     Err(format!(
-        "单文件 ONNX 未找到(model.onnx 或 onnx/model_int8.onnx): {}",
+        "单文件 ONNX 未找到(model.onnx 或 onnx/model_int8.onnx 或 onnx/model.onnx): {}",
         last_error
             .map(|error| error.to_string())
             .unwrap_or_default()

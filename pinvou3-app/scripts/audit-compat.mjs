@@ -426,9 +426,12 @@ function findAtRulePositions(scan, keyword) {
     if (scan.slice(i, i + at.length).toLowerCase() !== at) return false;
     const next = scan[i + at.length] ?? '';
     if (keyword === 'layer') return /[\s{]/.test(next);
-    if (/[\s"']/.test(next)) return true;
-    return (next === 'u' || next === 'U')
-      && scan.slice(i + at.length, i + at.length + 4).toLowerCase() === 'url(';
+    // Token boundary: an identifier character directly after the keyword
+    // extends it (`@importurl(...)` tokenizes as one unknown at-rule, never
+    // as @import), so only whitespace, EOF, or a directly-attached string
+    // delimiter complete the keyword. Minified output always keeps the
+    // whitespace before the URL token, so no `url(` special case is needed.
+    return next === '' || /[\s"']/.test(next);
   };
   const hits = [];
   const stack = [];
