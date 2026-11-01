@@ -107,8 +107,8 @@ const server = createServer(async (request, response) => {
     assert.notEqual(actor, actorA, 'the requester cannot decide their own correction');
     assert.ok(center.permissions.includes('platform.billing.repairs.approve'));
     assert.equal(body.expected_version, version); assert.equal(body.action_control_version, 1);
-    assert.ok(['APPROVE', 'REJECT'].includes(body.decision)); assert.ok(body.reason.trim().length >= 10);
-    center.decisions.push({ requestID, body, csrf }); status = body.decision === 'APPROVE' ? 'APPROVED' : 'REJECTED'; version++;
+    assert.ok(['APPROVED', 'REJECTED'].includes(body.decision)); assert.ok(body.reason.trim().length >= 10);
+    center.decisions.push({ requestID, body, csrf }); status = body.decision; version++;
     response.writeHead(204); return response.end();
   }
   if (url.pathname === `/api/admin/approvals/requests/${requestID}/actions/submit`) { assert.equal(request.method, 'POST'); assert.equal(request.headers['x-csrf-token'], csrf); submitCalls++; if (['submit-denied', 'edit-submit-denied'].includes(mode) && submitCalls === 1) return json(response, { code: 'PERMISSION_DENIED' }, 403); status = 'SUBMITTED'; version++; response.writeHead(204); return response.end(); }
@@ -260,7 +260,8 @@ try {
   }
   if (['all', 'approvals'].includes(caseGroup)) {
     const openCenterDetail = async (page, language) => {
-      await click(page, adminPlatformCopy[language].nav.approvals);
+      await page.waitForSelector('nav button[data-section="approvals"]');
+      await page.click('nav button[data-section="approvals"]');
       await page.waitForFunction(command => document.querySelector('tbody')?.textContent.includes(command), {}, proof.command_type);
       await click(page, financeCopy[language].details); await page.waitForSelector('article textarea');
       assert.ok(await page.$eval('article', (node, id) => node.textContent.includes(id), requestID));
@@ -280,7 +281,7 @@ try {
         actor = actorB; csrf = 'csrf-independent-approver'; center.permissions = ['platform.billing.repairs.approve'];
         await page.goto(`${origin}/admin.html?section=approvals&approval_view=pending`, { waitUntil: 'networkidle0' });
         await page.waitForFunction(command => document.querySelector('tbody')?.textContent.includes(command), {}, proof.command_type);
-        assert.equal(await page.$$eval('main > nav button', (buttons, label) => buttons.some(button => button.textContent === label), entitlementCorrectionCopy[language].title), false, 'approver-only access cannot create a new correction');
+        assert.equal(await page.$('nav button[data-section="billing"]'), null, 'approver-only access cannot enter the correction workspace');
         await click(page, financeCopy[language].details); await page.waitForSelector('article textarea');
         const label = decision === 'APPROVE' ? financeCopy[language].approve : financeCopy[language].reject;
         assert.equal(await page.$$eval('article button', (buttons, text) => buttons.find(button => button.textContent === text)?.disabled, label), true, 'a decision needs the existing minimum reason');
@@ -288,7 +289,7 @@ try {
         await click(page, label);
         await page.waitForFunction(expected => document.querySelector('article')?.textContent.includes(expected), {}, decision === 'APPROVE' ? 'APPROVED' : 'REJECTED');
         assert.equal(center.decisions.length, 1); assert.equal(center.decisions[0].requestID, requestID);
-        assert.equal(center.decisions[0].body.decision, decision); assert.equal(center.decisions[0].csrf, csrf);
+        assert.equal(center.decisions[0].body.decision, decision === 'APPROVE' ? 'APPROVED' : 'REJECTED'); assert.equal(center.decisions[0].csrf, csrf);
         assert.equal(writes.length, 1); assert.equal(effects, 1, 'a browser approval decision is not financial execution');
         await page.waitForNetworkIdle({ idleTime: 100 });
         center.permissions = [];
@@ -306,10 +307,10 @@ try {
       assert.equal(status, 'DRAFT'); assert.equal(writes.length, 1); assert.equal(version, 1);
       await openCenterDetail(page, 'en'); await page.type('article textarea', 'Recheck the exact original product split');
       await click(page, financeCopy.en.editSubmit);
-      await page.waitForFunction(label => [...document.querySelectorAll('button')].some(button => button.textContent === label && !button.disabled), {}, financeCopy.en.retry);
+      await page.waitForFunction(label => [...document.querySelectorAll('[data-workspace="approvals"]:not([hidden]) button')].some(button => button.textContent === label && !button.disabled), {}, financeCopy.en.retry);
       assert.equal(updates.length, 1); assert.equal(version, 2); assert.equal(prechecks.length, 2);
-      await click(page, financeCopy.en.retry);
-      await page.waitForFunction(() => document.querySelector('article')?.textContent.includes('SUBMITTED'));
+      await page.evaluate(label => [...document.querySelectorAll('[data-workspace="approvals"]:not([hidden]) button')].find(button => button.textContent === label && !button.disabled).click(), financeCopy.en.retry);
+      await page.waitForFunction(() => document.querySelector('[data-workspace="approvals"]:not([hidden]) article')?.textContent.includes('SUBMITTED'));
       assert.equal(updates.length, 2); assert.equal(updates[1], updates[0]); assert.equal(prechecks.length, 2, 'unknown EDIT retries frozen proof without reading a newer intent');
       assert.equal(JSON.parse(updates[0]).expected_version, 1); assert.equal(writes.length, 1); assert.equal(effects, 1);
       passed++; console.log('PASS compiled actual created draft -> center EDIT -> lost ACK -> same original request/key/CAS/exact proof replay -> SUBMITTED');

@@ -9,6 +9,8 @@ export function remotePermissionFailureText(code, copy = {}) {
     task_permission_mode_changed: 'permissionModeChanged',
     task_permission_mode_unsupported: 'permissionModeUnsupported',
     task_session_busy: 'taskRejectedBusy',
+    task_generation_stale: 'taskGenerationStale',
+    task_attachments_invalid: 'taskAttachmentsInvalid',
     task_session_lane_conflict: 'permissionModeChanged',
     task_session_lane_unknown: 'permissionModeChanged',
     task_session_lane_mismatch: 'permissionModeChanged',
@@ -155,10 +157,10 @@ const STATUS_COPY_KEYS = {
 export function controlledTaskChatItems(tasks = [], copy = {}, sessionId = '') {
   const items = [];
   for (const task of Array.isArray(tasks) ? tasks : []) {
-    if (!task || !task.taskId || !task.text) continue;
+    if (!task || !task.taskId || (!task.text && !CONTROLLED_FAILURE.has(task.status))) continue;
     if (!sessionId || String(task.sessionId || '') !== String(sessionId)) continue;
     const taskId = String(task.taskId);
-    items.push({
+    if (task.text) items.push({
       id: `controlled-${taskId}:user`,
       type: 'user',
       text: String(task.text),
@@ -285,9 +287,31 @@ export function mergeControlledTaskChatItems(chatItems = [], taskItems = []) {
     if (anchor >= 0) lastAnchor = anchor;
   }
   const taskIds = [...groups.keys()];
+  const reservedNoPromptFailures = new Set();
   for (const [taskId, items] of groups) {
     const prompt = items.find(item => item.type === 'user');
-    if (!prompt) continue;
+    if (!prompt) {
+      const nextTaskId = taskIds.slice(taskIds.indexOf(taskId) + 1).find(id => anchors.get(id) >= 0);
+      const position = nextTaskId ? anchors.get(nextTaskId) : durable.length;
+      for (const item of items) {
+        if (item.type !== 'assistant') continue;
+        if (!item.controlledFailureReason) { insert(position, item); continue; }
+        const match = durable.findIndex((existing, index) => !reservedNoPromptFailures.has(index)
+          && existing?.type === 'assistant' && String(existing.remoteTaskId || '') === taskId
+          && (existing.remoteKind === 'error' || (item.controlledFailureReason && existing.controlledFailureReason === item.controlledFailureReason))
+          && (String(existing.text || '') === item.text
+            || (item.controlledFailureReason && String(existing.text || '') === item.controlledFailureReason)));
+        if (match < 0) insert(position, item);
+        else if (String(durable[match].text || '') !== item.text) {
+          reservedNoPromptFailures.add(match);
+          const reason = item.controlledFailureReason;
+          const missingReason = durable[match].controlledFailureReason == null
+            && typeof reason === 'string' && reason.length > 0;
+          durable[match] = { ...durable[match], ...(missingReason ? { controlledFailureReason: reason } : {}), text: item.text };
+        } else reservedNoPromptFailures.add(match);
+      }
+      continue;
+    }
     const start = prompt.controlledMessageStart;
     const anchor = anchors.get(taskId) ?? -1;
     let lower = anchor + 1;
