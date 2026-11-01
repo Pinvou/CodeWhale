@@ -95,6 +95,7 @@ export class AdminPlatformClient {
     this.authorizationVersions = {};
     this.financeQueryAuthorizationGeneration = 0;
     this.authorizationVersionListeners = new Set();
+    this.registrationBonusPolicyListeners = new Set();
     this.inflightReads = new Map();
     this.approvalControl = null;
     this.approvalControllers = new Set();
@@ -104,6 +105,11 @@ export class AdminPlatformClient {
   onAuthorizationVersion(listener) {
     this.authorizationVersionListeners.add(listener);
     return () => this.authorizationVersionListeners.delete(listener);
+  }
+
+  onRegistrationBonusPolicySettled(listener) {
+    this.registrationBonusPolicyListeners.add(listener);
+    return () => this.registrationBonusPolicyListeners.delete(listener);
   }
 
   observeAuthorizationVersions(headers, sessionEpoch = this.financeSessionEpoch) {
@@ -220,7 +226,11 @@ export class AdminPlatformClient {
 
   updateRegistrationBonusPolicy(body, idempotencyKey = `registration-bonus-${secureRequestID()}`, signal) {
     if (typeof idempotencyKey !== 'string' || idempotencyKey.length < 16 || idempotencyKey.length > 128) throw new Error('INVALID_REGISTRATION_BONUS_REQUEST');
-    return this.mutate('billing', '/admin/v1/registration-bonus-policy', 'PUT', body, idempotencyKey, signal, 200, { decode: parseRegistrationBonusJSON, encode: encodeRegistrationBonusJSON });
+    return this.mutate('billing', '/admin/v1/registration-bonus-policy', 'PUT', body, idempotencyKey, signal, 200, { decode: parseRegistrationBonusJSON, encode: encodeRegistrationBonusJSON }).finally(() => {
+      // A retired session's write can still commit. Notify current readers to
+      // read with their own authority; never transfer its receipt or draft.
+      for (const listener of this.registrationBonusPolicyListeners) listener();
+    });
   }
 
   async mutate(area, resource, method, body, idempotencyKey = '', signal, expectedStatus = 0, codec = null) {

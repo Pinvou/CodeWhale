@@ -145,7 +145,11 @@ layers: zram (on by default, sized to 2x RAM with a zstd compressor, pool
 capped at 70% of RAM), a mandatory 8 GiB `/mnt/swapfile` as the unbounded
 overflow (on the shared single disk this costs 8 GiB of build disk; it is
 skipped only when /mnt is RAM-backed or has too little free space), then
-zswap and the image swap as fallbacks.
+zswap and the image swap as fallbacks. Only image-provided zram modules are
+loaded; if the module is missing or cannot load, the disk-swap target rises
+to 16 GiB (subject to the same free-space cap). Memory setup never installs
+kernel packages: its hard timeout must not interrupt dpkg and break later
+required system-dependency installation.
 Self-hosted runners retain their administrator-provisioned memory and swap;
 the memory setup script leaves them unchanged, and apt cleanup is hosted-only.
 

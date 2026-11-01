@@ -56,7 +56,7 @@ function lexicalRouteSource(source) {
     }
   }
   if (region && region !== 'line') fail('unrecognized route source lexical region');
-  return { lines: code.split(/\r?\n/), masked };
+  return { code, lines: code.split(/\r?\n/), masked };
 }
 
 function routeDeclarationLines(source) {
@@ -125,18 +125,36 @@ export function organizationFinanceRoutes(source, handlers) {
     }
     return undefined;
   };
+  // Keep literal arguments available for the finite supported call shapes,
+  // but require each match to start in executable Go code. Examples in a
+  // comment or string must never supply authority for a real handler.
+  const realMatches = (text, pattern, rootSelector = false) => {
+    const { code, masked } = lexicalRouteSource(text);
+    return [...code.matchAll(pattern)].filter(match => {
+      const before = masked.slice(0, match.index);
+      // Go identifiers include Unicode letters/digits. JavaScript's ASCII
+      // word boundary alone can match the tail of a different identifier.
+      if (masked[match.index] === ' ' || /[\p{L}\p{Nd}_]$/u.test(before.slice(-2))) return false;
+      // A selector may continue after whitespace or a comment following its
+      // dot. Such a field named s is not this handler's root Service receiver.
+      return !rootSelector || !before.trimEnd().endsWith('.');
+    });
+  };
   const routes = routeDeclarationLines(source).map(line => {
     const match = line.match(/^\s*routes\.(GET|POST|PUT)\("([^"]+)",\s*(.*)\)$/);
     if (!match) fail('unrecognized organization route declaration');
     const [, method, suffix, expression] = match;
-    const handler = expression.match(/httpserver\.AdaptFunc\(s\.(\w+)\)$/)?.[1];
-    if (!handler || !/^(?:approvalpolicy\.Require\("[A-Z_]+", approvalpolicy\.\w+\), )?httpserver\.AdaptFunc\(s\.\w+\)$/.test(expression)) fail('unrecognized organization handler');
+    const shape = expression.match(/^(?:httpserver\.RequirePathSuffix\("([^"]+)"\), )?(?:approvalpolicy\.Require\("[A-Z_]+", approvalpolicy\.\w+\), )?httpserver\.AdaptFunc\(s\.(\w+)\)$/);
+    const pathGuard = shape?.[1];
+    const handler = shape?.[2];
+    if (!handler || (pathGuard && !suffix.endsWith(pathGuard)) || !shape) fail('unrecognized organization handler');
     const body = realFunctionBody(handler);
     if (!body) fail('organization handler source missing');
     let permission;
     if (handler === 'organizationModelPolicy') {
-      if (!/permission := "org\.models\.read"/.test(body) || !/if r\.Method == http\.MethodPut \{\s*permission = "org\.models\.manage"/.test(body)
-        || !body.includes('AuthorizedOrganizationUserID(r.Context(), principal, permission, organizationID)')) fail('organization model authority changed');
+      if (realMatches(body, /\bpermission := "org\.models\.read"/g).length !== 1
+        || realMatches(body, /\bif r\.Method == http\.MethodPut \{\s*permission = "org\.models\.manage"/g).length !== 1
+        || realMatches(body, /\bs\.authorizer\.AuthorizedOrganizationUserID\(r\.Context\(\), principal, permission, organizationID\)/g, true).length !== 1) fail('organization model authority changed');
       permission = method === 'PUT' ? 'org.models.manage' : 'org.models.read';
     } else if (handler === 'reclaimClosedGrant' || handler === 'reclaimClosedGrantsBatch') {
       // These two existing handlers share one explicit authority helper. Keep
@@ -150,7 +168,11 @@ export function organizationFinanceRoutes(source, handlers) {
       if (!helper || !realStatement(body, /^\s*resolved, org, client, ok := s\.closedGrantClient\(w, r\)\s*$/, 's.closedGrantClient(w, r)')) fail('closed grant authority helper missing');
       if (!realStatement(helper, /^\s*resolved, org, _, ok := s\.resolveOrganizationBilling\(w, r, "org\.grants\.reclaim_closed"\)\s*$/, 's.resolveOrganizationBilling(w, r,')) fail('closed grant authority changed');
       permission = 'org.grants.reclaim_closed';
-    } else permission = body.match(/resolveOrganizationBilling\(w, r, "(org\.[a-z.]+)"\)/)?.[1];
+    } else {
+      const resolvers = realMatches(body, /\bs\.resolveOrganizationBilling\(w, r, "(org\.[a-z.]+)"\)/g, true);
+      if (resolvers.length > 1) fail('organization permission source ambiguous');
+      permission = resolvers[0]?.[1];
+    }
     if (!permission) fail('organization permission source missing');
     const policy = expression.match(/approvalpolicy\.Require\("([^"]+)", approvalpolicy\.(\w+)\)/);
     return { method: method.toLowerCase(), path: '/v1' + suffix.replace(/\/:([a-z_]+)/g, '/{$1}'), handler,
