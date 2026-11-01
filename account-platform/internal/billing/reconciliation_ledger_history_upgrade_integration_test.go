@@ -115,20 +115,27 @@ func TestLedgerRepairProofHistoricalUpgradePostgres(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	var prefix []migrations.Migration
+	var prefix, historicalUpgrade []migrations.Migration
 	for _, m := range all {
 		if m.Version <= 900031 {
 			prefix = append(prefix, m)
+		}
+		// This contract targets 900032, including its own forward-only guard.
+		if m.Version <= 900032 {
+			historicalUpgrade = append(historicalUpgrade, m)
 		}
 	}
 	if _, err = billingschema.VerifyApplied(ctx, operator, prefix); err != nil {
 		t.Fatal("verify original migration ledger", err)
 	}
-	if err = billingschema.Up(ctx, operator, all); err != nil {
+	if err = billingschema.Up(ctx, operator, historicalUpgrade); err != nil {
 		t.Fatal("official upgrade", err)
 	}
-	if _, err = billingschema.VerifyApplied(ctx, operator, all); err != nil {
+	if _, err = billingschema.VerifyApplied(ctx, operator, historicalUpgrade); err != nil {
 		t.Fatal("verify upgraded ledger", err)
+	}
+	if err = r.pool.QueryRow(ctx, `SELECT max(version) FROM schema_migrations`).Scan(&highest); err != nil || highest != 900032 {
+		t.Fatal("not exact upgraded historical prefix", highest, err)
 	}
 	if snapshot() != factBefore || acl() != aclBefore {
 		t.Fatal("upgrade changed historical data or runtime permissions")
@@ -141,17 +148,17 @@ func TestLedgerRepairProofHistoricalUpgradePostgres(t *testing.T) {
 	if err = r.pool.QueryRow(ctx, `SELECT jsonb_agg(to_jsonb(m) ORDER BY version)::text FROM schema_migrations m`).Scan(&ledger); err != nil {
 		t.Fatal(err)
 	}
-	if err = billingschema.Up(ctx, operator, all); err != nil {
+	if err = billingschema.Up(ctx, operator, historicalUpgrade); err != nil {
 		t.Fatal("official replay", err)
 	}
-	if _, err = billingschema.VerifyApplied(ctx, operator, all); err != nil {
+	if _, err = billingschema.VerifyApplied(ctx, operator, historicalUpgrade); err != nil {
 		t.Fatal("verify replay", err)
 	}
 	var after string
 	if err = r.pool.QueryRow(ctx, `SELECT jsonb_agg(to_jsonb(m) ORDER BY version)::text FROM schema_migrations m`).Scan(&after); err != nil || after != ledger || snapshot() != factBefore || acl() != aclBefore {
 		t.Fatal("replay changed ledger or financial facts", err)
 	}
-	err = billingschema.DownOne(ctx, operator, all)
+	err = billingschema.DownOne(ctx, operator, historicalUpgrade)
 	var rejected *pgconn.PgError
 	if !errors.As(err, &rejected) || rejected.Code != "55000" || rejected.Message != "ledger repair history proof is forward-only" {
 		t.Fatal("unexpected down result", err)
@@ -159,7 +166,7 @@ func TestLedgerRepairProofHistoricalUpgradePostgres(t *testing.T) {
 	if err = r.pool.QueryRow(ctx, `SELECT jsonb_agg(to_jsonb(m) ORDER BY version)::text FROM schema_migrations m`).Scan(&after); err != nil || after != ledger || snapshot() != factBefore || acl() != aclBefore {
 		t.Fatal("refused down changed data or privileges", err)
 	}
-	if _, err = billingschema.VerifyApplied(ctx, operator, all); err != nil {
+	if _, err = billingschema.VerifyApplied(ctx, operator, historicalUpgrade); err != nil {
 		t.Fatal("verify after refused down", err)
 	}
 }
