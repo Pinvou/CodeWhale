@@ -68,13 +68,25 @@ class QuotaLuaRunnerTests(unittest.TestCase):
             script = "import os, sys, time, subprocess\nfrom pathlib import Path\n"
             script += "assert 'PINVOU_TEST_AUTH_QUOTA_LUA_COMMAND' in os.environ\n"
             script += "assert '-timeout=90s' in sys.argv and '-run=^TestTokenQuota' in sys.argv\n"
-            if mode == "timeout":
+            timeout_mode = mode in {"timeout", "timeout-diagnostics", "timeout-oversize", "timeout-invalid-utf8"}
+            if timeout_mode:
                 child = "from pathlib import Path; import time; Path(" + repr(str(child_ready)) + ").write_text('ready'); time.sleep(30)"
                 script += "child = subprocess.Popen([sys.executable, '-c', " + repr(child) + "], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)\n"
                 script += "Path(" + repr(str(child_pid)) + ").write_text(str(child.pid))\n"
                 script += "while not Path(" + repr(str(child_ready)) + ").exists(): time.sleep(0.01)\n"
+                if mode == "timeout-diagnostics":
+                    script += "sys.stdout.write(" + repr(payload) + "); sys.stdout.flush()\n"
+                    script += "sys.stderr.write('QUOTA_FIXTURE_DIAGNOSTIC_BEFORE_TIMEOUT\\n'); sys.stderr.flush()\n"
+                elif mode == "timeout-oversize":
+                    script += "sys.stderr.write('x' * ((1 << 20) + 1)); sys.stderr.flush()\n"
+                elif mode == "timeout-invalid-utf8":
+                    script += "os.write(1, b'\\xff'); os.write(2, b'QUOTA_FIXTURE_TRUNCATED_UTF8\\n')\n"
                 script += "time.sleep(30)\n"
-            script += "sys.stdout.write(" + repr(payload) + ")\n"
+            if mode == "invalid-utf8":
+                invalid_output = payload.encode("utf-8") + b'{"Action":"output","Output":"\xff"}\n'
+                script += "os.write(1, " + repr(invalid_output) + ")\n"
+            else:
+                script += "sys.stdout.write(" + repr(payload) + ")\n"
             script += "raise SystemExit(" + ("2" if mode == "nonzero" else "0") + ")\n"
             fixture.write_text(script, encoding="utf-8")
             lua = str(Path(directory) / "missing-lua") if lua_missing else sys.executable
@@ -85,7 +97,7 @@ class QuotaLuaRunnerTests(unittest.TestCase):
                     "--go-command-json", json.dumps([sys.executable, "-B", str(fixture)]),
                     "--timeout", str(timeout),
                 ])
-            if mode == "timeout":
+            if timeout_mode:
                 self.assertTrue(child_ready.exists(), "timeout negative must reach a running descendant")
                 pid = int(child_pid.read_text())
                 try:
@@ -97,6 +109,12 @@ class QuotaLuaRunnerTests(unittest.TestCase):
                             subprocess.run(["taskkill", "/PID", str(pid), "/T", "/F"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=10, check=False)
                         else:
                             os.kill(pid, signal.SIGKILL)
+                if mode == "timeout-diagnostics":
+                    self.assertIn('"Action": "pass"', stdout.getvalue(), "timeout discarded the Go output")
+                elif mode == "timeout-oversize":
+                    self.assertEqual(stdout.getvalue(), "", "oversized diagnostics were published")
+                elif mode == "timeout-invalid-utf8":
+                    self.assertIn("\ufffd", stdout.getvalue(), "partial UTF-8 discarded timeout diagnostics")
             return code, stderr.getvalue()
 
     def test_complete_subprocess_evidence_passes(self):
@@ -122,6 +140,30 @@ class QuotaLuaRunnerTests(unittest.TestCase):
         self.assertEqual(code, 1)
         self.assertIn("process deadline", message)
         self.assertLess(time.monotonic() - started, 5)
+
+    def test_timeout_preserves_diagnostics_without_accepting_pass_events(self):
+        code, message = self.invoke("timeout-diagnostics", timeout=1)
+        self.assertEqual(code, 1)
+        self.assertIn("process deadline", message)
+        self.assertIn("QUOTA_FIXTURE_DIAGNOSTIC_BEFORE_TIMEOUT", message)
+        self.assertNotIn("AUTH_QUOTA_PRODUCTION_LUA_PASS", message)
+
+    def test_timeout_diagnostics_keep_the_output_bound(self):
+        code, message = self.invoke("timeout-oversize", timeout=1)
+        self.assertEqual(code, 1)
+        self.assertIn("test output exceeded its bound", message)
+        self.assertNotIn("xxxxxxxx", message)
+
+    def test_timeout_keeps_partial_utf8_diagnostics(self):
+        code, message = self.invoke("timeout-invalid-utf8", timeout=1)
+        self.assertEqual(code, 1)
+        self.assertIn("process deadline", message)
+        self.assertIn("QUOTA_FIXTURE_TRUNCATED_UTF8", message)
+
+    def test_successful_exit_still_requires_strict_utf8(self):
+        code, message = self.invoke("invalid-utf8")
+        self.assertEqual(code, 1)
+        self.assertIn("AUTH_QUOTA_PRODUCTION_LUA_FAIL", message)
 
 
 if __name__ == "__main__":

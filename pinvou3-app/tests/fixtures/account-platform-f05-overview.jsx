@@ -35,4 +35,4 @@ control.reset=()=>{control.calls=[];control.client=new AdminPlatformClient();con
 control.labels=()=>tokenManagementCopy[control.language].modelToken;
 control.resolve=()=>control.pending.splice(0).forEach(resolve=>resolve());
 globalThis.f05Overview=control;
-history.replaceState({},'',`${location.pathname}?operations_tab=usage`);control.render();
+history.replaceState({},'',`${location.pathname}?section=tokens&operations_tab=usage`);control.render();

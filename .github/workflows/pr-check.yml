@@ -1004,12 +1004,12 @@ jobs:
     # Draft runs lint/build/logic tests. Ready PRs and merge groups select browser
     # smokes from their actual base/head diff. Shared, unknown, test-infrastructure,
     # and empty diffs fail closed to the complete smoke set. Each selected smoke is
-    # retried once to absorb transient hosted-runner flakes; the 25-minute cap
-    # covers setup plus one full pass and a single rerun of the biggest smoke,
-    # while a run with several independent flakes hits the cap and fails.
+    # retried once to absorb transient hosted-runner flakes. The full selection
+    # can outlast 25 minutes without any retry; leave time for setup, a complete
+    # pass and one largest-smoke retry while retaining a bounded job lifetime.
     if: ${{ !cancelled() && github.event.action != 'closed' && needs.changes.outputs.pure_release_backflow != 'true' && (github.event_name == 'pull_request' || github.event_name == 'merge_group') && (needs.changes.outputs.frontend == 'true' || needs.changes.outputs.pet == 'true') }}
     runs-on: ${{ fromJSON(vars.PINVOU_LINUX_MEDIUM_RUNNER || vars.PINVOU_LINUX_RUNNER || '["ubuntu-22.04"]') }}
-    timeout-minutes: 25
+    timeout-minutes: 45
     defaults:
       run:
         working-directory: pinvou3-app
@@ -1423,7 +1423,7 @@ jobs:
           set -euo pipefail
           python3 -m unittest discover -s scripts/tests -p test_deployment_contracts.py
           for postgres_version in 17 18.4; do
-            env -u DOCKER_HOST python3 scripts/account-platform-deployment-contracts.py --postgres-version "$postgres_version" --artifacts "$RUNNER_TEMP/account-platform-deployment-contracts-$postgres_version"
+            env -u DOCKER_HOST python3 scripts/account-platform-deployment-contracts.py --postgres-version "$postgres_version" --artifacts "$RUNNER_TEMP/account-platform-deployment-contracts-$postgres_version-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
           done
 
       - name: Existing broker compatibility on owned PostgreSQL and TLS NATS

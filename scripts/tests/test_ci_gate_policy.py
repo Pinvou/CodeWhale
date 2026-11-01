@@ -1044,6 +1044,7 @@ class CiGatePolicyTests(unittest.TestCase):
                 for name in ("personal", "models", "invocation"):
                     source = f"account-platform/deploy/production/compose.{name}.yaml"
                     self.assertIn(source, entries)
+
                     self.assertTrue(_matches_paths_filter(source, entries))
             self.assertNotIn(path, listed, f"{path} must not be redundantly run twice")
             listed.add(path)
@@ -1056,6 +1057,22 @@ class CiGatePolicyTests(unittest.TestCase):
             on_disk,
             "scripts/tests node 套件与已核验的 CI runner 集合不一致"
             "(缺失=永不执行;多余=死条目)",
+        )
+
+    def test_deployment_contract_artifacts_are_attempt_scoped(self):
+        job = _without_inline_comments(
+            _extract_job_block(self.pr_workflow, "account-platform-test")
+        )
+        step = _step_named(
+            job, "Production history and managed PostgreSQL release contracts"
+        )
+        self.assertRegex(
+            step,
+            r'--artifacts "\$RUNNER_TEMP/account-platform-deployment-contracts-\$postgres_version-\$\{GITHUB_RUN_ID\}-\$\{GITHUB_RUN_ATTEMPT\}"',
+        )
+        self.assertNotIn(
+            '--artifacts "$RUNNER_TEMP/account-platform-deployment-contracts-$postgres_version"',
+            step,
         )
 
     def test_dedicated_node_suite_wiring_rejects_missing_or_commented_commands(self):

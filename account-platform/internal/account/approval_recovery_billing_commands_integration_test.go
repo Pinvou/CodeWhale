@@ -280,9 +280,13 @@ func TestApprovalRecoveryQueryForwardMigrationPostgres(t *testing.T) {
 		repo := fixture.repositoryWithInitialStage(t, func(ctx context.Context, conn *pgx.Conn, installed []migrations.Migration) error {
 			allMigrations = installed
 			retained := make([]migrations.Migration, 0, len(installed))
+			upgrade := make([]migrations.Migration, 0, len(installed))
 			for _, m := range installed {
-				if m.Version != 900009 {
+				if m.Version < 900009 {
 					retained = append(retained, m)
+				}
+				if m.Version <= 900009 {
+					upgrade = append(upgrade, m)
 				}
 			}
 			if e := accountschema.Up(ctx, conn, retained); e != nil {
@@ -290,6 +294,8 @@ func TestApprovalRecoveryQueryForwardMigrationPostgres(t *testing.T) {
 			}
 			// A genuine runtime session must not install the forward migration,
 			// even though it owns the public function and all prior SQL is applied.
+			// Later migrations require this forward migration and must not be
+			// installed into the historical stage with its prerequisite missing.
 			configuration := conn.Config().Copy()
 			configuration.User = "account_service"
 			runtime, e := pgx.ConnectConfig(ctx, configuration)
@@ -314,7 +320,21 @@ func TestApprovalRecoveryQueryForwardMigrationPostgres(t *testing.T) {
 			if !errors.As(e, &forbidden) || forbidden.Code != "42501" {
 				return errors.New("runtime did not hit exact migration session fence")
 			}
-			return conn.QueryRow(ctx, `SELECT (SELECT jsonb_agg(to_jsonb(s) ORDER BY version)::text FROM schema_migrations s), pg_get_userbyid(p.proowner)||'|'||p.prosecdef::text||'|'||p.proconfig::text||'|'||p.proacl::text FROM pg_proc p WHERE p.oid='public.claim_approval_recovery_query(uuid,uuid,uuid,text,bigint,bigint)'::regprocedure`).Scan(&oldLedger, &oldACL)
+			if e := conn.QueryRow(ctx, `SELECT (SELECT jsonb_agg(to_jsonb(s) ORDER BY version)::text FROM schema_migrations s), pg_get_userbyid(p.proowner)||'|'||p.prosecdef::text||'|'||p.proconfig::text||'|'||p.proacl::text FROM pg_proc p WHERE p.oid='public.claim_approval_recovery_query(uuid,uuid,uuid,text,bigint,bigint)'::regprocedure`).Scan(&oldLedger, &oldACL); e != nil {
+				return e
+			}
+			if e := accountschema.Up(ctx, conn, upgrade); e != nil {
+				return e
+			}
+			var newLedger, newACL string
+			var applied int
+			if e := conn.QueryRow(ctx, `SELECT (SELECT jsonb_agg(to_jsonb(s) ORDER BY version)::text FROM schema_migrations s WHERE version<>900009),pg_get_userbyid(p.proowner)||'|'||p.prosecdef::text||'|'||p.proconfig::text||'|'||p.proacl::text,(SELECT count(*) FROM schema_migrations WHERE version=900009) FROM pg_proc p WHERE p.oid='public.claim_approval_recovery_query(uuid,uuid,uuid,text,bigint,bigint)'::regprocedure`).Scan(&newLedger, &newACL, &applied); e != nil {
+				return e
+			}
+			if applied != 1 || oldLedger != newLedger || oldACL != newACL || !strings.HasPrefix(newACL, "account_service|true|") {
+				return errors.New("forward upgrade changed frozen ledger/function ownership or ACL")
+			}
+			return nil
 		})
 		ctx := context.Background()
 		configuration := repo.pool.Config().ConnConfig.Copy()
@@ -326,14 +346,6 @@ func TestApprovalRecoveryQueryForwardMigrationPostgres(t *testing.T) {
 		t.Cleanup(func() { migrator.Close(context.Background()) })
 		if _, e = migrator.Exec(ctx, "SET ROLE account_service"); e != nil {
 			t.Fatal(e)
-		}
-		var newLedger, newACL string
-		var installed int
-		if e := repo.pool.QueryRow(ctx, `SELECT (SELECT jsonb_agg(to_jsonb(s) ORDER BY version)::text FROM schema_migrations s WHERE version<>900009),pg_get_userbyid(p.proowner)||'|'||p.prosecdef::text||'|'||p.proconfig::text||'|'||p.proacl::text,(SELECT count(*) FROM schema_migrations WHERE version=900009) FROM pg_proc p WHERE p.oid='public.claim_approval_recovery_query(uuid,uuid,uuid,text,bigint,bigint)'::regprocedure`).Scan(&newLedger, &newACL, &installed); e != nil {
-			t.Fatal(e)
-		}
-		if installed != 1 || oldLedger != newLedger || oldACL != newACL || !strings.HasPrefix(newACL, "account_service|true|") {
-			t.Fatal("forward upgrade changed frozen ledger/function ownership or ACL", installed, oldACL, newACL)
 		}
 		if e := accountschema.Up(ctx, migrator, allMigrations); e != nil {
 			t.Fatal("exact migration replay", e)
