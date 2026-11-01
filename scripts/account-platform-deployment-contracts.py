@@ -11,6 +11,7 @@ import json
 import os
 from pathlib import Path
 import runpy
+import re
 import shutil
 import subprocess
 import sys
@@ -25,6 +26,37 @@ POSTGRES_PROFILES = {
     "18.4": "postgres:18.4-alpine@sha256:9a8afca54e7861fd90fab5fdf4c42477a6b1cb7d293595148e674e0a3181de15",
 }
 LABEL = "pinvou.deployment-contracts"
+
+
+def prepare_dependencies(arguments, logfile):
+    """Keep the complete private log; emit bounded, redacted failure evidence."""
+    try:
+        with logfile.open("w") as output:
+            subprocess.run(arguments, check=True, stdout=output, stderr=subprocess.STDOUT)
+    except subprocess.CalledProcessError as error:
+        with logfile.open("rb") as output:
+            output.seek(0, os.SEEK_END)
+            offset = max(0, output.tell() - 65536)
+            output.seek(offset)
+            tail_bytes = output.read()
+        if offset:
+            # A partial first line may have lost a URL/auth prefix needed for
+            # redaction. Only complete lines can enter the public diagnostic.
+            boundary = tail_bytes.find(b"\n")
+            tail_bytes = tail_bytes[boundary + 1:] if boundary >= 0 else b""
+        tail = tail_bytes.decode("utf-8", errors="replace")
+        # A caller may configure an authenticated registry or proxy.
+        for name, value in os.environ.items():
+            if len(value) >= 4 and re.search(r"TOKEN|PASSWORD|SECRET|CREDENTIAL|API_KEY", name, re.I):
+                tail = tail.replace(value, "[redacted]")
+        tail = re.sub(r"(?i)\b(?:https?|git\+https?)://[^\s<>\"']+", "[URL redacted]", tail)
+        tail = re.sub(r"(?i)(authorization\s*[:=]\s*(?:bearer|basic)\s+)\S+", r"\1[redacted]", tail)
+        tail = re.sub(r"(?i)((?:_authToken|password|token|secret)\s*[:=]\s*)\S+", r"\1[redacted]", tail)
+        tail = "\n".join(tail.splitlines()[-100:])[-24000:]
+        print("DEPENDENCY_PREPARATION_FAILED exit=" + str(error.returncode) + " log=" + logfile.name, file=sys.stderr)
+        print(tail, file=sys.stderr)
+        # CalledProcessError includes argv, which can contain GOPROXY secrets.
+        raise RuntimeError("dependency preparation failed; mandatory contracts did not run") from None
 
 
 def published_history(root, output):
@@ -73,8 +105,11 @@ def main():
 
     def command(arguments, logfile=None):
         if logfile:
-            with (artifacts / logfile).open("w") as output:
-                subprocess.run(arguments, check=True, stdout=output, stderr=subprocess.STDOUT)
+            if logfile == "dependencies.log":
+                prepare_dependencies(arguments, artifacts / logfile)
+            else:
+                with (artifacts / logfile).open("w") as output:
+                    subprocess.run(arguments, check=True, stdout=output, stderr=subprocess.STDOUT)
         else:
             return subprocess.check_output(arguments, text=True).strip()
 
