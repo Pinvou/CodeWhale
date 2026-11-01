@@ -25,17 +25,17 @@
 #      an incompressible workload cannot eat the runner's whole memory
 #      through zram itself. The 2026-09-19 tuning only changes the
 #      compressor (lz4 -> zstd), the device size (fixed 24 GiB -> 2x RAM)
-#      and the pool cap (50% -> 70% of RAM). Re-qualified on all three
-#      images via modprobe zram ->
-#      (on failure: activate the image swapfile first if nothing is active,
-#      then apt-get install linux-modules-extra-$(uname -r), then modprobe
-#      again) -> zstd -> 2x-RAM disksize -> mem_limit -> mkswap ->
-#      swapon -p 100.
+#      and the pool cap (50% -> 70% of RAM). Load the image's existing
+#      module via modprobe zram -> zstd -> 2x-RAM disksize -> mem_limit ->
+#      mkswap -> swapon -p 100. If the module is missing, use the fallback
+#      layers below. Never install kernel packages in this best-effort,
+#      timeout-bounded step: killing a package transaction can leave dpkg
+#      interrupted and break the subsequent required dependency install.
 #      The 2026-09-12 hosted job hangs once blamed on zram (run
 #      34708283784) are re-classified as a transient environment incident:
 #      the same script ran green with zram loaded on the community repo the
 #      same day. The countermeasure is structural, not a rollback: every
-#      userspace external call (modprobe, apt-get, fallocate, mkswap,
+#      userspace external call (modprobe, fallocate, mkswap,
 #      swapon, swapoff) runs under `timeout` with a SIGKILL backstop, and
 #      any failure degrades loudly to the next layer. Residual risk that no
 #      userspace measure can remove: an in-kernel hang (module load or a
@@ -103,10 +103,9 @@ else
   warn() { echo "[memory-setup] WARNING: $*" >&2; }
 fi
 
-# Steps that normally recover a few lines later (first modprobe miss on
-# hosted images, the image-swap pre-activation belonging to that same
-# recovery, the as-is swapon retry, and the last-resort image-swapfile
-# attempt after all layers fail) must not burn a standing ::warning
+# Steps that normally recover a few lines later (the as-is swapon retry
+# and the last-resort image-swapfile attempt after all layers fail) must not
+# burn a standing ::warning
 # annotation on every job; keep them visible in the log only.
 # Unrecovered failures still use warn.
 warn_recoverable() { echo "[memory-setup] WARNING: $*" >&2; }
@@ -163,47 +162,15 @@ DISK_SWAP_SIZE_KIB=$((8 * 1024 * 1024))
 DISK_SWAP_PRIORITY=10
 
 setup_zram() {
-  # Module load first; on hosted images the zram module may live in the
-  # linux-modules-extra package, so install it and retry once before
-  # giving up. Every external call is timeout-capped, with its stderr kept
-  # in the warning so the actual failure reason survives in the log.
+  # Only load modules already supplied by the image. A timed-out kernel
+  # package install can outlive apt, hold the dpkg lock, or leave an
+  # interrupted transaction (#2095's merge queue failure). This optional
+  # layer must never mutate package-manager state; missing or hung modules
+  # degrade to disk swap and zswap instead.
   local modprobe_err
   if ! modprobe_err="$(run_to 60 modprobe zram 2>&1)"; then
-    warn_recoverable "modprobe zram failed${modprobe_err:+: ${modprobe_err}}; installing linux-modules-extra-$(uname -r) and retrying"
-    # The module-install path (apt-get, up to minutes) is the slowest stretch
-    # of this script and the only one the workflow-side `timeout 240` can
-    # realistically interrupt. Activate the image swapfile BEFORE it, so a
-    # mid-apt kill degrades to "plain swap" and never to zero swap; if zram
-    # comes up afterwards it simply takes over as the higher-priority layer.
-    if ! any_swap_active; then
-      warn_recoverable "no swap active; activating the image swapfile before the slow module install"
-      activate_image_swap_fallback
-    fi
-    if ! run_to 60 apt-get update -qq; then
-      warn "apt-get update failed; the module install below may fail too"
-    fi
-    # Two install attempts: the 2026-10-01 probe recorded a transient failure
-    # of this exact install (same kernel had succeeded on 2026-09-28), and a
-    # failed attempt degrades every rust-test job on that image to swap-only.
-    # The install caps (90 + 90) fit inside the workflow-side 240s wrapper
-    # next to the 60s update above, but the earlier zram probes and the 15s
-    # kill grace are outside that sum: if the wrapper wins the race the
-    # script dies mid-apt and the degraded-mode 16G swapfile below never
-    # runs — the image-swap fallback activated above is then the only
-    # overflow layer for that job.
-    local modules_pkg="linux-modules-extra-$(uname -r)"
-    if ! run_to 90 apt-get install -y -qq --no-install-recommends \
-      "${modules_pkg}"; then
-      warn "apt-get install ${modules_pkg} failed once; retrying"
-      if ! run_to 90 apt-get install -y -qq --no-install-recommends \
-        "${modules_pkg}"; then
-        warn "apt-get install ${modules_pkg} failed again; giving up on zram layers"
-      fi
-    fi
-    if ! modprobe_err="$(run_to 60 modprobe zram 2>&1)"; then
-      warn "modprobe zram still failing after module install${modprobe_err:+: ${modprobe_err}}; giving up on zram"
-      return 1
-    fi
+    warn "modprobe zram failed${modprobe_err:+: ${modprobe_err}}; using fallback swap without installing kernel packages"
+    return 1
   fi
 
   local size_file=/sys/block/zram0/disksize
@@ -414,8 +381,8 @@ else
   warn "zram layer unavailable; continuing with the remaining swap layers"
 fi
 
-# Degraded-mode headroom (2026-10): when no zram swap is active — flaky
-# modules-extra install or explicit opt-out — the disk swapfile is the ONLY
+# Degraded-mode headroom (2026-10): when no zram swap is active — a missing
+# module or explicit opt-out — the disk swapfile is the ONLY
 # overflow layer behind the ~14.2GB rust-test link peaks, and 8G was sized
 # assuming zram would exist. Double it in that case; on the current image
 # family (146G root, 79-102G free) the disk cost is minor next to the

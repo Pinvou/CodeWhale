@@ -15,7 +15,7 @@ try{
  // SSR renders the actual component without running effects: the first frame
  // must select the same authorized tab as a subsequent permission update.
  const { AdminFinanceWorkspace } = await server.ssrLoadModule('/src/features/account-platform/AdminFinanceWorkspace.jsx');
- const { financeCopy, ledgerRepairCopy, entitlementCorrectionCopy } = await server.ssrLoadModule('/src/shared/i18n.js');
+ const { financeCopy, ledgerRepairCopy, entitlementCorrectionCopy, adminLayoutCopy } = await server.ssrLoadModule('/src/shared/i18n.js');
  for (const [name, permissions, initialTab, expected] of [
   ['finance-only ledger', ['platform.billing.wallets.read'], 'ledger', financeCopy.en.orders],
   ['finance-only correction', ['platform.billing.wallets.read'], 'correction', financeCopy.en.orders],
@@ -63,8 +63,8 @@ try{
  });
  for(const language of ['zh','en','ja'])await run('production finance tab / lossless precheck / draft / submit '+language,async page=>{
   await page.goto(server.resolvedUrls.local[0]+`tests/account_platform_ledger_repair_fixture.html?language=${language}${language==='en'?'&lost=1':''}`);
-  await page.waitForFunction(()=>window.f10 && [...document.querySelectorAll('nav button')].some(b=>b.textContent===window.f10.financeCopy[window.f10.language].finance));
-  await page.evaluate(()=>[...document.querySelectorAll('nav button')].find(b=>b.textContent===window.f10.financeCopy[window.f10.language].finance).click());
+  await page.waitForSelector('nav button[data-section="billing"]');
+  await page.click('nav button[data-section="billing"]');
   await page.waitForFunction(()=>window.f10 && [...document.querySelectorAll('nav button')].some(b=>b.textContent===window.f10.ledgerRepairCopy[window.f10.language].title));
   await page.evaluate(()=>[...document.querySelectorAll('nav button')].find(b=>b.textContent===window.f10.ledgerRepairCopy[window.f10.language].title).click());
   await page.waitForSelector('.adm-financial-repair-target');
@@ -73,17 +73,19 @@ try{
   assert.ok(await page.evaluate(()=>{const c=window.f10.calls.find(c=>c.url==='/api/admin/account/admin/v2/approval-command-prechecks');return c.body.includes('"amount_microcredits":9223372036854775807')&&JSON.parse(c.body).reason_code==='ATTRIBUTION_TO_WRONG_PLATFORM_ACCOUNT'&&c.headers['X-CSRF-Token']==='controlled-csrf';}));
   await page.type('.adm-financial-repair-draft textarea','Controlled ledger correction justification');await page.type('.adm-financial-repair-draft input','controlled-ledger-key');await page.click('.adm-financial-repair-draft button');
   if(language==='en'){await page.waitForSelector('.adm-financial-repair [role=alert]');await page.waitForFunction(()=>!document.querySelector('.adm-financial-repair-draft button').disabled);await page.click('.adm-financial-repair-draft button');}
-  await page.waitForFunction(()=>document.body.textContent.includes(window.f10.id(9))&&!document.querySelector('.adm-financial-repair'));
+  await page.waitForFunction(()=>document.querySelector('nav button[data-section="approvals"][aria-current="page"]')&&document.querySelector('article')?.textContent.includes(window.f10.id(9))&&[...document.querySelectorAll('.adm-financial-repair')].every(form=>form.closest('[hidden]')));
   assert.ok(await page.evaluate(()=>window.f10.calls.filter(c=>c.url==='/api/admin/approvals/requests'&&c.method==='POST').every(c=>c.body.includes('"amount_microcredits":9223372036854775807')&&JSON.parse(c.body).idempotency_key==='approval:controlled-ledger-key')));
   await page.evaluate(()=>[...document.querySelectorAll('button')].find(b=>b.textContent===window.f10.financeCopy[window.f10.language].submit).click());await page.waitForFunction(()=>window.f10.status==='SUBMITTED');
  });
  await run('repair-only center directory, current detail, typed EDIT and business drilldown',async page=>{
   await page.goto(server.resolvedUrls.local[0]+'tests/account_platform_ledger_repair_fixture.html?language=en');
-  await page.waitForFunction(()=>window.f10 && [...document.querySelectorAll('nav button')].some(b=>b.textContent===window.f10.financeCopy.en.finance));
-  await page.evaluate(()=>[...document.querySelectorAll('nav button')].find(b=>b.textContent===window.f10.financeCopy.en.finance).click());
+  await page.waitForSelector('nav button[data-section="billing"]');
+  await page.click('nav button[data-section="billing"]');
+  await page.waitForFunction(()=>window.f10 && [...document.querySelectorAll('.adm-tabs button')].some(b=>b.textContent===window.f10.ledgerRepairCopy.en.title));
+  await page.evaluate(()=>[...document.querySelectorAll('.adm-tabs button')].find(b=>b.textContent===window.f10.ledgerRepairCopy.en.title).click());
   await page.waitForSelector('.adm-financial-repair');
   await page.evaluate(()=>{window.f10.created=true;});
-  await page.evaluate(()=>[...document.querySelectorAll('button')].find(b=>b.textContent===window.f10.adminPlatformCopy.en.nav.approvals).click());
+  await page.click('nav button[data-section="approvals"]');
   await page.waitForSelector('.adm-approval-workspace tbody tr');
   await page.evaluate(()=>[...document.querySelectorAll('button')].find(b=>b.textContent===window.f10.adminPlatformCopy.en.approvalCenter.directory).click());
   await page.waitForFunction(()=>document.querySelector('tbody')?.textContent.includes('LEDGER_REPAIR'));
@@ -98,7 +100,12 @@ try{
   const update=calls.find(c=>c.method==='PUT');assert.ok(update.body.includes('\"amount_microcredits\":9223372036854775807'));assert.equal(JSON.parse(update.body).expected_version,1);
   await page.waitForFunction(()=>[...document.querySelectorAll('article button')].some(b=>b.textContent===window.f10.adminPlatformCopy.en.approvalCenter.openBusinessArea&&!b.disabled));
   await page.evaluate(()=>[...document.querySelectorAll('article button')].find(b=>b.textContent===window.f10.adminPlatformCopy.en.approvalCenter.openBusinessArea).click());
-  await page.waitForSelector('.adm-financial-repair');
+  await page.waitForFunction(()=>{
+    const finance=document.querySelector('[data-workspace="finance"]');
+    const ledger=finance?.querySelector('[data-workspace="ledger"] .adm-financial-repair');
+    return document.querySelector('nav button[data-section="billing"][aria-current="page"]') &&
+      ledger && !ledger.closest('[hidden]') && ledger.getClientRects().length>0;
+  });
   assert.ok(await page.evaluate(()=>window.f10.calls.every(c=>!c.url.includes('/admin/v1/wallets')&&!c.url.includes('/admin/v1/payment-orders')&&!c.url.includes('/admin/v1/adjustments'))));
  });
  await run('repair approver only enters approvals without draft or finance reads',async page=>{
@@ -107,6 +114,6 @@ try{
   assert.equal(await page.$('.adm-financial-repair'),null);
   assert.ok(await page.evaluate(()=>window.f10.calls.every(c=>!c.url.includes('/admin/v1/wallets')&&!c.url.includes('/admin/v1/payment-orders'))));
  });
- await run('permission denied hides installed Ledger form',async page=>{await page.goto(server.resolvedUrls.local[0]+'tests/account_platform_ledger_repair_fixture.html?deny=1');await page.waitForFunction(()=>window.f10 && document.body.textContent.includes(window.f10.adminPlatformCopy.zh.permissionDenied));assert.equal(await page.$('.adm-financial-repair'),null);assert.equal(await page.evaluate(()=>[...document.querySelectorAll('nav button')].some(b=>b.textContent===window.f10.ledgerRepairCopy.zh.title)),false);});
+ await run('permission denied hides installed Ledger form',async page=>{await page.goto(server.resolvedUrls.local[0]+'tests/account_platform_ledger_repair_fixture.html?deny=1');await page.waitForFunction(message=>window.f10 && document.querySelector('[role="alert"]')?.textContent===message,{},adminLayoutCopy.zh.unauthorized);assert.equal(await page.$('.adm-financial-repair'),null);assert.equal(await page.evaluate(()=>[...document.querySelectorAll('nav button')].some(b=>b.textContent===window.f10.ledgerRepairCopy.zh.title)),false);});
 }finally{await browser.close();await server.close();}
 const result={pass,fail,results,limits:['Actual AdminPlatformView/React/AdminPlatformClient with controlled BFF responses; no real issuer, PostgreSQL approval, canonical production build or full E2E.']};if(process.env.F10_REACT_RESULT)fs.writeFileSync(process.env.F10_REACT_RESULT,JSON.stringify(result,null,2));console.log(JSON.stringify(result));process.exitCode=fail?1:0;

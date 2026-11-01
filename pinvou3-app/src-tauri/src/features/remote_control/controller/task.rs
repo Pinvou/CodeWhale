@@ -1982,6 +1982,55 @@ pub(crate) struct RemoteTaskEvent {
     pub(crate) result_digest: Option<String>,
 }
 
+/// Public projections must not echo arbitrary persisted or backend text.
+/// Unknown reasons retain the terminal status and use the generic UI label.
+pub(crate) fn display_terminal_reason(reason: Option<&str>) -> Option<&str> {
+    reason.filter(|reason| {
+        matches!(
+            *reason,
+            "completed"
+                | "cancelled"
+                | "interrupted"
+                | "process_restart"
+                | "executor_error"
+                | "task_generation_stale"
+                | "task_attachments_invalid"
+                | "task_attachment_unavailable"
+                | "task_attachment_unconfirmed"
+                | "task_attachments_unavailable"
+                | "task_engine_unavailable"
+                | "task_turn_failed"
+                | "task_turn_timeout"
+                | "task_dispatch_panicked"
+                | "task_dispatch_rejected"
+                | "task_dispatch_worker_failed"
+                | "task_permission_mode_required"
+                | "task_permission_mode_changed"
+                | "task_permission_mode_unsupported"
+                | "task_session_busy"
+                | "task_session_lane_conflict"
+                | "task_session_lane_unknown"
+                | "task_session_lane_mismatch"
+                | "task_input_invalid"
+                | "task_input_digest_invalid"
+                | "task_skill_invalid"
+                | "task_mode_unsupported"
+                | "task_workspace_required"
+                | "task_workspace_not_authorized"
+                | "task_workspace_unexpected"
+                | "capability_workspace_not_authorized"
+                | "capability_snapshot_missing"
+                | "capability_snapshot_stale"
+                | "capability_snapshot_expired"
+                | "model_binding_invalid"
+                | "model_binding_stale"
+                | "model_credential_unavailable"
+                | "model_package_missing"
+                | "model_not_exportable"
+        )
+    })
+}
+
 #[derive(Debug, Clone, Copy, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub(crate) enum RemoteTaskModelSource {
@@ -3396,6 +3445,7 @@ impl RemoteTaskService {
             "taskId": record.task_id,
             "sessionId": record.session_id,
             "generation": record.lease.remote_control_generation,
+            "sequence": record.sequence.to_string(),
             "modelSource": record.model_source,
             "status": record.view_status(),
             "connectionId": record.lease.connection_id,
@@ -3404,7 +3454,7 @@ impl RemoteTaskService {
             "relayEpoch": record.lease.relay_epoch,
             "remoteControlGeneration": record.lease.remote_control_generation,
             "outcomeUnknown": record.outcome_unknown,
-            "terminalReason": record.terminal_reason,
+            "terminalReason": display_terminal_reason(record.terminal_reason.as_deref()),
             "resultDigest": record.result_digest,
         }))
     }
@@ -3660,6 +3710,28 @@ fn bounded_reason_owned(reason: String) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn terminal_reason_display_is_an_exact_closed_set() {
+        for code in [
+            "task_generation_stale",
+            "task_attachments_invalid",
+            "task_turn_failed",
+            "executor_error",
+        ] {
+            assert_eq!(display_terminal_reason(Some(code)), Some(code));
+        }
+        for code in [
+            "task_generation_stale_extra",
+            "TASK_GENERATION_STALE",
+            "secret/path",
+            "tokenvalue",
+            "",
+        ] {
+            assert_eq!(display_terminal_reason(Some(code)), None);
+        }
+        assert_eq!(display_terminal_reason(None), None);
+    }
 
     #[test]
     fn remote_policy_errors_are_public_but_local_failures_stay_bounded() {
