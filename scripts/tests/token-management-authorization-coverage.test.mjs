@@ -272,6 +272,24 @@ test('organization finance registration cannot disappear outside the management 
   assert.equal(result.organizationFinanceRoutes, 13);
 });
 
+test('organization finance recognizes the path guard without weakening its middleware grammar', () => {
+  const route = 'routes.POST("/organizations/:organization_id/quota-grants:batch", httpserver.RequirePathSuffix("/quota-grants:batch"), httpserver.AdaptFunc(s.allocateOrganizationQuotaBatch))';
+  const legacy = route.replace('httpserver.RequirePathSuffix("/quota-grants:batch"), ', '');
+  const legacySource = inputs.organizationFinanceSource.replace(route, legacy);
+  assert.ok(legacySource.includes(legacy));
+  assert.equal(checkCoverage({ ...inputs, organizationFinanceSource: legacySource }).organizationFinanceRoutes, 13);
+  const guardedSource = legacySource.replace(legacy, route);
+  assert.equal(checkCoverage({ ...inputs, organizationFinanceSource: guardedSource }).organizationFinanceRoutes, 13);
+  for (const replacement of [
+    route.replace('httpserver.RequirePathSuffix("/quota-grants:batch")', 'httpserver.RequirePathSuffix("/quota-grants:batchOther")'),
+    route.replace('httpserver.RequirePathSuffix("/quota-grants:batch"), ', 'httpserver.RequirePathSuffix("/quota-grants:batch"), httpserver.RequirePathSuffix("/quota-grants:batch"), '),
+    route.replace('httpserver.RequirePathSuffix("/quota-grants:batch"), ', 'middleware.Require("quota"), '),
+  ]) {
+    const source = guardedSource.replace(route, replacement);
+    assert.throws(() => checkCoverage({ ...inputs, organizationFinanceSource: source }), /organization handler/);
+  }
+});
+
 test('closed-grant authority helper cannot disappear or change permission', () => {
   for (const source of [
     inputs.organizationHandlerSource.replaceAll('s.closedGrantClient(w, r)', 's.unclassifiedClosedGrantClient(w, r)'),
@@ -344,6 +362,60 @@ for (const [name, change] of Object.entries({
 test('organization finance verifies permission inside the installed handler, not only declarations', () => {
  assert.throws(() => checkCoverage({ ...inputs, organizationHandlerSource: inputs.organizationHandlerSource.replace('resolveOrganizationBilling(w, r, "org.wallet.read")', 'resolveOrganizationBilling(w, r, "org.units.read")') }), /organization/);
 });
+
+// These use the installed source and production checker. String literals are
+// input examples only; they must not become evidence of executable authority.
+const goAuthorityStandIns = statement => {
+  const inline = statement.replace(/\s+/g, ' ');
+  return {
+    lineComment: `// ${inline}`,
+    blockComment: `/* ${statement} */`,
+    rawString: `_ = \`\n${statement}\n\``,
+    quotedString: `_ = ${JSON.stringify(inline)}`,
+  };
+};
+const ordinaryQuotaAuthority = 's.resolveOrganizationBilling(w, r, "org.quota.allocate")';
+const ordinaryQuotaStatement = 'resolved, organizationID, client, ok := ' + ordinaryQuotaAuthority;
+for (const [name, standIn] of Object.entries(goAuthorityStandIns(ordinaryQuotaStatement))) {
+  test(`ordinary organization authority cannot be supplied by ${name}`, () => {
+    assert.ok(inputs.organizationHandlerSource.includes(ordinaryQuotaStatement));
+    const source = inputs.organizationHandlerSource.replace(ordinaryQuotaStatement,
+      `${standIn}\n\t${ordinaryQuotaStatement.replace('org.quota.allocate', 'org.wallet.read')}`);
+    assert.throws(() => checkCoverage({ ...inputs, organizationHandlerSource: source }), /organization/);
+  });
+}
+test('ordinary organization authority ignores examples before its real call and rejects two real resolvers', () => {
+  const wrong = ordinaryQuotaStatement.replace('org.quota.allocate', 'org.wallet.read');
+  const examples = Object.values(goAuthorityStandIns(wrong)).join('\n\t');
+  const source = inputs.organizationHandlerSource.replace(ordinaryQuotaStatement, `${examples}\n\t${ordinaryQuotaStatement}`);
+  assert.doesNotThrow(() => checkCoverage({ ...inputs, organizationHandlerSource: source }));
+  const duplicate = inputs.organizationHandlerSource.replace(ordinaryQuotaStatement, `${ordinaryQuotaStatement}\n\t${ordinaryQuotaAuthority}`);
+  assert.throws(() => checkCoverage({ ...inputs, organizationHandlerSource: duplicate }), /organization permission source ambiguous/);
+});
+
+const modelAuthorityStatements = [
+  ['read-initialization', 'permission := "org.models.read"', 'permission := "org.models.manage"'],
+  ['put-selection', 'if r.Method == http.MethodPut {\n\t\tpermission = "org.models.manage"\n\t}', 'if r.Method == http.MethodPut {\n\t\t_ = permission\n\t}'],
+  ['authorizer-call', 'actor, authorizationVersion, err := s.authorizer.AuthorizedOrganizationUserID(r.Context(), principal, permission, organizationID)', 'actor, authorizationVersion, err := s.authorizer.AuthorizedOrganizationUserID(r.Context(), principal, "org.models.read", organizationID)\n\t_ = permission'],
+];
+for (const [boundary, original, replacement] of modelAuthorityStatements) {
+  for (const [name, standIn] of Object.entries(goAuthorityStandIns(original))) {
+    test(`organization model ${boundary} cannot be supplied by ${name}`, () => {
+      const normalized = inputs.organizationHandlerSource.replace(/\r\n/g, '\n');
+      assert.ok(normalized.includes(original));
+      const source = normalized.replace(original, `${standIn}\n\t${replacement}`);
+      assert.throws(() => checkCoverage({ ...inputs, organizationHandlerSource: source }), /organization model authority changed/);
+    });
+  }
+}
+test('organization model authority ignores examples while retaining its real three-stage authority', () => {
+  let source = inputs.organizationHandlerSource.replace(/\r\n/g, '\n');
+  for (const [, original, replacement] of modelAuthorityStatements) {
+    source = source.replace(original, `${Object.values(goAuthorityStandIns(replacement)).join('\n\t')}\n\t${original}`);
+  }
+  assert.doesNotThrow(() => checkCoverage({ ...inputs, organizationHandlerSource: source }));
+});
+
 for (const part of ['path', 'authority', 'key', 'approval']) test(`organization finance OpenAPI ${part} drift fails closed`, () => {
  const contract = structuredClone(inputs.organizationFinance), op = contract.paths['/v1/organizations/{organization_id}/model-policy'].put;
  if (part === 'path') delete contract.paths['/v1/organizations/{organization_id}/balance'];
