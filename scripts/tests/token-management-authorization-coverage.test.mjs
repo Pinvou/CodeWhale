@@ -416,6 +416,76 @@ test('organization model authority ignores examples while retaining its real thr
   assert.doesNotThrow(() => checkCoverage({ ...inputs, organizationHandlerSource: source }));
 });
 
+// These are finite receiver-shape checks, not Go alias or control-flow
+// analysis. The source contracts support the installed root Service receiver.
+const organizationHandlerVariant = (handler, transform) => {
+  const source = inputs.organizationHandlerSource.replace(/\r\n/g, '\n');
+  const pattern = new RegExp('func \\(s \\*Service\\) ' + handler + '\\([^\\n]*\\) \\{([\\s\\S]*?)\\n\\}', 'g');
+  const matches = [...source.matchAll(pattern)];
+  assert.equal(matches.length, 1);
+  const match = matches[0];
+  const body = transform(match[1]);
+  return source.slice(0, match.index) + match[0].replace(match[1], body) + source.slice(match.index + match[0].length);
+};
+const receiverShapes = [
+  ['qualified', 'forwarded := struct { s *Service }{s}', 'forwarded.s'],
+  ['dot-space', 'forwarded := struct { s *Service }{s}', 'forwarded. s'],
+  ['dot-newline', 'forwarded := struct { s *Service }{s}', 'forwarded.\n\t\ts'],
+  ['dot-block-comment', 'forwarded := struct { s *Service }{s}', 'forwarded. /* selector */ s'],
+  ['dot-line-comment', 'forwarded := struct { s *Service }{s}', 'forwarded. // selector\n\t\ts'],
+  ['unicode-letter', '他s := s', '他s'],
+  ['unicode-astral-letter', '𐐀s := s', '𐐀s'],
+  ['unicode-astral-digit', 'a𝟙s := s', 'a𝟙s'],
+];
+const withReceiver = (handler, call, declaration, receiver) => organizationHandlerVariant(handler, body => {
+  assert.equal(body.split(call).length, 2);
+  return `\n\t${declaration}\n` + body.replace(call, receiver + call.slice(1));
+});
+const ordinaryHandlers = inputs.manifest.organizationFinanceRoutes.filter(route =>
+  !['organizationModelPolicy', 'reclaimClosedGrant', 'reclaimClosedGrantsBatch'].includes(route.handler));
+assert.equal(ordinaryHandlers.length, 9);
+for (const route of ordinaryHandlers) {
+  test(`ordinary ${route.handler} rejects a qualified field instead of its root receiver`, () => {
+    const call = `s.resolveOrganizationBilling(w, r, "${route.authority.all[0]}")`;
+    const source = withReceiver(route.handler, call, receiverShapes[0][1], receiverShapes[0][2]);
+    assert.throws(() => checkCoverage({ ...inputs, organizationHandlerSource: source }), /organization permission source missing/);
+  });
+}
+for (const [name, declaration, receiver] of receiverShapes.slice(1)) {
+  test(`ordinary recharge authority rejects ${name} receiver prefixes`, () => {
+    const call = 's.resolveOrganizationBilling(w, r, "org.entitlements.purchase")';
+    const source = withReceiver('createOrganizationRechargeOrder', call, declaration, receiver);
+    assert.throws(() => checkCoverage({ ...inputs, organizationHandlerSource: source }), /organization permission source missing/);
+  });
+}
+for (const [name, declaration, receiver] of receiverShapes) {
+  test(`organization model authorizer rejects ${name} receiver prefixes`, () => {
+    const call = 's.authorizer.AuthorizedOrganizationUserID(r.Context(), principal, permission, organizationID)';
+    const source = withReceiver('organizationModelPolicy', call, declaration, receiver);
+    assert.throws(() => checkCoverage({ ...inputs, organizationHandlerSource: source }), /organization model authority changed/);
+  });
+}
+for (const name of ['他permission', '𐐀permission']) {
+  test(`organization model read initialization rejects another identifier ${name}`, () => {
+    const source = organizationHandlerVariant('organizationModelPolicy', body => body.replace('permission := "org.models.read"',
+      `permission := "org.models.manage"\n\t${name} := "org.models.read"\n\t_ = ${name}`));
+    assert.throws(() => checkCoverage({ ...inputs, organizationHandlerSource: source }), /organization model authority changed/);
+  });
+}
+for (const [handler, call] of [
+  ['reclaimClosedGrant', 's.closedGrantClient(w, r)'],
+  ['closedGrantClient', 's.resolveOrganizationBilling(w, r, "org.grants.reclaim_closed")'],
+]) {
+  test(`closed-grant ${handler} retains its existing strict receiver rejection`, () => {
+    const source = withReceiver(handler, call, receiverShapes[0][1], receiverShapes[0][2]);
+    assert.throws(() => checkCoverage({ ...inputs, organizationHandlerSource: source }), /closed grant authority/);
+  });
+}
+test('real organization authority remains valid after harmless literals and unrelated identifiers', () => {
+  const source = organizationHandlerVariant('organizationModelPolicy', body => '\n\t_ = 1.\n\t_ = "forwarded.s."\n\t他s := s\n\t_ = 他s\n' + body);
+  assert.doesNotThrow(() => checkCoverage({ ...inputs, organizationHandlerSource: source }));
+});
+
 for (const part of ['path', 'authority', 'key', 'approval']) test(`organization finance OpenAPI ${part} drift fails closed`, () => {
  const contract = structuredClone(inputs.organizationFinance), op = contract.paths['/v1/organizations/{organization_id}/model-policy'].put;
  if (part === 'path') delete contract.paths['/v1/organizations/{organization_id}/balance'];
