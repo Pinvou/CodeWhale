@@ -2,7 +2,7 @@
 # pinvou3 macOS 发布脚本：构建 universal dmg → 合并 latest.json platforms.macos-universal + macos-arm64 → rsync 上传。
 # 用法: ./scripts/release-macos.sh "本次更新说明"
 #
-# ⚠️ 本脚本只发布到源站 8.218.49.20。pinvou.com 的 DNS 已指向 nginx-edge(8.138.39.140),
+# ⚠️ 本脚本只发布到发布源站(地址经 PINVOU3_RELEASE_SERVER 提供,见私有运维资料)。pinvou.com 的 DNS 已指向 nginx-edge(公网入口),
 # 两机无自动同步:发版后须按 docs/应用内升级-设计.md「服务端现状」把同名文件与
 # latest.json 手工镜像到 edge,否则公网仍是旧版/404(2026-09-28 0.10.5 发版实测)。
 #
@@ -24,7 +24,7 @@ fi
 
 REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 APP_DIR="$REPO_ROOT/pinvou3-app"
-SERVER="admin@8.218.49.20"
+SERVER="${PINVOU3_RELEASE_SERVER:?需要 PINVOU3_RELEASE_SERVER(如 user@host),真实值见私有运维资料}"
 REMOTE_DIR="/var/www/pinvou3"
 BASE_URL="https://pinvou.com/pinvou3"
 ARCH="universal"
