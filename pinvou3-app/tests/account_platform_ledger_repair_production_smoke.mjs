@@ -73,8 +73,12 @@ async function open(page, language = 'en') {
 }
 async function enterLedger(page, language = 'en') {
   await page.waitForSelector('.adm-financial-repair-target');
+  assert.equal(await page.$eval('nav button[data-section="billing"]', button => button.getAttribute('aria-current')), 'page');
   assert.deepEqual(await page.$$eval('nav button[aria-pressed="true"]', buttons => buttons.map(button => button.textContent)),
-    [financeCopy[language].finance, ledgerRepairCopy[language].title]);
+    [ledgerRepairCopy[language].title]);
+}
+async function openedDraft(page) {
+  await page.waitForFunction(value => document.querySelector('nav button[data-section="approvals"][aria-current="page"]') && document.querySelector('article')?.textContent.includes(value) && [...document.querySelectorAll('.adm-financial-repair')].every(form => form.closest('[hidden]')), {}, draftID);
 }
 async function prepare(page) {
   const inputs = await page.$$('.adm-financial-repair-target input');
@@ -119,7 +123,7 @@ try {
   });
   for (const language of ['zh', 'en', 'ja']) await run(`compiled Ledger creates DRAFT only ${language}`, async page => {
     reset(); await open(page, language); await prepare(page); await retry(page);
-    await page.waitForFunction(value => document.body.textContent.includes(value) && !document.querySelector('.adm-financial-repair'), {}, draftID);
+    await openedDraft(page);
     assert.equal(effects, 1); assert.equal(submits, 0); assert.equal(writes.length, 1);
     assert.equal(JSON.parse(writes[0].raw).idempotency_key, `approval:${'k'.repeat(111)}`);
     // The user's existing approval viewing entry remains available after create.
@@ -140,7 +144,7 @@ try {
     await page.waitForSelector('.adm-financial-repair-draft');
     assert.equal(await page.$eval('.adm-financial-repair-draft input', element => element.value), 'k'.repeat(111));
     for (let attempt = 3; attempt <= 4; attempt++) { await retry(page); await page.waitForFunction(() => !document.querySelector('.adm-financial-repair-draft button').disabled); assert.equal(writes.length, attempt); await page.reload(); await enterLedger(page); await page.waitForSelector('.adm-financial-repair-draft'); }
-    await retry(page); await page.waitForFunction(value => document.body.textContent.includes(value) && !document.querySelector('.adm-financial-repair'), {}, draftID);
+    await retry(page); await openedDraft(page);
     assert.equal(effects, 1); assert.equal(submits, 0); assert.equal(writes.length, 5);
     for (const item of writes) { assert.equal(item.raw, writes[0].raw); assert.equal(item.actor, actorA); }
     assert.equal(writes[2].csrf, 'csrf-after-reauth');
@@ -149,10 +153,8 @@ try {
     reset('read-only-view');
     await page.evaluateOnNewDocument(() => localStorage.setItem('pinvou.admin.language', 'en'));
     await page.goto(`${origin}/admin.html?section=finance&finance_tab=ledger`);
-    await page.waitForFunction((finance, orders) => {
-      const selected = [...document.querySelectorAll('nav button[aria-pressed="true"]')].map(button => button.textContent);
-      return selected.length === 2 && selected[0] === finance && selected[1] === orders;
-    }, {}, financeCopy.en.finance, financeCopy.en.orders);
+    await page.waitForFunction(message => document.querySelector('nav button[data-section="billing"][aria-current="page"]') && [...document.querySelectorAll('.adm-panel [role="alert"]')].some(alert => alert.textContent === message), {}, financeCopy.en.permissions);
+    assert.equal(await page.$('nav button[aria-pressed="true"]'), null);
     assert.equal(await page.$('.adm-financial-repair'), null);
     assert.equal(writes.length, 0); assert.equal(effects, 0); assert.equal(submits, 0);
   });

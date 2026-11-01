@@ -1,5 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
+import fs from 'node:fs';
+import vm from 'node:vm';
 import { projectDeepSeekConversation } from '../src/features/conversation/deepseek-conversation.js';
 import {
   activeLiveRemoteTaskId,
@@ -37,6 +39,61 @@ const history = {
     { journalEpoch: 'e1', sequence: 3, eventId: 'c', kind: 'approval', taskId: 'task-1', body: 'waiting', attachments: [] },
   ],
 };
+
+test('authenticated history read preserves only safe failure reasons through the actual state projection', () => {
+  const context = { window: {} };
+  vm.createContext(context);
+  vm.runInContext(fs.readFileSync(new URL('../src/features/remote-control/remote-control-state.js', import.meta.url), 'utf8'), context);
+  const logic = context.window.__PINVOU_REMOTE_CONTROL_STATE__;
+  const terminal = { journalEpoch: 'e1', sequence: 1, eventId: 'terminal', kind: 'status', taskId: 'task-1', body: 'failed', attachments: [] };
+  for (const reason of ['task_generation_stale', 'task_attachments_invalid']) {
+    const record = { localSessionId: 'remote-local-1', pendingUnknownCount: 0, unattemptedPending: [], entries: [{ ...terminal, terminalReason: reason }] };
+    const state = logic.projectRemoteProxyRead(logic.createState(), record);
+    assert.equal(state.remoteProxyHistory.entries[0].terminalReason, reason);
+    assert.equal(remoteProxyChatItems(record.localSessionId, state.remoteProxyHistory)[0].text, reason);
+  }
+  for (const [body, terminalReason] of [['failed', 'task_generation_stale-secret'], ['succeeded', 'task_generation_stale'], ['failed', 'secret/path']]) {
+    const record = { localSessionId: 'remote-local-1', pendingUnknownCount: 0, unattemptedPending: [], entries: [{ ...terminal, body, terminalReason }] };
+    const state = logic.projectRemoteProxyRead(logic.createState(), record);
+    assert.equal(state.remoteProxyHistory.entries[0].terminalReason, null);
+    assert.equal(remoteProxyChatItems(record.localSessionId, state.remoteProxyHistory).length, 0);
+  }
+});
+
+test('structured failure and matching terminal status produce one localized item without hiding other errors', () => {
+  const entry = (sequence, kind, taskId, body, extra = {}) => ({ journalEpoch: 'e1', sequence, eventId: 'event-' + sequence, kind, taskId, body, attachments: [], ...extra });
+  const render = entries => remoteProxyChatItems('remote-local-1', { localSessionId: 'remote-local-1', entries });
+  const error = entry(1, 'error', 'task-1', JSON.stringify({ code: 'task_attachments_invalid' }));
+  const status = entry(3, 'status', 'task-1', 'failed', { terminalReason: 'task_attachments_invalid' });
+  assert.deepEqual(render([error]).map(x => x.text), ['task_attachments_invalid']);
+  assert.deepEqual(render([error, entry(2, 'assistant_message', 'other', 'other'), status]).map(x => x.text), ['task_attachments_invalid', 'other']);
+  assert.deepEqual(render([error, { ...status, journalEpoch: 'e2' }]).map(x => x.text), ['task_attachments_invalid', 'task_attachments_invalid']);
+  assert.deepEqual(render([error, entry(2, 'status', 'task-1', 'running'), status]).map(x => x.text), ['task_attachments_invalid', 'task_attachments_invalid']);
+  const otherError = entry(1, 'error', 'task-1', JSON.stringify({ code: 'task_attachments_invalid', detail: 'extra' }));
+  assert.deepEqual(render([otherError, status]).map(x => x.text), [otherError.body, 'task_attachments_invalid']);
+  assert.deepEqual(render([{ ...error, taskId: 'other' }, status]).map(x => x.text), ['task_attachments_invalid', 'task_attachments_invalid']);
+});
+
+test('failed terminal reasons display only the supported closed set', () => {
+  const terminal = {
+    journalEpoch: 'e1', sequence: 1, eventId: 'terminal', kind: 'status',
+    taskId: 'task-1', body: 'failed', attachments: [],
+  };
+  for (const code of ['task_generation_stale', 'task_attachments_invalid']) {
+    const record = { localSessionId: 'remote-local-1', entries: [{ ...terminal, terminalReason: code }] };
+    const items = remoteProxyChatItems('remote-local-1', record);
+    assert.equal(items.length, 1);
+    assert.equal(items[0].text, code);
+    assert.equal(items[0].remoteKind, 'error');
+    assert.equal(activeRemoteTaskId('remote-local-1', record), null);
+  }
+  for (const terminalReason of ['task_generation_stale-secret', 'secret/path', null]) {
+    const record = { localSessionId: 'remote-local-1', entries: [{ ...terminal, terminalReason }] };
+    assert.deepEqual(remoteProxyChatItems('remote-local-1', record), []);
+  }
+  const succeeded = { localSessionId: 'remote-local-1', entries: [{ ...terminal, body: 'succeeded', terminalReason: 'task_generation_stale' }] };
+  assert.deepEqual(remoteProxyChatItems('remote-local-1', succeeded), []);
+});
 
 test('authenticated rejection is visible and ends task activity without a journal terminal', () => {
   const rejected = { ...history, rejections: [{ taskId: 'task-1', code: 'task_permission_mode_required' }] };
