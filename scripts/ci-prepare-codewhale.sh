@@ -86,14 +86,23 @@ fi
 module_metadata="$root/.git/modules/CodeWhale"
 if [[ -e "$module_metadata" || -L "$module_metadata" ]]; then
   owned_metadata "$module_metadata" "$module_metadata" cached-module
-  module_worktree="$(git --git-dir="$module_metadata" --work-tree="$root" config --path --get core.worktree)"
-  case "$module_worktree" in
-    /*|[A-Za-z]:/*) module_parent="$(cd "$(dirname "$module_worktree")" && pwd -P)" ;;
-    *) module_parent="$(cd "$module_metadata/$(dirname "$module_worktree")" && pwd -P)" ;;
-  esac
-  if [[ "$module_parent/${module_worktree##*/}" != "$root/CodeWhale" ]]; then
-    echo 'Cached CodeWhale metadata belongs to a different working tree' >&2
-    exit 1
+  if module_worktree="$(git --git-dir="$module_metadata" --work-tree="$root" config --path --get core.worktree)"; then
+    case "$module_worktree" in
+      /*|[A-Za-z]:/*) module_parent="$(cd "$(dirname "$module_worktree")" && pwd -P)" ;;
+      *) module_parent="$(cd "$module_metadata/$(dirname "$module_worktree")" && pwd -P)" ;;
+    esac
+    if [[ "$module_parent/${module_worktree##*/}" != "$root/CodeWhale" ]]; then
+      echo 'Cached CodeWhale metadata belongs to a different working tree' >&2
+      exit 1
+    fi
+  else
+    config_status=$?
+    # A discovered child gitfile already proved this exact metadata owner.
+    # Without that checkout, an absent optional key cannot identify its owner.
+    if [[ "$config_status" != 1 || ! -f "$root/CodeWhale/.git" ]]; then
+      echo 'Cached CodeWhale working tree identity cannot be established' >&2
+      exit 1
+    fi
   fi
 fi
 if [[ "$(git -C "$root" config -f .gitmodules --get submodule.CodeWhale.path)" != CodeWhale ||

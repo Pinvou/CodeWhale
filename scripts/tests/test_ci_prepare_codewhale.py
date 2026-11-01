@@ -184,6 +184,27 @@ class PrepareCodeWhale(unittest.TestCase):
         shutil.rmtree(self.checkout)
         self.assert_ready(self.run_prepare())
 
+    def test_reuses_discovered_owned_module_without_optional_worktree_key(self):
+        self.assert_ready(self.run_prepare())
+        self.git(self.checkout, "config", "--local", "--unset", "core.worktree")
+        self.assertEqual(Path(self.git(self.checkout, "rev-parse", "--show-toplevel")), self.checkout)
+        (self.checkout / "tracked").write_text("stale runner content\n")
+        (self.checkout / "untracked").write_text("stale generated file\n")
+        self.assert_ready(self.run_prepare())
+        self.assertFalse((self.checkout / "untracked").exists())
+
+    def test_refuses_unbound_cached_module_without_optional_worktree_key(self):
+        self.assert_ready(self.run_prepare())
+        self.git(self.checkout, "config", "--local", "--unset", "core.worktree")
+        metadata = self.root / ".git/modules/CodeWhale"
+        before = {name: (metadata / name).read_bytes() for name in ("HEAD", "index", "config")}
+        shutil.rmtree(self.checkout)
+        result = self.run_prepare()
+        self.assertNotEqual(result.returncode, 0, result.stdout)
+        self.assertIn("working tree identity cannot be established", result.stdout)
+        self.assertEqual(before, {name: (metadata / name).read_bytes() for name in before})
+        self.assertFalse(self.checkout.exists())
+
 
 if __name__ == "__main__":
     unittest.main()
