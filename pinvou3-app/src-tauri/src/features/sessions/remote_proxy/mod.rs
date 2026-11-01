@@ -7,6 +7,7 @@ pub(crate) mod history;
 pub(crate) mod outbox;
 mod persistence;
 pub(crate) mod projection;
+mod projection_reason;
 mod records;
 pub(crate) mod routing;
 pub(crate) mod schema;

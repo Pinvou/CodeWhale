@@ -94,6 +94,7 @@ const server = createServer(async (request, response) => {
 });
 await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
 const origin = `http://127.0.0.1:${server.address().port}`;
+const accountURL = () => `${origin}/account.html?section=${mode.startsWith('org') ? 'myOrganization' : 'accountSettings'}`;
 const browser = await puppeteer.launch({ executablePath: browserPath, headless: true, args: ['--no-sandbox'] });
 let passed = 0;
 const click = async (page, label) => {
@@ -117,7 +118,7 @@ try {
     page.on('requestfailed', request => console.log('CONTROLLED_FIXTURE_LOAD', new URL(request.url()).pathname, request.failure()?.errorText));
     await page.evaluateOnNewDocument(language => localStorage.setItem('pinvou.account.language', language), locale);
     page.on('dialog', dialog => dialog.accept('CLOSE_MY_ACCOUNT'));
-    await page.goto(`${origin}/account.html`, { waitUntil: 'networkidle0' });
+    await page.goto(accountURL(), { waitUntil: 'networkidle0' });
     await click(page, accountClosureCopy[locale].start);
     await click(page, financeCopy[locale].retry);
     await page.waitForFunction(() => location.pathname === '/' && document.querySelector('.ap-danger-section'), { timeout: 5000 });
@@ -140,7 +141,7 @@ try {
   await page.waitForSelector('textarea'); await page.type('textarea', 'Retry only the original closure command');
   await click(page, financeCopy.en.retry); await click(page, financeCopy.en.retry);
   await click(page, accountClosureCopy.en.reauthenticate);
-  await page.waitForFunction(() => location.search.includes('section=closures') && document.querySelector('textarea'), { timeout: 5000 });
+  await page.waitForFunction(() => { const route = new URLSearchParams(location.search); return route.get('section') === 'operations' && route.get('operations_page') === 'closures' && document.querySelector('textarea'); }, { timeout: 5000 });
   await page.reload({ waitUntil: 'networkidle0' });
   assert.equal(writes.length, 2); assert.equal(effects, 1);
   await click(page, financeCopy.en.retry);
@@ -154,7 +155,7 @@ try {
     const orgPage = await browser.newPage();
     await orgPage.evaluateOnNewDocument(() => localStorage.setItem('pinvou.account.language', 'en'));
     orgPage.on('dialog', dialog => dialog.accept());
-    await orgPage.goto(`${origin}/account.html`, { waitUntil: 'networkidle0' });
+    await orgPage.goto(accountURL(), { waitUntil: 'networkidle0' });
     if (orgMode !== 'org-single') {
       await orgPage.waitForSelector('select[multiple]');
       await orgPage.select('select[multiple]', grantID);
@@ -177,7 +178,7 @@ try {
     mode = 'org-batch-items'; actor = actorA; readOnly = false; effects = 0; writes = []; csrf = 'csrf-initial';
     const mixedPage = await browser.newPage();
     await mixedPage.evaluateOnNewDocument(language => localStorage.setItem('pinvou.account.language', language), locale);
-    await mixedPage.goto(`${origin}/account.html`, { waitUntil: 'networkidle0' });
+    await mixedPage.goto(accountURL(), { waitUntil: 'networkidle0' });
     await mixedPage.waitForSelector('select[multiple]');
     await mixedPage.select('select[multiple]', grantID, actorB, closureID);
     await click(mixedPage, accountClosedGrantCopy[locale].batch);
@@ -203,7 +204,7 @@ try {
   }
   mode = 'personal'; actor = actorB; readOnly = true; effects = 0; writes = [];
   const readonlyPage = await browser.newPage();
-  await readonlyPage.goto(`${origin}/account.html`, { waitUntil: 'networkidle0' });
+  await readonlyPage.goto(accountURL(), { waitUntil: 'networkidle0' });
   assert.equal(await readonlyPage.evaluate(() => document.querySelector('.ap-danger-section')?.querySelectorAll('button').length), 1);
   assert.equal(writes.length, 0); passed++; console.log('PASS compiled personal read-only permission has no mutation action');
   await readonlyPage.close();
@@ -213,7 +214,7 @@ try {
     document.defaultView.sessionStorage.setItem(`pinvou.closure.intent.v1:${user}:account-closure`, '{broken');
     localStorage.setItem('pinvou.account.language', 'en');
   }, actorA);
-  await corruptPage.goto(`${origin}/account.html`, { waitUntil: 'networkidle0' });
+  await corruptPage.goto(accountURL(), { waitUntil: 'networkidle0' });
   await corruptPage.waitForFunction(text => document.body.textContent.includes(text), {}, accountClosureCopy.en.recoveryUnavailable);
   assert.equal(await corruptPage.evaluate(text => [...document.querySelectorAll('button')].find(button => button.textContent === text)?.disabled, accountClosureCopy.en.start), true);
   assert.equal(writes.length, 0); passed++; console.log('PASS compiled corrupted durable proof fails closed before any mutation');
@@ -232,7 +233,7 @@ try {
       };
     }, failure);
     unavailablePage.on('dialog', dialog => dialog.accept('CLOSE_MY_ACCOUNT'));
-    await unavailablePage.goto(`${origin}/account.html`, { waitUntil: 'networkidle0' });
+    await unavailablePage.goto(accountURL(), { waitUntil: 'networkidle0' });
     await click(unavailablePage, accountClosureCopy.en.start);
     await unavailablePage.waitForFunction(text => document.body.textContent.includes(text), {}, accountClosureCopy.en.recoveryUnavailable);
     assert.equal(writes.length, 0); passed++; console.log(`PASS compiled ${failure} proof persistence prevents sending a command`);
@@ -249,7 +250,7 @@ try {
     };
   });
   clearFailurePage.on('dialog', dialog => dialog.accept('CLOSE_MY_ACCOUNT'));
-  await clearFailurePage.goto(`${origin}/account.html`, { waitUntil: 'networkidle0' });
+  await clearFailurePage.goto(accountURL(), { waitUntil: 'networkidle0' });
   await click(clearFailurePage, accountClosureCopy.en.start);
   await clearFailurePage.waitForFunction(text => document.body.textContent.includes(text), {}, accountClosureCopy.en.recoveryUnavailable);
   assert.equal(writes.length, 1); assert.equal(effects, 1);
@@ -260,7 +261,7 @@ try {
   const changedActorPage = await browser.newPage();
   await changedActorPage.evaluateOnNewDocument(() => localStorage.setItem('pinvou.account.language', 'en'));
   changedActorPage.on('dialog', dialog => dialog.accept('CLOSE_MY_ACCOUNT'));
-  await changedActorPage.goto(`${origin}/account.html`, { waitUntil: 'networkidle0' });
+  await changedActorPage.goto(accountURL(), { waitUntil: 'networkidle0' });
   await click(changedActorPage, accountClosureCopy.en.start);
   await changedActorPage.waitForFunction(text => document.body.textContent.includes(text), {}, financeCopy.en.unknown);
   const proofBefore = await changedActorPage.evaluate(() => Object.entries(document.defaultView.sessionStorage));
@@ -282,7 +283,7 @@ try {
         return original.call(this, key, value);
       };
     });
-    await blockedPage.goto(`${origin}/account.html`, { waitUntil: 'networkidle0' });
+    await blockedPage.goto(accountURL(), { waitUntil: 'networkidle0' });
     if (orgMode === 'org-batch') { await blockedPage.waitForSelector('select[multiple]'); await blockedPage.select('select[multiple]', grantID); }
     const label = orgMode === 'org-batch' ? accountClosedGrantCopy.en.batch : accountClosedGrantCopy.en.single;
     await click(blockedPage, label);
@@ -298,7 +299,7 @@ try {
   mode = 'org-single'; actor = actorA; readOnly = false; effects = 0; writes = []; csrf = 'csrf-initial'; grantExpiry = '1970-01-01T00:00:00Z';
   const expiryPage = await browser.newPage();
   await expiryPage.evaluateOnNewDocument(() => localStorage.setItem('pinvou.account.language', 'en'));
-  await expiryPage.goto(`${origin}/account.html`, { waitUntil: 'networkidle0' });
+  await expiryPage.goto(accountURL(), { waitUntil: 'networkidle0' });
   assert.equal(await expiryPage.evaluate(text => [...document.querySelectorAll('button')].some(button => button.textContent === text), accountClosedGrantCopy.en.single), false);
   assert.equal(await expiryPage.evaluate(text => [...document.querySelectorAll('button')].find(button => button.textContent === text)?.disabled, accountClosedGrantCopy.en.batch), true);
   assert.equal(writes.length, 0);

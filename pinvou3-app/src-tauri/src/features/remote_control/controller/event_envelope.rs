@@ -433,6 +433,7 @@ pub(crate) struct JournalDisplay {
     kind: DisplayKind,
     task_id: String,
     body: Option<String>,
+    terminal_reason: Option<String>,
     attachments: Vec<AttachmentIndex>,
 }
 
@@ -453,6 +454,7 @@ impl JournalDisplay {
             kind,
             task_id,
             body,
+            terminal_reason: None,
             attachments,
         };
         display.validate()?;
@@ -469,6 +471,8 @@ impl JournalDisplay {
                 .as_ref()
                 .is_some_and(|text| text.len() > 16 * 1024)
             || self.attachments.len() > 16
+            || (self.terminal_reason.is_some()
+                && (self.kind != DisplayKind::Status || self.body.as_deref() != Some("failed")))
         {
             return Err(invalid());
         }
@@ -495,6 +499,21 @@ impl JournalDisplay {
     }
     pub(crate) fn body(&self) -> Option<&str> {
         self.body.as_deref()
+    }
+    /// Only closed-set, failed terminal reasons are allowed in this display
+    /// envelope. The status body remains unchanged for settlement consumers.
+    pub(crate) fn with_terminal_reason(mut self, reason: Option<&str>) -> Self {
+        if self.kind == DisplayKind::Status && self.body.as_deref() == Some("failed") {
+            self.terminal_reason = match reason {
+                Some("task_generation_stale") => Some("task_generation_stale".to_owned()),
+                Some("task_attachments_invalid") => Some("task_attachments_invalid".to_owned()),
+                _ => None,
+            };
+        }
+        self
+    }
+    pub(crate) fn terminal_reason(&self) -> Option<&str> {
+        self.terminal_reason.as_deref()
     }
     pub(crate) fn attachments(&self) -> &[AttachmentIndex] {
         &self.attachments

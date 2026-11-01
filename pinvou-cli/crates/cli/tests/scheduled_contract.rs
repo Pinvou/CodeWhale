@@ -2314,12 +2314,27 @@ fn read_commands_refuse_definitions_missing_required_fields() {
 #[cfg(unix)]
 #[test]
 fn once_at_rejects_dst_gap_times_like_the_foundation() {
+    use chrono::Datelike;
+
     // The foundation resolves naive stamps through the system timezone and a
     // nonexistent local time fails its sweep every tick, so the CLI must
     // reject one at creation. chrono caches the local zone at first use, so
     // a runtime TZ switch inside this test process is unreliable — drive the
     // real binary with a pinned timezone instead (UTC runners have no gap,
-    // so the zone must be pinned regardless).
+    // so the zone must be pinned regardless). Supply explicit US Eastern
+    // transition rules: a named zone alone can fall back on slim hosts
+    // without the IANA database. This fixture does not require host tzdata.
+    // Keep every active positive case in the future as the calendar advances.
+    let year = chrono::Utc::now().year() + 1;
+    let first_sunday = |month| {
+        1 + (7 - chrono::NaiveDate::from_ymd_opt(year, month, 1)
+            .unwrap()
+            .weekday()
+            .num_days_from_sunday())
+            % 7
+    };
+    let march = first_sunday(3) + 7;
+    let november = first_sunday(11);
     let root = scratch_dir("pinvou-cli-scheduled-once-at-dst");
     let prompt = root.join("dst.md");
     std::fs::write(&prompt, "Summarize the reports.").unwrap();
@@ -2327,15 +2342,16 @@ fn once_at_rejects_dst_gap_times_like_the_foundation() {
         run_child(
             &root,
             &create_argv("DST task", prompt.to_str().unwrap(), rrule, &[]),
-            &[("TZ", std::ffi::OsStr::new("America/New_York"))],
+            &[("TZ", std::ffi::OsStr::new("EST5EDT,M3.2.0/2,M11.1.0/2"))],
         )
     };
-    // 2027-03-14 02:30 does not exist in America/New_York (clocks jump
+    // The second Sunday in March has no 02:30 (clocks jump
     // 02:00 -> 03:00); the foundation's `resolve_local_datetime` returns
     // None for it. Both foundation naive shapes — `HH:MM` and `HH:MM:SS` —
     // must take that channel; an offset-less `HH:MM:SS` stamp used to fall
     // into the offset-free parse and skip the gap check entirely.
-    for gap_stamp in ["2027-03-14T02:30", "2027-03-14T02:30:00"] {
+    let gap = format!("{year}-03-{march:02}T02:30");
+    for gap_stamp in [gap.clone(), format!("{gap}:00")] {
         let gap = run(&format!("FREQ=ONCE;AT={gap_stamp}"));
         assert!(!gap.status.success(), "{gap_stamp} must be rejected");
         assert!(
@@ -2346,11 +2362,11 @@ fn once_at_rejects_dst_gap_times_like_the_foundation() {
     // Ordinary and ambiguous (fall-back) times still resolve — the
     // foundation picks the earliest occurrence for ambiguous stamps.
     for good in [
-        "FREQ=ONCE;AT=2027-01-15T02:30",
-        "FREQ=ONCE;AT=2027-11-07T01:30",
-        "FREQ=ONCE;AT=2027-01-15T02:30:00",
+        format!("FREQ=ONCE;AT={year}-01-15T02:30"),
+        format!("FREQ=ONCE;AT={year}-11-{november:02}T01:30"),
+        format!("FREQ=ONCE;AT={year}-01-15T02:30:00"),
     ] {
-        let output = run(good);
+        let output = run(&good);
         assert!(output.status.success(), "{good} must be accepted");
     }
     let _ = std::fs::remove_dir_all(&root);
