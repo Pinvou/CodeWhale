@@ -172,6 +172,15 @@ keep large Rust compilations away from small policy runners.
 Hosts use Ubuntu 26.04 while runner containers use the Ubuntu 22.04 image in
 `scripts/ci/runner-image/`. This retains the existing release glibc compatibility
 baseline. Each runner has independent writable state and resource limits.
+CI restores CodeWhale to the indexed gitlink and cleans its disposable workspace
+with `scripts/ci-prepare-codewhale.sh`. The fingerprint gate also requests full
+history with `--history`; compilation-only jobs do not download missing history.
+The helper requires the parent metadata at `.git` and CodeWhale metadata at
+`CodeWhale/.git` or `.git/modules/CodeWhale` in that Actions workspace; redirected
+or shared writable repository metadata and mutable Git path overrides are refused.
+Read-only object alternates are permitted. It does not change the gitlink or
+replace the public-baseline and fork-guard checks.
+
 PostgreSQL allocates dynamic CI ports; release-console container tests use a
 job-specific Compose project, port, and temporary public directory instead of
 the host production directory. The image preinstalls Chrome and the verified
