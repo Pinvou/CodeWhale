@@ -31,7 +31,7 @@ jobs:
 
       - name: Set up zram and swap
         # Best effort: timeouts or failures only warn and never block (falls back to stock runner memory).
-        run: timeout --kill-after=15 240 sudo --preserve-env=GITHUB_ACTIONS,PINVOU3_CI_DISABLE_ZRAM bash "${{ github.workspace }}/scripts/ci-memory-setup.sh" || echo "::warning::ci-memory-setup did not finish; continuing with stock runner memory"
+        run: timeout --kill-after=15 240 sudo --preserve-env=GITHUB_ACTIONS,PINVOU3_CI_DISABLE_ZRAM,RUNNER_ENVIRONMENT bash "${{ github.workspace }}/scripts/ci-memory-setup.sh" || echo "::warning::ci-memory-setup did not finish; continuing with stock runner memory"
 
       # 运行期可见性：告警/强制的生效模式只取决于服务端 variable 值，在日志里
       # 显式回显，防止设成 'False'/带空白等写法静默停留在告警模式。

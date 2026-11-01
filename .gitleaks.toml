@@ -20,10 +20,21 @@ useDefault = true
 [[allowlists]]
 description = "Pinned upstream connector documentation uses synthetic IDs and tokens"
 targetRules = ["generic-api-key"]
+condition = "AND"
+regexTarget = "line"
 paths = [
   '''^pinvou3-app/src-tauri/resources/common/bundle/dingtalk-skills/dws/references/products/doc(?:/doc-info)?\.md$''',
   '''^pinvou3-app/src-tauri/resources/common/bundle/(?:lark-skills|skills)/lark-im/references/lark-im-reactions\.md$''',
   '''^pinvou3-app/src-tauri/resources/common/bundle/(?:lark-skills|skills)/lark-base/references/lark-base-app-block-data-config\.md$''',
+]
+# 值级收紧:仅豁免文档中逐一登记的合成示例值(dentryKey/docKey/page_token/
+# base_token 的固定字面量)。这些文档路径上出现任何其他 key/token 形态的命中
+# (例如真实凭据样式)都不会被本组吞掉,必须照常报出。
+regexes = [
+  '''dentryKey=(?:wo1g3x54FzVEJ5yE|rBGBr2r1HmwanAGW)''',
+  '''docKey=Pd6l2Z7V8ZWydl7M''',
+  '''"page_token":\s*"YhljsPiGfUgnVAg9urvRFd-BvSqRLxxxx"''',
+  '''base_token['\"]?\s*[:=]\s*['\"]?A2f5boKjfazMzesI9zKbmugTc4T''',
 ]
 
 [[allowlists]]
