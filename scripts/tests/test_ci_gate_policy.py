@@ -5855,6 +5855,12 @@ exit 0
         env["REPAIR_TEST_STATE"] = str(self.state)
         env["PINVOU3_CI_DPKG_UPDATES_DIR"] = str(self.updates)
         env.pop("GITHUB_ACTIONS", None)
+        # 行为夹具必须走 hosted 主路径:生产脚本在 RUNNER_ENVIRONMENT=self-hosted
+        # 时于 repair/trap 安装前安全早退(保留管理员预置内存),该早退本身
+        # 不在本类回归范围。若继承外层 self-hosted 环境(fast-gate 的
+        # self-hosted runner 正是如此),五个行为测试将拿不到任何 configure
+        # 调用、断言空转。显式钉 hosted,保持生产早退分支不受影响。
+        env["RUNNER_ENVIRONMENT"] = "github-hosted"
         script = self.state / "ci-memory-setup.sh"
         script.write_text(self.src.replace(
             "if [[ ${EUID} -ne 0 ]]; then", "if [[ 0 -ne 0 ]]; then"
