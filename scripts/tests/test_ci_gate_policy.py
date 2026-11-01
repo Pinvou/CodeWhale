@@ -1044,6 +1044,7 @@ class CiGatePolicyTests(unittest.TestCase):
                 for name in ("personal", "models", "invocation"):
                     source = f"account-platform/deploy/production/compose.{name}.yaml"
                     self.assertIn(source, entries)
+
                     self.assertTrue(_matches_paths_filter(source, entries))
             self.assertNotIn(path, listed, f"{path} must not be redundantly run twice")
             listed.add(path)
@@ -1056,6 +1057,22 @@ class CiGatePolicyTests(unittest.TestCase):
             on_disk,
             "scripts/tests node 套件与已核验的 CI runner 集合不一致"
             "(缺失=永不执行;多余=死条目)",
+        )
+
+    def test_deployment_contract_artifacts_are_attempt_scoped(self):
+        job = _without_inline_comments(
+            _extract_job_block(self.pr_workflow, "account-platform-test")
+        )
+        step = _step_named(
+            job, "Production history and managed PostgreSQL release contracts"
+        )
+        self.assertRegex(
+            step,
+            r'--artifacts "\$RUNNER_TEMP/account-platform-deployment-contracts-\$postgres_version-\$\{GITHUB_RUN_ID\}-\$\{GITHUB_RUN_ATTEMPT\}"',
+        )
+        self.assertNotIn(
+            '--artifacts "$RUNNER_TEMP/account-platform-deployment-contracts-$postgres_version"',
+            step,
         )
 
     def test_dedicated_node_suite_wiring_rejects_missing_or_commented_commands(self):
@@ -3878,8 +3895,8 @@ class CiGatePolicyTests(unittest.TestCase):
         # 读取器同样把孤立 CR 当行终止,可伪造第二条 workflow command)。
         self.assertIn('echo "::warning::[memory-setup] ${*//[', source)
         self.assertIn("${*//[$'\\r\\n']/ }", source)
-        # 预期可恢复的慢路径(modprobe 首失败、镜像 swap 预激活、镜像 swap
-        # as-is 失败后的重试、全层失败后的镜像 swapfile 兜底重试)只进日志,
+        # 预期可恢复的慢路径(镜像 swap as-is 失败后的重试、全层失败后的
+        # 镜像 swapfile 兜底重试)只进日志,
         # 不得注解化,否则每个 job 都会常驻黄标稀释真告警。函数体全文钉死:
         # 改回 ::warning:: 注解即红。
         self.assertIn(
@@ -3887,12 +3904,7 @@ class CiGatePolicyTests(unittest.TestCase):
             source,
         )
         self.assertIn(
-            'warn_recoverable "modprobe zram failed${modprobe_err:+: ${modprobe_err}};',
-            source,
-        )
-        self.assertIn(
-            'warn_recoverable "no swap active; activating the image swapfile'
-            ' before the slow module install"',
+            'warn "modprobe zram failed${modprobe_err:+: ${modprobe_err}};',
             source,
         )
         self.assertIn(
@@ -4120,17 +4132,67 @@ class CiGatePolicyTests(unittest.TestCase):
             source,
         )
         self.assertIn(
-            'warn "apt-get install ${modules_pkg} failed once; retrying"',
-            source,
-        )
-        self.assertIn(
-            'warn "apt-get install ${modules_pkg} failed again; giving up on zram layers"',
-            source,
-        )
-        self.assertIn(
             'log "provisioning the mandatory /mnt disk swap"\nsetup_disk_swap',
             source,
         )
+
+    def test_memory_setup_module_failure_does_not_poison_dependency_install(self):
+        source = (ROOT / "scripts" / "ci-memory-setup.sh").read_text(encoding="utf-8")
+        # Execute the real module loader and main fallback flow with host
+        # operations stubbed. Never change the test machine's swap or sysfs.
+        loader = source.split("setup_zram() {", 1)[1].split("# Mandatory disk swap:", 1)[0]
+        main = source[source.index("if [[ ${PINVOU3_CI_DISABLE_ZRAM:-0}"):]
+        cases = ((1, "0", 0), (124, "0", 0), (1, "1", 0), (1, "0", 1))
+        for status, disabled, swap_status in cases:
+            with self.subTest(modprobe_status=status, disabled=disabled, swap_status=swap_status):
+                harness = r'''
+set -uo pipefail
+log() { echo "$*"; }
+warn() { echo "$*" >&2; }
+warn_recoverable() { warn "$@"; }
+run_to() { shift; "$@"; }
+modprobe() { echo "module unavailable" >&2; return "$MODULE_STATUS"; }
+apt-get() { echo "PACKAGE_MANAGER_CALLED"; return 1; }
+dpkg() { echo "PACKAGE_MANAGER_CALLED"; return 1; }
+swapon() { return 0; }
+any_swap_active() { return "$SWAP_STATUS"; }
+setup_disk_swap() { echo "disk-swap-kib=$DISK_SWAP_SIZE_KIB"; }
+setup_zswap_fallback() { echo "zswap-fallback"; }
+activate_image_swap_fallback() { echo "image-swap-fallback"; }
+zramctl() { :; }
+df() { :; }
+'''
+                shell = (
+                    harness
+                    + f"\nMODULE_STATUS={status}\nPINVOU3_CI_DISABLE_ZRAM={disabled}\n"
+                    + f"SWAP_STATUS={swap_status}\n"
+                    + "setup_zram() {" + loader + main
+                )
+                result = subprocess.run(
+                    ["bash", "-c", shell], capture_output=True, text=True, timeout=10,
+                    encoding="utf-8",
+                )
+                output = result.stdout + result.stderr
+                self.assertEqual(result.returncode, 0, output)
+                self.assertNotIn("PACKAGE_MANAGER_CALLED", output)
+                self.assertIn("disk-swap-kib=16777216", output)
+                self.assertIn("zswap-fallback", output)
+                if swap_status:
+                    self.assertIn("image-swap-fallback", output)
+                if disabled == "0":
+                    self.assertIn("module unavailable", output)
+                    self.assertIn("without installing kernel packages", output)
+
+    def test_memory_setup_changes_select_native_linux_regression(self):
+        for name in ("rust_code", "rust_full", "cli_rust"):
+            with self.subTest(filter=name):
+                block = re.search(
+                    rf"(?ms)^            {name}:\n(.*?)(?=^            \w+:|\Z)",
+                    self.pr_workflow,
+                )
+                self.assertIsNotNone(block)
+                paths = _extract_quoted_paths(_without_yaml_comments(block.group(1)))
+                self.assertIn("scripts/ci-memory-setup.sh", paths)
 
     def test_fetch_connectors_verifies_checksums_with_loud_diagnostics(self):
         # #1155 复审跟进:fetch-connectors.sh 的 verify_file 在 set -e 下被
@@ -4773,6 +4835,35 @@ class CiGatePolicyTests(unittest.TestCase):
                 with self.assertRaises((AssertionError, IndexError)):
                     self._assert_macos_deployment_regression(self.workflow.replace(old, new))
 
+    def test_macos_scheduled_spool_step_rejects_zero_match_and_failed_command(self):
+        job = _extract_job_block(self.pr_workflow, "macos-rust-check")
+        step = job.split("- name: macOS scheduled spool filename regression", 1)[1].split(
+            "\n      - name:", 1
+        )[0]
+        body = step.split("        run: |\n", 1)[1]
+        lines = []
+        for line in body.splitlines():
+            if line and not line.startswith("          "):
+                break
+            lines.append(line[10:] if line else "")
+        shell = "\n".join(lines)
+        self.assertEqual(shell.count("/tmp/macos_scheduled_spool.log"), 2)
+        shell = shell.replace("/tmp/macos_scheduled_spool.log", '"$TEST_LOG"')
+        prelude = 'cargo() { printf "%s\\n" "$FAKE_OUTPUT"; return "$FAKE_EXIT"; }; cd() { :; };\n'
+        with tempfile.TemporaryDirectory() as tmp:
+            for output, code, expected in (
+                ("test result: ok. 1 passed; 0 failed;", "0", True),
+                ("test result: ok. 0 passed; 0 failed;", "0", False),
+                ("test result: ok. 1 passed; 0 failed;", "1", False),
+                ("test result: ok. 0 passed; 1 ignored;", "0", False),
+            ):
+                result = subprocess.run(
+                    ["bash", "-c", prelude + shell], capture_output=True, timeout=10,
+                    env={**os.environ, "FAKE_OUTPUT": output, "FAKE_EXIT": code,
+                         "TEST_LOG": os.path.join(tmp, "spool.log")},
+                )
+                self.assertEqual(result.returncode == 0, expected, (output, code, result.stderr))
+
     def test_mac_bundle_smoke_is_gated_on_bundle_chain_paths(self):
         # mac-build.yml's bundle_chain filter (before its 2026-10 fold into
         # pr-check's macos-rust-check) decided when to append the universal
@@ -5067,6 +5158,22 @@ class CiGatePolicyTests(unittest.TestCase):
             )[1].split("\n      - name:", maxsplit=1)[0]
         )
         self.assertIn("github.event_name != 'push'", computer_use)
+
+        # The APFS-specific spool regression must execute on PR macOS, not
+        # only after main is updated; pin the actual case and no-match guard.
+        scheduled = _without_yaml_comments(
+            macos_job.split(
+                "- name: macOS scheduled spool filename regression", maxsplit=1
+            )[1].split("\n      - name:", maxsplit=1)[0]
+        )
+        self.assertIn("github.event_name == 'pull_request'", scheduled)
+        self.assertIn("set -euo pipefail", scheduled)
+        self.assertIn(
+            "features::scheduled::tasks::creation_requests::tests::non_utf8_squatters_do_not_starve_legitimate_records",
+            scheduled,
+        )
+        self.assertIn("--exact --test-threads=1", scheduled)
+        self.assertIn("test result: ok. 1 passed; 0 failed;", scheduled)
 
         # The bundle smoke consumes node_modules (build.js resolves
         # @tauri-apps/cli from it and the beforeBuildCommand runs vite), so the

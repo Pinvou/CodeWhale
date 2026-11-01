@@ -100,18 +100,25 @@ def run(args):
         options = {"creationflags": subprocess.CREATE_NEW_PROCESS_GROUP} if os.name == "nt" else {"start_new_session": True}
         with output.open("wb") as stdout, errors.open("wb") as stderr:
             process = subprocess.Popen(test, cwd=root / "account-platform", env=environment, stdin=subprocess.DEVNULL, stdout=stdout, stderr=stderr, **options)
+            timed_out = False
             try:
                 process.wait(timeout=args.timeout)
             except subprocess.TimeoutExpired:
-                stop_owned_process(process)
-                raise ValueError("quota Lua runner exceeded its process deadline") from None
+                timed_out = True
             finally:
                 stop_owned_process(process)
         if output.stat().st_size > 16 << 20 or errors.stat().st_size > 1 << 20:
             raise ValueError("quota Lua test output exceeded its bound")
-        raw = output.read_text(encoding="utf-8")
+        # A killed process may leave the final UTF-8 character incomplete. Only
+        # failure diagnostics may replace it; successful JSON remains strict.
+        decoding = "replace" if timed_out else "strict"
+        raw = output.read_text(encoding="utf-8", errors=decoding)
         sys.stdout.write(raw)
-        sys.stderr.write(errors.read_text(encoding="utf-8"))
+        sys.stderr.write(errors.read_text(encoding="utf-8", errors=decoding))
+        # Preserve bounded diagnostics before the private directory is removed.
+        # Even a complete-looking pass stream cannot turn a timeout into success.
+        if timed_out:
+            raise ValueError("quota Lua runner exceeded its process deadline")
         events = [json.loads(line) for line in raw.splitlines() if line.strip()]
         if any(not isinstance(event, dict) for event in events):
             raise ValueError("quota Lua test emitted invalid JSON events")
