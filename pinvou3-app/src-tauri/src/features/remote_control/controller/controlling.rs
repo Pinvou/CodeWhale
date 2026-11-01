@@ -217,6 +217,8 @@ struct Inner {
     phase: ControllingStatusKind,
     intent: u64,
     claim_request_id: Option<String>,
+    // Preserve the claim for terminal projection while revoking its operation.
+    stopped: bool,
     pending_code: Option<PendingCode>,
     lease: Option<ControllerLease>,
     /// Identity of the last terminal transition only; never grants a live lease.
@@ -233,6 +235,7 @@ impl Default for Inner {
             phase: ControllingStatusKind::Idle,
             intent: 0,
             claim_request_id: None,
+            stopped: false,
             pending_code: None,
             lease: None,
             retired_lease: None,
@@ -278,7 +281,10 @@ impl ControllingDeviceManager {
 
     pub(crate) fn stop(&self) {
         let mut inner = self.inner.lock();
+        inner.stopped = true;
         clear_live_context(&mut inner);
+        inner.phase = ControllingStatusKind::Disconnected;
+        inner.error_code = None;
     }
 
     pub(crate) fn is_running(&self) -> bool {
@@ -305,6 +311,7 @@ impl ControllingDeviceManager {
         inner.retired_lease = None;
         inner.retired_transport_owner = None;
         inner.intent += 1;
+        inner.stopped = false;
         let claim_request_id = format!("claim_{}", Uuid::new_v4().simple());
         inner.claim_request_id = Some(claim_request_id.clone());
         inner.pending_code = Some(PendingCode {
@@ -626,6 +633,9 @@ impl ControllingDeviceManager {
     /// E2E-06：当前连接尝试的 operation（恢复流程在 service 层按帧推进时需要它）。
     pub(crate) fn current_operation(&self) -> Option<ControllerOperation> {
         let inner = self.inner.lock();
+        if inner.stopped {
+            return None;
+        }
         inner
             .claim_request_id
             .as_ref()
@@ -1073,7 +1083,8 @@ fn normalize_public_error(code: &'static str) -> Result<&'static str> {
 }
 
 fn ensure_operation(inner: &Inner, operation: &ControllerOperation) -> Result<()> {
-    if inner.intent != operation.intent
+    if inner.stopped
+        || inner.intent != operation.intent
         || inner.claim_request_id.as_deref() != Some(operation.claim_request_id.as_str())
     {
         return Err(ControllingStateError::new("controller_stale_result"));
@@ -1403,6 +1414,180 @@ mod tests {
                 "task_v1".into(),
             ],
         }
+    }
+
+    #[test]
+    fn stop_retires_each_operation_and_preserves_only_terminal_identity() {
+        let idle = ControllingDeviceManager::default();
+        idle.stop();
+        assert_eq!(idle.status().status, ControllingStatusKind::Disconnected);
+        assert!(idle.current_operation().is_none());
+
+        for phase in [
+            "connecting",
+            "handshake",
+            "connected",
+            "reconnecting",
+            "error",
+            "connected_error",
+        ] {
+            let manager = ControllingDeviceManager::default();
+            let old = manager.connect("2345678").unwrap();
+            if matches!(
+                phase,
+                "handshake" | "connected" | "reconnecting" | "connected_error"
+            ) {
+                manager.complete_reserved(old.clone()).unwrap();
+            }
+            if matches!(phase, "connected" | "reconnecting" | "connected_error") {
+                manager.complete_connected(old.clone(), lease()).unwrap();
+            }
+            if phase == "reconnecting" {
+                manager.mark_transport_disconnected(5_000, Some(30_000));
+            }
+            if matches!(phase, "error" | "connected_error") {
+                manager
+                    .fail_connection(old.clone(), "endpoint_offline")
+                    .unwrap();
+            }
+            let old_status = manager.status();
+            manager.stop();
+            let stopped = manager.status();
+            assert_eq!(
+                stopped.status,
+                ControllingStatusKind::Disconnected,
+                "{phase}"
+            );
+            assert!(!stopped.has_pending_code, "{phase}");
+            assert_eq!(stopped.error_code, None, "{phase}");
+            assert_eq!(
+                stopped.claim_request_id, old_status.claim_request_id,
+                "{phase}"
+            );
+            if matches!(phase, "connected" | "reconnecting" | "connected_error") {
+                assert_eq!(stopped.lease, old_status.lease, "retired identity: {phase}");
+            }
+            manager.stop();
+            assert_eq!(manager.status(), stopped, "repeat stop: {phase}");
+            assert!(manager.current_operation().is_none(), "{phase}");
+            assert!(manager.live_lease().is_err(), "{phase}");
+            assert_eq!(
+                manager.complete_reserved(old.clone()).unwrap_err().code,
+                "controller_stale_result"
+            );
+            let effects = std::cell::Cell::new(0);
+            assert_eq!(
+                manager
+                    .complete_connected_with_install(old.clone(), lease(), || {
+                        effects.set(1);
+                        Ok(())
+                    })
+                    .unwrap_err()
+                    .code,
+                "controller_stale_result"
+            );
+            assert_eq!(
+                manager
+                    .fail_connection(old.clone(), "endpoint_offline")
+                    .unwrap_err()
+                    .code,
+                "controller_stale_result"
+            );
+            assert!(manager.with_lane_owner(&old, || effects.set(2)).is_err());
+            assert_eq!(effects.get(), 0, "old callbacks: {phase}");
+            assert_eq!(manager.status(), stopped, "late operations: {phase}");
+
+            let next = manager.connect("3456789").unwrap();
+            assert!(manager.with_lane_owner(&old, || effects.set(3)).is_err());
+            manager.with_lane_owner(&next, || effects.set(4)).unwrap();
+            assert_eq!(effects.get(), 4, "new owner: {phase}");
+            manager.complete_reserved(next.clone()).unwrap();
+            manager.complete_connected(next.clone(), lease()).unwrap();
+            assert!(
+                manager
+                    .fail_connection(old.clone(), "endpoint_offline")
+                    .is_err()
+            );
+            assert_eq!(manager.status().status, ControllingStatusKind::Connected);
+            assert_eq!(manager.live_lease().unwrap(), lease().context);
+        }
+    }
+
+    #[test]
+    fn stop_stops_owned_transport_and_prevents_its_reinstallation() {
+        let manager = ControllingDeviceManager::default();
+        let old = manager.connect("2345678").unwrap();
+        let (sender, _receiver) = super::super::relay_transport::transport_channels(
+            ControllerRole::ControllerA,
+            "generation-0001",
+            2,
+            2,
+            8192,
+            1024,
+        );
+        let lane = super::super::encrypted_lane::ControllingLaneState::default();
+        manager
+            .replace_owned_transport(&old, sender.clone(), &lane)
+            .unwrap();
+        let registered_old = old.clone().for_transport(sender.owner());
+        assert!(manager.is_running());
+        manager.stop();
+        assert!(sender.is_stopped());
+        assert!(!manager.is_running());
+        assert!(manager.with_lane_owner(&registered_old, || ()).is_err());
+        let (replacement, _receiver) = super::super::relay_transport::transport_channels(
+            ControllerRole::ControllerA,
+            "generation-0001",
+            2,
+            2,
+            8192,
+            1024,
+        );
+        assert!(
+            manager
+                .replace_owned_transport(&old, replacement, &lane)
+                .is_err()
+        );
+        assert!(!manager.is_running());
+    }
+
+    #[test]
+    fn stop_serializes_with_an_inflight_owner_callback() {
+        use std::sync::{Arc, mpsc};
+        use std::time::Duration;
+
+        let manager = Arc::new(ControllingDeviceManager::default());
+        let old = manager.connect("2345678").unwrap();
+        let (entered_tx, entered_rx) = mpsc::channel();
+        let (release_tx, release_rx) = mpsc::channel();
+        let worker_manager = Arc::clone(&manager);
+        let worker_owner = old.clone();
+        let worker = std::thread::spawn(move || {
+            worker_manager.with_lane_owner(&worker_owner, || {
+                entered_tx.send(()).unwrap();
+                release_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+            })
+        });
+        entered_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+        let (started_tx, started_rx) = mpsc::channel();
+        let (stopped_tx, stopped_rx) = mpsc::channel();
+        let stop_manager = Arc::clone(&manager);
+        let stopper = std::thread::spawn(move || {
+            started_tx.send(()).unwrap();
+            stop_manager.stop();
+            stopped_tx.send(()).unwrap();
+        });
+        started_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+        assert!(matches!(
+            stopped_rx.recv_timeout(Duration::from_millis(100)),
+            Err(mpsc::RecvTimeoutError::Timeout)
+        ));
+        release_tx.send(()).unwrap();
+        worker.join().unwrap().unwrap();
+        stopped_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+        stopper.join().unwrap();
+        assert!(manager.with_lane_owner(&old, || ()).is_err());
+        assert_eq!(manager.status().status, ControllingStatusKind::Disconnected);
     }
 
     #[test]
