@@ -5851,6 +5851,38 @@ impl AcpPool {
             }
         }
 
+        // 与 spawn_session 一致走 self.backend()，让辅助索引缺失的会话在
+        // acp_record 处得到明确报错，而不是误导性的「当前会话不是 ACP 会话」。
+        // Readiness is judged before the crash budget: a backend that is not
+        // installed must keep surfacing its actionable setup hint instead of
+        // a throttle message once its spawn attempts have exhausted the budget.
+        let backend = self.backend(session_id);
+        let readiness = match backend {
+            AgentBackend::CodexAcp => self.ensure_codex_ready().await.map(|_| ()),
+            AgentBackend::ClaudeAcp | AgentBackend::KimiAcp => {
+                let status = self.status_for_async(backend).await;
+                // update_required 仅 Codex 动态门禁会置真；此处的 !installed 一律表示
+                // 低于最低兼容版本，按 setup_hint 引导即可。
+                if !status.installed {
+                    Err(anyhow::anyhow!(
+                        "{} ACP 尚未就绪。{}",
+                        backend.display_name(),
+                        setup_hint_message(status.setup_hint)
+                    ))
+                } else {
+                    Ok(())
+                }
+            }
+            AgentBackend::Deepseek => Err(anyhow::anyhow!("当前会话不是 ACP 会话")),
+        };
+        if let Err(error) = readiness {
+            diagnostics::write(
+                &operation_id,
+                "session:runtime_failed",
+                format!("session_id={session_id} error={error:#}"),
+            );
+            return Err(error);
+        }
         if let Some(admission) = self
             .runtime_crash_budgets
             .lock()
@@ -5884,35 +5916,6 @@ impl AcpPool {
                 );
                 bail!("{reason}，{retry_hint}后可重试");
             }
-        }
-        // 与 spawn_session 一致走 self.backend()，让辅助索引缺失的会话在
-        // acp_record 处得到明确报错，而不是误导性的「当前会话不是 ACP 会话」。
-        let backend = self.backend(session_id);
-        let readiness = match backend {
-            AgentBackend::CodexAcp => self.ensure_codex_ready().await.map(|_| ()),
-            AgentBackend::ClaudeAcp | AgentBackend::KimiAcp => {
-                let status = self.status_for_async(backend).await;
-                // update_required 仅 Codex 动态门禁会置真；此处的 !installed 一律表示
-                // 低于最低兼容版本，按 setup_hint 引导即可。
-                if !status.installed {
-                    Err(anyhow::anyhow!(
-                        "{} ACP 尚未就绪。{}",
-                        backend.display_name(),
-                        setup_hint_message(status.setup_hint)
-                    ))
-                } else {
-                    Ok(())
-                }
-            }
-            AgentBackend::Deepseek => Err(anyhow::anyhow!("当前会话不是 ACP 会话")),
-        };
-        if let Err(error) = readiness {
-            diagnostics::write(
-                &operation_id,
-                "session:runtime_failed",
-                format!("session_id={session_id} error={error:#}"),
-            );
-            return Err(error);
         }
         diagnostics::write(
             &operation_id,
