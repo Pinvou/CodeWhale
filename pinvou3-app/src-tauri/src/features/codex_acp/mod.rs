@@ -1758,6 +1758,15 @@ fn code_native_workspace_info(
 /// 文案子串匹配（复审低危 5）。
 pub(crate) static INSTALL_CANCELLED_MARKER: &str = "install_cancelled:";
 
+/// Which kind of reclaim is awaiting its replacement notice for a session.
+/// The notice kind itself derives from `resumed_session` at publish time;
+/// this only records that a disclosure is still owed.
+#[derive(Clone, Copy)]
+enum RuntimeRestart {
+    Stall,
+    Crash,
+}
+
 #[derive(Clone)]
 pub struct AcpPool {
     app: AppHandle,
@@ -1791,6 +1800,15 @@ pub struct AcpPool {
     runtime_probe_generation: Arc<AtomicU64>,
     runtime_generation: Arc<AtomicU64>,
     runtime_crash_budgets: Arc<parking_lot::Mutex<HashMap<String, RuntimeCrashBudget>>>,
+    /// Restart disclosures awaiting publication: sessions whose runtime was
+    /// reclaimed (stall or crash) whose replacement has not yet emitted the
+    /// `agent_session_restarted[_fresh]` notice. The throttled replacement is
+    /// published by a later `get_or_spawn` call — the crash budget bails
+    /// before spawning — so the disclosure must live in the pool, not in one
+    /// call frame. Cleared by the same deliberate retirements that clear the
+    /// crash budget, and consumed at the publish site together with the
+    /// call-local restart flags.
+    runtime_restart_disclosures: Arc<parking_lot::Mutex<HashMap<String, RuntimeRestart>>>,
     resource_ledger: Arc<parking_lot::Mutex<AcpResourceLedger>>,
     cli_probe: Arc<parking_lot::RwLock<CliProbeCache>>,
     latest_version_probe: LatestVersionProbe,
@@ -2274,6 +2292,7 @@ impl AcpPool {
             runtime_probe_generation: Arc::new(AtomicU64::new(0)),
             runtime_generation: Arc::new(AtomicU64::new(0)),
             runtime_crash_budgets: Arc::new(parking_lot::Mutex::new(HashMap::new())),
+            runtime_restart_disclosures: Arc::new(parking_lot::Mutex::new(HashMap::new())),
             resource_ledger: Arc::new(parking_lot::Mutex::new(AcpResourceLedger::default())),
             cli_probe: Arc::new(parking_lot::RwLock::new(CliProbeCache::default())),
             latest_version_probe: LatestVersionProbe::new()?,
@@ -3758,7 +3777,11 @@ impl AcpPool {
                 .collect::<Vec<_>>()
         };
         for (session_id, runtime) in runtimes {
+            // A completed install/upgrade restart is not a crash: the rebuilt
+            // runtime must start with a clean crash budget and no parked
+            // restart disclosure.
             self.runtime_crash_budgets.lock().remove(&session_id);
+            self.runtime_restart_disclosures.lock().remove(&session_id);
             // runtime 已从共享表移除，避免新请求继续复用旧账号进程；显式使用旧
             // runtime 的 bridge 记录取消事件，让 timeline、acp-state 与前端 pending
             // 状态同时收口。
@@ -4760,7 +4783,22 @@ impl AcpPool {
             .await;
         self.cancel_pending_elicitations_with_bridge(session_id, Some(&runtime.bridge))
             .await;
+        // Idle reaping is deliberate retirement, not a crash: the budget must
+        // not survive the runtime it was tracked by. A reap can still land on
+        // a runtime that died unexpectedly and was never accessed again (its
+        // crash would otherwise only feed the budget through the Dead arm).
+        // Re-parking the disclosure keeps the next spawn honest — the user's
+        // agent context was lost, so the rebuild surfaces the restarted
+        // notice. The budget itself stays cleared: the 30-minute idle gate
+        // means no tight respawn loop can route through this path, and the
+        // crash instant is unrecoverable here, so a slot recorded now would
+        // mis-anchor the 60 s window.
         self.runtime_crash_budgets.lock().remove(session_id);
+        if runtime.lifecycle.take_uncounted_crash() {
+            self.runtime_restart_disclosures
+                .lock()
+                .insert(session_id.to_string(), RuntimeRestart::Crash);
+        }
         runtime.shutdown().await;
         true
     }
@@ -4954,6 +4992,16 @@ impl AcpPool {
     pub async fn shutdown_all(&self) {
         let runtimes: Vec<Arc<AcpSession>> = {
             let mut sessions = self.sessions.lock().await;
+            // The drain empties the pool, so any crash budget or parked restart
+            // disclosure keyed by those sessions is stale. Clearing inside the
+            // drain's critical section denies a concurrent get_or_spawn the
+            // interleaving where it wins the lock after the drain, spawns a
+            // fresh generation, and has that generation's crash slot or parked
+            // disclosure erased by these clears. shutdown_all is also reached
+            // from prepare_app_restart — the settings restart command and the
+            // post-update relaunch — where that spawn is reachable.
+            self.runtime_crash_budgets.lock().clear();
+            self.runtime_restart_disclosures.lock().clear();
             let ids = sessions.keys().cloned().collect::<Vec<_>>();
             ids.iter()
                 .filter_map(|id| {
@@ -4965,6 +5013,10 @@ impl AcpPool {
         };
         for runtime in runtimes {
             runtime.shutdown().await;
+            // Flush any card settlements a racing retirement buffered on this
+            // bridge before the drain, so a later drop-flush cannot regress a
+            // replacement's journal sequence.
+            runtime.bridge.flush_journal();
         }
     }
 
@@ -5549,6 +5601,7 @@ impl AcpPool {
             format!("session_id={session_id}"),
         );
         let mut restarted_after_stall = false;
+        let mut restarted_after_crash = false;
         let mut sessions = self.sessions.lock().await;
         self.remote_permission_owners
             .lock()
@@ -5589,6 +5642,12 @@ impl AcpPool {
                 if was_running {
                     // Repeated stalls in one window request replacement. The first
                     // stall remains conservative because long work can look wedged.
+                    // The replacement may be published by a later call if the
+                    // budget throttles this one, so park the disclosure in the
+                    // pool instead of relying on the call-local flag.
+                    self.runtime_restart_disclosures
+                        .lock()
+                        .insert(session_id.to_string(), RuntimeRestart::Stall);
                     runtime.shutdown().await;
                     // Make shutdown-side events durable before the replacement
                     // bridge seeds its journal sequence.
@@ -5622,6 +5681,14 @@ impl AcpPool {
                     // 从 journal 尾部播种到正确的 seq。死亡实例的缓冲要等最后
                     // 一个 bridge 克隆（stderr 任务）释放才隐式排空，不可依赖。
                     runtime.bridge.flush_journal();
+                    restarted_after_crash = true;
+                    // Parked for the same reason as the stall branch above: a
+                    // throttled replacement is published by a later
+                    // `get_or_spawn` call, which must still disclose the lost
+                    // agent context.
+                    self.runtime_restart_disclosures
+                        .lock()
+                        .insert(session_id.to_string(), RuntimeRestart::Crash);
                 }
             }
             RuntimeLookup::Missing => {}
@@ -5727,9 +5794,17 @@ impl AcpPool {
             bail!("ACP runtime 在初始化完成后立即退出，请重试");
         }
         sessions.insert(session_id.to_string(), runtime.clone());
-        if restarted_after_stall {
+        // Consume any disclosure parked by an earlier reclaim invocation:
+        // after a throttled crash replacement both call-local flags are
+        // false here, and the notice must still fire. The only insert site
+        // into the pool map is the line above, so a parked disclosure can
+        // only be consumed here.
+        let pending_restart = self.runtime_restart_disclosures.lock().remove(session_id);
+        if restarted_after_stall || restarted_after_crash || pending_restart.is_some() {
             // Promise retained history only after a real resume. Without
             // `load_session`, or when loading fails, spawn creates a fresh session.
+            // A crash replacement discloses the same way as a stall
+            // replacement: the user's agent context was rebuilt either way.
             let kind = if runtime.resumed_session {
                 "agent_session_restarted"
             } else {
