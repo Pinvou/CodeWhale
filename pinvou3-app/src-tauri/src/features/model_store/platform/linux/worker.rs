@@ -533,6 +533,60 @@ fn check_basics(a: &WorkerAccess) -> Result<(), WorkerError> {
     }
 }
 
+/// `docker info` 探针（`docker info 2>&1 >/dev/null; echo PROBE_RC=$?`）输出末行
+/// 是我们自己 echo 的 `PROBE_RC=<rc>`，之前的全部是 docker info 的 stderr。
+/// 返回 (rc, stderr 文本)；rc 行缺失或不合法 → None，由分类层按「说不清」处理，
+/// 绝不能猜成健康。
+fn parse_docker_probe(text: &str) -> (Option<i32>, &str) {
+    let trimmed = text.trim_end_matches(['\n', '\r']);
+    let (body, last) = match trimmed.rfind('\n') {
+        Some(pos) => (&trimmed[..pos], &trimmed[pos + 1..]),
+        None => ("", trimmed),
+    };
+    match last
+        .strip_prefix("PROBE_RC=")
+        .and_then(|r| r.parse::<i32>().ok())
+    {
+        Some(rc) => (Some(rc), body),
+        None => (None, trimmed),
+    }
+}
+
+/// 探针分类（round-4 P2-1 抽纯函数钉测试）。健康态最先判、权威是 rc 而不是
+/// 文本——docker info 成功时 stderr 也可能带 WARNING 噪声；反过来 rc 非 0 才
+/// 看失败串定分支。
+#[derive(Debug, PartialEq, Eq)]
+enum DockerProbeKind {
+    /// rc=0：什么都不用做。没有这一支时（round-4 P2-1 之前的形态），每次常规
+    /// connect 都对健康从机误报「不在 docker 组」并空跑一次幂等 sudo usermod。
+    Healthy,
+    /// permission denied：当前用户不在 docker 组，补组能治。
+    NotInGroup,
+    /// daemon 没在跑：补组治不了，usermod 后复查必失败。
+    DaemonDown,
+    /// 其他形态（rc 行没解析出来、未知错误文本）：保守处理，日志带原文。
+    Unclear,
+}
+
+fn classify_docker_probe(rc: Option<i32>, stderr_text: &str) -> DockerProbeKind {
+    match rc {
+        Some(0) => DockerProbeKind::Healthy,
+        Some(_) => {
+            // 与 round-3 判定序一致：denied 优先——两种串同现时根因按权限处理。
+            let denied = stderr_text.contains("permission denied");
+            let daemon_down = stderr_text.contains("Cannot connect to the Docker daemon");
+            if denied {
+                DockerProbeKind::NotInGroup
+            } else if daemon_down {
+                DockerProbeKind::DaemonDown
+            } else {
+                DockerProbeKind::Unclear
+            }
+        }
+        None => DockerProbeKind::Unclear,
+    }
+}
+
 /// 从机登录用户要能以普通用户身份用 docker（交付包的 preflight 明确拒绝 root）。
 /// 真机上缺过。手上正好有 sudo 密码，就顺手补上——但要在日志里说清楚，加入 docker
 /// 组基本等于授予 root 权限，这不是可以悄悄做的事。
@@ -544,30 +598,34 @@ fn ensure_docker_group(
     // round-3 P2-5：先分清「不在组」和「daemon 挂了」——permission denied 才是
     // 补组能治的病；daemon 不在跑时盲目 usermod，复查必然还失败，错误文案还让
     // 用户去手跑我们刚跑过的同一条命令。
-    let (denied, daemon_down) = {
-        let (_, out, err) = ssh_capture(a, "docker info 2>&1 >/dev/null; echo rc=$?", None);
-        let text = format!("{out}{err}");
-        (
-            text.contains("permission denied"),
-            text.contains("Cannot connect to the Docker daemon"),
-        )
+    // round-4 P2-1：上一版只做了一半——探针仍只盯两种失败串，rc=0 的健康态落进
+    // 「说不清」臂，每次常规 connect 都对健康从机打「不在 docker 组，正在把它
+    // 加入」这种与事实相反的日志，还空跑一次幂等 sudo usermod。现在 rc 随探针
+    // 传回来（`echo PROBE_RC=$?`），健康态最先判、直接早退。
+    let probe_text = {
+        let (_, out, err) = ssh_capture(a, "docker info 2>&1 >/dev/null; echo PROBE_RC=$?", None);
+        format!("{out}{err}")
     };
-    if daemon_down && !denied {
-        return Err(WorkerError::Other(format!(
-            "从机 {} 的 docker daemon 没有在运行（docker info 连不上 daemon）。\
-             请在从机上启动 docker 后重试；这不属于用户组问题，自动补组治不了它。",
-            a.target()
-        )));
-    }
-    if !denied {
-        // 说不清原因（比如 docker CLI 缺失由 check_basics 报过、或未知形态）：
-        // 保守起见按原流程走补组，但在失败信息里带上诊断原始串。
-        let (_, out, err) = ssh_capture(a, "docker info 2>&1 >/dev/null | head -c 200", None);
-        log(&format!(
-            "      docker info 异常（{}{}），先按最常见的组缺失处理",
-            out.trim(),
-            err.trim()
-        ));
+    let (rc, probe_err) = parse_docker_probe(&probe_text);
+    match classify_docker_probe(rc, probe_err) {
+        DockerProbeKind::Healthy => return Ok(()),
+        DockerProbeKind::DaemonDown => {
+            return Err(WorkerError::Other(format!(
+                "从机 {} 的 docker daemon 没有在运行（docker info 连不上 daemon）。\
+                 请在从机上启动 docker 后重试；这不属于用户组问题，自动补组治不了它。",
+                a.target()
+            )));
+        }
+        DockerProbeKind::NotInGroup => {}
+        DockerProbeKind::Unclear => {
+            // 说不清原因（比如 docker CLI 缺失由 check_basics 报过、rc 行没解析
+            // 出来、或未知形态）：保守起见按原流程走补组，但日志里带上诊断原始串
+            // ——探针这发就把 stderr 带回来了，不必像上一版再补一发 ssh。
+            let brief: String = probe_err.trim().chars().take(200).collect();
+            log(&format!(
+                "      docker info 异常（{brief}），先按最常见的组缺失处理"
+            ));
+        }
     }
     log(&format!(
         "      从机的 {} 不在 docker 组，正在把它加入（这相当于授予该用户 root 级别的权限）…",
@@ -831,6 +889,22 @@ fn slot_cross_card(access: Option<&WorkerAccess>, current: Option<&str>) -> bool
 /// 连接从机。第一次会弹一次表单；之后用保存的信息零输入。地址连不上（换了网络）、
 /// 密码失效（从机改了密码）都回到表单并说明原因，而不是直接失败。
 fn cli_connect() -> i32 {
+    // 表单标记走 stderr：卡片可能用 $( ) 调我们，stdout 会被捕获，LMM 就看不到了。
+    cli_connect_io(&mut read_answer_line, &mut |spec| {
+        eprintln!("LMM_PROMPT_FORM={spec}")
+    })
+}
+
+/// round-4 P2-2：cli_connect 的两个 pty 边缘——表单标记打 stderr、答案从 stdin
+/// 读回——抽成注入点。真实入口 [`cli_connect`] 接真 stdio；测试接替身。抽它们
+/// 不是为了让测试好写：这两个边缘是「跑在卡片脚本 pty 里」的进程外契约，进程内
+/// 测不了真 stdio；而除边缘外的整条循环（槽位加载、跨卡判定、快速路径/表单臂
+/// 路由、预填文案、重试轮次）必须能被接线级测试真实走到——r4 评审突变实证：删
+/// 快速路径守卫后谓词单测照绿，只有从循环里走才能钉住接线。
+fn cli_connect_io(
+    read_answer: &mut dyn FnMut() -> Option<String>,
+    prompt_form: &mut dyn FnMut(&str),
+) -> i32 {
     let mut access = load_access();
     let mut password = access.as_ref().and_then(load_password);
     let mut message: Option<String> = None;
@@ -865,9 +939,8 @@ fn cli_connect() -> i32 {
                     },
                     password.is_some(),
                 );
-                // 标记走 stderr：卡片可能用 $( ) 调我们，stdout 会被捕获，LMM 就看不到了
-                eprintln!("LMM_PROMPT_FORM={spec}");
-                let Some(answer) = read_answer_line() else {
+                prompt_form(&spec);
+                let Some(answer) = read_answer() else {
                     eprintln!("ERROR: 未收到从机信息，操作中止");
                     return 1;
                 };
@@ -1692,6 +1765,101 @@ mod tests {
         }
         // 归属一致：info 正常返回 0（不触网）
         assert_eq!(cli(&["info".into()]), 0);
+    }
+
+    /// round-4 P2-1：探针解析/分类钉。r4 评审实证：健康从机（rc=0）每次常规
+    /// connect 都被误报「不在 docker 组，正在把它加入」并空跑一次 sudo usermod
+    /// ——旧探针只匹配两种失败串，rc=0 落进「说不清」臂。健康必须最先判、权威
+    /// 是 rc 而不是文本（docker info 成功时 stderr 也可能有 WARNING 噪声）。
+    #[test]
+    fn docker_probe_health_wins_and_failures_sort_into_three_arms() {
+        // 健康：rc=0 + stderr 有噪声——噪声里甚至带失败字样也不改判
+        let (rc, text) = parse_docker_probe("WARNING: No swap limit support\nPROBE_RC=0\n");
+        assert_eq!(
+            (rc, text),
+            (Some(0), "WARNING: No swap limit support"),
+            "末行 PROBE_RC 归 rc，其余归 stderr 文本"
+        );
+        assert_eq!(classify_docker_probe(rc, text), DockerProbeKind::Healthy);
+        // 健康且无 stderr：整段就是一行 rc
+        assert_eq!(parse_docker_probe("PROBE_RC=0\n"), (Some(0), ""));
+        assert_eq!(classify_docker_probe(Some(0), ""), DockerProbeKind::Healthy);
+        // 不在组：permission denied
+        let (rc, text) = parse_docker_probe(
+            "permission denied while trying to connect to the Docker daemon socket\nPROBE_RC=126\n",
+        );
+        assert_eq!(classify_docker_probe(rc, text), DockerProbeKind::NotInGroup);
+        // daemon 挂了
+        let (rc, text) = parse_docker_probe(
+            "Cannot connect to the Docker daemon at unix:///var/run/docker.sock\nPROBE_RC=1\n",
+        );
+        assert_eq!(classify_docker_probe(rc, text), DockerProbeKind::DaemonDown);
+        // 两种串同现：denied 优先（与 round-3 判定序一致）
+        assert_eq!(
+            classify_docker_probe(
+                Some(1),
+                "Cannot connect to the Docker daemon … permission denied …"
+            ),
+            DockerProbeKind::NotInGroup
+        );
+        // 说不清：rc 非 0、两种串都没有
+        let (rc, text) = parse_docker_probe("alien failure\nPROBE_RC=125\n");
+        assert_eq!(classify_docker_probe(rc, text), DockerProbeKind::Unclear);
+        // rc 行没回来（ssh 半路断/输出被截）：绝不能当健康，按说不清保守处理
+        assert_eq!(
+            parse_docker_probe("garbage, no rc line"),
+            (None, "garbage, no rc line")
+        );
+        assert_eq!(
+            classify_docker_probe(None, "anything"),
+            DockerProbeKind::Unclear
+        );
+        let (rc, text) = parse_docker_probe("PROBE_RC=zero");
+        assert_eq!((rc, text), (None, "PROBE_RC=zero"));
+        assert_eq!(classify_docker_probe(rc, text), DockerProbeKind::Unclear);
+    }
+
+    /// round-4 P2-2：跨卡闸的**接线**钉。r4 评审突变实证：删掉 cli_connect 快速
+    /// 路径上的 `!slot_bound_to_other_card` 守卫后全套 23/23 仍绿——
+    /// slot_cross_card 的谓词单测只护函数本体，不护调用点。这里从真实的
+    /// cli_connect 循环走一遍（两个 pty 边缘注入替身，见 cli_connect_io）：
+    /// 槽绑 card-a、本次以 card-b 发起、地址密码俱全（快速路径的全部前置都
+    /// 满足）→ 第一轮必须进表单臂并预填跨卡说明，绝不能先走快速路径碰 ssh。
+    #[test]
+    fn connect_hits_the_form_arm_when_the_slot_belongs_to_another_card() {
+        let _iso = isolated();
+        let saved = WorkerAccess {
+            host: "192.168.10.42".into(),
+            user: "sky".into(),
+            card_id: Some("card-a".into()),
+        };
+        save_access(&saved).unwrap();
+        // 密钥环在测试环境不可用，落 0600 回退文件。前置必须真的加载到密码——
+        // 否则「没有密码」也会进表单臂，本钉就退化成空钉（删守卫照样绿）。
+        save_password_fallback(&password_fallback_file(&saved), "s3cret").unwrap();
+        assert_eq!(load_password(&saved), Some("s3cret".into()));
+        // SAFETY: isolated() 持有 ENV_TEST_LOCK；离开作用域时还原。
+        unsafe {
+            std::env::set_var(ENV_CARD_ID, "card-b");
+        }
+
+        let mut specs: Vec<String> = Vec::new();
+        let rc = cli_connect_io(
+            &mut || None, // 卡片脚本没回表单答案（EOF）
+            &mut |spec| specs.push(spec.to_string()),
+        );
+        // 没收到答案：按契约中止；且只问过这一次——第一轮就停在表单臂
+        assert_eq!(rc, 1, "specs：{specs:#?}");
+        assert_eq!(specs.len(), 1, "第一轮就该进表单臂并停在那：{specs:#?}");
+        assert!(
+            specs[0].contains("另一张模型卡"),
+            "预填文案必须说明快速路径为何关闭：{}",
+            specs[0]
+        );
+        let spec: serde_json::Value = serde_json::from_str(&specs[0]).unwrap();
+        // 表单预填旧地址/用户名——「确认仍要用这台从机」的语义靠它们
+        assert_eq!(spec["fields"][0]["value"], "192.168.10.42");
+        assert_eq!(spec["fields"][1]["value"], "sky");
     }
 
     #[test]
