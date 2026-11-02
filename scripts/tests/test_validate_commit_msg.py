@@ -551,10 +551,11 @@ class HistoricalSquashSignoffTests(unittest.TestCase):
         with patch.object(validate_commit_msg, "git", return_value=record):
             return validate_commit_msg.validate_range("base", "head", **kwargs)
 
-    def test_registry_is_bounded_to_19_full_object_ids_with_source_prs(self):
+    def test_registry_is_bounded_to_20_full_object_ids_with_source_prs(self):
         registry = validate_commit_msg.HISTORICAL_SQUASH_SIGNOFFS
-        self.assertEqual(len(registry), 19)
-        self.assertEqual(len(set(registry.values())), 19)
+        self.assertEqual(len(registry), 20)
+        self.assertEqual(len(set(registry.values())), 20)
+        self.assertEqual(registry["0dece3f05e29297317680b8ce0eb54b60ec1d73e"], 2285)
         for sha, pr in registry.items():
             self.assertRegex(sha, re.compile(r"^[0-9a-f]{40}$"))
             self.assertIsInstance(pr, int)

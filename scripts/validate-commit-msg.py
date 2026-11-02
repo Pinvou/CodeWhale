@@ -49,7 +49,8 @@ TRUSTED_BOT_AUTHORS = {
 LEGACY_HISTORY_CUTOFF = "deae3ca0141390c06e14aa93610645088b8966d4"
 
 # #1932: 已合入集成分支的 GitHub squash 提交保留了原签署，但作者不同。
-# 仅接受这 19 个不可变对象；不是身份别名，也不豁免标题或签署检查。
+# #2285 的固定合入对象经单独授权追加登记；仅接受这 20 个不可变对象。
+# 不是身份别名，也不豁免标题或签署检查。
 # 值为来源 PR，供审核追溯；新增提交不能按作者、分支或时间获得此例外。
 HISTORICAL_SQUASH_SIGNOFFS = {
     "55d39fbe6a90f8fee4f2c4d6a5fa709e7974a6d3": 1829,
@@ -71,6 +72,7 @@ HISTORICAL_SQUASH_SIGNOFFS = {
     "4340c11513aad6b9f9676981237dc8d327bab29f": 1794,
     "a7587edfc44c25ddc06e17fe0366cd457b104438": 1792,
     "c74061589a8428d3542184a1876189536e303110": 1791,
+    "0dece3f05e29297317680b8ce0eb54b60ec1d73e": 2285,
 }
 HISTORICAL_SQUASH_AUTHOR = ("zhuowp", "zwp-1989@qq.com")
 HISTORICAL_SQUASH_SIGNER = ("z27014", "zhuo.wenpei@h3c.com")
