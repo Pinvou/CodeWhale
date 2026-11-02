@@ -42,7 +42,7 @@ git commit -s
 
 Use `--signoff` when amending or rebasing existing commits. See the [Developer Certificate of Origin](https://developercertificate.org/). CI rejects unsigned human commits; trusted Dependabot and GitHub Actions bot commits and merge commits (more than one parent) are exempt.
 
-The fixed historical squash-commit registry documented in [the commit convention](docs/Git%20Commit%20信息规范文档.md#10-固定历史-squash-提交的签署登记) preserves the recorded original signers of 19 existing integration commits. It is not an identity alias or an exemption for new commits; titles and the registered signoffs remain checked.
+The fixed historical squash-commit registry documented in [the commit convention](docs/Git%20Commit%20信息规范文档.md#10-固定历史-squash-提交的签署登记) preserves the recorded original signers of 20 explicitly registered integration commits. It is not an identity alias or an exemption for new commits; titles and the registered signoffs remain checked.
 
 ## Where changes belong
 
@@ -152,6 +152,14 @@ kernel packages: its hard timeout must not interrupt dpkg and break later
 required system-dependency installation.
 Self-hosted runners retain their administrator-provisioned memory and swap;
 the memory setup script leaves them unchanged, and apt cleanup is hosted-only.
+
+The real PDF gate creates an exclusive temporary workspace per invocation and
+cleans only that workspace, including on failure; persistent runner temporary
+files from earlier jobs are never reused or deleted. Account browser fixtures
+recover only loopback static GET loads interrupted by Chromium's
+`ERR_NETWORK_CHANGED` (up to three loads). This does not retry product assertions
+or application requests; Docker interface changes on a shared host must not
+silently turn a failed module load into an empty-page timeout.
 
 Repository administrators can set `PINVOU_LINUX_RUNNER` to a JSON label array
 (for example `["self-hosted","Linux","pinvou3"]`) to route x64 Linux jobs to
