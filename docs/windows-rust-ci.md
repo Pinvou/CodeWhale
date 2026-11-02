@@ -234,6 +234,8 @@ order:
     - `features::remote_control::controller::controlling_service::resume_projection_tests::`
     - `features::remote_control::controller::controlling::tests::`
     - `features::remote_control::controller::controlling_service::tests::resume_sequence_reopens_business_only_after_controller_resumed`
+    - `features::remote_control::controller::controlling_inbound::tests::`
+    - `features::remote_control::controller::controlling_service::inbound_tests::`
     - `features::remote_control::controller::transfer::staging::tests::`
     - `features::computer_use::platform::windows::tests::`
     - `failed_probe_never_deletes_an_existing_store_windows`
@@ -255,6 +257,10 @@ order:
     nonzero-match guard, independently of the B reader/worker filters. Controlled
     Relay and telemetry ports do not establish a two-machine/WebView or upload
     E2E; full Linux and Windows gates remain required for remote-control changes.
+    The two controller inbound prefixes execute the A-only item/byte budgets,
+    control/disconnect ordering, real port/reader failure handling and owner
+    replacement contracts. They run in this same linked and patched binary;
+    `all-targets-check` alone is not behavior coverage for these paths.
 17. (`regression`) `pinvou-cli Windows-gated unit tests`: the `pinvou-cli`
     workspace's own cfg(windows) unit tests run on no other leg — the Linux
     CLI leg cannot compile them and the all-targets-check leg only

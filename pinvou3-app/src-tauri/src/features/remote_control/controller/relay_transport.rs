@@ -366,6 +366,9 @@ impl QueuedFrame {
     }
 }
 
+#[cfg(test)]
+type InitialLeaseInstallHook = Box<dyn FnOnce(&ControllerTransportSender) + Send>;
+
 #[derive(Clone)]
 pub(crate) struct ControllerTransportSender {
     role: ControllerRole,
@@ -380,6 +383,8 @@ pub(crate) struct ControllerTransportSender {
     resume_install: Arc<RwLock<Option<ResumeInstallAuthority>>>,
     transport_epoch: Arc<AtomicU64>,
     shutdown: CancellationToken,
+    #[cfg(test)]
+    before_initial_install: Arc<parking_lot::Mutex<Option<InitialLeaseInstallHook>>>,
 }
 
 impl ControllerTransportSender {
@@ -439,6 +444,15 @@ impl ControllerTransportSender {
                 "remote_control_generation".into(),
             ));
         }
+        // Only tests schedule a local ingress failure at this exact handoff
+        // boundary. No hook exists in production or on the resume path.
+        #[cfg(test)]
+        {
+            let hook = { self.before_initial_install.lock().take() };
+            if let Some(hook) = hook {
+                hook(self);
+            }
+        }
         let mut current = self.lease.write();
         if self.is_stopped() {
             return Err(ControllerSendError::Closed);
@@ -447,6 +461,16 @@ impl ControllerTransportSender {
         *self.resume_lease.write() = None;
         *self.resume_install.write() = None;
         Ok(())
+    }
+
+    #[cfg(test)]
+    pub(super) fn before_initial_install_for_test(
+        &self,
+        hook: impl FnOnce(&ControllerTransportSender) + Send + 'static,
+    ) {
+        let mut slot = self.before_initial_install.lock();
+        assert!(slot.is_none());
+        *slot = Some(Box::new(hook));
     }
 
     /// Consume the final frame's one-shot authority on the exact receiving
@@ -559,8 +583,15 @@ impl ControllerTransportSender {
         // Repeated failed reconnects preserve the original binding, not a new lease.
     }
 
+    // An active-lease view for consumers; None after stop does not claim that
+    // the underlying binding/key storage was synchronously erased.
     pub(crate) fn authenticated_lease(&self) -> Option<AuthenticatedLease> {
-        self.lease.read().clone()
+        let lease = self.lease.read();
+        if self.is_stopped() {
+            None
+        } else {
+            lease.clone()
+        }
     }
 
     pub(crate) fn try_send_control<T: Serialize>(
@@ -719,8 +750,15 @@ impl ControllerTransportSender {
     }
 
     pub(crate) fn stop(&self) {
-        self.shutdown.cancel();
+        self.request_stop();
         self.clear_authenticated_lease();
+    }
+
+    /// Revoke wire admission immediately without waiting for an already admitted
+    /// synchronous mutation's lease guard. The owner later retires its keys via
+    /// `stop`; the socket worker also observes this cancellation token.
+    pub(super) fn request_stop(&self) {
+        self.shutdown.cancel();
     }
 
     pub(crate) fn with_business_authority(
@@ -891,6 +929,8 @@ fn transport_channels_shared(
             resume_install: Arc::new(RwLock::new(None)),
             transport_epoch: Arc::new(AtomicU64::new(0)),
             shutdown,
+            #[cfg(test)]
+            before_initial_install: Arc::new(parking_lot::Mutex::new(None)),
         },
         ControllerTransportReceiver {
             control_rx,
@@ -1357,11 +1397,11 @@ fn dispatch_inbound(
 /// they never manufacture or directly install reader authority.
 #[cfg(test)]
 pub(super) fn disconnect_test_transport(sender: &ControllerTransportSender) {
-    disconnect_test_transport_to(sender, &|_| {});
+    disconnect_test_transport_to_sink(sender, &|_| {});
 }
 
 #[cfg(test)]
-pub(super) fn disconnect_test_transport_to(
+pub(super) fn disconnect_test_transport_to_sink(
     sender: &ControllerTransportSender,
     sink: &dyn ControllerEventSink,
 ) {
@@ -1372,9 +1412,18 @@ pub(super) fn disconnect_test_transport_to(
 
 #[cfg(test)]
 pub(super) fn dispatch_test_transport_frame(sender: &ControllerTransportSender, frame: &Value) {
+    dispatch_test_transport_frame_to_sink(sender, frame, &|_| {});
+}
+
+#[cfg(test)]
+pub(super) fn dispatch_test_transport_frame_to_sink(
+    sender: &ControllerTransportSender,
+    frame: &Value,
+    sink: &dyn ControllerEventSink,
+) -> bool {
     let config =
         ControllerTransportConfig::new("ws://127.0.0.1:1", sender.role, sender.generation());
-    dispatch_inbound(&config, sender, &|_| {}, &frame.to_string());
+    dispatch_inbound(&config, sender, sink, &frame.to_string())
 }
 
 /// Capture actual reader delivery, including schema/context rejection and

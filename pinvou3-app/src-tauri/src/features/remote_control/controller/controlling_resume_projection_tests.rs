@@ -146,6 +146,7 @@ impl Fixture {
             authorize: true,
             before_activate: None,
             after_activate: None,
+            resume_business: None,
             observe: None,
             final_after_first_event: None,
             first_event_at: None,
@@ -162,6 +163,7 @@ struct Lane {
     authorize: bool,
     before_activate: Option<Box<dyn Fn() + Send + Sync>>,
     after_activate: Option<Box<dyn Fn() + Send + Sync>>,
+    resume_business: Option<Box<dyn Fn() -> Result<(), ControllerLaneFailure> + Send + Sync>>,
     observe: Option<Box<dyn Fn(&ControllerLaneEvent) + Send>>,
     final_after_first_event: Option<Duration>,
     first_event_at: Option<tokio::time::Instant>,
@@ -245,6 +247,10 @@ impl ControllingLane for Lane {
             hook();
         }
     }
+
+    fn resume_business(&mut self) -> Result<(), ControllerLaneFailure> {
+        self.resume_business.as_ref().map_or(Ok(()), |hook| hook())
+    }
 }
 
 async fn serve(
@@ -308,6 +314,63 @@ fn assert_raw(f: &Fixture, status: &Value) {
     ] {
         assert_eq!(status["lease"][key].as_str(), Some(value.as_str()));
     }
+}
+
+#[test]
+fn connected_publication_waits_for_successful_inbound_resume() {
+    bounded(|| {
+        runtime(async {
+            for fail_resume in [false, true] {
+                let f = Fixture::new();
+                let mut lane = f.lane();
+                let resumed = Arc::new(AtomicBool::new(false));
+                let states = Arc::new(Mutex::new(Vec::new()));
+                let business = Arc::clone(&f.business);
+                let lease = f.lease.context.clone();
+                let release_seen = Arc::clone(&resumed);
+                let before_release = Arc::clone(&states);
+                lane.resume_business = Some(Box::new(move || {
+                    business.with_active(&lease, || Ok(())).unwrap();
+                    assert!(
+                        before_release
+                            .lock()
+                            .unwrap()
+                            .iter()
+                            .all(|kind| { *kind != ControllingStatusKind::Connected })
+                    );
+                    assert!(!release_seen.swap(true, Ordering::SeqCst));
+                    if fail_resume {
+                        Err(ControllerLaneFailure::Closed)
+                    } else {
+                        Ok(())
+                    }
+                }));
+                let mut sink = keeper_status_sink(
+                    &f.manager,
+                    &f.operation,
+                    |_| {},
+                    |status| {
+                        if status.kind() == ControllingStatusKind::Connected {
+                            assert!(resumed.load(Ordering::SeqCst));
+                            assert!(!fail_resume);
+                        }
+                        states.lock().unwrap().push(status.kind());
+                    },
+                );
+                serve(&f, &mut lane, &mut sink).await;
+                assert!(resumed.load(Ordering::SeqCst));
+                let connected = states
+                    .lock()
+                    .unwrap()
+                    .contains(&ControllingStatusKind::Connected);
+                assert_eq!(connected, !fail_resume);
+                if fail_resume {
+                    assert!(f.business.with_active(&f.lease.context, || Ok(())).is_err());
+                    assert_ne!(f.manager.status().kind(), ControllingStatusKind::Connected);
+                }
+            }
+        });
+    });
 }
 
 #[test]
