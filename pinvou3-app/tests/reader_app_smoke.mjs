@@ -6,6 +6,7 @@ import { fileURLToPath } from 'node:url';
 import react from '@vitejs/plugin-react';
 import * as puppeteer from 'puppeteer-core';
 import { createServer } from 'vite';
+import { navigateFixture } from './helpers/navigate-fixture.mjs';
 
 const appRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const chrome = process.env.CHROME || [
@@ -62,10 +63,14 @@ try {
   const pageErrors = [];
   page.on('pageerror', (error) => pageErrors.push(error.message));
   await page.setViewport({ width: 1000, height: 700, deviceScaleFactor: 1 });
-  await page.goto(url, { waitUntil: 'domcontentloaded' });
 
   // 建窗前 pending 队列拉取：main.py tab 打开并加载预览。
-  await page.waitForFunction(() => document.body.innerText.includes("print('main.py')"), { timeout: 10000 });
+  // Shared-host Docker interface changes can interrupt a loopback module GET.
+  // Recover only that initial load, before any event, click or assertion runs.
+  await navigateFixture(page, url, signal => page.waitForFunction(
+    () => document.body.innerText.includes("print('main.py')"),
+    { timeout: 10000, signal },
+  ));
   const pendingCalls = await page.evaluate(() => window.__invokeLog.filter((entry) => entry.command === 'take_code_reader_pending'));
   assert(pendingCalls.length === 1, '启动时应拉取一次 pending 队列', pendingCalls);
   const previewCalls = await page.evaluate(() => window.__invokeLog.filter((entry) => entry.command === 'preview_codex_workspace_file'));
