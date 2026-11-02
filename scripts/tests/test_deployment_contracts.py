@@ -275,6 +275,36 @@ printf 'owned consumer marker\\n' > "$cache/profile-$3"
             self.assertEqual(errors.getvalue(), "")
             self.assertEqual(logfile.read_text().strip(), "dependencies ready")
 
+    def test_contract_failure_exposes_bounded_redacted_evidence_without_argv(self):
+        with tempfile.TemporaryDirectory() as directory:
+            logfile = Path(directory) / "managed.jsonl"
+            secret = "fixture-contract-private-password"
+            program = "import sys; print('x'*70000); print('managed assertion failed'); print('postgres://fixture:private@localhost/db?password=private'); print('env '+sys.argv[1]); sys.exit(9)"
+            errors = io.StringIO()
+            with patch.dict(os.environ, {"DATABASE_PASSWORD": secret}), contextlib.redirect_stderr(errors):
+                with self.assertRaisesRegex(RuntimeError, "deployment contract command failed") as raised:
+                    deployment.run_logged_command([sys.executable, "-c", program, secret], logfile)
+            emitted = errors.getvalue()
+            self.assertIn("CONTRACT_COMMAND_FAILED exit=9 log=managed.jsonl", emitted)
+            self.assertIn("managed assertion failed", emitted)
+            self.assertLessEqual(len(emitted), 24200)
+            for value in (secret, "fixture:private", "password=private"):
+                self.assertNotIn(value, emitted)
+                self.assertNotIn(value, str(raised.exception))
+            self.assertIn(secret, logfile.read_text())
+
+    def test_contract_success_preserves_raw_go_json_for_mandatory_verification(self):
+        with tempfile.TemporaryDirectory() as directory:
+            logfile = Path(directory) / "managed.jsonl"
+            errors = io.StringIO()
+            payload = json.dumps({"Action": "fail", "Test": "Required", "Package": "fixture"})
+            with contextlib.redirect_stderr(errors):
+                deployment.run_logged_command([sys.executable, "-c", "import sys; print(sys.argv[1])", payload], logfile)
+            self.assertEqual(errors.getvalue(), "")
+            self.assertEqual(logfile.read_text().strip(), payload)
+            with self.assertRaises(RuntimeError):
+                verify_results(logfile.read_text(), {"Required"})
+
     def test_truncated_url_cannot_expose_query_credentials_after_its_prefix_is_lost(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
