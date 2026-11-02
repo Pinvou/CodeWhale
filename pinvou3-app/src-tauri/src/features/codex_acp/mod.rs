@@ -361,6 +361,10 @@ async fn take_session_if_still_idle<'a, T: PoolOwnedRuntime>(
     Some((taken, sessions))
 }
 
+/// Retry hints of at least this many milliseconds are phrased in seconds
+/// instead of raw ms, so long backoffs read as actionable waits.
+const RETRY_HINT_SECONDS_MIN_MS: u128 = 2_000;
+
 /// Minimum idle time before a rebind may reclaim a resident ACP runtime.
 ///
 /// Part of closing the pre-admission window (review #463 round-8 M1): the
@@ -5859,6 +5863,13 @@ impl AcpPool {
                 } else {
                     "ACP runtime 刚刚退出，正在退避"
                 };
+                // Long backoffs read as actionable waits in seconds; the
+                // short second-crash backoff stays in raw ms.
+                let retry_hint = if retry_ms >= RETRY_HINT_SECONDS_MIN_MS {
+                    format!("约 {} 秒", retry_ms.div_ceil(1_000))
+                } else {
+                    format!("{retry_ms} 毫秒")
+                };
                 diagnostics::write(
                     &operation_id,
                     "session:spawn_throttled",
@@ -5866,7 +5877,7 @@ impl AcpPool {
                         "session_id={session_id} retry_after_ms={retry_ms} budget_exhausted={budget_exhausted}"
                     ),
                 );
-                bail!("{reason}，请在 {retry_ms} 毫秒后重试");
+                bail!("{reason}，{retry_hint}后可重试");
             }
         }
         // 与 spawn_session 一致走 self.backend()，让辅助索引缺失的会话在

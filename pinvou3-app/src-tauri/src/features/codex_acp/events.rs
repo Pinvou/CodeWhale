@@ -1307,9 +1307,15 @@ impl EventBridge {
     /// emit path (`AcpPool::timeline` / `AcpPool::web_timeline_page`) never
     /// observe a pre-buffer view of an active turn. Turn boundaries already
     /// flush synchronously; this only drains the buffered chunk window.
-    /// Failures are swallowed: the reader falls back to whatever is durable.
+    /// Retirement paths additionally lean on this flush for their
+    /// flush-before-reseed invariant, so a failure is logged (never fatal —
+    /// the reader falls back to whatever is durable) rather than swallowed
+    /// silently.
     pub fn flush_journal(&self) {
-        let _ = self.timeline_writer.lock().flush();
+        if let Err(error) = self.timeline_writer.lock().flush() {
+            // Log hygiene: the IO error never carries session ids or paths.
+            eprintln!("[codex-acp] timeline journal flush failed: {error}");
+        }
     }
 
     pub(super) fn retire_journal(&self) {
