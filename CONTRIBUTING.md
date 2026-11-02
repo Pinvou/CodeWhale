@@ -155,11 +155,36 @@ the memory setup script leaves them unchanged, and apt cleanup is hosted-only.
 
 The real PDF gate creates an exclusive temporary workspace per invocation and
 cleans only that workspace, including on failure; persistent runner temporary
-files from earlier jobs are never reused or deleted. Account browser fixtures
-recover only loopback static GET loads interrupted by Chromium's
+files from earlier jobs are never reused or deleted. Account and Reader browser
+fixtures recover only loopback static GET loads interrupted by Chromium's
 `ERR_NETWORK_CHANGED` (up to three loads). This does not retry product assertions
 or application requests; Docker interface changes on a shared host must not
 silently turn a failed module load into an empty-page timeout.
+
+Deployment PostgreSQL contracts reuse a local image only when its recorded
+repository digest matches the selected pinned manifest. They pull that exact
+manifest only on a cache miss and validate it again before running contracts;
+an image tag or dependency preparation alone never counts as a test pass.
+During dependency preparation, an available runner Go download archive is
+mounted read-only as a file proxy, and configured local file proxies are
+translated to container paths. Actions jobs with a configured Go cache and host
+Go toolchain fill missing archives from the isolated source copy first; standalone
+Docker-only invocations do not require host Go. The disposable module directory
+remains fresh;
+`go mod verify` and the configured checksum/private-module policy stay enabled.
+An available npm content-addressed cache is mounted only for preparation with
+prefer-offline lookup; npm lockfile integrity checks remain enabled. Verification
+containers retain their network isolation and do not receive these cache mounts.
+If a deployment-contract subprocess fails, its stage and bounded, redacted log
+tail are emitted into the CI job log before temporary files are cleaned up.
+Raw Go JSON remains unchanged for required-root, failure and no-skip validation;
+successful dependency preparation never substitutes for a contract result.
+Managed PostgreSQL fixture teardown waits for server-side backend exit within
+the existing 15-second cleanup budget after closing clients. Every observation
+rechecks the expected database owner; zero sessions remain mandatory, and the
+final drop never forces disconnection. The required real PostgreSQL regression
+holds an advisory-lock barrier to prove that a closed client can still have a
+live backend, and verifies timeout, owner and missing-database refusal.
 
 Repository administrators can set `PINVOU_LINUX_RUNNER` to a JSON label array
 (for example `["self-hosted","Linux","pinvou3"]`) to route x64 Linux jobs to

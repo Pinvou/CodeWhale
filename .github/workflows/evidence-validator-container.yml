@@ -18,7 +18,7 @@ permissions:
 
 jobs:
   linux-amd64:
-    runs-on: ubuntu-22.04
+    runs-on: ${{ fromJSON(vars.PINVOU_LINUX_MEDIUM_RUNNER || vars.PINVOU_LINUX_RUNNER || '["ubuntu-22.04"]') }}
     timeout-minutes: 40
     steps:
       - uses: actions/checkout@v7

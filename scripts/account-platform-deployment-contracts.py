@@ -17,6 +17,8 @@ import subprocess
 import sys
 import tempfile
 import time
+from urllib.parse import urlsplit
+from urllib.request import url2pathname
 import uuid
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -26,13 +28,18 @@ POSTGRES_PROFILES = {
     "18.4": "postgres:18.4-alpine@sha256:9a8afca54e7861fd90fab5fdf4c42477a6b1cb7d293595148e674e0a3181de15",
 }
 LABEL = "pinvou.deployment-contracts"
+MANAGED_CONTRACT_ROOTS = {
+    "TestManagedRDSReleaseActualPostgres", "TestManagedRDSReleaseProductionHistoryPostgres",
+    "TestManagedBindingRejectsBeforeAnyNetworkAuthentication", "TestManagedReleaseInputsBindProviderAndPrivateCredentials",
+    "TestManagedFixtureDatabaseCleanupPostgres",
+}
 
 
-def prepare_dependencies(arguments, logfile):
+def run_logged_command(arguments, logfile, *, cwd=None, dependency_preparation=False):
     """Keep the complete private log; emit bounded, redacted failure evidence."""
     try:
         with logfile.open("w") as output:
-            subprocess.run(arguments, check=True, stdout=output, stderr=subprocess.STDOUT)
+            subprocess.run(arguments, check=True, stdout=output, stderr=subprocess.STDOUT, cwd=cwd)
     except subprocess.CalledProcessError as error:
         with logfile.open("rb") as output:
             output.seek(0, os.SEEK_END)
@@ -49,14 +56,114 @@ def prepare_dependencies(arguments, logfile):
         for name, value in os.environ.items():
             if len(value) >= 4 and re.search(r"TOKEN|PASSWORD|SECRET|CREDENTIAL|API_KEY", name, re.I):
                 tail = tail.replace(value, "[redacted]")
-        tail = re.sub(r"(?i)\b(?:https?|git\+https?)://[^\s<>\"']+", "[URL redacted]", tail)
+        tail = re.sub(r"(?i)\b(?:https?|git\+https?|postgres(?:ql)?)://[^\s<>\"']+", "[URL redacted]", tail)
         tail = re.sub(r"(?i)(authorization\s*[:=]\s*(?:bearer|basic)\s+)\S+", r"\1[redacted]", tail)
         tail = re.sub(r"(?i)((?:_authToken|password|token|secret)\s*[:=]\s*)\S+", r"\1[redacted]", tail)
         tail = "\n".join(tail.splitlines()[-100:])[-24000:]
-        print("DEPENDENCY_PREPARATION_FAILED exit=" + str(error.returncode) + " log=" + logfile.name, file=sys.stderr)
+        label = "DEPENDENCY_PREPARATION_FAILED" if dependency_preparation else "CONTRACT_COMMAND_FAILED"
+        print(label + " exit=" + str(error.returncode) + " log=" + logfile.name, file=sys.stderr)
         print(tail, file=sys.stderr)
         # CalledProcessError includes argv, which can contain GOPROXY secrets.
-        raise RuntimeError("dependency preparation failed; mandatory contracts did not run") from None
+        message = "dependency preparation failed; mandatory contracts did not run" if dependency_preparation else "deployment contract command failed; see redacted diagnostic"
+        raise RuntimeError(message) from None
+
+
+def prepare_dependencies(arguments, logfile, *, cwd=None):
+    run_logged_command(arguments, logfile, cwd=cwd, dependency_preparation=True)
+
+
+def ensure_postgres_image(reference, logfile):
+    """Reuse only the exact supported manifest; a tag alone is never a hit."""
+    if reference not in POSTGRES_PROFILES.values():
+        raise RuntimeError("PostgreSQL image must use a supported pinned digest")
+    digest = reference.split("@", 1)[1]
+    expected = {repository + "@" + digest for repository in (
+        "postgres", "library/postgres", "docker.io/library/postgres",
+    )}
+
+    def inspect():
+        result = subprocess.run(
+            ["docker", "image", "inspect", reference, "--format", "{{json .RepoDigests}}"],
+            text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=30,
+        )
+        if result.returncode:
+            return False
+        try:
+            digests = json.loads(result.stdout)
+        except (ValueError, TypeError):
+            raise RuntimeError("PostgreSQL image cache returned invalid digest metadata") from None
+        if not isinstance(digests, list) or not all(isinstance(item, str) for item in digests) or not expected.intersection(digests):
+            raise RuntimeError("PostgreSQL image cache does not match the pinned manifest")
+        return True
+
+    if inspect():
+        logfile.write_text("POSTGRES_IMAGE_CACHE_HIT " + reference + "\n")
+        print("POSTGRES_IMAGE_CACHE_HIT " + reference)
+        return
+    prepare_dependencies(["docker", "pull", reference], logfile)
+    if not inspect():
+        raise RuntimeError("PostgreSQL image is unavailable after preparation")
+
+
+def dependency_cache_options(environment):
+    """Expose download caches only to preparation, never replace its clean /gomod."""
+    mounts, values, destinations = [], [], {}
+
+    def mount(path, readonly):
+        path = Path(path).expanduser()
+        if not path.is_absolute() or any(char in str(path) for char in ",\r\n"):
+            raise RuntimeError("dependency cache must have an absolute Docker-bind-safe path")
+        if not path.is_dir():
+            return None
+        path = path.resolve()
+        if path == Path(path.anchor) or any(char in str(path) for char in ",\r\n"):
+            raise RuntimeError("dependency cache cannot expose a filesystem root or unsafe path")
+        key = (str(path), readonly)
+        if key not in destinations:
+            destination = "/runner-download-cache-" + str(len(destinations))
+            destinations[key] = destination
+            mounts.extend(["--mount", f"type=bind,src={path},dst={destination}" + (",readonly" if readonly else "")])
+        return destinations[key]
+
+    proxy = environment.get("GOPROXY") or "https://proxy.golang.org,direct"
+    if proxy != "off":
+        local = None
+        if environment.get("GOMODCACHE"):
+            local = mount(Path(environment["GOMODCACHE"]) / "cache/download", True)
+        parts = re.split(r"([,|])", proxy)
+        for index in range(0, len(parts), 2):
+            if not parts[index].startswith("file:"):
+                continue
+            uri = urlsplit(parts[index])
+            if uri.netloc not in ("", "localhost") or uri.query or uri.fragment:
+                raise RuntimeError("file Go proxy must identify a local directory")
+            destination = mount(url2pathname(uri.path), True)
+            if destination:
+                parts[index] = "file://" + destination
+        proxy = ("file://" + local + "," if local else "") + "".join(parts)
+    values.append("GOPROXY=" + proxy)
+    for name in ("GOSUMDB", "GOPRIVATE", "GONOSUMDB", "GONOPROXY", "GOVCS"):
+        if name in environment:
+            values.append(name + "=" + environment[name])
+    if environment.get("NPM_CONFIG_CACHE"):
+        destination = mount(environment["NPM_CONFIG_CACHE"], False)
+        if destination:
+            values += ["NPM_CONFIG_CACHE=" + destination, "NPM_CONFIG_PREFER_OFFLINE=true"]
+    return mounts, values
+
+
+def warm_runner_go_cache(source, logfile):
+    """In Actions, fill the existing Runner cache through its configured Go tool."""
+    if os.environ.get("GITHUB_ACTIONS") != "true" or not os.environ.get("GOMODCACHE"):
+        return False
+    go = shutil.which("go")
+    if not go:
+        return False  # Standalone Docker-only operators need no host Go toolchain.
+    cache = Path(os.environ["GOMODCACHE"]).expanduser()
+    if not cache.is_absolute() or cache.resolve() == Path(cache.anchor):
+        raise RuntimeError("Runner Go cache must be an explicit non-root absolute path")
+    prepare_dependencies([go, "mod", "download"], logfile, cwd=source)
+    return True
 
 
 def published_history(root, output):
@@ -108,8 +215,7 @@ def main():
             if logfile == "dependencies.log":
                 prepare_dependencies(arguments, artifacts / logfile)
             else:
-                with (artifacts / logfile).open("w") as output:
-                    subprocess.run(arguments, check=True, stdout=output, stderr=subprocess.STDOUT)
+                run_logged_command(arguments, artifacts / logfile)
         else:
             return subprocess.check_output(arguments, text=True).strip()
 
@@ -149,8 +255,11 @@ def main():
                   *caches, "-e", "GOMODCACHE=/gomod", "-e", "GOCACHE=/gobuild",
                   "-e", "GOTOOLCHAIN=local", "-e", "GOMAXPROCS=2", "-w", "/src/account-platform"]
 
-        def tools(arguments, logfile, network="none", environment=()):
-            command(common + ["--network", network] + [part for item in environment for part in ("-e", item)] + [image] + arguments, logfile)
+        def tools(arguments, logfile, network="none", environment=(), download_cache=False):
+            mounts, download_environment = dependency_cache_options(os.environ) if download_cache else ([], [])
+            variables = [*download_environment, *environment] if download_cache else environment
+            user = ["--user", f"{os.getuid()}:{os.getgid()}", "-e", "HOME=/tmp/pinvou-deployment-deps"] if download_cache else []
+            command(common + mounts + user + ["--network", network] + [part for item in variables for part in ("-e", item)] + [image] + arguments, logfile)
 
         def postgres(kind, user, database, data, tls=False):
             name = "pinvou-contract-" + kind + "-" + identity
@@ -181,14 +290,15 @@ def main():
             empty = work / "image-context"
             empty.mkdir()
             command(["docker", "build", "-t", image, "-f", str(ROOT / "account-platform/test/Dockerfile.deployment-control"), str(empty)], "tools-build.log")
-            command(["docker", "pull", postgres_image], "postgres-image.log")
-            tools(["sh", "-c", "go version && node --version && go mod download && go mod verify && npm ci --ignore-scripts"], "dependencies.log", "bridge", ["GOPROXY=" + os.environ.get("GOPROXY", "https://proxy.golang.org,direct")])
+            ensure_postgres_image(postgres_image, artifacts / "postgres-image.log")
+            warm_runner_go_cache(source / "account-platform", artifacts / "runner-go-download.log")
+            tools(["sh", "-c", "go version && node --version && go mod download && go mod verify && npm ci --ignore-scripts"], "dependencies.log", "bridge", download_cache=True)
             tools(["go", "build", "-trimpath", "-tags=nomsgpack", "-mod=readonly", "-o", "/out/bin/token-governance", "./cmd/token-governance"], "cli-build.log")
             tools(["sh", "-c", "openssl req -x509 -newkey rsa:2048 -nodes -keyout /fixture/server.key -out /fixture/ca.crt -days 2 -subj /CN=localhost -addext subjectAltName=IP:127.0.0.1,DNS:localhost && chown 70:70 /fixture/server.key && chmod 600 /fixture/server.key && chmod 644 /fixture/ca.crt"], "tls-fixture.log")
             (fixture / "pg_hba.conf").write_text("local all all trust\nhostssl all pinvou_control_fixture,token_migrator,account_policy_fixture,account_migrator,managed_dba_fixture 127.0.0.1/32 trust\nhostssl all all 127.0.0.1/32 scram-sha-256\nhost all all 0.0.0.0/0 reject\n")
             (fixture / "pg_hba.conf").chmod(0o644)
             managed = postgres("managed", "pinvou_control_fixture", "managed_control_fixture", "/var/lib/postgresql/data/managed_control_fixture", tls=True)
-            roots = {"TestManagedRDSReleaseActualPostgres", "TestManagedRDSReleaseProductionHistoryPostgres", "TestManagedBindingRejectsBeforeAnyNetworkAuthentication", "TestManagedReleaseInputsBindProviderAndPrivateCredentials"}
+            roots = MANAGED_CONTRACT_ROOTS
             selection = "^(" + "|".join(sorted(roots)) + ")$"
             tools(["go", "test", "-p", "1", "-race", "-json", "-tags=nomsgpack", "-mod=readonly", "-count=1", "-run", selection, "./cmd/token-release-prepare"], "managed.jsonl", "container:" + managed,
                   ["PINVOU_TEST_MANAGED_POSTGRES_URL=postgres://pinvou_control_fixture@127.0.0.1:5432/managed_control_fixture?sslmode=verify-full&sslrootcert=/fixture/ca.crt", "PINVOU_TEST_LEGACY_MIGRATIONS_DIRECTORY=/legacy", "PINVOU_TEST_RELEASE_CLI_DIRECTORY=/out/bin"])

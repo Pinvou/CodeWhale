@@ -73,7 +73,7 @@ spec:
         {{- include "pinvou.natsCredentialsInit" (dict "image" $app.image "client" $natsClient) | nindent 8 }}
         {{- else }}
         - name: prepare-keycloak-secret
-          image: "{{ $app.image.repository }}:{{ $app.image.tag }}"
+          image: {{ include "pinvou.imageRef" (dict "image" $app.image) | quote }}
           imagePullPolicy: {{ $app.image.pullPolicy }}
           command: ["/service"]
           args: ["prepare-keycloak-secret", "/var/run/bootstrap/pinvou/keycloak/client-secret", "/run/pinvou/keycloak-private/client-secret"]
@@ -86,7 +86,7 @@ spec:
       {{- end }}
       containers:
         - name: {{ $app.name }}
-          image: "{{ $app.image.repository }}:{{ $app.image.tag }}"
+          image: {{ include "pinvou.imageRef" (dict "image" $app.image) | quote }}
           imagePullPolicy: {{ $app.image.pullPolicy }}
           ports: [{ name: http, containerPort: 8080 }, { name: metrics, containerPort: 9090 }]
           securityContext: { allowPrivilegeEscalation: false, readOnlyRootFilesystem: true, capabilities: { drop: ["ALL"] } }

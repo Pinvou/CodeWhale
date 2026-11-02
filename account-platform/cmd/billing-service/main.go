@@ -31,6 +31,7 @@ import (
 	"github.com/Pinvou/pinvou3/account-platform/internal/platform/paymentcallback"
 	"github.com/Pinvou/pinvou3/account-platform/internal/platform/paymentsimulator"
 	"github.com/Pinvou/pinvou3/account-platform/internal/platform/serviceauth"
+	"github.com/Pinvou/pinvou3/account-platform/internal/platform/transit"
 )
 
 func main() {
@@ -96,6 +97,24 @@ func main() {
 		log.Fatal("BILLING_REGISTRATION_BONUS_CONFIGURATION_INVALID")
 	}
 	service := billing.NewService(repository).WithPayments(payments).WithRechargeProductCatalog(repository).WithAuthorizer(authorizer).WithApprovalExecutionGate(gate).WithAdminModelPriceProjection(modelPriceProjectionEnabled).WithRegistrationBonusEligibilityVerifier(bonusEligibility)
+	service.WithProductAdmissionEnvironment(cfg.Environment)
+	materialEnabled, err := optionalBooleanEnvironment("BILLING_PRODUCT_ADMISSION_MATERIALS_ENABLED", false)
+	if err != nil {
+		log.Fatal("BILLING_PRODUCT_ADMISSION_MATERIAL_CONFIGURATION_INVALID")
+	}
+	if materialEnabled {
+		uid, e := strconv.ParseUint(os.Getenv("BILLING_PRODUCT_ADMISSION_VALIDATOR_UID"), 10, 32)
+		if e != nil || uid == 0 {
+			log.Fatal("BILLING_PRODUCT_ADMISSION_MATERIAL_CONFIGURATION_INVALID")
+		}
+		e = billing.ConfigureProductAdmissionMaterials(service, repository, billing.ProductAdmissionMaterialConfig{
+			ValidatorSocket: os.Getenv("BILLING_PRODUCT_ADMISSION_VALIDATOR_SOCKET"), ValidatorUID: uint32(uid),
+			Transit: transit.Config{Environment: cfg.Environment, KeyID: os.Getenv("BILLING_PRODUCT_ADMISSION_KEY_ID"), RemoteURL: os.Getenv("BILLING_PRODUCT_ADMISSION_TRANSIT_URL"), RemoteTokenFile: os.Getenv("BILLING_PRODUCT_ADMISSION_TRANSIT_TOKEN_FILE"), TransitCAFile: os.Getenv("BILLING_PRODUCT_ADMISSION_TRANSIT_CA_FILE")},
+		})
+		if e != nil {
+			log.Fatal("BILLING_PRODUCT_ADMISSION_MATERIAL_CONFIGURATION_INVALID")
+		}
+	}
 	closureStates, err := billing.NewHTTPAccountClosureStateVerifier(os.Getenv("ACCOUNT_HTTP_URL"), credential)
 	if err != nil {
 		log.Fatal("BILLING_ACCOUNT_CLOSURE_CONFIGURATION_INVALID")

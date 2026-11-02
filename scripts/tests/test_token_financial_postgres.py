@@ -15,6 +15,17 @@ RUNNER = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(RUNNER)
 
 
+CHECKPOINT_LEAF_ROOTS = {
+    "TestRegistrationBonusEligibilityCheckpointPostgresIntegration",
+    "TestRegistrationBonusCheckpointGuardsPostgresIntegration",
+    "TestRegistrationBonusCheckpointMigrationPostgresIntegration",
+    "TestRegistrationBonusEligibilityReadyAndLifetimePostgresIntegration",
+    "TestRegistrationBonusEligibilityBlockedConsumesNewMobilesPostgresIntegration",
+}
+CHECKPOINT_FOREIGN_ROOT = "TestRegistrationBonusCheckpointForeignFactsPostgresIntegration"
+CHECKPOINT_FOREIGN_CHILDREN = {"unbound-existing-facts", "foreign-key-before-finalize"}
+
+
 class FinancialPostgresRunnerTests(unittest.TestCase):
     def test_pending_expiry_requires_owner_windows_and_historical_fallback(self):
         required = {
@@ -286,6 +297,51 @@ class FinancialPostgresRunnerTests(unittest.TestCase):
         for action in ["skip", "fail"]:
             with self.subTest(action=action), self.assertRaises(RuntimeError):
                 RUNNER.verify_results(events + [{"Action": action, "Package": RUNNER.ACCOUNT_PACKAGE, "Test": name}], RUNNER.ACCOUNT_REQUIRED, **options)
+
+    def test_registration_bonus_checkpoint_roots_are_mandatory(self):
+        names = CHECKPOINT_LEAF_ROOTS | {CHECKPOINT_FOREIGN_ROOT}
+        self.assertTrue(names <= RUNNER.ACCOUNT_REQUIRED)
+        self.assertEqual(RUNNER.ACCOUNT_LEAF_REQUIRED, CHECKPOINT_LEAF_ROOTS)
+        self.assertEqual(RUNNER.ACCOUNT_CHILD_REQUIRED, RUNNER.ACCOUNT_REQUIRED - CHECKPOINT_LEAF_ROOTS)
+        self.assertEqual(RUNNER.EXACT_REQUIRED_CHILDREN[CHECKPOINT_FOREIGN_ROOT], CHECKPOINT_FOREIGN_CHILDREN)
+        self.run_main_fixture()
+        command = self.fixture_commands[self.fixture_phases.index("owner-account")]
+        pattern = command[command.index("-run") + 1]
+        events = self.account_checkpoint_shape(self.events(RUNNER.ACCOUNT_REQUIRED, RUNNER.ACCOUNT_PACKAGE, children=True))
+        options = {"package": RUNNER.ACCOUNT_PACKAGE, "exact_roots": True, "require_children": True,
+                   "children_required": RUNNER.ACCOUNT_CHILD_REQUIRED}
+        RUNNER.verify_results(events, RUNNER.ACCOUNT_REQUIRED, **options)
+        for leaf in CHECKPOINT_LEAF_ROOTS:
+            self.assertFalse(any(e.get("Test", "").startswith(leaf + "/") for e in events))
+        for name in names:
+            self.assertIn(name, pattern)
+            for invalid in (
+                [e for e in events if e.get("Test", "").split("/", 1)[0] != name],
+                [e for e in events if not (e.get("Test") == name and e.get("Action") == "run")],
+                [e for e in events if not (e.get("Test") == name and e.get("Action") == "pass")],
+                events + [{"Action": "skip", "Package": RUNNER.ACCOUNT_PACKAGE, "Test": name}],
+                events + [{"Action": "fail", "Package": RUNNER.ACCOUNT_PACKAGE, "Test": name}],
+            ):
+                with self.subTest(root=name), self.assertRaises(RuntimeError):
+                    RUNNER.verify_results(invalid, RUNNER.ACCOUNT_REQUIRED, **options)
+        for child in CHECKPOINT_FOREIGN_CHILDREN:
+            for invalid in (
+                [e for e in events if e.get("Test") != CHECKPOINT_FOREIGN_ROOT + "/" + child],
+                events + [{"Action": "skip", "Package": RUNNER.ACCOUNT_PACKAGE, "Test": CHECKPOINT_FOREIGN_ROOT + "/" + child}],
+                events + [{"Action": "fail", "Package": RUNNER.ACCOUNT_PACKAGE, "Test": CHECKPOINT_FOREIGN_ROOT + "/" + child}],
+            ):
+                with self.subTest(child=child), self.assertRaises(RuntimeError):
+                    RUNNER.verify_results(invalid, RUNNER.ACCOUNT_REQUIRED, **options)
+        invalid = [e for e in events if not e.get("Test", "").startswith(CHECKPOINT_FOREIGN_ROOT + "/")]
+        with self.assertRaises(RuntimeError):
+            RUNNER.verify_results(invalid, RUNNER.ACCOUNT_REQUIRED, **options)
+
+    def account_checkpoint_shape(self, events):
+        # The five real Go roots are leaves. The sixth has these two real children,
+        # never the generic helper's invented /actual child.
+        return [e for e in events
+                if not (e.get("Test", "").split("/", 1)[0] in CHECKPOINT_LEAF_ROOTS and "/" in e.get("Test", ""))
+                and e.get("Test") != CHECKPOINT_FOREIGN_ROOT + "/actual"]
 
     def test_duplicate_forced_refund_requires_all_four_order_and_proof_cases(self):
         root = "TestLedgerRepairAuthorityDuplicateForcedRefundPostgres"
@@ -975,6 +1031,8 @@ class FinancialPostgresRunnerTests(unittest.TestCase):
                 else:
                     self.assertNotIn("PINVOU_TEST_TOKEN_DATABASE_URL", kwargs["env"])
                 events = self.events(required, package, children=phase != "retained-token")
+                if phase == "owner-account":
+                    events = self.account_checkpoint_shape(events)
                 if phase == "retained-token" and missing_token_children:
                     events = [event for event in events if "/" not in event.get("Test", "")]
                 if phase == "retained-token" and not missing_token_children:
@@ -1259,6 +1317,12 @@ class FinancialPostgresRunnerTests(unittest.TestCase):
             "TestOrganizationUnitAuthorityWallClockPostgres",
             "TestApprovalListPoolRuntimePostgres",
             "TestPasswordPreparationAuthorizationPostgres",
+            "TestRegistrationBonusEligibilityCheckpointPostgresIntegration",
+            "TestRegistrationBonusCheckpointGuardsPostgresIntegration",
+            "TestRegistrationBonusCheckpointMigrationPostgresIntegration",
+            "TestRegistrationBonusCheckpointForeignFactsPostgresIntegration",
+            "TestRegistrationBonusEligibilityReadyAndLifetimePostgresIntegration",
+            "TestRegistrationBonusEligibilityBlockedConsumesNewMobilesPostgresIntegration",
         })
         for name in RUNNER.ACCOUNT_REQUIRED:
             with self.subTest(name=name), self.assertRaises(RuntimeError):
