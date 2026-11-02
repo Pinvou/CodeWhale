@@ -2579,6 +2579,8 @@ dictEn["remoteConversation"] = {
   permissionModeRequired: "The controlled device has not configured permissions for this task channel. Open Settings → Remote control on that device, select YOLO or Plan, then create a new remote session and send again.",
   taskRejectedInvalid: "The controlled device rejected the task input or task mode. Update both clients, create a new remote session, check the input and send again.",
   taskRejectedBusy: "The controlled session is busy and did not accept this task. Wait for the current task to finish, then send again.",
+  taskGenerationStale: "The remote task or connection state changed or could not be confirmed. Check the original task status before reconnecting and deciding whether to retry.",
+  taskAttachmentsInvalid: "An attachment is unavailable or expired. Check the original task status, then review and select the attachment again.",
   taskRejectedCapacity: "The controlled device reached this connection's task-record limit and did not accept this task. Turn remote control off and on there, then create a new remote session and send again.",
   taskRejectedGeneric: "The controlled device did not accept this task. Use the code below to check its permission, model and workspace settings or logs. Resolve the issue, create a new remote session and send again.",
   taskRejectedWorkspace: "The controlled device rejected workspace access. Authorize the required folder on that device, reconnect, select that workspace and send again.",

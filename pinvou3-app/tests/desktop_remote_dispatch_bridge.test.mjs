@@ -240,6 +240,52 @@ test('B local send preserves local attachments and skills without leaking parsed
   assert.equal(state.desktopRemoteControl.controlledTasks[0].status, 'admitted');
 });
 
+test('B local send preserves admission identity for a later terminal reason', async () => {
+  const { feature, state, logic } = installFeature((command) => {
+    if (command === 'desktop_remote_controlled_task_send') return Promise.resolve({
+      task_id: 'task-1', session_id: 'session-1', task_status: 'failed',
+      generation: 'generation-1', sequence: '7', modelSource: 'controlled_device',
+    });
+    return undefined;
+  });
+  state.desktopRemoteControl = logic.applyControlledStatus(state.desktopRemoteControl, {
+    status: 'connected', generation: 'generation-1',
+  });
+  state.desktopRemoteControl = logic.applyControlledSession(state.desktopRemoteControl, {
+    sessionId: 'session-1', sessionRef: 'ref-1', generation: 'generation-1', lane: 'chat',
+  });
+  await feature.controlledTaskSend('session-1', 'hello', [], []);
+  const status = state.desktopRemoteControl.controlledTasks[0];
+  assert.equal(status.taskSequence, '7');
+  state.desktopRemoteControl = logic.applyControlledTaskEvent(state.desktopRemoteControl, {
+    taskId: 'task-1', sessionId: 'session-1', generation: 'generation-1', sequence: '7',
+    status: 'failed', terminalReason: 'task_attachments_invalid',
+  });
+  assert.equal(state.desktopRemoteControl.controlledTasks[0].terminalReason, 'task_attachments_invalid');
+});
+
+test('terminal event before B command response preserves the same admitted prompt', async () => {
+  let release;
+  const { feature, state, logic } = installFeature((command) => {
+    if (command === 'desktop_remote_controlled_task_send') return new Promise(resolve => { release = resolve; });
+    return undefined;
+  });
+  state.desktopRemoteControl = logic.applyControlledStatus(state.desktopRemoteControl, { status: 'connected', generation: 'generation-1' });
+  state.desktopRemoteControl = logic.applyControlledSession(state.desktopRemoteControl, { sessionId: 'session-1', sessionRef: 'ref-1', generation: 'generation-1', lane: 'chat' });
+  const pending = feature.controlledTaskSend('session-1', 'hello', [], []);
+  assert.equal(typeof release, 'function', 'command response is pending');
+  state.desktopRemoteControl = logic.applyControlledTaskEvent(state.desktopRemoteControl, {
+    taskId: 'task-1', sessionId: 'session-1', generation: 'generation-1', sequence: '7',
+    status: 'failed', terminalReason: 'task_attachments_invalid',
+  });
+  release({ task_id: 'task-1', session_id: 'session-1', task_status: 'failed', generation: 'generation-1', sequence: '7' });
+  await pending;
+  const task = state.desktopRemoteControl.controlledTasks[0];
+  assert.equal(task.text, 'hello');
+  assert.equal(task.status, 'failed');
+  assert.equal(task.terminalReason, 'task_attachments_invalid');
+});
+
 test('B local capability read reuses the negotiated snapshot command', async () => {
   const snapshot = {
     capabilityRevision: '7', connectionId: 'connection-1', controllerLeaseId: 'lease-1',

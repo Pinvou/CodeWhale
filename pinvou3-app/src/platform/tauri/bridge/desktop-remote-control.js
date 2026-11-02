@@ -696,13 +696,15 @@
         attachments: sources,
       }).catch(function (failure) { throw asBoundedError(failure); });
       var projection = result && typeof result === "object" ? result : {};
-      // The B Command returns the frozen task_status protocol projection.
+      // The B command extends its local status projection with the admission
+      // sequence; the encrypted task_status protocol itself remains frozen.
       var taskId = projection.task_id || null;
       if (taskId && projection.session_id === sessionId && projection.task_status) {
         publish(logic.applyControlledTaskEvent(current(), {
           taskId: taskId,
           sessionId: projection.session_id,
           generation: projection.generation,
+          sequence: projection.sequence,
           modelSource: projection.modelSource,
           status: projection.task_status,
           text: visibleText,
