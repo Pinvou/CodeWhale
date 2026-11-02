@@ -5,13 +5,15 @@
 use anyhow::{Result, bail};
 use std::collections::HashSet;
 
+use super::projection_reason::{apply_snapshot, merge_entry_reason};
+
 use super::binding::{LiveRemoteContext, require_live_mapping_locked};
 use super::persistence::persist_changed;
 use super::schema::{
-    AuthenticatedCursor, MAX_PROJECTION_BYTES, MAX_PROJECTION_ENTRIES, MAX_RETIRED_EPOCHS,
-    MAX_RETIRED_REQUESTS, PendingDispatchState, PendingRemoteRequest, ProjectionEntry,
-    ProjectionKind, RemoteProxyRecord, RetiredRemoteRequest, RetiredRequestDisposition,
-    SnapshotCandidate, SnapshotVerificationPort, validate_snapshot_window,
+    AuthenticatedCursor, MAX_PROJECTION_BYTES, MAX_PROJECTION_ENTRIES, MAX_RETIRED_REQUESTS,
+    PendingDispatchState, PendingRemoteRequest, ProjectionEntry, ProjectionKind, RemoteProxyRecord,
+    RetiredRemoteRequest, RetiredRequestDisposition, SnapshotCandidate, SnapshotVerificationPort,
+    validate_snapshot_window,
 };
 use crate::features::sessions::SessionStore;
 
@@ -51,58 +53,6 @@ fn trim_projection_window(record: &mut RemoteProxyRecord) -> Result<()> {
     // The durable cursor remains the newest authenticated sequence. Removed
     // display text is never authority for replay/ACK or task id reuse.
     record.projection.validate()
-}
-
-fn retire_snapshot_terminals(
-    record: &mut RemoteProxyRecord,
-    projection: &super::schema::AuthenticatedProjection,
-) -> Result<()> {
-    let mut terminal_tasks = HashSet::new();
-    for entry in &projection.entries {
-        if entry.kind != ProjectionKind::Status
-            || !matches!(
-                entry.body.as_deref(),
-                Some("succeeded" | "failed" | "cancelled" | "interrupted")
-            )
-        {
-            continue;
-        }
-        let task_id = entry
-            .task_id
-            .as_deref()
-            .ok_or_else(|| anyhow::anyhow!("remote snapshot terminal task missing"))?;
-        if !terminal_tasks.insert(task_id) {
-            bail!("remote snapshot contains duplicate terminal task");
-        }
-        let matches: Vec<_> = record
-            .pending
-            .iter()
-            .enumerate()
-            .filter(|(_, pending)| pending.task_id == task_id)
-            .collect();
-        if matches.len() > 1 {
-            bail!("remote snapshot terminal correlation is ambiguous");
-        }
-        let Some((index, pending)) = matches.first() else {
-            // B-local tasks and previously retired A tasks carry no live A
-            // outbox record. Their authenticated status remains display-only.
-            continue;
-        };
-        if pending.dispatch_state != PendingDispatchState::AttemptMayHaveOccurred
-            || record.retired_requests.len() >= MAX_RETIRED_REQUESTS
-        {
-            bail!("remote snapshot terminal correlation or capacity mismatch");
-        }
-        let retired = RetiredRemoteRequest {
-            client_request_id: pending.client_request_id.clone(),
-            task_id: pending.task_id.clone(),
-            request_fingerprint: pending.request_fingerprint.clone(),
-            disposition: RetiredRequestDisposition::Terminal,
-        };
-        record.pending.remove(*index);
-        record.retired_requests.push(retired);
-    }
-    Ok(())
 }
 
 impl SessionStore {
@@ -162,8 +112,10 @@ impl SessionStore {
         )
     }
 
-    /// One event key has one immutable content. Repeated authenticated delivery
-    /// is a no-op, not another disk write or UI notification.
+    /// One event key has immutable content apart from an authenticated,
+    /// closed-set reason that may enrich an otherwise identical older event.
+    /// Identical deliveries are no-ops; enrichment is persisted and triggers
+    /// a UI notification attempt.
     pub(crate) fn project_authenticated_remote_entry(
         &self,
         local_session_id: &str,
@@ -186,14 +138,19 @@ impl SessionStore {
             .get(local_session_id)
             .ok_or_else(|| anyhow::anyhow!("unknown RemoteProxy"))?
             .clone();
-        if let Some(previous) = record.projection.entries.iter().find(|old| {
+        if let Some(index) = record.projection.entries.iter().position(|old| {
             (old.journal_epoch == entry.journal_epoch && old.sequence == entry.sequence)
                 || old.event_id == entry.event_id
         }) {
-            if previous == &entry {
+            let previous = &record.projection.entries[index];
+            let merged = merge_entry_reason(previous, &entry)?;
+            if previous == &merged {
                 return Ok(ProjectionWrite::Unchanged);
             }
-            bail!("remote journal event key or id was reused with different content");
+            record.projection.entries[index] = merged;
+            trim_projection_window(&mut record)?;
+            persist_changed(&mut state, local_session_id, record)?;
+            return Ok(ProjectionWrite::Inserted);
         }
         require_next(&record, &entry)?;
         if record.retired_epochs.contains(&entry.journal_epoch) {
@@ -256,54 +213,9 @@ impl SessionStore {
         {
             bail!("retired journal epoch cannot be restored");
         }
-        if let Some(previous) = &record.authenticated_cursor {
-            if previous.journal_epoch == candidate.cursor.journal_epoch {
-                if candidate.cursor.sequence < previous.sequence {
-                    bail!("remote snapshot cursor moved backwards");
-                }
-                // Authentication proves the sender, not immutability of the
-                // retained history. A forward snapshot must obey the same
-                // event-key/id rule as a single-entry write before retiring
-                // pending requests or replacing any persisted state.
-                for incoming in &candidate.projection.entries {
-                    if record.projection.entries.iter().any(|existing| {
-                        ((existing.journal_epoch == incoming.journal_epoch
-                            && existing.sequence == incoming.sequence)
-                            || existing.event_id == incoming.event_id)
-                            && existing != incoming
-                    }) {
-                        bail!("remote snapshot event key or id was reused with different content");
-                    }
-                }
-                if candidate.cursor.sequence == previous.sequence {
-                    if candidate.projection == record.projection {
-                        return Ok(ProjectionWrite::Unchanged);
-                    }
-                    let existing = &record.projection.entries;
-                    let incoming = &candidate.projection.entries;
-                    // B's 256-KiB byte window may have trimmed more than A's
-                    // count/byte window at the same authenticated cursor.
-                    // Only a shorter, byte-identical suffix is a valid
-                    // replacement; there must be a common cursor-tail event.
-                    if incoming.is_empty()
-                        || existing.is_empty()
-                        || incoming.len() >= existing.len()
-                        || incoming.last() != existing.last()
-                        || !existing.ends_with(incoming)
-                    {
-                        bail!("same remote cursor has conflicting snapshot content");
-                    }
-                }
-            } else {
-                if record.retired_epochs.len() >= MAX_RETIRED_EPOCHS {
-                    bail!("retired journal epoch capacity reached");
-                }
-                record.retired_epochs.push(previous.journal_epoch.clone());
-            }
+        if !apply_snapshot(&mut record, candidate)? {
+            return Ok(ProjectionWrite::Unchanged);
         }
-        retire_snapshot_terminals(&mut record, &candidate.projection)?;
-        record.projection = candidate.projection;
-        record.authenticated_cursor = Some(candidate.cursor);
         persist_changed(&mut state, local_session_id, record)?;
         Ok(ProjectionWrite::Inserted)
     }
@@ -340,7 +252,7 @@ impl SessionStore {
             .get(local_session_id)
             .ok_or_else(|| anyhow::anyhow!("unknown RemoteProxy"))?
             .clone();
-        if let Some(previous) = record.projection.entries.iter().find(|old| {
+        if let Some(index) = record.projection.entries.iter().position(|old| {
             (old.journal_epoch == entry.journal_epoch && old.sequence == entry.sequence)
                 || old.event_id == entry.event_id
         }) {
@@ -350,8 +262,16 @@ impl SessionStore {
                     && item.request_fingerprint == fingerprint
                     && item.disposition == RetiredRequestDisposition::Terminal
             });
-            if previous == &entry && retired {
-                return Ok(ProjectionWrite::Unchanged);
+            if retired {
+                let previous = &record.projection.entries[index];
+                let merged = merge_entry_reason(previous, &entry)?;
+                if previous == &merged {
+                    return Ok(ProjectionWrite::Unchanged);
+                }
+                record.projection.entries[index] = merged;
+                trim_projection_window(&mut record)?;
+                persist_changed(&mut state, local_session_id, record)?;
+                return Ok(ProjectionWrite::Inserted);
             }
             bail!("terminal event conflicts with prior projection or retirement");
         }
@@ -434,6 +354,7 @@ mod tests {
             kind: ProjectionKind::AssistantMessage,
             task_id: Some("task-1".into()),
             body: Some(body.into()),
+            terminal_reason: None,
             attachments: Vec::new(),
         }
     }
@@ -449,6 +370,190 @@ mod tests {
         ) -> Result<()> {
             Ok(())
         }
+    }
+
+    #[test]
+    fn legacy_failed_entry_is_enriched_without_changing_cursor_or_event_identity() {
+        let temp = tempfile::tempdir().unwrap();
+        let store = SessionStore::boot_at_test_dir(temp.path()).unwrap();
+        let live = live();
+        let (local, remote_ref) = opened(&store, &live);
+        let mut legacy = entry(1, "failed");
+        legacy.kind = ProjectionKind::Status;
+        store
+            .project_authenticated_remote_entry(
+                &local,
+                &remote_ref,
+                &live,
+                "b-session-1",
+                legacy.clone(),
+            )
+            .unwrap();
+        let before = store.remote_proxy_snapshot(&local).unwrap();
+        let mut enriched = legacy.clone();
+        enriched.terminal_reason = Some("task_generation_stale".into());
+        assert_eq!(
+            store
+                .project_authenticated_remote_entry(
+                    &local,
+                    &remote_ref,
+                    &live,
+                    "b-session-1",
+                    enriched.clone()
+                )
+                .unwrap(),
+            ProjectionWrite::Inserted
+        );
+        let after = store.remote_proxy_snapshot(&local).unwrap();
+        assert_eq!(before.authenticated_cursor, after.authenticated_cursor);
+        assert_eq!(after.projection.entries, vec![enriched.clone()]);
+        assert_eq!(
+            store
+                .project_authenticated_remote_entry(
+                    &local,
+                    &remote_ref,
+                    &live,
+                    "b-session-1",
+                    legacy.clone()
+                )
+                .unwrap(),
+            ProjectionWrite::Unchanged
+        );
+        let mut conflict = enriched.clone();
+        conflict.terminal_reason = Some("task_attachments_invalid".into());
+        assert!(
+            store
+                .project_authenticated_remote_entry(
+                    &local,
+                    &remote_ref,
+                    &live,
+                    "b-session-1",
+                    conflict
+                )
+                .is_err()
+        );
+        let mut forged = enriched.clone();
+        forged.event_id = "different-id".into();
+        assert!(
+            store
+                .project_authenticated_remote_entry(
+                    &local,
+                    &remote_ref,
+                    &live,
+                    "b-session-1",
+                    forged
+                )
+                .is_err()
+        );
+        let snapshot = SnapshotCandidate {
+            projection: AuthenticatedProjection {
+                schema_version: 1,
+                entries: vec![legacy],
+            },
+            cursor: after.authenticated_cursor.unwrap(),
+        };
+        assert_eq!(
+            store
+                .project_authenticated_remote_snapshot(
+                    &local,
+                    &remote_ref,
+                    &live,
+                    "b-session-1",
+                    snapshot,
+                    &AcceptSnapshot
+                )
+                .unwrap(),
+            ProjectionWrite::Unchanged
+        );
+        drop(store);
+        let restarted = SessionStore::boot_at_test_dir(temp.path()).unwrap();
+        assert_eq!(
+            restarted
+                .remote_proxy_snapshot(&local)
+                .unwrap()
+                .projection
+                .entries,
+            vec![enriched]
+        );
+    }
+
+    #[test]
+    fn same_cursor_snapshot_can_enrich_but_cannot_rewrite_legacy_entry() {
+        let temp = tempfile::tempdir().unwrap();
+        let store = SessionStore::boot_at_test_dir(temp.path()).unwrap();
+        let live = live();
+        let (local, remote_ref) = opened(&store, &live);
+        let mut legacy = entry(1, "failed");
+        legacy.kind = ProjectionKind::Status;
+        store
+            .project_authenticated_remote_entry(
+                &local,
+                &remote_ref,
+                &live,
+                "b-session-1",
+                legacy.clone(),
+            )
+            .unwrap();
+        let mut enriched = legacy.clone();
+        enriched.terminal_reason = Some("task_attachments_invalid".into());
+        let snapshot = SnapshotCandidate {
+            projection: AuthenticatedProjection {
+                schema_version: 1,
+                entries: vec![enriched.clone()],
+            },
+            cursor: AuthenticatedCursor {
+                journal_epoch: "journal-1".into(),
+                sequence: 1,
+            },
+        };
+        assert_eq!(
+            store
+                .project_authenticated_remote_snapshot(
+                    &local,
+                    &remote_ref,
+                    &live,
+                    "b-session-1",
+                    snapshot.clone(),
+                    &AcceptSnapshot
+                )
+                .unwrap(),
+            ProjectionWrite::Inserted
+        );
+        assert_eq!(
+            store
+                .project_authenticated_remote_snapshot(
+                    &local,
+                    &remote_ref,
+                    &live,
+                    "b-session-1",
+                    snapshot.clone(),
+                    &AcceptSnapshot
+                )
+                .unwrap(),
+            ProjectionWrite::Unchanged
+        );
+        let mut forged = snapshot;
+        forged.projection.entries[0].event_id = "replacement".into();
+        assert!(
+            store
+                .project_authenticated_remote_snapshot(
+                    &local,
+                    &remote_ref,
+                    &live,
+                    "b-session-1",
+                    forged,
+                    &AcceptSnapshot
+                )
+                .is_err()
+        );
+        assert_eq!(
+            store
+                .remote_proxy_snapshot(&local)
+                .unwrap()
+                .projection
+                .entries,
+            vec![enriched]
+        );
     }
 
     #[test]
