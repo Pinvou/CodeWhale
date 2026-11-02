@@ -70,7 +70,8 @@ CONTRACTS = [
     ("ledger-repair-approval-proof", "./internal/account", LEDGER_REPAIR_APPROVAL_ROOTS, {}),
     ("account-anonymization", "./internal/account",
      {"TestAccountClosureAnonymizesOwnedHistoricalContacts", "TestAccountClosureRollbackPreservesEvidence",
-      "TestAccountClosureSelfServiceRecoveryPostgres", "TestF08ClosureAdvanceFailureIsScheduledPostgres"}, {}),
+      "TestAccountClosureSelfServiceRecoveryPostgres", "TestF08ClosureAdvanceFailureIsScheduledPostgres",
+      "TestAccountClosureBlockedSLAAlertsPostgres"}, {}),
 ]
 
 
