@@ -53,6 +53,14 @@ enum FimError {
     PrefixNotFound(String),
     #[error("Suffix anchor not found after prefix anchor: '{0}'")]
     SuffixNotFound(String),
+    #[error(
+        "Prefix anchor matches {1} locations in the file: '{0}'. Use a longer anchor that appears exactly once."
+    )]
+    PrefixAmbiguous(String, usize),
+    #[error(
+        "Suffix anchor matches {1} locations after the prefix anchor: '{0}'. Use a longer anchor that appears exactly once."
+    )]
+    SuffixAmbiguous(String, usize),
     #[error("Prefix and suffix anchors overlap (suffix starts at {0}, prefix ends at {1})")]
     AnchorsOverlap(usize, usize),
     #[error("FIM API call failed: {0}")]
@@ -85,11 +93,11 @@ impl ToolSpec for FimEditTool {
                 },
                 "prefix_anchor": {
                     "type": "string",
-                    "description": "Text anchor marking the end of the prefix. Everything up to and including this anchor is kept as-is before the generated middle."
+                    "description": "Text anchor marking the end of the prefix. Everything up to and including this anchor is kept as-is before the generated middle. Must appear exactly once in the file."
                 },
                 "suffix_anchor": {
                     "type": "string",
-                    "description": "Text anchor marking the start of the suffix. Everything from this anchor onward is kept as-is after the generated middle."
+                    "description": "Text anchor marking the start of the suffix. Everything from this anchor onward is kept as-is after the generated middle. Must appear exactly once after the prefix anchor."
                 },
                 "max_tokens": {
                     "type": "integer",
@@ -129,14 +137,30 @@ impl ToolSpec for FimEditTool {
                 FimError::PrefixNotFound(prefix_anchor.to_string()).to_string(),
             )
         })?;
+        // The anchors are matched at their first occurrence; an anchor that
+        // repeats would silently generate the middle at the wrong site, so
+        // ambiguity is refused instead of guessed.
+        let prefix_matches = content.matches(prefix_anchor).count();
+        if prefix_matches > 1 {
+            return Err(ToolError::execution_failed(
+                FimError::PrefixAmbiguous(prefix_anchor.to_string(), prefix_matches).to_string(),
+            ));
+        }
         let prefix_end = prefix_pos + prefix_anchor.len();
 
         // 3. Find suffix anchor (after prefix anchor)
-        let suffix_pos = content[prefix_end..].find(suffix_anchor).ok_or_else(|| {
+        let suffix_region = &content[prefix_end..];
+        let suffix_pos = suffix_region.find(suffix_anchor).ok_or_else(|| {
             ToolError::execution_failed(
                 FimError::SuffixNotFound(suffix_anchor.to_string()).to_string(),
             )
         })?;
+        let suffix_matches = suffix_region.matches(suffix_anchor).count();
+        if suffix_matches > 1 {
+            return Err(ToolError::execution_failed(
+                FimError::SuffixAmbiguous(suffix_anchor.to_string(), suffix_matches).to_string(),
+            ));
+        }
         let suffix_start = prefix_end + suffix_pos;
 
         // 4. Validate anchors don't overlap
@@ -199,5 +223,74 @@ mod tests {
         assert!(capabilities.contains(&ToolCapability::WritesFiles));
         assert!(!capabilities.contains(&ToolCapability::ReadOnly));
         assert!(!tool.is_read_only());
+    }
+
+    fn workspace_with(content: &str) -> (tempfile::TempDir, ToolContext) {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let context = ToolContext::new(tmp.path().to_path_buf());
+        std::fs::write(tmp.path().join("sample.txt"), content).expect("write fixture");
+        (tmp, context)
+    }
+
+    async fn refused(input: serde_json::Value, context: &ToolContext) -> String {
+        FimEditTool::new(None, "fim-model".to_string())
+            .execute(input, context)
+            .await
+            .expect_err("ambiguous anchor must be refused")
+            .to_string()
+    }
+
+    #[tokio::test]
+    async fn ambiguous_prefix_anchor_is_refused_not_first_occurrence_edited() {
+        let (_tmp, context) = workspace_with("fn a() {}\nfn main() {}\nfn a() {}\nlet _ = a;\n");
+        let message = refused(
+            serde_json::json!({
+                "path": "sample.txt",
+                "prefix_anchor": "fn a() {}",
+                "suffix_anchor": "let _ = a;",
+            }),
+            &context,
+        )
+        .await;
+        assert!(message.contains("matches 2 locations"), "{message}");
+        assert!(message.contains("exactly once"), "{message}");
+    }
+
+    #[tokio::test]
+    async fn ambiguous_suffix_anchor_is_refused() {
+        let (_tmp, context) = workspace_with("head\nreturn 1\nmid\nreturn 1\ntail\n");
+        let message = refused(
+            serde_json::json!({
+                "path": "sample.txt",
+                "prefix_anchor": "head",
+                "suffix_anchor": "return 1",
+            }),
+            &context,
+        )
+        .await;
+        assert!(
+            message.contains("Suffix anchor matches 2 locations"),
+            "{message}"
+        );
+    }
+
+    #[tokio::test]
+    async fn unique_anchors_pass_validation_and_reach_the_fim_call() {
+        let (_tmp, context) = workspace_with("head\nmid\ntail\n");
+        // With no client configured the call fails at the API boundary; that
+        // error proves the anchor validation accepted the unique anchors.
+        let message = refused(
+            serde_json::json!({
+                "path": "sample.txt",
+                "prefix_anchor": "head",
+                "suffix_anchor": "tail",
+            }),
+            &context,
+        )
+        .await;
+        assert!(
+            message.contains("FIM API client not available"),
+            "unique anchors must reach the API boundary: {message}"
+        );
     }
 }
