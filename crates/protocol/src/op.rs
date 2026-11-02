@@ -766,6 +766,60 @@ mod tests {
     }
 
     #[test]
+    fn change_mode_without_ask_on_guardrail_keeps_the_current_arming() {
+        // Pre-arming hosts emit ChangeMode with no `ask_on_guardrail` key at
+        // all. The absent field must deserialize to `None` (= keep the
+        // session's current arming), and an unarmed op must serialize without
+        // the key: a `serde(default)` or `skip_serializing_if` regression
+        // would hard-require the field on the wire and break every legacy
+        // sender (or leak the key into every unarmed op).
+        let full = serde_json::to_value(Op::ChangeMode {
+            mode: "operate".into(),
+            allow_shell: true,
+            trust_mode: true,
+            auto_approve: false,
+            approval_mode: "bypass".into(),
+            configured_sandbox_mode: Some("workspace-write".into()),
+            ask_on_guardrail: Some(true),
+        })
+        .unwrap();
+        let legacy = {
+            let mut value = full.clone();
+            value
+                .as_object_mut()
+                .expect("ChangeMode serializes to an object")
+                .remove("ask_on_guardrail")
+                .expect("the armed op carries the field");
+            value
+        };
+        let op: Op = serde_json::from_value(legacy).expect("legacy ChangeMode payload must parse");
+        match op {
+            Op::ChangeMode {
+                ask_on_guardrail, ..
+            } => assert_eq!(
+                ask_on_guardrail, None,
+                "an absent arming key must decode to keep-current, not a default arm"
+            ),
+            other => panic!("expected ChangeMode, got {other:?}"),
+        }
+
+        let unarmed = serde_json::to_value(Op::ChangeMode {
+            mode: "agent".into(),
+            allow_shell: false,
+            trust_mode: false,
+            auto_approve: false,
+            approval_mode: "suggest".into(),
+            configured_sandbox_mode: None,
+            ask_on_guardrail: None,
+        })
+        .unwrap();
+        assert!(
+            unarmed.get("ask_on_guardrail").is_none(),
+            "an unarmed op must keep the arming key off the wire: {unarmed}"
+        );
+    }
+
+    #[test]
     fn every_variant_round_trips_and_tags_by_kind() {
         for op in every_variant() {
             let value = serde_json::to_value(&op).unwrap();
