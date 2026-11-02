@@ -6128,7 +6128,17 @@ impl AcpPool {
                         let _ = tx.send(initialized.map(|response| (connection.clone(), response)));
                     }
                     if let Some(rx) = shutdown_rx.take() {
-                        let _ = rx.await;
+                        // `connect_with` runs until this closure returns; a clean
+                        // transport EOF (the child exited) does not end it on its
+                        // own and is not an error in this mode (agent-client-protocol
+                        // `connect_with` contract). Wait for either our shutdown or
+                        // the incoming close, so a crashed child releases this task
+                        // and the lifecycle stamp below records the generation as
+                        // dead instead of leaving it "running" in the pool forever.
+                        tokio::select! {
+                            _ = rx => {}
+                            () = connection.incoming_closed() => {}
+                        }
                     }
                     Ok(())
                 })

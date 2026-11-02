@@ -174,6 +174,15 @@ impl RuntimeLifecycle {
     }
 
     /// Marks transport completion and returns whether it was unexpected.
+    ///
+    /// Idempotent: the connection task, the retirement seal paths
+    /// (`seal_remote_turn`, `reclaim_before_async_cleanup`,
+    /// `close_runtime_if`, remote-owner release) and their cleanup clones all
+    /// call this on the same generation, in any order. Whatever runs first
+    /// decides the `unexpected` classification; later calls only re-state
+    /// `running = false`. Crash-budget accounting is separately once-only
+    /// through [`Self::take_uncounted_crash`]'s compare-exchange, so a
+    /// double-stamped generation can never be billed twice.
     pub(super) fn mark_connection_closed(&self) -> bool {
         let unexpected = !self.expected_shutdown.load(Ordering::Acquire);
         if unexpected {
@@ -604,6 +613,31 @@ mod tests {
         lifecycle.begin_expected_shutdown();
         assert!(!lifecycle.mark_connection_closed());
         assert!(!lifecycle.is_running());
+        assert!(!lifecycle.take_uncounted_crash());
+    }
+
+    /// The stamp is reached from several call sites (connection task, seal
+    /// paths, cleanup clones) in arbitrary order. A re-stamp must not
+    /// reclassify the exit, and the crash budget must stay single-slot no
+    /// matter how many times the generation was stamped dead.
+    #[test]
+    fn mark_connection_closed_is_idempotent_and_bills_exactly_once() {
+        // Connection task stamps first (unexpected), a seal path re-states it
+        // after latching expected-shutdown: the re-stamp must not flip the
+        // classification and the budget must still be billed exactly once.
+        let lifecycle = RuntimeLifecycle::new(1);
+        assert!(lifecycle.mark_connection_closed());
+        lifecycle.begin_expected_shutdown();
+        assert!(!lifecycle.mark_connection_closed());
+        assert!(lifecycle.take_uncounted_crash());
+        assert!(!lifecycle.take_uncounted_crash());
+
+        // Reverse order: the seal path stamps first (expected), so the
+        // connection task's completion is not a crash at all.
+        let lifecycle = RuntimeLifecycle::new(2);
+        lifecycle.begin_expected_shutdown();
+        assert!(!lifecycle.mark_connection_closed());
+        assert!(!lifecycle.mark_connection_closed());
         assert!(!lifecycle.take_uncounted_crash());
     }
 
