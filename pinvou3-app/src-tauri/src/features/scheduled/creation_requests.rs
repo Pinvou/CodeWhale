@@ -1820,6 +1820,35 @@ fn pending_batch(root: &Path, retries: &RetryState, mut listed: Vec<PathBuf>) ->
     selected
 }
 
+// Unnameable entries must be removed before they consume the bounded batch.
+// Keep quarantine as a callback so this ordering can also be tested on file
+// systems that cannot create non-UTF-8 names at all.
+fn filter_unnameable_spool_paths(
+    listed: Vec<PathBuf>,
+    mut quarantine: impl FnMut(&Path) -> bool,
+) -> (Vec<PathBuf>, usize) {
+    let mut quarantined = 0;
+    let retained = listed
+        .into_iter()
+        .filter(|path| {
+            if path.file_name().and_then(|name| name.to_str()).is_some() {
+                return true;
+            }
+            if quarantine(path) {
+                quarantined += 1;
+            }
+            false
+        })
+        .collect();
+    (retained, quarantined)
+}
+
+#[cfg(test)]
+struct SyntheticSpoolListing {
+    names: Vec<std::ffi::OsString>,
+    quarantined: Vec<PathBuf>,
+}
+
 /// Watch loop body: process every pending spool file (sorted names — uuid /
 /// key-hash hex), quarantining poison files immediately and creation failures
 /// after [`MAX_CREATE_ATTEMPTS`] attempts.
@@ -1828,6 +1857,24 @@ async fn process_pending_spool<C: TaskCreator, N: PanelNotifier + ?Sized>(
     sessions: &crate::features::sessions::SessionStore,
     notifier: &N,
     retries: &mut RetryState,
+) {
+    process_pending_spool_inner(
+        creator,
+        sessions,
+        notifier,
+        retries,
+        #[cfg(test)]
+        None,
+    )
+    .await;
+}
+
+async fn process_pending_spool_inner<C: TaskCreator, N: PanelNotifier + ?Sized>(
+    creator: &C,
+    sessions: &crate::features::sessions::SessionStore,
+    notifier: &N,
+    retries: &mut RetryState,
+    #[cfg(test)] mut synthetic: Option<&mut SyntheticSpoolListing>,
 ) {
     let root = spool_root();
     let directory = match private_directory(&root) {
@@ -1881,7 +1928,13 @@ async fn process_pending_spool<C: TaskCreator, N: PanelNotifier + ?Sized>(
     }
     // Enumeration itself is bounded, including non-json and non-file entries.
     // No scan/HashSet proportional to an untrusted directory's total size.
-    let names = match directory.entry_names_up_to(MAX_PENDING_FILES + MAX_TAIL_QUARANTINES + 2) {
+    #[cfg(test)]
+    let overridden_names = synthetic.as_ref().map(|listing| listing.names.clone());
+    #[cfg(not(test))]
+    let overridden_names: Option<Vec<std::ffi::OsString>> = None;
+    let names = match overridden_names.map(Ok).unwrap_or_else(|| {
+        directory.entry_names_up_to(MAX_PENDING_FILES + MAX_TAIL_QUARANTINES + 2)
+    }) {
         Ok(names) => names,
         Err(error) => {
             log::warn!("[scheduled-creation] spool listing failed: {error}");
@@ -1901,19 +1954,14 @@ async fn process_pending_spool<C: TaskCreator, N: PanelNotifier + ?Sized>(
     // in the PR body). Quarantine on sight, BEFORE the batch count; no
     // marker is possible (the stem is unnameable), failed/ is the trace.
     let mut sight_warnings: usize = 0;
-    let mut sight_quarantines: usize = 0;
-    let listed: Vec<PathBuf> = listed
-        .into_iter()
-        .filter(|path| {
-            if path.file_name().and_then(|n| n.to_str()).is_some() {
-                return true;
-            }
-            if quarantine_with_warning(path, &mut sight_warnings) {
-                sight_quarantines += 1;
-            }
-            false
-        })
-        .collect();
+    let (listed, sight_quarantines) = filter_unnameable_spool_paths(listed, |path| {
+        #[cfg(test)]
+        if let Some(listing) = synthetic.as_deref_mut() {
+            listing.quarantined.push(path.to_path_buf());
+            return true;
+        }
+        quarantine_with_warning(path, &mut sight_warnings)
+    });
     // Round-10 m6: a successful sweep is otherwise log-silent while 256
     // files land in failed/; one line per pass matches the round-31
     // per-pass budget pattern.
@@ -4485,10 +4533,43 @@ mod tests {
         );
     }
 
-    // Darwin rejects invalid-UTF-8 names at creation (EILSEQ), so the
-    // squatter fixture can only exist on Linux — same gate as
-    // `non_utf8_spool_names_are_quarantined`.
-    #[cfg(target_os = "linux")]
+    #[cfg(windows)]
+    #[test]
+    fn unnameable_paths_are_filtered_before_batch_on_windows() {
+        use std::os::windows::ffi::OsStringExt;
+        let root = PathBuf::from("spool");
+        let mut listed = Vec::new();
+        for i in 0..MAX_PENDING_FILES {
+            let mut name: Vec<u16> = format!("sq{i:03}").encode_utf16().collect();
+            name.push(0xD800); // unpaired surrogate: not representable as UTF-8
+            name.extend(".json".encode_utf16());
+            listed.push(root.join(std::ffi::OsString::from_wide(&name)));
+        }
+        listed.push(root.join("zzz.json"));
+        let mut calls = 0;
+        let (retained, quarantined) = filter_unnameable_spool_paths(listed, |_| {
+            calls += 1;
+            true
+        });
+        assert_eq!(calls, MAX_PENDING_FILES);
+        assert_eq!(quarantined, MAX_PENDING_FILES);
+        assert_eq!(retained, vec![root.join("zzz.json")]);
+        let mut bad_name: Vec<u16> = "bad".encode_utf16().collect();
+        bad_name.push(0xD800);
+        bad_name.extend(".json".encode_utf16());
+        let bad_path = root.join(std::ffi::OsString::from_wide(&bad_name));
+        let mut failed_attempts = Vec::new();
+        let (retained_after_failure, count) =
+            filter_unnameable_spool_paths(vec![bad_path.clone(), root.join("zzz.json")], |path| {
+                failed_attempts.push(path.to_path_buf());
+                false
+            });
+        assert_eq!(failed_attempts, vec![bad_path]);
+        assert_eq!(count, 0);
+        assert_eq!(retained_after_failure, vec![root.join("zzz.json")]);
+    }
+
+    #[cfg(unix)]
     #[tokio::test]
     async fn non_utf8_squatters_do_not_starve_legitimate_records() {
         use std::os::unix::ffi::OsStringExt;
@@ -4496,16 +4577,61 @@ mod tests {
         let state = watcher_state().await;
         let spool = spool_root();
         std::fs::create_dir_all(&spool).unwrap();
-        let mut squatters = Vec::new();
+        // Exercise the production pre-batch filter with genuine non-UTF-8
+        // OsStrings even when this filesystem refuses such names on disk.
+        let mut synthetic = Vec::new();
         for i in 0..MAX_PENDING_FILES {
-            // A trailing 0xFF byte is never valid UTF-8; the .json suffix
-            // passes the extension filter.
-            let mut name_bytes = format!("sq{i:03}").into_bytes();
-            name_bytes.push(0xFF);
-            name_bytes.extend_from_slice(b".json");
-            let name = std::ffi::OsString::from_vec(name_bytes);
-            squatters.push(spool.join(&name));
-            std::fs::write(spool.join(&name), b"{}\n").unwrap();
+            let mut bytes = format!("sq{i:03}").into_bytes();
+            bytes.push(0xFF);
+            bytes.extend_from_slice(b".json");
+            synthetic.push(spool.join(std::ffi::OsString::from_vec(bytes)));
+        }
+        let expected_squatters = synthetic.clone();
+        synthetic.push(spool.join("zzz.json"));
+        let mut observed = Vec::new();
+        let (retained, count) = filter_unnameable_spool_paths(synthetic, |path| {
+            observed.push(path.to_path_buf());
+            true
+        });
+        assert_eq!(count, MAX_PENDING_FILES);
+        assert_eq!(observed, expected_squatters);
+        assert_eq!(retained, vec![spool.join("zzz.json")]);
+
+        // Probe this exact spool filesystem; only Darwin's explicit EILSEQ
+        // means that the real non-UTF-8 fixture cannot be created here.
+        let mut probe_bytes = b"probe-".to_vec();
+        probe_bytes.push(0xFF);
+        probe_bytes.extend_from_slice(b".json");
+        let probe = spool.join(std::ffi::OsString::from_vec(probe_bytes));
+        let supports_non_utf8 = match std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&probe)
+        {
+            Ok(file) => {
+                drop(file);
+                std::fs::remove_file(&probe).unwrap();
+                true
+            }
+            Err(error)
+                if cfg!(target_os = "macos") && error.raw_os_error() == Some(libc::EILSEQ) =>
+            {
+                false
+            }
+            Err(error) => panic!("non-UTF-8 fixture probe failed unexpectedly: {error}"),
+        };
+        let mut squatters = Vec::new();
+        if supports_non_utf8 {
+            for i in 0..MAX_PENDING_FILES {
+                let mut bytes = format!("sq{i:03}").into_bytes();
+                bytes.push(0xFF);
+                bytes.extend_from_slice(b".json");
+                let path = spool.join(std::ffi::OsString::from_vec(bytes));
+                std::fs::write(&path, b"{}\n").unwrap();
+                squatters.push(path);
+            }
+        } else {
+            eprintln!("filesystem rejected non-UTF-8 names; real rename is not covered");
         }
         // Sorts after every squatter: without the on-sight quarantine it
         // falls past the batch window into the quarantined tail (or beyond
@@ -4513,13 +4639,36 @@ mod tests {
         std::fs::write(spool.join("zzz.json"), spool_record_json(&[])).unwrap();
         let notify_count = Arc::new(AtomicUsize::new(0));
         let mut retries = RetryState::default();
-        process_pending_spool(
-            &StateCreator(&state),
-            &state.sessions,
-            &CountingNotifier(notify_count.clone()),
-            &mut retries,
-        )
-        .await;
+        if supports_non_utf8 {
+            process_pending_spool(
+                &StateCreator(&state),
+                &state.sessions,
+                &CountingNotifier(notify_count.clone()),
+                &mut retries,
+            )
+            .await;
+        } else {
+            // The only synthetic part is listing/quarantine of names that
+            // this filesystem cannot store. The legitimate record is real
+            // and passes through the same drain and bounded batch selection.
+            let mut listing = SyntheticSpoolListing {
+                names: expected_squatters
+                    .iter()
+                    .map(|path| path.file_name().unwrap().to_os_string())
+                    .chain(std::iter::once(std::ffi::OsString::from("zzz.json")))
+                    .collect(),
+                quarantined: Vec::new(),
+            };
+            process_pending_spool_inner(
+                &StateCreator(&state),
+                &state.sessions,
+                &CountingNotifier(notify_count.clone()),
+                &mut retries,
+                Some(&mut listing),
+            )
+            .await;
+            assert_eq!(listing.quarantined, expected_squatters);
+        }
         assert_eq!(
             notify_count.load(Ordering::SeqCst),
             1,
