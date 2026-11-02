@@ -28,7 +28,7 @@ const CONTROLLED_KEYS = [
   'statePairingReserved', 'stateHandshakePending', 'stateConnected', 'stateReconnecting',
   'stateResumeProvisional', 'stateResumeActivatedPendingLiveness', 'stateRetiringGeneration',
   'stateStopping', 'stateError', 'securityNotice', 'unsupported',
-  'errorRelayUnavailable',
+  'errorRelayUnavailable', 'errorPairingExpired', 'errorHandshakeTimeout',
   // E2E-08 后的零配置体验：服务端点（生产/测试）内置在应用中，用户不需要环境变量。
   'endpointLabel', 'endpointProduction', 'endpointTest', 'endpointHint',
 ];

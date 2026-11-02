@@ -39,7 +39,7 @@ fn send_error_code(error: ControllerSendError) -> String {
         ControllerSendError::Unauthenticated => "controller_not_connected",
         ControllerSendError::FrameTooLarge { .. }
         | ControllerSendError::InvalidFrame(_)
-        | ControllerSendError::Serialization => "task_request_invalid",
+        | ControllerSendError::Serialization => "capability_snapshot_unavailable",
         ControllerSendError::ByteBudgetExhausted
         | ControllerSendError::QueueFull(_)
         | ControllerSendError::GenerationAlreadyBound
@@ -78,22 +78,25 @@ pub fn desktop_remote_controller_capability_send(
     remote_ref: String,
 ) -> Result<CapabilitySendAck, String> {
     ensure_supported(&manager)?;
-    let (lease, capabilities) = manager
-        .live_runtime_context()
+    // Capture the operation before the lease: any replacement between the
+    // reads is rejected by the final owner guard inside synchronous enqueue.
+    let operation = manager
+        .current_operation()
+        .ok_or_else(|| "controller_not_connected".to_owned())?;
+    let expected = manager
+        .authenticated_remote_proxy_identity()
         .map_err(|error| error.code.to_owned())?;
     let intent = sessions
-        .capability_request(&remote_ref, &lease)
-        .map_err(|error| error.code.to_owned())?;
-    let frame = business
-        .seal(
-            "capability_snapshot_request",
-            &intent.payload,
-            &capabilities,
-        )
-        .map_err(|error| error.code().to_owned())?;
-    manager
-        .send_authenticated_business(&frame)
-        .map_err(send_error_code)?;
+        .capability_request_with_send(&remote_ref, &expected.0, |payload| {
+            manager.send_capability_for_owner(
+                &operation,
+                &expected,
+                &business,
+                payload,
+                send_error_code,
+            )
+        })
+        .map_err(|error| error.into_code())?;
     Ok(intent.into())
 }
 
@@ -101,6 +104,25 @@ pub fn desktop_remote_controller_capability_send(
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn capability_send_errors_do_not_report_task_input_failure() {
+        for error in [
+            ControllerSendError::FrameTooLarge { bytes: 2, limit: 1 },
+            ControllerSendError::InvalidFrame("test".into()),
+            ControllerSendError::Serialization,
+        ] {
+            assert_eq!(send_error_code(error), "capability_snapshot_unavailable");
+        }
+        assert_eq!(
+            send_error_code(ControllerSendError::Unauthenticated),
+            "controller_not_connected"
+        );
+        assert_eq!(
+            send_error_code(ControllerSendError::ByteBudgetExhausted),
+            "controller_lane_unavailable"
+        );
+    }
 
     #[test]
     fn a_capability_commands_have_one_handler_each() {
