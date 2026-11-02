@@ -25713,6 +25713,323 @@ async fn mutating_legs_prune_dead_in_flight_reservations() {
     );
 }
 
+/// The cancellation-aware reclaim for the outer tool timeout (review P2):
+/// the agent loop drops the dispatch future when the per-tool deadline
+/// fires, so the stamping completion after the dispatch await never ran —
+/// and the unstamped entry was then held up by the owner's Running status
+/// alone, blocking every same-frame successor until the owner happened to
+/// go terminal even though the abandoned job had already ended. The
+/// executor's drop guard now settles the abandonment synchronously, and
+/// the frame it leaves behind is keyed on the shell manager alone: empty
+/// when nothing holds write scope, stamped while a genuinely live job
+/// does, and untouched when no shell source makes the truth unknowable.
+#[tokio::test]
+async fn cancelled_dispatch_settles_its_frame_from_the_shell_manager_alone() {
+    let tmp = tempdir().expect("tempdir");
+    let manager = new_shared_subagent_manager(tmp.path().to_path_buf(), 8);
+    let shell_jobs = crate::tools::shell::new_shared_shell_manager(tmp.path().to_path_buf());
+    {
+        let mut guard = manager.write().await;
+        guard.set_shell_job_source(Arc::clone(&shell_jobs));
+        guard.insert_test_running_agent("a", tmp.path());
+    }
+
+    // (a) Nothing of the owner's holds write scope: the frame opens at the
+    // drop itself instead of blocking same-frame successors until the
+    // owner goes terminal.
+    let token = manager
+        .write()
+        .await
+        .open_in_flight_unbounded("agent_a", CoordinationLane::SharedCheckout);
+    drop(InFlightDispatchGuard {
+        manager: Arc::clone(&manager),
+        token,
+        owner: "agent_a".to_string(),
+        settled: false,
+    });
+    assert_eq!(
+        manager.read().await.in_flight_unbounded_for_test(),
+        vec![],
+        "the abandoned dispatch's empty frame is reclaimed at the drop"
+    );
+
+    // (b) A genuinely live job exists when the dispatch is abandoned: the
+    // reclaim stamps it — no wholesale clear — the frame keeps blocking a
+    // same-frame successor, and it opens only once the job's exit is
+    // observed.
+    shell_jobs
+        .lock()
+        .expect("shell jobs")
+        .seed_running_shell_for_test("job_live", "agent_a");
+    let token = manager
+        .write()
+        .await
+        .open_in_flight_unbounded("agent_a", CoordinationLane::SharedCheckout);
+    drop(InFlightDispatchGuard {
+        manager: Arc::clone(&manager),
+        token,
+        owner: "agent_a".to_string(),
+        settled: false,
+    });
+    assert_eq!(
+        manager.read().await.in_flight_unbounded_for_test(),
+        vec![("agent_a".to_string(), vec!["job_live".to_string()])],
+        "the live job is stamped into the abandoned frame"
+    );
+    assert_eq!(
+        manager.read().await.in_flight_unbounded_conflicts(
+            "agent_b",
+            &CoordinationLane::SharedCheckout,
+            &[]
+        ),
+        vec!["agent_a".to_string()],
+        "the stamped frame still blocks a same-frame successor"
+    );
+    shell_jobs
+        .lock()
+        .expect("shell jobs")
+        .finish_seeded_shell_for_test("job_live");
+    // The successor's own mutating legs observe the exit and prune the
+    // finished frame.
+    let token = manager
+        .write()
+        .await
+        .open_in_flight_unbounded("agent_b", CoordinationLane::SharedCheckout);
+    manager.write().await.cancel_in_flight_unbounded(token);
+    assert_eq!(
+        manager.read().await.in_flight_unbounded_for_test(),
+        vec![],
+        "the frame opens once the live job's exit is observed"
+    );
+
+    // (c) An unwired manager has no shell source: the truth is unknowable,
+    // so the abandoned entry is left untouched and the consult's
+    // owner-liveness fallback keeps the conservative answer until the
+    // owner can no longer write.
+    let bare = new_shared_subagent_manager(tmp.path().join("bare"), 4);
+    let token = {
+        let mut guard = bare.write().await;
+        guard.insert_test_running_agent("a", tmp.path());
+        guard.open_in_flight_unbounded("agent_a", CoordinationLane::SharedCheckout)
+    };
+    drop(InFlightDispatchGuard {
+        manager: Arc::clone(&bare),
+        token,
+        owner: "agent_a".to_string(),
+        settled: false,
+    });
+    {
+        let guard = bare.read().await;
+        assert_eq!(
+            guard.in_flight_unbounded_for_test().len(),
+            1,
+            "without a shell source the abandoned entry is left untouched"
+        );
+        assert_eq!(
+            guard.in_flight_unbounded_conflicts("agent_b", &CoordinationLane::SharedCheckout, &[],),
+            vec!["agent_a".to_string()],
+            "the unknowable state still blocks — the conservative answer"
+        );
+    }
+    {
+        let mut guard = bare.write().await;
+        if let Some(agent) = guard.agents.get_mut("agent_a") {
+            agent.status = SubAgentStatus::Completed;
+        }
+        guard.prune_dead_in_flight_unbounded();
+        assert_eq!(
+            guard.in_flight_unbounded_for_test(),
+            vec![],
+            "once the owner is terminal the unknowable entry no longer holds"
+        );
+    }
+}
+
+/// The same cancellation through the real dispatch seam: the outer tool
+/// deadline drops the dispatch future mid-call, and the foreground command
+/// — which runs as a tracked background record — outlives the drop. The
+/// drop guard stamps the stranded child into the reservation, both arrival
+/// directions refuse while the child lives, and once its exit is observed
+/// the same frame admits a successor again.
+#[cfg(unix)]
+#[tokio::test]
+async fn outer_tool_timeout_settles_the_stranded_child_then_reopens_the_frame() {
+    let tmp = tempdir().expect("tempdir");
+    let manager = new_shared_subagent_manager(tmp.path().to_path_buf(), 8);
+    let shell_jobs = crate::tools::shell::new_shared_shell_manager(tmp.path().to_path_buf());
+    let claim = |owner: &str, roots: &[&str]| WriteScopeClaim {
+        owner: owner.to_string(),
+        roots: roots.iter().map(|root| (*root).to_string()).collect(),
+        exact_files: vec![],
+        contracts: vec![],
+    };
+
+    let mut guard = manager.write().await;
+    guard.set_shell_job_source(Arc::clone(&shell_jobs));
+    guard.insert_test_running_agent("a", tmp.path());
+    drop(guard);
+
+    let build_registry = |owner: &str| {
+        let mut runtime = stub_runtime();
+        runtime.manager = Arc::clone(&manager);
+        runtime.context = ToolContext::new(tmp.path());
+        runtime.context.execution.shell_manager = Arc::clone(&shell_jobs);
+        runtime.context.auto_approve = true;
+        runtime.worker_profile = WorkerRuntimeProfile::for_role(FleetRole::Builder);
+        SubAgentToolRegistry::new_with_owner(
+            runtime,
+            FleetRole::Builder,
+            owner.to_string(),
+            "implementer".into(),
+            Some(vec!["Bash".into()]),
+            Arc::new(Mutex::new(TodoList::new())),
+            Arc::new(Mutex::new(PlanState::default())),
+        )
+    };
+    let registry_a = build_registry("agent_a");
+    let registry_b = build_registry("agent_b");
+
+    // The outer deadline fires mid-call and drops the dispatch future; the
+    // loop keeps running and answers the model with the timeout error.
+    // The `sleep` keeps running as its tracked record.
+    let dispatched = tokio::time::timeout(
+        Duration::from_secs(1),
+        registry_a.execute(
+            "agent_a",
+            "Bash",
+            serde_json::json!({"action": "run", "command": "sleep 30 > stray.txt"}),
+        ),
+    )
+    .await;
+    assert!(
+        dispatched.is_err(),
+        "the dispatch is abandoned mid-call by the outer deadline"
+    );
+
+    // The drop guard settles the abandonment: the stranded child is
+    // stamped into the reservation, not dropped wholesale.
+    let in_flight = manager.read().await.in_flight_unbounded_for_test();
+    assert_eq!(
+        in_flight.len(),
+        1,
+        "exactly one reservation survives the abandonment: {in_flight:?}"
+    );
+    assert_eq!(in_flight[0].0, "agent_a");
+    assert!(
+        !in_flight[0].1.is_empty(),
+        "the stranded child's task id is stamped"
+    );
+    let task_id = in_flight[0].1[0].clone();
+
+    // While the child lives, a successor's unbounded dispatch is refused…
+    let refused = registry_b
+        .execute(
+            "agent_b",
+            "Bash",
+            serde_json::json!({"action": "run", "command": "echo from-b > b.txt"}),
+        )
+        .await
+        .expect_err("B's unbounded dispatch must wait for the stranded child");
+    let refused = refused.to_string();
+    assert!(
+        refused.contains("still in flight") && refused.contains("agent_a"),
+        "the refusal names the in-flight owner: {refused}"
+    );
+    // …and so is a later spawn on a disjoint claim.
+    let refused = {
+        let mut guard = manager.write().await;
+        let mut runtime_b = stub_runtime();
+        runtime_b.manager = Arc::clone(&manager);
+        runtime_b.context = ToolContext::new(tmp.path());
+        guard
+            .spawn_background_with_assignment_options(
+                Arc::clone(&manager),
+                runtime_b,
+                FleetRole::Builder,
+                "write elsewhere".into(),
+                make_assignment(),
+                Some(vec![]),
+                SubAgentSpawnOptions {
+                    name: Some("writer-b".into()),
+                    write_claim: Some(claim("", &["docs"])),
+                    ..Default::default()
+                },
+            )
+            .expect_err("a disjoint claim must still wait for the stranded child")
+    };
+    assert!(
+        refused.to_string().contains("still in flight"),
+        "the spawn refusal names the in-flight work: {refused}"
+    );
+
+    // The stranded child is cancelled the way exec_shell_cancel cancels a
+    // job; once the exit is observed, the frame opens for both directions.
+    shell_jobs
+        .lock()
+        .expect("shell jobs")
+        .kill(&task_id)
+        .expect("the stranded child is cancellable");
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    loop {
+        let held = shell_jobs
+            .lock()
+            .expect("shell jobs")
+            .any_running_job(std::slice::from_ref(&task_id));
+        if !held {
+            break;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the cancelled child never confirmed its exit"
+        );
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    registry_b
+        .execute(
+            "agent_b",
+            "Bash",
+            serde_json::json!({"action": "run", "command": "echo from-b > b.txt"}),
+        )
+        .await
+        .expect("B's unbounded dispatch is admitted once the child is gone");
+    {
+        let mut guard = manager.write().await;
+        guard
+            .spawn_background_with_assignment_options(
+                Arc::clone(&manager),
+                {
+                    let mut runtime_b = stub_runtime();
+                    runtime_b.manager = Arc::clone(&manager);
+                    runtime_b.context = ToolContext::new(tmp.path());
+                    runtime_b
+                },
+                FleetRole::Builder,
+                "write elsewhere".into(),
+                make_assignment(),
+                Some(vec![]),
+                SubAgentSpawnOptions {
+                    name: Some("writer-b2".into()),
+                    write_claim: Some(claim("", &["docs"])),
+                    ..Default::default()
+                },
+            )
+            .expect("the disjoint writer is admitted once the child is gone");
+    }
+    assert_eq!(
+        manager.read().await.in_flight_unbounded_for_test(),
+        vec![],
+        "the settled frame is pruned once its work is observed dead, and B's dispatch released its own"
+    );
+    assert!(
+        shell_jobs
+            .lock()
+            .expect("shell jobs")
+            .running_owner_agent_ids()
+            .is_empty(),
+        "no real process outlives the test"
+    );
+}
+
 /// The NFD half of the ledger-frame fix (review P3): claim roots are NFC
 /// per component (`normalize_claim_path`), a worktree subdirectory the OS
 /// spelled NFD keeps those bytes through the canonical workspace, and the

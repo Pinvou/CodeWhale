@@ -3325,6 +3325,55 @@ struct InFlightUnboundedWork {
     shell_task_ids: Vec<String>,
 }
 
+/// Owns one dispatch's reservation from the moment it is admitted until
+/// the dispatch settles, whichever way that happens.
+///
+/// The normal path settles through [`Self::settle`], which runs the same
+/// completion leg the executor always ran. The cancellation path is the
+/// outer tool timeout at the agent loop: `tokio::time::timeout` drops the
+/// execute future mid-call, and before the guard existed the completion
+/// leg after the await simply never ran — an empty task-id reservation was
+/// then held up by the owner's Running status alone, blocking every
+/// same-frame successor until the owner happened to go terminal even
+/// though the abandoned job had already ended. `Drop` now settles the
+/// cancellation synchronously via `reclaim_cancelled_in_flight_unbounded`,
+/// which keys the frame on the shell manager alone: genuinely live work is
+/// stamped and keeps blocking, a finished job's frame opens, and without a
+/// shell source the entry stays untouched (conservative).
+struct InFlightDispatchGuard {
+    manager: SharedSubAgentManager,
+    token: u64,
+    owner: String,
+    settled: bool,
+}
+
+impl InFlightDispatchGuard {
+    /// The dispatch returned: run the completion leg. Marks the guard
+    /// settled first so the `Drop` below stays a no-op.
+    async fn settle(mut self) {
+        self.settled = true;
+        let mut manager = self.manager.write().await;
+        manager.complete_in_flight_unbounded(self.token, &self.owner);
+    }
+}
+
+impl Drop for InFlightDispatchGuard {
+    fn drop(&mut self) {
+        if self.settled {
+            return;
+        }
+        // The dispatch future is being dropped inside the runtime between
+        // polls, so the write lock is uncontended in practice (the peer
+        // checks and the completion leg all release it before awaiting the
+        // registry). When it is genuinely unavailable, leaving the entry
+        // unstamped keeps the consult's conservative owner-liveness answer
+        // instead of guessing — the pre-fix behavior, not a new failure.
+        if let Ok(mut manager) = self.manager.try_write() {
+            manager.reclaim_cancelled_in_flight_unbounded(self.token, &self.owner);
+        }
+    }
+}
+
 pub struct SubAgentManager {
     agents: HashMap<String, SubAgent>,
     worker_records: HashMap<String, AgentWorkerRecord>,
@@ -5309,6 +5358,14 @@ impl SubAgentManager {
         entries
     }
 
+    /// The wired shell job source, for pins that assert a production
+    /// constructor actually bound one (the standalone Workflow builder
+    /// shipped without it once).
+    #[cfg(test)]
+    pub(crate) fn shell_job_source_for_test(&self) -> Option<SharedShellManager> {
+        self.shell_jobs.clone()
+    }
+
     /// Stamp a completed dispatch's reservation with the owner's still-
     /// running shell jobs. Background work keeps the entry (validated
     /// against the shell manager from now on); with nothing running the
@@ -5325,6 +5382,42 @@ impl SubAgentManager {
                     .map(|mut jobs| jobs.running_task_ids_for_owner(owner))
             })
             .unwrap_or_default();
+        if let Some(entry) = self
+            .in_flight_unbounded
+            .iter_mut()
+            .find(|entry| entry.token == token)
+        {
+            entry.shell_task_ids = stamped;
+        } else {
+            return;
+        }
+        self.in_flight_unbounded
+            .retain(|entry| !(entry.token == token && entry.shell_task_ids.is_empty()));
+    }
+
+    /// The cancellation-aware reclaim for a dispatch whose future was
+    /// dropped before the completion leg ran — the agent loop's outer tool
+    /// timeout abandons the execute future between opening the reservation
+    /// and stamping it, and no later success or prune could clear what the
+    /// stamping would have decided. The abandoned dispatch is no longer in
+    /// flight, so the owner's Running status must not keep speaking for it:
+    /// the shell manager alone decides what remains. Jobs that still hold
+    /// their write scope (a foreground child the drop stranded, a
+    /// background spawn, a stop whose exit was never confirmed) are
+    /// stamped exactly as the completion leg would have stamped them; with
+    /// nothing holding scope the frame opens. Without a shell source the
+    /// truth is unknowable, so the entry is left untouched and the
+    /// consult's owner-liveness fallback keeps the conservative answer —
+    /// this path never wholesale-clears possibly-live work.
+    pub(crate) fn reclaim_cancelled_in_flight_unbounded(&mut self, token: u64, owner: &str) {
+        self.prune_dead_in_flight_unbounded();
+        let Some(shell_jobs) = self.shell_jobs.as_ref() else {
+            return;
+        };
+        let Ok(mut jobs) = shell_jobs.lock() else {
+            return;
+        };
+        let stamped = jobs.running_task_ids_for_owner(owner);
         if let Some(entry) = self
             .in_flight_unbounded
             .iter_mut()
@@ -16464,7 +16557,7 @@ impl SubAgentToolRegistry {
         {
             return Err(anyhow!(reason));
         }
-        let mut reservation_token: Option<u64> = None;
+        let mut reservation: Option<InFlightDispatchGuard> = None;
         reject_subagent_terminal_takeover(name, &input)?;
         if self.network_is_denied() {
             reject_network_reaching_input(name, &input)?;
@@ -16678,7 +16771,12 @@ impl SubAgentToolRegistry {
                 manager.cancel_in_flight_unbounded(opened_token);
                 return Err(anyhow!(refusal));
             }
-            reservation_token = Some(opened_token);
+            reservation = Some(InFlightDispatchGuard {
+                manager: Arc::clone(&self.coordination_manager),
+                token: opened_token,
+                owner: self.owner_agent_id.clone(),
+                settled: false,
+            });
         }
         let context = self
             .registry
@@ -16689,13 +16787,14 @@ impl SubAgentToolRegistry {
             .registry
             .execute_rich_full_with_context(name, input, Some(&context))
             .await;
-        if let Some(token) = reservation_token {
+        if let Some(guard) = reservation.take() {
             // Stamp the reservation with the owner's still-running shell
             // jobs: a background job keeps it alive through the shell
             // manager; with nothing running the dispatch is over and the
-            // entry is released here.
-            let mut manager = self.coordination_manager.write().await;
-            manager.complete_in_flight_unbounded(token, &self.owner_agent_id);
+            // entry is released here. If this future never reaches the
+            // await (the outer tool timeout drops it), the guard's Drop
+            // settles the cancellation instead — see the struct above.
+            guard.settle().await;
         }
         result.map_err(|e| anyhow!(e))
     }
