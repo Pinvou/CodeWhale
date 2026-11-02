@@ -8,6 +8,7 @@ Token actors while this runner owns the three Billing deployment actors. Only
 the three Billing deployment actors are bootstrapped here, using their existing
 privilege contract. This runner must never accept a deployed database URL.
 """
+import argparse
 import json
 import os
 from pathlib import Path
@@ -329,7 +330,22 @@ def ci_identity_guard(raw):
     return ["-c", guard]
 
 
-def main():
+GROUPS = ("owners", "token", "billing-0", "billing-1")
+
+
+def billing_roots(group):
+    # Partition complete roots, never individual race/locking subcases. Sorting
+    # makes both shards deterministic; their union always includes new roots.
+    if group == "all":
+        return RETAINED_REQUIRED
+    if group not in ("billing-0", "billing-1"):
+        raise ValueError("not a Billing group")
+    return set(sorted(RETAINED_REQUIRED)[int(group[-1])::2])
+
+
+def main(*, group="all"):
+    if group not in ("all", *GROUPS):
+        raise ValueError("unknown financial execution group")
     raw = local_database_url(os.environ.get("PINVOU_ACCOUNT_FINANCIAL_TEST_DATABASE_URL", ""))
     psql = os.environ.get("PINVOU_ACCOUNT_TEST_PSQL", "psql")
     go = os.environ.get("PINVOU_ACCOUNT_TEST_GO", "go")
@@ -405,33 +421,37 @@ def main():
             raise RuntimeError("Go financial phase failed: " + label)
         count = verify_results([json.loads(line) for line in result.stdout.splitlines() if line.startswith("{")],
                                required, package=package, require_children=scoped or label == "retained-token", exact_roots=scoped,
-                               children_required=TOKEN_CHILD_REQUIRED if label == "retained-token" else BILLING_CHILD_REQUIRED if label == "retained-billing" else None)
+                               children_required=TOKEN_CHILD_REQUIRED if label == "retained-token" else BILLING_CHILD_REQUIRED & required if label == "retained-billing" else None)
         print(f"Financial phase {label}: {count} named passes; all {len(required)} required roots completed", flush=True)
 
-    # Each existing owner fixture requires its own absent actors. Restoration
-    # is checked between every phase, before any next fixture can write.
-    try:
-        run_phase("owner-account", "./internal/account", ACCOUNT_PACKAGE, ACCOUNT_REQUIRED, scoped=True)
-    finally:
-        assert_instance({user})
-    try:
-        run_phase("owner-wallet", "./internal/billing", BILLING_PACKAGE, OWNER_REQUIRED, scoped=True)
-    finally:
-        assert_instance({user})
-    try:
-        run_phase("owner-schema", "./internal/billingschema", SCHEMA_PACKAGE, SCHEMA_REQUIRED, scoped=True)
-    finally:
-        assert_instance({user})
-    try:
-        run_phase("owner-provisioning", "./internal/token", TOKEN_PACKAGE, PROVISIONING_REQUIRED, scoped=True)
-    finally:
-        assert_instance({user})
+    if group in ("all", "owners"):
+        # Each existing owner fixture requires its own absent actors. Restoration
+        # is checked between every phase, before any next fixture can write.
+        try:
+            run_phase("owner-account", "./internal/account", ACCOUNT_PACKAGE, ACCOUNT_REQUIRED, scoped=True)
+        finally:
+            assert_instance({user})
+        try:
+            run_phase("owner-wallet", "./internal/billing", BILLING_PACKAGE, OWNER_REQUIRED, scoped=True)
+        finally:
+            assert_instance({user})
+        try:
+            run_phase("owner-schema", "./internal/billingschema", SCHEMA_PACKAGE, SCHEMA_REQUIRED, scoped=True)
+        finally:
+            assert_instance({user})
+        try:
+            run_phase("owner-provisioning", "./internal/token", TOKEN_PACKAGE, PROVISIONING_REQUIRED, scoped=True)
+        finally:
+            assert_instance({user})
 
-    try:
-        run_phase("lifecycle-reconciliation", "./internal/account", ACCOUNT_PACKAGE,
-                  LIFECYCLE_RECONCILIATION_REQUIRED, scoped=True)
-    finally:
-        assert_instance({user})
+        try:
+            run_phase("lifecycle-reconciliation", "./internal/account", ACCOUNT_PACKAGE,
+                      LIFECYCLE_RECONCILIATION_REQUIRED, scoped=True)
+        finally:
+            assert_instance({user})
+
+        if group == "owners":
+            return
 
     query("""
 BEGIN;
@@ -443,9 +463,11 @@ GRANT billing_service TO billing_schema_owner WITH INHERIT TRUE,SET TRUE;
 COMMIT;
 """)
     try:
-        run_phase("retained-token", "./internal/token", TOKEN_PACKAGE, REQUIRED)
-        assert_instance(ACTORS | {user})
-        run_phase("retained-billing", "./internal/billing", BILLING_PACKAGE, RETAINED_REQUIRED, scoped=True)
+        if group in ("all", "token"):
+            run_phase("retained-token", "./internal/token", TOKEN_PACKAGE, REQUIRED)
+            assert_instance(ACTORS | {user})
+        if group == "all" or group.startswith("billing-"):
+            run_phase("retained-billing", "./internal/billing", BILLING_PACKAGE, billing_roots(group), scoped=True)
     finally:
         # Do not force-delete remnants from failed fixtures or unknown actors.
         assert_instance(ACTORS | {user})
@@ -464,4 +486,6 @@ COMMIT;
 
 
 if __name__ == "__main__":
-    main()
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--group", choices=("all", *GROUPS), default="all")
+    main(group=parser.parse_args().group)
