@@ -138,6 +138,8 @@ TOKEN_CHILD_REQUIRED = {
 }
 BILLING_PACKAGE = "github.com/Pinvou/pinvou3/account-platform/internal/billing"
 SCHEMA_PACKAGE = "github.com/Pinvou/pinvou3/account-platform/internal/billingschema"
+TOKEN_SCHEMA_PACKAGE = "github.com/Pinvou/pinvou3/account-platform/internal/tokenschema"
+TOKEN_SCHEMA_REQUIRED = {"TestManagementPublicMigrationInstallation"}
 SCHEMA_REQUIRED = {"TestLatePaymentQueryRegisteredIdentity", "TestReconciliationFairRetryRegisteredIdentity", "TestF09EntitlementPackageIndexPublicMigration", "TestTokenWalletReceiptSchemaPostgres", "TestLegacyEntitlementUpgradeAdmissionPostgres", "TestUsageWaiverHistoricalSchemaPostgres", "TestBillingOrdinaryReplayOriginalMigrationPostgres", "TestUnknownProviderEntryPublicMigrationPostgres", "TestLegacyExpiry025UpgradePreservesOriginalLedgerPostgres", "TestF04PublicTokenUserOwnerAuthorityAndDirectory"}
 OWNER_REQUIRED = {
     "TestF06OrganizationWalletRequiresLifecycleEvidence",
@@ -251,6 +253,12 @@ BILLING_LEAF_REQUIRED = {
 }
 BILLING_CHILD_REQUIRED = RETAINED_REQUIRED - BILLING_LEAF_REQUIRED
 EXACT_REQUIRED_CHILDREN = {
+    "TestManagementPublicMigrationInstallation": {
+        "fresh", "legacy-upgrade", "installed-29-upgrade", "installed-30-upgrade",
+        "installed-f05-34-upgrade", "retained-management-lifecycle-upgrade",
+        "installed-f07-36-upgrade", "installed-pre-runtime-37-upgrade",
+        "installed-pre-cleanup-39-upgrade",
+    },
     "TestUserUnusedIntentCancellationOwnerPostgres": {
         "before-claim", "after-claim", "waiting-owner-does-not-starve-later-target", "acquired-intent-control", "model-first-control",
     },
@@ -496,6 +504,8 @@ def main(*, group="all"):
             env["PINVOU_TEST_ACCOUNT_DATABASE_URL"] = raw
         elif target == "./internal/billingschema":
             env["PINVOU_TEST_SCHEMA_DATABASE_URL"] = raw
+        elif target == "./internal/tokenschema":
+            env["PINVOU_TEST_TOKEN_DATABASE_URL"] = raw
         else:
             env["PINVOU_TEST_BILLING_DATABASE_URL"] = raw
         if target == "./internal/token":
@@ -545,6 +555,10 @@ def main(*, group="all"):
             assert_instance({user})
         try:
             run_phase("owner-schema", "./internal/billingschema", SCHEMA_PACKAGE, SCHEMA_REQUIRED, scoped=True)
+        finally:
+            assert_instance({user})
+        try:
+            run_phase("owner-token-schema", "./internal/tokenschema", TOKEN_SCHEMA_PACKAGE, TOKEN_SCHEMA_REQUIRED, scoped=True)
         finally:
             assert_instance({user})
         try:
