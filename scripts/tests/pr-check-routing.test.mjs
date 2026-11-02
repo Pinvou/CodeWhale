@@ -119,6 +119,7 @@ const goStepName = "Test and vet all Account Platform Go modules";
 const auditPGStepName = "Audit export finite PostgreSQL rollback and persisted boundaries";
 const existingBrokerStepName = "Existing broker compatibility on owned PostgreSQL and TLS NATS";
 const pgPreflightStepName = "Verify account CI PostgreSQL service isolation";
+const pgStopStepName = "Stop owned temporary PostgreSQL services";
 
 function pgIdentityEnvironment(service) {
   return [
@@ -130,7 +131,7 @@ function pgIdentityEnvironment(service) {
 
 function assertFiniteAuditPGSetup(job) {
   const text = job.replaceAll("\r\n", "\n");
-  // These are exactly three approved ephemeral services, not permission for arbitrary
+  // These are exactly six approved ephemeral services, not permission for arbitrary
   // services, production credentials, public ports or persistent volumes.
   const service = text.match(/^ {4}services:\n[\s\S]*?(?=^ {4}\S|$(?![\s\S]))/m);
   assert.ok(service, "isolated audit PostgreSQL service not found");
@@ -165,7 +166,8 @@ function assertFiniteAuditPGSetup(job) {
     "          --health-interval 5s",
     "          --health-timeout 5s",
     "          --health-retries 12",
-    "      financial-postgres:",
+    ...["financial-postgres", "financial-token-postgres", "financial-billing-0-postgres", "financial-billing-1-postgres"].flatMap(name => [
+      `      ${name}:`,
     "        # Same immutable PostgreSQL image already used by team-relay-hub-test.",
     "        # Disposable runner only; trust is never a deployment configuration.",
     "        image: mirror.gcr.io/library/postgres@sha256:721873c34ceb9f8d8fc265984940dc982404c105f19ad51be9fdc5970a6080ea",
@@ -176,10 +178,14 @@ function assertFiniteAuditPGSetup(job) {
     '          - "127.0.0.1::5432"',
     "        options: >-",
     "          --rm",
+    "          --cpus 2",
+    "          --memory 1g",
+    "          --memory-swap 1g",
     "          --health-cmd \"pg_isready -U postgres -d postgres\"",
     "          --health-interval 5s",
     "          --health-timeout 5s",
     "          --health-retries 12",
+    ]),
   ].join("\n"));
   assert.doesNotMatch(job, /secrets\.|continue-on-error:/);
   // Admit only read-only verification of this job's actual service metadata.
@@ -214,7 +220,19 @@ function assertFiniteAuditPGSetup(job) {
   // F16's two separately bounded suites use only the other ephemeral service.
   // Validate each whole step before removing it from the audit-only env ban;
   // arbitrary env, commands, conditions and extra steps remain rejected.
-  let outsidePGSteps = text.replace(pg, "").replace(preflight, "");
+  const stop = namedStep(text, pgStopStepName);
+  assert.equal(stop.trimEnd(), [
+    `      - name: ${pgStopStepName}`,
+    "        if: ${{ always() }}", "        env:",
+    "          ACCOUNT_CI_SERVICES: ${{ toJSON(job.services) }}",
+    "        run: |",
+    "          python3 scripts/account-ci-postgres.py --stop-owned-services",
+  ].join("\n"));
+  for (const name of [existingBrokerStepName, auditPGStepName,
+    "Token financial contracts on isolated PostgreSQL", "Account closure contracts on isolated PostgreSQL"]) {
+    assert.ok(text.indexOf(namedStep(text, name)) < text.indexOf(stop), "stop must follow database consumers");
+  }
+  let outsidePGSteps = text.replace(pg, "").replace(preflight, "").replace(stop, "");
   // Admit only this bounded acceptance step before enforcing the job-wide ban
   // on incidental database inputs. The complete step is fixed deliberately.
   const existingBroker = namedStep(text, existingBrokerStepName);
@@ -238,9 +256,8 @@ function assertFiniteAuditPGSetup(job) {
   outsidePGSteps = outsidePGSteps.replace(existingBroker, "");
   for (const [name, environment, commands] of [
     ["Token financial contracts on isolated PostgreSQL", [
-      "PINVOU_ACCOUNT_FINANCIAL_TEST_DATABASE_URL: ${{ steps.account-pg.outputs.financial_url }}",
-      ...pgIdentityEnvironment("financial"),
-    ], ["set -euo pipefail", "python3 -m unittest discover -s scripts/tests -p test_token_financial_postgres.py", "python3 scripts/test-token-financial-postgres.py"]],
+      "ACCOUNT_FINANCIAL_SERVICES: ${{ steps.account-pg.outputs.financial_services }}",
+    ], ["set -euo pipefail", "python3 -m unittest discover -s scripts/tests -p test_token_financial_postgres.py", "python3 -m unittest discover -s scripts/tests -p test_financial_parallel.py", "python3 scripts/test-financial-parallel.py"]],
     ["Account closure contracts on isolated PostgreSQL", [
       "PINVOU_ACCOUNT_CLOSURE_TEST_DATABASE_URL: ${{ steps.account-pg.outputs.financial_url }}",
       ...pgIdentityEnvironment("financial"),
@@ -255,7 +272,7 @@ function assertFiniteAuditPGSetup(job) {
     ].join("\n"));
     outsidePGSteps = outsidePGSteps.replace(step, "");
   }
-  assert.doesNotMatch(outsidePGSteps, /DATABASE_URL|DATABASE_PROFILE|F17_TEST_|PINVOU_ACCOUNT_CI_PG_|ACCOUNT_CI_SERVICES/);
+  assert.doesNotMatch(outsidePGSteps, /DATABASE_URL|DATABASE_PROFILE|F17_TEST_|PINVOU_ACCOUNT_CI_PG_|ACCOUNT_CI_SERVICES|ACCOUNT_FINANCIAL_SERVICES/);
   const defaultStep = namedStep(job, goStepName);
   const jobEnv = text.match(/^ {4}env:\n[\s\S]*?(?=^ {4}\S|$(?![\s\S]))/m);
   assert.ok(jobEnv);
@@ -542,13 +559,13 @@ test("finite audit PostgreSQL exception rejects unsafe or unrelated service and 
     ["F17_TEST_DATABASE_URL: ${{ steps.account-pg.outputs.audit_url }}", "F17_TEST_DATABASE_URL: postgres://postgres@remote.invalid:5432/postgres?sslmode=disable"],
     ["PINVOU_TEST_SCHEMA_DATABASE_URL: ${{ steps.account-pg.outputs.broker_url }}", "PINVOU_TEST_SCHEMA_DATABASE_URL: postgres://postgres@remote.invalid:5434/postgres?sslmode=disable"],
     ["npm --prefix account-platform run test:existing-broker", "npm --prefix account-platform run test:existing-broker || true"],
-    ["PINVOU_ACCOUNT_FINANCIAL_TEST_DATABASE_URL: ${{ steps.account-pg.outputs.financial_url }}", "PINVOU_ACCOUNT_FINANCIAL_TEST_DATABASE_URL: postgres://postgres@remote.invalid:5433/postgres?sslmode=disable"],
+    ["ACCOUNT_FINANCIAL_SERVICES: ${{ steps.account-pg.outputs.financial_services }}", "ACCOUNT_FINANCIAL_SERVICES: ${{ toJSON(needs.other.outputs.services) }}"],
     ["PINVOU_ACCOUNT_CLOSURE_TEST_DATABASE_URL: ${{ steps.account-pg.outputs.financial_url }}", "PINVOU_ACCOUNT_CLOSURE_TEST_DATABASE_URL: ${{ steps.account-pg.outputs.audit_url }}"],
     ["ACCOUNT_CI_SERVICES: ${{ toJSON(job.services) }}", "ACCOUNT_CI_SERVICES: ${{ toJSON(needs.other.outputs.services) }}"],
     ["        id: account-pg", "        id: unrelated-pg"],
     ["python3 scripts/account-ci-postgres.py", "python3 scripts/account-ci-postgres.py || true"],
     ["python3 -m unittest discover -s scripts/tests -p test_account_ci_postgres.py", "true"],
-    ["python3 scripts/test-token-financial-postgres.py", "python3 scripts/test-token-financial-postgres.py || true"],
+    ["python3 scripts/test-financial-parallel.py", "python3 scripts/test-financial-parallel.py || true"],
     ["python3 scripts/test-account-closure-postgres.py", "python3 scripts/test-account-closure-postgres.py || true"],
     ["      GOTOOLCHAIN: local", "      F17_TEST_DATABASE_URL: postgres://postgres@127.0.0.1:5432/postgres\n      GOTOOLCHAIN: local"],
     ["        shell: bash", "        env:\n          F17_TEST_DATABASE_PROFILE: github-actions-service\n        shell: bash"],
@@ -580,7 +597,6 @@ test("finite audit PostgreSQL exception rejects unsafe or unrelated service and 
     assert.throws(() => assertFiniteAuditPGSetup(mutated), expected);
   };
   for (const [name, service] of [[auditPGStepName, "audit"], [existingBrokerStepName, "broker"],
-    ["Token financial contracts on isolated PostgreSQL", "financial"],
     ["Account closure contracts on isolated PostgreSQL", "financial"]]) {
     const step = namedStep(job, name);
     const miswired = step.replace(`outputs.${service}_url`, "outputs.unrelated_url");
@@ -596,6 +612,14 @@ test("finite audit PostgreSQL exception rejects unsafe or unrelated service and 
       step.replace("        run:", () => "        if: ${{ false }}\n        run:"),
       name === auditPGStepName ? /finite audit PostgreSQL gate must execute unconditionally/ : undefined);
   }
+  const financial = namedStep(job, "Token financial contracts on isolated PostgreSQL");
+  for (const replacement of ["", "ACCOUNT_FINANCIAL_SERVICES: ${{ steps.account-pg.outputs.unrelated }}"]) {
+    rejectStepMutation("Token financial contracts on isolated PostgreSQL", financial,
+      financial.replace("          ACCOUNT_FINANCIAL_SERVICES: ${{ steps.account-pg.outputs.financial_services }}\n",
+        () => replacement ? `          ${replacement}\n` : ""));
+  }
+  rejectStepMutation("Token financial contracts on isolated PostgreSQL", financial,
+    financial.replace("        run:", () => "        if: ${{ false }}\n        run:"));
   const preflight = namedStep(job, pgPreflightStepName);
   assert.throws(() => assertFiniteAuditPGSetup(job.replace(preflight, "")));
   rejectStepMutation(pgPreflightStepName, preflight,
@@ -615,6 +639,24 @@ test("PostgreSQL service preflight propagates admission test and verifier failur
       { encoding: "utf8", timeout: 30_000, windowsHide: true });
     assert.equal(result.status, expected, result.stderr);
     assert.equal(result.stdout, calls);
+  }
+});
+
+test("owned PostgreSQL stop is always scheduled and propagates failure", () => {
+  const job = jobBlock("account-platform-test");
+  assertFiniteAuditPGSetup(job);
+  const stop = namedStep(job, pgStopStepName);
+  for (const replacement of ["        if: ${{ false }}", "        if: ${{ success() }}"]) {
+    assert.throws(() => assertFiniteAuditPGSetup(job.replace(stop, () => stop.replace("        if: ${{ always() }}", replacement))));
+  }
+  assert.throws(() => assertFiniteAuditPGSetup(job.replace(stop, "")));
+  const audit = namedStep(job, auditPGStepName);
+  assert.throws(() => assertFiniteAuditPGSetup(job.replace(audit, "") + audit), /stop must follow database consumers/);
+  const run = stepRun(job, pgStopStepName);
+  for (const exit of [0, 7]) {
+    const result = spawnSync(bash, ["-e", "-c", `python3() { return ${exit}; };\n` + run],
+      { encoding: "utf8", timeout: 30_000, windowsHide: true });
+    assert.equal(result.status, exit);
   }
 });
 
@@ -649,13 +691,15 @@ test("Keycloak contract gate invokes the existing suite and propagates failure",
 test("Token financial PostgreSQL gate is required and cannot swallow a failed runner", () => {
   const paths = filterPaths(workflow, "account_platform");
   assert.ok(paths.includes("scripts/test-token-financial-postgres.py"));
+  assert.ok(paths.includes("scripts/test-financial-parallel.py"));
+  assert.ok(paths.includes("scripts/tests/test_financial_parallel.py"));
   assert.ok(paths.includes("scripts/tests/test_token_financial_postgres.py"));
   const job = jobBlock("account-platform-test");
   assert.match(job, /image: mirror\.gcr\.io\/library\/postgres@sha256:[a-f0-9]{64}/);
   const services = job.match(/^    services:\r?\n([\s\S]*?)^    env:/m)?.[1];
   assert.ok(services, "the disposable PostgreSQL service must exist");
-  assert.deepEqual([...services.matchAll(/^ {6}([a-z][a-z-]*):\r?$/gm)].map(match => match[1]), ["audit-export-postgres", "existing-broker-postgres", "financial-postgres"]);
-  assert.deepEqual([...services.matchAll(/^ {10}- (.+)\r?$/gm)].map(match => match[1]), Array(3).fill('"127.0.0.1::5432"'));
+  assert.deepEqual([...services.matchAll(/^ {6}([a-z][a-z0-9-]*):\r?$/gm)].map(match => match[1]), ["audit-export-postgres", "existing-broker-postgres", "financial-postgres", "financial-token-postgres", "financial-billing-0-postgres", "financial-billing-1-postgres"]);
+  assert.deepEqual([...services.matchAll(/^ {10}- (.+)\r?$/gm)].map(match => match[1]), Array(6).fill('"127.0.0.1::5432"'));
   assertFiniteAuditPGSetup(job);
   const run = stepRun(job, "Token financial contracts on isolated PostgreSQL");
   for (const failedPhase of ["guard", "postgres"]) {
