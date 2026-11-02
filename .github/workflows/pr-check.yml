@@ -3046,6 +3046,8 @@ jobs:
             'features::monitor::platform::windows_gpu::tests::' \
             'features::remote_control::platform::windows::tests::' \
             'app::commands::remote_control::reader_resume_tests::' \
+            'features::remote_control::controller::controlling_inbound::tests::' \
+            'features::remote_control::controller::controlling_service::inbound_tests::' \
             'features::remote_control::controller::transfer::staging::tests::' \
             'features::remote_control::controller::relay_transport::tests::' \
             'features::remote_control::controller::controlling_service::tests::connect_attempt_' \

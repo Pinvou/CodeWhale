@@ -125,6 +125,10 @@ impl ControlledHandshake {
         self.stage
     }
 
+    pub(crate) fn signed_expires_at_ms(&self) -> u64 {
+        self.install_context.signed_expires_at_ms()
+    }
+
     /// B 的 `finished_receipt_commit`。
     pub(crate) fn commit(&self) -> Result<Value> {
         let commitment = self

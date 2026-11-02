@@ -2,7 +2,7 @@
 // state tests independently of the full product graph.
 pub(crate) use crate::test_support;
 pub(crate) use crate::{
-    crypto, encrypted_lane, liveness, panic_scope, protocol, relay_transport, resume,
+    crypto, encrypted_lane, liveness, panic_scope, protocol, relay_runtime, relay_transport, resume,
 };
 
 #[path = "../../../src/features/remote_control/controller/clock.rs"]
@@ -46,4 +46,3 @@ pub(crate) mod turn_budget;
 
 #[path = "state_service.rs"]
 mod controlling_service;
-pub(crate) use crate::features::remote_control::controller::relay_runtime;
