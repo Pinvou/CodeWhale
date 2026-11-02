@@ -2554,6 +2554,8 @@ dictZh["remoteConversation"] = {
   permissionModeRequired: "被控端尚未配置该任务通道的权限。请在被控端的“设置 → 远程控制”中选择 YOLO 或 Plan，然后新建远程会话并重新发送。",
   taskRejectedInvalid: "被控端拒绝了任务输入或任务模式。请更新两端应用，新建远程会话，检查输入后重新发送。",
   taskRejectedBusy: "被控端会话正忙，本次任务未被接纳。请等待当前任务结束后重新发送。",
+  taskGenerationStale: "远程任务或连接状态已变化，或无法确认。请先核对原任务状态，再重新连接并决定是否重试。",
+  taskAttachmentsInvalid: "附件不可用或已失效。请先核对原任务状态，再检查并重新选择附件。",
   taskRejectedCapacity: "被控端本轮连接的任务记录已达上限，本次任务未被接纳。请在被控端关闭并重新开启远程控制，再新建远程会话并重新发送。",
   taskRejectedGeneric: "被控端未接纳本次任务。请根据下方错误码检查被控端的权限、模型、工作区设置或日志，处理后新建远程会话并重新发送。",
   taskRejectedWorkspace: "被控端拒绝访问工作区。请在被控端授权所需文件夹，重新连接并选择该工作区后重新发送。",

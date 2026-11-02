@@ -259,6 +259,8 @@ const CONTROLLED_PORT_LOG_ERROR_CODES: &[&str] = &[
     "task_permission_mode_required",
     "task_permission_mode_changed",
     "task_permission_mode_unsupported",
+    "task_generation_stale",
+    "task_attachments_invalid",
     "capability_admission_capacity",
     "capability_descriptor_capacity",
     "capability_descriptor_duplicate",
