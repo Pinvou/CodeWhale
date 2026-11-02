@@ -23,6 +23,28 @@
     result_unknown: true,
   };
 
+  // Must match the Rust task service's display_terminal_reason closed set.
+  // This is a second boundary for local event/status projections, not a
+  // sanitizer for assistant messages or journal content.
+  var DISPLAY_TERMINAL_REASONS = [
+    "completed", "cancelled", "interrupted", "process_restart", "executor_error",
+    "task_generation_stale", "task_attachments_invalid", "task_attachment_unavailable",
+    "task_attachment_unconfirmed", "task_attachments_unavailable", "task_engine_unavailable",
+    "task_turn_failed", "task_turn_timeout", "task_dispatch_panicked", "task_dispatch_rejected",
+    "task_dispatch_worker_failed", "task_permission_mode_required", "task_permission_mode_changed",
+    "task_permission_mode_unsupported", "task_session_busy", "task_session_lane_conflict",
+    "task_session_lane_unknown", "task_session_lane_mismatch", "task_input_invalid",
+    "task_input_digest_invalid", "task_skill_invalid", "task_mode_unsupported",
+    "task_workspace_required", "task_workspace_not_authorized", "task_workspace_unexpected",
+    "capability_workspace_not_authorized", "capability_snapshot_missing", "capability_snapshot_stale",
+    "capability_snapshot_expired", "model_binding_invalid", "model_binding_stale",
+    "model_credential_unavailable", "model_package_missing", "model_not_exportable",
+  ];
+
+  function displayTerminalReason(value) {
+    return typeof value === "string" && DISPLAY_TERMINAL_REASONS.indexOf(value) !== -1 ? value : null;
+  }
+
   function createControlledDevice() {
     return {
       status: "disabled",
@@ -880,6 +902,9 @@
           kind: entry.kind,
           taskId: projectionText(entry.taskId, 128) || null,
           body: typeof entry.body === "string" ? entry.body.slice(0, 16384) : null,
+          terminalReason: entry.kind === "status" && entry.body === "failed"
+            && (entry.terminalReason === "task_generation_stale" || entry.terminalReason === "task_attachments_invalid")
+            ? entry.terminalReason : null,
           attachments: Array.isArray(entry.attachments) ? entry.attachments.slice(0, 16).map(function (attachment) {
             var value = attachment && typeof attachment === "object" ? attachment : {};
             return {
@@ -947,12 +972,36 @@
         break;
       }
     }
+    if (tasksField === "controlledTasks" && index >= 0 && tasks[index].taskSequence
+      && payload.sequence && String(payload.sequence) !== tasks[index].taskSequence) return state;
     var source = payload.modelSource;
     var modelSource = source === "controlled_device" || source === "controller_temporary"
       ? source : null;
     if (index >= 0 && TASK_TERMINAL[tasks[index].status]) {
-      if (!modelSource || tasks[index].modelSource) return state;
-      tasks[index] = Object.assign({}, tasks[index], { modelSource: modelSource });
+      var reason = payload.terminalReason || payload.terminal_reason;
+      var safeReason = reason === "task_generation_stale" || reason === "task_attachments_invalid"
+        ? reason : null;
+      var generation = payload.generation || payload.remoteControlGeneration || payload.remote_control_generation;
+      var canEnrichReason = tasksField === "controlledTasks" && status === "failed"
+        && tasks[index].status === status && !tasks[index].terminalReason && safeReason
+        && payload.sequence && tasks[index].taskSequence
+        && String(payload.sequence) === tasks[index].taskSequence
+        && generation && tasks[index].taskGeneration
+        && String(generation) === tasks[index].taskGeneration
+        && String(payload.sessionId || payload.session_id || "") === tasks[index].sessionId;
+      var prompt = controlledPromptText(payload.text);
+      var canEnrichText = tasksField === "controlledTasks" && status === tasks[index].status
+        && !tasks[index].text && !!prompt && payload.sequence && tasks[index].taskSequence
+        && String(payload.sequence) === tasks[index].taskSequence
+        && generation && tasks[index].taskGeneration
+        && String(generation) === tasks[index].taskGeneration
+        && String(payload.sessionId || payload.session_id || "") === tasks[index].sessionId;
+      if ((!modelSource || tasks[index].modelSource) && !canEnrichReason && !canEnrichText) return state;
+      tasks[index] = Object.assign({}, tasks[index], {
+        modelSource: tasks[index].modelSource || modelSource,
+        text: canEnrichText ? prompt : tasks[index].text,
+        terminalReason: canEnrichReason ? safeReason : tasks[index].terminalReason,
+      });
       var terminalEnriched = shallowCopy(state);
       terminalEnriched[tasksField] = tasks;
       terminalEnriched.revision = state.revision + 1;
@@ -982,6 +1031,10 @@
         ? String(payload.sessionId || payload.session_id)
         : (index >= 0 ? tasks[index].sessionId : null),
       status: status,
+      taskSequence: payload.sequence ? String(payload.sequence) : (index >= 0 ? tasks[index].taskSequence || null : null),
+      taskGeneration: (payload.generation || payload.remoteControlGeneration || payload.remote_control_generation)
+        ? String(payload.generation || payload.remoteControlGeneration || payload.remote_control_generation)
+        : (index >= 0 ? tasks[index].taskGeneration || null : null),
       modelSource: modelSource || (index >= 0 ? tasks[index].modelSource || null : null),
       text: promptText
         ? promptText
@@ -993,9 +1046,7 @@
       errorText: index >= 0 ? tasks[index].errorText || null : null,
       contentEventIds: index >= 0 ? (tasks[index].contentEventIds || []).slice() : [],
       outcomeUnknown: !!(payload.outcomeUnknown || payload.outcome_unknown),
-      terminalReason: (payload.terminalReason || payload.terminal_reason)
-        ? String(payload.terminalReason || payload.terminal_reason)
-        : null,
+      terminalReason: displayTerminalReason(payload.terminalReason || payload.terminal_reason),
       resultDigest: (payload.resultDigest || payload.result_digest)
         ? String(payload.resultDigest || payload.result_digest)
         : null,
@@ -1003,6 +1054,8 @@
     if (index >= 0) {
       if (
         tasks[index].status === status
+        && tasks[index].taskSequence === entry.taskSequence
+        && tasks[index].taskGeneration === entry.taskGeneration
         && tasks[index].modelSource === entry.modelSource
         && tasks[index].text === entry.text
         && tasks[index].messageIndex === entry.messageIndex
