@@ -2069,8 +2069,9 @@ impl ShellManager {
     /// `stop_unconfirmed`): no portable test can spawn a child that survives
     /// SIGKILL, so tests set the flag — and the terminal status — the kill
     /// path would have recorded, and drive the real confirmation against a
-    /// real child.
-    #[cfg(test)]
+    /// real child. Gated to the platforms whose tests consume it: a plain
+    /// `#[cfg(test)]` helper would be dead code (denied) on Windows.
+    #[cfg(all(test, unix))]
     pub(crate) fn mark_stop_unconfirmed_for_test(&mut self, id: &str) {
         if let Some(shell) = self.processes.get_mut(id) {
             shell.status = ShellStatus::Killed;

@@ -126,8 +126,10 @@ impl WorkflowTool {
     }
 
     /// The coordination manager this tool dispatches children through, for
-    /// driving the same lifecycle the headless Workflow runs drive.
-    #[cfg(test)]
+    /// driving the same lifecycle the headless Workflow runs drive. Gated to
+    /// the platforms whose tests consume it: a plain `#[cfg(test)]` helper
+    /// would be dead code (denied) on Windows.
+    #[cfg(all(test, unix))]
     pub(crate) fn coordination_manager_for_test(
         &self,
     ) -> crate::tools::subagent::SharedSubAgentManager {
