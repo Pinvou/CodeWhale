@@ -138,7 +138,7 @@ function assertFiniteAuditPGSetup(job) {
   assert.equal(service[0].trimEnd(), [
     "    services:",
     "      audit-export-postgres:",
-    "        image: postgres:16-alpine",
+    "        image: mirror.gcr.io/library/postgres@sha256:721873c34ceb9f8d8fc265984940dc982404c105f19ad51be9fdc5970a6080ea",
     "        env:",
     "          POSTGRES_HOST_AUTH_METHOD: trust",
     "          POSTGRES_USER: postgres",
@@ -551,7 +551,7 @@ test("finite audit PostgreSQL exception rejects unsafe or unrelated service and 
     ['"127.0.0.1::5432"', '"0.0.0.0::5432"'],
     ['"127.0.0.1::5432"', '"127.0.0.1:5432:5432"'],
     ["          --rm\n", ""],
-    ["postgres:16-alpine", "postgres:latest"],
+    ["mirror.gcr.io/library/postgres@sha256:721873c34ceb9f8d8fc265984940dc982404c105f19ad51be9fdc5970a6080ea", "mirror.gcr.io/library/postgres@sha256:0000000000000000000000000000000000000000000000000000000000000000"],
     ["      audit-export-postgres:", "      unrelated-postgres:"],
     ["    env:\n      GOTOOLCHAIN:", "      another-service:\n        image: postgres:16-alpine\n    env:\n      GOTOOLCHAIN:"],
     ["        ports:", "        volumes:\n          - shared-data:/var/lib/postgresql/data\n        ports:"],
