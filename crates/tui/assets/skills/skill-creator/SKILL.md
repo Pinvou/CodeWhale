@@ -1,8 +1,6 @@
 ---
 name: skill-creator
 description: Create or improve Codewhale skills. Use when the user wants a new skill, wants to update an existing skill, or needs guidance on when a skill should be a skill versus MCP, hooks, tools, or a plugin scaffold.
-metadata:
-  short-description: Create Codewhale skills
 aliases-for: create-skill
 ---
 
