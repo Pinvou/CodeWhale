@@ -556,11 +556,17 @@ fn version_bump_respects_deleted_existing_skill_while_adding_new_skill() {
 #[test]
 fn upgrade_from_v4_installs_pack_and_retires_unchanged_v4_best_practices() {
     let tmp = TempDir::new().unwrap();
-    // Simulate a v4 install: marker + legacy skill bodies.
+    // Simulate a v4 install: marker + legacy skill bodies. The installed copy
+    // carries the previously shipped body (still teaching read_file/edit_file),
+    // not the current asset.
+    assert_ne!(
+        V4_BEST_PRACTICES_LEGACY_BODY, V4_BEST_PRACTICES_BODY,
+        "legacy pin must track the previously shipped body"
+    );
     fs::create_dir_all(skill_dir(&tmp, "v4-best-practices")).unwrap();
     fs::write(
         skill_file(&tmp, "v4-best-practices"),
-        V4_BEST_PRACTICES_BODY,
+        V4_BEST_PRACTICES_LEGACY_BODY,
     )
     .unwrap();
     fs::write(marker_file(&tmp), "4").unwrap();
@@ -569,7 +575,7 @@ fn upgrade_from_v4_installs_pack_and_retires_unchanged_v4_best_practices() {
 
     assert!(
         !skill_dir(&tmp, "v4-best-practices").exists(),
-        "unchanged v4-best-practices must be retired"
+        "unchanged legacy v4-best-practices must be retired"
     );
     assert!(skill_file(&tmp, "debug").exists());
     assert!(skill_file(&tmp, "docx").exists());
@@ -581,6 +587,25 @@ fn upgrade_from_v4_installs_pack_and_retires_unchanged_v4_best_practices() {
     );
     let ver = fs::read_to_string(marker_file(&tmp)).unwrap();
     assert_eq!(ver.trim(), BUNDLED_SKILL_VERSION);
+}
+
+#[test]
+fn upgrade_preserves_legacy_v4_body_plus_user_addendum() {
+    let tmp = TempDir::new().unwrap();
+    fs::create_dir_all(skill_dir(&tmp, "v4-best-practices")).unwrap();
+    fs::write(
+        skill_file(&tmp, "v4-best-practices"),
+        format!("{V4_BEST_PRACTICES_LEGACY_BODY}\nAppended by the user\n"),
+    )
+    .unwrap();
+    fs::write(marker_file(&tmp), "4").unwrap();
+
+    install_system_skills(tmp.path()).unwrap();
+
+    assert!(
+        skill_dir(&tmp, "v4-best-practices").exists(),
+        "anything short of a byte-exact shipped body is a user edit and stays"
+    );
 }
 
 #[test]

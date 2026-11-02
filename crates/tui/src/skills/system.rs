@@ -136,8 +136,65 @@ const CONTRIBUTOR_ONBOARDING_BODY: &str =
 const FEISHU_BODY: &str = include_str!("../../assets/skills/feishu/SKILL.md");
 const MCP_DISCOVERY_BODY: &str = include_str!("../../assets/skills/mcp-discovery/SKILL.md");
 
-// Legacy v4 body retained solely for digest-based safe retirement (#4691).
+// v4-best-practices ships as a plain asset (not in BUNDLED_SKILLS); it is
+// kept for byte-exact safe retirement (#4691), never auto-installed.
 const V4_BEST_PRACTICES_BODY: &str = include_str!("../../assets/skills/v4-best-practices/SKILL.md");
+
+/// The v4-best-practices body shipped before the tool-name fix; it teaches
+/// the retired `read_file`/`edit_file` names. Pinned byte-for-byte so
+/// [`retire_unchanged_v4_best_practices`] keeps retiring unmodified legacy
+/// installs after the shipped asset moves on; user edits stay untouched.
+const V4_BEST_PRACTICES_LEGACY_BODY: &str = r#"---
+name: v4-best-practices
+description: Use when working with deepseek-v4-pro or deepseek-v4-flash in thinking mode on multi-step or plan-driven tasks. Provides rules to prevent stale references, unverified plan assumptions, and vague plan output.
+---
+
+# V4 Best Practices
+
+Rules for multi-step V4 thinking-mode workflows. Each rule prevents a
+specific, observable failure class.
+
+## 1. Verify references before writing
+
+Before referencing a file path, function, or type in code or plan output,
+call `grep_files` or `read_file` to confirm it exists in the workspace.
+
+```
+# Bad:  edit_file path="src/config/loader.rs" (assumed from memory)
+# Good: grep_files pattern="pub fn load_config" → confirms src/config/mod.rs:42
+#        then reference src/config/mod.rs:42
+```
+
+Failure avoided: `edit_file` errors on non-existent paths; LSP diagnostics
+on hallucinated symbols.
+
+## 2. Spawn a verifier sub-agent before multi-file execution
+
+Before executing a plan that touches 3+ files, spawn a `deepseek-v4-flash`
+sub-agent (thinking off) to read the target files and confirm path/symbol
+assumptions still hold.
+
+```
+agent type="verifier" model="deepseek-v4-flash"
+  prompt: "Read these files and confirm: [list assumptions]. Report mismatches."
+```
+
+Failure avoided: multi-step edits fail partway because file structure
+changed since the plan was drafted.
+
+## 3. Plan output must use confirmed path:line references
+
+In plan-mode output, replace vague location pointers with `path:line`
+references drawn from a prior `grep_files` result.
+
+```
+# Bad:  "Update the retry logic in the client module"
+# Good: "Update retry loop at crates/tui/src/client.rs:187"
+```
+
+Failure avoided: agent-mode execution cannot locate the intended edit
+target when plan directions are imprecise.
+"#;
 
 struct BundledSkill {
     name: &'static str,
@@ -385,7 +442,7 @@ pub fn bundled_skill_generation() -> &'static str {
     BUNDLED_SKILL_VERSION
 }
 
-/// Legacy v4-best-practices body digest helper (not in BUNDLED_SKILLS).
+/// Current v4-best-practices body (not in BUNDLED_SKILLS).
 fn v4_best_practices_body() -> &'static str {
     V4_BEST_PRACTICES_BODY
 }
@@ -523,8 +580,8 @@ pub fn install_system_skills(skills_dir: &Path) -> std::io::Result<()> {
 }
 
 /// Delete `v4-best-practices` only when the installed SKILL.md exactly matches
-/// the last shipped bundled body (byte-for-byte). Modified or user-owned copies
-/// are preserved.
+/// the current or the previously shipped asset body (byte-for-byte). Modified
+/// or user-owned copies are preserved.
 fn retire_unchanged_v4_best_practices(skills_dir: &Path) -> std::io::Result<bool> {
     let dir = skills_dir.join("v4-best-practices");
     let file = dir.join("SKILL.md");
@@ -532,7 +589,7 @@ fn retire_unchanged_v4_best_practices(skills_dir: &Path) -> std::io::Result<bool
         return Ok(false);
     }
     let existing = fs::read_to_string(&file)?;
-    if existing != v4_best_practices_body() {
+    if existing != v4_best_practices_body() && existing != V4_BEST_PRACTICES_LEGACY_BODY {
         return Ok(false);
     }
     fs::remove_dir_all(&dir)?;
