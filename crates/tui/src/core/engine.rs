@@ -2708,10 +2708,19 @@ impl Engine {
             || self.session.approval_mode != effective_approval
             || self.api_config.sandbox_mode != configured_sandbox_mode;
         self.api_config.sandbox_mode = configured_sandbox_mode;
+        // The suffix below must key off an actual arming flip, not the mere
+        // presence of the carrier: production always delivers `Some` here
+        // (the op loop applies the snapshot that
+        // record_applied_runtime_authority backfilled with the session
+        // value), so a carrier echoing the unchanged session value would
+        // otherwise announce an arming change that never happened on every
+        // ordinary posture switch.
+        let mut arming_change: Option<bool> = None;
         if let Some(armed) = ask_on_guardrail
             && self.session.ask_on_guardrail != armed
         {
             self.session.ask_on_guardrail = armed;
+            arming_change = Some(armed);
             changed = true;
         }
         self.apply_runtime_mode_policy(&authority);
@@ -2724,7 +2733,7 @@ impl Engine {
             mode.description(),
             effective_approval.permission_chip_label(),
         );
-        if let Some(armed) = ask_on_guardrail {
+        if let Some(armed) = arming_change {
             status.push_str(if armed {
                 " (guardrail prompts armed)"
             } else {

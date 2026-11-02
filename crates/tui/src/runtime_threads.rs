@@ -9464,6 +9464,7 @@ impl RuntimeThreadManager {
                     tool_name,
                     description,
                     intent_summary,
+                    approval_force_prompt,
                     ..
                 } => {
                     let Some(authority) = self
@@ -9485,7 +9486,16 @@ impl RuntimeThreadManager {
                         intent_summary: intent_summary.clone(),
                     };
 
-                    if auto_approve {
+                    // `approval_force_prompt` is the CW-7495 / host-armed
+                    // consent contract: the engine raised this card
+                    // specifically so a human answers it, and posture
+                    // shortcuts must not consume it silently (the engine
+                    // already withheld session grants for the same reason).
+                    // Tripwire for future arming surfaces: if a host ever
+                    // arms `ask_on_guardrail` on this deployment, forced
+                    // holds keep reaching the human path below instead of
+                    // this auto-approve branch.
+                    if auto_approve && !approval_force_prompt {
                         self.emit_event(
                             &thread_id,
                             Some(&turn_id),

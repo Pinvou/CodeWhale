@@ -31810,6 +31810,32 @@ async fn forkguard_apply_change_mode_status_suffixes_report_the_arming_change() 
         !mode_status.contains("(guardrail prompts"),
         "a change without the ask carrier must not claim an arming flip: {mode_status}"
     );
+
+    // A carrier echoing the unchanged session value is the production
+    // shape: the op loop applies the snapshot that
+    // record_applied_runtime_authority backfilled, so an ordinary mode
+    // switch arrives as `Some(disarmed)` on a disarmed session and must
+    // not claim an arming flip either.
+    engine
+        .apply_change_mode(
+            AppMode::Operate,
+            false,
+            false,
+            false,
+            crate::tui::approval::ApprovalMode::Suggest,
+            None,
+            Some(false),
+        )
+        .await;
+    let echoed_status = status_message(&handle).await;
+    assert!(
+        echoed_status.starts_with("Runtime policy changed to:"),
+        "{echoed_status}"
+    );
+    assert!(
+        !echoed_status.contains("(guardrail prompts"),
+        "a carrier echoing the unchanged arming must not claim a flip: {echoed_status}"
+    );
 }
 
 #[tokio::test]
@@ -31977,6 +32003,153 @@ async fn forkguard_turn_start_detector_records_the_posture_and_renders_the_trans
     assert!(
         !last_user_content.contains("Authority transition"),
         "an unchanged posture must keep the next turn's own block byte-stable: {last_user_content}"
+    );
+}
+
+#[tokio::test]
+async fn forkguard_a_not_started_turn_neither_consumes_nor_records_the_transition() {
+    // Pins the NotStarted ordering: the posture comparison sits after the
+    // early returns, so a turn that fails before any block build must
+    // neither record the posture (which would swallow the pending host
+    // change) nor consume anything — the next successful turn's block is
+    // the one that renders the transition line.
+    use crate::core::authority::TurnMetaPosture;
+    use wiremock::matchers::{method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    let _lock = lock_test_env();
+    let workspace = tempdir().expect("tempdir");
+    let server = MockServer::start().await;
+    let plain_sse = concat!(
+        "data: {\"id\":\"chatcmpl-notstarted\",\"choices\":[{\"index\":0,",
+        "\"delta\":{\"content\":\"ok\"},\"finish_reason\":null}]}\n\n",
+        "data: {\"id\":\"chatcmpl-notstarted\",\"choices\":[{\"index\":0,",
+        "\"delta\":{},\"finish_reason\":\"stop\"}]}\n\n",
+        "data: [DONE]\n\n",
+    );
+    // Only the second turn reaches the provider.
+    Mock::given(method("POST"))
+        .and(path("/v1/chat/completions"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .insert_header("content-type", "text/event-stream")
+                .set_body_string(plain_sse),
+        )
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    let api_config = Config {
+        api_key: Some("test-key".to_string()),
+        base_url: Some(server.uri()),
+        ..Config::default()
+    };
+    let engine_config = EngineConfig {
+        model: crate::config::DEFAULT_TEXT_MODEL.to_string(),
+        workspace: workspace.path().to_path_buf(),
+        mcp_config_path: workspace.path().join("mcp.json"),
+        snapshots_enabled: false,
+        subagents_enabled: false,
+        ..EngineConfig::default()
+    };
+    let (mut engine, _handle) = Engine::new(engine_config, &api_config);
+
+    // The previous block reported Full Access disarmed; the next real turn
+    // runs Full Access armed, so the arming flip alone must produce the
+    // line — no matter that a turn failed in between.
+    engine.last_turn_meta_authority = Some(TurnMetaPosture {
+        mode: AppMode::Agent,
+        approval: crate::tui::approval::ApprovalMode::Bypass,
+        ask_on_guardrail: false,
+    });
+    engine.session.ask_on_guardrail = true;
+
+    async fn send_turn(
+        engine: &mut Engine,
+        api_config: &Config,
+        prompt: &str,
+    ) -> SendMessageOutcome {
+        engine
+            .handle_send_message(
+                prompt.to_string(),
+                AppMode::Agent,
+                *resolved_route_for_test(api_config, crate::config::DEFAULT_TEXT_MODEL),
+                CompactionConfig::default(),
+                None,
+                None,
+                crate::tools::goal::GoalStatus::Active,
+                None,
+                false,
+                false,
+                true,
+                true,
+                true,
+                crate::tui::approval::ApprovalMode::Bypass,
+                false,
+                None,
+                Vec::new(),
+                None,
+                None,
+                UserInputProvenance::ExternalUser,
+                None,
+            )
+            .await
+    }
+
+    // Turn one cannot start: no model client, so the turn exits before any
+    // block build. `model_client_injected` must ride along, or
+    // `install_resolved_runtime_route` would resurrect the client from the
+    // resolved route before the not-configured check runs.
+    let real_client = engine.model_client.take();
+    let real_injected = engine.model_client_injected;
+    engine.model_client_injected = true;
+    let outcome = send_turn(&mut engine, &api_config, "doomed turn").await;
+    match outcome {
+        SendMessageOutcome::NotStarted { .. } => {}
+        SendMessageOutcome::Finished { status, error } => panic!(
+            "the first turn must fail before the block build, got Finished status={status:?} error={error:?}"
+        ),
+    }
+    assert_eq!(
+        engine.last_turn_meta_authority,
+        Some(TurnMetaPosture {
+            mode: AppMode::Agent,
+            approval: crate::tui::approval::ApprovalMode::Bypass,
+            ask_on_guardrail: false,
+        }),
+        "a not-started turn must not record the posture (which would swallow the pending host change)"
+    );
+
+    // Turn two starts fine and must be the block that renders the line.
+    engine.model_client_injected = real_injected;
+    engine.model_client = real_client;
+    let outcome = send_turn(&mut engine, &api_config, "turn after the failure").await;
+    assert!(
+        matches!(
+            outcome,
+            SendMessageOutcome::Finished {
+                status: TurnOutcomeStatus::Completed,
+                ..
+            }
+        ),
+        "the second turn must complete"
+    );
+
+    let requests = server
+        .received_requests()
+        .await
+        .expect("wire mock records requests");
+    assert_eq!(
+        requests.len(),
+        1,
+        "the not-started turn makes no provider call"
+    );
+    let body = String::from_utf8_lossy(&requests[0].body);
+    assert!(
+        body.contains(
+            "Authority transition (host): agent (Full Access, guardrail prompts disarmed) -> agent (Full Access, guardrail prompts armed); reason: host_authority_change",
+        ),
+        "the turn after the failed start must still render the pending transition: {body}"
     );
 }
 
