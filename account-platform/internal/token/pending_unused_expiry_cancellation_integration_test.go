@@ -38,7 +38,13 @@ func pendingExpiryObservation(t *testing.T, f modelExpiryObservationFixture, lay
 	u, target := f.preparedExpiry(t, layout)
 	if claim {
 		targets, err := f.r.claimEmergencyCancellations(f.ctx, 1)
-		if err != nil || len(targets) != 1 || targets[0].ID != target {
+		// An original USER stop now owns recovery even before the expiry
+		// fence. Other layouts still exercise a claim racing the later fence.
+		if layout == "user-intent" {
+			if err != nil || len(targets) != 0 {
+				t.Fatal("USER unused intent should already defer MODEL claim", targets, err)
+			}
+		} else if err != nil || len(targets) != 1 || targets[0].ID != target {
 			t.Fatal("claim before original expiry fence", targets, err)
 		}
 	}

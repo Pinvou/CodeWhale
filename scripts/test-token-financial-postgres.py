@@ -19,6 +19,7 @@ from urllib.parse import parse_qs, urlsplit
 ROOT = Path(__file__).resolve().parents[1]
 ACTORS = {"billing_migrator", "billing_schema_owner", "billing_service"}
 REQUIRED = {
+    "TestUserUnusedIntentCancellationOwnerPostgres",
     "TestPendingUnusedExpiryRejectsInvalidProofTimestampPostgres",
     "TestPendingUnusedExpiryCancellationOwnerPostgres",
     "TestPendingUnusedExpiryLegacyCancellationFallbackPostgres",
@@ -116,6 +117,7 @@ ACCOUNT_LEAF_REQUIRED = {
 ACCOUNT_CHILD_REQUIRED = ACCOUNT_REQUIRED - ACCOUNT_LEAF_REQUIRED
 TOKEN_PACKAGE = "github.com/Pinvou/pinvou3/account-platform/internal/token"
 TOKEN_CHILD_REQUIRED = {
+    "TestUserUnusedIntentCancellationOwnerPostgres",
     "TestPendingUnusedExpiryRejectsInvalidProofTimestampPostgres",
     "TestPendingUnusedExpiryCancellationOwnerPostgres",
     "TestPendingUnusedExpiryLegacyCancellationFallbackPostgres",
@@ -249,6 +251,9 @@ BILLING_LEAF_REQUIRED = {
 }
 BILLING_CHILD_REQUIRED = RETAINED_REQUIRED - BILLING_LEAF_REQUIRED
 EXACT_REQUIRED_CHILDREN = {
+    "TestUserUnusedIntentCancellationOwnerPostgres": {
+        "before-claim", "after-claim", "waiting-owner-does-not-starve-later-target", "acquired-intent-control", "model-first-control",
+    },
     "TestPendingUnusedExpiryRejectsInvalidProofTimestampPostgres": {
         "infinity", "tomorrow", "zero-time", "invalid-calendar",
         "bad-first-valid-later", "wrong-identity-first-valid-later", "valid-first-later-bad",
