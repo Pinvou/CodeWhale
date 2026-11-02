@@ -17,6 +17,12 @@ pub(crate) trait ControllingRelayPort: Send {
     fn send(&self, message: Value) -> Result<(), String>;
     async fn recv(&mut self) -> Option<Value>;
 
+    /// A local ingress terminal can race the final joined frame. Inspect it
+    /// again at the authenticated handoff instead of trusting a prior recv.
+    fn ingress_failure(&self) -> Option<super::lane_event::ControllerLaneFailure> {
+        None
+    }
+
     /// Relay 明确返回的公共错误码（若有）。端口实现负责把它收敛到冻结的
     /// 公共错误闭集，状态所有者据此向用户给出有限错误。
     fn relay_error_code(&self) -> Option<&'static str> {

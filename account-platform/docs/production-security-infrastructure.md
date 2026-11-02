@@ -14,7 +14,7 @@
 
 | 原任务 | 当前实现与入口 | 必须另行取得的环境证据 |
 | --- | --- | --- |
-| SECINF-01 原生密钥接口 | `internal/token/crypto*.go` 中现有 SecretProvider/Transit/AAD接线；`deploy/openbao/` | 真实 Transit 身份、权限拒绝、当前及历史密文解密、错误 AAD 拒绝 |
+| SECINF-01 原生密钥接口 | `internal/token/crypto*.go` 中现有 SecretProvider/AAD 接线与 `internal/platform/transit/` 中共享原生 Transit 客户端；`deploy/openbao/` | 真实 Transit 身份、权限拒绝、当前及历史密文解密、错误 AAD 拒绝 |
 | SECINF-02 服务身份签发与轮换 | `deploy/keycloak/`、`deploy/production/workload-*.json.template`、各服务既有身份校验 | 真实 issuer/JWKS/audience/subject/精确权限、续取、过期与跨角色拒绝 |
 | SECINF-03 密钥托管、Agent 与恢复 | `tools/kms-recovery/cmd/` 中 initializer、operator、snapshot 等既有工具，根 `scripts/account-platform-kms-agent-check.py` 与 `account-platform-kms-monitor.py`；`deploy/openbao/` | 实际保管人交接、独立双身份续租、受控轮换未知结果恢复、加密快照及恢复 |
 | SECINF-04 生产依赖及业务接线 | `deploy/production/compose*.yaml`、`deploy/helm/account-platform/`、[NATS资源手册](../deploy/runbooks/nats-resources.md)、[原生KMS门禁](../deploy/runbooks/native-kms-security-gate.md) | 实际渲染与镜像/身份绑定、最小数据库权限、TLS、迁移顺序、真实 readiness、外部入口和结算回归 |

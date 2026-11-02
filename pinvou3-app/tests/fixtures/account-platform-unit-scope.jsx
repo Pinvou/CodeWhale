@@ -1,6 +1,7 @@
 import React from 'react';
 import { createRoot } from 'react-dom/client';
 import { OrganizationWorkspace } from '../../src/features/account-platform/OrganizationWorkspace.jsx';
+import { AdminMyOrganizationPage } from '../../src/features/account-platform/AdminRestoredPages.jsx';
 import { organizationCopy } from '../../src/shared/i18n.js';
 import dto from './organization-unit-scope-dto.json';
 
@@ -25,6 +26,7 @@ const client = {
    if (url.pathname.endsWith('/authorization-context')) {
     if (control.failed) throw Object.assign(new Error('CONTROLLED_DENIAL'), { status: control.failed });
     const value = clone(actor().context);
+    value.organization_authorization_version += control.authorityVersion || 0;
     if (['member', 'auditor'].includes(control.kind) || control.expired) value.unit_authorization_bindings = [];
     if (control.revoked) { value.organization_authorization_version++; value.unit_authorization_bindings = []; }
     if (control.mismatch) value[control.mismatch] = control.mismatch === 'organization_id' ? newID : value[control.mismatch] + 1;
@@ -38,6 +40,7 @@ const client = {
     throw Object.assign(new Error('FORBIDDEN_SCOPE'), { status: 403 });
    }
    if (method === 'GET' && url.pathname.endsWith('/members')) {
+    if (control.membersDenied) throw Object.assign(new Error('CONTROLLED_MEMBERS_DENIAL'), { status: 403 });
     if (url.searchParams.get('unit_id') === dto.root_c) return { items: [], next_cursor: null };
     const value = clone(actor().members_a);
     if (control.forgedCrossMember) value.items.push({ ...value.items[0], user_id: dto.cross_id, display_name: 'Cross subtree member', unit_ids: [dto.child_a, dto.root_c] });
@@ -68,13 +71,30 @@ control.client = client; control.listeners = listeners;
 control.copy = () => organizationCopy[control.language];
 control.me = () => {
  const me = clone(actor().me);
+ me.active_context.organization_authorization_version += control.authorityVersion || 0;
  if (control.kind === 'admin') me.active_context.permissions.push('org.units.read', 'org.members.read', 'org.units.manage', 'org.members.manage');
  if (control.kind === 'member') me.active_context.permissions = ['org.roles.read'];
  return me;
 };
 control.render = () => {
  if (!control.currentMe || control.profileKind !== control.kind || control.profileEpoch !== client.financeSessionEpoch) { control.currentMe = control.me(); control.profileKind = control.kind; control.profileEpoch = client.financeSessionEpoch; }
- root.render(<OrganizationWorkspace client={client} me={control.currentMe} language={control.language} onChanged={() => { control.changed++; }} />);
+ root.render(control.adminParent
+  ? <AdminMyOrganizationPage client={client} me={control.currentMe} language={control.language} onContextChanged={() => { control.changed++; }} />
+  : <OrganizationWorkspace client={client} me={control.currentMe} language={control.language} onChanged={() => { control.changed++; if (control.refreshProfile) { control.currentMe = null; control.render(); } }} />);
 };
 Object.assign(control, JSON.parse(new URLSearchParams(location.search).get('configuration') || '{}'));
+if (control.adminParent) {
+ // Exercise the actual Admin parent, its profile-null remount, and the real
+ // cookie BFF client. Only the HTTP response boundary is controlled.
+ globalThis.fetch = async (input, options = {}) => {
+  const url = new URL(input, location.origin);
+  const response = (value, status = 200) => new Response(JSON.stringify(value), { status, headers: { 'Content-Type': 'application/json' } });
+  if (url.pathname === '/api/session') return response({ authenticated: true, csrf_token: 'CONTROLLED_SAME_LOGIN' });
+  if (url.pathname === '/api/account/v1/account/bootstrap') { control.bootstraps = (control.bootstraps || 0) + 1; return response(control.me()); }
+  const match = /^\/api\/(account|token)(\/.*)$/.exec(url.pathname);
+  if (!match) throw new Error(`UNEXPECTED_HTTP ${url.pathname}`);
+  try { return response(await client.request(match[1], match[2] + url.search, { ...options, body: options.body ? JSON.parse(options.body) : undefined })); }
+  catch (error) { return response({ code: 'CONTROLLED_DENIAL', message: error.message }, error.status || 500); }
+ };
+}
 window.unitScope = control; control.render();
