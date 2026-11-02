@@ -16,12 +16,18 @@ server {
 
     client_max_body_size 4m;
 
-    # Account internal APIs are reachable only on the private service network.
-    # Do not forward them through the public /account prefix even when a client
-    # presents a syntactically valid Authorization header.
+    # Account and Token private APIs stay off the public edge, including bare
+    # prefixes. Public administration continues through the Portal ingress.
+    location = /account/internal { return 404; }
     location ^~ /account/internal/ {
         return 404;
     }
+    location = /account/admin { return 404; }
+    location ^~ /account/admin/ { return 404; }
+    location = /token/internal { return 404; }
+    location ^~ /token/internal/ { return 404; }
+    location = /token/admin { return 404; }
+    location ^~ /token/admin/ { return 404; }
 
     location = /api/v1/payment-callback/token {
         client_max_body_size 8k;

@@ -63,6 +63,20 @@ impl std::fmt::Display for SessionError {
 impl std::error::Error for SessionError {}
 
 type Result<T> = std::result::Result<T, SessionError>;
+#[derive(Debug)]
+pub(crate) enum CapabilityRequestError {
+    Session(SessionError),
+    Send(String),
+}
+
+impl CapabilityRequestError {
+    pub(crate) fn into_code(self) -> String {
+        match self {
+            Self::Session(error) => error.code.to_owned(),
+            Self::Send(error) => error,
+        }
+    }
+}
 
 /// 前端可见的会话投影：只含 opaque 标识、模式与计数，不含任何凭证。
 #[derive(Debug, Clone, Serialize, Eq, PartialEq)]
@@ -367,23 +381,55 @@ impl ControllingSessionManager {
         self.intents.lock().clear();
     }
 
-    /// 构造 `capability_snapshot_request`：以本地已知 revision 作为提示。
+    #[cfg(test)]
+    pub(crate) fn pending_capability_ids_for_test(&self, remote_ref: &str) -> Result<Vec<String>> {
+        let mut intents = self.intents.lock();
+        Ok(find_intent(&mut intents, remote_ref)?
+            .pending_capability_requests
+            .clone())
+    }
+
+    /// Serialize admission, synchronous enqueue, and pending publication with
+    /// close and inbound replies under the same intent lock. The callback must
+    /// not await or re-enter this manager.
+    pub(crate) fn capability_request_with_send(
+        &self,
+        remote_ref: &str,
+        lease: &LeaseContext,
+        send: impl FnOnce(&Value) -> std::result::Result<(), String>,
+    ) -> std::result::Result<ControllingIntentProjection, CapabilityRequestError> {
+        let mut intents = self.intents.lock();
+        let intent =
+            find_intent(&mut intents, remote_ref).map_err(CapabilityRequestError::Session)?;
+        ensure_context(intent, lease).map_err(CapabilityRequestError::Session)?;
+        let request_id = format!("request-{}", Uuid::new_v4().simple());
+        let payload = build_capability_snapshot_request(intent, &request_id)
+            .map_err(CapabilityRequestError::Session)?;
+        intent
+            .pending_capability_requests
+            .try_reserve(1)
+            .map_err(|_| CapabilityRequestError::Session(SessionError::new("session_capacity")))?;
+        let projection = intent_projection(request_id.clone(), intent, None, None, payload);
+        send(&projection.payload).map_err(CapabilityRequestError::Send)?;
+        intent.capability_error = None;
+        intent.pending_capability_requests.push(request_id);
+        if intent.pending_capability_requests.len() > MAX_PENDING_CAPABILITY_REQUESTS {
+            intent.pending_capability_requests.remove(0);
+        }
+        Ok(projection)
+    }
+
+    #[cfg(test)]
     pub(crate) fn capability_request(
         &self,
         remote_ref: &str,
         lease: &LeaseContext,
     ) -> Result<ControllingIntentProjection> {
-        let mut intents = self.intents.lock();
-        let intent = find_intent(&mut intents, remote_ref)?;
-        ensure_context(intent, lease)?;
-        let request_id = intent.next_request_id();
-        let payload = build_capability_snapshot_request(intent, &request_id)?;
-        intent.capability_error = None;
-        intent.pending_capability_requests.push(request_id.clone());
-        if intent.pending_capability_requests.len() > MAX_PENDING_CAPABILITY_REQUESTS {
-            intent.pending_capability_requests.remove(0);
-        }
-        Ok(intent_projection(request_id, intent, None, None, payload))
+        self.capability_request_with_send(remote_ref, lease, |_| Ok(()))
+            .map_err(|error| match error {
+                CapabilityRequestError::Session(error) => error,
+                CapabilityRequestError::Send(_) => SessionError::new("session_context_stale"),
+            })
     }
 
     /// Stage the fully validated response before confirming the B-owned Session
@@ -420,6 +466,16 @@ impl ControllingSessionManager {
             .any(|pending| pending == request_id)
         {
             return Err(SessionError::new("capability_response_unexpected"));
+        }
+        // An older successful reply can arrive after a newer retry starts.
+        // Do not clear or settle the newer request with the retired waiter.
+        if intent
+            .pending_capability_requests
+            .last()
+            .map(String::as_str)
+            != Some(request_id)
+        {
+            return Err(SessionError::new("capability_response_stale"));
         }
         let controlled_session_id = payload
             .get("controlled_session_id")
@@ -484,9 +540,9 @@ impl ControllingSessionManager {
         })
     }
 
-    /// Relay 在已连接阶段拒绝业务帧时，外层错误帧不携带加密载荷里的 request_id。
-    /// 只有当前租约恰好存在一个待处理能力会话时才允许关联；并发会话保持原状，
-    /// 避免把传输层错误误投影到错误的会话。
+    /// Test-only helper for exercising guarded retirement of a single pending
+    /// capability request. Uncorrelated relay errors do not call this helper.
+    #[cfg(test)]
     pub(crate) fn fail_pending_capability_for_lease(
         &self,
         lease: &LeaseContext,
@@ -498,6 +554,7 @@ impl ControllingSessionManager {
     /// Match capability mapping's lock order: session intents -> connection
     /// owner. The guard holds the owner only through this callback-free commit;
     /// projection/event callbacks run after both locks have been released.
+    #[cfg(test)]
     pub(crate) fn fail_pending_capability_for_lease_with_guard(
         &self,
         lease: &LeaseContext,
@@ -1832,6 +1889,198 @@ mod tests {
                 .unwrap()
                 .model_source,
             MODEL_SOURCE_TEMPORARY
+        );
+    }
+
+    #[test]
+    fn failed_capability_enqueue_preserves_the_four_prior_requests() {
+        let sessions = ControllingSessionManager::default();
+        let session = sessions
+            .open_for_test(
+                Some("session-1433"),
+                "Session",
+                "chat",
+                &lease(),
+                &capabilities(),
+            )
+            .unwrap();
+        let ids: Vec<_> = (0..4)
+            .map(|_| {
+                sessions
+                    .capability_request(&session.session_ref, &lease())
+                    .unwrap()
+                    .request_id
+            })
+            .collect();
+        for _ in 0..6 {
+            let error = sessions
+                .capability_request_with_send(&session.session_ref, &lease(), |_| {
+                    Err("controller_lane_unavailable".into())
+                })
+                .unwrap_err();
+            assert_eq!(error.into_code(), "controller_lane_unavailable");
+        }
+        assert_eq!(sessions.intents.lock()[0].pending_capability_requests, ids);
+        let next = sessions
+            .capability_request(&session.session_ref, &lease())
+            .unwrap()
+            .request_id;
+        let pending = sessions.intents.lock()[0]
+            .pending_capability_requests
+            .clone();
+        assert_eq!(
+            pending,
+            vec![ids[1].clone(), ids[2].clone(), ids[3].clone(), next]
+        );
+    }
+
+    #[test]
+    fn immediate_response_waits_until_the_enqueued_request_is_published() {
+        use std::sync::{Arc, mpsc};
+        use std::time::Duration;
+        let sessions = Arc::new(ControllingSessionManager::default());
+        let session = sessions
+            .open_for_test(
+                Some("session-1433"),
+                "Session",
+                "chat",
+                &lease(),
+                &capabilities(),
+            )
+            .unwrap();
+        let (payload_tx, payload_rx) = mpsc::channel();
+        let (release_tx, release_rx) = mpsc::channel();
+        let sender = Arc::clone(&sessions);
+        let session_ref = session.session_ref.clone();
+        let send_thread = std::thread::spawn(move || {
+            sender.capability_request_with_send(&session_ref, &lease(), |payload| {
+                payload_tx.send(payload.clone()).unwrap();
+                release_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+                Ok(())
+            })
+        });
+        let request = payload_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+        let (started_tx, started_rx) = mpsc::channel();
+        let receiver = Arc::clone(&sessions);
+        let response_thread = std::thread::spawn(move || {
+            let mut response = snapshot(1);
+            response["request_id"] = request["request_id"].clone();
+            response["session_id"] = request["session_id"].clone();
+            response["controlled_session_id"] = json!("b-session-1");
+            started_tx.send(()).unwrap();
+            receiver.apply_capability_snapshot_for_lease_with_mapping(
+                &lease(),
+                &response,
+                |_, _| Ok(()),
+            )
+        });
+        started_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+        // The send callback is paused while holding the actual intent lock.
+        // Response admission uses the same lock and cannot observe a gap.
+        assert!(sessions.intents.try_lock().is_none());
+        release_tx.send(()).unwrap();
+        assert!(send_thread.join().unwrap().is_ok());
+        assert!(response_thread.join().unwrap().is_ok());
+    }
+
+    #[test]
+    fn late_success_cannot_clear_a_newer_pending_capability_request() {
+        let sessions = ControllingSessionManager::default();
+        let session = sessions
+            .open_for_test(
+                Some("session-1433"),
+                "Session",
+                "chat",
+                &lease(),
+                &capabilities(),
+            )
+            .unwrap();
+        let first = sessions
+            .capability_request(&session.session_ref, &lease())
+            .unwrap();
+        let second = sessions
+            .capability_request(&session.session_ref, &lease())
+            .unwrap();
+        let mut response = snapshot(1);
+        response["request_id"] = json!(first.request_id);
+        response["session_id"] = json!(first.session_id);
+        response["controlled_session_id"] = json!("b-session-1");
+        assert_eq!(
+            sessions
+                .apply_capability_snapshot_for_lease_with_mapping(
+                    &lease(),
+                    &response,
+                    |_, _| Ok(())
+                )
+                .unwrap_err()
+                .code,
+            "capability_response_stale"
+        );
+        response["request_id"] = json!(second.request_id);
+        assert!(
+            sessions
+                .apply_capability_snapshot_for_lease_with_mapping(
+                    &lease(),
+                    &response,
+                    |_, _| Ok(())
+                )
+                .is_ok()
+        );
+    }
+
+    #[test]
+    fn reopening_the_same_session_never_reuses_the_old_capability_request_id() {
+        let sessions = ControllingSessionManager::default();
+        let first = sessions
+            .open_for_test(
+                Some("session-1433"),
+                "Session",
+                "chat",
+                &lease(),
+                &capabilities(),
+            )
+            .unwrap();
+        let old = sessions
+            .capability_request(&first.session_ref, &lease())
+            .unwrap();
+        sessions.close(&first.session_ref).unwrap();
+        let second = sessions
+            .open_for_test(
+                Some("session-1433"),
+                "Session",
+                "chat",
+                &lease(),
+                &capabilities(),
+            )
+            .unwrap();
+        let new = sessions
+            .capability_request(&second.session_ref, &lease())
+            .unwrap();
+        assert_ne!(old.request_id, new.request_id);
+        let mut response = snapshot(1);
+        response["request_id"] = json!(old.request_id);
+        response["session_id"] = json!(old.session_id);
+        response["controlled_session_id"] = json!("b-session-1");
+        assert_eq!(
+            sessions
+                .apply_capability_snapshot_for_lease_with_mapping(
+                    &lease(),
+                    &response,
+                    |_, _| Ok(())
+                )
+                .unwrap_err()
+                .code,
+            "session_not_found"
+        );
+        response["request_id"] = json!(new.request_id);
+        assert!(
+            sessions
+                .apply_capability_snapshot_for_lease_with_mapping(
+                    &lease(),
+                    &response,
+                    |_, _| Ok(())
+                )
+                .is_ok()
         );
     }
 

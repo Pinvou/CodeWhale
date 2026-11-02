@@ -9,8 +9,10 @@ import signal
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 import unittest
+from unittest.mock import patch
 
 SOURCE = Path(__file__).resolve().parents[1] / "account-platform-auth-quota-lua-check.py"
 SPEC = importlib.util.spec_from_file_location("quota_lua_check", SOURCE)
@@ -19,6 +21,77 @@ SPEC.loader.exec_module(CHECK)
 
 
 class QuotaLuaRunnerTests(unittest.TestCase):
+    def test_group_wait_ignores_zombies_and_unrelated_sessions(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            def stat(pid, state, group, session):
+                folder = root / str(pid)
+                folder.mkdir(exist_ok=True)
+                (folder / "stat").write_text(f"{pid} (worker ) name) {state} 1 {group} {session} 0\n")
+            stat(1, "Z", 123, 123)
+            stat(2, "S", 123, 456)
+            stat(3, "S", 456, 123)
+            self.assertFalse(CHECK._owned_group_has_live_process(123, root))
+            stat(4, "S", 123, 123)
+            self.assertTrue(CHECK._owned_group_has_live_process(123, root))
+            stat(4, "X", 123, 123)
+            self.assertFalse(CHECK._owned_group_has_live_process(123, root))
+
+    def test_live_owned_group_cannot_outwait_the_cleanup_budget(self):
+        with patch.object(CHECK, "_owned_group_has_live_process", return_value=True), \
+                patch.object(CHECK.time, "monotonic", return_value=11), \
+                patch.object(CHECK.time, "sleep") as sleep:
+            with self.assertRaisesRegex(ValueError, "cleanup deadline"):
+                CHECK._wait_owned_group(123, deadline=10)
+            sleep.assert_not_called()
+
+    @unittest.skipUnless(sys.platform.startswith("linux"), "owned process-group regression requires Linux")
+    def test_cleanup_waits_for_signalled_descendant_after_parent_exit(self):
+        with tempfile.TemporaryDirectory(prefix="quota delayed group ") as directory:
+            ready = Path(directory) / "child.ready"
+            pid_file = Path(directory) / "child.pid"
+            child = "from pathlib import Path; import os,time; Path(" + repr(str(pid_file)) + ").write_text(str(os.getpid())); Path(" + repr(str(ready)) + ").write_text('ready'); time.sleep(30)"
+            parent = "import subprocess,sys,time; subprocess.Popen([sys.executable,'-c'," + repr(child) + "]); time.sleep(30)"
+            process = subprocess.Popen([sys.executable, "-c", parent], start_new_session=True,
+                                       stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            kill_group = os.killpg
+            timer = None
+            try:
+                deadline = time.monotonic() + 5
+                while not ready.exists():
+                    if time.monotonic() >= deadline:
+                        self.fail("owned descendant fixture did not become ready")
+                    time.sleep(0.01)
+                pid = int(pid_file.read_text())
+
+                def finish_group():
+                    try:
+                        kill_group(process.pid, signal.SIGKILL)
+                    except ProcessLookupError:
+                        pass
+
+                def parent_exits_first(group, sig):
+                    nonlocal timer
+                    self.assertEqual(group, process.pid)
+                    self.assertEqual(sig, signal.SIGKILL)
+                    # Model asynchronous group death: the direct parent exits
+                    # immediately, but its owned descendant exits a little later.
+                    os.kill(process.pid, sig)
+                    timer = threading.Timer(0.15, finish_group)
+                    timer.start()
+
+                with patch.object(CHECK.os, "killpg", side_effect=parent_exits_first):
+                    CHECK.stop_owned_process(process)
+                self.assertFalse(self.child_running(pid), "cleanup returned before the signalled descendant exited")
+            finally:
+                try:
+                    kill_group(process.pid, signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
+                process.wait(timeout=10)
+                if timer is not None:
+                    timer.join(timeout=2)
+
     def child_running(self, pid):
         if os.name == "nt":
             import ctypes

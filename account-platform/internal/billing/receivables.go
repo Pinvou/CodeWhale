@@ -13,6 +13,9 @@ import (
 var (
 	receivableAccount         = uuid.MustParse("00000000-0000-7000-8000-000000000005")
 	chargebackClearingAccount = uuid.MustParse("00000000-0000-7000-8000-000000000006")
+	// Payment consumers may commit evidence on ErrConflict. A failed guarded
+	// settlement is an integrity failure and must roll back all prior writes.
+	errReceivableSettlementIntegrity = errors.New("receivable settlement integrity check failed")
 )
 
 type Receivable struct {
@@ -90,6 +93,9 @@ func settleOpenReceivablesWithinTransaction(ctx context.Context, tx pgx.Tx, wall
 		items = append(items, item)
 	}
 	rows.Close()
+	if err := rows.Err(); err != nil {
+		return 0, err
+	}
 	remaining, applied := maximum, int64(0)
 	for _, item := range items {
 		if remaining == 0 {
@@ -101,8 +107,12 @@ func settleOpenReceivablesWithinTransaction(ctx context.Context, tx pgx.Tx, wall
 		if amount == item.OutstandingMicrocredits {
 			status, settledAt = "SETTLED", &now
 		}
-		if _, err := tx.Exec(ctx, `UPDATE receivables SET settled_microcredits=settled_microcredits+$2,outstanding_microcredits=outstanding_microcredits-$2,status=$3,version=version+1,updated_at=$4,settled_at=$5 WHERE id=$1 AND outstanding_microcredits>=$2`, item.ID, amount, status, now, settledAt); err != nil {
+		command, err := tx.Exec(ctx, `UPDATE receivables SET settled_microcredits=settled_microcredits+$2,outstanding_microcredits=outstanding_microcredits-$2,status=$3,version=version+1,updated_at=$4,settled_at=$5 WHERE id=$1 AND outstanding_microcredits>=$2`, item.ID, amount, status, now, settledAt)
+		if err != nil {
 			return 0, err
+		}
+		if command.RowsAffected() != 1 {
+			return 0, errReceivableSettlementIntegrity
 		}
 		if _, err := tx.Exec(ctx, `INSERT INTO receivable_allocations(id,receivable_id,wallet_id,source_type,source_reference,amount_microcredits,journal_entry_id,created_at) VALUES($1,$2,$3,$4,$5,$6,$7,$8)`, uuid.Must(uuid.NewV7()), item.ID, walletID, sourceType, sourceReference, amount, journalID, now); err != nil {
 			return 0, err
@@ -110,9 +120,15 @@ func settleOpenReceivablesWithinTransaction(ctx context.Context, tx pgx.Tx, wall
 		remaining, applied = remaining-amount, applied+amount
 	}
 	if applied > 0 {
-		_, err = tx.Exec(ctx, `UPDATE wallets SET receivable_microcredits=receivable_microcredits-$2,financial_status=CASE WHEN receivable_microcredits=$2 THEN 'CLEAR' ELSE 'RECEIVABLE_OPEN' END,financial_freeze_reason=CASE WHEN receivable_microcredits=$2 THEN NULL ELSE financial_freeze_reason END,version=version+1,updated_at=$3 WHERE id=$1 AND receivable_microcredits>=$2`, walletID, applied, now)
-		if err == nil {
-			_, err = tx.Exec(ctx, `UPDATE payment_orders payment_order SET attention_summary=CASE WHEN EXISTS(SELECT 1 FROM receivables receivable WHERE receivable.payment_order_id=payment_order.id AND receivable.outstanding_microcredits>0) THEN 'RECEIVABLE_OPEN' WHEN payment_order.attention_summary='RECEIVABLE_OPEN' THEN 'NORMAL' ELSE payment_order.attention_summary END,summary_version=summary_version+1,updated_at=$2 WHERE payment_order.id IN (SELECT DISTINCT receivable.payment_order_id FROM receivables receivable WHERE receivable.wallet_id=$1 AND receivable.payment_order_id IS NOT NULL)`, walletID, now)
+		command, err := tx.Exec(ctx, `UPDATE wallets SET receivable_microcredits=receivable_microcredits-$2,financial_status=CASE WHEN receivable_microcredits=$2 THEN 'CLEAR' ELSE 'RECEIVABLE_OPEN' END,financial_freeze_reason=CASE WHEN receivable_microcredits=$2 THEN NULL ELSE financial_freeze_reason END,version=version+1,updated_at=$3 WHERE id=$1 AND receivable_microcredits>=$2`, walletID, applied, now)
+		if err != nil {
+			return 0, err
+		}
+		if command.RowsAffected() != 1 {
+			return 0, errReceivableSettlementIntegrity
+		}
+		if _, err := tx.Exec(ctx, `UPDATE payment_orders payment_order SET attention_summary=CASE WHEN EXISTS(SELECT 1 FROM receivables receivable WHERE receivable.payment_order_id=payment_order.id AND receivable.outstanding_microcredits>0) THEN 'RECEIVABLE_OPEN' WHEN payment_order.attention_summary='RECEIVABLE_OPEN' THEN 'NORMAL' ELSE payment_order.attention_summary END,summary_version=summary_version+1,updated_at=$2 WHERE payment_order.id IN (SELECT DISTINCT receivable.payment_order_id FROM receivables receivable WHERE receivable.wallet_id=$1 AND receivable.payment_order_id IS NOT NULL)`, walletID, now); err != nil {
+			return 0, err
 		}
 	}
 	return applied, err
