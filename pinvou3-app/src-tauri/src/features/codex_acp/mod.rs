@@ -5784,7 +5784,12 @@ impl AcpPool {
                     // pool instead of relying on the call-local flag. (The pool
                     // sessions lock is held across this whole arm, so the lock —
                     // not statement order alone — orders this against a
-                    // concurrent spawn.)
+                    // concurrent spawn.) A stall settle is a deliberate
+                    // retirement, not a crash: it never feeds the budget and
+                    // clears what the session had accumulated, so a
+                    // stall-driven replacement is neither throttled nor
+                    // mislabeled by earlier crashes.
+                    self.runtime_crash_budgets.lock().remove(session_id);
                     self.runtime_restart_disclosures
                         .lock()
                         .insert(session_id.to_string(), RuntimeRestart::Stall);
