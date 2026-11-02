@@ -195,15 +195,15 @@ impl ToolSpec for TasksTool {
             );
             properties.insert(
                 "allow_shell".to_string(),
-                json!({ "type": "boolean", "description": "(action=create)" }),
+                json!({ "type": "boolean", "description": "Whether the task's session may run shell commands. Omit to inherit the current session's allow-shell setting. (action=create)" }),
             );
             properties.insert(
                 "trust_mode".to_string(),
-                json!({ "type": "boolean", "description": "(action=create)" }),
+                json!({ "type": "boolean", "description": "Run the task with trust mode: file paths are accepted without workspace-boundary validation. Defaults to false. (action=create)" }),
             );
             properties.insert(
                 "auto_approve".to_string(),
-                json!({ "type": "boolean", "description": "(action=create)" }),
+                json!({ "type": "boolean", "description": "Run the task with tool calls auto-approved (full-access posture, no approval prompts). Defaults to false. (action=create)" }),
             );
             properties.insert(
                 "gate".to_string(),
@@ -215,7 +215,7 @@ impl ToolSpec for TasksTool {
             );
             properties.insert(
                 "command".to_string(),
-                json!({ "type": "string", "description": "Command to run. (action=gate_run)" }),
+                json!({ "type": "string", "description": "Command to run. A command the safety classifier rates dangerous is refused with BLOCKED (nothing runs) unless the session itself runs with auto-approve. (action=gate_run)" }),
             );
             properties.insert(
                 "cwd".to_string(),
