@@ -28,7 +28,7 @@ test('three original locales disclose one-time ticket recovery and no key loggin
  for(const locale of ['zh','en','ja'])for(const key of ['ticketIssueUnknown','ticketUnavailable','retrySameExport','saveKey','includePII'])assert.ok(auditWorkspaceCopy[locale].audit[key]);
 });
 
-test('OpenAPI service and BFF server bases match all six actual client transports', async () => {
+test('direct OpenAPI authorization and BFF mapping match all six actual client transports', async () => {
  const {readFile}=await import('node:fs/promises');
  const contract=JSON.parse(await readFile(new URL('../../contracts/openapi/audit-export.json',import.meta.url),'utf8'));
  const original=globalThis.fetch;const calls=[];const client=new AdminPlatformClient();client.csrfToken='controlled-csrf';
@@ -47,11 +47,15 @@ test('OpenAPI service and BFF server bases match all six actual client transport
   await client.downloadAuditExport(id,ticket.download_token);
   const paths=['/admin/v1/audit-logs','/admin/v1/audit-logs/{audit_id}','/admin/v1/audit-exports','/admin/v1/audit-exports/{export_id}','/admin/v1/audit-exports/{export_id}/download-tickets','/admin/v1/audit-exports/{export_id}/download'];
   assert.deepEqual(Object.keys(contract.paths),paths);
-  assert.deepEqual(contract.servers.map(server=>server.url),['/','/api/admin/account']);
+  assert.deepEqual(contract.servers.map(server=>server.url),['/']);
+  assert.deepEqual(contract.security,[{bearerAuth:[]}]);
+  assert.equal(contract.components.securitySchemes.bearerAuth.type,'http');
+  assert.equal(contract.components.securitySchemes.bearerAuth.scheme,'bearer');
   for(let index=0;index<paths.length;index++){
    const concrete=paths[index].replace(/\{(?:audit_id|export_id)\}/g,id);
    assert.equal(contract.servers[0].url.replace(/\/$/,'')+concrete,concrete);
-   assert.equal(contract.servers[1].url+concrete,calls[index].url);
+   assert.equal(contract['x-portal-bff-prefix']+concrete,calls[index].url);
+   assert.equal(new Headers(calls[index].options.headers).has('Authorization'),false);
    assert.equal(calls[index].options.credentials,'same-origin');assert.equal(calls[index].options.cache,'no-store');
   }
   assert.equal(calls.length,6);assert.equal(calls[5].options.headers['X-Pinvou-Download-Token'],token);
