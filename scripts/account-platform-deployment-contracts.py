@@ -30,7 +30,7 @@ POSTGRES_PROFILES = {
 LABEL = "pinvou.deployment-contracts"
 
 
-def prepare_dependencies(arguments, logfile, *, cwd=None):
+def run_logged_command(arguments, logfile, *, cwd=None, dependency_preparation=False):
     """Keep the complete private log; emit bounded, redacted failure evidence."""
     try:
         with logfile.open("w") as output:
@@ -51,14 +51,20 @@ def prepare_dependencies(arguments, logfile, *, cwd=None):
         for name, value in os.environ.items():
             if len(value) >= 4 and re.search(r"TOKEN|PASSWORD|SECRET|CREDENTIAL|API_KEY", name, re.I):
                 tail = tail.replace(value, "[redacted]")
-        tail = re.sub(r"(?i)\b(?:https?|git\+https?)://[^\s<>\"']+", "[URL redacted]", tail)
+        tail = re.sub(r"(?i)\b(?:https?|git\+https?|postgres(?:ql)?)://[^\s<>\"']+", "[URL redacted]", tail)
         tail = re.sub(r"(?i)(authorization\s*[:=]\s*(?:bearer|basic)\s+)\S+", r"\1[redacted]", tail)
         tail = re.sub(r"(?i)((?:_authToken|password|token|secret)\s*[:=]\s*)\S+", r"\1[redacted]", tail)
         tail = "\n".join(tail.splitlines()[-100:])[-24000:]
-        print("DEPENDENCY_PREPARATION_FAILED exit=" + str(error.returncode) + " log=" + logfile.name, file=sys.stderr)
+        label = "DEPENDENCY_PREPARATION_FAILED" if dependency_preparation else "CONTRACT_COMMAND_FAILED"
+        print(label + " exit=" + str(error.returncode) + " log=" + logfile.name, file=sys.stderr)
         print(tail, file=sys.stderr)
         # CalledProcessError includes argv, which can contain GOPROXY secrets.
-        raise RuntimeError("dependency preparation failed; mandatory contracts did not run") from None
+        message = "dependency preparation failed; mandatory contracts did not run" if dependency_preparation else "deployment contract command failed; see redacted diagnostic"
+        raise RuntimeError(message) from None
+
+
+def prepare_dependencies(arguments, logfile, *, cwd=None):
+    run_logged_command(arguments, logfile, cwd=cwd, dependency_preparation=True)
 
 
 def ensure_postgres_image(reference, logfile):
@@ -204,8 +210,7 @@ def main():
             if logfile == "dependencies.log":
                 prepare_dependencies(arguments, artifacts / logfile)
             else:
-                with (artifacts / logfile).open("w") as output:
-                    subprocess.run(arguments, check=True, stdout=output, stderr=subprocess.STDOUT)
+                run_logged_command(arguments, artifacts / logfile)
         else:
             return subprocess.check_output(arguments, text=True).strip()
 

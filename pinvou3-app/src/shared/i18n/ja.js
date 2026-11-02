@@ -2653,6 +2653,7 @@ Object.assign(dictJa.uiSettingsDetail, {
   platformModelsLoading:'プラットフォームモデルを読み込み中…',
   platformModelsSignIn:'Pinvou アカウントにログインするとプラットフォームモデルを選択できます。',
   platformModelsUnavailable:'プラットフォームモデルを一時的に読み込めません。後でもう一度お試しください。',
+  platformModelsRetry:'再読み込み',
   appliesToNewSessions:'新しい会話に適用',
   modelDeprecated:'提供終了予定',
   modelUnavailable:'利用不可',
