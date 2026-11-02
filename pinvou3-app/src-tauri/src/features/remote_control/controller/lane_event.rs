@@ -5,6 +5,25 @@
 pub(crate) enum ControllerLaneEvent {
     Frame(String),
     Disconnected(super::relay_transport::ControllerDisconnectContext),
+    Failed(ControllerLaneFailure),
+}
+
+/// Local ingress failures never carry remote text or frame contents.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum ControllerLaneFailure {
+    ItemCapacity,
+    ByteBudget,
+    Closed,
+}
+
+impl ControllerLaneFailure {
+    pub(crate) fn code(self) -> &'static str {
+        match self {
+            Self::ItemCapacity => "inbound_item_capacity",
+            Self::ByteBudget => "inbound_byte_budget",
+            Self::Closed => "inbound_closed",
+        }
+    }
 }
 
 impl std::fmt::Debug for ControllerLaneEvent {
@@ -12,6 +31,7 @@ impl std::fmt::Debug for ControllerLaneEvent {
         match self {
             Self::Frame(_) => f.debug_tuple("Frame").field(&"[REDACTED]").finish(),
             Self::Disconnected(_) => f.write_str("Disconnected"),
+            Self::Failed(reason) => f.debug_tuple("Failed").field(reason).finish(),
         }
     }
 }

@@ -3,6 +3,7 @@ import { accountClosureCopy, financeCopy, organizationCopy, tokenManagementCopy 
 import { AccountPlatformBffClient } from './bff-client.js';
 import { requirePersonalAccount } from './personal-contract.js';
 import { OrganizationWorkspace } from './OrganizationWorkspace.jsx';
+import { createOrganizationScopeFailureGuard } from './organization-scope.js';
 import { OrganizationDirectory } from './OrganizationDirectory.jsx';
 import { RetainedWorkspace } from './RetainedWorkspace.jsx';
 import { AdminFinanceOverview } from './AdminFinanceOverview.jsx';
@@ -47,6 +48,8 @@ export function AdminOperationsPage({ client, me, copy, language, permissions, r
 
 export function AdminMyOrganizationPage({ client, me, language, onContextChanged }) {
   const bff = useMemo(() => new AccountPlatformBffClient(client.baseURL), [client]);
+  // Profile refresh unmounts the workspace below; retain denied authority here.
+  const scopeFailureGuard = useMemo(() => createOrganizationScopeFailureGuard(), [bff]);
   const contextIdentity = account => { const context = account.active_context; return JSON.stringify([account.user_id, context.context_type, context.organization_id || '', context.context_version || 0, context.membership_version || account.membership_version || 0, context.organization_authorization_version || 0]); };
   const contextKey = contextIdentity(me);
   const [loadedContext, setLoadedContext] = useState('');
@@ -69,6 +72,6 @@ export function AdminMyOrganizationPage({ client, me, language, onContextChanged
   const visibleError = loadedContext === contextKey && error;
   return <section className="adm-panel">{visibleError && <p role="alert">{copy.unavailable}<button onClick={changed}>{copy.refresh}</button></p>}
     {!visibleProfile && !visibleError && <p role="status">{copy.loading}</p>}
-    {visibleProfile && <><OrganizationDirectory client={bff} me={visibleProfile} language={language} onChanged={changed} />{personalPortalSections(visibleProfile).includes('myOrganization') ? <OrganizationWorkspace key={`${visibleProfile.user_id}:${visibleProfile.active_context.organization_id}:${visibleProfile.active_context.context_version}`} client={bff} me={visibleProfile} language={language} onChanged={changed} /> : <p role="alert">{copy.permissions}</p>}</>}
+    {visibleProfile && <><OrganizationDirectory client={bff} me={visibleProfile} language={language} onChanged={changed} />{personalPortalSections(visibleProfile).includes('myOrganization') ? <OrganizationWorkspace key={`${visibleProfile.user_id}:${visibleProfile.active_context.organization_id}:${visibleProfile.active_context.context_version}`} client={bff} me={visibleProfile} language={language} onChanged={changed} scopeFailureGuard={scopeFailureGuard} /> : <p role="alert">{copy.permissions}</p>}</>}
   </section>;
 }
