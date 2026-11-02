@@ -4352,7 +4352,7 @@ impl Engine {
                 approval_mode: self.session.approval_mode,
                 working_set: &self.session.working_set,
                 policy_narrowing,
-                authority_transition: self.pending_authority_transition.clone(),
+                authority_transition: self.pending_authority_transition,
             },
         )
     }
@@ -6091,7 +6091,7 @@ impl Engine {
                 approval_mode: self.session.approval_mode,
                 working_set: &self.session.working_set,
                 policy_narrowing: self.last_policy_narrowing.as_ref(),
-                authority_transition: self.pending_authority_transition.clone(),
+                authority_transition: self.pending_authority_transition,
             },
         );
         self.session.add_message(user_msg);
