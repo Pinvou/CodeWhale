@@ -21,6 +21,65 @@ verify_results = runpy.run_path(str(ROOT / "scripts/test-account-closure-postgre
 
 
 class DeploymentContracts(unittest.TestCase):
+    def image_inspect_result(self, *, cached=True, digests=None):
+        if digests is None:
+            digests = [deployment.POSTGRES.split(":17-alpine", 1)[0] + "@" + deployment.POSTGRES.split("@", 1)[1]]
+        return subprocess.CompletedProcess([], 0 if cached else 1, json.dumps(digests), "")
+
+    def test_pinned_postgres_cache_hit_never_contacts_registry(self):
+        with tempfile.TemporaryDirectory() as directory:
+            logfile = Path(directory) / "postgres-image.log"
+            for reference in deployment.POSTGRES_PROFILES.values():
+                digest = "docker.io/library/postgres@" + reference.split("@", 1)[1]
+                with patch.object(deployment.subprocess, "run", return_value=self.image_inspect_result(digests=[digest])) as inspect, \
+                        patch.object(deployment, "prepare_dependencies") as pull, contextlib.redirect_stdout(io.StringIO()):
+                    deployment.ensure_postgres_image(reference, logfile)
+                pull.assert_not_called()
+                self.assertEqual(inspect.call_count, 1)
+                self.assertEqual(inspect.call_args.args[0], ["docker", "image", "inspect", reference, "--format", "{{json .RepoDigests}}"])
+                self.assertIn("POSTGRES_IMAGE_CACHE_HIT " + reference, logfile.read_text())
+
+    def test_missing_postgres_downloads_only_pinned_manifest_and_revalidates(self):
+        with tempfile.TemporaryDirectory() as directory:
+            logfile = Path(directory) / "postgres-image.log"
+            with patch.object(deployment.subprocess, "run", side_effect=[self.image_inspect_result(cached=False), self.image_inspect_result()]) as inspect, \
+                    patch.object(deployment, "prepare_dependencies") as pull:
+                deployment.ensure_postgres_image(deployment.POSTGRES, logfile)
+            pull.assert_called_once_with(["docker", "pull", deployment.POSTGRES], logfile)
+            self.assertEqual(inspect.call_count, 2)
+
+    def test_wrong_or_malformed_cached_digest_fails_without_mutating_cache(self):
+        with tempfile.TemporaryDirectory() as directory:
+            logfile = Path(directory) / "postgres-image.log"
+            for payload in (["postgres@sha256:" + "0" * 64], [], None, {}, [42], "not json"):
+                with self.subTest(payload=payload), \
+                        patch.object(deployment.subprocess, "run", return_value=subprocess.CompletedProcess([], 0, json.dumps(payload), "")), \
+                        patch.object(deployment, "prepare_dependencies") as pull:
+                    with self.assertRaisesRegex(RuntimeError, "cache"):
+                        deployment.ensure_postgres_image(deployment.POSTGRES, logfile)
+                    pull.assert_not_called()
+
+    def test_postgres_pull_failure_cannot_become_a_cache_or_contract_pass(self):
+        with tempfile.TemporaryDirectory() as directory:
+            with patch.object(deployment.subprocess, "run", return_value=self.image_inspect_result(cached=False)), \
+                    patch.object(deployment, "prepare_dependencies", side_effect=RuntimeError("mandatory contracts did not run")):
+                with self.assertRaisesRegex(RuntimeError, "mandatory contracts did not run"):
+                    deployment.ensure_postgres_image(deployment.POSTGRES, Path(directory) / "postgres-image.log")
+
+    def test_successful_pull_without_a_usable_image_still_fails(self):
+        with tempfile.TemporaryDirectory() as directory:
+            with patch.object(deployment.subprocess, "run", return_value=self.image_inspect_result(cached=False)), \
+                    patch.object(deployment, "prepare_dependencies") as pull:
+                with self.assertRaisesRegex(RuntimeError, "unavailable after preparation"):
+                    deployment.ensure_postgres_image(deployment.POSTGRES, Path(directory) / "postgres-image.log")
+                pull.assert_called_once()
+
+    def test_postgres_tag_only_reference_is_rejected_before_docker_access(self):
+        with tempfile.TemporaryDirectory() as directory, patch.object(deployment.subprocess, "run") as inspect:
+            with self.assertRaisesRegex(RuntimeError, "pinned digest"):
+                deployment.ensure_postgres_image("postgres:17-alpine", Path(directory) / "postgres-image.log")
+            inspect.assert_not_called()
+
     def run_workflow_cache_fixture(self, fail_allocation=False):
         workflow = (ROOT / ".github/workflows/pr-check.yml").read_text(encoding="utf-8")
         start = workflow.index("      - name: Production history and managed PostgreSQL release contracts\n")
