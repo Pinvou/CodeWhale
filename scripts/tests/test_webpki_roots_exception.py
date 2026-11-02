@@ -202,8 +202,10 @@ def cargo_deny_commands(workflow):
     lines = workflow.splitlines()
     commands = []
     scalar_lines = set()
-    # Account Platform already uses this pinned official toolchain action.
-    reviewed_pinned_actions = {'actions/setup-go@v6'}
+    # Account Platform uses the official Go toolchain action and the Node-based
+    # artifact client. Uploading existing diagnostic logs does not compile Rust
+    # or add another cargo-deny consumer. Review exact versions, not all tags.
+    reviewed_pinned_actions = {'actions/setup-go@v6', 'actions/upload-artifact@v7'}
     reviewed_actions = {'actions/checkout', 'actions/setup-node', 'actions/setup-python',
                         'actions/cache/restore', 'actions/cache/save', 'dorny/paths-filter',
                         'dtolnay/rust-toolchain', 'Swatinem/rust-cache', 'taiki-e/install-action'}
@@ -322,6 +324,15 @@ class WebpkiCiContractTests(unittest.TestCase):
         for replacement in ['actions/setup-go@v7', 'actions/setup-go@main', 'actions/setup-go']:
             with self.subTest(action=replacement), self.assertRaisesRegex(AssertionError, 'unreviewed action'):
                 self.verify_workflow(workflow.replace('actions/setup-go@v6', replacement))
+
+    def test_financial_diagnostic_upload_action_is_exactly_reviewed(self):
+        workflow = WORKFLOW.read_text(encoding='utf-8')
+        self.assertEqual(workflow.count('uses: actions/upload-artifact@v7'), 1)
+        self.verify_workflow(workflow)
+        for replacement in ['actions/upload-artifact@v8', 'actions/upload-artifact@main',
+                            'actions/upload-artifact', 'unreviewed/upload-artifact@v7']:
+            with self.subTest(action=replacement), self.assertRaisesRegex(AssertionError, 'unreviewed action'):
+                self.verify_workflow(workflow.replace('actions/upload-artifact@v7', replacement))
 
     def test_both_shared_policy_consumers_have_mandatory_locked_scan(self):
         self.verify_workflow(WORKFLOW.read_text(encoding='utf-8'))
