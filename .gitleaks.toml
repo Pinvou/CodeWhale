@@ -202,12 +202,19 @@ regexes = [
 ]
 
 [[allowlists]]
-description = "协议一致性测试夹具为确定性测试向量:该单一 JSON 夹具内提取为 64 位 hex 的 secret 均为确定性派生输出(full-value 锚定;新增 64-hex 值须逐一登记到夹具并复核本组)"
+description = "协议一致性测试夹具为确定性测试向量:该单一 JSON 夹具内 generic-api-key 实际提取到的 6 个 64 位 hex secret 逐一枚举登记(full-value 锚定;新增会落入提取面的 64-hex 值须同步登记本组,未登记值一律保持上报)"
 targetRules = ["generic-api-key"]
 condition = "AND"
 regexTarget = "secret"
 paths = ['''^remote-control-relay/test/fixtures/controller-protocol-v1\.json$''']
-regexes = ['''^[0-9a-f]{64}$''']
+regexes = [
+  '''^2ed76ab549b1e73c031eb49c9448f0798aea81b698279a0c3dc3e49fbfc4b953$''',
+  '''^6759296e0023a8b44a7fbfad74a8168a24ea649eb2369a116ab8bf9ad55d25b7$''',
+  '''^50dae738df11e467a48f1696b3f58e7c77d0ccbf95c879025c64ccb1c5a4b097$''',
+  '''^1231983d543abfd6d7dbae7eda24b115f8f56c6cfeb9180217f35b10eee111fb$''',
+  '''^40e47a3f525bdcac491d418978d7db5af623ac7afe7623c6d78a5d4fce9d0f63$''',
+  '''^473958b8a5f225931cb1f59d9512880d96aa00391c451c98fd9948cd4dca9b6f$''',
+]
 
 [[allowlists]]
 description = "二进制图标内的随机字节偶合 40-hex 令牌形状(该文件已不在主线,仅历史扫描误报)"

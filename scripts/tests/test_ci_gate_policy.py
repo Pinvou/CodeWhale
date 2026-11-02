@@ -5623,6 +5623,94 @@ class SecurityGateEnforcementPinsTests(unittest.TestCase):
                 f"非登记值 {attack!r} 不得被组 1 豁免（前缀扩展/其它值必须照常报出）",
             )
 
+    def test_gitleaks_protocol_fixture_group_enumerates_registered_vectors(self):
+        """协议夹具豁免组必须逐一枚举登记值，不得放行任意 64 位 hex（2026-11-02 评审收口）。
+
+        旧形态 `regexTarget="secret"` + `^[0-9a-f]{64}$` 只锚定了长度形状，
+        会把该夹具内任意字段提取到的任意 64 位 hex 一并豁免：向夹具追加一
+        个未登记的 api_key 赋值（任意合法 SHA-256 形状即可满足）会静默落
+        入本组——完整长度锚定本身不能证明它是已登记的确定性向量。新形态
+        要求每条正则都是 `^<64 位 hex 字面量>$` 的精确枚举，且每个字面量
+        必须真实存在于夹具文件中（夹具向量变更时登记必须同步复核）。合成
+        谓词正负控覆盖：登记值豁免、未登记 64-hex 与前缀扩展不豁免。
+        """
+        import re as _re
+
+        config = tomllib.loads((ROOT / ".gitleaks.toml").read_text(encoding="utf-8"))
+        allowlists = config.get("allowlists", [])
+        fixture = (
+            ROOT
+            / "remote-control-relay"
+            / "test"
+            / "fixtures"
+            / "controller-protocol-v1.json"
+        )
+        self.assertTrue(fixture.exists(), "协议夹具文件不得删除或改名")
+
+        group = next(
+            (
+                g
+                for g in allowlists
+                if "controller-protocol-v1" in (g.get("paths") or [""])[0]
+            ),
+            None,
+        )
+        self.assertIsNotNone(group, "协议夹具豁免组不得删除")
+        self.assertEqual(
+            group.get("targetRules"),
+            ["generic-api-key"],
+            "协议夹具豁免组的 targetRules 不得漂移",
+        )
+
+        hex_literal = _re.compile(r"^\^[0-9a-f]{64}\$$")
+        patterns = group.get("regexes", [])
+        self.assertTrue(patterns, "协议夹具豁免组必须逐一枚举登记值，不得为空")
+        registered = []
+        fixture_text = fixture.read_text(encoding="utf-8")
+        for pattern in patterns:
+            self.assertRegex(
+                pattern,
+                hex_literal,
+                "协议夹具豁免组的每条正则都必须是 ^<64 位 hex 字面量>$ 的"
+                f"精确枚举，不得放行任意长度形状: {pattern}",
+            )
+            value = pattern[1:-1]
+            self.assertIn(
+                value,
+                fixture_text,
+                f"豁免组登记值 {value} 必须真实存在于协议夹具文件中",
+            )
+            registered.append(value)
+        self.assertEqual(
+            len(registered),
+            len(set(registered)),
+            "协议夹具豁免组不得出现重复登记",
+        )
+
+        compiled = [_re.compile(p) for p in patterns]
+
+        def group_match(secret: str) -> bool:
+            return any(c.match(secret) is not None for c in compiled)
+
+        for value in registered:
+            self.assertTrue(
+                group_match(value),
+                f"登记值 {value} 必须仍被本组豁免（豁免面不得回退）",
+            )
+        # 同文件未登记 64-hex 凭据负例：任何不在这批枚举里的 64 位 hex
+        # （包括合法 SHA-256 形状的合成值）都不得落入本组豁免。
+        unregistered = [
+            "b3a9e2f14c8d7a0655e93f21c4b7d80669a2f5e18c7d4b309a6e1f25d8c4b7a9",
+            "0" * 64,
+            ("a" * 63) + "2",
+        ]
+        for attack in unregistered:
+            self.assertNotIn(attack, registered)
+            self.assertFalse(
+                group_match(attack),
+                f"未登记 64-hex 值 {attack} 不得被本组豁免（须照常报出）",
+            )
+
 
 class ReleaseDiskAndImagePolicyTests(unittest.TestCase):
     """Guard for release-build disk preparation and the single-image convention (backported from private-repo #1112 on 2026-09-16)."""
