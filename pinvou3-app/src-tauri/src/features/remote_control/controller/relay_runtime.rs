@@ -28,6 +28,7 @@ use super::controlled::{
     ControlledDeviceManager, ControlledLease, ControlledOperation, ControlledRegistration,
     ControlledResumeMaterial, ControlledResumeStep, ControlledStateError, ControlledStatus,
     ControlledStatusKind, ControlledTransportAuthority, ControlledTransportOwner,
+    MAX_HANDSHAKE_TTL_MS,
 };
 use super::controlled_handshake::ControlledHandshake;
 use super::controlling_handshake::JoinedLease;
@@ -40,7 +41,8 @@ use super::encrypted_lane::ControlledLaneState;
 use super::protocol::LeaseContext;
 use super::protocol::{
     ROLE_B, RegistrationValidationContext, SenderRole, is_self_echoed_handshake_frame,
-    validate_controller_message_json, validate_controller_registration_message_json,
+    is_valid_identifier, validate_controller_message_json,
+    validate_controller_registration_message_json,
 };
 use super::resume::{
     build_controller_post_activation_liveness, build_controller_resume_activation_ack,
@@ -141,26 +143,25 @@ fn remote_action_fingerprint(
     hasher.finalize().into()
 }
 
-// Relay signs a wall-clock expiry, whereas the B lifecycle owner and UI
-// countdown use one local monotonic clock. Convert once at receipt; never
-// expose either absolute clock origin to the WebView.
-fn pairing_deadline_b(wire_expiry_ms: u64, wall_now_ms: u64, now_b: u64) -> Result<u64, String> {
-    let remaining = wire_expiry_ms
-        .checked_sub(wall_now_ms)
-        .filter(|remaining| *remaining > 0)
-        .ok_or_else(|| "pairing_code_expired".to_owned())?
-        .min(MAX_PAIRING_CODE_TTL_MS);
-    now_b
-        .checked_add(remaining)
-        .ok_or_else(|| "pairing_registration_invalid".to_owned())
+// The Relay issues the five-minute code after our first queued registration.
+// Keep that conservative local anchor across idempotent retries; neither a
+// retry nor the response can renew waiting. Wire expiry stays AEAD-bound but
+// belongs to the Relay's wall clock, not B's local time domain.
+fn pairing_deadline_b(first_sent_at_b: u64, now_b: u64) -> Result<u64, String> {
+    first_sent_at_b
+        .checked_add(MAX_PAIRING_CODE_TTL_MS)
+        .filter(|deadline| now_b < *deadline)
+        .ok_or_else(|| "pairing_code_expired".to_owned())
 }
 
-fn wall_clock_millis() -> Result<u64, String> {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .ok()
-        .and_then(|elapsed| u64::try_from(elapsed.as_millis()).ok())
-        .ok_or_else(|| "pairing_clock_invalid".to_owned())
+fn handshake_deadline_b(signed_expiry_ms: u64, now_b: u64) -> Result<u64, String> {
+    // A signature authenticates expiry, not B's current time in the Relay's
+    // clock domain. Freeze the local budget once; the Relay still enforces its
+    // own reservation deadline at every authoritative handshake admission.
+    now_b
+        .checked_add(MAX_HANDSHAKE_TTL_MS)
+        .filter(|_| signed_expiry_ms > 0)
+        .ok_or_else(|| "desktop_remote_handshake_timeout".to_owned())
 }
 
 // Keep the transport's existing host projection at one narrow callsite.
@@ -443,6 +444,7 @@ fn log_scope(value: &str) -> &'static str {
 fn log_stage(value: &str) -> &'static str {
     const STAGES: &[&str] = &[
         "controlled_status",
+        "preconnect_expired",
         "controlled_result",
         "capability_handshake",
         "start_rejected",
@@ -649,6 +651,8 @@ fn log_detail(value: &str) -> &'static str {
         "stop_completed",
         "disconnect_requested",
         "disconnect_completed",
+        "desktop_remote_pairing_expired",
+        "desktop_remote_handshake_timeout",
     ];
     if let Some(value) = DETAILS.iter().copied().find(|detail| *detail == value) {
         return value;
@@ -894,6 +898,13 @@ impl ControlledHandshakeDriver {
         self.handshake.is_some()
     }
 
+    fn signed_expires_at_ms(&self) -> Result<u64, &'static str> {
+        self.handshake
+            .as_ref()
+            .map(ControlledHandshake::signed_expires_at_ms)
+            .ok_or("controller_handshake_stage_invalid")
+    }
+
     /// `controller_pairing_reserved`：验签 transcript、派生会话密钥与 receipt，
     /// 产出本端 `finished_receipt_commit`。未验签或重复接管都失败关闭。
     pub(crate) fn accept_reserved(
@@ -1003,6 +1014,20 @@ pub(crate) async fn wait_for_registration<P: ControlledRelayPort>(
                     // control frames. They are not registration responses and
                     // must never be fed to the registration validator.
                     _ => continue,
+                }
+                if kind == Some("desktop_pairing_registered")
+                    && ["request_id", "registration_request_id", "remote_control_generation"]
+                        .iter()
+                        .all(|key| message.get(*key).and_then(Value::as_str).is_some_and(is_valid_identifier))
+                    && ["request_id", "registration_request_id", "remote_control_generation"]
+                        .iter()
+                        .any(|key| message.get(*key).and_then(Value::as_str)
+                            .is_some_and(|value| Some(value) != request.get(*key).and_then(Value::as_str)))
+                {
+                    // A well-tagged reply for a retired registration is not a
+                    // response to this attempt. Do not renew its fixed sleep.
+                    // Missing/malformed current fields still reach validation.
+                    continue;
                 }
                 // relay 的拒绝必须保留原始有界码，便于定位（此前被映射成
                 // pairing_registration_rejected 后丢失了原因）。
@@ -1115,6 +1140,7 @@ impl ControlledRelayWorker {
         // 拒绝；同时网络抖动可能让端点通道 20 秒内都没就绪，因此整体**有界重试**：
         // 每次重试复用同一个 registration_request_id，relay 侧按幂等键返回同一结果。
         const MAX_ATTEMPTS: u32 = 3;
+        let mut first_registration_sent_at_b = None;
         for attempt in 1..=MAX_ATTEMPTS {
             match self.relay.wait_endpoint_ready(ENDPOINT_READY_TIMEOUT).await {
                 Ok(()) => log_controlled_event("endpoint_ready", "ok"),
@@ -1137,7 +1163,9 @@ impl ControlledRelayWorker {
                     .as_ref()
                     .ok_or_else(|| "handshake_key_invalid".to_owned())?,
             )?;
+            let sent_at_b = controlled_monotonic_millis();
             self.channel.try_send(request.clone())?;
+            let first_sent_at_b = *first_registration_sent_at_b.get_or_insert(sent_at_b);
             // 区分「连注册帧都没发出去」与「发出后等待/被拒」这两类失败。
             log_controlled_event("registration_sent", "waiting_registered");
             match wait_for_registration(
@@ -1150,13 +1178,13 @@ impl ControlledRelayWorker {
             {
                 Ok(mut registration) => {
                     let now_b = controlled_monotonic_millis();
-                    registration.expires_at_ms = pairing_deadline_b(
-                        registration.expires_at_ms,
-                        wall_clock_millis()?,
-                        now_b,
-                    )?;
+                    registration.expires_at_ms = pairing_deadline_b(first_sent_at_b, now_b)?;
                     let status = manager
-                        .complete_registration(self.operation.clone(), registration, now_b)
+                        .complete_registration_at(
+                            self.operation.clone(),
+                            registration,
+                            controlled_monotonic_millis,
+                        )
                         .map_err(|error| error.code.to_owned())?;
                     log_controlled_event("registered", "waiting_for_pairing");
                     emit_controlled_status(&self.app, &status);
@@ -1219,8 +1247,40 @@ impl ControlledRelayWorker {
         poll.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
         poll.tick().await;
         'serve: loop {
+            let preconnect = if joined {
+                None
+            } else {
+                let manager = self.app.state::<ControlledDeviceManager>();
+                match manager.preconnect_deadline(&self.operation) {
+                    Ok(ticket) => ticket,
+                    Err(_) => break 'serve,
+                }
+            };
+            let deadline_wait = async {
+                match preconnect.as_ref() {
+                    Some(ticket) => {
+                        let remaining = ticket
+                            .deadline_b()
+                            .saturating_sub(controlled_monotonic_millis());
+                        tokio::time::sleep(Duration::from_millis(remaining)).await;
+                    }
+                    None => std::future::pending::<()>().await,
+                }
+            };
             tokio::select! {
                 biased;
+                _ = deadline_wait => {
+                    let Some(ticket) = preconnect.as_ref() else { continue 'serve };
+                    let manager = self.app.state::<ControlledDeviceManager>();
+                    match manager.expire_preconnect(ticket, controlled_monotonic_millis) {
+                        Ok(Some(status)) => {
+                            emit_controlled_status(&self.app, &status);
+                            break 'serve;
+                        }
+                        Ok(None) => continue 'serve,
+                        Err(_) => break 'serve,
+                    }
+                }
                 _ = poll.tick() => {
                     if joined {
                         let manager = self.app.state::<ControlledDeviceManager>();
@@ -1435,7 +1495,7 @@ impl ControlledRelayWorker {
                                 == Some("controller_pairing_reserved")
                             {
                                 let manager = self.app.state::<ControlledDeviceManager>();
-                                match manager.mark_handshake_pending(self.operation.clone()) {
+                                match manager.mark_handshake_pending_at(self.operation.clone(), controlled_monotonic_millis) {
                                     Ok(status) => {
                                         emit_controlled_status(&self.app, &status);
                                     }
@@ -1643,8 +1703,15 @@ impl ControlledRelayWorker {
         let commit = driver
             .accept_reserved(message, &trust)
             .map_err(str::to_owned)?;
+        let now_b = controlled_monotonic_millis();
+        let deadline_b =
+            handshake_deadline_b(driver.signed_expires_at_ms().map_err(str::to_owned)?, now_b)?;
         let status = manager
-            .mark_pairing_reserved(self.operation.clone())
+            .mark_pairing_reserved_at(
+                self.operation.clone(),
+                deadline_b,
+                controlled_monotonic_millis,
+            )
             .map_err(|error| error.code.to_owned())?;
         emit_controlled_status(&self.app, &status);
         Ok(Some(commit))
@@ -1665,54 +1732,68 @@ impl ControlledRelayWorker {
         // 加密业务通道先于 connected 就位：状态一旦是 connected，业务帧既有租约
         // 准入也有会话密钥可用。
         let Ok(session) = driver.take_session() else {
-            return Err(self.fail_completed_handshake(&manager));
+            return Err(self.fail_completed_handshake(&manager, HANDSHAKE_FAILED));
         };
         let business = self.app.state::<ControlledLaneState>();
         let outbound = self.app.state::<ControlledOutboundState>();
         let context = lease.context.clone();
         let capabilities = lease.negotiated_capabilities.clone();
-        let result = manager.complete_connected_with_install(self.operation.clone(), lease, || {
-            // C -> R -> S keeps the real joined receipt and this worker's
-            // registration continuous with the lane/outbound/Connected commit.
-            // Errors leave this closure before any manager failure callback.
-            let transport = self
-                .channel
-                .authenticated_transport(&context, capabilities)
-                .map_err(|_| ControlledStateError {
-                    code: HANDSHAKE_FAILED,
-                })?;
-            business.clear();
-            business
-                .install(super::crypto::ControllerRole::B, &context, session)
-                .map_err(|_| ControlledStateError {
-                    code: HANDSHAKE_FAILED,
-                })?;
-            outbound.install(self.channel.sender());
-            Ok(std::sync::Arc::new(transport) as std::sync::Arc<dyn ControlledTransportAuthority>)
-        });
-        let (status, owner) = result.map_err(|_| self.fail_completed_handshake(&manager))?;
+        let result = manager.complete_connected_with_install(
+            self.operation.clone(),
+            lease,
+            controlled_monotonic_millis,
+            || {
+                // C -> R -> S keeps the real joined receipt and this worker's
+                // registration continuous with the lane/outbound/Connected commit.
+                // Errors leave this closure before any manager failure callback.
+                let transport = self
+                    .channel
+                    .authenticated_transport(&context, capabilities)
+                    .map_err(|_| ControlledStateError {
+                        code: HANDSHAKE_FAILED,
+                    })?;
+                business.clear();
+                business
+                    .install(super::crypto::ControllerRole::B, &context, session)
+                    .map_err(|_| ControlledStateError {
+                        code: HANDSHAKE_FAILED,
+                    })?;
+                outbound.install(self.channel.sender());
+                Ok(std::sync::Arc::new(transport)
+                    as std::sync::Arc<dyn ControlledTransportAuthority>)
+            },
+        );
+        let (status, owner) =
+            result.map_err(|error| self.fail_completed_handshake(&manager, error.code))?;
         emit_controlled_status(&self.app, &status);
         Ok(owner)
     }
 
     /// 握手成功后本地收尾失败（无权安装会话密钥/状态竞争）：失败关闭并返回
     /// 有界错误码，绝不留下「connected 但无业务通道」的状态。
-    fn fail_completed_handshake(&self, manager: &ControlledDeviceManager) -> String {
+    fn fail_completed_handshake(&self, manager: &ControlledDeviceManager, cause: &str) -> String {
+        // Preserve the local final-admission deadline result. Protocol/session
+        // failures retain the existing bounded generic code.
+        let code = if cause == "desktop_remote_handshake_timeout" {
+            "desktop_remote_handshake_timeout"
+        } else {
+            HANDSHAKE_FAILED
+        };
         let business = self.app.state::<ControlledLaneState>();
-        if let Ok(status) = manager.fail_operation_with_cleanup(
-            self.operation.clone(),
-            HANDSHAKE_FAILED.to_owned(),
-            || business.clear(),
-        ) {
+        if let Ok(status) =
+            manager.fail_preconnect_with_cleanup(self.operation.clone(), code.to_owned(), || {
+                business.clear()
+            })
+        {
+            log_controlled_event("handshake_failed", code);
             emit_controlled_status(&self.app, &status);
         }
-        HANDSHAKE_FAILED.to_owned()
+        code.to_owned()
     }
 
     /// 握手失败收尾：投影为有界错误并结束本代通道（dropping the channel 会
     /// 清掉该 generation 的通道绑定，本地停止/刷新入口保持可用）。
     fn fail_handshake(&self, error: &str) {
-        log_controlled_event("handshake_failed", &sanitize_error(error));
         let manager = self.app.state::<ControlledDeviceManager>();
         if !manager.is_pending_handshake(self.operation.clone()) {
             // 用户已停止/断开，或本代已被刷新取代：不覆盖既有投影。
@@ -1720,6 +1801,7 @@ impl ControlledRelayWorker {
         }
         let bounded = sanitize_error(error);
         if let Ok(status) = manager.fail_operation(self.operation.clone(), bounded) {
+            log_controlled_event("handshake_failed", &sanitize_error(error));
             emit_controlled_status(&self.app, &status);
         }
     }
@@ -3089,23 +3171,37 @@ mod tests {
     }
 
     #[test]
-    fn relay_wall_expiry_becomes_a_bounded_local_monotonic_deadline() {
+    fn registration_waiting_is_anchored_to_first_send_and_cannot_renew_on_receipt() {
+        let first_send = 70;
+        let deadline = first_send + MAX_PAIRING_CODE_TTL_MS;
+        for received in [70, 100, deadline - 1] {
+            assert_eq!(pairing_deadline_b(first_send, received).unwrap(), deadline);
+        }
+        for received in [deadline, deadline + 1] {
+            assert_eq!(
+                pairing_deadline_b(first_send, received).unwrap_err(),
+                "pairing_code_expired"
+            );
+        }
         assert_eq!(
-            pairing_deadline_b(1_030_000, 1_000_000, 70).unwrap(),
-            30_070
-        );
-        assert_eq!(
-            pairing_deadline_b(2_000_000, 1_000_000, 70).unwrap(),
-            70 + MAX_PAIRING_CODE_TTL_MS
-        );
-        assert_eq!(
-            pairing_deadline_b(1_000_000, 1_000_000, 70).unwrap_err(),
+            pairing_deadline_b(u64::MAX, u64::MAX).unwrap_err(),
             "pairing_code_expired"
         );
-        assert_eq!(
-            pairing_deadline_b(999_999, 1_000_000, 70).unwrap_err(),
-            "pairing_code_expired"
-        );
+    }
+
+    #[test]
+    fn authenticated_handshake_uses_a_local_budget_without_cross_wall_comparison() {
+        // Authenticated timestamps can be small or large in the Relay domain;
+        // neither value is evidence of B-local elapsed time or clock offset.
+        for expiry in [1, 10_001, 30_000, u64::MAX] {
+            assert_eq!(handshake_deadline_b(expiry, 7).unwrap(), 20_007);
+        }
+        for (expiry, mono) in [(0, 7), (u64::MAX, u64::MAX)] {
+            assert_eq!(
+                handshake_deadline_b(expiry, mono).unwrap_err(),
+                "desktop_remote_handshake_timeout"
+            );
+        }
     }
     use crate::features::remote_control::controller::controlling_handshake::ControllingHandshake;
     use crate::features::remote_control::controller::crypto::{CodeWrapKeyPair, HandshakeKeyPair};
@@ -3149,6 +3245,13 @@ mod tests {
             assert_eq!(log_remote_action_operation(sentinel), "other");
         }
         assert_eq!(log_stage("controlled_status"), "controlled_status");
+        assert_eq!(log_stage("preconnect_expired"), "preconnect_expired");
+        for detail in [
+            "desktop_remote_pairing_expired",
+            "desktop_remote_handshake_timeout",
+        ] {
+            assert_eq!(log_detail(detail), detail);
+        }
         assert_eq!(log_detail("pairing_code_invalid"), "pairing_code_invalid");
         assert_eq!(
             log_stage("task_session_discard_failed"),
@@ -3444,11 +3547,19 @@ mod tests {
     }
 
     fn registered_response(receiver: &CodeWrapKeyPair) -> Value {
+        registered_response_for(
+            &json!({"request_id":"request-registration-0001",
+            "registration_request_id":"registration-0001", "remote_control_generation":"generation-0001"}),
+            receiver,
+        )
+    }
+
+    fn registered_response_for(request: &Value, receiver: &CodeWrapKeyPair) -> Value {
         let code_wrap = CodeWrapKeyPair::generate().unwrap();
         let binding = CodeWrapBinding::new(
-            "registration-0001",
+            request["registration_request_id"].as_str().unwrap(),
             "pairing-0001",
-            "generation-0001",
+            request["remote_control_generation"].as_str().unwrap(),
             "relay-epoch-0001",
             1_800_000_000_000,
         )
@@ -3459,10 +3570,10 @@ mod tests {
         json!({
             "v": 1,
             "type": "desktop_pairing_registered",
-            "request_id": "request-registration-0001",
-            "registration_request_id": "registration-0001",
+            "request_id": request["request_id"],
+            "registration_request_id": request["registration_request_id"],
             "pairing_id": "pairing-0001",
-            "remote_control_generation": "generation-0001",
+            "remote_control_generation": request["remote_control_generation"],
             "sealed_code_b64": base64::engine::general_purpose::STANDARD.encode(sealed),
             "expires_at_ms": "1800000000000",
             "relay_epoch": "relay-epoch-0001",
@@ -3677,6 +3788,95 @@ mod tests {
             "relay failures must stay bounded: {error}"
         );
         assert!(!error.contains(' '));
+    }
+
+    #[test]
+    fn registration_ignores_stale_success_tags_but_accepts_the_current_sealed_reply() {
+        let (request, receiver) = registration_request_fixture();
+        let current = registered_response(&receiver);
+        let mut messages = Vec::new();
+        for key in [
+            "request_id",
+            "registration_request_id",
+            "remote_control_generation",
+        ] {
+            let mut retired_request = request.clone();
+            retired_request[key] = json!("retired-registration-0001");
+            // Re-seal with the retired AAD, so this is a valid old reply,
+            // rather than a tampered current reply with an invalid tag.
+            messages.push(registered_response_for(&retired_request, &receiver));
+        }
+        messages.push(current);
+        let mut port = FakePort::new(messages, false);
+        assert_eq!(
+            block_on(wait_for_registration(
+                &mut port,
+                &request,
+                &receiver,
+                Duration::from_millis(500)
+            ))
+            .unwrap()
+            .pairing_code,
+            "2345678"
+        );
+    }
+
+    #[test]
+    fn registration_rejects_malformed_current_success_and_preserves_restart_error() {
+        let (request, receiver) = registration_request_fixture();
+        for key in [
+            "request_id",
+            "registration_request_id",
+            "remote_control_generation",
+        ] {
+            for invalid in [
+                None,
+                Some(Value::Null),
+                Some(json!("")),
+                Some(json!("invalid~identifier")),
+                Some(json!(42)),
+            ] {
+                let mut malformed = registered_response(&receiver);
+                match invalid {
+                    Some(value) => {
+                        malformed[key] = value;
+                    }
+                    None => {
+                        malformed.as_object_mut().unwrap().remove(key);
+                    }
+                }
+                let mut port =
+                    FakePort::new(vec![malformed, registered_response(&receiver)], false);
+                assert_eq!(
+                    block_on(wait_for_registration(
+                        &mut port,
+                        &request,
+                        &receiver,
+                        Duration::from_millis(500)
+                    ))
+                    .unwrap_err(),
+                    "pairing_registration_rejected",
+                    "malformed current {key} must not be treated as an old reply"
+                );
+            }
+        }
+        let mut port = FakePort::new(
+            vec![
+                json!({"v":1,"type":"error", "request_id":request["request_id"],
+            "code":"pairing_registration_stale_relay_epoch", "message":"registration expired"}),
+            ],
+            false,
+        );
+        assert_eq!(
+            block_on(wait_for_registration(
+                &mut port,
+                &request,
+                &receiver,
+                Duration::from_millis(500)
+            ))
+            .unwrap_err(),
+            "pairing_registration_stale_relay_epoch"
+        );
     }
 
     #[test]
