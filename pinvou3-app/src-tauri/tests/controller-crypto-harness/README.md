@@ -35,9 +35,9 @@ cancellation, queue and loopback WebSocket regressions with:
 cargo test --locked --manifest-path pinvou3-app/src-tauri/tests/controller-crypto-harness/Cargo.toml relay_transport::tests:: -- --test-threads=1
 ```
 
-The harness substitutes Tokio for Tauri task spawning and does not include
-`controlling_service`. The real A port/handshake integration is a separate
-application test, selected by
+The harness substitutes Tokio for Tauri task spawning and links the production
+dispatcher through a test-only `controlling_service` host shim. The real A
+port/handshake integration remains a separate application test, selected by
 `features::remote_control::controller::controlling_service::tests::connect_attempt_`.
 Windows native CI executes that selector and the transport selector against the
 compiled application test executable, requiring a nonzero match. These tests

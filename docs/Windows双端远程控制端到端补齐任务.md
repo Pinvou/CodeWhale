@@ -206,7 +206,7 @@ E2E-04（加密业务帧双向派发）。开工前需先读第 4 节与本节�
 - 目标差异：出口用例「同进程双端完成任务 admission/execution/terminal status」由 `dual_end_task_round_trip_lands_in_a_side_state` 覆盖（A 构造并加密 → B 解密派发 → B 加密回传 → A 解密投影为任务事件）；B 的真实接纳/执行由 DEV-13 的服务用例覆盖，本用例用端口桩产出冻结形状的 `task_status`。
 - 失败路径：解密/校验失败、无活租约、异 generation/异租约帧、重放帧与未知 payload_kind 一律丢弃且无副作用（`encrypted_inbound_frames_dispatch_to_session_and_task_state`、`decrypted_payloads_dispatch_and_rewrite_the_session_reference`、`replay_wrong_direction_and_tampering_fail_closed`、`foreign_lease_and_missing_capabilities_fail_closed`）。
 - 敏感信息：信封不含明文或摘要（用例断言）；通道/密钥类型 Debug 脱敏；无新增日志。
-- 跨 generation/lease：通道与租约同时安装、断线即清空；解密与信封校验都绑定 lease 五元组与方向；`send_authenticated_business` 未装租约即拒绝。
+- 跨 generation/lease：通道与租约同时安装、断线即清空；解密与信封校验都绑定 lease 五元组与方向；业务发送入口须校验对应的连接所有者和租约。
 - 审核发现（minor，已修复）：命令层任务校验使用本地能力常量表（与真实协商可能漂移）→ 改用 `live_runtime_context`（`a899f4096`）。
 - 登记缺口：`task_cancel` 只校验帧的租约与任务存在性，跨 lease 遗留任务的清理属 E2E-06（B stop/刷新的任务清理）。
 
