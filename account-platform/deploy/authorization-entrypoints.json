@@ -1707,6 +1707,11 @@
   ],
   "cli": [
     {
+      "name": "evidence-image-validator",
+      "source": "account-platform/cmd/evidence-image-validator/main.go",
+      "strategy": "workload.default-disabled-unix-peer-uid-verified-evidence-validator"
+    },
+    {
       "name": "event-resources",
       "source": "account-platform/cmd/event-resources/main.go",
       "strategy": "protocol.offline-fixed-nats-authorization-or-workload-fixed-resources"

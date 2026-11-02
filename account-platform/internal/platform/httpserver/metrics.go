@@ -2,6 +2,7 @@ package httpserver
 
 import (
 	"bufio"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -16,6 +17,7 @@ import (
 
 type httpMetrics struct {
 	requests  *prometheus.CounterVec
+	aborts    *prometheus.CounterVec
 	duration  *prometheus.HistogramVec
 	inFlight  prometheus.Gauge
 	readiness prometheus.Gauge
@@ -25,13 +27,14 @@ type httpMetrics struct {
 func newHTTPMetrics(service string, collectors ...prometheus.Collector) *httpMetrics {
 	labels := prometheus.Labels{"service": service}
 	metrics := &httpMetrics{
-		requests:  prometheus.NewCounterVec(prometheus.CounterOpts{Name: "pinvou_http_requests_total", Help: "Completed account platform HTTP requests.", ConstLabels: labels}, []string{"method", "route", "status"}),
+		requests:  prometheus.NewCounterVec(prometheus.CounterOpts{Name: "pinvou_http_requests_total", Help: "Completed account platform HTTP requests; interrupted responses are aborted unless an already-written 5xx status is retained.", ConstLabels: labels}, []string{"method", "route", "status"}),
+		aborts:    prometheus.NewCounterVec(prometheus.CounterOpts{Name: "pinvou_http_response_aborts_total", Help: "HTTP responses aborted before completion.", ConstLabels: labels}, []string{"method", "route"}),
 		duration:  prometheus.NewHistogramVec(prometheus.HistogramOpts{Name: "pinvou_http_request_duration_seconds", Help: "Account platform HTTP request latency.", ConstLabels: labels, Buckets: []float64{0.005, 0.01, 0.025, 0.05, 0.1, 0.2, 0.5, 1, 2, 5}}, []string{"method", "route"}),
 		inFlight:  prometheus.NewGauge(prometheus.GaugeOpts{Name: "pinvou_http_in_flight_requests", Help: "Account platform HTTP requests currently executing.", ConstLabels: labels}),
 		readiness: prometheus.NewGauge(prometheus.GaugeOpts{Name: "pinvou_service_readiness", Help: "Whether the service's critical request dependencies are ready.", ConstLabels: labels}),
 		registry:  prometheus.NewRegistry(),
 	}
-	metrics.registry.MustRegister(metrics.requests, metrics.duration, metrics.inFlight, metrics.readiness)
+	metrics.registry.MustRegister(metrics.requests, metrics.aborts, metrics.duration, metrics.inFlight, metrics.readiness)
 	if len(collectors) > 0 {
 		metrics.registry.MustRegister(collectors...)
 	}
@@ -49,12 +52,26 @@ func (metrics *httpMetrics) middleware(next http.Handler, logger *slog.Logger) h
 		defer metrics.inFlight.Dec()
 		wrapped := &metricResponseWriter{ResponseWriter: w, status: http.StatusOK}
 		defer func() {
+			// Keep the wire abort semantics and do not serialize panic values.
+			// A response may already have emitted 200, but an aborted body is not
+			// a successfully completed request.
+			recovered := recover()
+			aborted := false
+			if err, ok := recovered.(error); ok {
+				aborted = errors.Is(err, http.ErrAbortHandler)
+			}
 			route := r.Pattern
 			if route == "" {
 				route = "unmatched"
 			}
 			status := strconv.Itoa(wrapped.status)
+			if aborted && !(wrapped.wroteHeader && wrapped.status >= 500 && wrapped.status < 600) {
+				status = "aborted"
+			}
 			method := metricMethod(r.Method)
+			if aborted {
+				metrics.aborts.WithLabelValues(method, route).Inc()
+			}
 			requestCounter := metrics.requests.WithLabelValues(method, route, status)
 			durationObserver := metrics.duration.WithLabelValues(method, route)
 			elapsed := time.Since(start)
@@ -66,7 +83,14 @@ func (metrics *httpMetrics) middleware(next http.Handler, logger *slog.Logger) h
 				requestCounter.Inc()
 				durationObserver.Observe(elapsed.Seconds())
 			}
-			logger.InfoContext(r.Context(), "http request completed", "method", r.Method, "route", route, "status", wrapped.status, "duration_ms", elapsed.Milliseconds())
+			if aborted {
+				logger.ErrorContext(r.Context(), "http request completed", "method", r.Method, "route", route, "status", wrapped.status, "duration_ms", elapsed.Milliseconds(), "error_code", "HTTP_RESPONSE_ABORTED")
+			} else {
+				logger.InfoContext(r.Context(), "http request completed", "method", r.Method, "route", route, "status", wrapped.status, "duration_ms", elapsed.Milliseconds())
+			}
+			if recovered != nil {
+				panic(recovered)
+			}
 		}()
 		next.ServeHTTP(wrapped, r)
 	})
