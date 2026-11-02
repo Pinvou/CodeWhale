@@ -191,7 +191,7 @@ impl ToolSpec for TasksTool {
             );
             properties.insert(
                 "mode".to_string(),
-                json!({ "type": "string", "enum": ["agent", "plan", "operate"], "description": "Operating mode for the task's session. 'plan' runs read-only: shell is disabled even if allow_shell is true, and approvals stay enabled. 'agent' (default) and 'operate' run with the task's allow_shell/trust_mode/auto_approve values. (action=create)" }),
+                json!({ "type": "string", "enum": ["agent", "plan", "operate"], "description": "Operating mode for the task's session. 'plan' runs read-only: shell is disabled even if allow_shell is true, and plan's read-only blocks are not lifted by auto_approve (which otherwise skips approval prompts). 'agent' (default) and 'operate' run with the task's allow_shell/trust_mode/auto_approve values. (action=create)" }),
             );
             properties.insert(
                 "allow_shell".to_string(),
@@ -223,7 +223,7 @@ impl ToolSpec for TasksTool {
             );
             properties.insert(
                 "timeout_ms".to_string(),
-                json!({ "type": "integer", "minimum": 1000, "maximum": 600000, "description": "Kill deadline for the gate command in milliseconds. Defaults to 120000; values are clamped into 1000-600000. On expiry the process group is killed, the result reports timed_out with no exit code, and any partial output is kept. (action=gate_run)" }),
+                json!({ "type": "integer", "minimum": 1000, "maximum": 600000, "description": "Kill deadline for the gate command in milliseconds. Defaults to 120000; out-of-range values are clamped, not rejected. On expiry the process group is killed, the result reports timed_out with no exit code, and any partial output is kept. (action=gate_run)" }),
             );
             properties.insert(
                 "attempt_group_id".to_string(),
@@ -231,11 +231,11 @@ impl ToolSpec for TasksTool {
             );
             properties.insert(
                 "attempt_index".to_string(),
-                json!({ "type": "integer", "minimum": 1, "description": "This attempt's position within its group (1-based), shown as 'index/count' in the task timeline. Defaults to 1; values below 1 are clamped to 1. (action=pr_attempt_record)" }),
+                json!({ "type": "integer", "minimum": 1, "description": "This attempt's position within its group (1-based), shown as 'index/count' in the task timeline. Defaults to 1; out-of-range values are clamped, not rejected. (action=pr_attempt_record)" }),
             );
             properties.insert(
                 "attempt_count".to_string(),
-                json!({ "type": "integer", "minimum": 1, "description": "Total number of attempts intended for the group, shown as 'index/count' in the task timeline. Defaults to 1; values below 1 are clamped to 1. (action=pr_attempt_record)" }),
+                json!({ "type": "integer", "minimum": 1, "description": "Total number of attempts intended for the group, shown as 'index/count' in the task timeline. Defaults to 1; out-of-range values are clamped, not rejected. (action=pr_attempt_record)" }),
             );
             properties.insert(
                 "summary".to_string(),
@@ -256,7 +256,7 @@ impl ToolSpec for TasksTool {
         );
         properties.insert(
             "limit".to_string(),
-            json!({ "type": "integer", "minimum": 1, "maximum": 100, "default": 20, "description": "Maximum number of tasks returned, newest first. Defaults to 20; values are clamped into 1-100. (action=list)" }),
+            json!({ "type": "integer", "minimum": 1, "maximum": 100, "default": 20, "description": "Maximum number of tasks returned, newest first. Out-of-range values are clamped, not rejected. (action=list)" }),
         );
         json!({
             "type": "object",
