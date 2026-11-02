@@ -508,6 +508,28 @@ impl LaneStore {
         operation()
     }
 
+    // Seal and enqueue under the exact lane owner; the caller holds the
+    // connection owner and the callback must be synchronous and non-reentrant.
+    fn seal_for_lease_and_send(
+        &self,
+        lease: &super::protocol::LeaseContext,
+        payload: &Value,
+        capabilities: &[String],
+        send: impl FnOnce(&Value) -> Result<(), String>,
+    ) -> Result<(), String> {
+        let mut guard = self.lane.lock();
+        let lane = guard
+            .as_mut()
+            .ok_or_else(|| "controller_lane_unavailable".to_owned())?;
+        if self.suspended.load(Ordering::SeqCst) || lane.lease() != lease {
+            return Err("controller_lane_unavailable".into());
+        }
+        let frame = lane
+            .seal("capability_snapshot_request", payload, capabilities)
+            .map_err(|error| error.code().to_owned())?;
+        send(&frame)
+    }
+
     pub(crate) fn is_suspended(&self) -> bool {
         self.suspended.load(Ordering::SeqCst)
     }
@@ -693,6 +715,19 @@ macro_rules! lane_state {
 
 lane_state!(ControllingLaneState, "A 端（主控）加密业务通道状态。");
 lane_state!(ControlledLaneState, "B 端（被控）加密业务通道状态。");
+
+impl ControllingLaneState {
+    pub(crate) fn seal_capability_and_send(
+        &self,
+        lease: &super::protocol::LeaseContext,
+        payload: &Value,
+        capabilities: &[String],
+        send: impl FnOnce(&Value) -> Result<(), String>,
+    ) -> Result<(), String> {
+        self.store
+            .seal_for_lease_and_send(lease, payload, capabilities, send)
+    }
+}
 
 impl ControlledLaneState {
     pub(crate) fn clear_if_lease(&self, expected: &super::protocol::LeaseContext) {
