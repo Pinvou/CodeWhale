@@ -155,8 +155,8 @@ the memory setup script leaves them unchanged, and apt cleanup is hosted-only.
 
 The real PDF gate creates an exclusive temporary workspace per invocation and
 cleans only that workspace, including on failure; persistent runner temporary
-files from earlier jobs are never reused or deleted. Account browser fixtures
-recover only loopback static GET loads interrupted by Chromium's
+files from earlier jobs are never reused or deleted. Account and Reader browser
+fixtures recover only loopback static GET loads interrupted by Chromium's
 `ERR_NETWORK_CHANGED` (up to three loads). This does not retry product assertions
 or application requests; Docker interface changes on a shared host must not
 silently turn a failed module load into an empty-page timeout.
