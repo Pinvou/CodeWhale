@@ -1,9 +1,10 @@
 import assert from 'node:assert/strict';
+import { navigateFixture } from './helpers/navigate-fixture.mjs';
 
 export async function runSMSConflictCases(page, origin) {
  let passed = 0; const errors = [];
  const onError = error => errors.push(error.message); page.on('pageerror', onError);
- const fresh = async (language = 'en') => { errors.length = 0; await page.goto(`${origin}/tests/fixtures/account-platform-sms-conflict.html?language=${language}`); await page.waitForSelector('.adm-sms-form'); };
+ const fresh = async (language = 'en') => { errors.length = 0; await navigateFixture(page, `${origin}/tests/fixtures/account-platform-sms-conflict.html?language=${language}`, signal => page.waitForSelector('.adm-sms-form', { signal })); };
  const reason = async (text = 'controlled correction reason') => { await page.$eval('textarea', (element, text) => { Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, 'value').set.call(element, text); element.dispatchEvent(new Event('input', { bubbles: true })); }, text); };
  const save = () => page.click('.adm-sms-form button[type=submit]');
  const error = () => page.waitForSelector('.adm-sms-error');
