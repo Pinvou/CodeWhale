@@ -1108,7 +1108,10 @@ mod tests {
     /// behavioral test stays green.
     #[test]
     fn failed_and_timed_out_installs_terminate_before_the_output_tail() {
-        let src = include_str!("install.rs");
+        // include_str! embeds checkout bytes; Windows autocrlf must not change
+        // which production code the probe inspects (same normalization as
+        // mod.rs's production_source).
+        let src = include_str!("install.rs").replace("\r\n", "\n");
         let production = &src[..src
             .find("#[cfg(test)]\nmod tests {")
             .expect("the test module marker must exist")];
