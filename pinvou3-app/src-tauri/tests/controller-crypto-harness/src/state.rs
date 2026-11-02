@@ -43,3 +43,6 @@ pub(crate) mod capabilities;
 
 #[path = "../../../src/features/remote_control/controller/turn_budget.rs"]
 pub(crate) mod turn_budget;
+
+#[path = "state_service.rs"]
+mod controlling_service;

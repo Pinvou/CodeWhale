@@ -862,6 +862,14 @@ pub(crate) struct ControllerTransportReceiver {
 
 impl ControllerTransportReceiver {
     #[cfg(test)]
+    pub(crate) fn take_business_for_test(&mut self) -> Option<String> {
+        self.business_rx
+            .try_recv()
+            .ok()
+            .map(|frame| frame.text().to_owned())
+    }
+
+    #[cfg(test)]
     pub(super) fn pending_control_for_test(&self) -> usize {
         self.control_rx.len()
     }
