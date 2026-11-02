@@ -106,21 +106,21 @@ impl ToolSpec for RunTool {
                 },
                 "commands": {
                     "type": "array",
-                    "description": "Optional explicit verifier gates (action=verifiers)",
+                    "description": "Optional explicit verifier gates (action=verifiers). Commands run directly as program+args, not through a shell; use program='bash', args=['-lc', '...'] only when Bash is intentionally part of the verifier.",
                     "items": {
                         "type": "object",
                         "properties": {
-                            "name": { "type": "string" },
-                            "program": { "type": "string" },
-                            "args": { "type": "array", "items": { "type": "string" } },
-                            "cwd": { "type": "string" }
+                            "name": { "type": "string", "description": "Short unique gate name." },
+                            "program": { "type": "string", "description": "Executable to spawn, for example 'cargo', 'npm', 'pytest', or 'make'." },
+                            "args": { "type": "array", "items": { "type": "string" }, "description": "Arguments passed directly to the executable." },
+                            "cwd": { "type": "string", "description": "Optional working directory relative to the workspace." }
                         },
                         "required": ["name", "program"]
                     }
                 },
                 "background": {
                     "type": "boolean",
-                    "description": "Start verifier gates as background jobs (action=verifiers)"
+                    "description": "Start verifier gates as background jobs and return task_ids immediately (action=verifiers). Use for long build/test/lint gates; completion is tracked in task/status state, and Bash with action 'wait' or task_shell_wait is only for early output, final output, or true dependency barriers."
                 }
             },
             "required": ["action"]
