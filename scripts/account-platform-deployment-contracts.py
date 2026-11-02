@@ -59,6 +59,39 @@ def prepare_dependencies(arguments, logfile):
         raise RuntimeError("dependency preparation failed; mandatory contracts did not run") from None
 
 
+def ensure_postgres_image(reference, logfile):
+    """Reuse only the exact supported manifest; a tag alone is never a hit."""
+    if reference not in POSTGRES_PROFILES.values():
+        raise RuntimeError("PostgreSQL image must use a supported pinned digest")
+    digest = reference.split("@", 1)[1]
+    expected = {repository + "@" + digest for repository in (
+        "postgres", "library/postgres", "docker.io/library/postgres",
+    )}
+
+    def inspect():
+        result = subprocess.run(
+            ["docker", "image", "inspect", reference, "--format", "{{json .RepoDigests}}"],
+            text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=30,
+        )
+        if result.returncode:
+            return False
+        try:
+            digests = json.loads(result.stdout)
+        except (ValueError, TypeError):
+            raise RuntimeError("PostgreSQL image cache returned invalid digest metadata") from None
+        if not isinstance(digests, list) or not all(isinstance(item, str) for item in digests) or not expected.intersection(digests):
+            raise RuntimeError("PostgreSQL image cache does not match the pinned manifest")
+        return True
+
+    if inspect():
+        logfile.write_text("POSTGRES_IMAGE_CACHE_HIT " + reference + "\n")
+        print("POSTGRES_IMAGE_CACHE_HIT " + reference)
+        return
+    prepare_dependencies(["docker", "pull", reference], logfile)
+    if not inspect():
+        raise RuntimeError("PostgreSQL image is unavailable after preparation")
+
+
 def published_history(root, output):
     manifest = json.loads((root / "account-platform/test/fixtures/production-history-manifest.json").read_text())
     if manifest.get("version") != 1 or set(manifest["domains"]) != {"account", "token"}:
@@ -181,7 +214,7 @@ def main():
             empty = work / "image-context"
             empty.mkdir()
             command(["docker", "build", "-t", image, "-f", str(ROOT / "account-platform/test/Dockerfile.deployment-control"), str(empty)], "tools-build.log")
-            command(["docker", "pull", postgres_image], "postgres-image.log")
+            ensure_postgres_image(postgres_image, artifacts / "postgres-image.log")
             tools(["sh", "-c", "go version && node --version && go mod download && go mod verify && npm ci --ignore-scripts"], "dependencies.log", "bridge", ["GOPROXY=" + os.environ.get("GOPROXY", "https://proxy.golang.org,direct")])
             tools(["go", "build", "-trimpath", "-tags=nomsgpack", "-mod=readonly", "-o", "/out/bin/token-governance", "./cmd/token-governance"], "cli-build.log")
             tools(["sh", "-c", "openssl req -x509 -newkey rsa:2048 -nodes -keyout /fixture/server.key -out /fixture/ca.crt -days 2 -subj /CN=localhost -addext subjectAltName=IP:127.0.0.1,DNS:localhost && chown 70:70 /fixture/server.key && chmod 600 /fixture/server.key && chmod 644 /fixture/ca.crt"], "tls-fixture.log")
