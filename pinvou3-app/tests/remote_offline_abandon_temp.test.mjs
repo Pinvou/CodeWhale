@@ -10,6 +10,12 @@ const chromeSuffix = 'com.google.Chrome.XXXXXX/SingletonSocket';
 const chromiumSuffix = '.org.chromium.Chromium.XXXXXX/SingletonSocket';
 const socketBytes = (root, suffix) => Buffer.byteLength(path.posix.join(root, suffix), 'utf8') + 1;
 
+function removeOwnedTestParent(parent, allowedParent) {
+  const actual = fs.realpathSync(parent);
+  if (path.dirname(actual) !== allowedParent || !path.basename(actual).startsWith('pva-contract-')) throw Error('Cleanup ownership changed');
+  fs.rmSync(parent, { recursive: true, force: true });
+}
+
 test('Linux long runner temp cannot exhaust the complete singleton socket budget', () => {
   const runner = '/home/github-runner/ci-runners/medium-02/_work/_temp';
   const previous = path.posix.join(runner, 'pinvou-offline-abandon-owner-5O5uDe');
@@ -67,8 +73,6 @@ test('a real child with long runner environment allocates and reaps only its pri
       for (const suffix of [chromeSuffix, chromiumSuffix]) assert.ok(socketBytes(result.root, suffix) <= 108);
     } else assert.equal(result.base, fs.realpathSync(longTemp));
   } finally {
-    const actual = fs.realpathSync(parent);
-    if (path.dirname(actual) !== allowedParent || !path.basename(actual).startsWith('pva-contract-')) throw Error('Cleanup ownership changed');
-    fs.rmSync(parent, { recursive: true, force: true });
+    removeOwnedTestParent(parent, allowedParent);
   }
 });
