@@ -70,6 +70,8 @@ test("offline abandonment smoke is selected for the real UI, bridge and fixtures
     "pinvou3-app/src/features/chat/ChatView.jsx",
     "pinvou3-app/src/platform/tauri/bridge/desktop-remote-control.js",
     "pinvou3-app/tests/remote_offline_abandon_smoke.mjs",
+    "pinvou3-app/tests/helpers/offline-abandon-temp.mjs",
+    "pinvou3-app/tests/remote_offline_abandon_temp.test.mjs",
     "pinvou3-app/tests/fixtures/remote_offline_abandon_smoke.jsx",
     "pinvou3-app/tests/fixtures/remote_offline_abandon_smoke.html",
   ]) assert.ok(labels(selectFrontendSmokes([changedPath])).includes(smoke), changedPath);

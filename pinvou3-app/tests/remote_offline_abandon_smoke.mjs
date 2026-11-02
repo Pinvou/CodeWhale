@@ -6,12 +6,13 @@ import { pathToFileURL, fileURLToPath } from 'node:url';
 import os from 'node:os';
 import crypto from 'node:crypto';
 import { spawnSync } from 'node:child_process';
+import { createOfflineAbandonTempRoot } from './helpers/offline-abandon-temp.mjs';
 
 const args=process.argv.slice(2);
 // The owner never loads Vite. Reap its worker before removing any temp files:
 // Vite/Rolldown may continue cache writes after their close promises settle.
 if(process.env.PINVOU_OFFLINE_ABANDON_WORKER !== '1') {
-  const ownedRoot=fs.mkdtempSync(path.join(os.tmpdir(),'pinvou-offline-abandon-owner-'));
+  const ownedRoot=createOfflineAbandonTempRoot();
   let worker;
   try {
     worker=spawnSync(process.execPath,[...process.execArgv,fileURLToPath(import.meta.url),...args],{
@@ -43,7 +44,8 @@ const sources=['src/features/chat/ChatView.jsx','src/features/remote-control/rem
 'src/features/remote-control/remote-session-adapter.mjs','src/features/remote-control/remote-dispatch-ui.mjs',
 'src/platform/tauri/bridge/desktop-remote-control.js','src/hooks/useBridge.js','package-lock.json',
 'src/styles/base.css','src/styles/tailwind.css','tailwind.config.cjs','postcss.config.cjs',
-'tests/fixtures/remote_offline_abandon_smoke.jsx','tests/fixtures/remote_offline_abandon_smoke.html'];
+'tests/fixtures/remote_offline_abandon_smoke.jsx','tests/fixtures/remote_offline_abandon_smoke.html',
+'tests/helpers/offline-abandon-temp.mjs'];
 const originalHashes=Object.fromEntries(sources.map(file=>[file,sha(path.join(app,file))]));
 const results={app,platform:process.platform,node:process.version,browser:chrome,
 mode:'offline never-attempted abandon through actual ChatView and desktop JS bridge',sourceHashes:originalHashes,
@@ -193,10 +195,5 @@ finally {
     fs.rmSync(scratch,{recursive:true,force:true});
   }
 }
-const expected=results.scenarios.length===4 && results.scenarios.every(result=>result.mounted)
-  && results.scenarios.find(result=>result.name==='unknown')?.outcome==='pass'
-  && results.scenarios.filter(result=>result.name!=='unknown').every(result=>result.outcome==='contract-failed'&&result.error?.message.includes('button must be enabled'))
-  && results.sourcesUnchanged;
-console.log('baselineCounterexampleConfirmed='+expected);
 console.log('remote_offline_abandon_smoke: '+results.scenarios.filter(result=>result.outcome==='pass').length+'/4 renderer scenarios passed (real JS bridge; mocked native IPC)');
 process.exitCode=results.fatal||!results.sourcesUnchanged||results.scenarios.some(result=>result.outcome==='harness-failed')?1:results.scenarios.every(result=>result.outcome==='pass')?0:1;
