@@ -21,6 +21,101 @@ verify_results = runpy.run_path(str(ROOT / "scripts/test-account-closure-postgre
 
 
 class DeploymentContracts(unittest.TestCase):
+    def test_actions_warms_runner_cache_in_isolated_source_before_offline_consumption(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source = root / "source"
+            source.mkdir()
+            logfile = root / "download.log"
+            with patch.dict(os.environ, {"GITHUB_ACTIONS": "true", "GOMODCACHE": str(root / "mod")}), \
+                    patch.object(deployment.shutil, "which", return_value="/tools/go"), \
+                    patch.object(deployment, "prepare_dependencies") as prepare:
+                self.assertTrue(deployment.warm_runner_go_cache(source, logfile))
+            prepare.assert_called_once_with(["/tools/go", "mod", "download"], logfile, cwd=source)
+
+    def test_standalone_docker_contracts_do_not_require_host_go(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            for environment, go in [({"GITHUB_ACTIONS": "false", "GOMODCACHE": str(root / "mod")}, "/tools/go"),
+                                    ({"GITHUB_ACTIONS": "true", "GOMODCACHE": ""}, "/tools/go"),
+                                    ({"GITHUB_ACTIONS": "true", "GOMODCACHE": str(root / "mod")}, None)]:
+                with self.subTest(environment=environment, go=go), patch.dict(os.environ, environment), \
+                        patch.object(deployment.shutil, "which", return_value=go), \
+                        patch.object(deployment, "prepare_dependencies") as prepare:
+                    self.assertFalse(deployment.warm_runner_go_cache(root, root / "download.log"))
+                    prepare.assert_not_called()
+
+    def test_host_cache_download_failure_stops_before_contracts(self):
+        with tempfile.TemporaryDirectory() as directory:
+            with patch.dict(os.environ, {"GITHUB_ACTIONS": "true", "GOMODCACHE": str(Path(directory) / "mod")}), \
+                    patch.object(deployment.shutil, "which", return_value="/tools/go"), \
+                    patch.object(deployment, "prepare_dependencies", side_effect=RuntimeError("mandatory contracts did not run")):
+                with self.assertRaisesRegex(RuntimeError, "mandatory contracts did not run"):
+                    deployment.warm_runner_go_cache(Path(directory), Path(directory) / "download.log")
+
+    def test_runner_go_archive_cache_is_readonly_and_preserves_checksum_policy(self):
+        with tempfile.TemporaryDirectory() as directory:
+            module = Path(directory) / "mod"
+            archive = module / "cache/download"
+            archive.mkdir(parents=True)
+            sentinel = archive / "preserve"
+            sentinel.write_text("archive bytes\n")
+            policy = {"GOMODCACHE": str(module), "GOPROXY": "https://example.invalid/proxy|direct",
+                      "GOSUMDB": "sum.golang.org", "GOPRIVATE": "private.example.invalid/*",
+                      "GONOSUMDB": "private.example.invalid/*", "GONOPROXY": "private.example.invalid/*"}
+            mounts, values = deployment.dependency_cache_options(policy)
+            self.assertEqual(mounts, ["--mount", f"type=bind,src={archive.resolve()},dst=/runner-download-cache-0,readonly"])
+            self.assertIn("GOPROXY=file:///runner-download-cache-0,https://example.invalid/proxy|direct", values)
+            for key in ["GOSUMDB", "GOPRIVATE", "GONOSUMDB", "GONOPROXY"]:
+                self.assertIn(key + "=" + policy[key], values)
+            self.assertFalse(any(x.startswith("GOMODCACHE=") for x in values))
+            self.assertEqual(sentinel.read_text(), "archive bytes\n")
+
+    def test_file_proxy_is_rebased_into_container_and_separators_are_preserved(self):
+        with tempfile.TemporaryDirectory(prefix="deployment file proxy ") as directory:
+            path = Path(directory)
+            mounts, values = deployment.dependency_cache_options({"GOPROXY": path.as_uri() + "|https://example.invalid/proxy,direct"})
+            self.assertEqual(mounts, ["--mount", f"type=bind,src={path.resolve()},dst=/runner-download-cache-0,readonly"])
+            self.assertEqual(values, ["GOPROXY=file:///runner-download-cache-0|https://example.invalid/proxy,direct"])
+
+    def test_duplicate_go_archive_source_is_mounted_once(self):
+        with tempfile.TemporaryDirectory() as directory:
+            module = Path(directory)
+            path = module / "cache/download"
+            path.mkdir(parents=True)
+            mounts, _ = deployment.dependency_cache_options({"GOMODCACHE": str(module), "GOPROXY": path.as_uri() + ",direct"})
+            self.assertEqual(mounts.count("--mount"), 1)
+
+    def test_missing_optional_cache_keeps_the_configured_fallback(self):
+        with tempfile.TemporaryDirectory() as directory:
+            missing = Path(directory) / "missing"
+            proxy = missing.as_uri() + ",https://example.invalid/proxy,direct"
+            mounts, values = deployment.dependency_cache_options({"GOMODCACHE": str(missing), "GOPROXY": proxy, "NPM_CONFIG_CACHE": str(missing)})
+            self.assertEqual(mounts, [])
+            self.assertEqual(values, ["GOPROXY=" + proxy])
+
+    def test_proxy_off_is_not_overridden_by_available_archive_cache(self):
+        with tempfile.TemporaryDirectory() as directory:
+            (Path(directory) / "cache/download").mkdir(parents=True)
+            mounts, values = deployment.dependency_cache_options({"GOMODCACHE": directory, "GOPROXY": "off"})
+            self.assertEqual((mounts, values), ([], ["GOPROXY=off"]))
+
+    def test_npm_reuses_configured_content_addressed_download_cache(self):
+        with tempfile.TemporaryDirectory() as directory:
+            mounts, values = deployment.dependency_cache_options({"NPM_CONFIG_CACHE": directory})
+            self.assertEqual(mounts, ["--mount", f"type=bind,src={Path(directory).resolve()},dst=/runner-download-cache-0"])
+            self.assertIn("NPM_CONFIG_CACHE=/runner-download-cache-0", values)
+            self.assertIn("NPM_CONFIG_PREFER_OFFLINE=true", values)
+
+    def test_unsafe_or_nonlocal_cache_paths_are_rejected(self):
+        for environment in ({"GOPROXY": "file://foreign.example.invalid/cache,direct"},
+                            {"GOPROXY": "file:///cache?token=private,direct"},
+                            {"NPM_CONFIG_CACHE": "relative/cache"},
+                            {"NPM_CONFIG_CACHE": str(ROOT.anchor)},
+                            {"NPM_CONFIG_CACHE": str(ROOT / "unsafe,path")}):
+            with self.subTest(environment=environment), self.assertRaises(RuntimeError):
+                deployment.dependency_cache_options(environment)
+
     def image_inspect_result(self, *, cached=True, digests=None):
         if digests is None:
             digests = [deployment.POSTGRES.split(":17-alpine", 1)[0] + "@" + deployment.POSTGRES.split("@", 1)[1]]
