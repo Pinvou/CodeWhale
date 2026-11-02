@@ -26030,6 +26030,228 @@ async fn outer_tool_timeout_settles_the_stranded_child_then_reopens_the_frame() 
     );
 }
 
+/// The standalone headless Workflow builder (review P2): it constructs its
+/// coordination manager and workflow context directly, never through the
+/// Engine, so its reservations shipped with no shell job source and
+/// completion treated "no source" as zero running jobs — a terminal
+/// owner's background job released its frame while it still ran, admitting
+/// an overlapping writer into the same checkout. The builder binds the
+/// context's own shell manager, and the driven chain holds the frame while
+/// the job holds write scope and opens it once the exit is confirmed.
+#[cfg(unix)]
+#[tokio::test]
+async fn standalone_workflow_wiring_holds_the_frame_past_a_terminal_owner() {
+    let workspace = tempfile::tempdir().expect("workspace");
+    // YOLO: the headless `workflow run` route this builder serves grants
+    // the shell posture its children dispatch through.
+    let config = crate::config::Config {
+        provider: Some("vllm".to_string()),
+        yolo: Some(true),
+        mcp_config_path: Some(
+            workspace
+                .path()
+                .join("missing-mcp.json")
+                .display()
+                .to_string(),
+        ),
+        providers: Some(crate::config::ProvidersConfig {
+            vllm: crate::config::ProviderConfig {
+                base_url: Some("http://127.0.0.1:9/v1".to_string()),
+                model: Some("offline-test-model".to_string()),
+                ..Default::default()
+            },
+            ..Default::default()
+        }),
+        ..Default::default()
+    };
+    let route = crate::CliAutoRoute {
+        provider: crate::config::ApiProvider::Vllm,
+        model: "offline-test-model".to_string(),
+        reasoning_effort: None,
+        auto_controls_reasoning: false,
+        auto_model: false,
+    };
+    let (event_tx, _event_rx) = tokio::sync::mpsc::channel(64);
+    let plugins = std::sync::Arc::new(crate::plugins::PluginRegistry::empty(workspace.path()));
+    let (tool, context) =
+        crate::build_direct_workflow_tool(&config, &route, workspace.path(), event_tx, plugins)
+            .await
+            .expect("build the standalone headless workflow runtime");
+    let shell_jobs = tool
+        .shell_job_source_for_test()
+        .await
+        .expect("the standalone builder binds a shell job source");
+    assert!(
+        std::sync::Arc::ptr_eq(&shell_jobs, &context.execution.shell_manager),
+        "the bound source is the workflow context's own shell manager — where its children's jobs live"
+    );
+    let manager = tool.coordination_manager_for_test();
+
+    let claim = |owner: &str, roots: &[&str]| WriteScopeClaim {
+        owner: owner.to_string(),
+        roots: roots.iter().map(|root| (*root).to_string()).collect(),
+        exact_files: vec![],
+        contracts: vec![],
+    };
+    let build_registry = |owner: &str| {
+        let mut runtime = stub_runtime();
+        runtime.manager = Arc::clone(&manager);
+        runtime.context = context.clone();
+        runtime.context.auto_approve = true;
+        runtime.worker_profile = WorkerRuntimeProfile::for_role(FleetRole::Builder);
+        SubAgentToolRegistry::new_with_owner(
+            runtime,
+            FleetRole::Builder,
+            owner.to_string(),
+            "implementer".into(),
+            Some(vec!["Bash".into()]),
+            Arc::new(Mutex::new(TodoList::new())),
+            Arc::new(Mutex::new(PlanState::default())),
+        )
+    };
+
+    {
+        let mut guard = manager.write().await;
+        guard.insert_test_running_agent("a", workspace.path());
+    }
+
+    let registry_a = build_registry("agent_a");
+    let registry_b = build_registry("agent_b");
+    registry_a
+        .execute(
+            "agent_a",
+            "Bash",
+            serde_json::json!({"action": "run", "command": "sleep 30", "background": true}),
+        )
+        .await
+        .expect("the workflow child's unbounded background command dispatches");
+    let in_flight = manager.read().await.in_flight_unbounded_for_test();
+    assert_eq!(
+        in_flight.len(),
+        1,
+        "the dispatch left exactly one reservation: {in_flight:?}"
+    );
+    assert!(
+        !in_flight[0].1.is_empty(),
+        "the background job's task id is stamped through the builder's wiring"
+    );
+    let task_id = in_flight[0].1[0].clone();
+
+    // The owner goes terminal while its job still runs — the exact window
+    // the unwired builder lost: completion then saw "no source" as zero
+    // jobs and released the frame.
+    {
+        let mut guard = manager.write().await;
+        if let Some(agent) = guard.agents.get_mut("agent_a") {
+            agent.status = SubAgentStatus::Completed;
+        }
+    }
+
+    // A successor's unbounded dispatch in the same checkout is refused…
+    let refused = registry_b
+        .execute(
+            "agent_b",
+            "Bash",
+            serde_json::json!({"action": "run", "command": "echo from-b > b.txt"}),
+        )
+        .await
+        .expect_err("B's unbounded dispatch must wait for the still-running job");
+    let refused = refused.to_string();
+    assert!(
+        refused.contains("still in flight") && refused.contains("agent_a"),
+        "the refusal names the in-flight owner: {refused}"
+    );
+    // …and so is a later spawn on a disjoint claim.
+    {
+        let mut guard = manager.write().await;
+        let mut runtime_b = stub_runtime();
+        runtime_b.manager = Arc::clone(&manager);
+        runtime_b.context = context.clone();
+        guard
+            .spawn_background_with_assignment_options(
+                Arc::clone(&manager),
+                runtime_b,
+                FleetRole::Builder,
+                "write elsewhere".into(),
+                make_assignment(),
+                Some(vec![]),
+                SubAgentSpawnOptions {
+                    name: Some("writer-b".into()),
+                    write_claim: Some(claim("", &["docs"])),
+                    ..Default::default()
+                },
+            )
+            .expect_err("a disjoint claim must still wait for the running job");
+    }
+
+    // The job is cancelled and its exit confirmed; the frame opens for
+    // both directions and the next call resumes.
+    shell_jobs
+        .lock()
+        .expect("shell jobs")
+        .kill(&task_id)
+        .expect("the background job is cancellable");
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    loop {
+        let held = shell_jobs
+            .lock()
+            .expect("shell jobs")
+            .any_running_job(std::slice::from_ref(&task_id));
+        if !held {
+            break;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the cancelled job never confirmed its exit"
+        );
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    registry_b
+        .execute(
+            "agent_b",
+            "Bash",
+            serde_json::json!({"action": "run", "command": "echo from-b > b.txt"}),
+        )
+        .await
+        .expect("B's unbounded dispatch is admitted once the exit is confirmed");
+    {
+        let mut guard = manager.write().await;
+        guard
+            .spawn_background_with_assignment_options(
+                Arc::clone(&manager),
+                {
+                    let mut runtime_b = stub_runtime();
+                    runtime_b.manager = Arc::clone(&manager);
+                    runtime_b.context = context.clone();
+                    runtime_b
+                },
+                FleetRole::Builder,
+                "write elsewhere".into(),
+                make_assignment(),
+                Some(vec![]),
+                SubAgentSpawnOptions {
+                    name: Some("writer-b2".into()),
+                    write_claim: Some(claim("", &["docs"])),
+                    ..Default::default()
+                },
+            )
+            .expect("the disjoint writer is admitted once the exit is confirmed");
+    }
+    assert_eq!(
+        manager.read().await.in_flight_unbounded_for_test(),
+        vec![],
+        "the confirmed exit releases the frame, and B's dispatch released its own"
+    );
+    assert!(
+        shell_jobs
+            .lock()
+            .expect("shell jobs")
+            .running_owner_agent_ids()
+            .is_empty(),
+        "no real process outlives the test"
+    );
+}
+
 /// The NFD half of the ledger-frame fix (review P3): claim roots are NFC
 /// per component (`normalize_claim_path`), a worktree subdirectory the OS
 /// spelled NFD keeps those bytes through the canonical workspace, and the
