@@ -99,6 +99,9 @@ func (r *PostgresRepository) claimEmergencyCancellations(ctx context.Context, li
 	rows, err := r.pool.Query(ctx, `WITH candidates AS (
     SELECT cancellation.id FROM model_emergency_cancellations cancellation
     WHERE cancellation.status IN ('PENDING','LEASED') AND (cancellation.lease_until IS NULL OR cancellation.lease_until<$1)
+    AND NOT EXISTS (SELECT 1 FROM usage_requests request WHERE request.id=cancellation.usage_request_id
+        AND request.cancellation_origin='USER' AND request.execution_status='REVIEW'
+        AND request.cancel_status='CANCEL_REQUESTED' AND request.error_class='cancel_hold_recovery_unconfirmed')
     ORDER BY cancellation.requested_at,cancellation.id FOR UPDATE SKIP LOCKED LIMIT $2
 ), claimed AS (
     UPDATE model_emergency_cancellations cancellation SET status='LEASED',lease_until=$1::timestamptz+interval '30 seconds',attempts=attempts+1,updated_at=$1::timestamptz
@@ -139,6 +142,12 @@ func (r *PostgresRepository) requestEmergencyCancellation(ctx context.Context, c
 	if err := tx.QueryRow(ctx, `SELECT request.cancellation_origin,EXISTS(SELECT 1 FROM model_emergency_cancellation_evidence evidence WHERE evidence.emergency_cancellation_id=$2 AND evidence.evidence_type='REQUESTED') FROM usage_requests request WHERE request.id=$1`, usage.ID, cancellationID).Scan(&cancellationOrigin, &requestAlreadyRecorded); err != nil {
 		return false, false, err
 	}
+	// The original USER proof owns this unconfirmed pre-dispatch release.
+	// Keep its identity and state intact so the existing recovery can finish;
+	// the MODEL target retries and observes the confirmed terminal result.
+	if cancellationOrigin == "USER" && usage.ExecutionStatus == "REVIEW" && usage.CancelStatus == "CANCEL_REQUESTED" && usage.ErrorClass != nil && *usage.ErrorClass == "cancel_hold_recovery_unconfirmed" {
+		return false, false, ErrForbidden
+	}
 	if cancellationOrigin == "MODEL_EMERGENCY" && requestAlreadyRecorded {
 		if usage.ExecutionStatus == "REVIEW" && usage.HoldID != nil {
 			if err := r.restoreEmergencyPreDispatchReview(ctx, tx, usage, cancellationID); err != nil {
@@ -160,7 +169,10 @@ func (r *PostgresRepository) requestEmergencyCancellation(ctx context.Context, c
 			cancelStatus = "UNSUPPORTED"
 		}
 	}
-	if _, err := tx.Exec(ctx, `UPDATE usage_requests SET cancel_status=$2,delivery_status=CASE WHEN $3 THEN delivery_status ELSE 'USER_STOPPED' END,cancellation_origin='MODEL_EMERGENCY',cancel_requested_at=COALESCE(cancel_requested_at,$4),user_stopped_at=CASE WHEN $3 THEN user_stopped_at ELSE COALESCE(user_stopped_at,$4) END,cancel_reconciliation_deadline=CASE WHEN $3 THEN cancel_reconciliation_deadline ELSE $4+make_interval(secs=>cancel_reconciliation_seconds) END,updated_at=$4 WHERE id=$1`, usage.ID, cancelStatus, terminal, now); err != nil {
+	// A confirmed USER cancellation remains the authority for expiry-proof
+	// replay when its response was lost. MODEL only observes that terminal.
+	keepUserConfirmation := cancellationOrigin == "USER" && usage.ExecutionStatus == "CANCELLED_BEFORE_DISPATCH" && usage.CancelStatus == "LOCAL_CONFIRMED" && usage.SettlementStatus == "RELEASED"
+	if _, err := tx.Exec(ctx, `UPDATE usage_requests SET cancel_status=CASE WHEN $5 THEN cancel_status ELSE $2 END,delivery_status=CASE WHEN $3 THEN delivery_status ELSE 'USER_STOPPED' END,cancellation_origin=CASE WHEN $5 THEN cancellation_origin ELSE 'MODEL_EMERGENCY' END,cancel_requested_at=COALESCE(cancel_requested_at,$4),user_stopped_at=CASE WHEN $3 THEN user_stopped_at ELSE COALESCE(user_stopped_at,$4) END,cancel_reconciliation_deadline=CASE WHEN $3 THEN cancel_reconciliation_deadline ELSE $4+make_interval(secs=>cancel_reconciliation_seconds) END,updated_at=$4 WHERE id=$1`, usage.ID, cancelStatus, terminal, now, keepUserConfirmation); err != nil {
 		return false, false, err
 	}
 	snapshot := map[string]any{"origin": "MODEL_EMERGENCY", "capability": capability, "pre_dispatch": preDispatch, "already_terminal": terminal, "provider_success_inferred": false}
