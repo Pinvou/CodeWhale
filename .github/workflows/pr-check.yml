@@ -300,6 +300,8 @@ jobs:
               - 'scripts/check-recharge-product-document-baseline.mjs'
               - 'scripts/account-ci-postgres.py'
               - 'scripts/tests/test_account_ci_postgres.py'
+              - 'scripts/test-financial-parallel.py'
+              - 'scripts/tests/test_financial_parallel.py'
               - 'scripts/test-token-financial-postgres.py'
               - 'scripts/tests/test_token_financial_postgres.py'
               - 'scripts/test-account-closure-postgres.py'
@@ -1234,10 +1236,9 @@ jobs:
     # Draft, Ready and the Merge Queue validate the same Go contracts. No
     # backflow exemption may suppress this independently deployable module.
     if: ${{ !cancelled() && github.event.action != 'closed' && needs.changes.outputs.account_platform == 'true' }}
-    runs-on: ${{ fromJSON(vars.PINVOU_LINUX_MEDIUM_RUNNER || vars.PINVOU_LINUX_RUNNER || '["ubuntu-22.04"]') }}
-    # Earlier gates took about 41m; retained Billing is bounded to 75m.
-    # Six later closure phases retain their 540s process caps (54m total).
-    # Keep a finite overall budget without changing other phase limits.
+    runs-on: ${{ fromJSON(vars.PINVOU_LINUX_HEAVY_RUNNER || vars.PINVOU_LINUX_RUNNER || '["ubuntu-22.04"]') }}
+    # Four independent financial workers can use the heavy runner's CPU.
+    # Preserve every worker's original limits and the finite overall budget.
     timeout-minutes: 180
     services:
       audit-export-postgres:
@@ -1280,6 +1281,63 @@ jobs:
           - "127.0.0.1::5432"
         options: >-
           --rm
+          --cpus 2
+          --memory 1g
+          --memory-swap 1g
+          --health-cmd "pg_isready -U postgres -d postgres"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 12
+      financial-token-postgres:
+        # Same immutable PostgreSQL image already used by team-relay-hub-test.
+        # Disposable runner only; trust is never a deployment configuration.
+        image: mirror.gcr.io/library/postgres@sha256:721873c34ceb9f8d8fc265984940dc982404c105f19ad51be9fdc5970a6080ea
+        env:
+          POSTGRES_HOST_AUTH_METHOD: trust
+          POSTGRES_DB: postgres
+        ports:
+          - "127.0.0.1::5432"
+        options: >-
+          --rm
+          --cpus 2
+          --memory 1g
+          --memory-swap 1g
+          --health-cmd "pg_isready -U postgres -d postgres"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 12
+      financial-billing-0-postgres:
+        # Same immutable PostgreSQL image already used by team-relay-hub-test.
+        # Disposable runner only; trust is never a deployment configuration.
+        image: mirror.gcr.io/library/postgres@sha256:721873c34ceb9f8d8fc265984940dc982404c105f19ad51be9fdc5970a6080ea
+        env:
+          POSTGRES_HOST_AUTH_METHOD: trust
+          POSTGRES_DB: postgres
+        ports:
+          - "127.0.0.1::5432"
+        options: >-
+          --rm
+          --cpus 2
+          --memory 1g
+          --memory-swap 1g
+          --health-cmd "pg_isready -U postgres -d postgres"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 12
+      financial-billing-1-postgres:
+        # Same immutable PostgreSQL image already used by team-relay-hub-test.
+        # Disposable runner only; trust is never a deployment configuration.
+        image: mirror.gcr.io/library/postgres@sha256:721873c34ceb9f8d8fc265984940dc982404c105f19ad51be9fdc5970a6080ea
+        env:
+          POSTGRES_HOST_AUTH_METHOD: trust
+          POSTGRES_DB: postgres
+        ports:
+          - "127.0.0.1::5432"
+        options: >-
+          --rm
+          --cpus 2
+          --memory 1g
+          --memory-swap 1g
           --health-cmd "pg_isready -U postgres -d postgres"
           --health-interval 5s
           --health-timeout 5s
@@ -1524,14 +1582,12 @@ jobs:
       - name: Token financial contracts on isolated PostgreSQL
         shell: bash
         env:
-          PINVOU_ACCOUNT_FINANCIAL_TEST_DATABASE_URL: ${{ steps.account-pg.outputs.financial_url }}
-          PINVOU_ACCOUNT_CI_PG_PORT: ${{ steps.account-pg.outputs.financial_port }}
-          PINVOU_ACCOUNT_CI_PG_SYSTEM_ID: ${{ steps.account-pg.outputs.financial_system }}
-          PINVOU_ACCOUNT_CI_PG_DIRECTORY: ${{ steps.account-pg.outputs.financial_directory }}
+          ACCOUNT_FINANCIAL_SERVICES: ${{ steps.account-pg.outputs.financial_services }}
         run: |
           set -euo pipefail
           python3 -m unittest discover -s scripts/tests -p test_token_financial_postgres.py
-          python3 scripts/test-token-financial-postgres.py
+          python3 -m unittest discover -s scripts/tests -p test_financial_parallel.py
+          python3 scripts/test-financial-parallel.py
 
       - name: Account closure contracts on isolated PostgreSQL
         shell: bash
@@ -1545,6 +1601,22 @@ jobs:
           set -euo pipefail
           python3 -m unittest discover -s scripts/tests -p test_account_closure_postgres.py
           python3 scripts/test-account-closure-postgres.py
+
+      - name: Financial parallel diagnostics
+        if: ${{ always() }}
+        uses: actions/upload-artifact@v7
+        with:
+          name: account-financial-parallel-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/financial-parallel-*/
+          if-no-files-found: ignore
+          retention-days: 7
+
+      - name: Stop owned temporary PostgreSQL services
+        if: ${{ always() }}
+        env:
+          ACCOUNT_CI_SERVICES: ${{ toJSON(job.services) }}
+        run: |
+          python3 scripts/account-ci-postgres.py --stop-owned-services
 
   windows-relay-dacl:
     name: windows-relay-dacl
