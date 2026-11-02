@@ -42,7 +42,12 @@ fn real_reader_resume_activation_holds_lifecycle_owner_commit() {
 fn real_reader_journal_owner_rejects_late_replay_after_fifo_rotation() {
     const CHILD: &str = "PINVOU_READER_RESUME_TEST_CHILD";
     if std::env::var(CHILD).as_deref() != Ok("1") {
-        run_reader_child("real_reader_journal_owner_rejects_late_replay_after_fifo_rotation");
+        run_reader_child(
+            "real_reader_journal_owner_rejects_late_replay_after_fifo_rotation",
+            false,
+            false,
+            15,
+        );
         return;
     }
     // The real business poll pauses synchronously outside M/J; other runtime
@@ -204,10 +209,10 @@ fn run_isolated_reader(
         }
         None => "real_reader_manager_worker_resume_round_trip",
     };
-    run_reader_child(name);
+    run_reader_child(name, preconnect, final_admission, child_budget);
 }
 
-fn run_reader_child(name: &str) {
+fn run_reader_child(name: &str, preconnect: bool, final_admission: bool, child_budget: u64) {
     const CHILD: &str = "PINVOU_READER_RESUME_TEST_CHILD";
     // A separate process owns Tauri's global runtime and path/env overrides.
     // Never alter the test runner's home or share its live managed states.

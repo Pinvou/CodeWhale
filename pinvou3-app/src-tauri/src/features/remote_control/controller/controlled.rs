@@ -2762,7 +2762,11 @@ mod tests {
                 ControlledRegistration {
                     pairing_code: "2345678".into(),
                     sealed_code_b64: "sealed".into(),
-                    expires_at_ms: 30_000,
+                    // A successor registration issues a fresh pairing code; keep
+                    // the expiry above every fixture clock advance (tests move
+                    // last_observed_now_b up to 33_000) so the merged #2146
+                    // preconnect deadline check sees a live ticket.
+                    expires_at_ms: 90_000,
                 },
                 1_000,
             )
