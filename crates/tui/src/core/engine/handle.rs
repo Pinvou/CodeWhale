@@ -91,6 +91,18 @@ impl EngineHandle {
             .live_runtime_authority
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
+        // Pinvou tri-mode safety: `None` arming means "keep the session's
+        // current arming" — the same doctrine `apply_change_mode` applies —
+        // so a posture-only publish (a turn install, or a ChangeMode op that
+        // carries no arming) can never erase a host arming published ahead
+        // of it in the queue. The op loop applies this snapshot, never the
+        // queued op payload, so an erasing publish would silently drop the
+        // arm request with no event and no receipt. Only an explicit `Some`
+        // may move arming.
+        let mut authority = authority;
+        if authority.ask_on_guardrail.is_none() {
+            authority.ask_on_guardrail = state.authority.ask_on_guardrail;
+        }
         state.revision = state.revision.wrapping_add(1).max(1);
         state.authority = authority;
     }

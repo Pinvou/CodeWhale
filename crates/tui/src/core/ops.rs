@@ -426,8 +426,10 @@ pub enum Op {
         /// sandbox escalation): armed, they raise an approval request with a
         /// real person guaranteed on the other end instead of denying.
         /// `None` leaves the session's current arming unchanged. The flag is
-        /// session-level state like `auto_approve`; it takes effect when this
-        /// op is processed and applies to subsequent tool planning.
+        /// session-level state like `auto_approve`; the engine applies the
+        /// live published authority snapshot as ops drain (mid-turn drains
+        /// included), so it lands before subsequent tool planning either
+        /// way, and an arming-free op cannot erase a pending arming.
         ask_on_guardrail: Option<bool>,
     },
 

@@ -8591,6 +8591,115 @@ async fn forkguard_armed_sandbox_escalation_prompts_instead_of_failing_closed() 
 }
 
 #[tokio::test]
+async fn forkguard_armed_auto_review_escalation_stays_fail_closed() {
+    // The armed escalation prompt exists only where a person can answer the
+    // card: it is reachable in Full Access (pinned by
+    // `forkguard_armed_sandbox_escalation_prompts_instead_of_failing_closed`).
+    // Auto-Review keeps the fail-closed deny even when armed — its
+    // unattended flow has nobody to answer — so this pin turns red if the
+    // posture exclusion at the escalation site is ever dropped and arming
+    // starts overriding Auto-Review into a card nobody can answer.
+    use crate::llm_client::mock::{MockLlmClient, canned};
+
+    let workspace = tempdir().expect("tempdir");
+    let mock = std::sync::Arc::new(MockLlmClient::new(vec![
+        canned::tool_call_turn(
+            "call-armed-auto-escalation",
+            "bash",
+            r#"{"command":"echo denied > escalation.txt","sandbox_permissions":"workspace-write","justification":"the command needs workspace write access"}"#,
+        ),
+        canned::simple_text_turn("Escalation was denied."),
+    ]));
+    // Let Auto-Review's independent guardian approve the bounded fixture
+    // call so the turn reaches the escalation rule under test.
+    mock.push_message_response(guardian_fixture_response(
+        r#"{"risk_level":"low","decision":"allow","reason":"isolated fixture write"}"#,
+    ));
+    let client: crate::core::model_client::SharedModelClient = mock.clone();
+    let config = Config {
+        sandbox_mode: Some("read-only".to_string()),
+        ..Config::default()
+    };
+    let (engine, handle) = Engine::new_with_model_client(
+        deterministic_engine_config(workspace.path()),
+        &config,
+        client,
+    );
+    let task = tokio::spawn(engine.run());
+
+    // Arm through the same `ChangeMode` channel hosts use for the toggle.
+    // The posture stays Auto-Review (auto_approve cleared): nobody can
+    // answer a card there, arming or not.
+    handle
+        .send(Op::ChangeMode {
+            mode: AppMode::Agent,
+            allow_shell: true,
+            trust_mode: true,
+            auto_approve: false,
+            approval_mode: crate::tui::approval::ApprovalMode::Auto,
+            configured_sandbox_mode: None,
+            ask_on_guardrail: Some(true),
+        })
+        .await
+        .expect("arm guardrail prompts");
+
+    let mut op = external_user_message_op(
+        "Escalate the sandbox for this one command.",
+        AppMode::Agent,
+        &config,
+    );
+    let Op::SendMessage {
+        approval_mode: op_approval_mode,
+        auto_approve: op_auto_approve,
+        ..
+    } = &mut op
+    else {
+        panic!("user message op")
+    };
+    *op_approval_mode = crate::tui::approval::ApprovalMode::Auto;
+    *op_auto_approve = false;
+    handle
+        .send(op)
+        .await
+        .expect("send armed Auto-Review escalation turn");
+
+    let mut saw_denial = false;
+    let mut rx = handle.rx_event.write().await;
+    loop {
+        let event = tokio::time::timeout(model_turn_event_timeout(), rx.recv())
+            .await
+            .expect("timed out waiting for armed Auto-Review escalation")
+            .expect("engine event stream closed");
+        match event {
+            Event::ApprovalRequired { .. } => {
+                panic!("armed Auto-Review must not open an escalation prompt")
+            }
+            Event::ToolCallComplete { id, result, .. } if id == "call-armed-auto-escalation" => {
+                let error = result.expect_err("armed Auto-Review escalation must be denied");
+                let error = error.to_string();
+                assert!(
+                    error.contains("Sandbox escalation requires a one-shot user approval"),
+                    "{error}"
+                );
+                assert!(error.contains("Auto-Review"), "{error}");
+                saw_denial = true;
+            }
+            Event::TurnComplete { status, error, .. } => {
+                assert_eq!(status, TurnOutcomeStatus::Completed, "{error:?}");
+                break;
+            }
+            _ => {}
+        }
+    }
+    drop(rx);
+
+    assert!(saw_denial);
+    assert!(!workspace.path().join("escalation.txt").exists());
+    handle.send(Op::Shutdown).await.expect("shutdown engine");
+    task.await.expect("engine task");
+}
+
+#[tokio::test]
 async fn productive_tool_results_do_not_hit_no_user_input_backstop() {
     use crate::llm_client::mock::{MockLlmClient, canned};
 
@@ -14283,6 +14392,80 @@ async fn run_shell_command_op_executes_without_approval_modal() {
     assert!(
         audit.contains("composer_bang"),
         "audit row must name the composer-bang source: {audit}"
+    );
+}
+
+#[tokio::test]
+async fn forkguard_armed_composer_shell_keeps_the_hard_deny_face() {
+    // #5191 pins the unarmed doctrine: typing a `!` command IS the approval,
+    // so the composer face keeps its hard deny in every posture, armed or
+    // not — the composer hands the ask-rule judgment the unarmed flag and
+    // only the `Block` arm is consumed. This pin holds that line under an
+    // armed Full Access session: a deny-rule match must stay a denial, and
+    // arming must neither raise a composer modal (one the user never asked
+    // for — they typed the command themselves) nor, if the face were ever
+    // "taught" to honor arming, silently auto-run a deny-matched command
+    // through its Prompt return. Arming delivery itself is pinned by the
+    // ChangeMode tests; this test targets the composer face only.
+    let _guard = lock_test_env();
+    let tmp = tempdir().expect("tempdir");
+    let (mut engine, handle) = Engine::new(
+        EngineConfig {
+            workspace: tmp.path().to_path_buf(),
+            exec_policy_engine: codewhale_execpolicy::ExecPolicyEngine::with_rulesets(vec![
+                codewhale_execpolicy::Ruleset::user(Vec::new(), vec!["echo".to_string()]),
+            ]),
+            ..EngineConfig::default()
+        },
+        &Config::default(),
+    );
+    engine.session.ask_on_guardrail = true;
+    engine.session.approval_mode = crate::tui::approval::ApprovalMode::Bypass;
+    engine.session.auto_approve = true;
+
+    engine
+        .handle_run_shell_command(
+            "echo armed-composer-deny-pin".to_string(),
+            AppMode::Agent,
+            true,
+            false,
+            true,
+            crate::tui::approval::ApprovalMode::Bypass,
+        )
+        .await;
+
+    let mut saw_denial = false;
+    let mut saw_approval = false;
+    let mut rx = handle.rx_event.write().await;
+    while let Some(event) = rx.recv().await {
+        match event {
+            Event::ApprovalRequired { .. } => saw_approval = true,
+            Event::ToolCallComplete { id, name, result } if name == "Bash" => {
+                assert!(id.starts_with(USER_SHELL_TOOL_ID_PREFIX));
+                let error = result.expect_err("an armed composer deny-rule hit must stay denied");
+                assert!(
+                    error.to_string().contains("denied prefix rule 'echo'"),
+                    "composer denial must carry the deny evidence: {error}"
+                );
+                saw_denial = true;
+            }
+            Event::TurnComplete { status, .. } => {
+                assert_eq!(
+                    status,
+                    TurnOutcomeStatus::Failed,
+                    "a denied composer command fails its turn"
+                );
+                break;
+            }
+            _ => {}
+        }
+    }
+    drop(rx);
+
+    assert!(saw_denial);
+    assert!(
+        !saw_approval,
+        "arming must not raise a composer modal (#5191)"
     );
 }
 
@@ -31450,6 +31633,95 @@ async fn forkguard_turn_authority_install_never_rolls_back_published_arming() {
 }
 
 #[tokio::test]
+async fn forkguard_pending_arming_survives_arming_free_authority_publishes() {
+    // The publish path REPLACES the whole authority snapshot, and the op
+    // loop applies the snapshot, never the queued op payload. A posture-only
+    // publish racing a host arm — a mid-turn turn install, or a ChangeMode
+    // op that carries no arming — used to overwrite the pending
+    // `Some(true)` with `None`, so the drain silently dropped the arm
+    // request with no event and no receipt. `None` must mean "keep" at the
+    // publish layer too (the same doctrine `apply_change_mode` applies);
+    // only an explicit `Some` may move arming.
+    let tmp = tempdir().expect("tempdir");
+    let (mut engine, handle) = Engine::new(
+        EngineConfig {
+            workspace: tmp.path().to_path_buf(),
+            ..EngineConfig::default()
+        },
+        &Config::default(),
+    );
+
+    // The host arms through the publish channel `Op::ChangeMode` uses.
+    handle.publish_turn_authority(
+        AppMode::Agent,
+        false,
+        false,
+        false,
+        crate::tui::approval::ApprovalMode::Suggest,
+        None,
+        Some(true),
+    );
+
+    // Before the engine drains, a turn installs its arming-free authority.
+    handle.publish_turn_authority(
+        AppMode::Agent,
+        false,
+        false,
+        false,
+        crate::tui::approval::ApprovalMode::Suggest,
+        None,
+        None,
+    );
+    let snapshot = engine.runtime_authority_snapshot();
+    assert_eq!(
+        snapshot.ask_on_guardrail,
+        Some(true),
+        "an arming-free publish must not erase the pending host arming"
+    );
+
+    // Draining the mangled-but-now-correct snapshot must arm the session.
+    assert!(
+        engine.apply_pending_runtime_authority().await,
+        "the armed publish must reach the session"
+    );
+    assert!(
+        engine.session.ask_on_guardrail,
+        "the interleaved turn install must not have swallowed the arm request"
+    );
+
+    // Disarming is explicit and still lands: `None` keeps, `Some(false)`
+    // clears.
+    handle.publish_turn_authority(
+        AppMode::Agent,
+        false,
+        false,
+        false,
+        crate::tui::approval::ApprovalMode::Suggest,
+        None,
+        None,
+    );
+    let _ = engine.apply_pending_runtime_authority().await;
+    assert!(
+        engine.session.ask_on_guardrail,
+        "an arming-free publish must not disarm either"
+    );
+    handle.publish_turn_authority(
+        AppMode::Agent,
+        false,
+        false,
+        false,
+        crate::tui::approval::ApprovalMode::Suggest,
+        None,
+        Some(false),
+    );
+    assert!(engine.apply_pending_runtime_authority().await);
+    assert!(
+        !engine.session.ask_on_guardrail,
+        "an explicit host disarm must still land"
+    );
+}
+
+#[tokio::test]
 async fn forkguard_apply_change_mode_status_suffixes_report_the_arming_change() {
     // The mode-changed status event is the user-visible receipt of an
     // arming toggle: arming and disarming must each append their explicit
@@ -31672,7 +31944,11 @@ async fn forkguard_turn_start_detector_records_the_posture_and_renders_the_trans
         .received_requests()
         .await
         .expect("wire mock records requests");
-    assert_eq!(requests.len(), 2, "each turn makes exactly one provider call");
+    assert_eq!(
+        requests.len(),
+        2,
+        "each turn makes exactly one provider call"
+    );
     let first = String::from_utf8_lossy(&requests[0].body);
     assert!(
         first.contains(
@@ -31695,7 +31971,9 @@ async fn forkguard_turn_start_detector_records_the_posture_and_renders_the_trans
         .rev()
         .find(|message| message["role"] == "user")
         .expect("a user message exists");
-    let last_user_content = last_user_message["content"].as_str().expect("string content");
+    let last_user_content = last_user_message["content"]
+        .as_str()
+        .expect("string content");
     assert!(
         !last_user_content.contains("Authority transition"),
         "an unchanged posture must keep the next turn's own block byte-stable: {last_user_content}"

@@ -2497,12 +2497,15 @@ pub struct SubAgentRuntime {
     /// unchanged for embedders that never thread one.
     pub exec_policy_engine: codewhale_execpolicy::ExecPolicyEngine,
     /// Host-armed interactive guardrail prompts (Pinvou tri-mode safety),
-    /// inherited from the parent session. When set, a guardrail hold that
-    /// would fail closed under this child's posture routes to the parent's
-    /// approval surface (when the host can prompt) instead of denying, and a
-    /// delegated typed-ask Prompt refuses instead of silently passing under
-    /// inherited auto-approve: children never run what the armed main line
-    /// would prompt on.
+    /// inherited from the parent session. The live armed child face is the
+    /// delegated typed-ask: it refuses instead of silently passing under
+    /// inherited auto-approve. The held-call route to the parent's approval
+    /// surface is fail-safe future-proofing, not a live face (Bypass plan
+    /// decisions collapse built-in holds to `Block` today). Faces this
+    /// child gate does not evaluate — repo-law holds stay a main-line face
+    /// — follow the child's own posture, so "never silently runs what the
+    /// armed main line would prompt on" holds for the gated faces, not for
+    /// repo-law.
     pub ask_on_guardrail: bool,
 }
 

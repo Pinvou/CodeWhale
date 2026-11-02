@@ -592,6 +592,13 @@ pub(crate) async fn sync_mode_update(app: &App, engine_handle: &EngineHandle) {
 /// mutating state, then respawning the engine so the API client picks up the
 /// new base URL/key. When `model_override` is set, it replaces the active
 /// model post-switch after provider-scoped normalization.
+///
+/// Pinvou tri-mode safety: respawning the engine drops session-level arming
+/// (`ask_on_guardrail` starts disarmed on every fresh engine, same doctrine
+/// as `auto_approve`). The built-in TUI never arms, so nothing here needs to
+/// re-arm — but any host that arms a session it drives through this path
+/// must re-send its arm request after a provider switch; the respawn emits
+/// no arming-loss signal of its own.
 pub(crate) async fn switch_provider(
     app: &mut App,
     engine_handle: &mut EngineHandle,

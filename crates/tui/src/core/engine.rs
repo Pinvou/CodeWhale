@@ -78,7 +78,8 @@ use crate::working_set::WorkingSet;
 #[cfg(test)]
 use super::authority::agent_approval_mode_for_turn;
 use super::authority::{
-    PolicyNarrowingEvent, TurnAuthority, effective_input_policy, shell_policy_for_mode,
+    PolicyNarrowingEvent, TurnAuthority, TurnMetaPosture, effective_input_policy,
+    shell_policy_for_mode,
 };
 use super::events::{Event, TurnOutcomeStatus, TurnRoute};
 use super::ops::{
@@ -4333,6 +4334,11 @@ impl Engine {
         policy_narrowing: Option<&PolicyNarrowingEvent>,
     ) -> ContentBlock {
         let prompt_context = self.installed_next_turn_prompt_context();
+        // Pinvou tri-mode safety: production only ever observes `Some` here
+        // inside the synchronous turn-start window — the pending transition is
+        // set and consumed around the block build with no `.await` between
+        // them. Keep that stretch await-free: a yield inserted there would let
+        // a steer or runtime notice re-render the line this builder reads.
         self.turn_metadata_block_from_snapshot(
             routed_model,
             auto_model,
@@ -4584,6 +4590,22 @@ impl Engine {
             content.push(notice);
         }
         content
+    }
+
+    /// The posture the turn built from `input_policy` reports in its
+    /// `<turn_meta>` block: the planned posture from the turn authority,
+    /// the live arming from the session. Single source for the live
+    /// compare (which runs after `apply_runtime_mode_policy` installs this
+    /// same authority, so `approval_mode_for_session()` is exactly the
+    /// installed session value) and the `/preview-request` recompute, so
+    /// the two surfaces cannot drift when preview inputs carry a
+    /// hypothetical posture (Pinvou tri-mode safety).
+    fn turn_meta_posture_for(&self, input_policy: &TurnAuthority) -> TurnMetaPosture {
+        TurnMetaPosture {
+            mode: input_policy.mode,
+            approval: input_policy.approval_mode_for_session(),
+            ask_on_guardrail: self.session.ask_on_guardrail,
+        }
     }
 
     /// The user message a turn would build, from an explicit state snapshot.
@@ -6045,12 +6067,12 @@ impl Engine {
         // that reports it is built — so a `NotStarted` failure above can
         // never record a posture the model never saw; and consumed below,
         // so steers and mid-turn runtime notices cannot re-render the same
-        // line.
-        let current_posture = crate::core::authority::TurnMetaPosture {
-            mode: input_policy.mode,
-            approval: self.session.approval_mode,
-            ask_on_guardrail: self.session.ask_on_guardrail,
-        };
+        // line. Residual boundary: the record precedes the provider send,
+        // so a mid-turn provider failure leaves the posture recorded — the
+        // block stays in append-only history and the next successful
+        // request still carries it, but an edit-last-turn truncation would
+        // drop it.
+        let current_posture = self.turn_meta_posture_for(&input_policy);
         self.pending_authority_transition = crate::core::authority::authority_transition_between(
             self.last_turn_meta_authority,
             current_posture,
@@ -8681,7 +8703,8 @@ fn tool_ask_rule_decision_for_context(
         if ask_on_guardrail
             && !matches!(
                 approval_mode,
-                crate::tui::approval::ApprovalMode::Auto | crate::tui::approval::ApprovalMode::Never
+                crate::tui::approval::ApprovalMode::Auto
+                    | crate::tui::approval::ApprovalMode::Never
             )
         {
             Some(ToolAskRuleDecision::Prompt(format!(
