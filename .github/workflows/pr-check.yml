@@ -882,7 +882,7 @@ jobs:
         run: ./scripts/verify-public-submodule.sh
 
       - name: 初始化公共底座 submodule
-        run: git submodule update --init --recursive -- CodeWhale
+        run: bash "${{ github.workspace }}/scripts/ci-prepare-codewhale.sh" --history
 
       - name: fork-guard 指纹层 (秒级,不编译)
         run: ./scripts/fork-guard.sh --fast
@@ -1509,7 +1509,7 @@ jobs:
         run: timeout --kill-after=15 240 sudo --preserve-env=GITHUB_ACTIONS,PINVOU3_CI_DISABLE_ZRAM,RUNNER_ENVIRONMENT bash "${{ github.workspace }}/scripts/ci-memory-setup.sh" || echo "::warning::ci-memory-setup 未完成,继续使用 runner 默认内存"
 
       - name: 初始化公共底座 submodule
-        run: git submodule update --init --recursive -- CodeWhale
+        run: bash "${{ github.workspace }}/scripts/ci-prepare-codewhale.sh"
 
       # 本 step 只作 rustup 引导;实际工具链由 pinvou3-app/src-tauri/rust-toolchain.toml
       # 锁定具体版本(下方 cargo 步骤 working-directory 在 src-tauri,rustup 按该文件
@@ -1786,7 +1786,7 @@ jobs:
         run: timeout --kill-after=15 240 sudo --preserve-env=GITHUB_ACTIONS,PINVOU3_CI_DISABLE_ZRAM,RUNNER_ENVIRONMENT bash "${{ github.workspace }}/scripts/ci-memory-setup.sh" || echo "::warning::ci-memory-setup 未完成,继续使用 runner 默认内存"
 
       - name: 初始化公共底座 submodule
-        run: git submodule update --init --recursive -- CodeWhale
+        run: bash "${{ github.workspace }}/scripts/ci-prepare-codewhale.sh"
 
       # pinvou3 编译链接的系统库(本地 pkg-config 实测:gtk/webkit/soup/rsvg/openssl/
       # X11×3/appindicator)。ubuntu runner 默认没装,否则 glib-sys 等 build script 失败。
@@ -2146,7 +2146,7 @@ jobs:
         run: timeout --kill-after=15 240 sudo --preserve-env=GITHUB_ACTIONS,PINVOU3_CI_DISABLE_ZRAM,RUNNER_ENVIRONMENT bash "${{ github.workspace }}/scripts/ci-memory-setup.sh" || echo "::warning::ci-memory-setup 未完成,继续使用 runner 默认内存"
 
       - name: Init CodeWhale submodule
-        run: git submodule update --init --recursive -- CodeWhale
+        run: bash "${{ github.workspace }}/scripts/ci-prepare-codewhale.sh"
 
       # pinvou-cli compiles pinvou3-tauri as a path dependency
       # (default-features=false): same tauri_build resource check and system
@@ -2371,7 +2371,7 @@ jobs:
         run: timeout --kill-after=15 240 sudo --preserve-env=GITHUB_ACTIONS,PINVOU3_CI_DISABLE_ZRAM,RUNNER_ENVIRONMENT bash "${{ github.workspace }}/scripts/ci-memory-setup.sh" || echo "::warning::ci-memory-setup did not finish; continuing with stock runner memory"
 
       - name: Init CodeWhale submodule
-        run: git submodule update --init --recursive -- CodeWhale
+        run: bash "${{ github.workspace }}/scripts/ci-prepare-codewhale.sh"
 
       # Same system packages as cli-test (the workspaces are identical: the
       # CLI compiles pinvou3-tauri as a path dependency, so its build script
@@ -2621,7 +2621,7 @@ jobs:
         run: |
           started=$SECONDS
           set +e
-          git submodule update --init --recursive -- CodeWhale
+          bash "${{ github.workspace }}/scripts/ci-prepare-codewhale.sh"
           status=$?
           set -e
           echo "WINDOWS_RUST_TIMING phase=${{ matrix.phase }} step=codewhale-init elapsed_seconds=$((SECONDS-started)) status=$status"
@@ -3324,7 +3324,7 @@ jobs:
           grep -qE '^ok [1-9][0-9]* - actual Darwin system temporary roots accept hardening input and reject operator links$' "$hardening_log"
 
       - name: Init CodeWhale submodule
-        run: git submodule update --init --recursive -- CodeWhale
+        run: bash "${{ github.workspace }}/scripts/ci-prepare-codewhale.sh"
 
       - name: Rust toolchain
         uses: dtolnay/rust-toolchain@stable
@@ -3866,7 +3866,7 @@ jobs:
           submodules: false
 
       - name: Init CodeWhale submodule
-        run: git submodule update --init --recursive -- CodeWhale
+        run: bash "${{ github.workspace }}/scripts/ci-prepare-codewhale.sh"
 
       # Same two-step toolchain as cli-test/windows-rust-test: dtolnay only
       # bootstraps rustup; the version pinned by src-tauri/rust-toolchain.toml
@@ -3991,7 +3991,7 @@ jobs:
         run: timeout --kill-after=15 240 sudo --preserve-env=GITHUB_ACTIONS,PINVOU3_CI_DISABLE_ZRAM,RUNNER_ENVIRONMENT bash "${{ github.workspace }}/scripts/ci-memory-setup.sh" || echo "::warning::ci-memory-setup did not finish; continuing with stock runner memory"
 
       - name: Init CodeWhale submodule
-        run: git submodule update --init --recursive -- CodeWhale
+        run: bash "${{ github.workspace }}/scripts/ci-prepare-codewhale.sh"
 
       # 宿主侧只需要构建脚本工具(cc/cmake/pkg-config):目标侧的
       # webkit/gtk/soup/openssl/pipewire 头与库全部来自 glibc 2.38 sysroot
