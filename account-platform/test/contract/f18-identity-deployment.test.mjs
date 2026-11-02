@@ -147,6 +147,7 @@ test('staging external Keycloak keeps SMS endpoint checks without requiring a CA
     assert.equal(env.KEYCLOAK_CA_FILE, undefined);
   });
   for (const changes of [
+    [...direct, 'keycloak.caConfigMap=fixture-only-staging-ca'],
     [...direct, 'keycloak.provisionerTokenUrl=http://other-keycloak.example.invalid/realms/pinvou/protocol/openid-connect/token'],
     [...direct, 'keycloak.adminApiUrl=http://accounts.staging.example.com', 'keycloak.provisionerTokenUrl=http://accounts.staging.example.com/realms/pinvou/protocol/openid-connect/token',
       'ingress.enabled=true', 'ingress.keycloakHost=accounts.staging.example.com'],
