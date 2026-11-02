@@ -24,6 +24,7 @@ async function nativeInvoke(command, args) {
       return fixture.cleanup;
     }
     if (fixture.refreshFails && fixture.sealed) throw new Error('refresh_io_failure');
+    if (command === 'desktop_remote_proxy_load_status') return null;
     if (command === 'desktop_remote_proxy_archive_candidates') return fixture.sealed ? [] : [
       { localSessionId: before.localSessionId, title: '待隔离旧会话', pendingCount: 2, projectedEntryCount: 0, hidden: true },
     ];
@@ -32,7 +33,7 @@ async function nativeInvoke(command, args) {
       { localSessionId: before.localSessionId, title: '冻结旧会话', archived: true, archiveCursor: '1' },
     ] : [];
     if (command === 'desktop_remote_proxy_history_read') return fixture.sealed ? after : before;
-    return {};
+    throw new Error(`unexpected quarantine fixture command: ${command}`);
 }
 const factories = window.__PINVOU_TAURI_BRIDGE_FEATURES__;
 const remoteFactory = factories['desktop-remote-control'];
