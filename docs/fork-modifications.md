@@ -521,6 +521,12 @@ Official 已有引擎快照写入/通知的同事务提交、代际写入存活�
 
 行为回归：`display_fallback_publishes_in_transaction_and_refuses_retired_writers`、`queued_engine_snapshot_checks_retirement_under_the_mutation_gate` 与 `transcript_persist_pins`；生命周期及已有回收方 5 秒兜底边界见 `docs/chat-transcript-commit-lifecycle.md`。不修改底座 gitlink 或底座行为。
 
+## 2026-10-28 可链 panic 钩子收尾（Community #780）
+
+Official 已有 `core::panic_hooks::chain` 互斥注册器本体与远控/computer_use 三个消费方（`pub(crate) mod panic_hooks`、`install_worker_panic_redaction` 走 `chain`），本次补齐来源 PR 的收尾件：模块头补记消费者契约（互斥注册 + `Once` 单次安装、逆注册顺序快照分发、无属主回落安装前钩子、panic 路径零分配、append-only 语义、双 panic 即中止）；`HANDLERS` 从 `OnceLock` + 访问器收敛为 `LazyLock` 静态（等价，少一层间接）；`late_registration_preserves_active_redaction_without_a_default_hook_gap` 按来源强化为属主线程作用域处理器 + `run_isolated_child` 60s 看门狗，并补第二/第三阶段断言（后注册属主赢第二个 panic、无属主 panic 仍达默认钩子）；`computer_use/backend.rs` 新增 `worker_thread_panics_are_redacted_and_other_panics_forwarded`（隔离子进程内验证 worker 线程 panic 载荷被脱敏且恰好一次、无属主 panic 转发默认钩子），并把两处 `panic_payload_summary(&panic)` 修正为 `&*panic`（Box 先解引用，避免把 Box 本体 unsize 成 `&dyn Any` 导致 downcast 全失败）。远控 `panic_scope.rs` 两个作用域的既有注册与行为不变。
+
+行为回归：`late_registration_preserves_active_redaction_without_a_default_hook_gap`、`worker_thread_panics_are_redacted_and_other_panics_forwarded`，二者登记为 fork-guard APP 指纹。不修改底座 gitlink 或底座行为。
+
 ### #118 已集成输出恢复的范围与守护（pinvou-agent#757）
 
 - 本节描述公开仓 pinvou-agent#796 已消费的公开 #118 squash `a96fdec8e`（由当前父仓 gitlink `6e1ee88ee` 包含），不是候选引用升级。只恢复到达引擎的返回正文；生产端上限继续保留：`git.rs`/`git_history.rs` 各为 40,000 字符，`test_runner.rs` 每流 40,000 字符，`verifier.rs` 每 gate 的 stdout/stderr 各为 16,000 字符，`shell_output.rs` 的 `MAX_OUTPUT_SIZE` 为 30,000 字节；`tasks.rs` 构造 gate DTO 前将每流 summary 限制为 900 字符。无 active task 时 `log_path` 为空，不保存完整命令日志；引擎 artifact 只保全返回 DTO，不能恢复生产端此前丢弃的尾部。有 `log_path` 时，该路径才是单独的命令日志。
