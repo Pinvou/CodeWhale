@@ -31,6 +31,7 @@ func TestReconciliationOrphanPaidOrderPostgres(t *testing.T) {
 			var ctx context.Context
 			var operator *pgx.Conn
 			var all []migrations.Migration
+			var orphanPrefix []migrations.Migration
 			if upgrade {
 				r, ctx = retainedFinanceRepository(t, 900032)
 			} else {
@@ -126,10 +127,18 @@ func TestReconciliationOrphanPaidOrderPostgres(t *testing.T) {
 				if err != nil {
 					t.Fatal(err)
 				}
-				if err := billingschema.Up(ctx, operator, all); err != nil {
-					t.Fatal("official forward upgrade", err)
+				for _, migration := range all {
+					if migration.Version <= 900033 {
+						orphanPrefix = append(orphanPrefix, migration)
+					}
 				}
-				if _, err := billingschema.VerifyApplied(ctx, operator, all); err != nil {
+				if len(orphanPrefix) == 0 || orphanPrefix[len(orphanPrefix)-1].Version != 900033 {
+					t.Fatal("exact orphan migration prefix is unavailable")
+				}
+				if err := billingschema.Up(ctx, operator, orphanPrefix); err != nil {
+					t.Fatal("official orphan boundary upgrade", err)
+				}
+				if _, err := billingschema.VerifyApplied(ctx, operator, orphanPrefix); err != nil {
 					t.Fatal("verify upgraded migration ledger", err)
 				}
 				migrations.Unlock(ctx, operator)
@@ -202,19 +211,43 @@ func TestReconciliationOrphanPaidOrderPostgres(t *testing.T) {
 				if err := r.pool.QueryRow(ctx, `SELECT jsonb_agg(to_jsonb(m) ORDER BY version)::text FROM schema_migrations m`).Scan(&ledgerBefore); err != nil {
 					t.Fatal(err)
 				}
-				if err := billingschema.Up(ctx, operator, all); err != nil {
+				if err := billingschema.Up(ctx, operator, orphanPrefix); err != nil {
 					t.Fatal("replay forward migration", err)
 				}
 				var refused *pgconn.PgError
-				err := billingschema.DownOne(ctx, operator, all)
+				err := billingschema.DownOne(ctx, operator, orphanPrefix)
 				if !errors.As(err, &refused) || refused.Code != "55000" || refused.Message != "orphan payment order classification is forward-only" {
 					t.Fatal("orphan case migration must refuse rollback", err)
 				}
-				if _, err := billingschema.VerifyApplied(ctx, operator, all); err != nil {
+				if _, err := billingschema.VerifyApplied(ctx, operator, orphanPrefix); err != nil {
 					t.Fatal("verify after refused rollback", err)
 				}
 				if err := r.pool.QueryRow(ctx, `SELECT jsonb_agg(to_jsonb(m) ORDER BY version)::text FROM schema_migrations m`).Scan(&ledgerAfter); err != nil || ledgerAfter != ledgerBefore || financialFacts() != before {
 					t.Fatal("replay or refused rollback changed migration ledger or funds", err)
+				}
+				// Check 900033's refusal at its exact boundary, then retain the
+				// complete current upgrade and replay contract independently.
+				if err := billingschema.Up(ctx, operator, all); err != nil {
+					t.Fatal("official complete forward upgrade", err)
+				}
+				if _, err := billingschema.VerifyApplied(ctx, operator, all); err != nil {
+					t.Fatal("verify complete forward upgrade", err)
+				}
+				if financialFacts() != before {
+					t.Fatal("complete forward upgrade changed original financial facts")
+				}
+				if err := r.pool.QueryRow(ctx, `SELECT jsonb_agg(to_jsonb(m) ORDER BY version)::text FROM schema_migrations m`).Scan(&ledgerBefore); err != nil {
+					t.Fatal(err)
+				}
+				if err := billingschema.Up(ctx, operator, all); err != nil {
+					t.Fatal("replay complete forward upgrade", err)
+				}
+				if _, err := billingschema.VerifyApplied(ctx, operator, all); err != nil {
+					t.Fatal("verify complete forward replay", err)
+				}
+				migrations.Unlock(ctx, operator)
+				if err := r.pool.QueryRow(ctx, `SELECT jsonb_agg(to_jsonb(m) ORDER BY version)::text FROM schema_migrations m`).Scan(&ledgerAfter); err != nil || ledgerAfter != ledgerBefore || financialFacts() != before {
+					t.Fatal("complete upgrade replay changed migration ledger or funds", err)
 				}
 				var retained int
 				if err := r.pool.QueryRow(ctx, `SELECT count(*) FROM reconciliation_cases c JOIN manual_review_cases m ON m.id=c.manual_review_case_id WHERE c.id=$1 AND c.case_type='PAYMENT_TRANSACTION_MISSING' AND c.status='OPEN' AND m.status='OPEN'`, firstCase).Scan(&retained); err != nil || retained != 1 {
