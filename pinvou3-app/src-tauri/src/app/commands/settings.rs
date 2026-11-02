@@ -567,51 +567,63 @@ pub(super) fn delete_model_if_matches_inner(
     expected_model: Option<String>,
     store: &dyn CredentialStore,
 ) -> Result<bool, String> {
-    let mut reference_to_delete: Option<CredentialReference> = None;
-    let mut deleted = false;
-    UserPrefs::update_transaction(|prefs| {
-        // 该 id 已不存在（用户在等待窗口里自行删了它）：无事可做，如实报告
-        // "未删"而不是报错——回收语义是"清理仍然属于被移除记录的配置"。
-        let Some(model) = prefs.model_by_id(id) else {
-            return Ok(());
-        };
-        // 期望身份逐字节比对原串；None（调用方拿不出身份）永不匹配——
-        // 拿不出身份的调用方就不该删用户的配置（fail-closed）。
-        let matches = model.base_url == expected_base_url.as_deref().unwrap_or("")
-            && model.model == expected_model.as_deref().unwrap_or("");
-        if !matches {
-            return Ok(());
-        }
-        if model.is_builtin_account_platform() {
-            return Err("内置模型不可删除".to_string());
-        }
-        if prefs.advanced.saved_models.len() <= 1 {
-            return Err("至少保留一个模型".to_string());
-        }
-        if let Some(reference) = model.credential_ref.clone() {
-            reference_to_delete = Some(reference);
-        }
-        prefs.remove_model(id);
-        deleted = true;
-        Ok(())
-    })
-    .map(|_| ())
-    .map_err(|e| sanitize_command_error("delete_model_if_matches", e))?;
-    if deleted {
-        // Same ordering contract as [`delete_model_inner`]: the keyring delete
-        // only follows a successful commit, and only for a row this command
-        // actually deleted.
-        if let Some(reference) = reference_to_delete {
-            if let Err(error) = store.delete(&reference) {
-                log::warn!(
-                    "delete_model_if_matches: model {id} removed, but its keyring secret \
-                     could not be deleted: {}",
-                    error.user_message()
-                );
+    // Same ordering contract as [`save_model_inner`]（三十五轮评审 P2）：凭据
+    // 删除在 post-commit 钩子里执行——提交成功后、释放 prefs 锁前。放在锁外
+    // 时，A 的行删除提交后、凭据删除前，B 可为同 id 保存新配置和新密钥（同一
+    // 确定性 `model:{id}` 引用）；A 迟到的删除会毁掉 B 的新密钥——新配置保留、
+    // 新密钥丢失，两次操作仍都报成功。锁内后提交清理与 save 的替换写入全序：
+    // B 的替换要么整体先于 A（A 的删除就是更晚的用户意图），要么等 A 的删除
+    // 完成后才拿得到锁。
+    // 同时改走 fail-closed 事务（三十五轮评审 P2）：设置文件读取/解析失败时
+    // 报错且不落盘，而不是把宽松加载折叠出的默认快照当现状、在返回“未删除”
+    // 的同时覆盖用户配置；该 id 不存在或身份不匹配返回 Ok(false) 并跳过落盘，
+    // 原文件字节保持。
+    let deferred_reference = std::cell::RefCell::new(None);
+    let deleted = std::cell::Cell::new(false);
+    UserPrefs::update_transaction_fail_closed(
+        |prefs| {
+            // 该 id 已不存在（用户在等待窗口里自行删了它）：无事可做，如实报告
+            // "未删"而不是报错——回收语义是"清理仍然属于被移除记录的配置"。
+            let Some(model) = prefs.model_by_id(id) else {
+                return Ok(false);
+            };
+            // 期望身份逐字节比对原串；None（调用方拿不出身份）永不匹配——
+            // 拿不出身份的调用方就不该删用户的配置（fail-closed）。旧形态
+            // `unwrap_or("")` 会让 None 期望匹配「base_url/model 均空串」的行，
+            // 与本注释的 fail-closed 承诺自相矛盾（三十五轮评审 P3，唯一产品
+            // 回收链先筛有效身份故不可达；按防御性 API 契约收口）。
+            let matches = expected_base_url.as_deref() == Some(model.base_url.as_str())
+                && expected_model.as_deref() == Some(model.model.as_str());
+            if !matches {
+                return Ok(false);
             }
-        }
-    }
-    Ok(deleted)
+            if model.is_builtin_account_platform() {
+                return Err("内置模型不可删除".to_string());
+            }
+            if prefs.advanced.saved_models.len() <= 1 {
+                return Err("至少保留一个模型".to_string());
+            }
+            if let Some(reference) = model.credential_ref.clone() {
+                *deferred_reference.borrow_mut() = Some(reference);
+            }
+            prefs.remove_model(id);
+            deleted.set(true);
+            Ok(true)
+        },
+        || {
+            if let Some(reference) = deferred_reference.borrow_mut().take() {
+                if let Err(error) = store.delete(&reference) {
+                    log::warn!(
+                        "delete_model_if_matches: model {id} removed, but its keyring secret \
+                         could not be deleted: {}",
+                        error.user_message()
+                    );
+                }
+            }
+        },
+    )
+    .map_err(|e| sanitize_command_error("delete_model_if_matches", e))?;
+    Ok(deleted.get())
 }
 
 /// 设全局默认模型(新建会话继承它)。不打断已在用的会话——它们各自保持 spawn
@@ -2455,6 +2467,24 @@ mod tests {
             .expect("unknown identity must be a no-op, not an error");
             assert!(!deleted, "an identity-less caller must never delete");
             assert!(UserPrefs::load().model_by_id("m-recycle").is_some());
+            // None 期望连「base_url/model 均空串」的行也不匹配（旧
+            // `unwrap_or("")` 形态下 None 期望会误删空身份行，三十五轮评审 P3
+            // 防御性契约收口）。
+            UserPrefs::update_transaction(|prefs| {
+                let mut row = prefs.model_by_id("m-recycle").cloned().expect("row");
+                row.base_url = String::new();
+                row.model = String::new();
+                prefs.upsert_model(row);
+                Ok(())
+            })
+            .expect("empty-identity fixture should save");
+            let deleted = delete_model_if_matches_inner("m-recycle", None, None, &store)
+                .expect("None expectations are a no-op, not an error");
+            assert!(
+                !deleted,
+                "None expectations must not match even an empty-identity row"
+            );
+            assert!(UserPrefs::load().model_by_id("m-recycle").is_some());
         });
     }
 
@@ -2519,6 +2549,79 @@ mod tests {
                     .collect::<Vec<_>>(),
                 vec![crate::platform::prefs::BUILTIN_LLMAPI_MODEL_ID],
                 "only the auto-seeded builtin row remains",
+            );
+        });
+    }
+
+    #[test]
+    fn delete_model_if_matches_read_failure_fails_closed_without_writing() {
+        with_temp_prefs_home(|| {
+            seed_two_models();
+            let path = crate::platform::paths::settings_path();
+            let original = std::fs::read_to_string(&path).expect("seeded settings");
+            // 宽松加载把「解析失败」折叠成默认快照（与读取失败的 `.ok()` 同一
+            // 折叠点）；破坏性命令必须在报错的同时保持磁盘字节——否则返回
+            // "未删除"却用默认值覆盖用户配置（三十五轮评审 P2）。
+            std::fs::write(&path, "{not json").expect("corrupt settings");
+            let store = MemoryCredentialStore::default();
+            let result = delete_model_if_matches_inner(
+                "m-recycle",
+                Some("http://127.0.0.1:11434/v1".to_string()),
+                Some("qwen3:latest".to_string()),
+                &store,
+            );
+            assert!(
+                result.is_err(),
+                "a destructive transaction must refuse when the settings file is unreadable"
+            );
+            assert_eq!(
+                std::fs::read_to_string(&path).expect("file still readable"),
+                "{not json",
+                "the corrupted file must not be rewritten by the failed cleanup"
+            );
+            // 恢复合法文件后同一请求照常工作（fail-closed 只拦读不出，不残留
+            // 拒绝态）。
+            std::fs::write(&path, original).expect("restore settings");
+            let deleted = delete_model_if_matches_inner(
+                "m-recycle",
+                Some("http://127.0.0.1:11434/v1".to_string()),
+                Some("qwen3:latest".to_string()),
+                &store,
+            )
+            .expect("post-recovery delete must work");
+            assert!(deleted);
+        });
+    }
+
+    #[test]
+    fn delete_model_if_matches_legitimate_absence_keeps_file_bytes() {
+        with_temp_prefs_home(|| {
+            seed_two_models();
+            let path = crate::platform::paths::settings_path();
+            // 未知字段 + 非规范化排版：任何「取出快照再无条件落盘」的路径都会
+            // 改字节；"该 id 已不存在 → 不改任何数据" 必须连落盘都不做。
+            let mut original = std::fs::read_to_string(&path).expect("seeded settings");
+            let trimmed = original.trim_end();
+            assert!(trimmed.ends_with('}'), "seeded settings end with an object");
+            // 未知字段插进顶层对象**内部**（剥掉收尾 `}` 再补回），而非其后。
+            original = format!(
+                "{},\"futureUnknownKey\": 1}}\n",
+                &trimmed[..trimmed.len() - 1]
+            );
+            std::fs::write(&path, &original).expect("annotate settings");
+            let store = MemoryCredentialStore::default();
+            let deleted = delete_model_if_matches_inner(
+                "m-gone",
+                Some("http://127.0.0.1:11434/v1".to_string()),
+                Some("qwen3:latest".to_string()),
+                &store,
+            )
+            .expect("missing row is a no-op, not an error");
+            assert!(!deleted);
+            assert_eq!(
+                std::fs::read_to_string(&path).expect("file readable"),
+                original,
+                "a no-op cleanup must not rewrite the file (bytes stay, unknown key survives)"
             );
         });
     }

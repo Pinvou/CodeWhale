@@ -1608,9 +1608,46 @@ impl UserPrefs {
         F: FnOnce(&mut Self) -> Result<(), String>,
         C: FnOnce(),
     {
+        Self::update_transaction_impl(|prefs| mutate(prefs).map(|_| true), post_commit, false)
+    }
+
+    /// 破坏性事务的 fail-closed 变体（三十五轮评审 P2）：与
+    /// [`Self::update_transaction_with_post_commit`] 同一临界区与 post-commit
+    /// 契约，闭包改为返回「是否真正改动」（`Ok(false)` = 无改动），另加两道
+    /// 破坏性写入专用的收紧：
+    ///
+    /// 1. **严格读预检**：宽松加载把「文件存在但读取失败/解析失败」折叠成默认
+    ///    快照（`load_unlocked_with_migration` 的 `.ok()`），随后无条件整文档
+    ///    落盘——普通读改写只是既有默认值语义，破坏性命令却会在返回“未删除”
+    ///    的同时用默认快照覆盖用户配置。本变体在锁内先按
+    ///    [`Self::load_read_only_model_snapshot`] 的三态口径预检：文件不存在
+    ///    （合法缺项）放行；存在但读不了/解析不了直接报错，整个事务不落盘。
+    /// 2. **无改动跳过落盘**：闭包返回 `Ok(false)`（该 id 已不存在或身份不
+    ///    匹配）时不调用 `save_unlocked`——「不改任何数据」的承诺落成字节级
+    ///    保证，也避免把「缺失 + `.bad` 残留」的隔离恢复态洗成全新默认文件。
+    pub fn update_transaction_fail_closed<F, C>(mutate: F, post_commit: C) -> Result<Self, String>
+    where
+        F: FnOnce(&mut Self) -> Result<bool, String>,
+        C: FnOnce(),
+    {
+        Self::update_transaction_impl(mutate, post_commit, true)
+    }
+
+    fn update_transaction_impl<F, C>(
+        mutate: F,
+        post_commit: C,
+        fail_closed_read: bool,
+    ) -> Result<Self, String>
+    where
+        F: FnOnce(&mut Self) -> Result<bool, String>,
+        C: FnOnce(),
+    {
         let _guard = lock_user_prefs();
         let _file_lock = lock_settings_file()
             .map_err(|error| format!("acquire settings lock failed: {error}"))?;
+        if fail_closed_read {
+            Self::ensure_settings_file_readable()?;
+        }
         let (mut prefs, migration) = Self::load_unlocked_with_migration(false);
         // round-41 review M1：迁移失败时明文 key 只存在于内存，而 save_unlocked
         // 无条件 sanitize 后整文档落盘——凭据会从它唯一的持久位置被抹掉，写入方
@@ -1619,13 +1656,30 @@ impl UserPrefs {
         if migration.has_failures() {
             return Err(CREDENTIAL_STORE_UNAVAILABLE_ERROR.to_string());
         }
-        mutate(&mut prefs)?;
-        prefs
-            .save_unlocked()
-            .map_err(|error| format!("save settings failed: {error:#}"))?;
-        post_commit();
+        let mutated = mutate(&mut prefs)?;
+        if mutated {
+            prefs
+                .save_unlocked()
+                .map_err(|error| format!("save settings failed: {error:#}"))?;
+            post_commit();
+        }
         // 返回再次从磁盘解析的规范化结果，保证桥接层内存状态与实际持久化内容一致。
         Ok(Self::load_unlocked_with_migration(false).0)
+    }
+
+    /// 破坏性事务的严格读预检（口径同 [`Self::load_read_only_model_snapshot`]）：
+    /// NotFound 放行（合法缺项）；读取失败或解析失败报错——调用方不得在读不出
+    /// 现状时用默认快照覆盖磁盘。
+    fn ensure_settings_file_readable() -> Result<(), String> {
+        let path = super::paths::settings_path();
+        let raw = match std::fs::read_to_string(&path) {
+            Ok(raw) => raw,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+            Err(error) => return Err(format!("settings file read failed: {error}")),
+        };
+        serde_json::from_str::<Self>(&raw)
+            .map(|_: Self| ())
+            .map_err(|error| format!("settings file parse failed: {error}"))
     }
 
     /// Test-only probe for the deferred-delete barrier test: reports whether
