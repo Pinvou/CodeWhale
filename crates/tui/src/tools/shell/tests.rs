@@ -581,7 +581,6 @@ fn deleted_saved_workspace_reports_path_and_recovery_before_spawn() {
     let message = error.to_string();
     assert!(message.contains("saved session workspace is unavailable"));
     assert!(message.contains(&stale.display().to_string()));
-    assert!(message.contains("working_dir") || message.contains("cwd"));
     assert!(message.contains("resume/fork"));
 }
 

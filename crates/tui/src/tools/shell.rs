@@ -130,7 +130,7 @@ fn validate_shell_working_dir(path: &Path, inherited_session_workspace: bool) ->
             "requested working directory"
         };
         format!(
-            "{source} is unavailable: {}. Restore or remap that directory, resume/fork the session from an existing workspace, or pass an explicit `cwd`",
+            "{source} is unavailable: {}. Restore or remap that directory, or resume/fork the session from an existing workspace",
             path.display()
         )
     })?;
@@ -141,7 +141,7 @@ fn validate_shell_working_dir(path: &Path, inherited_session_workspace: bool) ->
             "requested working directory"
         };
         return Err(anyhow!(
-            "{source} is not a directory: {}. Resume/fork from an existing workspace or pass an explicit `cwd`",
+            "{source} is not a directory: {}. Resume/fork the session from an existing workspace",
             path.display()
         ));
     }
