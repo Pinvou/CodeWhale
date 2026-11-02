@@ -106,7 +106,7 @@ impl ToolSpec for RunTool {
                 },
                 "commands": {
                     "type": "array",
-                    "description": "Optional explicit verifier gates (action=verifiers). Commands run directly as program+args, not through a shell; use program='bash', args=['-lc', '...'] only when Bash is intentionally part of the verifier.",
+                    "description": "Optional explicit verifier gates (action=verifiers). Commands run directly as program+args, not through a shell; use program='bash', args=['-lc', '...'] only when the shell is intentionally part of the verifier.",
                     "items": {
                         "type": "object",
                         "properties": {
@@ -120,7 +120,7 @@ impl ToolSpec for RunTool {
                 },
                 "background": {
                     "type": "boolean",
-                    "description": "Start verifier gates as background jobs and return task_ids immediately (action=verifiers). Use for long build/test/lint gates; completion is tracked in task/status state, and Bash with action 'wait' or task_shell_wait is only for early output, final output, or true dependency barriers."
+                    "description": "Start verifier gates as background jobs and return task_ids immediately (action=verifiers). Use for long build/test/lint gates; completion is tracked in task/status state, and task_shell_wait is only for early output, final output, or true dependency barriers."
                 }
             },
             "required": ["action"]
