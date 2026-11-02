@@ -400,5 +400,13 @@ mod tests {
         // 出网探测告知（round-22 评审 P3）：与 install 模板侧同一告知义务。
         assert!(skill.contains("可达性探测"));
         assert!(skill.contains("不携带任何数据"));
+        // 直接删除臂的守卫链绕开警示（三十五轮评审 P2）：用户让 AI 直接 `rm`
+        // 时走 shell、不经 device_remove_external_model，后端守卫拦不住——
+        // 守护进程模型库 / OLLAMA_MODELS 迁移根 / 商店根必须在技能文本里
+        // 写成绝对禁触目标，削弱（删句/去目标名）时本测试必红。
+        assert!(skill.contains("会完全绕开设备管理页后端的守卫链"));
+        assert!(skill.contains("`~/.ollama/models`（blobs/manifests）"));
+        assert!(skill.contains("`OLLAMA_MODELS`"));
+        assert!(skill.contains("`~/.pinvou3/model-store/` 是绝对禁触目标"));
     }
 }

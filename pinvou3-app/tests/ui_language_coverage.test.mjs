@@ -216,7 +216,7 @@ for (const language of ['zh', 'en', 'ja']) {
     23,
     `${language}.uiAuxChat must hold exactly the 23 pinned keys`,
   );
-    // All 117 uiDeviceMgr keys are pinned (PR #1661 评审跟进：三语**同时**删掉一个
+    // All 121 uiDeviceMgr keys are pinned (PR #1661 评审跟进：三语**同时**删掉一个
     // key 时 parity 检查全绿、视图渲染 undefined——uiAuxChat round-14 事故的同款
     // 洞；chipGpuTemp→chipMaxTemp 与评审新增键（servicesStale 随 round-6；
     // peakLabel/linkReasonBridge/linkReasonUnknown/registerNoId 随 round-7）随本
@@ -289,6 +289,9 @@ for (const language of ['zh', 'en', 'ja']) {
       'removeWeightsPath', 'linkFailed', 'doctorFailed', 'refreshFailed', 'linkRowStale',
       'linkRowRecycled', 'removeDone', 'removeFailed', 'warn', 'doctorCharCounter',
       'svcReasonHttp', 'svcReasonDockerExit',
+      // round-33 新增的改属保留 toast 也是插值函数（copy.linkRowKept(name)）：
+      // 缺这枚钉时单语翻成字符串全套件照绿、运行时 TypeError（三十五轮评审 P2）。
+      'linkRowKept',
     ]) {
       assert.equal(
         typeof dict[language].uiDeviceMgr[key],

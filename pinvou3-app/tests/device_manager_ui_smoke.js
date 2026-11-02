@@ -250,12 +250,18 @@ function injectSource() {
           return Promise.resolve(null);
         // 移除回收的条件删除桩（三十三轮评审 P2）：与生产 delete_model_if_matches
         // 同一语义——id 在且 base_url/model 原串与期望身份逐字节一致才删并返回
-        // true；改属/缺失返回 false（保留），身份缺参永不匹配。
+        // true；改属/缺失返回 false（保留），身份缺参永不匹配（fail-closed；
+        // 旧桩把缺参归一成 '' 反而可匹配空串行，与生产及本注释自相矛盾，
+        // 三十五轮评审 P2 收口）。
         case 'delete_model_if_matches': {
           var rowIfMatches = models.find(function (m) { return m.id === (args && args.id); });
           if (!rowIfMatches) return Promise.resolve(false);
-          var matches = rowIfMatches.base_url === ((args && args.expectedBaseUrl) || '')
-            && rowIfMatches.model === ((args && args.expectedModel) || '');
+          if (!args || typeof args.expectedBaseUrl !== 'string'
+            || typeof args.expectedModel !== 'string') {
+            return Promise.resolve(false);
+          }
+          var matches = rowIfMatches.base_url === args.expectedBaseUrl
+            && rowIfMatches.model === args.expectedModel;
           if (!matches) return Promise.resolve(false);
           models = models.filter(function (m) { return m.id !== (args && args.id); });
           return Promise.resolve(true);
