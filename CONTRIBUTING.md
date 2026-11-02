@@ -161,6 +161,11 @@ fixtures recover only loopback static GET loads interrupted by Chromium's
 or application requests; Docker interface changes on a shared host must not
 silently turn a failed module load into an empty-page timeout.
 
+Deployment PostgreSQL contracts reuse a local image only when its recorded
+repository digest matches the selected pinned manifest. They pull that exact
+manifest only on a cache miss and validate it again before running contracts;
+an image tag or dependency preparation alone never counts as a test pass.
+
 Repository administrators can set `PINVOU_LINUX_RUNNER` to a JSON label array
 (for example `["self-hosted","Linux","pinvou3"]`) to route x64 Linux jobs to
 a dedicated Ubuntu 22.04 runner. Without that variable they use `ubuntu-22.04`.
