@@ -812,12 +812,10 @@ impl SessionAgentStore {
             }
             _ => Vec::new(),
         };
-        {
-            let mut records = self.records.write();
-            // Publish only after the candidate has been durably replaced.
-            // Holding the write lock throughout also prevents this snapshot
-            // from overwriting a concurrent update.
-            let mut candidate = records.clone();
+        // Persist before publish: a failed persist leaves memory, disk and
+        // the sidecar on the previous binding, so a "failed bind" can never
+        // report bound (see `update_records_transactional`).
+        self.update_records_transactional(|candidate| {
             let record = candidate.entry(session_id.to_string()).or_default();
             if record.acp_session_id.is_some()
                 && (record.backend != backend
@@ -838,9 +836,8 @@ impl SessionAgentStore {
             // ACP 会话不是代码模式会话：绑定 ACP 时重置为 plain 模式，
             // 避免 is_code_session() 误判、且 restore 时不会拒绝 ACP 覆盖。
             record.mode = SessionMode::Plain;
-            self.persist_records(&candidate)?;
-            *records = candidate;
-        }
+            Ok(true)
+        })?;
         // 先持久化辅助索引，再清理权威 sidecar：persist 失败时 sidecar 仍在，与
         // 磁盘索引保持一致，不会出现「sidecar 已删、索引未更新」的中间态；若 sidecar
         // 清理失败，残留 sidecar 会在下次启动扫描时被识别为 ACP 会话残留并清理
@@ -877,9 +874,11 @@ impl SessionAgentStore {
             }
             _ => Vec::new(),
         };
-        {
-            let mut records = self.records.write();
-            let record = records.entry(session_id.to_string()).or_default();
+        // Persist before publish (same contract as set_acp_workspace): a
+        // failed persist leaves the record unchanged in memory and on disk,
+        // and the sidecar below is only written for a published binding.
+        self.update_records_transactional(|candidate| {
+            let record = candidate.entry(session_id.to_string()).or_default();
             if record.acp_session_id.is_some() && record.backend.is_acp() {
                 anyhow::bail!("ACP 会话已开始，不能更换 Agent；请新建会话");
             }
@@ -901,8 +900,8 @@ impl SessionAgentStore {
             // replaced keychain.
             record.explicit_ancestor_roots = Vec::new();
             record.mode = SessionMode::Code;
-        }
-        self.persist()?;
+            Ok(true)
+        })?;
         // 权威 sidecar：辅助索引损坏/丢失后据此恢复原生代码会话类型与项目绑定。
         // 写失败已逐条记日志；缺失的 sidecar 由启动时回填自愈补写。
         let (record_roots, record_explicit) = {
@@ -2026,9 +2025,8 @@ impl SessionAgentStore {
         config_values: HashMap<String, String>,
     ) -> Result<()> {
         let _section = self.lock_and_reload()?;
-        {
-            let mut records = self.records.write();
-            let record = records.entry(session_id.to_string()).or_default();
+        self.update_records_transactional(|candidate| {
+            let record = candidate.entry(session_id.to_string()).or_default();
             record.acp_session_id = Some(acp_session_id);
             record.acp_model_id = model_id
                 .clone()
@@ -2040,8 +2038,9 @@ impl SessionAgentStore {
                     .acp_config_values
                     .insert("model".to_string(), model_id);
             }
-        }
-        self.persist()
+            Ok(true)
+        })
+        .map(|_| ())
     }
 
     pub fn set_acp_config_value(
@@ -2051,9 +2050,8 @@ impl SessionAgentStore {
         value_id: &str,
     ) -> Result<()> {
         let _section = self.lock_and_reload()?;
-        {
-            let mut records = self.records.write();
-            let record = records.entry(session_id.to_string()).or_default();
+        self.update_records_transactional(|candidate| {
+            let record = candidate.entry(session_id.to_string()).or_default();
             record
                 .acp_config_values
                 .insert(config_id.to_string(), value_id.to_string());
@@ -2062,16 +2060,16 @@ impl SessionAgentStore {
             } else if config_id == "mode" {
                 record.acp_mode_id = Some(value_id.to_string());
             }
-        }
-        self.persist()
+            Ok(true)
+        })
+        .map(|_| ())
     }
 
     pub fn clear_acp_config_value(&self, session_id: &str, config_id: &str) -> Result<()> {
         let _section = self.lock_and_reload()?;
-        {
-            let mut records = self.records.write();
-            let Some(record) = records.get_mut(session_id) else {
-                return Ok(());
+        self.update_records_transactional(|candidate| {
+            let Some(record) = candidate.get_mut(session_id) else {
+                return Ok(false);
             };
             record.acp_config_values.remove(config_id);
             if config_id == "model" {
@@ -2079,8 +2077,9 @@ impl SessionAgentStore {
             } else if config_id == "mode" {
                 record.acp_mode_id = None;
             }
-        }
-        self.persist()
+            Ok(true)
+        })
+        .map(|_| ())
     }
 
     pub(super) fn restore_missing_acp_record(
@@ -2098,9 +2097,8 @@ impl SessionAgentStore {
             anyhow::bail!("恢复的 ACP 会话索引不完整");
         }
         let _section = self.lock_and_reload()?;
-        {
-            let mut records = self.records.write();
-            if records
+        self.update_records_transactional(|candidate| {
+            if candidate
                 .get(session_id)
                 .is_some_and(|record| record.backend.is_acp())
             {
@@ -2114,29 +2112,29 @@ impl SessionAgentStore {
             if !source_holds_recovery() {
                 return Ok(false);
             }
-            records.insert(session_id.to_string(), recovered);
-        }
-        self.persist()?;
-        Ok(true)
+            candidate.insert(session_id.to_string(), recovered);
+            Ok(true)
+        })
     }
 
     pub fn remove(&self, session_id: &str) -> Result<()> {
         let _section = self.lock_and_reload()?;
-        // Most purged sessions (plain chats) have no index entry; without
-        // this short-circuit every such purge would rewrite the whole index
-        // file for nothing, serialized inside the purge flow. It must sit
-        // AFTER `lock_and_reload`: only the fresh disk table proves durable
-        // absence. An in-memory miss on a boot-era snapshot proves nothing
-        // — a prior call whose persist failed leaves the entry on disk
-        // while memory already dropped it, and short-circuiting on that
-        // state would make the removal silently unretryable.
-        if self.records.write().remove(session_id).is_none() {
-            return Ok(());
+        // Most purged sessions (plain chats) have no index entry; the
+        // transactional no-op (`Ok(false)`: no persist, no publish) keeps
+        // such purges from rewriting the whole index file, serialized
+        // inside the purge flow. The freshness requirement stands: only the
+        // disk table reloaded under the section lock proves durable
+        // absence — an in-memory miss on a boot-era snapshot proves
+        // nothing. A failed removal stays retryable: the helper publishes
+        // only after the persist, so the entry survives in memory and on
+        // disk for the retry to find again.
+        let removed = self
+            .update_records_transactional(|candidate| Ok(candidate.remove(session_id).is_some()))?;
+        if removed {
+            // 删除会话时同步清理权威 sidecar，避免残留的 sidecar 让重建后的索引
+            // 误恢复一个已删除的原生代码会话。
+            remove_code_session_sidecar(&self.path, session_id);
         }
-        self.persist()?;
-        // 删除会话时同步清理权威 sidecar，避免残留的 sidecar 让重建后的索引
-        // 误恢复一个已删除的原生代码会话。
-        remove_code_session_sidecar(&self.path, session_id);
         Ok(())
     }
 
@@ -2213,15 +2211,20 @@ impl SessionAgentStore {
         // lane rewrites the whole table, so a newer-schema file must stop
         // here instead of being re-persisted under the current stamp.
         Self::assert_index_schema(&file)?;
-        let mut fresh = file.sessions;
-        fresh.remove(session_id);
+        // Adopt the fresh disk table first, then reuse the transactional
+        // publish-after-persist flow: a failed removal leaves both layers
+        // (and the sidecar) untouched, and an absent entry is a no-op that
+        // does not rewrite the index at all.
         {
             let mut records = self.records.write();
-            *records = fresh;
+            *records = file.sessions;
         }
-        self.persist()?;
-        // 同 `remove`：删除后清理权威 sidecar（幂等）。
-        remove_code_session_sidecar(&self.path, session_id);
+        let removed = self
+            .update_records_transactional(|candidate| Ok(candidate.remove(session_id).is_some()))?;
+        if removed {
+            // 同 `remove`：删除后清理权威 sidecar（幂等）。
+            remove_code_session_sidecar(&self.path, session_id);
+        }
         Ok(())
     }
 
@@ -2344,24 +2347,22 @@ impl SessionAgentStore {
         {
             anyhow::bail!("恢复的原生代码会话临时目录不应保存项目工作目录");
         }
-        {
-            let mut records = self.records.write();
-            if records
+        self.update_records_transactional(|candidate| {
+            if candidate
                 .get(session_id)
                 .is_some_and(|record| record.mode.is_code())
             {
                 return Ok(false);
             }
-            if records
+            if candidate
                 .get(session_id)
                 .is_some_and(|record| record.backend.is_acp())
             {
                 anyhow::bail!("会话已是 ACP 会话，拒绝用原生代码会话 sidecar 覆盖");
             }
-            records.insert(session_id.to_string(), record);
-        }
-        self.persist()?;
-        Ok(true)
+            candidate.insert(session_id.to_string(), record);
+            Ok(true)
+        })
     }
 
     fn persist(&self) -> Result<()> {
@@ -2370,6 +2371,42 @@ impl SessionAgentStore {
         // of the shared `.tmp` path and preserves snapshot order.
         let records = self.records.read();
         self.persist_records(&records)
+    }
+
+    /// Persist-before-publish for whole-table updates. `update` mutates a
+    /// candidate clone of the live table; when it returns `Ok(true)` the
+    /// candidate is persisted and only then published into the live map, so a
+    /// persist failure leaves memory, disk and sidecars on the previous state
+    /// and the error propagates before anything is observable. `Ok(false)`
+    /// means nothing changed: neither persist nor publish happens. The write
+    /// lock is held throughout so no concurrent writer can publish over the
+    /// snapshot being persisted; callers still take `lock_and_reload` first
+    /// for the cross-process section.
+    ///
+    /// Not every whole-table writer is on this helper: the workspace-roots
+    /// commit (`commit_session_workspace_roots_locked`), the workspace-prefix
+    /// rebind (`rebind_workspace_prefix`) and the workspace-index rekeys
+    /// (`commit_index_rekeys`) keep the older mutate-then-rollback shape on
+    /// purpose — their per-field restore logic is documented at each site.
+    /// Prefer this helper for new writers.
+    ///
+    /// Cost note: the exclusive lock now spans the whole serialize + fsync +
+    /// rename, so one writer's fsync duration stalls every reader of the
+    /// store. Accepted at the human-frequency write rates of these tables;
+    /// revisit with a snapshot-then-validated-publish shape if a writer ever
+    /// moves to a slow or networked disk.
+    fn update_records_transactional(
+        &self,
+        update: impl FnOnce(&mut HashMap<String, SessionAgentRecord>) -> Result<bool>,
+    ) -> Result<bool> {
+        let mut records = self.records.write();
+        let mut candidate = records.clone();
+        if !update(&mut candidate)? {
+            return Ok(false);
+        }
+        self.persist_records(&candidate)?;
+        *records = candidate;
+        Ok(true)
     }
 
     fn persist_records(&self, records: &HashMap<String, SessionAgentRecord>) -> Result<()> {
@@ -3153,6 +3190,157 @@ mod tests {
         );
         assert!(!after_retry.mode.is_code());
         assert!(read_code_session_sidecar(store.path(), "session-atomic").is_none());
+    }
+
+    /// The same persist-before-publish contract as
+    /// `acp_workspace_persist_failure_keeps_the_complete_previous_binding`
+    /// for the other whole-table writers: an injected persist failure must
+    /// leave memory, disk and (for native binds) the sidecar untouched, and
+    /// a no-op write (unknown session) neither persists nor consumes the
+    /// armed injection.
+    #[test]
+    fn sibling_writers_persist_before_publish() {
+        let root = tempfile::tempdir().unwrap();
+        let workspace = root.path().join("workspace");
+        fs::create_dir_all(&workspace).unwrap();
+        let store = SessionAgentStore::for_test(root.path().join("session-agents.json"));
+
+        // bind_code_native_session: nothing published, no sidecar minted.
+        store.inject_next_persist_failure();
+        assert!(
+            store
+                .bind_code_native_session(
+                    "session-native",
+                    CodexWorkspaceKind::Project,
+                    Some(workspace.clone()),
+                    Vec::new(),
+                )
+                .is_err()
+        );
+        assert!(!store.get("session-native").mode.is_code());
+        assert!(
+            !store.path().exists(),
+            "a failed first persist must not create the index"
+        );
+        assert!(read_code_session_sidecar(store.path(), "session-native").is_none());
+        store
+            .bind_code_native_session(
+                "session-native",
+                CodexWorkspaceKind::Project,
+                Some(workspace.clone()),
+                Vec::new(),
+            )
+            .unwrap();
+        assert!(store.get("session-native").mode.is_code());
+        assert!(read_code_session_sidecar(store.path(), "session-native").is_some());
+
+        // set_acp_session / set_acp_config_value / clear_acp_config_value:
+        // the record on disk and in memory stays what the last successful
+        // persist wrote.
+        store
+            .set_acp_workspace(
+                "session-acp",
+                AgentBackend::CodexAcp,
+                CodexWorkspaceKind::Temporary,
+                None,
+                Vec::new(),
+            )
+            .unwrap();
+        store.inject_next_persist_failure();
+        assert!(
+            store
+                .set_acp_session(
+                    "session-acp",
+                    "acp-1".to_string(),
+                    Some("model-a".to_string()),
+                    HashMap::new(),
+                )
+                .is_err()
+        );
+        assert_eq!(store.get("session-acp").acp_session_id, None);
+        assert_eq!(store.get("session-acp").acp_model_id, None);
+        store
+            .set_acp_session(
+                "session-acp",
+                "acp-1".to_string(),
+                Some("model-a".to_string()),
+                HashMap::new(),
+            )
+            .unwrap();
+        store.inject_next_persist_failure();
+        assert!(
+            store
+                .set_acp_config_value("session-acp", "model", "model-b")
+                .is_err()
+        );
+        assert_eq!(
+            store.get("session-acp").acp_model_id.as_deref(),
+            Some("model-a")
+        );
+        store.inject_next_persist_failure();
+        assert!(
+            store
+                .clear_acp_config_value("session-acp", "model")
+                .is_err()
+        );
+        assert_eq!(
+            store.get("session-acp").acp_model_id.as_deref(),
+            Some("model-a")
+        );
+        let durable: AgentStoreFile =
+            serde_json::from_slice(&fs::read(store.path()).unwrap()).unwrap();
+        assert_eq!(
+            durable.sessions["session-acp"].acp_model_id.as_deref(),
+            Some("model-a")
+        );
+
+        // Both removal lanes share the contract: an injected persist failure
+        // leaves the record in memory, on disk, and (for the native bind)
+        // the sidecar — the retry finds the entry again in every layer.
+        store.inject_next_persist_failure();
+        assert!(store.remove_for_second_process("session-native").is_err());
+        assert!(store.get("session-native").mode.is_code());
+        let durable: AgentStoreFile =
+            serde_json::from_slice(&fs::read(store.path()).unwrap()).unwrap();
+        assert!(
+            durable.sessions.contains_key("session-native"),
+            "a failed second-process removal must keep the disk record"
+        );
+        store.inject_next_persist_failure();
+        assert!(store.remove("session-native").is_err());
+        assert!(store.get("session-native").mode.is_code());
+        assert!(
+            read_code_session_sidecar(store.path(), "session-native").is_some(),
+            "a failed removal must not clean the sidecar"
+        );
+        store.remove("session-native").unwrap();
+        assert!(
+            !store.get("session-native").mode.is_code(),
+            "a successful removal must drop the record from memory"
+        );
+        let durable: AgentStoreFile =
+            serde_json::from_slice(&fs::read(store.path()).unwrap()).unwrap();
+        assert!(
+            !durable.sessions.contains_key("session-native"),
+            "a successful removal must drop the disk record"
+        );
+        assert!(read_code_session_sidecar(store.path(), "session-native").is_none());
+
+        // A no-op clear on an unknown session neither persists nor fails.
+        store.inject_next_persist_failure();
+        store
+            .clear_acp_config_value("session-unknown", "model")
+            .unwrap();
+        // Same for a removal of a session the fresh table never had.
+        store.inject_next_persist_failure();
+        store.remove("session-unknown").unwrap();
+        // ...and the armed injection is still pending for the next real write.
+        assert!(
+            store
+                .set_acp_config_value("session-acp", "mode", "plan")
+                .is_err()
+        );
+        assert_eq!(store.get("session-acp").acp_mode_id, None);
     }
 
     #[test]
