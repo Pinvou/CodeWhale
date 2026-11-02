@@ -1373,18 +1373,20 @@ jobs:
           set -euo pipefail
           test "$(uname -s)" = Linux
           base_python="${{ steps.evidence_pdf_python.outputs.python-path }}"
+          # Self-hosted RUNNER_TEMP may retain a previous job's files. Keep the
+          # venv, wheel audit and child launcher in one exclusively owned root.
+          pdf_root="$(mktemp -d "$RUNNER_TEMP/evidence-pdf.XXXXXX")"
+          trap 'rm -rf -- "$pdf_root"' EXIT
           # Scope the shared-library interpreter to this PDF step. Later
           # sanitized contracts must keep the runner's original Python PATH.
           base_library="$(dirname "$(dirname "$base_python")")/lib"
           export LD_LIBRARY_PATH="$base_library${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
-          "$base_python" -m venv "$RUNNER_TEMP/evidence-pdf-venv"
-          py="$RUNNER_TEMP/evidence-pdf-venv/bin/python"
+          "$base_python" -m venv "$pdf_root/venv"
+          py="$pdf_root/venv/bin/python"
           "$py" -m pip --isolated install --index-url https://pypi.org/simple --only-binary=:all: --require-hashes --no-deps -r account-platform/cmd/evidence-image-validator/pdf-requirements.lock
           "$py" -m pip check
-          "$py" -I -B account-platform/cmd/evidence-image-validator/fetch_pdf_gate_wheels.py --output "$RUNNER_TEMP/pdf-test-lxml-wheels"
-          pdf_child_root="$(mktemp -d "$RUNNER_TEMP/evidence-pdf-child.XXXXXX")"
-          pdf_child_python="$pdf_child_root/python"
-          trap 'rm -f "$pdf_child_python"; rmdir "$pdf_child_root"' EXIT
+          "$py" -I -B account-platform/cmd/evidence-image-validator/fetch_pdf_gate_wheels.py --output "$pdf_root/lxml-wheels"
+          pdf_child_python="$pdf_root/child-python"
           # The production supervisor intentionally clears the child environment.
           # Restore only the selected test interpreter's loader path in a launcher.
           "$py" - "$pdf_child_python" <<'PY'
@@ -1397,7 +1399,7 @@ jobs:
               output.write("#!/bin/sh\nexport LD_LIBRARY_PATH=" + shlex.quote(library) + "\nexec " + shlex.quote(sys.executable) + ' "$@"\n')
           launcher.chmod(0o700)
           PY
-          EVIDENCE_PDF_TEST_PYTHON="$pdf_child_python" EVIDENCE_PDF_AUDIT_DIR="$RUNNER_TEMP/pdf-test-lxml-wheels" EVIDENCE_PDF_REQUIRE_SYMLINK=1 "$py" -I -B account-platform/cmd/evidence-image-validator/run_pdf_gate.py --strict
+          EVIDENCE_PDF_TEST_PYTHON="$pdf_child_python" EVIDENCE_PDF_AUDIT_DIR="$pdf_root/lxml-wheels" EVIDENCE_PDF_REQUIRE_SYMLINK=1 "$py" -I -B account-platform/cmd/evidence-image-validator/run_pdf_gate.py --strict
 
       - name: Node.js for Token authorization contracts
         uses: actions/setup-node@v7

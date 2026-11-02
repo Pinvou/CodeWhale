@@ -1,4 +1,5 @@
 import { runSMSConflictCases } from './account_platform_sms_conflict_cases.mjs';
+import { navigateFixture } from './helpers/navigate-fixture.mjs';
 import { registrationRepairCopy } from '../src/shared/i18n.js';
 import fs from 'node:fs';
 import os from 'node:os';
@@ -35,7 +36,7 @@ try {
     if (/Encountered two children with the same key/.test(message.text())) duplicateKeys.push(message.text());
   });
   const url = `http://127.0.0.1:${vite.httpServer.address().port}/tests/fixtures/account-platform-f01-ui.html`;
-  const fresh = async kind => { errors.length = 0; await page.goto(url); await page.waitForFunction(() => window.f01 && document.body.textContent.includes('account-a')); if (kind === 'admin') { await page.evaluate(() => { history.replaceState({}, '', '?section=users'); window.f01.render('admin'); }); await page.waitForSelector('tbody tr'); } };
+  const fresh = async kind => { errors.length = 0; await navigateFixture(page, url, signal => page.waitForFunction(() => window.f01 && document.body.textContent.includes('account-a'), { signal })); if (kind === 'admin') { await page.evaluate(() => { history.replaceState({}, '', '?section=users'); window.f01.render('admin'); }); await page.waitForSelector('tbody tr'); } };
   const clickText = async text => {
     const section = await page.evaluate(value => { const c = globalThis.f01.copy().admin; return [c.userManagement.registrationRepair, c.userManagement.profileRepair].includes(value) ? 'operations' : value === c.settings.title ? 'settings' : null; }, text);
     if (section) { await page.click(`.adm-sidebar [data-section=${section}]`); await page.waitForSelector('[data-workspace=' + section + ']:not([hidden])'); if (section === 'settings') return; }
