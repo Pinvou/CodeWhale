@@ -405,6 +405,14 @@ function isAtRulePosition(scan, index) {
 //     rule-list frame a preceding `:` belonged to selector syntax
 //     (`.x:hover`), not a declaration opener, so the stale state must not
 //     suppress a sibling at-rule after that nested rule closes;
+//   - rule bodies whose prelude started with an at-keyword (@media,
+//     @supports, @layer, @scope, …) are rule-list frames: every `:` in
+//     their prelude or selector text is selector syntax and never opens a
+//     declaration, so a `--`-prefixed selector compound cannot poison the
+//     frame — `@media screen{.--x:hover{color:red}@layer real{…}}` is
+//     valid, minifier-surviving CSS whose real sibling layer must stay
+//     reported (a `--*` declaration is only legal inside a style-rule
+//     body, which has no `@` in its prelude);
 //   - a declaration opens when an ident is followed by `:` in a rule body
 //     and closes at `;` — an escaped `\;` is ident content, not a
 //     terminator (consumed like the stripper does), and the declaration
@@ -415,11 +423,7 @@ function isAtRulePosition(scan, index) {
 // token, and whitespace before it is optional (`@import"a.css"` is valid
 // CSS), so whitespace, a quote, or a `url(` token completes the keyword —
 // `@imports`-style longer at-keywords and a bare `@import` at EOF do not
-// count. Residual divergence: a selector compound ending in a `--`-ident
-// (`.--x:hover`) classifies the following `{` as a value block — real dist
-// has no nested rules at the safari14 target (lightningcss lowers
-// nesting), so only hand-written input can land there and the miss stays
-// bounded to that prefix.
+// count.
 function findAtRulePositions(scan, keyword) {
   const at = keyword === 'layer' ? '@layer' : '@import';
   const isCompleteAt = (i) => {
@@ -438,6 +442,11 @@ function findAtRulePositions(scan, keyword) {
   let identLen = 0;
   let identCustom = false;
   let firstIdentChar = '';
+  // Whether the current prelude (text since the last `{`/`}`/`;`) started
+  // with an at-keyword: the rule body a following `{` opens is then a rule
+  // list (@media/@supports/@layer/…) rather than a declaration block, so
+  // colons inside it are selector syntax, never `--*` declaration openers.
+  let hasAtPrelude = false;
   const resetIdent = () => {
     identLen = 0;
     identCustom = false;
@@ -451,6 +460,7 @@ function findAtRulePositions(scan, keyword) {
     }
     if (ch === '@') {
       const top = stack[stack.length - 1];
+      hasAtPrelude = true;
       if (
         isCompleteAt(i)
         && isAtRulePosition(scan, i)
@@ -463,7 +473,7 @@ function findAtRulePositions(scan, keyword) {
     }
     if (ch === ':') {
       const top = stack[stack.length - 1];
-      if (top && top.rule && top.decl === null) {
+      if (top && top.rule && top.decl === null && !top.grouping) {
         top.decl = identLen === 0 ? '' : identCustom ? 'custom' : 'plain';
       }
       resetIdent();
@@ -472,6 +482,7 @@ function findAtRulePositions(scan, keyword) {
     if (ch === ';') {
       const top = stack[stack.length - 1];
       if (top && top.rule) top.decl = null;
+      hasAtPrelude = false;
       resetIdent();
       continue;
     }
@@ -479,12 +490,14 @@ function findAtRulePositions(scan, keyword) {
       const top = stack[stack.length - 1];
       const rule = !top || (top.rule && top.decl !== 'custom');
       if (rule && top && top.rule) top.decl = null;
-      stack.push({ rule, decl: null });
+      stack.push({ rule, decl: null, grouping: rule && hasAtPrelude });
+      hasAtPrelude = false;
       resetIdent();
       continue;
     }
     if (ch === '}') {
       stack.pop();
+      hasAtPrelude = false;
       resetIdent();
       continue;
     }

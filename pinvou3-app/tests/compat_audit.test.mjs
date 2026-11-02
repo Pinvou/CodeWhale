@@ -635,6 +635,53 @@ test('a pseudo-class sibling rule does not mask the real layer after it', () => 
   }
 });
 
+test('a `--`-prefixed selector compound does not mask the real layer after it', () => {
+  // In a rule-list frame the `:` of a selector compound used to record a
+  // pending declaration on the enclosing frame; a `--`-prefixed compound
+  // (`.--x:hover`) recorded `custom`, so the nested rule's `{` was
+  // classified as a custom-property value block and the enclosing frame
+  // kept the stale `custom` state after the rule closed — the scanner
+  // returned 0 violations for the media fixture below while the real
+  // sibling layer survived the build. `--*` declarations are only legal
+  // inside a style-rule body; in a rule-list frame (prelude starts with an
+  // at-keyword: @media/@supports/@layer/…) every `:` is selector syntax
+  // and must not open a declaration. lightningcss keeps both the compound
+  // and the layer verbatim at the safari14 target, so the miss was
+  // reachable in dist; the custom-property value negative control stays.
+  const distDir = fs.mkdtempSync(path.join(os.tmpdir(), 'compat-audit-custom-sel-'));
+  try {
+    fs.mkdirSync(path.join(distDir, 'assets'), { recursive: true });
+    const minify = (css) => transformCss({
+      filename: 'main.css',
+      code: Buffer.from(css),
+      targets: browserslistToTargets(['safari 14']),
+      minify: true,
+    }).code.toString();
+    const mediaCustomSel = minify('@media screen{.--x:hover{color:red}@layer real{b{color:red}}}');
+    assert.match(mediaCustomSel, /\.--x:hover\{color:red\}/, 'minifier fixture must keep the `--`-prefixed compound rule');
+    assert.match(mediaCustomSel, /@layer real\{b\{color:red\}\}/, 'minifier fixture must keep the real layer');
+    const supportsCustomSel = minify('@supports (display:flex){.--x:hover{color:red}@layer real{b{color:red}}}');
+    assert.match(supportsCustomSel, /\.--x:hover\{color:red\}/, 'supports fixture must keep the compound rule');
+    assert.match(supportsCustomSel, /@layer real\{b\{color:red\}\}/, 'supports fixture must keep the real layer');
+    fs.writeFileSync(path.join(distDir, 'assets', 'media-custom-sel.css'), mediaCustomSel);
+    fs.writeFileSync(path.join(distDir, 'assets', 'supports-custom-sel.css'), supportsCustomSel);
+    fs.writeFileSync(path.join(distDir, 'assets', 'raw-custom-sel.css'), '@media screen{.--x:hover{color:red}@layer real{b{color:red}}}');
+    fs.writeFileSync(path.join(distDir, 'assets', 'no-layer.css'), '@media screen{.--x:hover{color:red}}');
+    fs.writeFileSync(path.join(distDir, 'assets', 'custom-prop.css'), 'a{--token:@layer demo{b{color:red}}}');
+    const violations = hermeticAudit({ distDir });
+    assert.deepEqual(
+      violations.map((violation) => violation.slice('dist:'.length).replace(/:.*/, '')).sort((a, b) => a.localeCompare(b)),
+      ['media-custom-sel.css', 'raw-custom-sel.css', 'supports-custom-sel.css'],
+      `exactly the real layers behind \`--\`-prefixed selector compounds must be reported; got: ${JSON.stringify(violations)}`,
+    );
+    for (const file of ['media-custom-sel.css', 'raw-custom-sel.css', 'supports-custom-sel.css']) {
+      assert.match(violations.find((violation) => violation.includes(file)), / @layer survives the build/);
+    }
+  } finally {
+    fs.rmSync(distDir, { recursive: true, force: true });
+  }
+});
+
 test('an @import token outside a rule position is not a layered import', () => {
   // The import scan shares the at-rule context walk with the @layer scan:
   // a custom-property value is token content, not a rule list, so the
