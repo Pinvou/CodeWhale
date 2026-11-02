@@ -148,10 +148,11 @@ pub struct MonitorDiagnostic {
 
 impl VllmSnapshot {
     /// 后端在线判定(live dot / CLI `monitor status` 的 `vllm_online` 共用):
-    /// 健康态 `verified` 且进程 Ready/Busy。原先该谓词在 GUI command 与
+    /// 有效 local/remote 目标、健康态 `verified` 且进程 Ready/Busy。原先该谓词在 GUI command 与
     /// CLI status_payload 各自手写一遍字面量匹配,单点收口避免字符串漂移。
     pub fn is_online(&self) -> bool {
-        self.health_status == HealthStatus::Verified
+        matches!(self.target_kind.as_str(), "local" | "remote")
+            && self.health_status == HealthStatus::Verified
             && matches!(self.status, VllmStatus::Ready | VllmStatus::Busy)
     }
 
@@ -316,28 +317,32 @@ async fn snapshot_for_model_config_with_client(
     api_key: Option<&str>,
     configured_context: Option<u32>,
 ) -> Option<VllmSnapshot> {
-    let target_kind = if preset == ModelPreset::LocalVllm {
-        "local"
-    } else {
-        vllm_target_kind(upstream)
+    // A local preset controls valid endpoint behavior, not URL validity.
+    let target_kind = match vllm_target_kind(upstream) {
+        "invalid" => "invalid",
+        _ if preset == ModelPreset::LocalVllm => "local",
+        kind => kind,
     };
     let metrics_applicable = target_kind == "local";
 
     // 1) /models 健康
-    let models_url = models_probe_url(upstream);
-    let mut request = client.get(models_url).timeout(Duration::from_secs(3));
-    if let Some(key) = api_key.map(str::trim).filter(|key| !key.is_empty()) {
-        if is_anthropic_endpoint(upstream) {
-            request = crate::core::model_endpoint::apply_anthropic_auth_headers(request, key);
-        } else {
-            request = request.bearer_auth(key);
-        }
-    }
-    let request =
-        crate::core::model_endpoint::with_opencode_session_header(request, upstream, "model-probe");
-    let should_probe_models =
-        target_kind == "local" || api_key.map(str::trim).is_some_and(|key| !key.is_empty());
+    let should_probe_models = target_kind != "invalid"
+        && (target_kind == "local" || api_key.map(str::trim).is_some_and(|key| !key.is_empty()));
     let models_resp = if should_probe_models {
+        let models_url = models_probe_url(upstream);
+        let mut request = client.get(models_url).timeout(Duration::from_secs(3));
+        if let Some(key) = api_key.map(str::trim).filter(|key| !key.is_empty()) {
+            if is_anthropic_endpoint(upstream) {
+                request = crate::core::model_endpoint::apply_anthropic_auth_headers(request, key);
+            } else {
+                request = request.bearer_auth(key);
+            }
+        }
+        let request = crate::core::model_endpoint::with_opencode_session_header(
+            request,
+            upstream,
+            "model-probe",
+        );
         Some(request.send().await)
     } else {
         None
@@ -422,9 +427,8 @@ async fn snapshot_for_model_config_with_client(
             }
             None
         }
-        // `None` only happens for remote/invalid targets with no API key (the
-        // probe is skipped for them); local targets always probe above, so no
-        // local arm is needed here.
+        // Invalid targets never probe; a valid remote target without an API
+        // key also skips the request. Valid local targets always probe.
         None => None,
     };
 
@@ -555,9 +559,10 @@ async fn snapshot_for_model_config_with_client(
         });
     }
 
-    let mut status = match (running, waiting) {
-        (Some(r), _) if r > 0.0 => VllmStatus::Busy,
-        (_, Some(w)) if w > 0.0 => VllmStatus::Busy,
+    let mut status = match (target_kind, running, waiting) {
+        ("invalid", _, _) => VllmStatus::Offline,
+        (_, Some(r), _) if r > 0.0 => VllmStatus::Busy,
+        (_, _, Some(w)) if w > 0.0 => VllmStatus::Busy,
         _ => VllmStatus::Ready,
     };
     // 如果用户配置了模型名，但和 vLLM 实际返回的不一致，降级为 Mismatch。
@@ -571,10 +576,9 @@ async fn snapshot_for_model_config_with_client(
     }
     let health_status = match status {
         VllmStatus::Mismatch => HealthStatus::Mismatch,
-        // No `Offline` arm: `status` is only ever Ready/Busy here (built from
-        // the queue gauges, then possibly downgraded to Mismatch); every
-        // Offline snapshot exits through the early returns above, which carry
-        // the offline refinement diagnostic themselves.
+        _ if target_kind == "invalid" => HealthStatus::Unverified,
+        // Valid-target offline snapshots exit through the early returns
+        // above, which carry the transport/HTTP refinement themselves.
         _ if target_kind == "remote"
             && api_key
                 .map(str::trim)
@@ -590,6 +594,13 @@ async fn snapshot_for_model_config_with_client(
         HealthStatus::MissingApiKey => Some(MonitorDiagnostic {
             code: "missing_api_key".to_string(),
             message: "远端模型未配置 API Key，跳过在线探测".to_string(),
+            http_status: None,
+            transport: None,
+            endpoint: None,
+        }),
+        HealthStatus::Unverified if target_kind == "invalid" => Some(MonitorDiagnostic {
+            code: "invalid_target".to_string(),
+            message: "模型接口地址无效，仅支持 HTTP(S) 地址".to_string(),
             http_status: None,
             transport: None,
             endpoint: None,
@@ -1030,7 +1041,8 @@ fn transport_class(err: &reqwest::Error) -> &'static str {
 /// Classify the backend kind by the base_url host: loopback/private IP
 /// ranges (including docker host aliases) = local inference engine
 /// (`local`, self-hosted vLLM with Prometheus metrics); public domain/IP =
-/// cloud API (`remote`); empty/unparseable = invalid config (`invalid`).
+/// cloud API (`remote`); missing-host, non-HTTP(S), or unparseable URL = invalid
+/// config (`invalid`).
 /// Drives the monitor card's local/remote/invalid label, metric
 /// applicability, and the native-window alert. The local/private decision
 /// shares core's `base_url_uses_local_or_private` with engine routing (one
@@ -1039,22 +1051,10 @@ fn transport_class(err: &reqwest::Error) -> &'static str {
 /// and trailing-dot local hosts classify as local instead of cloud.
 fn vllm_target_kind(upstream: &str) -> &'static str {
     let s = upstream.trim();
-    if s.is_empty() {
-        return "invalid";
-    }
-    let Some(rest) = s
-        .strip_prefix("http://")
-        .or_else(|| s.strip_prefix("https://"))
-    else {
+    let Ok(url) = reqwest::Url::parse(s) else {
         return "invalid";
     };
-    let Some(host_port) = rest.split('/').next() else {
-        return "invalid";
-    };
-    // 去端口 + ipv6 括号
-    let host = host_port.rsplit_once(':').map_or(host_port, |(h, _)| h);
-    let host = host.trim_start_matches('[').trim_end_matches(']');
-    if host.is_empty() {
+    if !matches!(url.scheme(), "http" | "https") || url.host_str().is_none() {
         return "invalid";
     }
     if crate::core::model_endpoint::base_url_uses_local_or_private(s) {
@@ -1177,11 +1177,197 @@ mod tests {
         );
         // 云端 API:公网域名 / 公网 IP
         assert_eq!(vllm_target_kind("https://api.deepseek.com/v1"), "remote");
+        assert_eq!(vllm_target_kind("HTTPS://MODEL.EXAMPLE/v1"), "remote");
+        assert_eq!(vllm_target_kind("http://[::1]:8000/v1"), "local");
+        assert_eq!(vllm_target_kind("http://[2001:db8::1]:8000/v1"), "remote");
+        assert_eq!(
+            vllm_target_kind("https://user:password@model.example:8443/v1"),
+            "remote"
+        );
         assert_eq!(vllm_target_kind("http://8.8.8.8:8000/v1"), "remote");
         assert_eq!(vllm_target_kind("http://172.32.0.1:8000/v1"), "remote"); // 172.32 不在私有段
         // 配置异常:空 / 非 URL
         assert_eq!(vllm_target_kind(""), "invalid");
         assert_eq!(vllm_target_kind("not-a-url"), "invalid");
+        for upstream in [
+            "ftp://model.example/v1",
+            "file:///tmp/model",
+            "mailto:model@example.com",
+            "https://",
+            "http://[::1",
+            "http://model.example:invalid/v1",
+            "http://model.example:65536/v1",
+        ] {
+            assert_eq!(vllm_target_kind(upstream), "invalid", "{upstream}");
+        }
+    }
+
+    #[test]
+    fn online_verdict_requires_a_valid_target_kind() {
+        for kind in ["invalid", "", "unknown", "local", "remote"] {
+            for status in [VllmStatus::Offline, VllmStatus::Ready, VllmStatus::Busy] {
+                for health in [HealthStatus::Verified, HealthStatus::Unverified] {
+                    let snapshot = VllmSnapshot {
+                        target_kind: kind.to_string(),
+                        status,
+                        health_status: health,
+                        ..VllmSnapshot::default()
+                    };
+                    assert_eq!(
+                        snapshot.is_online(),
+                        matches!(kind, "local" | "remote")
+                            && status != VllmStatus::Offline
+                            && health == HealthStatus::Verified,
+                        "kind={kind} status={status:?} health={health:?}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn invalid_targets_never_probe_or_report_online_even_with_a_local_preset_or_key() {
+        use std::sync::{
+            Arc,
+            atomic::{AtomicUsize, Ordering},
+        };
+
+        struct CountDns(Arc<AtomicUsize>);
+        impl reqwest::dns::Resolve for CountDns {
+            fn resolve(&self, _name: reqwest::dns::Name) -> reqwest::dns::Resolving {
+                self.0.fetch_add(1, Ordering::SeqCst);
+                Box::pin(std::future::ready(Err(std::io::Error::other(
+                    "unexpected invalid-target DNS lookup",
+                )
+                .into())))
+            }
+        }
+
+        let resolutions = Arc::new(AtomicUsize::new(0));
+        let client = reqwest::Client::builder()
+            .no_proxy()
+            .dns_resolver(Arc::new(CountDns(Arc::clone(&resolutions))))
+            .build()
+            .unwrap();
+        for upstream in [
+            "",
+            "not-a-url",
+            "ftp://user:private-marker@model.invalid/v1?token=private-marker",
+            "file:///tmp/private-marker",
+            "https://",
+            "http://[::1",
+            "https://user:private-marker@model.invalid:bad/v1?token=private-marker",
+            "http://model.invalid:65536/v1",
+        ] {
+            for preset in [ModelPreset::LocalVllm, ModelPreset::Deepseek] {
+                for key in [None, Some("private-api-key-marker")] {
+                    let snapshot = snapshot_for_model_config_with_client(
+                        &client,
+                        upstream,
+                        Some("configured-model".to_string()),
+                        preset,
+                        Some("model-id".to_string()),
+                        "provider".to_string(),
+                        key,
+                        Some(262_144),
+                    )
+                    .await
+                    .expect("invalid configuration remains an explicit snapshot");
+                    assert_eq!(snapshot.target_kind, "invalid");
+                    assert_eq!(snapshot.status, VllmStatus::Offline);
+                    assert_eq!(snapshot.health_status, HealthStatus::Unverified);
+                    assert!(!snapshot.is_online());
+                    assert!(!snapshot.metrics_applicable);
+                    assert_eq!(snapshot.max_model_len, Some(262_144));
+                    assert_eq!(
+                        snapshot.configured_model.as_deref(),
+                        Some("configured-model")
+                    );
+                    let diagnostic = snapshot.diagnostic.as_ref().expect("invalid diagnostic");
+                    assert_eq!(diagnostic.code, "invalid_target");
+                    assert!(diagnostic.http_status.is_none());
+                    assert!(diagnostic.transport.is_none());
+                    assert!(diagnostic.endpoint.is_none());
+                    let serialized = serde_json::to_string(&snapshot).unwrap();
+                    assert!(!serialized.contains("private-marker"));
+                    assert!(!serialized.contains("private-api-key-marker"));
+                }
+            }
+        }
+        assert_eq!(resolutions.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn valid_targets_preserve_remote_auth_and_local_preset_behavior() {
+        use crate::core::model_endpoint::models_mock;
+
+        let _lock = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        let mock = models_mock::spawn(&[
+            (
+                "/v1/models",
+                200,
+                r#"{"data":[{"id":"m","max_model_len":32768}]}"#.into(),
+            ),
+            ("/metrics", 200, "vllm:num_requests_running 1\n".into()),
+        ]);
+        let address = reqwest::Url::parse(&mock.base_url)
+            .unwrap()
+            .socket_addrs(|| None)
+            .unwrap()[0];
+        let upstream = format!("http://monitor.example:{}/v1", address.port());
+        let client = reqwest::Client::builder()
+            .no_proxy()
+            .resolve("monitor.example", address)
+            .build()
+            .unwrap();
+        for (preset, key, kind, health, status, model_hits) in [
+            (
+                ModelPreset::Deepseek,
+                None,
+                "remote",
+                HealthStatus::MissingApiKey,
+                VllmStatus::Ready,
+                0,
+            ),
+            (
+                ModelPreset::Deepseek,
+                Some("configured-test-key"),
+                "remote",
+                HealthStatus::Verified,
+                VllmStatus::Ready,
+                1,
+            ),
+            (
+                ModelPreset::LocalVllm,
+                None,
+                "local",
+                HealthStatus::Verified,
+                VllmStatus::Busy,
+                2,
+            ),
+        ] {
+            let snapshot = snapshot_for_model_config_with_client(
+                &client,
+                &upstream,
+                Some("m".to_string()),
+                preset,
+                None,
+                "provider".to_string(),
+                key,
+                None,
+            )
+            .await
+            .expect("valid target snapshot");
+            assert_eq!(snapshot.target_kind, kind);
+            assert_eq!(snapshot.health_status, health);
+            assert_eq!(snapshot.status, status);
+            assert_eq!(snapshot.is_online(), health == HealthStatus::Verified);
+            assert_eq!(mock.hits_for("/v1/models"), model_hits);
+            assert_eq!(mock.hits_for("/metrics"), usize::from(kind == "local"));
+            if let Some(key) = key {
+                assert_eq!(mock.auth_for("/v1/models"), Some(format!("Bearer {key}")));
+            }
+        }
     }
 
     #[test]

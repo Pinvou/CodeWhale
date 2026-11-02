@@ -155,15 +155,40 @@ a dedicated Ubuntu 22.04 runner. Without that variable they use `ubuntu-22.04`.
 The runner needs passwordless sudo for dependency setup, Docker with Compose and
 Buildx, GitHub CLI, and access to the required package registries. It must be
 reserved for trusted repository code. Self-hosted jobs retain local npm caches
-and disable setup-node's remote cache upload. Set `PINVOU_WINDOWS_MAC_ENABLED`
-to the literal `false` to disable Windows/macOS jobs and their corresponding
-required results; Linux checks remain required. Unset or any other value keeps
-the existing three-platform policy. ARM release jobs keep their hosted ARM label.
+and disable setup-node's remote cache upload. Set `PINVOU_WINDOWS_ENABLED` or
+`PINVOU_MACOS_ENABLED` to the literal `false` to disable that platform's jobs and
+corresponding required results independently; Linux checks remain required.
+Unset or any other value keeps that platform enabled. ARM release jobs keep their
+hosted ARM label.
 Optional `PINVOU_LINUX_HEAVY_RUNNER`, `PINVOU_LINUX_MEDIUM_RUNNER`, and
 `PINVOU_LINUX_LIGHT_RUNNER` arrays override that default for compilation,
 application/integration tests, and fast policy checks respectively. Each falls
 back to `PINVOU_LINUX_RUNNER`, then to the hosted 22.04 image. Distinct pool labels
 keep large Rust compilations away from small policy runners.
+
+Windows jobs accept `PINVOU_WINDOWS_HEAVY_RUNNER`,
+`PINVOU_WINDOWS_MEDIUM_RUNNER`, and `PINVOU_WINDOWS_LIGHT_RUNNER` JSON label
+arrays, falling back to `PINVOU_WINDOWS_RUNNER` and then `windows-latest`.
+For `pull_request`, these overrides are used only when both the head and base
+repository names and IDs match the workflow's `github.repository` and
+`github.repository_id`. Forks and missing or inconsistent repository metadata
+use the hardcoded hosted `windows-latest` fallback, including Windows matrix
+legs. Actor membership and approval do not establish repository identity.
+Push, manual dispatch, and Merge Group keep their existing pool routing only in
+workflows that already declare that event. Missing or undeclared event names
+also use the hardcoded hosted fallback.
+The release-only `PINVOU_REMOTE_RELEASE_RUNNER` scalar override uses the same
+PR source check; its job still runs only for the existing release events.
+
+This is the checked-in routing policy, not a security boundary against a fork
+that changes its workflow YAML. Before exposing persistent Windows self-hosted
+runners to PR workflows, maintainers must configure and verify a runner group
+restricted to trusted workflow/ref entries. The persistent-runner security finding
+remains blocking until that configuration is demonstrated; routing tests alone do
+not resolve it. The workflow files do not configure or verify those
+administrator-managed controls. An Actions approval alone does not make untrusted
+code safe for a persistent host. See
+[GitHub's runner security guidance](https://docs.github.com/en/actions/reference/security/secure-use).
 
 Hosts use Ubuntu 26.04 while runner containers use the Ubuntu 22.04 image in
 `scripts/ci/runner-image/`. This retains the existing release glibc compatibility

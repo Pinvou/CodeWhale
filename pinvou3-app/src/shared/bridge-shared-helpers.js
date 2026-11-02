@@ -4339,7 +4339,7 @@
         swapPct: snap.ram && snap.ram.swap_total_kib > 0 ? Math.round(snap.ram.swap_used_kib / snap.ram.swap_total_kib * 100) : 0,
         vllmModel: vllmDisplayModel,
         vllmHealthStatus: healthStatus,
-        vllmOnline: vllm ? (healthStatus === "verified" && (vllm.status === "ready" || vllm.status === "busy")) : false,
+        vllmOnline: vllm ? ((targetKind === "local" || targetKind === "remote") && healthStatus === "verified" && (vllm.status === "ready" || vllm.status === "busy")) : false,
         // 云端(remote)不做健康探测(无 auth 的 /v1/models 必 401)→ 不显示 OFFLINE。
         // 暴露原始 kind 供前端判定(别比本地化 label)。
         vllmIsRemote: targetKind === "remote",

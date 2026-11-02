@@ -766,7 +766,10 @@ jobs:
       # Windows/macOS 腿由独立的平台开关控制(matrix 上下文
       # 不可用于 job 级 if,故在矩阵生成处过滤)。
       matrix: ${{ fromJSON(vars.PINVOU_WINDOWS_ENABLED != 'false' && (vars.PINVOU_MACOS_ENABLED != 'false' && '{"include":[{"os":"ubuntu-22.04"},{"os":"windows-latest"},{"os":"macos-15"}]}' || '{"include":[{"os":"ubuntu-22.04"},{"os":"windows-latest"}]}') || (vars.PINVOU_MACOS_ENABLED != 'false' && '{"include":[{"os":"ubuntu-22.04"},{"os":"macos-15"}]}' || '{"include":[{"os":"ubuntu-22.04"}]}')) }}
-    runs-on: ${{ matrix.os == 'ubuntu-22.04' && fromJSON(vars.PINVOU_LINUX_LIGHT_RUNNER || vars.PINVOU_LINUX_RUNNER || '["ubuntu-22.04"]') || matrix.os == 'windows-latest' && fromJSON(vars.PINVOU_WINDOWS_LIGHT_RUNNER || vars.PINVOU_WINDOWS_RUNNER || '["windows-latest"]') || matrix.os }}
+    # Windows pool overrides are limited to same-repository PR metadata (name + ID).
+    # Fork/missing metadata or undeclared events use hosted Windows.
+    # PR-editable YAML is not a runner ACL; other declared events keep their pools.
+    runs-on: ${{ matrix.os == 'ubuntu-22.04' && fromJSON(vars.PINVOU_LINUX_LIGHT_RUNNER || vars.PINVOU_LINUX_RUNNER || '["ubuntu-22.04"]') || matrix.os == 'windows-latest' && fromJSON((github.event_name == 'push' || github.event_name == 'merge_group' || (github.event_name == 'pull_request' && github.repository != '' && github.repository_id != '' && github.event.pull_request.head.repo.full_name == github.repository && github.event.pull_request.base.repo.full_name == github.repository && github.event.pull_request.head.repo.id == github.repository_id && github.event.pull_request.base.repo.id == github.repository_id)) && (vars.PINVOU_WINDOWS_LIGHT_RUNNER || vars.PINVOU_WINDOWS_RUNNER || '["windows-latest"]') || '["windows-latest"]') || matrix.os }}
     timeout-minutes: 10
     steps:
       - name: Checkout
@@ -1120,7 +1123,7 @@ jobs:
     name: windows-relay-dacl
     needs: changes
     if: ${{ !cancelled() && needs.changes.outputs.relay == 'true' && (github.event_name == 'merge_group' || github.event_name == 'pull_request')  && vars.PINVOU_WINDOWS_ENABLED != 'false' }}
-    runs-on: ${{ fromJSON(vars.PINVOU_WINDOWS_LIGHT_RUNNER || vars.PINVOU_WINDOWS_RUNNER || '["windows-latest"]') }}
+    runs-on: ${{ fromJSON((github.event_name == 'push' || github.event_name == 'merge_group' || (github.event_name == 'pull_request' && github.repository != '' && github.repository_id != '' && github.event.pull_request.head.repo.full_name == github.repository && github.event.pull_request.base.repo.full_name == github.repository && github.event.pull_request.head.repo.id == github.repository_id && github.event.pull_request.base.repo.id == github.repository_id)) && (vars.PINVOU_WINDOWS_LIGHT_RUNNER || vars.PINVOU_WINDOWS_RUNNER || '["windows-latest"]') || '["windows-latest"]') }}
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@v7
@@ -1139,7 +1142,7 @@ jobs:
     name: windows-relay-tools-test
     needs: changes
     if: ${{ !cancelled() && github.event.action != 'closed' && needs.changes.outputs.relay == 'true' && (github.event_name == 'merge_group' || github.event_name == 'pull_request')  && vars.PINVOU_WINDOWS_ENABLED != 'false' }}
-    runs-on: ${{ fromJSON(vars.PINVOU_WINDOWS_LIGHT_RUNNER || vars.PINVOU_WINDOWS_RUNNER || '["windows-latest"]') }}
+    runs-on: ${{ fromJSON((github.event_name == 'push' || github.event_name == 'merge_group' || (github.event_name == 'pull_request' && github.repository != '' && github.repository_id != '' && github.event.pull_request.head.repo.full_name == github.repository && github.event.pull_request.base.repo.full_name == github.repository && github.event.pull_request.head.repo.id == github.repository_id && github.event.pull_request.base.repo.id == github.repository_id)) && (vars.PINVOU_WINDOWS_LIGHT_RUNNER || vars.PINVOU_WINDOWS_RUNNER || '["windows-latest"]') || '["windows-latest"]') }}
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@v7
@@ -1254,7 +1257,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix: ${{ fromJSON(vars.PINVOU_WINDOWS_ENABLED != 'false' && (vars.PINVOU_MACOS_ENABLED != 'false' && '{"include":[{"os":"ubuntu-22.04"},{"os":"windows-latest"}]}' || '{"include":[{"os":"ubuntu-22.04"},{"os":"windows-latest"}]}') || (vars.PINVOU_MACOS_ENABLED != 'false' && '{"include":[{"os":"ubuntu-22.04"}]}' || '{"include":[{"os":"ubuntu-22.04"}]}')) }}
-    runs-on: ${{ matrix.os == 'ubuntu-22.04' && fromJSON(vars.PINVOU_LINUX_MEDIUM_RUNNER || vars.PINVOU_LINUX_RUNNER || '["ubuntu-22.04"]') || matrix.os == 'windows-latest' && fromJSON(vars.PINVOU_WINDOWS_MEDIUM_RUNNER || vars.PINVOU_WINDOWS_RUNNER || '["windows-latest"]') || matrix.os }}
+    runs-on: ${{ matrix.os == 'ubuntu-22.04' && fromJSON(vars.PINVOU_LINUX_MEDIUM_RUNNER || vars.PINVOU_LINUX_RUNNER || '["ubuntu-22.04"]') || matrix.os == 'windows-latest' && fromJSON((github.event_name == 'push' || github.event_name == 'merge_group' || (github.event_name == 'pull_request' && github.repository != '' && github.repository_id != '' && github.event.pull_request.head.repo.full_name == github.repository && github.event.pull_request.base.repo.full_name == github.repository && github.event.pull_request.head.repo.id == github.repository_id && github.event.pull_request.base.repo.id == github.repository_id)) && (vars.PINVOU_WINDOWS_MEDIUM_RUNNER || vars.PINVOU_WINDOWS_RUNNER || '["windows-latest"]') || '["windows-latest"]') || matrix.os }}
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@v7
@@ -2282,7 +2285,7 @@ jobs:
     name: windows-static-updater-contract
     needs: changes
     if: ${{ !cancelled() && github.event.action != 'closed' && needs.changes.outputs.windows_static_updater == 'true'  && vars.PINVOU_WINDOWS_ENABLED != 'false' }}
-    runs-on: ${{ fromJSON(vars.PINVOU_WINDOWS_LIGHT_RUNNER || vars.PINVOU_WINDOWS_RUNNER || '["windows-latest"]') }}
+    runs-on: ${{ fromJSON((github.event_name == 'push' || github.event_name == 'merge_group' || (github.event_name == 'pull_request' && github.repository != '' && github.repository_id != '' && github.event.pull_request.head.repo.full_name == github.repository && github.event.pull_request.base.repo.full_name == github.repository && github.event.pull_request.head.repo.id == github.repository_id && github.event.pull_request.base.repo.id == github.repository_id)) && (vars.PINVOU_WINDOWS_LIGHT_RUNNER || vars.PINVOU_WINDOWS_RUNNER || '["windows-latest"]') || '["windows-latest"]') }}
     timeout-minutes: 10
     steps:
       - name: Checkout
@@ -2560,7 +2563,7 @@ jobs:
       max-parallel: 2
       matrix:
         phase: [all-targets-check, regression]
-    runs-on: ${{ fromJSON(vars.PINVOU_WINDOWS_HEAVY_RUNNER || vars.PINVOU_WINDOWS_RUNNER || '["windows-latest"]') }}
+    runs-on: ${{ fromJSON((github.event_name == 'push' || github.event_name == 'merge_group' || (github.event_name == 'pull_request' && github.repository != '' && github.repository_id != '' && github.event.pull_request.head.repo.full_name == github.repository && github.event.pull_request.base.repo.full_name == github.repository && github.event.pull_request.head.repo.id == github.repository_id && github.event.pull_request.base.repo.id == github.repository_id)) && (vars.PINVOU_WINDOWS_HEAVY_RUNNER || vars.PINVOU_WINDOWS_RUNNER || '["windows-latest"]') || '["windows-latest"]') }}
     # 状态机回归使用 Bash 循环；job 级固定 shell 也覆盖 merge ref 从 base
     # 带入该步骤的场景。本 job 其余 run 命令均兼容 Bash。
     defaults:
@@ -3136,7 +3139,7 @@ jobs:
     name: windows-rustup-repair-test
     needs: changes
     if: ${{ !cancelled() && github.event.action != 'closed' && needs.changes.outputs.pure_release_backflow != 'true' && needs.changes.outputs.windows_rustup_repair == 'true' && (github.event_name != 'pull_request' || github.event.pull_request.draft == false)  && vars.PINVOU_WINDOWS_ENABLED != 'false' }}
-    runs-on: ${{ fromJSON(vars.PINVOU_WINDOWS_HEAVY_RUNNER || vars.PINVOU_WINDOWS_RUNNER || '["windows-latest"]') }}
+    runs-on: ${{ fromJSON((github.event_name == 'push' || github.event_name == 'merge_group' || (github.event_name == 'pull_request' && github.repository != '' && github.repository_id != '' && github.event.pull_request.head.repo.full_name == github.repository && github.event.pull_request.base.repo.full_name == github.repository && github.event.pull_request.head.repo.id == github.repository_id && github.event.pull_request.base.repo.id == github.repository_id)) && (vars.PINVOU_WINDOWS_HEAVY_RUNNER || vars.PINVOU_WINDOWS_RUNNER || '["windows-latest"]') || '["windows-latest"]') }}
     # smoke 保留引擎生产环境的 1500s 修复预算;"所有下载源都僵死"的病态情形
     # 必须在引擎自身的诊断输出之后再截断,而不是提前,因此上限要盖过
     # checkout + setup + 工具链拷贝、该预算及其文档化的超冲:最后一次预算
@@ -3704,7 +3707,7 @@ jobs:
     name: windows-codex-runtime-test
     needs: changes
     if: ${{ !cancelled() && github.event.action != 'closed' && needs.changes.outputs.pure_release_backflow != 'true' && (needs.changes.outputs.windows_codex == 'true' || needs.changes.outputs.acp_runtime == 'true') && (github.event_name != 'pull_request' || github.event.pull_request.draft == false)  && vars.PINVOU_WINDOWS_ENABLED != 'false' }}
-    runs-on: ${{ fromJSON(vars.PINVOU_WINDOWS_LIGHT_RUNNER || vars.PINVOU_WINDOWS_RUNNER || '["windows-latest"]') }}
+    runs-on: ${{ fromJSON((github.event_name == 'push' || github.event_name == 'merge_group' || (github.event_name == 'pull_request' && github.repository != '' && github.repository_id != '' && github.event.pull_request.head.repo.full_name == github.repository && github.event.pull_request.base.repo.full_name == github.repository && github.event.pull_request.head.repo.id == github.repository_id && github.event.pull_request.base.repo.id == github.repository_id)) && (vars.PINVOU_WINDOWS_LIGHT_RUNNER || vars.PINVOU_WINDOWS_RUNNER || '["windows-latest"]') || '["windows-latest"]') }}
     timeout-minutes: 15
     steps:
       - name: Checkout
@@ -3756,7 +3759,7 @@ jobs:
     name: windows-runtime-test
     needs: changes
     if: ${{ !cancelled() && github.event.action != 'closed' && needs.changes.outputs.pure_release_backflow != 'true' && needs.changes.outputs.windows_runtime == 'true' && (github.event_name != 'pull_request' || github.event.pull_request.draft == false)  && vars.PINVOU_WINDOWS_ENABLED != 'false' }}
-    runs-on: ${{ fromJSON(vars.PINVOU_WINDOWS_LIGHT_RUNNER || vars.PINVOU_WINDOWS_RUNNER || '["windows-latest"]') }}
+    runs-on: ${{ fromJSON((github.event_name == 'push' || github.event_name == 'merge_group' || (github.event_name == 'pull_request' && github.repository != '' && github.repository_id != '' && github.event.pull_request.head.repo.full_name == github.repository && github.event.pull_request.base.repo.full_name == github.repository && github.event.pull_request.head.repo.id == github.repository_id && github.event.pull_request.base.repo.id == github.repository_id)) && (vars.PINVOU_WINDOWS_LIGHT_RUNNER || vars.PINVOU_WINDOWS_RUNNER || '["windows-latest"]') || '["windows-latest"]') }}
     timeout-minutes: 10
     steps:
       - name: Checkout
