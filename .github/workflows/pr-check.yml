@@ -5,6 +5,7 @@ name: PR Check
 # - version-consistency:强制校验 VERSION 单一事实来源与 SemVer 规则。
 # - fast-gate (seconds, runs on every PR): fork-guard fingerprints + fork
 #   compliance linkage + actionlint + Python determinism tests.
+# - merge-authored-audit: complete historical merge-resolution disclosure, independently bounded.
 # - changes:检测本 PR 有没有 Rust 代码、发布契约、L1 harness 或前端改动,给后续 job 做 paths filter。
 # - frontend-test:Draft 跑 lint/build/逻辑测试；Ready PR 与 Merge Queue 按实际
 #   base/head diff 选择浏览器 smoke；未知或共享路径保守执行全部 smoke。
@@ -108,6 +109,44 @@ env:
   CARGO_INCREMENTAL: "0"
 
 jobs:
+  merge-authored-audit:
+    name: merge-authored-audit
+    if: ${{ (github.event_name == 'pull_request' && github.event.action != 'closed') || github.event_name == 'merge_group' }}
+    runs-on: ${{ fromJSON(vars.PINVOU_LINUX_LIGHT_RUNNER || vars.PINVOU_LINUX_RUNNER || '["ubuntu-22.04"]') }}
+    # Keep the complete historical audit in its own finite job budget.
+    # Findings remain review input; execution errors still fail required-gate.
+    timeout-minutes: 20
+    steps:
+      - name: Checkout (含 submodule,fork 为 public 直接拉)
+        uses: actions/checkout@v7
+        with:
+          submodules: false
+          fetch-depth: 0
+
+      - name: Set up zram and swap
+        # 内存扩容为尽力而为:超时/失败只告警不阻断(回退 runner 默认内存)。
+        run: timeout --kill-after=15 240 sudo --preserve-env=GITHUB_ACTIONS,PINVOU3_CI_DISABLE_ZRAM,RUNNER_ENVIRONMENT bash "${{ github.workspace }}/scripts/ci-memory-setup.sh" || echo "::warning::ci-memory-setup 未完成,继续使用 runner 默认内存"
+
+      - name: 公开底座 gitlink 可达性
+        # Fail closed: the gitlink must equal the public maintenance head,
+        # including candidate windows. The transition policy only lets that
+        # public head lead the immutable closure tag; it does not waive this gate.
+        run: ./scripts/verify-public-submodule.sh
+
+      - name: 初始化公共底座 submodule
+        run: bash "${{ github.workspace }}/scripts/ci-prepare-codewhale.sh" --history
+
+      - name: fork-guard 指纹层 (秒级,不编译)
+        run: ./scripts/fork-guard.sh --fast
+
+      - name: Merge authored audit
+        if: ${{ github.event_name != 'push' }}
+        run: |
+          base_ref="${{ github.event_name == 'merge_group' && github.event.merge_group.base_ref || github.base_ref }}"
+          base_ref="${base_ref#refs/heads/}"
+          python3 scripts/audit-merge-authored.py "origin/$base_ref"
+
+
   commit-message:
     name: commit-message
     if: ${{ (github.event_name == 'pull_request' && github.event.action != 'closed') || github.event_name == 'push' }}
@@ -944,16 +983,6 @@ jobs:
 
       - name: fork-guard 指纹层 (秒级,不编译)
         run: ./scripts/fork-guard.sh --fast
-
-      # 合并提交 authored 标识披露审计（仅披露,恒以 0 退出,不阻断）：枚举
-      # 分支上每个 merge commit 的 resolution-authored 标识并打印，让
-      # 「resolution 内容已进树」在每个 PR 上持续可见，而不是依赖每轮手工运行。
-      - name: Merge authored audit (seconds)
-        if: ${{ github.event_name != 'push' }}
-        run: |
-          base_ref="${{ github.event_name == 'merge_group' && github.event.merge_group.base_ref || github.base_ref }}"
-          base_ref="${base_ref#refs/heads/}"
-          python3 scripts/audit-merge-authored.py "origin/$base_ref"
 
       - name: fork 合规联动 (gitlink ↔ fork-modifications)
         run: |
@@ -4553,6 +4582,7 @@ jobs:
       - changes
       - backflow-portability
       - fast-gate
+      - merge-authored-audit
       - frontend-test
       - relay-test
       - account-platform-test
@@ -4593,6 +4623,7 @@ jobs:
           CHANGES_RESULT: ${{ needs.changes.result }}
           BACKFLOW_PORTABILITY_RESULT: ${{ needs.backflow-portability.result }}
           FAST_GATE_RESULT: ${{ needs.fast-gate.result }}
+          MERGE_AUTHORED_AUDIT_RESULT: ${{ needs.merge-authored-audit.result }}
           FRONTEND_RESULT: ${{ needs.frontend-test.result }}
           RELAY_RESULT: ${{ needs.relay-test.result }}
           ACCOUNT_PLATFORM_RESULT: ${{ needs.account-platform-test.result }}
@@ -4629,12 +4660,12 @@ jobs:
           if [[ "$GITHUB_EVENT_NAME" == "merge_group" ]]; then
             # 队列提交由 GitHub 生成，不重复校验人工 commit message；
             # 其余基础与产品门禁必须验证当前组合提交。
-            if [[ "$VERSION_CONSISTENCY_RESULT" != success || "$CHANGES_RESULT" != success || "$FAST_GATE_RESULT" != success ]]; then
-              echo "Merge Queue 基础检查失败: version-consistency=$VERSION_CONSISTENCY_RESULT changes=$CHANGES_RESULT fast-gate=$FAST_GATE_RESULT" >&2
+            if [[ "$VERSION_CONSISTENCY_RESULT" != success || "$CHANGES_RESULT" != success || "$FAST_GATE_RESULT" != success || "$MERGE_AUTHORED_AUDIT_RESULT" != success ]]; then
+              echo "Merge Queue 基础检查失败: version-consistency=$VERSION_CONSISTENCY_RESULT changes=$CHANGES_RESULT fast-gate=$FAST_GATE_RESULT merge-authored-audit=$MERGE_AUTHORED_AUDIT_RESULT" >&2
               exit 1
             fi
-          elif [[ "$COMMIT_MESSAGE_RESULT" != success || "$VERSION_CONSISTENCY_RESULT" != success || "$CHANGES_RESULT" != success || "$FAST_GATE_RESULT" != success ]]; then
-            echo "基础检查失败: commit-message=$COMMIT_MESSAGE_RESULT version-consistency=$VERSION_CONSISTENCY_RESULT changes=$CHANGES_RESULT fast-gate=$FAST_GATE_RESULT" >&2
+          elif [[ "$COMMIT_MESSAGE_RESULT" != success || "$VERSION_CONSISTENCY_RESULT" != success || "$CHANGES_RESULT" != success || "$FAST_GATE_RESULT" != success || "$MERGE_AUTHORED_AUDIT_RESULT" != success ]]; then
+            echo "基础检查失败: commit-message=$COMMIT_MESSAGE_RESULT version-consistency=$VERSION_CONSISTENCY_RESULT changes=$CHANGES_RESULT fast-gate=$FAST_GATE_RESULT merge-authored-audit=$MERGE_AUTHORED_AUDIT_RESULT" >&2
             exit 1
           fi
 
