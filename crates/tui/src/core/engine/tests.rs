@@ -19963,6 +19963,305 @@ async fn edit_last_turn_restores_the_baseline_after_multiple_non_authoritative_r
     run_edit_last_turn_baseline_past_non_authoritative_runtime_turns(2).await;
 }
 
+/// Driver for the entryless-selectable-message edit scenarios: an unarmed
+/// turn establishes the standing baseline, the host arms the guardrail
+/// prompts (Ask/Suggest pair, arming flip only), the armed turn reports the
+/// A→B transition into history and records prior=A on the baseline stack,
+/// an ExternalUser message with no entry of its own lands in history
+/// mid-turn (a committed steer, or — with `max_steps = 1` — the step-budget
+/// notices; both persist through the same turn-metadata helper as a turn
+/// build while pushing no entry), and the edit then targets THAT message.
+///
+/// Returns the captured provider requests: index 0 is the unarmed turn,
+/// 1..=2 the armed turn's two requests, 3 the replacement.
+///
+/// The truncation removes only the entryless message(s) closest to the tail
+/// (the armed turn's first block and its original A→B notice are retained),
+/// so the pop must not take the armed turn's snapshot: the replacement
+/// recomputes against the unchanged standing baseline (B→B, no transition
+/// line). An unconditional pop consumed the armed turn's prior=A and
+/// re-rendered the transition as a false duplicate (PR #131 review
+/// residual).
+#[allow(clippy::await_holding_lock)]
+async fn run_edit_last_turn_baseline_past_entryless_selectable_message(
+    max_steps: u32,
+    commit_steer_mid_turn: bool,
+) -> Vec<crate::models::MessageRequest> {
+    use crate::llm_client::mock::{MockLlmClient, canned};
+
+    let workspace = tempdir().expect("workspace");
+    let mut engine_config = deterministic_engine_config(workspace.path());
+    engine_config.max_steps = max_steps;
+    let mock = Arc::new(MockLlmClient::new(vec![canned::simple_text_turn(
+        "unarmed posture answer",
+    )]));
+    let client: crate::core::model_client::SharedModelClient = mock.clone();
+    let (engine, handle) = Engine::new_with_model_client(engine_config, &Config::default(), client);
+    if commit_steer_mid_turn {
+        // Armed turn, request 1: commit the steer while the turn is live,
+        // then answer with a read-only tool call so the turn loops and the
+        // top-of-loop steer drain injects it into history before request 2
+        // (a text-only response would end the turn before that drain).
+        let tx_steer = handle.tx_steer.clone();
+        let steer_control = Arc::clone(&handle.steer_control);
+        mock.push_factory(move |_request| {
+            let target = {
+                let mut control = steer_control
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                let target = control
+                    .active_target()
+                    .expect("armed turn accepts test steer");
+                control
+                    .register("steer-edit-target".to_string(), target)
+                    .expect("register steer-edit-target");
+                target
+            };
+            tx_steer
+                .try_send(SteerMessage {
+                    id: "steer-edit-target".to_string(),
+                    target,
+                    content: "MID_TURN_STEER_EDIT_TARGET".to_string(),
+                })
+                .expect("steer channel remains open");
+            canned::tool_call_turn(
+                "call-steer-edit-read",
+                "read_file",
+                r#"{"path":"steer-edit-probe.txt"}"#,
+            )
+        });
+    } else {
+        // Budget-notice path: the armed turn's first response is a read-only
+        // tool call; with max_steps = 1 that tool round consumes the ceiling
+        // and the A1 soft-landing plus A2 exhaustion notices persist through
+        // the same ExternalUser turn-metadata helper as a steer.
+        mock.push_turn(canned::tool_call_turn(
+            "call-notice-read",
+            "read_file",
+            r#"{"path":"notice-probe.txt"}"#,
+        ));
+    }
+    mock.push_turn(canned::simple_text_turn(
+        "The mid-turn input is now handled.",
+    ));
+    mock.push_turn(canned::simple_text_turn("replacement answer"));
+    let run = tokio::spawn(engine.run());
+
+    // Turn 1 runs unarmed: it renders no transition and establishes the
+    // standing baseline.
+    handle
+        .send(Op::SendMessage {
+            content: "turn in the unarmed posture".to_string(),
+            mode: AppMode::Agent,
+            route: resolved_route_for_test(&Config::default(), "deepseek-v4-pro"),
+            compaction: Box::new(CompactionConfig::default()),
+            goal_objective: None,
+            goal_token_budget: None,
+            goal_status: crate::tools::goal::GoalStatus::Active,
+            reasoning_effort: None,
+            reasoning_effort_auto: false,
+            auto_model: false,
+            allow_shell: false,
+            trust_mode: false,
+            auto_approve: false,
+            approval_mode: crate::tui::approval::ApprovalMode::Suggest,
+            translation_enabled: false,
+            allowed_tools: None,
+            dynamic_tools: Vec::new(),
+            hook_executor: None,
+            verbosity: None,
+            provenance: UserInputProvenance::ExternalUser,
+            turn_tool_security: None,
+            submission_id: None,
+        })
+        .await
+        .expect("send the unarmed turn");
+    wait_for_turn_complete(&handle).await;
+
+    // Arm the host's guardrail prompts, then run a real turn whose block
+    // reports the A→B arming transition into history.
+    handle
+        .send(Op::ChangeMode {
+            mode: AppMode::Agent,
+            allow_shell: false,
+            trust_mode: false,
+            auto_approve: false,
+            approval_mode: crate::tui::approval::ApprovalMode::Suggest,
+            configured_sandbox_mode: None,
+            ask_on_guardrail: Some(true),
+        })
+        .await
+        .expect("send the guardrail arming change");
+    handle
+        .send(Op::SendMessage {
+            content: "turn that reports the arming transition".to_string(),
+            mode: AppMode::Agent,
+            route: resolved_route_for_test(&Config::default(), "deepseek-v4-pro"),
+            compaction: Box::new(CompactionConfig::default()),
+            goal_objective: None,
+            goal_token_budget: None,
+            goal_status: crate::tools::goal::GoalStatus::Active,
+            reasoning_effort: None,
+            reasoning_effort_auto: false,
+            auto_model: false,
+            allow_shell: false,
+            trust_mode: false,
+            auto_approve: false,
+            approval_mode: crate::tui::approval::ApprovalMode::Suggest,
+            translation_enabled: false,
+            allowed_tools: None,
+            dynamic_tools: Vec::new(),
+            hook_executor: None,
+            verbosity: None,
+            provenance: UserInputProvenance::ExternalUser,
+            turn_tool_security: None,
+            submission_id: None,
+        })
+        .await
+        .expect("send the armed turn");
+    wait_for_turn_complete(&handle).await;
+
+    // The selector's latest editable user prompt is now the entryless
+    // mid-turn message (steer or budget notice) — not the armed turn build.
+    handle
+        .send(Op::EditLastTurn {
+            new_message: "revise this committed input".to_string(),
+            submission_id: Some("sub-edit-entryless".to_string()),
+        })
+        .await
+        .expect("send edit");
+    wait_for_turn_complete(&handle).await;
+
+    handle.send(Op::Shutdown).await.expect("shutdown engine");
+    run.await.expect("engine task");
+
+    let requests = mock.captured_requests();
+    assert_eq!(
+        requests.len(),
+        4,
+        "unarmed turn, the armed turn's two requests, and the replacement"
+    );
+    requests
+}
+
+/// Wire-visible text of one captured request: every `Text` content block
+/// joined, so turn-meta assertions read exactly what the model would see.
+fn captured_request_wire_text(requests: &[crate::models::MessageRequest], index: usize) -> String {
+    requests[index]
+        .messages
+        .iter()
+        .flat_map(|message| message.content.iter())
+        .filter_map(|block| match block {
+            ContentBlock::Text { text, .. } => Some(text.as_str()),
+            _ => None,
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+/// Jensen residual P2, steer face (PR #131 review 5743286690): a committed
+/// steer persists a selectable ExternalUser user message that owns no
+/// standing-baseline entry. Editing it after the armed turn completed must
+/// leave the stack untouched — the retained history keeps the arming turn's
+/// original A→B line exactly once and the replacement steer message emits no
+/// new host-change line (same posture → no transition).
+#[tokio::test]
+async fn edit_last_turn_keeps_the_baseline_when_the_edited_target_is_a_committed_steer() {
+    let requests = run_edit_last_turn_baseline_past_entryless_selectable_message(32, true).await;
+
+    let unarmed = captured_request_wire_text(&requests, 0);
+    assert!(
+        !unarmed.contains("Authority transition (host)"),
+        "the first reported turn must render no transition"
+    );
+
+    let armed_first = captured_request_wire_text(&requests, 1);
+    assert!(
+        !armed_first.contains("MID_TURN_STEER_EDIT_TARGET"),
+        "the steer must commit between the armed turn's requests, not before it"
+    );
+    assert_eq!(
+        armed_first.matches("Authority transition (host)").count(),
+        1,
+        "the armed turn's block must report the arming transition exactly once"
+    );
+
+    let armed_second = captured_request_wire_text(&requests, 2);
+    assert!(
+        armed_second.contains("MID_TURN_STEER_EDIT_TARGET"),
+        "the steer must be committed mid-turn and reach the provider with the \
+         armed turn's follow-up request"
+    );
+    assert_eq!(
+        armed_second.matches("Authority transition (host)").count(),
+        1,
+        "the steer block renders no transition line of its own"
+    );
+
+    let replacement = captured_request_wire_text(&requests, 3);
+    assert!(
+        replacement.contains("revise this committed input"),
+        "the replacement must carry the edited steer text"
+    );
+    assert!(
+        !replacement.contains("MID_TURN_STEER_EDIT_TARGET"),
+        "the truncation must remove the committed steer, not the armed turn \
+         build before it"
+    );
+    assert!(
+        !replacement.contains("The mid-turn input is now handled."),
+        "the armed turn's truncated assistant response must be gone too"
+    );
+    assert_eq!(
+        replacement.matches("Authority transition (host)").count(),
+        1,
+        "the retained arming block stays the only transition: editing the \
+         entryless steer must not pop the armed turn's baseline snapshot and \
+         re-render the A→B line"
+    );
+}
+
+/// Jensen residual P2, budget-notice face: the step-budget notices persist
+/// through the same ExternalUser helper as a steer and are equally
+/// selectable, so editing the exhaustion notice must also leave the standing
+/// baseline untouched — the retained arming line stays exactly once and the
+/// replacement emits no new host-change line.
+#[tokio::test]
+async fn edit_last_turn_keeps_the_baseline_when_the_edited_target_is_a_budget_notice() {
+    let requests = run_edit_last_turn_baseline_past_entryless_selectable_message(1, false).await;
+
+    let armed_second = captured_request_wire_text(&requests, 2);
+    assert!(
+        armed_second.contains("Step budget soft landing")
+            && armed_second.contains("model-step budget was exhausted"),
+        "the ceiling notices must be persisted mid-turn and reach the \
+         armed turn's final request"
+    );
+    assert_eq!(
+        armed_second.matches("Authority transition (host)").count(),
+        1,
+        "the notice blocks render no transition line of their own"
+    );
+
+    let replacement = captured_request_wire_text(&requests, 3);
+    assert!(
+        replacement.contains("revise this committed input"),
+        "the replacement must carry the edited notice text"
+    );
+    assert!(
+        !replacement.contains("model-step budget was exhausted"),
+        "the truncation must remove the exhaustion notice, not the armed \
+         turn build before it"
+    );
+    assert_eq!(
+        replacement.matches("Authority transition (host)").count(),
+        1,
+        "the retained arming block stays the only transition: editing the \
+         entryless budget notice must not pop the armed turn's baseline \
+         snapshot and re-render the A→B line"
+    );
+}
+
 #[tokio::test]
 #[allow(clippy::await_holding_lock)]
 async fn edit_last_turn_cuts_at_user_prompt_before_tool_results() {

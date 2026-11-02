@@ -1106,6 +1106,26 @@ enum McpBootUpdate {
     },
 }
 
+/// One entry of the engine's `standing_posture_baseline_history`: the
+/// standing baseline an authoritative turn build replaced, recorded with the
+/// exact persisted user message that carries the block reporting it.
+///
+/// The message is the linkage unit for `EditLastTurn`: the edit selector
+/// selects by message, so the pop must too. Steer commits and step-budget
+/// notices persist selectable ExternalUser messages without pushing entries;
+/// comparing identities at pop time keeps those edits from consuming a
+/// turn-build snapshot their truncation never removed.
+#[derive(Debug, Clone)]
+struct StandingPostureBaselineEntry {
+    /// The baseline this turn's block replaced — restored when the turn is
+    /// edited away.
+    prior_posture: Option<crate::core::authority::TurnMetaPosture>,
+    /// The persisted user message this entry belongs to (a full clone of the
+    /// `Message` added to history at the same turn start; persisted user
+    /// messages are never mutated in place, so equality is stable).
+    turn_message: Message,
+}
+
 /// The core engine that processes operations and emits events
 pub struct Engine {
     config: EngineConfig,
@@ -1293,17 +1313,25 @@ pub struct Engine {
     /// steers or mid-turn runtime notices never re-render the same line.
     pending_authority_transition: Option<crate::core::authority::AuthorityTransition>,
     /// The standing posture baseline each authoritative (external-user) turn
-    /// replaced, one entry per such persisted turn in order. These are
-    /// exactly the turns `edit_last_turn_target` can select: every other
+    /// replaced, one entry per such persisted turn in order, each linked to
+    /// the exact persisted user message it belongs to. Authoritative turn
+    /// builds are the turns `edit_last_turn_target` can select — every other
     /// provenance renders the block's `(non-authoritative)` line, which the
-    /// selector reads as runtime-owned. Non-authoritative runtime turns
-    /// therefore record no entry, so an edit after any number of them still
-    /// pops exactly the edited turn's snapshot and restores the baseline it
-    /// replaced — the replacement turn re-reports the authority transition
-    /// its predecessor carried instead of silently swallowing it (the
-    /// truncated block is gone from retained history, but the baseline it
-    /// installed would otherwise survive).
-    standing_posture_baseline_history: Vec<Option<crate::core::authority::TurnMetaPosture>>,
+    /// selector reads as runtime-owned — but not every selectable message is
+    /// a turn build: a committed steer or step-budget notice persists an
+    /// ExternalUser message through `user_text_message_with_turn_metadata`
+    /// and is selectable too, while owning no entry of its own. The
+    /// message-identity linkage is what keeps the stack honest at edit time:
+    /// an edit pops only when the truncated target IS the message the top
+    /// entry was recorded with, so editing a steer or notice recomputes its
+    /// replacement against the unchanged standing baseline (same posture →
+    /// no transition line) while a real turn-build edit still pops exactly
+    /// the edited turn's snapshot and restores the baseline it replaced —
+    /// the replacement turn re-reports the authority transition its
+    /// predecessor carried instead of silently swallowing it (the truncated
+    /// block is gone from retained history, but the baseline it installed
+    /// would otherwise survive).
+    standing_posture_baseline_history: Vec<StandingPostureBaselineEntry>,
     /// The git snapshot line last emitted in a `<turn_meta>` block this
     /// session (#5187, k3-gap F3). The snapshot re-collects branch/dirty
     /// state every turn, so without change-detection the block's bytes drift
@@ -4023,6 +4051,7 @@ impl Engine {
                                 continue;
                             }
                         };
+                        let edited_message = self.session.messages.get(idx).cloned();
                         self.session.messages.truncate_to(idx);
                         self.session.bump_messages_revision();
                         // The truncated turn's `<turn_meta>` block — including
@@ -4031,15 +4060,28 @@ impl Engine {
                         // installed would survive and make the replacement
                         // turn omit that transition. Restore the baseline the
                         // edited turn replaced (None included, e.g. when the
-                        // session's first turn is edited). One pop is exact:
-                        // only the turns this selector can target ever pushed,
-                        // so the top entry is the edited turn's own snapshot,
-                        // and any non-authoritative runtime turns the
-                        // truncation removes alongside it left no entries.
-                        if let Some(prior_standing_posture) =
-                            self.standing_posture_baseline_history.pop()
+                        // session's first turn is edited) — but only when the
+                        // edited message IS the persisted turn-build message
+                        // the top entry was recorded with. The selector can
+                        // also target committed steer or step-budget notice
+                        // messages (ExternalUser provenance, no entry of
+                        // their own): truncating one of those removes only
+                        // the message itself, so the standing baseline must
+                        // stay untouched and the replacement recomputes
+                        // against it (same posture → no transition line).
+                        // Identity, not position, decides: entries are linked
+                        // to their persisted message at push time.
+                        let top_matches_edited = match (
+                            edited_message.as_ref(),
+                            self.standing_posture_baseline_history.last(),
+                        ) {
+                            (Some(edited), Some(entry)) => *edited == entry.turn_message,
+                            _ => false,
+                        };
+                        if top_matches_edited
+                            && let Some(entry) = self.standing_posture_baseline_history.pop()
                         {
-                            self.last_authoritative_turn_meta_posture = prior_standing_posture;
+                            self.last_authoritative_turn_meta_posture = entry.prior_posture;
                         }
                         // Now dispatch the new message as a normal send,
                         // reusing the engine's stored mode/model config.
@@ -6159,6 +6201,8 @@ impl Engine {
         // scoped to authoritative turns. A genuine host flip that lands in
         // the same window renders on the next authoritative turn, measured
         // from the pre-narrowing standing posture.
+        let mut standing_baseline_entry: Option<Option<crate::core::authority::TurnMetaPosture>> =
+            None;
         if !self.api_config.runtime_chat_isolated {
             let current_posture = self.turn_meta_posture_for(&input_policy);
             let narrowed_turn = input_policy.narrowing.is_some();
@@ -6177,16 +6221,20 @@ impl Engine {
             }
             // Snapshot what this persisted turn replaced so an EditLastTurn
             // truncation can restore the baseline its block carried away.
-            // Only authoritative turns record an entry:
-            // `edit_last_turn_target` selects exactly these — every other
+            // Only authoritative turn builds record an entry, and each entry
+            // is linked to the exact persisted user message the record is
+            // taken for (identity, not stack position, decides the pop):
+            // `edit_last_turn_target` selects these builds — every other
             // provenance renders the `(non-authoritative)` line its selector
-            // reads as runtime-owned — so the stack stays aligned 1:1 with
-            // the turns an edit can drop even when non-authoritative runtime
-            // turns complete between them (a truncation removes those turns
+            // reads as runtime-owned — but it can also select committed
+            // steer / step-budget-notice messages, which persist an
+            // ExternalUser message without pushing any entry, so the stack
+            // stays aligned 1:1 with the turn-build messages an edit can
+            // drop even when non-authoritative runtime turns or steers
+            // complete between them (a truncation removes those messages
             // without popping their entries, because they never pushed any).
             if provenance.can_authorize_work() {
-                self.standing_posture_baseline_history
-                    .push(prior_standing_posture);
+                standing_baseline_entry = Some(prior_standing_posture);
             }
         }
         let user_msg = self.user_text_message_from_snapshot(
@@ -6205,6 +6253,13 @@ impl Engine {
                 authority_transition: self.pending_authority_transition,
             },
         );
+        if let Some(prior_posture) = standing_baseline_entry {
+            self.standing_posture_baseline_history
+                .push(StandingPostureBaselineEntry {
+                    prior_posture,
+                    turn_message: user_msg.clone(),
+                });
+        }
         self.session.add_message(user_msg);
         // The transition is reported by this block and only this block.
         self.pending_authority_transition = None;
