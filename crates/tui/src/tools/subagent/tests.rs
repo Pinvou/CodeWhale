@@ -25872,13 +25872,20 @@ async fn settle_cancelled_at_the_lock_wait_still_reconciles_the_frame() {
         settled: false,
     };
 
-    // Hold the write lock the completion leg must take.
+    // Hold the write lock the completion leg must take, and acknowledge the
+    // acquisition so the abandonment below cannot race a holder that has not
+    // locked yet.
     let holder = Arc::clone(&manager);
+    let (locked_tx, locked_rx) = tokio::sync::oneshot::channel();
     let hold = tokio::spawn(async move {
         let _locked = holder.write().await;
+        let _ = locked_tx.send(());
         tokio::time::sleep(Duration::from_millis(150)).await;
     });
-    tokio::time::sleep(Duration::from_millis(20)).await;
+    tokio::time::timeout(Duration::from_secs(2), locked_rx)
+        .await
+        .expect("holder acquires the lock in time")
+        .expect("holder signalled the acquisition");
 
     // The deadline fires while settle is parked on the lock: the future is
     // dropped with the completion leg unrun.
@@ -25886,11 +25893,20 @@ async fn settle_cancelled_at_the_lock_wait_still_reconciles_the_frame() {
     assert!(settled.is_err(), "settle is abandoned at the lock wait");
     hold.await.expect("lock holder");
 
-    assert_eq!(
-        manager.read().await.in_flight_unbounded_for_test(),
-        vec![],
-        "the abandoned completion leg still reconciles: the empty frame opens"
-    );
+    // The drop hands the reclaim to a detached task, so wait for it in a
+    // bounded loop instead of assuming the scheduler ran it before here.
+    let deadline = std::time::Instant::now() + Duration::from_secs(2);
+    loop {
+        let entries = manager.read().await.in_flight_unbounded_for_test();
+        if entries.is_empty() {
+            break;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the abandoned completion leg still reconciles: the empty frame opens: {entries:?}"
+        );
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
 }
 
 /// Drop contention: the write lock can be held across another task's await,
@@ -25917,13 +25933,20 @@ async fn contended_drop_reconciles_the_frame_eventually() {
         .await
         .open_in_flight_unbounded("agent_a", CoordinationLane::SharedCheckout);
 
-    // Hold the write lock so the synchronous fast path cannot take it.
+    // Hold the write lock so the synchronous fast path cannot take it, and
+    // acknowledge the acquisition so the drop below cannot race a holder
+    // that has not locked yet.
     let holder = Arc::clone(&manager);
+    let (locked_tx, locked_rx) = tokio::sync::oneshot::channel();
     let hold = tokio::spawn(async move {
         let _locked = holder.write().await;
+        let _ = locked_tx.send(());
         tokio::time::sleep(Duration::from_millis(150)).await;
     });
-    tokio::time::sleep(Duration::from_millis(20)).await;
+    tokio::time::timeout(Duration::from_secs(2), locked_rx)
+        .await
+        .expect("holder acquires the lock in time")
+        .expect("holder signalled the acquisition");
     drop(InFlightDispatchGuard {
         manager: Arc::clone(&manager),
         token,
@@ -25959,11 +25982,16 @@ async fn contended_drop_reconciles_the_frame_eventually() {
         .await
         .open_in_flight_unbounded("agent_b", CoordinationLane::SharedCheckout);
     let holder_b = Arc::clone(&manager);
+    let (locked_tx, locked_rx) = tokio::sync::oneshot::channel();
     let hold = tokio::spawn(async move {
         let _locked = holder_b.write().await;
+        let _ = locked_tx.send(());
         tokio::time::sleep(Duration::from_millis(150)).await;
     });
-    tokio::time::sleep(Duration::from_millis(20)).await;
+    tokio::time::timeout(Duration::from_secs(2), locked_rx)
+        .await
+        .expect("holder acquires the lock in time")
+        .expect("holder signalled the acquisition");
     drop(InFlightDispatchGuard {
         manager: Arc::clone(&manager),
         token,
@@ -26011,12 +26039,20 @@ async fn refusal_cancel_abandoned_at_the_lock_wait_reopens_the_frame() {
         settled: false,
     };
 
+    // Hold the write lock the release must take, and acknowledge the
+    // acquisition so the abandonment below cannot race a holder that has not
+    // locked yet.
     let holder = Arc::clone(&manager);
+    let (locked_tx, locked_rx) = tokio::sync::oneshot::channel();
     let hold = tokio::spawn(async move {
         let _locked = holder.write().await;
+        let _ = locked_tx.send(());
         tokio::time::sleep(Duration::from_millis(150)).await;
     });
-    tokio::time::sleep(Duration::from_millis(20)).await;
+    tokio::time::timeout(Duration::from_secs(2), locked_rx)
+        .await
+        .expect("holder acquires the lock in time")
+        .expect("holder signalled the acquisition");
 
     let cancelled = tokio::time::timeout(Duration::from_millis(30), guard.cancel()).await;
     assert!(
@@ -26025,11 +26061,20 @@ async fn refusal_cancel_abandoned_at_the_lock_wait_reopens_the_frame() {
     );
     hold.await.expect("lock holder");
 
-    assert_eq!(
-        manager.read().await.in_flight_unbounded_for_test(),
-        vec![],
-        "the abandoned release still reclaims the refused dispatch's empty frame"
-    );
+    // The drop hands the reclaim to a detached task, so wait for it in a
+    // bounded loop instead of assuming the scheduler ran it before here.
+    let deadline = std::time::Instant::now() + Duration::from_secs(2);
+    loop {
+        let entries = manager.read().await.in_flight_unbounded_for_test();
+        if entries.is_empty() {
+            break;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the abandoned release still reclaims the refused dispatch's empty frame: {entries:?}"
+        );
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
 }
 
 /// The same cancellation through the real dispatch seam: the outer tool
