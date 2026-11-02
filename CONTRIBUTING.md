@@ -153,6 +153,14 @@ required system-dependency installation.
 Self-hosted runners retain their administrator-provisioned memory and swap;
 the memory setup script leaves them unchanged, and apt cleanup is hosted-only.
 
+The real PDF gate creates an exclusive temporary workspace per invocation and
+cleans only that workspace, including on failure; persistent runner temporary
+files from earlier jobs are never reused or deleted. Account browser fixtures
+recover only loopback static GET loads interrupted by Chromium's
+`ERR_NETWORK_CHANGED` (up to three loads). This does not retry product assertions
+or application requests; Docker interface changes on a shared host must not
+silently turn a failed module load into an empty-page timeout.
+
 Repository administrators can set `PINVOU_LINUX_RUNNER` to a JSON label array
 (for example `["self-hosted","Linux","pinvou3"]`) to route x64 Linux jobs to
 a dedicated Ubuntu 22.04 runner. Without that variable they use `ubuntu-22.04`.
