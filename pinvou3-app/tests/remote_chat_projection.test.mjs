@@ -18,6 +18,33 @@ const projectControlled = tasks => {
     { statusCancelled: 'Cancelled', statusFailed: 'Failed' }, 'session-b');
 };
 
+test('admitted failures without prompt text remain visible only in their own session', () => {
+  for (const lang of ['zh', 'en', 'ja']) {
+    const copy = dict[lang].remoteConversation;
+    for (const reason of ['task_generation_stale', 'task_attachments_invalid']) {
+      const task = { taskId: 'task-1', sessionId: 'session-b', status: 'failed', text: null, terminalReason: reason };
+      const items = controlledTaskChatItems([task], copy, 'session-b');
+      assert.equal(items.length, 1);
+      assert.equal(items[0].controlledContentLane, 'terminal');
+      assert.equal(items[0].controlledFailureReason, reason);
+      assert.ok(items[0].text.includes(remotePermissionFailureText(reason, copy)));
+      assert.equal(mergeControlledTaskChatItems([], items).length, 1, 'terminal remains visible without a prompt');
+      const unrelated = { type: 'assistant', text: reason, remoteTaskId: 'other-task' };
+      assert.equal(mergeControlledTaskChatItems([unrelated], items).length, 2, 'unrelated errors cannot absorb this terminal');
+      const unmarked = { type: 'assistant', text: reason, remoteTaskId: 'task-1' };
+      assert.equal(mergeControlledTaskChatItems([unmarked], items).length, 2, 'model output without error identity is retained');
+      const matching = { id: 'durable-1', type: 'assistant', text: reason, remoteTaskId: 'task-1', remoteKind: 'error' };
+      const merged = mergeControlledTaskChatItems([matching], items);
+      assert.equal(merged.length, 1, 'same task durable failure is not duplicated');
+      assert.equal(merged[0].id, 'durable-1');
+      assert.equal(merged[0].text, items[0].text, 'same task raw error gains localized explanation');
+      assert.equal(merged[0].controlledFailureReason, reason);
+      assert.equal(controlledTaskChatItems([task], copy, 'session-other').length, 0);
+      assert.equal(controlledTaskChatItems([{ ...task, status: 'running' }], copy, 'session-b').length, 0);
+    }
+  }
+});
+
 test('translated permission errors reconcile only the matching durable turn without discarding raw evidence', () => {
   const code = 'task_permission_mode_changed';
   const copy = dict.zh.remoteConversation;

@@ -176,7 +176,17 @@ assert.match(
 );
 assert.match(forkLinkGate, /base_ref="\$\{base_ref#refs\/heads\/\}"/);
 assert.match(forkLinkGate, /ci-fork-link-check\.sh "origin\/\$base_ref"/);
-const submoduleUpdates = workflow.match(/git submodule update[^\r\n]*/g) || [];
+assert.ok(
+  /^[ \t]*run: bash "\$\{\{ github\.workspace \}\}\/scripts\/ci-prepare-codewhale\.sh" --history[ \t]*\r?$/m.test(workflow),
+  "CI must invoke the public CodeWhale preparation helper",
+);
+const codeWhalePreparation = fs.readFileSync(
+  path.join(repoRoot, "scripts/ci-prepare-codewhale.sh"),
+  "utf8",
+);
+const submoduleUpdates = `${workflow}\n${codeWhalePreparation}`.match(
+  /git(?: -C "[^"\r\n]+")? submodule update[^\r\n]*/g,
+) || [];
 assert.ok(submoduleUpdates.length > 0, "CI must initialize the public CodeWhale submodule");
 assert.ok(
   submoduleUpdates.every((command) => command.endsWith("-- CodeWhale")),
