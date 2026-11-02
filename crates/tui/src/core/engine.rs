@@ -1292,14 +1292,17 @@ pub struct Engine {
     /// did not change emits nothing, ordinary blocks stay byte-stable, and
     /// steers or mid-turn runtime notices never re-render the same line.
     pending_authority_transition: Option<crate::core::authority::AuthorityTransition>,
-    /// The standing posture baseline each persisted user turn replaced, one
-    /// snapshot per non-isolated turn build in order. `EditLastTurn` pops the
-    /// truncated turn's entry and restores the baseline it replaced, so the
-    /// replacement turn re-reports the authority transition its predecessor
-    /// carried instead of silently swallowing it (the truncated block is gone
-    /// from retained history, but the baseline it installed would otherwise
-    /// survive). Each entry is the pre-advance value, which makes narrowed
-    /// turns — whose builds never advance the baseline — round-trip exactly.
+    /// The standing posture baseline each authoritative (external-user) turn
+    /// replaced, one entry per such persisted turn in order. These are
+    /// exactly the turns `edit_last_turn_target` can select: every other
+    /// provenance renders the block's `(non-authoritative)` line, which the
+    /// selector reads as runtime-owned. Non-authoritative runtime turns
+    /// therefore record no entry, so an edit after any number of them still
+    /// pops exactly the edited turn's snapshot and restores the baseline it
+    /// replaced — the replacement turn re-reports the authority transition
+    /// its predecessor carried instead of silently swallowing it (the
+    /// truncated block is gone from retained history, but the baseline it
+    /// installed would otherwise survive).
     standing_posture_baseline_history: Vec<Option<crate::core::authority::TurnMetaPosture>>,
     /// The git snapshot line last emitted in a `<turn_meta>` block this
     /// session (#5187, k3-gap F3). The snapshot re-collects branch/dirty
@@ -4027,10 +4030,12 @@ impl Engine {
                         // retained history, but the standing baseline it
                         // installed would survive and make the replacement
                         // turn omit that transition. Restore the baseline the
-                        // truncated turn replaced (None included, e.g. when
-                        // the session's first turn is edited), so the
-                        // replacement re-reports exactly what retained
-                        // history still implies.
+                        // edited turn replaced (None included, e.g. when the
+                        // session's first turn is edited). One pop is exact:
+                        // only the turns this selector can target ever pushed,
+                        // so the top entry is the edited turn's own snapshot,
+                        // and any non-authoritative runtime turns the
+                        // truncation removes alongside it left no entries.
                         if let Some(prior_standing_posture) =
                             self.standing_posture_baseline_history.pop()
                         {
@@ -6172,10 +6177,17 @@ impl Engine {
             }
             // Snapshot what this persisted turn replaced so an EditLastTurn
             // truncation can restore the baseline its block carried away.
-            // One entry per non-isolated build keeps the stack aligned 1:1
-            // with the user turns `edit_last_turn_target` can drop.
-            self.standing_posture_baseline_history
-                .push(prior_standing_posture);
+            // Only authoritative turns record an entry:
+            // `edit_last_turn_target` selects exactly these — every other
+            // provenance renders the `(non-authoritative)` line its selector
+            // reads as runtime-owned — so the stack stays aligned 1:1 with
+            // the turns an edit can drop even when non-authoritative runtime
+            // turns complete between them (a truncation removes those turns
+            // without popping their entries, because they never pushed any).
+            if provenance.can_authorize_work() {
+                self.standing_posture_baseline_history
+                    .push(prior_standing_posture);
+            }
         }
         let user_msg = self.user_text_message_from_snapshot(
             content,

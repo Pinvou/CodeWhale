@@ -19708,6 +19708,261 @@ async fn edit_last_turn_restores_the_standing_posture_baseline() {
     );
 }
 
+/// Drive the standing-posture-baseline edit scenario with non-authoritative
+/// runtime turns parked between the true user turns.
+///
+/// The posture pair stays inside the Ask/Suggest family and flips only the
+/// host's guardrail arming, so the AgentMail runtime turn has no standing
+/// auto authority to narrow and the only transition in play is the host
+/// re-authorization. Each runtime turn persists a real user-role turn with a
+/// non-authoritative provenance line — exactly the production AgentMail
+/// shape — and the edit selector must skip it; the baseline stack must not
+/// record it either, or the edit after it pops a snapshot the truncation
+/// never removed and the replacement turn drops the arming transition the
+/// retained history still implies.
+#[allow(clippy::await_holding_lock)]
+async fn run_edit_last_turn_baseline_past_non_authoritative_runtime_turns(runtime_turns: usize) {
+    use wiremock::matchers::{method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    let _lock = lock_test_env();
+    let tmp = tempdir().expect("tempdir");
+    let server = MockServer::start().await;
+    let done_sse = concat!(
+        "data: {\"id\":\"chatcmpl-edit-runtime-baseline\",\"choices\":[{\"index\":0,",
+        "\"delta\":{\"content\":\"Turn answer.\"},\"finish_reason\":null}]}\n\n",
+        "data: {\"id\":\"chatcmpl-edit-runtime-baseline\",\"choices\":[{\"index\":0,",
+        "\"delta\":{},\"finish_reason\":\"stop\"}]}\n\n",
+        "data: [DONE]\n\n",
+    );
+    // Two true user turns plus the replacement, with every requested runtime
+    // turn in between.
+    Mock::given(method("POST"))
+        .and(path("/v1/chat/completions"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .insert_header("content-type", "text/event-stream")
+                .set_body_string(done_sse),
+        )
+        .expect(u64::try_from(3 + runtime_turns).expect("request count fits u64"))
+        .mount(&server)
+        .await;
+
+    let api_config = Config {
+        api_key: Some("test-key".to_string()),
+        base_url: Some(server.uri()),
+        ..Config::default()
+    };
+    let config = EngineConfig {
+        workspace: tmp.path().to_path_buf(),
+        model: "deepseek-v4-pro".to_string(),
+        snapshots_enabled: false,
+        subagents_enabled: false,
+        ..Default::default()
+    };
+    let (engine, handle) = Engine::new(config, &api_config);
+    let run = tokio::spawn(engine.run());
+
+    let seeded_messages = vec![
+        Message {
+            role: Role::User,
+            content: vec![ContentBlock::Text {
+                text: "seed the conversation".to_string(),
+                cache_control: None,
+            }],
+        },
+        Message {
+            role: Role::Assistant,
+            content: vec![ContentBlock::Text {
+                text: "seeded response".to_string(),
+                cache_control: None,
+            }],
+        },
+    ];
+    handle
+        .send(Op::SyncSession {
+            session_id: Some(format!("edit-runtime-baseline-{runtime_turns}")),
+            messages: seeded_messages,
+            system_prompt: None,
+            system_prompt_override: false,
+            model: "deepseek-v4-pro".to_string(),
+            workspace: tmp.path().to_path_buf(),
+            workspace_roots: Vec::new(),
+            mode: AppMode::Agent,
+        })
+        .await
+        .expect("sync session");
+
+    // Turn 1 runs unarmed: the first reported turn renders no transition and
+    // establishes the standing baseline.
+    handle
+        .send(Op::SendMessage {
+            content: "turn in the unarmed posture".to_string(),
+            mode: AppMode::Agent,
+            route: resolved_route_for_test(&api_config, "deepseek-v4-pro"),
+            compaction: Box::new(CompactionConfig::default()),
+            goal_objective: None,
+            goal_token_budget: None,
+            goal_status: crate::tools::goal::GoalStatus::Active,
+            reasoning_effort: None,
+            reasoning_effort_auto: false,
+            auto_model: false,
+            allow_shell: false,
+            trust_mode: false,
+            auto_approve: false,
+            approval_mode: crate::tui::approval::ApprovalMode::Suggest,
+            translation_enabled: false,
+            allowed_tools: None,
+            dynamic_tools: Vec::new(),
+            hook_executor: None,
+            verbosity: None,
+            provenance: UserInputProvenance::ExternalUser,
+            turn_tool_security: None,
+            submission_id: None,
+        })
+        .await
+        .expect("send the unarmed turn");
+    wait_for_turn_complete(&handle).await;
+
+    // Arm the host's guardrail prompts (Ask/Suggest posture, arming flip
+    // only), then run a real turn whose block reports the transition into
+    // history.
+    handle
+        .send(Op::ChangeMode {
+            mode: AppMode::Agent,
+            allow_shell: false,
+            trust_mode: false,
+            auto_approve: false,
+            approval_mode: crate::tui::approval::ApprovalMode::Suggest,
+            configured_sandbox_mode: None,
+            ask_on_guardrail: Some(true),
+        })
+        .await
+        .expect("send the guardrail arming change");
+    handle
+        .send(Op::SendMessage {
+            content: "turn that reports the arming transition".to_string(),
+            mode: AppMode::Agent,
+            route: resolved_route_for_test(&api_config, "deepseek-v4-pro"),
+            compaction: Box::new(CompactionConfig::default()),
+            goal_objective: None,
+            goal_token_budget: None,
+            goal_status: crate::tools::goal::GoalStatus::Active,
+            reasoning_effort: None,
+            reasoning_effort_auto: false,
+            auto_model: false,
+            allow_shell: false,
+            trust_mode: false,
+            auto_approve: false,
+            approval_mode: crate::tui::approval::ApprovalMode::Suggest,
+            translation_enabled: false,
+            allowed_tools: None,
+            dynamic_tools: Vec::new(),
+            hook_executor: None,
+            verbosity: None,
+            provenance: UserInputProvenance::ExternalUser,
+            turn_tool_security: None,
+            submission_id: None,
+        })
+        .await
+        .expect("send the transition-reporting turn");
+    wait_for_turn_complete(&handle).await;
+
+    // Complete real non-isolated runtime turns in the production AgentMail
+    // shape: user-role, non-authoritative provenance, no authority to
+    // narrow under the Ask/Suggest posture.
+    for runtime_index in 0..runtime_turns {
+        handle
+            .send(Op::SendMessage {
+                content: format!("agent mail turn #{runtime_index}"),
+                mode: AppMode::Agent,
+                route: resolved_route_for_test(&api_config, "deepseek-v4-pro"),
+                compaction: Box::new(CompactionConfig::default()),
+                goal_objective: None,
+                goal_token_budget: None,
+                goal_status: crate::tools::goal::GoalStatus::Active,
+                reasoning_effort: None,
+                reasoning_effort_auto: false,
+                auto_model: false,
+                allow_shell: false,
+                trust_mode: false,
+                auto_approve: false,
+                approval_mode: crate::tui::approval::ApprovalMode::Suggest,
+                translation_enabled: false,
+                allowed_tools: None,
+                dynamic_tools: Vec::new(),
+                hook_executor: None,
+                verbosity: None,
+                provenance: UserInputProvenance::AgentMail,
+                turn_tool_security: None,
+                submission_id: None,
+            })
+            .await
+            .expect("send the agent mail runtime turn");
+        wait_for_turn_complete(&handle).await;
+    }
+
+    handle
+        .send(Op::EditLastTurn {
+            new_message: "revise this turn".to_string(),
+            submission_id: Some("sub-edit-runtime-baseline".to_string()),
+        })
+        .await
+        .expect("send edit");
+    wait_for_turn_complete(&handle).await;
+
+    handle.send(Op::Shutdown).await.expect("shutdown engine");
+    run.await.expect("engine task");
+
+    let requests = server.received_requests().await.expect("recorded requests");
+    assert_eq!(
+        requests.len(),
+        3 + runtime_turns,
+        "two true turns, every runtime turn, and the replacement"
+    );
+    let wire_body = |request: &[u8]| String::from_utf8_lossy(request).to_string();
+    assert!(
+        !wire_body(&requests[0].body).contains("Authority transition (host)"),
+        "the first reported turn must render no transition"
+    );
+    assert!(
+        wire_body(&requests[1].body).contains("Authority transition (host)"),
+        "the turn after the arming flip must report the transition"
+    );
+    for runtime_index in 0..runtime_turns {
+        let body = wire_body(&requests[2 + runtime_index].body);
+        assert!(
+            body.contains("Input provenance: agent_mail (non-authoritative)"),
+            "the runtime turn must carry the production AgentMail shape"
+        );
+        assert_eq!(
+            body.matches("Authority transition (host)").count(),
+            1,
+            "the runtime turn runs in the reported posture: the only \
+             transition line in its request is the retained history block, \
+             its own block must render none"
+        );
+    }
+    assert!(
+        wire_body(&requests[2 + runtime_turns].body).contains("Authority transition (host)"),
+        "the replacement turn must re-report the arming transition: the \
+         truncation removes the runtime turns too, so their baseline entries \
+         must not survive the edit"
+    );
+}
+
+#[tokio::test]
+#[allow(clippy::await_holding_lock)]
+async fn edit_last_turn_restores_the_baseline_after_a_non_authoritative_runtime_turn() {
+    run_edit_last_turn_baseline_past_non_authoritative_runtime_turns(1).await;
+}
+
+#[tokio::test]
+#[allow(clippy::await_holding_lock)]
+async fn edit_last_turn_restores_the_baseline_after_multiple_non_authoritative_runtime_turns() {
+    run_edit_last_turn_baseline_past_non_authoritative_runtime_turns(2).await;
+}
+
 #[tokio::test]
 #[allow(clippy::await_holding_lock)]
 async fn edit_last_turn_cuts_at_user_prompt_before_tool_results() {
