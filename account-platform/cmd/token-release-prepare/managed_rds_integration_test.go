@@ -61,10 +61,8 @@ func testManagedRDSReleaseActualPostgres(t *testing.T, legacyUpgrade bool) {
 		clean, done := context.WithTimeout(context.Background(), 15*time.Second)
 		defer done()
 		if databaseCreated {
-			var owner string
-			var sessions int
-			if err := admin.QueryRow(clean, `SELECT pg_get_userbyid(datdba),(SELECT count(*) FROM pg_stat_activity WHERE datname=$1) FROM pg_database WHERE datname=$1`, database).Scan(&owner, &sessions); err != nil || sessions != 0 || (owner != "token_gateway" && owner != "token_schema_owner") {
-				t.Error("fixture database cleanup guard refused")
+			if err := waitManagedFixtureDatabaseIdle(clean, admin, database); err != nil {
+				t.Errorf("fixture database cleanup guard refused: %v", err)
 				return
 			}
 			if _, err := admin.Exec(clean, "DROP DATABASE "+pgx.Identifier{database}.Sanitize()); err != nil {
