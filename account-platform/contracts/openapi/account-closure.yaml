@@ -61,7 +61,16 @@ paths:
           content: { application/json: { schema: { type: object, required: [code, message], properties: { code: {type: string}, message: {type: string}, request_id: {type: string} } } } }
         "403": { $ref: "#/components/responses/Error" }
         "404": { $ref: "#/components/responses/Error" }
-        "409": { $ref: "#/components/responses/Error" }
+        "409":
+          $ref: "#/components/responses/Error"
+          description: >-
+            ACCOUNT_CLOSURE_SERIALIZATION_CONFLICT: the create transaction met a
+            serialization conflict; retry with the same principal, same idempotency key
+            and unchanged confirmation. This is not an instruction to change the key
+            or to automatically retry an unknown result.
+            ACCOUNT_CONFLICT: the existing account state or key/facts binding conflicts
+            with the command; read the existing closure and reconcile the original facts.
+            Changing the key does not establish that an earlier request had no effect.
         "503": { $ref: "#/components/responses/Error" }
         default: { $ref: "#/components/responses/Error" }
   /admin/v1/account-closure-requests:

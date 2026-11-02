@@ -18,6 +18,7 @@ import (
 	"github.com/Pinvou/pinvou3/account-platform/internal/platform/observability"
 	"github.com/Pinvou/pinvou3/account-platform/internal/platform/serviceauth"
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5/pgconn"
 )
 
 var ErrWalletProvisioning = errors.New("personal wallet provisioning is incomplete")
@@ -226,6 +227,8 @@ func (s *Service) getAuthorizationContext(w http.ResponseWriter, r *http.Request
 func (s *Service) writeError(w http.ResponseWriter, r *http.Request, err error) {
 	status, code, message := http.StatusInternalServerError, "INTERNAL_ERROR", "the request could not be completed"
 	switch {
+	case accountClosureSerializationConflict(r, err):
+		status, code, message = http.StatusConflict, "ACCOUNT_CLOSURE_SERIALIZATION_CONFLICT", "the account closure request conflicted with another request; retry with the same idempotency key"
 	case errors.Is(err, ErrInvalidAccountClosureRequest):
 		status, code, message = http.StatusBadRequest, "INVALID_REQUEST", "invalid account closure command"
 	case errors.Is(err, ErrNotFound):
@@ -321,6 +324,11 @@ func (s *Service) writeError(w http.ResponseWriter, r *http.Request, err error) 
 		status, code, message = http.StatusServiceUnavailable, "BILLING_COMMAND_GOVERNANCE_UNAVAILABLE", "Billing command governance is unavailable"
 	}
 	api.WriteError(w, status, code, message, httpserver.RequestID(r.Context()))
+}
+
+func accountClosureSerializationConflict(r *http.Request, err error) bool {
+	var pgErr *pgconn.PgError
+	return strings.HasSuffix(r.URL.Path, "/v1/me/account-closure-requests") && errors.As(err, &pgErr) && pgErr.Code == "40001"
 }
 
 func mustPrincipal(ctx context.Context) identity.Principal {
