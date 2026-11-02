@@ -9507,6 +9507,7 @@ impl RuntimeThreadManager {
                                 "tool_name": tool_name,
                                 "description": description,
                                 "intent_summary": intent_summary,
+                                "approval_force_prompt": approval_force_prompt,
                             }),
                         )
                         .await?;
@@ -9604,6 +9605,7 @@ impl RuntimeThreadManager {
                                 "tool_name": tool_name,
                                 "description": description,
                                 "intent_summary": intent_summary,
+                                "approval_force_prompt": approval_force_prompt,
                             }),
                         )
                         .await
