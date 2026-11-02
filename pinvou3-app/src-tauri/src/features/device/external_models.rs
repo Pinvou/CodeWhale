@@ -644,53 +644,15 @@ pub async fn register_external_model(
         let base_url = base_url.clone();
         let model = model.clone();
         let weights_path = weights_path.clone();
-        move || -> Result<String, String> {
-            std::fs::create_dir_all(&dir)
-                .map_err(|error| format!("注册表目录创建失败：{error}"))?;
-            // 注册表记录含 base_url/weights_path，目录只留 owner 权限（对齐
-            // model_store 的私密纪律；unix 专属实现收在 platform 适配层）。
-            // 目录被换成符号链接时不收敛：harden 跟随链接会把目标目录 chmod
-            // 成 0700（与 read_registry 扫描同一纪律，round-22 review P2）。
-            // 记录文件本身由 create_private_file_once 直接按 0600 落盘。
-            let dir_is_regular = std::fs::symlink_metadata(&dir)
-                .map(|meta| !meta.file_type().is_symlink())
-                .unwrap_or(false);
-            if dir_is_regular {
-                super::platform::harden_dir_owner_only(&dir);
-            }
-            // 数量上限在写入处也生效：此前只在读取侧截断，目录塞满后新登记仍会
-            // 成功、并把排序靠后的既有记录挤出可见范围（第七轮评审 P3）。
-            ensure_registry_has_capacity(&dir)?;
-            // 同 kind 同业务身份查重（二十一轮评审 P2；二十三轮评审 P2 纳入
-            // 端点）：注册表不强制 name 唯一，两条同身份记录会让前端 armed/busy
-            // 键碰撞（一次 arm 打开两个确认面板）；不同端点的同名同模型是独立
-            // 服务，合法共存。读取端对存量重复只告警不吞，这里对新登记直接拒绝。
-            let (existing_models, _) = read_registry(&dir);
-            if let Some(conflict) = find_identity_conflict(
-                &existing_models,
-                &kind,
+        move || {
+            publish_registry_entry(
+                &dir,
                 &name,
-                model.as_deref(),
+                &kind,
                 base_url.as_deref(),
-            ) {
-                return Err(format!(
-                    "已存在同类别同模型且同服务地址的外部模型记录（{}，id {}），请先移除它，或改用其他名字/模型标识/服务地址",
-                    truncate_echo(&conflict.name),
-                    conflict.id
-                ));
-            }
-            let id = persist_new_record(&dir, random_record_id, |id| RegistryRecord {
-                schema: 1,
-                id: id.to_string(),
-                name: name.clone(),
-                kind: kind.clone(),
-                base_url: base_url.clone(),
-                model: model.clone(),
-                weights_path: weights_path.clone(),
-                installed_at: Some(chrono::Utc::now().to_rfc3339()),
-                note: None,
-            })?;
-            Ok(id)
+                model.as_deref(),
+                weights_path.as_deref(),
+            )
         }
     })
     .await
@@ -719,6 +681,113 @@ pub async fn register_external_model(
         source: "registry".to_string(),
     })
 }
+
+/// 注册表发布的进程级互斥（见 [`publish_registry_entry`]）：容量检查、身份
+/// 查重、随机 id 落盘共用一锁串行。锁中毒时直取内层守卫——登记写盘本就是
+/// 可失败的幂等操作，一条注册线程的 panic 不应把后续全部登记打成“锁中毒”。
+static REGISTRY_PUBLISH_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+/// 登记发布临界区（三十五轮评审 P2）：目录准备 → 容量检查 → 读注册表 → 同
+/// kind 同业务身份查重 → 随机 id 不覆盖落盘，整段在 [`REGISTRY_PUBLISH_LOCK`]
+/// 内串行。此前读取与发布之间无保护：两路同 (kind, effective model, endpoint)
+/// 的并发登记都能读到尚无该身份的旧集合、各自通过查重后以不同随机 id 先后
+/// 落盘——no-replace 只保护文件 id，不保护业务身份；读取端对存量重复只告警
+/// 不吞，两行随后共享同一 armed/busy 身份键，一次 arm 可同时展开两行确认
+/// 面板，查重的存在理由被并发路径绕过。单实例插件约束下进程内互斥即可覆盖
+/// 渲染层与 AI 通道的重试/重挂载并发；跨进程不存在本注册表的写入方（CLI 的
+/// models 子命令走 model_store，不经本注册表）。
+fn publish_registry_entry(
+    dir: &Path,
+    name: &str,
+    kind: &str,
+    base_url: Option<&str>,
+    model: Option<&str>,
+    weights_path: Option<&str>,
+) -> Result<String, String> {
+    let _publish_guard = REGISTRY_PUBLISH_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    #[cfg(test)]
+    section_test_pause();
+    std::fs::create_dir_all(dir).map_err(|error| format!("注册表目录创建失败：{error}"))?;
+    // 注册表记录含 base_url/weights_path，目录只留 owner 权限（对齐
+    // model_store 的私密纪律；unix 专属实现收在 platform 适配层）。
+    // 目录被换成符号链接时不收敛：harden 跟随链接会把目标目录 chmod
+    // 成 0700（与 read_registry 扫描同一纪律，round-22 review P2）。
+    // 记录文件本身由 create_private_file_once 直接按 0600 落盘。
+    let dir_is_regular = std::fs::symlink_metadata(dir)
+        .map(|meta| !meta.file_type().is_symlink())
+        .unwrap_or(false);
+    if dir_is_regular {
+        super::platform::harden_dir_owner_only(dir);
+    }
+    // 数量上限在写入处也生效：此前只在读取侧截断，目录塞满后新登记仍会
+    // 成功、并把排序靠后的既有记录挤出可见范围（第七轮评审 P3）。
+    ensure_registry_has_capacity(dir)?;
+    // 同 kind 同业务身份查重（二十一轮评审 P2；二十三轮评审 P2 纳入
+    // 端点）：注册表不强制 name 唯一，两条同身份记录会让前端 armed/busy
+    // 键碰撞（一次 arm 打开两个确认面板）；不同端点的同名同模型是独立
+    // 服务，合法共存。读取端对存量重复只告警不吞，这里对新登记直接拒绝。
+    // 读取必须在发布锁内：查重看的是锁内当下集合，不是进入临界区前的旧快照。
+    let (existing_models, _) = read_registry(dir);
+    if let Some(conflict) = find_identity_conflict(&existing_models, kind, name, model, base_url) {
+        return Err(format!(
+            "已存在同类别同模型且同服务地址的外部模型记录（{}，id {}），请先移除它，或改用其他名字/模型标识/服务地址",
+            truncate_echo(&conflict.name),
+            conflict.id
+        ));
+    }
+    persist_new_record(dir, random_record_id, |id| RegistryRecord {
+        schema: 1,
+        id: id.to_string(),
+        name: name.to_string(),
+        kind: kind.to_string(),
+        base_url: base_url.map(str::to_string),
+        model: model.map(str::to_string),
+        weights_path: weights_path.map(str::to_string),
+        installed_at: Some(chrono::Utc::now().to_rfc3339()),
+        note: None,
+    })
+}
+
+/// 测试专用暂停点（仅测试构建；见 [`publish_registry_entry`]）：受控交错回归
+/// 先把闸门置位，第一个进入发布临界区的线程在此暂停并通知“已到达”，直到
+/// 测试放行。用它在锁内强制出一个确定性窗口：第二个同身份请求必须被挡在
+/// [`REGISTRY_PUBLISH_LOCK`] 上，放行后凭锁内重读拒绝——删除该暂停点或把
+/// 查重挪出锁，回归即红。
+#[cfg(test)]
+fn section_test_pause() {
+    let mut state = SECTION_TEST_PAUSE.lock().expect("section pause lock");
+    if !state.armed {
+        return;
+    }
+    state.armed = false;
+    state.arrived = true;
+    SECTION_TEST_PAUSE_CV.notify_all();
+    while !state.release {
+        state = SECTION_TEST_PAUSE_CV
+            .wait(state)
+            .expect("section pause condvar");
+    }
+}
+
+#[cfg(test)]
+struct SectionPauseState {
+    armed: bool,
+    arrived: bool,
+    release: bool,
+}
+
+#[cfg(test)]
+static SECTION_TEST_PAUSE: std::sync::Mutex<SectionPauseState> =
+    std::sync::Mutex::new(SectionPauseState {
+        armed: false,
+        arrived: false,
+        release: false,
+    });
+
+#[cfg(test)]
+static SECTION_TEST_PAUSE_CV: std::sync::Condvar = std::sync::Condvar::new();
 
 fn normalize_optional(raw: &Option<String>) -> Option<String> {
     raw.as_deref()
@@ -3169,16 +3238,164 @@ mod tests {
         // blob 布局签名臂（第九轮评审 P2）：kind:"other" 记录带迁移目录下的
         // blobs 路径时，环境臂对 systemd 的 OLLAMA_MODELS 失明——登记端按
         // 签名拒绝。校验发生在商店边界查询之前，本测试不需要临时 HOME。
+        // 夹具从 temp_dir 派生**本平台**绝对路径（与
+        // register_rejects_ollama_records_with_weights_path 同款修法，三十五轮
+        // 评审 P2）：硬编码 `/mnt/...` 在 Windows 上 is_absolute()==false，会
+        // 打错臂落到"必须是绝对路径"拒绝上——那句错误回显里恰好带路径原文的
+        // "blobs" 字样，contains("blob") 侥幸放行，布局签名臂实际零覆盖。断言
+        // 也改钉布局臂独有的文案，错臂不再能被路径回显侥幸满足。
+        let fake_blobs = std::env::temp_dir()
+            .join("pinvou3-blob-fixture")
+            .join("models")
+            .join("blobs");
         let error = register_external_model(
             "blob-layout".to_string(),
             "other".to_string(),
             None,
             None,
-            Some("/mnt/ollama-models/blobs".to_string()),
+            Some(fake_blobs.to_string_lossy().into_owned()),
         )
         .await
         .expect_err("blob-layout weights_path must be rejected");
-        assert!(error.contains("blob"), "unexpected error: {error}");
+        assert!(
+            error.contains("守护进程的模型库布局"),
+            "unexpected error: {error}"
+        );
+    }
+
+    // 三十五轮评审 P2 受控交错回归：登记发布临界区（容量/查重/落盘）必须被
+    // REGISTRY_PUBLISH_LOCK 串行化。闸门把 A 强制停在锁内，证明 B 的同身份
+    // 请求拿不到锁、放行后凭**锁内重读**拒绝——把查重挪出锁或删掉锁，本测试
+    // 必红。两个用例共享全局闸门/互斥，用测试级互斥串行化，避免彼此踩闸门。
+    static PUBLISH_RACE_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    fn arm_publish_section_pause() {
+        let mut state = SECTION_TEST_PAUSE.lock().expect("pause lock");
+        state.armed = true;
+        state.arrived = false;
+        state.release = false;
+    }
+
+    fn wait_publish_section_arrival() {
+        let mut state = SECTION_TEST_PAUSE.lock().expect("pause lock");
+        while !state.arrived {
+            state = SECTION_TEST_PAUSE_CV.wait(state).expect("pause cv");
+        }
+    }
+
+    fn release_publish_section_pause() {
+        let mut state = SECTION_TEST_PAUSE.lock().expect("pause lock");
+        state.release = true;
+        SECTION_TEST_PAUSE_CV.notify_all();
+    }
+
+    #[test]
+    fn concurrent_same_identity_registrations_are_rejected_by_the_publish_section() {
+        let _serial = PUBLISH_RACE_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let dir = TempDir::new("registry-publish-race");
+        arm_publish_section_pause();
+        let dir_a = dir.path().to_path_buf();
+        let a = std::thread::spawn(move || {
+            publish_registry_entry(
+                &dir_a,
+                "svc",
+                "openai_endpoint",
+                Some("http://127.0.0.1:8080/v1"),
+                Some("qwen3:8b"),
+                None,
+            )
+        });
+        wait_publish_section_arrival();
+        // A 在临界区内持锁：任何并发entrant此刻都拿不到锁——确定性证明串行化。
+        assert!(
+            REGISTRY_PUBLISH_LOCK.try_lock().is_err(),
+            "the publish section must be held while a registration is inside it"
+        );
+        let dir_b = dir.path().to_path_buf();
+        let b = std::thread::spawn(move || {
+            publish_registry_entry(
+                &dir_b,
+                "svc",
+                "openai_endpoint",
+                Some("http://127.0.0.1:8080/v1"),
+                Some("qwen3:8b"),
+                None,
+            )
+        });
+        release_publish_section_pause();
+        let a_id = a
+            .join()
+            .expect("A must not panic")
+            .expect("A must publish the first record");
+        let error = b
+            .join()
+            .expect("B must not panic")
+            .expect_err("the same business identity must be rejected");
+        assert!(
+            error.contains("已存在同类别同模型"),
+            "unexpected error: {error}"
+        );
+        let (models, _) = read_registry(dir.path());
+        assert_eq!(models.len(), 1, "no duplicate identity row may exist");
+        assert_eq!(models[0].id, a_id, "the surviving row is A's record");
+    }
+
+    #[test]
+    fn concurrent_different_identity_registrations_both_publish() {
+        let _serial = PUBLISH_RACE_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let dir = TempDir::new("registry-publish-parallel");
+        arm_publish_section_pause();
+        let dir_a = dir.path().to_path_buf();
+        let a = std::thread::spawn(move || {
+            publish_registry_entry(
+                &dir_a,
+                "svc",
+                "openai_endpoint",
+                Some("http://127.0.0.1:8080/v1"),
+                Some("qwen3:8b"),
+                None,
+            )
+        });
+        wait_publish_section_arrival();
+        // 不同端点 = 设计文档定义的独立服务，并发登记合法共存——锁只串行化
+        // 临界区，不收窄合法配置。
+        let dir_b = dir.path().to_path_buf();
+        let b = std::thread::spawn(move || {
+            publish_registry_entry(
+                &dir_b,
+                "svc",
+                "openai_endpoint",
+                Some("http://127.0.0.1:8081/v1"),
+                Some("qwen3:8b"),
+                None,
+            )
+        });
+        release_publish_section_pause();
+        a.join().expect("A must not panic").expect("A must publish");
+        b.join().expect("B must not panic").expect("B must publish");
+        let (models, _) = read_registry(dir.path());
+        assert_eq!(models.len(), 2, "both independent services must coexist");
+        let mut endpoints = models
+            .iter()
+            .map(|model| {
+                model
+                    .base_url
+                    .clone()
+                    .expect("registered endpoints present")
+            })
+            .collect::<Vec<_>>();
+        endpoints.sort_unstable();
+        assert_eq!(
+            endpoints,
+            vec![
+                "http://127.0.0.1:8080/v1".to_string(),
+                "http://127.0.0.1:8081/v1".to_string()
+            ],
+        );
     }
 
     #[test]
