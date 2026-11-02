@@ -9,22 +9,48 @@ use crate::approval_log::{ApprovalOutcome, ApprovalReceipt};
 use crate::core::events::Event;
 use crate::tools::spec::ToolError;
 use crate::tools::user_input::{UserInputRequest, UserInputResponse};
+use tokio::sync::oneshot;
 
 use super::Engine;
 
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub(super) enum ApprovalDecision {
     Approved {
         id: String,
+        /// Acknowledges consumption back to the decision's caller: `true`
+        /// when the engine applied the decision (committed for the matching
+        /// id, or routed it to a waiting child), `false` when it was stale
+        /// or its outcome could not be committed.
+        ack: Option<oneshot::Sender<bool>>,
     },
     Denied {
         id: String,
+        /// See `Approved::ack`.
+        ack: Option<oneshot::Sender<bool>>,
     },
     /// Retry a tool with an elevated sandbox policy.
     RetryWithPolicy {
         id: String,
         policy: crate::sandbox::SandboxPolicy,
+        /// See `Approved::ack`.
+        ack: Option<oneshot::Sender<bool>>,
     },
+}
+
+impl ApprovalDecision {
+    /// Resolve the decision's ack, if its caller still waits on one. A
+    /// dropped ack (no `Some` sender left) is read by the caller as a
+    /// failed delivery.
+    pub(super) fn resolve_ack(&mut self, consumed: bool) {
+        let ack = match self {
+            Self::Approved { ack, .. }
+            | Self::Denied { ack, .. }
+            | Self::RetryWithPolicy { ack, .. } => ack.take(),
+        };
+        if let Some(ack) = ack {
+            let _ = ack.send(consumed);
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -96,6 +122,32 @@ impl Engine {
             .await
     }
 
+    /// Commit `outcome` for `tool_id` and resolve the decision caller's ack:
+    /// `true` only when the durable receipt committed, so a failed write
+    /// nacks the decision instead of letting the caller believe an
+    /// uncommitted approval took effect.
+    async fn commit_approval_outcome_and_ack(
+        &self,
+        tool_id: &str,
+        outcome: ApprovalOutcome,
+        mut ack: Option<oneshot::Sender<bool>>,
+    ) -> Result<(), ToolError> {
+        match self.commit_approval_outcome(tool_id, outcome).await {
+            Ok(()) => {
+                if let Some(ack) = ack.take() {
+                    let _ = ack.send(true);
+                }
+                Ok(())
+            }
+            Err(error) => {
+                if let Some(ack) = ack.take() {
+                    let _ = ack.send(false);
+                }
+                Err(error)
+            }
+        }
+    }
+
     pub(super) async fn request_tool_approval(
         &mut self,
         tool_id: &str,
@@ -154,7 +206,7 @@ impl Engine {
                     ));
                 }
                 decision = self.rx_approval.recv() => {
-                    let Some(decision) = decision else {
+                    let Some(mut decision) = decision else {
                         self.commit_approval_outcome(tool_id, ApprovalOutcome::Unavailable).await?;
                         return Err(ToolError::execution_failed(
                             "Approval channel closed — engine is shutting down. \
@@ -164,25 +216,37 @@ impl Engine {
                         ));
                     };
                     match decision {
-                        ApprovalDecision::Approved { id } if id == tool_id => {
-                            self.commit_approval_outcome(tool_id, ApprovalOutcome::ApprovedOnce).await?;
+                        ApprovalDecision::Approved { id, ack } if id == tool_id => {
+                            self.commit_approval_outcome_and_ack(
+                                tool_id,
+                                ApprovalOutcome::ApprovedOnce,
+                                ack,
+                            ).await?;
                             return Ok(ApprovalResult::Approved);
                         }
-                        ApprovalDecision::Denied { id } if id == tool_id => {
-                            self.commit_approval_outcome(tool_id, ApprovalOutcome::Denied).await?;
+                        ApprovalDecision::Denied { id, ack } if id == tool_id => {
+                            self.commit_approval_outcome_and_ack(
+                                tool_id,
+                                ApprovalOutcome::Denied,
+                                ack,
+                            ).await?;
                             return Ok(ApprovalResult::Denied);
                         }
-                        ApprovalDecision::RetryWithPolicy { id, policy } if id == tool_id => {
-                            self.commit_approval_outcome(
+                        ApprovalDecision::RetryWithPolicy { id, policy, ack } if id == tool_id => {
+                            self.commit_approval_outcome_and_ack(
                                 tool_id,
                                 ApprovalOutcome::RetryWithPolicy { policy: policy.clone() },
+                                ack,
                             ).await?;
                             return Ok(ApprovalResult::RetryWithPolicy(policy));
                         }
                         // A child prompt answered while the parent itself is
-                        // waiting: hand it to the child instead of dropping it.
-                        other => {
-                            self.route_child_approval_decision(other).await;
+                        // waiting: hand it to the child instead of dropping
+                        // it. A stale non-child id has no waiter here, so its
+                        // caller is nacked instead of left hanging.
+                        ref mut other => {
+                            let routed = self.route_child_approval_decision(other).await;
+                            other.resolve_ack(routed);
                             continue;
                         }
                     }
@@ -409,16 +473,25 @@ mod tests {
             .await
             .expect("approval event");
         assert!(matches!(emitted, Event::ApprovalRequired { .. }));
-        handle
-            .approve_tool_call("tool-stale")
-            .await
-            .expect("deliver stale decision");
+        // A stale non-child id has no waiter: the caller is nacked instead of
+        // being told its decision was accepted.
+        assert!(
+            handle.approve_tool_call("tool-stale").await.is_err(),
+            "a stale decision must not report success"
+        );
         assert!(
             tokio::time::timeout(Duration::from_millis(50), &mut task)
                 .await
                 .is_err(),
             "a stale decision must not grant or close the current request"
         );
+        // The stale decision must not have written any receipt: the ask is
+        // still the only recorded entry for the session.
+        let replay = store
+            .replay(&session_id)
+            .expect("replay after stale attempt");
+        assert!(replay.completed.is_empty());
+        assert_eq!(replay.unmatched_asks.len(), 1);
         handle
             .deny_tool_call("tool-current")
             .await
@@ -465,10 +538,13 @@ mod tests {
             .join("approval_receipts.jsonl");
         std::fs::remove_file(&log_path).expect("remove log after durable ask");
         std::fs::create_dir(&log_path).expect("replace log with unwritable directory");
-        handle
-            .approve_tool_call("tool-write-fails")
-            .await
-            .expect("deliver approval decision");
+        // The failed durable commit nacks the decision, so the caller learns
+        // its approval never took effect instead of reading a bare enqueue
+        // as success.
+        assert!(
+            handle.approve_tool_call("tool-write-fails").await.is_err(),
+            "a decision whose outcome could not be committed must not report success"
+        );
 
         assert!(
             task.await.expect("approval task").is_err(),

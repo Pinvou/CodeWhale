@@ -3132,10 +3132,12 @@ impl Engine {
                     }
                     // A background child may be waiting on a person's answer
                     // while the parent turn is idle: route it. Any other
-                    // decision has no waiter and is dropped, as before.
+                    // decision has no waiter here, so its caller is nacked
+                    // instead of being left hanging on the ack.
                     decision = self.rx_approval.recv() => {
-                        if let Some(decision) = decision {
-                            self.route_child_approval_decision(decision).await;
+                        if let Some(mut decision) = decision {
+                            let routed = self.route_child_approval_decision(&decision).await;
+                            decision.resolve_ack(routed);
                         }
                     }
                     update = async {
@@ -3167,14 +3169,14 @@ impl Engine {
     /// a child took it; the parent's own awaiting call keeps every other id.
     async fn route_child_approval_decision(
         &self,
-        decision: super::engine::approval::ApprovalDecision,
+        decision: &super::engine::approval::ApprovalDecision,
     ) -> bool {
         use crate::tools::subagent::{ChildApprovalOutcome, SubAgentManager};
-        let (id, outcome) = match &decision {
-            super::engine::approval::ApprovalDecision::Approved { id } => {
+        let (id, outcome) = match decision {
+            super::engine::approval::ApprovalDecision::Approved { id, .. } => {
                 (id.clone(), ChildApprovalOutcome::Approved)
             }
-            super::engine::approval::ApprovalDecision::Denied { id } => {
+            super::engine::approval::ApprovalDecision::Denied { id, .. } => {
                 (id.clone(), ChildApprovalOutcome::Denied)
             }
             // A sandbox retry only exists for the parent's own tool call.
@@ -8883,9 +8885,9 @@ pub(crate) enum MockApprovalEvent {
 impl MockEngineHandle {
     pub(crate) async fn recv_approval_event(&mut self) -> Option<MockApprovalEvent> {
         match self.rx_approval.recv().await? {
-            ApprovalDecision::Approved { id } => Some(MockApprovalEvent::Approved { id }),
-            ApprovalDecision::Denied { id } => Some(MockApprovalEvent::Denied { id }),
-            ApprovalDecision::RetryWithPolicy { id, policy } => {
+            ApprovalDecision::Approved { id, .. } => Some(MockApprovalEvent::Approved { id }),
+            ApprovalDecision::Denied { id, .. } => Some(MockApprovalEvent::Denied { id }),
+            ApprovalDecision::RetryWithPolicy { id, policy, .. } => {
                 Some(MockApprovalEvent::RetryWithPolicy { id, policy })
             }
         }
@@ -8919,7 +8921,28 @@ impl MockEngineHandle {
 pub(crate) fn mock_engine_handle() -> MockEngineHandle {
     let (tx_op, rx_op) = mpsc::channel(32);
     let (tx_event, rx_event) = mpsc::channel(256);
-    let (tx_approval, rx_approval) = mpsc::channel(64);
+    // Decisions sent through the mock handle carry the same ack the real
+    // engine contract expects, but no engine loop runs behind this handle.
+    // A small pump resolves each ack as consumed — a stand-in for the
+    // engine's wait or idle loop — and forwards the ack-stripped decision to
+    // the channel the test observes via `recv_approval_event`.
+    let (tx_approval, rx_approval) = if let Ok(runtime) = tokio::runtime::Handle::try_current() {
+        let (tx_pump, mut rx_pump) = mpsc::channel::<ApprovalDecision>(64);
+        let (tx_forward, rx_forward) = mpsc::channel::<ApprovalDecision>(64);
+        runtime.spawn(async move {
+            while let Some(mut decision) = rx_pump.recv().await {
+                decision.resolve_ack(true);
+                if tx_forward.send(decision).await.is_err() {
+                    break;
+                }
+            }
+        });
+        (tx_pump, rx_forward)
+    } else {
+        // No tokio runtime (plain sync test): no decision can be awaited
+        // through this handle anyway.
+        mpsc::channel(64)
+    };
     let (tx_user_input, rx_user_input) = mpsc::channel(32);
     let (tx_steer, rx_steer) = mpsc::channel(64);
     let cancel_token = CancellationToken::new();

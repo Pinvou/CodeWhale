@@ -10,15 +10,19 @@
 
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
+use std::time::Duration;
 
-use anyhow::Result;
-use tokio::sync::mpsc;
+use anyhow::{Result, anyhow};
+use tokio::sync::{mpsc, oneshot};
 
 use super::approval::{ApprovalDecision, UserInputDecision};
 use super::{
     CancelMode, CancelReason, EngineHandle, LiveRuntimeAuthority, Op, ReservedSteer,
     RuntimePermissionAuthority, SteerWithdrawal, UserInputResponse,
 };
+
+/// Bound on waiting for the engine to acknowledge an approval decision.
+const APPROVAL_ACK_TIMEOUT: Duration = Duration::from_secs(15);
 
 impl EngineHandle {
     /// True when the caller must preflight a concrete provider client before
@@ -290,35 +294,74 @@ impl EngineHandle {
         }
     }
 
-    /// Approve a pending tool call
+    /// Approve a pending tool call.
+    ///
+    /// `Ok(())` means the engine consumed the decision and durably committed
+    /// the approval for this exact id (or routed it to a waiting child). An
+    /// `Err` means the decision was stale, its outcome could not be
+    /// committed, or no engine waiter accepted it before the ack deadline;
+    /// the caller must treat the tool as not approved.
     pub async fn approve_tool_call(&self, id: impl Into<String>) -> Result<()> {
+        let (ack, rx_ack) = oneshot::channel();
         self.tx_approval
-            .send(ApprovalDecision::Approved { id: id.into() })
+            .send(ApprovalDecision::Approved {
+                id: id.into(),
+                ack: Some(ack),
+            })
             .await?;
-        Ok(())
+        Self::await_approval_ack(rx_ack).await
     }
 
-    /// Deny a pending tool call
+    /// Deny a pending tool call. The ack contract is the same as
+    /// [`EngineHandle::approve_tool_call`].
     pub async fn deny_tool_call(&self, id: impl Into<String>) -> Result<()> {
+        let (ack, rx_ack) = oneshot::channel();
         self.tx_approval
-            .send(ApprovalDecision::Denied { id: id.into() })
+            .send(ApprovalDecision::Denied {
+                id: id.into(),
+                ack: Some(ack),
+            })
             .await?;
-        Ok(())
+        Self::await_approval_ack(rx_ack).await
     }
 
-    /// Retry a tool call with an elevated sandbox policy.
+    /// Retry a tool call with an elevated sandbox policy. The ack contract
+    /// is the same as [`EngineHandle::approve_tool_call`].
     pub async fn retry_tool_with_policy(
         &self,
         id: impl Into<String>,
         policy: crate::sandbox::SandboxPolicy,
     ) -> Result<()> {
+        let (ack, rx_ack) = oneshot::channel();
         self.tx_approval
             .send(ApprovalDecision::RetryWithPolicy {
                 id: id.into(),
                 policy,
+                ack: Some(ack),
             })
             .await?;
-        Ok(())
+        Self::await_approval_ack(rx_ack).await
+    }
+
+    /// Wait, bounded, for the engine to acknowledge a delivered decision.
+    /// The engine's receiver is a per-turn wait loop or the always-running
+    /// idle loop, so a live engine answers quickly; the bound only backstops
+    /// a wedged or already-shut-down engine.
+    async fn await_approval_ack(rx_ack: oneshot::Receiver<bool>) -> Result<()> {
+        match tokio::time::timeout(APPROVAL_ACK_TIMEOUT, rx_ack).await {
+            Ok(Ok(true)) => Ok(()),
+            Ok(Ok(false)) => Err(anyhow!(
+                "approval decision was not applied: the tool call id is stale \
+                 or its outcome could not be committed"
+            )),
+            Ok(Err(_)) => Err(anyhow!(
+                "approval decision was dropped without being consumed by the engine"
+            )),
+            Err(_) => Err(anyhow!(
+                "engine did not acknowledge the approval decision within {}s",
+                APPROVAL_ACK_TIMEOUT.as_secs()
+            )),
+        }
     }
 
     /// Submit a response for request_user_input.

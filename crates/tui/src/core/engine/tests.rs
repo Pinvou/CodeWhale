@@ -9530,8 +9530,9 @@ async fn injected_model_fallback_text_tool_ids_stay_unique_across_responses() {
             parsed_prefix.starts_with("xml_tool_"),
             "fallback id must keep the parser shape as a prefix: {id}"
         );
-        let (millis, counter) =
-            incarnation.split_once('x').expect("incarnation must be <millis>x<counter>");
+        let (millis, counter) = incarnation
+            .split_once('x')
+            .expect("incarnation must be <millis>x<counter>");
         assert!(
             !millis.is_empty() && millis.bytes().all(|byte| byte.is_ascii_digit()),
             "incarnation millis must be numeric: {id}"
@@ -9554,7 +9555,10 @@ async fn injected_model_fallback_text_tool_ids_stay_unique_across_responses() {
 fn fresh_fallback_tool_ids_are_unique_within_a_process() {
     let first = super::turn_loop::fresh_fallback_tool_id("xml_tool_1");
     let second = super::turn_loop::fresh_fallback_tool_id("xml_tool_1");
-    assert_ne!(first, second, "the same parsed id must incarnate differently");
+    assert_ne!(
+        first, second,
+        "the same parsed id must incarnate differently"
+    );
     assert_eq!(
         first.split_once('#').map(|(prefix, _)| prefix),
         Some("xml_tool_1")
@@ -28258,8 +28262,14 @@ async fn idle_engine_routes_child_approval_decisions_to_the_waiting_child() {
         .expect("child prompt resolved");
     assert_eq!(outcome, ChildApprovalOutcome::Denied);
 
-    // A decision for a parent-shaped id has no child waiter and is not routed.
+    // A decision for a parent-shaped id has no child waiter and is not
+    // routed: the idle loop nacks it so the caller does not read a bare
+    // enqueue as acceptance.
     assert!(!crate::tools::subagent::SubAgentManager::is_child_approval_id("call_123"));
+    assert!(
+        handle.approve_tool_call("call_123").await.is_err(),
+        "an idle engine must nack a decision no waiter can consume"
+    );
     handle.send(Op::Shutdown).await.expect("shutdown engine");
     run.await.expect("engine task");
 }
