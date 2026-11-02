@@ -82,7 +82,10 @@ func TestTransitProviderDedicatedCAIsolation(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	transport := p.client.Transport.(*http.Transport)
+	transport, err := newTransitTransport(caPath)
+	if err != nil {
+		t.Fatal(err)
+	}
 	defer transport.CloseIdleConnections()
 	if transport.Proxy != nil || transport.TLSClientConfig.MinVersion != tls.VersionTLS12 || transport.TLSClientConfig.RootCAs == nil || http.DefaultTransport != trap {
 		t.Fatal("global transport or private trust isolation failed")
@@ -97,8 +100,12 @@ func TestTransitProviderDedicatedCAIsolation(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer public.client.CloseIdleConnections()
-	if public.client.Transport.(*http.Transport).TLSClientConfig.RootCAs != nil {
+	publicTransport, err := newTransitTransport("")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer publicTransport.CloseIdleConnections()
+	if publicTransport.TLSClientConfig.RootCAs != nil {
 		t.Fatal("private trust contaminated another client")
 	}
 	if _, err := public.Encrypt([]byte("x"), []byte("aad")); err == nil || calls != 1 {
@@ -112,15 +119,22 @@ func TestTransitProviderDedicatedCAIsolation(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer wrong.client.CloseIdleConnections()
 	if _, err := wrong.Encrypt([]byte("x"), []byte("aad")); err == nil || calls != 1 {
 		t.Fatal("wrong CA accepted")
 	}
 	// A correct trust root never disables endpoint hostname validation.
 	u, _ := url.Parse(server.URL)
 	_, port, _ := net.SplitHostPort(u.Host)
-	p.baseURL = "https://localhost:" + port
-	if _, err := p.Encrypt([]byte("x"), []byte("aad")); err == nil || calls != 1 {
+	if err := os.WriteFile(caPath, pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: server.Certificate().Raw}), 0600); err != nil {
+		t.Fatal(err)
+	}
+	wrongHost := cfg
+	wrongHost.RemoteURL = "https://localhost:" + port
+	hostProvider, err := NewTransitProvider(wrongHost)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := hostProvider.Encrypt([]byte("x"), []byte("aad")); err == nil || calls != 1 {
 		t.Fatal("wrong TLS hostname accepted")
 	}
 }

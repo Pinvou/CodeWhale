@@ -56,3 +56,21 @@ export function requireScopedMemberMutation(context, root, ids, member, nextUnit
  if (!hasUnitScopePermission(context, root, 'org.members.manage') || !memberWithinUnitScope(member, ids) || !Array.isArray(nextUnits) || !nextUnits.every(id => ids.has(id))) invalid();
  return member;
 }
+
+// Retain failure ownership above the keyed directory: refreshing authority must
+// not restart the same automatic 403 cycle after remounting that directory.
+export function createOrganizationScopeFailureGuard() {
+ let identity = '', attempted = new Set(), denied = new Set();
+ const select = key => {
+  if (identity !== key) { identity = key; attempted = new Set(); denied = new Set(); }
+ };
+ return {
+  deny(key, root) {
+   select(key); denied.add(root);
+   if (attempted.has(root)) return false;
+   attempted.add(root); return true;
+  },
+  isDenied(key, root) { select(key); return denied.has(root); },
+  retry(key, root) { select(key); denied.delete(root); },
+ };
+}

@@ -18,6 +18,7 @@
     "tests/account_platform_desktop_reauthentication_ui_smoke.mjs",
     "tests/*.js",
     "tests/remote_archive_smoke.mjs",
+    "tests/controlled_preconnect_smoke.mjs",
     "tests/remote_dispatch_ownership_smoke.mjs",
     "src/platform/tauri/bridge.js",
     "src/platform/tauri/bridge/*.js",

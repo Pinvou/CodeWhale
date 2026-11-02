@@ -39,7 +39,7 @@ test('authorization release gate classifies every HTTP task event callback and C
   for (const route of wildcardPaths) assert.ok(portal.includes(`router.Any("${route}",`), `missing existing Portal transport ${route}`);
   // The real checker still rejects missing, stale, duplicate or mis-scoped
   // entries before returning these exact inventory sizes.
-  assert.deepEqual(await runAuthorizationCoverage(), { routes: 402, tasks: 32, events: 18, cli: 26 });
+  assert.deepEqual(await runAuthorizationCoverage(), { routes: 402, tasks: 32, events: 18, cli: 27 });
 });
 
 function assertLedgerRepairProofAuthorization(service, handler) {
@@ -275,6 +275,23 @@ test('single-client workload token projector has an exact required authorization
   await rejectedMutation(catalog => {
     catalog.cli = catalog.cli.filter(item => item.name !== 'workload-token-agent');
   }, /unclassified_cli:workload-token-agent/);
+});
+
+test('evidence validator has an exact required authorization entry', async () => {
+  const catalog = JSON.parse(await readFile(catalogURL, 'utf8'));
+  assert.deepEqual(catalog.cli.filter(item => item.name === 'evidence-image-validator'), [{
+    name: 'evidence-image-validator', source: 'account-platform/cmd/evidence-image-validator/main.go',
+    strategy: 'workload.default-disabled-unix-peer-uid-verified-evidence-validator',
+  }]);
+  await rejectedMutation(catalog => {
+    catalog.cli = catalog.cli.filter(item => item.name !== 'evidence-image-validator');
+  }, /unclassified_cli:evidence-image-validator/);
+  await rejectedMutation(catalog => {
+    catalog.cli.find(item => item.name === 'evidence-image-validator').source = 'account-platform/cmd/healthcheck/main.go';
+  }, /cli_source_mismatch:evidence-image-validator/);
+  await rejectedMutation(catalog => {
+    catalog.cli.find(item => item.name === 'evidence-image-validator').strategy = '';
+  }, /unstable_cli_strategy:evidence-image-validator/);
 });
 
 test('authorization release gate fails closed for removed unknown and scope-mismatched policies', async () => {

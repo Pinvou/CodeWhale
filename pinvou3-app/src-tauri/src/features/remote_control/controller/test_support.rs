@@ -80,6 +80,33 @@ pub(crate) fn signed_reservation(
     a_public_b64: &str,
     b_public_b64: &str,
 ) -> Value {
+    let wall_now: u64 = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_millis()
+        .try_into()
+        .unwrap();
+    signed_reservation_expiring_at(
+        relay,
+        a_public_b64,
+        b_public_b64,
+        wall_now
+            .checked_add(
+                crate::features::remote_control::controller::controlled::MAX_HANDSHAKE_TTL_MS,
+            )
+            .unwrap(),
+    )
+}
+
+/// A delayed signed reservation can legitimately have only part of the Relay's
+/// twenty-second handshake budget left when B receives it. Both expiry fields
+/// still come from the same producer deadline, before hashing and signing.
+pub(crate) fn signed_reservation_expiring_at(
+    relay: &SignedRelay,
+    a_public_b64: &str,
+    b_public_b64: &str,
+    expires_at_ms: u64,
+) -> Value {
     let fixture: Value = serde_json::from_str(include_str!(
         "../../../../../../remote-control-relay/test/fixtures/controller-protocol-v1.json"
     ))
@@ -89,6 +116,10 @@ pub(crate) fn signed_reservation(
     let mut transcript = message["transcript"].clone();
     transcript["handshake_public_key_a_b64"] = json!(a_public_b64);
     transcript["handshake_public_key_b_b64"] = json!(b_public_b64);
+    transcript["expires_at_ms"] = json!(expires_at_ms.to_string());
+    message["handshake_expires_at_ms"] = json!(expires_at_ms.to_string());
+    message["reservation_expires_at_ms"] =
+        json!(expires_at_ms.saturating_sub(10_000).max(1).to_string());
     let preimage = build_pairing_transcript_preimage(&transcript).unwrap();
     message["transcript"] = transcript;
     message["transcript_hash"] = json!(hex_lower(&Sha256::digest(&preimage)));
