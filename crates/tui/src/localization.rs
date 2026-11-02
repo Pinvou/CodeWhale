@@ -6070,6 +6070,35 @@ mod tests {
     }
 
     #[test]
+    fn turn_and_mode_jump_strings_are_translated_in_non_english_locales() {
+        // `KbReasoningDetail` and `CmdTurnInspectDescription` shipped as
+        // untranslated English copies for months while the rest of the
+        // localization suite stayed green, and `KbAltJumpPlanAgentYolo`
+        // regressed the same way; keep a dedicated must-translate gate over
+        // them so the fallback chain cannot leak these strings again.
+        let ids = [
+            MessageId::KbReasoningDetail,
+            MessageId::CmdTurnInspectDescription,
+            MessageId::KbAltJumpPlanAgentYolo,
+        ];
+        for locale in Locale::shipped_complete() {
+            if *locale == Locale::En {
+                continue;
+            }
+            for id in ids {
+                let localized = tr(*locale, id);
+                assert!(!localized.is_empty(), "{} empty for {id:?}", locale.tag());
+                assert_ne!(
+                    localized,
+                    tr(Locale::En, id),
+                    "{} should translate {id:?}",
+                    locale.tag()
+                );
+            }
+        }
+    }
+
+    #[test]
     fn zh_hant_hotbar_command_and_keybinding_strings_are_native() {
         for id in [
             MessageId::CmdHotbarDescription,
