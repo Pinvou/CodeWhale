@@ -246,8 +246,8 @@ function assertConnectorMatrix(source) {
   }, "macOS-only switch preserves both macOS and both Linux mappings");
   const runners = job.filter((line) => /^    runs-on:/.test(line));
   assert.deepEqual(runners, [
-    "    runs-on: ${{ matrix.runs-on == 'ubuntu-22.04' && fromJSON(vars.PINVOU_LINUX_LIGHT_RUNNER || vars.PINVOU_LINUX_RUNNER || '[\"ubuntu-22.04\"]') || matrix.runs-on == 'windows-latest' && fromJSON(vars.PINVOU_WINDOWS_LIGHT_RUNNER || vars.PINVOU_WINDOWS_RUNNER || '[\"windows-latest\"]') || matrix.runs-on }}",
-  ], "connector matrix runner mapping retains LIGHT/legacy/default routing");
+    "    runs-on: ${{ matrix.runs-on == 'ubuntu-22.04' && fromJSON(vars.PINVOU_LINUX_LIGHT_RUNNER || vars.PINVOU_LINUX_RUNNER || '[\"ubuntu-22.04\"]') || matrix.runs-on == 'windows-latest' && fromJSON((github.event_name == 'push' || github.event_name == 'workflow_dispatch' || (github.event_name == 'pull_request' && github.repository != '' && github.repository_id != '' && github.event.pull_request.head.repo.full_name == github.repository && github.event.pull_request.base.repo.full_name == github.repository && github.event.pull_request.head.repo.id == github.repository_id && github.event.pull_request.base.repo.id == github.repository_id)) && (vars.PINVOU_WINDOWS_LIGHT_RUNNER || vars.PINVOU_WINDOWS_RUNNER || '[\"windows-latest\"]') || '[\"windows-latest\"]') || matrix.runs-on }}",
+  ], "connector matrix runner mapping retains LIGHT/legacy/default routing and verified Windows PR source");
 }
 assertConnectorMatrix(connectorWorkflow);
 assert.match(connectorWorkflow, /src\/platform\/paths\.rs/);

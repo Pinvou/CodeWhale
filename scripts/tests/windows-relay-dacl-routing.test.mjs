@@ -3,7 +3,7 @@ import { readFile } from 'node:fs/promises';
 import test from 'node:test';
 
 const workflow = await readFile(new URL('../../.github/workflows/pr-check.yml', import.meta.url), 'utf8');
-const nativeRunner = `runs-on: \${{ fromJSON(vars.PINVOU_WINDOWS_LIGHT_RUNNER || vars.PINVOU_WINDOWS_RUNNER || '["windows-latest"]') }}`;
+const nativeRunner = "runs-on: ${{ fromJSON((github.event_name == 'push' || github.event_name == 'merge_group' || (github.event_name == 'pull_request' && github.repository != '' && github.repository_id != '' && github.event.pull_request.head.repo.full_name == github.repository && github.event.pull_request.base.repo.full_name == github.repository && github.event.pull_request.head.repo.id == github.repository_id && github.event.pull_request.base.repo.id == github.repository_id)) && (vars.PINVOU_WINDOWS_LIGHT_RUNNER || vars.PINVOU_WINDOWS_RUNNER || '[\"windows-latest\"]') || '[\"windows-latest\"]') }}";
 function requireNativeGate(text) {
   const job = text.match(/^  windows-relay-dacl:\r?\n([\s\S]*?)(?=^  \S|(?![\s\S]))/m)?.[1];
   assert.ok(job, 'native DACL job must exist');
@@ -29,6 +29,8 @@ test('native DACL gate covers Relay changes and cannot disappear from required a
     workflow.replace(nativeRunner, 'runs-on: ubuntu-22.04'),
     workflow.replace(nativeRunner, nativeRunner.replace('WINDOWS_LIGHT_RUNNER', 'LINUX_LIGHT_RUNNER')),
     workflow.replace(nativeRunner, nativeRunner.replace('windows-latest', 'ubuntu-22.04')),
+    workflow.replace(nativeRunner, nativeRunner.replace(" && github.event.pull_request.head.repo.id == github.repository_id", '')),
+    workflow.replace(nativeRunner, nativeRunner.replace(" && github.event.pull_request.base.repo.id == github.repository_id", '')),
     workflow.replace('      - windows-relay-dacl\n', ''),
     workflow.replace('"windows-relay-dacl:$WINDOWS_RELAY_DACL_RESULT"', ''),
     workflow.replace('run: node scripts/run-windows-relay-dacl.mjs', 'run: echo skipped'),
