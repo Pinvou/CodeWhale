@@ -4663,9 +4663,19 @@ impl AcpPool {
                 if runtime.busy.load(Ordering::Acquire) {
                     let turn_id = runtime.bridge.current_turn_id();
                     runtime.cancel();
-                    runtime
-                        .bridge
-                        .emit("cancel_requested", json!({ "status": "cancelling" }));
+                    // Journal the cancel request against the captured busy
+                    // turn before scheduling the settle watchdog: the
+                    // timeline journal then records that the stop was
+                    // requested (and which turn it belongs to) even when the
+                    // agent never answers and the watchdog has to settle
+                    // locally. This is a journal record only — acp-state
+                    // `lastStatus` is not patched and the UI renders no
+                    // cancelling state from it.
+                    runtime.bridge.emit_with_turn(
+                        turn_id.clone(),
+                        "cancel_requested",
+                        json!({ "status": "cancelling" }),
+                    );
                     // Stop cannot wait forever for the agent. An upstream adapter
                     // may never answer a dropped or absorbed prompt; field evidence
                     // showed four clicks before its own cancel floor settled it.
@@ -7651,6 +7661,17 @@ mod tests {
             "the connection task must select on transport completion and \
              stamp the generation dead; without the stamp a crashed runtime \
              is never reclaimed"
+        );
+        // The cancel_requested producer is the only new journal behavior of
+        // the envelope claim; dropping the emit or the turn tag currently
+        // has no behavioral consumer, so pin the wiring. (The signature is
+        // spelled out because `production_body` matches substrings —
+        // `pub async fn cancel` would find `cancel_agent_install` first.)
+        let cancel = production_body(&src, "pub async fn cancel(&self, session_id: &str)");
+        assert!(
+            cancel.contains("emit_with_turn(") && cancel.contains("\"cancel_requested\""),
+            "a user cancel must journal the cancel_requested envelope \
+             through the captured busy turn"
         );
         // The idle reap can land on a runtime that died unexpectedly; the
         // re-parked disclosure is what keeps the next spawn's restart notice
