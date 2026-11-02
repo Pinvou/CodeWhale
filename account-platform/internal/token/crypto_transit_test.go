@@ -158,7 +158,10 @@ func TestTransitProviderRejectsRedirectAndUntrustedTLS(t *testing.T) {
 	}
 	untrusted := httptest.NewTLSServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) { called = true }))
 	defer untrusted.Close()
-	p.baseURL = untrusted.URL
+	p, err = NewTransitProvider(SecretProviderConfig{Environment: "test", KeyID: "key", RemoteURL: untrusted.URL, RemoteToken: "test-credential-only"})
+	if err != nil {
+		t.Fatal(err)
+	}
 	if _, err = p.Encrypt([]byte("secret"), []byte("aad")); err == nil || called {
 		t.Fatal("untrusted TLS accepted")
 	}
