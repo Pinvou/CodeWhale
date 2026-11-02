@@ -963,16 +963,19 @@ fn refuse_sensitive_note(note: &str) -> Result<()> {
 /// Refused families:
 /// - a run of 11 or more ASCII digits, bridging the separators grouped
 ///   numbers are conventionally written with (spaces, hyphen/dash variants,
-///   and dots) — CN mobile numbers are 11 digits and resident ID cards 18,
-///   while ordinary dates and version numbers stay under it (`2024-02-01`
-///   bridges to 8) (adapted from the embedder's total-digit count, which
+///   and dots) — CN mobile numbers are 11 digits and resident ID cards 18.
+///   The boundary is the bridged digit count, not a semantic date/version
+///   notion: date-like shapes stay under it (`2024-02-01` bridges to 8)
+///   while long version strings do not (`130.0.6723.116` bridges to 11 and
+///   is refused) (adapted from the embedder's total-digit count, which
 ///   false-positives on date/version-heavy full-sentence notes)
 /// - credential needles, including the Chinese markers 身份证 / 手机号 /
 ///   密码 / 口令 / 密钥 / 私钥 — kept deliberately: they are the real-world
 ///   secret markers in the locales the source heuristics run in production;
 ///   `api-key` (the HTTP header spelling), the `private_key` underscore
 ///   spelling, and the compound key kinds `ssh key` / `deploy key` /
-///   `access key` are additions on top of the port
+///   `access key` in all three spellings (space, underscore, hyphen) are
+///   additions on top of the port
 /// - `token` (or another credential word) tied to an assignment marker
 ///   (`=`, `:`, the full-width `：`, the CJK copulas 是/为, and —
 ///   adaptations for English notes — the copulas " is " / " was " and the
@@ -1014,7 +1017,7 @@ fn refuse_sensitive_note(note: &str) -> Result<()> {
 /// is never indexed or injected but is not scrubbed. Writes through the
 /// approval-gated file tools are out of scope: with the user approving
 /// each write, they carry the same trust as hand-editing the file.
-const SENSITIVE_NEEDLES: [&str; 19] = [
+const SENSITIVE_NEEDLES: [&str; 25] = [
     "身份证",
     "手机号",
     "手机号码",
@@ -1032,8 +1035,14 @@ const SENSITIVE_NEEDLES: [&str; 19] = [
     "private key",
     "private_key",
     "ssh key",
+    "ssh_key",
+    "ssh-key",
     "deploy key",
+    "deploy_key",
+    "deploy-key",
     "access key",
+    "access_key",
+    "access-key",
 ];
 
 fn looks_sensitive(value: &str) -> bool {
@@ -1174,8 +1183,12 @@ fn has_assignment_marker(lower: &str, value: &str) -> bool {
 fn looks_like_credential_assignment(value: &str) -> bool {
     let lower = value.to_ascii_lowercase();
     let has_assignment = has_assignment_marker(&lower, value);
-    // Words that are bare needles above (`api_key`, `secret`, 密钥, …) are
-    // repeated here on purpose: this must stay the full credential-word
+    // Backstop only: by the time this rule runs, the needle check has
+    // already refused every word below that is also in `SENSITIVE_NEEDLES`
+    // (`api_key`, `secret`, 密钥, …), and the earlier token rule has
+    // consumed `token` — so the only words that can actually decide an
+    // outcome here are `password` / `passwd` / `pwd` / `passcode`. The
+    // duplicates stay on purpose: this must remain the full credential-word
     // view so the rule stays correct even if either list changes alone.
     has_assignment
         && [

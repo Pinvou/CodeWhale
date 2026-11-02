@@ -179,11 +179,14 @@ note, so tabs or full-width spaces cannot split a needle or a marker:
 
 - a run of 11+ digits, bridging the spaces, hyphens, dashes, and dots
   grouped numbers are conventionally written with (CN mobile numbers
-  are 11, resident ID cards 18; dates and version numbers stay under
-  it — `2024-02-01` bridges to 8),
+  are 11, resident ID cards 18; the boundary is the bridged digit
+  count, so date-like shapes stay under it — `2024-02-01` bridges to
+  8 — while long version strings do not — `130.0.6723.116` bridges to
+  11 and is refused),
 - credential needles — `api_key`, `apikey`, `api key`, `api-key`,
   `secret`, `private key`, `private_key`, the compound key kinds
-  `ssh key` / `deploy key` / `access key`, and the Chinese markers
+  `ssh key` / `deploy key` / `access key` in all three spellings
+  (space, underscore, hyphen), and the Chinese markers
   身份证 / 手机号 / 手机号码 / 电话号码 / 联系电话 / 密码 / 口令 / 密钥 /
   私钥, which are the real-world secret markers in the locales the
   source heuristics run in,
