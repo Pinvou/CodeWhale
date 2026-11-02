@@ -13,6 +13,19 @@ fn marker_file(tmp: &TempDir) -> std::path::PathBuf {
     tmp.path().join(".system-installed-version")
 }
 
+/// The v4-best-practices body shipped before the tool-name fix. Kept as a
+/// fixture (instead of a source constant) so the pinned digest in
+/// `system.rs` is checked against the real historic bytes on every run.
+const V4_LEGACY_BODY_FIXTURE: &str = include_str!("fixtures/v4-best-practices-legacy.md");
+
+fn sha256_hex(bytes: &[u8]) -> String {
+    use sha2::{Digest, Sha256};
+    Sha256::digest(bytes)
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect()
+}
+
 // ── fresh install ─────────────────────────────────────────────────────────
 
 #[test]
@@ -63,8 +76,8 @@ fn bundled_integration_skills_use_current_codewhale_commands_and_paths() {
         ("delegate", DELEGATE_BODY),
         ("best-of-n", BEST_OF_N_BODY),
         // Not in BUNDLED_SKILLS (legacy, retirement-only), but the shipped
-        // asset still reaches users who install or keep it, so the same
-        // visible-tool contract applies.
+        // asset still reaches installs until a launch retires their
+        // byte-exact copy, so the same visible-tool contract applies.
         ("v4-best-practices", V4_BEST_PRACTICES_BODY),
     ] {
         assert!(
@@ -87,7 +100,7 @@ fn bundled_integration_skills_use_current_codewhale_commands_and_paths() {
 // absent because it is a live, searchable tool (tools/file.rs ListDirTool),
 // not a phantom. Scope note: `v4-best-practices` is not in BUNDLED_SKILLS
 // (legacy/optional, never auto-installed) but is swept explicitly below;
-// `feishu` is opt-in only and not swept.
+// `feishu` is never installed and not swept.
 const PHANTOM_NAMES: &[&str] = &[
     "`File`",
     "`Bash`",
@@ -559,15 +572,21 @@ fn upgrade_from_v4_installs_pack_and_retires_unchanged_v4_best_practices() {
     let tmp = TempDir::new().unwrap();
     // Simulate a v4 install: marker + legacy skill bodies. The installed copy
     // carries the previously shipped body (still teaching read_file/edit_file),
-    // not the current asset.
+    // not the current asset. The digest self-check fails the suite if either
+    // the fixture or the pinned digest drifts.
+    assert_eq!(
+        sha256_hex(V4_LEGACY_BODY_FIXTURE.as_bytes()),
+        V4_BEST_PRACTICES_LEGACY_BODY_SHA256,
+        "legacy fixture must keep matching the pinned digest"
+    );
     assert_ne!(
-        V4_BEST_PRACTICES_LEGACY_BODY, V4_BEST_PRACTICES_BODY,
+        V4_LEGACY_BODY_FIXTURE, V4_BEST_PRACTICES_BODY,
         "legacy pin must track the previously shipped body"
     );
     fs::create_dir_all(skill_dir(&tmp, "v4-best-practices")).unwrap();
     fs::write(
         skill_file(&tmp, "v4-best-practices"),
-        V4_BEST_PRACTICES_LEGACY_BODY,
+        V4_LEGACY_BODY_FIXTURE,
     )
     .unwrap();
     fs::write(marker_file(&tmp), "4").unwrap();
@@ -596,7 +615,7 @@ fn upgrade_preserves_legacy_v4_body_plus_user_addendum() {
     fs::create_dir_all(skill_dir(&tmp, "v4-best-practices")).unwrap();
     fs::write(
         skill_file(&tmp, "v4-best-practices"),
-        format!("{V4_BEST_PRACTICES_LEGACY_BODY}\nAppended by the user\n"),
+        format!("{V4_LEGACY_BODY_FIXTURE}\nAppended by the user\n"),
     )
     .unwrap();
     fs::write(marker_file(&tmp), "4").unwrap();
@@ -606,6 +625,26 @@ fn upgrade_preserves_legacy_v4_body_plus_user_addendum() {
     assert!(
         skill_dir(&tmp, "v4-best-practices").exists(),
         "anything short of a byte-exact shipped body is a user edit and stays"
+    );
+}
+
+#[test]
+fn upgrade_retires_byte_exact_current_v4_body_installs() {
+    let tmp = TempDir::new().unwrap();
+    fs::create_dir_all(skill_dir(&tmp, "v4-best-practices")).unwrap();
+    fs::write(
+        skill_file(&tmp, "v4-best-practices"),
+        V4_BEST_PRACTICES_BODY,
+    )
+    .unwrap();
+    fs::write(marker_file(&tmp), "4").unwrap();
+
+    install_system_skills(tmp.path()).unwrap();
+
+    assert!(
+        !skill_dir(&tmp, "v4-best-practices").exists(),
+        "the shipped v4 asset is retired alongside the legacy body; only \
+         user edits are preserved"
     );
 }
 
