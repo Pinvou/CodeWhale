@@ -153,7 +153,8 @@ class AccountCIAdmissionTests(unittest.TestCase):
     def test_workflow_consumers_and_anonymous_lifecycle(self):
         source=(ROOT/'.github/workflows/pr-check.yml').read_text(encoding='utf-8')
         job=source.split('\n  account-platform-test:',1)[1].split('\n  windows-relay-dacl:',1)[0]
-        self.assertIn('PINVOU_LINUX_HEAVY_RUNNER',job)
+        routes=[line.strip() for line in job.splitlines() if line.lstrip().startswith('runs-on:')]
+        self.assertEqual(routes, ["""runs-on: ${{ fromJSON(vars.PINVOU_LINUX_HEAVY_RUNNER || vars.PINVOU_LINUX_RUNNER || '["ubuntu-22.04"]') }}"""])
         self.assertEqual(job.count('"127.0.0.1::5432"'),6);self.assertEqual(job.count('          --rm\n'),6)
         for variable,key in [('PINVOU_TEST_SCHEMA_DATABASE_URL','broker'),('F17_TEST_DATABASE_URL','audit'),('PINVOU_ACCOUNT_CLOSURE_TEST_DATABASE_URL','financial')]:
             self.assertIn(variable+': ${{ steps.account-pg.outputs.'+key+'_url }}',job)
