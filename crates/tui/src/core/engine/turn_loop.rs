@@ -3979,7 +3979,11 @@ impl Engine {
                             prepared.auto_approve,
                         )
                     };
-                    approval_force_prompt = registered_non_bypassable || armed_full_access_hold;
+                    // `armed_full_access_hold` adds nothing here: both sides
+                    // of the hold are gated on `registered_tool_forces_prompt`
+                    // (see `registered_tool_blocked_in_full_access`), so the
+                    // hold implies `registered_non_bypassable`.
+                    approval_force_prompt = registered_non_bypassable;
                 }
                 approval_description = if armed_full_access_hold {
                     format!(
@@ -4231,13 +4235,10 @@ impl Engine {
                         if repo_law_must_block_without_prompt(
                             self.session.approval_mode,
                             self.session.auto_approve,
-                        ) && !(self.session.ask_on_guardrail
-                            && !matches!(
-                                self.session.approval_mode,
-                                crate::tui::approval::ApprovalMode::Auto
-                                    | crate::tui::approval::ApprovalMode::Never
-                            ))
-                        {
+                        ) && !crate::core::authority::guardrail_prompts_answerable(
+                            self.session.approval_mode,
+                            self.session.ask_on_guardrail,
+                        ) {
                             approval_required = false;
                             approval_force_prompt = false;
                             blocked_error = Some(ToolError::permission_denied(format!(
@@ -4320,11 +4321,25 @@ impl Engine {
             // elevated approval grants. A hard block above still wins.
             if blocked_error.is_none() {
                 match requested_sandbox_escalation(&tool_name, &tool_input, &batch_sandbox_policy) {
+                    // Suggest always prompts; an armed host under an
+                    // answerable posture gets the same Suggest-path approval
+                    // flow with the model's justification on the card (the
+                    // armed arm adds its marker to the receipt).
                     Ok(Some((_policy, justification)))
-                        if batch_approval_mode == crate::tui::approval::ApprovalMode::Suggest =>
+                        if batch_approval_mode == crate::tui::approval::ApprovalMode::Suggest
+                            || crate::core::authority::guardrail_prompts_answerable(
+                                batch_approval_mode,
+                                self.session.ask_on_guardrail,
+                            ) =>
                     {
+                        let armed_marker =
+                            if batch_approval_mode == crate::tui::approval::ApprovalMode::Suggest {
+                                ""
+                            } else {
+                                " (armed guardrail approval)"
+                            };
                         let escalation_description = format!(
-                            "Sandbox escalation to '{}' for this exact call: {justification}",
+                            "Sandbox escalation to '{}' for this exact call: {justification}{armed_marker}",
                             tool_input["sandbox_permissions"]
                                 .as_str()
                                 .expect("validated sandbox permission")
@@ -4339,41 +4354,15 @@ impl Engine {
                         approval_required = true;
                         approval_force_prompt = true;
                     }
-                    Ok(Some(_))
-                        if !self.session.ask_on_guardrail
-                            || matches!(
-                                batch_approval_mode,
-                                crate::tui::approval::ApprovalMode::Auto
-                                    | crate::tui::approval::ApprovalMode::Never
-                            ) =>
-                    {
-                        // Unarmed, or armed under an unattended posture
-                        // (Auto-Review / Never): nobody can answer the card,
-                        // so the escalation keeps its fail-closed deny — the
-                        // arming guarantee does not override the posture.
+                    // The complement: unarmed, or armed under an unattended
+                    // posture (Auto-Review / Never) — nobody can answer the
+                    // card, so the escalation keeps its fail-closed deny; the
+                    // arming guarantee does not override the posture.
+                    Ok(Some(_)) => {
                         blocked_error = Some(ToolError::permission_denied(format!(
                             "Sandbox escalation requires a one-shot user approval, but the current {} posture cannot provide it. Switch to Ask or continue without escalation.",
                             batch_approval_mode.permission_chip_label()
                         )));
-                    }
-                    // Armed hosts get the same Suggest-path approval flow as
-                    // above, with the model's justification on the card.
-                    Ok(Some((_policy, justification))) => {
-                        let escalation_description = format!(
-                            "Sandbox escalation to '{}' for this exact call: {justification} (armed guardrail approval)",
-                            tool_input["sandbox_permissions"]
-                                .as_str()
-                                .expect("validated sandbox permission")
-                        );
-                        approval_description = if approval_force_prompt {
-                            format!(
-                                "{escalation_description}. Additional approval gate: {approval_description}"
-                            )
-                        } else {
-                            escalation_description
-                        };
-                        approval_required = true;
-                        approval_force_prompt = true;
                     }
                     Ok(None) => {}
                     Err(error) => blocked_error = Some(error),

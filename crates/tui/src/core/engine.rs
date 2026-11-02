@@ -4520,6 +4520,10 @@ impl Engine {
         // Emitted only on a narrowed turn, so the ordinary turn's metadata
         // stays byte-stable.
         if let Some(event) = policy_narrowing {
+            // This narrowing receipt ("Authority transition: …") is a
+            // different line family from the host-armed
+            // `Authority transition (host): …` (AuthorityTransition::render);
+            // both may coexist in one block.
             lines.push(format!("Authority narrowing: {}", event.reason().as_str()));
             lines.push(format!("Authority transition: {}", event.transition()));
             lines.push(format!("Authority narrowing status: {}", event.message()));
@@ -8725,13 +8729,7 @@ fn tool_ask_rule_decision_for_context(
         // doctrine; Auto-Review and Never postures keep it in every case —
         // their denials stay unconditional because nobody can answer the
         // card there even when armed.
-        if ask_on_guardrail
-            && !matches!(
-                approval_mode,
-                crate::tui::approval::ApprovalMode::Auto
-                    | crate::tui::approval::ApprovalMode::Never
-            )
-        {
+        if crate::core::authority::guardrail_prompts_answerable(approval_mode, ask_on_guardrail) {
             Some(ToolAskRuleDecision::Prompt(format!(
                 "Guardrail approval requested (ask-on-guardrail is armed): {}",
                 decision.reason()

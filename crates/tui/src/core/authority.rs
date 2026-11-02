@@ -184,6 +184,12 @@ impl AuthorityTransition {
 
     /// The single model-visible sentence. Renders both postures with their
     /// approval chip and arming state so the change is self-describing.
+    ///
+    /// Deliberately distinct from the engine's narrowing receipt (the
+    /// `Authority transition: …` line emitted under `Authority narrowing` —
+    /// a provenance-driven policy change): the `(host)` marker and the
+    /// machine-readable reason keep the two families separable when a
+    /// narrowing and a host flip land in the same block.
     pub(crate) fn render(&self) -> String {
         fn part(mode: &str, approval: ApprovalMode, armed: bool) -> String {
             format!(
@@ -402,6 +408,20 @@ pub(crate) fn provenance_can_inherit_standing_auto_authority(
 #[must_use]
 pub(crate) fn permission_posture_allows_questions(approval_mode: ApprovalMode) -> bool {
     approval_mode != ApprovalMode::Auto
+}
+
+/// Whether an armed host's guardrail prompts can actually be answered in
+/// this posture. Auto-Review and Never are unattended: even with the host's
+/// arming guarantee there is nobody at the card, so every armed face (deny
+/// face, repo-law holds, sandbox escalation) keeps its fail-closed deny
+/// there. This is the shared half of the armed-face doctrine — the posture
+/// question only; each face keeps its own arming and matching semantics.
+#[must_use]
+pub(crate) fn guardrail_prompts_answerable(
+    approval_mode: ApprovalMode,
+    ask_on_guardrail: bool,
+) -> bool {
+    ask_on_guardrail && !matches!(approval_mode, ApprovalMode::Auto | ApprovalMode::Never)
 }
 
 #[must_use]
