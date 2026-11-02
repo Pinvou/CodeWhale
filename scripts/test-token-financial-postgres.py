@@ -19,6 +19,9 @@ from urllib.parse import parse_qs, urlsplit
 ROOT = Path(__file__).resolve().parents[1]
 ACTORS = {"billing_migrator", "billing_schema_owner", "billing_service"}
 REQUIRED = {
+    "TestPendingUnusedExpiryRejectsInvalidProofTimestampPostgres",
+    "TestPendingUnusedExpiryCancellationOwnerPostgres",
+    "TestPendingUnusedExpiryLegacyCancellationFallbackPostgres",
     "TestPreparationFailurePreservesAcceptedUsagePostgres",
     "TestCircuitFailureBeforeDispatchPostgres",
     "TestCredentialRotationWindowReceiptPostgres",
@@ -97,6 +100,9 @@ ACCOUNT_REQUIRED = {
 }
 TOKEN_PACKAGE = "github.com/Pinvou/pinvou3/account-platform/internal/token"
 TOKEN_CHILD_REQUIRED = {
+    "TestPendingUnusedExpiryRejectsInvalidProofTimestampPostgres",
+    "TestPendingUnusedExpiryCancellationOwnerPostgres",
+    "TestPendingUnusedExpiryLegacyCancellationFallbackPostgres",
     "TestCancellationReceivedReadRechecksReservationPostgres",
     "TestCancellationFirstUserPreservesConfirmedReceiptPostgres",
     "TestModelTerminalObservationPreservesExpiryProofPostgres",
@@ -220,6 +226,23 @@ BILLING_LEAF_REQUIRED = {
 }
 BILLING_CHILD_REQUIRED = RETAINED_REQUIRED - BILLING_LEAF_REQUIRED
 EXACT_REQUIRED_CHILDREN = {
+    "TestPendingUnusedExpiryRejectsInvalidProofTimestampPostgres": {
+        "infinity", "tomorrow", "zero-time", "invalid-calendar",
+        "bad-first-valid-later", "wrong-identity-first-valid-later", "valid-first-later-bad",
+    },
+    "TestPendingUnusedExpiryCancellationOwnerPostgres": {
+        "model-claim-race",
+        "user-first-and-retry",
+        "model-after-user-command",
+        "model-review-after-lost-release-ack",
+        "prior-user-stop",
+        "no-intent-control",
+        "waiting-owner-does-not-starve-later-target",
+    },
+    "TestPendingUnusedExpiryLegacyCancellationFallbackPostgres": {
+        "model-origin",
+        "user-local-pre-dispatch",
+    },
     "TestModelTerminalObservationPreservesExpiryProofPostgres": {
         "hold-attempted",
         "hold-converged",

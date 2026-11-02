@@ -100,8 +100,9 @@ func (r *PostgresRepository) claimEmergencyCancellations(ctx context.Context, li
     SELECT cancellation.id FROM model_emergency_cancellations cancellation
     WHERE cancellation.status IN ('PENDING','LEASED') AND (cancellation.lease_until IS NULL OR cancellation.lease_until<$1)
     AND NOT EXISTS (SELECT 1 FROM usage_requests request WHERE request.id=cancellation.usage_request_id
-        AND request.cancellation_origin='USER' AND request.execution_status='REVIEW'
+        AND ((request.cancellation_origin='USER' AND request.execution_status='REVIEW'
         AND request.cancel_status='CANCEL_REQUESTED' AND request.error_class='cancel_hold_recovery_unconfirmed')
+        OR (`+pendingUnusedExpiryFenceSQL+`)))
     ORDER BY cancellation.requested_at,cancellation.id FOR UPDATE SKIP LOCKED LIMIT $2
 ), claimed AS (
     UPDATE model_emergency_cancellations cancellation SET status='LEASED',lease_until=$1::timestamptz+interval '30 seconds',attempts=attempts+1,updated_at=$1::timestamptz
@@ -138,9 +139,14 @@ func (r *PostgresRepository) requestEmergencyCancellation(ctx context.Context, c
 		return false, false, err
 	}
 	var cancellationOrigin string
-	var requestAlreadyRecorded bool
-	if err := tx.QueryRow(ctx, `SELECT request.cancellation_origin,EXISTS(SELECT 1 FROM model_emergency_cancellation_evidence evidence WHERE evidence.emergency_cancellation_id=$2 AND evidence.evidence_type='REQUESTED') FROM usage_requests request WHERE request.id=$1`, usage.ID, cancellationID).Scan(&cancellationOrigin, &requestAlreadyRecorded); err != nil {
+	var requestAlreadyRecorded, expiryOwnsPending bool
+	if err := tx.QueryRow(ctx, `SELECT request.cancellation_origin,EXISTS(SELECT 1 FROM model_emergency_cancellation_evidence evidence WHERE evidence.emergency_cancellation_id=$2 AND evidence.evidence_type='REQUESTED'),`+pendingUnusedExpiryFenceSQL+` FROM usage_requests request WHERE request.id=$1`, usage.ID, cancellationID).Scan(&cancellationOrigin, &requestAlreadyRecorded, &expiryOwnsPending); err != nil {
 		return false, false, err
+	}
+	// Claiming and fencing are separate transactions. An original expiry
+	// fence may have committed after the claim; let that proof owner finish.
+	if expiryOwnsPending {
+		return false, false, ErrForbidden
 	}
 	// The original USER proof owns this unconfirmed pre-dispatch release.
 	// Keep its identity and state intact so the existing recovery can finish;

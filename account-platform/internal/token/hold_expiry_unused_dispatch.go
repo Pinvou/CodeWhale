@@ -302,3 +302,47 @@ func expiryJSONEqual(left, right []byte) bool {
 	r, re := decode(right)
 	return le == nil && re == nil && reflect.DeepEqual(l, r)
 }
+
+// Only intact expiry-owned unused dispatches are protected. Legacy MODEL or
+// LOCAL_PRE_DISPATCH takeover layouts retain their existing recovery paths.
+// This predicate is shared by queue selection and the locked command recheck.
+var pendingUnusedExpiryFenceSQL = `COALESCE((
+ request.organization_id IS NULL AND request.canonicalization_version=1
+ AND request.idempotency_namespace='model-inference' AND request.maximum_microcredits>=0
+ AND request.hold_id IS NOT NULL AND request.cancel_requested_at IS NOT NULL
+ AND request.cancel_status='CANCEL_REQUESTED'
+ AND ((request.execution_status='HOLD_RESERVED' AND request.status='RESERVED' AND request.settlement_status='HOLD_ACTIVE')
+   OR (request.execution_status='REVIEW' AND request.status='REVIEW' AND request.settlement_status='REVIEW' AND request.error_class='cancel_hold_recovery_unconfirmed'))
+ AND EXISTS(SELECT 1 FROM usage_dispatch_intents intent WHERE intent.usage_request_id=request.id
+   AND intent.worker_acquired_at IS NULL AND intent.worker_lease_owner IS NULL AND intent.worker_lease_until IS NULL
+   AND NOT intent.adapter_supports_idempotency AND octet_length(intent.encrypted_envelope)>0 AND btrim(intent.key_id)<>''
+   AND intent.upstream_idempotency_key='pinvou-'||request.id::text
+   AND intent.envelope_integrity=encode(sha256(intent.encrypted_envelope),'hex'))
+ AND EXISTS(SELECT 1 FROM LATERAL (
+   SELECT first_expiry.* FROM usage_cancellation_evidence first_expiry WHERE first_expiry.usage_request_id=request.id
+   AND first_expiry.evidence_type='CANCEL_REQUESTED' AND first_expiry.adapter_version='hold-expiry-v1'
+   ORDER BY first_expiry.occurred_at,first_expiry.id LIMIT 1) expiry
+   WHERE expiry.provider_id IS NULL AND expiry.upstream_reference_digest IS NULL
+   AND jsonb_typeof(expiry.sanitized_evidence->'expires_at')='string'
+   AND expiry.sanitized_evidence->>'expires_at' ~ '^[0-9]{4}-(0[1-9]|1[0-2])-([0-2][0-9]|3[01])T([01][0-9]|2[0-3]):[0-5][0-9]:[0-5][0-9]([.][0-9]+)?(Z|[+-]([01][0-9]|2[0-3]):[0-5][0-9])$'
+   AND CASE WHEN pg_input_is_valid(expiry.sanitized_evidence->>'expires_at','timestamp with time zone')
+     THEN (expiry.sanitized_evidence->>'expires_at')::timestamptz<>timestamptz '0001-01-01 00:00:00+00'
+     ELSE false END
+   AND expiry.sanitized_evidence=jsonb_build_object('usage_request_id',request.id,'hold_id',request.hold_id,'wallet_id',request.wallet_id,'max_microcredits',request.maximum_microcredits::text,'expires_at',expiry.sanitized_evidence->'expires_at'))
+ AND ((request.cancellation_origin='NONE' AND request.delivery_status='NOT_STARTED' AND request.user_stopped_at IS NULL)
+ OR (request.cancellation_origin='USER' AND request.delivery_status='USER_STOPPED' AND request.cancel_requested_at=request.user_stopped_at
+   AND EXISTS(SELECT 1 FROM usage_cancel_commands command
+    JOIN usage_cancellation_evidence stopped ON stopped.usage_request_id=command.usage_request_id
+    WHERE command.usage_request_id=request.id AND command.user_id=request.user_id AND command.cancellation_version=1
+     AND command.request_fingerprint=encode(sha256(decode('` + hex.EncodeToString([]byte(cancellationFingerprintDomain)) + `','hex')||convert_to(request.id::text,'UTF8')),'hex')
+     AND command.created_at=request.user_stopped_at AND stopped.occurred_at=command.created_at
+     AND stopped.evidence_type='UNSUPPORTED' AND stopped.adapter_version=request.request_snapshot->>'adapter_version'
+     AND stopped.provider_id IS NULL AND stopped.upstream_reference_digest IS NULL
+     AND stopped.sanitized_evidence=jsonb_build_object('capability','UNSUPPORTED','pre_dispatch',false))))
+),false)`
+
+func pendingUnusedExpiryFenceTx(ctx context.Context, tx pgx.Tx, id uuid.UUID) (bool, error) {
+	var pending bool
+	err := tx.QueryRow(ctx, `SELECT `+pendingUnusedExpiryFenceSQL+` FROM usage_requests request WHERE request.id=$1`, id).Scan(&pending)
+	return pending, err
+}

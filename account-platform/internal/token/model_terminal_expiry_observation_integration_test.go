@@ -41,7 +41,7 @@ func newModelExpiryObservationFixture(t *testing.T) modelExpiryObservationFixtur
 	return modelExpiryObservationFixture{r, funds, bp, ctx, client, service}
 }
 
-func (f modelExpiryObservationFixture) prepare(t *testing.T, layout string) (UsageRequest, uuid.UUID, *billing.ExpiredHoldRecoveryWorker) {
+func (f modelExpiryObservationFixture) preparedExpiry(t *testing.T, layout string) (UsageRequest, uuid.UUID) {
 	t.Helper()
 	u, envelope, hold := jR6UnboundSeed(t, f.r, f.funds, f.bp, f.client, f.ctx)
 	if layout == "hold" {
@@ -73,13 +73,23 @@ func (f modelExpiryObservationFixture) prepare(t *testing.T, layout string) (Usa
 	if _, err := f.bp.Exec(f.ctx, `UPDATE usage_holds SET expires_at=clock_timestamp()-interval '1 minute' WHERE id=$1`, hold.ID); err != nil {
 		t.Fatal(err)
 	}
+	prepared, err := f.r.GetUsage(f.ctx, u.ID)
+	if err != nil || prepared.HoldID == nil || *prepared.HoldID != hold.ID {
+		t.Fatal("original acknowledged hold", err)
+	}
+	return prepared, target
+}
+
+func (f modelExpiryObservationFixture) prepare(t *testing.T, layout string) (UsageRequest, uuid.UUID, *billing.ExpiredHoldRecoveryWorker) {
+	t.Helper()
+	u, target := f.preparedExpiry(t, layout)
 	proof := &emergencyLostExpiryProofClient{service: f.service}
 	expiry := billing.NewExpiredHoldRecoveryWorker(f.funds, proof, time.Minute)
 	if err := expiry.RunOnce(f.ctx); err != nil {
 		t.Fatal(err)
 	}
 	confirmed, err := f.r.GetUsage(f.ctx, u.ID)
-	if err != nil || !proof.lost || confirmed.ExecutionStatus != "CANCELLED_BEFORE_DISPATCH" || confirmed.CancelStatus != "LOCAL_CONFIRMED" || confirmed.SettlementStatus != "RELEASED" || confirmed.HoldID == nil || *confirmed.HoldID != hold.ID {
+	if err != nil || !proof.lost || confirmed.ExecutionStatus != "CANCELLED_BEFORE_DISPATCH" || confirmed.CancelStatus != "LOCAL_CONFIRMED" || confirmed.SettlementStatus != "RELEASED" || confirmed.HoldID == nil || *confirmed.HoldID != *u.HoldID {
 		t.Fatal("original expiry did not actually confirm its exact released hold", confirmed, err)
 	}
 	return confirmed, target, expiry
