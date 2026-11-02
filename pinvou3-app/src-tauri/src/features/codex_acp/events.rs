@@ -1030,7 +1030,9 @@ impl EventBridge {
         // full journal. Flush this bridge's append buffer first so the scan
         // reads the current on-disk state (turn boundaries are already
         // flushed synchronously; this only covers buffered chunk events).
-        let _ = self.timeline_writer.lock().flush();
+        // flush_journal logs a flush failure instead of swallowing it — the
+        // scan then just reads whatever is durable.
+        self.flush_journal();
         let events = match load_timeline(&self.pinvou_session_id) {
             Ok(events) => events,
             Err(error) => {
@@ -1314,7 +1316,7 @@ impl EventBridge {
     pub fn flush_journal(&self) {
         if let Err(error) = self.timeline_writer.lock().flush() {
             // Log hygiene: the IO error never carries session ids or paths.
-            eprintln!("[codex-acp] timeline journal flush failed: {error}");
+            eprintln!("[pinvou3-app] timeline journal flush failed: {error}");
         }
     }
 
