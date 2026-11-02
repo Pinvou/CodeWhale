@@ -165,6 +165,16 @@ Deployment PostgreSQL contracts reuse a local image only when its recorded
 repository digest matches the selected pinned manifest. They pull that exact
 manifest only on a cache miss and validate it again before running contracts;
 an image tag or dependency preparation alone never counts as a test pass.
+During dependency preparation, an available runner Go download archive is
+mounted read-only as a file proxy, and configured local file proxies are
+translated to container paths. Actions jobs with a configured Go cache and host
+Go toolchain fill missing archives from the isolated source copy first; standalone
+Docker-only invocations do not require host Go. The disposable module directory
+remains fresh;
+`go mod verify` and the configured checksum/private-module policy stay enabled.
+An available npm content-addressed cache is mounted only for preparation with
+prefer-offline lookup; npm lockfile integrity checks remain enabled. Verification
+containers retain their network isolation and do not receive these cache mounts.
 
 Repository administrators can set `PINVOU_LINUX_RUNNER` to a JSON label array
 (for example `["self-hosted","Linux","pinvou3"]`) to route x64 Linux jobs to
