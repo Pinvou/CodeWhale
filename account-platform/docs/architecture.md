@@ -103,7 +103,9 @@ flowchart LR
 | Event Relay ×2 | Account/Billing 事务 Outbox 投递、重试和死信 | Account/Billing Outbox/Inbox | Token 本地事件没有投递入口；现有消息不能替代缺失的跨域 Saga |
 | New API | OpenAI 兼容代理、供应商调用日志和用量证据 | 独立数据库 | 仍需通过 Adapter 契约补齐协议、取消和证据能力 |
 
-四个对外服务由同一客户端兼容策略包裹，所有响应声明 API 契约版本和当前最小支持版本。正式清单至少包含当前桌面小版本及前两个小版本，旧版的 `sunset_at` 必须晚于后继正式发布90天，普通弃用通知必须至少提前60天；严重安全例外可缩至7天，但清单必须携带审批号。桌面直连请求及经 CodeWhale 发出的平台模型请求都使用 `X-Pinvou-Client-Version` 标识真实制品版本。版本到期后仅远程写操作返回稳定 `426 CLIENT_UPGRADE_REQUIRED`、`Link: rel="latest-version"` 和 HTTPS 升级地址；只读远程数据、本地数据与本地独立模型不经过该淘汰门禁。
+当前 `clientcompat` 策略只将发布清单提供给 Token gateway readiness；`Policy.Wrap` / `Policy.WrapExcept` 未挂载到 Account、Billing、Token 或 Portal 的生产 HTTP 路由，不能据此宣称四服务已统一返回版本响应头或已启用全局 `426 CLIENT_UPGRADE_REQUIRED`。Account 的 `WithClientCompatibility` 另用于内部服务版本查询，也不安装这个 HTTP wrapper。实际入口、默认配置及验证边界见 [HTTP 客户端兼容层范围](client-compatibility-scope.md)；#1954 澄清当前装配范围，不代替未来改变装配的行为决策。
+
+策略库保留 N/N-1/N-2 清单、后继发布后至少90天支持、普通弃用提前60天及需审批号的7天安全例外校验；其 wrapper 单测覆盖过期远程写请求的 `426 CLIENT_UPGRADE_REQUIRED`、`Link: rel="latest-version"` 和 HTTPS 升级地址，以及读取豁免。这些库能力和桌面请求携带 `X-Pinvou-Client-Version`，不等于生产路由已经启用淘汰门禁。未来装配须单独明确路由、方法、豁免和旧客户端兼容承诺，不得以版本检查替代权限、幂等或资金事实校验。
 
 ### 3.1 仓库交付形态
 
