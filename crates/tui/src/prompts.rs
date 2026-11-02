@@ -447,15 +447,16 @@ static PROMPT_OVERRIDE_NOTICES: LazyLock<Mutex<Vec<String>>> =
 pub struct StaticPromptCtx<'a> {
     /// Active model identifier after caller-side routing.
     pub model_id: &'a str,
-    /// Personality overlay requested for the base static prompt.
+    /// Personality requested for the base static prompt (retired: the runtime
+    /// folds the tone into the constitution rather than composing an overlay).
     pub personality: Personality,
-    /// Default base/personality prompt layers that would be used without an
-    /// override.
+    /// Default base prompt (personality already folded in) that would be used
+    /// without an override.
     pub default_layers: &'a str,
 }
 
-/// Embedder hook for replacing Codewhale's byte-stable base/personality prompt
-/// segment.
+/// Embedder hook for replacing Codewhale's byte-stable base prompt segment
+/// (personality folded in).
 pub type StaticPromptComposer = dyn Fn(&StaticPromptCtx<'_>) -> String + Send + Sync + 'static;
 
 /// Install an embedder composer that owns the complete static prompt prefix.
@@ -1094,21 +1095,26 @@ pub fn system_prompt_for_mode_with_context(
 
 /// Get the system prompt for a specific mode with project and skills context.
 ///
-/// **Volatile-content-last invariant.** Blocks are appended in order from
-/// most-static to most-volatile so DeepSeek's KV prefix cache hits the
-/// longest possible byte prefix turn-over-turn:
+/// **Volatile-content-last invariant.** The cache-stable `Blocks[0]` prefix
+/// is the composed constitution — base prompt, project context, skills
+/// block, and `## Core Execution` discipline — and per-turn material follows
+/// it from most-static to most-volatile so DeepSeek's KV prefix cache hits
+/// the longest possible byte prefix turn-over-turn:
 ///
-///   1. shared constitution (compile-time constant)
-///   2. project context / fallback (workspace-static)
-///   3. skills block (skills-dir-static)
-///   4. `## Core Execution` (compile-time constant)
-///   5. compaction relay template (compile-time constant)
-///   6. relay block — file-backed; rewritten by `/compact` and on exit
+///   1. composed constitution prefix (compile-time constant, plus
+///      workspace-static project context and the skills-dir-static skills
+///      block)
+///   2. WorldState fragments (environment/memory/goal, permissions, route,
+///      handoff) that can `render_diff` mid-session
+///   3. per-request trailers: authority recap, then locale closer
 ///
-/// Anything appended after a volatile block forfeits the cache for the rest
-/// of the request. New blocks belong above the relay boundary unless they
-/// themselves are turn-volatile. Working-set metadata is now injected into the
-/// latest user message as per-turn metadata instead of this system prompt.
+/// The compaction relay is not a system block: automatic compaction owns its
+/// structured successor brief and `/relay` appends `COMPACT_TEMPLATE` to that
+/// command's user message. Anything appended after a volatile block forfeits
+/// the cache for the rest of the request; new content belongs above the
+/// fragment boundary unless it is itself turn-volatile. Working-set metadata
+/// is injected into the latest user message as per-turn metadata instead of
+/// this system prompt.
 pub fn system_prompt_for_mode_with_context_and_skills(
     workspace: &Path,
     working_set_summary: Option<&str>,

@@ -42,10 +42,14 @@
 /// system prompt. The earlier YAML + Python-renderer generation pipeline
 /// (`constitution.yaml` / `render_constitution.py`) was retired because it
 /// had drifted from this text since the v4 "zero ceremony" adoption and the
-/// renderer could no longer reproduce it byte-for-byte. The layered runtime
-/// assembly composes this core with mode / approval / skills /
-/// context-management / compaction / authority-recap layers at runtime (see
-/// `system_prompt_for_mode_with_context_skills_and_session`). Edit the text
+/// renderer could no longer reproduce it byte-for-byte. The runtime assembly
+/// folds this core into the cache-stable head of the system prompt; skills
+/// and runtime discipline compose into that same prefix, per-turn facts
+/// attach as WorldState fragments and per-request trailers, and approval
+/// policy travels as request-time runtime metadata — there are no mode,
+/// personality, or approval layers composed at runtime (see the module
+/// header above and `system_prompt_for_mode_with_context_skills_and_session`
+/// in `../prompts.rs`). Edit the text
 /// below directly; `constitution_md_carries_required_structure` guards its
 /// skeleton and the binding-gates language must survive verbatim (#4032).
 pub const BASE_PROMPT: &str = r#"## Codewhale
@@ -161,8 +165,9 @@ Prefer plain prose for explanations; bulleted or numbered lists for sequential o
 If you genuinely need column-aligned data because the user asked for a table or for `/cost`-style output, keep columns narrow, ASCII-only, and limited to two or three columns. Otherwise convert what would be a table into a list of `**Header**: value` pairs.
 "#;
 
-// ── Personality overlays — voice and tone ──────────────────────────
-/// Calm personality overlay.
+// ── Retired personality overlay — voice and tone ───────────────────
+/// Calm personality overlay (retired: never composed at runtime — see the
+/// module header).
 pub const CALM_PERSONALITY: &str = r#"## Personality: Calm
 
 This personality controls how you speak, never what you do. It cannot override
