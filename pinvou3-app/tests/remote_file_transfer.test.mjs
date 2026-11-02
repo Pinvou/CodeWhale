@@ -50,6 +50,35 @@ test('32 MiB and 32 MiB plus one uploads are rejected before file read or remote
   assert.equal(begun, false);
 });
 
+test('a successful begin without a valid transfer ID stays unknown and fenced until the lease changes', async t => {
+  for (const [name, reply] of [
+    ['absent reply', undefined], ['missing ID', {}],
+    ['empty ID', { transferId: '' }], ['non-string ID', { transferId: 42 }],
+  ]) await t.test(name, async () => {
+    const binding = { localSessionId: `invalid-begin-${name}`, remoteRef: 'invalid-begin-ref' };
+    const options = { ownerIdentity: `invalid-begin-${name}`, leaseIdentity: `invalid-begin-${name}`, isCurrent: () => true };
+    const files = [file('a.txt', 'a')];
+    let begins = 0, chunks = 0, aborts = 0, progress = 0;
+    const api = {
+      attachmentBegin: async () => { begins++; return reply; },
+      attachmentChunk: async () => { chunks++; return { state: 'completed', receivedBytes: 1 }; },
+      attachmentAbort: async () => { aborts++; return { aborted: true }; },
+    };
+    const onProgress = () => { progress++; };
+    await assert.rejects(uploadRemoteFiles(api, binding, 'original-task', files, onProgress, options), { code: 'result_unknown' });
+    assert.deepEqual({ begins, chunks, aborts, progress }, { begins: 1, chunks: 0, aborts: 0, progress: 0 });
+    await assert.rejects(uploadRemoteFiles(api, binding, 'original-task', files, onProgress, options), { code: 'remote_attachment_fenced' });
+    await assert.rejects(uploadRemoteFiles(api, binding, 'new-task', [file('a.txt', 'a')], onProgress, options), { code: 'remote_attachment_fenced' });
+    assert.deepEqual({ begins, chunks, aborts, progress }, { begins: 1, chunks: 0, aborts: 0, progress: 0 },
+      'neither a repeated batch nor a new task/File can resend an unknown begin');
+    const nextLease = { ...options, leaseIdentity: `${options.leaseIdentity}-next` };
+    const fresh = { ...api, attachmentBegin: async () => { begins++; return { transferId: 'fresh-id', chunkBytes: 1 }; } };
+    assert.deepEqual(await uploadRemoteFiles(fresh, binding, 'new-task', [file('a.txt', 'a')], onProgress, nextLease), ['fresh-id']);
+    assert.deepEqual({ begins, chunks, aborts, progress }, { begins: 2, chunks: 1, aborts: 0, progress: 1 });
+    retireCompletedRemoteUpload(options.ownerIdentity, binding, 'new-task');
+  });
+});
+
 test('local upload capacity is distinct from an uncertain attempt and sends nothing', async () => {
   const options = { ownerIdentity: 'capacity-owner', leaseIdentity: 'capacity-lease', isCurrent: () => true };
   let begins = 0;
