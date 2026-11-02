@@ -2169,6 +2169,7 @@ pub(crate) async fn connect_controlling_device(
 #[path = "controlling_resume_projection_tests.rs"]
 mod resume_projection_tests;
 
+#[cfg(test)]
 #[path = "controlling_inbound_tests.rs"]
 mod inbound_tests;
 

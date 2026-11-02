@@ -204,6 +204,7 @@ impl ControllingLane for Lane {
                 observe(&event);
             }
             match &event {
+                ControllerLaneEvent::Failed(_) => return Some(event),
                 ControllerLaneEvent::Disconnected(_) => {
                     super::super::relay_transport::disconnect_test_transport(&self.sender);
                     return Some(event);
@@ -314,6 +315,38 @@ fn assert_raw(f: &Fixture, status: &Value) {
     ] {
         assert_eq!(status["lease"][key].as_str(), Some(value.as_str()));
     }
+}
+
+#[test]
+fn inbound_failure_during_resume_retires_lane_without_connected_publication() {
+    bounded(|| {
+        runtime(async {
+            for reason in [
+                ControllerLaneFailure::ItemCapacity,
+                ControllerLaneFailure::ByteBudget,
+                ControllerLaneFailure::Closed,
+            ] {
+                let f = Fixture::new();
+                let mut lane = f.lane();
+                lane.events.insert(1, ControllerLaneEvent::Failed(reason));
+                let mut states = Vec::new();
+                serve(&f, &mut lane, &mut |status| states.push(status.kind())).await;
+                assert_eq!(
+                    states,
+                    [
+                        ControllingStatusKind::Reconnecting,
+                        ControllingStatusKind::Error
+                    ]
+                );
+                assert_eq!(f.manager.status().kind(), ControllingStatusKind::Error);
+                assert!(f.business.with_active(&f.lease.context, || Ok(())).is_err());
+                assert!(matches!(
+                    lane.events.front(),
+                    Some(ControllerLaneEvent::Frame(_))
+                ));
+            }
+        })
+    });
 }
 
 #[test]
