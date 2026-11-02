@@ -183,7 +183,7 @@ impl ToolSpec for TasksTool {
             );
             properties.insert(
                 "model".to_string(),
-                json!({ "type": "string", "description": "(action=create)" }),
+                json!({ "type": "string", "description": "Model id for the task's session, used as given. Omit to use the configured default model. Required when model_provider or model_provider_id is set. (action=create)" }),
             );
             properties.insert(
                 "workspace".to_string(),
@@ -191,11 +191,11 @@ impl ToolSpec for TasksTool {
             );
             properties.insert(
                 "mode".to_string(),
-                json!({ "type": "string", "enum": ["agent", "plan", "operate"], "description": "(action=create)" }),
+                json!({ "type": "string", "enum": ["agent", "plan", "operate"], "description": "Operating mode for the task's session. 'plan' runs read-only: shell is disabled even if allow_shell is true, and approvals stay enabled. 'agent' (default) and 'operate' run with the task's allow_shell/trust_mode/auto_approve values. (action=create)" }),
             );
             properties.insert(
                 "allow_shell".to_string(),
-                json!({ "type": "boolean", "description": "Whether the task's session may run shell commands. Omit to inherit the current session's allow-shell setting. (action=create)" }),
+                json!({ "type": "boolean", "description": "Whether the task's session may run shell commands. Passing true or false is always honored; omitting falls back to the configured durable-task allow-shell setting, which is false unless shell execution is enabled in config. (action=create)" }),
             );
             properties.insert(
                 "trust_mode".to_string(),
@@ -223,19 +223,19 @@ impl ToolSpec for TasksTool {
             );
             properties.insert(
                 "timeout_ms".to_string(),
-                json!({ "type": "integer", "minimum": 1000, "maximum": 600000, "description": "(action=gate_run)" }),
+                json!({ "type": "integer", "minimum": 1000, "maximum": 600000, "description": "Kill deadline for the gate command in milliseconds. Defaults to 120000; values are clamped into 1000-600000. On expiry the process group is killed, the result reports timed_out with no exit code, and any partial output is kept. (action=gate_run)" }),
             );
             properties.insert(
                 "attempt_group_id".to_string(),
-                json!({ "type": "string", "description": "(action=pr_attempt_record)" }),
+                json!({ "type": "string", "description": "Label grouping related attempts for correlation across pr_attempt_list and pr_attempt_read; shown in the task timeline. Any string; a fresh random group id is generated when omitted. (action=pr_attempt_record)" }),
             );
             properties.insert(
                 "attempt_index".to_string(),
-                json!({ "type": "integer", "minimum": 1, "description": "(action=pr_attempt_record)" }),
+                json!({ "type": "integer", "minimum": 1, "description": "This attempt's position within its group (1-based), shown as 'index/count' in the task timeline. Defaults to 1; values below 1 are clamped to 1. (action=pr_attempt_record)" }),
             );
             properties.insert(
                 "attempt_count".to_string(),
-                json!({ "type": "integer", "minimum": 1, "description": "(action=pr_attempt_record)" }),
+                json!({ "type": "integer", "minimum": 1, "description": "Total number of attempts intended for the group, shown as 'index/count' in the task timeline. Defaults to 1; values below 1 are clamped to 1. (action=pr_attempt_record)" }),
             );
             properties.insert(
                 "summary".to_string(),
@@ -243,12 +243,12 @@ impl ToolSpec for TasksTool {
             );
             properties.insert(
                 "verification".to_string(),
-                json!({ "type": "array", "items": { "type": "string" }, "description": "(action=pr_attempt_record)" }),
+                json!({ "type": "array", "items": { "type": "string" }, "description": "Verification evidence lines recorded with the attempt, returned by pr_attempt_list and pr_attempt_read. Omit for an empty list; non-string entries are dropped. (action=pr_attempt_record)" }),
             );
         }
         properties.insert(
             "attempt_id".to_string(),
-            json!({ "type": "string", "description": "(action=pr_attempt_read/preflight)" }),
+            json!({ "type": "string", "description": "Attempt id to fetch, as returned by pr_attempt_list. Matched exactly; an unknown id fails with 'Attempt not found'. (action=pr_attempt_read/preflight)" }),
         );
         properties.insert(
             "task_id".to_string(),
@@ -256,7 +256,7 @@ impl ToolSpec for TasksTool {
         );
         properties.insert(
             "limit".to_string(),
-            json!({ "type": "integer", "minimum": 1, "maximum": 100, "default": 20, "description": "(action=list)" }),
+            json!({ "type": "integer", "minimum": 1, "maximum": 100, "default": 20, "description": "Maximum number of tasks returned, newest first. Defaults to 20; values are clamped into 1-100. (action=list)" }),
         );
         json!({
             "type": "object",
