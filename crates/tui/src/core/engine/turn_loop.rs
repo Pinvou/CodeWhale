@@ -5,6 +5,8 @@
 //! event handling, tool planning/execution, LSP post-edit hooks, capacity
 //! checkpoints, and loop termination.
 
+use std::sync::atomic::{AtomicU64, Ordering};
+
 use super::dispatch::normalize_schema_json_containers;
 use super::*;
 use crate::core::authority::{ToolPermission, resolve_tool_permission};
@@ -20,6 +22,32 @@ use crate::tools::tool_call_budget::ToolCallBudget;
 use codewhale_core::request::{PrimaryTurnRequest, prepare_primary_turn_request};
 
 const MAX_APPROVAL_INTENT_SUMMARY_CHARS: usize = 2_000;
+
+/// Monotonic counter for rewritten text-fallback tool-call ids. The wall-clock
+/// millis alone can repeat within one process, so the counter disambiguates
+/// incarnations; the millis keep ids unique across engine restarts within the
+/// same session, where the approval receipt log persists.
+static FALLBACK_TOOL_ID_COUNTER: AtomicU64 = AtomicU64::new(0);
+
+/// Rewrite a parser-generated fallback tool-call id into a fresh incarnation
+/// (`<parsed id>#<unix millis>x<counter>`).
+///
+/// `tool_parser` restarts its generated ids at 1 for every response, and the
+/// approval receipt log rejects a tool-call id that was asked more than once,
+/// so every ingestion must mint a never-before-seen id for the session. The
+/// id is opaque to everything downstream (events, approvals, receipts,
+/// session persistence).
+pub(super) fn fresh_fallback_tool_id(parsed_id: &str) -> String {
+    let unix_millis = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|elapsed| elapsed.as_millis())
+        .unwrap_or_default();
+    format!(
+        "{parsed_id}#{}x{}",
+        unix_millis,
+        FALLBACK_TOOL_ID_COUNTER.fetch_add(1, Ordering::Relaxed)
+    )
+}
 
 /// Most images a single tool result may attach to its message.
 ///
@@ -2749,16 +2777,23 @@ impl Engine {
                 let parsed = tool_parser::parse_tool_calls(&current_text_raw);
                 final_text = parsed.clean_text;
                 for call in parsed.tool_calls {
+                    // The fallback parser restarts its generated ids at 1 for
+                    // every response, so two adjacent text-tool responses both
+                    // present `xml_tool_1`. Approval receipts are keyed by
+                    // tool-call id and reject a repeated ask, so each parsed id
+                    // is rewritten into a fresh incarnation here; everything
+                    // downstream treats the id as opaque.
+                    let id = fresh_fallback_tool_id(&call.id);
                     let _ = self
                         .tx_event
                         .send(Event::ToolCallStarted {
-                            id: call.id.clone(),
+                            id: id.clone(),
                             name: call.name.clone(),
                             input: call.args.clone(),
                         })
                         .await;
                     tool_uses.push(ToolUseState {
-                        id: call.id,
+                        id,
                         name: call.name,
                         input: call.args,
                         caller: None,

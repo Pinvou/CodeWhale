@@ -9433,6 +9433,135 @@ async fn injected_model_receives_malformed_tool_feedback_and_recovers() {
 }
 
 #[tokio::test]
+async fn injected_model_fallback_text_tool_ids_stay_unique_across_responses() {
+    use crate::llm_client::mock::{MockLlmClient, canned};
+
+    // Regression: the text-fallback parser restarts its generated ids at 1
+    // for every response, so two adjacent text-encoded tool responses both
+    // presented `xml_tool_1`. Approval receipts are keyed by tool-call id and
+    // reject a repeated ask, so every ingestion must mint a fresh incarnation
+    // or the second call can never be approved or executed.
+    let workspace = tempdir().expect("tempdir");
+    fs::write(workspace.path().join("fallback-1.txt"), "first").expect("write fixture");
+    fs::write(workspace.path().join("fallback-2.txt"), "second").expect("write fixture");
+    let fallback_turn = |message_id: &str, path: &str| {
+        vec![
+            canned::message_start(message_id),
+            canned::text_block_start(0),
+            canned::text_delta(
+                0,
+                &format!(
+                    "Reading the fixture. <invoke name=\"File\">\
+                     <parameter name=\"action\">read</parameter>\
+                     <parameter name=\"path\">{path}</parameter></invoke>"
+                ),
+            ),
+            canned::block_stop(0),
+            canned::message_delta("end_turn", None),
+            canned::message_stop(),
+        ]
+    };
+    let mock = std::sync::Arc::new(MockLlmClient::new(vec![
+        fallback_turn("mock_msg_fallback_1", "fallback-1.txt"),
+        fallback_turn("mock_msg_fallback_2", "fallback-2.txt"),
+        canned::simple_text_turn("Done."),
+    ]));
+    let client: crate::core::model_client::SharedModelClient = mock.clone();
+    let (engine, handle) = Engine::new_with_model_client(
+        deterministic_engine_config(workspace.path()),
+        &Config::default(),
+        client,
+    );
+    let task = tokio::spawn(engine.run());
+    handle
+        .send(external_user_message_op(
+            "Read both fixtures from plain text.",
+            AppMode::Agent,
+            &Config::default(),
+        ))
+        .await
+        .expect("send fallback trajectory");
+
+    let mut started_ids = Vec::new();
+    let mut rx = handle.rx_event.write().await;
+    while let Some(event) = tokio::time::timeout(model_turn_event_timeout(), rx.recv())
+        .await
+        .expect("timed out waiting for fallback trajectory")
+    {
+        match event {
+            Event::ToolCallStarted { id, name, .. } => {
+                assert_eq!(name, "File");
+                started_ids.push(id);
+            }
+            Event::ToolCallComplete { id, result, .. } => {
+                let result = result.expect("fallback tool call closes with a result");
+                assert!(
+                    result.success,
+                    "fallback tool call must execute: {result:?}"
+                );
+                assert!(
+                    started_ids.contains(&id),
+                    "results must carry the started id, got {id}"
+                );
+            }
+            Event::TurnComplete { status, error, .. } => {
+                assert_eq!(status, TurnOutcomeStatus::Completed, "{error:?}");
+                break;
+            }
+            _ => {}
+        }
+    }
+    drop(rx);
+
+    assert_eq!(
+        started_ids.len(),
+        2,
+        "both fallback responses must produce a tool call: {started_ids:?}"
+    );
+    assert_ne!(
+        started_ids[0], started_ids[1],
+        "adjacent fallback responses must not share a tool-call id"
+    );
+    for id in &started_ids {
+        let (parsed_prefix, incarnation) = id
+            .split_once('#')
+            .expect("incarnated fallback id keeps its parsed prefix");
+        assert!(
+            parsed_prefix.starts_with("xml_tool_"),
+            "fallback id must keep the parser shape as a prefix: {id}"
+        );
+        let (millis, counter) =
+            incarnation.split_once('x').expect("incarnation must be <millis>x<counter>");
+        assert!(
+            !millis.is_empty() && millis.bytes().all(|byte| byte.is_ascii_digit()),
+            "incarnation millis must be numeric: {id}"
+        );
+        assert!(
+            !counter.is_empty() && counter.bytes().all(|byte| byte.is_ascii_digit()),
+            "incarnation counter must be numeric: {id}"
+        );
+    }
+    assert_eq!(
+        mock.captured_requests().len(),
+        3,
+        "each fallback tool result must continue the turn"
+    );
+    handle.send(Op::Shutdown).await.expect("shutdown engine");
+    task.await.expect("engine task");
+}
+
+#[test]
+fn fresh_fallback_tool_ids_are_unique_within_a_process() {
+    let first = super::turn_loop::fresh_fallback_tool_id("xml_tool_1");
+    let second = super::turn_loop::fresh_fallback_tool_id("xml_tool_1");
+    assert_ne!(first, second, "the same parsed id must incarnate differently");
+    assert_eq!(
+        first.split_once('#').map(|(prefix, _)| prefix),
+        Some("xml_tool_1")
+    );
+}
+
+#[tokio::test]
 async fn engine_cancellation_drops_active_injected_model_request() {
     let workspace = tempdir().expect("tempdir");
     let entered = std::sync::Arc::new(tokio::sync::Notify::new());
