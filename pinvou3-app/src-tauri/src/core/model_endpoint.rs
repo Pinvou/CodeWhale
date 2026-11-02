@@ -901,7 +901,10 @@ pub enum LocalServerKind {
 
 /// 探测本地推理服务类型。只应在本地端点（`base_url_uses_local_or_private`）上
 /// called; all candidate signature endpoints are probed in parallel
-/// (`tokio::join!`, shared 3s timeout, a hung endpoint costs ~3s at worst),
+/// (`tokio::join!`, shared 3s timeout, a hung endpoint costs ~3s at worst;
+/// `fetch_v1_models`'s 404/405 root fallback adds at most one more request
+/// window on top — a hung primary times out once and is not retried, see
+/// [`probe_local_server_kind_uncached`]),
 /// and once all complete the result is picked by signature-exclusivity
 /// priority: LM Studio (`/api/v0/models`) > KoboldCpp
 /// (`/api/extra/version`) > LlamaCpp (`/props`) > Tachyon (`owned_by` in
@@ -940,6 +943,18 @@ pub enum LocalServerKind {
 /// wrong Generic route for 60s. Concurrent misses share one probe through
 /// the in-flight registry (first caller executes, the rest wait for the
 /// broadcast) instead of each paying a serial probe.
+///
+/// Support boundary for the "positive ⇒ authenticated" premise above: it
+/// holds for every supported deployment because each supported local server
+/// exposes all of its probe endpoints under one auth policy (Ollama /
+/// LM Studio / KoboldCpp / LlamaCpp / DMR are unauthenticated end to end;
+/// a `--api-key` vLLM/LMDeploy/Tachyon/SGLang gates every signature endpoint
+/// the same way). A hypothetical wrapper that exposes the weak `/api/tags`
+/// shim publicly while gating the stronger-signature endpoints behind
+/// credentials could let a credential-less call cache the weak kind and
+/// pin it for credentialed callers within the TTL — that mixed-auth
+/// single-URL shape is outside the supported set, and this cache accepts
+/// that boundary instead of paying a credential-split key everywhere.
 pub async fn probe_local_server_kind(base_url: &str, bearer: Option<&str>) -> LocalServerKind {
     let key = base_url.trim_end_matches('/').to_string();
     if let Some(kind) = probe_kind_cache_get(&key) {
