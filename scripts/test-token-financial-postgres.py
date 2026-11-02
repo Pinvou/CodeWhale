@@ -164,6 +164,7 @@ RETAINED_REQUIRED = {
     "TestEscalatedForcedRefundAtomicRollbackPostgres",
     "TestEscalatedForcedRefundEvidenceAndReceiptGuardsPostgres",
     "TestOrdinaryForcedRefundAppliedReceiptRecoveryPostgres",
+    "TestReconciliationOrphanPaidOrderPostgres",
     "TestPaymentPersonalWalletAdmissionPostgres",
     "TestPaymentPersonalWalletAdmissionStatusRacePostgres",
     "TestReceivableSettlementGuardedWritesPostgres",
@@ -244,6 +245,7 @@ EXACT_REQUIRED_CHILDREN = {
         "manual-status", "manual-link", "order-link", "transaction-link",
         "evidence-link", "receipt-identity-and-terminal-replay",
     },
+    "TestReconciliationOrphanPaidOrderPostgres": {"fresh-install", "historical-upgrade"},
     "TestRemoteModelCancellationOwnerLoopTransport": {
         "remote_emergency", "remote_emergency_then_user", "user_only",
         "read_failure", "lease_failure", "natural_terminal",
@@ -435,7 +437,7 @@ def main(*, group="all"):
             # Never run the whole Account package in the Token/Billing phase.
             env["PINVOU_TEST_TOKEN_DATABASE_URL"] = raw
             env["PINVOU_TEST_BILLING_DATABASE_URL"] = raw
-        # The 59 retained Billing roots create about 250 isolated migration
+        # The retained Billing roots create hundreds of isolated migration
         # fixtures. Other phases retain their existing finite 20-minute bound.
         timeout = "75m" if label == "retained-billing" else "20m"
         command = [go, "test", "-p=1", "-race", "-tags=nomsgpack", "-mod=readonly", "-count=1", "-timeout=" + timeout, "-json"]
