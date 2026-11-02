@@ -13,11 +13,16 @@
 //! most-volatile (see `system_prompt_for_mode_with_context_skills_and_session`
 //! in `../prompts.rs`):
 //!
-//!   1. Constitution (binding core: `BASE_PROMPT` + language/output law)
-//!   2. Personality overlay (`CALM_PERSONALITY` — one overlay, not a set)
-//!   3. Approval-policy overlays
-//!   4. Runtime templates (compaction relay, goal continuation, memory,
+//!   1. Constitution (binding core: `BASE_PROMPT` + language/output law;
+//!      personality tone is folded into the constitutional preamble, not
+//!      composed as a separate layer)
+//!   2. Approval-policy overlays
+//!   3. Runtime templates (compaction relay, goal continuation, memory,
 //!      core execution, sub-agent output contract)
+//!
+//! `CALM_PERSONALITY` below is a retired overlay: the runtime never composes
+//! it (tests assert the Calm tone stays folded into the constitution), and it
+//! is kept only so the historic text and its guard tests remain inspectable.
 //!
 //! Edit prompt text here directly. Content and ordering invariants are
 //! guarded by the test suite in `../prompts.rs` (constitution structure,
