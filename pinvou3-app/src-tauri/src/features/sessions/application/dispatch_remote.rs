@@ -2442,6 +2442,7 @@ mod tests {
                     kind: ProjectionKind::Status,
                     task_id: Some(request.task_id.clone()),
                     body: Some("succeeded".into()),
+                    terminal_reason: None,
                     attachments: Vec::new(),
                 },
             )

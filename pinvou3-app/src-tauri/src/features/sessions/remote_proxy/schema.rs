@@ -148,6 +148,10 @@ pub(crate) struct ProjectionEntry {
     /// User-authored text is not keyword-filtered: discussing an API key is
     /// legitimate history and cannot itself prove a secret was persisted.
     pub(crate) body: Option<String>,
+    /// Absent in legacy v1 history. New values are a closed set and only
+    /// annotate a failed status, never replace its settlement body.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) terminal_reason: Option<String>,
     pub(crate) attachments: Vec<ProjectionAttachment>,
 }
 
@@ -191,6 +195,11 @@ impl ProjectionEntry {
                 .as_ref()
                 .is_some_and(|value| value.len() > MAX_PROJECTION_BODY_BYTES)
             || self.attachments.len() > MAX_PROJECTION_ATTACHMENTS
+            || self.terminal_reason.as_deref().is_some_and(|reason| {
+                self.kind != ProjectionKind::Status
+                    || self.body.as_deref() != Some("failed")
+                    || !matches!(reason, "task_generation_stale" | "task_attachments_invalid")
+            })
         {
             bail!("invalid remote projection entry");
         }

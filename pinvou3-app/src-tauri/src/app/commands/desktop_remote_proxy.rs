@@ -221,6 +221,7 @@ fn read_visible(store: &SessionStore, local_session_id: &str) -> Result<Value, S
                 "kind": entry.kind,
                 "taskId": entry.task_id,
                 "body": entry.body,
+                "terminalReason": entry.terminal_reason,
                 "attachments": attachments,
             })
         })

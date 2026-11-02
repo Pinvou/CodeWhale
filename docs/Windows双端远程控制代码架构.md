@@ -79,6 +79,10 @@ B 的 Rust 权威枚举以 `features/remote_control/controller/controlled.rs` �
 - A 端远程会话使用 `SessionStore + RemoteControl`：`SessionStore` 保存 `RemoteProxy` 会话、A 本地 UI 元数据和已认证历史投影，`RemoteControl` 负责连接、加密通道、请求关联和恢复。
 - B 端 Session、Journal、任务准入和执行终态始终是唯一业务权威；A 的 `RemoteProxy` 只是已认证投影，不得进入 A 本机 EnginePool/AcpPool。
 
+### 失败原因投影与降级
+
+新版可以读取既有远控历史；新写入的已认证历史可包含闭集失败原因，旧版本可能无法读取含此字段的记录。需要降级时，应停用相关写入并使用兼容的历史副本或受控恢复，保留原始记录和未决事实；不得自动重发任务。该合同适用于尚未发布的远控功能。
+
 ## 2. 总体组件关系
 
 > 历史快照：组件关系已被正文当前契约替代，不是待实现方案。
