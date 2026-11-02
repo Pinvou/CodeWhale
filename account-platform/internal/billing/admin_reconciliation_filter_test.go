@@ -12,7 +12,7 @@ func TestAdminReconciliationGeneratedCaseFilters(t *testing.T) {
 	for _, kind := range []string{
 		"PAYMENT_LEDGER_INVALID", "REFUND_LEDGER_INVALID", "CHARGEBACK_LEDGER_INVALID",
 		"PAYMENT_PACKAGE_INVALID", "REFUND_DATE_UNVERIFIED", "CHARGEBACK_DATE_UNVERIFIED", "LEDGER_REPAIR_PROOF_UNAVAILABLE",
-		"PAYMENT_LEDGER_MISSING", "REFUND_AMOUNT_MISMATCH",
+		"PAYMENT_LEDGER_MISSING", "PAYMENT_TRANSACTION_MISSING", "REFUND_AMOUNT_MISMATCH",
 	} {
 		t.Run(kind, func(t *testing.T) {
 			w := httptest.NewRecorder()
@@ -23,7 +23,7 @@ func TestAdminReconciliationGeneratedCaseFilters(t *testing.T) {
 			}
 		})
 	}
-	for _, kind := range []string{"UNKNOWN_LEDGER_INVALID", "PAYMENT_DATE_UNVERIFIED"} {
+	for _, kind := range []string{"UNKNOWN_LEDGER_INVALID", "PAYMENT_DATE_UNVERIFIED", "PAYMENT_TRANSACTION_MISSING_UNKNOWN"} {
 		t.Run(kind, func(t *testing.T) {
 			w := httptest.NewRecorder()
 			r := httptest.NewRequest(http.MethodGet, "/admin/v1/reconciliation-cases?case_type="+kind, nil)

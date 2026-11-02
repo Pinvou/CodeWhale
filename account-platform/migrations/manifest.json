@@ -2186,6 +2186,16 @@
         "sha256": "74beb8e84a6bd58ac04c5cf2d628023a5a66fea6eb46d081e1b4c5ea7982f5d6"
       },
       {
+        "file": "900033_orphan_payment_order_case.down.sql",
+        "version": 900033,
+        "sha256": "9c8b34951a98278d748ecebfee78df23819d2201ff8121c25387e5c3a53f5a8f"
+      },
+      {
+        "file": "900033_orphan_payment_order_case.up.sql",
+        "version": 900033,
+        "sha256": "117014925dfa3a06bf0f6ca53ea4657eedf4321859faa799074796523a0a16db"
+      },
+      {
         "file": "900037_product_admission_materials.down.sql",
         "version": 900037,
         "sha256": "59d82853b39a25167167c3ef6f8c37c0b2d613960584be0c1678e7b628600c2b"

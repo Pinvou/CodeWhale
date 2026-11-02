@@ -1,16 +1,71 @@
 package account
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/Pinvou/pinvou3/account-platform/internal/platform/identity"
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5/pgconn"
 )
+
+type closureCreateErrorRepository struct {
+	*closureAssemblyRepository
+	cause     error
+	principal identity.Principal
+}
+
+func (f *closureCreateErrorRepository) CreateAccountClosure(_ context.Context, principal identity.Principal, key, confirmation string) (AccountClosureRequest, error) {
+	f.calls++
+	f.principal, f.key, f.confirmation = principal, key, confirmation
+	return AccountClosureRequest{}, f.cause
+}
+
+func TestAccountClosureCreateRoutePreservesErrorClassification(t *testing.T) {
+	principal := identity.Principal{Issuer: "https://owned.invalid", Subject: "closure-actor", SessionID: "closure-session", AuthenticatedAt: time.Now()}
+	for _, tc := range []struct {
+		name   string
+		cause  error
+		status int
+		code   string
+	}{
+		{"serialization", &pgconn.PgError{Code: "40001", Message: "private database detail"}, http.StatusConflict, "ACCOUNT_CLOSURE_SERIALIZATION_CONFLICT"},
+		{"wrapped serialization", errors.Join(errors.New("private context"), &pgconn.PgError{Code: "40001"}), http.StatusConflict, "ACCOUNT_CLOSURE_SERIALIZATION_CONFLICT"},
+		{"domain conflict", ErrConflict, http.StatusConflict, "ACCOUNT_CONFLICT"},
+		{"unique violation", &pgconn.PgError{Code: "23505", Message: "private database detail"}, http.StatusInternalServerError, "INTERNAL_ERROR"},
+		{"deadlock", &pgconn.PgError{Code: "40P01", Message: "private database detail"}, http.StatusInternalServerError, "INTERNAL_ERROR"},
+		{"unavailable", errors.New("private database detail"), http.StatusInternalServerError, "INTERNAL_ERROR"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			store := &closureCreateErrorRepository{closureAssemblyRepository: &closureAssemblyRepository{allow: true}, cause: tc.cause}
+			handler := NewService(store, nil).Handler(func(context.Context, string) (identity.Principal, error) { return principal, nil })
+			request := httptest.NewRequest(http.MethodPost, "/v1/me/account-closure-requests", strings.NewReader(`{"confirmation":"CLOSE_MY_ACCOUNT"}`))
+			request.Header.Set("Authorization", "Bearer controlled")
+			request.Header.Set("Idempotency-Key", "original-closure-key")
+			out := httptest.NewRecorder()
+			handler.ServeHTTP(out, request)
+			var payload struct{ Code, Message string }
+			if err := json.Unmarshal(out.Body.Bytes(), &payload); err != nil {
+				t.Fatal(err)
+			}
+			if out.Code != tc.status || payload.Code != tc.code || strings.Contains(out.Body.String(), "private") {
+				t.Fatalf("status=%d payload=%#v", out.Code, payload)
+			}
+			if store.calls != 1 || store.permission != PermissionPersonalAccountClosureRequest || store.key != "original-closure-key" || store.confirmation != accountClosureConfirmation || store.principal.Issuer != principal.Issuer || store.principal.Subject != principal.Subject || store.principal.SessionID != principal.SessionID {
+				t.Fatalf("original authority or request facts lost: calls=%d permission=%s principal=%#v key=%q confirmation=%q", store.calls, store.permission, store.principal, store.key, store.confirmation)
+			}
+			if got, want := strings.Contains(payload.Message, "retry with the same idempotency key"), tc.code == "ACCOUNT_CLOSURE_SERIALIZATION_CONFLICT"; got != want {
+				t.Fatalf("wrong recovery semantics for %s: %q", tc.code, payload.Message)
+			}
+		})
+	}
+}
 
 func TestAccountClosureRecentAuthenticationHTTPErrorIsStable(t *testing.T) {
 	recorder := httptest.NewRecorder()
@@ -23,6 +78,66 @@ func TestAccountClosureRecentAuthenticationHTTPErrorIsStable(t *testing.T) {
 	}
 	if recorder.Code != http.StatusUnauthorized || payload.Code != "RECENT_AUTHENTICATION_REQUIRED" {
 		t.Fatalf("unexpected response: status=%d code=%q body=%s", recorder.Code, payload.Code, recorder.Body.String())
+	}
+}
+
+func TestAccountClosureSerializationConflictHasStableHTTPClassification(t *testing.T) {
+	recorder := httptest.NewRecorder()
+	(&Service{}).writeError(recorder, httptest.NewRequest(http.MethodPost, "/v1/me/account-closure-requests", nil), &pgconn.PgError{Code: "40001", Message: "private serialization detail"})
+	var payload struct {
+		Code    string `json:"code"`
+		Message string `json:"message"`
+	}
+	if err := json.Unmarshal(recorder.Body.Bytes(), &payload); err != nil {
+		t.Fatalf("decode error response: %v body=%s", err, recorder.Body.String())
+	}
+	if recorder.Code != http.StatusConflict || payload.Code != "ACCOUNT_CLOSURE_SERIALIZATION_CONFLICT" || strings.Contains(payload.Message, "private") {
+		t.Fatalf("unexpected serialization response: status=%d payload=%#v", recorder.Code, payload)
+	}
+	if !strings.Contains(payload.Message, "retry with the same idempotency key") {
+		t.Fatalf("original-key recovery instruction missing: %q", payload.Message)
+	}
+}
+
+func TestAccountClosureSerializationClassificationIsRouteScoped(t *testing.T) {
+	for _, route := range []struct{ method, path string }{
+		{http.MethodGet, "/v1/me/account-closure-request"},
+		{http.MethodPost, "/admin/v1/account-closure-requests/00000000-0000-7000-8000-000000000001/actions/retry"},
+	} {
+		recorder := httptest.NewRecorder()
+		(&Service{}).writeError(recorder, httptest.NewRequest(route.method, route.path, nil), &pgconn.PgError{Code: "40001"})
+		if recorder.Code != http.StatusInternalServerError {
+			t.Fatalf("out-of-scope account route %s status=%d, want 500", route.path, recorder.Code)
+		}
+	}
+}
+
+func TestAccountClosureSerializationClassificationRejectsOtherDatabaseErrors(t *testing.T) {
+	for _, cause := range []error{
+		&pgconn.PgError{Code: "23505", Message: "private unique constraint detail"},
+		errors.New("private unavailable database detail"),
+	} {
+		recorder := httptest.NewRecorder()
+		(&Service{}).writeError(recorder, httptest.NewRequest(http.MethodPost, "/v1/me/account-closure-requests", nil), cause)
+		var payload struct{ Code, Message string }
+		if err := json.Unmarshal(recorder.Body.Bytes(), &payload); err != nil {
+			t.Fatal(err)
+		}
+		if recorder.Code != http.StatusInternalServerError || payload.Code != "INTERNAL_ERROR" || strings.Contains(payload.Message, "private") {
+			t.Fatalf("unrelated database error gained serialization recovery: status=%d payload=%#v", recorder.Code, payload)
+		}
+	}
+}
+
+func TestAccountClosureDomainConflictKeepsDistinctHTTPCode(t *testing.T) {
+	recorder := httptest.NewRecorder()
+	(&Service{}).writeError(recorder, httptest.NewRequest(http.MethodPost, "/v1/me/account-closure-requests", nil), ErrConflict)
+	var payload struct{ Code, Message string }
+	if err := json.Unmarshal(recorder.Body.Bytes(), &payload); err != nil {
+		t.Fatal(err)
+	}
+	if recorder.Code != http.StatusConflict || payload.Code != "ACCOUNT_CONFLICT" || strings.Contains(payload.Message, "retry with the same idempotency key") {
+		t.Fatalf("domain conflict gained serialization recovery: status=%d payload=%#v", recorder.Code, payload)
 	}
 }
 
@@ -84,6 +199,21 @@ func TestUserVisibleClosureRemovesInternalIdentifiers(t *testing.T) {
 	visible := userVisibleClosure(item)
 	if visible.ID != item.ID || visible.Blockers[0].ResourceID != "" {
 		t.Fatalf("unexpected public closure: %#v", visible)
+	}
+}
+
+func TestAccountClosureCursorIsOpaqueAndRoundTrips(t *testing.T) {
+	item := AccountClosureRequest{ID: uuid.New(), UpdatedAt: time.Date(2026, 10, 31, 5, 4, 3, 123456000, time.FixedZone("CST", 8*60*60))}
+	cursor, err := encodeAccountClosureCursor(item)
+	if err != nil || cursor == "" {
+		t.Fatalf("encode cursor: %v %q", err, cursor)
+	}
+	updatedAt, id, err := decodeAccountClosureCursor(cursor)
+	if err != nil || id == nil || *id != item.ID || updatedAt == nil || !updatedAt.Equal(item.UpdatedAt.UTC()) {
+		t.Fatalf("round trip mismatch: updated_at=%v id=%v err=%v", updatedAt, id, err)
+	}
+	if _, _, err := decodeAccountClosureCursor("not-a-cursor"); !errors.Is(err, ErrInvalidAccountClosureRequest) {
+		t.Fatalf("invalid cursor error=%v", err)
 	}
 }
 
