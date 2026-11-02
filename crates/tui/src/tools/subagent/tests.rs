@@ -25845,6 +25845,193 @@ async fn cancelled_dispatch_settles_its_frame_from_the_shell_manager_alone() {
     }
 }
 
+/// The settle boundary: the guard counts as settled only after the
+/// completion leg has actually run under the lock. The outer tool timeout
+/// can fire while `settle` is still parked waiting for that lock — a peer
+/// of this manager legitimately holds it across its own awaits — and the
+/// abandoned guard must then reconcile through `Drop` instead of leaving
+/// the unstamped entry behind the owner's liveness.
+#[tokio::test]
+async fn settle_cancelled_at_the_lock_wait_still_reconciles_the_frame() {
+    let tmp = tempdir().expect("tempdir");
+    let manager = new_shared_subagent_manager(tmp.path().to_path_buf(), 8);
+    let shell_jobs = crate::tools::shell::new_shared_shell_manager(tmp.path().to_path_buf());
+    {
+        let mut guard = manager.write().await;
+        guard.set_shell_job_source(Arc::clone(&shell_jobs));
+        guard.insert_test_running_agent("a", tmp.path());
+    }
+    let token = manager
+        .write()
+        .await
+        .open_in_flight_unbounded("agent_a", CoordinationLane::SharedCheckout);
+    let guard = InFlightDispatchGuard {
+        manager: Arc::clone(&manager),
+        token,
+        owner: "agent_a".to_string(),
+        settled: false,
+    };
+
+    // Hold the write lock the completion leg must take.
+    let holder = Arc::clone(&manager);
+    let hold = tokio::spawn(async move {
+        let _locked = holder.write().await;
+        tokio::time::sleep(Duration::from_millis(150)).await;
+    });
+    tokio::time::sleep(Duration::from_millis(20)).await;
+
+    // The deadline fires while settle is parked on the lock: the future is
+    // dropped with the completion leg unrun.
+    let settled = tokio::time::timeout(Duration::from_millis(30), guard.settle()).await;
+    assert!(settled.is_err(), "settle is abandoned at the lock wait");
+    hold.await.expect("lock holder");
+
+    assert_eq!(
+        manager.read().await.in_flight_unbounded_for_test(),
+        vec![],
+        "the abandoned completion leg still reconciles: the empty frame opens"
+    );
+}
+
+/// Drop contention: the write lock can be held across another task's await,
+/// so a drop between polls cannot assume the lock is free. The guard hands
+/// the reclaim to a detached task that queues on the lock and runs the same
+/// shell-aware reconciliation once the holder releases — stamping genuinely
+/// live work, opening a finished frame.
+#[tokio::test]
+async fn contended_drop_reconciles_the_frame_eventually() {
+    let tmp = tempdir().expect("tempdir");
+    let manager = new_shared_subagent_manager(tmp.path().to_path_buf(), 8);
+    let shell_jobs = crate::tools::shell::new_shared_shell_manager(tmp.path().to_path_buf());
+    {
+        let mut guard = manager.write().await;
+        guard.set_shell_job_source(Arc::clone(&shell_jobs));
+        guard.insert_test_running_agent("a", tmp.path());
+    }
+    shell_jobs
+        .lock()
+        .expect("shell jobs")
+        .seed_running_shell_for_test("job_live", "agent_a");
+    let token = manager
+        .write()
+        .await
+        .open_in_flight_unbounded("agent_a", CoordinationLane::SharedCheckout);
+
+    // Hold the write lock so the synchronous fast path cannot take it.
+    let holder = Arc::clone(&manager);
+    let hold = tokio::spawn(async move {
+        let _locked = holder.write().await;
+        tokio::time::sleep(Duration::from_millis(150)).await;
+    });
+    tokio::time::sleep(Duration::from_millis(20)).await;
+    drop(InFlightDispatchGuard {
+        manager: Arc::clone(&manager),
+        token,
+        owner: "agent_a".to_string(),
+        settled: false,
+    });
+    hold.await.expect("lock holder");
+
+    // The eventual reconciliation stamps the still-running job — no
+    // wholesale clear under contention.
+    let deadline = std::time::Instant::now() + Duration::from_secs(2);
+    loop {
+        let entries = manager.read().await.in_flight_unbounded_for_test();
+        if entries == vec![("agent_a".to_string(), vec!["job_live".to_string()])] {
+            break;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the contended drop eventually stamps the live job: {entries:?}"
+        );
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+
+    // Once the job's exit is observed, the same contended path opens the
+    // finished agent_b frame — and the same mutating leg sweeps agent_a's
+    // now-dead stamped frame, so nothing keeps blocking the frame.
+    shell_jobs
+        .lock()
+        .expect("shell jobs")
+        .finish_seeded_shell_for_test("job_live");
+    let token = manager
+        .write()
+        .await
+        .open_in_flight_unbounded("agent_b", CoordinationLane::SharedCheckout);
+    let holder_b = Arc::clone(&manager);
+    let hold = tokio::spawn(async move {
+        let _locked = holder_b.write().await;
+        tokio::time::sleep(Duration::from_millis(150)).await;
+    });
+    tokio::time::sleep(Duration::from_millis(20)).await;
+    drop(InFlightDispatchGuard {
+        manager: Arc::clone(&manager),
+        token,
+        owner: "agent_b".to_string(),
+        settled: false,
+    });
+    hold.await.expect("lock holder");
+    let deadline = std::time::Instant::now() + Duration::from_secs(2);
+    loop {
+        let entries = manager.read().await.in_flight_unbounded_for_test();
+        if entries.is_empty() {
+            break;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the contended drop opens the finished frame and the sweep clears the dead one: {entries:?}"
+        );
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+}
+
+/// The refusal boundary: the release counts as done only after it ran under
+/// the lock. A cancellation parked on that wait must still reconcile through
+/// the `Drop` — the reservation was owned from the instant it opened, so an
+/// abandoned release cannot strand an unstamped entry behind the owner's
+/// liveness.
+#[tokio::test]
+async fn refusal_cancel_abandoned_at_the_lock_wait_reopens_the_frame() {
+    let tmp = tempdir().expect("tempdir");
+    let manager = new_shared_subagent_manager(tmp.path().to_path_buf(), 8);
+    let shell_jobs = crate::tools::shell::new_shared_shell_manager(tmp.path().to_path_buf());
+    {
+        let mut guard = manager.write().await;
+        guard.set_shell_job_source(Arc::clone(&shell_jobs));
+        guard.insert_test_running_agent("a", tmp.path());
+    }
+    let token = manager
+        .write()
+        .await
+        .open_in_flight_unbounded("agent_a", CoordinationLane::SharedCheckout);
+    let guard = InFlightDispatchGuard {
+        manager: Arc::clone(&manager),
+        token,
+        owner: "agent_a".to_string(),
+        settled: false,
+    };
+
+    let holder = Arc::clone(&manager);
+    let hold = tokio::spawn(async move {
+        let _locked = holder.write().await;
+        tokio::time::sleep(Duration::from_millis(150)).await;
+    });
+    tokio::time::sleep(Duration::from_millis(20)).await;
+
+    let cancelled = tokio::time::timeout(Duration::from_millis(30), guard.cancel()).await;
+    assert!(
+        cancelled.is_err(),
+        "the release is abandoned at the lock wait"
+    );
+    hold.await.expect("lock holder");
+
+    assert_eq!(
+        manager.read().await.in_flight_unbounded_for_test(),
+        vec![],
+        "the abandoned release still reclaims the refused dispatch's empty frame"
+    );
+}
+
 /// The same cancellation through the real dispatch seam: the outer tool
 /// deadline drops the dispatch future mid-call, and the foreground command
 /// — which runs as a tracked background record — outlives the drop. The

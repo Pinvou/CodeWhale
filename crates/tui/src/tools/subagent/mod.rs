@@ -3336,10 +3336,13 @@ struct InFlightUnboundedWork {
 /// then held up by the owner's Running status alone, blocking every
 /// same-frame successor until the owner happened to go terminal even
 /// though the abandoned job had already ended. `Drop` now settles the
-/// cancellation synchronously via `reclaim_cancelled_in_flight_unbounded`,
-/// which keys the frame on the shell manager alone: genuinely live work is
-/// stamped and keeps blocking, a finished job's frame opens, and without a
-/// shell source the entry stays untouched (conservative).
+/// cancellation via `reclaim_cancelled_in_flight_unbounded`, which keys the
+/// frame on the shell manager alone: genuinely live work is stamped and
+/// keeps blocking, a finished job's frame opens, and without a shell source
+/// the entry stays untouched (conservative). When the lock is contended at
+/// the drop — peers of this manager legitimately hold it across their own
+/// awaits — the reclaim is handed to a detached task so it still runs once
+/// the holder releases: eventual, not best-effort.
 struct InFlightDispatchGuard {
     manager: SharedSubAgentManager,
     token: u64,
@@ -3348,12 +3351,24 @@ struct InFlightDispatchGuard {
 }
 
 impl InFlightDispatchGuard {
-    /// The dispatch returned: run the completion leg. Marks the guard
-    /// settled first so the `Drop` below stays a no-op.
+    /// The dispatch returned: run the completion leg. The guard counts as
+    /// settled only once the completion leg has actually run under the
+    /// lock — a cancellation while parked on the lock must still reach the
+    /// `Drop` reconciliation, which is exactly the window the outer tool
+    /// timeout fires into.
     async fn settle(mut self) {
-        self.settled = true;
         let mut manager = self.manager.write().await;
         manager.complete_in_flight_unbounded(self.token, &self.owner);
+        self.settled = true;
+    }
+
+    /// The dispatch was refused before executing: release its reservation.
+    /// Same contract as [`Self::settle`] — `settled` flips only after the
+    /// release ran, so a cancelled wait still reconciles through `Drop`.
+    async fn cancel(mut self) {
+        let mut manager = self.manager.write().await;
+        manager.cancel_in_flight_unbounded(self.token);
+        self.settled = true;
     }
 }
 
@@ -3362,14 +3377,30 @@ impl Drop for InFlightDispatchGuard {
         if self.settled {
             return;
         }
-        // The dispatch future is being dropped inside the runtime between
-        // polls, so the write lock is uncontended in practice (the peer
-        // checks and the completion leg all release it before awaiting the
-        // registry). When it is genuinely unavailable, leaving the entry
-        // unstamped keeps the consult's conservative owner-liveness answer
-        // instead of guessing — the pre-fix behavior, not a new failure.
+        // Fast path: the lock is usually free here (the peer checks and the
+        // completion leg release it before awaiting the registry), so the
+        // reclaim runs synchronously.
         if let Ok(mut manager) = self.manager.try_write() {
             manager.reclaim_cancelled_in_flight_unbounded(self.token, &self.owner);
+            return;
+        }
+        // Contended: the write lock can be held across another task's await
+        // (checkpoint preparation under the same manager, for one), so a
+        // drop between polls cannot assume the lock will be free. Queue the
+        // same shell-aware reclaim on a detached task — it runs once the
+        // holder releases, still stamping genuinely live work instead of
+        // clearing it. The reclaim is keyed on the token, so it stays a
+        // no-op against an entry that no longer exists. Without a runtime
+        // to spawn on, leaving the entry unstamped keeps the consult's
+        // conservative owner-liveness answer instead of guessing.
+        if let Ok(handle) = tokio::runtime::Handle::try_current() {
+            let manager = Arc::clone(&self.manager);
+            let token = self.token;
+            let owner = self.owner.clone();
+            handle.spawn(async move {
+                let mut manager = manager.write().await;
+                manager.reclaim_cancelled_in_flight_unbounded(token, &owner);
+            });
         }
     }
 }
@@ -16706,6 +16737,16 @@ impl SubAgentToolRegistry {
                 let mut manager = self.coordination_manager.write().await;
                 manager.open_in_flight_unbounded(&self.owner_agent_id, lane)
             };
+            // The guard takes ownership the instant the token exists: the
+            // peer checks below await on the same manager, and a cancellation
+            // parked there must reach the guard's reconciliation instead of
+            // stranding an unstamped entry behind the owner's liveness.
+            reservation = Some(InFlightDispatchGuard {
+                manager: Arc::clone(&self.coordination_manager),
+                token: opened_token,
+                owner: self.owner_agent_id.clone(),
+                settled: false,
+            });
             // Only a *contended* checkout needs this gate. The claim
             // exists so concurrent children cannot overwrite each other; a lone
             // writer has no peer to collide with, and blocking it there bought
@@ -16767,16 +16808,11 @@ impl SubAgentToolRegistry {
                 }
             };
             if let Some(refusal) = peer_refusal {
-                let mut manager = self.coordination_manager.write().await;
-                manager.cancel_in_flight_unbounded(opened_token);
+                if let Some(guard) = reservation.take() {
+                    guard.cancel().await;
+                }
                 return Err(anyhow!(refusal));
             }
-            reservation = Some(InFlightDispatchGuard {
-                manager: Arc::clone(&self.coordination_manager),
-                token: opened_token,
-                owner: self.owner_agent_id.clone(),
-                settled: false,
-            });
         }
         let context = self
             .registry
