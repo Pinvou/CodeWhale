@@ -56,6 +56,23 @@ jobs:
               },
             );
 
+            // "List commits on a PR" silently caps at 250 even when paginated:
+            // a larger PR's tail commits would be unverified here. Compare the
+            // authoritative count from pulls.get and fail closed instead of
+            // passing a truncated list (the repo-wide validate-commit-msg.py
+            // gate stays as the stricter full-range check).
+            const pr = await github.rest.pulls.get({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              pull_number: context.issue.number,
+            });
+            if (pr.data.commits > commits.length) {
+              core.setFailed(
+                `PR has ${pr.data.commits} commits but the REST API returns at most 250; ` +
+                "squash or split the PR so DCO coverage is complete.",
+              );
+            }
+
             const signoff = /^Signed-off-by:\s+.+\s+<[^<>@\s]+@[^<>\s]+>$/im;
             const trustedBots = new Set([
               "dependabot[bot]",

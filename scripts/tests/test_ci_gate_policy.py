@@ -5526,6 +5526,31 @@ class SecurityGateEnforcementPinsTests(unittest.TestCase):
         self.assertIn('"dependabot[bot]"', workflow)
         self.assertIn('"github-actions[bot]"', workflow)
 
+    def test_dco_workflow_fails_closed_on_commit_list_truncation(self):
+        """DCO 检查必须对 PR 提交列表截断保持 fail-closed（2026-11-03 评审收口）。
+
+        `pulls.listCommits` 即使 paginate 也在 250 条静默封顶：更大 PR 的尾部
+        提交会在这道门禁里未经核验就放行。必须以 `pulls.get().commits` 的
+        权威计数比对并在截断时 core.setFailed，不得降级为 warning——与
+        secret-scan 空证据即失败的公约同因。
+        """
+        workflow = (ROOT / ".github/workflows/dco.yml").read_text(encoding="utf-8")
+        self.assertIn(
+            "github.rest.pulls.get(",
+            workflow,
+            "dco 必须取 pulls.get 的权威提交计数用于截断比对",
+        )
+        self.assertIn(
+            "pr.data.commits > commits.length",
+            workflow,
+            "dco 必须比对权威计数与 listCommits 返回数，缺失比对会让截断静默放行",
+        )
+        self.assertIn(
+            "squash or split the PR",
+            workflow,
+            "截断分支必须 core.setFailed 并给出 squash/split 指引，不得静默通过",
+        )
+
     def test_gitleaks_config_keeps_default_rules_and_allowlist_surface(self):
         config_path = ROOT / ".gitleaks.toml"
         self.assertTrue(config_path.exists(), ".gitleaks.toml 不得删除")
