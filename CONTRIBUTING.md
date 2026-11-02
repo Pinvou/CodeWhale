@@ -175,6 +175,10 @@ remains fresh;
 An available npm content-addressed cache is mounted only for preparation with
 prefer-offline lookup; npm lockfile integrity checks remain enabled. Verification
 containers retain their network isolation and do not receive these cache mounts.
+If a deployment-contract subprocess fails, its stage and bounded, redacted log
+tail are emitted into the CI job log before temporary files are cleaned up.
+Raw Go JSON remains unchanged for required-root, failure and no-skip validation;
+successful dependency preparation never substitutes for a contract result.
 
 Repository administrators can set `PINVOU_LINUX_RUNNER` to a JSON label array
 (for example `["self-hosted","Linux","pinvou3"]`) to route x64 Linux jobs to

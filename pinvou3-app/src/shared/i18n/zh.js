@@ -2288,6 +2288,7 @@ Object.assign(dictZh.uiSettingsDetail, {
   platformModelsLoading:'正在加载平台模型…',
   platformModelsSignIn:'登录品悟账号后可选择平台模型。',
   platformModelsUnavailable:'暂时无法加载平台模型，请稍后重试。',
+  platformModelsRetry:'重试加载',
   appliesToNewSessions:'应用于新会话',
   modelDeprecated:'即将下架',
   modelUnavailable:'当前不可用',
