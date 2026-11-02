@@ -80,7 +80,9 @@ impl ToolSpec for FimEditTool {
          calls the active route's fill-in-the-middle completion endpoint to \
          generate replacement content; this requires the active provider to \
          expose a fill-in-the-middle completions endpoint, and the call fails \
-         otherwise."
+         otherwise. Each anchor must appear exactly once — the prefix anywhere \
+         in the file, the suffix after the prefix — and ambiguous anchors are \
+         refused with their match count."
     }
 
     fn input_schema(&self) -> Value {
@@ -137,9 +139,9 @@ impl ToolSpec for FimEditTool {
                 FimError::PrefixNotFound(prefix_anchor.to_string()).to_string(),
             )
         })?;
-        // The anchors are matched at their first occurrence; an anchor that
-        // repeats would silently generate the middle at the wrong site, so
-        // ambiguity is refused instead of guessed.
+        // Without this check an anchor that repeats would be matched only at
+        // its first occurrence and silently generate the middle at the wrong
+        // site, so ambiguity is refused instead of guessed.
         let prefix_matches = content.matches(prefix_anchor).count();
         if prefix_matches > 1 {
             return Err(ToolError::execution_failed(
@@ -232,18 +234,20 @@ mod tests {
         (tmp, context)
     }
 
-    async fn refused(input: serde_json::Value, context: &ToolContext) -> String {
+    /// Run `execute` and return the error text; every caller asserts on the
+    /// specific error it expects.
+    async fn execution_error(input: serde_json::Value, context: &ToolContext) -> String {
         FimEditTool::new(None, "fim-model".to_string())
             .execute(input, context)
             .await
-            .expect_err("ambiguous anchor must be refused")
+            .expect_err("expected the fim_edit call to fail")
             .to_string()
     }
 
     #[tokio::test]
     async fn ambiguous_prefix_anchor_is_refused_not_first_occurrence_edited() {
         let (_tmp, context) = workspace_with("fn a() {}\nfn main() {}\nfn a() {}\nlet _ = a;\n");
-        let message = refused(
+        let message = execution_error(
             serde_json::json!({
                 "path": "sample.txt",
                 "prefix_anchor": "fn a() {}",
@@ -259,7 +263,7 @@ mod tests {
     #[tokio::test]
     async fn ambiguous_suffix_anchor_is_refused() {
         let (_tmp, context) = workspace_with("head\nreturn 1\nmid\nreturn 1\ntail\n");
-        let message = refused(
+        let message = execution_error(
             serde_json::json!({
                 "path": "sample.txt",
                 "prefix_anchor": "head",
@@ -279,7 +283,7 @@ mod tests {
         let (_tmp, context) = workspace_with("head\nmid\ntail\n");
         // With no client configured the call fails at the API boundary; that
         // error proves the anchor validation accepted the unique anchors.
-        let message = refused(
+        let message = execution_error(
             serde_json::json!({
                 "path": "sample.txt",
                 "prefix_anchor": "head",
