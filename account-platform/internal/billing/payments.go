@@ -479,13 +479,13 @@ func (p *PaymentCoordinator) createOrderCommand(ctx context.Context, requesterID
 	if !productOrdersEnabled {
 		return PaymentOrder{}, false, ErrConflict
 	}
-	// Serialize a new organization order with the lifecycle wallet fence.
+	// Serialize new orders with wallet status changes for either beneficiary.
 	// Existing response/binding recovery remains above this new-order check.
-	wallet, walletErr := getWallet(ctx, tx, walletID, beneficiaryOrganizationID != nil)
+	wallet, walletErr := getWallet(ctx, tx, walletID, true)
 	if walletErr != nil {
 		return PaymentOrder{}, false, ErrNotFound
 	}
-	if beneficiaryOrganizationID == nil && (wallet.OwnerType != "PERSONAL" || wallet.OwnerID != requesterID) {
+	if beneficiaryOrganizationID == nil && (wallet.OwnerType != "PERSONAL" || wallet.OwnerID != requesterID || wallet.Status != "ACTIVE") {
 		return PaymentOrder{}, false, ErrConflict
 	}
 	if beneficiaryOrganizationID != nil && (wallet.OwnerType != "ORGANIZATION" || wallet.OwnerID != *beneficiaryOrganizationID || wallet.Status != "ACTIVE") {

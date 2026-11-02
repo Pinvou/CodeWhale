@@ -69,7 +69,9 @@ function StatusBanner({ copy, state, errorCode }) {
   if (errorCode === 'desktop_controller_relay_unavailable') detail = copy.errorRelayUnavailable;
   if (errorCode === 'desktop_remote_control_unsupported') detail = copy.unsupported;
   if (errorCode === 'remote_task_permissions_save_failed') detail = copy.taskPermissionSaveFailed;
-  if (errorCode && !['desktop_controller_relay_unavailable', 'desktop_remote_control_unsupported', 'remote_task_permissions_save_failed'].includes(errorCode)) {
+  if (errorCode === 'desktop_remote_pairing_expired') detail = copy.errorPairingExpired;
+  if (errorCode === 'desktop_remote_handshake_timeout') detail = copy.errorHandshakeTimeout;
+  if (errorCode && !['desktop_controller_relay_unavailable', 'desktop_remote_control_unsupported', 'remote_task_permissions_save_failed', 'desktop_remote_pairing_expired', 'desktop_remote_handshake_timeout'].includes(errorCode)) {
     detail = copy.errorGeneric;
   }
   return (

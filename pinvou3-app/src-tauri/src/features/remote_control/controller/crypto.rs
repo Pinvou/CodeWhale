@@ -1678,6 +1678,7 @@ impl TranscriptAuthenticator {
             capability_hash: parts.capability_hash,
             handshake_public_key_a_b64: parts.handshake_public_key_a_b64,
             handshake_public_key_b_b64: parts.handshake_public_key_b_b64,
+            signed_expires_at_ms: parts.signed_expires_at_ms,
         }))
     }
 }
@@ -1717,6 +1718,7 @@ pub(crate) struct VerifiedTranscript {
     capability_hash: String,
     handshake_public_key_a_b64: String,
     handshake_public_key_b_b64: String,
+    signed_expires_at_ms: u64,
 }
 
 impl VerifiedTranscript {
@@ -1755,6 +1757,10 @@ impl VerifiedTranscript {
     }
     pub(crate) fn peer_handshake_public_key(&self) -> &str {
         &self.handshake_public_key_b_b64
+    }
+
+    pub(crate) fn signed_expires_at_ms(&self) -> u64 {
+        self.signed_expires_at_ms
     }
 }
 

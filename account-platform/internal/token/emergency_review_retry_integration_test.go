@@ -1,6 +1,7 @@
 package token
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"github.com/Pinvou/pinvou3/account-platform/internal/billing"
@@ -21,11 +22,28 @@ func TestManagementEmergencyCancellationRetriesRecoveredACKRelease(t *testing.T)
 	testEmergencyConfirmedHoldRecovery(t, "recovered-ack")
 }
 func TestManagementEmergencyCancellationPreservesPriorUserRequest(t *testing.T) {
-	testEmergencyConfirmedHoldRecovery(t, "prior-user")
+	for _, mode := range []string{"prior-user", "prior-user-review", "prior-user-review-full-batch", "prior-user-review-proof-retry"} {
+		t.Run(mode, func(t *testing.T) { testEmergencyConfirmedHoldRecovery(t, mode) })
+	}
 }
 func TestManagementEmergencyCancellationRetriesCanonicalZeroBudget(t *testing.T) {
 	testEmergencyConfirmedHoldRecovery(t, "zero-budget")
 }
+
+type emergencyLostExpiryProofClient struct {
+	service *Service
+	lost    bool
+}
+
+func (c *emergencyLostExpiryProofClient) FenceExpiredHold(ctx context.Context, identity billing.ExpiredHoldIdentity) (billing.ExpiredHoldProof, error) {
+	proof, err := c.service.recoverExpiredHold(ctx, identity)
+	if err == nil && !c.lost {
+		c.lost = true
+		return billing.ExpiredHoldProof{}, errors.New("controlled lost confirmed expiry proof response")
+	}
+	return proof, err
+}
+
 func testEmergencyConfirmedHoldRecovery(t *testing.T, mode string) {
 	t.Setenv("APP_ENV", "test")
 	t.Setenv("WORKLOAD_IDENTITY_ISSUER", "")
@@ -170,6 +188,130 @@ func testEmergencyConfirmedHoldRecovery(t *testing.T, mode string) {
 	adapter := NewNewAPIGatewayAdapter()
 	service := &Service{billing: client, cancellationBilling: client, cancellationStore: repository, cancellationAdapter: adapter, upstream: adapter}
 	worker := NewEmergencyModelCancellationWorker(repository, service, time.Second)
+	if strings.HasPrefix(mode, "prior-user-review") {
+		// Queue the MODEL target while the real hold is still reserved, then
+		// let the original USER request encounter an unconfirmed release.
+		if err = repository.syncEmergencyCancellationTargets(ctx); err != nil {
+			t.Fatal(err)
+		}
+		if _, pre, e := repository.RequestCancellation(ctx, usageID, user, strings.Repeat("e", 64), cancellationFingerprint(usageID), adapter.AdapterVersion()); e != nil || !pre {
+			t.Fatal("original user cancellation", e)
+		}
+		if _, e := service.finishPreDispatchCancellation(ctx, usageID); e == nil {
+			t.Fatal("controlled release rejection did not retain uncertainty")
+		}
+		before := f05CancellationRecoveryFacts(t, repository, ctx, usageID)
+		if err = worker.runOnce(ctx); err != nil {
+			t.Fatal(err)
+		}
+		if after := f05CancellationRecoveryFacts(t, repository, ctx, usageID); after != before {
+			t.Fatal("model target overwrote the original USER recovery state or evidence")
+		}
+		var origin, target string
+		if err = repository.pool.QueryRow(ctx, `SELECT request.cancellation_origin,cancellation.status FROM usage_requests request JOIN model_emergency_cancellations cancellation ON cancellation.usage_request_id=request.id WHERE request.id=$1`, usageID).Scan(&origin, &target); err != nil || origin != "USER" || target != "PENDING" {
+			t.Fatal("original recovery ownership was not retained", origin, target, err)
+		}
+		money, e := funds.GetWallet(ctx, wallet.ID)
+		if e != nil || money.ReservedMicrocredits != amount {
+			t.Fatal("deferred model target changed reserved funds", money, e)
+		}
+		if mode != "prior-user-review-proof-retry" {
+			// A full batch of waiting USER recoveries must not starve later
+			// runnable MODEL targets. A batch of one fixes that boundary without
+			// timing assumptions; both targets use the production sync/worker.
+			if mode == "prior-user-review" {
+				worker.batchSize = 1
+			}
+			// Also exercise the production default limit: waiting rows must be
+			// excluded before LIMIT, leaving the whole runnable batch available.
+			laterIDs := make([]uuid.UUID, 0, worker.batchSize)
+			for range worker.batchSize {
+				laterUser := uuid.New()
+				laterWallet, _, e := funds.EnsureWallet(ctx, "PERSONAL", laterUser)
+				if e != nil {
+					t.Fatal(e)
+				}
+				later := retainedCancellationUsage(t, repository, ctx, laterUser, laterWallet.ID, nil, "STREAMING")
+				if _, err = repository.pool.Exec(ctx, `UPDATE usage_requests SET model_id=$2,started_at=$3,catalog_version=$4,model_capability_version_id=$5,protocol_definition_id=$6,route_generation=1,model_snapshot='{}',cancel_status='NOT_REQUESTED',cancel_requested_at=NULL WHERE id=$1`, later, modelID, usage.StartedAt, catalogVersion, capabilityID, protocolID); err != nil {
+					t.Fatal(err)
+				}
+				laterIDs = append(laterIDs, later)
+			}
+			clock := repository.now
+			laterTime := clock().Add(time.Second)
+			repository.now = func() time.Time { return laterTime }
+			err = repository.syncEmergencyCancellationTargets(ctx)
+			repository.now = clock
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err = worker.runOnce(ctx); err != nil {
+				t.Fatal(err)
+			}
+			var requests int
+			if err = repository.pool.QueryRow(ctx, `SELECT count(*) FROM model_emergency_cancellation_evidence evidence JOIN model_emergency_cancellations cancellation ON cancellation.id=evidence.emergency_cancellation_id WHERE cancellation.usage_request_id=ANY($1) AND evidence.evidence_type='REQUESTED'`, laterIDs).Scan(&requests); err != nil || requests != len(laterIDs) {
+				t.Fatal("waiting USER recovery starved a later MODEL target", requests, err)
+			}
+			if after := f05CancellationRecoveryFacts(t, repository, ctx, usageID); after != before {
+				t.Fatal("processing the later target changed original USER recovery facts")
+			}
+		}
+		// Exercise the existing proof owner and real Billing release. Only this
+		// fresh fixture's hold is made due; no production recovery gate changes.
+		allowed.Store(true)
+		service.repository = repository
+		if _, err = billingPool.Exec(ctx, `UPDATE usage_holds SET expires_at=clock_timestamp()-interval '1 minute' WHERE id=$1`, actualHold.ID); err != nil {
+			t.Fatal(err)
+		}
+		var proofClient billing.ExpiredHoldProofClient = f04LocalExpiryClient{service}
+		if mode == "prior-user-review-proof-retry" {
+			proofClient = &emergencyLostExpiryProofClient{service: service}
+		}
+		expiry := billing.NewExpiredHoldRecoveryWorker(funds, proofClient, time.Minute)
+		if err = expiry.RunOnce(ctx); err != nil {
+			t.Fatal("original USER proof could not recover release", err)
+		}
+		final, e := repository.GetUsage(ctx, usageID)
+		if e != nil || final.ExecutionStatus != "CANCELLED_BEFORE_DISPATCH" || final.CancelStatus != "LOCAL_CONFIRMED" || final.SettlementStatus != "RELEASED" {
+			t.Fatal("original recovery did not confirm its exact hold", final, e)
+		}
+		beforeFunds := f05CancellationClosureFundsFacts(t, billingPool, ctx)
+		if err = worker.runOnce(ctx); err != nil {
+			t.Fatal(err)
+		}
+		if err = worker.runOnce(ctx); err != nil {
+			t.Fatal(err)
+		}
+		if after := f05CancellationClosureFundsFacts(t, billingPool, ctx); after != beforeFunds {
+			t.Fatal("terminal MODEL observation repeated financial effects")
+		}
+		if mode == "prior-user-review-proof-retry" {
+			var state string
+			if err = billingPool.QueryRow(ctx, `SELECT state FROM usage_hold_expiry_recovery WHERE hold_id=$1`, actualHold.ID).Scan(&state); err != nil || state != "MANUAL_REVIEW" {
+				t.Fatal("lost proof response did not retain a retryable recovery", state, err)
+			}
+			if _, err = billingPool.Exec(ctx, `UPDATE usage_hold_expiry_recovery SET next_attempt_at=clock_timestamp() WHERE hold_id=$1`, actualHold.ID); err != nil {
+				t.Fatal(err)
+			}
+			if err = expiry.RunOnce(ctx); err != nil {
+				t.Fatal(err)
+			}
+			if err = billingPool.QueryRow(ctx, `SELECT state FROM usage_hold_expiry_recovery WHERE hold_id=$1`, actualHold.ID).Scan(&state); err != nil || state != "COMPLETED" {
+				t.Fatal("MODEL terminal observation broke original proof replay", state, err)
+			}
+			if after := f05CancellationClosureFundsFacts(t, billingPool, ctx); after != beforeFunds {
+				t.Fatal("proof replay repeated financial effects")
+			}
+		}
+		if err = repository.pool.QueryRow(ctx, `SELECT status FROM model_emergency_cancellations WHERE usage_request_id=$1`, usageID).Scan(&target); err != nil || target != "CONVERGED" {
+			t.Fatal("MODEL target did not converge after original recovery", target, err)
+		}
+		money, e = funds.GetWallet(ctx, wallet.ID)
+		if e != nil || money.ReservedMicrocredits != 0 || money.AvailableMicrocredits != 1000 {
+			t.Fatal("original recovery did not restore exact wallet funds", money, e)
+		}
+		return
+	}
 	if err = worker.runOnce(ctx); err != nil {
 		t.Fatal(err)
 	}

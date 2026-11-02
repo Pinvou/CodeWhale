@@ -5,7 +5,7 @@ Lua5.1 is a test-only CLI, not a product dependency or a Redis server. The Go
 fixture controls Redis primitives and faults, while Lua executes the production
 algorithm. No listener, external service, database or credentials are used.
 
-CI uses Linux owned-session cleanup, including descendants after parent exit.
+CI uses Linux owned-process-group cleanup, including after parent exit.
 Windows local validation cleans the live parent's tree on timeout; it does not
 claim Job-object containment of detached children after a parent already exits.
 """
@@ -19,6 +19,7 @@ import signal
 import subprocess
 import sys
 import tempfile
+import time
 
 PACKAGE = "github.com/Pinvou/pinvou3/account-platform/internal/identityadapter"
 REQUIRED = {
@@ -67,6 +68,29 @@ def validate(events, returncode):
         raise ValueError("required consumers did not execute the actual Lua program")
 
 
+def _owned_group_has_live_process(group_id, proc_root=Path("/proc")):
+    # SIGKILL delivery is asynchronous. A reaped direct parent does not prove
+    # its descendants have exited. Ignore zombies, which cannot execute and
+    # may remain until the container's init process reaps them.
+    for entry in proc_root.iterdir():
+        if not entry.name.isdecimal():
+            continue
+        try:
+            fields = (entry / "stat").read_text(encoding="utf-8", errors="replace").rsplit(") ", 1)[1].split()
+        except (FileNotFoundError, ProcessLookupError, PermissionError):
+            continue
+        if len(fields) >= 4 and fields[2:4] == [str(group_id), str(group_id)] and fields[0] not in {"Z", "X", "x"}:
+            return True
+    return False
+
+
+def _wait_owned_group(group_id, deadline):
+    while _owned_group_has_live_process(group_id):
+        if time.monotonic() >= deadline:
+            raise ValueError("quota Lua owned process group exceeded its cleanup deadline")
+        time.sleep(0.01)
+
+
 def stop_owned_process(process):
     if os.name == "nt":
         if process.poll() is not None:
@@ -75,14 +99,19 @@ def stop_owned_process(process):
             return
         # PID comes only from our Popen handle; no unrelated process is selected.
         subprocess.run(["taskkill", "/PID", str(process.pid), "/T", "/F"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=10, check=False)
+        process.wait(timeout=10)
     else:
-        # Also reap descendants after the Go parent has already exited. The
-        # session/group was created solely for this invocation.
+        # Also terminate descendants after the Go parent has already exited.
+        # The session/group was created solely for this invocation. Share the
+        # existing ten-second cleanup budget between parent and descendants.
+        deadline = time.monotonic() + 10
         try:
             os.killpg(process.pid, signal.SIGKILL)
         except ProcessLookupError:
             pass
-    process.wait(timeout=10)
+        process.wait(timeout=max(0.001, deadline - time.monotonic()))
+        if sys.platform.startswith("linux"):
+            _wait_owned_group(process.pid, deadline)
 
 
 def run(args):
