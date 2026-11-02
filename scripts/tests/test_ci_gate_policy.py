@@ -4456,6 +4456,50 @@ df() { :; }
                 with self.assertRaises(AssertionError):
                     assert_reader_execution(regression.replace(old, new))
 
+    def test_windows_controller_inbound_runs_in_the_nonzero_regression_loop(self):
+        windows_job = _without_yaml_comments(
+            self.pr_workflow.split("\n  windows-rust-test:", maxsplit=1)[1].split(
+                "\n  windows-rustup-repair-test:", maxsplit=1
+            )[0]
+        )
+        regression = windows_job.split(
+            "- name: Windows 原子替换状态机回归", maxsplit=1
+        )[1]
+        required_filters = (
+            "'features::remote_control::controller::controlling_inbound::tests::'",
+            "'features::remote_control::controller::controlling_service::inbound_tests::'",
+        )
+
+        def assert_inbound_execution(block):
+            loop = block.split("for filter in ", maxsplit=1)[1].split(
+                "done", maxsplit=1
+            )[0]
+            filters, commands = loop.split("; do", maxsplit=1)
+            for required in required_filters:
+                self.assertEqual(filters.count(required), 1)
+            self.assertIn('"$test_exe" "$filter" --test-threads=1', commands)
+            self.assertIn("running [1-9][0-9]* tests?", commands)
+            self.assertRegex(commands, r"grep -qE[^\n]+\|\|\s*\{[^}]*exit 1")
+            self.assertIn("set -euo pipefail", block)
+            self.assertNotIn("continue-on-error", block)
+
+        assert_inbound_execution(regression)
+        # These mutations protect actual behavior selection, not just linking
+        # or the presence of an unrelated filter elsewhere in the job.
+        mutations = [
+            (required, replacement)
+            for required in required_filters
+            for replacement in ("", "'features::remote_control::'")
+        ] + [
+            ('"$test_exe" "$filter" --test-threads=1', "echo compile-only"),
+            ("running [1-9][0-9]* tests?", "running [0-9]+ tests?"),
+            ("exit 1", "exit 0"),
+        ]
+        for old, new in mutations:
+            with self.subTest(mutation=(old, new)):
+                with self.assertRaises(AssertionError):
+                    assert_inbound_execution(regression.replace(old, new))
+
     def test_windows_rust_split_matches_the_declared_feature_graph(self):
         with TAURI_MANIFEST.open("rb") as manifest_file:
             manifest = tomllib.load(manifest_file)
