@@ -12,7 +12,7 @@ func (s *Service) registerOrganizationFinanceRoutes(routes *httpserver.RouteGrou
 		return
 	}
 	routes.POST("/organizations/:organization_id/account-closed-grants/:grant_id/reclaim", httpserver.AdaptFunc(s.reclaimClosedGrant))
-	routes.POST("/organizations/:organization_id/account-closed-grants:reclaim-batch", httpserver.AdaptFunc(s.reclaimClosedGrantsBatch))
+	routes.POST("/organizations/:organization_id/account-closed-grants:reclaim-batch", httpserver.RequirePathSuffix("/account-closed-grants:reclaim-batch"), httpserver.AdaptFunc(s.reclaimClosedGrantsBatch))
 	routes.GET("/organizations/:organization_id/model-policy", httpserver.AdaptFunc(s.organizationModelPolicy))
 	routes.PUT("/organizations/:organization_id/model-policy", approvalpolicy.Require("TOKEN_ORGANIZATION_MODEL_POLICY_UPDATE", approvalpolicy.AuditOnly), httpserver.AdaptFunc(s.organizationModelPolicy))
 	routes.GET("/organizations/:organization_id/balance", httpserver.AdaptFunc(s.getOrganizationBalance))
@@ -22,6 +22,6 @@ func (s *Service) registerOrganizationFinanceRoutes(routes *httpserver.RouteGrou
 	routes.POST("/organizations/:organization_id/recharge/orders", httpserver.AdaptFunc(s.createOrganizationRechargeOrder))
 	routes.GET("/organizations/:organization_id/recharge/orders/:order_id", httpserver.AdaptFunc(s.getOrganizationRechargeOrder))
 	routes.GET("/organizations/:organization_id/quota-grants", httpserver.AdaptFunc(s.listOrganizationQuotaGrants))
-	routes.POST("/organizations/:organization_id/quota-grants:batch", httpserver.AdaptFunc(s.allocateOrganizationQuotaBatch))
+	routes.POST("/organizations/:organization_id/quota-grants:batch", httpserver.RequirePathSuffix("/quota-grants:batch"), httpserver.AdaptFunc(s.allocateOrganizationQuotaBatch))
 	routes.POST("/organizations/:organization_id/quota-grants/:grant_id/revoke", httpserver.AdaptFunc(s.revokeOrganizationQuotaGrant))
 }

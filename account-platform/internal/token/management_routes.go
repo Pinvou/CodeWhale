@@ -76,7 +76,7 @@ func (s *Service) registerManagementRoutes(router *httpserver.Router, personal *
 		admin.GET("/provisionings/:provisioning_id/attempts", s.authorizer.Require("platform.tokens.read"), httpserver.AdaptFunc(s.adminProvisioningAttempts))
 		admin.GET("/owner-candidates", s.authorizer.Require("platform.tokens.owner-candidates.read"), httpserver.AdaptFunc(s.adminOwnerCandidates))
 		admin.GET("/resource-audit", s.authorizer.RequireAnyAnd([]string{"platform.models.read", "platform.tokens.read"}, []string{"platform.audit.read"}), httpserver.AdaptFunc(s.adminResourceAudit))
-		admin.POST("/commands:precheck", s.requireNewTokenCommandGovernanceActive(), httpserver.AdaptFunc(s.adminTokenCommandPrecheck))
+		admin.POST("/commands:precheck", httpserver.RequirePathSuffix("/commands:precheck"), s.requireNewTokenCommandGovernanceActive(), httpserver.AdaptFunc(s.adminTokenCommandPrecheck))
 		admin.POST("/commands", s.requireNewTokenCommandGovernanceActive(), httpserver.AdaptFunc(s.adminCreateTokenCommand))
 		admin.GET("/commands/by-idempotency-key", s.requireKnownTokenCommandGovernance(), httpserver.AdaptFunc(s.adminTokenCommandByIdempotencyKey))
 		admin.GET("/commands/recovery-queue", s.requireKnownTokenCommandGovernance(), httpserver.AdaptFunc(s.adminTokenAccountRecoveryQueue))

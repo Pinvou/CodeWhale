@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"syscall"
 	"testing"
 )
@@ -38,6 +39,53 @@ func TestRouterReturnsMethodNotAllowed(t *testing.T) {
 	router.ServeHTTP(response, httptest.NewRequest(http.MethodPost, "/v1/items", nil))
 	if response.Code != http.StatusMethodNotAllowed {
 		t.Fatalf("status = %d, want %d", response.Code, http.StatusMethodNotAllowed)
+	}
+}
+
+func TestRequirePathSuffixRejectsColonActionAliases(t *testing.T) {
+	for _, endpoint := range []struct{ prefix, route, suffix string }{
+		{"/v1", "/organizations/:organization_id/quota-grants:batch", "/quota-grants:batch"},
+		{"/v1", "/organizations/:organization_id/account-closed-grants:reclaim-batch", "/account-closed-grants:reclaim-batch"},
+		{"", "/internal/v1/organizations/:organization_id/quota-grants:batch", "/quota-grants:batch"},
+		{"/internal/v1", "/ledger-repair/authorization-proofs:batch", "/authorization-proofs:batch"},
+		{"/admin/v1", "/commands:precheck", "/commands:precheck"},
+	} {
+		t.Run(endpoint.prefix+endpoint.route, func(t *testing.T) {
+			router := NewRouter()
+			calls := 0
+			router.Group(endpoint.prefix).POST(endpoint.route, RequirePathSuffix(endpoint.suffix), AdaptFunc(func(w http.ResponseWriter, r *http.Request) {
+				calls++
+				if strings.Contains(endpoint.route, ":organization_id") && r.PathValue("organization_id") != "owned-org" {
+					t.Fatal("route guard changed the organization parameter")
+				}
+				w.WriteHeader(http.StatusNoContent)
+			}))
+			canonical := endpoint.prefix + strings.ReplaceAll(endpoint.route, ":organization_id", "owned-org")
+			for _, probe := range []struct {
+				path string
+				want int
+			}{
+				{canonical, http.StatusNoContent},
+				{canonical + "?ignored=other", http.StatusNoContent},
+				{strings.ReplaceAll(canonical, ":", "%3A"), http.StatusNoContent},
+				{canonical + "Other", http.StatusNotFound},
+				{strings.ReplaceAll(canonical, ":", ""), http.StatusNotFound},
+				{canonical + "/trailing", http.StatusNotFound},
+				{canonical + "Other?path=" + endpoint.suffix, http.StatusNotFound},
+				{canonical[:strings.LastIndex(canonical, ":")+1] + strings.ToUpper(strings.Split(endpoint.suffix, ":")[1]), http.StatusNotFound},
+			} {
+				before := calls
+				response := httptest.NewRecorder()
+				router.ServeHTTP(response, httptest.NewRequest(http.MethodPost, probe.path, nil))
+				wantCalls := 0
+				if probe.want == http.StatusNoContent {
+					wantCalls = 1
+				}
+				if response.Code != probe.want || calls-before != wantCalls {
+					t.Fatalf("%s status=%d calls=%d, want status=%d calls=%d", probe.path, response.Code, calls-before, probe.want, wantCalls)
+				}
+			}
+		})
 	}
 }
 
