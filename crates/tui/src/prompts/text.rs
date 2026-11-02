@@ -16,9 +16,11 @@
 //!   1. Constitution (binding core: `BASE_PROMPT` + language/output law;
 //!      personality tone is folded into the constitutional preamble, not
 //!      composed as a separate layer)
-//!   2. Approval-policy overlays
-//!   3. Runtime templates (compaction relay, goal continuation, memory,
+//!   2. Runtime templates (compaction relay, goal continuation, memory,
 //!      core execution, sub-agent output contract)
+//!
+//! Approval policy is not a layer here: it travels as request-time runtime
+//! metadata (see the `prompts.rs` module header).
 //!
 //! `CALM_PERSONALITY` below is a retired overlay: the runtime never composes
 //! it (tests assert the Calm tone stays folded into the constitution), and it

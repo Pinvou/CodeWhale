@@ -3,7 +3,7 @@
 //!
 //! Prompts are assembled from composable layers loaded at compile time from
 //! the single `text` module:
-//!   constitution + personality overlay → `message[0]` (byte-stable).
+//!   constitution (personality folded in) → `message[0]` (byte-stable).
 //!   approval policy → request-time runtime metadata.
 //! Tool availability comes only from the per-turn model catalog.
 //!
