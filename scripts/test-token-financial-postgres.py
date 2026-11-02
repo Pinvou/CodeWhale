@@ -144,6 +144,8 @@ REFUND_REQUIRED = {
     "TestRefundOriginalUnknownSuccessQueriesAndSettlesOrdinaryGrantsPostgres",
 }
 RETAINED_REQUIRED = {
+    "TestPaymentPersonalWalletAdmissionPostgres",
+    "TestPaymentPersonalWalletAdmissionStatusRacePostgres",
     "TestReceivableSettlementGuardedWritesPostgres",
     "TestPostgresManagedPricePagination",
     "TestLedgerRepairProofHistoricalUpgradePostgres",
@@ -188,6 +190,7 @@ RETAINED_REQUIRED = {
 # These exact roots are named leaves. Every other retained root must still
 # produce completed child-case evidence, not just a parent PASS.
 BILLING_LEAF_REQUIRED = {
+    "TestPaymentPersonalWalletAdmissionStatusRacePostgres",
     "TestPostgresManagedPricePagination",
     "TestLedgerRepairProofHistoricalUpgradePostgres",
     "TestLedgerRepairAuthorityMixedBatchPostgres",
