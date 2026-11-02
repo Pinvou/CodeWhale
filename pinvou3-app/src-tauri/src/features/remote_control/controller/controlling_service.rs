@@ -8,12 +8,18 @@
 //! 首版只接线普通会话所需的握手与租约；业务帧派发留给 E2E-04，liveness 与
 //! resume 留给 E2E-06。
 
+#[path = "controlling_dispatch.rs"]
+mod dispatch;
+use dispatch::*;
+pub(crate) use dispatch::{AuthenticatedJournalFrame, AuthenticatedSnapshotFrame};
+
 use std::sync::Arc;
 use std::time::Duration;
 
 use base64::Engine as _;
 use serde_json::Value;
 use tauri::{AppHandle, Emitter, Manager as _};
+#[cfg(test)]
 use tokio::sync::mpsc;
 use uuid::Uuid;
 
@@ -22,6 +28,7 @@ use super::controlling::{
     ControllingStatusKind, ResumeStep,
 };
 use super::controlling_handshake::{ControllingHandshake, HandshakeError};
+use super::controlling_inbound::{InboundCharge, InboundLimits, InboundReceiver, inbound_channel};
 use super::controlling_runtime::{
     ControllingHandshakeOutcome, ControllingRelayPort, ControllingStageEvent,
     drive_controlling_handshake,
@@ -32,10 +39,9 @@ use super::crypto::{
     load_relay_trust_config, transport_key_fingerprint,
 };
 use super::encrypted_lane::ControllingLaneState;
-use super::journal::{JournalEvent, JournalSnapshot, MAX_EVENT_PAYLOAD_BYTES};
-use super::protocol::{
-    LeaseContext, RuntimeValidationContext, SenderRole, validate_controller_runtime_message_json,
-};
+#[cfg(test)]
+use super::journal::{JournalEvent, JournalSnapshot};
+use super::protocol::{LeaseContext, SenderRole};
 use super::recovery_budget::LivenessBudget;
 use super::relay_runtime::log_controller_event;
 use super::relay_transport::{
@@ -68,6 +74,7 @@ const GENERIC_CONNECT_ERROR: &str = "invalid_message";
 const PEER_UNAVAILABLE_ERROR: &str = "endpoint_offline";
 
 pub(crate) use super::lane_event::ControllerLaneEvent;
+use super::lane_event::ControllerLaneFailure;
 
 /// 握手完成后的通道抽象。只暴露「下一条通道事件」，使断线投影可以在不依赖
 /// Tauri 的情况下被测试。
@@ -79,50 +86,16 @@ pub(crate) trait ControllingLane: Send {
     /// authenticated keeper must carry this exact transport and lease tuple.
     fn transport_sender(&self) -> Option<ControllerTransportSender>;
 
+    /// Release accepted business backlog only after authenticated resume and
+    /// the existing business lane have both completed their authority checks.
+    fn resume_business(&mut self) -> Result<(), ControllerLaneFailure> {
+        Ok(())
+    }
+
     /// E2E-06：发送恢复族的敏感控制帧（prepare/confirm/ready_ack）。默认实现
     /// 失败关闭，只有真实 transport 端口实现它；测试替身可覆写以记录帧。
     fn send_resume_control(&self, _message: Value) -> Result<(), String> {
         Err("controller_resume_unsupported".to_owned())
-    }
-}
-
-/// A 端权威 journal 落库端口（E2E-05）：由命令层实现——按会话引用写入 A 的
-/// SessionStore.RemoteProxy 投影正文；feature 层只负责解密与校验。
-/// Constructed only inside the AEAD-opened business-frame dispatcher. The
-/// app receives an authenticated frame, never a caller-asserted boolean.
-pub(crate) struct AuthenticatedJournalFrame<'a> {
-    operation: &'a ControllerOperation,
-    lease: &'a LeaseContext,
-    event: &'a JournalEvent,
-}
-
-impl AuthenticatedJournalFrame<'_> {
-    pub(crate) fn operation(&self) -> &ControllerOperation {
-        self.operation
-    }
-    pub(crate) fn lease(&self) -> &LeaseContext {
-        self.lease
-    }
-    pub(crate) fn event(&self) -> &JournalEvent {
-        self.event
-    }
-}
-
-pub(crate) struct AuthenticatedSnapshotFrame<'a> {
-    operation: &'a ControllerOperation,
-    lease: &'a LeaseContext,
-    snapshot: &'a JournalSnapshot,
-}
-
-impl AuthenticatedSnapshotFrame<'_> {
-    pub(crate) fn operation(&self) -> &ControllerOperation {
-        self.operation
-    }
-    pub(crate) fn lease(&self) -> &LeaseContext {
-        self.lease
-    }
-    pub(crate) fn snapshot(&self) -> &JournalSnapshot {
-        self.snapshot
     }
 }
 
@@ -181,16 +154,40 @@ pub(crate) trait ControllingJournalSink: Send + Sync {
 /// 出站一律走敏感队列（claim 自带连接码、receipt ack 自带 receipt secret）。
 pub(crate) struct ControllerTransportPort {
     sender: ControllerTransportSender,
-    inbound: mpsc::UnboundedReceiver<ControllerLaneEvent>,
+    inbound: InboundReceiver,
+    // The two production consumers finish processing a String before asking
+    // for another event. Keep its allocation/item budget through that work,
+    // including the handshake-to-keeper handoff; release on next or Drop.
+    current_charge: Option<InboundCharge>,
     relay_error_code: Option<&'static str>,
     relay_error_seen: bool,
     lane_disconnected: bool,
 }
 
+impl ControllerTransportPort {
+    fn new(sender: ControllerTransportSender, inbound: InboundReceiver) -> Self {
+        Self {
+            sender,
+            inbound,
+            current_charge: None,
+            relay_error_code: None,
+            relay_error_seen: false,
+            lane_disconnected: false,
+        }
+    }
+}
+
 #[async_trait::async_trait]
 impl ControllingLane for ControllerTransportPort {
     async fn next_lane_event(&mut self) -> Option<ControllerLaneEvent> {
-        self.inbound.recv().await
+        self.current_charge = None;
+        let delivery = self.inbound.recv().await?;
+        self.current_charge = delivery.charge;
+        Some(delivery.event)
+    }
+
+    fn resume_business(&mut self) -> Result<(), ControllerLaneFailure> {
+        self.inbound.resume_business()
     }
 
     fn transport_sender(&self) -> Option<ControllerTransportSender> {
@@ -215,6 +212,7 @@ impl ControllingRelayPort for ControllerTransportPort {
     async fn recv(&mut self) -> Option<Value> {
         loop {
             match self.next_lane_event().await? {
+                ControllerLaneEvent::Failed(_) => return None,
                 ControllerLaneEvent::Disconnected(context) => {
                     if context.owner != self.sender.owner() {
                         continue;
@@ -255,51 +253,46 @@ impl ControllingRelayPort for ControllerTransportPort {
     }
 
     fn lane_disconnected(&self) -> bool {
-        self.lane_disconnected
+        self.lane_disconnected || self.inbound.disconnect_pending()
     }
-}
 
-fn forward_controlling_event(
-    inbound_tx: &mpsc::UnboundedSender<ControllerLaneEvent>,
-    event: ControllerTransportEvent,
-) {
-    match event {
-        ControllerTransportEvent::Frame { json, .. } => {
-            let _ = inbound_tx.send(ControllerLaneEvent::Frame(json));
-        }
-        ControllerTransportEvent::Disconnected { context, .. } => {
-            let _ = inbound_tx.send(ControllerLaneEvent::Disconnected(context));
-        }
-        ControllerTransportEvent::Connected { .. } | ControllerTransportEvent::RttSample { .. } => {
-        }
+    fn ingress_failure(&self) -> Option<ControllerLaneFailure> {
+        self.inbound.failure()
     }
 }
 
 /// 绑定一条真实 Relay transport，并把入站事件投影为端口事件。generation 以
 /// 空串启动：A 端只有验签 transcript 之后才会通过 `bind_generation` 绑定它。
 fn spawn_controlling_lane(relay_url: &str) -> (ControllerTransportSender, ControllerTransportPort) {
-    spawn_controlling_lane_with_config(ControllerTransportConfig::new(
-        relay_url,
-        ControllerRole::ControllerA,
-        String::new(),
-    ))
+    spawn_controlling_lane_with_limits(relay_url, InboundLimits::default())
+}
+
+fn spawn_controlling_lane_with_limits(
+    relay_url: &str,
+    limits: InboundLimits,
+) -> (ControllerTransportSender, ControllerTransportPort) {
+    spawn_controlling_lane_with_config_and_limits(
+        ControllerTransportConfig::new(relay_url, ControllerRole::ControllerA, String::new()),
+        limits,
+    )
 }
 
 fn spawn_controlling_lane_with_config(
     config: ControllerTransportConfig,
 ) -> (ControllerTransportSender, ControllerTransportPort) {
-    let (inbound_tx, inbound_rx) = mpsc::unbounded_channel();
-    let sink = Arc::new(move |event: ControllerTransportEvent| {
-        forward_controlling_event(&inbound_tx, event);
-    });
+    spawn_controlling_lane_with_config_and_limits(config, InboundLimits::default())
+}
+
+fn spawn_controlling_lane_with_config_and_limits(
+    config: ControllerTransportConfig,
+    limits: InboundLimits,
+) -> (ControllerTransportSender, ControllerTransportPort) {
+    let (inbound_tx, inbound_rx) = inbound_channel(limits);
+    let ingress = inbound_tx.clone();
+    let sink = Arc::new(move |event: ControllerTransportEvent| ingress.enqueue(event));
     let sender = spawn_controller_transport(config, sink);
-    let port = ControllerTransportPort {
-        sender: sender.clone(),
-        inbound: inbound_rx,
-        relay_error_code: None,
-        relay_error_seen: false,
-        lane_disconnected: false,
-    };
+    inbound_tx.bind_transport(sender.clone());
+    let port = ControllerTransportPort::new(sender.clone(), inbound_rx);
     (sender, port)
 }
 
@@ -316,13 +309,20 @@ fn relay_error_code(value: &Value) -> Option<&'static str> {
     }
 }
 
-/// 失败分类：Relay 明确给出的码优先；断线与本地上限超时归为对端不可达；
+/// 失败分类：已观察到的本地入站终态优先于已保存的 Relay 错误码；
+/// 否则使用 Relay 明确码，断线与本地上限超时归为对端不可达；
 /// 其余（验签失败、顺序错误、本地 generation 绑定失败）归为协议错误。
-fn public_failure_code(port: &impl ControllingRelayPort, timed_out: bool) -> &'static str {
+fn public_failure_code(
+    port: &impl ControllingRelayPort,
+    locally_unavailable: bool,
+) -> &'static str {
+    if port.ingress_failure().is_some() {
+        return PEER_UNAVAILABLE_ERROR;
+    }
     if let Some(code) = port.relay_error_code() {
         return code;
     }
-    if timed_out || port.lane_disconnected() {
+    if locally_unavailable || port.lane_disconnected() {
         return PEER_UNAVAILABLE_ERROR;
     }
     GENERIC_CONNECT_ERROR
@@ -331,6 +331,11 @@ fn public_failure_code(port: &impl ControllingRelayPort, timed_out: bool) -> &'s
 /// 失败归因（有界、不含凭据）：公共码 + 来源（Relay 明确报错 / 通道断开 / 本地校验）。
 /// 只用于端上排障日志，不改变任何面向用户的错误语义。
 fn failure_origin_detail(port: &impl ControllingRelayPort, code: &str) -> String {
+    if let Some(reason) = port.ingress_failure() {
+        // The actual log sink accepts a closed detail set. Keep this local
+        // reason intact rather than constructing an unregistered string.
+        return reason.code().to_owned();
+    }
     let origin = if port.relay_error_seen() {
         "relay"
     } else if port.lane_disconnected() {
@@ -400,12 +405,38 @@ pub(crate) async fn run_controlling_connection<P: ControllingRelayPort>(
         }
     };
 
+    // A joined frame may already be in flight when ingress terminates or the
+    // socket disconnect barrier arrives. Never forget that known handoff loss.
+    if port.ingress_failure().is_some() || port.lane_disconnected() || sender.is_stopped() {
+        let code = public_failure_code(port, sender.is_stopped());
+        log_controller_event("connect_failed", &failure_origin_detail(port, code));
+        sender.stop();
+        fail_owned_lane(manager, &operation, business, code, on_status);
+        return Err(code.to_owned());
+    }
     match complete_connected(manager, operation.clone(), sender, business, outcome) {
         Ok(status) => {
+            if port.ingress_failure().is_some() || port.lane_disconnected() || sender.is_stopped() {
+                let code = public_failure_code(port, sender.is_stopped());
+                log_controller_event("connect_failed", &failure_origin_detail(port, code));
+                sender.stop();
+                fail_owned_lane(manager, &operation, business, code, on_status);
+                return Err(code.to_owned());
+            }
             on_status(&status);
             Ok(status)
         }
         Err(code) => {
+            // The first handoff check can pass before an ingress terminal
+            // makes the real lease installer return Closed. Recheck before
+            // cleanup so that local saturation retains its public reason.
+            if port.ingress_failure().is_some() || port.lane_disconnected() {
+                let code = public_failure_code(port, false);
+                log_controller_event("connect_failed", &failure_origin_detail(port, code));
+                sender.stop();
+                fail_owned_lane(manager, &operation, business, code, on_status);
+                return Err(code.to_owned());
+            }
             sender.stop();
             let _ = manager.with_lane_owner(&operation, || business.clear());
             // 本地收尾失败（指纹派生、租约安装）时不能停在非终态阶段：只有在
@@ -486,23 +517,24 @@ fn fail_connection(
     }
 }
 
-/// 通道保活期间的事件出口（状态/会话/任务），由 Tauri 层注入具体广播。
-pub(crate) struct ControllingLaneSinks<'a> {
-    pub(crate) on_status: &'a mut (dyn FnMut(&ControllingStatus) + Send),
-    pub(crate) on_session: &'a mut (dyn FnMut(&ControllingSessionProjection) + Send),
-    /// Authenticated capability response mapping, before A capability state advances.
-    pub(crate) on_mapping:
-        &'a mut (dyn FnMut(&LeaseContext, &str, &str) -> Result<(), String> + Send),
-    pub(crate) on_task: &'a mut (dyn FnMut(&LeaseContext, Value) + Send),
-    /// 解密并校验过的 B 权威 journal：A 端仅投影到 RemoteProxy。
-    pub(crate) on_journal:
-        &'a mut (dyn FnMut(&AuthenticatedJournalFrame<'_>) -> Result<(), String> + Send),
-    /// 权威快照（E2E-05 缺口恢复）：A 端据此原子替换本地副本。
-    pub(crate) on_snapshot:
-        &'a mut (dyn FnMut(&AuthenticatedSnapshotFrame<'_>) -> Result<(), String> + Send),
-    /// E2E-06：待发送的 A 端心跳帧（明文控制帧，绑定当前租约）。
-    // True means authenticated transport admission succeeded, not remote receipt.
-    pub(crate) on_liveness: &'a mut (dyn FnMut(Value) -> bool + Send),
+/// Both Connecting and Connected can observe an ingress terminal. Every
+/// mutation is fenced to the original intent/claim, including the clear.
+fn fail_owned_lane(
+    manager: &ControllingDeviceManager,
+    operation: &ControllerOperation,
+    business: &ControllingLaneState,
+    code: &'static str,
+    on_status: &mut (impl FnMut(&ControllingStatus) + ?Sized),
+) {
+    if manager
+        .with_lane_owner(operation, || business.clear())
+        .is_err()
+    {
+        return;
+    }
+    if let Ok(status) = manager.fail_connection(operation.clone(), code) {
+        on_status(&status);
+    }
 }
 
 /// 握手完成后的通道保活与业务帧派发：首次断线冻结认证存活截止时间并挂起
@@ -666,6 +698,11 @@ async fn serve_controlling_lane_with_evidence_context(
                 if manager.with_lane_owner(&operation, || ()).is_err() { return; }
                 let Some(event) = event else { return };
                 match event {
+                    ControllerLaneEvent::Failed(reason) => {
+                        log_controller_event("inbound_failed", reason.code());
+                        fail_owned_lane(manager, &operation, business, PEER_UNAVAILABLE_ERROR, sinks.on_status);
+                        return;
+                    }
                     ControllerLaneEvent::Disconnected(context) => {
                         if context.owner != registration.owner {
                             continue;
@@ -716,6 +753,11 @@ async fn serve_controlling_lane_with_evidence_context(
                             match handle_resume_frame(lane, manager, &operation, business, &mut resume, now_b, &json) {
                                 ResumeOutcome::Progressed | ResumeOutcome::Ignored => {}
                                 ResumeOutcome::Completed => {
+                                    if let Err(reason) = lane.resume_business() {
+                                        log_controller_event("inbound_failed", reason.code());
+                                        fail_owned_lane(manager, &operation, business, PEER_UNAVAILABLE_ERROR, sinks.on_status);
+                                        return;
+                                    }
                                     resume.reset();
                                     liveness = LivenessExpectations::default();
                                     // A transport resume is not a journal
@@ -1075,740 +1117,6 @@ fn next_liveness_frame(
     Some(frame)
 }
 
-/// 解密并派发一条入站业务帧。任何一层不符（非加密帧、无活租约、解密/校验
-/// 失败）都静默丢弃——攻击者不能通过伪造帧影响任何状态。
-fn dispatch_inbound_frame(
-    manager: &ControllingDeviceManager,
-    operation: &ControllerOperation,
-    sessions: &ControllingSessionManager,
-    business: &ControllingLaneState,
-    journal: &mut JournalExpectations,
-    liveness: &mut LivenessExpectations,
-    json: &str,
-    sinks: &mut ControllingLaneSinks<'_>,
-) {
-    let Ok(frame) = serde_json::from_str::<Value>(json) else {
-        return;
-    };
-    let Ok((runtime, epoch_a)) = manager
-        .with_peer_liveness_context(operation, |runtime, _, a| (runtime.clone(), a.to_owned()))
-    else {
-        return;
-    };
-    let Some(lease) = runtime.lease else {
-        return;
-    };
-    let capabilities = runtime.negotiated_capabilities;
-    if frame.get("type").and_then(Value::as_str) == Some("error") {
-        if let Some(request_id) = frame.get("request_id").and_then(Value::as_str) {
-            // A correlated negative response may advance retry to the next
-            // heartbeat; it never confirms/ACKs a journal cursor.
-            journal.expedite_negative_response(request_id, tokio::time::Instant::now());
-        }
-        let relay_code = frame
-            .get("code")
-            .and_then(Value::as_str)
-            .unwrap_or("invalid_message");
-        log_controller_event("runtime_relay_error", relay_code);
-        let outcome = sessions.fail_pending_capability_for_lease_with_guard(
-            &lease,
-            "capability_snapshot_unavailable",
-            |commit| {
-                manager.with_lane_owner(operation, commit).map_err(|_| {
-                    super::controlling_session::SessionError::new("session_context_stale")
-                })
-            },
-        );
-        match outcome {
-            Ok(projection) => {
-                log_controller_event("capability_snapshot_failed", "relay_rejected");
-                (sinks.on_session)(&projection);
-            }
-            Err(error) => {
-                log_controller_event("capability_error_rejected", error.code);
-            }
-        }
-        return;
-    }
-    // Relay 按冻结协议把 B 的挑战作为顶层明文控制帧转发给 A。它不是业务
-    // `encrypted_frame`，但必须先通过角色、租约和能力绑定校验，随后才生成由
-    // A/B 会话密钥保护的直接存活证明。此前该分支位于 encrypted_frame 解密后，
-    // 导致真实挑战在到达应答逻辑之前被静默丢弃。
-    if frame.get("type").and_then(Value::as_str) == Some("controller_liveness_challenge_a") {
-        dispatch_liveness_challenge(
-            manager,
-            operation,
-            business,
-            liveness,
-            &frame,
-            &lease,
-            &capabilities,
-            &epoch_a,
-            sinks,
-        );
-        return;
-    }
-    if frame.get("type").and_then(Value::as_str) != Some("encrypted_frame") {
-        return;
-    }
-    let Ok(Ok((payload_kind, payload))) =
-        manager.with_lane_owner(operation, || business.open(&frame, &capabilities))
-    else {
-        return;
-    };
-    dispatch_authenticated_payload(
-        manager,
-        operation,
-        sessions,
-        business,
-        journal,
-        &lease,
-        &capabilities,
-        &payload_kind,
-        payload,
-        sinks,
-    );
-}
-
-/// AEAD admission and projection are separate boundaries: final shared-state
-/// commits still validate this original owner after a replacement can occur.
-fn dispatch_authenticated_payload(
-    manager: &ControllingDeviceManager,
-    operation: &ControllerOperation,
-    sessions: &ControllingSessionManager,
-    business: &ControllingLaneState,
-    journal: &mut JournalExpectations,
-    lease: &LeaseContext,
-    capabilities: &[String],
-    payload_kind: &str,
-    payload: Value,
-    sinks: &mut ControllingLaneSinks<'_>,
-) {
-    if manager.with_lane_owner(operation, || ()).is_err() {
-        return;
-    }
-    match payload_kind {
-        "capability_snapshot" => {
-            match sessions.apply_capability_snapshot_for_lease_with_mapping_and_guard(
-                &lease,
-                &payload,
-                |remote_ref, controlled_session_id| {
-                    (sinks.on_mapping)(&lease, remote_ref, controlled_session_id).map_err(|_| {
-                        super::controlling_session::SessionError::new("remote_mapping_unavailable")
-                    })
-                },
-                |commit| {
-                    manager.with_lane_owner(operation, commit).map_err(|_| {
-                        super::controlling_session::SessionError::new("session_context_stale")
-                    })
-                },
-            ) {
-                Ok(projection) => {
-                    log_controller_event("capability_snapshot_applied", "ready");
-                    (sinks.on_session)(&projection);
-                }
-                Err(error) => {
-                    log_controller_event("capability_snapshot_rejected", error.code);
-                }
-            }
-        }
-        "capability_snapshot_error" => {
-            match sessions.apply_capability_error_for_lease_with_guard(&lease, &payload, |commit| {
-                manager.with_lane_owner(operation, commit).map_err(|_| {
-                    super::controlling_session::SessionError::new("session_context_stale")
-                })?
-            }) {
-                Ok(projection) => {
-                    log_controller_event("capability_snapshot_failed", "unavailable");
-                    (sinks.on_session)(&projection);
-                }
-                Err(error) => {
-                    log_controller_event("capability_error_rejected", error.code);
-                }
-            }
-        }
-        "task_status" => {
-            if let Some(event) = task_event_projection(&lease, &payload) {
-                log_controller_event(
-                    "task_status_received",
-                    event
-                        .get("status")
-                        .and_then(Value::as_str)
-                        .unwrap_or("unknown"),
-                );
-                (sinks.on_task)(&lease, event);
-            }
-        }
-        "remote_action_result" => {
-            // Only the authenticated decrypt path may reach this callback.
-            // The adapter never emits the raw result to WebView.
-            (sinks.on_task)(&lease, payload);
-        }
-        "journal_event" => {
-            let Some(event) = journal_event_from_wire(&payload) else {
-                log_controller_event("journal_event_rejected", "invalid_envelope_or_identity");
-                return;
-            };
-            if journal.is_retired(&event.session_id, &event.epoch) {
-                log_controller_event("journal_event_ignored", "retired_epoch");
-                return;
-            }
-            match project_journal_event(journal, &event, &mut |event| {
-                (sinks.on_journal)(&AuthenticatedJournalFrame {
-                    operation,
-                    lease: &lease,
-                    event,
-                })
-            }) {
-                Ok(JournalAdmission::Apply) => {
-                    log_controller_event("journal_event_applied", &event.kind);
-                }
-                Ok(JournalAdmission::Duplicate) => {
-                    log_controller_event("journal_event_verified", "duplicate");
-                }
-                Err(_) => log_controller_event("journal_event_rejected", "projection_failed"),
-                Ok(JournalAdmission::RequestReplay { epoch, after }) => {
-                    log_controller_event("journal_event_gap", "replay_requested");
-                    begin_and_send_replay(
-                        journal,
-                        &event.session_id,
-                        &epoch,
-                        after,
-                        event.sequence,
-                        &lease.remote_control_generation,
-                        tokio::time::Instant::now(),
-                        |pending| {
-                            request_journal_replay(
-                                manager,
-                                operation,
-                                business,
-                                &lease,
-                                &capabilities,
-                                &event.session_id,
-                                &pending.epoch,
-                                pending.after,
-                                &pending.request_id,
-                            )
-                        },
-                    );
-                }
-            }
-        }
-        "session_snapshot" => {
-            let Some(snapshot) = journal_snapshot_from_wire(&payload) else {
-                return;
-            };
-            // Equal-base snapshots still enter the authoritative sink so
-            // DEV-30 can verify immutable content; transport cache is not ACK
-            // authority and may never skip that comparison.
-            match project_journal_snapshot(journal, &snapshot, &mut |snapshot| {
-                (sinks.on_snapshot)(&AuthenticatedSnapshotFrame {
-                    operation,
-                    lease: &lease,
-                    snapshot,
-                })
-            }) {
-                Ok(()) => {}
-                Err(_) => log_controller_event("journal_snapshot_rejected", "projection_failed"),
-            }
-        }
-        _ => {}
-    }
-}
-
-/// 严格校验并应答 B 的顶层存活挑战。Relay 只能转发挑战，不能构造这里返回的
-/// AEAD 证明；因此明文控制帧仍不会被直接当成 B 的有效存活证据。
-fn dispatch_liveness_challenge(
-    manager: &ControllingDeviceManager,
-    operation: &ControllerOperation,
-    business: &ControllingLaneState,
-    liveness: &mut LivenessExpectations,
-    frame: &Value,
-    lease: &LeaseContext,
-    capabilities: &[String],
-    epoch: &str,
-    sinks: &mut ControllingLaneSinks<'_>,
-) {
-    let context = RuntimeValidationContext {
-        lease: Some(lease.clone()),
-        negotiated_capabilities: capabilities.to_vec(),
-    };
-    let Ok(challenge) = validate_controller_runtime_message_json(
-        &frame.to_string(),
-        SenderRole::ControlledB,
-        Some(&context),
-    ) else {
-        return;
-    };
-    let Some(challenge_id) = challenge.get("challenge_id").and_then(Value::as_str) else {
-        return;
-    };
-    let Some(challenge_b64) = challenge.get("challenge_b64").and_then(Value::as_str) else {
-        return;
-    };
-    let now_a = lane_monotonic_millis();
-    if !liveness.can_answer(challenge_id, now_a) {
-        return;
-    }
-    let Some(sequence) = liveness.next_sequence() else {
-        return;
-    };
-    let inner = serde_json::json!({
-        "v": 1,
-        "type": "controller_liveness_a",
-        "connection_id": lease.connection_id,
-        "controller_lease_id": lease.controller_lease_id,
-        "lease_epoch": lease.lease_epoch,
-        "relay_epoch": lease.relay_epoch,
-        "remote_control_generation": lease.remote_control_generation,
-        "role": "A",
-        "liveness_epoch_a": epoch,
-        "heartbeat_sequence_a": sequence.to_string(),
-        "challenge_id": challenge_id,
-        "challenge_b64": challenge_b64,
-    });
-    let Ok(Ok(response)) =
-        manager.with_lane_owner(operation, || business.seal_liveness(&inner, capabilities))
-    else {
-        return;
-    };
-    if (sinks.on_liveness)(response) {
-        liveness.record_answered(challenge_id, now_a);
-    }
-}
-
-/// wire `session_snapshot` → 权威快照。base64 体积与声明一致、摘要与快照本体
-/// 自带的 digest 一致才接受；事件条目沿用与增量事件相同的体积上限。
-fn journal_snapshot_from_wire(payload: &Value) -> Option<JournalSnapshot> {
-    let encoded = payload.get("snapshot_b64").and_then(Value::as_str)?;
-    let declared = payload
-        .get("snapshot_bytes")
-        .and_then(Value::as_str)
-        .and_then(|value| value.parse::<usize>().ok())?;
-    let raw = base64::engine::general_purpose::STANDARD
-        .decode(encoded)
-        .ok()?;
-    if raw.len() != declared || raw.len() > MAX_SNAPSHOT_BYTES {
-        return None;
-    }
-    let snapshot: JournalSnapshot = serde_json::from_slice(&raw).ok()?;
-    if !snapshot.verify_digest()
-        || payload.get("session_id").and_then(Value::as_str) != Some(snapshot.session_id.as_str())
-        || payload.get("sha256").and_then(Value::as_str) != Some(snapshot.digest.as_str())
-        || payload.get("journal_epoch").and_then(Value::as_str) != Some(snapshot.epoch.as_str())
-        || payload.get("base_sequence").and_then(Value::as_str)
-            != Some(snapshot.sequence.to_string().as_str())
-    {
-        return None;
-    }
-    Some(snapshot)
-}
-
-/// 快照帧的硬上限：256 条事件 × 单条上限 + 信封开销。
-const MAX_SNAPSHOT_BYTES: usize = 256 * MAX_EVENT_PAYLOAD_BYTES;
-
-/// wire `journal_event` → 权威事件。`event_b64` 是事件本体（冻结的 camelCase
-/// 形状），明文侧还有 journal_epoch/event_sequence/event_kind 供缺口检测；三者
-/// 必须互相一致，否则丢弃。事件体积有硬上限。明文 `event_kind` 是冻结闭集
-/// （如 `terminal`），事件本体保留更细的内部类型，因此只核对 epoch/序号/会话。
-fn journal_event_from_wire(payload: &Value) -> Option<JournalEvent> {
-    let encoded = payload.get("event_b64").and_then(Value::as_str)?;
-    let declared = payload
-        .get("event_bytes")
-        .and_then(Value::as_str)
-        .and_then(|value| value.parse::<usize>().ok())?;
-    let raw = base64::engine::general_purpose::STANDARD
-        .decode(encoded)
-        .ok()?;
-    if raw.len() != declared || raw.len() > MAX_EVENT_PAYLOAD_BYTES {
-        return None;
-    }
-    let event: JournalEvent = serde_json::from_slice(&raw).ok()?;
-    if event.validate_exportable().is_err()
-        || payload.get("event_kind").and_then(Value::as_str) != event.wire_kind()
-        || payload.get("journal_epoch").and_then(Value::as_str) != Some(event.epoch.as_str())
-        || payload.get("event_sequence").and_then(Value::as_str)
-            != Some(event.sequence.to_string().as_str())
-        || payload.get("session_id").and_then(Value::as_str) != Some(event.session_id.as_str())
-    {
-        return None;
-    }
-    Some(event)
-}
-
-/// A 端 transport 顺序提示；重复仍须交给权威投影端口验证内容等价。
-#[derive(Debug, Clone, Eq, PartialEq)]
-pub(crate) enum JournalAdmission {
-    Apply,
-    RequestReplay { epoch: String, after: u64 },
-    Duplicate,
-}
-
-/// 纯函数：依据本端已知的 (epoch, last_sequence) 与到达事件推导接纳动作。
-/// 换 epoch 时从该 epoch 的 0 号位请求回放（B 侧保留窗口不足会给快照）。
-pub(crate) fn journal_admission(
-    expected: Option<(&str, u64)>,
-    event: &JournalEvent,
-) -> JournalAdmission {
-    match expected {
-        None if event.sequence == 1 => JournalAdmission::Apply,
-        None => JournalAdmission::RequestReplay {
-            epoch: event.epoch.clone(),
-            after: 0,
-        },
-        Some((epoch, _)) if epoch != event.epoch => JournalAdmission::RequestReplay {
-            epoch: event.epoch.clone(),
-            after: 0,
-        },
-        Some((_, last)) if event.sequence <= last => JournalAdmission::Duplicate,
-        Some((_, last)) if event.sequence == last.saturating_add(1) => JournalAdmission::Apply,
-        Some((_, last)) => JournalAdmission::RequestReplay {
-            epoch: event.epoch.clone(),
-            after: last,
-        },
-    }
-}
-
-fn project_journal_event(
-    cache: &mut JournalExpectations,
-    event: &JournalEvent,
-    sink: &mut dyn FnMut(&JournalEvent) -> Result<(), String>,
-) -> Result<JournalAdmission, String> {
-    let admission = journal_admission(cache.expected(&event.session_id), event);
-    if matches!(
-        admission,
-        JournalAdmission::Apply | JournalAdmission::Duplicate
-    ) {
-        sink(event)?;
-        if admission == JournalAdmission::Apply {
-            cache.mark_applied(event);
-        }
-    }
-    Ok(admission)
-}
-
-fn project_journal_snapshot(
-    cache: &mut JournalExpectations,
-    snapshot: &JournalSnapshot,
-    sink: &mut dyn FnMut(&JournalSnapshot) -> Result<(), String>,
-) -> Result<(), String> {
-    if cache.is_retired(&snapshot.session_id, &snapshot.epoch) {
-        return Ok(());
-    }
-    let same_or_older = cache
-        .expected(&snapshot.session_id)
-        .filter(|(epoch, _)| *epoch == snapshot.epoch)
-        .map(|(_, sequence)| sequence.cmp(&snapshot.sequence));
-    if same_or_older == Some(std::cmp::Ordering::Greater) {
-        return Ok(());
-    }
-    // An equal-base snapshot may carry conflicting content. The durable
-    // projection port must decide; this cache cannot pronounce it duplicate.
-    sink(snapshot)?;
-    if same_or_older != Some(std::cmp::Ordering::Equal) {
-        cache.mark_snapshot(snapshot);
-    }
-    Ok(())
-}
-
-/// A 端存活状态：与心跳共享的单调序号 + 已应答过的挑战（同一挑战只答一次，
-/// 避免重复投递导致重复加密大帧）。
-#[derive(Default)]
-pub(crate) struct LivenessExpectations {
-    sequence: u64,
-    answered: std::collections::BTreeMap<String, u64>,
-}
-
-const MAX_ANSWERED_LIVENESS_CHALLENGES: usize = 64;
-
-impl LivenessExpectations {
-    pub(crate) fn next_sequence(&mut self) -> Option<u64> {
-        self.sequence = self.sequence.checked_add(1)?;
-        Some(self.sequence)
-    }
-
-    fn can_answer(&mut self, challenge_id: &str, now_a: u64) -> bool {
-        self.answered.retain(|_, answered_at| {
-            now_a.saturating_sub(*answered_at) <= super::liveness::LIVENESS_TOTAL_BUDGET_MS
-        });
-        !self.answered.contains_key(challenge_id)
-            && self.answered.len() < MAX_ANSWERED_LIVENESS_CHALLENGES
-    }
-
-    /// Seal/enqueue failures leave the challenge retryable. At capacity we
-    /// fail closed instead of evicting replay history inside its validity window.
-    fn record_answered(&mut self, challenge_id: &str, now_a: u64) {
-        self.answered.insert(challenge_id.to_owned(), now_a);
-    }
-}
-
-/// Conservative transport replay cache, never projection/ACK authority.
-/// A restart may lose these hints; only the DEV-30 durable projection decides
-/// duplicate content and confirmed cursor. In-flight replay suppresses only
-/// redundant transport requests, not calls into the projection sink.
-/// The authenticated journal sink sends ACK only after DEV-30's RemoteProxy
-/// projection confirms the durable cursor. This transport cache does not
-/// grant ACK authority or introduce another protocol message type.
-const MAX_PENDING_REPLAYS: usize = 256;
-const REPLAY_RETRY_INTERVAL: Duration = Duration::from_secs(3);
-
-#[derive(Clone, Debug)]
-pub(crate) struct PendingReplay {
-    request_id: String,
-    epoch: String,
-    after: u64,
-    target_sequence: u64,
-    generation: String,
-    next_retry_at: tokio::time::Instant,
-}
-
-#[derive(Default)]
-pub(crate) struct JournalExpectations {
-    applied: std::collections::BTreeMap<String, (String, u64)>,
-    awaiting_replay: std::collections::BTreeMap<String, PendingReplay>,
-    retired_epochs: std::collections::BTreeMap<String, std::collections::BTreeSet<String>>,
-}
-
-impl JournalExpectations {
-    pub(crate) fn expected(&self, session_id: &str) -> Option<(&str, u64)> {
-        self.applied
-            .get(session_id)
-            .map(|(epoch, sequence)| (epoch.as_str(), *sequence))
-    }
-
-    pub(crate) fn mark_applied(&mut self, event: &JournalEvent) {
-        if let Some((old_epoch, _)) = self.applied.get(&event.session_id) {
-            if old_epoch != &event.epoch {
-                self.retired_epochs
-                    .entry(event.session_id.clone())
-                    .or_default()
-                    .insert(old_epoch.clone());
-            }
-        }
-        self.applied.insert(
-            event.session_id.clone(),
-            (event.epoch.clone(), event.sequence),
-        );
-        if self
-            .awaiting_replay
-            .get(&event.session_id)
-            .is_some_and(|pending| {
-                pending.epoch == event.epoch && event.sequence >= pending.target_sequence
-            })
-        {
-            self.awaiting_replay.remove(&event.session_id);
-        }
-    }
-
-    /// 快照基准对空事件窗口同样有效，归属使用快照的明确 session_id。
-    pub(crate) fn mark_snapshot(&mut self, snapshot: &JournalSnapshot) {
-        if let Some((old_epoch, _)) = self.applied.get(&snapshot.session_id) {
-            if old_epoch != &snapshot.epoch {
-                self.retired_epochs
-                    .entry(snapshot.session_id.clone())
-                    .or_default()
-                    .insert(old_epoch.clone());
-            }
-        }
-        self.applied.insert(
-            snapshot.session_id.clone(),
-            (snapshot.epoch.clone(), snapshot.sequence),
-        );
-        if self
-            .awaiting_replay
-            .get(&snapshot.session_id)
-            .is_some_and(|pending| {
-                pending.epoch == snapshot.epoch && snapshot.sequence >= pending.target_sequence
-            })
-        {
-            self.awaiting_replay.remove(&snapshot.session_id);
-        }
-    }
-
-    pub(crate) fn is_retired(&self, session_id: &str, epoch: &str) -> bool {
-        self.retired_epochs
-            .get(session_id)
-            .is_some_and(|epochs| epochs.contains(epoch))
-    }
-
-    /// One stable request per session/epoch gap. The bounded entry survives
-    /// both successful queueing without response and local seal/send failure;
-    /// heartbeat retries it with the exact same request_id.
-    pub(crate) fn begin_replay(
-        &mut self,
-        session_id: &str,
-        epoch: &str,
-        after: u64,
-        target_sequence: u64,
-        generation: &str,
-        now: tokio::time::Instant,
-    ) -> Option<PendingReplay> {
-        if let Some(pending) = self.awaiting_replay.get_mut(session_id) {
-            if pending.epoch == epoch && pending.generation == generation {
-                pending.target_sequence = pending.target_sequence.max(target_sequence);
-                return None;
-            }
-        }
-        if !self.awaiting_replay.contains_key(session_id)
-            && self.awaiting_replay.len() >= MAX_PENDING_REPLAYS
-        {
-            return None;
-        }
-        let pending = PendingReplay {
-            request_id: format!("request-replay-{}", Uuid::new_v4().simple()),
-            epoch: epoch.to_owned(),
-            after,
-            target_sequence,
-            generation: generation.to_owned(),
-            next_retry_at: now + REPLAY_RETRY_INTERVAL,
-        };
-        self.awaiting_replay
-            .insert(session_id.to_owned(), pending.clone());
-        Some(pending)
-    }
-
-    pub(crate) fn due_replays(
-        &mut self,
-        generation: &str,
-        now: tokio::time::Instant,
-    ) -> Vec<(String, PendingReplay)> {
-        self.awaiting_replay
-            .retain(|_, pending| pending.generation == generation);
-        let mut due = Vec::new();
-        for (session_ref, pending) in &mut self.awaiting_replay {
-            if pending.next_retry_at <= now {
-                pending.next_retry_at = now + REPLAY_RETRY_INTERVAL;
-                due.push((session_ref.clone(), pending.clone()));
-            }
-        }
-        due
-    }
-
-    pub(crate) fn expedite_negative_response(
-        &mut self,
-        request_id: &str,
-        now: tokio::time::Instant,
-    ) {
-        if let Some(pending) = self
-            .awaiting_replay
-            .values_mut()
-            .find(|pending| pending.request_id == request_id)
-        {
-            pending.next_retry_at = now;
-        }
-    }
-
-    pub(crate) fn rearm_pending(&mut self, now: tokio::time::Instant) {
-        for pending in self.awaiting_replay.values_mut() {
-            pending.next_retry_at = now;
-        }
-    }
-}
-
-/// 冻结形状的 `journal_replay_request`（A→B 加密业务帧）。
-pub(crate) fn build_journal_replay_request(
-    lease: &LeaseContext,
-    session_ref: &str,
-    journal_epoch: &str,
-    after_sequence: u64,
-    request_id: &str,
-) -> Result<Value, &'static str> {
-    if session_ref.is_empty()
-        || journal_epoch.is_empty()
-        || request_id.is_empty()
-        || request_id.len() > 128
-    {
-        return Err("journal_request_invalid");
-    }
-    Ok(serde_json::json!({
-        "v": 1,
-        "type": "journal_replay_request",
-        "connection_id": lease.connection_id,
-        "controller_lease_id": lease.controller_lease_id,
-        "lease_epoch": lease.lease_epoch,
-        "relay_epoch": lease.relay_epoch,
-        "remote_control_generation": lease.remote_control_generation,
-        "request_id": request_id,
-        "session_id": session_ref,
-        "journal_epoch": journal_epoch,
-        "after_sequence": after_sequence.to_string(),
-    }))
-}
-
-/// 请求缺失区间的回放；失败不影响缺口事件的丢弃语义（下次事件仍会重试）。
-fn request_journal_replay(
-    manager: &ControllingDeviceManager,
-    operation: &ControllerOperation,
-    business: &ControllingLaneState,
-    lease: &LeaseContext,
-    capabilities: &[String],
-    session_ref: &str,
-    journal_epoch: &str,
-    after_sequence: u64,
-    request_id: &str,
-) -> bool {
-    let Ok(payload) = build_journal_replay_request(
-        lease,
-        session_ref,
-        journal_epoch,
-        after_sequence,
-        request_id,
-    ) else {
-        return false;
-    };
-    let Ok(sender) = manager.transport_for_operation(operation) else {
-        return false;
-    };
-    manager
-        .with_lane_owner(operation, || {
-            let Ok(frame) = business.seal("journal_replay_request", &payload, capabilities) else {
-                return false;
-            };
-            sender
-                .as_ref()
-                .is_some_and(|sender| sender.try_send_business(&frame).is_ok())
-        })
-        .unwrap_or(false)
-}
-
-fn begin_and_send_replay(
-    cache: &mut JournalExpectations,
-    session_id: &str,
-    epoch: &str,
-    after: u64,
-    target_sequence: u64,
-    generation: &str,
-    now: tokio::time::Instant,
-    send: impl FnOnce(&PendingReplay) -> bool,
-) -> bool {
-    let Some(pending) =
-        cache.begin_replay(session_id, epoch, after, target_sequence, generation, now)
-    else {
-        return false;
-    };
-    // A queued request is not a response. Keep the entry even if the local
-    // seal/send fails, so a timer drives the next attempt without new events.
-    send(&pending)
-}
-
-/// 任务状态投影（UI 任务域字段）；wire 的 `task_status` 只有状态与可选结果摘要。
-fn task_event_projection(lease: &LeaseContext, payload: &Value) -> Option<Value> {
-    let task_id = payload.get("task_id").and_then(Value::as_str)?;
-    let status = payload.get("task_status").and_then(Value::as_str)?;
-    Some(serde_json::json!({
-        "taskId": task_id,
-        "status": status,
-        "sessionId": payload.get("session_id").and_then(Value::as_str),
-        "connectionId": lease.connection_id,
-        "leaseEpoch": lease.lease_epoch,
-        "remoteControlGeneration": lease.remote_control_generation,
-        "resultDigest": payload.get("result_digest").and_then(Value::as_str),
-        "rejectionCode": payload.get("rejection_code").and_then(Value::as_str),
-        "clientRequestId": payload.get("client_request_id").and_then(Value::as_str),
-        "outcomeUnknown": status == "result_unknown",
-    }))
-}
-
 /// 把状态投影压成一行排障文本：与 UI 收到的 `status` / `errorCode` 同源，
 /// 不含连接码、租约、指纹或设备标识。
 fn controller_status_log_detail(status: &ControllingStatus) -> String {
@@ -2039,6 +1347,10 @@ pub(crate) async fn connect_controlling_device(
     });
     Ok(status)
 }
+
+#[cfg(test)]
+#[path = "controlling_inbound_tests.rs"]
+mod inbound_tests;
 
 #[cfg(test)]
 mod tests {
@@ -2950,7 +2262,10 @@ mod tests {
             8192,
             1024,
         );
-        let (inbound_tx, inbound) = mpsc::unbounded_channel();
+        // The inbox stays unbound from the transport on purpose: the test's
+        // producer teardown must not stop the sender before the resume
+        // prepare exercises the real transport queue below.
+        let (ingress_tx, inbound) = inbound_channel(InboundLimits::default());
         let install_sender = || {
             sender
                 .install_authenticated_lease(AuthenticatedLease {
@@ -2963,20 +2278,20 @@ mod tests {
             install_sender();
         }
         let expected = sender.disconnect_context();
-        let sink_tx = inbound_tx.clone();
+        let sink_tx = ingress_tx.clone();
         let sink = move |event: ControllerTransportEvent| {
             let ControllerTransportEvent::Disconnected { context, .. } = &event else {
                 panic!("expected the actual transport disconnect producer");
             };
             assert_eq!(context, &expected);
-            forward_controlling_event(&sink_tx, event);
+            sink_tx.enqueue(event);
         };
         // Exercise the actual transport producer, suspension, production
-        // adapter, queue, production port and keeper. The WebSocket driver
+        // adapter, inbox, production port and keeper. The WebSocket driver
         // itself is outside this A adapter test's scope.
-        super::super::relay_transport::disconnect_test_transport_to(&sender, &sink);
+        super::super::relay_transport::disconnect_test_transport_to_sink(&sender, &sink);
         drop(sink);
-        drop(inbound_tx);
+        drop(ingress_tx);
         if case == "pre_auth" {
             install_sender();
         }
@@ -2989,13 +2304,7 @@ mod tests {
         manager
             .complete_connected(operation.clone(), lease)
             .unwrap();
-        let mut port = ControllerTransportPort {
-            sender: sender.clone(),
-            inbound,
-            relay_error_code: None,
-            relay_error_seen: false,
-            lane_disconnected: false,
-        };
+        let mut port = ControllerTransportPort::new(sender.clone(), inbound);
         let replacement = if case == "replacement" {
             manager.disconnect();
             business.clear();
@@ -3032,14 +2341,21 @@ mod tests {
         .await;
         match case {
             "current" => {
-                assert_eq!(seen, vec![ControllingStatusKind::Reconnecting]);
-                assert!(business.is_suspended());
+                // The accepted disconnect still drives Reconnecting and the
+                // validated resume prepare; the producer teardown's Closed
+                // terminal then ends the lane with the bounded error.
+                assert_eq!(
+                    seen,
+                    vec![
+                        ControllingStatusKind::Reconnecting,
+                        ControllingStatusKind::Error
+                    ]
+                );
                 assert_eq!(
                     receiver.pending_control_for_test(),
                     1,
                     "the actual port must enqueue a validated resume prepare"
                 );
-                assert_eq!(manager.status().kind(), ControllingStatusKind::Reconnecting);
             }
             "pre_auth" => {
                 assert_eq!(seen, vec![ControllingStatusKind::Error]);
@@ -3889,236 +3205,7 @@ mod tests {
         assert!(journal_events.is_empty());
     }
 
-    /// 连接后的 Relay 错误必须立即结束唯一待处理的能力请求，不能退化成前端等待超时。
-    #[test]
-    fn connected_relay_error_fails_the_unique_pending_capability_request() {
-        let fixture = pairing_fixture(RELAY_KEY_ID);
-        let lease = lease_context(&fixture.reservation);
-        let capabilities = vec!["encrypted_frames_v1".to_owned(), "task_v1".to_owned()];
-        let manager = ControllingDeviceManager::default();
-        let operation = manager.connect("234-4567").unwrap();
-        manager.complete_reserved(operation.clone()).unwrap();
-        manager
-            .complete_connected(
-                operation.clone(),
-                ControllerLease {
-                    context: lease.clone(),
-                    peer_endpoint_id: "endpoint-0001".into(),
-                    reservation_id: "reservation-0001".into(),
-                    device_display_name: DEVICE_DISPLAY_NAME_PLACEHOLDER.to_owned(),
-                    liveness_epoch_a: "live-a-1".into(),
-                    liveness_epoch_b: "live-b-1".into(),
-                    resume_deadline_b: 30_000,
-                    resume_token: [7_u8; 32],
-                    transport_key_fingerprint: [9_u8; 32],
-                    negotiated_capabilities: capabilities.clone(),
-                },
-            )
-            .unwrap();
-        let sessions = ControllingSessionManager::default();
-        let session = sessions
-            .open_with_outcome(None, "Session", "chat", &lease, &capabilities)
-            .map(|(projection, _)| projection)
-            .unwrap();
-        let request = sessions
-            .capability_request(&session.session_ref, &lease)
-            .unwrap();
-        let business = ControllingLaneState::default();
-        let mut projections = Vec::new();
-        let mut on_status = |_: &ControllingStatus| {};
-        let mut on_session =
-            |projection: &ControllingSessionProjection| projections.push(projection.clone());
-        let mut on_task = |_: &LeaseContext, _: Value| {};
-        let mut on_journal = |_: &AuthenticatedJournalFrame<'_>| Ok(());
-        let mut on_snapshot = |_: &AuthenticatedSnapshotFrame<'_>| Ok(());
-        let mut on_liveness = |_: Value| false;
-        let mut sinks = ControllingLaneSinks {
-            on_status: &mut on_status,
-            on_session: &mut on_session,
-            on_mapping: &mut |_, _, _| Ok(()),
-            on_task: &mut on_task,
-            on_journal: &mut on_journal,
-            on_snapshot: &mut on_snapshot,
-            on_liveness: &mut on_liveness,
-        };
-        let mut journal = JournalExpectations::default();
-        let mut liveness = LivenessExpectations::default();
-        dispatch_inbound_frame(
-            &manager,
-            &manager.current_operation().unwrap(),
-            &sessions,
-            &business,
-            &mut journal,
-            &mut liveness,
-            &json!({
-                "v": 1,
-                "type": "error",
-                "request_id": "request-invalid",
-                "code": "invalid_message",
-                "message": "invalid message",
-            })
-            .to_string(),
-            &mut sinks,
-        );
-        drop(sinks);
-
-        assert_eq!(projections.len(), 1);
-        assert_eq!(
-            projections[0].capability_request_id.as_deref(),
-            Some(request.request_id.as_str())
-        );
-        assert_eq!(
-            projections[0].capability_error.as_deref(),
-            Some("capability_snapshot_unavailable")
-        );
-        // Replacement can happen after the keeper's cheap event fence. Reuse
-        // the same lease bytes deliberately: only the original operation owns
-        // this plaintext error, and must not consume the new pending request.
-        manager.with_lane_owner(&operation, || ()).unwrap();
-        manager.disconnect();
-        let replacement = manager.connect("234-4567").unwrap();
-        manager.complete_reserved(replacement.clone()).unwrap();
-        manager
-            .complete_connected(
-                replacement,
-                ControllerLease {
-                    context: lease.clone(),
-                    peer_endpoint_id: "endpoint-0001".into(),
-                    reservation_id: "reservation-0001".into(),
-                    device_display_name: DEVICE_DISPLAY_NAME_PLACEHOLDER.to_owned(),
-                    liveness_epoch_a: "live-a-2".into(),
-                    liveness_epoch_b: "live-b-2".into(),
-                    resume_deadline_b: 30_000,
-                    resume_token: [7; 32],
-                    transport_key_fingerprint: [9; 32],
-                    negotiated_capabilities: capabilities.clone(),
-                },
-            )
-            .unwrap();
-        let next_request = sessions
-            .capability_request(&session.session_ref, &lease)
-            .unwrap();
-        let mut ignored_session =
-            |_: &ControllingSessionProjection| panic!("old error reached new owner");
-        let mut stale_sinks = ControllingLaneSinks {
-            on_status: &mut on_status,
-            on_session: &mut ignored_session,
-            on_mapping: &mut |_, _, _| Ok(()),
-            on_task: &mut on_task,
-            on_journal: &mut on_journal,
-            on_snapshot: &mut on_snapshot,
-            on_liveness: &mut on_liveness,
-        };
-        dispatch_inbound_frame(&manager, &operation, &sessions, &business, &mut journal, &mut liveness,
-            &json!({"v":1,"type":"error","request_id":"old-error","code":"invalid_message","message":"invalid message"}).to_string(), &mut stale_sinks);
-        let still_pending = sessions
-            .fail_pending_capability_for_lease(&lease, "capability_snapshot_unavailable")
-            .unwrap();
-        assert_eq!(
-            still_pending.capability_request_id.as_deref(),
-            Some(next_request.request_id.as_str())
-        );
-        assert!(!request_journal_replay(
-            &manager,
-            &operation,
-            &business,
-            &lease,
-            &capabilities,
-            &session.session_ref,
-            "journal-epoch",
-            0,
-            "old-replay"
-        ));
-    }
-
     /// E2E-06：Relay 顶层存活挑战必须经租约校验并由 A 返回加密证明。
-    #[test]
-    fn opened_capability_error_cannot_mutate_a_replacement_owner_with_identical_lease() {
-        let fixture = pairing_fixture(RELAY_KEY_ID);
-        let lease = lease_context(&fixture.reservation);
-        let (a_keys, b_keys) =
-            paired_session_keys(fixture.a_keys, fixture.b_keys, &fixture.reservation);
-        let capabilities = vec!["encrypted_frames_v1".into(), "task_v1".into()];
-        let manager = ControllingDeviceManager::default();
-        let connect = || {
-            let operation = manager.connect("234-4567").unwrap();
-            manager.complete_reserved(operation.clone()).unwrap();
-            manager
-                .complete_connected(
-                    operation.clone(),
-                    ControllerLease {
-                        context: lease.clone(),
-                        peer_endpoint_id: "endpoint-0001".into(),
-                        reservation_id: "reservation-0001".into(),
-                        device_display_name: DEVICE_DISPLAY_NAME_PLACEHOLDER.to_owned(),
-                        liveness_epoch_a: "live-a-1".into(),
-                        liveness_epoch_b: "live-b-1".into(),
-                        resume_deadline_b: 30_000,
-                        resume_token: [7; 32],
-                        transport_key_fingerprint: [9; 32],
-                        negotiated_capabilities: capabilities.clone(),
-                    },
-                )
-                .unwrap();
-            operation
-        };
-        let old = connect();
-        let sessions = ControllingSessionManager::default();
-        let session = sessions
-            .open_with_outcome(None, "Session", "chat", &lease, &capabilities)
-            .unwrap()
-            .0;
-        let request = sessions
-            .capability_request(&session.session_ref, &lease)
-            .unwrap();
-        let payload = json!({ "v":1,"type":"capability_snapshot_error", "connection_id":lease.connection_id,
-            "controller_lease_id":lease.controller_lease_id,"lease_epoch":lease.lease_epoch,"relay_epoch":lease.relay_epoch,
-            "remote_control_generation":lease.remote_control_generation,"request_id":request.request_id,"session_id":session.session_id,
-            "code":"capability_snapshot_unavailable" });
-        let business = ControllingLaneState::default();
-        business.install(HandshakeRole::A, &lease, a_keys).unwrap();
-        let mut b = EncryptedLane::new(HandshakeRole::B, &lease, b_keys).unwrap();
-        let encrypted = b
-            .seal("capability_snapshot_error", &payload, &capabilities)
-            .unwrap();
-        let (kind, opened) = manager
-            .with_lane_owner(&old, || business.open(&encrypted, &capabilities))
-            .unwrap()
-            .unwrap();
-        // The old frame passed AEAD before the singleton was replaced. The
-        // intent/request deliberately remain pending with identical lease bytes.
-        manager.disconnect();
-        let _new = connect();
-        let mut sinks = ControllingLaneSinks {
-            on_status: &mut |_| {},
-            on_session: &mut |_| panic!("stale capability error projected"),
-            on_mapping: &mut |_, _, _| Ok(()),
-            on_task: &mut |_, _| {},
-            on_journal: &mut |_| Ok(()),
-            on_snapshot: &mut |_| Ok(()),
-            on_liveness: &mut |_| false,
-        };
-        dispatch_authenticated_payload(
-            &manager,
-            &old,
-            &sessions,
-            &business,
-            &mut JournalExpectations::default(),
-            &lease,
-            &capabilities,
-            &kind,
-            opened,
-            &mut sinks,
-        );
-        let pending = sessions
-            .fail_pending_capability_for_lease(&lease, "capability_snapshot_unavailable")
-            .unwrap();
-        assert_eq!(
-            pending.capability_request_id.as_deref(),
-            Some(request.request_id.as_str())
-        );
-    }
-
     #[tokio::test]
     async fn top_level_liveness_challenge_produces_direct_encrypted_proof() {
         let PairingFixture {

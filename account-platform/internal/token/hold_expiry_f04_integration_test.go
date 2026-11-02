@@ -225,10 +225,27 @@ func TestF04ExpiredHoldIntentWinsSharedDatabaseGate(t *testing.T) {
 		_, e := r.fenceExpiredHold(bounded, holdexpiry.Identity{UsageRequestID: usage, HoldID: hold, WalletID: wallet, MaxMicrocredits: 100, ExpiresAt: time.Now().UTC().Add(-time.Minute)})
 		result <- e
 	}()
-	select {
-	case e := <-result:
-		t.Fatal("proof did not wait for in-flight intent", e)
-	case <-time.After(50 * time.Millisecond):
+	readyCtx, readyCancel := context.WithTimeout(ctx, 2*time.Second)
+	defer readyCancel()
+	for {
+		var waiting bool
+		if err = r.pool.QueryRow(readyCtx, `SELECT EXISTS(
+			SELECT 1 FROM pg_stat_activity
+			WHERE datname=current_database() AND wait_event='transactionid'
+			  AND query LIKE '%FROM usage_requests%FOR UPDATE%'
+		)`).Scan(&waiting); err != nil {
+			t.Fatal("inspect proof lock wait", err)
+		}
+		if waiting {
+			break
+		}
+		select {
+		case e := <-result:
+			t.Fatal("proof did not wait for in-flight intent", e)
+		case <-readyCtx.Done():
+			t.Fatal("proof did not reach the shared lock before deadline")
+		case <-time.After(10 * time.Millisecond):
+		}
 	}
 	if err = tx.Commit(ctx); err != nil {
 		t.Fatal(err)
