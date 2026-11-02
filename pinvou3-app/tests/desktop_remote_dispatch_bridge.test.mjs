@@ -12,9 +12,9 @@ const remoteTaskCommandSource = fs.readFileSync(
   'utf8',
 );
 
-function installFeature(onInvoke) {
+function installFeature(onInvoke, timers = { setTimeout, clearTimeout }) {
   const root = { __PINVOU_TAURI_BRIDGE_FEATURES__: {} };
-  const sandbox = { window: root, TextEncoder, setTimeout, clearTimeout };
+  const sandbox = { window: root, TextEncoder, setTimeout: timers.setTimeout, clearTimeout: timers.clearTimeout };
   vm.createContext(sandbox);
   vm.runInContext(read('features/remote-control/remote-control-state.js'), sandbox);
   vm.runInContext(read('platform/tauri/bridge/desktop-remote-control.js'), sandbox);
@@ -197,6 +197,52 @@ test('B local send preserves local attachments and skills without leaking parsed
   assert.equal(state.desktopRemoteControl.controlledTasks[0].status, 'admitted');
 });
 
+test('B local send preserves admission identity for a later terminal reason', async () => {
+  const { feature, state, logic } = installFeature((command) => {
+    if (command === 'desktop_remote_controlled_task_send') return Promise.resolve({
+      task_id: 'task-1', session_id: 'session-1', task_status: 'failed',
+      generation: 'generation-1', sequence: '7', modelSource: 'controlled_device',
+    });
+    return undefined;
+  });
+  state.desktopRemoteControl = logic.applyControlledStatus(state.desktopRemoteControl, {
+    status: 'connected', generation: 'generation-1',
+  });
+  state.desktopRemoteControl = logic.applyControlledSession(state.desktopRemoteControl, {
+    sessionId: 'session-1', sessionRef: 'ref-1', generation: 'generation-1', lane: 'chat',
+  });
+  await feature.controlledTaskSend('session-1', 'hello', [], []);
+  const status = state.desktopRemoteControl.controlledTasks[0];
+  assert.equal(status.taskSequence, '7');
+  state.desktopRemoteControl = logic.applyControlledTaskEvent(state.desktopRemoteControl, {
+    taskId: 'task-1', sessionId: 'session-1', generation: 'generation-1', sequence: '7',
+    status: 'failed', terminalReason: 'task_attachments_invalid',
+  });
+  assert.equal(state.desktopRemoteControl.controlledTasks[0].terminalReason, 'task_attachments_invalid');
+});
+
+test('terminal event before B command response preserves the same admitted prompt', async () => {
+  let release;
+  const { feature, state, logic } = installFeature((command) => {
+    if (command === 'desktop_remote_controlled_task_send') return new Promise(resolve => { release = resolve; });
+    return undefined;
+  });
+  state.desktopRemoteControl = logic.applyControlledStatus(state.desktopRemoteControl, { status: 'connected', generation: 'generation-1' });
+  state.desktopRemoteControl = logic.applyControlledSession(state.desktopRemoteControl, { sessionId: 'session-1', sessionRef: 'ref-1', generation: 'generation-1', lane: 'chat' });
+  const pending = feature.controlledTaskSend('session-1', 'hello', [], []);
+  assert.equal(typeof release, 'function', 'command response is pending');
+  state.desktopRemoteControl = logic.applyControlledTaskEvent(state.desktopRemoteControl, {
+    taskId: 'task-1', sessionId: 'session-1', generation: 'generation-1', sequence: '7',
+    status: 'failed', terminalReason: 'task_attachments_invalid',
+  });
+  release({ task_id: 'task-1', session_id: 'session-1', task_status: 'failed', generation: 'generation-1', sequence: '7' });
+  await pending;
+  const task = state.desktopRemoteControl.controlledTasks[0];
+  assert.equal(task.text, 'hello');
+  assert.equal(task.status, 'failed');
+  assert.equal(task.terminalReason, 'task_attachments_invalid');
+});
+
 test('B local capability read reuses the negotiated snapshot command', async () => {
   const snapshot = {
     capabilityRevision: '7', connectionId: 'connection-1', controllerLeaseId: 'lease-1',
@@ -373,6 +419,81 @@ test('narrow authenticated capability result settles only its matching RemotePro
   assert.equal((await pending).capabilityRequestId, 'request-1');
   assert.equal(state.desktopRemoteControl.controllerConnection.mappingConfirmed, true);
   assert.equal(state.desktopRemoteControl.controllerConnection.capabilityRevision, 3);
+  feature.stop();
+});
+
+test('capability send failure keeps the capability error after bounded retries', async () => {
+  let attempts = 0;
+  const timers = {
+    setTimeout(fn) { queueMicrotask(fn); return 1; },
+    clearTimeout() {},
+  };
+  const { feature, state, logic } = installFeature(command => {
+    if (command === 'desktop_remote_controller_capability_send') {
+      attempts += 1;
+      // Tauri IPC rejects with strings; keep that error-normalization contract covered.
+      // eslint-disable-next-line prefer-promise-reject-errors
+      return Promise.reject('capability_snapshot_unavailable');
+    }
+    return undefined;
+  }, timers);
+  state.desktopRemoteControl = logic.beginControllerIntent(state.desktopRemoteControl, true);
+  state.desktopRemoteControl = logic.applyControllerStatus(state.desktopRemoteControl, {
+    intent: state.desktopRemoteControl.intents.controller, status: 'connected', connectionId: 'connection-1',
+    controllerLeaseId: 'lease-1', leaseEpoch: '2', relayEpoch: 'relay-1', generation: 'generation-1',
+  });
+  state.desktopRemoteControl = bindProxy(logic, state.desktopRemoteControl, 'ref-1', 'session-1');
+  await assert.rejects(feature.controllerCapabilitySend('ref-1'), { code: 'capability_snapshot_unavailable' });
+  assert.equal(attempts, 3);
+  assert.equal(state.desktopRemoteControl.controllerConnection.capabilityError, 'capability_snapshot_unavailable');
+  feature.stop();
+});
+
+test('a timed-out capability reply cannot settle the newer retry', async () => {
+  const scheduled = new Map();
+  let timerId = 0;
+  const timers = {
+    setTimeout(fn, delay) { const id = ++timerId; scheduled.set(id, { fn, delay }); return id; },
+    clearTimeout(id) { scheduled.delete(id); },
+  };
+  function fire(delay) {
+    const entry = [...scheduled.entries()].find(([, value]) => value.delay === delay);
+    assert.ok(entry, 'expected timer ' + delay);
+    scheduled.delete(entry[0]);
+    entry[1].fn();
+  }
+  async function until(condition) {
+    for (let i = 0; i < 30 && !condition(); i += 1) await Promise.resolve();
+    assert.ok(condition());
+  }
+  let attempts = 0;
+  const { feature, state, listeners, logic } = installFeature(command => {
+    if (command === 'desktop_remote_controller_capability_send') return Promise.resolve({ requestId: 'request-' + ++attempts, sessionId: 'session-1' });
+    return undefined;
+  }, timers);
+  feature.subscribe();
+  await Promise.resolve();
+  state.desktopRemoteControl = logic.beginControllerIntent(state.desktopRemoteControl, true);
+  state.desktopRemoteControl = logic.applyControllerStatus(state.desktopRemoteControl, {
+    intent: state.desktopRemoteControl.intents.controller, status: 'connected', connectionId: 'connection-1',
+    controllerLeaseId: 'lease-1', leaseEpoch: '2', relayEpoch: 'relay-1', generation: 'generation-1',
+  });
+  state.desktopRemoteControl = bindProxy(logic, state.desktopRemoteControl, 'ref-1', 'session-1');
+  const reply = { localSessionId: 'remote-ref-1', remoteSessionRef: 'ref-1', sessionId: 'session-1',
+    connectionId: 'connection-1', controllerLeaseId: 'lease-1', leaseEpoch: '2', relayEpoch: 'relay-1',
+    remoteControlGeneration: 'generation-1', capabilityRequestId: 'request-1', capabilityRevision: 3,
+    capabilityValidForMs: 30000, capabilityError: null, mappingConfirmed: true, temporaryModelAvailable: true };
+  const pending = feature.controllerCapabilitySend('ref-1');
+  await until(() => [...scheduled.values()].some(value => value.delay === 8000));
+  fire(8000);
+  await until(() => [...scheduled.values()].some(value => value.delay === 500));
+  fire(500);
+  await until(() => attempts === 2 && [...scheduled.values()].some(value => value.delay === 8000));
+  listeners.get('desktop-remote-proxy-capability')({ payload: reply });
+  assert.equal(state.desktopRemoteControl.controllerConnection.mappingConfirmed, false, 'old result must not update the new waiter');
+  listeners.get('desktop-remote-proxy-capability')({ payload: { ...reply, capabilityRequestId: 'request-2' } });
+  assert.equal((await pending).capabilityRequestId, 'request-2');
+  assert.equal(state.desktopRemoteControl.controllerConnection.mappingConfirmed, true);
   feature.stop();
 });
 
@@ -1000,4 +1121,73 @@ test('an authenticated RemoteProxy notice refreshes the selected copy via Sessio
   assert.ok(refreshed.includes('desktop_remote_proxy_history_read'));
   assert.equal(state.desktopRemoteControl.remoteProxyHistory.entries[0].body, 'stored response');
   assert.equal(JSON.stringify(state.desktopRemoteControl.remoteProxyHistory).includes('transport body'), false);
+});
+
+test('recorded Rust request identities survive bridge timeout and retry', async () => {
+  // Rust records contain production dispatcher projections and real UUIDs. This
+  // adapter supplies the Tauri/SessionStore event envelope; it is not that sink.
+  const records = JSON.parse(fs.readFileSync(process.env.PINVOU_DISPATCH_RECORD || new URL('./fixtures/controller_dispatch_timeout_record.json', import.meta.url), 'utf8'));
+  for (const mode of ['before-retry', 'delayed-event', 'rust-rejected']) {
+    const record = mode === 'rust-rejected' ? records.oldAfterRetry : records.oldBeforeRetry;
+    assert.equal(record.relayErrorProducedCapabilityEvent, false);
+    assert.notEqual(record.oldAck.requestId, record.newAck.requestId);
+    assert.equal(record.newProjection.capabilityRequestId, record.newAck.requestId);
+    if (mode === 'rust-rejected') assert.equal(record.oldProjection, null);
+    else assert.equal(record.oldProjection.capabilityRequestId, record.oldAck.requestId);
+    const scheduled = new Map();
+    let timerId = 0, attempts = 0;
+    const timers = {
+      setTimeout(fn, delay) { const id = ++timerId; scheduled.set(id, { fn, delay }); return id; },
+      clearTimeout(id) { scheduled.delete(id); },
+    };
+    const fire = delay => {
+      const entry = [...scheduled.entries()].find(([, t]) => t.delay === delay);
+      assert.ok(entry, `missing timer ${delay}`); scheduled.delete(entry[0]); entry[1].fn();
+    };
+    const until = async fn => { for (let i = 0; i < 40 && !fn(); i++) await Promise.resolve(); assert.ok(fn()); };
+    const { feature, state, listeners, logic } = installFeature(command => {
+      if (command === 'desktop_remote_controller_capability_send') {
+        attempts++;
+        return Promise.resolve(attempts === 1 ? record.oldAck : record.newAck);
+      }
+      return undefined;
+    }, timers);
+    const p = record.newProjection;
+    const remoteRef = p.sessionRef;
+    const asHostEvent = projection => ({ ...projection, localSessionId: 'remote-' + projection.sessionRef,
+      remoteSessionRef: projection.sessionRef, mappingConfirmed: true });
+    feature.subscribe(); await Promise.resolve();
+    state.desktopRemoteControl = logic.beginControllerIntent(state.desktopRemoteControl, true);
+    state.desktopRemoteControl = logic.applyControllerStatus(state.desktopRemoteControl, {
+      intent: state.desktopRemoteControl.intents.controller, status: 'connected', connectionId: p.connectionId,
+      controllerLeaseId: p.controllerLeaseId, leaseEpoch: p.leaseEpoch, relayEpoch: p.relayEpoch,
+      generation: p.remoteControlGeneration,
+    });
+    state.desktopRemoteControl = bindProxy(logic, state.desktopRemoteControl, remoteRef, p.sessionId);
+    let settled = false;
+    const pending = feature.controllerCapabilitySend(remoteRef).then(value => { settled = true; return value; });
+    await until(() => [...scheduled.values()].some(t => t.delay === 8000));
+    // The Rust relay error had no capability event; the original waiter remains live.
+    assert.equal(settled, false);
+    assert.equal(attempts, 1);
+    fire(8000);
+    await until(() => [...scheduled.values()].some(t => t.delay === 500));
+    const emit = listeners.get('desktop-remote-proxy-capability');
+    if (mode === 'before-retry') {
+      emit({ payload: asHostEvent(record.oldProjection) });
+      assert.equal(state.desktopRemoteControl.controllerConnection.mappingConfirmed, false);
+      assert.equal(settled, false);
+    }
+    fire(500);
+    await until(() => attempts === 2 && [...scheduled.values()].some(t => t.delay === 8000));
+    if (mode === 'delayed-event') {
+      emit({ payload: asHostEvent(record.oldProjection) });
+      assert.equal(state.desktopRemoteControl.controllerConnection.mappingConfirmed, false);
+      assert.equal(settled, false);
+    }
+    emit({ payload: asHostEvent(record.newProjection) });
+    assert.equal((await pending).capabilityRequestId, record.newAck.requestId);
+    assert.equal(state.desktopRemoteControl.controllerConnection.capabilityRevision, 5);
+    feature.stop();
+  }
 });

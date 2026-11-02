@@ -59,6 +59,7 @@ fn projection_entry(display: &JournalDisplay) -> ProjectionEntry {
         kind: projection_kind(display.kind()),
         task_id: Some(display.task_id().to_owned()),
         body: display.body().map(str::to_owned),
+        terminal_reason: display.terminal_reason().map(str::to_owned),
         attachments: display
             .attachments()
             .iter()
