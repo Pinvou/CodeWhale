@@ -21,6 +21,21 @@ verify_results = runpy.run_path(str(ROOT / "scripts/test-account-closure-postgre
 
 
 class DeploymentContracts(unittest.TestCase):
+    def test_backend_exit_regression_is_a_required_managed_contract_root(self):
+        required = deployment.MANAGED_CONTRACT_ROOTS
+        regression = "TestManagedFixtureDatabaseCleanupPostgres"
+        self.assertIn(regression, required)
+        def stream(names):
+            rows = [{"Action": "start", "Package": "fixture/package"}]
+            for name in sorted(names):
+                rows += [{"Action": "run", "Package": "fixture/package", "Test": name},
+                         {"Action": "pass", "Package": "fixture/package", "Test": name}]
+            rows.append({"Action": "pass", "Package": "fixture/package"})
+            return "\n".join(json.dumps(row) for row in rows)
+        with self.assertRaises(RuntimeError):
+            verify_results(stream(required - {regression}), required)
+        verify_results(stream(required), required)
+
     def test_actions_warms_runner_cache_in_isolated_source_before_offline_consumption(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
