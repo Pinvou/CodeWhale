@@ -28,6 +28,11 @@ POSTGRES_PROFILES = {
     "18.4": "postgres:18.4-alpine@sha256:9a8afca54e7861fd90fab5fdf4c42477a6b1cb7d293595148e674e0a3181de15",
 }
 LABEL = "pinvou.deployment-contracts"
+MANAGED_CONTRACT_ROOTS = {
+    "TestManagedRDSReleaseActualPostgres", "TestManagedRDSReleaseProductionHistoryPostgres",
+    "TestManagedBindingRejectsBeforeAnyNetworkAuthentication", "TestManagedReleaseInputsBindProviderAndPrivateCredentials",
+    "TestManagedFixtureDatabaseCleanupPostgres",
+}
 
 
 def run_logged_command(arguments, logfile, *, cwd=None, dependency_preparation=False):
@@ -293,7 +298,7 @@ def main():
             (fixture / "pg_hba.conf").write_text("local all all trust\nhostssl all pinvou_control_fixture,token_migrator,account_policy_fixture,account_migrator,managed_dba_fixture 127.0.0.1/32 trust\nhostssl all all 127.0.0.1/32 scram-sha-256\nhost all all 0.0.0.0/0 reject\n")
             (fixture / "pg_hba.conf").chmod(0o644)
             managed = postgres("managed", "pinvou_control_fixture", "managed_control_fixture", "/var/lib/postgresql/data/managed_control_fixture", tls=True)
-            roots = {"TestManagedRDSReleaseActualPostgres", "TestManagedRDSReleaseProductionHistoryPostgres", "TestManagedBindingRejectsBeforeAnyNetworkAuthentication", "TestManagedReleaseInputsBindProviderAndPrivateCredentials"}
+            roots = MANAGED_CONTRACT_ROOTS
             selection = "^(" + "|".join(sorted(roots)) + ")$"
             tools(["go", "test", "-p", "1", "-race", "-json", "-tags=nomsgpack", "-mod=readonly", "-count=1", "-run", selection, "./cmd/token-release-prepare"], "managed.jsonl", "container:" + managed,
                   ["PINVOU_TEST_MANAGED_POSTGRES_URL=postgres://pinvou_control_fixture@127.0.0.1:5432/managed_control_fixture?sslmode=verify-full&sslrootcert=/fixture/ca.crt", "PINVOU_TEST_LEGACY_MIGRATIONS_DIRECTORY=/legacy", "PINVOU_TEST_RELEASE_CLI_DIRECTORY=/out/bin"])
