@@ -62,6 +62,10 @@ fn bundled_integration_skills_use_current_codewhale_commands_and_paths() {
         ("help", HELP_BODY),
         ("delegate", DELEGATE_BODY),
         ("best-of-n", BEST_OF_N_BODY),
+        // Not in BUNDLED_SKILLS (legacy, retirement-only), but the shipped
+        // asset still reaches users who install or keep it, so the same
+        // visible-tool contract applies.
+        ("v4-best-practices", V4_BEST_PRACTICES_BODY),
     ] {
         assert!(
             !body.contains("read_file") && !body.contains("exec_shell"),
@@ -81,9 +85,9 @@ fn bundled_integration_skills_use_current_codewhale_commands_and_paths() {
 // `update_plan`, `rlm`) plus the canonical retired-name lists
 // (`RETIRED_TOOL_NAMES`, the `agents/*` family); `list_dir` is deliberately
 // absent because it is a live, searchable tool (tools/file.rs ListDirTool),
-// not a phantom. Scope note: `v4-best-practices` and `feishu` are not in
-// BUNDLED_SKILLS (legacy/optional, never auto-installed), so this sweep does
-// not cover them.
+// not a phantom. Scope note: `v4-best-practices` is not in BUNDLED_SKILLS
+// (legacy/optional, never auto-installed) but is swept explicitly below;
+// `feishu` is opt-in only and not swept.
 const PHANTOM_NAMES: &[&str] = &[
     "`File`",
     "`Bash`",
@@ -132,6 +136,15 @@ fn forkguard_bundled_skills_cite_no_hidden_or_retired_tool_names() {
                 skill.body
             );
         }
+    }
+    // Not in BUNDLED_SKILLS (legacy, retirement-only asset), but still
+    // shipped and installable, so it rides under the same contract.
+    for phantom in PHANTOM_NAMES {
+        assert!(
+            !V4_BEST_PRACTICES_BODY.contains(phantom),
+            "v4-best-practices cites {phantom}, which no model-visible \
+             catalog or `tool_search` result can ever return"
+        );
     }
 }
 
