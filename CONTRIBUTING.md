@@ -42,7 +42,7 @@ git commit -s
 
 Use `--signoff` when amending or rebasing existing commits. See the [Developer Certificate of Origin](https://developercertificate.org/). CI rejects unsigned human commits; trusted Dependabot and GitHub Actions bot commits and merge commits (more than one parent) are exempt.
 
-The fixed historical squash-commit registry documented in [the commit convention](docs/Git%20Commit%20信息规范文档.md#10-固定历史-squash-提交的签署登记) preserves the recorded original signers of 19 existing integration commits. It is not an identity alias or an exemption for new commits; titles and the registered signoffs remain checked.
+The fixed historical squash-commit registry documented in [the commit convention](docs/Git%20Commit%20信息规范文档.md#10-固定历史-squash-提交的签署登记) preserves the recorded original signers of 20 explicitly registered integration commits. It is not an identity alias or an exemption for new commits; titles and the registered signoffs remain checked.
 
 ## Where changes belong
 
