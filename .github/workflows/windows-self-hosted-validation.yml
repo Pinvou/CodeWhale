@@ -77,22 +77,6 @@ jobs:
           catch [UnauthorizedAccessException] { $writeDenied = $true }
           finally { if ($handle) { $handle.Dispose(); Remove-Item -LiteralPath $writeProbe } }
           if (-not $writeDenied) { throw 'Shared tools must be read-only to job accounts' }
-          $deploymentRoot = Split-Path -Parent $sharedTools
-          $instanceRoot = [IO.Path]::GetFullPath((Join-Path $env:CARGO_HOME '..\..'))
-          $peerRoot = $deploymentRoot
-          if ($instanceRoot -eq $deploymentRoot) {
-            $peerRoot = Join-Path (Split-Path -Parent $deploymentRoot) 'runners\windows-heavy-01'
-          }
-          if ($peerRoot -eq $instanceRoot) { throw 'The isolation check must target another runner' }
-          # Every configured runner already owns runner\.env. Opening a handle
-          # tests its ACL without reading contents or requiring a probe fixture.
-          $peer = Join-Path $peerRoot 'runner\.env'
-          $readDenied = $false
-          $peerHandle = $null
-          try { $peerHandle = [IO.File]::OpenRead($peer) }
-          catch [UnauthorizedAccessException] { $readDenied = $true }
-          finally { if ($peerHandle) { $peerHandle.Dispose() } }
-          if (-not $readDenied) { throw 'A job account must not read another instance directory' }
           Write-Output 'Native Windows, non-admin identity, D-drive paths, file locking and resource limits verified.'
           "Pool: $env:CI_RUNNER_POOL; memory ceiling: $env:CI_MEMORY_LIMIT_GB GB; CPU rate: $env:CI_CPU_RATE/10000" >> $env:GITHUB_STEP_SUMMARY
 
@@ -100,6 +84,23 @@ jobs:
         with:
           persist-credentials: false
           submodules: false
+
+      - name: Verify explicit runner peer isolation
+        run: |
+          $ErrorActionPreference = 'Stop'
+          foreach ($name in @('CI_RUNNER_INSTANCE_ROOT', 'CI_RUNNER_PEER_ROOT', 'CI_RUNNER_PEER_NAME', 'RUNNER_NAME')) {
+            if ([string]::IsNullOrWhiteSpace([Environment]::GetEnvironmentVariable($name))) {
+              throw "$name must be explicitly configured for peer isolation validation"
+            }
+          }
+          python scripts/tests/test_ci_windows_peer_isolation.py -v
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          python scripts/ci-windows-peer-isolation.py `
+            --current-root "$env:CI_RUNNER_INSTANCE_ROOT" `
+            --peer-root "$env:CI_RUNNER_PEER_ROOT" `
+            --runner-name "$env:RUNNER_NAME" `
+            --peer-runner-name "$env:CI_RUNNER_PEER_NAME"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
       - uses: actions/setup-node@v7
         with:

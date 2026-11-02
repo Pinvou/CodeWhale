@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import path from 'node:path';
+import vm from 'node:vm';
 import { fileURLToPath } from 'node:url';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
@@ -84,6 +85,46 @@ for (const [name, source] of Object.entries(bridges)) {
     /vllmTps:[\s\S]*?toFixed\(1\) \+ " tok\/s" : "0 tok\/s"/,
     `${name} bridge TPS 无数据不得回退为字面 "0 tok/s"`,
   );
+}
+
+// Exercise the shipped shared poller through both lane factories. Even a
+// stale/contradictory backend snapshot must not paint an invalid target online.
+const bridgeWindow = {};
+vm.runInNewContext(bridges.tauri, { window: bridgeWindow, console });
+for (const lane of ['tauriMonitor', 'web']) {
+  for (const kind of ['local', 'remote', 'invalid', 'unknown', undefined]) {
+    for (const status of ['ready', 'busy', 'offline', 'mismatch']) {
+      for (const health of ['verified', 'unverified', 'auth_failed', undefined]) {
+        const state = { settings: {}, tokens: {}, monitor: null, monitorError: null };
+        const inFlight = { value: false };
+        const poller = bridgeWindow.PinvouBridgeShared.create(lane, {
+          state,
+          sessionStates: {},
+          invoke: async () => ({
+            vllm: { target_kind: kind, status, health_status: health, metrics_applicable: false },
+          }),
+          notify() {},
+          bt: (key) => key,
+          monitorBaseline: { value: null },
+          clearMonitorBaseline() {},
+          monitorIntervalId: { value: null },
+          gpuUtilHistory: { value: [] },
+          monitorPollInFlight: inFlight,
+        });
+        await poller.pollMonitor();
+        const label = `${lane}: ${kind}/${status}/${health}`;
+        assert.equal(state.monitorError, null, `${label}: shared poller succeeds`);
+        assert.equal(inFlight.value, false, `${label}: in-flight guard resets`);
+        assert.equal(
+          state.monitor._fmt.vllmOnline,
+          (kind === 'local' || kind === 'remote')
+            && (status === 'ready' || status === 'busy')
+            && (health === 'verified' || health === undefined),
+          `${label}: online needs a valid target and the existing verified ready/busy contract`,
+        );
+      }
+    }
+  }
 }
 
 console.log('monitor bridge 无数据 TTFT/TPS fallback 在 tauri/web 两份 bridge 中一致为 —');

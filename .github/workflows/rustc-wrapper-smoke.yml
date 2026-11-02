@@ -91,7 +91,10 @@ jobs:
     strategy:
       fail-fast: false
       matrix: ${{ fromJSON(vars.PINVOU_WINDOWS_ENABLED != 'false' && (vars.PINVOU_MACOS_ENABLED != 'false' && '{"include":[{"os":"macos-15"},{"os":"ubuntu-22.04"},{"os":"windows-latest"}]}' || '{"include":[{"os":"ubuntu-22.04"},{"os":"windows-latest"}]}') || (vars.PINVOU_MACOS_ENABLED != 'false' && '{"include":[{"os":"macos-15"},{"os":"ubuntu-22.04"}]}' || '{"include":[{"os":"ubuntu-22.04"}]}')) }}
-    runs-on: ${{ matrix.os == 'ubuntu-22.04' && fromJSON(vars.PINVOU_LINUX_LIGHT_RUNNER || vars.PINVOU_LINUX_RUNNER || '["ubuntu-22.04"]') || matrix.os == 'windows-latest' && fromJSON(vars.PINVOU_WINDOWS_LIGHT_RUNNER || vars.PINVOU_WINDOWS_RUNNER || '["windows-latest"]') || matrix.os }}
+    # Windows pool overrides are limited to same-repository PR metadata (name + ID).
+    # Fork/missing metadata or undeclared events use hosted Windows.
+    # PR-editable YAML is not a runner ACL; other declared events keep their pools.
+    runs-on: ${{ matrix.os == 'ubuntu-22.04' && fromJSON(vars.PINVOU_LINUX_LIGHT_RUNNER || vars.PINVOU_LINUX_RUNNER || '["ubuntu-22.04"]') || matrix.os == 'windows-latest' && fromJSON((github.event_name == 'push' || github.event_name == 'merge_group' || (github.event_name == 'pull_request' && github.repository != '' && github.repository_id != '' && github.event.pull_request.head.repo.full_name == github.repository && github.event.pull_request.base.repo.full_name == github.repository && github.event.pull_request.head.repo.id == github.repository_id && github.event.pull_request.base.repo.id == github.repository_id)) && (vars.PINVOU_WINDOWS_LIGHT_RUNNER || vars.PINVOU_WINDOWS_RUNNER || '["windows-latest"]') || '["windows-latest"]') || matrix.os }}
     # Minutes of work when healthy (init a tiny crate, compile, run the
     # wrapper probes); the cap keeps a hung cargo from burning the 360-minute
     # default, including on the scarce macOS runner.
