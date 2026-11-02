@@ -106,7 +106,7 @@ impl ToolSpec for RunTool {
                 },
                 "commands": {
                     "type": "array",
-                    "description": "Optional explicit verifier gates (action=verifiers). Commands run directly as program+args, not through a shell; use program='bash', args=['-lc', '...'] only when the shell is intentionally part of the verifier.",
+                    "description": "Optional explicit verifier gates (action=verifiers). Foreground gates run directly as program+args, not through a shell; use program='bash', args=['-lc', '...'] only when the shell is intentionally part of the verifier. Background gates are rendered into a single command line and run through the detected platform shell, so shell quoting rules apply there (a POSIX-quoted path can fail under PowerShell).",
                     "items": {
                         "type": "object",
                         "properties": {
@@ -115,12 +115,13 @@ impl ToolSpec for RunTool {
                             "args": { "type": "array", "items": { "type": "string" }, "description": "Arguments passed directly to the executable." },
                             "cwd": { "type": "string", "description": "Optional working directory relative to the workspace." }
                         },
-                        "required": ["name", "program"]
+                        "required": ["name", "program"],
+                        "additionalProperties": false
                     }
                 },
                 "background": {
                     "type": "boolean",
-                    "description": "Start verifier gates as background jobs and return task_ids immediately (action=verifiers). Use for long build/test/lint gates; completion is tracked in task/status state, and task_shell_wait is only for early output, final output, or true dependency barriers."
+                    "description": "Start verifier gates as background jobs and return immediately with each gate's task id (action=verifiers). Use for long build/test/lint gates; completion is tracked in task/status state, and task_shell_wait is only for early output, final output, or true dependency barriers."
                 }
             },
             "required": ["action"]
