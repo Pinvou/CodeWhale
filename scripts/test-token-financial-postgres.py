@@ -160,6 +160,10 @@ REFUND_REQUIRED = {
     "TestRefundOriginalUnknownSuccessQueriesAndSettlesOrdinaryGrantsPostgres",
 }
 RETAINED_REQUIRED = {
+    "TestEscalatedForcedRefundRequiresSecondActorAndReplays",
+    "TestEscalatedForcedRefundAtomicRollbackPostgres",
+    "TestEscalatedForcedRefundEvidenceAndReceiptGuardsPostgres",
+    "TestOrdinaryForcedRefundAppliedReceiptRecoveryPostgres",
     "TestPaymentPersonalWalletAdmissionPostgres",
     "TestPaymentPersonalWalletAdmissionStatusRacePostgres",
     "TestReceivableSettlementGuardedWritesPostgres",
@@ -206,6 +210,8 @@ RETAINED_REQUIRED = {
 # These exact roots are named leaves. Every other retained root must still
 # produce completed child-case evidence, not just a parent PASS.
 BILLING_LEAF_REQUIRED = {
+    "TestEscalatedForcedRefundRequiresSecondActorAndReplays",
+    "TestOrdinaryForcedRefundAppliedReceiptRecoveryPostgres",
     "TestPaymentPersonalWalletAdmissionStatusRacePostgres",
     "TestPostgresManagedPricePagination",
     "TestLedgerRepairProofHistoricalUpgradePostgres",
@@ -230,6 +236,13 @@ BILLING_CHILD_REQUIRED = RETAINED_REQUIRED - BILLING_LEAF_REQUIRED
 EXACT_REQUIRED_CHILDREN = {
     "TestRegistrationBonusCheckpointForeignFactsPostgresIntegration": {
         "unbound-existing-facts", "foreign-key-before-finalize",
+    },
+    "TestEscalatedForcedRefundAtomicRollbackPostgres": {
+        "terminal-statement", "receipt-statement", "deferred-commit",
+    },
+    "TestEscalatedForcedRefundEvidenceAndReceiptGuardsPostgres": {
+        "manual-status", "manual-link", "order-link", "transaction-link",
+        "evidence-link", "receipt-identity-and-terminal-replay",
     },
     "TestRemoteModelCancellationOwnerLoopTransport": {
         "remote_emergency", "remote_emergency_then_user", "user_only",
