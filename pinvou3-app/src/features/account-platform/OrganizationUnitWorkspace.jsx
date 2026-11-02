@@ -3,7 +3,7 @@ import { organizationCopy } from '../../shared/i18n.js';
 import { organizationLabel } from './organization-labels.js';
 import { hasPermission } from './authorization-ui.js';
 import { organizationID, organizationUnitIDs, organizationVersion } from './organization-client.js';
-import { hasUnitScopePermission, memberWithinUnitScope, organizationScopeRoots, requireScopedMemberMutation, scopedUnitIDs } from './organization-scope.js';
+import { createOrganizationScopeFailureGuard, hasUnitScopePermission, memberWithinUnitScope, organizationScopeRoots, requireScopedMemberMutation, scopedUnitIDs } from './organization-scope.js';
 import { useOrganizationScope } from './useOrganizationScope.js';
 import { useOrganizationMemberPages } from './useOrganizationMemberPages.js';
 import { OrganizationActionForm } from './OrganizationActionForm.jsx';
@@ -14,27 +14,41 @@ const retired = () => { throw Object.assign(new Error('ORGANIZATION_SCOPE_CHANGE
 
 // Kept alongside the existing organization-wide view: an Auditor+Unit Admin
 // can still read the organization, but writes remain in one explicit subtree.
-export function OrganizationUnitWorkspace({ api, me, owner, language, onChanged }) {
- const copy = organizationCopy[language], scope = useOrganizationScope(api, me, owner, onChanged);
+export function OrganizationUnitWorkspace({ api, me, owner, language, onChanged, scopeFailureGuard }) {
+ const copy = organizationCopy[language];
  const [selection, setSelection] = useState({ owner: '', root: '' });
+ const failures = useRef(null);
+ if (!failures.current) failures.current = createOrganizationScopeFailureGuard();
+ const failureGuard = scopeFailureGuard || failures.current;
+ const [, refreshFailure] = useState(0);
+ const failureIdentity = JSON.stringify([owner, me.user_id, me.active_context.organization_id, me.active_context.context_version, me.active_context.organization_authorization_version, api.client.financeSessionEpoch || 0]);
+ const scope = useOrganizationScope(api, me, owner, onChanged, failureGuard, failureIdentity);
  const roots = organizationScopeRoots(scope.context);
  const root = selection.owner === owner && roots.includes(selection.root) ? selection.root : roots[0] || '';
  const selected = useRef(root); selected.current = root;
  const context = scope.context;
- const assertCurrent = () => { if (!scope.isCurrent(context) || selected.current !== root) retired(); };
+ const assertCurrent = () => { if (!scope.isCurrent(context) || selected.current !== root || failureGuard.isDenied(failureIdentity, root)) retired(); };
+ const permissionDenied = failureGuard.isDenied(failureIdentity, root);
+ const onPermissionDenied = () => {
+  if (!scope.isCurrent(context) || selected.current !== root) return;
+  const refreshAuthority = failureGuard.deny(failureIdentity, root);
+  refreshFailure(value => value + 1);
+  if (refreshAuthority) { void scope.refresh(); void onChanged(); }
+ };
+ const retryScope = () => { failureGuard.retry(failureIdentity, root); refreshFailure(value => value + 1); void scope.refresh(true); };
  if (!roots.length && !scope.error) return null;
  return <section className="ap-org-unit-scope"><h3>{copy.unitScopeTitle}</h3><p>{copy.unitScopeHint}</p>
-  <button type="button" disabled={scope.loading} onClick={() => void scope.refresh()}>{copy.refresh}</button>
-  {scope.error && <p role="alert">{copy[scope.error]}</p>}
+  <button type="button" disabled={scope.loading} onClick={retryScope}>{copy.refresh}</button>
+  {(scope.error || permissionDenied) && <p role="alert">{copy[scope.error || 'permissions']}</p>}
   {root && <><label>{copy.unitScope}<select value={root} onChange={event => { selected.current = event.target.value; setSelection({ owner, root: event.target.value }); }}>
    {roots.map(id => <option key={id} value={id}>{id}</option>)}
   </select></label>
-   <ScopedDirectory key={`${owner}:${root}:${scope.revision}`} api={api} me={me} owner={`${owner}:unit:${root}`} root={root} context={context} copy={copy} assertCurrent={assertCurrent} onChanged={() => { void scope.refresh(); void onChanged(); }} />
+   {!permissionDenied && <ScopedDirectory key={`${owner}:${root}:${scope.revision}`} api={api} me={me} owner={`${owner}:unit:${root}`} root={root} context={context} copy={copy} assertCurrent={assertCurrent} onPermissionDenied={onPermissionDenied} onChanged={() => { void scope.refresh(); void onChanged(); }} />}
   </>}
  </section>;
 }
 
-function ScopedDirectory({ api, me, owner, root, context, copy, assertCurrent, onChanged }) {
+function ScopedDirectory({ api, me, owner, root, context, copy, assertCurrent, onChanged, onPermissionDenied }) {
  const org = me.active_context.organization_id;
  const [tree, setTree] = useState(null), [error, setError] = useState(''), [invitation, setInvitation] = useState(null);
  const live = useRef(true);
@@ -48,7 +62,7 @@ function ScopedDirectory({ api, me, owner, root, context, copy, assertCurrent, o
  const ids = useMemo(() => tree ? scopedUnitIDs(tree, root) : new Set(), [tree, root]);
  const can = permission => hasUnitScopePermission(context, root, permission);
  const page = useOrganizationMemberPages({ api, org, owner, unitID: root, enabled: Boolean(tree) && can('org.members.read') });
- useEffect(() => { if (page.error === 'permissions') onChanged(); }, [page.error]); // eslint-disable-line react-hooks/exhaustive-deps
+ useEffect(() => { if (page.error === 'permissions') onPermissionDenied(); }, [page.error]); // eslint-disable-line react-hooks/exhaustive-deps
  const units = (tree?.items || []).map(unit => ({ value: unit.unit_id, label: unit.name }));
  const writableMembers = page.items.filter(member => can('org.members.manage') && memberWithinUnitScope(member, ids));
  const members = writableMembers.map(member => ({ value: member.user_id, label: member.display_name || member.user_code || member.user_id }));
@@ -57,7 +71,7 @@ function ScopedDirectory({ api, me, owner, root, context, copy, assertCurrent, o
   requireScopedMemberMutation(context, root, ids, member); return member;
  };
  const guarded = fn => (...args) => { assertCurrent(); if (!live.current || !tree) retired(); return fn(...args); };
- const mutate = execute => guarded(async (...args) => { try { return await execute(...args); } catch (reason) { if (reason.status === 403) onChanged(); throw reason; } });
+ const mutate = execute => guarded(async (...args) => { try { return await execute(...args); } catch (reason) { if (reason.status === 403) onPermissionDenied(); throw reason; } });
  const action = (name, title, fields, prepare, execute, confirm = false, confirmed) => <OrganizationActionForm key={name} client={api.client} owner={owner} copy={{ ...copy, unscopedUnits: name === 'invite' ? copy.unitScopeInviteUnitsHint : copy.unitScopeAssignmentHint }} scope={`unit:${root}:${name}`} title={title} fields={fields} prepare={guarded(prepare)} action={mutate(execute)} confirm={confirm} confirmationTarget={root} onConfirmed={value => { confirmed?.(value); if (!confirmed) onChanged(); }} />;
  return <div>{error && <p role="alert">{copy[error]}</p>}{!tree && !error && <p role="status">{copy.loading}</p>}
   {tree && <><h4>{copy.units}</h4><ul>{tree.items.map(unit => <li key={unit.unit_id}>{unit.name} · {unit.unit_id === root ? copy.unitScopeRoot : unit.parent_id}</li>)}</ul>

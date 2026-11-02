@@ -2354,6 +2354,8 @@ dictZh["controlledDevice"] = {
   unsupported: "当前系统暂不支持桌面远程控制。",
   errorGeneric: "操作失败，请稍后重试。",
   errorRelayUnavailable: "远程控制服务暂未启用桌面控制，请稍后重试或联系服务管理员。",
+  errorPairingExpired: "连接码已过期，请重新开启远程控制并使用新的连接码重试。",
+  errorHandshakeTimeout: "安全握手超时，请重新开启远程控制并使用新的连接码重试。",
   workspaceAuthorize: "添加工作区",
   workspaceAuthorized: "已授权",
   workspaceUnauthorized: "未授权",

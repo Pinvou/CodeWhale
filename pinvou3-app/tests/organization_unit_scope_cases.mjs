@@ -122,6 +122,43 @@ export async function runOrganizationUnitScopeCases(page, origin) {
    await fresh({ failed }); await page.waitForFunction(() => document.querySelector('.ap-org-unit-scope [role=alert]'));
    assert.equal(await page.evaluate(() => window.unitScope.calls.some(call => call.path.includes('root_unit_id='))), false);
   });
+  await run('Persistent member 403 retires scope once despite fresh profiles and keyed directory remounts', async () => {
+   await fresh({ membersDenied: true, refreshProfile: true });
+   await page.waitForFunction(() => window.unitScope.changed === 1 && document.querySelector('.ap-org-unit-scope [role=alert]'));
+   await page.evaluate(() => new Promise(resolve => setTimeout(resolve, 150)));
+   assert.equal(await page.evaluate(() => window.unitScope.changed), 1);
+   assert.equal(await page.evaluate(() => window.unitScope.calls.filter(call => /\/members\?/.test(call.path)).length), 1);
+   assert.equal(await page.evaluate(() => Boolean(document.querySelector('.ap-org-unit-scope form'))), false);
+   await page.evaluate(() => document.querySelector('.ap-org-unit-scope > button').click());
+   await page.waitForFunction(() => window.unitScope.calls.filter(call => /\/members\?/.test(call.path)).length === 2 && document.querySelector('.ap-org-unit-scope [role=alert]'));
+   assert.equal(await page.evaluate(() => window.unitScope.changed), 1, 'explicit retry must not replenish automatic refresh');
+   await page.evaluate(() => { window.unitScope.authorityVersion = 1; window.unitScope.currentMe = null; window.unitScope.render(); });
+   await page.waitForFunction(() => window.unitScope.changed === 2 && document.querySelector('.ap-org-unit-scope [role=alert]'));
+   await page.evaluate(() => new Promise(resolve => setTimeout(resolve, 100)));
+   assert.equal(await page.evaluate(() => window.unitScope.changed), 2);
+   assert.equal((await writes()).length, 0);
+  });
+  for (const denial of ['members', 'authorization']) await run(`Admin parent profile remount preserves ${denial} 403 retirement and explicit retry`, async () => {
+   await fresh({ adminParent: true, ...(denial === 'members' ? { membersDenied: true } : { failed: 403 }) });
+   await page.waitForFunction(() => window.unitScope.changed === 1 && window.unitScope.bootstraps === 2 && document.querySelector('.ap-org-unit-scope [role=alert]'));
+   await page.evaluate(() => new Promise(resolve => setTimeout(resolve, 200)));
+   assert.equal(await page.evaluate(() => window.unitScope.changed), 1);
+   assert.equal(await page.evaluate(() => window.unitScope.bootstraps), 2, 'Real Admin effect must reload the profile exactly once');
+   const counts = () => page.evaluate(() => ({ authorization: window.unitScope.calls.filter(call => call.path.endsWith('/authorization-context')).length, members: window.unitScope.calls.filter(call => /\/members\?/.test(call.path)).length }));
+   const before = await counts();
+   assert.equal(before.members, denial === 'members' ? 1 : 0);
+   await page.evaluate(() => document.querySelector('.ap-org-unit-scope > button').click());
+   await page.waitForFunction(before => window.unitScope.calls.filter(call => call.path.endsWith('/authorization-context')).length > before && document.querySelector('.ap-org-unit-scope [role=alert]'), {}, before.authorization);
+   if (denial === 'members') await page.waitForFunction(() => window.unitScope.calls.filter(call => /\/members\?/.test(call.path)).length === 2);
+   await page.evaluate(() => new Promise(resolve => setTimeout(resolve, 100)));
+   assert.equal(await page.evaluate(() => window.unitScope.changed), 1);
+   await page.evaluate(() => { window.unitScope.authorityVersion = 1; window.unitScope.currentMe = null; window.unitScope.render(); });
+   await page.waitForFunction(() => window.unitScope.changed === 2 && window.unitScope.bootstraps === 4 && document.querySelector('.ap-org-unit-scope [role=alert]'));
+   await page.evaluate(() => new Promise(resolve => setTimeout(resolve, 100)));
+   assert.equal(await page.evaluate(() => window.unitScope.changed), 2);
+   assert.equal(await page.evaluate(() => Boolean(document.querySelector('.ap-org-unit-scope form'))), false);
+   assert.equal((await writes()).length, 0);
+  });
   for (const mismatch of ['context_version', 'organization_authorization_version', 'organization_id']) await run(`Mismatched authority ${mismatch} cannot issue scope reads`, async () => {
    await fresh({ mismatch }); await page.waitForFunction(() => document.querySelector('.ap-org-unit-scope [role=alert]'));
    assert.equal(await page.evaluate(() => window.unitScope.calls.some(call => call.path.includes('root_unit_id=') || call.path.includes('unit_id='))), false);

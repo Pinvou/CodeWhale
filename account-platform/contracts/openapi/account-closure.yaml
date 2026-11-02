@@ -25,8 +25,11 @@ paths:
           content:
             application/json:
               schema: { $ref: "#/components/schemas/AccountClosure" }
+        "401": { $ref: "#/components/responses/Error" }
         "403": { $ref: "#/components/responses/Error" }
         "404": { $ref: "#/components/responses/Error" }
+        "503": { $ref: "#/components/responses/Error" }
+        default: { $ref: "#/components/responses/Error" }
   /v1/me/account-closure-requests:
     post:
       operationId: createMyAccountClosure
@@ -52,11 +55,15 @@ paths:
           content:
             application/json:
               schema: { $ref: "#/components/schemas/AccountClosure" }
+        "400": { $ref: "#/components/responses/Error" }
         "401":
           description: Recent authentication is missing or older than five minutes; stable code RECENT_AUTHENTICATION_REQUIRED
           content: { application/json: { schema: { type: object, required: [code, message], properties: { code: {type: string}, message: {type: string}, request_id: {type: string} } } } }
         "403": { $ref: "#/components/responses/Error" }
+        "404": { $ref: "#/components/responses/Error" }
         "409": { $ref: "#/components/responses/Error" }
+        "503": { $ref: "#/components/responses/Error" }
+        default: { $ref: "#/components/responses/Error" }
   /admin/v1/account-closure-requests:
     get:
       operationId: listAccountClosureRepairQueue
@@ -64,7 +71,10 @@ paths:
       description: Requires platform.account-closures.read. Domain resource identifiers remain restricted to administrators.
       responses:
         "200": { $ref: "#/components/responses/Collection" }
+        "401": { $ref: "#/components/responses/Error" }
         "403": { $ref: "#/components/responses/Error" }
+        "503": { $ref: "#/components/responses/Error" }
+        default: { $ref: "#/components/responses/Error" }
   /admin/v1/account-closure-requests/{closure_request_id}/actions/retry:
     post:
       operationId: retryAccountClosureStage
@@ -90,9 +100,13 @@ paths:
                 reason: { type: string, minLength: 1, maxLength: 500 }
       responses:
         "200": { description: Retry accepted and current stage returned }
+        "400": { $ref: "#/components/responses/Error" }
+        "401": { $ref: "#/components/responses/Error" }
         "403": { $ref: "#/components/responses/Error" }
         "404": { $ref: "#/components/responses/Error" }
         "409": { $ref: "#/components/responses/Error" }
+        "503": { $ref: "#/components/responses/Error" }
+        default: { $ref: "#/components/responses/Error" }
 components:
   securitySchemes:
     oidc:

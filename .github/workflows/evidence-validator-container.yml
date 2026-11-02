@@ -1,0 +1,41 @@
+name: evidence-validator-container
+
+on:
+  pull_request:
+    paths:
+      - 'account-platform/cmd/evidence-image-validator/**'
+      - 'account-platform/internal/billing/evidence_image_validator_client*.go'
+      - 'account-platform/internal/billing/evidence_image_validator_container_test.go'
+      - 'account-platform/Dockerfile.evidence-*validator*'
+      - 'account-platform/go.mod'
+      - 'account-platform/go.sum'
+      - '.github/workflows/evidence-validator-container.yml'
+  merge_group:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  linux-amd64:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: account-platform/go.mod
+          cache-dependency-path: account-platform/go.sum
+      - uses: actions/setup-python@v7
+        with:
+          python-version: '3.12.14'
+      - name: Record runner and test real container
+        run: |
+          set -euo pipefail
+          uname -a
+          docker version
+          docker buildx version
+          python -I -B account-platform/cmd/evidence-image-validator/test_container_ci.py
+          python -I -B account-platform/cmd/evidence-image-validator/container_ci.py
