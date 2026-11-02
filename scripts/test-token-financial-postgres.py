@@ -167,6 +167,11 @@ RETAINED_REQUIRED = {
     "TestReconciliationFairRetryRuntimePostgres",
     "TestProductResumeDefaultProviderPostgres",
     "TestProductAdmissionRetirementBindingPostgres",
+    "TestProductManualAdmissionPostgres",
+    "TestExpirePendingManualProductAdmissionsReleasesFingerprintSlot",
+    "TestProductAdmissionMaterialStorePostgres",
+    "TestProductAdmissionMaterialPurgePostgres",
+    "TestProductAdmissionMaterialHTTPPostgres",
     "TestNegativeAdjustmentMemberBucketConservationPostgres",
     "TestRechargeProductCommandAtomicityPostgres",
     "TestOrganizationChargebackDeletionEvidencePostgres",
@@ -190,6 +195,10 @@ RETAINED_REQUIRED = {
 # These exact roots are named leaves. Every other retained root must still
 # produce completed child-case evidence, not just a parent PASS.
 BILLING_LEAF_REQUIRED = {
+    "TestExpirePendingManualProductAdmissionsReleasesFingerprintSlot",
+    "TestProductAdmissionMaterialStorePostgres",
+    "TestProductAdmissionMaterialPurgePostgres",
+    "TestProductAdmissionMaterialHTTPPostgres",
     "TestPaymentPersonalWalletAdmissionStatusRacePostgres",
     "TestPostgresManagedPricePagination",
     "TestLedgerRepairProofHistoricalUpgradePostgres",
@@ -212,6 +221,14 @@ BILLING_LEAF_REQUIRED = {
 }
 BILLING_CHILD_REQUIRED = RETAINED_REQUIRED - BILLING_LEAF_REQUIRED
 EXACT_REQUIRED_CHILDREN = {
+    "TestProductManualAdmissionPostgres": {
+        "two-explicit-humans-first-publish-and-immutable-replay",
+        "runtime-cannot-rewrite-frozen-manual-facts",
+        "concurrent-second-votes-issue-once-and-audit-failure-rolls-back",
+        "reject-retains-original-and-no-evidence",
+        "stale-product-and-foreign-original-rejected",
+        "retention-purges-submission-snapshot-and-review-reason",
+    },
     "TestRemoteModelCancellationOwnerLoopTransport": {
         "remote_emergency", "remote_emergency_then_user", "user_only",
         "read_failure", "lease_failure", "natural_terminal",

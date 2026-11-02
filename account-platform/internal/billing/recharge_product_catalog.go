@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"math"
 	"sort"
 	"strings"
@@ -1207,25 +1208,45 @@ ORDER BY evidence.expires_at,binding.catalog_item_id LIMIT $1`, limit, afterExpi
 	return retired, nil
 }
 
+type productAdmissionExpiryRepository interface {
+	ExpireProductAdmissions(context.Context, int) (int, error)
+	ExpirePendingManualProductAdmissions(context.Context, int) (int, error)
+	purgeDueProductAdmissionMaterials(context.Context) (int, error)
+}
+
 type ProductAdmissionExpiryWorker struct {
-	repository *PostgresRepository
+	repository productAdmissionExpiryRepository
 	interval   time.Duration
+	logger     *slog.Logger
 }
 
 func NewProductAdmissionExpiryWorker(repository *PostgresRepository, interval time.Duration) *ProductAdmissionExpiryWorker {
 	if interval <= 0 {
 		interval = time.Minute
 	}
-	return &ProductAdmissionExpiryWorker{repository: repository, interval: interval}
+	return &ProductAdmissionExpiryWorker{repository: repository, interval: interval, logger: slog.Default()}
+}
+
+func (w *ProductAdmissionExpiryWorker) reportFailure(ctx context.Context, stage string, err error) {
+	if err != nil && !errors.Is(err, context.Canceled) {
+		w.logger.ErrorContext(ctx, "product admission maintenance failed", "component", "product-admission-expiry", "stage", stage, "error_code", "PRODUCT_ADMISSION_MAINTENANCE_RETRY_PENDING")
+	}
+}
+
+func (w *ProductAdmissionExpiryWorker) runOnce(ctx context.Context) {
+	_, err := w.repository.ExpireProductAdmissions(ctx, 100)
+	w.reportFailure(ctx, "published-expiry", err)
+	_, err = w.repository.ExpirePendingManualProductAdmissions(ctx, 100)
+	w.reportFailure(ctx, "pending-manual-expiry", err)
+	_, err = w.repository.purgeDueProductAdmissionMaterials(ctx)
+	w.reportFailure(ctx, "material-purge", err)
 }
 
 func (w *ProductAdmissionExpiryWorker) Run(ctx context.Context) {
 	ticker := time.NewTicker(w.interval)
 	defer ticker.Stop()
 	for {
-		_, _ = w.repository.ExpireProductAdmissions(ctx, 100)
-		_, _ = w.repository.ExpirePendingManualProductAdmissions(ctx, 100)
-		_, _ = w.repository.purgeDueProductAdmissionMaterials(ctx)
+		w.runOnce(ctx)
 		select {
 		case <-ctx.Done():
 			return

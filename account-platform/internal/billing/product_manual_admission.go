@@ -78,12 +78,15 @@ func (r *PostgresRepository) ExpirePendingManualProductAdmissions(ctx context.Co
 		return 0, err
 	}
 	rows.Close()
+	expired := 0
 	for _, item := range items {
 		if err = lockTransactionKey(ctx, tx, "catalog.admission", item.catalogID.String()); err != nil {
 			return 0, err
 		}
 		var locked uuid.UUID
-		if err = tx.QueryRow(ctx, `SELECT s.verification_id FROM product_manual_admission_submissions s JOIN product_admission_verifications v USING(verification_id) WHERE s.verification_id=$1 AND v.status='PENDING' AND s.expires_at<=clock_timestamp() FOR UPDATE OF s,v SKIP LOCKED`, item.verificationID).Scan(&locked); errors.Is(err, pgx.ErrNoRows) {
+		// Submissions are immutable to billing_service. The catalogue lock and
+		// mutable verification row serialize expiry with decisions and renewal.
+		if err = tx.QueryRow(ctx, `SELECT s.verification_id FROM product_manual_admission_submissions s JOIN product_admission_verifications v USING(verification_id) WHERE s.verification_id=$1 AND v.status='PENDING' AND s.expires_at<=clock_timestamp() FOR UPDATE OF v SKIP LOCKED`, item.verificationID).Scan(&locked); errors.Is(err, pgx.ErrNoRows) {
 			continue
 		} else if err != nil {
 			return 0, err
@@ -98,11 +101,12 @@ func (r *PostgresRepository) ExpirePendingManualProductAdmissions(ctx context.Co
 		if err = terminalProductAdmissionMaterial(ctx, tx, item.verificationID, now); err != nil {
 			return 0, err
 		}
+		expired++
 	}
 	if err = tx.Commit(ctx); err != nil {
 		return 0, err
 	}
-	return len(items), nil
+	return expired, nil
 }
 
 func (r *PostgresRepository) GetManualProductAdmission(ctx context.Context, catalogID, verificationID uuid.UUID) (ProductManualAdmission, error) {
@@ -226,7 +230,9 @@ func (r *PostgresRepository) DecideManualProductAdmission(ctx context.Context, i
 			return ProductManualAdmission{}, 0, err
 		}
 		var ignored uuid.UUID
-		if err := tx.QueryRow(ctx, `SELECT verification_id FROM product_admission_verifications WHERE verification_id=$1 AND catalog_item_id=$2 FOR UPDATE`, in.VerificationID, in.CatalogItemID).Scan(&ignored); err != nil {
+		if err := tx.QueryRow(ctx, `SELECT verification_id FROM product_admission_verifications WHERE verification_id=$1 AND catalog_item_id=$2 FOR UPDATE`, in.VerificationID, in.CatalogItemID).Scan(&ignored); errors.Is(err, pgx.ErrNoRows) {
+			return ProductManualAdmission{}, 0, ErrNotFound
+		} else if err != nil {
 			return ProductManualAdmission{}, 0, err
 		}
 		record, err := manualProductAdmission(ctx, tx, in.CatalogItemID, in.VerificationID)

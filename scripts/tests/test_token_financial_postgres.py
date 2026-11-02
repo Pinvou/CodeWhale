@@ -335,7 +335,7 @@ class FinancialPostgresRunnerTests(unittest.TestCase):
         self.assertEqual(billing[-1], "./internal/billing")
         self.assertEqual(billing[billing.index("-run") + 1],
                          "^(" + "|".join(sorted(RUNNER.RETAINED_REQUIRED)) + ")$")
-        self.assertEqual(len(RUNNER.RETAINED_REQUIRED), 63)
+        self.assertEqual(len(RUNNER.RETAINED_REQUIRED), 68)
         self.assertEqual(self.fixture_writes, ["create", "drop"])
         self.assertEqual(self.fixture_trace, [
             "owner-account", "owner-wallet", "owner-schema", "owner-provisioning",
@@ -738,6 +738,59 @@ class FinancialPostgresRunnerTests(unittest.TestCase):
         ):
             with self.subTest(raw=raw), self.assertRaises(ValueError):
                 RUNNER.local_database_url(raw)
+
+    def test_manual_admission_cli_selection_and_completed_cases_fail_closed(self):
+        manual = "TestProductManualAdmissionPostgres"
+        expiry = "TestExpirePendingManualProductAdmissionsReleasesFingerprintSlot"
+        materials = {
+            "TestProductAdmissionMaterialStorePostgres",
+            "TestProductAdmissionMaterialPurgePostgres",
+            "TestProductAdmissionMaterialHTTPPostgres",
+        }
+        roots = {manual, expiry, *materials}
+        self.assertEqual(RUNNER.BILLING_LEAF_REQUIRED & roots, {expiry, *materials})
+        self.run_main_fixture()
+        command = self.fixture_commands[-1]
+        selected = re.compile(command[command.index("-run") + 1])
+        for root in roots:
+            self.assertIsNotNone(selected.fullmatch(root))
+        self.assertEqual((RUNNER.billing_roots("billing-0") | RUNNER.billing_roots("billing-1")) & roots, roots)
+        self.assertFalse(RUNNER.billing_roots("billing-0") & RUNNER.billing_roots("billing-1"))
+        cases = {
+            "two-explicit-humans-first-publish-and-immutable-replay",
+            "runtime-cannot-rewrite-frozen-manual-facts",
+            "concurrent-second-votes-issue-once-and-audit-failure-rolls-back",
+            "reject-retains-original-and-no-evidence",
+            "stale-product-and-foreign-original-rejected",
+            "retention-purges-submission-snapshot-and-review-reason",
+        }
+        events = []
+        for root in sorted(roots):
+            children = cases if root == manual else set()
+            events.append({"Action": "run", "Package": RUNNER.BILLING_PACKAGE, "Test": root})
+            for child in sorted(children):
+                for action in ("run", "pass"):
+                    events.append({"Action": action, "Package": RUNNER.BILLING_PACKAGE, "Test": root + "/" + child})
+            events.append({"Action": "pass", "Package": RUNNER.BILLING_PACKAGE, "Test": root})
+        events.append({"Action": "pass", "Package": RUNNER.BILLING_PACKAGE})
+        options = {"package": RUNNER.BILLING_PACKAGE, "require_children": True,
+                   "exact_roots": True, "children_required": {manual}}
+        self.assertEqual(RUNNER.verify_results(events, roots, **options), 11)
+        for missing in [*roots, *(manual + "/" + child for child in cases)]:
+            incomplete = [event for event in events if event.get("Test") != missing
+                          and not event.get("Test", "").startswith(missing + "/")]
+            with self.subTest(missing=missing), self.assertRaises(RuntimeError):
+                RUNNER.verify_results(incomplete, roots, **options)
+        for root in roots:
+            for action in ("skip", "fail"):
+                rejected = events + [{"Action": action, "Package": RUNNER.BILLING_PACKAGE,
+                                      "Test": root}]
+                with self.subTest(root=root, action=action), self.assertRaises(RuntimeError):
+                    RUNNER.verify_results(rejected, roots, **options)
+        skipped = events + [{"Action": "skip", "Package": RUNNER.BILLING_PACKAGE,
+                             "Test": manual + "/retention-purges-submission-snapshot-and-review-reason"}]
+        with self.assertRaises(RuntimeError):
+            RUNNER.verify_results(skipped, roots, **options)
 
     def events(self, required=None, package=None, children=False):
         result = []
@@ -1434,6 +1487,10 @@ class FinancialPostgresRunnerTests(unittest.TestCase):
 
     def test_only_explicit_original_and_refund_leaves_can_omit_children(self):
         leaves = {
+            "TestExpirePendingManualProductAdmissionsReleasesFingerprintSlot",
+            "TestProductAdmissionMaterialStorePostgres",
+            "TestProductAdmissionMaterialPurgePostgres",
+            "TestProductAdmissionMaterialHTTPPostgres",
             "TestPaymentPersonalWalletAdmissionStatusRacePostgres",
             "TestPostgresManagedPricePagination",
             "TestLedgerRepairProofHistoricalUpgradePostgres",
@@ -1498,7 +1555,7 @@ class FinancialPostgresRunnerTests(unittest.TestCase):
         }
         self.assertEqual(RUNNER.REFUND_REQUIRED, expected)
         self.assertTrue(expected <= RUNNER.RETAINED_REQUIRED)
-        self.assertEqual(len(RUNNER.RETAINED_REQUIRED), 63)
+        self.assertEqual(len(RUNNER.RETAINED_REQUIRED), 68)
         valid = self.events(RUNNER.RETAINED_REQUIRED, RUNNER.BILLING_PACKAGE, children=True)
         options = {"package": RUNNER.BILLING_PACKAGE, "require_children": True, "exact_roots": True,
                    "children_required": RUNNER.BILLING_CHILD_REQUIRED}
