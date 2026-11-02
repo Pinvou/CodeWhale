@@ -23,12 +23,19 @@ pub(crate) fn store_model_name(model_name: &str) -> Option<String> {
 /// `case_insensitive` 供 Ollama 有效删除名臂：daemon 标签按小写归一，sqlite
 /// BINARY 精确匹配会漏掉 `Qwen3:30B` → `qwen3:30b` 的别名绕道（第四轮 P3）。
 ///
-/// 两臂直接比对都未命中时，再对**去掉 `:tag` 后缀**的名字按同一 case 口径重查
-/// 一次：商店的 `model_name` 由 `suggest_model_name` 生成，冒号一律清洗成 `-`
+/// 两臂直接比对都未命中时，再对一组**别名候选**按同一 case 口径逐个重查：
+/// 商店的 `model_name` 由 `suggest_model_name` 生成，冒号一律清洗成 `-`
 /// （lifecycle.rs），而 daemon 侧的名字恒带 `:tag`——商店 ollama 卡片以
 /// `name:latest` 形态出现在 /api/tags 与手写注册表记录里时，直接比对全部落空
-/// （第八轮评审）。误伤方向是"把用户自己的 `x:v2` 当商店模型拒掉"（fail-safe，
-/// 报错给出商店出口）；漏放方向是别名记录真删商店部署的 daemon 模型。
+/// （第八轮评审）。
+///
+/// 候选集见 [`alias_candidates`]。此前只剥「首个冒号」前缀：全限定名
+/// `registry.ollama.ai/library/name:latest` 剥出的是
+/// `registry.ollama.ai/library/name`，与商店裸名永不相等，重查照样落空——
+/// 守卫 4 会拿着 FQ 名对 daemon 发 DELETE，而 daemon 把 FQ 名归一化到默认
+/// host 的同一 manifest，商店部署的模型就这样被真删（第 36 轮评审 P2）。
+/// 误伤方向是"把用户自己的 `x:v2` 当商店模型拒掉"（fail-safe，报错给出商店
+/// 出口）；漏放方向是别名记录真删商店部署的 daemon 模型。
 pub(crate) fn store_model_name_checked(
     model_name: &str,
     case_insensitive: bool,
@@ -36,18 +43,48 @@ pub(crate) fn store_model_name_checked(
     match db::get_store_model_by_name(model_name, case_insensitive) {
         Ok(Some(record)) => Ok(Some(record.model_name)),
         Ok(None) => {
-            let stripped = model_name.split(':').next().unwrap_or(model_name).trim();
-            if stripped.is_empty() || stripped == model_name {
-                return Ok(None);
+            for candidate in alias_candidates(model_name) {
+                match db::get_store_model_by_name(&candidate, case_insensitive) {
+                    Ok(Some(record)) => return Ok(Some(record.model_name)),
+                    Ok(None) => continue,
+                    Err(error) => return Err(format!("商店库查询失败：{error}")),
+                }
             }
-            match db::get_store_model_by_name(stripped, case_insensitive) {
-                Ok(Some(record)) => Ok(Some(record.model_name)),
-                Ok(None) => Ok(None),
-                Err(error) => Err(format!("商店库查询失败：{error}")),
-            }
+            Ok(None)
         }
         Err(error) => Err(format!("商店库查询失败：{error}")),
     }
+}
+
+/// 别名候选集（纯函数，测试直打）：直接比对落空后值得逐个重查的变体，保持
+/// 原序、trim、去重、跳过空串与原串。daemon 名的形状是
+/// `[host[:port]/][ns/]model[:tag]`，tag 语法上是**末段的最后一个冒号**：
+/// - 末个冒号剥 tag（`a/b:c:v2` → `a/b:c`）：覆盖普通 `name:tag` 形态；
+/// - 末个 `/` 段（FQ 名 → `name:tag`）；
+/// - 末段再剥 tag（FQ 名 → `name`）：与 `core::ollama_canonical_name` 的
+///   末段尺同口径，是命中商店裸名的关键候选（第 36 轮评审 P2）。
+fn alias_candidates(model_name: &str) -> Vec<String> {
+    let mut candidates: Vec<String> = Vec::new();
+    let mut push = |value: &str| {
+        let trimmed = value.trim();
+        if !trimmed.is_empty()
+            && trimmed != model_name
+            && !candidates.iter().any(|candidate| candidate == trimmed)
+        {
+            candidates.push(trimmed.to_string());
+        }
+    };
+    if let Some(pos) = model_name.rfind(':') {
+        push(&model_name[..pos]);
+    }
+    if let Some(pos) = model_name.rfind('/') {
+        let segment = &model_name[pos + 1..];
+        push(segment);
+        if let Some(tag_pos) = segment.rfind(':') {
+            push(&segment[..tag_pos]);
+        }
+    }
+    candidates
 }
 
 /// 权重根收集（纯函数，测试直打）：返回**绝对**根集合与被拒的相对条目（回显
@@ -164,8 +201,8 @@ mod tests {
     use super::super::store_client::DeployTopology;
     use super::config::{self, TempHome};
     use super::{
-        db, ollama_base_url, ollama_base_url_checked, store_model_name, store_model_name_checked,
-        store_weights_roots, store_weights_roots_checked,
+        alias_candidates, db, ollama_base_url, ollama_base_url_checked, store_model_name,
+        store_model_name_checked, store_weights_roots, store_weights_roots_checked,
     };
 
     fn insert_store_model(card_id: &str, model_name: &str) {
@@ -499,5 +536,72 @@ mod tests {
         );
         // 用户自己的带 tag 模型在商店无同名卡片时不受影响。
         assert_eq!(store_model_name_checked("mymodel:v2", false).unwrap(), None);
+    }
+
+    #[test]
+    fn fully_qualified_ollama_names_are_caught_by_segment_candidates() {
+        let _ctx = TempHome::new();
+        db::init_db().unwrap();
+        insert_store_model("card-fq", "llama3");
+        // 第 36 轮评审 P2：FQ 名与裸名解析到 daemon 默认 host 的同一
+        // manifest——此前首个冒号剥出 `registry.ollama.ai/library/llama3`，
+        // 与商店裸名永不相等，两臂全被绕过，守卫 4 拿 FQ 名 DELETE 就能真删
+        // 商店部署的模型。末段剥 tag 候选必须命中。
+        assert_eq!(
+            store_model_name_checked("registry.ollama.ai/library/llama3:latest", true).unwrap(),
+            Some("llama3".to_string())
+        );
+        // 端口型 host + 命名空间同样收口。
+        assert_eq!(
+            store_model_name_checked("127.0.0.1:11434/library/llama3:latest", true).unwrap(),
+            Some("llama3".to_string())
+        );
+        // Ollama 有效删除名臂的大小写口径不变：候选保留原大小写，靠
+        // case_insensitive 折叠。
+        assert_eq!(
+            store_model_name_checked("registry.ollama.ai/library/Llama3:Latest", true).unwrap(),
+            Some("llama3".to_string())
+        );
+        // 精确口径不折叠大小写：大写形态候选与商店裸名 BINARY 不等 → 放行。
+        assert_eq!(
+            store_model_name_checked("registry.ollama.ai/library/Llama3:Latest", false).unwrap(),
+            None
+        );
+        // 商店不存在的 FQ 名仍按未命中放行（不误伤同名前缀的其他模型）。
+        assert_eq!(
+            store_model_name_checked("registry.ollama.ai/library/other:latest", true).unwrap(),
+            None
+        );
+    }
+
+    #[test]
+    fn alias_candidates_cover_tag_and_segment_forms() {
+        // 普通带 tag 名：末个冒号剥 tag（与旧首个冒号行为一致——单冒号形态
+        // 两把尺等价）。
+        assert_eq!(
+            alias_candidates("llama3:latest"),
+            vec!["llama3".to_string()]
+        );
+        // 多冒号：tag 是**末段**的最后一个冒号，`a:b:c` 剥成 `a:b`（旧首冒号
+        // 尺剥成 `a`，把合法 `a:b` 也吞掉；新尺只在末段判 tag）。
+        assert_eq!(alias_candidates("a:b:c"), vec!["a:b".to_string()]);
+        // FQ 名：末冒号剥 tag + 末段 + 末段剥 tag 三候选按序去重。
+        assert_eq!(
+            alias_candidates("registry.ollama.ai/library/llama3:latest"),
+            vec![
+                "registry.ollama.ai/library/llama3".to_string(),
+                "llama3:latest".to_string(),
+                "llama3".to_string(),
+            ]
+        );
+        // 端口型 host：唯一冒号在 host 段——首候选剥出的是 host（查询落空，
+        // 无害），末段候选 `qwen3` 才是有效命中形态。
+        assert_eq!(
+            alias_candidates("192.168.1.5:5000/ns/qwen3"),
+            vec!["192.168.1.5".to_string(), "qwen3".to_string()]
+        );
+        // 空名/裸名无候选。
+        assert_eq!(alias_candidates(":latest"), Vec::<String>::new());
+        assert_eq!(alias_candidates("llama3"), Vec::<String>::new());
     }
 }

@@ -46,6 +46,21 @@ test('ollama：翻转对共享身份且端点不参与（静默登记换 id 时 
   assert.equal(externalRowIdentity({ name: 'Qwen3', kind: 'ollama' }), externalRowIdentity({ name: 'qwen3:latest', kind: 'ollama' }));
   // 别名记录按有效模型计。
   assert.equal(externalRowIdentity({ name: 'foo:latest', kind: 'ollama', model: 'BAR' }), externalRowIdentity({ name: 'bar:latest', kind: 'ollama' }));
+  // registry 形态（host:port/ns/model）的主机端口冒号不是 tag——末段尺（36 轮
+  // 评审 P3，与 pinvou-model-link 的 canonicalOllamaModelName、后端
+  // registry_identity 同一把尺）：同一全名串的「无 tag 形态」与「显式 :latest」
+  // 同身份；旧整串 includes(':') 把前者当已带 tag、后者折叠 latest，翻转对在
+  // 静默登记换 id 时静默解除武装。（带 host 前缀的名与裸名仍是不同身份——
+  // 不同 host 命名空间解析到不同 manifest，与后端一致。）
+  assert.equal(
+    externalRowIdentity({ name: '192.168.1.5:5000/ns/qwen3', kind: 'ollama' }),
+    externalRowIdentity({ name: '192.168.1.5:5000/ns/qwen3:latest', kind: 'ollama' }),
+  );
+  // 显式 tag 的 registry 形态按显式 tag 计身份。
+  assert.notEqual(
+    externalRowIdentity({ name: '192.168.1.5:5000/ns/qwen3:8b', kind: 'ollama' }),
+    externalRowIdentity({ name: '192.168.1.5:5000/ns/qwen3', kind: 'ollama' }),
+  );
 });
 
 test('视图接线锚：armed/busy 键必须走 externalRowIdentity（改回内联键必红）', () => {

@@ -200,6 +200,7 @@ function pinvouSharedweb() {
     deviceServices: null,
     deviceServicesError: null,
     externalModels: null,
+    externalModelsError: null,
     backendOnline: null, // null=checking, true, false
     settings: null,
     selectedPet: "lingling",

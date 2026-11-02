@@ -1,6 +1,7 @@
 // Effective armed/busy/list identity of an external-model row in the device
 // manager. Pure function on the bridge row payload so tests can direct-hit the
 // contract without mounting the view (same pattern as pinvou-model-link.js).
+import { canonicalOllamaModelName } from '../model-store/pinvou-model-link.js';
 //
 // kind + effective model identity (round-21 review P2, external-review P2).
 // The old kind+name key collided on two real routes: two registry rows sharing
@@ -26,12 +27,19 @@
 // lowercase) mirrors the backend's registry_identity: the backend register
 // rejects same-(kind, identity, endpoint) records and read_registry warns on
 // handwritten duplicates, which keeps the key unique.
+//
+// The ollama tag test delegates to canonicalOllamaModelName (round-36 review
+// P3): the ruler is "last `/` segment decides the tag" — the whole-string
+// `includes(':')` this module used before counted a host-port colon as a tag,
+// so registry-form names (`192.168.1.5:5000/ns/qwen3`) got a different key on
+// each side of the quiet re-register id swap even though the backend folds
+// both to `...:latest`. Finer-than-backend keys never reopened the two-panel
+// bug, but they silently disarmed the flip pair for that shape; sharing the
+// one ruler the link matcher already uses removes the drift.
 export function externalRowIdentity(row) {
   const kind = row?.kind || '';
   const effective = String(row?.model || row?.name || '');
-  if (kind !== 'ollama') {
-    return `${kind}:${JSON.stringify([effective, row?.base_url || ''])}`;
-  }
-  const lower = effective.toLowerCase();
-  return `${kind}:${lower.includes(':') ? lower : `${lower}:latest`}`;
+  return kind === 'ollama'
+    ? `${kind}:${canonicalOllamaModelName(effective)}`
+    : `${kind}:${JSON.stringify([effective, row?.base_url || ''])}`;
 }

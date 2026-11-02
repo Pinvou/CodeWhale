@@ -128,6 +128,18 @@ assert.deepEqual(
   desktopSliceFields().device.slice().sort(),
   'web device slice keys must equal the desktop STATE_SLICE_FIELDS.device contract',
 );
+// seed 字面量亦须逐键有定义（round-36 review P3）：pick() 从共享注册表投影，
+// 上面的断言看不见初始 state——无 structuredClone 的引擎走 JSON 回退克隆时
+// undefined 键整个丢失，seed 漏一键 web 切片就比桌面少一键（externalModelsError
+// 曾漏）。对 bridge.js 源码做形状钉。
+const webBridgeSource = read('bridge.js');
+for (const key of desktopSliceFields().device) {
+  const keySeedPattern = new RegExp(`^ {4}${key}:`, 'm');
+  assert.ok(
+    keySeedPattern.test(webBridgeSource),
+    `web bridge seed must declare device key "${key}" explicitly`,
+  );
+}
 assert.equal(api.sendMessage, undefined, 'Web flat command facade must stay private');
 
 snapshotReads = 0;

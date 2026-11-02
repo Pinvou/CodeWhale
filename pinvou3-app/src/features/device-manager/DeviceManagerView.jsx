@@ -768,6 +768,12 @@ const DeviceManagerView = ({ theme, t, bs, onOpenChat, captureChatOwnership, onO
     if (confirmGateTimerRef.current) clearTimeout(confirmGateTimerRef.current);
   }, []);
 
+  // Doctor round state must be declared BEFORE confirmRemove (round-36 review
+  // P3): the mutex guard inside reads `doctorBusy`, but the useState used to
+  // sit below this callback — the deps array could not reference it (TDZ), so
+  // the in-callback half of the guard kept reading a stale closure value and
+  // the documented defense silently degraded to the disabled-button check.
+  const [doctorBusy, setDoctorBusy] = useState(null);
   // Guarded removal through the backend command. Ollama rows that were listed
   // straight from the local service (not yet in the registry) have no usable
   // id: register them quietly first, then remove with the returned record id
@@ -925,10 +931,9 @@ const DeviceManagerView = ({ theme, t, bs, onOpenChat, captureChatOwnership, onO
       // second saveModel / removeExternalModel.
       setBusyKey((current) => (current === `remove:${rowIdentity(row)}` ? null : current));
     }
-  }, [armedRemoveId, bs, busyKey, copy, deleteWeights, showToast, t]);
+  }, [armedRemoveId, bs, busyKey, copy, deleteWeights, doctorBusy, showToast, t]);
 
   // ── AI doctor actions ────────────────────────────────────────────
-  const [doctorBusy, setDoctorBusy] = useState(null);
   const [question, setQuestion] = useState('');
   const runDoctor = useCallback(async (kind, questionText = null, onDone = null) => {
     const dev = bridge?.device;

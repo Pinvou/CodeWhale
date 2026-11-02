@@ -693,9 +693,13 @@ static REGISTRY_PUBLISH_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 /// 的并发登记都能读到尚无该身份的旧集合、各自通过查重后以不同随机 id 先后
 /// 落盘——no-replace 只保护文件 id，不保护业务身份；读取端对存量重复只告警
 /// 不吞，两行随后共享同一 armed/busy 身份键，一次 arm 可同时展开两行确认
-/// 面板，查重的存在理由被并发路径绕过。单实例插件约束下进程内互斥即可覆盖
-/// 渲染层与 AI 通道的重试/重挂载并发；跨进程不存在本注册表的写入方（CLI 的
-/// models 子命令走 model_store，不经本注册表）。
+/// 面板，查重的存在理由被并发路径绕过。应用内的写入只有本函数这一条路（单
+/// 实例插件约束下进程内互斥即可覆盖渲染层与 AI 通道的重试/重挂载并发；CLI
+/// 的 models 子命令走 model_store，不经本注册表）。应用外确实存在写者：
+/// device-doctor 技能教示的 `mkdir -p` + `cat >` shell 直写不经过本锁，也
+/// 不走登记校验——那属于注册表自我声明的「手写记录」模型（读取端告警收敛、
+/// 容量截断、移除端 fail-closed 重校验兜底），不是本锁的保护对象（36 轮
+/// 评审 P2 更正：原注释声称「跨进程不存在写入方」，与技能教示矛盾）。
 fn publish_registry_entry(
     dir: &Path,
     name: &str,
@@ -708,7 +712,7 @@ fn publish_registry_entry(
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
     #[cfg(test)]
-    section_test_pause();
+    section_test_pause(&dir.to_string_lossy());
     std::fs::create_dir_all(dir).map_err(|error| format!("注册表目录创建失败：{error}"))?;
     // 注册表记录含 base_url/weights_path，目录只留 owner 权限（对齐
     // model_store 的私密纪律；unix 专属实现收在 platform 适配层）。
@@ -751,14 +755,17 @@ fn publish_registry_entry(
 }
 
 /// 测试专用暂停点（仅测试构建；见 [`publish_registry_entry`]）：受控交错回归
-/// 先把闸门置位，第一个进入发布临界区的线程在此暂停并通知“已到达”，直到
+/// 先按**目标目录**置闸，匹配该目录的发布线程在此暂停并通知“已到达”，直到
 /// 测试放行。用它在锁内强制出一个确定性窗口：第二个同身份请求必须被挡在
 /// [`REGISTRY_PUBLISH_LOCK`] 上，放行后凭锁内重读拒绝——删除该暂停点或把
-/// 查重挪出锁，回归即红。
+/// 查重挪出锁，回归即红。闸门按目录匹配是关键：闸是进程级的，同测试二进制
+/// 里 `platform/linux.rs` 的登记 e2e 用例与竞态用例并行跑，若首到者无条件
+/// 暂停，e2e 线程会偷走竞态用例布下的闸（wait 提前返回、try_lock 断言空转、
+/// 放行后 A/B 争锁时序不定），竞态回归退化为 flake（第 36 轮评审 P2）。
 #[cfg(test)]
-fn section_test_pause() {
+fn section_test_pause(key: &str) {
     let mut state = SECTION_TEST_PAUSE.lock().expect("section pause lock");
-    if !state.armed {
+    if !state.armed || state.armed_key.as_deref() != Some(key) {
         return;
     }
     state.armed = false;
@@ -774,6 +781,7 @@ fn section_test_pause() {
 #[cfg(test)]
 struct SectionPauseState {
     armed: bool,
+    armed_key: Option<String>,
     arrived: bool,
     release: bool,
 }
@@ -782,6 +790,7 @@ struct SectionPauseState {
 static SECTION_TEST_PAUSE: std::sync::Mutex<SectionPauseState> =
     std::sync::Mutex::new(SectionPauseState {
         armed: false,
+        armed_key: None,
         arrived: false,
         release: false,
     });
@@ -894,6 +903,13 @@ fn persist_new_record(
 // ---------------------------------------------------------------- 移除
 
 /// 移除外部模型（设计 §4 守卫链，顺序执行，任何一条不过返回人话 Err）。
+///
+/// 与登记发布锁的关系（36 轮评审备案的取舍）：移除刻意不取
+/// [`REGISTRY_PUBLISH_LOCK`]——它只在锁内 `read_registry` 的快照上做守卫判定，
+/// 随后按文件 id 删。登记读到旧快照（含本条）后、移除落盘前完成，登记会以新
+/// id 复活同一业务身份（反之登记在先则被拒绝）；这是两个合法用户意图的
+/// last-writer-wins，读取端对存量重复只告警，不构成破坏路径，故不为此加锁
+/// 拓宽临界区。
 pub async fn remove_external_model(
     id: String,
     delete_weights: bool,
@@ -3266,12 +3282,15 @@ mod tests {
     // 三十五轮评审 P2 受控交错回归：登记发布临界区（容量/查重/落盘）必须被
     // REGISTRY_PUBLISH_LOCK 串行化。闸门把 A 强制停在锁内，证明 B 的同身份
     // 请求拿不到锁、放行后凭**锁内重读**拒绝——把查重挪出锁或删掉锁，本测试
-    // 必红。两个用例共享全局闸门/互斥，用测试级互斥串行化，避免彼此踩闸门。
+    // 必红。两个用例共享全局闸门/互斥，用测试级互斥串行化，避免彼此踩闸门；
+    // 闸门按目标目录匹配（见 section_test_pause），同二进制里其他登记用例
+    // 偷不走闸（36 轮评审 P2）。
     static PUBLISH_RACE_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
-    fn arm_publish_section_pause() {
+    fn arm_publish_section_pause(key: &str) {
         let mut state = SECTION_TEST_PAUSE.lock().expect("pause lock");
         state.armed = true;
+        state.armed_key = Some(key.to_string());
         state.arrived = false;
         state.release = false;
     }
@@ -3295,7 +3314,7 @@ mod tests {
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         let dir = TempDir::new("registry-publish-race");
-        arm_publish_section_pause();
+        arm_publish_section_pause(&dir.path().to_string_lossy());
         let dir_a = dir.path().to_path_buf();
         let a = std::thread::spawn(move || {
             publish_registry_entry(
@@ -3348,7 +3367,7 @@ mod tests {
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         let dir = TempDir::new("registry-publish-parallel");
-        arm_publish_section_pause();
+        arm_publish_section_pause(&dir.path().to_string_lossy());
         let dir_a = dir.path().to_path_buf();
         let a = std::thread::spawn(move || {
             publish_registry_entry(

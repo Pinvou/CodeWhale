@@ -835,6 +835,21 @@ pub fn set_storage_settings(
     // 保护留痕）被一次普通保存整体洗掉。
     let mut settings =
         config::try_load_settings().map_err(|e| format!("读取当前配置失败，未做任何修改：{e}"))?;
+    // 先校验全部输入、再落任何副作用（36 轮评审 P3）：models_dir 臂的
+    // create_dir_all 是有副作用的，此前排在 import_scan_dirs 校验之后——一次
+    // 「合法新权重目录 + 相对扫描目录」的组合保存会先建出权重目录再整体报错，
+    // 配置没写、盘上多出一个空目录。
+    if let Some(dirs) = &import_scan_dirs {
+        // 与 models_dir 同一把绝对路径尺子：相对扫描目录的解析随调用方工作
+        // 目录漂移，设备侧移除守卫拿它做权重根前缀匹配时必然失配——"这个
+        // 目录里的权重属于商店"的保护会悄悄变 no-op（第七轮评审 P3）。设置
+        // 入口直接拒绝，读取侧的 trim/滤空口径保持不变。
+        for d in dirs.iter().map(|d| d.trim()).filter(|d| !d.is_empty()) {
+            if !std::path::Path::new(d).is_absolute() {
+                return Err(format!("导入扫描目录要填绝对路径，收到的是「{d}」"));
+            }
+        }
+    }
     if let Some(dir) = models_dir {
         let dir = dir.trim().to_string();
         if dir.is_empty() {
@@ -866,15 +881,6 @@ pub fn set_storage_settings(
         settings.models_dir = dir;
     }
     if let Some(dirs) = import_scan_dirs {
-        // 与 models_dir 同一把绝对路径尺子：相对扫描目录的解析随调用方工作
-        // 目录漂移，设备侧移除守卫拿它做权重根前缀匹配时必然失配——"这个
-        // 目录里的权重属于商店"的保护会悄悄变 no-op（第七轮评审 P3）。设置
-        // 入口直接拒绝，读取侧的 trim/滤空口径保持不变。
-        for d in dirs.iter().map(|d| d.trim()).filter(|d| !d.is_empty()) {
-            if !std::path::Path::new(d).is_absolute() {
-                return Err(format!("导入扫描目录要填绝对路径，收到的是「{d}」"));
-            }
-        }
         // 滤掉空白项：界面上多敲一次回车就会留一行空的，而空字符串进了搜索
         // 根列表只会白占一行。
         settings.import_scan_dirs = dirs
@@ -1066,6 +1072,21 @@ mod tests {
         )
         .expect_err("relative import_scan_dir must be rejected");
         assert!(error.contains("绝对路径"), "unexpected error: {error}");
+        // 校验先于一切副作用（36 轮评审 P3）：组合保存「合法新权重目录 + 相对
+        // 扫描目录」整体报错时，权重目录不得被建出来——配置没写，盘上也不该
+        // 多出空目录。校验若排在 mkdir 之后，此断言必红。
+        let fresh_weights = ctx.path().join("weights-untouched");
+        assert!(!fresh_weights.exists(), "fixture dir must not pre-exist");
+        let error = set_storage_settings(
+            Some(fresh_weights.to_string_lossy().to_string()),
+            Some(vec!["relative/dir".to_string()]),
+        )
+        .expect_err("combined save must still be rejected");
+        assert!(error.contains("绝对路径"), "unexpected error: {error}");
+        assert!(
+            !fresh_weights.exists(),
+            "failed save must not create the weights directory"
+        );
         // 合法路径照常保存，空白项照常滤掉。
         let ok = ctx.path().join("scan-ok").to_string_lossy().to_string();
         let settings = set_storage_settings(None, Some(vec![format!("  {ok}  "), String::new()]))

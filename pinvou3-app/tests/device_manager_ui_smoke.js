@@ -677,16 +677,31 @@ async function clickTestId(page, testId) {
     const row = document.querySelector('[data-testid="device-manager-external-row"]');
     row?.querySelector('[data-testid="device-manager-link"]')?.click();
   });
-  await page.waitForFunction(() => {
-    const toast = document.querySelector('[data-testid="model-store-toast"]');
-    return !!toast && toast.innerText.includes('接入失败');
-  }, { timeout: 8000 });
-  await page.waitForFunction(() => {
-    const link = document.querySelector('[data-testid="device-manager-external-row"] [data-testid="device-manager-link"]');
-    return !!link && !link.disabled;
-  }, { timeout: 8000 });
+  // 两个等待的达成结果记进场景（36 轮评审 P3）：此前的 rec(..., true) 把两个
+  // waitForFunction 的成败排除在 tally 之外——超时走 FATAL 仍会红，但失败只留
+  // 一句 FATAL、没有场景名诊断。折进 rec 后失败按场景计数、诊断可读。
+  let hasSaveFailToast = false;
+  let hasBusySlotReleased = false;
+  try {
+    await page.waitForFunction(() => {
+      const toast = document.querySelector('[data-testid="model-store-toast"]');
+      return !!toast && toast.innerText.includes('接入失败');
+    }, { timeout: 8000 });
+    hasSaveFailToast = true;
+  } catch { hasSaveFailToast = false; }
+  try {
+    await page.waitForFunction(() => {
+      const link = document.querySelector('[data-testid="device-manager-external-row"] [data-testid="device-manager-link"]');
+      return !!link && !link.disabled;
+    }, { timeout: 8000 });
+    hasBusySlotReleased = true;
+  } catch { hasBusySlotReleased = false; }
   await page.evaluate(() => { window.__DEVICE_MGR_TEST__.failSaveModel = false; });
-  rec('⑤-c 接入失败出 toast 且 busy 槽释放（重试交给 ⑤-b 的下一次点击）', true, 'save_model fail cycle');
+  rec(
+    '⑤-c 接入失败出 toast 且 busy 槽释放（重试交给 ⑤-b 的下一次点击）',
+    hasSaveFailToast && hasBusySlotReleased,
+    `toast=${hasSaveFailToast} busyReleased=${hasBusySlotReleased}`,
+  );
 
   // ⑤-b 接入品悟 happy path（页面的主动作，此前零覆盖）：未登记 Ollama 行用
   // 回环回退地址 save_model，随后把新模型设为新建会话默认（set_active_model）。

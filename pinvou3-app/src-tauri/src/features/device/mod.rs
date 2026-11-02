@@ -796,13 +796,19 @@ fn nvidia_compute_processes() -> Option<Vec<GpuProcInfo>> {
     )
 }
 
+/// 计算进程列表上限（36 轮评审 P3）：异常 GPU 状态下 nvidia-smi 可以吐出成百
+/// 行，doctor 上下文白名单对这个列表原本不设上限——注入体积无界。截断方向保
+/// 最小 pid：列表按 pid 升序，结果稳定可复现。
+const MAX_COMPUTE_PROCESS_ENTRIES: usize = 32;
+
 /// 纯函数折叠：nvidia-smi 输出 → 计算进程列表。输入 None（命令失败）原样传
-/// None；Some(文本) 逐行解析、坏行丢弃、按 pid 排序。测试直打 None/空/正常
-/// 三态，钉住"查询失败 ≠ 无进程"的契约。
+/// None；Some(文本) 逐行解析、坏行丢弃、按 pid 排序、超上限截断。测试直打
+/// None/空/正常/超限四态，钉住"查询失败 ≠ 无进程"的契约。
 fn fold_compute_apps_output(out: Option<&str>) -> Option<Vec<GpuProcInfo>> {
     let out = out?;
     let mut list: Vec<GpuProcInfo> = out.lines().filter_map(parse_compute_app_line).collect();
     list.sort_by(|a, b| a.pid.cmp(&b.pid));
+    list.truncate(MAX_COMPUTE_PROCESS_ENTRIES);
     Some(list)
 }
 
@@ -1634,6 +1640,23 @@ mod tests {
         .expect("some output must parse");
         let pids: Vec<u32> = procs.iter().map(|proc| proc.pid).collect();
         assert_eq!(pids, vec![9, 1234]);
+    }
+
+    #[test]
+    fn fold_compute_apps_output_truncates_at_the_cap() {
+        // 超限截断（36 轮评审 P3）：异常 GPU 状态下 nvidia-smi 可吐成百行，
+        // doctor 上下文的进程列表不得无界。按 pid 升序保最小 pid，结果稳定。
+        let mut lines = String::new();
+        for pid in 0..80u32 {
+            lines.push_str(&format!("{pid}, /usr/bin/proc-{pid}, 64\n"));
+        }
+        let procs = fold_compute_apps_output(Some(&lines)).expect("some output must parse");
+        assert_eq!(procs.len(), MAX_COMPUTE_PROCESS_ENTRIES);
+        let pids: Vec<u32> = procs.iter().map(|proc| proc.pid).collect();
+        assert_eq!(
+            pids,
+            (0..MAX_COMPUTE_PROCESS_ENTRIES as u32).collect::<Vec<_>>()
+        );
     }
 
     #[test]

@@ -4374,9 +4374,17 @@
         notify();
       }
     } catch (e) {
-      state.monitorError = e && e.message ? e.message : String(e || "monitor poll failed");
-      console.warn("monitor poll failed", e);
-      notify();
+      const message = e && e.message ? e.message : String(e || "monitor poll failed");
+      // Same-message guard: the monitor channel polls at 1 Hz, so re-writing
+      // state + notify on every failed tick re-renders the whole App tree each
+      // second while the failure persists (console.warn spams likewise). Mirror
+      // the device channel's discipline: identical consecutive failures stay
+      // silent; only the first failure or a changed message notifies.
+      if (state.monitorError !== message) {
+        state.monitorError = message;
+        console.warn("monitor poll failed", e);
+        notify();
+      }
     } finally {
       monitorPollInFlight.value = false;
     }
