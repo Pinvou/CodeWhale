@@ -88,21 +88,59 @@ func validateUnusedExpiryDispatchTx(ctx context.Context, tx pgx.Tx, usage UsageR
 			return err
 		}
 	}
+	// A terminal MODEL observation must not invalidate an already released
+	// expiry confirmation. The caller still checks the original exact expiry
+	// identity; observations never authorize a fresh release or dispatch.
+	terminal := usage.ExecutionStatus == "CANCELLED_BEFORE_DISPATCH" && usage.CancelStatus == "LOCAL_CONFIRMED" && usage.SettlementStatus == "RELEASED"
+	var converged []byte
+	if terminal {
+		converged, err = json.Marshal(emergencyConvergedSnapshot(usage.ID, usage.ExecutionStatus, usage.CancelStatus, usage.SettlementStatus, usage.HoldID, usage.ActualMicrocredits, []byte(usage.UsageSnapshot)))
+		if err != nil {
+			return err
+		}
+	}
 	var external bool
-	err = tx.QueryRow(ctx, `SELECT
+	err = tx.QueryRow(ctx, `WITH terminal_requests AS (
+ SELECT evidence.id,evidence.emergency_cancellation_id,evidence.snapshot,evidence.created_at
+ FROM model_emergency_cancellation_evidence evidence
+ JOIN model_emergency_cancellations target ON target.id=evidence.emergency_cancellation_id
+ JOIN model_emergency_cancellation_policies policy ON policy.id=target.policy_id
+ JOIN usage_requests original ON original.id=target.usage_request_id AND original.model_id=policy.model_id
+ WHERE $4 AND target.usage_request_id=$1 AND evidence.evidence_type='REQUESTED'
+ AND EXISTS(SELECT 1 FROM usage_cancellation_evidence expiry WHERE expiry.usage_request_id=$1 AND expiry.evidence_type='CANCEL_REQUESTED' AND expiry.adapter_version='hold-expiry-v1')
+ AND evidence.snapshot->>'capability' IN ('UNSUPPORTED','EXPLICIT_CANCEL','STREAM_ABORT_CONFIRMED_CANCEL')
+ AND evidence.snapshot=jsonb_build_object('origin','MODEL_EMERGENCY','capability',evidence.snapshot->>'capability','pre_dispatch',false,'already_terminal',true,'provider_success_inferred',false)
+), terminal_attempts AS (
+ SELECT evidence.* FROM model_emergency_cancellation_evidence evidence
+ JOIN terminal_requests request ON request.emergency_cancellation_id=evidence.emergency_cancellation_id
+ WHERE evidence.evidence_type='ATTEMPTED'
+ AND evidence.snapshot=jsonb_build_object('capability',request.snapshot->>'capability','local_transport_aborted',false,'provider_cancel_result','ALREADY_TERMINAL','provider_success_inferred',false,'hold_released',false)
+), terminal_observations AS (
+ SELECT 'REQUESTED' AS evidence_type,snapshot,created_at FROM terminal_requests
+ UNION ALL SELECT evidence_type,snapshot,created_at FROM terminal_attempts
+ UNION ALL SELECT evidence.evidence_type,evidence.snapshot,evidence.created_at
+ FROM model_emergency_cancellation_evidence evidence
+ JOIN terminal_attempts attempt ON attempt.emergency_cancellation_id=evidence.emergency_cancellation_id
+ WHERE evidence.evidence_type='CONVERGED' AND evidence.snapshot=$5::jsonb
+)
+SELECT
  EXISTS(SELECT 1 FROM usage_attempts WHERE usage_request_id=$1)
  OR EXISTS(SELECT 1 FROM usage_stream_events WHERE usage_request_id=$1)
  OR EXISTS(SELECT 1 FROM usage_replay_results WHERE usage_request_id=$1)
  OR EXISTS(SELECT 1 FROM usage_replay_retention_cases WHERE usage_request_id=$1)
  OR EXISTS(SELECT 1 FROM usage_delivery_confirmations WHERE usage_request_id=$1)
- OR EXISTS(SELECT 1 FROM usage_convergence_evidence WHERE usage_request_id=$1 AND NOT (
+ OR EXISTS(SELECT 1 FROM usage_convergence_evidence convergence WHERE usage_request_id=$1 AND NOT (
+  EXISTS(SELECT 1 FROM terminal_observations observation WHERE convergence.evidence_type='CANCELLATION' AND convergence.decision='RECORDED' AND convergence.provider_id IS NULL AND convergence.adapter_version IS NULL AND convergence.upstream_reference_digest IS NULL AND convergence.observed_at=observation.created_at AND convergence.sanitized_snapshot=observation.snapshot AND ((observation.evidence_type='REQUESTED' AND convergence.source_type='GATEWAY' AND convergence.evidence_key='model-emergency-requested') OR (observation.evidence_type='CONVERGED' AND convergence.source_type='RECONCILER' AND convergence.evidence_key='model-emergency-converged')))
+  OR
   (evidence_type='UNCERTAINTY' AND source_type='GATEWAY' AND decision='REVIEW' AND evidence_key='cancel_hold_recovery_unconfirmed' AND provider_id IS NULL AND adapter_version IS NULL AND upstream_reference_digest IS NULL AND sanitized_snapshot->>'reason' IS NOT DISTINCT FROM 'cancel_hold_recovery_unconfirmed')
   OR ($2 AND evidence_type='CANCELLATION' AND source_type='GATEWAY' AND decision='RECORDED' AND evidence_key='requested:UNSUPPORTED' AND provider_id IS NULL AND adapter_version IS NULL AND upstream_reference_digest IS NULL AND sanitized_snapshot=jsonb_build_object('cancel_status','UNSUPPORTED','capability','UNSUPPORTED','pre_dispatch',false,'provider_success_inferred',false))))
- OR EXISTS(SELECT 1 FROM usage_cancellation_evidence WHERE usage_request_id=$1 AND NOT (provider_id IS NULL AND upstream_reference_digest IS NULL AND (
+ OR EXISTS(SELECT 1 FROM usage_cancellation_evidence cancellation WHERE usage_request_id=$1 AND NOT (provider_id IS NULL AND upstream_reference_digest IS NULL AND (
+  EXISTS(SELECT 1 FROM terminal_observations observation WHERE cancellation.occurred_at=observation.created_at AND cancellation.sanitized_evidence=observation.snapshot AND ((observation.evidence_type='REQUESTED' AND cancellation.evidence_type='MODEL_EMERGENCY_REQUESTED' AND btrim(cancellation.adapter_version)<>'') OR (observation.evidence_type='ATTEMPTED' AND cancellation.evidence_type='MODEL_EMERGENCY_ATTEMPTED' AND cancellation.adapter_version='gateway')))
+  OR
   (evidence_type='CANCEL_REQUESTED' AND adapter_version='hold-expiry-v1')
   OR (evidence_type='LOCAL_CONFIRMED' AND adapter_version='local' AND sanitized_evidence=jsonb_build_object('provider_called',false,'hold_released',true))
   OR ($2 AND evidence_type='UNSUPPORTED' AND adapter_version=$3 AND sanitized_evidence=jsonb_build_object('capability','UNSUPPORTED','pre_dispatch',false)))))
- OR EXISTS(SELECT 1 FROM usage_requests WHERE id=$1 AND (trusted_usage_snapshot IS NOT NULL OR trusted_usage_source IS NOT NULL OR provider_cancel_sent_at IS NOT NULL OR provider_cancel_confirmed_at IS NOT NULL))`, usage.ID, localStop, checked.envelope.AdapterVersion).Scan(&external)
+ OR EXISTS(SELECT 1 FROM usage_requests WHERE id=$1 AND (trusted_usage_snapshot IS NOT NULL OR trusted_usage_source IS NOT NULL OR provider_cancel_sent_at IS NOT NULL OR provider_cancel_confirmed_at IS NOT NULL))`, usage.ID, localStop, checked.envelope.AdapterVersion, terminal, converged).Scan(&external)
 	if err != nil {
 		return err
 	}

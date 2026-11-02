@@ -29,6 +29,8 @@ REQUIRED = {
     "TestHoldAcknowledgementSurvivesDispatchPersistenceFailurePostgres",
     "TestCancellationReceivedReadRechecksReservationPostgres",
     "TestCancellationFirstUserPreservesConfirmedReceiptPostgres",
+    "TestModelTerminalObservationPreservesExpiryProofPostgres",
+    "TestModelTerminalObservationRejectsUntrustedEvidencePostgres",
     "TestPersonalZeroBudgetCancellationAndExpiryPostgres",
     "TestUsageWaiverCoordinatorRecoveryPostgres",
     "TestF05AdditionalReservationProjectionPublicPostgres",
@@ -97,6 +99,8 @@ TOKEN_PACKAGE = "github.com/Pinvou/pinvou3/account-platform/internal/token"
 TOKEN_CHILD_REQUIRED = {
     "TestCancellationReceivedReadRechecksReservationPostgres",
     "TestCancellationFirstUserPreservesConfirmedReceiptPostgres",
+    "TestModelTerminalObservationPreservesExpiryProofPostgres",
+    "TestModelTerminalObservationRejectsUntrustedEvidencePostgres",
     "TestLifecycleForceCancelApprovalPostgres",
     "TestLocalModelCancellationHandshakeHTTP",
     "TestRemoteModelCancellationOwnerLoopTransport",
@@ -216,6 +220,34 @@ BILLING_LEAF_REQUIRED = {
 }
 BILLING_CHILD_REQUIRED = RETAINED_REQUIRED - BILLING_LEAF_REQUIRED
 EXACT_REQUIRED_CHILDREN = {
+    "TestModelTerminalObservationPreservesExpiryProofPostgres": {
+        "hold-attempted",
+        "hold-converged",
+        "hold-requested",
+        "intent-attempted",
+        "intent-converged",
+        "intent-requested",
+        "user-intent-attempted",
+        "user-intent-converged",
+        "user-intent-requested",
+    },
+    "TestModelTerminalObservationRejectsUntrustedEvidencePostgres": {
+        "attempt-aborts",
+        "attempt-provider-success",
+        "attempt-releases",
+        "converged-extra-field",
+        "convergence-wrong-source",
+        "extra-field",
+        "missing-field",
+        "not-terminal",
+        "orphan-request",
+        "pre-dispatch",
+        "provider-reference",
+        "provider-success",
+        "unknown-capability",
+        "upstream-reference",
+        "wrong-adapter",
+    },
     "TestCancellationFirstUserPreservesConfirmedReceiptPostgres": {
         "model-before-attempt", "expiry-proof-ack-replay",
     },
