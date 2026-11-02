@@ -19514,6 +19514,200 @@ async fn edit_last_turn_preserves_current_mode() {
     run.await.expect("engine task");
 }
 
+#[allow(clippy::await_holding_lock)]
+async fn wait_for_turn_complete(handle: &EngineHandle) {
+    let mut rx = handle.rx_event.write().await;
+    loop {
+        let event = tokio::time::timeout(model_turn_event_timeout(), rx.recv())
+            .await
+            .expect("timed out waiting for the turn to complete")
+            .expect("engine event channel closed before turn completion");
+        if matches!(event, Event::TurnComplete { .. }) {
+            return;
+        }
+    }
+}
+
+#[tokio::test]
+async fn edit_last_turn_restores_the_standing_posture_baseline() {
+    use wiremock::matchers::{method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    // The truncated turn's <turn_meta> block carried the authority
+    // transition into append-only history; the standing baseline it
+    // installed must not survive the truncation, or the replacement turn
+    // silently drops the transition the retained history still implies.
+    let _lock = lock_test_env();
+    let tmp = tempdir().expect("tempdir");
+    let server = MockServer::start().await;
+    let done_sse = concat!(
+        "data: {\"id\":\"chatcmpl-edit-baseline\",\"choices\":[{\"index\":0,",
+        "\"delta\":{\"content\":\"Turn answer.\"},\"finish_reason\":null}]}\n\n",
+        "data: {\"id\":\"chatcmpl-edit-baseline\",\"choices\":[{\"index\":0,",
+        "\"delta\":{},\"finish_reason\":\"stop\"}]}\n\n",
+        "data: [DONE]\n\n",
+    );
+    Mock::given(method("POST"))
+        .and(path("/v1/chat/completions"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .insert_header("content-type", "text/event-stream")
+                .set_body_string(done_sse),
+        )
+        .expect(3)
+        .mount(&server)
+        .await;
+
+    let api_config = Config {
+        api_key: Some("test-key".to_string()),
+        base_url: Some(server.uri()),
+        ..Config::default()
+    };
+    let config = EngineConfig {
+        workspace: tmp.path().to_path_buf(),
+        model: "deepseek-v4-pro".to_string(),
+        snapshots_enabled: false,
+        subagents_enabled: false,
+        ..Default::default()
+    };
+    let (engine, handle) = Engine::new(config, &api_config);
+    let run = tokio::spawn(engine.run());
+
+    let seeded_messages = vec![
+        Message {
+            role: Role::User,
+            content: vec![ContentBlock::Text {
+                text: "seed the conversation".to_string(),
+                cache_control: None,
+            }],
+        },
+        Message {
+            role: Role::Assistant,
+            content: vec![ContentBlock::Text {
+                text: "seeded response".to_string(),
+                cache_control: None,
+            }],
+        },
+    ];
+    handle
+        .send(Op::SyncSession {
+            session_id: Some("edit-baseline-test".to_string()),
+            messages: seeded_messages,
+            system_prompt: None,
+            system_prompt_override: false,
+            model: "deepseek-v4-pro".to_string(),
+            workspace: tmp.path().to_path_buf(),
+            workspace_roots: Vec::new(),
+            mode: AppMode::Agent,
+        })
+        .await
+        .expect("sync session");
+
+    // Turn 1 runs in the installed Agent posture: the first reported turn
+    // renders no transition and establishes the standing baseline.
+    handle
+        .send(Op::SendMessage {
+            content: "turn in the original posture".to_string(),
+            mode: AppMode::Agent,
+            route: resolved_route_for_test(&api_config, "deepseek-v4-pro"),
+            compaction: Box::new(CompactionConfig::default()),
+            goal_objective: None,
+            goal_token_budget: None,
+            goal_status: crate::tools::goal::GoalStatus::Active,
+            reasoning_effort: None,
+            reasoning_effort_auto: false,
+            auto_model: false,
+            allow_shell: false,
+            trust_mode: false,
+            auto_approve: false,
+            approval_mode: crate::tui::approval::ApprovalMode::Suggest,
+            translation_enabled: false,
+            allowed_tools: None,
+            dynamic_tools: Vec::new(),
+            hook_executor: None,
+            verbosity: None,
+            provenance: UserInputProvenance::ExternalUser,
+            turn_tool_security: None,
+            submission_id: None,
+        })
+        .await
+        .expect("send the original-posture turn");
+    wait_for_turn_complete(&handle).await;
+
+    // Switch the host posture (approval chip SUGGEST -> AUTO, same tool
+    // surface), then run a real turn whose block reports the transition
+    // into history.
+    handle
+        .send(Op::ChangeMode {
+            mode: AppMode::Agent,
+            allow_shell: false,
+            trust_mode: false,
+            auto_approve: false,
+            approval_mode: crate::tui::approval::ApprovalMode::Auto,
+            configured_sandbox_mode: None,
+            ask_on_guardrail: None,
+        })
+        .await
+        .expect("send the approval posture change");
+    handle
+        .send(Op::SendMessage {
+            content: "turn that reports the transition".to_string(),
+            mode: AppMode::Agent,
+            route: resolved_route_for_test(&api_config, "deepseek-v4-pro"),
+            compaction: Box::new(CompactionConfig::default()),
+            goal_objective: None,
+            goal_token_budget: None,
+            goal_status: crate::tools::goal::GoalStatus::Active,
+            reasoning_effort: None,
+            reasoning_effort_auto: false,
+            auto_model: false,
+            allow_shell: false,
+            trust_mode: false,
+            auto_approve: false,
+            approval_mode: crate::tui::approval::ApprovalMode::Auto,
+            translation_enabled: false,
+            allowed_tools: None,
+            dynamic_tools: Vec::new(),
+            hook_executor: None,
+            verbosity: None,
+            provenance: UserInputProvenance::ExternalUser,
+            turn_tool_security: None,
+            submission_id: None,
+        })
+        .await
+        .expect("send the transition-reporting turn");
+    wait_for_turn_complete(&handle).await;
+
+    handle
+        .send(Op::EditLastTurn {
+            new_message: "revise this turn".to_string(),
+            submission_id: Some("sub-edit-baseline".to_string()),
+        })
+        .await
+        .expect("send edit");
+    wait_for_turn_complete(&handle).await;
+
+    handle.send(Op::Shutdown).await.expect("shutdown engine");
+    run.await.expect("engine task");
+
+    let requests = server.received_requests().await.expect("recorded requests");
+    assert_eq!(requests.len(), 3, "two real turns plus the replacement");
+    let wire_body = |request: &[u8]| String::from_utf8_lossy(request).to_string();
+    assert!(
+        !wire_body(&requests[0].body).contains("Authority transition (host)"),
+        "the first reported turn must render no transition"
+    );
+    assert!(
+        wire_body(&requests[1].body).contains("Authority transition (host)"),
+        "the turn after the host flip must report the transition"
+    );
+    assert!(
+        wire_body(&requests[2].body).contains("Authority transition (host)"),
+        "the replacement turn must re-report the transition: the truncated \
+         block left history but its baseline must not survive"
+    );
+}
+
 #[tokio::test]
 #[allow(clippy::await_holding_lock)]
 async fn edit_last_turn_cuts_at_user_prompt_before_tool_results() {

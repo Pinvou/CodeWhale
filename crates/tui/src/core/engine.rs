@@ -1292,6 +1292,15 @@ pub struct Engine {
     /// did not change emits nothing, ordinary blocks stay byte-stable, and
     /// steers or mid-turn runtime notices never re-render the same line.
     pending_authority_transition: Option<crate::core::authority::AuthorityTransition>,
+    /// The standing posture baseline each persisted user turn replaced, one
+    /// snapshot per non-isolated turn build in order. `EditLastTurn` pops the
+    /// truncated turn's entry and restores the baseline it replaced, so the
+    /// replacement turn re-reports the authority transition its predecessor
+    /// carried instead of silently swallowing it (the truncated block is gone
+    /// from retained history, but the baseline it installed would otherwise
+    /// survive). Each entry is the pre-advance value, which makes narrowed
+    /// turns — whose builds never advance the baseline — round-trip exactly.
+    standing_posture_baseline_history: Vec<Option<crate::core::authority::TurnMetaPosture>>,
     /// The git snapshot line last emitted in a `<turn_meta>` block this
     /// session (#5187, k3-gap F3). The snapshot re-collects branch/dirty
     /// state every turn, so without change-detection the block's bytes drift
@@ -1955,6 +1964,7 @@ impl Engine {
         // resets with it: the next authoritative turn re-establishes it.
         self.last_turn_meta_authority = None;
         self.last_authoritative_turn_meta_posture = None;
+        self.standing_posture_baseline_history.clear();
         let plugin_workspace_changed = self.plugin_registry.workspace() != workspace.as_path();
         let previous_session_id = self.session.id.clone();
         let next_session_id = if let Some(session_id) = session_id {
@@ -2449,6 +2459,7 @@ impl Engine {
             last_turn_meta_authority: None,
             last_authoritative_turn_meta_posture: None,
             pending_authority_transition: None,
+            standing_posture_baseline_history: Vec::new(),
             last_turn_meta_git_snapshot: StdMutex::new(None),
             token_estimate_cache: TokenEstimateCache::new(),
             shared_paused: shared_paused.clone(),
@@ -4011,6 +4022,20 @@ impl Engine {
                         };
                         self.session.messages.truncate_to(idx);
                         self.session.bump_messages_revision();
+                        // The truncated turn's `<turn_meta>` block — including
+                        // any authority transition it reported — is gone from
+                        // retained history, but the standing baseline it
+                        // installed would survive and make the replacement
+                        // turn omit that transition. Restore the baseline the
+                        // truncated turn replaced (None included, e.g. when
+                        // the session's first turn is edited), so the
+                        // replacement re-reports exactly what retained
+                        // history still implies.
+                        if let Some(prior_standing_posture) =
+                            self.standing_posture_baseline_history.pop()
+                        {
+                            self.last_authoritative_turn_meta_posture = prior_standing_posture;
+                        }
                         // Now dispatch the new message as a normal send,
                         // reusing the engine's stored mode/model config.
                         let mode = self.current_mode;
@@ -6132,6 +6157,7 @@ impl Engine {
         if !self.api_config.runtime_chat_isolated {
             let current_posture = self.turn_meta_posture_for(&input_policy);
             let narrowed_turn = input_policy.narrowing.is_some();
+            let prior_standing_posture = self.last_authoritative_turn_meta_posture;
             self.pending_authority_transition = if narrowed_turn {
                 None
             } else {
@@ -6144,6 +6170,12 @@ impl Engine {
             if !narrowed_turn {
                 self.last_authoritative_turn_meta_posture = Some(current_posture);
             }
+            // Snapshot what this persisted turn replaced so an EditLastTurn
+            // truncation can restore the baseline its block carried away.
+            // One entry per non-isolated build keeps the stack aligned 1:1
+            // with the user turns `edit_last_turn_target` can drop.
+            self.standing_posture_baseline_history
+                .push(prior_standing_posture);
         }
         let user_msg = self.user_text_message_from_snapshot(
             content,
