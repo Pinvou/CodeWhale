@@ -3,6 +3,7 @@ package account
 import (
 	"context"
 	"crypto/sha256"
+	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -17,10 +18,11 @@ import (
 )
 
 const (
-	accountClosureConfirmation  = "CLOSE_MY_ACCOUNT"
-	accountClosurePolicyVersion = 1
-	accountClosureRecentAuth    = 5 * time.Minute
-	accountClosureSLA           = 30 * time.Minute
+	accountClosureConfirmation    = "CLOSE_MY_ACCOUNT"
+	accountClosurePolicyVersion   = 1
+	accountClosureRecentAuth      = 5 * time.Minute
+	accountClosureSLA             = 30 * time.Minute
+	accountClosureCursorMaxLength = 512
 )
 
 type AccountClosureRequest struct {
@@ -46,8 +48,42 @@ type AccountClosureRequest struct {
 }
 
 type AccountClosureRepairFilter struct {
-	Status string
-	Stage  string
+	Status          string
+	Stage           string
+	CursorUpdatedAt *time.Time
+	CursorID        *uuid.UUID
+}
+
+type AccountClosureRepairPage struct {
+	Items      []AccountClosureRequest `json:"items"`
+	NextCursor *string                 `json:"next_cursor"`
+}
+
+func encodeAccountClosureCursor(item AccountClosureRequest) (string, error) {
+	body, err := json.Marshal(map[string]any{"updated_at": item.UpdatedAt.UTC(), "closure_request_id": item.ID})
+	if err != nil {
+		return "", err
+	}
+	return base64.RawURLEncoding.EncodeToString(body), nil
+}
+
+func decodeAccountClosureCursor(raw string) (*time.Time, *uuid.UUID, error) {
+	if len(raw) > accountClosureCursorMaxLength {
+		return nil, nil, ErrInvalidAccountClosureRequest
+	}
+	decoded, err := base64.RawURLEncoding.DecodeString(strings.TrimSpace(raw))
+	if err != nil {
+		return nil, nil, ErrInvalidAccountClosureRequest
+	}
+	var value struct {
+		UpdatedAt time.Time `json:"updated_at"`
+		ID        uuid.UUID `json:"closure_request_id"`
+	}
+	if err := json.Unmarshal(decoded, &value); err != nil || value.UpdatedAt.IsZero() || value.ID == uuid.Nil {
+		return nil, nil, ErrInvalidAccountClosureRequest
+	}
+	updatedAt := value.UpdatedAt.UTC()
+	return &updatedAt, &value.ID, nil
 }
 
 type AccountClosurePublic struct {
@@ -384,22 +420,34 @@ func (r *PostgresRepository) ScheduleAccountClosureError(ctx context.Context, it
 	return nil
 }
 
-func (r *PostgresRepository) ListAccountClosureRepairs(ctx context.Context, filter AccountClosureRepairFilter) ([]AccountClosureRequest, error) {
+func (r *PostgresRepository) ListAccountClosureRepairs(ctx context.Context, filter AccountClosureRepairFilter) (AccountClosureRepairPage, error) {
 	filter.Status, filter.Stage = strings.ToUpper(strings.TrimSpace(filter.Status)), strings.ToUpper(strings.TrimSpace(filter.Stage))
-	rows, err := r.pool.Query(ctx, accountClosureSelect+` WHERE ($1='' OR status=$1) AND ($2='' OR stage=$2) AND status<>'COMPLETED' ORDER BY updated_at DESC,id LIMIT 100`, filter.Status, filter.Stage)
+	rows, err := r.pool.Query(ctx, accountClosureSelect+` WHERE ($1='' OR status=$1) AND ($2='' OR stage=$2) AND status<>'COMPLETED' AND ($3::timestamptz IS NULL OR updated_at<$3 OR (updated_at=$3 AND id>$4::uuid)) ORDER BY updated_at DESC,id LIMIT 101`, filter.Status, filter.Stage, filter.CursorUpdatedAt, filter.CursorID)
 	if err != nil {
-		return nil, err
+		return AccountClosureRepairPage{}, err
 	}
 	defer rows.Close()
 	items := make([]AccountClosureRequest, 0)
 	for rows.Next() {
 		item, err := scanAccountClosure(rows)
 		if err != nil {
-			return nil, err
+			return AccountClosureRepairPage{}, err
 		}
 		items = append(items, item)
 	}
-	return items, rows.Err()
+	if err := rows.Err(); err != nil {
+		return AccountClosureRepairPage{}, err
+	}
+	page := AccountClosureRepairPage{Items: items}
+	if len(items) > 100 {
+		cursor, err := encodeAccountClosureCursor(items[99])
+		if err != nil {
+			return AccountClosureRepairPage{}, err
+		}
+		page.Items = items[:100]
+		page.NextCursor = &cursor
+	}
+	return page, nil
 }
 
 func (r *PostgresRepository) RetryAccountClosure(ctx context.Context, principal identity.Principal, closureID uuid.UUID, key, reason string) (AccountClosureRequest, error) {

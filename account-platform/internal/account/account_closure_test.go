@@ -202,6 +202,21 @@ func TestUserVisibleClosureRemovesInternalIdentifiers(t *testing.T) {
 	}
 }
 
+func TestAccountClosureCursorIsOpaqueAndRoundTrips(t *testing.T) {
+	item := AccountClosureRequest{ID: uuid.New(), UpdatedAt: time.Date(2026, 10, 31, 5, 4, 3, 123456000, time.FixedZone("CST", 8*60*60))}
+	cursor, err := encodeAccountClosureCursor(item)
+	if err != nil || cursor == "" {
+		t.Fatalf("encode cursor: %v %q", err, cursor)
+	}
+	updatedAt, id, err := decodeAccountClosureCursor(cursor)
+	if err != nil || id == nil || *id != item.ID || updatedAt == nil || !updatedAt.Equal(item.UpdatedAt.UTC()) {
+		t.Fatalf("round trip mismatch: updated_at=%v id=%v err=%v", updatedAt, id, err)
+	}
+	if _, _, err := decodeAccountClosureCursor("not-a-cursor"); !errors.Is(err, ErrInvalidAccountClosureRequest) {
+		t.Fatalf("invalid cursor error=%v", err)
+	}
+}
+
 func TestAccountClosureSelfServiceRequiresKnownFinancialAction(t *testing.T) {
 	for _, test := range []struct{ code, action string }{
 		{"PERSONAL_BALANCE_NONZERO", "CLEAR_PERSONAL_BALANCE"},

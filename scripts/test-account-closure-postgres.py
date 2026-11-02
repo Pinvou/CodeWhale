@@ -57,6 +57,7 @@ CLOSED_GRANT_GROUPS = [
     }),
 ]
 CONTRACTS = [
+    ("account-pagination", "./internal/account", {"TestAccountClosurePaginationPostgres"}, {}),
     ("migration-cli", "./cmd/migrate",
      {"TestAccountClosureLegacyRollbackCLI", "TestPhaseMigrationCLIPinsBeforeDown"}, {}),
     ("closure-combination", "./internal/billingschema", {"TestClosurePrivatePublicCombination"},

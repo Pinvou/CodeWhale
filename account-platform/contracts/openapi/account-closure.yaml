@@ -77,9 +77,30 @@ paths:
     get:
       operationId: listAccountClosureRepairQueue
       summary: List redacted non-completed account-closure stages and blockers
-      description: Requires platform.account-closures.read. Domain resource identifiers remain restricted to administrators.
+      description: >-
+        Requires platform.account-closures.read. Domain resource identifiers remain
+        restricted to administrators. Pagination reads a live queue, not a frozen
+        snapshot. Keep status and stage filters unchanged when following a cursor.
+        Records whose activity time or matching state changes may move out of a
+        continuation page; refresh from the first page to discover those changes.
+        Reading a page does not retry or advance a closure request.
+      parameters:
+        - name: status
+          in: query
+          required: false
+          schema: { type: string }
+        - name: stage
+          in: query
+          required: false
+          schema: { type: string }
+        - name: cursor
+          in: query
+          required: false
+          description: Opaque continuation cursor returned by the previous page; omit for the first page.
+          schema: { type: string, minLength: 1, maxLength: 512 }
       responses:
         "200": { $ref: "#/components/responses/Collection" }
+        "400": { $ref: "#/components/responses/Error" }
         "401": { $ref: "#/components/responses/Error" }
         "403": { $ref: "#/components/responses/Error" }
         "503": { $ref: "#/components/responses/Error" }
@@ -165,10 +186,13 @@ components:
             properties:
               items:
                 type: array
-                maxItems: 200
+                maxItems: 100
                 items:
                   type: object
                   additionalProperties: true
+              next_cursor:
+                type: string
+                nullable: true
     Error:
       description: JSON API error
       content:
