@@ -2,9 +2,17 @@
 useDefault = true
 
 # Allowlists are scoped as tightly as possible: a specific file (or test-tree
-# path) AND a specific synthetic value pattern on the matched line. Each group
-# documents why the flagged content is not a real credential. The CI scan runs
-# with --log-opts starting at the same legacy cutoff as
+# path) AND a specific synthetic value. Every group matches against the
+# *extracted secret* (regexTarget = "secret") with a fully anchored regex
+# (^value$), so an allowlist can only ever exempt the exact registered value —
+# a longer value that merely shares a registered prefix is reported as usual
+# (2026-11-02 review closure: line-target prefixes could swallow an
+# unregistered extended value found on the same line). The only exception is
+# the private-key marker group below, whose findings extract a multi-line
+# blob; it anchors the secret's start instead and is limited to the
+# private-key rule, whose secret by definition begins with the BEGIN marker.
+# Each group documents why the flagged content is not a real credential. The
+# CI scan runs with --log-opts starting at the same legacy cutoff as
 # scripts/validate-commit-msg.py (LEGACY_HISTORY_CUTOFF), so pre-baseline
 # history is out of scope here by design.
 #
@@ -21,185 +29,190 @@ useDefault = true
 description = "Pinned upstream connector documentation uses synthetic IDs and tokens"
 targetRules = ["generic-api-key"]
 condition = "AND"
-regexTarget = "line"
+regexTarget = "secret"
 paths = [
   '''^pinvou3-app/src-tauri/resources/common/bundle/dingtalk-skills/dws/references/products/doc(?:/doc-info)?\.md$''',
   '''^pinvou3-app/src-tauri/resources/common/bundle/(?:lark-skills|skills)/lark-im/references/lark-im-reactions\.md$''',
   '''^pinvou3-app/src-tauri/resources/common/bundle/(?:lark-skills|skills)/lark-base/references/lark-base-app-block-data-config\.md$''',
 ]
 # 值级收紧:仅豁免文档中逐一登记的合成示例值(dentryKey/docKey/page_token/
-# base_token 的固定字面量)。这些文档路径上出现任何其他 key/token 形态的命中
-# (例如真实凭据样式)都不会被本组吞掉,必须照常报出。
+# base_token 的固定字面量),并对提取出的 secret 全值锚定——登记值后追加
+# 任何字符都会得到一个不同的、不被豁免的新值,照常报出;这些文档路径上
+# 出现任何其他 key/token 形态的命中(例如真实凭据样式)同样不会被吞掉。
 regexes = [
-  '''dentryKey=(?:wo1g3x54FzVEJ5yE|rBGBr2r1HmwanAGW)''',
-  '''docKey=Pd6l2Z7V8ZWydl7M''',
-  '''"page_token":\s*"YhljsPiGfUgnVAg9urvRFd-BvSqRLxxxx"''',
-  '''base_token['\"]?\s*[:=]\s*['\"]?A2f5boKjfazMzesI9zKbmugTc4T''',
+  '''^(?:wo1g3x54FzVEJ5yE|rBGBr2r1HmwanAGW)$''',
+  '''^Pd6l2Z7V8ZWydl7M$''',
+  '''^YhljsPiGfUgnVAg9urvRFd-BvSqRLxxxx$''',
+  '''^A2f5boKjfazMzesI9zKbmugTc4T$''',
 ]
 
 [[allowlists]]
 description = "Credential persistence tests use explicit non-production test keys"
 targetRules = ["generic-api-key"]
 condition = "AND"
-regexTarget = "line"
+regexTarget = "secret"
 paths = [
   '''^pinvou3-app/src-tauri/src/(?:platform/)?prefs(?:/.+)?\.rs$''',
   '''^pinvou3-app/src-tauri/src/app/commands/tests\.rs$''',
 ]
-regexes = ['''sk-(?:test|legacy|custom|once)-secret-1234567890''']
+regexes = ['''^sk-(?:test|legacy|custom|once)-secret-1234567890$''']
 
 [[allowlists]]
 description = "CLI provider-slot tests use an explicit non-production test key"
 targetRules = ["generic-api-key"]
 condition = "AND"
-regexTarget = "line"
+regexTarget = "secret"
 paths = ['''^pinvou-cli/crates/cli/tests/code_contract\.rs$''']
-regexes = ['''sk-test-slots-1234567890''']
+regexes = ['''^sk-test-slots-1234567890$''']
 
 [[allowlists]]
 description = "CLI models keyring rotation tests use explicit non-production test keys"
 targetRules = ["generic-api-key"]
 condition = "AND"
-regexTarget = "line"
+regexTarget = "secret"
 paths = ['''^pinvou-cli/crates/cli/tests/models_contract\.rs$''']
-regexes = ['''sk-rotate-(?:first|second)-1234567890''']
+regexes = ['''^sk-rotate-(?:first|second)-1234567890$''']
 
 [[allowlists]]
 description = "File-ingest tests and detectors intentionally contain private-key header literals"
 targetRules = ["private-key"]
 condition = "AND"
-regexTarget = "line"
+# 例外组:private-key 规则提取的 secret 是从 BEGIN 标记开始的多行 blob,
+# 无法做全值结束锚定;这里锚定 secret 起点。该组只作用于 private-key 规则,
+# 而该规则命中的 secret 按定义就以 BEGIN 标记开头,不存在「登记值前缀
+# 扩展出新值」的放大面;文件范围仍限定为下列三处检测器/测试表。
+regexTarget = "secret"
 paths = [
   '''^pinvou3-app/src-tauri/src/features/files/file_ingest\.rs$''',
   '''^pinvou3-app/src-tauri/src/features/files/text_decode\.rs$''',
   '''^pinvou-knowledge/src/lib\.rs$''',
 ]
-regexes = ['''b?"-----BEGIN (?:RSA |DSA |EC |OPENSSH |ENCRYPTED |PGP )?PRIVATE KEY(?: BLOCK)?-----''']
+regexes = ['''^-----BEGIN (?:RSA |DSA |EC |OPENSSH |ENCRYPTED |PGP )?PRIVATE KEY(?: BLOCK)?-----''']
 
 [[allowlists]]
 description = "Browser wrapper tests and browser-feature test constants use sequential hex tokens"
 targetRules = ["generic-api-key"]
 condition = "AND"
-regexTarget = "line"
+regexTarget = "secret"
 paths = [
   '''^pinvou3-app/src-tauri/src/features/browser/.*\.rs$''',
   '''^pinvou3-app/tests/browser_wrapper_.*\.test\.mjs$''',
 ]
-regexes = ['''(?:0123456789abcdef|fedcba9876543210)''']
+regexes = ['''^(?:0123456789abcdef|fedcba9876543210)$''']
 
 [[allowlists]]
 description = "Redaction unit-test corpus uses deliberately realistic but synthetic credential shapes"
 targetRules = ["generic-api-key", "jwt"]
 condition = "AND"
-regexTarget = "line"
+regexTarget = "secret"
 paths = ['''^pinvou3-app/tests/chat_turn_error_isolation\.test\.mjs$''']
 regexes = [
-  '''rt_live_abc123def456ghi789|pat_abcdefgh1234|GOCSPX-abcdef1234567890''',
-  '''AIzaSyB3dEfGhIjKlMnOpQrStUvWxYz012345|1234-5678-abcd-ef01''',
-  '''1a2b3c4d5e6f7g8h9i0j|abc123def456ghijkl|1//0abcDEFghiJKL''',
-  '''dXNlcjpwYXNz|sk-abcdef1234567890|sk-proj-secret123XYZ|sk-abcdefghijklmnopqrstuvwxyz''',
-  '''eyJhbGciOiJIUzI1NiJ9\.eyJzdWIiOiIxMjM0NTY3ODkwIn0\.SflKxwRJSMeKKF2QT4fwpMeJf36POk6yJV_adQssw5c''',
+  '''^(?:rt_live_abc123def456ghi789|pat_abcdefgh1234|GOCSPX-abcdef1234567890)$''',
+  '''^(?:AIzaSyB3dEfGhIjKlMnOpQrStUvWxYz012345|1234-5678-abcd-ef01)$''',
+  '''^(?:1a2b3c4d5e6f7g8h9i0j|abc123def456ghijkl|1//0abcDEFghiJKL)$''',
+  '''^(?:dXNlcjpwYXNz|sk-abcdef1234567890|sk-proj-secret123XYZ|sk-abcdefghijklmnopqrstuvwxyz)$''',
+  '''^eyJhbGciOiJIUzI1NiJ9\.eyJzdWIiOiIxMjM0NTY3ODkwIn0\.SflKxwRJSMeKKF2QT4fwpMeJf36POk6yJV_adQssw5c$''',
 ]
 
 [[allowlists]]
 description = "localStorage key name, not a credential"
 targetRules = ["generic-api-key"]
 condition = "AND"
-regexTarget = "line"
+regexTarget = "secret"
 paths = [
   '''^pinvou3-app/src/features/chat/ChatView\.jsx$''',
   '''^pinvou3-app/src/features/codex/CodexAcpView\.jsx$''',
 ]
-regexes = ['''pinvou_conversation_ui_v2''']
+regexes = ['''^pinvou_conversation_ui_v2$''']
 
 [[allowlists]]
 description = "Code comment documenting the redaction regex with an example value"
 targetRules = ["generic-api-key"]
 condition = "AND"
-regexTarget = "line"
+regexTarget = "secret"
 paths = ['''^pinvou3-app/src/shared/model-service-errors\.js$''']
-regexes = ['''abc123def456''']
+regexes = ['''^abc123def456$''']
 
 [[allowlists]]
 description = "Marketplace reconcile fixtures carry env-var NAME placeholders, not credentials"
 targetRules = ["generic-api-key"]
 condition = "AND"
-regexTarget = "line"
+regexTarget = "secret"
 paths = ['''^pinvou3-app/src-tauri/src/features/marketplace/mod\.rs$''']
-regexes = ['''PINVOU3_MCP_SECRET_PATSNAP_KEY''']
+regexes = ['''^PINVOU3_MCP_SECRET_PATSNAP_KEY$''']
 
 [[allowlists]]
 description = "Credential redaction unit-test corpus uses deliberately synthetic Slack token shapes"
 targetRules = ["slack-legacy-workspace-token"]
 condition = "AND"
-regexTarget = "line"
+regexTarget = "secret"
 paths = ['''^pinvou3-app/src-tauri/src/platform/credential_store\.rs$''']
-regexes = ['''xox[ar]-shortexample''']
+regexes = ['''^xox[ar]-shortexample$''']
 
 # ---- 以下为 closed 仓新增的本地豁免组 ----
 # 全部为合成测试字面量、变量名误报或二进制随机字节误报,逐一按
-# 「具体文件 + 行内具体值/形态」AND 收紧;不允许目录级、IP 或生产主机豁免。
+# 「具体文件 + 提取 secret 全值锚定」AND 收紧;不允许目录级、IP 或生产主机豁免。
 # 每组说明命中为何不是真实凭据;出现真实凭据样式的命中时不得进此表,须先剔除。
 
 [[allowlists]]
 description = "权限预览测试使用合成 curl 示例头演示脱敏行为"
 targetRules = ["curl-auth-header"]
 condition = "AND"
-regexTarget = "line"
+regexTarget = "secret"
 paths = ['''^pinvou3-app/src-tauri/src/features/remote_control/controller/permission\.rs$''']
-regexes = ["Bearer sk-live-123['\"]"]
+regexes = ["^sk-live-123$"]
 
 [[allowlists]]
 description = "遥测测试夹具用合成 token 构造错误字符串,非真实凭据"
 targetRules = ["generic-api-key"]
 condition = "AND"
-regexTarget = "line"
+regexTarget = "secret"
 paths = ['''^pinvou3-app/src-tauri/src/features/behavior_telemetry/remote_control\.rs$''']
-regexes = ["sk-live-123456789['\"]"]
+regexes = ["^sk-live-123456789$"]
 
 [[allowlists]]
 description = "relay 存活探针中 signingPrivateKeyB64 是解构参数名与缺省回退表达式,不是凭据(仅豁免参数名形态,不给赋值行开洞)"
 targetRules = ["generic-api-key"]
 condition = "AND"
-regexTarget = "line"
+regexTarget = "secret"
 paths = ['''^remote-control-relay/controller-liveness\.js$''']
-regexes = ['''signingPrivateKeyB64\s*\?\?|\{\s*signingKeyId,\s*signingPrivateKeyB64''']
+regexes = ['''^signingPrivateKeyB64$''']
 
 [[allowlists]]
 description = "relay 诊断脱敏测试使用 AWS 文档通用的示例 AKIA 字面量"
 targetRules = ["aws-access-token"]
 condition = "AND"
-regexTarget = "line"
+regexTarget = "secret"
 paths = ['''^remote-control-relay/test/diagnostic-redaction\.test\.js$''']
-regexes = ['''AKIAABCDEFGHIJKLMNOP''']
+regexes = ['''^AKIAABCDEFGHIJKLMNOP$''']
 
 [[allowlists]]
 description = "relay 测试使用显式命名的合成 HMAC/摘要密钥材料(明示 at-least-32-bytes 测试语料)"
 targetRules = ["generic-api-key"]
 condition = "AND"
-regexTarget = "line"
+regexTarget = "secret"
 paths = [
   '''^remote-control-relay/test/relay\.test\.js$''',
   '''^remote-control-relay/test/pairing-code\.test\.js$''',
   '''^remote-control-relay/test/deploy-controller-preflight\.test\.js$''',
 ]
 regexes = [
-  '''PINVOU_REMOTE_ENROLLMENT_HMAC_KEY[=:] ?"?(?:enrollment-(?:regression|key)-material|enrollment-secret)-at-least-32-bytes"?''',
-  '''digest-key-(?:one|two)-material-at-least-32-bytes''',
+  '''^(?:enrollment-(?:regression|key)-material|enrollment-secret)-at-least-32-bytes$''',
+  '''^digest-key-(?:one|two)-material-at-least-32-bytes$''',
 ]
 
 [[allowlists]]
-description = "协议一致性测试夹具为确定性测试向量(私钥取 0101…/0202… 等序列),字段限定为 resume_secret_hex/shared_secret_hex/derived_key_hex 的 64 位 hex 派生输出"
+description = "协议一致性测试夹具为确定性测试向量:该单一 JSON 夹具内提取为 64 位 hex 的 secret 均为确定性派生输出(full-value 锚定;新增 64-hex 值须逐一登记到夹具并复核本组)"
 targetRules = ["generic-api-key"]
 condition = "AND"
-regexTarget = "line"
+regexTarget = "secret"
 paths = ['''^remote-control-relay/test/fixtures/controller-protocol-v1\.json$''']
-regexes = ['''"(?:resume_secret_hex|shared_secret_hex|derived_key_hex)": ?"[0-9a-f]{64}"''']
+regexes = ['''^[0-9a-f]{64}$''']
 
 [[allowlists]]
 description = "二进制图标内的随机字节偶合 40-hex 令牌形状(该文件已不在主线,仅历史扫描误报)"
 targetRules = ["sourcegraph-access-token"]
 condition = "AND"
-regexTarget = "line"
+regexTarget = "secret"
 paths = ['''^pinvou3-app/src/assets/tool-icons/tencent-docs\.ico$''']
-regexes = ['''567106ac886d5be6d50384e91869075eac91988e''']
+regexes = ['''^567106ac886d5be6d50384e91869075eac91988e$''']

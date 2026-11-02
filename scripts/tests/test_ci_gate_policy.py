@@ -5543,6 +5543,86 @@ class SecurityGateEnforcementPinsTests(unittest.TestCase):
             "属于扫描面安全变化，必须显式更新本断言并逐组说明理由",
         )
 
+    def test_gitleaks_allowlists_anchor_extracted_secret_full_value(self):
+        """豁免条件必须绑定提取 secret 的完整受审值（2026-11-02 评审收口）。
+
+        旧形态 regexTarget="line" 下，登记字面量只命中整行的已知前缀：登记
+        docKey 样例后追加不同字符，generic-api-key 提取的是完整未登记新值，
+        但允许正则仍在整行命中已知前缀，使路径 AND 正则条件一起成立，把
+        未登记的新值（含同行真实凭据样式的其它命中）一并吞掉。新形态要求
+        每组 regexTarget="secret" 且正则全值锚定（^…$），唯一例外是
+        private-key 标记组——其 secret 是从 BEGIN 标记开始的多行 blob，
+        只做起点锚定，且仅作用于 secret 按定义以 BEGIN 开头的 private-key
+        规则。gitleaks 二进制不进本套件，这里以合成 ASCII 谓词复现提取值
+        的匹配判定（提取=赋值右侧完整 token）。
+        """
+        import re as _re
+
+        config = tomllib.loads((ROOT / ".gitleaks.toml").read_text(encoding="utf-8"))
+        allowlists = config.get("allowlists", [])
+        self.assertTrue(allowlists, ".gitleaks.toml 必须定义 allowlist 组")
+
+        for group in allowlists:
+            label = group.get("description", "<无描述>")
+            self.assertEqual(
+                group.get("regexTarget"),
+                "secret",
+                f"豁免组「{label}」必须 regexTarget=\"secret\"；line 目标会把"
+                "登记前缀扩展出的未登记新值一并豁免",
+            )
+            self.assertEqual(
+                group.get("condition"),
+                "AND",
+                f"豁免组「{label}」必须保持路径 AND 正则的 AND 条件",
+            )
+            start_anchored_only = group.get("targetRules") == ["private-key"]
+            for pattern in group.get("regexes", []):
+                self.assertTrue(
+                    pattern.startswith("^"),
+                    f"豁免组「{label}」的正则必须从 secret 起点锚定: {pattern}",
+                )
+                if not start_anchored_only:
+                    self.assertTrue(
+                        pattern.endswith("$"),
+                        f"豁免组「{label}」的正则必须锚定到 secret 完整值结束"
+                        f"（private-key 标记组除外）: {pattern}",
+                    )
+
+        # 组 1（文档登记值）的合成谓词正负控：登记值豁免、前缀扩展/其它值/
+        # 48 字符长扩展不豁免。
+        doc_group = next(
+            (g for g in allowlists if "Pinned upstream connector" in g["description"]),
+            None,
+        )
+        self.assertIsNotNone(doc_group, "组 1（文档登记值）不得删除或改名")
+        compiled = [_re.compile(p) for p in doc_group["regexes"]]
+
+        def any_match(secret: str) -> bool:
+            return any(c.match(secret) is not None for c in compiled)
+
+        registered = [
+            "wo1g3x54FzVEJ5yE",
+            "rBGBr2r1HmwanAGW",
+            "Pd6l2Z7V8ZWydl7M",
+            "YhljsPiGfUgnVAg9urvRFd-BvSqRLxxxx",
+            "A2f5boKjfazMzesI9zKbmugTc4T",
+        ]
+        for value in registered:
+            self.assertTrue(
+                any_match(value),
+                f"登记值 {value!r} 必须仍被组 1 豁免（豁免面不得回退）",
+            )
+        for attack in (
+            "Pd6l2Z7V8ZWydl7MAPPENDED",
+            "A2f5boKjfazMzesI9zKbmugTc4T" + "x" * 24,
+            "Qq7Xk2Vb9NwRt5Yz",
+            "sk-live-realkeyshape0",
+        ):
+            self.assertFalse(
+                any_match(attack),
+                f"非登记值 {attack!r} 不得被组 1 豁免（前缀扩展/其它值必须照常报出）",
+            )
+
 
 class ReleaseDiskAndImagePolicyTests(unittest.TestCase):
     """Guard for release-build disk preparation and the single-image convention (backported from private-repo #1112 on 2026-09-16)."""
