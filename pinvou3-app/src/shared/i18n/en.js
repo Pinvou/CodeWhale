@@ -2649,6 +2649,7 @@ Object.assign(dictEn.uiSettingsDetail, {
   platformModelsLoading:'Loading platform models…',
   platformModelsSignIn:'Sign in to your Pinvou account to choose a platform model.',
   platformModelsUnavailable:'Platform models are temporarily unavailable. Try again later.',
+  platformModelsRetry:'Retry loading',
   appliesToNewSessions:'New conversations',
   modelDeprecated:'Retiring soon',
   modelUnavailable:'Unavailable',
