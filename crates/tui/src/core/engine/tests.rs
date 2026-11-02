@@ -31895,6 +31895,11 @@ async fn forkguard_turn_start_detector_records_the_posture_and_renders_the_trans
         approval: crate::tui::approval::ApprovalMode::Bypass,
         ask_on_guardrail: false,
     });
+    engine.last_authoritative_turn_meta_posture = Some(TurnMetaPosture {
+        mode: AppMode::Agent,
+        approval: crate::tui::approval::ApprovalMode::Bypass,
+        ask_on_guardrail: false,
+    });
     engine.session.ask_on_guardrail = true;
 
     async fn send_turn(
@@ -32007,6 +32012,384 @@ async fn forkguard_turn_start_detector_records_the_posture_and_renders_the_trans
 }
 
 #[tokio::test]
+#[allow(clippy::await_holding_lock)]
+async fn forkguard_a_provenance_narrowed_turn_neither_emits_the_host_line_nor_pollutes_the_baseline()
+ {
+    // Pins the narrowing attribution: a provenance-narrowed turn runs a
+    // per-turn authority reduction that the narrowing receipt family already
+    // reports, so it must neither emit the "(host)" transition line
+    // (misattributing the reduction to a host flip) nor update the standing
+    // baseline (otherwise its unwind on the next authoritative turn would
+    // render a reverse "host" line no host ever caused). A genuine host flip
+    // in the same window still renders, measured from the pre-narrowing
+    // standing posture. Removing the suppression gate turns the first body
+    // red; updating the baseline on the narrowed turn turns the second body
+    // red; erasing the baseline turns the third body red.
+    use wiremock::matchers::{method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    let _lock = lock_test_env();
+    let workspace = tempdir().expect("tempdir");
+    let server = MockServer::start().await;
+    let plain_sse = concat!(
+        "data: {\"id\":\"chatcmpl-narrow\",\"choices\":[{\"index\":0,",
+        "\"delta\":{\"content\":\"ok\"},\"finish_reason\":null}]}\n\n",
+        "data: {\"id\":\"chatcmpl-narrow\",\"choices\":[{\"index\":0,",
+        "\"delta\":{},\"finish_reason\":\"stop\"}]}\n\n",
+        "data: [DONE]\n\n",
+    );
+    Mock::given(method("POST"))
+        .and(path("/v1/chat/completions"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .insert_header("content-type", "text/event-stream")
+                .set_body_string(plain_sse),
+        )
+        .expect(3)
+        .mount(&server)
+        .await;
+
+    let api_config = Config {
+        api_key: Some("test-key".to_string()),
+        base_url: Some(server.uri()),
+        ..Config::default()
+    };
+    let engine_config = EngineConfig {
+        model: crate::config::DEFAULT_TEXT_MODEL.to_string(),
+        workspace: workspace.path().to_path_buf(),
+        mcp_config_path: workspace.path().join("mcp.json"),
+        snapshots_enabled: false,
+        subagents_enabled: false,
+        ..EngineConfig::default()
+    };
+    let (mut engine, _handle) = Engine::new(engine_config, &api_config);
+
+    // The standing posture is Full Access; the previous block reported it.
+    let standing = TurnMetaPosture {
+        mode: AppMode::Agent,
+        approval: crate::tui::approval::ApprovalMode::Bypass,
+        ask_on_guardrail: false,
+    };
+    engine.last_turn_meta_authority = Some(standing);
+    engine.last_authoritative_turn_meta_posture = Some(standing);
+
+    async fn send_turn(
+        engine: &mut Engine,
+        api_config: &Config,
+        prompt: &str,
+        approval: crate::tui::approval::ApprovalMode,
+        auto_approve: bool,
+        provenance: UserInputProvenance,
+    ) -> SendMessageOutcome {
+        engine
+            .handle_send_message(
+                prompt.to_string(),
+                AppMode::Agent,
+                *resolved_route_for_test(api_config, crate::config::DEFAULT_TEXT_MODEL),
+                CompactionConfig::default(),
+                None,
+                None,
+                crate::tools::goal::GoalStatus::Active,
+                None,
+                false,
+                false,
+                true,
+                true,
+                auto_approve,
+                approval,
+                false,
+                None,
+                Vec::new(),
+                None,
+                None,
+                provenance,
+                None,
+            )
+            .await
+    }
+
+    async fn assert_completed(outcome: SendMessageOutcome, label: &str) {
+        assert!(
+            matches!(
+                outcome,
+                SendMessageOutcome::Finished {
+                    status: TurnOutcomeStatus::Completed,
+                    ..
+                }
+            ),
+            "{label} must complete without starting"
+        );
+    }
+
+    // Turn one: a provenance-narrowed turn under the Full Access standing
+    // posture. Its reduction is reported by the narrowing receipt family,
+    // never by the "(host)" line, and the standing baseline survives it.
+    let outcome = send_turn(
+        &mut engine,
+        &api_config,
+        "narrowed turn",
+        crate::tui::approval::ApprovalMode::Bypass,
+        true,
+        UserInputProvenance::ImportedTranscript,
+    )
+    .await;
+    assert_completed(outcome, "the narrowed turn").await;
+    assert!(
+        engine.pending_authority_transition.is_none(),
+        "a narrowed turn must leave no pending host transition"
+    );
+    assert_eq!(
+        engine.last_turn_meta_authority,
+        Some(TurnMetaPosture {
+            mode: AppMode::Agent,
+            approval: crate::tui::approval::ApprovalMode::Suggest,
+            ask_on_guardrail: false,
+        }),
+        "the narrowed turn records the posture its block reported"
+    );
+    assert_eq!(
+        engine.last_authoritative_turn_meta_posture,
+        Some(standing),
+        "the narrowed turn must not update the standing baseline"
+    );
+
+    // Turn two: authoritative turn under the unchanged standing posture —
+    // the narrowing unwound, and no host flip ever happened, so the block
+    // must stay free of the "(host)" line entirely.
+    let outcome = send_turn(
+        &mut engine,
+        &api_config,
+        "authoritative turn",
+        crate::tui::approval::ApprovalMode::Bypass,
+        true,
+        UserInputProvenance::ExternalUser,
+    )
+    .await;
+    assert_completed(outcome, "the unwind turn").await;
+    assert_eq!(
+        engine.last_authoritative_turn_meta_posture,
+        Some(standing),
+        "the authoritative turn re-establishes the same standing baseline"
+    );
+
+    // Turn three: a genuine host flip (Full Access -> Ask) must render,
+    // measured from the pre-narrowing standing posture — not from the
+    // narrowed posture the previous block happened to report.
+    let outcome = send_turn(
+        &mut engine,
+        &api_config,
+        "host flip turn",
+        crate::tui::approval::ApprovalMode::Suggest,
+        false,
+        UserInputProvenance::ExternalUser,
+    )
+    .await;
+    assert_completed(outcome, "the host flip turn").await;
+
+    let requests = server
+        .received_requests()
+        .await
+        .expect("wire mock records requests");
+    assert_eq!(
+        requests.len(),
+        3,
+        "each turn makes exactly one provider call"
+    );
+    let narrowed_body = String::from_utf8_lossy(&requests[0].body);
+    assert!(
+        !narrowed_body.contains("Authority transition (host)"),
+        "a provenance-narrowed turn must not emit the host transition line"
+    );
+    assert!(
+        narrowed_body.contains("Authority narrowing:"),
+        "the narrowing receipt family must report the reduction"
+    );
+    let unwind_body = String::from_utf8_lossy(&requests[1].body);
+    assert_eq!(
+        unwind_body.matches("Authority transition (host)").count(),
+        0,
+        "the narrowing unwind on an authoritative turn must not render a \
+         reverse host line"
+    );
+    let flip_body = String::from_utf8_lossy(&requests[2].body);
+    assert!(
+        flip_body.contains(
+            "Authority transition (host): agent (Full Access, guardrail prompts disarmed) -> agent (Ask, guardrail prompts disarmed); reason: host_authority_change",
+        ),
+        "a genuine host flip renders from the standing baseline, not the \
+         narrowed record: {flip_body}"
+    );
+}
+
+#[tokio::test]
+#[allow(clippy::await_holding_lock)]
+async fn forkguard_an_auto_review_turn_narrowed_by_provenance_still_records_its_narrowing() {
+    // Pins the Auto-Review narrowing receipt: Auto-Review is standing auto
+    // authority, so a provenance-narrowed turn that downgrades Auto ->
+    // Suggest must carry the structured narrowing event (a silent downgrade
+    // would leave the model no receipt for why prompts appeared) — and the
+    // reduced turn still emits no "(host)" line, with the standing baseline
+    // untouched so the next authoritative Auto turn stays byte-stable.
+    // Reverting the Auto arm of the narrowing predicate turns the first
+    // body red (the misattributed host line returns).
+    use wiremock::matchers::{method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    let _lock = lock_test_env();
+    let workspace = tempdir().expect("tempdir");
+    let server = MockServer::start().await;
+    let plain_sse = concat!(
+        "data: {\"id\":\"chatcmpl-autonarrow\",\"choices\":[{\"index\":0,",
+        "\"delta\":{\"content\":\"ok\"},\"finish_reason\":null}]}\n\n",
+        "data: {\"id\":\"chatcmpl-autonarrow\",\"choices\":[{\"index\":0,",
+        "\"delta\":{},\"finish_reason\":\"stop\"}]}\n\n",
+        "data: [DONE]\n\n",
+    );
+    Mock::given(method("POST"))
+        .and(path("/v1/chat/completions"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .insert_header("content-type", "text/event-stream")
+                .set_body_string(plain_sse),
+        )
+        .expect(2)
+        .mount(&server)
+        .await;
+
+    let api_config = Config {
+        api_key: Some("test-key".to_string()),
+        base_url: Some(server.uri()),
+        ..Config::default()
+    };
+    let engine_config = EngineConfig {
+        model: crate::config::DEFAULT_TEXT_MODEL.to_string(),
+        workspace: workspace.path().to_path_buf(),
+        mcp_config_path: workspace.path().join("mcp.json"),
+        snapshots_enabled: false,
+        subagents_enabled: false,
+        ..EngineConfig::default()
+    };
+    let (mut engine, _handle) = Engine::new(engine_config, &api_config);
+
+    let auto_standing = TurnMetaPosture {
+        mode: AppMode::Agent,
+        approval: crate::tui::approval::ApprovalMode::Auto,
+        ask_on_guardrail: false,
+    };
+    engine.last_turn_meta_authority = Some(auto_standing);
+    engine.last_authoritative_turn_meta_posture = Some(auto_standing);
+
+    async fn send_turn(
+        engine: &mut Engine,
+        api_config: &Config,
+        prompt: &str,
+        provenance: UserInputProvenance,
+    ) -> SendMessageOutcome {
+        engine
+            .handle_send_message(
+                prompt.to_string(),
+                AppMode::Agent,
+                *resolved_route_for_test(api_config, crate::config::DEFAULT_TEXT_MODEL),
+                CompactionConfig::default(),
+                None,
+                None,
+                crate::tools::goal::GoalStatus::Active,
+                None,
+                false,
+                false,
+                false,
+                false,
+                false,
+                crate::tui::approval::ApprovalMode::Auto,
+                false,
+                None,
+                Vec::new(),
+                None,
+                None,
+                provenance,
+                None,
+            )
+            .await
+    }
+
+    let outcome = send_turn(
+        &mut engine,
+        &api_config,
+        "narrowed auto turn",
+        UserInputProvenance::ImportedTranscript,
+    )
+    .await;
+    assert!(
+        matches!(
+            outcome,
+            SendMessageOutcome::Finished {
+                status: TurnOutcomeStatus::Completed,
+                ..
+            }
+        ),
+        "the narrowed Auto turn must complete without starting"
+    );
+    assert_eq!(
+        engine.last_turn_meta_authority,
+        Some(TurnMetaPosture {
+            mode: AppMode::Agent,
+            approval: crate::tui::approval::ApprovalMode::Suggest,
+            ask_on_guardrail: false,
+        }),
+        "the narrowed turn records the Suggest posture it reported"
+    );
+    assert_eq!(
+        engine.last_authoritative_turn_meta_posture,
+        Some(auto_standing),
+        "the narrowed turn must not update the standing Auto baseline"
+    );
+
+    let outcome = send_turn(
+        &mut engine,
+        &api_config,
+        "authoritative auto turn",
+        UserInputProvenance::ExternalUser,
+    )
+    .await;
+    assert!(
+        matches!(
+            outcome,
+            SendMessageOutcome::Finished {
+                status: TurnOutcomeStatus::Completed,
+                ..
+            }
+        ),
+        "the authoritative Auto turn must complete without starting"
+    );
+
+    let requests = server
+        .received_requests()
+        .await
+        .expect("wire mock records requests");
+    assert_eq!(
+        requests.len(),
+        2,
+        "each turn makes exactly one provider call"
+    );
+    let narrowed_body = String::from_utf8_lossy(&requests[0].body);
+    assert!(
+        !narrowed_body.contains("Authority transition (host)"),
+        "the Auto downgrade is provenance narrowing, not a host flip"
+    );
+    assert!(
+        narrowed_body.contains("Authority narrowing:"),
+        "the Auto -> Suggest downgrade must carry its narrowing receipt"
+    );
+    let auth_body = String::from_utf8_lossy(&requests[1].body);
+    assert_eq!(
+        auth_body.matches("Authority transition (host)").count(),
+        0,
+        "an authoritative Auto turn after the narrowed one must stay \
+         byte-stable: {auth_body}"
+    );
+}
+
+#[tokio::test]
 async fn forkguard_a_not_started_turn_neither_consumes_nor_records_the_transition() {
     // Pins the NotStarted ordering: the posture comparison sits after the
     // early returns, so a turn that fails before any block build must
@@ -32058,6 +32441,11 @@ async fn forkguard_a_not_started_turn_neither_consumes_nor_records_the_transitio
     // runs Full Access armed, so the arming flip alone must produce the
     // line — no matter that a turn failed in between.
     engine.last_turn_meta_authority = Some(TurnMetaPosture {
+        mode: AppMode::Agent,
+        approval: crate::tui::approval::ApprovalMode::Bypass,
+        ask_on_guardrail: false,
+    });
+    engine.last_authoritative_turn_meta_posture = Some(TurnMetaPosture {
         mode: AppMode::Agent,
         approval: crate::tui::approval::ApprovalMode::Bypass,
         ask_on_guardrail: false,
@@ -32206,6 +32594,11 @@ async fn forkguard_sync_session_clears_the_recorded_turn_meta_posture() {
         approval: crate::tui::approval::ApprovalMode::Bypass,
         ask_on_guardrail: true,
     });
+    engine.last_authoritative_turn_meta_posture = Some(TurnMetaPosture {
+        mode: AppMode::Agent,
+        approval: crate::tui::approval::ApprovalMode::Bypass,
+        ask_on_guardrail: true,
+    });
 
     engine
         .apply_synced_session(
@@ -32222,6 +32615,10 @@ async fn forkguard_sync_session_clears_the_recorded_turn_meta_posture() {
     assert_eq!(
         engine.last_turn_meta_authority, None,
         "the sync must clear the previous conversation's recorded posture"
+    );
+    assert_eq!(
+        engine.last_authoritative_turn_meta_posture, None,
+        "the sync must clear the standing baseline with it"
     );
 
     // A host disarm lands before the installed conversation's first turn,
@@ -32361,6 +32758,11 @@ async fn forkguard_an_isolated_turn_neither_consumes_nor_records_the_transition(
         approval: crate::tui::approval::ApprovalMode::Bypass,
         ask_on_guardrail: false,
     });
+    engine.last_authoritative_turn_meta_posture = Some(TurnMetaPosture {
+        mode: AppMode::Agent,
+        approval: crate::tui::approval::ApprovalMode::Bypass,
+        ask_on_guardrail: false,
+    });
     engine.session.ask_on_guardrail = true;
 
     async fn send_turn(
@@ -32414,6 +32816,15 @@ async fn forkguard_an_isolated_turn_neither_consumes_nor_records_the_transition(
             ask_on_guardrail: false,
         }),
         "an isolated turn must not record a posture no block will report"
+    );
+    assert_eq!(
+        engine.last_authoritative_turn_meta_posture,
+        Some(TurnMetaPosture {
+            mode: AppMode::Agent,
+            approval: crate::tui::approval::ApprovalMode::Bypass,
+            ask_on_guardrail: false,
+        }),
+        "an isolated turn must not touch the standing baseline either"
     );
     assert!(
         engine.pending_authority_transition.is_none(),

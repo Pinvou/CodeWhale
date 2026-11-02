@@ -349,8 +349,13 @@ pub(crate) fn effective_input_policy(
     if !provenance_can_inherit_standing_auto_authority(provenance) {
         let from_mode = mode;
         let from_approval = approval_mode;
-        let had_auto_authority =
-            trust_mode || auto_approve || matches!(approval_mode, ApprovalMode::Bypass);
+        // Auto-Review is standing auto authority too: the non-inheriting turn
+        // still loses it (Auto -> Suggest below), so it must carry the same
+        // structured event — a silent downgrade would leave the model with no
+        // receipt for why approval prompts appeared.
+        let had_auto_authority = trust_mode
+            || auto_approve
+            || matches!(approval_mode, ApprovalMode::Auto | ApprovalMode::Bypass);
         trust_mode = false;
         auto_approve = false;
         if matches!(approval_mode, ApprovalMode::Auto | ApprovalMode::Bypass) {

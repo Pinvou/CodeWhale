@@ -1274,6 +1274,14 @@ pub struct Engine {
     /// The posture the last `<turn_meta>` block reported (Pinvou tri-mode
     /// safety). Comparison unit for [`Self::pending_authority_transition`].
     last_turn_meta_authority: Option<crate::core::authority::TurnMetaPosture>,
+    /// The last posture an authoritative-provenance turn reported — the
+    /// standing baseline a host flip is measured against. A
+    /// provenance-narrowed turn runs a per-turn reduction that neither emits
+    /// the host transition nor updates this baseline (the narrowing receipt
+    /// family reports the reduction), so a narrowed turn between two
+    /// authoritative turns can never be misread as a host flip — nor its
+    /// unwind on the next authoritative turn.
+    last_authoritative_turn_meta_posture: Option<crate::core::authority::TurnMetaPosture>,
     /// Host-driven authority change computed when the turn's metadata block
     /// is built, against the posture the previous block reported. Consumed
     /// by that block only and cleared immediately, so a turn whose posture
@@ -1939,8 +1947,10 @@ impl Engine {
         // establishes a fresh baseline instead of rendering a transition
         // whose "from" side it never reported. Arming itself
         // (`session.ask_on_guardrail`) is host-owned and deliberately stays
-        // — the host did not disarm across this edge.
+        // — the host did not disarm across this edge. The standing baseline
+        // resets with it: the next authoritative turn re-establishes it.
         self.last_turn_meta_authority = None;
+        self.last_authoritative_turn_meta_posture = None;
         let plugin_workspace_changed = self.plugin_registry.workspace() != workspace.as_path();
         let previous_session_id = self.session.id.clone();
         let next_session_id = if let Some(session_id) = session_id {
@@ -2433,6 +2443,7 @@ impl Engine {
             turn_wall_clock: turn_budget::TurnWallClock::start(turn_wall_clock_budget),
             last_policy_narrowing: None,
             last_turn_meta_authority: None,
+            last_authoritative_turn_meta_posture: None,
             pending_authority_transition: None,
             last_turn_meta_git_snapshot: StdMutex::new(None),
             token_estimate_cache: TokenEstimateCache::new(),
@@ -6098,14 +6109,33 @@ impl Engine {
         // would be rendered nowhere: an isolated turn neither consumes nor
         // records, and the next block-building turn compares against the
         // last posture a block actually reported.
+        //
+        // A provenance-narrowed turn runs a per-turn authority reduction that
+        // the narrowing receipt family below already reports. It therefore
+        // neither emits the host transition (labeling the reduction a host
+        // flip would misattribute the cause) nor updates the standing
+        // baseline (otherwise its unwind on the next authoritative turn
+        // would render a reverse "host" line no host ever caused). Its
+        // reported posture still lands in `last_turn_meta_authority`, so the
+        // wire record stays faithful; only the host-flip measurement is
+        // scoped to authoritative turns. A genuine host flip that lands in
+        // the same window renders on the next authoritative turn, measured
+        // from the pre-narrowing standing posture.
         if !self.api_config.runtime_chat_isolated {
             let current_posture = self.turn_meta_posture_for(&input_policy);
-            self.pending_authority_transition =
+            let narrowed_turn = input_policy.narrowing.is_some();
+            self.pending_authority_transition = if narrowed_turn {
+                None
+            } else {
                 crate::core::authority::authority_transition_between(
-                    self.last_turn_meta_authority,
+                    self.last_authoritative_turn_meta_posture,
                     current_posture,
-                );
+                )
+            };
             self.last_turn_meta_authority = Some(current_posture);
+            if !narrowed_turn {
+                self.last_authoritative_turn_meta_posture = Some(current_posture);
+            }
         }
         let user_msg = self.user_text_message_from_snapshot(
             content,

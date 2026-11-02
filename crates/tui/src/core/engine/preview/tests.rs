@@ -1302,6 +1302,7 @@ async fn forkguard_preview_manifest_hashes_the_same_authority_transition_line_th
     // With the previous block having reported the armed posture, the preview
     // recomputes the same transition the live turn will render.
     engine.last_turn_meta_authority = Some(previous);
+    engine.last_authoritative_turn_meta_posture = Some(previous);
     let planned = plan(&config, &identity, false, prompt).await;
     let manifest = engine
         .build_request_manifest(inputs(false, Some(planned), prompt))
@@ -1317,6 +1318,7 @@ async fn forkguard_preview_manifest_hashes_the_same_authority_transition_line_th
     // output is byte-stable: two consecutive builds hash identically, and
     // neither carries the transition.
     engine.last_turn_meta_authority = None;
+    engine.last_authoritative_turn_meta_posture = None;
     let planned = plan(&config, &identity, false, prompt).await;
     let plain_first = engine
         .build_request_manifest(inputs(false, Some(planned), prompt))
@@ -1349,6 +1351,7 @@ async fn forkguard_preview_manifest_hashes_the_same_authority_transition_line_th
     // Production derives the same transition at turn start and sends the
     // exact bytes the armed preview hashed.
     engine.last_turn_meta_authority = Some(previous);
+    engine.last_authoritative_turn_meta_posture = Some(previous);
     let planned = plan(&config, &identity, false, prompt).await;
     let production_route = planned.route.clone();
     let compaction = planned.compaction.clone();
@@ -1437,6 +1440,11 @@ async fn forkguard_preview_transition_uses_the_planned_posture_not_the_stale_ses
     // live turn below) carries Full Access. Only a planned-posture source
     // renders the Suggest -> Full Access transition in the previewed body.
     engine.last_turn_meta_authority = Some(TurnMetaPosture {
+        mode: AppMode::Agent,
+        approval: crate::tui::approval::ApprovalMode::Suggest,
+        ask_on_guardrail: false,
+    });
+    engine.last_authoritative_turn_meta_posture = Some(TurnMetaPosture {
         mode: AppMode::Agent,
         approval: crate::tui::approval::ApprovalMode::Suggest,
         ask_on_guardrail: false,
