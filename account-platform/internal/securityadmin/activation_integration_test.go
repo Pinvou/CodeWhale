@@ -238,6 +238,10 @@ func TestRetainedSecurityBreakGlassReplayHasNoIdentityEffects(t *testing.T) {
 }
 
 type retainedPartialIdentity struct {
+	resetFailureStatus                       int
+	resetFailureBody                         string
+	resetDisconnect                          bool
+	resetAttempts, logouts                   int
 	mu                                       sync.Mutex
 	enabled, failLogout                      bool
 	resets, enables, disables, failedLogouts int
@@ -261,11 +265,23 @@ func retainedRealIdentity(t *testing.T, f *retainedSecurityFixture) *retainedPar
 			return
 		}
 		if strings.HasSuffix(r.URL.Path, "/reset-password") && r.Method == http.MethodPut {
+			state.resetAttempts++
+			if state.resetFailureStatus != 0 {
+				w.WriteHeader(state.resetFailureStatus)
+				io.WriteString(w, state.resetFailureBody)
+				return
+			}
 			state.resets++
+			if state.resetDisconnect {
+				connection, _, _ := w.(http.Hijacker).Hijack()
+				connection.Close()
+				return
+			}
 			w.WriteHeader(http.StatusNoContent)
 			return
 		}
 		if strings.HasSuffix(r.URL.Path, "/logout") && r.Method == http.MethodPost {
+			state.logouts++
 			if state.failLogout && state.enabled {
 				state.failLogout = false
 				state.failedLogouts++
