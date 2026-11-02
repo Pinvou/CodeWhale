@@ -498,6 +498,44 @@ test("Account Platform Node gate executes its contracts and rejects empty, faile
   }
 });
 
+test("offline render gate pins tool downloads, hashes and exported binaries", () => {
+  const job = jobBlock("account-platform-test");
+  const install = namedStep(job, "Install pinned offline-render tools");
+  assert.match(install, /helm-v3\.16\.4-linux-amd64\.tar\.gz/);
+  assert.match(install, /docker\/compose\/releases\/download\/v5\.4\.0\/docker-compose-linux-x86_64/);
+  assert.match(install, /prometheus\/releases\/download\/v3\.13\.5\/prometheus-3\.13\.5\.linux-amd64\.tar\.gz/);
+  assert.equal((install.match(/sha256sum --check --strict/g) ?? []).length, 3);
+  for (const variable of [
+    "PINVOU_TEST_KMS_HELM_BINARY",
+    "PINVOU_TEST_KMS_COMPOSE_BINARY",
+    "PINVOU_TEST_PROMTOOL_BINARY",
+  ]) {
+    assert.match(install, new RegExp(`${variable}=`));
+    assert.match(install, /GITHUB_ENV/);
+  }
+  const render = namedStep(job, "Account Platform rendered Prometheus rule scenarios");
+  assert.match(render, /PINVOU_TEST_KMS_HELM_BINARY/);
+  assert.match(render, /PINVOU_TEST_PROMTOOL_BINARY/);
+  const assertPinned = candidate => {
+    const step = namedStep(candidate, "Install pinned offline-render tools");
+    assert.equal((step.match(/sha256sum --check --strict/g) ?? []).length, 3);
+    for (const variable of ["PINVOU_TEST_KMS_HELM_BINARY", "PINVOU_TEST_KMS_COMPOSE_BINARY", "PINVOU_TEST_PROMTOOL_BINARY"]) {
+      assert.match(step, new RegExp(`${variable}=`));
+      assert.match(step, /GITHUB_ENV/);
+    }
+  };
+  assertPinned(job);
+  for (const candidate of [
+    job.replace(install, "", 1),
+    job.replace(install, install.replace("sha256sum --check --strict", "sha256sum --check", 1), 1),
+    job.replace(install, install.replace("PINVOU_TEST_KMS_COMPOSE_BINARY", "PINVOU_TEST_KMS_COMPOSE_BINARY_REMOVED", 1), 1),
+  ]) {
+    assert.throws(() => {
+      assertPinned(candidate);
+    });
+  }
+});
+
 test("Go gate executes test and vet for root and future nested modules, and fails on errors", () => {
   const job = jobBlock("account-platform-test");
   const run = stepRun(job, goStepName);
