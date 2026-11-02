@@ -1011,6 +1011,10 @@ pub struct EngineHandle {
     /// be awaiting a provider while its bounded op mailbox is unable to drain,
     /// so cancellation cannot depend on processing a later mailbox entry.
     compaction_cancellation: Arc<StdMutex<CompactionCancellationState>>,
+    /// Fast ack deadline for approval decisions; see `engine/handle.rs`.
+    approval_ack_timeout: Duration,
+    /// Settle window after the ack deadline; see `engine/handle.rs`.
+    approval_ack_settle_timeout: Duration,
 }
 
 const MAX_PENDING_COMPACTION_CANCELLATIONS: usize = 64;
@@ -2464,6 +2468,8 @@ impl Engine {
             live_runtime_authority,
             steer_control,
             compaction_cancellation,
+            approval_ack_timeout: handle::APPROVAL_ACK_TIMEOUT,
+            approval_ack_settle_timeout: handle::APPROVAL_ACK_SETTLE_TIMEOUT,
         };
 
         (engine, handle)
@@ -8980,6 +8986,8 @@ pub(crate) fn mock_engine_handle() -> MockEngineHandle {
         live_runtime_authority,
         steer_control: Arc::new(StdMutex::new(steer_control_state)),
         compaction_cancellation,
+        approval_ack_timeout: handle::APPROVAL_ACK_TIMEOUT,
+        approval_ack_settle_timeout: handle::APPROVAL_ACK_SETTLE_TIMEOUT,
     };
 
     MockEngineHandle {
@@ -9301,6 +9309,7 @@ mod approval;
 mod context;
 mod handle;
 pub mod preview;
+pub(crate) use self::handle::ApprovalAckUnknownError;
 use crate::compaction::estimate_input_tokens_conservative;
 #[cfg(test)]
 pub(crate) use context::compact_tool_result_for_context;

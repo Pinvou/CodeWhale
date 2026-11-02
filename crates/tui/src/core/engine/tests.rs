@@ -26690,6 +26690,8 @@ fn engine_handle_try_send_does_not_block_when_op_channel_is_full() {
         ))),
         steer_control: Arc::new(StdMutex::new(SteerControlState::default())),
         compaction_cancellation: Arc::new(StdMutex::new(CompactionCancellationState::default())),
+        approval_ack_timeout: super::handle::APPROVAL_ACK_TIMEOUT,
+        approval_ack_settle_timeout: super::handle::APPROVAL_ACK_SETTLE_TIMEOUT,
     };
 
     // Fill the op channel with one message (capacity = 1).

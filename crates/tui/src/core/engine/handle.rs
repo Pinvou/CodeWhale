@@ -22,7 +22,77 @@ use super::{
 };
 
 /// Bound on waiting for the engine to acknowledge an approval decision.
-const APPROVAL_ACK_TIMEOUT: Duration = Duration::from_secs(15);
+/// A live engine answers quickly; this only backstops a wedged engine.
+pub(super) const APPROVAL_ACK_TIMEOUT: Duration = Duration::from_secs(15);
+
+/// Extra settle window after the ack deadline. The engine sends the ack
+/// only after its durable receipt commit finished and that commit has no
+/// deadline, so the handle keeps waiting on the same oneshot instead of
+/// reporting a false "not applied" while persistence is merely slow.
+pub(super) const APPROVAL_ACK_SETTLE_TIMEOUT: Duration = Duration::from_secs(75);
+
+/// Terminal result when neither the ack deadline nor the settle window
+/// produced an engine answer. Deliberately distinct from "not applied":
+/// the engine answers only after the durable receipt commit finishes and
+/// that commit has no deadline, so the decision may still be committed
+/// and the tool executed after this error is returned. Callers must
+/// surface the outcome as unconfirmed instead of claiming the decision
+/// was refused.
+#[derive(Debug)]
+pub(crate) struct ApprovalAckUnknownError {
+    ack_timeout: Duration,
+    settle_timeout: Duration,
+}
+
+impl ApprovalAckUnknownError {
+    /// Test-only constructor for consumers pinning the remote mapping.
+    #[cfg(test)]
+    pub(crate) fn for_test(ack_timeout: Duration, settle_timeout: Duration) -> Self {
+        Self {
+            ack_timeout,
+            settle_timeout,
+        }
+    }
+}
+
+impl std::fmt::Display for ApprovalAckUnknownError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "approval decision outcome is unknown: the engine did not \
+             acknowledge within {}s ack + {}s settle, and the decision may \
+             still be committed and executed",
+            self.ack_timeout.as_secs(),
+            self.settle_timeout.as_secs()
+        )
+    }
+}
+
+impl std::error::Error for ApprovalAckUnknownError {}
+
+/// One bounded wait on the approval ack oneshot. `TimedOut` deliberately
+/// leaves the receiver alive with its caller: the decision may still be
+/// mid-commit, and dropping the receiver here is what used to turn a slow
+/// commit into a false "not applied".
+enum AckAnswer {
+    Applied,
+    NotApplied(anyhow::Error),
+    TimedOut,
+}
+
+async fn ack_answer(rx_ack: &mut oneshot::Receiver<bool>, budget: Duration) -> AckAnswer {
+    match tokio::time::timeout(budget, &mut *rx_ack).await {
+        Ok(Ok(true)) => AckAnswer::Applied,
+        Ok(Ok(false)) => AckAnswer::NotApplied(anyhow!(
+            "approval decision was not applied: the tool call id is stale \
+             or its outcome could not be committed"
+        )),
+        Ok(Err(_)) => AckAnswer::NotApplied(anyhow!(
+            "approval decision was dropped without being consumed by the engine"
+        )),
+        Err(_elapsed) => AckAnswer::TimedOut,
+    }
+}
 
 impl EngineHandle {
     /// True when the caller must preflight a concrete provider client before
@@ -297,10 +367,17 @@ impl EngineHandle {
     /// Approve a pending tool call.
     ///
     /// `Ok(())` means the engine consumed the decision and durably committed
-    /// the approval for this exact id (or routed it to a waiting child). An
-    /// `Err` means the decision was stale, its outcome could not be
-    /// committed, or no engine waiter accepted it before the ack deadline;
-    /// the caller must treat the tool as not approved.
+    /// the approval for this exact id (or routed it to a waiting child).
+    /// `Err` means exactly one of:
+    ///
+    /// - the decision was refused (stale id, its durable outcome could not
+    ///   be committed, or the engine dropped it unconsumed): the tool is
+    ///   not approved;
+    /// - the outcome is unknown ([`ApprovalAckUnknownError`]): neither the
+    ///   ack deadline nor the settle window got an answer. The engine's
+    ///   durable commit has no deadline, so the decision may still be
+    ///   committed and executed later; the caller must report the outcome
+    ///   as unconfirmed — not as "not approved".
     pub async fn approve_tool_call(&self, id: impl Into<String>) -> Result<()> {
         let (ack, rx_ack) = oneshot::channel();
         self.tx_approval
@@ -309,7 +386,12 @@ impl EngineHandle {
                 ack: Some(ack),
             })
             .await?;
-        Self::await_approval_ack(rx_ack).await
+        Self::await_approval_ack(
+            rx_ack,
+            self.approval_ack_timeout,
+            self.approval_ack_settle_timeout,
+        )
+        .await
     }
 
     /// Deny a pending tool call. The ack contract is the same as
@@ -322,7 +404,12 @@ impl EngineHandle {
                 ack: Some(ack),
             })
             .await?;
-        Self::await_approval_ack(rx_ack).await
+        Self::await_approval_ack(
+            rx_ack,
+            self.approval_ack_timeout,
+            self.approval_ack_settle_timeout,
+        )
+        .await
     }
 
     /// Retry a tool call with an elevated sandbox policy. The ack contract
@@ -340,28 +427,52 @@ impl EngineHandle {
                 ack: Some(ack),
             })
             .await?;
-        Self::await_approval_ack(rx_ack).await
+        Self::await_approval_ack(
+            rx_ack,
+            self.approval_ack_timeout,
+            self.approval_ack_settle_timeout,
+        )
+        .await
     }
 
-    /// Wait, bounded, for the engine to acknowledge a delivered decision.
-    /// The engine's receiver is a per-turn wait loop or the always-running
-    /// idle loop, so a live engine answers quickly; the bound only backstops
-    /// a wedged or already-shut-down engine.
-    async fn await_approval_ack(rx_ack: oneshot::Receiver<bool>) -> Result<()> {
-        match tokio::time::timeout(APPROVAL_ACK_TIMEOUT, rx_ack).await {
-            Ok(Ok(true)) => Ok(()),
-            Ok(Ok(false)) => Err(anyhow!(
-                "approval decision was not applied: the tool call id is stale \
-                 or its outcome could not be committed"
-            )),
-            Ok(Err(_)) => Err(anyhow!(
-                "approval decision was dropped without being consumed by the engine"
-            )),
-            Err(_) => Err(anyhow!(
-                "engine did not acknowledge the approval decision within {}s",
-                APPROVAL_ACK_TIMEOUT.as_secs()
-            )),
+    /// Wait for the engine to acknowledge a delivered decision, then keep
+    /// converging through a settle window.
+    ///
+    /// The engine sends the ack only after the durable receipt commit
+    /// finished, so an answer received in either window is always the real
+    /// terminal outcome. The fast ack deadline backstops a wedged engine;
+    /// the settle window then covers the slow-persistence case (the receipt
+    /// append waits on a file lock and fsync with no deadline): the receiver
+    /// is deliberately kept alive so a decision whose commit merely crossed
+    /// the deadline resolves to its true outcome instead of a false "not
+    /// applied". Only when both windows expire does the caller receive
+    /// [`ApprovalAckUnknownError`].
+    async fn await_approval_ack(
+        rx_ack: oneshot::Receiver<bool>,
+        ack_timeout: Duration,
+        settle_timeout: Duration,
+    ) -> Result<()> {
+        let mut rx_ack = rx_ack;
+        match ack_answer(&mut rx_ack, ack_timeout).await {
+            AckAnswer::Applied => Ok(()),
+            AckAnswer::NotApplied(error) => Err(error),
+            AckAnswer::TimedOut => match ack_answer(&mut rx_ack, settle_timeout).await {
+                AckAnswer::Applied => Ok(()),
+                AckAnswer::NotApplied(error) => Err(error),
+                AckAnswer::TimedOut => Err(anyhow::Error::new(ApprovalAckUnknownError {
+                    ack_timeout,
+                    settle_timeout,
+                })),
+            },
         }
+    }
+
+    /// Override the ack/settle windows in tests so slow-persistence
+    /// regressions run in milliseconds instead of wall-clock minutes.
+    #[cfg(test)]
+    pub(crate) fn set_approval_ack_windows_for_test(&mut self, ack: Duration, settle: Duration) {
+        self.approval_ack_timeout = ack;
+        self.approval_ack_settle_timeout = settle;
     }
 
     /// Submit a response for request_user_input.

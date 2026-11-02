@@ -630,4 +630,167 @@ mod tests {
             "the wait must end as a cancelled error, got {resolved:?}"
         );
     }
+
+    /// Spawn a native thread that acquires the receipt write lock, reports
+    /// once it holds it, keeps the lock for `hold_for`, then releases. The
+    /// engine's decided-receipt append then blocks exactly like slow
+    /// persistence (contended file lock or fsync) would, with no code-level
+    /// seam. The lock file must already exist (the durable ask creates it).
+    fn hold_receipt_lock_for(
+        lock_path: &std::path::Path,
+        hold_for: Duration,
+    ) -> (std::sync::mpsc::Receiver<()>, std::thread::JoinHandle<()>) {
+        let lock_path = lock_path.to_path_buf();
+        let (held_tx, held_rx) = std::sync::mpsc::channel();
+        let holder = std::thread::spawn(move || {
+            let lock_file = std::fs::OpenOptions::new()
+                .create(true)
+                .truncate(false)
+                .read(true)
+                .write(true)
+                .open(&lock_path)
+                .expect("open receipt lock");
+            let mut receipt_lock = fd_lock::RwLock::new(lock_file);
+            let guard = receipt_lock.write().expect("acquire receipt lock");
+            held_tx.send(()).expect("report held receipt lock");
+            std::thread::sleep(hold_for);
+            drop(guard);
+        });
+        (held_rx, holder)
+    }
+
+    #[tokio::test]
+    async fn slow_receipt_commit_converges_on_the_real_outcome() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let (mut engine, mut handle) = Engine::new(EngineConfig::default(), &Config::default());
+        let store = crate::approval_log::ApprovalReceiptStore::new(tmp.path().join("sessions"));
+        engine.approval_receipt_store = Ok(store.clone());
+        let session_id = engine.session.id.clone();
+        handle
+            .set_approval_ack_windows_for_test(Duration::from_millis(150), Duration::from_secs(5));
+        let task = tokio::spawn(async move {
+            engine
+                .request_tool_approval(
+                    "tool-slow-commit",
+                    "exec_shell",
+                    approval_event("tool-slow-commit"),
+                )
+                .await
+        });
+
+        let emitted = handle
+            .rx_event
+            .write()
+            .await
+            .recv()
+            .await
+            .expect("approval event");
+        assert!(matches!(emitted, Event::ApprovalRequired { .. }));
+
+        // Hold the receipt lock so the engine's decided-receipt append
+        // blocks past the fast ack deadline, exactly like slow persistence
+        // (file lock or fsync) would.
+        let lock_path = store
+            .sessions_dir()
+            .join(&session_id)
+            .join("approval_receipts.lock");
+        let (held, holder) = hold_receipt_lock_for(&lock_path, Duration::from_millis(400));
+        held.recv()
+            .expect("holder thread must hold the receipt lock");
+
+        // The ack deadline (150ms) expires, but the settle window keeps the
+        // receiver alive and reports the real outcome once persistence
+        // lands. Reporting "not applied" here would be the false refusal:
+        // the receipt commits and the tool proceeds right after it.
+        handle
+            .approve_tool_call("tool-slow-commit")
+            .await
+            .expect("a slow commit crossing the ack deadline must converge on applied");
+
+        assert!(matches!(
+            task.await.expect("approval task"),
+            Ok(ApprovalResult::Approved)
+        ));
+        let replay = store.replay(&session_id).expect("replay approvals");
+        assert_eq!(replay.completed.len(), 1);
+        assert_eq!(replay.completed[0].outcome, ApprovalOutcome::ApprovedOnce);
+        assert!(replay.unmatched_asks.is_empty());
+        holder.join().expect("holder thread");
+    }
+
+    #[tokio::test]
+    async fn settle_expiry_reports_unknown_outcome_not_refusal() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let (mut engine, mut handle) = Engine::new(EngineConfig::default(), &Config::default());
+        let store = crate::approval_log::ApprovalReceiptStore::new(tmp.path().join("sessions"));
+        engine.approval_receipt_store = Ok(store.clone());
+        let session_id = engine.session.id.clone();
+        handle.set_approval_ack_windows_for_test(
+            Duration::from_millis(120),
+            Duration::from_millis(250),
+        );
+        let mut task = tokio::spawn(async move {
+            engine
+                .request_tool_approval(
+                    "tool-still-committing",
+                    "exec_shell",
+                    approval_event("tool-still-committing"),
+                )
+                .await
+        });
+
+        let emitted = handle
+            .rx_event
+            .write()
+            .await
+            .recv()
+            .await
+            .expect("approval event");
+        assert!(matches!(emitted, Event::ApprovalRequired { .. }));
+
+        // Hold the receipt lock past both windows: the commit is still in
+        // flight when the caller gives up.
+        let lock_path = store
+            .sessions_dir()
+            .join(&session_id)
+            .join("approval_receipts.lock");
+        let (held, holder) = hold_receipt_lock_for(&lock_path, Duration::from_millis(700));
+        held.recv()
+            .expect("holder thread must hold the receipt lock");
+
+        let error = handle
+            .approve_tool_call("tool-still-committing")
+            .await
+            .expect_err("both ack windows expired");
+        assert!(
+            error
+                .downcast_ref::<crate::core::engine::ApprovalAckUnknownError>()
+                .is_some(),
+            "settle expiry must surface the typed unknown-outcome error, got {error:#}"
+        );
+        assert!(
+            !error.to_string().contains("not applied"),
+            "an unknown outcome must not be worded as a refusal: {error}"
+        );
+
+        // The decision was not refused: the tool is still awaiting its
+        // committed approval.
+        assert!(
+            tokio::time::timeout(Duration::from_millis(100), &mut task)
+                .await
+                .is_err(),
+            "an unconfirmed decision must not have granted execution yet"
+        );
+
+        // Once persistence lands the approval applies for real — the
+        // unknown report stayed honest instead of claiming a refusal.
+        holder.join().expect("holder thread releases the lock");
+        assert!(matches!(
+            task.await.expect("approval task"),
+            Ok(ApprovalResult::Approved)
+        ));
+        let replay = store.replay(&session_id).expect("replay approvals");
+        assert_eq!(replay.completed.len(), 1);
+        assert_eq!(replay.completed[0].outcome, ApprovalOutcome::ApprovedOnce);
+    }
 }
