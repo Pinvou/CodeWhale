@@ -462,6 +462,14 @@ GSA-02 在 APT-138 已完成后确认 ADM-64 的 Account 审批近期认证仍�
 
 三批完成顺序固定为 `APT-122-R2 → APT-123-R2 → APT-125-R1 → APT-138`。具名整改批次不占正式 APT 编号，故主任务表的依赖列仍只列 APT-122～APT-136；本段是 APT-138 的强制附加先决条件，三批任一未 `PASS` 即不得开工 APT-138。它们不得新增 activation schema、生产 reader/transaction guard/credential authority guard、Account activation 校验、审批事件 consumer 或 NATS 注册；这些对象仍唯一归 APT-138。三批也不得将任何命令改为另一治理模式，或提前注册 APT-134 lifecycle worker与APT-123-R2 account provisioning DB-polling worker；两个worker的生产 main 注册与 activation 联动由 APT-138 总装。
 
+### 客户端兼容层当前缺口归属（2026-11-02）
+
+保留 APT-044 的历史 `DONE` 记录；当前 NFR-47 按实际装配情况保持“部分实现”，由以下整改任务唯一跟踪未完成部分。该记录不新增正式任务编号，不改变 143 个正式任务统计，也不把 #1954 的范围澄清与配置回归扩大为本批安装全局 wrapper 的要求。
+
+| remediation_id | target_ids | status | dependencies | 范围与验收 |
+|---|---|---|---|---|
+| APT-044-R1 | NFR-47 | PENDING | APT-044 | 跟踪四服务生产路由尚未装配兼容 wrapper、统一响应头与稳定426未闭环的缺口；先确认真实路由、方法、豁免和旧客户端兼容范围，再按确认方案实现并验证当前及前两桌面版本、通知窗口和过期行为。若改变原 NFR-47 验收要求，须先完成正式需求确认；策略库和文档测试不能单独将本任务标记 DONE。 |
+
 ### APT-138 十九项命令一致性总验收与原子激活
 
 - **当前状态**：`DONE / NOT_DEPLOYED`。设计 7.4.1 及必要细化已获 B 文档 PASS，代码与本批验收已获 B 整批最终独立 PASS；十九项生产治理总装已完成，应用默认 PRE，尚未推送部署或实际激活。APT-137 在本批独立签署后继续，仍负责灰度、N/N-1 与部署环境验收，不计作本批已完成。
