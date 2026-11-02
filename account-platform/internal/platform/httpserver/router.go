@@ -68,20 +68,6 @@ func (router *Router) Group(relativePath string, handlers ...gin.HandlerFunc) *R
 
 type RouteGroup struct{ *gin.RouterGroup }
 
-// RequirePathSuffix rejects Gin's wildcard expansion for action-like paths
-// such as "/resource:batch". Gin treats the colon as a parameter marker even
-// when it is embedded in a segment, so an unguarded route would also accept
-// "/resource:batchOther".
-func RequirePathSuffix(suffix string) gin.HandlerFunc {
-	return func(c *gin.Context) {
-		if !strings.HasSuffix(c.Request.URL.Path, suffix) {
-			c.AbortWithStatus(http.StatusNotFound)
-			return
-		}
-		c.Next()
-	}
-}
-
 func (group *RouteGroup) GET(relativePath string, handlers ...gin.HandlerFunc) gin.IRoutes {
 	group.RouterGroup.GET(relativePath, handlers...)
 	return group.RouterGroup.HEAD(relativePath, handlers...)
