@@ -20,7 +20,9 @@ use std::path::Path;
 /// route, xlsx recalc caveat) and refreshes superseded shipped copies via
 /// [`SUPERSEDED_SHIPPED_BODY_DIGESTS`].
 /// Generation 12 respects host-provided built-in discovery entry points.
-const BUNDLED_SKILL_VERSION: &str = "12";
+/// Generation 13 refreshes bundled bodies stripped of dead short-description
+/// frontmatter.
+const BUNDLED_SKILL_VERSION: &str = "13";
 
 /// SHA-256 digests of bundled bodies shipped by the previous generation that
 /// this generation replaces. The non-destructive upgrade table (#4691) must
@@ -33,12 +35,24 @@ const BUNDLED_SKILL_VERSION: &str = "12";
 /// supported.
 const SUPERSEDED_SHIPPED_BODY_DIGESTS: &[(&str, &str)] = &[
     (
+        "best-of-n",
+        "b72d093fcbcf4e35185a2a6880cad24af03f764e279ba34ae47f7b449688213f",
+    ),
+    (
+        "delegate",
+        "169640cc236cf9eaae852843eb0f06c4f093f20e8fceb6b7a780ebf8f805d302",
+    ),
+    (
         "documents",
         "27ba3161ab9448245d6658efadccf955ee8f4ef2cda4f7b825a99c45b8bd66aa",
     ),
     (
         "docx",
         "fb2edb80df2119e42c1febcb5eae74c15092ba1e5dfbedf91ee45118ed9c7556",
+    ),
+    (
+        "fleet-manager",
+        "fa4369c7192553e986bb68644c7163a60e39fc6e530d4746d43830f2d369930a",
     ),
     (
         "mcp-builder",
@@ -63,6 +77,10 @@ const SUPERSEDED_SHIPPED_BODY_DIGESTS: &[(&str, &str)] = &[
     (
         "presentations",
         "ecddd5663a93bc1afca20ef2a5bdac26258a98557aa1a743797c0a5fa720a247",
+    ),
+    (
+        "skill-creator",
+        "6fb9e9212ad53b9ecc0e7bb8b6ee40e047a94b2b93f0bd6705d234cc082474d9",
     ),
     (
         "skill-installer",

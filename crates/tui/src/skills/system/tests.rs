@@ -218,8 +218,9 @@ fn contributor_onboarding_ships_at_generation_8_and_keeps_its_refusals() {
     // The pin tracks the current catalog generation: 9 added handoff,
     // 10 added mcp-discovery (#5238), 11 corrected bundled skill bodies
     // from the model-facing text audit (#112) and refreshes superseded
-    // shipped copies; 12 updates host-aware discovery.
-    assert_eq!(BUNDLED_SKILL_VERSION, "12");
+    // shipped copies; 12 updates host-aware discovery; 13 refreshes bundled
+    // bodies stripped of dead short-description frontmatter.
+    assert_eq!(BUNDLED_SKILL_VERSION, "13");
 
     let body = skill.body;
     assert!(body.contains("invocation: explicit-only"));
@@ -680,7 +681,7 @@ fn version_bump_refreshes_superseded_shipped_body() {
         current,
         "superseded shipped body must be refreshed on bump"
     );
-    assert_eq!(fs::read_to_string(marker_file(&tmp)).unwrap().trim(), "12");
+    assert_eq!(fs::read_to_string(marker_file(&tmp)).unwrap().trim(), "13");
 }
 
 #[test]
@@ -787,7 +788,7 @@ fn forkguard_skill_upgrade_refreshes_shipped_mcp_discovery_and_preserves_user_ed
         let expected_version = if customized && !peer_present {
             "11"
         } else {
-            "12"
+            "13"
         };
         if peer_present {
             assert_eq!(
