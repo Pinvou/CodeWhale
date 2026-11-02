@@ -120,7 +120,7 @@ export const TASK_REJECTION_CODES = [
   "task_payload_replay",
 ];
 
-export const CONTROLLER_CONTRACT_SHA256 = "63db457fd305cf8d758133fa8996b853bd3073892fa8bfe93aec7de8f873e242";
+export const CONTROLLER_CONTRACT_SHA256 = "5208650492c4e37286a7322d12ffc6c401724b8f261f8672d830146839db9f63";
 
 export const CONTROLLER_CAPABILITIES = Object.freeze([
   "pairing_v1", "encrypted_frames_v1", "finished_receipt_v1", "role_liveness_v1", "resume_v1",
@@ -157,6 +157,7 @@ export const CONTROLLER_ERROR_CODES = Object.freeze([
   "pairing_code_invalid", "pairing_code_generation_failed", "controller_busy", "version_incompatible", "endpoint_offline", "enrollment_required",
   "invalid_message", "unsupported_capability", "permission_already_decided", "permission_expired", "result_unknown",
   "capability_snapshot_unavailable",
+  "pairing_registration_stale_relay_epoch",
 ]);
 
 export const LEGACY_WEB_CONFLICT = Object.freeze({

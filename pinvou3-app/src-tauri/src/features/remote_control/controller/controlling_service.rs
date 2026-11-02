@@ -14,6 +14,7 @@ use std::time::Duration;
 use base64::Engine as _;
 use serde_json::Value;
 use tauri::{AppHandle, Emitter, Manager as _};
+#[cfg(test)]
 use tokio::sync::mpsc;
 use uuid::Uuid;
 
@@ -22,6 +23,7 @@ use super::controlling::{
     ControllingStatusKind, ResumeStep,
 };
 use super::controlling_handshake::{ControllingHandshake, HandshakeError};
+use super::controlling_inbound::{InboundCharge, InboundLimits, InboundReceiver, inbound_channel};
 use super::controlling_runtime::{
     ControllingHandshakeOutcome, ControllingRelayPort, ControllingStageEvent,
     drive_controlling_handshake,
@@ -68,6 +70,7 @@ const GENERIC_CONNECT_ERROR: &str = "invalid_message";
 const PEER_UNAVAILABLE_ERROR: &str = "endpoint_offline";
 
 pub(crate) use super::lane_event::ControllerLaneEvent;
+use super::lane_event::ControllerLaneFailure;
 
 /// 握手完成后的通道抽象。只暴露「下一条通道事件」，使断线投影可以在不依赖
 /// Tauri 的情况下被测试。
@@ -78,6 +81,12 @@ pub(crate) trait ControllingLane: Send {
     /// The port's original registration, never a fresh manager lookup. A real
     /// authenticated keeper must carry this exact transport and lease tuple.
     fn transport_sender(&self) -> Option<ControllerTransportSender>;
+
+    /// Release accepted business backlog only after authenticated resume and
+    /// the existing business lane have both completed their authority checks.
+    fn resume_business(&mut self) -> Result<(), ControllerLaneFailure> {
+        Ok(())
+    }
 
     /// E2E-06：发送恢复族的敏感控制帧（prepare/confirm/ready_ack）。默认实现
     /// 失败关闭，只有真实 transport 端口实现它；测试替身可覆写以记录帧。
@@ -181,16 +190,40 @@ pub(crate) trait ControllingJournalSink: Send + Sync {
 /// 出站一律走敏感队列（claim 自带连接码、receipt ack 自带 receipt secret）。
 pub(crate) struct ControllerTransportPort {
     sender: ControllerTransportSender,
-    inbound: mpsc::UnboundedReceiver<ControllerLaneEvent>,
+    inbound: InboundReceiver,
+    // The two production consumers finish processing a String before asking
+    // for another event. Keep its allocation/item budget through that work,
+    // including the handshake-to-keeper handoff; release on next or Drop.
+    current_charge: Option<InboundCharge>,
     relay_error_code: Option<&'static str>,
     relay_error_seen: bool,
     lane_disconnected: bool,
 }
 
+impl ControllerTransportPort {
+    fn new(sender: ControllerTransportSender, inbound: InboundReceiver) -> Self {
+        Self {
+            sender,
+            inbound,
+            current_charge: None,
+            relay_error_code: None,
+            relay_error_seen: false,
+            lane_disconnected: false,
+        }
+    }
+}
+
 #[async_trait::async_trait]
 impl ControllingLane for ControllerTransportPort {
     async fn next_lane_event(&mut self) -> Option<ControllerLaneEvent> {
-        self.inbound.recv().await
+        self.current_charge = None;
+        let delivery = self.inbound.recv().await?;
+        self.current_charge = delivery.charge;
+        Some(delivery.event)
+    }
+
+    fn resume_business(&mut self) -> Result<(), ControllerLaneFailure> {
+        self.inbound.resume_business()
     }
 
     fn transport_sender(&self) -> Option<ControllerTransportSender> {
@@ -215,6 +248,7 @@ impl ControllingRelayPort for ControllerTransportPort {
     async fn recv(&mut self) -> Option<Value> {
         loop {
             match self.next_lane_event().await? {
+                ControllerLaneEvent::Failed(_) => return None,
                 ControllerLaneEvent::Disconnected(context) => {
                     if context.owner != self.sender.owner() {
                         continue;
@@ -255,51 +289,46 @@ impl ControllingRelayPort for ControllerTransportPort {
     }
 
     fn lane_disconnected(&self) -> bool {
-        self.lane_disconnected
+        self.lane_disconnected || self.inbound.disconnect_pending()
     }
-}
 
-fn forward_controlling_event(
-    inbound_tx: &mpsc::UnboundedSender<ControllerLaneEvent>,
-    event: ControllerTransportEvent,
-) {
-    match event {
-        ControllerTransportEvent::Frame { json, .. } => {
-            let _ = inbound_tx.send(ControllerLaneEvent::Frame(json));
-        }
-        ControllerTransportEvent::Disconnected { context, .. } => {
-            let _ = inbound_tx.send(ControllerLaneEvent::Disconnected(context));
-        }
-        ControllerTransportEvent::Connected { .. } | ControllerTransportEvent::RttSample { .. } => {
-        }
+    fn ingress_failure(&self) -> Option<ControllerLaneFailure> {
+        self.inbound.failure()
     }
 }
 
 /// 绑定一条真实 Relay transport，并把入站事件投影为端口事件。generation 以
 /// 空串启动：A 端只有验签 transcript 之后才会通过 `bind_generation` 绑定它。
 fn spawn_controlling_lane(relay_url: &str) -> (ControllerTransportSender, ControllerTransportPort) {
-    spawn_controlling_lane_with_config(ControllerTransportConfig::new(
-        relay_url,
-        ControllerRole::ControllerA,
-        String::new(),
-    ))
+    spawn_controlling_lane_with_limits(relay_url, InboundLimits::default())
+}
+
+fn spawn_controlling_lane_with_limits(
+    relay_url: &str,
+    limits: InboundLimits,
+) -> (ControllerTransportSender, ControllerTransportPort) {
+    spawn_controlling_lane_with_config_and_limits(
+        ControllerTransportConfig::new(relay_url, ControllerRole::ControllerA, String::new()),
+        limits,
+    )
 }
 
 fn spawn_controlling_lane_with_config(
     config: ControllerTransportConfig,
 ) -> (ControllerTransportSender, ControllerTransportPort) {
-    let (inbound_tx, inbound_rx) = mpsc::unbounded_channel();
-    let sink = Arc::new(move |event: ControllerTransportEvent| {
-        forward_controlling_event(&inbound_tx, event);
-    });
+    spawn_controlling_lane_with_config_and_limits(config, InboundLimits::default())
+}
+
+fn spawn_controlling_lane_with_config_and_limits(
+    config: ControllerTransportConfig,
+    limits: InboundLimits,
+) -> (ControllerTransportSender, ControllerTransportPort) {
+    let (inbound_tx, inbound_rx) = inbound_channel(limits);
+    let ingress = inbound_tx.clone();
+    let sink = Arc::new(move |event: ControllerTransportEvent| ingress.enqueue(event));
     let sender = spawn_controller_transport(config, sink);
-    let port = ControllerTransportPort {
-        sender: sender.clone(),
-        inbound: inbound_rx,
-        relay_error_code: None,
-        relay_error_seen: false,
-        lane_disconnected: false,
-    };
+    inbound_tx.bind_transport(sender.clone());
+    let port = ControllerTransportPort::new(sender.clone(), inbound_rx);
     (sender, port)
 }
 
@@ -316,13 +345,20 @@ fn relay_error_code(value: &Value) -> Option<&'static str> {
     }
 }
 
-/// 失败分类：Relay 明确给出的码优先；断线与本地上限超时归为对端不可达；
+/// 失败分类：已观察到的本地入站终态优先于已保存的 Relay 错误码；
+/// 否则使用 Relay 明确码，断线与本地上限超时归为对端不可达；
 /// 其余（验签失败、顺序错误、本地 generation 绑定失败）归为协议错误。
-fn public_failure_code(port: &impl ControllingRelayPort, timed_out: bool) -> &'static str {
+fn public_failure_code(
+    port: &impl ControllingRelayPort,
+    locally_unavailable: bool,
+) -> &'static str {
+    if port.ingress_failure().is_some() {
+        return PEER_UNAVAILABLE_ERROR;
+    }
     if let Some(code) = port.relay_error_code() {
         return code;
     }
-    if timed_out || port.lane_disconnected() {
+    if locally_unavailable || port.lane_disconnected() {
         return PEER_UNAVAILABLE_ERROR;
     }
     GENERIC_CONNECT_ERROR
@@ -331,6 +367,11 @@ fn public_failure_code(port: &impl ControllingRelayPort, timed_out: bool) -> &'s
 /// 失败归因（有界、不含凭据）：公共码 + 来源（Relay 明确报错 / 通道断开 / 本地校验）。
 /// 只用于端上排障日志，不改变任何面向用户的错误语义。
 fn failure_origin_detail(port: &impl ControllingRelayPort, code: &str) -> String {
+    if let Some(reason) = port.ingress_failure() {
+        // The actual log sink accepts a closed detail set. Keep this local
+        // reason intact rather than constructing an unregistered string.
+        return reason.code().to_owned();
+    }
     let origin = if port.relay_error_seen() {
         "relay"
     } else if port.lane_disconnected() {
@@ -400,12 +441,38 @@ pub(crate) async fn run_controlling_connection<P: ControllingRelayPort>(
         }
     };
 
+    // A joined frame may already be in flight when ingress terminates or the
+    // socket disconnect barrier arrives. Never forget that known handoff loss.
+    if port.ingress_failure().is_some() || port.lane_disconnected() || sender.is_stopped() {
+        let code = public_failure_code(port, sender.is_stopped());
+        log_controller_event("connect_failed", &failure_origin_detail(port, code));
+        sender.stop();
+        fail_owned_lane(manager, &operation, business, code, on_status);
+        return Err(code.to_owned());
+    }
     match complete_connected(manager, operation.clone(), sender, business, outcome) {
         Ok(status) => {
+            if port.ingress_failure().is_some() || port.lane_disconnected() || sender.is_stopped() {
+                let code = public_failure_code(port, sender.is_stopped());
+                log_controller_event("connect_failed", &failure_origin_detail(port, code));
+                sender.stop();
+                fail_owned_lane(manager, &operation, business, code, on_status);
+                return Err(code.to_owned());
+            }
             on_status(&status);
             Ok(status)
         }
         Err(code) => {
+            // The first handoff check can pass before an ingress terminal
+            // makes the real lease installer return Closed. Recheck before
+            // cleanup so that local saturation retains its public reason.
+            if port.ingress_failure().is_some() || port.lane_disconnected() {
+                let code = public_failure_code(port, false);
+                log_controller_event("connect_failed", &failure_origin_detail(port, code));
+                sender.stop();
+                fail_owned_lane(manager, &operation, business, code, on_status);
+                return Err(code.to_owned());
+            }
             sender.stop();
             let _ = manager.with_lane_owner(&operation, || business.clear());
             // 本地收尾失败（指纹派生、租约安装）时不能停在非终态阶段：只有在
@@ -483,6 +550,26 @@ fn fail_connection(
         }
         // 竞态下仍可能失败（例如刚被取代）：同样只回报有界错误码。
         Err(error) => error.code.to_owned(),
+    }
+}
+
+/// Both Connecting and Connected can observe an ingress terminal. Every
+/// mutation is fenced to the original intent/claim, including the clear.
+fn fail_owned_lane(
+    manager: &ControllingDeviceManager,
+    operation: &ControllerOperation,
+    business: &ControllingLaneState,
+    code: &'static str,
+    on_status: &mut (impl FnMut(&ControllingStatus) + ?Sized),
+) {
+    if manager
+        .with_lane_owner(operation, || business.clear())
+        .is_err()
+    {
+        return;
+    }
+    if let Ok(status) = manager.fail_connection(operation.clone(), code) {
+        on_status(&status);
     }
 }
 
@@ -666,6 +753,11 @@ async fn serve_controlling_lane_with_evidence_context(
                 if manager.with_lane_owner(&operation, || ()).is_err() { return; }
                 let Some(event) = event else { return };
                 match event {
+                    ControllerLaneEvent::Failed(reason) => {
+                        log_controller_event("inbound_failed", reason.code());
+                        fail_owned_lane(manager, &operation, business, PEER_UNAVAILABLE_ERROR, sinks.on_status);
+                        return;
+                    }
                     ControllerLaneEvent::Disconnected(context) => {
                         if context.owner != registration.owner {
                             continue;
@@ -716,6 +808,11 @@ async fn serve_controlling_lane_with_evidence_context(
                             match handle_resume_frame(lane, manager, &operation, business, &mut resume, now_b, &json) {
                                 ResumeOutcome::Progressed | ResumeOutcome::Ignored => {}
                                 ResumeOutcome::Completed => {
+                                    if let Err(reason) = lane.resume_business() {
+                                        log_controller_event("inbound_failed", reason.code());
+                                        fail_owned_lane(manager, &operation, business, PEER_UNAVAILABLE_ERROR, sinks.on_status);
+                                        return;
+                                    }
                                     resume.reset();
                                     liveness = LivenessExpectations::default();
                                     // A transport resume is not a journal
@@ -2041,6 +2138,10 @@ pub(crate) async fn connect_controlling_device(
 }
 
 #[cfg(test)]
+#[path = "controlling_inbound_tests.rs"]
+mod inbound_tests;
+
+#[cfg(test)]
 mod tests {
     use std::cell::RefCell;
     use std::collections::VecDeque;
@@ -2950,7 +3051,10 @@ mod tests {
             8192,
             1024,
         );
-        let (inbound_tx, inbound) = mpsc::unbounded_channel();
+        // The inbox stays unbound from the transport on purpose: the test's
+        // producer teardown must not stop the sender before the resume
+        // prepare exercises the real transport queue below.
+        let (ingress_tx, inbound) = inbound_channel(InboundLimits::default());
         let install_sender = || {
             sender
                 .install_authenticated_lease(AuthenticatedLease {
@@ -2963,20 +3067,20 @@ mod tests {
             install_sender();
         }
         let expected = sender.disconnect_context();
-        let sink_tx = inbound_tx.clone();
+        let sink_tx = ingress_tx.clone();
         let sink = move |event: ControllerTransportEvent| {
             let ControllerTransportEvent::Disconnected { context, .. } = &event else {
                 panic!("expected the actual transport disconnect producer");
             };
             assert_eq!(context, &expected);
-            forward_controlling_event(&sink_tx, event);
+            sink_tx.enqueue(event);
         };
         // Exercise the actual transport producer, suspension, production
-        // adapter, queue, production port and keeper. The WebSocket driver
+        // adapter, inbox, production port and keeper. The WebSocket driver
         // itself is outside this A adapter test's scope.
-        super::super::relay_transport::disconnect_test_transport_to(&sender, &sink);
+        super::super::relay_transport::disconnect_test_transport_to_sink(&sender, &sink);
         drop(sink);
-        drop(inbound_tx);
+        drop(ingress_tx);
         if case == "pre_auth" {
             install_sender();
         }
@@ -2989,13 +3093,7 @@ mod tests {
         manager
             .complete_connected(operation.clone(), lease)
             .unwrap();
-        let mut port = ControllerTransportPort {
-            sender: sender.clone(),
-            inbound,
-            relay_error_code: None,
-            relay_error_seen: false,
-            lane_disconnected: false,
-        };
+        let mut port = ControllerTransportPort::new(sender.clone(), inbound);
         let replacement = if case == "replacement" {
             manager.disconnect();
             business.clear();
@@ -3032,14 +3130,21 @@ mod tests {
         .await;
         match case {
             "current" => {
-                assert_eq!(seen, vec![ControllingStatusKind::Reconnecting]);
-                assert!(business.is_suspended());
+                // The accepted disconnect still drives Reconnecting and the
+                // validated resume prepare; the producer teardown's Closed
+                // terminal then ends the lane with the bounded error.
+                assert_eq!(
+                    seen,
+                    vec![
+                        ControllingStatusKind::Reconnecting,
+                        ControllingStatusKind::Error
+                    ]
+                );
                 assert_eq!(
                     receiver.pending_control_for_test(),
                     1,
                     "the actual port must enqueue a validated resume prepare"
                 );
-                assert_eq!(manager.status().kind(), ControllingStatusKind::Reconnecting);
             }
             "pre_auth" => {
                 assert_eq!(seen, vec![ControllingStatusKind::Error]);

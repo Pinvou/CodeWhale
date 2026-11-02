@@ -331,7 +331,13 @@ impl RemoteTaskEventSink for DesktopTaskEventSink {
         if event.generation != lease.remote_control_generation {
             return;
         }
-        let _ = self.app.emit(TASK_STATUS_EVENT, event);
+        let mut display_event = event.clone();
+        display_event.terminal_reason =
+            crate::features::remote_control::controller::task::display_terminal_reason(
+                event.terminal_reason.as_deref(),
+            )
+            .map(str::to_owned);
+        let _ = self.app.emit(TASK_STATUS_EVENT, &display_event);
         publish_authoritative_task_status(&self.app, event);
         // Only the current authenticated B session/generation can allocate a
         // visible journal sequence. Ordinary local sessions remain local.
@@ -356,7 +362,7 @@ impl RemoteTaskEventSink for DesktopTaskEventSink {
         // E2E-05：先落 B 权威 journal，再经同代加密通道回传 A。
         if let Some(stored) = self
             .journal
-            .record_task_event_for_owner(&journal_owner, event)
+            .record_task_event_for_owner(&journal_owner, &display_event)
         {
             publish_authoritative_event(
                 &self.app,
@@ -685,6 +691,12 @@ fn display_event(event: &JournalEvent) -> Result<JournalDisplay, String> {
         body,
         Vec::new(),
     )
+    .map(|display| {
+        let reason = (event.terminal_status.as_deref() == Some("failed"))
+            .then(|| event.payload.get("terminal_reason").and_then(Value::as_str))
+            .flatten();
+        display.with_terminal_reason(reason)
+    })
     .map_err(|_| "remote_projection_display_invalid".to_owned())
 }
 
@@ -1184,6 +1196,30 @@ mod tests {
             outcome_unknown: false,
             terminal_reason: None,
             result_digest: None,
+        }
+    }
+
+    #[test]
+    fn real_terminal_journal_producer_projects_only_supported_failure_reasons() {
+        for reason in [
+            "task_generation_stale",
+            "task_attachments_invalid",
+            "secret/path",
+            "task_generation_stale_extra",
+        ] {
+            let journal = RemoteJournal::new("epoch-1");
+            let mut event = task_event("task-1", "failed");
+            event.terminal_reason = Some(reason.into());
+            let produced = journal.record_task_event(&event).unwrap();
+            let display = display_event(&produced).unwrap();
+            assert_eq!(display.body(), Some("failed"));
+            assert_eq!(
+                display.terminal_reason(),
+                match reason {
+                    "task_generation_stale" | "task_attachments_invalid" => Some(reason),
+                    _ => None,
+                }
+            );
         }
     }
 

@@ -181,6 +181,8 @@ fn submit_error(code: &str) -> UseCaseError {
             UseCaseError::new("task_permission_mode_unsupported", false)
         }
         "task_session_busy" => UseCaseError::new("task_session_busy", true),
+        "task_generation_stale" => UseCaseError::new("task_generation_stale", false),
+        "task_attachments_invalid" => UseCaseError::new("task_attachments_invalid", false),
         "task_turn_timeout" => UseCaseError::new("task_turn_timeout", false),
         "task_turn_timeout_config_invalid" => {
             UseCaseError::new("task_turn_timeout_config_invalid", false)
@@ -2364,6 +2366,8 @@ mod submit_boundary_tests {
             "controlled_session_projection_failed"
         );
         for (code, retryable) in [
+            ("task_generation_stale", false),
+            ("task_attachments_invalid", false),
             ("task_binding_stale", true),
             ("task_ledger_capacity", true),
             ("task_ledger_persist_failed", true),
