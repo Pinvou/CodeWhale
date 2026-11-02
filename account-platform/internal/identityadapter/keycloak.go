@@ -101,7 +101,7 @@ func (p *KeycloakDirectory) ActivateBootstrapAdmin(ctx context.Context, subject,
 	if err := ValidatePrivilegedPassword(password, username); err != nil {
 		return err
 	}
-	if err := p.SetPassword(ctx, subject, password); err != nil {
+	if err := p.setPassword(ctx, subject, password, true); err != nil {
 		return err
 	}
 	if err := p.updateUser(ctx, subject, func(user map[string]any) { user["enabled"] = true }); err != nil {
@@ -320,6 +320,10 @@ func (p *KeycloakDirectory) UpdateMobile(ctx context.Context, subject string, op
 }
 
 func (p *KeycloakDirectory) SetPassword(ctx context.Context, subject, password string) error {
+	return p.setPassword(ctx, subject, password, false)
+}
+
+func (p *KeycloakDirectory) setPassword(ctx context.Context, subject, password string, bootstrap bool) error {
 	access, err := p.accessToken(ctx)
 	if err != nil {
 		return err
@@ -335,6 +339,9 @@ func (p *KeycloakDirectory) SetPassword(ctx context.Context, subject, password s
 		return fmt.Errorf("reset Keycloak password: %w", err)
 	}
 	defer response.Body.Close()
+	if bootstrap && bootstrapPasswordPolicyRejection(response) {
+		return &bootstrapPasswordRejected{}
+	}
 	_, _ = io.Copy(io.Discard, io.LimitReader(response.Body, 4096))
 	if response.StatusCode != http.StatusNoContent {
 		return fmt.Errorf("reset Keycloak password returned HTTP %d", response.StatusCode)

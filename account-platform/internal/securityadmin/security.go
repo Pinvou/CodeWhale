@@ -448,6 +448,12 @@ func (m *Manager) BreakGlass(ctx context.Context, request BreakGlassRequest) (er
 		}
 	}()
 	if err := m.directory.ActivateBootstrapAdmin(ctx, subject, identity.TargetUsername, request.FormalPassword); err != nil {
+		// A typed proof from the first Identity password step means there is
+		// nothing in Identity to compensate. Preserve the pre-existing identity;
+		// the Account transaction (including recovery receipts) still rolls back.
+		if identityadapter.BootstrapActivationUnchanged(err) {
+			compensationRequired = false
+		}
 		return err
 	}
 	if err := tx.Commit(ctx); err != nil {
