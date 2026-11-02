@@ -27,6 +27,7 @@ REQUIRED = {
     "TestCredentialFailurePreparationFencePostgres",
     "TestCredentialFailureExistingEventsPostgres",
     "TestHoldAcknowledgementSurvivesDispatchPersistenceFailurePostgres",
+    "TestCancellationReceivedReadRechecksReservationPostgres",
     "TestPersonalZeroBudgetCancellationAndExpiryPostgres",
     "TestUsageWaiverCoordinatorRecoveryPostgres",
     "TestF05AdditionalReservationProjectionPublicPostgres",
@@ -93,6 +94,7 @@ ACCOUNT_REQUIRED = {
 }
 TOKEN_PACKAGE = "github.com/Pinvou/pinvou3/account-platform/internal/token"
 TOKEN_CHILD_REQUIRED = {
+    "TestCancellationReceivedReadRechecksReservationPostgres",
     "TestLifecycleForceCancelApprovalPostgres",
     "TestLocalModelCancellationHandshakeHTTP",
     "TestRemoteModelCancellationOwnerLoopTransport",
@@ -212,6 +214,9 @@ BILLING_LEAF_REQUIRED = {
 }
 BILLING_CHILD_REQUIRED = RETAINED_REQUIRED - BILLING_LEAF_REQUIRED
 EXACT_REQUIRED_CHILDREN = {
+    "TestCancellationReceivedReadRechecksReservationPostgres": {
+        "not-started", "reserve-ack-pending", "reserve-ack-attached", "wrong-hold-then-original",
+    },
     "TestRemoteModelCancellationOwnerLoopTransport": {
         "remote_emergency", "remote_emergency_then_user", "user_only",
         "read_failure", "lease_failure", "natural_terminal",
