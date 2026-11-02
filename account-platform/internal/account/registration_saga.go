@@ -335,7 +335,7 @@ func (r *PostgresRepository) CommitRegistration(ctx context.Context, operationID
 	if eligibilityKeyID != "" && eligibilityKeyID != fingerprintKeyID {
 		return RegistrationOperation{}, ErrRegistrationConflict
 	}
-	if eligibilityStatus != "PENDING" {
+	if eligibilityStatus != "PENDING" || eligibilityKeyID != "" {
 		verifier, verifyErr := r.registrationBonusFingerprintKeyVerifier()
 		if verifyErr != nil || subtle.ConstantTimeCompare(verifier, eligibilityKeyVerifier) != 1 {
 			return RegistrationOperation{}, ErrRegistrationConflict
