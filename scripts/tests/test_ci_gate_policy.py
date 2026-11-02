@@ -1059,6 +1059,32 @@ class CiGatePolicyTests(unittest.TestCase):
             "(缺失=永不执行;多余=死条目)",
         )
 
+    def test_account_closure_ci_steps_are_precisely_pinned(self):
+        """Keep the closure source and isolated-PG gates live and fail-closed."""
+        job = _without_inline_comments(_extract_job_block(self.pr_workflow, "account-platform-test"))
+
+        def assert_contract(text):
+            source = _step_named(text, "Verify Account closure source and API contracts")
+            self.assertIn("npm --prefix account-platform run test:closure-contracts", source)
+            self.assertNotRegex(source, r"(?m)^        (?:if|continue-on-error):")
+            postgres = _step_named(text, "Account closure contracts on isolated PostgreSQL")
+            self.assertIn("python3 -m unittest discover -s scripts/tests -p test_account_closure_postgres.py", postgres)
+            self.assertIn("python3 scripts/test-account-closure-postgres.py", postgres)
+            self.assertIn("PINVOU_ACCOUNT_CLOSURE_TEST_DATABASE_URL", postgres)
+            self.assertNotRegex(postgres, r"(?m)^        (?:if|continue-on-error):")
+
+        assert_contract(job)
+        source = _step_named(job, "Verify Account closure source and API contracts")
+        postgres = _step_named(job, "Account closure contracts on isolated PostgreSQL")
+        for mutated in (
+            job.replace(source, "", 1),
+            job.replace(postgres, "", 1),
+            job.replace("npm --prefix account-platform run test:closure-contracts", "true", 1),
+            job.replace("python3 scripts/test-account-closure-postgres.py", "true", 1),
+        ):
+            with self.assertRaises(AssertionError):
+                assert_contract(mutated)
+
     def test_deployment_contract_artifacts_are_attempt_scoped(self):
         job = _without_inline_comments(
             _extract_job_block(self.pr_workflow, "account-platform-test")

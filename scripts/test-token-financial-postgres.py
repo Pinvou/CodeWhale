@@ -90,7 +90,23 @@ ACCOUNT_REQUIRED = {
     "TestApprovalListPoolRuntimePostgres",
     "TestPasswordPreparationAuthorizationPostgres",
     "TestApprovalWithdrawalOriginalReceiptPostgres",
+    "TestRegistrationBonusEligibilityCheckpointPostgresIntegration",
+    "TestRegistrationBonusCheckpointGuardsPostgresIntegration",
+    "TestRegistrationBonusCheckpointMigrationPostgresIntegration",
+    "TestRegistrationBonusCheckpointForeignFactsPostgresIntegration",
+    "TestRegistrationBonusEligibilityReadyAndLifetimePostgresIntegration",
+    "TestRegistrationBonusEligibilityBlockedConsumesNewMobilesPostgresIntegration",
 }
+# These Account roots are real named leaf tests; all other required roots
+# still need completed child-case evidence. Root run/pass and no-skip stay mandatory.
+ACCOUNT_LEAF_REQUIRED = {
+    "TestRegistrationBonusEligibilityCheckpointPostgresIntegration",
+    "TestRegistrationBonusCheckpointGuardsPostgresIntegration",
+    "TestRegistrationBonusCheckpointMigrationPostgresIntegration",
+    "TestRegistrationBonusEligibilityReadyAndLifetimePostgresIntegration",
+    "TestRegistrationBonusEligibilityBlockedConsumesNewMobilesPostgresIntegration",
+}
+ACCOUNT_CHILD_REQUIRED = ACCOUNT_REQUIRED - ACCOUNT_LEAF_REQUIRED
 TOKEN_PACKAGE = "github.com/Pinvou/pinvou3/account-platform/internal/token"
 TOKEN_CHILD_REQUIRED = {
     "TestLifecycleForceCancelApprovalPostgres",
@@ -212,6 +228,9 @@ BILLING_LEAF_REQUIRED = {
 }
 BILLING_CHILD_REQUIRED = RETAINED_REQUIRED - BILLING_LEAF_REQUIRED
 EXACT_REQUIRED_CHILDREN = {
+    "TestRegistrationBonusCheckpointForeignFactsPostgresIntegration": {
+        "unbound-existing-facts", "foreign-key-before-finalize",
+    },
     "TestRemoteModelCancellationOwnerLoopTransport": {
         "remote_emergency", "remote_emergency_then_user", "user_only",
         "read_failure", "lease_failure", "natural_terminal",
@@ -425,7 +444,7 @@ def main(*, group="all"):
             raise RuntimeError("Go financial phase failed: " + label)
         count = verify_results([json.loads(line) for line in result.stdout.splitlines() if line.startswith("{")],
                                required, package=package, require_children=scoped or label == "retained-token", exact_roots=scoped,
-                               children_required=TOKEN_CHILD_REQUIRED if label == "retained-token" else BILLING_CHILD_REQUIRED & required if label == "retained-billing" else None)
+                               children_required=ACCOUNT_CHILD_REQUIRED if label == "owner-account" else TOKEN_CHILD_REQUIRED if label == "retained-token" else BILLING_CHILD_REQUIRED & required if label == "retained-billing" else None)
         print(f"Financial phase {label}: {count} named passes; all {len(required)} required roots completed", flush=True)
 
     if group in ("all", "owners"):

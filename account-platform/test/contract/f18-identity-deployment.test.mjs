@@ -5,6 +5,7 @@ import { spawnSync } from 'node:child_process';
 import test from 'node:test';
 import YAML from 'yaml';
 import { matchesPodSelector } from '../../../scripts/account-platform-model-token-deployment-check.mjs';
+import { productionImageDigestArgs } from '../fixtures/production-image-digests.mjs';
 
 const root = path.resolve(import.meta.dirname, '../../..');
 const chart = path.join(root, 'account-platform/deploy/helm/account-platform');
@@ -20,7 +21,7 @@ function render(overrides = [], production = true) {
     ...(!production ? ['--set', 'nats.enabled=false', '--set-string',
       'dependencies.natsUrl=tls://nats.example.invalid:4222', '--set-json', 'workloadIdentity.kubernetesApiServerPorts=[443]', '--set-json', 'external.workloadJwksCidrs=["192.0.2.40/32"]'] : []),
     // Config-only fixture member; production values require real deployed on-call users.
-    ...(production ? ['--set-json', 'global.manualReviewOnCallUserIds=["00000000-0000-4000-8000-000000000707"]'] : []),
+    ...(production ? ['--set-json', 'global.manualReviewOnCallUserIds=["00000000-0000-4000-8000-000000000707"]', ...productionImageDigestArgs] : []),
     ...[...newApi, ...overrides].flatMap(value =>
       [/^(?:(keycloak|sms|ingress)\.enabled|security\.authRiskEnabled)=(true|false)$/.test(value) ? '--set' : '--set-string', value])];
   return spawnSync(process.env.PINVOU_TEST_KMS_HELM_BINARY || 'helm', args,
