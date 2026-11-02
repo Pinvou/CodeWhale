@@ -70,11 +70,16 @@ pub(crate) fn stream_open_timeout_for(base_url: &str) -> Duration {
 }
 
 /// True when the base URL terminates on this machine or its local network:
-/// loopback (v4+v6), `.localhost` names, RFC1918 private, link-local, and
-/// unique-local v6. Hostnames that are not `localhost` are conservatively
-/// treated as remote — no DNS resolution on this hot path, and a cloud host
-/// behind a resolvable name would be misclassified far more expensively in
-/// the other direction.
+/// loopback (v4+v6), `.localhost` names, RFC1918 private, link-local (v4+v6),
+/// unique-local v6, IPv4-mapped v6 (re-checked as v4), and CGNAT
+/// 100.64.0.0/10 — the range Tailscale-style overlays use, a very common way
+/// to reach a home/office GPU box (`validate_base_url_security` already
+/// invites llama.cpp-on-private-IP over HTTP, so those endpoints are in
+/// scope). Hostnames that are not `localhost` are conservatively treated as
+/// remote — no DNS resolution on this hot path, and a cloud host behind a
+/// resolvable name would be misclassified far more expensively in the other
+/// direction. `0.0.0.0` as a *destination* stays remote: nothing should
+/// dial it, and widening for it would only mask caller bugs.
 fn endpoint_is_local(base_url: &str) -> bool {
     let Some(parsed) = url::Url::parse(base_url).ok() else {
         return false;
@@ -84,10 +89,25 @@ fn endpoint_is_local(base_url: &str) -> bool {
             host.eq_ignore_ascii_case("localhost")
                 || host.to_ascii_lowercase().ends_with(".localhost")
         }
-        Some(url::Host::Ipv4(ip)) => ip.is_loopback() || ip.is_private() || ip.is_link_local(),
-        Some(url::Host::Ipv6(ip)) => ip.is_loopback() || ip.is_unique_local(),
+        Some(url::Host::Ipv4(ip)) => ipv4_is_local(ip),
+        Some(url::Host::Ipv6(ip)) => {
+            ip.is_loopback()
+                || ip.is_unique_local()
+                || ip.is_unicast_link_local()
+                // `[::ffff:127.0.0.1]`-style mapped addresses classify by
+                // their v4 payload, not by the v6 wrapper.
+                || ip.to_ipv4_mapped().is_some_and(ipv4_is_local)
+        }
         None => false,
     }
+}
+
+fn ipv4_is_local(ip: std::net::Ipv4Addr) -> bool {
+    // 100.64.0.0/10（CGNAT，Tailscale 类 overlay）：is_shared() 在本工具链
+    // 还是 unstable（feature ip），手写第二字节 64..=127 判定。
+    let o = ip.octets();
+    let cgnat = o[0] == 100 && (64..=127).contains(&o[1]);
+    ip.is_loopback() || ip.is_private() || ip.is_link_local() || cgnat
 }
 
 /// How the shared stream open path should pin HTTP version.
@@ -310,7 +330,13 @@ mod tests {
     #[test]
     fn local_endpoints_get_the_wider_open_budget() {
         let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-        // 本地各形态：回环/私网/链路本地/localhost 名（含大小写）
+        // 评审 MINOR：宿主机可能 export 了超时变量——不清掉的话
+        // `== LOCAL_STREAM_OPEN_TIMEOUT` 断言在那种机器上必红。持锁清理后
+        // 本测试对环境完全密封。
+        unsafe { std::env::remove_var("CODEWHALE_STREAM_OPEN_TIMEOUT_SECS") };
+        unsafe { std::env::remove_var("DEEPSEEK_STREAM_OPEN_TIMEOUT_SECS") };
+        // 本地各形态：回环/私网/链路本地/localhost 名（含大小写）、v6 链路本地、
+        // IPv4-mapped v6、CGNAT（Tailscale 类）——后三类是评审 MINOR 补的口。
         for url in [
             "http://127.0.0.1:8889/v1",
             "http://localhost:8080/v1",
@@ -322,6 +348,9 @@ mod tests {
             "http://169.254.7.7/v1",
             "http://[::1]:9000/v1",
             "http://[fd00::1]:9000/v1",
+            "http://[fe80::1]:9000/v1",
+            "http://[::ffff:127.0.0.1]:9000/v1",
+            "http://100.101.102.103:8000/v1",
         ] {
             assert!(endpoint_is_local(url), "应识别为本地端点：{url}");
             assert_eq!(
@@ -330,11 +359,13 @@ mod tests {
                 "本地端点应拿宽预算：{url}"
             );
         }
-        // 云端与不可解析输入维持默认/保守
+        // 云端与不可解析输入维持默认/保守。0.0.0.0 作为目的地属调用方
+        // bug，刻意不放宽（见 endpoint_is_local 注释）。
         for url in [
             "https://api.deepseek.com/v1",
             "https://gateway.example.com/v1",
             "https://my-model.internal.example.com", // 可解析域名保守按远端
+            "http://0.0.0.0:8888/v1",
             "",
             "not a url",
         ] {
@@ -353,10 +384,18 @@ mod tests {
         // set/remove_var 在 edition 2024 是 unsafe：进程内其他线程可能并发
         // 读 env——本测试与上面那个都持有 ENV_LOCK，且两个调用之间没有
         // await 点，实际单线程访问。
+        // 评审 MINOR：断言 panic 时变量会泄进进程毒化其他测试——用 Drop
+        // 守卫保证无论怎么退出都清理。
+        struct EnvReset;
+        impl Drop for EnvReset {
+            fn drop(&mut self) {
+                unsafe { std::env::remove_var("CODEWHALE_STREAM_OPEN_TIMEOUT_SECS") };
+            }
+        }
         let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _reset = EnvReset;
         unsafe { std::env::set_var("CODEWHALE_STREAM_OPEN_TIMEOUT_SECS", "66") };
         let r = stream_open_timeout_for("http://127.0.0.1:8889/v1");
-        unsafe { std::env::remove_var("CODEWHALE_STREAM_OPEN_TIMEOUT_SECS") };
         assert_eq!(r, Duration::from_secs(66));
     }
 
