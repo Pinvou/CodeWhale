@@ -325,6 +325,7 @@ fn sensitive_notes_are_refused_at_the_write_path() {
     let store = NativeMemoryStore::new(tmp.path());
     for note in [
         "aws key AKIAIOSFODNN7EXAMPLE belongs to the ci account",
+        "aws session key ASIAIOSFODNN7EXAMPLE for the batch job",
         "rotate it from -----BEGIN RSA PRIVATE KEY----- in the vault",
         "her 身份证 is 110105194912310021",
         "密码：hunter2",
@@ -352,6 +353,13 @@ fn sensitive_notes_are_refused_at_the_write_path() {
         "the deploy key is hunter2horse",
         "the ssh key is hunter2horse",
         "her access key is hunter2horse",
+        // The underscore and hyphen spellings of the compound kinds are
+        // needles too: `prod access_key = hunter2` must not walk through
+        // just because the assignment shape alone had no live word.
+        "prod access_key = hunter2",
+        "prod access-key = hunter2",
+        "the ssh_key entry holds hunter2horse",
+        "the deploy-key entry holds hunter2horse",
         "the old password was hunter2",
         "password -> hunter2",
     ] {
@@ -532,6 +540,42 @@ fn revise_refuses_sensitive_replacements_but_can_still_remove_stored_ones() {
         store.search("legacy", 10).unwrap()[0].text,
         "legacy credentials were rotated out of memory"
     );
+}
+
+/// Evidence is journal-only text that is never indexed or injected, so the
+/// documented contract is that it is never screened: quoting the secret
+/// shape that motivated a revise or retire must not refuse the edit.
+#[test]
+fn revise_and_retire_evidence_is_never_screened() {
+    let tmp = TempDir::new().unwrap();
+    let store = NativeMemoryStore::new(tmp.path());
+    store
+        .remember(MemoryScope::Global, None, "Deploys run on Tuesdays")
+        .unwrap();
+
+    store
+        .revise(
+            MemoryScope::Global,
+            None,
+            "Deploys run on Tuesdays",
+            "deploys moved to Thursdays",
+            "evidence: rotated api_key=sk-live-abc123 out of the deploy job",
+        )
+        .unwrap_or_else(|error| panic!("revise evidence must not be screened: {error}"));
+    assert_eq!(
+        store.search("Thursdays", 10).unwrap()[0].text,
+        "deploys moved to Thursdays"
+    );
+
+    store
+        .retire(
+            MemoryScope::Global,
+            None,
+            "deploys moved to Thursdays",
+            "removed the stale token: ghp_0123456789abcdef reference",
+        )
+        .unwrap_or_else(|error| panic!("retire evidence must not be screened: {error}"));
+    assert!(store.search("Thursdays", 10).unwrap().is_empty());
 }
 
 /// Removal stays possible for content that predates the gate: `retire` is
