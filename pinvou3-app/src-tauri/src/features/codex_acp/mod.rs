@@ -5112,14 +5112,19 @@ impl AcpPool {
                         runtime.finish_remote_retirement()
                     })
                 })
+                .map(|runtime| {
+                    // Make the taken generation's settled events durable while
+                    // the drain still holds the lock: a concurrent get_or_spawn
+                    // that wins the lock next must seed its bridge from a tail
+                    // that already includes them — the same flush-before-reseed
+                    // ordering as evict / evict_if_idle / rebind / restart.
+                    runtime.bridge.flush_journal();
+                    runtime
+                })
                 .collect()
         };
         for runtime in runtimes {
             runtime.shutdown().await;
-            // Flush any card settlements a racing retirement buffered on this
-            // bridge before the drain, so a later drop-flush cannot regress a
-            // replacement's journal sequence.
-            runtime.bridge.flush_journal();
         }
     }
 
