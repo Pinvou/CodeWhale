@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync/atomic"
 	"testing"
 )
 
@@ -35,14 +36,14 @@ func TestBootstrapPasswordRejectionProofHTTPBoundary(t *testing.T) {
 		{name: "after-password-write", partial: true},
 	} {
 		t.Run(test.name, func(t *testing.T) {
-			var writes, later int
+			var writes, later atomic.Int64
 			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				if r.URL.Path == "/token" {
 					io.WriteString(w, `{"access_token":"fixture","expires_in":300}`)
 					return
 				}
 				if strings.HasSuffix(r.URL.Path, "/reset-password") {
-					writes++
+					writes.Add(1)
 					if test.disconnect {
 						c, _, _ := w.(http.Hijacker).Hijack()
 						c.Close()
@@ -57,7 +58,7 @@ func TestBootstrapPasswordRejectionProofHTTPBoundary(t *testing.T) {
 					io.WriteString(w, test.body)
 					return
 				}
-				later++
+				later.Add(1)
 				w.Header().Set("Content-Type", "application/json")
 				w.WriteHeader(400)
 				io.WriteString(w, policy)
@@ -71,8 +72,9 @@ func TestBootstrapPasswordRejectionProofHTTPBoundary(t *testing.T) {
 			if err == nil || BootstrapActivationUnchanged(err) != test.proof {
 				t.Fatalf("proof=%t err=%v", BootstrapActivationUnchanged(err), err)
 			}
-			if writes != 1 || (!test.partial && later != 0) {
-				t.Fatalf("password attempts=%d later calls=%d", writes, later)
+			passwordAttempts, laterCalls := writes.Load(), later.Load()
+			if passwordAttempts != 1 || (!test.partial && laterCalls != 0) {
+				t.Fatalf("password attempts=%d later calls=%d", passwordAttempts, laterCalls)
 			}
 			if test.proof {
 				if !errors.Is(err, ErrPasswordInvalid) {
