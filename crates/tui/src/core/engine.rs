@@ -1933,6 +1933,14 @@ impl Engine {
         // non-turn reader inherits cross-conversation state.
         self.session.tool_activation_cache.clear();
         self.session.pending_toolbox_eviction_notes.clear();
+        // The recorded turn_meta posture belongs to the previous
+        // conversation: its model saw that receipt, the installed one never
+        // did. Reset it so the installed conversation's first turn
+        // establishes a fresh baseline instead of rendering a transition
+        // whose "from" side it never reported. Arming itself
+        // (`session.ask_on_guardrail`) is host-owned and deliberately stays
+        // — the host did not disarm across this edge.
+        self.last_turn_meta_authority = None;
         let plugin_workspace_changed = self.plugin_registry.workspace() != workspace.as_path();
         let previous_session_id = self.session.id.clone();
         let next_session_id = if let Some(session_id) = session_id {
@@ -6081,12 +6089,20 @@ impl Engine {
         // block stays in append-only history and the next successful
         // request still carries it, but an edit-last-turn truncation would
         // drop it.
-        let current_posture = self.turn_meta_posture_for(&input_policy);
-        self.pending_authority_transition = crate::core::authority::authority_transition_between(
-            self.last_turn_meta_authority,
-            current_posture,
-        );
-        self.last_turn_meta_authority = Some(current_posture);
+        // `runtime_chat_isolated` builds no `<turn_meta>` block at all (see
+        // the block constructors), so a posture recorded on an isolated turn
+        // would be rendered nowhere: an isolated turn neither consumes nor
+        // records, and the next block-building turn compares against the
+        // last posture a block actually reported.
+        if !self.api_config.runtime_chat_isolated {
+            let current_posture = self.turn_meta_posture_for(&input_policy);
+            self.pending_authority_transition =
+                crate::core::authority::authority_transition_between(
+                    self.last_turn_meta_authority,
+                    current_posture,
+                );
+            self.last_turn_meta_authority = Some(current_posture);
+        }
         let user_msg = self.user_text_message_from_snapshot(
             content,
             &model,

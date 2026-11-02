@@ -32153,5 +32153,288 @@ async fn forkguard_a_not_started_turn_neither_consumes_nor_records_the_transitio
     );
 }
 
+#[tokio::test]
+async fn forkguard_sync_session_clears_the_recorded_turn_meta_posture() {
+    // The recorded posture belongs to one conversation: the installed
+    // conversation's model never saw the previous one's receipts, so its
+    // first turn must establish a fresh baseline instead of rendering a
+    // transition whose "from" side it never reported. (Arming itself is
+    // host-owned and deliberately survives the sync.)
+    use crate::core::authority::TurnMetaPosture;
+    use wiremock::matchers::{method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    let _lock = lock_test_env();
+    let workspace = tempdir().expect("tempdir");
+    let server = MockServer::start().await;
+    let plain_sse = concat!(
+        "data: {\"id\":\"chatcmpl-syncposture\",\"choices\":[{\"index\":0,",
+        "\"delta\":{\"content\":\"ok\"},\"finish_reason\":null}]}\n\n",
+        "data: {\"id\":\"chatcmpl-syncposture\",\"choices\":[{\"index\":0,",
+        "\"delta\":{},\"finish_reason\":\"stop\"}]}\n\n",
+        "data: [DONE]\n\n",
+    );
+    Mock::given(method("POST"))
+        .and(path("/v1/chat/completions"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .insert_header("content-type", "text/event-stream")
+                .set_body_string(plain_sse),
+        )
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    let api_config = Config {
+        api_key: Some("test-key".to_string()),
+        base_url: Some(server.uri()),
+        ..Config::default()
+    };
+    let engine_config = EngineConfig {
+        model: crate::config::DEFAULT_TEXT_MODEL.to_string(),
+        workspace: workspace.path().to_path_buf(),
+        mcp_config_path: workspace.path().join("mcp.json"),
+        snapshots_enabled: false,
+        subagents_enabled: false,
+        ..EngineConfig::default()
+    };
+    let (mut engine, _handle) = Engine::new(engine_config, &api_config);
+
+    // The previous conversation's last block reported Full Access armed.
+    engine.last_turn_meta_authority = Some(TurnMetaPosture {
+        mode: AppMode::Agent,
+        approval: crate::tui::approval::ApprovalMode::Bypass,
+        ask_on_guardrail: true,
+    });
+
+    engine
+        .apply_synced_session(
+            Some("fresh-conversation".to_string()),
+            Vec::new(),
+            None,
+            false,
+            crate::config::DEFAULT_TEXT_MODEL.to_string(),
+            workspace.path().to_path_buf(),
+            Vec::new(),
+            AppMode::Agent,
+        )
+        .await;
+    assert_eq!(
+        engine.last_turn_meta_authority, None,
+        "the sync must clear the previous conversation's recorded posture"
+    );
+
+    // A host disarm lands before the installed conversation's first turn,
+    // so that turn reports disarmed. It must stay silent: it has no earlier
+    // receipt in this conversation to be a transition from.
+    engine.session.ask_on_guardrail = false;
+
+    async fn send_turn(
+        engine: &mut Engine,
+        api_config: &Config,
+        prompt: &str,
+    ) -> SendMessageOutcome {
+        engine
+            .handle_send_message(
+                prompt.to_string(),
+                AppMode::Agent,
+                *resolved_route_for_test(api_config, crate::config::DEFAULT_TEXT_MODEL),
+                CompactionConfig::default(),
+                None,
+                None,
+                crate::tools::goal::GoalStatus::Active,
+                None,
+                false,
+                false,
+                true,
+                true,
+                true,
+                crate::tui::approval::ApprovalMode::Bypass,
+                false,
+                None,
+                Vec::new(),
+                None,
+                None,
+                UserInputProvenance::ExternalUser,
+                None,
+            )
+            .await
+    }
+
+    let outcome = send_turn(
+        &mut engine,
+        &api_config,
+        "first turn of the new conversation",
+    )
+    .await;
+    assert!(
+        matches!(
+            outcome,
+            SendMessageOutcome::Finished {
+                status: TurnOutcomeStatus::Completed,
+                ..
+            }
+        ),
+        "the first turn must complete"
+    );
+
+    let requests = server
+        .received_requests()
+        .await
+        .expect("wire mock records requests");
+    assert_eq!(
+        requests.len(),
+        1,
+        "the turn makes exactly one provider call"
+    );
+    let wire_body: serde_json::Value =
+        serde_json::from_slice(&requests[0].body).expect("request body is JSON");
+    let last_user_message = wire_body["messages"]
+        .as_array()
+        .expect("messages array")
+        .iter()
+        .rev()
+        .find(|message| message["role"] == "user")
+        .expect("a user message exists");
+    let last_user_content = last_user_message["content"]
+        .as_str()
+        .expect("string content");
+    assert!(
+        !last_user_content.contains("Authority transition"),
+        "the installed conversation's first turn must not inherit the previous conversation's receipt: {last_user_content}"
+    );
+}
+
+#[tokio::test]
+async fn forkguard_an_isolated_turn_neither_consumes_nor_records_the_transition() {
+    // `runtime_chat_isolated` builds no `<turn_meta>` block at all, so a
+    // posture recorded on an isolated turn would be rendered nowhere. The
+    // turn must leave the record (and any pending transition) untouched:
+    // the next block-building turn compares against the last posture a
+    // block actually reported and renders the change then.
+    use crate::core::authority::TurnMetaPosture;
+    use wiremock::matchers::{method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    let _lock = lock_test_env();
+    let workspace = tempdir().expect("tempdir");
+    let server = MockServer::start().await;
+    let plain_sse = concat!(
+        "data: {\"id\":\"chatcmpl-isolatedposture\",\"choices\":[{\"index\":0,",
+        "\"delta\":{\"content\":\"ok\"},\"finish_reason\":null}]}\n\n",
+        "data: {\"id\":\"chatcmpl-isolatedposture\",\"choices\":[{\"index\":0,",
+        "\"delta\":{},\"finish_reason\":\"stop\"}]}\n\n",
+        "data: [DONE]\n\n",
+    );
+    Mock::given(method("POST"))
+        .and(path("/v1/chat/completions"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .insert_header("content-type", "text/event-stream")
+                .set_body_string(plain_sse),
+        )
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    let api_config = Config {
+        runtime_chat_isolated: true,
+        api_key: Some("test-key".to_string()),
+        base_url: Some(server.uri()),
+        ..Config::default()
+    };
+    let engine_config = EngineConfig {
+        model: crate::config::DEFAULT_TEXT_MODEL.to_string(),
+        workspace: workspace.path().to_path_buf(),
+        mcp_config_path: workspace.path().join("mcp.json"),
+        snapshots_enabled: false,
+        subagents_enabled: false,
+        ..EngineConfig::default()
+    };
+    let (mut engine, _handle) = Engine::new(engine_config, &api_config);
+
+    // The last block reported Full Access disarmed; this isolated turn runs
+    // armed. Nothing may be recorded or consumed — there is no block here
+    // to report the change.
+    engine.last_turn_meta_authority = Some(TurnMetaPosture {
+        mode: AppMode::Agent,
+        approval: crate::tui::approval::ApprovalMode::Bypass,
+        ask_on_guardrail: false,
+    });
+    engine.session.ask_on_guardrail = true;
+
+    async fn send_turn(
+        engine: &mut Engine,
+        api_config: &Config,
+        prompt: &str,
+    ) -> SendMessageOutcome {
+        engine
+            .handle_send_message(
+                prompt.to_string(),
+                AppMode::Agent,
+                *resolved_route_for_test(api_config, crate::config::DEFAULT_TEXT_MODEL),
+                CompactionConfig::default(),
+                None,
+                None,
+                crate::tools::goal::GoalStatus::Active,
+                None,
+                false,
+                false,
+                true,
+                true,
+                true,
+                crate::tui::approval::ApprovalMode::Bypass,
+                false,
+                None,
+                Vec::new(),
+                None,
+                None,
+                UserInputProvenance::ExternalUser,
+                None,
+            )
+            .await
+    }
+
+    let outcome = send_turn(&mut engine, &api_config, "isolated turn").await;
+    assert!(
+        matches!(
+            outcome,
+            SendMessageOutcome::Finished {
+                status: TurnOutcomeStatus::Completed,
+                ..
+            }
+        ),
+        "the isolated turn must complete"
+    );
+    assert_eq!(
+        engine.last_turn_meta_authority,
+        Some(TurnMetaPosture {
+            mode: AppMode::Agent,
+            approval: crate::tui::approval::ApprovalMode::Bypass,
+            ask_on_guardrail: false,
+        }),
+        "an isolated turn must not record a posture no block will report"
+    );
+    assert!(
+        engine.pending_authority_transition.is_none(),
+        "nothing was set, so nothing may be consumed"
+    );
+
+    let requests = server
+        .received_requests()
+        .await
+        .expect("wire mock records requests");
+    assert_eq!(
+        requests.len(),
+        1,
+        "the turn makes exactly one provider call"
+    );
+    let body = String::from_utf8_lossy(&requests[0].body);
+    assert!(
+        !body.contains("<turn_meta>"),
+        "isolated runs build no turn_meta block at all: {body}"
+    );
+}
+
 #[path = "partial_input_differential_tests.rs"]
 mod partial_input_differential_tests;
