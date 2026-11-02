@@ -71,6 +71,12 @@ func (r *PostgresRepository) requestCancellation(ctx context.Context, usageID, u
 	if usage.ExecutionStatus == "REVIEW" && usage.ErrorClass != nil && *usage.ErrorClass == "cancel_hold_recovery_unconfirmed" && usage.CancelStatus == "CANCEL_REQUESTED" {
 		return cancellationSnapshot(usage), false, tx.Commit(ctx)
 	}
+	// A MODEL cancellation or expiry recovery may already have confirmed release
+	// before the user's first command. Keep its immutable confirmation so the
+	// original worker can record its attempt or replay its expiry proof.
+	if usage.ExecutionStatus == "CANCELLED_BEFORE_DISPATCH" && usage.CancelStatus == "LOCAL_CONFIRMED" && usage.SettlementStatus == "RELEASED" {
+		return cancellationSnapshot(usage), false, tx.Commit(ctx)
+	}
 	terminal := usage.ExecutionStatus == "SUCCEEDED" || usage.ExecutionStatus == "FAILED" || usage.ExecutionStatus == "CANCELLED_BEFORE_DISPATCH"
 	if terminal {
 		if _, err := tx.Exec(ctx, `UPDATE usage_requests SET cancel_status='ALREADY_TERMINAL',cancel_requested_at=$2,updated_at=$2 WHERE id=$1`, usageID, now); err != nil {

@@ -590,7 +590,7 @@ USAGE_PENDING -> SETTLED | REVIEW
 ```
 
 1. `[TOK-38]` Gateway 提供按 `usage_request_id` 取消的幂等命令。只有原请求的稳定业务用户可以取消；即使请求开始时的组织成员关系或活动上下文随后失效，仍允许原请求用户执行这一降低后续成本的动作。命令持久化 `CANCEL_REQUESTED`、取消幂等键、请求版本和 `cancel_requested_at` 后立即返回当前执行、取消、交付与结算状态，不得把已接收取消意图返回成“Provider 已取消”。重复取消返回同一取消记录，不重复调用 Provider。
-2. `[TOK-38]` 请求尚未持久化派发意图时，取消通过版本检查把执行终结为 `CANCELLED_BEFORE_DISPATCH`、把取消状态写为 `LOCAL_CONFIRMED`，不得调用 Provider，并按 BILL-35 释放全部 Hold。取消与完成并发时，以已经持久化的上游执行证据为准；请求已经进入不可逆终态时返回稳定 `ALREADY_TERMINAL`，不得倒写成功、失败或结算事实。
+2. `[TOK-38]` 请求尚未持久化派发意图时，取消通过版本检查把执行终结为 `CANCELLED_BEFORE_DISPATCH`、把取消状态写为 `LOCAL_CONFIRMED`，不得调用 Provider，并按 BILL-35 释放全部 Hold。取消与完成并发时，以已经持久化的上游执行证据为准；请求已经进入不可逆终态时返回稳定 `ALREADY_TERMINAL`；已确认本地取消且 Hold 已释放的请求保留 `LOCAL_CONFIRMED` 及原确认事实，供原取消或过期恢复任务收尾、重放证明。不得倒写成功、失败或结算事实。
 3. `[TOK-39]` 每个 Model Gateway Adapter 必须声明 `EXPLICIT_CANCEL`、`STREAM_ABORT_CONFIRMED_CANCEL` 或 `UNSUPPORTED`。只有正式取消接口，或 Provider 合同明确保证关闭上游流会停止生成且仍能取得可靠最终用量时，才能声明前两种能力；普通 HTTP/SSE 断开不得被推断为取消成功。Provider 专属取消请求、状态和错误只存在于 Adapter，领域层只保存统一能力、结果和脱敏证据。
 4. `[TOK-39]` `EXPLICIT_CANCEL` 使用原 `upstream_request_id` 和稳定取消幂等键调用 Provider；只有 Provider 明确保证取消幂等时才可自动重试。`STREAM_ABORT_CONFIRMED_CANCEL` 必须保留可查询的上游请求引用和最终用量获取路径。`UNSUPPORTED` 时停止向该客户端继续展示，但 Gateway 必须继续受控消费原响应或查询原调用，不能通过断开上游连接丢失结果和用量证据。
 5. `[TOK-40]` HTTP、SSE、WebSocket 断开、应用退出、设备休眠和用户仅关闭显示区域都只改变 `delivery_status`，不生成取消意图、不把模型执行标记失败、不释放或缩减 Hold，也不触发新的 Provider 调用。服务端继续执行、持久化流事件并按 TOK-29 支持重连；只有显式调用 TOK-38 取消命令才表示用户要求停止生成。
