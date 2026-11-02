@@ -67,7 +67,7 @@ ARCH="${ARCH#pinvou3_"${VERSION}"_}"
 # ── 3. 合并 latest.json(保留其它平台条目,只更新顶层 Linux 字段) ──────
 # 修复「Linux 发版抹掉 platforms.macos-arm64」:此前用 `jq -n` 从零生成 latest.json,
 # 会清掉 platforms 下所有非 Linux 条目 → Mac 客户端回退到顶层(此时是 Linux deb)→
-# 把 .deb 当 dmg 下。改为:拉远端 latest.json → 只覆盖顶层 version/url/sha256/size →
+# 把 .deb 当 dmg 下。改为:拉远端 latest.json → 只覆盖顶层 version/url/sha256/size/pub_date/notes →
 # 推回。platforms.macos-arm64 / windows-x86_64 等条目原样保留。
 SHA256=$(sha256sum "$DEB" | awk '{print $1}')
 SIZE=$(stat -c%s "$DEB")

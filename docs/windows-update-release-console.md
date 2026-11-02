@@ -75,6 +75,14 @@ Nginx 的 `client_max_body_size` 设为 `4224m`，为 4 GiB 安装器之外的 m
 
 ## Docker Compose 部署
 
+> **双服务器拓扑**：发布台容器只写它所在机器的 `/var/www/pinvou3`（volume 挂载，
+> 见 `deploy/compose.yaml`），落盘机即清单生效机。`pinvou.com` 的 DNS 指向
+> nginx-edge（公网入口），与发布源站（地址见私有运维资料）无自动同步。**首发（写
+> `latest.json`）的发布台必须部署在 nginx-edge 那台机器上**：发布流程会“通过最终
+> HTTPS URL 再次下载并校验”，发布台落在源站时公网入口还没有新产物，该步必然 404
+> 并阻断发布；源站作为镜像端在发布后按
+> [应用内升级-设计](应用内升级-设计.md)「服务端现状」同步，否则另一端仍是旧版/404。
+
 1. 确认 `/var/www/pinvou3/latest.json` 是经过复核的当前线上清单、是权限为 `0644` 的实际普通文件，
    且运行容器的 UID 对该目录有写权限。不得为了通过启动门禁而将未经复核的清单直接改为公开可读。
 2. 生成令牌并写入不进 Git 的 `update-release-console/deploy/.env`：
@@ -96,14 +104,6 @@ Nginx 的 `client_max_body_size` 设为 `4224m`，为 4 GiB 安装器之外的 m
    `pinvou.com` HTTPS server block，执行 `nginx -t` 后 reload，再用
    `curl -fsS https://pinvou.com/pinvou3/latest.json >/dev/null` 验证公网清单可读。
 5. 打开 `https://pinvou.com/pinvou3/release-console/`，输入管理令牌。
-
-> **双服务器拓扑**：发布台容器只写它所在机器的 `/var/www/pinvou3`（volume 挂载，
-> 见 `deploy/compose.yaml`），落盘机即清单生效机。`pinvou.com` 的 DNS 指向
-> nginx-edge（公网入口），与发布源站（地址见私有运维资料）无自动同步。**首发（写
-> `latest.json`）的发布台必须部署在 nginx-edge 那台机器上**：发布流程会“通过最终
-> HTTPS URL 再次下载并校验”，发布台落在源站时公网入口还没有新产物，该步必然 404
-> 并阻断发布；源站作为镜像端在发布后按
-> [应用内升级-设计](应用内升级-设计.md)「服务端现状」同步，否则另一端仍是旧版/404。
 
 如果服务器不是 `pinvou.com`，先同步修改 Compose 中的 `PINVOU_UPDATE_PUBLIC_BASE_URL` 和
 Nginx 路径。不要把管理服务端口绑定到公网地址。

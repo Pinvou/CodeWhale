@@ -107,8 +107,8 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\prepare-windows-re
      -ExpectedSize <release-info 中的字节数>
    ```
 
-3. 上传 `latest.json.new`。
-4. 在服务端将 `latest.json.new` 原子重命名为 `latest.json`。
+3. 上传 `latest.json.new` 到 nginx-edge（与步骤 1 同一台）。
+4. 在 nginx-edge 将 `latest.json.new` 原子重命名为 `latest.json`。
 5. 回读线上 `latest.json`，确认 Windows 版本、URL、大小和 SHA-256。
 6. 使用一台旧版本 Windows 设备完成检查、下载、取消、UAC、覆盖安装和新版拉起验证。
 
