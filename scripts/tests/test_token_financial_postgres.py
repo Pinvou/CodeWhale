@@ -346,7 +346,7 @@ class FinancialPostgresRunnerTests(unittest.TestCase):
         workflow = (Path(__file__).resolve().parents[2] / ".github/workflows/pr-check.yml").read_text(encoding="utf-8")
         job = workflow.split("\n  account-platform-test:\n", 1)[1].split("\n  windows-relay-dacl:\n", 1)[0]
         self.assertIn("\n    timeout-minutes: 180\n", job)
-        self.assertIn("python3 scripts/test-token-financial-postgres.py", job)
+        self.assertIn("python3 scripts/test-financial-parallel.py", job)
         self.assertIn("python3 scripts/test-account-closure-postgres.py", job)
 
     def test_withdrawal_original_receipt_is_selected_and_requires_real_children(self):
@@ -792,7 +792,7 @@ class FinancialPostgresRunnerTests(unittest.TestCase):
             len(RUNNER.REQUIRED) + sum(len(RUNNER.EXACT_REQUIRED_CHILDREN.get(root, ())) for root in RUNNER.REQUIRED),
         )
 
-    def run_main_fixture(self, *, existing_roles=False, user_objects=False, leftover=False,
+    def run_main_fixture(self, *, group="all", existing_roles=False, user_objects=False, leftover=False,
                          owner_leftover=False, account_leftover=False, schema_leftover=False, provisioning_leftover=False, active_client=False, external_dependency=False,
                          go_fail_phase=None, empty_phase=None, skipped_phase=None, missing_token_children=False, platform_role_evidence=None):
         writes, commands, phases, trace = [], [], [], []
@@ -825,7 +825,7 @@ class FinancialPostgresRunnerTests(unittest.TestCase):
                     self.assertFalse(state["bootstrapped"])
                     state["schema_done"] = True
                 else:
-                    phase, required, package = "retained-billing", RUNNER.RETAINED_REQUIRED, RUNNER.BILLING_PACKAGE
+                    phase, required, package = "retained-billing", RUNNER.billing_roots(group), RUNNER.BILLING_PACKAGE
                     self.assertTrue(state["bootstrapped"])
                     state["retained_done"] = True
                 phases.append(phase)
@@ -924,12 +924,48 @@ class FinancialPostgresRunnerTests(unittest.TestCase):
             "GOFLAGS": "-trimpath",
         }, clear=True), patch.object(RUNNER.subprocess, "run", side_effect=run), contextlib.redirect_stdout(io.StringIO()):
             try:
-                RUNNER.main()
+                RUNNER.main(group=group)
             finally:
                 self.fixture_writes = writes
                 self.fixture_commands = commands
                 self.fixture_phases = phases
                 self.fixture_trace = trace
+
+    def test_parallel_groups_preserve_complete_contract_and_exclusive_cleanup(self):
+        phases = []
+        shards = []
+        for group in RUNNER.GROUPS:
+            self.run_main_fixture(group=group)
+            phases.extend(self.fixture_phases)
+            if group == "owners":
+                self.assertEqual(self.fixture_writes, [])
+            else:
+                self.assertEqual(self.fixture_writes, ["create", "drop"])
+            if group.startswith("billing-"):
+                command = self.fixture_commands[0]
+                roots = RUNNER.billing_roots(group)
+                self.assertTrue(roots)
+                for root in RUNNER.RETAINED_REQUIRED:
+                    self.assertEqual(bool(re.fullmatch(command[command.index("-run") + 1], root)), root in roots)
+                shards.append(roots)
+            for command in self.fixture_commands:
+                self.assertIn("-race", command)
+                self.assertIn("-count=1", command)
+        self.assertEqual(len(phases), 8)  # original seven; Billing is split in two
+        self.assertEqual(set(phases), {"owner-account", "owner-wallet", "owner-schema", "owner-provisioning", "lifecycle-reconciliation", "retained-token", "retained-billing"})
+        self.assertFalse(shards[0] & shards[1])
+        self.assertEqual(shards[0] | shards[1], RUNNER.RETAINED_REQUIRED)
+        for group in RUNNER.GROUPS:
+            phase = "owner-account" if group == "owners" else "retained-token" if group == "token" else "retained-billing"
+            for option in ("empty_phase", "skipped_phase", "go_fail_phase"):
+                with self.subTest(group=group, option=option), self.assertRaises(RuntimeError):
+                    self.run_main_fixture(group=group, **{option: phase})
+            with self.assertRaises(RuntimeError):
+                self.run_main_fixture(group=group, existing_roles=True)
+            self.assertEqual(self.fixture_commands, [])
+        with patch.object(RUNNER.subprocess, "run") as run, self.assertRaises(ValueError):
+            RUNNER.main(group="billing-2")
+        run.assert_not_called()
 
     def test_existing_roles_prevent_bootstrap(self):
         with self.assertRaises(RuntimeError):

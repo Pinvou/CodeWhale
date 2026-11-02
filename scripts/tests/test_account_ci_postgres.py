@@ -1,6 +1,8 @@
 """Pure admission regressions; synthetic metadata is not a Docker acceptance."""
 import copy
+import contextlib
 import importlib.util
+import io
 import os
 from pathlib import Path
 import unittest
@@ -49,6 +51,58 @@ class AccountCIAdmissionTests(unittest.TestCase):
         for old,new in [('5432','5433'),('data','other'),('|t|','|f|'),('160015','180004')]:
             with self.assertRaises(ValueError):PG.identity_matches(good.replace(old,new),'/var/lib/postgresql/data','16')
 
+    def test_stop_only_exact_owned_services_after_complete_validation(self):
+        import json
+        metadata, items = {}, {}
+        for index, (_, (name, image, _, major)) in enumerate(PG.SERVICES.items()):
+            meta, item = self.fixture()
+            meta['id'] = str(index+1)*64
+            meta['ports']['5432'] = str(49173+index)
+            item['Id'] = meta['id']; item['Config']['Image'] = image
+            item['NetworkSettings']['Ports']['5432/tcp'][0]['HostPort'] = meta['ports']['5432']
+            item['Mounts'][0].update(Name=str(index+4)*64, Destination='/var/lib/postgresql' if major=='18' else '/var/lib/postgresql/data')
+            metadata[name] = meta; items[meta['id']] = item
+        for problem in ('none', 'unhealthy', 'gone', 'all-gone', 'image', 'bind', 'reused-volume', 'reused-id', 'logs-failed', 'stop-failed'):
+            current, actual = copy.deepcopy(metadata), copy.deepcopy(items)
+            stops = []
+            if problem == 'unhealthy': actual['2'*64]['State']['Health']['Status'] = 'unhealthy'
+            if problem == 'gone': actual.pop('2'*64)
+            if problem == 'all-gone': actual.clear()
+            if problem == 'image': actual['2'*64]['Config']['Image'] = 'unrelated'
+            if problem == 'bind': actual['2'*64]['HostConfig']['Binds'] = ['/business:/data']
+            if problem == 'reused-volume': actual['2'*64]['Mounts'][0]['Name'] = '4'*64
+            if problem == 'reused-id': current['existing-broker-postgres']['id'] = '1'*64
+            def run(argv, **kwargs):
+                if argv[:2] == ['docker', 'ps']:
+                    return '\n'.join([*actual, 'c'*64])  # unrelated container must never be stopped
+                if argv[:2] == ['docker', 'inspect']:
+                    return json.dumps([actual[argv[2]]])
+                if argv[:2] == ['docker', 'logs']:
+                    self.assertIn(argv[2], actual)
+                    self.assertTrue(kwargs['include_stderr'])
+                    if problem == 'logs-failed': raise RuntimeError('controlled log failure')
+                    return 'controlled PostgreSQL stdout and stderr'
+                if argv[:2] == ['docker', 'stop']:
+                    stops.extend(argv[4:]); self.assertEqual(argv[2:4], ['--time', '15'])
+                    self.assertEqual(kwargs['timeout'], 105)
+                    if problem == 'stop-failed': raise RuntimeError('controlled stop failure')
+                    return ''
+                raise AssertionError('unexpected Docker operation')
+            with patch.dict(os.environ, {'GITHUB_ACTIONS':'true'}), patch.object(PG, 'run', side_effect=run), contextlib.redirect_stdout(io.StringIO()) as output:
+                if problem in ('image', 'bind', 'reused-volume', 'reused-id'):
+                    with self.assertRaises(ValueError): PG.stop_owned_services(current)
+                    self.assertEqual(stops, [])
+                elif problem == 'stop-failed':
+                    with self.assertRaises(RuntimeError): PG.stop_owned_services(current)
+                else:
+                    PG.stop_owned_services(current)
+                    self.assertEqual(set(stops), set(actual))
+                self.assertNotIn('c'*64, stops)
+                if problem == 'logs-failed': self.assertIn('::warning::', output.getvalue())
+        with patch.dict(os.environ, {'GITHUB_ACTIONS':''}), patch.object(PG, 'run') as run:
+            with self.assertRaises(RuntimeError): PG.stop_owned_services(metadata)
+            run.assert_not_called()
+
     def test_three_services_and_namespace_match(self):
         import json
         import tempfile
@@ -76,6 +130,9 @@ class AccountCIAdmissionTests(unittest.TestCase):
             with tempfile.TemporaryDirectory() as directory, patch.dict(os.environ,{'ACCOUNT_CI_SERVICES':json.dumps(current),'GITHUB_OUTPUT':str(Path(directory)/'output')}), patch.object(PG,'run',side_effect=run):
                 if failure=='none':
                     PG.main();self.assertIn('financial_system=102',(Path(directory)/'output').read_text())
+                    output=(Path(directory)/'output').read_text()
+                    from_line=next(line for line in output.splitlines() if line.startswith('financial_services='))
+                    self.assertEqual(set(json.loads(from_line.split('=',1)[1])), set(PG.FINANCIAL_GROUPS))
                 else:
                     with self.assertRaises(ValueError):PG.main()
                     self.assertFalse((Path(directory)/'output').exists())
@@ -96,10 +153,14 @@ class AccountCIAdmissionTests(unittest.TestCase):
     def test_workflow_consumers_and_anonymous_lifecycle(self):
         source=(ROOT/'.github/workflows/pr-check.yml').read_text(encoding='utf-8')
         job=source.split('\n  account-platform-test:',1)[1].split('\n  windows-relay-dacl:',1)[0]
-        self.assertIn('PINVOU_LINUX_MEDIUM_RUNNER',job)
-        self.assertEqual(job.count('"127.0.0.1::5432"'),3);self.assertEqual(job.count('          --rm\n'),3)
-        for variable,key in [('PINVOU_TEST_SCHEMA_DATABASE_URL','broker'),('F17_TEST_DATABASE_URL','audit'),('PINVOU_ACCOUNT_FINANCIAL_TEST_DATABASE_URL','financial'),('PINVOU_ACCOUNT_CLOSURE_TEST_DATABASE_URL','financial')]:
+        self.assertIn('PINVOU_LINUX_HEAVY_RUNNER',job)
+        self.assertEqual(job.count('"127.0.0.1::5432"'),6);self.assertEqual(job.count('          --rm\n'),6)
+        for variable,key in [('PINVOU_TEST_SCHEMA_DATABASE_URL','broker'),('F17_TEST_DATABASE_URL','audit'),('PINVOU_ACCOUNT_CLOSURE_TEST_DATABASE_URL','financial')]:
             self.assertIn(variable+': ${{ steps.account-pg.outputs.'+key+'_url }}',job)
+        self.assertIn('ACCOUNT_FINANCIAL_SERVICES: ${{ steps.account-pg.outputs.financial_services }}',job)
+        self.assertEqual(job.count('          --memory 1g\n'),4)
+        self.assertEqual(job.count('          --memory-swap 1g\n'),4)
+        self.assertEqual(job.count('          --cpus 2\n'),4)
         self.assertIn('ACCOUNT_CI_SERVICES: ${{ toJSON(job.services) }}',job)
         self.assertIn('F17_TEST_SERVICE_PORT: ${{ steps.account-pg.outputs.audit_port }}',job)
         self.assertIn('lua5.1 postgresql-client',job)
