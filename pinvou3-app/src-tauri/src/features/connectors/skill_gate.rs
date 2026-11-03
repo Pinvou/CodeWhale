@@ -22,14 +22,14 @@ use serde_json::{Value, json};
 // implementations (they carry the outcome out of `apply_with_consent` for the
 // tail + completion).
 pub(crate) use crate::features::marketplace::ConnectGrantOutcome;
+use crate::features::marketplace::scope::{
+    connect_consent_sync_failure_message, connect_grant_commit_failure_message,
+};
 use crate::features::marketplace::{
     RELIED_GRANT_LOST_CAUSE, RELIED_GRANT_REPLACEMENT_PENDING_CAUSE, ReliedGrantCommit,
     complete_connect_grant, deny_first_register_connector, deny_first_register_connector_refresh,
     grant_connect_enable, grant_connect_enable_refresh, revoke_connect_enable,
     sync_deny_all_scopes_after_install,
-};
-use crate::features::marketplace::scope::{
-    connect_consent_sync_failure_message, connect_grant_commit_failure_message,
 };
 /// Retain error origin: callers may localize materialization, never consent.
 #[derive(Debug, PartialEq, Eq)]
@@ -97,11 +97,7 @@ pub(crate) trait ConnectorSkillGate {
     /// 连接手势门(feat/connector-connect-grants-enable):`apply_skills_command`
     /// 的 deny-first 臂。返回 `ConnectGrantOutcome` 供尾腿授权与完成校验消费。
     fn apply_with_consent(&self, visible: bool) -> Result<ConnectGrantOutcome, SkillApplyError> {
-        apply_registered_skills(
-            self,
-            visible,
-            deny_first_register_connector,
-        )
+        apply_registered_skills(self, visible, deny_first_register_connector)
     }
 
     /// 启动刷新门(refresh 变体):LEDGER-GATED 且尊重 stored 裁决——boot 刷新
@@ -110,11 +106,7 @@ pub(crate) trait ConnectorSkillGate {
         &self,
         visible: bool,
     ) -> Result<ConnectGrantOutcome, SkillApplyError> {
-        apply_registered_skills(
-            self,
-            visible,
-            deny_first_register_connector_refresh,
-        )
+        apply_registered_skills(self, visible, deny_first_register_connector_refresh)
     }
 
     /// 停用标志文件完整路径:`~/.pinvou3/<disabled_filename>`。
@@ -282,12 +274,8 @@ pub(crate) fn complete_grant_for_completion(
     gate: &ConnectGrantOutcome,
     tail: &ConnectGrantOutcome,
 ) -> Result<(), String> {
-    let lost = |cause: String| {
-        connect_consent_sync_failure_message(
-            &format!("{id} connected"),
-            &cause,
-        )
-    };
+    let lost =
+        |cause: String| connect_consent_sync_failure_message(&format!("{id} connected"), &cause);
     match complete_connect_grant(id, gate, Some(tail)) {
         Ok(ReliedGrantCommit::NotRelied | ReliedGrantCommit::Committed) => Ok(()),
         Ok(ReliedGrantCommit::Superseded) => {
@@ -302,26 +290,20 @@ pub(crate) fn complete_grant_for_completion(
         // consent keeps the connector enabled, and the frontend's
         // commit-incomplete copy says exactly that without latching the
         // disabled banner (round-11 review P2).
-        Ok(ReliedGrantCommit::ReplacementPending) => Err(
-            connect_grant_commit_failure_message(
-                &format!("{id} connected"),
-                RELIED_GRANT_REPLACEMENT_PENDING_CAUSE,
-            ),
-        ),
-        Ok(ReliedGrantCommit::GrantLost) => Err(lost(
-            RELIED_GRANT_LOST_CAUSE.to_string(),
+        Ok(ReliedGrantCommit::ReplacementPending) => Err(connect_grant_commit_failure_message(
+            &format!("{id} connected"),
+            RELIED_GRANT_REPLACEMENT_PENDING_CAUSE,
         )),
+        Ok(ReliedGrantCommit::GrantLost) => Err(lost(RELIED_GRANT_LOST_CAUSE.to_string())),
         // A persist failure is the OPPOSITE state to GrantLost: the
         // standing grant + ledger stay effective, so the connector
         // REMAINS enabled — the disabled/nothing-exposed copy of `lost`
         // would be false (round-9 review P2). The commit-stage copy says
         // so and does not drive the frontend's consent-failure latch.
-        Err(commit_err) => Err(
-            connect_grant_commit_failure_message(
-                &format!("{id} connected"),
-                &commit_err,
-            ),
-        ),
+        Err(commit_err) => Err(connect_grant_commit_failure_message(
+            &format!("{id} connected"),
+            &commit_err,
+        )),
     }
 }
 #[cfg(test)]
@@ -479,12 +461,8 @@ mod tests {
                     Err("injected materialization failure".into())
                 }
             }
-            let error = apply_registered_skills(
-                &FailingGate,
-                true,
-                deny_first_register_connector,
-            )
-            .unwrap_err();
+            let error = apply_registered_skills(&FailingGate, true, deny_first_register_connector)
+                .unwrap_err();
             let surfaced = error.map_materialization(|e| e);
             assert!(
                 surfaced.contains("injected materialization failure"),

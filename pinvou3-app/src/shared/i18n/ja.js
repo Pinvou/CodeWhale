@@ -2106,7 +2106,6 @@ dictJa["uiAccount"] = {
 };
 dictJa["uiToolStore"]["guide"]["types"] = ["標準スキル（SKILL.md フォルダ）", "単一の .md スキルファイル", "MCP サービス", "Pinvou プラグインパッケージ（推奨）"];
 dictJa["uiToolStore"]["connectorErrors"] = {
-    "consent_persist_failed": "接続は完了しましたが、デフォルトOFFの同意状態の保存に失敗しました。入力欄のツールリストでコネクタをオフにしてから、再接続してください。",
     "connect_consent_persist_failed": "認証は完了しましたが、コネクタの有効状態の保存に失敗しました。外部には何も公開されていません。再接続して再試行してください。",
     "connect_consent_commit_incomplete": "認証は完了しましたが、コネクタの有効状態の確定に失敗しました。現在も有効ですが、並行して実行中の操作によって取り消される可能性があります。確定するには再接続してください。",
     "consent_persist_failed": "接続は完了しましたが、デフォルトOFFの同意状態の保存に失敗しました。入力欄のツールリストでコネクタをオフにしてから、再接続してください。",

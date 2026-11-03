@@ -2078,7 +2078,6 @@ dictZh["uiAccount"] = {
 };
 dictZh["uiToolStore"]["guide"]["types"] = ["标准 Skill（SKILL.md 目录）", "单个 .md 技能文件", "MCP 服务", "Pinvou 插件包（推荐）"];
 dictZh["uiToolStore"]["connectorErrors"] = {
-    "consent_persist_failed": "授权已完成，但默认关同意状态落盘失败。请在输入框工具列表中关闭该连接器后重新连接。",
     "connect_consent_persist_failed": "授权已完成，但连接器启用状态落盘失败。未对外暴露任何能力，请重新连接重试。",
     "connect_consent_commit_incomplete": "授权已完成，但固化连接器启用状态失败。连接器保持启用，但并发操作仍可能将其撤回——请重新连接以确认生效。",
     "consent_persist_failed": "授权已完成，但默认关同意状态落盘失败。请在输入框工具列表中关闭该连接器后重新连接。",

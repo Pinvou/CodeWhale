@@ -12,7 +12,9 @@ use serde_json::{Value, json};
 use tauri::{AppHandle, Manager};
 
 use crate::features::connectors::connector_cli::{self as cc, CliCtx, ConnectorConn};
-use crate::features::connectors::skill_gate::{ConnectGrantOutcome, ConnectorGate, ConnectorSkillGate};
+use crate::features::connectors::skill_gate::{
+    ConnectGrantOutcome, ConnectorGate, ConnectorSkillGate,
+};
 
 const ID: &str = "tmeet";
 /// `pub` + the facade re-export: single-sourced with the CLI's connectors
@@ -498,35 +500,39 @@ pub(crate) static TMEET_GATE: ConnectorGate = ConnectorGate {
 };
 
 pub async fn tmeet_apply_skills() -> Result<Value, String> {
-    let (show, grant) = tokio::task::spawn_blocking(|| -> Result<(bool, ConnectGrantOutcome), String> {
-        let show = tmeet_skills_should_show();
-        // Deny-first transaction boundary (#517): record the connector's
-        // connect consent BEFORE materializing skill files, so a refused
-        // gate write aborts before anything lands — the connector can never
-        // end up live without its consent recorded. The consent write can
-        // block on the cross-process flock, hence inside this spawn_blocking
-        // closure; the gate outcome is carried out for the tail grant and
-        // the completion below.
-        let grant = GATE.apply_with_consent(show).map_err(|e| {
-            e.map_materialization(|e| {
-                // Keep the raw materialization cause when the card replaces it.
-                log::warn!("[tmeet] apply skills failed: {e}");
-                e
-            })
-        })?;
-        Ok((show, grant))
-    })
-    .await
-    .map_err(|e| {
-        // Same loss risk for the join failure itself.
-        log::warn!("[tmeet] apply skills task failed: {e}");
-        format!("spawn_blocking: {e}")
-    })??;
+    let (show, grant) =
+        tokio::task::spawn_blocking(|| -> Result<(bool, ConnectGrantOutcome), String> {
+            let show = tmeet_skills_should_show();
+            // Deny-first transaction boundary (#517): record the connector's
+            // connect consent BEFORE materializing skill files, so a refused
+            // gate write aborts before anything lands — the connector can never
+            // end up live without its consent recorded. The consent write can
+            // block on the cross-process flock, hence inside this spawn_blocking
+            // closure; the gate outcome is carried out for the tail grant and
+            // the completion below.
+            let grant = GATE.apply_with_consent(show).map_err(|e| {
+                e.map_materialization(|e| {
+                    // Keep the raw materialization cause when the card replaces it.
+                    log::warn!("[tmeet] apply skills failed: {e}");
+                    e
+                })
+            })?;
+            Ok((show, grant))
+        })
+        .await
+        .map_err(|e| {
+            // Same loss risk for the join failure itself.
+            log::warn!("[tmeet] apply skills task failed: {e}");
+            format!("spawn_blocking: {e}")
+        })??;
     // 连接动作本身就是同意（feat/connector-connect-grants-enable）：见
     // feishu_apply_skills 同名注释（授权尾腿 + 完成校验，fail-closed）。
     if show {
-        let tail = crate::features::connectors::skill_gate::grant_connect_enable_tail("tmeet", &grant)?;
-        crate::features::connectors::skill_gate::complete_grant_for_completion("tmeet", &grant, &tail)?;
+        let tail =
+            crate::features::connectors::skill_gate::grant_connect_enable_tail("tmeet", &grant)?;
+        crate::features::connectors::skill_gate::complete_grant_for_completion(
+            "tmeet", &grant, &tail,
+        )?;
     }
     Ok(json!({ "visible": show }))
 }
@@ -542,7 +548,8 @@ pub(crate) fn tmeet_gate_step() -> Result<bool, String> {
     // a boot refresh has no user gesture behind it, so its consent write is
     // the ledger-gated, verdict-respecting grant — it never lifts a stored
     // row (a composer toggle-off or a legacy-migrated disable survives).
-    let grant = GATE.apply_with_consent_refresh(show)
+    let grant = GATE
+        .apply_with_consent_refresh(show)
         .map_err(|e| e.map_materialization(|e| format!("更新腾讯会议技能失败: {e}")))?;
     if show {
         let tail = crate::features::connectors::skill_gate::grant_connect_enable_refresh_tail(
@@ -550,15 +557,17 @@ pub(crate) fn tmeet_gate_step() -> Result<bool, String> {
             "腾讯会议",
             &grant,
         )?;
-        crate::features::connectors::skill_gate::complete_grant_for_completion("tmeet", &grant, &tail)
-            .map_err(|e| {
-                crate::platform::startup::mark_with_detail(
-                    "rust",
-                    "connector_consent_sync:failed",
-                    &format!("tmeet: {e}"),
-                );
-                e
-            })?;
+        crate::features::connectors::skill_gate::complete_grant_for_completion(
+            "tmeet", &grant, &tail,
+        )
+        .map_err(|e| {
+            crate::platform::startup::mark_with_detail(
+                "rust",
+                "connector_consent_sync:failed",
+                &format!("tmeet: {e}"),
+            );
+            e
+        })?;
     }
     Ok(show)
 }

@@ -720,11 +720,11 @@ pub use crate::features::marketplace::scope::{
 // backfill and the CLI's standalone `apply-skills` maintenance run — a
 // command with no connect gesture behind it must never lift a stored
 // no-ledger verdict (round-3 review).
+#[cfg(test)]
+pub use crate::features::marketplace::scope::load_disabled_bundles;
 pub(crate) use crate::features::marketplace::scope::{
     grant_connect_enable, grant_connect_enable_refresh, revoke_connect_enable,
 };
-#[cfg(test)]
-pub use crate::features::marketplace::scope::load_disabled_bundles;
 
 /// 按会话类型 scope 持久化连接器禁用列表并刷新技能目录。
 ///

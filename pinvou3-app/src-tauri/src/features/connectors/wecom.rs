@@ -24,7 +24,9 @@ use serde_json::{Value, json};
 use tauri::{AppHandle, Manager};
 
 use crate::features::connectors::connector_cli::{self as cc, CliCtx, ConnectorConn};
-use crate::features::connectors::skill_gate::{ConnectGrantOutcome, ConnectorGate, ConnectorSkillGate};
+use crate::features::connectors::skill_gate::{
+    ConnectGrantOutcome, ConnectorGate, ConnectorSkillGate,
+};
 
 /// 连接器 id(事件前缀 + ConnectorConn 槽位键 + 停用标志名)。
 const ID: &str = "wecom";
@@ -426,35 +428,39 @@ pub(crate) static WECOM_GATE: ConnectorGate = ConnectorGate {
 
 /// 按当前"应否可见"状态写 / 删技能文件。前端在连接成功 / 断开 / 切开关后调。
 pub async fn wecom_apply_skills() -> Result<Value, String> {
-    let (show, grant) = tokio::task::spawn_blocking(|| -> Result<(bool, ConnectGrantOutcome), String> {
-        let show = wecom_skills_should_show();
-        // Deny-first transaction boundary (#517): record the connector's
-        // connect consent BEFORE materializing skill files, so a refused
-        // gate write aborts before anything lands — the connector can never
-        // end up live without its consent recorded. The consent write can
-        // block on the cross-process flock, hence inside this spawn_blocking
-        // closure; the gate outcome is carried out for the tail grant and
-        // the completion below.
-        let grant = GATE.apply_with_consent(show).map_err(|e| {
-            e.map_materialization(|e| {
-                // Keep the raw materialization cause when the card replaces it.
-                log::warn!("[wecom] apply skills failed: {e}");
-                e
-            })
-        })?;
-        Ok((show, grant))
-    })
-    .await
-    .map_err(|e| {
-        // Same loss risk for the join failure itself.
-        log::warn!("[wecom] apply skills task failed: {e}");
-        format!("spawn_blocking: {e}")
-    })??;
+    let (show, grant) =
+        tokio::task::spawn_blocking(|| -> Result<(bool, ConnectGrantOutcome), String> {
+            let show = wecom_skills_should_show();
+            // Deny-first transaction boundary (#517): record the connector's
+            // connect consent BEFORE materializing skill files, so a refused
+            // gate write aborts before anything lands — the connector can never
+            // end up live without its consent recorded. The consent write can
+            // block on the cross-process flock, hence inside this spawn_blocking
+            // closure; the gate outcome is carried out for the tail grant and
+            // the completion below.
+            let grant = GATE.apply_with_consent(show).map_err(|e| {
+                e.map_materialization(|e| {
+                    // Keep the raw materialization cause when the card replaces it.
+                    log::warn!("[wecom] apply skills failed: {e}");
+                    e
+                })
+            })?;
+            Ok((show, grant))
+        })
+        .await
+        .map_err(|e| {
+            // Same loss risk for the join failure itself.
+            log::warn!("[wecom] apply skills task failed: {e}");
+            format!("spawn_blocking: {e}")
+        })??;
     // 连接动作本身就是同意（feat/connector-connect-grants-enable）：见
     // feishu_apply_skills 同名注释（授权尾腿 + 完成校验，fail-closed）。
     if show {
-        let tail = crate::features::connectors::skill_gate::grant_connect_enable_tail("wecom", &grant)?;
-        crate::features::connectors::skill_gate::complete_grant_for_completion("wecom", &grant, &tail)?;
+        let tail =
+            crate::features::connectors::skill_gate::grant_connect_enable_tail("wecom", &grant)?;
+        crate::features::connectors::skill_gate::complete_grant_for_completion(
+            "wecom", &grant, &tail,
+        )?;
     }
     Ok(json!({ "visible": show }))
 }
@@ -471,7 +477,8 @@ pub(crate) fn wecom_gate_step() -> Result<bool, String> {
     // a boot refresh has no user gesture behind it, so its consent write is
     // the ledger-gated, verdict-respecting grant — it never lifts a stored
     // row (a composer toggle-off or a legacy-migrated disable survives).
-    let grant = GATE.apply_with_consent_refresh(show)
+    let grant = GATE
+        .apply_with_consent_refresh(show)
         .map_err(|e| e.map_materialization(|e| format!("更新企业微信技能失败: {e}")))?;
     if show {
         let tail = crate::features::connectors::skill_gate::grant_connect_enable_refresh_tail(
@@ -479,15 +486,17 @@ pub(crate) fn wecom_gate_step() -> Result<bool, String> {
             "企业微信",
             &grant,
         )?;
-        crate::features::connectors::skill_gate::complete_grant_for_completion("wecom", &grant, &tail)
-            .map_err(|e| {
-                crate::platform::startup::mark_with_detail(
-                    "rust",
-                    "connector_consent_sync:failed",
-                    &format!("wecom: {e}"),
-                );
-                e
-            })?;
+        crate::features::connectors::skill_gate::complete_grant_for_completion(
+            "wecom", &grant, &tail,
+        )
+        .map_err(|e| {
+            crate::platform::startup::mark_with_detail(
+                "rust",
+                "connector_consent_sync:failed",
+                &format!("wecom: {e}"),
+            );
+            e
+        })?;
     }
     Ok(show)
 }

@@ -2106,7 +2106,6 @@ dictEn["uiAccount"] = {
 };
 dictEn["uiToolStore"]["guide"]["types"] = ["Standard skill (SKILL.md folder)", "Single .md skill file", "MCP server", "Pinvou plugin package (recommended)"];
 dictEn["uiToolStore"]["connectorErrors"] = {
-    "consent_persist_failed": "Authorization completed, but persisting the default-off consent failed. Turn the connector off in the composer tools list, then reconnect.",
     "connect_consent_persist_failed": "Authorization completed, but persisting the connector’s enabled state failed. Nothing was exposed — reconnect to try again.",
     "connect_consent_commit_incomplete": "Authorization completed, but finalizing the connector’s enabled state failed. It stays enabled, but a concurrent operation could still withdraw it — reconnect to secure it.",
     "consent_persist_failed": "Authorization completed, but persisting the default-off consent failed. Turn the connector off in the composer tools list, then reconnect.",

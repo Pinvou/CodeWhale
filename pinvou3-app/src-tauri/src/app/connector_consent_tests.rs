@@ -135,7 +135,9 @@ mod skill_gate_tests {
                 "the raw lock cause stays in the wrapped copy: {message}"
             );
             assert!(
-                message.contains(crate::features::marketplace::scope::CONNECT_CONSENT_SYNC_FAILURE_MARKER),
+                message.contains(
+                    crate::features::marketplace::scope::CONNECT_CONSENT_SYNC_FAILURE_MARKER
+                ),
                 "the gesture gate's persist refusal must carry the connect consent marker: {message}"
             );
             assert_eq!(
