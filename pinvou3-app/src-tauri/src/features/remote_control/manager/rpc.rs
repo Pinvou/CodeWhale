@@ -1124,8 +1124,19 @@ mod tests {
             "a not-ready session store is a transient condition and must never be \
              cached as a terminal completion"
         );
+        let (_, load_failure) = body
+            .split_once("if let Err(error) = store.load(session_id) {")
+            .expect("session load failure branch must exist");
+        let (load_failure, _) = load_failure
+            .split_once("\n    }")
+            .expect("session load failure branch must be bounded");
+        let compact: String = load_failure.split_ascii_whitespace().collect();
         assert!(
-            body.contains("WebScopeRejection::Transient(\"web_session_unavailable\".to_string())"),
+            compact.contains(
+                "returnErr(WebScopeRejection::Transient(\"web_session_unavailable\".to_string(),));"
+            ) || compact.contains(
+                "returnErr(WebScopeRejection::Transient(\"web_session_unavailable\".to_string()));"
+            ),
             "a failed session load may be transient filesystem unavailability and must \
              never be cached as a terminal completion"
         );
