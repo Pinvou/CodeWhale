@@ -1,0 +1,91 @@
+{
+  "oldAfterRetry": {
+    "newAck": {
+      "requestId": "request-b4c48eb8a19d4ccebf74ba5c5dc26970",
+      "sessionId": "session-ref-546d7d63467641bf991ee6fb569b4511"
+    },
+    "newProjection": {
+      "capabilityError": null,
+      "capabilityRequestId": "request-b4c48eb8a19d4ccebf74ba5c5dc26970",
+      "capabilityRevision": 5,
+      "capabilityValidForMs": 30000,
+      "connectionId": "connection-0001",
+      "controllerLeaseId": "lease-0001",
+      "leaseEpoch": "1",
+      "mode": "chat",
+      "modelSource": "controlled_device",
+      "modes": [
+        "chat"
+      ],
+      "relayEpoch": "epoch-test-1",
+      "remoteControlGeneration": "generation-0001",
+      "sessionId": "session-ref-546d7d63467641bf991ee6fb569b4511",
+      "sessionRef": "session-ref-546d7d63467641bf991ee6fb569b4511",
+      "taskCount": 0,
+      "temporaryModelAvailable": false,
+      "title": "Session",
+      "workspaceCount": 0
+    },
+    "oldAck": {
+      "requestId": "request-3ccaf4b07b824751bb608e834e0984dc",
+      "sessionId": "session-ref-546d7d63467641bf991ee6fb569b4511"
+    },
+    "oldProjection": null,
+    "relayErrorProducedCapabilityEvent": false
+  },
+  "oldBeforeRetry": {
+    "newAck": {
+      "requestId": "request-034720e50c2e4e81ad0208a2435aab03",
+      "sessionId": "session-ref-5b30b6c41d57432f9c492ad8b1d26a67"
+    },
+    "newProjection": {
+      "capabilityError": null,
+      "capabilityRequestId": "request-034720e50c2e4e81ad0208a2435aab03",
+      "capabilityRevision": 5,
+      "capabilityValidForMs": 30000,
+      "connectionId": "connection-0001",
+      "controllerLeaseId": "lease-0001",
+      "leaseEpoch": "1",
+      "mode": "chat",
+      "modelSource": "controlled_device",
+      "modes": [
+        "chat"
+      ],
+      "relayEpoch": "epoch-test-1",
+      "remoteControlGeneration": "generation-0001",
+      "sessionId": "session-ref-5b30b6c41d57432f9c492ad8b1d26a67",
+      "sessionRef": "session-ref-5b30b6c41d57432f9c492ad8b1d26a67",
+      "taskCount": 0,
+      "temporaryModelAvailable": false,
+      "title": "Session",
+      "workspaceCount": 0
+    },
+    "oldAck": {
+      "requestId": "request-291ac206ad364ccd82b3c29240d38678",
+      "sessionId": "session-ref-5b30b6c41d57432f9c492ad8b1d26a67"
+    },
+    "oldProjection": {
+      "capabilityError": null,
+      "capabilityRequestId": "request-291ac206ad364ccd82b3c29240d38678",
+      "capabilityRevision": 4,
+      "capabilityValidForMs": 30000,
+      "connectionId": "connection-0001",
+      "controllerLeaseId": "lease-0001",
+      "leaseEpoch": "1",
+      "mode": "chat",
+      "modelSource": "controlled_device",
+      "modes": [
+        "chat"
+      ],
+      "relayEpoch": "epoch-test-1",
+      "remoteControlGeneration": "generation-0001",
+      "sessionId": "session-ref-5b30b6c41d57432f9c492ad8b1d26a67",
+      "sessionRef": "session-ref-5b30b6c41d57432f9c492ad8b1d26a67",
+      "taskCount": 0,
+      "temporaryModelAvailable": false,
+      "title": "Session",
+      "workspaceCount": 0
+    },
+    "relayErrorProducedCapabilityEvent": false
+  }
+}

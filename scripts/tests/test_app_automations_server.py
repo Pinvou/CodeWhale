@@ -54,7 +54,7 @@ spec.loader.exec_module(server)
 
 
 def _future_at(minutes=60):
-    at = datetime.datetime.now() + datetime.timedelta(minutes=minutes)
+    at = server.datetime.datetime.now() + datetime.timedelta(minutes=minutes)
     return at.strftime("%Y-%m-%dT%H:%M")
 
 
@@ -80,6 +80,47 @@ def _write_automation(directory, task_id, **overrides):
 
 class RruleValidationTests(unittest.TestCase):
     """B1-B5/B8: the product subset, normalization, and rejections."""
+
+    def setUp(self):
+        from types import SimpleNamespace
+        from unittest.mock import patch
+
+        class FixtureDateTime(datetime.datetime):
+            @classmethod
+            def now(cls):
+                return cls(2026, 1, 1, 12, 0)
+
+        # The validator and ordinary ONCE fixtures share one stable local
+        # clock; the production timezone resolver and DST policy stay active.
+        clock = SimpleNamespace(datetime=FixtureDateTime, timezone=datetime.timezone)
+        fixture = patch.object(server, "datetime", clock)
+        fixture.start()
+        self.addCleanup(fixture.stop)
+
+    def test_ordinary_future_shape_survives_host_dst_windows(self):
+        import zoneinfo
+        from types import SimpleNamespace
+        from unittest.mock import patch
+
+        try:
+            zoneinfo.ZoneInfo("America/New_York")
+        except zoneinfo.ZoneInfoNotFoundError:
+            self.skipTest("no IANA tz database on this host")
+        for host_now in (datetime.datetime(2026, 3, 8, 1, 30), datetime.datetime(2026, 11, 1, 0, 30)):
+            with self.subTest(host_now=host_now):
+                class HostDateTime(datetime.datetime):
+                    @classmethod
+                    def now(cls):
+                        return host_now
+
+                host_clock = SimpleNamespace(datetime=HostDateTime, timedelta=datetime.timedelta, timezone=datetime.timezone)
+                # A healthy ordinary ONCE fixture must remain valid when the
+                # real host's next hour would fall into either DST boundary.
+                with patch.dict(_future_at.__globals__, {"datetime": host_clock}), patch.dict(os.environ, {"TZ": "America/New_York"}):
+                    future_at = _future_at()
+                    normalized, error = server.validate_rrule("FREQ=ONCE;AT=%s" % future_at)
+                self.assertIsNone(error)
+                self.assertEqual(normalized, "FREQ=ONCE;AT=%s" % future_at)
 
     def test_valid_product_shapes_pass_and_normalize(self):
         cases = [
@@ -172,13 +213,13 @@ class RruleValidationTests(unittest.TestCase):
             self.skipTest("no IANA tz database on this host")
         old_tz = os.environ.get("TZ")
         os.environ["TZ"] = "America/New_York"
+
         try:
+            # Keep all three wall times future relative to the fixture clock.
+            # A moving "now + minutes" can itself land in a DST overlap/gap.
             _, gap_error = server.validate_rrule("FREQ=ONCE;AT=2026-03-08T02:30")
             _, amb_error = server.validate_rrule("FREQ=ONCE;AT=2026-11-01T01:30")
-            # Round-27 minor 3: the passing arm uses the file's
-            # _future_at() helper — a hardcoded wall time failed the
-            # future check once it passed, a deterministic suite red.
-            future_at = _future_at(minutes=365)
+            future_at = "2026-06-01T09:30"
             normalized, ok_error = server.validate_rrule("FREQ=ONCE;AT=%s" % future_at)
         finally:
             if old_tz is None:
