@@ -29,8 +29,10 @@ Office、压缩包、MSG、扫描 PDF 的 OCR 和 PDF 预览统一使用独占�
 - 纯文本、JSON、图片和 XLSX 使用现有解析/输入流程；格式识别与 MIME 取已校验的原始文件名。
 - DOCX/ODT 仍调用 pandoc，显式传入输入格式；PDF、压缩包和邮件继续使用现有有界转换命令。
 - LibreOffice 不直接接受这类匿名源。旧 Office、WPS、演示及表格回退改经本地 UNO `InputStream` 输入封存字节；使用独占临时 profile 和随机本地管道，禁用宏与链接更新，沿用进程树超时与输出限制。
+- UNO 管道按 LibreOffice 的 Linux OSL 规则落在 `/tmp/OSL_PIPE_<uid>_<name>`（`/tmp` 不可写时使用 `/var/tmp`，不由 `TMPDIR` 指定）。启动前拒绝任何预存节点；连接前后以 `lstat` 校验节点为当前有效 UID 所有、组和其他用户无权限的 socket，并复核设备号/inode。共享父目录须由 root 或当前用户持有，且可被其他用户写入时必须有 sticky bit；不支持的目录状态直接拒绝，不删除或改权限接管外来节点。
 - Linux 的该转换路径需要系统 `/usr/bin/python3`、`python3-uno` 与 LibreOffice。设置中的依赖检查提供中/英/日文说明和现有手动安装入口；Debian/Ubuntu 可安装 `libreoffice python3-uno`。不自动安装，不开放 TCP UNO 服务。缺桥接依赖返回 `attachment_office_stream_dependency_missing`，设置中的体检项明确提供安装入口；缺少 UNO 时不改走 CLI 文件路径，以维持封存输入契约。成功退出但没有实际转换产物仍判失败。
 - UNO 冷启动预算为 60 秒，整棵进程树仍受外层 180 秒截止约束。正常退出先关闭文档和 UNO desktop；不另建可逃逸外层超时的子进程组。SIGKILL 无法运行 Python finally，可能遗留无正文内容的 `0700` 本地管道节点，此限制保留，不能宣称绝对无节点残留。
+- 管道名仍可经同机 `/proc/<pid>/cmdline` 观察；其他用户抢注仍可能令本次转换被拒，不能宣称消除本地拒绝服务。上述检查在发送附件字节前失败关闭；同 UID 进程及 root 不在跨用户隔离保证内。
 - 远程摄入的转换器与 IO 错误只输出安全诊断码，覆盖压缩包内成员转换告警；本地普通摄入保留原诊断，成功文档正文不会被路径过滤改写。源消失返回 unavailable，范围、名字或摘要不匹配返回 invalid。
 
 ## 验证
@@ -43,6 +45,7 @@ CLI 夏令时回归使用 `America/New_York` 的真实时区数据；CLI Linux �
 
 ```bash
 python3 scripts/architecture-guard.py
+python3 -m unittest scripts.tests.test_office_stream_security -v
 node --test pinvou3-app/tests/*remote*.test.mjs pinvou3-app/tests/controlled_device*.test.mjs pinvou3-app/tests/connect_remote*.test.mjs pinvou3-app/tests/controller_session*.test.mjs
 cargo test --locked --manifest-path pinvou3-app/src-tauri/tests/controller-crypto-harness/Cargo.toml -- --test-threads=1
 cargo test --locked --manifest-path pinvou3-app/src-tauri/Cargo.toml --lib -- --test-threads=1
@@ -53,6 +56,12 @@ cargo test --locked --manifest-path pinvou3-app/src-tauri/Cargo.toml --lib seale
 测试覆盖平台/发布开关的组合、双端共享状态机和加密传输、真实 Linux 上传与延迟清理、封存源的子进程读取及篡改拒绝、会话范围拒绝、文件格式和只读 owner 的非序列化边界。前端 mock bridge smoke 与 Rust loopback 测试不代替已安装应用的双机验证。
 
 发布前仍须用实际安装包完成 Linux→Linux、Linux→Windows、Windows→Linux：配对、chat/code 两种模式、工作区授权、两种模型来源、审批允许/拒绝、图片/文本/Office 附件、产物下载、断网恢复和 B 手动关闭。不同架构的系统包、Wayland 实际宿主与 Windows 原生回归分别保留验证记录。
+
+## UNO 端点身份修复验证（2026-11-03）
+
+本机 aarch64 Linux 上，合成的同 UID、`0777` 预占 socket 实际收到 LibreOffice 的连接；这验证预占行为，不冒充真实跨 UID 攻击实验。权限过宽的端点在原 helper 的定向回归中未被拒绝，修复后 13 项 Python 回归全部通过，覆盖预存节点、异主 UID 元数据、权限、符号链接、父目录、连接期间替换、附件字节发送前拒绝及子进程清理。异主 UID 通过 `lstat` 边界注入验证，未修改宿主用户或权限配置。分别移除 UID、权限、连接后身份检查的三个变异版本均被对应测试捕获。
+
+真实封存 RTF 经系统 LibreOffice/UNO 转换为预期正文通过；现有 Rust 测试内嵌的冷启动预算探针及缺 UNO 诊断探针以当前源码直接执行通过。本次未重新编译或执行完整 Rust/跨平台套件，新 head 的 CI 另行核验；不沿用旧 head 绿灯。
 
 ## 初版本机验证记录（2026-10-23）
 

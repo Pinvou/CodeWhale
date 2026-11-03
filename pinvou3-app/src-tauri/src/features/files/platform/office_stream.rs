@@ -109,7 +109,7 @@ mod tests {
     #[ignore = "requires local /usr/bin/python3; no UNO, network or model"]
     fn helper_startup_budget_and_missing_uno_are_deterministic() {
         let script = r#"
-import sys
+import os, pathlib, socket, sys, tempfile
 namespace = {'__name__': 'office_stream_test'}
 exec(sys.argv[1], namespace)
 class Process:
@@ -120,15 +120,20 @@ class Resolver:
         self.calls += 1
         if self.calls <= self.success_after: raise RuntimeError('synthetic cold start')
         return 'ready'
-ticks = iter([0, 21, 59])
-assert namespace['wait_for_context'](Resolver(2), 'test', Process(), lambda: next(ticks), lambda _: None) == 'ready'
-ticks = iter([0, 61])
-try:
-    namespace['wait_for_context'](Resolver(99), 'test', Process(), lambda: next(ticks), lambda _: None)
-except RuntimeError:
-    pass
-else:
-    raise AssertionError('startup exceeded the 60 second budget')
+with tempfile.TemporaryDirectory() as root, socket.socket(socket.AF_UNIX) as server:
+    node = pathlib.Path(root) / 'private.socket'
+    server.bind(str(node))
+    os.chmod(node, 0o700)
+    namespace['pipe_node_path'] = lambda _: node
+    ticks = iter([0, 21, 59])
+    assert namespace['wait_for_context'](Resolver(2), 'test', Process(), lambda: next(ticks), lambda _: None) == 'ready'
+    ticks = iter([0, 61])
+    try:
+        namespace['wait_for_context'](Resolver(99), 'test', Process(), lambda: next(ticks), lambda _: None)
+    except RuntimeError:
+        pass
+    else:
+        raise AssertionError('startup exceeded the 60 second budget')
 "#;
         let mut command = crate::platform::process::HiddenCommand::new("/usr/bin/python3");
         command.args(["-I", "-c", script, include_str!("office_stream.py")]);

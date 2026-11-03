@@ -6,21 +6,56 @@ are materialized at a mutable pathname, and no remote UNO listener is opened.
 import fcntl
 import os
 import pathlib
+import stat
 import subprocess
 import sys
 import time
 import uuid
 
 
+def pipe_node_path(pipe):
+    # Match LibreOffice's Linux OSL path selection; TMPDIR does not select it.
+    for root in ("/tmp", "/var/tmp"):
+        if os.access(root, os.W_OK):
+            parent = pathlib.Path(root)
+            info = parent.lstat()
+            if (not stat.S_ISDIR(info.st_mode) or info.st_uid not in (0, os.geteuid())
+                    or (info.st_mode & 0o022 and not info.st_mode & stat.S_ISVTX)):
+                raise RuntimeError("unsafe office pipe directory")
+            return parent / ("OSL_PIPE_" + str(os.getuid()) + "_" + pipe)
+    raise RuntimeError("office pipe directory unavailable")
+
+
+def checked_pipe_node(node):
+    info = node.lstat()  # Never follow a pre-created symlink.
+    if (not stat.S_ISSOCK(info.st_mode) or info.st_uid != os.geteuid()
+            or stat.S_IMODE(info.st_mode) & 0o077):
+        raise RuntimeError("unsafe office pipe endpoint")
+    return info.st_dev, info.st_ino
+
+
 def wait_for_context(resolver, pipe, process, clock=time.monotonic, pause=time.sleep):
+    node = pipe_node_path(pipe)
     deadline = clock() + 60
     while True:
         try:
-            return resolver.resolve("uno:pipe,name=" + pipe + ";urp;StarOffice.ComponentContext")
-        except Exception:
-            if clock() >= deadline or process.poll() is not None:
-                raise RuntimeError("office stream startup failed") from None
-            pause(0.05)
+            identity = checked_pipe_node(node)
+        except FileNotFoundError:
+            identity = None
+        if identity is not None:
+            try:
+                context = resolver.resolve("uno:pipe,name=" + pipe + ";urp;StarOffice.ComponentContext")
+            except Exception:
+                pass  # A private socket can appear before UNO is ready.
+            else:
+                # The trusted sticky parent prevents replacement by other UIDs.
+                # Check again before any services or attachment bytes are sent.
+                if checked_pipe_node(node) != identity:
+                    raise RuntimeError("office pipe endpoint changed")
+                return context
+        if clock() >= deadline or process.poll() is not None:
+            raise RuntimeError("office stream startup failed") from None
+        pause(0.05)
 
 
 def convert():
@@ -45,6 +80,14 @@ def convert():
         return prop
 
     pipe = "pinvou_" + uuid.uuid4().hex
+    node = pipe_node_path(pipe)
+    try:
+        node.lstat()
+    except FileNotFoundError:
+        pass
+    else:
+        # Do not connect to, remove, or chmod a pre-existing endpoint.
+        raise RuntimeError("office pipe endpoint already exists")
     process = subprocess.Popen(
         [executable, "-env:UserInstallation=" + (output / "profile").as_uri(),
          "--headless", "--norestore", "--nodefault", "--nofirststartwizard",
