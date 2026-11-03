@@ -18,8 +18,8 @@ use crate::runtime_handoff::UserTurnPromptKind;
 
 use super::{
     COMPACT_RETAINED_USER_MESSAGE_MAX_TOKENS, compaction_checkpoint_message,
-    is_compaction_checkpoint_message, retained_user_messages, retained_user_messages_with_origins,
-    truncate_retained_block, user_text_of,
+    is_compaction_checkpoint_message, retained_user_messages_with_origins, truncate_retained_block,
+    user_text_of,
 };
 
 const LAST_ROUND_TOOL_RESULT_MAX_CHARS: usize = 8 * 1024;
@@ -518,7 +518,9 @@ pub(super) fn build_replacement_history(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::compaction::{COMPACTION_SUMMARY_MARKER, compaction_checkpoint_message};
+    use crate::compaction::{
+        COMPACTION_SUMMARY_MARKER, compaction_checkpoint_message, retained_user_messages,
+    };
     use crate::models::{ContentBlock, Role};
     use serde_json::json;
 
