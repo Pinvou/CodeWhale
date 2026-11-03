@@ -26,7 +26,8 @@ const DICTS = new Map(LANGS.map((lang) => [lang, read('src', 'shared', 'i18n', `
 test('dismiss goes through the dedicated command with a two-step inline confirmation', () => {
   assert.match(API, /dismissIncomplete\(runId\)[\s\S]{0,80}model_store_dismiss_incomplete/);
   // 只有已终结的记录才给放弃入口（进行中的任务没有"放弃"语义，后端也会拒绝）。
-  assert.match(PANEL, /item\.terminal && <MsButton tone="ghost"[\s\S]{0,120}incompleteDismiss/);
+  assert.match(PANEL, /item\.terminal && <MsButton tone="ghost"/);
+  assert.match(PANEL, /data-testid="incomplete-dismiss-button"/);
   // 两步确认：先出确认条，确认条里有继续按钮；点放弃本身不直接发请求。
   assert.match(PANEL, /confirmingId && <div role="alertdialog"[\s\S]*?data-testid="incomplete-dismiss-confirm"/);
   assert.match(PANEL, /data-testid="incomplete-dismiss-confirm-button"/);

@@ -124,7 +124,8 @@ function OrphansSection({ copy, onToast }) {
       setRemoving(false);
     }
   };
-  const entries = result?.entries || EMPTY;
+  const ownershipUnresolved = Boolean(result?.unresolvedLibraryCards?.length);
+  const entries = ownershipUnresolved ? EMPTY : result?.entries || EMPTY;
   return <section data-testid="model-store-orphans" className="mb-8">
     <h3 className={`mb-2 px-3 text-[13px] font-bold uppercase tracking-wider ${TEXT_SECONDARY}`}>
       {copy.orphansTitle}
@@ -133,15 +134,18 @@ function OrphansSection({ copy, onToast }) {
     <p className="mb-3 px-3 text-xs opacity-75">{copy.orphansHint}</p>
     {requestError && <p role="alert" className="mb-3 break-words px-3 text-xs text-red-600 dark:text-red-400">{requestError}</p>}
     {result?.unresolvedInFlight > 0 && <p role="alert" className="mb-3 break-words px-3 text-xs text-red-600 dark:text-red-400">{copy.orphansUnresolved}</p>}
+    {ownershipUnresolved && <p role="alert" data-testid="model-store-orphans-ownership" className="mb-3 break-words px-3 text-xs text-red-600 dark:text-red-400">
+      {copy.orphansOwnershipUnresolved} {result.unresolvedLibraryCards.join(', ')}
+    </p>}
     {result?.partial && <p className="mb-3 px-3 text-xs opacity-75">{copy.orphansPartial}</p>}
-    {result && entries.length === 0 && <p className="px-3 text-xs opacity-75" data-testid="model-store-orphans-empty">{copy.orphansEmpty}</p>}
+    {result && !ownershipUnresolved && entries.length === 0 && <p className="px-3 text-xs opacity-75" data-testid="model-store-orphans-empty">{copy.orphansEmpty}</p>}
     {entries.map(entry => <div key={entry.path} className="mx-3 mb-2 rounded-xl border border-[#E1E5EA] p-3 text-xs dark:border-[#2E3134]">
       <div className="flex flex-wrap items-center justify-between gap-2">
         <div className="min-w-0">
           <div className="font-semibold">{entry.name}</div>
           <div className="break-all opacity-75">{formatBytes(entry.bytes)}</div>
         </div>
-        <MsButton tone="danger" disabled={removing} data-testid="model-store-orphan-delete" onClick={() => setRemoveTarget(entry)}>{copy.orphansDelete}</MsButton>
+        <MsButton tone="danger" disabled={removing || result?.unresolvedInFlight > 0} data-testid="model-store-orphan-delete" onClick={() => setRemoveTarget(entry)}>{copy.orphansDelete}</MsButton>
       </div>
       {removeTarget?.path === entry.path && <div role="alertdialog" aria-modal="false" aria-label={copy.orphansDeleteConfirmTitle} data-testid="model-store-orphan-confirm" className="mt-3 rounded-lg border border-rose-400 p-3">
         <p className={`font-medium ${TEXT_DANGER}`}>{copy.orphansDeleteConfirmTitle}</p>

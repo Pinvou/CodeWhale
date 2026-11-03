@@ -73,16 +73,20 @@ export function IncompleteInstallPanel({ installations = EMPTY, error, copy, onR
       </div>
       <div className="flex shrink-0 items-center gap-2">
         {/* 只放已终结的记录：还在跑的任务没有「放弃」语义，后端也会拒绝。 */}
-        {item.terminal && <MsButton tone="ghost" disabled={loading || dismissing || isRetrying?.(item.cardId)} onClick={() => setConfirmingId(item.runId)}>{copy.incompleteDismiss}</MsButton>}
+        {item.terminal && <MsButton tone="ghost" data-testid="incomplete-dismiss-button" data-run-id={item.runId}
+          disabled={loading || dismissing || Boolean(confirmingId && confirmingId !== item.runId) || isRetrying?.(item.cardId)}
+          onClick={() => setConfirmingId(item.runId)}>{copy.incompleteDismiss}</MsButton>}
         <MsButton disabled={loading || !item.canPreview || isRetrying?.(item.cardId)} onClick={() => inspect(item)}>{copy.incompletePreview}</MsButton>
       </div>
     </div>)}
     {confirmingId && <div role="alertdialog" aria-modal="false" aria-label={copy.incompleteDismiss} data-testid="incomplete-dismiss-confirm" className="my-3 rounded-xl border border-amber-500 p-3 text-xs">
       <p className={`font-medium ${TEXT_DANGER}`}>{copy.incompleteDismissConfirmTitle}</p>
+      <p className="mt-2 break-all font-semibold">{confirmingItem?.cardId}</p>
+      <p className="mt-1 break-all font-mono">{confirmingId}</p>
       <p className="mt-2 opacity-75">{copy.incompleteDismissConfirmHint}</p>
       <div className="mt-3 flex gap-3">
         <MsButton tone="ghost" disabled={dismissing} onClick={() => setConfirmingId(null)}>{copy.taskCancel}</MsButton>
-        <MsButton disabled={dismissing || (confirmingItem && isRetrying?.(confirmingItem.cardId))} busy={dismissing} data-testid="incomplete-dismiss-confirm-button"
+        <MsButton disabled={!confirmingItem || dismissing || isRetrying?.(confirmingItem.cardId)} busy={dismissing} data-testid="incomplete-dismiss-confirm-button"
           onClick={() => dismiss(confirmingItem)}>{copy.incompleteDismiss}</MsButton>
       </div>
     </div>}

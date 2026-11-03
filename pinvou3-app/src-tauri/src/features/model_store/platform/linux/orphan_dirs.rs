@@ -8,13 +8,15 @@
 //!     「已经下好的部分保留，再点一次下载会从断点接着传」），扫描只列举体积，
 //!     删除必须用户逐条确认。
 //!   * **宁可漏，不能错**。有库记录的目录、正在下载的目录、软链接、
-//!     models_dir 之外或更深一级的路径，一律拒绝——误删几十 GB 权重不可逆，
-//!     漏掉一个残留目录的代价只是它多躺一会儿。
+//!     models_dir 之外或更深一级的路径，一律拒绝。库记录只有共享根、缺少根或
+//!     根无法核实时，整根暂停列举和删除；命名启发与单个 MODEL_DIR 都不能证明
+//!     脚本全部输出的归属。误删权重不可逆，漏报只是暂时保留磁盘占用。
 
 use std::collections::HashSet;
 use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
 
+use serde::{Deserialize, Deserializer};
 use serde_json::{Value, json};
 
 use super::{config, db};
@@ -28,9 +30,11 @@ const MAX_ENTRIES: usize = 512;
 ///
 /// `unresolved` 是想排除却推导失败的进行中任务个数（物化卡片缺失或解析失败）。
 /// 扫描对它只提示「列表可能不完整」；**删除对它整题拒绝**——删错不可逆。
+/// `unresolved_library` 无法证明已入库权重的范围，扫描与删除均整根暂停。
 struct Blocked {
     dirs: HashSet<PathBuf>,
     unresolved: usize,
+    unresolved_library: Vec<String>,
 }
 
 impl Blocked {
@@ -105,6 +109,22 @@ pub(super) fn is_in_flight_kind(kind: &str) -> bool {
     IN_FLIGHT_KINDS.contains(&kind)
 }
 
+/// Only activity metadata is needed here. In particular, historical log lines
+/// must be skipped by the streaming deserializer, not allocated as a Value tree.
+#[derive(Deserialize)]
+struct InstallActivity {
+    card_id: Option<String>,
+    kind: Option<String>,
+    #[serde(default, rename = "outcome", deserialize_with = "pending_outcome")]
+    pending: bool,
+}
+
+fn pending_outcome<'de, D: Deserializer<'de>>(deserializer: D) -> Result<bool, D::Error> {
+    // A missing outcome defaults to false, while an explicit null denotes an
+    // unfinished receipt. Non-null result payloads need no materialization.
+    Option::<serde::de::IgnoredAny>::deserialize(deserializer).map(|value| value.is_none())
+}
+
 /// 未终结的安装类回执的卡片集合（card_id -> kind）。
 fn non_terminal_install_cards(out: &mut std::collections::HashMap<String, String>) -> usize {
     let runs_dir = config::data_dir().join("runs");
@@ -123,24 +143,40 @@ fn non_terminal_install_cards(out: &mut std::collections::HashMap<String, String
         if path.extension().and_then(|value| value.to_str()) != Some("json") {
             continue;
         }
-        let Ok(bytes) = std::fs::read(&path) else {
+        let Ok(file) = std::fs::File::open(&path) else {
             unresolved += 1;
             continue;
         };
-        let Ok(value) = serde_json::from_slice::<Value>(&bytes) else {
+        let Ok(receipt) =
+            serde_json::from_reader::<_, InstallActivity>(std::io::BufReader::new(file))
+        else {
             unresolved += 1;
             continue;
         };
-        let kind = value.get("kind").and_then(Value::as_str).unwrap_or("");
-        if is_in_flight_kind(kind) && value.get("outcome").is_some_and(Value::is_null) {
-            if let Some(card) = value.get("card_id").and_then(Value::as_str) {
-                out.insert(card.to_string(), kind.to_string());
+        let kind = receipt.kind.as_deref().unwrap_or("");
+        if is_in_flight_kind(kind) && receipt.pending {
+            if let Some(card) = receipt.card_id {
+                out.insert(card, kind.to_string());
             } else {
                 unresolved += 1;
             }
         }
     }
     unresolved
+}
+
+/// A recorded download root protects its entire subtree. If it covers the scan
+/// root, names cannot tell which children belong to the model. Missing or
+/// unreadable roots are likewise unknown; a single deployed MODEL_DIR is not a
+/// complete download-output manifest and must not reopen this cleanup gate.
+fn library_root_is_separate(root: Option<&str>, scan_root: Option<&Path>) -> bool {
+    let Some(root) = root.map(Path::new).filter(|root| root.is_absolute()) else {
+        return false;
+    };
+    match (root.canonicalize(), scan_root) {
+        (Ok(root), Some(scan_root)) if root.is_dir() => !scan_root.starts_with(root),
+        _ => false,
+    }
 }
 
 /// 汇总「不准碰」的目录。库记录来自 sqlite；进行中下载来自盘上未终结的安装
@@ -151,13 +187,17 @@ fn blocked_dirs(service: Option<&super::service::ModelStoreService>) -> Result<B
     let mut blocked = Blocked {
         dirs: HashSet::new(),
         unresolved: 0,
+        unresolved_library: Vec::new(),
     };
 
+    let scan_root = models_dir.canonicalize().ok();
     let records = db::list_store_models().map_err(|error| error.to_string())?;
     for rec in &records {
-        // 普通下载登记的是共享 models_dir，不是这张卡独占的目录；若拦住
-        // 共享根，祖先匹配会把所有残留都误判为有主。此类记录仍由下面的
-        // 实际目录、HF 仓库名和 model_name 保护。隔离/版本化根继续完整保护。
+        if !library_root_is_separate(rec.models_root.as_deref(), scan_root.as_deref()) {
+            blocked.unresolved_library.push(rec.card_id.clone());
+        }
+        // 普通下载只登记共享根，不能把名字猜测当成权重归属证明。上面的
+        // 未核实记录会暂停整根清理；独立/版本化根继续完整保护其子树。
         if let Some(root) = &rec.models_root {
             blocked.insert(&models_dir, PathBuf::from(root));
         }
@@ -166,7 +206,7 @@ fn blocked_dirs(service: Option<&super::service::ModelStoreService>) -> Result<B
         if let Some(actual) = super::lifecycle::legacy_resource_dir_for_scan(rec, &models_dir) {
             blocked.insert(&models_dir, actual);
         }
-        // 商店卡片的权重目录：卡片脚本统一放 ${LMM_MODELS_DIR}/<HF 仓库名>。
+        // 名字和仓库名只是额外保守排除，不能证明脚本的实际输出目录。
         // 末段必须过 safe_path_component——"x/.." 的末段就是 ".."（
         // lifecycle::candidate_paths 里踩过的坑）。
         if let Some(repo) = rec
@@ -290,6 +330,15 @@ fn scan_for_user(
     let settings = config::load_settings();
     let models_dir = settings.models_path();
     let blocked = blocked_dirs(service)?;
+    if !blocked.unresolved_library.is_empty() {
+        // Do not label unproven library weights as leftovers, even read-only.
+        // remove() independently repeats this check under the resource lock.
+        return Ok(json!({
+            "entries": [], "partial": false,
+            "unresolvedInFlight": blocked.unresolved,
+            "unresolvedLibraryCards": blocked.unresolved_library,
+        }));
+    }
     let mut entries = Vec::new();
     let mut partial = false;
     let read = std::fs::read_dir(&models_dir).map_err(|_| "orphan_scan_unavailable".to_string())?;
@@ -347,6 +396,7 @@ fn scan_for_user(
         "entries": entries,
         "partial": partial,
         "unresolvedInFlight": blocked.unresolved,
+        "unresolvedLibraryCards": blocked.unresolved_library,
     }))
 }
 
@@ -402,6 +452,12 @@ fn remove_for_user(
     // 3) 不是库记录的目录、不是进行中下载的目标目录。进行中下载有推导失败的
     //    情形时整题拒绝：删错不可逆，等它结束再删只是晚几分钟。
     let blocked = blocked_dirs(service)?;
+    if !blocked.unresolved_library.is_empty() {
+        return Err(format!(
+            "orphan_library_ownership_unresolved: {}",
+            blocked.unresolved_library.join(", ")
+        ));
+    }
     if blocked.contains(&target) {
         return Err("orphan_directory_owned".into());
     }
@@ -465,7 +521,9 @@ mod tests {
     }
 
     fn seed_record(model_name: &str) {
-        seed_record_at_root(model_name, None);
+        let root = config::load_settings().models_path().join(model_name);
+        std::fs::create_dir_all(&root).unwrap();
+        seed_record_at_root(model_name, Some(&root));
     }
 
     fn seed_record_at_root(model_name: &str, root: Option<&Path>) {
@@ -496,7 +554,7 @@ mod tests {
     }
 
     #[test]
-    fn shared_download_root_keeps_owned_models_but_allows_unrelated_orphans() {
+    fn shared_download_root_pauses_cleanup_for_real_card_directory_mismatches() {
         for linked_root in [false, true] {
             let _home = config::TempHome::new();
             if linked_root {
@@ -508,27 +566,37 @@ mod tests {
             let models = config::load_settings().models_path();
             let repo_owned = models.join("owned-repo");
             std::fs::create_dir_all(&repo_owned).unwrap();
+            // Real scripts choose raw case, quantization and extra suffixes;
+            // none of these matches this record's model/repository heuristics.
+            let actual = models.join("Qwen3.8-27B-NVFP4-unsloth");
+            std::fs::create_dir_all(&actual).unwrap();
+            std::fs::write(actual.join("weights.bin"), b"registered weights").unwrap();
             // 与普通下载成功的落库路径一致：共享根以 canonical 形式登记。
             seed_record_at_root("owned-model", Some(&models.canonicalize().unwrap()));
 
             let report = scan(None).unwrap();
             let entries = report["entries"].as_array().unwrap();
-            assert_eq!(entries.len(), 1, "共享根不得遮住所有残留：{report}");
-            assert_eq!(entries[0]["path"], orphan.to_string_lossy().as_ref());
-            for protected in [&owned, &repo_owned] {
-                assert_eq!(
-                    remove(None, &protected.to_string_lossy()).unwrap_err(),
-                    "orphan_directory_owned"
-                );
+            assert!(entries.is_empty(), "归属未核实时不得生成残留候选：{report}");
+            assert_eq!(report["unresolvedLibraryCards"], json!(["owned-card"]));
+            assert_eq!(report["unresolvedInFlight"], 0);
+            for protected in [&owned, &repo_owned, &actual, &orphan] {
+                let error = remove(None, &protected.to_string_lossy()).unwrap_err();
+                assert!(error.starts_with("orphan_library_ownership_unresolved:"));
                 assert!(protected.exists());
             }
-            remove(None, &orphan.to_string_lossy()).unwrap();
-            assert!(!orphan.exists());
+            assert_eq!(
+                std::fs::read(actual.join("weights.bin")).unwrap(),
+                b"registered weights"
+            );
+            assert_eq!(
+                db::get_store_model("owned-card").unwrap().unwrap().status,
+                "downloaded"
+            );
         }
     }
 
     #[test]
-    fn legacy_runtime_fallback_does_not_block_the_shared_root() {
+    fn legacy_runtime_shared_root_fallback_does_not_establish_ownership() {
         for linked in [false, true] {
             let _home = config::TempHome::new();
             if linked {
@@ -549,22 +617,20 @@ mod tests {
                 "fixture must exercise the legacy shared-root fallback"
             );
             let report = scan(None).unwrap();
-            assert_eq!(report["entries"].as_array().unwrap().len(), 1);
-            assert_eq!(
-                report["entries"][0]["path"],
-                orphan.to_string_lossy().as_ref()
+            assert!(report["entries"].as_array().unwrap().is_empty());
+            assert_eq!(report["unresolvedLibraryCards"], json!(["owned-card"]));
+            assert!(
+                remove(None, &orphan.to_string_lossy())
+                    .unwrap_err()
+                    .starts_with("orphan_library_ownership_unresolved:")
             );
-            assert_eq!(
-                remove(None, &owned.to_string_lossy()).unwrap_err(),
-                "orphan_directory_owned"
-            );
-            remove(None, &orphan.to_string_lossy()).unwrap();
+            assert!(orphan.exists());
             assert!(owned.exists());
         }
     }
 
     #[test]
-    fn declared_legacy_weights_are_protected_without_a_matching_model_or_repo_name() {
+    fn one_deployed_directory_is_not_a_complete_shared_root_manifest() {
         let _home = config::TempHome::new();
         let (orphan, _) = seed_models_dir();
         let models = config::load_settings().models_path();
@@ -584,21 +650,116 @@ mod tests {
         .unwrap();
 
         let report = scan(None).unwrap();
-        assert_eq!(report["entries"].as_array().unwrap().len(), 1);
-        assert_eq!(
-            report["entries"][0]["path"],
-            orphan.to_string_lossy().as_ref()
+        assert!(report["entries"].as_array().unwrap().is_empty());
+        assert_eq!(report["unresolvedLibraryCards"], json!(["owned-card"]));
+        assert!(
+            blocked_dirs(None)
+                .unwrap()
+                .contains(&models.join("custom-legacy-root"))
         );
-        assert_eq!(
-            remove(None, &models.join("custom-legacy-root").to_string_lossy()).unwrap_err(),
-            "orphan_directory_owned"
+        assert!(
+            remove(None, &models.join("custom-legacy-root").to_string_lossy())
+                .unwrap_err()
+                .starts_with("orphan_library_ownership_unresolved:")
         );
         assert_eq!(
             std::fs::read(actual.join("weights.bin")).unwrap(),
             b"registered weights"
         );
-        remove(None, &orphan.to_string_lossy()).unwrap();
-        assert!(!orphan.exists());
+        assert!(remove(None, &orphan.to_string_lossy()).is_err());
+        assert!(orphan.exists());
+    }
+
+    #[test]
+    fn absent_unreadable_or_ancestor_library_roots_pause_cleanup() {
+        for root_kind in ["absent", "missing", "file", "relative", "ancestor"] {
+            let _home = config::TempHome::new();
+            let (orphan, _) = seed_models_dir();
+            let models = config::load_settings().models_path();
+            let root = match root_kind {
+                "absent" => None,
+                "missing" => Some(models.join("no-longer-readable-root")),
+                "file" => {
+                    let file = models.join("invalid-root.bin");
+                    std::fs::write(&file, b"not a directory").unwrap();
+                    Some(file)
+                }
+                "relative" => Some(PathBuf::from("relative-root")),
+                _ => Some(models.parent().unwrap().to_path_buf()),
+            };
+            seed_record_at_root("unrelated-name", root.as_deref());
+            let report = scan(None).unwrap();
+            assert!(
+                report["entries"].as_array().unwrap().is_empty(),
+                "{root_kind}"
+            );
+            assert_eq!(report["unresolvedLibraryCards"], json!(["owned-card"]));
+            assert!(
+                remove(None, &orphan.to_string_lossy())
+                    .unwrap_err()
+                    .starts_with("orphan_library_ownership_unresolved:")
+            );
+            assert!(orphan.exists());
+        }
+    }
+
+    #[test]
+    fn separate_library_roots_protect_their_subtree_and_allow_other_leftovers() {
+        for outside in [false, true] {
+            let _home = config::TempHome::new();
+            let (orphan, _) = seed_models_dir();
+            let models = config::load_settings().models_path();
+            let root = if outside {
+                config::data_dir().join("separate-library-root")
+            } else {
+                models.join("Actual-Weights-With-A-Custom-Name")
+            };
+            std::fs::create_dir_all(root.join("extra-repo")).unwrap();
+            std::fs::write(root.join("extra-repo/weights.bin"), b"owned").unwrap();
+            seed_record_at_root("owned-model", Some(&root));
+            let report = scan(None).unwrap();
+            assert_eq!(report["unresolvedLibraryCards"], json!([]));
+            assert_eq!(report["entries"].as_array().unwrap().len(), 1);
+            assert_eq!(
+                report["entries"][0]["path"],
+                orphan.to_string_lossy().as_ref()
+            );
+            if !outside {
+                assert_eq!(
+                    remove(None, &root.to_string_lossy()).unwrap_err(),
+                    "orphan_directory_owned"
+                );
+            }
+            remove(None, &orphan.to_string_lossy()).unwrap();
+            assert!(!orphan.exists());
+            assert_eq!(
+                std::fs::read(root.join("extra-repo/weights.bin")).unwrap(),
+                b"owned"
+            );
+        }
+    }
+
+    #[test]
+    fn library_ownership_is_rechecked_when_deleting_a_stale_scan_candidate() {
+        let _home = config::TempHome::new();
+        db::init_db().unwrap();
+        let (candidate, _) = seed_models_dir();
+        let report = scan(None).unwrap();
+        assert!(
+            report["entries"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|entry| entry["path"] == candidate.to_string_lossy().as_ref())
+        );
+        let models = config::load_settings().models_path();
+        seed_record_at_root("newly-downloaded-model", Some(&models));
+        assert!(
+            remove(None, &candidate.to_string_lossy())
+                .unwrap_err()
+                .starts_with("orphan_library_ownership_unresolved:")
+        );
+        assert!(candidate.join("config.json").exists());
     }
 
     #[test]
@@ -790,6 +951,39 @@ mod tests {
         }
         remove(None, &orphan.to_string_lossy()).unwrap();
         assert!(!orphan.exists());
+    }
+
+    #[test]
+    fn activity_reader_skips_large_history_and_distinguishes_missing_and_null_outcomes() {
+        let _home = config::TempHome::new();
+        for (outcome, active) in [
+            (None, false),
+            (Some(Value::Null), true),
+            (Some(json!({"Err":"stopped"})), false),
+        ] {
+            let mut receipt = json!({"card_id":"history-card", "kind":"download",
+                "lines":["history ".repeat(256 * 1024)]});
+            if let Some(outcome) = outcome {
+                receipt["outcome"] = outcome;
+            }
+            write_receipt("history", &receipt);
+            let mut cards = std::collections::HashMap::new();
+            assert_eq!(non_terminal_install_cards(&mut cards), 0);
+            assert_eq!(cards.contains_key("history-card"), active);
+        }
+    }
+
+    #[test]
+    fn skipped_log_fields_still_require_valid_json() {
+        let _home = config::TempHome::new();
+        super::super::execution_fence::private_write(
+            &config::data_dir().join("runs/broken.json"),
+            br#"{"card_id":"card","kind":"download","outcome":null,"lines":[invalid]}"#,
+        )
+        .unwrap();
+        let mut cards = std::collections::HashMap::new();
+        assert_eq!(non_terminal_install_cards(&mut cards), 1);
+        assert!(cards.is_empty());
     }
 
     #[test]

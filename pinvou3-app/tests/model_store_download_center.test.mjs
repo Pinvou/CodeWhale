@@ -51,7 +51,9 @@ test('orphan section scans on demand and deletes only after an explicit confirma
   assert.match(CENTER, /data-testid="model-store-orphan-confirm-button"/);
   assert.match(CENTER, /removeOrphan\(target\.path\)/);
   // 删除完成后必须重扫，不能让用户对着幽灵条目。
-  assert.match(CENTER, /setResult\(await scanOrphans\(\)\)/);
+  const removeBody = CENTER.match(/const remove = async target => \{([\s\S]*?)\n  const entries =/)[1];
+  assert.match(removeBody, /await removeOrphan\(target\.path\)[\s\S]*setResult\(await scanOrphans\(\)\)/);
+  assert.match(removeBody, /catch \(failure\) \{\s*setResult\(null\)/);
 });
 
 test('task card has an inline variant without the floating-panel chrome', () => {
@@ -89,13 +91,13 @@ test('downloads copy exists in all three languages', () => {
 });
 
 test('orphan copy exists in all three languages and promises irreversibility', () => {
-  const KEYS = ['orphansTitle:', 'orphansHint:', 'orphansScan:', 'orphansScanning:', 'orphansPartial:', 'orphansUnresolved:', 'orphansEmpty:', 'orphansDelete:', 'orphansDeleteConfirmTitle:', 'orphansDeleteConfirmHint:', 'orphansDeleted:', 'orphanErrors:'];
+  const KEYS = ['orphansTitle:', 'orphansHint:', 'orphansScan:', 'orphansScanning:', 'orphansPartial:', 'orphansUnresolved:', 'orphansOwnershipUnresolved:', 'orphansEmpty:', 'orphansDelete:', 'orphansDeleteConfirmTitle:', 'orphansDeleteConfirmHint:', 'orphansDeleted:', 'orphanErrors:'];
   for (const text of DICTS.values()) {
     for (const key of KEYS) {
       assert.ok(text.includes(key), `${key} 缺失`);
     }
     // 后端拒绝码必须都有人话对应，缺一个界面上就裸奔错误码。
-    for (const code of ['orphan_scan_unavailable', 'orphan_directory_owned', 'orphan_directory_other_user', 'orphan_activity_unresolved', 'orphan_path_unsafe', 'orphan_remove_failed', 'orphan_resources_busy']) {
+    for (const code of ['orphan_scan_unavailable', 'orphan_directory_owned', 'orphan_directory_other_user', 'orphan_activity_unresolved', 'orphan_library_ownership_unresolved', 'orphan_path_unsafe', 'orphan_remove_failed', 'orphan_resources_busy']) {
       assert.ok(text.includes(`${code}:`), `orphanErrors.${code} 缺失`);
     }
   }
