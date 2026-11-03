@@ -20,6 +20,16 @@ cancellation may be unsupported or unconfirmed. This never implies free usage:
 predispatch funds are released only after confirmation; dispatched calls retain
 the existing usage reconciliation and historical-price settlement evidence.
 
+Each emergency claim returns its incremented attempts as an ownership token.
+Request and attempt recording lock the target before the usage row and require
+that exact token in LEASED state; retry resets only that same claim. A delayed
+worker cannot overwrite a reclaimed target, its usage, or its cancellation
+evidence. Lease expiry makes a target eligible for reclaim; it does not revoke
+an unchanged claim by itself. An external cancellation or idempotent hold release
+already started after an owned request commits may still finish after reclaim;
+this fencing does not promise exactly-once external effects. Existing USER and
+expiry ownership checks and financial confirmation requirements still apply.
+
 The worker attempts local transport cancellation immediately. When another
 replica owns the connection, that owner also reads the immutable cancellation
 request at its next existing dispatch-lease heartbeat (four-minute cadence,

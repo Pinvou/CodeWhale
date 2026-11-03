@@ -18,15 +18,13 @@ func TestUserUnusedIntentCancellationOwnerPostgres(t *testing.T) {
 				layout = "intent"
 			}
 			u, target := f.preparedExpiry(t, layout)
-			if name == "model-first-control" {
-				if _, _, err := f.r.requestEmergencyCancellation(f.ctx, target, ProviderCancelUnsupported, f.service.upstream.AdapterVersion()); err != nil {
-					t.Fatal("original MODEL request", err)
-				}
+			claim := EmergencyCancellationTarget{ID: target}
+			if name == "model-first-control" || name == "acquired-intent-control" || name == "after-claim" {
+				claim = claimOneEmergencyCancellation(t, f.r, f.ctx, target)
 			}
-			if name == "after-claim" {
-				claimed, err := f.r.claimEmergencyCancellations(f.ctx, 1)
-				if err != nil || len(claimed) != 1 || claimed[0].ID != target {
-					t.Fatal("claim before USER stop", claimed, err)
+			if name == "model-first-control" {
+				if _, _, err := f.r.requestEmergencyCancellation(f.ctx, claim, ProviderCancelUnsupported, f.service.upstream.AdapterVersion()); err != nil {
+					t.Fatal("original MODEL request", err)
 				}
 			}
 			if name == "acquired-intent-control" {
@@ -49,7 +47,7 @@ func TestUserUnusedIntentCancellationOwnerPostgres(t *testing.T) {
 				}
 			}
 			if name == "acquired-intent-control" || name == "model-first-control" {
-				if _, _, err := f.r.requestEmergencyCancellation(f.ctx, target, ProviderCancelUnsupported, f.service.upstream.AdapterVersion()); err != nil {
+				if _, _, err := f.r.requestEmergencyCancellation(f.ctx, claim, ProviderCancelUnsupported, f.service.upstream.AdapterVersion()); err != nil {
 					t.Fatal("existing MODEL fallback must remain available", err)
 				}
 				return
@@ -59,11 +57,11 @@ func TestUserUnusedIntentCancellationOwnerPostgres(t *testing.T) {
 				t.Fatal(err)
 			}
 			fundsBefore := f05CancellationClosureFundsFacts(t, f.bp, f.ctx)
-			if _, _, err := f.r.requestEmergencyCancellation(f.ctx, target, ProviderCancelUnsupported, f.service.upstream.AdapterVersion()); !errors.Is(err, ErrForbidden) {
+			if _, _, err := f.r.requestEmergencyCancellation(f.ctx, claim, ProviderCancelUnsupported, f.service.upstream.AdapterVersion()); !errors.Is(err, ErrForbidden) {
 				t.Error("locked MODEL command replaced USER proof owner", err)
 			}
 			if name == "after-claim" {
-				if err := f.r.retryEmergencyCancellation(f.ctx, target, ErrForbidden); err != nil {
+				if err := f.r.retryEmergencyCancellation(f.ctx, claim, ErrForbidden); err != nil {
 					t.Fatal(err)
 				}
 			}

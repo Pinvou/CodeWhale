@@ -549,8 +549,12 @@ func TestManagementEmergencyCancellationRecoversLostReserveACK(t *testing.T) {
 		t.Fatal(err)
 	}
 	// A request and a completed reservation do not themselves prove release.
-	if err = repository.recordEmergencyCancellationAttempt(ctx, cancellationID, ProviderCancelUnsupported, false, true, false); !errors.Is(err, ErrForbidden) {
+	claim := claimOneEmergencyCancellation(t, repository, ctx, cancellationID)
+	if err = repository.recordEmergencyCancellationAttempt(ctx, claim, ProviderCancelUnsupported, false, true, false); !errors.Is(err, ErrForbidden) {
 		t.Fatalf("unconfirmed attempt accepted: %v", err)
+	}
+	if err = repository.retryEmergencyCancellation(ctx, claim, ErrForbidden); err != nil {
+		t.Fatal(err)
 	}
 	var attempted int
 	if err = repository.pool.QueryRow(ctx, `SELECT count(*) FROM model_emergency_cancellation_evidence WHERE emergency_cancellation_id=$1 AND evidence_type='ATTEMPTED'`, cancellationID).Scan(&attempted); err != nil || attempted != 0 {
