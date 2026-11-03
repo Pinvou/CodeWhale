@@ -179,12 +179,10 @@ repair_dpkg_state() {
   fi
   warn "dpkg was left in an interrupted state; running 'dpkg --configure -a' so later apt-get steps in this job do not fail"
   # 40s matches the observed bound on how long the orphaned dpkg held the
-  # frontend lock after its parent was killed (26ms-40s in the incident).
-  # Wrapper math stays honest: this script no longer installs kernel
-  # packages (main's no-install policy), so the repair's own worst case is
-  # the wait budget plus one 60s-capped configure — it only approaches the
-  # workflow-side 240s wrapper when configure itself hangs repeatedly,
-  # which is the documented wrapper-kill residual.
+  # frontend lock after its parent was killed. This script performs no
+  # package installs of its own, so this wait only ever spends the script's
+  # residual exit window; if the lock is still held after the wait, the
+  # give-up warning below names the state for whichever step hits it next.
   wait_deadline=$(( $(date +%s) + 40 ))
   while :; do
     attempt=$((attempt + 1))
@@ -205,15 +203,14 @@ repair_dpkg_state() {
   audit_out="$(dpkg --audit 2>/dev/null || true)"
   warn "dpkg --configure -a did not succeed; later apt-get steps in this job may still fail until it is run manually${audit_out:+ (dpkg --audit still reports: ${audit_out})}"
 }
-# EXIT trap is the backstop for kill paths outside setup_zram. The workflow-
-# side `timeout 240` wrapper TERM's sudo->bash; route TERM through exit so
-# the trap still runs the repair once the in-flight run_to command returns.
-# Best effort: bash runs no traps while a foreground command is active, so
-# the repair only starts when the inner run_to cap expires, and it fits in
-# the wrapper's 15s SIGKILL grace only if TERM lands near that expiry. This
-# script itself no longer installs kernel packages (main's no-install
-# policy), but any dpkg state dirtied elsewhere in the job is still repaired
-# here before later steps run.
+# EXIT trap is the only repair entry point: the script itself never
+# installs packages (the zram layer must not mutate package-manager state),
+# so there is no in-flow repair call. The workflow-side `timeout 240`
+# wrapper TERM's sudo->bash; route TERM through exit so the trap still runs
+# the repair once the in-flight command returns. Best effort: bash runs no
+# traps while a foreground command is active, and if the wrapper's SIGKILL
+# lands first, no repair runs — a later job step then sees the same
+# "dpkg was interrupted" state and this script's warning is absent.
 trap repair_dpkg_state EXIT
 trap 'exit 143' TERM
 

@@ -3938,15 +3938,22 @@ class CiGatePolicyTests(unittest.TestCase):
             "swapon --show=NAME --noheadings 2>/dev/null | grep -q '/dev/zram'",
             source,
         )
-        self.assertIn(
-            'log "provisioning the mandatory /mnt disk swap"\nsetup_disk_swap',
-            source,
-        )
-        # 2026-10-28 修订(冲突消解):主分支已定案"镜像自带模块、本脚本不装
-        # 内核包",原 install 路径的等锁/单次尝试/in-flow 调用点钉子随路径
-        # 一并退役;dpkg 修复兜底仍是全 job 契约:修复函数、60s×3 等锁重试
-        # 与 stderr 透传、updates 残留 journal 门、TERM 与 EXIT 双兜底。
-        self.assertGreaterEqual(source.count("repair_dpkg_state"), 2)
+        # 2026-10-28 修订,2026-11-02 随主线 #2095 再修订:zram 层不再安装
+        # 内核包(modprobe 失败直接降级磁盘 swap/zswap,脚本自身零 apt 调用,
+        # 永不变更包管理器状态),同 job 的 dpkg 中断态改由本 PR 的
+        # repair_dpkg_state 在退出路径兜底(unattended-upgrades 等外部来源
+        # 仍可留下中断态)。合同钉住:脚本零 apt 安装/等锁选项(禁装政策)、
+        # 修复的按钟等锁重试(40s 预算、每次尝试仍 60s 上限、真实失败早停)
+        # 与 stderr 透传、updates 残留 journal 门、TERM 兜底,以及退出路径
+        # 上的修复兜底。
+        # 这些文本钉只是廉价漂移警报;生产行为由
+        # CiMemorySetupRepairBehaviorTests 端到端兜底(函数体清空/删调用
+        # 在那里必红)。
+        self.assertNotIn("apt-get install", source)
+        self.assertNotIn("-o DPkg::Lock::Timeout", source)
+        # 定义 + EXIT trap + 头注 journal 门说明,共 3 处;减少即说明
+        # 兜底被拆,行为测试会给出具体断层数据。
+        self.assertEqual(source.count("repair_dpkg_state"), 3)
         self.assertIn("run_to 60 dpkg --configure -a", source)
         self.assertIn("wait_deadline=$(( $(date +%s) + 40 ))", source)
         self.assertIn(
@@ -3969,6 +3976,10 @@ class CiGatePolicyTests(unittest.TestCase):
         )
         self.assertIn("trap 'exit 143' TERM", source)
         self.assertIn("trap repair_dpkg_state EXIT", source)
+        self.assertIn(
+            'log "provisioning the mandatory /mnt disk swap"\nsetup_disk_swap',
+            source,
+        )
 
     def test_memory_setup_module_failure_does_not_poison_dependency_install(self):
         source = (ROOT / "scripts" / "ci-memory-setup.sh").read_text(encoding="utf-8")
@@ -5871,9 +5882,10 @@ exit 0
         self.assertEqual(proc.returncode, 0, f"script failed; stderr:\n{proc.stderr}")
         return proc
 
-    def test_busy_lock_released_after_20s_is_repaired_in_flow(self):
-        # 评审轮 3 回归:忙锁在 ~25s(>20s)后释放,按钟重试必须原地恢复,
-        # 而不是像 3 次×5s 固定重试那样 ~10s 就耗尽等锁窗口。
+    def test_busy_lock_released_after_25s_is_repaired_in_exit_round(self):
+        # 评审轮 3 回归:忙锁在 ~25s 后释放,按钟重试必须等到释放点恢复,
+        # 而不是像 3 次×5s 固定重试那样 ~10s 就耗尽等锁窗口。主线 #2095
+        # 后脚本自身不再安装内核包,修复只经 EXIT trap 单轮执行。
         (self.state / "audit-dirty").write_text("1")
         (self.state / "release-at").write_text(str(self.BASE + 25))
         proc = self._run_script()
@@ -5882,34 +5894,31 @@ exit 0
         self.assertEqual(len(calls), 6, calls)
         self.assertIn("dpkg admin state repaired (configure attempt 6)", proc.stdout)
         self.assertNotIn("did not succeed", proc.stderr)
-        # EXIT 再入重新过门:状态已收敛,不产生额外 configure。
-        self.assertEqual(len(calls), 6, calls)
 
-    def test_lock_held_past_budget_gives_up_loudly_and_exit_round_still_recovers(self):
+    def test_lock_held_past_budget_gives_up_loudly(self):
         (self.state / "audit-dirty").write_text("1")
         (self.state / "release-at").write_text(str(self.BASE + 45))
         proc = self._run_script()
         calls = self._configure_calls()
-        # in-flow 尝试落在 0..40 共 9 次(40s 预算耗尽,响亮放弃并上报
-        # 仍脏的 audit);EXIT 再入自 40s 起新预算,45s 释放后第 2 次恢复。
-        self.assertEqual(len(calls), 11, calls)
+        # 唯一一轮(EXIT 兜底)的尝试落在 0..40 共 9 次:40s 预算耗尽后
+        # 响亮放弃并上报仍脏的 audit;45s 才释放的锁不再有第二轮等待,
+        # 残留状态交给后续步骤与告警。
+        self.assertEqual(len(calls), 9, calls)
         self.assertTrue(
-            all(int(c.rsplit("@", 1)[1]) < self.BASE + 41 for c in calls[:9]), calls,
+            all(int(c.rsplit("@", 1)[1]) <= self.BASE + 40 for c in calls), calls,
         )
-        self.assertEqual(int(calls[9].rsplit("@", 1)[1]), self.BASE + 40, calls)
-        self.assertEqual(int(calls[10].rsplit("@", 1)[1]), self.BASE + 45, calls)
         self.assertIn("dpkg --configure -a did not succeed", proc.stderr)
         self.assertIn("dpkg --audit still reports", proc.stderr)
-        self.assertIn("dpkg admin state repaired (configure attempt 2)", proc.stdout)
+        self.assertNotIn("dpkg admin state repaired", proc.stdout)
 
     def test_real_configure_failure_stops_early_without_burning_the_budget(self):
         (self.state / "audit-dirty").write_text("1")
         (self.state / "slow-fail").write_text("1")
         proc = self._run_script()
         calls = self._configure_calls()
-        # 尝试本身跑了 30s 仍失败 = 真实错误,等待无益:每轮 1 次即早停,
-        # in-flow + EXIT 再入共 2 次,而不是把 40s 等锁预算烧满。
-        self.assertEqual(len(calls), 2, calls)
+        # 尝试本身跑了 30s 仍失败 = 真实错误,等待无益:单轮(EXIT 兜底)
+        # 1 次即早停,而不是把 40s 等锁预算烧满。
+        self.assertEqual(len(calls), 1, calls)
         self.assertIn("failed after 30s", proc.stderr)
         self.assertIn("did not succeed", proc.stderr)
 
