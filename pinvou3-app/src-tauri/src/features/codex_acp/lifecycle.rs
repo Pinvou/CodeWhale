@@ -157,6 +157,20 @@ impl RuntimeLifecycle {
         }
     }
 
+    /// Pins the spawn instant for tests: the stability gate reads
+    /// `started_at`, which [`Self::new`] freezes at the current instant.
+    #[cfg(test)]
+    pub(super) fn with_started_at(generation: u64, started_at: Instant) -> Self {
+        Self {
+            generation,
+            started_at,
+            running: AtomicBool::new(true),
+            expected_shutdown: AtomicBool::new(false),
+            unexpected_exit: AtomicBool::new(false),
+            crash_counted: AtomicBool::new(false),
+        }
+    }
+
     pub(super) fn generation(&self) -> u64 {
         self.generation
     }
@@ -174,6 +188,26 @@ impl RuntimeLifecycle {
     }
 
     /// Marks transport completion and returns whether it was unexpected.
+    ///
+    /// Idempotent: the connection task, the retirement seal paths
+    /// (`seal_remote_turn`, `reclaim_before_async_cleanup`,
+    /// `close_runtime_if`, remote-owner release) and their cleanup clones all
+    /// call this on the same generation, in any order. Whatever runs first
+    /// decides the `unexpected` classification; later calls only re-state
+    /// `running = false`. Crash-budget accounting is separately once-only
+    /// through [`Self::take_uncounted_crash`]'s compare-exchange, so a
+    /// double-stamped generation can never be billed twice.
+    ///
+    /// Detection boundary: a dead generation is observed through the
+    /// transport (`incoming_closed`), which resolves only once every writer
+    /// of the runtime child's stdout pipe is gone. A child that exits while
+    /// a forked descendant keeps the pipe open stays `running` here; the
+    /// stall watchdog (with a turn in flight) or the idle reaper still
+    /// reclaims it later. Such a blind exit is classified as a stall when
+    /// reclaimed (`was_running` is still true), so it clears rather than
+    /// feeds the crash budget: a blind crash-loop cycles at the
+    /// stall-watchdog cadence without the respawn backoff, until the
+    /// descendant lets the pipe close.
     pub(super) fn mark_connection_closed(&self) -> bool {
         let unexpected = !self.expected_shutdown.load(Ordering::Acquire);
         if unexpected {
@@ -607,6 +641,31 @@ mod tests {
         assert!(!lifecycle.take_uncounted_crash());
     }
 
+    /// The stamp is reached from several call sites (connection task, seal
+    /// paths, cleanup clones) in arbitrary order. A re-stamp must not
+    /// reclassify the exit, and the crash budget must stay single-slot no
+    /// matter how many times the generation was stamped dead.
+    #[test]
+    fn mark_connection_closed_is_idempotent_and_bills_exactly_once() {
+        // Connection task stamps first (unexpected), a seal path re-states it
+        // after latching expected-shutdown: the re-stamp must not flip the
+        // classification and the budget must still be billed exactly once.
+        let lifecycle = RuntimeLifecycle::new(1);
+        assert!(lifecycle.mark_connection_closed());
+        lifecycle.begin_expected_shutdown();
+        assert!(!lifecycle.mark_connection_closed());
+        assert!(lifecycle.take_uncounted_crash());
+        assert!(!lifecycle.take_uncounted_crash());
+
+        // Reverse order: the seal path stamps first (expected), so the
+        // connection task's completion is not a crash at all.
+        let lifecycle = RuntimeLifecycle::new(2);
+        lifecycle.begin_expected_shutdown();
+        assert!(!lifecycle.mark_connection_closed());
+        assert!(!lifecycle.mark_connection_closed());
+        assert!(!lifecycle.take_uncounted_crash());
+    }
+
     #[test]
     fn crash_budget_backs_off_then_stops_a_tight_respawn_loop() {
         let start = Instant::now();
@@ -637,5 +696,105 @@ mod tests {
             budget.admission_at(start + CRASH_WINDOW),
             SpawnAdmission::Allowed
         );
+    }
+
+    /// Anchors the short backoff to the LATEST crash. Anchoring to the older
+    /// of the two surviving crashes would make this admission Allowed (its
+    /// deadline expired long before), silently dropping the second-crash
+    /// gate whenever the crashes are far apart.
+    #[test]
+    fn backoff_is_measured_from_the_latest_crash() {
+        let start = Instant::now();
+        let mut budget = RuntimeCrashBudget::default();
+        budget.record_crash_at(start);
+        let latest = start + Duration::from_secs(40);
+        budget.record_crash_at(latest);
+        assert_eq!(
+            budget.admission_at(latest + Duration::from_millis(100)),
+            SpawnAdmission::RetryAfter {
+                delay: SECOND_RETRY_DELAY - Duration::from_millis(100),
+                budget_exhausted: false,
+            }
+        );
+    }
+
+    #[test]
+    fn stability_gate_measures_from_spawn_start_while_running() {
+        let stable = RuntimeLifecycle::with_started_at(9, Instant::now() - STABLE_RESET_AFTER);
+        assert!(runtime_is_stable(&stable));
+
+        // One second short of the boundary: not yet stable, so a reuse does
+        // not clear the session's crash budget.
+        let young = RuntimeLifecycle::with_started_at(
+            10,
+            Instant::now() - STABLE_RESET_AFTER + Duration::from_secs(1),
+        );
+        assert!(!runtime_is_stable(&young));
+
+        // A dead generation never counts as stable, however long it lived.
+        let dead = RuntimeLifecycle::with_started_at(11, Instant::now() - STABLE_RESET_AFTER);
+        dead.mark_connection_closed();
+        assert!(!runtime_is_stable(&dead));
+    }
+
+    #[test]
+    fn admission_prunes_expired_crashes_before_judging_the_window() {
+        let start = Instant::now();
+        let mut budget = RuntimeCrashBudget::default();
+        budget.record_crash_at(start);
+        let late = start + CRASH_WINDOW - Duration::from_millis(100);
+        budget.record_crash_at(late);
+        budget.record_crash_at(late);
+        // The exhausted pause is anchored to the OLDEST crash: the delay is
+        // the time left until the first crash leaves the window (100 ms
+        // here). Anchoring to the latest crash instead would report the full
+        // 60 s window, silently doubling the wait.
+        assert_eq!(
+            budget.admission_at(late),
+            SpawnAdmission::RetryAfter {
+                delay: Duration::from_millis(100),
+                budget_exhausted: true,
+            },
+        );
+
+        // The instant the first crash leaves the window only two remain: the
+        // pause must lift into the short backoff (measured from the latest
+        // crash), neither staying exhausted nor falling through to Allowed.
+        // Only an admission-time prune produces this state — the records
+        // above happened before anything expired.
+        let at_window = start + CRASH_WINDOW;
+        assert_eq!(
+            budget.admission_at(at_window),
+            SpawnAdmission::RetryAfter {
+                delay: SECOND_RETRY_DELAY - Duration::from_millis(100),
+                budget_exhausted: false,
+            }
+        );
+    }
+
+    /// The stamp can be observed by several reclaim paths in one window;
+    /// whichever wins, the generation must bill exactly one crash slot.
+    #[test]
+    fn concurrent_observers_consume_exactly_one_crash_slot() {
+        let lifecycle = std::sync::Arc::new(RuntimeLifecycle::new(3));
+        assert!(lifecycle.mark_connection_closed());
+        let observers = 8;
+        let barrier = std::sync::Arc::new(std::sync::Barrier::new(observers));
+        let handles = (0..observers)
+            .map(|_| {
+                let lifecycle = lifecycle.clone();
+                let barrier = barrier.clone();
+                std::thread::spawn(move || {
+                    barrier.wait();
+                    lifecycle.take_uncounted_crash()
+                })
+            })
+            .collect::<Vec<_>>();
+        let taken = handles
+            .into_iter()
+            .map(|handle| handle.join().expect("observer thread"))
+            .filter(|took| *took)
+            .count();
+        assert_eq!(taken, 1);
     }
 }

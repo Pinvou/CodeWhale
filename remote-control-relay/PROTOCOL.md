@@ -700,7 +700,7 @@ outcomes and already-admitted requests are not refusal receipts. Both clients
 must support these fields; older strict decoders may reject such receipts.
 
 The contract digest is
-`63db457fd305cf8d758133fa8996b853bd3073892fa8bfe93aec7de8f873e242`.
+`5208650492c4e37286a7322d12ffc6c401724b8f261f8672d830146839db9f63`.
 It is SHA-256 over canonical JSON (object keys recursively sorted, array order
 preserved, compact JSON scalars) of `{contract,fixture}`. `contract` is the
 executable manifest containing every schema required/optional field, role
@@ -1113,13 +1113,19 @@ partial post-rotation hook installation.
 Controller error envelopes use only these codes: `pairing_code_invalid`,
 `pairing_code_generation_failed`, `controller_busy`, `version_incompatible`, `endpoint_offline`,
 `enrollment_required`, `invalid_message`, `unsupported_capability`,
-`permission_already_decided`, `permission_expired`, `result_unknown` and
-`capability_snapshot_unavailable`.
+`permission_already_decided`, `permission_expired`, `result_unknown`,
+`capability_snapshot_unavailable` and `pairing_registration_stale_relay_epoch`.
 Malformed schema errors are local parser failures and are mapped to the bounded
 `invalid_message` envelope before the later dispatcher closes the socket.
 Non-local pairing failures (missing, expired, consumed, revoked, wrong
 generation or a losing concurrent claim) all produce the same user-facing
 `pairing_code_invalid` message: “连接码无效或已失效”.
+
+A registration ID retained across Relay epochs remains rejected. Its correlated
+error preserves the closed `pairing_registration_stale_relay_epoch` code; B
+must start a new registration, never accept an old-epoch outcome. Older strict
+decoders may present a generic registration rejection for this new code; the
+successful registration shape and same-epoch idempotency remain unchanged.
 
 When a legacy WebUI v2 `web_client_join` conflicts with a desktop reservation
 or controller lease, compatibility requires the exact existing response and no
