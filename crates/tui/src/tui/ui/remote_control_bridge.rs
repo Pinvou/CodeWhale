@@ -311,10 +311,14 @@ pub(crate) async fn drain_remote_control_events(
                                     Some(error.to_string()),
                                 );
                                 if status == "unknown" {
-                                    app.status_message = Some(
-                                        "Approval outcome not confirmed yet; the card stays \
-                                         open until the engine reports."
-                                            .to_string(),
+                                    let notice = app
+                                        .tr(crate::localization::MessageId::RemoteApprovalOutcomeUnconfirmed)
+                                        .into_owned();
+                                    app.status_message = Some(notice.clone());
+                                    app.push_status_toast(
+                                        notice,
+                                        StatusToastLevel::Warning,
+                                        Some(8_000),
                                     );
                                 }
                             }

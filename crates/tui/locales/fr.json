@@ -2098,5 +2098,6 @@
   "AutomationEditorFriday": "Ven",
   "AutomationEditorSaturday": "Sam",
   "AutomationEditorSunday": "Dim",
-  "AttachedRootsNotRevertedNote": "Seul l'espace de travail principal a été restauré ; les racines attachées n'ont pas été annulées (les répertoires exclus de l'instantané — comme vendor/ — et les dépôts imbriqués conservent leurs modifications)."
+  "AttachedRootsNotRevertedNote": "Seul l'espace de travail principal a été restauré ; les racines attachées n'ont pas été annulées (les répertoires exclus de l'instantané — comme vendor/ — et les dépôts imbriqués conservent leurs modifications).",
+  "RemoteApprovalOutcomeUnconfirmed": "Résultat d'approbation pas encore confirmé ; la carte reste ouverte jusqu'au rapport du moteur."
 }

@@ -2098,5 +2098,6 @@
   "AutomationEditorFriday": "周五",
   "AutomationEditorSaturday": "周六",
   "AutomationEditorSunday": "周日",
-  "AttachedRootsNotRevertedNote": "仅回退了主工作区;附加的工作区根未回滚(快照排除的目录(如 vendor/)与嵌套仓库会保留其更改)。"
+  "AttachedRootsNotRevertedNote": "仅回退了主工作区;附加的工作区根未回滚(快照排除的目录(如 vendor/)与嵌套仓库会保留其更改)。",
+  "RemoteApprovalOutcomeUnconfirmed": "审批结果尚未确认；在引擎回报前卡片保持打开。"
 }
