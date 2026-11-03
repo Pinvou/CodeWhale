@@ -154,10 +154,19 @@ assert.ok(
   /const handleSwitchSession = useCallback\(async \(id\) => \{[\s\S]{0,220}runBrowserUiTransition[\s\S]{0,260}setCurrentView\('chat'\)[\s\S]{0,180}await bridge\.sessions\.switchToSession\(id\)[\s\S]{0,180}!switched \|\| !isCurrent\(\)[\s\S]{0,260}channel: 'session'[\s\S]{0,100}hideMode: 'workspace'[\s\S]{0,80}serialize: true/.test(indexHtml),
   'ordinary session navigation must hide the native browser before publishing the chat route and loading the remote session'
 );
-assert.ok(
-  /const navigateFromScheduledRun = useCallback\(async \(nextView[\s\S]{0,520}runBrowserUiTransition[\s\S]{0,260}await bridge\.scheduled\.exitScheduledRunChat\(\)[\s\S]{0,160}!exited \|\| !isCurrent\(\)[\s\S]{0,260}setCurrentView\(nextView\)[\s\S]{0,560}hideMode: bs && bs\.scheduledRunContext[\s\S]{0,80}'workspace'/.test(indexHtml),
-  'leaving a scheduled run must hide the native browser before restoring its return session and publishing the next route'
-);
+const scheduledNavigationStart = indexHtml.indexOf('const navigateFromScheduledRun = useCallback(');
+const scheduledNavigationEnd = indexHtml.indexOf('function openSettingsSection(', scheduledNavigationStart);
+assert.ok(scheduledNavigationStart >= 0 && scheduledNavigationEnd > scheduledNavigationStart,
+  'scheduled navigation source anchors must exist');
+const scheduledNavigation = indexHtml.slice(scheduledNavigationStart, scheduledNavigationEnd);
+assert.match(scheduledNavigation,
+  /useCallback\(async \(nextView, beforeNavigate, ownerIsCurrent, controlledOwner\)[\s\S]*?return runBrowserUiTransition\(async \(\{ isCurrent \}\) => \{/);
+assert.match(scheduledNavigation,
+  /if \(bs && bs\.scheduledRunContext && bridge\.available && \(controlledOwner \|\| bridge\.scheduled\.exitScheduledRunChat\)\) \{\s*if \(controlledOwner && !bridge\.sessions\?\.exitControlledScheduledRunChat\) return false;\s*const exited = controlledOwner\s*\? await bridge\.sessions\.exitControlledScheduledRunChat\(controlledOwner\)\s*: await bridge\.scheduled\.exitScheduledRunChat\(\);\s*if \(!exited \|\| !isCurrent\(\) \|\| \(ownerIsCurrent && !ownerIsCurrent\(\)\)\) return false;\s*\}\s*if \(!isCurrent\(\) \|\| \(ownerIsCurrent && !ownerIsCurrent\(\)\)\) return false;[\s\S]*?setCurrentView\(nextView\)/,
+  'both scheduled exit branches must finish and retain transition and controlled-owner authority before publishing the route');
+assert.match(scheduledNavigation,
+  /channel: 'view',\s*hideMode: bs && bs\.scheduledRunContext\s*\? 'workspace'/,
+  'scheduled navigation must hide the native workspace before publishing');
 assert.ok(
   /onBackScheduledRun=\{\(\) => navigateFromScheduledRun\('scheduled'\)\}/.test(indexHtml),
   'scheduled back navigation must await restoration before committing the Scheduled route'
@@ -323,7 +332,8 @@ assert.ok(
   'scheduled task details must not expose task-level permission controls'
 );
 assert.ok(
-  /async function openRunChat\(run\)[\s\S]*?bridge\.scheduled\.openScheduledRunChat\(run,\s*detail \|\| selected\)/.test(indexHtml),
+  /async function openRunChat\(run\)[\s\S]*?onOpenScheduledRun\(run,\s*detail \|\| selected,\s*flushBeforeAction\)/.test(indexHtml) &&
+    /onOpenScheduledRun=\{handleOpenScheduledRunShortcut\}/.test(indexHtml),
   'scheduled run history rows should open the run chat session'
 );
 assert.ok(
