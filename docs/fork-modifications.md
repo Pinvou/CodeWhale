@@ -605,3 +605,9 @@ Official 已有 `core::panic_hooks::chain` 互斥注册器本体与远控/comput
 ## 2026-10-26 账号平台分支同步 main
 
 本次以普通 merge 同步 main `c5e2e174e`，消费其公开 CodeWhale `6e1ee88ee`、工具结果恢复与子代理生命周期依赖登记，以及会话和定时任务修复。保留本分支已审核的 age `=0.11.5` 安全修复、账户宿主 opt-in 和现有交互协议登记；父仓证书锁图继续遵循原受控守卫。实际组合验证另行记录，不继承 main 的测试为本分支已运行结果。
+
+## 2026-10-31 consumed baseline: controlled-session navigation ownership (T4c)
+
+The controlled-session recovery slice adds a fork-side bridge contract consumed by the desktop UI. The `sessions` bridge now exposes `switchToControlledSession`, `captureControlledNavigationOwner`, `beginLocalNavigationIntent`, `onLocalNavigation`, `getLocalNavigationEpoch`, `isControlledNavigationOwnerCurrent`, and `exitControlledScheduledRunChat`; the `desktopRemoteControl` state slice carries the controlled-navigation intent and pending state. `materializeSession` and `ensureSession` preserve the existing session identity and ownership semantics while routing every local navigation writer through the same epoch gate. These APIs are desktop-only and remain absent from the web bridge contract.
+
+The recovery effects and manual retry path consume the owner, session id, and generation together. A stale controlled open or failure cannot publish into a later local session, and a retry cannot resubmit the underlying task. This is a parent-consumer adaptation of the fork's existing bridge surface; it does not change the CodeWhale gitlink, wire DTOs, persisted schema, or upstream engine behavior. The associated bridge-domain, lane-dependency, navigation-race, and UI smoke fingerprints remain the authoritative checks for this slice.
