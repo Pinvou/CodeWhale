@@ -415,6 +415,11 @@
 6. web access/relay、remote proxy 会话视图、materializeSession 为闭源必须保留面（函数级点名，防对齐批次误删）：web access/relay 6 函数 `refreshWebAccessStatus`/`enableWebAccess`/`disableWebAccess`/`rotateWebAccessLink`/`getWebRelaySettings`/`setWebRelayAddress`（上游曾两轮删除：#684/#701）；remote proxy 会话视图 9 函数 `isKnownRemoteProxy`/`isRemoteProxyView`/`isListedRemoteProxy`/`readRemoteProxyHistory`/`isRemoteProxyReadCurrent`/`selectRemoteProxyHistory`/`deleteRemoteProxyHistory` 及同域 2 函数（随 Windows 双端远控文档族）。读取按 navigation/background/view 隔离意图，采用前通过 `isRemoteProxyReadCurrent` 必需接线复核；同 epoch cursor 防回退，不以请求序判断快照新旧，真实模块回归见 `remote_proxy_navigation.test.mjs`；`materializeSession`（`tauri/bridge/sessions.js`，团队接力等显式工作入口依赖的稳定 session id 物化）。
 7. `src/shared/bridge-messages.js` 两谓词为闭源语义必须保留面：`isContextUpdateRuntimeMessage`（CodeWhale prompt-cache delta 以 user-role 持久化的识别，`bridge-messages.js` 与 `shared/internal-message.mjs` 镜像）、`isKnownInternalMetadataBlock`（`<turn_meta_unchanged/>`/turn_meta 块识别；官方两 lane `userMessageDisplayText` 以它就地过滤元数据块，helpers/上游版无此过滤——这是 persistMessagesFor/userMessageDisplayText 官方 lane 本体不壳化的原因之一）。上游全史无此两符号，T7 压缩检查点主题不覆盖其点名保留。
 8. #2030 披露的 Rust/前端保留面（原仅存 PR 正文，现落 docs 为持久 registry）：①`discard_aux_session` 全链（Rust 命令+RPC opcode+allowlist；JS facade `auxChatDiscard` 已随 #701 X 清理删除，Rust 命令面属后端批次）；②`UserPrefs::save`；③`run_captured_with_timeout`/`CLI_RUN_TIMEOUT`（连接器超时钳制，闭源连接器面不回流）；④engine_pool send 门 + reserved 包装、`load_for_engine_spawn`；⑤`pet_window` 再导出；⑥SettingsView reasoningEffort；⑦icons.jsx 既有导出面；⑧AcpRuntimeNotices i18n 回退；⑨ChatView 工作台引用；⑩`test_ci_gate_policy.py` helpers（main #1973 重写后有新消费）；⑪ima 同意门测试定位（app/connector_consent_tests.rs，上游在 ima.rs）；⑫extraction 内联 `__pycache__` 判定（避免 runtime_bundle→marketplace 环边）；⑬`tests/team_relay_avatar.test.mjs`（官方独有测试，reduced-motion 钉）；⑭acp_providers_contract/protocol_tests 两断言按官方保留面适配。以上均为语义映射保留面、非遗漏。
+9. `model_store` 企业模型商店整模块闭源：闭源持有 `pinvou3-app/src-tauri/src/app/commands/model_store.rs`、Rust `features/model_store/`、前端 `src/features/model-store/` 与 `uiModelStore` i18n；依赖官方模型分发服务与账号体系，开源侧零残留属预期。对齐/回流批次不得把开源侧缺失当漂移补齐，也不得要求闭源面随社区核心开源。
+10. 桌面双端远程控制闭源独有（PM 2026-10-25 决定，仅开源手机/QR 一期）：闭源面为 `features/remote_control/`（含 `controller/`、`task_permissions.rs`、`relay_client*`）、`app/commands/desktop_remote_*`、`features/sessions/{application,remote_proxy}`、前端 `src/features/remote-control/`、Relay 侧 `controller-*.js`/`enrollment-*`/`pairing-*` 与 `docs/Windows双端远程控制*.md` 发布证据；归属口径见 M0 §11 与代办「运行服务器与远程控制处理口径」。同步/回流时不得把该面当作漂移删除或要求开源侧补齐。
+11. MegaCube 入口/图标闭源独有（PM 2026-10-25 决定）：`show_megacube_site` 能力、`megacubeSite` i18n、`megacube-icon.png` 与产品入口仅存在于闭源仓；M0 §6.1 已同步改为社区版不包含，取代旧「社区版保留名称、图标、产品入口和通用集成，真实官方访问地址通过官方构建或运行环境注入」口径。开源侧零残留属预期，不作为缺失回流。
+12. （已退役，2026-10-29 开源仓 Pinvou/pinvou-agent#783 合入同一守卫）原登记「webpki-roots 例外守卫当前闭源独有」已与现状不符：开源仓已于 2026-10-28 经 Pinvou/pinvou-agent#783（squash `2ceccb700b`）合入同一守卫（`docs/webpki-roots-exception.md`、`scripts/guard-webpki-roots-exception.py` 与 `deny.toml`/`Cargo.toml` bans），两仓均持有该守卫，不再构成分歧，本条不再作为有意分歧保留；两仓 ban 版本区间暂有差异（闭源封禁 <1.0.10、开源封禁 <1.0.11），后续同步以各自 manifest 为准。
+13. 应用内更新器/OTA 分歧：闭源保留完整 OTA 实现（`features/updater/`，含 `updater/health.rs` 事务账本）与前端 `src/platform/tauri/update-readiness.js`；开源为文档化 unsupported stub（M0 §8：Community 首版不提供应用内自动更新，走 GitHub Releases 手动安装）。对齐批次不得把闭源 updater 面当漂移删除，开源 stub 也不得被视为缺失。
 
 ## 13. 发布与回退
 
@@ -515,6 +520,12 @@ Official 父仓集成边界：三套产品锁文件继续服从 `docs/webpki-roo
 Official 已有引擎快照写入/通知的同事务提交、代际写入存活标记、mutation 门内启动基线和 ColdEngineCustody 未公开引擎回收，本次保留这些实现与远控生产 CAS。仅补齐乐观准入显示消息回退：`persist_admitted_chat_display_with_commit` 在同一 mutation 门内检查代际、落盘并通知，版本不匹配时通知现有 durable 版本而不覆盖。转发器三条保存路径均使用原引擎存活标记，退休回退不再写入或发布。既有无回调接口保留。
 
 行为回归：`display_fallback_publishes_in_transaction_and_refuses_retired_writers`、`queued_engine_snapshot_checks_retirement_under_the_mutation_gate` 与 `transcript_persist_pins`；生命周期及已有回收方 5 秒兜底边界见 `docs/chat-transcript-commit-lifecycle.md`。不修改底座 gitlink 或底座行为。
+
+## 2026-10-28 可链 panic 钩子收尾（Community #780）
+
+Official 已有 `core::panic_hooks::chain` 互斥注册器本体与远控/computer_use 三个消费方（`pub(crate) mod panic_hooks`、`install_worker_panic_redaction` 走 `chain`），本次补齐来源 PR 的收尾件：模块头补记消费者契约（互斥注册 + `Once` 单次安装、逆注册顺序快照分发、无属主回落安装前钩子、panic 路径零分配、append-only 语义、双 panic 即中止）；`HANDLERS` 从 `OnceLock` + 访问器收敛为 `LazyLock` 静态（等价，少一层间接）；`late_registration_preserves_active_redaction_without_a_default_hook_gap` 按来源强化为属主线程作用域处理器 + `run_isolated_child` 60s 看门狗，并补第二/第三阶段断言（后注册属主赢第二个 panic、无属主 panic 仍达默认钩子）；`computer_use/backend.rs` 新增 `worker_thread_panics_are_redacted_and_other_panics_forwarded`（隔离子进程内验证 worker 线程 panic 载荷被脱敏且恰好一次、无属主 panic 转发默认钩子），并把两处 `panic_payload_summary(&panic)` 修正为 `&*panic`（Box 先解引用，避免把 Box 本体 unsize 成 `&dyn Any` 导致 downcast 全失败）。远控 `panic_scope.rs` 两个作用域的既有注册与行为不变。
+
+行为回归：`late_registration_preserves_active_redaction_without_a_default_hook_gap`、`worker_thread_panics_are_redacted_and_other_panics_forwarded`，二者登记为 fork-guard APP 指纹。不修改底座 gitlink 或底座行为。
 
 ### #118 已集成输出恢复的范围与守护（pinvou-agent#757）
 

@@ -1,11 +1,19 @@
 import assert from "node:assert/strict";
+import crypto from "node:crypto";
+import { mkdtemp, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import test from "node:test";
 
 import { ControllerRouter } from "../controller-router.js";
 import { ControllerLivenessHooks } from "../controller-liveness.js";
 import { ControllerResumeHooks } from "../controller-resume.js";
+import { RelayStateStore } from "../relay-state-store.js";
+import { PairingStore } from "../pairing-store.js";
+import { PairingRegistrationHandler } from "../pairing-registration-handler.js";
+import { validateControllerMessage } from "../protocol-controller.js";
 
-function fixture({ clock = Date.now, capabilities = ["encrypted_frames_v1", "task_v1"], realLeaseHooks = false } = {}) {
+function fixture({ clock = Date.now, capabilities = ["encrypted_frames_v1", "task_v1"], realLeaseHooks = false, pairingRegistrationHandler } = {}) {
   const sent = new Map([["socket-A", []], ["socket-B", []]]);
   const aborted = [];
   const terminated = [];
@@ -62,7 +70,7 @@ function fixture({ clock = Date.now, capabilities = ["encrypted_frames_v1", "tas
   const liveness = new ControllerLivenessHooks({ clock, ...(realLeaseHooks ? { leaseManager: leases } : {}) });
   const resume = new ControllerResumeHooks({ clock, ...(realLeaseHooks ? { leaseManager: leases } : {}) });
   const router = new ControllerRouter({
-    pairingRegistrationHandler: {
+    pairingRegistrationHandler: pairingRegistrationHandler ?? {
       register: async (message) => ({
         v: 1, type: "desktop_pairing_registered", request_id: message.request_id,
       }),
@@ -351,6 +359,61 @@ test("router keeps registration on authenticated B and cleans up disconnected pe
   await router.removeSocket("socket-B");
   assert.equal(router.resolveControlledEndpoint("endpoint-0001"), null);
   assert.equal(aborted.length, 1);
+});
+
+test("persistent registration replay preserves outcomes and exposes only the restart rejection", async (t) => {
+  const directory = await mkdtemp(join(tmpdir(), "pinvou-registration-restart-"));
+  const options = { statePath: join(directory, "controller", "state.json"), legacyStatePath: join(directory, "legacy.json"),
+    // This is a real file/lock/CAS restart test, not native Windows ACL proof.
+    ...(process.platform === "win32" ? { protectPath: async () => {}, verifyPath: async () => {}, verifyAncestors: async () => {} } : {}) };
+  let state;
+  t.after(async () => { await state?.close(); await rm(directory, { recursive: true, force: true }); });
+  const digestKeyring = { activeKeyId: "restart-test-key", keys: [{ keyId: "restart-test-key", key: crypto.randomBytes(32).toString("hex") }] };
+  const publicKey = () => crypto.generateKeyPairSync("x25519").publicKey.export({ type: "spki", format: "der" }).subarray(-32).toString("base64");
+  const request = { v: 1, type: "desktop_pairing_register", request_id: "request-restart-0001",
+    registration_request_id: "registration-restart-0001", endpoint_id: "endpoint-0001", remote_control_generation: "generation-restart-0001",
+    code_wrap_public_key_b64: publicKey(), handshake_public_key_b64: publicKey(), key_algorithm: "x25519", capabilities: ["pairing_v1"] };
+  const routed = (pairingStore, relayEpoch) => fixture({ pairingRegistrationHandler: new PairingRegistrationHandler({ pairingStore, relayEpoch,
+    authorizeEndpoint: async ({ endpointId, context }) => assert.equal(context.endpointId, endpointId) }) });
+  state = await RelayStateStore.open(options);
+  let pairing = await PairingStore.open({ stateStore: state, digestKeyring, clock: () => 1000 });
+  let { router, sent } = routed(pairing, "relay-restart-0001");
+  await router.handle({ socketIdentity: "socket-B", message: request });
+  const first = sent.get("socket-B").at(-1);
+  assert.equal(first.type, "desktop_pairing_registered");
+  const retry = { ...request, request_id: "request-restart-retry" };
+  await router.handle({ socketIdentity: "socket-B", message: retry });
+  assert.deepEqual(sent.get("socket-B").at(-1), { ...first, request_id: retry.request_id });
+  await state.close();
+  state = await RelayStateStore.open(options);
+  pairing = await PairingStore.open({ stateStore: state, digestKeyring, clock: () => 2000 });
+  assert.equal(await pairing.invalidateForRelayRestart(), 1);
+  ({ router, sent } = routed(pairing, "relay-restart-0002"));
+  await assert.rejects(router.handle({ socketIdentity: "socket-B", message: retry }),
+    { code: "pairing_registration_stale_relay_epoch" });
+  const stale = sent.get("socket-B").at(-1);
+  assert.equal(stale.code, "pairing_registration_stale_relay_epoch");
+  assert.equal(stale.request_id, retry.request_id);
+  assert.equal(validateControllerMessage(stale, "relay").code,
+    "pairing_registration_stale_relay_epoch");
+  const next = { ...request, request_id: "request-restart-next", registration_request_id: "registration-restart-next",
+    remote_control_generation: "generation-restart-next", code_wrap_public_key_b64: publicKey(), handshake_public_key_b64: publicKey() };
+  await router.handle({ socketIdentity: "socket-B", message: next });
+  const recovered = sent.get("socket-B").at(-1);
+  assert.equal(recovered.type, "desktop_pairing_registered");
+  assert.equal(recovered.remote_control_generation, next.remote_control_generation);
+  assert.equal(recovered.relay_epoch, "relay-restart-0002");
+});
+
+test("registration routing continues to collapse unrelated internal errors", async () => {
+  const { router, sent } = fixture({ pairingRegistrationHandler: { register: async () => {
+    throw Object.assign(new Error("internal registration details"), { code: "internal_registration_failure" });
+  } } });
+  await assert.rejects(router.handle({ socketIdentity: "socket-B", message: { v: 1, type: "desktop_pairing_register", request_id: "request-internal-0001" } }),
+    { code: "internal_registration_failure" });
+  assert.equal(sent.get("socket-B").at(-1).code, "invalid_message");
+  assert.equal(sent.get("socket-B").at(-1).request_id, "request-internal-0001");
+  assert.equal(JSON.stringify(sent.get("socket-B")).includes("internal_registration"), false);
 });
 
 test("explicit controller disconnect forwards once and terminates the shared lease", async () => {

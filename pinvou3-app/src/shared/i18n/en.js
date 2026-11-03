@@ -2369,6 +2369,8 @@ dictEn["controlledDevice"] = {
   unsupported: "Desktop remote control is not supported on this system.",
   errorGeneric: "The operation failed. Please try again.",
   errorRelayUnavailable: "The remote service has not enabled desktop control. Try again later or contact the service administrator.",
+  errorPairingExpired: "The code expired. Start remote control again and retry with a new code.",
+  errorHandshakeTimeout: "The secure connection timed out. Start remote control again and retry with a new code.",
   workspaceAuthorize: "Add workspace",
   workspaceAuthorized: "Authorized",
   workspaceUnauthorized: "Not authorized",
