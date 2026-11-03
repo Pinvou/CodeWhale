@@ -3079,16 +3079,22 @@ const App = () => {
             lastFailedDoctorSidRef.current = null;
             reused = null;
           }
+          // prompt 窗口决算紧跟 prompt await（round-37 review）：此刻双通道
+          // 修订号仍与动作起点可比（materialize 尚未启动），hung prompt 窗口
+          // 里的用户切会话/去设置在此拍板。
+          const promptWindowIntact = ownership.kept();
           const sid = reused || (await bridge.sessions.materializeSession());
           lastFailedDoctorSidRef.current = null;
           if (!sid) return false;
           usedSid = sid;
-          // prompt/materialize 窗口的导航意图决算（三十三轮评审 P2）：本动作
-          // 自己的 session 票据尚未签发，此刻双通道修订号仍与动作起点可比——
-          // 期间任何侧栏切会话/去设置导航都让 intentIntact 变 false，晚到的
-          // 完成只送达、不切换（进入本 transition 后 session 修订号被自己
-          // 顶掉，kept() 不再可比，只能在这里拍板）。
-          const intentIntact = ownership.kept();
+          // 导航意图 = prompt 窗口双通道决算 ∧ 视图半边持续到落定（round-37
+          // review 修订三十三轮 P2 的拍点）：session 半边在 materialize 之前
+          // 拍板——彼时修订号仍与动作起点可比，hung prompt 窗口里的用户切会
+          // 话照旧拦下导航；materialize 窗口的用户切会话由
+          // materializeSession 自身守卫接管（token 前移/活动会话移位 → 返回
+          // null → 本动作放弃发送），其机器内部转换不再计入意图尺；视图半
+          // 边（materialize 期间去设置）照旧持续到落定。
+          const intentIntact = promptWindowIntact && ownership.keptChannel('view');
           const sent = await runBrowserUiTransition(async ({ isCurrent }) => {
             if (!isCurrent()) return false;
             // 先发送再跳转：发送失败时用户还留在设备管理页，「请重试」的
@@ -3142,6 +3148,21 @@ const App = () => {
             // draft — without the null baseline that observation classifies as
             // external and supersedes this transition (round-20 review P2).
             sessionBaseline: null,
+            // guardSession off (round-37 review): the gate's session guard
+            // compares the browser-view session captured at run() against the
+            // live value at publish time, and this transition IS the session
+            // switch — the bridge's active session moved null-draft → sid
+            // inside materializeSession, before the transition began. The
+            // captured snapshot (stale React commit, still null on the device
+            // page) can only ever mismatch by timing: the guarded comparison
+            // read null vs sid and killed the publication before the send
+            // (reproduced deterministically against main #2216's notification
+            // scheduling, which commits the layout effect inside the
+            // hide/serialize window). Real user navigation during the flow is
+            // still guarded by the ownership ticket + intentIntact + live view
+            // check below; the guard here had no legitimate failure mode to
+            // protect.
+            guardSession: false,
           });
           if (sent !== true) lastFailedDoctorSidRef.current = sid;
           return sent === true;
