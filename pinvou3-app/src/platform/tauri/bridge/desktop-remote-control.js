@@ -65,6 +65,8 @@
     // undefined——后端已 waiting_for_pairing 且带连接码，面板却显示未开启（2026-09-20 实测）。
     var STATE_SLICES = [
       "controlledDevice",
+      "controlledNavigationIntent",
+      "controlledNavigationPending",
       "controlledSession",
       "controllerConnection",
       "remoteCapabilities",
@@ -272,6 +274,12 @@
       return next.intents.controlled;
     }
 
+    function settleControlledIntent(intent) {
+      var previous = current();
+      if (!previous.intents || previous.intents.controlled !== intent || !previous.controlledNavigationPending) return;
+      publish(Object.assign({}, previous, { controlledNavigationPending: false }));
+    }
+
     function controllerIntent(openNewConnection) {
       var next = logic.beginControllerIntent(current(), openNewConnection);
       publish(next);
@@ -335,7 +343,7 @@
           });
         }
         return applyControlled(intent, result, true);
-      }).catch(function (failure) { throw asBoundedError(failure); });
+      }).catch(function (failure) { throw asBoundedError(failure); }).finally(function () { settleControlledIntent(intent); });
     }
 
     function controlledRefresh() {
@@ -344,7 +352,7 @@
       var intent = controlledIntent(true);
       return invoke("desktop_remote_controlled_refresh", {}).then(function (result) {
         return applyControlled(intent, result, true);
-      }).catch(function (failure) { throw asBoundedError(failure); });
+      }).catch(function (failure) { throw asBoundedError(failure); }).finally(function () { settleControlledIntent(intent); });
     }
 
     function controlledStop() {
@@ -352,7 +360,7 @@
       var intent = controlledIntent();
       return invoke("desktop_remote_controlled_stop", {}).then(function (result) {
         return applyControlled(intent, result);
-      }).catch(function (failure) { throw asBoundedError(failure); });
+      }).catch(function (failure) { throw asBoundedError(failure); }).finally(function () { settleControlledIntent(intent); });
     }
 
     function controlledDisconnectNow() {
@@ -360,7 +368,7 @@
       var intent = controlledIntent();
       return invoke("desktop_remote_controlled_disconnect_now", {}).then(function (result) {
         return applyControlled(intent, result);
-      }).catch(function (failure) { throw asBoundedError(failure); });
+      }).catch(function (failure) { throw asBoundedError(failure); }).finally(function () { settleControlledIntent(intent); });
     }
 
     function controlledStatus() {
@@ -688,13 +696,15 @@
         attachments: sources,
       }).catch(function (failure) { throw asBoundedError(failure); });
       var projection = result && typeof result === "object" ? result : {};
-      // The B Command returns the frozen task_status protocol projection.
+      // The B command extends its local status projection with the admission
+      // sequence; the encrypted task_status protocol itself remains frozen.
       var taskId = projection.task_id || null;
       if (taskId && projection.session_id === sessionId && projection.task_status) {
         publish(logic.applyControlledTaskEvent(current(), {
           taskId: taskId,
           sessionId: projection.session_id,
           generation: projection.generation,
+          sequence: projection.sequence,
           modelSource: projection.modelSource,
           status: projection.task_status,
           text: visibleText,

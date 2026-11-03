@@ -159,7 +159,7 @@ window.addEventListener('pinvou:chat-round-committed', (event) => {
       }
       return (
         <div className="relative min-w-0">
-          <button ref={triggerRef} onClick={() => { if (!busy && canSwitchModels) setOpen(o => !o); }} disabled={busy || !canSwitchModels}
+          <button type="button" ref={triggerRef} onClick={() => { if (!busy && canSwitchModels) setOpen(o => !o); }} disabled={busy || !canSwitchModels}
             title={(current ? selectorMainLabel(current, t) : t.modelNonePick) + (busy ? ' · ' + t.modelSwitchBusy : '')}
             className={`relative shrink-0 flex items-center justify-center ${multiAgentOn ? 'text-[#6d28d9] dark:text-[#c4b5fd]' : 'text-gray-700 dark:text-gray-200'} transition-colors border disabled:opacity-50 ${compact ? 'w-9 h-9 rounded-full bg-transparent hover:bg-black/5 dark:hover:bg-white/10 border-transparent' : 'h-8 gap-1.5 rounded-[12px] px-2.5 text-[12px] font-semibold min-w-0 max-w-full bg-black/[0.045] dark:bg-white/[0.055] hover:bg-black/[0.07] dark:hover:bg-white/[0.09] border-black/[0.045] dark:border-white/[0.06]'}`}>
             {compact ? (
@@ -184,7 +184,7 @@ window.addEventListener('pinvou:chat-round-committed', (event) => {
                       {withDivider && <div className="h-px bg-black/5 dark:bg-white/10 my-1.5 mx-2" />}
                       <div className="px-3 pt-1.5 pb-1 text-[11px] font-semibold text-gray-400 dark:text-gray-500">{label}</div>
                       {items.map(m => (
-                        <button key={m.id} onClick={() => pick(m.id)}
+                        <button type="button" key={m.id} onClick={() => pick(m.id)}
                           className="w-full flex items-center justify-between gap-2 px-3 py-2 text-left rounded-xl transition-colors group hover:bg-[#007AFF] hover:text-white">
                           <span className="flex items-center gap-2.5 min-w-0">
                             <Cpu size={15} className="shrink-0 text-gray-400 group-hover:text-white/90" />
@@ -252,7 +252,7 @@ window.addEventListener('pinvou:chat-round-committed', (event) => {
                 {canManageModels && (
                   <>
                     <div className="h-px bg-black/5 dark:bg-white/10 my-1.5 mx-2" />
-                    <button onClick={() => { setOpen(false); if (onGotoSettings) onGotoSettings(); }}
+                    <button type="button" onClick={() => { setOpen(false); if (onGotoSettings) onGotoSettings(); }}
                       className="w-full flex items-center gap-2.5 px-3 py-2.5 text-[13px] text-gray-700 dark:text-gray-200 hover:bg-[#007AFF] hover:text-white rounded-xl transition-colors group">
                       <Plus size={15} className="text-gray-400 group-hover:text-white/90" />
                       {t.manageModels}
@@ -659,7 +659,7 @@ window.addEventListener('pinvou:chat-round-committed', (event) => {
             <span className="block text-[13px] text-gray-700 dark:text-gray-200 truncate">{row.title}</span>
             {statusBadge(row.active ? t.composerSkillInUse : t.composerBuiltinAuto, row.active ? 'green' : 'blue')}
           </span>
-          <button disabled aria-label={row.id} title={t.composerReadonlySwitch}
+          <button type="button" disabled aria-label={row.id} title={t.composerReadonlySwitch}
             className={`relative inline-flex h-5 w-[34px] shrink-0 items-center rounded-full transition-colors cursor-not-allowed bg-[#34C759]/60`}>
             <span className="inline-block h-4 w-4 rounded-full bg-white shadow translate-x-[16px]" />
           </button>
@@ -690,7 +690,7 @@ window.addEventListener('pinvou:chat-round-committed', (event) => {
               />
             </button>
           ) : (
-          <button ref={triggerRef} data-testid={triggerTestId || 'composer-tool-menu-trigger'} onClick={() => setOpen(o => !o)} title={t.composerTools}
+          <button type="button" ref={triggerRef} data-testid={triggerTestId || 'composer-tool-menu-trigger'} onClick={() => setOpen(o => !o)} title={t.composerTools}
             className={`relative shrink-0 flex items-center justify-center text-gray-700 dark:text-gray-200 transition-colors border ${compact ? 'w-9 h-9 rounded-full bg-transparent hover:bg-black/5 dark:hover:bg-white/10 border-transparent' : 'h-8 gap-1.5 rounded-[12px] px-2.5 text-[12px] font-semibold whitespace-nowrap bg-black/[0.045] dark:bg-white/[0.055] hover:bg-black/[0.07] dark:hover:bg-white/[0.09] border-black/[0.045] dark:border-white/[0.06]'}`}>
             <Wrench size={compact ? 18 : 13} className="opacity-80" />
             {!compact && t.composerTools}
@@ -731,7 +731,7 @@ window.addEventListener('pinvou:chat-round-committed', (event) => {
                         <span className="min-w-0">
                           <span className="block text-[13px] text-gray-700 dark:text-gray-200 truncate">
                             {t.composerProjectSkills}
-                            <button onClick={() => setProjectSkillsHelp(true)} aria-label={t.composerProjectSkillsHelpTitle}
+                            <button type="button" onClick={() => setProjectSkillsHelp(true)} aria-label={t.composerProjectSkillsHelpTitle}
                               className="inline-flex items-center justify-center w-[15px] h-[15px] ml-1 rounded-full text-[10px] font-semibold leading-none text-gray-400 dark:text-gray-500 hover:text-gray-600 dark:hover:text-gray-300 hover:bg-black/5 dark:hover:bg-white/10 align-middle">?</button>
                           </span>
                           <span className="block text-[10px] text-gray-400 dark:text-gray-500">{t.composerProjectSkillsDesc}</span>
@@ -745,7 +745,7 @@ window.addEventListener('pinvou:chat-round-committed', (event) => {
                   </>
                 )}
                 <div className="h-px bg-black/5 dark:bg-white/10 my-1.5 mx-2" />
-                <button onClick={() => { setOpen(false); if (onGotoTools) onGotoTools(); }}
+                <button type="button" onClick={() => { setOpen(false); if (onGotoTools) onGotoTools(); }}
                   className="w-full flex items-center gap-2.5 px-3 py-2.5 text-[13px] text-gray-700 dark:text-gray-200 hover:bg-[#007AFF] hover:text-white rounded-xl transition-colors group">
                   <Store size={15} className="text-gray-400 group-hover:text-white/90" />
                   {t.composerManageTools}
@@ -756,7 +756,7 @@ window.addEventListener('pinvou:chat-round-committed', (event) => {
               <div onClick={e => e.stopPropagation()} className="relative w-full max-w-[380px] rounded-[22px] shadow-2xl p-5 bg-white text-[#1F1F1F] dark:bg-[#1E1F20] dark:text-[#E3E3E3]">
                 <div className="flex items-start justify-between gap-3 mb-4">
                   <div className="text-[16px] font-semibold">{t.composerProjectSkillsHelpTitle}</div>
-                  <button onClick={() => setProjectSkillsHelp(false)} className="w-8 h-8 rounded-full flex items-center justify-center hover:bg-black/5 dark:hover:bg-white/10"><X size={17} /></button>
+                  <button type="button" onClick={() => setProjectSkillsHelp(false)} className="w-8 h-8 rounded-full flex items-center justify-center hover:bg-black/5 dark:hover:bg-white/10"><X size={17} /></button>
                 </div>
                 <div className="text-[12px] leading-relaxed text-[#5F6368] dark:text-[#AEB4BC]">{t.composerProjectSkillsHelpBody}</div>
                 <div className="mt-3 text-[12px] font-medium">{t.composerProjectSkillsHelpDirsLabel}</div>

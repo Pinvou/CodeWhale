@@ -24,7 +24,9 @@ use crate::features::remote_control::controller::event_envelope::{
 use crate::features::remote_control::controller::journal::JournalSnapshot;
 #[cfg(test)]
 use crate::features::remote_control::controller::journal::ReplayOutcome;
-use crate::features::remote_control::controller::journal::{JournalEvent, RemoteJournal};
+use crate::features::remote_control::controller::journal::{
+    JournalEvent, JournalOwner, RemoteJournal,
+};
 use crate::features::remote_control::controller::ports::RemotePortError;
 use crate::features::remote_control::controller::protocol::LeaseContext;
 use crate::features::remote_control::controller::task::{
@@ -318,10 +320,10 @@ impl RemoteTaskEventSink for DesktopTaskEventSink {
         if let Some(record) = task_telemetry_record(&self.ledger, event) {
             self.track_task_once(event, &record);
         }
-        let Some(lease) = self
+        let Some((lease, journal_owner)) = self
             .app
             .state::<ControlledDeviceManager>()
-            .with_local_cancel_lease(Clone::clone)
+            .local_journal_context()
             .ok()
         else {
             return;
@@ -329,7 +331,13 @@ impl RemoteTaskEventSink for DesktopTaskEventSink {
         if event.generation != lease.remote_control_generation {
             return;
         }
-        let _ = self.app.emit(TASK_STATUS_EVENT, event);
+        let mut display_event = event.clone();
+        display_event.terminal_reason =
+            crate::features::remote_control::controller::task::display_terminal_reason(
+                event.terminal_reason.as_deref(),
+            )
+            .map(str::to_owned);
+        let _ = self.app.emit(TASK_STATUS_EVENT, &display_event);
         publish_authoritative_task_status(&self.app, event);
         // Only the current authenticated B session/generation can allocate a
         // visible journal sequence. Ordinary local sessions remain local.
@@ -351,19 +359,17 @@ impl RemoteTaskEventSink for DesktopTaskEventSink {
         if record.lease.remote_control_generation != lease.remote_control_generation {
             return;
         }
-        if self
-            .journal
-            .bind_generation(&lease.remote_control_generation)
-            .is_err()
-        {
-            return;
-        }
         // E2E-05：先落 B 权威 journal，再经同代加密通道回传 A。
         if let Some(stored) = self
             .journal
-            .record_task_event_for_generation(&lease.remote_control_generation, event)
+            .record_task_event_for_owner(&journal_owner, &display_event)
         {
-            publish_authoritative_event(&self.app, &lease.remote_control_generation, &stored);
+            publish_authoritative_event(
+                &self.app,
+                &lease.remote_control_generation,
+                &journal_owner,
+                &stored,
+            );
         }
     }
 }
@@ -374,6 +380,7 @@ impl RemoteTaskEventSink for DesktopTaskEventSink {
 fn publish_if_current<T>(
     journal: &RemoteJournal,
     appended_generation: &str,
+    owner: &JournalOwner,
     lease: &LeaseContext,
     event: &JournalEvent,
     mapped_session: Option<&str>,
@@ -382,7 +389,7 @@ fn publish_if_current<T>(
     if lease.remote_control_generation != appended_generation
         || mapped_session != Some(event.session_id.as_str())
         || journal
-            .require_current_event_for_generation(appended_generation, event)
+            .require_current_event_for_owner(owner, event)
             .is_err()
     {
         return None;
@@ -393,6 +400,7 @@ fn publish_if_current<T>(
 pub(crate) fn publish_authoritative_event(
     app: &tauri::AppHandle,
     appended_generation: &str,
+    owner: &JournalOwner,
     event: &JournalEvent,
 ) {
     use tauri::Manager as _;
@@ -419,6 +427,7 @@ pub(crate) fn publish_authoritative_event(
     if publish_if_current(
         journal_runtime.journal(),
         appended_generation,
+        owner,
         &lease,
         event,
         mapped_session.as_deref(),
@@ -493,6 +502,15 @@ fn publish_current_authoritative_event(
 }
 
 impl DesktopRemoteJournalRuntime {
+    pub(crate) fn from_controlled_manager(
+        manager: &crate::features::remote_control::controller::controlled::ControlledDeviceManager,
+    ) -> Arc<Self> {
+        Arc::new(Self {
+            journal: manager.journal(),
+        })
+    }
+
+    #[cfg(test)]
     pub(crate) fn journal_only(epoch: impl Into<String>) -> Arc<Self> {
         Arc::new(Self {
             journal: Arc::new(RemoteJournal::new(epoch)),
@@ -673,6 +691,12 @@ fn display_event(event: &JournalEvent) -> Result<JournalDisplay, String> {
         body,
         Vec::new(),
     )
+    .map(|display| {
+        let reason = (event.terminal_status.as_deref() == Some("failed"))
+            .then(|| event.payload.get("terminal_reason").and_then(Value::as_str))
+            .flatten();
+        display.with_terminal_reason(reason)
+    })
     .map_err(|_| "remote_projection_display_invalid".to_owned())
 }
 
@@ -1176,6 +1200,30 @@ mod tests {
     }
 
     #[test]
+    fn real_terminal_journal_producer_projects_only_supported_failure_reasons() {
+        for reason in [
+            "task_generation_stale",
+            "task_attachments_invalid",
+            "secret/path",
+            "task_generation_stale_extra",
+        ] {
+            let journal = RemoteJournal::new("epoch-1");
+            let mut event = task_event("task-1", "failed");
+            event.terminal_reason = Some(reason.into());
+            let produced = journal.record_task_event(&event).unwrap();
+            let display = display_event(&produced).unwrap();
+            assert_eq!(display.body(), Some("failed"));
+            assert_eq!(
+                display.terminal_reason(),
+                match reason {
+                    "task_generation_stale" | "task_attachments_invalid" => Some(reason),
+                    _ => None,
+                }
+            );
+        }
+    }
+
+    #[test]
     fn recovered_terminal_telemetry_reads_its_owned_ledger_without_a_runtime() {
         use crate::features::remote_control::controller::task::RemoteTaskRequest;
 
@@ -1380,14 +1428,17 @@ mod tests {
         };
         let sent = Cell::new(0);
         let old_owner = lease("generation-1");
+        let old_handle = journal.test_owner_for_generation("generation-1").unwrap();
         journal.bind_generation("generation-2").unwrap();
         let new_owner = lease("generation-2");
+        let new_handle = journal.test_owner_for_generation("generation-2").unwrap();
         // The new ref maps to the same B session. Neither a captured old
         // lease nor reinterpreting the old event under the new lease may send.
         assert!(
             publish_if_current(
                 &journal,
                 "generation-1",
+                &old_handle,
                 &new_owner,
                 &old,
                 Some("b-session"),
@@ -1399,6 +1450,7 @@ mod tests {
             publish_if_current(
                 &journal,
                 "generation-1",
+                &old_handle,
                 &old_owner,
                 &old,
                 Some("b-session"),
@@ -1422,6 +1474,7 @@ mod tests {
             publish_if_current(
                 &journal,
                 "generation-2",
+                &new_handle,
                 &new_owner,
                 &current,
                 Some("b-session"),

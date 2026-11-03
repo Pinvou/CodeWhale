@@ -1,3 +1,4 @@
+// architecture-guard: allow-target-cfg -- The test-only journal_owner_tests module constructs a process-private real Windows Wry host for journal body/terminal consumers. Unsupported platforms must not simulate this host; product OS adaptation remains in the feature platform module.
 //! B-local remote task status and stop commands, plus private task owners.
 //!
 //! A08 accepts only authenticated full bindings or B-local semantic intents;
@@ -19,6 +20,9 @@ use uuid::Uuid;
 
 #[cfg(test)]
 mod frozen_permission_tests;
+
+#[cfg(all(test, target_os = "windows"))]
+pub(super) mod journal_owner_tests;
 
 use super::desktop_remote_model::prepare_selected_task_package_snapshot;
 use crate::features::assistant::engine_pool::EnginePool;
@@ -363,9 +367,9 @@ impl ControllerTaskEventSink for TaskEventBridge {
         // B may finish or cancel an already admitted local task while the
         // encrypted lane is reconnecting. Keep the authoritative B journal;
         // forwarding to A remains gated by the connected transport below.
-        let Ok(lease) = self.app.state::<
+        let Ok((lease, journal_owner)) = self.app.state::<
             crate::features::remote_control::controller::controlled::ControlledDeviceManager,
-        >().with_local_cancel_lease(Clone::clone) else {
+        >().local_journal_context() else {
             crate::features::remote_control::controller::relay_runtime::log_controlled_event(
                 "journal_event_ignored",
                 "lease_unavailable",
@@ -410,20 +414,9 @@ impl ControllerTaskEventSink for TaskEventBridge {
                 return;
             }
         }
-        if history
-            .journal()
-            .bind_generation(&lease.remote_control_generation)
-            .is_err()
-        {
-            crate::features::remote_control::controller::relay_runtime::log_controlled_event(
-                "journal_event_ignored",
-                "generation_or_binding_stale",
-            );
-            return;
-        }
         let event_id = format!("journal-{}", uuid::Uuid::new_v4().simple());
-        match history.journal().append_for_generation(
-            &lease.remote_control_generation,
+        match history.journal().append_for_owner(
+            &journal_owner,
             &event_id,
             kind,
             session_id,
@@ -459,6 +452,7 @@ impl ControllerTaskEventSink for TaskEventBridge {
                 super::desktop_remote_journal::publish_authoritative_event(
                     &self.app,
                     &lease.remote_control_generation,
+                    &journal_owner,
                     &event,
                 );
             }
@@ -1306,6 +1300,25 @@ fn finish_prepared_admission_owned(
         .map_err(|error| error.code.to_owned())
 }
 
+// A local status response may only claim the exact admission it describes.
+// A missing record is also stale: it may have been pruned or replaced.
+fn attach_current_local_sequence(
+    service: &RemoteTaskService,
+    task_id: &str,
+    sequence: u64,
+    status: &mut Value,
+) -> Result<(), String> {
+    if service
+        .status(task_id)
+        .map(|current| current.sequence != sequence)
+        .unwrap_or(true)
+    {
+        return Err("task_generation_stale".to_owned());
+    }
+    status["sequence"] = json!(sequence.to_string());
+    Ok(())
+}
+
 /// 接纳并派发一条已通过冻结校验、且会话已在远程映射中的 `task_submit`。
 /// 命令入口与 wire 入口共用，避免两条实现漂移。
 #[allow(clippy::too_many_arguments)]
@@ -1323,6 +1336,7 @@ fn admit_and_dispatch(
     local_attachment_cleanup: LocalAttachmentCleanup,
     budget: crate::features::remote_control::controller::turn_budget::TurnBudget,
 ) -> Result<Value, String> {
+    let local_submission = local_attachments.is_some();
     let request =
         RemoteTaskRequest::from_payload(validated).map_err(|error| error.code.to_owned())?;
     budget.checkpoint(&CancellationToken::new())?;
@@ -1451,9 +1465,20 @@ fn admit_and_dispatch(
     let (outcome, mut admission_cleanup) =
         finish_prepared_admission_owned(&service, prepared_admission)?;
     match outcome {
-        AdmissionOutcome::Replay(record) => service
-            .status_payload(&record.task_id)
-            .map_err(|error| error.code.to_owned()),
+        AdmissionOutcome::Replay(record) => {
+            let mut status = service
+                .status_payload(&record.task_id)
+                .map_err(|error| error.code.to_owned())?;
+            if local_submission {
+                attach_current_local_sequence(
+                    &service,
+                    &record.task_id,
+                    record.sequence,
+                    &mut status,
+                )?;
+            }
+            Ok(status)
+        }
         AdmissionOutcome::Admitted(ticket) => {
             let task_id = ticket.record.task_id.clone();
             let task_sequence = ticket.record.sequence;
@@ -1588,7 +1613,17 @@ fn admit_and_dispatch(
                 &mut admission_cleanup.handed_off,
             )? {
                 AdmittedTaskReady::Ready(ready) => ready,
-                AdmittedTaskReady::Failed(status) => return Ok(status),
+                AdmittedTaskReady::Failed(mut status) => {
+                    if local_submission {
+                        attach_current_local_sequence(
+                            &service,
+                            &task_id,
+                            task_sequence,
+                            &mut status,
+                        )?;
+                    }
+                    return Ok(status);
+                }
             };
             if model_source == TASK_MODEL_SOURCE_TEMPORARY {
                 crate::features::remote_control::controller::relay_runtime::log_controlled_event(
@@ -1606,6 +1641,7 @@ fn admit_and_dispatch(
                         "taskId": &task_id,
                         "sessionId": session_id,
                         "generation": &lease.remote_control_generation,
+                        "sequence": task_sequence.to_string(),
                         "modelSource": projected_model_source.as_str(),
                         "status": "admitted",
                         "text": &prompt,
@@ -1731,6 +1767,10 @@ fn admit_and_dispatch(
                 }
             });
             admission_cleanup.handed_off = true;
+            let mut status = status;
+            if local_submission {
+                attach_current_local_sequence(&service, &task_id, task_sequence, &mut status)?;
+            }
             Ok(status)
         }
     }
@@ -3041,6 +3081,107 @@ mod tests {
             "input": {"text": "hello", "attachment_ids": [], "skill_ids": []}
         });
         (manager, service, context, payload)
+    }
+
+    #[test]
+    fn local_sequence_requires_the_exact_current_admission() {
+        let (_, service, context, payload) = task_admission_fixture();
+        let prepared = service
+            .prepare_bound_admission(&context, &payload, 3_500, Some("a-ref-admission"), |_| {
+                Ok(())
+            })
+            .unwrap();
+        let admitted = service.finish_bound_admission(prepared).unwrap();
+        let AdmissionOutcome::Admitted(ticket) = admitted else {
+            panic!("expected admission")
+        };
+        let sequence = ticket.record.sequence;
+        let mut status = json!({"state": "admitted"});
+        attach_current_local_sequence(&service, "task-admission", sequence, &mut status).unwrap();
+        assert_eq!(status["sequence"], json!(sequence.to_string()));
+        for (task, stale_sequence) in [("task-admission", sequence + 1), ("task-missing", sequence)]
+        {
+            let mut stale_status = json!({"state": "admitted"});
+            assert_eq!(
+                attach_current_local_sequence(&service, task, stale_sequence, &mut stale_status)
+                    .unwrap_err(),
+                "task_generation_stale"
+            );
+            assert_eq!(stale_status, json!({"state": "admitted"}));
+        }
+        assert_eq!(service.status("task-admission").unwrap().sequence, sequence);
+    }
+
+    #[test]
+    fn local_sequence_rejects_a_pruned_and_reused_task_id() {
+        use crate::features::remote_control::controller::task::{
+            RemoteTaskRequest, RemoteTaskTerminal,
+        };
+        let (_, service, context, payload) = task_admission_fixture();
+        let request = RemoteTaskRequest::from_payload(&payload).unwrap();
+        let ledger = service.ledger();
+        let AdmissionOutcome::Admitted(first) = ledger.admit(&context, &request, 3_500).unwrap()
+        else {
+            panic!("expected first admission")
+        };
+        let original_sequence = first.record.sequence;
+        ledger
+            .complete("task-admission", RemoteTaskTerminal::Failed, None, 3_501)
+            .unwrap();
+        // Fill the real bounded ledger so its own terminal pruning removes the
+        // original identity, rather than constructing an impossible fixture.
+        for index in 0..256 {
+            let mut next = payload.clone();
+            let task = format!("task-fill-{index}");
+            next["task_id"] = json!(task);
+            next["client_request_id"] = json!(format!("client-fill-{index}"));
+            let next_request = RemoteTaskRequest::from_payload(&next).unwrap();
+            ledger
+                .admit(&context, &next_request, 3_600 + index)
+                .unwrap();
+            ledger
+                .complete(&task, RemoteTaskTerminal::Failed, None, 3_600 + index)
+                .unwrap();
+        }
+        assert_eq!(
+            service.status("task-admission").unwrap_err().code,
+            "task_not_found"
+        );
+        let mut stale = json!({"state": "failed"});
+        assert_eq!(
+            attach_current_local_sequence(
+                &service,
+                "task-admission",
+                original_sequence,
+                &mut stale
+            )
+            .unwrap_err(),
+            "task_generation_stale"
+        );
+        let AdmissionOutcome::Admitted(reused) = ledger.admit(&context, &request, 4_000).unwrap()
+        else {
+            panic!("expected new admission after pruning")
+        };
+        assert_ne!(reused.record.sequence, original_sequence);
+        assert_eq!(
+            attach_current_local_sequence(
+                &service,
+                "task-admission",
+                original_sequence,
+                &mut stale
+            )
+            .unwrap_err(),
+            "task_generation_stale"
+        );
+        assert_eq!(stale, json!({"state": "failed"}));
+        attach_current_local_sequence(
+            &service,
+            "task-admission",
+            reused.record.sequence,
+            &mut stale,
+        )
+        .unwrap();
+        assert_eq!(stale["sequence"], json!(reused.record.sequence.to_string()));
     }
 
     #[test]
