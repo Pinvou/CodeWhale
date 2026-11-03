@@ -917,6 +917,30 @@ fn fleet_authority_intersects_readonly_github_bash_with_network_ceiling() {
         .expect_err("network denial must win")
         .to_string();
     assert!(error.contains("does not grant network access"), "{error}");
+    // The envelope admits Bash through the parallel classifier, which refuses
+    // compounds and globs outright, so a gh read inside one fails closed
+    // before the per-stage network predicate is consulted — with or without
+    // a network grant. Compound probes are an in-session `agent` capability,
+    // not a fleet one.
+    for command in [
+        "pwd; gh repo view",
+        "gh pr list --search '*'",
+        "gh repo view | head -n 3",
+    ] {
+        let compound = json!({"action": "run", "command": command});
+        for context in [&offline, &networked] {
+            let error = enforce_tool_authority("Bash", &compound, &shell, context)
+                .expect_err("a compound gh read fails closed under the fleet envelope")
+                .to_string();
+            // The wall that fires is the parallel classifier's (compounds
+            // are never parallel-admitted), not the network ceiling: name it
+            // so a refusal from any other wall cannot green this leg.
+            assert!(
+                error.contains("outside its machine-readable authority envelope"),
+                "{command}: {error}"
+            );
+        }
+    }
 }
 
 #[tokio::test]

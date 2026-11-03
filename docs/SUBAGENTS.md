@@ -71,7 +71,7 @@ stewardship.
 | `planner`     | analyse and produce a strategy         | no      | yes      | read-only probes | "design the migration; don't execute"        |
 | `reviewer`    | read-and-grade with severity scores    | no      | yes      | read-only (net + bounded verify) | "audit this PR for bugs"                     |
 | `implement`   | land a specific change with min edit   | yes     | yes      | yes           | "rewrite `bar.rs::Foo::bar` to do X"         |
-| `test`        | run tests / validation, report outcome | no      | yes      | bounded verification (no writes) | "verify the diff with the bounded test checks; report PASS/FAIL" |
+| `test`        | run the built-in verification gates and report outcome | no      | yes      | built-in gates + read-only probes (no custom commands) | "verify the diff with the built-in checks; report PASS/FAIL" |
 | `advisor`     | short-lived, high-reasoning counsel     | no      | yes      | none          | "what are we missing in this design?"        |
 | `custom`      | explicit narrow tool allowlist         | inherits | inherits | inherits     | hand-picked tools on the parent's posture    |
 
@@ -90,11 +90,16 @@ builder) is a supported escape hatch for *work capacity* — the child brings
 its own model, route, and step budget — but the child's authority is clamped
 against the delegating parent's live posture, not the operator's: a scout's
 builder child lands read-only with raw shell and mutating tools denied, and
-canonical `Bash` is denied to it too (only bounded-inspection roles keep the
+canonical `Bash` is denied to it too (only the bounded-inspection roles and the verifier keep the
 classified read-only shell). Delegating to obtain shell is therefore
 mechanically useless — the scout's own bounded shell (`git -C … log`,
 `find … | head`, `npm view …`, classifier-gated) is the only shell path a
-read-only parent has. Read-only is transitive through any delegation chain:
+read-only parent has. The bounded grammar also admits compound probes of
+those families — segments joined by `;`, `&&`, `||`, or `|`, where every
+segment must individually be admitted (e.g. `wc -c f; wc -l f`,
+`cd sub && wc -c notes.md`, `cat x | od -c`) — and a workspace-confined
+`cd <one relative path>` in any sequence position its connector always runs (joined by `;`, or first — a `cd` after `&&`/`||` may never execute, so it refuses).
+Read-only is transitive through any delegation chain:
 the clamp (`ChildAuthority::clamp` in `fleet/exact.rs`) intersects every
 field with the narrower side, the deny-list union means a descendant can
 never drop an ancestor's restriction, and `inherit_disallowed_tools: false`
@@ -273,9 +278,13 @@ OUTPUT: VERDICT, EVIDENCE, GAPS, NEXT.
 - **`test`** — when the parent needs an authoritative pass/fail
   on the test suite or other validation. Verifiers don't fix
   failures; they capture the failing assertion + stack and put fix
-  candidates under RISKS. The verifier posture never writes, and shell
-  is clamped to the bounded built-in verification surface: the write
-  ceiling is read-only and unbounded shell forms are refused (#5186).
+  candidates under RISKS. The verifier posture never writes; its shell
+  is the bounded built-in verification surface plus the same
+  classifier-gated read-only probe lane the inspection roles hold
+  (`wc`, `ls`, `cat`, `grep` pipelines) for gathering evidence. The
+  write ceiling is read-only, unbounded shell forms are refused
+  (#5186), and custom commands are refused — use a write-capable role
+  for those.
 - **`advisor`** — when the operator wants a high-leverage second opinion
   before cheaper execution continues. Consultants read enough to ground a
   recommendation, but cannot write or run shell commands. `oracle` and

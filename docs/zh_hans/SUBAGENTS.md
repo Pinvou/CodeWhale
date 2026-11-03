@@ -31,13 +31,13 @@ Fleet 角色是面向用户的委派工作词汇：父代理通过 `agent` 启�
 | `planner` | 分析并产出策略 | 否 | 是 | 只读探针 | "设计迁移方案；不要执行" |
 | `reviewer` | 带严重度评分的阅读与评审 | 否 | 是 | 只读（网络 + 有界验证） | "审计这个 PR 的 bug" |
 | `builder` | 以最小改动落地某个具体变更 | 是 | 是 | 是 | "把 `bar.rs::Foo::bar` 重写为做 X" |
-| `verifier` | 运行测试/验证并报告结果 | 否 | 是 | 测试导向 | "运行 cargo test --workspace，并报告" |
+| `verifier` | 运行内置验证门禁并报告结果（只读探针取证） | 否 | 是 | 内置门禁 + 只读探针（无自定义命令） | "用内置检查验证这个 diff，并报告 PASS/FAIL" |
 | `consultant` | 短期、高推理密度的咨询 | 否 | 是 | 无 | "这个设计我们漏掉了什么？" |
 | `custom` | 显式的窄工具 allowlist | 继承 | 继承 | 继承 | 在父代理姿态上精选的工具 |
 
 角色的默认值就是该角色*想要*的姿态，而父代理的有效姿态永远是天花板（子代理绝不会扩得比父代理更宽）。只读角色按意图扣留**工作区写入**；默认不拿走任何其他东西——每个角色都保留网络读取，`custom` 继承父代理的写入/网络/shell 姿态，并且只被它的显式工具列表或发起调用收窄。被聚焦的 worker 的头部会依据运行时自身的权限快照声明有效姿态（`scout · read-only · network · read-only shell`）。
 
-**委派移动的是工作，绝不是权限**（#5426 的遏制答案）。只读角色委派给可写角色（scout → builder）是*工作容量*受支持的逃生舱——子代理自带其模型、路由和步骤预算——但子代理的权限被钳制在委派父代理的实时姿态上，而不是操作者的姿态上：scout 的 builder 子代理以只读落地，raw shell 和可变工具被拒绝，规范的 `Bash` 对它也被拒绝（只有有界检查角色保留分类的只读 shell）。因此通过委派来获得 shell 在机制上是无用的——scout 自带的受限 shell（`git -C … log`、`find … | head`、`npm view …`，分类器门控）是只读父代理唯一的 shell 路径。只读通过任何委派链都是传递的：钳制（`fleet/exact.rs` 中的 `ChildAuthority::clamp`）把每个字段与更窄的一侧求交，拒绝列表的并集意味着后代永远无法去掉祖先的限制，而 `inherit_disallowed_tools: false` 无法去掉姿态拒绝（`is_posture_denial`）。这一点由 `crates/tui/src/fleet/exact.rs` 测试中的 `a_read_only_parents_delegation_never_widens_authority` 钉死。
+**委派移动的是工作，绝不是权限**（#5426 的遏制答案）。只读角色委派给可写角色（scout → builder）是*工作容量*受支持的逃生舱——子代理自带其模型、路由和步骤预算——但子代理的权限被钳制在委派父代理的实时姿态上，而不是操作者的姿态上：scout 的 builder 子代理以只读落地，raw shell 和可变工具被拒绝，规范的 `Bash` 对它也被拒绝（只有有界检查角色与 verifier 保留分类的只读 shell）。因此通过委派来获得 shell 在机制上是无用的——scout 自带的受限 shell（`git -C … log`、`find … | head`、`npm view …`，分类器门控）是只读父代理唯一的 shell 路径。该有界语法还允许把这些已准入的探针组合成复合序列——以 `;`、`&&`、`||` 或 `|` 连接的段，且每个段都必须单独准入（例如 `wc -c f; wc -l f`、`cd sub && wc -c notes.md`、`cat x | od -c`）——以及工作区受限的 `cd <单个相对路径>`（可单独使用，或出现在连接符必定执行它的序列位置——以 `;` 连接或位于序列首位；`&&`/`||` 之后的 `cd` 可能根本不会执行，因此会被拒绝）。只读通过任何委派链都是传递的：钳制（`fleet/exact.rs` 中的 `ChildAuthority::clamp`）把每个字段与更窄的一侧求交，拒绝列表的并集意味着后代永远无法去掉祖先的限制，而 `inherit_disallowed_tools: false` 无法去掉姿态拒绝（`is_posture_denial`）。这一点由 `crates/tui/src/fleet/exact.rs` 测试中的 `a_read_only_parents_delegation_never_widens_authority` 钉死。
 
 会话的**权限姿态**在每个子代理内部的应用方式与父代理回合完全一致：在 Auto-Review 下，同一个确定性底线和一次性模型守护者决定 worker 的被扣留调用（绝不是提示词；守护者不可用时拒绝，fail closed）；在 Ask 下，角色无法委派的被扣留调用会作为审批提示在父代理的 UI 中弹出，worker 可见地等待（`waiting for user`），或者在无法提示的主机上带着原因被拒绝；Full Access 仍然在不可绕过的安全底线上 fail closed。每一次没有人被提示的决策都是该 worker 转录中的一行备注（聚焦时可见）和一条审计日志记录。参见 `docs/MODES.md`。
 
@@ -120,7 +120,7 @@ OUTPUT: VERDICT、EVIDENCE、GAPS、NEXT。
 - **`planner`** —— 当父代理有目标但没有可执行的分解。planner 写工件（`todo_write` 条目、响应体里的策略），但不执行它们。
 - **`reviewer`** —— 当已经有一个变更，父代理想要它被评分。reviewer 不打补丁——他们在发现里描述修复方案，这样如果判定是"修它"，父代理可以派一个 builder。
 - **`builder`** —— 当变更已经被明确指定、只需要落地。builder 保持严格的范围：最小改动，不做顺手重构，交回前跑一次快速验证。
-- **`verifier`** —— 当父代理需要测试套件或其他验证上的权威通过/失败结论。verifier 不修失败；他们记录失败的断言 + 栈，把修复候选放在 RISKS 下。
+- **`verifier`** —— 当父代理需要测试套件或其他验证上的权威通过/失败结论。verifier 不修失败；他们记录失败的断言 + 栈，把修复候选放在 RISKS 下。verifier 姿态从不写入；其 shell 是有界内置验证面，加上与检查角色相同的分类器门控只读探针通道（`wc`、`ls`、`cat`、`grep` 管道）用于取证。写入上限是只读，无界 shell 形式被拒绝（#5186），自定义命令也被拒绝——请改用具备写能力的角色。
 - **`consultant`** —— 当操作者想在更便宜的执行继续之前得到一个高杠杆的第二意见。consultant 读足够的材料来支撑一条建议，但不能写，也不能运行 shell 命令。`oracle` 和 `advisor` 只在加载更老的请求或持久化记录时被接受；新的提示词、回执和 UI 使用 `consultant`。
 - **`custom`** —— 只有当父代理需要显式约束工具集时。通过 legacy/internal 子代理记录上的 `allowed_tools` 字段传 allowlist；面向模型的 `agent` 工具刻意保持公共 schema 很小。
 
