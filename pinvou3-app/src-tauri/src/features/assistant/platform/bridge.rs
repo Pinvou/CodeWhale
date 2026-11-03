@@ -4757,9 +4757,7 @@ mod tests {
             let primary_agents = primary.join("AGENTS.md");
             std::fs::write(&primary_agents, "primary rules").unwrap();
             let additional = project.clone();
-            bridge.set_execution_root_resolver(std::sync::Arc::new(move |_| {
-                Some(primary.clone())
-            }));
+            bridge.set_execution_root_resolver(std::sync::Arc::new(move |_| Some(primary.clone())));
             bridge.set_workspace_roots_resolver(std::sync::Arc::new(move |_| {
                 vec![additional.clone()]
             }));
