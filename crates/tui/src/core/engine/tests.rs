@@ -19954,6 +19954,20 @@ async fn purge_then_edit_restores_the_standing_posture_baseline() {
 /// truncated B block carried away. The captured-request count also proves
 /// the compaction took the mechanical prune path: PruneOnly makes no
 /// provider call, so only the two real turns and the replacement appear.
+///
+/// The fixture pins a small fixed system prompt (`system_prompt_override`):
+/// without it, the submit-turn refresh composes the default prompt from the
+/// real user environment (memory, skills, plugins, platform lines), whose
+/// size differs per machine — zhuowp review 5748136802: on Windows the
+/// ambient term pushed the post-prune pressure estimate over the compaction
+/// threshold, the PruneOnly branch was skipped for the LLM summary pass
+/// (which these SSE-only mocks cannot serve), and the compaction failed
+/// leaving the stale output unpruned. The prune accounting itself is pure
+/// byte math; only the environment-composed prompt varies. With the prompt
+/// pinned, both threshold crossings are machine-independent: the stale
+/// output alone estimates ~18K tokens (over the 5K threshold), and the
+/// pruned remainder stays ~300 tokens — far under any threshold this
+/// fixture or a reasonable estimate could set.
 #[tokio::test]
 async fn manual_prune_only_compaction_keeps_the_standing_baseline_entries() {
     use wiremock::matchers::{body_string_contains, method, path};
@@ -20062,8 +20076,14 @@ async fn manual_prune_only_compaction_keeps_the_standing_baseline_entries() {
         .send(Op::SyncSession {
             session_id: Some("prune-baseline-test".to_string()),
             messages: seeded_messages,
-            system_prompt: None,
-            system_prompt_override: false,
+            // Pin the stable prefix: the prune/stop checks estimate the
+            // session system prompt too, so an environment-composed default
+            // (machine-dependent size) would make the threshold crossing —
+            // and with it the PruneOnly branch itself — platform-dependent.
+            system_prompt: Some(SystemPrompt::Text(
+                "prune-baseline stable system prompt".to_string(),
+            )),
+            system_prompt_override: true,
             model: "deepseek-v4-pro".to_string(),
             workspace: tmp.path().to_path_buf(),
             workspace_roots: Vec::new(),
