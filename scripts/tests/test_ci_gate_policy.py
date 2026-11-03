@@ -3716,8 +3716,13 @@ class CiGatePolicyTests(unittest.TestCase):
         )
         # 模块加载失败后不得出现任何包管理器安装路径:超时杀掉的 apt 事务
         # 会留下 dpkg 中断状态,毒化同 job 后续必需的依赖安装(静态取代被
-        # 删除的行为级 PACKAGE_MANAGER_CALLED 断言)。
-        self.assertNotIn("apt-get ", source)
+        # 删除的行为级 PACKAGE_MANAGER_CALLED 断言)。钉法对齐主线 #2095
+        # 后的 no-install 合同:零 apt 安装、零等锁选项。repair_dpkg_state
+        # 的注释与 warn 文案合法提及 "later apt-get steps"(脚本零 apt
+        # 调用的合同不变),裸 "apt-get " 全文禁令会与该合同相撞
+        # (merge queue run 41619867285 即此红)。
+        self.assertNotIn("apt-get install", source)
+        self.assertNotIn("-o DPkg::Lock::Timeout", source)
         self.assertIn(
             "using fallback swap without installing kernel packages",
             source,
