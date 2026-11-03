@@ -604,7 +604,7 @@ for (const navigation of ['none', 'session', 'new-draft', 'after-rollback']) {
           itemIdSeq: { get value() { return 0; }, set value(v) {} },
           formatAttachmentDisplayText: (t) => t,
         }));`, ctx);
-        vm.runInContext(['captureDraftWorkspaceBinding', 'ensureSession', 'enterDraft'].map(name => bridgeFunction(sessionSource, name)).join('\n')
+        vm.runInContext('var notifyingLocalSessionNavigation = false; var localNavigationListeners = new Set();\n' + ['publishLocalSessionNavigation', 'beginLocalSessionNavigation', 'captureDraftWorkspaceBinding', 'ensureSession', 'enterDraft'].map(name => bridgeFunction(sessionSource, name)).join('\n')
       + '\n' + ['restoreTaskDraft', 'restoreSteerText', 'prefillComposer', 'getComposerDraft'].map(name => bridgeFunction(chatSource, name)).join('\n'), ctx);
     const owner = { sessionId: null, draftEpoch: 4, operationId: operation.operationId };
     const creating = ctx.ensureSession(owner);
@@ -819,7 +819,7 @@ for (const lane of ['desktop', 'web']) {
           // maybePruneFailedWorkspaceRecent; load the real helpers (matching
           // names from the merged source) beside the sliced function.
           vm.runInContext((lane === 'desktop'
-            ? ['captureDraftWorkspaceBinding', 'maybePruneFailedWorkspaceRecent'].map(name => bridgeFunction(sessionSource, name)).join('\n') + '\n'
+            ? 'var notifyingLocalSessionNavigation = false; var localNavigationListeners = new Set();\n' + ['publishLocalSessionNavigation', 'beginLocalSessionNavigation', 'captureDraftWorkspaceBinding', 'maybePruneFailedWorkspaceRecent'].map(name => bridgeFunction(sessionSource, name)).join('\n') + '\n'
             : '') + bridgeFunction(sessionSource, 'ensureSession'), ctx);
         }
         const bridgeTargets = [];

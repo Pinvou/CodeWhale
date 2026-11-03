@@ -29,6 +29,15 @@ test("the real archive component smoke is included in the full CI suite", () => 
   ])).includes("node:tests/remote_archive_smoke.mjs"));
 });
 
+test("controlled recovery smoke is selected for the real application and feature paths", () => {
+  const smoke = "node:tests/controlled_open_ui_smoke.mjs";
+  for (const path of ["pinvou3-app/src/app/main.jsx", "pinvou3-app/src/features/remote-control/ControlledOpenRecovery.jsx", "pinvou3-app/tests/controlled_open_ui_smoke.mjs"]) {
+    assert.ok(labels(selectFrontendSmokes([path])).includes(smoke), path);
+  }
+  const knip = JSON.parse(readFileSync(new URL("../../pinvou3-app/knip.json", import.meta.url), "utf8"));
+  assert.ok(knip.entry.includes("tests/controlled_open_ui_smoke.mjs"));
+});
+
 test("the archive smoke is an executable Knip entry, not an ignored file", () => {
   const knip = JSON.parse(readFileSync(
     new URL("../../pinvou3-app/knip.json", import.meta.url), "utf8",
