@@ -9,6 +9,7 @@
     "tests/*.test.{js,mjs}",
     "tests/*.js",
     "tests/remote_archive_smoke.mjs",
+    "tests/remote_quarantine_smoke.mjs",
     "tests/controlled_preconnect_smoke.mjs",
     "tests/remote_dispatch_ownership_smoke.mjs",
     "tests/controlled_open_ui_smoke.mjs",

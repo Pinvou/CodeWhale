@@ -204,7 +204,8 @@ function remoteProxySystemBody(item) {
 function remoteActionFailureCode(failure) {
   const candidate = failure?.code || failure?.message || failure;
   const code = String(candidate || '');
-  return remoteActionFailureCopyKey(code) !== 'actionFailed' ? code : 'errorGeneric';
+  return ['remote_proxy_byte_budget', 'remote_pending_limit_reached', 'remote_retirement_budget_exhausted'].includes(code)
+    || remoteActionFailureCopyKey(code) !== 'actionFailed' ? code : 'errorGeneric';
 }
 
 function remoteActionFailureCopyKey(code) {
@@ -216,6 +217,13 @@ function remoteActionFailureCopyKey(code) {
     case 'remote_attachment_metadata_invalid': return 'attachmentMetadataInvalid';
     default: return 'actionFailed';
   }
+}
+
+function remoteCapacityFailureText(code, copy) {
+  if (code === 'remote_proxy_byte_budget') return copy.byteBudget;
+  if (code === 'remote_pending_limit_reached') return copy.pendingLimit;
+  if (code === 'remote_retirement_budget_exhausted') return copy.retirementBudget;
+  return null;
 }
 
 function constrainDialogFocus(event, dialog) {
@@ -3340,10 +3348,9 @@ const openChatExternalUrl = (url) => {
         }
       }
       const remoteSendMessage = remotePermissionFailureText(currentRemoteSendError, t.remoteConversation)
+        ?? remoteCapacityFailureText(currentRemoteSendError, t.remoteArchive)
         ?? (currentRemoteSendError === 'remote_capability_not_ready'
         ? t.remoteConversation.capabilityNotReady
-        : currentRemoteSendError === 'remote_proxy_byte_budget'
-        ? t.remoteArchive.byteBudget
         : currentRemoteSendError === 'task_session_busy'
         ? t.remoteConversation.sessionBusy
         : (currentRemoteSendError === 'temporary_model_capability_required'
@@ -4903,7 +4910,7 @@ const openChatExternalUrl = (url) => {
 
             {remoteChatActive && remoteActionError && (
               <div role="alert" data-testid="chat-remote-action-error" className={`mb-4 w-full max-w-[800px] px-5 text-[12px] text-[#EA4335] max-sm:px-4 ${hasMessages ? 'mx-auto' : ''}`}>
-                {t.remoteConversation[remoteActionFailureCopyKey(remoteActionError)]}
+                {remoteCapacityFailureText(remoteActionError, t.remoteArchive) ?? t.remoteConversation[remoteActionFailureCopyKey(remoteActionError)]}
               </div>
             )}
 
