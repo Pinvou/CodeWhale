@@ -170,13 +170,26 @@ const SECRET_QUERY_KEYS: [&str; 10] = [
 /// 枚举永远追不全（评审 P2：整名精确匹配漏掉大小写/新参数），按前缀收——
 /// `X-Amz-Algorithm`、`X-Amz-Date` 不是机密，但一起抹掉只是少一个非必要信息，
 /// 漏一个签名值却是签名本身持久化落盘。
-const SECRET_QUERY_PREFIXES: [&str; 1] = ["x-amz-"];
+///
+/// r21 P2-9：Google 云签名 query 同族（`X-Goog-Signature` /
+/// `X-Goog-Credential` / `X-Goog-Access-Token`……）按同样的前缀收。
+const SECRET_QUERY_PREFIXES: [&str; 2] = ["x-amz-", "x-goog-"];
+
+/// Azure SAS 令牌的 query 参数名（r21 P2-9）：`sp`（权限）/`se`（过期时间）/
+/// `sig`（签名）合在一起才是一把可用钥匙，单 `sig` 已是签名本体。刻意**不**并进
+/// `SECRET_QUERY_KEYS`：那张表还喂 bare-词形态（`token` 裸键后跟取值），而
+/// `se`/`sp` 是常见普通词根，收进去会把无辜的下一个词抹掉；这里只按
+/// 「URL query 参数名 / `KEY=` 取值 / `-H KEY=值`」的键名语境收。
+const AZURE_SAS_QUERY_KEYS: [&str; 3] = ["sig", "se", "sp"];
 
 /// query 参数名是否命中机密名单（整名或前缀，均大小写不敏感）。
 fn query_key_is_secret(key: &str) -> bool {
     SECRET_QUERY_KEYS
         .iter()
         .any(|known| key.eq_ignore_ascii_case(known))
+        || AZURE_SAS_QUERY_KEYS
+            .iter()
+            .any(|known| key.eq_ignore_ascii_case(known))
         || SECRET_QUERY_PREFIXES
             .iter()
             .any(|prefix| key.to_ascii_lowercase().starts_with(prefix))
@@ -250,17 +263,51 @@ fn word_is_secret(word: &str) -> bool {
 /// `KEY=VALUE` 里的 KEY 是不是机密名。大小写不敏感：脚本里两种写法都见过。
 /// SigV4 全家（`Credential=AKIA…/…`、`Signature=…`、`X-Amz-Credential=` 等）按
 /// 前缀+整名收——签名材料持久化落盘等于把凭证落盘（r5 评审 P2-3 实测）。
+/// r21 P2-9：前缀表扩到 X-Goog-，Azure SAS 键（sig/se/sp）一并按键名收。
 fn key_is_secret(key: &str) -> bool {
     let key = key.trim_matches(|c: char| matches!(c, '"' | '\'' | '$' | '{' | '}'));
     let lowered = key.to_ascii_lowercase();
     SECRET_ENV_KEYS
         .iter()
         .any(|known| key.eq_ignore_ascii_case(known))
-        || lowered.starts_with("x-amz-")
+        || SECRET_QUERY_PREFIXES
+            .iter()
+            .any(|prefix| lowered.starts_with(prefix))
+        || AZURE_SAS_QUERY_KEYS
+            .iter()
+            .any(|known| key.eq_ignore_ascii_case(known))
         || matches!(
             lowered.as_str(),
             "credential" | "signature" | "security-token"
         )
+}
+
+/// 「这个名字是不是机密键名」的统一判据（r21 P2-8② 冒号黏连形态用）：
+/// 环境变量名、URL query 参数名（含前缀族）、Azure SAS 键，全部大小写不敏感。
+fn secret_key_name(name: &str) -> bool {
+    let name = name.trim_matches(|c: char| matches!(c, '"' | '\'' | '$' | '{' | '}' | '[' | ']'));
+    !name.is_empty()
+        && (SECRET_ENV_KEYS
+            .iter()
+            .any(|known| name.eq_ignore_ascii_case(known))
+            || query_key_is_secret(name))
+}
+
+/// 取值侧「长得像机密」的判据（r21 P2-8①：键不在名单、值本身像机密的
+/// `MY_TOKEN=hf_xxx…` / ②冒号黏连的 `api_key:plainsecret123`）。
+/// 只发生在「键名/键语境已经是机密键名」的前提下，误伤面可控。
+fn value_looks_secret(value: &str) -> bool {
+    let value = value.trim_matches(|c: char| {
+        matches!(
+            c,
+            '"' | '\'' | ',' | ';' | ')' | '(' | '{' | '}' | '[' | ']'
+        )
+    });
+    // 前缀族短值（不足 8 字符的 sk-abc）也收：前缀本身就是形状声明。
+    SECRET_PREFIXES
+        .iter()
+        .any(|prefix| value.starts_with(prefix))
+        || word_is_secret(value)
 }
 
 /// 把 URL 里的 userinfo（`https://user:pass@host`）和机密 query 参数抹掉。
@@ -346,6 +393,11 @@ pub fn sanitize_for_disk(line: &str) -> String {
     out.push_str(&indent);
     // 上一个词要求把下一个词抹掉（`--token abc` / `Bearer abc` 这种分开写的）。
     let mut redact_next = false;
+    // r21 P2-8③：curl 的 `-u` / `--user`，取值形态是 `user:password`。**要求
+    // 取值里带冒号**才整词抹（用户名+密码一起，与 URL userinfo 同口径）：
+    // `sudo -u root` 的 -u 是「以该用户执行」，值是普通用户名、没有冒号——
+    // 不设这道形状门，排障日志里最常见的 sudo 命令会被打得读不了。
+    let mut curl_user_next = false;
     // `--header` / `-H` 的两段式取值：先等 `名字:`、再等值。名字要留着（排查靠
     // 它认出是哪个头），值才是机密——整词抹掉会把"哪个头"一起丢掉。
     let mut header_expect: Option<HeaderExpect> = None;
@@ -368,6 +420,15 @@ pub fn sanitize_for_disk(line: &str) -> String {
             } else {
                 out.push_str(REDACTED);
                 redact_next = false;
+            }
+            continue;
+        }
+        if curl_user_next {
+            curl_user_next = false;
+            if word.contains(':') {
+                out.push_str(REDACTED);
+            } else {
+                out.push_str(word);
             }
             continue;
         }
@@ -417,6 +478,15 @@ pub fn sanitize_for_disk(line: &str) -> String {
         }
         if word_is_secret(word) {
             out.push_str(REDACTED);
+        } else if let Some((name, _value)) = colon_glued_secret(word) {
+            // r21 P2-8②：冒号黏连——`api_key:plainsecret123`、
+            // `{"api_key":"plainsecret123"}`（紧凑 JSON 无空白可分）。bare 检查
+            // 要求整词相等、`=` 分支只看等号，这条缝隙此前两个都够不着。键名
+            // 留着（排查靠它认出是哪个凭证），值抹掉。URL 的 `scheme://…` 左段
+            // 是 scheme，不在键名单里，不受影响。
+            out.push_str(name);
+            out.push(':');
+            out.push_str(REDACTED);
         } else if let Some((key, rest)) = word.split_once('=') {
             // `KEY=VALUE`：只看 KEY。命令行开关（`--token=abc`）和环境变量
             // （`HF_TOKEN=abc`）共用这一支。
@@ -445,6 +515,21 @@ pub fn sanitize_for_disk(line: &str) -> String {
                     // 状态已在上面落好，不能再走底部的 bare 检查（会把它覆写回等名字）
                     continue;
                 }
+                out.push_str(REDACTED);
+            } else if (key == "--user" || key == "-u") && rest.contains(':') {
+                // r21 P2-8③：`--user=admin:s3cr3t` 黏连形态。带冒号才是
+                // user:password 凭证（与上方分开写形态同一道形状门）。
+                out.push_str(key);
+                out.push('=');
+                out.push_str(REDACTED);
+            } else if value_looks_secret(rest) && !word.contains("://") {
+                // r21 P2-8①：键不在任何名单、值本身长得像机密——
+                // `MY_TOKEN=hf_AbC123…`。此前 `=` 分支只查键不查值，带前缀的
+                // 机密黏在陌生键后面原样落盘+导出。键名保留，值抹掉。带 `://`
+                // 的词走下方 URL 那一道（`?token=hf_…` 在那边有更好的键名保留
+                // 形态，别在这里按第一个 `=` 拦腰切）。
+                out.push_str(key);
+                out.push('=');
                 out.push_str(REDACTED);
             } else {
                 out.push_str(&redact_url_secrets(word));
@@ -483,9 +568,49 @@ pub fn sanitize_for_disk(line: &str) -> String {
         } else if bare == "-H" {
             // curl 的 `-H`（大写）与 `--header` 同义；`-h` 是 help，刻意不收。
             header_expect = Some(HeaderExpect::Name);
+        } else if bare == "-u" || bare == "--user" {
+            // r21 P2-8③：curl 凭证开关（见上方 curl_user_next 的形状门说明）。
+            // 刻意不进 SECRET_FLAGS：那张表对下一个词无条件整词抹，这里要按
+            // 「带冒号才抹」收，避免误伤 `sudo -u root`。
+            curl_user_next = true;
         }
     }
     clamp_line(&out)
+}
+
+/// r21 P2-8②：把 `名字:取值` 冒号黏连的词拆开，仅当名字是机密键名、取值达到
+/// 字面量机密的最小长度时命中。取值里的引号/花括号/逗号（紧凑 JSON 的 `"v"}`、
+/// `body={"k":"v"}` 的尾巴）先剥掉；名字一侧按**最后一个** `{` / `,` / `=` 切断
+/// （`body={"api_key"` → `api_key`），整个词只有一个可辨认的键名时才可能命中。
+/// **不要求取值带机密前缀**——这里的信号是键名本身（api_key/password……），正是
+/// 「无前缀裸值」这一族此前两个分支都够不着的根本原因；长度门负责把 Python
+/// 注解（`password: str`）这类短非值挡在外面。
+fn colon_glued_secret(word: &str) -> Option<(&str, &str)> {
+    let (name, value) = word.split_once(':')?;
+    // 名字取最后一个结构定界符（{ / , / =）之后的那一段；都没有就整段。
+    let name = name
+        .rfind(['{', ',', '='])
+        .map(|cut| &name[cut + 1..])
+        .unwrap_or(name);
+    let trimmed_name = name.trim_matches(|c: char| {
+        matches!(
+            c,
+            '"' | '\'' | '{' | '}' | '[' | ']' | ',' | ';' | '(' | ')'
+        )
+    });
+    if !secret_key_name(trimmed_name) {
+        return None;
+    }
+    let trimmed_value = value.trim_matches(|c: char| {
+        matches!(
+            c,
+            '"' | '\'' | '{' | '}' | '[' | ']' | ',' | ';' | '(' | ')'
+        )
+    });
+    if trimmed_value.len() < MIN_LITERAL_SECRET_LEN {
+        return None;
+    }
+    Some((trimmed_name, value))
 }
 
 /// 导出/上报走这一道：定向脱敏 + 全仓通用尺子 + 内网地址。
@@ -916,6 +1041,101 @@ mod tests {
                 "{line} -> {cleaned}"
             );
         }
+    }
+
+    /// r21 评审 P2-8/P2-9 的五个此前漏网的形态：
+    /// ① `MY_TOKEN=hf_…`——键不在名单、值带机密前缀（`=` 分支此前只查键）；
+    /// ② `api_key:plainsecret123` 冒号黏连 + `{"api_key":"plainsecret123"}`
+    ///    紧凑 JSON 无前缀裸值（bare 检查要求整词相等，两个分支都够不着）；
+    /// ③ `curl -u admin:s3cr3t` / `--user=admin:s3cr3t`（全文件零处理）；
+    /// ④ X-Goog- 签名 query 前缀族；
+    /// ⑤ Azure SAS 的 sig/se/sp query 参数。
+    #[test]
+    fn sanitiser_covers_r21_glued_and_signed_query_gaps() {
+        // ① 键陌生、值带前缀
+        for line in [
+            "+ export MY_TOKEN=hf_AbCdEfGhIjKlMnOpQrStUvWx",
+            "MODEL_KEY=sk-proj-0123456789abcdefghijklmnop",
+        ] {
+            let cleaned = sanitize_for_disk(line);
+            assert!(
+                !cleaned.contains("hf_AbCdEfGhIjKlMnOpQrStUvWx"),
+                "{line} -> {cleaned}"
+            );
+            assert!(
+                !cleaned.contains("sk-proj-0123456789abcdefghijklmnop"),
+                "{line} -> {cleaned}"
+            );
+            assert!(cleaned.contains('='), "键名要留着：{line} -> {cleaned}");
+        }
+        // ② 冒号黏连 / 紧凑 JSON 的无前缀裸值——键名是信号，值只要够长。
+        // 带机密前缀的黏连值（第三行）由 word_is_secret 的整词分支更先接住
+        // （r5 起的既有行为，整词抹比保键抹值更强），不要求键名保留。
+        for (line, keep_key) in [
+            ("resp: api_key:plainsecret1234 done", true),
+            ("body={\"api_key\":\"plainsecret1234\"}", true),
+            ("auth api_key:ghp_AbCdEfGhIjKlMnOpQrStUv", false),
+        ] {
+            let cleaned = sanitize_for_disk(line);
+            assert!(!cleaned.contains("plainsecret1234"), "{line} -> {cleaned}");
+            assert!(
+                !cleaned.contains("ghp_AbCdEfGhIjKlMnOpQrStUv"),
+                "{line} -> {cleaned}"
+            );
+            if keep_key {
+                assert!(
+                    cleaned.contains("api_key"),
+                    "键名不该一起抹掉：{line} -> {cleaned}"
+                );
+            }
+        }
+        // 形状门内的反例：黏连取值太短（Python 注解 `password:str`）不该抹。
+        // 注意分开写的 `password: str` 走的是 bare-键分支（r6 起），下一个词
+        // 本来就会被抹——这里钉的是黏连形态自己的长度门。
+        let cleaned = sanitize_for_disk("def f(password:str) -> None:");
+        assert_eq!(cleaned, "def f(password:str) -> None:");
+        // ③ curl -u / --user 的 user:password
+        for line in [
+            "curl -u admin:s3cr3tpassword123 https://example.com",
+            "curl --user admin:s3cr3tpassword123 https://example.com",
+            "curl --user=admin:s3cr3tpassword123 https://example.com",
+        ] {
+            let cleaned = sanitize_for_disk(line);
+            assert!(
+                !cleaned.contains("s3cr3tpassword123"),
+                "{line} -> {cleaned}"
+            );
+            assert!(
+                !cleaned.contains("admin:s3cr3tpassword123"),
+                "用户名+密码一起抹（与 URL userinfo 同口径）：{line} -> {cleaned}"
+            );
+        }
+        // ③ 的形状门反例：`sudo -u root` 的 -u 不是凭证开关，值无冒号不抹
+        let cleaned = sanitize_for_disk("sudo -u root systemctl restart ollama");
+        assert_eq!(
+            cleaned, "sudo -u root systemctl restart ollama",
+            "不带冒号的 -u 取值是普通用户名，不该抹：{cleaned}"
+        );
+        // ④ X-Goog- 前缀族
+        for line in [
+            "GET https://storage.googleapis.com/b?X-Goog-Signature=abcdef0123456789abcdef&x=1",
+            "GET https://storage.googleapis.com/b?x-goog-credential=goog-creds-0123456789&x=1",
+        ] {
+            let cleaned = sanitize_for_disk(line);
+            assert!(
+                !cleaned.contains("abcdef0123456789abcdef")
+                    && !cleaned.contains("goog-creds-0123456789"),
+                "{line} -> {cleaned}"
+            );
+        }
+        // ⑤ Azure SAS query
+        let cleaned = sanitize_for_disk(
+            "GET https://acct.blob.core.windows.net/c?sp=r&se=2026-10-21T06%3A00Z&sig=abcdef0123456789abcdef01&sv=2025-01-01",
+        );
+        assert!(
+            !cleaned.contains("sig=abcdef0123456789abcdef01"),
+            "Azure SAS 签名漏了：{cleaned}"
+        );
     }
 
     /// 2026-10-21 评审 P2 脱敏长尾四形态：
