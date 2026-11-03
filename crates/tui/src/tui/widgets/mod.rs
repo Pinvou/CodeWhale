@@ -8280,6 +8280,7 @@ mod tests {
             Some(
                 "Clearing stale build artifacts and temp files before a fresh run so the next build is reproducible.",
             ),
+            None,
             std::path::Path::new("/tmp/project"),
         );
         let view = crate::tui::approval::ApprovalView::new(request.clone());
@@ -8644,6 +8645,7 @@ diff --git a/src/b.rs b/src/b.rs\n\
             }),
             "exec_shell:cargo",
             Some("Need to verify the fallback build path before editing files."),
+            None,
             std::path::Path::new("/tmp/project"),
         );
         let view = crate::tui::approval::ApprovalView::new(request.clone());
@@ -8673,6 +8675,7 @@ diff --git a/src/b.rs b/src/b.rs\n\
             }),
             "exec_shell:cargo-clippy",
             Some("Confirmed - passes in isolation, so this is the documentation gate."),
+            None,
             std::path::Path::new("/Volumes/VIXinSSD/codewhale"),
         );
         let view = crate::tui::approval::ApprovalView::new(request.clone());

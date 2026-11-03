@@ -3504,6 +3504,7 @@ pub(crate) async fn run_event_loop(
                                     &description,
                                     &tool_input,
                                     &approval_key,
+                                    &approval_grouping_key,
                                     intent_summary.as_deref(),
                                     config.approval_default_selection(),
                                 );

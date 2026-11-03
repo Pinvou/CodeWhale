@@ -20833,6 +20833,7 @@ fn approval_prompt_uses_event_input_after_message_complete_drain() {
         "Run cargo tests",
         &event_input,
         "approval-key",
+        "approval-group",
         None,
         crate::config::ApprovalDefaultSelection::Deny,
     );
@@ -20866,6 +20867,7 @@ fn approval_prompt_uses_configured_default_selection() {
         "Run a trusted command",
         &serde_json::json!({"command": "cargo check"}),
         "approval-key",
+        "approval-group",
         None,
         crate::config::ApprovalDefaultSelection::AllowOnce,
     );
@@ -20882,6 +20884,144 @@ fn approval_prompt_uses_configured_default_selection() {
             ..
         })
     ));
+}
+
+/// Real TUI approval round-trip for a subagent-originated request
+/// (zhuowp review 5759493820 / JensenChen28 review 5759735821): the
+/// session-grant read side queries with the engine-bound grouping key from
+/// the `ApprovalRequired` event, so the dialog and the "approve for session"
+/// write must answer under that same identity. Recomputing the grouping key
+/// from the parent dialog workspace stored a grant the next identical
+/// sub-workspace request could never hit (repeat prompting) and under an
+/// identity the user never saw.
+#[tokio::test]
+async fn session_grant_round_trips_on_the_event_carried_grouping_key() {
+    use crate::core::authority::ApprovalRequestDisposition;
+    use crate::tools::approval_cache::{
+        bind_workspace_scope, build_approval_grouping_key, build_approval_key,
+    };
+
+    let tmp = TempDir::new().expect("tempdir");
+    let parent_ws = tmp.path().join("parent");
+    let sub_ws_a = tmp.path().join("sub-a");
+    let sub_ws_b = tmp.path().join("sub-b");
+    for path in [&parent_ws, &sub_ws_a, &sub_ws_b] {
+        std::fs::create_dir_all(path).expect("workspaces");
+    }
+    let mut app = create_test_app();
+    app.mode = AppMode::Agent;
+    app.approval_mode = ApprovalMode::Suggest;
+    app.workspace = parent_ws.clone();
+
+    let input = serde_json::json!({"command": "cargo test -p codewhale-tui"});
+
+    // Mirror the subagent producer (tools/subagent): the engine binds both
+    // identities to the effective execution workspace before emitting the
+    // ApprovalRequired event.
+    let bound_keys = |workspace: &std::path::Path| {
+        let approval_key =
+            bind_workspace_scope(build_approval_key("exec_shell", &input), workspace).0;
+        let grouping = bind_workspace_scope(
+            build_approval_grouping_key("exec_shell", &input, workspace),
+            workspace,
+        )
+        .0;
+        (approval_key, grouping)
+    };
+    let (key_a, grouping_a) = bound_keys(&sub_ws_a);
+    let (key_b, grouping_b) = bound_keys(&sub_ws_b);
+    assert_ne!(grouping_a, grouping_b, "distinct scopes, distinct identity");
+
+    // First request from sub-a: nothing granted yet → the real card.
+    assert_eq!(
+        resolve_ui_approval_disposition(&app, "exec_shell", &grouping_a, &key_a, false),
+        ApprovalRequestDisposition::Prompt
+    );
+
+    push_approval_request_view(
+        &mut app,
+        "tool-a",
+        "exec_shell",
+        "Run tests in the sub workspace",
+        &input,
+        &key_a,
+        &grouping_a,
+        None,
+        crate::config::ApprovalDefaultSelection::Deny,
+    );
+    let mut view = app.view_stack.pop().expect("approval view");
+    let approval = view
+        .as_any_mut()
+        .downcast_mut::<ApprovalView>()
+        .expect("approval view");
+    // '2' commits ApproveAlways → "approve for this session" (direct
+    // shortcut, independent of the card's option order).
+    let action = approval.handle_key(KeyEvent::new(KeyCode::Char('2'), KeyModifiers::NONE));
+    let ViewAction::EmitAndClose(ViewEvent::ApprovalDecision {
+        decision,
+        approval_grouping_key,
+        ..
+    }) = action
+    else {
+        panic!("expected an approval decision from the card");
+    };
+    assert_eq!(
+        decision,
+        crate::tui::approval::ReviewDecision::ApprovedForSession
+    );
+    assert_eq!(
+        approval_grouping_key, grouping_a,
+        "the card must answer under the event-carried grouping identity, not one\
+         recomputed from the parent workspace"
+    );
+
+    // Feed the decision through the production writer (the same shape
+    // handlers.rs forwards from the view event).
+    let mut config = Config::default();
+    let mut engine = mock_engine_handle();
+    apply_approval_decision(
+        &mut app,
+        &mut engine.handle,
+        &mut config,
+        ApprovalDecisionEvent {
+            tool_id: "tool-a".to_string(),
+            tool_name: "exec_shell".to_string(),
+            decision: crate::tui::approval::ReviewDecision::ApprovedForSession,
+            timed_out: false,
+            approval_key: key_a.clone(),
+            approval_grouping_key: grouping_a.clone(),
+            persistent_rules: Vec::new(),
+        },
+    )
+    .await;
+    assert!(app.approval_session_approved.contains(&grouping_a));
+    let parent_recomputed = build_approval_grouping_key("exec_shell", &input, &parent_ws).0;
+    assert_ne!(
+        grouping_a, parent_recomputed,
+        "the subagent binding must differ from a parent recompute for this fixture"
+    );
+    assert!(
+        !app.approval_session_approved.contains(&parent_recomputed),
+        "the stored grant must not live under the parent-recomputed identity"
+    );
+
+    // Same sub workspace, same operation family: the grant is reused — no
+    // second prompt for the scope the user just approved.
+    assert_eq!(
+        resolve_ui_approval_disposition(&app, "exec_shell", &grouping_a, &key_a, false),
+        ApprovalRequestDisposition::AutoApprove
+    );
+    // A different sub workspace runs the same family under a different
+    // identity: still prompts.
+    assert_eq!(
+        resolve_ui_approval_disposition(&app, "exec_shell", &grouping_b, &key_b, false),
+        ApprovalRequestDisposition::Prompt
+    );
+    // A forced hold stays on the card even for the approved key.
+    assert_eq!(
+        resolve_ui_approval_disposition(&app, "exec_shell", &grouping_a, &key_a, true),
+        ApprovalRequestDisposition::Prompt
+    );
 }
 
 #[test]
@@ -20901,6 +21041,7 @@ fn patch_approval_modal_does_not_displace_the_active_file_receipt() {
         "Apply a file patch",
         &input,
         "approval-key",
+        "approval-group",
         None,
         crate::config::ApprovalDefaultSelection::Deny,
     );

@@ -488,9 +488,15 @@ pub(crate) fn push_approval_request_view(
     description: &str,
     tool_input: &serde_json::Value,
     approval_key: &str,
+    approval_grouping_key: &str,
     intent_summary: Option<&str>,
     default_selection: crate::config::ApprovalDefaultSelection,
 ) {
+    // Carry the event's grouping identity verbatim (see
+    // `ApprovalRequest::new_with_intent`): the session-grant read side queries
+    // with the engine-bound key, so this dialog and the "approve for session"
+    // write it produces must answer under the same identity, not one
+    // recomputed from the parent workspace.
     let request = ApprovalRequest::new_with_intent(
         id,
         tool_name,
@@ -498,6 +504,7 @@ pub(crate) fn push_approval_request_view(
         tool_input,
         approval_key,
         intent_summary,
+        Some(approval_grouping_key),
         &app.workspace,
     );
     app.view_stack
