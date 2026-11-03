@@ -137,7 +137,7 @@ pub(super) fn xlsx_formula_span_limits(bytes: &[u8]) -> Option<HashMap<String, (
             continue;
         };
         let (rows, cols) = formula_cell_span(&xml);
-        limits.insert(flatten_text(&sheet_name), (rows, cols));
+        limits.insert(sheet_name, (rows, cols));
     }
     Some(limits)
 }
@@ -675,6 +675,26 @@ mod tests {
         let limits = xlsx_formula_span_limits(&synthetic_xlsx_fixture()).unwrap();
         // 只有 D3/D4 带公式；值格 A1/C2 不参与张成。
         assert_eq!(limits.get("Map"), Some(&(4, 4)));
+    }
+
+    #[test]
+    fn formula_span_limits_preserve_reader_sheet_names() {
+        use calamine::Reader;
+
+        let bytes = folded_formula_fixture();
+        let limits = xlsx_formula_span_limits(&bytes).unwrap();
+        let mut workbook = calamine::open_workbook_auto_from_rs(Cursor::new(bytes)).unwrap();
+        let name = workbook.sheet_names()[0].clone();
+        assert_eq!(name, "Fold\nX");
+        assert_eq!(limits.get(&name), Some(&(1, 1)));
+        let values = workbook.worksheet_range(&name).unwrap();
+        assert!(!values.is_empty());
+        assert_eq!(values.get_value((0, 0)).unwrap().to_string(), "3");
+        let formulas = workbook.worksheet_formula(&name).unwrap();
+        assert_eq!(
+            formulas.get_value((0, 0)).map(String::as_str),
+            Some("SUM(1)\n+ 2")
+        );
     }
 
     #[test]
