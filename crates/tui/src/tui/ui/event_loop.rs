@@ -3399,6 +3399,7 @@ pub(crate) async fn run_event_loop(
                                 &input,
                                 &approval_key,
                                 intent_summary.as_deref(),
+                                approval_force_prompt,
                             );
                             true
                         } else {

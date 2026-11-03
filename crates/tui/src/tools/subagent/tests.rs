@@ -22208,7 +22208,12 @@ mod child_permission_gate {
                             ..
                         } = event
                     {
-                        captured = Some((id, approval_key, approval_grouping_key, approval_force_prompt));
+                        captured = Some((
+                            id,
+                            approval_key,
+                            approval_grouping_key,
+                            approval_force_prompt,
+                        ));
                         break;
                     }
                     tokio::time::sleep(std::time::Duration::from_millis(10)).await;
@@ -22257,7 +22262,10 @@ mod child_permission_gate {
             "the grouping key must not embed the transport incarnation: {first_grouping}"
         );
         assert!(!first_force, "the ordinary ask stays a non-force prompt");
-        assert!(!second_force, "force_prompt is independent of the key scopes");
+        assert!(
+            !second_force,
+            "force_prompt is independent of the key scopes"
+        );
         assert_eq!(manager.read().await.pending_child_approvals(), 0);
     }
 
