@@ -66,6 +66,10 @@
     "scripts/**/*.{js,mjs}",
     "tests/**/*.{js,mjs}"
   ],
+  "paths": {
+    "/features/model-store/IncompleteInstallPanel.jsx": ["./src/features/model-store/IncompleteInstallPanel.jsx"],
+    "/features/model-store/DownloadCenterView.jsx": ["./src/features/model-store/DownloadCenterView.jsx"]
+  },
   "ignore": [
     "src/vendor/**"
   ],
