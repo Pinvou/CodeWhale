@@ -542,7 +542,12 @@ assert.doesNotMatch(
   env.clock.now += 9000;
   env.api.checkDeviceStale(env.clock.now);
   assert.equal(env.state.deviceStale, false);
-  env.clock.now += 1500;
+  // 恰好 10s 是「超过」语义的等值边界（round-37 review P3）：> 变异成 >= 时
+  // 该点必红（阈值 DEVICE_STALE_AFTER_MS=10000，五个 2s 拍整）。
+  env.clock.now += 1000;
+  env.api.checkDeviceStale(env.clock.now);
+  assert.equal(env.state.deviceStale, false, 'exactly at the threshold is still fresh');
+  env.clock.now += 500;
   env.api.checkDeviceStale(env.clock.now);
   assert.equal(env.state.deviceStale, true);
   assert.equal(env.notifyCount(), quiet + 1, 'entering stale must notify exactly once');

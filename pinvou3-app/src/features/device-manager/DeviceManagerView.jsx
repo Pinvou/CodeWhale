@@ -980,7 +980,12 @@ const DeviceManagerView = ({ theme, t, bs, onOpenChat, captureChatOwnership, onO
     } finally {
       setDoctorBusy(null);
     }
-  }, [captureChatOwnership, copy, doctorBusy, onOpenChat, showToast, t]);
+    // busyKey belongs in the deps (round-37 review P3): the in-callback guard
+    // reads busyKey, but without this entry the callback kept the closure from
+    // its first build (busyKey almost always null there) and the guard's
+    // busyKey half could never fire — the disabled buttons were the only live
+    // defense against a concurrent row operation.
+  }, [busyKey, captureChatOwnership, copy, doctorBusy, onOpenChat, showToast, t]);
   const questionInvalid = question.trim().length === 0 || question.length > QUESTION_MAX;
   const sendCustom = useCallback(() => {
     const text = question.trim();

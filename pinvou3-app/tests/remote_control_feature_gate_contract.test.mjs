@@ -79,8 +79,10 @@ test('compiled production gate is immutable under runtime environment overrides'
     await writeFile(unitWrapper, includeBoth);
     rustc(['--test', unitWrapper, '-o', unit], env);
     // 全绿且零失败：不硬钉总数——上游给 dmi/capabilities 增删测试不该让本
-    // 契约红（11→17→18 的两次跨 PR 摩擦，round-21 review P3）。
-    assert.match(run(unit, env), /\d+ passed; 0 failed/u);
+    // 契约红（11→17→18 的两次跨 PR 摩擦，round-21 review P3）。首位非零保住
+    // 「测试面非空」性质：单元测试被整体删空（0 passed; 0 failed）仍要红
+    // （round-37 review P3）。
+    assert.match(run(unit, env), /[1-9]\d* passed; 0 failed/u);
     const binary = executable(`artifact-${buildFlag}`);
     rustc([host, '-o', binary], env);
     for (const runtimeFlag of [undefined, '0', '1', 'true']) {

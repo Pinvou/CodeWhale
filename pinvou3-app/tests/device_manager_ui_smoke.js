@@ -382,7 +382,12 @@ function injectSource() {
           return Promise.resolve('DEVICE_DOCTOR_MARKER::' + (args && args.kind) + (args && args.question ? '::' + args.question : ''));
         case 'device_register_external_model':
           return Promise.resolve({ id: 'm-registered-new', name: (args && args.name) || '', kind: (args && args.kind) || 'ollama' });
-        case 'device_remove_external_model': return Promise.resolve(removeOutcome);
+        case 'device_remove_external_model':
+          // ⑥-h 守卫拒绝面（round-37 review P2）：后端守卫链返回 Err(String)
+          // 是移除的核心安全叙事，唯一用户出口就是这个拒绝臂——桩此前恒成功，
+          // 删掉 catch→toast 全套测试照绿。
+          if (window.__DEVICE_MGR_TEST__.failRemove) return Promise.reject(new Error('remove blocked (smoke)'));
+          return Promise.resolve(removeOutcome);
         default: return Promise.resolve(null);
       }
     }
@@ -399,6 +404,9 @@ function injectSource() {
       failMonitor: false,
       // 接入主动作的失败面（round-21 review P3）：此前只有读取面有 fail 开关。
       failSaveModel: false,
+      // ⑥-h 移除守卫拒绝面（round-37 review P2）：拒绝 toast 是守卫链的唯一
+      // 用户出口，桩注入 Err 用。
+      failRemove: false,
       // ⑥-g 同端点跨行身份（round-31 review P2）：换成碰撞列表用。
       collisionExternalModels: false,
       // ⑩-e/⑩-f 外部模型读取面（round-30 review P3）：旧行在场的常驻陈旧行 +
@@ -954,6 +962,105 @@ async function clickTestId(page, testId) {
   rec('⑥-c 取消移除收起 armed 面板且不发起删除命令',
     cancelOutcome.armedClosed && cancelOutcome.removeCallsStillOne,
     JSON.stringify({ cancelOutcome }));
+
+  // ⑥-b2 deleteWeights:true 正向臂（round-37 review P2）：勾选后真正完成一次
+  // 移除。⑥ 只断 false 臂（ollama 行无勾选框）、⑥-b/⑥-c 在勾选后取消——把
+  // confirmRemove 的 deleteWeights 硬编码成 false 此前全套照绿（桥层透传钉在
+  // device_bridge_format，视图半边无钉）。
+  const removeCallsBeforeWeights = await page.evaluate(
+    () => window.__DEVICE_MGR_TEST__.callsOf('device_remove_external_model').length);
+  await page.evaluate(() => {
+    const rows = [...document.querySelectorAll('[data-testid="device-manager-external-row"]')];
+    rows.find(candidate => (candidate.innerText || '').includes('my-endpoint'))
+      ?.querySelector('[data-testid="device-manager-remove"]')?.click();
+  });
+  await page.waitForFunction(
+    () => {
+      const rows = [...document.querySelectorAll('[data-testid="device-manager-external-row"]')];
+      const target = rows.find(candidate => (candidate.innerText || '').includes('my-endpoint'));
+      const toggle = target?.querySelector('[data-testid="device-manager-delete-weights"]');
+      const confirm = target?.querySelector('[data-testid="device-manager-remove-confirm"]');
+      return !!toggle && !toggle.disabled && !!confirm && !confirm.disabled;
+    },
+    { timeout: 4000 },
+  );
+  await page.evaluate(() => {
+    const rows = [...document.querySelectorAll('[data-testid="device-manager-external-row"]')];
+    rows.find(candidate => (candidate.innerText || '').includes('my-endpoint'))
+      ?.querySelector('[data-testid="device-manager-delete-weights"]')?.click();
+  });
+  // 勾选后的不可撤销提示是 React 渲染，等它出现再确认（与 ⑥-b 同款判据）。
+  await page.waitForFunction(
+    () => [...document.querySelectorAll('[data-testid="device-manager-external-row"]')]
+      .some(row => row.querySelector('[data-testid="device-manager-remove-weights-path"]')
+        && (row.innerText || '').includes('不可恢复')),
+    { timeout: 4000 },
+  );
+  await page.evaluate(() => {
+    const rows = [...document.querySelectorAll('[data-testid="device-manager-external-row"]')];
+    rows.find(candidate => (candidate.innerText || '').includes('my-endpoint'))
+      ?.querySelector('[data-testid="device-manager-remove-confirm"]')?.click();
+  });
+  await page.waitForFunction(
+    baseline => window.__DEVICE_MGR_TEST__.callsOf('device_remove_external_model').length > baseline,
+    { timeout: 8000 },
+    removeCallsBeforeWeights,
+  );
+  const weightsCall = await page.evaluate(baseline => {
+    const calls = window.__DEVICE_MGR_TEST__.callsOf('device_remove_external_model');
+    return calls[calls.length - 1]?.args || null;
+  }, removeCallsBeforeWeights);
+  rec('⑥-b2 勾选删除权重后确认，remove 命令携带 deleteWeights:true',
+    !!weightsCall && weightsCall.deleteWeights === true
+    && weightsCall.confirmName === 'my-endpoint' && weightsCall.id === 'm-reg-1',
+    JSON.stringify({ weightsCall }));
+
+  // ⑥-h 移除守卫拒绝臂（round-37 review P2）：后端守卫链（商店边界/三层深/
+  // canonicalize）返回 Err(String) 时，唯一用户出口是 removeFailed toast——
+  // 桩此前恒成功，删掉 catch 臂全套测试照绿。busy 槽必须在 catch 后释放。
+  await page.evaluate(() => {
+    window.__DEVICE_MGR_TEST__.failRemove = true;
+    document.querySelector('[data-testid="device-manager-remove"]')?.click();
+  });
+  await page.waitForFunction(() => {
+    const confirm = document.querySelector('[data-testid="device-manager-remove-confirm"]');
+    return !!confirm && !confirm.disabled;
+  }, { timeout: 4000 });
+  await page.evaluate(() => {
+    document.querySelector('[data-testid="device-manager-remove-confirm"]')?.click();
+  });
+  const rejectOutcome = await page.evaluate(() => new Promise(resolve => {
+    let tries = 0;
+    const timer = setInterval(() => {
+      tries += 1;
+      const toast = document.querySelector('[data-testid="model-store-toast"]');
+      const confirm = document.querySelector('[data-testid="device-manager-remove-confirm"]');
+      const failed = !!toast && (toast.innerText || '').includes('remove blocked (smoke)');
+      // busy 槽释放 = 确认按钮回到可点（busyKey 清空后按钮不再 disabled）。
+      if (failed && (!confirm || !confirm.disabled)) {
+        clearInterval(timer);
+        resolve({ failedToast: true, busyReleased: true });
+      } else if (tries > 1600) {
+        clearInterval(timer);
+        resolve({
+          failedToast: !!toast && (toast.innerText || '').includes('remove blocked (smoke)'),
+          busyReleased: !confirm || !confirm.disabled,
+        });
+      }
+    }, 5);
+  }));
+  await page.evaluate(() => { window.__DEVICE_MGR_TEST__.failRemove = false; });
+  rec('⑥-h 移除守卫拒绝出 toast 且 busy 槽释放',
+    rejectOutcome.failedToast && rejectOutcome.busyReleased,
+    JSON.stringify({ rejectOutcome }));
+  // 失败臂不清 armed（成功臂专属）：收尾取消，把无 armed 的初始态还给 ⑥-e。
+  await page.evaluate(() => {
+    document.querySelector('[data-testid="device-manager-remove-cancel"]')?.click();
+  });
+  await page.waitForFunction(
+    () => !document.querySelector('[data-testid="device-manager-remove-confirm"]'),
+    { timeout: 4000 },
+  );
 
   // ⑥-e armed 确认 × doctor 互斥（round-22 review P2）：doctor 一轮在飞（这里
   // 用挂住的 create_session 制造可观察窗口）必须把 armed 确认按钮/勾选框按住
