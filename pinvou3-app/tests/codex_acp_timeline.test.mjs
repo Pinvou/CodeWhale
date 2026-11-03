@@ -4,11 +4,6 @@ import { copyFileSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSy
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
-import {
-  createRightDockState,
-  reduceRightDockState,
-  rightDockSnapshot,
-} from '../src/components/layout/right-dock-state.mjs';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const root = path.join(here, '..');
@@ -1070,13 +1065,10 @@ try {
     && auxChatPanelView.includes('onActiveChange={onActiveChange}'),
   'the code-mode aux chat must reuse the shared Right Dock panel, remember scroll on open, keep its entry highlight tied to real dock visibility, and gate the panel mount and the quote selection on isNativeAgent like the entry button (external-ACP tasks must never reach the aux session)');
 
-  let codexDockState = createRightDockState();
-  codexDockState = reduceRightDockState(codexDockState, { type: 'activate', panelId: 'codex-workspace' });
-  codexDockState = reduceRightDockState(codexDockState, { type: 'activate', panelId: 'subagent-transcript' });
-  assert.equal(rightDockSnapshot(codexDockState).activePanelId, 'subagent-transcript');
-  codexDockState = reduceRightDockState(codexDockState, { type: 'hide', panelId: 'subagent-transcript' });
-  assert.equal(rightDockSnapshot(codexDockState).activePanelId, 'codex-workspace',
-    'closing the active subagent panel must reveal the still-mounted workspace');
+  // The right-dock activate/hide fallback semantics exercised here are pinned
+  // with strictly stronger assertions by side_panel_layout.test.mjs ("Right
+  // Dock has one physical host..." covers the full snapshot and the hide
+  // fallback; its occlusion test pins activate's auto-mount).
   assert.ok(codexWorkspace.includes('listAcpWorkspace({')
     && codexWorkspace.includes('previewAcpWorkspaceFile({')
     && codexWorkspace.includes('loadAcpWorkspaceChanges({')
@@ -1177,9 +1169,9 @@ try {
     && codexView.includes("if (!String(outgoing || '').trim()) return false;")
     && codexView.includes('busy || working || activeRuntimeBusy || workspaceUnavailable || sessionSyncing')
     && codexView.includes('if (!activeId && !draftWorkspacePath) return false;')
-    && codexView.includes("attachments.some(attachment => attachment.status === 'parsing')")
+    && !/attachments\.some/.test((codexView.match(/function canSendNativeVoiceTask\(outgoing\) \{[\s\S]*?\n {2}\}/) || [''])[0])
     && codexView.includes('sendTask: async (outgoing, context) => send(outgoing, { voiceOperationId: context?.operationId })'),
-  'Codex voice task mode must go through the shared hook, code-lane risk gate, and real send result before reporting success');
+  'Codex voice task mode must go through the shared hook, code-lane risk gate, and real send result before reporting success; pending attachments must reach send() so the failure is reported instead of faking success');
   // plain（非 native）车道仍走自绘 CodexComposerConfigSelect 配置组，不随 native 车道
   // 迁移到共享组件；共享 config select 保留 ACP testid 契约。
   assert.ok(codexView.includes('data-testid="codex-composer-configs"')

@@ -43,17 +43,17 @@ export const TitleBar = ({ theme, t, sidebarOpen = true }) => {
       </div>
       {nativeControls === false && (
       <div className="flex items-center h-full">
-        <button onClick={() => appWindow && appWindow.minimize()} title={t.winMin}
+        <button type="button" onClick={() => appWindow && appWindow.minimize()} title={t.winMin}
           className={`h-full w-12 flex items-center justify-center transition-colors ${hoverBg}`}>
-          <svg width="11" height="11" viewBox="0 0 11 11"><rect x="1" y="5" width="9" height="1" fill="currentColor"/></svg>
+          <svg aria-hidden="true" width="11" height="11" viewBox="0 0 11 11"><rect x="1" y="5" width="9" height="1" fill="currentColor"/></svg>
         </button>
-        <button onClick={() => appWindow && appWindow.toggleMaximize()} title={t.winMax}
+        <button type="button" onClick={() => appWindow && appWindow.toggleMaximize()} title={t.winMax}
           className={`h-full w-12 flex items-center justify-center transition-colors ${hoverBg}`}>
-          <svg width="11" height="11" viewBox="0 0 11 11"><rect x="1.5" y="1.5" width="8" height="8" fill="none" stroke="currentColor" strokeWidth="1"/></svg>
+          <svg aria-hidden="true" width="11" height="11" viewBox="0 0 11 11"><rect x="1.5" y="1.5" width="8" height="8" fill="none" stroke="currentColor" strokeWidth="1"/></svg>
         </button>
-        <button onClick={() => appWindow && appWindow.close()} title={t.winClose}
+        <button type="button" onClick={() => appWindow && appWindow.close()} title={t.winClose}
           className="h-full w-12 flex items-center justify-center transition-colors hover:bg-[#E81123] hover:text-white">
-          <svg width="11" height="11" viewBox="0 0 11 11"><path d="M1 1 L10 10 M10 1 L1 10" stroke="currentColor" strokeWidth="1.1"/></svg>
+          <svg aria-hidden="true" width="11" height="11" viewBox="0 0 11 11"><path d="M1 1 L10 10 M10 1 L1 10" stroke="currentColor" strokeWidth="1.1"/></svg>
         </button>
       </div>
       )}
