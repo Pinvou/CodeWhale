@@ -202,8 +202,21 @@ pub(crate) use crate::platform::connector_skills::{
 ///       connectors.lock.json 换 1.0.65 下载钉扎，NOTICE-dingtalk.md 拆分
 ///       「技能内容基线 1.0.64 / CLI pin 1.0.65」并同步手册条目；技能内容
 ///       基线不变，v1.0.65 技能同步另行进行。
+/// 0.38: 回流 Community #808 的 dws 技能树模型向文案勘误（无上游 sync、无代码
+///       变化）：oa 审批人选人规则计数 10 → 11（oa.md / oa-process-nodes.md /
+///       approver.md / handler.md 四处口径统一，oa-process-nodes.md 补
+///       `target_connect_approval` 第 11 节，approver.md 规则表与 handler.md
+///       清单补该规则行），form-components.md 控件分类五大类 → 六大类（补
+///       关联控件 1 种，总数 38 不变），sheet-search-replace.md 注意事项行
+///       `--replace` 更正为真实 flag `--replacement`，attendance_report_checkin.py
+///       头注 100 人 → 50 人（与 MAX_USERS_PER_CHECKIN_BATCH 常量一致），
+///       attendance_report_common.py RGBA 注释与 convert("RGBA") 对齐。全部
+///       登记于 NOTICE-dingtalk.md 供下次 sync 重放。技能树不参与内容哈希，
+///       必须语义升位让已连接用户启动时刷新（否则刷新要等首帧后
+///       refresh_connector_auth_gates 回填）；extracted-VERSION 门禁只做
+///       不等比较。
 pub const BUNDLE_VERSION: &str = concat!(
-    "0.37-",
+    "0.38-",
     env!("BUNDLE_INSTRUCTIONS_HASH"),
     "-",
     env!("BUNDLE_H3C_CLI_HASH"),
