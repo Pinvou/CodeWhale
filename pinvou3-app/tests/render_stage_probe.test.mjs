@@ -319,6 +319,39 @@ test('武装条目帧等待超阈值后切走：dispatch→frame 经转变收尾
     JSON.stringify(h.recorded[0].details));
 });
 
+// r9 P2：markThrottled 只对**未盖章**条目生效——已盖章（publish 已跑、React
+// 状态已更新）的条目处于「等下一帧」段，它的 dispatch→frame 量的是真实渲染/
+// 冻结。迟到的节流标记（流中切走/冻结跨帧/多会话流三几何，受控时钟亲证）
+// 若能打到已盖章条目，真实冻结被 finalize 的 veto 吞掉、零记录。删掉
+// `entry.t_dispatch == null` 守卫此测试必红。
+test('r9 P2：已盖章条目的真实冻结不得被迟到的 markThrottled 吞掉', () => {
+  const h = harness();
+  h.probe.begin('fg');
+  const entry = h.probe._liveEntry('fg');
+  h.probe.markScheduled('fg');
+  h.probe.markDispatched('fg');           // publish 已跑，条目在等下一帧
+  entry.t_recv -= 490;                    // recv→dispatch 段保持 <120（聚焦帧段）
+  entry.t_dispatch -= 964;                // 帧等待 964ms 真实冻结（评审对照实验值）
+  h.probe.markThrottled('fg');            // 迟到的节流标记不得否决已盖章条目
+  flushFrames(h);
+  assert.equal(h.recorded.length, 1,
+    '已盖章条目的 dispatch→frame 真实冻结必须上报（无守卫时被 throttledOrigin veto 吞掉）');
+  assert.ok(h.recorded[0].details.dispatch_to_frame_ms >= 490,
+    JSON.stringify(h.recorded[0].details));
+});
+
+// r9 P2 对照臂：未盖章条目打节流标记的既有语义（r7 P2-2）不受守卫影响。
+test('r9 P2 对照：未盖章条目的节流标记照常抑制上报', () => {
+  const h = harness();
+  h.probe.begin('bg');
+  h.probe._liveEntry('bg').t_recv -= 1032;
+  h.probe.markThrottled('bg');            // 此刻 t_dispatch 仍为 null → 照常生效
+  h.probe.markScheduled('bg');
+  h.probe.markDispatched('bg');
+  flushFrames(h);
+  assert.equal(h.recorded.length, 0, '未盖章条目的节流抑制语义不变');
+});
+
 // r7 P2-2：后台预览腿（1s 合并节流）的条目打了 throttledOrigin 标记后
 // finalize 不上报——节流不是冻结，节律性假信号（每会话每 10s 一条 ~1032ms）
 // 会支配诊断流。snapshot 仍保留段差可查。

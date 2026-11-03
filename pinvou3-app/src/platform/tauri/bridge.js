@@ -1378,7 +1378,17 @@ function onSessionEvent(e, fn, options) {
   // 上报一条无内容记录；失败路径见 shared/render-stage-probe.js。实现在共享
   // 模块（评审 rebase 指示），这里在委托外面包一层，不侵入其内部结构。
   var eventNameForProbe = String((e && e.event) || "");
-  if (/^chat:(delta|reasoning_delta)$/.test(eventNameForProbe) && window.RenderStageProbe) {
+  // r9 P1 旁支1：空文本 reasoning_delta 的监听器会提前 return（chat-events
+  // 的 if (!text) return），此后无人调度发布——begin 了就成滞留条目，下一个
+  // 无关事件把它盖章成活跃会话上的假 stall（受控时钟 200ms 实测）。空文本
+  // 根本不是渲染事件，跳过 begin。
+  var emptyReasoningDelta =
+    eventNameForProbe === "chat:reasoning_delta" && !(e && e.payload && e.payload.text);
+  if (
+    /^chat:(delta|reasoning_delta)$/.test(eventNameForProbe) &&
+    !emptyReasoningDelta &&
+    window.RenderStageProbe
+  ) {
     try { window.RenderStageProbe.begin(e && e.payload && e.payload.session_id); } catch (_) {}
   }
   return pinvouSharedtauriMain().onSessionEvent(e, fn, options);
