@@ -2555,9 +2555,9 @@ fn format_instructions(sources: &[deepseek_tui::prompts::InstructionSource]) -> 
 /// 底座两层 plan 结构：
 ///   - `update_plan`         → strategy 层（`plan_snapshot`）
 ///   - `checklist_write` / `todo_write` → leaf task 层（`todos_snapshot`）
-/// 任一调过 + plan_phase=Planning → TurnComplete 时 emit `chat:plan_ready`。
-/// 参考底座 `tui/ui.rs:1072-1085` 的 `plan_tool_used_in_turn` 判据 +
-/// `prompts/modes/plan.md` "Use update_plan ... and checklist_write ..." 双工具引导。
+/// 任一调过 + 会话处于 Plan 模式（`SerializableMode::Plan`）→ TurnComplete 时
+/// emit `chat:plan_ready`（PlanPhase 已移除，触发判据为 forwarder 的
+/// `plan_used && state.mode == Plan`）。
 #[derive(Default)]
 struct TurnPlanTracker {
     plan_tool_used: bool,
