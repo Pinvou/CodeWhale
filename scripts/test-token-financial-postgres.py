@@ -19,6 +19,7 @@ from urllib.parse import parse_qs, urlsplit
 ROOT = Path(__file__).resolve().parents[1]
 ACTORS = {"billing_migrator", "billing_schema_owner", "billing_service"}
 REQUIRED = {
+    "TestUserUnusedIntentCancellationOwnerPostgres",
     "TestPendingUnusedExpiryRejectsInvalidProofTimestampPostgres",
     "TestPendingUnusedExpiryCancellationOwnerPostgres",
     "TestPendingUnusedExpiryLegacyCancellationFallbackPostgres",
@@ -116,6 +117,7 @@ ACCOUNT_LEAF_REQUIRED = {
 ACCOUNT_CHILD_REQUIRED = ACCOUNT_REQUIRED - ACCOUNT_LEAF_REQUIRED
 TOKEN_PACKAGE = "github.com/Pinvou/pinvou3/account-platform/internal/token"
 TOKEN_CHILD_REQUIRED = {
+    "TestUserUnusedIntentCancellationOwnerPostgres",
     "TestPendingUnusedExpiryRejectsInvalidProofTimestampPostgres",
     "TestPendingUnusedExpiryCancellationOwnerPostgres",
     "TestPendingUnusedExpiryLegacyCancellationFallbackPostgres",
@@ -136,6 +138,8 @@ TOKEN_CHILD_REQUIRED = {
 }
 BILLING_PACKAGE = "github.com/Pinvou/pinvou3/account-platform/internal/billing"
 SCHEMA_PACKAGE = "github.com/Pinvou/pinvou3/account-platform/internal/billingschema"
+TOKEN_SCHEMA_PACKAGE = "github.com/Pinvou/pinvou3/account-platform/internal/tokenschema"
+TOKEN_SCHEMA_REQUIRED = {"TestManagementPublicMigrationInstallation"}
 SCHEMA_REQUIRED = {"TestLatePaymentQueryRegisteredIdentity", "TestReconciliationFairRetryRegisteredIdentity", "TestF09EntitlementPackageIndexPublicMigration", "TestTokenWalletReceiptSchemaPostgres", "TestLegacyEntitlementUpgradeAdmissionPostgres", "TestUsageWaiverHistoricalSchemaPostgres", "TestBillingOrdinaryReplayOriginalMigrationPostgres", "TestUnknownProviderEntryPublicMigrationPostgres", "TestLegacyExpiry025UpgradePreservesOriginalLedgerPostgres", "TestF04PublicTokenUserOwnerAuthorityAndDirectory", "TestManualRetentionHistoricalHardeningPostgres"}
 OWNER_REQUIRED = {
     "TestF06OrganizationWalletRequiresLifecycleEvidence",
@@ -265,6 +269,23 @@ EXACT_REQUIRED_CHILDREN = {
         "reject-retains-original-and-no-evidence",
         "stale-product-and-foreign-original-rejected",
         "retention-purges-submission-snapshot-and-review-reason",
+    },
+    "TestPasswordPreparationAuthorizationPostgres": {
+        "retention-redacts-expired-mobiles-without-changing-grant-facts/expired",
+        "retention-redacts-expired-mobiles-without-changing-grant-facts/young",
+        "retention-redacts-expired-mobiles-without-changing-grant-facts/valid",
+        "retention-keeps-issued-grant-and-continues-later-artifact-cleanup",
+        "retention-skips-locked-expired-captcha-and-rejects-late-grant",
+        "retention-FK-protects-inflight-reference-and-subsequent-passes",
+    },
+    "TestManagementPublicMigrationInstallation": {
+        "fresh", "legacy-upgrade", "installed-29-upgrade", "installed-30-upgrade",
+        "installed-f05-34-upgrade", "retained-management-lifecycle-upgrade",
+        "installed-f07-36-upgrade", "installed-pre-runtime-37-upgrade",
+        "installed-pre-cleanup-39-upgrade",
+    },
+    "TestUserUnusedIntentCancellationOwnerPostgres": {
+        "before-claim", "after-claim", "waiting-owner-does-not-starve-later-target", "acquired-intent-control", "model-first-control",
     },
     "TestPendingUnusedExpiryRejectsInvalidProofTimestampPostgres": {
         "infinity", "tomorrow", "zero-time", "invalid-calendar",
@@ -508,6 +529,8 @@ def main(*, group="all"):
             env["PINVOU_TEST_ACCOUNT_DATABASE_URL"] = raw
         elif target == "./internal/billingschema":
             env["PINVOU_TEST_SCHEMA_DATABASE_URL"] = raw
+        elif target == "./internal/tokenschema":
+            env["PINVOU_TEST_TOKEN_DATABASE_URL"] = raw
         else:
             env["PINVOU_TEST_BILLING_DATABASE_URL"] = raw
         if target == "./internal/token":
@@ -557,6 +580,10 @@ def main(*, group="all"):
             assert_instance({user})
         try:
             run_phase("owner-schema", "./internal/billingschema", SCHEMA_PACKAGE, SCHEMA_REQUIRED, scoped=True)
+        finally:
+            assert_instance({user})
+        try:
+            run_phase("owner-token-schema", "./internal/tokenschema", TOKEN_SCHEMA_PACKAGE, TOKEN_SCHEMA_REQUIRED, scoped=True)
         finally:
             assert_instance({user})
         try:

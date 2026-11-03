@@ -346,3 +346,39 @@ func pendingUnusedExpiryFenceTx(ctx context.Context, tx pgx.Tx, id uuid.UUID) (b
 	err := tx.QueryRow(ctx, `SELECT `+pendingUnusedExpiryFenceSQL+` FROM usage_requests request WHERE request.id=$1`, id).Scan(&pending)
 	return pending, err
 }
+
+// A USER stop of an intact, never-acquired intent still owns its original
+// expiry recovery even before Billing writes its first fence. This predicate
+// only defers MODEL takeover; it never grants a financial release proof.
+var pendingUserUnusedIntentSQL = `COALESCE((
+ request.organization_id IS NULL AND request.canonicalization_version=1
+ AND request.idempotency_namespace='model-inference'
+ AND request.execution_status='DISPATCH_INTENT_PERSISTED'
+ AND request.status='RESERVED' AND request.settlement_status='HOLD_ACTIVE'
+ AND request.hold_id IS NOT NULL AND request.maximum_microcredits>=0
+ AND request.cancellation_origin='USER' AND request.cancel_status='UNSUPPORTED'
+ AND request.delivery_status='USER_STOPPED' AND request.cancel_requested_at=request.user_stopped_at
+ AND request.provider_terminal_at IS NULL AND request.final_usage_observed_at IS NULL
+ AND request.actual_microcredits IS NULL AND request.last_persisted_sequence=0 AND request.last_client_confirmed_sequence=0
+ AND NOT EXISTS(SELECT 1 FROM model_emergency_cancellations cancellation
+  JOIN model_emergency_cancellation_evidence evidence ON evidence.emergency_cancellation_id=cancellation.id
+  WHERE cancellation.usage_request_id=request.id AND evidence.evidence_type='REQUESTED')
+ AND EXISTS(SELECT 1 FROM usage_dispatch_intents intent WHERE intent.usage_request_id=request.id
+  AND intent.worker_acquired_at IS NULL AND intent.worker_lease_owner IS NULL AND intent.worker_lease_until IS NULL
+  AND NOT intent.adapter_supports_idempotency AND octet_length(intent.encrypted_envelope)>0 AND btrim(intent.key_id)<>''
+  AND intent.upstream_idempotency_key='pinvou-'||request.id::text
+  AND intent.envelope_integrity=encode(sha256(intent.encrypted_envelope),'hex'))
+ AND EXISTS(SELECT 1 FROM usage_cancel_commands command
+  JOIN usage_cancellation_evidence stopped ON stopped.usage_request_id=command.usage_request_id
+  WHERE command.usage_request_id=request.id AND command.user_id=request.user_id AND command.cancellation_version=1
+   AND command.request_fingerprint=encode(sha256(decode('` + hex.EncodeToString([]byte(cancellationFingerprintDomain)) + `','hex')||convert_to(request.id::text,'UTF8')),'hex')
+   AND command.created_at=request.user_stopped_at AND stopped.occurred_at=command.created_at
+   AND stopped.evidence_type='UNSUPPORTED' AND stopped.adapter_version=request.request_snapshot->>'adapter_version'
+   AND stopped.provider_id IS NULL AND stopped.upstream_reference_digest IS NULL
+   AND stopped.sanitized_evidence=jsonb_build_object('capability','UNSUPPORTED','pre_dispatch',false))
+ AND EXISTS(SELECT 1 FROM usage_convergence_evidence stopped WHERE stopped.usage_request_id=request.id
+  AND stopped.evidence_type='CANCELLATION' AND stopped.source_type='GATEWAY' AND stopped.decision='RECORDED'
+  AND stopped.evidence_key='requested:UNSUPPORTED' AND stopped.provider_id IS NULL AND stopped.adapter_version IS NULL
+  AND stopped.upstream_reference_digest IS NULL AND stopped.observed_at=request.user_stopped_at
+  AND stopped.sanitized_snapshot=jsonb_build_object('cancel_status','UNSUPPORTED','capability','UNSUPPORTED','pre_dispatch',false,'provider_success_inferred',false))
+),false)`

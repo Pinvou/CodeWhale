@@ -2668,6 +2668,16 @@
         "file": "900005_usage_waiver_intents.up.sql",
         "version": 900005,
         "sha256": "110f4c6961fa6c213e270e1ee047ffc512233941f374c809474ea16a8eeef2fe"
+      },
+      {
+        "file": "900006_replay_cleanup_indexes.down.sql",
+        "version": 900006,
+        "sha256": "8e61b6454d78cc307b7d060699b9f8f0b936d4fc98aed1c0048536ed525cf17f"
+      },
+      {
+        "file": "900006_replay_cleanup_indexes.up.sql",
+        "version": 900006,
+        "sha256": "bf8521c04a898ba68675b828d09ad98afcc86c4b11115530520844dd9a2bae58"
       }
     ]
   }
