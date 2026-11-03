@@ -332,6 +332,8 @@ jobs:
               - '.gitmodules'
               - '.github/workflows/pr-check.yml'
             rust_dependencies:
+              - 'scripts/calamine-upstream-advisories.py'
+              - 'scripts/tests/test_calamine_upstream_advisories.py'
               - 'scripts/guard-webpki-roots-exception.py'
               - 'scripts/tests/test_webpki_roots_exception.py'
               - '**/Cargo.toml'
@@ -477,6 +479,8 @@ jobs:
               # required-gate passing on `skipped`).
               - 'docs/gaia-benchmark.md'
             knowledge_rust:
+              - 'scripts/calamine-upstream-advisories.py'
+              - 'scripts/tests/test_calamine_upstream_advisories.py'
               - 'pinvou-knowledge/**/*.rs'
               - 'pinvou-knowledge/Cargo.toml'
               - 'pinvou-knowledge/Cargo.lock'
@@ -488,6 +492,8 @@ jobs:
               - 'pinvou-knowledge/deploy/**'
               - '.github/workflows/pr-check.yml'
             knowledge_dependencies:
+              - 'scripts/calamine-upstream-advisories.py'
+              - 'scripts/tests/test_calamine_upstream_advisories.py'
               - 'scripts/guard-webpki-roots-exception.py'
               - 'scripts/tests/test_webpki_roots_exception.py'
               - 'pinvou-knowledge/Cargo.toml'
@@ -2054,6 +2060,12 @@ jobs:
           python3 scripts/guard-webpki-roots-exception.py
           cargo deny --locked --manifest-path pinvou-knowledge/Cargo.toml --config pinvou3-app/src-tauri/deny.toml check advisories licenses bans sources
 
+      - name: calamine upstream advisories
+        if: ${{ needs.changes.outputs.knowledge_dependencies == 'true' }}
+        shell: bash
+        working-directory: .
+        run: python3 scripts/calamine-upstream-advisories.py --manifest-path pinvou-knowledge/Cargo.toml
+
   # clippy/fmt/deny 独立 job:与 rust-test 并行,各自独立 cache。
   # clippy 用 clippy-driver 编译,产物不能被 cargo test(rustc)复用;在同一 job 里
   # 串行跑会导致依赖图被编译两遍。拆成并行 job 后 wall-clock ≈ max(lint, test)。
@@ -2295,6 +2307,12 @@ jobs:
         run: |
           python3 ../../scripts/guard-webpki-roots-exception.py
           cargo deny --locked check advisories licenses bans sources
+
+      - name: calamine upstream advisories
+        if: ${{ env.RUN_HEAVY_RUST_CHECKS == 'true' && needs.changes.outputs.rust_dependencies == 'true' }}
+        shell: bash
+        working-directory: .
+        run: python3 scripts/calamine-upstream-advisories.py --manifest-path pinvou3-app/src-tauri/Cargo.toml
 
   rust-test:
     name: rust-test

@@ -211,7 +211,7 @@ walkdir = "2"
 # 电子表格解析（file_ingest 用）：读 xlsx/xls/ods 的全部工作表。
 # 0.37 要求 zip ^9（见上）与 quick-xml ^0.42（ReDoS 修复线,见 RUSTSEC-2026-0194/0195）。
 # 残留的 quick-xml 0.41 仅来自 wayland-scanner/xcb 的 Linux 构建链（`cargo tree -i quick-xml`）。
-calamine = "0.38"
+calamine = { version = "0.38", git = "https://github.com/zhuowp/calamine.git", rev = "54d55a113b309c5d7ab9a4a6d6b2dd8d7320ebea" }
 # XLSX structure preservation: inspect OOXML cell styles, formulas, and merged
 # ranges that calamine's value-only Range intentionally does not expose.
 quick-xml = "0.42"
