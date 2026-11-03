@@ -695,7 +695,7 @@ export function ProvidersSection({ t }) {
       {/* Agent 标签页 */}
       <div className="flex gap-1.5">
         {AGENTS.map(agent => (
-          <button
+          <button type="button"
             key={agent.key}
             data-testid={`acp-agent-tab-${agent.key}`}
             onClick={() => setActiveAgent(agent.key)}
@@ -797,7 +797,7 @@ export function ProvidersSection({ t }) {
 
       {/* 工具栏 */}
       <div className="flex items-center gap-2">
-        <button
+        <button type="button"
           data-testid="acp-provider-add"
           onClick={() => { setEditing(null); setFormOpen(true); }}
           className="h-9 px-4 rounded-full bg-[#007AFF] text-white text-[12px] font-semibold inline-flex items-center gap-1.5"
@@ -805,7 +805,7 @@ export function ProvidersSection({ t }) {
           <Plus size={14} />
           {copy.addProvider}
         </button>
-        <button
+        <button type="button"
           data-testid="acp-provider-export"
           onClick={doExport}
           disabled={providers.length === 0}
@@ -814,7 +814,7 @@ export function ProvidersSection({ t }) {
           <Download size={13} />
           {copy.export}
         </button>
-        <button
+        <button type="button"
           data-testid="acp-provider-import"
           onClick={() => setImportOpen(true)}
           className="h-9 px-3 rounded-full text-[12px] font-medium border border-black/[0.08] dark:border-white/[0.12] inline-flex items-center gap-1.5"
@@ -822,7 +822,7 @@ export function ProvidersSection({ t }) {
           <Upload size={13} />
           {copy.import}
         </button>
-        <button
+        <button type="button"
           data-testid="acp-provider-refresh"
           onClick={() => refresh(true)}
           className="h-9 px-3 rounded-full text-[12px] font-medium border border-black/[0.08] dark:border-white/[0.12] inline-flex items-center gap-1.5"
@@ -861,7 +861,7 @@ export function ProvidersSection({ t }) {
                 </div>
                 <div className="flex shrink-0 items-center gap-1.5">
                   {!isCurrent(provider.id) && (
-                    <button
+                    <button type="button"
                       data-testid={`acp-provider-switch-${provider.id}`}
                       onClick={() => switchTo(provider.id, false)}
                       disabled={busyOnAgent || !provider.hasCredential}
@@ -872,7 +872,7 @@ export function ProvidersSection({ t }) {
                       {copy.switch}
                     </button>
                   )}
-                  <button
+                  <button type="button"
                     data-testid={`acp-provider-edit-${provider.id}`}
                     onClick={() => { setEditing(provider); setFormOpen(true); }}
                     className="h-8 w-8 rounded-full flex items-center justify-center border border-black/[0.08] dark:border-white/[0.12]"
@@ -880,7 +880,7 @@ export function ProvidersSection({ t }) {
                   >
                     <Edit2 size={13} />
                   </button>
-                  <button
+                  <button type="button"
                     data-testid={`acp-provider-delete-${provider.id}`}
                     onClick={() => setDeleteConfirm(provider)}
                     className="h-8 w-8 rounded-full flex items-center justify-center border border-black/[0.08] dark:border-white/[0.12] hover:text-red-500"
@@ -900,7 +900,7 @@ export function ProvidersSection({ t }) {
         <div className="flex items-center gap-2 text-[12px]">
           {officialBadgeEffective}
           {!view.officialActive && (
-            <button
+            <button type="button"
               data-testid="acp-provider-switch-official"
               onClick={() => switchTo(null, true)}
               disabled={busyOnAgent}
@@ -931,7 +931,7 @@ export function ProvidersSection({ t }) {
             </div>
             <div className="flex items-center gap-2">
               {runInstallAction && (
-                <button
+                <button type="button"
                   data-testid="acp-cli-install-update"
                   onClick={() => installOrUpdate(status.install_action)}
                   disabled={installing || busyOnAgent}
@@ -941,7 +941,7 @@ export function ProvidersSection({ t }) {
                 </button>
               )}
               {installing && (
-                <button
+                <button type="button"
                   data-testid="acp-cli-install-cancel"
                   onClick={cancelInstall}
                   disabled={busy === 'cancel-install:' + activeAgent}
@@ -951,7 +951,7 @@ export function ProvidersSection({ t }) {
                 </button>
               )}
               {status.installed && !status.authenticated && !loginWaiting && (
-                <button
+                <button type="button"
                   data-testid="acp-cli-login"
                   onClick={startLogin}
                   disabled={busyOnAgent}
@@ -963,7 +963,7 @@ export function ProvidersSection({ t }) {
               {/* 登出的是官方账号：中转生效时禁用并提示，避免误当「登出中转」
                   把可切回官方的凭据登没了（kimi 走 provider remove，同规则） */}
               {status.installed && status.authenticated && (
-                <button
+                <button type="button"
                   data-testid="acp-cli-logout"
                   onClick={doLogout}
                   disabled={busyOnAgent || Boolean(view && !view.officialActive)}
@@ -974,7 +974,7 @@ export function ProvidersSection({ t }) {
                 </button>
               )}
               {status.installed && (
-                <button
+                <button type="button"
                   data-testid="acp-cli-uninstall"
                   onClick={() => setUninstallConfirm({ cleanup: false })}
                   disabled={busyOnAgent}
@@ -983,7 +983,7 @@ export function ProvidersSection({ t }) {
                   {busy === 'uninstall:' + activeAgent ? copy.uninstallBusy : copy.uninstall}
                 </button>
               )}
-              <button
+              <button type="button"
                 onClick={recheck}
                 disabled={recheckingOnAgent || busyOnAgent}
                 className="h-8 px-3 rounded-full text-[11px] font-medium border border-black/[0.08] dark:border-white/[0.12] inline-flex items-center gap-1.5 disabled:opacity-50"
@@ -1026,7 +1026,7 @@ export function ProvidersSection({ t }) {
                   <RefreshCw size={12} className="animate-spin" />
                   <span>{copy.loginWaiting}</span>
                   {status.login_url && (
-                    <button
+                    <button type="button"
                       data-testid="acp-cli-login-open-url"
                       onClick={() => invokeTauri('open_acp_agent_login_url', { agentId: activeAgent }).catch(e => setError(String(e)))}
                       className="h-7 px-3 rounded-full bg-[#007AFF] text-white text-[11px] font-semibold"
@@ -1044,7 +1044,7 @@ export function ProvidersSection({ t }) {
                       placeholder={copy.loginCodePlaceholder}
                       className="h-8 flex-1 rounded-lg px-2.5 font-mono text-[12px] outline-none bg-black/[0.05] dark:bg-white/[0.07]"
                     />
-                    <button
+                    <button type="button"
                       data-testid="acp-cli-login-submit"
                       onClick={submitLoginCode}
                       disabled={!loginCode.trim()}
@@ -1124,7 +1124,7 @@ export function ProvidersSection({ t }) {
                 <h3 className="text-[15px] font-semibold">{copy.exportWarningTitle}</h3>
                 <p className="mt-1 text-[12px] leading-relaxed opacity-75">{copy.exportWarningDesc}</p>
               </div>
-              <button onClick={() => setExportOpen(false)} className="h-8 w-8 rounded-full flex items-center justify-center hover:bg-black/[0.06] dark:hover:bg-white/[0.08]"><X size={15} /></button>
+              <button type="button" onClick={() => setExportOpen(false)} className="h-8 w-8 rounded-full flex items-center justify-center hover:bg-black/[0.06] dark:hover:bg-white/[0.08]"><X size={15} /></button>
             </div>
             <textarea
               data-testid="acp-provider-export-json"
@@ -1134,10 +1134,10 @@ export function ProvidersSection({ t }) {
               className="mt-4 h-56 w-full rounded-xl p-3 font-mono text-[11px] outline-none bg-black/[0.05] dark:bg-white/[0.06] resize-none custom-scrollbar"
             />
             <div className="mt-4 flex justify-end gap-2">
-              <button onClick={() => setExportOpen(false)} className="h-9 px-4 rounded-full text-[13px] font-semibold border border-black/[0.08] dark:border-white/[0.12]">{copy.cancel}</button>
+              <button type="button" onClick={() => setExportOpen(false)} className="h-9 px-4 rounded-full text-[13px] font-semibold border border-black/[0.08] dark:border-white/[0.12]">{copy.cancel}</button>
               {/* 不自动复制到剪贴板：明文 key 意外粘贴到聊天/网页有泄露风险，
                   改为全选让用户主动复制 */}
-              <button
+              <button type="button"
                 data-testid="acp-provider-export-select"
                 onClick={event => { event.currentTarget.closest('div').previousElementSibling.select(); }}
                 className="h-9 px-4 rounded-full bg-[#007AFF] text-white text-[13px] font-semibold"
@@ -1165,8 +1165,8 @@ export function ProvidersSection({ t }) {
               className="mt-3 h-52 w-full rounded-xl p-3 font-mono text-[11px] outline-none bg-black/[0.05] dark:bg-white/[0.06] resize-none custom-scrollbar"
             />
             <div className="mt-4 flex justify-end gap-2">
-              <button onClick={() => setImportOpen(false)} className="h-9 px-4 rounded-full text-[13px] font-semibold border border-black/[0.08] dark:border-white/[0.12]">{copy.cancel}</button>
-              <button
+              <button type="button" onClick={() => setImportOpen(false)} className="h-9 px-4 rounded-full text-[13px] font-semibold border border-black/[0.08] dark:border-white/[0.12]">{copy.cancel}</button>
+              <button type="button"
                 data-testid="acp-provider-import-confirm"
                 onClick={doImport}
                 disabled={busyOnAgent || !String(importJson || '').trim()}
