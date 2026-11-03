@@ -3264,23 +3264,31 @@ class CiGatePolicyTests(unittest.TestCase):
             "'success' to required-gate, so the whole compile/test leg becomes "
             "advisory while the required check stays green",
         )
-        # Exactly one legitimate use, and it is a STEP whose entire purpose is
-        # to print an analysis it must not be able to fail the job with.
+        # These reviewed diagnostic-only steps cannot suppress a compiler,
+        # test or cleanup failure. Artifact transport is bounded separately;
+        # adding another advisory step still requires explicit review here.
+        reviewed_diagnostics = (
+            "Windows 测试二进制导入诊断",
+            "Test resource lifecycle receipts",
+            "Financial parallel diagnostics",
+            "Account test resource lifecycle receipts",
+        )
         self.assertEqual(
             len(step_level),
-            1,
-            "only the Windows PE import diagnostic may opt out of blocking; "
+            len(reviewed_diagnostics),
+            "only reviewed diagnostic steps may opt out of blocking; "
             f"found {len(step_level)} continue-on-error settings: {step_level}",
         )
-        diagnostic_step = body.split(
-            "- name: Windows 测试二进制导入诊断", maxsplit=1
-        )[1].split("\n      - name:", maxsplit=1)[0]
-        self.assertIn(
-            "continue-on-error: true",
-            diagnostic_step,
-            "the single permitted continue-on-error must be the Windows PE "
-            "import diagnostic step, not some other step that moved under it",
-        )
+        for name in reviewed_diagnostics:
+            diagnostic_step = body.split(
+                "- name: " + name + "\n", maxsplit=1
+            )[1].split("\n      - name:", maxsplit=1)[0]
+            self.assertIn(
+                "continue-on-error: true",
+                diagnostic_step,
+                "continue-on-error belongs only to the reviewed diagnostic "
+                "step, not another step that moved under it",
+            )
 
     def test_gate_jobs_do_not_swallow_their_exit_status(self):
         # The companion fail-open vector to continue-on-error: appending
