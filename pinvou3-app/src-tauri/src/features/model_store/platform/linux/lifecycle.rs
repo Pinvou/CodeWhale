@@ -974,14 +974,15 @@ impl ModelManager {
                         && rec.status == "deployed"
                         && openai_endpoint_alive_cached(&rec.card_id, endpoint)
                     {
-                        let card_dir = config::data_dir()
-                            .join("cards")
-                            .join(config::safe_path_component(&rec.card_id).unwrap_or_default());
-                        if !card_dir.as_os_str().is_empty()
-                            && native_engine_identity_alive(&card_dir)
-                        {
-                            let _ = db::set_running(&rec.card_id, true);
-                            corrected.push(rec.card_name.clone());
+                        // r22 P3-3：safe_path_component 失败时 join("") 得到的
+                        // 仍是 cards/ 本身（永非空），旧守卫防不了「探测整目录」；
+                        // 换成校验失败直接跳过（:3084 同款先例）。
+                        if let Ok(safe_id) = config::safe_path_component(&rec.card_id) {
+                            let card_dir = config::data_dir().join("cards").join(safe_id);
+                            if native_engine_identity_alive(&card_dir) {
+                                let _ = db::set_running(&rec.card_id, true);
+                                corrected.push(rec.card_name.clone());
+                            }
                         }
                     }
                     continue;
@@ -2319,13 +2320,14 @@ impl ModelManager {
             // 预检放行，r19 P1-1 修的洞换个状态重现。身份文件
             // （.runtime/serve.identity.json）在卡片目录里、不随 DB 状态复位消失，
             // 且带 start_ticks/uid 防 PID 复用——与 reconcile 的收编臂同源同判据。
-            let card_dir = config::data_dir()
-                .join("cards")
-                .join(config::safe_path_component(&rec.card_id).unwrap_or_default());
-            if !card_dir.as_os_str().is_empty() && native_engine_identity_alive(&card_dir) {
-                return Err(ModelManagerError::new(format!(
-                    "此原生引擎仍有运行实例或状态无法确认，请先停用使用该引擎的模型再{action}。"
-                )));
+            // r22 P3-3 同款：校验失败直接跳过身份判据，不再探测 cards/ 整目录。
+            if let Ok(safe_id) = config::safe_path_component(&rec.card_id) {
+                let card_dir = config::data_dir().join("cards").join(safe_id);
+                if native_engine_identity_alive(&card_dir) {
+                    return Err(ModelManagerError::new(format!(
+                        "此原生引擎仍有运行实例或状态无法确认，请先停用使用该引擎的模型再{action}。"
+                    )));
+                }
             }
             let snapshot = super::native_process::discover();
             if !snapshot.complete
@@ -4762,12 +4764,10 @@ fn docker_container_memory(container: &str) -> Option<String> {
 /// 原生引擎在 `.runtime/serve.identity.json` 里记的 PID（含 start_ticks/uid
 /// 核验——与 reconcile 的身份核验同一判据，PID 复用后老 PID 的假活不展示）。
 fn native_runtime_pid(rec: &db::StoreModelRecord) -> Option<i64> {
-    let card_dir = config::data_dir()
-        .join("cards")
-        .join(config::safe_path_component(&rec.card_id).unwrap_or_default());
-    if card_dir.as_os_str().is_empty() {
-        return None;
-    }
+    // r22 P3-3：join("") 得到的路径永非空，旧的空串守卫防不了「探测 cards/
+    // 整目录」；校验失败直接没有身份可读。
+    let safe_id = config::safe_path_component(&rec.card_id).ok()?;
+    let card_dir = config::data_dir().join("cards").join(safe_id);
     let identity = native_identity_process(&card_dir)?;
     identity_process_alive(&identity).then_some(identity.pid)
 }

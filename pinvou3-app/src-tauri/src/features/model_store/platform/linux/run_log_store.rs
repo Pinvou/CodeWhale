@@ -555,7 +555,14 @@ pub fn sanitize_for_disk(line: &str) -> String {
             || SECRET_QUERY_KEYS
                 .iter()
                 .any(|known| bare.eq_ignore_ascii_case(known))
-            || query_key_is_secret(bare)
+            // r22 P2-2：这里刻意**不走** query_key_is_secret——那张表 r21 并入了
+            // Azure SAS 键（sig/se/sp），而 `se`/`sp` 是常见普通词根，进 bare
+            // 词表会把无辜的下一个词抹掉（AZURE_SAS_QUERY_KEYS 的注释一直这么
+            // 声称，代码却在 r21 P2-9 时顺手破坏了它）。bare 语境只额外收
+            // 前缀族（x-amz-/x-goog-），Azure 键维持「仅键名语境」的边界。
+            || SECRET_QUERY_PREFIXES
+                .iter()
+                .any(|prefix| bare.to_ascii_lowercase().starts_with(prefix))
             || SECRET_FLAGS
                 .iter()
                 .any(|known| bare.eq_ignore_ascii_case(known))
@@ -573,6 +580,18 @@ pub fn sanitize_for_disk(line: &str) -> String {
             // 刻意不进 SECRET_FLAGS：那张表对下一个词无条件整词抹，这里要按
             // 「带冒号才抹」收，避免误伤 `sudo -u root`。
             curl_user_next = true;
+        } else if word.len() > 14
+            && word
+                .get(..14)
+                .is_some_and(|prefix| prefix.eq_ignore_ascii_case("authorization:"))
+        {
+            // r22（10:21 分片 P2-1b）：`Authorization:Basic <b64>` 冒号黏连的
+            // scheme 声明词——词本身不含机密（值是 Basic/Bearer），base64 凭证
+            // 在**下一个词**。与上方 bare bearer/basic 同语义：标记下一个词
+            // 整词抹除，本词保留供排查。**必须长于 14 字符**（冒号后真的黏了
+            // scheme）才走这臂：裸 `Authorization:`（空格分离形态）的下一词是
+            // basic/bearer 本身，得留给上面的 bare scheme 臂去标真正的凭证词。
+            redact_next = true;
         }
     }
     clamp_line(&out)
@@ -581,36 +600,51 @@ pub fn sanitize_for_disk(line: &str) -> String {
 /// r21 P2-8②：把 `名字:取值` 冒号黏连的词拆开，仅当名字是机密键名、取值达到
 /// 字面量机密的最小长度时命中。取值里的引号/花括号/逗号（紧凑 JSON 的 `"v"}`、
 /// `body={"k":"v"}` 的尾巴）先剥掉；名字一侧按**最后一个** `{` / `,` / `=` 切断
-/// （`body={"api_key"` → `api_key`），整个词只有一个可辨认的键名时才可能命中。
+/// （`body={"api_key"` → `api_key`）。
 /// **不要求取值带机密前缀**——这里的信号是键名本身（api_key/password……），正是
 /// 「无前缀裸值」这一族此前两个分支都够不着的根本原因；长度门负责把 Python
 /// 注解（`password: str`）这类短非值挡在外面。
+///
+/// r22 P2-1：**全词逐冒号扫描**，不再只看第一个冒号。紧凑 JSON 的机密键未必是
+/// 首位键——`{"user":"bob","api_key":"supersecretvalue"}` 按首个冒号切出的
+/// 名字是 `user`，`split_once` 永远够不着后面的 `api_key`（r21 修复面窄于
+/// 声明的根因）。取**第一个命中**的键：命中后值是抹到词尾的，后面的键值段
+/// 一并被覆盖，继续扫只会让保留的前缀更短、丢更多无害上下文。
 fn colon_glued_secret(word: &str) -> Option<(&str, &str)> {
-    let (name, value) = word.split_once(':')?;
-    // 名字取最后一个结构定界符（{ / , / =）之后的那一段；都没有就整段。
-    let name = name
-        .rfind(['{', ',', '='])
-        .map(|cut| &name[cut + 1..])
-        .unwrap_or(name);
-    let trimmed_name = name.trim_matches(|c: char| {
-        matches!(
-            c,
-            '"' | '\'' | '{' | '}' | '[' | ']' | ',' | ';' | '(' | ')'
-        )
-    });
-    if !secret_key_name(trimmed_name) {
-        return None;
+    let mut hit: Option<(&str, &str)> = None;
+    for (colon, c) in word.char_indices() {
+        if c != ':' {
+            continue;
+        }
+        let name_part = &word[..colon];
+        let value = &word[colon + 1..];
+        // 名字取最后一个结构定界符（{ / , / =）之后的那一段；都没有就整段。
+        let name = name_part
+            .rfind(['{', ',', '='])
+            .map(|cut| &name_part[cut + 1..])
+            .unwrap_or(name_part);
+        let trimmed_name = name.trim_matches(|c: char| {
+            matches!(
+                c,
+                '"' | '\'' | '{' | '}' | '[' | ']' | ',' | ';' | '(' | ')'
+            )
+        });
+        if !secret_key_name(trimmed_name) {
+            continue;
+        }
+        let trimmed_value = value.trim_matches(|c: char| {
+            matches!(
+                c,
+                '"' | '\'' | '{' | '}' | '[' | ']' | ',' | ';' | '(' | ')'
+            )
+        });
+        if trimmed_value.len() < MIN_LITERAL_SECRET_LEN {
+            continue;
+        }
+        hit = Some((trimmed_name, value));
+        break;
     }
-    let trimmed_value = value.trim_matches(|c: char| {
-        matches!(
-            c,
-            '"' | '\'' | '{' | '}' | '[' | ']' | ',' | ';' | '(' | ')'
-        )
-    });
-    if trimmed_value.len() < MIN_LITERAL_SECRET_LEN {
-        return None;
-    }
-    Some((trimmed_name, value))
+    hit
 }
 
 /// 导出/上报走这一道：定向脱敏 + 全仓通用尺子 + 内网地址。
@@ -1385,6 +1419,69 @@ mod tests {
             let disk = sanitize_for_disk(line);
             assert!(!disk.contains("dXNlcjpwYXNz"), "{line} -> {disk}");
             // 导出走 sanitize_for_disk 之后再上通用尺子，同一道定向层先拦
+            let export = sanitize_for_export(line);
+            assert!(!export.contains("dXNlcjpwYXNz"), "{line} -> {export}");
+        }
+    }
+
+    /// r22 P2-1：紧凑 JSON 的机密键不是首位键时，r21 的修复（只看第一个冒号）
+    /// 够不着它——`split_once` 切出的名字是 `user`，`api_key` 永远不被扫描。
+    /// 全词逐冒号扫描后这条必须双道（落盘+导出）都拦住。
+    #[test]
+    fn compact_json_with_secret_key_not_in_first_position_is_redacted() {
+        for line in [
+            r#"body={"user":"bob","api_key":"supersecretvalue"}"#,
+            r#"{"model":"qwen","token":"ab12cd34ef56"}"#,
+            r#"data={"a":1,"password":"plainsecret1234"}"#,
+        ] {
+            let disk = sanitize_for_disk(line);
+            assert!(
+                !disk.contains("supersecretvalue")
+                    && !disk.contains("ab12cd34ef56")
+                    && !disk.contains("plainsecret1234"),
+                "非首位机密键落盘泄漏：{line} -> {disk}"
+            );
+            let export = sanitize_for_export(line);
+            assert!(
+                !export.contains("supersecretvalue")
+                    && !export.contains("ab12cd34ef56")
+                    && !export.contains("plainsecret1234"),
+                "非首位机密键导出泄漏：{line} -> {export}"
+            );
+        }
+    }
+
+    /// r22 P2-2：Azure SAS 键（se/sp/sig）**不得**进 bare 词表——`se`/`sp` 是
+    /// 常见普通词根，裸词形态会把无辜的下一个词抹掉（AZURE_SAS_QUERY_KEYS
+    /// 的注释一直这么承诺）。键名语境（URL query / `KEY=` / `-H KEY=值`）照收。
+    #[test]
+    fn azure_sas_keys_do_not_swallow_innocent_next_words_in_bare_form() {
+        // 裸词形态：`se` 后面的普通词必须原样保留
+        let disk = sanitize_for_disk("params: se 2026-01-01T00:00:00Z sp r");
+        assert!(
+            disk.contains("2026-01-01T00:00:00Z"),
+            "bare 语境的 Azure 键不得抹掉下一个词：{disk}"
+        );
+        // 键名语境照收：URL query 里的 se/sig 取值仍要抹
+        let url = "https://acct.blob.core.windows.net/c/b?se=2026-01-01&sp=r&sig=QUxFU0lHTUFURQ";
+        let redacted = sanitize_for_disk(url);
+        assert!(
+            !redacted.contains("QUxFU0lHTUFURQ"),
+            "query 语境的 sig 必须抹：{redacted}"
+        );
+    }
+
+    /// r22（10:21 分片 P2-1b）：`Authorization:Basic <b64>` 冒号黏连形态——
+    /// scheme 声明词本身不含机密，base64 凭证在下一个词；与空格分离形态
+    /// （上方 bare_basic_scheme 测试）同语义覆盖。
+    #[test]
+    fn authorization_glued_scheme_redacts_following_credential() {
+        for line in [
+            "+ export Authorization:Basic dXNlcjpwYXNzOndyb25n",
+            "Authorization:Bearer 4oKk4oK0dXNlcjpwYXNz",
+        ] {
+            let disk = sanitize_for_disk(line);
+            assert!(!disk.contains("dXNlcjpwYXNz"), "{line} -> {disk}");
             let export = sanitize_for_export(line);
             assert!(!export.contains("dXNlcjpwYXNz"), "{line} -> {export}");
         }
