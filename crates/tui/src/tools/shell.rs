@@ -1433,11 +1433,16 @@ impl BackgroundShell {
                 // the worst case is a wedged write on the session's shell
                 // lock; the unix deadline is an improvement there, not a
                 // guarantee.
-                // The same predicate as the `PtyFile` variant: ohos falls
-                // through to the blocking write below, where the per-call
-                // cap keeps the worst case a wedged write on the session's
-                // shell lock (the deadline is a unix improvement, not a
-                // guarantee — ohos is a niche target, disclosed here).
+                // The same predicate as the `PtyFile` variant. ohos strips
+                // this whole statement (the attribute gates the if-else), so
+                // ohos's only write is the `any(target_env = "ohos",
+                // not(unix))` block below — that predicate is what keeps
+                // ohos compiling with a live write and no dead binding,
+                // field, or methods under the workspace deny(warnings). The
+                // per-call cap keeps the worst case a wedged write on the
+                // session's shell lock (the deadline is a unix-non-ohos
+                // improvement, not a guarantee — ohos is a niche target,
+                // disclosed here).
                 #[cfg(all(unix, not(target_env = "ohos")))]
                 if matches!(stdin, StdinWriter::Pipe(_) | StdinWriter::PtyFile(_)) {
                     use std::os::fd::AsFd;
@@ -1469,7 +1474,13 @@ impl BackgroundShell {
                         .context("Failed to write to stdin")?;
                     stdin.flush().ok();
                 }
-                #[cfg(not(unix))]
+                // Windows and ohos share one blocking write: Windows strips
+                // the bounded statement above (`unix` false) and ohos strips
+                // it by the `not(target_env = "ohos")` half — the `any` here
+                // is the surviving fallback on both, which is what keeps the
+                // `stdin` binding, the `Pipe` field, and the `StdinWriter`
+                // methods live on every target.
+                #[cfg(any(target_env = "ohos", not(unix)))]
                 {
                     stdin
                         .write_all(input.as_bytes())
@@ -4112,7 +4123,7 @@ fn readonly_compound_refused_by_shell_kind(
     // mirroring the cmd `%` wall's any-occurrence shape.
     if kind.is_powershell() && command.contains(',') {
         return Some(
-            "[shell.readonly.sequence.unsupported_shell] PowerShell argument mode splits a bare `,` into several arguments, so a read-only probe containing one would run with operands the gate judged as a single word; run the probe without `,`.",
+            "[shell.readonly.sequence.unsupported_shell] PowerShell argument mode splits a bare `,` into several arguments, so a read-only probe containing one could run with operands the gate judged as a single word (quoted occurrences refuse too, fail-closed); run the probe without `,`.",
         );
     }
     if !matches!(kind, crate::shell_dispatcher::ShellKind::Cmd) {
@@ -4129,7 +4140,7 @@ fn readonly_compound_refused_by_shell_kind(
     // any-occurrence shape.
     if command.contains(',') || command.contains('=') {
         return Some(
-            "[shell.readonly.sequence.unsupported_shell] cmd.exe splits `,` and `=` into separate argument words when it runs a command, so a read-only probe containing either would run with operands the gate judged as a single word; run the probe without `,` or `=`.",
+            "[shell.readonly.sequence.unsupported_shell] cmd.exe splits `,` and `=` into separate argument words when it runs a command, so a read-only probe containing either could run with operands the gate judged as a single word (quoted occurrences refuse too, fail-closed); run the probe without `,` or `=`.",
         );
     }
     if command.contains('%') || command.contains('^') {
@@ -5916,11 +5927,16 @@ fn readonly_git_config_filter_names(
 /// One key setting parsed from git config text, with the section it
 /// appeared under. Values are raw — git's quote/escape processing is not
 /// applied — so consumers needing a value spell their own fail-closed rules.
+/// `continued` marks a value that spans more than one physical line: this
+/// parser keeps only the first line's text, while git joins the continuation
+/// (dropping each `\`+newline and decoding escapes), so a consumer that
+/// admits on the raw value would judge a path git never applies.
 struct ParsedGitConfigSetting {
     base: String,
     subsection: Option<String>,
     key: String,
     value: Option<String>,
+    continued: bool,
 }
 
 /// A physical git config line continues its value onto the next one iff it
@@ -6084,10 +6100,14 @@ fn parse_git_config_header(header: &str) -> Result<(String, Option<String>), Str
 /// at git's bad-config fatal and the command refuses.
 fn parse_git_config_settings(config_text: &str) -> Result<Vec<ParsedGitConfigSetting>, String> {
     let config_text = config_text.strip_prefix('\u{feff}').unwrap_or(config_text);
-    let mut settings = Vec::new();
+    let mut settings: Vec<ParsedGitConfigSetting> = Vec::new();
     // (section, subsection) of the last `[...]` header; `None` before one.
     let mut section: Option<(String, Option<String>)> = None;
     let mut continuation = false;
+    // Index into `settings` of the setting whose value the current logical
+    // line's continuation extends, if any (`None` for a pre-section key
+    // line, whose swallowed continuation lines belong to no setting).
+    let mut continuing_setting: Option<usize> = None;
     // Quote state carried across the continuation lines of the current
     // logical line; every fresh logical line starts unquoted.
     let mut in_quotes = false;
@@ -6108,6 +6128,14 @@ fn parse_git_config_settings(config_text: &str) -> Result<Vec<ParsedGitConfigSet
             } else {
                 continuation = git_config_line_continues(text);
                 in_quotes = if continuation { quotes_after } else { false };
+            }
+            // The captured value is only this logical line's first physical
+            // line; mark the setting it continues so value-dependent
+            // consumers can refuse instead of judging a prefix of the
+            // string git decodes. A pre-section key line has no setting to
+            // mark (git swallows those lines too).
+            if let Some(index) = continuing_setting {
+                settings[index].continued = true;
             }
             continue;
         }
@@ -6182,11 +6210,13 @@ fn parse_git_config_settings(config_text: &str) -> Result<Vec<ParsedGitConfigSet
                 "the repository enables the worktree-config extension, which adds a config file this scan does not read".to_string(),
             );
         }
+        continuing_setting = Some(settings.len());
         settings.push(ParsedGitConfigSetting {
             base: base.clone(),
             subsection: subsection.clone(),
             key,
             value,
+            continued: continuation,
         });
     }
     Ok(settings)
@@ -6277,16 +6307,24 @@ fn validated_core_worktree(
     gitdir: &std::path::Path,
     worktree_dir: &std::path::Path,
 ) -> Result<(), String> {
-    let Some(declared) = settings
-        .iter()
-        .rev()
-        .find(|setting| {
-            setting.base == "core" && setting.key == "worktree" && setting.subsection.is_none()
-        })
-        .and_then(|setting| setting.value.clone())
-    else {
+    let Some(setting) = settings.iter().rev().find(|setting| {
+        setting.base == "core" && setting.key == "worktree" && setting.subsection.is_none()
+    }) else {
         return Ok(());
     };
+    // git applies the continuation-joined, escape-decoded value; this
+    // parser captured only the first physical line. A hostile config can
+    // drive the two apart — a raw value that canonicalizes back to the
+    // discovered worktree while the decoded value relocates git elsewhere
+    // (probe-pinned with a `w\`-continuation fixture) — so a continued
+    // value refuses instead of validating a prefix of git's string.
+    if setting.continued {
+        return Err(format!(
+            "the repository config declares `core.worktree` with a continued value ({:?}); this scan reads the first physical line only while git joins the continuation, so the declared worktree cannot be validated against the tree this lane bounds",
+            readonly_refusal_echo(setting.value.as_deref().unwrap_or(""))
+        ));
+    }
+    let declared = setting.value.clone().unwrap_or_default();
     // git resolves a relative `core.worktree` against the git directory.
     let joined = if std::path::Path::new(&declared).is_absolute() {
         PathBuf::from(&declared)
@@ -6625,7 +6663,15 @@ fn enforce_readonly_argv_operands(
             past_option_terminator = true;
             continue;
         }
-        if token.starts_with('-') && (token.contains('/') || token.contains('\\')) {
+        // Past `--` a `-`-prefixed token is a plain file name (the
+        // classifier deliberately admits everything after the terminator),
+        // so the option wall must not fire there: `cat -- -a/b` reads the
+        // workspace file named `-a/b`, and the whole-word judgment below
+        // already judges post-`--` tokens by resolved location.
+        if !past_option_terminator
+            && token.starts_with('-')
+            && (token.contains('/') || token.contains('\\'))
+        {
             return Err(ToolError::permission_denied(format!(
                 "[shell.readonly.option.attached_path] Read-only shell options may not carry attached paths; refused {token:?}. Use the bounded File read/search actions for project evidence."
             )));
@@ -6735,6 +6781,14 @@ fn enforce_readonly_argv_operands(
             }
         }
         if value.contains('*') {
+            // The seam is option-table-blind: it cannot tell a quoted value
+            // the shell passes literally (`grep -e 'pat*'`) from a bare
+            // word the shell expands, so a `*`-bearing value is walked as a
+            // glob even when quoting suppressed the expansion. That
+            // over-approximation is the cost of judging without the
+            // option tables' context; it fails safe (an incidental match
+            // outside the workspace refuses a command the shell would have
+            // run inertly) and shares the one command glob budget.
             enforce_readonly_glob_operand(value, roots, effective_cwd, glob_budget)?;
             if let Some(shell_cwd) = shell_expansion_cwd.filter(|base| *base != effective_cwd) {
                 enforce_readonly_glob_operand(value, roots, shell_cwd, glob_budget)?;
@@ -7787,7 +7841,7 @@ impl ToolSpec for BashTool {
 
     fn description(&self) -> &'static str {
         if self.read_only {
-            "Inspect the workspace with the bounded read-only command subset. Single commands without a `*` run directly as argv; pipelines (`a | b`), `;`/`&&`/`||` sequences, commands with a `cd` segment, and single commands carrying a `*` glob run through the detected shell instead — the gate expands the glob exactly as the shell would (pipelines additionally get a `set -o pipefail` prefix where the detected binary speaks it — bash, zsh, and the ksh family — never on cmd.exe or PowerShell; every multi-segment compound and `%`/`^`-bearing command is refused on a cmd.exe host, and `,`-bearing commands on a PowerShell host; a standalone `cd` affects only that one command). Only action=run plus command, cwd, and timeout_ms are accepted."
+            "Inspect the workspace with the bounded read-only command subset. Single commands without a `*` run directly as argv; pipelines (`a | b`), `;`/`&&`/`||` sequences, commands with a `cd` segment, and single commands carrying a `*` glob run through the detected shell instead — the gate expands the glob and judges every match by its resolved location, and shapes it cannot mirror that way (a recursive `**/`, a glob on a `gh` stage) refuse (pipelines additionally get a `set -o pipefail` prefix where the detected binary speaks it — bash, zsh, and the ksh family — never on cmd.exe or PowerShell; every multi-segment compound and `%`/`^`/`,`/`=`-bearing command is refused on a cmd.exe host, and `,`-bearing commands on a PowerShell host; a standalone `cd` affects only that one command). Only action=run plus command, cwd, and timeout_ms are accepted."
         } else {
             guidance::description()
         }

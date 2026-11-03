@@ -549,7 +549,7 @@ fn forkguard_shell_catalog_guidance_matches_execution() {
             .contains("bash, zsh, and the ksh family")
     );
     assert!(readonly.description().contains(
-        "every multi-segment compound and `%`/`^`-bearing command is refused on a cmd.exe host"
+        "every multi-segment compound and `%`/`^`/`,`/`=`-bearing command is refused on a cmd.exe host"
     ));
     assert!(
         readonly
@@ -1800,6 +1800,15 @@ fn readonly_filter_discovery_refuses_configs_it_cannot_enumerate() {
         error.contains("shell.readonly.git.filter_config"),
         "{error}"
     );
+    // A continued `core.worktree` value refuses outright: the scan captured
+    // only the first physical line while git joins the continuation, so the
+    // declared worktree cannot be validated against the tree this lane
+    // bounds (the discriminating raw-resolves-back fixture is unix-gated in
+    // `readonly_filter_discovery_refuses_a_continued_core_worktree_value`).
+    refusal(
+        "[core]\n\tworktree = w\\\n/../../victim\n",
+        "a continued core.worktree value cannot be validated",
+    );
     // One resolving back to the discovered worktree admits: `..` relative
     // to the gitdir is the checkout holding it, and the absorbed submodule
     // layout git itself writes points at its checkout the same way.
@@ -2751,6 +2760,15 @@ fn readonly_operand_gate_refuses_glob_operands_on_gh_stages() {
 /// refuses the expansion outright so a slow or network-backed filesystem
 /// cannot stretch one admitted command past any watchdog.
 #[test]
+fn readonly_glob_walk_deadline_magnitude_is_pinned() {
+    assert_eq!(
+        super::READONLY_GLOB_WALK_DEADLINE,
+        std::time::Duration::from_secs(10),
+        "the glob walk's wall-clock budget regressed — the refusal copy interpolates it and every expansion pays it"
+    );
+}
+
+#[test]
 fn readonly_glob_walk_refuses_once_its_deadline_has_passed() {
     let workspace = tempdir().expect("workspace");
     std::fs::write(workspace.path().join("inside.txt"), "inside").expect("inside file");
@@ -2935,6 +2953,108 @@ async fn readonly_shell_lane_git_status_does_not_run_repository_content_filters(
     }
 }
 
+/// git applies a `core.worktree` value with its continuation joined (each
+/// `\`+newline dropped and the next line appended), while the scan captured
+/// only the first physical line. With `.git/w\` planted as a symlink to the
+/// discovered worktree, the raw first line canonicalizes right back to the
+/// worktree the lane discovered — the validate-the-raw-value behavior
+/// admitted — while the decoded value `w/../../victim` relocates git's
+/// worktree outside the workspace (the E2E twin proves the relocation with
+/// a raw-shell control). A continued value therefore refuses, and a
+/// single-line spelling resolving through the same link keeps admitting —
+/// the wall keys on the continuation, not on the link spelling.
+#[cfg(unix)]
+#[test]
+fn readonly_filter_discovery_refuses_a_continued_core_worktree_value() {
+    let root = tempdir().expect("root");
+    let ws = root.path().join("ws");
+    let repo = ws.join("repo");
+    std::fs::create_dir_all(repo.join(".git")).expect("repo gitdir");
+    seed_minimal_gitdir(&repo.join(".git"));
+    std::os::unix::fs::symlink(&repo, repo.join(".git").join("w\\")).expect("raw-value link");
+    std::os::unix::fs::symlink(&repo, repo.join(".git").join("w")).expect("decoded-first link");
+    std::fs::write(
+        repo.join(".git").join("config"),
+        "[core]\n\trepositoryformatversion = 0\n\tworktree = w\\\n/../../victim\n",
+    )
+    .expect("config");
+    let error = discover_pins("git status -s", &repo)
+        .expect_err("a continued core.worktree value must refuse")
+        .to_string();
+    assert!(error.contains("continued value"), "{error}");
+    // The admission twin: the same link spelling, one physical line, no
+    // continuation — the raw value IS the string git applies.
+    std::fs::write(
+        repo.join(".git").join("config"),
+        "[core]\n\trepositoryformatversion = 0\n\tworktree = w\n",
+    )
+    .expect("config");
+    discover_pins("git status -s", &repo)
+        .expect("a single-line core.worktree resolving to the discovered worktree admits");
+}
+
+/// End to end: the continued `core.worktree` fixture relocates the child's
+/// worktree outside the workspace under a raw shell (the control lists the
+/// outside victim's files), while the lane refuses before spawn — the raw
+/// first-line value resolves back to the discovered worktree, so only the
+/// continuation wall stands between the admitted read and the relocation.
+#[cfg(unix)]
+#[tokio::test]
+async fn readonly_shell_lane_refuses_a_continued_core_worktree_relocation() {
+    let root = tempdir().expect("root");
+    let ws = root.path().join("ws");
+    let repo = ws.join("repo");
+    let victim = root.path().join("victim");
+    std::fs::create_dir_all(&repo).expect("repo");
+    std::fs::create_dir_all(&victim).expect("victim");
+    std::fs::write(victim.join("out.txt"), "OUTSIDE-CORE-WT").expect("outside file");
+    git_helper(&["init", "-q", "."], &repo);
+    std::fs::write(repo.join("f.txt"), "aaa\n").expect("tracked file");
+    git_helper(&["add", "."], &repo);
+    git_helper(&["commit", "-q", "-m", "seed"], &repo);
+    std::os::unix::fs::symlink(&repo, repo.join(".git").join("w\\")).expect("raw-value link");
+    std::os::unix::fs::symlink(&repo, repo.join(".git").join("w")).expect("decoded-first link");
+    std::fs::write(
+        repo.join(".git").join("config"),
+        "[core]\n\trepositoryformatversion = 0\n\tworktree = w\\\n/../../victim\n",
+    )
+    .expect("config");
+
+    // Positive control: raw git relocates and lists the outside victim.
+    let control = std::process::Command::new("sh")
+        .args(["-c", "git status --short 2>&1"])
+        .current_dir(&repo)
+        .output()
+        .expect("control shell runs");
+    let control_out = String::from_utf8_lossy(&control.stdout);
+    assert!(
+        control_out.contains("out.txt"),
+        "raw git must list the relocated outside victim for this fixture to discriminate: {control_out}"
+    );
+
+    let context = ToolContext::new(ws.clone())
+        .with_shell_policy(crate::worker_profile::ShellPolicy::ReadOnly);
+    let output = LowercaseBashTool
+        .execute(json!({"command": "cd repo; git status -s"}), &context)
+        .await;
+    match output {
+        Err(error) => assert!(error.to_string().contains("continued"), "{error}"),
+        Ok(output) => {
+            assert!(
+                !output.success,
+                "the relocated read must refuse: {}",
+                output.content
+            );
+            assert!(output.content.contains("continued"), "{}", output.content);
+            assert!(
+                !output.content.contains("out.txt"),
+                "outside content crossed the boundary: {}",
+                output.content
+            );
+        }
+    }
+}
+
 /// git strips an UNBOUNDED run of trailing `\r`/`\n` bytes from a `.git`
 /// link value, in any order — probe-pinned against git 2.43, where a value
 /// ending in `\n\n`, `\r\r`, or `\n\r` resolved the fully stripped
@@ -3048,6 +3168,38 @@ fn parse_git_config_settings_swallows_the_line_after_a_pre_section_continuation(
     assert!(
         !summary.iter().any(|(base, _)| base == "filter"),
         "the swallowed header must not arm a driver git never runs: {summary:?}"
+    );
+}
+
+/// A value that spans more than one physical line is captured by this
+/// parser as its first line only, while git joins the continuation — the
+/// `continued` flag must mark exactly those settings so value-dependent
+/// consumers can refuse instead of judging a prefix of git's decoded
+/// string (probe-pinned: `worktree = w\` + a second line relocates git
+/// while the raw first line can resolve back to the discovered worktree).
+#[test]
+fn parse_git_config_settings_flags_continued_values() {
+    let settings = parse_git_config_settings(
+        "[core]\n\tworktree = w\\\n/../../victim\n[filter \"plain\"]\n\tclean = cat\n",
+    )
+    .expect("the text parses");
+    let summary: Vec<(String, bool)> = settings
+        .iter()
+        .map(|setting| (setting.key.clone(), setting.continued))
+        .collect();
+    assert_eq!(
+        summary,
+        [("worktree".to_string(), true), ("clean".to_string(), false)],
+        "the continued value is flagged, the plain one is not: {summary:?}"
+    );
+    assert_eq!(settings[0].value.as_deref(), Some("w\\"));
+    // A value that only LOOKS like it might continue (even backslash count
+    // ends it) stays single-line.
+    let settings =
+        parse_git_config_settings("[core]\n\tworktree = w\\\\\n").expect("the text parses");
+    assert!(
+        settings.iter().all(|setting| !setting.continued),
+        "an escaped-backslash value does not continue"
     );
 }
 
@@ -10375,6 +10527,34 @@ fn readonly_operand_gate_judges_post_dash_operands_by_full_spelling() {
         .expect("a bare `-` operand stays skipped");
     enforce_readonly_workspace_operands("cat -- ''", &roots, workspace.path())
         .expect("an empty post-`--` operand stays skipped");
+    // The attached-path wall belongs to the OPTION grammar, so it must not
+    // fire past `--`: `cat -- -a/b` reads the file literally named `-a/b`,
+    // judged by resolved location like every other post-`--` plain operand
+    // (the classifier admits it; a wall here would refuse a legitimate
+    // read), while the same spelling before `--` still refuses as an
+    // attached option path.
+    std::fs::create_dir(workspace.path().join("-a")).expect("dash-named dir");
+    std::fs::write(workspace.path().join("-a").join("b"), "dashslash").expect("dashslash file");
+    enforce_readonly_workspace_operands("cat -- -a/b", &roots, workspace.path())
+        .expect("a post-`--` attached-path spelling is a plain operand, not an option");
+    // The judgment is by resolved location: with `-a` retargeted outside,
+    // the same admitted spelling refuses on the plain-operand location
+    // check, proving the operand was judged rather than waved through.
+    std::fs::remove_dir_all(workspace.path().join("-a")).expect("drop inside dir");
+    std::fs::write(outside.path().join("b"), "outside-b").expect("outside target file");
+    std::os::unix::fs::symlink(outside.path(), workspace.path().join("-a"))
+        .expect("outside dir symlink");
+    let error = enforce_readonly_workspace_operands("cat -- -a/b", &roots, workspace.path())
+        .expect_err("a post-`--` operand that resolves outside must refuse")
+        .to_string();
+    assert!(
+        error.contains("outside_workspace"),
+        "the wall must be location, not the option grammar: {error}"
+    );
+    let error = enforce_readonly_workspace_operands("cat -a/b", &roots, workspace.path())
+        .expect_err("a pre-`--` attached option path still refuses")
+        .to_string();
+    assert!(error.contains("attached_path"), "{error}");
 }
 
 /// Round-15 B3: the shell expands `*` inside the already-hardened text, so
@@ -10759,10 +10939,15 @@ async fn readonly_shell_lane_git_stage_glob_judges_the_shell_expansion_base() {
 
     // Positive control: the EXACT hardened text under the splice's own
     // flags — the expansion re-arms `--textconv`, the repository's attribute
-    // driver executes, and the secret crosses into its output.
+    // driver executes, and the secret crosses into its output. `LC_ALL` is
+    // pinned byte-collation because the expansion order decides whether
+    // git even parses the re-armed flag: under a strcoll locale bash sorts
+    // `seed.txt` before `--textconv` and `git diff <path> --textconv`
+    // fatals ("must come before non-option arguments"), which would red
+    // this control on a macos runner whose `sh` is bash.
     let control = std::process::Command::new("sh")
         .arg("-c")
-        .arg("git -C .r diff --no-ext-diff --no-textconv * 2>&1")
+        .arg("LC_ALL=C; export LC_ALL; git -C .r diff --no-ext-diff --no-textconv * 2>&1")
         .current_dir(workspace.path())
         .output()
         .expect("control shell runs");
