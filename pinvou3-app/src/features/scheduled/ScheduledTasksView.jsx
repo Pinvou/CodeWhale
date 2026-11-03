@@ -1365,11 +1365,11 @@ import memoryOrganizeImage from '../../assets/scheduled/memory-organize.jpg';
                       {taskListStatusLabel(task.status)}
                     </span>
                     {task.isRunning && (
-                      <span data-testid="scheduled-task-running" aria-label={scheduledCopy.running}
+                      <span data-testid="scheduled-task-running" role="img" aria-label={scheduledCopy.running}
                         className="ml-2 h-3.5 w-3.5 shrink-0 animate-spin rounded-full border-2 border-[#007AFF] border-t-transparent dark:border-[#0A84FF]" />
                     )}
                     {task.hasUnreadRuns && (
-                      <span data-testid="scheduled-task-unread" aria-label={scheduledCopy.unread}
+                      <span data-testid="scheduled-task-unread" role="img" aria-label={scheduledCopy.unread}
                         className="ml-2 h-2.5 w-2.5 shrink-0 rounded-full bg-[#007AFF] dark:bg-[#0A84FF]" />
                     )}
                   </span>
@@ -1545,10 +1545,10 @@ import memoryOrganizeImage from '../../assets/scheduled/memory-organize.jpg';
                           aria-label={item.sessionId ? scheduledCopy.openRunLabel(runStatusLabel(item.status)) : scheduledCopy.noOpenRun}>
                           <span className="mt-1 flex h-5 w-5 shrink-0 items-center justify-center">
                             {['queued', 'running'].includes(item.status) ? (
-                              <span data-testid="scheduled-run-running" aria-label={scheduledCopy.runInProgress}
+                              <span data-testid="scheduled-run-running" aria-hidden="true"
                                 className="h-3 w-3 shrink-0 animate-spin rounded-full border-2 border-[#007AFF] border-t-transparent dark:border-[#0A84FF]" />
                             ) : item.unread ? (
-                              <span data-testid="scheduled-run-unread" aria-label={scheduledCopy.unread}
+                              <span data-testid="scheduled-run-unread" role="img" aria-label={scheduledCopy.unread}
                                 className="h-2.5 w-2.5 shrink-0 rounded-full bg-[#007AFF] dark:bg-[#0A84FF]" />
                             ) : (
                               <span className="h-2.5 w-2.5 shrink-0 rounded-full" style={{ background: item.status === 'failed' ? '#FF3B30' : '#8E8E93' }} />
