@@ -8,7 +8,7 @@ import { shanghaiBusinessDate } from '../integration/shanghai-business-date.mjs'
 
 const root = path.resolve(import.meta.dirname, '../../..');
 
-test('E2E runner generates secrets and exercises financial idempotency', async () => {
+test('Compose acceptance scripts retain security and financial assertions (source contract)', async () => {
   const runner = await readFile(path.join(root, 'scripts/account-platform.mjs'), 'utf8');
   const acceptance = await readFile(path.join(root, 'account-platform/test/integration/compose-acceptance.mjs'), 'utf8');
   const fault = await readFile(path.join(root, 'account-platform/test/integration/compose-fault.mjs'), 'utf8');
