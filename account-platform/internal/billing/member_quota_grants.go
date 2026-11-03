@@ -243,7 +243,10 @@ func (r *PostgresRepository) RevokeMemberQuota(ctx context.Context, organization
 	if err := appendMemberQuotaOutbox(ctx, tx, grant, "billing.member-quota.revoked.v1", now); err != nil {
 		return MemberQuotaGrant{}, err
 	}
-	snapshot, _ := json.Marshal(grant)
+	snapshot, err := json.Marshal(grant)
+	if err != nil {
+		return MemberQuotaGrant{}, err
+	}
 	if _, err := tx.Exec(ctx, `INSERT INTO member_quota_revoke_commands(organization_id,idempotency_key,request_fingerprint,grant_id,response_snapshot,created_at) VALUES($1,$2,$3,$4,$5,$6)`, organizationID, idempotencyKey, fingerprint, grant.ID, snapshot, now); err != nil {
 		return MemberQuotaGrant{}, err
 	}

@@ -42,9 +42,10 @@ export function encodeFinanceJSON(value) {
   return encode(value);
 }
 
-// Personal finance keeps the existing int64 wire contract. Preserve its source
-// digits before JSON.parse; Admin decimal-string money is accepted unchanged.
-export function parseFinanceJSON(text, { paymentIntegers = true, refundIntegers = true, chargebackIntegers = true, overviewIntegers = false } = {}) {
+// Preserve selected JSON integer tokens as decimal strings before JSON.parse.
+// Callers choose the protected field set; this keeps endpoint-specific contracts
+// while sharing the scanner's escape, range and malformed-token handling.
+export function preserveJSONIntegerFields(text, isIntegerKey, { rejectMalformed = true } = {}) {
   let result = '';
   for (let i = 0; i < text.length;) {
     if (text[i] !== '"') { result += text[i++]; continue; }
@@ -57,18 +58,30 @@ export function parseFinanceJSON(text, { paymentIntegers = true, refundIntegers 
     result += token;
     let cursor = i;
     while (cursor < text.length && /\s/.test(text[cursor])) cursor++;
-    if (text[cursor] !== ':' || !(overviewIntegers && JSON.parse(token) === 'value' || MONEY_KEY.test(JSON.parse(token)) || RECEIVABLE_INTEGER_KEY.test(JSON.parse(token)) || paymentIntegers && PAYMENT_INTEGER_KEY.test(JSON.parse(token)) || refundIntegers && REFUND_INTEGER_KEY.test(JSON.parse(token)) || chargebackIntegers && CHARGEBACK_INTEGER_KEY.test(JSON.parse(token)))) continue;
+    if (text[cursor] !== ':' || !isIntegerKey(JSON.parse(token))) continue;
     cursor++;
     while (cursor < text.length && /\s/.test(text[cursor])) cursor++;
     const match = text.slice(cursor).match(/^-?(?:0|[1-9]\d*)(?=\s*[,}\]])/);
     if (!match) {
-      if (text[cursor] !== '"' && !/^null(?=\s*[,}\]])/.test(text.slice(cursor))) throw new Error('INVALID_FINANCE_AMOUNT');
-      continue; // Quoted Admin money is checked below.
+      if (rejectMalformed && text[cursor] !== '"' && !/^null(?=\s*[,}\]])/.test(text.slice(cursor))) throw new Error('INVALID_FINANCE_AMOUNT');
+      continue;
     }
     integerMoney(match[0]);
     result += text.slice(i, cursor) + JSON.stringify(match[0]);
     i = cursor + match[0].length;
   }
+  return result;
+}
+
+// Personal finance keeps the existing int64 wire contract. Preserve its source
+// digits before JSON.parse; Admin decimal-string money is accepted unchanged.
+export function parseFinanceJSON(text, { paymentIntegers = true, refundIntegers = true, chargebackIntegers = true, overviewIntegers = false } = {}) {
+  const result = preserveJSONIntegerFields(text, key => overviewIntegers && key === 'value'
+    || MONEY_KEY.test(key)
+    || RECEIVABLE_INTEGER_KEY.test(key)
+    || paymentIntegers && PAYMENT_INTEGER_KEY.test(key)
+    || refundIntegers && REFUND_INTEGER_KEY.test(key)
+    || chargebackIntegers && CHARGEBACK_INTEGER_KEY.test(key));
   const payload = JSON.parse(result);
   const validate = value => {
     if (!value || typeof value !== 'object') return;

@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
+import { integerMoney } from '../../../pinvou3-app/src/features/account-platform/finance-contract.js';
 import { shanghaiBusinessDate } from './shanghai-business-date.mjs';
 import { readTestWorkloadCredential } from './workload-credential.mjs';
 
@@ -178,7 +179,9 @@ const refund = await eventually('targeted whole LEGACY refund', requestRefund, (
 assert.equal(refund.refund_id, requestedRefund.refund_id, 'lost-ACK replay must preserve the original refund');
 assert.equal(refund.payment_transaction_id, refundablePackage.source_payment_transaction_id);
 assert.equal(refund.entitlement_package_id, refundablePackage.package_id);
-assert.equal(refund.amount_fen, refundableOrder.amount_fen, 'refund must cover the complete selected transaction amount');
+assert.equal(typeof refund.amount_fen, 'string', 'refund amount must retain its decimal-string DTO encoding');
+assert.equal(typeof refundableOrder.amount_fen, 'number', 'order amount must retain its numeric DTO encoding');
+assert.equal(integerMoney(refund.amount_fen), integerMoney(refundableOrder.amount_fen), 'refund must cover the complete selected transaction amount');
 const refundReplay = await requestRefund();
 assert.deepEqual(refundReplay, refund, 'completed same-key replay must preserve the immutable refund');
 const afterRefund = await requestJSON(`/internal/v1/wallets/${wallet.wallet_id}/balance`);

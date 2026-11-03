@@ -372,6 +372,13 @@ func bindProductAdmissionMaterial(ctx context.Context, tx pgx.Tx, catalogID, mat
 	if err = tx.QueryRow(ctx, `SELECT clock_timestamp()`).Scan(&now); err != nil {
 		return err
 	}
+	var catalogVersion int64
+	if err = tx.QueryRow(ctx, `SELECT version FROM recharge_product_catalog_items WHERE catalog_item_id=$1`, catalogID).Scan(&catalogVersion); err != nil {
+		return err
+	}
+	if m.CatalogVersion != catalogVersion {
+		return ErrConflict
+	}
 	if verificationID == uuid.Nil || m.VerificationID != nil || m.PurgedAt != nil || m.TerminalAt != nil || !m.IntendedExpiresAt.Equal(expiry.UTC().Truncate(time.Microsecond)) || !expiry.After(now) {
 		return ErrConflict
 	}

@@ -7,7 +7,7 @@ import re
 import subprocess
 
 SERVICES = {
-    'audit': ('audit-export-postgres', 'postgres:16-alpine', '/var/lib/postgresql/data', '16'),
+    'audit': ('audit-export-postgres', 'mirror.gcr.io/library/postgres@sha256:721873c34ceb9f8d8fc265984940dc982404c105f19ad51be9fdc5970a6080ea', '/var/lib/postgresql/data', '16'),
     'broker': ('existing-broker-postgres', 'postgres:18.4-alpine@sha256:9a8afca54e7861fd90fab5fdf4c42477a6b1cb7d293595148e674e0a3181de15', '/var/lib/postgresql/18/docker', '18'),
     'financial': ('financial-postgres', 'mirror.gcr.io/library/postgres@sha256:721873c34ceb9f8d8fc265984940dc982404c105f19ad51be9fdc5970a6080ea', '/var/lib/postgresql/data', '16'),
 }

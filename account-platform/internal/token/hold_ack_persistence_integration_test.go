@@ -297,7 +297,7 @@ func TestHoldAcknowledgementSurvivesDispatchPersistenceFailurePostgres(t *testin
 	})
 }
 
-func jR6UnboundSeed(t *testing.T, r *PostgresRepository, funds *billing.PostgresRepository, pool *pgxpool.Pool, client *HTTPBillingClient, ctx context.Context) (UsageRequest, DispatchEnvelope, BillingHold) {
+func jR6PreparedSeed(t *testing.T, r *PostgresRepository, funds *billing.PostgresRepository, pool *pgxpool.Pool, client *HTTPBillingClient, ctx context.Context) (UsageRequest, DispatchEnvelope) {
 	t.Helper()
 	u, e, s := f05ExpiryFrozenFixture(t)
 	upstreamModel := "frozen-upstream-" + u.ModelID.String()
@@ -364,7 +364,13 @@ func jR6UnboundSeed(t *testing.T, r *PostgresRepository, funds *billing.Postgres
 	if err = r.PrepareDispatch(ctx, u.ID, e); err != nil {
 		t.Fatal(err)
 	}
-	if err = r.MarkHoldReserving(ctx, u.ID); err != nil {
+	return u, e
+}
+
+func jR6UnboundSeed(t *testing.T, r *PostgresRepository, funds *billing.PostgresRepository, pool *pgxpool.Pool, client *HTTPBillingClient, ctx context.Context) (UsageRequest, DispatchEnvelope, BillingHold) {
+	t.Helper()
+	u, e := jR6PreparedSeed(t, r, funds, pool, client, ctx)
+	if err := r.MarkHoldReserving(ctx, u.ID); err != nil {
 		t.Fatal(err)
 	}
 	service := &Service{repository: r, billing: client, cancellationBilling: client, cancellationStore: r}

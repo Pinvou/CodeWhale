@@ -1072,6 +1072,16 @@
         "file": "900013_model_lifecycle_force_cancel_policy.up.sql",
         "version": 900013,
         "sha256": "2518d6a465a8bd33175d334aa2914c0939ce4066f49f29f2925c2601b677238d"
+      },
+      {
+        "file": "900014_registration_bonus_backfill_progress.down.sql",
+        "version": 900014,
+        "sha256": "40b0b65c69eba618089f472b64f232e55d41855e80ed27d1068797d38498b908"
+      },
+      {
+        "file": "900014_registration_bonus_backfill_progress.up.sql",
+        "version": 900014,
+        "sha256": "275c8a43bbf3741806ffd9204b506b2730074878b5cd83ac2477e9e14df2fede"
       }
     ],
     "billing": [
@@ -2174,6 +2184,16 @@
         "file": "900032_ledger_repair_history_proof.up.sql",
         "version": 900032,
         "sha256": "74beb8e84a6bd58ac04c5cf2d628023a5a66fea6eb46d081e1b4c5ea7982f5d6"
+      },
+      {
+        "file": "900033_orphan_payment_order_case.down.sql",
+        "version": 900033,
+        "sha256": "9c8b34951a98278d748ecebfee78df23819d2201ff8121c25387e5c3a53f5a8f"
+      },
+      {
+        "file": "900033_orphan_payment_order_case.up.sql",
+        "version": 900033,
+        "sha256": "117014925dfa3a06bf0f6ca53ea4657eedf4321859faa799074796523a0a16db"
       },
       {
         "file": "900037_product_admission_materials.down.sql",

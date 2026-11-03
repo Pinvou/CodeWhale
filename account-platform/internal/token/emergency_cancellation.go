@@ -100,8 +100,9 @@ func (r *PostgresRepository) claimEmergencyCancellations(ctx context.Context, li
     SELECT cancellation.id FROM model_emergency_cancellations cancellation
     WHERE cancellation.status IN ('PENDING','LEASED') AND (cancellation.lease_until IS NULL OR cancellation.lease_until<$1)
     AND NOT EXISTS (SELECT 1 FROM usage_requests request WHERE request.id=cancellation.usage_request_id
-        AND request.cancellation_origin='USER' AND request.execution_status='REVIEW'
+        AND ((request.cancellation_origin='USER' AND request.execution_status='REVIEW'
         AND request.cancel_status='CANCEL_REQUESTED' AND request.error_class='cancel_hold_recovery_unconfirmed')
+        OR (`+pendingUnusedExpiryFenceSQL+`)))
     ORDER BY cancellation.requested_at,cancellation.id FOR UPDATE SKIP LOCKED LIMIT $2
 ), claimed AS (
     UPDATE model_emergency_cancellations cancellation SET status='LEASED',lease_until=$1::timestamptz+interval '30 seconds',attempts=attempts+1,updated_at=$1::timestamptz
@@ -138,9 +139,14 @@ func (r *PostgresRepository) requestEmergencyCancellation(ctx context.Context, c
 		return false, false, err
 	}
 	var cancellationOrigin string
-	var requestAlreadyRecorded bool
-	if err := tx.QueryRow(ctx, `SELECT request.cancellation_origin,EXISTS(SELECT 1 FROM model_emergency_cancellation_evidence evidence WHERE evidence.emergency_cancellation_id=$2 AND evidence.evidence_type='REQUESTED') FROM usage_requests request WHERE request.id=$1`, usage.ID, cancellationID).Scan(&cancellationOrigin, &requestAlreadyRecorded); err != nil {
+	var requestAlreadyRecorded, expiryOwnsPending bool
+	if err := tx.QueryRow(ctx, `SELECT request.cancellation_origin,EXISTS(SELECT 1 FROM model_emergency_cancellation_evidence evidence WHERE evidence.emergency_cancellation_id=$2 AND evidence.evidence_type='REQUESTED'),`+pendingUnusedExpiryFenceSQL+` FROM usage_requests request WHERE request.id=$1`, usage.ID, cancellationID).Scan(&cancellationOrigin, &requestAlreadyRecorded, &expiryOwnsPending); err != nil {
 		return false, false, err
+	}
+	// Claiming and fencing are separate transactions. An original expiry
+	// fence may have committed after the claim; let that proof owner finish.
+	if expiryOwnsPending {
+		return false, false, ErrForbidden
 	}
 	// The original USER proof owns this unconfirmed pre-dispatch release.
 	// Keep its identity and state intact so the existing recovery can finish;
@@ -169,10 +175,10 @@ func (r *PostgresRepository) requestEmergencyCancellation(ctx context.Context, c
 			cancelStatus = "UNSUPPORTED"
 		}
 	}
-	// A confirmed USER cancellation remains the authority for expiry-proof
+	// Any confirmed local cancellation remains authoritative for expiry-proof
 	// replay when its response was lost. MODEL only observes that terminal.
-	keepUserConfirmation := cancellationOrigin == "USER" && usage.ExecutionStatus == "CANCELLED_BEFORE_DISPATCH" && usage.CancelStatus == "LOCAL_CONFIRMED" && usage.SettlementStatus == "RELEASED"
-	if _, err := tx.Exec(ctx, `UPDATE usage_requests SET cancel_status=CASE WHEN $5 THEN cancel_status ELSE $2 END,delivery_status=CASE WHEN $3 THEN delivery_status ELSE 'USER_STOPPED' END,cancellation_origin=CASE WHEN $5 THEN cancellation_origin ELSE 'MODEL_EMERGENCY' END,cancel_requested_at=COALESCE(cancel_requested_at,$4),user_stopped_at=CASE WHEN $3 THEN user_stopped_at ELSE COALESCE(user_stopped_at,$4) END,cancel_reconciliation_deadline=CASE WHEN $3 THEN cancel_reconciliation_deadline ELSE $4+make_interval(secs=>cancel_reconciliation_seconds) END,updated_at=$4 WHERE id=$1`, usage.ID, cancelStatus, terminal, now, keepUserConfirmation); err != nil {
+	keepLocalConfirmation := usage.ExecutionStatus == "CANCELLED_BEFORE_DISPATCH" && usage.CancelStatus == "LOCAL_CONFIRMED" && usage.SettlementStatus == "RELEASED"
+	if _, err := tx.Exec(ctx, `UPDATE usage_requests SET cancel_status=CASE WHEN $5 THEN cancel_status ELSE $2 END,delivery_status=CASE WHEN $3 THEN delivery_status ELSE 'USER_STOPPED' END,cancellation_origin=CASE WHEN $5 THEN cancellation_origin ELSE 'MODEL_EMERGENCY' END,cancel_requested_at=COALESCE(cancel_requested_at,$4),user_stopped_at=CASE WHEN $3 THEN user_stopped_at ELSE COALESCE(user_stopped_at,$4) END,cancel_reconciliation_deadline=CASE WHEN $3 THEN cancel_reconciliation_deadline ELSE $4+make_interval(secs=>cancel_reconciliation_seconds) END,updated_at=$4 WHERE id=$1`, usage.ID, cancelStatus, terminal, now, keepLocalConfirmation); err != nil {
 		return false, false, err
 	}
 	snapshot := map[string]any{"origin": "MODEL_EMERGENCY", "capability": capability, "pre_dispatch": preDispatch, "already_terminal": terminal, "provider_success_inferred": false}
@@ -339,7 +345,7 @@ ORDER BY cancellation.updated_at,cancellation.id LIMIT $1`, limit)
 		return err
 	}
 	for _, item := range items {
-		snapshot := map[string]any{"usage_request_id": item.usageID, "execution_status": item.execution, "cancel_status": item.cancel, "settlement_status": item.settlement, "hold_id": item.hold, "actual_microcredits": item.actual, "usage_snapshot": item.usage, "emergency_removal_implied_free": false}
+		snapshot := emergencyConvergedSnapshot(item.usageID, item.execution, item.cancel, item.settlement, item.hold, item.actual, item.usage)
 		tx, err := r.pool.Begin(ctx)
 		if err != nil {
 			return err
@@ -361,4 +367,10 @@ ORDER BY cancellation.updated_at,cancellation.id LIMIT $1`, limit)
 		}
 	}
 	return nil
+}
+
+// Keep the existing audit wire format shared by its writer and the expiry
+// observer classifier. In particular, usage is the original []byte payload.
+func emergencyConvergedSnapshot(id uuid.UUID, execution, cancellation, settlement string, hold *uuid.UUID, actual *int64, usage []byte) map[string]any {
+	return map[string]any{"usage_request_id": id, "execution_status": execution, "cancel_status": cancellation, "settlement_status": settlement, "hold_id": hold, "actual_microcredits": actual, "usage_snapshot": usage, "emergency_removal_implied_free": false}
 }

@@ -47,7 +47,7 @@ spec:
         {{- end }}
       containers:
         - name: event-relay
-          image: "{{ $root.Values.images.eventRelay.repository }}:{{ $root.Values.images.eventRelay.tag }}"
+          image: {{ include "pinvou.imageRef" (dict "image" $root.Values.images.eventRelay) | quote }}
           imagePullPolicy: {{ $root.Values.images.eventRelay.pullPolicy }}
           ports: [{ name: metrics, containerPort: 9090 }]
           securityContext: { allowPrivilegeEscalation: false, readOnlyRootFilesystem: true, capabilities: { drop: ["ALL"] } }

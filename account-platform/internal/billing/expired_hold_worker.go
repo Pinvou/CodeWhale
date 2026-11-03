@@ -148,8 +148,14 @@ func (w *ExpiredHoldRecoveryWorker) recoverOne(ctx context.Context, usageID uuid
 	} else {
 		err = errors.New("trusted hold proof unavailable")
 	}
-	valid := err == nil && proof.Matches(identity)
-	current, readErr := getHoldByUsage(ctx, conn, usageID, false)
+	proofErr := err
+	valid := proofErr == nil && proof.Matches(identity)
+	// The proof call shares the item budget, but recording the resulting
+	// decision must survive that budget. A detached, short write context keeps
+	// a timeout/cancellation from losing the retry schedule after a slow RPC.
+	persistCtx, persistCancel := context.WithTimeout(context.WithoutCancel(ctx), 2*time.Second)
+	defer persistCancel()
+	current, readErr := getHoldByUsage(persistCtx, conn, usageID, false)
 	if readErr != nil {
 		return readErr
 	}
@@ -163,18 +169,21 @@ func (w *ExpiredHoldRecoveryWorker) recoverOne(ctx context.Context, usageID uuid
 		b, _ := json.Marshal(proof)
 		raw = b
 	}
-	tx, err := conn.Begin(ctx)
+	tx, err := conn.Begin(persistCtx)
 	if err != nil {
 		return err
 	}
 	defer tx.Rollback(context.Background())
-	if _, err = tx.Exec(ctx, `UPDATE usage_hold_expiry_recovery SET state=$2,proof=$3,next_attempt_at=clock_timestamp()+interval '1 minute',updated_at=clock_timestamp() WHERE hold_id=$1`, hold.ID, nextState, raw); err != nil {
+	if _, err = tx.Exec(persistCtx, `UPDATE usage_hold_expiry_recovery SET state=$2,proof=$3,next_attempt_at=clock_timestamp()+interval '1 minute',updated_at=clock_timestamp() WHERE hold_id=$1`, hold.ID, nextState, raw); err != nil {
 		return err
 	}
 	if state != nextState {
-		if _, err = tx.Exec(ctx, `INSERT INTO usage_hold_expiry_evidence(id,hold_id,decision,proof,occurred_at) VALUES($1,$2,$3,$4,clock_timestamp())`, uuid.Must(uuid.NewV7()), hold.ID, decision, raw); err != nil {
+		if _, err = tx.Exec(persistCtx, `INSERT INTO usage_hold_expiry_evidence(id,hold_id,decision,proof,occurred_at) VALUES($1,$2,$3,$4,clock_timestamp())`, uuid.Must(uuid.NewV7()), hold.ID, decision, raw); err != nil {
 			return err
 		}
 	}
-	return tx.Commit(ctx)
+	if err := tx.Commit(persistCtx); err != nil {
+		return err
+	}
+	return ctx.Err()
 }

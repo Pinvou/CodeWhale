@@ -12,6 +12,95 @@ import (
 	"time"
 )
 
+func TestSecureSocketPath(t *testing.T) {
+	// /tmp is deliberately rejected by the production ancestor policy. Use a
+	// private fixture under the physical home, whose ancestry must also pass.
+	home, err := os.UserHomeDir()
+	if err != nil {
+		t.Fatal(err)
+	}
+	home, err = filepath.EvalSymlinks(home)
+	if err != nil {
+		t.Fatal(err)
+	}
+	base, err := os.MkdirTemp(home, ".piv-path-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		if err := os.RemoveAll(base); err != nil {
+			t.Error(err)
+		}
+	})
+	dir := filepath.Join(base, "private")
+	if err := os.Mkdir(dir, 0700); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(dir, "validator.sock")
+	if os.Geteuid() == 0 {
+		if secureSocketPath(path) {
+			t.Fatal("root-owned worker directory accepted")
+		}
+		t.Log("root refusal verified; owner and unsafe-path cases require a non-root Linux run")
+		return
+	}
+	assertSafe := func(t *testing.T) {
+		t.Helper()
+		if !secureSocketPath(path) {
+			t.Fatal("positive control rejected: fixture needs worker-owned, protected physical home ancestry")
+		}
+	}
+	assertSafe(t)
+	for _, candidate := range []string{"validator.sock", dir + "/./validator.sock", filepath.Join(base, "missing", "validator.sock")} {
+		if secureSocketPath(candidate) {
+			t.Fatalf("invalid or absent parent path accepted: %s", candidate)
+		}
+	}
+	link := filepath.Join(base, "linked")
+	if err := os.Symlink(dir, link); err != nil {
+		t.Fatal(err)
+	}
+	if secureSocketPath(filepath.Join(link, "validator.sock")) {
+		t.Fatal("symlinked socket parent accepted")
+	}
+	for _, tc := range []struct {
+		name string
+		dir  string
+		mode os.FileMode
+	}{
+		{"writable leaf group", dir, 0720},
+		{"readable leaf other", dir, 0704},
+		{"writable ancestor group", base, 0720},
+		{"writable ancestor other", base, 0702},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			assertSafe(t)
+			if err := os.Chmod(tc.dir, tc.mode); err != nil {
+				t.Fatal(err)
+			}
+			defer func() {
+				if err := os.Chmod(tc.dir, 0700); err != nil {
+					t.Error(err)
+				}
+			}()
+			if secureSocketPath(path) {
+				t.Fatal("unsafe permissions accepted")
+			}
+		})
+	}
+	assertSafe(t)
+	if err := os.WriteFile(path, []byte("occupied"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if secureSocketPath(path) {
+		t.Fatal("existing endpoint accepted")
+	}
+	if err := os.Remove(path); err != nil {
+		t.Fatal(err)
+	}
+	assertSafe(t)
+}
+
 func TestLinuxPeerUIDAndHalfClose(t *testing.T) {
 	directory, err := os.MkdirTemp("/tmp", "piv-peer-")
 	if err != nil {
