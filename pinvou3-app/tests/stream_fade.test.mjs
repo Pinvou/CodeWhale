@@ -187,7 +187,9 @@ function spanDelays(container) {
 }
 
 // Keep callbacks and span ages on the same controlled clock without relying on
-// experimental timer APIs on the project's supported Node 22 runtime.
+// experimental timer APIs on the project's supported Node 22 runtime: the
+// exact UNWRAP_MIN_AGE_MS boundary (199 must not unwrap, +1 must) can only be
+// pinned against a fake clock, not a real sleep.
 function createFadeClock() {
   let now = 1_700_000_000_000;
   const timers = new Map();
