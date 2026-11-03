@@ -10,7 +10,7 @@ The four `F18_TEST_*` identity inputs below are not consumed by the current name
 
 ## Target contract — not current runnable configuration
 
-The following template documents the intended owned fixture contract. #1735 and #1979 track the remaining portable fixture implementation and real owned-PostgreSQL acceptance; this PR only pins its documentation. Until the named test consumes and validates these inputs and its lifecycle is verified, this template is not a launch recipe. The CI guard checks documented fields and prose, not a live PostgreSQL fixture or runtime acceptance.
+The following template documents the intended owned fixture contract. #1735 and #1979 track the remaining portable fixture implementation and real owned-PostgreSQL acceptance; #2244 proposes the configuration changes and has not been merged into this PR's target. This PR only pins its documentation. Until the named test consumes and validates these inputs and its lifecycle is verified, this template is not a launch recipe. The CI guard checks documented fields and prose and flags changes to the named test's configuration entry point; it does not validate all runtime configurations, a live PostgreSQL fixture or runtime acceptance.
 
 ```text
 PINVOU_TEST_BILLING_DATABASE_URL=postgres://<owned-user>@127.0.0.1:<port>/postgres?sslmode=disable
@@ -20,7 +20,7 @@ F18_TEST_DATABASE_PORT=<port>
 F18_TEST_DATA_DIRECTORY=<temp>/pinvou-f18-billing-<uuid>/data
 ```
 
-The URL must resolve to loopback, the `postgres` database, the declared user and port, with no TLS, fallback host, or runtime parameter. The server probe must report the same session user, port and canonical data directory, no non-system roles other than the declared fixture coordinator, no non-template databases other than `postgres`, and no other client sessions. The directory must be an absolute path directly below the operating system temporary directory and use the `pinvou-f18-billing-<uuid>/data` shape; generate a new UUID for every fixture instance.
+The URL host must be the literal `127.0.0.1`, with the `postgres` database, the declared user and port, and no TLS, fallback host, or runtime parameter. `<port>` must be canonical decimal in the range 1024–65535 and equal the URL port; the URL user must equal `F18_TEST_DATABASE_USER`. The password-free URL above is an example, not a claim that the proposed Go validator rejects passwords. The server probe must report the same session user, port and canonical data directory, no non-system roles other than the declared fixture coordinator, no non-template databases other than `postgres`, and no other client sessions. The directory must be an absolute path directly below the operating system temporary directory and use the `pinvou-f18-billing-<uuid>/data` shape; generate a new lowercase, canonical, non-nil UUID for every fixture instance. The proposed validator accepts canonical UUID versions other than v4; the documentation guard checks the literal `<uuid>` placeholder, not a replacement runtime UUID parser.
 
 The target implementation must create only its own billing roles and record their names before cleanup. Cleanup must handle success, failure, timeout and cancellation, dropping only those roles after verifying that no owned client sessions remain. If any identity, emptiness or ownership check fails, it must stop before DDL. In that future profile contract, an unset profile is reported as a conditional skip and must not be counted as a PostgreSQL pass; the current test instead skips on an unset URL as described above.
 

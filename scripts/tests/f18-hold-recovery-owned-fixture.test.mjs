@@ -14,7 +14,6 @@ const names = [
   "PINVOU_TEST_BILLING_DATABASE_URL", "F18_TEST_DATABASE_PROFILE",
   "F18_TEST_DATABASE_USER", "F18_TEST_DATABASE_PORT", "F18_TEST_DATA_DIRECTORY",
 ];
-const uuid = "11111111-1111-4111-8111-111111111111";
 
 function assertDocumentedTemplate(text) {
   const block = text.match(/```text\r?\n([\s\S]*?)\r?\n```/u);
@@ -35,8 +34,7 @@ function assertDocumentedTemplate(text) {
   const url = new URL(rendered);
   assert.equal(url.username, fields.F18_TEST_DATABASE_USER.replace("<owned-user>", "owned-user"));
   assert.equal(url.port, fields.F18_TEST_DATABASE_PORT.replace("<port>", "55474"));
-  assert.match(fields.F18_TEST_DATA_DIRECTORY.replaceAll("<uuid>", uuid),
-    /^<temp>\/pinvou-f18-billing-[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}\/data$/u);
+  assert.equal(fields.F18_TEST_DATA_DIRECTORY, "<temp>/pinvou-f18-billing-<uuid>/data");
 }
 
 test("F18 runbook distinguishes the target contract from the current named fixture", () => {
@@ -51,8 +49,10 @@ test("F18 runbook distinguishes the target contract from the current named fixtu
   assert.match(runbook, /stop before DDL/u);
   assert.match(goTest, /raw := os\.Getenv\("PINVOU_TEST_BILLING_DATABASE_URL"\)/u);
   assert.match(goTest, /if raw == ""\s*\{\s*t\.Skip\(/u);
+  assert.match(goTest, /admin,\s*e\s*:=\s*pgx\.Connect\(ctx,\s*raw\)/u,
+    "revisit current-status documentation when the named test changes its connection path");
   for (const name of names.slice(1)) {
-    assert.doesNotMatch(goTest, new RegExp(`os\\.(?:Getenv|LookupEnv)\\("${name}"\\)`),
+    assert.doesNotMatch(goTest, new RegExp(`os\\.(?:Getenv|LookupEnv)\\(\\s*"${name}"\\s*\\)`),
       `${name} consumption requires revisiting the documented current status`);
   }
 });
@@ -70,7 +70,6 @@ test("F18 shape rejects mutations of the actual runbook URL and directory", () =
     ["sslmode=disable", "sslmode=disable&sslmode=prefer"],
     ["sslmode=disable", "sslmode=disable#runtime"],
     ["<uuid>", "00000000-0000-0000-0000-000000000000"],
-    ["<uuid>", "11111111-1111-5111-8111-111111111111"],
     ["/data", "/data/extra"],
     ["F18_TEST_DATABASE_PROFILE=local-owned", "F18_TEST_DATABASE_PROFILE=shared"],
   ]) {

@@ -257,11 +257,9 @@ test("初始化要求有效 publicRoot/latest.json 并清理自有陈旧临时�
 
   await mkdir(publicRoot);
   await writeFile(join(publicRoot, "latest.json"), "not-json");
-  if (process.platform !== "win32") await chmod(join(publicRoot, "latest.json"), 0o644);
   await assert.rejects(service.initialize(), (error) => error.code === "invalid_json");
 
   await writeFile(join(publicRoot, "latest.json"), "{}\n");
-  if (process.platform !== "win32") await chmod(join(publicRoot, "latest.json"), 0o644);
   const ownedTemporary = ".pinvou3-release-123e4567-e89b-42d3-a456-426614174000.tmp";
   const manifestTemporary = "latest.json.123e4567-e89b-42d3-a456-426614174001.tmp";
   const draftTemporary = "windows-draft.json.123e4567-e89b-42d3-a456-426614174002.tmp";
