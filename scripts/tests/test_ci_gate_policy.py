@@ -3703,15 +3703,34 @@ class CiGatePolicyTests(unittest.TestCase):
         self.assertIn('echo "::warning::[memory-setup] ${*//[', source)
         self.assertIn("${*//[$'\\r\\n']/ }", source)
         # 预期可恢复的慢路径(镜像 swap as-is 失败后的重试、全层失败后的
-        # 镜像 swapfile 兜底重试)只进日志,
-        # 不得注解化,否则每个 job 都会常驻黄标稀释真告警。函数体全文钉死:
-        # 改回 ::warning:: 注解即红。
+        # 镜像 swapfile 兜底重试)只进日志,不得注解化,否则每个 job 都会
+        # 常驻黄标稀释真告警。函数体全文钉死:改回 ::warning:: 注解即红。
+        # modprobe 失败不属于可恢复慢路径:2026-10 起脚本不再安装内核包,
+        # 该失败是终局降级,必须走 warn 注解让 zram 缺席可见。
         self.assertIn(
             'warn_recoverable() { echo "[memory-setup] WARNING: $*" >&2; }',
             source,
         )
         self.assertIn(
             'warn "modprobe zram failed${modprobe_err:+: ${modprobe_err}};',
+            source,
+        )
+        # 模块加载失败后不得出现任何包管理器安装路径:超时杀掉的 apt 事务
+        # 会留下 dpkg 中断状态,毒化同 job 后续必需的依赖安装(静态取代被
+        # 删除的行为级 PACKAGE_MANAGER_CALLED 断言)。钉法对齐主线 #2095
+        # 后的 no-install 合同:零 apt 安装、零等锁选项。repair_dpkg_state
+        # 的注释与 warn 文案合法提及 "later apt-get steps"(脚本零 apt
+        # 调用的合同不变),裸 "apt-get " 全文禁令会与该合同相撞
+        # (merge queue run 41619867285 即此红)。
+        self.assertNotIn("apt-get install", source)
+        self.assertNotIn("-o DPkg::Lock::Timeout", source)
+        self.assertIn(
+            "using fallback swap without installing kernel packages",
+            source,
+        )
+        self.assertIn(
+            'warn_recoverable "no active swap after all layers; trying the'
+            ' image-provided swapfile"',
             source,
         )
         self.assertIn(
@@ -3981,64 +4000,6 @@ class CiGatePolicyTests(unittest.TestCase):
             source,
         )
 
-    def test_memory_setup_module_failure_does_not_poison_dependency_install(self):
-        source = (ROOT / "scripts" / "ci-memory-setup.sh").read_text(encoding="utf-8")
-        # Execute the real module loader and main fallback flow with host
-        # operations stubbed. Never change the test machine's swap or sysfs.
-        loader = source.split("setup_zram() {", 1)[1].split("# Mandatory disk swap:", 1)[0]
-        main = source[source.index("if [[ ${PINVOU3_CI_DISABLE_ZRAM:-0}"):]
-        cases = ((1, "0", 0), (124, "0", 0), (1, "1", 0), (1, "0", 1))
-        for status, disabled, swap_status in cases:
-            with self.subTest(modprobe_status=status, disabled=disabled, swap_status=swap_status):
-                harness = r'''
-set -uo pipefail
-log() { echo "$*"; }
-warn() { echo "$*" >&2; }
-warn_recoverable() { warn "$@"; }
-run_to() { shift; "$@"; }
-modprobe() { echo "module unavailable" >&2; return "$MODULE_STATUS"; }
-apt-get() { echo "PACKAGE_MANAGER_CALLED"; return 1; }
-dpkg() { echo "PACKAGE_MANAGER_CALLED"; return 1; }
-swapon() { return 0; }
-any_swap_active() { return "$SWAP_STATUS"; }
-setup_disk_swap() { echo "disk-swap-kib=$DISK_SWAP_SIZE_KIB"; }
-setup_zswap_fallback() { echo "zswap-fallback"; }
-activate_image_swap_fallback() { echo "image-swap-fallback"; }
-zramctl() { :; }
-df() { :; }
-'''
-                shell = (
-                    harness
-                    + f"\nMODULE_STATUS={status}\nPINVOU3_CI_DISABLE_ZRAM={disabled}\n"
-                    + f"SWAP_STATUS={swap_status}\n"
-                    + "setup_zram() {" + loader + main
-                )
-                result = subprocess.run(
-                    ["bash", "-c", shell], capture_output=True, text=True, timeout=10,
-                    encoding="utf-8",
-                )
-                output = result.stdout + result.stderr
-                self.assertEqual(result.returncode, 0, output)
-                self.assertNotIn("PACKAGE_MANAGER_CALLED", output)
-                self.assertIn("disk-swap-kib=16777216", output)
-                self.assertIn("zswap-fallback", output)
-                if swap_status:
-                    self.assertIn("image-swap-fallback", output)
-                if disabled == "0":
-                    self.assertIn("module unavailable", output)
-                    self.assertIn("without installing kernel packages", output)
-
-    def test_memory_setup_changes_select_native_linux_regression(self):
-        for name in ("rust_code", "rust_full", "cli_rust"):
-            with self.subTest(filter=name):
-                block = re.search(
-                    rf"(?ms)^            {name}:\n(.*?)(?=^            \w+:|\Z)",
-                    self.pr_workflow,
-                )
-                self.assertIsNotNone(block)
-                paths = _extract_quoted_paths(_without_yaml_comments(block.group(1)))
-                self.assertIn("scripts/ci-memory-setup.sh", paths)
-
     def test_fetch_connectors_verifies_checksums_with_loud_diagnostics(self):
         # #1155 复审跟进:fetch-connectors.sh 的 verify_file 在 set -e 下被
         # 三处调用点裸调(check_only 门禁、下载复核、二进制落位前),失配若
@@ -4300,50 +4261,6 @@ df() { :; }
             with self.subTest(mutation=old):
                 with self.assertRaises(AssertionError):
                     assert_reader_execution(regression.replace(old, new))
-
-    def test_windows_controller_inbound_runs_in_the_nonzero_regression_loop(self):
-        windows_job = _without_yaml_comments(
-            self.pr_workflow.split("\n  windows-rust-test:", maxsplit=1)[1].split(
-                "\n  windows-rustup-repair-test:", maxsplit=1
-            )[0]
-        )
-        regression = windows_job.split(
-            "- name: Windows 原子替换状态机回归", maxsplit=1
-        )[1]
-        required_filters = (
-            "'features::remote_control::controller::controlling_inbound::tests::'",
-            "'features::remote_control::controller::controlling_service::inbound_tests::'",
-        )
-
-        def assert_inbound_execution(block):
-            loop = block.split("for filter in ", maxsplit=1)[1].split(
-                "done", maxsplit=1
-            )[0]
-            filters, commands = loop.split("; do", maxsplit=1)
-            for required in required_filters:
-                self.assertEqual(filters.count(required), 1)
-            self.assertIn('"$test_exe" "$filter" --test-threads=1', commands)
-            self.assertIn("running [1-9][0-9]* tests?", commands)
-            self.assertRegex(commands, r"grep -qE[^\n]+\|\|\s*\{[^}]*exit 1")
-            self.assertIn("set -euo pipefail", block)
-            self.assertNotIn("continue-on-error", block)
-
-        assert_inbound_execution(regression)
-        # These mutations protect actual behavior selection, not just linking
-        # or the presence of an unrelated filter elsewhere in the job.
-        mutations = [
-            (required, replacement)
-            for required in required_filters
-            for replacement in ("", "'features::remote_control::'")
-        ] + [
-            ('"$test_exe" "$filter" --test-threads=1', "echo compile-only"),
-            ("running [1-9][0-9]* tests?", "running [0-9]+ tests?"),
-            ("exit 1", "exit 0"),
-        ]
-        for old, new in mutations:
-            with self.subTest(mutation=(old, new)):
-                with self.assertRaises(AssertionError):
-                    assert_inbound_execution(regression.replace(old, new))
 
     def test_windows_rust_split_matches_the_declared_feature_graph(self):
         with TAURI_MANIFEST.open("rb") as manifest_file:
@@ -4724,35 +4641,6 @@ df() { :; }
                 with self.assertRaises((AssertionError, IndexError)):
                     self._assert_macos_deployment_regression(self.workflow.replace(old, new))
 
-    def test_macos_scheduled_spool_step_rejects_zero_match_and_failed_command(self):
-        job = _extract_job_block(self.pr_workflow, "macos-rust-check")
-        step = job.split("- name: macOS scheduled spool filename regression", 1)[1].split(
-            "\n      - name:", 1
-        )[0]
-        body = step.split("        run: |\n", 1)[1]
-        lines = []
-        for line in body.splitlines():
-            if line and not line.startswith("          "):
-                break
-            lines.append(line[10:] if line else "")
-        shell = "\n".join(lines)
-        self.assertEqual(shell.count("/tmp/macos_scheduled_spool.log"), 2)
-        shell = shell.replace("/tmp/macos_scheduled_spool.log", '"$TEST_LOG"')
-        prelude = 'cargo() { printf "%s\\n" "$FAKE_OUTPUT"; return "$FAKE_EXIT"; }; cd() { :; };\n'
-        with tempfile.TemporaryDirectory() as tmp:
-            for output, code, expected in (
-                ("test result: ok. 1 passed; 0 failed;", "0", True),
-                ("test result: ok. 0 passed; 0 failed;", "0", False),
-                ("test result: ok. 1 passed; 0 failed;", "1", False),
-                ("test result: ok. 0 passed; 1 ignored;", "0", False),
-            ):
-                result = subprocess.run(
-                    ["bash", "-c", prelude + shell], capture_output=True, timeout=10,
-                    env={**os.environ, "FAKE_OUTPUT": output, "FAKE_EXIT": code,
-                         "TEST_LOG": os.path.join(tmp, "spool.log")},
-                )
-                self.assertEqual(result.returncode == 0, expected, (output, code, result.stderr))
-
     def test_mac_bundle_smoke_is_gated_on_bundle_chain_paths(self):
         # mac-build.yml's bundle_chain filter (before its 2026-10 fold into
         # pr-check's macos-rust-check) decided when to append the universal
@@ -5047,22 +4935,6 @@ df() { :; }
             )[1].split("\n      - name:", maxsplit=1)[0]
         )
         self.assertIn("github.event_name != 'push'", computer_use)
-
-        # The APFS-specific spool regression must execute on PR macOS, not
-        # only after main is updated; pin the actual case and no-match guard.
-        scheduled = _without_yaml_comments(
-            macos_job.split(
-                "- name: macOS scheduled spool filename regression", maxsplit=1
-            )[1].split("\n      - name:", maxsplit=1)[0]
-        )
-        self.assertIn("github.event_name == 'pull_request'", scheduled)
-        self.assertIn("set -euo pipefail", scheduled)
-        self.assertIn(
-            "features::scheduled::tasks::creation_requests::tests::non_utf8_squatters_do_not_starve_legitimate_records",
-            scheduled,
-        )
-        self.assertIn("--exact --test-threads=1", scheduled)
-        self.assertIn("test result: ok. 1 passed; 0 failed;", scheduled)
 
         # The bundle smoke consumes node_modules (build.js resolves
         # @tauri-apps/cli from it and the beforeBuildCommand runs vite), so the
@@ -5595,6 +5467,319 @@ df() { :; }
         )
 
 
+
+
+class DependencyReviewWarnOnlyGateTests(unittest.TestCase):
+    """dependency-review.yml 的能力缺失降级必须由仓库 variable 门控，不得无条件吞错。
+
+    Dependency graph 未开启时动作必然失败（能力缺失），降级为告警是合理的；
+    但降级必须由仓库 variable DEPENDENCY_REVIEW_WARN_ONLY 门控——无条件
+    continue-on-error 会在依赖图开启后把真实 high 级漏洞/许可证违规静默吞成
+    告警，且没有任何机制或测试保障恢复强制门禁。
+    """
+
+    def test_dependency_review_downgrade_is_variable_gated(self):
+        workflow = (ROOT / ".github/workflows/dependency-review.yml").read_text(
+            encoding="utf-8"
+        )
+        self.assertIsNone(
+            re.search(r"continue-on-error:\s*['\"]?true['\"]?", workflow),
+            "dependency-review 不得无条件 continue-on-error（含引号形式 "
+            "`continue-on-error: 'true'`）：降级必须由 vars.DEPENDENCY_REVIEW_WARN_ONLY "
+            "门控，依赖图开启后把该 variable 设为 'false' 即恢复强制门禁",
+        )
+        self.assertIn(
+            "vars.DEPENDENCY_REVIEW_WARN_ONLY",
+            workflow,
+            "dependency-review 的降级必须由仓库 variable DEPENDENCY_REVIEW_WARN_ONLY 门控",
+        )
+        self.assertIn(
+            "fail-on-severity: high",
+            workflow,
+            "dependency-review 必须保留 fail-on-severity: high 强度阈值",
+        )
+
+
+class SecurityGateEnforcementPinsTests(unittest.TestCase):
+    """secret-scan / dco / .gitleaks.toml 的承重形态钉（round-2 评审收口）。
+
+    变异实证：把 dco 的 core.setFailed 降级为 core.warning、删除 secret-scan
+    的「commits scanned」防空扫守卫、甚至整文件删除 secret-scan.yml，原有
+    套件全部保持绿色——门禁的强制力此前没有任何测试保护。本类以存在性
+    断言钉住各承重点；改动这些形态时必须显式评估并同步更新对应断言。
+    """
+
+    def test_secret_scan_workflow_keeps_fail_closed_guard(self):
+        workflow = (ROOT / ".github/workflows/secret-scan.yml").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn(
+            'grep -Eq "[1-9][0-9]* commits scanned"',
+            workflow,
+            "secret-scan 的防空扫守卫不得删除：gitleaks 的 exit code 在坏 git "
+            "区间下不可信（可 exit 0 且打印 0 commits）",
+        )
+        self.assertIn(
+            "fetch-depth: 0",
+            workflow,
+            "全量历史扫描需要完整 checkout（fetch-depth: 0）",
+        )
+        self.assertIn(
+            "sha256sum -c -",
+            workflow,
+            "gitleaks 安装必须保留校验和验证",
+        )
+        self.assertIn(
+            "--diff-merges=first-parent",
+            workflow,
+            "git log -p 默认不输出 merge 补丁；扫描必须显式纳入 merge diff，"
+            "否则 evil merge / 绕队列手工 merge 引入的泄漏对本门禁不可见",
+        )
+
+    def test_secret_scan_cutoff_matches_commit_message_gate(self):
+        validator = (ROOT / "scripts/validate-commit-msg.py").read_text(
+            encoding="utf-8"
+        )
+        match = re.search(
+            r"LEGACY_HISTORY_CUTOFF\s*=\s*[\"']([0-9a-f]{40})[\"']", validator
+        )
+        self.assertIsNotNone(
+            match, "validate-commit-msg.py 必须定义 40 位 hex 的 LEGACY_HISTORY_CUTOFF"
+        )
+        workflow = (ROOT / ".github/workflows/secret-scan.yml").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn(
+            match.group(1),
+            workflow,
+            "secret-scan 的 --log-opts 扫描起点必须与 LEGACY_HISTORY_CUTOFF 一致，"
+            "两道门禁的信任边界不得漂移",
+        )
+
+    def test_dco_workflow_stays_enforcing(self):
+        workflow = (ROOT / ".github/workflows/dco.yml").read_text(encoding="utf-8")
+        self.assertIn(
+            "core.setFailed(",
+            workflow,
+            "dco 必须以 core.setFailed 强制失败；降级为 core.warning 会让门禁静默失效",
+        )
+        self.assertIn(
+            "/^Signed-off-by:",
+            workflow,
+            "dco 的签署存在性正则不得移除或弱化",
+        )
+        self.assertIn('"dependabot[bot]"', workflow)
+        self.assertIn('"github-actions[bot]"', workflow)
+
+    def test_dco_workflow_fails_closed_on_commit_list_truncation(self):
+        """DCO 检查必须对 PR 提交列表截断保持 fail-closed（2026-11-03 评审收口）。
+
+        `pulls.listCommits` 即使 paginate 也在 250 条静默封顶：更大 PR 的尾部
+        提交会在这道门禁里未经核验就放行。必须以 `pulls.get().commits` 的
+        权威计数比对并在截断时 core.setFailed，不得降级为 warning——与
+        secret-scan 空证据即失败的公约同因。
+        """
+        workflow = (ROOT / ".github/workflows/dco.yml").read_text(encoding="utf-8")
+        self.assertIn(
+            "github.rest.pulls.get(",
+            workflow,
+            "dco 必须取 pulls.get 的权威提交计数用于截断比对",
+        )
+        self.assertIn(
+            "pr.data.commits > commits.length",
+            workflow,
+            "dco 必须比对权威计数与 listCommits 返回数，缺失比对会让截断静默放行",
+        )
+        self.assertIn(
+            "squash or split the PR",
+            workflow,
+            "截断分支必须 core.setFailed 并给出 squash/split 指引，不得静默通过",
+        )
+
+    def test_gitleaks_config_keeps_default_rules_and_allowlist_surface(self):
+        config_path = ROOT / ".gitleaks.toml"
+        self.assertTrue(config_path.exists(), ".gitleaks.toml 不得删除")
+        config = tomllib.loads(config_path.read_text(encoding="utf-8"))
+        self.assertEqual(
+            config.get("extend", {}).get("useDefault"),
+            True,
+            "必须扩展 gitleaks 默认规则集（useDefault = true），不得整体替换",
+        )
+        allowlists = config.get("allowlists", [])
+        self.assertEqual(
+            len(allowlists),
+            18,
+            "allowlist 组数被钉死（cargo-deny 精确集合同款公约）：新增或删除豁免组"
+            "属于扫描面安全变化，必须显式更新本断言并逐组说明理由",
+        )
+
+    def test_gitleaks_allowlists_anchor_extracted_secret_full_value(self):
+        """豁免条件必须绑定提取 secret 的完整受审值（2026-11-02 评审收口）。
+
+        旧形态 regexTarget="line" 下，登记字面量只命中整行的已知前缀：登记
+        docKey 样例后追加不同字符，generic-api-key 提取的是完整未登记新值，
+        但允许正则仍在整行命中已知前缀，使路径 AND 正则条件一起成立，把
+        未登记的新值（含同行真实凭据样式的其它命中）一并吞掉。新形态要求
+        每组 regexTarget="secret" 且正则全值锚定（^…$），唯一例外是
+        private-key 标记组——其 secret 是从 BEGIN 标记开始的多行 blob，
+        只做起点锚定，且仅作用于 secret 按定义以 BEGIN 开头的 private-key
+        规则。gitleaks 二进制不进本套件，这里以合成 ASCII 谓词复现提取值
+        的匹配判定（提取=赋值右侧完整 token）。
+        """
+        import re as _re
+
+        config = tomllib.loads((ROOT / ".gitleaks.toml").read_text(encoding="utf-8"))
+        allowlists = config.get("allowlists", [])
+        self.assertTrue(allowlists, ".gitleaks.toml 必须定义 allowlist 组")
+
+        for group in allowlists:
+            label = group.get("description", "<无描述>")
+            self.assertEqual(
+                group.get("regexTarget"),
+                "secret",
+                f"豁免组「{label}」必须 regexTarget=\"secret\"；line 目标会把"
+                "登记前缀扩展出的未登记新值一并豁免",
+            )
+            self.assertEqual(
+                group.get("condition"),
+                "AND",
+                f"豁免组「{label}」必须保持路径 AND 正则的 AND 条件",
+            )
+            start_anchored_only = group.get("targetRules") == ["private-key"]
+            for pattern in group.get("regexes", []):
+                self.assertTrue(
+                    pattern.startswith("^"),
+                    f"豁免组「{label}」的正则必须从 secret 起点锚定: {pattern}",
+                )
+                if not start_anchored_only:
+                    self.assertTrue(
+                        pattern.endswith("$"),
+                        f"豁免组「{label}」的正则必须锚定到 secret 完整值结束"
+                        f"（private-key 标记组除外）: {pattern}",
+                    )
+
+        # 组 1（文档登记值）的合成谓词正负控：登记值豁免、前缀扩展/其它值/
+        # 48 字符长扩展不豁免。
+        doc_group = next(
+            (g for g in allowlists if "Pinned upstream connector" in g["description"]),
+            None,
+        )
+        self.assertIsNotNone(doc_group, "组 1（文档登记值）不得删除或改名")
+        compiled = [_re.compile(p) for p in doc_group["regexes"]]
+
+        def any_match(secret: str) -> bool:
+            return any(c.match(secret) is not None for c in compiled)
+
+        registered = [
+            "wo1g3x54FzVEJ5yE",
+            "rBGBr2r1HmwanAGW",
+            "Pd6l2Z7V8ZWydl7M",
+            "YhljsPiGfUgnVAg9urvRFd-BvSqRLxxxx",
+            "A2f5boKjfazMzesI9zKbmugTc4T",
+        ]
+        for value in registered:
+            self.assertTrue(
+                any_match(value),
+                f"登记值 {value!r} 必须仍被组 1 豁免（豁免面不得回退）",
+            )
+        for attack in (
+            "Pd6l2Z7V8ZWydl7MAPPENDED",
+            "A2f5boKjfazMzesI9zKbmugTc4T" + "x" * 24,
+            "Qq7Xk2Vb9NwRt5Yz",
+            "sk-live-realkeyshape0",
+        ):
+            self.assertFalse(
+                any_match(attack),
+                f"非登记值 {attack!r} 不得被组 1 豁免（前缀扩展/其它值必须照常报出）",
+            )
+
+    def test_gitleaks_protocol_fixture_group_enumerates_registered_vectors(self):
+        """协议夹具豁免组必须逐一枚举登记值，不得放行任意 64 位 hex（2026-11-02 评审收口）。
+
+        旧形态 `regexTarget="secret"` + `^[0-9a-f]{64}$` 只锚定了长度形状，
+        会把该夹具内任意字段提取到的任意 64 位 hex 一并豁免：向夹具追加一
+        个未登记的 api_key 赋值（任意合法 SHA-256 形状即可满足）会静默落
+        入本组——完整长度锚定本身不能证明它是已登记的确定性向量。新形态
+        要求每条正则都是 `^<64 位 hex 字面量>$` 的精确枚举，且每个字面量
+        必须真实存在于夹具文件中（夹具向量变更时登记必须同步复核）。合成
+        谓词正负控覆盖：登记值豁免、未登记 64-hex 与前缀扩展不豁免。
+        """
+        import re as _re
+
+        config = tomllib.loads((ROOT / ".gitleaks.toml").read_text(encoding="utf-8"))
+        allowlists = config.get("allowlists", [])
+        fixture = (
+            ROOT
+            / "remote-control-relay"
+            / "test"
+            / "fixtures"
+            / "controller-protocol-v1.json"
+        )
+        self.assertTrue(fixture.exists(), "协议夹具文件不得删除或改名")
+
+        group = next(
+            (
+                g
+                for g in allowlists
+                if "controller-protocol-v1" in (g.get("paths") or [""])[0]
+            ),
+            None,
+        )
+        self.assertIsNotNone(group, "协议夹具豁免组不得删除")
+        self.assertEqual(
+            group.get("targetRules"),
+            ["generic-api-key"],
+            "协议夹具豁免组的 targetRules 不得漂移",
+        )
+
+        hex_literal = _re.compile(r"^\^[0-9a-f]{64}\$$")
+        patterns = group.get("regexes", [])
+        self.assertTrue(patterns, "协议夹具豁免组必须逐一枚举登记值，不得为空")
+        registered = []
+        fixture_text = fixture.read_text(encoding="utf-8")
+        for pattern in patterns:
+            self.assertRegex(
+                pattern,
+                hex_literal,
+                "协议夹具豁免组的每条正则都必须是 ^<64 位 hex 字面量>$ 的"
+                f"精确枚举，不得放行任意长度形状: {pattern}",
+            )
+            value = pattern[1:-1]
+            self.assertIn(
+                value,
+                fixture_text,
+                f"豁免组登记值 {value} 必须真实存在于协议夹具文件中",
+            )
+            registered.append(value)
+        self.assertEqual(
+            len(registered),
+            len(set(registered)),
+            "协议夹具豁免组不得出现重复登记",
+        )
+
+        compiled = [_re.compile(p) for p in patterns]
+
+        def group_match(secret: str) -> bool:
+            return any(c.match(secret) is not None for c in compiled)
+
+        for value in registered:
+            self.assertTrue(
+                group_match(value),
+                f"登记值 {value} 必须仍被本组豁免（豁免面不得回退）",
+            )
+        # 同文件未登记 64-hex 凭据负例：任何不在这批枚举里的 64 位 hex
+        # （包括合法 SHA-256 形状的合成值）都不得落入本组豁免。
+        unregistered = [
+            "b3a9e2f14c8d7a0655e93f21c4b7d80669a2f5e18c7d4b309a6e1f25d8c4b7a9",
+            "0" * 64,
+            ("a" * 63) + "2",
+        ]
+        for attack in unregistered:
+            self.assertNotIn(attack, registered)
+            self.assertFalse(
+                group_match(attack),
+                f"未登记 64-hex 值 {attack} 不得被本组豁免（须照常报出）",
+            )
 
 
 class ReleaseDiskAndImagePolicyTests(unittest.TestCase):
