@@ -1625,8 +1625,8 @@ pub fn run() {
                             .set_artifact_scope(desktop_artifacts.clone());
                         handle.state::<ControlledDeviceManager>().register_cleanup_sink(desktop_attachments.cleanup_sink());
                         let desktop_history =
-                            commands::desktop_remote_journal::DesktopRemoteJournalRuntime::journal_only(
-                                format!("boot-{}", std::process::id()),
+                            commands::desktop_remote_journal::DesktopRemoteJournalRuntime::from_controlled_manager(
+                                &handle.state::<ControlledDeviceManager>(),
                             );
                         desktop_task_runtime
                             .hooks()
