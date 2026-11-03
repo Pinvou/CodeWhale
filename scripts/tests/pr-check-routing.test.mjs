@@ -113,6 +113,27 @@ function stepRun(job, name) {
   return body.join("\n");
 }
 
+function assertAccountFailurePolicy(job) {
+  assert.doesNotMatch(job, /secrets\./);
+  let mandatory = job;
+  // Only these reviewed, bounded transport steps are advisory. Remove their
+  // complete named blocks before applying the original job-wide failure ban;
+  // a test, cleanup, unnamed sibling or job-level exception remains forbidden.
+  for (const [name, id] of [
+    ["Financial parallel diagnostics", "financial_diagnostics_upload"],
+    ["Account test resource lifecycle receipts", "account_receipts_upload"],
+  ]) {
+    const diagnostic = namedStep(job, name);
+    assert.match(diagnostic, new RegExp(`^ {8}id: ${id}$`, "m"));
+    assert.match(diagnostic, /^ {8}uses: actions\/upload-artifact@v7$/m);
+    assert.match(diagnostic, /^ {8}timeout-minutes: 3$/m);
+    assert.match(diagnostic, /^ {8}continue-on-error: true$/m);
+    assert.doesNotMatch(diagnostic, /^ {8}(?:run|env):/m);
+    mandatory = mandatory.replace(diagnostic, "");
+  }
+  assert.doesNotMatch(mandatory, /continue-on-error:/);
+}
+
 
 
 const goStepName = "Test and vet all Account Platform Go modules";
@@ -187,7 +208,7 @@ function assertFiniteAuditPGSetup(job) {
     "          --health-retries 12",
     ]),
   ].join("\n"));
-  assert.doesNotMatch(job, /secrets\.|continue-on-error:/);
+  assertAccountFailurePolicy(job);
   // Admit only read-only verification of this job's actual service metadata.
   // Every database consumer must use its identity-checked outputs, never a
   // fixed port or another job's endpoint on the shared runner host.
@@ -420,7 +441,25 @@ test("Account Platform changes cannot bypass the Go gate at any PR or queue stag
     assert.equal(result.status, expectedStatus, result.stderr);
     assert.equal(result.stdout, expectedOutput);
   }
-  assert.doesNotMatch(job, /secrets\.|continue-on-error:/);
+  assertAccountFailurePolicy(job);
+});
+
+test("diagnostic delivery cannot make Account tests or resource retirement advisory", () => {
+  const job = jobBlock("account-platform-test").replaceAll("\r\n", "\n");
+  assertAccountFailurePolicy(job);
+  for (const name of [goStepName, "Confirm Account test resource retirement"]) {
+    assert.throws(() => assertAccountFailurePolicy(job.replace(
+      `      - name: ${name}\n`, `      - name: ${name}\n        continue-on-error: true\n`,
+    )));
+  }
+  for (const [before, after] of [
+    ["        timeout-minutes: 3\n", ""],
+    ["        uses: actions/upload-artifact@v7", "        uses: actions/upload-artifact@main"],
+    ["    name: account-platform-test\n", "    name: account-platform-test\n    continue-on-error: true\n"],
+  ]) {
+    assert.ok(job.includes(before));
+    assert.throws(() => assertAccountFailurePolicy(job.replace(before, after)));
+  }
 });
 
 test("restored operator unit gates reject zero, skipped, missing and failed evidence without operations", () => {
