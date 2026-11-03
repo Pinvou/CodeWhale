@@ -2618,6 +2618,15 @@ dictEn.uiSettings.remoteControl = 'Desktop Remote Control';
 dictEn.uiSettingsDetail.desktopRemoteControlEntryDesc = "Let someone connect with a pairing code and run tasks with this machine's model; you can review and disconnect at any time.";
 dictEn.uiSettingsDetail.desktopRemoteControlBack = 'Back to General';
 dictEn.remoteArchive = {
+  pendingLimit: 'Unresolved requests have reached the limit. Wait for authoritative results, or open Settings → Remote control → Remote conversation archives, disconnect and explicitly quarantine the old record, then create a new conversation. Quarantine does not cancel remote work or authorize resending old tasks.',
+  retirementBudget: 'This conversation has exhausted its permanent request identity budget. Open Settings → Remote control → Remote conversation archives and disconnect. Permanently archive it if no requests remain unresolved; otherwise explicitly quarantine it as read-only, then create a new conversation.',
+  quarantine: 'Quarantine permanently', quarantineTitle: 'Confirm conversation quarantine', quarantineConfirm: 'Confirm permanent quarantine',
+  quarantineWarning: 'This cannot be undone. All history, pending requests and unknown outcomes will be retained; old identities will be permanently disabled and active capacity released. Remote tasks may still be running. Quarantine does not mean cancellation, success or failure. The old record will be frozen without automatic late-result updates, reconnection or resending old tasks. Create a new conversation to continue.',
+  quarantinedHint: 'This record is permanently frozen. Never-attempted and unknown outcomes remain unchanged. Remote tasks may still be running; this record no longer receives automatic result updates.',
+  frozenPrepared: 'Requests known never to have been attempted', frozenUnknown: 'Requests with unknown outcomes',
+  quarantineCompleted: 'Permanently quarantined as read-only and active capacity released. Create a new conversation; do not resend old tasks.',
+  quarantineRefreshPending: 'Permanently quarantined as read-only, but the list could not refresh. Refresh it. Old identities cannot be restored; remote tasks may still be running.',
+  quarantineCleanupPending: 'Permanently quarantined as read-only. Active-file cleanup will retry on a later write. Old identities cannot execute and unknown outcomes remain unchanged.',
   remote_proxy_unreadable: 'Remote records cannot be read. Remote writes are disabled.',
   remote_proxy_oversized: 'Remote records exceed the supported size or count. Remote writes are disabled.',
   remote_proxy_malformed: 'Remote records cannot be read in the current format; they may be damaged or use an incompatible version. Remote writes are disabled.',
@@ -2626,7 +2635,7 @@ dictEn.remoteArchive = {
   remote_proxy_archive_unavailable: 'The remote archive is unavailable or conflicts with active records. Remote writes are disabled.',
   byteBudget: 'Remote conversation capacity is full. Open Settings → Remote control → Remote conversation archives, disconnect offline conversations and settle unresolved tasks, then archive them permanently to free capacity.',
   title: 'Remote conversation archives', active: 'Active records', archived: 'Archived history',
-  hint: 'Archive offline conversations to free active capacity. History and replay protection are retained; archived conversations cannot run tasks or reconnect. Connected conversations and unresolved tasks must be settled first.',
+  hint: 'Permanently archive offline conversations without unresolved requests, or explicitly choose irreversible read-only quarantine when requests remain unresolved. Both retain history and replay protection; old identities cannot execute or reconnect. Disconnect connected or recovering conversations first.',
   archive: 'Archive permanently', refresh: 'Refresh', empty: 'No conversations', untitled: 'Untitled conversation',
   previous: 'Previous page', next: 'Next page', readOnly: 'Read-only archive',
   completed: 'Archived. Active capacity has been released.',

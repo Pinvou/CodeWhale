@@ -2793,6 +2793,7 @@ function composePlanMarkdown(snapshots) { return pinvouSharedtauriMain().compose
       readRemoteProxyHistory: desktopRemoteControlFeature.readRemoteProxyHistory,
       deleteRemoteProxyHistory: desktopRemoteControlFeature.deleteRemoteProxyHistory,
       archiveRemoteProxyHistory: desktopRemoteControlFeature.archiveRemoteProxyHistory,
+      quarantineRemoteProxyHistory: desktopRemoteControlFeature.quarantineRemoteProxyHistory,
       listRemoteProxyArchives: desktopRemoteControlFeature.listRemoteProxyArchives,
       listRemoteProxyArchiveCandidates: desktopRemoteControlFeature.listRemoteProxyArchiveCandidates,
       getRemoteProxyLoadStatus: desktopRemoteControlFeature.getRemoteProxyLoadStatus,
