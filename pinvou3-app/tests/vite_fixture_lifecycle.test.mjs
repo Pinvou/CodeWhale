@@ -41,6 +41,18 @@ test('two HTTP fixtures bind distinct dynamic ports and closing one leaves the o
     }
     const ports = servers.map(server => server.httpServer.address().port);
     assert.notEqual(ports[0], ports[1]);
+    // Vite injects its browser client even with hmr:false. It must be able to
+    // connect on each fixture's HTTP port, without a separate fixed listener.
+    for (const port of ports) {
+      const socket = new WebSocket(`ws://127.0.0.1:${port}/`, 'vite-hmr');
+      try {
+        await new Promise((resolve, reject) => {
+          const timer = setTimeout(() => reject(new Error('owned Vite WebSocket did not connect')), 5000);
+          socket.addEventListener('open', () => { clearTimeout(timer); resolve(); }, { once: true });
+          socket.addEventListener('error', () => { clearTimeout(timer); reject(new Error('owned Vite WebSocket failed')); }, { once: true });
+        });
+      } finally { socket.close(); }
+    }
     await servers[0].close();
     assert.equal(servers[0].httpServer.listening, false);
     assert.equal(servers[1].httpServer.listening, true);

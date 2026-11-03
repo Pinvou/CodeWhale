@@ -3,8 +3,10 @@ import { fixtureScope, ownedDirectory } from './fixture-scope.mjs';
 export { build } from 'vite';
 
 
-// All one-shot fixtures use isolated optimizer output and no HMR listener.
-// HTTP port=0 alone does not isolate middleware-mode Vite's HMR port 24678.
+// Optimizer output is private and HMR updates are disabled. Browser fixtures
+// still load @vite/client, so keep its WebSocket on the owned HTTP listener.
+// SSR-only middleware fixtures have no HTTP listener: disable WS there rather
+// than opening Vite's shared default port 24678.
 export async function createServer(config = {}) {
   const directory = ownedDirectory('vite');
   let server;
@@ -26,7 +28,7 @@ export async function createServer(config = {}) {
     server = await createViteServer({
       ...config,
       cacheDir: directory.path,
-      server: { ...config.server, host: '127.0.0.1', port: 0, strictPort: true, hmr: false, ws: false, watch: null },
+      server: { ...config.server, host: '127.0.0.1', port: 0, strictPort: true, hmr: false, ws: config.server?.middlewareMode ? false : {}, watch: null },
     });
     nativeClose = server.close.bind(server);
     server.close = release;
