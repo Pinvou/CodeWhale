@@ -1039,7 +1039,7 @@ pub async fn open_artifact_window(
     if crate::platform::os::libreoffice_open_fallback_needed(&p) {
         return open_with_libreoffice(&p);
     }
-    // 用文件 inode 做稳定 label,防同一文件多次打开建多窗口。Tauri label 只允许 a-zA-Z0-9-_。
+    // 用文件路径哈希做稳定 label,防同一文件多次打开建多窗口。Tauri label 只允许 a-zA-Z0-9-_。
     use std::collections::hash_map::DefaultHasher;
     use std::hash::{Hash, Hasher};
     let mut hasher = DefaultHasher::new();

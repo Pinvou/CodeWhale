@@ -1,4 +1,4 @@
-//! codex / claude / gemini(即 kimi) CLI 的安装、升级与版本/来源探测。
+//! codex / claude / kimi CLI 的安装、升级与版本/来源探测。
 
 use super::runtime::run_version_probe;
 use super::*;
@@ -726,9 +726,10 @@ fn brew_install_failure(
 
 /// Shared execution skeleton for managed installs. Differences are injected only via [`ManagedInstallStage`]:
 /// InstallChildGuard::register → post-spawn cancel recheck → emit_install_progress →
-/// InstallOutputReaders::spawn → 600s tokio timeout (diagnostics `<stage>:timeout`) →
-/// finish → diagnostics `<stage>:output` (output tail) → idempotent early success →
-/// cancel rewrite and the [`ManagedInstallStage::failure_detail`] bail on the failure exits.
+/// InstallOutputReaders::spawn → 600s tokio timeout (diagnostics `<stage>:timeout`, tree kill,
+/// guard disarmed after the reap) → finish → diagnostics `<stage>:output` (output tail) →
+/// idempotent early success (guard disarmed) → cancel rewrite and the
+/// [`ManagedInstallStage::failure_detail`] bail on the failure exits.
 #[allow(clippy::too_many_arguments)]
 async fn run_managed_install(
     app: &AppHandle,
@@ -761,7 +762,24 @@ async fn run_managed_install(
     let output_readers = InstallOutputReaders::spawn(app, backend, stdout, stderr);
     const TIMEOUT: Duration = Duration::from_secs(600);
     let status = match tokio::time::timeout(TIMEOUT, child.wait()).await {
-        Ok(result) => result.context(stage.wait_context)?,
+        Ok(result) => {
+            let status = result.context(stage.wait_context)?;
+            if !status.success() {
+                // A failed leader's survivors are reclaimed here, not after
+                // the output tail: the tail idles up to IDLE_TIMEOUT when a
+                // descendant holds the pipes — exactly the case that has
+                // survivors — and a kill deferred behind it would fire on a
+                // token the OS may meanwhile have handed to an unrelated
+                // group (the unix token is the leader's pid). The managed
+                // tree keeps this kill inside its kernel-owned token, and
+                // disarming afterwards keeps the Drop from re-killing by the
+                // stale token. An idempotent-ok run normally leaves an empty
+                // group, which the reclaim treats as ESRCH.
+                let _ = process_tree.terminate();
+                child_guard.disarm();
+            }
+            status
+        }
         Err(_) => {
             diagnostics::write(
                 operation_id,
@@ -770,6 +788,10 @@ async fn run_managed_install(
             );
             let _ = process_tree.terminate();
             let _ = child.wait().await;
+            // The wait reaped the leader: disarm so the Drop never
+            // terminates by the now-stale token (the Windows Job Object
+            // handle stays valid, but the tree is already gone).
+            child_guard.disarm();
             bail!("{}", stage.timeout_message);
         }
     };
@@ -1076,6 +1098,51 @@ pub(super) fn node_major_version(version: &str) -> Option<u32> {
 
 #[cfg(test)]
 mod tests {
+
+    /// The failure arm must reclaim the leader's tree BEFORE the output
+    /// tail: the tail idles up to IDLE_TIMEOUT exactly when a descendant
+    /// holds the pipes — the case that has survivors — so a kill deferred
+    /// behind it fires on a token the OS may have handed to an unrelated
+    /// group. Both wait-exit arms must also disarm the guard after the
+    /// reap, so the Drop never re-kills by a stale token while every
+    /// behavioral test stays green.
+    #[test]
+    fn failed_and_timed_out_installs_terminate_before_the_output_tail() {
+        // include_str! embeds checkout bytes; Windows autocrlf must not change
+        // which production code the probe inspects (same normalization as
+        // mod.rs's production_source).
+        let src = include_str!("install.rs").replace("\r\n", "\n");
+        let production = &src[..src
+            .find("#[cfg(test)]\nmod tests {")
+            .expect("the test module marker must exist")];
+        let fn_start = production
+            .find("async fn run_managed_install")
+            .expect("run_managed_install must exist");
+        let body = &production[fn_start..];
+        let wait = body
+            .find("let status = match tokio::time::timeout")
+            .expect("the managed wait must exist");
+        let tail = body
+            .find("output_readers.finish().await")
+            .expect("the output tail must exist");
+        // Counting rather than slicing keeps the pin honest about the
+        // failure arm specifically, which a range check would otherwise
+        // satisfy via the timeout arm's own call.
+        assert_eq!(
+            body[wait..tail].matches("process_tree.terminate()").count(),
+            2,
+            "the failure arm and the timeout arm must terminate the tree \
+             before the output tail; deferring it past the tail reclaims by \
+             a possibly recycled token"
+        );
+        assert_eq!(
+            body[wait..tail].matches("child_guard.disarm()").count(),
+            2,
+            "both wait-exit arms must disarm the guard at the reap site; a \
+             missing disarm leaves the Drop kill armed on a stale token"
+        );
+    }
+
     use super::*;
 
     #[test]

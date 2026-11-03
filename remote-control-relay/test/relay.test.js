@@ -2,8 +2,8 @@ import assert from "node:assert/strict";
 import crypto from "node:crypto";
 import { after, before, test } from "node:test";
 import { spawn } from "node:child_process";
-import { mkdir, mkdtemp, readFile, realpath, rm, writeFile } from "node:fs/promises";
-import { createServer } from "node:net";
+import { mkdir, mkdtemp, readFile, readdir, realpath, rm, writeFile } from "node:fs/promises";
+import { connect, createServer } from "node:net";
 import { dirname, join } from "node:path";
 import { tmpdir } from "node:os";
 import { fileURLToPath } from "node:url";
@@ -71,6 +71,40 @@ function waitForOutput(child, pattern, timeoutMs = 5000) {
       child.stderr.off("data", onErr);
       reject(new Error(`relay exited during startup: ${code}\nstdout:\n${stdout}\nstderr:\n${stderr}`));
     });
+  });
+}
+
+// A relay log line is written by the relay process and delivered to this
+// process through a pipe: socket close and stderr arrival are independent
+// events, so assertions on the line must wait for it instead of assuming it
+// landed by the time the close handshake finished.
+function waitForError(isolated, pattern, timeoutMs = 5000) {
+  return new Promise((resolve, reject) => {
+    const started = Date.now();
+    const poll = () => {
+      if (pattern.test(isolated.errors())) return resolve();
+      if (Date.now() - started > timeoutMs) {
+        return reject(new Error(`timeout waiting for stderr ${pattern}\nstderr:\n${isolated.errors()}`));
+      }
+      setTimeout(poll, 25);
+    };
+    poll();
+  });
+}
+
+// Sends one hand-built HTTP request and returns the raw response text; used
+// where the WebSocket and fetch clients refuse to send malformed headers.
+function rawRequest(hostPort, requestText) {
+  return new Promise((resolve, reject) => {
+    const socket = connect(hostPort, "127.0.0.1", () => {
+      socket.end(requestText);
+    });
+    // A server that accepts but never answers must fail the test, not hang CI.
+    socket.setTimeout(5000, () => socket.destroy());
+    let text = "";
+    socket.on("data", (chunk) => { text += String(chunk); });
+    socket.once("error", reject);
+    socket.once("close", () => resolve(text));
   });
 }
 
@@ -206,7 +240,7 @@ async function stopRelay(child) {
   await waitForExit(child);
 }
 
-async function spawnRelay(env = {}, { preload, ipc = false } = {}) {
+async function spawnRelay(env = {}, { preload, ipc = false, awaitListening = true } = {}) {
   const isolatedPort = await getFreePort();
   const statePath = env.PINVOU_REMOTE_STATE_PATH
     || join(testRoot, `relay-state-${isolatedPort}-${Date.now()}-${Math.random().toString(16).slice(2)}.json`);
@@ -224,14 +258,22 @@ async function spawnRelay(env = {}, { preload, ipc = false } = {}) {
     },
     stdio: ipc ? ["ignore", "pipe", "pipe", "ipc"] : ["ignore", "pipe", "pipe"],
   });
-  await waitForOutput(child, /pinvou remote relay listening/,
-    env.PINVOU_DESKTOP_CONTROLLER_ENABLED === "1" ? 60_000 : 5000);
+  let output = "";
+  let errors = "";
+  child.stdout.on("data", (chunk) => { output += String(chunk); });
+  child.stderr.on("data", (chunk) => { errors += String(chunk); });
+  if (awaitListening) {
+    await waitForOutput(child, /pinvou remote relay listening/,
+      env.PINVOU_DESKTOP_CONTROLLER_ENABLED === "1" ? 60_000 : 5000);
+  }
   return {
     child,
     port: isolatedPort,
     httpUrl: `http://127.0.0.1:${isolatedPort}`,
     wsUrl: `ws://127.0.0.1:${isolatedPort}/pinvou3/remote/ws`,
     statePath,
+    output: () => output,
+    errors: () => errors,
   };
 }
 
@@ -1293,6 +1335,120 @@ test("revoke fails closed without ACK when the tombstone cannot be persisted", a
   }
 });
 
+test("tombstone capacity stays inside what the state limit can hold", async () => {
+  // MAX_REVOKED_ENDPOINTS is clamped to what MAX_RELAY_STATE_BYTES can hold
+  // (one tombstone per ~256 bytes): revocations past the clamp refuse through
+  // the normal capacity path instead of persisting entries until the size
+  // check fails every further revoke.
+  const isolated = await spawnRelay({
+    MAX_RELAY_STATE_BYTES: "2048",
+    MAX_REVOKED_ENDPOINTS: "100",
+    ENDPOINT_CREATE_LIMIT: "100",
+  });
+  try {
+    for (let i = 0; i < 8; i += 1) {
+      const endpointId = `endpoint_clamp_${String(i).padStart(2, "0")}`;
+      const desktop = await registerDesktop(
+        endpointId,
+        `clamp-token-${String(i).padStart(22, "0")}`,
+        `clamp-secret-${String(i).padStart(22, "0")}`,
+        isolated.wsUrl,
+      );
+      assert.equal(desktop.registered.endpoint_id, endpointId);
+      const revokedAck = nextMessage(desktop.ws, "desktop_endpoint_revoked");
+      desktop.ws.send(JSON.stringify({
+        v: 2,
+        type: "desktop_endpoint_revoke",
+        endpoint_id: endpointId,
+      }));
+      await revokedAck;
+      await waitForClose(desktop.ws);
+    }
+    const over = await registerDesktop(
+      "endpoint_clamp_over_capacity_x",
+      "clamp-token-over-capacity-000000000x",
+      "clamp-secret-over-capacity-00000000x",
+      isolated.wsUrl,
+    );
+    assert.equal(over.registered.endpoint_id, "endpoint_clamp_over_capacity_x");
+    const refusal = nextMessage(over.ws, "error");
+    over.ws.send(JSON.stringify({
+      v: 2,
+      type: "desktop_endpoint_revoke",
+      endpoint_id: "endpoint_clamp_over_capacity_x",
+    }));
+    // Capacity exhaustion gets its own code: it is an expected operational
+    // condition, not a persistence failure, and must stay distinguishable
+    // from a broken disk.
+    assert.equal((await refusal).code, "revoked_endpoint_capacity_reached");
+    await waitForClose(over.ws);
+
+    const persisted = JSON.parse(await readFile(isolated.statePath, "utf8"));
+    assert.equal(persisted.revoked_endpoints.length, 8);
+    // The refused endpoint stays registered and usable; only the tombstone
+    // is missing.
+    const health = await (await fetch(`${isolated.httpUrl}/pinvou3/remote/healthz`)).json();
+    assert.equal(health.endpoint_count, 1);
+  } finally {
+    await stopRelay(isolated.child);
+  }
+});
+
+test("a state above the clamped capacity loads and refuses only new revocations", async () => {
+  // The tombstone clamp ties MAX_REVOKED_ENDPOINTS to MAX_RELAY_STATE_BYTES.
+  // A state file accumulated above the clamp must still load — the size
+  // limit is the real bound, every loaded tombstone stays enforced, and
+  // refusing to start would brick the relay on a valid file. Only new
+  // revocations are refused, with the capacity code instead of a persistence
+  // failure.
+  const statePath = join(testRoot, `clamped-state-${Date.now()}.json`);
+  const entries = [];
+  for (let i = 0; i < 9; i += 1) {
+    entries.push({ endpoint_id: `clamp${i}`, revoked_at: "2026-01-01T00:00:00Z" });
+  }
+  await writeFile(statePath, JSON.stringify({ version: 1, revoked_endpoints: entries }));
+  const isolated = await spawnRelay({
+    PINVOU_REMOTE_STATE_PATH: statePath,
+    MAX_RELAY_STATE_BYTES: "2048",
+    ENDPOINT_CREATE_LIMIT: "100",
+  });
+  try {
+    assert.match(isolated.output(), /revoked_endpoints=9/u);
+    // A loaded tombstone stays enforced.
+    const stale = await openSocket(isolated.wsUrl);
+    const staleError = nextMessage(stale, "error");
+    stale.send(JSON.stringify({
+      v: 2,
+      type: "desktop_endpoint_register",
+      endpoint_id: "clamp3",
+      access_token: "clamped-stale-access-token-000001",
+      desktop_secret: "clamped-stale-desktop-secret-0001",
+    }));
+    assert.equal((await staleError).code, "endpoint_revoked");
+    await waitForClose(stale);
+
+    const desktop = await registerDesktop(
+      "endpoint_clamped_capacity_x",
+      "clamped-token-0000000000000000000x",
+      "clamped-secret-000000000000000000x",
+      isolated.wsUrl,
+    );
+    assert.equal(desktop.registered.endpoint_id, "endpoint_clamped_capacity_x");
+    const refusal = nextMessage(desktop.ws, "error");
+    desktop.ws.send(JSON.stringify({
+      v: 2,
+      type: "desktop_endpoint_revoke",
+      endpoint_id: "endpoint_clamped_capacity_x",
+    }));
+    assert.equal((await refusal).code, "revoked_endpoint_capacity_reached");
+    await waitForClose(desktop.ws);
+    const persisted = JSON.parse(await readFile(statePath, "utf8"));
+    assert.equal(persisted.revoked_endpoints.length, 9);
+  } finally {
+    await stopRelay(isolated.child);
+  }
+});
+
 test("forwards payloads larger than the previous 1 MiB limit", async (t) => {
   const endpointId = `endpoint_payload_${Date.now()}`;
   const accessToken = "access-token-payload-0000000000001";
@@ -1319,6 +1475,96 @@ test("closes a websocket that does not authenticate in time", async () => {
     assert.equal((await error).code, "authentication_timeout");
     await waitForClose(ws);
   } finally {
+    await stopRelay(isolated.child);
+  }
+});
+
+test("a cross-endpoint revoker keeps its own session", async () => {
+  const isolated = await spawnRelay({ WS_CONNECT_LIMIT: "20" });
+  let desktopA;
+  let desktopB;
+  try {
+    desktopA = await registerDesktop(
+      "endpoint_revoke_self_a",
+      "revoke-self-token-a-0000000000001",
+      "revoke-self-secret-a-000000000001",
+      isolated.wsUrl,
+    );
+    await desktopA.registered;
+    desktopB = await registerDesktop(
+      "endpoint_revoke_self_b",
+      "revoke-self-token-b-0000000000001",
+      "revoke-self-secret-b-000000000001",
+      isolated.wsUrl,
+    );
+    await desktopB.registered;
+    // A's desktop revokes endpoint B with B's secret.
+    const revokedAck = nextMessage(desktopA.ws, "desktop_endpoint_revoked");
+    desktopA.ws.send(JSON.stringify({
+      v: 2,
+      type: "desktop_endpoint_revoke",
+      endpoint_id: "endpoint_revoke_self_b",
+      desktop_secret: "revoke-self-secret-b-000000000001",
+    }));
+    await revokedAck;
+    // A's own endpoint must survive with its desktop still connected.
+    await new Promise((resolve) => setTimeout(resolve, 300));
+    const health = await (await fetch(`${isolated.httpUrl}/pinvou3/remote/healthz`)).json();
+    assert.equal(health.endpoint_count, 1);
+    assert.equal(health.desktop_offline_count, 0);
+    // The surviving session must still work: B is gone, so an rpc_request
+    // from A's desktop-role socket is refused as unsupported_message_type
+    // (desktops may not originate rpc_request) — an answered error proving
+    // the socket is alive, not a dead one.
+    const alive = nextMessage(desktopA.ws, "error");
+    desktopA.ws.send(JSON.stringify({
+      v: 2,
+      type: "rpc_request",
+      request_id: "post-revoke-1",
+      payload: { tool: "ping" },
+    }));
+    assert.equal((await alive).code, "unsupported_message_type");
+  } finally {
+    closeSocket(desktopA.ws);
+    closeSocket(desktopB?.ws);
+    await stopRelay(isolated.child);
+  }
+});
+
+test("an unauthenticated cross-endpoint revoker stays bounded by the auth timeout", async () => {
+  // The secret authorizes the revoke itself, but a revoker that never
+  // authenticated keeps its socket after a cross-endpoint revoke — so the
+  // authentication timer, cleared when the revoke started, must be re-armed.
+  // Without that, the socket holds a connection (and a healthz
+  // unauthenticated counter) forever.
+  const isolated = await spawnRelay({ WS_AUTH_TIMEOUT_MS: "1500", WS_CONNECT_LIMIT: "20" });
+  let desktopB;
+  let revoker;
+  try {
+    desktopB = await registerDesktop(
+      "endpoint_revoke_unk_b",
+      "revoke-unk-token-b-0000000000001",
+      "revoke-unk-secret-b-0000000000001",
+      isolated.wsUrl,
+    );
+    await desktopB.registered;
+    revoker = await openSocket(isolated.wsUrl);
+    const revokedAck = nextMessage(revoker, "desktop_endpoint_revoked");
+    revoker.send(JSON.stringify({
+      v: 2,
+      type: "desktop_endpoint_revoke",
+      endpoint_id: "endpoint_revoke_unk_b",
+      desktop_secret: "revoke-unk-secret-b-0000000000001",
+    }));
+    await revokedAck;
+    // The endpoint is gone; the revoker has no credentials left to
+    // authenticate with and must be closed by the re-armed timeout.
+    const timeoutError = nextMessage(revoker, "error", 5000);
+    assert.equal((await timeoutError).code, "authentication_timeout");
+    await waitForClose(revoker, 6000);
+  } finally {
+    closeSocket(revoker);
+    closeSocket(desktopB?.ws);
     await stopRelay(isolated.child);
   }
 });
@@ -1599,6 +1845,100 @@ test("trusted proxy malformed sources never crash the enabled controller or bypa
   }
 });
 
+test("survives a websocket protocol violation that emits an error event", async () => {
+  const isolated = await spawnRelay({});
+  let ws;
+  let controller;
+  try {
+    ws = await openSocket(isolated.wsUrl);
+    // A frame over maxPayload makes ws emit "error" on the socket; without a
+    // listener the unhandled event crashed the whole relay process.
+    ws.send("x".repeat(4 * 1024 * 1024 + 8));
+    await waitForClose(ws);
+    // The containment must stay observable: one fixed line, no frame content.
+    // The line reaches this process through a pipe that drains independently
+    // of the close handshake, so wait for the evidence before asserting it.
+    await waitForError(
+      isolated,
+      /\[relay-error\] websocket_protocol_violation code=WS_ERR_UNSUPPORTED_MESSAGE_LENGTH/u,
+    );
+    // The controller lane shares the connection handler and its error guard.
+    // Baseline the log count before the violation: the line can land while
+    // the close handshake is still draining.
+    const violations = () => isolated.errors().match(/websocket_protocol_violation/gu)?.length ?? 0;
+    const loggedBefore = violations();
+    controller = await openControllerSocket(isolated.wsUrl);
+    controller.send("x".repeat(4 * 1024 * 1024 + 8));
+    await waitForClose(controller, 5000);
+    const deadline = Date.now() + 5000;
+    while (violations() <= loggedBefore && Date.now() < deadline) {
+      await new Promise((resolve) => setTimeout(resolve, 25));
+    }
+    assert.ok(violations() > loggedBefore, "controller lane protocol violation was not logged");
+    // The relay is unharmed: a follower connects and the process stays up.
+    const follower = await openSocket(isolated.wsUrl);
+    closeSocket(follower);
+    assert.equal(isolated.child.exitCode, null);
+  } finally {
+    closeSocket(ws);
+    closeSocket(controller);
+    await stopRelay(isolated.child);
+  }
+});
+
+test("rejects malformed Host headers instead of crashing", async () => {
+  const isolated = await spawnRelay({});
+  try {
+    const httpBanner = await rawRequest(
+      isolated.port,
+      "GET /pinvou3/remote/healthz HTTP/1.1\r\n"
+      + "Host: ::1:99999\r\n"
+      + "Connection: close\r\n\r\n",
+    );
+    assert.match(httpBanner, /400 Bad Request/u);
+    assert.match(httpBanner, /bad request/u);
+    const upgradeBanner = await rawRequest(
+      isolated.port,
+      "GET /pinvou3/remote/ws HTTP/1.1\r\n"
+      + "Host: ::1:99999\r\n"
+      + "Upgrade: websocket\r\nConnection: Upgrade\r\n"
+      + "Sec-WebSocket-Key: AAAAAAAAAAAAAAAAAAAAAA==\r\n"
+      + "Sec-WebSocket-Version: 13\r\n\r\n",
+    );
+    assert.match(upgradeBanner, /400 Bad Request/u);
+    assert.match(upgradeBanner, /malformed host header/u);
+    const follower = await openSocket(isolated.wsUrl);
+    closeSocket(follower);
+    assert.equal(isolated.child.exitCode, null);
+  } finally {
+    await stopRelay(isolated.child);
+  }
+});
+
+test("matches a mixed-case IPv4-mapped trust entry with the plain peer address", async () => {
+  // The trust entry is spelled with an uppercase mapped prefix; the loopback
+  // peer reports plain "127.0.0.1". Canonical reduction must make trust hold,
+  // so the forwarded connection opens its own bucket (the second forwarded
+  // attempt hits the 429) while the untouched peer bucket still admits a
+  // plain connection.
+  const isolated = await spawnRelay({
+    WS_CONNECT_LIMIT: "1",
+    PINVOU_REMOTE_TRUSTED_PROXY_IPS: "::FFFF:127.0.0.1",
+  });
+  let first;
+  try {
+    first = await openSocket(isolated.wsUrl, { headers: { "x-forwarded-for": "198.51.100.9" } });
+    assert.equal(await rejectedUpgrade(isolated.wsUrl, {
+      headers: { "x-forwarded-for": "198.51.100.9" },
+    }), 429);
+    const plain = await openSocket(isolated.wsUrl);
+    closeSocket(plain);
+  } finally {
+    closeSocket(first);
+    await stopRelay(isolated.child);
+  }
+});
+
 test("expired Web endpoint releases its exact interaction slot before deletion", async () => {
   const isolated = await spawnRelay(controllerEnvironment("expired-slot", { ENDPOINT_OFFLINE_TTL_MS: "1000" }));
   const sockets = [];
@@ -1704,7 +2044,9 @@ test("actual controller startup rejects both public pairing HMAC examples before
 
 test("invalid or partially invalid proxy IP configuration fails startup instead of opening the allowlist", async () => {
   for (const variable of ["PINVOU_REMOTE_ALLOWED_PROXY_IPS", "PINVOU_REMOTE_TRUSTED_PROXY_IPS"]) {
-    for (const value of ["not-an-ip", "127.0.0.1,not-an-ip"]) {
+    // ",,," has visible content but yields no entries: a broken edit must
+    // fail closed at startup, never silently mean an empty allowlist.
+    for (const value of ["not-an-ip", "127.0.0.1,not-an-ip", ",,,"]) {
       const child = spawn(process.execPath, [join(relayDir, "server.js")], {
         cwd: relayDir, env: { ...process.env, PORT: String(await getFreePort()),
           PINVOU_REMOTE_STATE_PATH: join(testRoot, `proxy-invalid-${variable}-${Date.now()}.json`), [variable]: value },
@@ -1721,6 +2063,44 @@ test("invalid or partially invalid proxy IP configuration fails startup instead 
         assert.doesNotMatch(output, /pinvou remote relay listening/u);
       } finally { await stopRelay(child); }
     }
+  }
+});
+
+test("an invalid PORT reports the fixed line instead of a stack", async () => {
+  // listen() validates the port synchronously, so an invalid value would die
+  // inside the call with a RangeError whose stack prints the module path.
+  for (const value of ["abc", "99999", "-1", "1.5", "0"]) {
+    const isolated = await spawnRelay({ PORT: value }, { awaitListening: false });
+    try {
+      await waitForExit(isolated.child, 10000);
+      assert.notEqual(isolated.child.exitCode, 0);
+      assert.equal(
+        isolated.errors().trim(),
+        "[relay-error] invalid PORT: use an integer from 1 to 65535",
+      );
+    } finally {
+      await stopRelay(isolated.child);
+    }
+  }
+});
+
+test("a failed bind reports a fixed error without the bind address", async () => {
+  const first = await spawnRelay({});
+  try {
+    const second = await spawnRelay({ PORT: String(first.port) }, { awaitListening: false });
+    try {
+      await waitForExit(second.child, 10000);
+      assert.notEqual(second.child.exitCode, 0);
+      // The relay may print operational notices (telemetry configuration);
+      // only [relay-error] lines are pinned, and there must be exactly one.
+      const errorLines = second.errors().split("\n").filter((line) => line.startsWith("[relay-error]"));
+      assert.deepEqual(errorLines, ["[relay-error] listen_failed code=EADDRINUSE"]);
+      assert.ok(!second.errors().includes(String(first.port)), "bind address echoed into stderr");
+    } finally {
+      await stopRelay(second.child);
+    }
+  } finally {
+    await stopRelay(first.child);
   }
 });
 
@@ -2028,6 +2408,127 @@ test("controller v1 completes a real three-party encrypted handshake beside lega
     assert.equal((await conflict).code, "endpoint_not_found");
   } finally {
     sockets.forEach(closeSocket);
+    await stopRelay(isolated.child);
+  }
+});
+
+test("a non-numeric heartbeat falls back instead of a 1 ms NaN tick", async (t) => {
+  // setInterval(NaN) beats at 1 ms; the observable regression is the ping
+  // cadence itself: a connected client must see no ping for a window that a
+  // 1 ms ticker blows past immediately (the 15 s fallback's first ping lands
+  // far outside it).
+  const isolated = await spawnRelay({ HEARTBEAT_INTERVAL_MS: "abc" });
+  const ws = await openSocket(isolated.wsUrl);
+  t.after(() => { closeSocket(ws); return stopRelay(isolated.child); });
+  let pings = 0;
+  ws.on("ping", () => { pings += 1; });
+  await new Promise((resolve) => setTimeout(resolve, 1500));
+  assert.equal(pings, 0, `garbage heartbeat produced ${pings} pings (1 ms NaN tick)`);
+  // And the relay stays silent on stderr — a clean fallback prints no
+  // [relay-error] line (operational notices aside).
+  assert.doesNotMatch(isolated.errors(), /\[relay-error\]/u, "heartbeat fallback produced an error line");
+  const health = await (await fetch(`${isolated.httpUrl}/pinvou3/remote/healthz`)).json();
+  assert.equal(health.endpoint_count, 0);
+
+  // An oversized value clamps to the 24 h ceiling instead of passing the raw
+  // number to setInterval; the relay must stay healthy either way.
+  const oversized = await spawnRelay({ HEARTBEAT_INTERVAL_MS: "99999999999999" });
+  try {
+    const oversizeSocket = await openSocket(oversized.wsUrl);
+    let oversizePings = 0;
+    oversizeSocket.on("ping", () => { oversizePings += 1; });
+    await new Promise((resolve) => setTimeout(resolve, 1200));
+    assert.equal(oversizePings, 0);
+    const oversizeHealth = await (await fetch(`${oversized.httpUrl}/pinvou3/remote/healthz`)).json();
+    assert.equal(oversizeHealth.ok, true);
+    closeSocket(oversizeSocket);
+  } finally {
+    await stopRelay(oversized.child);
+  }
+});
+
+test("clamps a sub-floor heartbeat to the five second floor", async (t) => {
+  // An empty value parses as 0 (the old parser took its default through the
+  // falsy-string branch): measure the cadence between two pings, which is
+  // phase-independent (the first ping can land anywhere in the cycle).
+  const isolated = await spawnRelay({ HEARTBEAT_INTERVAL_MS: "" });
+  try {
+    const ws = await openSocket(isolated.wsUrl);
+    t.after(() => closeSocket(ws));
+    const pings = [];
+    ws.on("ping", () => pings.push(performance.now()));
+    await new Promise((resolve, reject) => {
+      // Both timers must clear on either exit path: an interval left running
+      // would hold the test process open after a rejection.
+      const timer = setTimeout(() => {
+        clearInterval(poll);
+        reject(new Error("heartbeat pings never arrived"));
+      }, 15000);
+      const poll = setInterval(() => {
+        if (pings.length >= 2) {
+          clearInterval(poll);
+          clearTimeout(timer);
+          resolve();
+        }
+      }, 100);
+    });
+    const cadence = pings[1] - pings[0];
+    assert.ok(cadence >= 4500 && cadence <= 9000,
+      `heartbeat cadence ${Math.round(cadence)} ms — expected the 5 s floor`);
+  } finally {
+    await stopRelay(isolated.child);
+  }
+});
+
+test("sweeps stranded state temp files at startup", async () => {
+  const stateDirectory = join(testRoot, `tmp-sweep-${Date.now()}`);
+  await mkdir(stateDirectory, { recursive: true });
+  await writeFile(join(stateDirectory, "relay-state.json.999.deadbeef.tmp"), "partial write");
+  await writeFile(join(stateDirectory, "unrelated.tmp"), "keep me");
+  // A sibling state path extending this basename keeps its own writer's
+  // temp files, and a bare basename.tmp is not a writer product either:
+  // the sweep matches only basename.<pid>.<hex>.tmp.
+  await writeFile(join(stateDirectory, "relay-state.json.backup.123.abcde.tmp"), "sibling partial write");
+  await writeFile(join(stateDirectory, "relay-state.json.tmp"), "not a writer product");
+  const isolated = await spawnRelay({
+    PINVOU_REMOTE_STATE_PATH: join(stateDirectory, "relay-state.json"),
+  });
+  try {
+    const survivors = new Set(await readdir(stateDirectory));
+    assert.ok(!survivors.has("relay-state.json.999.deadbeef.tmp"), "stranded temp file not swept");
+    assert.ok(survivors.has("unrelated.tmp"), "sweep removed an unrelated file");
+    assert.ok(survivors.has("relay-state.json.backup.123.abcde.tmp"), "sweep removed a sibling path's temp file");
+    assert.ok(survivors.has("relay-state.json.tmp"), "sweep removed a non-writer temp name");
+  } finally {
+    await stopRelay(isolated.child);
+  }
+});
+
+test("serves 503 for the site root when the web build is missing entirely", async () => {
+  const emptyWebDir = join(testRoot, `web-empty-${Date.now()}`);
+  await mkdir(emptyWebDir, { recursive: true });
+  const isolated = await spawnRelay({ PINVOU_REMOTE_WEB_DIR: emptyWebDir });
+  try {
+    // The site entry is the build: a missing index.html is "build is not
+    // available" (503), not an ordinary 404. A missing asset with an
+    // extension stays a plain 404 (a stale reference to a replaced build),
+    // and an extensionless SPA route falls back to the same missing entry.
+    const root = await fetch(`${isolated.httpUrl}/pinvou3/remote/`);
+    assert.equal(root.status, 503);
+    assert.equal(await root.text(), "WebUI build is not available");
+    // HEAD reads the same site entry, so an uptime probe cannot disagree
+    // with the GET that follows it.
+    const rootHead = await fetch(`${isolated.httpUrl}/pinvou3/remote/`, { method: "HEAD" });
+    assert.equal(rootHead.status, 503);
+    assert.equal(
+      (await fetch(`${isolated.httpUrl}/pinvou3/remote/staleAsset-12345678.js`)).status,
+      404,
+    );
+    assert.equal(
+      (await fetch(`${isolated.httpUrl}/pinvou3/remote/some/route`)).status,
+      503,
+    );
+  } finally {
     await stopRelay(isolated.child);
   }
 });

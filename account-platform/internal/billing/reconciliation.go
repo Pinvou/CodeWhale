@@ -218,6 +218,26 @@ func successfulBillEntryStatus(item ProviderBillEntry) bool {
 	}
 }
 
+func isOrphanPaymentOrderFact(fact ReconciliationInternalFact) bool {
+	if fact.EntryType != "PAYMENT" || fact.PaymentOrderID == uuid.Nil || fact.ProviderReferenceID != "ORPHAN_PAYMENT_ORDER:"+fact.PaymentOrderID.String() {
+		return false
+	}
+	var snapshot struct {
+		Order struct {
+			ID                uuid.UUID
+			Status            string
+			FulfillmentStatus string `json:"fulfillment_status"`
+		} `json:"payment_order"`
+		Transaction json.RawMessage `json:"payment_transaction"`
+	}
+	if json.Unmarshal(fact.InternalSnapshot, &snapshot) != nil {
+		return false
+	}
+	// A provider transaction reference can share this prefix. Only the owned
+	// order snapshot without a transaction is the missing-transaction finding.
+	return snapshot.Order.ID == fact.PaymentOrderID && snapshot.Order.Status == "PAID" && snapshot.Order.FulfillmentStatus == "CREDITED" && len(snapshot.Transaction) == 0
+}
+
 func CompareFourWayReconciliation(provider []ProviderBillEntry, internal []ReconciliationInternalFact) []ReconciliationDifference {
 	providerByKey := map[string]ProviderBillEntry{}
 	differences := []ReconciliationDifference{}
@@ -240,6 +260,13 @@ func CompareFourWayReconciliation(provider []ProviderBillEntry, internal []Recon
 	internalByKey := map[string]ReconciliationInternalFact{}
 	for index := range internal {
 		fact := internal[index]
+		if isOrphanPaymentOrderFact(fact) {
+			// A PAID+CREDITED order without a payment transaction is a database
+			// integrity finding. Keep the original order snapshot for manual review;
+			// this path never creates a transaction, credits a wallet, or repairs funds.
+			differences = append(differences, differenceFromFact(fact, "PAYMENT_TRANSACTION_MISSING", "P0", nil))
+			continue
+		}
 		key := fact.EntryType + "|" + fact.ProviderReferenceID
 		if _, exists := internalByKey[key]; exists {
 			differences = append(differences, differenceFromFact(fact, "DUPLICATE_TRANSACTION", "P0", nil))
@@ -355,6 +382,14 @@ SELECT 'CHARGEBACK',btrim(chargeback.provider_chargeback_id,$7::text),payment.me
        COALESCE((SELECT jsonb_agg(to_jsonb(entry) ORDER BY entry.created_at,entry.id) FROM journal_entries entry WHERE entry.business_reference IN ('payment-transaction:'||chargeback.payment_transaction_id::text||':chargeback:'||chargeback.provider_chargeback_id,'chargeback-repair:'||chargeback.id::text)),'[]'::jsonb)
 FROM chargeback_cases chargeback JOIN payment_orders payment ON payment.id=chargeback.payment_order_id JOIN payment_transactions transaction ON transaction.id=chargeback.payment_transaction_id
 WHERE payment.channel=$1 AND ((chargeback.resolved_at>=$2 AND chargeback.resolved_at<$3) OR (btrim(chargeback.provider_chargeback_id,$7::text),payment.merchant_order_no) IN (SELECT reference,merchant FROM jsonb_to_recordset($6::jsonb) AS supplied(reference text,merchant text,kind text) WHERE kind='CHARGEBACK')) AND chargeback.status='CONFIRMED' AND transaction.provider_id=$4 AND transaction.provider_version=$5
+UNION ALL
+SELECT 'PAYMENT','ORPHAN_PAYMENT_ORDER:'||payment.id::text,payment.merchant_order_no,payment.id,payment.amount_fen,payment.currency,
+       jsonb_build_object('payment_order',to_jsonb(payment),'payment_date_verification_required',payment.paid_at IS NULL),NULL,'[]'::jsonb
+FROM payment_orders payment
+WHERE payment.channel=$1 AND payment.status='PAID' AND payment.fulfillment_status='CREDITED'
+  AND (payment.paid_at IS NULL OR (payment.paid_at>=$2 AND payment.paid_at<$3))
+  AND payment.provider_id=$4 AND payment.provider_version=$5
+  AND NOT EXISTS(SELECT 1 FROM payment_transactions transaction WHERE transaction.payment_order_id=payment.id)
 ORDER BY 1,2`, channel, start, end, providerID, providerVersion, references, reconciliationReferenceTrimCharacters)
 	if err != nil {
 		return nil, err

@@ -206,7 +206,8 @@ function remoteProxySystemBody(item) {
 function remoteActionFailureCode(failure) {
   const candidate = failure?.code || failure?.message || failure;
   const code = String(candidate || '');
-  return remoteActionFailureCopyKey(code) !== 'actionFailed' ? code : 'errorGeneric';
+  return ['remote_proxy_byte_budget', 'remote_pending_limit_reached', 'remote_retirement_budget_exhausted'].includes(code)
+    || remoteActionFailureCopyKey(code) !== 'actionFailed' ? code : 'errorGeneric';
 }
 
 function remoteActionFailureCopyKey(code) {
@@ -218,6 +219,13 @@ function remoteActionFailureCopyKey(code) {
     case 'remote_attachment_metadata_invalid': return 'attachmentMetadataInvalid';
     default: return 'actionFailed';
   }
+}
+
+function remoteCapacityFailureText(code, copy) {
+  if (code === 'remote_proxy_byte_budget') return copy.byteBudget;
+  if (code === 'remote_pending_limit_reached') return copy.pendingLimit;
+  if (code === 'remote_retirement_budget_exhausted') return copy.retirementBudget;
+  return null;
 }
 
 function constrainDialogFocus(event, dialog) {
@@ -683,7 +691,7 @@ const openChatExternalUrl = (url) => {
       }
       return (
         <div className="relative">
-          <button ref={triggerRef} onClick={onTriggerClick} title={t.attachAdd} className={COMPOSER_ICON_BUTTON_CLASS}>
+          <button type="button" ref={triggerRef} onClick={onTriggerClick} title={t.attachAdd} className={COMPOSER_ICON_BUTTON_CLASS}>
             <Paperclip size={18} />
           </button>
           <input ref={fileInputRef} type="file" multiple className="hidden" data-testid="device-file-input" onChange={onFilesChosen} />
@@ -3379,10 +3387,9 @@ const openChatExternalUrl = (url) => {
         }
       }
       const remoteSendMessage = remotePermissionFailureText(currentRemoteSendError, t.remoteConversation)
+        ?? remoteCapacityFailureText(currentRemoteSendError, t.remoteArchive)
         ?? (currentRemoteSendError === 'remote_capability_not_ready'
         ? t.remoteConversation.capabilityNotReady
-        : currentRemoteSendError === 'remote_proxy_byte_budget'
-        ? t.remoteArchive.byteBudget
         : currentRemoteSendError === 'task_session_busy'
         ? t.remoteConversation.sessionBusy
         : (currentRemoteSendError === 'temporary_model_capability_required'
@@ -4942,7 +4949,7 @@ const openChatExternalUrl = (url) => {
 
             {remoteChatActive && remoteActionError && (
               <div role="alert" data-testid="chat-remote-action-error" className={`mb-4 w-full max-w-[800px] px-5 text-[12px] text-[#EA4335] max-sm:px-4 ${hasMessages ? 'mx-auto' : ''}`}>
-                {t.remoteConversation[remoteActionFailureCopyKey(remoteActionError)]}
+                {remoteCapacityFailureText(remoteActionError, t.remoteArchive) ?? t.remoteConversation[remoteActionFailureCopyKey(remoteActionError)]}
               </div>
             )}
 
@@ -5423,7 +5430,7 @@ const openChatExternalUrl = (url) => {
                         className={`text-[13px] px-4 py-2 rounded-full ${'bg-[#E1E5EA] hover:bg-[#D3D9E0] dark:bg-[#333537] dark:hover:bg-[#444746]'} ${su.cancelling ? 'opacity-50' : ''}`}>
                         {su.installing ? (su.cancelling ? chatCopy.cancelling : chatCopy.cancelDownload) : chatCopy.cancel}</button>
                       {!su.installing && (
-                        <button onClick={() => bridge.voice.installVoiceAsr()} disabled={!su.status?.installable}
+                        <button type="button" onClick={() => bridge.voice.installVoiceAsr()} disabled={!su.status?.installable}
                           className={`text-[13px] font-medium px-4 py-2 rounded-full ${'bg-[#0B57D0] text-white hover:bg-[#1967D2] dark:bg-[#A8C7FA] dark:text-[#041E49] dark:hover:bg-[#C2D7FB]'} ${!su.status?.installable ? 'opacity-50' : ''}`}>
                           {!su.status?.installable ? chatCopy.repairInstall : (needModel ? chatCopy.downloadModel : chatCopy.install)}</button>
                       )}
@@ -6285,7 +6292,7 @@ const openChatExternalUrl = (url) => {
             )}
             {/* iOS 风操作条：hover 气泡时下方浮现；窄屏无 hover，常显保证触屏可达。复制=所有 query；编辑重发=仅最新(editable)。 */}
             <div className="flex items-center gap-0.5 mt-1 pr-1 opacity-0 group-hover:opacity-100 max-sm:opacity-100 transition-opacity duration-150">
-              <button title={copied ? t.copied : t.copyMsg} onClick={copyText}
+              <button type="button" title={copied ? t.copied : t.copyMsg} onClick={copyText}
                 className={`w-7 h-7 rounded-lg flex items-center justify-center transition-colors ${actBtn}`}>
                 {copied ? <Check size={14} className="text-[#34C759]" /> : <Copy size={14} />}
               </button>
@@ -6550,7 +6557,7 @@ const openChatExternalUrl = (url) => {
                   <div className="text-[14px] font-medium mb-2" style={{ color: theme === 'dark' ? '#fff' : '#000' }}>{cq.q.question}</div>
                   <div className="rounded-[14px] overflow-hidden" style={{ background: theme === 'dark' ? '#1C1C1E' : '#fff', border: theme === 'dark' ? 'none' : '0.5px solid rgba(60,60,67,.12)' }}>
                     {cq.q.options.map((opt, i) => (
-                      <button key={i} onClick={()=> onSend && onSend(optionAnswer(opt))}
+                      <button type="button" key={i} onClick={()=> onSend && onSend(optionAnswer(opt))}
                         className="w-full flex items-center gap-3 px-4 py-3 text-left transition-opacity active:opacity-60 hover:opacity-90"
                         style={i ? { borderTop: '0.5px solid ' + (theme === 'dark' ? 'rgba(84,84,88,.45)' : 'rgba(60,60,67,.12)') } : undefined}>
                         <span className="text-[15px] shrink-0 text-right" style={{ color: '#8E8E93', width: 15, fontVariantNumeric: 'tabular-nums' }}>{i + 1}</span>
@@ -6570,7 +6577,7 @@ const openChatExternalUrl = (url) => {
                   </div>
                   {draftSaved
                     ? <span className="shrink-0 inline-flex items-center gap-1 h-8 px-1 text-[13px] font-medium" style={{ color:'#8E8E93' }} title={t.cpDraftSavedTitle}><Check size={15} strokeWidth={2.5} style={{ color:'#34C759' }} />{t.cpDraftSaved}</span>
-                    : <button onClick={()=> onOpenEditor && onOpenEditor(pd.draft)} className="shrink-0 px-4 h-8 rounded-full text-[13px] font-semibold text-white" style={{ background: theme === 'dark' ? '#0A84FF' : '#007AFF' }} title={t.cpDraftViewTitle}>{t.cpDraftView}</button>}
+                    : <button type="button" onClick={()=> onOpenEditor && onOpenEditor(pd.draft)} className="shrink-0 px-4 h-8 rounded-full text-[13px] font-semibold text-white" style={{ background: theme === 'dark' ? '#0A84FF' : '#007AFF' }} title={t.cpDraftViewTitle}>{t.cpDraftView}</button>}
                 </div>
               ) : null}
               {showAssistantActions && assistantCopyAvailable && <AssistantMessageFooter>
@@ -6710,7 +6717,7 @@ const openChatExternalUrl = (url) => {
                 <div className="shrink-0 flex items-center gap-2">
                   <span className="text-[11px] px-2 py-1 rounded-full bg-white/[0.07] text-[#AEB4BC]">{meta.label}</span>
                   {!resolved && (
-                    <button
+                    <button type="button"
                       className="w-6 h-6 rounded-full flex items-center justify-center text-[#8E8E93] hover:text-[#F2F3F5] hover:bg-white/[0.08] transition-colors"
                       title={chatCopy.ignoreOnce}
                       data-testid="memory-candidate-dismiss"
@@ -6727,9 +6734,9 @@ const openChatExternalUrl = (url) => {
               {!resolved && <div className="mt-2 ml-9 text-[12px] leading-relaxed text-[#AEB4BC]">{meta.hint}</div>}
               {!resolved && (
                 <div className="mt-3 ml-9 flex flex-wrap items-center gap-2">
-                  <button data-testid="memory-candidate-confirm" className="inline-flex items-center gap-1.5 text-[13px] font-medium px-3.5 py-1.5 rounded-full bg-[#0A84FF] text-white hover:bg-[#1677D2] transition-colors" onClick={() => bridge.available && bridge.memory.confirmMemoryCandidate && bridge.memory.confirmMemoryCandidate(item.memoryId, item.id)}><Check size={14} />{chatCopy.remember}</button>
-                  <button data-testid="memory-candidate-ignore" className="inline-flex items-center gap-1.5 text-[13px] px-3.5 py-1.5 rounded-full bg-white/[0.08] text-[#E8EAED] hover:bg-white/[0.12] transition-colors" onClick={() => bridge.available && bridge.memory.ignoreMemoryCandidate && bridge.memory.ignoreMemoryCandidate(item.memoryId, item.id)}><X size={14} />{chatCopy.ignoreOnce}</button>
-                  <button data-testid="memory-candidate-never" className="text-[13px] px-2 py-1.5 rounded-full text-[#AEB4BC] hover:text-[#F2F3F5] hover:bg-white/[0.08] transition-colors" onClick={() => bridge.available && bridge.memory.neverMemoryCandidate && bridge.memory.neverMemoryCandidate(item.memoryId, item.id)}>{chatCopy.neverAsk}</button>
+                  <button type="button" data-testid="memory-candidate-confirm" className="inline-flex items-center gap-1.5 text-[13px] font-medium px-3.5 py-1.5 rounded-full bg-[#0A84FF] text-white hover:bg-[#1677D2] transition-colors" onClick={() => bridge.available && bridge.memory.confirmMemoryCandidate && bridge.memory.confirmMemoryCandidate(item.memoryId, item.id)}><Check size={14} />{chatCopy.remember}</button>
+                  <button type="button" data-testid="memory-candidate-ignore" className="inline-flex items-center gap-1.5 text-[13px] px-3.5 py-1.5 rounded-full bg-white/[0.08] text-[#E8EAED] hover:bg-white/[0.12] transition-colors" onClick={() => bridge.available && bridge.memory.ignoreMemoryCandidate && bridge.memory.ignoreMemoryCandidate(item.memoryId, item.id)}><X size={14} />{chatCopy.ignoreOnce}</button>
+                  <button type="button" data-testid="memory-candidate-never" className="text-[13px] px-2 py-1.5 rounded-full text-[#AEB4BC] hover:text-[#F2F3F5] hover:bg-white/[0.08] transition-colors" onClick={() => bridge.available && bridge.memory.neverMemoryCandidate && bridge.memory.neverMemoryCandidate(item.memoryId, item.id)}>{chatCopy.neverAsk}</button>
                 </div>
               )}
             </div>

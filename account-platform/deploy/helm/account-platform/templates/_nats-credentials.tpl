@@ -2,7 +2,7 @@
      Secret projection is init-only; the main container sees the memory copy. */}}
 {{- define "pinvou.natsCredentialsInit" -}}
 - name: prepare-nats-{{ .client }}
-  image: "{{ .image.repository }}:{{ .image.tag }}"
+  image: {{ include "pinvou.imageRef" (dict "image" .image) | quote }}
   imagePullPolicy: {{ .image.pullPolicy }}
   command: ["/service"]
   args: ["prepare-nats-credentials", {{ .client | quote }}]

@@ -14,6 +14,7 @@ app.kubernetes.io/instance: {{ .Release.Name }}
 {{- define "pinvou.newApiRedisUrl" -}}{{ default (printf "redis://%s-redis:6379/1" (include "pinvou.fullname" .)) .Values.dependencies.newApiRedisUrl }}{{- end -}}
 {{- define "pinvou.natsUrl" -}}{{ default (printf "nats://%s-nats:4222" (include "pinvou.fullname" .)) .Values.dependencies.natsUrl }}{{- end -}}
 {{- define "pinvou.natsMonitorUrl" -}}{{ default (printf "http://%s-nats:8222/healthz" (include "pinvou.fullname" .)) .Values.dependencies.natsMonitorUrl }}{{- end -}}
+{{- define "pinvou.imageRef" -}}{{- if .image.digest -}}{{ .image.repository }}@{{ .image.digest }}{{- else -}}{{ .image.repository }}:{{ .image.tag }}{{- end -}}{{- end -}}
 {{- define "pinvou.availabilityPodSpec" -}}
 {{- if .root.Values.availability.enabled }}
 terminationGracePeriodSeconds: {{ .root.Values.availability.terminationGracePeriodSeconds }}
@@ -39,6 +40,7 @@ topologySpreadConstraints:
 {{- include "pinvou.validateNativeKms" . -}}
 {{- include "pinvou.validateTokenGovernance" . -}}
 {{- if eq .Values.global.environment "production-new" -}}
+{{- range $name, $image := dict "accountService" .Values.images.accountService "identityService" .Values.images.identityService "billingService" .Values.images.billingService "tokenGateway" .Values.images.tokenGateway "tokenPortal" .Values.images.tokenPortal "tokenCredentialPortal" .Values.images.tokenCredentialPortal "tokenCommandExecutor" .Values.images.tokenCommandExecutor "tokenGovernance" .Values.images.tokenGovernance "eventRelay" .Values.images.eventRelay "migrate" .Values.images.migrate "tokenPolicyBootstrap" .Values.images.tokenPolicyBootstrap "keycloak" .Values.images.keycloak "redis" .Values.images.redis "nats" .Values.images.nats -}}{{- if not (regexMatch "^sha256:[a-f0-9]{64}$" (default "" $image.digest)) -}}{{ fail (printf "production-new image %s must be pinned by digest" $name) }}{{- end -}}{{- end -}}
 {{- if or (not .Values.networkPolicy.enabled) (not .Values.ingress.enabled) -}}{{ fail "production-new requires NetworkPolicy and ingress" }}{{- end -}}
 {{- if eq .Values.ingress.tlsSecretName "" -}}{{ fail "production-new requires an ingress TLS secret" }}{{- end -}}
 {{- if not .Values.externalSecrets.enabled -}}{{ fail "production-new requires an external KMS/Vault-backed runtime secret" }}{{- end -}}

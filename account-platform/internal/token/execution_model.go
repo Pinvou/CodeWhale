@@ -108,7 +108,7 @@ type UsageStore interface {
 	LoadReplay(context.Context, uuid.UUID, int64) (ReplaySnapshot, error)
 	MarkDelivery(context.Context, uuid.UUID, string) error
 	RequestCancellation(context.Context, uuid.UUID, uuid.UUID, string, string, string) (CancellationResult, bool, error)
-	ConfirmPreDispatchCancellation(context.Context, uuid.UUID) (CancellationResult, error)
+	ConfirmPreDispatchCancellation(context.Context, uuid.UUID, uuid.UUID) (CancellationResult, error)
 	RecordDeliveryConfirmation(context.Context, uuid.UUID, string, int64) error
 	CleanupReplayRetention(context.Context) error
 	RecoverUncertainDispatches(context.Context) error

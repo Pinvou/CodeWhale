@@ -1242,7 +1242,7 @@ jobs:
     timeout-minutes: 180
     services:
       audit-export-postgres:
-        image: postgres:16-alpine
+        image: mirror.gcr.io/library/postgres@sha256:721873c34ceb9f8d8fc265984940dc982404c105f19ad51be9fdc5970a6080ea
         env:
           POSTGRES_HOST_AUTH_METHOD: trust
           POSTGRES_USER: postgres
@@ -3586,6 +3586,10 @@ jobs:
             'features::monitor::platform::windows_gpu::tests::' \
             'features::remote_control::platform::windows::tests::' \
             'app::commands::remote_control::reader_resume_tests::' \
+            'features::remote_control::controller::controlled::journal_owner_tests::' \
+            'app::commands::desktop_remote_journal::tests::' \
+            'app::commands::desktop_remote_task::journal_owner_tests::' \
+            'features::remote_control::controller::controlled::tests::resume_sequence_advances_the_gate_and_rotates_material' \
             'features::remote_control::controller::controlling_inbound::tests::' \
             'features::remote_control::controller::controlling_service::inbound_tests::' \
             'features::remote_control::controller::transfer::staging::tests::' \
@@ -3897,6 +3901,14 @@ jobs:
       - name: dev-profile memory guard (codewhale-tui O0, this job only)
         run: |
           config="${CARGO_HOME:-$HOME/.cargo}/config.toml"
+          # $CARGO_HOME is not guaranteed to exist: since 2026-11 the macos-15
+          # runner image ships Rust with rustup's home outside ~/.cargo, so
+          # dtolnay/rust-toolchain's "Install rustup if needed" skips and never
+          # creates ~/.cargo; a bare cat >> then exits 1 on the missing parent
+          # directory. Create the directory before appending; cat >> creates
+          # a missing file itself. (The rust-test / windows-rust-test siblings
+          # are covered by scripts/ci-cargo-dev-profile.py.)
+          mkdir -p "$(dirname "$config")"
           cat >> "$config" <<'EOF'
 
           [profile.dev.package.codewhale-tui]

@@ -13,7 +13,10 @@ export function verifyRenderedKeycloak(source) {
   const container = containers[0];
   check(container.ports?.some(p => p.name === 'management' && p.containerPort === 9000)
     && same(container.startupProbe?.httpGet, { path: '/health/started', port: 'management', scheme: 'HTTP' })
-    && same(container.readinessProbe?.httpGet, { path: '/health/ready', port: 'management', scheme: 'HTTP' }), 'keycloak_health');
+    && same(container.readinessProbe?.httpGet, { path: '/health/ready', port: 'management', scheme: 'HTTP' })
+    && same(container.livenessProbe?.httpGet, { path: '/health/live', port: 'management', scheme: 'HTTP' }), 'keycloak_health');
+  check(['requests', 'limits'].every(bound => ['cpu', 'memory'].every(resource =>
+    container.resources?.[bound]?.[resource] !== undefined)), 'keycloak_resources');
   const ingresses = resources.filter(r => r.kind === 'Ingress');
   const sticky = ingresses.filter(r => r.metadata.name.endsWith('-keycloak-session'));
   check(sticky.length === 1 && sticky[0].spec?.ingressClassName === 'nginx', 'keycloak_sticky');

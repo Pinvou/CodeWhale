@@ -95,11 +95,11 @@ const NavItem = memo(function NavItem({ icon, label, active, unread = false, unr
           data-testid={chat.menuTestId}
           className={`fixed z-[1000] overflow-hidden rounded-xl py-1 shadow-xl ring-1 bg-white ring-black/10 dark:bg-[#202124] dark:ring-white/10`}
           style={menuStyle}>
-          {onTogglePinned && <button className={menuItemCls} onClick={() => { closeMenu(); onTogglePinned(chat.id, !chat.pinned); }}>
+          {onTogglePinned && <button type="button" className={menuItemCls} onClick={() => { closeMenu(); onTogglePinned(chat.id, !chat.pinned); }}>
             {chat.pinned ? <PinOffIcon size={15} /> : <PinIcon size={15} />}
             <span>{chat.pinned ? t.riUnpin : t.riPin}</span>
           </button>}
-          {onRename && <button className={menuItemCls} onClick={() => { closeMenu(); setVal(chat.title); setEditing(true); }}>
+          {onRename && <button type="button" className={menuItemCls} onClick={() => { closeMenu(); setVal(chat.title); setEditing(true); }}>
             <Edit2 size={15} />
             <span>{t.riRename}</span>
           </button>}
@@ -115,7 +115,7 @@ const NavItem = memo(function NavItem({ icon, label, active, unread = false, unr
               <span>{t.uiProjects.moveToProject}</span>
             </button>
           )}
-          <button className={`${menuItemCls} text-[#C5221F] hover:bg-[#FAD2CF] dark:text-[#F28B82] dark:hover:bg-[#5c2b29]`} onClick={() => { closeMenu(); setConfirming(true); }}>
+          <button type="button" className={`${menuItemCls} text-[#C5221F] hover:bg-[#FAD2CF] dark:text-[#F28B82] dark:hover:bg-[#5c2b29]`} onClick={() => { closeMenu(); setConfirming(true); }}>
             <Trash2 size={15} />
             <span>{t.cpDelete}</span>
           </button>
@@ -123,7 +123,7 @@ const NavItem = memo(function NavItem({ icon, label, active, unread = false, unr
             <div className="my-1 h-px bg-black/10 dark:bg-white/10" />
           )}
           {onOpenFolder && (
-            <button className={menuItemCls} onClick={() => { closeMenu(); onOpenFolder(chat.id); }}>
+            <button type="button" className={menuItemCls} onClick={() => { closeMenu(); onOpenFolder(chat.id); }}>
               <FolderOpen size={15} />
               <span>{t.riOpenFolder}</span>
             </button>
@@ -135,7 +135,7 @@ const NavItem = memo(function NavItem({ icon, label, active, unread = false, unr
             </button>
           )}
           {onArchive && (
-            <button className={menuItemCls} onClick={() => { closeMenu(); onArchive(chat.id); }}>
+            <button type="button" className={menuItemCls} onClick={() => { closeMenu(); onArchive(chat.id); }}>
               <Archive size={15} />
               <span>{t.archiveSession}</span>
             </button>
@@ -216,9 +216,9 @@ const NavItem = memo(function NavItem({ icon, label, active, unread = false, unr
           {confirming ? (
             <div className="mr-4 flex items-center gap-0.5 shrink-0">
               <span className="text-[11px] mr-0.5 text-[#C5221F] dark:text-[#F28B82]">{t.riDelQ}</span>
-              <button title={t.riDelConfirm} onClick={(e) => { e.stopPropagation(); onDelete(chat.id); }}
+              <button type="button" title={t.riDelConfirm} onClick={(e) => { e.stopPropagation(); onDelete(chat.id); }}
                 className="w-6 h-6 rounded-full flex items-center justify-center text-[#C5221F] hover:bg-[#FAD2CF] dark:text-[#F28B82] dark:hover:bg-[#5c2b29]"><Check size={14} /></button>
-              <button title={t.cpCancel} onClick={(e) => { e.stopPropagation(); setConfirming(false); }}
+              <button type="button" title={t.cpCancel} onClick={(e) => { e.stopPropagation(); setConfirming(false); }}
                 className="w-6 h-6 rounded-full flex items-center justify-center text-[#5F6368] hover:bg-[#D3D7DB] dark:text-[#C4C7C5] dark:hover:bg-[#444746]"><X size={13} /></button>
             </div>
           ) : (
@@ -231,13 +231,13 @@ const NavItem = memo(function NavItem({ icon, label, active, unread = false, unr
                 </span>
               )}
               <div className="mr-4 hidden group-hover:flex group-focus-within:flex max-sm:flex items-center gap-0.5 shrink-0">
-                {onTogglePinned && <button title={chat.pinned ? t.riUnpin : t.riPin} onClick={(e) => { e.stopPropagation(); onTogglePinned(chat.id, !chat.pinned); }}
+                {onTogglePinned && <button type="button" title={chat.pinned ? t.riUnpin : t.riPin} onClick={(e) => { e.stopPropagation(); onTogglePinned(chat.id, !chat.pinned); }}
                   className="w-6 h-6 rounded-full flex items-center justify-center transition-colors text-[#5F6368] hover:bg-[#D3D7DB] dark:text-[#C4C7C5] dark:hover:bg-[#444746]">
                   {chat.pinned ? <PinOffIcon size={13} /> : <PinIcon size={13} />}
                 </button>}
 
                 <div className="relative">
-                  <button title={t.riMore} onClick={toggleMenu}
+                  <button type="button" title={t.riMore} onClick={toggleMenu}
                     className="w-6 h-6 rounded-full flex items-center justify-center text-[#5F6368] hover:bg-[#D3D7DB] dark:text-[#C4C7C5] dark:hover:bg-[#444746]"><MoreHorizontal size={14} /></button>
                 </div>
               </div>

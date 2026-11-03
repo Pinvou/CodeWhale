@@ -38,6 +38,14 @@ type ReconciliationStore interface {
 	RecordConvergenceEvidence(context.Context, uuid.UUID, string, string, string, string, map[string]any) error
 }
 
+type ownedReconciliationStore interface {
+	RescheduleReconciliationOwned(context.Context, uuid.UUID, int, string, time.Time) error
+}
+
+type ownedStopReconciliationStore interface {
+	StopReconciliationOwned(context.Context, uuid.UUID, int, string) error
+}
+
 func legacyResponseStateSplit(request UsageRequest) bool {
 	return request.Status == "UPSTREAM_ACTIVE" && request.ExecutionStatus == "SETTLEMENT_PENDING"
 }
@@ -146,20 +154,57 @@ RETURNING request.id,request.idempotency_key_digest,request.user_id,request.sess
 }
 
 func (r *PostgresRepository) RescheduleReconciliation(ctx context.Context, usageID uuid.UUID, lastError string, nextAt time.Time) error {
-	command, err := r.pool.Exec(ctx, `UPDATE usage_requests
+	return r.rescheduleReconciliation(ctx, usageID, 0, lastError, nextAt, false)
+}
+
+// RescheduleReconciliationOwned only writes a result for the worker attempt
+// that claimed the row. A late worker becomes a no-op instead of clearing a
+// newer lease.
+func (r *PostgresRepository) RescheduleReconciliationOwned(ctx context.Context, usageID uuid.UUID, attempt int, lastError string, nextAt time.Time) error {
+	if attempt < 1 {
+		return ErrForbidden
+	}
+	return r.rescheduleReconciliation(ctx, usageID, attempt, lastError, nextAt, true)
+}
+
+func (r *PostgresRepository) rescheduleReconciliation(ctx context.Context, usageID uuid.UUID, attempt int, lastError string, nextAt time.Time, owned bool) error {
+	query := `UPDATE usage_requests
 SET reconciliation_next_at=$2,reconciliation_lease_until=NULL,reconciliation_last_error=$3,updated_at=$4
 WHERE id=$1 AND status IN ('SETTLEMENT_PENDING','REVIEW') AND reconciliation_stopped_at IS NULL
-  AND error_class IS DISTINCT FROM 'cancel_hold_recovery_unconfirmed'`, usageID, nextAt.UTC(), truncateReconciliationError(lastError), r.now())
+  AND error_class IS DISTINCT FROM 'cancel_hold_recovery_unconfirmed'`
+	args := []any{usageID, nextAt.UTC(), truncateReconciliationError(lastError), r.now()}
+	if owned {
+		query += ` AND reconciliation_attempts=$5`
+		args = append(args, attempt)
+	}
+	command, err := r.pool.Exec(ctx, query, args...)
 	if err != nil {
 		return err
 	}
 	if command.RowsAffected() == 0 {
+		if owned {
+			return nil
+		}
 		return r.ensureUsageState(ctx, usageID, "COMMITTED", "RELEASED")
 	}
 	return nil
 }
 
 func (r *PostgresRepository) StopReconciliation(ctx context.Context, usageID uuid.UUID, reason string) error {
+	return r.stopReconciliation(ctx, usageID, 0, reason, false)
+}
+
+// StopReconciliationOwned only writes a stop decision for the worker attempt
+// that claimed the row. A late worker becomes a no-op instead of clearing a
+// newer lease or appending stale stop evidence.
+func (r *PostgresRepository) StopReconciliationOwned(ctx context.Context, usageID uuid.UUID, attempt int, reason string) error {
+	if attempt < 1 {
+		return ErrForbidden
+	}
+	return r.stopReconciliation(ctx, usageID, attempt, reason, true)
+}
+
+func (r *PostgresRepository) stopReconciliation(ctx context.Context, usageID uuid.UUID, attempt int, reason string, owned bool) error {
 	now := r.now()
 	tx, err := r.pool.Begin(ctx)
 	if err != nil {
@@ -171,13 +216,16 @@ func (r *PostgresRepository) StopReconciliation(ctx context.Context, usageID uui
 	} else if pending {
 		return tx.Commit(ctx)
 	}
-	changed, err := r.stopReconciliationTx(ctx, tx, usageID, reason, now)
+	changed, err := r.stopReconciliationTxOwned(ctx, tx, usageID, attempt, reason, now, owned)
 	if err != nil {
 		return err
 	}
 	if !changed {
 		if err := tx.Rollback(ctx); err != nil {
 			return err
+		}
+		if owned {
+			return nil
 		}
 		return r.ensureUsageState(ctx, usageID, "COMMITTED", "RELEASED")
 	}
@@ -187,13 +235,23 @@ func (r *PostgresRepository) StopReconciliation(ctx context.Context, usageID uui
 // The captured finisher calls this only after verifying its exact immutable intent.
 // Public StopReconciliation still respects the shared deadline decision fence.
 func (r *PostgresRepository) stopReconciliationTx(ctx context.Context, tx pgx.Tx, usageID uuid.UUID, reason string, now time.Time) (bool, error) {
+	return r.stopReconciliationTxOwned(ctx, tx, usageID, 0, reason, now, false)
+}
+
+func (r *PostgresRepository) stopReconciliationTxOwned(ctx context.Context, tx pgx.Tx, usageID uuid.UUID, attempt int, reason string, now time.Time, owned bool) (bool, error) {
 	// UPDATE evaluates this ownership predicate under its usage-row lock. A
 	// previously claimed item cannot overwrite a later cancellation recovery or
 	// append RECONCILIATION_STOPPED evidence that invalidates its release proof.
-	command, err := tx.Exec(ctx, `UPDATE usage_requests
+	query := `UPDATE usage_requests
 SET status='REVIEW',settlement_status='REVIEW',cancel_status=CASE WHEN cancel_status IN ('CANCEL_REQUESTED','PROVIDER_SENT','PROVIDER_CONFIRMED') THEN 'RESULT_UNKNOWN' ELSE cancel_status END,error_class='automatic_reconciliation_exhausted',reconciliation_next_at=NULL,reconciliation_lease_until=NULL,reconciliation_last_error=$2,reconciliation_stopped_at=$3,updated_at=$3
 WHERE id=$1 AND status IN ('SETTLEMENT_PENDING','REVIEW')
-  AND error_class IS DISTINCT FROM 'cancel_hold_recovery_unconfirmed'`, usageID, truncateReconciliationError(reason), now)
+	  AND error_class IS DISTINCT FROM 'cancel_hold_recovery_unconfirmed'`
+	args := []any{usageID, truncateReconciliationError(reason), now}
+	if owned {
+		query += ` AND reconciliation_attempts=$4`
+		args = append(args, attempt)
+	}
+	command, err := tx.Exec(ctx, query, args...)
 	if err != nil {
 		return false, err
 	}
@@ -403,6 +461,20 @@ type UsageReconciler struct {
 	batchSize int
 }
 
+func (r *UsageReconciler) reschedule(ctx context.Context, item ReconciliationItem, reason string, nextAt time.Time) error {
+	if owned, ok := r.store.(ownedReconciliationStore); ok {
+		return owned.RescheduleReconciliationOwned(ctx, item.ID, item.Attempts, reason, nextAt)
+	}
+	return r.store.RescheduleReconciliation(ctx, item.ID, reason, nextAt)
+}
+
+func (r *UsageReconciler) stop(ctx context.Context, item ReconciliationItem, reason string) error {
+	if owned, ok := r.store.(ownedStopReconciliationStore); ok {
+		return owned.StopReconciliationOwned(ctx, item.ID, item.Attempts, reason)
+	}
+	return r.store.StopReconciliation(ctx, item.ID, reason)
+}
+
 var errManualReconciliationRequired = errors.New("manual reconciliation required")
 
 func NewUsageReconciler(store ReconciliationStore, billing ReconciliationBilling, evidence UsageEvidenceProvider, interval time.Duration) *UsageReconciler {
@@ -450,7 +522,7 @@ func (r *UsageReconciler) runOnce(ctx context.Context) {
 		if handled, err := r.reconcileMissingReferenceDeadline(ctx, item); handled {
 			if err != nil {
 				r.logger.Warn("missing-reference release pending", "usage_request_id", item.ID, "error", err)
-				if writeErr := r.store.RescheduleReconciliation(ctx, item.ID, "MISSING_UPSTREAM_REFERENCE_RELEASE_UNCONFIRMED", r.now().Add(reconciliationBackoff(item.Attempts))); writeErr != nil {
+				if writeErr := r.reschedule(ctx, item, "MISSING_UPSTREAM_REFERENCE_RELEASE_UNCONFIRMED", r.now().Add(reconciliationBackoff(item.Attempts))); writeErr != nil {
 					r.logger.Error("missing-reference retry persistence failed", "usage_request_id", item.ID, "error", writeErr)
 				}
 			}
@@ -458,7 +530,7 @@ func (r *UsageReconciler) runOnce(ctx context.Context) {
 		}
 		if handled, err := r.reconcileUsageWaiver(ctx, item); handled {
 			if err != nil {
-				_ = r.store.RescheduleReconciliation(ctx, item.ID, "ADMIN_WAIVER_RESULT_UNKNOWN", r.now().Add(reconciliationBackoff(item.Attempts)))
+				_ = r.reschedule(ctx, item, "ADMIN_WAIVER_RESULT_UNKNOWN", r.now().Add(reconciliationBackoff(item.Attempts)))
 			}
 			continue
 		}
@@ -466,7 +538,7 @@ func (r *UsageReconciler) runOnce(ctx context.Context) {
 			r.logger.Warn("request reconciliation deferred", "usage_request_id", item.ID, "attempt", item.Attempts, "error", err)
 			errorCode := reconciliationErrorCode(err)
 			if errors.Is(err, errManualReconciliationRequired) {
-				_ = r.store.StopReconciliation(ctx, item.ID, errorCode)
+				_ = r.stop(ctx, item, errorCode)
 				continue
 			}
 			if r.now().Sub(item.StartedAt) >= r.maxAge {
@@ -478,15 +550,15 @@ func (r *UsageReconciler) runOnce(ctx context.Context) {
 						continue
 					}
 					// Stores without the durable decision contract cannot authorize a release.
-					if writeErr := r.store.StopReconciliation(ctx, item.ID, "HOLD_RELEASE_UNAVAILABLE:"+errorCode); writeErr != nil {
+					if writeErr := r.stop(ctx, item, "HOLD_RELEASE_UNAVAILABLE:"+errorCode); writeErr != nil {
 						r.logger.Error("manual stop failed", "error", writeErr)
 					}
-				} else if writeErr := r.store.StopReconciliation(ctx, item.ID, "MANUAL_RECONCILIATION_REQUIRED"); writeErr != nil {
+				} else if writeErr := r.stop(ctx, item, "MANUAL_RECONCILIATION_REQUIRED"); writeErr != nil {
 					r.logger.Error("manual stop failed", "error", writeErr)
 				}
 				continue
 			}
-			_ = r.store.RescheduleReconciliation(ctx, item.ID, errorCode, r.now().Add(reconciliationBackoff(item.Attempts)))
+			_ = r.reschedule(ctx, item, errorCode, r.now().Add(reconciliationBackoff(item.Attempts)))
 		}
 	}
 }

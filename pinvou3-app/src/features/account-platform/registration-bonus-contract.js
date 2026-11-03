@@ -1,4 +1,4 @@
-import { integerMoney, parseFinanceJSON } from './finance-contract.js';
+import { integerMoney, parseFinanceJSON, preserveJSONIntegerFields } from './finance-contract.js';
 
 export const MAX_BONUS_POINTS = 922337203685477;
 export function bonusRevision(value) {
@@ -10,27 +10,7 @@ export function bonusRevision(value) {
 // This endpoint alone has an int64 revision. Preserve its original token before
 // JSON.parse; do not change how unrelated API versions are represented.
 export function parseRegistrationBonusJSON(text) {
-  let result = '';
-  for (let i = 0; i < text.length;) {
-    if (text[i] !== '"') { result += text[i++]; continue; }
-    const start = i++;
-    while (i < text.length) {
-      if (text[i] === '\\') { i += 2; continue; }
-      if (text[i++] === '"') break;
-    }
-    const token = text.slice(start, i);
-    result += token;
-    let cursor = i;
-    while (/\s/.test(text[cursor] || '') && cursor < text.length) cursor++;
-    if (text[cursor] !== ':' || !['revision', 'recoverable_registration_count', 'unrecoverable_registration_count'].includes(JSON.parse(token))) continue;
-    cursor++;
-    while (/\s/.test(text[cursor] || '') && cursor < text.length) cursor++;
-    const match = text.slice(cursor).match(/^-?(?:0|[1-9]\d*)(?=\s*[,}\]])/);
-    if (!match) continue;
-    integerMoney(match[0]);
-    result += text.slice(i, cursor) + JSON.stringify(match[0]);
-    i = cursor + match[0].length;
-  }
+  const result = preserveJSONIntegerFields(text, key => ['revision', 'recoverable_registration_count', 'unrecoverable_registration_count'].includes(key), { rejectMalformed: false });
   const policy = parseFinanceJSON(result);
   policy.revision = bonusRevision(policy.revision);
   const amount = integerMoney(policy.amount_microcredits);

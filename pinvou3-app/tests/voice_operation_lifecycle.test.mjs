@@ -362,6 +362,66 @@ test('stale edit preview is abandoned, while applying a valid edit retains prove
   }
 });
 
+// PR#2138 review regression: the send gate (busy / workspace sync / session
+// readiness / auth) can flip to false between recording start and transcription
+// completion. A closed gate must fail the real submission chain with the
+// send_failed error — the bridge's catch then lands on the failure notice and
+// the completed "voiceTaskSent" writeback is unreachable — while an open gate
+// keeps the normal accepted path untouched.
+for (const gateOpen of [false, true]) {
+  test(`voice task gate ${gateOpen ? 'open: the real send stays accepted' : 'closed: writeback chain fails instead of faking a sent success'}`, async () => {
+    const hook = read('src/features/voice-composer/useComposerVoiceInput.js');
+    const sends = [];
+    const blocked = [];
+    let acceptedCount = 0;
+    let draft = '';
+    const sandbox = {
+      useCallback: fn => fn,
+      trimDraft: value => String(value || '').trim(),
+      normalizeMode: mode => mode,
+      isActiveVoiceTarget: () => true,
+      clearStaleVoiceState() {},
+      discardVoiceResult() {},
+      taskSendInFlightRef: { current: false },
+      adapterRef: { current: {
+        targetId: 'chat-composer',
+        getDraft: () => draft,
+        setDraft: value => { draft = String(value); },
+        canSendTask: () => gateOpen,
+        sendTask: async text => { sends.push(text); return true; },
+        onTaskBlocked: (stage, text) => blocked.push([stage, text]),
+        onTaskAccepted: () => { acceptedCount += 1; },
+      } },
+    };
+    vm.createContext(sandbox);
+    const errorStart = hook.indexOf('function createVoiceTaskSendError(');
+    const deliverStart = hook.indexOf('async function deliverVoiceTask(');
+    const deliverEnd = hook.indexOf('\nfunction useComposerVoiceInput(', deliverStart);
+    const resultStart = hook.indexOf('  const handleVoiceResult = useCallback(');
+    const resultEnd = hook.indexOf('\n  // Returns true only', resultStart);
+    vm.runInContext(
+      `${hook.slice(errorStart, hook.indexOf('\n// Task-send teardown:', errorStart))}\n`
+      + `${hook.slice(deliverStart, deliverEnd)}\n`
+      + `${hook.slice(resultStart, resultEnd)}\nthis.writeback = handleVoiceResult;`,
+      sandbox,
+    );
+    const outcome = await sandbox.writeback('voice-session', 'voice task', '', { mode: 'task', operationId: 'voiceop-gate' })
+      .then(() => 'accepted', error => error.category);
+    if (gateOpen) {
+      assert.deepEqual(sends, ['voice task'], 'an open gate must reach the real sendTask');
+      assert.deepEqual(blocked, [], 'an open gate must not report a block');
+      assert.equal(acceptedCount, 1, 'the accepted path keeps its success bookkeeping');
+      assert.equal(outcome, 'accepted', 'a real send must not be flipped into a failure');
+    } else {
+      assert.deepEqual(sends, [], 'a closed gate must not pretend sendTask ran');
+      assert.deepEqual(blocked, [['gate', 'voice task']], 'the gate rejection must still notify the adapter');
+      assert.equal(acceptedCount, 0, 'a blocked task must not claim accepted bookkeeping');
+      assert.equal(draft, 'voice task', 'the text stays in the draft for a manual retry');
+      assert.equal(outcome, 'send_failed', 'the gate rejection must fail the writeback chain so no completed/voiceTaskSent writeback can follow');
+    }
+  });
+}
+
 test('desktop waits for Rust ownership and cannot open a microphone after a rejected claim', async () => {
   const h = harness(sources.desktop);
   let resolveClaim;
@@ -628,7 +688,7 @@ for (const navigation of ['none', 'session', 'new-draft', 'after-rollback']) {
           itemIdSeq: { get value() { return 0; }, set value(v) {} },
           formatAttachmentDisplayText: (t) => t,
         }));`, ctx);
-        vm.runInContext(['captureDraftWorkspaceBinding', 'ensureSession', 'enterDraft'].map(name => bridgeFunction(sessionSource, name)).join('\n')
+        vm.runInContext('var notifyingLocalSessionNavigation = false; var localNavigationListeners = new Set();\n' + ['publishLocalSessionNavigation', 'beginLocalSessionNavigation', 'captureDraftWorkspaceBinding', 'ensureSession', 'enterDraft'].map(name => bridgeFunction(sessionSource, name)).join('\n')
       + '\n' + ['restoreTaskDraft', 'restoreSteerText', 'prefillComposer', 'getComposerDraft'].map(name => bridgeFunction(chatSource, name)).join('\n'), ctx);
     const owner = { sessionId: null, draftEpoch: 4, operationId: operation.operationId };
     const creating = ctx.ensureSession(owner);
@@ -843,7 +903,7 @@ for (const lane of ['desktop', 'web']) {
           // maybePruneFailedWorkspaceRecent; load the real helpers (matching
           // names from the merged source) beside the sliced function.
           vm.runInContext((lane === 'desktop'
-            ? ['captureDraftWorkspaceBinding', 'maybePruneFailedWorkspaceRecent'].map(name => bridgeFunction(sessionSource, name)).join('\n') + '\n'
+            ? 'var notifyingLocalSessionNavigation = false; var localNavigationListeners = new Set();\n' + ['publishLocalSessionNavigation', 'beginLocalSessionNavigation', 'captureDraftWorkspaceBinding', 'maybePruneFailedWorkspaceRecent'].map(name => bridgeFunction(sessionSource, name)).join('\n') + '\n'
             : '') + bridgeFunction(sessionSource, 'ensureSession'), ctx);
         }
         const bridgeTargets = [];

@@ -205,9 +205,8 @@ test('云端 case-only 模型 ID 仍为自定义(无拼写迁移的目录精确�
 test('Coding Plan 手填 ID -> 自定义', () => {
   assert.strictEqual(isPresetModel(mk({ preset: 'openai_compatible', provider_kind: 'coding_plan', vendor: 'glm', base_url: 'https://open.bigmodel.cn/api/coding/paas/v4', model: 'my-custom-glm' })), false);
 });
-test('官方 API 命中目录(deepseek-v4-pro) -> 预设', () => {
-  assert.strictEqual(isPresetModel(mk({ preset: 'deepseek', provider_kind: 'official_api', vendor: 'deepseek', base_url: 'https://api.deepseek.com', model: 'deepseek-v4-pro' })), true);
-});
+// deepseek-v4-pro 的 official_api 命中断言由下方 legacyAliases 测试的
+// mkDeepseek('deepseek-v4-pro') 行逐字覆盖(同输入同期望),不再单列。
 test('deepseek catalog retired spellings still classify as preset via legacyAliases; the new mainline deepseek-flash hits exactly', () => {
   // The deepseek-v4-flash / -vision-exp rows are deleted and registered as
   // legacyAliases of deepseek-flash: existing configs must keep being
@@ -655,18 +654,10 @@ test('reasoningEffortTiersForModel 按 provider 暴露有实际区别的档位',
   assert.deepStrictEqual(tiers(anthropic), ['low', 'medium', 'high', 'max']);
   // GPT×Responses hits on openai rows take the openai_responses tier table
   // (the Responses effort mapper has no none: off normalizes to low so it is
-  // not exposed; max sends xhigh).
-  const openai56 = { preset: 'openai', vendor: 'openai', model: 'gpt-5.6-terra' };
-  assert.deepStrictEqual(tiers(openai56), ['low', 'medium', 'high', 'max']);
-  const openai55 = { preset: 'openai', vendor: 'openai', model: 'gpt-5.5' };
-  assert.deepStrictEqual(tiers(openai55), ['low', 'medium', 'high', 'max']);
-  const openai56Sol = { preset: 'openai', vendor: 'openai', model: 'gpt-5.6-sol' };
-  assert.deepStrictEqual(tiers(openai56Sol), ['low', 'medium', 'high', 'max']);
-  // gpt-5.4-mini hits the Responses wire too (the whole GPT family has been
-  // Responses since 2026-09-29, function calling confirmed on the model
-  // pages) instead of returning null via the Chat reasoning family.
-  const openaiMini = { preset: 'openai', vendor: 'openai', model: 'gpt-5.4-mini' };
-  assert.deepStrictEqual(tiers(openaiMini), ['low', 'medium', 'high', 'max']);
+  // not exposed; max sends xhigh). The per-id assertions for gpt-5.6-terra /
+  // gpt-5.5 / gpt-5.6-sol / gpt-5.4-mini are pinned with the same inputs by
+  // the "OpenAI 档位路由" test's responsesFamily loop below, so they are not
+  // repeated here.
   // openai_responses group: any model id gets the Responses tier table.
   const responsesCustom = { preset: 'openai_responses', model: 'my-aggregator-model' };
   assert.deepStrictEqual(tiers(responsesCustom), ['low', 'medium', 'high', 'max']);

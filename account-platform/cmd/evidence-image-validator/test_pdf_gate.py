@@ -29,6 +29,29 @@ def encode(items):
 
 
 class GateTests(unittest.TestCase):
+    def test_strict_runs_all_pdf_delivery_suites(self):
+        selected = []
+
+        def run(args, **kwargs):
+            if args[1:3] == ["test", "-json"]:
+                return types.SimpleNamespace(returncode=0, stdout=encode(events()), stderr="")
+            if any(str(arg).endswith("run_pdf_unittest.py") for arg in args):
+                selected.append(Path(args[-1]).name)
+                return types.SimpleNamespace(returncode=0, stdout=json.dumps({
+                    "tests": 1, "skipped": 0, "failures": 0, "errors": 0,
+                    "expected_failures": 0, "unexpected_successes": 0,
+                }))
+            return types.SimpleNamespace(returncode=0)
+
+        with patch.dict(os.environ, {"EVIDENCE_PDF_AUDIT_DIR": "fixture-audit"}), \
+             patch.object(gate.shutil, "which", side_effect=lambda value: value), \
+             patch.object(gate.subprocess, "run", side_effect=run), \
+             patch.object(sys, "argv", ["gate", "--strict"]), \
+             contextlib.redirect_stdout(io.StringIO()):
+            gate.main()
+        self.assertEqual(selected, ["test_pdf_gate.py", "test_pdf_validator.py",
+                                    "test_prune_pdf_lxml.py", "test_pdf_image_candidate.py"])
+
     def test_go_uses_venv_interpreter_without_resolving_symlinks(self):
         # POSIX venv/bin/python is often a symlink: resolving it can bypass
         # pyvenv.cfg and lose packages installed inside the venv.

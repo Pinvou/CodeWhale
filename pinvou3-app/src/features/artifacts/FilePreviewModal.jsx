@@ -46,8 +46,8 @@ const FilePreviewModal = ({ path, sessionId, onClose, t }) => {
         <div className="flex items-center justify-between px-4 py-3 border-b border-black/10 dark:border-white/10">
           <span className="text-[14px] font-medium truncate text-[#1F1F1F] dark:text-[#E3E3E3]" title={path}>{name}</span>
           <div className="flex items-center gap-2">
-            {canOpen && <button onClick={open} className="px-2 py-1 text-[12px] rounded text-[#444746] dark:text-[#C4C7C5] hover:bg-[#F0F4F9] dark:hover:bg-[#333537]">{isWeb ? labels.download : labels.openExternal}</button>}
-            <button onClick={onClose} className="w-7 h-7 rounded-full flex items-center justify-center hover:bg-[#F0F4F9] dark:hover:bg-[#333537] text-[#444746] dark:text-[#C4C7C5]">✕</button>
+            {canOpen && <button type="button" onClick={open} className="px-2 py-1 text-[12px] rounded text-[#444746] dark:text-[#C4C7C5] hover:bg-[#F0F4F9] dark:hover:bg-[#333537]">{isWeb ? labels.download : labels.openExternal}</button>}
+            <button type="button" onClick={onClose} className="w-7 h-7 rounded-full flex items-center justify-center hover:bg-[#F0F4F9] dark:hover:bg-[#333537] text-[#444746] dark:text-[#C4C7C5]">✕</button>
           </div>
         </div>
         <div className="flex-1 overflow-y-auto custom-scrollbar p-4 min-w-0">
