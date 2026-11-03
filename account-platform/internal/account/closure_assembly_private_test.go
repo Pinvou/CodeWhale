@@ -35,9 +35,9 @@ func (f *closureAssemblyRepository) AccountClosureForPrincipal(context.Context, 
 	f.calls++
 	return AccountClosureRequest{ID: f.id, Status: "IN_PROGRESS", Stage: "CLOSURE_REQUESTED", Blockers: []AccountClosureBlocker{}}, nil
 }
-func (f *closureAssemblyRepository) ListAccountClosureRepairs(context.Context, AccountClosureRepairFilter) ([]AccountClosureRequest, error) {
+func (f *closureAssemblyRepository) ListAccountClosureRepairs(context.Context, AccountClosureRepairFilter) (AccountClosureRepairPage, error) {
 	f.calls++
-	return []AccountClosureRequest{}, nil
+	return AccountClosureRepairPage{Items: []AccountClosureRequest{}}, nil
 }
 func (f *closureAssemblyRepository) RetryAccountClosure(_ context.Context, _ identity.Principal, id uuid.UUID, key, reason string) (AccountClosureRequest, error) {
 	f.calls++

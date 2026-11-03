@@ -511,7 +511,7 @@ import memoryOrganizeImage from '../../assets/scheduled/memory-organize.jpg';
     // ScheduledTasksView 内的 MyTasksSection 分区（见组件内定义）直接闭包共享状态；
     // 原模块级 makeMyTasksSection 工厂只有一个调用点，已内联为普通渲染函数。
 
-    const ScheduledTasksView = ({ theme, t, onOpenChat, onGotoModelSettings }) => {
+    const ScheduledTasksView = ({ theme, t, onOpenChat, onOpenScheduledRun, onGotoModelSettings }) => {
       // The settings slice is required here: the memory-organize template card
       // is gated on bs.settings.memory_enabled; without the domain the field
       // is always undefined and the card can never render.
@@ -956,11 +956,9 @@ import memoryOrganizeImage from '../../assets/scheduled/memory-organize.jpg';
       }
 
       async function openRunChat(run) {
-        if (!run || !run.sessionId || !bridge || !bridge.scheduled.openScheduledRunChat) return;
+        if (!run || !run.sessionId || !onOpenScheduledRun) return;
         try {
-          if (!(await flushBeforeAction())) return;
-          const opened = await bridge.scheduled.openScheduledRunChat(run, detail || selected);
-          if (!opened) return;
+          await onOpenScheduledRun(run, detail || selected, flushBeforeAction);
         } catch (_) {}
       }
 

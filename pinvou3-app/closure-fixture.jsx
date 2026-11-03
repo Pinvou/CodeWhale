@@ -21,6 +21,7 @@ globalThis.fetch = async (url, input = {}) => {
   if (c.delay) await new Promise(resolve => { c.resolve = resolve; });
   if (c.repair401 && String(url).includes('/actions/retry')) return new Response(JSON.stringify({ code: 'RECENT_AUTHENTICATION_REQUIRED' }), { status: 401 });
   if (c.unknown) { c.unknown = false; throw new TypeError('Controlled ACK lost'); }
+  if (c.serializationConflict) { c.serializationConflict = false; return new Response(JSON.stringify({ code: 'ACCOUNT_CLOSURE_SERIALIZATION_CONFLICT' }), { status: 409 }); }
   return Response.json(c.invalidSLA ? { ...receipt, sla_expires_at: c.invalidSLA === 'missing' ? undefined : '2026-02-31T12:00:00Z' } : receipt, { status: String(url).includes('/actions/retry') ? 200 : 202 });
 };
 window.prompt = () => 'CLOSE_MY_ACCOUNT';

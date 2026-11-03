@@ -397,7 +397,7 @@ func (r *UsageReconciler) reconcileCapturedReferenceDeadline(ctx context.Context
 	}
 	v, handled, err := store.PrepareCapturedReferenceRelease(ctx, item.ID, failure, create)
 	if errors.Is(err, ErrForbidden) {
-		if stopErr := r.store.StopReconciliation(ctx, item.ID, "MANUAL_RECONCILIATION_REQUIRED"); stopErr != nil {
+		if stopErr := r.stop(ctx, item, "MANUAL_RECONCILIATION_REQUIRED"); stopErr != nil {
 			return true, stopErr
 		}
 	}

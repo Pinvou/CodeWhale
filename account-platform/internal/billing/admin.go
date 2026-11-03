@@ -198,6 +198,7 @@ type adminRepository interface {
 	ClaimPaymentAnomaly(context.Context, uuid.UUID, uuid.UUID, string) (PaymentAnomalyCase, error)
 	ResolvePaymentAnomaly(context.Context, uuid.UUID, uuid.UUID, string, string, string, string) (PaymentAnomalyCase, error)
 	PreparePaymentAnomalyResolution(context.Context, uuid.UUID, uuid.UUID, string, string, string) (PaymentAnomalyCase, bool, error)
+	CompleteEscalatedForcedRefund(context.Context, uuid.UUID, uuid.UUID, string, string) (PaymentAnomalyCase, error)
 	ApplyConfirmedChargeback(context.Context, uuid.UUID, string) (ChargebackCase, error)
 	ApplyReviewedForcedRefund(context.Context, uuid.UUID) (ForcedRefundCase, error)
 	AdminLatePaymentReviews(context.Context, LatePaymentReviewFilter, int) ([]LatePaymentReviewCase, error)
@@ -714,6 +715,15 @@ func (s *Service) adminResolvePaymentAnomaly(w http.ResponseWriter, r *http.Requ
 		return
 	}
 	resolution := strings.ToUpper(strings.TrimSpace(body.Resolution))
+	if resolution == "COMPLETE_ESCALATED_FORCED_REFUND" {
+		item, err := repository.CompleteEscalatedForcedRefund(r.Context(), caseID, adminActor(adminPrincipal(r)), idempotencyKey, body.Reason)
+		if err != nil {
+			s.writeError(w, r, err)
+			return
+		}
+		writeAdminFinancialJSON(w, http.StatusOK, item)
+		return
+	}
 	prepared, completed, err := repository.PreparePaymentAnomalyResolution(r.Context(), caseID, adminActor(adminPrincipal(r)), idempotencyKey, resolution, body.Reason)
 	if err != nil {
 		s.writeError(w, r, err)

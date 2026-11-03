@@ -95,6 +95,7 @@ def main():
             raise RuntimeError("strict PDF gate requires both audited lxml wheels")
         test_env["EVIDENCE_PDF_REQUIRE_SYMLINK"] = "1"
         tests.append("test_prune_pdf_lxml.py")
+        tests.append("test_pdf_image_candidate.py")
     for test in tests:
         report = subprocess.run([python, "-I", "-B", str(HERE / "run_pdf_unittest.py"), str(HERE / test)], cwd=HERE, env=test_env, check=True, stdout=subprocess.PIPE, text=True, timeout=120)
         print(test, "passed:", check_python_result(report.stdout), "tests")
