@@ -433,7 +433,7 @@ const ToolOutput = ({ item, t }) => {
               aria-expanded={expanded}
               onClick={toggleExpanded}
               onKeyDown={(event) => {
-                // 行内嵌着真 <button>（取消任务）：键盘事件先判来源，否则冒泡
+                // 行内嵌着真 <button type="button">（取消任务）：键盘事件先判来源，否则冒泡
                 // 到这里的 preventDefault 会吞掉嵌套按钮的原生 Enter/Space 激活。
                 if (event.target !== event.currentTarget) return;
                 if (event.key === 'Enter' || event.key === ' ') {
@@ -568,9 +568,9 @@ const ToolOutput = ({ item, t }) => {
           {active ? (
             <div className="flex items-center gap-2 flex-wrap">
               <span className={`text-[13px] mr-1 text-[#444746] dark:text-[#C4C7C5]`}>{t.planNext}</span>
-              <button className={cardBtnCls('primary') + ' disabled:opacity-40 disabled:cursor-not-allowed'} disabled={webReadOnly} onClick={() => bridge.interaction.acceptPlan(item.id, item.planMarkdown, undefined, item.planId)}>{t.planGo}</button>
-              <button className={cardBtnCls() + ' disabled:opacity-40 disabled:cursor-not-allowed'} disabled={webReadOnly} onClick={() => onPrefill && onPrefill(t.planRevisePrefill)}>{t.planEdit}</button>
-              <button className={cardBtnCls() + ' disabled:opacity-40 disabled:cursor-not-allowed'} disabled={webReadOnly} onClick={() => bridge.interaction.discardPlan(item.id, item.planId)}>{t.planDrop}</button>
+              <button type="button" className={cardBtnCls('primary') + ' disabled:opacity-40 disabled:cursor-not-allowed'} disabled={webReadOnly} onClick={() => bridge.interaction.acceptPlan(item.id, item.planMarkdown, undefined, item.planId)}>{t.planGo}</button>
+              <button type="button" className={cardBtnCls() + ' disabled:opacity-40 disabled:cursor-not-allowed'} disabled={webReadOnly} onClick={() => onPrefill && onPrefill(t.planRevisePrefill)}>{t.planEdit}</button>
+              <button type="button" className={cardBtnCls() + ' disabled:opacity-40 disabled:cursor-not-allowed'} disabled={webReadOnly} onClick={() => bridge.interaction.discardPlan(item.id, item.planId)}>{t.planDrop}</button>
             </div>
           ) : (
             <div className={`text-[13px] font-medium text-[#137333] dark:text-[#93D5A6]`}>{item.statusLabel}</div>
@@ -640,7 +640,7 @@ const ToolOutput = ({ item, t }) => {
           <div className={`text-[12px] leading-relaxed mb-1.5 text-[#757575] dark:text-[#8E8E8E]`}>{t.cbNote}</div>
           {hasTech && (
             <div>
-              <button onClick={() => setShowTech(!showTech)} className={`text-[11px] text-[#0B57D0] dark:text-[#8AB4F8]`}>{showTech ? t.cbTechHide : t.cbTechShow}</button>
+              <button type="button" onClick={() => setShowTech(!showTech)} className={`text-[11px] text-[#0B57D0] dark:text-[#8AB4F8]`}>{showTech ? t.cbTechHide : t.cbTechShow}</button>
               {showTech && (
                 <div className={`mt-1 text-[11px] font-mono space-y-0.5 text-[#757575] dark:text-[#8E8E8E]`}>
                   {rawReasons.map((r, i) => <div key={'r' + i}>· {r}</div>)}

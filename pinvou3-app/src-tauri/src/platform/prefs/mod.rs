@@ -482,7 +482,7 @@ pub struct SavedModel {
     /// Optional user-facing label for cloud model selectors.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub alias: Option<String>,
-    /// 决定 provider 路由 + 模板,复用现有 9 预设枚举。
+    /// 决定 provider 路由 + 模板,复用现有 14 变体预设枚举。
     pub preset: ModelPreset,
     /// 该具体部署允许的 context window；与发给服务端的 `model` wire name 解耦。
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1523,8 +1523,11 @@ impl UserPrefs {
     /// started, "free" means it runs outside the transaction's critical
     /// section (the racy ordering this probe exists to catch in red runs) and
     /// "held" means it runs under the lock (serialized with replacements).
-    /// Callers hold `ENV_LOCK`, and every prefs-lock-using test takes that
-    /// lock first, so no unrelated test can hold `USER_PREFS_LOCK` here.
+    /// The barrier helper probes before spawning the replacement thread, so
+    /// the parked delete thread is the only possible holder and the answer is
+    /// deterministic for both orderings. Callers hold `ENV_LOCK`, and every
+    /// prefs-lock-using test takes that lock first, so no unrelated test can
+    /// hold `USER_PREFS_LOCK` here.
     #[cfg(test)]
     pub(crate) fn user_prefs_lock_free_for_test() -> bool {
         matches!(USER_PREFS_LOCK.try_lock(), Ok(_))
