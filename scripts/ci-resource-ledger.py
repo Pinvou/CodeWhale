@@ -48,6 +48,9 @@ def main():
     if args.init:
         parent = Path(os.environ['RUNNER_TEMP']).resolve(strict=True)
         root = Path(tempfile.mkdtemp(prefix='pinvou-resource-ledger-', dir=parent))
+        # Keep a diagnostic artifact even if dependency/lint setup fails before
+        # the first fixture starts. Zero JSON receipts do not prove tests ran.
+        (root / 'ledger.txt').write_text('Independent job resource ledger initialized. JSON receipts appear when resources are registered; an empty set is not proof that tests executed.\n', encoding='utf-8')
         with Path(os.environ['GITHUB_ENV']).open('a', encoding='utf-8') as output:
             output.write('PINVOU_CI_RESOURCE_LEDGER=' + str(root) + '\n')
             if args.docker:

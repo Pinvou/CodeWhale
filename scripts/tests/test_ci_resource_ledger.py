@@ -2,6 +2,9 @@ import importlib.util
 import json
 from pathlib import Path
 import tempfile
+import os
+import subprocess
+import sys
 import unittest
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -11,6 +14,16 @@ spec.loader.exec_module(ledger)
 
 
 class LedgerTests(unittest.TestCase):
+    def test_initialization_keeps_an_artifact_before_any_test_starts(self):
+        with tempfile.TemporaryDirectory() as directory:
+            envfile = Path(directory) / 'github-env'
+            result = subprocess.run([sys.executable, str(ROOT / 'scripts/ci-resource-ledger.py'), '--init'], env={**os.environ, 'RUNNER_TEMP': directory, 'GITHUB_ENV': str(envfile)}, capture_output=True, text=True, timeout=15)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            root = Path(envfile.read_text().strip().split('=', 1)[1])
+            self.assertTrue((root / 'ledger.txt').is_file())
+            self.assertEqual(ledger.inspect([root])['receipts'], 0)
+            self.assertTrue(ledger.inspect([root])['clean'])
+
     def test_unconfirmed_missing_or_malformed_is_not_clean(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

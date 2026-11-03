@@ -1229,7 +1229,7 @@ test("credential origin browser matrix runs after browser preparation without ac
   const run = stepRun(job, name);
   assert.match(run, /^set -euo pipefail$/m);
   assert.match(run, /^test -x "\$\{CHROME:\?browser preparation must provide CHROME\}"$/m);
-  assert.match(run, /^node --test --test-reporter=tap tests\/credential_origin_scope_probe\.test\.mjs \| tee "\$report"$/m);
+  assert.match(run, /^python3 \.\.\/scripts\/ci-fixture-process\.py --receipt "\$PINVOU_CI_RESOURCE_LEDGER\/credential-origin\.json" -- node --test --test-reporter=tap tests\/credential_origin_scope_probe\.test\.mjs \| tee "\$report"$/m);
   assert.match(run, /^grep -Eq '\^# pass \[1-9\]\[0-9\]\*\$' "\$report"$/m);
   assert.match(run, /^grep -Fxq '# fail 0' "\$report"$/m);
   assert.match(run, /^grep -Fxq '# skipped 0' "\$report"$/m);
@@ -1246,10 +1246,15 @@ test("credential origin browser matrix shell rejects failed, empty or skipped re
       [2, 1, 0, 0, 1], [2, 0, 0, 7, 7], [2, 0, null, 0, 1],
     ]) {
       const summary = `# pass ${passed}\n# fail ${failed}\n${skipped === null ? "" : `# skipped ${skipped}\n`}`;
-      const prefix = `CHROME="$(command -v bash)"; node() { printf '%s' '${summary}'; return ${exit}; };\n`;
+      const prefix = `CHROME="$(command -v bash)";
+        python3() {
+          [[ "$1" == ../scripts/ci-fixture-process.py && "$2" == --receipt && "$3" == "$PINVOU_CI_RESOURCE_LEDGER/credential-origin.json" && "$4" == -- ]] || return 99;
+          shift 4; "$@";
+        }
+        node() { printf '%s' '${summary}'; return ${exit}; };\n`;
       const result = spawnSync(bash, ["-c", prefix + run], {
         cwd: directory, encoding: "utf8", timeout: 30_000, windowsHide: true,
-        env: { ...process.env, RUNNER_TEMP: directory.replaceAll("\\", "/") },
+        env: { ...process.env, RUNNER_TEMP: directory.replaceAll("\\", "/"), PINVOU_CI_RESOURCE_LEDGER: directory.replaceAll("\\", "/") },
       });
       assert.equal(result.status, expected, `${passed}/${failed}/${skipped}/${exit}: ${result.stderr}`);
     }
