@@ -121,7 +121,7 @@ def _get_operator_context() -> tuple[str, str]:
 # 签到接口限制：开始到结束最多 7 天
 MAX_DAYS_PER_CHECKIN_SLICE = 7
 
-# 签到接口限制：每次最多查 100 人（与 check record 一致）
+# 每次最多查 50 人
 MAX_USERS_PER_CHECKIN_BATCH = 50
 
 # 最多支持 9 张图片列
