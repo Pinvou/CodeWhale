@@ -3,6 +3,7 @@ package account
 import (
 	"context"
 	"errors"
+	"github.com/Pinvou/pinvou3/account-platform/internal/cifixture"
 	"os"
 	"regexp"
 	"strings"
@@ -28,29 +29,17 @@ func waitOwnedBillingFixtureSessionsClosed(ctx context.Context, admin *pgx.Conn,
 	if !ownedBillingFixtureName.MatchString(database) {
 		return errOwnedBillingCleanupIdentity
 	}
-	for {
-		if ctx.Err() != nil {
-			return errOwnedBillingCleanupSessions
-		}
-		var owner string
-		var sessions int
-		if err := admin.QueryRow(ctx, `SELECT pg_get_userbyid(datdba),(SELECT count(*) FROM pg_stat_activity WHERE datname=$1) FROM pg_database WHERE datname=$1`, database).Scan(&owner, &sessions); err != nil {
-			return errOwnedBillingCleanupQuery
-		}
-		if owner != "billing_schema_owner" {
-			return errOwnedBillingCleanupIdentity
-		}
-		if sessions == 0 {
-			return nil
-		}
-		timer := time.NewTimer(10 * time.Millisecond)
-		select {
-		case <-ctx.Done():
-			timer.Stop()
-			return errOwnedBillingCleanupSessions
-		case <-timer.C:
-		}
+	err := cifixture.WaitDatabaseIdle(ctx, admin, database, "billing_schema_owner")
+	if err == nil {
+		return nil
 	}
+	if errors.Is(err, cifixture.ErrDatabaseOwner) || errors.Is(err, cifixture.ErrDatabaseIdentity) || errors.Is(err, cifixture.ErrDatabaseUnregistered) {
+		return errOwnedBillingCleanupIdentity
+	}
+	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+		return errOwnedBillingCleanupSessions
+	}
+	return errOwnedBillingCleanupQuery
 }
 
 func TestOwnedBillingCleanupGuardsPostgres(t *testing.T) {
@@ -74,8 +63,11 @@ func TestOwnedBillingCleanupGuardsPostgres(t *testing.T) {
 		}
 	}()
 	database := "billing_entitlement_" + strings.ReplaceAll(uuid.NewString(), "-", "")
+	var fixtureDatabase *cifixture.Database
 	identifier := pgx.Identifier{database}.Sanitize()
-	if _, err := admin.Exec(ctx, "CREATE DATABASE "+identifier+" OWNER billing_schema_owner TEMPLATE template0"); err != nil {
+	fixtureDatabaseCreated, creationError := cifixture.CreateDatabase(ctx, admin, database, "CREATE DATABASE "+identifier+" OWNER billing_schema_owner TEMPLATE template0")
+	fixtureDatabase = fixtureDatabaseCreated
+	if err := creationError; err != nil {
 		t.Fatal("owned fixture creation failed")
 	}
 	t.Cleanup(func() {
@@ -95,7 +87,7 @@ func TestOwnedBillingCleanupGuardsPostgres(t *testing.T) {
 			t.Errorf("owned guard retained fixture: %s", e)
 			return
 		}
-		if _, e := control.Exec(clean, "DROP DATABASE "+identifier); e != nil {
+		if _, e := cifixture.DropDatabase(clean, control, fixtureDatabase, "billing_schema_owner"); e != nil {
 			t.Error("owned fixture drop failed")
 		}
 	})

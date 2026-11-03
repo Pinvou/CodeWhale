@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"github.com/Pinvou/pinvou3/account-platform/internal/cifixture"
 	"github.com/jackc/pgx/v5/pgconn"
 	"os"
 	"strings"
@@ -45,33 +46,13 @@ func testManagementPublicMigrationInstallation(t *testing.T, legacy bool, previo
 	}
 	created := []string{}
 	database := "f04_token_management_" + uuid.New().String()[:8] + fmt.Sprintf("%d", time.Now().UnixNano())
+	var fixtureDatabase *cifixture.Database
 	databaseCreated := false
 	defer func() {
 		cleanupCtx, done := context.WithTimeout(context.Background(), 10*time.Second)
 		defer done()
 		if databaseCreated {
-			var owner string
-			var active int
-			deadline := time.Now().Add(5 * time.Second)
-			for {
-				if err := admin.QueryRow(cleanupCtx, `SELECT pg_get_userbyid(datdba),(SELECT count(*) FROM pg_stat_activity WHERE datname=$1) FROM pg_database WHERE datname=$1`, database).Scan(&owner, &active); err != nil {
-					t.Error("owned database cleanup identity unavailable")
-					return
-				}
-				if owner != admin.Config().User {
-					t.Error("owned database owner changed; cleanup refused")
-					return
-				}
-				if active == 0 {
-					break
-				}
-				if time.Now().After(deadline) {
-					t.Error("owned database still active; cleanup refused")
-					return
-				}
-				time.Sleep(10 * time.Millisecond)
-			}
-			if _, err := admin.Exec(cleanupCtx, "DROP DATABASE "+pgx.Identifier{database}.Sanitize()); err != nil {
+			if _, err := cifixture.DropDatabase(cleanupCtx, admin, fixtureDatabase, admin.Config().User); err != nil {
 				t.Error("owned database cleanup failed; roles retained")
 				return
 			}
@@ -95,7 +76,9 @@ func testManagementPublicMigrationInstallation(t *testing.T, legacy bool, previo
 	if _, err = admin.Exec(ctx, `GRANT token_gateway,token_schema_owner,token_cap_policy_deployer TO token_migrator`); err != nil {
 		t.Fatal(err)
 	}
-	if _, err = admin.Exec(ctx, "CREATE DATABASE "+pgx.Identifier{database}.Sanitize()); err != nil {
+	fixtureDatabaseCreated, creationError := cifixture.CreateDatabase(ctx, admin, database, "CREATE DATABASE "+pgx.Identifier{database}.Sanitize())
+	fixtureDatabase = fixtureDatabaseCreated
+	if err := creationError; err != nil {
 		t.Fatal(err)
 	}
 	databaseCreated = true

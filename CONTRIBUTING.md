@@ -87,6 +87,46 @@ up to 11.10 silently strips them and the same guard fails the strip.
 
 Tests requiring a live model, network service, credential, or large model asset must be ignored by default and provide an explicit opt-in command.
 
+### Test resource lifetime
+
+One-shot CI fixtures must create resources through the shared lifetime boundary:
+
+- Go PostgreSQL fixtures use `internal/cifixture.CreateDatabase` and retain the
+  returned opaque lease for `DropDatabase`. Close clients first. Cleanup observes
+  backend exit and checks cluster, database OID and the fixture's original owner
+  policy before ordinary DROP; it never disconnects another backend. Keep existing
+  role/dependency checks. Job-owned disposable PostgreSQL services contain roles
+  and interrupted database setup; no shared or production database is reclaimed.
+- Frontend fixtures use `tests/helpers/{vite,puppeteer,http,https,net}-fixture.mjs`
+  (CommonJS browser adapter: `puppeteer-fixture.cjs`). Servers bind independent
+  loopback ports; Vite optimizer output and browser profiles are private. Await
+  close acknowledgement before deleting directories. Legacy explicit exits use
+  `fixture-exit.cjs` so cleanup completes without replacing the original failure.
+- Run one-shot commands through `scripts/ci-fixture-process.py`. Its Linux
+  subreaper / Windows child Job Object contains detached descendants and assigns
+  a private temporary directory. A killed Linux controller can be recovered only
+  by the registered scope marker, UID, cgroup and pidfd identity. No PID/name
+  sweep or shared Runner Job Object is used.
+- Account CI installs `ci-fixture-docker.py` on **that job's PATH only**. Docker
+  writes a fresh cidfile for every CLI `run`/`create`; the always-run ledger step
+  validates all leases before stopping exact IDs and checks anonymous volumes.
+  Missing creation confirmation fails closed. Direct Docker API creation must
+  add equivalent ownership registration before use. Images, named cache volumes
+  and shared BuildKit builders are outside this disposable resource boundary.
+
+`ci-resource-ledger.py --init` starts fresh job receipts; the workflow always
+checks them and uploads them for seven days. `--recover` is restricted to the
+current GitHub job ledger. Unknown or unconfirmed cleanup fails the gate and
+never grants permission to retry another smoke. Existing business assertions,
+required roots, dependency skips and retries remain unchanged. Download/build
+caches are reusable resources and must not be deleted as fixture residue.
+
+Run `python3 scripts/ci-fixture-guard.py` plus its regression tests when adding
+fixtures. The guard covers test database DDL and JS/CommonJS resource imports;
+runtime identity checks remain authoritative. A new resource type needs a shared
+factory, failure/cancellation verification and a zero-resource postcondition,
+rather than another ad-hoc cleanup command in an individual test.
+
 ## CI and merge queue
 
 Pull requests use a staged, path-aware gate. Draft pull requests run fast feedback

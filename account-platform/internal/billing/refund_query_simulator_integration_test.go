@@ -52,6 +52,7 @@ func refundQuerySimulator(t *testing.T, ctx context.Context, interceptors ...fun
 		t.Fatal(err)
 	}
 	database := "refund_query_" + strings.ReplaceAll(uuid.NewString(), "-", "")
+	var fixtureDatabase *cifixture.Database
 	quoted := pgx.Identifier{database}.Sanitize()
 	created := false
 	t.Cleanup(func() {
@@ -59,24 +60,7 @@ func refundQuerySimulator(t *testing.T, ctx context.Context, interceptors ...fun
 		defer cancel()
 		defer admin.Close(cleanup)
 		if created {
-			var owner string
-			var active int
-			deadline := time.Now().Add(5 * time.Second)
-			for {
-				if err := admin.QueryRow(cleanup, `SELECT pg_get_userbyid(datdba),(SELECT count(*) FROM pg_stat_activity WHERE datname=$1) FROM pg_database WHERE datname=$1`, database).Scan(&owner, &active); err != nil || owner != actor {
-					t.Error("owned simulator database identity guard")
-					return
-				}
-				if active == 0 || !time.Now().Before(deadline) {
-					break
-				}
-				time.Sleep(10 * time.Millisecond)
-			}
-			if active != 0 {
-				t.Error("owned simulator database still has sessions")
-				return
-			}
-			if _, err := admin.Exec(cleanup, "DROP DATABASE "+quoted); err != nil {
+			if _, err := cifixture.DropDatabase(cleanup, admin, fixtureDatabase, actor); err != nil {
 				t.Error("owned simulator database cleanup", err)
 				return
 			}
@@ -90,7 +74,9 @@ func refundQuerySimulator(t *testing.T, ctx context.Context, interceptors ...fun
 			t.Error("owned simulator actor cleanup", err)
 		}
 	})
-	if _, err := admin.Exec(ctx, "CREATE DATABASE "+quoted+" OWNER payment_simulator"); err != nil {
+	fixtureDatabaseCreated, creationError := cifixture.CreateDatabase(ctx, admin, database, "CREATE DATABASE "+quoted+" OWNER payment_simulator")
+	fixtureDatabase = fixtureDatabaseCreated
+	if err := creationError; err != nil {
 		t.Fatal(err)
 	}
 	created = true

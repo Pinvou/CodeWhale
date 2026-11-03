@@ -234,11 +234,12 @@ INSERT INTO payment_anomaly_resolution_intents(payment_anomaly_case_id,actor_id,
 }
 
 type stageFixture struct {
-	admin       *pgx.Conn
-	config      *pgx.ConnConfig
-	roles       []string
-	dbs         map[string]string
-	connections []*pgx.Conn
+	admin          *pgx.Conn
+	config         *pgx.ConnConfig
+	roles          []string
+	dbs            map[string]string
+	databaseLeases map[string]*cifixture.Database
+	connections    []*pgx.Conn
 }
 
 func newStageFixture(t *testing.T, ctx context.Context, raw string) *stageFixture {
@@ -303,23 +304,7 @@ func newStageFixture(t *testing.T, ctx context.Context, raw string) *stageFixtur
 		}
 		allGone := true
 		for name, owner := range f.dbs {
-			var got string
-			var active int
-			deadline := time.Now().Add(5 * time.Second)
-			var queryErr error
-			for {
-				queryErr = admin.QueryRow(clean, `SELECT pg_get_userbyid(datdba),(SELECT count(*) FROM pg_stat_activity WHERE datname=$1) FROM pg_database WHERE datname=$1`, name).Scan(&got, &active)
-				if queryErr != nil || got != owner || active == 0 || !time.Now().Before(deadline) {
-					break
-				}
-				time.Sleep(10 * time.Millisecond)
-			}
-			if queryErr != nil || got != owner || active != 0 {
-				t.Error("owned DB cleanup identity/connection guard failed")
-				allGone = false
-				continue
-			}
-			if _, err := admin.Exec(clean, "DROP DATABASE "+pgx.Identifier{name}.Sanitize()); err != nil {
+			if _, err := cifixture.DropDatabase(clean, admin, f.databaseLeases[name], owner); err != nil {
 				t.Error("nonforce owned DB cleanup failed")
 				allGone = false
 			}
@@ -348,7 +333,15 @@ func newStageFixture(t *testing.T, ctx context.Context, raw string) *stageFixtur
 func (f *stageFixture) database(t *testing.T, ctx context.Context, domain, owner string) *pgx.Conn {
 	t.Helper()
 	name := "f02_schema_" + domain + "_" + strings.ReplaceAll(uuid.NewString(), "-", "")
-	if _, err := f.admin.Exec(ctx, "CREATE DATABASE "+pgx.Identifier{name}.Sanitize()+" OWNER "+pgx.Identifier{owner}.Sanitize()); err != nil {
+	fixtureDatabase, creationError := cifixture.CreateDatabase(ctx, f.admin, name, "CREATE DATABASE "+pgx.Identifier{name}.Sanitize()+" OWNER "+pgx.Identifier{owner}.Sanitize())
+	if creationError != nil {
+		t.Fatal(creationError)
+	}
+	if f.databaseLeases == nil {
+		f.databaseLeases = make(map[string]*cifixture.Database)
+	}
+	f.databaseLeases[name] = fixtureDatabase
+	if err := creationError; err != nil {
 		t.Fatal("create exclusively owned DB")
 	}
 	f.dbs[name] = owner

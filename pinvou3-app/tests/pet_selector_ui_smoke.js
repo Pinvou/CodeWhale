@@ -1,17 +1,18 @@
 #!/usr/bin/env node
+const finishFixtures = require('./helpers/fixture-exit.cjs');
 const fs = require('fs');
 const os = require('os');
 const path = require('path');
 const { startUiTestServer } = require('./ui_test_server');
 
 function loadPuppeteer() {
-  try { return require('puppeteer-core'); } catch (_) { /* fall through */ }
+  try { return require('./helpers/puppeteer-fixture.cjs'); } catch (_) { /* fall through */ }
   const npx = path.join(os.homedir(), '.npm', '_npx');
   if (fs.existsSync(npx)) {
     for (const directory of fs.readdirSync(npx)) {
       const candidate = path.join(npx, directory, 'node_modules', 'puppeteer-core');
       if (fs.existsSync(candidate)) {
-        try { return require(candidate); } catch (_) { /* try next */ }
+        try { return require('./helpers/browser-fixture.cjs').wrapNative(require(candidate)); } catch (_) { /* try next */ }
       }
     }
   }
@@ -478,5 +479,5 @@ async function main() {
 
 main().catch((error) => {
   console.error('FAIL:', error && error.stack ? error.stack : error);
-  process.exit(1);
+  finishFixtures(1);
 });

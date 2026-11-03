@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import * as puppeteer from 'puppeteer-core';
+import * as puppeteer from './helpers/puppeteer-fixture.mjs';
 import { financeCopy } from '../src/shared/i18n.js';
 import { startRechargePollingFixture } from './account_platform_recharge_polling_server.mjs';
 

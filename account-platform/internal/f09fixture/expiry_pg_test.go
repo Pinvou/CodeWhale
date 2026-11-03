@@ -15,7 +15,6 @@ type stageFixture struct {
 	admin       *pgx.Conn
 	config      *pgx.ConnConfig
 	roles       []string
-	dbs         map[string]string
 	connections []*pgx.Conn
 }
 
@@ -30,7 +29,7 @@ func newStageFixture(t *testing.T, ctx context.Context, raw string) *stageFixtur
 		admin.Close(context.Background())
 		t.Fatal("parse schema fixture")
 	}
-	f := &stageFixture{admin: admin, config: config, dbs: make(map[string]string), roles: []string{"account_service", "account_migrator", "account_approval_control_owner", "account_approval_authorization_owner", "account_approval_writer", "account_approval_backfill", "account_approval_relay", "account_approval_recovery", "billing_service", "billing_schema_owner", "billing_migrator", "token_gateway", "token_cap_policy_deployer", "token_schema_owner", "token_migrator", "token_policy_operator"}}
+	f := &stageFixture{admin: admin, config: config, roles: []string{"account_service", "account_migrator", "account_approval_control_owner", "account_approval_authorization_owner", "account_approval_writer", "account_approval_backfill", "account_approval_relay", "account_approval_recovery", "billing_service", "billing_schema_owner", "billing_migrator", "token_gateway", "token_cap_policy_deployer", "token_schema_owner", "token_migrator", "token_policy_operator"}}
 	var count int
 	if err := admin.QueryRow(ctx, `SELECT count(*) FROM pg_roles WHERE rolname=ANY($1)`, f.roles).Scan(&count); err != nil || count != 0 {
 		admin.Close(context.Background())
@@ -67,33 +66,6 @@ func newStageFixture(t *testing.T, ctx context.Context, raw string) *stageFixtur
 			if err := c.Close(clean); err != nil {
 				t.Error("owned migration connection close failed")
 			}
-		}
-		allGone := true
-		for name, owner := range f.dbs {
-			var got string
-			var active int
-			deadline := time.Now().Add(5 * time.Second)
-			var queryErr error
-			for {
-				queryErr = admin.QueryRow(clean, `SELECT pg_get_userbyid(datdba),(SELECT count(*) FROM pg_stat_activity WHERE datname=$1) FROM pg_database WHERE datname=$1`, name).Scan(&got, &active)
-				if queryErr != nil || got != owner || active == 0 || !time.Now().Before(deadline) {
-					break
-				}
-				time.Sleep(10 * time.Millisecond)
-			}
-			if queryErr != nil || got != owner || active != 0 {
-				t.Error("owned DB cleanup identity/connection guard failed")
-				allGone = false
-				continue
-			}
-			if _, err := admin.Exec(clean, "DROP DATABASE "+pgx.Identifier{name}.Sanitize()); err != nil {
-				t.Error("nonforce owned DB cleanup failed")
-				allGone = false
-			}
-		}
-		if !allGone {
-			t.Error("owned actors retained after incomplete DB cleanup")
-			return
 		}
 		var outside bool
 		if err := admin.QueryRow(clean, `SELECT EXISTS(SELECT 1 FROM pg_shdepend WHERE refclassid='pg_authid'::regclass AND refobjid IN(SELECT oid FROM pg_roles WHERE rolname=ANY($1)) AND dbid<>0) OR EXISTS(SELECT 1 FROM pg_auth_members WHERE (roleid IN(SELECT oid FROM pg_roles WHERE rolname=ANY($1)) OR member IN(SELECT oid FROM pg_roles WHERE rolname=ANY($1))) AND NOT(roleid IN(SELECT oid FROM pg_roles WHERE rolname=ANY($1)) AND member IN(SELECT oid FROM pg_roles WHERE rolname=ANY($1))))`, f.roles).Scan(&outside); err != nil || outside {

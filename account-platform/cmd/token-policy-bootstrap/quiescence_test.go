@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"github.com/Pinvou/pinvou3/account-platform/internal/cifixture"
 	"net/url"
 	"os"
 	"strings"
@@ -28,6 +29,7 @@ func TestWriterQuiescencePostgres(t *testing.T) {
 	defer admin.Close(ctx)
 	suffix := strings.ReplaceAll(uuid.NewString(), "-", "")
 	database, writer, member := "quiescence_"+suffix, "qw_"+suffix, "qm_"+suffix
+	var fixtureDatabase *cifixture.Database
 	quote := func(name string) string { return pgx.Identifier{name}.Sanitize() }
 	exec := func(connection interface {
 		Exec(context.Context, string, ...any) (pgconn.CommandTag, error)
@@ -41,17 +43,15 @@ func TestWriterQuiescencePostgres(t *testing.T) {
 		t.Fatal("exclusive UUID identities required")
 	}
 	var createdRoles []string
-	exec(admin, "CREATE DATABASE "+quote(database))
+	fixtureDatabaseCreated, creationError := cifixture.CreateDatabase(ctx, admin, database, "CREATE DATABASE "+pgx.Identifier{database}.Sanitize())
+	fixtureDatabase = fixtureDatabaseCreated
+	if err := creationError; err != nil {
+		t.Fatal(err)
+	}
 	defer func() {
 		cleanup, stop := context.WithTimeout(context.Background(), 10*time.Second)
 		defer stop()
-		var owner string
-		var sessions int
-		if err := admin.QueryRow(cleanup, `SELECT pg_get_userbyid(datdba),(SELECT count(*) FROM pg_stat_activity WHERE datname=$1) FROM pg_database WHERE datname=$1`, database).Scan(&owner, &sessions); err != nil || owner != admin.Config().User || sessions != 0 {
-			t.Error("owned fixture cleanup guard failed")
-			return
-		}
-		if _, err := admin.Exec(cleanup, "DROP DATABASE "+quote(database)); err != nil {
+		if _, err := cifixture.DropDatabase(cleanup, admin, fixtureDatabase, admin.Config().User); err != nil {
 			t.Error("owned fixture DB cleanup failed")
 			return
 		}

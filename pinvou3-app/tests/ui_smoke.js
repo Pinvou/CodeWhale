@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+const finishFixtures = require('./helpers/fixture-exit.cjs');
 /* eslint-disable no-promise-executor-return -- Browser-side waits adapt timer and animation callback APIs whose handles are intentionally ignored. */
 /**
  * pinvou3 前端 UI 冒烟回归测试 — headless chromium + mock TauriBridge,加载真 src/index.html。
@@ -17,12 +18,12 @@ const fs = require('fs'), path = require('path'), os = require('os');
 const { startUiTestServer } = require('./ui_test_server');
 
 function loadPuppeteer() {
-  try { return require('puppeteer-core'); } catch (e) { /* fall through */ }
+  try { return require('./helpers/puppeteer-fixture.cjs'); } catch (e) { /* fall through */ }
   const npx = path.join(os.homedir(), '.npm', '_npx');
   if (fs.existsSync(npx)) {
     for (const d of fs.readdirSync(npx)) {
       const p = path.join(npx, d, 'node_modules', 'puppeteer-core');
-      if (fs.existsSync(p)) { try { return require(p); } catch (e) { /* next */ } }
+      if (fs.existsSync(p)) { try { return require('./helpers/browser-fixture.cjs').wrapNative(require(p)); } catch (e) { /* next */ } }
     }
   }
   console.error('SKIP: 找不到 puppeteer-core。装一个再跑:  npm i -D puppeteer-core   (或  npx -y puppeteer-core)');
@@ -2883,5 +2884,5 @@ async function expand(page) {
 
   const failed = results.filter(r => !r.pass).length;
   console.log(failed ? `\n❌ ${failed}/${results.length} FAILED` : `\n✅ ALL ${results.length} PASS`);
-  process.exit(failed ? 1 : 0);
-})().catch(e => { console.error('FATAL', e.message); process.exit(1); });
+  finishFixtures(failed ? 1 : 0);
+})().catch(e => { console.error('FATAL', e.message); finishFixtures(1); });
