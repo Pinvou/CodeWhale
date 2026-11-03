@@ -19,6 +19,7 @@ export function PlatformRoleBindings({ words, copy, bindings, target, blocked, o
       <select aria-label={copy.status} value={status} onChange={event => { setStatus(event.target.value); setPageNumber(1); }}><option value="">{words.allStatuses}</option>{['ACTIVE', 'SCHEDULED', 'EXPIRED', 'REVOKED'].map(value => <option key={value} value={value}>{words.statuses[value]}</option>)}</select>
     </div>
     {bindings && <>
+      {bindings.truncated && <p className="adm-inline-message" role="status">{copy.bindingsTruncated}</p>}
       {/* biome-ignore lint/a11y/noNoninteractiveTabindex: This named overflow region needs keyboard focus for native horizontal table scrolling. */}
       <div className="adm-table-wrap" role="region" aria-label={words.bindingManagement} tabIndex={0}>
         <table className="adm-table adm-role-binding-table">

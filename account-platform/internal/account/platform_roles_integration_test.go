@@ -27,6 +27,9 @@ func TestPlatformRoleManagementRuntimePostgres(t *testing.T) {
 	userCodeLookupTestGuard(t)
 	f := retainedWalletFenceActors(t)
 	ctx := context.Background()
+	t.Run("actual-http-bounded-list", func(t *testing.T) {
+		testPlatformRoleBindingsTruncation(t, f)
+	})
 	t.Run("actual-http-invalid-json-is-explicit-no-write", func(t *testing.T) {
 		r := f.repository(t)
 		admin, _, _ := userCodeActor(t, r, "invalid-json-admin")

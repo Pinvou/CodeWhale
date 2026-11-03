@@ -212,7 +212,10 @@ export class AdminPlatformClient {
     entry.controller.abort();
   }
 
-  accountClosures(signal) { return this.request('account', '/admin/v1/account-closure-requests', signal); }
+  accountClosures(signal, cursor = '') {
+    const query = cursor ? `?cursor=${encodeURIComponent(cursor)}` : '';
+    return this.request('account', `/admin/v1/account-closure-requests${query}`, signal);
+  }
   retryAccountClosure(id, reason, key, signal) {
     requireFinanceID(id);
     return this.mutate('account', `/admin/v1/account-closure-requests/${id}/actions/retry`, 'POST', { reason }, key, signal, 200);
@@ -363,8 +366,10 @@ export class AdminPlatformClient {
     if (typeof userID === 'string') userID = userID.trim().toLowerCase();
     if (userID) requireFinanceID(userID);
     const payload = await this.request('account', '/admin/v1/role-bindings' + (userID ? `?user_id=${encodeURIComponent(userID)}` : ''), signal);
-    if (!Array.isArray(payload?.items)) throw new Error('INVALID_ROLE_BINDINGS');
-    return payload.items.map(item => requirePlatformRoleBinding(item));
+    if (!Array.isArray(payload?.items) || typeof payload.truncated !== 'boolean' || payload.items.length > 500 || payload.truncated && payload.items.length !== 500) throw new Error('INVALID_ROLE_BINDINGS');
+    const items = payload.items.map(item => requirePlatformRoleBinding(item));
+    Object.defineProperty(items, 'truncated', { value: payload.truncated, enumerable: false });
+    return items;
   }
   async grantPlatformRole(owner, body, signal) {
     requireFinanceID(owner);

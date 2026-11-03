@@ -18,7 +18,11 @@ func cancellationSnapshot(usage UsageRequest) CancellationResult {
 	}
 }
 
-func (r *PostgresRepository) ConfirmPreDispatchCancellation(ctx context.Context, usageID uuid.UUID) (CancellationResult, error) {
+var errCancellationReservationAdvanced = errors.New("cancellation reservation state advanced")
+
+// A zero releasedHoldID confirms only a canonical request whose reservation has
+// not started. Otherwise the caller must have released this exact persisted hold.
+func (r *PostgresRepository) ConfirmPreDispatchCancellation(ctx context.Context, usageID, releasedHoldID uuid.UUID) (CancellationResult, error) {
 	tx, err := r.pool.Begin(ctx)
 	if err != nil {
 		return CancellationResult{}, err
@@ -36,7 +40,14 @@ func (r *PostgresRepository) ConfirmPreDispatchCancellation(ctx context.Context,
 	if usage.CancelStatus != "CANCEL_REQUESTED" || (usage.ExecutionStatus != "RECEIVED" && usage.ExecutionStatus != "HOLD_RESERVING" && usage.ExecutionStatus != "HOLD_RESERVED") {
 		return CancellationResult{}, ErrForbidden
 	}
-	if usage.CanonicalVersion == 0 && usage.HoldID == nil {
+	if releasedHoldID == uuid.Nil {
+		if usage.CanonicalVersion == 0 {
+			return CancellationResult{}, ErrForbidden
+		}
+		if usage.ExecutionStatus != "RECEIVED" || usage.HoldID != nil {
+			return CancellationResult{}, errCancellationReservationAdvanced
+		}
+	} else if usage.HoldID == nil || *usage.HoldID != releasedHoldID {
 		return CancellationResult{}, ErrForbidden
 	}
 	now := r.now()

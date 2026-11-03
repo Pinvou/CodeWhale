@@ -32,7 +32,12 @@ export function OrganizationWorkspace({ client, me, language, onChanged, scopeFa
   ]);
   if (stamp === generation.current) setData({ units: units.items, structure: units.structure_version, bindings, bindingsTruncated: Boolean(bindings.truncated) });
  };
- const refresh = async () => { void memberPage.refresh(); const stamp = ++generation.current; setLoading(true); setError(''); try { await load(stamp); } catch (reason) { if (stamp === generation.current) setError(reason.status === 403 ? copy.permissions : copy.unavailable); } finally { if (stamp === generation.current) setLoading(false); } };
+ const refresh = async () => { void memberPage.refresh(); const stamp = ++generation.current; setLoading(true); setError(''); try { await load(stamp); } catch (reason) {
+  if (stamp === generation.current) {
+   setData(current => ({ ...current, bindings: [], bindingsTruncated: false }));
+   setError(reason.status === 403 ? copy.permissions : copy.unavailable);
+  }
+ } finally { if (stamp === generation.current) setLoading(false); } };
  useEffect(() => { const stamp = ++generation.current, controller = new AbortController(); setData({ units: [], bindings: [], bindingsTruncated: false, structure: 0 }); setInvitation(null); setError(''); setLoading(true); void load(stamp, controller.signal).catch(reason => { if (stamp === generation.current && reason.name !== 'AbortError') setError(reason.status === 403 ? copy.permissions : copy.unavailable); }).finally(() => { if (stamp === generation.current) setLoading(false); }); return () => { generation.current++; controller.abort(); }; }, [api, owner]); // eslint-disable-line react-hooks/exhaustive-deps
  const units = data.units.filter(unit => unit.status === 'ACTIVE').map(unit => ({ value: unit.unit_id, label: unit.name }));
  const members = memberPage.items.filter(member => member.status === 'ACTIVE').map(member => ({ value: member.user_id, label: member.display_name || member.user_code || member.user_id }));

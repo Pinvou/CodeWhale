@@ -641,7 +641,7 @@ func (r *PostgresRepository) CleanupReplayRetention(ctx context.Context) error {
 	// Unsettled rows retain their original content identity/clock but not their
 	// ciphertext. That prevents sequence reuse and result lifetime renewal.
 	for _, table := range []string{"usage_stream_events", "usage_replay_results"} {
-		if _, err := tx.Exec(ctx, `UPDATE `+table+` content SET encrypted_payload='\x'::bytea,expires_at=LEAST(COALESCE(expires_at,created_at+interval '720 hours'),created_at+interval '720 hours') WHERE (expires_at<=$1 OR created_at+interval '720 hours'<=$1) AND EXISTS(SELECT 1 FROM usage_requests request WHERE request.id=content.usage_request_id AND request.status NOT IN ('COMMITTED','RELEASED')) AND `+fmt.Sprintf(caseGuard, "content.usage_request_id"), now); err != nil {
+		if _, err := tx.Exec(ctx, `UPDATE `+table+` content SET encrypted_payload='\x'::bytea,expires_at=LEAST(COALESCE(expires_at,created_at+interval '720 hours'),created_at+interval '720 hours') WHERE octet_length(encrypted_payload)>0 AND (expires_at<=$1 OR created_at<=$2) AND EXISTS(SELECT 1 FROM usage_requests request WHERE request.id=content.usage_request_id AND request.status NOT IN ('COMMITTED','RELEASED')) AND `+fmt.Sprintf(caseGuard, "content.usage_request_id"), now, now.Add(-720*time.Hour)); err != nil {
 			return err
 		}
 	}

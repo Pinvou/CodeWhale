@@ -1,10 +1,10 @@
 # 图片校验器 socket 重启设计草案
 
-状态：**仅设计，未实现、未在 Linux 或容器验证，默认关闭**。本文不授权清理现有目录、启动工作负载或调整凭证保全策略。当前校验器在 `db0eef9019ac23f8d1db81eff3c4112c02a3e990` 的独立候选中；该分支尚未接入 Billing 上传、Helm 或 Compose。
+状态：**重启恢复仅设计、未实现和验证；校验器默认关闭**。本文不授权清理现有目录、启动工作负载或调整凭证保全策略。独立校验器候选由 [PR #2213](https://github.com/Pinvou/pinvou3/pull/2213) 跟踪，源码位于 `account-platform/cmd/evidence-image-validator/`，尚未接入 Billing 上传、Helm 或 Compose。
 
 ## 已观察的现状
 
-候选使用专用 Unix 域 socket 和双向 UID 预期；socket 目录由 worker 所有，Billing 不应有目录写权限。当前 worker 在启动时要求 socket 路径不存在，监听后显式关闭 Go `UnixListener` 的自动 unlink，不会自动删除路径。缺少独立 Linux 环境，当前行为未进行 Linux 容器实证。
+候选使用专用 Unix 域 socket 和双向 UID 预期；socket 目录由 worker 所有，Billing 不应有目录写权限。当前 worker 在启动时要求 socket 路径不存在，监听后显式关闭 Go `UnixListener` 的自动 unlink，不会自动删除路径。历史 head `2fad692934c601f43a185662acd6e9ce36c06044` 的 [Linux amd64 CI job 122720332200](https://github.com/Pinvou/pinvou3/actions/runs/40659993285/job/122720332200) 已构建 PDF 镜像并完成基础 UID、样本、cgroup 配置和遗留 socket 拒绝验证；该结果不覆盖后续修改、arm64、下述重启恢复方案或生产隔离条件。
 
 Go 1.26.6 `net/unixsock_posix.go` 中，`net.Listen` 创建的 UnixListener 默认在 Close 时按路径 unlink；源码本身注明该路径可能在关闭前被替换。候选通过 `SetUnlinkOnClose(false)` 避免该自动删除。`net.Listen` 最终调用系统 bind；当前在路径检查与 bind/`os.Chmod` 之间仍存在竞态。同一 worker UID 或特权主体能够干扰可写目录时，常规路径检查无法证明安全。
 

@@ -6,6 +6,7 @@ import test from 'node:test';
 import YAML from 'yaml';
 import Ajv from 'ajv';
 import addFormats from 'ajv-formats';
+import { productionImageDigestArgs } from '../fixtures/production-image-digests.mjs';
 
 const chart = path.resolve(import.meta.dirname, '../../deploy/helm/account-platform');
 const apiURL = 'https://kubernetes.default.svc/openid/v1/jwks';
@@ -21,7 +22,7 @@ function render(profile = 'base', changes = []) {
     ...(profile === 'production-new' ? ['--set-string', 'newApi.tlsSecretName=fixture-newapi', '--set-string', 'newApi.caConfigMap=fixture-newapi-ca', '--set-string', 'images.newApiTLS.repository=registry.example.invalid/fixture', '--set-string', 'images.newApiTLS.digest=sha256:' + '0'.repeat(64)] : ['--set', 'newApi.enabled=false']), '--set', 'nats.enabled=false', '--set-string', 'dependencies.natsUrl=tls://nats.fixture.invalid:4222',
     '--set-json', 'external.workloadJwksCidrs=' + JSON.stringify(cidrs),
     '--set-json', 'workloadIdentity.kubernetesApiServerPorts=' + JSON.stringify(ports),
-    ...(profile === 'production-new' ? ['--set-json', 'global.manualReviewOnCallUserIds=["00000000-0000-4000-8000-000000000707"]',
+    ...(profile === 'production-new' ? ['--set-json', 'global.manualReviewOnCallUserIds=["00000000-0000-4000-8000-000000000707"]', ...productionImageDigestArgs,
       '--set-string', 'keycloak.tlsSecretName=fixture-keycloak', '--set-string', 'keycloak.caConfigMap=fixture-keycloak-ca'] : []),
     ...changes];
   return spawnSync(process.env.PINVOU_TEST_KMS_HELM_BINARY || 'helm', args,

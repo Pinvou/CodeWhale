@@ -2034,6 +2034,7 @@ const formatMemoryTime = (item, copy) => {
       const [modelDeleteConfirm, setModelDeleteConfirm] = useState(/** @type {SettingsModelEntry | null} */ (null));
       const [platformCatalog, setPlatformCatalog] = useState({ items: [] });
       const [platformCatalogState, setPlatformCatalogState] = useState('idle');
+      const [platformCatalogRetry, setPlatformCatalogRetry] = useState(0);
       const [platformDefaultBusy, setPlatformDefaultBusy] = useState('');
       const [editingSearch, setEditingSearch] = useState(null);
       const [pendingSearchProvider, setPendingSearchProvider] = useState(null);
@@ -2134,7 +2135,7 @@ const formatMemoryTime = (item, copy) => {
           if (!controller.signal.aborted) setPlatformCatalogState('error');
         });
         return () => controller.abort();
-      }, [activeSection, accountPlatformClient, platformDefaultModelId]);
+      }, [activeSection, accountPlatformClient, platformDefaultModelId, platformCatalogRetry]);
       useEffect(() => {
         if (!feedbackNotice) return;
         const timer = window.setTimeout(() => setFeedbackNotice(''), 2600);
@@ -2777,7 +2778,14 @@ const formatMemoryTime = (item, copy) => {
             <Group>
               {platformCatalogState === 'loading' && <div className="px-4 py-4 text-[14px] text-[#8A8A8E] dark:text-[#98989D]">{settingsCopy.platformModelsLoading}</div>}
               {platformCatalogState === 'auth_required' && <div className="px-4 py-4 text-[14px] text-[#8A8A8E] dark:text-[#98989D]">{settingsCopy.platformModelsSignIn}</div>}
-              {platformCatalogState === 'error' && <div className="px-4 py-4 text-[14px] text-[#FF3B30]">{settingsCopy.platformModelsUnavailable}</div>}
+              {platformCatalogState === 'error' && (
+                <div className="px-4 py-4 flex items-center justify-between gap-3 text-[14px] text-[#FF3B30]">
+                  <span>{settingsCopy.platformModelsUnavailable}</span>
+                  <button type="button" className="shrink-0 text-[#007AFF]" onClick={() => setPlatformCatalogRetry(value => value + 1)}>
+                    {settingsCopy.platformModelsRetry}
+                  </button>
+                </div>
+              )}
               {platformCatalogState === 'ready' && (platformCatalog.items || []).length === 0 && <div className="px-4 py-4 text-[14px] text-[#8A8A8E] dark:text-[#98989D]">{settingsCopy.noModels}</div>}
               {platformCatalogState === 'ready' && (platformCatalog.items || []).map(item => {
                 const selectable = platformModelSelectableAsDefault(item);

@@ -591,6 +591,42 @@
           }
         }
       }
+    },
+    "/v1/auth/password-resets": {
+      "post": {
+        "operationId": "resetForgottenPassword",
+        "summary": "Complete a password reset with the verified SMS challenge and opaque password reference",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": ["mobile", "challenge_id", "code", "password_handle", "password_policy_version"],
+                "properties": {
+                  "mobile": {"type": "string"},
+                  "challenge_id": {"type": "string", "format": "uuid"},
+                  "code": {"type": "string"},
+                  "password_handle": {"type": "string"},
+                  "password_policy_version": {"type": "string"}
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "204": {"description": "Password reset accepted and no response body is returned."},
+          "400": {"description": "Invalid request, password reference, or password policy input."},
+          "401": {"description": "SMS verification is invalid or expired."},
+          "403": {"description": "The requested profile operation is not permitted."},
+          "409": {"description": "The password reset conflicts with an existing profile operation."},
+          "410": {"description": "The password reference has expired."},
+          "429": {"description": "The SMS verification rate limit was exceeded."},
+          "503": {"description": "The SMS or identity dependency is unavailable."},
+          "default": {"description": "Unexpected profile reset failure."}
+        }
+      }
     }
   },
   "components": {

@@ -1,5 +1,6 @@
 """Static checks only; these do not build or exercise the Linux image."""
 import hashlib
+import importlib.util
 import json
 import os
 from pathlib import Path
@@ -11,10 +12,11 @@ import tempfile
 import unittest
 from unittest.mock import patch
 
-import prepare_pdf_image
-
 HERE = Path(__file__).resolve().parent
 PLATFORM = HERE.parent.parent
+spec = importlib.util.spec_from_file_location("prepare_pdf_image", HERE / "prepare_pdf_image.py")
+prepare_pdf_image = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(prepare_pdf_image)
 
 
 class ImageCandidateTests(unittest.TestCase):

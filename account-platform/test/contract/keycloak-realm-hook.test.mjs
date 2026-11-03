@@ -4,6 +4,7 @@ import { readFileSync, mkdtempSync, writeFileSync, rmSync, lstatSync } from 'nod
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
+import { productionImageDigestArgs } from '../fixtures/production-image-digests.mjs';
 import YAML from 'yaml';
 import Ajv from 'ajv';
 import addFormats from 'ajv-formats';
@@ -45,7 +46,7 @@ function helmResult(release) {
   try {
     const args = ['template', 'hook-contract', chart, '-f', path.join(chart, 'values-production-new.yaml'),
       '-f', valuesFile, '--set-json', 'global.manualReviewOnCallUserIds=["00000000-0000-4000-8000-000000000707"]',
-      ...[
+      ...productionImageDigestArgs, ...[
         'newApi.tlsSecretName=fixture-only-newapi', 'newApi.caConfigMap=fixture-only-newapi-ca',
         'images.newApiTLS.repository=registry.example.invalid/config-only', 'images.newApiTLS.digest=sha256:' + '0'.repeat(64),
         'keycloak.tlsSecretName=fixture-only-keycloak', 'keycloak.caConfigMap=fixture-only-keycloak-ca',
