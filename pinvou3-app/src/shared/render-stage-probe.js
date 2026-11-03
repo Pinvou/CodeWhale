@@ -211,10 +211,15 @@
     },
     /** r7 P2-2：这条目目的 recv→dispatch 间隔含**应用自己的**合并节流（后台
      * 会话 1s 预览腿），不是主线程冻结——打标后 finalize 不上报（snapshot
-     * 保留，段差仍可查）。调用方是 chat-events 的后台渲染腿。 */
+     * 保留，段差仍可查）。调用方是 chat-events 的后台渲染腿。
+     * r9 P2：只对**未盖章**的条目打标。已盖章（publish 已跑、React 状态已
+     * 更新）的条目处于「等下一帧」段——它的 dispatch→frame 间隔量的是真实
+     * 渲染/冻结，无条件打标会把真实冻结吞掉（受控时钟三几何亲证：流中切走/
+     * 冻结跨帧等待/自然多会话流——最常态的「看着 A、B 在生成」场景正中）。
+     * 这一行守卫对 r7-P2-2 的抑制语义（未盖章条目）零影响。 */
     markThrottled: function (sid) {
       var entry = currentBySession[sid || ""];
-      if (entry && !entry.finalized) entry.throttledOrigin = true;
+      if (entry && !entry.finalized && entry.t_dispatch == null) entry.throttledOrigin = true;
     },
     /** 可见发布已执行（React 状态已更新）。缺 scheduled 视为同步路径，补齐。 */
     markDispatched: function (sid) {

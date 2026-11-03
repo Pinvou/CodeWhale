@@ -324,13 +324,21 @@ test('bridge onSessionEvent 包装层：流式事件打 begin、始终委托共�
   vm.runInContext(wrapperSource, sandbox, { filename: 'bridge-onSessionEvent-wrapper.js' });
 
   assert.equal(sandbox.onSessionEvent({ event: 'chat:delta', payload: { session_id: 'sB' } }), 'delegated');
-  sandbox.onSessionEvent({ event: 'chat:reasoning_delta', payload: { session_id: 'sB2' } });
+  sandbox.onSessionEvent({ event: 'chat:reasoning_delta', payload: { session_id: 'sB2', text: 'reason' } });
   assert.deepEqual(begun, ['sB', 'sB2'], '两条流式事件各打一次 begin；前缀/后缀拼凑名均不触发');
   sandbox.onSessionEvent({ event: 'pre_chat:delta', payload: { session_id: 'no1' } });
   sandbox.onSessionEvent({ event: 'chat:delta_x', payload: { session_id: 'no3' } });  // r5: $ 锚定
   sandbox.onSessionEvent({ event: 'chat:turn_completed', payload: { session_id: 'no2' } });
   assert.deepEqual(begun, ['sB', 'sB2'], '前缀拼凑名与非流式事件不得触发 begin');
-  assert.equal(delegated.length, 5, '所有事件（含未打 begin 的）都必须原样委托');
+  // r9 P1 旁支1：空文本 reasoning_delta 的监听器会提前 return，无人调度发布
+  // ——begin 了就成滞留条目，下一个无关事件把它盖章成活跃会话上的假 stall
+  // （受控时钟 200ms 实测）。删掉包装层的 emptyReasoningDelta 分支此断言必红。
+  sandbox.onSessionEvent({ event: 'chat:reasoning_delta', payload: { session_id: 'sB3', text: '' } });
+  sandbox.onSessionEvent({ event: 'chat:reasoning_delta', payload: { session_id: 'sB3' } });
+  assert.deepEqual(begun, ['sB', 'sB2'], '空文本 reasoning_delta 不是渲染事件，不得 begin');
+  sandbox.onSessionEvent({ event: 'chat:reasoning_delta', payload: { session_id: 'sB3', text: 'x' } });
+  assert.deepEqual(begun, ['sB', 'sB2', 'sB3'], '有文本的 reasoning_delta 照常 begin');
+  assert.equal(delegated.length, 8, '所有事件（含未打 begin 的）都必须原样委托');
 });
 
 // r7 P1：抑制态 notify 不盖章的**行为锁**——r5 P2-2 的修复本体
@@ -386,6 +394,79 @@ test('后台渲染腿给探针条目打节流标记（r7 P2-2 接线锁）', () 
   assert.ok(
     calls.some(([kind, sid]) => kind === 'markThrottled' && sid === 's1'),
     '后台渲染腿必须打节流标记（删掉该接线此断言必红）',
+  );
+});
+
+// r9 P1-A 行为锁：抑制态 notify 取消掉的 pending 条目必须按节流收口——
+// 不补 markThrottled 的话它无主滞留，下一个无关事件把它盖章成假 stall
+// （recv→dispatch= 整段工具执行时间，UI 从未冻结）。删掉 notify 抑制臂的
+// markThrottled 接线此断言必红。
+test('抑制态 notify 取消 pending 后补节流标记（r9 P1-A 行为锁）', () => {
+  const calls = [];
+  const h = createNativeStreamHarness({
+    count: 2,
+    probe: {
+      begin(sid) { calls.push(['begin', sid]); },
+      markScheduled(sid) { calls.push(['markScheduled', sid]); },
+      markThrottled(sid) { calls.push(['markThrottled', sid]); },
+      markDispatched(sid) { calls.push(['markDispatched', sid]); },
+    },
+  });
+  // 后台 s1 的语义事件在抑制态路由内执行：notify 被调、无渲染发布。
+  h.emit('s1', 'chat:reasoning_done', { index: 0 });
+  assert.ok(
+    calls.some(([kind, sid]) => kind === 'markThrottled' && sid === 's1'),
+    '抑制态 notify 必须对 activeSessionId 补 markThrottled（不补=滞留条目被下一事件盖章成假 stall）',
+  );
+  assert.ok(
+    !calls.some(([kind]) => kind === 'markDispatched'),
+    '抑制态不得打派发标记（r5 P2-2 语义不变）',
+  );
+});
+
+// r9 P1-B 行为锁：refreshActiveStreamRender 取消切换会话的 pending 合并帧
+// 后补节流标记——紧随的真实发布本 tick 上屏或已不可达，滞留条目会被后续
+// 事件盖章成假 stall（recv→dispatch= 纯等待时间，32ms 窗口内切会话 5-15%）。
+test('切会话取消 pending 合并帧后补节流标记（r9 P1-B 行为锁）', () => {
+  const stamps = [];
+  const h = createNativeStreamHarness({
+    count: 2,
+    probe: {
+      begin(sid) { stamps.push(['begin', sid]); },
+      markScheduled(sid) { stamps.push(['markScheduled', sid]); },
+      markThrottled(sid) { stamps.push(['markThrottled', sid]); },
+      markDispatched(sid) { stamps.push(['markDispatched', sid]); },
+    },
+  });
+  h.emit('s1', 'chat:delta', { text: 'first' }); // 后台首条 delta：落到合并帧（武装）
+  h.activate('s1');                               // 宿主发布快照并切换活跃会话
+  h.emit('s1', 'chat:delta', { text: ' latest' });// 活跃会话第二条 delta：再武装合并帧
+  h.feature.refreshActiveStreamRender();          // 宿主恢复可见工作集的刷新入口
+  assert.ok(
+    stamps.some(([kind, sid]) => kind === 'markThrottled' && sid === 's1'),
+    'refresh 取消 pending 合并帧后必须补 markThrottled（不补=滞留条目被盖章成假 stall）',
+  );
+});
+
+// r9 P1-C 行为锁：后台会话终态取消自己的 pending 合并帧后补节流标记——
+// 引擎 delta+done 背靠背时终态总在 +16ms rAF 之前到，**每次后台会话完成**
+// 都会滞留；切回后下一个事件盖章成假 stall（recv→dispatch= 纯阅读时间）。
+test('后台终态取消 pending 合并帧后补节流标记（r9 P1-C 行为锁）', () => {
+  const stamps = [];
+  const h = createNativeStreamHarness({
+    count: 2,
+    probe: {
+      begin(sid) { stamps.push(['begin', sid]); },
+      markScheduled(sid) { stamps.push(['markScheduled', sid]); },
+      markThrottled(sid) { stamps.push(['markThrottled', sid]); },
+      markDispatched(sid) { stamps.push(['markDispatched', sid]); },
+    },
+  });
+  h.emit('s1', 'chat:delta', { text: 'tail' }); // 后台首条 delta：落到合并帧（武装）
+  h.emit('s1', 'chat:done', { status: 'completed' }); // 终态背靠背到达（rAF 之前）
+  assert.ok(
+    stamps.some(([kind, sid]) => kind === 'markThrottled' && sid === 's1'),
+    '后台终态取消 pending 后必须补 markThrottled（不补=每次后台会话完成都滞留）',
   );
 });
 
