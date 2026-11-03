@@ -2,6 +2,9 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import { adminPlatformCopy } from '../src/shared/i18n.js';
 import { AdminPlatformClient } from '../src/features/account-platform/admin-client.js';
+import { readFileSync } from 'node:fs';
+
+const operationsSource = readFileSync(new URL('../src/features/account-platform/AdminOperationsWorkspace.jsx', import.meta.url), 'utf8');
 
 for (const language of ['zh', 'en', 'ja']) test(`${language}: signup policy has every local authority, recovery and form label`, () => {
   const copy = adminPlatformCopy[language].operations;
@@ -31,4 +34,11 @@ test('Actual policy client uses existing same-origin no-store read and CSRF/key-
     assert.equal(calls[1].options.headers['Idempotency-Key'], 'controlled-immutable-policy-key');
     assert.deepEqual(JSON.parse(calls[1].options.body), body);
   } finally { globalThis.fetch = original; }
+});
+
+test('pending write recovery exposes a GET-only retry after manage permission is revoked', () => {
+  assert.match(operationsSource, /unknownWrite && canManage && state\.errorCode/);
+  assert.match(operationsSource, /unknownWrite && !canManage && canRead/);
+  assert.match(operationsSource, /onClick=\{\(\) => void load\(\)\}/);
+  assert.doesNotMatch(operationsSource, /unknownWrite && !canManage[\s\S]{0,240}updateRegistrationBonusPolicy/);
 });

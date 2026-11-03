@@ -24,6 +24,7 @@ func TestManagementPublicMigrationInstallation(t *testing.T) {
 	t.Run("retained-management-lifecycle-upgrade", func(t *testing.T) { testManagementPublicMigrationInstallation(t, false, 34, true) })
 	t.Run("installed-f07-36-upgrade", func(t *testing.T) { testManagementPublicMigrationInstallation(t, false, 36, false) })
 	t.Run("installed-pre-runtime-37-upgrade", func(t *testing.T) { testManagementPublicMigrationInstallation(t, false, 37, false) })
+	t.Run("installed-pre-cleanup-39-upgrade", func(t *testing.T) { testManagementPublicMigrationInstallation(t, false, 39, false) })
 }
 func testManagementPublicMigrationInstallation(t *testing.T, legacy bool, previousStage int, retainedManagement bool) {
 	dsn := os.Getenv("PINVOU_TEST_TOKEN_DATABASE_URL")
@@ -153,8 +154,14 @@ func testManagementPublicMigrationInstallation(t *testing.T, legacy bool, previo
 	if previousStage > 0 {
 		previous := []migrations.Migration{}
 		for _, m := range loaded {
-			if m.Version == 900005 {
-				continue // Waiver intents are not part of the retained predecessor.
+			if previousStage == 39 {
+				if m.Version != 900006 {
+					previous = append(previous, m)
+				}
+				continue
+			}
+			if m.Version >= 900005 {
+				continue // Waiver intents and later cleanup indexes are not part of the retained predecessor.
 			}
 			if m.Version != 35 && (previousStage == 37 || (m.Version != 900004 && (previousStage == 36 || (m.Version != 8 && m.Version != 9 && (previousStage == 34 || ((m.Version < 900002 || (previousStage == 30 && m.Version == 900002)) && m.Version != 16 && m.Version != 17 && m.Version != 34)))))) {
 				previous = append(previous, m)

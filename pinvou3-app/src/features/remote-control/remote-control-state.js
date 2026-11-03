@@ -116,6 +116,8 @@
       controlledTasks: [],
       controlledTranscript: [],
       intents: { controlled: 0, controller: 0 },
+      controlledNavigationIntent: 0,
+      controlledNavigationPending: false,
       revision: 0,
     };
   }
@@ -124,12 +126,14 @@
     var next = shallowCopy(state);
     next.intents = shallowCopy(state.intents);
     next.intents[kind] = (next.intents[kind] || 0) + 1;
+    if (kind === "controlled") next.controlledNavigationIntent = next.intents.controlled;
     next.revision = state.revision + 1;
     return next;
   }
 
   function beginControlledIntent(state, openNewGeneration) {
     var next = bump(state, "controlled");
+    next.controlledNavigationPending = true;
     if (openNewGeneration === true) {
       next.controlledOpenIntent = next.intents.controlled;
       next.controlledTerminatedOpenIntent = null;

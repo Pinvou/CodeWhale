@@ -1523,8 +1523,11 @@ impl UserPrefs {
     /// started, "free" means it runs outside the transaction's critical
     /// section (the racy ordering this probe exists to catch in red runs) and
     /// "held" means it runs under the lock (serialized with replacements).
-    /// Callers hold `ENV_LOCK`, and every prefs-lock-using test takes that
-    /// lock first, so no unrelated test can hold `USER_PREFS_LOCK` here.
+    /// The barrier helper probes before spawning the replacement thread, so
+    /// the parked delete thread is the only possible holder and the answer is
+    /// deterministic for both orderings. Callers hold `ENV_LOCK`, and every
+    /// prefs-lock-using test takes that lock first, so no unrelated test can
+    /// hold `USER_PREFS_LOCK` here.
     #[cfg(test)]
     pub(crate) fn user_prefs_lock_free_for_test() -> bool {
         matches!(USER_PREFS_LOCK.try_lock(), Ok(_))

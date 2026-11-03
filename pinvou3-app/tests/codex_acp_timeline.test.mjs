@@ -926,7 +926,7 @@ try {
     /else if \(mode === 'work'\) \{[\s\S]*?savePinvouModeState\(\{ mode: 'work' \}[^;]*;[\s\S]*?createNewSession\(\);[\s\S]*?setCurrentView\('chat'\)/,
     'selecting Work from the shared mode entry must return to ChatView work mode');
   assert.ok(
-    main.includes("if (bridge.available && !bs?.activeSessionId) bridge.sessions.createNewSession();"),
+    /if \(bridge\.available && !bs\?\.activeSessionId\) \{\s*invalidateControlledNavigation\(\);\s*bridge\.sessions\.createNewSession\(\);\s*\}/.test(main),
     'switching back from code to work keeps the original work session; only the draft state creates a new one (null-safe against an unavailable bridge)');
   assert.ok(
     main.includes("createPinvouModeScopeKey(bs.activeSessionId)"),

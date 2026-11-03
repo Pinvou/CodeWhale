@@ -8,6 +8,10 @@
 
 只有持久状态证明尚未开始渠道创建时才能启动创建。已经开始但结果不确定时按原商户订单号查询，不把“不知道结果”解释为“没有创建”。客户端遇到响应丢失须保留原键与原请求，不另建订单。
 
+### 订单与退款回执金额编码
+
+普通充值订单创建与查询（`POST /internal/v1/recharge/orders`、`GET /internal/v1/recharge/orders/{order_id}`）返回 `PaymentOrder`，其 `amount_fen` 是 JSON 整数；普通退款（`POST /internal/v1/recharge/orders/{order_id}/refunds`）返回 `Refund`，其 `amount_fen` 是十进制 JSON 字符串。两者均以分为单位、使用 int64 金额；不同 DTO 的既有编码保持兼容。全额退款验收先检查两者分别保留 string / number 类型，再通过现有 `integerMoney` 精确比较金额，交易与权益包归属仍须分别核验。JavaScript 消费者不得先将超出安全整数范围的金额转成 `Number`；此验收使用的普通商品金额在安全整数范围内，工具会拒绝非安全整数。
+
 ## 异常处置
 
 `POST /admin/v1/payment-anomalies/{case_id}/resolve` 要求既有管理权限、当前有效认领、至少八字符的 `Idempotency-Key`，以及包含 `resolution` 和至少十字符 `reason` 的 JSON。处置意图绑定案件、操作者、键、动作及理由；不能用另一操作者或相反动作替换尚未完成的金融处置。金融效果已提交但案件回执失败时，恢复读取对应持久效果，不重复记账。
