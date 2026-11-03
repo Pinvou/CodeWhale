@@ -20262,6 +20262,192 @@ async fn edit_last_turn_keeps_the_baseline_when_the_edited_target_is_a_budget_no
     );
 }
 
+/// JensenChen28 review 5745427306 counterexample (PR #131): while the first
+/// (unarmed) turn is still live, the host flips only the guardrail arming and
+/// a steer commits with text identical to that first prompt. Same day, empty
+/// non-git workspace, low context pressure: the steer message is then
+/// value-equal to the surviving first-turn message, so a value-based pop
+/// would consume the first turn's snapshot when the steer is edited away and
+/// leave the baseline at `None` — the replacement turn (armed posture) would
+/// omit the A→B host transition the retained first-turn block still implies.
+/// The pop must decide by position: no entry sits at the steer's cut, so the
+/// baseline stays on the first turn's posture and the replacement re-reports
+/// the transition.
+#[tokio::test]
+async fn edit_last_turn_value_equal_steer_leaves_the_first_turn_baseline_in_place() {
+    use crate::llm_client::mock::{MockLlmClient, canned};
+
+    const FIRST_PROMPT: &str = "turn in the unarmed posture";
+    let workspace = tempdir().expect("workspace");
+    let mut engine_config = deterministic_engine_config(workspace.path());
+    engine_config.max_steps = 32;
+    let mock = Arc::new(MockLlmClient::new(vec![]));
+    let client: crate::core::model_client::SharedModelClient = mock.clone();
+    let (engine, handle) = Engine::new_with_model_client(engine_config, &Config::default(), client);
+
+    // First turn, request 1: commit the same-text steer while the turn is
+    // live and flip the arming mid-run, then answer with a read-only tool
+    // call so the turn loops and the top-of-loop steer drain injects the
+    // steer into history before request 2.
+    let steer_handle = handle.clone();
+    mock.push_factory(move |_request| {
+        steer_handle
+            .try_send(Op::ChangeMode {
+                mode: AppMode::Agent,
+                allow_shell: false,
+                trust_mode: false,
+                auto_approve: false,
+                approval_mode: crate::tui::approval::ApprovalMode::Suggest,
+                configured_sandbox_mode: None,
+                ask_on_guardrail: Some(true),
+            })
+            .expect("live arming publish accepts the mid-turn flip");
+        let tx_steer = steer_handle.tx_steer.clone();
+        let steer_control = Arc::clone(&steer_handle.steer_control);
+        let target = {
+            let mut control = steer_control
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let target = control
+                .active_target()
+                .expect("first turn accepts test steer");
+            control
+                .register("same-text-steer".to_string(), target)
+                .expect("register same-text-steer");
+            target
+        };
+        tx_steer
+            .try_send(SteerMessage {
+                id: "same-text-steer".to_string(),
+                target,
+                content: FIRST_PROMPT.to_string(),
+            })
+            .expect("steer channel remains open");
+        canned::tool_call_turn(
+            "call-same-text-steer-read",
+            "read_file",
+            r#"{"path":"same-text-steer-probe.txt"}"#,
+        )
+    });
+    mock.push_turn(canned::simple_text_turn("first turn final answer"));
+    mock.push_turn(canned::simple_text_turn("replacement answer"));
+    let run = tokio::spawn(engine.run());
+
+    handle
+        .send(Op::SendMessage {
+            content: FIRST_PROMPT.to_string(),
+            mode: AppMode::Agent,
+            route: resolved_route_for_test(&Config::default(), "deepseek-v4-pro"),
+            compaction: Box::new(CompactionConfig::default()),
+            goal_objective: None,
+            goal_token_budget: None,
+            goal_status: crate::tools::goal::GoalStatus::Active,
+            reasoning_effort: None,
+            reasoning_effort_auto: false,
+            auto_model: false,
+            allow_shell: false,
+            trust_mode: false,
+            auto_approve: false,
+            approval_mode: crate::tui::approval::ApprovalMode::Suggest,
+            translation_enabled: false,
+            allowed_tools: None,
+            dynamic_tools: Vec::new(),
+            hook_executor: None,
+            verbosity: None,
+            provenance: UserInputProvenance::ExternalUser,
+            turn_tool_security: None,
+            submission_id: None,
+        })
+        .await
+        .expect("send the unarmed first turn");
+    wait_for_turn_complete(&handle).await;
+
+    // Precondition pin: the committed steer and the surviving first-turn
+    // message are value-equal, exactly the reviewed condition a value-based
+    // pop cannot decide.
+    {
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        handle
+            .send(Op::GetSessionSnapshot {
+                tx: std::sync::Arc::new(std::sync::Mutex::new(Some(tx))),
+            })
+            .await
+            .expect("request snapshot");
+        let snapshot = tokio::time::timeout(model_turn_event_timeout(), rx)
+            .await
+            .expect("snapshot response")
+            .expect("snapshot");
+        // Tool results persist with role "user" too; locate the first turn's
+        // message and the drained steer by their shared prompt text.
+        let same_text_messages: Vec<&Message> = snapshot
+            .messages
+            .iter()
+            .filter(|message| {
+                message.role.as_str() == "user"
+                    && message.content.iter().any(|block| {
+                        matches!(block, ContentBlock::Text { text, .. } if text.contains(FIRST_PROMPT))
+                    })
+            })
+            .collect();
+        assert_eq!(
+            same_text_messages.len(),
+            2,
+            "exactly the first turn's message and the drained steer carry the prompt text"
+        );
+        assert_eq!(
+            same_text_messages[0], same_text_messages[1],
+            "the same-text steer must be value-equal to the surviving first-turn message"
+        );
+    }
+
+    // The selector's latest editable user prompt is the entryless same-text
+    // steer — not the first turn build before it.
+    handle
+        .send(Op::EditLastTurn {
+            new_message: "revise this committed input".to_string(),
+            submission_id: Some("sub-edit-same-text-steer".to_string()),
+        })
+        .await
+        .expect("send edit");
+    wait_for_turn_complete(&handle).await;
+
+    handle.send(Op::Shutdown).await.expect("shutdown engine");
+    run.await.expect("engine task");
+
+    let requests = mock.captured_requests();
+    assert_eq!(
+        requests.len(),
+        3,
+        "the first turn's two requests and the replacement"
+    );
+    let first_request = captured_request_wire_text(&requests, 0);
+    assert!(
+        !first_request.contains("Authority transition (host)"),
+        "the first reported turn must render no transition"
+    );
+    let second_request = captured_request_wire_text(&requests, 1);
+    assert!(
+        second_request.contains(FIRST_PROMPT),
+        "the drained same-text steer must reach the first turn's follow-up request"
+    );
+    assert!(
+        !second_request.contains("Authority transition (host)"),
+        "the steer block renders no transition line of its own"
+    );
+    let replacement = captured_request_wire_text(&requests, 2);
+    assert!(
+        replacement.contains("revise this committed input"),
+        "the replacement must carry the edited steer text"
+    );
+    assert_eq!(
+        replacement.matches("Authority transition (host)").count(),
+        1,
+        "the replacement must re-report the A→B arming transition: the \
+         edited steer owned no entry, so the first turn's snapshot stays and \
+         the retained first-turn block remains the measured baseline"
+    );
+}
+
 #[tokio::test]
 #[allow(clippy::await_holding_lock)]
 async fn edit_last_turn_cuts_at_user_prompt_before_tool_results() {

@@ -1962,6 +1962,17 @@ impl Engine {
                             let auto_messages_after = result.messages.len();
                             let retries_used = result.retries_used;
                             let coverage_clause = result.coverage.receipt_clause();
+                            // The replacement history is provider-authored
+                            // (summaries, pruned tool results, coverage
+                            // floors), so the standing-baseline stack's
+                            // recorded indices no longer map onto it. Vacate
+                            // the entries instead of guessing a rebase:
+                            // post-compaction turn builds re-establish their
+                            // own entries immediately, and an edit that
+                            // targets a pre-compaction survivor recomputes
+                            // against the unchanged standing baseline rather
+                            // than restoring a misattributed snapshot.
+                            self.standing_posture_baseline_history.clear();
                             self.session.replace_messages(result.messages);
                             turn.clear_parent_input_tokens();
                             if let Some(pm) = self.session.prefix_stability.as_mut() {

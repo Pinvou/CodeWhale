@@ -1108,22 +1108,29 @@ enum McpBootUpdate {
 
 /// One entry of the engine's `standing_posture_baseline_history`: the
 /// standing baseline an authoritative turn build replaced, recorded with the
-/// exact persisted user message that carries the block reporting it.
+/// history index its persisted user message was appended at.
 ///
-/// The message is the linkage unit for `EditLastTurn`: the edit selector
-/// selects by message, so the pop must too. Steer commits and step-budget
-/// notices persist selectable ExternalUser messages without pushing entries;
-/// comparing identities at pop time keeps those edits from consuming a
-/// turn-build snapshot their truncation never removed.
+/// Position is the linkage unit for `EditLastTurn`, not message value:
+/// `Message` equality is structural (role + content), so a committed steer
+/// carrying the same text as the turn it ran inside is value-equal to that
+/// turn's message, and a history rewrite moves values away from the messages
+/// an entry was recorded for. The engine appends every message itself, so it
+/// always knows the index an entry belongs to; `EditLastTurn` truncates a
+/// suffix at the selector's cut, and a suffix cut never moves prefix indices,
+/// so an entry is the edited message's exactly when its index equals the cut.
+/// Steer commits and step-budget notices persist selectable ExternalUser
+/// messages without pushing entries — no entry sits at their cut, so editing
+/// them pops nothing.
 #[derive(Debug, Clone)]
 struct StandingPostureBaselineEntry {
     /// The baseline this turn's block replaced — restored when the turn is
     /// edited away.
     prior_posture: Option<crate::core::authority::TurnMetaPosture>,
-    /// The persisted user message this entry belongs to (a full clone of the
-    /// `Message` added to history at the same turn start; persisted user
-    /// messages are never mutated in place, so equality is stable).
-    turn_message: Message,
+    /// History index the entry's message was appended at (the
+    /// `session.messages` length before its `add_message`). Only meaningful
+    /// while no history replacement (session resume, compaction) has rebuilt
+    /// the list underneath it; those paths clear the stack.
+    push_index: usize,
 }
 
 /// The core engine that processes operations and emits events
@@ -4051,7 +4058,6 @@ impl Engine {
                                 continue;
                             }
                         };
-                        let edited_message = self.session.messages.get(idx).cloned();
                         self.session.messages.truncate_to(idx);
                         self.session.bump_messages_revision();
                         // The truncated turn's `<turn_meta>` block — including
@@ -4060,28 +4066,32 @@ impl Engine {
                         // installed would survive and make the replacement
                         // turn omit that transition. Restore the baseline the
                         // edited turn replaced (None included, e.g. when the
-                        // session's first turn is edited) — but only when the
-                        // edited message IS the persisted turn-build message
-                        // the top entry was recorded with. The selector can
+                        // session's first turn is edited) — by position, not
+                        // message value. Message equality is structural, so a
+                        // committed steer carrying the same text as the turn
+                        // it ran inside is value-equal to that turn's message
+                        // and a value match would pop the surviving turn's
+                        // snapshot. The truncation removes exactly the suffix
+                        // at `idx` and never moves prefix indices, so the
+                        // edited message owns an entry exactly when the top
+                        // entry was appended at `idx` itself. The selector can
                         // also target committed steer or step-budget notice
                         // messages (ExternalUser provenance, no entry of
-                        // their own): truncating one of those removes only
-                        // the message itself, so the standing baseline must
-                        // stay untouched and the replacement recomputes
-                        // against it (same posture → no transition line).
-                        // Identity, not position, decides: entries are linked
-                        // to their persisted message at push time.
-                        let top_matches_edited = match (
-                            edited_message.as_ref(),
-                            self.standing_posture_baseline_history.last(),
-                        ) {
-                            (Some(edited), Some(entry)) => *edited == entry.turn_message,
-                            _ => false,
-                        };
-                        if top_matches_edited
-                            && let Some(entry) = self.standing_posture_baseline_history.pop()
+                        // their own): no entry sits at their cut, the stack is
+                        // untouched, and the replacement recomputes against
+                        // the unchanged baseline (same posture → no
+                        // transition line).
+                        while let Some(entry) = self
+                            .standing_posture_baseline_history
+                            .pop_if(|entry| entry.push_index >= idx)
                         {
-                            self.last_authoritative_turn_meta_posture = entry.prior_posture;
+                            // The edit selector targets the last genuine user
+                            // prompt, so no entry can sit above the cut; an
+                            // entry at exactly `idx` is the edited turn's own,
+                            // and an entry below the cut ends the drain.
+                            if entry.push_index == idx {
+                                self.last_authoritative_turn_meta_posture = entry.prior_posture;
+                            }
                         }
                         // Now dispatch the new message as a normal send,
                         // reusing the engine's stored mode/model config.
@@ -6254,10 +6264,17 @@ impl Engine {
             },
         );
         if let Some(prior_posture) = standing_baseline_entry {
+            // The message appends right after this line, so the current
+            // history length is the index its entry is linked to. The engine
+            // appends every history message itself, so the index stays exact
+            // until a history replacement clears the stack (session resume,
+            // compaction); suffix truncations from EditLastTurn never move
+            // prefix indices.
+            let push_index = self.session.messages.len();
             self.standing_posture_baseline_history
                 .push(StandingPostureBaselineEntry {
                     prior_posture,
-                    turn_message: user_msg.clone(),
+                    push_index,
                 });
         }
         self.session.add_message(user_msg);
