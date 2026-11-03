@@ -711,6 +711,38 @@ fn readonly_verifier_context(workspace: &std::path::Path) -> ToolContext {
         .expect("bounded verifier authority")
 }
 
+/// A worker whose envelope grants no shell authority refuses every bash call
+/// at dispatch (`enforce_tool_authority` demands `ToolShellAuthority::ReadOnly`
+/// for bash/Bash), so the evidence catalog must not advertise the lane it can
+/// never use — while a worker whose envelope DOES grant read-only shell keeps
+/// the classifier-bounded probe lane.
+#[test]
+fn machine_catalog_omits_bash_without_shell_authority() {
+    let tmp = tempdir().expect("tempdir");
+    let shell_less = ToolRegistryBuilder::new()
+        .with_read_only_shell_tool()
+        .build(readonly_verifier_context(tmp.path()));
+    let shell_less_tools = shell_less.to_api_tools();
+    let names: Vec<&str> = shell_less_tools
+        .iter()
+        .map(|tool| tool.name.as_str())
+        .collect();
+    assert!(
+        !names.contains(&"bash") && !names.contains(&"Bash"),
+        "a shell-less verifier catalog must not list the bash lane: {names:?}"
+    );
+    // The twin: a read-only-shell envelope keeps the lane.
+    let scoped = ToolRegistryBuilder::new()
+        .with_read_only_shell_tool()
+        .build(readonly_scout_context(tmp.path(), true));
+    let scoped_tools = scoped.to_api_tools();
+    let names: Vec<&str> = scoped_tools.iter().map(|tool| tool.name.as_str()).collect();
+    assert!(
+        names.contains(&"bash"),
+        "a read-only-shell scout catalog keeps the classified probe lane: {names:?}"
+    );
+}
+
 #[test]
 fn machine_verifier_catalog_and_dispatch_add_only_bounded_run() {
     let tmp = tempdir().expect("tempdir");

@@ -1397,6 +1397,46 @@ fn readonly_options_are_allowed(canonical: &str, tokens: &[&str]) -> bool {
         "gh workflow view" => (3, "--yaml", "--ref -R --repo"),
         _ => return false,
     };
+    // wc's row letters are every one a no-value switch, so the POSIX getopt
+    // cluster spelling (`wc -cl`) expands to admitted letters only — expand
+    // before the exact match instead of enumerating cluster literals the way
+    // the ls row does. A letter that is not an admitted switch (`wc -cx`,
+    // `wc -c5`) still refuses, matching what the tool itself rejects.
+    if canonical == "wc" {
+        let owned: Vec<String> = tokens.iter().map(|token| (*token).to_string()).collect();
+        let expanded = expand_clustered_short_options(
+            &owned,
+            &switches.split_ascii_whitespace().collect::<Vec<_>>(),
+            &[],
+        );
+        let refs: Vec<&str> = expanded[start..].iter().map(String::as_str).collect();
+        return options_match_allowlist(&refs, switches, values);
+    }
+    // GNU grep glues the context count into the option word (`grep -3 pat f`
+    // is exactly `grep -C 3 pat f`); rewrite the shorthand to the exact-match
+    // form so the shared matcher consumes it. Only tokens in the option
+    // context rewrite — past `--` a `-3` is a file name and stays an operand.
+    // No other row gains the spelling (rg does not accept it).
+    if canonical == "grep" {
+        let mut rewritten: Vec<String> = Vec::with_capacity(tokens.len());
+        let mut options = true;
+        for token in &tokens[start..] {
+            if options && *token == "--" {
+                options = false;
+            } else if options
+                && token.len() > 1
+                && token.starts_with('-')
+                && token[1..].bytes().all(|byte| byte.is_ascii_digit())
+            {
+                rewritten.push("-C".to_string());
+                rewritten.push(token[1..].to_string());
+                continue;
+            }
+            rewritten.push((*token).to_string());
+        }
+        let refs: Vec<&str> = rewritten.iter().map(String::as_str).collect();
+        return options_match_allowlist(&refs, switches, values);
+    }
     options_match_allowlist(&tokens[start..], switches, values)
         && (!canonical.starts_with("gh ") || !github_command_targets_unsupported_host(tokens))
 }
@@ -3303,6 +3343,79 @@ mod tests {
                 "{command} stays refused"
             );
         }
+    }
+
+    /// wc's row letters are all no-value switches, so the POSIX getopt
+    /// cluster spelling (`wc -cl`) is exactly `-c -l`; the cluster expands
+    /// before the exact match and every letter must already be admitted.
+    /// The spelling reaches both classifiers through the shared table.
+    #[test]
+    fn agent_readonly_shell_admits_wc_clustered_switch_spellings() {
+        for command in [
+            "wc -cl f.txt",
+            "wc -lw f.txt",
+            "wc -clw f.txt",
+            "wc -Lc f.txt",
+            "wc -cl a.txt b.txt",
+        ] {
+            assert!(
+                is_agent_readonly_shell_command(command),
+                "{command} must admit like its separated form"
+            );
+            assert!(
+                is_parallel_readonly_command(command),
+                "the shared wc row admits {command} for parent auto-approve too"
+            );
+        }
+        for command in [
+            "wc -cx f.txt",
+            "wc -c5 f.txt",
+            "wc -5 f.txt",
+            "wc -x f.txt",
+            "wc -clx f.txt",
+        ] {
+            assert!(
+                !is_agent_readonly_shell_command(command),
+                "{command} stays refused"
+            );
+            assert!(!is_parallel_readonly_command(command));
+        }
+    }
+
+    /// GNU grep glues the context count into the option word (`grep -3 pat f`
+    /// is exactly `grep -C 3 pat f`); the shorthand rewrites to the
+    /// exact-match form for the shared matcher, in the option context only —
+    /// past `--` a `-3` is a file name and stays an operand. rg does not
+    /// accept the spelling and its row does not gain it.
+    #[test]
+    fn agent_readonly_shell_admits_grep_numeric_context_shorthand() {
+        for command in [
+            "grep -3 pat f.txt",
+            "grep -3 -i pat f.txt",
+            "grep -i -3 pat f.txt",
+            "grep -C 3 pat f.txt",
+        ] {
+            assert!(
+                is_agent_readonly_shell_command(command),
+                "{command} must admit like its separated -C form"
+            );
+            assert!(
+                is_parallel_readonly_command(command),
+                "the shared grep row admits {command} for parent auto-approve too"
+            );
+        }
+        for command in ["rg -3 pat f.txt", "grep -3.5 pat f.txt"] {
+            assert!(
+                !is_agent_readonly_shell_command(command),
+                "{command} stays refused"
+            );
+            assert!(!is_parallel_readonly_command(command));
+        }
+        // Past `--` the spelling is a file name: it stays an operand, judged
+        // by resolved location like every other post-terminator token (an
+        // in-workspace file named `-3` is a legitimate read; the classifier
+        // admits and the operand gate judges the name).
+        assert!(is_agent_readonly_shell_command("grep -- -3 f.txt"));
     }
 
     /// od's numeric `-j`/`-N` values accept GNU's multiplicative suffixes

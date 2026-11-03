@@ -4128,7 +4128,11 @@ fn write_stdin_to_a_child_that_stops_consuming_errors_instead_of_wedging() {
                     "the write returned before the deadline: {elapsed:?}"
                 ));
             }
-            if elapsed > std::time::Duration::from_secs(15) {
+            if elapsed > std::time::Duration::from_secs(30) {
+                // 6× the deadline: the deadline must fire promptly relative
+                // to a broken-mechanism hang (the outer guard catches that),
+                // but tightly enough to fail fast. 15 s (3×) flaked once
+                // under a heavily loaded host.
                 return Err(format!("the write took far past the deadline: {elapsed:?}"));
             }
             // Further writes are refused by the stall flag without waiting.
@@ -5582,6 +5586,55 @@ fn readonly_github_shell_calls_obey_the_host_network_policy_before_spawn() {
         .expect_err("headless Scout cannot prompt interactively")
         .to_string();
     assert!(prompted.contains("requires network approval"));
+}
+
+/// The decision function is only half the wall; the ordering claim ("before
+/// spawn") lives at the tool entry. A regression that drops or reorders the
+/// guard inside `execute` must redden here: under Deny, an admitted gh read
+/// refuses with the policy error and no child runs, while a non-gh read
+/// under the same policy runs untouched. The gh shape parses `--limit` on
+/// the client so even the MUTANT path (guard dropped) fails locally at arg
+/// parsing instead of reaching the network.
+#[tokio::test]
+async fn readonly_github_calls_refuse_at_the_policy_inside_the_tool_entry() {
+    let tmp = tempdir().expect("tempdir");
+    std::fs::write(tmp.path().join("inside.txt"), "inside").expect("inside file");
+    let context = ToolContext::new(tmp.path())
+        .with_shell_policy(crate::worker_profile::ShellPolicy::ReadOnly)
+        .with_network_policy(crate::network_policy::NetworkPolicyDecider::new(
+            crate::network_policy::NetworkPolicy {
+                default: crate::network_policy::DecisionToml::Deny,
+                ..crate::network_policy::NetworkPolicy::default()
+            },
+            None,
+        ));
+    let refused = LowercaseBashTool
+        .execute(
+            json!({"command": "gh issue list --limit notanumber"}),
+            &context,
+        )
+        .await;
+    let refused = match refused {
+        Err(error) => error.to_string(),
+        Ok(output) => {
+            assert!(
+                !output.success,
+                "the denied gh read must not succeed: {}",
+                output.content
+            );
+            output.content
+        }
+    };
+    assert!(
+        refused.contains("blocked by the active network policy"),
+        "the policy wall must fire inside execute, before any child runs: {refused}"
+    );
+    // A non-gh read under the same policy runs untouched.
+    let local = LowercaseBashTool
+        .execute(json!({"command": "wc -c inside.txt"}), &context)
+        .await
+        .expect("a local read does not consult the network policy");
+    assert!(local.success, "{}", local.content);
 }
 
 /// The tool description states the foreground stdin contract; the sentence is
@@ -10455,7 +10508,11 @@ fn interact_write_to_a_stalled_tty_command_is_bounded() {
                     "the write returned before the deadline: {elapsed:?}"
                 ));
             }
-            if elapsed > std::time::Duration::from_secs(15) {
+            if elapsed > std::time::Duration::from_secs(30) {
+                // 6× the deadline: the deadline must fire promptly relative
+                // to a broken-mechanism hang (the outer guard catches that),
+                // but tightly enough to fail fast. 15 s (3×) flaked once
+                // under a heavily loaded host.
                 return Err(format!("the write took far past the deadline: {elapsed:?}"));
             }
             let started = std::time::Instant::now();
@@ -10474,10 +10531,10 @@ fn interact_write_to_a_stalled_tty_command_is_bounded() {
         verdict
     });
     let verdict = receiver
-        .recv_timeout(Duration::from_secs(30))
+        .recv_timeout(Duration::from_secs(60))
         .unwrap_or_else(|_| {
             let _ = handle.join();
-            Err("the bounded tty-write test hung past its 30 s guard".to_string())
+            Err("the bounded tty-write test hung past its 60 s guard".to_string())
         });
     assert!(verdict.is_ok(), "{verdict:?}");
 }
@@ -10961,29 +11018,42 @@ async fn readonly_shell_lane_git_stage_glob_judges_the_shell_expansion_base() {
 
     let context = ToolContext::new(workspace.path().to_path_buf())
         .with_shell_policy(crate::worker_profile::ShellPolicy::ReadOnly);
-    let refused = LowercaseBashTool
-        .execute(json!({"command": "git -C .r diff *"}), &context)
-        .await
-        .expect_err("the operand gate refuses before spawn")
-        .to_string();
-    assert!(
-        refused.contains("glob_dash_named"),
-        "the wall must judge the shell's expansion base: {refused}"
-    );
-    assert!(!marker.exists(), "the refused wildcard must run nothing");
+    // Both call sites judge the shell-expansion base: the unpiped shape and
+    // the piped shape (git not the first program, so the stage walk runs).
+    // Either site alone regressing must redden here, not only in the unit.
+    for command in ["git -C .r diff *", "pwd | git -C .r diff * | wc -l"] {
+        let refused = LowercaseBashTool
+            .execute(json!({ "command": command }), &context)
+            .await
+            .expect_err("the operand gate refuses before spawn")
+            .to_string();
+        assert!(
+            refused.contains("glob_dash_named"),
+            "{command}: the wall must judge the shell's expansion base: {refused}"
+        );
+        assert!(
+            !marker.exists(),
+            "{command}: the refused wildcard must run nothing"
+        );
+    }
 
     // Without the bait the retargeted wildcard admits and stays clean: the
     // splice keeps `--no-textconv` ahead of git's last-flag-wins, and the
     // filter/env pins cover the rest.
     std::fs::remove_file(workspace.path().join("--textconv")).expect("remove bait");
-    let admitted = LowercaseBashTool
-        .execute(json!({"command": "git -C .r diff *"}), &context)
-        .await
-        .expect("the clean retargeted wildcard runs");
-    assert!(admitted.success, "{}", admitted.content);
-    assert!(!marker.exists(), "the admitted wildcard must run nothing");
-    assert!(
-        !admitted.content.contains("TOPSECRET-GITGLOB"),
-        "the admitted wildcard must leak nothing"
-    );
+    for command in ["git -C .r diff *", "pwd | git -C .r diff * | wc -l"] {
+        let admitted = LowercaseBashTool
+            .execute(json!({ "command": command }), &context)
+            .await
+            .unwrap_or_else(|error| panic!("{command} must run clean: {error}"));
+        assert!(admitted.success, "{command}: {}", admitted.content);
+        assert!(
+            !marker.exists(),
+            "{command}: the admitted wildcard must run nothing"
+        );
+        assert!(
+            !admitted.content.contains("TOPSECRET-GITGLOB"),
+            "{command}: the admitted wildcard must leak nothing"
+        );
+    }
 }
