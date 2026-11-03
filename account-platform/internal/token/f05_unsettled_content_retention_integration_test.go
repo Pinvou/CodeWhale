@@ -1,6 +1,7 @@
 package token
 
 import (
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -179,6 +180,47 @@ func TestF05UnsettledContentRetention(t *testing.T) {
 		}
 		if after := f05CancellationRecoveryFacts(t, r, ctx, id); after != before {
 			t.Error("content cleanup changed financial/identity/audit facts")
+		}
+		versions := func() string {
+			t.Helper()
+			var value string
+			if err := r.pool.QueryRow(ctx, `SELECT jsonb_build_object('events',
+ (SELECT jsonb_agg(xmin::text ORDER BY sequence) FROM usage_stream_events WHERE usage_request_id=$1),
+ 'result',(SELECT xmin::text FROM usage_replay_results WHERE usage_request_id=$1))::text`, id).Scan(&value); err != nil {
+				t.Fatal(err)
+			}
+			return value
+		}
+		cleared := versions()
+		for range 2 {
+			clock = clock.Add(15 * time.Second)
+			if err := r.CleanupReplayRetention(ctx); err != nil {
+				t.Fatal(err)
+			}
+			if versions() != cleared {
+				t.Fatal("periodic cleanup rewrote already-cleared metadata stubs")
+			}
+		}
+		// Check the actual OR query has a live-ciphertext index path. Disabling
+		// sequential scans proves availability, not a production latency budget.
+		tx, err := r.pool.Begin(ctx)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer tx.Rollback(ctx)
+		if _, err = tx.Exec(ctx, `SET LOCAL enable_seqscan=off`); err != nil {
+			t.Fatal(err)
+		}
+		for _, table := range []string{"usage_stream_events", "usage_replay_results"} {
+			var plan string
+			if err := tx.QueryRow(ctx, fmt.Sprintf(`EXPLAIN (FORMAT JSON) SELECT usage_request_id FROM %s
+ WHERE octet_length(encrypted_payload)>0 AND (expires_at<=$1 OR created_at<=$2)`, table), clock, clock.Add(-720*time.Hour)).Scan(&plan); err != nil {
+				t.Fatal(err)
+			}
+			if !strings.Contains(plan, table+"_cleanup_") || strings.Contains(plan, `"Node Type": "Seq Scan"`) {
+				t.Fatal("cleanup OR query lacks its live-ciphertext index path", plan)
+			}
+			t.Log("bounded cleanup index path", table, plan)
 		}
 	})
 

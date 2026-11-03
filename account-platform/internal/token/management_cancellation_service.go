@@ -19,7 +19,19 @@ func (s *Service) finishPreDispatchCancellation(ctx context.Context, usageID uui
 		return CancellationResult{}, err
 	}
 	if usage.ExecutionStatus == "RECEIVED" && usage.CanonicalVersion > 0 {
-		return s.cancellationStore.ConfirmPreDispatchCancellation(ctx, usageID)
+		result, confirmErr := s.cancellationStore.ConfirmPreDispatchCancellation(ctx, usageID, uuid.Nil)
+		if !errors.Is(confirmErr, errCancellationReservationAdvanced) {
+			return result, confirmErr
+		}
+		// The original invocation started reserving after our read. Recover its
+		// same hold below rather than declaring that no reservation exists.
+		usage, err = s.cancellationStore.GetUsage(ctx, usageID)
+		if err != nil {
+			return CancellationResult{}, err
+		}
+		if usage.ExecutionStatus != "HOLD_RESERVING" && usage.ExecutionStatus != "HOLD_RESERVED" {
+			return cancellationSnapshot(usage), nil
+		}
 	}
 	if usage.CanonicalVersion == 0 && usage.ExecutionStatus == "RECEIVED" {
 		// A migrated CREATED row may have lost the acknowledgement of an
@@ -77,7 +89,10 @@ func (s *Service) finishPreDispatchCancellation(ctx context.Context, usageID uui
 			return s.unconfirmedCancellation(ctx, usage, err)
 		}
 	}
-	return s.cancellationStore.ConfirmPreDispatchCancellation(ctx, usageID)
+	if usage.HoldID == nil {
+		return CancellationResult{}, ErrForbidden
+	}
+	return s.cancellationStore.ConfirmPreDispatchCancellation(ctx, usageID, *usage.HoldID)
 }
 
 func legacyCancellationPricing(usage UsageRequest) (uuid.UUID, HoldPricingContext, error) {
@@ -127,7 +142,7 @@ func (s *Service) unconfirmedCancellation(ctx context.Context, usage UsageReques
 
 type managementCancellationStore interface {
 	GetUsage(context.Context, uuid.UUID) (UsageRequest, error)
-	ConfirmPreDispatchCancellation(context.Context, uuid.UUID) (CancellationResult, error)
+	ConfirmPreDispatchCancellation(context.Context, uuid.UUID, uuid.UUID) (CancellationResult, error)
 	MarkHoldReserving(context.Context, uuid.UUID) error
 	LoadDispatchPreparation(context.Context, uuid.UUID) (DispatchEnvelope, error)
 	CompleteCancellationHold(context.Context, uuid.UUID, uuid.UUID, uuid.UUID) error

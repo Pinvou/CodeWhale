@@ -9,6 +9,8 @@ import (
 // CleanupMobileRecords implements the approved 24-hour captcha / 90-day SMS
 // retention policy. Each pass is bounded; database FK locks protect races with
 // new business references. Referenced or uncertain deliveries are retained.
+// Expired preparation/captcha facts remain; only their raw mobiles are redacted
+// after the original capability deadline plus 24 hours, without inferring users.
 func (r *PostgresRepository) CleanupMobileRecords(ctx context.Context) error {
 	tx, err := r.pool.Begin(ctx)
 	if err != nil {
@@ -16,6 +18,18 @@ func (r *PostgresRepository) CleanupMobileRecords(ctx context.Context) error {
 	}
 	defer tx.Rollback(ctx)
 	queries := []string{
+		`WITH candidates AS MATERIALIZED (
+            SELECT a.id,a.captcha_id FROM password_preparation_authorizations a
+            JOIN slider_captcha_challenges c ON c.id=a.captcha_id
+            WHERE a.expires_at<=now()-interval '24 hours' AND c.expires_at<=now()-interval '24 hours'
+              AND (a.mobile_e164 LIKE '+%' OR c.mobile_e164 LIKE '+%')
+            ORDER BY a.expires_at,a.id LIMIT 500 FOR UPDATE OF a,c SKIP LOCKED
+        ), redacted AS (
+            UPDATE password_preparation_authorizations a
+            SET mobile_e164='expired:'||a.id::text FROM candidates
+            WHERE a.id=candidates.id RETURNING a.captcha_id
+        ) UPDATE slider_captcha_challenges c SET mobile_e164='expired:'||c.id::text,updated_at=now()
+          FROM redacted WHERE c.id=redacted.captcha_id`,
 		`DELETE FROM slider_captcha_challenges WHERE id IN (
             SELECT c.id FROM slider_captcha_challenges c
             WHERE c.expires_at < now() AND c.updated_at < now()-interval '24 hours'

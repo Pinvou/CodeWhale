@@ -653,6 +653,68 @@ func TestPasswordPreparationAuthorizationPostgres(t *testing.T) {
 			}
 		}
 	})
+	t.Run("retention-redacts-expired-mobiles-without-changing-grant-facts", func(t *testing.T) {
+		for _, sample := range []struct {
+			name string
+			age  time.Duration
+		}{{"expired", 25 * time.Hour}, {"young", 23 * time.Hour}, {"valid", 0}} {
+			t.Run(sample.name, func(t *testing.T) {
+				id, captcha := uuid.New(), uuid.New()
+				mobile := "+8613800138003"
+				expires := time.Now().UTC().Add(2 * time.Minute)
+				if e := repository.CreateSliderCaptcha(ctx, SliderCaptcha{ID: captcha, Mobile: mobile, Purpose: SMSPurposeRegister, TargetX: 20, ExpiresAt: expires}); e != nil {
+					t.Fatal(e)
+				}
+				if _, e := repository.IssuePasswordPreparation(ctx, id, captcha, mobile, SMSPurposeRegister, 20, "retention-source", "retention-device"); e != nil {
+					t.Fatal(e)
+				}
+				if _, e := repository.ClaimPasswordPreparation(ctx, id, uuid.New(), "retention-source", "retention-device"); e != nil {
+					t.Fatal(e)
+				}
+				if e := repository.ConsumePasswordPreparationSMS(ctx, id, mobile, SMSPurposeRegister, "retention-source", "retention-device"); e != nil {
+					t.Fatal(e)
+				}
+				if sample.age > 0 {
+					expires = time.Now().UTC().Add(-sample.age)
+					if _, e := repository.pool.Exec(ctx, `UPDATE password_preparation_authorizations SET expires_at=$2 WHERE id=$1`, id, expires); e != nil {
+						t.Fatal(e)
+					}
+					if _, e := repository.pool.Exec(ctx, `UPDATE slider_captcha_challenges SET expires_at=$2,updated_at=$2 WHERE id=$1`, captcha, expires); e != nil {
+						t.Fatal(e)
+					}
+				}
+				facts := func() string {
+					t.Helper()
+					var value string
+					if e := repository.pool.QueryRow(ctx, `SELECT jsonb_build_array(to_jsonb(a)-'mobile_e164',to_jsonb(c)-'mobile_e164'-'updated_at')::text FROM password_preparation_authorizations a JOIN slider_captcha_challenges c ON c.id=a.captcha_id WHERE a.id=$1`, id).Scan(&value); e != nil {
+						t.Fatal(e)
+					}
+					return value
+				}
+				before, previousVersions := facts(), ""
+				for pass := 0; pass < 2; pass++ {
+					if e := repository.CleanupMobileRecords(ctx); e != nil {
+						t.Fatal(e)
+					}
+					var grantMobile, captchaMobile, versions string
+					if e := repository.pool.QueryRow(ctx, `SELECT a.mobile_e164,c.mobile_e164,a.xmin::text||':'||c.xmin::text FROM password_preparation_authorizations a JOIN slider_captcha_challenges c ON c.id=a.captcha_id WHERE a.id=$1`, id).Scan(&grantMobile, &captchaMobile, &versions); e != nil {
+						t.Fatal(e)
+					}
+					if sample.name == "expired" {
+						if grantMobile != "expired:"+id.String() || captchaMobile != "expired:"+captcha.String() {
+							t.Fatal("raw mobile retained beyond original deadline plus 24 hours")
+						}
+					} else if grantMobile != mobile || captchaMobile != mobile {
+						t.Fatal("cleanup changed a valid or young capability")
+					}
+					if facts() != before || (pass == 1 && versions != previousVersions) {
+						t.Fatal("cleanup changed grant facts or rewrote an already-redacted record")
+					}
+					previousVersions = versions
+				}
+			})
+		}
+	})
 	t.Run("retention-skips-locked-expired-captcha-and-rejects-late-grant", func(t *testing.T) {
 		// Independent legal target avoids consuming another test's per-mobile CAPTCHA quota.
 		status, raw := preparationPost(t, accountServer.URL+"/v1/auth/captcha/challenges", map[string]any{"mobile": "13900138001", "purpose": SMSPurposeRegister}, nil)

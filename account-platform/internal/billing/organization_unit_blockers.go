@@ -82,7 +82,7 @@ func (r *PostgresRepository) ApplyOrganizationUnitLifecycle(ctx context.Context,
 	if status == "DELETED" && !assessment.Ready {
 		return assessment, tx.Commit(ctx)
 	}
-	if _, err := tx.Exec(ctx, `INSERT INTO organization_unit_lifecycle_states(organization_id,unit_id,status,structure_version,updated_at) VALUES($1,$2,$3,$4,$5) ON CONFLICT(organization_id,unit_id) DO UPDATE SET status=EXCLUDED.status,structure_version=EXCLUDED.structure_version,updated_at=EXCLUDED.updated_at`, organizationID, unitID, status, structureVersion, time.Now().UTC()); err != nil {
+	if _, err := tx.Exec(ctx, `INSERT INTO organization_unit_lifecycle_states(organization_id,unit_id,status,structure_version,updated_at) VALUES($1,$2,$3,$4,$5) ON CONFLICT(organization_id,unit_id) DO UPDATE SET status=EXCLUDED.status,structure_version=EXCLUDED.structure_version,updated_at=EXCLUDED.updated_at`, organizationID, unitID, status, structureVersion, r.now()); err != nil {
 		return OrganizationUnitDeletionAssessment{}, err
 	}
 	if status == "DELETED" {

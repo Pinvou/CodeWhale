@@ -4,6 +4,13 @@ This chart deploys Account Service, Billing Service, Token Gateway, Token Portal
 Keycloak, and Redis. NATS, PostgreSQL and payment/model providers stay external so
 their backup, certificate, and merchant controls remain environment-owned.
 
+The bundled Keycloak uses the existing chart-wide `resources` requests and
+limits. Its management HTTP startup/readiness probes remain distinct from
+`/health/live`, which restarts a failed process only after startup succeeds.
+The shared default memory limit is 512 MiB; it is not a Keycloak capacity
+acceptance result. Measure and configure the site's budget before activation;
+render checks alone do not demonstrate JVM recovery or production throughput.
+
 ### Account governance expectations
 
 Account retains its default models assembly, including base/staging installs with

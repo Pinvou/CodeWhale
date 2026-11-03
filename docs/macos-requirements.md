@@ -36,7 +36,7 @@ macOS 语音输入直接调用系统 **Speech 框架**，无需额外安装引�
 /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"
 
 # 通过应用内「依赖体检」一键安装，或手动执行：
-brew install poppler pandoc tesseract p7zip
+brew install poppler pandoc tesseract tesseract-lang p7zip
 brew install --cask libreoffice
 ```
 
@@ -50,7 +50,7 @@ brew install --cask libreoffice
 | PDF 渲染预览 | poppler (`pdftoppm`) | Homebrew / 官网 | https://poppler.freedesktop.org |
 | Office 文档转换 | LibreOffice | Homebrew cask / 官网 | https://www.libreoffice.org/download |
 | Markdown/文档转换 | pandoc | Homebrew / 官网 | https://pandoc.org/installing.html |
-| OCR（扫描件识别） | tesseract | Homebrew / 官网 | https://tesseract-ocr.github.io/tessdoc/Installation.html |
+| OCR（扫描件识别） | tesseract + tesseract-lang（中文语言包，中文识别必需） | Homebrew / 官网 | https://tesseract-ocr.github.io/tessdoc/Installation.html |
 | 压缩包解压 | 7-Zip (`7z`) | Homebrew (`p7zip`) / 官网 | https://www.7-zip.org |
 | 语音输入 | macOS 系统 Speech 框架 | 系统自带（无需安装） | — |
 | 邮件解析 (.msg) | msgconvert (Perl 模块) | `sudo cpan -i Email::Outlook::Message` | — |
@@ -77,7 +77,7 @@ xcode-select --install
 | 邮件 (.msg/.eml) | 跳过解析，返回提示信息 |
 | 语音输入 | 走系统 Speech 框架：支持时端上识别，否则使用 Apple Speech 在线服务 |
 
-**所有缺失均不会导致应用崩溃。** 应用启动时和「设置 → 依赖体检」页面会实时检测已安装的工具状态。
+**所有缺失均不会导致应用崩溃。** 文件解析等功能用到的系统工具在首次使用时检测一次并缓存；「设置 → 依赖体检」页面为实时检测。
 
 ## 应用内依赖体检
 
@@ -89,7 +89,7 @@ xcode-select --install
 
 ## GUI 启动与 PATH
 
-从 DMG、Finder 或 Spotlight 启动的 GUI 应用不继承终端 shell 的 PATH。pinvou3 会在启动时自动探测并将以下目录加入进程 PATH（如果存在）：
+从 DMG、Finder 或 Spotlight 启动的 GUI 应用不继承终端 shell 的 PATH。pinvou3 会在启动时将以下目录加入进程 PATH：
 
 - `/opt/homebrew/bin`（Apple Silicon Homebrew）
 - `/usr/local/bin`（Intel Homebrew / 手动安装工具）
@@ -101,11 +101,11 @@ xcode-select --install
 
 以下为当前 macOS 分发链路的已知风险，集中登记以便后续 PR 跟踪：
 
-- **未签名 / ad-hoc 分发**：当前 dmg 为 ad-hoc 签名（`tauri.conf.json` 的 `mac.signingIdentity = "-"`），首次打开会被 Gatekeeper 隔离。用户需手动解除隔离：
+- **未签名 / ad-hoc 分发**：当前 dmg 为 ad-hoc 签名（`pinvou3-app/src-tauri/config/platforms/macos/tauri.conf.json` 的 `bundle.macOS.signingIdentity = "-"`），首次打开会被 Gatekeeper 隔离。用户需手动解除隔离：
   ```bash
   xattr -dr com.apple.quarantine /Applications/pinvou3.app
   ```
-  Developer ID + 公证（notarization）凭证将在后续 PR 接入，届时可省去此步并启用 Hardened Runtime（路线见 `src-tauri/entitlements.plist` 顶部注释）。
+  Developer ID + 公证（notarization）凭证将在后续 PR 接入，届时可省去此步并启用 Hardened Runtime（路线见 `pinvou3-app/src-tauri/packaging/macos/entitlements.plist` 顶部注释）。
 
 - **OTA 无独立签名验证**：更新通道的 `latest.json` 仅靠 sha256 自校验 + CFBundleIdentifier 字符串校验 + PlistBuddy 字段校验，没有 minisign / Developer ID 离线签名。攻击者若控制 pinvou.com 分发域名，理论上可投递伪造的 manifest + dmg。计划后续引入 manifest 离线签名 + 客户端验签。
 

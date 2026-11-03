@@ -27,7 +27,7 @@ spec:
       securityContext: { runAsNonRoot: true, seccompProfile: { type: RuntimeDefault } }
       containers:
         - name: migrate
-          image: "{{ $root.Values.images.migrate.repository }}:{{ $root.Values.images.migrate.tag }}"
+          image: {{ include "pinvou.imageRef" (dict "image" $root.Values.images.migrate) | quote }}
           imagePullPolicy: {{ $root.Values.images.migrate.pullPolicy }}
           args: ["--dir", "/migrations/{{ $domain }}"]
           securityContext: { allowPrivilegeEscalation: false, readOnlyRootFilesystem: true, capabilities: { drop: ["ALL"] } }
@@ -73,7 +73,7 @@ spec:
       securityContext: { runAsNonRoot: true, seccompProfile: { type: RuntimeDefault } }
       containers:
         - name: bootstrap
-          image: "{{ .Values.images.tokenPolicyBootstrap.repository }}:{{ .Values.images.tokenPolicyBootstrap.tag }}"
+          image: {{ include "pinvou.imageRef" (dict "image" .Values.images.tokenPolicyBootstrap) | quote }}
           imagePullPolicy: {{ .Values.images.tokenPolicyBootstrap.pullPolicy }}
           args: ["--mode", "bootstrap"]
           securityContext: { allowPrivilegeEscalation: false, readOnlyRootFilesystem: true, capabilities: { drop: ["ALL"] } }

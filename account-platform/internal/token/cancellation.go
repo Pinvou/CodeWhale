@@ -71,6 +71,23 @@ func (r *PostgresRepository) requestCancellation(ctx context.Context, usageID, u
 	if usage.ExecutionStatus == "REVIEW" && usage.ErrorClass != nil && *usage.ErrorClass == "cancel_hold_recovery_unconfirmed" && usage.CancelStatus == "CANCEL_REQUESTED" {
 		return cancellationSnapshot(usage), false, tx.Commit(ctx)
 	}
+	// A MODEL cancellation or expiry recovery may already have confirmed release
+	// before the user's first command. Keep its immutable confirmation so the
+	// original worker can record its attempt or replay its expiry proof.
+	if usage.ExecutionStatus == "CANCELLED_BEFORE_DISPATCH" && usage.CancelStatus == "LOCAL_CONFIRMED" && usage.SettlementStatus == "RELEASED" {
+		return cancellationSnapshot(usage), false, tx.Commit(ctx)
+	}
+	// The existing expiry fence already stopped this original dispatch. Record
+	// the user's command, retaining its proof and the usual same-hold finish.
+	if usage.ExecutionStatus == "HOLD_RESERVED" && usage.CancelStatus == "CANCEL_REQUESTED" {
+		pending, err := pendingUnusedExpiryFenceTx(ctx, tx, usage.ID)
+		if err != nil {
+			return CancellationResult{}, false, err
+		}
+		if pending {
+			return cancellationSnapshot(usage), true, tx.Commit(ctx)
+		}
+	}
 	terminal := usage.ExecutionStatus == "SUCCEEDED" || usage.ExecutionStatus == "FAILED" || usage.ExecutionStatus == "CANCELLED_BEFORE_DISPATCH"
 	if terminal {
 		if _, err := tx.Exec(ctx, `UPDATE usage_requests SET cancel_status='ALREADY_TERMINAL',cancel_requested_at=$2,updated_at=$2 WHERE id=$1`, usageID, now); err != nil {
@@ -125,7 +142,9 @@ func isCancellationKeyConflict(err error) bool {
 		databaseError.ConstraintName == "usage_cancel_commands_user_id_idempotency_key_digest_key"
 }
 
+const cancellationFingerprintDomain = "pinvou-usage-cancel-v1\x00"
+
 func cancellationFingerprint(usageID uuid.UUID) string {
-	digest := sha256.Sum256([]byte("pinvou-usage-cancel-v1\x00" + usageID.String()))
+	digest := sha256.Sum256([]byte(cancellationFingerprintDomain + usageID.String()))
 	return hex.EncodeToString(digest[:])
 }

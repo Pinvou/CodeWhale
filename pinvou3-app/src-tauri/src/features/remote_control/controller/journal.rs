@@ -11,6 +11,7 @@
 
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::fmt;
+use std::sync::Arc;
 
 use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
@@ -256,10 +257,31 @@ struct JournalInner {
     acknowledged: u64,
 }
 
+/// A process-local identity issued by the B lifecycle manager. There is no
+/// constructor or deserializer for ordinary consumers, and names grant no authority.
+#[derive(Clone)]
+pub(crate) struct JournalOwner(Arc<JournalOwnerIdentity>);
+
+struct JournalOwnerIdentity {
+    generation: String,
+}
+
+impl JournalOwner {
+    fn same_as(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.0, &other.0)
+    }
+
+    fn generation(&self) -> &str {
+        &self.0.generation
+    }
+}
+
 struct JournalState {
     epoch_seed: String,
     epoch: String,
     generation: Option<String>,
+    active_owner: Option<JournalOwner>,
+    payload_owner: Option<JournalOwner>,
     retired_generations: HashSet<String>,
     retired_order: VecDeque<String>,
     sessions: HashMap<String, JournalInner>,
@@ -277,6 +299,8 @@ impl RemoteJournal {
                 epoch_seed: epoch.clone(),
                 epoch,
                 generation: None,
+                active_owner: None,
+                payload_owner: None,
                 retired_generations: HashSet::new(),
                 retired_order: VecDeque::new(),
                 sessions: HashMap::new(),
@@ -297,73 +321,125 @@ impl RemoteJournal {
 
     /// Starts a new epoch (reconnect or new lease). Everything older is
     /// unreachable, so a replay request against the old epoch yields a gap.
+    #[cfg(test)]
     pub(crate) fn reset(&self, epoch: impl Into<String>) {
         let mut inner = self.inner.lock();
         inner.epoch = epoch.into();
         inner.epoch_seed = inner.epoch.clone();
         inner.generation = None;
+        inner.active_owner = None;
+        inner.payload_owner = None;
         inner.retired_generations.clear();
         inner.retired_order.clear();
         inner.sessions.clear();
     }
 
-    /// The live B owner calls this before recording or reading a generation.
-    /// A new lease generation retires the entire prior per-session epoch; it
-    /// can never replay events admitted under the previous controller lease.
-    pub(crate) fn bind_generation(&self, generation: &str) -> Result<String> {
+    pub(super) fn activate_owner(
+        &self,
+        authority: &super::controlled::JournalAuthority,
+        generation: &str,
+    ) -> Result<JournalOwner> {
         validate_id(generation, MAX_SESSION_ID_CHARS)?;
-        let mut state = self.inner.lock();
-        if state.generation.as_deref() != Some(generation) {
-            if state.retired_generations.contains(generation) {
-                return Err(error("journal_generation_retired"));
-            }
-            if let Some(previous) = state.generation.take() {
-                // Bounded FIFO retirement: without eviction a long-lived
-                // process hard-fails every new generation once the cap is
-                // hit, silently dropping all journal recording. A replay of
-                // an evicted generation stays fenced by its derived epoch and
-                // the per-frame lease context binding.
-                state.retired_generations.insert(previous.clone());
-                state.retired_order.push_back(previous);
-                if state.retired_order.len() > MAX_RETIRED_GENERATIONS {
-                    if let Some(evicted) = state.retired_order.pop_front() {
-                        state.retired_generations.remove(&evicted);
-                    }
-                }
-            }
-            let mut hasher = Sha256::new();
-            hasher.update(b"pinvou-journal-generation-v1\0");
-            hasher.update(state.epoch_seed.as_bytes());
-            hasher.update([0]);
-            hasher.update(generation.as_bytes());
-            state.epoch = format!(
-                "journal-{}",
-                crate::platform::encoding::hex_lower(&hasher.finalize())
-            );
-            state.sessions.clear();
-            state.generation = Some(generation.to_owned());
-        }
-        Ok(state.epoch.clone())
-    }
-
-    fn require_generation_locked(state: &JournalState, generation: &str) -> Result<()> {
-        validate_id(generation, MAX_SESSION_ID_CHARS)?;
-        if state.generation.as_deref() != Some(generation) {
+        if !authority.controls(self) {
             return Err(error("journal_generation_stale"));
         }
+        let owner = JournalOwner(Arc::new(JournalOwnerIdentity {
+            generation: generation.to_owned(),
+        }));
+        self.inner.lock().active_owner = Some(owner.clone());
+        // Issuance changes permission only. Preserve the previous payload until
+        // the first valid operation by the new owner, as before this repair.
+        Ok(owner)
+    }
+
+    pub(super) fn revoke_owner(
+        &self,
+        authority: &super::controlled::JournalAuthority,
+        owner: &JournalOwner,
+    ) {
+        if !authority.controls(self) {
+            return;
+        }
+        let mut state = self.inner.lock();
+        if state
+            .active_owner
+            .as_ref()
+            .is_some_and(|active| active.same_as(owner))
+        {
+            state.active_owner = None;
+        }
+    }
+
+    fn require_active_owner_locked(state: &JournalState, owner: &JournalOwner) -> Result<()> {
+        if !state
+            .active_owner
+            .as_ref()
+            .is_some_and(|active| active.same_as(owner))
+        {
+            return Err(error("journal_generation_stale"));
+        }
+        Ok(())
+    }
+
+    fn require_owner_locked(state: &JournalState, owner: &JournalOwner) -> Result<()> {
+        Self::require_active_owner_locked(state, owner)?;
+        if !state
+            .payload_owner
+            .as_ref()
+            .is_some_and(|payload| payload.same_as(owner))
+        {
+            return Err(error("journal_generation_stale"));
+        }
+        Ok(())
+    }
+
+    fn select_owner_locked(state: &mut JournalState, owner: &JournalOwner) -> Result<()> {
+        // This check and the complete operation share the journal mutex. A
+        // captured stale handle cannot select or clear a successor's payload.
+        Self::require_active_owner_locked(state, owner)?;
+        if state
+            .payload_owner
+            .as_ref()
+            .is_some_and(|payload| payload.same_as(owner))
+        {
+            return Ok(());
+        }
+        if let Some(previous) = state.generation.take() {
+            // Bounded presentation bookkeeping, never a grant of authority.
+            // Full responsibility-aware retirement remains a separate task.
+            state.retired_generations.insert(previous.clone());
+            state.retired_order.push_back(previous);
+            if state.retired_order.len() > MAX_RETIRED_GENERATIONS {
+                if let Some(evicted) = state.retired_order.pop_front() {
+                    state.retired_generations.remove(&evicted);
+                }
+            }
+        }
+        let mut hasher = Sha256::new();
+        hasher.update(b"pinvou-journal-generation-v1\0");
+        hasher.update(state.epoch_seed.as_bytes());
+        hasher.update([0]);
+        hasher.update(owner.generation().as_bytes());
+        state.epoch = format!(
+            "journal-{}",
+            crate::platform::encoding::hex_lower(&hasher.finalize())
+        );
+        state.sessions.clear();
+        state.generation = Some(owner.generation().to_owned());
+        state.payload_owner = Some(owner.clone());
         Ok(())
     }
 
     /// Publication after append must not reinterpret an old event under a new
     /// live lease/ref. This exact-stream proof is checked under the same
     /// journal mutex as generation and epoch.
-    pub(crate) fn require_current_event_for_generation(
+    pub(crate) fn require_current_event_for_owner(
         &self,
-        generation: &str,
+        owner: &JournalOwner,
         event: &JournalEvent,
     ) -> Result<()> {
         let state = self.inner.lock();
-        Self::require_generation_locked(&state, generation)?;
+        Self::require_owner_locked(&state, owner)?;
         if state.epoch != event.epoch
             || !state
                 .sessions
@@ -375,10 +451,12 @@ impl RemoteJournal {
         Ok(())
     }
 
+    #[cfg(test)]
     pub(crate) fn epoch(&self) -> String {
         self.inner.lock().epoch.clone()
     }
 
+    #[cfg(test)]
     pub(crate) fn last_sequence_for(&self, session_id: &str) -> u64 {
         self.inner
             .lock()
@@ -387,6 +465,7 @@ impl RemoteJournal {
             .map_or(0, |stream| stream.sequence)
     }
 
+    #[cfg(test)]
     pub(crate) fn acknowledged_for(&self, session_id: &str) -> u64 {
         self.inner
             .lock()
@@ -395,12 +474,41 @@ impl RemoteJournal {
             .map_or(0, |stream| stream.acknowledged)
     }
 
+    #[cfg(test)]
     pub(crate) fn len_for(&self, session_id: &str) -> usize {
         self.inner
             .lock()
             .sessions
             .get(session_id)
             .map_or(0, |stream| stream.events.len())
+    }
+
+    /// Raw state observation for deterministic no-mutation regressions only.
+    /// It grants neither issuance nor journal write permission.
+    #[cfg(test)]
+    pub(crate) fn owner_test_state(&self, owner: &JournalOwner) -> Value {
+        let state = self.inner.lock();
+        let sessions: std::collections::BTreeMap<_, _> = state
+            .sessions
+            .iter()
+            .map(|(id, stream)| {
+                (
+                    id.clone(),
+                    json!({
+                        "sequence": stream.sequence, "events": stream.events, "bytes": stream.bytes,
+                        "eventIds": stream.event_ids, "terminals": stream.terminals,
+                        "acknowledged": stream.acknowledged,
+                    }),
+                )
+            })
+            .collect();
+        let retired: std::collections::BTreeSet<_> = state.retired_generations.iter().collect();
+        json!({
+            "activeMatches": state.active_owner.as_ref().is_some_and(|active| active.same_as(owner)),
+            "payloadMatches": state.payload_owner.as_ref().is_some_and(|payload| payload.same_as(owner)),
+            "generation": state.generation, "epoch": state.epoch, "epochSeed": state.epoch_seed,
+            "retired": retired, "retiredOrder": state.retired_order, "sessions": sessions,
+        })
     }
 
     #[cfg(test)]
@@ -416,9 +524,9 @@ impl RemoteJournal {
             .ok_or_else(|| error("journal_kind_not_exportable"))
     }
 
-    pub(crate) fn append_for_generation(
+    pub(crate) fn append_for_owner(
         &self,
-        generation: &str,
+        owner: &JournalOwner,
         event_id: &str,
         kind: JournalKind,
         session_id: &str,
@@ -426,7 +534,7 @@ impl RemoteJournal {
         payload: Value,
     ) -> Result<JournalEvent> {
         self.append_inner(
-            Some(generation),
+            Some(owner),
             event_id,
             kind,
             session_id,
@@ -465,9 +573,9 @@ impl RemoteJournal {
         )
     }
 
-    pub(crate) fn append_terminal_for_generation(
+    pub(crate) fn append_terminal_for_owner(
         &self,
-        generation: &str,
+        owner: &JournalOwner,
         event_id: &str,
         session_id: &str,
         task_id: &str,
@@ -481,7 +589,7 @@ impl RemoteJournal {
             return Err(error("journal_status_invalid"));
         }
         self.append_inner(
-            Some(generation),
+            Some(owner),
             event_id,
             JournalKind::TaskStatus,
             session_id,
@@ -493,7 +601,7 @@ impl RemoteJournal {
 
     fn append_inner(
         &self,
-        generation: Option<&str>,
+        owner: Option<&JournalOwner>,
         event_id: &str,
         kind: JournalKind,
         session_id: &str,
@@ -529,8 +637,8 @@ impl RemoteJournal {
         )
         .into();
         let mut state = self.inner.lock();
-        if let Some(generation) = generation {
-            Self::require_generation_locked(&state, generation)?;
+        if let Some(owner) = owner {
+            Self::select_owner_locked(&mut state, owner)?;
         }
         let epoch = state.epoch.clone();
         if !state.sessions.contains_key(session_id) && state.sessions.len() >= MAX_JOURNAL_SESSIONS
@@ -607,27 +715,27 @@ impl RemoteJournal {
         self.replay_after_for_inner(None, session_id, epoch, sequence)
     }
 
-    pub(crate) fn replay_after_for_generation(
+    pub(crate) fn replay_after_for_owner(
         &self,
-        generation: &str,
+        owner: &JournalOwner,
         session_id: &str,
         epoch: &str,
         sequence: u64,
     ) -> Result<ReplayOutcome> {
-        self.replay_after_for_inner(Some(generation), session_id, epoch, sequence)
+        self.replay_after_for_inner(Some(owner), session_id, epoch, sequence)
     }
 
     fn replay_after_for_inner(
         &self,
-        generation: Option<&str>,
+        owner: Option<&JournalOwner>,
         session_id: &str,
         epoch: &str,
         sequence: u64,
     ) -> Result<ReplayOutcome> {
         validate_id(session_id, MAX_SESSION_ID_CHARS)?;
-        let state = self.inner.lock();
-        if let Some(generation) = generation {
-            Self::require_generation_locked(&state, generation)?;
+        let mut state = self.inner.lock();
+        if let Some(owner) = owner {
+            Self::select_owner_locked(&mut state, owner)?;
         }
         let stream = state.sessions.get(session_id);
         if state.epoch != epoch {
@@ -665,23 +773,23 @@ impl RemoteJournal {
         self.snapshot_for_inner(None, session_id)
     }
 
-    pub(crate) fn snapshot_for_generation(
+    pub(crate) fn snapshot_for_owner(
         &self,
-        generation: &str,
+        owner: &JournalOwner,
         session_id: &str,
     ) -> Result<JournalSnapshot> {
-        self.snapshot_for_inner(Some(generation), session_id)
+        self.snapshot_for_inner(Some(owner), session_id)
     }
 
     fn snapshot_for_inner(
         &self,
-        generation: Option<&str>,
+        owner: Option<&JournalOwner>,
         session_id: &str,
     ) -> Result<JournalSnapshot> {
         validate_id(session_id, MAX_SESSION_ID_CHARS)?;
-        let state = self.inner.lock();
-        if let Some(generation) = generation {
-            Self::require_generation_locked(&state, generation)?;
+        let mut state = self.inner.lock();
+        if let Some(owner) = owner {
+            Self::select_owner_locked(&mut state, owner)?;
         }
         Ok(Self::snapshot_locked(&state, session_id))
     }
@@ -696,27 +804,27 @@ impl RemoteJournal {
         self.acknowledge_for_inner(None, session_id, epoch, sequence)
     }
 
-    pub(crate) fn acknowledge_for_generation(
+    pub(crate) fn acknowledge_for_owner(
         &self,
-        generation: &str,
+        owner: &JournalOwner,
         session_id: &str,
         epoch: &str,
         sequence: u64,
     ) -> Result<u64> {
-        self.acknowledge_for_inner(Some(generation), session_id, epoch, sequence)
+        self.acknowledge_for_inner(Some(owner), session_id, epoch, sequence)
     }
 
     fn acknowledge_for_inner(
         &self,
-        generation: Option<&str>,
+        owner: Option<&JournalOwner>,
         session_id: &str,
         epoch: &str,
         sequence: u64,
     ) -> Result<u64> {
         validate_id(session_id, MAX_SESSION_ID_CHARS)?;
         let mut state = self.inner.lock();
-        if let Some(generation) = generation {
-            Self::require_generation_locked(&state, generation)?;
+        if let Some(owner) = owner {
+            Self::select_owner_locked(&mut state, owner)?;
         }
         if state.epoch != epoch {
             return Err(error("journal_epoch_stale"));
@@ -1118,20 +1226,20 @@ impl RemoteJournal {
         self.record_task_event_inner(None, event)
     }
 
-    pub(crate) fn record_task_event_for_generation(
+    pub(crate) fn record_task_event_for_owner(
         &self,
-        generation: &str,
+        owner: &JournalOwner,
         event: &RemoteTaskEvent,
     ) -> Option<JournalEvent> {
-        self.record_task_event_inner(Some(generation), event)
+        self.record_task_event_inner(Some(owner), event)
     }
 
     fn record_task_event_inner(
         &self,
-        generation: Option<&str>,
+        owner: Option<&JournalOwner>,
         event: &RemoteTaskEvent,
     ) -> Option<JournalEvent> {
-        if generation.is_some_and(|expected| expected != event.generation) {
+        if owner.is_some_and(|expected| expected.generation() != event.generation.as_str()) {
             return None;
         }
         let terminal = matches!(
@@ -1161,9 +1269,9 @@ impl RemoteJournal {
             "task-{}",
             crate::platform::encoding::hex_lower(&Sha256::digest(event_identity.as_bytes()))
         );
-        let result = match generation {
-            Some(generation) => self.append_terminal_for_generation(
-                generation,
+        let result = match owner {
+            Some(owner) => self.append_terminal_for_owner(
+                owner,
                 &event_id,
                 &event.session_id,
                 &event.task_id,
@@ -2100,5 +2208,127 @@ mod tests {
         let stored = long_id_journal.record_task_event(&long_id_event).unwrap();
         assert!(stored.event_id.len() <= MAX_TASK_ID_CHARS);
         assert!(stored.event_id.starts_with("task-"));
+    }
+}
+
+#[cfg(test)]
+impl RemoteJournal {
+    pub(crate) fn bind_generation(&self, generation: &str) -> Result<String> {
+        validate_id(generation, MAX_SESSION_ID_CHARS)?;
+        let mut state = self.inner.lock();
+        if state.generation.as_deref() != Some(generation)
+            && state.retired_generations.contains(generation)
+        {
+            return Err(error("journal_generation_retired"));
+        }
+        let owner = state
+            .active_owner
+            .as_ref()
+            .filter(|owner| owner.generation() == generation)
+            .cloned()
+            .unwrap_or_else(|| {
+                JournalOwner(Arc::new(JournalOwnerIdentity {
+                    generation: generation.to_owned(),
+                }))
+            });
+        state.active_owner = Some(owner.clone());
+        Self::select_owner_locked(&mut state, &owner)?;
+        Ok(state.epoch.clone())
+    }
+
+    pub(crate) fn test_owner_for_generation(&self, generation: &str) -> Result<JournalOwner> {
+        self.inner
+            .lock()
+            .active_owner
+            .as_ref()
+            .filter(|owner| owner.generation() == generation)
+            .cloned()
+            .ok_or_else(|| error("journal_generation_stale"))
+    }
+
+    pub(crate) fn require_current_event_for_generation(
+        &self,
+        generation: &str,
+        event: &JournalEvent,
+    ) -> Result<()> {
+        self.require_current_event_for_owner(&self.test_owner_for_generation(generation)?, event)
+    }
+    pub(crate) fn append_for_generation(
+        &self,
+        generation: &str,
+        event_id: &str,
+        kind: JournalKind,
+        session_id: &str,
+        task_id: Option<&str>,
+        payload: Value,
+    ) -> Result<JournalEvent> {
+        self.append_for_owner(
+            &self.test_owner_for_generation(generation)?,
+            event_id,
+            kind,
+            session_id,
+            task_id,
+            payload,
+        )
+    }
+    pub(crate) fn append_terminal_for_generation(
+        &self,
+        generation: &str,
+        event_id: &str,
+        session_id: &str,
+        task_id: &str,
+        status: &str,
+        payload: Value,
+    ) -> Result<Option<JournalEvent>> {
+        self.append_terminal_for_owner(
+            &self.test_owner_for_generation(generation)?,
+            event_id,
+            session_id,
+            task_id,
+            status,
+            payload,
+        )
+    }
+    pub(crate) fn replay_after_for_generation(
+        &self,
+        generation: &str,
+        session_id: &str,
+        epoch: &str,
+        sequence: u64,
+    ) -> Result<ReplayOutcome> {
+        self.replay_after_for_owner(
+            &self.test_owner_for_generation(generation)?,
+            session_id,
+            epoch,
+            sequence,
+        )
+    }
+    pub(crate) fn snapshot_for_generation(
+        &self,
+        generation: &str,
+        session_id: &str,
+    ) -> Result<JournalSnapshot> {
+        self.snapshot_for_owner(&self.test_owner_for_generation(generation)?, session_id)
+    }
+    pub(crate) fn acknowledge_for_generation(
+        &self,
+        generation: &str,
+        session_id: &str,
+        epoch: &str,
+        sequence: u64,
+    ) -> Result<u64> {
+        self.acknowledge_for_owner(
+            &self.test_owner_for_generation(generation)?,
+            session_id,
+            epoch,
+            sequence,
+        )
+    }
+    pub(crate) fn record_task_event_for_generation(
+        &self,
+        generation: &str,
+        event: &RemoteTaskEvent,
+    ) -> Option<JournalEvent> {
+        self.record_task_event_for_owner(&self.test_owner_for_generation(generation).ok()?, event)
     }
 }

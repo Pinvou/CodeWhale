@@ -1,6 +1,7 @@
 package billing
 
 import (
+	"fmt"
 	"github.com/google/uuid"
 	"testing"
 	"time"
@@ -49,6 +50,30 @@ func TestFourWayUnsuccessfulProviderRowDoesNotHideMissingPaidFact(t *testing.T) 
 	}
 	if counts["UNSUPPORTED_PROVIDER_ENTRY"] != 1 || counts["INTERNAL_PAID_PROVIDER_MISSING"] != 1 {
 		t.Fatal("failed row hid missing confirmed provider payment", counts)
+	}
+}
+
+func TestFourWayOrphanPaidOrderCreatesManualReviewFinding(t *testing.T) {
+	orderID := uuid.New()
+	differences := CompareFourWayReconciliation(nil, []ReconciliationInternalFact{{
+		EntryType: "PAYMENT", ProviderReferenceID: "ORPHAN_PAYMENT_ORDER:" + orderID.String(),
+		MerchantOrderNo: "orphan-order", PaymentOrderID: orderID, AmountFen: 100, Currency: "CNY",
+		InternalSnapshot: []byte(fmt.Sprintf(`{"payment_order":{"id":%q,"status":"PAID","fulfillment_status":"CREDITED"}}`, orderID)),
+	}})
+	if len(differences) != 1 || differences[0].CaseType != "PAYMENT_TRANSACTION_MISSING" || differences[0].PaymentOrderID == nil || *differences[0].PaymentOrderID != orderID {
+		t.Fatalf("unexpected orphan finding: %#v", differences)
+	}
+}
+
+func TestFourWayRealTransactionReferenceCannotBecomeOrphan(t *testing.T) {
+	orderID := uuid.New()
+	reference := "ORPHAN_PAYMENT_ORDER:" + orderID.String()
+	fact := ReconciliationInternalFact{EntryType: "PAYMENT", ProviderReferenceID: reference,
+		MerchantOrderNo: "real-order", PaymentOrderID: orderID, AmountFen: 100, Currency: "CNY", LedgerPresent: true,
+		InternalSnapshot: []byte(fmt.Sprintf(`{"payment_order":{"id":%q,"status":"PAID","fulfillment_status":"CREDITED"},"payment_transaction":{"id":%q}}`, orderID, uuid.New()))}
+	provider := ProviderBillEntry{EntryType: "PAYMENT", ProviderReferenceID: reference, MerchantOrderNo: fact.MerchantOrderNo, AmountFen: fact.AmountFen, Currency: fact.Currency, Status: "SUCCESS"}
+	if differences := CompareFourWayReconciliation([]ProviderBillEntry{provider}, []ReconciliationInternalFact{fact}); len(differences) != 0 {
+		t.Fatal("real transaction reference was reclassified as a missing transaction", differences)
 	}
 }
 

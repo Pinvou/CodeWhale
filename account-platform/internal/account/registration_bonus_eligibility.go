@@ -31,45 +31,83 @@ func (r *PostgresRepository) PrepareRegistrationBonusEligibility(ctx context.Con
 	if r.registrationBonusFingerprintKeyID == "" || len(r.registrationBonusFingerprintKey) != 32 {
 		return RegistrationBonusEligibilityReadiness{}, errors.New("registration bonus fingerprint is not configured")
 	}
-	tx, err := r.pool.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.ReadCommitted})
-	if err != nil {
-		return RegistrationBonusEligibilityReadiness{}, err
-	}
-	defer tx.Rollback(ctx)
-	if _, err = tx.Exec(ctx, `SELECT pg_advisory_xact_lock(hashtext('registration-bonus-eligibility-backfill'))`); err != nil {
-		return RegistrationBonusEligibilityReadiness{}, err
-	}
 	keyVerifier, err := r.registrationBonusFingerprintKeyVerifier()
 	if err != nil {
 		return RegistrationBonusEligibilityReadiness{}, err
 	}
-	readiness, err := scanRegistrationBonusEligibilityReadiness(tx.QueryRow(ctx, `SELECT status,COALESCE(fingerprint_key_id,''),recoverable_registration_count,unrecoverable_registration_count,completed_at,COALESCE(fingerprint_key_verifier,'\x'::bytea) FROM registration_bonus_eligibility_state WHERE singleton=TRUE FOR UPDATE`))
-	if err != nil {
-		return RegistrationBonusEligibilityReadiness{}, err
-	}
-	if readiness.Status != "PENDING" {
-		if readiness.FingerprintKeyID != r.registrationBonusFingerprintKeyID || subtle.ConstantTimeCompare(readiness.keyVerifier, keyVerifier) != 1 {
-			return RegistrationBonusEligibilityReadiness{}, errors.New("registration bonus fingerprint key differs from completed eligibility backfill")
-		}
-		return readiness, tx.Commit(ctx)
-	}
-	var recoverable int64
-	type historicalMobile struct {
-		userID uuid.UUID
-		mobile string
-	}
-	cursorMobile, cursorUserID := "", uuid.Nil
 	for {
+		tx, err := r.pool.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.ReadCommitted})
+		if err != nil {
+			return RegistrationBonusEligibilityReadiness{}, err
+		}
+		if _, err = tx.Exec(ctx, `SELECT pg_advisory_xact_lock(hashtext('registration-bonus-eligibility-backfill'))`); err != nil {
+			tx.Rollback(ctx)
+			return RegistrationBonusEligibilityReadiness{}, err
+		}
+		var readiness RegistrationBonusEligibilityReadiness
+		var cursorMobile *string
+		var cursorUserID *uuid.UUID
+		var snapshotAt *time.Time
+		err = tx.QueryRow(ctx, `SELECT status,COALESCE(fingerprint_key_id,''),recoverable_registration_count,unrecoverable_registration_count,completed_at,COALESCE(fingerprint_key_verifier,'\x'::bytea),backfill_cursor_mobile_e164,backfill_cursor_user_id,backfill_snapshot_at FROM registration_bonus_eligibility_state WHERE singleton=TRUE FOR UPDATE`).Scan(&readiness.Status, &readiness.FingerprintKeyID, &readiness.RecoverableRegistrationCount, &readiness.UnrecoverableRegistrationCount, &readiness.CompletedAt, &readiness.keyVerifier, &cursorMobile, &cursorUserID, &snapshotAt)
+		if err != nil {
+			tx.Rollback(ctx)
+			return RegistrationBonusEligibilityReadiness{}, err
+		}
+		if readiness.Status != "PENDING" || readiness.FingerprintKeyID != "" {
+			if readiness.FingerprintKeyID != r.registrationBonusFingerprintKeyID || subtle.ConstantTimeCompare(readiness.keyVerifier, keyVerifier) != 1 {
+				tx.Rollback(ctx)
+				return RegistrationBonusEligibilityReadiness{}, errors.New("registration bonus fingerprint key differs from eligibility backfill")
+			}
+		}
+		if readiness.Status != "PENDING" {
+			if err := tx.Commit(ctx); err != nil {
+				return RegistrationBonusEligibilityReadiness{}, err
+			}
+			return readiness, nil
+		}
+		if readiness.FingerprintKeyID == "" {
+			// A committed prefix without its verifier cannot be safely attributed
+			// to the configured key, even when its key ID happens to match.
+			var existingFacts bool
+			if readiness.RecoverableRegistrationCount != 0 || cursorMobile != nil || cursorUserID != nil || snapshotAt != nil {
+				tx.Rollback(ctx)
+				return RegistrationBonusEligibilityReadiness{}, errors.New("registration bonus backfill progress has no fingerprint key binding")
+			}
+			if err = tx.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM registration_bonus_mobile_eligibility)`).Scan(&existingFacts); err != nil {
+				tx.Rollback(ctx)
+				return RegistrationBonusEligibilityReadiness{}, err
+			}
+			if existingFacts {
+				tx.Rollback(ctx)
+				return RegistrationBonusEligibilityReadiness{}, errors.New("registration bonus eligibility facts have no fingerprint key binding")
+			}
+		}
+		type historicalMobile struct {
+			userID uuid.UUID
+			mobile string
+		}
+		mobileCursor, userCursor := "", uuid.Nil
+		if cursorMobile != nil {
+			mobileCursor = *cursorMobile
+		}
+		if cursorUserID != nil {
+			userCursor = *cursorUserID
+		}
+		candidateSnapshot := r.now()
+		if snapshotAt != nil {
+			candidateSnapshot = *snapshotAt
+		}
 		rows, queryErr := tx.Query(ctx, `SELECT user_id,mobile_e164 FROM (
 SELECT DISTINCT ON (mobile_e164) user_id,mobile_e164 FROM (
-  SELECT id AS user_id,mobile_e164 FROM users WHERE mobile_verified_at IS NOT NULL AND mobile_e164 LIKE '+86%'
+  SELECT id AS user_id,mobile_e164 FROM users WHERE mobile_verified_at IS NOT NULL AND mobile_verified_at <= $3 AND mobile_e164 LIKE '+86%' AND created_at <= $3
   UNION ALL
-  SELECT committed_user_id,mobile_e164 FROM registration_operations WHERE committed_user_id IS NOT NULL AND mobile_e164 LIKE '+86%'
+  SELECT committed_user_id,mobile_e164 FROM registration_operations WHERE committed_user_id IS NOT NULL AND account_committed_at IS NOT NULL AND account_committed_at <= $3 AND mobile_e164 LIKE '+86%' AND created_at <= $3
 ) candidates ORDER BY mobile_e164,user_id
 ) recoverable
-WHERE $1='' OR (mobile_e164,user_id)>($1,$2)
-ORDER BY mobile_e164,user_id LIMIT 1000`, cursorMobile, cursorUserID)
+		WHERE $1='' OR (mobile_e164,user_id)>($1,$2)
+		ORDER BY mobile_e164,user_id LIMIT 1000`, mobileCursor, userCursor, candidateSnapshot)
 		if queryErr != nil {
+			tx.Rollback(ctx)
 			return RegistrationBonusEligibilityReadiness{}, queryErr
 		}
 		batch := make([]historicalMobile, 0, 1000)
@@ -77,44 +115,73 @@ ORDER BY mobile_e164,user_id LIMIT 1000`, cursorMobile, cursorUserID)
 			var item historicalMobile
 			if err = rows.Scan(&item.userID, &item.mobile); err != nil {
 				rows.Close()
+				tx.Rollback(ctx)
 				return RegistrationBonusEligibilityReadiness{}, err
 			}
 			batch = append(batch, item)
 		}
 		if err = rows.Err(); err != nil {
 			rows.Close()
+			tx.Rollback(ctx)
 			return RegistrationBonusEligibilityReadiness{}, err
 		}
 		rows.Close()
 		for _, item := range batch {
 			_, fingerprint, fingerprintErr := r.registrationBonusFingerprint(item.mobile)
 			if fingerprintErr != nil {
+				tx.Rollback(ctx)
 				return RegistrationBonusEligibilityReadiness{}, fingerprintErr
 			}
 			if _, err = tx.Exec(ctx, `INSERT INTO registration_bonus_mobile_eligibility(mobile_fingerprint,fingerprint_key_id,first_user_id,source,created_at) VALUES($1,$2,$3,'HISTORICAL_BACKFILL',$4) ON CONFLICT(mobile_fingerprint) DO NOTHING`, fingerprint, r.registrationBonusFingerprintKeyID, item.userID, r.now()); err != nil {
+				tx.Rollback(ctx)
 				return RegistrationBonusEligibilityReadiness{}, err
 			}
-			recoverable++
 		}
-		if len(batch) < 1000 {
-			break
+		if len(batch) == 1000 {
+			last := batch[len(batch)-1]
+			if _, err = tx.Exec(ctx, `UPDATE registration_bonus_eligibility_state SET recoverable_registration_count=recoverable_registration_count+$1,backfill_cursor_mobile_e164=$2,backfill_cursor_user_id=$3,backfill_snapshot_at=$4,updated_at=$5,fingerprint_key_id=$6,fingerprint_key_verifier=$7 WHERE singleton=TRUE AND status='PENDING'`, len(batch), last.mobile, last.userID, candidateSnapshot, r.now(), r.registrationBonusFingerprintKeyID, keyVerifier); err != nil {
+				tx.Rollback(ctx)
+				return RegistrationBonusEligibilityReadiness{}, err
+			}
+			if err := tx.Commit(ctx); err != nil {
+				return RegistrationBonusEligibilityReadiness{}, err
+			}
+			continue
 		}
-		cursorMobile, cursorUserID = batch[len(batch)-1].mobile, batch[len(batch)-1].userID
+		var unrecoverable int64
+		if err = tx.QueryRow(ctx, `SELECT count(*) FROM registration_operations WHERE committed_user_id IS NOT NULL AND mobile_e164 NOT LIKE '+86%' AND created_at <= $1 AND (account_committed_at IS NULL OR account_committed_at <= $1)`, candidateSnapshot).Scan(&unrecoverable); err != nil {
+			tx.Rollback(ctx)
+			return RegistrationBonusEligibilityReadiness{}, err
+		}
+		var mismatchedKey bool
+		if err = tx.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM registration_bonus_mobile_eligibility WHERE fingerprint_key_id <> $1)`, r.registrationBonusFingerprintKeyID).Scan(&mismatchedKey); err != nil {
+			tx.Rollback(ctx)
+			return RegistrationBonusEligibilityReadiness{}, err
+		}
+		if mismatchedKey {
+			tx.Rollback(ctx)
+			return RegistrationBonusEligibilityReadiness{}, errors.New("registration bonus eligibility facts use a different fingerprint key")
+		}
+		status := "READY"
+		if unrecoverable > 0 {
+			status = "BLOCKED"
+		}
+		now := r.now()
+		if _, err = tx.Exec(ctx, `UPDATE registration_bonus_eligibility_state SET status=$1,fingerprint_key_id=$2,fingerprint_key_verifier=$3,recoverable_registration_count=recoverable_registration_count+$4,unrecoverable_registration_count=$5,backfill_cursor_mobile_e164=NULL,backfill_cursor_user_id=NULL,backfill_snapshot_at=NULL,completed_at=$6,updated_at=$6 WHERE singleton=TRUE AND status='PENDING'`, status, r.registrationBonusFingerprintKeyID, keyVerifier, len(batch), unrecoverable, now); err != nil {
+			tx.Rollback(ctx)
+			return RegistrationBonusEligibilityReadiness{}, err
+		}
+		readiness.FingerprintKeyID = r.registrationBonusFingerprintKeyID
+		readiness.keyVerifier = keyVerifier
+		readiness.Status = status
+		readiness.RecoverableRegistrationCount += int64(len(batch))
+		readiness.UnrecoverableRegistrationCount = unrecoverable
+		readiness.CompletedAt = &now
+		if err := tx.Commit(ctx); err != nil {
+			return RegistrationBonusEligibilityReadiness{}, err
+		}
+		return readiness, nil
 	}
-	var unrecoverable int64
-	if err = tx.QueryRow(ctx, `SELECT count(*) FROM registration_operations WHERE committed_user_id IS NOT NULL AND mobile_e164 NOT LIKE '+86%'`).Scan(&unrecoverable); err != nil {
-		return RegistrationBonusEligibilityReadiness{}, err
-	}
-	status := "READY"
-	if unrecoverable > 0 {
-		status = "BLOCKED"
-	}
-	now := r.now()
-	if _, err = tx.Exec(ctx, `UPDATE registration_bonus_eligibility_state SET status=$1,fingerprint_key_id=$2,fingerprint_key_verifier=$3,recoverable_registration_count=$4,unrecoverable_registration_count=$5,completed_at=$6,updated_at=$6 WHERE singleton=TRUE`, status, r.registrationBonusFingerprintKeyID, keyVerifier, recoverable, unrecoverable, now); err != nil {
-		return RegistrationBonusEligibilityReadiness{}, err
-	}
-	readiness = RegistrationBonusEligibilityReadiness{Status: status, FingerprintKeyID: r.registrationBonusFingerprintKeyID, RecoverableRegistrationCount: recoverable, UnrecoverableRegistrationCount: unrecoverable, CompletedAt: &now}
-	return readiness, tx.Commit(ctx)
 }
 
 func (r *PostgresRepository) RegistrationBonusEligibilityReadiness(ctx context.Context) (RegistrationBonusEligibilityReadiness, error) {

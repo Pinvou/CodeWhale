@@ -58,6 +58,10 @@ type entitlementCorrectionRecord struct {
 	FactsDigest          string
 }
 
+func validEntitlementCorrectionReasonCode(reason string) bool {
+	return len(reason) > 0 && len(reason) <= 80
+}
+
 func (f entitlementCorrectionFrozenFacts) matches(plan entitlementCorrectionReadPlan) bool {
 	return f.WalletID == plan.WalletID && f.WalletVersion == plan.WalletVersion &&
 		f.PaymentTransactionID == plan.PaymentTransactionID &&
@@ -153,7 +157,7 @@ func (r *PostgresRepository) ExecuteEntitlementComponentCorrection(ctx context.C
 	if r == nil || r.pool == nil || approvalRequestID == uuid.Nil || authorizationEventID == uuid.Nil || approvalEpoch < 1 ||
 		packageID == uuid.Nil || paymentOrderID == uuid.Nil || requesterID == uuid.Nil || approverID == uuid.Nil ||
 		requesterID == approverID || executionIdempotencyKey == "" || decisionReason == "" ||
-		len(reasonCode) == 0 || len([]rune(reasonCode)) > 80 || frozen.AmountMicrocredits < 1 || frozen.SourceType == frozen.TargetType {
+		!validEntitlementCorrectionReasonCode(reasonCode) || frozen.AmountMicrocredits < 1 || frozen.SourceType == frozen.TargetType {
 		return EntitlementCorrectionResult{}, ErrConflict
 	}
 	tx, err := r.pool.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.Serializable})

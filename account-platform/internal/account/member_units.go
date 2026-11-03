@@ -149,6 +149,10 @@ func (r *PostgresRepository) ReplaceMemberUnits(ctx context.Context, principal i
 	}
 	var membershipID uuid.UUID
 	var version int64
+	// Read Committed is intentional here: the organization row is locked above,
+	// then the active membership and user rows are locked before the final
+	// status/version predicate is rechecked. Changing isolation would alter the
+	// receipt-first concurrency and error contract.
 	if err = tx.QueryRow(ctx, `SELECT m.id,m.version FROM memberships m JOIN users u ON u.id=m.user_id AND u.status='ACTIVE' WHERE m.organization_id=$1 AND m.user_id=$2 AND m.status='ACTIVE' FOR UPDATE OF m,u`, organizationID, targetID).Scan(&membershipID, &version); errors.Is(err, pgx.ErrNoRows) {
 		return MembershipMutationResult{}, ErrNotFound
 	} else if err != nil {

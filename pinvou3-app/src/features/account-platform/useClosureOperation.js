@@ -59,6 +59,12 @@ export function useClosureOperation(owner, copy, client, scope, storageAdapter) 
       intent.current = null; setUnknown(false); if (!noReceipt) setMessage('saved'); return result;
     } catch (reason) {
       if (stamp !== generation.current) return;
+      if (scope === 'account-closure' && reason.status === 409 && reason.code === 'ACCOUNT_CLOSURE_SERIALIZATION_CONFLICT') {
+        // This attempt aborted, but its original facts/key remain the command
+        // to retry explicitly. Do not resolve any earlier unknown outcome.
+        setError(unknown ? 'unknown' : 'closureSerializationConflict');
+        return;
+      }
       const uncertain = hadUnresolved || !Number.isInteger(reason.status) || reason.status >= 500 || reason.code === 'COMMAND_RESULT_UNKNOWN';
       if (!uncertain) {
         try { clearRecord(current); intent.current = null; }

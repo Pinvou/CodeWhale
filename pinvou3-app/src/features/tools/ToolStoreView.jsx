@@ -213,7 +213,7 @@ const withUiTimeout = (promise, timeoutMs, fallbackResult) => {
             <span className={`w-2 h-2 rounded-full ${isErr ? 'bg-rose-500' : 'bg-blue-500 animate-pulse'}`} />
             <span className="font-semibold text-[14px] text-slate-900 dark:text-slate-100">{isErr ? copy.incomplete(name) : (flow.phase === 'done' ? copy.connected(name) : copy.connecting(name))}</span>
             <span className="flex-1" />
-            {(flow.phase === 'running' || flow.phase === 'qr') && <button onClick={onCancel} className="text-[12px] text-slate-400 hover:text-slate-600 dark:hover:text-slate-200">{copy.cancel}</button>}
+            {(flow.phase === 'running' || flow.phase === 'qr') && <button type="button" onClick={onCancel} className="text-[12px] text-slate-400 hover:text-slate-600 dark:hover:text-slate-200">{copy.cancel}</button>}
           </div>
           <div className="px-5 pb-4 space-y-1">
             {steps.map(s => {
@@ -277,8 +277,8 @@ const withUiTimeout = (promise, timeoutMs, fallbackResult) => {
                   {connectorErrorCopy(errors, flow.errorCode) || errors.unknown || copy.connectionIncomplete}
                 </div>
                 <div className="flex gap-2 mt-3 justify-end">
-                  <button onClick={onCancel} className="px-3 py-1.5 rounded-lg bg-slate-200 dark:bg-white/10 text-slate-700 dark:text-slate-100 text-[13px]">{copy.close}</button>
-                  <button onClick={onRetry} className="px-3 py-1.5 rounded-lg bg-blue-600 text-white text-[13px]">{copy.retry}</button>
+                  <button type="button" onClick={onCancel} className="px-3 py-1.5 rounded-lg bg-slate-200 dark:bg-white/10 text-slate-700 dark:text-slate-100 text-[13px]">{copy.close}</button>
+                  <button type="button" onClick={onRetry} className="px-3 py-1.5 rounded-lg bg-blue-600 text-white text-[13px]">{copy.retry}</button>
                 </div>
               </div>
             </div>
@@ -653,7 +653,7 @@ const withUiTimeout = (promise, timeoutMs, fallbackResult) => {
                 </div>
                 {alert.cancelable && (
                   <div className={`border-t border-slate-200 dark:border-white/10`}>
-                    <button
+                    <button type="button"
                       onClick={() => onCancelLoading && onCancelLoading(alert)}
                       className={`w-full py-3 text-[17px] font-normal text-center transition-colors text-[#007AFF] active:bg-slate-100 dark:text-[#0A84FF] dark:active:bg-white/5`}
                     >
@@ -679,7 +679,7 @@ const withUiTimeout = (promise, timeoutMs, fallbackResult) => {
                   )}
                 </div>
                 <div className={`border-t border-slate-200 dark:border-white/10`}>
-                  <button
+                  <button type="button"
                     onClick={onDismiss}
                     className="w-full py-3 text-[17px] font-normal text-center transition-colors text-[#007AFF] active:bg-slate-100 dark:text-[#0A84FF] dark:active:bg-white/5"
                   >
@@ -688,7 +688,7 @@ const withUiTimeout = (promise, timeoutMs, fallbackResult) => {
                 </div>
                 {!alert.isError && !alert.suppressNewChat && (
                   <div className={`border-t border-slate-200 dark:border-white/10`}>
-                    <button
+                    <button type="button"
                       onClick={onNewChat}
                       className={`w-full py-3 text-[17px] font-semibold text-center transition-colors text-[#007AFF] active:bg-slate-100 dark:text-[#0A84FF] dark:active:bg-white/5`}
                     >
@@ -726,7 +726,7 @@ const withUiTimeout = (promise, timeoutMs, fallbackResult) => {
                 </div>
               )}
               {config.configDocUrl && (
-                <button
+                <button type="button"
                   onClick={() => invokeTauri('open_external_url', { url: config.configDocUrl }).catch(onOpenError)}
                   className={`text-[13px] mb-4 inline-block text-[#007AFF] dark:text-[#0A84FF] hover:underline`}
                 >
@@ -756,7 +756,7 @@ const withUiTimeout = (promise, timeoutMs, fallbackResult) => {
               ))}
             </div>
             <div className={`border-t border-slate-200 dark:border-white/10`}>
-              <button
+              <button type="button"
                 onClick={onCancel}
                 className={`w-full py-3 text-[17px] font-normal text-center transition-colors text-[#007AFF] active:bg-slate-100 dark:text-[#0A84FF] dark:active:bg-white/5`}
               >
@@ -764,7 +764,7 @@ const withUiTimeout = (promise, timeoutMs, fallbackResult) => {
               </button>
             </div>
             <div className={`border-t border-slate-200 dark:border-white/10`}>
-              <button
+              <button type="button"
                 onClick={() => canSubmit && onConfirm(values)}
                 disabled={!canSubmit}
                 className={`w-full py-3 text-[17px] font-semibold text-center transition-colors ${
@@ -930,7 +930,7 @@ const withUiTimeout = (promise, timeoutMs, fallbackResult) => {
       const c = COPY[guide.state] || COPY.not_installed;
       const btn = (label, on, cls) => (
         <div className={`border-t border-slate-200 dark:border-white/10`}>
-          <button onClick={on} className={`w-full py-3 text-center transition-colors ${cls}`}>{label}</button>
+          <button type="button" onClick={on} className={`w-full py-3 text-center transition-colors ${cls}`}>{label}</button>
         </div>
       );
       return (
@@ -2840,20 +2840,20 @@ const withUiTimeout = (promise, timeoutMs, fallbackResult) => {
                       className="min-w-0 basis-full flex-1 sm:basis-auto sm:max-w-[520px]"
                     />
                     <div className="flex shrink-0 items-center justify-end gap-3">
-                      <button data-testid="tool-store-guide" onClick={() => setShowGuide(true)} title={storeCopy.guide.title}
+                      <button type="button" data-testid="tool-store-guide" onClick={() => setShowGuide(true)} title={storeCopy.guide.title}
                         className="inline-flex h-9 items-center rounded-full bg-slate-100 px-4 text-[13px] font-semibold shadow-sm transition-colors hover:bg-slate-200 dark:bg-[#2C2C2E] dark:text-white dark:hover:bg-[#3A3A3C]">
                         <BookOpen size={14} className="mr-2 opacity-70" />
                         <span>{storeCopy.guide.title}</span>
                       </button>
                       {canMutateToolStore && (
-                        <button data-testid="tool-store-manage-visibility" onClick={() => setManagingVisibility(v => !v)} title={storeCopy.modeVisibilityHint}
+                        <button type="button" data-testid="tool-store-manage-visibility" onClick={() => setManagingVisibility(v => !v)} title={storeCopy.modeVisibilityHint}
                           className={`inline-flex h-9 items-center rounded-full px-4 text-[13px] font-semibold shadow-sm transition-colors ${managingVisibility ? 'bg-blue-600 text-white hover:bg-blue-700' : 'bg-slate-100 text-slate-700 hover:bg-slate-200 dark:bg-[#2C2C2E] dark:text-white dark:hover:bg-[#3A3A3C]'}`}>
                           <Settings size={14} className="mr-2 opacity-70" />
                           <span>{managingVisibility ? storeCopy.doneManagingVisibility : storeCopy.manageVisibility}</span>
                         </button>
                       )}
                       {canMutateToolStore && (
-                        <button data-testid="tool-store-upload-btn" onClick={handleUploadSkill} title={storeCopy.uploadSkillPackage} disabled={busyId === '__upload__'}
+                        <button type="button" data-testid="tool-store-upload-btn" onClick={handleUploadSkill} title={storeCopy.uploadSkillPackage} disabled={busyId === '__upload__'}
                           className="inline-flex h-9 items-center rounded-full bg-slate-100 px-4 text-[13px] font-semibold shadow-sm transition-colors hover:bg-slate-200 disabled:opacity-50 dark:bg-[#2C2C2E] dark:text-white dark:hover:bg-[#3A3A3C]">
                           <Upload size={14} className="mr-2 opacity-70" />
                           <span>{storeCopy.uploadSkillPackage}</span>
@@ -2874,7 +2874,7 @@ const withUiTimeout = (promise, timeoutMs, fallbackResult) => {
                   <aside className="hidden lg:block w-40 shrink-0 sticky top-6">
                     <nav className="flex flex-col gap-1">
                       {navSections.map(s => (
-                        <button key={s.id} onClick={() => scrollToSection(s.id)}
+                        <button type="button" key={s.id} onClick={() => scrollToSection(s.id)}
                           className="flex items-center justify-between gap-2 w-full px-3 py-2 rounded-xl text-left text-[13px] font-medium text-slate-600 hover:bg-slate-100 hover:text-slate-900 dark:text-slate-300 dark:hover:bg-white/5 dark:hover:text-white transition-colors">
                           <span className="truncate">{s.label}</span>
                           <span className="text-[11px] text-slate-400 dark:text-slate-500 tabular-nums shrink-0">{s.items.length}</span>
@@ -2889,7 +2889,7 @@ const withUiTimeout = (promise, timeoutMs, fallbackResult) => {
                   <div className={`flex flex-col gap-4 mb-6 pb-5 ${!searching ? '' : 'sm:flex-row sm:items-end justify-between'}`}>
                     {searching && (
                       <div className="flex items-center gap-3">
-                        <button onClick={() => setSearchQuery('')} title={storeCopy.back}
+                        <button type="button" onClick={() => setSearchQuery('')} title={storeCopy.back}
                           className="w-9 h-9 rounded-full bg-slate-100 dark:bg-white/10 hover:bg-slate-200 dark:hover:bg-white/20 flex items-center justify-center text-slate-600 dark:text-slate-300 transition-colors shrink-0">
                           <ChevronLeft size={20} />
                         </button>
@@ -2902,7 +2902,7 @@ const withUiTimeout = (promise, timeoutMs, fallbackResult) => {
                         {/* 主维度切换:按类型 / 按业务,决定二级筛选集合;下方列表始终按另一维度分区 */}
                         <div className="flex h-9 shrink-0 items-center self-start rounded-full bg-slate-100 p-1 shadow-sm dark:bg-[#2C2C2E]">
                           {[{ key: 'type', label: storeCopy.groupByType }, { key: 'business', label: storeCopy.groupByBusiness }].map(seg => (
-                            <button key={seg.key} onClick={() => { setGroupBy(seg.key); setActiveCategory('all'); }}
+                            <button type="button" key={seg.key} onClick={() => { setGroupBy(seg.key); setActiveCategory('all'); }}
                               className={`inline-flex h-7 items-center rounded-full px-3 text-[13px] font-semibold transition-colors whitespace-nowrap ${
                                 groupBy === seg.key
                                   ? 'bg-white text-slate-900 shadow-sm dark:bg-[#3A3A3C] dark:text-white'
@@ -2916,7 +2916,7 @@ const withUiTimeout = (promise, timeoutMs, fallbackResult) => {
                           {groupChips.map((chip) => {
                             const isActive = activeCategory === chip.id;
                             return (
-                              <button
+                              <button type="button"
                                 key={chip.id}
                                 onClick={() => { setActiveCategory(chip.id); }}
                                 className={`h-9 whitespace-nowrap shrink-0 text-[13px] px-3.5 rounded-full font-semibold transition-colors ${isActive
@@ -2927,7 +2927,7 @@ const withUiTimeout = (promise, timeoutMs, fallbackResult) => {
                               </button>
                             );
                           })}
-                          <button data-testid="tool-store-installed-only" onClick={() => setInstalledOnly(v => !v)} title={storeCopy.installedOnly}
+                          <button type="button" data-testid="tool-store-installed-only" onClick={() => setInstalledOnly(v => !v)} title={storeCopy.installedOnly}
                             className={`ml-auto h-9 whitespace-nowrap shrink-0 inline-flex items-center rounded-full px-3.5 text-[13px] font-semibold transition-colors ${installedOnly
                               ? 'bg-blue-600 text-[#fff] hover:bg-blue-700'
                               : 'bg-[#F2F2F7] text-[#000] dark:bg-[#2C2C2E] dark:text-[#fff]'}`}>
@@ -2950,7 +2950,7 @@ const withUiTimeout = (promise, timeoutMs, fallbackResult) => {
                           )}
                           <span className="hidden xl:flex min-w-0 items-center gap-1.5 text-[12px] text-slate-400 dark:text-slate-500 pl-1">
                             <span className="truncate">{storeCopy.guide.dragHintShort}</span>
-                            <button onClick={() => setShowGuide(true)} aria-label={storeCopy.guide.title} title={storeCopy.guide.title}
+                            <button type="button" onClick={() => setShowGuide(true)} aria-label={storeCopy.guide.title} title={storeCopy.guide.title}
                               className="shrink-0 w-[18px] h-[18px] rounded-full bg-slate-200 dark:bg-white/10 text-slate-500 dark:text-slate-400 hover:bg-slate-300 dark:hover:bg-white/20 flex items-center justify-center text-[11px] font-bold leading-none">?</button>
                           </span>
                         </div>
@@ -3083,7 +3083,7 @@ const withUiTimeout = (promise, timeoutMs, fallbackResult) => {
               >
                 <div className="flex items-center justify-between px-6 py-4 border-b border-slate-200/50 dark:border-white/10">
                   <h2 className="text-[18px] font-semibold">{storeCopy.guide.title}</h2>
-                  <button onClick={() => setShowGuide(false)} aria-label={storeCopy.guide.close}
+                  <button type="button" onClick={() => setShowGuide(false)} aria-label={storeCopy.guide.close}
                     className="w-8 h-8 rounded-full hover:bg-slate-100 dark:hover:bg-white/10 flex items-center justify-center text-slate-500 dark:text-slate-400">
                     <XIcon size={16} />
                   </button>
@@ -3107,7 +3107,7 @@ const withUiTimeout = (promise, timeoutMs, fallbackResult) => {
                   <section>
                     <h3 className="text-[14px] font-semibold mb-1.5">{storeCopy.guide.specTitle}</h3>
                     <p className="text-[13px] text-slate-600 dark:text-slate-300 leading-relaxed">{storeCopy.guide.specDesc}</p>
-                    <button onClick={downloadSpec} data-testid="tool-store-download-spec"
+                    <button type="button" onClick={downloadSpec} data-testid="tool-store-download-spec"
                       className="mt-3 inline-flex h-9 items-center rounded-full bg-blue-600 px-4 text-[13px] font-semibold text-white shadow-sm transition-colors hover:bg-blue-700">
                       <Download size={14} className="mr-2" />{storeCopy.guide.downloadSpec}
                     </button>
@@ -3130,7 +3130,7 @@ const withUiTimeout = (promise, timeoutMs, fallbackResult) => {
                 onClick={(e) => e.stopPropagation()}
               >
                 <div className="absolute top-0 right-0 w-full px-6 py-5 flex items-center justify-end z-20 pointer-events-none">
-                  <button
+                  <button type="button"
                     onClick={() => setSelectedTool(null)}
                     className="pointer-events-auto w-8 h-8 flex items-center justify-center rounded-full bg-slate-100/80 dark:bg-black/50 backdrop-blur text-slate-500 dark:text-slate-300 hover:bg-slate-200 dark:hover:bg-black transition-colors"
                   >

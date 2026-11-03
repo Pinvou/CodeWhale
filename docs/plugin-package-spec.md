@@ -152,18 +152,11 @@ MCP server 的启动真相源。本地 stdio server 的必填与常用字段：
 - `args` = 入口脚本，**脚本必须命名为 `server.py`** 且 `args: ["server.py"]`
   （安装时仅 `server.py`（或以 `/server.py` 结尾的参数）会被重写为 `bundles/<id>/mcp/server.py`
   绝对路径；其他脚本名原样写入 mcp.json，无法定位安装目录）。
-- 依赖 pip 包 → 声明 `"pip_dependencies": ["requests"]`。注意：首次上传/导入供给
-  **不会自动安装**（供应链安全，仅日志提示需用户自行处理依赖）。Windows 内置
-  Python 使用隔离环境：上传工具卸载后若从商店卡片普通重装，非空
-  `pip_dependencies` 会因缺少受信任依赖锁而明确拒绝安装；上传包应自行随附与内置
-  Python ABI 兼容的依赖并移除该声明。只有内置商店工具的安装管线才会按产品
-  清单自动安装；Windows 内置工具还必须由产品清单提供
-  `windows_python_dependencies`（目标 Python ABI、依赖锁 hash、import 探针及逐个
-  wheel 的 PyPI 官方（files.pythonhosted.org）HTTPS 地址与 SHA-256）；锁 hash
-  同时绑定 target 与有序 wheel 列表，非通用 wheel 的 PEP 425 标签必须与 target
-  兼容。安装时下载到用户目录并先校验、原子落盘、实际导入成功，之后才注册 MCP。
-  存量迁移在每次启动首帧后后台重试，不在同步启动解包链路联网。上传包声明该字段
-  不会触发自动下载。
+- 依赖 pip 包 → 声明 `"pip_dependencies": ["requests"]`。注意：上传/导入路径
+  **不会自动安装**（供应链安全，仅日志提示已跳过、需用户自行安装）；只有内置
+  商店工具的安装管线才会自动装。Windows 内置 Python 为隔离环境：已安装的上传
+  工具卸载后若从商店卡片普通重装，声明了非空 `pip_dependencies` 而无受信依赖锁
+  的会被明确拒绝——上传包应自行随附与内置 Python ABI 兼容的依赖并移除该声明。
 - 敏感项走 `secret_env` / `secret_headers` / `config_fields`（`secret: true`），
   值只进 keyring，落盘占位符。
 
@@ -181,8 +174,12 @@ MCP server 的启动真相源。本地 stdio server 的必填与常用字段：
 
 可选字段全量：`env`、`secret_env`、`secret_headers`、`validate_on_install`、
 `config_fields`、`pip_dependencies`、
-`windows_python_dependencies`（仅受信任内置包消费）、
-`servers`、`companion_skills`。
+`python_dependencies`（受信内置清单的按平台依赖锁：PyPI 官方 HTTPS 地址 +
+SHA-256 校验、导入探针、原子落盘；上传/导入声明会被跳过、不触发下载，仅内置
+商店安装管线消费）、`servers`、`companion_skills`，以及内置语义字段 `builtin`、
+`visibility`、`security_level`、`data_access`、`tool_features`（见
+`builtin-toolset-contract.md` §3.1；上传包声明 `builtin: true` 或
+`visibility: "system"` 会被导入管线拒绝）。
 （路由知识字段 `routing_rules` / `tool_table_entries` 已删除：一律进 SKILL.md，
 serde 会忽略旧 manifest 中的残留字段。）
 
