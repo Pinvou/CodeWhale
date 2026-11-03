@@ -108,7 +108,7 @@ const MONITOR_CLOCK_LOCALE = { zh: 'zh-CN', en: 'en-US', ja: 'ja-JP' };
       return (
         <div className="flex flex-col items-center">
           <div className="relative flex items-center justify-center" style={{ width: size, height: size }}>
-            <svg className="w-full h-full -rotate-90 overflow-visible">
+            <svg aria-hidden="true" className="w-full h-full -rotate-90 overflow-visible">
               <circle cx={size / 2} cy={size / 2} r={radius} stroke="currentColor" strokeWidth={strokeWidth} fill="none" className="text-black/5 dark:text-white/5" />
               <circle cx={size / 2} cy={size / 2} r={radius} stroke={color} strokeWidth={strokeWidth} fill="none" strokeDasharray={circumference} strokeDashoffset={offset} strokeLinecap="round" className="transition-all duration-1000 ease-[cubic-bezier(0.16,1,0.3,1)]" style={{ filter: `drop-shadow(0 2px 7px ${color}55)` }} />
             </svg>
@@ -137,7 +137,7 @@ const MONITOR_CLOCK_LOCALE = { zh: 'zh-CN', en: 'en-US', ja: 'ja-JP' };
       const id = String(color).replace('#', '');
       return (
         <div className="h-16 w-full mt-2 relative">
-          <svg viewBox="0 0 100 100" preserveAspectRatio="none" className="w-full h-full overflow-visible">
+          <svg aria-hidden="true" viewBox="0 0 100 100" preserveAspectRatio="none" className="w-full h-full overflow-visible">
             <defs>
               <linearGradient id={`mon-grad-${id}`} x1="0" x2="0" y1="0" y2="1"><stop offset="0%" stopColor={color} stopOpacity="0.28" /><stop offset="55%" stopColor={color} stopOpacity="0.08" /><stop offset="100%" stopColor={color} stopOpacity="0" /></linearGradient>
               <linearGradient id={`mon-stroke-${id}`} x1="0" x2="1" y1="0" y2="0"><stop offset="0%" stopColor={color} stopOpacity="0.45" /><stop offset="65%" stopColor={color} stopOpacity="1" /><stop offset="100%" stopColor={color} stopOpacity="1" /></linearGradient>

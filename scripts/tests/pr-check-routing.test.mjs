@@ -138,7 +138,7 @@ function assertFiniteAuditPGSetup(job) {
   assert.equal(service[0].trimEnd(), [
     "    services:",
     "      audit-export-postgres:",
-    "        image: postgres:16-alpine",
+    "        image: mirror.gcr.io/library/postgres@sha256:721873c34ceb9f8d8fc265984940dc982404c105f19ad51be9fdc5970a6080ea",
     "        env:",
     "          POSTGRES_HOST_AUTH_METHOD: trust",
     "          POSTGRES_USER: postgres",
@@ -498,6 +498,44 @@ test("Account Platform Node gate executes its contracts and rejects empty, faile
   }
 });
 
+test("offline render gate pins tool downloads, hashes and exported binaries", () => {
+  const job = jobBlock("account-platform-test");
+  const install = namedStep(job, "Install pinned offline-render tools");
+  assert.match(install, /helm-v3\.16\.4-linux-amd64\.tar\.gz/);
+  assert.match(install, /docker\/compose\/releases\/download\/v5\.4\.0\/docker-compose-linux-x86_64/);
+  assert.match(install, /prometheus\/releases\/download\/v3\.13\.5\/prometheus-3\.13\.5\.linux-amd64\.tar\.gz/);
+  assert.equal((install.match(/sha256sum --check --strict/g) ?? []).length, 3);
+  for (const variable of [
+    "PINVOU_TEST_KMS_HELM_BINARY",
+    "PINVOU_TEST_KMS_COMPOSE_BINARY",
+    "PINVOU_TEST_PROMTOOL_BINARY",
+  ]) {
+    assert.match(install, new RegExp(`${variable}=`));
+    assert.match(install, /GITHUB_ENV/);
+  }
+  const render = namedStep(job, "Account Platform rendered Prometheus rule scenarios");
+  assert.match(render, /PINVOU_TEST_KMS_HELM_BINARY/);
+  assert.match(render, /PINVOU_TEST_PROMTOOL_BINARY/);
+  const assertPinned = candidate => {
+    const step = namedStep(candidate, "Install pinned offline-render tools");
+    assert.equal((step.match(/sha256sum --check --strict/g) ?? []).length, 3);
+    for (const variable of ["PINVOU_TEST_KMS_HELM_BINARY", "PINVOU_TEST_KMS_COMPOSE_BINARY", "PINVOU_TEST_PROMTOOL_BINARY"]) {
+      assert.match(step, new RegExp(`${variable}=`));
+      assert.match(step, /GITHUB_ENV/);
+    }
+  };
+  assertPinned(job);
+  for (const candidate of [
+    job.replace(install, "", 1),
+    job.replace(install, install.replace("sha256sum --check --strict", "sha256sum --check", 1), 1),
+    job.replace(install, install.replace("PINVOU_TEST_KMS_COMPOSE_BINARY", "PINVOU_TEST_KMS_COMPOSE_BINARY_REMOVED", 1), 1),
+  ]) {
+    assert.throws(() => {
+      assertPinned(candidate);
+    });
+  }
+});
+
 test("Go gate executes test and vet for root and future nested modules, and fails on errors", () => {
   const job = jobBlock("account-platform-test");
   const run = stepRun(job, goStepName);
@@ -551,7 +589,7 @@ test("finite audit PostgreSQL exception rejects unsafe or unrelated service and 
     ['"127.0.0.1::5432"', '"0.0.0.0::5432"'],
     ['"127.0.0.1::5432"', '"127.0.0.1:5432:5432"'],
     ["          --rm\n", ""],
-    ["postgres:16-alpine", "postgres:latest"],
+    ["mirror.gcr.io/library/postgres@sha256:721873c34ceb9f8d8fc265984940dc982404c105f19ad51be9fdc5970a6080ea", "mirror.gcr.io/library/postgres@sha256:0000000000000000000000000000000000000000000000000000000000000000"],
     ["      audit-export-postgres:", "      unrelated-postgres:"],
     ["    env:\n      GOTOOLCHAIN:", "      another-service:\n        image: postgres:16-alpine\n    env:\n      GOTOOLCHAIN:"],
     ["        ports:", "        volumes:\n          - shared-data:/var/lib/postgresql/data\n        ports:"],

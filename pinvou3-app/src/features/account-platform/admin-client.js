@@ -212,7 +212,10 @@ export class AdminPlatformClient {
     entry.controller.abort();
   }
 
-  accountClosures(signal) { return this.request('account', '/admin/v1/account-closure-requests', signal); }
+  accountClosures(signal, cursor = '') {
+    const query = cursor ? `?cursor=${encodeURIComponent(cursor)}` : '';
+    return this.request('account', `/admin/v1/account-closure-requests${query}`, signal);
+  }
   retryAccountClosure(id, reason, key, signal) {
     requireFinanceID(id);
     return this.mutate('account', `/admin/v1/account-closure-requests/${id}/actions/retry`, 'POST', { reason }, key, signal, 200);

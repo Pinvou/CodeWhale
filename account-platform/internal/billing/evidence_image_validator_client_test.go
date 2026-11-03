@@ -16,6 +16,33 @@ func fakeImageValidator(t *testing.T, peer func(net.Conn)) *evidenceImageValidat
 	return &evidenceImageValidator{path: "test", workerUID: 123, slots: make(chan struct{}, 1), timeout: time.Second,
 		dial: func(context.Context, string) (net.Conn, error) { a, b := net.Pipe(); go peer(b); return a, nil }, verify: func(net.Conn, uint32) bool { return true }}
 }
+
+func TestEvidenceImageValidatorDialFailure(t *testing.T) {
+	for _, media := range []string{"image/png", "image/jpeg", "application/pdf"} {
+		t.Run(media, func(t *testing.T) {
+			payload := []byte("original-private-evidence")
+			before := append([]byte(nil), payload...)
+			dialError := errors.New("private socket transport diagnostic")
+			calls := 0
+			v := &evidenceImageValidator{path: "missing.sock", workerUID: 123, slots: make(chan struct{}, 1), timeout: time.Second,
+				dial:   func(context.Context, string) (net.Conn, error) { calls++; return nil, dialError },
+				verify: func(net.Conn, uint32) bool { t.Fatal("authenticated a connection after failed dial"); return false }}
+			// A second invocation also proves that failure releases the admission slot.
+			for attempt := 0; attempt < 2; attempt++ {
+				if err := v.Validate(context.Background(), media, payload); err != errImageValidatorUnavailable {
+					t.Fatalf("dial failure must return only the public unavailable error: %v", err)
+				}
+				if !bytes.Equal(payload, before) || len(v.slots) != 0 {
+					t.Fatal("dial failure changed evidence or retained an admission slot")
+				}
+			}
+			if calls != 2 {
+				t.Fatalf("wanted one dial per invocation without retry, got %d", calls)
+			}
+		})
+	}
+}
+
 func TestEvidenceImageValidatorResponseBinding(t *testing.T) {
 	for _, tc := range []struct {
 		name     string

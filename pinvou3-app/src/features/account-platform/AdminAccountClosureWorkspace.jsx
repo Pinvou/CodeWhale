@@ -31,26 +31,29 @@ function ClosureRepair({ client, owner, item, copy, closureCopy, canRepair, onCh
 export function AdminAccountClosureWorkspace({ client, me, language }) {
   const copy = financeCopy[language];
   const [items, setItems] = useState(null);
+  const [nextCursor, setNextCursor] = useState('');
   const [error, setError] = useState(false);
   const generation = useRef(0);
   const permissions = me.platform_permissions || [];
   const canRead = permissions.includes('platform.account-closures.read');
   const canRepair = permissions.includes('platform.account-closures.repair');
   const epoch = client.financeSessionEpoch || 0;
-  const load = async signal => {
-    const stamp = ++generation.current; setItems(null); setError(false);
+  const load = async (signal, cursor = '') => {
+    const stamp = ++generation.current; setItems(null); setNextCursor(''); setError(false);
     try {
-      const pending = closureRepairIntents(me.user_id).map(value => ({ closure_request_id: value.facts.id, recovery_only: true }));
+      const pending = cursor ? [] : closureRepairIntents(me.user_id).map(value => ({ closure_request_id: value.facts.id, recovery_only: true }));
       setItems(pending);
-      const result = await client.accountClosures(signal);
+      const result = await client.accountClosures(signal, cursor);
       if (stamp !== generation.current) return;
       if (!Array.isArray(result?.items)) throw new Error('INVALID_CLOSURE_COLLECTION');
       result.items.forEach(requireAccountClosure); setItems([...result.items, ...pending.filter(item => !result.items.some(current => current.closure_request_id === item.closure_request_id))]);
+      setNextCursor(typeof result.next_cursor === 'string' ? result.next_cursor : '');
     } catch { if (stamp === generation.current) setError(true); }
   };
   useEffect(() => { const controller = new AbortController(); if (canRead) void load(controller.signal); return () => { generation.current++; controller.abort(); }; }, [client, me.user_id, epoch, canRead]); // eslint-disable-line react-hooks/exhaustive-deps
   if (!canRead) return null;
   return <section><h2>{accountClosureCopy[language].title}</h2>{error && <p role="alert">{copy.unavailable}</p>}<button onClick={() => void load()}>{copy.refresh}</button>
     {items?.map(item => <ClosureRepair key={`${me.user_id}:${epoch}:${item.closure_request_id}`} client={client} owner={me.user_id} item={item} copy={copy} closureCopy={accountClosureCopy[language]} canRepair={canRepair} onChanged={() => void load()} />)}
+    {nextCursor && <button type="button" onClick={() => void load(undefined, nextCursor)}>{copy.next}</button>}
   </section>;
 }

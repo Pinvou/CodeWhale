@@ -262,7 +262,7 @@ APT-123-R2 最终状态（2026-09-06）：`DONE / REMEDIATION_REVIEW_PASS`，身
 | TOK-35 | 部分实现 | DOC_CURRENT | DESKTOP-CLIENT-SWITCH | NOT_DEPLOYED | 盘点、配置备份、幂等 schema/会话/任务迁移、旧身份/缓存/凭据清理重试及只读安装预检已实现；仍缺正式安装制品崩溃注入和跨版本验收 |
 | TOK-36 | 部分实现 | DOC_CURRENT | CLIENT-SWITCH-READINESS; DESKTOP-CLIENT-SWITCH | NOT_DEPLOYED | 发布门禁验证公开兼容、OIDC、摘要和短时证明；安装门禁验证证明、系统包签名及只读预检；运行门禁无旧路径回退。平台安装器的二进制/配置原子提交回滚仍缺正式制品环境证明 |
 | TOK-37 | 部分实现 | DOC_CURRENT | GO-UNIT; CLIENT-SWITCH-READINESS | NOT_DEPLOYED | 内部服务身份接口只读核验 OIDC、Account 契约、目录、READY 路由及价格/公式，不创建 Hold/用量/推理；发布系统可取得绑定环境、制品摘要、客户端/服务/契约/目录版本的 Ed25519 短时证明，更新器仅获取公开兼容范围和验签公钥。生产密钥注入、真实环境连续无副作用核对及发布系统联调待验收。 |
-| TOK-38 | 已实现 | DOC_CURRENT | GO-UNIT; USAGE-CANCELLATION-CONVERGENCE | NOT_DEPLOYED | 取消仅按原稳定 user_id 授权并持久化键摘要/指纹；派发前竞态在用量行锁内阻止意图提升、幂等释放唯一 Hold 并终结为 LOCAL_CONFIRMED/CANCELLED_BEFORE_DISPATCH，终态返回 ALREADY_TERMINAL |
+| TOK-38 | 已实现 | DOC_CURRENT | GO-UNIT; USAGE-CANCELLATION-CONVERGENCE | NOT_DEPLOYED | 取消仅按原稳定 user_id 授权并持久化键摘要/指纹；派发前竞态在用量行锁内阻止意图提升、幂等释放唯一 Hold 并终结为 LOCAL_CONFIRMED/CANCELLED_BEFORE_DISPATCH，其余终态返回 ALREADY_TERMINAL；已确认本地取消且 Hold 已释放时保留 LOCAL_CONFIRMED 和原确认事实，支持原任务收尾及证明重放 |
 | TOK-39 | 已实现 | DOC_CURRENT | GO-UNIT; USAGE-CANCELLATION-CONVERGENCE | NOT_DEPLOYED | Adapter 统一声明 EXPLICIT_CANCEL、STREAM_ABORT_CONFIRMED_CANCEL 或 UNSUPPORTED；当前 OpenAI-compatible/New API 明确为 UNSUPPORTED，不把普通 HTTP/SSE 断开伪装成取消成功 |
 | TOK-40 | 已实现 | DOC_CURRENT | GO-UNIT; USAGE-EXECUTION-REPLAY; USAGE-CANCELLATION-CONVERGENCE | NOT_DEPLOYED | execution/cancel/delivery/settlement 独立持久；断线只改 delivery，后台上下文继续读取、持久化和结算，显式停止写 USER_STOPPED 且不覆盖真实执行状态 |
 | TOK-41 | 已实现 | DOC_CURRENT | GO-UNIT; USAGE-CANCELLATION-CONVERGENCE | NOT_DEPLOYED | 保存取消、Provider 终态、最终用量时间线、Adapter/上游引用及不可变脱敏证据；不支持取消继续自然收敛，结果不确定按原引用退避核对并在期限转 REVIEW |

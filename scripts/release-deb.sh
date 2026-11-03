@@ -2,15 +2,20 @@
 # pinvou3 发布脚本：构建 deb → 生成 latest.json → rsync 上传到更新源。
 # 用法: ./scripts/release-deb.sh "本次更新说明"
 #
+# ⚠️ 本脚本只发布到发布源站(地址经 PINVOU3_RELEASE_SERVER 提供,见私有运维资料)。pinvou.com 的 DNS 已指向 nginx-edge(公网入口),
+# 两机无自动同步:发版后须按 docs/应用内升级-设计.md「服务端现状」把同名文件与
+# latest.json 手工镜像到 edge,否则公网仍是旧版/404(2026-09-28 0.10.5 发版实测)。
+#
 # 发版三步:
-#   1. bump 版本号(tauri.conf.json / Cargo.toml / package.json 三处,本脚本会校验一致)
+#   1. 改根目录 VERSION 后运行 node scripts/sync-version.mjs 同步各版本文件
+#      (本脚本以 sync-version.mjs --check 校验一致,不再三处手工 bump)
 #   2. ./scripts/release-deb.sh "修了 xxx"
-#   3. 客户端 App 启动/手动检查即可看到新版
+#   3. 按文档把产物镜像到 edge 后,客户端 App 启动/手动检查才可见新版
 set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 APP_DIR="$REPO_ROOT/pinvou3-app"
-SERVER="admin@8.218.49.20"
+SERVER="${PINVOU3_RELEASE_SERVER:?需要 PINVOU3_RELEASE_SERVER(如 user@host),真实值见私有运维资料}"
 REMOTE_DIR="/var/www/pinvou3"
 BASE_URL="https://pinvou.com/pinvou3"
 
@@ -62,7 +67,7 @@ ARCH="${ARCH#pinvou3_"${VERSION}"_}"
 # ── 3. 合并 latest.json(保留其它平台条目,只更新顶层 Linux 字段) ──────
 # 修复「Linux 发版抹掉 platforms.macos-arm64」:此前用 `jq -n` 从零生成 latest.json,
 # 会清掉 platforms 下所有非 Linux 条目 → Mac 客户端回退到顶层(此时是 Linux deb)→
-# 把 .deb 当 dmg 下。改为:拉远端 latest.json → 只覆盖顶层 version/url/sha256/size →
+# 把 .deb 当 dmg 下。改为:拉远端 latest.json → 只覆盖顶层 version/url/sha256/size/pub_date/notes →
 # 推回。platforms.macos-arm64 / windows-x86_64 等条目原样保留。
 SHA256=$(sha256sum "$DEB" | awk '{print $1}')
 SIZE=$(stat -c%s "$DEB")
@@ -126,4 +131,6 @@ ssh "$SERVER" "mv '$REMOTE_DIR/latest.json.new' '$REMOTE_DIR/latest.json' && chm
 
 echo "=== 发布完成 ==="
 echo "清单: $BASE_URL/latest.json"
+# 注意:下方 curl 走 DNS(=edge)。未镜像 edge 前它必显示旧版,是预期而非失败,不能作为
+# 发布成功依据;以 docs/应用内升级-设计.md「服务端现状」的双端验证为准。
 curl -fsS "$BASE_URL/latest.json" | jq .version || echo "(线上验证失败,检查 nginx)"

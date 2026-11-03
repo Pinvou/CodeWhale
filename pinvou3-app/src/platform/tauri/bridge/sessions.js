@@ -101,6 +101,7 @@ function pinvouSharedtauriSessions() {
   var sessionBufferTouchClock = 0;
   var scheduledRunOwnerTouchClock = 0;
   var scheduledRunOpenInFlight = Object.create(null);
+  var scheduledRunOpenOwners = Object.create(null);
   var sessionSwitchRequestToken = 0;
   // Navigation marker only: the record and transcript remain owned by
   // SessionStore. This prevents local working-set persistence for a proxy.
@@ -376,8 +377,56 @@ function rollbackScheduledOpenActivation(snapshot) { return pinvouSharedtauriSes
   // 进入草稿态:不创建 session,只清空工作集 + activeSessionId=null,落在「你好」欢迎页。
   // session 在首次有实质内容(发消息 / 加卡牌,见 ensureSession)时才物化——这样会话列表里
   // 永远不会堆积没用过的空「新对话」(ChatGPT/Claude 式 lazy session)。
-  function enterDraft() {
-    sessionSwitchRequestToken += 1; // 新建/返回草稿会话使任何仍在等待的 load_session 结果失效
+  // Separate user-navigation identity from the load token: controlled-owned
+  // transitions may perform several internal switches without losing ownership.
+  var notifyingLocalSessionNavigation = false;
+  var localNavigationListeners = new Set();
+  var localNavigationPending = false;
+  function onLocalNavigation(listener) {
+    localNavigationListeners.add(listener);
+    return function () { localNavigationListeners.delete(listener); };
+  }
+  function getLocalNavigationEpoch() {
+    return Number.isSafeInteger(state.controlledLocalNavigationEpoch)
+      ? state.controlledLocalNavigationEpoch : 0;
+  }
+  function publishLocalSessionNavigation() {
+    localNavigationPending = true;
+    if (notifyingLocalSessionNavigation) return;
+    notifyingLocalSessionNavigation = true;
+    try {
+      while (localNavigationPending) {
+        localNavigationPending = false;
+        Array.from(localNavigationListeners).forEach(function (listener) {
+          if (localNavigationListeners.has(listener)) listener();
+        });
+      }
+    } finally { notifyingLocalSessionNavigation = false; }
+  }
+  function beginLocalSessionNavigation(deferNotify) {
+    var current = Number.isSafeInteger(state.controlledLocalNavigationEpoch)
+      ? state.controlledLocalNavigationEpoch : 0;
+    state.controlledLocalNavigationEpoch = current + 1;
+    if (!deferNotify) publishLocalSessionNavigation();
+  }
+  function beginLocalNavigationIntent() {
+    sessionSwitchRequestToken += 1;
+    beginLocalSessionNavigation();
+  }
+
+  function affectsCurrentOrControlledSession(id) {
+    var remote = state.desktopRemoteControl;
+    return !!id && (state.activeSessionId === id
+      || remote && remote.controlledSession && remote.controlledSession.sessionId === id);
+  }
+
+  function enterDraft(controlledOwner) {
+    if (controlledOwner) {
+      if (!isControlledNavigationOwnerCurrent(controlledOwner)) return false;
+    }
+    var requestToken = ++sessionSwitchRequestToken;
+    if (!controlledOwner) beginLocalSessionNavigation();
+    if (requestToken !== sessionSwitchRequestToken || (controlledOwner && !isControlledNavigationOwnerCurrent(controlledOwner))) return false;
     state.scheduledRunContext = null;
     state.draftEpoch++; // 每次点击都自增——含下面提前返回的「已在草稿态」分支,让前端能重置 welcomeToolId
     state.scheduledTaskPendingGuide = null; // 换了对话,未发送的定时任务引导词作废
@@ -405,7 +454,7 @@ function rollbackScheduledOpenActivation(snapshot) { return pinvouSharedtauriSes
       // 草稿 mode 显示 = 当前 lane 全局默认（两分 lane 语义，design 并入 work）。
       state.modeState = currentDraftModeState();
       notify();
-      return;
+      return requestToken === sessionSwitchRequestToken;
     }
     if (state.activeSessionId && !isRemoteProxyView(state.activeSessionId)) {
       saveWorkingSetTo(getBuffer(state.activeSessionId));
@@ -417,6 +466,7 @@ function rollbackScheduledOpenActivation(snapshot) { return pinvouSharedtauriSes
     // 全局默认（work lane 的 last_mode）。
     state.modeState = currentDraftModeState();
     notify();
+    return requestToken === sessionSwitchRequestToken;
   }
   // 公开「新建对话」入口(侧边栏按钮)= 进草稿态。名字保留以兼容前端调用。
 async function createNewSession() { return pinvouSharedtauriSessions().createNewSession(); }
@@ -424,7 +474,7 @@ async function createNewSession() { return pinvouSharedtauriSessions().createNew
   // 团队接力等显式工作入口需要立即获得稳定 session id 以建立本机关联；
   // 这类用户动作已经确认要开始工作，不适用侧边栏空草稿的 lazy 语义。
   async function materializeSession() {
-    enterDraft();
+    if (!enterDraft()) return null;
     return ensureSession();
   }
 
@@ -545,15 +595,33 @@ async function createNewSession() { return pinvouSharedtauriSessions().createNew
     if (state.activeSessionId) return state.activeSessionId;
     if (ensureSessionInFlight) {
       var pendingOutcome = ensureSessionDraftOutcome;
+      // A later explicit materialization of the same still-current draft wins
+      // over a controlled load. Never re-arm after a local navigation (even a
+      // queued one) or a new draft. A synchronous notification subscriber is a
+      // coalesced observer, not another intent; ignoring it avoids a notify loop.
+      if (!notifyingLocalSessionNavigation && pendingOutcome
+        && pendingOutcome.epoch === Number(state.draftEpoch || 0)
+        && pendingOutcome.bridgeNavigationEpoch === (state.controlledLocalNavigationEpoch || 0)) {
+        pendingOutcome.navToken = ++sessionSwitchRequestToken;
+        beginLocalSessionNavigation(true);
+        pendingOutcome.bridgeNavigationEpoch = state.controlledLocalNavigationEpoch;
+        publishLocalSessionNavigation();
+      }
       var pendingResult = await ensureSessionInFlight;
       applyDraftOutcome(pendingOutcome);
       return pendingResult;
     }
+    // Materializing the current draft is a local session-navigation intent.
+    // Retire prior controlled loads synchronously, before create_session awaits.
+    // Delay the notification until the in-flight promise is registered so a
+    // synchronous subscriber cannot start a duplicate materialization.
+    var navToken = ++sessionSwitchRequestToken;
+    beginLocalSessionNavigation(true);
     // 捕获导航 token：仅判 activeSessionId 覆盖不了「再进草稿」——enterDraft
     // 只推进 token 不改 activeSessionId（仍为 null），在途 create_session 返回
     // 后必须连同 token 一起校验，否则会劫持用户新进的草稿（三审 P1）。
-    var navToken = sessionSwitchRequestToken;
-    var draftOutcome = { epoch: Number(state.draftEpoch || 0), createdSessionId: null };
+    var draftOutcome = { epoch: Number(state.draftEpoch || 0), createdSessionId: null,
+      navToken: navToken, bridgeNavigationEpoch: state.controlledLocalNavigationEpoch };
     ensureSessionDraftOutcome = draftOutcome;
     // Capture the materialization payload synchronously, outside the try: the
     // catch-side rollback and the recents cleanup both need the values bound by
@@ -580,7 +648,7 @@ async function createNewSession() { return pinvouSharedtauriSessions().createNew
         // 调用方按 null 处理不发送本条消息。离开草稿的寄存开关意图一并作废。
         // 「切到既有会话」→ activeSessionId 非空；「再进草稿」→ activeSessionId
         // 仍为 null 但导航 token 已前移——两种导航都中止物化（三审 P1）。
-        if (state.activeSessionId || navToken !== sessionSwitchRequestToken) {
+        if (state.activeSessionId || draftOutcome.navToken !== sessionSwitchRequestToken) {
           state.pendingDraftMultiAgent = false;
           state.pendingDraftMode = null;
           sessionStates[meta.id] = freshBuffer();
@@ -623,7 +691,7 @@ async function createNewSession() { return pinvouSharedtauriSessions().createNew
             } else {
               throw new Error("unsupported model selection source");
             }
-            if (state.activeSessionId === meta.id && navToken === sessionSwitchRequestToken) {
+            if (state.activeSessionId === meta.id && draftOutcome.navToken === sessionSwitchRequestToken) {
               state.currentSessionModelRef = pendingModelRef;
             }
           } catch (modelError) {
@@ -633,7 +701,7 @@ async function createNewSession() { return pinvouSharedtauriSessions().createNew
               // 空会话残留可手动删除，不掩盖模型选择失败。
             }
             draftOutcome.createdSessionId = null;
-            if (state.activeSessionId !== meta.id || navToken !== sessionSwitchRequestToken) return null;
+            if (state.activeSessionId !== meta.id || draftOutcome.navToken !== sessionSwitchRequestToken) return null;
             var rollbackComposerDraft = state.composerDraft || "";
             enterDraft();
             state.composerDraft = rollbackComposerDraft;
@@ -654,7 +722,7 @@ async function createNewSession() { return pinvouSharedtauriSessions().createNew
             return null;
           }
         }
-        if (state.activeSessionId !== meta.id || navToken !== sessionSwitchRequestToken) return null;
+        if (state.activeSessionId !== meta.id || draftOutcome.navToken !== sessionSwitchRequestToken) return null;
         if (pendingMultiAgent) {
           try {
             await invoke("set_multi_agent_mode", { sessionId: meta.id, enabled: true });
@@ -670,7 +738,7 @@ async function createNewSession() { return pinvouSharedtauriSessions().createNew
             }
             draftOutcome.createdSessionId = null;
             // A real navigation during the toggle/cleanup awaits is not a rollback.
-            if (navToken !== sessionSwitchRequestToken || state.activeSessionId !== meta.id) return null;
+            if (draftOutcome.navToken !== sessionSwitchRequestToken || state.activeSessionId !== meta.id) return null;
             var rollbackComposerDraft = state.composerDraft || "";
             enterDraft();
             state.composerDraft = rollbackComposerDraft;
@@ -749,7 +817,7 @@ async function createNewSession() { return pinvouSharedtauriSessions().createNew
         // 不得返回切走后的 active 让操作漂进新会话（二审 F1、三审 P1）。
         // 返回非 null 时 active 必等于 meta.id 且无任何新导航，调用方重读
         // state.activeSessionId 即为目标会话。
-        return navToken === sessionSwitchRequestToken
+        return draftOutcome.navToken === sessionSwitchRequestToken
           && state.activeSessionId === meta.id ? meta.id : null;
       } catch (e) {
         addSystemItem(bt("newChatFailed") + e);
@@ -762,6 +830,7 @@ async function createNewSession() { return pinvouSharedtauriSessions().createNew
       }
     })();
     ensureSessionInFlight = p;
+    publishLocalSessionNavigation();
     p.then(
       function () { if (ensureSessionInFlight === p) ensureSessionInFlight = null; },
       function () { if (ensureSessionInFlight === p) ensureSessionInFlight = null; }
@@ -836,8 +905,42 @@ function interruptedDisplayRange(item) { return pinvouSharedtauriSessionsN47342(
     return remappedCurrentStreamId;
   }
 
+  function currentControlledSessionOwner(id, generation, intent) {
+    var remote = state.desktopRemoteControl;
+    if (!remote || remote.controlledNavigationPending || !remote.controlledDevice || remote.controlledDevice.status !== "connected"
+      || remote.controlledDevice.generation !== generation
+      || !remote.intents || remote.intents.controlled !== intent) return false;
+    var session = remote.controlledSession || {};
+    if (session.sessionId) return session.sessionId === id && session.generation === generation;
+    var tasks = remote.controlledTasks || [];
+    for (var i = tasks.length - 1; i >= 0; i -= 1) {
+      if (tasks[i] && tasks[i].sessionId) return tasks[i].sessionId === id;
+    }
+    return false;
+  }
+
   async function switchToSessionInternal(id, preserveScheduledRunContext, errorScope, options) {
-    var requestToken = ++sessionSwitchRequestToken;
+    var owner = options && options.controlledOwner;
+    var navigationOwner = options && options.navigationOwner;
+    if (owner && (!isControlledNavigationOwnerCurrent(owner) || !currentControlledSessionOwner(id, owner.generation, owner.intent))) return false;
+    if (navigationOwner && !isControlledNavigationOwnerCurrent(navigationOwner)) return false;
+    var localRequestOwner = options && options.localRequestOwner;
+    var requestToken = localRequestOwner ? localRequestOwner.token : ++sessionSwitchRequestToken;
+    if (!owner && !navigationOwner && !localRequestOwner) beginLocalSessionNavigation();
+    if ((localRequestOwner ? localRequestOwner.token : requestToken) !== sessionSwitchRequestToken) return false;
+    var commitScheduled = options && options.commitScheduled;
+    var scheduledCommitted = false;
+    function commitScheduledContext() {
+      if (commitScheduled) { state.scheduledRunContext = null; scheduledCommitted = true; }
+    }
+    if (owner && !currentControlledSessionOwner(id, owner.generation, owner.intent)) return false;
+    if (navigationOwner && !isControlledNavigationOwnerCurrent(navigationOwner)) return false;
+    function switchStillCurrent() {
+      return (localRequestOwner ? localRequestOwner.token : requestToken) === sessionSwitchRequestToken
+        && (!owner || (isControlledNavigationOwnerCurrent(owner) && currentControlledSessionOwner(id, owner.generation, owner.intent)))
+        && (!navigationOwner || isControlledNavigationOwnerCurrent(navigationOwner))
+        && (!commitScheduled || (scheduledCommitted ? state.scheduledRunContext === null : state.scheduledRunContext === commitScheduled));
+    }
     var forceDurableLoad = !!(options && options.forceDurableLoad);
     var hydrateLiveSession = !!(options && options.hydrateLiveSession);
     if (!id) {
@@ -851,7 +954,7 @@ function interruptedDisplayRange(item) { return pinvouSharedtauriSessionsN47342(
       try {
         if (typeof readRemoteProxyHistory !== "function") throw new Error("remote_proxy_not_found");
         var remoteRecord = await readRemoteProxyHistory(id);
-        if (requestToken !== sessionSwitchRequestToken) return false;
+        if (!switchStillCurrent()) return false;
         if (!remoteRecord || remoteRecord.localSessionId !== id) throw new Error("remote_proxy_not_found");
         // Keep the identity check at adoption, including synchronous retirement.
         // The checker is required wiring, not an optional validation fallback.
@@ -864,6 +967,7 @@ function interruptedDisplayRange(item) { return pinvouSharedtauriSessionsN47342(
         if (!preserveScheduledRunContext) state.scheduledRunContext = null;
         state.scheduledTaskPendingGuide = null;
         state.activeSessionId = id;
+        commitScheduledContext();
         activeRemoteProxyId = id;
         // No local Engine/ACP working set is created or hydrated for a proxy.
         // ChatView reads the authenticated projection independently.
@@ -871,9 +975,9 @@ function interruptedDisplayRange(item) { return pinvouSharedtauriSessionsN47342(
         state.composerDraft = remoteProxyDrafts ? remoteProxyDrafts.get(id) : "";
         if (typeof selectRemoteProxyHistory === "function") selectRemoteProxyHistory(remoteRecord);
         notify();
-        return true;
+        return switchStillCurrent() && state.activeSessionId === id;
       } catch (error) {
-        if (requestToken === sessionSwitchRequestToken) reportSessionSwitchFailure(error, errorScope);
+        if (switchStillCurrent()) reportSessionSwitchFailure(error, errorScope);
         return false;
       }
     }
@@ -883,9 +987,10 @@ function interruptedDisplayRange(item) { return pinvouSharedtauriSessionsN47342(
     }
     if (id === state.activeSessionId && !forceDurableLoad && !hydrateLiveSession) {
       if (!preserveScheduledRunContext) state.scheduledRunContext = null;
+      commitScheduledContext();
       state.scheduledTaskPendingGuide = null;
       notify();
-      return true;
+      return switchStillCurrent() && state.activeSessionId === id;
     }
     // 多 session 并发:切换【不再 cancel】旧 session —— 它在自己的 engine 上继续跑,
     // 工作集存进 sessionStates 后台累积。切回来能看到完整(含切走期间产生的)内容。
@@ -910,12 +1015,14 @@ function interruptedDisplayRange(item) { return pinvouSharedtauriSessionsN47342(
       if (!preserveScheduledRunContext) state.scheduledRunContext = null;
       state.scheduledTaskPendingGuide = null; // 仅在目标会话已确认可用后提交导航状态
       switchActiveTo(id, null);
+      commitScheduledContext();
       await syncModeState();
       await syncActivePersona();
       await syncMountedCollection();
       await loadMemoryOverview({ rehydratePending: true });
-      if (requestToken !== sessionSwitchRequestToken || state.activeSessionId !== id) return false;
+      if (!switchStillCurrent() || state.activeSessionId !== id) return false;
       notify();
+      if (!switchStillCurrent() || state.activeSessionId !== id) return false;
       reconcileArtifacts(id); // 对账磁盘产物(fire-and-forget)
       return true;
     }
@@ -923,11 +1030,11 @@ function interruptedDisplayRange(item) { return pinvouSharedtauriSessionsN47342(
     try {
       saved = await invoke("load_session", { id: id });
     } catch (e) {
-      if (requestToken === sessionSwitchRequestToken) reportSessionSwitchFailure(e, errorScope);
+      if (switchStillCurrent()) reportSessionSwitchFailure(e, errorScope);
       return false;
     }
-    if (requestToken !== sessionSwitchRequestToken) return false;
-    if (!saved || !saved.metadata || !saved.metadata.id) {
+    if (!switchStillCurrent()) return false;
+    if (!saved || !saved.metadata || !saved.metadata.id || ((owner || navigationOwner) && saved.metadata.id !== id)) {
       reportSessionSwitchFailure(new Error(bt("sessionDataInvalid")), errorScope);
       return false;
     }
@@ -938,7 +1045,7 @@ function interruptedDisplayRange(item) { return pinvouSharedtauriSessionsN47342(
     var pinvouReviews = await loadPinvouReviewsForSession(id);
     var turnTimeline = [];
     try { turnTimeline = await invoke("get_session_timeline", { sessionId: id }) || []; } catch (_) {}
-    if (requestToken !== sessionSwitchRequestToken) return false;
+    if (!switchStillCurrent()) return false;
 
     // load_session 与必要的直接会话数据均成功后，才一次性提交 active/context。
     if (state.activeSessionId && !isRemoteProxyView(state.activeSessionId)) {
@@ -947,6 +1054,7 @@ function interruptedDisplayRange(item) { return pinvouSharedtauriSessionsN47342(
     if (!preserveScheduledRunContext) state.scheduledRunContext = null;
     state.scheduledTaskPendingGuide = null;
     state.activeSessionId = saved.metadata.id;
+    commitScheduledContext();
     activeRemoteProxyId = null;
     if (hydrateLiveSession) {
       var liveBuffer = sessionStates[id] || freshBuffer();
@@ -1003,15 +1111,53 @@ function interruptedDisplayRange(item) { return pinvouSharedtauriSessionsN47342(
     await syncActivePersona();
     await syncMountedCollection();
     await loadMemoryOverview({ rehydratePending: true });
-    if (requestToken !== sessionSwitchRequestToken || state.activeSessionId !== saved.metadata.id) return false;
+    if (!switchStillCurrent() || state.activeSessionId !== saved.metadata.id) return false;
     notify();
+    if (!switchStillCurrent() || state.activeSessionId !== saved.metadata.id) return false;
     reconcileArtifacts(id); // 对账磁盘产物(修重启/跟踪遗漏导致的面板缺文件)
     return true;
   }
 
 async function switchToSession(id) { return pinvouSharedtauriSessions().switchToSession(id); }
 
-  async function openScheduledRunChatOnce(run, task) {
+  function captureControlledNavigationOwner(generation) {
+    var remote = state.desktopRemoteControl;
+    var intent = remote && remote.intents && remote.intents.controlled;
+    if (!generation || !Number.isSafeInteger(intent) || remote.controlledNavigationPending || !remote.controlledDevice
+      || remote.controlledDevice.status !== "connected" || remote.controlledDevice.generation !== generation) return null;
+    return { generation: generation, intent: intent, bridgeNavigationEpoch: state.controlledLocalNavigationEpoch || 0 };
+  }
+
+  function isControlledNavigationOwnerCurrent(owner) {
+    var remote = state.desktopRemoteControl;
+    return !!(owner && owner.bridgeNavigationEpoch === (state.controlledLocalNavigationEpoch || 0) && (!owner.navigationIsCurrent || owner.navigationIsCurrent()) && remote && !remote.controlledNavigationPending && remote.controlledDevice && remote.intents
+      && remote.controlledDevice.status === "connected"
+      && remote.controlledDevice.generation === owner.generation
+      && remote.intents.controlled === owner.intent);
+  }
+
+  async function switchToControlledSession(id, owner) {
+    if (!isControlledNavigationOwnerCurrent(owner)
+      || !currentControlledSessionOwner(id, owner.generation, owner.intent)) return false;
+    return switchToSessionInternal(id, false, "chat", { controlledOwner: owner });
+  }
+
+  async function exitControlledScheduledRunChat(owner) {
+    if (!isControlledNavigationOwnerCurrent(owner)) return false;
+    var scheduled = state.scheduledRunContext;
+    if (!scheduled) return false;
+    if (scheduled.returnSessionId && scheduled.returnSessionId !== scheduled.sessionId) {
+      return switchToSessionInternal(scheduled.returnSessionId, true, "scheduled", {
+        navigationOwner: owner, commitScheduled: scheduled,
+      });
+    }
+    if (!isControlledNavigationOwnerCurrent(owner)) return false;
+    return !!enterDraft(owner) && isControlledNavigationOwnerCurrent(owner);
+  }
+
+  async function openScheduledRunChatOnce(run, task, localOwner) {
+    if (!localOwner) return openScheduledRunChat(run, task);
+    if (localOwner.token !== sessionSwitchRequestToken) return false;
     var sessionId = run && typeof run.sessionId === "string" ? run.sessionId.trim() : "";
     if (!sessionId) {
       reportSessionSwitchFailure(new Error(bt("runHasNoSession")), "scheduled");
@@ -1027,6 +1173,10 @@ async function switchToSession(id) { return pinvouSharedtauriSessions().switchTo
     }
     setScheduledTaskError(null);
     notify();
+    if (localOwner.token !== sessionSwitchRequestToken) {
+      rollbackScheduledOpenActivation(openActivation);
+      return false;
+    }
     var returnSessionId = state.scheduledRunContext
       ? state.scheduledRunContext.returnSessionId
       : state.activeSessionId;
@@ -1042,12 +1192,14 @@ async function switchToSession(id) { return pinvouSharedtauriSessions().switchTo
     var switched = await switchToSessionInternal(sessionId, true, "scheduled", {
       forceDurableLoad: forceDurableLoad,
       hydrateLiveSession: !isTerminalRun,
+      localRequestOwner: localOwner,
     });
-    if (!switched) {
+    if (!switched || localOwner.token !== sessionSwitchRequestToken) {
       rollbackScheduledOpenActivation(openActivation);
       notify();
       return false;
     }
+    localOwner.committed = true;
     if (forceDurableLoad) markScheduledInitialTurnTerminal(sessionId);
     else scheduledRunBuffer(sessionId);
     var automationId = (run && run.automationId) || (task && task.id) || null;
@@ -1079,9 +1231,45 @@ async function switchToSession(id) { return pinvouSharedtauriSessions().switchTo
     return true;
   }
 
-function openScheduledRunChat(run, task) { return pinvouSharedtauriSessions().openScheduledRunChat(run, task); }
+function openScheduledRunChat(run, task) {
+  var sessionId = run && typeof run.sessionId === "string" ? run.sessionId.trim() : "";
+  var existing = sessionId && scheduledRunOpenOwners[sessionId];
+  if (existing && !existing.committed && existing.bridgeEpoch === (state.controlledLocalNavigationEpoch || 0)) {
+    if (!notifyingLocalSessionNavigation) {
+      existing.token = ++sessionSwitchRequestToken;
+      beginLocalSessionNavigation(true);
+      existing.bridgeEpoch = state.controlledLocalNavigationEpoch;
+      publishLocalSessionNavigation();
+    }
+    return existing.promise;
+  }
+  var localOwner = { token: ++sessionSwitchRequestToken, bridgeEpoch: 0, promise: null };
+  beginLocalSessionNavigation(true);
+  localOwner.bridgeEpoch = state.controlledLocalNavigationEpoch;
+  var resolveOpening, rejectOpening;
+  localOwner.promise = new Promise(function (resolve, reject) { resolveOpening = resolve; rejectOpening = reject; });
+  if (sessionId) {
+    scheduledRunOpenOwners[sessionId] = localOwner;
+    scheduledRunOpenInFlight[sessionId] = localOwner.promise;
+  }
+  function clearOpening() {
+    if (sessionId && scheduledRunOpenOwners[sessionId] === localOwner) {
+      delete scheduledRunOpenOwners[sessionId];
+      delete scheduledRunOpenInFlight[sessionId];
+    }
+  }
+  localOwner.promise.then(clearOpening, clearOpening);
+  publishLocalSessionNavigation();
+  openScheduledRunChatOnce(run, task, localOwner).then(resolveOpening, rejectOpening);
+  return localOwner.promise;
+}
 
-async function exitScheduledRunChat() { return pinvouSharedtauriSessions().exitScheduledRunChat(); }
+async function exitScheduledRunChat() {
+  var requestToken = ++sessionSwitchRequestToken;
+  beginLocalSessionNavigation();
+  if (requestToken !== sessionSwitchRequestToken) return false;
+  return pinvouSharedtauriSessions().exitScheduledRunChat();
+}
 
 function recentScheduledRunForSession(id) { return pinvouSharedtauriSessions().recentScheduledRunForSession(id); }
 
@@ -1091,7 +1279,10 @@ function recentScheduledRunForSession(id) { return pinvouSharedtauriSessions().r
   // 才渲染返回按钮;只清 active 会卡在「定时路由下的空白页且没有返回按钮」。
   // 清掉之后 currentView 仍是 'scheduled',界面自然落回定时任务列表。
   // 不负责 buffer:删除要丢弃 buffer,收纳要保留 buffer,由调用方各自处理。
-  function leaveSessionView(id) { return pinvouSharedtauriSessions().leaveSessionView(id); }
+  function leaveSessionView(id) {
+    if (affectsCurrentOrControlledSession(id)) beginLocalSessionNavigation();
+    return pinvouSharedtauriSessions().leaveSessionView(id);
+  }
 
   // session:deleted fan-out: applyDeletedSession is the ONE path that
   // observes every deleted id — list_sessions excludes code-mode sessions
@@ -1101,7 +1292,10 @@ function recentScheduledRunForSession(id) { return pinvouSharedtauriSessions().r
   // wiring) registers a listener here instead of the sessions domain pushing.
   var sessionDeletedListeners = new Set();
   function onSessionDeleted(listener) { return pinvouSharedtauriSessions().onSessionDeleted(listener); }
-  function applyDeletedSession(id) { return pinvouSharedtauriSessions().applyDeletedSession(id); }
+  function applyDeletedSession(id) {
+    if (affectsCurrentOrControlledSession(id)) beginLocalSessionNavigation();
+    return pinvouSharedtauriSessions().applyDeletedSession(id);
+  }
 
   // Stamps the workspace_rebound mark the rebind command emits for the
   // sessions whose persisted artifact paths its lanes rebased (rebound,
@@ -1170,6 +1364,7 @@ function recentScheduledRunForSession(id) { return pinvouSharedtauriSessions().r
   }
 
   async function deleteSession(id, onRemoteProxyError) {
+    if (affectsCurrentOrControlledSession(id)) beginLocalSessionNavigation();
     if (isKnownRemoteProxy(id)) {
       try {
         if (typeof deleteRemoteProxyHistory !== "function") return false;
@@ -1262,6 +1457,7 @@ function recentScheduledRunForSession(id) { return pinvouSharedtauriSessions().r
   }
 
   async function archiveSession(id) {
+    if (affectsCurrentOrControlledSession(id)) beginLocalSessionNavigation();
     if (isKnownRemoteProxy(id)) return false;
     invalidateScheduledRecentRunsForSession(id);
     var idx = state.sessions.findIndex(function (s) { return s.id === id; });
@@ -1396,6 +1592,13 @@ function recentScheduledRunForSession(id) { return pinvouSharedtauriSessions().r
       isRemoteProxyView: isRemoteProxyView,
       isKnownRemoteProxy: isKnownRemoteProxy,
       switchToSession: switchToSession,
+      switchToControlledSession: switchToControlledSession,
+      captureControlledNavigationOwner: captureControlledNavigationOwner,
+      beginLocalNavigationIntent: beginLocalNavigationIntent,
+      onLocalNavigation: onLocalNavigation,
+      getLocalNavigationEpoch: getLocalNavigationEpoch,
+      isControlledNavigationOwnerCurrent: isControlledNavigationOwnerCurrent,
+      exitControlledScheduledRunChat: exitControlledScheduledRunChat,
       openScheduledRunChatOnce: openScheduledRunChatOnce,
       openScheduledRunChat: openScheduledRunChat,
       exitScheduledRunChat: exitScheduledRunChat,

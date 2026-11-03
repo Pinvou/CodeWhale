@@ -119,8 +119,15 @@ func TestF04ExpiredHoldRecoveryPreservesUnknownAndReplaysRelease(t *testing.T) {
 			t.Fatal("first RPC did not interrupt receipt")
 		}
 		var pending string
-		if err = r.pool.QueryRow(ctx, `SELECT state FROM usage_hold_expiry_recovery WHERE hold_id=$1`, fresh.ID).Scan(&pending); err != nil || pending != "MANUAL_REVIEW" {
-			t.Fatal("first RPC lost durable intent", pending, err)
+		var retryScheduled bool
+		if err = r.pool.QueryRow(ctx, `SELECT state,next_attempt_at>updated_at FROM usage_hold_expiry_recovery WHERE hold_id=$1`, fresh.ID).Scan(&pending, &retryScheduled); err != nil || pending != "MANUAL_REVIEW" || !retryScheduled {
+			t.Fatal("first RPC lost durable intent or retry schedule", pending, retryScheduled, err)
+		}
+		// Cancellation still persists the bounded retry. Advance only this
+		// original hold to its next eligible attempt before replaying it.
+		advanced, advanceErr := r.pool.Exec(ctx, `UPDATE usage_hold_expiry_recovery SET next_attempt_at=clock_timestamp() WHERE hold_id=$1`, fresh.ID)
+		if advanceErr != nil || advanced.RowsAffected() != 1 {
+			t.Fatal("first RPC retry advance", advanced.RowsAffected(), advanceErr)
 		}
 		if err = worker.RunOnce(ctx); err != nil {
 			t.Fatal(err)

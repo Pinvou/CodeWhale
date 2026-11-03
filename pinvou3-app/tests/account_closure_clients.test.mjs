@@ -97,11 +97,12 @@ test('admin recovery uses original target and the CSRF mutation boundary', async
   const calls = [];
   globalThis.fetch = async (url, options) => { calls.push({ url, options }); return Response.json({}); };
   const client = new AdminPlatformClient(); client.csrfToken = 'controlled-admin-csrf';
-  await client.accountClosures(); await client.retryAccountClosure(other, 'Controlled original reason', key);
+  await client.accountClosures(); await client.accountClosures(undefined, 'opaque cursor'); await client.retryAccountClosure(other, 'Controlled original reason', key);
   assert.equal(calls[0].url, '/api/admin/account/admin/v1/account-closure-requests');
-  assert.equal(calls[1].url, `/api/admin/account/admin/v1/account-closure-requests/${other}/actions/retry`);
-  assert.equal(calls[1].options.headers['Idempotency-Key'], key);
-  assert.equal(calls[1].options.headers['X-CSRF-Token'], 'controlled-admin-csrf');
+  assert.equal(calls[1].url, '/api/admin/account/admin/v1/account-closure-requests?cursor=opaque%20cursor');
+  assert.equal(calls[2].url, `/api/admin/account/admin/v1/account-closure-requests/${other}/actions/retry`);
+  assert.equal(calls[2].options.headers['Idempotency-Key'], key);
+  assert.equal(calls[2].options.headers['X-CSRF-Token'], 'controlled-admin-csrf');
 });
 
 test('closed-grant evidence preserves int64 version and money; batch checks every target', async () => {

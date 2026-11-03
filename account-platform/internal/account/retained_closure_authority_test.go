@@ -26,8 +26,8 @@ func (s *retainedClosureStore) CreateAccountClosure(context.Context, identity.Pr
 func (*retainedClosureStore) AccountClosureForPrincipal(context.Context, identity.Principal) (AccountClosureRequest, error) {
 	return AccountClosureRequest{}, nil
 }
-func (*retainedClosureStore) ListAccountClosureRepairs(context.Context, AccountClosureRepairFilter) ([]AccountClosureRequest, error) {
-	return nil, nil
+func (*retainedClosureStore) ListAccountClosureRepairs(context.Context, AccountClosureRepairFilter) (AccountClosureRepairPage, error) {
+	return AccountClosureRepairPage{}, nil
 }
 func (s *retainedClosureStore) RetryAccountClosure(context.Context, identity.Principal, uuid.UUID, string, string) (AccountClosureRequest, error) {
 	s.writes++
