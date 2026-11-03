@@ -332,13 +332,20 @@ mod tests {
             ("dingtalk", include_str!("dingtalk.rs")),
             ("tmeet", include_str!("tmeet.rs")),
         ] {
-            let apply_body = source
-                .split(&format!("pub async fn {module}_apply_skills("))
-                .nth(1)
-                .expect("real connector apply entry")
-                .split("\n}")
-                .next()
-                .unwrap();
+            // 断言按去空白后的代码流匹配：body 形状契约针对编排次序，
+            // 不应被 cargo fmt 的换行/缩进差异击穿（connectors 正文由
+            // include_str! 文本抽取，非语法树）。
+            let strip_ws =
+                |body: &str| -> String { body.chars().filter(|c| !c.is_whitespace()).collect() };
+            let apply_body = strip_ws(
+                source
+                    .split(&format!("pub async fn {module}_apply_skills("))
+                    .nth(1)
+                    .expect("real connector apply entry")
+                    .split("\n}")
+                    .next()
+                    .unwrap(),
+            );
             assert_eq!(
                 apply_body.matches("GATE.apply_with_consent(show)").count(),
                 1,
@@ -348,13 +355,15 @@ mod tests {
                 !apply_body.contains("GATE.apply_skills("),
                 "{module}: no unregistered materialization"
             );
-            let refresh_body = source
-                .split(&format!("pub(crate) fn {module}_gate_step("))
-                .nth(1)
-                .expect("real connector gate_step entry")
-                .split("\n}")
-                .next()
-                .unwrap();
+            let refresh_body = strip_ws(
+                source
+                    .split(&format!("pub(crate) fn {module}_gate_step("))
+                    .nth(1)
+                    .expect("real connector gate_step entry")
+                    .split("\n}")
+                    .next()
+                    .unwrap(),
+            );
             assert_eq!(
                 refresh_body
                     .matches("GATE.apply_with_consent_refresh(show)")
