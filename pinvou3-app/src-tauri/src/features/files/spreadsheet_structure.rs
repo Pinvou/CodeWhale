@@ -177,10 +177,13 @@ fn workbook_location<R: Read + Seek>(
             Ok(Event::Start(element) | Event::Empty(element))
                 if element.local_name().as_ref() == "Relationship" =>
             {
-                let is_office_document = attr(&element, "Type")
-                    .is_some_and(|relationship_type| relationship_type.ends_with("officeDocument"));
+                let is_office_document = attr(&element, "Type").is_some_and(|relationship_type| {
+                    relationship_type.ends_with("/relationships/officeDocument")
+                });
                 if is_office_document {
-                    target = attr(&element, "Target");
+                    if let Some(document_target) = attr(&element, "Target") {
+                        target = Some(document_target);
+                    }
                 }
             }
             Ok(Event::Eof) => break,
@@ -772,6 +775,44 @@ mod tests {
                 Some("SUM(1)\n+ 2")
             );
         }
+    }
+
+    #[test]
+    fn formula_guard_matches_reader_office_document_type() {
+        use calamine::Reader;
+
+        let mut archive = zip::ZipArchive::new(Cursor::new(folded_formula_fixture())).unwrap();
+        let mut entries = Vec::new();
+        for index in 0..archive.len() {
+            let mut file = archive.by_index(index).unwrap();
+            let name = file.name().unwrap().into_owned();
+            let mut xml = String::new();
+            file.read_to_string(&mut xml).unwrap();
+            if name == "_rels/.rels" {
+                xml = xml.replace(
+                    "</Relationships>",
+                    r#"<Relationship Id="rId2" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/fakeofficeDocument" Target="xl/other.xml"/><Relationship Id="rId3" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument"/></Relationships>"#,
+                );
+            }
+            entries.push((name, xml));
+        }
+        let files: Vec<_> = entries
+            .iter()
+            .map(|(name, xml)| (name.as_str(), xml.as_str()))
+            .collect();
+        let bytes = xlsx_fixture(&files);
+        let limits = xlsx_formula_span_limits(&bytes).unwrap();
+        let mut workbook = calamine::open_workbook_auto_from_rs(Cursor::new(bytes)).unwrap();
+        let name = workbook.sheet_names()[0].clone();
+        assert_eq!(limits.get(&name), Some(&(1, 1)));
+        let values = workbook.worksheet_range(&name).unwrap();
+        assert!(!values.is_empty());
+        assert_eq!(values.get_value((0, 0)).unwrap().to_string(), "3");
+        let formulas = workbook.worksheet_formula(&name).unwrap();
+        assert_eq!(
+            formulas.get_value((0, 0)).map(String::as_str),
+            Some("SUM(1)\n+ 2")
+        );
     }
 
     #[test]
