@@ -15134,13 +15134,24 @@ impl SubAgentToolRegistry {
         // exact denial the approval interface promises to remember. Derive
         // both keys from the operation like the main line does (tool + input;
         // the grouping key anchors cwd operands against the session
-        // workspace). Transport identity stays in `id`; force_prompt keeps
+        // workspace), then bind BOTH to the effective execution context —
+        // the workspace root this call is judged under — with the same
+        // `@root` tag the grouping side uses for patch families. Sibling
+        // workers share this session's decision caches while running under
+        // different roots, so the identical operation in another workspace
+        // must mint a different identity instead of riding this context's
+        // grant or denial, while the same context keeps the operation family
+        // reusable. Transport identity stays in `id`; force_prompt keeps
         // riding its own field and is never answered by either cache.
-        let approval_key = crate::tools::approval_cache::build_approval_key(name, input).0;
-        let approval_grouping_key = crate::tools::approval_cache::build_approval_grouping_key(
-            name,
-            input,
-            &self.gate_runtime.context.workspace,
+        let workspace = &self.gate_runtime.context.workspace;
+        let approval_key = crate::tools::approval_cache::bind_workspace_scope(
+            crate::tools::approval_cache::build_approval_key(name, input),
+            workspace,
+        )
+        .0;
+        let approval_grouping_key = crate::tools::approval_cache::bind_workspace_scope(
+            crate::tools::approval_cache::build_approval_grouping_key(name, input, workspace),
+            workspace,
         )
         .0;
         let sent = event_tx

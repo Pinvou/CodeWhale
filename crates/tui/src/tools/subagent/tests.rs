@@ -21922,19 +21922,46 @@ mod child_permission_gate {
         SharedSubAgentManager,
     ) {
         let tmp = tempdir().expect("tempdir");
+        let workspace = tmp.path().to_path_buf();
+        // Keep the tempdir alive for the registry's lifetime by leaking it
+        // into the workspace path (tests are short-lived).
+        std::mem::forget(tmp);
+        worker_registry_in(
+            approval_mode,
+            auto_approve,
+            parent_can_prompt,
+            client,
+            workspace,
+        )
+    }
+
+    /// [`worker_registry`] under an explicit workspace root, so a test can
+    /// raise the same child operation under two different execution
+    /// contexts — the approval cache keys bind to this root.
+    fn worker_registry_in(
+        approval_mode: ApprovalMode,
+        auto_approve: bool,
+        parent_can_prompt: bool,
+        client: Option<DeepSeekClient>,
+        workspace: std::path::PathBuf,
+    ) -> (
+        SubAgentToolRegistry,
+        tokio::sync::mpsc::Receiver<Event>,
+        SharedSubAgentManager,
+    ) {
+        let receipt_root = workspace.join("sessions");
         let (tx, rx) = tokio::sync::mpsc::channel(32);
         let mut runtime = stub_runtime();
         if let Some(client) = client {
             runtime.client = client;
         }
         let session_id = format!("child_gate_{}", uuid::Uuid::new_v4().simple());
-        runtime.context =
-            ToolContext::new(tmp.path().to_path_buf()).with_state_namespace(session_id);
+        runtime.context = ToolContext::new(workspace).with_state_namespace(session_id);
         runtime.context.auto_approve = auto_approve;
         runtime.allow_shell = true;
         runtime.event_tx = Some(tx);
         runtime = runtime.with_approval_receipt_store(Ok(
-            crate::approval_log::ApprovalReceiptStore::new(tmp.path().join("sessions")),
+            crate::approval_log::ApprovalReceiptStore::new(receipt_root),
         ));
         runtime = runtime.with_permission_posture(
             approval_mode,
@@ -21942,9 +21969,6 @@ mod child_permission_gate {
             parent_can_prompt,
         );
         let manager = Arc::clone(&runtime.manager);
-        // Keep the tempdir alive for the registry's lifetime by leaking it
-        // into the workspace path (tests are short-lived).
-        std::mem::forget(tmp);
         let registry = SubAgentToolRegistry::new(
             runtime,
             FleetRole::Worker,
@@ -22190,6 +22214,14 @@ mod child_permission_gate {
     /// reused by the next identical call. Two identical operations must
     /// raise prompts with identical keys that do not embed the approval id;
     /// force_prompt keeps riding its own field (never answered by a cache).
+    ///
+    /// zhuowp review 5747926699: the operation identity must ALSO cover the
+    /// effective execution context. Sibling workers share the session's
+    /// decision caches while running under different workspace roots, and
+    /// the existing directory-scope contract (round-37 M37-6) binds a
+    /// decision to the root it was judged under — so the identical
+    /// operation under another workspace must mint different keys, while
+    /// the same workspace keeps the operation family reusable.
     #[tokio::test]
     async fn child_approval_cache_keys_are_operation_scoped_across_incarnations() {
         let (registry, mut rx, manager) = worker_registry(ApprovalMode::Suggest, false, true, None);
@@ -22266,6 +22298,103 @@ mod child_permission_gate {
             !second_force,
             "force_prompt is independent of the key scopes"
         );
+        assert_eq!(manager.read().await.pending_child_approvals(), 0);
+
+        // Cross-context (zhuowp review 5747926699): the operation identity
+        // must also cover the effective execution context. Sibling workers
+        // share the session's decision caches while running under different
+        // workspace roots, and the directory-scope contract (round-37
+        // M37-6) binds a decision to the root it was judged under — so the
+        // IDENTICAL operation under another root must mint different keys,
+        // while the two incarnations above (same workspace) stayed
+        // identical: same-context family reuse is preserved.
+        let tmp_other = tempdir().expect("tempdir");
+        let (other_registry, mut other_rx, other_manager) = worker_registry_in(
+            ApprovalMode::Suggest,
+            false,
+            true,
+            None,
+            tmp_other.path().to_path_buf(),
+        );
+        std::mem::forget(tmp_other);
+        let other_workspace = other_registry
+            .gate_runtime
+            .context
+            .workspace
+            .display()
+            .to_string();
+        let this_workspace = registry
+            .gate_runtime
+            .context
+            .workspace
+            .display()
+            .to_string();
+        let manager_for_other_answer = Arc::clone(&other_manager);
+        let other_answerer = tokio::spawn(async move {
+            let mut captured = None;
+            for _ in 0..200 {
+                if let Ok(event) = other_rx.try_recv()
+                    && let Event::ApprovalRequired {
+                        id,
+                        approval_key,
+                        approval_grouping_key,
+                        approval_force_prompt,
+                        ..
+                    } = event
+                {
+                    captured = Some((
+                        id,
+                        approval_key,
+                        approval_grouping_key,
+                        approval_force_prompt,
+                    ));
+                    break;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+            let prompt = captured.expect("the cross-context prompt must reach the host");
+            assert!(
+                manager_for_other_answer
+                    .write()
+                    .await
+                    .resolve_child_approval(&prompt.0, ChildApprovalOutcome::Denied),
+                "the waiting cross-context child must accept the denial"
+            );
+            prompt
+        });
+        let err = other_registry
+            .execute("agent_gate", "bash", json!({"command": "echo gated"}))
+            .await
+            .expect_err("the denied cross-context call must not run");
+        assert!(err.to_string().contains("denied by the user"), "{err}");
+        let (other_id, other_key, other_grouping, other_force) =
+            other_answerer.await.expect("other answerer task");
+        assert_ne!(
+            first_key, other_key,
+            "the exact-denial scope must not cross workspace contexts: {first_key} vs {other_key}"
+        );
+        assert_ne!(
+            first_grouping, other_grouping,
+            "the session-grant scope must not cross workspace contexts: {first_grouping} vs {other_grouping}"
+        );
+        assert!(
+            first_key.contains(&this_workspace) && !first_key.contains(&other_workspace),
+            "this context's exact key must be bound to this workspace only: {first_key}"
+        );
+        assert!(
+            other_key.contains(&other_workspace) && !other_key.contains(&this_workspace),
+            "the other context's exact key must be bound to its workspace only: {other_key}"
+        );
+        assert!(
+            other_grouping.contains(&other_workspace),
+            "the other context's grouping key must be bound to its workspace: {other_grouping}"
+        );
+        assert_ne!(other_id, first_id, "transport incarnations stay distinct");
+        assert!(
+            !other_force,
+            "force_prompt stays independent of the context binding"
+        );
+        assert_eq!(other_manager.read().await.pending_child_approvals(), 0);
         assert_eq!(manager.read().await.pending_child_approvals(), 0);
     }
 
