@@ -83,8 +83,17 @@ function pinvouSharedtauriChatEvents() {
       // activeSessionId + suppressNotify），此处没有任何渲染发布发生，盖章
       // 会产出假 stall 记录（recv→dispatch≈201ms 实测）或系统性量快（漏报）。
       // 发布侧（publish 内）不需要门控：rAF/定时器腿在路由 finally 后才 fire。
-      if (window.RenderStageProbe && !isNotifySuppressed()) {
-        try { window.RenderStageProbe.markDispatched(state.activeSessionId); } catch (_) {}
+      // r9 P1-A：抑制态**取消**掉的 pending 条目也不能就这么滞留——它已无
+      // 发布者（合并帧被杀、抑制态又无直发），下一个无关事件终会把它盖章成
+      // 假 stall（recv→dispatch= 整段工具执行时间）。按节流收口：markThrottled
+      // 诚实地声明「我们主动选择不发布」，finalize 不上报。配 markThrottled 的
+      // t_dispatch 守卫（r9 P2），对已盖章条目安全退化为 no-op。
+      if (window.RenderStageProbe) {
+        if (!isNotifySuppressed()) {
+          try { window.RenderStageProbe.markDispatched(state.activeSessionId); } catch (_) {}
+        } else {
+          try { window.RenderStageProbe.markThrottled(state.activeSessionId); } catch (_) {}
+        }
       }
     }
 
@@ -677,6 +686,12 @@ function finalizeStreamingReasoning(index) { return pinvouSharedtauriChatEvents(
     }
     lastForegroundSessionId = sid;
     cancelPendingStreamNotify(sid);
+    // r9 P1-B：切会话取消掉的合并帧同样无主了——紧随的真实发布本 tick 上屏
+    // 或已不可达，滞留条目会被后续事件盖章成假 stall（recv→dispatch= 纯等待
+    // 时间）。提前打节流章远比迟到数秒的假冻结诚实。
+    if (window.RenderStageProbe) {
+      try { window.RenderStageProbe.markThrottled(sid); } catch (_) {}
+    }
   }
 
   function scheduleStreamRender(sid) {
@@ -1156,6 +1171,12 @@ function finalizeStreamingReasoning(index) { return pinvouSharedtauriChatEvents(
       // background session's terminal must cancel its own pending frame or a
       // redundant late round fires within 32ms.
       cancelPendingStreamNotify(sid);
+      // r9 P1-C：后台终态取消的合并帧是滞留条目（引擎 delta+done 背靠背时
+      // 终态总在 +16ms rAF 之前到——每次后台会话完成都会滞留）。切回后下一
+      // 个事件会把它盖章成假 stall（recv→dispatch= 纯阅读时间）。按节流收口。
+      if (window.RenderStageProbe) {
+        try { window.RenderStageProbe.markThrottled(sid); } catch (_) {}
+      }
       var terminalStatus = String(e.payload && e.payload.status || "").toLowerCase();
       var interrupted = ["interrupted", "cancelled", "canceled"].includes(terminalStatus);
       if (interrupted) preserveInterruptedAssistantPresentation();
