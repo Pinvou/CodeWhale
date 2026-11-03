@@ -47,7 +47,7 @@ spec:
       {{- end }}
       containers:
         - name: {{ $app.name }}
-          image: "{{ $app.image.repository }}:{{ $app.image.tag }}"
+          image: {{ include "pinvou.imageRef" (dict "image" $app.image) | quote }}
           imagePullPolicy: {{ $app.image.pullPolicy }}
           ports: [{ name: http, containerPort: 8080 }, { name: metrics, containerPort: 9090 }]
           securityContext: { allowPrivilegeEscalation: false, readOnlyRootFilesystem: true, capabilities: { drop: ["ALL"] } }
@@ -178,7 +178,7 @@ spec:
       securityContext: { runAsNonRoot: true, seccompProfile: { type: RuntimeDefault } }
       containers:
         - name: governance-check
-          image: "{{ .Values.images.tokenGovernance.repository }}:{{ .Values.images.tokenGovernance.tag }}"
+          image: {{ include "pinvou.imageRef" (dict "image" .Values.images.tokenGovernance) | quote }}
           imagePullPolicy: {{ .Values.images.tokenGovernance.pullPolicy }}
           command: ["/service"]
           args: []

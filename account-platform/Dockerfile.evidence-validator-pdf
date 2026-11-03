@@ -1,4 +1,4 @@
-# Candidate only: image build and runtime isolation have not been validated.
+# Candidate only: historical amd64 CI built/basic-tested it; arm64 and production isolation remain unverified (see cmd/evidence-image-validator/README.md).
 FROM --platform=$BUILDPLATFORM golang:1.26.6-alpine@sha256:3889b425f035be855a72fb4755265311293b6d414521f0a519d819df32222d83 AS go-build
 ARG TARGETOS
 ARG TARGETARCH

@@ -138,7 +138,7 @@ export function currentRenderFixture(kind, profile = 'personal', settings = {}) 
     const images = Object.fromEntries(Object.keys(defaults.images).map(key => [key,
       key === 'newApiTLS' ? { repository: 'registry.fixture.invalid/newapi-tls', digest: `sha256:${'a'.repeat(64)}` }
         : key === 'newApi' ? { repository: 'registry.fixture.invalid/newapi', tag: 'fixture', digest: `sha256:${'a'.repeat(64)}` }
-          : { repository: `registry.fixture.invalid/${key.toLowerCase()}`, tag: `fixture@sha256:${'a'.repeat(64)}` }]));
+          : { repository: `registry.fixture.invalid/${key.toLowerCase()}`, tag: 'fixture', digest: `sha256:${'a'.repeat(64)}` }]));
     fixture.recipe = { kind, namespace: 'public-fixture', release: 'public-fixture',
       valuesFile: file('helm-values.json', JSON.stringify({ images,
         global: { manualReviewOnCallUserIds: [subjects['account-service']] },

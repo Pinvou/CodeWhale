@@ -404,7 +404,7 @@ export function AdminOperationsWorkspace({ client, copy, language = 'en', permis
     formOwnerUserID.current = currentUserID;
     setState((value) => ({ ...value, error: '', errorCode: '', notice: labels.reauthenticationDraftDiscarded }));
   };
-  const errorAction = unknownWrite && state.errorCode !== 'RECENT_AUTHENTICATION_REQUIRED'
+  const errorAction = unknownWrite && canManage && state.errorCode !== 'RECENT_AUTHENTICATION_REQUIRED'
     ? { label: labels.retryUnknown, run: () => void save() }
     : state.errorCode === 'REGISTRATION_BONUS_DRAFT_CONFLICT'
     ? { label: labels.loadLatestPolicy, run: () => void load() }
@@ -421,7 +421,7 @@ export function AdminOperationsWorkspace({ client, copy, language = 'en', permis
       <header className="adm-section-head"><div><h2>{labels.title}</h2><p>{labels.lead}</p></div></header>
       <div className="adm-inline-message warn" role="note">{labels.lifetimeWarning}</div>
       {pendingDraft && <div className="adm-inline-message warn adm-registration-bonus-draft-prompt" role="status"><span>{labels.unfinishedReauthenticationDraft}</span><div><button type="button" onClick={recoverPendingDraft} disabled={state.loading || !policy}>{labels.recoverDraft}</button><button type="button" onClick={discardPendingDraft}>{labels.discardDraft}</button></div></div>}
-      {(unknownWrite || recoveryBlocked) && !state.error && <div className="adm-inline-message error" role="alert"><span>{recoveryBlocked ? labels.pendingStorageFailed : labels.outcomeUnknown}</span>{unknownWrite && <button type="button" disabled={state.saving || authorizationRefreshing || !canManage || recoveryBlocked} onClick={() => void save()}>{labels.retryUnknown}</button>}</div>}
+      {(unknownWrite || recoveryBlocked) && !state.error && <div className="adm-inline-message error" role="alert"><span>{recoveryBlocked ? labels.pendingStorageFailed : labels.outcomeUnknown}</span>{unknownWrite && canManage && <button type="button" disabled={state.saving || authorizationRefreshing || recoveryBlocked} onClick={() => void save()}>{labels.retryUnknown}</button>}{unknownWrite && !canManage && canRead && <button type="button" disabled={state.loading || authorizationRefreshing || recoveryBlocked} onClick={() => void load()}>{copy.retry}</button>}</div>}
       {state.error && <div className="adm-inline-message error" role="alert"><span>{state.error}</span><button type="button" onClick={errorAction.run} disabled={state.loading || state.saving || authorizationRefreshing || (errorAction.read ? !canRead : !canManage) || (errorAction.save && (!valid || (form.enabled && !eligibilityReady))) || recoveryBlocked}>{errorAction.label}</button></div>}
       {state.notice && <div className="adm-inline-message ok" role="status">{state.notice}</div>}
       {state.loading && <p className="adm-muted">{copy.loading}</p>}
