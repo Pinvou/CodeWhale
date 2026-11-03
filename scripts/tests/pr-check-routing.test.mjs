@@ -177,6 +177,80 @@ test("financial diagnostic exception rejects business and job exemptions", () =>
   assertFinancialDiagnosticExemption(job);
 });
 
+// Match the Python gate policy across the complete workflow. Account-only
+// validation cannot detect a job/step exception added to a different leg.
+function assertWorkflowFailurePolicy(workflowText) {
+  const text = workflowText.replaceAll("\r\n", "\n").replace(/^ *#.*\n/gm, "");
+  const financialJob = jobBlock("account-platform-test", text);
+  assertFinancialDiagnosticExemption(financialJob);
+  const financial = namedStep(financialJob, "Financial parallel diagnostics");
+  const windows = namedStep(jobBlock("windows-rust-test", text), "Windows 测试二进制导入诊断");
+  assert.equal(windows.trimEnd(), [
+    "      - name: Windows 测试二进制导入诊断",
+    "        if: ${{ matrix.phase == 'regression' }}",
+    "        continue-on-error: true",
+    "        shell: pwsh",
+    '        run: python scripts/ci-windows-imports-diagnose.py "$env:PINVOU3_TEST_EXE"',
+  ].join("\n"));
+  const remainder = text.replace(financial, "").replace(windows, "");
+  // Explicit YAML keys may put comments/newlines before their value indicator.
+  const keySeparator = String.raw`(?:\s|#[^\n]*(?:\n|$))*:`;
+  assert.doesNotMatch(remainder, new RegExp(String.raw`\bcontinue-on-error\s*['"]?` + keySeparator),
+    "only the two exact reviewed diagnostic steps may be advisory in any job");
+  // YAML double-quoted keys decode numeric escapes and escaped line breaks.
+  // Inspect each possible quoted key, including inside flow mappings. A
+  // lookahead avoids a quote in unrelated shell text hiding a later real key.
+  for (const match of remainder.matchAll(new RegExp(String.raw`(?="((?:[^"\\]|\\[\s\S])*)"` + keySeparator + ")", "g"))) {
+    const key = match[1].replace(/\\(?:x([\da-fA-F]{2})|u([\da-fA-F]{4})|U([\da-fA-F]{8})|(\n[ \t]*)|([\s\S]))/g,
+      (escape, hex, shortUnicode, longUnicode, continuation, character) => {
+        const digits = hex ?? shortUnicode ?? longUnicode;
+        if (digits !== undefined) return String.fromCodePoint(Number.parseInt(digits, 16));
+        if (continuation !== undefined) return "";
+        // All other YAML escapes produce characters outside this ASCII key.
+        // Consume escaped backslashes once, without decoding their result again.
+        return character === "\\" ? "\\" : escape;
+      });
+    assert.notEqual(key, "continue-on-error", "escaped YAML keys cannot grant an advisory exception");
+  }
+  // Alias mapping keys would need resolution against a separate scalar. This
+  // finite workflow contract requires literal keys rather than guessing one.
+  assert.doesNotMatch(remainder, new RegExp(String.raw`\*[^\s\[\]{},:]+` + keySeparator),
+    "alias mapping keys require an explicit failure-policy contract review");
+}
+
+test("all workflow legs reject unreviewed job and step failure exemptions", () => {
+  const original = workflow.replaceAll("\r\n", "\n");
+  assertWorkflowFailurePolicy(original);
+  const windows = namedStep(jobBlock("windows-rust-test", original), "Windows 测试二进制导入诊断");
+  const withoutWindowsExemption = original.replace(windows,
+    windows.replace("        continue-on-error: true\n", ""));
+  const mutants = [
+    original.replace("  frontend-test:\n", "  frontend-test:\n    continue-on-error: true\n"),
+    original.replace("  frontend-test:\n", "  frontend-test:\n    'continue-on-error': true\n"),
+    original.replace("  windows-rust-test:\n", "  windows-rust-test:\n    continue-on-error: true\n"),
+    original.replace(windows, windows + "      - run: exit 37\n        continue-on-error: true\n"),
+    original.replace(windows, windows + "      - {run: exit 37, 'continue-on-error': true}\n"),
+    withoutWindowsExemption.replace("  frontend-test:\n", "  frontend-test:\n    continue-on-error: true\n"),
+    original.replace(windows, windows.replace("scripts/ci-windows-imports-diagnose.py", "scripts/not-the-reviewed-diagnostic.py")),
+    original.replace("  frontend-test:\n", '  frontend-test:\n    "continue\\u002don-error": true\n'),
+    original.replace("  frontend-test:\n", '  frontend-test:\n    "\\u0063ontinue-on-error": true\n'),
+    original.replace("  frontend-test:\n", '  frontend-test:\n    "continue\\x2don-error": true\n'),
+    original.replace("  frontend-test:\n", '  frontend-test:\n    "continue\\U0000002don-error": true\n'),
+    original.replace("  frontend-test:\n", '  frontend-test:\n    ? "continue\\\n      -on-error"\n    : true\n'),
+    original.replace(windows, windows + '      - {run: exit 37, "continue\\u002don-error": true}\n'),
+    original.replace("  frontend-test:\n", '  frontend-test:\n    env:\n      FAILURE_KEY: &advisory_key "continue\\u002don-error"\n    *advisory_key: true\n'),
+    original.replace("  frontend-test:\n", '  frontend-test:\n    env:\n      FAILURE_KEY: &advisory_key "continue\\u002don-error"\n    ? *advisory_key # label\n    : true\n'),
+    original.replace("  frontend-test:\n", '  frontend-test:\n    env:\n      FAILURE_KEY: &advisory#key "continue\\u002don-error"\n    *advisory#key : true\n'),
+    original.replace("  frontend-test:\n", '  frontend-test:\n    ? "continue\\u002don-error" # label\n    : true\n'),
+    original.replace("  frontend-test:\n", '  frontend-test:\n    ? continue-on-error # label\n    : true\n'),
+  ];
+  for (const mutant of mutants) {
+    assert.notEqual(mutant, original, "the counterexample must change the actual workflow");
+    assert.throws(() => assertWorkflowFailurePolicy(mutant));
+  }
+  assertWorkflowFailurePolicy(original);
+});
+
 function assertFiniteAuditPGSetup(job) {
   const text = job.replaceAll("\r\n", "\n");
   // These are exactly six approved ephemeral services, not permission for arbitrary
