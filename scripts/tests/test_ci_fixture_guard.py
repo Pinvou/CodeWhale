@@ -36,6 +36,12 @@ class FixtureGuardTests(unittest.TestCase):
         self.assertFalse(self.check(node="import { createServer } from './helpers/vite-fixture.mjs'; createServer();"))
         self.assertFalse(self.check(node="import { build } from 'vite'; build();"))
 
+    def test_client_import_is_not_confused_with_another_modules_server_factory(self):
+        for client in ["import {createConnection} from 'node:net';", "const {createConnection} = require('net');"]:
+            self.assertFalse(self.check(node=client + "\nimport net from './helpers/net-fixture.mjs'; net.createServer();"))
+        for native in ["import net from 'node:net'; net.createServer();", "import * as net from 'net'; net.createServer();", "const net = require('net'); net.createServer();", "const {createServer: createNative} = require('net'); createNative();", "const {createServer} = await import('net'); createServer();", "require('http').createServer();"]:
+            self.assertTrue(self.check(node=native), native)
+
     def test_commonjs_and_dynamic_imports_cannot_bypass_factory(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

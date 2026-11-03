@@ -42,6 +42,27 @@ def call_end(source, start):
     return len(source)
 
 
+def native_factory(source, package, operation):
+    literal = '(?:' + '|'.join(re.escape(quote + package + quote) for quote in ["'", '"', '`']) + ')'
+    binding = r'(\{[^}]*\}|\*\s+as\s+[\w$]+|[\w$]+(?:\s*,\s*\{[^}]*\})?)'
+    patterns = [r'\bimport\s+' + binding + r'\s+from\s*' + literal,
+                r'\b(?:const|let|var)\s+' + binding + r'\s*=\s*(?:await\s+)?(?:require|import)\s*\(\s*' + literal + r'\s*\)']
+    bindings = [match.group(1) for pattern in patterns for match in re.finditer(pattern, source)]
+    for imported in bindings:
+        names = re.search(r'\{([^}]*)\}', imported)
+        if names and any(re.match(r'\s*' + re.escape(operation) + r'\b', part) for part in names[1].split(',')):
+            return True
+        namespace = imported.split(',')[0].strip()
+        if namespace.startswith('*'):
+            namespace = namespace.split()[-1]
+        if re.fullmatch(r'[\w$]+', namespace):
+            quoted_operation = '(?:' + '|'.join(re.escape(quote + operation + quote) for quote in ["'", '"', '`']) + ')'
+            member = r'\b' + re.escape(namespace) + r'\s*(?:\.\s*' + re.escape(operation) + r'\b|\[\s*' + quoted_operation + r'\s*\])'
+            if re.search(member, source):
+                return True
+    return bool(re.search(r'(?:require|import)\s*\(\s*' + literal + r'\s*\)\s*\)?\s*\.\s*' + re.escape(operation) + r'\b', source))
+
+
 def violations(root=ROOT):
     failures = []
     for path in (root / 'account-platform').rglob('*_test.go'):
@@ -63,8 +84,7 @@ def violations(root=ROOT):
             continue
         source = without_comments(path.read_text(encoding='utf-8'))
         for package, operation in [('vite', 'createServer'), ('puppeteer-core', 'launch'), *[(prefix + name, 'createServer') for prefix in ['', 'node:'] for name in ['http', 'https', 'net']]]:
-            imported = re.search(r'(?:from\s*|import\s*\(|require\s*\()([\'"])' + re.escape(package) + r'\1', source)
-            if imported and re.search(r'\b'+operation+r'\b', source):
+            if native_factory(source, package, operation):
                 failures.append(f'{relative}: {operation} must use the shared fixture factory for {package}')
     for relative, reason in PROCESS_ONLY.items():
         if root == ROOT and (not (root / relative).is_file() or len(reason) < 40):
