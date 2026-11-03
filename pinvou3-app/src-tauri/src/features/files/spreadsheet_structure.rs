@@ -119,10 +119,9 @@ pub(super) fn xlsx_structure_annotations(bytes: &[u8]) -> Result<Option<String>,
 /// `_rels/.rels` 的 officeDocument Target），非 `xl/` 布局无法绕过守卫。
 pub(super) fn xlsx_formula_span_limits(bytes: &[u8]) -> Option<HashMap<String, (u64, u64)>> {
     let mut archive = zip::ZipArchive::new(Cursor::new(bytes)).ok()?;
-    let base = workbook_base_folder(&mut archive).ok()?;
-    let workbook = read_zip_text(&mut archive, &format!("{base}workbook.xml")).ok()??;
-    let relationships =
-        read_zip_text(&mut archive, &format!("{base}_rels/workbook.xml.rels")).ok()??;
+    let (base, name) = workbook_location(&mut archive).ok()?;
+    let workbook = read_zip_text(&mut archive, &format!("{base}{name}")).ok()??;
+    let relationships = read_zip_text(&mut archive, &format!("{base}_rels/{name}.rels")).ok()??;
     let relationship_targets = parse_relationship_targets(&relationships).ok()?;
     let mut limits = HashMap::new();
     for (sheet_name, relationship_id) in parse_sheets(&workbook).ok()? {
@@ -143,11 +142,11 @@ pub(super) fn xlsx_formula_span_limits(bytes: &[u8]) -> Option<HashMap<String, (
     Some(limits)
 }
 
-/// calamine `Xlsx::read_package_relationships` 的镜像：workbook 基目录取自根
-/// `_rels/.rels` 中 officeDocument 关系 Target 的目录前缀（剥离开头 `/`）。
-fn workbook_base_folder<R: Read + Seek>(
+/// 镜像 calamine `Xlsx::read_package_relationships` 对根 officeDocument
+/// Target 的目录和文件名解析，让预检与读取器定位同一工作簿。
+fn workbook_location<R: Read + Seek>(
     archive: &mut zip::ZipArchive<R>,
-) -> Result<String, String> {
+) -> Result<(String, String), String> {
     let root_rels = read_zip_text(archive, "_rels/.rels")?.ok_or("_rels/.rels 缺失")?;
     let mut reader = Reader::from_str(&root_rels);
     reader.config_mut().trim_text(true);
@@ -168,11 +167,19 @@ fn workbook_base_folder<R: Read + Seek>(
             _ => {}
         }
     }
-    let directory = target
-        .as_deref()
-        .and_then(|target| target.rfind('/').map(|end| &target[..=end]))
-        .map(|directory| directory.strip_prefix('/').unwrap_or(directory));
-    Ok(directory.unwrap_or("").to_string())
+    let target = target.as_deref().unwrap_or("");
+    let (directory, name) = target
+        .rfind('/')
+        .map_or(("", target), |end| target.split_at(end + 1));
+    Ok((
+        directory.strip_prefix('/').unwrap_or(directory).to_string(),
+        if name.is_empty() {
+            "workbook.xml"
+        } else {
+            name
+        }
+        .to_string(),
+    ))
 }
 
 /// 工作表内公式格的跨度 `(rows, cols)`，取自带 `r` 属性且含 `<f>` 子元素的
@@ -685,27 +692,47 @@ mod tests {
 
     #[test]
     fn guard_resolves_nonstandard_base_folder() {
+        assert_workbook_location("deep/workbook.xml");
+    }
+
+    #[test]
+    fn guard_follows_workbook_filename_from_package_relationship() {
+        for target in ["deep/book.xml", "/deep/book.xml", "book.xml"] {
+            assert_workbook_location(target);
+        }
+    }
+
+    fn assert_workbook_location(target: &str) {
+        let workbook = target.strip_prefix('/').unwrap_or(target);
+        let (base, name) = workbook
+            .rfind('/')
+            .map_or(("", workbook), |end| workbook.split_at(end + 1));
+        let root_relationships = format!(
+            r#"<?xml version="1.0"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="{target}"/></Relationships>"#
+        );
+        let relationships = format!("{base}_rels/{name}.rels");
+        let sheet = format!("{base}worksheets/sheet1.xml");
         let bytes = xlsx_fixture(&[
             ("[Content_Types].xml", TEST_CONTENT_TYPES),
+            ("_rels/.rels", &root_relationships),
             (
-                "_rels/.rels",
-                r#"<?xml version="1.0"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="deep/workbook.xml"/></Relationships>"#,
-            ),
-            (
-                "deep/workbook.xml",
+                workbook,
                 r#"<?xml version="1.0"?><workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><sheets><sheet name="Base" sheetId="1" r:id="rId1"/></sheets></workbook>"#,
             ),
             (
-                "deep/_rels/workbook.xml.rels",
+                &relationships,
                 r#"<?xml version="1.0"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet1.xml"/></Relationships>"#,
             ),
             (
-                "deep/worksheets/sheet1.xml",
+                &sheet,
                 r#"<?xml version="1.0"?><worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><sheetData><row r="2"><c r="B2"><f>A1</f></c></row></sheetData></worksheet>"#,
             ),
         ]);
         let limits = xlsx_formula_span_limits(&bytes).unwrap();
         assert_eq!(limits.get("Base"), Some(&(2, 2)));
+        let mut workbook = calamine::open_workbook_auto_from_rs(Cursor::new(bytes)).unwrap();
+        let formulas = calamine::Reader::worksheet_formula(&mut workbook, "Base").unwrap();
+        assert_eq!(formulas.get_value((1, 1)).map(String::as_str), Some("A1"));
     }
 
     #[test]
