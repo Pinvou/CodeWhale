@@ -21,6 +21,7 @@ func TestOwnedAuditFixtureConfiguration(t *testing.T) {
 		{"noncanonical_port", "postgres://pinvou_audit_fixture@127.0.0.1:55474/postgres?sslmode=disable", "055474", directory, false},
 		{"deployment_database", "postgres://pinvou_audit_fixture@127.0.0.1:55474/deployment?sslmode=disable", "55474", directory, false},
 		{"fallback", "postgres://pinvou_audit_fixture@127.0.0.1:55474/postgres?sslmode=prefer", "55474", directory, false},
+		{"runtime_parameter", "postgres://pinvou_audit_fixture@127.0.0.1:55474/postgres?sslmode=disable&application_name=fixture", "55474", directory, false},
 		{"unowned_directory", "postgres://pinvou_audit_fixture@127.0.0.1:55474/postgres?sslmode=disable", "55474", filepath.Join(os.TempDir(), "deployment", "data"), false},
 		{"missing_directory", "postgres://pinvou_audit_fixture@127.0.0.1:55474/postgres?sslmode=disable", "55474", "", false},
 	} {
@@ -36,6 +37,49 @@ func TestOwnedAuditFixtureConfiguration(t *testing.T) {
 	}
 	if !DirectoryMatches(filepath.ToSlash(directory), directory) || DirectoryMatches(filepath.Join(os.TempDir(), "outside", "data"), directory) {
 		t.Fatal("server directory identity mismatch")
+	}
+}
+
+func TestOwnedInstanceBindsCallerIdentity(t *testing.T) {
+	const id = "11111111-1111-4111-8111-111111111111"
+	instance := OwnedInstance{User: "billing_fixture", Port: "55474", Directory: filepath.Join(os.TempDir(), "pinvou-f18-billing-"+id, "data"), Prefix: "pinvou-f18-billing-"}
+	config, err := pgx.ParseConfig("postgres://billing_fixture@127.0.0.1:55474/postgres?sslmode=disable")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !instance.ConfigurationAllowed(config) || !instance.DirectoryMatches(filepath.ToSlash(instance.Directory)) {
+		t.Fatal("declared caller-owned instance rejected")
+	}
+	for _, tc := range []struct {
+		name string
+		edit func(*OwnedInstance)
+	}{
+		{"empty_user", func(i *OwnedInstance) { i.User = "" }},
+		{"other_user", func(i *OwnedInstance) { i.User = OwnedActor }},
+		{"other_port", func(i *OwnedInstance) { i.Port = "55475" }},
+		{"noncanonical_port", func(i *OwnedInstance) { i.Port = "055474" }},
+		{"other_prefix", func(i *OwnedInstance) { i.Prefix = "pinvou-f17-audit-" }},
+		{"empty_prefix", func(i *OwnedInstance) { i.Prefix = "" }},
+		{"path_prefix", func(i *OwnedInstance) { i.Prefix = "../pinvou-f18-billing-" }},
+		{"outside_directory", func(i *OwnedInstance) { i.Directory = filepath.Join(os.TempDir(), "outside", "data") }},
+		{"nil_uuid", func(i *OwnedInstance) {
+			i.Directory = filepath.Join(os.TempDir(), i.Prefix+"00000000-0000-0000-0000-000000000000", "data")
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			changed := instance
+			tc.edit(&changed)
+			if changed.ConfigurationAllowed(config) {
+				t.Fatal("different caller identity admitted")
+			}
+		})
+	}
+	if instance.ConfigurationAllowed(nil) || instance.DirectoryMatches(filepath.Join(os.TempDir(), "outside", "data")) || OwnedConfigurationAllowed(config, instance.Port, instance.Directory) {
+		t.Fatal("missing config, wrong server directory or other fixture identity admitted")
+	}
+	config.RuntimeParams["application_name"] = "fixture"
+	if instance.ConfigurationAllowed(config) {
+		t.Fatal("runtime parameters admitted")
 	}
 }
 
