@@ -22182,6 +22182,85 @@ mod child_permission_gate {
         }
     }
 
+    /// Review P2: a child prompt's cache keys must be operation-scoped, not
+    /// incarnation-scoped. The approval id is per-event transport identity;
+    /// keying the exact denial AND the session grant on
+    /// `{approval_id}:{name}` made every equivalent child operation a
+    /// brand-new operation, so neither remembered decision could ever be
+    /// reused by the next identical call. Two identical operations must
+    /// raise prompts with identical keys that do not embed the approval id;
+    /// force_prompt keeps riding its own field (never answered by a cache).
+    #[tokio::test]
+    async fn child_approval_cache_keys_are_operation_scoped_across_incarnations() {
+        let (registry, mut rx, manager) = worker_registry(ApprovalMode::Suggest, false, true, None);
+        let manager_for_answer = Arc::clone(&manager);
+        let answerer = tokio::spawn(async move {
+            let mut prompts = Vec::new();
+            for _ in 0..2 {
+                let mut captured = None;
+                for _ in 0..200 {
+                    if let Ok(event) = rx.try_recv()
+                        && let Event::ApprovalRequired {
+                            id,
+                            approval_key,
+                            approval_grouping_key,
+                            approval_force_prompt,
+                            ..
+                        } = event
+                    {
+                        captured = Some((id, approval_key, approval_grouping_key, approval_force_prompt));
+                        break;
+                    }
+                    tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+                }
+                let prompt = captured.expect("child prompt must reach the host");
+                assert!(
+                    manager_for_answer
+                        .write()
+                        .await
+                        .resolve_child_approval(&prompt.0, ChildApprovalOutcome::Denied),
+                    "the waiting child must accept the denial"
+                );
+                prompts.push(prompt);
+            }
+            prompts
+        });
+        for _ in 0..2 {
+            let err = registry
+                .execute("agent_gate", "bash", json!({"command": "echo gated"}))
+                .await
+                .expect_err("the denied call must not run");
+            assert!(err.to_string().contains("denied by the user"), "{err}");
+        }
+        let prompts = answerer.await.expect("answerer task");
+        assert_eq!(prompts.len(), 2);
+        let (first_id, first_key, first_grouping, first_force) = prompts[0].clone();
+        let (second_id, second_key, second_grouping, second_force) = prompts[1].clone();
+        assert_ne!(
+            first_id, second_id,
+            "each prompt carries a fresh transport incarnation"
+        );
+        assert_eq!(
+            first_key, second_key,
+            "the exact-denial scope must be operation-scoped"
+        );
+        assert_eq!(
+            first_grouping, second_grouping,
+            "the session-grant scope must be operation-scoped"
+        );
+        assert!(
+            !first_key.contains(&first_id),
+            "the exact key must not embed the transport incarnation: {first_key}"
+        );
+        assert!(
+            !first_grouping.contains(&first_id),
+            "the grouping key must not embed the transport incarnation: {first_grouping}"
+        );
+        assert!(!first_force, "the ordinary ask stays a non-force prompt");
+        assert!(!second_force, "force_prompt is independent of the key scopes");
+        assert_eq!(manager.read().await.pending_child_approvals(), 0);
+    }
+
     #[tokio::test]
     async fn closed_child_approval_waiter_persists_unavailable_not_cancelled() {
         let (registry, mut rx, manager) = worker_registry(ApprovalMode::Suggest, false, true, None);

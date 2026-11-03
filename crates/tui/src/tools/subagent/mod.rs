@@ -15126,7 +15126,23 @@ impl SubAgentToolRegistry {
             self.owner_agent_name,
             agent_id.chars().take(12).collect::<String>()
         );
-        let approval_key = format!("{approval_id}:{name}");
+        // The approval id is this prompt's transport incarnation (fresh per
+        // event); it must not double as the operation-cache identity. Keying
+        // BOTH cache scopes on `{approval_id}:{name}` made every equivalent
+        // child operation a brand-new operation, so the next identical call
+        // could never reuse the session grant (lossy grouping scope) or the
+        // exact denial the approval interface promises to remember. Derive
+        // both keys from the operation like the main line does (tool + input;
+        // the grouping key anchors cwd operands against the session
+        // workspace). Transport identity stays in `id`; force_prompt keeps
+        // riding its own field and is never answered by either cache.
+        let approval_key = crate::tools::approval_cache::build_approval_key(name, input).0;
+        let approval_grouping_key = crate::tools::approval_cache::build_approval_grouping_key(
+            name,
+            input,
+            &self.gate_runtime.context.workspace,
+        )
+        .0;
         let sent = event_tx
             .send(Event::ApprovalRequired {
                 id: approval_id.clone(),
@@ -15134,7 +15150,7 @@ impl SubAgentToolRegistry {
                 description,
                 input: input.clone(),
                 approval_key: approval_key.clone(),
-                approval_grouping_key: approval_key,
+                approval_grouping_key,
                 intent_summary: None,
                 approval_force_prompt: force_prompt,
             })
