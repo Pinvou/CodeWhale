@@ -747,6 +747,64 @@ test('unprotected materialization keeps the explicit-entry semantics', async () 
   assert.equal(rt.calls.invoke.filter(name => name === 'create_session').length, 1);
 });
 
+// ── materializeSession 后台物化（round-39 review P2，zhuowp）──
+// prompt 窗口决算发现用户已切到既有会话 B：B 非空使 protectUserDraft 拦不住，
+// 前台物化的 enterDraft + switchActiveTo 会把活动工作集切到新诊断会话并
+// notify——订阅快照携带诊断会话的正文，B 的视图在 ChatView 被顶掉。background
+// 选项只创建 + 登记（sessionStates buffer + refreshHistoryList 侧栏注册），
+// 不进草稿、不切工作集，返回真实 sid 供调用方后台钉定发送。
+
+test('background materialization keeps session B active and its body intact', async () => {
+  const localInvokeCalls = [];
+  let created = false;
+  let resolveCreation;
+  const creation = new Promise((resolve) => { resolveCreation = resolve; });
+  const rt = loadSessionsFeature({ invoke(name) {
+    localInvokeCalls.push(name);
+    if (name === 'create_session') return creation;
+    if (name === 'list_sessions') {
+      // create_session 落定后后端列表才含新会话；物化链在创建之后才刷新列表。
+      return Promise.resolve(created
+        ? [{ id: 'local-b' }, { id: 'created-bg' }]
+        : [{ id: 'local-b' }]);
+    }
+    if (name === 'list_archived_sessions') return Promise.resolve([]);
+    return Promise.resolve({});
+  } });
+  // 用户已切到既有会话 B：活动工作集带 B 的正文与未发送输入。
+  rt.state.activeSessionId = 'local-b';
+  rt.state.messages = [{ role: 'user', content: [{ type: 'text', text: 'B 的正文' }] }];
+  rt.state.chatItems = [{ type: 'user', text: 'B 的正文', id: 'b-1' }];
+  rt.state.composerDraft = 'B 里未发送的文字';
+  const navigationEpochs = [];
+  rt.api.onLocalNavigation(() => navigationEpochs.push(rt.api.getLocalNavigationEpoch()));
+  const pending = rt.api.materializeSession({ background: true });
+  created = true;
+  resolveCreation({ id: 'created-bg' });
+  assert.equal(await pending, 'created-bg');
+  assert.equal(rt.state.activeSessionId, 'local-b', 'B 仍是活动会话（不得 enterDraft/switchActiveTo）');
+  assert.equal(rt.state.composerDraft, 'B 里未发送的文字', '未发送文字原地保留');
+  assert.equal(rt.state.messages.length, 1, 'B 的正文不被诊断会话顶掉');
+  assert.equal(rt.state.chatItems.length, 1, 'B 的展示层不被诊断会话顶掉');
+  assert.ok(rt.state.sessions.some(s => s && s.id === 'created-bg'), '新会话已登记侧栏历史');
+  assert.equal(rt.sessionStates['created-bg']?.loadedFromDisk, true, 'buffer 已登记（sendMessageToSession 存在性第二把尺子）');
+  assert.equal(localInvokeCalls.filter(name => name === 'create_session').length, 1);
+  assert.equal(navigationEpochs.length, 0, '后台物化不得发布本地导航（enterDraft 才会推进导航纪元）');
+});
+
+test('background materialization failure stays silent on the user session', async () => {
+  const rt = loadSessionsFeature();
+  rt.state.activeSessionId = 'local-b';
+  rt.state.chatItems = [{ type: 'user', text: 'B 的正文', id: 'b-1' }];
+  const creation = rt.defer('create_session');
+  const pending = rt.api.materializeSession({ background: true });
+  creation.reject(new Error('backend down'));
+  assert.equal(await pending, null, '创建失败按 null 返回，调用方按发送失败契约处理');
+  assert.equal(rt.state.activeSessionId, 'local-b', '失败不得改变活动会话');
+  assert.equal(rt.state.chatItems.length, 1, '报错卡不得写进用户当前会话正文');
+  assert.equal(rt.state.composerDraft, '');
+});
+
 test('direct scheduled-run navigation invalidates a previously captured controlled owner', async () => {
   const rt = loadSessionsFeature();
   rt.state.desktopRemoteControl = {

@@ -481,11 +481,42 @@ async function createNewSession() { return pinvouSharedtauriSessions().createNew
   // 绑定）时直接返回 null，调用方按守卫语义放弃发送、内容原地保留；无参
   // 调用保持原语义（点击即时的显式工作入口，如团队接力，仍按「用户已确认
   // 开始工作」覆盖旧草稿）。
+  //
+  // 后台物化（round-39 review P2，zhuowp：切到既有会话后不得前台物化）：
+  // prompt 窗口决算发现用户已切到既有会话 B 时，晚到的物化调用方改走
+  // background——B 非空使 protectUserDraft 拦不住，前台路径 enterDraft 的工作
+  // 集清空 + switchActiveTo 会把活动工作集切到新会话并 notify，订阅快照随之
+  // 携带诊断会话的 chatItems/activeSessionId，B 的正文在 ChatView 被顶掉。
+  // 本路径只做创建与登记：后端 create_session（无目录绑定的普通新会话，与
+  // 前台空草稿物化同参）+ 空 buffer 登记 sessionStates（sendMessageToSession
+  // 的存在性第二把尺子，与 ensureSession 导航中止分支同款）+
+  // refreshHistoryList 入侧栏历史（其 notify 只刷列表，不动
+  // activeSessionId/chatItems）；不 enterDraft、不切工作集、不抢活动会话，
+  // 返回真实 sid 供调用方后台发送。创建失败静默返回 null（addSystemItem 会
+  // 把报错卡写进用户当前会话的正文，后台路径不得污染），由调用方按发送失败
+  // 契约处理；materializeSession 无 background 选项的调用方不受影响。
+  async function createBackgroundSession() {
+    try {
+      const meta = await invoke("create_session", {
+        workspacePath: null,
+        workspaceRoots: null,
+        projectId: null,
+      });
+      sessionStates[meta.id] = freshBuffer();
+      sessionStates[meta.id].loadedFromDisk = true;
+      await refreshHistoryList();
+      return meta.id;
+    } catch (e) {
+      console.warn("background create_session failed", e);
+      return null;
+    }
+  }
   async function materializeSession(options) {
     if (options && options.protectUserDraft && !state.activeSessionId
       && (String(state.composerDraft || "").length > 0 || state.draftWorkspacePath)) {
       return null;
     }
+    if (options && options.background) return createBackgroundSession();
     if (!enterDraft()) return null;
     return ensureSession();
   }

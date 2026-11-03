@@ -10,6 +10,7 @@
  * - 故障排查快捷卡：device_doctor_prompt → 新建普通会话（create_session）→ chat 携带提示词
  * - prompt 采样挂起期间经侧栏去设置：晚到的提示词不把用户拽回聊天、消息照常送达（复核 P2）
  * - prompt 采样挂起期间新建对话并输入草稿：晚到物化放弃发送、草稿原地保留（round-38 评审 P2）
+ * - prompt 采样挂起期间切到既有会话 B：晚到动作后台送达新会话，B 的活动行/正文/未发送输入原地保留（round-39 评审 P2）
  * - 商店库/外部模型读取失败面：常驻错误行 + 前往商店/重试恢复（第五轮评审）
  * - 旧行在场的刷新失败常驻陈旧行、交错读取按世代消费错误状态（round-30 评审）
  * - 非温度传感器越线出通用临界文案、不误指温度（round-30 评审）
@@ -1305,6 +1306,79 @@ async function clickTestId(page, testId) {
     && draftWindowState.chatCalls === draftWindowState.chatBaseline
     && draftWindowState.createCalls === draftWindowState.createBaseline,
     JSON.stringify(draftWindowState));
+
+  // ⑥-f5 prompt 采样窗口里**切到既有会话 B**（round-39 review P2，zhuowp）：
+  // B 非空使 protectUserDraft 拦不住，前台物化的 enterDraft + switchActiveTo
+  // 会把活动工作集切到新诊断会话并 notify——纵然后面导航 setter 全不执行，
+  // 订阅快照携带的诊断会话正文仍把 B 的视图顶掉（⑥-f2 的行样式断言读的是
+  // activeChat 导航态，拦不住这个正文替换）。修后 prompt 决算发现切到既有
+  // 会话即走 background：create_session 照常调用（创建+侧栏登记），发送钉定
+  // 新 sid 落后台，B 的活动行、正文与未发送输入原地保留。修前本用例必红：
+  // 输入框被清空、诊断消息气泡直接顶进 B 的视图。
+  await clickNavByLabel(page, '设备管理');
+  await page.waitForFunction(() => document.querySelector('[data-testid="app-root"]')?.getAttribute('data-current-view') === 'monitor', { timeout: 8000 });
+  await page.waitForFunction(() => !!document.querySelector('[data-testid="device-manager-view"]'), { timeout: 8000 });
+  // 会话行住在展开态侧栏的最近列表里（isSidebarOpen 才渲染）；⑥-f4 之后
+  // 展开态不确定，先探测再按需展开，避免盲点 toggle 把已开的侧栏点收。
+  await page.waitForFunction(() => !!document.querySelector('[data-testid="regular-sidebar-item"]'), { timeout: 2000 }).catch(async () => {
+    await page.evaluate(() => { document.querySelector('[data-sidebar-toggle]')?.click(); });
+    await page.waitForFunction(() => !!document.querySelector('[data-testid="regular-sidebar-item"]'), { timeout: 8000 });
+  });
+  await page.evaluate(() => { window.__DEVICE_MGR_TEST__.hangDoctorPrompt = true; });
+  const chatCallsBeforeBgWindow = await page.evaluate(() => window.__DEVICE_MGR_TEST__.callsOf('chat').length);
+  const createCallsBeforeBgWindow = await page.evaluate(() => window.__DEVICE_MGR_TEST__.callsOf('create_session').length);
+  await clickTestId(page, 'device-manager-doctor-packages');
+  await page.waitForFunction(
+    () => typeof window.__DEVICE_MGR_TEST__.resolveDoctorPrompt === 'function',
+    { timeout: 8000 },
+  );
+  // prompt 挂起期间经真实侧栏切到会话 B（handleSwitchSession，session 通道），
+  // 并在 B 里输入未发送文字。
+  await page.evaluate(() => { document.querySelector('[data-testid="regular-sidebar-item"]').click(); });
+  await page.waitForFunction(() => document.querySelector('[data-testid="app-root"]')?.getAttribute('data-current-view') === 'chat', { timeout: 8000 });
+  await page.waitForFunction(() => !!document.querySelector('[data-testid="chat-composer-input"]'), { timeout: 8000 });
+  await page.type('[data-testid="chat-composer-input"]', 'B 的未发送文字');
+  await page.evaluate(() => { window.__DEVICE_MGR_TEST__.hangDoctorPrompt = false; });
+  await page.evaluate(() => { window.__DEVICE_MGR_TEST__.resolveDoctorPrompt?.(); });
+  // 消息照常送达（后台新会话）：chat 照发、create_session 照调（创建+登记）。
+  await page.waitForFunction(
+    (before) => window.__DEVICE_MGR_TEST__.callsOf('chat').length > before,
+    { timeout: 15000 },
+    chatCallsBeforeBgWindow,
+  );
+  await sleep(600);
+  const bgWindowState = await page.evaluate((beforeCreate) => {
+    const activeRow = Array.from(document.querySelectorAll('[data-testid="regular-sidebar-item"]'))
+      .find(row => row.parentElement?.className.includes('bg-[#E1E5EA]'));
+    const lastChat = window.__DEVICE_MGR_TEST__.callsOf('chat').slice(-1)[0] || {};
+    return {
+      composer: (document.querySelector('[data-testid="chat-composer-input"]') || {}).value || '',
+      view: document.querySelector('[data-testid="app-root"]')?.getAttribute('data-current-view'),
+      activeRowTitle: activeRow ? activeRow.innerText : null,
+      createCalls: window.__DEVICE_MGR_TEST__.callsOf('create_session').length,
+      createBaseline: beforeCreate,
+      bodyHasMarker: document.body.innerText.includes('DEVICE_DOCTOR_MARKER'),
+      lastChatSessionId: lastChat.args ? lastChat.args.sessionId : null,
+      toast: document.querySelector('[data-testid="model-store-toast"]')?.innerText || null,
+    };
+  }, createCallsBeforeBgWindow);
+  if (bgWindowState.composer !== 'B 的未发送文字' || bgWindowState.bodyHasMarker) {
+    const diag = await page.evaluate(() => ({
+      composer: (document.querySelector('[data-testid="chat-composer-input"]') || {}).value || '',
+      view: document.querySelector('[data-testid="app-root"]')?.getAttribute('data-current-view'),
+      lastCalls: window.__DEVICE_MGR_TEST__.calls.slice(-10).map(c => c.cmd),
+    }));
+    console.error('[smoke][⑥-f5 diag]', JSON.stringify(diag));
+  }
+  rec('⑥-f5 prompt 采样期间切到既有会话 B：后台送达新会话、B 的视图与草稿原地保留',
+    bgWindowState.view === 'chat'
+    && bgWindowState.composer === 'B 的未发送文字'
+    && !!bgWindowState.activeRowTitle && bgWindowState.activeRowTitle.includes('另一个会话')
+    && bgWindowState.createCalls === bgWindowState.createBaseline + 1
+    && bgWindowState.lastChatSessionId === 's-doctor'
+    && !bgWindowState.bodyHasMarker
+    && !bgWindowState.toast,
+    JSON.stringify(bgWindowState));
 
   // ⑥-f3 completion 窗口里**不经 gate 的直接视图变更**（三十三轮评审 P2）：
   // 动作自己的 publication 还开着（publishing>0），此刻更新卡的

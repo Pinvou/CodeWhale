@@ -255,8 +255,14 @@ const expectedProtocolHashes = {
   // maybePruneFailedWorkspaceRecent wiring (single-entry workspace picker);
   // same command set, no new invoke or listen entries — the extractor scans
   // raw source, so the merged body/comment text is part of the digest.
-  // Combined local model rollback receipts and main workspace keychain carryover.
-  sessions: '70bec8acd21b45ce46ecce0cd9f1b78deb456c064693e64129aac339c9a72235',
+  // T0-b (#701 桥接面对齐) 重算：get_session_persona_events /
+  // get_session_pinvou_reviews 两支 invoke 移入 helpers 的
+  // loadPersonaEventsForSession / loadPinvouReviewsForSession（sessions.js 留
+  // 转发壳 + reportSidecarReadFailure 注入），命令面无增删。
+  // round-39 评审 P2 重算：sessions.js 新增 createBackgroundSession 的
+  // create_session invoke（后台物化——切到既有会话后晚到的诊断动作改走
+  // 不切工作集的创建/登记路径），复用既有 create_session 命令，命令面无增删。
+  sessions: '1330dea103640a6615c71032232f98962218f265f2950c8040dcba03bfad9f77',
   // Recomputed for the builtin feature toggle hook: settings.js gains the
   // list_builtin_features / set_builtin_feature_enabled invoke wrappers (the
   // session-mention feature gate reads the list; the setter is the contract

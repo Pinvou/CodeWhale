@@ -3083,6 +3083,24 @@ const App = () => {
           // 修订号仍与动作起点可比（materialize 尚未启动），hung prompt 窗口
           // 里的用户切会话/去设置在此拍板。
           const promptWindowIntact = ownership.kept();
+          // 双车道归属（round-39 review P2，zhuowp）：prompt 决算发现 session
+          // 半边已移位且桥的活动目标是**既有会话 B**（activeSessionId 非空；
+          // 新对话草稿 activeSessionId 为 null，仍走前台车道由 protectUserDraft
+          // 分管）时，晚到的动作不得前台物化——B 非空使 protectUserDraft 拦
+          // 不住，前台物化的 enterDraft 工作集清空 + switchActiveTo 会把活动
+          // 工作集切到新诊断会话并 notify，订阅快照随之携带诊断会话的
+          // chatItems/activeSessionId，纵然后面导航 setter 全不执行，用户当前
+          // 会话的正文仍被顶掉。归属在物化副作用**之前**结算：本车道
+          // 改走 materializeSession({ background })（只创建+登记侧栏历史，不
+          // enterDraft/不切工作集），发送照常钉定 sid，全程不做任何视图/工作
+          // 集切换——不进 runBrowserUiTransition、不 setCodeModeOn/
+          // closeMobileSidebar/setCurrentView/setActiveChat。B 的未发送文字在
+          // 原缓冲原地保留；排查消息照常按已送达计（返回契约不变）。
+          // stayed-on-device-page / 去设置（view 通道）/ 窗口里点了新对话
+          // （session 通道移位但 activeSessionId 为 null）均维持前台车道既有
+          // 口径（⑥-f / ⑥-f4 / round-37 pins 不动）。
+          const backgroundDelivery = !ownership.keptChannel('session')
+            && !!bsRef.current?.activeSessionId;
           // 前台物化携带草稿内容保护（round-38 review P2）：采样等待窗口里
           // 用户新建对话并输入未发送文本 / 选了工作目录时，晚到的物化不得让
           // enterDraft 把这份内容吞掉——materializeSession 见未物化草稿带
@@ -3090,10 +3108,32 @@ const App = () => {
           // 页保留输入并提示重试），草稿原地保留。空草稿（用户点了新对话但
           // 未输入）照旧物化，与 ⑥-f2「消息照常送达、只跳过视图切换」的
           // 既有口径一致。
-          const sid = reused || (await bridge.sessions.materializeSession({ protectUserDraft: true }));
+          const sid = reused || (await bridge.sessions.materializeSession(
+            backgroundDelivery ? { background: true } : { protectUserDraft: true },
+          ));
           lastFailedDoctorSidRef.current = null;
           if (!sid) return false;
           usedSid = sid;
+          if (backgroundDelivery) {
+            // 后台送达（round-39 review P2）：不进 transition、不申请导航权，
+            // 只把排查提示词钉定投递到后台新建的会话。发送前存在性由
+            // materializeSession 的登记保证（sessionStates buffer + 侧栏列表
+            // 双尺子）；失败口径与前台一致——没发出去就记住 sid 等重试、
+            // 返回 false；已接受发送（含 completion 成功）按已送达计 true。
+            const result = await bridge.chat.sendMessageToSession(sid, prompt);
+            if (!result?.accepted) {
+              lastFailedDoctorSidRef.current = sid;
+              return false;
+            }
+            if (result.completion) {
+              const outcome = await result.completion;
+              if (!outcome?.ok) {
+                lastFailedDoctorSidRef.current = sid;
+                return false;
+              }
+            }
+            return true;
+          }
           // 导航意图 = prompt 窗口双通道决算 ∧ 视图半边持续到落定（round-37
           // review 修订三十三轮 P2 的拍点）：session 半边在 materialize 之前
           // 拍板——彼时修订号仍与动作起点可比，hung prompt 窗口里的用户切会
