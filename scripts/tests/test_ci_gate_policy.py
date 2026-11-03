@@ -3701,21 +3701,30 @@ class CiGatePolicyTests(unittest.TestCase):
         # 读取器同样把孤立 CR 当行终止,可伪造第二条 workflow command)。
         self.assertIn('echo "::warning::[memory-setup] ${*//[', source)
         self.assertIn("${*//[$'\\r\\n']/ }", source)
-        # 预期可恢复的慢路径(modprobe 首失败、镜像 swap 预激活、镜像 swap
-        # as-is 失败后的重试、全层失败后的镜像 swapfile 兜底重试)只进日志,
-        # 不得注解化,否则每个 job 都会常驻黄标稀释真告警。函数体全文钉死:
-        # 改回 ::warning:: 注解即红。
+        # 预期可恢复的慢路径(镜像 swap as-is 失败后的重试、全层失败后的
+        # 镜像 swapfile 兜底重试)只进日志,不得注解化,否则每个 job 都会
+        # 常驻黄标稀释真告警。函数体全文钉死:改回 ::warning:: 注解即红。
+        # modprobe 失败不属于可恢复慢路径:2026-10 起脚本不再安装内核包,
+        # 该失败是终局降级,必须走 warn 注解让 zram 缺席可见。
         self.assertIn(
             'warn_recoverable() { echo "[memory-setup] WARNING: $*" >&2; }',
             source,
         )
         self.assertIn(
-            'warn_recoverable "modprobe zram failed${modprobe_err:+: ${modprobe_err}};',
+            'warn "modprobe zram failed${modprobe_err:+: ${modprobe_err}};',
+            source,
+        )
+        # 模块加载失败后不得出现任何包管理器安装路径:超时杀掉的 apt 事务
+        # 会留下 dpkg 中断状态,毒化同 job 后续必需的依赖安装(静态取代被
+        # 删除的行为级 PACKAGE_MANAGER_CALLED 断言)。
+        self.assertNotIn("apt-get ", source)
+        self.assertIn(
+            "using fallback swap without installing kernel packages",
             source,
         )
         self.assertIn(
-            'warn_recoverable "no swap active; activating the image swapfile'
-            ' before the slow module install"',
+            'warn_recoverable "no active swap after all layers; trying the'
+            ' image-provided swapfile"',
             source,
         )
         self.assertIn(
@@ -3940,14 +3949,6 @@ class CiGatePolicyTests(unittest.TestCase):
         self.assertIn("DISK_SWAP_SIZE_KIB=$((16 * 1024 * 1024))", source)
         self.assertIn(
             "swapon --show=NAME --noheadings 2>/dev/null | grep -q '/dev/zram'",
-            source,
-        )
-        self.assertIn(
-            'warn "apt-get install ${modules_pkg} failed once; retrying"',
-            source,
-        )
-        self.assertIn(
-            'warn "apt-get install ${modules_pkg} failed again; giving up on zram layers"',
             source,
         )
         self.assertIn(
