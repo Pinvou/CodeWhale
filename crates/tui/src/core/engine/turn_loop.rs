@@ -1940,23 +1940,13 @@ impl Engine {
                     Ok(mut result) => {
                         // Only update if we got valid messages (never corrupt state)
                         if !result.messages.is_empty() || self.session.messages.is_empty() {
-                            // Distinguish the two replacement shapes (see
-                            // `standing_baseline_layout_preserved`): a local
-                            // mechanical prune rewrites ToolResult content in
-                            // place and keeps every slot, so the recorded
-                            // indices stay exact and the entries survive; a
-                            // provider-authored summary merges or drops turns
-                            // into unknowable slots, so the entries are
-                            // vacated instead of guessed — post-compaction
-                            // turn builds re-establish their own entries
-                            // immediately, and an edit that targets a
-                            // pre-compaction survivor recomputes against the
-                            // unchanged standing baseline rather than
-                            // restoring a misattributed snapshot. Measured
-                            // against the pre-topology replacement: the
-                            // checkpoint the topology step inserts below is
-                            // engine-authored slot bookkeeping whose shift is
-                            // rebased onto the entries at replace time.
+                            // Measured against the pre-topology replacement:
+                            // the checkpoint the topology step inserts below
+                            // is engine-authored slot bookkeeping whose
+                            // shift is rebased onto the entries at replace
+                            // time. The re-anchoring itself is shared with
+                            // the manual and emergency paths (see
+                            // `rebase_standing_baseline_after_compaction`).
                             let layout_preserved = standing_baseline_layout_preserved(
                                 &result.messages,
                                 &self.session.messages,
@@ -1984,14 +1974,11 @@ impl Engine {
                             let auto_messages_after = result.messages.len();
                             let retries_used = result.retries_used;
                             let coverage_clause = result.coverage.receipt_clause();
-                            if layout_preserved {
-                                for entry in &mut self.standing_posture_baseline_history {
-                                    entry.push_index =
-                                        topology_rebase.rebase_index(entry.push_index);
-                                }
-                            } else {
-                                self.standing_posture_baseline_history.clear();
-                            }
+                            self.rebase_standing_baseline_after_compaction(
+                                layout_preserved,
+                                result.summary_origins.as_deref(),
+                                &topology_rebase,
+                            );
                             self.session.replace_messages(result.messages);
                             turn.clear_parent_input_tokens();
                             if let Some(pm) = self.session.prefix_stability.as_mut() {

@@ -1139,12 +1139,18 @@ struct StandingPostureBaselineEntry {
     ///   its message's new slot and drops entries whose message is gone —
     ///   a survived turn keeps restoring its prior posture even when its
     ///   index shifted;
-    /// - a replacement the engine did not author slot-by-slot (auto,
-    ///   manual, and emergency compaction results; the emergency fallback
-    ///   can also re-carry history through the agent-topology checkpoint
-    ///   rewrite) cannot be rebased, so it vacates the stack — except when
-    ///   the replacement is value-identical to the previous history, which
-    ///   keeps every slot exact;
+    /// - a replacement the engine did not author slot-by-slot cannot be
+    ///   rebased, so it vacates the stack — except when the replacement is
+    ///   value-identical to the previous history (equal lists keep every
+    ///   slot exact) or when it is the local summary builder's output,
+    ///   which reports where every retained slot came from
+    ///   (`CompactionResult::summary_origins`): a retained turn's entry
+    ///   relocates to its message's new slot and a dropped turn's entry
+    ///   goes away with the turn (see
+    ///   `rebase_standing_baseline_after_compaction`; auto, manual, and
+    ///   emergency compaction all share it, and the emergency fallback can
+    ///   also re-carry history through the agent-topology checkpoint
+    ///   rewrite);
     /// - a conversation replacement (`SyncSession`) clears the stack with
     ///   the rest of the posture state.
     push_index: usize,
@@ -1157,9 +1163,12 @@ struct StandingPostureBaselineEntry {
 /// ToolResult content in place and keep every slot, so recorded
 /// `push_index`es stay exact — a PruneOnly compaction that only pruned old
 /// tool output must keep the entries, or an edit of a surviving turn loses
-/// the snapshot its block still needs. Provider-authored summaries merge or
-/// drop turns, so those replacements cannot be mapped slot-for-slot and
-/// vacate the stack instead (see the compaction call sites).
+/// the snapshot its block still needs. The summary path shrinks the list,
+/// so this check is false there and the compaction sites fall through to
+/// the builder's origin map (`CompactionResult::summary_origins`): the
+/// local builder reports where every retained slot came from, so retained
+/// turns relocate instead of being vacated with the unmappable shapes (see
+/// `rebase_standing_baseline_after_compaction`).
 fn standing_baseline_layout_preserved(replacement: &[Message], replaced: &[Message]) -> bool {
     replacement.len() == replaced.len()
         && replacement
@@ -6726,23 +6735,13 @@ impl Engine {
         match compaction_result {
             Ok(mut result) => {
                 if !result.messages.is_empty() || self.session.messages.is_empty() {
-                    // Unified standing-baseline handling for history
-                    // replacements the engine did not author slot-by-slot
-                    // (see `StandingPostureBaselineEntry::push_index` and
-                    // `standing_baseline_layout_preserved`): a provider-
-                    // authored compaction result moves survivors to
-                    // unknowable slots, so vacate the entries rather than
-                    // guess a rebase — the same rationale as the
-                    // auto-compaction path in core/engine/turn_loop.rs.
-                    // Post-compaction turn builds re-establish their own
-                    // entries. A local mechanical prune (PruneOnly) rewrites
-                    // ToolResult content in place and keeps every slot, so
-                    // the layout check keeps the entries anchored there;
-                    // byte-identical replacements also keep equal slots.
                     // Measured against the pre-topology replacement: the
                     // checkpoint the topology step inserts below is
                     // engine-authored slot bookkeeping whose shift is
-                    // rebased onto the entries at replace time.
+                    // rebased onto the entries at replace time. The
+                    // re-anchoring itself is shared with the auto and
+                    // emergency paths (see
+                    // `rebase_standing_baseline_after_compaction`).
                     let layout_preserved = standing_baseline_layout_preserved(
                         &result.messages,
                         &self.session.messages,
@@ -6777,13 +6776,11 @@ impl Engine {
                     let messages_after = result.messages.len();
                     let retries_used = result.retries_used;
                     let coverage_clause = result.coverage.receipt_clause();
-                    if layout_preserved {
-                        for entry in &mut self.standing_posture_baseline_history {
-                            entry.push_index = topology_rebase.rebase_index(entry.push_index);
-                        }
-                    } else {
-                        self.standing_posture_baseline_history.clear();
-                    }
+                    self.rebase_standing_baseline_after_compaction(
+                        layout_preserved,
+                        result.summary_origins.as_deref(),
+                        &topology_rebase,
+                    );
                     self.session.replace_messages(result.messages);
                     if let Some(pm) = self.session.prefix_stability.as_mut() {
                         pm.note_history_reset("compaction");
@@ -7082,6 +7079,7 @@ impl Engine {
 
         let mut retries_used = 0u32;
         let mut summary_prompt = None;
+        let mut summary_origins = None;
         let mut compacted_messages: Vec<Message> = self.session.messages.clone().into();
 
         let mut forced_config = self.config.compaction.clone();
@@ -7120,6 +7118,7 @@ impl Engine {
                 retries_used = result.retries_used;
                 compacted_messages = result.messages;
                 summary_prompt = result.summary_prompt;
+                summary_origins = result.summary_origins;
             }
             Err(err) => {
                 let _ = self
@@ -7167,27 +7166,17 @@ impl Engine {
                 return false;
             }
             // Unified standing-baseline handling for history replacements
-            // the engine did not author slot-by-slot (see
-            // `StandingPostureBaselineEntry::push_index` and
-            // `standing_baseline_layout_preserved`): whether the API pass
-            // produced a provider-authored replacement or the local fallback
-            // re-carried history through the agent-topology checkpoint
-            // rewrite (arbitrary retain/insert positions), survivors land in
-            // slots that no longer map onto the recorded indices, so vacate
-            // the entries rather than guess a rebase — the same rationale as
-            // the auto-compaction path in core/engine/turn_loop.rs. A local
-            // mechanical prune (PruneOnly) rewrites ToolResult content in
-            // place and keeps every slot, so the layout check keeps the
-            // entries anchored there; a fallback that left the history
-            // layout-identical also keeps equal slots, so a survived-turn
-            // edit still restores its prior posture.
-            if layout_preserved {
-                for entry in &mut self.standing_posture_baseline_history {
-                    entry.push_index = topology_rebase.rebase_index(entry.push_index);
-                }
-            } else {
-                self.standing_posture_baseline_history.clear();
-            }
+            // (see `rebase_standing_baseline_after_compaction`): whether the
+            // API pass produced a summary replacement, a mechanical prune,
+            // or — after an API failure — the local fallback re-carried
+            // history through the agent-topology checkpoint rewrite, the
+            // shared rebase keeps the recorded indices meaningful before
+            // the next edit reads them.
+            self.rebase_standing_baseline_after_compaction(
+                layout_preserved,
+                summary_origins.as_deref(),
+                &topology_rebase,
+            );
             self.session.replace_messages(compacted_messages);
         }
         self.commit_compaction_checkpoint(summary_prompt);
@@ -8616,6 +8605,61 @@ impl Engine {
             manager.list_for_session(&self.session.id)
         };
         crate::runtime_handoff::replace_agent_topology_checkpoint(messages, &snapshots)
+    }
+
+    /// Re-anchor the standing-posture baseline entries onto a compaction
+    /// replacement (see `StandingPostureBaselineEntry::push_index`; the
+    /// manual, auto, and emergency paths all install replacements through
+    /// this). Three shapes:
+    /// - a layout-preserving replacement — the mechanical PruneOnly prune
+    ///   rewrites ToolResult content in place, and the emergency fallback can
+    ///   re-carry the history verbatim — keeps every slot, so each entry only
+    ///   takes the agent-topology shift;
+    /// - a summary-path replacement is authored by the LOCAL builder
+    ///   (`CompactionResult::summary_origins`), which reports where every
+    ///   slot came from: an entry whose user message the builder retained
+    ///   relocates to that message's new slot (then takes the topology
+    ///   shift), and an entry whose message the builder dropped goes away
+    ///   with its turn — no later edit can target it. Without the relocation
+    ///   the retained turns would lose their linkage even though the builder
+    ///   kept them deterministically: editing a retained turn would pop
+    ///   nothing and silently drop the transition its truncated block
+    ///   carried away;
+    /// - any other replacement (provider-authored content, or the emergency
+    ///   fallback rewritten through the agent-topology checkpoint) moves
+    ///   survivors to unknowable slots and vacates the stack —
+    ///   post-compaction turn builds re-establish their own entries.
+    ///
+    /// `layout_preserved` and `summary_origins` must both be measured against
+    /// the pre-topology replacement (the shift `topology_rebase` describes is
+    /// applied to the re-anchored indices here).
+    fn rebase_standing_baseline_after_compaction(
+        &mut self,
+        layout_preserved: bool,
+        summary_origins: Option<&[Option<usize>]>,
+        topology_rebase: &crate::runtime_handoff::AgentTopologyCheckpointRebase,
+    ) {
+        if layout_preserved {
+            for entry in &mut self.standing_posture_baseline_history {
+                entry.push_index = topology_rebase.rebase_index(entry.push_index);
+            }
+        } else if let Some(origins) = summary_origins {
+            self.standing_posture_baseline_history = self
+                .standing_posture_baseline_history
+                .drain(..)
+                .filter_map(|entry| {
+                    origins
+                        .iter()
+                        .position(|origin| *origin == Some(entry.push_index))
+                        .map(|index| StandingPostureBaselineEntry {
+                            prior_posture: entry.prior_posture,
+                            push_index: topology_rebase.rebase_index(index),
+                        })
+                })
+                .collect();
+        } else {
+            self.standing_posture_baseline_history.clear();
+        }
     }
 }
 
