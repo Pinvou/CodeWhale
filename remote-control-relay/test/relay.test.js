@@ -2534,6 +2534,8 @@ test("serves 503 for the site root when the web build is missing entirely", asyn
   } finally {
     await stopRelay(isolated.child);
   }
+});
+
 test("rejects a hostile Host header without killing the relay", async () => {
   // An out-of-range port in Host makes the URL constructor throw; the relay
   // must answer 400 and keep serving, not die on an unhandled rejection.
