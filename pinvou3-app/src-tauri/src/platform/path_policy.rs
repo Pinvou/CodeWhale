@@ -1,4 +1,4 @@
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 
 /// Resolve an artifact path against its execution workspace without imposing
 /// command-layer knowledge on feature code.
@@ -33,7 +33,23 @@ pub const BLOCKED_COMPONENTS: &[&str] = &[
     "id_dsa",
     "credentials.json",
     ".env",
+    // 与 `.env` 同类的本地凭据/密钥文件,逐一枚举的黑名单此前漏掉的常見
+    // 命名(direnv 的 .envrc 常含导出的密钥;.git-credentials/.netrc/
+    // .pgpass/.npmrc 是各工具的默认凭据存储)。
+    ".envrc",
+    ".git-credentials",
+    ".netrc",
+    ".pgpass",
+    ".npmrc",
 ];
+
+/// 组件前缀黑名单:`.env.` 系命名(`.env.local`、`.env.production`、
+/// `.env.development`……)与 `.env` 同为本地环境凭据文件,环境变体命名
+/// 无法逐一枚举,按前缀判定。匹配经由平台感知的 `path_component_prefix`
+/// (macOS/Windows 大小写折叠,与 `path_component_eq` 同语义)。`.env.example`/
+/// `.env.sample` 因此同样被拦,且是有意为之:示例文件常被人把真实密钥忘在
+/// 里面,模型上下文车道宁可过宽。
+pub const BLOCKED_COMPONENT_PREFIXES: &[&str] = &[".env."];
 
 /// 系统敏感前缀黑名单——Unix 系统文件/虚拟文件系统路径。
 pub const BLOCKED_PREFIXES: &[&str] = &[
@@ -47,11 +63,51 @@ pub const BLOCKED_PREFIXES: &[&str] = &[
     "/sys/",
 ];
 
+/// macOS 把 `/etc`、`/var`、`/tmp` 符号链接到 `/private/...` 下的真实目录;
+/// `std::fs::canonicalize` 会把调用方的 `/etc/...` 拼写改写成解析后的
+/// `/private/etc/...`,系统前缀黑名单若只比对改写后的路径就会整体失效
+/// (`/etc/sudoers` 在 macOS 上永远匹配不到 `/etc/sudoers`,折叠修复的
+/// `/Etc/Sudoers` 同理只对不存在的路径生效)。比对前剥掉这层别名;仅
+/// macOS 启用——Linux 上 `/private/etc` 是普通目录,必须保持字节精确语义,
+/// Windows 无此别名。
+fn strip_macos_private_alias(path: &Path) -> Option<PathBuf> {
+    let mut components = path.components();
+    match (components.next(), components.next(), components.next()) {
+        (Some(Component::RootDir), Some(private), Some(target))
+            if crate::platform::os::path_component_eq(private.as_os_str(), "private")
+                && ["etc", "var", "tmp"].iter().any(|name| {
+                    crate::platform::os::path_component_eq(target.as_os_str(), name)
+                }) =>
+        {
+            let mut aliased = PathBuf::from("/");
+            aliased.push(target);
+            aliased.push(components.as_path());
+            Some(aliased)
+        }
+        _ => None,
+    }
+}
+
+/// 系统前缀命中判定,含 macOS 别名展开。`alias_symlinks` 由调用方按平台
+/// 传入(`cfg!(target_os = "macos")`),独立参数让折叠平台语义在所有平台
+/// 上都可被单元测试直接驱动。
+pub fn canonical_system_prefix_hit(canonical: &Path, alias_symlinks: bool) -> bool {
+    let alias_stripped = if alias_symlinks {
+        strip_macos_private_alias(canonical)
+    } else {
+        None
+    };
+    BLOCKED_PREFIXES.iter().any(|prefix| {
+        crate::platform::os::path_starts_with_folded(canonical, prefix)
+            || alias_stripped.as_deref().is_some_and(|aliased| {
+                crate::platform::os::path_starts_with_folded(aliased, prefix)
+            })
+    })
+}
+
 /// 检查已规范化路径是否触及凭据组件或系统敏感前缀。
 /// 供 `validate_user_path` 和 `validate_browsable_path` 共享。
 pub(crate) fn check_sensitive_components(canonical: &Path) -> Result<(), String> {
-    let canonical_text = canonical.to_string_lossy();
-
     for blocked in BLOCKED_COMPONENTS {
         if canonical
             .components()
@@ -65,13 +121,27 @@ pub(crate) fn check_sensitive_components(canonical: &Path) -> Result<(), String>
         }
     }
 
-    for prefix in BLOCKED_PREFIXES {
-        if canonical_text.starts_with(prefix) {
+    for prefix in BLOCKED_COMPONENT_PREFIXES {
+        if canonical.components().any(|component| {
+            crate::platform::os::path_component_prefix(component.as_os_str(), prefix)
+        }) {
             return Err(format!(
-                "path {} is in system-sensitive area",
-                canonical.display()
+                "path {} crosses sensitive component prefix {}",
+                canonical.display(),
+                prefix
             ));
         }
+    }
+
+    // 组件序列比较走平台折叠语义(macOS 大小写不敏感卷会把 `/Etc/Sudoers`
+    // 解析到真文件,字节 starts_with 会让大写变体绕过系统区黑名单),
+    // Linux 字节精确语义由 path_component_eq 的平台分支保持;macOS 再叠加
+    // /private 符号链接别名展开(见 strip_macos_private_alias)。
+    if canonical_system_prefix_hit(canonical, cfg!(target_os = "macos")) {
+        return Err(format!(
+            "path {} is in system-sensitive area",
+            canonical.display()
+        ));
     }
 
     Ok(())
@@ -88,7 +158,23 @@ pub(crate) fn validate_user_path(raw: &str) -> Result<PathBuf, String> {
         return Err(format!("path must be absolute: {raw}"));
     }
 
-    let canonical = std::fs::canonicalize(&path).unwrap_or_else(|_| path.clone());
+    let canonical = match std::fs::canonicalize(&path) {
+        Ok(canonical) => canonical,
+        Err(_) => {
+            // canonicalize 失败(路径不存在)时保留原拼写前先拒绝
+            // `..`——组件有界的黑名单比对会把 `a/../b` 的 ParentDir 视为
+            // 普通不匹配组件,未规范化拼写在回退分支里不可信,fail-closed。
+            if path
+                .components()
+                .any(|component| component == Component::ParentDir)
+            {
+                return Err(format!(
+                    "path must not contain '..' when it cannot be resolved: {raw}"
+                ));
+            }
+            path.clone()
+        }
+    };
     check_sensitive_components(&canonical)?;
     Ok(canonical)
 }
@@ -144,20 +230,233 @@ mod tests {
         }
     }
 
-    /// 大小写变体语义跟随平台：Windows 文件系统大小写不敏感，黑名单大写
-    /// 写法同样必须命中；Unix 大小写敏感，大写变体是不同文件，不拦属正确
-    /// 语义。此用例同时锁住「比较经由平台感知 helper」这一修复点。
+    /// 大小写变体语义跟随平台：Windows 与 macOS 默认卷大小写不敏感，黑名单
+    /// 大写写法同样必须命中（卷层会把 `.AWS` 解析到磁盘上的 `.aws`，按调用方
+    /// 拼写字节比较的词法检查会被绕过，见 posix.rs `path_component_eq`）；
+    /// Linux 大小写敏感，大写变体是不同文件，不拦属正确语义。此用例同时锁住
+    /// 「比较经由平台感知 helper」这一修复点。
     #[test]
     fn case_variant_semantics_follow_platform() {
         for blocked in BLOCKED_COMPONENTS {
             let upper = blocked.to_uppercase();
             let path = std::env::temp_dir().join(&upper).join("x.txt");
             let r = check_sensitive_components(&path);
-            if cfg!(windows) {
-                assert!(r.is_err(), "Windows 上 {upper} 应被拦");
+            if cfg!(windows) || cfg!(target_os = "macos") {
+                assert!(r.is_err(), "{upper} 应被拦");
             } else {
-                assert!(r.is_ok(), "Unix 上 {upper} 是不同文件，不应拦");
+                assert!(r.is_ok(), "Linux 上 {upper} 是不同文件，不应拦");
             }
         }
+    }
+
+    /// 大写变体逐项钉住比较语义：大小写不敏感平台上 `.ENV`/`.AWS` 等拼写
+    /// 会解析到与原样拼写相同的磁盘文件，词法黑名单必须同样命中；Linux 上
+    /// 同一批大写变体是不同文件、放行，而原样拼写仍拦截。
+    /// check_sensitive_components 纯组件判定、不触盘，断言的是比较语义本身。
+    #[test]
+    fn uppercase_credential_variants_follow_platform() {
+        let uppercase_variants = [
+            ".ENV",
+            ".AWS/credentials",
+            ".KUBE/config",
+            ".DOCKER/config.json",
+            ".SSH",
+        ];
+        for raw in uppercase_variants {
+            let path = std::env::temp_dir().join(raw);
+            let r = check_sensitive_components(&path);
+            if cfg!(windows) || cfg!(target_os = "macos") {
+                assert!(r.is_err(), "大小写不敏感平台上 {raw} 应被拦");
+            } else {
+                assert!(r.is_ok(), "Linux 上 {raw} 是不同文件，不应拦");
+            }
+        }
+        for raw in uppercase_variants {
+            let lower = raw.to_lowercase();
+            let path = std::env::temp_dir().join(&lower);
+            assert!(
+                check_sensitive_components(&path).is_err(),
+                "原样拼写 {lower} 应被拦"
+            );
+        }
+    }
+
+    #[test]
+    fn env_variants_and_credential_files_are_blocked() {
+        // `.env.` 系环境变体逐一枚举追不全,按前缀拦截;.envrc 与各工具的
+        // 默认凭据文件按精确组件拦截。
+        let blocked = [
+            ".env.local",
+            ".env.production",
+            ".env.development",
+            // `.env.` 前缀对示例文件同样生效是有意之举(示例文件常被忘进
+            // 真实密钥;模型上下文车道宁可过宽)。
+            ".env.example",
+            ".envrc",
+            ".git-credentials",
+            ".netrc",
+            ".pgpass",
+            ".npmrc",
+        ];
+        for raw in blocked {
+            let path = std::env::temp_dir().join("app").join(raw);
+            assert!(check_sensitive_components(&path).is_err(), "{raw} 必须被拦");
+        }
+        // 前缀仅按组件边界生效:同名前缀的普通文件不受影响。
+        for benign in [
+            "environment.md",
+            "envelope.txt",
+            ".environment",
+            ".gitignore",
+        ] {
+            let path = std::env::temp_dir().join("app").join(benign);
+            assert!(
+                check_sensitive_components(&path).is_ok(),
+                "{benign} 不是凭据文件,不应被拦"
+            );
+        }
+    }
+
+    #[test]
+    fn env_variant_case_semantics_follow_platform() {
+        // 与 uppercase_credential_variants_follow_platform 同判据:.ENV.LOCAL
+        // 这类大写变体在大小写不敏感卷(macOS/Windows)上解析到同一文件,
+        // 词法前缀判定必须同样折叠;Linux 上是不同文件,不拦。
+        let path = std::env::temp_dir().join("app").join(".ENV.LOCAL");
+        if cfg!(windows) || cfg!(target_os = "macos") {
+            assert!(check_sensitive_components(&path).is_err());
+        } else {
+            assert!(check_sensitive_components(&path).is_ok());
+        }
+    }
+
+    #[test]
+    fn system_prefixes_follow_component_boundaries() {
+        // 系统区前缀按组件序列比较:前缀自身与其嵌套路径必须被拒;仅共享
+        // 前缀字节的同名文件是普通可读文件,必须放行——字节 starts_with
+        // 会误拒 `/etc/shadowed` 一类路径。
+        for prefix in BLOCKED_PREFIXES {
+            let base = Path::new(prefix);
+            assert!(check_sensitive_components(base).is_err(), "{prefix}");
+            assert!(
+                check_sensitive_components(&base.join("probe")).is_err(),
+                "{prefix}/probe must be refused"
+            );
+            if !prefix.ends_with('/') {
+                assert!(
+                    check_sensitive_components(&PathBuf::from(format!("{prefix}probe"))).is_ok(),
+                    "{prefix}probe is a different file and must stay readable"
+                );
+            }
+        }
+        for benign in [
+            "/etc/shadowed",
+            "/etc/sudoersedit.md",
+            "/var/log/authprobe",
+            "/var/log/autolog.txt",
+        ] {
+            assert!(
+                check_sensitive_components(Path::new(benign)).is_ok(),
+                "{benign} is not a system-sensitive file and must stay readable"
+            );
+        }
+        // 大小写变体跟随平台折叠语义(纯 ASCII 比较在字节精确平台上不命中)。
+        let folded = cfg!(windows) || cfg!(target_os = "macos");
+        assert_eq!(
+            check_sensitive_components(Path::new("/Etc/Sudoers")).is_err(),
+            folded,
+            "case variants follow the platform's volume folding"
+        );
+    }
+
+    /// macOS 的 canonicalize 把 `/etc/...` 解析成 `/private/etc/...`(/etc
+    /// 是符号链接),系统前缀黑名单若只看改写后的路径就整体失效。别名展开
+    /// 用显式平台参数表达,单元测试在所有平台直接驱动,展开被删即红;
+    /// 组件边界语义穿越别名后必须保持(`/private/etc/shadowed` 不是凭据
+    /// 文件)。
+    #[test]
+    fn system_prefixes_survive_the_macos_private_alias() {
+        assert!(
+            canonical_system_prefix_hit(Path::new("/private/etc/shadow"), true),
+            "the aliased /etc/shadow spelling must hit on an alias-expanding platform"
+        );
+        assert!(
+            canonical_system_prefix_hit(Path::new("/private/etc/ssh/authorized_keys"), true),
+            "nested paths under the aliased prefix must hit"
+        );
+        assert!(
+            !canonical_system_prefix_hit(Path::new("/private/etc/shadowed"), true),
+            "the component boundary must survive alias expansion"
+        );
+        assert!(
+            !canonical_system_prefix_hit(Path::new("/private/etc/shadowprobe"), true),
+            "same-name files under the aliased prefix must stay readable"
+        );
+        assert!(
+            !canonical_system_prefix_hit(Path::new("/private/etc/shadow"), false),
+            "without alias expansion (non-macOS platforms) the raw spelling is not a hit"
+        );
+        assert!(
+            canonical_system_prefix_hit(Path::new("/etc/shadow"), false),
+            "the direct spelling must keep matching on every platform"
+        );
+        assert!(
+            !canonical_system_prefix_hit(Path::new("/private/etc/not-blocked"), true),
+            "unrelated /private/etc files stay readable"
+        );
+        assert!(
+            !canonical_system_prefix_hit(Path::new("/private/usr/local/bin/tool"), true),
+            "only the symlinked system roots are aliased"
+        );
+        // 别名展开覆盖 etc/var/tmp 三根,认证日志在 macOS 上以
+        // `/private/var/log/...` 拼写出现,`/private/var` 腿一旦收窄,
+        // 已有 only-etc 断言仍然全绿——此处钉住 var 腿的命中与无辜放行。
+        assert!(
+            canonical_system_prefix_hit(Path::new("/private/var/log/auth"), true),
+            "the auth log under the aliased /var must hit"
+        );
+        assert!(
+            !canonical_system_prefix_hit(Path::new("/private/var/log/authprobe"), true),
+            "the component boundary must survive the aliased /var leg"
+        );
+    }
+
+    /// 清单自律:`*` 只允许出现在末分量且剥掉星号后非空——裸 `*` 会退化
+    /// 成逐路径全匹配,内嵌 `*` 只会按字面比较而静默失效。清单改写无法
+    /// 靠编译器约束,测试运行时逐条钉住。
+    #[test]
+    fn wildcard_entries_keep_list_discipline() {
+        for prefix in BLOCKED_PREFIXES {
+            let components: Vec<&str> = prefix.split('/').filter(|c| !c.is_empty()).collect();
+            for (index, component) in components.iter().enumerate() {
+                if component.ends_with('*') {
+                    assert!(
+                        index + 1 == components.len(),
+                        "{prefix}: a wildcard component must be the last one"
+                    );
+                    assert!(
+                        component.len() > 1,
+                        "{prefix}: a bare '*' component would match every path"
+                    );
+                }
+            }
+        }
+    }
+
+    /// canonicalize 失败的回退分支必须拒绝含 `..` 的未规范化拼写——组件
+    /// 有界比对会把 ParentDir 当普通不匹配组件。已存在路径走 canonical
+    /// 成功分支,不受影响。
+    #[test]
+    fn unresolvable_dotdot_paths_fail_closed() {
+        let nested = std::env::temp_dir().join("pinvou3-path-policy-missing/../etc-shadow-probe");
+        assert!(validate_user_path(&nested.to_string_lossy()).is_err());
+        // 断言对象必须是规范化后的拼写——macOS 的 TMPDIR(/var/folders/...)
+        // 经 canonicalize 解析到 /private/var/...,与未展开的 temp_dir()
+        // 拼写不等,原断言在 macOS 上必红。
+        let existing = std::env::temp_dir();
+        let canonical_existing =
+            std::fs::canonicalize(&existing).unwrap_or_else(|_| existing.clone());
+        let ok = validate_user_path(&existing.to_string_lossy()).expect("existing path stays valid");
+        assert_eq!(ok, canonical_existing);
     }
 }
