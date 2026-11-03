@@ -3264,12 +3264,12 @@ class CiGatePolicyTests(unittest.TestCase):
             "'success' to required-gate, so the whole compile/test leg becomes "
             "advisory while the required check stays green",
         )
-        # Exactly one legitimate use, and it is a STEP whose entire purpose is
-        # to print an analysis it must not be able to fail the job with.
+        # Only explicit diagnostic steps may be advisory. Neither exemption
+        # applies to a test command or to an entire job.
         self.assertEqual(
             len(step_level),
-            1,
-            "only the Windows PE import diagnostic may opt out of blocking; "
+            2,
+            "only Windows PE imports and financial diagnostic upload may be advisory; "
             f"found {len(step_level)} continue-on-error settings: {step_level}",
         )
         diagnostic_step = body.split(
@@ -3278,9 +3278,89 @@ class CiGatePolicyTests(unittest.TestCase):
         self.assertIn(
             "continue-on-error: true",
             diagnostic_step,
-            "the single permitted continue-on-error must be the Windows PE "
+            "one permitted continue-on-error must be the Windows PE "
             "import diagnostic step, not some other step that moved under it",
         )
+        financial_job = _extract_job_block(body, "account-platform-test")
+        financial_matches = list(re.finditer(
+            r"(?ms)^      - name: Financial parallel diagnostics\n"
+            r"(?P<step>.*?)(?=^      - |\Z)",
+            financial_job,
+        ))
+        self.assertEqual(
+            len(financial_matches), 1, "the advisory upload must be one real named step"
+        )
+        # Stop at every next sequence item, regardless of its first mapping key.
+        # The complete, comment-free upload object is the narrow exception.
+        self.assertEqual(
+            financial_matches[0].group("step").strip(),
+            textwrap.dedent("""\
+                if: ${{ always() }}
+                continue-on-error: true
+                uses: actions/upload-artifact@v7
+                with:
+                  name: account-financial-parallel-${{ github.run_attempt }}
+                  path: ${{ runner.temp }}/financial-parallel-*/
+                  if-no-files-found: ignore
+                  retention-days: 7
+            """).strip().replace("\n", "\n        "),
+            "the second advisory step may only be the exact diagnostic upload",
+        )
+
+    def test_diagnostic_exemptions_cannot_move_to_business_tests_or_jobs(self):
+        original = self.pr_workflow
+        financial_start = "      - name: Financial parallel diagnostics\n"
+        financial_step = original.split(financial_start, maxsplit=1)[1].split(
+            "\n      - name:", maxsplit=1
+        )[0]
+        without_upload_exemption = original.replace(
+            financial_step,
+            financial_step.replace("        continue-on-error: true\n", "", 1),
+            1,
+        )
+        business = "      - name: Test and vet all Account Platform Go modules\n"
+        mutations = {
+            "advisory whole job": original.replace(
+                "  account-platform-test:\n",
+                "  account-platform-test:\n    continue-on-error: true\n",
+                1,
+            ),
+            "extra advisory business step": original.replace(
+                business, business + "        continue-on-error: true\n", 1
+            ),
+            "move upload exemption to business with same total": without_upload_exemption.replace(
+                business, business + "        continue-on-error: true\n", 1
+            ),
+            "upload label on a run command": original.replace(
+                financial_step,
+                financial_step.replace("uses: actions/upload-artifact@v7", "run: echo not-an-upload", 1),
+                1,
+            ),
+        }
+        for first_line, remaining in (
+            ("run: exit 37", "        name: Required business command\n"),
+            ("id: business_guard", '        name: Required business command\n        "run": exit 37\n'),
+            ("if: ${{ always() }}", "        run: exit 37\n"),
+            ("env:", "          FIXTURE: yes\n        run: exit 37\n"),
+        ):
+            # Moving the exception must fail even when the next valid YAML
+            # step starts with run/id/if/env and the total count stays two.
+            mutations[f"move exemption to {first_line} next step"] = without_upload_exemption.replace(
+                "      - name: Stop owned temporary PostgreSQL services\n",
+                f"      - {first_line}\n{remaining}        continue-on-error: true\n\n"
+                "      - name: Stop owned temporary PostgreSQL services\n",
+                1,
+            )
+        try:
+            self.test_no_job_level_continue_on_error_disarms_a_gate_job()
+            for label, mutant in mutations.items():
+                with self.subTest(label=label):
+                    self.assertNotEqual(mutant, original, "the negative control must change the workflow")
+                    self.pr_workflow = mutant
+                    with self.assertRaises(AssertionError):
+                        self.test_no_job_level_continue_on_error_disarms_a_gate_job()
+        finally:
+            self.pr_workflow = original
 
     def test_gate_jobs_do_not_swallow_their_exit_status(self):
         # The companion fail-open vector to continue-on-error: appending

@@ -1645,6 +1645,9 @@ jobs:
 
       - name: Financial parallel diagnostics
         if: ${{ always() }}
+        # Diagnostic transport must not invalidate the completed test verdict.
+        # The preceding contract/test steps and required-gate remain strict.
+        continue-on-error: true
         uses: actions/upload-artifact@v7
         with:
           name: account-financial-parallel-${{ github.run_attempt }}

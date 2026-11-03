@@ -129,6 +129,54 @@ function pgIdentityEnvironment(service) {
   ];
 }
 
+function assertFinancialDiagnosticExemption(job) {
+  const text = job.replaceAll("\r\n", "\n");
+  const diagnostic = namedStep(text, "Financial parallel diagnostics");
+  const withoutComments = diagnostic.replace(/^ *#.*\n/gm, "").trimEnd();
+  assert.equal(withoutComments, [
+    "      - name: Financial parallel diagnostics",
+    "        if: ${{ always() }}",
+    "        continue-on-error: true",
+    "        uses: actions/upload-artifact@v7",
+    "        with:",
+    "          name: account-financial-parallel-${{ github.run_attempt }}",
+    "          path: ${{ runner.temp }}/financial-parallel-*/",
+    "          if-no-files-found: ignore",
+    "          retention-days: 7",
+  ].join("\n"));
+  assert.doesNotMatch(text, /secrets\./);
+  assert.doesNotMatch(text.replace(diagnostic, ""), /continue-on-error:/,
+    "only the exact diagnostic upload step may be advisory");
+}
+
+test("financial diagnostic exception rejects business and job exemptions", () => {
+  const job = jobBlock("account-platform-test");
+  assertFinancialDiagnosticExemption(job);
+  const diagnostic = namedStep(job, "Financial parallel diagnostics");
+  const withoutExemption = job.replace(diagnostic,
+    diagnostic.replace("        continue-on-error: true\n", ""));
+  const mutants = [
+    job.replace("  account-platform-test:\n", "  account-platform-test:\n    continue-on-error: true\n"),
+    job.replace("uses: actions/upload-artifact@v7", "run: exit 37"),
+    job.replace("uses: actions/upload-artifact@v7", "uses: actions/upload-artifact@v6"),
+    job + "      - run: exit 37\n        continue-on-error: true\n",
+  ];
+  for (const [first, rest] of [
+    ["run: exit 37", "        name: Required business command\n"],
+    ["id: business_guard", '        name: Required business command\n        "run": exit 37\n'],
+    ["if: ${{ always() }}", "        run: exit 37\n"],
+    ["env:", "          FIXTURE: yes\n        run: exit 37\n"],
+  ]) {
+    mutants.push(withoutExemption.replace("      - name: Stop owned temporary PostgreSQL services\n",
+      `      - ${first}\n${rest}        continue-on-error: true\n\n      - name: Stop owned temporary PostgreSQL services\n`));
+  }
+  for (const mutant of mutants) {
+    assert.notEqual(mutant, job);
+    assert.throws(() => assertFinancialDiagnosticExemption(mutant));
+  }
+  assertFinancialDiagnosticExemption(job);
+});
+
 function assertFiniteAuditPGSetup(job) {
   const text = job.replaceAll("\r\n", "\n");
   // These are exactly six approved ephemeral services, not permission for arbitrary
@@ -187,7 +235,7 @@ function assertFiniteAuditPGSetup(job) {
     "          --health-retries 12",
     ]),
   ].join("\n"));
-  assert.doesNotMatch(job, /secrets\.|continue-on-error:/);
+  assertFinancialDiagnosticExemption(job);
   // Admit only read-only verification of this job's actual service metadata.
   // Every database consumer must use its identity-checked outputs, never a
   // fixed port or another job's endpoint on the shared runner host.
@@ -420,7 +468,7 @@ test("Account Platform changes cannot bypass the Go gate at any PR or queue stag
     assert.equal(result.status, expectedStatus, result.stderr);
     assert.equal(result.stdout, expectedOutput);
   }
-  assert.doesNotMatch(job, /secrets\.|continue-on-error:/);
+  assertFinancialDiagnosticExemption(job);
 });
 
 test("restored operator unit gates reject zero, skipped, missing and failed evidence without operations", () => {
