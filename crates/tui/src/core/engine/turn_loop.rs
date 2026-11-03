@@ -1940,7 +1940,29 @@ impl Engine {
                     Ok(mut result) => {
                         // Only update if we got valid messages (never corrupt state)
                         if !result.messages.is_empty() || self.session.messages.is_empty() {
-                            self.append_compaction_agent_topology(&mut result.messages)
+                            // Distinguish the two replacement shapes (see
+                            // `standing_baseline_layout_preserved`): a local
+                            // mechanical prune rewrites ToolResult content in
+                            // place and keeps every slot, so the recorded
+                            // indices stay exact and the entries survive; a
+                            // provider-authored summary merges or drops turns
+                            // into unknowable slots, so the entries are
+                            // vacated instead of guessed — post-compaction
+                            // turn builds re-establish their own entries
+                            // immediately, and an edit that targets a
+                            // pre-compaction survivor recomputes against the
+                            // unchanged standing baseline rather than
+                            // restoring a misattributed snapshot. Measured
+                            // against the pre-topology replacement: the
+                            // checkpoint the topology step inserts below is
+                            // engine-authored slot bookkeeping whose shift is
+                            // rebased onto the entries at replace time.
+                            let layout_preserved = standing_baseline_layout_preserved(
+                                &result.messages,
+                                &self.session.messages,
+                            );
+                            let topology_rebase = self
+                                .append_compaction_agent_topology(&mut result.messages)
                                 .await;
                             let turn_was_canceled = turn_cancel.is_cancelled();
                             if turn_was_canceled || compaction_cancel.is_cancelled() {
@@ -1962,17 +1984,14 @@ impl Engine {
                             let auto_messages_after = result.messages.len();
                             let retries_used = result.retries_used;
                             let coverage_clause = result.coverage.receipt_clause();
-                            // The replacement history is provider-authored
-                            // (summaries, pruned tool results, coverage
-                            // floors), so the standing-baseline stack's
-                            // recorded indices no longer map onto it. Vacate
-                            // the entries instead of guessing a rebase:
-                            // post-compaction turn builds re-establish their
-                            // own entries immediately, and an edit that
-                            // targets a pre-compaction survivor recomputes
-                            // against the unchanged standing baseline rather
-                            // than restoring a misattributed snapshot.
-                            self.standing_posture_baseline_history.clear();
+                            if layout_preserved {
+                                for entry in &mut self.standing_posture_baseline_history {
+                                    entry.push_index =
+                                        topology_rebase.rebase_index(entry.push_index);
+                                }
+                            } else {
+                                self.standing_posture_baseline_history.clear();
+                            }
                             self.session.replace_messages(result.messages);
                             turn.clear_parent_input_tokens();
                             if let Some(pm) = self.session.prefix_stability.as_mut() {

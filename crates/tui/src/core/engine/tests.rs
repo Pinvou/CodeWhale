@@ -19944,6 +19944,364 @@ async fn purge_then_edit_restores_the_standing_posture_baseline() {
     );
 }
 
+/// JensenChen28 review 5747388050 counterexample (PR #131): a manual
+/// compaction that lands on the local PruneOnly branch rewrites old
+/// ToolResult content in place — same length, same role at every index — so
+/// the whole-list value comparison sees a changed list and (pre-fix) vacated
+/// every standing-baseline entry even though the A/B user turns survived in
+/// place. Editing the B turn after such a prune must still restore its
+/// prior (A) and the replacement must re-report the A→B transition the
+/// truncated B block carried away. The captured-request count also proves
+/// the compaction took the mechanical prune path: PruneOnly makes no
+/// provider call, so only the two real turns and the replacement appear.
+#[tokio::test]
+async fn manual_prune_only_compaction_keeps_the_standing_baseline_entries() {
+    use wiremock::matchers::{body_string_contains, method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    let _lock = lock_test_env();
+    let tmp = tempdir().expect("tempdir");
+    let server = MockServer::start().await;
+
+    let sse_body = |id: &str, answer: &str| {
+        format!(
+            "data: {{\"id\":\"chatcmpl-{id}\",\"choices\":[{{\"index\":0,\
+             \"delta\":{{\"content\":\"{answer}\"}},\"finish_reason\":null}}]}}\n\n\
+             data: {{\"id\":\"chatcmpl-{id}\",\"choices\":[{{\"index\":0,\
+             \"delta\":{{}},\"finish_reason\":\"stop\"}}]}}\n\n\
+             data: [DONE]\n\n",
+        )
+    };
+    // First-match-wins, mirroring the purge regression: the replacement and
+    // the B turn are told apart by their own prompt text; the fallback
+    // serves the A turn. A compaction provider call would land on the
+    // fallback and blow its expect(1), so the request count also pins the
+    // mechanical-prune path.
+    Mock::given(method("POST"))
+        .and(path("/v1/chat/completions"))
+        .and(body_string_contains("revise this committed input"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .insert_header("content-type", "text/event-stream")
+                .set_body_string(sse_body("prune-fix-revised", "Revised answer.")),
+        )
+        .expect(1)
+        .mount(&server)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/v1/chat/completions"))
+        .and(body_string_contains("turn that reports the transition"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .insert_header("content-type", "text/event-stream")
+                .set_body_string(sse_body("prune-fix-b", "B answer.")),
+        )
+        .expect(1)
+        .mount(&server)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/v1/chat/completions"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .insert_header("content-type", "text/event-stream")
+                .set_body_string(sse_body("prune-fix-a", "A answer.")),
+        )
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    let api_config = Config {
+        api_key: Some("test-key".to_string()),
+        base_url: Some(server.uri()),
+        ..Config::default()
+    };
+    // Auto compaction stays off so the seeded pressure cannot trigger it
+    // mid-turn; the manual op below carries its own enabled config.
+    let mut config = EngineConfig {
+        workspace: tmp.path().to_path_buf(),
+        model: "deepseek-v4-pro".to_string(),
+        snapshots_enabled: false,
+        subagents_enabled: false,
+        compaction: CompactionConfig {
+            enabled: false,
+            ..CompactionConfig::default()
+        },
+        ..Default::default()
+    };
+    config.max_steps = 32;
+    let (engine, handle) = Engine::new(config, &api_config);
+    let run = tokio::spawn(engine.run());
+
+    // A stale, oversized tool output well outside the protected recent
+    // window, paired with the assistant tool call that owns it (the prune
+    // planner only candidates ToolResults whose tool_use_id was seen). Its
+    // estimate comfortably crosses the manual op's threshold.
+    const OLD_TOOL_OUTPUT: &str = "prunable stale tool output padding. ";
+    let seeded_messages = vec![
+        Message {
+            role: Role::Assistant,
+            content: vec![ContentBlock::ToolUse {
+                id: "old-prunable-tool".to_string(),
+                name: "read_file".to_string(),
+                input: serde_json::json!({"path": "old-probe.txt"}),
+                caller: None,
+                thought_signature: None,
+            }],
+        },
+        Message {
+            role: Role::User,
+            content: vec![ContentBlock::ToolResult {
+                tool_use_id: "old-prunable-tool".to_string(),
+                content: OLD_TOOL_OUTPUT.repeat(2000),
+                is_error: None,
+                content_blocks: None,
+            }],
+        },
+    ];
+    handle
+        .send(Op::SyncSession {
+            session_id: Some("prune-baseline-test".to_string()),
+            messages: seeded_messages,
+            system_prompt: None,
+            system_prompt_override: false,
+            model: "deepseek-v4-pro".to_string(),
+            workspace: tmp.path().to_path_buf(),
+            workspace_roots: Vec::new(),
+            mode: AppMode::Agent,
+        })
+        .await
+        .expect("sync session");
+
+    // Turn A runs unarmed: it renders no transition and establishes the
+    // standing baseline.
+    handle
+        .send(Op::SendMessage {
+            content: "turn in the original posture".to_string(),
+            mode: AppMode::Agent,
+            route: resolved_route_for_test(&api_config, "deepseek-v4-pro"),
+            compaction: Box::new(CompactionConfig {
+                enabled: false,
+                ..CompactionConfig::default()
+            }),
+            goal_objective: None,
+            goal_token_budget: None,
+            goal_status: crate::tools::goal::GoalStatus::Active,
+            reasoning_effort: None,
+            reasoning_effort_auto: false,
+            auto_model: false,
+            allow_shell: false,
+            trust_mode: false,
+            auto_approve: false,
+            approval_mode: crate::tui::approval::ApprovalMode::Suggest,
+            translation_enabled: false,
+            allowed_tools: None,
+            dynamic_tools: Vec::new(),
+            hook_executor: None,
+            verbosity: None,
+            provenance: UserInputProvenance::ExternalUser,
+            turn_tool_security: None,
+            submission_id: None,
+        })
+        .await
+        .expect("send the original-posture turn");
+    wait_for_turn_complete(&handle).await;
+
+    // Arm the approval posture, then run the B turn whose block reports the
+    // A→B transition into history.
+    handle
+        .send(Op::ChangeMode {
+            mode: AppMode::Agent,
+            allow_shell: false,
+            trust_mode: false,
+            auto_approve: false,
+            approval_mode: crate::tui::approval::ApprovalMode::Auto,
+            configured_sandbox_mode: None,
+            ask_on_guardrail: None,
+        })
+        .await
+        .expect("send the approval posture change");
+    handle
+        .send(Op::SendMessage {
+            content: "turn that reports the transition".to_string(),
+            mode: AppMode::Agent,
+            route: resolved_route_for_test(&api_config, "deepseek-v4-pro"),
+            compaction: Box::new(CompactionConfig {
+                enabled: false,
+                ..CompactionConfig::default()
+            }),
+            goal_objective: None,
+            goal_token_budget: None,
+            goal_status: crate::tools::goal::GoalStatus::Active,
+            reasoning_effort: None,
+            reasoning_effort_auto: false,
+            auto_model: false,
+            allow_shell: false,
+            trust_mode: false,
+            auto_approve: false,
+            approval_mode: crate::tui::approval::ApprovalMode::Auto,
+            translation_enabled: false,
+            allowed_tools: None,
+            dynamic_tools: Vec::new(),
+            hook_executor: None,
+            verbosity: None,
+            provenance: UserInputProvenance::ExternalUser,
+            turn_tool_security: None,
+            submission_id: None,
+        })
+        .await
+        .expect("send the transition-reporting turn");
+    wait_for_turn_complete(&handle).await;
+
+    // Manual compaction over a threshold the prunable stale output crosses:
+    // pruning it lands under, so compact_messages_safe returns the local
+    // PruneOnly result without any provider summary call.
+    handle
+        .send(Op::CompactContext {
+            id: "manual-prune-1".to_string(),
+            route: resolved_route_for_test(&api_config, "deepseek-v4-pro"),
+            compaction: Box::new(CompactionConfig {
+                enabled: true,
+                token_threshold: 5_000,
+                ..CompactionConfig::default()
+            }),
+        })
+        .await
+        .expect("send manual compaction");
+    {
+        let mut rx = handle.rx_event.write().await;
+        loop {
+            let event = tokio::time::timeout(model_turn_event_timeout(), rx.recv())
+                .await
+                .expect("timed out waiting for the manual compaction")
+                .expect("engine event channel closed before compaction settled");
+            if let Event::TurnComplete {
+                compaction_id: Some(id),
+                ..
+            } = event
+            {
+                assert_eq!(id, "manual-prune-1", "the manual compaction must settle");
+                break;
+            }
+        }
+    }
+
+    // Precondition pins: the mechanical prune actually ran (the stale output
+    // shrank) and the layout survived (same message count and roles as
+    // before the compaction).
+    let (pre_len, pre_roles) = {
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        handle
+            .send(Op::GetSessionSnapshot {
+                tx: std::sync::Arc::new(std::sync::Mutex::new(Some(tx))),
+            })
+            .await
+            .expect("request snapshot");
+        let snapshot = tokio::time::timeout(model_turn_event_timeout(), rx)
+            .await
+            .expect("snapshot response")
+            .expect("snapshot");
+        (
+            snapshot.messages.len(),
+            snapshot
+                .messages
+                .iter()
+                .map(|message| message.role.as_str().to_string())
+                .collect::<Vec<_>>(),
+        )
+    };
+    {
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        handle
+            .send(Op::GetSessionSnapshot {
+                tx: std::sync::Arc::new(std::sync::Mutex::new(Some(tx))),
+            })
+            .await
+            .expect("request snapshot");
+        let snapshot = tokio::time::timeout(model_turn_event_timeout(), rx)
+            .await
+            .expect("snapshot response")
+            .expect("snapshot");
+        let post_roles: Vec<_> = snapshot
+            .messages
+            .iter()
+            .map(|message| message.role.as_str().to_string())
+            .collect();
+        assert_eq!(
+            (snapshot.messages.len(), post_roles.as_slice()),
+            (pre_len, pre_roles.as_slice()),
+            "a PruneOnly compaction must keep every message slot: pre roles \
+             {pre_roles:?}, post roles {post_roles:?}"
+        );
+        let stale_output_len = snapshot
+            .messages
+            .iter()
+            .flat_map(|message| message.content.iter())
+            .filter_map(|block| match block {
+                ContentBlock::ToolResult { content, .. } => Some(content.len()),
+                _ => None,
+            })
+            .max()
+            .expect("the seeded stale tool result must still exist");
+        assert!(
+            stale_output_len < OLD_TOOL_OUTPUT.len() * 2000,
+            "the manual compaction must have pruned the stale tool output in \
+             place (pruned length {stale_output_len})"
+        );
+    }
+
+    // The selector's latest editable user prompt is the B turn build; its
+    // entry was pushed at the index it still occupies after the layout-
+    // preserving prune.
+    handle
+        .send(Op::EditLastTurn {
+            new_message: "revise this committed input".to_string(),
+            submission_id: Some("sub-edit-after-prune".to_string()),
+        })
+        .await
+        .expect("send edit");
+    wait_for_turn_complete(&handle).await;
+
+    handle.send(Op::Shutdown).await.expect("shutdown engine");
+    run.await.expect("engine task");
+
+    let requests = server.received_requests().await.expect("recorded requests");
+    assert_eq!(
+        requests.len(),
+        3,
+        "two real turns and the replacement: a PruneOnly compaction makes \
+         no provider call, so an extra request would mean the summary path \
+         ran and the mechanical-prune scenario did not"
+    );
+    let wire_body = |request: &[u8]| String::from_utf8_lossy(request).to_string();
+    assert!(
+        !wire_body(&requests[0].body).contains("Authority transition (host)"),
+        "the first reported turn must render no transition"
+    );
+    assert!(
+        wire_body(&requests[1].body).contains("Authority transition (host)"),
+        "the turn after the posture flip must report the transition"
+    );
+    let replacement = wire_body(&requests[2].body);
+    assert!(
+        replacement.contains("revise this committed input"),
+        "the replacement must carry the edited turn text"
+    );
+    assert!(
+        !replacement.contains("B answer."),
+        "the edit must have truncated the edited turn's suffix"
+    );
+    assert!(
+        replacement.contains("turn in the original posture"),
+        "the prune must have kept the first user block"
+    );
+    assert!(
+        replacement.contains("Authority transition (host)"),
+        "editing the B turn after a PruneOnly compaction must restore its \
+         prior (A) and re-report the transition the truncated block carried \
+         away"
+    );
+}
+
 /// Drive the standing-posture-baseline edit scenario with non-authoritative
 /// runtime turns parked between the true user turns.
 ///

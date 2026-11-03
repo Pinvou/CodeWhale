@@ -1150,6 +1150,26 @@ struct StandingPostureBaselineEntry {
     push_index: usize,
 }
 
+/// True when a replacement history occupies the same slots as the history it
+/// replaces: equal length and equal role at every index.
+///
+/// Local mechanical rewrites (tool-result pruning, sanitization) rewrite
+/// ToolResult content in place and keep every slot, so recorded
+/// `push_index`es stay exact — a PruneOnly compaction that only pruned old
+/// tool output must keep the entries, or an edit of a surviving turn loses
+/// the snapshot its block still needs. Provider-authored summaries merge or
+/// drop turns, so those replacements cannot be mapped slot-for-slot and
+/// vacate the stack instead (see the compaction call sites).
+fn standing_baseline_layout_preserved(replacement: &[Message], replaced: &[Message]) -> bool {
+    replacement.len() == replaced.len()
+        && replacement
+            .iter()
+            .zip(replaced.iter())
+            .all(|(replacement_message, original_message)| {
+                replacement_message.role == original_message.role
+            })
+}
+
 /// The core engine that processes operations and emits events
 pub struct Engine {
     config: EngineConfig,
@@ -6706,7 +6726,29 @@ impl Engine {
         match compaction_result {
             Ok(mut result) => {
                 if !result.messages.is_empty() || self.session.messages.is_empty() {
-                    self.append_compaction_agent_topology(&mut result.messages)
+                    // Unified standing-baseline handling for history
+                    // replacements the engine did not author slot-by-slot
+                    // (see `StandingPostureBaselineEntry::push_index` and
+                    // `standing_baseline_layout_preserved`): a provider-
+                    // authored compaction result moves survivors to
+                    // unknowable slots, so vacate the entries rather than
+                    // guess a rebase — the same rationale as the
+                    // auto-compaction path in core/engine/turn_loop.rs.
+                    // Post-compaction turn builds re-establish their own
+                    // entries. A local mechanical prune (PruneOnly) rewrites
+                    // ToolResult content in place and keeps every slot, so
+                    // the layout check keeps the entries anchored there;
+                    // byte-identical replacements also keep equal slots.
+                    // Measured against the pre-topology replacement: the
+                    // checkpoint the topology step inserts below is
+                    // engine-authored slot bookkeeping whose shift is
+                    // rebased onto the entries at replace time.
+                    let layout_preserved = standing_baseline_layout_preserved(
+                        &result.messages,
+                        &self.session.messages,
+                    );
+                    let topology_rebase = self
+                        .append_compaction_agent_topology(&mut result.messages)
                         .await;
                     if cancel_token.is_cancelled() {
                         self.finish_compaction(&id);
@@ -6735,18 +6777,11 @@ impl Engine {
                     let messages_after = result.messages.len();
                     let retries_used = result.retries_used;
                     let coverage_clause = result.coverage.receipt_clause();
-                    // Unified standing-baseline handling for history
-                    // replacements the engine did not author slot-by-slot
-                    // (see `StandingPostureBaselineEntry::push_index`): a
-                    // provider-authored compaction result moves survivors to
-                    // unknowable slots, so vacate the entries rather than
-                    // guess a rebase — the same rationale as the
-                    // auto-compaction path in core/engine/turn_loop.rs.
-                    // Post-compaction turn builds re-establish their own
-                    // entries. The value-identity guard keeps entries
-                    // anchored when the replacement is byte-identical to the
-                    // history it replaces: equal lists keep equal slots.
-                    if result.messages.as_slice() != &self.session.messages[..] {
+                    if layout_preserved {
+                        for entry in &mut self.standing_posture_baseline_history {
+                            entry.push_index = topology_rebase.rebase_index(entry.push_index);
+                        }
+                    } else {
                         self.standing_posture_baseline_history.clear();
                     }
                     self.session.replace_messages(result.messages);
@@ -7110,7 +7145,14 @@ impl Engine {
         }
 
         if !compacted_messages.is_empty() || self.session.messages.is_empty() {
-            self.append_compaction_agent_topology(&mut compacted_messages)
+            // Measured against the pre-topology replacement (see the manual
+            // compaction site): the checkpoint the topology step inserts
+            // below is engine-authored slot bookkeeping whose shift is
+            // rebased onto the entries at replace time.
+            let layout_preserved =
+                standing_baseline_layout_preserved(&compacted_messages, &self.session.messages);
+            let topology_rebase = self
+                .append_compaction_agent_topology(&mut compacted_messages)
                 .await;
             let turn_was_canceled = turn_cancel.is_cancelled();
             if turn_was_canceled || compaction_cancel.is_cancelled() {
@@ -7126,18 +7168,24 @@ impl Engine {
             }
             // Unified standing-baseline handling for history replacements
             // the engine did not author slot-by-slot (see
-            // `StandingPostureBaselineEntry::push_index`): whether the API
-            // pass produced a provider-authored replacement or the local
-            // fallback re-carried history through the agent-topology
-            // checkpoint rewrite (arbitrary retain/insert positions),
-            // survivors land in slots that no longer map onto the recorded
-            // indices, so vacate the entries rather than guess a rebase —
-            // the same rationale as the auto-compaction path in
-            // core/engine/turn_loop.rs. The value-identity guard keeps
-            // entries anchored when the fallback left the history
-            // value-identical: equal lists keep equal slots, so a
-            // survived-turn edit still restores its prior posture.
-            if compacted_messages.as_slice() != &self.session.messages[..] {
+            // `StandingPostureBaselineEntry::push_index` and
+            // `standing_baseline_layout_preserved`): whether the API pass
+            // produced a provider-authored replacement or the local fallback
+            // re-carried history through the agent-topology checkpoint
+            // rewrite (arbitrary retain/insert positions), survivors land in
+            // slots that no longer map onto the recorded indices, so vacate
+            // the entries rather than guess a rebase — the same rationale as
+            // the auto-compaction path in core/engine/turn_loop.rs. A local
+            // mechanical prune (PruneOnly) rewrites ToolResult content in
+            // place and keeps every slot, so the layout check keeps the
+            // entries anchored there; a fallback that left the history
+            // layout-identical also keeps equal slots, so a survived-turn
+            // edit still restores its prior posture.
+            if layout_preserved {
+                for entry in &mut self.standing_posture_baseline_history {
+                    entry.push_index = topology_rebase.rebase_index(entry.push_index);
+                }
+            } else {
                 self.standing_posture_baseline_history.clear();
             }
             self.session.replace_messages(compacted_messages);
@@ -8559,12 +8607,15 @@ impl Engine {
     /// its world-state reference after standalone compaction so the next turn
     /// receives fresh environment/subagent context instead of trusting the
     /// narrative summary as live process state.
-    async fn append_compaction_agent_topology(&self, messages: &mut Vec<Message>) {
+    async fn append_compaction_agent_topology(
+        &self,
+        messages: &mut Vec<Message>,
+    ) -> crate::runtime_handoff::AgentTopologyCheckpointRebase {
         let snapshots = {
             let manager = self.subagent_manager.read().await;
             manager.list_for_session(&self.session.id)
         };
-        crate::runtime_handoff::replace_agent_topology_checkpoint(messages, &snapshots);
+        crate::runtime_handoff::replace_agent_topology_checkpoint(messages, &snapshots)
     }
 }
 
