@@ -66,8 +66,8 @@ test('case writes preserve the same key and exact money response, reject false A
 
 import * as reconciliation from '../src/features/account-platform/reconciliation-contract.js';
 import fs from 'node:fs';
-const GENERATED_CASE_TYPES = ['LEDGER_REPAIR_PROOF_UNAVAILABLE', 'UNSUPPORTED_PROVIDER_ENTRY', 'DUPLICATE_TRANSACTION', 'INTERNAL_PAID_PROVIDER_MISSING', 'INTERNAL_REFUND_PROVIDER_MISSING', 'INTERNAL_CHARGEBACK_PROVIDER_MISSING', 'AMOUNT_MISMATCH', 'REFUND_AMOUNT_MISMATCH', 'REFUND_DATE_UNVERIFIED', 'CHARGEBACK_DATE_UNVERIFIED', 'PAYMENT_LEDGER_INVALID', 'REFUND_LEDGER_INVALID', 'CHARGEBACK_LEDGER_INVALID', 'PAYMENT_PACKAGE_INVALID', 'PAYMENT_LEDGER_MISSING', 'REFUND_LEDGER_MISSING', 'CHARGEBACK_LEDGER_MISSING', 'PROVIDER_PAID_INTERNAL_MISSING', 'PROVIDER_REFUND_INTERNAL_MISSING', 'PROVIDER_CHARGEBACK_INTERNAL_MISSING'];
-test('all twenty current producer case types have explicit three-language labels; future remains raw', () => {
+const GENERATED_CASE_TYPES = ['LEDGER_REPAIR_PROOF_UNAVAILABLE', 'UNSUPPORTED_PROVIDER_ENTRY', 'DUPLICATE_TRANSACTION', 'INTERNAL_PAID_PROVIDER_MISSING', 'INTERNAL_REFUND_PROVIDER_MISSING', 'INTERNAL_CHARGEBACK_PROVIDER_MISSING', 'AMOUNT_MISMATCH', 'REFUND_AMOUNT_MISMATCH', 'REFUND_DATE_UNVERIFIED', 'CHARGEBACK_DATE_UNVERIFIED', 'PAYMENT_LEDGER_INVALID', 'REFUND_LEDGER_INVALID', 'CHARGEBACK_LEDGER_INVALID', 'PAYMENT_PACKAGE_INVALID', 'PAYMENT_LEDGER_MISSING', 'PAYMENT_TRANSACTION_MISSING', 'REFUND_LEDGER_MISSING', 'CHARGEBACK_LEDGER_MISSING', 'PROVIDER_PAID_INTERNAL_MISSING', 'PROVIDER_REFUND_INTERNAL_MISSING', 'PROVIDER_CHARGEBACK_INTERNAL_MISSING'];
+test('all current producer case types have explicit three-language labels; future remains raw', () => {
   for (const language of ['zh', 'en', 'ja']) {
     assert.deepEqual(Object.keys(reconciliationCopy[language].caseTypes).sort(), [...GENERATED_CASE_TYPES].sort());
     for (const type of GENERATED_CASE_TYPES) {
@@ -128,7 +128,7 @@ test('OpenAPI describes actual list filters, snapshot cursors and distinct input
   assert.match(imports,/'413':[^\n]*64 MiB/);
   assert.ok(imports.includes("'400':"));assert.ok(imports.includes("'409':"));
   assert.ok(operation('/admin/v1/reconciliation-cases/{case_id}/commands').includes("'409':"));
-  // The independent server filter definitions are the authority, including all twenty case enums.
+  // The independent server filter definitions are the authority, including every current case enum.
   for(const type of GENERATED_CASE_TYPES) assert.ok(definition('adminPageReconciliationCases').includes(`"${type}"`));
   const declaredCases=parameter('CaseType').match(/enum: \[([^\]]+)\]/)[1].split(',').map(value=>value.trim());
   assert.deepEqual(declaredCases.sort(),[...GENERATED_CASE_TYPES].sort());

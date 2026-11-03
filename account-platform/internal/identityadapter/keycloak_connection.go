@@ -82,7 +82,8 @@ func keycloakHTTPSURL(raw string) (*url.URL, error) {
 
 func keycloakHTTPClient(endpoint, caFile string, production bool, timeout time.Duration) (*http.Client, error) {
 	if caFile == "" && !production {
-		return &http.Client{Timeout: timeout}, nil
+		return &http.Client{Timeout: timeout,
+			CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}, nil
 	}
 	if caFile == "" {
 		return nil, ErrKeycloakConfiguration

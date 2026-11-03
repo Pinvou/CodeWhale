@@ -17,6 +17,7 @@ export const FULL_FRONTEND_SMOKES = Object.freeze([
   command("node", "tests/remote_archive_smoke.mjs"),
   command("node", "tests/controlled_preconnect_smoke.mjs"),
   command("node", "tests/remote_dispatch_ownership_smoke.mjs"),
+  command("node", "tests/controlled_open_ui_smoke.mjs"),
   command("npm", "test:team-relay-ui"),
   command("npm", "test:markdown-artifact-ui"),
   command("node", "tests/detached_boot_smoke.js"),

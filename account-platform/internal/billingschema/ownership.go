@@ -138,12 +138,12 @@ GRANT CREATE ON SCHEMA public TO billing_service;
 DO $$ DECLARE object RECORD; BEGIN
  FOR object IN SELECT c.relname,c.relkind FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace
  WHERE n.nspname='public' AND pg_get_userbyid(c.relowner)='billing_schema_owner' AND c.relkind IN ('r','p','S','v','m')
- AND c.relname NOT IN ('schema_migrations','billing_runtime_hardening','billing_approval_command_activations','billing_approval_command_activation_history','billing_approval_proof_claims','entitlement_component_corrections','token_account_wallet_provisioning_receipts','usage_hold_admin_commands','usage_waiver_commands','usage_waiver_results','usage_waiver_rejections') LOOP
+ AND c.relname NOT IN ('schema_migrations','billing_runtime_hardening','billing_approval_command_activations','billing_approval_command_activation_history','billing_approval_proof_claims','entitlement_component_corrections','token_account_wallet_provisioning_receipts','usage_hold_admin_commands','usage_waiver_commands','usage_waiver_results','usage_waiver_rejections','product_admission_materials','product_admission_material_ciphertexts','product_admission_material_commands','product_admission_material_audits') LOOP
  EXECUTE format('ALTER %s public.%I OWNER TO billing_service',CASE object.relkind WHEN 'S' THEN 'SEQUENCE' WHEN 'v' THEN 'VIEW' WHEN 'm' THEN 'MATERIALIZED VIEW' ELSE 'TABLE' END,object.relname);
  END LOOP;
  FOR object IN SELECT p.oid::regprocedure::text AS signature FROM pg_proc p JOIN pg_namespace n ON n.oid=p.pronamespace
  WHERE n.nspname='public' AND pg_get_userbyid(p.proowner)='billing_schema_owner'
- AND p.proname NOT IN ('harden_billing_runtime_objects','reject_billing_truncate','reject_token_account_wallet_receipt_mutation') LOOP
+ AND p.proname NOT IN ('harden_billing_runtime_objects','reject_billing_truncate','reject_token_account_wallet_receipt_mutation','guard_product_admission_material','guard_product_admission_ciphertext') LOOP
  EXECUTE format('ALTER FUNCTION %s OWNER TO billing_service',object.signature);
  END LOOP;
 END $$;
@@ -191,6 +191,11 @@ DO $$ BEGIN
  END IF;
  IF to_regclass('public.token_account_wallet_provisioning_receipts') IS NOT NULL AND (SELECT pg_get_userbyid(relowner)='billing_schema_owner' FROM pg_class WHERE oid=to_regclass('public.token_account_wallet_provisioning_receipts')) THEN
   REVOKE UPDATE,DELETE ON TABLE public.token_account_wallet_provisioning_receipts FROM billing_service;
+ END IF;
+ IF to_regclass('public.product_admission_materials') IS NOT NULL THEN
+  REVOKE DELETE,TRUNCATE ON public.product_admission_materials FROM billing_service;
+  REVOKE UPDATE,TRUNCATE ON public.product_admission_material_ciphertexts FROM billing_service;
+  REVOKE UPDATE,DELETE,TRUNCATE ON public.product_admission_material_commands,public.product_admission_material_audits FROM billing_service;
  END IF;
  IF to_regclass('public.usage_waiver_commands') IS NOT NULL THEN
   REVOKE UPDATE,DELETE,TRUNCATE ON public.usage_waiver_commands,public.usage_waiver_results,public.usage_waiver_rejections FROM billing_service;

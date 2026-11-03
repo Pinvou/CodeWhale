@@ -14,7 +14,7 @@ import (
 type accountClosureStore interface {
 	CreateAccountClosure(context.Context, identity.Principal, string, string) (AccountClosureRequest, error)
 	AccountClosureForPrincipal(context.Context, identity.Principal) (AccountClosureRequest, error)
-	ListAccountClosureRepairs(context.Context, AccountClosureRepairFilter) ([]AccountClosureRequest, error)
+	ListAccountClosureRepairs(context.Context, AccountClosureRepairFilter) (AccountClosureRepairPage, error)
 	RetryAccountClosure(context.Context, identity.Principal, uuid.UUID, string, string) (AccountClosureRequest, error)
 }
 
@@ -66,12 +66,21 @@ func (s *Service) adminAccountClosures(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	items, err := store.ListAccountClosureRepairs(r.Context(), AccountClosureRepairFilter{Status: r.URL.Query().Get("status"), Stage: r.URL.Query().Get("stage")})
+	filter := AccountClosureRepairFilter{Status: r.URL.Query().Get("status"), Stage: r.URL.Query().Get("stage")}
+	if raw := r.URL.Query().Get("cursor"); len(raw) > accountClosureCursorMaxLength || strings.TrimSpace(raw) != "" {
+		updatedAt, id, err := decodeAccountClosureCursor(raw)
+		if err != nil {
+			api.WriteError(w, http.StatusBadRequest, "INVALID_CLOSURE_FILTER", "the account-closure cursor is invalid", httpserver.RequestID(r.Context()))
+			return
+		}
+		filter.CursorUpdatedAt, filter.CursorID = updatedAt, id
+	}
+	page, err := store.ListAccountClosureRepairs(r.Context(), filter)
 	if err != nil {
 		s.writeError(w, r, err)
 		return
 	}
-	api.WriteJSON(w, http.StatusOK, map[string]any{"items": items})
+	api.WriteJSON(w, http.StatusOK, page)
 }
 
 func (s *Service) adminRetryAccountClosure(w http.ResponseWriter, r *http.Request) {

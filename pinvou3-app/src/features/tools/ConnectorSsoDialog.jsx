@@ -21,11 +21,11 @@ function ConnectorSsoDialog({ state, name, copy, onCancel, onOpen, onDismiss }) 
           ? <img src={state.qr} alt={copy.sso.qrAlt(name)} className="w-52 h-52 rounded-2xl border border-slate-200 dark:border-white/10 bg-white" />
           : <div className="w-52 h-52 rounded-2xl border border-dashed border-slate-300 dark:border-white/10 flex items-center justify-center px-4 text-[13px] text-slate-500 dark:text-slate-400 bg-slate-50 dark:bg-white/5">{pendingCopy}</div>}
         {/* 还没拿到 SSO 地址(限流等待/等旧流程)时没有可打开的链接,按钮保持占位但不可点。 */}
-        <button onClick={onOpen} disabled={!state.url} className="mt-4 px-6 py-2.5 rounded-full text-[14px] font-semibold bg-blue-600 hover:bg-blue-700 text-white disabled:opacity-40 disabled:cursor-not-allowed">{copy.sso.openBrowser}</button>
+        <button type="button" onClick={onOpen} disabled={!state.url} className="mt-4 px-6 py-2.5 rounded-full text-[14px] font-semibold bg-blue-600 hover:bg-blue-700 text-white disabled:opacity-40 disabled:cursor-not-allowed">{copy.sso.openBrowser}</button>
         <div className="flex items-center gap-1.5 mt-5 text-[13px] text-slate-500 dark:text-slate-400">
           <span className="w-2 h-2 rounded-full bg-amber-400 animate-pulse"></span> {copy.sso.waiting}
         </div>
-        <button onClick={onCancel} className="mt-3 px-6 py-2 rounded-full text-[14px] font-semibold bg-slate-100 dark:bg-[#2C2C2E] text-slate-600 dark:text-slate-300">{copy.cancel}</button>
+        <button type="button" onClick={onCancel} className="mt-3 px-6 py-2 rounded-full text-[14px] font-semibold bg-slate-100 dark:bg-[#2C2C2E] text-slate-600 dark:text-slate-300">{copy.cancel}</button>
       </div>
     </div>
   ), document.body);

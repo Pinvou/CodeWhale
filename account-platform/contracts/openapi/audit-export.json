@@ -2,8 +2,15 @@
   "openapi": "3.1.0",
   "info": {
     "title": "Account audit export",
-    "version": "0.2.0"
+    "version": "0.2.0",
+    "description": "This contract describes the direct Account API with bearer authorization. The Portal BFF maps /api/admin/account plus these paths, authenticates browsers with its session cookie and CSRF protection for mutations, and forwards the stored session access token to Account. That browser-facing authentication is not described by this direct-service security scheme."
   },
+  "security": [
+    {
+      "bearerAuth": []
+    }
+  ],
+  "x-portal-bff-prefix": "/api/admin/account",
   "paths": {
     "/admin/v1/audit-logs": {
       "get": {
@@ -250,6 +257,13 @@
     }
   },
   "components": {
+    "securitySchemes": {
+      "bearerAuth": {
+        "type": "http",
+        "scheme": "bearer",
+        "bearerFormat": "JWT"
+      }
+    },
     "parameters": {
       "Limit": {
         "name": "limit",
@@ -540,10 +554,6 @@
     {
       "url": "/",
       "description": "Direct Account service; routes require existing bearer authorization."
-    },
-    {
-      "url": "/api/admin/account",
-      "description": "Session-bound Portal BFF prefix for the same Account routes; existing CSRF and one-time token forwarding apply."
     }
   ]
 }

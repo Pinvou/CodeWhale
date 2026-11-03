@@ -218,6 +218,32 @@ func TestReconciliationErrorCodeDoesNotPersistProviderMessage(t *testing.T) {
 	}
 }
 
+func TestUsageReconcilerRescheduleCarriesClaimAttempt(t *testing.T) {
+	usageID, holdID, priceID := uuid.New(), uuid.New(), uuid.New()
+	providerID, adapterVersion, upstreamRequestID := "NEW_API", "new-api-v1", "late-request"
+	store := &ownedReconciliationStoreFake{reconciliationStoreFake: reconciliationStoreFake{claims: []ReconciliationItem{{
+		UsageRequest: UsageRequest{ID: usageID, HoldID: &holdID, PriceVersionID: &priceID, Model: "test-model", Status: "REVIEW", StartedAt: time.Now()},
+		ProviderID: &providerID, AdapterVersion: &adapterVersion, UpstreamRequestID: &upstreamRequestID, Attempts: 7,
+	}}}}
+	reconciler := NewUsageReconciler(store, &reconciliationBillingFake{price: PriceVersion{ID: priceID, Model: "test-model"}}, evidenceClientFake{}, time.Second)
+	reconciler.runOnce(context.Background())
+	if store.attempt != 7 || store.rescheduledID != usageID {
+		t.Fatalf("reconciliation reschedule did not carry the claim attempt: attempt=%d store=%#v", store.attempt, store)
+	}
+}
+
+func TestUsageReconcilerStopCarriesClaimAttempt(t *testing.T) {
+	usageID := uuid.New()
+	store := &ownedReconciliationStoreFake{reconciliationStoreFake: reconciliationStoreFake{claims: []ReconciliationItem{{
+		UsageRequest: UsageRequest{ID: usageID, Status: "REVIEW", StartedAt: time.Now()}, Attempts: 7,
+	}}}}
+	reconciler := NewUsageReconciler(store, &reconciliationBillingFake{}, evidenceClientFake{}, time.Second)
+	reconciler.runOnce(context.Background())
+	if store.attempt != 7 || store.stoppedID != usageID || store.stoppedReason != "MANUAL_RECONCILIATION_REQUIRED" {
+		t.Fatalf("reconciliation stop did not carry the claim attempt: attempt=%d store=%#v", store.attempt, store)
+	}
+}
+
 type reconciliationStoreFake struct {
 	committedSnapshot     map[string]any
 	committedID           uuid.UUID
@@ -231,6 +257,22 @@ type reconciliationStoreFake struct {
 	recoveryCalls         int
 	claimsAfterRecovery   []ReconciliationItem
 	claimedBeforeRecovery bool
+}
+
+type ownedReconciliationStoreFake struct {
+	reconciliationStoreFake
+	attempt int
+}
+
+func (s *ownedReconciliationStoreFake) RescheduleReconciliationOwned(_ context.Context, id uuid.UUID, attempt int, _ string, _ time.Time) error {
+	s.rescheduledID = id
+	s.attempt = attempt
+	return nil
+}
+
+func (s *ownedReconciliationStoreFake) StopReconciliationOwned(_ context.Context, id uuid.UUID, attempt int, reason string) error {
+	s.stoppedID, s.stoppedReason, s.attempt = id, reason, attempt
+	return nil
 }
 
 func (s *reconciliationStoreFake) RecordConvergenceEvidence(_ context.Context, _ uuid.UUID, _, _, _, _ string, _ map[string]any) error {

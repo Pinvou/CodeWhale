@@ -169,4 +169,15 @@ func TestLedgerRepairProofHistoricalUpgradePostgres(t *testing.T) {
 	if _, err = billingschema.VerifyApplied(ctx, operator, historicalUpgrade); err != nil {
 		t.Fatal("verify after refused down", err)
 	}
+	// The 900032 rollback contract is checked at its own historical boundary;
+	// subsequent public migrations must still install without changing funds/ACL.
+	if err = billingschema.Up(ctx, operator, all); err != nil {
+		t.Fatal("install later public migrations", err)
+	}
+	if _, err = billingschema.VerifyApplied(ctx, operator, all); err != nil {
+		t.Fatal("verify later public migrations", err)
+	}
+	if snapshot() != factBefore || acl() != aclBefore {
+		t.Fatal("later migrations changed historical financial facts or runtime permissions")
+	}
 }

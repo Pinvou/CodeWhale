@@ -215,7 +215,7 @@ const ComposerKbSelector = ({
 
   return (
     <div className="relative">
-      <button ref={triggerRef} onClick={toggle} data-testid="kb-mount-trigger" title={active ? mountedTitle : (triggerBlocked ? modelBlockedCopy : t.kbMountTitle)}
+      <button type="button" ref={triggerRef} onClick={toggle} data-testid="kb-mount-trigger" title={active ? mountedTitle : (triggerBlocked ? modelBlockedCopy : t.kbMountTitle)}
         className={`relative shrink-0 flex items-center justify-center transition-colors border ${compact ? 'w-9 h-9 rounded-full' : 'h-8 gap-1.5 rounded-[12px] px-2.5 text-[12px] font-semibold'} ${active
           ? (compact ? 'bg-transparent text-[#1A73E8] dark:text-[#A8C7FA] border-transparent' : 'bg-[#007AFF]/10 dark:bg-[#0A84FF]/[0.18] text-[#007AFF] dark:text-[#5AC8FA] border-[#007AFF]/20 dark:border-[#0A84FF]/25')
           : triggerBlocked
@@ -242,7 +242,7 @@ const ComposerKbSelector = ({
               return (
                 <div key={c.key} data-testid="kb-mount-row"
                   className="flex items-center rounded-xl text-gray-700 dark:text-gray-200 hover:bg-[#007AFF] hover:text-white transition-colors group">
-                  <button onClick={() => entry ? toggleEnabled(c) : pick(c)} disabled={disabled} data-testid="kb-mount-toggle"
+                  <button type="button" onClick={() => entry ? toggleEnabled(c) : pick(c)} disabled={disabled} data-testid="kb-mount-toggle"
                     title={entry ? (entry.enabled ? t.kbMountDisable : t.kbMountEnable) : t.kbMountPick}
                     className="min-w-0 flex-1 flex items-center justify-between gap-2.5 px-3 py-2.5 text-[13px] text-left disabled:cursor-not-allowed disabled:opacity-50">
                     <span className="flex items-center gap-2.5 min-w-0">
@@ -259,7 +259,7 @@ const ComposerKbSelector = ({
                       : <span className="text-[11px] text-gray-400 group-hover:text-white/80 shrink-0">{c.docCount}</span>}
                   </button>
                   {entry && (
-                    <button onClick={() => remove(c)} title={t.kbMountRemoveOne} aria-label={`${t.kbMountRemoveOne}: ${c.name}`}
+                    <button type="button" onClick={() => remove(c)} title={t.kbMountRemoveOne} aria-label={`${t.kbMountRemoveOne}: ${c.name}`}
                       data-testid="kb-mount-remove" className="shrink-0 p-2.5 mr-0.5 rounded-lg text-gray-400 hover:text-white hover:bg-white/15">
                       <X size={14} />
                     </button>
@@ -307,7 +307,7 @@ const ComposerModeChip = ({ t, bs, compact, mode: modeProp, busy: busyProp, onSw
   const optCls = COMPOSER_MENU_ENTRY_OPTION_CLASS;
   return (
     <div className="relative">
-      <button ref={triggerRef} onClick={() => setOpen(!open)} title={t.modeSwitchTitle + ' · ' + (isPlan ? t.modePlan : t.modeYolo)}
+      <button type="button" ref={triggerRef} onClick={() => setOpen(!open)} title={t.modeSwitchTitle + ' · ' + (isPlan ? t.modePlan : t.modeYolo)}
         className={`${COMPOSER_ICON_BUTTON_CLASS} font-semibold ${isPlan ? 'text-[#1A73E8] dark:text-[#A8C7FA]' : ''}`}>
         {isPlan
           ? <ClipboardList size={18} className="shrink-0" />
@@ -315,14 +315,14 @@ const ComposerModeChip = ({ t, bs, compact, mode: modeProp, busy: busyProp, onSw
       </button>
       <ComposerPopover open={open} onClose={() => setOpen(false)} triggerRef={triggerRef} compact={compact}
         desktopClassName="absolute bottom-full left-0 mb-2 z-50 w-60 bg-white dark:bg-[#1E1E20] border border-black/5 dark:border-white/10 rounded-2xl shadow-xl p-1.5">
-            <button onClick={() => switchTo('yolo')} className={optCls}>
+            <button type="button" onClick={() => switchTo('yolo')} className={optCls}>
               <span className="flex flex-col items-start min-w-0">
                 <span className="font-semibold">{t.modeYolo}</span>
                 <span className="text-[11px] text-gray-400 group-hover:text-white/80">{t.modeYoloDesc}</span>
               </span>
               {!isPlan && <Check size={15} className="shrink-0 text-[#007AFF] group-hover:text-white" />}
             </button>
-            <button onClick={() => switchTo('plan')} className={optCls}>
+            <button type="button" onClick={() => switchTo('plan')} className={optCls}>
               <span className="flex flex-col items-start min-w-0">
                 <span className="font-semibold">{t.modePlan}</span>
                 <span className="text-[11px] text-gray-400 group-hover:text-white/80">{t.modePlanDesc}</span>

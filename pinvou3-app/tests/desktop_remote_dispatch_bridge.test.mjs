@@ -135,6 +135,49 @@ test('B refresh opens and projects the replacement generation after retiring the
   assert.deepEqual([...state.desktopRemoteControl.retiredControlledGenerations], ['generation-old']);
 });
 
+test('a failed refresh releases only its own navigation intent and mirrors the transition', async () => {
+  const refresh = Promise.withResolvers();
+  const { feature, state, logic } = installFeature(command => {
+    if (command === 'desktop_remote_controlled_refresh') return refresh.promise;
+    return undefined;
+  });
+  state.desktopRemoteControl = logic.applyControlledStatus(state.desktopRemoteControl, {
+    status: 'connected', generation: 'generation-current',
+  });
+  const pending = feature.controlledRefresh();
+  const intent = state.desktopRemoteControl.intents.controlled;
+  assert.equal(state.controlledNavigationIntent, intent);
+  assert.equal(state.controlledNavigationPending, true);
+  refresh.reject(new Error('refresh failed'));
+  await assert.rejects(pending);
+  assert.equal(state.desktopRemoteControl.controlledDevice.status, 'connected');
+  assert.equal(state.controlledNavigationIntent, intent);
+  assert.equal(state.controlledNavigationPending, false);
+});
+
+test('a stale control completion cannot release the newer navigation intent', async () => {
+  const first = Promise.withResolvers();
+  const second = Promise.withResolvers();
+  let count = 0;
+  const { feature, state, logic } = installFeature(command => {
+    if (command === 'desktop_remote_controlled_refresh') return ++count === 1 ? first.promise : second.promise;
+    return undefined;
+  });
+  state.desktopRemoteControl = logic.applyControlledStatus(state.desktopRemoteControl, {
+    status: 'connected', generation: 'generation-current',
+  });
+  const older = feature.controlledRefresh();
+  const newer = feature.controlledRefresh();
+  const newestIntent = state.controlledNavigationIntent;
+  first.reject(new Error('old failure'));
+  await assert.rejects(older);
+  assert.equal(state.controlledNavigationIntent, newestIntent);
+  assert.equal(state.controlledNavigationPending, true);
+  second.reject(new Error('new failure'));
+  await assert.rejects(newer);
+  assert.equal(state.controlledNavigationPending, false);
+});
+
 test('B workspace authorization exists only in the start transaction, never a live invoke', () => {
   const rustRoot = path.join(app, 'src-tauri', 'src');
   const rust = (...parts) => fs.readFileSync(path.join(rustRoot, ...parts), 'utf8');
