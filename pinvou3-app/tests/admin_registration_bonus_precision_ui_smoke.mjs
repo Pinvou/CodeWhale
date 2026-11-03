@@ -18,6 +18,7 @@ assert.ok(browserPath, 'Chromium or Edge is required');
 const staticRoot = path.resolve(import.meta.dirname, '../../account-platform/internal/portal/static');
 let dropNextAck = false;
 let mutations = 0;
+let policyReads = 0;
 const receipts = new Map();
 let permissions = ['platform.registration-bonus.read', 'platform.registration-bonus.manage'];
 let currentUserID = '0199a100-0001-7000-8000-000000000101';
@@ -108,6 +109,7 @@ const server = createServer(async (request, response) => {
     return json(response, { user_id: requestedUserID, status: "ACTIVE", active_context: { context_type: "PERSONAL", context_version: 1, authorization_version: 1, personal_authorization_version: 1, platform_authorization_version: 1, organization_authorization_version: 0, membership_version: 1, permissions: [] }, personal_permissions: [], platform_permissions: requestedPermissions });
   }
   if (url.pathname === '/api/admin/billing/admin/v1/registration-bonus-policy' && request.method === 'GET') {
+    policyReads++;
     const responsePolicy = { ...policy };
     if (nextPolicyReadDelayMs > 0) {
       const delay = nextPolicyReadDelayMs;
@@ -204,11 +206,33 @@ try {
         if (lostAck === 'http-revoked') {
           const recoveryKey = `pinvou.admin.registration-bonus.pending.${currentUserID}`;
           const originalPending = await page.evaluate(key => document.defaultView.sessionStorage.getItem(key), recoveryKey);
+          assert.ok(typeof originalPending === 'string' && originalPending.length > 0, 'the unresolved original command has persisted recovery evidence');
           permissions = ['platform.registration-bonus.read'];
           await page.reload({ waitUntil: 'networkidle0' });
           await page.waitForSelector('[data-testid="registration-bonus-policy"] [role="alert"] button');
-          assert.equal(await page.$eval('[data-testid="registration-bonus-policy"] [role="alert"] button', node => node.disabled), true);
-          await page.$eval('[data-testid="registration-bonus-policy"] [role="alert"] button', node => node.click());
+          assert.equal(await page.$eval('[data-testid="registration-bonus-policy"] [role="alert"] button', node => node.disabled), false, 'retained read permission permits a policy read retry');
+          const previousReadRevision = String(policy.revision);
+          await page.waitForFunction(expected => document.querySelector('[data-testid="registration-bonus-policy"] .adm-registration-bonus-summary dd')?.textContent.trim() === expected, {}, previousReadRevision);
+          // A legitimate newer server value distinguishes this retry's consumed
+          // response from the policy already displayed by the preceding reload.
+          policy = { ...policy, revision: (BigInt(policy.revision) + 1n).toString(), updated_at: new Date().toISOString() };
+          const expectedReadRevision = String(policy.revision);
+          assert.notEqual(expectedReadRevision, previousReadRevision);
+          const readsBeforeRetry = policyReads;
+          await Promise.all([
+            page.waitForResponse(response => response.request().method() === 'GET'
+              && new URL(response.url()).pathname === '/api/admin/billing/admin/v1/registration-bonus-policy'
+              && response.status() === 200),
+            page.click('[data-testid="registration-bonus-policy"] [role="alert"] button'),
+          ]);
+          await page.waitForNetworkIdle({ idleTime: 100 });
+          assert.equal(policyReads, readsBeforeRetry + 1, 'the read retry reaches the real policy GET handler');
+          await page.waitForFunction(expected => document.querySelector('[data-testid="registration-bonus-policy"] .adm-registration-bonus-summary dd')?.textContent.trim() === expected, {}, expectedReadRevision);
+          const readOnlyControls = await page.$eval('[data-testid="registration-bonus-policy"]', panel => ({
+            enabledSubmit: [...panel.querySelectorAll('button[type="submit"]')].some(node => !node.disabled),
+            editableFields: [...panel.querySelectorAll('input, textarea')].some(node => !node.disabled),
+          }));
+          assert.deepEqual(readOnlyControls, { enabledSubmit: false, editableFields: false }, 'read retry exposes no writable policy controls');
           assert.equal(writes.length, 1); assert.equal(mutations, 1);
           assert.equal(await page.evaluate(key => document.defaultView.sessionStorage.getItem(key), recoveryKey), originalPending, 'revoked manage cannot discard unresolved evidence');
           console.log(JSON.stringify({ action: 'pass', test: name })); continue;

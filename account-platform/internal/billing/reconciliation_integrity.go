@@ -44,12 +44,18 @@ func auditRecords(raw json.RawMessage) []reconciliationAuditRecord {
 
 func auditFourWayReconciliationFacts(ctx context.Context, q reconciliationQuerier, facts []ReconciliationInternalFact) error {
 	requests := make([]reconciliationAuditRequest, 0, len(facts))
+	factIndices := make([]int, 0, len(facts))
 	for i, f := range facts {
+		if isOrphanPaymentOrderFact(f) {
+			// There is no transaction or monetary posting to audit. The original
+			// order remains a distinct manual-review finding, never a repair.
+			continue
+		}
 		var internal reconciliationAuditRecord
 		if err := json.Unmarshal(f.InternalSnapshot, &internal); err != nil {
 			return fmt.Errorf("decode reconciliation internal facts: %w", err)
 		}
-		request := reconciliationAuditRequest{Index: i, Order: f.PaymentOrderID.String(), EntryType: f.EntryType}
+		request := reconciliationAuditRequest{Index: len(requests), Order: f.PaymentOrderID.String(), EntryType: f.EntryType}
 		if f.EntryType == "PAYMENT" {
 			var transaction reconciliationAuditRecord
 			if err := json.Unmarshal(internal["payment_transaction"], &transaction); err != nil {
@@ -75,6 +81,7 @@ func auditFourWayReconciliationFacts(ctx context.Context, q reconciliationQuerie
 			}
 		}
 		requests = append(requests, request)
+		factIndices = append(factIndices, i)
 	}
 	if len(requests) == 0 {
 		return nil
@@ -115,14 +122,14 @@ func auditFourWayReconciliationFacts(ctx context.Context, q reconciliationQuerie
 	}
 	defer rows.Close()
 	count := 0
-	seen := make([]bool, len(facts))
+	seen := make([]bool, len(requests))
 	for rows.Next() {
 		var index int
 		var data []byte
 		if err := rows.Scan(&index, &data); err != nil {
 			return err
 		}
-		if index < 0 || index >= len(facts) || seen[index] {
+		if index < 0 || index >= len(requests) || seen[index] {
 			return fmt.Errorf("invalid reconciliation audit row index")
 		}
 		seen[index] = true
@@ -130,13 +137,13 @@ func auditFourWayReconciliationFacts(ctx context.Context, q reconciliationQuerie
 		if err := json.Unmarshal(data, &payload); err != nil {
 			return err
 		}
-		auditReconciliationFact(&facts[index], requests[index], payload)
+		auditReconciliationFact(&facts[factIndices[index]], requests[index], payload)
 		count++
 	}
 	if err := rows.Err(); err != nil {
 		return err
 	}
-	if count != len(facts) {
+	if count != len(requests) {
 		return fmt.Errorf("incomplete reconciliation integrity query")
 	}
 	return nil

@@ -224,7 +224,7 @@ func (r *f06UnconfirmedCancelRepository) MarkReview(_ context.Context, id uuid.U
 	r.usage.CancelStatus = "UNCERTAINTY"
 	return nil
 }
-func (*f06UnconfirmedCancelRepository) ConfirmPreDispatchCancellation(context.Context, uuid.UUID) (CancellationResult, error) {
+func (*f06UnconfirmedCancelRepository) ConfirmPreDispatchCancellation(context.Context, uuid.UUID, uuid.UUID) (CancellationResult, error) {
 	panic("unconfirmed earlier hold was treated as released")
 }
 func (*f06UnconfirmedCancelRepository) MarkHoldReserving(context.Context, uuid.UUID) error {

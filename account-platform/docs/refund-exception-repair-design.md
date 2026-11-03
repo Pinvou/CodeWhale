@@ -115,6 +115,8 @@ PAY-27 网络边界：原退款意图、冻结权益/现金预留与 Outbox 先�
 - 该推进必须幂等：已为 `APPLIED` 且存在同 `refund_id` 的 case 时按 result-first 读回，不重复推进、不再写账。
 - 若异常仍是 `OPEN`/`NONE`（未升级）或 `version` 漂移，整笔失败关闭，禁止自行升级或替审批人决定。
 
+相邻的 `FORCED_REFUND` 通过 `CompleteEscalatedForcedRefund` 提供独立的窄状态边：仅接受已 `RESOLVED/ESCALATE_FINANCIAL_REPAIR/PENDING` 且 manual 为 `LONG_TERM_PLAN` 的案件，由不同于原升级负责人的第二人提交，并逐项核对强退案的 manual、订单、交易和支付证据关联。该入口在同一个 Serializable 事务里复用强退财务写入，完成强退终态、异常版本 CAS、manual 结案、订单摘要及不可变命令/事件；任何已知数据库拒绝均回滚整笔。提交结果不明时使用原 actor、key 和 reason 查询/重试持久回执；相同 key 的 actor/内容不符以及终态后新 key 均拒绝，不重复撤销权益。普通 `CONFIRM_FORCED_REFUND` 仍允许回放财务已提交、异常尚未结案窗口的原强退回执，此兼容路径不以启用升级恢复为前提。以上不构成其他类型的通用推进或重新发起外部退款。
+
 ### 7.3 幂等与未知结果
 
 - 线性化点：`refund_exception_repair_cases.refund_id` 唯一 + `refunds` 行的 `status` 校验 + 异常 `version` CAS + journal `business_reference` 唯一；同一退款至多一次补记。

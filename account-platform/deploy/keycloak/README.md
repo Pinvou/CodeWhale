@@ -12,6 +12,11 @@ current Account-produced `account-platform/test/fixtures/provisioning-password-l
 CLI double; it does not provision a real realm. Full deployment/E2E validation
 is separate from these component tests.
 
+Configure Identity's TokenProxy with the final token endpoint URL. It rejects
+HTTP redirects in development as well as production/private-CA configurations;
+redirect responses retain the existing failed OAuth result. Correct the endpoint
+configuration to resolve such responses instead of forwarding login requests.
+
 ## Platform administrator provisioning
 
 `provision-platform-admin.sh` keeps the existing login-identity and realm-role
