@@ -648,7 +648,7 @@ npm run build:nsis
 | 聊天、模式、工具卡 | `features/chat/ChatView.jsx`、`tauri-bridge.js` | `commands.rs`、`engine.rs`、`engine_pool.rs` | `tests/ui_smoke.js`、`DeepSeek-TUI/crates/tui/src/core/engine/` |
 | Shell 实时输出与取消 | `tauri-bridge.js`、`features/chat/ChatView.jsx` | `engine.rs`、`commands.rs` | `DeepSeek-TUI/crates/tui/src/tools/shell.rs`、`tools/shell/tests.rs`、`core/engine/tests.rs` |
 | 附件与文件解析 | `tauri-bridge.js` | `file_ingest.rs`、`os/windows/windows_path.rs`、`windows_system.rs` | `file_ingest.rs` 内单元测试 |
-| 制品预览和编辑 | `features/artifacts/` | `commands.rs` | `tests/markdown_artifact_edit_smoke.js`、`tests/render_markdown_smoke.js` |
+| 制品预览和编辑 | `features/artifacts/` | `commands.rs` | `tests/markdown_artifact_edit_smoke.js` |
 | 模型与内置账号 | `features/settings/SettingsView.jsx`、`platform/tauri/bridge/settings.js` | `llmapi_hub/`、`app/commands/monitor.rs`、`app/commands/settings.rs` | `tests/settings_ui_smoke.js`、对应 Rust 模块测试 |
 | 本地知识库 | `features/knowledge/KnowledgeView.jsx` | `knowledge/`、`file_ingest.rs` | `tests/kb_smoke.js`、`knowledge/` 内单元测试 |
 | 记忆和角色卡 | `SettingsView.jsx`、`features/personas/` | `commands.rs`、`memory.rs`、`personas.rs` | `tests/ui_smoke.js`、对应 Rust 模块测试 |
