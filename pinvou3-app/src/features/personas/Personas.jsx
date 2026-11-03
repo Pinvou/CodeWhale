@@ -48,7 +48,7 @@ import { deptLabelFor, personaText, DEPT_ORDER, ALL_DEPT, DEPT_OPTIONS, deptColo
                 <h2 className="text-[20px] font-semibold truncate text-[#000] dark:text-[#fff]">{cd.name}</h2>
                 <p className="text-[13px] mt-0.5" style={{ color:'#8E8E93' }}>{deptLabelFor(t, card.dept)}{card.source==='user'?' · ' + t.cpBadgeUser:''}</p>
               </div>
-              <button onClick={onClose} className="shrink-0 w-8 h-8 rounded-full flex items-center justify-center bg-[#F2F2F7] dark:bg-[#2C2C2E]" style={{ color:'#8E8E93' }}><X size={16}/></button>
+              <button type="button" onClick={onClose} className="shrink-0 w-8 h-8 rounded-full flex items-center justify-center bg-[#F2F2F7] dark:bg-[#2C2C2E]" style={{ color:'#8E8E93' }}><X size={16}/></button>
             </div>
             {cd.description ? <div className="px-5 py-3 text-[14px] shrink-0 text-[#3C3C43] dark:text-[#C7C7CC] bg-[#fff] dark:bg-[#000] border-t border-[rgba(198,198,200,.4)] dark:border-[#1C1C1E]">{cd.description}</div> : null}
             {/* 完整人设 */}
@@ -60,7 +60,7 @@ import { deptLabelFor, personaText, DEPT_ORDER, ALL_DEPT, DEPT_OPTIONS, deptColo
             </div>
             {/* 加持/取消 */}
             <div className="p-4 shrink-0 border-t border-[rgba(198,198,200,.5)] dark:border-[#38383A]">
-              <button onClick={()=>onEquip(card)} className={"w-full py-3 rounded-[12px] text-[16px] font-semibold transition-colors " + (equipped ? 'bg-[#E5E5EA] dark:bg-[#2C2C2E] text-[#000] dark:text-[#fff]' : 'bg-[#0A84FF] dark:bg-[#007AFF] text-[#fff]')}>
+              <button type="button" onClick={()=>onEquip(card)} className={"w-full py-3 rounded-[12px] text-[16px] font-semibold transition-colors " + (equipped ? 'bg-[#E5E5EA] dark:bg-[#2C2C2E] text-[#000] dark:text-[#fff]' : 'bg-[#0A84FF] dark:bg-[#007AFF] text-[#fff]')}>
                 {equipped ? t.cpDetailUnequip : t.cpEquipShort}
               </button>
             </div>
@@ -105,9 +105,9 @@ import { deptLabelFor, personaText, DEPT_ORDER, ALL_DEPT, DEPT_OPTIONS, deptColo
           <div onClick={(e)=>e.stopPropagation()} className="w-full h-[90vh] md:h-auto md:max-h-[85vh] md:max-w-md flex flex-col rounded-t-[14px] md:rounded-[14px] overflow-hidden bg-[#F2F2F7] dark:bg-[#1C1C1E] text-[#000] dark:text-[#fff]">
             {/* 导航栏 */}
             <div className="flex justify-between items-center px-4 h-14 shrink-0 border-b border-[rgba(198,198,200,.5)] dark:border-[#38383A]">
-              <button onClick={onClose} className="text-[17px] text-[#007AFF] dark:text-[#0A84FF]">{t.cpCancel}</button>
+              <button type="button" onClick={onClose} className="text-[17px] text-[#007AFF] dark:text-[#0A84FF]">{t.cpCancel}</button>
               <span className="text-[17px] font-semibold">{isEdit ? t.cpEditCard : t.cpNewCard}</span>
-              <button onClick={save} disabled={saving} className={"text-[17px] font-semibold " + (saving ? 'text-[#8E8E93]' : 'text-[#007AFF] dark:text-[#0A84FF]')}>{saving ? t.cpSaving : (isEdit ? t.cpSaveEdit : t.cpCreate)}</button>
+              <button type="button" onClick={save} disabled={saving} className={"text-[17px] font-semibold " + (saving ? 'text-[#8E8E93]' : 'text-[#007AFF] dark:text-[#0A84FF]')}>{saving ? t.cpSaving : (isEdit ? t.cpSaveEdit : t.cpCreate)}</button>
             </div>
             {/* 表单 */}
             <div className="flex-1 overflow-y-auto p-4 space-y-6">
@@ -183,7 +183,7 @@ import { deptLabelFor, personaText, DEPT_ORDER, ALL_DEPT, DEPT_OPTIONS, deptColo
           {/* 左侧内容 */}
           <div className="relative z-10 shrink-0 flex flex-col justify-center" style={{ width:430, padding:'0 36px' }}>
             <div style={{ fontSize:28, fontWeight:800, color:'#26215C', lineHeight:1.15, letterSpacing:'-.5px', marginBottom:18 }}>{t.cpAICreate} <span style={{ color:'#534AB7' }}>{t.bnrTitleHi}</span></div>
-            <button onClick={(e)=>{ e.stopPropagation(); onStart && onStart(); }} className="inline-flex items-center gap-1.5 self-start active:opacity-80" style={{ background:'#534AB7', color:'#fff', padding:'10px 22px', borderRadius:14, fontSize:14, fontWeight:600, marginBottom:18, boxShadow:'0 4px 14px rgba(83,74,183,.35)' }}>{t.bnrStart}</button>
+            <button type="button" onClick={(e)=>{ e.stopPropagation(); onStart && onStart(); }} className="inline-flex items-center gap-1.5 self-start active:opacity-80" style={{ background:'#534AB7', color:'#fff', padding:'10px 22px', borderRadius:14, fontSize:14, fontWeight:600, marginBottom:18, boxShadow:'0 4px 14px rgba(83,74,183,.35)' }}>{t.bnrStart}</button>
             <div className="flex gap-2">
               {[['1',t.bnrStep1],['2',t.bnrStep2],['3',t.bnrStep3]].map(s => (
                 <div key={s[0]} className="flex items-center gap-1.5" style={{ background:'rgba(255,255,255,.85)', borderRadius:10, padding:'7px 11px', border:'1px solid rgba(175,169,236,.3)' }}>
@@ -290,7 +290,7 @@ import { deptLabelFor, personaText, DEPT_ORDER, ALL_DEPT, DEPT_OPTIONS, deptColo
                       className="w-full min-w-0 lg:max-w-[360px] lg:flex-1"
                     />
                     <div className="flex shrink-0 items-center justify-end gap-3">
-                      <button
+                      <button type="button"
                         data-testid="my-personas-toggle"
                         data-active={myOnly ? 'true' : 'false'}
                         onClick={() => setMyOnly(!myOnly)}
@@ -298,7 +298,7 @@ import { deptLabelFor, personaText, DEPT_ORDER, ALL_DEPT, DEPT_OPTIONS, deptColo
                         <User size={14} className="mr-2 opacity-70" />
                         {t.cpMyCards}
                       </button>
-                      <button onClick={() => setChooser(true)} title={t.cpNewCardTitle}
+                      <button type="button" onClick={() => setChooser(true)} title={t.cpNewCardTitle}
                         className="inline-flex h-9 items-center rounded-full bg-[#007AFF] px-4 text-[13px] font-semibold text-white shadow-sm transition-colors hover:bg-[#0066D6]">
                         <Plus size={14} className="mr-2" />
                         {t.cpNewCard}
@@ -316,18 +316,18 @@ import { deptLabelFor, personaText, DEPT_ORDER, ALL_DEPT, DEPT_OPTIONS, deptColo
 
                 {/* 分类药丸 + 左右滚动箭头 */}
                 <div className="relative pt-2 pb-4 group">
-                  {showL ? <button onClick={() => scrollPills(-220)} className="absolute left-0 top-1/2 -translate-y-1/2 z-10 w-8 h-8 rounded-full flex items-center justify-center border opacity-0 group-hover:opacity-100 transition shadow-sm bg-[#fff] dark:bg-[#2C2C2E] text-[#000] dark:text-[#fff] border-[rgba(198,198,200,.6)] dark:border-[#38383A]"><ChevronLeft size={18} /></button> : null}
+                  {showL ? <button type="button" onClick={() => scrollPills(-220)} className="absolute left-0 top-1/2 -translate-y-1/2 z-10 w-8 h-8 rounded-full flex items-center justify-center border opacity-0 group-hover:opacity-100 transition shadow-sm bg-[#fff] dark:bg-[#2C2C2E] text-[#000] dark:text-[#fff] border-[rgba(198,198,200,.6)] dark:border-[#38383A]"><ChevronLeft size={18} /></button> : null}
                   <div ref={scrollRef} className="flex overflow-x-auto gap-2 no-scrollbar scroll-smooth">
                     {[ALL_DEPT].concat(DEPT_ORDER.filter(k => counts[k])).map(k => {
                       const isAll = k === ALL_DEPT; const on = isAll ? activeDept === ALL_DEPT : activeDept === k;
                       return (
-                        <button key={k} onClick={() => setActiveDept(k)} className={"h-9 whitespace-nowrap shrink-0 text-[13px] px-3.5 rounded-full font-semibold transition-colors " + (on ? 'bg-[#3A3A3C] dark:bg-[#fff] text-[#fff] dark:text-[#000]' : 'bg-[#F2F2F7] dark:bg-[#2C2C2E] text-[#000] dark:text-[#fff]')}>
+                        <button type="button" key={k} onClick={() => setActiveDept(k)} className={"h-9 whitespace-nowrap shrink-0 text-[13px] px-3.5 rounded-full font-semibold transition-colors " + (on ? 'bg-[#3A3A3C] dark:bg-[#fff] text-[#fff] dark:text-[#000]' : 'bg-[#F2F2F7] dark:bg-[#2C2C2E] text-[#000] dark:text-[#fff]')}>
                           {isAll ? t.cpAll : deptLabelFor(t, k)}
                         </button>
                       );
                     })}
                   </div>
-                  {showR ? <button onClick={() => scrollPills(220)} className="absolute right-0 top-1/2 -translate-y-1/2 z-10 w-8 h-8 rounded-full flex items-center justify-center border opacity-0 group-hover:opacity-100 transition shadow-sm bg-[#fff] dark:bg-[#2C2C2E] text-[#000] dark:text-[#fff] border-[rgba(198,198,200,.6)] dark:border-[#38383A]"><ChevronRight size={18} /></button> : null}
+                  {showR ? <button type="button" onClick={() => scrollPills(220)} className="absolute right-0 top-1/2 -translate-y-1/2 z-10 w-8 h-8 rounded-full flex items-center justify-center border opacity-0 group-hover:opacity-100 transition shadow-sm bg-[#fff] dark:bg-[#2C2C2E] text-[#000] dark:text-[#fff] border-[rgba(198,198,200,.6)] dark:border-[#38383A]"><ChevronRight size={18} /></button> : null}
                 </div>
 
                 {/* 列表 */}
@@ -348,8 +348,8 @@ import { deptLabelFor, personaText, DEPT_ORDER, ALL_DEPT, DEPT_OPTIONS, deptColo
                                 <h2 className="text-[17px] font-semibold tracking-tight truncate mb-0.5 text-[#000] dark:text-[#fff]">{cd.name}</h2>
                                 <p className="text-[13px] truncate text-[rgba(60,60,67,.6)] dark:text-[rgba(235,235,245,.6)]">{deptLabelFor(t, c.dept)}{isUser ? ' · ' + t.cpBadgeUser : ''}</p>
                               </div>
-                              {isUser ? <button onClick={(e) => openCtx(c, e)} title={t.cpEdit} className="shrink-0 w-8 h-8 rounded-full flex items-center justify-center text-[18px] opacity-0 group-hover:opacity-100 transition-opacity" style={{ color: '#8E8E93' }}>⋯</button> : null}
-                              <button onClick={(e) => equip(c, e)} className={"shrink-0 text-[15px] font-bold px-5 py-1.5 rounded-full transition active:opacity-70 bg-[#F2F2F7] dark:bg-[#2C2C2E] " + (isEmpowered ? 'text-[#8E8E93]' : 'text-[#007AFF] dark:text-[#0A84FF]')}>
+                              {isUser ? <button type="button" onClick={(e) => openCtx(c, e)} title={t.cpEdit} className="shrink-0 w-8 h-8 rounded-full flex items-center justify-center text-[18px] opacity-0 group-hover:opacity-100 transition-opacity" style={{ color: '#8E8E93' }}>⋯</button> : null}
+                              <button type="button" onClick={(e) => equip(c, e)} className={"shrink-0 text-[15px] font-bold px-5 py-1.5 rounded-full transition active:opacity-70 bg-[#F2F2F7] dark:bg-[#2C2C2E] " + (isEmpowered ? 'text-[#8E8E93]' : 'text-[#007AFF] dark:text-[#0A84FF]')}>
                                 {isEmpowered ? t.cpUnequip : t.cpEquipShort}
                               </button>
                             </div>
@@ -366,7 +366,7 @@ import { deptLabelFor, personaText, DEPT_ORDER, ALL_DEPT, DEPT_OPTIONS, deptColo
                   )}
                   {filtered.length > visible ? (
                     <div className="flex justify-center mt-6">
-                      <button onClick={() => setVisible(visible + 60)} className="text-[15px] px-5 py-2 text-[#007AFF] dark:text-[#0A84FF]">{t.cpShowMore(filtered.length - visible)}</button>
+                      <button type="button" onClick={() => setVisible(visible + 60)} className="text-[15px] px-5 py-2 text-[#007AFF] dark:text-[#0A84FF]">{t.cpShowMore(filtered.length - visible)}</button>
                     </div>
                   ) : null}
                 </div>
@@ -380,9 +380,9 @@ import { deptLabelFor, personaText, DEPT_ORDER, ALL_DEPT, DEPT_OPTIONS, deptColo
             <div className="fixed z-[100] min-w-[128px] rounded-[10px] overflow-hidden border text-[14px] bg-[#fff] dark:bg-[#2C2C2E] border-[rgba(0,0,0,.08)] dark:border-[#38383A]"
               style={{ left: Math.min(ctx.x, (typeof window !== 'undefined' ? window.innerWidth : 9999) - 150), top: Math.min(ctx.y, (typeof window !== 'undefined' ? window.innerHeight : 9999) - 100), boxShadow: '0 10px 40px rgba(0,0,0,.25)' }}
               onClick={(e) => e.stopPropagation()}>
-              <button onClick={() => { editCard(ctx.card); setCtx(null); }} className="w-full text-left px-4 py-2.5 text-[#000] dark:text-[#fff]">{t.cpMenuEdit}</button>
+              <button type="button" onClick={() => { editCard(ctx.card); setCtx(null); }} className="w-full text-left px-4 py-2.5 text-[#000] dark:text-[#fff]">{t.cpMenuEdit}</button>
               <div className="h-px bg-[rgba(0,0,0,.06)] dark:bg-[#38383A]" />
-              <button onClick={() => { doDelete(ctx.card); setCtx(null); }} className="w-full text-left px-4 py-2.5" style={{ color: '#FF3B30' }}>{t.cpDelete}</button>
+              <button type="button" onClick={() => { doDelete(ctx.card); setCtx(null); }} className="w-full text-left px-4 py-2.5" style={{ color: '#FF3B30' }}>{t.cpDelete}</button>
             </div>
           ) : null}
 
@@ -405,14 +405,14 @@ import { deptLabelFor, personaText, DEPT_ORDER, ALL_DEPT, DEPT_OPTIONS, deptColo
             <div className="fixed inset-0 z-[70] flex items-end md:items-center justify-center md:p-4" style={{ background:'rgba(0,0,0,.6)', backdropFilter:'blur(2px)', WebkitBackdropFilter:'blur(2px)' }} onClick={()=>setChooser(false)}>
               <div onClick={(e)=>e.stopPropagation()} className="w-full md:max-w-sm flex flex-col gap-2 p-3 md:p-0">
                 <div className="rounded-[14px] overflow-hidden bg-[#fff] dark:bg-[#1C1C1E]">
-                  <button onClick={()=>{ setChooser(false); if (onAICreate) onAICreate(); }} className="w-full flex items-center gap-3 px-4 py-4 text-left border-b border-[rgba(198,198,200,.5)] dark:border-[#38383A]">
+                  <button type="button" onClick={()=>{ setChooser(false); if (onAICreate) onAICreate(); }} className="w-full flex items-center gap-3 px-4 py-4 text-left border-b border-[rgba(198,198,200,.5)] dark:border-[#38383A]">
                     <div className="w-10 h-10 rounded-[12px] flex items-center justify-center shrink-0 bg-[#007AFF] dark:bg-[#0A84FF]"><Sparkles size={20} style={{ color:'#fff' }} /></div>
                     <div className="min-w-0">
                       <div className="text-[16px] font-semibold flex items-center gap-2 text-[#000] dark:text-[#fff]">{t.cpAICreate} <span className="text-[10px] px-1.5 py-0.5 rounded bg-[rgba(0,122,255,.12)] dark:bg-[rgba(10,132,255,.2)] text-[#007AFF] dark:text-[#0A84FF]">{t.chooserRecommend}</span></div>
                       <div className="text-[13px] mt-0.5 text-[rgba(60,60,67,.6)] dark:text-[rgba(235,235,245,.6)]">{t.chooserAIDesc}</div>
                     </div>
                   </button>
-                  <button onClick={()=>{ setChooser(false); setEditor({ initial: null }); }} className="w-full flex items-center gap-3 px-4 py-4 text-left">
+                  <button type="button" onClick={()=>{ setChooser(false); setEditor({ initial: null }); }} className="w-full flex items-center gap-3 px-4 py-4 text-left">
                     <div className="w-10 h-10 rounded-[12px] flex items-center justify-center shrink-0 bg-[#F2F2F7] dark:bg-[#2C2C2E] text-[#007AFF] dark:text-[#0A84FF]"><Plus size={20} /></div>
                     <div className="min-w-0">
                       <div className="text-[16px] font-semibold text-[#000] dark:text-[#fff]">{t.chooserManualTitle}</div>
@@ -420,7 +420,7 @@ import { deptLabelFor, personaText, DEPT_ORDER, ALL_DEPT, DEPT_OPTIONS, deptColo
                     </div>
                   </button>
                 </div>
-                <button onClick={()=>setChooser(false)} className="w-full rounded-[14px] py-3.5 text-[17px] font-semibold bg-[#fff] dark:bg-[#2C2C2E] text-[#007AFF] dark:text-[#0A84FF]">{t.cpCancel}</button>
+                <button type="button" onClick={()=>setChooser(false)} className="w-full rounded-[14px] py-3.5 text-[17px] font-semibold bg-[#fff] dark:bg-[#2C2C2E] text-[#007AFF] dark:text-[#0A84FF]">{t.cpCancel}</button>
               </div>
             </div>
           ), document.body) : null}

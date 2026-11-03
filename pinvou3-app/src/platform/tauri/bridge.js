@@ -1280,6 +1280,11 @@ function pinvouSceneForMessagePos(pos) { return pinvouSharedtauriMain().pinvouSc
   var mergeHydratedChatItems = sessionsFeature.mergeHydratedChatItems;
   var switchToSessionInternal = sessionsFeature.switchToSessionInternal;
   var switchToSession = sessionsFeature.switchToSession;
+  var switchToControlledSession = sessionsFeature.switchToControlledSession;
+  var captureControlledNavigationOwner = sessionsFeature.captureControlledNavigationOwner;
+  var beginLocalNavigationIntent = sessionsFeature.beginLocalNavigationIntent;
+  var isControlledNavigationOwnerCurrent = sessionsFeature.isControlledNavigationOwnerCurrent;
+  var exitControlledScheduledRunChat = sessionsFeature.exitControlledScheduledRunChat;
   var openScheduledRunChatOnce = sessionsFeature.openScheduledRunChatOnce;
   var openScheduledRunChat = sessionsFeature.openScheduledRunChat;
   var exitScheduledRunChat = sessionsFeature.exitScheduledRunChat;
@@ -2612,6 +2617,13 @@ function composePlanMarkdown(snapshots) { return pinvouSharedtauriMain().compose
       createNewSession: createNewSession,
       materializeSession: materializeSession,
       switchToSession: switchToSession,
+      switchToControlledSession: switchToControlledSession,
+      captureControlledNavigationOwner: captureControlledNavigationOwner,
+      beginLocalNavigationIntent: beginLocalNavigationIntent,
+      onLocalNavigation: sessionsFeature.onLocalNavigation,
+      getLocalNavigationEpoch: sessionsFeature.getLocalNavigationEpoch,
+      isControlledNavigationOwnerCurrent: isControlledNavigationOwnerCurrent,
+      exitControlledScheduledRunChat: exitControlledScheduledRunChat,
       deleteSession: deleteSession,
       renameSession: renameSession,
       toggleSessionPinned: toggleSessionPinned,

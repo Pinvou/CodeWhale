@@ -75,7 +75,7 @@ function publicError(error) {
     || ["unsupported_capability", "unsupported_version"].includes(error?.cause?.code)) {
     return "version_incompatible";
   }
-  if (["pairing_code_invalid", "controller_busy", "endpoint_offline", "version_incompatible"].includes(code)) {
+  if (["pairing_code_invalid", "controller_busy", "endpoint_offline", "version_incompatible", "pairing_registration_stale_relay_epoch"].includes(code)) {
     return code;
   }
   return "invalid_message";
@@ -86,6 +86,7 @@ function errorMessage(code) {
   if (code === "controller_busy") return "被控设备当前正被使用";
   if (code === "endpoint_offline") return "被控设备不在线";
   if (code === "version_incompatible") return "双方版本不兼容";
+  if (code === "pairing_registration_stale_relay_epoch") return "注册已失效，请重新开启被控端";
   return "消息无效";
 }
 

@@ -47,20 +47,24 @@ try {
   assert.equal(resolvePet('missing'), PET_REGISTRY.lingling);
   assert.equal(resolvePet(), PET_REGISTRY.lingling);
 
-  const manifestIds = manifest.map((pet) => pet.id).sort();
-  const loaderIds = Object.keys(PET_LOADERS).sort();
+  const manifestIds = manifest.map((pet) => pet.id).sort(); // eslint-disable-line unicorn/require-array-sort-compare -- lexicographic order of string arrays matches assertion expectations
+  assert.deepEqual(Object.keys(PET_REGISTRY).sort(), manifestIds); // eslint-disable-line unicorn/require-array-sort-compare -- lexicographic order of string arrays matches assertion expectations
+  // PET_REGISTRY is built from PET_LOADERS, so a missing loader throws at
+  // import time; this loop catches the inverse drift — an unused extra
+  // loader, or a loader entry that lost or gained an export (the exact
+  // atlas+cover shape is the contract, so a new export must update this pin).
+  const loaderIds = Object.keys(PET_LOADERS).sort(); // eslint-disable-line unicorn/require-array-sort-compare -- lexicographic order of string arrays matches assertion expectations
   assert.deepEqual(loaderIds, manifestIds);
-  assert.deepEqual(Object.keys(PET_REGISTRY).sort(), manifestIds);
+  for (const id of loaderIds) {
+    assert.deepEqual(Object.keys(PET_LOADERS[id]).sort(), ['atlas', 'cover']); // eslint-disable-line unicorn/require-array-sort-compare -- lexicographic order of string arrays matches assertion expectations
+    assert.equal(typeof PET_LOADERS[id].cover, 'function');
+    assert.equal(typeof PET_LOADERS[id].atlas, 'function');
+  }
   assert.deepEqual(
     Object.keys(PET_REGISTRY),
     ['lingling', 'langlang', 'ace-taffy'],
     'registry iteration order drives the visible card order',
   );
-  for (const id of loaderIds) {
-    assert.deepEqual(Object.keys(PET_LOADERS[id]).sort(), ['atlas', 'cover']);
-    assert.equal(typeof PET_LOADERS[id].cover, 'function');
-    assert.equal(typeof PET_LOADERS[id].atlas, 'function');
-  }
 
   for (const id of manifestIds) {
     assert.equal(typeof PET_REGISTRY[id].cover, 'function');

@@ -1,35 +1,41 @@
 //! Process-private Windows host driver for the feature's real reader regression.
 use std::io::Read;
 use std::time::{Duration, Instant};
+use tauri::Manager as _;
 
 #[test]
 fn real_reader_manager_worker_resume_round_trip() {
-    run_isolated_reader(false, None);
+    run_isolated_reader(false, false, false, None);
 }
 
 #[test]
 fn real_reader_endpoint_retirement_closes_waiting_and_connected_workers() {
-    run_isolated_reader(true, None);
+    run_isolated_reader(true, false, false, None);
+}
+
+#[test]
+fn real_reader_preconnection_deadlines_bound_silence_and_self_echo() {
+    run_isolated_reader(false, true, false, None);
 }
 
 #[test]
 fn real_reader_old_received_disconnect_cannot_mutate_successor() {
-    run_isolated_reader(false, Some("disconnect"));
+    run_isolated_reader(false, false, false, Some("disconnect"));
 }
 
 #[test]
 fn real_reader_old_received_joined_cannot_install_or_clear_successor() {
-    run_isolated_reader(false, Some("joined"));
+    run_isolated_reader(false, false, false, Some("joined"));
 }
 
 #[test]
 fn real_reader_old_tick_challenge_cannot_mask_successor_suspicion() {
-    run_isolated_reader(false, Some("challenge"));
+    run_isolated_reader(false, false, false, Some("challenge"));
 }
 
 #[test]
 fn real_reader_resume_activation_holds_lifecycle_owner_commit() {
-    run_isolated_reader(false, Some("activation"));
+    run_isolated_reader(false, false, false, Some("activation"));
 }
 
 #[test]
@@ -82,8 +88,25 @@ fn real_relay_manager_routes_controller_lane_outage_signal() {
     );
 }
 
-fn run_isolated_reader(retire_endpoint: bool, owner_case: Option<&str>) {
+#[test]
+fn real_worker_final_admission_preserves_timeout_and_signed_deadline() {
+    run_isolated_reader(false, false, true, None);
+}
+
+fn run_isolated_reader(
+    retire_endpoint: bool,
+    preconnect: bool,
+    final_admission: bool,
+    owner_case: Option<&str>,
+) {
     const CHILD: &str = "PINVOU_READER_RESUME_TEST_CHILD";
+    // These two regressions exercise real twenty-second local deadlines twice;
+    // they never shorten the production budget through a test-only branch.
+    let child_budget = if preconnect || final_admission {
+        65
+    } else {
+        15
+    };
     if std::env::var(CHILD).as_deref() == Ok("1") {
         if let Some(case) = owner_case {
             unsafe {
@@ -113,7 +136,7 @@ fn run_isolated_reader(retire_endpoint: bool, owner_case: Option<&str>) {
                 .unwrap()
         };
         runtime.block_on(async {
-            tokio::time::timeout(Duration::from_secs(if concurrent_race { 40 } else { 15 }),
+            tokio::time::timeout(Duration::from_secs(if concurrent_race { 40 } else { child_budget }),
                 crate::features::remote_control::controller::relay_runtime::reader_resume_tests::resume_round_trip(|| {
                     let mut context = crate::build_tauri_context();
                     context.config_mut().app.windows.clear();
@@ -122,6 +145,14 @@ fn run_isolated_reader(retire_endpoint: bool, owner_case: Option<&str>) {
                         .manage(crate::features::remote_control::controller::encrypted_lane::ControlledLaneState::default())
                         .manage(crate::features::remote_control::controller::relay_runtime::ControlledOutboundState::default())
                         .build(context).unwrap();
+                    if final_admission {
+                        let handle = app.handle().clone();
+                        handle.manage(crate::features::remote_control::RemoteControlManager::new(handle.clone()));
+                        let cleanup: std::sync::Arc<dyn crate::features::remote_control::controller::controlled::ControlledCleanupSink> = std::sync::Arc::new(super::super::desktop_remote_controller_business::DesktopControlledCleanup::new(handle.clone()));
+                        handle.state::<crate::features::remote_control::controller::controlled::ControlledDeviceManager>()
+                            .register_cleanup_sink(cleanup.clone());
+                        handle.manage(cleanup);
+                    }
                     (app.handle().clone(), app)
                 }, retire_endpoint))
                 .await
@@ -138,6 +169,10 @@ fn run_isolated_reader(retire_endpoint: bool, owner_case: Option<&str>) {
         Some("activation") => "real_reader_resume_activation_holds_lifecycle_owner_commit",
         Some("challenge") => "real_reader_old_tick_challenge_cannot_mask_successor_suspicion",
         Some(other) => panic!("unknown isolated ownership case: {other}"),
+        None if final_admission => {
+            "real_worker_final_admission_preserves_timeout_and_signed_deadline"
+        }
+        None if preconnect => "real_reader_preconnection_deadlines_bound_silence_and_self_echo",
         None if retire_endpoint => {
             "real_reader_endpoint_retirement_closes_waiting_and_connected_workers"
         }
@@ -147,13 +182,25 @@ fn run_isolated_reader(retire_endpoint: bool, owner_case: Option<&str>) {
     let child = std::process::Command::new(std::env::current_exe().unwrap())
         .args(["--exact", &filter, "--nocapture"])
         .env(CHILD, "1")
+        .env(
+            "PINVOU_READER_PRECONNECT_SCENARIO",
+            if preconnect { "1" } else { "0" },
+        )
+        .env(
+            "PINVOU_READER_FINAL_ADMISSION_SCENARIO",
+            if final_admission { "1" } else { "0" },
+        )
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
         .spawn()
         .unwrap();
     let (status, output, errors) = collect_reader_child(
         child,
-        Duration::from_secs(if owner_case.is_some() { 50 } else { 25 }),
+        Duration::from_secs(if owner_case.is_some() {
+            50
+        } else {
+            child_budget + 10
+        }),
     );
     assert!(
         status.success(),
