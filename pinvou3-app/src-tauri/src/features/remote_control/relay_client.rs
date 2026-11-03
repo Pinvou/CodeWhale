@@ -1290,7 +1290,7 @@ mod tests {
         };
         assert_eq!(text, original);
 
-        let fixture = super::super::controller::test_support::pairing_fixture("relay-debug-key");
+        let fixture = super::controller::test_support::pairing_fixture("relay-debug-key");
         let authority = SharedControllerAuthority::default();
         let generation = fixture.joined["remote_control_generation"]
             .as_str()
@@ -1373,7 +1373,7 @@ mod tests {
         let request = controller_websocket_request(&config().relay_url).unwrap();
         assert_eq!(
             request.headers().get(SEC_WEBSOCKET_PROTOCOL).unwrap(),
-            super::super::controller::protocol::CONTROLLER_SUBPROTOCOL
+            super::controller::protocol::CONTROLLER_SUBPROTOCOL
         );
     }
 
@@ -2010,11 +2010,11 @@ mod tests {
         classified_terminal.extend(REGISTER_REJECTED_ERROR_CODES);
         for code in &classified_terminal {
             assert!(
-                super::super::manager::TERMINAL_REGISTRATION_ERROR_CODES.contains(code),
+                super::manager::TERMINAL_REGISTRATION_ERROR_CODES.contains(code),
                 "relay terminal code {code} must be in the manager terminal list"
             );
         }
-        for code in super::super::manager::TERMINAL_REGISTRATION_ERROR_CODES {
+        for code in super::manager::TERMINAL_REGISTRATION_ERROR_CODES {
             let classified =
                 terminal_message(&json!({ "type": "error", "code": code }), "ep-cross-pin");
             assert!(
@@ -2026,7 +2026,7 @@ mod tests {
             );
         }
         assert!(
-            !super::super::manager::TERMINAL_REGISTRATION_ERROR_CODES
+            !super::manager::TERMINAL_REGISTRATION_ERROR_CODES
                 .contains(&"endpoint_not_found")
         );
     }
