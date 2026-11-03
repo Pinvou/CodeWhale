@@ -762,31 +762,48 @@ struct GateEntry {
 /// 不占 Tauri setup 主线程；各自只修改互不重叠的技能目录。四连接器的探测 + 刷新
 /// 同一形状,逐连接器静态 GateEntry 表驱动。
 pub async fn refresh_connector_auth_gates() -> Result<ConnectorAuthGateRefresh, String> {
+    refresh_gates(&GATE_ENTRIES).await
+}
+
+/// 四连接器的静态 GateEntry 表（供 [`refresh_gates`] 驱动与测试注入混合
+/// 成功/失败聚合）。
+static GATE_ENTRIES: [GateEntry; 4] = [
+    GateEntry {
+        id: "feishu",
+        display_name: "飞书",
+        probe_and_apply: crate::features::connectors::feishu::feishu_gate_step,
+    },
+    GateEntry {
+        id: "wecom",
+        display_name: "企业微信",
+        probe_and_apply: crate::features::connectors::wecom::wecom_gate_step,
+    },
+    GateEntry {
+        id: "dingtalk",
+        display_name: "钉钉",
+        probe_and_apply: crate::features::connectors::dingtalk::dingtalk_gate_step,
+    },
+    GateEntry {
+        id: "tmeet",
+        display_name: "腾讯会议",
+        probe_and_apply: crate::features::connectors::tmeet::tmeet_gate_step,
+    },
+];
+
+/// The table-driven aggregate behind [`refresh_connector_auth_gates`],
+/// parameterized over the gate table so tests can drive a mixed
+/// successful/failing aggregate without the real CLI probes. Structural
+/// contract (pinned by
+/// `aggregate_keeps_successful_sibling_mutations_while_reporting_failure`):
+/// every gate runs to completion and a sibling's error never rolls back the
+/// mutations a successful gate already persisted — the first error is only
+/// reported AFTER all gates finished, so the caller's delivery step must run
+/// on the error path too.
+pub(crate) async fn refresh_gates(
+    gates: &'static [GateEntry],
+) -> Result<ConnectorAuthGateRefresh, String> {
     let started = Instant::now();
     crate::platform::startup::mark("connector_auth_refresh:start");
-
-    let gates: &[GateEntry] = &[
-        GateEntry {
-            id: "feishu",
-            display_name: "飞书",
-            probe_and_apply: crate::features::connectors::feishu::feishu_gate_step,
-        },
-        GateEntry {
-            id: "wecom",
-            display_name: "企业微信",
-            probe_and_apply: crate::features::connectors::wecom::wecom_gate_step,
-        },
-        GateEntry {
-            id: "dingtalk",
-            display_name: "钉钉",
-            probe_and_apply: crate::features::connectors::dingtalk::dingtalk_gate_step,
-        },
-        GateEntry {
-            id: "tmeet",
-            display_name: "腾讯会议",
-            probe_and_apply: crate::features::connectors::tmeet::tmeet_gate_step,
-        },
-    ];
 
     let tasks: Vec<_> = gates
         .iter()
@@ -900,6 +917,63 @@ pub fn bundle_store_on_disconnected(id: &str) {
 
 #[cfg(test)]
 mod tests {
+    /// Marker "materialization" for the successful aggregate sibling: the
+    /// fn-pointer entry cannot capture, so it touches the (env-isolated)
+    /// PINVOU3_HOME.
+    fn aggregate_sibling_apply_ok() -> Result<bool, String> {
+        let marker = crate::platform::paths::pinvou3_home().join("aggregate-ok-skills");
+        std::fs::create_dir_all(marker).map_err(|e| e.to_string())?;
+        Ok(true)
+    }
+
+    fn aggregate_sibling_apply_fail() -> Result<bool, String> {
+        Err("aggregate sibling failure".to_string())
+    }
+
+    /// Review P2 (aggregate delivery): a failing sibling must not erase (or
+    /// stand in front of) a successful sibling's persisted mutations. The
+    /// aggregate runs every gate to completion and reports only the first
+    /// error — the caller's live-session wrap-up runs on the error path too,
+    /// and this pins the precondition that fix relies on: the successful
+    /// gate's grant + materialization are durable even though the aggregate
+    /// returns Err.
+    #[test]
+    fn aggregate_keeps_successful_sibling_mutations_while_reporting_failure() {
+        use crate::platform::test_support::with_temp_home;
+        with_temp_home("pinvou3-aggregate-siblings", || {
+            let ok_gate = super::GateEntry {
+                id: "aggtestok",
+                display_name: "聚合测试成功侧",
+                probe_and_apply: aggregate_sibling_apply_ok,
+            };
+            let bad_gate = super::GateEntry {
+                id: "aggtestbad",
+                display_name: "聚合测试失败侧",
+                probe_and_apply: aggregate_sibling_apply_fail,
+            };
+            let gates: &'static [super::GateEntry] =
+                Box::leak(vec![ok_gate, bad_gate].into_boxed_slice());
+            let err = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .unwrap()
+                .block_on(super::refresh_gates(gates))
+                .unwrap_err();
+            assert!(
+                err.contains("aggregate sibling failure"),
+                "the failing sibling's error is the aggregate verdict (Official's \
+                 collect_refresh_outcomes propagates the gate's raw error; the \
+                 display-name prefix only wraps a join panic): {err}"
+            );
+            assert!(
+                crate::platform::paths::pinvou3_home()
+                    .join("aggregate-ok-skills")
+                    .exists(),
+                "the successful sibling's materialization must survive the sibling's error"
+            );
+        });
+    }
+
     /// 连接镜像的存证口径：盘上二进制无法通过 hash 核对（缺失/不匹配/无 lock
     /// 条目）时必须降级为无 pin 记录，而非携带 lock 表的「应然」pin。
     #[test]

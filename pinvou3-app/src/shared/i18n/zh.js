@@ -840,10 +840,12 @@ dictZh.uiToolDetails.flow = {
   openBrowser:'在浏览器打开 ↗', connectionIncomplete:'连接未完成', close:'关闭', retry:'重试',
 };
 
-dictZh.uiToolDetails.actions = { connectedTmeet:'已连接腾讯会议', enabled:'已连接。工具开关默认关闭，可在输入框工具列表中开启', disconnectedTmeet:'已断开腾讯会议', connectingIma:'正在连接「腾讯 ima」', validatingIma:'正在校验 OpenAPI 凭证…', connectedIma:'已连接「腾讯 ima」', imaEnabled:'IMA 已连接。工具开关默认关闭，可在输入框工具列表中开启。', imaFailed:'IMA 连接失败', imaSkillsFailed:err=>`IMA 连接未完成：技能已安装，但同意状态保存失败，本次连接已回滚（需重新连接）；重连后如技能默认开启，请在输入框工具列表中手动关闭：${err}`, disconnectedIma:'已断开「腾讯 ima」', operationFailed:'操作失败，请重试' };
+dictZh.uiToolDetails.actions = { connectedTmeet:'已连接腾讯会议', enabled:'已连接。工具开关默认开启，可在输入框工具列表中管理', disconnectedTmeet:'已断开腾讯会议', connectingIma:'正在连接「腾讯 ima」', validatingIma:'正在校验 OpenAPI 凭证…', connectedIma:'已连接「腾讯 ima」', imaEnabled:'IMA 已连接。工具开关默认关闭，可在输入框工具列表中开启。', imaFailed:'IMA 连接失败', imaSkillsFailed:err=>`IMA 连接未完成：技能已安装，但同意状态保存失败，本次连接已回滚（需重新连接）；重连后如技能默认开启，请在输入框工具列表中手动关闭：${err}`, disconnectedIma:'已断开「腾讯 ima」', operationFailed:'操作失败，请重试' };
 
 dictZh.uiToolDetails.tmeetSteps = [{key:'runtime',label:'准备运行时',sub:'使用应用自带 Node'},{key:'cli',label:'安装连接组件',sub:'tmeet · 首次约 40 秒'},{key:'qr',label:'扫码登录',sub:'腾讯会议授权页'}];
 
+// Retained for parity with the private implementation this tree aligns with; it has
+// no consumer in the public tree (the flow card always renders localized copy).
 // Retained for parity with the private implementation this tree aligns with; it has
 // no consumer in the public tree (the flow card always renders localized copy).
 dictZh.uiToolDetails.showRawErrors = true;
@@ -1195,7 +1197,7 @@ desktopHint:'请先在桌面端安装 Obsidian 并创建笔记库，然后在这
   connectFailed:name=>`${name}连接失败`, connectTitle:name=>`连接${name}`,
   connectBusy:name=>`${name}上一个登录流程还在收尾`,
   connectBusyHint:'它稍后会自己完成，请等几秒再点「连接」。',
-  connectedBanner:name=>`已连接${name} · 工具开关默认关闭，可在输入框工具列表中开启`,
+  connectedBanner:name=>`已连接${name} · 工具开关默认开启，可在输入框工具列表中管理`,
   connectedBannerIma:'已连接腾讯 ima · 工具开关默认关闭，可在输入框工具列表中开启',
   connectedTool:name=>`已连接${name}`, disconnectedTool:name=>`已断开${name}`,
   connectedQuoted:name=>`已连接「${name}」`, installedQuoted:name=>`已安装「${name}」`, uninstalledQuoted:name=>`已卸载「${name}」`,
@@ -1242,6 +1244,8 @@ desktopHint:'请先在桌面端安装 Obsidian 并创建笔记库，然后在这
     registration_failed:'应用注册未完成，请重新连接',
     auth_failed:'登录授权未完成，请重新连接',
     consent_persist_failed:'授权已完成，但默认关同意状态落盘失败。请在输入框工具列表中关闭该连接器后重新连接。',
+    connect_consent_persist_failed:'授权已完成，但连接器启用状态落盘失败。未对外暴露任何能力，请重新连接重试。',
+    connect_consent_commit_incomplete:'授权已完成，但固化连接器启用状态失败。连接器保持启用，但并发操作仍可能将其撤回——请重新连接以确认生效。',
     skills_enable_failed:'已完成授权，但启用技能失败，请重试',
     unknown:'连接失败，请稍后重试',
   },
@@ -2074,6 +2078,9 @@ dictZh["uiAccount"] = {
 };
 dictZh["uiToolStore"]["guide"]["types"] = ["标准 Skill（SKILL.md 目录）", "单个 .md 技能文件", "MCP 服务", "Pinvou 插件包（推荐）"];
 dictZh["uiToolStore"]["connectorErrors"] = {
+    "consent_persist_failed": "授权已完成，但默认关同意状态落盘失败。请在输入框工具列表中关闭该连接器后重新连接。",
+    "connect_consent_persist_failed": "授权已完成，但连接器启用状态落盘失败。未对外暴露任何能力，请重新连接重试。",
+    "connect_consent_commit_incomplete": "授权已完成，但固化连接器启用状态失败。连接器保持启用，但并发操作仍可能将其撤回——请重新连接以确认生效。",
     "consent_persist_failed": "授权已完成，但默认关同意状态落盘失败。请在输入框工具列表中关闭该连接器后重新连接。",
   "runtime_prepare_failed": "准备连接器运行环境失败，请重试",
   "cli_install_failed": "安装连接组件失败，请检查网络后重试",
