@@ -1127,9 +1127,26 @@ struct StandingPostureBaselineEntry {
     /// edited away.
     prior_posture: Option<crate::core::authority::TurnMetaPosture>,
     /// History index the entry's message was appended at (the
-    /// `session.messages` length before its `add_message`). Only meaningful
-    /// while no history replacement (session resume, compaction) has rebuilt
-    /// the list underneath it; those paths clear the stack.
+    /// `session.messages` length before its `add_message`). Invariant: the
+    /// index is only meaningful against the CURRENT retained history, and
+    /// every history mutation must restore that property before the next
+    /// `EditLastTurn` reads it:
+    /// - a suffix truncation (`EditLastTurn`) never moves prefix indices —
+    ///   its drain drops entries at or above the cut and restores the cut
+    ///   entry's `prior_posture`;
+    /// - a mechanical removal that keeps survivors in order (`/purge`,
+    ///   `trim_oldest_messages_to_budget`) remaps each surviving entry to
+    ///   its message's new slot and drops entries whose message is gone —
+    ///   a survived turn keeps restoring its prior posture even when its
+    ///   index shifted;
+    /// - a replacement the engine did not author slot-by-slot (auto,
+    ///   manual, and emergency compaction results; the emergency fallback
+    ///   can also re-carry history through the agent-topology checkpoint
+    ///   rewrite) cannot be rebased, so it vacates the stack — except when
+    ///   the replacement is value-identical to the previous history, which
+    ///   keeps every slot exact;
+    /// - a conversation replacement (`SyncSession`) clears the stack with
+    ///   the rest of the posture state.
     push_index: usize,
 }
 
@@ -6267,9 +6284,11 @@ impl Engine {
             // The message appends right after this line, so the current
             // history length is the index its entry is linked to. The engine
             // appends every history message itself, so the index stays exact
-            // until a history replacement clears the stack (session resume,
-            // compaction); suffix truncations from EditLastTurn never move
-            // prefix indices.
+            // across suffix truncations (EditLastTurn never moves prefix
+            // indices), and every other history mutation — purge and trim
+            // re-anchoring survivors, compaction replacements vacating the
+            // stack, session resume clearing it — restores that invariant
+            // before the next edit reads it (see `push_index`).
             let push_index = self.session.messages.len();
             self.standing_posture_baseline_history
                 .push(StandingPostureBaselineEntry {
@@ -6716,6 +6735,20 @@ impl Engine {
                     let messages_after = result.messages.len();
                     let retries_used = result.retries_used;
                     let coverage_clause = result.coverage.receipt_clause();
+                    // Unified standing-baseline handling for history
+                    // replacements the engine did not author slot-by-slot
+                    // (see `StandingPostureBaselineEntry::push_index`): a
+                    // provider-authored compaction result moves survivors to
+                    // unknowable slots, so vacate the entries rather than
+                    // guess a rebase — the same rationale as the
+                    // auto-compaction path in core/engine/turn_loop.rs.
+                    // Post-compaction turn builds re-establish their own
+                    // entries. The value-identity guard keeps entries
+                    // anchored when the replacement is byte-identical to the
+                    // history it replaces: equal lists keep equal slots.
+                    if result.messages.as_slice() != &self.session.messages[..] {
+                        self.standing_posture_baseline_history.clear();
+                    }
                     self.session.replace_messages(result.messages);
                     if let Some(pm) = self.session.prefix_stability.as_mut() {
                         pm.note_history_reset("compaction");
@@ -6829,6 +6862,16 @@ impl Engine {
         {
             Ok(result) => {
                 let messages_after = result.messages.len();
+                // Purge keeps survivors in order and rewrites them in place,
+                // so `survivor_origins` maps every retained message back to
+                // its pre-purge slot. Re-anchor the standing baseline through
+                // that mapping before the history is replaced (see
+                // `StandingPostureBaselineEntry::push_index`): entries whose
+                // turn message the purge removed are dropped, survivors keep
+                // a corrected `push_index`, so an EditLastTurn cut still
+                // matches the retained turn's entry and a survived turn —
+                // even at a shifted index — restores its prior posture.
+                self.relocate_standing_baseline_entries(&result.survivor_origins);
                 self.session.replace_messages(result.messages);
                 self.emit_session_updated().await;
 
@@ -6922,6 +6965,25 @@ impl Engine {
         )
     }
 
+    /// Re-anchor standing-baseline entries after a mechanical history
+    /// removal that keeps survivors in order. `survivor_origins[i]` is the
+    /// previous-history index of the message now at index `i` (ascending,
+    /// each index at most once — `/purge`'s `PurgeResult::survivor_origins`
+    /// has exactly this shape). An entry is kept with `push_index` remapped
+    /// to its message's new slot, or dropped when the removal took its
+    /// message (see `StandingPostureBaselineEntry::push_index`).
+    fn relocate_standing_baseline_entries(&mut self, survivor_origins: &[usize]) {
+        self.standing_posture_baseline_history.retain_mut(|entry| {
+            match survivor_origins.binary_search(&entry.push_index) {
+                Ok(new_index) => {
+                    entry.push_index = new_index;
+                    true
+                }
+                Err(_) => false,
+            }
+        });
+    }
+
     fn trim_oldest_messages_to_budget(&mut self, target_input_budget: usize) -> usize {
         let mut removed = 0usize;
         while self.session.messages.len() > MIN_RECENT_MESSAGES_TO_KEEP
@@ -6930,6 +6992,22 @@ impl Engine {
             self.session.messages.trim_front(1);
             self.session.bump_messages_revision();
             removed = removed.saturating_add(1);
+        }
+        if removed > 0 {
+            // A front trim removes exactly the first `removed` messages and
+            // keeps the survivors in order, so re-anchor the standing
+            // baseline (see `StandingPostureBaselineEntry::push_index`):
+            // entries below the cut lost their message and are dropped,
+            // survivors shift down by `removed` and keep restoring their
+            // prior posture on an edit.
+            self.standing_posture_baseline_history.retain_mut(|entry| {
+                if entry.push_index < removed {
+                    false
+                } else {
+                    entry.push_index -= removed;
+                    true
+                }
+            });
         }
         removed
     }
@@ -7045,6 +7123,22 @@ impl Engine {
                 .to_string();
                 self.emit_compaction_cancelled(id, true, message).await;
                 return false;
+            }
+            // Unified standing-baseline handling for history replacements
+            // the engine did not author slot-by-slot (see
+            // `StandingPostureBaselineEntry::push_index`): whether the API
+            // pass produced a provider-authored replacement or the local
+            // fallback re-carried history through the agent-topology
+            // checkpoint rewrite (arbitrary retain/insert positions),
+            // survivors land in slots that no longer map onto the recorded
+            // indices, so vacate the entries rather than guess a rebase —
+            // the same rationale as the auto-compaction path in
+            // core/engine/turn_loop.rs. The value-identity guard keeps
+            // entries anchored when the fallback left the history
+            // value-identical: equal lists keep equal slots, so a
+            // survived-turn edit still restores its prior posture.
+            if compacted_messages.as_slice() != &self.session.messages[..] {
+                self.standing_posture_baseline_history.clear();
             }
             self.session.replace_messages(compacted_messages);
         }

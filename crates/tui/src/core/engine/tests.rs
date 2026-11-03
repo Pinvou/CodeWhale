@@ -19708,6 +19708,242 @@ async fn edit_last_turn_restores_the_standing_posture_baseline() {
     );
 }
 
+#[tokio::test]
+async fn purge_then_edit_restores_the_standing_posture_baseline() {
+    use wiremock::matchers::{body_string_contains, method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    // A `/purge` that removes an earlier assistant while keeping both user
+    // blocks shifts the second turn's block to a lower history index. The
+    // standing-baseline entry recorded the index at push time, so the purge
+    // must re-anchor the surviving entry — an edit of that turn then still
+    // restores the baseline its block replaced and re-reports the transition
+    // the truncated block carried away. Without the re-anchor, the drain
+    // discards the entry at the stale index and the replacement recomputes
+    // against the unchanged baseline (B→B), silently dropping the A→B line.
+    let _lock = lock_test_env();
+    let tmp = tempdir().expect("tempdir");
+    let server = MockServer::start().await;
+
+    let sse_body = |id: &str, answer: &str| {
+        format!(
+            "data: {{\"id\":\"chatcmpl-{id}\",\"choices\":[{{\"index\":0,\
+             \"delta\":{{\"content\":\"{answer}\"}},\"finish_reason\":null}}]}}\n\n\
+             data: {{\"id\":\"chatcmpl-{id}\",\"choices\":[{{\"index\":0,\
+             \"delta\":{{}},\"finish_reason\":\"stop\"}}]}}\n\n\
+             data: [DONE]\n\n",
+        )
+    };
+    // First-match-wins: the purge request is the only one carrying
+    // `purge_context`; the replacement is the only one carrying the revised
+    // text; the two real turns are told apart by their own prompt text —
+    // the B-turn mock is mounted first because the B request replays the
+    // retained A-turn text, so the A-turn matcher would otherwise capture
+    // it too (the purge request carries both texts, but the purge mock
+    // matches first).
+    Mock::given(method("POST"))
+        .and(path("/v1/chat/completions"))
+        .and(body_string_contains("purge_context"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .insert_header("content-type", "application/json")
+                .set_body_string(
+                    r#"{"id":"chatcmpl-purge-fix","model":"deepseek-v4-pro","choices":[{"index":0,"message":{"role":"assistant","content":null,"tool_calls":[{"id":"call_purge_fix","type":"function","function":{"name":"purge_context","arguments":"{\"operations\":[{\"op\":\"remove\",\"msg\":2}]}"}}]},"finish_reason":"tool_calls"}],"usage":{"prompt_tokens":10,"completion_tokens":5,"total_tokens":15}}"#,
+                ),
+        )
+        .expect(1)
+        .mount(&server)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/v1/chat/completions"))
+        .and(body_string_contains("revise this turn"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .insert_header("content-type", "text/event-stream")
+                .set_body_string(sse_body("purge-fix-revised", "Revised answer.")),
+        )
+        .expect(1)
+        .mount(&server)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/v1/chat/completions"))
+        .and(body_string_contains("turn that reports the transition"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .insert_header("content-type", "text/event-stream")
+                .set_body_string(sse_body("purge-fix-b", "B answer.")),
+        )
+        .expect(1)
+        .mount(&server)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/v1/chat/completions"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .insert_header("content-type", "text/event-stream")
+                .set_body_string(sse_body("purge-fix-a", "A answer.")),
+        )
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    let api_config = Config {
+        api_key: Some("test-key".to_string()),
+        base_url: Some(server.uri()),
+        ..Config::default()
+    };
+    let config = EngineConfig {
+        workspace: tmp.path().to_path_buf(),
+        model: "deepseek-v4-pro".to_string(),
+        snapshots_enabled: false,
+        subagents_enabled: false,
+        ..Default::default()
+    };
+    let (engine, handle) = Engine::new(config, &api_config);
+    let run = tokio::spawn(engine.run());
+
+    // No seeded history: the first authoritative block appends at index 0,
+    // its ordinary assistant reply at index 1 — the message the purge will
+    // legally remove while keeping both user blocks.
+    handle
+        .send(Op::SyncSession {
+            session_id: Some("purge-baseline-test".to_string()),
+            messages: Vec::new(),
+            system_prompt: None,
+            system_prompt_override: false,
+            model: "deepseek-v4-pro".to_string(),
+            workspace: tmp.path().to_path_buf(),
+            workspace_roots: Vec::new(),
+            mode: AppMode::Agent,
+        })
+        .await
+        .expect("sync session");
+
+    handle
+        .send(Op::SendMessage {
+            content: "turn in the original posture".to_string(),
+            mode: AppMode::Agent,
+            route: resolved_route_for_test(&api_config, "deepseek-v4-pro"),
+            compaction: Box::new(CompactionConfig::default()),
+            goal_objective: None,
+            goal_token_budget: None,
+            goal_status: crate::tools::goal::GoalStatus::Active,
+            reasoning_effort: None,
+            reasoning_effort_auto: false,
+            auto_model: false,
+            allow_shell: false,
+            trust_mode: false,
+            auto_approve: false,
+            approval_mode: crate::tui::approval::ApprovalMode::Suggest,
+            translation_enabled: false,
+            allowed_tools: None,
+            dynamic_tools: Vec::new(),
+            hook_executor: None,
+            verbosity: None,
+            provenance: UserInputProvenance::ExternalUser,
+            turn_tool_security: None,
+            submission_id: None,
+        })
+        .await
+        .expect("send the original-posture turn");
+    wait_for_turn_complete(&handle).await;
+
+    handle
+        .send(Op::ChangeMode {
+            mode: AppMode::Agent,
+            allow_shell: false,
+            trust_mode: false,
+            auto_approve: false,
+            approval_mode: crate::tui::approval::ApprovalMode::Auto,
+            configured_sandbox_mode: None,
+            ask_on_guardrail: None,
+        })
+        .await
+        .expect("send the approval posture change");
+    handle
+        .send(Op::SendMessage {
+            content: "turn that reports the transition".to_string(),
+            mode: AppMode::Agent,
+            route: resolved_route_for_test(&api_config, "deepseek-v4-pro"),
+            compaction: Box::new(CompactionConfig::default()),
+            goal_objective: None,
+            goal_token_budget: None,
+            goal_status: crate::tools::goal::GoalStatus::Active,
+            reasoning_effort: None,
+            reasoning_effort_auto: false,
+            auto_model: false,
+            allow_shell: false,
+            trust_mode: false,
+            auto_approve: false,
+            approval_mode: crate::tui::approval::ApprovalMode::Auto,
+            translation_enabled: false,
+            allowed_tools: None,
+            dynamic_tools: Vec::new(),
+            hook_executor: None,
+            verbosity: None,
+            provenance: UserInputProvenance::ExternalUser,
+            turn_tool_security: None,
+            submission_id: None,
+        })
+        .await
+        .expect("send the transition-reporting turn");
+    wait_for_turn_complete(&handle).await;
+
+    // History: [A block(0), A assistant(1), B block(2), B assistant(3)].
+    // Purge removes msg 2 (the index-1 assistant) without cascading to the
+    // user blocks; B's block shifts to index 1.
+    handle.send(Op::PurgeContext).await.expect("send purge");
+    wait_for_turn_complete(&handle).await;
+
+    handle
+        .send(Op::EditLastTurn {
+            new_message: "revise this turn".to_string(),
+            submission_id: Some("sub-edit-after-purge".to_string()),
+        })
+        .await
+        .expect("send edit after purge");
+    wait_for_turn_complete(&handle).await;
+
+    handle.send(Op::Shutdown).await.expect("shutdown engine");
+    run.await.expect("engine task");
+
+    let requests = server.received_requests().await.expect("recorded requests");
+    assert_eq!(requests.len(), 4, "two turns, one purge, one replacement");
+    let wire_body = |request: &[u8]| String::from_utf8_lossy(request).to_string();
+    assert!(
+        !wire_body(&requests[0].body).contains("Authority transition (host)"),
+        "the first reported turn must render no transition"
+    );
+    assert!(
+        wire_body(&requests[1].body).contains("Authority transition (host)"),
+        "the turn after the host flip must report the transition"
+    );
+    assert!(
+        wire_body(&requests[2].body).contains("purge_context"),
+        "the third request must be the purge"
+    );
+    let replacement = wire_body(&requests[3].body);
+    assert!(
+        !replacement.contains("A answer."),
+        "the purge must have removed the first turn's assistant reply: the \
+         replacement replays retained history only"
+    );
+    assert!(
+        !replacement.contains("B answer."),
+        "the edit must have truncated the edited turn's suffix"
+    );
+    assert!(
+        replacement.contains("turn in the original posture"),
+        "the purge must have kept the first user block"
+    );
+    assert!(
+        replacement.contains("Authority transition (host)"),
+        "editing the purged-and-shifted turn must restore the baseline its \
+         block replaced, re-reporting the transition the truncated block \
+         carried away"
+    );
+}
+
 /// Drive the standing-posture-baseline edit scenario with non-authoritative
 /// runtime turns parked between the true user turns.
 ///
