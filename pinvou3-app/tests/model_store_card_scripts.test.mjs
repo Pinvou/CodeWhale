@@ -286,8 +286,8 @@ for (const [status, running, action, disabled] of [
   });
 }
 
-// 评审 P2-1：权重未就绪（incomplete/cleanup_required/缺 weights_ready_at）的
-// 记录不给可点的「部署模型」——发起必然失败的部署只会产生看不懂的报错。
+// 评审 P2-1：权重未就绪（incomplete/缺 weights_ready_at）的记录不给可点的
+// 「部署模型」——发起必然失败的部署只会产生看不懂的报错。
 test('no update: 权重未就绪时部署按钮禁用（不发起注定失败的部署）', async (t) => {
   const ui = await fixture(t, { status: 'downloaded', running: false });
   // 夹具默认带 weights_ready_at；这里模拟缺凭据的记录
@@ -301,6 +301,43 @@ test('no update: 权重未就绪时部署按钮禁用（不发起注定失败的
   assert.ok(btn);
   assert.equal(btn.disabled, true, '权重未就绪：部署按钮必须禁用');
 });
+
+// r21 P1-1：cleanup_required 的主按钮。mark_cleanup_required 不清 weights_ready_at
+// （db.rs），此前弹窗因此落进 final else——weights 在时给**可点的「部署模型」**，
+// weights 缺时给 disabled 部署 + title「需继续下载」，两个子情形都与状态行
+// 「需继续清理」自相矛盾；行卡同态一直是 danger「继续清理」。测试注释曾声称
+// 覆盖 cleanup_required，但矩阵里一个案例都没有——这里补真实夹具：主按钮必须是
+// 「继续清理」且走 onUninstall（由 uninstallOptionsFor 给出 cleanup-only 确认框），
+// 不得出现「部署模型」。
+for (const weightsReady of [true, false]) {
+  test(`no update: cleanup_required(weights_ready_at=${weightsReady ? 'set' : 'null'}) 主按钮是「继续清理」不是部署`, async (t) => {
+    const ui = await fixture(t, { status: 'cleanup_required', running: false });
+    if (!weightsReady) ui.record.weights_ready_at = null;
+    const actions = [];
+    await ui.render(React.createElement(ModelDetailDialog, {
+      cardId: 'card', copy: dict.zh.uiModelStore, theme: 'light', scriptUpdates: {},
+      onClose() {}, onUninstall: () => actions.push('uninstall'),
+      onRedeploy: () => { throw new Error('cleanup_required 不得发起部署'); },
+    }));
+    assert.equal(
+      ui.container.querySelectorAll('[data-testid="model-store-detail-action-deploy"]').length,
+      0,
+      'cleanup_required 不得出现「部署模型」按钮'
+    );
+    const cleanup = ui.container.querySelector('[data-testid="model-store-detail-action-cleanup"]');
+    assert.ok(cleanup, '必须有「继续清理」主按钮');
+    assert.equal(cleanup.textContent, dict.zh.uiModelStore.continueCleanup);
+    assert.equal(cleanup.disabled, false);
+    await ui.click('[data-testid="model-store-detail-action-cleanup"]');
+    assert.deepEqual(actions, ['uninstall'], '走卸载链（cleanup-only 确认框由 uninstallOptionsFor 决定）');
+    // 「删除模型」次级入口不出现：cleanup-only 确认框里没有删除选项
+    assert.equal(
+      ui.container.querySelectorAll('[data-testid="model-store-detail-secondary-delete"]').length,
+      0,
+      'cleanup-only 确认框没有删除选项，弹窗不得摆「删除模型」次级按钮'
+    );
+  });
+}
 
 // 评审 P2-2：老后台不下发 script_sha256 时，后端 serde 缺省成空对象 `{}`——truthy，
 // 判空挡不住，放行进比对后本地任何非空哈希都算「服务器版本不同」，该卡全部已装

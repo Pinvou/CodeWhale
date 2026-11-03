@@ -915,17 +915,13 @@ fn start_lifecycle_checked(
     // **策略**，属于最外层接口——本模块既有的分层就是这么定的：`purge_weights` 的
     // 默认值也只在最外层定，方法签名里留必填参数（见 lifecycle.rs 里 uninstall 的
     // 文档注释）。
-    if op == OP_UNINSTALL {
-        // DB 读错必须显式失败（评审 P2：静默放行 = 带病卸载）；running 检查升级为
-        // 三重真实核验——stop 半成功时标志是 false 而进程还活，只信标志会在活进程
-        // 脚下卸载并抹掉 container_name（reconcile 反向认领靠它，清掉即永久失控）。
-        let rec = db::get_store_model(&card_id)
-            .map_err(|e| format!("读取模型记录失败，已取消卸载：{e}"))?
-            .ok_or_else(|| "该模型尚未下载".to_string())?;
-        ModelManager::new(None, None)
-            .require_actually_stopped(&rec, "卸载")
-            .map_err(|e| format!("「{}」{}", rec.card_name, e))?;
-    }
+    //
+    // r21 P2-1：核验本体挪进了 job 闭包顶部（下方 uninstall 臂）。原先它做在
+    // `spawn_op` 之前——与取锁（StartupGuard 的 flock + ActiveCardOps 的卡片
+    // 互斥）之间留着一个窗口：并发的 enable 恰好卡在两步之间完成时，解锁后的
+    // 卸载直跑清理脚本，活实例脚下删权重（正是上面注释自列的 `stop || echo
+    // 继续` 卡类）。挪到锁内复跑，分层语义不变（策略仍在最外层接口，只是换到
+    // 持锁后执行）；失败同样如实报给 run log，任务卡上看得见。
 
     let card = card_id.clone();
     spawn_op(service, &card_id, op, move |log, control, _run_id| {
@@ -942,10 +938,22 @@ fn start_lifecycle_checked(
                 .stop(&card, &mut cb, control)
                 .map(|_| Value::Null)
                 .map_err(|e| e.to_string()),
-            _ => mgr
-                .uninstall(&card, purge_weights, &mut cb, control)
-                .map(|outcome| serde_json::to_value(outcome).unwrap_or(Value::Null))
-                .map_err(|e| e.to_string()),
+            _ => {
+                // 三重停验（r21 P2-1 挪进锁内，见上方注释）：此刻 StartupGuard 的
+                // flock 与 ActiveCardOps 的卡片互斥都已持有，并发 enable 不可能再
+                // 从这条核验和清理脚本之间挤过去。DB 读错必须显式失败（静默放行 =
+                // 带病卸载）；running 检查是真实核验——stop 半成功时标志是 false
+                // 而进程还活，只信标志会在活进程脚下卸载并抹掉 container_name
+                // （reconcile 反向认领靠它，清掉即永久失控）。
+                let rec = db::get_store_model(&card)
+                    .map_err(|e| format!("读取模型记录失败，已取消卸载：{e}"))?
+                    .ok_or_else(|| "该模型尚未下载".to_string())?;
+                mgr.require_actually_stopped(&rec, "卸载")
+                    .map_err(|e| format!("「{}」{}", rec.card_name, e))?;
+                mgr.uninstall(&card, purge_weights, &mut cb, control)
+                    .map(|outcome| serde_json::to_value(outcome).unwrap_or(Value::Null))
+                    .map_err(|e| e.to_string())
+            }
         }
     })
 }

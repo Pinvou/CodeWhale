@@ -545,6 +545,25 @@ function ModelDetailDialog({ cardId, copy, theme, onClose, onRedeploy, onToast, 
                     {copy.actionUninstall}
                   </MsButton>
                 );
+              } else if (state === 'cleanup_required') {
+                // r21 P1-1：cleanup_required 此前一路落进下面的 final else——
+                // mark_cleanup_required 不清 weights_ready_at（db.rs），于是
+                // weightsReady=true 弹窗摆出**可点的「部署模型」**，与状态行
+                // 「需继续清理」自相矛盾；weights_ready_at=NULL 的子情形更拧巴：
+                // disabled 部署 + title「需继续下载」。行卡同态的主按钮一直是
+                // danger「继续清理」（ModelRow），这里补显式分支对齐：走
+                // onUninstall，uninstallOptionsFor 会按 cleanup-only 给出只含
+                // 清理范围的确认框——同一条路，不是新入口。
+                primary = (
+                  <MsButton
+                    tone="danger"
+                    disabled={cardBusy}
+                    onClick={() => { onClose(); onUninstall?.(record); }}
+                    data-testid="model-store-detail-action-cleanup"
+                  >
+                    {copy.continueCleanup}
+                  </MsButton>
+                );
               } else if (!weightsReady) {
                 primary = (
                   <MsButton
@@ -597,8 +616,11 @@ function ModelDetailDialog({ cardId, copy, theme, onClose, onRedeploy, onToast, 
                     {copy.actionRedeploy}
                   </MsButton>
                 );
-              } else {
-                // 非 deployed：删除入口（r7 P1-3）
+              } else if (state !== 'cleanup_required') {
+                // 非 deployed：删除入口（r7 P1-3）。cleanup_required 除外：它的
+                // 卸载确认框是 cleanup-only（uninstallOptionsFor），里面没有
+                // 「删除」这个选项——摆一个「删除模型」按钮、点开却是「继续清理」
+                // 的确认框，文不对题；行卡同态也只有「继续清理」一个主动作。
                 secondary.push(
                   <MsButton
                     key="delete"

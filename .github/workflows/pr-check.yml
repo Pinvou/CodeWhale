@@ -245,6 +245,12 @@ jobs:
               - '**/build.rs'
               - 'scripts/ci-libpipewire-build.sh'
               - 'scripts/ci-cargo-dev-profile.py'
+              # r21 P2-10：permissions harness 是纯 shell 入口（tests/model-store-
+              # permissions/run.sh），一个 .rs 文件都没有——不登记的话只改 run.sh
+              # 的 PR 会跳过执行它的腿而 required-gate 按 skipped 通过（本 workflow
+              # :271-280 自己记载过这类事故）。LAN harness 不需要：它的 src/*.rs
+              # 天然命中上面的 '**/*.rs'。
+              - 'tests/model-store-permissions/**'
               - 'CodeWhale'
               - '.gitmodules'
               - '.github/workflows/pr-check.yml'

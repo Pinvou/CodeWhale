@@ -586,12 +586,16 @@ mod tests {
             r#"{"store_url": "https://192.0.2.10/model-store"}"#,
         ] {
             std::fs::write(&path, leftover).unwrap();
-            // 文件本身仍然是能解析的（多出来的键被 serde 忽略），不该被隔离。
+            // r21 P2-11：断言必须在 load_settings **之后**——隔离行为要锁定的
+            // 正是「读取看到不认识的键时不作废整份配置」：既不把文件改名
+            // quarantine（坏文件才走那条路，文件会被移走、此处 exists 即假），
+            // 读取也照常完成。断言放在读取之前只证明了「我们刚写过」，
+            // 什么行为都没钉住。
+            let _settings = load_settings();
             assert!(
                 path.exists(),
                 "多一个不认识的键不该让整份配置作废：{leftover}"
             );
-            let _ = load_settings();
         }
 
         assert_eq!(

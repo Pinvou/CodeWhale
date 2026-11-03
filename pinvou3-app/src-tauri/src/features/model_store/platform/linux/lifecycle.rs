@@ -1912,14 +1912,27 @@ impl ModelManager {
     pub(crate) fn transfer_interrupted_failure(msg: &str) -> bool {
         // 小写比对：curl 原文的 "HTTP/2"、"Transferred" 都在句中大写。
         const MARKERS: &[&str] = &[
-            // 卡片脚本 humanize 后的中文形态（驭光 install_engine 自己打印的）
-            "curl 退出码 18",
-            "curl 退出码 92",
+            // 卡片脚本 humanize 后的中文形态（驭光 install_engine 自己打印的）。
+            // r21 P2-7：按「退出码 N」收而不是「curl 退出码 N」——通用包装器
+            // `脚本执行失败（退出码 18）：{summary}`（script_runner 的失败路径）
+            // 没有 curl 前缀，卡片未透出 curl 原文时此前必 miss。误收面只有
+            // 「别的工具恰好也用 18/92 当退出码」，代价是多几次断点续传重试，
+            // 不涉及安全。
+            "退出码 18",
+            "退出码 92",
             // curl 原文（卡片没 humanize 时直接透出）
             "transferred a partial file",
             "http/2 stream",
             // 同族中断：连接被对端重置（curl 56 / docker read reset）
             "connection reset by peer",
+            // r21 P2-7：curl/docker 断流的三个原文形态，此前全部 miss、落
+            // pkexec 整段重跑，正是 cube-5059 要消灭的路径——整段被掐
+            // （curl 18 原文 `transfer closed with N bytes remaining`）、
+            // 连接重置的无 by peer 变体（`Connection was reset`）、对端半途
+            // 关流（`unexpected EOF`）。
+            "transfer closed with",
+            "connection was reset",
+            "unexpected eof",
         ];
         let lowered = msg.to_lowercase();
         MARKERS.iter().any(|k| lowered.contains(k))
@@ -2298,6 +2311,22 @@ impl ModelManager {
                     )
                 })
         {
+            // r21 P2-2：先看卡片自己的身份文件。mark_weights_incomplete /
+            // mark_cleanup_required 会把 endpoint_model/container_name 一并抹掉，
+            // 下面那套「进程 --model-id ↔ endpoint_model（model_name 兜底）」的
+            // 比对从此失去目标（model_name 兜底六卡实测无一命中）——本 PR 创造的
+            // incomplete/cleanup_required 两态上被重新拉起的实例认不出，purge
+            // 预检放行，r19 P1-1 修的洞换个状态重现。身份文件
+            // （.runtime/serve.identity.json）在卡片目录里、不随 DB 状态复位消失，
+            // 且带 start_ticks/uid 防 PID 复用——与 reconcile 的收编臂同源同判据。
+            let card_dir = config::data_dir()
+                .join("cards")
+                .join(config::safe_path_component(&rec.card_id).unwrap_or_default());
+            if !card_dir.as_os_str().is_empty() && native_engine_identity_alive(&card_dir) {
+                return Err(ModelManagerError::new(format!(
+                    "此原生引擎仍有运行实例或状态无法确认，请先停用使用该引擎的模型再{action}。"
+                )));
+            }
             let snapshot = super::native_process::discover();
             if !snapshot.complete
                 || snapshot.processes.iter().any(|process| {
@@ -2334,20 +2363,34 @@ impl ModelManager {
             // container_name 也没有 docker 镜像，docker_owned_container_state
             // 只会得到 Absent，又因 ollama 引擎登记不出 docker_image 兜不回
             // 来，必落 _ 臂拒绝；而这个分支提前 return，下面的端口探测不可达。
-            // 停用后 status 仍是 deployed，更新/卸载从此全部必拒。判据与
-            // reconcile_running_status 的 ollama 分支同口径：ollama 服务不在 =
-            // 这台机器上任何 ollama 模型都不可能在服务 = 已停；服务还在则本卡
-            // 无法确认没在服务，保守拒绝。
+            // 停用后 status 仍是 deployed。判据与 reconcile_running_status 的
+            // ollama 分支同口径：ollama 服务不在 = 这台机器上任何 ollama 模型
+            // 都不可能在服务 = 已停；服务还在时不能就此放行，也不该一刀切拒绝
+            // （r21 P2-5：daemon 是系统服务常态存活，一刀切让稳态更新/卸载全部
+            // 确定性失败）——继续按 /api/ps 查这个模型是否仍被加载。
             if matches!(
                 deployed_stopped_evidence(&rec.engine_name),
                 DeployedStoppedEvidence::OllamaService
             ) {
-                if ollama_alive(&self.settings.ollama_host) {
-                    return Err(ModelManagerError::new(format!(
-                        "Ollama 服务仍在运行，请先停用再{action}。"
-                    )));
+                if !ollama_alive(&self.settings.ollama_host) {
+                    return Ok(());
                 }
-                return Ok(());
+                // r21 P2-5：服务在 ≠ 这个模型在服务。ollama 卡的 deployed 是永态
+                // （stop 只清 running 标志），daemon 是系统服务常态存活——只按
+                // 服务判停，稳态下更新脚本/卸载全部确定性拒绝，正文原先宣称的
+                // 「不再锁死」只在 daemon 已死时成立。对破坏性操作真正危险的
+                // 是**这个模型此刻被加载在显存里**；判据改查 /api/ps 该模型
+                // 是否加载（与 ollama_runtime_lines 同口径按 name 匹配）：
+                // 未加载 → 放行；已加载或查不动 → 保守拒绝。
+                return match ollama_model_loaded(&self.settings.ollama_host, &rec.model_name) {
+                    Some(false) => Ok(()),
+                    Some(true) => Err(ModelManagerError::new(format!(
+                        "该模型仍加载在 Ollama 服务中，请先停用再{action}。"
+                    ))),
+                    None => Err(ModelManagerError::new(format!(
+                        "Ollama 服务仍在运行且无法确认该模型是否已卸载，请先停用再{action}。"
+                    ))),
+                };
             }
             // 例外（2026-10-27 真机实锤）：无 container_name 的 docker 卡——
             // z-image-turbo 停用五天后点「更新脚本」，一路落到这里被「无法确认」
@@ -2476,6 +2519,23 @@ impl ModelManager {
         control: script_runner::RunControl,
     ) -> Result<(), ModelManagerError> {
         let rec = self.get_record(card_id)?;
+        // 状态门（r21 P1-1，对照 enable 的 status 门）。此前 deploy 对任何状态都
+        // 直接跑脚本：cleanup_required 的卡在弹窗被误点「部署模型」（mark_cleanup_
+        // required 不清 weights_ready_at，前端矩阵落在 enabled 部署格）后，脚本
+        // 一报权重残缺，错误路径的 mark_weights_incomplete 会把 cleanup_required
+        // **静默改写成 incomplete**——正是 db.rs 注释禁止的「用继续下载掩盖清理态」。
+        // incomplete / 缺 weights_ready_at（升级前的老库）同理：权重未就绪时部署
+        // 必然失败，门在跑脚本之前把指引给对（先继续下载补齐）。
+        if rec.status == "cleanup_required" {
+            return Err(ModelManagerError::new(
+                "该模型上一次删除没有清理完，请先点「继续清理」完成清理（或明确选择仅从列表移除），再部署。",
+            ));
+        }
+        if rec.status == "incomplete" || rec.weights_ready_at.is_none() {
+            return Err(ModelManagerError::new(
+                "模型权重尚未就绪，请先点「继续下载」补齐文件后再部署。",
+            ));
+        }
         let source = self.local_scripts_source(&rec);
         let profiles = source.profiles();
         let mut resolved_profile_id = profile_id
@@ -4057,6 +4117,32 @@ fn ollama_alive(host: &str) -> bool {
     }
 }
 
+/// `/api/ps` 里这个模型当前是否仍被加载（r21 P2-5）。
+///
+/// 三态：`Some(true)` 在跑；`Some(false)` 服务在但这个模型未加载；`None` 查不动
+/// （请求失败/应答不是合法 JSON——保守侧）。与 reconcile 的 ollama 分支刻意不是
+/// 同一把尺子：那边纠 running 标志不能用 /api/ps（ollama 空闲 5 分钟自动把模型
+/// 卸出显存，按它纠会把正常待机报成故障，见 reconcile 里的注释）；这边是破坏性
+/// 操作（删权重/换脚本）前的停验，问的就是「此刻在不在显存里」——正是 /api/ps
+/// 回答的问题，与 [`ModelManager::ollama_runtime_lines`] 的匹配口径一致（按
+/// `name` 全等比对 `model_name`）。
+fn ollama_model_loaded(host: &str, model_name: &str) -> Option<bool> {
+    let url = format!("{}/api/ps", host.trim_end_matches('/'));
+    let response = reqwest::blocking::Client::builder()
+        .timeout(Duration::from_secs(5))
+        .no_proxy()
+        .build()
+        .and_then(|client| client.get(&url).send())
+        .ok()?;
+    let data = response.json::<serde_json::Value>().ok()?;
+    let models = data.get("models")?.as_array()?;
+    Some(
+        models
+            .iter()
+            .any(|m| m.get("name").and_then(|v| v.as_str()) == Some(model_name)),
+    )
+}
+
 /// 原生引擎给模型商店的 endpoint 是 OpenAI 兼容的 chat-completions 地址。
 /// 运行状态探测不能向它发一次聊天请求（那会触发真正推理），只访问轻量的
 /// `/v1/models`。无法确定的网络错误一律保留原状态，避免一时负载过高就把
@@ -5071,6 +5157,14 @@ mod tests {
             "脚本执行失败（退出码 92）：curl: (92) HTTP/2 stream 1 was not closed cleanly: CANCEL (err 8)",
             // 同族：连接被对端重置（curl 56）
             "脚本执行失败（退出码 56）：脚本返回错误（curl: (56) Recv failure: Connection reset by peer）",
+            // r21 P2-7：通用包装器形态——卡片没透出 curl 原文、摘要里也没有
+            // 「curl」字样时，只剩退出码本身可认。
+            "脚本执行失败（退出码 18）：下载未完成",
+            "脚本执行失败（退出码 92）：流被中途取消",
+            // r21 P2-7：curl/docker 断流的三个原文形态
+            "脚本执行失败（退出码 18）：curl: (18) transfer closed with 297 bytes remaining",
+            "脚本执行失败（退出码 56）：Recv failure: Connection was reset",
+            "脚本执行失败（退出码 1）：unexpected EOF during chunked transfer",
         ] {
             assert!(
                 ModelManager::transfer_interrupted_failure(msg),
@@ -6022,6 +6116,227 @@ echo '权重就绪'
         );
     }
 
+    /// r21 P1-1：deploy 的状态门。cleanup_required 的卡被误点部署时，必须在跑
+    /// 任何脚本之前拒绝，且不得把状态改写成 incomplete（「用继续下载掩盖清理态」
+    /// 正是 db.rs 注释禁止的）；incomplete / 缺 weights_ready_at（升级前老库）
+    /// 同样先拒、指「继续下载」。
+    #[test]
+    fn deploy_status_gate_rejects_cleanup_required_and_incomplete_records() {
+        let tmp = setup_temp_db();
+        let models_dir = tmp.path().join("models");
+        let mgr = manager_with_card(
+            download_settings(&models_dir),
+            local_script_card(&tmp.path().join("scripts"), None),
+        );
+        mgr.download_from_store("card-dl", &mut |_| {}, Default::default(), None)
+            .unwrap();
+
+        db::mark_cleanup_required("card-dl").unwrap();
+        let error = mgr
+            .deploy("card-dl", None, &mut |_| {}, Default::default())
+            .unwrap_err();
+        assert!(
+            error.to_string().contains("继续清理"),
+            "cleanup_required 要指引继续清理：{error}"
+        );
+        let rec = db::get_store_model("card-dl").unwrap().unwrap();
+        assert_eq!(rec.status, "cleanup_required", "拒绝路径不得改写状态");
+        assert!(
+            rec.weights_ready_at.is_some(),
+            "拒绝路径不得顺手抹掉下载凭据"
+        );
+
+        db::mark_weights_incomplete("card-dl").unwrap();
+        let error = mgr
+            .deploy("card-dl", None, &mut |_| {}, Default::default())
+            .unwrap_err();
+        assert!(
+            error.to_string().contains("继续下载"),
+            "incomplete 要指引继续下载：{error}"
+        );
+        let rec = db::get_store_model("card-dl").unwrap().unwrap();
+        assert_eq!(rec.status, "incomplete");
+    }
+
+    /// r20 P2-5 的守卫接线（r21 补测试）：deploy 撞「权重不完整」要走
+    /// 抹身份前的等价停验——实例仍在（running=1）时保留记录原样报错；
+    /// 真停了才归位成 incomplete。此前这条守卫零接线测试。
+    #[test]
+    fn weights_incomplete_reset_keeps_records_whose_instance_is_still_alive() {
+        let tmp = setup_temp_db();
+        let models_dir = tmp.path().join("models");
+        let mgr = manager_with_card(
+            download_settings(&models_dir),
+            local_script_card(&tmp.path().join("scripts"), None),
+        );
+        mgr.download_from_store("card-dl", &mut |_| {}, Default::default(), None)
+            .unwrap();
+        // 换一个「报权重不完整」的 deploy 脚本（模型权重不完整是
+        // model_weights_are_incomplete 的强信号标记）。
+        let rec = db::get_store_model("card-dl").unwrap().unwrap();
+        let mut scripts = rec.scripts_content.clone();
+        let deploy_body = "#!/bin/sh\necho '模型权重不完整，请先下载模型' >&2\nexit 1\n";
+        scripts.insert(
+            "deploy".into(),
+            db::ScriptBlob {
+                content: deploy_body.into(),
+                sha256: script_runner::sha256_hex(deploy_body),
+            },
+        );
+        db::replace_card_package(&rec, &scripts, &rec.assets_content).unwrap();
+
+        // 实例仍在：停验必须拒绝归位，记录一字不动。
+        db::set_running("card-dl", true).unwrap();
+        let error = mgr
+            .deploy("card-dl", None, &mut |_| {}, Default::default())
+            .unwrap_err();
+        assert!(
+            error.to_string().contains("仍有实例在运行"),
+            "活实例脚下不得归位：{error}"
+        );
+        let rec = db::get_store_model("card-dl").unwrap().unwrap();
+        assert_eq!(rec.status, "downloaded", "拒绝路径不得改写状态");
+        assert!(rec.weights_ready_at.is_some());
+        assert!(rec.running, "拒绝路径不得清 running 标志");
+
+        // 真停了：归位照常发生（这正是守卫要保护的正确路径）。
+        db::set_running("card-dl", false).unwrap();
+        let error = mgr
+            .deploy("card-dl", None, &mut |_| {}, Default::default())
+            .unwrap_err();
+        assert!(
+            error.to_string().contains("继续下载"),
+            "停验通过后应归位为继续下载：{error}"
+        );
+        let rec = db::get_store_model("card-dl").unwrap().unwrap();
+        assert_eq!(rec.status, "incomplete");
+        assert!(rec.weights_ready_at.is_none());
+    }
+
+    /// r20 P2-8 的启用预检接线（r21 补测试）：running=1 直接拒；端点仍有响应
+    /// （遗留实例）也拒；端点确定没人听时放行（后续失败是脚本层的事，预检
+    /// 不背锅）。此前这条守卫零接线测试。
+    #[test]
+    fn enable_precheck_rejects_running_records_and_live_endpoints() {
+        use std::io::{Read as _, Write as _};
+
+        let tmp = setup_temp_db();
+        let models_dir = tmp.path().join("models");
+        let mgr = manager_with_card(
+            download_settings(&models_dir),
+            local_script_card(&tmp.path().join("scripts"), None),
+        );
+        mgr.download_from_store("card-dl", &mut |_| {}, Default::default(), None)
+            .unwrap();
+        db::update_store_model_status("card-dl", "deployed", None).unwrap();
+
+        // ① DB 已说在跑 → 拒绝，别在活实例上再叠一个。
+        db::set_running("card-dl", true).unwrap();
+        let error = mgr
+            .enable("card-dl", &mut |_| {}, Default::default())
+            .unwrap_err();
+        assert!(
+            error.to_string().contains("请勿重复启用"),
+            "running=1 必须拒绝：{error}"
+        );
+
+        // ② 端点仍有响应（遗留实例）→ 拒绝并指引自助恢复。
+        db::set_running("card-dl", false).unwrap();
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        std::thread::spawn(move || {
+            while let Ok((mut socket, _)) = listener.accept() {
+                let mut buf = [0_u8; 1024];
+                let _ = socket.read(&mut buf);
+                let _ = socket.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n");
+                let _ = socket.flush();
+            }
+        });
+        db::set_endpoint_info(
+            "card-dl",
+            Some(&format!("http://127.0.0.1:{port}/v1")),
+            Some("model-id"),
+        )
+        .unwrap();
+        let error = mgr
+            .enable("card-dl", &mut |_| {}, Default::default())
+            .unwrap_err();
+        assert!(
+            error.to_string().contains("双实例"),
+            "端点活着的遗留实例必须拒绝：{error}"
+        );
+
+        // ③ 端点确定没人听 → 预检放行（失败原因是夹具没有 enable 脚本，
+        // 而不是预检拦的）。
+        let closed = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let closed_port = closed.local_addr().unwrap().port();
+        drop(closed);
+        db::set_endpoint_info(
+            "card-dl",
+            Some(&format!("http://127.0.0.1:{closed_port}/v1")),
+            Some("model-id"),
+        )
+        .unwrap();
+        let error = mgr
+            .enable("card-dl", &mut |_| {}, Default::default())
+            .unwrap_err();
+        assert!(
+            !error.to_string().contains("双实例"),
+            "端口确定没人听时预检必须放行：{error}"
+        );
+        assert!(
+            error.to_string().contains("enable 脚本"),
+            "放行后失败应来自脚本层：{error}"
+        );
+    }
+
+    /// r21 P2-5 的判停新判据：/api/ps 能区分「服务在但模型未加载」（放行）与
+    /// 「模型仍在显存」（拒绝）；查不动是三态里的保守侧。
+    #[test]
+    fn ollama_model_loaded_distinguishes_loaded_from_idle() {
+        use std::io::{Read as _, Write as _};
+
+        let body = r#"{"models":[{"name":"qwen3:8b","size_vram":8589934592}]}"#;
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        std::thread::spawn(move || {
+            for _ in 0..2 {
+                let Ok((mut socket, _)) = listener.accept() else {
+                    return;
+                };
+                let mut buf = [0_u8; 1024];
+                let _ = socket.read(&mut buf);
+                let response = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                    body.len(),
+                    body
+                );
+                let _ = socket.write_all(response.as_bytes());
+                let _ = socket.flush();
+            }
+        });
+        let host = format!("http://127.0.0.1:{port}");
+        assert_eq!(
+            ollama_model_loaded(&host, "qwen3:8b"),
+            Some(true),
+            "api/ps 里列着的就是在跑"
+        );
+        assert_eq!(
+            ollama_model_loaded(&host, "llama3:70b"),
+            Some(false),
+            "服务在、模型未加载 = 卸载/更新可放行的稳态"
+        );
+
+        // 查不动（端口上没有服务）→ None（保守侧，调用方拒绝）。
+        let closed = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let closed_port = closed.local_addr().unwrap().port();
+        drop(closed);
+        assert_eq!(
+            ollama_model_loaded(&format!("http://127.0.0.1:{closed_port}"), "qwen3:8b"),
+            None
+        );
+    }
+
     #[test]
     fn deploy_cancelled_before_engine_install_has_no_install_or_deploy_side_effects() {
         let (_home, manager, models) = updated_engine_deployment(None, None);
@@ -6514,6 +6829,20 @@ fn tighten_directory_permissions_fixes_wide_modes_and_skips_foreign() {
     std::fs::create_dir(&already_tight).unwrap();
     std::fs::set_permissions(&already_tight, std::fs::Permissions::from_mode(0o755)).unwrap();
 
+    // r20 P2-11（r21 补齐）：名字里的 skips_foreign 此前没有对应用例。构造
+    // 非属主目录需要 chown 权限——只有 root 有（CI 常规腿以非 root 跑，这里
+    // 拿不到就跳过该子断言并说明，不做假断言）；root 环境下真正钉住「属主
+    // 不是自己的目录一个字节都不动」。
+    let foreign = cards.join("foreign-owned");
+    std::fs::create_dir(&foreign).unwrap();
+    std::fs::set_permissions(&foreign, std::fs::Permissions::from_mode(0o777)).unwrap();
+    let foreign_chowned = {
+        use std::os::unix::ffi::OsStrExt as _;
+        let c_path = std::ffi::CString::new(foreign.as_os_str().as_bytes()).unwrap();
+        // 65534 = nobody/4294967294 沙箱惯用的非特权 uid。
+        (unsafe { libc::chown(c_path.as_ptr(), 65534, 65534) } == 0)
+    };
+
     let settings = config::Settings::default();
     tighten_store_directory_permissions(&settings);
 
@@ -6523,4 +6852,13 @@ fn tighten_directory_permissions_fixes_wide_modes_and_skips_foreign() {
     assert_eq!(mode(&logs), 0o755, "logs 目录应收紧到 755");
     assert_eq!(mode(&card_a), 0o755, "一级子目录应收紧到 755");
     assert_eq!(mode(&already_tight), 0o755, "已正确的目录不变");
+    if foreign_chowned {
+        assert_eq!(
+            mode(&foreign),
+            0o777,
+            "属主不是当前用户的目录不许动（哪怕它 777）"
+        );
+    } else {
+        eprintln!("[test] 非 root 环境无法构造非属主目录，跳过 skips_foreign 子断言");
+    }
 }

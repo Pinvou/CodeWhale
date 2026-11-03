@@ -805,6 +805,35 @@ fn cap_output_lines(output_lines: &mut Vec<String>, scanned_lines: &mut usize) {
     *output_lines = kept;
 }
 
+/// 单行入环前的字节顶（r21 评审 P2-3）。
+///
+/// 落盘侧有 `run_log_store::MAX_LINE_CHARS` 的 clamp，但内存环（output_lines →
+/// on_progress → 前端 → 失败 tail）里的行此前没有任何长度上限：脚本打出一行
+/// 几 MB 的 base64/JSON，全链路原样放大。真实协议行（LMM_PROMPT= /
+/// LMM_PROGRESS_BYTES）都是短行，16 KiB 只有病态输出才会碰到。
+const MAX_RING_LINE_BYTES: usize = 16 * 1024;
+
+/// 无终止符滞留缓冲（`buf`）的字节顶（同上）。
+///
+/// 脚本 `cat` 一个无换行的大文件时，整段输出作为「半行」滞留在 buf 里直到
+/// 6h 绝对超时——此前没有上限，失控/恶意卡片可直指 OOM。触顶即把滞留段作为
+/// 一条截断行入环（按上面的单行顶截），丢弃的字节数写进标记，后续字节从新行
+/// 开始累计。
+const MAX_PENDING_LINE_BYTES: usize = 1024 * 1024;
+
+/// 按字节上限截断到 UTF-8 字符边界，并带截断标记（超长本身也是一条诊断信息）。
+fn truncate_line(line: &str, max_bytes: usize) -> String {
+    if line.len() <= max_bytes {
+        return line.to_string();
+    }
+    let mut cut = max_bytes;
+    while !line.is_char_boundary(cut) {
+        cut -= 1;
+    }
+    let dropped = line.len() - cut;
+    format!("{}…[输出超长，已截断并丢弃 {dropped} 字节]", &line[..cut])
+}
+
 fn drain_lines(
     buf: String,
     output_lines: &mut Vec<String>,
@@ -816,7 +845,21 @@ fn drain_lines(
         let idx_n = rest.find('\n');
         let idx_r = rest.find('\r');
         let (idx, skip) = match (idx_n, idx_r) {
-            (None, None) => return rest,
+            (None, None) => {
+                // r21 P2-3：无终止符的滞留段也要有顶——见 MAX_PENDING_LINE_BYTES。
+                if rest.len() > MAX_PENDING_LINE_BYTES {
+                    let truncated = truncate_line(&rest, MAX_RING_LINE_BYTES);
+                    if !truncated.trim().is_empty() {
+                        output_lines.push(truncated.clone());
+                        cap_output_lines(output_lines, scanned_lines);
+                        if let Some(cb) = on_progress.as_deref_mut() {
+                            cb(ScriptProgress::line(truncated));
+                        }
+                    }
+                    return String::new();
+                }
+                return rest;
+            }
             // 回车在换行之前（或者压根没有换行）就按回车切。用 is_none_or 而不是
             // `is_none() || … unwrap()`：后者要读的人自己去确认两个分支互斥。
             (idx_n, Some(idx_r)) if idx_n.is_none_or(|n| idx_r < n) => {
@@ -830,7 +873,7 @@ fn drain_lines(
             (Some(idx_n), _) => (idx_n, 1),
             _ => unreachable!(),
         };
-        let line = strip_ansi(&rest[..idx]);
+        let line = truncate_line(&strip_ansi(&rest[..idx]), MAX_RING_LINE_BYTES);
         rest = rest[idx + skip..].to_string();
         if !line.trim().is_empty() {
             output_lines.push(line.clone());
@@ -1206,9 +1249,12 @@ pub fn run_script(
     }
 
     if !buf.trim().is_empty() {
-        output_lines.push(buf.clone());
+        // 收尾残行同样过单行顶（r21 P2-3）：走到这里 buf 已经过 drain_lines 的
+        // 滞留顶约束，但正常路径的最后一行（脚本退出前的收尾长输出）此前没有。
+        let line = truncate_line(&buf, MAX_RING_LINE_BYTES);
+        output_lines.push(line.clone());
         if let Some(cb) = opts.on_progress.as_deref_mut() {
-            cb(ScriptProgress::line(buf));
+            cb(ScriptProgress::line(line));
         }
     }
 
@@ -2224,6 +2270,67 @@ printf '[1A[2K7e1f8fb7d4ba: Pulling fs layer
         );
         assert!(pending.is_empty());
     }
+    /// r21 P2-3：单行入环前截断。无论有没有终止符，环里的行都不许超过
+    /// MAX_RING_LINE_BYTES（截断标记本身略超出算预期），且截断必须落在 UTF-8
+    /// 字符边界上（多字节字符不得被拦腰切开）。
+    #[test]
+    fn oversized_lines_are_truncated_before_entering_the_ring() {
+        let mut lines = Vec::new();
+        let mut scanned = 0usize;
+        let mut progress: Option<&mut ProgressCallback<'_>> = None;
+        // 多字节内容压着上限——边界切点必须自己回退到字符边界。
+        let huge: String = "汉".repeat(MAX_RING_LINE_BYTES / 3 + 100);
+        let rest = drain_lines(
+            format!("{huge}\nrest-of-line",),
+            &mut lines,
+            &mut progress,
+            &mut scanned,
+        );
+        assert_eq!(lines.len(), 1, "一行只入环一次：{lines:?}");
+        assert!(
+            lines[0].len() <= MAX_RING_LINE_BYTES + 128,
+            "截断标记之外不许超顶：{}",
+            lines[0].len()
+        );
+        assert!(lines[0].contains("已截断"), "截断要留标记：{}", lines[0]);
+        assert_eq!(rest, "rest-of-line", "终止符后的内容照常留给下一轮");
+    }
+
+    /// r21 P2-3：无终止符的滞留缓冲触顶即出清。此前 `cat` 一个无换行大文件
+    /// 会让整段输出滞留 buf 直到 6h 绝对超时（内存无上限，完成后还会全链路
+    /// clone 放大）；触顶后滞留段作为一条截断行入环、后续字节从新行开始。
+    #[test]
+    fn unterminated_pending_buffer_is_capped() {
+        let mut lines = Vec::new();
+        let mut scanned = 0usize;
+        let mut progress: Option<&mut ProgressCallback<'_>> = None;
+        let rest = drain_lines(
+            "x".repeat(MAX_PENDING_LINE_BYTES + 4096),
+            &mut lines,
+            &mut progress,
+            &mut scanned,
+        );
+        assert_eq!(rest, "", "触顶后滞留段清空：{rest:?}");
+        assert_eq!(lines.len(), 1);
+        assert!(
+            lines[0].contains("已截断并丢弃"),
+            "丢弃量要写进标记：{}",
+            lines[0]
+        );
+        // 后续字节从新行开始累计，不再背上一段的内存。
+        let mut lines2 = Vec::new();
+        let mut scanned2 = 0usize;
+        let mut progress2: Option<&mut ProgressCallback<'_>> = None;
+        let rest2 = drain_lines(
+            "tail-without-newline".to_string(),
+            &mut lines2,
+            &mut progress2,
+            &mut scanned2,
+        );
+        assert_eq!(rest2, "tail-without-newline");
+        assert!(lines2.is_empty(), "未触顶的滞留段照常滞留：{lines2:?}");
+    }
+
     #[test]
     fn cap_output_lines_keeps_prompt_scan_cursor_in_range() {
         // 评审阻塞项 1 的回归测试：超上限丢最老一半后，绝对下标游标必须跟着

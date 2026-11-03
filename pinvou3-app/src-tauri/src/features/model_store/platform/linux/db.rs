@@ -699,31 +699,85 @@ pub struct DockerImageReference {
 /// 新行无能为力）。只查本引擎行的绑定名单（list_model_names_using_engine）拦
 /// 不住这种冒名：必须按镜像字符串反查**其他**引擎行，再顺藤摸瓜列出绑在那些
 /// 行上的模型，删除前把受害名单摆出来。
+/// 归一化 docker 镜像引用，用于「同一镜像的不同写法」等价判定（r21 评审 P2-6）。
+///
+/// docker 里 `docker.io/lmsysorg/sglang:v1`、`lmsysorg/sglang:v1` 指的是同一个
+/// 镜像：`docker.io/`（及别名 `index.docker.io/`）是默认 registry，写不写等价；
+/// rmi 按任一别名都能删掉同一个镜像。此前反查按字节相等，冒名卡只要在
+/// `docker.io/` 前缀上做文章就能绕过。归一化只做**会合并**方向的收法
+/// （补默认 registry、补官方镜像的 `library/` 命名空间、补隐式 `:latest`）；
+/// 这是删除前的安全预检，宁可多拦（报「还在被引用」）不可漏放。digest 引用
+/// （`@sha256:…`）不带隐式 tag，且两个不同 digest 永远不等——归一化不动它们。
+fn normalize_image_ref(image: &str) -> String {
+    let mut s = image.trim();
+    // registry 主机名大小写不敏感；命中默认 registry 的任一别名后，剩余部分
+    // （路径/标签，大小写敏感）原样保留。
+    for prefix in ["docker.io/", "index.docker.io/"] {
+        if let Some(rest) = s
+            .get(..prefix.len())
+            .filter(|head| head.eq_ignore_ascii_case(prefix))
+            .map(|_| &s[prefix.len()..])
+        {
+            s = rest;
+            break;
+        }
+    }
+    let mut normalized = s.to_string();
+    // 官方镜像的 library/ 命名空间是隐含默认：nginx ≡ library/nginx。仅对
+    // 不带任何斜杠的裸名适用（lmsysorg/sglang 不是官方镜像，不补）。
+    if !normalized.contains('/') {
+        normalized.insert_str(0, "library/");
+    }
+    // 隐式 tag 等于 :latest。tag 冒号只可能出现在最后一个路径段里——
+    // `registry:5000/repo` 的冒号是端口，不能靠「整串含不含冒号」判断。
+    // 带 digest（@sha256:…）的引用不动 tag 部分。
+    if !normalized.contains('@')
+        && !normalized
+            .rsplit('/')
+            .next()
+            .is_some_and(|s| s.contains(':'))
+    {
+        normalized.push_str(":latest");
+    }
+    normalized
+}
+
 pub fn find_docker_image_users(
     image: &str,
     exclude_engine_name: &str,
     exclude_engine_version: Option<&str>,
 ) -> rusqlite::Result<Vec<DockerImageReference>> {
     let conn = connect()?;
+    // r21 P2-6：等价判定改为「两侧都归一化后比较」，SQL 字节相等被绕过
+    // （docker.io/ 前缀一族等价写法）。installed_engines 全表就几行到几十行，
+    // 全量取回后在 Rust 侧过滤，代价可忽略。
     let mut stmt = conn.prepare(
-        "SELECT engine_name, engine_version FROM installed_engines
-          WHERE docker_image = ?1
-            AND NOT (engine_name = ?2 AND engine_version = ?3)",
+        "SELECT engine_name, engine_version, docker_image FROM installed_engines
+          WHERE docker_image IS NOT NULL",
     )?;
     let rows = stmt
-        .query_map(
-            params![
-                image,
-                exclude_engine_name,
-                engine_key(exclude_engine_version)
-            ],
-            |row| Ok((row.get::<_, String>(0)?, row.get::<_, Option<String>>(1)?)),
-        )?
+        .query_map([], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, Option<String>>(1)?,
+                row.get::<_, String>(2)?,
+            ))
+        })?
         .collect::<rusqlite::Result<Vec<_>>>()?;
+    let wanted = normalize_image_ref(image);
+    let exclude_version = engine_key(exclude_engine_version);
+    let rows = rows
+        .into_iter()
+        .filter(|(name, version, row_image)| {
+            normalize_image_ref(row_image) == wanted
+                && !(name == exclude_engine_name
+                    && version.as_deref() == Some(exclude_version.as_str()))
+        })
+        .collect::<Vec<_>>();
     // 绑定模型名单逐行补齐，口径复用 list_model_names_using_engine
     // （COALESCE(engine_version,'') 与 engine_key 对齐），避免两处判据漂移。
     let mut users = Vec::with_capacity(rows.len());
-    for (engine_name, engine_version) in rows {
+    for (engine_name, engine_version, _) in rows {
         let model_names = list_model_names_using_engine(&engine_name, engine_version.as_deref())?;
         users.push(DockerImageReference {
             engine_name,
@@ -1887,6 +1941,101 @@ mod tests {
             "删一个版本把另一个版本也删了"
         );
         assert!(!is_engine_installed("vllm", Some("dspark-0.1.1")).unwrap());
+    }
+
+    /// r21 P2-6：镜像反查的等价判定。`docker.io/lmsysorg/sglang:v1` 与
+    /// `lmsysorg/sglang:v1` 是同一个镜像（默认 registry 写不写等价、官方镜像的
+    /// library/ 命名空间、隐式 :latest 同理），docker rmi 按任一别名删的都是
+    /// 同一个——按字节相等反查会被一个前缀绕过，冒名卡就能借「规范化等价」
+    /// 让受害者镜像的引用名单查不出来。
+    #[test]
+    fn image_reference_lookup_treats_canonical_aliases_as_equal() {
+        // 纯函数侧：归一化的等价组与不等组
+        for (a, b) in [
+            (
+                "docker.io/lmsysorg/sglang:v0.5.16",
+                "lmsysorg/sglang:v0.5.16",
+            ),
+            (
+                "index.docker.io/lmsysorg/sglang:v0.5.16",
+                "lmsysorg/sglang:v0.5.16",
+            ),
+            ("docker.io/library/nginx", "nginx"),
+            ("nginx", "nginx:latest"),
+            ("registry:5000/repo", "registry:5000/repo:latest"),
+        ] {
+            assert_eq!(
+                normalize_image_ref(a),
+                normalize_image_ref(b),
+                "{a} 与 {b} 是同一镜像的等价写法"
+            );
+        }
+        for (a, b) in [
+            ("lmsysorg/sglang:v0.5.16", "lmsysorg/sglang:v0.5.17"),
+            ("lmsysorg/sglang:v1", "other/sglang:v1"),
+            ("repo@sha256:aaaa", "repo@sha256:bbbb"),
+            ("nginx:1.27", "nginx:latest"),
+        ] {
+            assert_ne!(
+                normalize_image_ref(a),
+                normalize_image_ref(b),
+                "{a} 与 {b} 不是同一引用，不得合并"
+            );
+        }
+
+        // 反查侧：受害者用无前缀写法登记，冒名行自报 docker.io/ 前缀——按任一
+        // 侧查询都必须把对方算进引用名单；exclude 行自己除外。
+        let _ctx = setup_temp_db();
+        mark_engine_installed(
+            "sglang",
+            Some("v0.5.16"),
+            Some("lmsysorg/sglang:v0.5.16"),
+            None,
+            None,
+        )
+        .unwrap();
+        mark_engine_installed(
+            "sglang-evil",
+            Some("x"),
+            Some("docker.io/lmsysorg/sglang:v0.5.16"),
+            None,
+            None,
+        )
+        .unwrap();
+        mark_engine_installed(
+            "unrelated",
+            Some("y"),
+            Some("lmsysorg/sglang:v0.5.17"),
+            None,
+            None,
+        )
+        .unwrap();
+        let users =
+            find_docker_image_users("lmsysorg/sglang:v0.5.16", "sglang-evil", Some("x")).unwrap();
+        let names = users
+            .iter()
+            .map(|r| r.engine_name.as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            names,
+            ["sglang"],
+            "冒名行（docker.io/ 前缀）反查受害者镜像时必须把受害行算进引用：{names:?}"
+        );
+        let users = find_docker_image_users(
+            "docker.io/lmsysorg/sglang:v0.5.16",
+            "sglang",
+            Some("v0.5.16"),
+        )
+        .unwrap();
+        let names = users
+            .iter()
+            .map(|r| r.engine_name.as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            names,
+            ["sglang-evil"],
+            "从带前缀的写法反查同样要认出无前缀的行：{names:?}"
+        );
     }
 
     /// 老库（主键只有 engine_name）能升级到复合主键，数据不丢。
