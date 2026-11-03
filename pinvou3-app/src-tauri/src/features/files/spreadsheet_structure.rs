@@ -119,9 +119,18 @@ pub(super) fn xlsx_structure_annotations(bytes: &[u8]) -> Result<Option<String>,
 /// `_rels/.rels` 的 officeDocument Target），非 `xl/` 布局无法绕过守卫。
 pub(super) fn xlsx_formula_span_limits(bytes: &[u8]) -> Option<HashMap<String, (u64, u64)>> {
     let mut archive = zip::ZipArchive::new(Cursor::new(bytes)).ok()?;
-    let (base, name) = workbook_location(&mut archive).ok()?;
-    let workbook = read_zip_text(&mut archive, &format!("{base}{name}")).ok()??;
-    let relationships = read_zip_text(&mut archive, &format!("{base}_rels/{name}.rels")).ok()??;
+    let mut paths = HashMap::with_capacity(archive.len());
+    for path in archive.file_names() {
+        let path = path.ok()?;
+        paths.insert(
+            path.replace('\\', "/").to_ascii_lowercase(),
+            path.to_string(),
+        );
+    }
+    let (base, name) = workbook_location(&mut archive, &paths).ok()?;
+    let workbook = read_formula_zip_text(&mut archive, &paths, &format!("{base}{name}")).ok()??;
+    let relationships =
+        read_formula_zip_text(&mut archive, &paths, &format!("{base}_rels/{name}.rels")).ok()??;
     let relationship_targets = parse_relationship_targets(&relationships).ok()?;
     let mut limits = HashMap::new();
     for (sheet_name, relationship_id) in parse_sheets(&workbook).ok()? {
@@ -133,7 +142,7 @@ pub(super) fn xlsx_formula_span_limits(bytes: &[u8]) -> Option<HashMap<String, (
         } else {
             format!("{base}{target}")
         };
-        let Ok(Some(xml)) = read_zip_text(&mut archive, &path) else {
+        let Ok(Some(xml)) = read_formula_zip_text(&mut archive, &paths, &path) else {
             continue;
         };
         let (rows, cols) = formula_cell_span(&xml);
@@ -142,12 +151,24 @@ pub(super) fn xlsx_formula_span_limits(bytes: &[u8]) -> Option<HashMap<String, (
     Some(limits)
 }
 
+fn read_formula_zip_text<R: Read + Seek>(
+    archive: &mut zip::ZipArchive<R>,
+    paths: &HashMap<String, String>,
+    path: &str,
+) -> Result<Option<String>, String> {
+    let key = path.to_ascii_lowercase();
+    let path = paths.get(&key).map(String::as_str).unwrap_or(path);
+    read_zip_text(archive, path)
+}
+
 /// 镜像 calamine `Xlsx::read_package_relationships` 对根 officeDocument
 /// Target 的目录和文件名解析，让预检与读取器定位同一工作簿。
 fn workbook_location<R: Read + Seek>(
     archive: &mut zip::ZipArchive<R>,
+    paths: &HashMap<String, String>,
 ) -> Result<(String, String), String> {
-    let root_rels = read_zip_text(archive, "_rels/.rels")?.ok_or("_rels/.rels 缺失")?;
+    let root_rels =
+        read_formula_zip_text(archive, paths, "_rels/.rels")?.ok_or("_rels/.rels 缺失")?;
     let mut reader = Reader::from_str(&root_rels);
     reader.config_mut().trim_text(true);
     let mut target = None;
@@ -695,6 +716,62 @@ mod tests {
             formulas.get_value((0, 0)).map(String::as_str),
             Some("SUM(1)\n+ 2")
         );
+    }
+
+    #[test]
+    fn formula_guard_follows_reader_zip_path_cache() {
+        use calamine::Reader;
+
+        for layout in [
+            "uppercase",
+            "backslashes",
+            "uppercase_backslashes",
+            "duplicate",
+        ] {
+            let mut archive = zip::ZipArchive::new(Cursor::new(folded_formula_fixture())).unwrap();
+            let mut entries = Vec::new();
+            for index in 0..archive.len() {
+                let mut file = archive.by_index(index).unwrap();
+                let mut name = file.name().unwrap().into_owned();
+                if matches!(layout, "uppercase" | "uppercase_backslashes") {
+                    name = name.to_ascii_uppercase();
+                }
+                if matches!(layout, "backslashes" | "uppercase_backslashes") {
+                    name = name.replace('/', "\\");
+                }
+                let mut xml = String::new();
+                file.read_to_string(&mut xml).unwrap();
+                entries.push((name, xml));
+            }
+            if layout == "duplicate" {
+                let xml = entries.last().unwrap().1.replace("r=\"1\"", "r=\"2\"");
+                let xml = xml.replace("r=\"A1\"", "r=\"B2\"");
+                entries.push(("XL/WORKSHEETS/SHEET1.XML".to_string(), xml));
+            }
+            let files: Vec<_> = entries
+                .iter()
+                .map(|(name, xml)| (name.as_str(), xml.as_str()))
+                .collect();
+            let bytes = xlsx_fixture(&files);
+            let limits = xlsx_formula_span_limits(&bytes).unwrap();
+            let mut workbook = calamine::open_workbook_auto_from_rs(Cursor::new(bytes)).unwrap();
+            let name = workbook.sheet_names()[0].clone();
+            let position = if layout == "duplicate" {
+                (1, 1)
+            } else {
+                (0, 0)
+            };
+            let span = (u64::from(position.0 + 1), u64::from(position.1 + 1));
+            assert_eq!(limits.get(&name), Some(&span));
+            let values = workbook.worksheet_range(&name).unwrap();
+            assert!(!values.is_empty());
+            assert_eq!(values.get_value(position).unwrap().to_string(), "3");
+            let formulas = workbook.worksheet_formula(&name).unwrap();
+            assert_eq!(
+                formulas.get_value(position).map(String::as_str),
+                Some("SUM(1)\n+ 2")
+            );
+        }
     }
 
     #[test]
