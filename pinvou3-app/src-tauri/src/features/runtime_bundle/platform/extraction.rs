@@ -2109,9 +2109,7 @@ mod tests {
                 )
                 .unwrap();
 
-                let manager = crate::features::marketplace::MarketplaceManager::with_store(
-                    crate::platform::credential_store::MemoryCredentialStore::default(),
-                );
+                let manager = test_marketplace_manager();
                 let bundle = super::Pinvou3Bundle::paths();
                 assert!(!bundle.mcp_json.exists(), "precondition: no mcp.json yet");
 
@@ -2170,9 +2168,7 @@ mod tests {
         crate::platform::test_support::with_temp_home(
             "pinvou3-bundle-startup_maintenance_preserves_corrupt_mcp_json_bytes",
             || {
-                let manager = crate::features::marketplace::MarketplaceManager::with_store(
-                    crate::platform::credential_store::MemoryCredentialStore::default(),
-                );
+                let manager = test_marketplace_manager();
                 let bundle = super::Pinvou3Bundle::paths();
                 std::fs::create_dir_all(bundle.mcp_json.parent().unwrap()).unwrap();
                 // Corrupt by truncation: two hand-added custom entries, no closing brace.
@@ -2278,9 +2274,7 @@ mod tests {
 
                 let bundle = super::Pinvou3Bundle::paths();
                 std::fs::create_dir_all(bundle.mcp_json.parent().unwrap()).unwrap();
-                let manager = crate::features::marketplace::MarketplaceManager::with_store(
-                    crate::platform::credential_store::MemoryCredentialStore::default(),
-                );
+                let manager = test_marketplace_manager();
                 bundle
                     .ensure_extracted_with_marketplace(&manager, |_manager| Ok(Vec::new()))
                     .unwrap();
@@ -2353,9 +2347,7 @@ mod tests {
                 // with an unchanged bundle takes).
                 std::fs::write(super::paths::bundle_version_file(), super::BUNDLE_VERSION).unwrap();
 
-                let manager = crate::features::marketplace::MarketplaceManager::with_store(
-                    crate::platform::credential_store::MemoryCredentialStore::default(),
-                );
+                let manager = test_marketplace_manager();
                 bundle
                     .ensure_extracted_with_marketplace(&manager, |_manager| Ok(Vec::new()))
                     .unwrap();
@@ -2414,6 +2406,17 @@ mod tests {
         let _ = std::fs::remove_dir_all(&tmp);
     }
 
+    /// 测试统一 fixture：内存凭据存储构造 MarketplaceManager，规避真实钥匙串依赖。
+    /// 集中一处让守卫的 runtime_bundle→marketplace 引用计数不随测试数量增长
+    /// （baseline ratchet 不允许基线放宽，见 scripts/architecture-baseline.json）。
+    fn test_marketplace_manager() -> crate::features::marketplace::MarketplaceManager<
+        crate::platform::credential_store::MemoryCredentialStore,
+    > {
+        crate::features::marketplace::MarketplaceManager::with_store(
+            crate::platform::credential_store::MemoryCredentialStore::default(),
+        )
+    }
+
     /// PR #808 回流回归:既有配置目录跨一次「仅技能树内容变化」的 bundle 升级时,
     /// 连接器缓存完整可见(无 `dingtalk_disabled` 标记 + dws 目录已全部落盘)且
     /// `bundle/VERSION` 仍是旧值。门是 `bundle_changed || !show` —— `bundle_changed`
@@ -2453,9 +2456,7 @@ mod tests {
                     .unwrap();
                 std::fs::write(super::paths::bundle_version_file(), "0.0.1-stale").unwrap();
 
-                let manager = crate::features::marketplace::MarketplaceManager::with_store(
-                    crate::platform::credential_store::MemoryCredentialStore::default(),
-                );
+                let manager = test_marketplace_manager();
                 bundle
                     .ensure_extracted_with_marketplace(&manager, |_manager| Ok(Vec::new()))
                     .unwrap();
