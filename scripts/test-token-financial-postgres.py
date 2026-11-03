@@ -253,6 +253,14 @@ BILLING_LEAF_REQUIRED = {
 }
 BILLING_CHILD_REQUIRED = RETAINED_REQUIRED - BILLING_LEAF_REQUIRED
 EXACT_REQUIRED_CHILDREN = {
+    "TestPasswordPreparationAuthorizationPostgres": {
+        "retention-redacts-expired-mobiles-without-changing-grant-facts/expired",
+        "retention-redacts-expired-mobiles-without-changing-grant-facts/young",
+        "retention-redacts-expired-mobiles-without-changing-grant-facts/valid",
+        "retention-keeps-issued-grant-and-continues-later-artifact-cleanup",
+        "retention-skips-locked-expired-captcha-and-rejects-late-grant",
+        "retention-FK-protects-inflight-reference-and-subsequent-passes",
+    },
     "TestManagementPublicMigrationInstallation": {
         "fresh", "legacy-upgrade", "installed-29-upgrade", "installed-30-upgrade",
         "installed-f05-34-upgrade", "retained-management-lifecycle-upgrade",

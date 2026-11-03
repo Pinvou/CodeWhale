@@ -27,6 +27,29 @@ CHECKPOINT_FOREIGN_CHILDREN = {"unbound-existing-facts", "foreign-key-before-fin
 
 
 class FinancialPostgresRunnerTests(unittest.TestCase):
+    def test_password_preparation_requires_redaction_boundaries_and_reference_safety(self):
+        root = "TestPasswordPreparationAuthorizationPostgres"
+        self.assertIn(root, RUNNER.ACCOUNT_REQUIRED)
+        required = {
+            "retention-redacts-expired-mobiles-without-changing-grant-facts/expired",
+            "retention-redacts-expired-mobiles-without-changing-grant-facts/young",
+            "retention-redacts-expired-mobiles-without-changing-grant-facts/valid",
+            "retention-keeps-issued-grant-and-continues-later-artifact-cleanup",
+            "retention-skips-locked-expired-captcha-and-rejects-late-grant",
+            "retention-FK-protects-inflight-reference-and-subsequent-passes",
+        }
+        self.assertEqual(RUNNER.EXACT_REQUIRED_CHILDREN[root], required)
+        events = self.events({root}, RUNNER.ACCOUNT_PACKAGE, children=True)
+        options = {"package": RUNNER.ACCOUNT_PACKAGE, "require_children": True, "exact_roots": True}
+        RUNNER.verify_results(events, {root}, **options)
+        for child in required:
+            for invalid in (
+                [event for event in events if event.get("Test") != root + "/" + child],
+                events + [{"Action": "skip", "Package": RUNNER.ACCOUNT_PACKAGE, "Test": root + "/" + child}],
+            ):
+                with self.subTest(child=child), self.assertRaises(RuntimeError):
+                    RUNNER.verify_results(invalid, {root}, **options)
+
     def test_token_public_upgrade_phase_requires_retained_pre_cleanup_stage(self):
         root = "TestManagementPublicMigrationInstallation"
         self.assertEqual(RUNNER.TOKEN_SCHEMA_REQUIRED, {root})
