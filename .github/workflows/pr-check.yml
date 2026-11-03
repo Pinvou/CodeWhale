@@ -576,6 +576,12 @@ jobs:
             frontend:
               - 'pinvou3-app/src/**'
               - 'pinvou3-app/tests/**'
+              # connector_online_install_contract.test.js 读 scripts/ 下的
+              # smoke 脚本做版本下限钉扎(tauri/build.js 已由
+              # pinvou3-app/scripts/tauri/** 覆盖);不列出则 scripts-only PR
+              # 静默跳过该 node 门禁(test_ci_gate_policy 锁定此路由)。
+              - 'pinvou3-app/scripts/dingtalk-smoke.sh'
+              - 'pinvou3-app/scripts/wecom-smoke.sh'
               # multiagent_plan_normalize.test.mjs 读取下列 Rust 源做跨语言
               # 契约断言(蜂群契约/同快照不变式/编辑重发等);不列出则
               # Rust-only 改动会静默跳过该 node 门禁(同 resources/** 的
@@ -3049,6 +3055,10 @@ jobs:
             'features::remote_control::controller::controlling_service::resume_projection_tests::' \
             'features::remote_control::controller::controlling::tests::' \
             'features::remote_control::controller::controlling_service::tests::resume_sequence_reopens_business_only_after_controller_resumed' \
+            'features::remote_control::controller::controlled::journal_owner_tests::' \
+            'app::commands::desktop_remote_journal::tests::' \
+            'app::commands::desktop_remote_task::journal_owner_tests::' \
+            'features::remote_control::controller::controlled::tests::resume_sequence_advances_the_gate_and_rotates_material' \
             'features::remote_control::controller::controlling_inbound::tests::' \
             'features::remote_control::controller::controlling_service::inbound_tests::' \
             'features::remote_control::controller::transfer::staging::tests::' \
@@ -3360,6 +3370,14 @@ jobs:
       - name: dev-profile memory guard (codewhale-tui O0, this job only)
         run: |
           config="${CARGO_HOME:-$HOME/.cargo}/config.toml"
+          # $CARGO_HOME is not guaranteed to exist: since 2026-11 the macos-15
+          # runner image ships Rust with rustup's home outside ~/.cargo, so
+          # dtolnay/rust-toolchain's "Install rustup if needed" skips and never
+          # creates ~/.cargo; a bare cat >> then exits 1 on the missing parent
+          # directory. Create the directory before appending; cat >> creates
+          # a missing file itself. (The rust-test / windows-rust-test siblings
+          # are covered by scripts/ci-cargo-dev-profile.py.)
+          mkdir -p "$(dirname "$config")"
           cat >> "$config" <<'EOF'
 
           [profile.dev.package.codewhale-tui]

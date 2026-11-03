@@ -1404,7 +1404,7 @@ fn dispatch_inbound(
 /// Test adapters exercise the real suspension and reader validation paths;
 /// they never manufacture or directly install reader authority.
 #[cfg(test)]
-pub(super) fn disconnect_test_transport(sender: &ControllerTransportSender) {
+pub(crate) fn disconnect_test_transport(sender: &ControllerTransportSender) {
     disconnect_test_transport_to_sink(sender, &|_| {});
 }
 
@@ -1419,7 +1419,7 @@ pub(super) fn disconnect_test_transport_to_sink(
 }
 
 #[cfg(test)]
-pub(super) fn dispatch_test_transport_frame(sender: &ControllerTransportSender, frame: &Value) {
+pub(crate) fn dispatch_test_transport_frame(sender: &ControllerTransportSender, frame: &Value) {
     dispatch_test_transport_frame_to_sink(sender, frame, &|_| {});
 }
 

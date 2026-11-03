@@ -10,6 +10,18 @@ import {
 const labels = (items) => items.map(({ kind, target }) => `${kind}:${target}`);
 const fullLabels = labels(FULL_FRONTEND_SMOKES);
 
+test("quarantine confirmation smoke runs in full CI and for its real public facade", () => {
+  const smoke = "node:tests/remote_quarantine_smoke.mjs";
+  assert.ok(fullLabels.includes(smoke));
+  for (const entry of ["pinvou3-app/src/features/remote-control/RemoteProxyArchivePanel.jsx",
+    "pinvou3-app/src/platform/tauri/bridge.js", "pinvou3-app/tests/fixtures/remote_quarantine_smoke.jsx"]) {
+    assert.ok(labels(selectFrontendSmokes([entry])).includes(smoke));
+  }
+  const knip = JSON.parse(readFileSync(new URL("../../pinvou3-app/knip.json", import.meta.url), "utf8"));
+  assert.ok(knip.entry.includes("tests/remote_quarantine_smoke.mjs"));
+  assert.ok(!knip.ignore.includes("tests/remote_quarantine_smoke.mjs"));
+});
+
 test("remote operation ownership regression runs for its product and fixture paths", () => {
   const smoke = "node:tests/remote_dispatch_ownership_smoke.mjs";
   for (const path of ["pinvou3-app/src/features/chat/ChatView.jsx",
@@ -27,6 +39,15 @@ test("the real archive component smoke is included in the full CI suite", () => 
   assert.ok(labels(selectFrontendSmokes([
     "pinvou3-app/src/features/remote-control/RemoteProxyArchivePanel.jsx",
   ])).includes("node:tests/remote_archive_smoke.mjs"));
+});
+
+test("controlled recovery smoke is selected for the real application and feature paths", () => {
+  const smoke = "node:tests/controlled_open_ui_smoke.mjs";
+  for (const path of ["pinvou3-app/src/app/main.jsx", "pinvou3-app/src/features/remote-control/ControlledOpenRecovery.jsx", "pinvou3-app/tests/controlled_open_ui_smoke.mjs"]) {
+    assert.ok(labels(selectFrontendSmokes([path])).includes(smoke), path);
+  }
+  const knip = JSON.parse(readFileSync(new URL("../../pinvou3-app/knip.json", import.meta.url), "utf8"));
+  assert.ok(knip.entry.includes("tests/controlled_open_ui_smoke.mjs"));
 });
 
 test("the archive smoke is an executable Knip entry, not an ignored file", () => {

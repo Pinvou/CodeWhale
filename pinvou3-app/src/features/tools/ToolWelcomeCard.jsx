@@ -47,7 +47,7 @@ const ToolWelcomeCard = ({ toolId, theme, t, onSend }) => {
               </div>
               <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5">
                 {tool.welcomeQueries.map((q, i) => (
-                  <button
+                  <button type="button"
                     key={i}
                     onMouseEnter={() => setHovered(i)}
                     onMouseLeave={() => setHovered(null)}

@@ -2,13 +2,18 @@
 # pinvou3 macOS 发布脚本：构建 universal dmg → 合并 latest.json platforms.macos-universal + macos-arm64 → rsync 上传。
 # 用法: ./scripts/release-macos.sh "本次更新说明"
 #
+# ⚠️ 本脚本只发布到发布源站(地址经 PINVOU3_RELEASE_SERVER 提供,见私有运维资料)。pinvou.com 的 DNS 已指向 nginx-edge(公网入口),
+# 两机无自动同步:发版后须按 docs/应用内升级-设计.md「服务端现状」把同名文件与
+# latest.json 手工镜像到 edge,否则公网仍是旧版/404(2026-09-28 0.10.5 发版实测)。
+#
 # 发版前置:
-#   1. bump 版本号(tauri.conf.json / Cargo.toml / package.json 三处,本脚本会校验一致)
+#   1. 改根目录 VERSION 后运行 node scripts/sync-version.mjs 同步各版本文件
+#      (本脚本以 sync-version.mjs --check 校验一致,不再三处手工 bump)
 #   2. (可选)export MACOS_SIGNING_IDENTITY / APPLE_ID / APPLE_APP_SPECIFIC_PASSWORD / APPLE_TEAM_ID
 #      未设则 Tauri bundler 用 tauri.conf.json 的 signingIdentity="-" 做 ad-hoc 签(可运行,
 #      但用户首次需 xattr -dr com.apple.quarantine 才能过 Gatekeeper)。
 #   3. ./scripts/release-macos.sh "修了 xxx"
-#   4. 客户端 App 启动/手动检查即可看到新版
+#   4. 按文档把产物镜像到 edge 后,客户端 App 启动/手动检查才可见新版
 set -euo pipefail
 
 NOTES="${1:-}"
@@ -19,7 +24,7 @@ fi
 
 REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 APP_DIR="$REPO_ROOT/pinvou3-app"
-SERVER="admin@8.218.49.20"
+SERVER="${PINVOU3_RELEASE_SERVER:?需要 PINVOU3_RELEASE_SERVER(如 user@host),真实值见私有运维资料}"
 REMOTE_DIR="/var/www/pinvou3"
 BASE_URL="https://pinvou.com/pinvou3"
 ARCH="universal"
@@ -275,4 +280,6 @@ ssh "$SERVER" "mv '$REMOTE_DIR/latest.json.new' '$REMOTE_DIR/latest.json' && chm
 echo "=== 发布完成 ==="
 echo "DMG: $DMG_URL"
 echo "清单: $BASE_URL/latest.json"
+# 注意:下方 curl 走 DNS(=edge)。未镜像 edge 前它必显示旧版,是预期而非失败,不能作为
+# 发布成功依据;以 docs/应用内升级-设计.md「服务端现状」的双端验证为准。
 curl -fsS "$BASE_URL/latest.json" | jq '{version, macos_universal: .platforms["macos-universal"] | {url, sha256}, macos_arm64: .platforms["macos-arm64"] | {url, sha256}}' || echo "(线上验证失败,检查 nginx)"

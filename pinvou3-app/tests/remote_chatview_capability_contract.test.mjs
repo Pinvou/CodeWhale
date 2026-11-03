@@ -145,7 +145,7 @@ test('ChatView consumes the authenticated mode, workspace, tool and skill snapsh
 test('App initializes and passes the controller configured model source', () => {
   const initialization = sourceSection(
     app, 'const [remoteModelSource, setRemoteModelSource]',
-    'const controlledDeviceAutoOpenRef',
+    'const remoteTemporaryModelAvailable',
   );
   assert.match(initialization,
     /useState\('controller_temporary'\)/,

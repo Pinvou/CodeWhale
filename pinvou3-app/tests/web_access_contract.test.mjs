@@ -132,6 +132,33 @@ function rustCommandBlock(source, command) {
   return source.slice(start, next === -1 ? source.length : next);
 }
 
+// web_access_* 管理命令的桌面专用反钉收敛为单一清单。
+// 命名空间约定:web_access_* 一律管理面(端点生命周期、配对状态、RPC 代
+// 理、bridge 就绪),除 web_access_list_host_files 外全部不进 Web 策略。
+const desktopOnlyWebAccessCommands = [
+  'web_access_enable',
+  'web_access_disable',
+  'web_access_status',
+  'web_access_rotate',
+  'web_access_revoke_host_workspace',
+  // 主 WebView 事件通道同样管理专用——进 Web 策略的
+  // 话手机可经 RPC→bridge invoke 触发 publish_frontend_event(只过
+  // policy.events 允许名单,可伪造允许事件);缺席即全部防线。
+  'web_access_publish_event',
+  // RPC 代理与 bridge 就绪命令——各自 doc comment 声明
+  // desktop-only,把它们加进 access-policy
+  // 或删掉其 require_main_webview 门都静默全绿(rpc_begin/rpc_respond 的
+  // 策略侧防线即全部防线:relay 路径的执行窗口本就是 main)。
+  'web_access_bridge_ready',
+  'web_access_rpc_begin',
+  'web_access_rpc_respond',
+  // 自定义 Relay 指向/轮换/重置只能由桌面端决定;web_access_track_behavior_event
+  // 属行为埋点、在 Web 策略内,不在本清单。
+  'web_access_relay_settings',
+  'web_access_set_relay',
+  'web_access_reset_relay',
+];
+
 for (const command of [
   'chat',
   'ingest_file',
@@ -173,6 +200,17 @@ for (const command of [
   'open_acp_agent_login_url',
   'submit_acp_agent_login_code',
   'web_access_enable',
+  // web_access_* 的管理命令同样桌面专用——手机侧的可达性
+  // 只经由主 WebView 代理 RPC(此时 require_main_webview 门按设计放行),
+  // 真正的门是策略白名单的缺席;只反钉 enable 会让「把其余命令加进
+  // access-policy.json」静默通过全部测试。(web_access_list_host_files
+  // 有意留在 Web 策略内——手机文件选择器的 RPC 由主 WebView 派发,不在
+  // 本反钉清单;require_main_webview 门在命令层单独拦 aux webview。)
+  // web_access_* 管理命令收敛为单一清单,下方结构性
+  // 互斥钉按它判「其余命令」——清单与 Web 策略的并集必须覆盖
+  // remote_control.rs 里定义的每一个 web_access_* 命令,新增命令不加进
+  // 任一侧即红(结构性漏网:rpc 代理三兄弟、bridge_ready 由此兜住)。
+  ...desktopOnlyWebAccessCommands,
   // 上传包展示名/说明编辑写 bundles.json 并可能回写 SKILL.md：写操作桌面专用。
   'update_bundle_display_meta',
   // 回收站恢复/彻底删除与两种包导出都是桌面端写操作（原生保存对话框 + 文件系统
@@ -194,6 +232,43 @@ for (const command of [
   'check_dependencies',
 ]) {
   assert.equal(allowed.has(command), false, `${command} must remain desktop-only`);
+}
+
+// 结构性互斥钉——remote_control.rs 里定义的每一个
+// web_access_* 命令必须要么在 Web 策略里(受 positive wrapper 钉约束),
+// 要么在上面的桌面专用反钉清单里。手工反钉清单的结构性漏网
+// (web_access_bridge_ready / web_access_rpc_begin / web_access_rpc_respond
+// 一类)由本钉永久兜住:任何新 web_access_* 命令不加进任一侧即红。
+{
+  const defined = new Set();
+  for (const match of remoteControlCommands.matchAll(/pub(?:\([\w:]+\))? (?:async )?fn (web_access_\w+)\(/g)) {
+    defined.add(match[1]);
+  }
+  assert.ok(defined.size >= 50,
+    `expected the full web_access_* command surface, found ${defined.size}`);
+  for (const command of defined) {
+    assert.ok(
+      allowed.has(command) || desktopOnlyWebAccessCommands.includes(command),
+      `${command} must be either in the web policy or explicitly anti-pinned as desktop-only`,
+    );
+  }
+  for (const command of desktopOnlyWebAccessCommands) {
+    assert.ok(defined.has(command),
+      `${command} is anti-pinned but no longer defined in remote_control.rs`);
+  }
+}
+
+// 事件半边的反钉——web_access:* 事件全部管理专用
+// (status 携带配对 URL/QR,rpc_request 携带代理命令与参数,
+// event_subscribe 是订阅控制)。结构化扫描 Rust 管理器与 JS 桥里的
+// web_access:* 字面量:任何一个都不允许出现在 Web 策略事件名单里,
+// 新增同名事件即被扫进(此前事件半边没有任何反向钉)。
+for (const source of [remoteControlManager, desktopRemoteControlBridge]) {
+  for (const match of source.matchAll(/"web_access:([a-z_]+)"/g)) {
+    const eventName = `web_access:${match[1]}`;
+    assert.equal(allowedEvents.has(eventName), false,
+      `${eventName} is a management channel and must never enter the web event policy`);
+  }
 }
 
 // 知识库批量导入的进度查看与继续/取消/重试/失败文件分页是一组协同命令：Web 端知识库
@@ -955,16 +1030,132 @@ assert.match(settingsView, /remoteCopy = t\.uiRemote/);
 assert.match(settingsView, /\{remoteCopy\.title\}/);
 assert.match(settingsView, /\{remoteCopy\.link\}/);
 assert.match(settingsView, /\{remoteCopy\.refresh\}/);
-assert.match(settingsView, /startRemoteControl\(\{ allowHostWorkspace: true \}\)/,
-  'host workspace access must follow an explicit action in the desktop modal');
+// Enable and allow-folders must stay on separate handlers (regression: one shared
+// handler made a single Enable click silently latch allow_host_workspace consent):
+// the Enable handler starts with an empty options object, and the explicit
+// allow-folders handler is the only place that passes allowHostWorkspace: true.
+assert.match(settingsView, /async function handleEnableWebAccess\(\) \{[\s\S]{0,220}startRemoteControl\(\{\}\)/,
+  'Enable Access must start remote control without host workspace consent');
+assert.match(settingsView, /async function handleAllowHostWorkspace\(\) \{[\s\S]{0,220}startRemoteControl\(\{ allowHostWorkspace: true \}\)/,
+  'host workspace access must follow an explicit allow-folders action in the desktop modal');
+assert.match(settingsView, /onClick=\{handleAllowHostWorkspace\}[\s\S]{0,400}\{remoteCopy\.allowWorkspace\}/,
+  'the allow-folders button must keep its dedicated consent handler');
+assert.match(settingsView, /onClick=\{handleEnableWebAccess\}[\s\S]{0,400}\{remoteCopy\.enable\}/,
+  'the Enable button must use the consent-free start handler');
 assert.doesNotMatch(settingsView, /useEffect\(\(\) => \{[\s\S]{0,240}startRemoteControl/,
   'opening the remote-control modal must not silently authorize host workspace access');
 assert.match(desktopRemoteControlBridge, /allowHostWorkspace: !!\(options && options\.allowHostWorkspace\)/,
   'the desktop bridge must carry explicit host-workspace consent');
+// Folder consent must stay visible and individually revocable while the link
+// is active: consent latched by the pre-split single-button UI can be seen
+// and taken back without stopping or rotating the whole link.
+assert.match(settingsView, /async function handleRevokeHostWorkspace\(\) \{[\s\S]{0,220}revokeRemoteHostWorkspace\(\)/,
+  'the modal must expose a dedicated revoke-folder-consent handler');
+assert.match(settingsView, /webAccessActive && hostWorkspaceAuthorized && \([\s\S]{0,420}\{remoteCopy\.workspaceAllowed\}[\s\S]{0,300}onClick=\{handleRevokeHostWorkspace\}/,
+  'folder authorization must render an affirmative indicator wired to the revoke handler');
+assert.match(settingsView, /\{remoteCopy\.revokeWorkspace\}/,
+  'the revoke control must carry explicit trilingual copy');
+assert.doesNotMatch(settingsView, /handleRevokeHostWorkspace[\s\S]{0,200}allowHostWorkspace: true/,
+  'revoking folder consent must never re-grant it');
+// uiRemote 的 close / workspaceAllowed / revokeWorkspace
+// 三键按 uiRemote 分区的开闭括号切片后逐键钉在位,删任一语言的任一键即红。
+const i18nByLanguage = {
+  en: readSource(path.join(root, 'src', 'shared', 'i18n', 'en.js'), 'utf8'),
+  ja: readSource(path.join(root, 'src', 'shared', 'i18n', 'ja.js'), 'utf8'),
+  zh: readSource(path.join(root, 'src', 'shared', 'i18n', 'zh.js'), 'utf8'),
+};
+for (const [language, source] of Object.entries(i18nByLanguage)) {
+  const uiRemoteStart = source.indexOf('uiRemote: {');
+  assert.notEqual(uiRemoteStart, -1,
+    `the ${language} i18n dictionary must define a uiRemote section`);
+  const uiRemoteEnd = source.indexOf('\n        },', uiRemoteStart);
+  assert.notEqual(uiRemoteEnd, -1,
+    `the uiRemote section of the ${language} i18n dictionary must have a closing brace`);
+  const uiRemoteBlock = source.slice(uiRemoteStart, uiRemoteEnd);
+  for (const key of ['close', 'workspaceAllowed', 'revokeWorkspace']) {
+    assert.match(
+      uiRemoteBlock,
+      new RegExp(`\\b${key}:`),
+      `the uiRemote section of the ${language} i18n dictionary must define ${key}: (missing copy breaks the settings remote-control modal)`,
+    );
+  }
+}
+// Registration rejections must surface trilingual recovery copy through the
+// stable last_error_code; the raw English last_error is fallback only
+// (regression: the actionable hints shipped as English-only raw strings).
+assert.match(settingsView, /webAccess\.last_error_code\s*\?\s*remoteCopy\.registerHints\?\.\[webAccess\.last_error_code\]/,
+  'the settings modal must map the registration error code to localized recovery copy');
+assert.match(settingsView, /registerHint \|\| webAccess\.last_error/,
+  'unmapped errors must fall back to the raw last_error text');
+assert.equal((i18n.match(/rotate_credentials:/g) || []).length, 3,
+  'the rotate-credentials recovery copy must exist in all three languages');
+assert.equal((i18n.match(/rotate_recover_config:/g) || []).length, 3,
+  'the rotate-recover recovery copy must exist in all three languages');
+assert.equal((i18n.match(/update_desktop:/g) || []).length, 3,
+  'the update-desktop recovery copy must exist in all three languages');
+assert.match(desktopRemoteControlBridge, /invoke\("web_access_revoke_host_workspace"\)/,
+  'the desktop bridge must call the desktop-only revoke command');
+// 「乐观合并清码」账必须逐分支成立——错误
+// 写入与码清理成对。remote-control.js 全部十个清码点在此逐点设 pin:
+// refresh 失败、乐观开始、start 成功/失败、stop 成功/失败、rotate
+// 成功/失败、revoke 合并/失败。其中两组字节完全相同的孪生形状——
+// refresh/revoke 失败共用的 { last_error: String(error), ... } 单行,
+// 以及 stop/rotate 失败共用的 status: "error"... 单行——无法按文本
+// 指向单侧,改用全局 count 断言守住两侧,删任一侧即红;其余各点按该
+// merge 对象的唯一形状逐点匹配。revoke 合并另须按 url 有无推导
+// active,不得把非活跃状态标成在线,改回强制 active: true 即红。
+assert.match(desktopRemoteControlBridge, /\{ starting: true, last_error: null, last_error_code: null \}/,
+  'the optimistic start merge must clear the stale recovery code');
+assert.match(desktopRemoteControlBridge,
+  /active: true, starting: false, last_error: null, last_error_code: null,/,
+  'the start success merge must clear the stale recovery code');
+assert.match(desktopRemoteControlBridge,
+  /active: wasActive, web_client_connected: wasActive && !!state\.webAccess\.web_client_connected, starting: false,\n {10}status: "error", last_error: String\(error\), last_error_code: null,/,
+  'the start failure merge must clear the stale recovery code');
+assert.equal(
+  (desktopRemoteControlBridge.match(/status: "error", last_error: String\(error\), last_error_code: null, starting: false \}/g) || []).length, 2,
+  'the stop and rotate failure merges are byte-identical twins; both must keep clearing the stale recovery code');
+assert.match(desktopRemoteControlBridge,
+  /status: "stopped", starting: false,\n {8}last_error: null, last_error_code: null,/,
+  'the stop success merge must clear the stale recovery code');
+assert.match(desktopRemoteControlBridge,
+  /active: true, web_client_connected: false, last_error: null, last_error_code: null, starting: false,/,
+  'the rotate success merge must clear the stale recovery code');
+assert.match(desktopRemoteControlBridge,
+  /active: !!\(info && info\.url\), starting: false,\n {10}host_workspace_authorized: false, last_error: null, last_error_code: null,/,
+  'the revoke merge must derive active from the url and clear the stale recovery code');
+assert.equal(
+  (desktopRemoteControlBridge.match(/\{ last_error: String\(error\), last_error_code: null \}/g) || []).length, 2,
+  'the status-refresh failure merge and the revoke failure merge must both clear the stale code');
+assert.match(remoteControlCommands, /web_access_revoke_host_workspace\([\s\S]{0,240}require_main_webview\(&window\)\?/,
+  'only the main desktop WebView may revoke folder consent');
 assert.match(remoteControlCommands, /web_access_enable\([\s\S]{0,240}require_main_webview\(&window\)\?/,
   'only the main desktop WebView may enable a persistent remote endpoint');
+assert.match(
+  remoteControlCommands,
+  /web_access_status\([\s\S]{0,260}require_main_webview\(&window\)\?/,
+  'web_access_status carries the token-bearing pairing URL and must stay main-WebView only',
+);
+assert.match(
+  remoteControlCommands,
+  /web_access_rotate\([\s\S]{0,240}require_main_webview\(&window\)\?/,
+  'rotation rewrites link credentials and must stay main-WebView only',
+);
+assert.match(remoteControlCommands, /web_access_disable\([\s\S]{0,240}require_main_webview\(&window\)\?/,
+  'only the main desktop WebView may stop a persistent remote endpoint');
 assert.match(remoteControlManager, /require_host_workspace_authorization\(endpoint\.config\.allow_host_workspace\)\?/,
   'workspace capabilities must fail closed until desktop authorization is persisted');
+// The JS half of the edit_last_turn revision guard: dropping or renaming the
+// arg would silently degrade the stale-view protection to fail-open, and the
+// Rust-side Option param alone cannot catch it.
+assert.match(webBridge, /expectedTranscriptRevision: expectedRevision \|\| null/,
+  'the web bridge must send its transcript revision with edit_last_turn');
+const memoryCommands = readSource(
+  path.join(root, 'src-tauri', 'src', 'app', 'commands', 'memory.rs'),
+  'utf8',
+);
+assert.match(memoryCommands, /expected_transcript_revision: Option<String>/,
+  'edit_last_turn must keep the optional transcript-revision guard parameter');
 assert.doesNotMatch(settingsView, />刷新链接</);
 assert.doesNotMatch(settingsView, /Relay 服务器/);
 assert.doesNotMatch(settingsView, /getWebRelaySettings/);

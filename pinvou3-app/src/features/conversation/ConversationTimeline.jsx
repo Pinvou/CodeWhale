@@ -731,7 +731,7 @@ function PermissionCard({ permission, pending, onRespond, responding, agentLabel
             : <StructuredValue label={c.operationArguments} value={tool.rawInput} />}
           <div className="mt-3 flex flex-wrap gap-2">
             {options.map(option => (
-              <button key={option.optionId} disabled={!actionable || responding}
+              <button type="button" key={option.optionId} disabled={!actionable || responding}
                 onClick={() => onRespond(permission.toolCallId, option.optionId)}
                 className={`max-w-full min-w-0 whitespace-normal break-all px-3 py-1.5 rounded-xl text-[12px] leading-5 font-medium transition-colors ${
                   String(option.kind || '').startsWith('allow')

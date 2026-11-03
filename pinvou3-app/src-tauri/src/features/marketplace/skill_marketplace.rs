@@ -31,7 +31,7 @@ use sha2::{Digest, Sha256};
 
 use crate::platform::paths;
 
-/// 预置技能资源:编译进二进制。每个子目录(pua/ nuwa/)是一个含 SKILL.md 的 skill。
+/// 预置技能资源:编译进二进制。每个子目录(如 government-writing/ pptx/)是一个含 SKILL.md 的 skill。
 static MARKETPLACE_DIR: Dir<'static> =
     include_dir!("$CARGO_MANIFEST_DIR/resources/common/skill-marketplace");
 

@@ -48,10 +48,10 @@ use crate::features::sessions::{
 };
 use crate::features::sessions::{SerializableMode, SessionModeState};
 
-/// 定时任务无人值守首轮的唯一附加约束。任务 prompt 原文已作为用户消息传入，
-/// 这一句只防模型把目标改写成别的事，不再堆叠更长的提示词。
-const SCHEDULED_TURN_REMINDER: &str =
-    "本轮是定时任务的自动执行：直接执行用户消息里的任务，不要改写、替换或扩展任务目标。";
+/// Unattended turns must finish or report a blocker without waiting for a user.
+const SCHEDULED_TURN_REMINDER: &str = "本轮为无人值守自动执行，只完成用户给定的任务，不改写、替换或扩展任务目标。\n\
+有安全默认且在已有授权范围内时直接推进；不要发起等待用户回答或确认的操作。\n\
+缺少关键条件或授权时，说明阻塞、已完成部分和未执行事项，然后结束本轮；不猜测缺失事实或声称已经完成。";
 
 /// 单个 session 的 engine wrapper(handle + 该 session 绑定的 bridge)。
 ///
@@ -1775,6 +1775,7 @@ pub(crate) fn unattended_disallowed_tools(disallowed: &[String]) -> Vec<String> 
     for tool in [
         "create_goal",
         "update_goal",
+        "request_user_input",
         crate::features::assistant::platform::bridge::SCHEDULED_TASK_CREATE_TOOL,
         crate::features::assistant::platform::bridge::SCHEDULED_TASK_UPDATE_TOOL,
         crate::features::assistant::platform::bridge::SCHEDULED_TASK_DELETE_TOOL,
@@ -2554,9 +2555,9 @@ fn format_instructions(sources: &[deepseek_tui::prompts::InstructionSource]) -> 
 /// 底座两层 plan 结构：
 ///   - `update_plan`         → strategy 层（`plan_snapshot`）
 ///   - `checklist_write` / `todo_write` → leaf task 层（`todos_snapshot`）
-/// 任一调过 + plan_phase=Planning → TurnComplete 时 emit `chat:plan_ready`。
-/// 参考底座 `tui/ui.rs:1072-1085` 的 `plan_tool_used_in_turn` 判据 +
-/// `prompts/modes/plan.md` "Use update_plan ... and checklist_write ..." 双工具引导。
+/// 任一调过 + 会话处于 Plan 模式（`SerializableMode::Plan`）→ TurnComplete 时
+/// emit `chat:plan_ready`（PlanPhase 已移除，触发判据为 forwarder 的
+/// `plan_used && state.mode == Plan`）。
 #[derive(Default)]
 struct TurnPlanTracker {
     plan_tool_used: bool,
@@ -4355,9 +4356,10 @@ mod live_tests {
     // 污染）由 `platform::test_support::EnvRestore` 承担（快照为 OsString，
     // 恢复语义与原 String 版一致），与 engine_pool / multiagent 回归测试共用。
 
-    /// 真机集成(#[ignore]):打真 vLLM 跑一轮,drain rx_event 时**照 forwarder 四臂
-    /// 原样喂 SelfMetrics**,证明真实事件流(TurnStarted→MessageDelta→TurnComplete+真
-    /// usage)累加出合理指标 + 事件顺序符合预期(TurnStarted 在首 MessageDelta 前)。
+    /// 真机集成(#[ignore]):打真 vLLM 跑一轮,drain rx_event 时**照 forwarder 五臂
+    /// 原样喂 SelfMetrics**,证明真实事件流(TurnStarted→MessageDelta→TurnUsage→
+    /// TurnComplete+真usage)累加出合理指标 + 事件顺序符合预期(TurnStarted 在首
+    /// MessageDelta 前)。
     ///
     ///   DEEPSEEK_ALLOW_INSECURE_HTTP=1 DEEPSEEK_FORCE_HTTP1=1 \
     ///   cargo test --manifest-path pinvou3-app/src-tauri/Cargo.toml \
@@ -4418,6 +4420,14 @@ mod live_tests {
                 }
                 Event::MessageDelta { content, .. } => {
                     m.on_message_delta(sid, content.chars().count());
+                }
+                Event::TurnUsage {
+                    usage,
+                    first_token_ms,
+                    request_ms,
+                    ..
+                } => {
+                    m.on_engine_usage(sid, first_token_ms, request_ms, usage.output_tokens);
                 }
                 Event::ToolCallStarted { .. } => {
                     seq.push(format!("t{turn}:ToolCallStarted"));
@@ -4828,6 +4838,7 @@ mod unattended_shield_tests {
         for tool in [
             "create_goal",
             "update_goal",
+            "request_user_input",
             "mcp_app-automations_create_scheduled_task",
             "mcp_app-automations_update_scheduled_task",
             "mcp_app-automations_delete_scheduled_task",

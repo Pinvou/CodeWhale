@@ -195,7 +195,7 @@ const EditableMarkdownPreview = forwardRef(function EditableMarkdownPreview({
       return saveNow();
     }
     return ok;
-  }, [artifact?.path, initialInfo, onSaved]);
+  }, [artifact?.path, initialInfo, markdownFromDom, onSaved]);
 
   useEffect(() => {
     saveNowRef.current = saveNow;
