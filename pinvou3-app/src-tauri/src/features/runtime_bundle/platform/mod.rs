@@ -211,7 +211,8 @@ pub(crate) use crate::platform::connector_skills::{
 ///       `--replace` 更正为真实 flag `--replacement`，attendance_report_checkin.py
 ///       头注 100 人 → 50 人（与 MAX_USERS_PER_CHECKIN_BATCH 常量一致），
 ///       attendance_report_common.py RGBA 注释与 convert("RGBA") 对齐。全部
-///       登记于 NOTICE-dingtalk.md 供下次 sync 重放。技能树不参与内容哈希，
+///       登记于 NOTICE-dingtalk.md 供下次 sync 重放（该 NOTICE 已压缩为修改
+///       摘要，逐条重放记录经其 git 历史指针可达）。技能树不参与内容哈希，
 ///       必须语义升位让已连接用户启动时刷新（否则刷新要等首帧后
 ///       refresh_connector_auth_gates 回填）；extracted-VERSION 门禁只做
 ///       不等比较。
