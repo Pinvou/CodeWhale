@@ -691,6 +691,62 @@ test('direct materialization retires a controlled owner before creating its new 
   assert.equal(rt.state.activeSessionId, 'created-local');
 });
 
+// ── materializeSession 草稿内容保护（round-38 review P2，诊断直达）──
+// 设备页排查动作在 prompt 采样 resolve 后才物化；等待窗口里用户新建对话并
+// 输入未发送文本 / 选了工作目录时，enterDraft 的工作集清空会把内容原地吞掉。
+// protectUserDraft 见「未物化草稿 + 用户内容」必须拒答 null，内容原地保留。
+
+test('protected materialization refuses a content-bearing draft and keeps text and workspace', async () => {
+  const rt = loadSessionsFeature();
+  rt.state.composerDraft = '采样窗口里新写的未发送草稿';
+  rt.state.draftWorkspacePath = '/tmp/选中的工作目录';
+  const refused = await rt.api.materializeSession({ protectUserDraft: true });
+  assert.equal(refused, null);
+  assert.equal(rt.calls.invoke.filter(name => name === 'create_session').length, 0);
+  assert.equal(rt.state.composerDraft, '采样窗口里新写的未发送草稿');
+  assert.equal(rt.state.draftWorkspacePath, '/tmp/选中的工作目录');
+  assert.equal(rt.state.activeSessionId, null);
+});
+
+test('protected materialization refuses a workspace-only draft', async () => {
+  const rt = loadSessionsFeature();
+  rt.state.draftWorkspacePath = '/tmp/ws-only';
+  const refused = await rt.api.materializeSession({ protectUserDraft: true });
+  assert.equal(refused, null);
+  assert.equal(rt.calls.invoke.filter(name => name === 'create_session').length, 0);
+  assert.equal(rt.state.draftWorkspacePath, '/tmp/ws-only');
+});
+
+test('protected materialization still materializes an empty draft', async () => {
+  const rt = loadSessionsFeature();
+  const creation = rt.defer('create_session');
+  const pending = rt.api.materializeSession({ protectUserDraft: true });
+  creation.resolve({ id: 'created-local' });
+  assert.equal(await pending, 'created-local');
+  assert.equal(rt.state.activeSessionId, 'created-local');
+});
+
+test('protected materialization ignores content inside an active session', async () => {
+  const rt = loadSessionsFeature();
+  rt.state.activeSessionId = 'local-a';
+  rt.state.composerDraft = '活动会话里的未发送文本';
+  const creation = rt.defer('create_session');
+  const pending = rt.api.materializeSession({ protectUserDraft: true });
+  creation.resolve({ id: 'created-local' });
+  assert.equal(await pending, 'created-local');
+});
+
+test('unprotected materialization keeps the explicit-entry semantics', async () => {
+  const rt = loadSessionsFeature();
+  rt.state.composerDraft = '显式入口前的旧草稿';
+  rt.state.draftWorkspacePath = '/tmp/旧目录';
+  const creation = rt.defer('create_session');
+  const pending = rt.api.materializeSession();
+  creation.resolve({ id: 'created-local' });
+  assert.equal(await pending, 'created-local');
+  assert.equal(rt.calls.invoke.filter(name => name === 'create_session').length, 1);
+});
+
 test('direct scheduled-run navigation invalidates a previously captured controlled owner', async () => {
   const rt = loadSessionsFeature();
   rt.state.desktopRemoteControl = {

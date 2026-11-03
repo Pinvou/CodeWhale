@@ -266,6 +266,46 @@ test('web ensureSession：尾部 await 期间再进草稿 → 物化中止不漂
   await p;
 });
 
+// ── materializeSession 草稿内容保护（round-38 review P2，诊断直达）──
+// 与桌面桥同款（session_nav_race.test.mjs 的 tauri 侧钉）：等待窗口之后
+// 晚到的物化遇「未物化草稿 + 未发送文本」必须拒答 null，草稿原地保留；
+// 空草稿与无参调用保持既有语义。Web 无目录选择通道，只钉文本半边。
+
+test('web materializeSession：protectUserDraft 遇未发送草稿 → 放弃且草稿存活', async () => {
+  const rt = bootWebBridge();
+  rt.flat.setComposerDraft('采样窗口里新写的未发送草稿');
+  const refused = await rt.sessions.materializeSession({ protectUserDraft: true });
+  assert.equal(refused, null);
+  const view = rt.view();
+  assert.equal(view.activeSessionId, null, '不得物化覆盖用户草稿');
+  assert.equal(view.composerDraft, '采样窗口里新写的未发送草稿', '未发送文本必须原地保留');
+});
+
+test('web materializeSession：protectUserDraft 空草稿照常物化', async () => {
+  const rt = bootWebBridge();
+  const create = rt.defer('web_access_create_session');
+  const list = rt.defer('list_sessions');
+  const pending = rt.sessions.materializeSession({ protectUserDraft: true });
+  create.resolve({ id: 'chat-ok', transcript_revision: 1 });
+  await new Promise(r => { setTimeout(r, 0); });
+  list.resolve([]);
+  assert.equal(await pending, 'chat-ok');
+  assert.equal(rt.view().activeSessionId, 'chat-ok');
+});
+
+test('web materializeSession：无参调用遇草稿保持显式入口语义', async () => {
+  const rt = bootWebBridge();
+  rt.flat.setComposerDraft('显式入口前的旧草稿');
+  const create = rt.defer('web_access_create_session');
+  const list = rt.defer('list_sessions');
+  const pending = rt.sessions.materializeSession();
+  create.resolve({ id: 'chat-ok', transcript_revision: 1 });
+  await new Promise(r => { setTimeout(r, 0); });
+  list.resolve([]);
+  assert.equal(await pending, 'chat-ok');
+  assert.equal(rt.view().activeSessionId, 'chat-ok');
+});
+
 // ── archiveSession：失败回滚不劫持新草稿 ──────────────────────────
 
 // Build the scheduled-run scenario: register the task via loadScheduledTasks

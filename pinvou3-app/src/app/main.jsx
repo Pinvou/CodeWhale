@@ -3083,7 +3083,14 @@ const App = () => {
           // 修订号仍与动作起点可比（materialize 尚未启动），hung prompt 窗口
           // 里的用户切会话/去设置在此拍板。
           const promptWindowIntact = ownership.kept();
-          const sid = reused || (await bridge.sessions.materializeSession());
+          // 前台物化携带草稿内容保护（round-38 review P2）：采样等待窗口里
+          // 用户新建对话并输入未发送文本 / 选了工作目录时，晚到的物化不得让
+          // enterDraft 把这份内容吞掉——materializeSession 见未物化草稿带
+          // 用户内容即返回 null，本动作按既有守卫语义放弃发送（false → 设备
+          // 页保留输入并提示重试），草稿原地保留。空草稿（用户点了新对话但
+          // 未输入）照旧物化，与 ⑥-f2「消息照常送达、只跳过视图切换」的
+          // 既有口径一致。
+          const sid = reused || (await bridge.sessions.materializeSession({ protectUserDraft: true }));
           lastFailedDoctorSidRef.current = null;
           if (!sid) return false;
           usedSid = sid;

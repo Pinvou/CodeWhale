@@ -9,6 +9,7 @@
  * - 外部模型「移除」的两段式确认：先登记（ollama 未登记行）再走守卫移除命令
  * - 故障排查快捷卡：device_doctor_prompt → 新建普通会话（create_session）→ chat 携带提示词
  * - prompt 采样挂起期间经侧栏去设置：晚到的提示词不把用户拽回聊天、消息照常送达（复核 P2）
+ * - prompt 采样挂起期间新建对话并输入草稿：晚到物化放弃发送、草稿原地保留（round-38 评审 P2）
  * - 商店库/外部模型读取失败面：常驻错误行 + 前往商店/重试恢复（第五轮评审）
  * - 旧行在场的刷新失败常驻陈旧行、交错读取按世代消费错误状态（round-30 评审）
  * - 非温度传感器越线出通用临界文案、不误指温度（round-30 评审）
@@ -1253,6 +1254,57 @@ async function clickTestId(page, testId) {
     && !sessionWindowState.toast
     && sessionWindowState.chatCalls > chatCallsBeforeSessionWindow,
     JSON.stringify(sessionWindowState));
+
+  // ⑥-f4 prompt 采样窗口里**新建对话并输入草稿**（round-38 review P2）：
+  // 窗口里用户点「新对话」并在输入框写下未发送文本——晚到的物化若照旧
+  // enterDraft，会把这份内容连同工作目录选择一并清空。修后 materializeSession
+  // 携带 protectUserDraft：见「未物化草稿 + 用户内容」返回 null，动作按守卫
+  // 语义放弃发送（无 chat/create_session 调用、无排查会话），草稿原地保留。
+  // 修前本用例必红：输入框被清空、排查消息静默送达新会话。视图停在聊天页
+  // （用户自己的导航），失败 toast 属设备页且视图已卸载，不在此断言（设备页
+  // 的「保留输入并提示重试」由 ⑨ 的失败面覆盖）。
+  await clickNavByLabel(page, '设备管理');
+  await page.waitForFunction(() => document.querySelector('[data-testid="app-root"]')?.getAttribute('data-current-view') === 'monitor', { timeout: 8000 });
+  await page.waitForFunction(() => !!document.querySelector('[data-testid="device-manager-view"]'), { timeout: 8000 });
+  await page.evaluate(() => { window.__DEVICE_MGR_TEST__.hangDoctorPrompt = true; });
+  const chatCallsBeforeDraftWindow = await page.evaluate(() => window.__DEVICE_MGR_TEST__.callsOf('chat').length);
+  const createCallsBeforeDraftWindow = await page.evaluate(() => window.__DEVICE_MGR_TEST__.callsOf('create_session').length);
+  await clickTestId(page, 'device-manager-doctor-packages');
+  await page.waitForFunction(
+    () => typeof window.__DEVICE_MGR_TEST__.resolveDoctorPrompt === 'function',
+    { timeout: 8000 },
+  );
+  // prompt 挂起期间点「新对话」（真实侧栏路径，session 通道）并输入未发送文本。
+  await clickNavByLabel(page, '新对话');
+  await page.waitForFunction(() => document.querySelector('[data-testid="app-root"]')?.getAttribute('data-current-view') === 'chat', { timeout: 8000 });
+  await page.waitForFunction(() => !!document.querySelector('[data-testid="chat-composer-input"]'), { timeout: 8000 });
+  await page.type('[data-testid="chat-composer-input"]', '采样窗口里输入的草稿文本');
+  await page.evaluate(() => { window.__DEVICE_MGR_TEST__.hangDoctorPrompt = false; });
+  await page.evaluate(() => { window.__DEVICE_MGR_TEST__.resolveDoctorPrompt?.(); });
+  // 留出潜在误物化窗口后断言：草稿文本原样保留、排查链路零调用。
+  await sleep(600);
+  const draftWindowState = await page.evaluate((beforeChat, beforeCreate) => ({
+    composer: (document.querySelector('[data-testid="chat-composer-input"]') || {}).value || '',
+    view: document.querySelector('[data-testid="app-root"]')?.getAttribute('data-current-view'),
+    chatCalls: window.__DEVICE_MGR_TEST__.callsOf('chat').length,
+    createCalls: window.__DEVICE_MGR_TEST__.callsOf('create_session').length,
+    chatBaseline: beforeChat,
+    createBaseline: beforeCreate,
+  }), chatCallsBeforeDraftWindow, createCallsBeforeDraftWindow);
+  if (draftWindowState.composer !== '采样窗口里输入的草稿文本') {
+    const diag = await page.evaluate(() => ({
+      composer: (document.querySelector('[data-testid="chat-composer-input"]') || {}).value || '',
+      view: document.querySelector('[data-testid="app-root"]')?.getAttribute('data-current-view'),
+      lastCalls: window.__DEVICE_MGR_TEST__.calls.slice(-8).map(c => c.cmd),
+    }));
+    console.error('[smoke][⑥-f4 diag]', JSON.stringify(diag));
+  }
+  rec('⑥-f4 prompt 采样期间新对话输入草稿：晚到物化放弃发送、草稿原地保留',
+    draftWindowState.composer === '采样窗口里输入的草稿文本'
+    && draftWindowState.view === 'chat'
+    && draftWindowState.chatCalls === draftWindowState.chatBaseline
+    && draftWindowState.createCalls === draftWindowState.createBaseline,
+    JSON.stringify(draftWindowState));
 
   // ⑥-f3 completion 窗口里**不经 gate 的直接视图变更**（三十三轮评审 P2）：
   // 动作自己的 publication 还开着（publishing>0），此刻更新卡的

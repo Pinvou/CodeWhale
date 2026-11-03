@@ -2234,7 +2234,16 @@ function timeStr() { return pinvouSharedweb().timeStr(); }
 async function createNewSession() { return pinvouSharedweb().createNewSession(); }
 
   // 与桌面域契约保持一致；显式工作流需要一个可持久关联的 session id。
-  async function materializeSession() {
+  // 前台物化的草稿内容保护（round-38 review P2，诊断直达）：与桌面桥同款——
+  // protectUserDraft 供「等待窗口之后才晚到」的物化调用方使用，活动目标仍是
+  // 未物化草稿（activeSessionId 为空）且草稿带用户内容（未发送文本；Web 无
+  // 目录选择通道，draftWorkspacePath 为同形恒 null 桩）时返回 null 放弃，
+  // enterDraft 不得吞掉用户输入；无参调用保持原语义。
+  async function materializeSession(options) {
+    if (options && options.protectUserDraft && !state.activeSessionId
+      && (String(state.composerDraft || "").length > 0 || state.draftWorkspacePath)) {
+      return null;
+    }
     enterDraft();
     return ensureSession();
   }

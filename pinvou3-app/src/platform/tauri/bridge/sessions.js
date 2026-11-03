@@ -473,7 +473,19 @@ async function createNewSession() { return pinvouSharedtauriSessions().createNew
 
   // 团队接力等显式工作入口需要立即获得稳定 session id 以建立本机关联；
   // 这类用户动作已经确认要开始工作，不适用侧边栏空草稿的 lazy 语义。
-  async function materializeSession() {
+  // 前台物化的草稿内容保护（round-38 review P2，诊断直达）：protectUserDraft
+  // 供「等待窗口之后才晚到」的物化调用方（设备页排查动作在 prompt 采样
+  // resolve 后才物化）使用——窗口里用户新建对话并输入未发送文本 / 选了工作
+  // 目录时，下面 enterDraft 的工作集清空会把这份内容原地吞掉。此刻活动目标
+  // 仍是未物化草稿（activeSessionId 为空）且草稿带用户内容（输入文本或目录
+  // 绑定）时直接返回 null，调用方按守卫语义放弃发送、内容原地保留；无参
+  // 调用保持原语义（点击即时的显式工作入口，如团队接力，仍按「用户已确认
+  // 开始工作」覆盖旧草稿）。
+  async function materializeSession(options) {
+    if (options && options.protectUserDraft && !state.activeSessionId
+      && (String(state.composerDraft || "").length > 0 || state.draftWorkspacePath)) {
+      return null;
+    }
     if (!enterDraft()) return null;
     return ensureSession();
   }
