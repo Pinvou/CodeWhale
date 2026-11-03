@@ -2202,6 +2202,7 @@ pub fn run() {
             commands::desktop_remote_proxy::desktop_remote_proxy_history_read,
             commands::desktop_remote_proxy::desktop_remote_proxy_history_delete,
             commands::desktop_remote_proxy::desktop_remote_proxy_archive,
+            commands::desktop_remote_proxy::desktop_remote_proxy_quarantine,
             commands::desktop_remote_proxy::desktop_remote_proxy_archive_list,
             commands::desktop_remote_proxy::desktop_remote_proxy_archive_candidates,
             commands::desktop_remote_proxy::desktop_remote_proxy_load_status,

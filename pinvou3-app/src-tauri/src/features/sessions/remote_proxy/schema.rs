@@ -15,6 +15,35 @@ pub(super) const MAX_PROJECTION_ATTACHMENTS: usize = 16;
 pub(super) const MAX_REMOTE_PROXY_FILE_BYTES: usize = 16 * 1024 * 1024;
 pub(super) const MAX_REMOTE_PROXY_RECORDS: usize = 256;
 pub(super) const MAX_RETIRED_EPOCHS: usize = 64;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum RemoteProxyCapacityError {
+    PendingLimit,
+    RetirementBudget,
+}
+
+impl RemoteProxyCapacityError {
+    pub(crate) fn code(self) -> &'static str {
+        match self {
+            Self::PendingLimit => "remote_pending_limit_reached",
+            Self::RetirementBudget => "remote_retirement_budget_exhausted",
+        }
+    }
+}
+
+impl std::fmt::Display for RemoteProxyCapacityError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(self.code())
+    }
+}
+
+impl std::error::Error for RemoteProxyCapacityError {}
+
+pub(crate) fn remote_proxy_capacity_code(error: &anyhow::Error) -> Option<&'static str> {
+    error
+        .downcast_ref::<RemoteProxyCapacityError>()
+        .map(|kind| kind.code())
+}
 // Matches controller/task.rs::validate_identifier, not protocol.rs's stricter
 // first-character grammar. Keep this local: sessions must not depend on the
 // remote_control feature. The app-layer contract test compares both sides.
@@ -240,6 +269,7 @@ pub(crate) struct RemoteProxyListItem {
     pub(crate) local_session_id: String,
     pub(crate) ui: RemoteUiMetadata,
     pub(crate) projected_entry_count: usize,
+    pub(crate) pending_count: usize,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -249,6 +279,9 @@ pub(crate) struct RemoteOfflineView {
     pub(crate) projection: AuthenticatedProjection,
     pub(crate) authenticated_cursor: Option<AuthenticatedCursor>,
     pub(crate) pending_unknown_count: usize,
+    /// Permanently frozen facts, never resumable dispatch handles.
+    pub(crate) quarantined: bool,
+    pub(crate) frozen_prepared_count: usize,
     /// Authenticated pre-admission receipts, separate from B's journal cursor.
     pub(crate) rejections: Vec<(String, String)>,
     /// Only never-attempted handles are discoverable after restart so the UI
