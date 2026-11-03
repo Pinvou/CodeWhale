@@ -2,25 +2,46 @@
 import { createRequire } from 'node:module';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { dirname, join, resolve } from 'node:path';
-import { copyFileSync, cpSync, mkdirSync, mkdtempSync, rmSync } from 'node:fs';
+import { copyFileSync, cpSync, lstatSync, mkdirSync, mkdtempSync, rmSync } from 'node:fs';
+import { createServer as createHttpServer } from 'node:http';
 import { tmpdir } from 'node:os';
 const require = createRequire(new URL('../package.json', import.meta.url));
-const { createServer } = await import(pathToFileURL(require.resolve('vite')).href);
+const { createServer: createViteServer } = await import(pathToFileURL(require.resolve('vite')).href);
 const react = (await import(pathToFileURL(require.resolve('@vitejs/plugin-react')).href)).default;
 const inputRoot = fileURLToPath(new URL('../', import.meta.url));
 // Vite correctly denies .git inputs. Serve only a fresh public source projection
 // outside .git; keep the default deny list and exact filesystem allow-list.
 export async function startRechargePollingFixture() {
-const root = mkdtempSync(join(tmpdir(), 'pinvou-public-tok03-app-'));
-for (const part of ['src/features/account-platform', 'src/shared'])
-  cpSync(join(inputRoot, part), join(root, part), { recursive: true, dereference: false });
-mkdirSync(join(root, 'tests/fixtures'), { recursive: true });
-copyFileSync(join(inputRoot, 'package.json'), join(root, 'package.json'));
-for (const name of ['account-platform-recharge-polling.html', 'account-platform-recharge-polling.jsx'])
-  copyFileSync(join(inputRoot, 'tests/fixtures', name), join(root, 'tests/fixtures', name));
-const cache = join(root, '.vite-cache');
 const port = Number(process.env.PINVOU_TEST_TOK03_PORT || 0);
 if (!Number.isSafeInteger(port) || port < 0 || port > 65535) throw new Error('FIXTURE_PORT_INVALID');
+let root; let rootIdentity;
+const removeProjection = () => {
+  if (!root) return;
+  let current;
+  try { current = lstatSync(root); } catch (reason) { if (reason.code === 'ENOENT') return; throw reason; }
+  if (dirname(resolve(root)) !== resolve(tmpdir()) || !root.split(/[/\\]/).pop().startsWith('pinvou-public-tok03-app-')
+    || !rootIdentity || !current.isDirectory() || current.isSymbolicLink()
+    || current.dev !== rootIdentity.dev || current.ino !== rootIdentity.ino) throw new Error('FIXTURE_CACHE_TARGET_INVALID');
+  rmSync(root, { recursive: true, force: true });
+};
+try {
+  root = mkdtempSync(join(tmpdir(), 'pinvou-public-tok03-app-'));
+  rootIdentity = lstatSync(root);
+  for (const part of ['src/features/account-platform', 'src/shared'])
+    cpSync(join(inputRoot, part), join(root, part), { recursive: true, dereference: false });
+  mkdirSync(join(root, 'tests/fixtures'), { recursive: true });
+  copyFileSync(join(inputRoot, 'package.json'), join(root, 'package.json'));
+  for (const name of ['account-platform-recharge-polling.html', 'account-platform-recharge-polling.jsx'])
+    copyFileSync(join(inputRoot, 'tests/fixtures', name), join(root, 'tests/fixtures', name));
+} catch (reason) {
+  const errors = [reason];
+  try { removeProjection(); } catch (cleanupReason) {
+    errors.push(cleanupReason);
+  }
+  if (errors.length > 1) throw new AggregateError(errors, 'FIXTURE_STARTUP_CLEANUP_FAILED', { cause: reason });
+  throw reason;
+}
+const cache = join(root, '.vite-cache');
 const id = '33333333-3333-4333-8333-333333333333';
 let actor = 'A', status = 'PENDING', closeStatus = 'OPEN', hold = false, created = Date.now(), lifetime = 120000, denyDetail = 0, denyList = 0, denyCreate = 0, denyWallet = 0, denyPurchase = 0, unknownCreate = false, requests = [], held = new Map();
 const createdKeys = new Map(), heldLists = new Map(), heldCreates = new Map(); let holdList = false, holdCreate = false;
@@ -101,40 +122,96 @@ const fixtureAPI = async (req, res, next) => {
       else send(res, order());
     } else send(res, { code: 'FIXTURE_NOT_FOUND' }, 404);
   };
-let vite;
-try {
-  vite = await createServer({ root, configFile: false, appType: 'mpa', clearScreen: false, logLevel: 'error', cacheDir: cache,
-    plugins: [react(), { name: 'public-loopback-fixture-api', configureServer(server) { server.middlewares.use(fixtureAPI); } }], resolve: { alias: { react: dirname(require.resolve('react/package.json')), 'react-dom': dirname(require.resolve('react-dom/package.json')) } },
-    optimizeDeps: { entries: ['tests/fixtures/account-platform-recharge-polling.html'] },
-    server: { host: '127.0.0.1', port, strictPort: true, watch: null, fs: { allow: [root, dirname(require.resolve('react/package.json')), dirname(require.resolve('react-dom/package.json'))] } } });
-
-  await vite.listen();
-
-} catch (reason) {
-  if (vite) await vite.close();
-  if (dirname(resolve(root)) === resolve(tmpdir()) && root.split(/[/\\]/).pop().startsWith('pinvou-public-tok03-app-')) rmSync(root, { recursive: true, force: true });
-  throw reason;
-}
-let cleanupPromise;
+let vite; let httpServer; let cleanupPromise;
+const sockets = new Set();
+const apiTasks = new Set();
+const handleFixtureAPI = (request, response, next) => {
+  // Connect does not consume a Promise returned by async middleware. Own each
+  // request's completion before cancellation can reject its body iterator.
+  const task = fixtureAPI(request, response, next).catch(reason => {
+    if (!request.socket.destroyed && !response.destroyed) next(reason);
+  }).finally(() => apiTasks.delete(task));
+  apiTasks.add(task);
+  // A dispatch failure must also be observed if an error middleware throws.
+  task.catch(reason => { console.error(reason); response.destroy(); });
+};
 const cleanup = () => {
   if (cleanupPromise) return cleanupPromise;
   cleanupPromise = (async () => {
-    for (const r of [...held.keys(), ...heldLists.keys(), ...heldCreates.keys()]) r.destroy();
+    for (const response of [...held.keys(), ...heldLists.keys(), ...heldCreates.keys()]) response.destroy();
     held.clear(); heldLists.clear(); heldCreates.clear();
-    await vite.close();
-    if (dirname(resolve(root)) !== resolve(tmpdir()) || !root.split(/[/\\]/).pop().startsWith('pinvou-public-tok03-app-')) throw new Error('FIXTURE_CACHE_TARGET_INVALID');
-    rmSync(root, { recursive: true, force: true });
+    const errors = [];
+    const closeHttp = async () => {
+      if (!httpServer) return;
+      for (const socket of sockets) socket.destroy();
+      await new Promise((resolveClose, rejectClose) => httpServer.close(reason => {
+        if (reason && reason.code !== 'ERR_SERVER_NOT_RUNNING') rejectClose(reason); else resolveClose();
+      }));
+    };
+    try { await closeHttp(); } catch (reason) { errors.push(reason); }
+    for (const result of await Promise.allSettled([...apiTasks]))
+      if (result.status === 'rejected') errors.push(result.reason);
+    // Vite's close snapshots its optimizer cancellation before awaiting a scan.
+    // Drain that existing scan first so a late optimizer cannot recreate the
+    // retired cache after close has resolved. HTTP accepts no new work now.
+    for (const result of await Promise.allSettled(Object.values(vite?.environments ?? {})
+      .map(async environment => {
+        await environment.depsOptimizer?.scanProcessing;
+        await environment.waitForRequestsIdle?.();
+        await Promise.all(Object.values(environment.depsOptimizer?.metadata.discovered ?? {})
+          .map(dependency => dependency.processing));
+      })))
+      if (result.status === 'rejected') errors.push(result.reason);
+    try { await vite?.close(); } catch (reason) { errors.push(reason); }
+    try { removeProjection(); } catch (reason) { errors.push(reason); }
+    if (errors.length) throw new AggregateError(errors, 'FIXTURE_CLEANUP_FAILED');
   })();
   return cleanupPromise;
 };
-return { url: `http://127.0.0.1:${vite.httpServer.address().port}/tests/fixtures/account-platform-recharge-polling.html`, rootPath: root, close: cleanup };
+try {
+  // The fixture owns HTTP and process lifetime. Middleware mode prevents Vite
+  // from installing SIGTERM/stdin handlers that call process.exit before this
+  // projection has been retired. WebSocket traffic shares the owned listener.
+  httpServer = createHttpServer();
+  httpServer.on('connection', socket => { sockets.add(socket); socket.once('close', () => sockets.delete(socket)); });
+  vite = await createViteServer({ root, configFile: false, appType: 'mpa', clearScreen: false, logLevel: 'error', cacheDir: cache,
+    plugins: [react(), { name: 'public-loopback-fixture-api', configureServer(server) { server.middlewares.use(handleFixtureAPI); } }], resolve: { alias: { react: dirname(require.resolve('react/package.json')), 'react-dom': dirname(require.resolve('react-dom/package.json')) } },
+    optimizeDeps: { entries: ['tests/fixtures/account-platform-recharge-polling.html'] },
+    server: { host: '127.0.0.1', port, strictPort: true, middlewareMode: true, ws: { server: httpServer }, watch: null,
+      fs: { allow: [root, dirname(require.resolve('react/package.json')), dirname(require.resolve('react-dom/package.json'))] } } });
+  httpServer.on('request', (request, response) => vite.middlewares(request, response));
+  await new Promise((resolveListen, rejectListen) => {
+    const failed = reason => { httpServer.off('listening', ready); rejectListen(reason); };
+    const ready = () => { httpServer.off('error', failed); resolveListen(); };
+    httpServer.once('error', failed); httpServer.once('listening', ready);
+    httpServer.listen(port, '127.0.0.1');
+  });
+} catch (reason) {
+  const errors = [reason];
+  try { await cleanup(); } catch (cleanupReason) {
+    errors.push(cleanupReason);
+  }
+  if (errors.length > 1) throw new AggregateError(errors, 'FIXTURE_STARTUP_CLEANUP_FAILED', { cause: reason });
+  throw reason;
+}
+return { url: 'http://127.0.0.1:' + httpServer.address().port + '/tests/fixtures/account-platform-recharge-polling.html', rootPath: root, close: cleanup };
 }
 if (process.argv[1] && import.meta.url === pathToFileURL(resolve(process.argv[1])).href) {
-  const fixture = await startRechargePollingFixture(); console.log(JSON.stringify({ url: fixture.url, scope: 'Actual React and BFF, loopback only' }));
-  // Vite may install its own signal handlers. Replace them so one awaited
-  // shutdown owns server sockets and the temporary source projection.
-  for (const signal of ['SIGINT', 'SIGTERM']) {
-    process.removeAllListeners(signal);
-    process.once(signal, () => { void fixture.close().then(() => process.exit(0), () => process.exit(1)); });
-  }
+  let startup; let shutdownPromise;
+  const failed = reason => { console.error(reason); process.exit(1); };
+  const shutdown = () => {
+    if (!shutdownPromise) shutdownPromise = Promise.resolve().then(() => startup)
+      .then(fixture => fixture.close()).then(() => process.exit(0), failed);
+  };
+  // Register before the first startup await and retain listeners during the
+  // entire close promise, so repeated signals cannot restore a hard exit.
+  for (const signal of ['SIGINT', 'SIGTERM']) process.on(signal, shutdown);
+  process.stdin.on('end', shutdown);
+  process.stdin.resume();
+  startup = startRechargePollingFixture();
+  try {
+    const fixture = await startup;
+    if (shutdownPromise) await shutdownPromise;
+    else console.log(JSON.stringify({ url: fixture.url, scope: 'Actual React and BFF, loopback only' }));
+  } catch (reason) { if (!shutdownPromise) failed(reason); }
 }
