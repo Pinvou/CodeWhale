@@ -774,9 +774,9 @@ pub(super) fn validate_web_rpc_scope(
         // file for every 256 KiB chunk.
         return Ok(());
     }
-    let store = app.try_state::<SessionStore>().ok_or_else(|| {
-        WebScopeRejection::Transient("Session store is not ready".to_string())
-    })?;
+    let store = app
+        .try_state::<SessionStore>()
+        .ok_or_else(|| WebScopeRejection::Transient("Session store is not ready".to_string()))?;
     if let Err(error) = store.load(session_id) {
         // 读取失败可能是暂时的(存储尚未就绪/文件暂时不可读):拒绝必须能被
         // 同一 client_request_id 重试,所以归类为 Transient 而非确定性非法。
@@ -785,7 +785,9 @@ pub(super) fn validate_web_rpc_scope(
             "failed",
         );
         log::warn!("[remote_control] Web Session scope lookup failed: {error:#}");
-        return Err(WebScopeRejection::Transient("web_session_unavailable".to_string()));
+        return Err(WebScopeRejection::Transient(
+            "web_session_unavailable".to_string(),
+        ));
     }
     Ok(())
 }

@@ -391,10 +391,9 @@ pub async fn update_memory_profile(
     store: State<'_, SessionStore>,
     app: AppHandle,
 ) -> Result<MemoryProfileState, String> {
-    let profile = crate::features::memory::update_profile(patch)
-        .map_err(|e| {
-            crate::platform::paths::redact_storage_prefix(&format!("update profile: {e}"))
-        })?;
+    let profile = crate::features::memory::update_profile(patch).map_err(|e| {
+        crate::platform::paths::redact_storage_prefix(&format!("update profile: {e}"))
+    })?;
     let (runtime, warnings) = refresh_memory_runtime_best_effort(session_id, &store, &app);
     Ok(MemoryProfileState {
         profile,
@@ -652,10 +651,9 @@ pub async fn confirm_pending_memory(
     store: State<'_, SessionStore>,
     app: AppHandle,
 ) -> Result<MemoryWriteState<Option<crate::features::memory::MemoryWriteEvent>>, String> {
-    let event = crate::features::memory::confirm_pending_memory(&id)
-        .map_err(|e| {
-            crate::platform::paths::redact_storage_prefix(&format!("confirm pending memory: {e}"))
-        })?;
+    let event = crate::features::memory::confirm_pending_memory(&id).map_err(|e| {
+        crate::platform::paths::redact_storage_prefix(&format!("confirm pending memory: {e}"))
+    })?;
     if let (Some(sid), Some(event)) = (
         resolve_session_id(session_id.clone(), &store),
         event.as_ref(),
@@ -680,11 +678,9 @@ pub async fn ignore_pending_memory(
     // The command's contract is Option<event>: the AlreadyDecided/NotFound
     // distinction matters to organize's report wording, not to this caller,
     // which historically answers None for both.
-    let event = match crate::features::memory::ignore_pending_memory(&id)
-        .map_err(|e| {
-            crate::platform::paths::redact_storage_prefix(&format!("ignore pending memory: {e}"))
-        })?
-    {
+    let event = match crate::features::memory::ignore_pending_memory(&id).map_err(|e| {
+        crate::platform::paths::redact_storage_prefix(&format!("ignore pending memory: {e}"))
+    })? {
         crate::features::memory::PendingIgnoreOutcome::Ignored(event) => Some(event),
         crate::features::memory::PendingIgnoreOutcome::AlreadyDecided
         | crate::features::memory::PendingIgnoreOutcome::NotFound => None,
@@ -711,10 +707,9 @@ pub async fn never_pending_memory(
     store: State<'_, SessionStore>,
     app: AppHandle,
 ) -> Result<MemoryWriteState<Option<crate::features::memory::MemoryWriteEvent>>, String> {
-    let event = crate::features::memory::never_pending_memory(&id, reason)
-        .map_err(|e| {
-            crate::platform::paths::redact_storage_prefix(&format!("never pending memory: {e}"))
-        })?;
+    let event = crate::features::memory::never_pending_memory(&id, reason).map_err(|e| {
+        crate::platform::paths::redact_storage_prefix(&format!("never pending memory: {e}"))
+    })?;
     if let (Some(sid), Some(event)) = (
         resolve_session_id(session_id.clone(), &store),
         event.as_ref(),
@@ -802,10 +797,9 @@ pub async fn delete_memory_preference(
     store: State<'_, SessionStore>,
     app: AppHandle,
 ) -> Result<MemoryWriteState<bool>, String> {
-    let changed = crate::features::memory::delete_preference(&id)
-        .map_err(|e| {
-            crate::platform::paths::redact_storage_prefix(&format!("delete preference: {e}"))
-        })?;
+    let changed = crate::features::memory::delete_preference(&id).map_err(|e| {
+        crate::platform::paths::redact_storage_prefix(&format!("delete preference: {e}"))
+    })?;
     if changed {
         if let Some(sid) = resolve_session_id(session_id.clone(), &store) {
             emit_memory_write_events(
@@ -836,10 +830,9 @@ pub async fn update_memory_preference(
     store: State<'_, SessionStore>,
     app: AppHandle,
 ) -> Result<MemoryWriteState<Option<crate::features::memory::PreferenceFile>>, String> {
-    let mutation = crate::features::memory::update_preference(&id, patch)
-        .map_err(|e| {
-            crate::platform::paths::redact_storage_prefix(&format!("update preference: {e}"))
-        })?;
+    let mutation = crate::features::memory::update_preference(&id, patch).map_err(|e| {
+        crate::platform::paths::redact_storage_prefix(&format!("update preference: {e}"))
+    })?;
     let mut persistence_warnings = Vec::new();
     let item = mutation.map(|mutation| {
         if let Some(detail) = mutation.cleanup_warning {
@@ -883,10 +876,9 @@ pub async fn update_work_context_memory(
     store: State<'_, SessionStore>,
     app: AppHandle,
 ) -> Result<MemoryWriteState<Option<crate::features::memory::WorkContextFile>>, String> {
-    let mutation = crate::features::memory::update_work_context(&id, patch)
-        .map_err(|e| {
-            crate::platform::paths::redact_storage_prefix(&format!("update work context: {e}"))
-        })?;
+    let mutation = crate::features::memory::update_work_context(&id, patch).map_err(|e| {
+        crate::platform::paths::redact_storage_prefix(&format!("update work context: {e}"))
+    })?;
     let mut persistence_warnings = Vec::new();
     let item = mutation.map(|mutation| {
         if let Some(detail) = mutation.cleanup_warning {
@@ -929,10 +921,9 @@ pub async fn delete_work_context_memory(
     store: State<'_, SessionStore>,
     app: AppHandle,
 ) -> Result<MemoryWriteState<bool>, String> {
-    let changed = crate::features::memory::delete_work_context(&id)
-        .map_err(|e| {
-            crate::platform::paths::redact_storage_prefix(&format!("delete work context: {e}"))
-        })?;
+    let changed = crate::features::memory::delete_work_context(&id).map_err(|e| {
+        crate::platform::paths::redact_storage_prefix(&format!("delete work context: {e}"))
+    })?;
     if changed {
         if let Some(sid) = resolve_session_id(session_id.clone(), &store) {
             emit_memory_write_events(
@@ -964,10 +955,9 @@ pub async fn update_timed_memory(
     store: State<'_, SessionStore>,
     app: AppHandle,
 ) -> Result<MemoryWriteState<Option<crate::features::memory::TimedMemoryItem>>, String> {
-    let item = crate::features::memory::update_timed_memory(&kind, &id, patch)
-        .map_err(|e| {
-            crate::platform::paths::redact_storage_prefix(&format!("update timed memory: {e}"))
-        })?;
+    let item = crate::features::memory::update_timed_memory(&kind, &id, patch).map_err(|e| {
+        crate::platform::paths::redact_storage_prefix(&format!("update timed memory: {e}"))
+    })?;
     if let (Some(sid), Some(item)) = (
         resolve_session_id(session_id.clone(), &store),
         item.as_ref(),
@@ -999,10 +989,9 @@ pub async fn delete_timed_memory(
     store: State<'_, SessionStore>,
     app: AppHandle,
 ) -> Result<MemoryWriteState<bool>, String> {
-    let changed = crate::features::memory::delete_timed_memory(&kind, &id)
-        .map_err(|e| {
-            crate::platform::paths::redact_storage_prefix(&format!("delete timed memory: {e}"))
-        })?;
+    let changed = crate::features::memory::delete_timed_memory(&kind, &id).map_err(|e| {
+        crate::platform::paths::redact_storage_prefix(&format!("delete timed memory: {e}"))
+    })?;
     if changed {
         if let Some(sid) = resolve_session_id(session_id.clone(), &store) {
             emit_memory_write_events(
@@ -1387,6 +1376,4 @@ mod tests {
             "edit_last_turn's send-failure error text must fold the storage prefix"
         );
     }
-
-
 }

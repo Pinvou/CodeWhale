@@ -456,7 +456,8 @@ mod tests {
         let existing = std::env::temp_dir();
         let canonical_existing =
             std::fs::canonicalize(&existing).unwrap_or_else(|_| existing.clone());
-        let ok = validate_user_path(&existing.to_string_lossy()).expect("existing path stays valid");
+        let ok =
+            validate_user_path(&existing.to_string_lossy()).expect("existing path stays valid");
         assert_eq!(ok, canonical_existing);
     }
 }

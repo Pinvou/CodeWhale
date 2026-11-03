@@ -40,10 +40,10 @@ use persistence::{
     config_path, eligible_pending_revocations, fresh_config, load_config, load_config_from,
     load_or_initialize_rpc_ledger, load_pending_revocations_for_replay, load_relay_settings,
     new_stream_epoch, normalize_relay_address, pairing_info, pending_revocation_key,
-    persist_config, persist_pending_revocations, persist_rpc_ledger, process_lock_path,
-    public_url, queue_pending_revocation_for_removal, relay_settings_path,
-    remote_public_base_url, remote_relay_ws_url, remove_config, remove_private_file,
-    remove_rpc_ledger, validate_config, validate_relay_settings,
+    persist_config, persist_pending_revocations, persist_rpc_ledger, process_lock_path, public_url,
+    queue_pending_revocation_for_removal, relay_settings_path, remote_public_base_url,
+    remote_relay_ws_url, remove_config, remove_private_file, remove_rpc_ledger, validate_config,
+    validate_relay_settings,
 };
 
 // RPC admission, response shaping, scope validation, and the stream/event
@@ -3014,8 +3014,7 @@ impl RemoteControlManager {
                     .unwrap_or_default()
                     .to_string();
                 let reader_owned = self.inner.lock().endpoint.as_ref().is_some_and(|endpoint| {
-                    (framed_endpoint.is_empty()
-                        || framed_endpoint == endpoint.config.endpoint_id)
+                    (framed_endpoint.is_empty() || framed_endpoint == endpoint.config.endpoint_id)
                         && endpoint.sender.same_channel(reader_owner)
                 });
                 if !reader_owned {
@@ -7239,5 +7238,4 @@ mod tests {
             "the sweep must mark placeholders for acknowledged (still-executing) requests"
         );
     }
-
 }
