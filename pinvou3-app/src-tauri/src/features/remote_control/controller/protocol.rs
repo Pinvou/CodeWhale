@@ -105,7 +105,7 @@ const MAX_ARTIFACTS: usize = 256;
 pub(crate) const MAX_ENCRYPTED_WIRE_BYTES: usize =
     MAX_ENCRYPTED_FRAME_BYTES.div_ceil(3) * 4 + MAX_CONTROL_MESSAGE_BYTES;
 const CONTROLLER_CONTRACT_SHA256: &str =
-    "63db457fd305cf8d758133fa8996b853bd3073892fa8bfe93aec7de8f873e242";
+    "5208650492c4e37286a7322d12ffc6c401724b8f261f8672d830146839db9f63";
 
 pub(crate) const CONTROLLER_CAPABILITIES: &[&str] = &[
     "pairing_v1",
@@ -288,6 +288,7 @@ pub(crate) const CONTROLLER_ERROR_CODES: &[&str] = &[
     "permission_expired",
     "result_unknown",
     "capability_snapshot_unavailable",
+    "pairing_registration_stale_relay_epoch",
 ];
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -1562,6 +1563,7 @@ pub(crate) struct LeaseInstallValidationContext {
     capability_hash: String,
     handshake_public_key_a_b64: String,
     handshake_public_key_b_b64: String,
+    signed_expires_at_ms: u64,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -1582,6 +1584,7 @@ pub(crate) struct ParsedTranscript {
     relay_signature: Vec<u8>,
     handshake_public_key_a_b64: String,
     handshake_public_key_b_b64: String,
+    signed_expires_at_ms: u64,
 }
 
 pub(crate) struct ParsedTranscriptParts {
@@ -1601,6 +1604,7 @@ pub(crate) struct ParsedTranscriptParts {
     pub(crate) relay_signature: Vec<u8>,
     pub(crate) handshake_public_key_a_b64: String,
     pub(crate) handshake_public_key_b_b64: String,
+    pub(crate) signed_expires_at_ms: u64,
 }
 
 impl ParsedTranscript {
@@ -1622,6 +1626,7 @@ impl ParsedTranscript {
             relay_signature: self.relay_signature,
             handshake_public_key_a_b64: self.handshake_public_key_a_b64,
             handshake_public_key_b_b64: self.handshake_public_key_b_b64,
+            signed_expires_at_ms: self.signed_expires_at_ms,
         }
     }
 }
@@ -1643,6 +1648,7 @@ impl LeaseInstallValidationContext {
             capability_hash: verified.capability_hash().to_owned(),
             handshake_public_key_a_b64: verified.local_handshake_public_key().to_owned(),
             handshake_public_key_b_b64: verified.peer_handshake_public_key().to_owned(),
+            signed_expires_at_ms: verified.signed_expires_at_ms(),
         }
     }
 
@@ -1688,6 +1694,13 @@ impl LeaseInstallValidationContext {
     /// E2E-02：对端（B）握手公钥，用于 ECDH 派生会话密钥。
     pub(crate) fn peer_handshake_public_key_b64(&self) -> &str {
         &self.handshake_public_key_b_b64
+    }
+
+    /// Relay wall-clock expiry carried through the authenticated transcript.
+    /// This authenticates a Relay fact, not the receiving host's current time.
+    /// Local preconnection budgets must not subtract an unrelated wall clock.
+    pub(crate) fn signed_expires_at_ms(&self) -> u64 {
+        self.signed_expires_at_ms
     }
 
     /// Transcript hash as raw bytes for the handshake KDF. Hex is validated on
@@ -3735,6 +3748,11 @@ pub(crate) fn parse_controller_pairing_transcript(input: &str) -> Result<ParsedT
         relay_signature,
         handshake_public_key_a_b64: handshake_key("handshake_public_key_a_b64")?,
         handshake_public_key_b_b64: handshake_key("handshake_public_key_b_b64")?,
+        signed_expires_at_ms: object_string(transcript, "expires_at_ms", "transcript")?
+            .parse()
+            .map_err(|_| {
+                ControllerProtocolError::new("invalid_field", "transcript.expires_at_ms")
+            })?,
     })
 }
 
