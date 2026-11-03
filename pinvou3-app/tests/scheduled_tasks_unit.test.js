@@ -365,6 +365,14 @@ assert.ok(
     /onChange=\{value => editSchedule\('interval', value\)\}/.test(scheduledViewSource),
   'hourly schedules should expose a themed 1-24 hour interval selector'
 );
+// Switching weekly→hourly (or editing the hourly interval) used to rebuild the rrule
+// without BYDAY, silently dropping the selected weekdays; the hourly branch must carry
+// them and omit BYDAY only when no day is selected.
+assert.ok(
+  /editor\.repeat === 'hourly'\) \{[\s\S]{0,400}const byday = days\.length \? `;BYDAY=\$\{days\.join\(','\)\}` : '';/.test(scheduledViewSource) &&
+    /return `FREQ=HOURLY;INTERVAL=\$\{Math\.max\(1, interval \|\| 1\)\}\$\{byday\}\$\{anchor\}`;/.test(scheduledViewSource),
+  'hourly schedules must persist the selected weekdays as BYDAY and omit it when none is selected'
+);
 assert.ok(
   /SCHEDULED_TASK_WRITABLE_FIELDS\s*=\s*\["name", "prompt", "rrule", "model", "modelId", "paused"\]/.test(tauriBridge) &&
     !/SCHEDULED_TASK_WRITABLE_FIELDS[^;]*allowShell/.test(tauriBridge) &&
