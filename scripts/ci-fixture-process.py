@@ -215,7 +215,11 @@ def main(argv=None):
         raise ValueError('test command required')
     for signum in (signal.SIGINT, signal.SIGTERM):
         signal.signal(signum, cancel)
-    root = Path(tempfile.mkdtemp(prefix='pinvou-ci-fixture-'))
+    # Chrome's Linux SingletonSocket is an AF_UNIX pathname (108 bytes max).
+    # Runner TMPDIR can already exceed that budget before Chrome appends its
+    # own directory and socket name. Keep the private scope under the short
+    # system temporary path; never alter the Runner's global environment.
+    root = Path(tempfile.mkdtemp(prefix='pinvou-ci-fixture-', dir='/tmp' if sys.platform == 'linux' else None))
     identity = root.stat()
     ledger = args.receipt.parent / (args.receipt.stem + '-resources')
     ledger.mkdir()

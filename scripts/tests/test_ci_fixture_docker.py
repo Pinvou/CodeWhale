@@ -105,6 +105,13 @@ class DockerLeaseTests(unittest.TestCase):
                 docker.recover(root, run)
             self.assertNotEqual(json.loads(path.read_text())['state'], 'released')
 
+    def test_optional_host_mount_metadata_can_be_null_without_losing_volume_ownership(self):
+        def run(args):
+            self.assertEqual(args[0], 'inspect')
+            return '\n'.join(map(json.dumps, [CID, None, None, [dict(Type='volume', Name='owned-anonymous', Destination='/data')]]))
+        self.assertEqual(docker.observe_volumes(CID, run), ['owned-anonymous'])
+        self.assertEqual(docker.observe_volumes(CID, lambda args: '\n'.join(map(json.dumps, [CID, None, None, []]))), [])
+
     def test_cli_delegates_streams_and_keeps_arguments_out_of_receipts(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

@@ -71,7 +71,10 @@ def anonymous_volumes(item):
 
 
 def observe_volumes(cid, run):
-    raw = run(['inspect', '--format', '{{json .Id}}\n{{json .HostConfig.Binds}}\n{{json .HostConfig.Mounts}}\n{{json .Mounts}}', cid])
+    # Docker omits optional HostConfig keys when they were not specified.
+    # Direct map member access fails the whole Go template on those engines;
+    # index gives JSON null without exposing Config.Env or command arguments.
+    raw = run(['inspect', '--format', '{{json .Id}}\n{{json (index .HostConfig "Binds")}}\n{{json (index .HostConfig "Mounts")}}\n{{json .Mounts}}', cid])
     parts = raw.splitlines()
     if len(parts) != 4 or json.loads(parts[0]) != cid:
         raise RuntimeError('container identity was not confirmed')

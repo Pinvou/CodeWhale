@@ -9,6 +9,7 @@ import sys
 import tempfile
 import time
 import unittest
+from unittest.mock import patch
 
 SUPERVISOR = Path(__file__).resolve().parents[1] / 'ci-fixture-process.py'
 
@@ -45,6 +46,19 @@ class ProcessScopeTests(unittest.TestCase):
             p, receipt, _ = self.invoke("print('fixture actually executed')", directory)
             self.assertEqual(p.returncode, 0, p.stderr)
             self.assertIn('fixture actually executed', p.stdout)
+            self.assertEqual(receipt['state'], 'released')
+            self.assertFalse(receipt['cleanup_failed'])
+
+    @unittest.skipUnless(sys.platform == 'linux', 'AF_UNIX Chrome path limit is Linux-specific')
+    def test_long_runner_temp_cannot_overflow_chrome_singleton_socket(self):
+        with tempfile.TemporaryDirectory() as directory:
+            long_temp = Path(directory) / ('runner-' + 'x' * 100)
+            long_temp.mkdir()
+            source = "import os,socket,tempfile,pathlib; root=pathlib.Path(tempfile.mkdtemp(prefix='com.google.Chrome.')); p=root/'SingletonSocket'; s=socket.socket(socket.AF_UNIX); s.bind(str(p)); s.close(); p.unlink(); root.rmdir(); print(os.environ['TMPDIR'])"
+            with patch.dict(os.environ, TMPDIR=str(long_temp), TMP=str(long_temp), TEMP=str(long_temp)):
+                p, receipt, _ = self.invoke(source, directory)
+            self.assertEqual(p.returncode, 0, p.stderr)
+            self.assertTrue(p.stdout.strip().startswith('/tmp/pinvou-ci-fixture-'))
             self.assertEqual(receipt['state'], 'released')
             self.assertFalse(receipt['cleanup_failed'])
 
