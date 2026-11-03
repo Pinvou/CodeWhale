@@ -10969,10 +10969,14 @@ mod tests {
     /// SGLang / llama.cpp / KoboldCpp / LMDeploy / Docker Model Runner probe
     /// results all map to the engine's vllm provider (chat_template_kwargs +
     /// reasoning_effort wire are structurally identical), defaulting to the
-    /// lowest thinking tier low locally.
+    /// lowest thinking tier low locally. The route declares the
+    /// separate_field stream style so the server's reasoning_content deltas
+    /// surface as thinking instead of being inlined into the answer text by
+    /// the foundation's wildcard-proxy fallback.
     #[test]
     fn local_reasoning_frameworks_map_to_vllm_wire_and_default_low() {
         for kind in [
+            LocalServerKind::Vllm,
             LocalServerKind::Sglang,
             LocalServerKind::LlamaCpp,
             LocalServerKind::KoboldCpp,
@@ -10998,6 +11002,13 @@ mod tests {
             assert_eq!(
                 bridge.request_reasoning_effort().as_deref(),
                 Some("low"),
+                "{kind:?}"
+            );
+            let cfg = bridge.build_dt_config();
+            let providers = cfg.providers.as_ref().expect("providers config");
+            assert_eq!(
+                providers.vllm.reasoning_stream_style.as_deref(),
+                Some(SEPARATE_REASONING_FIELD),
                 "{kind:?}"
             );
         }
