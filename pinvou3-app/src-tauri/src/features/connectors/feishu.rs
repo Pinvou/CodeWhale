@@ -21,7 +21,9 @@ use serde_json::{Value, json};
 use tauri::{AppHandle, Manager};
 
 use crate::features::connectors::connector_cli::{self as cc, CliCtx, ConnectorConn};
-use crate::features::connectors::skill_gate::{ConnectorGate, ConnectorSkillGate};
+use crate::features::connectors::skill_gate::{
+    ConnectGrantOutcome, ConnectorGate, ConnectorSkillGate,
+};
 
 /// 连接器 id(事件前缀 + ConnectorConn 槽位键)。
 const ID: &str = "feishu";
@@ -498,39 +500,45 @@ pub(crate) static FEISHU_GATE: ConnectorGate = ConnectorGate {
 };
 
 /// 按当前"应否可见"状态写 / 删技能文件,并广播刷新在跑会话(当前对话即时生效)。
-/// 前端在 **连接成功 / 断开 / 切开关** 后调,统一收口。
+/// 前端在 **连接成功 / 断开 / 切开关** 后调,统一收口。连接通道的同意即
+/// 「连接动作本身授予启用」（feat/connector-connect-grants-enable）。
 pub async fn feishu_apply_skills() -> Result<Value, String> {
-    let show = tokio::task::spawn_blocking(|| -> Result<bool, String> {
-        let show = feishu_skills_should_show();
-        // Deny-first transaction boundary (#517): register the connector
-        // in the initialized DenyAll scopes BEFORE materializing skill
-        // files, so a refused registration aborts before anything lands
-        // (the sync write can block on the cross-process flock, hence
-        // inside this spawn_blocking closure; the post-apply consent sync
-        // below stays as the fail-visible belt-and-braces leg).
-        GATE.apply_with_consent(show).map_err(|e| {
-            e.map_materialization(|e| {
-                // Keep the raw materialization cause when the card replaces it.
-                log::warn!("[feishu] apply skills failed: {e}");
-                e
-            })
-        })?;
-        Ok(show)
-    })
-    .await
-    .map_err(|e| {
-        // Same loss risk for the join failure itself.
-        log::warn!("[feishu] apply skills task failed: {e}");
-        format!("spawn_blocking: {e}")
-    })??;
-    // scope 门禁同步：连接器转为可用等同「新装」——已初始化 code 开关时加入 code
-    // 禁用集，保持「code 会话外部能力默认关」语义（与 MCP 新装连接器一致）。
+    let (show, grant) =
+        tokio::task::spawn_blocking(|| -> Result<(bool, ConnectGrantOutcome), String> {
+            let show = feishu_skills_should_show();
+            // Deny-first transaction boundary (#517): record the connector's
+            // connect consent BEFORE materializing skill files, so a refused
+            // gate write aborts before anything lands — the connector can never
+            // end up live without its consent recorded. The consent write can
+            // block on the cross-process flock, hence inside this spawn_blocking
+            // closure; the gate outcome is carried out for the tail grant and
+            // the completion below.
+            let grant = GATE.apply_with_consent(show).map_err(|e| {
+                e.map_materialization(|e| {
+                    // Keep the raw materialization cause when the card replaces it.
+                    log::warn!("[feishu] apply skills failed: {e}");
+                    e
+                })
+            })?;
+            Ok((show, grant))
+        })
+        .await
+        .map_err(|e| {
+            // Same loss risk for the join failure itself.
+            log::warn!("[feishu] apply skills task failed: {e}");
+            format!("spawn_blocking: {e}")
+        })??;
+    // 连接动作本身就是同意（feat/connector-connect-grants-enable）：物化落地后
+    // 补记连接启用授权并完成校验。持久失败 fail-closed（连接器保持关闭，
+    // 未暴露任何能力），错误文案携带前端共享的连接标记（两侧 pin 住），原始
+    // 原因在助手内记入日志；完成阶段的提交丢失/不可持久化同样以显式失败
+    // 交还重连，绝不报告一个同意会算成「关」的 visible:true。
     if show {
-        // Fail-visible persist (review #455 R13-B3): swallowing the error would
-        // let the connector go live with zero consent; the error text carries
-        // recovery guidance and the shared consent marker (pinned on both
-        // sides), and the raw cause is logged.
-        crate::features::connectors::skill_gate::apply_skills_consent_sync("feishu")?;
+        let tail =
+            crate::features::connectors::skill_gate::grant_connect_enable_tail("feishu", &grant)?;
+        crate::features::connectors::skill_gate::complete_grant_for_completion(
+            "feishu", &grant, &tail,
+        )?;
     }
     // 技能写盘即可——连接成功弹窗已引导「新建对话」,新会话 spawn 时自然扫到飞书技能;
     // 不再原地广播刷新当前对话(故不依赖子模块 Op::RefreshSystemPrompt)。
@@ -539,18 +547,34 @@ pub async fn feishu_apply_skills() -> Result<Value, String> {
 
 /// 给前端渲染开关态:`{connected, enabled(=未停用), visible(=connected&&enabled)}`。
 /// 启动期门控刷新的单连接器步骤（`refresh_connector_auth_gates` 调）：
-/// 实时探测应否可见，按结果写 / 删技能目录；转为可见时跑 LEDGER-GATED
-/// 同步（review #455 round-31 BLOCKER：只补写从未同步过的默认关行，
-/// 用户显式开启不会被开机刷新回退）。
+/// 实时探测应否可见，按结果写 / 删技能目录；转为可见时跑 LEDGER-GATED 且
+/// 尊重 stored 裁决的连接启用授权回填（feat/connector-connect-grants-enable：
+/// 连接即同意的 boot 形态——只对从未同意过的对授权，stored 行一律不碰），
+/// 并按完成时点实况校验所依赖的同意。
 pub(crate) fn feishu_gate_step() -> Result<bool, String> {
     let show = feishu_skills_should_show();
-    // Same deny-first boundary as the apply command (#517): the auth-gate
-    // refresh also materializes skill files, so a connector flipping
-    // visible here registers first; a refusal fails before exposure.
-    GATE.apply_with_consent(show)
+    // Same deny-first boundary as the apply command (#517), REFRESH variant:
+    // a boot refresh has no user gesture behind it, so its consent write is
+    // the ledger-gated, verdict-respecting grant — it never lifts a stored
+    // row (a composer toggle-off or a legacy-migrated disable survives).
+    let grant = GATE
+        .apply_with_consent_refresh(show)
         .map_err(|e| e.map_materialization(|e| format!("更新飞书技能失败: {e}")))?;
     if show {
-        crate::features::connectors::skill_gate::refresh_gate_consent_sync("feishu", "飞书")?;
+        let tail = crate::features::connectors::skill_gate::grant_connect_enable_refresh_tail(
+            "feishu", "飞书", &grant,
+        )?;
+        crate::features::connectors::skill_gate::complete_grant_for_completion(
+            "feishu", &grant, &tail,
+        )
+        .map_err(|e| {
+            crate::platform::startup::mark_with_detail(
+                "rust",
+                "connector_consent_sync:failed",
+                &format!("feishu: {e}"),
+            );
+            e
+        })?;
     }
     Ok(show)
 }
