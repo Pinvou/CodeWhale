@@ -40,6 +40,6 @@ test('authoritative documents distinguish current readiness from unmounted HTTP 
     assert.match(source, /readiness/);
     assert.match(source, /未(?:挂载|装配)/);
     assert.match(source, /#1954/);
-    assert.doesNotMatch(source, /四个对外服务由同一客户端兼容策略包裹|四服务共用版本清单与响应头|四服务返回契约\/最小版本\/Sunset头/);
+    assert.doesNotMatch(source, /四个对外服务由同一客户端兼容策略包裹|四服务共用版本清单与响应头|四服务返回契约\/最小版本\/Sunset头|N\/N-1\/N-2 兼容淘汰闭环均已在仓库实现/);
   }
 });
