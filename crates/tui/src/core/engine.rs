@@ -8610,11 +8610,12 @@ impl Engine {
     /// Re-anchor the standing-posture baseline entries onto a compaction
     /// replacement (see `StandingPostureBaselineEntry::push_index`; the
     /// manual, auto, and emergency paths all install replacements through
-    /// this). Three shapes:
-    /// - a layout-preserving replacement — the mechanical PruneOnly prune
-    ///   rewrites ToolResult content in place, and the emergency fallback can
-    ///   re-carry the history verbatim — keeps every slot, so each entry only
-    ///   takes the agent-topology shift;
+    /// this). Branch precedence: an available origin graph always wins —
+    /// equal length and equal roles do not make a replacement
+    /// slot-preserving, because the local builder can move a retained
+    /// message across same-role slots, so a Summary replacement relocates
+    /// through its origin map even when it coincidentally matches the old
+    /// layout. The shapes, in precedence order:
     /// - a summary-path replacement is authored by the LOCAL builder
     ///   (`CompactionResult::summary_origins`), which reports where every
     ///   slot came from: an entry whose user message the builder retained
@@ -8625,6 +8626,11 @@ impl Engine {
     ///   kept them deterministically: editing a retained turn would pop
     ///   nothing and silently drop the transition its truncated block
     ///   carried away;
+    /// - a layout-preserving replacement on an origin-less mechanical path —
+    ///   the PruneOnly prune rewrites ToolResult content in place, and the
+    ///   emergency fallback can re-carry the history verbatim — keeps every
+    ///   slot by construction, so each entry only takes the agent-topology
+    ///   shift;
     /// - any other replacement (provider-authored content, or the emergency
     ///   fallback rewritten through the agent-topology checkpoint) moves
     ///   survivors to unknowable slots and vacates the stack —
@@ -8639,11 +8645,7 @@ impl Engine {
         summary_origins: Option<&[Option<usize>]>,
         topology_rebase: &crate::runtime_handoff::AgentTopologyCheckpointRebase,
     ) {
-        if layout_preserved {
-            for entry in &mut self.standing_posture_baseline_history {
-                entry.push_index = topology_rebase.rebase_index(entry.push_index);
-            }
-        } else if let Some(origins) = summary_origins {
+        if let Some(origins) = summary_origins {
             self.standing_posture_baseline_history = self
                 .standing_posture_baseline_history
                 .drain(..)
@@ -8657,6 +8659,10 @@ impl Engine {
                         })
                 })
                 .collect();
+        } else if layout_preserved {
+            for entry in &mut self.standing_posture_baseline_history {
+                entry.push_index = topology_rebase.rebase_index(entry.push_index);
+            }
         } else {
             self.standing_posture_baseline_history.clear();
         }

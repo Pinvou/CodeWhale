@@ -20653,6 +20653,222 @@ async fn manual_summary_compaction_keeps_the_retained_turn_linkage() {
     );
 }
 
+/// Build one plain user text message (the role every standing-baseline
+/// entry's push_index points at).
+#[cfg(test)]
+fn baseline_user_text(text: &str) -> Message {
+    Message {
+        role: Role::User,
+        content: vec![ContentBlock::Text {
+            text: text.to_string(),
+            cache_control: None,
+        }],
+    }
+}
+
+/// JensenChen28 review 5749580324 (PR #131): the shared rebase checked
+/// `layout_preserved` before `summary_origins`, so a local-builder Summary
+/// replacement that coincidentally matched the replaced history's length and
+/// role sequence was trusted as slot-preserving even though the builder had
+/// moved a retained message across same-role slots. The pinned shape: a
+/// tool round, an old handoff checkpoint, and the B user turn are replaced
+/// by the builder's layout — tool round, B, fresh checkpoint — so B slides
+/// from slot 4 to 3 while the fresh checkpoint takes 4. Roles stay
+/// `[user, assistant, user, user, user]` on both sides, so the positional
+/// check held and (pre-fix) shadowed the builder's origin map: the entry
+/// bound to B stayed at slot 4, and editing B truncated from the checkpoint
+/// instead, losing the A→B transition the entry existed to restore. The
+/// helper is exercised directly because the coincidental equal-role layout
+/// cannot be produced deterministically through a provider mock.
+#[test]
+fn summary_origins_beat_an_equal_role_layout_in_the_baseline_rebase() {
+    let _lock = lock_test_env();
+    let (mut engine, _handle) = Engine::new(EngineConfig::default(), &Config::default());
+
+    let replaced = vec![
+        baseline_user_text("turn A in the original posture"),
+        Message {
+            role: Role::Assistant,
+            content: vec![ContentBlock::ToolUse {
+                id: "tool-a".to_string(),
+                name: "read_file".to_string(),
+                input: serde_json::json!({"path": "probe.txt"}),
+                caller: None,
+                thought_signature: None,
+            }],
+        },
+        Message {
+            role: Role::User,
+            content: vec![ContentBlock::ToolResult {
+                tool_use_id: "tool-a".to_string(),
+                content: "tool output from the A round".to_string(),
+                is_error: None,
+                content_blocks: None,
+            }],
+        },
+        baseline_user_text("superseded handoff checkpoint"),
+        baseline_user_text("turn B that reports the transition"),
+    ];
+    let replacement = vec![
+        baseline_user_text("turn A in the original posture"),
+        Message {
+            role: Role::Assistant,
+            content: vec![ContentBlock::ToolUse {
+                id: "tool-a".to_string(),
+                name: "read_file".to_string(),
+                input: serde_json::json!({"path": "probe.txt"}),
+                caller: None,
+                thought_signature: None,
+            }],
+        },
+        Message {
+            role: Role::User,
+            content: vec![ContentBlock::ToolResult {
+                tool_use_id: "tool-a".to_string(),
+                content: "tool output from the A round".to_string(),
+                is_error: None,
+                content_blocks: None,
+            }],
+        },
+        baseline_user_text("turn B that reports the transition"),
+        baseline_user_text("fresh handoff checkpoint"),
+    ];
+    let origins = [Some(0), Some(1), Some(2), Some(4), None];
+    let layout_preserved = standing_baseline_layout_preserved(&replacement, &replaced);
+    assert!(
+        layout_preserved,
+        "fixture must pin the coincidental equal-length equal-role shape the \
+         positional check would trust"
+    );
+    // The topology checkpoint appends after plain text history, so the
+    // rebase shift must be identity on these slots: any movement below comes
+    // from the branch under test, not from the topology bookkeeping.
+    let topology_rebase = {
+        let mut scratch = replacement.clone();
+        crate::runtime_handoff::replace_agent_topology_checkpoint(&mut scratch, &[])
+    };
+    assert_eq!(topology_rebase.rebase_index(3), 3);
+    assert_eq!(topology_rebase.rebase_index(4), 4);
+    engine.standing_posture_baseline_history = vec![StandingPostureBaselineEntry {
+        prior_posture: Some(TurnMetaPosture {
+            mode: AppMode::Agent,
+            approval: crate::tui::approval::ApprovalMode::Suggest,
+            ask_on_guardrail: false,
+        }),
+        push_index: 4,
+    }];
+
+    engine.rebase_standing_baseline_after_compaction(
+        layout_preserved,
+        Some(&origins),
+        &topology_rebase,
+    );
+
+    assert_eq!(
+        engine.standing_posture_baseline_history.len(),
+        1,
+        "the builder retained the B turn, so its entry must survive"
+    );
+    let entry = &engine.standing_posture_baseline_history[0];
+    assert_eq!(
+        entry.push_index, 3,
+        "the entry bound to B's old slot must follow B's origin to its NEW \
+         slot, not the coincidentally role-equal slot 4 (which now holds the \
+         checkpoint the builder inserted)"
+    );
+    assert!(
+        entry.prior_posture.is_some(),
+        "the relocated entry must keep the prior posture it restores on edit"
+    );
+}
+
+/// The PruneOnly side of review 5749580324's fix must stay positional: an
+/// origin-less mechanical replacement (the prune rewrites ToolResult content
+/// in place, equal length, equal roles) keeps every slot by construction, so
+/// an entry at slot 4 stays at 4. Pinning this proves the precedence swap
+/// only reroutes builder-authored Summary replacements and leaves the
+/// origin-less paths untouched.
+#[test]
+fn originless_layout_preserved_replacement_keeps_positional_rebase() {
+    let _lock = lock_test_env();
+    let (mut engine, _handle) = Engine::new(EngineConfig::default(), &Config::default());
+
+    let tool_use = || {
+        vec![ContentBlock::ToolUse {
+            id: "tool-a".to_string(),
+            name: "read_file".to_string(),
+            input: serde_json::json!({"path": "probe.txt"}),
+            caller: None,
+            thought_signature: None,
+        }]
+    };
+    let replaced = vec![
+        baseline_user_text("turn A in the original posture"),
+        Message {
+            role: Role::Assistant,
+            content: tool_use(),
+        },
+        Message {
+            role: Role::User,
+            content: vec![ContentBlock::ToolResult {
+                tool_use_id: "tool-a".to_string(),
+                content: "stale pruned tool output".to_string(),
+                is_error: None,
+                content_blocks: None,
+            }],
+        },
+        baseline_user_text("superseded handoff checkpoint"),
+        baseline_user_text("turn B that reports the transition"),
+    ];
+    // The mechanical prune rewrites the ToolResult in place; slots and roles
+    // are untouched.
+    let replacement = vec![
+        baseline_user_text("turn A in the original posture"),
+        Message {
+            role: Role::Assistant,
+            content: tool_use(),
+        },
+        Message {
+            role: Role::User,
+            content: vec![ContentBlock::ToolResult {
+                tool_use_id: "tool-a".to_string(),
+                content: "pruned".to_string(),
+                is_error: None,
+                content_blocks: None,
+            }],
+        },
+        baseline_user_text("superseded handoff checkpoint"),
+        baseline_user_text("turn B that reports the transition"),
+    ];
+    let layout_preserved = standing_baseline_layout_preserved(&replacement, &replaced);
+    assert!(
+        layout_preserved,
+        "fixture must pin the prune's in-place layout"
+    );
+    let topology_rebase = {
+        let mut scratch = replacement.clone();
+        crate::runtime_handoff::replace_agent_topology_checkpoint(&mut scratch, &[])
+    };
+    assert_eq!(topology_rebase.rebase_index(4), 4);
+    engine.standing_posture_baseline_history = vec![StandingPostureBaselineEntry {
+        prior_posture: None,
+        push_index: 4,
+    }];
+
+    engine.rebase_standing_baseline_after_compaction(layout_preserved, None, &topology_rebase);
+
+    assert_eq!(
+        engine.standing_posture_baseline_history.len(),
+        1,
+        "the mechanical prune kept every slot, so the entry must survive"
+    );
+    assert_eq!(
+        engine.standing_posture_baseline_history[0].push_index, 4,
+        "an origin-less layout-preserving replacement must keep positional \
+         rebase: slot 4 stays slot 4"
+    );
+}
+
 /// Drive the standing-posture-baseline edit scenario with non-authoritative
 /// runtime turns parked between the true user turns.
 ///
