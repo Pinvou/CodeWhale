@@ -1552,7 +1552,7 @@ def download_and_convert_image(
     try:
         from io import BytesIO
         with PILImage.open(BytesIO(raw_bytes)) as img:
-            # webp 等可能是 RGBA / P 模式，统一转 RGB 再存 PNG
+            # webp 等可能是 P 模式等非 RGB/RGBA 格式，统一转 RGBA 再存 PNG
             if img.mode not in ("RGB", "RGBA"):
                 img = img.convert("RGBA")
             img.save(local_path, format="PNG")

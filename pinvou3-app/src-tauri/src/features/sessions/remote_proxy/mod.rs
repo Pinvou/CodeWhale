@@ -2,6 +2,7 @@
 
 mod archive;
 mod archive_lifecycle;
+mod archive_snapshot;
 pub(crate) mod binding;
 pub(crate) mod history;
 pub(crate) mod outbox;
@@ -65,3 +66,6 @@ pub(crate) struct RemoteProxyState {
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod quarantine_tests;
