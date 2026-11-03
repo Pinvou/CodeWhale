@@ -115,7 +115,10 @@ One-shot CI fixtures must create resources through the shared lifetime boundary:
   and shared BuildKit builders are outside this disposable resource boundary.
 
 `ci-resource-ledger.py --init` starts fresh job receipts; the workflow always
-checks them and uploads them for seven days. `--recover` is restricted to the
+checks them and attempts to upload them with seven-day retention. Diagnostic
+uploads have a three-minute limit and warn on transport failure; original local
+receipts/logs remain available. Upload delivery does not replace or relax the
+mandatory tests and resource-retirement gate. `--recover` is restricted to the
 current GitHub job ledger. Unknown or unconfirmed cleanup fails the gate and
 never grants permission to retry another smoke. Existing business assertions,
 required roots, dependency skips and retries remain unchanged. Download/build

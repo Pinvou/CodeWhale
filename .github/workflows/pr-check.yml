@@ -1207,13 +1207,21 @@ jobs:
         run: python3 ../scripts/ci-resource-ledger.py --recover
 
       - name: Test resource lifecycle receipts
+        id: frontend_receipts_upload
         if: ${{ always() && env.PINVOU_CI_RESOURCE_LEDGER != '' }}
+        # Diagnostic transport must not stall always-run cleanup or change test results.
+        timeout-minutes: 3
+        continue-on-error: true
         uses: actions/upload-artifact@v7
         with:
           name: frontend-resource-lifecycle-${{ github.run_attempt }}
           path: ${{ env.PINVOU_CI_RESOURCE_LEDGER }}/
           if-no-files-found: error
           retention-days: 7
+
+      - name: Warn when frontend diagnostic delivery fails
+        if: ${{ always() && steps.frontend_receipts_upload.outcome == 'failure' }}
+        run: echo '::warning::Diagnostic upload failed or timed out; original receipts remain on the runner. Tests and resource retirement remain mandatory.'
 
   relay-test:
     name: relay-test
@@ -1671,7 +1679,10 @@ jobs:
           python3 scripts/test-account-closure-postgres.py
 
       - name: Financial parallel diagnostics
+        id: financial_diagnostics_upload
         if: ${{ always() }}
+        timeout-minutes: 3
+        continue-on-error: true
         uses: actions/upload-artifact@v7
         with:
           name: account-financial-parallel-${{ github.run_attempt }}
@@ -1698,7 +1709,10 @@ jobs:
           python3 scripts/ci-resource-ledger.py --recover "${args[@]}"
 
       - name: Account test resource lifecycle receipts
+        id: account_receipts_upload
         if: ${{ always() && env.PINVOU_CI_RESOURCE_LEDGER != '' }}
+        timeout-minutes: 3
+        continue-on-error: true
         uses: actions/upload-artifact@v7
         with:
           name: account-resource-lifecycle-${{ github.run_attempt }}
@@ -1707,6 +1721,10 @@ jobs:
             ${{ runner.temp }}/account-platform-deployment-contracts-*/resources/
           if-no-files-found: error
           retention-days: 7
+
+      - name: Warn when Account diagnostic delivery fails
+        if: ${{ always() && (steps.financial_diagnostics_upload.outcome == 'failure' || steps.account_receipts_upload.outcome == 'failure') }}
+        run: echo '::warning::Diagnostic upload failed or timed out; original logs and receipts remain on the runner. Tests and resource retirement remain mandatory.'
 
   windows-relay-dacl:
     name: windows-relay-dacl
