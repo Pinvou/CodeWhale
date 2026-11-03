@@ -1679,7 +1679,7 @@ cargo test -p pinvou3-tauri engine_pool --no-run
 
 - 侧边栏记录的删除**只删这一次运行**，绝不调用 `delete_scheduled_task`。
 - 运行中/排队中的运行记录不允许删除（后端返回“正在运行的定时任务记录不能删除”）。
-- 定时运行的 transcript 由 Engine 独占持久化，`save_session_messages` / `save_session_artifacts` 等会话覆盖类命令仍拒绝 `sched-*`（`ensure_chat_session` 按 `SessionKind` 分发守卫）。
+- 定时运行的 transcript 由 Engine 独占持久化，`ensure_chat_session` 守卫的会话覆盖类命令——`chat`、`save_session_messages`、`save_session_artifacts`、save/get `pinvou_scene_events`、save/get `steered_messages` 等——仍拒绝 `sched-*`（按 `SessionKind` 分发；同一守卫还覆盖 aux 会话的创建/重置与 `move_session_to_project`，合计十个调用点）。
 
 #### 3. 侧边栏“定时任务记录”的范围
 

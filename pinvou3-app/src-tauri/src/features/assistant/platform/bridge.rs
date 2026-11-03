@@ -5717,6 +5717,7 @@ mod tests {
         // fallback depends on when the process env is read, which is
         // non-deterministic under the parallel suite; the fallback semantics
         // themselves are covered by the marketplace plain_deny_all_* tests).
+        // plain disables my-skill → contains a deny rule pointing at the script
         crate::features::marketplace::scope::save_disabled_bundles_for(
             ConnectorScope::Plain,
             &["my-skill".to_string()],
@@ -5724,10 +5725,13 @@ mod tests {
         .unwrap();
         let rs = bridge.scope_deny_ruleset("sess-plain");
         assert!(
+            rs.ask_rules.iter().any(|r| r
+                .command
+                .as_deref()
+                .is_some_and(|c| c.starts_with("python ") && c.contains("run.py"))
+                && r.action == codewhale_execpolicy::PermissionAction::Deny),
+            "disabled skill script should have a deny rule: {:?}",
             rs.ask_rules
-                .iter()
-                .any(|r| r.command.as_deref().is_some_and(|c| c.contains("run.py"))),
-            "after plain disables an installed skill, the script deny ruleset must be present"
         );
         // Since the v3 rollback, safety-net rules are command-only (the File
         // path face was removed): mkfs-style fallback denies are always
@@ -5746,23 +5750,6 @@ mod tests {
         assert!(
             rs.denied_prefixes.iter().any(|p| p.starts_with("mkfs")),
             "safety-net rules should be promoted into denied_prefixes"
-        );
-
-        // plain disables my-skill → contains a deny rule pointing at the script
-        crate::features::marketplace::scope::save_disabled_bundles_for(
-            ConnectorScope::Plain,
-            &["my-skill".to_string()],
-        )
-        .unwrap();
-        let rs = bridge.scope_deny_ruleset("sess-plain");
-        assert!(
-            rs.ask_rules.iter().any(|r| r
-                .command
-                .as_deref()
-                .is_some_and(|c| c.starts_with("python ") && c.contains("run.py"))
-                && r.action == codewhale_execpolicy::PermissionAction::Deny),
-            "disabled skill script should have a deny rule: {:?}",
-            rs.ask_rules
         );
 
         // Re-enabled → script rule disappears (same computation as the hot
@@ -11104,10 +11091,14 @@ mod tests {
     /// SGLang / llama.cpp / KoboldCpp / LMDeploy / Docker Model Runner probe
     /// results all map to the engine's vllm provider (chat_template_kwargs +
     /// reasoning_effort wire are structurally identical), defaulting to the
-    /// lowest thinking tier low locally.
+    /// lowest thinking tier low locally. The route declares the
+    /// separate_field stream style so the server's reasoning_content deltas
+    /// surface as thinking instead of being inlined into the answer text by
+    /// the foundation's wildcard-proxy fallback.
     #[test]
     fn local_reasoning_frameworks_map_to_vllm_wire_and_default_low() {
         for kind in [
+            LocalServerKind::Vllm,
             LocalServerKind::Sglang,
             LocalServerKind::LlamaCpp,
             LocalServerKind::KoboldCpp,
@@ -11133,6 +11124,13 @@ mod tests {
             assert_eq!(
                 bridge.request_reasoning_effort().as_deref(),
                 Some("low"),
+                "{kind:?}"
+            );
+            let cfg = bridge.build_dt_config();
+            let providers = cfg.providers.as_ref().expect("providers config");
+            assert_eq!(
+                providers.vllm.reasoning_stream_style.as_deref(),
+                Some(SEPARATE_REASONING_FIELD),
                 "{kind:?}"
             );
         }
