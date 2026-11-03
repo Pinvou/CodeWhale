@@ -1,3 +1,4 @@
+// architecture-guard: allow-target-cfg -- The test-only journal_owner_tests module constructs a process-private real Windows Wry host for journal body/terminal consumers. Unsupported platforms must not simulate this host; product OS adaptation remains in the feature platform module.
 //! B-local remote task status and stop commands, plus private task owners.
 //!
 //! A08 accepts only authenticated full bindings or B-local semantic intents;
@@ -19,6 +20,9 @@ use uuid::Uuid;
 
 #[cfg(test)]
 mod frozen_permission_tests;
+
+#[cfg(all(test, target_os = "windows"))]
+pub(super) mod journal_owner_tests;
 
 use super::desktop_remote_model::prepare_selected_task_package_snapshot;
 use crate::features::assistant::engine_pool::EnginePool;
@@ -363,9 +367,9 @@ impl ControllerTaskEventSink for TaskEventBridge {
         // B may finish or cancel an already admitted local task while the
         // encrypted lane is reconnecting. Keep the authoritative B journal;
         // forwarding to A remains gated by the connected transport below.
-        let Ok(lease) = self.app.state::<
+        let Ok((lease, journal_owner)) = self.app.state::<
             crate::features::remote_control::controller::controlled::ControlledDeviceManager,
-        >().with_local_cancel_lease(Clone::clone) else {
+        >().local_journal_context() else {
             crate::features::remote_control::controller::relay_runtime::log_controlled_event(
                 "journal_event_ignored",
                 "lease_unavailable",
@@ -410,20 +414,9 @@ impl ControllerTaskEventSink for TaskEventBridge {
                 return;
             }
         }
-        if history
-            .journal()
-            .bind_generation(&lease.remote_control_generation)
-            .is_err()
-        {
-            crate::features::remote_control::controller::relay_runtime::log_controlled_event(
-                "journal_event_ignored",
-                "generation_or_binding_stale",
-            );
-            return;
-        }
         let event_id = format!("journal-{}", uuid::Uuid::new_v4().simple());
-        match history.journal().append_for_generation(
-            &lease.remote_control_generation,
+        match history.journal().append_for_owner(
+            &journal_owner,
             &event_id,
             kind,
             session_id,
@@ -459,6 +452,7 @@ impl ControllerTaskEventSink for TaskEventBridge {
                 super::desktop_remote_journal::publish_authoritative_event(
                     &self.app,
                     &lease.remote_control_generation,
+                    &journal_owner,
                     &event,
                 );
             }

@@ -1077,10 +1077,14 @@ import memoryOrganizeImage from '../../assets/scheduled/memory-organize.jpg';
         }
         if (editor.repeat === 'hourly') {
           const interval = previousEditor.repeat === 'hourly' ? editor.interval : 1;
+          // BYDAY rule (full week or a subset of days) aligns with the Rust humanize "Mon、Tue every N hours";
+          // omitted when no day is selected (pure hourly), which reads the same as every day.
+          const days = normalizeScheduleDays(editor.days);
+          const byday = days.length ? `;BYDAY=${days.join(',')}` : '';
           const anchor = previousEditor.hasTimeAnchor
             ? `;BYHOUR=${Number(hour || 0)};BYMINUTE=${Number(minute || 0)}`
             : '';
-          return `FREQ=HOURLY;INTERVAL=${Math.max(1, interval || 1)}${anchor}`;
+          return `FREQ=HOURLY;INTERVAL=${Math.max(1, interval || 1)}${byday}${anchor}`;
         }
         if (key === 'repeat' && editor.repeat === 'weekly') {
           const previousDays = normalizeScheduleDays(previousEditor.days);
