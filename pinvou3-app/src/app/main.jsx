@@ -20,6 +20,7 @@ const MobileTabBar = lazy(() =>
   import('../components/layout/MobileShell.jsx').then((m) => ({ default: m.MobileTabBar })));
 const MobileTopBar = lazy(() =>
   import('../components/layout/MobileShell.jsx').then((m) => ({ default: m.MobileTopBar })));
+const ControlledOpenRecovery = lazy(() => import('../features/remote-control/ControlledOpenRecovery.jsx'));
 import { bridge, useBridgeState, usePlatformCapability, activeModelIsLocal, shouldShowModelAccessGate } from '../hooks/useBridge.js';
 import { useCompactViewport, useVisualViewportHeight } from '../hooks/useViewport.js';
 import { useSystemDarkMode } from '../hooks/useSystemDarkMode.js';
@@ -87,7 +88,6 @@ import { createPetActivationGuard } from '../features/pet/activation-guard.js';
 import { SessionAttachmentTitle } from '../features/attachments/SessionAttachmentTitle.jsx';
 import {
   isControlledSessionChatActive,
-  openControlledDeviceChatWithRetry,
 } from '../features/remote-control/remote-control-logic.mjs';
 import { modelSourceForLease } from '../features/remote-control/remote-model-source.mjs';
 import { mergeSessionStoreHistory, remoteProxyForSession } from '../features/remote-control/remote-session-adapter.mjs';
@@ -512,8 +512,25 @@ const App = () => {
       const browserWorkspaceError = browserOpenState.status === 'failed'
         ? browserOpenState.error
         : '';
+      const localNavigationEpochRef = useRef(0);
+      const [localNavigationEpoch, setLocalNavigationEpoch] = useState(0);
+      const invalidateControlledNavigation = useCallback(() => {
+        const epoch = ++localNavigationEpochRef.current;
+        bridge.sessions?.beginLocalNavigationIntent?.();
+        setLocalNavigationEpoch(localNavigationEpochRef.current);
+        return epoch;
+      }, []);
+      const captureLocalNavigation = useCallback(() => {
+        const epoch = localNavigationEpochRef.current;
+        return { epoch, isCurrent: () => localNavigationEpochRef.current === epoch };
+      }, []);
       const runBrowserUiTransition = useCallback((publish, options) => {
         const tracksSession = options?.channel === 'session';
+        if (tracksSession && options?.sessionSource !== 'bridge'
+          && Object.keys(options).includes('sessionTarget') && !options?.controlledNavigation) {
+          const epoch = invalidateControlledNavigation();
+          if (epoch !== localNavigationEpochRef.current) return false;
+        }
         const tracksCommandEcho = tracksSession
           && options?.sessionSource !== 'bridge'
           && Object.keys(options).includes('sessionTarget');
@@ -576,7 +593,7 @@ const App = () => {
         }
         finishRequest();
         return result;
-      }, [browserSessionCommandEchoGuard, requestBrowserUiCommitAck]);
+      }, [browserSessionCommandEchoGuard, requestBrowserUiCommitAck, invalidateControlledNavigation]);
       const setCurrentView = useCallback((nextView) => {
         const resolvedView = typeof nextView === 'function'
           ? nextView(currentViewRef.current)
@@ -1317,10 +1334,6 @@ const App = () => {
       const remoteTemporaryModelAvailable = bs?.controllerConnection?.temporaryModelAvailable === true;
       const remoteModelLeaseKey = `${bs?.controllerConnection?.connectionId || ''}:${bs?.controllerConnection?.leaseEpoch || ''}:${remoteTemporaryModelAvailable ? 'temporary' : 'controlled'}`;
       const remoteModelLeaseKeyRef = useRef(remoteModelLeaseKey);
-      const controlledDeviceAutoOpenRef = useRef(null);
-      const controlledDeviceAutoOpenInFlightRef = useRef(null);
-      const controlledSessionAutoOpenRef = useRef(null);
-      const controlledSessionAutoOpenInFlightRef = useRef(null);
       const controlledDeviceStatus = bs?.controlledDevice?.status || null;
       const controlledDeviceGeneration = bs?.controlledDevice?.generation || null;
       const controlledTaskSessionId = (() => {
@@ -2461,6 +2474,7 @@ const App = () => {
           // picked minutes earlier on another page. The chat page's own
           // handleNewChat always navigates; this entry now does too.
           if (bs && bs.activeSessionId && bridge.sessions.createNewSession) {
+            invalidateControlledNavigation();
             setCodeModeOn(false);
             await bridge.sessions.createNewSession();
           }
@@ -2690,7 +2704,7 @@ const App = () => {
       // Stable useCallback: the sidebar NavItem memo depends on this callback
       // identity. bs is read through a latest-ref — a click sees the most
       // recently rendered snapshot, matching closure-capture semantics.
-      const navigateFromScheduledRun = useCallback(async (nextView, beforeNavigate) => {
+      const navigateFromScheduledRun = useCallback(async (nextView, beforeNavigate, ownerIsCurrent, controlledOwner) => {
         NAV_PREFETCH[nextView]?.();
         const bs = bsRef.current;
         const context = browserSurfaceTransitionContextRef.current;
@@ -2699,10 +2713,14 @@ const App = () => {
           || (nextView === 'scheduled' && context.scheduledRunChat)
         );
         return runBrowserUiTransition(async ({ isCurrent }) => {
-          if (bs && bs.scheduledRunContext && bridge.available && bridge.scheduled.exitScheduledRunChat) {
-            const exited = await bridge.scheduled.exitScheduledRunChat();
-            if (!exited || !isCurrent()) return false;
+          if (bs && bs.scheduledRunContext && bridge.available && (controlledOwner || bridge.scheduled.exitScheduledRunChat)) {
+            if (controlledOwner && !bridge.sessions?.exitControlledScheduledRunChat) return false;
+            const exited = controlledOwner
+              ? await bridge.sessions.exitControlledScheduledRunChat(controlledOwner)
+              : await bridge.scheduled.exitScheduledRunChat();
+            if (!exited || !isCurrent() || (ownerIsCurrent && !ownerIsCurrent())) return false;
           }
+          if (!isCurrent() || (ownerIsCurrent && !ownerIsCurrent())) return false;
           if (beforeNavigate) beforeNavigate();
           if (nextView === 'chat') setCodeModeOn(false);
           setCurrentView(nextView);
@@ -2721,106 +2739,6 @@ const App = () => {
         });
       }, [closeMobileSidebar, runBrowserUiTransition, setCurrentView]);
 
-      // B 端建立连接后进入普通会话页，便于立即看到远程请求及执行过程。
-      // 以 remote-control generation 去重：liveness 更新和链路恢复不会反复抢走用户当前页面。
-      useEffect(() => {
-        if (controlledDeviceStatus !== 'connected') {
-          return;
-        }
-        if (!controlledDeviceGeneration) return;
-        const connectionKey = controlledDeviceGeneration;
-        if (
-          controlledDeviceAutoOpenRef.current === connectionKey
-          || controlledDeviceAutoOpenInFlightRef.current === connectionKey
-        ) return;
-        const originView = currentViewRef.current;
-        let cancelled = false;
-        controlledDeviceAutoOpenInFlightRef.current = connectionKey;
-        setRemoteConversationOpen(false);
-        void openControlledDeviceChatWithRetry({
-          navigate: () => navigateFromScheduledRun('chat'),
-          isCurrent: () => {
-            if (cancelled) return false;
-            const latest = bsRef.current && bsRef.current.controlledDevice;
-            const latestKey = latest && latest.generation;
-            const viewIsCurrent = currentViewRef.current === originView || currentViewRef.current === 'chat';
-            return !!(latest && latest.status === 'connected' && latestKey === connectionKey && viewIsCurrent);
-          },
-          onError: (error) => console.warn('[remote-control] B-side chat auto-open failed', error),
-        }).then((opened) => {
-          if (controlledDeviceAutoOpenInFlightRef.current === connectionKey) {
-            controlledDeviceAutoOpenInFlightRef.current = null;
-          }
-          if (opened) controlledDeviceAutoOpenRef.current = connectionKey;
-        });
-        return () => {
-          cancelled = true;
-          if (controlledDeviceAutoOpenInFlightRef.current === connectionKey) {
-            controlledDeviceAutoOpenInFlightRef.current = null;
-          }
-        };
-      }, [controlledDeviceGeneration, controlledDeviceStatus, navigateFromScheduledRun]);
-
-      // A remote session is provisioned only when B receives the first task.
-      // Connection-time navigation therefore cannot select it yet; once the
-      // admitted task publishes its authoritative session id, select that
-      // session exactly once so filtering never hides the received command.
-      useEffect(() => {
-        if (controlledDeviceStatus !== 'connected' || !controlledDeviceGeneration || !controlledTaskSessionId) return undefined;
-        const sessionKey = `${controlledDeviceGeneration}:${controlledTaskSessionId}`;
-        if (
-          controlledSessionAutoOpenRef.current === sessionKey
-          || controlledSessionAutoOpenInFlightRef.current === sessionKey
-        ) return undefined;
-        let cancelled = false;
-        controlledSessionAutoOpenInFlightRef.current = sessionKey;
-        void runBrowserUiTransition(async ({ isCurrent }) => {
-          const latest = bsRef.current;
-          if (latest?.scheduledRunContext && bridge.available && bridge.scheduled.exitScheduledRunChat) {
-            const exited = await bridge.scheduled.exitScheduledRunChat();
-            if (!exited || !isCurrent() || cancelled) return false;
-          }
-          if (!bridge.available || !bridge.sessions?.switchToSession || !isCurrent() || cancelled) {
-            return false;
-          }
-          setCodeModeOn(false);
-          setCurrentView('chat');
-          closeMobileSidebar();
-          const switched = await bridge.sessions.switchToSession(controlledTaskSessionId);
-          if (!switched || !isCurrent() || cancelled) return false;
-          setActiveChat(controlledTaskSessionId);
-          return true;
-        }, {
-          channel: 'session',
-          hideMode: 'workspace',
-          serialize: true,
-          sessionTarget: controlledTaskSessionId,
-        }).then((opened) => {
-          if (controlledSessionAutoOpenInFlightRef.current === sessionKey) {
-            controlledSessionAutoOpenInFlightRef.current = null;
-          }
-          if (opened) controlledSessionAutoOpenRef.current = sessionKey;
-        }).catch((error) => {
-          if (controlledSessionAutoOpenInFlightRef.current === sessionKey) {
-            controlledSessionAutoOpenInFlightRef.current = null;
-          }
-          console.warn('[remote-control] B-side session open failed', error);
-        });
-        return () => {
-          cancelled = true;
-          if (controlledSessionAutoOpenInFlightRef.current === sessionKey) {
-            controlledSessionAutoOpenInFlightRef.current = null;
-          }
-        };
-      }, [
-        controlledDeviceGeneration,
-        controlledDeviceStatus,
-        controlledTaskSessionId,
-        closeMobileSidebar,
-        runBrowserUiTransition,
-        setCurrentView,
-      ]);
-
       function openSettingsSection(section = 'general') {
         // 记录进入设置前的页面（代码页齿轮等深链入口），关闭设置时原路返回，
         // 而不是一律回工作页。
@@ -2832,7 +2750,7 @@ const App = () => {
       // Stable useCallbacks: the LazySearchView/RecentItem memos depend on
       // these callback identities; rebuilding them per render would defeat
       // the memo (the dependencies are the real semantic dependencies).
-      const handleOpenScheduledRunShortcut = useCallback(async (run) => {
+      const handleOpenScheduledRunShortcut = useCallback(async (run, selectedTask, beforeOpen) => {
         if (!run || !run.sessionId) return;
         // A scheduled-run session is a normal chat: both the fallback and the
         // successful-open branches land on the scheduled view, so each branch
@@ -2840,13 +2758,14 @@ const App = () => {
         // would also clear it when the open fails, leaving an active code
         // session behind the standard sidebar and New chat creating plain drafts.
         return runBrowserUiTransition(async ({ isCurrent }) => {
+          if (beforeOpen && (!(await beforeOpen()) || !isCurrent())) return false;
           if (!bridge.available || !bridge.scheduled.openScheduledRunChat) {
             setCodeModeOn(false);
             setCurrentView('scheduled');
             closeMobileSidebar();
             return true;
           }
-          const task = {
+          const task = selectedTask || {
             id: run.automationId,
             name: run.taskName || t.scheduledPlans,
             model: run.taskModel || null,
@@ -2933,6 +2852,7 @@ const App = () => {
           last_synced_sequence: linkedSequence,
         });
         if (existing?.kind === 'chat' && bridge.available && bridge.sessions.switchToSession) {
+          invalidateControlledNavigation();
           const switched = await bridge.sessions.switchToSession(existing.session_id);
           if (switched) {
             if (request.contextUpdate && bridge.attachments.addAttachmentByPath) {
@@ -3013,7 +2933,10 @@ const App = () => {
             ? createPinvouModeScopeKey(bs.activeSessionId)
             : undefined;
           savePinvouModeState({ mode: 'work' }, undefined, scopeKey);
-          if (bridge.available && !bs?.activeSessionId) bridge.sessions.createNewSession();
+          if (bridge.available && !bs?.activeSessionId) {
+            invalidateControlledNavigation();
+            bridge.sessions.createNewSession();
+          }
           // While on the code page the original work session's mode may have
           // changed (the code page has its own chain), so pull a fresh value
           // before switching back — ChatView must not mount with a stale
@@ -4314,6 +4237,13 @@ const App = () => {
 
           <VoiceShortcutRouter />
           <WebConnectionStatus theme={activeTheme} t={t} />
+          <Suspense fallback={null}><ControlledOpenRecovery bs={bs} bsRef={bsRef} bridge={bridge}
+            currentView={currentView} currentViewRef={currentViewRef} controlledDeviceStatus={controlledDeviceStatus}
+            controlledDeviceGeneration={controlledDeviceGeneration} controlledTaskSessionId={controlledTaskSessionId}
+            localNavigationEpoch={localNavigationEpoch} captureLocalNavigation={captureLocalNavigation}
+            navigateFromScheduledRun={navigateFromScheduledRun} runBrowserUiTransition={runBrowserUiTransition}
+            setCodeModeOn={setCodeModeOn} setCurrentView={setCurrentView} setActiveChat={setActiveChat} setRemoteConversationOpen={setRemoteConversationOpen}
+            closeMobileSidebar={closeMobileSidebar} copy={t.remoteConversation} /></Suspense>
 
           {/* 撕离拖拽 avatar:被拎起的标签,跟随光标(DOM 实现,丝滑跟手、不选中文字) */}
           {dragAvatar && (
@@ -5226,7 +5156,7 @@ const App = () => {
               bs && bs.scheduledRunContext ? (
                 <ChatView {...chatViewBaseProps} prefill="" onPrefillConsumed={() => {}} onBackScheduledRun={() => navigateFromScheduledRun('scheduled')} browserDockAvailable={browserDockAvailable} rightDockActivePanelId={browserDockSelectedPanelId} onRightDockPanelSelectionChange={selectRightDockPanel} />
               ) : (
-                <LazyScheduledTasksView theme={activeTheme} t={t} onOpenChat={() => { setCodeModeOn(false); setCurrentView('chat'); }} onGotoModelSettings={() => openSettingsSection('model')} />
+                <LazyScheduledTasksView theme={activeTheme} t={t} onOpenChat={() => { setCodeModeOn(false); setCurrentView('chat'); }} onOpenScheduledRun={handleOpenScheduledRunShortcut} onGotoModelSettings={() => openSettingsSection('model')} />
               )
             )}
             {/* 草稿态(无 session)也渲染挂件,但强制空态——让欢迎页保留「＋加持卡牌」入口。

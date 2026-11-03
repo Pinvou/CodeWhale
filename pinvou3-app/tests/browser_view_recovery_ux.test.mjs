@@ -30,6 +30,14 @@ const appMain = fs.readFileSync(
   path.resolve(here, '..', 'src', 'app', 'main.jsx'),
   'utf8',
 );
+const controlledRecovery = fs.readFileSync(
+  path.resolve(here, '..', 'src', 'features', 'remote-control', 'ControlledOpenRecovery.jsx'),
+  'utf8',
+);
+const controlledRecoveryActions = fs.readFileSync(
+  path.resolve(here, '..', 'src', 'features', 'remote-control', 'controlled-open-recovery.mjs'),
+  'utf8',
+);
 const browserI18n = fs.readFileSync(
   path.resolve(here, '..', 'src', 'shared', 'i18n', 'browser.js'),
   'utf8',
@@ -467,13 +475,23 @@ test('rapid bridge session changes always enqueue the latest serialized publicat
   assert.match(syncEffect, /const isCommandEcho = bridgeObservation\.type === 'command-echo'/);
   assert.match(appMain, /browserSessionCommandEchoGuard\.begin\(/);
   assert.match(appMain, /browserSessionCommandEchoGuard\.settle\(sessionCommandToken\)/);
-  const serializedTargets = [...appMain.matchAll(
-    /channel: 'session',\s*hideMode: 'workspace',\s*serialize: true,\s*sessionTarget: ([^,\n]+),/g,
-  )].map(match => match[1]);
-  assert.deepEqual(serializedTargets, ['controlledTaskSessionId', 'run.sessionId', 'null', 'id', 'sessionId'],
-    'controlled auto-open and all existing session transitions must retain serialized browser ownership');
-  assert.equal((appMain.match(/sessionTarget:/g) || []).length, serializedTargets.length,
-    'no session target may bypass the serialized session/workspace channel');
+  assert.match(appMain, /import\('\.\.\/features\/remote-control\/ControlledOpenRecovery\.jsx'\)/);
+  assert.match(appMain, /<ControlledOpenRecovery\b[\s\S]*?runBrowserUiTransition=\{runBrowserUiTransition\}/);
+  assert.match(controlledRecovery, /import \{[^}]*retryControlledSessionOpen as retrySession[^}]*\} from '\.\/controlled-open-recovery\.mjs'/);
+  assert.match(controlledRecovery, /return retrySession\(\{[^}]*runBrowserUiTransition/);
+  for (const [source, expected] of [
+    [appMain, ['run.sessionId', 'null', 'id', 'sessionId']],
+    [controlledRecovery, ['controlledTaskSessionId']],
+    [controlledRecoveryActions, ['failure.sessionId']],
+  ]) {
+    const serializedTargets = [...source.matchAll(
+      /channel: 'session',\s*hideMode: 'workspace',\s*serialize: true,\s*sessionTarget: ([^,}\n]+)[,}]/g,
+    )].map(match => match[1].trim());
+    assert.deepEqual(serializedTargets, expected,
+      'all session transitions must retain serialized browser ownership');
+    assert.equal((source.match(/sessionTarget:/g) || []).length, serializedTargets.length,
+      'no session target may bypass the serialized session/workspace channel');
+  }
   assert.match(syncEffect, /bridgeTransition\?\.sessionId !== nextSessionId/);
   assert.match(
     syncEffect,
