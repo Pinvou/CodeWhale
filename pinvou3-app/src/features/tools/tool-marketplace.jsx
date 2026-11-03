@@ -180,14 +180,14 @@ const tc = (t) => (t && t.uiToolCommon) || dict.zh.uiToolCommon;
       }
       if (!tool.backendId) {
         return (
-          <button {...actionAttrs} disabled className={`${isLg ? 'px-10 py-2.5 text-[15px]' : 'min-w-20 px-3 py-1.5 text-[14px] whitespace-nowrap'} rounded-full font-bold bg-slate-100 dark:bg-[#1C1C1E] border border-slate-200 dark:border-slate-700 text-slate-400 dark:text-slate-500 cursor-not-allowed`}>
+          <button type="button" {...actionAttrs} disabled className={`${isLg ? 'px-10 py-2.5 text-[15px]' : 'min-w-20 px-3 py-1.5 text-[14px] whitespace-nowrap'} rounded-full font-bold bg-slate-100 dark:bg-[#1C1C1E] border border-slate-200 dark:border-slate-700 text-slate-400 dark:text-slate-500 cursor-not-allowed`}>
             {T.comingSoon}
           </button>
         );
       }
       if (busy) {
         return (
-          <button {...actionAttrs} disabled className={`${isLg ? 'px-10 py-2.5 text-[15px]' : 'min-w-20 px-3 py-1.5 text-[14px] whitespace-nowrap'} rounded-full font-bold opacity-50 cursor-wait bg-slate-100 dark:bg-[#1C1C1E] border border-slate-200 dark:border-slate-700 text-slate-500`}>
+          <button type="button" {...actionAttrs} disabled className={`${isLg ? 'px-10 py-2.5 text-[15px]' : 'min-w-20 px-3 py-1.5 text-[14px] whitespace-nowrap'} rounded-full font-bold opacity-50 cursor-wait bg-slate-100 dark:bg-[#1C1C1E] border border-slate-200 dark:border-slate-700 text-slate-500`}>
             ...
           </button>
         );
@@ -226,7 +226,7 @@ const tc = (t) => (t && t.uiToolCommon) || dict.zh.uiToolCommon;
             {list.map((a) => {
               const s = specs[a.id];
               return (
-                <button
+                <button type="button"
                   key={a.id}
                   {...actionAttrs}
                   {...(s.testid ? { 'data-testid': s.testid } : {})}
@@ -245,7 +245,7 @@ const tc = (t) => (t && t.uiToolCommon) || dict.zh.uiToolCommon;
       // —— 以下为无 actions 时的旧分支（回退；Phase 3 清理）——
       if (tool.installed) {
         const uninstallBtn = (
-          <button
+          <button type="button"
             {...actionAttrs}
             onClick={(e) => { e.stopPropagation(); onAction(tool.backendId, true); }}
             className={`${isLg ? 'px-10 py-2.5 text-[15px]' : 'min-w-20 px-3 py-1.5 text-[14px] whitespace-nowrap'} rounded-full font-bold transition-all active:scale-95 bg-slate-100 dark:bg-[#2C2C2E] border border-slate-200 dark:border-slate-700 text-[#FF3B30] dark:text-[#FF453A] hover:bg-slate-200 dark:hover:bg-[#3A3A3C]`}
@@ -258,7 +258,7 @@ const tc = (t) => (t && t.uiToolCommon) || dict.zh.uiToolCommon;
         if (!tool.updateAvailable || !onUpdate) return uninstallBtn;
         return (
           <div className="flex items-center gap-2">
-            <button
+            <button type="button"
               data-testid="tool-store-update"
               data-tool-id={tool.backendId || ''}
               data-tool-title={tool.title || ''}
@@ -274,7 +274,7 @@ const tc = (t) => (t && t.uiToolCommon) || dict.zh.uiToolCommon;
       if (tool.oauthMcp) {
         const retry = tool.authStatus && tool.authStatus !== 'not_installed';
         return (
-          <button
+          <button type="button"
             {...actionAttrs}
             onClick={(e) => { e.stopPropagation(); onAction(tool.backendId, false); }}
             className={`${isLg ? 'px-10 py-2.5 text-[15px] shadow-md shadow-blue-500/20' : 'min-w-20 px-3 py-1.5 text-[14px] whitespace-nowrap'} rounded-full font-bold transition-all active:scale-95 bg-blue-600 hover:bg-blue-700 text-white`}
@@ -285,7 +285,7 @@ const tc = (t) => (t && t.uiToolCommon) || dict.zh.uiToolCommon;
       }
       const hasConfig = tool.configFields && tool.configFields.length > 0;
       return (
-        <button
+        <button type="button"
           {...actionAttrs}
           onClick={(e) => { e.stopPropagation(); onAction(tool.backendId, false); }}
           className={`${isLg ? 'px-10 py-2.5 text-[15px] shadow-md shadow-blue-500/20' : 'min-w-20 px-3 py-1.5 text-[14px] whitespace-nowrap'} rounded-full font-bold transition-all active:scale-95 bg-blue-600 hover:bg-blue-700 text-white`}
