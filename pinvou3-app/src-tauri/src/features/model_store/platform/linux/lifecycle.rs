@@ -2850,7 +2850,10 @@ impl ModelManager {
         // 先量一次基线。**必须在跑脚本之前量**：脚本一跑完目录就没了，事后再
         // 想知道"刚才那儿有多少字节"已经无处可查，只剩下 card.json 里那个标称
         // 值可以拿来充数——而那正是要杜绝的事。
-        let candidates = self.candidate_paths(&rec);
+        //
+        // 清单 = 猜的候选 + `.deploy-env` 记录的实际部署目录：猜错方向的代价
+        // 见 `deployed_weights_hint`（量不到真权重 → "实测释放"虚报为 0）。
+        let candidates = self.owned_candidate_paths(&rec);
         let before = total_size(&candidates);
 
         self.run_card_script(
@@ -2884,9 +2887,15 @@ impl ModelManager {
 
         let after = total_size(&candidates);
         let freed_bytes = before.saturating_sub(after);
+        // 残留判定前先摘掉**其他在库卡片**拥有的路径：猜的权重目录可能跟别的卡
+        // 碰名（repo 末段相同）或共用同一个 blob 根（ollama 全家）。不摘的话，
+        // 本卡删得再干净也会被判"尚未全部删除"，而那个目录恰恰是别的卡的活
+        // 权重，重试一万次也删不掉——用户最后只能走强制移除，还被提示去手动
+        // 清理那个目录，一下就把保留卡的权重删了（2026-11-03 真机剧本）。
+        let other_cards_paths = self.paths_owned_by_other_cards(card_id);
         let remaining_paths: Vec<String> = candidates
             .iter()
-            .filter(|p| p.exists())
+            .filter(|p| p.exists() && !other_cards_paths.contains(p))
             .map(|p| p.to_string_lossy().to_string())
             .collect();
 
@@ -3031,10 +3040,15 @@ impl ModelManager {
     /// 去 `ls` 发现没有，下次就不信这条提示了。反过来，漏报也比误报安全——
     /// warning 里那句"请自行核实"就是为漏报兜底的。
     fn residual_paths(&self, rec: &db::StoreModelRecord) -> Vec<String> {
+        // 与 uninstall 的收尾判定同一套口径：实际部署目录入列、他卡拥有的路径
+        // 摘掉。强制移除的"残留点名"会引导用户去手动 rm——把保留卡的活权重
+        // 列进去等于教用户删错东西（2026-11-03 真机：删除下线卡收尾被
+        // `models_dir/Qwen3.8-27B-NVFP4` 挡住，那其实是保留卡的 21G 权重）。
+        let other_cards_paths = self.paths_owned_by_other_cards(&rec.card_id);
         let mut out: Vec<String> = Vec::new();
-        for p in self.candidate_paths(rec) {
+        for p in self.owned_candidate_paths(rec) {
             let s = p.to_string_lossy().to_string();
-            if p.exists() && !out.contains(&s) {
+            if p.exists() && !other_cards_paths.contains(&p) && !out.contains(&s) {
                 out.push(s);
             }
         }
@@ -3099,6 +3113,88 @@ impl ModelManager {
         for p in candidates {
             if !out.contains(&p) {
                 out.push(p);
+            }
+        }
+        out
+    }
+
+    /// 这张卡**实际部署时**用的权重目录，从部署脚本落下的 `.deploy-env` 里读。
+    ///
+    /// 为什么需要它：[`Self::candidate_paths`] 是按卡片脚本约定**猜**的（repo 末段
+    /// /模型名），而猜有两个已知的错方向——
+    /// - 同名异源：`unsloth/Qwen3.8-27B-NVFP4` 与 `RadixArk/Qwen3.8-27B-NVFP4`
+    ///   猜出来是**同一条** `models_dir/Qwen3.8-27B-NVFP4`；
+    /// - 消歧后缀：厂商部署脚本会自己在末段上加后缀（真机 2026-11-03：
+    ///   实际部署在 `Qwen3.8-27B-NVFP4-unsloth`，猜的路径两头都对不上）。
+    ///
+    /// 后一种让"实测释放"量不到真权重；前一种见 `paths_owned_by_other_cards`。
+    ///
+    /// 只信一种形态：`MODEL_DIR="<models_dir>/<单个安全段>"`（多行取最后一行，
+    /// 与卸载脚本自己的读法一致）。`.deploy-env` 是卡片脚本写的文件，内容不可
+    /// 信——逃出 models_dir、带路径分隔符或校验不过的一律当没有。这里的结果
+    /// 只用于测量与残留报告，不做删除，但校验仍然先行。
+    fn deployed_weights_hint(&self, rec: &db::StoreModelRecord) -> Option<PathBuf> {
+        let safe_id = config::safe_path_component(&rec.card_id).ok()?;
+        let env_file = config::data_dir()
+            .join("cards")
+            .join(safe_id)
+            .join("vendor")
+            .join(".deploy-env");
+        let content = std::fs::read_to_string(env_file).ok()?;
+        let last = content.lines().rev().find_map(|line| {
+            line.strip_prefix("MODEL_DIR=\"")
+                .and_then(|rest| rest.strip_suffix('"'))
+        })?;
+        let models_dir = self.settings.models_path();
+        let candidate = PathBuf::from(last);
+        let leaf = candidate.file_name()?.to_str()?;
+        if candidate.parent() != Some(models_dir.as_path()) {
+            return None;
+        }
+        // safe_path_component 是校验不是改写：过不了就当没有。
+        if config::safe_path_component(leaf).ok()? != leaf {
+            return None;
+        }
+        Some(candidate)
+    }
+
+    /// 本卡候选 + 实际部署目录，去重——`uninstall` 的前后计量与残留判定、
+    /// `residual_paths` 的残留点名必须用**同一份**清单，否则"释放了多少"和
+    /// "还剩什么"各说各话。
+    fn owned_candidate_paths(&self, rec: &db::StoreModelRecord) -> Vec<PathBuf> {
+        let mut candidates = self.candidate_paths(rec);
+        if let Some(actual) = self.deployed_weights_hint(rec) {
+            if !candidates.contains(&actual) {
+                candidates.push(actual);
+            }
+        }
+        candidates
+    }
+
+    /// 其他在库卡片的候选路径：这些目录不属于本卡，即便"存在"也不能算本卡的
+    /// 删除残留。两类现实场景（都是把用户逼到「强制移除」逃生口的真机事故）：
+    ///
+    /// - repo 末段碰撞（2026-11-03 真机，cube-9fde）：删 A 卡时它猜的权重目录
+    ///   恰是 B 卡的**活权重**——A 自己的东西全删干净了，收尾判定却永远看见
+    ///   B 的 21G"仍在磁盘上"，卡进「需要继续清理」死循环，重试不可能成功；
+    /// - ollama 家族：所有 ollama 卡的 blob 同住 `~/.ollama`，多卡互为 purge
+    ///   残留，谁也删不干净（r21 登记的 P3 死循环）。
+    ///
+    /// 归属以「其他记录按同一套约定会猜到它」为准——宁可少报残留也不把别的卡
+    /// 的活权重说成本卡欠的账；漏报由 force_remove 的"请自行核实"兜底。
+    fn paths_owned_by_other_cards(&self, card_id: &str) -> Vec<PathBuf> {
+        let mut out: Vec<PathBuf> = Vec::new();
+        let Ok(rows) = db::list_store_models_light() else {
+            return out;
+        };
+        for row in rows {
+            if row.record.card_id == card_id {
+                continue;
+            }
+            for p in self.candidate_paths(&row.record) {
+                if !out.contains(&p) {
+                    out.push(p);
+                }
             }
         }
         out
@@ -5862,6 +5958,244 @@ exit 0
             "彻底删除必须把卡片从模型库里移除"
         );
         assert!(!outcome.record_kept);
+    }
+
+    /// 同 [`add_record_with_uninstall_script`]，但脚本删的目录名可以指定——
+    /// 复现厂商部署脚本「实际权重落在带消歧后缀的目录」的形态（真机：
+    /// `Qwen3.8-27B-NVFP4-unsloth`，与 repo 末段猜出的目录名不同）。
+    fn add_record_with_uninstall_script_for_dir(card_id: &str, repo: &str, dir_leaf: &str) {
+        add_stuck_record(card_id, repo, 0);
+        let script = format!(
+            "#!/bin/bash\n\
+             set -euo pipefail\n\
+             if [ \"${{LMM_PURGE_WEIGHTS:-0}}\" = \"1\" ]; then\n\
+             \x20   rm -rf -- \"$LMM_MODELS_DIR/{dir_leaf}\"\n\
+             \x20   echo '权重已删除'\n\
+             else\n\
+             \x20   echo '按选择保留权重'\n\
+             fi\n"
+        );
+        let blobs: BTreeMap<String, db::ScriptBlob> = [(
+            "uninstall".to_string(),
+            db::ScriptBlob {
+                content: script,
+                sha256: String::new(),
+            },
+        )]
+        .into_iter()
+        .collect();
+        db::set_scripts_content(card_id, &blobs, &Default::default()).unwrap();
+    }
+
+    /// 2026-11-03 真机事故（cube-9fde）：下线卡 `unsloth/Qwen3.8-27B-NVFP4` 与
+    /// 保留卡 `RadixArk/Qwen3.8-27B-NVFP4` 的 repo 末段相同，猜出的权重目录是
+    /// 同一条。用户删下线卡：脚本把自己真正的权重（`-unsloth` 后缀目录）删得
+    /// 干干净净，收尾判定却看见保留卡的 21G 活权重"仍在磁盘上"→ 卡进
+    /// 「需要继续清理」，重试永远失败，唯一出路是强制移除——还被提示去手动
+    /// 清理那个目录。他卡拥有的路径不得算本卡的删除残留。
+    #[test]
+    fn purge_completes_when_a_sibling_card_shares_the_guessed_weights_dir() {
+        let tmp = setup_temp_db();
+        let models_dir = tmp.path().join("models");
+        // 保留卡的活权重：整个卸载动作从头到尾不许碰它
+        let sibling_weights = models_dir.join("Qwen3.8-27B-NVFP4");
+        make_fake_weights(&sibling_weights, 4096);
+        // 下线卡自己的权重在带消歧后缀的目录里，脚本按约定删掉它
+        let own_weights = models_dir.join("Qwen3.8-27B-NVFP4-unsloth");
+        let own_bytes = make_fake_weights(&own_weights, 4096);
+
+        add_record_with_uninstall_script_for_dir(
+            "card-retired",
+            "unsloth/Qwen3.8-27B-NVFP4",
+            "Qwen3.8-27B-NVFP4-unsloth",
+        );
+        // 部署过的卡都会留下 .deploy-env，记着真实权重位置（带消歧后缀）
+        let vendor = config::data_dir()
+            .join("cards")
+            .join("card-retired")
+            .join("vendor");
+        std::fs::create_dir_all(&vendor).unwrap();
+        std::fs::write(
+            vendor.join(".deploy-env"),
+            format!("MODEL_DIR=\"{}\"\n", own_weights.display()),
+        )
+        .unwrap();
+        add_stuck_record("card-kept", "RadixArk/Qwen3.8-27B-NVFP4", 21_000_000_000);
+
+        let outcome = manager_with_models_dir(&models_dir)
+            .uninstall("card-retired", true, &mut |_| {}, Default::default())
+            .expect("自己的产物删干净了就该判完成，而不是卡进死循环");
+
+        assert!(!own_weights.exists(), "本卡自己的权重必须真的删掉");
+        assert!(
+            sibling_weights.join("model.safetensors").exists(),
+            "保留卡的活权重一个字节都不能少"
+        );
+        assert!(
+            outcome.remaining_paths.is_empty(),
+            "他卡的目录不得算本卡残留：{:?}",
+            outcome.remaining_paths
+        );
+        // 等号钉不死（purge 收尾还会删 cards/<id> 里的部署文件），钉下界：
+        // 量不到自己目录的字节就说明 hint/清单又退回纯猜了。
+        assert!(
+            outcome.freed_bytes >= own_bytes,
+            "量到的必须含自己目录的真实字节：{} < {own_bytes}",
+            outcome.freed_bytes
+        );
+        assert!(
+            db::get_store_model("card-retired").unwrap().is_none(),
+            "彻底删除必须移除记录"
+        );
+        let kept = db::get_store_model("card-kept")
+            .unwrap()
+            .expect("保留卡的记录不许被顺手删掉");
+        assert_eq!(kept.status, "deployed");
+    }
+
+    /// 卡片的真实权重落在带消歧后缀的目录（`.deploy-env` 记着），猜路径猜不到
+    /// 它。修复前 23G 权重删了、"实测释放"却报 0——数字是从猜的清单上量出来
+    /// 的。hint 入列后要量到真字节。
+    #[test]
+    fn deploy_env_hint_counts_the_real_weights_dir_in_freed_bytes() {
+        let tmp = setup_temp_db();
+        let models_dir = tmp.path().join("models");
+        // 猜的目录（repo 末段）在磁盘上不存在——本卡的实际权重在别处
+        let actual = models_dir.join("Qwen3.8-27B-NVFP4-unsloth");
+        let real_bytes = make_fake_weights(&actual, 4096);
+
+        add_record_with_uninstall_script_for_dir(
+            "card-hint",
+            "unsloth/Qwen3.8-27B-NVFP4",
+            "Qwen3.8-27B-NVFP4-unsloth",
+        );
+        let vendor = config::data_dir()
+            .join("cards")
+            .join("card-hint")
+            .join("vendor");
+        std::fs::create_dir_all(&vendor).unwrap();
+        std::fs::write(
+            vendor.join(".deploy-env"),
+            format!("MODEL_DIR=\"{}\"\n", actual.display()),
+        )
+        .unwrap();
+
+        let outcome = manager_with_models_dir(&models_dir)
+            .uninstall("card-hint", true, &mut |_| {}, Default::default())
+            .expect("卸载应当成功");
+        assert!(!actual.exists());
+        // 等号钉不死：purge 收尾还会删掉 cards/<id> 里的部署文件（含这份
+        // .deploy-env 本身）。钉下界就够了——修复前 hint 不入列，量到的只有
+        // 几十字节的部署文件，远够不到真权重的字节数。
+        assert!(
+            outcome.freed_bytes >= real_bytes,
+            "实测释放必须量到 .deploy-env 指向的真权重目录：{} < {real_bytes}",
+            outcome.freed_bytes
+        );
+        assert!(
+            outcome.remaining_paths.is_empty(),
+            "删干净了就不该报残留：{:?}",
+            outcome.remaining_paths
+        );
+    }
+
+    /// `.deploy-env` 是卡片脚本写的文件，内容不可信：指到 models_dir 外、
+    /// 指到多层子目录的一律当没有。这里只做测量与报告，但校验必须先行——
+    /// 防的是未来有人拿 hint 去做删除。
+    #[test]
+    fn deploy_env_hint_rejects_paths_outside_the_models_dir() {
+        let tmp = setup_temp_db();
+        let models_dir = tmp.path().join("models");
+        std::fs::create_dir_all(&models_dir).unwrap();
+        add_stuck_record("card-hint-guard", "unsloth/Qwen3.8-27B-NVFP4", 1);
+        let vendor = config::data_dir()
+            .join("cards")
+            .join("card-hint-guard")
+            .join("vendor");
+        std::fs::create_dir_all(&vendor).unwrap();
+        let mgr = manager_with_models_dir(&models_dir);
+        let rec = mgr.get_record("card-hint-guard").unwrap();
+
+        for bad in [
+            format!("MODEL_DIR=\"/etc\"\n"),
+            format!("MODEL_DIR=\"{}\"\n", models_dir.join("sub/inner").display()),
+            format!("MODEL_DIR=\"{}\"\n", models_dir.parent().unwrap().display()),
+            "PORT=30000\n".to_string(),
+        ] {
+            std::fs::write(vendor.join(".deploy-env"), bad).unwrap();
+            assert!(
+                mgr.deployed_weights_hint(&rec).is_none(),
+                "逃出 models_dir 或非 MODEL_DIR 行必须当没有"
+            );
+        }
+        let good = models_dir.join("Qwen3.8-27B-NVFP4-unsloth");
+        std::fs::write(
+            vendor.join(".deploy-env"),
+            format!("MODEL_DIR=\"{}\"\n", good.display()),
+        )
+        .unwrap();
+        assert_eq!(mgr.deployed_weights_hint(&rec), Some(good));
+        std::fs::remove_file(vendor.join(".deploy-env")).unwrap();
+        assert_eq!(mgr.deployed_weights_hint(&rec), None);
+    }
+
+    /// r21 登记 P3「多 ollama 卡互为 purge 残留死循环」：所有 ollama 卡的 blob
+    /// 同住 `~/.ollama`。删 A 卡时该目录因 B 卡仍在而"存在"→ A 永远
+    /// 「需要继续清理」。它是 B 卡的候选路径，不算 A 的残留。
+    #[test]
+    fn purging_one_ollama_card_does_not_stall_on_the_shared_blob_dir() {
+        let tmp = setup_temp_db();
+        let models_dir = tmp.path().join("models");
+        // TempHome 已把 HOME 指到临时目录：在这里造出 ollama 的 blob 布局
+        let ollama_blobs = tmp.path().join(".ollama").join("models").join("blobs");
+        std::fs::create_dir_all(&ollama_blobs).unwrap();
+        std::fs::write(ollama_blobs.join("sha256-weights"), [0u8; 64]).unwrap();
+
+        for card_id in ["card-ollama-a", "card-ollama-b"] {
+            db::add_store_model(db::AddStoreModelParams {
+                card_id,
+                model_name: "qwen3:32b",
+                card_name: "Qwen3 32B",
+                org: None,
+                description: None,
+                engine_name: "ollama",
+                engine_version: None,
+                size_bytes: 20_000_000_000,
+                quantization: None,
+                source_repo_id: None,
+                source_filename: None,
+                scripts: &Default::default(),
+                status: "deployed",
+                profiles: &[],
+                deploy_topology: DeployTopology::Single,
+            })
+            .unwrap();
+        }
+        // A 卡的卸载脚本：blob 由 ollama 服务自己管（ollama rm），这里只复现
+        // "脚本成功结束、共享 blob 根仍在"的收尾现场。
+        let blobs: BTreeMap<String, db::ScriptBlob> = [(
+            "uninstall".to_string(),
+            db::ScriptBlob {
+                content: "#!/bin/bash\nexit 0\n".into(),
+                sha256: String::new(),
+            },
+        )]
+        .into_iter()
+        .collect();
+        db::set_scripts_content("card-ollama-a", &blobs, &Default::default()).unwrap();
+
+        manager_with_models_dir(&models_dir)
+            .uninstall("card-ollama-a", true, &mut |_| {}, Default::default())
+            .expect("共享 blob 根是 B 卡的，不该把 A 卡卡进「需要继续清理」");
+        assert!(
+            ollama_blobs.join("sha256-weights").exists(),
+            "B 卡还在用，blob 根必须原样保留"
+        );
+        assert!(db::get_store_model("card-ollama-a").unwrap().is_none());
+        assert!(
+            db::get_store_model("card-ollama-b").unwrap().is_some(),
+            "B 卡记录不许被顺手删掉"
+        );
     }
 
     /// 防的是「脚本没认 LMM_PURGE_WEIGHTS，界面却照样宣布权重已删除」。
