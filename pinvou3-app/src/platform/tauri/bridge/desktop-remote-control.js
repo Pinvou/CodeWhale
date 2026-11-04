@@ -39,6 +39,7 @@
     var capabilityRenewalTimer = null;
     var modelListIntent = 0;
     var capabilityReadIntent = 0;
+    var capabilityReadFlight = null;
     var controlledTerminalSequence = 0;
     var controllerTerminalSequence = 0;
     var proxyListIntent = 0;
@@ -604,14 +605,20 @@
 
     function scheduleCapabilityRenewal(payload) {
       if (capabilityRenewalTimer) clearTimeout(capabilityRenewalTimer);
+      var before = current();
       var validForMs = Number(payload.capabilityValidForMs || 30_000);
-      var delay = Math.max(1_000, Math.min(25_000, validForMs - CAPABILITY_RENEWAL_LEAD_MS));
-      var sessionRef = current().controllerConnection && current().controllerConnection.sessionRef;
+      var expiresAtMs = Number(payload.expiresAtMs);
+      // Cache reads retain their original expiry; reopening a view must not
+      // restart a full TTL or create a second renderer-owned renewal timer.
+      var delay = Number.isSafeInteger(expiresAtMs) && expiresAtMs > 0
+        ? Math.max(0, expiresAtMs - Date.now() - CAPABILITY_RENEWAL_LEAD_MS)
+        : Math.max(1_000, Math.min(25_000, validForMs - CAPABILITY_RENEWAL_LEAD_MS));
+      var sessionRef = before.controllerConnection && before.controllerConnection.sessionRef;
       if (!sessionRef) return;
       capabilityRenewalTimer = setTimeout(function () {
         capabilityRenewalTimer = null;
         var connection = current().controllerConnection || {};
-        if (connection.status !== "connected" || connection.sessionRef !== sessionRef) return;
+        if (connection.status !== "connected" || !sameControllerView(before, current())) return;
         beginCapabilityHandshake(sessionRef, true).catch(function () {});
       }, delay);
     }
@@ -780,7 +787,7 @@
 
     function capabilitiesSnapshot(remoteRef) {
       ensureAvailable();
-      var intent = ++capabilityReadIntent;
+      subscribe();
       var before = current();
       var connection = before.controllerConnection || {};
       if (!requiredOpaqueId(remoteRef) || connection.status !== "connected"
@@ -789,13 +796,28 @@
         || !connection.relayEpoch || !connection.generation) {
         return Promise.reject(asBoundedError("capability_snapshot_unavailable"));
       }
-      return invoke("desktop_remote_controller_capability_snapshot", { remoteRef: remoteRef }).then(function (snapshot) {
+      // ChatView's revision effect and the send preflight can read together.
+      // Share that exact owner's read instead of superseding one caller with
+      // a null result while its matching projection is still being published.
+      if (capabilityReadFlight && capabilityReadFlight.remoteRef === remoteRef
+        && sameControllerView(capabilityReadFlight.before, before)) return capabilityReadFlight.promise;
+      var intent = ++capabilityReadIntent;
+      var flight = { remoteRef: remoteRef, before: before, promise: null };
+      flight.promise = invoke("desktop_remote_controller_capability_snapshot", { remoteRef: remoteRef }).then(function (snapshot) {
         if (intent !== capabilityReadIntent || !sameControllerView(before, current())) return null;
         var after = logic.applyCapabilities(current(), snapshot);
-        if (after === current()) return null;
-        publish(after);
-        return after.remoteCapabilities;
-      }).catch(function (failure) { throw asBoundedError(failure); });
+        var changed = after !== current();
+        if (changed) publish(after);
+        if (snapshot && Number.isSafeInteger(Number(snapshot.expiresAtMs)) && Number(snapshot.expiresAtMs) > 0
+          && Number(snapshot.capabilityRevision) === Number(current().controllerConnection.capabilityRevision)) {
+          scheduleCapabilityRenewal(snapshot);
+        }
+        return changed ? after.remoteCapabilities : null;
+      }).catch(function (failure) { throw asBoundedError(failure); }).finally(function () {
+        if (capabilityReadFlight === flight) capabilityReadFlight = null;
+      });
+      capabilityReadFlight = flight;
+      return flight.promise;
     }
 
     function noteControlledTerminal(payload) {

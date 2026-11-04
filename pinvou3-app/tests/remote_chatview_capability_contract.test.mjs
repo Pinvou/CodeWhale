@@ -212,7 +212,9 @@ test('model readiness clears only its own prompt and missing model remains send-
     chat, 'const remoteNewDispatchReady =', 'setRemoteFiles([]);',
   );
   assert.match(newDispatchReadiness,
-    /remoteNewDispatchReady = remoteTaskContextReady\s*&& !pendingRemoteDispatches/);
+    /remoteNewDispatchReady = remoteLinkReady && !!remoteCapabilities && remoteModeReady\s*&& !pendingRemoteDispatches/);
+  assert.doesNotMatch(newDispatchReadiness, /remoteCapabilityFresh/,
+    'idle expiry must remain reachable through the new-task freshness preflight');
   assert.doesNotMatch(newDispatchReadiness, /remoteModelError/,
     'a missing model must not disable the path that surfaces its dedicated prompt');
 
@@ -230,14 +232,15 @@ test('model readiness clears only its own prompt and missing model remains send-
     'the send button must remain clickable when only the remote model is missing');
 });
 
-test('both ChatViews refresh the exact capability binding before its 30 second expiry', () => {
+test('A delegates renewal to its bridge while B refreshes its local capability projection', () => {
   for (const field of ['connectionId', 'controllerLeaseId', 'leaseEpoch', 'relayEpoch',
     'remoteControlGeneration', 'remoteSessionRef', 'capabilityRevision']) {
     assert.match(chat, new RegExp(`remoteCapabilities\\?\\.${field}|remoteCapabilities\\.${field}`),
       `A refresh binding must include ${field}`);
   }
-  assert.match(chat, /expiresAtMs\) - Date\.now\(\) - 5_000/);
-  assert.match(chat, /controllerCapabilitySend\(scopedRemoteConnection\.sessionRef\)/);
+  assert.doesNotMatch(chat, /controllerCapabilitySend\(scopedRemoteConnection\.sessionRef\)/,
+    'A must not create a second renewal timer alongside its bridge');
+  assert.match(chat, /capabilitiesSnapshot\(scopedRemoteConnection\.sessionRef\)/);
   assert.match(chat, /controlledCapabilitiesSnapshot\(controlledSession\.sessionId\)/);
   assert.match(chat, /controlledCapabilities\?\.connectionId[\s\S]*?controlledCapabilities\?\.expiresAtMs/,
     'B timer dependencies must bind the full snapshot identity and expiry');

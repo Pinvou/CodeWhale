@@ -140,6 +140,7 @@ import {
   taskStatusKey,
 } from '../remote-control/remote-control-logic.mjs';
 import { createCapabilityRequestLoop } from '../remote-control/capability-request-loop.mjs';
+import { prepareRemoteTaskCapabilities } from '../remote-control/remote-task-preflight.mjs';
 import { permissionOperationCopyKey, permissionRedactionCopyKey } from '../remote-control/controlled-device-panel-state.mjs';
 import {
   canUseControllerTemporaryModel,
@@ -1319,38 +1320,6 @@ const openChatExternalUrl = (url) => {
         return () => { cancelled = true; };
       }, [remoteModelBindingKey, scopedRemoteConnection?.capabilityRevision, scopedRemoteConnection?.sessionRef]);
       useEffect(() => {
-        if (!remoteCapabilities || !scopedRemoteConnection?.sessionRef || !bridge.available) return undefined;
-        const expiresAtMs = Number(remoteCapabilities.expiresAtMs);
-        if (!Number.isSafeInteger(expiresAtMs) || expiresAtMs <= 0) return undefined;
-        let cancelled = false;
-        const refreshDelayMs = Math.max(0, expiresAtMs - Date.now() - 5_000);
-        const timer = setTimeout(() => {
-          if (cancelled) return;
-          setRemoteCapabilityBusy(true);
-          setRemoteCapabilityError(null);
-          bridge.desktopRemoteControl.controllerCapabilitySend(scopedRemoteConnection.sessionRef)
-            .then(() => { if (!cancelled) setRemoteCapabilityError(null); })
-            .catch(failure => {
-              if (!cancelled) setRemoteCapabilityError(String(failure?.code || 'capability_snapshot_unavailable'));
-            })
-            .finally(() => { if (!cancelled) setRemoteCapabilityBusy(false); });
-        }, refreshDelayMs);
-        return () => {
-          cancelled = true;
-          clearTimeout(timer);
-        };
-      }, [
-        remoteCapabilities?.connectionId,
-        remoteCapabilities?.controllerLeaseId,
-        remoteCapabilities?.leaseEpoch,
-        remoteCapabilities?.relayEpoch,
-        remoteCapabilities?.remoteControlGeneration,
-        remoteCapabilities?.remoteSessionRef,
-        remoteCapabilities?.capabilityRevision,
-        remoteCapabilities?.expiresAtMs,
-        scopedRemoteConnection?.sessionRef,
-      ]);
-      useEffect(() => {
         if (!remoteCapabilities) return;
         setRemoteMode(current => remoteModes.includes(current) ? current : (remoteModes[0] || 'chat'));
         setRemoteWorkspaceId(current => remoteWorkspaces.some(item => item.workspaceId === current)
@@ -1374,9 +1343,12 @@ const openChatExternalUrl = (url) => {
         ));
       }, [remoteModelError, remoteSendIdentity]);
       const remoteDispatchReady = remoteTaskContextReady && !remoteModelError;
-      const remoteNewDispatchReady = remoteTaskContextReady
+      // An expired display snapshot can be renewed before a NEW reserve. Keep
+      // exact freshness/revision requirements for already prepared task actions.
+      const remoteNewDispatchReady = remoteLinkReady && !!remoteCapabilities && remoteModeReady
         && !pendingRemoteDispatches.some(item => item.state === 'prepared_not_sent');
       useEffect(() => {
+        remoteComposerIdentityRef.current = remoteComposerIdentity;
         setRemoteFiles([]);
         setRemoteMode('chat');
         setRemoteWorkspaceId('');
@@ -1388,6 +1360,10 @@ const openChatExternalUrl = (url) => {
         setRemoteArtifacts([]);
         setRemoteArtifactPreview(null);
         setRemoteActionError(null);
+        return () => {
+          remoteTransferGuard.invalidate();
+          remoteComposerIdentityRef.current = '';
+        };
       }, [remoteComposerIdentity, remoteTransferGuard]);
       useEffect(() => {
         if (!remoteArtifactPreview) return undefined;
@@ -2844,7 +2820,7 @@ const openChatExternalUrl = (url) => {
           // 构造 task intent。发送按钮、回车、语音与欢迎卡片最终都经过这里，
           // 因此必须在统一入口拦截，不能只依赖按钮 disabled。
           if (!remoteLinkReady) return false;
-          const sendIdentity = remoteSendIdentity;
+          let sendIdentity = remoteSendIdentity;
           if (!remoteBinding || !remoteNewDispatchReady) {
             setRemoteSendError({ identity: sendIdentity, code: 'remote_task_intent_invalid' });
             return false;
@@ -2853,8 +2829,19 @@ const openChatExternalUrl = (url) => {
             setRemoteSendError({ identity: sendIdentity, code: remoteModelError });
             return false;
           }
-          const transferAttempt = remoteTransferGuard.start(sendIdentity);
-          const currentTransfer = () => remoteTransferGuard.isCurrent(transferAttempt, remoteSendIdentityRef.current);
+          const composerIdentity = remoteComposerIdentity;
+          let transferAttempt = remoteTransferGuard.start(composerIdentity);
+          let contextPrepared = false;
+          const readRemoteState = () => bridge.state.get('desktopRemoteControl');
+          const preparingCurrent = () => remoteTransferGuard.isCurrent(transferAttempt, remoteComposerIdentityRef.current);
+          const currentTransfer = () => {
+            const connection = readRemoteState().controllerConnection;
+            return connection?.status === 'connected'
+              && remoteComposerIdentityRef.current === composerIdentity
+              && remoteTransferGuard.isCurrent(transferAttempt, remoteProxyLeaseIdentity(
+                activeSessionIdRef.current, connection,
+              ));
+          };
           try {
             const taskText = outgoing || t.remoteConversation.attachmentOnlyPrompt;
             const intent = newRemoteTaskIntent(
@@ -2866,6 +2853,21 @@ const openChatExternalUrl = (url) => {
               remoteSkillIds,
             );
             if (!intent) return false;
+            const connection = await prepareRemoteTaskCapabilities({
+              binding: remoteBinding,
+              ownerIdentity: composerIdentity,
+              readState: readRemoteState,
+              snapshot: bridge.desktopRemoteControl.capabilitiesSnapshot,
+              renew: bridge.desktopRemoteControl.controllerCapabilitySend,
+              isCurrent: preparingCurrent,
+            });
+            // Freeze operation ownership only after renewal. Read the host's
+            // published state so React batching cannot leave an old revision
+            // in the ref while a new authenticated snapshot is already applied.
+            sendIdentity = remoteProxyLeaseIdentity(remoteBinding.localSessionId, connection);
+            transferAttempt = remoteTransferGuard.start(sendIdentity);
+            contextPrepared = true;
+            if (!currentTransfer()) return false;
             const prepared = await bridge.desktopRemoteControl.reserveRemoteTask(
               remoteBinding.localSessionId, remoteBinding.remoteRef, intent,
             );
@@ -2905,8 +2907,10 @@ const openChatExternalUrl = (url) => {
             }
             if (outcome.state !== 'queued') return 'held';
           } catch (failure) {
-            if (remoteSendIdentityRef.current === sendIdentity) {
-              setRemoteSendError({ identity: sendIdentity, code: String(failure?.code || 'errorGeneric') });
+            if (contextPrepared ? currentTransfer() : preparingCurrent()) {
+              const errorIdentity = contextPrepared ? sendIdentity
+                : remoteProxyLeaseIdentity(remoteBinding.localSessionId, readRemoteState().controllerConnection);
+              setRemoteSendError({ identity: errorIdentity, code: String(failure?.code || 'errorGeneric') });
             }
             throw failure;
           } finally {
@@ -3087,7 +3091,7 @@ const openChatExternalUrl = (url) => {
         // as-is: the voice task lane needs to tell "restored" apart from
         // accepted, while ordinary sends treat both as not-false.
         return dispatchResult;
-      }, [activeSessionId, attachments, controlledCapabilityBound, controlledCapabilityBusy, controlledChatActive, controlledLinkReady, controlledSession.sessionId, controlledSkillIds, dataVisualizationSceneActive, documentWritingSceneActive, effectiveRemoteModelSource, hasReadyAttachment, personalWorkbenchSceneActive, pptDesignSceneActive, remoteBinding, remoteChatActive, remoteFiles, remoteMode, remoteModelError, remoteNewDispatchReady, remoteProxyHistory, remoteSendIdentity, remoteSkillIds, remoteTransferGuard, remoteWorkspaceId, selectedRemoteModelId, sessionMentionEnabled, t, visualPosterSceneActive]);
+      }, [activeSessionId, attachments, controlledCapabilityBound, controlledCapabilityBusy, controlledChatActive, controlledLinkReady, controlledSession.sessionId, controlledSkillIds, dataVisualizationSceneActive, documentWritingSceneActive, effectiveRemoteModelSource, hasReadyAttachment, personalWorkbenchSceneActive, pptDesignSceneActive, remoteBinding, remoteChatActive, remoteComposerIdentity, remoteFiles, remoteMode, remoteModelError, remoteNewDispatchReady, remoteProxyHistory, remoteSendIdentity, remoteSkillIds, remoteTransferGuard, remoteWorkspaceId, selectedRemoteModelId, sessionMentionEnabled, t, visualPosterSceneActive]);
 
       // SessionStore mapping/lease establishment is owned by the A-side
       // authenticated ensure/bind command, never by an implicit ChatView open.
@@ -3149,13 +3153,17 @@ const openChatExternalUrl = (url) => {
           .catch((failure) => setRemoteCapabilityError(String((failure && failure.code) || 'errorGeneric')))
           .finally(() => setRemoteCapabilityBusy(false));
       }, [remoteHandshakeBinding, remoteCapabilityBusy, remoteConnection]);
+      // A background handshake can remain ready/null throughout recovery.
+      // Clear its old read error only after a fresh projection matches the
+      // current complete owner/revision; a dropped or expired read is not recovery.
+      const remoteCapabilityRecoveryIdentity = remoteCapabilityFresh ? remoteSendIdentity : '';
       useEffect(() => {
         if (remoteConnection?.capabilityError) {
           setRemoteCapabilityError(String(remoteConnection.capabilityError));
-        } else if (remoteConnection?.capabilityStatus === 'ready') {
+        } else if (remoteConnection?.capabilityStatus === 'ready' && remoteCapabilityRecoveryIdentity) {
           setRemoteCapabilityError(null);
         }
-      }, [remoteConnection?.capabilityError, remoteConnection?.capabilityStatus]);
+      }, [remoteConnection?.capabilityError, remoteConnection?.capabilityStatus, remoteCapabilityRecoveryIdentity]);
       const remoteCapabilityMessage = !scopedRemoteConnection ? null
         : remoteCapabilityError === 'capability_snapshot_timeout'
           ? t.controllerConnection.remoteCapabilityTimeout
