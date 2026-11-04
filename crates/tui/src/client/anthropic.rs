@@ -273,43 +273,14 @@ impl DeepSeekClient {
 
     async fn send_anthropic_request(&self, url: &str, body: &Value) -> Result<reqwest::Response> {
         let url = self.messages_transport_url(url);
-        self.wait_for_rate_limit().await;
-        // This request is consumed non-streaming (the body is decoded as one
-        // JSON document), so it gets the same total budget as every other
-        // non-streaming completion; without it a provider that accepts and
-        // stalls - or trickles the body - wedged the caller indefinitely.
         let response = self
-            .with_operation_header(self.http_client.post(&url))
-            .header("Accept", "text/event-stream")
-            .timeout(crate::client::non_streaming_request_envelope())
-            .json(body)
-            .send()
-            .await;
-        let response = match response {
-            Ok(response) => response,
-            Err(error) => {
-                let rendered = if error.is_timeout() {
-                    "anthropic request exceeded the envelope".to_string()
-                } else {
-                    format!("anthropic transport failure: {error}")
-                };
-                // A transport-level failure never reaches the status checks
-                // below, so it must mark health and probe on its own —
-                // otherwise a provider that stalls past the envelope leaves
-                // connection health stale until the next request retries.
-                // The isolated classifier request is the exception: a
-                // read-only inspection must not write the shared connection
-                // health (or fire a /models probe), matching the isolated
-                // dispatch contract of the generic send paths.
-                if !self.isolated_request_state {
-                    self.mark_request_failure(&rendered).await;
-                    self.maybe_probe_recovery().await;
-                }
-                return Err(
-                    anyhow::Error::new(error).context("Anthropic Messages API request failed")
-                );
-            }
-        };
+            .send_with_retry(|| {
+                self.http_client
+                    .post(&url)
+                    .header("Accept", "text/event-stream")
+                    .json(body)
+            })
+            .await?;
         self.check_anthropic_response(response).await
     }
 
@@ -357,18 +328,19 @@ impl DeepSeekClient {
         let opened = super::stream_entry::open_sse_response(&open_req, |policy| {
             let url = url.clone();
             async move {
-                self.wait_for_rate_limit().await;
                 let client = super::stream_entry::client_for_policy(
                     &self.http_client,
                     self.http1_fallback_client(),
                     policy,
                 );
-                self.with_operation_header(client.post(&url))
-                    .header("Accept", "text/event-stream")
-                    .json(body)
-                    .send()
-                    .await
-                    .context("Anthropic Messages API request failed")
+                self.send_stream_open_with_retry(|| {
+                    client
+                        .post(&url)
+                        .header("Accept", "text/event-stream")
+                        .json(body)
+                })
+                .await
+                .context("Anthropic Messages API request failed")
             }
         })
         .await;

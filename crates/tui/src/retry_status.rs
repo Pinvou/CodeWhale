@@ -155,6 +155,7 @@ pub fn snapshot() -> RetryState {
 /// Extend the provider-wide rate-limit pause window. This is separate from
 /// the footer banner so one successful concurrent request cannot clear another
 /// request's active `Retry-After` window.
+#[cfg(test)]
 pub fn note_rate_limit(delay: Duration) {
     let deadline = Instant::now() + delay;
     with_rate_limit(|current| {

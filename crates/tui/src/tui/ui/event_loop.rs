@@ -1705,6 +1705,7 @@ pub(crate) async fn run_event_loop(
                 record_turn_activity(app, &event, Instant::now());
                 let turn_end_lifecycle = TurnEndLifecycleReceipt::capture(&event);
                 match event {
+                    EngineEvent::ModelRecovery { .. } => {}
                     EngineEvent::MessageStarted { .. } => {
                         // Assistant text starting after parallel tool work
                         // means the tool group is done. Flush the active

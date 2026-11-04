@@ -2037,7 +2037,7 @@ impl SubAgentTerminalDeliveryContext {
 
     /// Publish to every live sink without blocking or awaiting while the
     /// manager owns the terminal claim. The public agent/worker states remain
-    /// Running until all three sends have been attempted.
+    /// Running until every terminal sink has been attempted.
     fn deliver(&self, result: &SubAgentResult) {
         let report_ref = spill_subagent_final_report(&self.session_id, result);
         let completion = subagent_completion_from_result_with_ref_for_session(
@@ -2062,6 +2062,26 @@ impl SubAgentTerminalDeliveryContext {
                 id: result.agent_id.clone(),
                 result: completion.payload,
             });
+            // The parent mailbox may already be sealed for detached/off-turn
+            // work. Publish a typed terminal status on the independent event
+            // channel even when cancellation aborted the worker future.
+            let status = worker_status_from_subagent_status(&result.status);
+            let event = Event::AgentProgress {
+                owner_session_id: self.session_id.clone(),
+                id: result.agent_id.clone(),
+                status: agent_worker_status_name(status).into(),
+                activity: AgentProgressEventMeta::new(status).with_step(result.steps_taken),
+                parent_run_id: result.parent_run_id.clone(),
+                spawn_depth: result.spawn_depth,
+            };
+            if let Err(mpsc::error::TrySendError::Full(event)) = event_tx.try_send(event)
+                && let Ok(runtime) = tokio::runtime::Handle::try_current()
+            {
+                let tx = event_tx.clone();
+                runtime.spawn(async move {
+                    let _ = tx.send(event).await;
+                });
+            }
         }
     }
 }
@@ -11381,11 +11401,27 @@ async fn request_subagent_model_response_with_retries(
         if let Some(governor) = runtime.governor.as_ref() {
             governor.record_attempt(Instant::now());
         }
-        match tokio::time::timeout(
-            runtime.step_api_timeout,
-            runtime
-                .client
-                .create_message_for_operation(request.clone(), operation_id),
+        let event_tx = runtime.event_tx.clone();
+        let recovery_agent_id = agent_id.to_owned();
+        let observer: crate::llm_client::rate_limit::RecoveryObserver =
+            std::sync::Arc::new(move |mut receipt| {
+                receipt.agent_id = Some(recovery_agent_id.clone());
+                receipt.operation_id = Some(operation_id.to_string());
+                let event_tx = event_tx.clone();
+                Box::pin(async move {
+                    if let Some(tx) = event_tx {
+                        let _ = tx.send(Event::ModelRecovery { receipt }).await;
+                    }
+                })
+            });
+        match crate::llm_client::rate_limit::with_observer(
+            observer,
+            crate::llm_client::rate_limit::active_timeout(
+                runtime.step_api_timeout,
+                runtime
+                    .client
+                    .create_message_for_operation(request.clone(), operation_id),
+            ),
         )
         .await
         {
@@ -11405,6 +11441,18 @@ async fn request_subagent_model_response_with_retries(
                     && let Some(governor) = runtime.governor.as_ref()
                 {
                     governor.record_rate_limited(Instant::now());
+                }
+                // The transport owns the complete 429 budget. An outer replay would reset it.
+                if matches!(
+                    err.downcast_ref::<LlmError>(),
+                    Some(LlmError::RateLimited { .. } | LlmError::QuotaWindow { .. })
+                ) {
+                    return Err(SubAgentApiRequestFailure::Interrupted {
+                        reason: format!(
+                            "Rate-limit recovery stopped: {err}; checkpoint preserved for continuation"
+                        ),
+                        checkpoint_reason: "api_rate_limited",
+                    });
                 }
                 let retry_number = transient_failures.saturating_add(1);
                 let Some(retryable) = retryable_subagent_provider_failure(&err, retry_number)
@@ -15898,10 +15946,25 @@ impl SubAgentToolRegistry {
             .context()
             .clone()
             .with_owner_agent(self.owner_agent_id.clone(), self.owner_agent_name.clone());
-        self.registry
-            .execute_rich_full_with_context(name, input, Some(&context))
-            .await
-            .map_err(|e| anyhow!(e))
+        let event_tx = self.gate_runtime.event_tx.clone();
+        let agent_id = self.owner_agent_id.clone();
+        let observer: crate::llm_client::rate_limit::RecoveryObserver =
+            Arc::new(move |mut receipt| {
+                receipt.agent_id = Some(agent_id.clone());
+                let event_tx = event_tx.clone();
+                Box::pin(async move {
+                    if let Some(tx) = event_tx {
+                        let _ = tx.send(Event::ModelRecovery { receipt }).await;
+                    }
+                })
+            });
+        crate::llm_client::rate_limit::with_observer(
+            observer,
+            self.registry
+                .execute_rich_full_with_context(name, input, Some(&context)),
+        )
+        .await
+        .map_err(|e| anyhow!(e))
     }
 
     #[cfg(test)]
@@ -16309,7 +16372,7 @@ fn build_allowed_tools(
 /// failures at a glance.
 fn subagent_failure_message(err: &anyhow::Error) -> String {
     let class = match err.downcast_ref::<LlmError>() {
-        Some(LlmError::RateLimited { .. }) => Some("rate_limited"),
+        Some(LlmError::RateLimited { .. } | LlmError::QuotaWindow { .. }) => Some("rate_limited"),
         Some(LlmError::QuotaExhausted(_)) => Some("quota_exhausted"),
         Some(LlmError::ServerError { .. }) => Some("server"),
         Some(LlmError::NetworkError(_)) | Some(LlmError::Timeout(_)) => Some("network"),

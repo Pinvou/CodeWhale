@@ -2513,6 +2513,7 @@ async fn always_rate_limited_chat_client() -> (DeepSeekClient, Arc<AtomicUsize>)
         api_key: Some("test-key".to_string()),
         base_url: Some(format!("http://{addr}/v1")),
         retry: Some(crate::config::RetryConfig {
+            rate_limit: crate::config::RateLimitRetryPolicy::default(),
             enabled: Some(false),
             max_retries: Some(0),
             initial_delay: Some(0.0),
@@ -2563,6 +2564,7 @@ async fn always_invalid_request_chat_client() -> (DeepSeekClient, Arc<AtomicUsiz
         api_key: Some("test-key".to_string()),
         base_url: Some(format!("http://{addr}/v1")),
         retry: Some(crate::config::RetryConfig {
+            rate_limit: crate::config::RateLimitRetryPolicy::default(),
             enabled: Some(false),
             max_retries: Some(0),
             initial_delay: Some(0.0),
@@ -6366,6 +6368,16 @@ async fn agent_tool_cancel_stops_running_child() {
 
 #[tokio::test]
 async fn model_wait_cancel_fans_in_once_and_preserves_checkpoint() {
+    assert_model_wait_cancel_delivery(false, false).await;
+}
+
+#[tokio::test]
+async fn forkguard_rate_limit_detached_cancel_survives_a_sealed_parent_mailbox() {
+    assert_model_wait_cancel_delivery(true, false).await;
+    assert_model_wait_cancel_delivery(true, true).await;
+}
+
+async fn assert_model_wait_cancel_delivery(sealed_parent: bool, event_queue_full: bool) {
     use tokio_util::sync::CancellationToken;
 
     let tmp = tempdir().expect("tempdir");
@@ -6396,7 +6408,17 @@ async fn model_wait_cancel_fans_in_once_and_preserves_checkpoint() {
     let (completion_tx, mut completion_rx) = mpsc::unbounded_channel::<SubAgentCompletion>();
     let (mailbox, mut mailbox_rx) = Mailbox::new(CancellationToken::new());
     let (event_tx, mut event_rx) = mpsc::channel(8);
+    if event_queue_full {
+        for _ in 0..8 {
+            event_tx
+                .try_send(Event::status("fixture queue occupancy"))
+                .unwrap();
+        }
+    }
     let mut runtime = runtime_with_depth(1, Some(completion_tx));
+    if sealed_parent {
+        mailbox.seal();
+    }
     runtime.mailbox = Some(mailbox);
     runtime.event_tx = Some(event_tx);
     agent.terminal_delivery = Some(SubAgentTerminalDeliveryContext::from_runtime(&runtime));
@@ -6441,16 +6463,33 @@ async fn model_wait_cancel_fans_in_once_and_preserves_checkpoint() {
             )
         })
         .collect::<Vec<_>>();
-    assert_eq!(terminal_mail.len(), 1);
-    assert!(matches!(
-        terminal_mail[0].message,
-        MailboxMessage::Cancelled { ref agent_id } if agent_id == "agent_model_wait_cancel"
-    ));
+    assert_eq!(terminal_mail.len(), usize::from(!sealed_parent));
+    if !sealed_parent {
+        assert!(matches!(
+            terminal_mail[0].message,
+            MailboxMessage::Cancelled { ref agent_id } if agent_id == "agent_model_wait_cancel"
+        ));
+    }
 
-    let complete_events = std::iter::from_fn(|| event_rx.try_recv().ok())
-        .filter(|event| matches!(event, Event::AgentComplete { .. }))
-        .count();
-    assert_eq!(complete_events, 1);
+    let mut events: Vec<_> = std::iter::from_fn(|| event_rx.try_recv().ok()).collect();
+    if event_queue_full {
+        events.push(
+            tokio::time::timeout(Duration::from_secs(1), event_rx.recv())
+                .await
+                .expect("queued metadata terminal must be delivered")
+                .unwrap(),
+        );
+    }
+    assert_eq!(
+        events
+            .iter()
+            .filter(|event| matches!(event, Event::AgentComplete { .. }))
+            .count(),
+        usize::from(!event_queue_full)
+    );
+    assert_eq!(events.iter().filter(|event| matches!(event,
+        Event::AgentProgress { id, activity, .. } if id == &agent_id && activity.worker_status == AgentWorkerStatus::Cancelled)).count(), 1,
+        "a typed terminal event survives parent mailbox sealing and worker abortion");
     let worker = manager.get_worker_record(&agent_id).expect("worker record");
     assert_eq!(worker.status, AgentWorkerStatus::Cancelled);
     assert_eq!(
@@ -9539,90 +9578,105 @@ async fn subagent_retries_transient_provider_header_timeout_before_succeeding() 
     assert_eq!(snapshot.result.as_deref(), Some("recovered answer"));
 }
 
-#[tokio::test]
-async fn subagent_rate_limit_exhaustion_interrupts_with_checkpoint() {
-    let tmp = tempdir().expect("tempdir");
-    let manager = Arc::new(RwLock::new(SubAgentManager::new(
-        tmp.path().to_path_buf(),
-        2,
-    )));
-    let agent_id = "agent_rate_limited_checkpoint".to_string();
-    let (task_input_tx, task_input_rx) = mpsc::unbounded_channel();
-    let agent = SubAgent::new(
-        agent_id.clone(),
-        FleetRole::Worker,
-        "Inspect rate-limit recovery".to_string(),
-        make_assignment(),
-        "deepseek-v4-flash".to_string(),
-        Some("Blue".to_string()),
-        Some(vec![]),
-        task_input_tx,
-        tmp.path().to_path_buf(),
-        "boot_test".to_string(),
-    );
-    {
-        let mut manager = manager.write().await;
-        manager.agents.insert(agent_id.clone(), agent);
-        manager.register_worker(make_worker_spec(&agent_id, tmp.path().to_path_buf()));
-    }
+#[test]
+fn subagent_rate_limit_exhaustion_interrupts_with_checkpoint() {
+    // Exercise the full worker fixture with the product Engine thread's 16 MiB stack.
+    std::thread::Builder::new()
+        .stack_size(crate::CODEWHALE_MAIN_STACK_BYTES)
+        .spawn(|| {
+            tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .unwrap()
+                .block_on(async {
+                    let tmp = tempdir().expect("tempdir");
+                    let manager = Arc::new(RwLock::new(SubAgentManager::new(
+                        tmp.path().to_path_buf(),
+                        2,
+                    )));
+                    let agent_id = "agent_rate_limited_checkpoint".to_string();
+                    let (task_input_tx, task_input_rx) = mpsc::unbounded_channel();
+                    let agent = SubAgent::new(
+                        agent_id.clone(),
+                        FleetRole::Worker,
+                        "Inspect rate-limit recovery".to_string(),
+                        make_assignment(),
+                        "deepseek-v4-flash".to_string(),
+                        Some("Blue".to_string()),
+                        Some(vec![]),
+                        task_input_tx,
+                        tmp.path().to_path_buf(),
+                        "boot_test".to_string(),
+                    );
+                    {
+                        let mut manager = manager.write().await;
+                        manager.agents.insert(agent_id.clone(), agent);
+                        manager
+                            .register_worker(make_worker_spec(&agent_id, tmp.path().to_path_buf()));
+                    }
 
-    let (client, calls) = always_rate_limited_chat_client().await;
-    let mut runtime = stub_runtime().with_step_api_timeout(Duration::from_secs(5));
-    runtime.client = client;
-    runtime.manager = Arc::clone(&manager);
-    runtime.context = ToolContext::new(tmp.path());
+                    let (client, calls) = always_rate_limited_chat_client().await;
+                    let mut runtime = stub_runtime().with_step_api_timeout(Duration::from_secs(5));
+                    runtime.client = client;
+                    runtime.manager = Arc::clone(&manager);
+                    runtime.context = ToolContext::new(tmp.path());
 
-    let task = SubAgentTask {
-        manager_handle: Arc::clone(&manager),
-        runtime,
-        agent_id: agent_id.clone(),
-        agent_type: FleetRole::Worker,
-        prompt: "Inspect rate-limit recovery".to_string(),
-        assignment: make_assignment(),
-        allowed_tools: Some(vec![]),
-        fork_context: false,
-        started_at: Instant::now(),
-        max_steps: 3,
-        token_budget: None,
-        wall_time: DEFAULT_CHILD_WALL_TIME,
-        input_rx: task_input_rx,
-        launch_gate: None,
-        _foreground_child_registration: None,
-    };
+                    let task = SubAgentTask {
+                        manager_handle: Arc::clone(&manager),
+                        runtime,
+                        agent_id: agent_id.clone(),
+                        agent_type: FleetRole::Worker,
+                        prompt: "Inspect rate-limit recovery".to_string(),
+                        assignment: make_assignment(),
+                        allowed_tools: Some(vec![]),
+                        fork_context: false,
+                        started_at: Instant::now(),
+                        max_steps: 3,
+                        token_budget: None,
+                        wall_time: DEFAULT_CHILD_WALL_TIME,
+                        input_rx: task_input_rx,
+                        launch_gate: None,
+                        _foreground_child_registration: None,
+                    };
 
-    tokio::time::timeout(
-        Duration::from_secs(10),
-        tokio::spawn(run_subagent_task(task)),
-    )
-    .await
-    .expect("sub-agent task should finish")
-    .expect("sub-agent join should succeed");
+                    tokio::time::timeout(
+                        Duration::from_secs(10),
+                        tokio::spawn(run_subagent_task(task)),
+                    )
+                    .await
+                    .expect("sub-agent task should finish")
+                    .expect("sub-agent join should succeed");
 
-    assert_eq!(
-        calls.load(Ordering::SeqCst),
-        SUBAGENT_TRANSIENT_PROVIDER_MAX_RETRIES.saturating_add(1) as usize,
-        "rate-limit retries should be owned by the sub-agent retry loop"
-    );
-    let snapshot = {
-        let manager = manager.read().await;
-        manager
-            .get_result(&agent_id)
-            .expect("agent should stay registered")
-    };
-    let SubAgentStatus::Interrupted(reason) = &snapshot.status else {
-        panic!("expected interrupted sub-agent, got {:?}", snapshot.status);
-    };
-    assert!(
-        reason.contains("rate-limited provider response"),
-        "reason should name the provider rate limit: {reason}"
-    );
-    let checkpoint = snapshot
-        .checkpoint
-        .as_ref()
-        .expect("rate-limit interruption should preserve checkpoint");
-    assert_eq!(checkpoint.reason, "api_rate_limited");
-    assert!(checkpoint.continuable);
-    assert!(snapshot.needs_input.is_some());
+                    assert_eq!(
+                        calls.load(Ordering::SeqCst),
+                        1,
+                        "disabled transport retries must not be restarted by the child wrapper"
+                    );
+                    let snapshot = {
+                        let manager = manager.read().await;
+                        manager
+                            .get_result(&agent_id)
+                            .expect("agent should stay registered")
+                    };
+                    let SubAgentStatus::Interrupted(reason) = &snapshot.status else {
+                        panic!("expected interrupted sub-agent, got {:?}", snapshot.status);
+                    };
+                    assert!(
+                        reason.contains("Rate-limit recovery stopped"),
+                        "reason should name the provider rate limit: {reason}"
+                    );
+                    let checkpoint = snapshot
+                        .checkpoint
+                        .as_ref()
+                        .expect("rate-limit interruption should preserve checkpoint");
+                    assert_eq!(checkpoint.reason, "api_rate_limited");
+                    assert!(checkpoint.continuable);
+                    assert!(snapshot.needs_input.is_some());
+                });
+        })
+        .unwrap()
+        .join()
+        .unwrap();
 }
 
 #[tokio::test]
@@ -15850,6 +15904,7 @@ async fn tool_call_then_invalid_request_chat_client() -> (DeepSeekClient, Arc<At
         api_key: Some("test-key".to_string()),
         base_url: Some(format!("http://{addr}/v1")),
         retry: Some(crate::config::RetryConfig {
+            rate_limit: crate::config::RateLimitRetryPolicy::default(),
             enabled: Some(false),
             max_retries: Some(0),
             initial_delay: Some(0.0),

@@ -624,9 +624,30 @@ impl Engine {
                 .await
                 .map(RichToolResult::plain)
         } else if let Some(registry) = registry {
-            registry
-                .execute_rich_full_with_context(&tool_name, tool_input, context_override.as_ref())
-                .await
+            let context = context_override
+                .as_ref()
+                .unwrap_or_else(|| registry.context());
+            let agent_id = context.owner_agent_id.clone();
+            let turn_id = context.origin_turn_id.clone();
+            let event_tx = tx_event.clone();
+            let observer: crate::llm_client::rate_limit::RecoveryObserver =
+                Arc::new(move |mut receipt| {
+                    receipt.agent_id = agent_id.clone();
+                    receipt.turn_id = turn_id.clone();
+                    let event_tx = event_tx.clone();
+                    Box::pin(async move {
+                        let _ = event_tx.send(Event::ModelRecovery { receipt }).await;
+                    })
+                });
+            crate::llm_client::rate_limit::with_observer(
+                observer,
+                registry.execute_rich_full_with_context(
+                    &tool_name,
+                    tool_input,
+                    context_override.as_ref(),
+                ),
+            )
+            .await
         } else {
             Err(ToolError::not_available(format!(
                 "tool '{tool_name}' is not registered"

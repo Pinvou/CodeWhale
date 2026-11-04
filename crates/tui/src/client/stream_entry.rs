@@ -168,7 +168,7 @@ where
     F: Fn(StreamHttpPolicy) -> Fut,
     Fut: Future<Output = Result<reqwest::Response>>,
 {
-    let fallback_reason = match tokio::time::timeout(
+    let fallback_reason = match crate::llm_client::rate_limit::active_timeout(
         open_req.open_timeout,
         attempt(open_req.policy),
     )
@@ -200,7 +200,9 @@ where
     crate::logging::warn(format!(
         "SSE stream {fallback_reason}; retrying once with HTTP/1.1"
     ));
-    match tokio::time::timeout(h1_req.open_timeout, attempt(h1_req.policy)).await {
+    match crate::llm_client::rate_limit::active_timeout(h1_req.open_timeout, attempt(h1_req.policy))
+        .await
+    {
         Ok(Ok(response)) => Ok(response),
         Ok(Err(err)) => Err(h1_fallback_error(err)),
         // Typed, not a bare string: a header stall is a transport

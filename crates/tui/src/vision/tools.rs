@@ -10,30 +10,19 @@ use serde_json::{Value, json};
 use crate::client::DeepSeekClient;
 use crate::config::ApiProvider;
 use crate::config::VisionModelConfig;
-use crate::llm_client::{LlmError, RetryConfig, sanitize_http_error_body, with_retry};
+use crate::llm_client::rate_limit::active_timeout_total;
 use crate::tools::spec::{
     ToolCapability, ToolContext, ToolError, ToolResult, ToolSpec, required_str,
 };
 
 pub struct ImageAnalyzeTool {
     config: VisionModelConfig,
-    client: reqwest::Client,
     route_client: Option<DeepSeekClient>,
 }
 
-/// Total envelope for one image_analyze call, retry attempts and response
-/// body consumption included. reqwest's `read_timeout` is *not* a per-read
-/// idle bound for the request phase: its timer starts at `send()` and is
-/// never reset until the response headers arrive, so it silently acts as a
-/// total deadline on the multi-MB upload plus the full non-streaming vision
-/// generation — precisely the healthy work a 120s cap used to kill. The
-/// client therefore bounds only the connect handshake, and this envelope
-/// (the same 30-minute budget as non-streaming model requests) is the sole
-/// total bound; a stalled connection errors out through it instead of
-/// hanging. The envelope is shared across retry attempts, not per attempt:
-/// an attempt that fails slowly consumes its share of the one budget, so
-/// only retries of fast failures (connect errors, quick 5xx) fit before
-/// the shared envelope expires.
+/// Active-work envelope for image upload, generation and response consumption.
+/// Native HTTP transport owns per-attempt bounds and quota admission. Provider
+/// backoff and shared admission waits use their separate recovery clock.
 const VISION_REQUEST_ENVELOPE: Duration = Duration::from_secs(1800);
 
 fn vision_request_envelope() -> Duration {
@@ -56,18 +45,8 @@ impl ImageAnalyzeTool {
         config: VisionModelConfig,
         route_client: Option<DeepSeekClient>,
     ) -> Self {
-        let client = crate::tls::reqwest_client_builder()
-            // Bound only the connect handshake. A client- or request-level
-            // `read_timeout` would start counting at `send()` and never
-            // reset before the response headers, quietly re-introducing a
-            // total deadline on the upload + long non-streaming generation;
-            // the total bound lives in VISION_REQUEST_ENVELOPE instead.
-            .connect_timeout(Duration::from_secs(10))
-            .build()
-            .expect("Failed to build HTTP client");
         Self {
             config,
-            client,
             route_client,
         }
     }
@@ -283,82 +262,26 @@ impl ToolSpec for ImageAnalyzeTool {
 
         let url = format!("{}/chat/completions", self.base_url());
         let api_key = self.api_key();
-        let operation_id = uuid::Uuid::new_v4();
-        // The route client can be the parent's main model while vision has a
-        // separate provider. Only the exact matching route may contribute
-        // its frozen context headers or logical-call opt-in.
-        let idempotency_route = self
-            .route_client
-            .as_ref()
-            .filter(|route| route.idempotency_matches_route(&self.base_url(), &api_key));
-
-        let retry_config = RetryConfig {
-            max_retries: 3,
-            initial_delay: 1.0,
-            max_delay: 30.0,
-            enabled: true,
-            ..Default::default()
-        };
-        let response_json = tokio::time::timeout(vision_request_envelope(), async {
-            // Acquire inside the envelope: the ownership window is part of
-            // the bounded call, so a contested permit cannot park this tool
-            // (and its share of Runtime Chat availability) outside every
-            // total bound. The guard is still held for the whole request.
+        let route = DeepSeekClient::auxiliary_json_route(
+            self.route_client.as_ref(),
+            &self.base_url(),
+            &api_key,
+            &self.config.model,
+        )
+        .map_err(|e| {
+            ToolError::execution_failed(format!("Failed to configure vision route: {e}"))
+        })?;
+        let response_json = active_timeout_total(vision_request_envelope(), async {
+            // Ownership remains inside the tool's active envelope. The native
+            // HTTP adapter owns quota admission and releases slots in backoff.
             let _inference = match self.route_client.as_ref() {
                 Some(client) => client.acquire_remote_control_inference_permit().await,
                 None => Some(crate::client::acquire_remote_control_inference_participant().await),
             };
-            let response = with_retry(
-                &retry_config,
-                || {
-                    let client = idempotency_route
-                        .map(|route| route.http_client.clone())
-                        .unwrap_or_else(|| self.client.clone());
-                    let url = url.clone();
-                    let api_key = api_key.clone();
-                    let payload = payload.clone();
-                    async move {
-                        let builder = client
-                            .post(&url)
-                            .header("Content-Type", "application/json")
-                            .header("Authorization", format!("Bearer {api_key}"))
-                            .json(&payload);
-                        let builder = match idempotency_route {
-                            Some(route) => {
-                                route.with_operation_header_for_id(builder, operation_id)
-                            }
-                            None => builder,
-                        };
-                        let response = builder
-                            .send()
-                            .await
-                            .map_err(|e| LlmError::from_reqwest(&e))?;
-
-                        let status = response.status();
-                        if !status.is_success() {
-                            let error_text = response
-                                .text()
-                                .await
-                                .unwrap_or_else(|_| "Unknown error".to_string());
-                            let error_text = sanitize_http_error_body(
-                                Some("Vision provider"),
-                                status.as_u16(),
-                                &error_text,
-                            );
-                            return Err(LlmError::from_http_response(status.as_u16(), &error_text));
-                        }
-                        Ok(response)
-                    }
-                },
-                None,
-            )
-            .await
-            .map_err(|e| ToolError::execution_failed(format!("Vision API request failed: {e}")))?;
-
-            let json: Value = response.json().await.map_err(|e| {
-                ToolError::execution_failed(format!("Failed to parse response: {e}"))
-            })?;
-            Ok(json)
+            route
+                .request_auxiliary_json(&url, &payload, uuid::Uuid::new_v4())
+                .await
+                .map_err(|e| ToolError::execution_failed(format!("Vision API request failed: {e}")))
         })
         .await
         .map_err(|_| ToolError::Timeout {
@@ -739,7 +662,7 @@ mod tests {
     }
 
     #[test]
-    fn image_dimensions_omits_bmp_because_decoder_feature_is_off() {
+    fn image_dimensions_follows_available_bmp_decoder() {
         // Minimal well-formed 1x1 24-bit BMP: even valid BMP input must
         // degrade to `None` (no panic, no error) while the `bmp` feature of
         // the `image` dependency is not enabled.
@@ -765,7 +688,11 @@ mod tests {
         let dir = tempdir().expect("tempdir");
         let path = dir.path().join("tiny.bmp");
         std::fs::write(&path, MINIMAL_BMP).expect("write fixture");
-        assert_eq!(ImageAnalyzeTool::image_dimensions(&path), None);
+        let expected =
+            image::ImageFormat::Bmp
+                .reading_enabled()
+                .then_some((1, 1, String::from("bmp")));
+        assert_eq!(ImageAnalyzeTool::image_dimensions(&path), expected);
     }
 
     #[tokio::test]
@@ -890,7 +817,7 @@ mod tests {
                 "owned-context".into(),
             )]));
             let route = DeepSeekClient::new(&config).unwrap();
-            assert!(!route.idempotency_matches_route(&server.uri(), key));
+            assert!(!route.matches_auxiliary_chat_route(&server.uri(), key));
             let tool = ImageAnalyzeTool::new_with_route_client(
                 VisionModelConfig {
                     model: "test-vision-model".into(),
@@ -908,7 +835,7 @@ mod tests {
         }
         let receipts = server.received_requests().await.unwrap();
         assert_eq!(receipts.len(), 3);
-        for receipt in &receipts {
+        for (index, receipt) in receipts.iter().enumerate() {
             assert!(receipt.url.path().ends_with("/chat/completions"));
             for header in [
                 "idempotency-key",
@@ -922,15 +849,22 @@ mod tests {
                     "incompatible parent header {header}"
                 );
             }
-            assert!(
-                receipt
-                    .headers
-                    .get("authorization")
-                    .unwrap()
-                    .to_str()
-                    .unwrap()
-                    .starts_with("Bearer")
-            );
+            if index == 1 {
+                assert!(
+                    !receipt.headers.contains_key("authorization"),
+                    "an explicit empty key stays unauthenticated"
+                );
+            } else {
+                assert!(
+                    receipt
+                        .headers
+                        .get("authorization")
+                        .unwrap()
+                        .to_str()
+                        .unwrap()
+                        .starts_with("Bearer ")
+                );
+            }
         }
     }
 
@@ -975,7 +909,7 @@ mod tests {
             config.request_idempotency_header = Some("idempotency-key".into());
             let route = DeepSeekClient::new(&config).unwrap();
             assert_eq!(
-                route.idempotency_matches_route(&base, "owned-test-key"),
+                route.matches_auxiliary_chat_route(&base, "owned-test-key"),
                 matching
             );
             let tool = ImageAnalyzeTool::new_with_route_client(
@@ -1003,6 +937,68 @@ mod tests {
                 matching
             );
         }
+    }
+
+    #[tokio::test]
+    async fn forkguard_rate_limit_vision_shared_policy_and_long_minimum() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .respond_with(ResponseTemplate::new(429).insert_header("retry-after", "3600"))
+            .expect(1)
+            .mount(&server)
+            .await;
+        let workspace = tempdir().unwrap();
+        std::fs::write(
+            workspace.path().join("tiny.png"),
+            create_test_png(2, 2, [1, 2, 3, 255]),
+        )
+        .unwrap();
+        let context = ToolContext::new(workspace.path());
+        let base = format!("{}/v1", server.uri());
+        let route = DeepSeekClient::new(&crate::config::Config {
+            provider: Some("deepseek".into()),
+            api_key: Some("owned-test-key".into()),
+            base_url: Some(base.clone()),
+            http_headers: Some(std::collections::HashMap::from([(
+                "OpenAI-Project".into(),
+                "vision-project-fixture".into(),
+            )])),
+            ..Default::default()
+        })
+        .unwrap();
+        let tool = ImageAnalyzeTool::new_with_route_client(
+            VisionModelConfig {
+                model: "test-vision-model".into(),
+                api_key: Some("owned-test-key".into()),
+                base_url: Some(base.clone()),
+            },
+            Some(route.clone()),
+        );
+        let error = tool
+            .execute(json!({"image_path":"tiny.png"}), &context)
+            .await
+            .unwrap_err();
+        assert!(error.to_string().contains("Rate limit"));
+        // The matching foreground client sees the same minimum before wire dispatch.
+        let error = route
+            .request_auxiliary_json(
+                &format!("{base}/chat/completions"),
+                &json!({}),
+                uuid::Uuid::new_v4(),
+            )
+            .await
+            .unwrap_err();
+        assert!(matches!(
+            error.downcast_ref::<crate::llm_client::LlmError>(),
+            Some(crate::llm_client::LlmError::QuotaWindow { .. })
+        ));
+        let requests = server.received_requests().await.unwrap();
+        assert_eq!(requests.len(), 1);
+        assert_eq!(
+            requests[0].headers.get("openai-project").unwrap(),
+            "vision-project-fixture"
+        );
+        assert!(!requests[0].headers.contains_key("idempotency-key"));
     }
 
     #[tokio::test]

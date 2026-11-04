@@ -760,6 +760,7 @@ struct StreamOutcome {
     first_token_at: Option<Instant>,
     request_dispatched_at: Instant,
     stream_error: Option<String>,
+    rate_limit_interrupted: bool,
 }
 
 pub(super) fn initial_stream_error_user_message(
@@ -1494,6 +1495,7 @@ impl Engine {
         // registry-derived field as unknown rather than guessing.
         inspection_surface: Option<crate::tool_inspection::ToolSurfaceContext>,
     ) -> (TurnOutcomeStatus, Option<String>) {
+        self.model_recovery_interrupted = false;
         // R1: restart the cumulative per-turn wall-clock budget. This is the
         // only place it is started, so exactly one turn owns it at a time.
         self.turn_wall_clock =
@@ -1791,12 +1793,12 @@ impl Engine {
                 && snapshot.tokens_used >= u64::from(budget)
             {
                 let _ = self
-                    .tx_event
-                    .send(Event::status(format!(
-                        "Goal over token budget ({} / {budget} tokens) — continuing (unbounded); verify or /goal clear when done.",
-                        snapshot.tokens_used
-                    )))
-                    .await;
+                .tx_event
+                .send(Event::status(format!(
+                    "Goal over token budget ({} / {budget} tokens) — continuing (unbounded); verify or /goal clear when done.",
+                    snapshot.tokens_used
+                )))
+                .await;
             }
 
             let auto_compaction_config = self.config.compaction.clone();
@@ -1890,11 +1892,11 @@ impl Engine {
                 let Some(compaction_result) = compaction_result else {
                     self.finish_compaction(&compaction_id);
                     let message = if turn_was_canceled {
-                        "Auto-compaction canceled with the active turn; conversation context was not changed"
-                    } else {
-                        "Auto-compaction canceled; conversation context was not changed"
-                    }
-                    .to_string();
+                    "Auto-compaction canceled with the active turn; conversation context was not changed"
+                } else {
+                    "Auto-compaction canceled; conversation context was not changed"
+                }
+                .to_string();
                     self.emit_compaction_cancelled(compaction_id, true, message)
                         .await;
                     if turn_was_canceled {
@@ -1914,11 +1916,11 @@ impl Engine {
                             if turn_was_canceled || compaction_cancel.is_cancelled() {
                                 self.finish_compaction(&compaction_id);
                                 let message = if turn_was_canceled {
-                                    "Auto-compaction canceled with the active turn; conversation context was not changed"
-                                } else {
-                                    "Auto-compaction canceled; conversation context was not changed"
-                                }
-                                .to_string();
+                                "Auto-compaction canceled with the active turn; conversation context was not changed"
+                            } else {
+                                "Auto-compaction canceled; conversation context was not changed"
+                            }
+                            .to_string();
                                 self.emit_compaction_cancelled(compaction_id, true, message)
                                     .await;
                                 if turn_was_canceled {
@@ -2035,7 +2037,7 @@ impl Engine {
                     if context_recovery_attempts >= MAX_CONTEXT_RECOVERY_ATTEMPTS {
                         let message = format!(
                             "Context remains above model limit after {MAX_CONTEXT_RECOVERY_ATTEMPTS} recovery attempts \
-                             (~{estimated_input} token estimate, ~{input_budget} budget). Please run /compact or /clear."
+                         (~{estimated_input} token estimate, ~{input_budget} budget). Please run /compact or /clear."
                         );
                         turn_error = Some(message.clone());
                         let _ = self
@@ -2286,14 +2288,20 @@ impl Engine {
                     let _ = self.tx_event.send(Event::status("Request cancelled")).await;
                     return (TurnOutcomeStatus::Interrupted, None);
                 }
-                result = async { client.prepare_stream_call(request) } => result,
+                result = async {
+                    let call = client.prepare_stream_call(request)?;
+                    let identity = match &call.operation_identity {
+                        Some(identity) => identity.clone(),
+                        None => crate::llm_client::caller_stream_operation_identity(
+                            client.provider_name(), client.billing_base_url(), &call.request,
+                        )?,
+                    };
+                    Ok::<_, anyhow::Error>((call, identity))
+                } => result,
             };
-            let prepared_stream = preparation.as_ref().ok().cloned();
-            let operation_id = match prepared_stream
-                .as_ref()
-                .and_then(|call| call.operation_identity.as_ref())
-            {
-                Some(identity) => {
+            let prepared_stream = preparation.as_ref().ok().map(|(call, _)| call.clone());
+            let operation_id = match preparation.as_ref().ok() {
+                Some((_, identity)) => {
                     let id = match &model_operation {
                         Some((previous, id)) if previous == identity => *id,
                         _ => uuid::Uuid::new_v4(),
@@ -2301,10 +2309,7 @@ impl Engine {
                     model_operation = Some((identity.clone(), id));
                     id
                 }
-                None => {
-                    model_operation = None;
-                    uuid::Uuid::new_v4()
-                }
+                None => uuid::Uuid::new_v4(),
             };
             if prepared_stream.is_some() {
                 let _ = self
@@ -2330,6 +2335,17 @@ impl Engine {
             // instant (connection setup included), and time-to-first-token is
             // the gap to the first content-bearing stream event.
             let request_dispatched_at = Instant::now();
+            let tx = self.tx_event.clone();
+            let recovery_turn_id = turn.id.clone();
+            let observer: crate::llm_client::rate_limit::RecoveryObserver =
+                std::sync::Arc::new(move |mut receipt| {
+                    receipt.operation_id = Some(operation_id.to_string());
+                    receipt.turn_id = Some(recovery_turn_id.clone());
+                    let tx = tx.clone();
+                    Box::pin(async move {
+                        let _ = tx.send(Event::ModelRecovery { receipt }).await;
+                    })
+                });
             let stream_result = tokio::select! {
                 biased;
                 () = self.cancel_token.cancelled() => {
@@ -2338,8 +2354,9 @@ impl Engine {
                     return (TurnOutcomeStatus::Interrupted, None);
                 }
                 result = async {
-                    let prepared = preparation?;
-                    client.create_prepared_message_stream_for_operation(prepared, operation_id).await
+                    let (prepared, _) = preparation?;
+                    crate::llm_client::rate_limit::with_observer(observer.clone(),
+                        client.create_prepared_message_stream_for_operation(prepared, operation_id)).await
                 } => result,
             };
             let stream = match stream_result {
@@ -2382,6 +2399,14 @@ impl Engine {
                         let _ = self.tx_event.send(Event::status(status)).await;
                         continue;
                     }
+                    let rate_limited = matches!(
+                        e.downcast_ref::<crate::llm_client::LlmError>(),
+                        Some(
+                            crate::llm_client::LlmError::RateLimited { .. }
+                                | crate::llm_client::LlmError::QuotaWindow { .. }
+                        )
+                    );
+                    self.model_recovery_interrupted |= rate_limited;
                     turn_error = Some(message.clone());
                     let _ = self
                         .tx_event
@@ -2389,7 +2414,14 @@ impl Engine {
                             e, message,
                         )))
                         .await;
-                    return (TurnOutcomeStatus::Failed, turn_error);
+                    return (
+                        if rate_limited {
+                            TurnOutcomeStatus::Interrupted
+                        } else {
+                            TurnOutcomeStatus::Failed
+                        },
+                        turn_error,
+                    );
                 }
             };
             let StreamOutcome {
@@ -2412,18 +2444,23 @@ impl Engine {
                 first_token_at,
                 request_dispatched_at,
                 stream_error,
-            } = self
-                .process_stream(
-                    client.as_ref(),
-                    stream,
-                    prepared_stream
-                        .as_ref()
-                        .expect("successful stream has a prepared call"),
-                    operation_id,
-                    request_dispatched_at,
-                    stream_retry_budget.spent(),
-                )
-                .await;
+                rate_limit_interrupted,
+            } = crate::llm_client::rate_limit::with_observer(
+                observer,
+                Box::pin(
+                    self.process_stream(
+                        client.as_ref(),
+                        stream,
+                        prepared_stream
+                            .as_ref()
+                            .expect("successful stream has a prepared call"),
+                        operation_id,
+                        request_dispatched_at,
+                        stream_retry_budget.spent(),
+                    ),
+                ),
+            )
+            .await;
             turn_error = turn_error.or(stream_error);
             // These belong to post-stream response assembly, not stream
             // consumption: blocks are built from the completed stream state,
@@ -2465,6 +2502,11 @@ impl Engine {
                 self.add_interrupted_assistant_text(&current_text_visible)
                     .await;
                 return (TurnOutcomeStatus::Interrupted, None);
+            }
+
+            if rate_limit_interrupted {
+                self.model_recovery_interrupted = true;
+                return (TurnOutcomeStatus::Interrupted, turn_error);
             }
 
             if is_incomplete_stop_reason(stop_reason.as_deref()) {
@@ -2554,11 +2596,11 @@ impl Engine {
                             "Resuming after system sleep (attempt {attempt}/{MAX_STREAM_RETRIES}); discarding partial output and retrying request"
                         ));
                         let _ = self
-                            .tx_event
-                            .send(Event::status(format!(
-                                "System sleep detected; connection lost — retrying request ({attempt}/{MAX_STREAM_RETRIES})"
-                            )))
-                            .await;
+                        .tx_event
+                        .send(Event::status(format!(
+                            "System sleep detected; connection lost — retrying request ({attempt}/{MAX_STREAM_RETRIES})"
+                        )))
+                        .await;
                         // Finalize any partially-rendered assistant cell so
                         // the retried stream renders fresh instead of
                         // appending to the pre-sleep fragment.
@@ -2639,21 +2681,21 @@ impl Engine {
                                 "Resuming interactive turn after mid-stream network drop (attempt {attempt}/{MAX_STREAM_RETRIES}); only hidden reasoning streamed — no partial reply to preserve, retrying request"
                             ));
                             let _ = self
-                                .tx_event
-                                .send(Event::status(format!(
-                                    "Connection interrupted; retrying ({attempt}/{MAX_STREAM_RETRIES})"
-                                )))
-                                .await;
+                            .tx_event
+                            .send(Event::status(format!(
+                                "Connection interrupted; retrying ({attempt}/{MAX_STREAM_RETRIES})"
+                            )))
+                            .await;
                         } else {
                             crate::logging::warn(format!(
                                 "Resuming interactive turn after mid-stream network drop (attempt {attempt}/{MAX_STREAM_RETRIES}); preserving partial reply and retrying request"
                             ));
                             let _ = self
-                                .tx_event
-                                .send(Event::status(format!(
-                                    "Connection interrupted; preserving partial reply and retrying ({attempt}/{MAX_STREAM_RETRIES})"
-                                )))
-                                .await;
+                            .tx_event
+                            .send(Event::status(format!(
+                                "Connection interrupted; preserving partial reply and retrying ({attempt}/{MAX_STREAM_RETRIES})"
+                            )))
+                            .await;
                             // Finalize the partial text cell so the UI stops
                             // streaming and the retried content lands in a
                             // fresh cell instead of appending to an
@@ -2802,11 +2844,11 @@ impl Engine {
                         return (TurnOutcomeStatus::Failed, Some(reason));
                     }
                     self.add_session_message(self.runtime_text_message_with_turn_metadata(
-                        "All tools are disabled. The previous tool markers were ignored. Respond now with only the requested final answer in the exact required format."
-                            .to_string(),
-                        UserInputProvenance::Runtime,
-                    ))
-                    .await;
+                    "All tools are disabled. The previous tool markers were ignored. Respond now with only the requested final answer in the exact required format."
+                        .to_string(),
+                    UserInputProvenance::Runtime,
+                ))
+                .await;
                     turn.next_step();
                     continue;
                 }
@@ -2899,14 +2941,14 @@ impl Engine {
                     .take()
                     .expect("output_limit_truncated checked above");
                 self.add_session_message(
-                    self.runtime_text_message_with_turn_metadata(
-                        format!(
-                            "[runtime] The provider stopped generation at its output limit (`{reason}`) before completing. Your last response was cut off. Continue from where you left off; do not repeat content already delivered."
-                        ),
-                        UserInputProvenance::Runtime,
+                self.runtime_text_message_with_turn_metadata(
+                    format!(
+                        "[runtime] The provider stopped generation at its output limit (`{reason}`) before completing. Your last response was cut off. Continue from where you left off; do not repeat content already delivered."
                     ),
-                )
-                .await;
+                    UserInputProvenance::Runtime,
+                ),
+            )
+            .await;
                 let _ = self
                     .tx_event
                     .send(Event::status(
@@ -3246,11 +3288,11 @@ impl Engine {
 
                     // No FINAL — let the model iterate with the feedback.
                     let _ = self
-                        .tx_event
-                        .send(Event::status(format!(
-                            "Continuing — REPL round feedback (consecutive_empty={consecutive_empty_repl_rounds})"
-                        )))
-                        .await;
+                    .tx_event
+                    .send(Event::status(format!(
+                        "Continuing — REPL round feedback (consecutive_empty={consecutive_empty_repl_rounds})"
+                    )))
+                    .await;
                     turn.next_step();
                     continue;
                 }
@@ -3415,7 +3457,7 @@ impl Engine {
                 {
                     let message = if has_provider_reasoning {
                         "Model returned reasoning but no answer or tool call; the provider response was incomplete."
-                            .to_string()
+                        .to_string()
                     } else if let Some(reason) = stop_reason.as_deref() {
                         format!(
                             "Model returned terminal stop reason `{reason}` with no answer or tool call."
@@ -3579,11 +3621,11 @@ impl Engine {
                 self.session.pending_prefix_change_reason =
                     Some("benchmark_final_only".to_string());
                 self.add_session_message(self.runtime_text_message_with_turn_metadata(
-                    "Tool budget is exhausted. All tools are now disabled for this turn. Do not call any tool again. Use only the evidence already present in the conversation and provide the requested final answer now, in the exact output format requested by the user."
-                        .to_string(),
-                    UserInputProvenance::Runtime,
-                ))
-                .await;
+                "Tool budget is exhausted. All tools are now disabled for this turn. Do not call any tool again. Use only the evidence already present in the conversation and provide the requested final answer now, in the exact output format requested by the user."
+                    .to_string(),
+                UserInputProvenance::Runtime,
+            ))
+            .await;
                 let _ = self
                     .tx_event
                     .send(Event::status(
@@ -3611,14 +3653,14 @@ impl Engine {
             // assistant `tool_use` directly) and the model can act on it.
             if let Some(reason) = output_limit_truncated.take() {
                 self.add_session_message(
-                    self.runtime_text_message_with_turn_metadata(
-                        format!(
-                            "[runtime] The provider stopped generation at its output limit (`{reason}`) before completing. Your last response was cut off. Continue from where you left off; do not repeat content already delivered."
-                        ),
-                        UserInputProvenance::Runtime,
+                self.runtime_text_message_with_turn_metadata(
+                    format!(
+                        "[runtime] The provider stopped generation at its output limit (`{reason}`) before completing. Your last response was cut off. Continue from where you left off; do not repeat content already delivered."
                     ),
-                )
-                .await;
+                    UserInputProvenance::Runtime,
+                ),
+            )
+            .await;
             }
 
             // A successful tool step is productive progress, not a runaway
@@ -3641,11 +3683,11 @@ impl Engine {
                 .map_or(0, |registry| registry.active_count());
             if running > 0 {
                 let _ = self
-                    .tx_event
-                    .send(Event::status(format!(
-                        "Turn failed with {running} turn-owned sub-agent(s) still running; cancelling them."
-                    )))
-                    .await;
+                .tx_event
+                .send(Event::status(format!(
+                    "Turn failed with {running} turn-owned sub-agent(s) still running; cancelling them."
+                )))
+                .await;
             }
             return (TurnOutcomeStatus::Failed, Some(err));
         }
@@ -3654,11 +3696,11 @@ impl Engine {
             .map_or(0, |registry| registry.active_count());
         if running > 0 {
             let _ = self
-                .tx_event
-                .send(Event::status(format!(
-                    "Turn ending with {running} turn-owned sub-agent(s) still running; parking them as resumable work."
-                )))
-                .await;
+            .tx_event
+            .send(Event::status(format!(
+                "Turn ending with {running} turn-owned sub-agent(s) still running; parking them as resumable work."
+            )))
+            .await;
             self.add_session_message(self.runtime_text_message_with_turn_metadata(
                 turn_owned_child_parking_runtime_text(running),
                 UserInputProvenance::Runtime,
@@ -3671,11 +3713,11 @@ impl Engine {
         };
         if detached_running > 0 {
             let _ = self
-                .tx_event
-                .send(Event::status(format!(
-                    "Turn ending with {detached_running} detached sub-agent(s) still running in the background; they'll report when done."
-                )))
-                .await;
+            .tx_event
+            .send(Event::status(format!(
+                "Turn ending with {detached_running} detached sub-agent(s) still running in the background; they'll report when done."
+            )))
+            .await;
             self.add_session_message(waiting_for_subagents_runtime_message(detached_running))
                 .await;
         }
@@ -5634,6 +5676,7 @@ impl Engine {
         // breaking the existing pin invariants.
         let mut stream = stream;
         let mut stream_error: Option<String> = None;
+        let mut rate_limit_interrupted = false;
 
         let mut current_text_raw = String::new();
         let mut current_text_visible = String::new();
@@ -5851,6 +5894,13 @@ impl Engine {
                                 continue;
                             }
                             Err(retry_err) => {
+                                rate_limit_interrupted = matches!(
+                                    retry_err.downcast_ref::<crate::llm_client::LlmError>(),
+                                    Some(
+                                        crate::llm_client::LlmError::RateLimited { .. }
+                                            | crate::llm_client::LlmError::QuotaWindow { .. }
+                                    )
+                                );
                                 let retry_msg = self.decorate_auth_error_message(format!(
                                     "Stream retry failed: {retry_err}"
                                 ));
@@ -6402,6 +6452,7 @@ impl Engine {
             first_token_at,
             request_dispatched_at,
             stream_error,
+            rate_limit_interrupted,
         }
     }
 
