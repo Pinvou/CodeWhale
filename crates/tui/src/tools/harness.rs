@@ -54,7 +54,7 @@ impl ToolSpec for HarnessTool {
     }
 
     fn description(&self) -> &'static str {
-        "Inspect or refine the durable continual harness for this workspace. Use action=overview at the start of substantial multi-turn work to recover bounded prompt notes, reusable sub-agent briefs, and skill hints. Use action=refine only after observing concrete evidence for a reusable improvement; it stores a small project-local entry that later turns receive as untrusted working guidance. Use action=remove to retire an obsolete entry. Keep large source material in rlm, compose parallel child work with workflow task(...), and use agent action=message/followup for child coordination."
+        "Inspect or refine the durable continual harness for this workspace. Use action=overview at the start of substantial multi-turn work to recover bounded prompt notes, reusable sub-agent briefs, and skill hints. Use action=refine only after observing concrete evidence for a reusable improvement; it stores a small project-local entry that later turns receive as untrusted working guidance. Use action=remove to retire an obsolete entry. Keep large source material out of the transcript: read with offset/limit and retrieve_tool_result reload bounded slices on demand; compose parallel child work with workflow task(...); use agent action=message/followup for child coordination."
     }
 
     fn input_schema(&self) -> Value {
@@ -121,7 +121,7 @@ impl ToolSpec for HarnessTool {
                     "path": state.path,
                     "entries": state.entries,
                     "runtime": {
-                        "context": "rlm keeps large context as a persistent Python variable",
+                        "context": "read with offset/limit and retrieve_tool_result reload bounded slices of large material on demand",
                         "orchestration": "workflow composes task(...) calls and parallel fan-out",
                         "messaging": "agent action=message and action=followup coordinate active children",
                         "continuation": "goal keeps an explicit durable objective active"
