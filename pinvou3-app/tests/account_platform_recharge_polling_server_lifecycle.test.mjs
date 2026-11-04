@@ -3,74 +3,22 @@ import test from 'node:test';
 import { spawn } from 'node:child_process';
 import { once } from 'node:events';
 import { existsSync, lstatSync, mkdtempSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
-import { createServer } from 'node:net';
+import { createServer } from './helpers/net-fixture.mjs';
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve, sep } from 'node:path';
-import { fileURLToPath, pathToFileURL } from 'node:url';
+import { fileURLToPath } from 'node:url';
 
 const appRoot = fileURLToPath(new URL('../', import.meta.url));
 const fixtureUrl = new URL('./account_platform_recharge_polling_server.mjs', import.meta.url).href;
 const fixturePath = fileURLToPath(fixtureUrl);
+const faultUrl = new URL('./helpers/recharge-polling-faults.mjs', import.meta.url).href;
+const netFixtureUrl = new URL('./helpers/net-fixture.mjs', import.meta.url).href;
 
-// Only dependency boundaries fail: the fixture's allocation, close, signal,
-// directory checks and error projection always execute their real code.
-const hooks = String.raw`
-import fs from 'node:fs';
-import http from 'node:http';
-import { resolve, sep } from 'node:path';
-import { syncBuiltinESMExports } from 'node:module';
-const owner = resolve(process.env.FIXTURE_LIFECYCLE_OWNER);
-const mode = process.env.FIXTURE_LIFECYCLE_MODE;
-const inProjection = value => {
-  const path = resolve(String(value));
-  return path.startsWith(owner + sep) && path.includes('pinvou-public-tok03-app-');
-};
-for (const [name, targetIndex, fault] of [['cpSync', 1, 'copy-cp'], ['mkdirSync', 0, 'copy-mkdir'], ['copyFileSync', 1, 'copy-file']]) {
-  const original = fs[name];
-  fs[name] = (...args) => {
-    if ((mode === fault || (mode === 'copy-and-remove' && name === 'cpSync')) && inProjection(args[targetIndex]))
-      throw Object.assign(new Error('INJECTED_COPY_FAILURE'), { code: 'INJECTED_COPY_FAILURE' });
-    return original(...args);
-  };
-}
-const remove = fs.rmSync;
-fs.rmSync = (...args) => {
-  if ((mode === 'remove' || mode === 'copy-and-remove') && inProjection(args[0]))
-    throw Object.assign(new Error('INJECTED_REMOVE_FAILURE'), { code: 'INJECTED_REMOVE_FAILURE' });
-  return remove(...args);
-};
-const create = http.createServer;
-http.createServer = (...args) => {
-  const server = create(...args);
-  if (mode === 'startup-signal') {
-    const listen = server.listen;
-    server.listen = (...listenArgs) => {
-      // Fix the signal between entering listen and announcing readiness.
-      process.nextTick(() => process.emit('SIGTERM'));
-      setTimeout(() => listen.apply(server, listenArgs), 40);
-      return server;
-    };
-  }
-  if (mode === 'repeat-signal' || mode === 'os-repeat-signal') {
-    const close = server.close;
-    server.close = callback => close.call(server, reason => setTimeout(() => callback?.(reason), 80));
-  }
-  return server;
-};
-if (mode === 'repeat-signal') process.on('message', message => {
-  if (message !== 'signal') return;
-  process.emit('SIGTERM');
-  process.send?.({ signalListenersAfterFirst: process.listenerCount('SIGTERM') });
-  setTimeout(() => process.emit('SIGTERM'), 5);
-});
-syncBuiltinESMExports();
-`;
 
 async function withOwner(action) {
   const owner = mkdtempSync(join(tmpdir(), 'pinvou-polling-lifecycle-'));
   const identity = lstatSync(owner);
   writeFileSync(join(owner, 'canary'), 'preserve');
-  writeFileSync(join(owner, 'hooks.mjs'), hooks);
   try { return await action(owner); }
   finally {
     assert.equal(dirname(resolve(owner)), resolve(tmpdir()));
@@ -85,7 +33,7 @@ async function withOwner(action) {
 
 function runChild(owner, { mode = '', code, cli = false, port, ready, endStdinOnSpawn = false } = {}) {
   return new Promise((resolveChild, rejectChild) => {
-    const args = ['--import', pathToFileURL(join(owner, 'hooks.mjs')).href,
+    const args = ['--import', faultUrl,
       ...(cli ? [fixturePath] : ['--input-type=module', '--eval', code])];
     const env = { ...process.env, TEMP: owner, TMP: owner, TMPDIR: owner,
       FIXTURE_LIFECYCLE_OWNER: owner, FIXTURE_LIFECYCLE_MODE: mode };
@@ -133,7 +81,7 @@ test('real fixture HTTP, bounded ownership and concurrent close remain usable', 
   const code = importFixture + String.raw`
     const assert = (await import('node:assert/strict')).default;
     const fs = await import('node:fs');
-    const net = await import('node:net');
+    const net = await import(${JSON.stringify(netFixtureUrl)});
     const events = await import('node:events');
     const before = process.listenerCount('SIGTERM');
     const fixture = await startRechargePollingFixture();
@@ -175,7 +123,7 @@ test('invalid port and every pre-server copy boundary retire only their own dire
 test('real bind failure preserves its cause and removes the allocated projection', async () => withOwner(async owner => {
   const result = await runChild(owner, { code: importFixture + String.raw`
     const assert = (await import('node:assert/strict')).default;
-    const server = (await import('node:net')).createServer();
+    const server = (await import(${JSON.stringify(netFixtureUrl)})).createServer();
     server.listen(0, '127.0.0.1'); await (await import('node:events')).once(server, 'listening');
     try {
       process.env.PINVOU_TEST_TOK03_PORT = String(server.address().port);
