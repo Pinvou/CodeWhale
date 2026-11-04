@@ -2098,5 +2098,6 @@
   "AutomationEditorFriday": "Vie",
   "AutomationEditorSaturday": "Sáb",
   "AutomationEditorSunday": "Dom",
-  "AttachedRootsNotRevertedNote": "Solo se revirtió el workspace primario; las raíces adjuntas del workspace no se revirtieron (los directorios excluidos de la instantánea —como vendor/— y los repositorios anidados conservan sus cambios)."
+  "AttachedRootsNotRevertedNote": "Solo se revirtió el workspace primario; las raíces adjuntas del workspace no se revirtieron (los directorios excluidos de la instantánea —como vendor/— y los repositorios anidados conservan sus cambios).",
+  "RemoteApprovalOutcomeUnconfirmed": "Resultado de aprobación aún sin confirmar; la tarjeta permanece abierta hasta que el motor reporte."
 }

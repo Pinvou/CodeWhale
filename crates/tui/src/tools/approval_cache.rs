@@ -170,6 +170,27 @@ pub fn build_approval_grouping_key(
     ApprovalKey(fingerprint)
 }
 
+/// Bind an operation key to the effective execution context it was judged
+/// under — the length-prefixed `@root:<len>:<path>` spelling the grouping
+/// side already uses to bind patch families to their primary (round-37
+/// M37-6).
+///
+/// Both digests above are operation-scoped only: the same tool + input
+/// minted the same key under every workspace. Within one conversation that
+/// is safe because a workspace or session switch clears the whole session
+/// grant/denial sets (`apply_workspace_runtime_state`). Delegated child
+/// calls are different: sibling workers share the session's decision
+/// caches while running under DIFFERENT workspace roots at the same time,
+/// so an identical child operation must not ride a grant or denial decided
+/// under another root. Binding the root into the key keeps same-context
+/// operation families reusable (identical keys) while any other context
+/// mints a different identity.
+#[must_use]
+pub fn bind_workspace_scope(key: ApprovalKey, workspace: &std::path::Path) -> ApprovalKey {
+    let root_tag = workspace.display().to_string();
+    ApprovalKey(format!("{}@root:{}:{root_tag}", key.0, root_tag.len()))
+}
+
 /// Return the canonical command prefix for the shell command in `input`.
 ///
 /// Uses [`classify_command`] from the arity dictionary so that approving
@@ -372,6 +393,59 @@ mod tests {
         let key_a = build_approval_key("exec_shell", &json!({"command": "cargo build"}));
         let key_b = build_approval_key("exec_shell", &json!({"command": "cargo build --release"}));
         assert_ne!(key_a, key_b);
+    }
+
+    /// zhuowp review 5747926699: the operation identity must cover the
+    /// effective execution context. Binding the judged root keeps the
+    /// same-context operation family reusable (identical keys) while any
+    /// other workspace mints a different identity, for BOTH cache scopes.
+    #[test]
+    fn workspace_scope_binding_separates_contexts_and_keeps_families() {
+        let input = json!({"command": "echo gated"});
+        let exact_a = bind_workspace_scope(
+            build_approval_key("bash", &input),
+            std::path::Path::new("/repo-a"),
+        );
+        let exact_a_again = bind_workspace_scope(
+            build_approval_key("bash", &input),
+            std::path::Path::new("/repo-a"),
+        );
+        let exact_b = bind_workspace_scope(
+            build_approval_key("bash", &input),
+            std::path::Path::new("/repo-b"),
+        );
+        assert_eq!(
+            exact_a, exact_a_again,
+            "the same context must keep the operation family reusable"
+        );
+        assert_ne!(
+            exact_a, exact_b,
+            "a different context must mint a different exact identity"
+        );
+        assert!(
+            exact_a.0.contains("@root:7:/repo-a"),
+            "the binding uses the length-prefixed root tag: {}",
+            exact_a.0
+        );
+        let grouping_a =
+            bind_workspace_scope(gkey("bash", &input), std::path::Path::new("/repo-a"));
+        let grouping_a_again =
+            bind_workspace_scope(gkey("bash", &input), std::path::Path::new("/repo-a"));
+        let grouping_b =
+            bind_workspace_scope(gkey("bash", &input), std::path::Path::new("/repo-b"));
+        assert_eq!(
+            grouping_a, grouping_a_again,
+            "the same context must keep the grant family reusable"
+        );
+        assert_ne!(
+            grouping_a, grouping_b,
+            "a different context must mint a different grant identity"
+        );
+        assert!(
+            grouping_a.0.ends_with("@root:7:/repo-a"),
+            "the grouping key carries the same root tag: {}",
+            grouping_a.0
+        );
     }
 
     /// Round-37 M37-6 pins: the grouping key resolves the cwd operand

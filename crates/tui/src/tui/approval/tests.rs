@@ -2543,6 +2543,7 @@ fn canonical_bash_keeps_original_name_but_uses_shell_approval_semantics() {
         &json!({"action": "run", "command": "cargo test", "cwd": "/workspace"}),
         "tool:Bash",
         None,
+        None,
         Path::new("/workspace"),
     );
 
@@ -2603,6 +2604,7 @@ fn canonical_file_mutations_get_legacy_previews_and_scoped_ask_rules() {
             "Mutate file",
             &params,
             "tool:File",
+            None,
             None,
             Path::new("/workspace"),
         );

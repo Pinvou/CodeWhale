@@ -416,6 +416,27 @@ impl Engine {
                 approval_mode: input_policy.approval_mode_for_session(),
                 working_set: &previewed_working_set,
                 policy_narrowing: input_policy.narrowing.as_ref(),
+                // Pinvou tri-mode safety: recompute the transition exactly the
+                // live turn will, never read the turn-start leftover — a host
+                // that flips posture between turns previews the line the live
+                // body will send, and an already-consumed change never leaks
+                // here. The posture comes from the same helper as the live
+                // compare: planned approval from the preview inputs, live
+                // arming from the session, so a hypothetical posture in the
+                // inputs is rendered exactly as the live turn would render
+                // it. Both sides of the compare mirror the live turn-start
+                // detector: an authoritative planned turn measures against
+                // the standing authoritative baseline, and a provenance-
+                // narrowed planned turn emits no host transition at all (the
+                // narrowing receipt above reports the reduction).
+                authority_transition: if input_policy.narrowing.is_some() {
+                    None
+                } else {
+                    crate::core::authority::authority_transition_between(
+                        self.last_authoritative_turn_meta_posture,
+                        self.turn_meta_posture_for(&input_policy),
+                    )
+                },
             },
         );
         *self

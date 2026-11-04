@@ -2098,5 +2098,6 @@
   "AutomationEditorFriday": "Jum",
   "AutomationEditorSaturday": "Sab",
   "AutomationEditorSunday": "Min",
-  "AttachedRootsNotRevertedNote": "Hanya workspace utama yang dikembalikan; root workspace terlampir tidak di-rollbalik (direktori yang dikecualikan dari snapshot — seperti vendor/ — dan repositori bersarang mempertahankan perubahannya)."
+  "AttachedRootsNotRevertedNote": "Hanya workspace utama yang dikembalikan; root workspace terlampir tidak di-rollbalik (direktori yang dikecualikan dari snapshot — seperti vendor/ — dan repositori bersarang mempertahankan perubahannya).",
+  "RemoteApprovalOutcomeUnconfirmed": "Hasil persetujuan belum dikonfirmasi; kartu tetap terbuka sampai engine melaporkan."
 }

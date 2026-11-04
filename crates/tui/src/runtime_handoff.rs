@@ -818,13 +818,21 @@ pub(crate) fn compaction_anchor_in_era(
 pub(crate) fn replace_agent_topology_checkpoint(
     messages: &mut Vec<Message>,
     snapshots: &[SubAgentResult],
-) {
+) -> AgentTopologyCheckpointRebase {
     // Both forms: a restored carrier is the projection of a sidecar a previous
     // save already wrote, and keeping it beside the fresh one would persist a
     // superseded duplicate that no later replay removes.
-    messages.retain(|message| {
-        !is_agent_topology_checkpoint(message) && !is_restored_agent_topology_checkpoint(message)
-    });
+    let mut retained = Vec::with_capacity(messages.len());
+    let mut removed_indices = Vec::new();
+    for (index, message) in messages.drain(..).enumerate() {
+        if is_agent_topology_checkpoint(&message) || is_restored_agent_topology_checkpoint(&message)
+        {
+            removed_indices.push(index);
+        } else {
+            retained.push(message);
+        }
+    }
+    *messages = retained;
     let checkpoints = crate::history_recognition::CheckpointEra::of_history(messages);
     let ends_with_tool_result = messages.last().is_some_and(carries_tool_result);
     let ends_with_compaction_summary = messages
@@ -837,6 +845,44 @@ pub(crate) fn replace_agent_topology_checkpoint(
         messages.len()
     };
     messages.insert(position, agent_topology_checkpoint_message(snapshots));
+    AgentTopologyCheckpointRebase {
+        removed_indices,
+        insert_position: position,
+    }
+}
+
+/// How [`replace_agent_topology_checkpoint`] moved history slots: the
+/// original indices of the superseded checkpoint carriers it removed, and
+/// the post-removal index the fresh checkpoint was inserted at. Positions
+/// recorded against the pre-call history translate through
+/// [`AgentTopologyCheckpointRebase::rebase_index`].
+#[derive(Debug, Clone)]
+pub(crate) struct AgentTopologyCheckpointRebase {
+    removed_indices: Vec<usize>,
+    insert_position: usize,
+}
+
+impl AgentTopologyCheckpointRebase {
+    /// Translate a position recorded against the pre-call history to the
+    /// post-call history: superseded carriers removed before it shift it
+    /// down, the fresh checkpoint inserted at or before it shifts it up.
+    /// Positions are slot bookkeeping only — the checkpoint carriers are
+    /// engine-authored messages no turn-build record ever points at, so a
+    /// translated index always refers to the same surviving message.
+    #[must_use]
+    pub(crate) fn rebase_index(&self, push_index: usize) -> usize {
+        let removed_before = self
+            .removed_indices
+            .iter()
+            .filter(|&&removed| removed < push_index)
+            .count();
+        let shifted = push_index.saturating_sub(removed_before);
+        if shifted >= self.insert_position {
+            shifted + 1
+        } else {
+            shifted
+        }
+    }
 }
 
 #[cfg(test)]
