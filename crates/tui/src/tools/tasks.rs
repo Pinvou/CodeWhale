@@ -199,7 +199,7 @@ impl ToolSpec for TasksTool {
             );
             properties.insert(
                 "trust_mode".to_string(),
-                json!({ "type": "boolean", "description": "Run the task with trust mode: file paths are accepted without workspace-boundary validation. Defaults to false. (action=create)" }),
+                json!({ "type": "boolean", "description": "Run the task with trust mode: file paths are accepted without workspace-boundary validation, and when auto_approve is on, a tool call the sandbox denies is retried with full access instead of being denied. Defaults to false. (action=create)" }),
             );
             properties.insert(
                 "auto_approve".to_string(),
