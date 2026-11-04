@@ -1240,10 +1240,12 @@ pub(crate) fn build_chat_wire_body(
             .iter()
             .map(|tool| tool_to_chat_for_base_url(tool, base_url))
             .collect();
-        // Moonshot function parameters must end at a plain object root.
-        // Flatten root composition, preserve valid nested anyOf, and drop
-        // only the tools whose parameters cannot pass MFJS validation so one
-        // incompatible tool never sinks the whole request.
+        // Moonshot function parameters must end at a plain object root or at
+        // the MFJS-legal root union of object branches (walle specification;
+        // 2026-11-04 live probe). Flatten remaining root composition,
+        // preserve valid nested anyOf, and drop only the tools whose
+        // parameters cannot pass MFJS validation so one incompatible tool
+        // never sinks the whole request.
         if matches!(provider, crate::config::ApiProvider::Moonshot) {
             omitted_tool_names = sanitize_moonshot_chat_tools(&mut chat_tools);
         }
@@ -8603,6 +8605,109 @@ mod image_block_wire_tests {
             tools[1]["function"]["description"],
             format!("Lookup things. {NOTE}"),
             "a non-empty description keeps the appended-note form"
+        );
+    }
+
+    /// Moonshot's MFJS specification lists `anyOf` as a first-class
+    /// applicator, and a 2026-11-04 live probe of the Kimi Code endpoint
+    /// returned 200 for a root union of object branches with per-branch
+    /// `required` groups honored. The Moonshot lane must keep such a union —
+    /// with each branch's own required set — instead of folding it into one
+    /// merged object whose single required group starved k3's constrained
+    /// decoding into emitting only the required fields.
+    #[test]
+    fn kimi_chat_keeps_root_union_of_object_branches() {
+        let union_schema = serde_json::json!({
+            "anyOf": [
+                {
+                    "type": "object",
+                    "properties": {
+                        "kind": {"type": "string"},
+                        "outline": {"type": "string"}
+                    },
+                    "required": ["kind", "outline"],
+                    "additionalProperties": false
+                },
+                {
+                    "type": "object",
+                    "properties": {
+                        "kind": {"type": "string"},
+                        "content": {"type": "string"}
+                    },
+                    "required": ["kind", "content"],
+                    "additionalProperties": false
+                }
+            ]
+        });
+        let tool = Tool {
+            tool_type: None,
+            name: "deck".to_string(),
+            description: "Build a slide deck.".to_string(),
+            input_schema: union_schema,
+            allowed_callers: None,
+            defer_loading: None,
+            input_examples: None,
+            strict: None,
+            cache_control: None,
+        };
+        let request = MessageRequest {
+            model: crate::config::KIMI_CODE_K3_MODEL.to_string(),
+            messages: vec![Message {
+                role: Role::User,
+                content: vec![ContentBlock::Text {
+                    text: "build the deck".to_string(),
+                    cache_control: None,
+                }],
+            }],
+            max_tokens: 128,
+            system: None,
+            tools: Some(vec![tool]),
+            tool_choice: None,
+            metadata: None,
+            thinking: None,
+            reasoning_effort: None,
+            stream: None,
+            temperature: None,
+            top_p: None,
+        };
+
+        let body = build_chat_wire_body(
+            &request,
+            ApiProvider::Moonshot,
+            crate::config::DEFAULT_KIMI_CODE_BASE_URL,
+            false,
+        )
+        .expect("Kimi Code wire body");
+
+        assert!(
+            body.omitted_tool_names.is_empty(),
+            "the union root must not be dropped: {:?}",
+            body.omitted_tool_names
+        );
+        let parameters = &body.body["tools"][0]["function"]["parameters"];
+        let branches = parameters["anyOf"]
+            .as_array()
+            .expect("root anyOf must survive");
+        assert_eq!(branches.len(), 2, "both object variants must survive");
+        assert_eq!(
+            branches[0]["required"],
+            serde_json::json!(["kind", "outline"])
+        );
+        assert_eq!(
+            branches[1]["required"],
+            serde_json::json!(["kind", "content"])
+        );
+        assert!(
+            branches.iter().all(|branch| branch["type"] == "object"),
+            "MFJS requires the object type inside every branch: {parameters}"
+        );
+        assert!(
+            parameters.get("type").is_none(),
+            "type may not sit beside the union keyword: {parameters}"
+        );
+        assert!(
+            parameters.get("properties").is_none(),
+            "branch properties must not be merged into the root: {parameters}"
         );
     }
 }
