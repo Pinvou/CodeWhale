@@ -910,10 +910,20 @@ fn persist_new_record(
 /// id 复活同一业务身份（反之登记在先则被拒绝）；这是两个合法用户意图的
 /// last-writer-wins，读取端对存量重复只告警，不构成破坏路径，故不为此加锁
 /// 拓宽临界区。
+///
+/// `expected_ollama_base`（2026-11-04 评审 P3）：ollama 记录的确认面板只带
+/// 模型标识与名称，守护进程地址此前在删除时刻才解析——列表之后、确认之前
+/// 这段窗口里改过商店设置的 `ollama_host`，DELETE 会改投新实例，同名模型
+/// 即被误删。前端把**列表行自带的基地址**（与展示/链接同一解析）随确认传入，
+/// 这里绑定：不一致整单拒绝（要求刷新后重新确认），一致则全程使用**这一
+/// 次解析值**执行删除（守卫 4 不再二次解析，收窄检查与删除之间的改配窗口）。
+/// settings 读取失败维持三十二轮评审口径：不硬拦注册表清理，守卫 4 再解析
+/// 一次并把失败收进警告。
 pub async fn remove_external_model(
     id: String,
     delete_weights: bool,
     confirm_name: String,
+    expected_ollama_base: Option<String>,
 ) -> Result<RemoveOutcome, String> {
     let mut warnings = Vec::new();
     if !is_safe_id(&id) {
@@ -1000,6 +1010,25 @@ pub async fn remove_external_model(
         name_hit.as_deref(),
         ollama_model_hit.as_deref(),
     )?;
+
+    // 守卫 2.5（2026-11-04 评审 P3）：ollama 记录在**任何破坏性动作之前**绑定
+    // 守护进程实例。解析与比对集中在这一处：一致则把这一次的解析值带给守卫 4
+    // （删除不再二次解析），不一致整单拒绝——注册表文件原样保留，用户刷新
+    // 设备页后对当前视图重新确认。
+    let ollama_bound_base = match ollama_model_name.as_deref() {
+        Some(_) => match super::ollama_base_checked().await {
+            Ok(current) => {
+                ensure_ollama_base_binding(expected_ollama_base.as_deref(), &current)?;
+                Some(current)
+            }
+            // settings 读不出来时无法比对，维持三十二轮评审口径：此处不硬拦
+            // （注册表清理不该被瞬时 IO 卡死），守卫 4 再解析一次，失败按警告
+            // 收尾、DELETE 不改投默认实例。
+            Err(_) => None,
+        },
+        // 非 ollama 记录不涉及守护进程，绑定参数不参与（前端对这类行传 null）。
+        None => None,
+    };
 
     // 守卫 3：权重目录删除（绝对路径 / 家目录之下 / 深度 ≥ 3 / 存在的目录 /
     // 不在应用自身数据树内）。守卫是纯路径计算，留在 async 侧；只有整目录删除
@@ -1128,10 +1157,15 @@ pub async fn remove_external_model(
     // 守卫 4：Ollama 模型顺带从 Ollama 里删；失败只警告，不阻断注册表清理。
     // 基地址走可失败解析（三十二轮评审 P2）：settings 恰在此刻读不出来/被隔离
     // 时按 Err 收进警告，DELETE 不改投默认实例——宁可留下可手动处理的原实例
-    // 模型，不能删错守护进程上的同名对象。
+    // 模型，不能删错守护进程上的同名对象。守卫 2.5 绑定通过时沿用**那一次**
+    // 的解析值（2026-11-04 评审 P3：二次解析会在检查与删除之间重开改配窗口）。
     let mut ollama_deleted = false;
     if let Some(model_name) = &ollama_model_name {
-        match ollama_delete(model_name).await {
+        let delete_result = match ollama_bound_base.as_deref() {
+            Some(base) => ollama_delete_against(base, model_name).await,
+            None => ollama_delete(model_name).await,
+        };
+        match delete_result {
             Ok(()) => ollama_deleted = true,
             Err(reason) => warnings.push(format!(
                 "Ollama 删除失败（不影响本机移除，可手动处理）：{reason}"
@@ -1216,6 +1250,41 @@ fn removal_boundary_error(
 /// 了同名模型、手写记录把权重放进商店根等）此前是死胡同——与"记录损坏"分支给
 /// 手工删除出路同一口径（二十一轮评审 P3）。
 const STORE_BOUNDARY_ESCAPE_HINT: &str = "；若确认该登记记录本身不应由商店管理，可手工删除 ~/.pinvou3/device/external-models.d/<id>.json";
+
+/// 守卫 2.5 的纯逻辑（测试矩阵直打）：确认面板带来的守护进程基地址与当前解析
+/// 值必须一致，否则整单拒绝。展示端点恒为基地址 + `/v1`（`ExternalModel
+/// base_url` 契约），归一化剥掉这一层与尾斜杠后做精确比对——比对的单位是
+/// 「实例」，scheme/host/端口任何一个分量变了都是换实例（哪怕新实例恰好也有
+/// 同名模型，删除也不该改投它）。expected 缺失（旧调用方/存量行无 base_url）
+/// 一律拒绝：绑定是 ollama 记录移除的必要输入，缺了就要求刷新设备页重来，
+/// 不给"当没传"的静默放行口子。
+pub(crate) fn ensure_ollama_base_binding(
+    expected: Option<&str>,
+    current: &str,
+) -> Result<(), String> {
+    let Some(expected) = expected else {
+        return Err(
+            "移除确认缺少守护进程地址绑定，为防误删已拒绝；请刷新设备页后重新确认".to_string(),
+        );
+    };
+    let normalize = |raw: &str| -> String {
+        // 先剥尾斜杠再剥一层 "/v1"、再剥尾斜杠——"…/v1/"（展示端点带的
+        // 尾斜杠形状）才能归一到裸基地址；裸基地址本身不受益。
+        let trimmed = raw.trim().trim_end_matches('/');
+        let without_v1 = trimmed.strip_suffix("/v1").unwrap_or(trimmed);
+        without_v1.trim_end_matches('/').to_string()
+    };
+    let (expected, current) = (normalize(expected), normalize(current));
+    if expected != current {
+        // 回显限长（与本文件其余回显同一纪律）：地址来自前端载荷/设置文件。
+        return Err(format!(
+            "Ollama 守护进程配置已变化（确认时 {}，当前 {}），为防误删已拒绝；请刷新设备页后重新确认",
+            truncate_echo(&expected),
+            truncate_echo(&current),
+        ));
+    }
+    Ok(())
+}
 
 /// 权重删除守卫（纯函数，测试矩阵直打）。全部通过时返回**规范化后**的目标目录，
 /// 调用方只对该返回值执行 `remove_dir_all`——绝不删除入参原样路径。
@@ -1927,6 +1996,49 @@ mod tests {
         fn drop(&mut self) {
             let _ = std::fs::remove_dir_all(&self.0);
         }
+    }
+
+    // 守卫 2.5 绑定矩阵（2026-11-04 评审 P3）：展示端点 = 基地址 + "/v1" 的
+    // 归一层必须剥掉再比对；任何 host/端口/scheme 分量变化都是换实例，整单
+    // 拒绝；expected 缺失不给静默放行。
+    #[test]
+    fn daemon_binding_accepts_same_instance_in_display_shapes() {
+        let base = "http://127.0.0.1:11434";
+        assert!(ensure_ollama_base_binding(Some(base), base).is_ok());
+        // 展示形状（列表行自带 /v1、可能带尾斜杠）与当前裸基地址同实例。
+        assert!(ensure_ollama_base_binding(Some("http://127.0.0.1:11434/v1"), base).is_ok());
+        assert!(ensure_ollama_base_binding(Some("http://127.0.0.1:11434/v1/"), base).is_ok());
+        // 首尾空白是前端载荷的正常噪声。
+        assert!(ensure_ollama_base_binding(Some("  http://127.0.0.1:11434/v1  "), base).is_ok());
+    }
+
+    #[test]
+    fn daemon_binding_rejects_any_instance_component_change() {
+        let base = "http://127.0.0.1:11434";
+        // 端口变了 = 新实例（哪怕新实例恰好有同名模型，也不该改投）。
+        let port = ensure_ollama_base_binding(Some("http://127.0.0.1:11500/v1"), base)
+            .expect_err("port change must be refused");
+        assert!(
+            port.contains("已变化") && port.contains("刷新"),
+            "got: {port}"
+        );
+        // host 变了同理。
+        assert!(ensure_ollama_base_binding(Some("http://127.0.0.2/v1"), base).is_err());
+        // scheme 变了同理。
+        assert!(ensure_ollama_base_binding(Some("https://127.0.0.1:11434"), base).is_err());
+        // 路径分量不同（不只是 /v1 归一层）也是不同实例。
+        assert!(ensure_ollama_base_binding(Some("http://127.0.0.1:11434/v2"), base).is_err());
+        // "/v1" 只剥一层：裸基地址恰好以别的段结尾不受益。
+        assert!(ensure_ollama_base_binding(Some("http://127.0.0.1:11434/ollama"), base).is_err());
+    }
+
+    #[test]
+    fn daemon_binding_refuses_missing_binding_instead_of_silent_passthrough() {
+        // 旧调用方/存量行没带绑定：拒绝并要求刷新，绝不静默当"无绑定"放行
+        // ——那正是评审洞的形状（删除时刻重新解析、改投他实例）。
+        let error = ensure_ollama_base_binding(None, "http://127.0.0.1:11434")
+            .expect_err("missing binding must be refused");
+        assert!(error.contains("缺少守护进程地址绑定"), "got: {error}");
     }
 
     #[test]

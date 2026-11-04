@@ -628,7 +628,7 @@ mod tests {
             )
             .expect("corrupt db");
             let result =
-                remove_external_model(id.clone(), false, "guard-e2e-model".to_string()).await;
+                remove_external_model(id.clone(), false, "guard-e2e-model".to_string(), None).await;
             let error = result.expect_err("corrupt store db must reject the removal");
             assert!(
                 error.contains("已被拒绝"),
@@ -680,10 +680,16 @@ mod tests {
             .build()
             .expect("test runtime");
         runtime.block_on(async move {
-            let outcome =
-                remove_external_model("m-ollama01".to_string(), true, "cleanup".to_string())
-                    .await
-                    .expect("removal must succeed");
+            let outcome = remove_external_model(
+                "m-ollama01".to_string(),
+                true,
+                "cleanup".to_string(),
+                // 守护进程绑定（2026-11-04 评审 P3）：确认面板带来的地址必须与
+                // point_ollama_at_dead_port 写入的设置同源，否则守卫 2.5 整单拒绝。
+                Some("http://127.0.0.1:1".to_string()),
+            )
+            .await
+            .expect("removal must succeed");
             assert!(
                 !outcome.removed_weights,
                 "ollama weights must not be touched"
@@ -739,10 +745,14 @@ mod tests {
             .build()
             .expect("test runtime");
         runtime.block_on(async move {
-            let outcome =
-                remove_external_model("m-wiring01".to_string(), true, "wiring-e2e".to_string())
-                    .await
-                    .expect("removal must succeed");
+            let outcome = remove_external_model(
+                "m-wiring01".to_string(),
+                true,
+                "wiring-e2e".to_string(),
+                None,
+            )
+            .await
+            .expect("removal must succeed");
             assert!(
                 outcome.removed_weights,
                 "guard-approved weights must be deleted"
@@ -757,6 +767,88 @@ mod tests {
                 view.models.iter().all(|model| model.id != "m-wiring01"),
                 "registry record must disappear from the listing"
             );
+        });
+    }
+
+    /// 2026-11-04 评审 P3 的端到端：确认面板带来的守护进程地址与当前设置解析
+    /// 值不一致时（列表之后、确认之前改过 `ollama_host`），整单拒绝且记录
+    /// 原样保留——DELETE 绝不改投新实例；用**当前**地址重新确认则正常走完
+    /// （daemon 不可达按既有口径收进警告，注册表清理不阻断）。
+    #[test]
+    fn stale_daemon_confirmation_is_refused_not_redirected() {
+        use crate::features::device::{
+            external_models::registry_dir, get_external_models, remove_external_model,
+        };
+        use crate::features::model_store::platform::linux::{config, db};
+        let _ctx = config::TempHome::new();
+        point_ollama_at_dead_port();
+        db::init_db().expect("init store db");
+        let dir = registry_dir();
+        std::fs::create_dir_all(&dir).expect("registry dir");
+        std::fs::write(
+            dir.join("m-stale01.json"),
+            r#"{"schema":1,"id":"m-stale01","name":"stale-model","kind":"ollama","model":"stale-model:latest"}"#,
+        )
+        .expect("write ollama record");
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("test runtime");
+        runtime.block_on(async move {
+            // 列表时刻解析出的地址（改配前的确认面板所见）：出厂默认。
+            let view = get_external_models().await.expect("list external models");
+            let row = view
+                .models
+                .iter()
+                .find(|model| model.id == "m-stale01")
+                .expect("listed ollama row");
+            let listed_base = row.base_url.clone().expect("ollama rows carry base_url");
+
+            // 中间改配（设置里的 ollama_host 换实例：dead port → 另一死端口）。
+            std::fs::write(
+                config::config_dir().join("config.json"),
+                r#"{"ollama_host": "http://127.0.0.1:2"}"#,
+            )
+            .expect("switch daemon config");
+
+            // 陈旧确认：按改配前的地址请求移除 → 整单拒绝。
+            let error = remove_external_model(
+                "m-stale01".to_string(),
+                true,
+                "stale-model".to_string(),
+                Some(listed_base),
+            )
+            .await
+            .expect_err("stale confirmation must be refused");
+            assert!(
+                error.contains("已变化") && error.contains("刷新"),
+                "rejection must demand a refresh, got: {error}"
+            );
+            assert!(
+                dir.join("m-stale01.json").exists(),
+                "registry record must survive the refusal"
+            );
+
+            // 用当前地址重新确认 → 正常走完；DELETE 发往当前实例（死端口，
+            // 失败按警告收尾），注册表清理完成。
+            let outcome = remove_external_model(
+                "m-stale01".to_string(),
+                true,
+                "stale-model".to_string(),
+                Some("http://127.0.0.1:2/v1".to_string()),
+            )
+            .await
+            .expect("re-confirmation with the current base must succeed");
+            assert!(!outcome.ollama_deleted, "dead daemon cannot be deleted");
+            assert!(
+                outcome
+                    .warnings
+                    .iter()
+                    .any(|warning| warning.contains("Ollama 删除失败")),
+                "daemon failure must be disclosed, got: {:?}",
+                outcome.warnings
+            );
+            assert!(outcome.removed_registry, "registry file should be removed");
         });
     }
 
@@ -817,7 +909,7 @@ mod tests {
         .expect("write legacy record");
         runtime.block_on(async move {
             let error =
-                remove_external_model("m-dlroot01".to_string(), true, "dl-model".to_string())
+                remove_external_model("m-dlroot01".to_string(), true, "dl-model".to_string(), None)
                     .await
                     .expect_err("removal must be rejected for builtin-scan-root weights");
             assert!(

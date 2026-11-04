@@ -70,3 +70,12 @@ test('视图接线锚：armed/busy 键必须走 externalRowIdentity（改回内�
   assert.match(source, /import \{ externalRowIdentity \} from '\.\/externalRowIdentity\.js'/);
   assert.match(source, /const rowIdentity = externalRowIdentity;/);
 });
+
+test('视图接线锚：移除确认必须携带守护进程地址绑定（改回裸 id+name 必红）', () => {
+  // 2026-11-04 评审 P3：确认面板只带 id+name 时，后端在删除时刻才重新解析
+  // Ollama 守护进程地址——列表之后、确认之前改过 ollama_host，DELETE 会改投
+  // 新实例上的同名模型。expectedOllamaBase 用 row.base_url（与列表/链接同一
+  // 次解析）绑定已确认的实例，地址漂移时后端整单拒绝并要求刷新。
+  const source = readFileSync(VIEW_PATH, 'utf8');
+  assert.match(source, /expectedOllamaBase: row\.base_url \|\| null/);
+});

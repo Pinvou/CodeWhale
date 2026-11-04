@@ -65,15 +65,19 @@ pub async fn device_register_external_model(
     device::register_external_model(name, kind, base_url, model, weights_path).await
 }
 
-/// 移除外部模型（守卫链：确认名 → 商店边界 → 权重删除守卫 → Ollama 删除 → 删记录）。
+/// 移除外部模型（守卫链：确认名 → 商店边界 → 守护进程绑定 → 权重删除守卫 →
+/// Ollama 删除 → 删记录）。`expected_ollama_base` 是确认面板对准的守护进程
+/// 基地址（列表行自带的那一次解析），ollama 记录在删除前绑定校验（2026-11-04
+/// 评审 P3）；非 ollama 记录传 null。
 #[tauri::command]
 pub async fn device_remove_external_model(
     id: String,
     delete_weights: bool,
     confirm_name: String,
+    expected_ollama_base: Option<String>,
 ) -> Result<RemoveOutcome, String> {
     ensure_device_supported()?;
-    device::remove_external_model(id, delete_weights, confirm_name).await
+    device::remove_external_model(id, delete_weights, confirm_name, expected_ollama_base).await
 }
 
 /// 组装 AI 故障排查提示词（设计 §5）。上下文由这里实时采样拼装，保证模型拿到

@@ -811,6 +811,16 @@ const DeviceManagerView = ({ theme, t, bs, onOpenChat, captureChatOwnership, onO
         id,
         deleteWeights,
         confirmName: row.name,
+        // Daemon-instance binding (2026-11-04 review P3): the confirm panel only
+        // carried id + name, and the backend re-resolved the Ollama daemon base
+        // at delete time — switching ollama_host between listing and confirming
+        // redirected the DELETE to the new instance, where a same-named model
+        // would be removed instead. row.base_url is the SAME resolution the
+        // list/link used, so the backend can bind the confirmed instance and
+        // refuse the whole removal when settings moved underneath. Endpoint rows
+        // (non-ollama) have their own base_url but no daemon delete — null is
+        // ignored by the backend for those kinds.
+        expectedOllamaBase: row.base_url || null,
       });
       // Recycle rows linked into Pinvou (same contract as
       // ModelStoreView.cleanLinkedRows): the backend deletes ollama models from
