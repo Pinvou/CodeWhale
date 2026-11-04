@@ -770,6 +770,75 @@ mod tests {
         });
     }
 
+    /// 2026-11-04 评审 P2 的**完整状态转换**：扫描目录里的权重被卡片就地复用
+    /// （宿主无从枚举引用，保护取保守超集）→ 用户从存储设置移除该扫描目录 →
+    /// 设备管理对指向其中权重的外部记录请求「删除权重」。不留痕的旧形态在
+    /// 最后一跳整单放行（评审者以隔离探针实证）；留痕后目录经
+    /// `import_scan_dirs_history` 仍属商店权重根，删除被拒、目录与记录原样
+    /// 保留。设置层留痕/根集合联动由 model_store 侧单测直打，这里钉设备侧
+    /// 全链路。
+    #[test]
+    fn removing_scan_dir_shields_reused_weights_from_device_deletion() {
+        use crate::features::device::{
+            external_models::registry_dir, register_external_model, remove_external_model,
+        };
+        use crate::features::model_store::platform::linux::{config, db};
+        use crate::platform::paths::user_home_dir;
+        let ctx = config::TempHome::new();
+        point_ollama_at_dead_port();
+        db::init_db().expect("init store db");
+        // 权重落在家目录三层（深度臂本会放行的形状），先以普通外部模型登记
+        // ——此刻目录还不是扫描根，登记合法。
+        let scan_root = ctx.path().join("imported");
+        let weights = user_home_dir().join("imported").join("hf").join("qwen");
+        std::fs::create_dir_all(&weights).expect("create weights dir");
+        std::fs::write(weights.join("weight.bin"), b"weights").expect("write weight");
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("test runtime");
+        runtime.block_on(async {
+            let registered = register_external_model(
+                "reused-model".to_string(),
+                "other".to_string(),
+                None,
+                None,
+                Some(weights.to_string_lossy().into_owned()),
+            )
+            .await
+            .expect("register before the dir becomes a scan root");
+
+            // 挂为扫描目录（卡片会就地复用其中的既有权重），随后从设置移除
+            // ——正是评审点名的状态转换。留痕后它仍在保护集合里。
+            crate::features::model_store::set_storage_settings(
+                None,
+                Some(vec![scan_root.to_string_lossy().into_owned()]),
+            )
+            .expect("add scan dir");
+            crate::features::model_store::set_storage_settings(None, Some(Vec::new()))
+                .expect("remove scan dir");
+
+            let error = remove_external_model(
+                registered.id.clone(),
+                true,
+                "reused-model".to_string(),
+                None,
+            )
+            .await
+            .expect_err("weights in a removed scan dir must stay protected");
+            assert!(
+                error.contains("模型商店"),
+                "rejection must say the weights are store-managed, got: {error}"
+            );
+            assert!(weights.exists(), "weight dir must survive the rejection");
+            let dir = registry_dir();
+            assert!(
+                dir.join(format!("{}.json", registered.id)).exists(),
+                "registry record must survive the rejection"
+            );
+        });
+    }
+
     /// 2026-11-04 评审 P3 的端到端：确认面板带来的守护进程地址与当前设置解析
     /// 值不一致时（列表之后、确认之前改过 `ollama_host`），整单拒绝且记录
     /// 原样保留——DELETE 绝不改投新实例；用**当前**地址重新确认则正常走完
