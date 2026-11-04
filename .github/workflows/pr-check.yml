@@ -1692,6 +1692,8 @@ jobs:
         id: financial_diagnostics_upload
         if: ${{ always() }}
         timeout-minutes: 3
+        # Diagnostic transport must not invalidate the completed test verdict.
+        # The preceding contract/test steps and required-gate remain strict.
         continue-on-error: true
         uses: actions/upload-artifact@v7
         with:

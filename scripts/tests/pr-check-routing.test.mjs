@@ -150,6 +150,188 @@ function pgIdentityEnvironment(service) {
   ];
 }
 
+function assertFinancialDiagnosticExemption(job) {
+  const text = job.replaceAll("\r\n", "\n");
+  const diagnostic = namedStep(text, "Financial parallel diagnostics");
+  const withoutComments = diagnostic.replace(/^ *#.*\n/gm, "").trimEnd();
+  assert.equal(withoutComments, [
+    "      - name: Financial parallel diagnostics",
+    "        id: financial_diagnostics_upload",
+    "        if: ${{ always() }}",
+    "        timeout-minutes: 3",
+    "        continue-on-error: true",
+    "        uses: actions/upload-artifact@v7",
+    "        with:",
+    "          name: account-financial-parallel-${{ github.run_attempt }}",
+    "          path: ${{ runner.temp }}/financial-parallel-*/",
+    "          if-no-files-found: ignore",
+    "          retention-days: 7",
+  ].join("\n"));
+  assert.doesNotMatch(text, /secrets\./);
+  assert.doesNotMatch(text.replace(diagnostic, "").replace(namedStep(text, "Account test resource lifecycle receipts"), ""), /continue-on-error:/,
+    "only the exact diagnostic upload step may be advisory");
+}
+
+test("financial diagnostic exception rejects business and job exemptions", () => {
+  const job = jobBlock("account-platform-test");
+  assertFinancialDiagnosticExemption(job);
+  const diagnostic = namedStep(job, "Financial parallel diagnostics");
+  const withoutExemption = job.replace(diagnostic,
+    diagnostic.replace("        continue-on-error: true\n", ""));
+  const mutants = [
+    job.replace("  account-platform-test:\n", "  account-platform-test:\n    continue-on-error: true\n"),
+    job.replace("uses: actions/upload-artifact@v7", "run: exit 37"),
+    job.replace("uses: actions/upload-artifact@v7", "uses: actions/upload-artifact@v6"),
+    job + "      - run: exit 37\n        continue-on-error: true\n",
+  ];
+  for (const [first, rest] of [
+    ["run: exit 37", "        name: Required business command\n"],
+    ["id: business_guard", '        name: Required business command\n        "run": exit 37\n'],
+    ["if: ${{ always() }}", "        run: exit 37\n"],
+    ["env:", "          FIXTURE: yes\n        run: exit 37\n"],
+  ]) {
+    mutants.push(withoutExemption.replace("      - name: Stop owned temporary PostgreSQL services\n",
+      `      - ${first}\n${rest}        continue-on-error: true\n\n      - name: Stop owned temporary PostgreSQL services\n`));
+  }
+  for (const mutant of mutants) {
+    assert.notEqual(mutant, job);
+    assert.throws(() => assertFinancialDiagnosticExemption(mutant));
+  }
+  assertFinancialDiagnosticExemption(job);
+});
+
+// Match the Python gate policy across the complete workflow. Account-only
+// validation cannot detect a job/step exception added to a different leg.
+function assertWorkflowFailurePolicy(workflowText) {
+  const text = workflowText.replaceAll("\r\n", "\n").replace(/^ *#.*\n/gm, "");
+  const financialJob = jobBlock("account-platform-test", text);
+  assertFinancialDiagnosticExemption(financialJob);
+  const financial = namedStep(financialJob, "Financial parallel diagnostics");
+  const windows = namedStep(jobBlock("windows-rust-test", text), "Windows 测试二进制导入诊断");
+  assert.equal(windows.trimEnd(), [
+    "      - name: Windows 测试二进制导入诊断",
+    "        if: ${{ matrix.phase == 'regression' }}",
+    "        continue-on-error: true",
+    "        shell: pwsh",
+    '        run: python scripts/ci-windows-imports-diagnose.py "$env:PINVOU3_TEST_EXE"',
+  ].join("\n"));
+  let remainder = text.replace(financial, "").replace(windows, "");
+  {
+    const receipt = namedStep(jobBlock("frontend-test", text), "Test resource lifecycle receipts");
+    assert.equal(receipt.trimEnd(), [
+      "      - name: Test resource lifecycle receipts",
+      "        id: frontend_receipts_upload",
+      "        if: ${{ always() && env.PINVOU_CI_RESOURCE_LEDGER != '' }}",
+      "        timeout-minutes: 3",
+      "        continue-on-error: true",
+      "        uses: actions/upload-artifact@v7",
+      "        with:",
+      "          name: frontend-resource-lifecycle-${{ github.run_attempt }}",
+      "          path: ${{ env.PINVOU_CI_RESOURCE_LEDGER }}/",
+      "          if-no-files-found: error",
+      "          retention-days: 7",
+    ].join("\n"));
+    remainder = remainder.replace(receipt, "");
+  }
+  {
+    const receipt = namedStep(jobBlock("account-platform-test", text), "Account test resource lifecycle receipts");
+    assert.equal(receipt.trimEnd(), [
+      "      - name: Account test resource lifecycle receipts",
+      "        id: account_receipts_upload",
+      "        if: ${{ always() && env.PINVOU_CI_RESOURCE_LEDGER != '' }}",
+      "        timeout-minutes: 3",
+      "        continue-on-error: true",
+      "        uses: actions/upload-artifact@v7",
+      "        with:",
+      "          name: account-resource-lifecycle-${{ github.run_attempt }}",
+      "          path: |",
+      "            ${{ env.PINVOU_CI_RESOURCE_LEDGER }}/",
+      "            ${{ runner.temp }}/account-platform-deployment-contracts-*/resources/",
+      "          if-no-files-found: error",
+      "          retention-days: 7",
+    ].join("\n"));
+    remainder = remainder.replace(receipt, "");
+  }
+  // Explicit YAML keys may put comments/newlines before their value indicator.
+  const keySeparator = String.raw`(?:\s|#[^\n]*(?:\n|$))*:`;
+  assert.doesNotMatch(remainder, new RegExp(String.raw`\bcontinue-on-error\s*['"]?` + keySeparator),
+    "only the four exact reviewed diagnostic steps may be advisory in any job");
+  // YAML double-quoted keys decode numeric escapes and escaped line breaks.
+  // Inspect each possible quoted key, including inside flow mappings. A
+  // lookahead avoids a quote in unrelated shell text hiding a later real key.
+  for (const match of remainder.matchAll(new RegExp(String.raw`(?="((?:[^"\\]|\\[\s\S])*)"` + keySeparator + ")", "g"))) {
+    const key = match[1].replace(/\\(?:x([\da-fA-F]{2})|u([\da-fA-F]{4})|U([\da-fA-F]{8})|(\n[ \t]*)|([\s\S]))/g,
+      (escape, hex, shortUnicode, longUnicode, continuation, character) => {
+        const digits = hex ?? shortUnicode ?? longUnicode;
+        if (digits !== undefined) return String.fromCodePoint(Number.parseInt(digits, 16));
+        if (continuation !== undefined) return "";
+        // All other YAML escapes produce characters outside this ASCII key.
+        // Consume escaped backslashes once, without decoding their result again.
+        return character === "\\" ? "\\" : escape;
+      });
+    assert.notEqual(key, "continue-on-error", "escaped YAML keys cannot grant an advisory exception");
+  }
+  // Alias mapping keys would need resolution against a separate scalar. This
+  // finite workflow contract requires literal keys rather than guessing one.
+  assert.doesNotMatch(remainder, new RegExp(String.raw`\*[^\s\[\]{},:]+` + keySeparator),
+    "alias mapping keys require an explicit failure-policy contract review");
+}
+
+test("all workflow legs reject unreviewed job and step failure exemptions", () => {
+  const original = workflow.replaceAll("\r\n", "\n");
+  assertWorkflowFailurePolicy(original);
+  const windows = namedStep(jobBlock("windows-rust-test", original), "Windows 测试二进制导入诊断");
+  const withoutWindowsExemption = original.replace(windows,
+    windows.replace("        continue-on-error: true\n", ""));
+  const mutants = [
+    original.replace("  frontend-test:\n", "  frontend-test:\n    continue-on-error: true\n"),
+    original.replace("  frontend-test:\n", "  frontend-test:\n    'continue-on-error': true\n"),
+    original.replace("  windows-rust-test:\n", "  windows-rust-test:\n    continue-on-error: true\n"),
+    original.replace(windows, windows + "      - run: exit 37\n        continue-on-error: true\n"),
+    original.replace(windows, windows + "      - {run: exit 37, 'continue-on-error': true}\n"),
+    withoutWindowsExemption.replace("  frontend-test:\n", "  frontend-test:\n    continue-on-error: true\n"),
+    original.replace(windows, windows.replace("scripts/ci-windows-imports-diagnose.py", "scripts/not-the-reviewed-diagnostic.py")),
+    original.replace("  frontend-test:\n", '  frontend-test:\n    "continue\\u002don-error": true\n'),
+    original.replace("  frontend-test:\n", '  frontend-test:\n    "\\u0063ontinue-on-error": true\n'),
+    original.replace("  frontend-test:\n", '  frontend-test:\n    "continue\\x2don-error": true\n'),
+    original.replace("  frontend-test:\n", '  frontend-test:\n    "continue\\U0000002don-error": true\n'),
+    original.replace("  frontend-test:\n", '  frontend-test:\n    ? "continue\\\n      -on-error"\n    : true\n'),
+    original.replace(windows, windows + '      - {run: exit 37, "continue\\u002don-error": true}\n'),
+    original.replace("  frontend-test:\n", '  frontend-test:\n    env:\n      FAILURE_KEY: &advisory_key "continue\\u002don-error"\n    *advisory_key: true\n'),
+    original.replace("  frontend-test:\n", '  frontend-test:\n    env:\n      FAILURE_KEY: &advisory_key "continue\\u002don-error"\n    ? *advisory_key # label\n    : true\n'),
+    original.replace("  frontend-test:\n", '  frontend-test:\n    env:\n      FAILURE_KEY: &advisory#key "continue\\u002don-error"\n    *advisory#key : true\n'),
+    original.replace("  frontend-test:\n", '  frontend-test:\n    ? "continue\\u002don-error" # label\n    : true\n'),
+    original.replace("  frontend-test:\n", '  frontend-test:\n    ? continue-on-error # label\n    : true\n'),
+  ];
+  for (const [jobName, stepName] of [
+    ["frontend-test", "Test resource lifecycle receipts"],
+    ["account-platform-test", "Account test resource lifecycle receipts"],
+  ]) {
+    const receipt = namedStep(jobBlock(jobName, original), stepName);
+    const withoutReceiptExemption = original.replace(receipt,
+      receipt.replace("        continue-on-error: true\n", ""));
+    mutants.push(
+      withoutReceiptExemption.replace("  frontend-test:\n", "  frontend-test:\n    continue-on-error: true\n"),
+      original.replace(receipt, receipt.replace("uses: actions/upload-artifact@v7", "run: exit 37")),
+      original.replace(receipt, receipt.replace("timeout-minutes: 3\n", "")),
+    );
+    for (const [first, rest] of [
+      ["run: exit 37", "        name: Required business command\n"],
+      ["id: business_guard", '        name: Required business command\n        "run": exit 37\n'],
+      ["if: ${{ always() }}", "        run: exit 37\n"],
+      ["env:", "          FIXTURE: yes\n        run: exit 37\n"],
+    ]) {
+      mutants.push(withoutReceiptExemption.replace(receipt.replace("        continue-on-error: true\n", ""),
+        `${receipt.replace("        continue-on-error: true\n", "")}      - ${first}\n${rest}        continue-on-error: true\n`));
+    }
+  }
+  for (const mutant of mutants) {
+    assert.notEqual(mutant, original, "the counterexample must change the actual workflow");
+    assert.throws(() => assertWorkflowFailurePolicy(mutant));
+  }
+  assertWorkflowFailurePolicy(original);
+});
+
 function assertFiniteAuditPGSetup(job) {
   const text = job.replaceAll("\r\n", "\n");
   // These are exactly six approved ephemeral services, not permission for arbitrary
