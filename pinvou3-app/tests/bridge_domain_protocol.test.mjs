@@ -208,7 +208,10 @@ const expectedProtocolHashes = {
   // the chat-events cluster export entry all sit outside every invoke/listen
   // call span, so they ride along hash-neutral — no invoke or listen call-set
   // change.
-  chat: 'ec6881aa20351e3c5bf29beefb89b859f543b80ed647ca8224eb54f66d23157a',
+  // r10 重钉（评审 r10 P1）：r9 的取消点修复改写了 chat:done 监听体/notify 抑制臂/
+  // refresh 钩子的载荷文本——签名清单不变（52 条），但 join 文本哈希随之漂移；
+  // 原钉 ec6881aa 是父提交 1d2aa96d8 的值。此钉=当前 head 实算值。
+  chat: 'c5470014a8b717786e781f44f7361b8742e59db2c32c2f18770d0843045a205f',
   dependencies: 'd39f5a46b8e34c1c30d8f8e08ef62baccfe822ffb7fad8dbf3301c69c566e31c',
   // Recomputed for #445: the YOLO gate threads an adjudicated session id
   // through exitPlanToYolo and planStuckGo.
