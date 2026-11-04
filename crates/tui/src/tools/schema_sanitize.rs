@@ -89,51 +89,6 @@ fn is_object_branch(branch: &Value) -> bool {
     branch.get("type").and_then(Value::as_str) == Some("object")
 }
 
-/// Whether the schema root is a single `anyOf`/`oneOf` union whose every
-/// branch declares `type: "object"`, beside only keywords that survive as
-/// legal union siblings after the Kimi compatibility passes (`type` is pushed
-/// down into the branches; annotations and root-only `$defs`/`$id` are
-/// permitted). Returns the union's keyword so a root `oneOf` can be promoted
-/// to the MFJS-documented `anyOf`.
-///
-/// The Moonshot MFJS specification
-/// (<https://github.com/MoonshotAI/walle/blob/main/docs/mfjs-spec.zh.md>)
-/// admits `anyOf` as a first-class applicator: `type` must live inside the
-/// branches, and every branch must be an object schema. A live probe of
-/// <https://api.kimi.com/coding/v1> on 2026-11-04 returned 200 for such root
-/// unions with per-branch `required` groups honored, so they no longer need
-/// the semantics-losing root flatten (which merged the branches' required
-/// sets and left k3's constrained decoding to emit only the single merged
-/// group). Anything else — a union with a non-object branch, both union
-/// keywords at once, or an unrepresented keyword beside the union — returns
-/// `None` and keeps the protective flatten.
-fn kimi_root_object_union(schema: &Value) -> Option<(&'static str, &Vec<Value>)> {
-    let obj = schema.as_object()?;
-    if obj.contains_key("anyOf") && obj.contains_key("oneOf") {
-        // Two independent unions at the root would have to survive together;
-        // MFJS documents only `anyOf`, so the flatten keeps the safe merge.
-        return None;
-    }
-    let union_key: &'static str = if obj.contains_key("anyOf") {
-        "anyOf"
-    } else if obj.contains_key("oneOf") {
-        "oneOf"
-    } else {
-        return None;
-    };
-    let branches = obj.get(union_key)?.as_array()?;
-    if branches.is_empty() || branches.iter().any(|branch| !is_object_branch(branch)) {
-        return None;
-    }
-    for key in obj.keys() {
-        match key.as_str() {
-            "anyOf" | "oneOf" | "type" | "title" | "description" | "$defs" | "$id" => {}
-            _ => return None,
-        }
-    }
-    Some((union_key, branches))
-}
-
 /// Sanitize a schema for OpenAI Responses function tools.
 ///
 /// The Responses API requires the top-level `parameters` schema to be an object
@@ -1357,14 +1312,7 @@ impl KimiParameterRoute {
 /// Normalize a complete Kimi / Moonshot `function.parameters` object.
 ///
 /// Function parameters have an additional MFJS constraint: the root must end
-/// as a plain `type: "object"` schema or as the MFJS-legal object union — a
-/// single `anyOf` whose every branch declares `type: "object"` (a root
-/// `oneOf` of object branches is promoted to `anyOf`). The union shape is
-/// backed by the walle MFJS specification, which lists `anyOf` as a
-/// first-class applicator, and by a 2026-11-04 live probe of
-/// <https://api.kimi.com/coding/v1> (200, per-branch `required` honored);
-/// keeping the branches preserves their per-branch required groups, which the
-/// former flatten erased. Every other root composition is flattened using the
+/// as a plain `type: "object"` schema. Root composition is flattened using the
 /// same compatibility pass as Responses and xAI, while supported nested
 /// `anyOf` branches remain nested. Internal root `$ref` values are resolved
 /// and inlined before normalization so we never manufacture the invalid
@@ -1404,30 +1352,21 @@ fn sanitize_kimi_parameters_candidate(
 
     inline_internal_kimi_root_ref(parameters)?;
 
-    // A root union of explicit object branches is MFJS-legal since the walle
-    // specification listed `anyOf` as a first-class applicator (live probe
-    // 2026-11-04: 200 with per-branch `required` honored), so it passes
-    // through with only semantics-preserving normalization. A root `oneOf` is
-    // promoted to the documented `anyOf` first. Anything else — a union with
-    // a non-object branch (apply_patch's bare required-groups among them),
-    // root allOf/enum/not, or an unrepresented keyword beside the union —
-    // keeps the flatten, and retains its dropped required-group contract as a
-    // prompt note for the model.
+    // A function schema's root cannot carry MFJS composition because the
+    // Tool Use documentation requires an object root ("The root of
+    // `parameters` must be an `object`",
+    // https://platform.kimi.ai/docs/api/tool-use, fetched 2026-11-05). The
+    // MFJS specification lists `anyOf` as an applicator without authorizing
+    // it at a parameters root, so on the conflicting documents the strict
+    // face wins: every root union is flattened, and the flatten retains the
+    // dropped required-group contract as a prompt note for the model. (The
+    // 2026-11-04 live probe of the coding endpoint accepted a root union with
+    // 200 — an observation, and per policy never a shipping basis against the
+    // documents.)
     // MFJS has no conditional keywords. The shared compatibility pass drops
     // them with a bounded description note instead of sending a shape the
     // validator would reject (which would drop the whole tool).
-    let constraint_note = if kimi_root_object_union(parameters).is_some() {
-        if let Some(root) = parameters.as_object_mut()
-            && let Some(one_of) = root.remove("oneOf")
-        {
-            root.insert("anyOf".to_string(), one_of);
-        }
-        let dependent_note = drop_dependent_keywords(parameters);
-        sanitize(parameters);
-        dependent_note
-    } else {
-        sanitize_for_responses(parameters)
-    };
+    let constraint_note = sanitize_for_responses(parameters);
 
     // Restore nullable unions collapsed by the registry's provider-neutral
     // sanitizer, translate MFJS-safe scalar const values, and normalize nested
@@ -1455,12 +1394,12 @@ fn sanitize_kimi_parameters_candidate(
     let Some(root) = parameters.as_object() else {
         return Err(KimiParameterSchemaError::RootMustBeObject);
     };
-    let plain_object_root = root.get("type").and_then(Value::as_str) == Some("object")
-        && !root.contains_key("anyOf")
-        && !root.contains_key("oneOf")
-        && !root.contains_key("allOf")
-        && !root.contains_key("$ref");
-    if !plain_object_root && kimi_root_object_union(parameters).is_none() {
+    if root.get("type").and_then(Value::as_str) != Some("object")
+        || root.contains_key("anyOf")
+        || root.contains_key("oneOf")
+        || root.contains_key("allOf")
+        || root.contains_key("$ref")
+    {
         return Err(KimiParameterSchemaError::RootMustBeObject);
     }
 
@@ -1732,17 +1671,12 @@ pub fn validate_mfjs_parameters(
     let root = parameters
         .as_object()
         .ok_or(KimiParameterSchemaError::RootMustBeObject)?;
-    // The root is either a plain `type: "object"` schema or the MFJS-legal
-    // object union (`anyOf` of explicit object branches, promoted from
-    // `oneOf` by the sanitizer); anything else stays rejected. A `type`
-    // beside the union is not part of either shape — the sibling check inside
-    // `validate_schema` rejects it with InvalidKeywordValue.
-    let plain_object_root = root.get("type").and_then(Value::as_str) == Some("object")
-        && !root.contains_key("anyOf")
-        && !root.contains_key("oneOf")
-        && !root.contains_key("allOf")
-        && !root.contains_key("$ref");
-    if !plain_object_root && kimi_root_object_union(parameters).is_none() {
+    if root.get("type").and_then(Value::as_str) != Some("object")
+        || root.contains_key("anyOf")
+        || root.contains_key("oneOf")
+        || root.contains_key("allOf")
+        || root.contains_key("$ref")
+    {
         return Err(KimiParameterSchemaError::RootMustBeObject);
     }
     if serde_json::to_vec(parameters)
@@ -2596,12 +2530,14 @@ mod kimi_tests {
         assert!(schema["properties"].get("type").is_none());
     }
 
-    // Function parameters must end as a plain object root, or — since the
-    // walle specification listed anyOf as an applicator and the 2026-11-04
-    // probe confirmed it live — as a root union of explicit object branches
-    // (see kimi_parameters_passes_root_anyof_of_object_branches_through).
-    // Every other composition stays flattened; the tests below pin those
-    // protective shapes.
+    // Function parameters must end as a plain object root. Composition stays
+    // available only in valid nested anyOf positions: the Moonshot Tool Use
+    // documentation requires "The root of `parameters` must be an `object`"
+    // (https://platform.kimi.ai/docs/api/tool-use, fetched 2026-11-05), and
+    // the MFJS specification lists `anyOf` as an applicator without
+    // authorizing it at a parameters root — on the conflicting documents the
+    // strict face wins, so every root union is flattened. The tests below pin
+    // those protective shapes.
 
     #[test]
     fn kimi_parameters_add_type_to_anyof_root() {
@@ -2631,64 +2567,7 @@ mod kimi_tests {
     }
 
     #[test]
-    fn kimi_parameters_passes_root_anyof_of_object_branches_through() {
-        // The 2026-06 incident shape (root anyOf, per-branch required groups)
-        // used to be flattened into one merged object, erasing every branch's
-        // own required set. The walle MFJS specification
-        // (https://github.com/MoonshotAI/walle/blob/main/docs/mfjs-spec.zh.md)
-        // now lists `anyOf` as a first-class applicator — branches must be
-        // objects and `type` must live inside them — and a live probe of
-        // https://api.kimi.com/coding/v1 on 2026-11-04 returned 200 with
-        // per-branch required groups honored, so the union must survive.
-        let mut schema = json!({
-            "anyOf": [
-                {
-                    "type": "object",
-                    "properties": {
-                        "kind": {"type": "string"},
-                        "outline": {"type": "string"}
-                    },
-                    "required": ["kind", "outline"],
-                    "additionalProperties": false
-                },
-                {
-                    "type": "object",
-                    "properties": {
-                        "kind": {"type": "string"},
-                        "content": {"type": "string"}
-                    },
-                    "required": ["kind", "content"],
-                    "additionalProperties": false
-                }
-            ]
-        });
-
-        sanitize_for_kimi_parameters(&mut schema, KimiParameterRoute::Platform).unwrap();
-
-        let branches = schema["anyOf"].as_array().expect("root union survives");
-        assert_eq!(branches.len(), 2);
-        assert_eq!(
-            branches[0]["required"],
-            json!(["kind", "outline"]),
-            "each branch keeps its own required group"
-        );
-        assert_eq!(branches[1]["required"], json!(["kind", "content"]));
-        assert!(
-            branches.iter().all(|branch| branch["type"] == "object"),
-            "MFJS requires the object type inside every branch: {schema}"
-        );
-        assert!(
-            !schema.as_object().unwrap().contains_key("type"),
-            "type may not sit beside the union keyword on the wire"
-        );
-        validate_mfjs_parameters(&schema, KimiParameterRoute::Platform).unwrap();
-    }
-
-    #[test]
-    fn kimi_parameters_promotes_root_oneof_of_object_branches_to_anyof() {
-        // oneOf stays outside the MFJS specification, so a root oneOf of
-        // object branches is promoted to the documented anyOf union instead
-        // of being flattened.
+    fn kimi_parameters_add_type_to_oneof_root() {
         let mut schema = json!({
             "oneOf": [
                 {
@@ -2706,53 +2585,18 @@ mod kimi_tests {
 
         sanitize_for_kimi_parameters(&mut schema, KimiParameterRoute::Platform).unwrap();
 
+        assert_eq!(schema["type"], "object");
         assert!(schema.get("oneOf").is_none());
-        let branches = schema["anyOf"].as_array().expect("promoted union");
-        assert_eq!(branches.len(), 2);
-        assert_eq!(branches[0]["required"], json!(["id"]));
-        assert_eq!(branches[1]["required"], json!(["name"]));
-        validate_mfjs_parameters(&schema, KimiParameterRoute::Platform).unwrap();
-    }
-
-    #[test]
-    fn kimi_parameters_pushes_root_type_into_object_union_branches() {
-        // MFJS forbids `type` beside the union keyword; the compatibility
-        // pushdown moves it into every branch so the sent shape matches the
-        // specification (the endpoint also accepted the parent-side type, so
-        // the pushdown is a conformance nicety, not a 400 guard).
-        let mut schema = json!({
-            "type": "object",
-            "anyOf": [
-                {
-                    "type": "object",
-                    "properties": {"path": {"type": "string"}},
-                    "required": ["path"]
-                },
-                {
-                    "type": "object",
-                    "properties": {"url": {"type": "string"}},
-                    "required": ["url"]
-                }
-            ]
-        });
-
-        sanitize_for_kimi_parameters(&mut schema, KimiParameterRoute::Platform).unwrap();
-
-        assert!(
-            !schema.as_object().unwrap().contains_key("type"),
-            "root type must be pushed down: {schema}"
-        );
-        assert!(!schema.as_object().unwrap().contains_key("properties"));
-        let branches = schema["anyOf"].as_array().unwrap();
-        assert!(branches.iter().all(|branch| branch["type"] == "object"));
+        assert_eq!(schema["properties"]["id"]["type"], "integer");
+        assert_eq!(schema["properties"]["name"]["type"], "string");
         validate_mfjs_parameters(&schema, KimiParameterRoute::Platform).unwrap();
     }
 
     #[test]
     fn kimi_parameters_still_flattens_root_union_with_non_object_branch() {
         // A branch without an explicit object type keeps the protective
-        // flatten: the MFJS applicator rule only admits object branches, and
-        // a union with e.g. a null branch has no documented wire shape.
+        // flatten: the Tool Use documentation requires an object root, and a
+        // union with e.g. a null branch has no documented wire shape.
         let mut schema = json!({
             "anyOf": [
                 {
@@ -2771,9 +2615,9 @@ mod kimi_tests {
 
     #[test]
     fn kimi_parameters_still_flattens_root_union_with_extra_root_keywords() {
-        // Keywords beside the union that MFJS would reject as union siblings
-        // (here: root `properties`) keep the flatten instead of shipping a
-        // shape the validator must fail closed.
+        // Keywords beside the union that would be lost by a union passthrough
+        // (here: root `properties`) keep the flatten — a parameters root must
+        // be an object schema, so every root union merges into one.
         let mut schema = json!({
             "anyOf": [
                 {
@@ -2792,49 +2636,6 @@ mod kimi_tests {
         sanitize_for_kimi_parameters(&mut schema, KimiParameterRoute::Platform).unwrap();
         assert_eq!(schema["type"], "object");
         assert!(schema.get("anyOf").is_none());
-    }
-
-    #[test]
-    fn mfjs_validator_accepts_union_root_but_rejects_union_siblings() {
-        let union_root = json!({
-            "anyOf": [
-                {
-                    "type": "object",
-                    "properties": {"path": {"type": "string"}},
-                    "required": ["path"]
-                },
-                {
-                    "type": "object",
-                    "properties": {"url": {"type": "string"}},
-                    "required": ["url"]
-                }
-            ]
-        });
-        validate_mfjs_parameters(&union_root, KimiParameterRoute::Platform).unwrap();
-
-        let mut typed_union = union_root.clone();
-        typed_union
-            .as_object_mut()
-            .unwrap()
-            .insert("type".to_string(), json!("object"));
-        assert_eq!(
-            validate_mfjs_parameters(&typed_union, KimiParameterRoute::Platform).unwrap_err(),
-            KimiParameterSchemaError::InvalidKeywordValue,
-            "type may not sit beside the union keyword"
-        );
-
-        let mixed_branch_union = json!({
-            "anyOf": [
-                {"type": "object", "properties": {"a": {"type": "string"}}},
-                {"type": "string"}
-            ]
-        });
-        assert_eq!(
-            validate_mfjs_parameters(&mixed_branch_union, KimiParameterRoute::Platform)
-                .unwrap_err(),
-            KimiParameterSchemaError::RootMustBeObject,
-            "a union root with a non-object branch is not an object schema"
-        );
     }
 
     #[test]
