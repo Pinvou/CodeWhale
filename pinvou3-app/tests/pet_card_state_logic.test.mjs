@@ -10,6 +10,7 @@ const src = path.join(here, '..', 'src', 'features', 'pet', 'pet-card-state.js')
 const i18nSrc = path.join(here, '..', 'src', 'shared', 'i18n.js');
 const connectorI18nSrc = path.join(here, '..', 'src', 'shared', 'connector-i18n.js');
 const accountPlatformI18nSrc = path.join(here, '..', 'src', 'shared', 'account-platform-i18n.js');
+const productAdmissionI18nSrc = path.join(here, '..', 'src', 'shared', 'product-admission-i18n.js');
 const dir = mkdtempSync(path.join(tmpdir(), 'pinvou3-pet-card-state-'));
 // pet-card-state.js imports ../../shared/i18n.js，保持两层目录结构以便相对路径解析
 const tmp = path.join(dir, 'a', 'b', 'pet-card-state.mjs');
@@ -21,6 +22,7 @@ try {
   copyFileSync(i18nSrc, path.join(dir, 'shared', 'i18n.js'));
   copyFileSync(connectorI18nSrc, path.join(dir, 'shared', 'connector-i18n.js'));
   copyFileSync(accountPlatformI18nSrc, path.join(dir, 'shared', 'account-platform-i18n.js')); copyFileSync(path.join(here, '..', 'src', 'shared', 'admin-platform-i18n.js'), path.join(dir, 'shared', 'admin-platform-i18n.js'));
+  copyFileSync(productAdmissionI18nSrc, path.join(dir, 'shared', 'product-admission-i18n.js'));
 copyFileSync(path.join(here, '..', 'src', 'shared', 'registration-bonus-i18n.js'), path.join(dir, 'shared', 'registration-bonus-i18n.js'));
 copyFileSync(path.join(here, '..', 'src', 'shared', 'account-closure-i18n.js'), path.join(dir, 'shared', 'account-closure-i18n.js'));
 copyFileSync(path.join(here, '..', 'src', 'shared', 'account-closed-grants-i18n.js'), path.join(dir, 'shared', 'account-closed-grants-i18n.js'));
