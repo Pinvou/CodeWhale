@@ -6685,13 +6685,21 @@ async function checkDependencies() { return pinvouSharedweb().checkDependencies(
 
   function trackVoiceEvent(eventName, session, fields) {
     if (!session || !session.operationId) return;
-    var request = Object.assign({ eventName: eventName, operationId: session.operationId }, fields || {});
+    var request = Object.assign({ eventName: eventName, operationId: session.operationId, inputType: "voice" }, fields || {});
     if (session.telemetrySessionId && request.sessionId == null) request.sessionId = session.telemetrySessionId;
     invoke(IS_WEB ? "web_access_track_behavior_event" : "track_behavior_event", { request: request }).catch(function () {});
   }
 
   function voiceDurationMs(session) {
     return Math.max(0, Math.min(86400000, Date.now() - Number(session && session.startedAt || Date.now())));
+  }
+
+  function voiceAsrPreflightStep(status) {
+    // Project only the three registered component names, never backend text or paths.
+    var missing = ["engine", "ffmpeg", "model"].filter(function (component) {
+      return status[component] === false || (Array.isArray(status.missing) && status.missing.includes(component));
+    });
+    return missing.length ? "asr_missing_" + missing.join("_") : "asr_dependencies";
   }
 
   function voiceFlowError(category, stage, message) { return pinvouSharedweb().voiceFlowError(category, stage, message); }
@@ -7208,6 +7216,8 @@ async function downloadKbModel(repair) { return pinvouSharedweb().downloadKbMode
         trackVoiceTerminal("voice_recognition_failed", pendingVoiceSession, {
           durationMs: voiceDurationMs(pendingVoiceSession),
           errorCategory: "configuration_missing",
+          stage: "submission",
+          step: voiceAsrPreflightStep(asrStatus),
         });
         if (IS_WEB) {
           if (primedAudioContext) primedAudioContext.close().catch(function () {});

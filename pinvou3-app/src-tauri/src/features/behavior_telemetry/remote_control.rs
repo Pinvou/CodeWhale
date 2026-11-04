@@ -142,6 +142,20 @@ pub(crate) struct RemoteControlEvent {
 }
 
 impl RemoteControlEvent {
+    /// Inspect the actual event at an injected recording port without exposing
+    /// telemetry internals in the product API or enabling a user's collection.
+    #[cfg(test)]
+    pub(crate) fn lifecycle_fields_for_test(
+        &self,
+    ) -> (
+        RemoteStage,
+        RemoteOutcome,
+        RemoteReason,
+        Option<&'static str>,
+    ) {
+        (self.stage, self.outcome, self.reason, self.role)
+    }
+
     pub(crate) fn new(stage: RemoteStage, outcome: RemoteOutcome) -> Self {
         Self {
             stage,
