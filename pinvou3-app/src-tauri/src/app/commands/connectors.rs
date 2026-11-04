@@ -290,9 +290,7 @@ pub async fn refresh_connector_auth_gates(
 #[tauri::command]
 pub async fn feishu_ensure_cli(app: AppHandle) -> Result<Value, String> {
     let install = crate::features::behavior_telemetry::begin_tool_install(&app, "feishu", "cli");
-    let result = feishu_domain::feishu_ensure_cli().await?;
-    install.success();
-    Ok(result)
+    install.finish(feishu_domain::feishu_ensure_cli().await)
 }
 async_command_passthrough!(
     feishu_domain,
@@ -334,9 +332,7 @@ async_command_passthrough!(feishu_domain, feishu_skills_state() -> Result<Value,
 #[tauri::command]
 pub async fn wecom_ensure_cli(app: AppHandle) -> Result<Value, String> {
     let install = crate::features::behavior_telemetry::begin_tool_install(&app, "wecom", "cli");
-    let result = wecom_domain::wecom_ensure_cli().await?;
-    install.success();
-    Ok(result)
+    install.finish(wecom_domain::wecom_ensure_cli().await)
 }
 async_command_passthrough!(
     wecom_domain,
@@ -374,9 +370,7 @@ async_command_passthrough!(wecom_domain, wecom_skills_state() -> Result<Value, S
 #[tauri::command]
 pub async fn dingtalk_ensure_cli(app: AppHandle) -> Result<Value, String> {
     let install = crate::features::behavior_telemetry::begin_tool_install(&app, "dingtalk", "cli");
-    let result = dingtalk_domain::dingtalk_ensure_cli().await?;
-    install.success();
-    Ok(result)
+    install.finish(dingtalk_domain::dingtalk_ensure_cli().await)
 }
 async_command_passthrough!(
     dingtalk_domain,
@@ -436,9 +430,7 @@ async_command_passthrough!(zhidao_domain, zhidao_logout() -> Result<Value, Strin
 #[tauri::command]
 pub async fn tmeet_ensure_cli(app: AppHandle) -> Result<Value, String> {
     let install = crate::features::behavior_telemetry::begin_tool_install(&app, "tmeet", "cli");
-    let result = tmeet_domain::tmeet_ensure_cli().await?;
-    install.success();
-    Ok(result)
+    install.finish(tmeet_domain::tmeet_ensure_cli().await)
 }
 async_command_passthrough!(
     tmeet_domain,
