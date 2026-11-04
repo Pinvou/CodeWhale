@@ -478,15 +478,21 @@ pub fn sanitize_for_disk(line: &str) -> String {
         }
         if word_is_secret(word) {
             out.push_str(REDACTED);
-        } else if let Some((name, _value)) = colon_glued_secret(word) {
+        } else if let Some((name, value)) = colon_glued_secret(word) {
             // r21 P2-8②：冒号黏连——`api_key:plainsecret123`、
             // `{"api_key":"plainsecret123"}`（紧凑 JSON 无空白可分）。bare 检查
             // 要求整词相等、`=` 分支只看等号，这条缝隙此前两个都够不着。键名
             // 留着（排查靠它认出是哪个凭证），值抹掉。URL 的 `scheme://…` 左段
             // 是 scheme，不在键名单里，不受影响。
+            // r23 P1-2：值侧为空的命中（词尾冒号形态）改置 redact_next——值在
+            // 下一个词，本词保留键名供排查。
             out.push_str(name);
             out.push(':');
-            out.push_str(REDACTED);
+            if value.is_empty() {
+                redact_next = true;
+            } else {
+                out.push_str(REDACTED);
+            }
         } else if let Some((key, rest)) = word.split_once('=') {
             // `KEY=VALUE`：只看 KEY。命令行开关（`--token=abc`）和环境变量
             // （`HF_TOKEN=abc`）共用这一支。
@@ -537,7 +543,18 @@ pub fn sanitize_for_disk(line: &str) -> String {
         } else {
             out.push_str(&redact_url_secrets(word));
         }
-        let bare = word.trim_matches(|c: char| matches!(c, '"' | '\'' | ',' | ';' | ':'));
+        // r23 P1-2：trim 集并入 {}[]() ——与下方 colon_glued 名字侧同集。缺括号时
+        // `body={"api_key": "supersecret"}`（json.dumps 默认分隔符就是 `": "`）拆成
+        // `body={"api_key":` / `"supersecret"}` 两词：键不化简为 api_key（不触发
+        // redact_next）、colon 值侧为空（长度门跳过）、值词无前缀且 <24（导出粗尺
+        // 不接）——三道臂全绕过，落盘+导出双泄漏。补集后键化简命中、值侧按
+        // redact_next 正常抹除。
+        let bare = word.trim_matches(|c: char| {
+            matches!(
+                c,
+                '"' | '\'' | ',' | ';' | ':' | '{' | '}' | '[' | ']' | '(' | ')'
+            )
+        });
         // `--TOKEN x`（空格形态）此前大小写敏感漏网——`=` 形态早已不敏感，两处对齐。
         // r6 P1-5 + r7 P1-4：bare 键检查大小写不敏感，且并入 SECRET_QUERY_KEYS
         // （token / x-api-key / access_token 等 URL query 表已有的名字，此前
@@ -638,6 +655,14 @@ fn colon_glued_secret(word: &str) -> Option<(&str, &str)> {
                 '"' | '\'' | '{' | '}' | '[' | ']' | ',' | ';' | '(' | ')'
             )
         });
+        // r23 P1-2：值侧为空（词尾就是冒号）也命中——`body={"api_key": "x"` 的
+        // 值在**下一个词**（json.dumps 默认分隔符就是 `": "`，非紧凑形态必然
+        // 词尾留冒号）。返回空值串作信号，调用方据此改置 redact_next（与 bare
+        // 键臂 `token: abc` 同语义）；非空值仍走原长度门。
+        if trimmed_value.is_empty() {
+            hit = Some((trimmed_name, ""));
+            break;
+        }
         if trimmed_value.len() < MIN_LITERAL_SECRET_LEN {
             continue;
         }
@@ -1447,6 +1472,29 @@ mod tests {
                     && !export.contains("ab12cd34ef56")
                     && !export.contains("plainsecret1234"),
                 "非首位机密键导出泄漏：{line} -> {export}"
+            );
+        }
+    }
+
+    /// r23 P1-2：`json.dumps` 默认分隔符是 `": "`——带空格的 JSON 形态拆词后
+    /// 键词带 `{` 前缀、值词带 `}` 后缀，旧 trim 集不含括号导致三道脱敏臂
+    /// （bare 键 / colon 黏连 / 导出粗尺）全绕过。补集后必须落盘+导出双脱敏。
+    #[test]
+    fn spaced_json_secret_form_with_braces_is_redacted() {
+        for line in [
+            r#"body={"api_key": "supersecret"}"#,
+            r#"data={"token": "ab12cd34ef56"}"#,
+            r#"payload={"password": "plainsecret1234"}"#,
+        ] {
+            let disk = sanitize_for_disk(line);
+            assert!(
+                !disk.contains("supersecret") && !disk.contains("ab12cd34ef56") && !disk.contains("plainsecret1234"),
+                "空格 JSON 机密键落盘泄漏：{line} -> {disk}"
+            );
+            let export = sanitize_for_export(line);
+            assert!(
+                !export.contains("supersecret") && !export.contains("ab12cd34ef56") && !export.contains("plainsecret1234"),
+                "空格 JSON 机密键导出泄漏：{line} -> {export}"
             );
         }
     }
