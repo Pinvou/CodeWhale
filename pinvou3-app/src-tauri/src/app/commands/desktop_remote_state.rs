@@ -55,12 +55,14 @@ impl<'a, 'de: 'a, T: Send + Sync + 'static, R: Runtime> CommandArg<'de, R>
         if !crate::platform::capabilities::current().desktop_remote_control_supported {
             return Err(InvokeError("desktop_remote_control_unsupported".into()));
         }
-        let states = command.message.state_ref();
-        if states.try_get::<DesktopRemoteReady>().is_none() {
+        // state_ref() was deprecated by the Tauri 2.12 line: the webview
+        // implements Manager and resolves the same application-wide state map.
+        let webview = command.message.webview_ref();
+        if webview.try_state::<DesktopRemoteReady>().is_none() {
             return Err(InvokeError(UNAVAILABLE.into()));
         }
-        states
-            .try_get::<T>()
+        webview
+            .try_state::<T>()
             .map(Self)
             .ok_or_else(|| InvokeError(UNAVAILABLE.into()))
     }

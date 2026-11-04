@@ -800,6 +800,7 @@ pub(crate) async fn harvest_child_processes(app: &tauri::AppHandle) {
 /// restore manifests and destroys native surfaces, then asynchronous children are
 /// harvested. The caller invokes the non-returning restart immediately afterward.
 pub(crate) async fn prepare_app_restart(app: &tauri::AppHandle) {
+    features::system_tray::before_restart(app).await;
     if let Some(browser) = app.try_state::<features::browser::BrowserManager>() {
         browser.shutdown_before_restart().await;
     }
@@ -1851,6 +1852,7 @@ pub fn run() {
             // after the hook is installed. One shared load serves both this
             // and the global-shortcut replay below.
             let prefs = crate::platform::prefs::UserPrefs::load();
+            crate::features::system_tray::install(app.handle(), prefs.language);
             crate::features::voice_shortcut::set_enabled(prefs.voice_shortcut_enabled);
 
             // System-wide bring-to-front shortcut: same replay shape. A parse
@@ -1866,6 +1868,7 @@ pub fn run() {
             Ok(())
         })
         .on_window_event(|window, event| {
+            crate::features::system_tray::on_window_event(window, event);
             if let tauri::WindowEvent::Destroyed = event {
                 // When a recording window is closed outright, the frontend has
                 // no chance to deregister; leaving it registered would keep the
@@ -2476,6 +2479,7 @@ pub fn run() {
         }
         tauri::RunEvent::Exit => {
             startup::mark("tauri:event_loop:exit");
+            features::system_tray::on_exit();
             // On main-process exit, refresh browser URL restore manifests, destroy
             // in-app native WebViews, and clean runtime targets/endpoints. Preserve
             // restore manifests; there is no external Chrome process.

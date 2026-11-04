@@ -3106,6 +3106,9 @@ jobs:
             'app::commands::dependencies::platform::windows::tests::' \
             'features::codex_acp::platform::windows::tests::' \
             'features::codex_acp::install::tests::' \
+            'features::codex_acp::platform::windows::shutdown_tests::' \
+            'features::codex_acp::shutdown::tests::' \
+            'features::system_tray::' \
             'platform::os::windows::' \
             'windows_attachment_runtime_stays_security_gated'; do
             index=$((index+1))
