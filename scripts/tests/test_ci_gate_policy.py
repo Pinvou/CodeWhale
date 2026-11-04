@@ -1074,6 +1074,10 @@ class CiGatePolicyTests(unittest.TestCase):
                 "account-platform-test", "account_platform",
                 "Verify Account Platform authorization contracts",
             ),
+            "f18-hold-recovery-owned-fixture.test.mjs": (
+                "account-platform-test", "account_platform",
+                "Verify F18 owned fixture contract",
+            ),
             "account-platform-invocation-environment.test.mjs": (
                 "frontend-test", "frontend",
                 "Verify Account invocation environment contracts",

@@ -315,6 +315,7 @@ jobs:
               - 'scripts/tests/token-management-phase-coverage.test.mjs'
               - 'scripts/check-account-platform-authorization-coverage.mjs'
               - 'scripts/tests/account-platform-authorization-coverage.test.mjs'
+              - 'scripts/tests/f18-hold-recovery-owned-fixture.test.mjs'
               - '.github/workflows/pr-check.yml'
               - 'scripts/tests/pr-check-routing.test.mjs'
             rust_code:
@@ -1468,6 +1469,9 @@ jobs:
       - name: Verify Account Platform task contracts
         run: |
           node --test scripts/check-account-platform-tasks.test.mjs
+
+      - name: Verify F18 owned fixture contract
+        run: node --test scripts/tests/f18-hold-recovery-owned-fixture.test.mjs
 
       - name: Verify Account Platform authorization contracts
         run: |
