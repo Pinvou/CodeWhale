@@ -16,10 +16,10 @@ use tokio::time::timeout as tokio_timeout;
 
 use crate::config::{
     TOGETHER_INKLING_MODEL, is_exact_direct_moonshot_k3_route, is_exact_kimi_code_k3_route,
-    is_exact_xai_grok_4_6_route, is_exact_zai_chat_route, is_exact_zai_forced_thinking_route,
-    is_exact_zai_tiered_effort_route, is_kimi_code_membership_model,
-    minimax_m3_route_uses_max_completion_tokens, moonshot_base_url_is_exact_kimi_code,
-    wire_model_for_provider_route,
+    is_exact_kimi_code_k31_route, is_exact_xai_grok_4_6_route, is_exact_zai_chat_route,
+    is_exact_zai_forced_thinking_route, is_exact_zai_tiered_effort_route,
+    is_kimi_code_membership_model, minimax_m3_route_uses_max_completion_tokens,
+    moonshot_base_url_is_exact_kimi_code, wire_model_for_provider_route,
 };
 
 // The bounded response-header wait (`stream_open_timeout`) and its env
@@ -3499,6 +3499,7 @@ fn should_replay_reasoning_content_for_provider_on_route(
     // reasoning field on later tool turns for multi-turn continuity.
     if is_exact_direct_moonshot_k3_route(provider, base_url, model)
         || is_exact_kimi_code_k3_route(provider, base_url, model)
+        || is_exact_kimi_code_k31_route(provider, base_url, model)
         || (is_exact_mistral_chat_route(provider, base_url)
             && mistral_model_has_native_reasoning(model))
     {
@@ -3589,6 +3590,7 @@ fn is_reasoning_model_for_stream_on_route(
 ) -> bool {
     if is_exact_kimi_code_k3_route(provider, base_url, model)
         || is_exact_direct_moonshot_k3_route(provider, base_url, model)
+        || is_exact_kimi_code_k31_route(provider, base_url, model)
     {
         return true;
     }
@@ -5157,6 +5159,166 @@ mod minimax_reasoning_replay_tests {
             neighbor[0].get("reasoning_content").is_none(),
             "a generic Moonshot k3 identifier must not inherit Kimi Code replay"
         );
+    }
+
+    /// Assistant Thinking + Text + ToolUse turn plus its matching ToolResult:
+    /// the exact "tool call, tool result, inspect the second request" shape
+    /// the review asked the regression to cover (pinvou-agent#825).
+    fn request_with_kimi_thinking_and_tool(model: &str, effort: Option<&str>) -> MessageRequest {
+        MessageRequest {
+            model: model.to_string(),
+            messages: vec![
+                Message {
+                    role: Role::Assistant,
+                    content: vec![
+                        ContentBlock::Thinking {
+                            thinking: "Inspect tool state".to_string(),
+                            signature: None,
+                            state: None,
+                            redacted_data: None,
+                            reasoning_details: None,
+                        },
+                        ContentBlock::Text {
+                            text: "Calling the tool now.".to_string(),
+                            cache_control: None,
+                        },
+                        ContentBlock::ToolUse {
+                            id: "call-1".to_string(),
+                            name: "read_file".to_string(),
+                            input: serde_json::json!({"path": "README.md"}),
+                            caller: None,
+                            thought_signature: None,
+                        },
+                    ],
+                },
+                Message {
+                    role: Role::User,
+                    content: vec![ContentBlock::ToolResult {
+                        tool_use_id: "call-1".to_string(),
+                        content: "contents".to_string(),
+                        is_error: None,
+                        content_blocks: None,
+                    }],
+                },
+            ],
+            max_tokens: 16,
+            system: None,
+            tools: None,
+            tool_choice: None,
+            metadata: None,
+            thinking: None,
+            reasoning_effort: effort.map(|value| value.to_string()),
+            stream: None,
+            temperature: None,
+            top_p: None,
+        }
+    }
+
+    #[test]
+    fn kimi_code_k31_replays_reasoning_across_the_tool_loop() {
+        // Review P2 (pinvou-agent#825): the K3.1 flagship ids on the exact
+        // Kimi Code route are always-reasoning models — the vendor requires
+        // the assistant `reasoning_content` on the follow-up request after a
+        // tool call. The bare ids must replay exactly like the older `k3`
+        // membership ids, regardless of the caller effort, and must not
+        // inherit the replay on a different Moonshot endpoint.
+        for (model, effort) in [
+            ("k3.1-pro", None),
+            ("k3.1-pro", Some("high")),
+            ("k3.1-pro-highspeed", None),
+            ("K3.1-PRO", Some("high")),
+        ] {
+            let request = request_with_kimi_thinking_and_tool(model, effort);
+            let messages = build_chat_messages_for_request_and_provider_and_route(
+                &request,
+                ApiProvider::Moonshot,
+                DEFAULT_KIMI_CODE_BASE_URL,
+            );
+            assert_eq!(
+                messages[0]
+                    .get("reasoning_content")
+                    .and_then(serde_json::Value::as_str),
+                Some("Inspect tool state"),
+                "{model} (effort {effort:?}) must replay reasoning on the tool turn"
+            );
+            // The tool-call id and its result must stay intact in the same
+            // replayed sequence.
+            assert_eq!(
+                messages[0]
+                    .pointer("/tool_calls/0/id")
+                    .and_then(serde_json::Value::as_str),
+                Some("call-1"),
+                "{model} must keep the tool call binding intact"
+            );
+        }
+
+        // Negative arm: the same bare id on the direct Moonshot platform
+        // endpoint is a different route and must not inherit Kimi Code
+        // replay (mirrors the k3 membership-route isolation above).
+        let request = request_with_kimi_thinking_and_tool("k3.1-pro", None);
+        let neighbor = build_chat_messages_for_request_and_provider_and_route(
+            &request,
+            ApiProvider::Moonshot,
+            DEFAULT_MOONSHOT_BASE_URL,
+        );
+        assert!(
+            neighbor[0].get("reasoning_content").is_none(),
+            "a bare k3.1 id on the direct platform endpoint must not inherit Kimi Code replay"
+        );
+    }
+
+    #[test]
+    fn kimi_code_k31_sanitizer_injects_placeholder_when_trace_was_dropped() {
+        // When an upstream hop dropped the reasoning field, the route-aware
+        // sanitizer must still satisfy the vendor contract with the replay
+        // placeholder on assistant tool-call turns.
+        use super::{REASONING_REPLAY_PLACEHOLDER, sanitize_thinking_mode_messages_for_route};
+        let base = serde_json::json!({
+            "model": "k3.1-pro",
+            "messages": [
+                {
+                    "role": "assistant",
+                    "content": "Calling the tool now.",
+                    "tool_calls": [
+                        {"id": "call-1", "type": "function",
+                         "function": {"name": "read_file", "arguments": "{}"}}
+                    ]
+                },
+                {"role": "tool", "tool_call_id": "call-1", "content": "contents"}
+            ]
+        });
+        let mut body = base.clone();
+        // The return value is the replay-telemetry token estimate, not the
+        // injection count: Some(_) means the route replayed reasoning content.
+        let replay_tokens = sanitize_thinking_mode_messages_for_route(
+            &mut body,
+            "k3.1-pro",
+            Some("high"),
+            ApiProvider::Moonshot,
+            DEFAULT_KIMI_CODE_BASE_URL,
+        );
+        assert!(
+            replay_tokens.is_some(),
+            "k3.1-pro must count as a replay route"
+        );
+        assert_eq!(
+            body.pointer("/messages/0/reasoning_content")
+                .and_then(serde_json::Value::as_str),
+            Some(REASONING_REPLAY_PLACEHOLDER),
+        );
+
+        // Negative arm: the same id on the direct platform endpoint is not a
+        // replay route, so the sanitizer must leave the body untouched.
+        let mut neighbor = base.clone();
+        let replay_tokens = sanitize_thinking_mode_messages_for_route(
+            &mut neighbor,
+            "k3.1-pro",
+            Some("high"),
+            ApiProvider::Moonshot,
+            DEFAULT_MOONSHOT_BASE_URL,
+        );
+        assert_eq!(replay_tokens, None);
+        assert!(neighbor.pointer("/messages/0/reasoning_content").is_none());
     }
 
     #[test]

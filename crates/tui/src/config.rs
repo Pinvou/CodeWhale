@@ -10006,6 +10006,26 @@ pub(crate) fn is_exact_kimi_code_k3_route(
             .any(|id| model.trim().eq_ignore_ascii_case(id))
 }
 
+/// Whether a route is one of the official Kimi Code K3.1 flagship models.
+///
+/// K3.1 is always-reasoning and rejects the K2.x `thinking` parameter, so it
+/// deliberately stays out of [`is_exact_kimi_code_k3_route`]: the K3 route
+/// shapers (nested `thinking.effort`, fixed sampling, output ceilings) are
+/// K3-only contracts. Only the reasoning-replay/stream contract is shared
+/// (review P2, pinvou-agent#825: tool-turn follow-ups on the bare `k3.1-pro`
+/// ids dropped the vendor-required `reasoning_content`).
+pub(crate) fn is_exact_kimi_code_k31_route(
+    provider: ApiProvider,
+    base_url: &str,
+    model: &str,
+) -> bool {
+    provider == ApiProvider::Moonshot
+        && moonshot_base_url_is_exact_kimi_code(base_url)
+        && [KIMI_CODE_K3_1_MODEL, KIMI_CODE_K3_1_HIGHSPEED_MODEL]
+            .iter()
+            .any(|id| model.trim().eq_ignore_ascii_case(id))
+}
+
 /// Whether a route uses plan-tier-dependent bare `k3`.
 ///
 /// Keep entitlement handling separate from `k3-256k`, whose window is fixed.

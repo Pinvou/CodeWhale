@@ -13307,6 +13307,67 @@ fn k3_and_kimi_k3_never_cross_products_and_fail_visibly() {
     ));
 }
 
+/// The K3.1 flagship ids share the Kimi Code endpoint with the K3 ids but are
+/// a distinct always-reasoning contract: the new predicate must hit exactly
+/// the two bare ids on the membership endpoint and stay disjoint from every
+/// K3 predicate (review P2, pinvou-agent#825).
+#[test]
+fn kimi_code_k31_route_predicate_is_exact_and_disjoint_from_k3() {
+    for model in [KIMI_CODE_K3_1_MODEL, KIMI_CODE_K3_1_HIGHSPEED_MODEL] {
+        assert!(is_exact_kimi_code_k31_route(
+            ApiProvider::Moonshot,
+            DEFAULT_KIMI_CODE_BASE_URL,
+            model
+        ));
+        // Case-insensitive on the wire id, like every exact predicate here.
+        assert!(is_exact_kimi_code_k31_route(
+            ApiProvider::Moonshot,
+            DEFAULT_KIMI_CODE_BASE_URL,
+            &model.to_ascii_uppercase()
+        ));
+        // Disjoint from every K3 route predicate.
+        assert!(!is_exact_kimi_code_k3_route(
+            ApiProvider::Moonshot,
+            DEFAULT_KIMI_CODE_BASE_URL,
+            model
+        ));
+        assert!(!is_exact_kimi_code_bare_k3_route(
+            ApiProvider::Moonshot,
+            DEFAULT_KIMI_CODE_BASE_URL,
+            model
+        ));
+        assert!(!is_exact_direct_moonshot_k3_route(
+            ApiProvider::Moonshot,
+            DEFAULT_MOONSHOT_BASE_URL,
+            model
+        ));
+    }
+
+    // Endpoint isolation: the platform spellings (`kimi-k3.1-pro*`) are a
+    // different product route and must not hit the Kimi Code predicate.
+    assert!(!is_exact_kimi_code_k31_route(
+        ApiProvider::Moonshot,
+        DEFAULT_KIMI_CODE_BASE_URL,
+        "kimi-k3.1-pro"
+    ));
+    assert!(!is_exact_kimi_code_k31_route(
+        ApiProvider::Moonshot,
+        DEFAULT_MOONSHOT_BASE_URL,
+        KIMI_CODE_K3_1_MODEL
+    ));
+    // And the K3 ids must not hit the K3.1 predicate (bidirectional).
+    assert!(!is_exact_kimi_code_k31_route(
+        ApiProvider::Moonshot,
+        DEFAULT_KIMI_CODE_BASE_URL,
+        KIMI_CODE_K3_MODEL
+    ));
+    assert!(!is_exact_kimi_code_k31_route(
+        ApiProvider::Moonshot,
+        DEFAULT_KIMI_CODE_BASE_URL,
+        KIMI_CODE_K3_256K_MODEL
+    ));
+}
+
 #[test]
 fn unknown_models_pass_through_on_canonical_moonshot_endpoints() {
     for base_url in [DEFAULT_KIMI_CODE_BASE_URL, DEFAULT_MOONSHOT_BASE_URL] {

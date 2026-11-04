@@ -121,6 +121,15 @@ pub const KIMI_CODE_K3_MODEL: &str = "k3";
 /// Official fixed-256K Kimi Code K3 wire model id. This is a distinct
 /// membership-route model, not a client-side context alias for `k3`.
 pub const KIMI_CODE_K3_256K_MODEL: &str = "k3-256k";
+/// Kimi Code K3.1 flagship wire id. Always-reasoning: the model rejects the
+/// K2.x `thinking` parameter and requires `reasoning_content` to be replayed
+/// on later tool turns. Only the reasoning-replay/stream route contract
+/// consumes this id — the K3 route shapers (nested `thinking.effort`, fixed
+/// sampling, output ceilings) are K3-only and must not pick it up.
+pub const KIMI_CODE_K3_1_MODEL: &str = "k3.1-pro";
+/// Kimi Code K3.1 flagship high-speed wire id. Same always-reasoning contract
+/// as [`KIMI_CODE_K3_1_MODEL`] on the low-latency membership lane.
+pub const KIMI_CODE_K3_1_HIGHSPEED_MODEL: &str = "k3.1-pro-highspeed";
 /// Kimi Code membership high-speed wire model id. Membership route only, not
 /// a direct Moonshot platform catalog model.
 pub const KIMI_CODE_HIGHSPEED_MODEL: &str = "kimi-for-coding-highspeed";
