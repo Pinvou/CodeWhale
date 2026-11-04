@@ -4472,10 +4472,15 @@ fn readonly_shell_startup_env_walls() -> [(&'static str, &'static str); 2] {
 /// The fixed spawn-env overrides every admitted read-only child runs under,
 /// beyond the computed GIT_* pin block: the startup-env walls (see
 /// [`readonly_shell_startup_env_walls`]) plus the `CDPATH` clear (a hostile
-/// CDPATH rewrites what a bare `cd sub` resolves to) and the ripgrep config
+/// CDPATH rewrites what a bare `cd sub` resolves to), the ripgrep config
 /// clear (a hostile `RIPGREP_CONFIG_PATH` re-arms flags on an admitted
-/// `rg`). Extracted so the application site has one pinned source and a
-/// dropped call site turns into dead code under `deny(warnings)`.
+/// `rg`), and the `BASHOPTS`/`SHELLOPTS` clears — bash honors both at
+/// startup from the process environment it inherits (`BASHOPTS=dotglob`
+/// widens `*` over dotfiles the GLOBIGNORE wall keeps cold; `SHELLOPTS`
+/// arms `set -o` spellings). The tool process's environment is operator
+/// territory, the same reason the ZDOTDIR wall exists. Extracted so the
+/// application site has one pinned source and a dropped call site turns
+/// into dead code under `deny(warnings)`.
 fn readonly_spawn_env_overrides() -> Vec<(&'static str, String)> {
     let mut overrides: Vec<(&'static str, String)> = readonly_shell_startup_env_walls()
         .iter()
@@ -4483,6 +4488,8 @@ fn readonly_spawn_env_overrides() -> Vec<(&'static str, String)> {
         .collect();
     overrides.push(("CDPATH", String::new()));
     overrides.push(("RIPGREP_CONFIG_PATH", String::new()));
+    overrides.push(("BASHOPTS", String::new()));
+    overrides.push(("SHELLOPTS", String::new()));
     overrides
 }
 
