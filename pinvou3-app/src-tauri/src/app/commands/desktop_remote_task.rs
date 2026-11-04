@@ -1,3 +1,4 @@
+// architecture-guard: allow-target-cfg -- The test-only journal_owner_tests module constructs a process-private real Windows Wry host for journal body/terminal consumers. Unsupported platforms must not simulate this host; product OS adaptation remains in the feature platform module.
 //! B-local remote task status and stop commands, plus private task owners.
 //!
 //! A08 accepts only authenticated full bindings or B-local semantic intents;
@@ -19,6 +20,9 @@ use uuid::Uuid;
 
 #[cfg(test)]
 mod frozen_permission_tests;
+
+#[cfg(all(test, target_os = "windows"))]
+pub(super) mod journal_owner_tests;
 
 use super::desktop_remote_model::prepare_selected_task_package_snapshot;
 use crate::features::assistant::engine_pool::EnginePool;
@@ -363,9 +367,9 @@ impl ControllerTaskEventSink for TaskEventBridge {
         // B may finish or cancel an already admitted local task while the
         // encrypted lane is reconnecting. Keep the authoritative B journal;
         // forwarding to A remains gated by the connected transport below.
-        let Ok(lease) = self.app.state::<
+        let Ok((lease, journal_owner)) = self.app.state::<
             crate::features::remote_control::controller::controlled::ControlledDeviceManager,
-        >().with_local_cancel_lease(Clone::clone) else {
+        >().local_journal_context() else {
             crate::features::remote_control::controller::relay_runtime::log_controlled_event(
                 "journal_event_ignored",
                 "lease_unavailable",
@@ -410,20 +414,9 @@ impl ControllerTaskEventSink for TaskEventBridge {
                 return;
             }
         }
-        if history
-            .journal()
-            .bind_generation(&lease.remote_control_generation)
-            .is_err()
-        {
-            crate::features::remote_control::controller::relay_runtime::log_controlled_event(
-                "journal_event_ignored",
-                "generation_or_binding_stale",
-            );
-            return;
-        }
         let event_id = format!("journal-{}", uuid::Uuid::new_v4().simple());
-        match history.journal().append_for_generation(
-            &lease.remote_control_generation,
+        match history.journal().append_for_owner(
+            &journal_owner,
             &event_id,
             kind,
             session_id,
@@ -459,6 +452,7 @@ impl ControllerTaskEventSink for TaskEventBridge {
                 super::desktop_remote_journal::publish_authoritative_event(
                     &self.app,
                     &lease.remote_control_generation,
+                    &journal_owner,
                     &event,
                 );
             }
@@ -1888,6 +1882,10 @@ pub(super) fn with_current_dispatch_binding<T>(
         .map_err(|code| match code.as_str() {
             "remote_pending_persist_failed" => dispatch_error("remote_pending_persist_failed"),
             "remote_proxy_byte_budget" => dispatch_error("remote_proxy_byte_budget"),
+            "remote_pending_limit_reached" => dispatch_error("remote_pending_limit_reached"),
+            "remote_retirement_budget_exhausted" => {
+                dispatch_error("remote_retirement_budget_exhausted")
+            }
             "remote_attempt_persist_failed" => dispatch_error("remote_attempt_persist_failed"),
             "remote_attachment_unconfirmed"
             | "remote_attachment_count_invalid"
@@ -1958,7 +1956,13 @@ impl RemoteTaskDispatchPort for DesktopRemoteTaskDispatchPort {
             store
                 .insert_remote_pending(local_session_id, remote_ref, live, pending)
                 .map_err(|error| {
-                    if error.to_string() == "remote_proxy_byte_budget" {
+                    if let Some(code) =
+                        crate::features::sessions::remote_proxy::schema::remote_proxy_capacity_code(
+                            &error,
+                        )
+                    {
+                        code.to_owned()
+                    } else if error.to_string() == "remote_proxy_byte_budget" {
                         "remote_proxy_byte_budget".to_owned()
                     } else {
                         "remote_pending_persist_failed".to_owned()
@@ -2747,14 +2751,14 @@ mod tests {
             );
             return;
         }
-        let path = std::env::temp_dir().join(format!(
-            "pinvou-controlled-local-{}.txt",
-            Uuid::new_v4().simple()
-        ));
-        let session_root = std::env::temp_dir().join(format!(
-            "pinvou-controlled-session-{}",
-            Uuid::new_v4().simple()
-        ));
+        // Linux upload admission accepts user-owned home locations, not /tmp.
+        // This fixture now exercises the real path policy on both platforms.
+        let fixture = tempfile::Builder::new()
+            .prefix(".pinvou-controlled-local-")
+            .tempdir_in(crate::platform::os::user_home_dir())
+            .unwrap();
+        let path = fixture.path().join("input.txt");
+        let session_root = fixture.path().join("session");
         std::fs::create_dir_all(&session_root).unwrap();
         std::fs::write(&path, b"local attachment body").unwrap();
         let attachments = local_controlled_attachments(

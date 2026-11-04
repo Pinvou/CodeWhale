@@ -287,6 +287,8 @@ function pinvouSharedweb() {
     // 保证 getMany 不抛 unknown slice；真正的 UI 入口由 desktopRemoteControl
     // capability=false 隐藏。
     controlledDevice: null,
+    controlledNavigationIntent: 0,
+    controlledNavigationPending: false,
     controlledSession: { sessionId: null, sessionRef: null, generation: null },
     controllerConnection: null,
     remoteCapabilities: null,
@@ -5786,11 +5788,16 @@ async function submitUserInput(itemId, toolCallId, answers, questions) { return 
     notify();
     turnUsageDirty[sid] = false; // 编辑重跑=新一轮，同 doSendFor 重置口径保护
     emitPetEvent();
+    // A desktop turn that landed after this view was loaded makes the backend
+    // refuse with session_revision_conflict instead of truncating its newer
+    // transcript. Empty (older desktop without revisions) keeps old behavior.
+    const expectedRevision = editBuffer ? String(editBuffer.sessionRevision || "") : "";
     try {
       await invoke("edit_last_turn", {
         newMessage: newText,
         sessionId: sid,
         retryReason: options && options.retryReason || "input_changed",
+        expectedTranscriptRevision: expectedRevision || null,
       });
       // 编辑重跑 = 后端受理新一轮：未提交的「打开」转正锁死（同 doSendFor）。
       try { window.PinvouToolStoreEvents.notifyChatRoundCommitted(); } catch { /* silently ignored */ }
@@ -6570,13 +6577,21 @@ async function checkDependencies() { return pinvouSharedweb().checkDependencies(
 
   function trackVoiceEvent(eventName, session, fields) {
     if (!session || !session.operationId) return;
-    var request = Object.assign({ eventName: eventName, operationId: session.operationId }, fields || {});
+    var request = Object.assign({ eventName: eventName, operationId: session.operationId, inputType: "voice" }, fields || {});
     if (session.telemetrySessionId && request.sessionId == null) request.sessionId = session.telemetrySessionId;
     invoke(IS_WEB ? "web_access_track_behavior_event" : "track_behavior_event", { request: request }).catch(function () {});
   }
 
   function voiceDurationMs(session) {
     return Math.max(0, Math.min(86400000, Date.now() - Number(session && session.startedAt || Date.now())));
+  }
+
+  function voiceAsrPreflightStep(status) {
+    // Project only the three registered component names, never backend text or paths.
+    var missing = ["engine", "ffmpeg", "model"].filter(function (component) {
+      return status[component] === false || (Array.isArray(status.missing) && status.missing.includes(component));
+    });
+    return missing.length ? "asr_missing_" + missing.join("_") : "asr_dependencies";
   }
 
   function voiceFlowError(category, stage, message) { return pinvouSharedweb().voiceFlowError(category, stage, message); }
@@ -7093,6 +7108,8 @@ async function downloadKbModel(repair) { return pinvouSharedweb().downloadKbMode
         trackVoiceTerminal("voice_recognition_failed", pendingVoiceSession, {
           durationMs: voiceDurationMs(pendingVoiceSession),
           errorCategory: "configuration_missing",
+          stage: "submission",
+          step: voiceAsrPreflightStep(asrStatus),
         });
         if (IS_WEB) {
           if (primedAudioContext) primedAudioContext.close().catch(function () {});

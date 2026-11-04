@@ -1,3 +1,4 @@
+import { trayLabels } from './tray/ja.js';
 // 日本語 UI 辞書。ensureLanguage("ja") で遅延ロード。en をスプレッドで併合し、
 // ja 固有キーで上書きする(zh の全キーとの整合は tests/ui_language_coverage.test.mjs
 // の parity アサーションが強制)。
@@ -337,7 +338,7 @@ const jaBase = {
         sysPerm: 'システム権限', sudo: '高度な実行権限 (Sudo)', sudoDesc: 'アシスタントによる環境設定などの高度なコマンド実行を許可',
         versionUpdate: 'バージョンと更新',
         uiRemote: {
-          title:'モバイル遠隔操作', desc:'有効にすると、遠隔操作リンクからローカルファイルを参照し、選択したフォルダーでコード Agent を実行できます。信頼できる相手とのみ共有してください。', browser:'ブラウザー接続', stop:'停止', qrAlt:'遠隔操作 QR コード', qrHint:'スマートフォンでスキャンするか、下のリンクをコピーしてください', link:'遠隔操作リンク', linkHint:'QR コードとリンクは同一で、再起動後も有効です。更新または停止すると古いリンクは直ちに無効になります。', generating:'遠隔操作リンクを生成中…', notStarted:'遠隔操作は有効になっていません。', copy:'リンクをコピー', refresh:'QR コードを更新', enable:'アクセスを有効化', allowWorkspace:'ローカルフォルダーを許可', refreshTitle:'QR コードを更新しますか？', refreshDesc:'古い QR コードとリンクは直ちに無効になり、現在のブラウザー接続も切断されます。新しい QR コードをスキャンするか、新しいリンクをコピーして再接続してください。', refreshing:'更新中…', updated:'遠隔操作の状態を更新しました。', unavailable:'遠隔操作は一時的に利用できません。再試行してください。',
+          title:'モバイル遠隔操作', desc:'「アクセスを有効化」で遠隔操作リンクを確立します。ローカルフォルダーへのアクセスは、個別に取り消せる別の許可です。リンクは信頼できる相手とのみ共有してください。', browser:'ブラウザー接続', stop:'停止', close:'閉じる', qrAlt:'遠隔操作 QR コード', qrHint:'スマートフォンでスキャンするか、下のリンクをコピーしてください', link:'遠隔操作リンク', linkHint:'QR コードとリンクは同一で、再起動後も有効です。更新または停止すると古いリンクは直ちに無効になります。', generating:'遠隔操作リンクを生成中…', notStarted:'遠隔操作は有効になっていません。', copy:'リンクをコピー', refresh:'QR コードを更新', enable:'アクセスを有効化', allowWorkspace:'ローカルフォルダーを許可', workspaceAllowed:'このリンクにはローカルフォルダーへのアクセスが許可されています', revokeWorkspace:'フォルダー許可を取り消す', registerHints:{ rotate_credentials:'Web アクセスがこのデスクトップの資格情報を拒否しました。デスクトップで Web アクセスをローテーションして新しいリンクを発行してください。', rotate_recover_config:'保存された Web アクセス設定が壊れています。デスクトップで Web アクセスをローテーションして復旧してください。', update_desktop:'リレーはより新しいプロトコルを要求しています。デスクトップアプリ（および自己ホストのリレーがあればそれも）を最新版に更新して Web アクセスを復元してください。' }, refreshTitle:'QR コードを更新しますか？', refreshDesc:'古い QR コードとリンクは直ちに無効になり、現在のブラウザー接続も切断されます。新しい QR コードをスキャンするか、新しいリンクをコピーして再接続してください。すでに許可されたローカルフォルダーのアクセスは新しいリンクにも引き継がれます。', refreshing:'更新中…', updated:'遠隔操作の状態を更新しました。', unavailable:'遠隔操作は一時的に利用できません。再試行してください。',
           status:{ idle:['未有効','有効にすると長期利用可能な遠隔操作リンクを作成します。'], starting:['開始中','遠隔操作接続を作成しています。'], connecting_relay:['接続中','リレーに接続しています…'], waiting_web_client:['ブラウザー待ち','スマートフォンまたはパソコンのブラウザーにリンクを貼り付けてください。'], web_client_connected:['ブラウザー接続済み','ブラウザーがこのデスクトップに接続しています。'], web_client_disconnected:['ブラウザー切断','リンクは引き続き有効で、いつでも再接続できます。'], revoked:['リンク無効','遠隔操作をもう一度有効にしてください。'], stopped:['停止済み','このパネルを開くと再度有効にできます。'], error:['接続エラー','遠隔操作は一時的に利用できません。再試行してください。'] },
         },
         uiMonitor: { bridgeNotReady:'ブリッジ未準備', readFailed:'読み込み失敗', reading:'読み込み中', configError:'設定エラー', unverified:'未確認', authFailed:'認証失敗', bridgeError:'モニターブリッジが未準備です。Tauri アプリのウィンドウで開いてください。', activity:'実行状況' },
@@ -623,6 +624,7 @@ const jaBase = {
         depCheckTitle: '依存関係チェック', depChecking: '確認中…', depRecheck: '再チェック',
         depAllOk: 'すべての依存関係が準備済み', depMissingSuffix: ' 件の依存が不足（該当機能は利用不可）',
         depInstalling: 'インストール中…', depInstallBtn: 'インストール', depGoInstall: 'インストール', depInstallNote: '権限昇格して不足依存をインストール（ネットワークまたは apt ソースが必要）', depInstallNoteWindows: '不足モデルをダウンロードし、LibreOffice は winget で権限昇格してインストール（ネットワークが必要）', depInstallNoteMac: 'Homebrew で不足依存をインストール（ネットワークが必要、Homebrew 未導入なら brew.sh から先にインストール）',
+        dep_office_stream: 'リモート Office 添付の解析（python3-uno が必要・ここからインストール）',
         dep_pdf: 'PDF テキスト抽出', dep_office_modern: 'Office 文書（docx）', dep_office_legacy: '旧 Office / スライドと表計算',
         dep_ocr: '画像 / スキャン PDF の OCR', dep_archive: 'アーカイブ（zip/rar/7z）', dep_email: 'メール（.eml / .msg）', dep_voice_asr: 'ローカル音声認識',
         dep_voice_asr_model: '音声認識モデル（SenseVoice q8）', dep_knowledge_embedding_model: 'ナレッジ埋め込みモデル（bge-m3）',
@@ -800,7 +802,7 @@ const jaBase = {
 };
 
 // ja 漏翻的 key 回落英文，避免新增文案后显示 undefined
-export const dictJa = { ...dictEn, ...jaBase, diagnostics: failureDiagnosticsJa };
+export const dictJa = { ...dictEn, ...jaBase, diagnostics: failureDiagnosticsJa, tray: trayLabels };
 
 dictJa.uiToolDetails.flow = {
   incomplete:name=>`${name} の接続が未完了`, connected:name=>`${name} に接続済み`, connecting:name=>`${name} に接続中`,
@@ -811,17 +813,19 @@ dictJa.uiToolDetails.flow = {
   openBrowser:'ブラウザーで開く ↗', connectionIncomplete:'接続が完了していません', close:'閉じる', retry:'再試行',
 };
 
-dictJa.uiToolDetails.actions = { connectedTmeet:'Tencent Meeting に接続しました', enabled:'接続しました。ツールスイッチはデフォルトでオフです。入力欄のツールリストでオンにしてください', disconnectedTmeet:'Tencent Meeting から切断しました', connectingIma:'Tencent ima に接続中', validatingIma:'OpenAPI 認証情報を確認しています…', connectedIma:'Tencent ima に接続しました', imaEnabled:'IMA に接続しました。ツールスイッチはデフォルトでオフです。入力欄のツールリストでオンにしてください。', imaFailed:'IMA の接続に失敗しました', imaSkillsFailed:err=>`IMA の接続は完了しませんでした：スキルはインストールされましたが、同意状態の保存に失敗したため、今回の接続はロールバックされました（再接続が必要です）。再接続後にスキルが既定で有効になる場合は、入力欄のツールリストから手動でオフにしてください：${err}`, disconnectedIma:'Tencent ima から切断しました', operationFailed:'操作に失敗しました。再試行してください' };
+dictJa.uiToolDetails.actions = { connectedTmeet:'Tencent Meeting に接続しました', enabled:'接続しました。ツールスイッチはデフォルトでオンです。入力欄のツールリストで管理できます', disconnectedTmeet:'Tencent Meeting から切断しました', connectingIma:'Tencent ima に接続中', validatingIma:'OpenAPI 認証情報を確認しています…', connectedIma:'Tencent ima に接続しました', imaEnabled:'IMA に接続しました。ツールスイッチはデフォルトでオフです。入力欄のツールリストでオンにしてください。', imaFailed:'IMA の接続に失敗しました', imaSkillsFailed:err=>`IMA の接続は完了しませんでした：スキルはインストールされましたが、同意状態の保存に失敗したため、今回の接続はロールバックされました（再接続が必要です）。再接続後にスキルが既定で有効になる場合は、入力欄のツールリストから手動でオフにしてください：${err}`, disconnectedIma:'Tencent ima から切断しました', operationFailed:'操作に失敗しました。再試行してください' };
 
 dictJa.uiToolDetails.tmeetSteps = [{key:'runtime',label:'ランタイムを準備',sub:'アプリ同梱の Node を使用'},{key:'cli',label:'接続コンポーネントをインストール',sub:'tmeet · 初回は約 40 秒'},{key:'qr',label:'ログイン',sub:'Tencent Meeting 認証ページ'}];
 
+// Retained for parity with the private implementation this tree aligns with; it has
+// no consumer in the public tree (the flow card always renders localized copy).
 // Retained for parity with the private implementation this tree aligns with; it has
 // no consumer in the public tree (the flow card always renders localized copy).
 dictJa.uiToolDetails.showRawErrors = false;
 
 Object.assign(dictJa.uiToolDetails.tools, {
   'app-automations':{ title:'定期タスク', subtitle:'デスクトップでタスクを管理。対象が曖昧なら確認', latency:'ローカル', desc:'デスクトップの Operate/Yolo チャットでタスクの作成、確認、名前・モデル・一時停止状態の変更ができます。削除対象が明確なら実行し、同名や曖昧な指示がある場合は先にユーザーに確認します。タスク定義のバックアップや取り消しはありません。プロンプトや予定の上書きは定期タスク画面で確認して保存します。結果カードと画面で結果を確認できます。無人実行では委任を無効化します。アプリの起動が必要です。Plan と CLI は非対応。ローカルツールです。無効化は settings.json の disabled_builtin_features に scheduled-task-automation を追加して再起動します（設定画面の切替は未実装）。', welcomeQueries:['毎日 8:30 に AI ニュースまとめの定期タスクを作成して','6 月 1 日 9:30 に一度リマインドして','朝のダイジェストを一時停止して','既存のタスクを一覧表示して'] },
-  'session-reader':{ title:'セッション読み取り', subtitle:'この端末の他セッション履歴の読み取りと、他セッションへのメッセージ送信', latency:'ローカル', desc:'AI がこの端末の他の Pinvou セッション履歴をページング付きの読み取り専用で参照できます：入力欄で @ セッションを参照すると、AI が必要に応じて内容を取得します。また、別のセッションへメッセージを送信者カードとして届けられます（デフォルトでインストール。ローカルのセッションファイルのみを読み、ネットワーク接続もアップロードもなく、配信は監査ログに記録されます）。内蔵プラグインはアンインストールできません。セッション読み取りは内蔵機能スイッチでオフにできます。', welcomeQueries:['参照したセッションを要約して','前回のセッションはどこまで進んだ？'] },
+  'session-reader':{ title:'セッション読み取り', subtitle:'この端末の他セッション履歴の読み取り、メッセージ送信、新規セッション作成', latency:'ローカル', desc:'AI がこの端末の他の Pinvou セッション履歴をページング付きの読み取り専用で参照できます：入力欄で @ セッションを参照すると、AI が必要に応じて内容を取得します。また、別のセッションへメッセージを送信者カードとして届け、送信者必須・予算ゲート付きで新しいセッションを作成できます（デフォルトでインストール。ローカルのセッションファイルのみを読み、ネットワーク接続もアップロードもなく、書き込み操作に逐次の確認ダイアログは表示されず、配信とセッション作成は監査ログに記録されます）。内蔵プラグインはアンインストールできません。セッション読み取りとセッション作成は内蔵機能スイッチでオフにできます。', welcomeQueries:['参照したセッションを要約して','前回のセッションはどこまで進んだ？'] },
   weather:{ title:'Amap 天気', subtitle:'Amap 地図のリアルタイム天気と多日予報', desc:'Amap Web サービス API で全国の都市のリアルタイム天気と今後数日の予報を照会します。自分の Amap Web サービス API Key を入力する必要があります。キーはこの端末のシステム認証情報にのみ保存されます。', configTitle:'Amap 天気 Key', configDescription:'Key はこの端末の認証情報にのみ保存され、mcp.json には書き込まれません。', configDocLabel:'Web サービス Key を作成', configFields:[{key:'AMAP_KEY', label:'API Key', helpText:'「Web サービス」タイプを選択してください。', placeholder:'Amap Web サービス Key を貼り付け'}], welcomeQueries:['杭州の今日の天気','北京は今週雨が降る？','上海の明日の服装'] },
   iwencai:{ title:'iWenCai（問財）', subtitle:'A 株相場、財務、銘柄スクリーニング、マクロ、ニュース', desc:'同花順問財（iWenCai）公式 API をベースに 12 の金融照会ツールを提供します。自分の問財 API Key を入力する必要があります。キーはこの端末のシステム認証情報にのみ保存されます。', configTitle:'問財 Key', configDescription:'Key はこの端末の認証情報にのみ保存され、mcp.json には書き込まれません。', configDocLabel:'問財 SkillHub を開く', configFields:[{key:'IWENCAI_API_KEY', label:'API Key', helpText:'公式 Skill の「インストール方法」からコピーしてください。', placeholder:'IWENCAI_API_KEY を貼り付け'}], welcomeQueries:['茅台の最新株価','今日の市況は？','PER 10 倍未満の銀行株','最近の利下げニュース'] },
   card3:{ title:'QQ メール API', subtitle:'スマートなメール送受信とスレッド要約', desc:'メールの送受信、検索、整理のための標準インターフェースを提供します。大規模モデルと組み合わせて、自然言語でのメール閲覧、長いスレッドの要約、フォルダーの自動アーカイブ管理が可能です。' },
@@ -857,7 +861,7 @@ dictJa.uiBuiltinPlugins = {
   versionNote:'アプリと共に更新',
   dataAccessLabel:'データアクセス範囲',
   levels:{ L0:'読み取り専用：状態を変更せず、内容は信頼できないものとして扱う', L1:'書き込み：ユーザーに見える副作用を伴う（メッセージ送信、タスク作成など）', L2:'破壊的：削除・上書きなど不可逆な操作。明示的な認可が必要' },
-  dataAccess:{ 'sessions.read':'この端末のセッションストレージ（読み取り専用）', 'sessions.write':'この端末の他セッションへのメッセージ送信（書き込み）', 'automations.read':'本機の定期タスク一覧（読み取り専用）', 'automations.write':'本機の定期タスクの作成・変更・削除（書き込み）' },
+  dataAccess:{ 'sessions.read':'この端末のセッションストレージ（読み取り専用）', 'sessions.write':'この端末の他セッションへのメッセージ送信・作成（書き込み）', 'automations.read':'本機の定期タスク一覧（読み取り専用）', 'automations.write':'本機の定期タスクの作成・変更・削除（書き込み）' },
 };
 
 // Shared copy for builtin-feature degradation (docs/builtin-toolset-contract.md
@@ -1133,7 +1137,7 @@ desktopHint:'先にデスクトップで Obsidian をインストールして保
   connectFailed:name=>`${name} の接続に失敗しました`, connectTitle:name=>`${name} に接続`,
   connectBusy:name=>`${name} は前回のログインを処理中です`,
   connectBusyHint:'まもなく完了する場合があります。数秒待ってから再度「接続」を押してください。',
-  connectedBanner:name=>`${name} に接続済み · ツールスイッチはデフォルトでオフです。入力欄のツールリストでオンにできます`,
+  connectedBanner:name=>`${name} に接続済み · ツールスイッチはデフォルトでオンです。入力欄のツールリストで管理できます`,
   connectedBannerIma:'Tencent ima に接続済み · ツールスイッチはデフォルトでオフです。入力欄のツールリストでオンにできます',
   connectedTool:name=>`${name} に接続しました`, disconnectedTool:name=>`${name} から切断しました`,
   connectedQuoted:name=>`「${name}」に接続しました`, installedQuoted:name=>`「${name}」をインストールしました`, uninstalledQuoted:name=>`「${name}」をアンインストールしました`,
@@ -1180,6 +1184,8 @@ desktopHint:'先にデスクトップで Obsidian をインストールして保
     registration_failed:'アプリの登録が完了していません。再接続してください。',
     auth_failed:'ログイン認証が完了していません。再接続してください。',
     consent_persist_failed:'接続は完了しましたが、デフォルトOFFの同意状態の保存に失敗しました。入力欄のツールリストでコネクタをオフにしてから、再接続してください。',
+    connect_consent_persist_failed:'認証は完了しましたが、コネクタの有効状態の保存に失敗しました。外部には何も公開されていません。再接続して再試行してください。',
+    connect_consent_commit_incomplete:'認証は完了しましたが、コネクタの有効状態の確定に失敗しました。現在も有効ですが、並行して実行中の操作によって取り消される可能性があります。確定するには再接続してください。',
     skills_enable_failed:'認証は完了しましたが、スキルを有効化できませんでした。再試行してください。',
     unknown:'接続に失敗しました。後で再試行してください。',
   },
@@ -2102,6 +2108,8 @@ dictJa["uiAccount"] = {
 };
 dictJa["uiToolStore"]["guide"]["types"] = ["標準スキル（SKILL.md フォルダ）", "単一の .md スキルファイル", "MCP サービス", "Pinvou プラグインパッケージ（推奨）"];
 dictJa["uiToolStore"]["connectorErrors"] = {
+    "connect_consent_persist_failed": "認証は完了しましたが、コネクタの有効状態の保存に失敗しました。外部には何も公開されていません。再接続して再試行してください。",
+    "connect_consent_commit_incomplete": "認証は完了しましたが、コネクタの有効状態の確定に失敗しました。現在も有効ですが、並行して実行中の操作によって取り消される可能性があります。確定するには再接続してください。",
     "consent_persist_failed": "接続は完了しましたが、デフォルトOFFの同意状態の保存に失敗しました。入力欄のツールリストでコネクタをオフにしてから、再接続してください。",
   "runtime_prepare_failed": "コネクターの実行環境を準備できませんでした。再試行してください。",
   "cli_install_failed": "コネクターをインストールできませんでした。ネットワークを確認して再試行してください。",
@@ -2595,6 +2603,9 @@ dictJa["remoteConversation"] = {
   addAttachment: "リモート添付を追加",
   attachmentCountInvalid: "リモート添付を 1～8 個選択してください。",
   attachmentSizeInvalid: "各添付は空でなく、32 MiB 以下である必要があります。",
+  chatOpenFailed: "リモート会話を自動で開けませんでした。",
+  sessionOpenFailed: "タスクを受信した会話を自動で開けませんでした。",
+  openAgain: "もう一度開く",
   attachmentTotalSizeInvalid: "添付の合計サイズは 64 MiB 以下にしてください。",
   attachmentMetadataInvalid: "添付の名前または種類が無効か長すぎます。ファイルを選び直してください。",
   capabilityNotReady: "リモートタスクの機能情報が未準備です。準備完了を待つか、更新してから送信してください。",
@@ -2621,6 +2632,15 @@ dictJa.uiSettings.remoteControl = 'デスクトップ遠隔操作';
 dictJa.uiSettingsDetail.desktopRemoteControlEntryDesc = '接続コードを入力して相手の端末から本機に接続し、本機のモデルでタスクを実行できます。いつでも確認して切断できます。';
 dictJa.uiSettingsDetail.desktopRemoteControlBack = '一般に戻る';
 dictJa.remoteArchive = {
+  pendingLimit: '未確定のリクエスト数が上限に達しました。権威ある結果を待つか、「設定 → リモート操作 → リモート会話のアーカイブ」で切断し、古い記録の隔離を明示的に確認してから新しい会話を作成してください。隔離はリモートタスクのキャンセルや再送の許可ではありません。',
+  retirementBudget: 'この会話の永久リクエスト識別子の上限に達しました。「設定 → リモート操作 → リモート会話のアーカイブ」で切断し、未確定の要求がなければ永久アーカイブ、残っていれば読み取り専用の隔離を明示的に確認してから、新しい会話を作成してください。',
+  quarantine: '永久に読み取り専用で隔離', quarantineTitle: '会話の隔離を確認', quarantineConfirm: '永久隔離を確認',
+  quarantineWarning: 'この操作は取り消せません。履歴、未確定のリクエストと不明な結果をすべて保持し、古い識別子を永久に無効化して有効な記録の容量を解放します。リモートタスクは実行中かもしれません。隔離はキャンセル、成功、失敗を意味しません。古い記録は凍結され、遅れて届く結果の自動更新、再接続、旧タスクの再送はできません。続行するには新しい会話を作成してください。',
+  quarantinedHint: 'この記録は永久に凍結されています。一度も送信を試みていない事実と不明な結果は変わりません。リモートタスクは実行中かもしれませんが、この記録に結果は自動反映されません。',
+  frozenPrepared: '送信を一度も試みていないリクエスト', frozenUnknown: '結果が不明なリクエスト',
+  quarantineCompleted: '読み取り専用で永久に隔離し、有効な記録の容量を解放しました。新しい会話を作成し、旧タスクを再送しないでください。',
+  quarantineRefreshPending: '永久隔離は完了しましたが一覧を更新できませんでした。再読み込みしてください。古い識別子は復元できず、リモートタスクは実行中かもしれません。',
+  quarantineCleanupPending: '読み取り専用で永久に隔離しました。有効なファイルの整理は次回以降の書き込みで再試行します。古い識別子で実行できず、不明な結果は変わりません。',
   remote_proxy_unreadable: 'リモート記録を読み取れません。リモート書き込みは無効です。',
   remote_proxy_oversized: 'リモート記録が対応するサイズまたは件数を超えています。リモート書き込みは無効です。',
   remote_proxy_malformed: 'リモート記録を現在の形式で読み取れません。破損またはバージョンの非互換が考えられます。リモート書き込みは無効です。',
@@ -2629,7 +2649,7 @@ dictJa.remoteArchive = {
   remote_proxy_archive_unavailable: 'リモートアーカイブを利用できないか、有効な記録と競合しています。リモート書き込みは無効です。',
   byteBudget: 'リモート会話の容量がいっぱいです。「設定 → リモート操作 → リモート会話のアーカイブ」で接続を解除し、未解決のタスクを処理してから、オフライン会話を永久にアーカイブして容量を解放してください。',
   title: 'リモート会話のアーカイブ', active: '有効な記録', archived: 'アーカイブ済み履歴',
-  hint: 'オフラインの会話をアーカイブすると有効な記録の容量を解放できます。履歴とリプレイ防止記録は保持されますが、タスクの実行や再接続はできません。接続中の会話と未確定のタスクは先に終了してください。',
+  hint: '未確定の要求がないオフライン会話は永久アーカイブできます。要求が残る場合は、取り消せない読み取り専用の隔離を明示的に選べます。どちらも履歴とリプレイ防止記録を保持し、古い識別子での実行や再接続はできません。接続中または復旧中の会話は先に切断してください。',
   archive: '永久にアーカイブ', refresh: '更新', empty: '会話はありません', untitled: '無題の会話',
   previous: '前のページ', next: '次のページ', readOnly: '読み取り専用アーカイブ',
   completed: 'アーカイブが完了し、有効な記録の容量が解放されました。',

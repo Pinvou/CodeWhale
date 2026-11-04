@@ -16,10 +16,10 @@ import { zhDict } from '../../shared/i18n.js';
 // lazy-load window yields undefined and the flat shape wins).
 const tc = (t) => (t && t.uiToolCommon) || zhDict().uiToolCommon || t || {};
     // 设计稿专用图标（逐字照搬 前端-产物卡片.txt，含其独有 strokeWidth）。
-    const AcShieldCheck = ({ className }) => <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className={className}><path d="M20 13c0 5-3.5 7.5-7.66 8.95a1 1 0 0 1-.67-.01C7.5 20.5 4 18 4 13V6a1 1 0 0 1 1-1c2 0 4.5-1.2 6.24-2.72a1.17 1.17 0 0 1 1.52 0C14.51 3.81 17 5 19 5a1 1 0 0 1 1 1z"/><path d="m9 12 2 2 4-4"/></svg>;
-    const AcSparkles = ({ className }) => <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className={className}><path d="m12 3-1.912 5.813a2 2 0 0 1-1.275 1.275L3 12l5.813 1.912a2 2 0 0 1 1.275 1.275L12 21l1.912-5.813a2 2 0 0 1 1.275-1.275L21 12l-5.813-1.912a2 2 0 0 1-1.275-1.275L12 3Z"/></svg>;
-    const AcArrowUpRight = ({ className }) => <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round" className={className}><path d="M7 7h10v10"/><path d="M7 17 17 7"/></svg>;
-    const AcFolder = ({ className }) => <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className={className}><path d="M4 20h16a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2h-7.93a2 2 0 0 1-1.66-.9l-.82-1.2A2 2 0 0 0 7.93 3H4a2 2 0 0 0-2 2v13c0 1.1.9 2 2 2Z"/></svg>;
+    const AcShieldCheck = ({ className }) => <svg aria-hidden="true" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className={className}><path d="M20 13c0 5-3.5 7.5-7.66 8.95a1 1 0 0 1-.67-.01C7.5 20.5 4 18 4 13V6a1 1 0 0 1 1-1c2 0 4.5-1.2 6.24-2.72a1.17 1.17 0 0 1 1.52 0C14.51 3.81 17 5 19 5a1 1 0 0 1 1 1z"/><path d="m9 12 2 2 4-4"/></svg>;
+    const AcSparkles = ({ className }) => <svg aria-hidden="true" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className={className}><path d="m12 3-1.912 5.813a2 2 0 0 1-1.275 1.275L3 12l5.813 1.912a2 2 0 0 1 1.275 1.275L12 21l1.912-5.813a2 2 0 0 1 1.275-1.275L21 12l-5.813-1.912a2 2 0 0 1-1.275-1.275L12 3Z"/></svg>;
+    const AcArrowUpRight = ({ className }) => <svg aria-hidden="true" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round" className={className}><path d="M7 7h10v10"/><path d="M7 17 17 7"/></svg>;
+    const AcFolder = ({ className }) => <svg aria-hidden="true" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className={className}><path d="M4 20h16a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2h-7.93a2 2 0 0 1-1.66-.9l-.82-1.2A2 2 0 0 0 7.93 3H4a2 2 0 0 0-2 2v13c0 1.1.9 2 2 2Z"/></svg>;
 
     const ArtifactCard = ({ item, theme, t, isLatest }) => {
       const path = item.path || '';
@@ -75,7 +75,7 @@ const tc = (t) => (t && t.uiToolCommon) || zhDict().uiToolCommon || t || {};
               <h2 className="text-[20px] font-semibold tracking-tight text-[#111] dark:text-[#eee] leading-snug truncate group-hover/header:text-[#007AFF] transition-colors">
                 {title}
               </h2>
-              {canOpenArtifact && <button onClick={(e) => { e.stopPropagation(); open(); }} className="flex-shrink-0 flex items-center justify-center w-9 h-9 rounded-full bg-gray-100 dark:bg-white/5 group-hover/header:bg-gray-200 dark:group-hover/header:bg-white/10 text-[#007AFF] dark:text-[#0A84FF] transition-colors active:scale-95" aria-label={tc(t).open}>
+              {canOpenArtifact && <button type="button" onClick={(e) => { e.stopPropagation(); open(); }} className="flex-shrink-0 flex items-center justify-center w-9 h-9 rounded-full bg-gray-100 dark:bg-white/5 group-hover/header:bg-gray-200 dark:group-hover/header:bg-white/10 text-[#007AFF] dark:text-[#0A84FF] transition-colors active:scale-95" aria-label={tc(t).open}>
                 <AcArrowUpRight className="w-[18px] h-[18px]" />
               </button>}
             </div>
@@ -83,13 +83,13 @@ const tc = (t) => (t && t.uiToolCommon) || zhDict().uiToolCommon || t || {};
             {/* 智能操作区：品 / 悟，横排单行、无副标题；仅最新产物显示 */}
             {isLatest && (
               <div className="grid grid-cols-2 gap-3 mb-4 px-3">
-                <button onClick={() => bridge.available && bridge.interaction.summonPinvou(path)} title={t.pvBtnPinTitle}
+                <button type="button" onClick={() => bridge.available && bridge.interaction.summonPinvou(path)} title={t.pvBtnPinTitle}
                   className="flex items-center justify-center min-w-0 py-3.5 px-3 rounded-[12px] bg-[#F9F9F9] dark:bg-white/5 hover:bg-[#F0F0F0] dark:hover:bg-white/10 transition-colors active:scale-[0.98] group/btn" aria-label={tc(t).pinAriaLabel}>
                   <AcShieldCheck className="w-[18px] h-[18px] text-[#FF9500] dark:text-[#FF9F0A] mr-2 shrink-0" />
                   <span className="text-[14px] font-medium text-[#111] dark:text-[#eee] truncate">{t.pvBtnPinLabel}</span>
                 </button>
 
-                <button onClick={() => bridge.available && bridge.interaction.inspectPinvou(path)} title={t.pvBtnWuTitle}
+                <button type="button" onClick={() => bridge.available && bridge.interaction.inspectPinvou(path)} title={t.pvBtnWuTitle}
                   className="flex items-center justify-center min-w-0 py-3.5 px-3 rounded-[12px] bg-[#F9F9F9] dark:bg-white/5 hover:bg-[#F0F0F0] dark:hover:bg-white/10 transition-colors active:scale-[0.98] group/btn" aria-label={tc(t).wuAriaLabel}>
                   <AcSparkles className="w-[18px] h-[18px] text-[#5E5CE6] dark:text-[#5E5CE6] mr-2 shrink-0" />
                   <span className="text-[14px] font-medium text-[#111] dark:text-[#eee] truncate">{t.pvBtnWuLabel}</span>

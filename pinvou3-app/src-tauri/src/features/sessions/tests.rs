@@ -1089,6 +1089,63 @@ fn validate_workspace_roots_rejects_an_over_cap_declaration() {
     );
 }
 
+/// Round-23 M1 (#657): the pinvou3 home (settings.json, connector
+/// credentials, sessions/, spool roots) is refused as a project workspace —
+/// binding it would present privileged state as an unattended opening
+/// turn's project. Deleting the scope clause turns this red. Round-29
+/// hygiene: runs against a relocated PINVOU3_HOME under the env lock —
+/// the real ~/.pinvou3 used to be created and read as a side effect, and
+/// the env write raced parallel tests.
+#[test]
+fn validate_user_workspace_path_refuses_pinvou3_home() {
+    use super::validators::validate_user_workspace_path;
+
+    let (_lock, _env) = crate::platform::test_support::locked_env(&["PINVOU3_HOME"]);
+    let home = std::env::temp_dir().join(format!(
+        "pinvou3-home-refusal-{}-{}",
+        std::process::id(),
+        crate::platform::paths::tests::unique_suffix()
+    ));
+    let _ = std::fs::remove_dir_all(&home);
+    // SAFETY: platform::paths::tests::ENV_LOCK held; env writes are serialized.
+    unsafe { std::env::set_var("PINVOU3_HOME", &home) };
+    std::fs::create_dir_all(&home).expect("seed relocated home");
+    let validated = validate_user_workspace_path(home.to_str().expect("utf8"));
+    assert!(
+        validated.is_err(),
+        "the pinvou3 home must be refused: {:?}",
+        validated
+    );
+    let inside = home.join("sessions");
+    std::fs::create_dir_all(&inside).expect("seed sessions dir");
+    assert!(
+        validate_user_workspace_path(inside.to_str().expect("utf8")).is_err(),
+        "paths inside the pinvou3 home must also be refused"
+    );
+    let _ = std::fs::remove_dir_all(&home);
+}
+
+/// Round-29 minor: the volume-root clause had no test, and the retired
+/// `len() <= 3` heuristic misclassified 1-2 character top-level
+/// directories as volume roots. Pins the refusal on the real root; the
+/// happy path for ordinary directories is pinned by the validator tests
+/// above.
+#[test]
+fn validate_user_workspace_path_refuses_volume_root() {
+    use super::validators::validate_user_workspace_path;
+
+    let root = if cfg!(windows) { r"C:\" } else { "/" };
+    let canonical_root = std::path::Path::new(root)
+        .canonicalize()
+        .expect("the volume root canonicalizes");
+    let error = validate_user_workspace_path(canonical_root.to_str().expect("utf8"))
+        .expect_err("the volume root must be refused");
+    assert!(
+        error.to_string().contains("volume root"),
+        "refusal must name the volume root: {error}"
+    );
+}
+
 fn text_message(role: &str, text: &str) -> Message {
     Message {
         role: role.into(),
@@ -3015,6 +3072,60 @@ fn delete_removes_session() {
 }
 
 #[test]
+fn delete_reclaims_remote_attachment_references_without_removing_the_user_workspace() {
+    if !crate::platform::filesystem::supports_private_read_path_publication() {
+        return;
+    }
+    with_isolated_store_restoring_home(|store| {
+        use sha2::{Digest as _, Sha256};
+        let workspace = tempfile::tempdir().unwrap();
+        let user_file = workspace.path().join("keep.txt");
+        std::fs::write(&user_file, b"user workspace file").unwrap();
+        let session = store
+            .create_new("/model".into(), None, workspace.path().to_owned())
+            .unwrap();
+        let ledger = store.session_roots(&session.metadata.id).unwrap().ledger;
+        let body = b"session attachment";
+        let owner = Arc::new(
+            crate::platform::filesystem::publish_private_read_path(
+                crate::platform::filesystem::open_private_file_directory(
+                    &ledger.join("remote_uploads/ctr-up-delete"),
+                )
+                .unwrap(),
+                std::ffi::OsStr::new("report.txt"),
+                body,
+            )
+            .unwrap(),
+        );
+        let independent_reference = owner.read_path() != owner.path();
+        let descriptor = crate::features::files::file_ingest::PublishedAttachment {
+            handle_id: "ctr-up-delete".into(),
+            path: owner.path().to_owned(),
+            display_name: "report.txt".into(),
+            mime_type: "text/plain".into(),
+            bytes: body.len() as u64,
+            sha256: crate::platform::encoding::hex_lower(&Sha256::digest(body)),
+            read_owner: Some(owner.clone()),
+        };
+        let ingested =
+            crate::features::files::file_ingest::ingest_staged_attachment(&ledger, &descriptor)
+                .unwrap();
+        let reference = PathBuf::from(&ingested.path);
+        drop(ingested);
+        drop(descriptor);
+        owner.request_cleanup();
+        drop(owner);
+        if independent_reference {
+            assert_eq!(std::fs::read(&reference).unwrap(), body);
+        }
+        store.delete(&session.metadata.id).unwrap();
+        assert!(!ledger.exists());
+        assert!(!reference.exists());
+        assert_eq!(std::fs::read(user_file).unwrap(), b"user workspace file");
+    });
+}
+
+#[test]
 fn active_id_tracks_set_active() {
     let (store, _g) = isolated_store();
     assert!(store.active_id().is_none());
@@ -3863,44 +3974,6 @@ fn retention_purge_notifies_session_purged_hooks() {
         notified,
         vec![id],
         "the purge hook must receive the deleted session id"
-    );
-}
-
-/// The composition root's purge hook also removes the session's entry from
-/// the codex_acp agents index — durable, id-scoped IO performed WHILE the
-/// purge runs. The store's hook contract (store.rs) keeps the sidecar io
-/// mutexes released while hooks fire (`scheduled_mutation` stays held), so
-/// a hook may touch its own files without self-deadlock; this test cannot
-/// pin that lock contract itself — it pins that the hook fires with exactly
-/// the evicted id and can perform durable, id-keyed IO while the purge
-/// runs. Pinned with a file stand-in for the index: sessions must not
-/// depend on codex_acp here. The removal leg is unit-tested in lib.rs
-/// against a real agents store, and the run() capture is pinned textually
-/// by the startup-order contract test.
-#[test]
-fn retention_purge_runs_hooks_that_remove_durable_state_for_the_id() {
-    let (store, _guard) = isolated_store();
-    let chat = store
-        .create_new("m".into(), None, std::env::temp_dir())
-        .expect("create chat");
-    let id = chat.metadata.id.clone();
-
-    // Underscore-prefixed like the other scan-invisible sidecar files.
-    let entry = paths::sessions_root().join(format!("_{id}.purge-hook-stub"));
-    std::fs::write(&entry, b"index entry stand-in").expect("seed stub");
-    store.register_session_purged_hook(std::sync::Arc::new(move |sid: &str| {
-        // Stand-in for the agents-index removal: the file is keyed by the id
-        // the hook actually receives, so a wrong id keeps the stub and fails
-        // the assertion below.
-        let _ =
-            std::fs::remove_file(paths::sessions_root().join(format!("_{sid}.purge-hook-stub")));
-    }));
-
-    store.purge_session_side_maps(std::slice::from_ref(&id));
-
-    assert!(
-        !entry.exists(),
-        "the purge must run hooks that remove durable state for the evicted id"
     );
 }
 

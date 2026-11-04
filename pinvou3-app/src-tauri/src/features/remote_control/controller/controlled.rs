@@ -14,6 +14,7 @@ use uuid::Uuid;
 use zeroize::{Zeroize, Zeroizing};
 
 use super::crypto::{AuthenticatedRelayTrustConfig, authenticate_relay_liveness_attestation};
+use super::journal::{JournalOwner, RemoteJournal};
 use super::liveness::{
     ControllerLivenessWatchdog, LivenessWatchdogState, MAX_LIVENESS_ATTESTATION_AGE_MS,
 };
@@ -416,6 +417,18 @@ enum ReconnectReason {
     LivenessSuspect,
 }
 
+/// Only the lifecycle manager can construct or retain issuance authority.
+/// Consumers receive the journal view and opaque owner handles separately.
+pub(super) struct JournalAuthority {
+    journal: Arc<RemoteJournal>,
+}
+
+impl JournalAuthority {
+    pub(super) fn controls(&self, journal: &RemoteJournal) -> bool {
+        std::ptr::eq(self.journal.as_ref(), journal)
+    }
+}
+
 struct Inner {
     phase: ControlledStatusKind,
     intent: u64,
@@ -427,6 +440,8 @@ struct Inner {
     pairing: Option<PairingState>,
     preconnect_deadline: Option<ControlledPreconnectDeadline>,
     lease_context: Option<LeaseContext>,
+    journal_authority: JournalAuthority,
+    journal_owner: Option<JournalOwner>,
     negotiated_capabilities: Vec<String>,
     liveness_epoch_a: Option<String>,
     controller_device_name: Option<String>,
@@ -458,6 +473,10 @@ impl Default for Inner {
             pairing: None,
             preconnect_deadline: None,
             lease_context: None,
+            journal_authority: JournalAuthority {
+                journal: Arc::new(RemoteJournal::new(format!("boot-{}", Uuid::new_v4()))),
+            },
+            journal_owner: None,
             negotiated_capabilities: Vec::new(),
             liveness_epoch_a: None,
             controller_device_name: None,
@@ -785,6 +804,12 @@ impl ControlledDeviceManager {
             lease.transport_key_fingerprint,
             lease.resume_deadline_b,
         );
+        let journal_owner = inner
+            .journal_authority
+            .journal
+            .activate_owner(&inner.journal_authority, &operation.generation)
+            .map_err(|_| ControlledStateError::new("desktop_remote_phase_invalid"))?;
+        inner.journal_owner = Some(journal_owner);
         if let Some(transport) = install()? {
             if let Some(previous) = inner.transport.replace(transport) {
                 previous.stop();
@@ -1115,6 +1140,7 @@ impl ControlledDeviceManager {
         ) {
             return Err(ControlledStateError::new("desktop_remote_refresh_invalid"));
         }
+        revoke_journal_owner(&mut inner);
         inner.intent += 1;
         if let Some(pairing) = inner.pairing.as_mut() {
             pairing.pairing_code.zeroize();
@@ -1809,6 +1835,14 @@ impl ControlledDeviceManager {
         expected: &LeaseContext,
         action: impl FnOnce() -> T,
     ) -> Result<T> {
+        self.with_current_business_inner(expected, |_| action())
+    }
+
+    fn with_current_business_inner<T>(
+        &self,
+        expected: &LeaseContext,
+        action: impl FnOnce(&Inner) -> T,
+    ) -> Result<T> {
         let inner = self.inner.lock();
         if inner.phase != ControlledStatusKind::Connected
             || inner.lease_context.as_ref() != Some(expected)
@@ -1821,11 +1855,34 @@ impl ControlledDeviceManager {
         let mut action = Some(action);
         let mut result = None;
         if !transport.with_business_authority(expected, &mut || {
-            result = action.take().map(|action| action());
+            result = action.take().map(|action| action(&inner));
         }) {
             return Err(ControlledStateError::new("desktop_remote_not_connected"));
         }
         result.ok_or_else(|| ControlledStateError::new("desktop_remote_not_connected"))
+    }
+
+    pub(crate) fn journal(&self) -> Arc<RemoteJournal> {
+        Arc::clone(&self.inner.lock().journal_authority.journal)
+    }
+
+    /// Capture only an owner already issued to this exact authenticated lease.
+    /// The journal revalidates it at the final operation after this lock exits.
+    pub(crate) fn business_journal_owner(&self, expected: &LeaseContext) -> Result<JournalOwner> {
+        self.with_current_business_inner(expected, |inner| inner.journal_owner.clone())?
+            .ok_or_else(|| ControlledStateError::new("desktop_remote_not_connected"))
+    }
+
+    /// Accepted local work keeps recording through same-generation reconnect.
+    /// Lease and owner must be captured together, before any mapping lookup.
+    pub(crate) fn local_journal_context(&self) -> Result<(LeaseContext, JournalOwner)> {
+        let inner = self.inner.lock();
+        let lease = local_cancel_lease(&inner)?;
+        let owner = inner
+            .journal_owner
+            .clone()
+            .ok_or_else(|| ControlledStateError::new("desktop_remote_not_connected"))?;
+        Ok((lease.clone(), owner))
     }
 
     /// Response construction pins the B owner but is not business admission.
@@ -1852,19 +1909,7 @@ impl ControlledDeviceManager {
         admit: impl FnOnce(&LeaseContext) -> T,
     ) -> Result<T> {
         let inner = self.inner.lock();
-        if !matches!(
-            inner.phase,
-            ControlledStatusKind::Connected
-                | ControlledStatusKind::Reconnecting
-                | ControlledStatusKind::ResumeProvisional
-                | ControlledStatusKind::ResumeActivatedPendingLiveness
-        ) {
-            return Err(ControlledStateError::new("desktop_remote_not_connected"));
-        }
-        let lease = inner
-            .lease_context
-            .as_ref()
-            .ok_or_else(|| ControlledStateError::new("desktop_remote_not_connected"))?;
+        let lease = local_cancel_lease(&inner)?;
         Ok(admit(lease))
     }
 
@@ -2096,6 +2141,31 @@ fn recover_liveness_suspect(inner: &mut Inner, now_b: u64) {
     }
 }
 
+fn local_cancel_lease(inner: &Inner) -> Result<&LeaseContext> {
+    if !matches!(
+        inner.phase,
+        ControlledStatusKind::Connected
+            | ControlledStatusKind::Reconnecting
+            | ControlledStatusKind::ResumeProvisional
+            | ControlledStatusKind::ResumeActivatedPendingLiveness
+    ) {
+        return Err(ControlledStateError::new("desktop_remote_not_connected"));
+    }
+    inner
+        .lease_context
+        .as_ref()
+        .ok_or_else(|| ControlledStateError::new("desktop_remote_not_connected"))
+}
+
+fn revoke_journal_owner(inner: &mut Inner) {
+    if let Some(owner) = inner.journal_owner.take() {
+        inner
+            .journal_authority
+            .journal
+            .revoke_owner(&inner.journal_authority, &owner);
+    }
+}
+
 fn require_preconnect_live(inner: &Inner, now_b: u64) -> Result<()> {
     let ticket = inner
         .preconnect_deadline
@@ -2110,6 +2180,7 @@ fn require_preconnect_live(inner: &Inner, now_b: u64) -> Result<()> {
 }
 
 fn clear_sensitive(inner: &mut Inner, now_b: u64, clear_workspaces: bool) {
+    revoke_journal_owner(inner);
     if let Some(generation) = inner.generation.as_ref() {
         inner.retired_generation = Some(generation.clone());
     }
@@ -2229,6 +2300,10 @@ fn validate_pairing_code(code: &str) -> Result<()> {
     }
     Ok(())
 }
+
+#[cfg(test)]
+#[path = "controlled/journal_owner_tests.rs"]
+mod journal_owner_tests;
 
 #[cfg(test)]
 mod tests {
@@ -2639,7 +2714,7 @@ mod tests {
         }
     }
 
-    fn lease(generation: &str) -> ControlledLease {
+    pub(super) fn lease(generation: &str) -> ControlledLease {
         ControlledLease {
             context: LeaseContext {
                 connection_id: "connection-0001".into(),
@@ -2680,21 +2755,28 @@ mod tests {
         .to_string()
     }
 
-    fn register(manager: &ControlledDeviceManager, operation: &ControlledOperation) {
+    pub(super) fn register(manager: &ControlledDeviceManager, operation: &ControlledOperation) {
         manager
             .complete_registration(
                 operation.clone(),
                 ControlledRegistration {
                     pairing_code: "2345678".into(),
                     sealed_code_b64: "sealed".into(),
-                    expires_at_ms: 30_000,
+                    // A successor registration issues a fresh pairing code; keep
+                    // the expiry above every fixture clock advance (tests move
+                    // last_observed_now_b up to 33_000) so the merged #2146
+                    // preconnect deadline check sees a live ticket.
+                    expires_at_ms: 90_000,
                 },
                 1_000,
             )
             .unwrap();
     }
 
-    fn enter_handshake(manager: &ControlledDeviceManager, operation: &ControlledOperation) {
+    pub(super) fn enter_handshake(
+        manager: &ControlledDeviceManager,
+        operation: &ControlledOperation,
+    ) {
         manager.mark_pairing_reserved(operation.clone()).unwrap();
         manager.mark_handshake_pending(operation.clone()).unwrap();
     }
@@ -3087,6 +3169,21 @@ mod tests {
         manager
             .complete_connected(operation.clone(), lease(&operation.generation))
             .unwrap();
+        let journal = manager.journal();
+        let (_, journal_owner) = manager.local_journal_context().unwrap();
+        journal
+            .append_for_owner(
+                &journal_owner,
+                "before-resume",
+                super::super::journal::JournalKind::UserMessage,
+                "b-session",
+                None,
+                serde_json::json!({"text":"keep through resume"}),
+            )
+            .unwrap();
+        let before_journal = journal
+            .snapshot_for_owner(&journal_owner, "b-session")
+            .unwrap();
         let current = lease(&operation.generation);
         let sender = super::super::test_support::resume_reader_transport(
             super::super::relay_transport::ControllerRole::ControlledB,
@@ -3178,6 +3275,30 @@ mod tests {
             )
             .unwrap();
         assert_eq!(resumed.status, ControlledStatusKind::Connected);
+        let (_, resumed_owner) = manager.local_journal_context().unwrap();
+        assert_eq!(
+            journal
+                .snapshot_for_owner(&journal_owner, "b-session")
+                .unwrap(),
+            before_journal
+        );
+        assert_eq!(
+            journal
+                .snapshot_for_owner(&resumed_owner, "b-session")
+                .unwrap(),
+            before_journal
+        );
+        journal
+            .append_for_owner(
+                &resumed_owner,
+                "after-resume",
+                super::super::journal::JournalKind::UserMessage,
+                "b-session",
+                None,
+                serde_json::json!({"text":"next accepted local event"}),
+            )
+            .unwrap();
+
         assert_eq!(manager.live_liveness_epoch(), Some("live:a-2".to_owned()));
 
         // 第二次断线后相位错乱（未 provisional 就 confirm）必须失败关闭。
@@ -3206,6 +3327,11 @@ mod tests {
             Some("desktop_remote_resume_invalid")
         );
         assert!(manager.live_lease().is_err());
+        assert!(
+            journal
+                .snapshot_for_owner(&journal_owner, "b-session")
+                .is_err()
+        );
     }
 
     #[test]

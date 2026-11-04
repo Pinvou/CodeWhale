@@ -6,10 +6,12 @@
 //!
 //! [`super`]: super
 
+use std::io::Read as _;
 use std::path::Path;
 use std::process::Command;
 use std::sync::OnceLock;
 
+use super::ingest_diagnostics::safe_error;
 use serde::Serialize;
 
 /// 各 ingest 子模块需要的系统工具探测结果（启动时缓存一次）。
@@ -107,6 +109,9 @@ pub fn check_dependencies() -> Vec<DependencyCheckItem> {
         crate::features::voice::asr_dependency_packages(),
     ));
     items.push(item("office_legacy", libreoffice, "libreoffice"));
+    if let Some((installed, packages)) = super::super::platform::office_stream_dependency() {
+        items.push(item("office_stream", installed, packages));
+    }
     if crate::platform::os::show_ocr_dependency_check() {
         items.push(item(
             "ocr",
@@ -142,25 +147,51 @@ pub(super) fn pdf_tool_command(command: &str) -> Command {
     crate::platform::process::HiddenCommand::new(crate::platform::os::pdf_tool_path(command))
 }
 
-/// `pdftotext -layout <pdf> -` → stdout text, shared by pdf-body extraction
-/// and presentation-to-PDF extraction. Kill-backed timeout (60s): corrupt or
-/// oddly wrapped input can hang the demuxer. Failure wording keeps the two
-/// call sites' historical strings (spawn failure → 「pdftotext 调用失败」,
-/// non-zero exit → 「pdftotext 失败」); the kind/warning IngestResult wrapping
-/// stays with the caller.
+/// 抽取产物落盘后的读回上限。整本文档走 stdout 曾受平台层 4 MiB 捕获上限
+/// 约束，几千页的合法文档会被误杀；改落盘后读回侧独立限量，放宽到 32 MiB
+/// （仍挡住解压炸弹类输入把读回变成无界内存）。
+pub(super) const EXTRACTED_TEXT_READ_CAP: u64 = 32 * 1024 * 1024;
+
+/// 从抽取产物文件限量读回文本：超过 [`EXTRACTED_TEXT_READ_CAP`] 报错。
+pub(super) fn read_capped_text(path: &Path) -> Result<String, String> {
+    let file =
+        std::fs::File::open(path).map_err(|e| safe_error(format!("读取抽取产物失败: {e}")))?;
+    let mut buffer = Vec::new();
+    file.take(EXTRACTED_TEXT_READ_CAP + 1)
+        .read_to_end(&mut buffer)
+        .map_err(|e| safe_error(format!("读取抽取产物失败: {e}")))?;
+    if buffer.len() as u64 > EXTRACTED_TEXT_READ_CAP {
+        return Err(safe_error(format!(
+            "抽取文本超过 {EXTRACTED_TEXT_READ_CAP} 字节读回上限"
+        )));
+    }
+    Ok(String::from_utf8_lossy(&buffer).into_owned())
+}
+
+/// `pdftotext -layout <pdf> <tmpfile>` → 落盘后限量读回，shared by pdf-body
+/// extraction and presentation-to-PDF extraction. Kill-backed timeout (60s):
+/// corrupt or oddly wrapped input can hang the demuxer. Failure wording keeps
+/// the two call sites' historical strings (spawn failure → 「pdftotext 调用
+/// 失败」, non-zero exit → 「pdftotext 失败」); the kind/warning IngestResult
+/// wrapping stays with the caller.
 pub(super) fn pdftotext_extract(pdf: &Path) -> Result<String, String> {
+    // 产物落盘再限量读回（原 `-` 走 stdout，整本输出受平台层 4 MiB 捕获上限
+    // 约束，大文档会被整树终止误杀）；runaway 进程仍受超时与溢出终止约束。
+    let temporary = super::super::platform::private_conversion_directory("pinvou3-pdftotext-")
+        .map_err(|e| safe_error(format!("pdftotext 调用失败: {e}")))?;
+    let output_path = temporary.path().join("extracted.txt");
     let mut command = pdf_tool_command("pdftotext");
-    command.arg("-layout").arg(pdf).arg("-");
+    command.arg("-layout").arg(pdf).arg(&output_path);
     match crate::platform::process::output_with_timeout_and_kill_tree(
         command,
         std::time::Duration::from_secs(60),
     ) {
-        Ok(o) if o.status.success() => Ok(String::from_utf8_lossy(&o.stdout).into_owned()),
-        Ok(o) => Err(format!(
+        Ok(o) if o.status.success() => read_capped_text(&output_path).map_err(safe_error),
+        Ok(o) => Err(safe_error(format!(
             "pdftotext 失败: {}",
             String::from_utf8_lossy(&o.stderr).trim()
-        )),
-        Err(e) => Err(format!("pdftotext 调用失败: {e}")),
+        ))),
+        Err(e) => Err(safe_error(format!("pdftotext 调用失败: {e}"))),
     }
 }
 
@@ -206,19 +237,23 @@ pub(super) fn run_libreoffice_convert<T>(
     fail_label: &str,
     consume: impl FnOnce(&Path) -> Result<T, String>,
 ) -> Result<T, String> {
-    // Temp dir: unique each time, avoiding concurrent file-name conflicts.
-    let ts = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_nanos())
-        .unwrap_or(0);
-    let tmpdir = std::env::temp_dir().join(format!("{tmp_prefix}-{ts}"));
-    std::fs::create_dir_all(&tmpdir).map_err(|e| format!("failed to create temp dir: {e}"))?;
+    // The output contains decrypted attachment content too. A fresh private
+    // directory avoids permissive modes and pre-existing-name adoption on Unix.
+    let temporary = super::super::platform::private_conversion_directory(&format!("{tmp_prefix}-"))
+        .map_err(|e| safe_error(format!("failed to create temp dir: {e}")))?;
+    let tmpdir = temporary.path().to_owned();
 
     // soffice cold start or a stale lock can hang; bounded by a 180s kill-tree
     // timeout (same budget as the #532 inline conversion points). The profile
     // argument is built inside the closure so every error path below still
     // reaches the cleanup step instead of leaking the temp dir.
     let result = (|| -> Result<T, String> {
+        if let Some(converted) =
+            super::super::platform::convert_office_stream(path, convert_to, &tmpdir)
+        {
+            converted?;
+            return consume(&tmpdir);
+        }
         let profile_arg = libreoffice_user_installation_arg(&tmpdir.join("profile"))?;
         let out = crate::platform::process::output_with_timeout_and_kill_tree(
             {
@@ -237,11 +272,11 @@ pub(super) fn run_libreoffice_convert<T>(
         );
         match out {
             Ok(o) if o.status.success() => consume(&tmpdir),
-            Ok(o) => Err(format!(
+            Ok(o) => Err(safe_error(format!(
                 "{fail_label}: {}",
                 String::from_utf8_lossy(&o.stderr).trim()
-            )),
-            Err(e) => Err(format!("LibreOffice invocation failed: {e}")),
+            ))),
+            Err(e) => Err(safe_error(format!("LibreOffice invocation failed: {e}"))),
         }
     })();
     let _ = std::fs::remove_dir_all(&tmpdir);
@@ -313,6 +348,46 @@ pub(super) fn ocr_lang_arg() -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn read_capped_text_passes_small_files_and_rejects_over_cap() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("text.txt");
+        std::fs::write(&path, "抽取文本").unwrap();
+        assert_eq!(read_capped_text(&path).unwrap(), "抽取文本");
+
+        std::fs::write(&path, vec![b'a'; (EXTRACTED_TEXT_READ_CAP + 1) as usize]).unwrap();
+        let error = read_capped_text(&path).unwrap_err();
+        assert!(error.contains("读回上限"), "{error}");
+    }
+
+    #[test]
+    fn capped_read_errors_keep_local_detail_but_redact_private_conversions() {
+        let dir = super::super::super::platform::private_conversion_directory("pinvou3-read-test-")
+            .unwrap();
+        let missing = dir.path().join("missing-output.txt");
+        let local_error = read_capped_text(&missing).unwrap_err();
+        assert!(local_error.starts_with("读取抽取产物失败:"));
+
+        let oversized = dir.path().join("oversized-output.txt");
+        std::fs::File::create(&oversized)
+            .unwrap()
+            .set_len(EXTRACTED_TEXT_READ_CAP + 1)
+            .unwrap();
+        super::super::ingest_diagnostics::with_private(|| {
+            for path in [&missing, &oversized] {
+                assert_eq!(
+                    read_capped_text(path).unwrap_err(),
+                    super::super::ingest_diagnostics::CONVERSION_FAILED,
+                );
+            }
+        });
+        assert!(
+            read_capped_text(&oversized)
+                .unwrap_err()
+                .contains("读回上限")
+        );
+    }
 
     #[test]
     fn libreoffice_user_installation_uses_encoded_file_url() {

@@ -133,16 +133,38 @@ pub(crate) enum ProbeError {
 impl ProbeError {
     /// 在**包装人类可读文案之前**对 platform::process 的原始错误分型。
     /// 分型依据是本仓库自家模块的报错格式(`spawn {program} failed: ` 出自
-    /// platform/process.rs 的 spawn 失败路径,` timed out after ` 出自超时
-    /// 路径),由下方测试钉住。分型必须吃原始错误——先包装后分型会让前缀
-    /// 匹配永远落空,降级分支随之失效(本轮修掉的回归)。
+    /// platform/process.rs 的 spawn 失败路径,`CAPTURE_TIMEOUT_ANCHOR` /
+    /// `CAPTURE_OVERFLOW_ANCHOR` 两条锚点常量出自超时/溢出路径),由下方测试
+    /// 钉住。分型必须吃原始错误——先包装后分型会让前缀匹配永远落空,降级
+    /// 分支随之失效(本轮修掉的回归)。两个锚点都在 platform 的**固定前缀**
+    /// 里、必然先于内嵌的捕获输出出现,故按首次出现位置取先者——即便子进程
+    /// 自己的输出里也含另一条锚点文本,也不会误报超时。超时与溢出统一在
+    /// 胜出锚点后按 detail 分隔符剪切(见 [`withhold_captured_output`]):
+    /// 溢出剪切不得依赖 tree-termination claim 子句的存在——Windows 溢出
+    /// 后退出路径对已回收 root 合法地产出无 claim 的溢出文案,剪不掉就
+    /// 会把捕获输出原样放进 webview/日志。
     fn classify(raw: String) -> Self {
         if raw.starts_with("spawn ") {
+            // spawn 失败没有子进程,错误串不含捕获输出,原样保留。
             Self::Spawn(raw)
-        } else if raw.contains(" timed out after ") {
-            Self::Timeout(raw)
         } else {
-            Self::Other(raw)
+            let timeout = raw.find(crate::platform::process::CAPTURE_TIMEOUT_ANCHOR);
+            let overflow = raw.find(crate::platform::process::CAPTURE_OVERFLOW_ANCHOR);
+            let prefer_timeout = match (timeout, overflow) {
+                (Some(t), Some(o)) => t < o,
+                (Some(_), None) => true,
+                (None, _) => false,
+            };
+            if prefer_timeout {
+                Self::Timeout(withhold_captured_output(&raw, timeout))
+            } else if let Some(overflow) = overflow {
+                Self::Other(withhold_captured_output(&raw, Some(overflow)))
+            } else {
+                // wait error / capture readback 失败等无捕获输出的错误:原样
+                // 保留(kill/reap 附加子句与 readback 的 io error 都是平台侧
+                // 固定文本,不含子进程输出)。
+                Self::Other(raw)
+            }
         }
     }
 
@@ -159,6 +181,31 @@ impl ProbeError {
                 format!("{error}(CLI 探测执行异常;进程已启动但通信失败,请重试)")
             }
         }
+    }
+}
+
+/// 把 platform::process 错误里内嵌的子进程捕获输出剪掉,只保留固定前缀
+/// (命令名 + 超时/溢出锚点子句 + 溢出路径的 tree-termination claim)。
+/// 捕获输出可能含身份/凭证信息,而 ProbeError 的文案会进 webview
+/// (bundle_readiness 卡片、断开登录确认)与应用日志;feishu/wecom/dingtalk/
+/// tmeet 状态命令的既有约定是 raw 输出不得越出本层(feishu_status「只回
+/// 布尔」注释)。剪切点 = 胜出锚点后第一个 ": ",即 detail 的起点:
+/// 超时格式 `"{program} timed out after {n}s: {detail}{reap}{kill}"`、溢出
+/// 格式 `"{program} output exceeded {n} bytes{tree_claim}: {detail}{kill}"`,
+/// 锚点与 ": " 之间的 `{n}s` / `bytes` / tree_claim(可为空,Windows 溢出
+/// 后退出路径不产 claim)都不含 ": ",故该剪切点对**每一条**溢出产出形态
+/// 成立,不依赖 claim 子句的存在(kill/reap 附加子句随 detail 一并剪去
+/// ——那是平台层诊断,探测分型文案不需要)。格式漂移时(找不到剪切锚点)
+/// 保守保留原文:格式由 platform/process.rs 与本文件 fixture 测试两端钉
+/// 住,漂移会先在测试里炸出来。
+fn withhold_captured_output(raw: &str, anchor: Option<usize>) -> String {
+    match anchor {
+        Some(anchor) => match raw[anchor..].find(": ") {
+            Some(colon) => raw[..anchor + colon].trim_end().to_string(),
+            // 格式漂移(锚点后找不到 detail 分隔符):保守保留原文。
+            None => raw.to_string(),
+        },
+        None => raw.to_string(),
     }
 }
 
@@ -762,31 +809,48 @@ struct GateEntry {
 /// 不占 Tauri setup 主线程；各自只修改互不重叠的技能目录。四连接器的探测 + 刷新
 /// 同一形状,逐连接器静态 GateEntry 表驱动。
 pub async fn refresh_connector_auth_gates() -> Result<ConnectorAuthGateRefresh, String> {
+    refresh_gates(&GATE_ENTRIES).await
+}
+
+/// 四连接器的静态 GateEntry 表（供 [`refresh_gates`] 驱动与测试注入混合
+/// 成功/失败聚合）。
+static GATE_ENTRIES: [GateEntry; 4] = [
+    GateEntry {
+        id: "feishu",
+        display_name: "飞书",
+        probe_and_apply: crate::features::connectors::feishu::feishu_gate_step,
+    },
+    GateEntry {
+        id: "wecom",
+        display_name: "企业微信",
+        probe_and_apply: crate::features::connectors::wecom::wecom_gate_step,
+    },
+    GateEntry {
+        id: "dingtalk",
+        display_name: "钉钉",
+        probe_and_apply: crate::features::connectors::dingtalk::dingtalk_gate_step,
+    },
+    GateEntry {
+        id: "tmeet",
+        display_name: "腾讯会议",
+        probe_and_apply: crate::features::connectors::tmeet::tmeet_gate_step,
+    },
+];
+
+/// The table-driven aggregate behind [`refresh_connector_auth_gates`],
+/// parameterized over the gate table so tests can drive a mixed
+/// successful/failing aggregate without the real CLI probes. Structural
+/// contract (pinned by
+/// `aggregate_keeps_successful_sibling_mutations_while_reporting_failure`):
+/// every gate runs to completion and a sibling's error never rolls back the
+/// mutations a successful gate already persisted — the first error is only
+/// reported AFTER all gates finished, so the caller's delivery step must run
+/// on the error path too.
+pub(crate) async fn refresh_gates(
+    gates: &'static [GateEntry],
+) -> Result<ConnectorAuthGateRefresh, String> {
     let started = Instant::now();
     crate::platform::startup::mark("connector_auth_refresh:start");
-
-    let gates: &[GateEntry] = &[
-        GateEntry {
-            id: "feishu",
-            display_name: "飞书",
-            probe_and_apply: crate::features::connectors::feishu::feishu_gate_step,
-        },
-        GateEntry {
-            id: "wecom",
-            display_name: "企业微信",
-            probe_and_apply: crate::features::connectors::wecom::wecom_gate_step,
-        },
-        GateEntry {
-            id: "dingtalk",
-            display_name: "钉钉",
-            probe_and_apply: crate::features::connectors::dingtalk::dingtalk_gate_step,
-        },
-        GateEntry {
-            id: "tmeet",
-            display_name: "腾讯会议",
-            probe_and_apply: crate::features::connectors::tmeet::tmeet_gate_step,
-        },
-    ];
 
     let tasks: Vec<_> = gates
         .iter()
@@ -900,6 +964,63 @@ pub fn bundle_store_on_disconnected(id: &str) {
 
 #[cfg(test)]
 mod tests {
+    /// Marker "materialization" for the successful aggregate sibling: the
+    /// fn-pointer entry cannot capture, so it touches the (env-isolated)
+    /// PINVOU3_HOME.
+    fn aggregate_sibling_apply_ok() -> Result<bool, String> {
+        let marker = crate::platform::paths::pinvou3_home().join("aggregate-ok-skills");
+        std::fs::create_dir_all(marker).map_err(|e| e.to_string())?;
+        Ok(true)
+    }
+
+    fn aggregate_sibling_apply_fail() -> Result<bool, String> {
+        Err("aggregate sibling failure".to_string())
+    }
+
+    /// Review P2 (aggregate delivery): a failing sibling must not erase (or
+    /// stand in front of) a successful sibling's persisted mutations. The
+    /// aggregate runs every gate to completion and reports only the first
+    /// error — the caller's live-session wrap-up runs on the error path too,
+    /// and this pins the precondition that fix relies on: the successful
+    /// gate's grant + materialization are durable even though the aggregate
+    /// returns Err.
+    #[test]
+    fn aggregate_keeps_successful_sibling_mutations_while_reporting_failure() {
+        use crate::platform::test_support::with_temp_home;
+        with_temp_home("pinvou3-aggregate-siblings", || {
+            let ok_gate = super::GateEntry {
+                id: "aggtestok",
+                display_name: "聚合测试成功侧",
+                probe_and_apply: aggregate_sibling_apply_ok,
+            };
+            let bad_gate = super::GateEntry {
+                id: "aggtestbad",
+                display_name: "聚合测试失败侧",
+                probe_and_apply: aggregate_sibling_apply_fail,
+            };
+            let gates: &'static [super::GateEntry] =
+                Box::leak(vec![ok_gate, bad_gate].into_boxed_slice());
+            let err = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .unwrap()
+                .block_on(super::refresh_gates(gates))
+                .unwrap_err();
+            assert!(
+                err.contains("aggregate sibling failure"),
+                "the failing sibling's error is the aggregate verdict (Official's \
+                 collect_refresh_outcomes propagates the gate's raw error; the \
+                 display-name prefix only wraps a join panic): {err}"
+            );
+            assert!(
+                crate::platform::paths::pinvou3_home()
+                    .join("aggregate-ok-skills")
+                    .exists(),
+                "the successful sibling's materialization must survive the sibling's error"
+            );
+        });
+    }
+
     /// 连接镜像的存证口径：盘上二进制无法通过 hash 核对（缺失/不匹配/无 lock
     /// 条目）时必须降级为无 pin 记录，而非携带 lock 表的「应然」pin。
     #[test]
@@ -1142,6 +1263,67 @@ mod tests {
         );
     }
 
+    /// platform 错误里内嵌的捕获输出不得越出 connector 层:分型文案只保留
+    /// 固定前缀。raw 输出可能含身份/凭证信息(见 feishu_status「只回布尔」
+    /// 的既有约定),既不能进 webview 也不能进应用日志。分型发生在 RAW
+    /// platform 错误上,且按两条锚点子句首次出现的位置取先者。
+    #[test]
+    fn probe_error_messages_withhold_captured_output() {
+        let timeout = ProbeError::classify(String::from(
+            "lark-cli timed out after 30s: stderr:\n{\"access_token\":\"secret-token-1\"}\nstdout:\npartial status",
+        ));
+        assert!(matches!(timeout, ProbeError::Timeout(_)));
+        let message = timeout.message();
+        assert!(
+            message.contains("lark-cli timed out after 30s"),
+            "{message}"
+        );
+        assert!(message.contains("探测超时"));
+        assert!(!message.contains("access_token"), "{message}");
+        assert!(!message.contains("secret-token-1"), "{message}");
+
+        // 溢出锚点在固定前缀中先于 detail 出现:即便 detail 里也含
+        // " timed out after " 文本,也必须按 Other 分型(不得误报超时)。
+        let overflow = ProbeError::classify(String::from(
+            "lark-cli output exceeded 4194304 bytes; subprocess tree termination requested: stderr:\nrequest timed out after 1s\nrefresh_token=secret-token-2",
+        ));
+        assert!(matches!(overflow, ProbeError::Other(_)));
+        let message = overflow.message();
+        assert!(
+            message
+                .contains("output exceeded 4194304 bytes; subprocess tree termination requested"),
+            "{message}"
+        );
+        assert!(!message.contains("timed out after 1s"), "{message}");
+        assert!(!message.contains("refresh_token"), "{message}");
+        assert!(!message.contains("secret-token-2"), "{message}");
+
+        // Windows 溢出后退出路径对已回收 root 合法地产出**无 claim** 的溢出
+        // 文案(overflow_kill_notes 返回空 claim):剪切必须仍成立,否则该
+        // 形态的捕获输出原样越过边界进 webview/日志。
+        let overflow_no_claim = ProbeError::classify(String::from(
+            "lark-cli output exceeded 4194304 bytes: stderr:\naccess_token=secret-token-3",
+        ));
+        assert!(matches!(overflow_no_claim, ProbeError::Other(_)));
+        let message = overflow_no_claim.message();
+        assert!(
+            message.contains("lark-cli output exceeded 4194304 bytes"),
+            "{message}"
+        );
+        assert!(!message.contains("access_token"), "{message}");
+        assert!(!message.contains("secret-token-3"), "{message}");
+
+        // 无捕获输出的错误(wait error + 附加子句)原样保留。
+        let wait_error = ProbeError::classify(String::from(
+            "lark-cli wait error: no such process; kill tree request failed: budget",
+        ));
+        assert!(matches!(wait_error, ProbeError::Other(_)));
+        assert_eq!(
+            wait_error.message(),
+            "lark-cli wait error: no such process; kill tree request failed: budget(CLI 探测执行异常;进程已启动但通信失败,请重试)"
+        );
+    }
+
     /// A 30s probe timeout must NOT read as "CLI not installed": the ensure
     /// flow branches on the collapsed boolean and would re-download a CLI
     /// that is merely hung, and `auth logout` of a connected user would
@@ -1154,7 +1336,7 @@ mod tests {
     fn probe_error_messages_distinguish_timeout_from_missing_install() {
         // fixtures use the real platform::process message formats.
         let timeout = ProbeError::classify(String::from(
-            "lark-cli timed out after 30s: subprocess tree termination requested",
+            "lark-cli timed out after 30s: no subprocess output",
         ));
         assert!(matches!(timeout, ProbeError::Timeout(_)));
         assert!(timeout.message().contains("探测超时"));
@@ -1215,7 +1397,7 @@ mod tests {
 
         // 超时/执行异常维持原分型文案,同样不得降级。
         let timeout = ProbeError::classify(String::from(
-            "dws timed out after 30s: subprocess tree termination requested",
+            "dws timed out after 30s: no subprocess output",
         ));
         match logout_probe_verdict(label, Err(timeout)) {
             LogoutProbeVerdict::Unconfirmed(message) => {

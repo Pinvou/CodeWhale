@@ -468,7 +468,7 @@ const ArtifactTileIcon = ({ name, tileCls = 'w-9 h-9 rounded-[10px]', glyphCls =
         const active = tab === key;
         const disabled = key === 'preview' && !sel;
         return (
-          <button key={key} disabled={disabled}
+          <button type="button" key={key} disabled={disabled}
             onClick={() => !disabled && handleTabSelect(key)}
             className={`px-4 py-1.5 rounded-full text-[13px] font-medium transition-colors
               ${active ? 'bg-[#E8EDF2] text-[#1F1F1F] dark:bg-[#333537] dark:text-[#E3E3E3]'
@@ -647,7 +647,7 @@ const ArtifactTileIcon = ({ name, tileCls = 'w-9 h-9 rounded-[10px]', glyphCls =
             <p className="text-[13px] max-w-[360px]">{(vis && visualWarningLabel(vis)) || t.apUnsupported}</p>
             {vis && dependencyCheckButton(vis)}
             {(!isWeb || canDownloadArtifacts) && (
-              <button onClick={() => sel && bridge.artifacts.openArtifactExternal(sel.path, sel.sessionId)} className={cardBtnCls('primary')}>
+              <button type="button" onClick={() => sel && bridge.artifacts.openArtifactExternal(sel.path, sel.sessionId)} className={cardBtnCls('primary')}>
                 {t.apBtnOpen}
               </button>
             )}
@@ -686,7 +686,7 @@ const ArtifactTileIcon = ({ name, tileCls = 'w-9 h-9 rounded-[10px]', glyphCls =
                   </button>
                 )}
                 {onToggleFullscreen && (
-                  <button
+                  <button type="button"
                     onClick={onToggleFullscreen}
                     data-testid="artifact-fullscreen-toggle"
                     aria-label={isFullscreen ? uiA.fsExitFullBack : uiA.fsEnterPreview}
@@ -695,7 +695,7 @@ const ArtifactTileIcon = ({ name, tileCls = 'w-9 h-9 rounded-[10px]', glyphCls =
                     {isFullscreen ? <Minimize2 size={17} /> : <Maximize2 size={17} />}
                   </button>
                 )}
-                <button
+                <button type="button"
                   onClick={handleClose}
                   data-testid="artifact-close"
                   aria-label={uiA.closePreviewAria}
@@ -716,7 +716,7 @@ const ArtifactTileIcon = ({ name, tileCls = 'w-9 h-9 rounded-[10px]', glyphCls =
                     const info = infos[a.path];
                     return (
                       // The list row has multiple nested layouts and inline buttons; a
-                      // <button> would break existing styles, so keep the div keyboard-usable.
+                      // <button type="button"> would break existing styles, so keep the div keyboard-usable.
                       <div key={a.path} role="button" tabIndex={0} onClick={() => preview(a)}
                         onKeyDown={(e) => { if (e.target !== e.currentTarget) return; if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); preview(a); } }}
                         className={`group flex items-center gap-3 px-3 py-2.5 rounded-xl cursor-pointer
@@ -728,7 +728,7 @@ const ArtifactTileIcon = ({ name, tileCls = 'w-9 h-9 rounded-[10px]', glyphCls =
                             {t.apLastMod} {info ? formatLocalDateTime(info.modified * 1000, '') : '—'}
                           </div>
                         </div>
-                        {canOpenContainingFolder && <button title={t.apBtnLocate} onClick={(e) => { e.stopPropagation(); bridge.artifacts.openContainingFolder(a.path); }}
+                        {canOpenContainingFolder && <button type="button" title={t.apBtnLocate} onClick={(e) => { e.stopPropagation(); bridge.artifacts.openContainingFolder(a.path); }}
                           className={`opacity-0 group-hover:opacity-100 group-focus-within:opacity-100 w-8 h-8 rounded-full flex items-center justify-center hover:bg-white text-[#444746] dark:hover:bg-[#1E1F20] dark:text-[#C4C7C5]`}><FolderOpen size={16} /></button>
                         }
                       </div>
@@ -907,13 +907,13 @@ const ArtifactTileIcon = ({ name, tileCls = 'w-9 h-9 rounded-[10px]', glyphCls =
                     ) : null}
                     <div className="mt-3 flex items-center gap-2">
                       {(!isWeb || canDownloadArtifacts) && (
-                        <button onClick={() => bridge.artifacts.openArtifactExternal(sel.path, sel.sessionId)}
+                        <button type="button" onClick={() => bridge.artifacts.openArtifactExternal(sel.path, sel.sessionId)}
                           className={`flex-1 flex items-center justify-center gap-1.5 ${cardBtnCls('primary')}`}>
                           <ExternalLink size={15} /> {t.apBtnOpen}
                         </button>
                       )}
                       {canOpenContainingFolder && (
-                        <button onClick={() => bridge.artifacts.openContainingFolder(sel.path)}
+                        <button type="button" onClick={() => bridge.artifacts.openContainingFolder(sel.path)}
                           className={`flex-1 flex items-center justify-center gap-1.5 ${cardBtnCls()}`}>
                           <FolderOpen size={15} /> {t.apBtnLocate}
                         </button>
