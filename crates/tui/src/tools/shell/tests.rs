@@ -10503,7 +10503,10 @@ fn interact_write_to_a_stalled_tty_command_is_bounded() {
                 // overflow instead): a raw `sleep` that never reads pins the
                 // writer until the deadline.
                 .execute_with_options_env(
-                    "stty raw -echo 2>/dev/null; sleep 60",
+                    // The marker prints only after `stty` succeeds, so the
+                    // wait below also turns a stty failure into an honest
+                    // setup error instead of a misleading write success.
+                    "stty raw -echo 2>/dev/null && printf RAW-READY; sleep 60",
                     None,
                     60_000,
                     true,
@@ -10516,6 +10519,26 @@ fn interact_write_to_a_stalled_tty_command_is_bounded() {
             let task_id = result
                 .task_id
                 .ok_or_else(|| "background execution should return task_id".to_string())?;
+            // Raw mode must be established before the write lands: on a fast
+            // or loaded host the background shell may not have run `stty`
+            // yet, and a payload written in canonical mode drains (overflow
+            // is discarded there) instead of backpressuring — the write then
+            // completes and the deadline pin never gets to fire. That race
+            // failed the first CI run of this pin.
+            let mut raw_ready = false;
+            for _ in 0..40 {
+                std::thread::sleep(Duration::from_millis(150));
+                let snapshot = manager.inspect_job(&task_id).expect("inspect job").snapshot;
+                if snapshot.stdout_tail.contains("RAW-READY") {
+                    raw_ready = true;
+                    break;
+                }
+            }
+            assert!(
+                raw_ready,
+                "raw mode must be established before the stalled write: {:?}",
+                manager.inspect_job(&task_id).expect("inspect job").snapshot
+            );
             // Far past any line-discipline input buffer: the write cannot
             // complete unless the child reads, and it never does.
             let payload = "x".repeat(200 * 1024);
