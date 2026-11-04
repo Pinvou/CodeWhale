@@ -3072,6 +3072,60 @@ fn delete_removes_session() {
 }
 
 #[test]
+fn delete_reclaims_remote_attachment_references_without_removing_the_user_workspace() {
+    if !crate::platform::filesystem::supports_private_read_path_publication() {
+        return;
+    }
+    with_isolated_store_restoring_home(|store| {
+        use sha2::{Digest as _, Sha256};
+        let workspace = tempfile::tempdir().unwrap();
+        let user_file = workspace.path().join("keep.txt");
+        std::fs::write(&user_file, b"user workspace file").unwrap();
+        let session = store
+            .create_new("/model".into(), None, workspace.path().to_owned())
+            .unwrap();
+        let ledger = store.session_roots(&session.metadata.id).unwrap().ledger;
+        let body = b"session attachment";
+        let owner = Arc::new(
+            crate::platform::filesystem::publish_private_read_path(
+                crate::platform::filesystem::open_private_file_directory(
+                    &ledger.join("remote_uploads/ctr-up-delete"),
+                )
+                .unwrap(),
+                std::ffi::OsStr::new("report.txt"),
+                body,
+            )
+            .unwrap(),
+        );
+        let independent_reference = owner.read_path() != owner.path();
+        let descriptor = crate::features::files::file_ingest::PublishedAttachment {
+            handle_id: "ctr-up-delete".into(),
+            path: owner.path().to_owned(),
+            display_name: "report.txt".into(),
+            mime_type: "text/plain".into(),
+            bytes: body.len() as u64,
+            sha256: crate::platform::encoding::hex_lower(&Sha256::digest(body)),
+            read_owner: Some(owner.clone()),
+        };
+        let ingested =
+            crate::features::files::file_ingest::ingest_staged_attachment(&ledger, &descriptor)
+                .unwrap();
+        let reference = PathBuf::from(&ingested.path);
+        drop(ingested);
+        drop(descriptor);
+        owner.request_cleanup();
+        drop(owner);
+        if independent_reference {
+            assert_eq!(std::fs::read(&reference).unwrap(), body);
+        }
+        store.delete(&session.metadata.id).unwrap();
+        assert!(!ledger.exists());
+        assert!(!reference.exists());
+        assert_eq!(std::fs::read(user_file).unwrap(), b"user workspace file");
+    });
+}
+
+#[test]
 fn active_id_tracks_set_active() {
     let (store, _g) = isolated_store();
     assert!(store.active_id().is_none());

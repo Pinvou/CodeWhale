@@ -628,6 +628,7 @@ export const dictEn = {
         depCheckTitle: 'Dependency Check', depChecking: 'Checking…', depRecheck: 'Check again',
         depAllOk: 'All dependencies ready', depMissingSuffix: ' dependency(ies) missing (those features will be unavailable)',
         depInstalling: 'Installing…', depInstallBtn: 'Install', depGoInstall: 'Install', depInstallNote: 'Installs missing deps via elevated apt (needs network or an apt source)', depInstallNoteWindows: 'Downloads missing models; installs LibreOffice through elevated winget (requires network)', depInstallNoteMac: 'Installs missing deps via Homebrew (needs network; install Homebrew first from brew.sh if missing)',
+        dep_office_stream: 'Remote Office attachments (requires python3-uno; install here)',
         dep_pdf: 'PDF text extraction', dep_office_modern: 'Office docs (docx)', dep_office_legacy: 'Legacy Office / slides & sheets',
         dep_ocr: 'Image / scanned-PDF OCR', dep_archive: 'Archives (zip/rar/7z)', dep_email: 'Email (.eml / .msg)', dep_voice_asr: 'Local speech recognition',
         dep_voice_asr_model: 'Speech recognition model (SenseVoice q8)', dep_knowledge_embedding_model: 'Knowledge embedding model (bge-m3)',

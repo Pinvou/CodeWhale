@@ -12,6 +12,7 @@ use std::path::Path;
 use super::IngestResult;
 use super::estimate_tokens;
 use super::ingest_deps::{read_capped_text, system_tools};
+use super::ingest_diagnostics::safe_error;
 
 /// 邮件（.eml / .msg）：.eml 直接用 python 标准库 email 模块解出收发件人/主题/
 /// 日期/正文/附件名；.msg 在 Windows 走 Rust 原生解析，非 Windows 保留 msgconvert 转 .eml。
@@ -26,6 +27,7 @@ pub(super) fn ingest_email(
     let mk = |markdown: Option<String>, warning: Option<String>| {
         let token_estimate = markdown.as_deref().map(estimate_tokens).unwrap_or(0);
         IngestResult {
+            read_owner: None,
             kind: kind.into(),
             basename: basename.clone(),
             path: path_str.clone(),
@@ -60,14 +62,11 @@ pub(super) fn ingest_email(
             );
         }
         // msgconvert 把 .msg 转成 .eml（输出到 cwd），用临时目录承接再解析。
-        let ts = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_nanos())
-            .unwrap_or(0);
-        let tmpdir = std::env::temp_dir().join(format!("pinvou3-msg-{ts}"));
-        if let Err(e) = std::fs::create_dir_all(&tmpdir) {
-            return mk(None, Some(format!("创建临时目录失败: {e}")));
-        }
+        let temporary = match super::super::platform::private_conversion_directory("pinvou3-msg-") {
+            Ok(directory) => directory,
+            Err(e) => return mk(None, Some(safe_error(format!("创建临时目录失败: {e}")))),
+        };
+        let tmpdir = temporary.path().to_owned();
         // msgconvert 是 perl 脚本，网络/编码异常下会挂死，按超时 kill-tree。
         let conv = crate::platform::process::output_with_timeout_and_kill_tree(
             {
@@ -86,7 +85,7 @@ pub(super) fn ingest_email(
                 Ok(o) => String::from_utf8_lossy(&o.stderr).trim().to_string(),
                 Err(e) => e,
             };
-            Err(format!("msgconvert 转换失败: {detail}"))
+            Err(safe_error(format!("msgconvert 转换失败: {detail}")))
         };
         let _ = std::fs::remove_dir_all(&tmpdir);
         result
@@ -117,8 +116,8 @@ struct MsgMarkdownParts {
 /// The msg_parser-typed parsing helpers below compile on Windows only (same gating as the dependency section).
 #[cfg(target_os = "windows")]
 fn parse_msg_via_msg_parser(path: &Path) -> Result<String, String> {
-    let outlook =
-        msg_parser::Outlook::from_path(path).map_err(|e| format!(".msg 解析失败: {e}"))?;
+    let outlook = msg_parser::Outlook::from_path(path)
+        .map_err(|e| safe_error(format!(".msg 解析失败: {e}")))?;
     let body = decode_msg_body(&outlook);
     let parts = MsgMarkdownParts {
         sender: person_to_text(&outlook.sender),
@@ -452,7 +451,7 @@ try:
         with open(sys.argv[2], 'w', encoding='utf-8') as out:
             out.write(body.get_content())
 except Exception as e:
-    print('\n(正文解析失败:', e, ')')
+    print('\n(正文解析失败:', sys.argv[4] or str(e), ')')
 atts = [p.get_filename() for p in msg.iter_attachments() if p.get_filename()]
 if atts:
     with open(sys.argv[3], 'w', encoding='utf-8') as tail:
@@ -463,7 +462,8 @@ if atts:
     // kill-tree，避免上传永久转圈。
     // 正文可随输入涨到 20 MiB 上限量级，超出 4 MiB 捕获上限，单独落盘回读
     // （32 MiB 上限，同 pdftotext/pandoc），不走 stdout。
-    let body_dir = tempfile::tempdir().map_err(|e| format!("创建临时目录失败: {e}"))?;
+    let body_dir = super::super::platform::private_conversion_directory("pinvou3-eml-")
+        .map_err(|e| safe_error(format!("创建临时目录失败: {e}")))?;
     let body_path = body_dir.path().join("body.txt");
     let tail_path = body_dir.path().join("tail.txt");
     let mut command = crate::platform::process::HiddenCommand::new(&program);
@@ -472,12 +472,15 @@ if atts:
         .arg(SCRIPT)
         .arg(path)
         .arg(&body_path)
-        .arg(&tail_path);
+        .arg(&tail_path)
+        // Empty for local ingestion; private ingestion supplies only its stable
+        // error code, including warnings returned in an otherwise valid email.
+        .arg(safe_error(""));
     let out = crate::platform::process::output_with_timeout_and_kill_tree(
         command,
         std::time::Duration::from_secs(60),
     )
-    .map_err(|e| format!("Python 调用失败({program}): {e}"))?;
+    .map_err(|e| safe_error(format!("Python 调用失败({program}): {e}")))?;
     if out.status.success() {
         let mut markdown = String::from_utf8_lossy(&out.stdout).trim_end().to_string();
         // 脚本仅在成功提取正文时写 argv[2]，仅有附件时写 argv[3]；解析
@@ -492,10 +495,10 @@ if atts:
         }
         Ok(markdown.trim_end().to_string())
     } else {
-        Err(format!(
+        Err(safe_error(format!(
             "邮件解析失败: {}",
             String::from_utf8_lossy(&out.stderr).trim()
-        ))
+        )))
     }
 }
 
@@ -619,6 +622,28 @@ mod tests {
             attachment_label_at < attachment_name_at,
             "attachment names follow their label: {parsed}"
         );
+    }
+
+    #[test]
+    fn eml_body_decode_warnings_keep_local_detail_but_redact_private_ingestion() {
+        if !crate::platform::os::command_exists(&crate::platform::paths::python_command()) {
+            eprintln!("skip: Python is not available");
+            return;
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let eml = dir.path().join("invalid-charset.eml");
+        std::fs::write(
+            &eml,
+            "From: alice@example.com\r\nContent-Type: text/plain; charset=pinvou_private_test_charset\r\n\r\nbody",
+        )
+        .unwrap();
+        let local = parse_eml_via_python(&eml).unwrap();
+        assert!(local.contains("pinvou_private_test_charset"));
+        let private =
+            super::super::ingest_diagnostics::with_private(|| parse_eml_via_python(&eml)).unwrap();
+        assert!(private.contains(super::super::ingest_diagnostics::CONVERSION_FAILED));
+        assert!(!private.contains("pinvou_private_test_charset"));
+        assert!(private.contains("alice@example.com"));
     }
 
     #[test]

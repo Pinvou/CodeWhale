@@ -686,10 +686,9 @@ test('remote actions reuse one request id across uncertain retry and later recon
   assert.equal(new Set(actionCalls.map(call => call.args.requestId)).size, 1);
 });
 
-test('desktop remote control capability stays false until explicit Windows Rust flag', async () => {
+test('desktop remote control capability stays false until an explicit loaded host flag', async () => {
   const desktopBridge = read('platform/tauri/bridge.js');
   assert.match(desktopBridge, /detected\.desktopRemoteControlSupported === true/);
-  assert.match(desktopBridge, /detected\.os === "windows"/);
   const previousWindow = globalThis.window;
   const runtime = { loaded: false, os: 'unknown', desktopRemoteControl: false };
   globalThis.window = {
@@ -701,7 +700,7 @@ test('desktop remote control capability stays false until explicit Windows Rust 
     const { can } = await import(`${moduleUrl}?desktop-remote-contract`);
     assert.equal(can('desktopRemoteControl'), false);
     Object.assign(runtime, { loaded: true, os: 'linux', desktopRemoteControl: true });
-    assert.equal(can('desktopRemoteControl'), false);
+    assert.equal(can('desktopRemoteControl'), true);
     Object.assign(runtime, { os: 'windows', desktopRemoteControl: true });
     assert.equal(can('desktopRemoteControl'), true);
     runtime.desktopRemoteControl = false;
