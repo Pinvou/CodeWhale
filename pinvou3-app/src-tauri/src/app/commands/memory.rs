@@ -1014,10 +1014,6 @@ pub async fn delete_timed_memory(
     })
 }
 
-/// 编辑/重发最后一轮 user 消息。
-/// engine 砍掉 session 末尾最近的 user+assistant 后，用 new_message 重发。
-/// 前端在调这个命令之前必须自己更新 state.messages（删最后一对，加新 user）。
-#[tauri::command]
 /// `edit_last_turn` 的乐观并发护栏：`expected` 与当前已落盘 transcript 的
 /// revision 不一致时拒绝编辑（不动 transcript、不消费 turn）。稳定错误码与
 /// store 的 `compare_and_swap_messages`（`session_revision_conflict`）同族；
@@ -1354,12 +1350,9 @@ mod tests {
             "delete timed memory: ",
         ];
         for marker in WEB_VISIBLE_ARM_MARKERS {
-            let pos = production
-                .find(marker)
-                .unwrap_or_else(|| panic!("web-visible arm {marker:?} must exist"));
-            let window = &production[pos..(pos + 260).min(production.len())];
+            let wrapped = format!("redact_storage_prefix(&format!(\"{marker}{{e}}\"))");
             assert!(
-                window.contains("redact_storage_prefix"),
+                production.contains(&wrapped),
                 "the web-visible memory error arm {marker:?} must fold the storage prefix \
                  via redact_storage_prefix"
             );
