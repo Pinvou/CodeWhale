@@ -1030,9 +1030,11 @@ mod tests {
 
     #[test]
     fn workspace_write_policy_materializes_additional_roots() {
-        let workspace = Path::new("/work");
+        let directory = tempfile::tempdir().expect("workspace");
+        let workspace = directory.path();
         let agent = authority(AppMode::Agent, false, ApprovalMode::Suggest);
-        let roots = vec![PathBuf::from("/shared"), PathBuf::from("/work")];
+        let attached = tempfile::tempdir().expect("attached");
+        let roots = vec![attached.path().to_path_buf(), workspace.to_path_buf()];
 
         let policy =
             agent.sandbox_policy(workspace, &roots, None, SandboxNetworkAccess::Restricted);
@@ -1041,7 +1043,7 @@ mod tests {
         };
         assert_eq!(
             writable_roots,
-            vec![PathBuf::from("/work"), PathBuf::from("/shared")],
+            vec![workspace.to_path_buf(), attached.path().to_path_buf()],
             "the primary root stays first and duplicates are removed"
         );
 
@@ -1233,7 +1235,7 @@ mod tests {
         // Empty root set materializes exactly the historical single-root
         // policy value.
         let single = authority(AppMode::Agent, false, ApprovalMode::Suggest).sandbox_policy(
-            Path::new("/work"),
+            primary.path(),
             &[],
             None,
             SandboxNetworkAccess::Restricted,
@@ -1241,7 +1243,7 @@ mod tests {
         let SandboxPolicy::WorkspaceWrite { writable_roots, .. } = single else {
             panic!("agent posture must stay workspace-write");
         };
-        assert_eq!(writable_roots, vec![PathBuf::from("/work")]);
+        assert_eq!(writable_roots, vec![primary.path().to_path_buf()]);
     }
 
     #[cfg(unix)]
@@ -1267,7 +1269,8 @@ mod tests {
 
     #[test]
     fn full_access_is_unsandboxed_unless_effective_config_is_stricter() {
-        let workspace = Path::new("/work");
+        let directory = tempfile::tempdir().expect("workspace");
+        let workspace = directory.path();
         let full_access = authority(AppMode::Agent, true, ApprovalMode::Bypass);
 
         assert_eq!(
@@ -1323,7 +1326,8 @@ mod tests {
 
     #[test]
     fn workspace_write_never_grants_network_without_an_explicit_opt_in() {
-        let workspace = Path::new("/work");
+        let directory = tempfile::tempdir().expect("workspace");
+        let workspace = directory.path();
         // Every non-Yolo posture, with and without a configured sandbox mode.
         for approval_mode in [
             ApprovalMode::Suggest,
@@ -1389,7 +1393,8 @@ mod tests {
 
     #[test]
     fn plan_ask_and_auto_review_cannot_be_loosened_by_sandbox_config() {
-        let workspace = Path::new("/work");
+        let directory = tempfile::tempdir().expect("workspace");
+        let workspace = directory.path();
         for approval_mode in [ApprovalMode::Suggest, ApprovalMode::Auto] {
             let authority = authority(AppMode::Agent, false, approval_mode);
             assert!(matches!(

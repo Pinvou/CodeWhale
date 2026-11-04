@@ -17,8 +17,8 @@ use tokio::sync::{mpsc, oneshot};
 
 use super::approval::{ApprovalDecision, UserInputDecision};
 use super::{
-    CancelMode, CancelReason, EngineHandle, LiveRuntimeAuthority, Op, ReservedSteer,
-    RuntimePermissionAuthority, SteerWithdrawal, UserInputResponse,
+    CancelMode, CancelReason, EngineHandle, EngineRunCompletion, LiveRuntimeAuthority, Op,
+    ReservedSteer, RuntimePermissionAuthority, SteerWithdrawal, UserInputResponse,
 };
 
 /// Bound on waiting for the engine to acknowledge an approval decision.
@@ -95,6 +95,25 @@ async fn ack_answer(rx_ack: &mut oneshot::Receiver<bool>, budget: Duration) -> A
 }
 
 impl EngineHandle {
+    /// Wait for this exact background run to return or terminate abnormally.
+    /// Cancelling a wait does not stop the engine or consume another waiter's result.
+    /// Directly constructed handles return `NotObserved`; completion does not prove
+    /// persistence succeeded or detached children and blocking writers stopped.
+    pub async fn wait_run_completion(&self) -> EngineRunCompletion {
+        let Some(mut completion) = self.run_completion.clone() else {
+            return EngineRunCompletion::NotObserved;
+        };
+        loop {
+            let outcome = *completion.borrow_and_update();
+            if let Some(outcome) = outcome {
+                return outcome;
+            }
+            if completion.changed().await.is_err() {
+                return EngineRunCompletion::AbnormalTermination;
+            }
+        }
+    }
+
     /// True when the caller must preflight a concrete provider client before
     /// committing UI/runtime turn state. Test and embedding handles with an
     /// injected model client return false because that client owns model I/O.

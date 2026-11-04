@@ -256,6 +256,10 @@ fn forkguard_fetch_url_full_envelope_round_trips_before_context_cut() {
             assert_eq!(
                 std::fs::read_dir(sessions.join(&session).join("artifacts"))
                     .unwrap()
+                    // The full envelope has one payload; its ownership proof
+                    // is a separate file, not another retained output.
+                    .map(|entry| entry.unwrap().path())
+                    .filter(|path| path.extension().is_some_and(|extension| extension == "txt"))
                     .count(),
                 1
             );

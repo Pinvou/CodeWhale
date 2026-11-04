@@ -976,6 +976,7 @@ impl Drop for ReservedSteer {
 /// Handle to communicate with the engine
 #[derive(Clone)]
 pub struct EngineHandle {
+    run_completion: Option<tokio::sync::watch::Receiver<Option<EngineRunCompletion>>>,
     /// Send operations to the engine
     pub tx_op: mpsc::Sender<Op>,
     /// Receive events from the engine
@@ -2416,6 +2417,14 @@ impl Engine {
                 manager.set_denied_read_subpaths(config.read_denylist.subtree_paths());
             }
         }
+        // Coordination reservations validate in-flight shell jobs against
+        // the same manager the shells live in, so an interrupted child's
+        // background job keeps its frame occupied exactly as long as it runs.
+        // Construction-time wiring: no other handle exists yet, so the
+        // try-lock cannot fail short of a poisoned construction path.
+        if let Ok(mut subagent_manager) = subagent_manager.try_write() {
+            subagent_manager.set_shell_job_source(Arc::clone(&shell_manager));
+        }
         let file_read_tracker = new_shared_file_read_tracker();
         let lsp_manager = Arc::new(match config.lsp_config.clone() {
             Some(cfg) => crate::lsp::LspManager::new(cfg, config.workspace.clone()),
@@ -2550,6 +2559,7 @@ impl Engine {
             advisor_emission_guard: None,
         };
         let handle = EngineHandle {
+            run_completion: None,
             tx_op,
             rx_event: Arc::new(RwLock::new(rx_event)),
             cancel_token: shared_cancel_token,
@@ -9138,15 +9148,12 @@ fn apply_patch_permission_paths(input: &Value) -> Vec<String> {
 
 /// Spawn the engine in a background task
 pub fn spawn_engine(config: EngineConfig, api_config: &Config) -> EngineHandle {
-    let (engine, handle) = Engine::new(config, api_config);
+    let (engine, mut handle) = Engine::new(config, api_config);
 
-    spawn_supervised(
-        "engine-event-loop",
-        std::panic::Location::caller(),
-        async move {
-            engine.run().await;
-        },
-    );
+    // Keep the large run future boxed before entering the supervisor.
+    let (run, completion) = run_completion::observe(Box::pin(engine.run()));
+    handle.run_completion = Some(completion);
+    spawn_supervised("engine-event-loop", std::panic::Location::caller(), run);
 
     handle
 }
@@ -9158,16 +9165,13 @@ pub(crate) fn spawn_engine_with_authoritative_route_config(
     api_config: &Config,
     authoritative_route_config: Arc<parking_lot::RwLock<Config>>,
 ) -> EngineHandle {
-    let (mut engine, handle) = Engine::new(config, api_config);
+    let (mut engine, mut handle) = Engine::new(config, api_config);
     engine.authoritative_route_config = Some(authoritative_route_config);
 
-    spawn_supervised(
-        "engine-event-loop",
-        std::panic::Location::caller(),
-        async move {
-            engine.run().await;
-        },
-    );
+    // Keep the large run future boxed before entering the supervisor.
+    let (run, completion) = run_completion::observe(Box::pin(engine.run()));
+    handle.run_completion = Some(completion);
+    spawn_supervised("engine-event-loop", std::panic::Location::caller(), run);
 
     handle
 }
@@ -9200,6 +9204,18 @@ pub(crate) enum MockApprovalEvent {
 
 #[cfg(test)]
 impl MockEngineHandle {
+    pub(crate) fn observe_run_for_test<F>(
+        &mut self,
+        future: F,
+    ) -> impl Future<Output = ()> + Send + 'static + use<F>
+    where
+        F: Future<Output = ()> + Send + 'static,
+    {
+        let (run, completion) = run_completion::observe(Box::pin(future));
+        self.handle.run_completion = Some(completion);
+        run
+    }
+
     pub(crate) async fn recv_approval_event(&mut self) -> Option<MockApprovalEvent> {
         match self.rx_approval.recv().await? {
             ApprovalDecision::Approved { id, .. } => Some(MockApprovalEvent::Approved { id }),
@@ -9284,6 +9300,7 @@ pub(crate) fn mock_engine_handle() -> MockEngineHandle {
     let mut steer_control_state = SteerControlState::default();
     steer_control_state.begin_turn();
     let handle = EngineHandle {
+        run_completion: None,
         tx_op,
         rx_event: Arc::new(RwLock::new(rx_event)),
         cancel_token: shared_cancel_token,
@@ -9619,6 +9636,8 @@ impl SubAgentWiring {
 mod approval;
 mod context;
 mod handle;
+mod run_completion;
+pub use run_completion::EngineRunCompletion;
 pub mod preview;
 pub(crate) use self::handle::ApprovalAckUnknownError;
 use crate::compaction::estimate_input_tokens_conservative;
