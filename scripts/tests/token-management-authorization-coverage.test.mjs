@@ -3,6 +3,7 @@ import test from 'node:test';
 import fs from 'node:fs';
 import { readFileSync } from 'node:fs';
 import { checkCoverage, loadInputs } from '../check-token-management-authorization-coverage.mjs';
+import { authorizationRoutes } from '../check-account-platform-authorization-coverage.mjs';
 
 const inputs = loadInputs();
 
@@ -274,6 +275,9 @@ test('organization finance registration cannot disappear outside the management 
 
 test('organization finance recognizes the path guard without weakening its middleware grammar', () => {
   const route = 'routes.POST("/organizations/:organization_id/quota-grants:batch", httpserver.RequirePathSuffix("/quota-grants:batch"), httpserver.AdaptFunc(s.allocateOrganizationQuotaBatch))';
+  const registrations = authorizationRoutes('organization finance', inputs.organizationFinanceSource)
+    .filter(({ method, path }) => method === 'POST' && path === '/organizations/:organization_id/quota-grants:batch');
+  assert.deepEqual(registrations.map(({ registration }) => registration.trim()), [route]);
   const legacy = route.replace('httpserver.RequirePathSuffix("/quota-grants:batch"), ', '');
   const legacySource = inputs.organizationFinanceSource.replace(route, legacy);
   assert.ok(legacySource.includes(legacy));

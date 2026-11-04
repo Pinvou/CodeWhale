@@ -49,7 +49,7 @@ function assertLedgerRepairProofAuthorization(service, handler) {
   assert.equal(routes.length, 1, 'the ledger repair proof route must exist exactly once');
   assert.equal(routes[0].receiver, 'internal');
   assert.equal(routes[0].method, 'POST');
-  assert.equal(routes[0].registration.trim(), 'internal.POST("/ledger-repair/authorization-proofs:batch", serviceauth.Require("internal.account.ledger-repair-proof.read"), httpserver.AdaptFunc(s.ledgerRepairAuthorizationProofBatch))');
+  assert.equal(routes[0].registration.trim(), 'internal.POST("/ledger-repair/authorization-proofs:batch", httpserver.RequirePathSuffix("/authorization-proofs:batch"), serviceauth.Require("internal.account.ledger-repair-proof.read"), httpserver.AdaptFunc(s.ledgerRepairAuthorizationProofBatch))');
   const {code, masked} = goSource(service);
   const groups = [...code.matchAll(/\binternal\s*(?::=|=)\s*router\.Group\("([^"]+)"\)/g)]
     .filter(match => masked[match.index] !== ' ');
@@ -69,9 +69,13 @@ test('ledger repair history proof is one exact Billing-only workload route', asy
   assert.ok(catalog.http_sources.includes(source));
   assert.equal(catalog.http_policies.some(route => route.source === source && route.path === '/ledger-repair/authorization-proofs:batch'), false);
   assertLedgerRepairProofAuthorization(service, handler);
-  const registration = 'internal.POST("/ledger-repair/authorization-proofs:batch", serviceauth.Require("internal.account.ledger-repair-proof.read"), httpserver.AdaptFunc(s.ledgerRepairAuthorizationProofBatch))';
+  const registration = 'internal.POST("/ledger-repair/authorization-proofs:batch", httpserver.RequirePathSuffix("/authorization-proofs:batch"), serviceauth.Require("internal.account.ledger-repair-proof.read"), httpserver.AdaptFunc(s.ledgerRepairAuthorizationProofBatch))';
   for (const mutation of [
     service.replace(registration, ''),
+    service.replace(registration, registration.replace('httpserver.RequirePathSuffix("/authorization-proofs:batch"), ', '')),
+    service.replace(registration, registration.replace('"/authorization-proofs:batch")', '"/authorization-proofs:batchOther")')),
+    service.replace(registration, registration.replace('httpserver.RequirePathSuffix("/authorization-proofs:batch"), ', 'httpserver.RequirePathSuffix("/authorization-proofs:batch"), httpserver.RequirePathSuffix("/authorization-proofs:batch"), ')),
+    service.replace(registration, registration.replace('httpserver.RequirePathSuffix("/authorization-proofs:batch")', 'middleware.Require("path")')),
     service.replace(registration, registration.replace('internal.POST', 'internal.GET')),
     service.replace(registration, registration.replace('internal.account.ledger-repair-proof.read', 'internal.account.other.read')),
     service.replace(registration, registration.replace('s.ledgerRepairAuthorizationProofBatch', 's.otherHandler')),
