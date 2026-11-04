@@ -11,6 +11,20 @@ spec.loader.exec_module(module)
 
 
 class ContainerCIUnitTest(unittest.TestCase):
+    def test_remote_go_cache_is_limited_to_hosted_runners(self):
+        workflow_path = module.PLATFORM.parent / ".github/workflows/evidence-validator-container.yml"
+        workflow = workflow_path.read_text(encoding="utf-8")
+        setup_go = workflow.split("- uses: actions/setup-go@v6", 1)[1].split(
+            "\n      - ", 1
+        )[0]
+        cache_lines = [
+            line.strip() for line in setup_go.splitlines()
+            if line.lstrip().startswith("cache:")
+        ]
+        self.assertEqual(
+            cache_lines, ["cache: ${{ runner.environment == 'github-hosted' }}"]
+        )
+
     def test_volume_mode_is_set_before_ownership_transfer(self):
         with patch.object(module, "docker") as docker:
             module.initialize_volume("init", ["--cap-drop", "ALL"], "volume", "image")
