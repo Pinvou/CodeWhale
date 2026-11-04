@@ -186,6 +186,16 @@ The three SQL migration hooks do not provision it, and
 it is not a first-install bootstrap switch. Keycloak's management readiness
 probe alone does not establish that application login or JWKS is available.
 
+With the built-in realm upgrade hook enabled, `oidc.portalHandoffClientId`
+must also be nonempty ASCII letters, digits, dots, underscores and hyphens.
+Rendering rejects other characters when `keycloak.enabled` and
+`keycloak.realmUpgradeEnabled` are both true. The hook
+enables the dedicated access-only handoff client using that exact release ID
+and the same runtime Secret key `portal-handoff-oidc-client-secret` as Portal,
+projected read-only as a single file. Provision that controlled key before the
+hook runs. The existing bootstrap/readback and real login acceptance remain
+required.
+
 The realm updater accepts `oidc.audience` and `oidc.portalClientId` only as
 nonempty ASCII letters, digits, dots, underscores and hyphens. The chart rejects
 other characters during schema validation, before rendering resources. This is
