@@ -307,6 +307,7 @@ mod tests {
                 },
                 sequence: 2,
                 isolated_worktree: false,
+                worktree_root: None,
             }],
             reconciliations: vec![ReconciliationReceipt {
                 reconciliation_id: "reconcile-ui".to_string(),

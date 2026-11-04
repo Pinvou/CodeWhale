@@ -314,6 +314,7 @@ fn turn_metadata_uses_planned_cross_route_limits_not_installed_limits() {
             approval_mode: crate::tui::approval::ApprovalMode::Suggest,
             working_set: &engine.session.working_set,
             policy_narrowing: None,
+            authority_transition: None,
         },
     );
     let metadata = message
@@ -1248,6 +1249,284 @@ async fn paused_detach_goal_context_matches_captured_first_production_body() {
             .to_string()
             .contains("stale paused objective"),
         "detached paused goal leaked onto the first wire body"
+    );
+}
+
+/// Pinvou tri-mode safety: the preview manifest must be byte-faithful about
+/// authority transitions. With a transition pending, the previewed body must
+/// hash the exact same `Authority transition (host): ...` bytes the live
+/// turn_meta builder renders onto the wire body; without one, consecutive
+/// previews stay byte-stable (the transition never leaks into a body that
+/// production would not send).
+#[tokio::test]
+async fn forkguard_preview_manifest_hashes_the_same_authority_transition_line_the_wire_sends() {
+    use crate::core::authority::{TurnMetaPosture, authority_transition_between};
+    use wiremock::matchers::method;
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .insert_header("content-type", "text/event-stream")
+                .set_body_string("data: [DONE]\n\n"),
+        )
+        .mount(&server)
+        .await;
+    let mut config = deepseek_config();
+    config
+        .providers
+        .as_mut()
+        .expect("providers")
+        .deepseek
+        .base_url = Some(server.uri());
+    let identity = deepseek_identity();
+    let (mut engine, _tmp) = wire_preview_engine(&config);
+
+    let previous = TurnMetaPosture {
+        mode: AppMode::Agent,
+        approval: crate::tui::approval::ApprovalMode::Bypass,
+        ask_on_guardrail: true,
+    };
+    let current = TurnMetaPosture {
+        mode: AppMode::Agent,
+        approval: crate::tui::approval::ApprovalMode::Suggest,
+        ask_on_guardrail: false,
+    };
+    let transition = authority_transition_between(Some(previous), current)
+        .expect("a host posture change yields a transition");
+    let transition_line = transition.render();
+
+    let prompt = "inspect the armed-to-ask handoff";
+
+    // With the previous block having reported the armed posture, the preview
+    // recomputes the same transition the live turn will render.
+    engine.last_turn_meta_authority = Some(previous);
+    engine.last_authoritative_turn_meta_posture = Some(previous);
+    let planned = plan(&config, &identity, false, prompt).await;
+    let manifest = engine
+        .build_request_manifest(inputs(false, Some(planned), prompt))
+        .await;
+    let armed_hash = manifest
+        .body
+        .exact()
+        .expect("preview body is exact")
+        .body_sha256
+        .clone();
+
+    // Without a recorded posture (first turn / restored session) the preview
+    // output is byte-stable: two consecutive builds hash identically, and
+    // neither carries the transition.
+    engine.last_turn_meta_authority = None;
+    engine.last_authoritative_turn_meta_posture = None;
+    let planned = plan(&config, &identity, false, prompt).await;
+    let plain_first = engine
+        .build_request_manifest(inputs(false, Some(planned), prompt))
+        .await;
+    let plain_hash = plain_first
+        .body
+        .exact()
+        .expect("preview body is exact")
+        .body_sha256
+        .clone();
+    let planned = plan(&config, &identity, false, prompt).await;
+    let plain_again = engine
+        .build_request_manifest(inputs(false, Some(planned), prompt))
+        .await;
+    let plain_again_hash = plain_again
+        .body
+        .exact()
+        .expect("preview body is exact")
+        .body_sha256
+        .clone();
+    assert_eq!(
+        plain_hash, plain_again_hash,
+        "without a pending change the previewed body must stay byte-stable"
+    );
+    assert_ne!(
+        armed_hash, plain_hash,
+        "a pending authority transition must change the previewed body"
+    );
+
+    // Production derives the same transition at turn start and sends the
+    // exact bytes the armed preview hashed.
+    engine.last_turn_meta_authority = Some(previous);
+    engine.last_authoritative_turn_meta_posture = Some(previous);
+    let planned = plan(&config, &identity, false, prompt).await;
+    let production_route = planned.route.clone();
+    let compaction = planned.compaction.clone();
+    let reasoning_effort = planned.effective_reasoning_effort.clone();
+    let reasoning_effort_auto = planned.auto_controls_reasoning;
+    let _ = engine
+        .handle_send_message(
+            prompt.to_string(),
+            AppMode::Agent,
+            production_route,
+            compaction,
+            None,
+            None,
+            GoalStatus::Active,
+            reasoning_effort,
+            reasoning_effort_auto,
+            false,
+            false,
+            false,
+            false,
+            crate::tui::approval::ApprovalMode::Suggest,
+            false,
+            None,
+            Vec::new(),
+            None,
+            None,
+            UserInputProvenance::ExternalUser,
+            None,
+        )
+        .await;
+
+    let requests = server
+        .received_requests()
+        .await
+        .expect("wire mock records requests");
+    assert_eq!(requests.len(), 1, "the fixture must make one provider call");
+    let wire_body: serde_json::Value =
+        serde_json::from_slice(&requests[0].body).expect("first HTTP body is JSON");
+    let wire_hash =
+        crate::hashing::sha256_hex(crate::client::canonical_json(&wire_body).as_bytes());
+    assert_eq!(
+        armed_hash, wire_hash,
+        "preview hash must match the transition-bearing body production sends"
+    );
+    assert!(
+        wire_body.to_string().contains(&transition_line),
+        "the wire body must carry the exact transition line the live builder renders: {transition_line}"
+    );
+}
+
+/// Pinvou tri-mode safety: even when the preview inputs carry a posture
+/// that differs from the session's stale one, the previewed body must hash
+/// exactly the body the live turn sends for those same inputs — the
+/// transition is computed against the planned posture, not the session
+/// state. (The sibling hash test pins the matching-inputs case and the
+/// exact rendered bytes; this pin holds the divergence case, where a
+/// session-sourced posture would silently skip the line the live turn
+/// renders.)
+#[tokio::test]
+async fn forkguard_preview_transition_uses_the_planned_posture_not_the_stale_session() {
+    use crate::core::authority::TurnMetaPosture;
+    use wiremock::matchers::method;
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .insert_header("content-type", "text/event-stream")
+                .set_body_string("data: [DONE]\n\n"),
+        )
+        .mount(&server)
+        .await;
+    let mut config = deepseek_config();
+    config
+        .providers
+        .as_mut()
+        .expect("providers")
+        .deepseek
+        .base_url = Some(server.uri());
+    let identity = deepseek_identity();
+    let (mut engine, _tmp) = wire_preview_engine(&config);
+
+    // The recorded posture says Suggest; the session still sits in Suggest
+    // (fresh engine default) — but the planned turn (preview inputs and the
+    // live turn below) carries Full Access. Only a planned-posture source
+    // renders the Suggest -> Full Access transition in the previewed body.
+    engine.last_turn_meta_authority = Some(TurnMetaPosture {
+        mode: AppMode::Agent,
+        approval: crate::tui::approval::ApprovalMode::Suggest,
+        ask_on_guardrail: false,
+    });
+    engine.last_authoritative_turn_meta_posture = Some(TurnMetaPosture {
+        mode: AppMode::Agent,
+        approval: crate::tui::approval::ApprovalMode::Suggest,
+        ask_on_guardrail: false,
+    });
+    let prompt = "inspect the planned posture";
+    let planned = plan(&config, &identity, false, prompt).await;
+    let mut preview_inputs = inputs(false, Some(planned), prompt);
+    preview_inputs.auto_approve = true;
+    preview_inputs.approval_mode = crate::tui::approval::ApprovalMode::Bypass;
+    let manifest = engine.build_request_manifest(preview_inputs).await;
+    let preview_hash = manifest
+        .body
+        .exact()
+        .expect("preview body is exact")
+        .body_sha256
+        .clone();
+
+    // Preview purity: the build must not consume the recorded posture.
+    let planned_again = plan(&config, &identity, false, prompt).await;
+    let mut again_inputs = inputs(false, Some(planned_again), prompt);
+    again_inputs.auto_approve = true;
+    again_inputs.approval_mode = crate::tui::approval::ApprovalMode::Bypass;
+    let again_hash = engine
+        .build_request_manifest(again_inputs)
+        .await
+        .body
+        .exact()
+        .expect("preview body is exact")
+        .body_sha256
+        .clone();
+    assert_eq!(
+        preview_hash, again_hash,
+        "previewing must not consume the recorded posture"
+    );
+
+    // The live turn for the same planned posture installs Full Access and
+    // renders the transition onto the wire body; the previewed body must be
+    // exactly that body — not the stale-session body with no line.
+    let planned_live = plan(&config, &identity, false, prompt).await;
+    let production_route = planned_live.route.clone();
+    let compaction = planned_live.compaction.clone();
+    let reasoning_effort = planned_live.effective_reasoning_effort.clone();
+    let reasoning_effort_auto = planned_live.auto_controls_reasoning;
+    let _ = engine
+        .handle_send_message(
+            prompt.to_string(),
+            AppMode::Agent,
+            production_route,
+            compaction,
+            None,
+            None,
+            GoalStatus::Active,
+            reasoning_effort,
+            reasoning_effort_auto,
+            false,
+            false,
+            false,
+            true,
+            crate::tui::approval::ApprovalMode::Bypass,
+            false,
+            None,
+            Vec::new(),
+            None,
+            None,
+            UserInputProvenance::ExternalUser,
+            None,
+        )
+        .await;
+    let requests = server
+        .received_requests()
+        .await
+        .expect("wire mock records requests");
+    assert_eq!(requests.len(), 1, "the fixture must make one provider call");
+    let wire_body: serde_json::Value =
+        serde_json::from_slice(&requests[0].body).expect("first HTTP body is JSON");
+    let wire_hash =
+        crate::hashing::sha256_hex(crate::client::canonical_json(&wire_body).as_bytes());
+    assert_eq!(
+        preview_hash, wire_hash,
+        "preview must hash the transition-bearing body the live turn sends \
+         for the planned posture — a session-sourced posture would skip the \
+         line and hash the stale body"
     );
 }
 

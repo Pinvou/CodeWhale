@@ -163,6 +163,36 @@ fn legacy_parser_marker_helper_flags_fake_wrappers_without_enabling_execution() 
 }
 
 #[test]
+fn fallback_tool_call_ids_are_reincarnated_at_ingestion() {
+    // The parser restarts its generated ids at 1 for every response, so the
+    // turn loop must rewrite each parsed id into a fresh incarnation before
+    // the id reaches approvals and the receipt log (which reject a repeated
+    // ask of the same id). The wall-clock millis keep restarts of one session
+    // unique; the process-global counter disambiguates same-millisecond
+    // incarnations inside one process.
+    assert!(
+        any_engine_source_contains("fresh_fallback_tool_id"),
+        "the turn loop must rewrite fallback ids through the incarnation helper"
+    );
+    assert!(
+        any_engine_source_contains("FALLBACK_TOOL_ID_COUNTER"),
+        "the incarnation helper must be backed by a process-global counter"
+    );
+
+    // Within a single response the parser still numbers its calls apart;
+    // only across responses do the generated ids repeat.
+    let parsed = crate::tool_parser::parse_tool_calls(
+        "a <invoke name=\"x\"></invoke> b <invoke name=\"y\"></invoke>",
+    );
+    let ids: Vec<&str> = parsed
+        .tool_calls
+        .iter()
+        .map(|call| call.id.as_str())
+        .collect();
+    assert_eq!(ids, vec!["xml_tool_1", "xml_tool_2"]);
+}
+
+#[test]
 fn engine_source_file_still_exists_and_is_non_trivial() {
     // Sanity check so the `include_str!` above is meaningful — if the engine
     // module ever moves, this test must be updated alongside it.

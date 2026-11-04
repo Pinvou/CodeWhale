@@ -114,6 +114,27 @@ impl WorkflowTool {
         self.approval_decision = "approved_explicit_cli_command";
         self
     }
+
+    /// The coordination manager's wired shell job source, for pins that
+    /// assert a production constructor actually bound one (the standalone
+    /// headless builder shipped without it once).
+    #[cfg(test)]
+    pub(crate) async fn shell_job_source_for_test(
+        &self,
+    ) -> Option<crate::tools::shell::SharedShellManager> {
+        self.manager.read().await.shell_job_source_for_test()
+    }
+
+    /// The coordination manager this tool dispatches children through, for
+    /// driving the same lifecycle the headless Workflow runs drive. Gated to
+    /// the platforms whose tests consume it: a plain `#[cfg(test)]` helper
+    /// would be dead code (denied) on Windows.
+    #[cfg(all(test, unix))]
+    pub(crate) fn coordination_manager_for_test(
+        &self,
+    ) -> crate::tools::subagent::SharedSubAgentManager {
+        std::sync::Arc::clone(&self.manager)
+    }
 }
 
 type SharedWorkflowRuns = Arc<Mutex<HashMap<String, WorkflowRunRecord>>>;

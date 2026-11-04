@@ -138,7 +138,15 @@ pub(super) fn git_repo_root(workspace: &Path) -> Result<PathBuf, ToolError> {
             return Ok(root);
         }
 
-        if let Ok(entries) = fs::read_dir(dir) {
+        // Only the anchor itself may adopt a single nested checkout (a test
+        // harness or a session workspace that wraps one repository). Ancestors
+        // are probed for containment only: scanning their children would adopt
+        // or enumerate unrelated repositories — a session workspace under
+        // `~/.pinvou3/sessions/<id>/workspace` walked up to `$HOME` and
+        // reported the user's other projects as "multiple repositories".
+        if levels == 0
+            && let Ok(entries) = fs::read_dir(dir)
+        {
             let mut nested_roots = Vec::new();
             for entry in entries.flatten() {
                 let child = entry.path();
