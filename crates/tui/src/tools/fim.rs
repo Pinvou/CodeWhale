@@ -381,4 +381,47 @@ mod tests {
         assert!(prefix.contains("counted without overlap"), "{prefix}");
         assert!(suffix.contains("counted without overlap"), "{suffix}");
     }
+
+    #[tokio::test]
+    async fn empty_prefix_anchor_on_an_empty_file_passes_to_the_fim_call() {
+        // A non-empty file refuses an empty prefix because it matches at
+        // every char boundary. On an empty file the single boundary
+        // yields count 1, so validation passes and the call reaches the
+        // API boundary — the base behavior, not a refusal.
+        let (_tmp, context) = workspace_with("");
+        let message = execution_error(
+            serde_json::json!({
+                "path": "sample.txt",
+                "prefix_anchor": "",
+                "suffix_anchor": "",
+            }),
+            &context,
+        )
+        .await;
+        assert!(
+            message.contains("FIM API client not available"),
+            "empty prefix on an empty file must pass validation: {message}"
+        );
+    }
+
+    #[tokio::test]
+    async fn empty_suffix_after_an_eof_ending_prefix_passes_to_the_fim_call() {
+        // A prefix ending at EOF leaves an empty suffix region, where an
+        // empty suffix matches exactly once, so validation passes and the
+        // call reaches the API boundary — the base behavior, not a refusal.
+        let (_tmp, context) = workspace_with("tail anchor");
+        let message = execution_error(
+            serde_json::json!({
+                "path": "sample.txt",
+                "prefix_anchor": "tail anchor",
+                "suffix_anchor": "",
+            }),
+            &context,
+        )
+        .await;
+        assert!(
+            message.contains("FIM API client not available"),
+            "empty suffix after an EOF-ending prefix must pass validation: {message}"
+        );
+    }
 }
