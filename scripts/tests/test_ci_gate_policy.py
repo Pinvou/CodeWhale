@@ -1176,7 +1176,13 @@ class CiGatePolicyTests(unittest.TestCase):
     def test_closure_smokes_include_production_recovery_and_original_contract(self):
         package = json.loads((ROOT / "pinvou3-app/package.json").read_text(encoding="utf-8"))
         command = "test:account-platform-closure-ui"
-        files = ("account_platform_closure_ui_smoke.mjs", "account_platform_closure_production_smoke.mjs")
+        # The composite must retain the original and production suites and also
+        # execute the polling regression through the real frontend CI selector.
+        files = (
+            "account_platform_closure_ui_smoke.mjs",
+            "account_platform_closure_production_smoke.mjs",
+            "account_platform_closure_polling_smoke.mjs",
+        )
         self.assertEqual(package["scripts"][command], " && ".join(f"node tests/{name}" for name in files))
         for name in files:
             self.assertTrue((ROOT / "pinvou3-app/tests" / name).is_file())
