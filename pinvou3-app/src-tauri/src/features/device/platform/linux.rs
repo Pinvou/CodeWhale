@@ -839,6 +839,178 @@ mod tests {
         });
     }
 
+    /// 2026-11-04 评审 P2（5765748232）场景 a——**升级空历史**：修复上线前
+    /// 已被从扫描列表移除的目录在存量配置里不进 import_scan_dirs_history，
+    /// 目录级超集覆盖不到；已安装卡片的就地复用经约定软链（models_dir/<HF
+    /// 仓库名> → 原位）恢复实际引用路径，删除守卫据此拦截。
+    #[test]
+    fn upgrade_with_empty_history_still_shields_reused_weights() {
+        use crate::features::device::{external_models::registry_dir, remove_external_model};
+        use crate::features::model_store::platform::linux::{config, db};
+        use crate::platform::paths::user_home_dir;
+        let _ctx = config::TempHome::new();
+        point_ollama_at_dead_port();
+        db::init_db().expect("init store db");
+        // 原位权重：家目录三层（深度臂本会放行），不在任何现役根之下。
+        let weights = user_home_dir()
+            .join("legacy-store")
+            .join("hf")
+            .join("qwen-weights");
+        std::fs::create_dir_all(&weights).expect("create original weights");
+        std::fs::write(weights.join("weight.bin"), b"weights").expect("write weight");
+        // 约定软链：models_dir/<HF 仓库名> → 原位（就地复用不搬家的形态）。
+        let models_dir = config::try_load_settings()
+            .expect("load default settings")
+            .models_path();
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(&weights, models_dir.join("qwen-weights"))
+            .expect("create reuse symlink");
+        db::add_store_model(db::AddStoreModelParams {
+            card_id: "c-upg",
+            model_name: "upg-model",
+            card_name: "c-upg",
+            org: None,
+            description: None,
+            engine_name: "e",
+            engine_version: None,
+            size_bytes: 0,
+            quantization: None,
+            source_repo_id: Some("org/qwen-weights"),
+            source_filename: None,
+            scripts: &std::collections::BTreeMap::new(),
+            status: "downloaded",
+            profiles: &[],
+            deploy_topology: crate::features::model_store::platform::linux::store_client::DeployTopology::default(),
+            card_source: "store",
+        })
+        .expect("insert downloaded model");
+        let dir = registry_dir();
+        std::fs::create_dir_all(&dir).expect("registry dir");
+        std::fs::write(
+            dir.join("m-upg01.json"),
+            format!(
+                r#"{{"schema":1,"id":"m-upg01","name":"upg-model","kind":"other","weights_path":{}}}"#,
+                serde_json::to_string(&weights.to_string_lossy()).expect("json string")
+            ),
+        )
+        .expect("write registry record");
+        // 不触碰任何设置 → import_scan_dirs_history 保持空（存量升级形态）。
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("test runtime");
+        runtime.block_on(async move {
+            let error =
+                remove_external_model("m-upg01".to_string(), true, "upg-model".to_string(), None)
+                    .await
+                    .expect_err("empty-history upgrade must still shield reused weights");
+            assert!(
+                error.contains("已安装商店模型引用") && error.contains("删除会破坏仍在使用"),
+                "rejection must name the installed-reference arm, got: {error}"
+            );
+            assert!(weights.exists(), "referenced weights must survive");
+            assert!(
+                dir.join("m-upg01.json").exists(),
+                "registry record must survive the rejection"
+            );
+        });
+    }
+
+    /// 2026-11-04 评审 P2（5765748232）场景 b——**历史到顶仍存在引用**：扫描
+    /// 目录历史被 17 次交换挤出最老端后，目录级保护对该根脱出；在册卡片经
+    /// 约定软链恢复的引用路径继续拦住删除。
+    #[test]
+    fn evicted_history_root_keeps_referenced_weights_shielded() {
+        use crate::features::device::{external_models::registry_dir, remove_external_model};
+        use crate::features::model_store::platform::linux::{config, db};
+        use crate::platform::paths::user_home_dir;
+        let ctx = config::TempHome::new();
+        point_ollama_at_dead_port();
+        db::init_db().expect("init store db");
+        // 被淘汰的最老扫描根下的原位权重（家目录四层）。
+        let scan_root = ctx.path().join("scan-000");
+        let weights = user_home_dir()
+            .join("scan-000")
+            .join("legacy")
+            .join("hf")
+            .join("qwen-weights");
+        std::fs::create_dir_all(&weights).expect("create original weights");
+        std::fs::write(weights.join("weight.bin"), b"weights").expect("write weight");
+        let models_dir = config::try_load_settings()
+            .expect("load default settings")
+            .models_path();
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(&weights, models_dir.join("qwen-weights"))
+            .expect("create reuse symlink");
+        db::add_store_model(db::AddStoreModelParams {
+            card_id: "c-evict",
+            model_name: "evict-model",
+            card_name: "c-evict",
+            org: None,
+            description: None,
+            engine_name: "e",
+            engine_version: None,
+            size_bytes: 0,
+            quantization: None,
+            source_repo_id: Some("org/qwen-weights"),
+            source_filename: None,
+            scripts: &std::collections::BTreeMap::new(),
+            status: "downloaded",
+            profiles: &[],
+            deploy_topology: crate::features::model_store::platform::linux::store_client::DeployTopology::default(),
+            card_source: "store",
+        })
+        .expect("insert downloaded model");
+        let dir = registry_dir();
+        std::fs::create_dir_all(&dir).expect("registry dir");
+        std::fs::write(
+            dir.join("m-evict01.json"),
+            format!(
+                r#"{{"schema":1,"id":"m-evict01","name":"evict-model","kind":"other","weights_path":{}}}"#,
+                serde_json::to_string(&weights.to_string_lossy()).expect("json string")
+            ),
+        )
+        .expect("write registry record");
+        // 把扫描目录历史顶到上限并挤出 scan-000（与 service 层淘汰测试同一
+        // 交换序列，MAX_IMPORT_SCAN_DIRS_HISTORY + 1 次）。
+        for index in 0..=(config::MAX_IMPORT_SCAN_DIRS_HISTORY + 1) {
+            let swap = ctx.path().join(format!("scan-{index:03}"));
+            std::fs::create_dir_all(&swap).expect("create swap dir");
+            crate::features::model_store::set_storage_settings(
+                None,
+                Some(vec![swap.to_string_lossy().into_owned()]),
+            )
+            .expect("swap scan dir");
+        }
+        let settings = config::load_settings();
+        assert!(
+            !settings
+                .import_scan_dirs_history
+                .contains(&scan_root.to_string_lossy().into_owned()),
+            "precondition: the oldest root must have been evicted, got {:?}",
+            settings.import_scan_dirs_history
+        );
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("test runtime");
+        runtime.block_on(async move {
+            let error = remove_external_model(
+                "m-evict01".to_string(),
+                true,
+                "evict-model".to_string(),
+                None,
+            )
+            .await
+            .expect_err("evicted root must not lift installed-reference protection");
+            assert!(
+                error.contains("已安装商店模型引用"),
+                "rejection must come from the installed-reference arm, got: {error}"
+            );
+            assert!(weights.exists(), "referenced weights must survive");
+        });
+    }
+
     /// 2026-11-04 评审 P3 的端到端：确认面板带来的守护进程地址与当前设置解析
     /// 值不一致时（列表之后、确认之前改过 `ollama_host`），整单拒绝且记录
     /// 原样保留——DELETE 绝不改投新实例；用**当前**地址重新确认则正常走完

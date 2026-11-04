@@ -797,6 +797,59 @@ pub fn take_startup_cleanup(service: &Arc<ModelStoreService>) -> Result<Value, S
 /// 返回里除了可编辑的 `import_scan_dirs`，还给出 `scan_dirs`——**实际会扫的完整
 /// 列表**，含内置位置和当前挂着的 U 盘。用户真正要问的是"到底找了哪些地方"，
 /// 只回一个补充列表答不了这个问题。
+/// 设备管理删除守卫的"已安装卡片实际引用的权重路径"集合（可失败版）。
+///
+/// 就地复用不搬家：卡片脚本按约定把 `$LMM_MODELS_DIR/<HF 仓库名>` 软链到扫描
+/// 目录原位（import_scan 候选约定），宿主不记录落点——2026-11-04 评审 P2 的
+/// 两条腿（升级空历史、历史淘汰不查引用）都源于"目录级保护超集覆盖不到存量
+/// 引用"，这里从**在册模型 + 约定候选路径**恢复实际引用：枚举全部在册记录的
+/// 约定权重候选（当前 models_dir 与历史根下各一份，换目录不搬权重），exists()
+/// 过滤后 canonicalize 解析软链得到真实落点。卡片目录（data_dir/cards/<id>）
+/// 不在集合里——它恒在商店数据根之下，路径臂本已覆盖。
+///
+/// fail-closed：settings/DB 读不了 → Err（与商店名单查询同口径，破坏性移除
+/// 路径不得当未命中放行）。与 residual_paths 同一把 exists() 尺子但方向相反：
+/// 提示文案宁可漏报，保护集合宁可多报。
+pub(crate) fn installed_weight_paths_checked() -> Result<Vec<std::path::PathBuf>, String> {
+    let settings = config::try_load_settings()?;
+    let records = db::list_store_models().map_err(|e| format!("读取在册模型失败：{e}"))?;
+    let mut roots: Vec<std::path::PathBuf> = vec![settings.models_path()];
+    for dir in &settings.models_dir_history {
+        let root = std::path::PathBuf::from(dir.trim());
+        if root.is_absolute() {
+            roots.push(root);
+        }
+    }
+    let mut out: Vec<std::path::PathBuf> = Vec::new();
+    for rec in &records {
+        // 与 lifecycle::candidate_paths 同一候选约定（权重两臂）：来源仓库名
+        // 末段与用户模型名，都过 safe_path_component 防逃逸。
+        let mut names: Vec<String> = Vec::new();
+        if let Some(repo) = rec.source_repo_id.as_deref() {
+            if let Some(base) = repo.rsplit('/').next() {
+                if let Ok(safe) = config::safe_path_component(base) {
+                    names.push(safe);
+                }
+            }
+        }
+        if let Ok(safe) = config::safe_path_component(&rec.model_name) {
+            names.push(safe);
+        }
+        for root in &roots {
+            for name in &names {
+                let candidate = root.join(name);
+                if candidate.exists() {
+                    let resolved = candidate.canonicalize().unwrap_or(candidate);
+                    if !out.contains(&resolved) {
+                        out.push(resolved);
+                    }
+                }
+            }
+        }
+    }
+    Ok(out)
+}
+
 pub fn storage_settings() -> Result<Value, String> {
     let settings = config::load_settings();
     let models_dir = settings.models_path();
@@ -1147,6 +1200,110 @@ mod tests {
         set_storage_settings(None, Some(vec![path_of(&kept)])).expect("remove it");
         let settings = super::config::load_settings();
         assert!(settings.import_scan_dirs_history.contains(&path_of(&blank)));
+    }
+
+    #[test]
+    fn installed_weight_paths_recover_referenced_paths_from_records() {
+        use crate::features::model_store::platform::linux::db;
+
+        let ctx = super::config::TempHome::new();
+        db::init_db().expect("init store db");
+        // 空库 → 空引用集合（设备守卫的该臂恒不命中）。
+        let empty = crate::features::model_store::installed_weight_paths_checked()
+            .expect("empty store enumerates");
+        assert!(empty.is_empty(), "got {empty:?}");
+
+        // 在册卡片的两条约定候选（来源仓库名末段、用户模型名）各落一个真实
+        // 目录 → 枚举恢复两条 canonical 路径。
+        db::add_store_model(db::AddStoreModelParams {
+            card_id: "c-refs-1",
+            model_name: "my-model",
+            card_name: "c-refs-1",
+            org: None,
+            description: None,
+            engine_name: "e",
+            engine_version: None,
+            size_bytes: 0,
+            quantization: None,
+            source_repo_id: Some("org/qwen-weights"),
+            source_filename: None,
+            scripts: &std::collections::BTreeMap::new(),
+            status: "downloaded",
+            profiles: &[],
+            deploy_topology: crate::features::model_store::platform::linux::store_client::DeployTopology::default(),
+            card_source: "store",
+        })
+        .expect("insert downloaded model");
+        let models_dir = super::config::load_settings().models_path();
+        let by_repo = models_dir.join("qwen-weights");
+        let by_name = models_dir.join("my-model");
+        std::fs::create_dir_all(&by_repo).expect("create repo candidate");
+        std::fs::create_dir_all(&by_name).expect("create name candidate");
+        let refs = crate::features::model_store::installed_weight_paths_checked()
+            .expect("enumerate installed refs");
+        assert!(
+            refs.contains(&by_repo.canonicalize().expect("canonical repo")),
+            "repo-name candidate must be recovered, got {refs:?}"
+        );
+        assert!(
+            refs.contains(&by_name.canonicalize().expect("canonical name")),
+            "model-name candidate must be recovered, got {refs:?}"
+        );
+
+        // 不存在的候选被 exists() 过滤（与 residual_paths 同一尺子）。
+        assert!(
+            !refs.iter().any(|p| p.ends_with("absent-candidate")),
+            "missing candidates must be filtered, got {refs:?}"
+        );
+
+        // 就地复用形态：约定位置是软链 → canonicalize 解析到原位。
+        let original = ctx.path().join("legacy-scan").join("hf").join("qwen");
+        std::fs::create_dir_all(&original).expect("create original weights");
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(&original, models_dir.join("linked-repo"))
+            .expect("create reuse symlink");
+        db::add_store_model(db::AddStoreModelParams {
+            card_id: "c-refs-2",
+            model_name: "linked-model",
+            card_name: "c-refs-2",
+            org: None,
+            description: None,
+            engine_name: "e",
+            engine_version: None,
+            size_bytes: 0,
+            quantization: None,
+            source_repo_id: Some("org/linked-repo"),
+            source_filename: None,
+            scripts: &std::collections::BTreeMap::new(),
+            status: "downloaded",
+            profiles: &[],
+            deploy_topology: crate::features::model_store::platform::linux::store_client::DeployTopology::default(),
+            card_source: "store",
+        })
+        .expect("insert linked model");
+        let refs = crate::features::model_store::installed_weight_paths_checked()
+            .expect("enumerate after symlink");
+        assert!(
+            refs.contains(&original.canonicalize().expect("canonical original")),
+            "in-place reuse must recover the ORIGINAL path via the symlink, got {refs:?}"
+        );
+
+        // 历史根也参与枚举：换目录不搬权重，老根下的在册候选同样恢复。
+        let old_models_dir = models_dir.clone();
+        let new_models_dir = ctx.path().join("weights-new");
+        crate::features::model_store::set_storage_settings(
+            Some(new_models_dir.to_string_lossy().into_owned()),
+            None,
+        )
+        .expect("switch models_dir");
+        // 老根（现入历史）下的既有候选仍被恢复。
+        let refs = crate::features::model_store::installed_weight_paths_checked()
+            .expect("enumerate with history roots");
+        assert!(
+            refs.contains(&by_repo.canonicalize().expect("canonical old root")),
+            "candidates under the historical models_dir root must still be recovered, got {refs:?}"
+        );
+        let _ = old_models_dir;
     }
 
     #[test]

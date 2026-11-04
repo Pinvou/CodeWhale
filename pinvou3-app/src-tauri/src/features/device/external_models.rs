@@ -991,7 +991,16 @@ pub async fn remove_external_model(
                 }
                 None => false,
             };
-            Ok((name_hit, ollama_model_hit, weights_hit))
+            // 存量引用臂（2026-11-04 评审 P2）：目录级保护超集覆盖不到的两类
+            // 存量——升级前已移除的扫描目录（历史为空）与被 16 条上限淘汰的
+            // 历史根——由"在册卡片实际引用的权重路径"兜底。fail-closed 与
+            // 名单/权重根查询同口径。
+            let installed_refs = crate::features::model_store::installed_weight_paths_checked()?;
+            let installed_weight_hit = match weights_path.as_deref() {
+                Some(weights) => paths_intersect_any(Path::new(weights), &installed_refs),
+                None => false,
+            };
+            Ok((name_hit, ollama_model_hit, weights_hit, installed_weight_hit))
         }
     })
     .await
@@ -1002,11 +1011,12 @@ pub async fn remove_external_model(
         // "稍后重试"是死路，记录会从 UI 永远删不掉。
         format!("{error}；为防误删商店管理的模型，本次移除已被拒绝，请稍后重试{STORE_BOUNDARY_ESCAPE_HINT}")
     })?;
-    let (name_hit, ollama_model_hit, weights_hit) = boundary;
+    let (name_hit, ollama_model_hit, weights_hit, installed_weight_hit) = boundary;
     removal_boundary_error(
         &record.name,
         &confirm_name,
         weights_hit,
+        installed_weight_hit,
         name_hit.as_deref(),
         ollama_model_hit.as_deref(),
     )?;
@@ -1121,6 +1131,17 @@ pub async fn remove_external_model(
                                         )
                                     })?;
                             ensure_recheck_outside_store_roots(&recheck, &store_roots)?;
+                            // 存量引用删除时刻复查（2026-11-04 评审 P2）：与商店
+                            // 根复查同一模式重推导，查询失败按拒绝（fail-closed
+                            // 同口径）。
+                            let installed_refs =
+                                crate::features::model_store::installed_weight_paths_checked()
+                                    .map_err(|error| {
+                                        format!(
+                                            "拒绝删除：已安装引用读取失败（{error}），为防误删已拒绝"
+                                        )
+                                    })?;
+                            ensure_recheck_outside_installed_refs(&recheck, &installed_refs)?;
                             // 并发移除兜底：另一窗口/通道已把目录删掉时
                             // remove_dir_all 报 NotFound——与存在性预检的
                             // Ok(None) 同口径按"已删除"收敛，不报误导性的
@@ -1213,6 +1234,7 @@ fn removal_boundary_error(
     record_name: &str,
     confirm_name: &str,
     weights_in_store: bool,
+    installed_weight_hit: bool,
     store_name_hit: Option<&str>,
     ollama_model_store_hit: Option<&str>,
 ) -> Result<(), String> {
@@ -1241,6 +1263,14 @@ fn removal_boundary_error(
         // 由商店边界拦下——递归删除会连根清掉商店目录（二十六轮评审 P1）。
         return Err(format!(
             "该模型的权重目录与模型商店目录相交（位于商店目录之下，或包含商店权重根），由模型商店管理，请在模型商店中操作{STORE_BOUNDARY_ESCAPE_HINT}"
+        ));
+    }
+    if installed_weight_hit {
+        // 存量引用臂（2026-11-04 评审 P2）：就地复用的卡片权重可能落在已从
+        // 设置移除的扫描目录或被历史淘汰的旧根里——目录级超集覆盖不到，由
+        // 在册卡片引用路径兜底。
+        return Err(format!(
+            "该模型的权重目录与已安装商店模型引用的权重路径相交（就地复用），删除会破坏仍在使用的商店模型，请在模型商店中操作{STORE_BOUNDARY_ESCAPE_HINT}"
         ));
     }
     Ok(())
@@ -1553,6 +1583,20 @@ fn ensure_recheck_outside_store_roots(
     if paths_intersect_any(recheck, store_roots) {
         return Err(
             "拒绝删除：目标目录与模型商店目录相交（位于商店目录之下，或包含商店权重根），由模型商店管理，请在模型商店中操作".to_string(),
+        );
+    }
+    Ok(())
+}
+
+/// 删除时刻的存量引用复查（纯函数，测试直打）：目标与任一在册卡片引用路径
+/// 相交即拒绝。
+fn ensure_recheck_outside_installed_refs(
+    recheck: &Path,
+    installed_refs: &[PathBuf],
+) -> Result<(), String> {
+    if paths_intersect_any(recheck, installed_refs) {
+        return Err(
+            "拒绝删除：目标目录与已安装商店模型引用的权重路径相交（就地复用），由模型商店管理，请在模型商店中操作".to_string(),
         );
     }
     Ok(())
@@ -2030,6 +2074,48 @@ mod tests {
         assert!(ensure_ollama_base_binding(Some("http://127.0.0.1:11434/v2"), base).is_err());
         // "/v1" 只剥一层：裸基地址恰好以别的段结尾不受益。
         assert!(ensure_ollama_base_binding(Some("http://127.0.0.1:11434/ollama"), base).is_err());
+    }
+
+    #[test]
+    fn installed_refs_recheck_rejects_intersections_and_passes_disjoint_targets() {
+        let refs = vec![
+            PathBuf::from("/home/u/legacy-store/hf/qwen-weights"),
+            PathBuf::from("/home/u/data/llm/qwen"),
+        ];
+        // 相等即命中。
+        assert!(
+            ensure_recheck_outside_installed_refs(
+                Path::new("/home/u/legacy-store/hf/qwen-weights"),
+                &refs
+            )
+            .is_err()
+        );
+        // 目标在引用之下（删子目录同样破坏该引用）。
+        assert!(
+            ensure_recheck_outside_installed_refs(
+                Path::new("/home/u/legacy-store/hf/qwen-weights/blobs/sha256-x"),
+                &refs
+            )
+            .is_err()
+        );
+        // 祖先方向：目标包含引用 = 连根删除，同样拒绝。
+        assert!(
+            ensure_recheck_outside_installed_refs(Path::new("/home/u/legacy-store"), &refs)
+                .is_err()
+        );
+        // 与全部引用都不相交 → 放行。
+        assert!(
+            ensure_recheck_outside_installed_refs(Path::new("/home/u/own-models/unrelated"), &refs)
+                .is_ok()
+        );
+        // 空引用集合（无在册卡片/非商店平台）恒放行。
+        assert!(
+            ensure_recheck_outside_installed_refs(
+                Path::new("/home/u/legacy-store/hf/qwen-weights"),
+                &[]
+            )
+            .is_ok()
+        );
     }
 
     #[test]
@@ -2592,25 +2678,33 @@ mod tests {
     fn removal_boundary_rejects_confirm_mismatch_store_names_and_store_weights() {
         // 双侧都 trim：存量记录名带空白时确认输入 trim 后仍应匹配（Ok 而非 Err）。
         assert!(
-            removal_boundary_error(" qwen3 ", "qwen3", false, None, None).is_ok(),
+            removal_boundary_error(" qwen3 ", "qwen3", false, false, None, None).is_ok(),
             "trailing-space record names must stay removable"
         );
-        let error = removal_boundary_error("qwen3", " qwen3x ", false, None, None).unwrap_err();
+        let error =
+            removal_boundary_error("qwen3", " qwen3x ", false, false, None, None).unwrap_err();
         assert!(error.contains("确认名"));
         // 守卫 2 名字臂：名字命中商店名单。
-        let error =
-            removal_boundary_error("qwen3", "qwen3", false, Some("Qwen3-30B"), None).unwrap_err();
+        let error = removal_boundary_error("qwen3", "qwen3", false, false, Some("Qwen3-30B"), None)
+            .unwrap_err();
         assert!(error.contains("模型商店"));
         // 守卫 2 model 臂：别名记录的 Ollama 有效删除名命中商店名单（第三轮
         // 评审 P1）——名字臂拦不住它，必须单独立臂。
-        let error = removal_boundary_error("my-alias", "my-alias", false, None, Some("qwen3:30b"))
-            .unwrap_err();
+        let error = removal_boundary_error(
+            "my-alias",
+            "my-alias",
+            false,
+            false,
+            None,
+            Some("qwen3:30b"),
+        )
+        .unwrap_err();
         assert!(error.contains("模型商店"));
         // 守卫 2 路径臂：权重位于任一商店根之下（别名躲过两个名字臂时仍被拦）。
-        let error = removal_boundary_error("qwen3", "qwen3", true, None, None).unwrap_err();
+        let error = removal_boundary_error("qwen3", "qwen3", true, false, None, None).unwrap_err();
         assert!(error.contains("模型商店"));
         // 四道全过 → Ok。
-        assert!(removal_boundary_error("qwen3", " qwen3 ", false, None, None).is_ok());
+        assert!(removal_boundary_error("qwen3", " qwen3 ", false, false, None, None).is_ok());
     }
 
     #[test]
@@ -3666,7 +3760,8 @@ mod tests {
         // 确认名回显限长（第九轮评审 P3）：record_name 来自手写文件，超长名字
         // 不逐字进错误与日志。
         let long_name = "长".repeat(100);
-        let error = removal_boundary_error(&long_name, "mismatch", false, None, None).unwrap_err();
+        let error =
+            removal_boundary_error(&long_name, "mismatch", false, false, None, None).unwrap_err();
         assert!(error.contains(&"长".repeat(32)));
         assert!(!error.contains(&"长".repeat(33)), "echo must be truncated");
     }

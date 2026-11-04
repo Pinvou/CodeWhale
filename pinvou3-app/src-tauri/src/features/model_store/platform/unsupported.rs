@@ -171,6 +171,11 @@ pub(crate) fn store_weights_roots_checked() -> Result<Vec<std::path::PathBuf>, S
     Ok(store_weights_roots())
 }
 
+/// 非 Linux 没有商店：空引用集合（设备守卫的该臂恒不命中）。
+pub(crate) fn installed_weight_paths_checked() -> Result<Vec<std::path::PathBuf>, String> {
+    Ok(Vec::new())
+}
+
 pub(crate) fn ollama_base_url() -> String {
     "http://127.0.0.1:11434".to_string()
 }
