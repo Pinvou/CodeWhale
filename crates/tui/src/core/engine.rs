@@ -2272,6 +2272,14 @@ impl Engine {
                 manager.set_denied_read_subpaths(config.read_denylist.subtree_paths());
             }
         }
+        // Coordination reservations validate in-flight shell jobs against
+        // the same manager the shells live in, so an interrupted child's
+        // background job keeps its frame occupied exactly as long as it runs.
+        // Construction-time wiring: no other handle exists yet, so the
+        // try-lock cannot fail short of a poisoned construction path.
+        if let Ok(mut subagent_manager) = subagent_manager.try_write() {
+            subagent_manager.set_shell_job_source(Arc::clone(&shell_manager));
+        }
         let file_read_tracker = new_shared_file_read_tracker();
         let lsp_manager = Arc::new(match config.lsp_config.clone() {
             Some(cfg) => crate::lsp::LspManager::new(cfg, config.workspace.clone()),

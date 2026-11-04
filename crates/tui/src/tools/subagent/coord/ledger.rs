@@ -160,6 +160,15 @@ pub struct PersistedWriteClaim {
     pub sequence: u64,
     #[serde(default)]
     pub isolated_worktree: bool,
+    /// Canonical workspace of the worktree this claim is confined to, when
+    /// `isolated_worktree`. Claims sharing a root contend with each other
+    /// (ancestors exempted at registration); claims in different worktrees
+    /// never do. `None` on records persisted before the field existed, which
+    /// keeps those on the legacy never-contending footing — and `None` is
+    /// omitted from the persisted shape (like the neighboring optional
+    /// receipt fields), so only rooted claims carry the key on disk.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub worktree_root: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -480,6 +489,8 @@ impl CoordinationLedger {
         &mut self,
         mut claim: WriteScopeClaim,
         isolated_worktree: bool,
+        worktree_root: Option<String>,
+        exempt_owners: &[String],
         mut owner_is_active: F,
     ) -> Result<PersistedWriteClaim, String>
     where
@@ -521,9 +532,31 @@ impl CoordinationLedger {
                 ));
             }
         }
-        if !isolated_worktree
-            && let Some(existing) = self
-                .write_claims
+        // Isolated claims name a private checkout, so they never contend with
+        // shared-root claims. Within ONE worktree the ledger still serializes
+        // unrelated writers: claims registered against the same worktree root
+        // contend unless the existing owner is an ancestor of the new one
+        // (`exempt_owners` is that ancestor chain — the parent delegated the
+        // work downward), so parallel siblings refuse instead of racing the
+        // same checkout. A `None` root predates serialization; it names no
+        // worktree, so it keeps the documented legacy never-contending
+        // footing instead of matching every other `None`.
+        let mut same_worktree_sibling = |existing: &PersistedWriteClaim| {
+            existing.isolated_worktree
+                && existing.worktree_root.is_some()
+                && existing.worktree_root == worktree_root
+                && existing.claim.owner != claim.owner
+                && !exempt_owners.contains(&existing.claim.owner)
+                && owner_is_active(&existing.claim.owner)
+                && existing.claim.overlaps(&claim)
+        };
+        let conflicting = if isolated_worktree {
+            self.write_claims
+                .iter()
+                .find(|existing| same_worktree_sibling(existing))
+                .cloned()
+        } else {
+            self.write_claims
                 .iter()
                 .find(|existing| {
                     !existing.isolated_worktree
@@ -532,7 +565,8 @@ impl CoordinationLedger {
                         && existing.claim.overlaps(&claim)
                 })
                 .cloned()
-        {
+        };
+        if let Some(existing) = conflicting {
             let receipt = WriteContentionReceipt {
                 claimant: claim.owner.clone(),
                 conflicting_owner: existing.claim.owner.clone(),
@@ -559,6 +593,7 @@ impl CoordinationLedger {
             claim,
             sequence: self.next_sequence(),
             isolated_worktree,
+            worktree_root,
         };
         for contention in &mut self.contentions {
             if contention.claimant == record.claim.owner
@@ -1379,6 +1414,8 @@ mod records_tests {
                         contracts: Vec::new(),
                     },
                     false,
+                    None,
+                    &[],
                     |candidate| candidate == "live-builder",
                 )
                 .expect("non-overlapping claim registers");
@@ -1411,6 +1448,8 @@ mod records_tests {
                     contracts: Vec::new(),
                 },
                 false,
+                None,
+                &[],
                 |candidate| candidate == "live-builder",
             )
             .expect("claim registers");
@@ -1431,6 +1470,8 @@ mod records_tests {
                     contracts: Vec::new(),
                 },
                 false,
+                None,
+                &[],
                 |candidate| candidate == "live-builder",
             )
             .expect("claim registers");
@@ -1497,7 +1538,9 @@ mod records_tests {
             exact_files: vec![],
             contracts: vec!["public-api".into()],
         };
-        ledger.register_claim(first, false, |_| false).unwrap();
+        ledger
+            .register_claim(first, false, None, &[], |_| false)
+            .unwrap();
         let second = WriteScopeClaim {
             owner: "agent-b".into(),
             roots: vec!["docs".into()],
@@ -1505,7 +1548,7 @@ mod records_tests {
             contracts: vec!["public-api".into()],
         };
         let err = ledger
-            .register_claim(second.clone(), false, |owner| owner == "agent-a")
+            .register_claim(second.clone(), false, None, &[], |owner| owner == "agent-a")
             .unwrap_err();
         assert!(
             err.contains("contention") && err.contains("agent-a"),
@@ -1523,7 +1566,7 @@ mod records_tests {
             json!("blocked_pending_isolation_or_serialization")
         );
         let resolving_claim = ledger
-            .register_claim(second, true, |owner| owner == "agent-a")
+            .register_claim(second, true, None, &[], |owner| owner == "agent-a")
             .expect("isolated claim resolves the blocked admission");
         assert_eq!(
             ledger.contentions[0].disposition,
@@ -1548,6 +1591,8 @@ mod records_tests {
                         contracts: vec![],
                     },
                     false,
+                    None,
+                    &[],
                     |_| true,
                 )
                 .unwrap();
@@ -1561,6 +1606,8 @@ mod records_tests {
                     contracts: vec![],
                 },
                 false,
+                None,
+                &[],
                 |_| true,
             )
             .expect_err("all-active capacity must fail before evicting ownership");
@@ -1721,10 +1768,66 @@ mod records_tests {
                     contracts: vec![],
                 },
                 false,
+                None,
+                &[],
                 |_| false,
             )
             .unwrap_err();
         assert!(error.contains("unsupported coordination schema"), "{error}");
         assert!(ledger.write_claims.is_empty());
+    }
+
+    /// The serialization key round-trips both ways across the field's
+    /// introduction: a record persisted before the field existed (no
+    /// `worktree_root` key) deserializes onto the legacy never-contending
+    /// footing, a rooted record carries its key, and an unrooted record
+    /// omits the key from the persisted shape instead of writing an
+    /// explicit null.
+    #[test]
+    fn persisted_write_claim_worktree_root_round_trips_across_the_field_introduction() {
+        let claim = |owner: &str| WriteScopeClaim {
+            owner: owner.to_string(),
+            roots: vec![".".into()],
+            exact_files: vec![],
+            contracts: vec![],
+        };
+        let legacy: PersistedWriteClaim = serde_json::from_value(json!({
+            "claim": { "owner": "legacy-worker", "roots": ["."], "exact_files": [], "contracts": [] },
+            "sequence": 1,
+            "isolated_worktree": true,
+        }))
+        .expect("a pre-field record deserializes");
+        assert_eq!(
+            legacy.worktree_root, None,
+            "a missing key keeps the legacy footing"
+        );
+        assert_eq!(
+            serde_json::to_value(&legacy)
+                .expect("serialize legacy")
+                .to_string(),
+            r#"{"claim":{"owner":"legacy-worker","roots":["."],"exact_files":[],"contracts":[]},"sequence":1,"isolated_worktree":true}"#,
+            "an unrooted record omits the key instead of writing null"
+        );
+
+        let rooted = PersistedWriteClaim {
+            claim: claim("rooted-worker"),
+            sequence: 2,
+            isolated_worktree: true,
+            worktree_root: Some("/wt".into()),
+        };
+        assert_eq!(
+            serde_json::to_value(&rooted).expect("serialize rooted"),
+            json!({
+                "claim": { "owner": "rooted-worker", "roots": ["."], "exact_files": [], "contracts": [] },
+                "sequence": 2,
+                "isolated_worktree": true,
+                "worktree_root": "/wt",
+            }),
+            "a rooted record carries its key"
+        );
+        let parsed: PersistedWriteClaim =
+            serde_json::from_value(serde_json::to_value(&rooted).expect("serialize rooted"))
+                .expect("round trip");
+        assert_eq!(parsed, rooted);
     }
 }
