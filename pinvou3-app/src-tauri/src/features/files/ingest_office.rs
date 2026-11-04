@@ -36,7 +36,7 @@ pub(super) fn ingest_pandoc(
     }
     // 产物落盘再限量读回(原走 stdout,整本输出受平台层 4 MiB 捕获上限约束,
     // 大文档会被误杀);带超时兜底:挂死的转换进程不能让上传永远转圈。
-    let temporary = match tempfile::tempdir() {
+    let temporary = match super::super::platform::private_conversion_directory("pinvou3-pandoc-") {
         Ok(temporary) => temporary,
         Err(e) => {
             return IngestResult::warning(
@@ -44,7 +44,7 @@ pub(super) fn ingest_pandoc(
                 &basename,
                 path,
                 byte_size,
-                format!("pandoc 调用失败: {e}"),
+                safe_error(format!("pandoc 调用失败: {e}")),
             );
         }
     };

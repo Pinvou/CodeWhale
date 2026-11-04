@@ -451,7 +451,7 @@ try:
         with open(sys.argv[2], 'w', encoding='utf-8') as out:
             out.write(body.get_content())
 except Exception as e:
-    print('\n(正文解析失败:', e, ')')
+    print('\n(正文解析失败:', sys.argv[4] or str(e), ')')
 atts = [p.get_filename() for p in msg.iter_attachments() if p.get_filename()]
 if atts:
     with open(sys.argv[3], 'w', encoding='utf-8') as tail:
@@ -462,7 +462,8 @@ if atts:
     // kill-tree，避免上传永久转圈。
     // 正文可随输入涨到 20 MiB 上限量级，超出 4 MiB 捕获上限，单独落盘回读
     // （32 MiB 上限，同 pdftotext/pandoc），不走 stdout。
-    let body_dir = tempfile::tempdir().map_err(|e| format!("创建临时目录失败: {e}"))?;
+    let body_dir = super::super::platform::private_conversion_directory("pinvou3-eml-")
+        .map_err(|e| safe_error(format!("创建临时目录失败: {e}")))?;
     let body_path = body_dir.path().join("body.txt");
     let tail_path = body_dir.path().join("tail.txt");
     let mut command = crate::platform::process::HiddenCommand::new(&program);
@@ -471,7 +472,10 @@ if atts:
         .arg(SCRIPT)
         .arg(path)
         .arg(&body_path)
-        .arg(&tail_path);
+        .arg(&tail_path)
+        // Empty for local ingestion; private ingestion supplies only its stable
+        // error code, including warnings returned in an otherwise valid email.
+        .arg(safe_error(""));
     let out = crate::platform::process::output_with_timeout_and_kill_tree(
         command,
         std::time::Duration::from_secs(60),
@@ -618,6 +622,28 @@ mod tests {
             attachment_label_at < attachment_name_at,
             "attachment names follow their label: {parsed}"
         );
+    }
+
+    #[test]
+    fn eml_body_decode_warnings_keep_local_detail_but_redact_private_ingestion() {
+        if !crate::platform::os::command_exists(&crate::platform::paths::python_command()) {
+            eprintln!("skip: Python is not available");
+            return;
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let eml = dir.path().join("invalid-charset.eml");
+        std::fs::write(
+            &eml,
+            "From: alice@example.com\r\nContent-Type: text/plain; charset=pinvou_private_test_charset\r\n\r\nbody",
+        )
+        .unwrap();
+        let local = parse_eml_via_python(&eml).unwrap();
+        assert!(local.contains("pinvou_private_test_charset"));
+        let private =
+            super::super::ingest_diagnostics::with_private(|| parse_eml_via_python(&eml)).unwrap();
+        assert!(private.contains(super::super::ingest_diagnostics::CONVERSION_FAILED));
+        assert!(!private.contains("pinvou_private_test_charset"));
+        assert!(private.contains("alice@example.com"));
     }
 
     #[test]

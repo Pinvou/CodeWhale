@@ -154,15 +154,16 @@ pub(super) const EXTRACTED_TEXT_READ_CAP: u64 = 32 * 1024 * 1024;
 
 /// 从抽取产物文件限量读回文本：超过 [`EXTRACTED_TEXT_READ_CAP`] 报错。
 pub(super) fn read_capped_text(path: &Path) -> Result<String, String> {
-    let file = std::fs::File::open(path).map_err(|e| format!("读取抽取产物失败: {e}"))?;
+    let file =
+        std::fs::File::open(path).map_err(|e| safe_error(format!("读取抽取产物失败: {e}")))?;
     let mut buffer = Vec::new();
     file.take(EXTRACTED_TEXT_READ_CAP + 1)
         .read_to_end(&mut buffer)
-        .map_err(|e| format!("读取抽取产物失败: {e}"))?;
+        .map_err(|e| safe_error(format!("读取抽取产物失败: {e}")))?;
     if buffer.len() as u64 > EXTRACTED_TEXT_READ_CAP {
-        return Err(format!(
+        return Err(safe_error(format!(
             "抽取文本超过 {EXTRACTED_TEXT_READ_CAP} 字节读回上限"
-        ));
+        )));
     }
     Ok(String::from_utf8_lossy(&buffer).into_owned())
 }
@@ -176,7 +177,8 @@ pub(super) fn read_capped_text(path: &Path) -> Result<String, String> {
 pub(super) fn pdftotext_extract(pdf: &Path) -> Result<String, String> {
     // 产物落盘再限量读回（原 `-` 走 stdout，整本输出受平台层 4 MiB 捕获上限
     // 约束，大文档会被整树终止误杀）；runaway 进程仍受超时与溢出终止约束。
-    let temporary = tempfile::tempdir().map_err(|e| format!("pdftotext 调用失败: {e}"))?;
+    let temporary = super::super::platform::private_conversion_directory("pinvou3-pdftotext-")
+        .map_err(|e| safe_error(format!("pdftotext 调用失败: {e}")))?;
     let output_path = temporary.path().join("extracted.txt");
     let mut command = pdf_tool_command("pdftotext");
     command.arg("-layout").arg(pdf).arg(&output_path);
@@ -357,6 +359,34 @@ mod tests {
         std::fs::write(&path, vec![b'a'; (EXTRACTED_TEXT_READ_CAP + 1) as usize]).unwrap();
         let error = read_capped_text(&path).unwrap_err();
         assert!(error.contains("读回上限"), "{error}");
+    }
+
+    #[test]
+    fn capped_read_errors_keep_local_detail_but_redact_private_conversions() {
+        let dir = super::super::super::platform::private_conversion_directory("pinvou3-read-test-")
+            .unwrap();
+        let missing = dir.path().join("missing-output.txt");
+        let local_error = read_capped_text(&missing).unwrap_err();
+        assert!(local_error.starts_with("读取抽取产物失败:"));
+
+        let oversized = dir.path().join("oversized-output.txt");
+        std::fs::File::create(&oversized)
+            .unwrap()
+            .set_len(EXTRACTED_TEXT_READ_CAP + 1)
+            .unwrap();
+        super::super::ingest_diagnostics::with_private(|| {
+            for path in [&missing, &oversized] {
+                assert_eq!(
+                    read_capped_text(path).unwrap_err(),
+                    super::super::ingest_diagnostics::CONVERSION_FAILED,
+                );
+            }
+        });
+        assert!(
+            read_capped_text(&oversized)
+                .unwrap_err()
+                .contains("读回上限")
+        );
     }
 
     #[test]
