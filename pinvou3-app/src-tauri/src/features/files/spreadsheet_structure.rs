@@ -903,7 +903,7 @@ mod tests {
             .collect();
         let bytes = xlsx_fixture(&files);
         let limits = xlsx_formula_span_limits(&bytes).unwrap();
-        let &(rows, cols) = limits.get("Map").unwrap();
+        let (rows, cols) = limits["Map"];
         assert!(rows.saturating_mul(cols) > MAX_FORMULA_SPAN_CELLS);
 
         let calamine::Sheets::Xlsx(mut workbook) =
