@@ -14,6 +14,7 @@ use super::IngestResult;
 use super::classify;
 use super::ingest;
 use super::ingest_deps::{archive_tool_command, system_tools};
+use super::ingest_diagnostics::safe_error;
 use crate::features::files::platform::archive_entry::is_link_or_reparse_point;
 
 const MAX_ARCHIVE_ENTRIES: usize = 50;
@@ -49,17 +50,14 @@ pub(super) fn ingest_archive(
                 max_bytes: MAX_ARCHIVE_EXPANDED_BYTES,
             });
         }
-        Err(e) => return Ok(mk_err(format!("压缩包内容读取失败: {e}"))),
+        Err(e) => return Ok(mk_err(safe_error(format!("压缩包内容读取失败: {e}")))),
     }
 
-    let ts = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_nanos())
-        .unwrap_or(0);
-    let tmpdir = std::env::temp_dir().join(format!("pinvou3-archive-{ts}"));
-    if let Err(e) = std::fs::create_dir_all(&tmpdir) {
-        return Ok(mk_err(format!("创建临时目录失败: {e}")));
-    }
+    let temporary = match super::super::platform::private_conversion_directory("pinvou3-archive-") {
+        Ok(directory) => directory,
+        Err(e) => return Ok(mk_err(safe_error(format!("创建临时目录失败: {e}")))),
+    };
+    let tmpdir = temporary.path().to_owned();
 
     // 解压上限 100 MiB，300s 预算覆盖慢盘上的解压；卡死的 7z（畸形包、
     // 杀软占用）按超时 kill-tree，上传不再永久转圈（同 pdftotext 的兜底）。
@@ -81,7 +79,7 @@ pub(super) fn ingest_archive(
             Err(e) => e,
         };
         let _ = std::fs::remove_dir_all(&tmpdir);
-        return Ok(mk_err(format!("7z 解压失败: {detail}")));
+        return Ok(mk_err(safe_error(format!("7z 解压失败: {detail}"))));
     }
 
     // 递归收集文件，对每个调主 ingest；嵌套压缩包不展开。
@@ -89,7 +87,7 @@ pub(super) fn ingest_archive(
         Ok(path) => path,
         Err(e) => {
             let _ = std::fs::remove_dir_all(&tmpdir);
-            return Ok(mk_err(format!("解析临时目录失败: {e}")));
+            return Ok(mk_err(safe_error(format!("解析临时目录失败: {e}"))));
         }
     };
     let mut files = Vec::new();
@@ -178,9 +176,9 @@ fn archive_list_stats(path: &Path) -> Result<(usize, u64), String> {
         command,
         std::time::Duration::from_secs(60),
     )
-    .map_err(map_archive_list_error)?;
+    .map_err(|e| safe_error(map_archive_list_error(e)))?;
     if !out.status.success() {
-        return Err(String::from_utf8_lossy(&out.stderr).trim().to_string());
+        return Err(safe_error(String::from_utf8_lossy(&out.stderr).trim()));
     }
     let text = String::from_utf8_lossy(&out.stdout);
     parse_archive_list_stats(&text)

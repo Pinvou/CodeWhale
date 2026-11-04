@@ -1,4 +1,7 @@
 {{- if and .Values.keycloak.enabled .Values.keycloak.realmUpgradeEnabled }}
+{{- if or (eq .Values.oidc.portalHandoffClientId "") (regexMatch "[^A-Za-z0-9._-]" .Values.oidc.portalHandoffClientId) }}
+{{- fail "oidc.portalHandoffClientId must be a nonempty safe OIDC identifier when the realm upgrade hook is enabled" }}
+{{- end }}
 apiVersion: batch/v1
 kind: Job
 metadata:
@@ -40,6 +43,9 @@ spec:
             - { name: PINVOU_OIDC_CLIENT_ID, value: {{ .Values.keycloak.oidcClientId | quote }} }
             - { name: PINVOU_OIDC_AUDIENCE, value: {{ .Values.oidc.audience | quote }} }
             - { name: PORTAL_OIDC_CLIENT_ID, value: {{ .Values.oidc.portalClientId | quote }} }
+            - { name: PORTAL_HANDOFF_OIDC_CLIENT_ID, value: {{ .Values.oidc.portalHandoffClientId | quote }} }
+            - { name: PORTAL_SESSION_HANDOFF, value: "true" }
+            - { name: PORTAL_HANDOFF_OIDC_CLIENT_SECRET_FILE, value: /var/run/secrets/pinvou/portal-handoff/client-secret }
             - { name: PORTAL_PUBLIC_URL, value: {{ .Values.public.portalUrl | quote }} }
             - name: KEYCLOAK_ADMIN_USERNAME
               valueFrom: { secretKeyRef: { name: {{ .Values.global.runtimeSecret }}, key: keycloak-realm-upgrade-admin-username } }
@@ -49,6 +55,11 @@ spec:
               valueFrom: { secretKeyRef: { name: {{ .Values.global.runtimeSecret }}, key: keycloak-provisioner-client-secret } }
           volumeMounts:
             - { name: tmp, mountPath: /tmp }
+            - { name: portal-handoff-oidc, mountPath: /var/run/secrets/pinvou/portal-handoff, readOnly: true }
       volumes:
         - { name: tmp, emptyDir: { sizeLimit: 32Mi } }
+        - name: portal-handoff-oidc
+          secret:
+            secretName: {{ .Values.global.runtimeSecret }}
+            items: [{ key: portal-handoff-oidc-client-secret, path: client-secret }]
 {{- end }}

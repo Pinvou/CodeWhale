@@ -538,3 +538,55 @@ test('organization detail fallback rejects missing, incorrect, duplicate and inl
   catalog.http_policies.find(isDetail).permissions = ['platform.users.read'];
   assert.throws(() => assertRestoredReadAuthorization(sources, catalog));
 });
+
+
+const colonActionRegistrations = [
+  ['account/service.go', 'internal', '/ledger-repair/authorization-proofs:batch', '/authorization-proofs:batch'],
+  ['billing/organization_routes.go', 'protected', '/internal/v1/organizations/:organization_id/quota-grants:batch', '/quota-grants:batch'],
+  ['token/management_routes.go', 'admin', '/commands:precheck', '/commands:precheck'],
+  ['token/organization_finance_routes.go', 'routes', '/organizations/:organization_id/account-closed-grants:reclaim-batch', '/account-closed-grants:reclaim-batch'],
+  ['token/organization_finance_routes.go', 'routes', '/organizations/:organization_id/quota-grants:batch', '/quota-grants:batch'],
+];
+
+function assertColonActionGuard(source, file, receiver, path, suffix) {
+  const routes = authorizationRoutes(file, source).filter(route => route.path === path);
+  assert.equal(routes.length, 1, path);
+  const route = routes[0];
+  assert.equal(route.receiver, receiver, path);
+  assert.equal(route.method, 'POST', path);
+  const prefix = `${receiver}.POST("${path}", `;
+  const guard = `httpserver.RequirePathSuffix("${suffix}")`;
+  assert.ok(route.registration.trim().startsWith(prefix + guard + ', '), path);
+  const {code, masked} = goSource(route.registration);
+  const liveGuards = [...code.matchAll(/\bhttpserver\.RequirePathSuffix\(/g)]
+    .filter(match => masked[match.index] !== ' ');
+  assert.equal(liveGuards.length, 1, path);
+}
+
+test('all five production colon action registrations keep their first exact path guard', async () => {
+  for (const [file, receiver, path, suffix] of colonActionRegistrations) {
+    const source = await readFile(new URL(`../../internal/${file}`, import.meta.url), 'utf8');
+    const check = text => assertColonActionGuard(text, file, receiver, path, suffix);
+    check(source);
+    const route = authorizationRoutes(file, source).find(route => route.path === path).registration;
+    const guard = `httpserver.RequirePathSuffix("${suffix}")`;
+    const prefix = `${receiver}.POST("${path}", `;
+    const mutations = [
+      route.replace(guard + ', ', ''),
+      route.replace(guard, `httpserver.RequirePathSuffix("${suffix}Other")`),
+      route.replace(prefix + guard + ', ', prefix).replace(/\)$/, ', ' + guard + ')'),
+      route.replace(guard + ', ', guard + ', ' + guard + ', '),
+    ];
+    for (const registration of mutations) {
+      assert.notEqual(registration, route, path);
+      const mutated = source.replace(route, registration);
+      assert.notEqual(mutated, source, path);
+      assert.throws(() => check(mutated), undefined, path);
+    }
+    // Comments and literals cannot replace a missing executable guard.
+    const absent = mutations[0];
+    for (const decoy of ['// ' + route, `var guardExample = \`${route}\``]) {
+      assert.throws(() => check(source.replace(route, absent) + '\n' + decoy), undefined, path);
+    }
+  }
+});

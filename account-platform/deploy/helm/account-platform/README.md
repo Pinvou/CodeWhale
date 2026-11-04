@@ -186,6 +186,16 @@ The three SQL migration hooks do not provision it, and
 it is not a first-install bootstrap switch. Keycloak's management readiness
 probe alone does not establish that application login or JWKS is available.
 
+With the built-in realm upgrade hook enabled, `oidc.portalHandoffClientId`
+must also be nonempty ASCII letters, digits, dots, underscores and hyphens.
+Rendering rejects other characters when `keycloak.enabled` and
+`keycloak.realmUpgradeEnabled` are both true. The hook
+enables the dedicated access-only handoff client using that exact release ID
+and the same runtime Secret key `portal-handoff-oidc-client-secret` as Portal,
+projected read-only as a single file. Provision that controlled key before the
+hook runs. The existing bootstrap/readback and real login acceptance remain
+required.
+
 The realm updater accepts `oidc.audience` and `oidc.portalClientId` only as
 nonempty ASCII letters, digits, dots, underscores and hyphens. The chart rejects
 other characters during schema validation, before rendering resources. This is
@@ -365,16 +375,22 @@ are different resources and do not satisfy these inputs. Build/review the
 SHA-256 digest, never the all-zero test fixture digest. Rendering cannot establish
 that those resources or the image exist.
 
+Use the existing reviewed site values file to supply every image digest required
+by production validation, together with the approved site configuration. Set
+`ACCOUNT_PLATFORM_SITE_VALUES_FILE` to its path.
+
 With reviewed operator inputs in the shell environment, validate the production
 values and **actually render** them (do not print or supply private keys):
 
 ```sh
+: "${ACCOUNT_PLATFORM_SITE_VALUES_FILE:?set the reviewed site values file with approved image digests}"
 : "${NEWAPI_TLS_SECRET_NAME:?set the Ready TLS Secret name}"
 : "${NEWAPI_CA_CONFIGMAP_NAME:?set the Ready public CA ConfigMap name}"
 : "${NEWAPI_TLS_IMAGE_REPOSITORY:?set the approved image repository}"
 : "${NEWAPI_TLS_IMAGE_DIGEST:?set the approved sha256 image digest}"
 helm lint account-platform/deploy/helm/account-platform \
   -f account-platform/deploy/helm/account-platform/values-production-new.yaml \
+  -f "$ACCOUNT_PLATFORM_SITE_VALUES_FILE" \
   --set-string newApi.tlsSecretName="$NEWAPI_TLS_SECRET_NAME" \
   --set-string newApi.caConfigMap="$NEWAPI_CA_CONFIGMAP_NAME" \
   --set-string images.newApiTLS.repository="$NEWAPI_TLS_IMAGE_REPOSITORY" \
@@ -383,6 +399,7 @@ helm lint account-platform/deploy/helm/account-platform \
   --set-string keycloak.caConfigMap="${KEYCLOAK_CA_CONFIGMAP_NAME:?set the Ready Keycloak public CA ConfigMap name}"
 helm template pinvou account-platform/deploy/helm/account-platform \
   -f account-platform/deploy/helm/account-platform/values-production-new.yaml \
+  -f "$ACCOUNT_PLATFORM_SITE_VALUES_FILE" \
   --set-string newApi.tlsSecretName="$NEWAPI_TLS_SECRET_NAME" \
   --set-string newApi.caConfigMap="$NEWAPI_CA_CONFIGMAP_NAME" \
   --set-string images.newApiTLS.repository="$NEWAPI_TLS_IMAGE_REPOSITORY" \

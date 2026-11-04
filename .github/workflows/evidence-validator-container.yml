@@ -28,6 +28,7 @@ jobs:
         with:
           go-version-file: account-platform/go.mod
           cache-dependency-path: account-platform/go.sum
+          cache: ${{ runner.environment == 'github-hosted' }}
       - uses: actions/setup-python@v7
         with:
           python-version: '3.12.14'

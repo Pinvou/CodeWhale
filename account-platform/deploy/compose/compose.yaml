@@ -403,6 +403,7 @@ services:
         SERVICE: token-portal
     environment:
       HTTP_TRUSTED_PROXY_IPS: ${TOKEN_PORTAL_HTTP_TRUSTED_PROXY_IPS:-}
+      PORTAL_TRUSTED_PROXY_IPS: ${TOKEN_PORTAL_HTTP_TRUSTED_PROXY_IPS:-}
       <<: *client-compatibility
       APP_ENV: development
       PORT: 8080
@@ -587,6 +588,8 @@ services:
     environment:
       DATABASE_URL: postgresql://payment_simulator:${PAYMENT_SIM_DB_PASSWORD}@postgres:5432/account_platform_payment_sim?sslmode=disable
     depends_on:
+      deployment-credentials-check:
+        condition: service_completed_successfully
       postgres:
         condition: service_healthy
 

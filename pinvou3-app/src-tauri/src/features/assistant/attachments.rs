@@ -566,9 +566,15 @@ fn build_message_with_attachments_in_dir_with_access(
             // (实测同一张图,不调工具时编造内容,调工具才得真相)。改成"你现在
             // 一无所知,调用前绝不描述",把模糊建议变成具体硬规则(Qwen3.6 对具体
             // 硬规则遵循好、对抽象意图无效)。
-            match existing_workspace_relative_file(&a.path, workspace).or_else(|| {
-                stage_file_in_workspace(&a.path, &a.basename, workspace, attachment_dir)
-            }) {
+            match existing_workspace_relative_file(&a.read_path().to_string_lossy(), workspace)
+                .or_else(|| {
+                    stage_file_in_workspace(
+                        &a.read_path().to_string_lossy(),
+                        &a.basename,
+                        workspace,
+                        attachment_dir,
+                    )
+                }) {
                 Some(rel) => {
                     let rel = staged_reference(workspace, &rel, reference_absolute);
                     if image_tools_allowed {
@@ -706,13 +712,18 @@ pub(crate) fn prepare_native_user_message_in_dir(
         if a.kind == "image" {
             // 暂存复用现有校验链(basename 白名单/symlink 防逃逸/create_new 防覆盖);
             // 标记路径只来自暂存结果,不接受前端直给路径(设计 §11)。
-            let relative = stage_file_in_workspace(&a.path, &a.basename, workspace, attachment_dir)
-                .ok_or_else(|| {
-                    format!(
-                        "图片 {} 暂存到 workspace 失败,无法原生发送。请重新选择图片。",
-                        a.basename
-                    )
-                })?;
+            let relative = stage_file_in_workspace(
+                &a.read_path().to_string_lossy(),
+                &a.basename,
+                workspace,
+                attachment_dir,
+            )
+            .ok_or_else(|| {
+                format!(
+                    "图片 {} 暂存到 workspace 失败,无法原生发送。请重新选择图片。",
+                    a.basename
+                )
+            })?;
             let abs = workspace.join(&relative);
             segment.push_str(&format!(
                 "### {} (image, {} bytes)\n",
@@ -744,8 +755,55 @@ mod read_only_prompt_tests {
     use super::build_read_only_message_with_attachments;
     use crate::features::files::file_ingest::IngestResult;
 
+    #[test]
+    fn large_published_text_prompt_uses_a_named_reference_instead_of_a_parser_fd() {
+        if !crate::platform::filesystem::supports_private_read_path_publication() {
+            return;
+        }
+        use sha2::{Digest as _, Sha256};
+        let root = tempfile::tempdir().unwrap();
+        let body = "verified large text line\n".repeat(10_000).into_bytes();
+        let owner = std::sync::Arc::new(
+            crate::platform::filesystem::publish_private_read_path(
+                crate::platform::filesystem::open_private_file_directory(
+                    &root.path().join("remote_uploads/ctr-up-large"),
+                )
+                .unwrap(),
+                std::ffi::OsStr::new("large.txt"),
+                &body,
+            )
+            .unwrap(),
+        );
+        let parser_path = owner.read_path().to_owned();
+        let descriptor = crate::features::files::file_ingest::PublishedAttachment {
+            handle_id: "ctr-up-large".into(),
+            path: owner.path().to_owned(),
+            display_name: "large.txt".into(),
+            mime_type: "text/plain".into(),
+            bytes: body.len() as u64,
+            sha256: crate::platform::encoding::hex_lower(&Sha256::digest(&body)),
+            read_owner: Some(owner.clone()),
+        };
+        let ingested =
+            crate::features::files::file_ingest::ingest_staged_attachment(root.path(), &descriptor)
+                .unwrap();
+        let reference = ingested.path.clone();
+        let prompt = super::build_message_with_attachments_in_dir(
+            "read all".into(),
+            vec![ingested],
+            root.path(),
+            "attachments",
+            false,
+        );
+        assert!(prompt.contains(&reference));
+        if parser_path != std::path::Path::new(&reference) {
+            assert!(!prompt.contains(parser_path.to_str().unwrap()));
+        }
+    }
+
     fn attachment(markdown: String, token_estimate: u32) -> IngestResult {
         IngestResult {
+            read_owner: None,
             kind: "xlsx".into(),
             basename: "report.xlsx".into(),
             path: "attachments/report.xlsx".into(),
@@ -795,6 +853,7 @@ mod read_only_prompt_tests {
         let staged = workspace.path().join("attachments/photo.png");
         std::fs::write(&staged, b"png").unwrap();
         let img = IngestResult {
+            read_owner: None,
             kind: "image".into(),
             basename: "photo.png".into(),
             path: staged.to_string_lossy().into_owned(),

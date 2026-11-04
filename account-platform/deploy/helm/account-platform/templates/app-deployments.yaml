@@ -98,6 +98,9 @@ spec:
             - { name: RATE_LIMIT_RPS, value: {{ $root.Values.security.rateLimitRPS | quote }} }
             - { name: RATE_LIMIT_BURST, value: {{ $root.Values.security.rateLimitBurst | quote }} }
             - { name: HTTP_TRUSTED_PROXY_IPS, value: {{ join "," (index $root.Values.security.httpTrustedProxyIPs $app.name | default list) | quote }} }
+            {{- if eq $app.name "token-portal" }}
+            - { name: PORTAL_TRUSTED_PROXY_IPS, value: {{ join "," (index $root.Values.security.httpTrustedProxyIPs $app.name | default list) | quote }} }
+            {{- end }}
             - { name: TRUSTED_TIME_SOURCES, value: {{ join "," $root.Values.global.trustedTimeSources | quote }} }
             {{- if ne $app.name "identity-service" }}
             - { name: PINVOU_API_CONTRACT_VERSION, value: {{ $root.Values.compatibility.contractVersion | quote }} }

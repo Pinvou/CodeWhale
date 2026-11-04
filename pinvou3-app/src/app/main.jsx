@@ -1346,7 +1346,6 @@ const App = () => {
       })();
       const remoteChatConnection = bs?.controllerConnection || REMOTE_DISCONNECTED_CONNECTION;
       const remoteProxyHistoryAvailable = bs?.platformCapabilities?.loaded === true
-        && bs?.platformCapabilities?.os === 'windows'
         && bs?.platformCapabilities?.desktopRemoteControl === true;
       useEffect(() => {
         if (!bridge.available || !remoteProxyHistoryAvailable) return;
