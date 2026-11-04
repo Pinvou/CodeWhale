@@ -6072,8 +6072,11 @@ fn provider_schema_sanitizers_preserve_the_closed_fleet_role_enum() {
     // Moonshot/Kimi must retain the supported field vocabulary while dropping
     // the one root dependency keyword MFJS cannot represent.
     let mut kimi = agent_schema.clone();
-    schema_sanitize::sanitize_for_kimi_parameters(&mut kimi)
-        .expect("agent schema must stay Kimi-compatible");
+    schema_sanitize::sanitize_for_kimi_parameters(
+        &mut kimi,
+        schema_sanitize::KimiParameterRoute::KimiCode,
+    )
+    .expect("agent schema must stay Kimi-compatible");
     assert_eq!(
         kimi["properties"]["type"]["enum"], expected,
         "kimi sanitize must not erase or widen the role enum"
@@ -6201,8 +6204,11 @@ fn agent_tool_schema_rejects_empty_input_across_provider_forms() {
     forms.push(("responses", responses));
 
     let mut kimi = agent_schema;
-    schema_sanitize::sanitize_for_kimi_parameters(&mut kimi)
-        .expect("agent schema must stay Kimi-compatible");
+    schema_sanitize::sanitize_for_kimi_parameters(
+        &mut kimi,
+        schema_sanitize::KimiParameterRoute::KimiCode,
+    )
+    .expect("agent schema must stay Kimi-compatible");
     forms.push(("kimi", kimi));
 
     let empty = json!({});
