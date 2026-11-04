@@ -382,6 +382,7 @@ fingerprints=(
   "APP|F-B2 web access/relay（web lane）       |pinvou3-app/src/platform/web/bridge.js|async function refreshWebAccessStatus("
   "APP|F-B2 web relay 设置（tauri lane）        |pinvou3-app/src/platform/tauri/bridge/remote-control.js|async function getWebRelaySettings("
   "APP|F-B3 remote proxy 会话视图            |pinvou3-app/src/platform/tauri/bridge/sessions.js|function isKnownRemoteProxy(id)"
+  "APP|F-B3 offline never-attempted abandon    |pinvou3-app/src/features/chat/ChatView.jsx|onClick={() => abandonRemoteTask(item)} disabled={!!remoteDispatchAction}"
   "APP|F-B4 materializeSession              |pinvou3-app/src/platform/tauri/bridge/sessions.js|async function materializeSession("
   "APP|F-C1 bridge-messages prompt-cache 谓词    |pinvou3-app/src/shared/bridge-messages.js|function isContextUpdateRuntimeMessage(value)"
   "APP|F-C1 bridge-messages turn_meta 谓词      |pinvou3-app/src/shared/bridge-messages.js|function isKnownInternalMetadataBlock(value)"
