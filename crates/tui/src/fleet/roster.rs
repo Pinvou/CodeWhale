@@ -481,7 +481,7 @@ impl FleetRoster {
                 "verifier",
                 FleetSlot::Verifier,
                 FleetLoadout::Inherit,
-                "Runs builds and tests to verify claims; reports evidence, does not patch.",
+                "Runs the built-in verification gates to verify claims; reports evidence, does not patch, holds no shell.",
                 None,
             ),
             (

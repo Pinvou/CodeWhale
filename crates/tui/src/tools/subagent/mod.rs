@@ -404,7 +404,7 @@ fn subagent_perf_enabled() -> bool {
 
 const VALID_SUBAGENT_TYPES: &str = "general, explore, planner, reviewer, implement, test, advisor, custom \
      (legacy aliases remain accepted: worker, scout, builder, verifier, consultant, general-purpose, general_purpose, default, exploration/explorer, plan/planning/awaiter, review/code-review/code_review, implementer/implementation, verify/verification/validator/tester, oracle)";
-const SUBAGENT_TYPE_DESCRIPTION: &str = "Fleet role for this delegated worker. general: full tool access for multi-step tasks; write-capable, so it claims the parent workspace unless write_roots narrows it — parallel generals without disjoint write_roots contend, so prefer a read-only role for research fan-outs. explore: fast read-only exploration. planner: grounded strategy with read-only probes. reviewer: reads and grades code. implement: lands focused code changes; write-capable under the same workspace-claim rules as general, so parallel implements need disjoint write_roots or worktree=true. test: runs the built-in verification gates and reports evidence, with a bounded read-only shell — for in-session delegations — for gathering it; custom commands are refused. advisor: read-only high-reasoning counsel for judgement calls and design critique. custom: the tools listed in allowed_tools on the parent's posture; without an explicit write authority it starts read-only and never contends. Legacy aliases remain accepted at deserialization boundaries.";
+const SUBAGENT_TYPE_DESCRIPTION: &str = "Fleet role for this delegated worker. general: full tool access for multi-step tasks; write-capable, so it claims the parent workspace unless write_roots narrows it — parallel generals without disjoint write_roots contend, so prefer a read-only role for research fan-outs. explore: fast read-only exploration. planner: grounded strategy with read-only probes. reviewer: reads and grades code. implement: lands focused code changes; write-capable under the same workspace-claim rules as general, so parallel implements need disjoint write_roots or worktree=true. test: runs the built-in verification gates and reports evidence, with a bounded read-only shell — for in-session delegations — for gathering it; a read-only-shell parent clamps the gates (probes remain), and custom commands are refused. advisor: read-only high-reasoning counsel for judgement calls and design critique. custom: the tools listed in allowed_tools on the parent's posture; without an explicit write authority it starts read-only and never contends. Legacy aliases remain accepted at deserialization boundaries.";
 
 // === Types ===
 
@@ -15560,12 +15560,14 @@ impl SubAgentToolSurface {
 /// Role-only approval posture; the registry allow/deny and runtime envelope
 /// remain the authoritative per-tool checks.
 ///
-/// `Auto` is safe for every role. `Suggest` requires a write-capable role;
-/// `Required` requires the full-shell posture. A Custom worker may describe
-/// either posture, but its explicit allowlist and the runtime envelope still
-/// narrow what it can execute. Read-only bash operations are classified Auto,
-/// so Scouts and Reviewers do not gain general shell authority through this
-/// branch.
+/// Only the `Auto` and `Suggest` answers remain live: the posture gate's
+/// `Required` branch keys on the held shell policy plus the verifier's
+/// recorded parent-shell grant (`holds_shell_authority`), no longer on this
+/// role-only table. `Suggest` still requires a write-capable role. A Custom
+/// worker may describe either posture, but its explicit allowlist and the
+/// runtime envelope still narrow what it can execute. Read-only bash
+/// operations are classified Auto, so the read-only roles do not gain
+/// general shell authority through this branch.
 fn role_posture_permits(agent_type: &FleetRole, approval: ApprovalRequirement) -> bool {
     if matches!(agent_type, FleetRole::Custom) {
         return true;
@@ -15714,9 +15716,9 @@ impl SubAgentToolRegistry {
         let coordination_manager = Arc::clone(&runtime.manager);
         let mut surface_options = runtime.agent_tool_surface_options.clone();
         // Shell authority is an intersection: a parent cannot delegate more
-        // than it owns, and read-only inspection roles (Scout, Reviewer) are
-        // narrowed to the hardened read-only classifier even when the parent
-        // has a full shell.
+        // than it owns, and read-only roles (Scout, Reviewer, Planner,
+        // Verifier) are narrowed to the hardened read-only classifier even
+        // when the parent has a full shell.
         let parent_shell = ShellPolicy::from_legacy_allow_shell(runtime.allow_shell);
         let mut child_shell = runtime.worker_profile.shell.min_with(parent_shell);
         // Capture the grant before the role narrowing below: a Full shell
@@ -15789,10 +15791,11 @@ impl SubAgentToolRegistry {
     /// clears the role-based delegation rules on its own.
     fn delegation_refusal(&self, name: &str, input: &Value) -> Option<String> {
         // #5595/#5438: session approval is transport, not a second shell
-        // classifier. Scout/Reviewer/Planner calls already proven by the exact
-        // predicate used at posture, envelope, and execute boundaries are
-        // delegated reads even though lowercase `bash` deliberately keeps the
-        // stricter parent-parallel classifier as its generic approval baseline.
+        // classifier. Scout/Reviewer/Planner/Verifier calls already proven by
+        // the exact predicate used at posture, envelope, and execute
+        // boundaries are delegated reads even though lowercase `bash`
+        // deliberately keeps the stricter parent-parallel classifier as its
+        // generic approval baseline.
         if self.bounded_readonly_bash_evidence(name, input) {
             return None;
         }
@@ -17881,7 +17884,7 @@ const CONSULTANT_AGENT_INTRO: &str = concat!(
 );
 
 const VERIFIER_AGENT_INTRO: &str = concat!(
-    "You are a trusted Fleet test agent (role: `test`). Your job is to run the requested gates with your bounded validation tools — the allowed test/check selections — and report results. You never write: patching the workspace is denied. Unbounded shell forms are refused; use the verification surface.\n",
+    "You are a trusted Fleet test agent (role: `test`). Your job is to run the requested gates with your bounded validation tools — the allowed test/check selections — and report results; the gates are yours on envelopes whose parent grants shell authority, while a child clamped by a read-only-shell parent keeps the read-only probes but has its gates refused. You never write: patching the workspace is denied. Unbounded shell forms are refused; use the verification surface.\n",
     "When the session grants it — for in-session delegations, on envelopes that carry the probe lane — you also hold a bounded read-only shell, under the same classifier-gated grammar as the read-only roles, for gathering evidence with probes such as `wc`, `ls`, `cat`, and `grep` pipelines; envelopes without it omit the shell entirely and shell attempts refuse, and custom commands are refused.\n",
     "Report PASS/FAIL/FLAKY at the top of SUMMARY with exact command evidence.\n",
     "Capture failing assertion and file:line; put obvious fixes under RISKS.\n",
