@@ -18,7 +18,7 @@ use crate::config::{
     TOGETHER_INKLING_MODEL, is_exact_direct_moonshot_k3_route, is_exact_kimi_code_k3_route,
     is_exact_xai_grok_4_6_route, is_exact_zai_chat_route, is_exact_zai_forced_thinking_route,
     is_exact_zai_tiered_effort_route, minimax_m3_route_uses_max_completion_tokens,
-    moonshot_base_url_is_exact_kimi_code, wire_model_for_provider_route,
+    wire_model_for_provider_route,
 };
 
 // The bounded response-header wait (`stream_open_timeout`) and its env
@@ -957,11 +957,6 @@ fn apply_direct_moonshot_k3_fixed_sampling(
 /// `is_exact_kimi_code_route` itself belongs to in-flight PR #137, so the
 /// sampling strip carries this route-scoped twin here; it must stay in sync
 /// with those semantics.
-///
-/// Deliberately narrower consumers keep the stricter China-only predicate
-/// (`moonshot_base_url_is_exact_kimi_code`): the `KimiParameterRoute`
-/// whitelist selection is probe-backed only for `.com`, and the replay /
-/// billing contracts aligned with it advance through #137.
 #[must_use]
 fn kimi_code_sampling_route(base_url: &str) -> bool {
     const KIMI_CODE_ENDPOINTS: [(&str, &str); 2] =
@@ -1107,15 +1102,13 @@ fn mirror_minimax_reasoning_details_for_body(body: &mut Value, provider: ApiProv
 /// before transport. The tool name is safe to log — it is already visible in
 /// the UI — while the error's `Display` deliberately carries no schema values.
 ///
-/// The route selects the keyword whitelist (see [`KimiParameterRoute`]); the
-/// per-tool drop plus its projection warning stay the final safety net on
-/// every route.
+/// One pipeline serves every Moonshot route: the wire contract is the MFJS
+/// specification's supported set, uniform across the platform and Kimi Code
+/// endpoints. The per-tool drop plus its projection warning stays the final
+/// safety net.
 ///
 /// Returns the names of the dropped tools, in catalog order.
-fn sanitize_moonshot_chat_tools(
-    chat_tools: &mut Vec<Value>,
-    route: crate::tools::schema_sanitize::KimiParameterRoute,
-) -> Vec<String> {
+fn sanitize_moonshot_chat_tools(chat_tools: &mut Vec<Value>) -> Vec<String> {
     let mut dropped = Vec::new();
     chat_tools.retain_mut(|tool| {
         let Some(function) = tool
@@ -1128,7 +1121,7 @@ fn sanitize_moonshot_chat_tools(
         let Some(parameters) = function.get_mut("parameters") else {
             return true;
         };
-        match crate::tools::schema_sanitize::sanitize_for_kimi_parameters(parameters, route) {
+        match crate::tools::schema_sanitize::sanitize_for_kimi_parameters(parameters) {
             Ok(note) => {
                 if let Some(note) = note {
                     let description = function
@@ -1246,12 +1239,7 @@ pub(crate) fn build_chat_wire_body(
         // whose parameters cannot pass MFJS validation so one incompatible
         // tool never sinks the whole request.
         if matches!(provider, crate::config::ApiProvider::Moonshot) {
-            let route = if moonshot_base_url_is_exact_kimi_code(base_url) {
-                crate::tools::schema_sanitize::KimiParameterRoute::KimiCode
-            } else {
-                crate::tools::schema_sanitize::KimiParameterRoute::Platform
-            };
-            omitted_tool_names = sanitize_moonshot_chat_tools(&mut chat_tools, route);
+            omitted_tool_names = sanitize_moonshot_chat_tools(&mut chat_tools);
         }
         // xAI rejects a parameters root that is not a plain object schema
         // (e.g. apply_patch's root `oneOf` required-groups) with a 400.
@@ -6743,13 +6731,12 @@ mod alias_thinking_detection_tests {
     }
 
     #[test]
-    fn overseas_kimi_ai_endpoint_keeps_the_conservative_parameter_whitelist() {
-        // Widening the sampling strip to the overseas host must NOT widen
-        // the KimiParameterRoute selection: the relaxed whitelist tier is
-        // backed by a live probe of the China endpoint only, so `pattern` (a
-        // KimiCode-route keyword) still fails the platform whitelist on
-        // `.ai` and the tool degrades per tool. Sampling shaping and route
-        // selection are deliberately split.
+    fn overseas_kimi_ai_endpoint_keeps_the_document_parameter_whitelist() {
+        // Widening the sampling strip to the overseas host must NOT widen the
+        // tool-schema contract: both Kimi Code hosts serve the same MFJS
+        // specification, so a keyword the specification does not list
+        // (`pattern`) degrades the tool on both, while the sampling strip
+        // (document-backed: "omit them from requests") covers both hosts.
         let patterned_tool = crate::models::Tool {
             tool_type: None,
             name: "patterned".to_string(),
@@ -6770,50 +6757,34 @@ mod alias_thinking_detection_tests {
         let mut request = sampling_probe_request("k3.1-pro");
         request.tools = Some(vec![patterned_tool]);
 
-        let overseas = crate::client::chat::build_chat_wire_body(
-            &request,
-            ApiProvider::Moonshot,
+        for base_url in [
             "https://api.kimi.ai/coding/v1",
-            false,
-        )
-        .expect("overseas Kimi Code wire body");
-        assert_eq!(
-            overseas.omitted_tool_names,
-            vec!["patterned".to_string()],
-            "the conservative platform whitelist must stay in force on `.ai`"
-        );
-        assert!(
-            overseas.body.get("tools").is_none(),
-            "the dropped tool must not ship: {}",
-            overseas.body
-        );
-        // The sampling strip, by contrast, does cover the overseas route.
-        assert!(
-            overseas.body.get("temperature").is_none() && overseas.body.get("top_p").is_none(),
-            "fixed sampling must still strip on `.ai`: {}",
-            overseas.body
-        );
-
-        // The China endpoint keeps the relaxed tier it was probed for: the
-        // same tool ships with its `pattern` intact.
-        let china = crate::client::chat::build_chat_wire_body(
-            &request,
-            ApiProvider::Moonshot,
             crate::config::DEFAULT_KIMI_CODE_BASE_URL,
-            false,
-        )
-        .expect("China Kimi Code wire body");
-        assert!(
-            china.omitted_tool_names.is_empty(),
-            "the probe-verified keyword must ship on the probed route: {:?}",
-            china.omitted_tool_names
-        );
-        assert_eq!(
-            china.body["tools"][0]["function"]["parameters"]["properties"]["label"]["pattern"],
-            json!("^[a-z]+$"),
-            "pattern must survive on the China coding route: {}",
-            china.body
-        );
+        ] {
+            let body = crate::client::chat::build_chat_wire_body(
+                &request,
+                ApiProvider::Moonshot,
+                base_url,
+                false,
+            )
+            .expect("Kimi Code wire body");
+            assert_eq!(
+                body.omitted_tool_names,
+                vec!["patterned".to_string()],
+                "the document-absent keyword drops the tool on {base_url}"
+            );
+            assert!(
+                body.body.get("tools").is_none(),
+                "the dropped tool must not ship on {base_url}: {}",
+                body.body
+            );
+            // The sampling strip covers the route regardless.
+            assert!(
+                body.body.get("temperature").is_none() && body.body.get("top_p").is_none(),
+                "fixed sampling must still strip on {base_url}: {}",
+                body.body
+            );
+        }
     }
 
     #[test]
@@ -8744,44 +8715,63 @@ mod image_block_wire_tests {
         }
     }
 
-    /// The 2026-11-04 live probe verified pattern, format, $schema,
-    /// prefixItems, exclusiveMinimum, and nested allOf end to end on the
-    /// exact Kimi Code endpoint: the wire must keep them.
+    /// Keywords the 2026-11-04 live probe merely observed the endpoint
+    /// accepting (pattern, format, $schema, prefixItems, exclusiveMinimum,
+    /// exclusiveMaximum, nested allOf) sit outside the MFJS specification's
+    /// supported set. Probe facts are observations only and never a shipping
+    /// basis, so the tool carrying them degrades with a projection warning on
+    /// every Moonshot route — one pipeline, one wire contract.
     #[test]
-    fn kimi_code_route_keeps_probe_verified_keywords_on_wire() {
+    fn probe_observed_keywords_never_reach_the_wire() {
         let schema = serde_json::json!({
-            "$schema": "https://json-schema.org/draft/2020-12/schema",
             "type": "object",
             "properties": {
                 "label": {
                     "type": "string",
                     "pattern": "^[a-z][a-z0-9-]*$",
                     "format": "uri"
-                },
-                "price": {"type": "number", "exclusiveMinimum": 0},
-                "row": {
-                    "type": "array",
-                    "prefixItems": [{"type": "string"}],
-                    "minItems": 1
-                },
-                "target": {
-                    "type": "object",
-                    "allOf": [
-                        {
-                            "type": "object",
-                            "properties": {"path": {"type": "string"}},
-                            "required": ["path"]
-                        },
-                        {
-                            "type": "object",
-                            "properties": {"mode": {"type": "string"}}
-                        }
-                    ]
                 }
             },
             "required": ["label"]
         });
         let request = single_tool_request("probe_tool", schema);
+
+        for base_url in [
+            crate::config::DEFAULT_KIMI_CODE_BASE_URL,
+            crate::config::DEFAULT_MOONSHOT_BASE_URL,
+        ] {
+            let body = build_chat_wire_body(&request, ApiProvider::Moonshot, base_url, false)
+                .expect("Moonshot wire body");
+
+            assert_eq!(
+                body.omitted_tool_names,
+                vec!["probe_tool".to_string()],
+                "the probe-observed keyword drops the tool on {base_url}"
+            );
+            assert!(
+                body.body.get("tools").is_none(),
+                "a fully dropped catalog must omit the tools key on {base_url}: {}",
+                body.body
+            );
+        }
+    }
+
+    /// Advisory keywords the MFJS specification does not list (title,
+    /// minLength, ...) are stripped in place — a semantics-lossless or
+    /// soft-constraint-losing simplification — so the tool still ships and
+    /// the wire carries only the document's supported set.
+    #[test]
+    fn advisory_keywords_are_stripped_from_the_wire() {
+        let schema = serde_json::json!({
+            "title": "Annotated tool",
+            "type": "object",
+            "properties": {
+                "label": {"type": "string", "title": "Label", "minLength": 1, "maxLength": 40},
+                "price": {"type": "number", "minimum": 0, "maximum": 100}
+            },
+            "required": ["label"]
+        });
+        let request = single_tool_request("annotated_tool", schema);
 
         let body = build_chat_wire_body(
             &request,
@@ -8793,71 +8783,22 @@ mod image_block_wire_tests {
 
         assert!(
             body.omitted_tool_names.is_empty(),
-            "probe-verified keywords must not drop the tool: {:?}",
+            "advisory keywords must not drop the tool: {:?}",
             body.omitted_tool_names
         );
         let parameters = &body.body["tools"][0]["function"]["parameters"];
+        for keyword in ["title", "minLength", "maxLength", "minimum", "maximum"] {
+            assert!(
+                !serde_json::to_string(parameters)
+                    .unwrap()
+                    .contains(&format!("\"{keyword}\"")),
+                "{keyword} must not reach the wire: {parameters}"
+            );
+        }
+        assert_eq!(parameters["type"], "object");
         assert_eq!(
-            parameters["properties"]["label"]["pattern"],
-            serde_json::json!("^[a-z][a-z0-9-]*$")
-        );
-        assert_eq!(
-            parameters["properties"]["label"]["format"],
-            serde_json::json!("uri")
-        );
-        assert_eq!(
-            parameters["properties"]["price"]["exclusiveMinimum"],
-            serde_json::json!(0)
-        );
-        assert_eq!(
-            parameters["properties"]["row"]["prefixItems"],
-            serde_json::json!([{"type": "string"}])
-        );
-        assert_eq!(
-            parameters["properties"]["target"]["allOf"]
-                .as_array()
-                .map(Vec::len),
-            Some(2),
-            "nested allOf must survive on the Kimi Code route: {parameters}"
-        );
-    }
-
-    /// Platform endpoints keep the conservative MFJS whitelist: the same
-    /// probe schema is not verifiable there, an unsupported keyword risks a
-    /// whole-request 400, and the per-tool drop plus the projection warning
-    /// stay the final safety net.
-    #[test]
-    fn moonshot_platform_route_keeps_the_conservative_whitelist() {
-        let schema = serde_json::json!({
-            "type": "object",
-            "properties": {
-                "label": {
-                    "type": "string",
-                    "pattern": "^[a-z][a-z0-9-]*$",
-                    "format": "uri"
-                }
-            },
-            "required": ["label"]
-        });
-        let request = single_tool_request("probe_tool", schema);
-
-        let body = build_chat_wire_body(
-            &request,
-            ApiProvider::Moonshot,
-            crate::config::DEFAULT_MOONSHOT_BASE_URL,
-            false,
-        )
-        .expect("platform wire body");
-
-        assert_eq!(
-            body.omitted_tool_names,
-            vec!["probe_tool".to_string()],
-            "the unsupported keyword drops only this tool on the platform route"
-        );
-        assert!(
-            body.body.get("tools").is_none(),
-            "a fully dropped catalog must omit the tools key: {}",
-            body.body
+            parameters["properties"]["label"]["type"], "string",
+            "the supported vocabulary survives the strip: {parameters}"
         );
     }
 }

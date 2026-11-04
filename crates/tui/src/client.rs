@@ -6348,11 +6348,7 @@ mod tests {
             parameters["properties"]["query"].get("nullable").is_none(),
             "{parameters}"
         );
-        crate::tools::schema_sanitize::validate_mfjs_parameters(
-            parameters,
-            crate::tools::schema_sanitize::KimiParameterRoute::KimiCode,
-        )
-        .unwrap();
+        crate::tools::schema_sanitize::validate_mfjs_parameters(parameters).unwrap();
     }
 
     async fn assert_kimi_code_captures_exact_general_child_catalog() {
@@ -6380,11 +6376,8 @@ mod tests {
         // production errors remain fixed and non-secret.
         for tool in &tools {
             let mut parameters = tool.input_schema.clone();
-            crate::tools::schema_sanitize::sanitize_for_kimi_parameters(
-                &mut parameters,
-                crate::tools::schema_sanitize::KimiParameterRoute::KimiCode,
-            )
-            .unwrap_or_else(|error| panic!("General child tool {}: {error}", tool.name));
+            crate::tools::schema_sanitize::sanitize_for_kimi_parameters(&mut parameters)
+                .unwrap_or_else(|error| panic!("General child tool {}: {error}", tool.name));
         }
 
         let mut request = k3_request_fixture(crate::config::KIMI_CODE_K3_MODEL, Some("low"), false);
@@ -6424,11 +6417,7 @@ mod tests {
                     tool["function"]["name"]
                 );
             }
-            crate::tools::schema_sanitize::validate_mfjs_parameters(
-                parameters,
-                crate::tools::schema_sanitize::KimiParameterRoute::KimiCode,
-            )
-            .unwrap();
+            crate::tools::schema_sanitize::validate_mfjs_parameters(parameters).unwrap();
         }
     }
 
