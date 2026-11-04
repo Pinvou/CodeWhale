@@ -72,6 +72,7 @@ pub mod scheduled;
 pub(crate) mod session_creation;
 pub mod sessions;
 pub mod shared_knowledge_host;
+pub(crate) mod system_tray;
 pub(crate) mod team_relay;
 pub(crate) mod updater;
 pub mod voice;

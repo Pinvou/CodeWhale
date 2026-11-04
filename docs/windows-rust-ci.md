@@ -231,6 +231,9 @@ order:
     - `features::monitor::platform::windows_gpu::tests::`
     - `features::remote_control::platform::windows::tests::`
     - `app::commands::remote_control::reader_resume_tests::`
+    - `features::remote_control::controller::controlling_service::resume_projection_tests::`
+    - `features::remote_control::controller::controlling::tests::`
+    - `features::remote_control::controller::controlling_service::tests::resume_sequence_reopens_business_only_after_controller_resumed`
     - `features::remote_control::controller::controlling_inbound::tests::`
     - `features::remote_control::controller::controlling_service::inbound_tests::`
     - `features::remote_control::controller::transfer::staging::tests::`
@@ -247,6 +250,13 @@ order:
     filters cover the atomic-replacement state machine that the static
     updater exercises end to end; the `filesystem`/`artifact_*` filters cover
     the same writer-side invariants at the unit level.
+    The A controller filters execute the authenticated resume status consumer,
+    its first/second-disconnection telemetry, exact state/owner publication
+    fences, raw DTO/shared fixture contract, and existing reader-authorized
+    service sequence. They run the linked product executable with the same
+    nonzero-match guard, independently of the B reader/worker filters. Controlled
+    Relay and telemetry ports do not establish a two-machine/WebView or upload
+    E2E; full Linux and Windows gates remain required for remote-control changes.
     The two controller inbound prefixes execute the A-only item/byte budgets,
     control/disconnect ordering, real port/reader failure handling and owner
     replacement contracts. They run in this same linked and patched binary;

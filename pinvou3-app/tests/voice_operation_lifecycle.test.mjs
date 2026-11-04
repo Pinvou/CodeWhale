@@ -258,7 +258,8 @@ for (const [lane, source] of Object.entries(sources)) {
     Object.assign(operation, { rawText: 'private conversation', draftBeforeStart: 'private draft',
       diagnostic: { error: 'secret raw error' }, modelId: 'private-model', path: 'private-path' });
     h.api.completeVoiceSubmission(operation.operationId, 'native-session', true);
-    assert.deepEqual(Object.keys(h.events[0]).sort(), ['command', 'eventName', 'operationId', 'sessionId']);
+    assert.deepEqual(Object.keys(h.events[0]).sort(), ['command', 'eventName', 'inputType', 'operationId', 'sessionId']);
+    assert.equal(h.events[0].inputType, 'voice');
   });
 
   test(`${lane}: implementation publishes context before awaiting writeback and never resets terminal`, () => {
@@ -784,8 +785,9 @@ for (const lane of ['desktop', 'web']) {
           controlledCapabilityBound: false, controlledCapabilityBusy: false, controlledSkillIds: [],
           controlledSession: { sessionId: null },
           remoteChatActive: false, remoteConnection: null, remoteLinkReady: false,
-          remoteSessionBusy: false,
-          remoteSendIdentity: null, remoteTransferGuard: null, effectiveRemoteModelSource: null, remoteBinding: null,
+          remoteSessionBusy: false, remoteTranscriptActive: false,
+          remoteSendIdentity: '', remoteComposerIdentity: '',
+          remoteTransferGuard: null, effectiveRemoteModelSource: null, remoteBinding: null,
           remoteFiles: [], remoteNewDispatchReady: false, remoteProxyHistory: null,
           remoteModelError: null, remoteModelSource: 'controlled_device',
           remoteMode: 'chat', remoteSkillIds: [], remoteWorkspaceId: '',
