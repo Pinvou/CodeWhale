@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"github.com/Pinvou/pinvou3/account-platform/internal/cifixture"
 	"os"
 	"path/filepath"
 	"strings"
@@ -49,17 +50,16 @@ func testGovernanceExpansionPostgres(t *testing.T, ctx context.Context, admin *p
 	}
 	exec(admin, `GRANT account_service,account_approval_control_owner TO account_migrator; GRANT account_approval_authorization_owner TO account_migrator WITH INHERIT FALSE,SET TRUE,ADMIN TRUE`)
 	accountDatabase := "managed_account_" + strings.ReplaceAll(uuid.NewString(), "-", "")
-	exec(admin, "CREATE DATABASE "+pgx.Identifier{accountDatabase}.Sanitize()+" OWNER account_service")
+	var fixtureDatabase *cifixture.Database
+	fixtureDatabaseCreated, creationError := cifixture.CreateDatabase(ctx, admin, accountDatabase, "CREATE DATABASE "+pgx.Identifier{accountDatabase}.Sanitize()+" OWNER account_service")
+	fixtureDatabase = fixtureDatabaseCreated
+	if err := creationError; err != nil {
+		t.Fatal(err)
+	}
 	defer func() {
-		var owner string
-		var sessions int
 		clean, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer cancel()
-		if admin.QueryRow(clean, `SELECT pg_get_userbyid(datdba),(SELECT count(*) FROM pg_stat_activity WHERE datname=$1) FROM pg_database WHERE datname=$1`, accountDatabase).Scan(&owner, &sessions) != nil || owner != "account_service" || sessions != 0 {
-			t.Error("Account fixture cleanup identity/session guard refused")
-			return
-		}
-		if _, err := admin.Exec(clean, "DROP DATABASE "+pgx.Identifier{accountDatabase}.Sanitize()); err != nil {
+		if _, err := cifixture.DropDatabase(clean, admin, fixtureDatabase, "account_service"); err != nil {
 			t.Error("Account fixture cleanup failed")
 		}
 	}()

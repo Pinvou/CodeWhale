@@ -3,6 +3,7 @@ package billingschema
 import (
 	"context"
 	"errors"
+	"github.com/Pinvou/pinvou3/account-platform/internal/cifixture"
 	"github.com/Pinvou/pinvou3/account-platform/internal/platform/migrations"
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
@@ -26,29 +27,17 @@ func TestBillingOwnerLegacyAndIncrementalMigrations(t *testing.T) {
 	}
 	defer admin.Close(context.Background())
 	name := "billing_owner_review_" + strings.ReplaceAll(uuid.NewString(), "-", "")
+	var fixtureDatabase *cifixture.Database
 	quoted := pgx.Identifier{name}.Sanitize()
-	if _, err = admin.Exec(ctx, "CREATE DATABASE "+quoted+" OWNER billing_schema_owner"); err != nil {
+	fixtureDatabaseCreated, creationError := cifixture.CreateDatabase(ctx, admin, name, "CREATE DATABASE "+quoted+" OWNER billing_schema_owner")
+	fixtureDatabase = fixtureDatabaseCreated
+	if err := creationError; err != nil {
 		t.Fatal(err)
 	}
 	defer func() {
 		clean, c := context.WithTimeout(context.Background(), 10*time.Second)
 		defer c()
-		var owner string
-		var active int
-		for limit := time.Now().Add(5 * time.Second); ; time.Sleep(10 * time.Millisecond) {
-			if e := admin.QueryRow(clean, `SELECT pg_get_userbyid(datdba),(SELECT count(*) FROM pg_stat_activity WHERE datname=$1) FROM pg_database WHERE datname=$1`, name).Scan(&owner, &active); e != nil {
-				t.Error(e)
-				return
-			}
-			if active == 0 || time.Now().After(limit) {
-				break
-			}
-		}
-		if owner != "billing_schema_owner" || active != 0 {
-			t.Error("owned database cleanup identity guard")
-			return
-		}
-		if _, e := admin.Exec(clean, "DROP DATABASE "+quoted); e != nil {
+		if _, e := cifixture.DropDatabase(clean, admin, fixtureDatabase, "billing_schema_owner"); e != nil {
 			t.Error(e)
 		}
 	}()

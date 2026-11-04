@@ -1,8 +1,8 @@
 import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
-import http from 'node:http';
+import http from './helpers/http-fixture.mjs';
 import test from 'node:test';
-import puppeteer from 'puppeteer-core';
+import puppeteer from './helpers/puppeteer-fixture.mjs';
 import { inspectHandoffPage, probeCredentialBrowser } from '../../scripts/account-platform-credential-browser-scope.mjs';
 import { handoffBuildEvidence } from '../../scripts/account-platform-credential-origin-probe.mjs';
 

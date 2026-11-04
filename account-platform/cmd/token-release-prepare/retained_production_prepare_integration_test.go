@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"github.com/Pinvou/pinvou3/account-platform/internal/cifixture"
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 	"os"
@@ -25,6 +26,7 @@ func TestRetainedProductionPrepareGovernanceStats(t *testing.T) {
 	defer admin.Close(context.Background())
 	suffix := strings.ReplaceAll(uuid.NewString(), "-", "")
 	database := "f04_cli_" + suffix
+	var fixtureDatabase *cifixture.Database
 	candidates := []string{"tc_a_" + suffix, "tc_b_" + suffix}
 	roles := []string{"token_gateway", "token_schema_owner", "token_cap_policy_deployer", "token_migrator", "token_policy_operator"}
 	roles = append(roles, candidates...)
@@ -40,28 +42,7 @@ func TestRetainedProductionPrepareGovernanceStats(t *testing.T) {
 		clean, stop := context.WithTimeout(context.Background(), 10*time.Second)
 		defer stop()
 		if dbCreated {
-			var actualOwner string
-			var active int
-			deadline := time.Now().Add(5 * time.Second)
-			for {
-				if err := admin.QueryRow(clean, `SELECT pg_get_userbyid(datdba),(SELECT count(*) FROM pg_stat_activity WHERE datname=$1) FROM pg_database WHERE datname=$1`, database).Scan(&actualOwner, &active); err != nil {
-					t.Error("owned database identity unavailable")
-					return
-				}
-				if actualOwner != owner {
-					t.Error("owned database owner changed")
-					return
-				}
-				if active == 0 {
-					break
-				}
-				if time.Now().After(deadline) {
-					t.Error("owned database connections remain")
-					return
-				}
-				time.Sleep(25 * time.Millisecond)
-			}
-			if _, err := admin.Exec(clean, "DROP DATABASE "+pgx.Identifier{database}.Sanitize()); err != nil {
+			if _, err := cifixture.DropDatabase(clean, admin, fixtureDatabase, owner); err != nil {
 				t.Error("owned database no-force cleanup failed")
 				return
 			}
@@ -90,7 +71,9 @@ func TestRetainedProductionPrepareGovernanceStats(t *testing.T) {
 		t.Fatal("exclusive runtime role creation failed")
 	}
 	created = append(created, "token_gateway")
-	if _, err = admin.Exec(ctx, "CREATE DATABASE "+pgx.Identifier{database}.Sanitize()+" OWNER token_gateway"); err != nil {
+	fixtureDatabaseCreated, creationError := cifixture.CreateDatabase(ctx, admin, database, "CREATE DATABASE "+pgx.Identifier{database}.Sanitize()+" OWNER token_gateway")
+	fixtureDatabase = fixtureDatabaseCreated
+	if err := creationError; err != nil {
 		t.Fatal("owned database creation failed")
 	}
 	dbCreated = true

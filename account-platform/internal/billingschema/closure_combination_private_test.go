@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"github.com/Pinvou/pinvou3/account-platform/internal/accountschema"
+	"github.com/Pinvou/pinvou3/account-platform/internal/cifixture"
 	"github.com/Pinvou/pinvou3/account-platform/internal/platform/migrations"
 	"github.com/Pinvou/pinvou3/account-platform/internal/tokenschema"
 	"github.com/google/uuid"
@@ -54,7 +55,12 @@ func TestClosurePrivatePublicCombination(t *testing.T) {
 	if err = f.admin.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM pg_database WHERE datname=$1)`, name).Scan(&exists); err != nil || exists {
 		t.Fatal("own Token UUID absence", err)
 	}
-	if _, err = f.admin.Exec(ctx, "CREATE DATABASE "+pgx.Identifier{name}.Sanitize()); err != nil {
+	fixtureDatabaseCreated, creationError := cifixture.CreateDatabase(ctx, f.admin, name, "CREATE DATABASE "+pgx.Identifier{name}.Sanitize())
+	if f.databaseLeases == nil {
+		f.databaseLeases = make(map[string]*cifixture.Database)
+	}
+	f.databaseLeases[name] = fixtureDatabaseCreated
+	if err := creationError; err != nil {
 		t.Fatal(err)
 	}
 	f.dbs[name] = f.config.User

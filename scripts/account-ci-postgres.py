@@ -5,6 +5,7 @@ import os
 from pathlib import Path
 import re
 import subprocess
+import uuid
 
 SERVICES = {
     'audit': ('audit-export-postgres', 'mirror.gcr.io/library/postgres@sha256:721873c34ceb9f8d8fc265984940dc982404c105f19ad51be9fdc5970a6080ea', '/var/lib/postgresql/data', '16'),
@@ -50,17 +51,32 @@ def run(argv, *, timeout=30, include_stderr=False):
     return (result.stdout + (result.stderr if include_stderr else '')).strip()
 
 
-def stop_owned_services(metadata):
+def save_receipt(path, value):
+    if path is None:
+        return
+    temporary = path.with_name(path.name + '.' + uuid.uuid4().hex + '.tmp')
+    temporary.write_text(json.dumps(value, sort_keys=True), encoding='utf-8')
+    os.replace(temporary, path)
+
+
+def stop_owned_services(metadata, receipt_path=None):
     if os.environ.get('GITHUB_ACTIONS') != 'true':
         raise RuntimeError('service stop requires this job service context')
     # A graceful stop lets Docker AutoRemove remove anonymous data volumes.
     # The runner's later force-rm otherwise leaves those volumes behind.
     # Validate the complete set before stopping anything. Never prune volumes
     # or select containers by a name/image prefix on a shared runner host.
+    if not isinstance(metadata, dict):
+        save_receipt(receipt_path, {'schema': 1, 'kind': 'postgres-services', 'state': 'unconfirmed', 'reason': 'job service registration unavailable'})
+        raise ValueError('job service registration unavailable; no unknown resource will be reclaimed')
     existing = set(run(['docker', 'ps', '--all', '--quiet', '--no-trunc']).splitlines())
     ids, ports, volumes, selected = set(), set(), set(), []
+    missing = []
     for _, (name, image, _, _) in SERVICES.items():
-        meta = metadata[name]
+        meta = metadata.get(name)
+        if meta is None:
+            missing.append(name)
+            continue
         identifier = meta.get('id', '')
         port = port_value(meta.get('ports', {}).get('5432'))
         if not re.fullmatch('[0-9a-f]{64}', identifier) or identifier in ids or port in ports:
@@ -76,6 +92,9 @@ def stop_owned_services(metadata):
             raise ValueError('service volume is shared')
         volumes.add(volume)
         selected.append(identifier)
+    receipt = {'schema': 1, 'kind': 'postgres-services', 'state': 'registered', 'ids': sorted(ids), 'volumes': sorted(volumes), 'unregistered': missing}
+    save_receipt(receipt_path, receipt)
+    stop_error = None
     if selected:
         # AutoRemove also removes container logs. Preserve the diagnostics that
         # the runner normally prints after the job, before retiring the service.
@@ -85,7 +104,21 @@ def stop_owned_services(metadata):
                 print(run(['docker', 'logs', identifier], include_stderr=True), flush=True)
             except (RuntimeError, subprocess.TimeoutExpired):
                 print('::warning::PostgreSQL service log read failed; continuing owned-service cleanup', flush=True)
-        run(['docker', 'stop', '--time', '15', *selected], timeout=105)
+        try:
+            run(['docker', 'stop', '--time', '15', *selected], timeout=105)
+        except (RuntimeError, subprocess.TimeoutExpired) as error:
+            stop_error = error
+    # Command success is not a resource-release acknowledgement. Inspect only
+    # the IDs/anonymous volumes admitted above; never prune or guess old names.
+    remaining_ids = ids.intersection(run(['docker', 'ps', '--all', '--quiet', '--no-trunc']).splitlines())
+    remaining_volumes = volumes.intersection(run(['docker', 'volume', 'ls', '--quiet']).splitlines())
+    clean = not remaining_ids and not remaining_volumes and not missing
+    receipt.update(state='released' if clean else 'unconfirmed', remaining_ids=sorted(remaining_ids), remaining_volumes=sorted(remaining_volumes))
+    save_receipt(receipt_path, receipt)
+    if stop_error is not None:
+        raise RuntimeError('owned PostgreSQL stop failed; postcheck receipt retained') from stop_error
+    if not clean:
+        raise RuntimeError('owned PostgreSQL retirement was not confirmed; receipt retained')
     print(f'Gracefully stopped {len(selected)} exact job-owned PostgreSQL services; no volume pruning')
 
 def identity_matches(value, directory, major):
@@ -128,6 +161,7 @@ if __name__ == '__main__':
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--stop-owned-services', action='store_true')
     if parser.parse_args().stop_owned_services:
-        stop_owned_services(json.loads(os.environ['ACCOUNT_CI_SERVICES']))
+        ledger = os.environ.get('PINVOU_CI_RESOURCE_LEDGER')
+        stop_owned_services(json.loads(os.environ['ACCOUNT_CI_SERVICES']), Path(ledger) / 'postgres-services.json' if ledger else None)
     else:
         main()

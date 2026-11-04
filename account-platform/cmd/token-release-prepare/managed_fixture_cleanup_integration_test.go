@@ -3,7 +3,7 @@ package main
 import (
 	"context"
 	"errors"
-	"fmt"
+	"github.com/Pinvou/pinvou3/account-platform/internal/cifixture"
 	"os"
 	"strings"
 	"testing"
@@ -19,26 +19,7 @@ import (
 // a backend. Ownership must remain valid on every observation, and DROP DATABASE
 // still performs PostgreSQL's final no-live-sessions check after this barrier.
 func waitManagedFixtureDatabaseIdle(ctx context.Context, admin *pgx.Conn, database string) error {
-	for {
-		var owner string
-		var sessions int
-		if err := admin.QueryRow(ctx, `SELECT pg_get_userbyid(datdba),(SELECT count(*) FROM pg_stat_activity WHERE datname=$1) FROM pg_database WHERE datname=$1`, database).Scan(&owner, &sessions); err != nil {
-			return fmt.Errorf("fixture database identity query failed: %w", err)
-		}
-		if owner != "token_gateway" && owner != "token_schema_owner" {
-			return errors.New("fixture database owner changed")
-		}
-		if sessions == 0 {
-			return nil
-		}
-		timer := time.NewTimer(10 * time.Millisecond)
-		select {
-		case <-ctx.Done():
-			timer.Stop()
-			return fmt.Errorf("fixture backends did not exit (remaining=%d): %w", sessions, ctx.Err())
-		case <-timer.C:
-		}
-	}
+	return cifixture.WaitDatabaseIdle(ctx, admin, database, "token_gateway", "token_schema_owner")
 }
 
 func TestManagedFixtureDatabaseCleanupPostgres(t *testing.T) {
@@ -64,6 +45,7 @@ func TestManagedFixtureDatabaseCleanupPostgres(t *testing.T) {
 		t.Fatal("refusing writes outside the newly initialized exclusive fixture cluster")
 	}
 	database := "managed_cleanup_" + strings.ReplaceAll(uuid.NewString(), "-", "")
+	var fixtureDatabase *cifixture.Database
 	if _, err := admin.Exec(ctx, "CREATE ROLE token_gateway NOLOGIN INHERIT"); err != nil {
 		t.Fatal(err)
 	}
@@ -76,7 +58,7 @@ func TestManagedFixtureDatabaseCleanupPostgres(t *testing.T) {
 				t.Errorf("probe cleanup guard refused: %v", err)
 				return
 			}
-			if _, err := admin.Exec(clean, "DROP DATABASE "+pgx.Identifier{database}.Sanitize()); err != nil {
+			if _, err := cifixture.DropDatabase(clean, admin, fixtureDatabase, "token_gateway", "token_schema_owner"); err != nil {
 				t.Error(err)
 				return
 			}
@@ -85,7 +67,9 @@ func TestManagedFixtureDatabaseCleanupPostgres(t *testing.T) {
 			t.Error(err)
 		}
 	}()
-	if _, err := admin.Exec(ctx, "CREATE DATABASE "+pgx.Identifier{database}.Sanitize()+" OWNER token_gateway"); err != nil {
+	fixtureDatabaseCreated, creationError := cifixture.CreateDatabase(ctx, admin, database, "CREATE DATABASE "+pgx.Identifier{database}.Sanitize()+" OWNER token_gateway")
+	fixtureDatabase = fixtureDatabaseCreated
+	if err := creationError; err != nil {
 		t.Fatal(err)
 	}
 	created = true
@@ -194,7 +178,7 @@ func TestManagedFixtureDatabaseCleanupPostgres(t *testing.T) {
 		}
 	})
 	t.Run("unexpected-owner-refused", func(t *testing.T) {
-		if err := waitManagedFixtureDatabaseIdle(ctx, admin, config.Database); err == nil || err.Error() != "fixture database owner changed" {
+		if err := waitManagedFixtureDatabaseIdle(ctx, admin, config.Database); err == nil || (!errors.Is(err, cifixture.ErrDatabaseOwner) && !errors.Is(err, cifixture.ErrDatabaseIdentity)) {
 			t.Fatalf("unexpected database owner was accepted: %v", err)
 		}
 	})
@@ -226,7 +210,7 @@ func TestManagedFixtureDatabaseCleanupPostgres(t *testing.T) {
 		changed = true
 		select {
 		case err := <-result:
-			if err == nil || err.Error() != "fixture database owner changed" {
+			if !errors.Is(err, cifixture.ErrDatabaseOwner) {
 				t.Fatalf("owner change during cleanup was accepted: %v", err)
 			}
 		case <-ctx.Done():
@@ -236,6 +220,65 @@ func TestManagedFixtureDatabaseCleanupPostgres(t *testing.T) {
 	t.Run("missing-database-refused", func(t *testing.T) {
 		if err := waitManagedFixtureDatabaseIdle(ctx, admin, database+"_absent"); !errors.Is(err, pgx.ErrNoRows) {
 			t.Fatalf("missing database identity was accepted: %v", err)
+		}
+	})
+	t.Run("creation-lease-is-idempotent-and-refuses-same-name-replacement", func(t *testing.T) {
+		name := database + "_lease"
+		create := func() *cifixture.Database {
+			t.Helper()
+			lease, err := cifixture.CreateDatabase(ctx, admin, name, "CREATE DATABASE "+pgx.Identifier{name}.Sanitize()+" OWNER token_gateway")
+			if err != nil {
+				t.Fatal(err)
+			}
+			return lease
+		}
+		first := create()
+		if _, err := cifixture.DropDatabase(ctx, admin, first, "token_gateway"); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := cifixture.DropDatabase(ctx, admin, first, "token_gateway"); err != nil {
+			t.Fatal("repeated cleanup is not idempotent", err)
+		}
+		second := create()
+		defer func() {
+			if _, err := cifixture.DropDatabase(ctx, admin, second, "token_gateway"); err != nil {
+				t.Error(err)
+			}
+		}()
+		if _, err := cifixture.DropDatabase(ctx, admin, first, "token_gateway"); !errors.Is(err, cifixture.ErrDatabaseIdentity) {
+			t.Fatal("stale lease adopted the next invocation", err)
+		}
+		var exists bool
+		if err := admin.QueryRow(ctx, "SELECT EXISTS(SELECT 1 FROM pg_database WHERE datname=$1)", name).Scan(&exists); err != nil || !exists {
+			t.Fatal("replacement database was not preserved", err)
+		}
+	})
+	t.Run("nil-lease-never-authorizes-a-drop", func(t *testing.T) {
+		if _, err := cifixture.DropDatabase(ctx, admin, nil); !errors.Is(err, cifixture.ErrDatabaseUnregistered) {
+			t.Fatal("unowned cleanup was accepted", err)
+		}
+	})
+	t.Run("partial-setup-retains-primary-error-and-retires-created-database", func(t *testing.T) {
+		name := database + "_partial"
+		primary := errors.New("controlled setup failure")
+		setup := func() error {
+			lease, err := cifixture.CreateDatabase(ctx, admin, name, "CREATE DATABASE "+pgx.Identifier{name}.Sanitize()+" OWNER token_gateway")
+			if err != nil {
+				return err
+			}
+			defer func() {
+				if _, err := cifixture.DropDatabase(ctx, admin, lease, "token_gateway"); err != nil {
+					t.Error(err)
+				}
+			}()
+			return primary
+		}
+		if setup() != primary {
+			t.Fatal("cleanup replaced the primary failure")
+		}
+		var exists bool
+		if err := admin.QueryRow(ctx, "SELECT EXISTS(SELECT 1 FROM pg_database WHERE datname=$1)", name).Scan(&exists); err != nil || exists {
+			t.Fatal("partial setup left an owned database", err)
 		}
 	})
 }

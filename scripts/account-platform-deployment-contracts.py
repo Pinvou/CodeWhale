@@ -242,6 +242,7 @@ def main():
         output = work / "output"
         output.mkdir()
         (output / "bin").mkdir()
+        (output / "resources").mkdir()
         caches = []
         for suffix, variable in (("gomod", "PINVOU_DEPLOYMENT_TEST_MODULE_CACHE"), ("gobuild", "PINVOU_DEPLOYMENT_TEST_BUILD_CACHE")):
             path = Path(os.environ.get(variable, str(work / suffix))).resolve()
@@ -253,7 +254,7 @@ def main():
                   "--mount", f"type=bind,src={fixture},dst=/fixture",
                   "--mount", f"type=bind,src={legacy},dst=/legacy,readonly",
                   *caches, "-e", "GOMODCACHE=/gomod", "-e", "GOCACHE=/gobuild",
-                  "-e", "GOTOOLCHAIN=local", "-e", "GOMAXPROCS=2", "-w", "/src/account-platform"]
+                  "-e", "GOTOOLCHAIN=local", "-e", "GOMAXPROCS=2", "-e", "PINVOU_CI_RESOURCE_LEDGER=/out/resources", "-w", "/src/account-platform"]
 
         def tools(arguments, logfile, network="none", environment=(), download_cache=False):
             mounts, download_environment = dependency_cache_options(os.environ) if download_cache else ([], [])
@@ -273,8 +274,10 @@ def main():
             pg += [postgres_image, "-c", "listen_addresses=127.0.0.1"]
             if tls:
                 pg += ["-c", "ssl=on", "-c", "ssl_cert_file=/fixture/ca.crt", "-c", "ssl_key_file=/fixture/server.key", "-c", "hba_file=/fixture/pg_hba.conf", "-c", "allow_system_table_mods=on"]
-            command(pg)
-            owned.append(name)
+            identifier = command(pg)
+            if not re.fullmatch('[0-9a-f]{64}', identifier):
+                raise RuntimeError("PostgreSQL creation ID was not confirmed")
+            owned.append((name, identifier))
             deadline = time.monotonic() + 40
             while subprocess.run(["docker", "exec", name, "pg_isready", "-h", "127.0.0.1", "-U", user, "-d", database], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL).returncode:
                 if time.monotonic() > deadline:
@@ -313,12 +316,44 @@ def main():
             (artifacts / "receipt.json").write_text(json.dumps(receipt, indent=2) + "\n")
             print("ISOLATED_CONTRACTS_PASSED_NOT_DEPLOYED")
         finally:
-            for name in reversed(owned):
-                actual = command(["docker", "inspect", name, "--format", '{{index .Config.Labels "' + LABEL + '"}}'])
-                if actual != identity:
-                    raise RuntimeError("refusing cleanup of a container outside this invocation")
-                command(["docker", "rm", "-f", "-v", name])
-            subprocess.run(["docker", "image", "rm", image], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            primary = sys.exc_info()[1]
+            cleanup_errors = []
+            try:
+                shutil.copytree(output / "resources", artifacts / "resources", dirs_exist_ok=True)
+            except Exception as error:
+                cleanup_errors.append(error)
+            admitted = []
+            # Complete identity validation precedes any destructive operation.
+            for name, identifier in reversed(owned):
+                try:
+                    actual = command(["docker", "inspect", identifier, "--format", '{{index .Config.Labels "' + LABEL + '"}}'])
+                    if actual != identity:
+                        raise RuntimeError("refusing cleanup of a container outside this invocation")
+                    admitted.append(identifier)
+                except Exception as error:
+                    cleanup_errors.append(error)
+            if len(admitted) == len(owned):
+                for name in admitted:
+                    try:
+                        command(["docker", "rm", "-f", "-v", name])
+                    except Exception as error:
+                        cleanup_errors.append(error)
+                try:
+                    remaining = set(command(["docker", "ps", "--all", "--quiet", "--no-trunc"]).splitlines()).intersection(admitted)
+                    if remaining:
+                        cleanup_errors.append(RuntimeError("owned deployment containers remain after cleanup"))
+                except Exception as error:
+                    cleanup_errors.append(error)
+            try:
+                (artifacts / "resources").mkdir(exist_ok=True)
+                (artifacts / "resources/cleanup-receipt.json").write_text(json.dumps({"schema": 1, "kind": "deployment-containers", "state": "unconfirmed" if cleanup_errors else "released", "count": len(owned), "failures": len(cleanup_errors)}))
+                subprocess.run(["docker", "image", "rm", image], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            except Exception as error:
+                cleanup_errors.append(error)
+            if cleanup_errors:
+                if primary is None:
+                    raise RuntimeError("owned deployment cleanup failed; receipt retained") from cleanup_errors[0]
+                print("::error::owned deployment cleanup also failed; primary failure preserved", file=sys.stderr)
 
 
 if __name__ == "__main__":

@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { createServer } from 'node:http';
+import { createServer } from './helpers/http-fixture.mjs';
 import test from 'node:test';
 import { OrganizationClient } from '../src/features/account-platform/organization-client.js';
 import { AccountPlatformBffClient } from '../src/features/account-platform/bff-client.js';
