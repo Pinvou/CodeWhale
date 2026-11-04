@@ -2098,5 +2098,6 @@
   "AutomationEditorFriday": "Dv",
   "AutomationEditorSaturday": "Ds",
   "AutomationEditorSunday": "Dg",
-  "AttachedRootsNotRevertedNote": "Només s'ha restaurat l'workspace primari; les arrels adjuntes del workspace no s'han revertit (els directoris exclosos de la instantània —com vendor/— i els repositoris niats conserven els canvis)."
+  "AttachedRootsNotRevertedNote": "Només s'ha restaurat l'workspace primari; les arrels adjuntes del workspace no s'han revertit (els directoris exclosos de la instantània —com vendor/— i els repositoris niats conserven els canvis).",
+  "RemoteApprovalOutcomeUnconfirmed": "El resultat de l'aprovació encara no està confirmat; la targeta roman oberta fins que el motor ho informi."
 }

@@ -2098,5 +2098,6 @@
   "AutomationEditorFriday": "金",
   "AutomationEditorSaturday": "土",
   "AutomationEditorSunday": "日",
-  "AttachedRootsNotRevertedNote": "プライマリワークスペースのみ復元されました。アタッチされたワークスペースルートはロールバックされていません（スナップショットから除外されるディレクトリ（vendor/ など）やネストされたリポジトリは変更が残ります）。"
+  "AttachedRootsNotRevertedNote": "プライマリワークスペースのみ復元されました。アタッチされたワークスペースルートはロールバックされていません（スナップショットから除外されるディレクトリ（vendor/ など）やネストされたリポジトリは変更が残ります）。",
+  "RemoteApprovalOutcomeUnconfirmed": "承認結果はまだ確定していません。エンジンが報告するまでカードは開いたままです。"
 }

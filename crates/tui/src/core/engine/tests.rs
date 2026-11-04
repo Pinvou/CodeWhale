@@ -8461,6 +8461,245 @@ async fn sandbox_escalation_fails_closed_when_the_posture_cannot_prompt() {
 }
 
 #[tokio::test]
+async fn forkguard_armed_sandbox_escalation_prompts_instead_of_failing_closed() {
+    // The unarmed fail-closed faces are pinned by
+    // `sandbox_escalation_fails_closed_when_the_posture_cannot_prompt`.
+    // Armed, the same non-Suggest escalation must reach the host as a
+    // Suggest-style approval (`approval_force_prompt` set, description
+    // naming the armed guardrail approval), and denying it must read as an
+    // approval denial — never as the fail-closed posture block, and never a
+    // silent execution.
+    use crate::llm_client::mock::{MockLlmClient, canned};
+
+    let workspace = tempdir().expect("tempdir");
+    let mock = std::sync::Arc::new(MockLlmClient::new(vec![
+        canned::tool_call_turn(
+            "call-armed-escalation",
+            "bash",
+            r#"{"command":"echo denied > escalation.txt","sandbox_permissions":"workspace-write","justification":"the command needs workspace write access"}"#,
+        ),
+        canned::simple_text_turn("Escalation was denied."),
+    ]));
+    let client: crate::core::model_client::SharedModelClient = mock.clone();
+    let config = Config {
+        sandbox_mode: Some("read-only".to_string()),
+        ..Config::default()
+    };
+    let (engine, handle) = Engine::new_with_model_client(
+        deterministic_engine_config(workspace.path()),
+        &config,
+        client,
+    );
+    let handle_for_approval = handle.clone();
+    let task = tokio::spawn(engine.run());
+
+    // Arm through the same `ChangeMode` channel hosts use for the toggle.
+    // The posture stays Full Access (non-Suggest): exactly the posture whose
+    // escalation face flips from deny to prompt when armed.
+    handle
+        .send(Op::ChangeMode {
+            mode: AppMode::Agent,
+            allow_shell: true,
+            trust_mode: true,
+            auto_approve: true,
+            approval_mode: crate::tui::approval::ApprovalMode::Bypass,
+            configured_sandbox_mode: None,
+            ask_on_guardrail: Some(true),
+        })
+        .await
+        .expect("arm guardrail prompts");
+
+    let mut op = external_user_message_op(
+        "Escalate the sandbox for this one command.",
+        AppMode::Agent,
+        &config,
+    );
+    let Op::SendMessage {
+        approval_mode: op_approval_mode,
+        auto_approve: op_auto_approve,
+        ..
+    } = &mut op
+    else {
+        panic!("user message op")
+    };
+    *op_approval_mode = crate::tui::approval::ApprovalMode::Bypass;
+    *op_auto_approve = true;
+    handle.send(op).await.expect("send armed escalation turn");
+
+    let mut saw_prompt = false;
+    let mut rx = handle.rx_event.write().await;
+    loop {
+        let event = tokio::time::timeout(model_turn_event_timeout(), rx.recv())
+            .await
+            .expect("timed out waiting for armed escalation")
+            .expect("engine event stream closed");
+        match event {
+            Event::ApprovalRequired {
+                id,
+                input,
+                description,
+                approval_force_prompt,
+                ..
+            } if id == "call-armed-escalation" => {
+                assert_eq!(input["sandbox_permissions"], "workspace-write");
+                assert!(
+                    approval_force_prompt,
+                    "armed escalation must carry approval_force_prompt"
+                );
+                assert!(
+                    description.contains("Sandbox escalation to 'workspace-write'"),
+                    "{description}"
+                );
+                assert!(
+                    description.contains("armed guardrail approval"),
+                    "armed escalation description must name the arming: {description}"
+                );
+                saw_prompt = true;
+                handle_for_approval
+                    .deny_tool_call(id)
+                    .await
+                    .expect("deny armed escalation");
+            }
+            Event::ToolCallComplete { id, result, .. } if id == "call-armed-escalation" => {
+                let error = result.expect_err("denied armed escalation must be an error");
+                let error = error.to_string();
+                assert!(
+                    error.contains("denied by user"),
+                    "the armed denial must read as an approval denial: {error}"
+                );
+                assert!(
+                    !error.contains("requires a one-shot user approval"),
+                    "armed escalation must not take the fail-closed deny face: {error}"
+                );
+            }
+            Event::TurnComplete { status, error, .. } => {
+                assert_eq!(status, TurnOutcomeStatus::Completed, "{error:?}");
+                break;
+            }
+            _ => {}
+        }
+    }
+    drop(rx);
+
+    assert!(saw_prompt, "armed non-Suggest escalation must prompt");
+    assert!(
+        !workspace.path().join("escalation.txt").exists(),
+        "a denied armed escalation must not execute"
+    );
+    handle.send(Op::Shutdown).await.expect("shutdown engine");
+    task.await.expect("engine task");
+}
+
+#[tokio::test]
+async fn forkguard_armed_auto_review_escalation_stays_fail_closed() {
+    // The armed escalation prompt exists only where a person can answer the
+    // card: it is reachable in Full Access (pinned by
+    // `forkguard_armed_sandbox_escalation_prompts_instead_of_failing_closed`).
+    // Auto-Review keeps the fail-closed deny even when armed — its
+    // unattended flow has nobody to answer — so this pin turns red if the
+    // posture exclusion at the escalation site is ever dropped and arming
+    // starts overriding Auto-Review into a card nobody can answer.
+    use crate::llm_client::mock::{MockLlmClient, canned};
+
+    let workspace = tempdir().expect("tempdir");
+    let mock = std::sync::Arc::new(MockLlmClient::new(vec![
+        canned::tool_call_turn(
+            "call-armed-auto-escalation",
+            "bash",
+            r#"{"command":"echo denied > escalation.txt","sandbox_permissions":"workspace-write","justification":"the command needs workspace write access"}"#,
+        ),
+        canned::simple_text_turn("Escalation was denied."),
+    ]));
+    // Let Auto-Review's independent guardian approve the bounded fixture
+    // call so the turn reaches the escalation rule under test.
+    mock.push_message_response(guardian_fixture_response(
+        r#"{"risk_level":"low","decision":"allow","reason":"isolated fixture write"}"#,
+    ));
+    let client: crate::core::model_client::SharedModelClient = mock.clone();
+    let config = Config {
+        sandbox_mode: Some("read-only".to_string()),
+        ..Config::default()
+    };
+    let (engine, handle) = Engine::new_with_model_client(
+        deterministic_engine_config(workspace.path()),
+        &config,
+        client,
+    );
+    let task = tokio::spawn(engine.run());
+
+    // Arm through the same `ChangeMode` channel hosts use for the toggle.
+    // The posture stays Auto-Review (auto_approve cleared): nobody can
+    // answer a card there, arming or not.
+    handle
+        .send(Op::ChangeMode {
+            mode: AppMode::Agent,
+            allow_shell: true,
+            trust_mode: true,
+            auto_approve: false,
+            approval_mode: crate::tui::approval::ApprovalMode::Auto,
+            configured_sandbox_mode: None,
+            ask_on_guardrail: Some(true),
+        })
+        .await
+        .expect("arm guardrail prompts");
+
+    let mut op = external_user_message_op(
+        "Escalate the sandbox for this one command.",
+        AppMode::Agent,
+        &config,
+    );
+    let Op::SendMessage {
+        approval_mode: op_approval_mode,
+        auto_approve: op_auto_approve,
+        ..
+    } = &mut op
+    else {
+        panic!("user message op")
+    };
+    *op_approval_mode = crate::tui::approval::ApprovalMode::Auto;
+    *op_auto_approve = false;
+    handle
+        .send(op)
+        .await
+        .expect("send armed Auto-Review escalation turn");
+
+    let mut saw_denial = false;
+    let mut rx = handle.rx_event.write().await;
+    loop {
+        let event = tokio::time::timeout(model_turn_event_timeout(), rx.recv())
+            .await
+            .expect("timed out waiting for armed Auto-Review escalation")
+            .expect("engine event stream closed");
+        match event {
+            Event::ApprovalRequired { .. } => {
+                panic!("armed Auto-Review must not open an escalation prompt")
+            }
+            Event::ToolCallComplete { id, result, .. } if id == "call-armed-auto-escalation" => {
+                let error = result.expect_err("armed Auto-Review escalation must be denied");
+                let error = error.to_string();
+                assert!(
+                    error.contains("Sandbox escalation requires a one-shot user approval"),
+                    "{error}"
+                );
+                assert!(error.contains("Auto-Review"), "{error}");
+                saw_denial = true;
+            }
+            Event::TurnComplete { status, error, .. } => {
+                assert_eq!(status, TurnOutcomeStatus::Completed, "{error:?}");
+                break;
+            }
+            _ => {}
+        }
+    }
+    drop(rx);
+
+    assert!(saw_denial);
+    assert!(!workspace.path().join("escalation.txt").exists());
+    handle.send(Op::Shutdown).await.expect("shutdown engine");
+    task.await.expect("engine task");
+}
+
+#[tokio::test]
 async fn productive_tool_results_do_not_hit_no_user_input_backstop() {
     use crate::llm_client::mock::{MockLlmClient, canned};
 
@@ -9191,6 +9430,139 @@ async fn injected_model_receives_malformed_tool_feedback_and_recovers() {
     assert_eq!(mock.call_count(), 2);
     handle.send(Op::Shutdown).await.expect("shutdown engine");
     task.await.expect("engine task");
+}
+
+#[tokio::test]
+async fn injected_model_fallback_text_tool_ids_stay_unique_across_responses() {
+    use crate::llm_client::mock::{MockLlmClient, canned};
+
+    // Regression: the text-fallback parser restarts its generated ids at 1
+    // for every response, so two adjacent text-encoded tool responses both
+    // presented `xml_tool_1`. Approval receipts are keyed by tool-call id and
+    // reject a repeated ask, so every ingestion must mint a fresh incarnation
+    // or the second call can never be approved or executed.
+    let workspace = tempdir().expect("tempdir");
+    fs::write(workspace.path().join("fallback-1.txt"), "first").expect("write fixture");
+    fs::write(workspace.path().join("fallback-2.txt"), "second").expect("write fixture");
+    let fallback_turn = |message_id: &str, path: &str| {
+        vec![
+            canned::message_start(message_id),
+            canned::text_block_start(0),
+            canned::text_delta(
+                0,
+                &format!(
+                    "Reading the fixture. <invoke name=\"File\">\
+                     <parameter name=\"action\">read</parameter>\
+                     <parameter name=\"path\">{path}</parameter></invoke>"
+                ),
+            ),
+            canned::block_stop(0),
+            canned::message_delta("end_turn", None),
+            canned::message_stop(),
+        ]
+    };
+    let mock = std::sync::Arc::new(MockLlmClient::new(vec![
+        fallback_turn("mock_msg_fallback_1", "fallback-1.txt"),
+        fallback_turn("mock_msg_fallback_2", "fallback-2.txt"),
+        canned::simple_text_turn("Done."),
+    ]));
+    let client: crate::core::model_client::SharedModelClient = mock.clone();
+    let (engine, handle) = Engine::new_with_model_client(
+        deterministic_engine_config(workspace.path()),
+        &Config::default(),
+        client,
+    );
+    let task = tokio::spawn(engine.run());
+    handle
+        .send(external_user_message_op(
+            "Read both fixtures from plain text.",
+            AppMode::Agent,
+            &Config::default(),
+        ))
+        .await
+        .expect("send fallback trajectory");
+
+    let mut started_ids = Vec::new();
+    let mut rx = handle.rx_event.write().await;
+    while let Some(event) = tokio::time::timeout(model_turn_event_timeout(), rx.recv())
+        .await
+        .expect("timed out waiting for fallback trajectory")
+    {
+        match event {
+            Event::ToolCallStarted { id, name, .. } => {
+                assert_eq!(name, "File");
+                started_ids.push(id);
+            }
+            Event::ToolCallComplete { id, result, .. } => {
+                let result = result.expect("fallback tool call closes with a result");
+                assert!(
+                    result.success,
+                    "fallback tool call must execute: {result:?}"
+                );
+                assert!(
+                    started_ids.contains(&id),
+                    "results must carry the started id, got {id}"
+                );
+            }
+            Event::TurnComplete { status, error, .. } => {
+                assert_eq!(status, TurnOutcomeStatus::Completed, "{error:?}");
+                break;
+            }
+            _ => {}
+        }
+    }
+    drop(rx);
+
+    assert_eq!(
+        started_ids.len(),
+        2,
+        "both fallback responses must produce a tool call: {started_ids:?}"
+    );
+    assert_ne!(
+        started_ids[0], started_ids[1],
+        "adjacent fallback responses must not share a tool-call id"
+    );
+    for id in &started_ids {
+        let (parsed_prefix, incarnation) = id
+            .split_once('#')
+            .expect("incarnated fallback id keeps its parsed prefix");
+        assert!(
+            parsed_prefix.starts_with("xml_tool_"),
+            "fallback id must keep the parser shape as a prefix: {id}"
+        );
+        let (millis, counter) = incarnation
+            .split_once('x')
+            .expect("incarnation must be <millis>x<counter>");
+        assert!(
+            !millis.is_empty() && millis.bytes().all(|byte| byte.is_ascii_digit()),
+            "incarnation millis must be numeric: {id}"
+        );
+        assert!(
+            !counter.is_empty() && counter.bytes().all(|byte| byte.is_ascii_digit()),
+            "incarnation counter must be numeric: {id}"
+        );
+    }
+    assert_eq!(
+        mock.captured_requests().len(),
+        3,
+        "each fallback tool result must continue the turn"
+    );
+    handle.send(Op::Shutdown).await.expect("shutdown engine");
+    task.await.expect("engine task");
+}
+
+#[test]
+fn fresh_fallback_tool_ids_are_unique_within_a_process() {
+    let first = super::turn_loop::fresh_fallback_tool_id("xml_tool_1");
+    let second = super::turn_loop::fresh_fallback_tool_id("xml_tool_1");
+    assert_ne!(
+        first, second,
+        "the same parsed id must incarnate differently"
+    );
+    assert_eq!(
+        first.split_once('#').map(|(prefix, _)| prefix),
+        Some("xml_tool_1")
+    );
 }
 
 #[tokio::test]
@@ -10714,6 +11086,7 @@ fn exec_shell_scenario() {
             Path::new("/repo"),
             &[],
             crate::tui::approval::ApprovalMode::Auto,
+            false,
         );
 
         assert_eq!(
@@ -10738,6 +11111,7 @@ fn exec_shell_scenario() {
             Path::new("/repo"),
             &[],
             crate::tui::approval::ApprovalMode::Never,
+            false,
         );
 
         assert_eq!(
@@ -10761,6 +11135,7 @@ fn exec_shell_scenario() {
             Path::new("/repo"),
             &[],
             crate::tui::approval::ApprovalMode::Auto,
+            false,
         );
 
         assert_eq!(decision, None);
@@ -10781,6 +11156,7 @@ fn canonical_bash_run_honors_legacy_typed_ask_rules() {
         Path::new("/repo"),
         &[],
         crate::tui::approval::ApprovalMode::Auto,
+        false,
     );
 
     assert_eq!(
@@ -10810,6 +11186,7 @@ fn exec_shell_allow_rule_decision_allows_only_exact_command_in_scoped_repo() {
             Path::new("/repo"),
             &[],
             crate::tui::approval::ApprovalMode::Suggest,
+            false,
         ),
         Some(ToolAskRuleDecision::Allow)
     );
@@ -10821,6 +11198,7 @@ fn exec_shell_allow_rule_decision_allows_only_exact_command_in_scoped_repo() {
             Path::new("/repo"),
             &[],
             crate::tui::approval::ApprovalMode::Suggest,
+            false,
         ),
         None
     );
@@ -10832,6 +11210,7 @@ fn exec_shell_allow_rule_decision_allows_only_exact_command_in_scoped_repo() {
             Path::new("/other"),
             &[],
             crate::tui::approval::ApprovalMode::Suggest,
+            false,
         ),
         None
     );
@@ -10864,6 +11243,7 @@ fn exec_shell_scoped_allow_rule_does_not_follow_cwd_into_attached_root() {
             Path::new("/repo"),
             &roots,
             crate::tui::approval::ApprovalMode::Suggest,
+            false,
         ),
         Some(ToolAskRuleDecision::Allow)
     );
@@ -10877,6 +11257,7 @@ fn exec_shell_scoped_allow_rule_does_not_follow_cwd_into_attached_root() {
             Path::new("/repo"),
             &roots,
             crate::tui::approval::ApprovalMode::Suggest,
+            false,
         ),
         Some(ToolAskRuleDecision::Allow)
     );
@@ -10890,6 +11271,7 @@ fn exec_shell_scoped_allow_rule_does_not_follow_cwd_into_attached_root() {
             Path::new("/repo"),
             &roots,
             crate::tui::approval::ApprovalMode::Suggest,
+            false,
         ),
         None,
         "a /repo-scoped allow must not auto-approve execution under an attached root"
@@ -10913,6 +11295,7 @@ fn exec_shell_scoped_allow_rule_does_not_follow_cwd_into_attached_root() {
             Path::new("/repo"),
             &roots,
             crate::tui::approval::ApprovalMode::Suggest,
+            false,
         ),
         Some(ToolAskRuleDecision::Allow)
     );
@@ -10924,6 +11307,7 @@ fn exec_shell_scoped_allow_rule_does_not_follow_cwd_into_attached_root() {
             Path::new("/repo"),
             &roots,
             crate::tui::approval::ApprovalMode::Suggest,
+            false,
         ),
         None
     );
@@ -10957,6 +11341,7 @@ fn exec_shell_attached_root_scoped_deny_reaches_rule_decision() {
         Path::new("/repo"),
         &[PathBuf::from("/shared")],
         crate::tui::approval::ApprovalMode::Suggest,
+        false,
     );
     assert!(
         matches!(decision, Some(ToolAskRuleDecision::Block(_))),
@@ -10972,6 +11357,7 @@ fn exec_shell_attached_root_scoped_deny_reaches_rule_decision() {
         Path::new("/repo"),
         &[],
         crate::tui::approval::ApprovalMode::Suggest,
+        false,
     );
     assert_eq!(decision, None);
 }
@@ -10993,6 +11379,7 @@ fn file_ask_scenario() {
             Path::new("/repo"),
             &[],
             crate::tui::approval::ApprovalMode::Auto,
+            false,
         );
 
         assert_eq!(
@@ -11017,6 +11404,7 @@ fn file_ask_scenario() {
             Path::new("/repo"),
             &[],
             crate::tui::approval::ApprovalMode::Auto,
+            false,
         );
 
         assert_eq!(
@@ -11041,6 +11429,7 @@ fn file_ask_scenario() {
             Path::new("/repo"),
             &[],
             crate::tui::approval::ApprovalMode::Never,
+            false,
         );
 
         assert_eq!(
@@ -11064,6 +11453,7 @@ fn file_ask_scenario() {
             Path::new("/repo"),
             &[],
             crate::tui::approval::ApprovalMode::Auto,
+            false,
         );
 
         assert_eq!(decision, None);
@@ -11084,6 +11474,7 @@ fn canonical_file_action_honors_legacy_path_ask_rules() {
         Path::new("/repo"),
         &[],
         crate::tui::approval::ApprovalMode::Auto,
+        false,
     );
 
     assert_eq!(
@@ -11114,6 +11505,7 @@ fn camelCase_file_path_alias_reaches_the_ask_rule_and_carve_out_judgments() {
         Path::new("/repo"),
         &[],
         crate::tui::approval::ApprovalMode::Auto,
+        false,
     );
     assert_eq!(
         camel,
@@ -11130,6 +11522,7 @@ fn camelCase_file_path_alias_reaches_the_ask_rule_and_carve_out_judgments() {
         Path::new("/repo"),
         &[],
         crate::tui::approval::ApprovalMode::Auto,
+        false,
     );
     assert_eq!(
         snake, camel,
@@ -11146,6 +11539,7 @@ fn camelCase_file_path_alias_reaches_the_ask_rule_and_carve_out_judgments() {
         Path::new("/repo"),
         &[],
         crate::tui::approval::ApprovalMode::Auto,
+        false,
     );
     assert_eq!(canonical_wins, None, "path wins; other.rs is not ruled");
 }
@@ -11178,6 +11572,7 @@ fn apply_patch_allow_requires_every_touched_path_to_match() {
         Path::new("/repo"),
         &[],
         crate::tui::approval::ApprovalMode::Suggest,
+        false,
     );
     assert_eq!(fully_allowed, Some(ToolAskRuleDecision::Allow));
 
@@ -11193,6 +11588,7 @@ fn apply_patch_allow_requires_every_touched_path_to_match() {
         Path::new("/repo"),
         &[],
         crate::tui::approval::ApprovalMode::Suggest,
+        false,
     );
     assert_eq!(partially_allowed, None);
 }
@@ -12415,6 +12811,184 @@ fn tool_error_messages_include_actionable_hints() {
     assert!(
         formatted.contains("Adjust approval mode or request permission"),
         "{formatted}"
+    );
+}
+
+/// A validation receipt echoes the input schema so the model can repair a
+/// malformed call, but a kilobytes-long schema replayed on every semantic
+/// refusal (live session 2026-10-24: the `agent` schema — ~6.7KB on the
+/// current tree — appended to eight "agent not found"/contention errors)
+/// drowns the one-line cause. Large schemas are reduced to their field
+/// inventory; small ones stay verbatim.
+#[test]
+fn tool_validation_feedback_bounds_oversized_schemas_to_their_field_inventory() {
+    let error = ToolError::invalid_input("Agent not found in the active session");
+    let big_schema = json!({
+        "type": "object",
+        "properties": {
+            "action": {"type": "string", "description": "x".repeat(3000)},
+            "agent_id": {"type": "string"},
+            "prompt": {"type": "string"}
+        },
+        "required": ["action"]
+    });
+    let formatted = format_tool_error_with_schema(&error, "agent", Some(&big_schema));
+    assert!(
+        formatted.len() < big_schema.to_string().len() / 2,
+        "an oversized schema must not be echoed verbatim ({} bytes)",
+        formatted.len()
+    );
+    assert!(
+        formatted
+            .starts_with("Invalid input for tool 'agent': Agent not found in the active session"),
+        "the cause stays first: {formatted}"
+    );
+    assert!(formatted.contains("\"category\":\"invalid_input\""));
+    for field in [
+        "\"action\"",
+        "\"agent_id\"",
+        "\"prompt\"",
+        "\"required\":[\"action\"]",
+    ] {
+        assert!(
+            formatted.contains(field),
+            "field inventory must survive: {formatted}"
+        );
+    }
+    assert!(
+        formatted.contains("omitted from this receipt"),
+        "{formatted}"
+    );
+    assert!(
+        !formatted.contains(&"x".repeat(100)),
+        "schema prose must be dropped"
+    );
+
+    let small_schema = json!({
+        "type": "object",
+        "properties": {"path": {"type": "string", "description": "workspace-relative"}},
+        "required": ["path"]
+    });
+    let formatted = format_tool_error_with_schema(&error, "read", Some(&small_schema));
+    assert!(
+        formatted.contains("workspace-relative"),
+        "small schemas stay verbatim: {formatted}"
+    );
+    assert!(!formatted.contains("omitted"), "{formatted}");
+
+    // Budget boundary: a schema serialized to exactly 2048 bytes stays
+    // verbatim; one byte more reduces it to the field inventory.
+    let sized_schema = |filler: usize| {
+        json!({
+            "type": "object",
+            "properties": {"path": {"description": "x".repeat(filler)}},
+            "required": ["path"]
+        })
+    };
+    let base_len = sized_schema(0).to_string().len();
+    let at_budget = sized_schema(2048 - base_len);
+    assert_eq!(at_budget.to_string().len(), 2048);
+    let formatted = format_tool_error_with_schema(&error, "boundary", Some(&at_budget));
+    assert!(
+        !formatted.contains("omitted from this receipt"),
+        "a schema at exactly the budget stays verbatim: {formatted}"
+    );
+    let over_budget = sized_schema(2049 - base_len);
+    let formatted = format_tool_error_with_schema(&error, "boundary+1", Some(&over_budget));
+    assert!(
+        formatted.contains("omitted from this receipt")
+            && formatted.contains("\"required\":[\"path\"]"),
+        "one byte over the budget reduces to the inventory: {formatted}"
+    );
+
+    // A composition-only schema has no top-level properties: the reduced
+    // receipt carries an empty inventory plus the pointer back to the
+    // advertised schema, not a misleading shape.
+    let composition = json!({
+        "oneOf": [
+            {"type": "object", "description": "x".repeat(3000)},
+            {"type": "string", "description": "x".repeat(3000)}
+        ]
+    });
+    let formatted = format_tool_error_with_schema(&error, "apply_patch", Some(&composition));
+    assert!(
+        formatted.contains("\"properties\":[]") && formatted.contains("omitted from this receipt"),
+        "a no-properties schema reduces with an empty inventory: {formatted}"
+    );
+    assert!(
+        !formatted.contains("\"type\":"),
+        "a schema that declares no type must not be mis-typed as object in the receipt: {formatted}"
+    );
+
+    // The reduced receipt carries the schema's DECLARED type, not a
+    // hardcoded \"object\": a composition-free string schema must say so.
+    let string_schema = json!({
+        "type": "string",
+        "description": "x".repeat(3000),
+        "minLength": 1
+    });
+    let formatted = format_tool_error_with_schema(&error, "read", Some(&string_schema));
+    assert!(
+        formatted.contains("\"type\":\"string\""),
+        "the declared type must survive the reduction: {formatted}"
+    );
+    assert!(
+        !formatted.contains("\"type\":\"object\""),
+        "the declared type must not be overridden: {formatted}"
+    );
+
+    // The reduction honors its own budget: a schema with more properties
+    // than the inventory cap truncates the list with an explicit marker
+    // instead of echoing an unbounded receipt.
+    let many_properties = (0..60)
+        .map(|index| {
+            (
+                format!("field_{index:02}"),
+                json!({"type": "string", "description": "x".repeat(40)}),
+            )
+        })
+        .collect::<serde_json::Map<_, _>>();
+    let wide_schema = json!({
+        "type": "object",
+        "properties": many_properties,
+        "required": ["field_00"]
+    });
+    let formatted = format_tool_error_with_schema(&error, "wide", Some(&wide_schema));
+    assert!(
+        formatted.contains("... and 20 more properties"),
+        "truncated inventories name their remainder: {formatted}"
+    );
+    assert!(
+        formatted.contains("\"field_39\"") && !formatted.contains("\"field_40\""),
+        "the inventory truncates at the cap: {formatted}"
+    );
+
+    // The reduction honors the byte budget it enforces: few-but-long
+    // property names are each skipped into the omitted tail, so the
+    // receipt stays under the budget even when the cap alone would not
+    // bound it.
+    let long_names = (0..3)
+        .map(|index| {
+            (
+                format!("very_long_property_name_{index}_{}", "x".repeat(800)),
+                json!({}),
+            )
+        })
+        .collect::<serde_json::Map<_, _>>();
+    let long_name_schema = json!({
+        "type": "object",
+        "properties": long_names,
+        "required": ["very_long_property_name_0"]
+    });
+    let formatted = format_tool_error_with_schema(&error, "long", Some(&long_name_schema));
+    assert!(
+        formatted.contains("... and 3 more properties"),
+        "over-long names are counted as omitted: {formatted}"
+    );
+    assert!(
+        formatted.len() < 2048,
+        "the reduced receipt stays under the budget regardless of name lengths ({} bytes)",
+        formatted.len()
     );
 }
 
@@ -14133,6 +14707,80 @@ async fn run_shell_command_op_executes_without_approval_modal() {
 }
 
 #[tokio::test]
+async fn forkguard_armed_composer_shell_keeps_the_hard_deny_face() {
+    // #5191 pins the unarmed doctrine: typing a `!` command IS the approval,
+    // so the composer face keeps its hard deny in every posture, armed or
+    // not — the composer hands the ask-rule judgment the unarmed flag and
+    // only the `Block` arm is consumed. This pin holds that line under an
+    // armed Full Access session: a deny-rule match must stay a denial, and
+    // arming must neither raise a composer modal (one the user never asked
+    // for — they typed the command themselves) nor, if the face were ever
+    // "taught" to honor arming, silently auto-run a deny-matched command
+    // through its Prompt return. Arming delivery itself is pinned by the
+    // ChangeMode tests; this test targets the composer face only.
+    let _guard = lock_test_env();
+    let tmp = tempdir().expect("tempdir");
+    let (mut engine, handle) = Engine::new(
+        EngineConfig {
+            workspace: tmp.path().to_path_buf(),
+            exec_policy_engine: codewhale_execpolicy::ExecPolicyEngine::with_rulesets(vec![
+                codewhale_execpolicy::Ruleset::user(Vec::new(), vec!["echo".to_string()]),
+            ]),
+            ..EngineConfig::default()
+        },
+        &Config::default(),
+    );
+    engine.session.ask_on_guardrail = true;
+    engine.session.approval_mode = crate::tui::approval::ApprovalMode::Bypass;
+    engine.session.auto_approve = true;
+
+    engine
+        .handle_run_shell_command(
+            "echo armed-composer-deny-pin".to_string(),
+            AppMode::Agent,
+            true,
+            false,
+            true,
+            crate::tui::approval::ApprovalMode::Bypass,
+        )
+        .await;
+
+    let mut saw_denial = false;
+    let mut saw_approval = false;
+    let mut rx = handle.rx_event.write().await;
+    while let Some(event) = rx.recv().await {
+        match event {
+            Event::ApprovalRequired { .. } => saw_approval = true,
+            Event::ToolCallComplete { id, name, result } if name == "Bash" => {
+                assert!(id.starts_with(USER_SHELL_TOOL_ID_PREFIX));
+                let error = result.expect_err("an armed composer deny-rule hit must stay denied");
+                assert!(
+                    error.to_string().contains("denied prefix rule 'echo'"),
+                    "composer denial must carry the deny evidence: {error}"
+                );
+                saw_denial = true;
+            }
+            Event::TurnComplete { status, .. } => {
+                assert_eq!(
+                    status,
+                    TurnOutcomeStatus::Failed,
+                    "a denied composer command fails its turn"
+                );
+                break;
+            }
+            _ => {}
+        }
+    }
+    drop(rx);
+
+    assert!(saw_denial);
+    assert!(
+        !saw_approval,
+        "arming must not raise a composer modal (#5191)"
+    );
+}
+
+#[tokio::test]
 async fn run_shell_command_op_skips_approval_when_auto_approved() {
     let workspace = tempdir().expect("tempdir");
     let todos = crate::tools::todo::new_shared_todo_list();
@@ -14271,6 +14919,9 @@ async fn yolo_mode_does_not_prompt_for_typed_ask_rule() {
     // stale ApprovalMode::Auto maps to OnFailure in the execpolicy (honors
     // ask-rules). The auto_review safety floor and typed deny rules still
     // apply; only the ask-rule Prompt is suppressed under Full Access.
+    // (Pinvou tri-mode safety: an `ask_on_guardrail`-armed session is the
+    // one exception — the Prompt is honored because the host guaranteed a
+    // person can answer; the unarmed default this test pins is unchanged.)
     let (mut engine, handle) = Engine::new(
         EngineConfig {
             exec_policy_engine: ask_rule_engine("echo"),
@@ -14312,6 +14963,190 @@ async fn yolo_mode_does_not_prompt_for_typed_ask_rule() {
     }
 
     assert!(saw_complete);
+}
+
+#[tokio::test]
+#[allow(clippy::await_holding_lock)]
+async fn forkguard_armed_full_access_typed_ask_rule_prompts_instead_of_auto_running() {
+    // The unarmed faces are pinned by
+    // `yolo_mode_does_not_prompt_for_typed_ask_rule` (composer `!`
+    // provenance) and
+    // `full_access_subagent_handoff_keeps_model_shell_free_of_approval_prompts`
+    // (model-provenance mainline): in the Full Access posture a typed
+    // ask-rule Prompt is suppressed and the call auto-runs. Armed, the
+    // mainline turn loop must honor that same Prompt — the ask-rule hold
+    // reaches the host as a forced approval even though the session grants
+    // auto-approval, and denying it reads as an approval denial, never as a
+    // silent auto-run.
+    use wiremock::matchers::{body_string_contains, method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    let _lock = lock_test_env();
+    let workspace = tempdir().expect("tempdir");
+    let server = MockServer::start().await;
+
+    let tool_call_sse = concat!(
+        "data: {\"id\":\"chatcmpl-armed-ask-rule\",\"choices\":[{\"index\":0,\"delta\":{\"tool_calls\":[",
+        "{\"index\":0,\"id\":\"call_armed_ask_rule\",\"type\":\"function\",\"function\":{\"name\":\"Bash\",",
+        "\"arguments\":\"{\\\"action\\\":\\\"run\\\",\\\"command\\\":\\\"echo armed-typed-ask-rule\\\"}\"}}",
+        "]},\"finish_reason\":null}]}\n\n",
+        "data: {\"id\":\"chatcmpl-armed-ask-rule\",\"choices\":[{\"index\":0,\"delta\":{},",
+        "\"finish_reason\":\"tool_calls\"}]}\n\n",
+        "data: [DONE]\n\n",
+    );
+    let done_sse = concat!(
+        "data: {\"id\":\"chatcmpl-armed-ask-rule-done\",\"choices\":[{\"index\":0,",
+        "\"delta\":{\"content\":\"done\"},\"finish_reason\":null}]}\n\n",
+        "data: {\"id\":\"chatcmpl-armed-ask-rule-done\",\"choices\":[{\"index\":0,\"delta\":{},",
+        "\"finish_reason\":\"stop\"}]}\n\n",
+        "data: [DONE]\n\n",
+    );
+
+    Mock::given(method("POST"))
+        .and(path("/v1/chat/completions"))
+        .and(body_string_contains("denied by user"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .insert_header("content-type", "text/event-stream")
+                .set_body_string(done_sse),
+        )
+        .expect(1)
+        .with_priority(1)
+        .mount(&server)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/v1/chat/completions"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .insert_header("content-type", "text/event-stream")
+                .set_body_string(tool_call_sse),
+        )
+        .expect(1)
+        .with_priority(2)
+        .mount(&server)
+        .await;
+
+    let api_config = Config {
+        api_key: Some("test-key".to_string()),
+        base_url: Some(server.uri()),
+        ..Config::default()
+    };
+    let (engine, handle) = Engine::new(
+        EngineConfig {
+            model: crate::config::DEFAULT_TEXT_MODEL.to_string(),
+            workspace: workspace.path().to_path_buf(),
+            mcp_config_path: workspace.path().join("mcp.json"),
+            snapshots_enabled: false,
+            subagents_enabled: false,
+            exec_policy_engine: ask_rule_engine("echo"),
+            ..EngineConfig::default()
+        },
+        &api_config,
+    );
+    let handle_for_approval = handle.clone();
+    let run_task = tokio::spawn(engine.run());
+
+    // Arm through the same `ChangeMode` channel hosts use for the toggle.
+    // The posture stays Full Access (auto_approve), so only the arming can
+    // convert the typed ask-rule hold into a prompt.
+    handle
+        .send(Op::ChangeMode {
+            mode: AppMode::Agent,
+            allow_shell: true,
+            trust_mode: true,
+            auto_approve: true,
+            approval_mode: crate::tui::approval::ApprovalMode::Bypass,
+            configured_sandbox_mode: None,
+            ask_on_guardrail: Some(true),
+        })
+        .await
+        .expect("arm guardrail prompts");
+
+    handle
+        .send(Op::SendMessage {
+            content: "exercise the armed typed ask-rule hold".to_string(),
+            mode: AppMode::Agent,
+            route: resolved_route_for_test(&api_config, crate::config::DEFAULT_TEXT_MODEL),
+            compaction: Box::new(CompactionConfig::default()),
+            goal_objective: None,
+            goal_token_budget: None,
+            goal_status: crate::tools::goal::GoalStatus::Active,
+            reasoning_effort: None,
+            reasoning_effort_auto: false,
+            auto_model: false,
+            allow_shell: true,
+            trust_mode: true,
+            auto_approve: true,
+            approval_mode: crate::tui::approval::ApprovalMode::Bypass,
+            translation_enabled: false,
+            allowed_tools: None,
+            dynamic_tools: Vec::new(),
+            hook_executor: None,
+            verbosity: None,
+            provenance: UserInputProvenance::ExternalUser,
+            turn_tool_security: None,
+            submission_id: None,
+        })
+        .await
+        .expect("send armed typed ask-rule turn");
+
+    let mut saw_prompt = false;
+    let mut rx = handle.rx_event.write().await;
+    while let Some(event) = tokio::time::timeout(model_turn_event_timeout(), rx.recv())
+        .await
+        .expect("timed out waiting for armed typed ask-rule event")
+    {
+        match event {
+            Event::ApprovalRequired {
+                id,
+                tool_name,
+                description,
+                approval_force_prompt,
+                ..
+            } => {
+                assert_eq!(tool_name, "Bash");
+                assert!(
+                    approval_force_prompt,
+                    "armed typed ask-rule hold must carry approval_force_prompt"
+                );
+                // The plain typed ask-rule face keeps the main-line reason
+                // (the "ask-on-guardrail is armed" framing belongs to the
+                // rich denied-prefix face); arming only makes this Prompt
+                // honored instead of suppressed under auto_approve.
+                assert!(
+                    description.contains("Typed ask rule")
+                        && description.contains("requires approval"),
+                    "armed typed ask-rule hold must carry the typed rule reason: {description}"
+                );
+                saw_prompt = true;
+                handle_for_approval
+                    .deny_tool_call(id)
+                    .await
+                    .expect("deny armed typed ask-rule hold");
+            }
+            Event::ToolCallComplete { name, result, .. } if name == "Bash" => {
+                let error = result.expect_err("denied ask-rule call must be an error");
+                let error = error.to_string();
+                assert!(
+                    error.contains("denied by user"),
+                    "the armed denial must read as an approval denial: {error}"
+                );
+            }
+            Event::TurnComplete { status, .. } => {
+                assert_eq!(status, TurnOutcomeStatus::Completed);
+                break;
+            }
+            _ => {}
+        }
+    }
+    drop(rx);
+
+    handle.send(Op::Shutdown).await.expect("shutdown engine");
+    run_task.await.expect("engine task");
+    assert!(
+        saw_prompt,
+        "armed Full Access must prompt for a typed ask-rule instead of auto-running"
+    );
 }
 
 #[tokio::test]
@@ -14791,7 +15626,12 @@ async fn full_access_blocks_non_bypassable_registered_tools_without_prompting() 
     // This intentionally reverses upstream v0.9.12's
     // `full_access_auto_approves_non_bypassable_registered_tools`. Pinvou
     // treats a tool that requires an explicit human decision as unavailable
-    // in Full Access, whose posture cannot open an approval prompt.
+    // in Full Access, whose posture cannot open an approval prompt. (Pinvou
+    // tri-mode safety: an `ask_on_guardrail`-armed session is the one
+    // exception — it has guaranteed a person can answer, so the hold raises
+    // an approval instead; pinned by
+    // `forkguard_armed_full_access_hold_prompts_instead_of_blocking`. This
+    // test keeps pinning the unarmed default.)
     let _lock = lock_test_env();
     let workspace = tempdir().expect("tempdir");
     let marker = workspace.path().join("runtime-tool-must-run");
@@ -14887,6 +15727,7 @@ async fn full_access_permission_allow_cannot_bypass_repo_law() {
             workspace.path(),
             &[],
             crate::tui::approval::ApprovalMode::Bypass,
+            false,
         ),
         Some(ToolAskRuleDecision::Allow),
         "precondition: the remembered grant must match before repo law tightens the plan"
@@ -14959,6 +15800,225 @@ async fn full_access_repo_law_holds_writes_under_attached_roots() {
     assert!(
         !target.exists(),
         "repo-law block must prevent the write under the attached root"
+    );
+}
+
+#[tokio::test]
+#[allow(clippy::await_holding_lock)]
+async fn forkguard_armed_repo_law_hold_prompts_instead_of_blocking() {
+    // The unarmed siblings are pinned by
+    // `full_access_permission_allow_cannot_bypass_repo_law` and
+    // `full_access_repo_law_holds_writes_under_attached_roots`: a repo-law
+    // ForcePrompt hold fails closed to the hard deny in a posture that
+    // cannot prompt. Armed, the same hold — even behind a remembered allow
+    // grant — must fall through to a forced approval prompt, and denying it
+    // must read as an approval denial, never as the Full Access law block.
+    use wiremock::matchers::{body_string_contains, method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    let _lock = lock_test_env();
+    let workspace = tempdir().expect("tempdir");
+    let law_dir = workspace.path().join(".codewhale");
+    fs::create_dir_all(&law_dir).expect("create law directory");
+    fs::write(
+        law_dir.join("constitution.json"),
+        r#"{
+            "protected_invariants": [{
+                "text": "Release notes need human review",
+                "paths": ["CHANGELOG.md"]
+            }]
+        }"#,
+    )
+    .expect("write repo law fixture");
+    let target = workspace.path().join("CHANGELOG.md");
+    let allow_rule = codewhale_execpolicy::ToolAskRule::file_path("write_file", "CHANGELOG.md")
+        .into_exact_workspace_allow(workspace.path().to_string_lossy().into_owned());
+    let engine_config = EngineConfig {
+        model: crate::config::DEFAULT_TEXT_MODEL.to_string(),
+        workspace: workspace.path().to_path_buf(),
+        mcp_config_path: workspace.path().join("mcp.json"),
+        snapshots_enabled: false,
+        subagents_enabled: false,
+        exec_policy_engine: codewhale_execpolicy::ExecPolicyEngine::with_rulesets(vec![
+            codewhale_execpolicy::Ruleset::user(vec![], vec![]).with_ask_rules(vec![allow_rule]),
+        ]),
+        ..EngineConfig::default()
+    };
+
+    let server = MockServer::start().await;
+    let tool_delta = json!({
+        "id": "chatcmpl-armed-repo-law",
+        "choices": [{
+            "index": 0,
+            "delta": {"tool_calls": [{
+                "index": 0,
+                "id": "call_armed_repo_law_0",
+                "type": "function",
+                "function": {
+                    "name": "File",
+                    "arguments": json!({
+                        "action": "write",
+                        "path": "CHANGELOG.md",
+                        "content": "must not be written\n"
+                    })
+                    .to_string(),
+                },
+            }]},
+            "finish_reason": serde_json::Value::Null,
+        }],
+    });
+    let tool_finish = json!({
+        "id": "chatcmpl-armed-repo-law",
+        "choices": [{"index": 0, "delta": {}, "finish_reason": "tool_calls"}],
+    });
+    let tool_call_sse = format!("data: {tool_delta}\n\ndata: {tool_finish}\n\ndata: [DONE]\n\n");
+    let done_sse = concat!(
+        "data: {\"id\":\"chatcmpl-armed-repo-law-done\",\"choices\":[{\"index\":0,",
+        "\"delta\":{\"content\":\"done\"},\"finish_reason\":null}]}\n\n",
+        "data: {\"id\":\"chatcmpl-armed-repo-law-done\",\"choices\":[{\"index\":0,\"delta\":{},",
+        "\"finish_reason\":\"stop\"}]}\n\n",
+        "data: [DONE]\n\n",
+    );
+
+    Mock::given(method("POST"))
+        .and(path("/v1/chat/completions"))
+        .and(body_string_contains("denied by user"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .insert_header("content-type", "text/event-stream")
+                .set_body_string(done_sse),
+        )
+        .expect(1)
+        .with_priority(1)
+        .mount(&server)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/v1/chat/completions"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .insert_header("content-type", "text/event-stream")
+                .set_body_string(tool_call_sse),
+        )
+        .expect(1)
+        .with_priority(2)
+        .mount(&server)
+        .await;
+
+    let api_config = Config {
+        api_key: Some("test-key".to_string()),
+        base_url: Some(server.uri()),
+        ..Config::default()
+    };
+    let (engine, handle) = Engine::new(engine_config, &api_config);
+    let handle_for_approval = handle.clone();
+    let run_task = tokio::spawn(engine.run());
+
+    // Arm through the same `ChangeMode` channel hosts use for the toggle;
+    // the posture stays Full Access, whose unarmed face is the hard deny.
+    handle
+        .send(Op::ChangeMode {
+            mode: AppMode::Agent,
+            allow_shell: true,
+            trust_mode: true,
+            auto_approve: true,
+            approval_mode: crate::tui::approval::ApprovalMode::Bypass,
+            configured_sandbox_mode: None,
+            ask_on_guardrail: Some(true),
+        })
+        .await
+        .expect("arm guardrail prompts");
+
+    handle
+        .send(Op::SendMessage {
+            content: "exercise the armed repo-law hold".to_string(),
+            mode: AppMode::Agent,
+            route: resolved_route_for_test(&api_config, crate::config::DEFAULT_TEXT_MODEL),
+            compaction: Box::new(CompactionConfig::default()),
+            goal_objective: None,
+            goal_token_budget: None,
+            goal_status: crate::tools::goal::GoalStatus::Active,
+            reasoning_effort: None,
+            reasoning_effort_auto: false,
+            auto_model: false,
+            allow_shell: true,
+            trust_mode: true,
+            auto_approve: true,
+            approval_mode: crate::tui::approval::ApprovalMode::Bypass,
+            translation_enabled: false,
+            allowed_tools: None,
+            dynamic_tools: Vec::new(),
+            hook_executor: None,
+            verbosity: None,
+            provenance: UserInputProvenance::ExternalUser,
+            turn_tool_security: None,
+            submission_id: None,
+        })
+        .await
+        .expect("send armed repo-law turn");
+
+    let mut saw_prompt = false;
+    let mut saw_complete = false;
+    let mut rx = handle.rx_event.write().await;
+    while let Some(event) = tokio::time::timeout(model_turn_event_timeout(), rx.recv())
+        .await
+        .expect("timed out waiting for armed repo-law event")
+    {
+        match event {
+            Event::ApprovalRequired {
+                id,
+                tool_name,
+                description,
+                approval_force_prompt,
+                ..
+            } => {
+                assert_eq!(tool_name, "File");
+                assert!(
+                    approval_force_prompt,
+                    "armed repo-law hold must carry approval_force_prompt"
+                );
+                assert!(
+                    description.contains("Repo law holds this write"),
+                    "armed hold must carry the repo-law reason: {description}"
+                );
+                assert!(
+                    description.contains("Release notes need human review"),
+                    "armed hold must name the protected invariant: {description}"
+                );
+                saw_prompt = true;
+                handle_for_approval
+                    .deny_tool_call(id)
+                    .await
+                    .expect("deny armed repo-law hold");
+            }
+            Event::ToolCallComplete { name, result, .. } if name == "File" => {
+                let error = result.expect_err("denied repo-law write must be an error");
+                let error = error.to_string();
+                assert!(
+                    error.contains("denied by user"),
+                    "the armed denial must read as an approval denial: {error}"
+                );
+                assert!(
+                    !error.contains("Repository law blocked"),
+                    "armed hold must not be phrased as the hard law block: {error}"
+                );
+                saw_complete = true;
+            }
+            Event::TurnComplete { status, .. } => {
+                assert_eq!(status, TurnOutcomeStatus::Completed);
+                break;
+            }
+            _ => {}
+        }
+    }
+    drop(rx);
+
+    handle.send(Op::Shutdown).await.expect("shutdown engine");
+    run_task.await.expect("engine task");
+    assert!(saw_prompt, "armed repo-law hold must prompt, not block");
+    assert!(saw_complete, "denied armed repo-law hold must complete");
+    assert!(
+        !target.exists(),
+        "a denied armed repo-law hold must not write"
     );
 }
 
@@ -15237,6 +16297,7 @@ async fn full_access_permission_allow_cannot_bypass_background_catastrophic_floo
             workspace.path(),
             &[],
             crate::tui::approval::ApprovalMode::Bypass,
+            false,
         ),
         Some(ToolAskRuleDecision::Allow),
         "precondition: the remembered grant must match before the safety floor tightens the plan"
@@ -17169,6 +18230,7 @@ async fn change_mode_refreshes_session_prompt_and_updates_session() {
             auto_approve: true,
             approval_mode: crate::tui::approval::ApprovalMode::Bypass,
             configured_sandbox_mode: None,
+            ask_on_guardrail: None,
         })
         .await
         .expect("send change mode");
@@ -17256,6 +18318,7 @@ async fn live_runtime_authority_applies_latest_posture_and_sandbox_before_tools(
                 auto_approve,
                 approval_mode: posture,
                 configured_sandbox_mode: sandbox_mode,
+                ask_on_guardrail: None,
             })
             .expect("publish live runtime authority");
 
@@ -17814,6 +18877,7 @@ async fn change_mode_op_updates_current_mode_and_emits_status() {
             auto_approve: true,
             approval_mode: crate::tui::approval::ApprovalMode::Bypass,
             configured_sandbox_mode: None,
+            ask_on_guardrail: None,
         })
         .await
         .expect("send change mode");
@@ -18570,6 +19634,7 @@ async fn edit_last_turn_preserves_current_mode() {
             auto_approve: false,
             approval_mode: crate::tui::approval::ApprovalMode::Suggest,
             configured_sandbox_mode: None,
+            ask_on_guardrail: None,
         })
         .await
         .expect("send plan mode");
@@ -18625,6 +19690,2101 @@ async fn edit_last_turn_preserves_current_mode() {
     );
     handle.send(Op::Shutdown).await.expect("shutdown engine");
     run.await.expect("engine task");
+}
+
+#[allow(clippy::await_holding_lock)]
+async fn wait_for_turn_complete(handle: &EngineHandle) {
+    let mut rx = handle.rx_event.write().await;
+    loop {
+        let event = tokio::time::timeout(model_turn_event_timeout(), rx.recv())
+            .await
+            .expect("timed out waiting for the turn to complete")
+            .expect("engine event channel closed before turn completion");
+        if matches!(event, Event::TurnComplete { .. }) {
+            return;
+        }
+    }
+}
+
+#[tokio::test]
+async fn edit_last_turn_restores_the_standing_posture_baseline() {
+    use wiremock::matchers::{method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    // The truncated turn's <turn_meta> block carried the authority
+    // transition into append-only history; the standing baseline it
+    // installed must not survive the truncation, or the replacement turn
+    // silently drops the transition the retained history still implies.
+    let _lock = lock_test_env();
+    let tmp = tempdir().expect("tempdir");
+    let server = MockServer::start().await;
+    let done_sse = concat!(
+        "data: {\"id\":\"chatcmpl-edit-baseline\",\"choices\":[{\"index\":0,",
+        "\"delta\":{\"content\":\"Turn answer.\"},\"finish_reason\":null}]}\n\n",
+        "data: {\"id\":\"chatcmpl-edit-baseline\",\"choices\":[{\"index\":0,",
+        "\"delta\":{},\"finish_reason\":\"stop\"}]}\n\n",
+        "data: [DONE]\n\n",
+    );
+    Mock::given(method("POST"))
+        .and(path("/v1/chat/completions"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .insert_header("content-type", "text/event-stream")
+                .set_body_string(done_sse),
+        )
+        .expect(3)
+        .mount(&server)
+        .await;
+
+    let api_config = Config {
+        api_key: Some("test-key".to_string()),
+        base_url: Some(server.uri()),
+        ..Config::default()
+    };
+    let config = EngineConfig {
+        workspace: tmp.path().to_path_buf(),
+        model: "deepseek-v4-pro".to_string(),
+        snapshots_enabled: false,
+        subagents_enabled: false,
+        ..Default::default()
+    };
+    let (engine, handle) = Engine::new(config, &api_config);
+    let run = tokio::spawn(engine.run());
+
+    let seeded_messages = vec![
+        Message {
+            role: Role::User,
+            content: vec![ContentBlock::Text {
+                text: "seed the conversation".to_string(),
+                cache_control: None,
+            }],
+        },
+        Message {
+            role: Role::Assistant,
+            content: vec![ContentBlock::Text {
+                text: "seeded response".to_string(),
+                cache_control: None,
+            }],
+        },
+    ];
+    handle
+        .send(Op::SyncSession {
+            session_id: Some("edit-baseline-test".to_string()),
+            messages: seeded_messages,
+            system_prompt: None,
+            system_prompt_override: false,
+            model: "deepseek-v4-pro".to_string(),
+            workspace: tmp.path().to_path_buf(),
+            workspace_roots: Vec::new(),
+            mode: AppMode::Agent,
+        })
+        .await
+        .expect("sync session");
+
+    // Turn 1 runs in the installed Agent posture: the first reported turn
+    // renders no transition and establishes the standing baseline.
+    handle
+        .send(Op::SendMessage {
+            content: "turn in the original posture".to_string(),
+            mode: AppMode::Agent,
+            route: resolved_route_for_test(&api_config, "deepseek-v4-pro"),
+            compaction: Box::new(CompactionConfig::default()),
+            goal_objective: None,
+            goal_token_budget: None,
+            goal_status: crate::tools::goal::GoalStatus::Active,
+            reasoning_effort: None,
+            reasoning_effort_auto: false,
+            auto_model: false,
+            allow_shell: false,
+            trust_mode: false,
+            auto_approve: false,
+            approval_mode: crate::tui::approval::ApprovalMode::Suggest,
+            translation_enabled: false,
+            allowed_tools: None,
+            dynamic_tools: Vec::new(),
+            hook_executor: None,
+            verbosity: None,
+            provenance: UserInputProvenance::ExternalUser,
+            turn_tool_security: None,
+            submission_id: None,
+        })
+        .await
+        .expect("send the original-posture turn");
+    wait_for_turn_complete(&handle).await;
+
+    // Switch the host posture (approval chip SUGGEST -> AUTO, same tool
+    // surface), then run a real turn whose block reports the transition
+    // into history.
+    handle
+        .send(Op::ChangeMode {
+            mode: AppMode::Agent,
+            allow_shell: false,
+            trust_mode: false,
+            auto_approve: false,
+            approval_mode: crate::tui::approval::ApprovalMode::Auto,
+            configured_sandbox_mode: None,
+            ask_on_guardrail: None,
+        })
+        .await
+        .expect("send the approval posture change");
+    handle
+        .send(Op::SendMessage {
+            content: "turn that reports the transition".to_string(),
+            mode: AppMode::Agent,
+            route: resolved_route_for_test(&api_config, "deepseek-v4-pro"),
+            compaction: Box::new(CompactionConfig::default()),
+            goal_objective: None,
+            goal_token_budget: None,
+            goal_status: crate::tools::goal::GoalStatus::Active,
+            reasoning_effort: None,
+            reasoning_effort_auto: false,
+            auto_model: false,
+            allow_shell: false,
+            trust_mode: false,
+            auto_approve: false,
+            approval_mode: crate::tui::approval::ApprovalMode::Auto,
+            translation_enabled: false,
+            allowed_tools: None,
+            dynamic_tools: Vec::new(),
+            hook_executor: None,
+            verbosity: None,
+            provenance: UserInputProvenance::ExternalUser,
+            turn_tool_security: None,
+            submission_id: None,
+        })
+        .await
+        .expect("send the transition-reporting turn");
+    wait_for_turn_complete(&handle).await;
+
+    handle
+        .send(Op::EditLastTurn {
+            new_message: "revise this turn".to_string(),
+            submission_id: Some("sub-edit-baseline".to_string()),
+        })
+        .await
+        .expect("send edit");
+    wait_for_turn_complete(&handle).await;
+
+    handle.send(Op::Shutdown).await.expect("shutdown engine");
+    run.await.expect("engine task");
+
+    let requests = server.received_requests().await.expect("recorded requests");
+    assert_eq!(requests.len(), 3, "two real turns plus the replacement");
+    let wire_body = |request: &[u8]| String::from_utf8_lossy(request).to_string();
+    assert!(
+        !wire_body(&requests[0].body).contains("Authority transition (host)"),
+        "the first reported turn must render no transition"
+    );
+    assert!(
+        wire_body(&requests[1].body).contains("Authority transition (host)"),
+        "the turn after the host flip must report the transition"
+    );
+    assert!(
+        wire_body(&requests[2].body).contains("Authority transition (host)"),
+        "the replacement turn must re-report the transition: the truncated \
+         block left history but its baseline must not survive"
+    );
+}
+
+#[tokio::test]
+async fn purge_then_edit_restores_the_standing_posture_baseline() {
+    use wiremock::matchers::{body_string_contains, method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    // A `/purge` that removes an earlier assistant while keeping both user
+    // blocks shifts the second turn's block to a lower history index. The
+    // standing-baseline entry recorded the index at push time, so the purge
+    // must re-anchor the surviving entry — an edit of that turn then still
+    // restores the baseline its block replaced and re-reports the transition
+    // the truncated block carried away. Without the re-anchor, the drain
+    // discards the entry at the stale index and the replacement recomputes
+    // against the unchanged baseline (B→B), silently dropping the A→B line.
+    let _lock = lock_test_env();
+    let tmp = tempdir().expect("tempdir");
+    let server = MockServer::start().await;
+
+    let sse_body = |id: &str, answer: &str| {
+        format!(
+            "data: {{\"id\":\"chatcmpl-{id}\",\"choices\":[{{\"index\":0,\
+             \"delta\":{{\"content\":\"{answer}\"}},\"finish_reason\":null}}]}}\n\n\
+             data: {{\"id\":\"chatcmpl-{id}\",\"choices\":[{{\"index\":0,\
+             \"delta\":{{}},\"finish_reason\":\"stop\"}}]}}\n\n\
+             data: [DONE]\n\n",
+        )
+    };
+    // First-match-wins: the purge request is the only one carrying
+    // `purge_context`; the replacement is the only one carrying the revised
+    // text; the two real turns are told apart by their own prompt text —
+    // the B-turn mock is mounted first because the B request replays the
+    // retained A-turn text, so the A-turn matcher would otherwise capture
+    // it too (the purge request carries both texts, but the purge mock
+    // matches first).
+    Mock::given(method("POST"))
+        .and(path("/v1/chat/completions"))
+        .and(body_string_contains("purge_context"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .insert_header("content-type", "application/json")
+                .set_body_string(
+                    r#"{"id":"chatcmpl-purge-fix","model":"deepseek-v4-pro","choices":[{"index":0,"message":{"role":"assistant","content":null,"tool_calls":[{"id":"call_purge_fix","type":"function","function":{"name":"purge_context","arguments":"{\"operations\":[{\"op\":\"remove\",\"msg\":2}]}"}}]},"finish_reason":"tool_calls"}],"usage":{"prompt_tokens":10,"completion_tokens":5,"total_tokens":15}}"#,
+                ),
+        )
+        .expect(1)
+        .mount(&server)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/v1/chat/completions"))
+        .and(body_string_contains("revise this turn"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .insert_header("content-type", "text/event-stream")
+                .set_body_string(sse_body("purge-fix-revised", "Revised answer.")),
+        )
+        .expect(1)
+        .mount(&server)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/v1/chat/completions"))
+        .and(body_string_contains("turn that reports the transition"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .insert_header("content-type", "text/event-stream")
+                .set_body_string(sse_body("purge-fix-b", "B answer.")),
+        )
+        .expect(1)
+        .mount(&server)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/v1/chat/completions"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .insert_header("content-type", "text/event-stream")
+                .set_body_string(sse_body("purge-fix-a", "A answer.")),
+        )
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    let api_config = Config {
+        api_key: Some("test-key".to_string()),
+        base_url: Some(server.uri()),
+        ..Config::default()
+    };
+    let config = EngineConfig {
+        workspace: tmp.path().to_path_buf(),
+        model: "deepseek-v4-pro".to_string(),
+        snapshots_enabled: false,
+        subagents_enabled: false,
+        ..Default::default()
+    };
+    let (engine, handle) = Engine::new(config, &api_config);
+    let run = tokio::spawn(engine.run());
+
+    // No seeded history: the first authoritative block appends at index 0,
+    // its ordinary assistant reply at index 1 — the message the purge will
+    // legally remove while keeping both user blocks.
+    handle
+        .send(Op::SyncSession {
+            session_id: Some("purge-baseline-test".to_string()),
+            messages: Vec::new(),
+            system_prompt: None,
+            system_prompt_override: false,
+            model: "deepseek-v4-pro".to_string(),
+            workspace: tmp.path().to_path_buf(),
+            workspace_roots: Vec::new(),
+            mode: AppMode::Agent,
+        })
+        .await
+        .expect("sync session");
+
+    handle
+        .send(Op::SendMessage {
+            content: "turn in the original posture".to_string(),
+            mode: AppMode::Agent,
+            route: resolved_route_for_test(&api_config, "deepseek-v4-pro"),
+            compaction: Box::new(CompactionConfig::default()),
+            goal_objective: None,
+            goal_token_budget: None,
+            goal_status: crate::tools::goal::GoalStatus::Active,
+            reasoning_effort: None,
+            reasoning_effort_auto: false,
+            auto_model: false,
+            allow_shell: false,
+            trust_mode: false,
+            auto_approve: false,
+            approval_mode: crate::tui::approval::ApprovalMode::Suggest,
+            translation_enabled: false,
+            allowed_tools: None,
+            dynamic_tools: Vec::new(),
+            hook_executor: None,
+            verbosity: None,
+            provenance: UserInputProvenance::ExternalUser,
+            turn_tool_security: None,
+            submission_id: None,
+        })
+        .await
+        .expect("send the original-posture turn");
+    wait_for_turn_complete(&handle).await;
+
+    handle
+        .send(Op::ChangeMode {
+            mode: AppMode::Agent,
+            allow_shell: false,
+            trust_mode: false,
+            auto_approve: false,
+            approval_mode: crate::tui::approval::ApprovalMode::Auto,
+            configured_sandbox_mode: None,
+            ask_on_guardrail: None,
+        })
+        .await
+        .expect("send the approval posture change");
+    handle
+        .send(Op::SendMessage {
+            content: "turn that reports the transition".to_string(),
+            mode: AppMode::Agent,
+            route: resolved_route_for_test(&api_config, "deepseek-v4-pro"),
+            compaction: Box::new(CompactionConfig::default()),
+            goal_objective: None,
+            goal_token_budget: None,
+            goal_status: crate::tools::goal::GoalStatus::Active,
+            reasoning_effort: None,
+            reasoning_effort_auto: false,
+            auto_model: false,
+            allow_shell: false,
+            trust_mode: false,
+            auto_approve: false,
+            approval_mode: crate::tui::approval::ApprovalMode::Auto,
+            translation_enabled: false,
+            allowed_tools: None,
+            dynamic_tools: Vec::new(),
+            hook_executor: None,
+            verbosity: None,
+            provenance: UserInputProvenance::ExternalUser,
+            turn_tool_security: None,
+            submission_id: None,
+        })
+        .await
+        .expect("send the transition-reporting turn");
+    wait_for_turn_complete(&handle).await;
+
+    // History: [A block(0), A assistant(1), B block(2), B assistant(3)].
+    // Purge removes msg 2 (the index-1 assistant) without cascading to the
+    // user blocks; B's block shifts to index 1.
+    handle.send(Op::PurgeContext).await.expect("send purge");
+    wait_for_turn_complete(&handle).await;
+
+    handle
+        .send(Op::EditLastTurn {
+            new_message: "revise this turn".to_string(),
+            submission_id: Some("sub-edit-after-purge".to_string()),
+        })
+        .await
+        .expect("send edit after purge");
+    wait_for_turn_complete(&handle).await;
+
+    handle.send(Op::Shutdown).await.expect("shutdown engine");
+    run.await.expect("engine task");
+
+    let requests = server.received_requests().await.expect("recorded requests");
+    assert_eq!(requests.len(), 4, "two turns, one purge, one replacement");
+    let wire_body = |request: &[u8]| String::from_utf8_lossy(request).to_string();
+    assert!(
+        !wire_body(&requests[0].body).contains("Authority transition (host)"),
+        "the first reported turn must render no transition"
+    );
+    assert!(
+        wire_body(&requests[1].body).contains("Authority transition (host)"),
+        "the turn after the host flip must report the transition"
+    );
+    assert!(
+        wire_body(&requests[2].body).contains("purge_context"),
+        "the third request must be the purge"
+    );
+    let replacement = wire_body(&requests[3].body);
+    assert!(
+        !replacement.contains("A answer."),
+        "the purge must have removed the first turn's assistant reply: the \
+         replacement replays retained history only"
+    );
+    assert!(
+        !replacement.contains("B answer."),
+        "the edit must have truncated the edited turn's suffix"
+    );
+    assert!(
+        replacement.contains("turn in the original posture"),
+        "the purge must have kept the first user block"
+    );
+    assert!(
+        replacement.contains("Authority transition (host)"),
+        "editing the purged-and-shifted turn must restore the baseline its \
+         block replaced, re-reporting the transition the truncated block \
+         carried away"
+    );
+}
+
+/// JensenChen28 review 5747388050 counterexample (PR #131): a manual
+/// compaction that lands on the local PruneOnly branch rewrites old
+/// ToolResult content in place — same length, same role at every index — so
+/// the whole-list value comparison sees a changed list and (pre-fix) vacated
+/// every standing-baseline entry even though the A/B user turns survived in
+/// place. Editing the B turn after such a prune must still restore its
+/// prior (A) and the replacement must re-report the A→B transition the
+/// truncated B block carried away. The captured-request count also proves
+/// the compaction took the mechanical prune path: PruneOnly makes no
+/// provider call, so only the two real turns and the replacement appear.
+///
+/// The fixture pins a small fixed system prompt (`system_prompt_override`):
+/// without it, the submit-turn refresh composes the default prompt from the
+/// real user environment (memory, skills, plugins, platform lines), whose
+/// size differs per machine — zhuowp review 5748136802: on Windows the
+/// ambient term pushed the post-prune pressure estimate over the compaction
+/// threshold, the PruneOnly branch was skipped for the LLM summary pass
+/// (which these SSE-only mocks cannot serve), and the compaction failed
+/// leaving the stale output unpruned. The prune accounting itself is pure
+/// byte math; only the environment-composed prompt varies. With the prompt
+/// pinned, both threshold crossings are machine-independent: the stale
+/// output alone estimates ~18K tokens (over the 5K threshold), and the
+/// pruned remainder stays ~300 tokens — far under any threshold this
+/// fixture or a reasonable estimate could set.
+#[tokio::test]
+async fn manual_prune_only_compaction_keeps_the_standing_baseline_entries() {
+    use wiremock::matchers::{body_string_contains, method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    let _lock = lock_test_env();
+    let tmp = tempdir().expect("tempdir");
+    let server = MockServer::start().await;
+
+    let sse_body = |id: &str, answer: &str| {
+        format!(
+            "data: {{\"id\":\"chatcmpl-{id}\",\"choices\":[{{\"index\":0,\
+             \"delta\":{{\"content\":\"{answer}\"}},\"finish_reason\":null}}]}}\n\n\
+             data: {{\"id\":\"chatcmpl-{id}\",\"choices\":[{{\"index\":0,\
+             \"delta\":{{}},\"finish_reason\":\"stop\"}}]}}\n\n\
+             data: [DONE]\n\n",
+        )
+    };
+    // First-match-wins, mirroring the purge regression: the replacement and
+    // the B turn are told apart by their own prompt text; the fallback
+    // serves the A turn. A compaction provider call would land on the
+    // fallback and blow its expect(1), so the request count also pins the
+    // mechanical-prune path.
+    Mock::given(method("POST"))
+        .and(path("/v1/chat/completions"))
+        .and(body_string_contains("revise this committed input"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .insert_header("content-type", "text/event-stream")
+                .set_body_string(sse_body("prune-fix-revised", "Revised answer.")),
+        )
+        .expect(1)
+        .mount(&server)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/v1/chat/completions"))
+        .and(body_string_contains("turn that reports the transition"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .insert_header("content-type", "text/event-stream")
+                .set_body_string(sse_body("prune-fix-b", "B answer.")),
+        )
+        .expect(1)
+        .mount(&server)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/v1/chat/completions"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .insert_header("content-type", "text/event-stream")
+                .set_body_string(sse_body("prune-fix-a", "A answer.")),
+        )
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    let api_config = Config {
+        api_key: Some("test-key".to_string()),
+        base_url: Some(server.uri()),
+        ..Config::default()
+    };
+    // Auto compaction stays off so the seeded pressure cannot trigger it
+    // mid-turn; the manual op below carries its own enabled config.
+    let mut config = EngineConfig {
+        workspace: tmp.path().to_path_buf(),
+        model: "deepseek-v4-pro".to_string(),
+        snapshots_enabled: false,
+        subagents_enabled: false,
+        compaction: CompactionConfig {
+            enabled: false,
+            ..CompactionConfig::default()
+        },
+        ..Default::default()
+    };
+    config.max_steps = 32;
+    let (engine, handle) = Engine::new(config, &api_config);
+    let run = tokio::spawn(engine.run());
+
+    // A stale, oversized tool output well outside the protected recent
+    // window, paired with the assistant tool call that owns it (the prune
+    // planner only candidates ToolResults whose tool_use_id was seen). Its
+    // estimate comfortably crosses the manual op's threshold.
+    const OLD_TOOL_OUTPUT: &str = "prunable stale tool output padding. ";
+    let seeded_messages = vec![
+        Message {
+            role: Role::Assistant,
+            content: vec![ContentBlock::ToolUse {
+                id: "old-prunable-tool".to_string(),
+                name: "read_file".to_string(),
+                input: serde_json::json!({"path": "old-probe.txt"}),
+                caller: None,
+                thought_signature: None,
+            }],
+        },
+        Message {
+            role: Role::User,
+            content: vec![ContentBlock::ToolResult {
+                tool_use_id: "old-prunable-tool".to_string(),
+                content: OLD_TOOL_OUTPUT.repeat(2000),
+                is_error: None,
+                content_blocks: None,
+            }],
+        },
+    ];
+    handle
+        .send(Op::SyncSession {
+            session_id: Some("prune-baseline-test".to_string()),
+            messages: seeded_messages,
+            // Pin the stable prefix: the prune/stop checks estimate the
+            // session system prompt too, so an environment-composed default
+            // (machine-dependent size) would make the threshold crossing —
+            // and with it the PruneOnly branch itself — platform-dependent.
+            system_prompt: Some(SystemPrompt::Text(
+                "prune-baseline stable system prompt".to_string(),
+            )),
+            system_prompt_override: true,
+            model: "deepseek-v4-pro".to_string(),
+            workspace: tmp.path().to_path_buf(),
+            workspace_roots: Vec::new(),
+            mode: AppMode::Agent,
+        })
+        .await
+        .expect("sync session");
+
+    // Turn A runs unarmed: it renders no transition and establishes the
+    // standing baseline.
+    handle
+        .send(Op::SendMessage {
+            content: "turn in the original posture".to_string(),
+            mode: AppMode::Agent,
+            route: resolved_route_for_test(&api_config, "deepseek-v4-pro"),
+            compaction: Box::new(CompactionConfig {
+                enabled: false,
+                ..CompactionConfig::default()
+            }),
+            goal_objective: None,
+            goal_token_budget: None,
+            goal_status: crate::tools::goal::GoalStatus::Active,
+            reasoning_effort: None,
+            reasoning_effort_auto: false,
+            auto_model: false,
+            allow_shell: false,
+            trust_mode: false,
+            auto_approve: false,
+            approval_mode: crate::tui::approval::ApprovalMode::Suggest,
+            translation_enabled: false,
+            allowed_tools: None,
+            dynamic_tools: Vec::new(),
+            hook_executor: None,
+            verbosity: None,
+            provenance: UserInputProvenance::ExternalUser,
+            turn_tool_security: None,
+            submission_id: None,
+        })
+        .await
+        .expect("send the original-posture turn");
+    wait_for_turn_complete(&handle).await;
+
+    // Arm the approval posture, then run the B turn whose block reports the
+    // A→B transition into history.
+    handle
+        .send(Op::ChangeMode {
+            mode: AppMode::Agent,
+            allow_shell: false,
+            trust_mode: false,
+            auto_approve: false,
+            approval_mode: crate::tui::approval::ApprovalMode::Auto,
+            configured_sandbox_mode: None,
+            ask_on_guardrail: None,
+        })
+        .await
+        .expect("send the approval posture change");
+    handle
+        .send(Op::SendMessage {
+            content: "turn that reports the transition".to_string(),
+            mode: AppMode::Agent,
+            route: resolved_route_for_test(&api_config, "deepseek-v4-pro"),
+            compaction: Box::new(CompactionConfig {
+                enabled: false,
+                ..CompactionConfig::default()
+            }),
+            goal_objective: None,
+            goal_token_budget: None,
+            goal_status: crate::tools::goal::GoalStatus::Active,
+            reasoning_effort: None,
+            reasoning_effort_auto: false,
+            auto_model: false,
+            allow_shell: false,
+            trust_mode: false,
+            auto_approve: false,
+            approval_mode: crate::tui::approval::ApprovalMode::Auto,
+            translation_enabled: false,
+            allowed_tools: None,
+            dynamic_tools: Vec::new(),
+            hook_executor: None,
+            verbosity: None,
+            provenance: UserInputProvenance::ExternalUser,
+            turn_tool_security: None,
+            submission_id: None,
+        })
+        .await
+        .expect("send the transition-reporting turn");
+    wait_for_turn_complete(&handle).await;
+
+    // Manual compaction over a threshold the prunable stale output crosses:
+    // pruning it lands under, so compact_messages_safe returns the local
+    // PruneOnly result without any provider summary call.
+    handle
+        .send(Op::CompactContext {
+            id: "manual-prune-1".to_string(),
+            route: resolved_route_for_test(&api_config, "deepseek-v4-pro"),
+            compaction: Box::new(CompactionConfig {
+                enabled: true,
+                token_threshold: 5_000,
+                ..CompactionConfig::default()
+            }),
+        })
+        .await
+        .expect("send manual compaction");
+    {
+        let mut rx = handle.rx_event.write().await;
+        loop {
+            let event = tokio::time::timeout(model_turn_event_timeout(), rx.recv())
+                .await
+                .expect("timed out waiting for the manual compaction")
+                .expect("engine event channel closed before compaction settled");
+            if let Event::TurnComplete {
+                compaction_id: Some(id),
+                ..
+            } = event
+            {
+                assert_eq!(id, "manual-prune-1", "the manual compaction must settle");
+                break;
+            }
+        }
+    }
+
+    // Precondition pins: the mechanical prune actually ran (the stale output
+    // shrank) and the layout survived (same message count and roles as
+    // before the compaction).
+    let (pre_len, pre_roles) = {
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        handle
+            .send(Op::GetSessionSnapshot {
+                tx: std::sync::Arc::new(std::sync::Mutex::new(Some(tx))),
+            })
+            .await
+            .expect("request snapshot");
+        let snapshot = tokio::time::timeout(model_turn_event_timeout(), rx)
+            .await
+            .expect("snapshot response")
+            .expect("snapshot");
+        (
+            snapshot.messages.len(),
+            snapshot
+                .messages
+                .iter()
+                .map(|message| message.role.as_str().to_string())
+                .collect::<Vec<_>>(),
+        )
+    };
+    {
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        handle
+            .send(Op::GetSessionSnapshot {
+                tx: std::sync::Arc::new(std::sync::Mutex::new(Some(tx))),
+            })
+            .await
+            .expect("request snapshot");
+        let snapshot = tokio::time::timeout(model_turn_event_timeout(), rx)
+            .await
+            .expect("snapshot response")
+            .expect("snapshot");
+        let post_roles: Vec<_> = snapshot
+            .messages
+            .iter()
+            .map(|message| message.role.as_str().to_string())
+            .collect();
+        assert_eq!(
+            (snapshot.messages.len(), post_roles.as_slice()),
+            (pre_len, pre_roles.as_slice()),
+            "a PruneOnly compaction must keep every message slot: pre roles \
+             {pre_roles:?}, post roles {post_roles:?}"
+        );
+        let stale_output_len = snapshot
+            .messages
+            .iter()
+            .flat_map(|message| message.content.iter())
+            .filter_map(|block| match block {
+                ContentBlock::ToolResult { content, .. } => Some(content.len()),
+                _ => None,
+            })
+            .max()
+            .expect("the seeded stale tool result must still exist");
+        assert!(
+            stale_output_len < OLD_TOOL_OUTPUT.len() * 2000,
+            "the manual compaction must have pruned the stale tool output in \
+             place (pruned length {stale_output_len})"
+        );
+    }
+
+    // The selector's latest editable user prompt is the B turn build; its
+    // entry was pushed at the index it still occupies after the layout-
+    // preserving prune.
+    handle
+        .send(Op::EditLastTurn {
+            new_message: "revise this committed input".to_string(),
+            submission_id: Some("sub-edit-after-prune".to_string()),
+        })
+        .await
+        .expect("send edit");
+    wait_for_turn_complete(&handle).await;
+
+    handle.send(Op::Shutdown).await.expect("shutdown engine");
+    run.await.expect("engine task");
+
+    let requests = server.received_requests().await.expect("recorded requests");
+    assert_eq!(
+        requests.len(),
+        3,
+        "two real turns and the replacement: a PruneOnly compaction makes \
+         no provider call, so an extra request would mean the summary path \
+         ran and the mechanical-prune scenario did not"
+    );
+    let wire_body = |request: &[u8]| String::from_utf8_lossy(request).to_string();
+    assert!(
+        !wire_body(&requests[0].body).contains("Authority transition (host)"),
+        "the first reported turn must render no transition"
+    );
+    assert!(
+        wire_body(&requests[1].body).contains("Authority transition (host)"),
+        "the turn after the posture flip must report the transition"
+    );
+    let replacement = wire_body(&requests[2].body);
+    assert!(
+        replacement.contains("revise this committed input"),
+        "the replacement must carry the edited turn text"
+    );
+    assert!(
+        !replacement.contains("B answer."),
+        "the edit must have truncated the edited turn's suffix"
+    );
+    assert!(
+        replacement.contains("turn in the original posture"),
+        "the prune must have kept the first user block"
+    );
+    assert!(
+        replacement.contains("Authority transition (host)"),
+        "editing the B turn after a PruneOnly compaction must restore its \
+         prior (A) and re-report the transition the truncated block carried \
+         away"
+    );
+}
+
+/// JensenChen28 review 5747963791 (PR #131): the summary compaction path
+/// replaces history with the LOCAL builder's layout — retained early user
+/// turns, the bound last round, and one checkpoint — so the role lists
+/// before and after no longer match and (pre-fix) the whole standing-baseline
+/// stack was vacated even though the builder retained both turns
+/// deterministically. After an ordinary no-tool A turn and a transition-
+/// reporting B turn, a manual compaction with nothing to prune must keep the
+/// retained turns' entries anchored: editing B then still restores its prior
+/// (A) posture and the replacement re-reports the A→B transition the
+/// truncated B block carried away. The captured-request count pins the
+/// summary path: with no stale ToolResult to prune, the compaction makes
+/// exactly one provider call — the summary request, which is non-streaming
+/// and therefore served as chat-completions JSON rather than SSE.
+#[tokio::test]
+async fn manual_summary_compaction_keeps_the_retained_turn_linkage() {
+    use wiremock::matchers::{body_string_contains, method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    let _lock = lock_test_env();
+    let tmp = tempdir().expect("tempdir");
+    let server = MockServer::start().await;
+
+    let sse_body = |id: &str, answer: &str| {
+        format!(
+            "data: {{\"id\":\"chatcmpl-{id}\",\"choices\":[{{\"index\":0,\
+             \"delta\":{{\"content\":\"{answer}\"}},\"finish_reason\":null}}]}}\n\n\
+             data: {{\"id\":\"chatcmpl-{id}\",\"choices\":[{{\"index\":0,\
+             \"delta\":{{}},\"finish_reason\":\"stop\"}}]}}\n\n\
+             data: [DONE]\n\n",
+        )
+    };
+    // First-match-wins, mirroring the prune regression. The summary request
+    // is the only one carrying the compaction prompt, so it is matched first
+    // and served as JSON. Its answer text must not contain that prompt text,
+    // or the retained checkpoint inside the later replacement request would
+    // match this mock again.
+    Mock::given(method("POST"))
+        .and(path("/v1/chat/completions"))
+        .and(body_string_contains("context checkpoint compaction"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .insert_header("content-type", "application/json")
+                .set_body_string(
+                    r#"{"id":"chatcmpl-summary-fix","model":"deepseek-v4-pro","choices":[{"index":0,"message":{"role":"assistant","content":"handoff summary of the earlier turns"},"finish_reason":"stop"}],"usage":{"prompt_tokens":10,"completion_tokens":5,"total_tokens":15}}"#,
+                ),
+        )
+        .expect(1)
+        .mount(&server)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/v1/chat/completions"))
+        .and(body_string_contains("revise this committed input"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .insert_header("content-type", "text/event-stream")
+                .set_body_string(sse_body("summary-fix-revised", "Revised answer.")),
+        )
+        .expect(1)
+        .mount(&server)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/v1/chat/completions"))
+        .and(body_string_contains("turn that reports the transition"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .insert_header("content-type", "text/event-stream")
+                .set_body_string(sse_body("summary-fix-b", "B answer.")),
+        )
+        .expect(1)
+        .mount(&server)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/v1/chat/completions"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .insert_header("content-type", "text/event-stream")
+                .set_body_string(sse_body("summary-fix-a", "A answer.")),
+        )
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    let api_config = Config {
+        api_key: Some("test-key".to_string()),
+        base_url: Some(server.uri()),
+        ..Config::default()
+    };
+    // Auto compaction stays off so nothing triggers it mid-turn; the manual
+    // op below carries its own enabled config.
+    let mut config = EngineConfig {
+        workspace: tmp.path().to_path_buf(),
+        model: "deepseek-v4-pro".to_string(),
+        snapshots_enabled: false,
+        subagents_enabled: false,
+        compaction: CompactionConfig {
+            enabled: false,
+            ..CompactionConfig::default()
+        },
+        ..Default::default()
+    };
+    config.max_steps = 32;
+    let (engine, handle) = Engine::new(config, &api_config);
+    let run = tokio::spawn(engine.run());
+
+    // Turn A runs unarmed: it renders no transition and establishes the
+    // standing baseline. No tool calls anywhere, so there is nothing the
+    // mechanical pruner could candidate — the compaction below can only
+    // take the summary path.
+    handle
+        .send(Op::SendMessage {
+            content: "turn in the original posture".to_string(),
+            mode: AppMode::Agent,
+            route: resolved_route_for_test(&api_config, "deepseek-v4-pro"),
+            compaction: Box::new(CompactionConfig {
+                enabled: false,
+                ..CompactionConfig::default()
+            }),
+            goal_objective: None,
+            goal_token_budget: None,
+            goal_status: crate::tools::goal::GoalStatus::Active,
+            reasoning_effort: None,
+            reasoning_effort_auto: false,
+            auto_model: false,
+            allow_shell: false,
+            trust_mode: false,
+            auto_approve: false,
+            approval_mode: crate::tui::approval::ApprovalMode::Suggest,
+            translation_enabled: false,
+            allowed_tools: None,
+            dynamic_tools: Vec::new(),
+            hook_executor: None,
+            verbosity: None,
+            provenance: UserInputProvenance::ExternalUser,
+            turn_tool_security: None,
+            submission_id: None,
+        })
+        .await
+        .expect("send the original-posture turn");
+    wait_for_turn_complete(&handle).await;
+
+    // Arm the approval posture, then run the B turn whose block reports the
+    // A→B transition into history.
+    handle
+        .send(Op::ChangeMode {
+            mode: AppMode::Agent,
+            allow_shell: false,
+            trust_mode: false,
+            auto_approve: false,
+            approval_mode: crate::tui::approval::ApprovalMode::Auto,
+            configured_sandbox_mode: None,
+            ask_on_guardrail: None,
+        })
+        .await
+        .expect("send the approval posture change");
+    handle
+        .send(Op::SendMessage {
+            content: "turn that reports the transition".to_string(),
+            mode: AppMode::Agent,
+            route: resolved_route_for_test(&api_config, "deepseek-v4-pro"),
+            compaction: Box::new(CompactionConfig {
+                enabled: false,
+                ..CompactionConfig::default()
+            }),
+            goal_objective: None,
+            goal_token_budget: None,
+            goal_status: crate::tools::goal::GoalStatus::Active,
+            reasoning_effort: None,
+            reasoning_effort_auto: false,
+            auto_model: false,
+            allow_shell: false,
+            trust_mode: false,
+            auto_approve: false,
+            approval_mode: crate::tui::approval::ApprovalMode::Auto,
+            translation_enabled: false,
+            allowed_tools: None,
+            dynamic_tools: Vec::new(),
+            hook_executor: None,
+            verbosity: None,
+            provenance: UserInputProvenance::ExternalUser,
+            turn_tool_security: None,
+            submission_id: None,
+        })
+        .await
+        .expect("send the transition-reporting turn");
+    wait_for_turn_complete(&handle).await;
+
+    // Manual compaction. Nothing prunable means compact_messages_safe falls
+    // through to the LLM summary pass, whose replacement the local builder
+    // authors: retained early user turns + last round + checkpoint.
+    handle
+        .send(Op::CompactContext {
+            id: "manual-summary-1".to_string(),
+            route: resolved_route_for_test(&api_config, "deepseek-v4-pro"),
+            compaction: Box::new(CompactionConfig {
+                enabled: true,
+                token_threshold: 5_000,
+                ..CompactionConfig::default()
+            }),
+        })
+        .await
+        .expect("send manual compaction");
+    {
+        let mut rx = handle.rx_event.write().await;
+        loop {
+            let event = tokio::time::timeout(model_turn_event_timeout(), rx.recv())
+                .await
+                .expect("timed out waiting for the manual compaction")
+                .expect("engine event channel closed before compaction settled");
+            if let Event::TurnComplete {
+                compaction_id: Some(id),
+                status,
+                ..
+            } = event
+            {
+                assert_eq!(id, "manual-summary-1", "the manual compaction must settle");
+                assert_eq!(
+                    status,
+                    TurnOutcomeStatus::Completed,
+                    "the summary pass must succeed: a Failed status means the \
+                     compaction left the history unchanged"
+                );
+                break;
+            }
+        }
+    }
+
+    // Precondition pins: the summary path actually ran and the builder
+    // retained both user turns verbatim. A's assistant output is gone
+    // (summarized away) — that loss of the A/B slot pairing is exactly why
+    // the role-list layout check cannot hold here.
+    let snapshot = {
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        handle
+            .send(Op::GetSessionSnapshot {
+                tx: std::sync::Arc::new(std::sync::Mutex::new(Some(tx))),
+            })
+            .await
+            .expect("request snapshot");
+        tokio::time::timeout(model_turn_event_timeout(), rx)
+            .await
+            .expect("snapshot response")
+            .expect("snapshot")
+    };
+    {
+        let rendered = |snapshot: &crate::core::ops::SessionSnapshot| {
+            snapshot
+                .messages
+                .iter()
+                .flat_map(|message| message.content.iter())
+                .filter_map(|block| match block {
+                    ContentBlock::Text { text, .. } => Some(text.as_str()),
+                    _ => None,
+                })
+                .collect::<Vec<_>>()
+                .join("\n")
+        };
+        let history = rendered(&snapshot);
+        assert!(
+            history.contains("turn in the original posture"),
+            "the builder must retain the early A user turn: {history}"
+        );
+        assert!(
+            history.contains("turn that reports the transition"),
+            "the builder must retain the latest B user turn verbatim"
+        );
+        assert!(
+            history.contains("handoff summary of the earlier turns"),
+            "the builder must append the summary checkpoint"
+        );
+        assert!(
+            !history.contains("A answer."),
+            "the summary path must have replaced A's assistant turn: the \
+             layout can no longer match slot for slot"
+        );
+    }
+
+    // The selector's latest editable user prompt is the retained B turn
+    // build; its relocated entry must restore its prior (A) posture.
+    handle
+        .send(Op::EditLastTurn {
+            new_message: "revise this committed input".to_string(),
+            submission_id: Some("sub-edit-after-summary".to_string()),
+        })
+        .await
+        .expect("send edit");
+    wait_for_turn_complete(&handle).await;
+
+    handle.send(Op::Shutdown).await.expect("shutdown engine");
+    run.await.expect("engine task");
+
+    let requests = server.received_requests().await.expect("recorded requests");
+    assert_eq!(
+        requests.len(),
+        4,
+        "two real turns, one summary call, and the replacement: an extra \
+         request would mean the scenario did not run the shapes it pins"
+    );
+    let wire_body = |request: &[u8]| String::from_utf8_lossy(request).to_string();
+    assert!(
+        !wire_body(&requests[0].body).contains("Authority transition (host)"),
+        "the first reported turn must render no transition"
+    );
+    assert!(
+        wire_body(&requests[1].body).contains("Authority transition (host)"),
+        "the turn after the posture flip must report the transition"
+    );
+    assert!(
+        wire_body(&requests[2].body).contains("context checkpoint compaction"),
+        "the third request must be the compaction summary call"
+    );
+    let replacement = wire_body(&requests[3].body);
+    assert!(
+        replacement.contains("revise this committed input"),
+        "the replacement must carry the edited turn text"
+    );
+    assert!(
+        !replacement.contains("B answer."),
+        "the edit must have truncated the edited turn's suffix"
+    );
+    assert!(
+        replacement.contains("turn in the original posture"),
+        "the summary must have kept the first user block"
+    );
+    assert!(
+        replacement.contains("Authority transition (host)"),
+        "editing the retained B turn after a summary compaction must restore \
+         its prior (A) and re-report the transition the truncated block \
+         carried away"
+    );
+}
+
+/// Build one plain user text message (the role every standing-baseline
+/// entry's push_index points at).
+#[cfg(test)]
+fn baseline_user_text(text: &str) -> Message {
+    Message {
+        role: Role::User,
+        content: vec![ContentBlock::Text {
+            text: text.to_string(),
+            cache_control: None,
+        }],
+    }
+}
+
+/// JensenChen28 review 5749580324 (PR #131): the shared rebase checked
+/// `layout_preserved` before `summary_origins`, so a local-builder Summary
+/// replacement that coincidentally matched the replaced history's length and
+/// role sequence was trusted as slot-preserving even though the builder had
+/// moved a retained message across same-role slots. The pinned shape: a
+/// tool round, an old handoff checkpoint, and the B user turn are replaced
+/// by the builder's layout — tool round, B, fresh checkpoint — so B slides
+/// from slot 4 to 3 while the fresh checkpoint takes 4. Roles stay
+/// `[user, assistant, user, user, user]` on both sides, so the positional
+/// check held and (pre-fix) shadowed the builder's origin map: the entry
+/// bound to B stayed at slot 4, and editing B truncated from the checkpoint
+/// instead, losing the A→B transition the entry existed to restore. The
+/// helper is exercised directly because the coincidental equal-role layout
+/// cannot be produced deterministically through a provider mock.
+#[test]
+fn summary_origins_beat_an_equal_role_layout_in_the_baseline_rebase() {
+    let _lock = lock_test_env();
+    let (mut engine, _handle) = Engine::new(EngineConfig::default(), &Config::default());
+
+    let replaced = vec![
+        baseline_user_text("turn A in the original posture"),
+        Message {
+            role: Role::Assistant,
+            content: vec![ContentBlock::ToolUse {
+                id: "tool-a".to_string(),
+                name: "read_file".to_string(),
+                input: serde_json::json!({"path": "probe.txt"}),
+                caller: None,
+                thought_signature: None,
+            }],
+        },
+        Message {
+            role: Role::User,
+            content: vec![ContentBlock::ToolResult {
+                tool_use_id: "tool-a".to_string(),
+                content: "tool output from the A round".to_string(),
+                is_error: None,
+                content_blocks: None,
+            }],
+        },
+        baseline_user_text("superseded handoff checkpoint"),
+        baseline_user_text("turn B that reports the transition"),
+    ];
+    let replacement = vec![
+        baseline_user_text("turn A in the original posture"),
+        Message {
+            role: Role::Assistant,
+            content: vec![ContentBlock::ToolUse {
+                id: "tool-a".to_string(),
+                name: "read_file".to_string(),
+                input: serde_json::json!({"path": "probe.txt"}),
+                caller: None,
+                thought_signature: None,
+            }],
+        },
+        Message {
+            role: Role::User,
+            content: vec![ContentBlock::ToolResult {
+                tool_use_id: "tool-a".to_string(),
+                content: "tool output from the A round".to_string(),
+                is_error: None,
+                content_blocks: None,
+            }],
+        },
+        baseline_user_text("turn B that reports the transition"),
+        baseline_user_text("fresh handoff checkpoint"),
+    ];
+    let origins = [Some(0), Some(1), Some(2), Some(4), None];
+    let layout_preserved = standing_baseline_layout_preserved(&replacement, &replaced);
+    assert!(
+        layout_preserved,
+        "fixture must pin the coincidental equal-length equal-role shape the \
+         positional check would trust"
+    );
+    // The topology checkpoint appends after plain text history, so the
+    // rebase shift must be identity on these slots: any movement below comes
+    // from the branch under test, not from the topology bookkeeping.
+    let topology_rebase = {
+        let mut scratch = replacement.clone();
+        crate::runtime_handoff::replace_agent_topology_checkpoint(&mut scratch, &[])
+    };
+    assert_eq!(topology_rebase.rebase_index(3), 3);
+    assert_eq!(topology_rebase.rebase_index(4), 4);
+    engine.standing_posture_baseline_history = vec![StandingPostureBaselineEntry {
+        prior_posture: Some(TurnMetaPosture {
+            mode: AppMode::Agent,
+            approval: crate::tui::approval::ApprovalMode::Suggest,
+            ask_on_guardrail: false,
+        }),
+        push_index: 4,
+    }];
+
+    engine.rebase_standing_baseline_after_compaction(
+        layout_preserved,
+        Some(&origins),
+        &topology_rebase,
+    );
+
+    assert_eq!(
+        engine.standing_posture_baseline_history.len(),
+        1,
+        "the builder retained the B turn, so its entry must survive"
+    );
+    let entry = &engine.standing_posture_baseline_history[0];
+    assert_eq!(
+        entry.push_index, 3,
+        "the entry bound to B's old slot must follow B's origin to its NEW \
+         slot, not the coincidentally role-equal slot 4 (which now holds the \
+         checkpoint the builder inserted)"
+    );
+    assert!(
+        entry.prior_posture.is_some(),
+        "the relocated entry must keep the prior posture it restores on edit"
+    );
+}
+
+/// The PruneOnly side of review 5749580324's fix must stay positional: an
+/// origin-less mechanical replacement (the prune rewrites ToolResult content
+/// in place, equal length, equal roles) keeps every slot by construction, so
+/// an entry at slot 4 stays at 4. Pinning this proves the precedence swap
+/// only reroutes builder-authored Summary replacements and leaves the
+/// origin-less paths untouched.
+#[test]
+fn originless_layout_preserved_replacement_keeps_positional_rebase() {
+    let _lock = lock_test_env();
+    let (mut engine, _handle) = Engine::new(EngineConfig::default(), &Config::default());
+
+    let tool_use = || {
+        vec![ContentBlock::ToolUse {
+            id: "tool-a".to_string(),
+            name: "read_file".to_string(),
+            input: serde_json::json!({"path": "probe.txt"}),
+            caller: None,
+            thought_signature: None,
+        }]
+    };
+    let replaced = vec![
+        baseline_user_text("turn A in the original posture"),
+        Message {
+            role: Role::Assistant,
+            content: tool_use(),
+        },
+        Message {
+            role: Role::User,
+            content: vec![ContentBlock::ToolResult {
+                tool_use_id: "tool-a".to_string(),
+                content: "stale pruned tool output".to_string(),
+                is_error: None,
+                content_blocks: None,
+            }],
+        },
+        baseline_user_text("superseded handoff checkpoint"),
+        baseline_user_text("turn B that reports the transition"),
+    ];
+    // The mechanical prune rewrites the ToolResult in place; slots and roles
+    // are untouched.
+    let replacement = vec![
+        baseline_user_text("turn A in the original posture"),
+        Message {
+            role: Role::Assistant,
+            content: tool_use(),
+        },
+        Message {
+            role: Role::User,
+            content: vec![ContentBlock::ToolResult {
+                tool_use_id: "tool-a".to_string(),
+                content: "pruned".to_string(),
+                is_error: None,
+                content_blocks: None,
+            }],
+        },
+        baseline_user_text("superseded handoff checkpoint"),
+        baseline_user_text("turn B that reports the transition"),
+    ];
+    let layout_preserved = standing_baseline_layout_preserved(&replacement, &replaced);
+    assert!(
+        layout_preserved,
+        "fixture must pin the prune's in-place layout"
+    );
+    let topology_rebase = {
+        let mut scratch = replacement.clone();
+        crate::runtime_handoff::replace_agent_topology_checkpoint(&mut scratch, &[])
+    };
+    assert_eq!(topology_rebase.rebase_index(4), 4);
+    engine.standing_posture_baseline_history = vec![StandingPostureBaselineEntry {
+        prior_posture: None,
+        push_index: 4,
+    }];
+
+    engine.rebase_standing_baseline_after_compaction(layout_preserved, None, &topology_rebase);
+
+    assert_eq!(
+        engine.standing_posture_baseline_history.len(),
+        1,
+        "the mechanical prune kept every slot, so the entry must survive"
+    );
+    assert_eq!(
+        engine.standing_posture_baseline_history[0].push_index, 4,
+        "an origin-less layout-preserving replacement must keep positional \
+         rebase: slot 4 stays slot 4"
+    );
+}
+
+/// Drive the standing-posture-baseline edit scenario with non-authoritative
+/// runtime turns parked between the true user turns.
+///
+/// The posture pair stays inside the Ask/Suggest family and flips only the
+/// host's guardrail arming, so the AgentMail runtime turn has no standing
+/// auto authority to narrow and the only transition in play is the host
+/// re-authorization. Each runtime turn persists a real user-role turn with a
+/// non-authoritative provenance line — exactly the production AgentMail
+/// shape — and the edit selector must skip it; the baseline stack must not
+/// record it either, or the edit after it pops a snapshot the truncation
+/// never removed and the replacement turn drops the arming transition the
+/// retained history still implies.
+#[allow(clippy::await_holding_lock)]
+async fn run_edit_last_turn_baseline_past_non_authoritative_runtime_turns(runtime_turns: usize) {
+    use wiremock::matchers::{method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    let _lock = lock_test_env();
+    let tmp = tempdir().expect("tempdir");
+    let server = MockServer::start().await;
+    let done_sse = concat!(
+        "data: {\"id\":\"chatcmpl-edit-runtime-baseline\",\"choices\":[{\"index\":0,",
+        "\"delta\":{\"content\":\"Turn answer.\"},\"finish_reason\":null}]}\n\n",
+        "data: {\"id\":\"chatcmpl-edit-runtime-baseline\",\"choices\":[{\"index\":0,",
+        "\"delta\":{},\"finish_reason\":\"stop\"}]}\n\n",
+        "data: [DONE]\n\n",
+    );
+    // Two true user turns plus the replacement, with every requested runtime
+    // turn in between.
+    Mock::given(method("POST"))
+        .and(path("/v1/chat/completions"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .insert_header("content-type", "text/event-stream")
+                .set_body_string(done_sse),
+        )
+        .expect(u64::try_from(3 + runtime_turns).expect("request count fits u64"))
+        .mount(&server)
+        .await;
+
+    let api_config = Config {
+        api_key: Some("test-key".to_string()),
+        base_url: Some(server.uri()),
+        ..Config::default()
+    };
+    let config = EngineConfig {
+        workspace: tmp.path().to_path_buf(),
+        model: "deepseek-v4-pro".to_string(),
+        snapshots_enabled: false,
+        subagents_enabled: false,
+        ..Default::default()
+    };
+    let (engine, handle) = Engine::new(config, &api_config);
+    let run = tokio::spawn(engine.run());
+
+    let seeded_messages = vec![
+        Message {
+            role: Role::User,
+            content: vec![ContentBlock::Text {
+                text: "seed the conversation".to_string(),
+                cache_control: None,
+            }],
+        },
+        Message {
+            role: Role::Assistant,
+            content: vec![ContentBlock::Text {
+                text: "seeded response".to_string(),
+                cache_control: None,
+            }],
+        },
+    ];
+    handle
+        .send(Op::SyncSession {
+            session_id: Some(format!("edit-runtime-baseline-{runtime_turns}")),
+            messages: seeded_messages,
+            system_prompt: None,
+            system_prompt_override: false,
+            model: "deepseek-v4-pro".to_string(),
+            workspace: tmp.path().to_path_buf(),
+            workspace_roots: Vec::new(),
+            mode: AppMode::Agent,
+        })
+        .await
+        .expect("sync session");
+
+    // Turn 1 runs unarmed: the first reported turn renders no transition and
+    // establishes the standing baseline.
+    handle
+        .send(Op::SendMessage {
+            content: "turn in the unarmed posture".to_string(),
+            mode: AppMode::Agent,
+            route: resolved_route_for_test(&api_config, "deepseek-v4-pro"),
+            compaction: Box::new(CompactionConfig::default()),
+            goal_objective: None,
+            goal_token_budget: None,
+            goal_status: crate::tools::goal::GoalStatus::Active,
+            reasoning_effort: None,
+            reasoning_effort_auto: false,
+            auto_model: false,
+            allow_shell: false,
+            trust_mode: false,
+            auto_approve: false,
+            approval_mode: crate::tui::approval::ApprovalMode::Suggest,
+            translation_enabled: false,
+            allowed_tools: None,
+            dynamic_tools: Vec::new(),
+            hook_executor: None,
+            verbosity: None,
+            provenance: UserInputProvenance::ExternalUser,
+            turn_tool_security: None,
+            submission_id: None,
+        })
+        .await
+        .expect("send the unarmed turn");
+    wait_for_turn_complete(&handle).await;
+
+    // Arm the host's guardrail prompts (Ask/Suggest posture, arming flip
+    // only), then run a real turn whose block reports the transition into
+    // history.
+    handle
+        .send(Op::ChangeMode {
+            mode: AppMode::Agent,
+            allow_shell: false,
+            trust_mode: false,
+            auto_approve: false,
+            approval_mode: crate::tui::approval::ApprovalMode::Suggest,
+            configured_sandbox_mode: None,
+            ask_on_guardrail: Some(true),
+        })
+        .await
+        .expect("send the guardrail arming change");
+    handle
+        .send(Op::SendMessage {
+            content: "turn that reports the arming transition".to_string(),
+            mode: AppMode::Agent,
+            route: resolved_route_for_test(&api_config, "deepseek-v4-pro"),
+            compaction: Box::new(CompactionConfig::default()),
+            goal_objective: None,
+            goal_token_budget: None,
+            goal_status: crate::tools::goal::GoalStatus::Active,
+            reasoning_effort: None,
+            reasoning_effort_auto: false,
+            auto_model: false,
+            allow_shell: false,
+            trust_mode: false,
+            auto_approve: false,
+            approval_mode: crate::tui::approval::ApprovalMode::Suggest,
+            translation_enabled: false,
+            allowed_tools: None,
+            dynamic_tools: Vec::new(),
+            hook_executor: None,
+            verbosity: None,
+            provenance: UserInputProvenance::ExternalUser,
+            turn_tool_security: None,
+            submission_id: None,
+        })
+        .await
+        .expect("send the transition-reporting turn");
+    wait_for_turn_complete(&handle).await;
+
+    // Complete real non-isolated runtime turns in the production AgentMail
+    // shape: user-role, non-authoritative provenance, no authority to
+    // narrow under the Ask/Suggest posture.
+    for runtime_index in 0..runtime_turns {
+        handle
+            .send(Op::SendMessage {
+                content: format!("agent mail turn #{runtime_index}"),
+                mode: AppMode::Agent,
+                route: resolved_route_for_test(&api_config, "deepseek-v4-pro"),
+                compaction: Box::new(CompactionConfig::default()),
+                goal_objective: None,
+                goal_token_budget: None,
+                goal_status: crate::tools::goal::GoalStatus::Active,
+                reasoning_effort: None,
+                reasoning_effort_auto: false,
+                auto_model: false,
+                allow_shell: false,
+                trust_mode: false,
+                auto_approve: false,
+                approval_mode: crate::tui::approval::ApprovalMode::Suggest,
+                translation_enabled: false,
+                allowed_tools: None,
+                dynamic_tools: Vec::new(),
+                hook_executor: None,
+                verbosity: None,
+                provenance: UserInputProvenance::AgentMail,
+                turn_tool_security: None,
+                submission_id: None,
+            })
+            .await
+            .expect("send the agent mail runtime turn");
+        wait_for_turn_complete(&handle).await;
+    }
+
+    handle
+        .send(Op::EditLastTurn {
+            new_message: "revise this turn".to_string(),
+            submission_id: Some("sub-edit-runtime-baseline".to_string()),
+        })
+        .await
+        .expect("send edit");
+    wait_for_turn_complete(&handle).await;
+
+    handle.send(Op::Shutdown).await.expect("shutdown engine");
+    run.await.expect("engine task");
+
+    let requests = server.received_requests().await.expect("recorded requests");
+    assert_eq!(
+        requests.len(),
+        3 + runtime_turns,
+        "two true turns, every runtime turn, and the replacement"
+    );
+    let wire_body = |request: &[u8]| String::from_utf8_lossy(request).to_string();
+    assert!(
+        !wire_body(&requests[0].body).contains("Authority transition (host)"),
+        "the first reported turn must render no transition"
+    );
+    assert!(
+        wire_body(&requests[1].body).contains("Authority transition (host)"),
+        "the turn after the arming flip must report the transition"
+    );
+    for runtime_index in 0..runtime_turns {
+        let body = wire_body(&requests[2 + runtime_index].body);
+        assert!(
+            body.contains("Input provenance: agent_mail (non-authoritative)"),
+            "the runtime turn must carry the production AgentMail shape"
+        );
+        assert_eq!(
+            body.matches("Authority transition (host)").count(),
+            1,
+            "the runtime turn runs in the reported posture: the only \
+             transition line in its request is the retained history block, \
+             its own block must render none"
+        );
+    }
+    assert!(
+        wire_body(&requests[2 + runtime_turns].body).contains("Authority transition (host)"),
+        "the replacement turn must re-report the arming transition: the \
+         truncation removes the runtime turns too, so their baseline entries \
+         must not survive the edit"
+    );
+}
+
+#[tokio::test]
+#[allow(clippy::await_holding_lock)]
+async fn edit_last_turn_restores_the_baseline_after_a_non_authoritative_runtime_turn() {
+    run_edit_last_turn_baseline_past_non_authoritative_runtime_turns(1).await;
+}
+
+#[tokio::test]
+#[allow(clippy::await_holding_lock)]
+async fn edit_last_turn_restores_the_baseline_after_multiple_non_authoritative_runtime_turns() {
+    run_edit_last_turn_baseline_past_non_authoritative_runtime_turns(2).await;
+}
+
+/// Driver for the entryless-selectable-message edit scenarios: an unarmed
+/// turn establishes the standing baseline, the host arms the guardrail
+/// prompts (Ask/Suggest pair, arming flip only), the armed turn reports the
+/// A→B transition into history and records prior=A on the baseline stack,
+/// an ExternalUser message with no entry of its own lands in history
+/// mid-turn (a committed steer, or — with `max_steps = 1` — the step-budget
+/// notices; both persist through the same turn-metadata helper as a turn
+/// build while pushing no entry), and the edit then targets THAT message.
+///
+/// Returns the captured provider requests: index 0 is the unarmed turn,
+/// 1..=2 the armed turn's two requests, 3 the replacement.
+///
+/// The truncation removes only the entryless message(s) closest to the tail
+/// (the armed turn's first block and its original A→B notice are retained),
+/// so the pop must not take the armed turn's snapshot: the replacement
+/// recomputes against the unchanged standing baseline (B→B, no transition
+/// line). An unconditional pop consumed the armed turn's prior=A and
+/// re-rendered the transition as a false duplicate (PR #131 review
+/// residual).
+#[allow(clippy::await_holding_lock)]
+async fn run_edit_last_turn_baseline_past_entryless_selectable_message(
+    max_steps: u32,
+    commit_steer_mid_turn: bool,
+) -> Vec<crate::models::MessageRequest> {
+    use crate::llm_client::mock::{MockLlmClient, canned};
+
+    let workspace = tempdir().expect("workspace");
+    let mut engine_config = deterministic_engine_config(workspace.path());
+    engine_config.max_steps = max_steps;
+    let mock = Arc::new(MockLlmClient::new(vec![canned::simple_text_turn(
+        "unarmed posture answer",
+    )]));
+    let client: crate::core::model_client::SharedModelClient = mock.clone();
+    let (engine, handle) = Engine::new_with_model_client(engine_config, &Config::default(), client);
+    if commit_steer_mid_turn {
+        // Armed turn, request 1: commit the steer while the turn is live,
+        // then answer with a read-only tool call so the turn loops and the
+        // top-of-loop steer drain injects it into history before request 2
+        // (a text-only response would end the turn before that drain).
+        let tx_steer = handle.tx_steer.clone();
+        let steer_control = Arc::clone(&handle.steer_control);
+        mock.push_factory(move |_request| {
+            let target = {
+                let mut control = steer_control
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                let target = control
+                    .active_target()
+                    .expect("armed turn accepts test steer");
+                control
+                    .register("steer-edit-target".to_string(), target)
+                    .expect("register steer-edit-target");
+                target
+            };
+            tx_steer
+                .try_send(SteerMessage {
+                    id: "steer-edit-target".to_string(),
+                    target,
+                    content: "MID_TURN_STEER_EDIT_TARGET".to_string(),
+                })
+                .expect("steer channel remains open");
+            canned::tool_call_turn(
+                "call-steer-edit-read",
+                "read_file",
+                r#"{"path":"steer-edit-probe.txt"}"#,
+            )
+        });
+    } else {
+        // Budget-notice path: the armed turn's first response is a read-only
+        // tool call; with max_steps = 1 that tool round consumes the ceiling
+        // and the A1 soft-landing plus A2 exhaustion notices persist through
+        // the same ExternalUser turn-metadata helper as a steer.
+        mock.push_turn(canned::tool_call_turn(
+            "call-notice-read",
+            "read_file",
+            r#"{"path":"notice-probe.txt"}"#,
+        ));
+    }
+    mock.push_turn(canned::simple_text_turn(
+        "The mid-turn input is now handled.",
+    ));
+    mock.push_turn(canned::simple_text_turn("replacement answer"));
+    let run = tokio::spawn(engine.run());
+
+    // Turn 1 runs unarmed: it renders no transition and establishes the
+    // standing baseline.
+    handle
+        .send(Op::SendMessage {
+            content: "turn in the unarmed posture".to_string(),
+            mode: AppMode::Agent,
+            route: resolved_route_for_test(&Config::default(), "deepseek-v4-pro"),
+            compaction: Box::new(CompactionConfig::default()),
+            goal_objective: None,
+            goal_token_budget: None,
+            goal_status: crate::tools::goal::GoalStatus::Active,
+            reasoning_effort: None,
+            reasoning_effort_auto: false,
+            auto_model: false,
+            allow_shell: false,
+            trust_mode: false,
+            auto_approve: false,
+            approval_mode: crate::tui::approval::ApprovalMode::Suggest,
+            translation_enabled: false,
+            allowed_tools: None,
+            dynamic_tools: Vec::new(),
+            hook_executor: None,
+            verbosity: None,
+            provenance: UserInputProvenance::ExternalUser,
+            turn_tool_security: None,
+            submission_id: None,
+        })
+        .await
+        .expect("send the unarmed turn");
+    wait_for_turn_complete(&handle).await;
+
+    // Arm the host's guardrail prompts, then run a real turn whose block
+    // reports the A→B arming transition into history.
+    handle
+        .send(Op::ChangeMode {
+            mode: AppMode::Agent,
+            allow_shell: false,
+            trust_mode: false,
+            auto_approve: false,
+            approval_mode: crate::tui::approval::ApprovalMode::Suggest,
+            configured_sandbox_mode: None,
+            ask_on_guardrail: Some(true),
+        })
+        .await
+        .expect("send the guardrail arming change");
+    handle
+        .send(Op::SendMessage {
+            content: "turn that reports the arming transition".to_string(),
+            mode: AppMode::Agent,
+            route: resolved_route_for_test(&Config::default(), "deepseek-v4-pro"),
+            compaction: Box::new(CompactionConfig::default()),
+            goal_objective: None,
+            goal_token_budget: None,
+            goal_status: crate::tools::goal::GoalStatus::Active,
+            reasoning_effort: None,
+            reasoning_effort_auto: false,
+            auto_model: false,
+            allow_shell: false,
+            trust_mode: false,
+            auto_approve: false,
+            approval_mode: crate::tui::approval::ApprovalMode::Suggest,
+            translation_enabled: false,
+            allowed_tools: None,
+            dynamic_tools: Vec::new(),
+            hook_executor: None,
+            verbosity: None,
+            provenance: UserInputProvenance::ExternalUser,
+            turn_tool_security: None,
+            submission_id: None,
+        })
+        .await
+        .expect("send the armed turn");
+    wait_for_turn_complete(&handle).await;
+
+    // The selector's latest editable user prompt is now the entryless
+    // mid-turn message (steer or budget notice) — not the armed turn build.
+    handle
+        .send(Op::EditLastTurn {
+            new_message: "revise this committed input".to_string(),
+            submission_id: Some("sub-edit-entryless".to_string()),
+        })
+        .await
+        .expect("send edit");
+    wait_for_turn_complete(&handle).await;
+
+    handle.send(Op::Shutdown).await.expect("shutdown engine");
+    run.await.expect("engine task");
+
+    let requests = mock.captured_requests();
+    assert_eq!(
+        requests.len(),
+        4,
+        "unarmed turn, the armed turn's two requests, and the replacement"
+    );
+    requests
+}
+
+/// Wire-visible text of one captured request: every `Text` content block
+/// joined, so turn-meta assertions read exactly what the model would see.
+fn captured_request_wire_text(requests: &[crate::models::MessageRequest], index: usize) -> String {
+    requests[index]
+        .messages
+        .iter()
+        .flat_map(|message| message.content.iter())
+        .filter_map(|block| match block {
+            ContentBlock::Text { text, .. } => Some(text.as_str()),
+            _ => None,
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+/// Jensen residual P2, steer face (PR #131 review 5743286690): a committed
+/// steer persists a selectable ExternalUser user message that owns no
+/// standing-baseline entry. Editing it after the armed turn completed must
+/// leave the stack untouched — the retained history keeps the arming turn's
+/// original A→B line exactly once and the replacement steer message emits no
+/// new host-change line (same posture → no transition).
+#[tokio::test]
+async fn edit_last_turn_keeps_the_baseline_when_the_edited_target_is_a_committed_steer() {
+    let requests = run_edit_last_turn_baseline_past_entryless_selectable_message(32, true).await;
+
+    let unarmed = captured_request_wire_text(&requests, 0);
+    assert!(
+        !unarmed.contains("Authority transition (host)"),
+        "the first reported turn must render no transition"
+    );
+
+    let armed_first = captured_request_wire_text(&requests, 1);
+    assert!(
+        !armed_first.contains("MID_TURN_STEER_EDIT_TARGET"),
+        "the steer must commit between the armed turn's requests, not before it"
+    );
+    assert_eq!(
+        armed_first.matches("Authority transition (host)").count(),
+        1,
+        "the armed turn's block must report the arming transition exactly once"
+    );
+
+    let armed_second = captured_request_wire_text(&requests, 2);
+    assert!(
+        armed_second.contains("MID_TURN_STEER_EDIT_TARGET"),
+        "the steer must be committed mid-turn and reach the provider with the \
+         armed turn's follow-up request"
+    );
+    assert_eq!(
+        armed_second.matches("Authority transition (host)").count(),
+        1,
+        "the steer block renders no transition line of its own"
+    );
+
+    let replacement = captured_request_wire_text(&requests, 3);
+    assert!(
+        replacement.contains("revise this committed input"),
+        "the replacement must carry the edited steer text"
+    );
+    assert!(
+        !replacement.contains("MID_TURN_STEER_EDIT_TARGET"),
+        "the truncation must remove the committed steer, not the armed turn \
+         build before it"
+    );
+    assert!(
+        !replacement.contains("The mid-turn input is now handled."),
+        "the armed turn's truncated assistant response must be gone too"
+    );
+    assert_eq!(
+        replacement.matches("Authority transition (host)").count(),
+        1,
+        "the retained arming block stays the only transition: editing the \
+         entryless steer must not pop the armed turn's baseline snapshot and \
+         re-render the A→B line"
+    );
+}
+
+/// Jensen residual P2, budget-notice face: the step-budget notices persist
+/// through the same ExternalUser helper as a steer and are equally
+/// selectable, so editing the exhaustion notice must also leave the standing
+/// baseline untouched — the retained arming line stays exactly once and the
+/// replacement emits no new host-change line.
+#[tokio::test]
+async fn edit_last_turn_keeps_the_baseline_when_the_edited_target_is_a_budget_notice() {
+    let requests = run_edit_last_turn_baseline_past_entryless_selectable_message(1, false).await;
+
+    let armed_second = captured_request_wire_text(&requests, 2);
+    assert!(
+        armed_second.contains("Step budget soft landing")
+            && armed_second.contains("model-step budget was exhausted"),
+        "the ceiling notices must be persisted mid-turn and reach the \
+         armed turn's final request"
+    );
+    assert_eq!(
+        armed_second.matches("Authority transition (host)").count(),
+        1,
+        "the notice blocks render no transition line of their own"
+    );
+
+    let replacement = captured_request_wire_text(&requests, 3);
+    assert!(
+        replacement.contains("revise this committed input"),
+        "the replacement must carry the edited notice text"
+    );
+    assert!(
+        !replacement.contains("model-step budget was exhausted"),
+        "the truncation must remove the exhaustion notice, not the armed \
+         turn build before it"
+    );
+    assert_eq!(
+        replacement.matches("Authority transition (host)").count(),
+        1,
+        "the retained arming block stays the only transition: editing the \
+         entryless budget notice must not pop the armed turn's baseline \
+         snapshot and re-render the A→B line"
+    );
+}
+
+/// JensenChen28 review 5745427306 counterexample (PR #131): while the first
+/// (unarmed) turn is still live, the host flips only the guardrail arming and
+/// a steer commits with text identical to that first prompt. Same day, empty
+/// non-git workspace, low context pressure: the steer message is then
+/// value-equal to the surviving first-turn message, so a value-based pop
+/// would consume the first turn's snapshot when the steer is edited away and
+/// leave the baseline at `None` — the replacement turn (armed posture) would
+/// omit the A→B host transition the retained first-turn block still implies.
+/// The pop must decide by position: no entry sits at the steer's cut, so the
+/// baseline stays on the first turn's posture and the replacement re-reports
+/// the transition.
+#[tokio::test]
+async fn edit_last_turn_value_equal_steer_leaves_the_first_turn_baseline_in_place() {
+    use crate::llm_client::mock::{MockLlmClient, canned};
+
+    const FIRST_PROMPT: &str = "turn in the unarmed posture";
+    let workspace = tempdir().expect("workspace");
+    let mut engine_config = deterministic_engine_config(workspace.path());
+    engine_config.max_steps = 32;
+    let mock = Arc::new(MockLlmClient::new(vec![]));
+    let client: crate::core::model_client::SharedModelClient = mock.clone();
+    let (engine, handle) = Engine::new_with_model_client(engine_config, &Config::default(), client);
+
+    // First turn, request 1: commit the same-text steer while the turn is
+    // live and flip the arming mid-run, then answer with a read-only tool
+    // call so the turn loops and the top-of-loop steer drain injects the
+    // steer into history before request 2.
+    let steer_handle = handle.clone();
+    mock.push_factory(move |_request| {
+        steer_handle
+            .try_send(Op::ChangeMode {
+                mode: AppMode::Agent,
+                allow_shell: false,
+                trust_mode: false,
+                auto_approve: false,
+                approval_mode: crate::tui::approval::ApprovalMode::Suggest,
+                configured_sandbox_mode: None,
+                ask_on_guardrail: Some(true),
+            })
+            .expect("live arming publish accepts the mid-turn flip");
+        let tx_steer = steer_handle.tx_steer.clone();
+        let steer_control = Arc::clone(&steer_handle.steer_control);
+        let target = {
+            let mut control = steer_control
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let target = control
+                .active_target()
+                .expect("first turn accepts test steer");
+            control
+                .register("same-text-steer".to_string(), target)
+                .expect("register same-text-steer");
+            target
+        };
+        tx_steer
+            .try_send(SteerMessage {
+                id: "same-text-steer".to_string(),
+                target,
+                content: FIRST_PROMPT.to_string(),
+            })
+            .expect("steer channel remains open");
+        canned::tool_call_turn(
+            "call-same-text-steer-read",
+            "read_file",
+            r#"{"path":"same-text-steer-probe.txt"}"#,
+        )
+    });
+    mock.push_turn(canned::simple_text_turn("first turn final answer"));
+    mock.push_turn(canned::simple_text_turn("replacement answer"));
+    let run = tokio::spawn(engine.run());
+
+    handle
+        .send(Op::SendMessage {
+            content: FIRST_PROMPT.to_string(),
+            mode: AppMode::Agent,
+            route: resolved_route_for_test(&Config::default(), "deepseek-v4-pro"),
+            compaction: Box::new(CompactionConfig::default()),
+            goal_objective: None,
+            goal_token_budget: None,
+            goal_status: crate::tools::goal::GoalStatus::Active,
+            reasoning_effort: None,
+            reasoning_effort_auto: false,
+            auto_model: false,
+            allow_shell: false,
+            trust_mode: false,
+            auto_approve: false,
+            approval_mode: crate::tui::approval::ApprovalMode::Suggest,
+            translation_enabled: false,
+            allowed_tools: None,
+            dynamic_tools: Vec::new(),
+            hook_executor: None,
+            verbosity: None,
+            provenance: UserInputProvenance::ExternalUser,
+            turn_tool_security: None,
+            submission_id: None,
+        })
+        .await
+        .expect("send the unarmed first turn");
+    wait_for_turn_complete(&handle).await;
+
+    // Precondition pin: the committed steer and the surviving first-turn
+    // message are value-equal, exactly the reviewed condition a value-based
+    // pop cannot decide.
+    {
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        handle
+            .send(Op::GetSessionSnapshot {
+                tx: std::sync::Arc::new(std::sync::Mutex::new(Some(tx))),
+            })
+            .await
+            .expect("request snapshot");
+        let snapshot = tokio::time::timeout(model_turn_event_timeout(), rx)
+            .await
+            .expect("snapshot response")
+            .expect("snapshot");
+        // Tool results persist with role "user" too; locate the first turn's
+        // message and the drained steer by their shared prompt text.
+        let same_text_messages: Vec<&Message> = snapshot
+            .messages
+            .iter()
+            .filter(|message| {
+                message.role.as_str() == "user"
+                    && message.content.iter().any(|block| {
+                        matches!(block, ContentBlock::Text { text, .. } if text.contains(FIRST_PROMPT))
+                    })
+            })
+            .collect();
+        assert_eq!(
+            same_text_messages.len(),
+            2,
+            "exactly the first turn's message and the drained steer carry the prompt text"
+        );
+        assert_eq!(
+            same_text_messages[0], same_text_messages[1],
+            "the same-text steer must be value-equal to the surviving first-turn message"
+        );
+    }
+
+    // The selector's latest editable user prompt is the entryless same-text
+    // steer — not the first turn build before it.
+    handle
+        .send(Op::EditLastTurn {
+            new_message: "revise this committed input".to_string(),
+            submission_id: Some("sub-edit-same-text-steer".to_string()),
+        })
+        .await
+        .expect("send edit");
+    wait_for_turn_complete(&handle).await;
+
+    handle.send(Op::Shutdown).await.expect("shutdown engine");
+    run.await.expect("engine task");
+
+    let requests = mock.captured_requests();
+    assert_eq!(
+        requests.len(),
+        3,
+        "the first turn's two requests and the replacement"
+    );
+    let first_request = captured_request_wire_text(&requests, 0);
+    assert!(
+        !first_request.contains("Authority transition (host)"),
+        "the first reported turn must render no transition"
+    );
+    let second_request = captured_request_wire_text(&requests, 1);
+    assert!(
+        second_request.contains(FIRST_PROMPT),
+        "the drained same-text steer must reach the first turn's follow-up request"
+    );
+    assert!(
+        !second_request.contains("Authority transition (host)"),
+        "the steer block renders no transition line of its own"
+    );
+    let replacement = captured_request_wire_text(&requests, 2);
+    assert!(
+        replacement.contains("revise this committed input"),
+        "the replacement must carry the edited steer text"
+    );
+    assert_eq!(
+        replacement.matches("Authority transition (host)").count(),
+        1,
+        "the replacement must re-report the A→B arming transition: the \
+         edited steer owned no entry, so the first turn's snapshot stays and \
+         the retained first-turn block remains the measured baseline"
+    );
 }
 
 #[tokio::test]
@@ -19684,7 +22844,13 @@ fn legacy_spill_without_ref_keeps_the_ownership_retrieval_hint() {
     assert!(!view.needs_full_output_artifact);
     assert!(view.text.chars().count() <= budget_128k());
     assert!(view.text.contains("/tmp/tool_outputs/call-legacy.txt"));
-    assert!(view.text.contains("this call's id or the spillover path"));
+    assert!(
+        view.text
+            .contains("ref=<this call's id>, ref_kind=\"tool_call_id\""),
+        "legacy recovery must select the raw-call namespace explicitly: {}",
+        view.text
+    );
+    assert!(!view.text.contains("this call's id or the spillover path"));
     assert!(view.text.contains("retrieve_tool_result"));
 }
 
@@ -19885,28 +23051,1059 @@ fn forkguard_short_coordination_fields_are_inline_or_recoverable() {
 #[test]
 fn forkguard_structured_recovery_footer_is_single_and_route_bounded() {
     let _workshop = crate::tools::large_output_router::active_workshop_test_guard();
-    let output =
-        ToolResult::success(json!({"action": "roster", "members": "x".repeat(4_000)}).to_string());
-    for window in [1, 64, 1_024, 4_096, 128_000] {
+    with_artifact_home(|home| {
+        // The production fleet projection has an agents array, rather than a
+        // fictitious string-valued members field.
+        let raw = json!({"agents":[{"agent_id":"agent_12345678","status":"completed","result":"detail\n".repeat(4_000)}]}).to_string();
+        let unsaved = ToolResult::success(raw.clone());
+        let mut saved = unsaved.clone();
+        assert!(
+            crate::tools::truncate::preserve_full_output_for_model_context(
+                &mut saved,
+                "structured-short",
+                "agent",
+                SESSION_6508
+            )
+        );
+        for window in [1, 64, 1_024, 2_048, 4_096, 128_000] {
+            for (output, is_saved) in [(&unsaved, false), (&saved, true)] {
+                let view = super::context::tool_result_context_view(
+                    ApiProvider::Deepseek,
+                    ROUTE_128K,
+                    Some(codewhale_config::route::RouteLimits {
+                        context_tokens: Some(window),
+                        ..Default::default()
+                    }),
+                    "agent",
+                    output,
+                );
+                let budget = crate::route_budget::route_inline_char_budget(Some(window as u32));
+                assert_eq!(view.needs_full_output_artifact, !is_saved);
+                assert!(
+                    view.text.chars().count() <= budget,
+                    "window={window}: {}",
+                    view.text
+                );
+                assert!(view.text.matches("recovery").count() <= 1, "{}", view.text);
+                if window >= 2_048 {
+                    if is_saved {
+                        assert!(view.text.contains("retrieve_tool_result"), "{}", view.text);
+                        let (_, rest) = view
+                            .text
+                            .split_once("ref=\"")
+                            .expect("short ref must be advertised whole");
+                        let (reference, _) = rest.split_once('"').expect("closed recovery ref");
+                        let runtime = tokio::runtime::Builder::new_current_thread()
+                            .enable_all()
+                            .build()
+                            .unwrap();
+                        let context =
+                            crate::tools::ToolContext::new(home).with_state_namespace(SESSION_6508);
+                        let recovered = runtime
+                            .block_on(crate::tools::spec::ToolSpec::execute(
+                                &crate::tools::tool_result_retrieval::RetrieveToolResultTool,
+                                json!({"ref":reference,"mode":"tail","line_count":1}),
+                                &context,
+                            ))
+                            .unwrap();
+                        assert!(recovered.success && recovered.content.contains("detail"));
+                    } else {
+                        assert!(
+                            view.text.contains("no tool call reaches this copy"),
+                            "{}",
+                            view.text
+                        );
+                        assert!(view.text.contains("re-run"), "{}", view.text);
+                    }
+                }
+            }
+        }
+        let call_id = format!("art_{}", "x".repeat(188));
+        let mut long_saved = unsaved.clone();
+        assert!(
+            crate::tools::truncate::preserve_full_output_for_model_context(
+                &mut long_saved,
+                &call_id,
+                "agent",
+                SESSION_6508
+            )
+        );
         let view = super::context::tool_result_context_view(
             ApiProvider::Deepseek,
             ROUTE_128K,
             Some(codewhale_config::route::RouteLimits {
-                context_tokens: Some(window),
+                context_tokens: Some(2048),
                 ..Default::default()
             }),
             "agent",
+            &long_saved,
+        );
+        assert!(view.text.contains("ref_kind=tool_call_id"), "{}", view.text);
+        assert!(view.text.chars().count() <= 245);
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let context = crate::tools::ToolContext::new(home).with_state_namespace(SESSION_6508);
+        let recovered = runtime
+            .block_on(crate::tools::spec::ToolSpec::execute(
+                &crate::tools::tool_result_retrieval::RetrieveToolResultTool,
+                json!({"ref":call_id,"ref_kind":"tool_call_id","mode":"tail","line_count":1}),
+                &context,
+            ))
+            .unwrap();
+        assert!(recovered.success && recovered.content.contains("detail"));
+        assert_eq!(saved.content, raw);
+    });
+}
+
+#[test]
+fn forkguard_plan_retained_output_is_discoverable_and_session_bound() {
+    with_artifact_home(|home| {
+        let raw = "first\nretained tail".repeat(400);
+        let mut output = ToolResult::success(raw);
+        assert!(
+            crate::tools::truncate::preserve_full_output_for_model_context(
+                &mut output,
+                "plan-own",
+                "generic_result",
+                SESSION_6508
+            )
+        );
+        let mut foreign = ToolResult::success("foreign evidence".repeat(400));
+        assert!(
+            crate::tools::truncate::preserve_full_output_for_model_context(
+                &mut foreign,
+                "plan-foreign",
+                "generic_result",
+                "session-other"
+            )
+        );
+        let (engine, _handle) = Engine::new(deterministic_engine_config(home), &Config::default());
+        let context = engine
+            .build_tool_context(AppMode::Plan, false)
+            .with_state_namespace(SESSION_6508);
+        let registry = engine
+            .build_turn_tool_registry_builder(
+                AppMode::Plan,
+                engine.config.todos.clone(),
+                engine.config.plan_state.clone(),
+            )
+            .build(context);
+        // Match Engine::build_turn_tools: registry specs alone have not
+        // received the native deferral policy used by real model requests.
+        let catalog = build_model_tool_catalog_with_surface(
+            registry.to_api_tools(),
+            Vec::new(),
+            AppMode::Plan,
+            &HashSet::new(),
+            crate::model_profile::ToolSurfaceBudget::Standard,
+        );
+        let mut surface = ToolSurfacePolicy::new(
+            registry,
+            Some(catalog),
+            AppMode::Plan,
+            &HashSet::new(),
+            &[],
+            false,
+            Some(vec!["retrieve_tool_result".into(), "tool_search".into()]),
+            None,
+            None,
+            engine.session.approval_mode,
+        );
+        assert!(surface.registry.contains("retrieve_tool_result"));
+        assert!(!surface.active_names.contains("retrieve_tool_result"));
+        let search = execute_tool_search(
+            "tool_search",
+            &json!({"query":"retrieve_tool_result","match":"regex"}),
+            &surface.catalog,
+            &mut surface.active_names,
+        )
+        .unwrap();
+        assert!(search.content.contains("retrieve_tool_result"));
+        assert!(surface.active_names.contains("retrieve_tool_result"));
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let result = runtime
+            .block_on(surface.registry.execute_full(
+                "retrieve_tool_result",
+                json!({"ref":"art_plan-own","mode":"tail","line_count":1}),
+            ))
+            .unwrap();
+        assert!(result.success && result.content.contains("retained tail"));
+        let foreign_path = foreign.metadata.as_ref().unwrap()["artifact_path"]
+            .as_str()
+            .unwrap();
+        assert!(
+            runtime
+                .block_on(
+                    surface
+                        .registry
+                        .execute_full("retrieve_tool_result", json!({"ref":foreign_path}))
+                )
+                .is_err()
+        );
+        // Explicit deny still narrows a registered reader out of discovery.
+        let denied = policy_for_catalog(
+            surface.catalog.clone(),
+            None,
+            Some(vec!["retrieve_tool_result".into()]),
+            engine.session.approval_mode,
+        );
+        assert!(
+            !denied
+                .catalog
+                .iter()
+                .any(|tool| tool.name == "retrieve_tool_result")
+        );
+    });
+}
+
+#[test]
+fn forkguard_classic_legacy_hint_recovers_after_session_artifact_write_failure() {
+    use crate::tools::large_output_router::WorkshopConfig;
+    use crate::tools::spec::ToolSpec;
+    let _environment = crate::test_support::lock_test_env();
+    let _classic = crate::test_support::EnvVarGuard::set("CODEWHALE_CLASSIC_OUTPUT_ROUTING", "1");
+    let _workshop = crate::tools::large_output_router::active_workshop_test_guard();
+    struct RestoreWorkshop(WorkshopConfig);
+    impl Drop for RestoreWorkshop {
+        fn drop(&mut self) {
+            let _ = WorkshopConfig::install_active(Some(&self.0));
+        }
+    }
+    let _restore = RestoreWorkshop(WorkshopConfig::install_active(None));
+    with_artifact_home(|home| {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        for (index, call_id) in ["call.legacy", "art_call.legacy"].into_iter().enumerate() {
+            let session = format!("classic-recovery-{index}");
+            let artifacts = home
+                .join(".codewhale/sessions")
+                .join(&session)
+                .join("artifacts");
+            fs::create_dir_all(artifacts.parent().unwrap()).unwrap();
+            // A real filesystem failure for the session writer, while the
+            // independent legacy directory and its ownership sidecar work.
+            fs::write(&artifacts, b"not a directory").unwrap();
+            #[cfg(unix)]
+            assert_eq!(
+                crate::tools::large_output_router::read_evidence_metadata(
+                    &session,
+                    &crate::artifacts::artifact_id_for_tool_call(call_id),
+                )
+                .unwrap_err()
+                .kind(),
+                std::io::ErrorKind::NotADirectory,
+            );
+            let raw = format!("BEGIN\n{}END", "classic-line\n".repeat(10_000));
+            assert!(raw.len() > crate::tools::truncate::SPILLOVER_THRESHOLD_BYTES);
+            let mut output = ToolResult::success(raw.clone());
+            let saved = crate::tools::truncate::apply_spillover_with_artifact(
+                &mut output,
+                call_id,
+                "generic_result",
+                &session,
+            )
+            .expect("classic spillover survives session write failure");
+            assert_eq!(
+                Some(saved.clone()),
+                crate::tools::truncate::spillover_path(call_id)
+            );
+            assert_eq!(fs::read_to_string(&saved).unwrap(), raw);
+            assert!(
+                output
+                    .metadata
+                    .as_ref()
+                    .unwrap()
+                    .get("artifact_id")
+                    .is_none()
+            );
+            let proof = crate::tools::truncate::read_legacy_spillover_ownership(&saved).unwrap();
+            assert_eq!(proof.origin_session, session);
+            let view = super::context::tool_result_context_view(
+                ApiProvider::Deepseek,
+                ROUTE_128K,
+                Some(codewhale_config::route::RouteLimits {
+                    context_tokens: Some(2048),
+                    ..Default::default()
+                }),
+                "generic_result",
+                &output,
+            );
+            assert!(view.text.chars().count() <= 245, "{}", view.text);
+            assert!(!view.needs_full_output_artifact);
+            assert!(
+                view.text
+                    .contains("retrieve_tool_result ref=<call id>,ref_kind=tool_call_id"),
+                "{}",
+                view.text
+            );
+            let full_view = super::context::tool_result_context_view(
+                ApiProvider::Deepseek,
+                ROUTE_128K,
+                None,
+                "generic_result",
+                &output,
+            );
+            assert!(full_view.text.chars().count() <= budget_128k());
+            assert!(!full_view.needs_full_output_artifact);
+            assert!(
+                full_view
+                    .text
+                    .contains("ref=<this call's id>, ref_kind=\"tool_call_id\""),
+                "{}",
+                full_view.text
+            );
+            let context = crate::tools::spec::ToolContext::new(home).with_state_namespace(&session);
+            #[cfg(unix)]
+            if call_id.starts_with("art_") {
+                // This printed default path follows the historical grammar.
+                // The emitted full hint must instead teach typed raw-ID
+                // retrieval, which uses this legacy writer's own proof below.
+                let default_error = runtime
+                    .block_on(
+                        crate::tools::tool_result_retrieval::RetrieveToolResultTool.execute(
+                            json!({"ref":saved.to_str().unwrap(),"mode":"tail","line_count":1}),
+                            &context,
+                        ),
+                    )
+                    .unwrap_err()
+                    .to_string();
+                assert!(
+                    default_error.contains("evidence metadata is corrupt"),
+                    "{default_error}"
+                );
+            }
+            let metadata = runtime
+                .block_on(
+                    crate::tools::tool_result_retrieval::RetrieveToolResultTool.execute(
+                        json!({"ref":call_id,"ref_kind":"tool_call_id","mode":"metadata"}),
+                        &context,
+                    ),
+                )
+                .unwrap();
+            let metadata: Value = serde_json::from_str(&metadata.content).unwrap();
+            assert_eq!(metadata["ref"], call_id);
+            assert_eq!(metadata["ref_kind"], "tool_call_id");
+            assert_eq!(metadata["total_bytes"], raw.len());
+            let tail_input = json!({"ref":metadata["ref"],"ref_kind":metadata["ref_kind"],"mode":"tail","line_count":1});
+            let tail = runtime
+                .block_on(
+                    crate::tools::tool_result_retrieval::RetrieveToolResultTool
+                        .execute(tail_input.clone(), &context),
+                )
+                .unwrap();
+            assert!(tail.success && tail.content.contains("END"));
+            let bytes = runtime.block_on(crate::tools::tool_result_retrieval::RetrieveToolResultTool.execute(
+                json!({"ref":metadata["ref"],"ref_kind":metadata["ref_kind"],"mode":"bytes","length":5}), &context,
+            )).unwrap();
+            let bytes: Value = serde_json::from_str(&bytes.content).unwrap();
+            assert_eq!(bytes["data"], "QkVHSU4=");
+            assert_eq!(bytes["ref"], call_id);
+            assert_eq!(bytes["ref_kind"], "tool_call_id");
+            let foreign = crate::tools::spec::ToolContext::new(home)
+                .with_state_namespace("foreign-classic-session");
+            let error = runtime
+                .block_on(
+                    crate::tools::tool_result_retrieval::RetrieveToolResultTool
+                        .execute(tail_input.clone(), &foreign),
+                )
+                .unwrap_err()
+                .to_string();
+            assert!(error.contains("belongs to another session"), "{error}");
+            fs::write(&saved, "tampered").unwrap();
+            let error = runtime
+                .block_on(
+                    crate::tools::tool_result_retrieval::RetrieveToolResultTool
+                        .execute(tail_input.clone(), &context),
+                )
+                .unwrap_err()
+                .to_string();
+            assert!(error.contains("corrupt"), "{error}");
+            fs::write(&saved, &raw).unwrap();
+            let recovered = runtime
+                .block_on(
+                    crate::tools::tool_result_retrieval::RetrieveToolResultTool
+                        .execute(tail_input, &context),
+                )
+                .unwrap();
+            assert!(recovered.content.contains("END"));
+        }
+    });
+}
+
+#[test]
+fn forkguard_classic_generated_recovery_never_reads_a_replacement_call() {
+    use crate::tools::large_output_router::WorkshopConfig;
+    use crate::tools::spec::ToolSpec;
+    fn request_from_preview(preview: &str) -> Value {
+        let (_, hint) = preview
+            .split_once("retrieve_tool_result with ref=")
+            .expect("the real writer must supply its recovery instruction");
+        let reference = serde_json::Deserializer::from_str(hint)
+            .into_iter::<String>()
+            .next()
+            .unwrap()
+            .unwrap();
+        let kind = if hint.contains("ref_kind=\"tool_call_id\"") {
+            "tool_call_id"
+        } else {
+            "artifact"
+        };
+        json!({"ref":reference,"ref_kind":kind,"mode":"tail","line_count":1})
+    }
+    let _environment = crate::test_support::lock_test_env();
+    let _classic = crate::test_support::EnvVarGuard::set("CODEWHALE_CLASSIC_OUTPUT_ROUTING", "1");
+    let _workshop = crate::tools::large_output_router::active_workshop_test_guard();
+    struct RestoreWorkshop(WorkshopConfig);
+    impl Drop for RestoreWorkshop {
+        fn drop(&mut self) {
+            let _ = WorkshopConfig::install_active(Some(&self.0));
+        }
+    }
+    let _restore = RestoreWorkshop(WorkshopConfig::install_active(None));
+    with_artifact_home(|home| {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        for legacy_only in [true, false] {
+            let session = if legacy_only {
+                "collision-legacy"
+            } else {
+                "collision-session"
+            };
+            let first_id = "call.legacy";
+            let second_id = if legacy_only {
+                "calllegacy"
+            } else {
+                "call_legacy"
+            };
+            if legacy_only {
+                let path = home
+                    .join(".codewhale/sessions")
+                    .join(session)
+                    .join("artifacts");
+                fs::create_dir_all(path.parent().unwrap()).unwrap();
+                fs::write(path, b"not a directory").unwrap();
+                assert_eq!(
+                    crate::tools::truncate::spillover_path(first_id),
+                    crate::tools::truncate::spillover_path(second_id)
+                );
+            } else {
+                assert_eq!(
+                    crate::artifacts::artifact_id_for_tool_call(first_id),
+                    crate::artifacts::artifact_id_for_tool_call(second_id)
+                );
+            }
+            let context = crate::tools::spec::ToolContext::new(home).with_state_namespace(session);
+            let mut first =
+                ToolResult::success(format!("OLD\n{}OLD END", "payload\n".repeat(20_000)));
+            crate::tools::truncate::apply_spillover_with_artifact(
+                &mut first,
+                first_id,
+                "generic_result",
+                session,
+            )
+            .unwrap();
+            let request = request_from_preview(&first.content);
+            let before = runtime
+                .block_on(
+                    crate::tools::tool_result_retrieval::RetrieveToolResultTool
+                        .execute(request.clone(), &context),
+                )
+                .unwrap();
+            assert!(before.content.contains("OLD END"));
+            let mut second =
+                ToolResult::success(format!("NEW\n{}NEW END", "payload\n".repeat(20_000)));
+            let raw_second = second.content.clone();
+            let saved = crate::tools::truncate::apply_spillover_with_artifact(
+                &mut second,
+                second_id,
+                "generic_result",
+                session,
+            );
+            if !legacy_only {
+                assert!(saved.is_none(), "a session handle cannot replace old bytes");
+                assert_eq!(second.content, raw_second, "the colliding call keeps raw");
+                let original = runtime
+                    .block_on(
+                        crate::tools::tool_result_retrieval::RetrieveToolResultTool
+                            .execute(request, &context),
+                    )
+                    .unwrap();
+                assert!(original.content.contains("OLD END"));
+                assert!(!original.content.contains("NEW END"));
+                continue;
+            }
+            assert!(
+                fs::read_to_string(saved.unwrap())
+                    .unwrap()
+                    .contains("NEW END")
+            );
+            let wrong = runtime
+                .block_on(
+                    crate::tools::tool_result_retrieval::RetrieveToolResultTool
+                        .execute(request, &context),
+                )
+                .unwrap_err()
+                .to_string();
+            assert!(wrong.contains("tool-call identity"), "{session}: {wrong}");
+            let next = runtime
+                .block_on(
+                    crate::tools::tool_result_retrieval::RetrieveToolResultTool
+                        .execute(request_from_preview(&second.content), &context),
+                )
+                .unwrap();
+            assert!(next.content.contains("NEW END") && !next.content.contains("OLD END"));
+        }
+    });
+}
+
+#[test]
+fn forkguard_classic_both_unrecoverable_copies_keep_full_output_and_retry() {
+    use crate::tools::large_output_router::WorkshopConfig;
+    use crate::tools::spec::ToolSpec;
+    let _environment = crate::test_support::lock_test_env();
+    let _classic = crate::test_support::EnvVarGuard::set("CODEWHALE_CLASSIC_OUTPUT_ROUTING", "1");
+    let _workshop = crate::tools::large_output_router::active_workshop_test_guard();
+    struct RestoreWorkshop(WorkshopConfig);
+    impl Drop for RestoreWorkshop {
+        fn drop(&mut self) {
+            let _ = WorkshopConfig::install_active(Some(&self.0));
+        }
+    }
+    let _restore = RestoreWorkshop(WorkshopConfig::install_active(None));
+    with_artifact_home(|home| {
+        let call_id = "call-both-unavailable";
+        let session = "classic-both-unavailable";
+        let legacy = crate::tools::truncate::spillover_path(call_id).unwrap();
+        let proof = crate::tools::truncate::legacy_spillover_ownership_path(&legacy);
+        let payload = crate::artifacts::session_artifact_absolute_path(
+            session,
+            &crate::artifacts::session_artifact_relative_path(
+                &crate::artifacts::artifact_id_for_tool_call(call_id),
+            ),
+        )
+        .unwrap();
+        // Separate leaf obstructions keep the metadata parent valid on both
+        // Unix and Windows: both real writes fail after the preflight passes.
+        fs::create_dir_all(&proof).unwrap();
+        fs::create_dir_all(&payload).unwrap();
+        let raw = format!("FULL\n{}END", "payload\n".repeat(20_000));
+        let mut output = ToolResult::success(raw.clone());
+        assert!(
+            crate::tools::truncate::apply_spillover_with_artifact(
+                &mut output,
+                call_id,
+                "generic_result",
+                session
+            )
+            .is_none()
+        );
+        assert_eq!(output.content, raw);
+        assert!(
+            output
+                .metadata
+                .as_ref()
+                .and_then(|m| m.get("spillover_path"))
+                .is_none()
+        );
+        assert!(
+            !crate::tools::truncate::preserve_full_output_for_model_context(
+                &mut output,
+                call_id,
+                "generic_result",
+                session
+            )
+        );
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let context = crate::tools::spec::ToolContext::new(home).with_state_namespace(session);
+        assert!(runtime.block_on(crate::tools::tool_result_retrieval::RetrieveToolResultTool.execute(
+            json!({"ref":call_id,"ref_kind":"tool_call_id","mode":"tail","line_count":1}), &context,
+        )).is_err());
+        fs::remove_dir(&proof).unwrap();
+        fs::remove_dir(&payload).unwrap();
+        crate::tools::truncate::apply_spillover_with_artifact(
+            &mut output,
+            call_id,
+            "generic_result",
+            session,
+        )
+        .unwrap();
+        let restored = runtime
+            .block_on(
+                crate::tools::tool_result_retrieval::RetrieveToolResultTool.execute(
+                    json!({"ref":call_id,"ref_kind":"tool_call_id","mode":"tail","line_count":1}),
+                    &context,
+                ),
+            )
+            .unwrap();
+        assert!(restored.content.contains("END"));
+    });
+}
+
+#[test]
+fn forkguard_classic_long_call_has_a_bounded_recoverable_proof() {
+    use crate::tools::large_output_router::WorkshopConfig;
+    use crate::tools::spec::ToolSpec;
+    let _environment = crate::test_support::lock_test_env();
+    let _classic = crate::test_support::EnvVarGuard::set("CODEWHALE_CLASSIC_OUTPUT_ROUTING", "1");
+    let _workshop = crate::tools::large_output_router::active_workshop_test_guard();
+    struct RestoreWorkshop(WorkshopConfig);
+    impl Drop for RestoreWorkshop {
+        fn drop(&mut self) {
+            let _ = WorkshopConfig::install_active(Some(&self.0));
+        }
+    }
+    let _restore = RestoreWorkshop(WorkshopConfig::install_active(None));
+    with_artifact_home(|home| {
+        let call_id = "x".repeat(241);
+        let session = "classic-long-proof";
+        let mut output = ToolResult::success(format!("LONG\n{}END", "payload\n".repeat(20_000)));
+        crate::tools::truncate::apply_spillover_with_artifact(
+            &mut output,
+            &call_id,
+            "generic_result",
+            session,
+        )
+        .unwrap();
+        let path = std::path::PathBuf::from(
+            output.metadata.as_ref().unwrap()["artifact_path"]
+                .as_str()
+                .unwrap(),
+        );
+        assert_eq!(path.file_name().unwrap().as_encoded_bytes().len(), 249);
+        let proof_path = crate::tools::truncate::legacy_spillover_ownership_path(&path);
+        assert!(proof_path.file_name().unwrap().as_encoded_bytes().len() < 100);
+        assert!(proof_path.is_file());
+        let view = super::context::tool_result_context_view(
+            ApiProvider::Deepseek,
+            ROUTE_128K,
+            Some(codewhale_config::route::RouteLimits {
+                context_tokens: Some(2048),
+                ..Default::default()
+            }),
+            "generic_result",
             &output,
         );
-        let budget = crate::route_budget::route_inline_char_budget(Some(window as u32));
-        assert!(view.needs_full_output_artifact);
         assert!(
-            view.text.chars().count() <= budget,
-            "window={window}: {}",
+            view.text.chars().count() <= 245 && view.text.contains("ref_kind=tool_call_id"),
+            "{}",
             view.text
         );
-        assert!(view.text.matches("recovery").count() <= 1, "{}", view.text);
+        let context = crate::tools::spec::ToolContext::new(home).with_state_namespace(session);
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let retained = runtime
+            .block_on(
+                crate::tools::tool_result_retrieval::RetrieveToolResultTool.execute(
+                    json!({"ref":call_id,"ref_kind":"tool_call_id","mode":"tail","line_count":1}),
+                    &context,
+                ),
+            )
+            .unwrap();
+        assert!(retained.content.contains("END"));
+    });
+}
+
+#[test]
+fn forkguard_classic_failed_proof_keeps_full_output_unadvertised_and_retryable() {
+    use crate::tools::large_output_router::WorkshopConfig;
+    use crate::tools::spec::ToolSpec;
+    let _environment = crate::test_support::lock_test_env();
+    let _classic = crate::test_support::EnvVarGuard::set("CODEWHALE_CLASSIC_OUTPUT_ROUTING", "1");
+    let _workshop = crate::tools::large_output_router::active_workshop_test_guard();
+    struct RestoreWorkshop(WorkshopConfig);
+    impl Drop for RestoreWorkshop {
+        fn drop(&mut self) {
+            let _ = WorkshopConfig::install_active(Some(&self.0));
+        }
     }
+    let _restore = RestoreWorkshop(WorkshopConfig::install_active(None));
+    with_artifact_home(|home| {
+        let session = "classic-blocked-proof";
+        let call_id = "call-proof-blocked";
+        let handle = crate::artifacts::artifact_id_for_tool_call(call_id);
+        let relative = crate::artifacts::session_artifact_relative_path(&handle);
+        let payload = crate::artifacts::session_artifact_absolute_path(session, &relative).unwrap();
+        let blocked = crate::tools::truncate::legacy_spillover_ownership_path(&payload);
+        fs::create_dir_all(&blocked).unwrap();
+        let raw = format!("FULL\n{}END", "payload\n".repeat(20_000));
+        let mut output = ToolResult::success(raw.clone());
+        assert!(
+            crate::tools::truncate::apply_spillover_with_artifact(
+                &mut output,
+                call_id,
+                "generic_result",
+                session
+            )
+            .is_none()
+        );
+        assert_eq!(output.content, raw);
+        assert!(
+            output
+                .metadata
+                .as_ref()
+                .and_then(|m| m.get("artifact_id"))
+                .is_none()
+        );
+        assert!(
+            !crate::tools::truncate::preserve_full_output_for_model_context(
+                &mut output,
+                call_id,
+                "generic_result",
+                session
+            )
+        );
+        assert_eq!(output.content, raw);
+        assert!(
+            output
+                .metadata
+                .as_ref()
+                .and_then(|m| m.get("artifact_id"))
+                .is_none()
+        );
+        // Repair only this test-owned obstruction; the immutable payload is
+        // retained and the next legitimate save/read succeeds in-process.
+        fs::remove_dir(&blocked).unwrap();
+        assert!(
+            crate::tools::truncate::preserve_full_output_for_model_context(
+                &mut output,
+                call_id,
+                "generic_result",
+                session
+            )
+        );
+        let context = crate::tools::spec::ToolContext::new(home).with_state_namespace(session);
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let retained = runtime
+            .block_on(
+                crate::tools::tool_result_retrieval::RetrieveToolResultTool.execute(
+                    json!({"ref":call_id,"ref_kind":"tool_call_id","mode":"tail","line_count":1}),
+                    &context,
+                ),
+            )
+            .unwrap();
+        assert!(retained.content.contains("END"));
+    });
+}
+
+#[test]
+fn forkguard_generic_long_call_retention_publishes_typed_identity() {
+    use crate::tools::spec::ToolSpec;
+    with_artifact_home(|home| {
+        let session = "generic-long-proof";
+        let call_id = "g".repeat(140);
+        let raw = format!("GENERIC\n{}END", "payload\n".repeat(1_000));
+        let mut output = ToolResult::success(raw.clone());
+        assert!(
+            crate::tools::truncate::preserve_full_output_for_model_context(
+                &mut output,
+                &call_id,
+                "generic_result",
+                session
+            )
+        );
+        assert_eq!(output.content, raw);
+        let handle = crate::artifacts::artifact_id_for_tool_call(&call_id);
+        assert!(
+            crate::tools::large_output_router::read_evidence_metadata(session, &handle).is_err()
+        );
+        let view = super::context::tool_result_context_view(
+            ApiProvider::Deepseek,
+            ROUTE_128K,
+            Some(codewhale_config::route::RouteLimits {
+                context_tokens: Some(2048),
+                ..Default::default()
+            }),
+            "generic_result",
+            &output,
+        );
+        assert!(!view.needs_full_output_artifact);
+        assert!(
+            view.text.chars().count() <= 245 && view.text.contains("ref_kind=tool_call_id"),
+            "{}",
+            view.text
+        );
+        let context = crate::tools::spec::ToolContext::new(home).with_state_namespace(session);
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let retained = runtime
+            .block_on(
+                crate::tools::tool_result_retrieval::RetrieveToolResultTool.execute(
+                    json!({"ref":call_id,"ref_kind":"tool_call_id","mode":"tail","line_count":1}),
+                    &context,
+                ),
+            )
+            .unwrap();
+        assert!(retained.content.contains("END"));
+    });
+}
+
+#[test]
+fn forkguard_retention_conflicting_evidence_never_advertises_another_call() {
+    use crate::tools::large_output_router::WorkshopConfig;
+    use crate::tools::spec::ToolSpec;
+    let _environment = crate::test_support::lock_test_env();
+    let _workshop = crate::tools::large_output_router::active_workshop_test_guard();
+    struct RestoreWorkshop(WorkshopConfig);
+    impl Drop for RestoreWorkshop {
+        fn drop(&mut self) {
+            let _ = WorkshopConfig::install_active(Some(&self.0));
+        }
+    }
+    let _restore = RestoreWorkshop(WorkshopConfig::install_active(None));
+    with_artifact_home(|home| {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let first_id = format!("{}.", "x".repeat(139));
+        let second_id = format!("{}_", "x".repeat(139));
+        let next_id = format!("{}z", "x".repeat(139));
+        let handle = crate::artifacts::artifact_id_for_tool_call(&first_id);
+        assert_eq!(
+            handle,
+            crate::artifacts::artifact_id_for_tool_call(&second_id)
+        );
+        for classic in [false, true] {
+            let _adaptive =
+                crate::test_support::EnvVarGuard::set("CODEWHALE_CLASSIC_OUTPUT_ROUTING", "0");
+            let session = if classic {
+                "retention-classic-conflict"
+            } else {
+                "retention-generic-conflict"
+            };
+            let raw = format!(
+                "BEGIN\n{}\nEND",
+                "x".repeat(if classic { 120_000 } else { 60_000 })
+            );
+            let mut first = ToolResult::success(raw.clone());
+            crate::tools::truncate::apply_spillover_with_artifact(
+                &mut first,
+                &first_id,
+                "generic_result",
+                session,
+            )
+            .unwrap();
+            let evidence =
+                crate::tools::large_output_router::read_evidence_metadata(session, &handle)
+                    .unwrap();
+            assert_eq!(evidence.call_id, first_id);
+            let _routing = crate::test_support::EnvVarGuard::set(
+                "CODEWHALE_CLASSIC_OUTPUT_ROUTING",
+                if classic { "1" } else { "0" },
+            );
+            let mut rejected = ToolResult::success(raw.clone());
+            assert!(
+                crate::tools::truncate::apply_spillover_with_artifact(
+                    &mut rejected,
+                    &second_id,
+                    "generic_result",
+                    session
+                )
+                .is_none()
+            );
+            assert!(
+                !crate::tools::truncate::preserve_full_output_for_model_context(
+                    &mut rejected,
+                    &second_id,
+                    "generic_result",
+                    session
+                )
+            );
+            assert_eq!(rejected.content, raw);
+            assert!(
+                rejected
+                    .metadata
+                    .as_ref()
+                    .and_then(|m| m.get("artifact_id"))
+                    .is_none()
+            );
+            assert_eq!(
+                serde_json::to_value(
+                    crate::tools::large_output_router::read_evidence_metadata(session, &handle)
+                        .unwrap()
+                )
+                .unwrap(),
+                serde_json::to_value(&evidence).unwrap()
+            );
+            let context = crate::tools::spec::ToolContext::new(home).with_state_namespace(session);
+            let retained = runtime.block_on(crate::tools::tool_result_retrieval::RetrieveToolResultTool.execute(
+                json!({"ref":first_id,"ref_kind":"tool_call_id","mode":"tail","line_count":1}), &context,
+            )).unwrap();
+            assert!(retained.content.contains("END"));
+            let wrong = runtime.block_on(crate::tools::tool_result_retrieval::RetrieveToolResultTool.execute(
+                json!({"ref":second_id,"ref_kind":"tool_call_id","mode":"tail","line_count":1}), &context,
+            )).unwrap_err().to_string();
+            assert!(wrong.contains("another tool call"), "{wrong}");
+            // A subsequent noncolliding call still saves and restores normally.
+            let mut next = ToolResult::success(raw.clone());
+            assert!(
+                crate::tools::truncate::preserve_full_output_for_model_context(
+                    &mut next,
+                    &next_id,
+                    "generic_result",
+                    session
+                )
+            );
+            let retained = runtime.block_on(crate::tools::tool_result_retrieval::RetrieveToolResultTool.execute(
+                json!({"ref":next_id,"ref_kind":"tool_call_id","mode":"tail","line_count":1}), &context,
+            )).unwrap();
+            assert!(retained.content.contains("END"));
+        }
+    });
+}
+
+#[test]
+fn forkguard_generic_metadata_and_recovery_share_the_whole_route_budget() {
+    use crate::tools::large_output_router::WorkshopConfig;
+    let _workshop = crate::tools::large_output_router::active_workshop_test_guard();
+    struct RestoreWorkshop(WorkshopConfig);
+    impl Drop for RestoreWorkshop {
+        fn drop(&mut self) {
+            let _ = WorkshopConfig::install_active(Some(&self.0));
+        }
+    }
+    let _restore = RestoreWorkshop(WorkshopConfig::install_active(None));
+    assert_eq!(
+        crate::route_budget::route_inline_char_budget(Some(2048)),
+        245
+    );
+    with_artifact_home(|home| {
+        // The old bare-ID grammar would select this distinct prior call for
+        // a current provider ID that itself starts with art_.
+        let mut previous = ToolResult::success("WRONG OLDER EVIDENCE\n".repeat(1000));
+        assert!(
+            crate::tools::truncate::preserve_full_output_for_model_context(
+                &mut previous,
+                &"x".repeat(188),
+                "generic_result",
+                SESSION_6508
+            )
+        );
+        for window in [2048, 4096, 128_000] {
+            for (index, summary) in [None, Some("m".repeat(320)), Some("界🙂".repeat(160))]
+                .into_iter()
+                .enumerate()
+            {
+                let raw = format!("BEGIN\n{}END", "一行🙂data\n".repeat(4_000));
+                let mut output = ToolResult::success(raw.clone());
+                if let Some(summary) = summary {
+                    output.metadata = Some(json!({"summary": summary}));
+                }
+                let view = |output: &ToolResult| {
+                    super::context::tool_result_context_view(
+                        ApiProvider::Deepseek,
+                        ROUTE_128K,
+                        Some(codewhale_config::route::RouteLimits {
+                            context_tokens: Some(window),
+                            ..Default::default()
+                        }),
+                        "generic_result",
+                        output,
+                    )
+                };
+                let budget = crate::route_budget::route_inline_char_budget(Some(window as u32));
+                let unsaved = view(&output);
+                assert!(unsaved.needs_full_output_artifact);
+                assert!(
+                    unsaved.text.chars().count() <= budget,
+                    "window={window}: {}",
+                    unsaved.text
+                );
+                assert!(
+                    unsaved.text.contains("no tool call reaches this copy"),
+                    "{}",
+                    unsaved.text
+                );
+                // Keep even the writer's temporary component below 255 bytes.
+                // The emitted ref still cannot fit the small-route footer.
+                let call_id = if window == 2048 {
+                    match index {
+                        0 => format!("art_{}", "x".repeat(188)),
+                        1 => format!("{}.", "x".repeat(191)),
+                        _ => "x".repeat(192),
+                    }
+                } else {
+                    format!("budget-{window}-{index}")
+                };
+                assert!(
+                    crate::tools::truncate::preserve_full_output_for_model_context(
+                        &mut output,
+                        &call_id,
+                        "generic_result",
+                        SESSION_6508,
+                    )
+                );
+                let saved = view(&output);
+                assert!(!saved.needs_full_output_artifact);
+                assert!(
+                    saved.text.chars().count() <= budget,
+                    "window={window}: {}",
+                    saved.text
+                );
+                assert!(
+                    saved.text.contains("retrieve_tool_result"),
+                    "{}",
+                    saved.text
+                );
+                assert!(saved.text.contains("output omitted ("), "{}", saved.text);
+                assert!(
+                    unsaved.text.contains("output omitted ("),
+                    "{}",
+                    unsaved.text
+                );
+                // Follow the actual model-visible instruction. A full ref
+                // invented by the test would conceal a cut quoted reference.
+                let advertised_ref = if let Some((_, rest)) = saved.text.split_once("ref=\"") {
+                    rest.split_once('"')
+                        .expect("complete quoted recovery ref")
+                        .0
+                        .to_owned()
+                } else {
+                    assert!(
+                        saved.text.contains("ref_kind=tool_call_id"),
+                        "{}",
+                        saved.text
+                    );
+                    call_id.clone()
+                };
+                // The context view cannot change the UI/full-evidence payload.
+                assert_eq!(output.content, raw);
+                let runtime = tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                    .unwrap();
+                let context =
+                    crate::tools::spec::ToolContext::new(home).with_state_namespace(SESSION_6508);
+                let recovered = runtime
+                    .block_on(crate::tools::spec::ToolSpec::execute(
+                        &crate::tools::tool_result_retrieval::RetrieveToolResultTool,
+                        json!({"ref": advertised_ref, "ref_kind":if saved.text.contains("ref_kind=tool_call_id") {"tool_call_id"} else {"artifact"}, "mode":"tail", "line_count":1}),
+                        &context,
+                    ))
+                    .unwrap();
+                assert!(recovered.success && recovered.content.contains("END"));
+            }
+        }
+    });
 }
 
 #[test]
@@ -20818,9 +25015,10 @@ fn forkguard_subagent_hint_gates_on_visible_rows_only() {
 // snapshot shape, so they must keep passing through bounded — the scope is
 // the payload the model needs to reason about its own write permissions.
 // The fixture mirrors the real receipt: `PersistedWriteClaim` serializes as
-// {claim, sequence, isolated_worktree} with no `action` key (the translated
-// `action: "claim"` only exists on the tool-call input), so it survives via
-// the summarizer's shape fall-through, not the action rule.
+// {claim, sequence, isolated_worktree} (plus `worktree_root` when an
+// isolated claim records its serialization key) with no `action` key (the
+// translated `action: "claim"` only exists on the tool-call input), so it
+// survives via the summarizer's shape fall-through, not the action rule.
 #[test]
 fn forkguard_agent_claim_receipt_passes_through_to_context() {
     let claim = json!({
@@ -21541,6 +25739,7 @@ fn turn_metadata_is_byte_identical_across_identical_consecutive_turns() {
                 approval_mode: engine.session.approval_mode,
                 working_set: &engine.session.working_set,
                 policy_narrowing: None,
+                authority_transition: None,
             },
         )
     };
@@ -21679,6 +25878,7 @@ fn turn_meta_block_stays_within_measured_ceiling() {
             approval_mode: engine.session.approval_mode,
             working_set: &engine.session.working_set,
             policy_narrowing: None,
+            authority_transition: None,
         },
     );
     let ContentBlock::Text { text, .. } = message.content.last().expect("turn metadata block")
@@ -21730,6 +25930,7 @@ fn turn_metadata_names_the_effective_sandbox_posture() {
                 approval_mode: engine.session.approval_mode,
                 working_set: &engine.session.working_set,
                 policy_narrowing: None,
+                authority_transition: None,
             },
         );
         let ContentBlock::Text { text, .. } = message.content.last().expect("turn metadata block")
@@ -25774,6 +29975,7 @@ fn engine_handle_try_send_does_not_block_when_op_channel_is_full() {
     // Construct a minimal EngineHandle with the tiny channel.
     let cancel_token = CancellationToken::new();
     let handle = EngineHandle {
+        run_completion: None,
         tx_op,
         rx_event: Arc::new(RwLock::new(mpsc::channel::<Event>(1).1)),
         cancel_token: Arc::new(StdMutex::new(super::TurnCancelSlot {
@@ -25795,10 +29997,13 @@ fn engine_handle_try_send_does_not_block_when_op_channel_is_full() {
                 false,
                 crate::tui::approval::ApprovalMode::Suggest,
                 None,
+                None,
             ),
         ))),
         steer_control: Arc::new(StdMutex::new(SteerControlState::default())),
         compaction_cancellation: Arc::new(StdMutex::new(CompactionCancellationState::default())),
+        approval_ack_timeout: super::handle::APPROVAL_ACK_TIMEOUT,
+        approval_ack_settle_timeout: super::handle::APPROVAL_ACK_SETTLE_TIMEOUT,
     };
 
     // Fill the op channel with one message (capacity = 1).
@@ -25817,6 +30022,7 @@ fn engine_handle_try_send_does_not_block_when_op_channel_is_full() {
         auto_approve: false,
         approval_mode: crate::tui::approval::ApprovalMode::Auto,
         configured_sandbox_mode: None,
+        ask_on_guardrail: None,
     });
     assert!(result.is_err(), "try_send should fail when channel is full");
     let authority = handle.runtime_permission_authority();
@@ -25859,6 +30065,7 @@ async fn full_mailbox_posture_update_supersedes_queued_change_mode() {
             auto_approve: false,
             approval_mode: ApprovalMode::Suggest,
             configured_sandbox_mode: None,
+            ask_on_guardrail: None,
         })
         .expect("queue older posture");
     for _ in 1..ENGINE_OP_CHANNEL_CAPACITY {
@@ -25874,6 +30081,7 @@ async fn full_mailbox_posture_update_supersedes_queued_change_mode() {
         auto_approve: false,
         approval_mode: ApprovalMode::Auto,
         configured_sandbox_mode: Some("read-only".to_string()),
+        ask_on_guardrail: None,
     });
     assert!(
         result.is_err(),
@@ -27368,8 +31576,14 @@ async fn idle_engine_routes_child_approval_decisions_to_the_waiting_child() {
         .expect("child prompt resolved");
     assert_eq!(outcome, ChildApprovalOutcome::Denied);
 
-    // A decision for a parent-shaped id has no child waiter and is not routed.
+    // A decision for a parent-shaped id has no child waiter and is not
+    // routed: the idle loop nacks it so the caller does not read a bare
+    // enqueue as acceptance.
     assert!(!crate::tools::subagent::SubAgentManager::is_child_approval_id("call_123"));
+    assert!(
+        handle.approve_tool_call("call_123").await.is_err(),
+        "an idle engine must nack a decision no waiter can consume"
+    );
     handle.send(Op::Shutdown).await.expect("shutdown engine");
     run.await.expect("engine task");
 }
@@ -30242,6 +34456,7 @@ fn exec_judged_cwd_resolves_symlinks_like_execution() {
             Path::new(&primary),
             &roots,
             crate::tui::approval::ApprovalMode::Suggest,
+            false,
         ),
         Some(ToolAskRuleDecision::Allow)
     );
@@ -30256,6 +34471,7 @@ fn exec_judged_cwd_resolves_symlinks_like_execution() {
             Path::new(&primary),
             &roots,
             crate::tui::approval::ApprovalMode::Suggest,
+            false,
         ),
         Some(ToolAskRuleDecision::Allow)
     );
@@ -30270,6 +34486,7 @@ fn exec_judged_cwd_resolves_symlinks_like_execution() {
             Path::new(&primary),
             &roots,
             crate::tui::approval::ApprovalMode::Suggest,
+            false,
         ),
         Some(ToolAskRuleDecision::Allow)
     );
@@ -30316,6 +34533,7 @@ fn exec_judged_cwd_resolves_absent_interior_behind_symlink() {
             Path::new(&primary),
             &roots,
             crate::tui::approval::ApprovalMode::Suggest,
+            false,
         ),
         Some(ToolAskRuleDecision::Allow)
     );
@@ -30352,5 +34570,1788 @@ fn composer_bang_ask_rule_site_forwards_session_workspace_roots() {
     );
 }
 
+// ───────────────────────── Pinvou tri-mode safety (ask-on-guardrail) ─────────────────────────
+//
+// These tests pin the host-armed interactive guardrail prompts: unarmed
+// behavior must stay byte-identical to the pre-flag doctrine (the existing
+// `full_access_blocks_non_bypassable_registered_tools_without_prompting`,
+// `yolo_mode_does_not_prompt_for_typed_ask_rule`, and
+// `sandbox_escalation_fails_closed_when_the_posture_cannot_prompt` pins keep
+// enforcing that); armed behavior converts the fail-closed guardrail faces
+// into approval requests because the host has guaranteed a person can answer.
+
+#[test]
+fn forkguard_armed_deny_face_becomes_guardrail_prompt_unarmed_stays_block() {
+    let engine =
+        codewhale_execpolicy::ExecPolicyEngine::new(Vec::new(), vec!["rm -rf".to_string()]);
+    let workspace = Path::new("/repo");
+    let command = "rm -rf /tmp/whatever";
+
+    // Unarmed (the default): the denied-prefix face stays a hard block with
+    // the main-line wording.
+    let unarmed = super::tool_ask_rule_decision_for_context(
+        &engine,
+        "exec_shell",
+        command,
+        None,
+        workspace,
+        workspace,
+        &[],
+        crate::tui::approval::ApprovalMode::Bypass,
+        false,
+    );
+    match unarmed {
+        Some(ToolAskRuleDecision::Block(reason)) => {
+            assert!(
+                reason.contains("denied prefix rule 'rm -rf'"),
+                "unarmed deny face must carry the main-line reason: {reason}"
+            );
+        }
+        other => panic!("unarmed deny face must Block, got {other:?}"),
+    }
+
+    // Armed under Full Access: the same face becomes an approval request
+    // carrying the full matching evidence — the rich denied-prefix matching
+    // face is what makes armed prompting meaningful.
+    let armed = super::tool_ask_rule_decision_for_context(
+        &engine,
+        "exec_shell",
+        command,
+        None,
+        workspace,
+        workspace,
+        &[],
+        crate::tui::approval::ApprovalMode::Bypass,
+        true,
+    );
+    match armed {
+        Some(ToolAskRuleDecision::Prompt(reason)) => {
+            assert!(
+                reason.starts_with("Guardrail approval requested (ask-on-guardrail is armed):"),
+                "armed deny face must be framed as a guardrail approval: {reason}"
+            );
+            assert!(
+                reason.contains("denied prefix rule 'rm -rf'"),
+                "armed prompt must carry the matching evidence: {reason}"
+            );
+        }
+        other => panic!("armed deny face must Prompt, got {other:?}"),
+    }
+
+    // `Never` never prompts, even when armed: nobody is at the card.
+    let never_armed = super::tool_ask_rule_decision_for_context(
+        &engine,
+        "exec_shell",
+        command,
+        None,
+        workspace,
+        workspace,
+        &[],
+        crate::tui::approval::ApprovalMode::Never,
+        true,
+    );
+    assert!(
+        matches!(never_armed, Some(ToolAskRuleDecision::Block(_))),
+        "Never posture keeps the deny face even when armed, got {never_armed:?}"
+    );
+
+    // Auto-Review keeps it too: the resolver denies unconditionally there,
+    // so the armed conversion must not even reword the deny face.
+    let auto_armed = super::tool_ask_rule_decision_for_context(
+        &engine,
+        "exec_shell",
+        command,
+        None,
+        workspace,
+        workspace,
+        &[],
+        crate::tui::approval::ApprovalMode::Auto,
+        true,
+    );
+    assert!(
+        matches!(auto_armed, Some(ToolAskRuleDecision::Block(_))),
+        "Auto-Review posture keeps the deny face even when armed, got {auto_armed:?}"
+    );
+}
+
+#[test]
+fn forkguard_turn_meta_authority_transition_renders_only_on_change() {
+    use crate::core::authority::{AuthorityTransition, TurnMetaPosture};
+    let tmp = tempdir().expect("tempdir");
+    let config = EngineConfig {
+        workspace: tmp.path().to_path_buf(),
+        ..EngineConfig::default()
+    };
+    let (engine, _handle) = Engine::new(config, &Config::default());
+    let prompt_context = NextTurnPromptContext::for_planned_turn(
+        ApiProvider::Deepseek,
+        "deepseek-v4-flash".to_string(),
+        None,
+        AppMode::Agent,
+        None,
+        crate::tools::goal::GoalStatus::Active,
+        None,
+        false,
+        None,
+    );
+    fn snapshot_with<'a>(
+        engine: &'a Engine,
+        prompt_context: &'a NextTurnPromptContext,
+        transition: Option<AuthorityTransition>,
+    ) -> TurnMetadataSnapshot<'a> {
+        TurnMetadataSnapshot {
+            prompt_context,
+            system_prompt: None,
+            approval_mode: engine.session.approval_mode,
+            working_set: &engine.session.working_set,
+            policy_narrowing: None,
+            authority_transition: transition,
+        }
+    }
+    let meta_of = |msg: &Message| -> String {
+        let ContentBlock::Text { text, .. } = msg.content.last().expect("turn metadata block")
+        else {
+            panic!("expected text metadata block");
+        };
+        text.clone()
+    };
+    let message_for = |engine: &Engine, transition: Option<AuthorityTransition>| {
+        engine.user_text_message_from_snapshot(
+            "mode flip context".to_string(),
+            &prompt_context.model,
+            false,
+            None,
+            false,
+            UserInputProvenance::ExternalUser,
+            snapshot_with(engine, &prompt_context, transition),
+        )
+    };
+
+    // No transition: the block carries no transition line at all.
+    let plain_meta = meta_of(&message_for(&engine, None));
+    assert!(
+        !plain_meta.contains("Authority transition"),
+        "blocks must stay transition-free without a host change: {plain_meta}"
+    );
+
+    // A transition renders exactly one explicit line naming both postures.
+    let transition = AuthorityTransition::from_postures(
+        TurnMetaPosture {
+            mode: AppMode::Agent,
+            approval: crate::tui::approval::ApprovalMode::Bypass,
+            ask_on_guardrail: true,
+        },
+        TurnMetaPosture {
+            mode: AppMode::Agent,
+            approval: crate::tui::approval::ApprovalMode::Suggest,
+            ask_on_guardrail: false,
+        },
+    );
+    let changed_meta = meta_of(&message_for(&engine, Some(transition)));
+    assert!(
+        changed_meta.contains(
+            "Authority transition (host): agent (Full Access, guardrail prompts armed) -> agent (Ask, guardrail prompts disarmed); reason: host_authority_change"
+        ),
+        "the transition line must be explicit and self-describing: {changed_meta}"
+    );
+    assert_eq!(
+        changed_meta
+            .lines()
+            .filter(|line| line.contains("Authority transition"))
+            .count(),
+        1,
+        "exactly one transition line"
+    );
+}
+
+#[test]
+fn forkguard_live_turn_meta_builder_reads_the_pending_transition() {
+    use crate::core::authority::{AuthorityTransition, TurnMetaPosture};
+    let tmp = tempdir().expect("tempdir");
+    let config = EngineConfig {
+        workspace: tmp.path().to_path_buf(),
+        ..EngineConfig::default()
+    };
+    let (mut engine, _handle) = Engine::new(config, &Config::default());
+    let block_text = |engine: &Engine| -> String {
+        match engine.turn_metadata_block(
+            "deepseek-v4-flash",
+            false,
+            None,
+            false,
+            UserInputProvenance::ExternalUser,
+            "hello",
+            None,
+        ) {
+            ContentBlock::Text { text, .. } => text,
+            other => panic!("expected text metadata block, got {other:?}"),
+        }
+    };
+
+    // No pending transition: byte-stable ordinary block.
+    engine.pending_authority_transition = None;
+    let plain = block_text(&engine);
+    assert!(!plain.contains("Authority transition"), "{plain}");
+
+    // The turn-start comparison stores the pending transition; the live
+    // builder must render it (this is the wiring between the turn-start
+    // compare and the outbound message).
+    engine.pending_authority_transition = Some(AuthorityTransition::from_postures(
+        TurnMetaPosture {
+            mode: AppMode::Agent,
+            approval: crate::tui::approval::ApprovalMode::Bypass,
+            ask_on_guardrail: true,
+        },
+        TurnMetaPosture {
+            mode: AppMode::Agent,
+            approval: crate::tui::approval::ApprovalMode::Suggest,
+            ask_on_guardrail: false,
+        },
+    ));
+    let armed = block_text(&engine);
+    assert!(
+        armed.contains("Authority transition (host):"),
+        "live builder must render the pending transition: {armed}"
+    );
+}
+
+#[tokio::test]
+async fn forkguard_armed_full_access_hold_prompts_instead_of_blocking() {
+    // The unarmed sibling of this behavior is pinned by
+    // `full_access_blocks_non_bypassable_registered_tools_without_prompting`.
+    // Armed, the same hold must reach the host as an approval request with
+    // `approval_force_prompt` set (no session grant or posture shortcut may
+    // consume it silently), and the deny decision must read as an approval
+    // denial — never as the Full Access block.
+    use wiremock::matchers::{body_string_contains, method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    let _lock = lock_test_env();
+    let workspace = tempdir().expect("tempdir");
+    let engine_config = EngineConfig {
+        model: crate::config::DEFAULT_TEXT_MODEL.to_string(),
+        workspace: workspace.path().to_path_buf(),
+        mcp_config_path: workspace.path().join("mcp.json"),
+        snapshots_enabled: false,
+        subagents_enabled: false,
+        ..EngineConfig::default()
+    };
+
+    let server = MockServer::start().await;
+    let tool_delta = json!({
+        "id": "chatcmpl-armed-hold",
+        "choices": [{
+            "index": 0,
+            "delta": {"tool_calls": [{
+                "index": 0,
+                "id": "call_armed_hold_0",
+                "type": "function",
+                "function": {
+                    "name": "start_mcp_server",
+                    "arguments": json!({"server": "probe-server", "name": "armed-probe"}).to_string(),
+                },
+            }]},
+            "finish_reason": serde_json::Value::Null,
+        }],
+    });
+    let tool_finish = json!({
+        "id": "chatcmpl-armed-hold",
+        "choices": [{"index": 0, "delta": {}, "finish_reason": "tool_calls"}],
+    });
+    let tool_call_sse = format!("data: {tool_delta}\n\ndata: {tool_finish}\n\ndata: [DONE]\n\n");
+    let done_sse = concat!(
+        "data: {\"id\":\"chatcmpl-armed-done\",\"choices\":[{\"index\":0,",
+        "\"delta\":{\"content\":\"done\"},\"finish_reason\":null}]}\n\n",
+        "data: {\"id\":\"chatcmpl-armed-done\",\"choices\":[{\"index\":0,\"delta\":{},",
+        "\"finish_reason\":\"stop\"}]}\n\n",
+        "data: [DONE]\n\n",
+    );
+
+    // `start_mcp_server` is a deferred tool: its first use returns the
+    // schema receipt (discovery, never execution), and the model's retry is
+    // the call the armed hold gates. Three-step wire: (lowest priority)
+    // first request -> tool call; (2) schema-receipt followup -> the same
+    // tool call again, now hydrated; (highest) denial followup -> done.
+    Mock::given(method("POST"))
+        .and(path("/v1/chat/completions"))
+        .and(body_string_contains("denied by user"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .insert_header("content-type", "text/event-stream")
+                .set_body_string(done_sse),
+        )
+        .expect(1)
+        .with_priority(1)
+        .mount(&server)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/v1/chat/completions"))
+        .and(body_string_contains("Retry with the loaded schema"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .insert_header("content-type", "text/event-stream")
+                .set_body_string(tool_call_sse.clone()),
+        )
+        .expect(1)
+        .with_priority(2)
+        .mount(&server)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/v1/chat/completions"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .insert_header("content-type", "text/event-stream")
+                .set_body_string(tool_call_sse),
+        )
+        .expect(1)
+        .with_priority(3)
+        .mount(&server)
+        .await;
+
+    let api_config = Config {
+        api_key: Some("test-key".to_string()),
+        base_url: Some(server.uri()),
+        ..Config::default()
+    };
+    let (engine, handle) = Engine::new(engine_config, &api_config);
+    let handle_for_approval = handle.clone();
+    let run_task = tokio::spawn(engine.run());
+
+    // Arm through the same `ChangeMode` channel hosts use for the toggle.
+    handle
+        .send(Op::ChangeMode {
+            mode: AppMode::Agent,
+            allow_shell: true,
+            trust_mode: true,
+            auto_approve: true,
+            approval_mode: crate::tui::approval::ApprovalMode::Bypass,
+            configured_sandbox_mode: None,
+            ask_on_guardrail: Some(true),
+        })
+        .await
+        .expect("arm guardrail prompts");
+
+    handle
+        .send(Op::SendMessage {
+            content: "exercise the armed Full Access hold".to_string(),
+            mode: AppMode::Agent,
+            route: resolved_route_for_test(&api_config, crate::config::DEFAULT_TEXT_MODEL),
+            compaction: Box::new(CompactionConfig::default()),
+            goal_objective: None,
+            goal_token_budget: None,
+            goal_status: crate::tools::goal::GoalStatus::Active,
+            reasoning_effort: None,
+            reasoning_effort_auto: false,
+            auto_model: false,
+            allow_shell: true,
+            trust_mode: true,
+            auto_approve: true,
+            approval_mode: crate::tui::approval::ApprovalMode::Bypass,
+            translation_enabled: false,
+            allowed_tools: None,
+            dynamic_tools: Vec::new(),
+            hook_executor: None,
+            verbosity: None,
+            provenance: UserInputProvenance::ExternalUser,
+            turn_tool_security: None,
+            submission_id: None,
+        })
+        .await
+        .expect("send armed Full Access model turn");
+
+    let mut saw_prompt = false;
+    let mut saw_complete = false;
+    let mut rx = handle.rx_event.write().await;
+    while let Some(event) = tokio::time::timeout(model_turn_event_timeout(), rx.recv())
+        .await
+        .expect("timed out waiting for armed hold event")
+    {
+        match event {
+            Event::ApprovalRequired {
+                id,
+                tool_name,
+                description,
+                approval_force_prompt,
+                ..
+            } => {
+                assert_eq!(tool_name, "start_mcp_server");
+                assert!(
+                    approval_force_prompt,
+                    "armed hold must carry approval_force_prompt"
+                );
+                assert!(
+                    description.contains("ask-on-guardrail is armed"),
+                    "armed hold description must say why it prompts: {description}"
+                );
+                saw_prompt = true;
+                handle_for_approval
+                    .deny_tool_call(id)
+                    .await
+                    .expect("deny armed hold");
+            }
+            Event::ToolCallComplete { name, result, .. } if name == "start_mcp_server" => {
+                // The first completion is the deferred-tool schema receipt
+                // (an Ok result, never executed); the hold denial is the
+                // error completion after the hydrated retry.
+                let Some(error) = result.as_ref().err() else {
+                    continue;
+                };
+                let error = error.to_string();
+                assert!(
+                    error.contains("denied by user"),
+                    "armed hold denial must read as an approval denial: {error}"
+                );
+                assert!(
+                    !error.contains("blocked in Full Access"),
+                    "armed hold must not be phrased as the Full Access block: {error}"
+                );
+                saw_complete = true;
+            }
+            Event::TurnComplete { status, .. } => {
+                assert_eq!(status, TurnOutcomeStatus::Completed);
+                break;
+            }
+            _ => {}
+        }
+    }
+    drop(rx);
+
+    handle.send(Op::Shutdown).await.expect("shutdown engine");
+    run_task.await.expect("engine task");
+    assert!(saw_prompt, "armed Full Access hold must prompt");
+    assert!(saw_complete, "denied armed hold must complete the turn");
+}
+
+#[tokio::test]
+async fn forkguard_turn_authority_install_never_rolls_back_published_arming() {
+    // `record_applied_runtime_authority` rebuilds the applied authority via
+    // `from_turn_authority`, whose `ask_on_guardrail` is always `None`
+    // (turn installs carry no arming). The recorder must patch the
+    // session's live arming back in: a turn authority install after a
+    // published arming may not roll the recorded `Some(true)` backward to
+    // `None`, or the equality-based re-record check would flap the
+    // authority state on every turn install.
+    let tmp = tempdir().expect("tempdir");
+    let (mut engine, handle) = Engine::new(
+        EngineConfig {
+            workspace: tmp.path().to_path_buf(),
+            ..EngineConfig::default()
+        },
+        &Config::default(),
+    );
+
+    // The host arms through the same publish channel `Op::ChangeMode` uses.
+    handle.publish_turn_authority(
+        AppMode::Agent,
+        false,
+        false,
+        false,
+        crate::tui::approval::ApprovalMode::Suggest,
+        None,
+        Some(true),
+    );
+    assert!(
+        engine.apply_pending_runtime_authority().await,
+        "the armed publish must reach the session"
+    );
+    assert!(engine.session.ask_on_guardrail, "session must be armed");
+    let published = engine.runtime_authority_snapshot();
+    assert_eq!(published.ask_on_guardrail, Some(true));
+
+    // A later turn installs its arming-free turn authority; the re-record
+    // must keep the published arming and stay quiescent.
+    let turn_authority = TurnAuthority::from_effective_fields(
+        AppMode::Agent,
+        false,
+        false,
+        false,
+        crate::tui::approval::ApprovalMode::Suggest,
+    );
+    engine.record_applied_runtime_authority(&turn_authority);
+
+    let recorded = engine.runtime_authority_snapshot();
+    assert_eq!(
+        recorded.ask_on_guardrail,
+        Some(true),
+        "turn authority install must not roll the published arming back to None"
+    );
+    assert_eq!(
+        recorded, published,
+        "re-record must be a no-op against the published armed authority"
+    );
+    assert!(
+        engine.take_pending_runtime_authority().is_none(),
+        "no spurious re-record may schedule another authority transition"
+    );
+}
+
+#[tokio::test]
+async fn forkguard_pending_arming_survives_arming_free_authority_publishes() {
+    // The publish path REPLACES the whole authority snapshot, and the op
+    // loop applies the snapshot, never the queued op payload. A posture-only
+    // publish racing a host arm — a mid-turn turn install, or a ChangeMode
+    // op that carries no arming — used to overwrite the pending
+    // `Some(true)` with `None`, so the drain silently dropped the arm
+    // request with no event and no receipt. `None` must mean "keep" at the
+    // publish layer too (the same doctrine `apply_change_mode` applies);
+    // only an explicit `Some` may move arming.
+    let tmp = tempdir().expect("tempdir");
+    let (mut engine, handle) = Engine::new(
+        EngineConfig {
+            workspace: tmp.path().to_path_buf(),
+            ..EngineConfig::default()
+        },
+        &Config::default(),
+    );
+
+    // The host arms through the publish channel `Op::ChangeMode` uses.
+    handle.publish_turn_authority(
+        AppMode::Agent,
+        false,
+        false,
+        false,
+        crate::tui::approval::ApprovalMode::Suggest,
+        None,
+        Some(true),
+    );
+
+    // Before the engine drains, a turn installs its arming-free authority.
+    handle.publish_turn_authority(
+        AppMode::Agent,
+        false,
+        false,
+        false,
+        crate::tui::approval::ApprovalMode::Suggest,
+        None,
+        None,
+    );
+    let snapshot = engine.runtime_authority_snapshot();
+    assert_eq!(
+        snapshot.ask_on_guardrail,
+        Some(true),
+        "an arming-free publish must not erase the pending host arming"
+    );
+
+    // Draining the mangled-but-now-correct snapshot must arm the session.
+    assert!(
+        engine.apply_pending_runtime_authority().await,
+        "the armed publish must reach the session"
+    );
+    assert!(
+        engine.session.ask_on_guardrail,
+        "the interleaved turn install must not have swallowed the arm request"
+    );
+
+    // Disarming is explicit and still lands: `None` keeps, `Some(false)`
+    // clears.
+    handle.publish_turn_authority(
+        AppMode::Agent,
+        false,
+        false,
+        false,
+        crate::tui::approval::ApprovalMode::Suggest,
+        None,
+        None,
+    );
+    let _ = engine.apply_pending_runtime_authority().await;
+    assert!(
+        engine.session.ask_on_guardrail,
+        "an arming-free publish must not disarm either"
+    );
+    handle.publish_turn_authority(
+        AppMode::Agent,
+        false,
+        false,
+        false,
+        crate::tui::approval::ApprovalMode::Suggest,
+        None,
+        Some(false),
+    );
+    assert!(engine.apply_pending_runtime_authority().await);
+    assert!(
+        !engine.session.ask_on_guardrail,
+        "an explicit host disarm must still land"
+    );
+}
+
+#[tokio::test]
+async fn forkguard_apply_change_mode_status_suffixes_report_the_arming_change() {
+    // The mode-changed status event is the user-visible receipt of an
+    // arming toggle: arming and disarming must each append their explicit
+    // suffix, and a change without the ask carrier must stay suffix-free so
+    // it never claims an arming flip that did not happen.
+    async fn status_message(handle: &EngineHandle) -> String {
+        let mut rx = handle.rx_event.write().await;
+        loop {
+            let event = tokio::time::timeout(model_turn_event_timeout(), rx.recv())
+                .await
+                .expect("timed out waiting for the status message")
+                .expect("event stream closed before the status message");
+            if let Event::Status { message } = event {
+                return message;
+            }
+        }
+    }
+
+    let tmp = tempdir().expect("tempdir");
+    let (mut engine, handle) = Engine::new(
+        EngineConfig {
+            workspace: tmp.path().to_path_buf(),
+            ..EngineConfig::default()
+        },
+        &Config::default(),
+    );
+
+    // Arming.
+    engine
+        .apply_change_mode(
+            AppMode::Agent,
+            false,
+            false,
+            false,
+            crate::tui::approval::ApprovalMode::Suggest,
+            None,
+            Some(true),
+        )
+        .await;
+    let armed_status = status_message(&handle).await;
+    assert!(
+        armed_status.starts_with("Runtime policy changed to:"),
+        "{armed_status}"
+    );
+    assert!(
+        armed_status.ends_with(" (guardrail prompts armed)"),
+        "arming must be announced: {armed_status}"
+    );
+
+    // Disarming.
+    engine
+        .apply_change_mode(
+            AppMode::Agent,
+            false,
+            false,
+            false,
+            crate::tui::approval::ApprovalMode::Suggest,
+            None,
+            Some(false),
+        )
+        .await;
+    let disarmed_status = status_message(&handle).await;
+    assert!(
+        disarmed_status.ends_with(" (guardrail prompts disarmed)"),
+        "disarming must be announced: {disarmed_status}"
+    );
+
+    // A mode-only change without the ask carrier carries no suffix.
+    engine
+        .apply_change_mode(
+            AppMode::Plan,
+            false,
+            false,
+            false,
+            crate::tui::approval::ApprovalMode::Suggest,
+            None,
+            None,
+        )
+        .await;
+    let mode_status = status_message(&handle).await;
+    assert!(
+        mode_status.starts_with("Runtime policy changed to:"),
+        "{mode_status}"
+    );
+    assert!(
+        !mode_status.contains("(guardrail prompts"),
+        "a change without the ask carrier must not claim an arming flip: {mode_status}"
+    );
+
+    // A carrier echoing the unchanged session value is the production
+    // shape: the op loop applies the snapshot that
+    // record_applied_runtime_authority backfilled, so an ordinary mode
+    // switch arrives as `Some(disarmed)` on a disarmed session and must
+    // not claim an arming flip either.
+    engine
+        .apply_change_mode(
+            AppMode::Operate,
+            false,
+            false,
+            false,
+            crate::tui::approval::ApprovalMode::Suggest,
+            None,
+            Some(false),
+        )
+        .await;
+    let echoed_status = status_message(&handle).await;
+    assert!(
+        echoed_status.starts_with("Runtime policy changed to:"),
+        "{echoed_status}"
+    );
+    assert!(
+        !echoed_status.contains("(guardrail prompts"),
+        "a carrier echoing the unchanged arming must not claim a flip: {echoed_status}"
+    );
+}
+
+#[tokio::test]
+#[allow(clippy::await_holding_lock)]
+async fn forkguard_turn_start_detector_records_the_posture_and_renders_the_transition_once() {
+    // Pins the production detector end to end (compare → record → render →
+    // consume): the turn that sees a host flip renders the line on its own
+    // block, records the posture it reported, and consumes the pending
+    // change; the next turn under the same posture stays byte-stable.
+    // Deleting the recorder update turns the second request red (the stale
+    // posture re-renders); deleting the consumption reset leaves the pending
+    // transition dangling for mid-turn blocks.
+    use crate::core::authority::TurnMetaPosture;
+    use wiremock::matchers::{method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    let _lock = lock_test_env();
+    let workspace = tempdir().expect("tempdir");
+    let server = MockServer::start().await;
+    let plain_sse = concat!(
+        "data: {\"id\":\"chatcmpl-detector\",\"choices\":[{\"index\":0,",
+        "\"delta\":{\"content\":\"ok\"},\"finish_reason\":null}]}\n\n",
+        "data: {\"id\":\"chatcmpl-detector\",\"choices\":[{\"index\":0,",
+        "\"delta\":{},\"finish_reason\":\"stop\"}]}\n\n",
+        "data: [DONE]\n\n",
+    );
+    Mock::given(method("POST"))
+        .and(path("/v1/chat/completions"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .insert_header("content-type", "text/event-stream")
+                .set_body_string(plain_sse),
+        )
+        .expect(2)
+        .mount(&server)
+        .await;
+
+    let api_config = Config {
+        api_key: Some("test-key".to_string()),
+        base_url: Some(server.uri()),
+        ..Config::default()
+    };
+    let engine_config = EngineConfig {
+        model: crate::config::DEFAULT_TEXT_MODEL.to_string(),
+        workspace: workspace.path().to_path_buf(),
+        mcp_config_path: workspace.path().join("mcp.json"),
+        snapshots_enabled: false,
+        subagents_enabled: false,
+        ..EngineConfig::default()
+    };
+    let (mut engine, _handle) = Engine::new(engine_config, &api_config);
+
+    // The previous block reported Full Access disarmed; this turn runs Full
+    // Access armed, so the arming flip alone must produce the line.
+    engine.last_turn_meta_authority = Some(TurnMetaPosture {
+        mode: AppMode::Agent,
+        approval: crate::tui::approval::ApprovalMode::Bypass,
+        ask_on_guardrail: false,
+    });
+    engine.last_authoritative_turn_meta_posture = Some(TurnMetaPosture {
+        mode: AppMode::Agent,
+        approval: crate::tui::approval::ApprovalMode::Bypass,
+        ask_on_guardrail: false,
+    });
+    engine.session.ask_on_guardrail = true;
+
+    async fn send_turn(
+        engine: &mut Engine,
+        api_config: &Config,
+        prompt: &str,
+    ) -> SendMessageOutcome {
+        engine
+            .handle_send_message(
+                prompt.to_string(),
+                AppMode::Agent,
+                *resolved_route_for_test(api_config, crate::config::DEFAULT_TEXT_MODEL),
+                CompactionConfig::default(),
+                None,
+                None,
+                crate::tools::goal::GoalStatus::Active,
+                None,
+                false,
+                false,
+                true,
+                true,
+                true,
+                crate::tui::approval::ApprovalMode::Bypass,
+                false,
+                None,
+                Vec::new(),
+                None,
+                None,
+                UserInputProvenance::ExternalUser,
+                None,
+            )
+            .await
+    }
+
+    let outcome = send_turn(&mut engine, &api_config, "turn one").await;
+    assert!(
+        matches!(
+            outcome,
+            SendMessageOutcome::Finished {
+                status: TurnOutcomeStatus::Completed,
+                ..
+            }
+        ),
+        "turn one must complete without starting"
+    );
+    assert!(
+        engine.pending_authority_transition.is_none(),
+        "the turn's block must consume the transition so steers and runtime notices cannot re-render it"
+    );
+    assert_eq!(
+        engine.last_turn_meta_authority,
+        Some(TurnMetaPosture {
+            mode: AppMode::Agent,
+            approval: crate::tui::approval::ApprovalMode::Bypass,
+            ask_on_guardrail: true,
+        }),
+        "the detector must record the posture the block reported"
+    );
+
+    let outcome = send_turn(&mut engine, &api_config, "turn two").await;
+    assert!(
+        matches!(
+            outcome,
+            SendMessageOutcome::Finished {
+                status: TurnOutcomeStatus::Completed,
+                ..
+            }
+        ),
+        "turn two must complete without starting"
+    );
+
+    let requests = server
+        .received_requests()
+        .await
+        .expect("wire mock records requests");
+    assert_eq!(
+        requests.len(),
+        2,
+        "each turn makes exactly one provider call"
+    );
+    let first = String::from_utf8_lossy(&requests[0].body);
+    assert!(
+        first.contains(
+            "Authority transition (host): agent (Full Access, guardrail prompts disarmed) -> agent (Full Access, guardrail prompts armed); reason: host_authority_change",
+        ),
+        "the changed turn's wire body must carry the exact transition line"
+    );
+    let second = String::from_utf8_lossy(&requests[1].body);
+    assert_eq!(
+        second.matches("Authority transition (host)").count(),
+        1,
+        "turn one's rendered line persists in history exactly once"
+    );
+    let wire_body: serde_json::Value =
+        serde_json::from_slice(&requests[1].body).expect("second request body is JSON");
+    let last_user_message = wire_body["messages"]
+        .as_array()
+        .expect("messages array")
+        .iter()
+        .rev()
+        .find(|message| message["role"] == "user")
+        .expect("a user message exists");
+    let last_user_content = last_user_message["content"]
+        .as_str()
+        .expect("string content");
+    assert!(
+        !last_user_content.contains("Authority transition"),
+        "an unchanged posture must keep the next turn's own block byte-stable: {last_user_content}"
+    );
+}
+
+#[tokio::test]
+#[allow(clippy::await_holding_lock)]
+async fn forkguard_a_provenance_narrowed_turn_neither_emits_the_host_line_nor_pollutes_the_baseline()
+ {
+    // Pins the narrowing attribution: a provenance-narrowed turn runs a
+    // per-turn authority reduction that the narrowing receipt family already
+    // reports, so it must neither emit the "(host)" transition line
+    // (misattributing the reduction to a host flip) nor update the standing
+    // baseline (otherwise its unwind on the next authoritative turn would
+    // render a reverse "host" line no host ever caused). A genuine host flip
+    // in the same window still renders, measured from the pre-narrowing
+    // standing posture. Removing the suppression gate turns the first body
+    // red; updating the baseline on the narrowed turn turns the second body
+    // red; erasing the baseline turns the third body red.
+    use wiremock::matchers::{method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    let _lock = lock_test_env();
+    let workspace = tempdir().expect("tempdir");
+    let server = MockServer::start().await;
+    let plain_sse = concat!(
+        "data: {\"id\":\"chatcmpl-narrow\",\"choices\":[{\"index\":0,",
+        "\"delta\":{\"content\":\"ok\"},\"finish_reason\":null}]}\n\n",
+        "data: {\"id\":\"chatcmpl-narrow\",\"choices\":[{\"index\":0,",
+        "\"delta\":{},\"finish_reason\":\"stop\"}]}\n\n",
+        "data: [DONE]\n\n",
+    );
+    Mock::given(method("POST"))
+        .and(path("/v1/chat/completions"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .insert_header("content-type", "text/event-stream")
+                .set_body_string(plain_sse),
+        )
+        .expect(3)
+        .mount(&server)
+        .await;
+
+    let api_config = Config {
+        api_key: Some("test-key".to_string()),
+        base_url: Some(server.uri()),
+        ..Config::default()
+    };
+    let engine_config = EngineConfig {
+        model: crate::config::DEFAULT_TEXT_MODEL.to_string(),
+        workspace: workspace.path().to_path_buf(),
+        mcp_config_path: workspace.path().join("mcp.json"),
+        snapshots_enabled: false,
+        subagents_enabled: false,
+        ..EngineConfig::default()
+    };
+    let (mut engine, _handle) = Engine::new(engine_config, &api_config);
+
+    // The standing posture is Full Access; the previous block reported it.
+    let standing = TurnMetaPosture {
+        mode: AppMode::Agent,
+        approval: crate::tui::approval::ApprovalMode::Bypass,
+        ask_on_guardrail: false,
+    };
+    engine.last_turn_meta_authority = Some(standing);
+    engine.last_authoritative_turn_meta_posture = Some(standing);
+
+    async fn send_turn(
+        engine: &mut Engine,
+        api_config: &Config,
+        prompt: &str,
+        approval: crate::tui::approval::ApprovalMode,
+        auto_approve: bool,
+        provenance: UserInputProvenance,
+    ) -> SendMessageOutcome {
+        engine
+            .handle_send_message(
+                prompt.to_string(),
+                AppMode::Agent,
+                *resolved_route_for_test(api_config, crate::config::DEFAULT_TEXT_MODEL),
+                CompactionConfig::default(),
+                None,
+                None,
+                crate::tools::goal::GoalStatus::Active,
+                None,
+                false,
+                false,
+                true,
+                true,
+                auto_approve,
+                approval,
+                false,
+                None,
+                Vec::new(),
+                None,
+                None,
+                provenance,
+                None,
+            )
+            .await
+    }
+
+    async fn assert_completed(outcome: SendMessageOutcome, label: &str) {
+        assert!(
+            matches!(
+                outcome,
+                SendMessageOutcome::Finished {
+                    status: TurnOutcomeStatus::Completed,
+                    ..
+                }
+            ),
+            "{label} must complete without starting"
+        );
+    }
+
+    // Turn one: a provenance-narrowed turn under the Full Access standing
+    // posture. Its reduction is reported by the narrowing receipt family,
+    // never by the "(host)" line, and the standing baseline survives it.
+    let outcome = send_turn(
+        &mut engine,
+        &api_config,
+        "narrowed turn",
+        crate::tui::approval::ApprovalMode::Bypass,
+        true,
+        UserInputProvenance::ImportedTranscript,
+    )
+    .await;
+    assert_completed(outcome, "the narrowed turn").await;
+    assert!(
+        engine.pending_authority_transition.is_none(),
+        "a narrowed turn must leave no pending host transition"
+    );
+    assert_eq!(
+        engine.last_turn_meta_authority,
+        Some(TurnMetaPosture {
+            mode: AppMode::Agent,
+            approval: crate::tui::approval::ApprovalMode::Suggest,
+            ask_on_guardrail: false,
+        }),
+        "the narrowed turn records the posture its block reported"
+    );
+    assert_eq!(
+        engine.last_authoritative_turn_meta_posture,
+        Some(standing),
+        "the narrowed turn must not update the standing baseline"
+    );
+
+    // Turn two: authoritative turn under the unchanged standing posture —
+    // the narrowing unwound, and no host flip ever happened, so the block
+    // must stay free of the "(host)" line entirely.
+    let outcome = send_turn(
+        &mut engine,
+        &api_config,
+        "authoritative turn",
+        crate::tui::approval::ApprovalMode::Bypass,
+        true,
+        UserInputProvenance::ExternalUser,
+    )
+    .await;
+    assert_completed(outcome, "the unwind turn").await;
+    assert_eq!(
+        engine.last_authoritative_turn_meta_posture,
+        Some(standing),
+        "the authoritative turn re-establishes the same standing baseline"
+    );
+
+    // Turn three: a genuine host flip (Full Access -> Ask) must render,
+    // measured from the pre-narrowing standing posture — not from the
+    // narrowed posture the previous block happened to report.
+    let outcome = send_turn(
+        &mut engine,
+        &api_config,
+        "host flip turn",
+        crate::tui::approval::ApprovalMode::Suggest,
+        false,
+        UserInputProvenance::ExternalUser,
+    )
+    .await;
+    assert_completed(outcome, "the host flip turn").await;
+
+    let requests = server
+        .received_requests()
+        .await
+        .expect("wire mock records requests");
+    assert_eq!(
+        requests.len(),
+        3,
+        "each turn makes exactly one provider call"
+    );
+    let narrowed_body = String::from_utf8_lossy(&requests[0].body);
+    assert!(
+        !narrowed_body.contains("Authority transition (host)"),
+        "a provenance-narrowed turn must not emit the host transition line"
+    );
+    assert!(
+        narrowed_body.contains("Authority narrowing:"),
+        "the narrowing receipt family must report the reduction"
+    );
+    let unwind_body = String::from_utf8_lossy(&requests[1].body);
+    assert_eq!(
+        unwind_body.matches("Authority transition (host)").count(),
+        0,
+        "the narrowing unwind on an authoritative turn must not render a \
+         reverse host line"
+    );
+    let flip_body = String::from_utf8_lossy(&requests[2].body);
+    assert!(
+        flip_body.contains(
+            "Authority transition (host): agent (Full Access, guardrail prompts disarmed) -> agent (Ask, guardrail prompts disarmed); reason: host_authority_change",
+        ),
+        "a genuine host flip renders from the standing baseline, not the \
+         narrowed record: {flip_body}"
+    );
+}
+
+#[tokio::test]
+#[allow(clippy::await_holding_lock)]
+async fn forkguard_an_auto_review_turn_narrowed_by_provenance_still_records_its_narrowing() {
+    // Pins the Auto-Review narrowing receipt: Auto-Review is standing auto
+    // authority, so a provenance-narrowed turn that downgrades Auto ->
+    // Suggest must carry the structured narrowing event (a silent downgrade
+    // would leave the model no receipt for why prompts appeared) — and the
+    // reduced turn still emits no "(host)" line, with the standing baseline
+    // untouched so the next authoritative Auto turn stays byte-stable.
+    // Reverting the Auto arm of the narrowing predicate turns the first
+    // body red (the misattributed host line returns).
+    use wiremock::matchers::{method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    let _lock = lock_test_env();
+    let workspace = tempdir().expect("tempdir");
+    let server = MockServer::start().await;
+    let plain_sse = concat!(
+        "data: {\"id\":\"chatcmpl-autonarrow\",\"choices\":[{\"index\":0,",
+        "\"delta\":{\"content\":\"ok\"},\"finish_reason\":null}]}\n\n",
+        "data: {\"id\":\"chatcmpl-autonarrow\",\"choices\":[{\"index\":0,",
+        "\"delta\":{},\"finish_reason\":\"stop\"}]}\n\n",
+        "data: [DONE]\n\n",
+    );
+    Mock::given(method("POST"))
+        .and(path("/v1/chat/completions"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .insert_header("content-type", "text/event-stream")
+                .set_body_string(plain_sse),
+        )
+        .expect(2)
+        .mount(&server)
+        .await;
+
+    let api_config = Config {
+        api_key: Some("test-key".to_string()),
+        base_url: Some(server.uri()),
+        ..Config::default()
+    };
+    let engine_config = EngineConfig {
+        model: crate::config::DEFAULT_TEXT_MODEL.to_string(),
+        workspace: workspace.path().to_path_buf(),
+        mcp_config_path: workspace.path().join("mcp.json"),
+        snapshots_enabled: false,
+        subagents_enabled: false,
+        ..EngineConfig::default()
+    };
+    let (mut engine, _handle) = Engine::new(engine_config, &api_config);
+
+    let auto_standing = TurnMetaPosture {
+        mode: AppMode::Agent,
+        approval: crate::tui::approval::ApprovalMode::Auto,
+        ask_on_guardrail: false,
+    };
+    engine.last_turn_meta_authority = Some(auto_standing);
+    engine.last_authoritative_turn_meta_posture = Some(auto_standing);
+
+    async fn send_turn(
+        engine: &mut Engine,
+        api_config: &Config,
+        prompt: &str,
+        provenance: UserInputProvenance,
+    ) -> SendMessageOutcome {
+        engine
+            .handle_send_message(
+                prompt.to_string(),
+                AppMode::Agent,
+                *resolved_route_for_test(api_config, crate::config::DEFAULT_TEXT_MODEL),
+                CompactionConfig::default(),
+                None,
+                None,
+                crate::tools::goal::GoalStatus::Active,
+                None,
+                false,
+                false,
+                false,
+                false,
+                false,
+                crate::tui::approval::ApprovalMode::Auto,
+                false,
+                None,
+                Vec::new(),
+                None,
+                None,
+                provenance,
+                None,
+            )
+            .await
+    }
+
+    let outcome = send_turn(
+        &mut engine,
+        &api_config,
+        "narrowed auto turn",
+        UserInputProvenance::ImportedTranscript,
+    )
+    .await;
+    assert!(
+        matches!(
+            outcome,
+            SendMessageOutcome::Finished {
+                status: TurnOutcomeStatus::Completed,
+                ..
+            }
+        ),
+        "the narrowed Auto turn must complete without starting"
+    );
+    assert_eq!(
+        engine.last_turn_meta_authority,
+        Some(TurnMetaPosture {
+            mode: AppMode::Agent,
+            approval: crate::tui::approval::ApprovalMode::Suggest,
+            ask_on_guardrail: false,
+        }),
+        "the narrowed turn records the Suggest posture it reported"
+    );
+    assert_eq!(
+        engine.last_authoritative_turn_meta_posture,
+        Some(auto_standing),
+        "the narrowed turn must not update the standing Auto baseline"
+    );
+
+    let outcome = send_turn(
+        &mut engine,
+        &api_config,
+        "authoritative auto turn",
+        UserInputProvenance::ExternalUser,
+    )
+    .await;
+    assert!(
+        matches!(
+            outcome,
+            SendMessageOutcome::Finished {
+                status: TurnOutcomeStatus::Completed,
+                ..
+            }
+        ),
+        "the authoritative Auto turn must complete without starting"
+    );
+
+    let requests = server
+        .received_requests()
+        .await
+        .expect("wire mock records requests");
+    assert_eq!(
+        requests.len(),
+        2,
+        "each turn makes exactly one provider call"
+    );
+    let narrowed_body = String::from_utf8_lossy(&requests[0].body);
+    assert!(
+        !narrowed_body.contains("Authority transition (host)"),
+        "the Auto downgrade is provenance narrowing, not a host flip"
+    );
+    assert!(
+        narrowed_body.contains("Authority narrowing:"),
+        "the Auto -> Suggest downgrade must carry its narrowing receipt"
+    );
+    let auth_body = String::from_utf8_lossy(&requests[1].body);
+    assert_eq!(
+        auth_body.matches("Authority transition (host)").count(),
+        0,
+        "an authoritative Auto turn after the narrowed one must stay \
+         byte-stable: {auth_body}"
+    );
+}
+
+#[tokio::test]
+async fn forkguard_a_not_started_turn_neither_consumes_nor_records_the_transition() {
+    // Pins the NotStarted ordering: the posture comparison sits after the
+    // early returns, so a turn that fails before any block build must
+    // neither record the posture (which would swallow the pending host
+    // change) nor consume anything — the next successful turn's block is
+    // the one that renders the transition line.
+    use crate::core::authority::TurnMetaPosture;
+    use wiremock::matchers::{method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    let _lock = lock_test_env();
+    let workspace = tempdir().expect("tempdir");
+    let server = MockServer::start().await;
+    let plain_sse = concat!(
+        "data: {\"id\":\"chatcmpl-notstarted\",\"choices\":[{\"index\":0,",
+        "\"delta\":{\"content\":\"ok\"},\"finish_reason\":null}]}\n\n",
+        "data: {\"id\":\"chatcmpl-notstarted\",\"choices\":[{\"index\":0,",
+        "\"delta\":{},\"finish_reason\":\"stop\"}]}\n\n",
+        "data: [DONE]\n\n",
+    );
+    // Only the second turn reaches the provider.
+    Mock::given(method("POST"))
+        .and(path("/v1/chat/completions"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .insert_header("content-type", "text/event-stream")
+                .set_body_string(plain_sse),
+        )
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    let api_config = Config {
+        api_key: Some("test-key".to_string()),
+        base_url: Some(server.uri()),
+        ..Config::default()
+    };
+    let engine_config = EngineConfig {
+        model: crate::config::DEFAULT_TEXT_MODEL.to_string(),
+        workspace: workspace.path().to_path_buf(),
+        mcp_config_path: workspace.path().join("mcp.json"),
+        snapshots_enabled: false,
+        subagents_enabled: false,
+        ..EngineConfig::default()
+    };
+    let (mut engine, _handle) = Engine::new(engine_config, &api_config);
+
+    // The previous block reported Full Access disarmed; the next real turn
+    // runs Full Access armed, so the arming flip alone must produce the
+    // line — no matter that a turn failed in between.
+    engine.last_turn_meta_authority = Some(TurnMetaPosture {
+        mode: AppMode::Agent,
+        approval: crate::tui::approval::ApprovalMode::Bypass,
+        ask_on_guardrail: false,
+    });
+    engine.last_authoritative_turn_meta_posture = Some(TurnMetaPosture {
+        mode: AppMode::Agent,
+        approval: crate::tui::approval::ApprovalMode::Bypass,
+        ask_on_guardrail: false,
+    });
+    engine.session.ask_on_guardrail = true;
+
+    async fn send_turn(
+        engine: &mut Engine,
+        api_config: &Config,
+        prompt: &str,
+    ) -> SendMessageOutcome {
+        engine
+            .handle_send_message(
+                prompt.to_string(),
+                AppMode::Agent,
+                *resolved_route_for_test(api_config, crate::config::DEFAULT_TEXT_MODEL),
+                CompactionConfig::default(),
+                None,
+                None,
+                crate::tools::goal::GoalStatus::Active,
+                None,
+                false,
+                false,
+                true,
+                true,
+                true,
+                crate::tui::approval::ApprovalMode::Bypass,
+                false,
+                None,
+                Vec::new(),
+                None,
+                None,
+                UserInputProvenance::ExternalUser,
+                None,
+            )
+            .await
+    }
+
+    // Turn one cannot start: no model client, so the turn exits before any
+    // block build. `model_client_injected` must ride along, or
+    // `install_resolved_runtime_route` would resurrect the client from the
+    // resolved route before the not-configured check runs.
+    let real_client = engine.model_client.take();
+    let real_injected = engine.model_client_injected;
+    engine.model_client_injected = true;
+    let outcome = send_turn(&mut engine, &api_config, "doomed turn").await;
+    match outcome {
+        SendMessageOutcome::NotStarted { .. } => {}
+        SendMessageOutcome::Finished { status, error } => panic!(
+            "the first turn must fail before the block build, got Finished status={status:?} error={error:?}"
+        ),
+    }
+    assert_eq!(
+        engine.last_turn_meta_authority,
+        Some(TurnMetaPosture {
+            mode: AppMode::Agent,
+            approval: crate::tui::approval::ApprovalMode::Bypass,
+            ask_on_guardrail: false,
+        }),
+        "a not-started turn must not record the posture (which would swallow the pending host change)"
+    );
+
+    // Turn two starts fine and must be the block that renders the line.
+    engine.model_client_injected = real_injected;
+    engine.model_client = real_client;
+    let outcome = send_turn(&mut engine, &api_config, "turn after the failure").await;
+    assert!(
+        matches!(
+            outcome,
+            SendMessageOutcome::Finished {
+                status: TurnOutcomeStatus::Completed,
+                ..
+            }
+        ),
+        "the second turn must complete"
+    );
+
+    let requests = server
+        .received_requests()
+        .await
+        .expect("wire mock records requests");
+    assert_eq!(
+        requests.len(),
+        1,
+        "the not-started turn makes no provider call"
+    );
+    let body = String::from_utf8_lossy(&requests[0].body);
+    assert!(
+        body.contains(
+            "Authority transition (host): agent (Full Access, guardrail prompts disarmed) -> agent (Full Access, guardrail prompts armed); reason: host_authority_change",
+        ),
+        "the turn after the failed start must still render the pending transition: {body}"
+    );
+}
+
+#[tokio::test]
+async fn forkguard_sync_session_clears_the_recorded_turn_meta_posture() {
+    // The recorded posture belongs to one conversation: the installed
+    // conversation's model never saw the previous one's receipts, so its
+    // first turn must establish a fresh baseline instead of rendering a
+    // transition whose "from" side it never reported. (Arming itself is
+    // host-owned and deliberately survives the sync.)
+    use crate::core::authority::TurnMetaPosture;
+    use wiremock::matchers::{method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    let _lock = lock_test_env();
+    let workspace = tempdir().expect("tempdir");
+    let server = MockServer::start().await;
+    let plain_sse = concat!(
+        "data: {\"id\":\"chatcmpl-syncposture\",\"choices\":[{\"index\":0,",
+        "\"delta\":{\"content\":\"ok\"},\"finish_reason\":null}]}\n\n",
+        "data: {\"id\":\"chatcmpl-syncposture\",\"choices\":[{\"index\":0,",
+        "\"delta\":{},\"finish_reason\":\"stop\"}]}\n\n",
+        "data: [DONE]\n\n",
+    );
+    Mock::given(method("POST"))
+        .and(path("/v1/chat/completions"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .insert_header("content-type", "text/event-stream")
+                .set_body_string(plain_sse),
+        )
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    let api_config = Config {
+        api_key: Some("test-key".to_string()),
+        base_url: Some(server.uri()),
+        ..Config::default()
+    };
+    let engine_config = EngineConfig {
+        model: crate::config::DEFAULT_TEXT_MODEL.to_string(),
+        workspace: workspace.path().to_path_buf(),
+        mcp_config_path: workspace.path().join("mcp.json"),
+        snapshots_enabled: false,
+        subagents_enabled: false,
+        ..EngineConfig::default()
+    };
+    let (mut engine, _handle) = Engine::new(engine_config, &api_config);
+
+    // The previous conversation's last block reported Full Access armed.
+    engine.last_turn_meta_authority = Some(TurnMetaPosture {
+        mode: AppMode::Agent,
+        approval: crate::tui::approval::ApprovalMode::Bypass,
+        ask_on_guardrail: true,
+    });
+    engine.last_authoritative_turn_meta_posture = Some(TurnMetaPosture {
+        mode: AppMode::Agent,
+        approval: crate::tui::approval::ApprovalMode::Bypass,
+        ask_on_guardrail: true,
+    });
+
+    engine
+        .apply_synced_session(
+            Some("fresh-conversation".to_string()),
+            Vec::new(),
+            None,
+            false,
+            crate::config::DEFAULT_TEXT_MODEL.to_string(),
+            workspace.path().to_path_buf(),
+            Vec::new(),
+            AppMode::Agent,
+        )
+        .await;
+    assert_eq!(
+        engine.last_turn_meta_authority, None,
+        "the sync must clear the previous conversation's recorded posture"
+    );
+    assert_eq!(
+        engine.last_authoritative_turn_meta_posture, None,
+        "the sync must clear the standing baseline with it"
+    );
+
+    // A host disarm lands before the installed conversation's first turn,
+    // so that turn reports disarmed. It must stay silent: it has no earlier
+    // receipt in this conversation to be a transition from.
+    engine.session.ask_on_guardrail = false;
+
+    async fn send_turn(
+        engine: &mut Engine,
+        api_config: &Config,
+        prompt: &str,
+    ) -> SendMessageOutcome {
+        engine
+            .handle_send_message(
+                prompt.to_string(),
+                AppMode::Agent,
+                *resolved_route_for_test(api_config, crate::config::DEFAULT_TEXT_MODEL),
+                CompactionConfig::default(),
+                None,
+                None,
+                crate::tools::goal::GoalStatus::Active,
+                None,
+                false,
+                false,
+                true,
+                true,
+                true,
+                crate::tui::approval::ApprovalMode::Bypass,
+                false,
+                None,
+                Vec::new(),
+                None,
+                None,
+                UserInputProvenance::ExternalUser,
+                None,
+            )
+            .await
+    }
+
+    let outcome = send_turn(
+        &mut engine,
+        &api_config,
+        "first turn of the new conversation",
+    )
+    .await;
+    assert!(
+        matches!(
+            outcome,
+            SendMessageOutcome::Finished {
+                status: TurnOutcomeStatus::Completed,
+                ..
+            }
+        ),
+        "the first turn must complete"
+    );
+
+    let requests = server
+        .received_requests()
+        .await
+        .expect("wire mock records requests");
+    assert_eq!(
+        requests.len(),
+        1,
+        "the turn makes exactly one provider call"
+    );
+    let wire_body: serde_json::Value =
+        serde_json::from_slice(&requests[0].body).expect("request body is JSON");
+    let last_user_message = wire_body["messages"]
+        .as_array()
+        .expect("messages array")
+        .iter()
+        .rev()
+        .find(|message| message["role"] == "user")
+        .expect("a user message exists");
+    let last_user_content = last_user_message["content"]
+        .as_str()
+        .expect("string content");
+    assert!(
+        !last_user_content.contains("Authority transition"),
+        "the installed conversation's first turn must not inherit the previous conversation's receipt: {last_user_content}"
+    );
+}
+
+#[tokio::test]
+async fn forkguard_an_isolated_turn_neither_consumes_nor_records_the_transition() {
+    // `runtime_chat_isolated` builds no `<turn_meta>` block at all, so a
+    // posture recorded on an isolated turn would be rendered nowhere. The
+    // turn must leave the record (and any pending transition) untouched:
+    // the next block-building turn compares against the last posture a
+    // block actually reported and renders the change then.
+    use crate::core::authority::TurnMetaPosture;
+    use wiremock::matchers::{method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    let _lock = lock_test_env();
+    let workspace = tempdir().expect("tempdir");
+    let server = MockServer::start().await;
+    let plain_sse = concat!(
+        "data: {\"id\":\"chatcmpl-isolatedposture\",\"choices\":[{\"index\":0,",
+        "\"delta\":{\"content\":\"ok\"},\"finish_reason\":null}]}\n\n",
+        "data: {\"id\":\"chatcmpl-isolatedposture\",\"choices\":[{\"index\":0,",
+        "\"delta\":{},\"finish_reason\":\"stop\"}]}\n\n",
+        "data: [DONE]\n\n",
+    );
+    Mock::given(method("POST"))
+        .and(path("/v1/chat/completions"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .insert_header("content-type", "text/event-stream")
+                .set_body_string(plain_sse),
+        )
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    let api_config = Config {
+        runtime_chat_isolated: true,
+        api_key: Some("test-key".to_string()),
+        base_url: Some(server.uri()),
+        ..Config::default()
+    };
+    let engine_config = EngineConfig {
+        model: crate::config::DEFAULT_TEXT_MODEL.to_string(),
+        workspace: workspace.path().to_path_buf(),
+        mcp_config_path: workspace.path().join("mcp.json"),
+        snapshots_enabled: false,
+        subagents_enabled: false,
+        ..EngineConfig::default()
+    };
+    let (mut engine, _handle) = Engine::new(engine_config, &api_config);
+
+    // The last block reported Full Access disarmed; this isolated turn runs
+    // armed. Nothing may be recorded or consumed — there is no block here
+    // to report the change.
+    engine.last_turn_meta_authority = Some(TurnMetaPosture {
+        mode: AppMode::Agent,
+        approval: crate::tui::approval::ApprovalMode::Bypass,
+        ask_on_guardrail: false,
+    });
+    engine.last_authoritative_turn_meta_posture = Some(TurnMetaPosture {
+        mode: AppMode::Agent,
+        approval: crate::tui::approval::ApprovalMode::Bypass,
+        ask_on_guardrail: false,
+    });
+    engine.session.ask_on_guardrail = true;
+
+    async fn send_turn(
+        engine: &mut Engine,
+        api_config: &Config,
+        prompt: &str,
+    ) -> SendMessageOutcome {
+        engine
+            .handle_send_message(
+                prompt.to_string(),
+                AppMode::Agent,
+                *resolved_route_for_test(api_config, crate::config::DEFAULT_TEXT_MODEL),
+                CompactionConfig::default(),
+                None,
+                None,
+                crate::tools::goal::GoalStatus::Active,
+                None,
+                false,
+                false,
+                true,
+                true,
+                true,
+                crate::tui::approval::ApprovalMode::Bypass,
+                false,
+                None,
+                Vec::new(),
+                None,
+                None,
+                UserInputProvenance::ExternalUser,
+                None,
+            )
+            .await
+    }
+
+    let outcome = send_turn(&mut engine, &api_config, "isolated turn").await;
+    assert!(
+        matches!(
+            outcome,
+            SendMessageOutcome::Finished {
+                status: TurnOutcomeStatus::Completed,
+                ..
+            }
+        ),
+        "the isolated turn must complete"
+    );
+    assert_eq!(
+        engine.last_turn_meta_authority,
+        Some(TurnMetaPosture {
+            mode: AppMode::Agent,
+            approval: crate::tui::approval::ApprovalMode::Bypass,
+            ask_on_guardrail: false,
+        }),
+        "an isolated turn must not record a posture no block will report"
+    );
+    assert_eq!(
+        engine.last_authoritative_turn_meta_posture,
+        Some(TurnMetaPosture {
+            mode: AppMode::Agent,
+            approval: crate::tui::approval::ApprovalMode::Bypass,
+            ask_on_guardrail: false,
+        }),
+        "an isolated turn must not touch the standing baseline either"
+    );
+    assert!(
+        engine.pending_authority_transition.is_none(),
+        "nothing was set, so nothing may be consumed"
+    );
+
+    let requests = server
+        .received_requests()
+        .await
+        .expect("wire mock records requests");
+    assert_eq!(
+        requests.len(),
+        1,
+        "the turn makes exactly one provider call"
+    );
+    let body = String::from_utf8_lossy(&requests[0].body);
+    assert!(
+        !body.contains("<turn_meta>"),
+        "isolated runs build no turn_meta block at all: {body}"
+    );
+}
+
 #[path = "partial_input_differential_tests.rs"]
 mod partial_input_differential_tests;
+
+#[test]
+fn run_completion_real_factories_observe_shutdown_and_direct_handles_do_not() {
+    let _env = lock_test_env();
+    let home = tempdir().unwrap();
+    let _home = EnvVarGuard::set("CODEWHALE_HOME", home.path());
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    runtime.block_on(async {
+        let config = Config::default();
+        let engine_config = || {
+            let mut config = deterministic_engine_config(home.path());
+            config.features.disable(Feature::Mcp);
+            config.memory_enabled = false;
+            config
+        };
+        let (direct, handle) = Engine::new(engine_config(), &config);
+        assert_eq!(
+            handle.wait_run_completion().await,
+            EngineRunCompletion::NotObserved
+        );
+        drop(direct);
+        let handle = spawn_engine(engine_config(), &config);
+        let mut completion = Box::pin(handle.wait_run_completion());
+        std::future::poll_fn(|cx| {
+            assert!(std::future::Future::poll(completion.as_mut(), cx).is_pending());
+            std::task::Poll::Ready(())
+        })
+        .await;
+        drop(completion);
+        handle.send(Op::Shutdown).await.unwrap();
+        assert_eq!(
+            tokio::time::timeout(Duration::from_secs(5), handle.wait_run_completion())
+                .await
+                .unwrap(),
+            EngineRunCompletion::NormalReturn
+        );
+        let handle = spawn_engine_with_authoritative_route_config(
+            engine_config(),
+            &config,
+            Arc::new(parking_lot::RwLock::new(config.clone())),
+        );
+        handle.send(Op::Shutdown).await.unwrap();
+        assert_eq!(
+            tokio::time::timeout(Duration::from_secs(5), handle.wait_run_completion())
+                .await
+                .unwrap(),
+            EngineRunCompletion::NormalReturn
+        );
+    });
+}

@@ -165,10 +165,21 @@ impl ApprovalRequest {
             params,
             approval_key,
             None,
+            None,
             Path::new("/workspace"),
         )
     }
 
+    /// `approval_grouping_key_override` carries the grouping identity the
+    /// engine already bound on the `ApprovalRequired` event. Subagent workers
+    /// mint workspace-scoped keys (`bind_workspace_scope` over the effective
+    /// execution root), and the read side (`resolve_ui_approval_disposition`)
+    /// queries session grants with that carried value — so the dialog and the
+    /// "approve for session" write must use the same identity. Recomputing
+    /// from the dialog's (parent) workspace would diverge from the read key,
+    /// re-prompt for the very scope the user approved and store a grant under
+    /// an identity the user never saw. Pass `None` only for flows that never
+    /// ride an engine event (render tests and the `#[cfg(test)]` helper).
     pub fn new_with_intent(
         id: &str,
         tool_name: &str,
@@ -176,14 +187,21 @@ impl ApprovalRequest {
         params: &Value,
         approval_key: &str,
         intent_summary: Option<&str>,
+        approval_grouping_key_override: Option<&str>,
         workspace: &Path,
     ) -> Self {
         let semantic_tool_name = canonical_action_alias(tool_name, params);
         let category = get_tool_category_for_call(tool_name, params);
         let risk = classify_risk(tool_name, category, params);
-        let approval_grouping_key =
-            crate::tools::approval_cache::build_approval_grouping_key(tool_name, params, workspace)
-                .0;
+        let approval_grouping_key = match approval_grouping_key_override {
+            Some(carried) => carried.to_string(),
+            None => {
+                crate::tools::approval_cache::build_approval_grouping_key(
+                    tool_name, params, workspace,
+                )
+                .0
+            }
+        };
         let persistent_ask_rules =
             build_persistent_ask_rules(semantic_tool_name, params, workspace);
         let persistent_allow_rules = if classify_stakes(tool_name, category, risk, params)

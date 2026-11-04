@@ -1,7 +1,10 @@
 //! Legacy parser for text-based tool calls from DeepSeek models.
 //!
-//! Structured tool-call items are preferred, so the engine no longer invokes
-//! this parser. It is kept for reference/debugging.
+//! Structured tool-call items are preferred, but the engine still invokes
+//! this parser as a fallback when a response carries tool-call markers in
+//! plain text. The generated ids restart at 1 for every invocation and are
+//! only unique within one parsed response; the engine rewrites them into
+//! fresh incarnations before persisting or asking for approval.
 //!
 //! Some DeepSeek outputs tool calls as text in various formats:
 //! ```text

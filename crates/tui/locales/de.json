@@ -2098,5 +2098,6 @@
   "AutomationEditorFriday": "Fr",
   "AutomationEditorSaturday": "Sa",
   "AutomationEditorSunday": "So",
-  "AttachedRootsNotRevertedNote": "Nur der primäre Workspace wurde wiederhergestellt; angehängte Workspace-Roots wurden nicht zurückgerollt (vom Snapshot ausgeschlossene Verzeichnisse — etwa vendor/ — und verschachtelte Repositories behalten ihre Änderungen)."
+  "AttachedRootsNotRevertedNote": "Nur der primäre Workspace wurde wiederhergestellt; angehängte Workspace-Roots wurden nicht zurückgerollt (vom Snapshot ausgeschlossene Verzeichnisse — etwa vendor/ — und verschachtelte Repositories behalten ihre Änderungen).",
+  "RemoteApprovalOutcomeUnconfirmed": "Das Genehmigungsergebnis ist noch nicht bestätigt; die Karte bleibt offen, bis die Engine berichtet."
 }

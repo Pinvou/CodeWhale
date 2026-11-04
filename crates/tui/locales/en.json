@@ -2098,5 +2098,6 @@
   "AutomationEditorFriday": "Fri",
   "AutomationEditorSaturday": "Sat",
   "AutomationEditorSunday": "Sun",
-  "AttachedRootsNotRevertedNote": "Only the primary workspace was reverted; attached workspace roots were not rolled back (roots excluded from the snapshot — such as vendor/ — and nested repositories keep their changes)."
+  "AttachedRootsNotRevertedNote": "Only the primary workspace was reverted; attached workspace roots were not rolled back (roots excluded from the snapshot — such as vendor/ — and nested repositories keep their changes).",
+  "RemoteApprovalOutcomeUnconfirmed": "Approval outcome not confirmed yet; the card stays open until the engine reports."
 }

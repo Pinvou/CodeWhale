@@ -2098,5 +2098,6 @@
   "AutomationEditorFriday": "금",
   "AutomationEditorSaturday": "토",
   "AutomationEditorSunday": "일",
-  "AttachedRootsNotRevertedNote": "기본 워크스페이스만 되돌렸습니다; 첨부된 워크스페이스 루트는 롤백되지 않았습니다(스냅샷에서 제외되는 디렉터리 — 예: vendor/ — 및 중첩 저장소는 변경 사항이 유지됩니다)."
+  "AttachedRootsNotRevertedNote": "기본 워크스페이스만 되돌렸습니다; 첨부된 워크스페이스 루트는 롤백되지 않았습니다(스냅샷에서 제외되는 디렉터리 — 예: vendor/ — 및 중첩 저장소는 변경 사항이 유지됩니다).",
+  "RemoteApprovalOutcomeUnconfirmed": "승인 결과가 아직 확정되지 않았습니다. 엔진이 보고할 때까지 카드는 열려 있습니다."
 }
