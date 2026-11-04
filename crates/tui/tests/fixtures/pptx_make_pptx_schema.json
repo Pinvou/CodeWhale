@@ -1,0 +1,412 @@
+{
+  "tools": [
+    {
+      "name": "make_pptx",
+      "description": "本地直出可编辑 PowerPoint(.pptx):输入结构化 deck(主题 + slides 数组),套主题模板渲染生成,真·可编辑图表,数据不出机。生成后拿到 path,需再调 present_artifact 上卡。",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "theme": {
+            "type": "string",
+            "description": "主题(按 PPT 内容自动选):business-blue/tech-dark/gov-red/creative-purple/fresh-green/warm-orange/navy-gold/minimal-mono/midnight。缺省 business-blue"
+          },
+          "slides": {
+            "type": "array",
+            "description": "deck 的 slides 数组。每页一个对象,`layout` 选版式,并**必须按版式填正文字段**(只给 title 会得到空白页!)。每版式的必填字段已写进对应分支的 required:\n- cover: {title}(subtitle/date 可选)\n- agenda: {title, items}  章节条目数组\n- section: {title}  ← 章节分隔页\n- bullets: {title, bullets}  要点数组\n- two_col: {title, left, right}(leftTitle/rightTitle 可选)\n- kpi: {title, items}  最多4个大数字\n- chart: {title, chartType?, categories, series}\n- table: {title, headers, rows}\n- image: {title}(image/bullets/caption 可选)\n- end: {title}(subtitle 可选)  ← 结尾页\n正文要有真实内容/数据,不要只放标题。",
+            "items": {
+              "description": "一页 = 一个版式分支:layout 的单值 enum 选中分支,各分支 required 列出该版式必填字段",
+              "anyOf": [
+                {
+                  "type": "object",
+                  "description": "封面页:必填 title;subtitle/date 可选",
+                  "properties": {
+                    "layout": {
+                      "type": "string",
+                      "enum": [
+                        "cover"
+                      ],
+                      "description": "版式:封面页"
+                    },
+                    "title": {
+                      "type": "string",
+                      "description": "主标题"
+                    },
+                    "subtitle": {
+                      "type": "string",
+                      "description": "副标题"
+                    },
+                    "date": {
+                      "type": "string",
+                      "description": "日期"
+                    }
+                  },
+                  "required": [
+                    "layout",
+                    "title"
+                  ]
+                },
+                {
+                  "type": "object",
+                  "description": "目录页:必填 items(章节条目数组,最多 6 条)",
+                  "properties": {
+                    "layout": {
+                      "type": "string",
+                      "enum": [
+                        "agenda"
+                      ],
+                      "description": "版式:目录页"
+                    },
+                    "title": {
+                      "type": "string",
+                      "description": "页标题"
+                    },
+                    "items": {
+                      "type": "array",
+                      "items": {
+                        "anyOf": [
+                          {
+                            "type": "string"
+                          },
+                          {
+                            "type": "object",
+                            "properties": {
+                              "num": {
+                                "type": "string",
+                                "description": "大数字,如 68%"
+                              },
+                              "label": {
+                                "type": "string",
+                                "description": "指标说明"
+                              }
+                            }
+                          }
+                        ]
+                      },
+                      "description": "章节条目数组(最多 6 条):字符串,或 {num, label}"
+                    }
+                  },
+                  "required": [
+                    "layout",
+                    "title",
+                    "items"
+                  ]
+                },
+                {
+                  "type": "object",
+                  "description": "章节分隔页:只要 layout+title",
+                  "properties": {
+                    "layout": {
+                      "type": "string",
+                      "enum": [
+                        "section"
+                      ],
+                      "description": "版式:章节分隔页"
+                    },
+                    "title": {
+                      "type": "string",
+                      "description": "页标题"
+                    }
+                  },
+                  "required": [
+                    "layout",
+                    "title"
+                  ]
+                },
+                {
+                  "type": "object",
+                  "description": "要点页:必填 bullets(要点字符串数组)",
+                  "properties": {
+                    "layout": {
+                      "type": "string",
+                      "enum": [
+                        "bullets"
+                      ],
+                      "description": "版式:要点页"
+                    },
+                    "title": {
+                      "type": "string",
+                      "description": "页标题"
+                    },
+                    "bullets": {
+                      "type": "array",
+                      "items": {
+                        "type": "string"
+                      },
+                      "description": "要点,每条一个字符串"
+                    }
+                  },
+                  "required": [
+                    "layout",
+                    "title",
+                    "bullets"
+                  ]
+                },
+                {
+                  "type": "object",
+                  "description": "双栏对比页:必填 left/right 两栏要点;leftTitle/rightTitle 可选",
+                  "properties": {
+                    "layout": {
+                      "type": "string",
+                      "enum": [
+                        "two_col"
+                      ],
+                      "description": "版式:双栏对比页"
+                    },
+                    "title": {
+                      "type": "string",
+                      "description": "页标题"
+                    },
+                    "leftTitle": {
+                      "type": "string",
+                      "description": "左栏标题"
+                    },
+                    "left": {
+                      "type": "array",
+                      "items": {
+                        "type": "string"
+                      },
+                      "description": "左栏要点"
+                    },
+                    "rightTitle": {
+                      "type": "string",
+                      "description": "右栏标题"
+                    },
+                    "right": {
+                      "type": "array",
+                      "items": {
+                        "type": "string"
+                      },
+                      "description": "右栏要点"
+                    }
+                  },
+                  "required": [
+                    "layout",
+                    "title",
+                    "left",
+                    "right"
+                  ]
+                },
+                {
+                  "type": "object",
+                  "description": "大数字指标页:必填 items(最多 4 个 {num, label})",
+                  "properties": {
+                    "layout": {
+                      "type": "string",
+                      "enum": [
+                        "kpi"
+                      ],
+                      "description": "版式:大数字指标页"
+                    },
+                    "title": {
+                      "type": "string",
+                      "description": "页标题"
+                    },
+                    "items": {
+                      "type": "array",
+                      "items": {
+                        "anyOf": [
+                          {
+                            "type": "string"
+                          },
+                          {
+                            "type": "object",
+                            "properties": {
+                              "num": {
+                                "type": "string",
+                                "description": "大数字,如 68%"
+                              },
+                              "label": {
+                                "type": "string",
+                                "description": "指标说明"
+                              }
+                            }
+                          }
+                        ]
+                      },
+                      "description": "指标数组(最多 4 个):{num, label} 或字符串"
+                    }
+                  },
+                  "required": [
+                    "layout",
+                    "title",
+                    "items"
+                  ]
+                },
+                {
+                  "type": "object",
+                  "description": "图表页:必填 categories+series;chartType 缺省 bar",
+                  "properties": {
+                    "layout": {
+                      "type": "string",
+                      "enum": [
+                        "chart"
+                      ],
+                      "description": "版式:图表页"
+                    },
+                    "title": {
+                      "type": "string",
+                      "description": "页标题"
+                    },
+                    "chartType": {
+                      "type": "string",
+                      "enum": [
+                        "bar",
+                        "line",
+                        "pie"
+                      ],
+                      "description": "图表类型,缺省 bar"
+                    },
+                    "categories": {
+                      "type": "array",
+                      "items": {
+                        "type": "string"
+                      },
+                      "description": "类目轴标签"
+                    },
+                    "series": {
+                      "type": "array",
+                      "description": "数据系列,data 与 categories 等长",
+                      "items": {
+                        "type": "object",
+                        "properties": {
+                          "name": {
+                            "type": "string",
+                            "description": "系列名"
+                          },
+                          "data": {
+                            "type": "array",
+                            "items": {
+                              "type": "number"
+                            },
+                            "description": "与 categories 等长的数值"
+                          }
+                        },
+                        "required": [
+                          "data"
+                        ]
+                      }
+                    }
+                  },
+                  "required": [
+                    "layout",
+                    "title",
+                    "categories",
+                    "series"
+                  ]
+                },
+                {
+                  "type": "object",
+                  "description": "表格页:必填 headers+rows,每行与 headers 等长",
+                  "properties": {
+                    "layout": {
+                      "type": "string",
+                      "enum": [
+                        "table"
+                      ],
+                      "description": "版式:表格页"
+                    },
+                    "title": {
+                      "type": "string",
+                      "description": "页标题"
+                    },
+                    "headers": {
+                      "type": "array",
+                      "items": {
+                        "type": "string"
+                      },
+                      "description": "表头"
+                    },
+                    "rows": {
+                      "type": "array",
+                      "description": "行数据,每行是与 headers 等长的单元格数组",
+                      "items": {
+                        "type": "array",
+                        "items": {
+                          "type": "string"
+                        }
+                      }
+                    }
+                  },
+                  "required": [
+                    "layout",
+                    "title",
+                    "headers",
+                    "rows"
+                  ]
+                },
+                {
+                  "type": "object",
+                  "description": "图片页:image 缺了显示占位框(不强制编造路径);bullets 作侧栏说明,caption 作图注",
+                  "properties": {
+                    "layout": {
+                      "type": "string",
+                      "enum": [
+                        "image"
+                      ],
+                      "description": "版式:图片页"
+                    },
+                    "title": {
+                      "type": "string",
+                      "description": "页标题"
+                    },
+                    "bullets": {
+                      "type": "array",
+                      "items": {
+                        "type": "string"
+                      },
+                      "description": "图片旁的说明要点"
+                    },
+                    "image": {
+                      "type": "string",
+                      "description": "本地图片绝对路径(可选,缺了显示占位框)"
+                    },
+                    "caption": {
+                      "type": "string",
+                      "description": "图注"
+                    }
+                  },
+                  "required": [
+                    "layout",
+                    "title"
+                  ]
+                },
+                {
+                  "type": "object",
+                  "description": "结尾页:必填 title(如「谢谢」);subtitle 可选",
+                  "properties": {
+                    "layout": {
+                      "type": "string",
+                      "enum": [
+                        "end"
+                      ],
+                      "description": "版式:结尾页"
+                    },
+                    "title": {
+                      "type": "string",
+                      "description": "页标题"
+                    },
+                    "subtitle": {
+                      "type": "string",
+                      "description": "副标题"
+                    }
+                  },
+                  "required": [
+                    "layout",
+                    "title"
+                  ]
+                }
+              ]
+            }
+          },
+          "filename": {
+            "type": "string",
+            "description": "文件名(不含扩展名),缺省 演示文稿"
+          }
+        },
+        "required": [
+          "slides"
+        ]
+      }
+    }
+  ]
+}
