@@ -401,7 +401,7 @@ pub(crate) async fn execute_read_media(
          Crop: {crop_summary}\n\
          Detail: {}\n\
          Delivery: {delivery_note}\n\
-         Size: {} (source) -> {} (wire payload)",
+         Size: {} (source) -> {} (encoded payload)",
         detail_mode.as_str(),
         human_bytes(processed.source_bytes),
         human_bytes(processed.encoded_bytes),
