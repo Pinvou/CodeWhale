@@ -1,5 +1,6 @@
-//! Compile-time prompt text — the single source of truth for every bundled
-//! layer of the Codewhale system prompt.
+//! Compile-time prompt text — most bundled layers of the Codewhale system
+//! prompt live here as constants (the authority recap and the locale
+//! bookends are defined in `prompts.rs`).
 //!
 //! Each constant below used to live in its own `prompts/*.md` file, pulled in
 //! with `include_str!`. The per-layer file sprawl (17 files across 4

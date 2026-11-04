@@ -83,8 +83,9 @@ impl Default for PromptSessionContext<'_> {
 
 /// Conventional location for the structured session relay artifact (#32).
 /// A previous session writes it on exit / `/compact`; the next session reads
-/// it back on startup and prepends it to the system prompt so a fresh agent
-/// doesn't have to re-discover open blockers from scratch.
+/// it back on startup and routes it as the late WorldState token-budget /
+/// continuity fragment (`load_handoff_block`) so a fresh agent doesn't have
+/// to re-discover open blockers from scratch.
 pub const HANDOFF_RELATIVE_PATH: &str = ".codewhale/handoff.md";
 /// Legacy handoff path for reading from existing installs. `pub(crate)` so
 /// command surfaces that teach the fallback name it from the same constant
@@ -190,9 +191,10 @@ fn translation_target_language_for_tag(locale_tag: &str) -> &'static str {
 /// Render a `## Environment` block listing the resolved locale tag and the
 /// actionable host facts that affect command syntax.
 ///
-/// The block is appended to the workspace-static portion of the system
-/// prompt (after the shared constitution + project context, before configured
-/// instructions / skills). `locale_tag` is resolved by the caller from
+/// The block leads the workspace WorldState fragment (environment + memory /
+/// goal facts), which is assembled after the cache-stable constitution
+/// prefix so a change re-renders as a fragment diff instead of rebuilding
+/// the static prefix. `locale_tag` is resolved by the caller from
 /// `Settings` so this function stays I/O-free.
 ///
 /// `platform` and `shell` remain because they change how commands must be
@@ -402,10 +404,12 @@ fn user_constitution_disabled_by_setup_state() -> bool {
 
 // ── Prompt layers loaded at compile time ──────────────────────────────
 //
-// Every bundled prompt layer lives in `prompts/text.rs` as a compile-time
-// constant (consolidated from the retired per-layer `prompts/*.md` files;
-// each constant is byte-identical to the file it replaced, trailing newline
-// included). The constants are re-exported here so the existing
+// Every bundled prompt layer is a compile-time constant — most in
+// `prompts/text.rs`, with the authority recap and the locale bookends
+// defined in this file (consolidated from the retired per-layer
+// `prompts/*.md` files; each constant is byte-identical to the file it
+// replaced, trailing newline included). The constants are re-exported here
+// so the existing
 // `crate::prompts::NAME` paths used across the crate are unchanged. Edit
 // prompt text in `text.rs` directly; the test suite below guards content
 // and ordering invariants (constitution structure and binding gates #4032,
