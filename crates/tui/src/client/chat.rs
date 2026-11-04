@@ -1116,7 +1116,10 @@ fn mirror_minimax_reasoning_details_for_body(body: &mut Value, provider: ApiProv
 /// whitelist relaxation either.
 ///
 /// Returns the names of the dropped tools, in catalog order.
-fn sanitize_moonshot_chat_tools(chat_tools: &mut Vec<Value>) -> Vec<String> {
+fn sanitize_moonshot_chat_tools(
+    chat_tools: &mut Vec<Value>,
+    route: crate::tools::schema_sanitize::KimiParameterRoute,
+) -> Vec<String> {
     let mut dropped = Vec::new();
     chat_tools.retain_mut(|tool| {
         let Some(function) = tool
@@ -1129,7 +1132,7 @@ fn sanitize_moonshot_chat_tools(chat_tools: &mut Vec<Value>) -> Vec<String> {
         let Some(parameters) = function.get_mut("parameters") else {
             return true;
         };
-        match crate::tools::schema_sanitize::sanitize_for_kimi_parameters(parameters) {
+        match crate::tools::schema_sanitize::sanitize_for_kimi_parameters(parameters, route) {
             Ok(note) => {
                 if let Some(note) = note {
                     let description = function
@@ -1247,7 +1250,12 @@ pub(crate) fn build_chat_wire_body(
         // parameters cannot pass MFJS validation so one incompatible tool
         // never sinks the whole request.
         if matches!(provider, crate::config::ApiProvider::Moonshot) {
-            omitted_tool_names = sanitize_moonshot_chat_tools(&mut chat_tools);
+            let route = if moonshot_base_url_is_exact_kimi_code(base_url) {
+                crate::tools::schema_sanitize::KimiParameterRoute::KimiCode
+            } else {
+                crate::tools::schema_sanitize::KimiParameterRoute::Platform
+            };
+            omitted_tool_names = sanitize_moonshot_chat_tools(&mut chat_tools, route);
         }
         // xAI rejects a parameters root that is not a plain object schema
         // (e.g. apply_patch's root `oneOf` required-groups) with a 400.
@@ -8708,6 +8716,156 @@ mod image_block_wire_tests {
         assert!(
             parameters.get("properties").is_none(),
             "branch properties must not be merged into the root: {parameters}"
+        );
+    }
+
+    fn single_tool_request(name: &str, schema: serde_json::Value) -> MessageRequest {
+        MessageRequest {
+            model: crate::config::KIMI_CODE_K3_MODEL.to_string(),
+            messages: vec![Message {
+                role: Role::User,
+                content: vec![ContentBlock::Text {
+                    text: "probe".to_string(),
+                    cache_control: None,
+                }],
+            }],
+            max_tokens: 128,
+            system: None,
+            tools: Some(vec![Tool {
+                tool_type: None,
+                name: name.to_string(),
+                description: "Probe the route's schema whitelist.".to_string(),
+                input_schema: schema,
+                allowed_callers: None,
+                defer_loading: None,
+                input_examples: None,
+                strict: None,
+                cache_control: None,
+            }]),
+            tool_choice: None,
+            metadata: None,
+            thinking: None,
+            reasoning_effort: None,
+            stream: None,
+            temperature: None,
+            top_p: None,
+        }
+    }
+
+    /// The 2026-11-04 live probe verified pattern, format, $schema,
+    /// prefixItems, exclusiveMinimum, and nested allOf end to end on the
+    /// exact Kimi Code endpoint: the wire must keep them.
+    #[test]
+    fn kimi_code_route_keeps_probe_verified_keywords_on_wire() {
+        let schema = serde_json::json!({
+            "$schema": "https://json-schema.org/draft/2020-12/schema",
+            "type": "object",
+            "properties": {
+                "label": {
+                    "type": "string",
+                    "pattern": "^[a-z][a-z0-9-]*$",
+                    "format": "uri"
+                },
+                "price": {"type": "number", "exclusiveMinimum": 0},
+                "row": {
+                    "type": "array",
+                    "prefixItems": [{"type": "string"}],
+                    "minItems": 1
+                },
+                "target": {
+                    "type": "object",
+                    "allOf": [
+                        {
+                            "type": "object",
+                            "properties": {"path": {"type": "string"}},
+                            "required": ["path"]
+                        },
+                        {
+                            "type": "object",
+                            "properties": {"mode": {"type": "string"}}
+                        }
+                    ]
+                }
+            },
+            "required": ["label"]
+        });
+        let request = single_tool_request("probe_tool", schema);
+
+        let body = build_chat_wire_body(
+            &request,
+            ApiProvider::Moonshot,
+            crate::config::DEFAULT_KIMI_CODE_BASE_URL,
+            false,
+        )
+        .expect("Kimi Code wire body");
+
+        assert!(
+            body.omitted_tool_names.is_empty(),
+            "probe-verified keywords must not drop the tool: {:?}",
+            body.omitted_tool_names
+        );
+        let parameters = &body.body["tools"][0]["function"]["parameters"];
+        assert_eq!(
+            parameters["properties"]["label"]["pattern"],
+            serde_json::json!("^[a-z][a-z0-9-]*$")
+        );
+        assert_eq!(
+            parameters["properties"]["label"]["format"],
+            serde_json::json!("uri")
+        );
+        assert_eq!(
+            parameters["properties"]["price"]["exclusiveMinimum"],
+            serde_json::json!(0)
+        );
+        assert_eq!(
+            parameters["properties"]["row"]["prefixItems"],
+            serde_json::json!([{"type": "string"}])
+        );
+        assert_eq!(
+            parameters["properties"]["target"]["allOf"]
+                .as_array()
+                .map(Vec::len),
+            Some(2),
+            "nested allOf must survive on the Kimi Code route: {parameters}"
+        );
+    }
+
+    /// Platform endpoints keep the conservative MFJS whitelist: the same
+    /// probe schema is not verifiable there, an unsupported keyword risks a
+    /// whole-request 400, and the per-tool drop plus the projection warning
+    /// stay the final safety net.
+    #[test]
+    fn moonshot_platform_route_keeps_the_conservative_whitelist() {
+        let schema = serde_json::json!({
+            "type": "object",
+            "properties": {
+                "label": {
+                    "type": "string",
+                    "pattern": "^[a-z][a-z0-9-]*$",
+                    "format": "uri"
+                }
+            },
+            "required": ["label"]
+        });
+        let request = single_tool_request("probe_tool", schema);
+
+        let body = build_chat_wire_body(
+            &request,
+            ApiProvider::Moonshot,
+            crate::config::DEFAULT_MOONSHOT_BASE_URL,
+            false,
+        )
+        .expect("platform wire body");
+
+        assert_eq!(
+            body.omitted_tool_names,
+            vec!["probe_tool".to_string()],
+            "the unsupported keyword drops only this tool on the platform route"
+        );
+        assert!(
+            body.body.get("tools").is_none(),
+            "a fully dropped catalog must omit the tools key: {}",
+            body.body
         );
     }
 }
