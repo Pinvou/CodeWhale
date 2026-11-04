@@ -10,6 +10,41 @@
 //! `ToolRegistry::tools_for_api()` before the registry hands them off.
 //! Provider-specific helpers below add stricter DeepSeek and OpenAI Responses
 //! compatibility passes where their request shapes need it.
+//!
+//! # Moonshot / Kimi tool-schema policy (ruling of 2026-11-05)
+//!
+//! The wire shape sent to Moonshot function-calling endpoints is governed
+//! strictly by the published MFJS specification
+//! (<https://github.com/MoonshotAI/walle/blob/main/docs/mfjs-spec.zh.md>,
+//! fetched 2026-11-05; the English original lives at `docs/mfjs-spec.md` in
+//! the same repository). Three rules follow from that ruling:
+//!
+//! 1. The wire carries only the specification's supported keyword set. Its
+//!    closing clause is the authority for everything else: "若官方规范中的
+//!    某些概念、关键字或特性在本文档中未被提及，则表示当前 MFJS 尚未提供官方
+//!    支持……我们不保证它们能在最终的结构化输出中产生稳定、符合预期的结果".
+//! 2. Live probes are observations only and can never widen the wire. A
+//!    2026-11-04 probe of `https://api.kimi.com/coding/v1` observed the
+//!    endpoint accepting `pattern`, `format`, `$schema`, `prefixItems`,
+//!    exclusive bounds, nested `allOf`, and a root `anyOf` union with 200 —
+//!    none of that ships, because the specification does not list it. A
+//!    probe may motivate tightening (it did: the route-tier whitelists this
+//!    module carried for one day were removed on exactly that evidence's
+//!    insufficiency), never loosening.
+//! 3. When the documents and the server source disagree, the documents
+//!    govern. Source-comparison note: the walle implementation
+//!    (`model.go`, `SupportedKeywords`) additionally accepts `title`, `$id`,
+//!    `minLength`, `maxLength`, `minimum`, `maximum`, `minItems`,
+//!    `maxItems`, and `ValidateLevelDefault == "ultra"` validates with that
+//!    wider set — the published specification does not list any of them, so
+//!    this module takes the narrower face: those keywords are stripped
+//!    upstream of validation (`strip_mfjs_advisory_keywords`), never
+//!    shipped.
+//!
+//! One pipeline serves every Moonshot route (platform `api.moonshot.cn`/`ai`
+//! and coding `api.kimi.com` / `api.kimi.ai`): all of those routes'
+//! documentation points at the same specification, so a per-route whitelist
+//! tier would be precision without a mandate.
 
 use std::collections::HashSet;
 

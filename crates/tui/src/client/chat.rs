@@ -982,26 +982,29 @@ fn kimi_code_sampling_route(base_url: &str) -> bool {
 /// regardless of model id; custom gateways and the direct platform route
 /// keep their own wire contract.
 ///
-/// The strip is deliberately route-scoped, not roster-scoped: a 2026-11-04
-/// live probe of the China endpoint (GET /models plus per-model requests)
-/// showed all six served ids — `k3`, `k3-256k`, `k3.1-pro`,
-/// `k3.1-pro-highspeed`, `kimi-for-coding`, `kimi-for-coding-highspeed` —
-/// reject anything but the fixed values with a 400 ("invalid temperature:
-/// only 1 is allowed for this model" / "invalid top_p: only 0.95 is allowed
-/// for this model"). The roster has already lagged behind this endpoint
-/// three times (`k3-256k`, `kimi-for-coding-highspeed`, then both `k3.1-pro`
-/// spellings), so any model id the endpoint serves next is covered without a
-/// code change.
+/// The strip is deliberately route-scoped, not roster-scoped. The document
+/// backing is the Kimi Code guide's own instruction to omit generic sampling
+/// on these endpoints ("omit them from requests",
+/// <https://www.kimi.com/code/docs/en/third-party-tools/codex.html>,
+/// verified 2026-08-26 and re-verified 2026-11-05). The 2026-11-04 live
+/// probe of the China endpoint (GET /models plus per-model requests) is an
+/// observation recorded alongside it, never the shipping basis: all six
+/// served ids — `k3`, `k3-256k`, `k3.1-pro`, `k3.1-pro-highspeed`,
+/// `kimi-for-coding`, `kimi-for-coding-highspeed` — rejected anything but
+/// the fixed values with a 400 ("invalid temperature: only 1 is allowed for
+/// this model" / "invalid top_p: only 0.95 is allowed for this model"). The
+/// roster has already lagged behind this endpoint three times (`k3-256k`,
+/// `kimi-for-coding-highspeed`, then both `k3.1-pro` spellings), so any
+/// model id the endpoint serves next is covered without a code change.
 ///
-/// The overseas host `api.kimi.ai` joins on contract extrapolation: the
-/// official documentation presents both regional endpoints as the same
-/// product with the same wire contract, and the 6/6-model 400 probe covered
-/// only the China spelling. The failure mode of the extrapolation is benign —
-/// not sending `temperature`/`top_p` is exactly the official recommended
-/// configuration for this endpoint, so an `.ai` route that would have
-/// tolerated generic sampling merely ships the documented shape instead.
-/// Source: <https://www.kimi.com/code/docs/en/third-party-tools/codex.html>
-/// (verified 2026-08-26; probe verified 2026-11-04).
+/// The overseas host `api.kimi.ai` joins on the same document: the official
+/// documentation presents both regional endpoints as the same product with
+/// the same wire contract (the 6/6-model probe covered only the China
+/// spelling — an observation on one host, not a widening of another). The
+/// failure mode is benign — not sending `temperature`/`top_p` is exactly
+/// the documented configuration for this endpoint, so an `.ai` route that
+/// would have tolerated generic sampling merely ships the documented shape
+/// instead.
 fn apply_kimi_code_fixed_sampling(body: &mut Value, provider: ApiProvider, base_url: &str) {
     if provider != ApiProvider::Moonshot || !kimi_code_sampling_route(base_url) {
         return;
@@ -6575,8 +6578,10 @@ mod alias_thinking_detection_tests {
 
     #[test]
     fn kimi_code_fixed_sampling_covers_every_model_id_on_the_route() {
-        // 2026-11-04 live probe (GET /models + per-model requests): all six
-        // ids served by https://api.kimi.com/coding/v1 answer
+        // Observation record (2026-11-04 live probe, GET /models + per-model
+        // requests; the shipping basis is the documented "omit them from
+        // requests" contract): all six ids served by
+        // https://api.kimi.com/coding/v1 answer
         // "invalid temperature: only 1 is allowed for this model" /
         // "invalid top_p: only 0.95 is allowed for this model" with a 400.
         // The roster has lagged this endpoint three times already
