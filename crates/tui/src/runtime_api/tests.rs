@@ -283,6 +283,7 @@ fn saved_session_with_blocks(blocks: Vec<crate::models::ContentBlock>) -> SavedS
             model_provider: "deepseek".to_string(),
             model_provider_id: None,
             workspace: PathBuf::from("."),
+            workspace_roots: Vec::new(),
             mode: None,
             cost: Default::default(),
             parent_session_id: None,
@@ -420,6 +421,7 @@ fn messages_from_thread_detail_batches_tool_results() {
         reasoning_effort: None,
         allowed_tools: None,
         workspace: PathBuf::from("."),
+        workspace_roots: Vec::new(),
         mode: "agent".to_string(),
         permission_posture: Some("ask".to_string()),
         allow_shell: false,
@@ -610,6 +612,7 @@ fn legacy_exact_thread_export_normalizes_provider_kind_and_id() {
             reasoning_effort: None,
             allowed_tools: None,
             workspace: PathBuf::from("."),
+            workspace_roots: Vec::new(),
             mode: "agent".to_string(),
             permission_posture: None,
             allow_shell: false,
@@ -969,6 +972,7 @@ async fn spawn_test_server_with_root_token_mobile_workspace_and_overrides(
             allow_shell: false,
             trust_mode: false,
             execution_limits: crate::task_manager::TaskExecutionLimits::default(),
+            human_waits_answerable: false,
         },
         Arc::new(MockExecutor),
     )
@@ -2742,6 +2746,9 @@ async fn compatibility_stream_closes_losslessly_across_replay_live_handoff() -> 
             .await;
         let _ = tx_event
             .send(EngineEvent::TurnComplete {
+                turn_id: None,
+                submission_id: None,
+                compaction_id: None,
                 usage: Usage {
                     input_tokens: 3,
                     output_tokens: 1,
@@ -2995,6 +3002,9 @@ async fn compatibility_stream_exposes_and_resolves_user_input_without_answer_ech
         harness
             .tx_event
             .send(EngineEvent::TurnComplete {
+                turn_id: None,
+                submission_id: None,
+                compaction_id: None,
                 usage: Usage::default(),
                 status: TurnOutcomeStatus::Completed,
                 error: None,
@@ -3355,6 +3365,9 @@ async fn thread_endpoints_expose_lifecycle_contract() -> Result<()> {
                         .await;
                     let _ = tx_event
                         .send(EngineEvent::TurnComplete {
+                            turn_id: None,
+                            submission_id: None,
+                            compaction_id: None,
                             usage: Usage {
                                 input_tokens: 10,
                                 output_tokens: 5,
@@ -3370,6 +3383,9 @@ async fn thread_endpoints_expose_lifecycle_contract() -> Result<()> {
                 Op::CompactContext { .. } => {
                     let _ = tx_event
                         .send(EngineEvent::TurnComplete {
+                            turn_id: None,
+                            submission_id: None,
+                            compaction_id: None,
                             usage: Usage {
                                 input_tokens: 0,
                                 output_tokens: 0,
@@ -3511,6 +3527,9 @@ async fn turn_endpoint_operation_key_returns_original_and_conflicts_on_mismatch(
             sleep(Duration::from_millis(20)).await;
             let _ = tx_event
                 .send(EngineEvent::TurnComplete {
+                    turn_id: None,
+                    submission_id: None,
+                    compaction_id: None,
                     usage: Usage::default(),
                     status: TurnOutcomeStatus::Completed,
                     error: None,
@@ -3616,6 +3635,9 @@ async fn events_endpoint_respects_since_seq_cursor() -> Result<()> {
             .await;
         let _ = tx_event
             .send(EngineEvent::TurnComplete {
+                turn_id: None,
+                submission_id: None,
+                compaction_id: None,
                 usage: Usage {
                     input_tokens: 5,
                     output_tokens: 3,
@@ -3836,6 +3858,9 @@ async fn steer_and_interrupt_endpoints_work_on_active_turn() -> Result<()> {
         sleep(Duration::from_millis(60)).await;
         let _ = tx_event
             .send(EngineEvent::TurnComplete {
+                turn_id: None,
+                submission_id: None,
+                compaction_id: None,
                 usage: Usage {
                     input_tokens: 2,
                     output_tokens: 1,
@@ -4253,6 +4278,9 @@ async fn stream_endpoint_remains_backward_compatible() -> Result<()> {
             .await;
         let _ = tx_event
             .send(EngineEvent::TurnComplete {
+                turn_id: None,
+                submission_id: None,
+                compaction_id: None,
                 usage: Usage {
                     input_tokens: 4,
                     output_tokens: 2,
@@ -4972,6 +5000,9 @@ async fn session_create_from_thread_rejects_active_turn() -> Result<()> {
             .await;
         let _ = tx_event
             .send(EngineEvent::TurnComplete {
+                turn_id: None,
+                submission_id: None,
+                compaction_id: None,
                 usage: Usage {
                     input_tokens: 2,
                     output_tokens: 1,
@@ -10765,7 +10796,8 @@ fn create_managed_skill(root_dir: &std::path::Path, name: &str) -> Result<(PathB
     )?;
     // Write an `.installed-from` marker so the mutation module considers it
     // managed (and therefore eligible for update/remove/trust).
-    let digest = crate::skills::audit::compute_package_digest(&skill_dir).expect("package digest");
+    let digest =
+        crate::skills::package_digest::compute_package_digest(&skill_dir).expect("package digest");
     crate::skills::install::write_installed_from_v2(
         &skill_dir,
         &format!("github:test/{name}"),
