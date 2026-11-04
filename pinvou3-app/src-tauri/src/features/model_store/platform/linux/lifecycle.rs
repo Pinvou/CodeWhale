@@ -2612,12 +2612,27 @@ impl ModelManager {
     /// 两条都不满足（含 docker 查不动的 Unknown）→ false：外来服务或归属
     /// 查不实，宁拒不收——把别人的服务认成自己的实例，停用就会去停别人的
     /// 服务。
+    /// 接管承诺「用户从此有了停用入口」——本地脚本必须真有 stop，否则接管会把
+    /// 用户锁进无自愈路径（stop() 的脚本步 `?` 先行返回 → running 恒 true →
+    /// 再启用被拒、更新脚本被「确已停止」拒、卸载被拒）。r23 P2-2：fail-closed，
+    /// 缺失则不接管、维持拒绝口径。
+    fn local_stop_script_present(&self, rec: &db::StoreModelRecord) -> bool {
+        match self.local_scripts_source(rec) {
+            ScriptsSource::Local { blobs, .. } => blobs.contains_key("stop"),
+            ScriptsSource::Remote { scripts, .. } => scripts.contains_key("stop"),
+        }
+    }
+
     fn leftover_instance_is_own(&self, rec: &db::StoreModelRecord) -> bool {
-        let card_dir = config::data_dir()
-            .join("cards")
-            .join(config::safe_path_component(&rec.card_id).unwrap_or_default());
-        if !card_dir.as_os_str().is_empty() && native_engine_identity_alive(&card_dir) {
-            return true;
+        // r23 P2-1：与 reconcile 收编（:977 一带）同款判据——safe_path_component
+        // 失败时直接跳过本机探测。旧写法 unwrap_or_default + 非空判是死守卫：
+        // join("") 得到的仍是 cards/ 本身（永非空），校验失败会去探测整个
+        // cards/ 目录下的身份文件。
+        if let Ok(safe_id) = config::safe_path_component(&rec.card_id) {
+            let card_dir = config::data_dir().join("cards").join(safe_id);
+            if native_engine_identity_alive(&card_dir) {
+                return true;
+            }
         }
         docker_owned_container_state(&rec.card_id) == DockerOwnedContainerState::Running
     }
@@ -2655,6 +2670,12 @@ impl ModelManager {
         }
         if rec.engine_name == "ollama" {
             if ollama_model_loaded(&self.settings.ollama_host, &rec.model_name) == Some(true) {
+                if !self.local_stop_script_present(&rec) {
+                    return Err(ModelManagerError::new(
+                        "检测到该模型仍由 Ollama 加载着，但本地缺少停用脚本，接管后您将无法\
+                         从界面停用它。请先「更新卡片脚本」补齐脚本包后重试。",
+                    ));
+                }
                 on_progress(
                     "检测到该模型仍由 Ollama 加载着（可能来自商店外的操作或上次异常中断），\
                      已接管为运行中，未重新加载；如需重启请先停用。",
@@ -2667,6 +2688,13 @@ impl ModelManager {
             if endpoint_path_is_openai_style(endpoint) && openai_compatible_endpoint_alive(endpoint)
             {
                 if self.leftover_instance_is_own(&rec) {
+                    if !self.local_stop_script_present(&rec) {
+                        return Err(ModelManagerError::new(
+                            "该模型的服务仍在后台运行且归属核验通过，但本地缺少停用脚本，\
+                             接管后您将无法从界面停用它。请先「更新卡片脚本」补齐脚本包后重试；\
+                             如仍失败请反馈日志。",
+                        ));
+                    }
                     on_progress(
                         "检测到本卡服务已在后台运行且身份核验通过（非商店操作启动的遗留实例），\
                          已接管为运行中，未重启实例；如需重启请先停用。",
@@ -6335,6 +6363,9 @@ echo '权重就绪'
 
     const FAKE_UNINSTALL: &str = "#!/bin/sh\necho '已卸载'\n";
 
+    /// r23 P2-2：接管守卫要求本地真有 stop 脚本（接管=承诺停用入口），夹具随之补齐。
+    const FAKE_STOP: &str = "#!/bin/sh\necho '已停用'\n";
+
     /// 脚印文件里有几行 = 那个脚本真正跑了几次。文件不在就是 0 次。
     fn ran_times(marker: &std::path::Path) -> usize {
         std::fs::read_to_string(marker)
@@ -6360,6 +6391,7 @@ echo '权重就绪'
         for (script_type, body) in [
             ("install_engine", FAKE_INSTALL_ENGINE),
             ("download_model", FAKE_DOWNLOAD_MODEL),
+            ("stop", FAKE_STOP),
             ("uninstall", FAKE_UNINSTALL),
         ] {
             let path = dir.join(format!("{script_type}.sh"));
