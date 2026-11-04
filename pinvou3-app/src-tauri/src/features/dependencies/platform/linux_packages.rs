@@ -3,6 +3,7 @@ const KNOWN_DEP_PACKAGES: &[&str] = &[
     "poppler-utils",
     "pandoc",
     "libreoffice",
+    "python3-uno",
     "tesseract-ocr",
     "tesseract-ocr-chi-sim",
     "p7zip-full",
@@ -29,6 +30,11 @@ mod tests {
     #[test]
     fn voice_asr_ffmpeg_is_an_allowed_dependency() {
         assert_eq!(validate_packages(&["ffmpeg".to_string()]), Ok(()));
+    }
+
+    #[test]
+    fn remote_office_stream_bridge_is_an_allowed_system_dependency() {
+        assert_eq!(validate_packages(&["python3-uno".to_string()]), Ok(()));
     }
 
     #[test]

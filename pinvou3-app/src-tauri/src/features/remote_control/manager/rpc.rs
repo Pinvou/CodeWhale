@@ -1131,12 +1131,20 @@ mod tests {
             .split_once("\n    }")
             .expect("session load failure branch must be bounded");
         let compact: String = load_failure.split_ascii_whitespace().collect();
+        let (before_session_load_error, _) = load_failure
+            .split_once("\"web_session_unavailable\".to_string()")
+            .expect("the session-load rejection must retain its stable error code");
+        let rejection_prefix: String = before_session_load_error
+            .chars()
+            .filter(|ch| !ch.is_whitespace())
+            .collect();
         assert!(
-            compact.contains(
-                "returnErr(WebScopeRejection::Transient(\"web_session_unavailable\".to_string(),));"
-            ) || compact.contains(
-                "returnErr(WebScopeRejection::Transient(\"web_session_unavailable\".to_string()));"
-            ),
+            rejection_prefix.ends_with("WebScopeRejection::Transient(")
+                && (compact.contains(
+                    "returnErr(WebScopeRejection::Transient(\"web_session_unavailable\".to_string(),));"
+                ) || compact.contains(
+                    "returnErr(WebScopeRejection::Transient(\"web_session_unavailable\".to_string()));"
+                )),
             "a failed session load may be transient filesystem unavailability and must \
              never be cached as a terminal completion"
         );

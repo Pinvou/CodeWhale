@@ -13,6 +13,7 @@ use std::path::Path;
 use super::IngestResult;
 use super::estimate_tokens;
 use super::ingest_deps::{pandoc_tool_command, pdftotext_extract, read_capped_text, system_tools};
+use super::ingest_diagnostics::{OFFICE_STREAM_MISSING, safe_error};
 
 const MAX_FORMULAS_PER_SHEET: usize = 2_048;
 
@@ -35,7 +36,7 @@ pub(super) fn ingest_pandoc(
     }
     // 产物落盘再限量读回(原走 stdout,整本输出受平台层 4 MiB 捕获上限约束,
     // 大文档会被误杀);带超时兜底:挂死的转换进程不能让上传永远转圈。
-    let temporary = match tempfile::tempdir() {
+    let temporary = match super::super::platform::private_conversion_directory("pinvou3-pandoc-") {
         Ok(temporary) => temporary,
         Err(e) => {
             return IngestResult::warning(
@@ -43,13 +44,15 @@ pub(super) fn ingest_pandoc(
                 &basename,
                 path,
                 byte_size,
-                format!("pandoc 调用失败: {e}"),
+                safe_error(format!("pandoc 调用失败: {e}")),
             );
         }
     };
     let output_path = temporary.path().join("converted.md");
     let mut command = pandoc_tool_command();
     command
+        .arg("-f")
+        .arg(label)
         .arg("-t")
         .arg("markdown")
         .arg("-o")
@@ -69,14 +72,17 @@ pub(super) fn ingest_pandoc(
             &basename,
             path,
             byte_size,
-            format!("pandoc 失败: {}", String::from_utf8_lossy(&o.stderr).trim()),
+            safe_error(format!(
+                "pandoc 失败: {}",
+                String::from_utf8_lossy(&o.stderr).trim()
+            )),
         ),
         Err(e) => IngestResult::warning(
             label,
             &basename,
             path,
             byte_size,
-            format!("pandoc 调用失败: {e}"),
+            safe_error(format!("pandoc 调用失败: {e}")),
         ),
     }
 }
@@ -107,7 +113,7 @@ fn libreoffice_convert_text(
             std::fs::read_to_string(&out_path)
             // soffice's txt/csv exports carry a UTF-8 BOM; strip it so it does not pollute the start of the body.
             .map(|s| s.trim_start_matches('\u{feff}').to_string())
-            .map_err(|e| format!("LibreOffice 转换后读取失败: {e}"))
+            .map_err(|e| safe_error(format!("LibreOffice 转换后读取失败: {e}")))
         },
     )
 }
@@ -137,7 +143,7 @@ pub(super) fn ingest_spreadsheet(
     kind: &str,
 ) -> IngestResult {
     // (markdown, warning)：calamine 成功取全表；失败回退 LibreOffice CSV（仅首个工作表）。
-    let (markdown, warning) = match spreadsheet_all_sheets_text(path) {
+    let (markdown, warning) = match spreadsheet_all_sheets_text(path, kind == "xlsx") {
         Ok(body) if !body.trim().is_empty() => (Some(body), None),
         other => {
             let fb_err = other.err();
@@ -148,12 +154,20 @@ pub(super) fn ingest_spreadsheet(
                     )),
                     None,
                 ),
-                Err(e) => (None, Some(fb_err.unwrap_or(e))),
+                Err(e) => (
+                    None,
+                    Some(if e == OFFICE_STREAM_MISSING {
+                        e
+                    } else {
+                        fb_err.unwrap_or(e)
+                    }),
+                ),
             }
         }
     };
     let token_estimate = markdown.as_deref().map(estimate_tokens).unwrap_or(0);
     IngestResult {
+        read_owner: None,
         kind: kind.into(),
         basename,
         path: path_str,
@@ -167,12 +181,11 @@ pub(super) fn ingest_spreadsheet(
 /// calamine 读电子表格全部工作表 → 逐行文本。每个工作表加 `## 工作表：名` 小标题，
 /// 每行用 ` | ` 连接非空尾部单元格（去掉行尾连续空单元格），整行空则跳过。
 /// 单元格内换行折成空格，避免破坏「一行 = 一条记录」的语义（利于切块/检索）。
-fn spreadsheet_all_sheets_text(path: &Path) -> Result<String, String> {
-    let bytes = std::fs::read(path).map_err(|e| format!("读取文件失败: {e}"))?;
-    let preserve_xlsx_structure = path
-        .extension()
-        .and_then(|extension| extension.to_str())
-        .is_some_and(|extension| extension.eq_ignore_ascii_case("xlsx"));
+fn spreadsheet_all_sheets_text(
+    path: &Path,
+    preserve_xlsx_structure: bool,
+) -> Result<String, String> {
+    let bytes = std::fs::read(path).map_err(|e| safe_error(format!("读取文件失败: {e}")))?;
     spreadsheet_text_from_bytes(&bytes, preserve_xlsx_structure)
 }
 
@@ -185,7 +198,7 @@ fn spreadsheet_text_from_bytes(
     use calamine::{Data, DataType, Reader, open_workbook_auto_from_rs};
 
     let mut wb = open_workbook_auto_from_rs(std::io::Cursor::new(bytes))
-        .map_err(|e| format!("calamine 解析失败: {e}"))?;
+        .map_err(|e| safe_error(format!("calamine 解析失败: {e}")))?;
 
     // calamine 对 XLSX 公式 Range 按公式格极值做稠密物化（见
     // spreadsheet_structure::MAX_FORMULA_SPAN_CELLS），必须先按内容预扫跨度；
