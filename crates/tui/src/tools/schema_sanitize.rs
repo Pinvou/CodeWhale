@@ -73,16 +73,50 @@ pub fn sanitize_for_strict(schema: &mut Value) {
 
 /// Sanitize a tool `parameters` schema for xAI chat completions.
 ///
-/// xAI validates that the parameters root is an object schema and rejects a
-/// root-level `anyOf`/`oneOf` union with any non-object branch
-/// ("tool parameter root must be an object type"). The built-in `apply_patch`
-/// schema's `oneOf: [{required:["patch"]}, {required:["changes"]}]` trips this
-/// with a 400 on the first tool-bearing request. The Responses-API pass
-/// performs exactly the required normalization — merge root composition
-/// properties, force `type: object`, drop root-only composition keywords —
-/// so reuse it and surface the dropped constraint as a description note.
+/// xAI rejects a parameters root that is neither an object schema nor a
+/// root-level `anyOf`/`oneOf` union whose every branch is itself an object
+/// schema ("tool parameter root must be an object type"), naming the tool in
+/// the 400. The 2026-07-18 live incident (grok-4.5's first tool-bearing
+/// request) died on `apply_patch`'s `oneOf: [{required:["patch"]},
+/// {required:["changes"]}]`. xAI's 2026-10-10 function-calling documentation
+/// (https://docs.x.ai/developers/tools/function-calling) has since relaxed
+/// the rule — "A root `anyOf` or `oneOf` also works when every branch is
+/// itself an object" — so a union of object schemas now passes through with
+/// only semantics-preserving normalization, while anything else (non-object
+/// roots, unions with a non-object branch, root composition keywords outside
+/// the relaxed rule) still goes through the Responses-API flattening pass.
 pub fn sanitize_for_xai_parameters(parameters: &mut Value) -> Option<String> {
+    if root_union_is_all_object_branches(parameters) {
+        let dependent_note = drop_dependent_keywords(parameters);
+        sanitize(parameters);
+        return dependent_note;
+    }
     sanitize_for_responses(parameters)
+}
+
+/// Whether the schema's root carries at least one `oneOf`/`anyOf` and every
+/// root-level union consists exclusively of branches declaring
+/// `type: "object"` — the shape xAI documents as valid for a parameters root.
+///
+/// Branches without an explicit object `type` do not count: xAI's own 400
+/// message for `apply_patch`'s bare required-groups called that union "an
+/// anyOf/oneOf union with a non-object branch".
+fn root_union_is_all_object_branches(schema: &Value) -> bool {
+    let mut has_union = false;
+    for key in ["oneOf", "anyOf"] {
+        let Some(branches) = schema.get(key).and_then(Value::as_array) else {
+            continue;
+        };
+        if branches.is_empty() || branches.iter().any(|branch| !is_object_branch(branch)) {
+            return false;
+        }
+        has_union = true;
+    }
+    has_union
+}
+
+fn is_object_branch(branch: &Value) -> bool {
+    branch.get("type").and_then(Value::as_str) == Some("object")
 }
 
 /// Sanitize a schema for OpenAI Responses function tools.
@@ -1037,7 +1071,9 @@ mod tests {
     fn xai_sanitize_flattens_apply_patch_root_one_of() {
         // The exact shape that produced the live 400:
         // "apply_patch: tool parameter root must be an object type (root
-        // schema is an anyOf/oneOf union with a non-object branch)".
+        // schema is an anyOf/oneOf union with a non-object branch)". The
+        // branches carry no explicit `type`, so xAI counts them as
+        // non-object branches even after its 2026-10-10 relaxation.
         use crate::tools::spec::ToolSpec as _;
         let mut schema = crate::tools::apply_patch::ApplyPatchTool.input_schema();
         assert!(schema.get("oneOf").is_some(), "fixture must match the tool");
@@ -1055,6 +1091,77 @@ mod tests {
                 "Exactly one of these parameter groups must be provided: `changes` | `patch` | `replace`."
             )
         );
+    }
+
+    #[test]
+    fn xai_sanitize_passes_root_union_of_object_branches_through() {
+        // The documented-good shape from xAI's 2026-10-10 function-calling
+        // page: "A root `anyOf` or `oneOf` also works when every branch is
+        // itself an object". Folding it into one merged object would erase
+        // the variant contract the tool documented.
+        let mut schema = json!({
+            "oneOf": [
+                {
+                    "type": "object",
+                    "properties": {
+                        "kind": {"const": "email"},
+                        "address": {"type": "string"}
+                    },
+                    "required": ["kind", "address"]
+                },
+                {
+                    "type": "object",
+                    "properties": {
+                        "kind": {"const": "sms"},
+                        "phone": {"type": "string"}
+                    },
+                    "required": ["kind", "phone"]
+                }
+            ]
+        });
+
+        let note = sanitize_for_xai_parameters(&mut schema);
+
+        let branches = schema
+            .get("oneOf")
+            .and_then(Value::as_array)
+            .expect("root oneOf must survive");
+        assert_eq!(branches.len(), 2, "both object variants must survive");
+        assert_eq!(branches[0]["required"], json!(["kind", "address"]));
+        assert_eq!(branches[1]["required"], json!(["kind", "phone"]));
+        assert!(
+            schema.get("type").is_none(),
+            "the root must not gain a forced object type: {schema}"
+        );
+        assert!(
+            schema.get("properties").is_none(),
+            "branch properties must not be merged into the root: {schema}"
+        );
+        assert_eq!(note, None);
+    }
+
+    #[test]
+    fn xai_sanitize_still_flattens_root_union_with_non_object_branch() {
+        // A union with any non-object branch still "cannot be compiled into
+        // a tool-call grammar" per the 2026-10-10 doc, so the flattening
+        // pass must stay for it.
+        let mut schema = json!({
+            "anyOf": [
+                {
+                    "type": "object",
+                    "properties": {"path": {"type": "string"}},
+                    "required": ["path"]
+                },
+                {"type": "string"}
+            ]
+        });
+
+        let note = sanitize_for_xai_parameters(&mut schema);
+
+        assert_eq!(schema["type"], "object");
+        assert!(schema.get("anyOf").is_none());
+        assert!(schema["properties"].get("path").is_some());
+        assert_eq!(note, None);
     }
 
     #[test]
