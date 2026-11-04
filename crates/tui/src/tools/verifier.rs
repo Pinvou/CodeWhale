@@ -275,7 +275,7 @@ impl ToolSpec for RunVerifiersTool {
                 },
                 "commands": {
                     "type": "array",
-                    "description": "Optional explicit verifier gates. Commands run directly as program+args, not through a shell. Use program='bash', args=['-lc', '...'] only when Bash is intentionally part of the verifier.",
+                    "description": "Optional explicit verifier gates. Foreground gates run directly as program+args, not through a shell; background gates are rendered into a single command line and run through the detected platform shell, so shell quoting rules apply there. Use program='bash', args=['-lc', '...'] only when Bash is intentionally part of the verifier.",
                     "items": {
                         "type": "object",
                         "properties": {
