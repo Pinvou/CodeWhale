@@ -132,7 +132,9 @@ const expectedProtocolHashes = {
   // 回到 helpers 共享基座；裁决⑤ 定案删除 open_in_system / open_external_url
   // 包装位（Rust 命令有 features 层消费，仅删 JS 面）。同批改动见
   // artifacts.js / tauri/bridge.js facade / web bridge。
-  artifacts: 'e4cd72cc8f6953c8e27cba48f24659e28cbe2c68b3b27e35ff3d5237dbbb9db1',
+  // Attachment failure telemetry extends the two track_behavior_event payloads
+  // with stage, step and inputType and updates the terminal error fallback.
+  artifacts: '3e7a4ef7c3924e2c1028500de53a3de747f2f3ecc30780b5043ac1f37fe54403',
 // New domain: computer-use consent commands/events (desktop-only; the web
   // RPC allowlist excludes them, same policy as browser:*).
   // Recomputed when the 30s deny-suppression cooldown was removed: a deny now
