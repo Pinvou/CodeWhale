@@ -170,28 +170,35 @@ fn workbook_location<R: Read + Seek>(
     let root_rels =
         read_formula_zip_text(archive, paths, "_rels/.rels")?.ok_or("_rels/.rels 缺失")?;
     let mut reader = Reader::from_str(&root_rels);
-    reader.config_mut().trim_text(true);
+    let config = reader.config_mut();
+    config.check_end_names = false;
+    config.expand_empty_elements = true;
+    let mut in_relationships = false;
     let mut target = None;
     loop {
         match reader.read_event() {
-            Ok(Event::Start(element) | Event::Empty(element))
-                if element.local_name().as_ref() == "Relationship" =>
+            Ok(Event::Start(element)) if element.local_name().as_ref() == "Relationships" => {
+                in_relationships = true;
+            }
+            Ok(Event::Start(element))
+                if in_relationships && element.local_name().as_ref() == "Relationship" =>
             {
-                let is_office_document = attr(&element, "Type").is_some_and(|relationship_type| {
-                    relationship_type.ends_with("/relationships/officeDocument")
-                });
-                if is_office_document {
-                    if let Some(document_target) = attr(&element, "Target") {
-                        target = Some(document_target);
-                    }
+                if let Some(document_target) = office_document_target(&element)? {
+                    target = Some(document_target);
                 }
             }
-            Ok(Event::Eof) => break,
+            // The reader uses only the first Relationships block.
+            Ok(Event::End(element))
+                if in_relationships && element.local_name().as_ref() == "Relationships" =>
+            {
+                break;
+            }
+            Ok(Event::Eof) => return Err("XLSX 根 relationships 未闭合".to_string()),
             Err(error) => return Err(format!("解析 XLSX 根 relationships 失败: {error}")),
             _ => {}
         }
     }
-    let target = target.as_deref().unwrap_or("");
+    let target = target.as_deref().ok_or("XLSX 根主文档关系缺失")?;
     let (directory, name) = target
         .rfind('/')
         .map_or(("", target), |end| target.split_at(end + 1));
@@ -204,6 +211,47 @@ fn workbook_location<R: Read + Seek>(
         }
         .to_string(),
     ))
+}
+
+// calamine 0.38 scans raw attributes through the next equals sign. Mirror that
+// selection so accepted malformed attributes cannot make the preflight miss a workbook.
+fn office_document_target(element: &BytesStart<'_>) -> Result<Option<String>, String> {
+    let mut remaining = element.attributes_raw().trim_ascii_start();
+    let mut relationship_type = None;
+    let mut target = None;
+    let mut recognized = 0;
+    while !remaining.is_empty() {
+        let (key, value) = remaining.split_once('=').ok_or("XLSX 根关系属性缺少等号")?;
+        let value = value.trim_ascii_start();
+        let quote = match value.as_bytes().first() {
+            Some(b'"') => '"',
+            Some(b'\'') => '\'',
+            _ => return Err("XLSX 根关系属性缺少引号".to_string()),
+        };
+        let value = &value[1..];
+        let (value, tail) = value.split_once(quote).unwrap_or((value, ""));
+        remaining = tail.trim_ascii_start();
+        match key.trim_ascii_end() {
+            "Type" => relationship_type = Some(value),
+            "Target" => target = Some(value),
+            _ => continue,
+        }
+        recognized += 1;
+        if recognized == 2 {
+            break;
+        }
+    }
+    if relationship_type.is_some_and(|value| value.ends_with("/relationships/officeDocument")) {
+        target
+            .map(|value| {
+                quick_xml::escape::unescape(value)
+                    .map(|path| path.into_owned())
+                    .map_err(|error| format!("解析 XLSX 根主文档路径失败: {error}"))
+            })
+            .transpose()
+    } else {
+        Ok(None)
+    }
 }
 
 /// 工作表内公式格的跨度 `(rows, cols)`，取自带 `r` 属性且含 `<f>` 子元素的
@@ -812,6 +860,65 @@ mod tests {
         assert_eq!(
             formulas.get_value((0, 0)).map(String::as_str),
             Some("SUM(1)\n+ 2")
+        );
+    }
+
+    #[test]
+    fn formula_guard_uses_the_readers_package_relationship() {
+        assert_package_relationship_keeps_distant_span(|xml| {
+            xml.push_str(r#"<Relationship Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="xl/other.xml"/>"#);
+        });
+        assert_package_relationship_keeps_distant_span(|xml| {
+            assert!(xml.contains(r#"Target="xl/workbook.xml""#));
+            *xml = xml.replace(
+                r#"Target="xl/workbook.xml""#,
+                r#"xmlns:extra="urn:extra" extra:Target="xl/other.xml" Target="xl/workbook&#46;xml""#,
+            );
+        });
+        assert_package_relationship_keeps_distant_span(|xml| {
+            assert!(xml.contains("</Relationships>"));
+            *xml = xml.replace(
+                "</Relationships>",
+                r#"<Relationship Junk Type="urn:ignored" Target="xl/other.xml"/></Relationships>"#,
+            );
+        });
+    }
+
+    fn assert_package_relationship_keeps_distant_span(change_root: impl Fn(&mut String)) {
+        let mut archive = zip::ZipArchive::new(Cursor::new(distant_formula_fixture())).unwrap();
+        let mut entries = Vec::new();
+        for index in 0..archive.len() {
+            let mut file = archive.by_index(index).unwrap();
+            let name = file.name().unwrap().into_owned();
+            let mut xml = String::new();
+            file.read_to_string(&mut xml).unwrap();
+            if name == "_rels/.rels" {
+                change_root(&mut xml);
+            }
+            entries.push((name, xml));
+        }
+        let files: Vec<_> = entries
+            .iter()
+            .map(|(name, xml)| (name.as_str(), xml.as_str()))
+            .collect();
+        let bytes = xlsx_fixture(&files);
+        let limits = xlsx_formula_span_limits(&bytes).unwrap();
+        let &(rows, cols) = limits.get("Map").unwrap();
+        assert!(rows.saturating_mul(cols) > MAX_FORMULA_SPAN_CELLS);
+
+        let calamine::Sheets::Xlsx(mut workbook) =
+            calamine::open_workbook_auto_from_rs(Cursor::new(bytes)).unwrap()
+        else {
+            panic!("expected XLSX");
+        };
+        let mut cells = workbook.worksheet_cells_reader("Map").unwrap();
+        assert_eq!(
+            cells.next_formula().unwrap().unwrap().get_position(),
+            (0, 0)
+        );
+        assert_eq!(
+            cells.next_formula().unwrap().unwrap().get_position(),
+            (4_294_967_294, 16_383)
         );
     }
 

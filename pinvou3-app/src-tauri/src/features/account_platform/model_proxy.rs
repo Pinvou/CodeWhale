@@ -2610,7 +2610,9 @@ mod cancellation_integration_tests {
                 .unwrap();
             assert_eq!(response.status(), StatusCode::CONFLICT);
             tokio::time::timeout(Duration::from_secs(3), async {
-                while f.posts.lock().unwrap().len() < 2 {
+                // Recording the retry POST precedes its response and receipt GET.
+                // Wait for both observations before asserting either contract.
+                while f.posts.lock().unwrap().len() < 2 || *f.reads.lock().unwrap() == 0 {
                     sleep(Duration::from_millis(10)).await;
                 }
             })

@@ -105,12 +105,9 @@ wildcards = "warn"
 highlight = "all"
 
 [sources]
-# 允许 crates.io、本地 path 及下述固定 revision 的 calamine 仓库。
+# 只允许 crates.io + 本地 path 依赖。禁止任何 git/未知 registry。
 # 注意:[sources] 不支持 version 键(只有 [advisories]/[licenses] 支持)。
 unknown-registry = "deny"
 unknown-git = "deny"
 allow-registry = ["https://github.com/rust-lang/crates.io-index"]
-# 临时使用公开 fork 的完整 revision 54d55a113b309c5d7ab9a4a6d6b2dd8d7320ebea 共享样式修复。
-# 上游发布等效修复且公开接口、正常 Office 读取结果与严格门禁验证通过后，迁回上游发布版。
-allow-git = ["https://github.com/zhuowp/calamine.git"]
-required-git-spec = "rev"
+allow-git = []

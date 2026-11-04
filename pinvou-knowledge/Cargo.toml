@@ -44,7 +44,7 @@ server = [
 anyhow = "1.0"
 # Keep 0.22 to match the app: upstreams still require 0.22; a solo 0.23 bump would add a second copy. Revisit once upstreams align.
 base64 = "0.22"
-calamine = { version = "0.38", git = "https://github.com/zhuowp/calamine.git", rev = "54d55a113b309c5d7ab9a4a6d6b2dd8d7320ebea" }
+calamine = "0.38"
 chrono = { version = "0.4", default-features = false, features = ["clock", "serde"] }
 encoding_rs = "0.8"
 parking_lot = "0.12"

@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"math"
 	"sort"
 	"strings"
@@ -160,6 +161,8 @@ type ProductAdmissionVerification struct {
 	PublishFingerprint string     `json:"publish_fingerprint"`
 	Current            bool       `json:"current"`
 	Active             bool       `json:"active"`
+	UsableForPublish   bool       `json:"usable_for_publish"`
+	ManualSubmission   bool       `json:"manual_submission"`
 	Status             string     `json:"status"`
 	FailureCode        *string    `json:"failure_code,omitempty"`
 	RequestedAt        time.Time  `json:"requested_at"`
@@ -473,7 +476,9 @@ ORDER BY item.updated_at DESC,item.catalog_item_id DESC LIMIT $5`, lifecycle, in
 
 func (r *PostgresRepository) ListProductAdmissionVerifications(ctx context.Context, catalogItemID uuid.UUID) ([]ProductAdmissionVerification, error) {
 	rows, err := r.pool.Query(ctx, `SELECT verification.verification_id,verification.catalog_item_id,verification.retry_of,verification.publish_fingerprint,verification.status,verification.failure_code,verification.requested_at,verification.completed_at,evidence.evidence_id,
-EXISTS(SELECT 1 FROM product_admission_bindings binding WHERE binding.evidence_id=evidence.evidence_id AND binding.effective_to IS NULL)
+			EXISTS(SELECT 1 FROM product_admission_bindings binding WHERE binding.evidence_id=evidence.evidence_id AND binding.effective_to IS NULL),
+			COALESCE(evidence.expires_at>clock_timestamp() AND NOT EXISTS(SELECT 1 FROM product_admission_revocations revocation WHERE revocation.evidence_id=evidence.evidence_id),FALSE),
+			EXISTS(SELECT 1 FROM product_manual_admission_submissions manual WHERE manual.verification_id=verification.verification_id)
 FROM product_admission_verifications verification LEFT JOIN product_admission_evidence evidence USING(verification_id)
 WHERE verification.catalog_item_id=$1 ORDER BY verification.requested_at DESC,verification.verification_id DESC`, catalogItemID)
 	if err != nil {
@@ -483,7 +488,7 @@ WHERE verification.catalog_item_id=$1 ORDER BY verification.requested_at DESC,ve
 	items := make([]ProductAdmissionVerification, 0)
 	for rows.Next() {
 		var item ProductAdmissionVerification
-		if err := rows.Scan(&item.VerificationID, &item.CatalogItemID, &item.RetryOf, &item.PublishFingerprint, &item.Status, &item.FailureCode, &item.RequestedAt, &item.CompletedAt, &item.EvidenceID, &item.Active); err != nil {
+		if err := rows.Scan(&item.VerificationID, &item.CatalogItemID, &item.RetryOf, &item.PublishFingerprint, &item.Status, &item.FailureCode, &item.RequestedAt, &item.CompletedAt, &item.EvidenceID, &item.Active, &item.UsableForPublish, &item.ManualSubmission); err != nil {
 			return nil, err
 		}
 		items = append(items, item)
@@ -505,6 +510,7 @@ WHERE verification.catalog_item_id=$1 ORDER BY verification.requested_at DESC,ve
 	})
 	for index := range items {
 		items[index].Current = items[index].PublishFingerprint == currentFingerprint
+		items[index].UsableForPublish = items[index].UsableForPublish && items[index].Current && items[index].Status == "VERIFIED"
 	}
 	return items, nil
 }
@@ -830,6 +836,16 @@ func (r *PostgresRepository) CompleteProductAdmissionVerification(ctx context.Co
 	if err = tx.QueryRow(ctx, `SELECT catalog_item_id FROM product_admission_verifications WHERE verification_id=$1`, verificationID).Scan(&catalogID); err != nil {
 		return uuid.Nil, err
 	}
+	var admissionClass string
+	if err = tx.QueryRow(ctx, `SELECT admission_class FROM recharge_product_mapping_drafts WHERE catalog_item_id=$1`, catalogID).Scan(&admissionClass); err != nil {
+		return uuid.Nil, err
+	}
+	if admissionClass == "FORMAL" {
+		var approved int
+		if err = tx.QueryRow(ctx, `SELECT count(*) FROM product_manual_admission_decisions WHERE verification_id=$1 AND decision='APPROVE'`, verificationID).Scan(&approved); err != nil || approved < 2 {
+			return uuid.Nil, ErrConflict
+		}
+	}
 	if err = lockTransactionKey(ctx, tx, "catalog.admission", catalogID.String()); err != nil {
 		return uuid.Nil, err
 	}
@@ -887,6 +903,66 @@ func (r *PostgresRepository) CompleteProductAdmissionVerification(ctx context.Co
 		return uuid.Nil, err
 	}
 	return evidenceID, tx.Commit(ctx)
+}
+
+// completeProductAdmissionVerificationTx is the manual-review-only finalizer.
+// It shares the existing evidence and binding rules while requiring the caller
+// to hold the catalog admission lock and to have persisted the second vote in
+// the same transaction.
+func (r *PostgresRepository) completeProductAdmissionVerificationTx(ctx context.Context, tx pgx.Tx, verificationID uuid.UUID, issuer, method, source string, expiresAt time.Time, manual bool) (uuid.UUID, error) {
+	issuer, method, source = strings.TrimSpace(issuer), strings.TrimSpace(method), strings.TrimSpace(source)
+	if !manual || issuer == "" || method == "" || source == "" {
+		return uuid.Nil, ErrConflict
+	}
+	var catalogID uuid.UUID
+	var targetMappingID *uuid.UUID
+	var fingerprint, status string
+	if err := tx.QueryRow(ctx, `SELECT catalog_item_id,target_mapping_id,publish_fingerprint,status FROM product_admission_verifications WHERE verification_id=$1 FOR UPDATE`, verificationID).Scan(&catalogID, &targetMappingID, &fingerprint, &status); err != nil {
+		return uuid.Nil, err
+	}
+	if status == "VERIFIED" {
+		var evidenceID uuid.UUID
+		err := tx.QueryRow(ctx, `SELECT evidence_id FROM product_admission_evidence WHERE verification_id=$1`, verificationID).Scan(&evidenceID)
+		return evidenceID, err
+	}
+	if status != "PENDING" || !expiresAt.After(r.now()) {
+		return uuid.Nil, ErrConflict
+	}
+	item, err := rechargeProductCatalogItem(ctx, tx, catalogID)
+	if err != nil {
+		return uuid.Nil, err
+	}
+	var product Product
+	if err = tx.QueryRow(ctx, `SELECT product_id,base_points,bonus_points,validity_days,invoice_product_name FROM recharge_products WHERE product_id=$1`, item.ProductID).Scan(&product.ProductID, &product.BasePoints, &product.BonusPoints, &product.ValidityDays, &product.InvoiceProductName); err != nil || catalogFingerprint(item, product) != fingerprint {
+		return uuid.Nil, ErrConflict
+	}
+	now := r.now()
+	evidenceID := uuid.Must(uuid.NewV7())
+	if _, err = tx.Exec(ctx, `INSERT INTO product_admission_evidence(evidence_id,verification_id,catalog_item_id,publish_fingerprint,issuer_workload,verification_method,source_reference,issued_at,expires_at,created_at) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$8)`, evidenceID, verificationID, catalogID, fingerprint, issuer, method, source, now, expiresAt); err != nil {
+		return uuid.Nil, err
+	}
+	if _, err = tx.Exec(ctx, `UPDATE product_admission_verifications SET status='VERIFIED',completed_at=$2 WHERE verification_id=$1`, verificationID, now); err != nil {
+		return uuid.Nil, err
+	}
+	if targetMappingID != nil {
+		if _, err = tx.Exec(ctx, `SELECT catalog_item_id FROM recharge_product_catalog_items WHERE catalog_item_id=$1 FOR UPDATE`, catalogID); err != nil {
+			return uuid.Nil, err
+		}
+		if err = r.retireInvalidProductAdmissionBeforeRenewal(ctx, tx, catalogID, now); err != nil {
+			return uuid.Nil, err
+		}
+		if _, err = tx.Exec(ctx, `UPDATE product_admission_bindings SET effective_to=$2 WHERE catalog_item_id=$1 AND effective_to IS NULL`, catalogID, now); err != nil {
+			return uuid.Nil, err
+		}
+		var admissionVersion int64
+		if err = tx.QueryRow(ctx, `UPDATE recharge_product_catalog_items SET admission_version=admission_version+1,updated_at=$2 WHERE catalog_item_id=$1 RETURNING admission_version`, catalogID, now).Scan(&admissionVersion); err != nil {
+			return uuid.Nil, err
+		}
+		if _, err = tx.Exec(ctx, `INSERT INTO product_admission_bindings(catalog_item_id,admission_version,evidence_id,mapping_id,effective_from,created_at) VALUES($1,$2,$3,$4,$5,$5)`, catalogID, admissionVersion, evidenceID, *targetMappingID, now); err != nil {
+			return uuid.Nil, err
+		}
+	}
+	return evidenceID, nil
 }
 
 func (r *PostgresRepository) TransitionRechargeProduct(ctx context.Context, catalogItemID uuid.UUID, expectedVersion int64, target string, evidenceID *uuid.UUID) (RechargeProductCatalogItem, error) {
@@ -1132,24 +1208,45 @@ ORDER BY evidence.expires_at,binding.catalog_item_id LIMIT $1`, limit, afterExpi
 	return retired, nil
 }
 
+type productAdmissionExpiryRepository interface {
+	ExpireProductAdmissions(context.Context, int) (int, error)
+	ExpirePendingManualProductAdmissions(context.Context, int) (int, error)
+	purgeDueProductAdmissionMaterials(context.Context) (int, error)
+}
+
 type ProductAdmissionExpiryWorker struct {
-	repository *PostgresRepository
+	repository productAdmissionExpiryRepository
 	interval   time.Duration
+	logger     *slog.Logger
 }
 
 func NewProductAdmissionExpiryWorker(repository *PostgresRepository, interval time.Duration) *ProductAdmissionExpiryWorker {
 	if interval <= 0 {
 		interval = time.Minute
 	}
-	return &ProductAdmissionExpiryWorker{repository: repository, interval: interval}
+	return &ProductAdmissionExpiryWorker{repository: repository, interval: interval, logger: slog.Default()}
+}
+
+func (w *ProductAdmissionExpiryWorker) reportFailure(ctx context.Context, stage string, err error) {
+	if err != nil && !errors.Is(err, context.Canceled) {
+		w.logger.ErrorContext(ctx, "product admission maintenance failed", "component", "product-admission-expiry", "stage", stage, "error_code", "PRODUCT_ADMISSION_MAINTENANCE_RETRY_PENDING")
+	}
+}
+
+func (w *ProductAdmissionExpiryWorker) runOnce(ctx context.Context) {
+	_, err := w.repository.ExpireProductAdmissions(ctx, 100)
+	w.reportFailure(ctx, "published-expiry", err)
+	_, err = w.repository.ExpirePendingManualProductAdmissions(ctx, 100)
+	w.reportFailure(ctx, "pending-manual-expiry", err)
+	_, err = w.repository.purgeDueProductAdmissionMaterials(ctx)
+	w.reportFailure(ctx, "material-purge", err)
 }
 
 func (w *ProductAdmissionExpiryWorker) Run(ctx context.Context) {
 	ticker := time.NewTicker(w.interval)
 	defer ticker.Stop()
 	for {
-		_, _ = w.repository.ExpireProductAdmissions(ctx, 100)
-		_, _ = w.repository.purgeDueProductAdmissionMaterials(ctx)
+		w.runOnce(ctx)
 		select {
 		case <-ctx.Done():
 			return

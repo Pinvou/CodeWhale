@@ -6,6 +6,7 @@ import { chmod, mkdir, open, readdir, readFile, rename, rm, stat } from "node:fs
 import { basename, dirname, extname, join, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { WebSocketServer } from "ws";
+import { encodeFrame } from "./frame.js";
 import { createTelemetryService } from "./telemetry-service.js";
 import { ControllerTelemetry } from "./controller-telemetry.js";
 import { ControllerLeaseManager } from "./controller-lease.js";
@@ -362,28 +363,43 @@ async function createControllerRuntime() {
   }
 }
 
+/// 终结单个目的地 socket 的四步清理,send() 的全部终止路径共用:
+/// stringify 失败 / 高水位 / send 回调错误 / send 同步抛错。
+function terminateDestination(ws) {
+  ws.policyClosing = true;
+  clearTimeout(ws.authTimer);
+  ws.authTimer = null;
+  try { ws.terminate(); } catch {}
+}
+
 function send(ws, value) {
   if (!ws || ws.readyState !== ws.OPEN || ws.policyClosing) return false;
-  const encoded = JSON.stringify(value);
-  const bytes = Buffer.byteLength(encoded);
+  // One poisoned frame (encodeFrame throws, see frame.js) must terminate only
+  // this destination, exactly like the high-water-mark path below — never
+  // crash the Relay process.
+  let encoded;
+  let bytes;
+  try {
+    ({ encoded, bytes } = encodeFrame(value));
+  } catch {
+    terminateDestination(ws);
+    return false;
+  }
   if (bytes > WS_MAX_BUFFERED_BYTES
     || ws.bufferedAmount + bytes > WS_MAX_BUFFERED_BYTES) {
-    ws.policyClosing = true;
-    clearTimeout(ws.authTimer);
-    ws.authTimer = null;
-    try { ws.terminate(); } catch {}
+    terminateDestination(ws);
     return false;
   }
   try {
     ws.send(encoded, (error) => {
       if (!error) return;
-      ws.policyClosing = true;
-      try { ws.terminate(); } catch {}
+      terminateDestination(ws);
     });
     return true;
   } catch {
-    ws.policyClosing = true;
-    try { ws.terminate(); } catch {}
+    // 与其余三条终结路径同口径清理 authTimer:close 处理器会兜底,
+    // 但这里先行清理保持四条路径完全一致。
+    terminateDestination(ws);
     return false;
   }
 }
@@ -814,6 +830,11 @@ function withoutCredentials(message) {
     token: _token,
     pairing_token: _pairingToken,
     desktop_secret: _desktopSecret,
+    // `web_rejoining` is relay-authoritative (set only on the relay-generated
+    // informational frames); a client-supplied value must not survive
+    // forwarding where it is indistinguishable from a relay-set field at the
+    // type level (round-11 review).
+    web_rejoining: _webRejoining,
     ...safe
   } = message;
   return safe;
@@ -833,7 +854,7 @@ function desktopStatus(endpoint, status) {
   });
 }
 
-function notifyDesktopOfWeb(endpoint) {
+function notifyDesktopOfWeb(endpoint, rejoining = false) {
   if (!socketOpen(endpoint.desktop) || !socketOpen(endpoint.web)) return;
   send(endpoint.desktop, {
     v: 2,
@@ -842,6 +863,7 @@ function notifyDesktopOfWeb(endpoint) {
     lease_id: endpoint.lease_id,
     stream_epoch: endpoint.web.streamEpoch || null,
     after_seq: endpoint.web.afterSeq,
+    web_rejoining: rejoining === true,
   });
 }
 
@@ -1005,8 +1027,10 @@ const server = http.createServer(async (req, res) => {
   try {
     url = new URL(req.url || "/", `http://${req.headers.host || "127.0.0.1"}`);
   } catch {
-    // A hostile Host header must not crash the relay; the fixed reply never
-    // echoes the offending value.
+    // A hostile Host header (out-of-range port) or an absolute-form request
+    // target makes the URL constructor throw; the fixed reply never echoes
+    // the offending value. Like any other poisoned input this must terminate
+    // only this exchange, never the process.
     res.writeHead(400, { "content-type": "text/plain; charset=utf-8" });
     res.end("bad request");
     return;
@@ -1037,6 +1061,16 @@ const wss = new WebSocketServer({
 });
 
 server.on("upgrade", (req, socket, head) => {
+  // Defense-in-depth, stated honestly (round-14 review): Node's HTTP server
+  // swallows raw-socket errors that land before the 'upgrade' event fires,
+  // and ws attaches its own `socket.on("error")` synchronously as the first
+  // line of handleUpgrade — so a pre-handshake RST cannot surface as an
+  // unhandled 'error' event even without this listener, and the RST test
+  // pins the observable survival property rather than this guard (removing
+  // the guard keeps that test green by construction). The listener stays so
+  // this handler never has to reason about the boundary: any socket error
+  // it can observe must only ever kill this socket, never the process.
+  socket.on("error", () => socket.destroy());
   const controllerUpgrade = String(req.headers["sec-websocket-protocol"] || "")
     .split(",")
     .some((value) => value.trim() === CONTROLLER_SUBPROTOCOL);
@@ -1049,6 +1083,9 @@ server.on("upgrade", (req, socket, head) => {
   try {
     url = new URL(req.url || "/", `http://${req.headers.host || "127.0.0.1"}`);
   } catch {
+    // Same poisoned-input class as the request handler: answer the upgrade
+    // with the fixed 400 banner, then destroy only this socket and keep the
+    // process alive.
     rejectUpgrade(socket, "400 Bad Request", "malformed host header");
     return;
   }
@@ -1218,10 +1255,14 @@ async function finishDesktopRegistration(ws, { endpointId, accessToken, desktopS
     endpoint_id: endpointId,
     web_client_connected: socketOpen(endpoint.web),
     lease_id: socketOpen(endpoint.web) ? endpoint.lease_id : null,
+    // The incumbent web client keeps the flag from its own join: a client
+    // that rejoined while the desktop was away must not trigger the
+    // takeover wipe when the desktop re-registers.
+    web_rejoining: endpoint.web_rejoined === true,
   });
   if (socketOpen(endpoint.web)) {
     desktopStatus(endpoint, "connected");
-    notifyDesktopOfWeb(endpoint);
+    notifyDesktopOfWeb(endpoint, endpoint.web_rejoined === true);
   }
 }
 
@@ -1262,6 +1303,15 @@ function joinWebClient(ws, msg) {
     });
   }
 
+  // A join that arrives while the previous web socket is already gone is a
+  // rejoin (watchdog or network recovery by the same token holder), not a
+  // takeover: flag it so the desktop keeps lease-scoped state (staged
+  // attachments, in-flight uploads, session downloads) instead of wiping it
+  // on every idle reconnect.
+  const rejoining = !previousWeb && Boolean(endpoint.had_web_client);
+  endpoint.had_web_client = true;
+  endpoint.web_rejoined = rejoining;
+
   ws.streamEpoch = typeof msg.stream_epoch === "string" ? msg.stream_epoch.slice(0, 256) : null;
   ws.afterSeq = Math.max(0, Number.isSafeInteger(msg.after_seq) ? msg.after_seq : 0);
   endpoint.web = ws;
@@ -1274,7 +1324,7 @@ function joinWebClient(ws, msg) {
     lease_id: leaseId,
     desktop_connected: socketOpen(endpoint.desktop),
   });
-  notifyDesktopOfWeb(endpoint);
+  notifyDesktopOfWeb(endpoint, rejoining);
 
   if (previousWeb) closeSocket(previousWeb, 4001, "endpoint replaced");
 }
@@ -1567,6 +1617,11 @@ wss.on("connection", (ws, req) => {
       const leaseId = endpoint.lease_id;
       endpoint.web = null;
       endpoint.lease_id = null;
+      // rejoin 旗标描述的是「当前在线的 web 会话是接续会话」;该会话已死,
+      // 旗标随之失效。不重置的话,desktop 在无 web 在线时重新注册会收到
+      // web_client_connected:false + web_rejoining:true 的矛盾帧。
+      // 下一次 join 会按 had_web_client 重新计算,不受此处重置影响。
+      endpoint.web_rejoined = false;
       controllerRuntime?.reservations.releaseWeb({ endpointId: endpoint.endpoint_id, leaseId });
       send(endpoint.desktop, {
         v: 2,

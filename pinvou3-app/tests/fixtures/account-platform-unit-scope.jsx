@@ -47,7 +47,7 @@ const client = {
     if (control.pagination) { const second = Boolean(url.searchParams.get('cursor')); value.items = value.items.slice(second ? 1 : 0, second ? 2 : 1); value.next_cursor = second ? null : 'controlled-scope-page-2'; }
     return value;
    }
-   if (method === 'GET' && url.pathname.endsWith('/role-bindings')) return { items: [] };
+   if (method === 'GET' && url.pathname.endsWith('/role-bindings')) return { items: [], truncated: false };
    if (method === 'GET' && url.pathname.endsWith('/balance')) return { owner_type: 'ORGANIZATION', owner_id: dto.organization_id, wallet_id: newID, posted_microcredits: '0', reserved_microcredits: '0', available_microcredits: '0' };
    if (method === 'GET' && url.pathname.endsWith('/model-policy')) return { organization_id: dto.organization_id, version: 0, mode: 'ALLOW_ALL', model_ids: [], authorization_version: actor().context.organization_authorization_version };
    if (method === 'GET') return { items: [] };

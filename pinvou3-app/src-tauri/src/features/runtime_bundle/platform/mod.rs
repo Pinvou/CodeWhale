@@ -211,12 +211,45 @@ pub(crate) use crate::platform::connector_skills::{
 ///       `--replace` 更正为真实 flag `--replacement`，attendance_report_checkin.py
 ///       头注 100 人 → 50 人（与 MAX_USERS_PER_CHECKIN_BATCH 常量一致），
 ///       attendance_report_common.py RGBA 注释与 convert("RGBA") 对齐。全部
-///       登记于 NOTICE-dingtalk.md 供下次 sync 重放。技能树不参与内容哈希，
+///       登记于 NOTICE-dingtalk.md 供下次 sync 重放（该 NOTICE 已压缩为修改
+///       摘要，逐条重放记录经其 git 历史指针可达）。技能树不参与内容哈希，
 ///       必须语义升位让已连接用户启动时刷新（否则刷新要等首帧后
 ///       refresh_connector_auth_gates 回填）；extracted-VERSION 门禁只做
 ///       不等比较。
+/// 0.39: 回流 Community #815 的 2026-10-07 审计未交付模型向指引补缺（无上游
+///       sync、无 Rust 逻辑变化）：lark-calendar/SKILL.md `+meeting` 行不再把
+///       视频会议链接/产物获取路由到 `+get`（reference 输出字段表仅
+///       `event_id`/`meeting_id`/`meeting_note`），并写明 `+create` 默认携带
+///       飞书视频会议（`vchat: {"vc_type": "vc"}`）、纪要/妙记凭 `meeting_id`
+///       走 `vc +detail`；lark-shared/SKILL.md 通用准则补第 5/6 条（CLI 未
+///       安装由品悟应用代管、按需授权两段式提醒、限流集中默认值：
+///       `retry_after_seconds`/`hint` 指数退避约 3 次内，个别 reference 专属
+///       口径仍优先）并把 description 的「权限不足与 missing_scope 处理」改为
+///       「权限不足/未安装/限流默认处理」；wecomcli-meeting/SKILL.md 删除
+///       `open_vid`≡`userid` 等价句，改为 `userid`（`wo` 前缀）只经
+///       wecomcli-contact 搜索解析、其他系统标识不能替代或按形态拼接；
+///       wecomcli-contact / wecomcli-doc / wecomcli-doc-manage 各补「业务失败
+///       处理」节（同一操作最多重试 2 次，自动重试仅限读取类操作；写操作
+///       超时属结果不明——接口无调用级凭据，读回/名称检索不能归因到本次
+///       调用，一律停止自动操作并如实报告「结果未知」，由用户人工核对后才可
+///       补写一次），append/overwrite reference 各补「超时与结果不明」流程；
+///       bridge.rs 的 AUX_SESSION_INSTRUCTIONS 尾句解释 `# userselect:`
+///       引文围栏（AUX_ZERO_TOOL_INSTRUCTIONS 按字节恒等契约保持原文）。
+///       Hooks：multiagent_depth_guard 的 opaque-source 门改为只匹配
+///       字符串值的 `"source_path"` 键（grep 无法计嵌套深度，载荷内嵌套
+///       source_path 仍保守拦截；裸 `path` 手动别名不再拦截——裸键匹配曾误伤
+///       plan 载荷内嵌套 `path` 字段的合法调用，引擎 #5253 min-clamp 已兜底
+///       文件内覆盖）；instructions-work / instructions-work-bound 补
+///       `<context_update>` 增量消息说明（此前仅代码 lane 的
+///       CORE_EXECUTION_PROFILE_PROMPT 有）。全部登记于 lark-skills/NOTICE.md
+///       与 NOTICE-wecom.md 供下次 sync 重放。0.38 已被 #808 占用，使用下一
+///       空闲槽位；instructions 文件在内容哈希内，哈希变化本身已强制启动
+///       刷新，槽位升位额外送达不参与哈希的面——技能树（当前可见连接器由
+///       首帧后 refresh_connector_auth_gates 回填）与 depth-guard hook 双子
+///       （唯一写入方是本 bundle_changed 门控块），并保持每批交付一个连贯
+///       槽位；extracted-VERSION 门禁只做不等比较。
 pub const BUNDLE_VERSION: &str = concat!(
-    "0.38-",
+    "0.39-",
     env!("BUNDLE_INSTRUCTIONS_HASH"),
     "-",
     env!("BUNDLE_H3C_CLI_HASH"),
@@ -546,11 +579,21 @@ pub const DENY_SENSITIVE_PATHS_SH: &str =
 pub const DENY_SENSITIVE_PATHS_PS1: &str =
     include_str!("../../../../resources/common/bundle/deny_sensitive_paths.ps1");
 
-/// 多智能体会话的两层深度护栏。仅在多智能体 EngineConfig 中挂载，
-/// 普通对话不使用。会话上限允许一级代理再派生一层；hook 拦截主会话显式
-/// 传入的正数深度覆盖字段（嵌套子代理的调用不经过 ToolCallBefore，由
-/// 继承上限与准入/并发额度兜底）；Workflow 的
-/// `source_path` 要求改用 inline script/plan，避免 hook 无法检查文件内参数。
+/// Two-layer depth guard for multi-agent sessions. Mounted only in
+/// multi-agent EngineConfig; ordinary conversations do not use it. The
+/// session cap lets first-level agents spawn one more layer; the hook
+/// intercepts the positive depth-override field explicitly passed by the
+/// main session (nested subagent calls bypass ToolCallBefore and are
+/// backstopped by the inherited cap plus admission/concurrency quota);
+/// Workflow top-level `source_path` must switch to inline script/plan,
+/// since the hook cannot inspect file-internal args. The engine side also
+/// has a `path` manual alias not written into the schema (the
+/// `optional_str` fallback on `workflow_source`, not a serde alias); that
+/// alias is not intercepted here (bare-key matching would false-hit nested
+/// `path` fields inside plan payloads). The `path` interception predates
+/// the engine's #5253 min-clamp and was load-bearing before the clamp
+/// landed; the clamp now backstops in-file overrides, so this leftover is
+/// not an execution gap.
 pub const MULTIAGENT_DEPTH_GUARD_SH: &str =
     include_str!("../../../../resources/common/bundle/multiagent_depth_guard.sh");
 pub const MULTIAGENT_DEPTH_GUARD_PS1: &str =
@@ -1642,6 +1685,38 @@ mod tests {
                         && !opaque_reason.contains(" file ")
                         && opaque_reason.chars().count() <= 240,
                     "opaque workflow 拒绝原因必须原样通过引擎脱敏管线: {opaque_reason:?}"
+                );
+
+                // Nested "path" keys inside structured plan payloads are ordinary
+                // field names (child tool args etc.), not the schema-documented
+                // source_path bypass key: the opaque-source trigger must not fire
+                // on them (the guard used to match the bare "path" manual fallback
+                // at any nesting depth and false-denied these calls; the fallback
+                // stays un-intercepted by design, see the hook's header comment).
+                let nested_path = run_depth_guard(
+                    &bundle,
+                    "workflow",
+                    r#"{"plan":{"goal":"summarize docs","children":[{"id":"a","args":{"path":"docs/x.md"}}]}}"#,
+                );
+                assert!(
+                    nested_path.status.success(),
+                    "plan 载荷里的嵌套 path 字段不得触发 source_path 拦截: {nested_path:?}"
+                );
+
+                // Any string-valued "source_path" key still denies: grep cannot
+                // count JSON nesting depth, so nested occurrences inside
+                // free-form payloads (child args bags, responseSchema examples)
+                // are denied conservatively. Pin that behavior so a later edit
+                // cannot quietly narrow the gate past the documented shape
+                // (only the bare "path" carve-out is intentional).
+                let nested_source_path = run_depth_guard(
+                    &bundle,
+                    "workflow",
+                    r#"{"plan":{"goal":"ingest","children":[{"id":"a","args":{"source_path":"notes.md"}}]}}"#,
+                );
+                assert!(
+                    !nested_source_path.status.success(),
+                    "嵌套的字符串型 source_path 键仍应保守拦截（grep 无法计嵌套深度，仅 path 别名是有意放行）: {nested_source_path:?}"
                 );
             },
         );

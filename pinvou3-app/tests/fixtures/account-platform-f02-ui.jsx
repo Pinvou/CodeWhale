@@ -103,7 +103,7 @@ globalThis.fetch = async (url, options = {}) => {
   }
   if (url.includes('/recharge-products?')) return json({ items: [product] });
   if (url.endsWith('/recharge-product-create-options')) return json({ adapters: [{ provider_id: 'controlled', provider_version: 'v1', channels: ['ALIPAY'] }], invoice_product_names: ['Controlled invoice'] });
-  if (url.endsWith('/admission-verifications')) return json({ items: control.verifiedProduct ? [{ verification_id: other, status: control.verificationStatus || 'VERIFIED', current: true, active: true, evidence_id: other }] : [] });
+  if (url.endsWith('/admission-verifications')) return json({ items: control.verifiedProduct ? [{ verification_id: other, status: control.verificationStatus || 'VERIFIED', current: true, active: true, usable_for_publish: !control.verificationStatus || control.verificationStatus === 'VERIFIED', manual_submission: false, evidence_id: other }] : [] });
   if (url.endsWith(`/recharge-products/${id}/publish`)) { const input = JSON.parse(options.body); if (input.evidence_id !== other || !control.verifiedProduct || (control.verificationStatus && control.verificationStatus !== 'VERIFIED')) return json({ code: 'CONFLICT' }, 409); control.productPublished = true; return json({ ...product, lifecycle_status: 'ON_SALE', version: 2 }); }
   if (url.includes('/payment-anomalies?')) return json({ items: [anomaly()] });
   if (url.endsWith(`/payment-anomalies/${id}`)) return json({ case: anomaly(), events: [] });

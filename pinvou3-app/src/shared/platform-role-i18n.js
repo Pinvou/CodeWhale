@@ -2,6 +2,7 @@ export const platformRoleCopy = {
   "zh": {
     "title": "平台角色",
     "lead": "查看原子权限及最多 500 条平台用户授权。组织角色请使用组织管理。",
+    "bindingsTruncated": "角色列表已截断，仅显示前 500 条。请按目标用户查询以缩小范围。",
     "target": "目标用户 ID",
     "role": "角色",
     "starts": "生效时间（留空立即生效）",
@@ -37,6 +38,7 @@ export const platformRoleCopy = {
   "en": {
     "title": "Platform roles",
     "lead": "Inspect atomic permissions and up to 500 platform user grants. Manage organization roles in organization administration.",
+    "bindingsTruncated": "The role list is truncated; only the first 500 entries are shown. Filter by target user to narrow the list.",
     "target": "Target user ID",
     "role": "Role",
     "starts": "Starts at (blank means now)",
@@ -72,6 +74,7 @@ export const platformRoleCopy = {
   "ja": {
     "title": "プラットフォームのロール",
     "lead": "原子的な権限とユーザーへの付与を最大 500 件表示します。組織ロールは組織管理で操作してください。",
+    "bindingsTruncated": "ロール一覧は切り詰められています。最初の500件のみ表示します。対象ユーザーで絞り込んでください。",
     "target": "対象ユーザー ID",
     "role": "ロール",
     "starts": "開始日時（空欄は即時）",

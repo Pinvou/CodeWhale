@@ -196,22 +196,48 @@ pub fn web_access_enable(
 }
 
 #[tauri::command]
-pub fn web_access_disable(manager: State<'_, RemoteControlManager>) -> Result<(), String> {
+pub fn web_access_disable(
+    window: WebviewWindow,
+    manager: State<'_, RemoteControlManager>,
+) -> Result<(), String> {
+    // 停链与启用同口径:辅助 WebView(code-reader/宠物等)里的脚本不得
+    // 静默切断用户的远程链接。
+    require_main_webview(&window)?;
     manager.stop_current()
 }
 
+/// 与 enable/revoke 同一口径:状态 payload 携带含 access_token 片段的配对
+/// URL,轮换会改写凭据——两者都只属于主 WebView 的设置入口,读者/宠物等
+/// 辅助 WebView 不得触发或轮询。
 #[tauri::command]
 pub fn web_access_status(
+    window: WebviewWindow,
     manager: State<'_, RemoteControlManager>,
 ) -> Result<WebAccessStatus, String> {
+    require_main_webview(&window)?;
     Ok(manager.status())
 }
 
 #[tauri::command]
 pub fn web_access_rotate(
+    window: WebviewWindow,
     manager: State<'_, RemoteControlManager>,
 ) -> Result<WebAccessInfo, String> {
+    require_main_webview(&window)?;
     manager.refresh()
+}
+
+/// Desktop-only consent surface: take back the host-folder authorization
+/// without stopping the link. The phone can never flip consent — this command
+/// is main-WebView-gated like `web_access_enable` and absent from the Web
+/// access policy.
+#[tauri::command]
+pub fn web_access_revoke_host_workspace(
+    window: WebviewWindow,
+    manager: State<'_, RemoteControlManager>,
+) -> Result<WebAccessInfo, String> {
+    require_main_webview(&window)?;
+    manager.revoke_host_workspace()
 }
 
 /// 桌面专属：查询/设置自定义 Relay 地址。均不进 Web 命令白名单——Relay 指向
@@ -949,7 +975,10 @@ pub async fn web_access_create_codex_acp_session(
                 workspace_reservation
                     .as_ref()
                     .ok_or_else(|| "Web workspace authorization is missing".to_string())?
-                    .verify_bound_path(path)
+                    .verify_bound_path(path)?;
+                // reserve 与绑定之间用户可能已撤销授权:绑定时点复核旗标,
+                // 不让撤权前的 reservation 在 TTL 窗口内完成绑定。
+                manager.require_host_workspace_authorized()
             };
             let workspace_verifier = workspace_reservation.as_ref().map(|_| {
                 &verify_workspace as &(dyn Fn(&Path) -> Result<(), String> + Send + Sync)

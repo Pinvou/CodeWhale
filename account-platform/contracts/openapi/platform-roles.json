@@ -54,7 +54,30 @@
         ],
         "responses": {
           "200": {
-            "description": "Platform-only association projection"
+            "description": "Platform-only association projection, ordered and bounded to 500 entries. truncated is true only when more matching entries exist.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": [
+                    "items",
+                    "truncated"
+                  ],
+                  "properties": {
+                    "items": {
+                      "type": "array",
+                      "maxItems": 500,
+                      "items": {
+                        "$ref": "#/components/schemas/RoleBinding"
+                      }
+                    },
+                    "truncated": {
+                      "type": "boolean"
+                    }
+                  }
+                }
+              }
+            }
           },
           "401": {
             "$ref": "#/components/responses/AuthenticationRequired"
