@@ -22,6 +22,7 @@
     "tests/remote_quarantine_smoke.mjs",
     "tests/controlled_preconnect_smoke.mjs",
     "tests/remote_dispatch_ownership_smoke.mjs",
+    "tests/remote_offline_abandon_smoke.mjs",
     "tests/controlled_open_ui_smoke.mjs",
     "src/platform/tauri/bridge.js",
     "src/platform/tauri/bridge/*.js",
