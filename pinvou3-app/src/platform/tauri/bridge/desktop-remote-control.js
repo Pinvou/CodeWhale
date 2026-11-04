@@ -39,6 +39,7 @@
     var capabilityRenewalTimer = null;
     var modelListIntent = 0;
     var capabilityReadIntent = 0;
+    var capabilityReadFlight = null;
     var controlledTerminalSequence = 0;
     var controllerTerminalSequence = 0;
     var proxyListIntent = 0;
@@ -65,6 +66,8 @@
     // undefined——后端已 waiting_for_pairing 且带连接码，面板却显示未开启（2026-09-20 实测）。
     var STATE_SLICES = [
       "controlledDevice",
+      "controlledNavigationIntent",
+      "controlledNavigationPending",
       "controlledSession",
       "controllerConnection",
       "remoteCapabilities",
@@ -272,6 +275,12 @@
       return next.intents.controlled;
     }
 
+    function settleControlledIntent(intent) {
+      var previous = current();
+      if (!previous.intents || previous.intents.controlled !== intent || !previous.controlledNavigationPending) return;
+      publish(Object.assign({}, previous, { controlledNavigationPending: false }));
+    }
+
     function controllerIntent(openNewConnection) {
       var next = logic.beginControllerIntent(current(), openNewConnection);
       publish(next);
@@ -335,7 +344,7 @@
           });
         }
         return applyControlled(intent, result, true);
-      }).catch(function (failure) { throw asBoundedError(failure); });
+      }).catch(function (failure) { throw asBoundedError(failure); }).finally(function () { settleControlledIntent(intent); });
     }
 
     function controlledRefresh() {
@@ -344,7 +353,7 @@
       var intent = controlledIntent(true);
       return invoke("desktop_remote_controlled_refresh", {}).then(function (result) {
         return applyControlled(intent, result, true);
-      }).catch(function (failure) { throw asBoundedError(failure); });
+      }).catch(function (failure) { throw asBoundedError(failure); }).finally(function () { settleControlledIntent(intent); });
     }
 
     function controlledStop() {
@@ -352,7 +361,7 @@
       var intent = controlledIntent();
       return invoke("desktop_remote_controlled_stop", {}).then(function (result) {
         return applyControlled(intent, result);
-      }).catch(function (failure) { throw asBoundedError(failure); });
+      }).catch(function (failure) { throw asBoundedError(failure); }).finally(function () { settleControlledIntent(intent); });
     }
 
     function controlledDisconnectNow() {
@@ -360,7 +369,7 @@
       var intent = controlledIntent();
       return invoke("desktop_remote_controlled_disconnect_now", {}).then(function (result) {
         return applyControlled(intent, result);
-      }).catch(function (failure) { throw asBoundedError(failure); });
+      }).catch(function (failure) { throw asBoundedError(failure); }).finally(function () { settleControlledIntent(intent); });
     }
 
     function controlledStatus() {
@@ -596,14 +605,20 @@
 
     function scheduleCapabilityRenewal(payload) {
       if (capabilityRenewalTimer) clearTimeout(capabilityRenewalTimer);
+      var before = current();
       var validForMs = Number(payload.capabilityValidForMs || 30_000);
-      var delay = Math.max(1_000, Math.min(25_000, validForMs - CAPABILITY_RENEWAL_LEAD_MS));
-      var sessionRef = current().controllerConnection && current().controllerConnection.sessionRef;
+      var expiresAtMs = Number(payload.expiresAtMs);
+      // Cache reads retain their original expiry; reopening a view must not
+      // restart a full TTL or create a second renderer-owned renewal timer.
+      var delay = Number.isSafeInteger(expiresAtMs) && expiresAtMs > 0
+        ? Math.max(0, expiresAtMs - Date.now() - CAPABILITY_RENEWAL_LEAD_MS)
+        : Math.max(1_000, Math.min(25_000, validForMs - CAPABILITY_RENEWAL_LEAD_MS));
+      var sessionRef = before.controllerConnection && before.controllerConnection.sessionRef;
       if (!sessionRef) return;
       capabilityRenewalTimer = setTimeout(function () {
         capabilityRenewalTimer = null;
         var connection = current().controllerConnection || {};
-        if (connection.status !== "connected" || connection.sessionRef !== sessionRef) return;
+        if (connection.status !== "connected" || !sameControllerView(before, current())) return;
         beginCapabilityHandshake(sessionRef, true).catch(function () {});
       }, delay);
     }
@@ -772,7 +787,7 @@
 
     function capabilitiesSnapshot(remoteRef) {
       ensureAvailable();
-      var intent = ++capabilityReadIntent;
+      subscribe();
       var before = current();
       var connection = before.controllerConnection || {};
       if (!requiredOpaqueId(remoteRef) || connection.status !== "connected"
@@ -781,13 +796,28 @@
         || !connection.relayEpoch || !connection.generation) {
         return Promise.reject(asBoundedError("capability_snapshot_unavailable"));
       }
-      return invoke("desktop_remote_controller_capability_snapshot", { remoteRef: remoteRef }).then(function (snapshot) {
+      // ChatView's revision effect and the send preflight can read together.
+      // Share that exact owner's read instead of superseding one caller with
+      // a null result while its matching projection is still being published.
+      if (capabilityReadFlight && capabilityReadFlight.remoteRef === remoteRef
+        && sameControllerView(capabilityReadFlight.before, before)) return capabilityReadFlight.promise;
+      var intent = ++capabilityReadIntent;
+      var flight = { remoteRef: remoteRef, before: before, promise: null };
+      flight.promise = invoke("desktop_remote_controller_capability_snapshot", { remoteRef: remoteRef }).then(function (snapshot) {
         if (intent !== capabilityReadIntent || !sameControllerView(before, current())) return null;
         var after = logic.applyCapabilities(current(), snapshot);
-        if (after === current()) return null;
-        publish(after);
-        return after.remoteCapabilities;
-      }).catch(function (failure) { throw asBoundedError(failure); });
+        var changed = after !== current();
+        if (changed) publish(after);
+        if (snapshot && Number.isSafeInteger(Number(snapshot.expiresAtMs)) && Number(snapshot.expiresAtMs) > 0
+          && Number(snapshot.capabilityRevision) === Number(current().controllerConnection.capabilityRevision)) {
+          scheduleCapabilityRenewal(snapshot);
+        }
+        return changed ? after.remoteCapabilities : null;
+      }).catch(function (failure) { throw asBoundedError(failure); }).finally(function () {
+        if (capabilityReadFlight === flight) capabilityReadFlight = null;
+      });
+      capabilityReadFlight = flight;
+      return flight.promise;
     }
 
     function noteControlledTerminal(payload) {
@@ -999,7 +1029,9 @@
         .then(function (records) {
           if (!Array.isArray(records) || records.length > 256 || records.some(function (record) {
             return !record || !requiredOpaqueId(record.localSessionId)
-              || !record.localSessionId.startsWith("remote-") || typeof record.hidden !== "boolean";
+              || !record.localSessionId.startsWith("remote-") || typeof record.hidden !== "boolean"
+              || (record.pendingCount !== undefined && (!Number.isSafeInteger(record.pendingCount)
+                || record.pendingCount < 0 || record.pendingCount > 64));
           })) throw asBoundedError("remote_proxy_projection_invalid");
           // This management-only result must not publish hidden entries into
           // the ordinary history list or select a live execution target.
@@ -1022,18 +1054,36 @@
     }
 
     function archiveRemoteProxyHistory(localSessionId) {
+      return sealRemoteProxyHistory(localSessionId, false);
+    }
+
+    function quarantineRemoteProxyHistory(localSessionId, confirmed) {
+      if (confirmed !== true) {
+        return Promise.reject(asBoundedError("remote_proxy_quarantine_confirmation_required"));
+      }
+      return sealRemoteProxyHistory(localSessionId, true);
+    }
+
+    function sealRemoteProxyHistory(localSessionId, quarantine) {
       ensureAvailable();
       if (!requiredOpaqueId(localSessionId) || !localSessionId.startsWith("remote-")) {
         return Promise.reject(invalidTaskIntent());
       }
-      return invoke("desktop_remote_proxy_archive", { localSessionId: localSessionId })
+      var operation = quarantine
+        ? invoke("desktop_remote_proxy_quarantine", { localSessionId: localSessionId, confirmed: true })
+        : invoke("desktop_remote_proxy_archive", { localSessionId: localSessionId });
+      return operation
         .then(function (cleaned) {
           ++proxyListIntent;
           delete proxyReadIntents[localSessionId];
           var selected = current().remoteProxyHistory;
           if (selected && selected.localSessionId === localSessionId) {
             publish(logic.projectRemoteProxyRead(current(), Object.assign({}, selected, {
-              archived: true, pendingUnknownCount: 0, unattemptedPending: [],
+              archived: true,
+              quarantined: quarantine,
+              pendingUnknownCount: quarantine ? selected.pendingUnknownCount : 0,
+              frozenPreparedCount: quarantine ? selected.unattemptedPending.length : 0,
+              unattemptedPending: [],
             })));
           }
           // The irreversible Rust commit succeeded. Refresh failure cannot
@@ -1419,6 +1469,7 @@
       selectRemoteProxyHistory: selectRemoteProxyHistory,
       deleteRemoteProxyHistory: deleteRemoteProxyHistory,
       archiveRemoteProxyHistory: archiveRemoteProxyHistory,
+      quarantineRemoteProxyHistory: quarantineRemoteProxyHistory,
       listRemoteProxyArchives: listRemoteProxyArchives,
       listRemoteProxyArchiveCandidates: listRemoteProxyArchiveCandidates,
       getRemoteProxyLoadStatus: getRemoteProxyLoadStatus,

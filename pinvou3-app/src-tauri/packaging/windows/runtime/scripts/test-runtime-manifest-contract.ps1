@@ -1,4 +1,4 @@
-﻿# Windows runtime manifest contract suite. Scope note (keeps the lib itself
+# Windows runtime manifest contract suite. Scope note (keeps the lib itself
 # byte-identical to upstream): the contract library is currently exercised
 # ONLY here, via `npm run test:windows-runtime-manifest` in pr-check's
 # windows-codex-runtime-test job. Production staging validation still lives
@@ -10,7 +10,7 @@
 # verbatim below. They dot-source resolve-runtime.ps1 -ImportFunctionsOnly,
 # which in this fork runs its top-level lock validation (read-only, and it
 # passes against the checked-in x86_64.lock.json) before returning ahead of
-# all staging work — so the fork needs no resolve-runtime.ps1 parity for
+# all staging work -- so the fork needs no resolve-runtime.ps1 parity for
 # these assertions. (Round-6 review correction: the earlier note claiming
 # the dot-source was impossible pre-parity was wrong.)
 $ErrorActionPreference = "Stop"
@@ -138,11 +138,11 @@ try {
   }
 
   # Pattern is per-throw-site (not the shared word "canonical") so a regression
-  # in one guard cannot be masked by the other one throwing instead.
-  # Round-13 review: the whole-path guard's whitespace-only case and the
-  # segment guard's trailing-dot / colon (ADS) / trailing-whitespace cases
-  # shipped without direct assertions — a guard regression there passed the
-  # suite while staging validation weakened.
+  # in one guard cannot be masked by the other one throwing instead. The
+  # whole-path guard's whitespace-only case and the segment guard's
+  # trailing-dot / colon (ADS) / trailing-whitespace cases previously shipped
+  # without direct assertions -- a guard regression there passed the suite
+  # while staging validation weakened.
   foreach ($wholePathViolation in @(
     "/absolute.txt",
     "C:/absolute.txt",

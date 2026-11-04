@@ -530,7 +530,7 @@ impl Drop for CredentialRenewalTransition<'_> {
 }
 
 pub struct ToolInstallGuard {
-    app: tauri::AppHandle,
+    telemetry: Option<BehaviorTelemetry>,
     operation_id: String,
     started_at: u64,
     tool_key: &'static str,
@@ -541,15 +541,34 @@ pub struct ToolInstallGuard {
 }
 
 impl ToolInstallGuard {
+    /// Record the actual outcome before propagating it to the caller.
+    pub fn finish<T>(self, result: Result<T, String>) -> Result<T, String> {
+        match result {
+            Ok(value) => {
+                self.success();
+                Ok(value)
+            }
+            Err(error) => {
+                self.failed(&error);
+                Err(error)
+            }
+        }
+    }
+
     pub fn success(mut self) {
-        self.complete(true, None);
+        self.complete(true, None, None);
     }
 
     pub fn failed(mut self, error: &str) {
-        self.complete(false, Some(error_category(Some(error))));
+        self.complete(false, Some(error_category(Some(error))), Some(error));
     }
 
-    fn complete(&mut self, success: bool, error_category: Option<&str>) {
+    fn complete(
+        &mut self,
+        success: bool,
+        error_category: Option<&str>,
+        diagnostic_error: Option<&str>,
+    ) {
         let mut event = BehaviorEvent::new("tool_install_completed")
             .tool(self.tool_key, &self.tool_name, self.tool_type)
             .string("operation_id", &self.operation_id)
@@ -559,10 +578,12 @@ impl ToolInstallGuard {
         if let Some(category) = error_category {
             event = event.string("error_category", category);
         }
-        if let (Some(telemetry), Some(generation)) = (
-            self.app.try_state::<BehaviorTelemetry>(),
-            self.authorization_generation,
-        ) {
+        if let Some(error) = diagnostic_error {
+            event = event.diagnostic_error(error, "lifecycle");
+        }
+        if let (Some(telemetry), Some(generation)) =
+            (self.telemetry.as_ref(), self.authorization_generation)
+        {
             telemetry.complete_tool_install_terminal(self.operation_id.clone(), generation, event);
         }
         self.completed = true;
@@ -572,7 +593,7 @@ impl ToolInstallGuard {
 impl Drop for ToolInstallGuard {
     fn drop(&mut self) {
         if !self.completed {
-            self.complete(false, Some("internal_error"));
+            self.complete(false, Some("internal_error"), None);
         }
     }
 }

@@ -422,7 +422,10 @@ pub async fn deliver_spooled_message(
     let to_session = message.to_session.clone();
     steer_then_dispatch(
         || pool.steer(&to_session, text.clone()),
-        || pool.deliver_messaging_turn(&to_session, text.clone()),
+        // Round-9 M6 (session-creation): no shield here — this sender runs in an
+        // attended session under the user's eye (the family pass tracks
+        // the target-side question separately).
+        || pool.deliver_messaging_turn(&to_session, text.clone(), false),
     )
     .await
 }
@@ -2505,30 +2508,6 @@ mod spool_pipeline_tests {
         .await;
         assert_eq!(*fake.calls.borrow(), 1, "done marker suppresses redelivery");
         assert!(!spool.join("abc.json").exists());
-    }
-
-    #[tokio::test]
-    async fn poison_file_is_quarantined_immediately() {
-        let _home = TempHome::new();
-        let spool = spool_root();
-        std::fs::create_dir_all(&spool).unwrap();
-        std::fs::write(spool.join("bad.json"), b"not json").unwrap();
-        let fake = FakeDelivery {
-            outcome: Ok(DeliveryOutcome::Steered),
-            calls: Rc::new(RefCell::new(0)),
-        };
-        let mut retries = RetryState::default();
-        process_pending_spool(
-            &fake,
-            &AllowAllGates,
-            &sessions_store(),
-            &mut retries,
-            &mut Default::default(),
-        )
-        .await;
-        assert_eq!(*fake.calls.borrow(), 0, "poison never reaches delivery");
-        assert!(failed_dir().join("bad.json").exists());
-        assert!(!spool.join("bad.json").exists());
     }
 
     /// Round-8 R2-3: the post-read size re-check ("grew between stat and

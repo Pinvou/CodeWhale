@@ -1404,7 +1404,7 @@ fn dispatch_inbound(
 /// Test adapters exercise the real suspension and reader validation paths;
 /// they never manufacture or directly install reader authority.
 #[cfg(test)]
-pub(super) fn disconnect_test_transport(sender: &ControllerTransportSender) {
+pub(crate) fn disconnect_test_transport(sender: &ControllerTransportSender) {
     disconnect_test_transport_to_sink(sender, &|_| {});
 }
 
@@ -1419,7 +1419,7 @@ pub(super) fn disconnect_test_transport_to_sink(
 }
 
 #[cfg(test)]
-pub(super) fn dispatch_test_transport_frame(sender: &ControllerTransportSender, frame: &Value) {
+pub(crate) fn dispatch_test_transport_frame(sender: &ControllerTransportSender, frame: &Value) {
     dispatch_test_transport_frame_to_sink(sender, frame, &|_| {});
 }
 
@@ -1432,6 +1432,28 @@ pub(super) fn dispatch_test_transport_frame_to_sink(
     let config =
         ControllerTransportConfig::new("ws://127.0.0.1:1", sender.role, sender.generation());
     dispatch_inbound(&config, sender, sink, &frame.to_string())
+}
+
+/// Capture actual reader delivery, including schema/context rejection and
+/// one-shot final authority. The reader's bool means "keep reading", so it must
+/// not be mistaken for admission (a valid terminal error can return false).
+#[cfg(test)]
+pub(super) fn read_test_transport_frame(
+    sender: &ControllerTransportSender,
+    frame: &Value,
+) -> Option<ControllerTransportEvent> {
+    let delivered = Arc::new(parking_lot::Mutex::new(None));
+    let captured = Arc::clone(&delivered);
+    let config =
+        ControllerTransportConfig::new("ws://127.0.0.1:1", sender.role, sender.generation());
+    dispatch_inbound(
+        &config,
+        sender,
+        &move |event| *captured.lock() = Some(event),
+        &frame.to_string(),
+    );
+    let event = delivered.lock().take();
+    event
 }
 
 /// 未绑定 generation 的 transport（A 端 claim 之前）只按类型准入，绑定之后

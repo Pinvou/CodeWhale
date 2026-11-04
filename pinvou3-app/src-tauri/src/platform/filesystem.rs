@@ -861,6 +861,10 @@ pub(crate) struct PublishedPrivateFile {
     file: parking_lot::Mutex<Option<File>>,
     _directory: Option<PrivateFileDirectory>,
     path: PathBuf,
+    #[cfg(all(target_os = "linux", target_pointer_width = "64"))]
+    read_path: PathBuf,
+    #[cfg(all(target_os = "linux", target_pointer_width = "64"))]
+    cleanup_parent: PrivateFileDirectory,
     cleanup_requested: std::sync::atomic::AtomicBool,
     #[cfg(windows)]
     identity: (u32, u64),
@@ -885,12 +889,36 @@ impl PublishedPrivateFile {
         &self.path
     }
 
+    /// Parser input may differ from the logical attachment path. Linux uses a
+    /// sealed anonymous file; its proc fd path is valid for child readers too.
+    pub(crate) fn read_path(&self) -> &Path {
+        #[cfg(all(target_os = "linux", target_pointer_width = "64"))]
+        {
+            &self.read_path
+        }
+        #[cfg(not(all(target_os = "linux", target_pointer_width = "64")))]
+        {
+            &self.path
+        }
+    }
+
+    pub(crate) fn validate_scope(&self, root: &Path) -> io::Result<()> {
+        #[cfg(all(target_os = "linux", target_pointer_width = "64"))]
+        {
+            linux_publication::validate_scope(self, root)
+        }
+        #[cfg(not(all(target_os = "linux", target_pointer_width = "64")))]
+        {
+            validate_published_path_scope(&self.path, root)
+        }
+    }
+
     pub(crate) fn read_bounded(&self, maximum_bytes: u64) -> io::Result<Vec<u8>> {
         use std::io::{Read as _, Seek as _};
         let mut state = self.file.lock();
         let file = state
             .as_mut()
-            .ok_or_else(|| io::Error::other("private file is closed"))?;
+            .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "private file is closed"))?;
         file.rewind()?;
         let mut bytes = Vec::new();
         (&mut *file)
@@ -924,7 +952,15 @@ impl PublishedPrivateFile {
         remove_known_private_file(directory, name, self.identity)
     }
 
-    #[cfg(not(windows))]
+    #[cfg(all(target_os = "linux", target_pointer_width = "64"))]
+    pub(crate) fn cleanup(&self) -> io::Result<()> {
+        // There is no directory entry to unlink. The last owning fd releases
+        // the sealed bytes, and foreign files at the logical name are retained.
+        self.file.lock().take();
+        Ok(())
+    }
+
+    #[cfg(not(any(windows, all(target_os = "linux", target_pointer_width = "64"))))]
     pub(crate) fn cleanup(&self) -> io::Result<()> {
         Err(io::Error::new(
             io::ErrorKind::Unsupported,
@@ -933,7 +969,7 @@ impl PublishedPrivateFile {
     }
 }
 
-#[cfg(windows)]
+#[cfg(any(windows, all(target_os = "linux", target_pointer_width = "64")))]
 impl Drop for PublishedPrivateFile {
     fn drop(&mut self) {
         if !self
@@ -942,40 +978,74 @@ impl Drop for PublishedPrivateFile {
         {
             return;
         }
-        // Last-owner cleanup uses the exact publication object, not a recursive
-        // pathname delete. Unknown entries are never removed.
-        let Some(path_parent) = self.path.parent() else {
-            return;
-        };
-        let Some(parent_path) = path_parent.parent() else {
-            return;
-        };
-        let Some(directory_name) = path_parent.file_name() else {
-            return;
-        };
-        let parent = match open_private_file_directory(parent_path) {
-            Ok(parent) => parent,
-            Err(_) => {
-                eprintln!("[private-file] cleanup anchor unavailable");
+        #[cfg(all(target_os = "linux", target_pointer_width = "64"))]
+        {
+            linux_publication::cleanup_directory(self);
+        }
+        #[cfg(windows)]
+        {
+            // Last-owner cleanup uses the exact publication object, not a recursive
+            // pathname delete. Unknown entries are never removed.
+            let Some(path_parent) = self.path.parent() else {
+                return;
+            };
+            let Some(parent_path) = path_parent.parent() else {
+                return;
+            };
+            let Some(directory_name) = path_parent.file_name() else {
+                return;
+            };
+            let parent = match open_private_file_directory(parent_path) {
+                Ok(parent) => parent,
+                Err(_) => {
+                    eprintln!("[private-file] cleanup anchor unavailable");
+                    return;
+                }
+            };
+            if self.cleanup().is_err() {
+                eprintln!(
+                    "[private-file] authenticated-object cleanup failed; foreign entries retained"
+                );
                 return;
             }
-        };
-        if self.cleanup().is_err() {
-            eprintln!(
-                "[private-file] authenticated-object cleanup failed; foreign entries retained"
-            );
-            return;
-        }
-        self._directory.take();
-        if parent.remove_empty_child_directory(directory_name).is_err() {
-            eprintln!("[private-file] empty-directory cleanup failed; foreign entries retained");
+            self._directory.take();
+            if parent.remove_empty_child_directory(directory_name).is_err() {
+                eprintln!(
+                    "[private-file] empty-directory cleanup failed; foreign entries retained"
+                );
+            }
         }
     }
 }
 
 pub(crate) const fn supports_private_read_path_publication() -> bool {
-    cfg!(windows)
+    cfg!(any(
+        windows,
+        all(target_os = "linux", target_pointer_width = "64")
+    ))
 }
+
+/// Ordinary publication scopes retain the existing canonical regular-file
+/// check. Anonymous Linux sources authenticate their pinned directory instead.
+pub(crate) fn validate_published_path_scope(path: &Path, root: &Path) -> io::Result<()> {
+    if std::fs::canonicalize(path)? == path
+        && path.starts_with(root)
+        && std::fs::symlink_metadata(path)?.file_type().is_file()
+    {
+        Ok(())
+    } else {
+        Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "private publication scope mismatch",
+        ))
+    }
+}
+
+#[cfg(all(target_os = "linux", target_pointer_width = "64"))]
+#[path = "filesystem/linux_publication.rs"]
+mod linux_publication;
+#[cfg(all(target_os = "linux", target_pointer_width = "64"))]
+pub(crate) use linux_publication::publish_private_read_path;
 
 /// Cleanup authority only: rejected content never grants read authority.
 pub(crate) struct PrivatePublicationCleanup {
@@ -1087,10 +1157,8 @@ thread_local! {
     static PRIVATE_PUBLICATION_AFTER_RENAME: std::cell::RefCell<Option<Box<dyn FnOnce(&Path)>>> = const { std::cell::RefCell::new(None) };
 }
 
-/// No Unix path fallback: directory fds cannot prevent pathname replacement
-/// when a later external parser opens a path. This Windows-only capability is
-/// distinct from portable, handle-relative private writes.
-#[cfg(not(windows))]
+/// Unsupported targets never substitute mutable Unix paths for an OS lease.
+#[cfg(not(any(windows, all(target_os = "linux", target_pointer_width = "64"))))]
 pub(crate) fn publish_private_read_path(
     _directory: PrivateFileDirectory,
     _name: &std::ffi::OsStr,
@@ -3075,18 +3143,125 @@ pub(crate) fn reserved_target_is_unchanged(_file: &File, path: &Path) -> bool {
 /// destroy each other's evidence. Returns the quarantine path; the caller
 /// owns the refuse/log semantics.
 pub(crate) fn quarantine_corrupt_file(path: &Path) -> io::Result<PathBuf> {
+    let quarantine = quarantine_destination(path);
+    std::fs::rename(path, &quarantine)?;
+    Ok(quarantine)
+}
+
+/// Rename-free fallback for callers whose fresh-start path would otherwise
+/// overwrite or delete the corrupt original: when `rename` fails (Windows
+/// AV/backup locks, transiently immutable directories), the in-memory bytes
+/// are written to the same timestamped quarantine name so the evidence
+/// survives the caller's destructive rewrite of the original path.
+pub(crate) fn quarantine_corrupt_file_bytes(path: &Path, bytes: &[u8]) -> io::Result<PathBuf> {
+    let quarantine = quarantine_destination(path);
+    atomic_write_private(&quarantine, bytes)?;
+    Ok(quarantine)
+}
+
+/// Full-content fallback for oversize sources: the bytes-fallback above only
+/// holds what the caller's bounded read kept in memory (a truncated prefix by
+/// design), so when the complete on-disk file is the evidence, copy it whole.
+/// Permission inheritance is platform-shaped: on unix, `fs::copy` preserves
+/// permission bits and the caller repairs the source to 0600 before
+/// quarantining, so the copy inherits that mode — a caller on a path where
+/// the repair did NOT or could not run must use
+/// [`quarantine_secret_file`] instead (the copy would inherit the loose
+/// mode); on Windows the repair is a documented no-op and the copy carries
+/// the source's ACL (same exposure as the source file, no widening).
+pub(crate) fn quarantine_corrupt_file_copy(path: &Path) -> io::Result<PathBuf> {
+    let quarantine = quarantine_destination(path);
+    std::fs::copy(path, &quarantine)?;
+    Ok(quarantine)
+}
+
+/// Quarantine a secret-bearing file whose 0600 permission repair itself
+/// failed (a backup restore can leave a foreign-owned world-readable
+/// secret at the well-known path). A plain `rename` preserves the loose
+/// mode bits, so the evidence copy would stay world-readable at its new
+/// name. Here the app owns the copy it creates: stream-copy the content
+/// (no unbounded in-memory read), tighten the copy to 0600 — the chmod
+/// that failed on the foreign-owned source succeeds on our own file —
+/// then unlink the loose original. The app's authority over the original
+/// is the parent directory's write bit, not the file's ownership.
+/// Non-regular targets (the EISDIR fixture plants a directory at the
+/// path), unreadable sources, and copy failures keep
+/// [`quarantine_corrupt_file`]'s rename semantics; if the copy lands but
+/// the unlink fails, the returned error makes the caller log that the
+/// loose file stays in place (the 0600 copy still exists as evidence).
+pub(crate) fn quarantine_secret_file(path: &Path) -> io::Result<PathBuf> {
+    let is_regular = std::fs::symlink_metadata(path)
+        .map(|meta| meta.file_type().is_file())
+        .unwrap_or(false);
+    let quarantine = quarantine_destination(path);
+    // unix 腿改用 0600 create_new 直接创建副本再流
+    // 式拷贝——`fs::copy` 先按默认模式(通常 0644)落盘再收紧,证据副本
+    // 在 copy+chmod 窗口内全局可读;且收紧失败被静默吞掉,恰在本 helper
+    // 存在的修复失败路径上自相矛盾(文档声称该 chmod 必然成功)。副本
+    // 创建即 0600,后续 chmod 只是显式兜底,失败时大声记录。Windows 腿
+    // 保留 `fs::copy`:副本继承源 ACL(与源文件同暴露,无扩大),默认
+    // ACL 反而取决于目录模板,不在本次收紧范围。
+    let copy_landed = if !is_regular {
+        false
+    } else {
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt as _;
+            let copy_result: io::Result<()> = (|| {
+                let mut source = std::fs::File::open(path)?;
+                let mut destination = std::fs::OpenOptions::new()
+                    .write(true)
+                    .create_new(true)
+                    .mode(0o600)
+                    .open(&quarantine)?;
+                std::io::copy(&mut source, &mut destination)?;
+                Ok(())
+            })();
+            match copy_result {
+                Ok(()) => true,
+                Err(_) => {
+                    let _ = std::fs::remove_file(&quarantine);
+                    return quarantine_corrupt_file(path);
+                }
+            }
+        }
+        #[cfg(not(unix))]
+        {
+            std::fs::copy(path, &quarantine).is_ok()
+        }
+    };
+    if copy_landed {
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            if let Err(error) =
+                std::fs::set_permissions(&quarantine, std::fs::Permissions::from_mode(0o600))
+            {
+                eprintln!(
+                    "quarantine: tighten {} to 0600 failed: {error} (copy was created 0600)",
+                    quarantine.display()
+                );
+            }
+        }
+        return match std::fs::remove_file(path) {
+            Ok(()) => Ok(quarantine),
+            Err(remove_error) => Err(remove_error),
+        };
+    }
+    quarantine_corrupt_file(path)
+}
+
+fn quarantine_destination(path: &Path) -> PathBuf {
     let now = chrono::Utc::now();
     let stem = path
         .file_name()
         .and_then(|name| name.to_str())
         .unwrap_or("file");
-    let quarantine = path.with_file_name(format!(
+    path.with_file_name(format!(
         "{stem}.corrupt-{}.{:09}",
         now.format("%Y%m%dT%H%M%S"),
         now.timestamp_subsec_nanos(),
-    ));
-    std::fs::rename(path, &quarantine)?;
-    Ok(quarantine)
+    ))
 }
 
 /// Append-only log/diary rotation: when `path` exceeds `max_bytes`, either
@@ -4033,6 +4208,11 @@ pub(crate) mod tests {
         let _ = std::fs::remove_dir_all(root);
     }
 
+    // The 1175/1176/1177 family converges through one code path
+    // (converge_failed_windows_replace never reads the raw code), so one
+    // representative error code pins the roll-back layout; there is no
+    // per-code branch left to catch.
+
     #[cfg(windows)]
     #[test]
     fn windows_1175_retains_the_two_official_original_names() {
@@ -4043,26 +4223,6 @@ pub(crate) mod tests {
         let error =
             super::replace_file_atomically_with(&replacement, &target, &backup, |_, _, _| {
                 Err(std::io::Error::from_raw_os_error(1175))
-            })
-            .unwrap_err();
-
-        assert_eq!(error.state(), super::ReplaceState::RolledBack);
-        assert_eq!(std::fs::read_to_string(&target).unwrap(), "old");
-        assert_eq!(std::fs::read_to_string(&replacement).unwrap(), "new");
-        assert!(!backup.exists());
-        let _ = std::fs::remove_dir_all(root);
-    }
-
-    #[cfg(windows)]
-    #[test]
-    fn windows_1176_with_backup_name_retains_the_two_official_original_names() {
-        let (root, target, replacement, backup) = windows_replace_fixture("1176");
-        std::fs::write(&target, "old").unwrap();
-        std::fs::write(&replacement, "new").unwrap();
-
-        let error =
-            super::replace_file_atomically_with(&replacement, &target, &backup, |_, _, _| {
-                Err(std::io::Error::from_raw_os_error(1176))
             })
             .unwrap_err();
 

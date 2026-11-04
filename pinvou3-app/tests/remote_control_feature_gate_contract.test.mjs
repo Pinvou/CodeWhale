@@ -50,6 +50,7 @@ test('compiled production gate is immutable under runtime environment overrides'
       toolchain ? ['run', toolchain, 'rustc', ...args] : args,
       { env, encoding: 'utf8', windowsHide: true, timeout: 60_000 });
     assert.equal(result.status, 0, `${result.error || ''}\n${result.stderr}`);
+    return result.stdout;
   };
   const run = (path, env) => {
     const result = spawnSync(path, [], { env, encoding: 'utf8', windowsHide: true, timeout: 30_000 });
@@ -57,6 +58,10 @@ test('compiled production gate is immutable under runtime environment overrides'
     return result.stdout;
   };
   const helperTests = executable('build-helper-tests');
+  const targetCfg = rustc(['--print', 'cfg']);
+  const targetOs = /^target_os="([^"]+)"$/m.exec(targetCfg)?.[1];
+  const pointerWidth = /^target_pointer_width="([^"]+)"$/m.exec(targetCfg)?.[1];
+  assert.ok(targetOs && pointerWidth, 'the tested compiler must identify its actual target');
   rustc(['--test', helper, '-o', helperTests]);
   assert.match(run(helperTests, process.env), /2 passed; 0 failed/u);
   const host = join(directory, 'host.rs');
@@ -73,7 +78,7 @@ test('compiled production gate is immutable under runtime environment overrides'
       const runtime = { ...process.env, PINVOU_DESKTOP_CONTROLLER_BUILD_ENABLED: '1' };
       delete runtime.PINVOU_DESKTOP_CONTROLLER_ENABLED;
       if (runtimeFlag !== undefined) runtime.PINVOU_DESKTOP_CONTROLLER_ENABLED = runtimeFlag;
-      const enabled = process.platform === 'win32' && buildFlag === '1' && (runtimeFlag === undefined || runtimeFlag === '1');
+      const enabled = (targetOs === 'windows' || (targetOs === 'linux' && pointerWidth === '64')) && buildFlag === '1' && (runtimeFlag === undefined || runtimeFlag === '1');
       assert.equal(run(binary, runtime).trim(), `${enabled} ${enabled}`);
     }
   }
@@ -86,7 +91,9 @@ test('the readiness helper includes the release switch and never supplies defaul
   assert.match(source.slice(start, end), /ensure_desktop_remote_control_enabled\(\)\?/u);
   assert.match(source.slice(start, end), /is_ready\(app\)/u);
   assert.match(source.slice(start, end), /UNAVAILABLE/u);
-  assert.match(source, /try_get::<DesktopRemoteReady>\(\)/u);
-  assert.match(source, /try_get::<T>\(\)/u);
+  // Tauri 2.12 deprecated InvokeMessage::state_ref; the readiness probe now
+  // goes through the webview's Manager::try_state on the same app-wide map.
+  assert.match(source, /try_state::<DesktopRemoteReady>\(\)/u);
+  assert.match(source, /try_state::<T>\(\)/u);
   assert.doesNotMatch(source.slice(0, source.indexOf('#[cfg(test)]')), /unwrap_or_default|\.manage\(/u);
 });

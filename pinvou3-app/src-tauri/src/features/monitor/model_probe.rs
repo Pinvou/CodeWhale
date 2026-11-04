@@ -283,6 +283,13 @@ fn shared_probe_client() -> Option<&'static reqwest::Client> {
         .as_ref()
 }
 
+// Transport-error fixtures can scope a client without changing the production
+// shared client or process-wide DNS/proxy settings.
+#[cfg(test)]
+tokio::task_local! {
+    static TEST_PROBE_CLIENT: reqwest::Client;
+}
+
 async fn snapshot_for_model_config(
     upstream: &str,
     configured_model: Option<String>,
@@ -293,6 +300,10 @@ async fn snapshot_for_model_config(
     configured_context: Option<u32>,
 ) -> Option<VllmSnapshot> {
     let client = shared_probe_client()?;
+    #[cfg(test)]
+    let client = TEST_PROBE_CLIENT
+        .try_with(Clone::clone)
+        .unwrap_or_else(|_| client.clone());
     let target_kind = if preset == ModelPreset::LocalVllm {
         "local"
     } else {
@@ -1486,31 +1497,71 @@ mod tests {
 
     /// A hostname that cannot resolve classifies as `dns_failed`, not
     /// `connection_refused`: hyper-util wraps resolver failures in its
-    /// Connect kind, so `is_connect()` alone mislabels them. `.invalid` is
-    /// reserved by RFC 6761 to never resolve.
+    /// Connect kind, so `is_connect()` alone mislabels them. Inject failures
+    /// through reqwest's resolver: system DNS/proxies can answer even for
+    /// `.invalid`, which would exercise an HTTP response instead.
     #[tokio::test]
     async fn snapshot_classifies_dns_failures_as_dns_failed() {
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        struct FailingDns {
+            message: &'static str,
+            calls: Arc<AtomicUsize>,
+        }
+
+        impl reqwest::dns::Resolve for FailingDns {
+            fn resolve(&self, name: reqwest::dns::Name) -> reqwest::dns::Resolving {
+                assert_eq!(name.as_str(), "pinvou-monitor-probe.invalid");
+                self.calls.fetch_add(1, Ordering::SeqCst);
+                let message = self.message;
+                Box::pin(async move { Err(std::io::Error::other(message).into()) })
+            }
+        }
+
         let _lock = crate::platform::paths::tests::ENV_LOCK
             .lock()
             .unwrap_or_else(|p| p.into_inner());
-        let snap = snapshot_for_model_config(
-            "http://pinvou-monitor-probe.invalid:1",
-            Some("m".to_string()),
-            ModelPreset::LocalVllm,
-            None,
-            "vllm".to_string(),
-            None,
-            None,
-        )
-        .await
-        .expect("a local-preset target yields a snapshot even when unresolvable");
-        let diagnostic = snap.diagnostic.expect("offline carries a diagnostic");
-        assert_eq!(diagnostic.code, "models_unreachable");
-        assert_eq!(diagnostic.transport, Some("dns_failed"));
-        assert_eq!(
-            diagnostic.endpoint.as_deref(),
-            Some("http://pinvou-monitor-probe.invalid:1")
-        );
+        for message in [
+            "failed to lookup address information: fixture DNS failure",
+            "No such host is known: fixture DNS failure",
+        ] {
+            let calls = Arc::new(AtomicUsize::new(0));
+            let client = reqwest::Client::builder()
+                .no_proxy()
+                .dns_resolver(FailingDns {
+                    message,
+                    calls: calls.clone(),
+                })
+                .build()
+                .expect("isolated probe client");
+            let snap = TEST_PROBE_CLIENT
+                .scope(
+                    client,
+                    snapshot_for_model_config(
+                        "http://pinvou-monitor-probe.invalid:1",
+                        Some("m".to_string()),
+                        ModelPreset::LocalVllm,
+                        None,
+                        "vllm".to_string(),
+                        None,
+                        None,
+                    ),
+                )
+                .await
+                .expect("a local-preset target yields a snapshot even when unresolvable");
+            assert!(calls.load(Ordering::SeqCst) > 0, "fixture resolver ran");
+            assert_eq!(snap.status, VllmStatus::Offline);
+            assert_eq!(snap.health_status, HealthStatus::Offline);
+            let diagnostic = snap.diagnostic.expect("offline carries a diagnostic");
+            assert_eq!(diagnostic.code, "models_unreachable");
+            assert_eq!(diagnostic.transport, Some("dns_failed"));
+            assert!(diagnostic.http_status.is_none());
+            assert_eq!(
+                diagnostic.endpoint.as_deref(),
+                Some("http://pinvou-monitor-probe.invalid:1")
+            );
+        }
     }
 
     /// Every branch carries the right structured diagnostic. The offline
