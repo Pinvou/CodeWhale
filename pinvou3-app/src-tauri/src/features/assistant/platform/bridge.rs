@@ -322,6 +322,16 @@ fn official_deepseek_model_name(model: &str) -> String {
 /// `Pinvou3Bridge::scope_deny_ruleset_with` and by features::messaging's
 /// audit records.
 pub const MESSAGING_SEND_TOOL: &str = "mcp_session-reader_send_message_to_session";
+/// Full model-visible name of the session-creation tool (server key
+/// session-reader, tool create_session). Same L1 treatment as
+/// `MESSAGING_SEND_TOOL`: a typed Ask rule is registered for it, but the
+/// rule does not prompt under the current full-auto approval (the engine
+/// consults ask rules for exec_shell and the file tools only) — it is the
+/// latent pin for the approval-mode split. The working gates are the
+/// required-sender validation, the watcher-side isolation checks, and the
+/// unattended-turn deny channel (engine.rs); the audit trail is written by
+/// features::session_creation.
+pub const SESSION_CREATE_TOOL: &str = "mcp_session-reader_create_session";
 /// 原生代码会话的执行根解析器与「两个根」类型统一由
 /// [`crate::features::sessions`] 定义(SessionStore 与 bridge 共用同一实现),
 /// 此处 re-export 保持既有调用路径不变。
@@ -3156,6 +3166,15 @@ impl Pinvou3Bridge {
         // single-sourced here (messaging imports it — dependency direction
         // messaging -> assistant, never the reverse).
         rules.push(codewhale_execpolicy::ToolAskRule::new(MESSAGING_SEND_TOOL));
+        // Session creation (docs/builtin-toolset-contract.md §5 L1, same
+        // pattern as the send tool — and the same honest posture): the rule
+        // is the latent pin for the approval-mode split, not a prompt
+        // today. The deterministic unattended recursion shield is the
+        // engine-side deny channel (create_session joins
+        // create_goal/update_goal in unattended_disallowed_tools); the
+        // working gates are the required-sender validation, the watcher's
+        // isolation re-checks, and the audit trail.
+        rules.push(codewhale_execpolicy::ToolAskRule::new(SESSION_CREATE_TOOL));
         // Scheduled-task family (docs/builtin-toolset-contract.md §5 L1,
         // same pattern — and the same honest posture as the send rule
         // above): the Ask rules are latent pins for the approval-mode
@@ -5328,6 +5347,7 @@ mod tests {
                 .collect::<Vec<_>>(),
             [
                 MESSAGING_SEND_TOOL,
+                SESSION_CREATE_TOOL,
                 SCHEDULED_TASK_CREATE_TOOL,
                 SCHEDULED_TASK_UPDATE_TOOL,
                 SCHEDULED_TASK_DELETE_TOOL,
@@ -5339,6 +5359,7 @@ mod tests {
                 .iter()
                 .all(|r| r.action == codewhale_execpolicy::PermissionAction::Deny
                     || r.tool == MESSAGING_SEND_TOOL
+                    || r.tool == SESSION_CREATE_TOOL
                     || r.tool == SCHEDULED_TASK_CREATE_TOOL
                     || r.tool == SCHEDULED_TASK_UPDATE_TOOL
                     || r.tool == SCHEDULED_TASK_DELETE_TOOL),
@@ -5398,6 +5419,7 @@ mod tests {
                 .iter()
                 .all(|r| r.action == codewhale_execpolicy::PermissionAction::Deny
                     || r.tool == MESSAGING_SEND_TOOL
+                    || r.tool == SESSION_CREATE_TOOL
                     || r.tool == SCHEDULED_TASK_CREATE_TOOL
                     || r.tool == SCHEDULED_TASK_UPDATE_TOOL
                     || r.tool == SCHEDULED_TASK_DELETE_TOOL),
@@ -5414,6 +5436,7 @@ mod tests {
                 .iter()
                 .all(|r| r.action == codewhale_execpolicy::PermissionAction::Deny
                     || r.tool == MESSAGING_SEND_TOOL
+                    || r.tool == SESSION_CREATE_TOOL
                     || r.tool == SCHEDULED_TASK_CREATE_TOOL
                     || r.tool == SCHEDULED_TASK_UPDATE_TOOL
                     || r.tool == SCHEDULED_TASK_DELETE_TOOL),
@@ -5621,6 +5644,51 @@ mod tests {
         // one cyclic edge past the registered architecture envelope
         // (assistant->marketplace = 64, no spare allowance), and a
         // marketplace -> assistant import would close the dependency cycle.
+    }
+
+    /// Session creation (docs/builtin-toolset-contract.md §5 L1): the
+    /// composed ruleset always carries the typed Ask rule for
+    /// create_session. Like the messaging rule it is a latent pin for the
+    /// approval-mode split — it never prompts under the current full-auto
+    /// approval; the deterministic unattended shield against recursive
+    /// creation is the engine-side deny channel. Mirrors the
+    /// messaging-send test above.
+    #[test]
+    fn scope_deny_ruleset_asks_for_session_create() {
+        let bridge = fixture_bridge();
+        let ruleset = bridge.scope_deny_ruleset("sess-plain");
+        let rule = ruleset
+            .ask_rules
+            .iter()
+            .find(|r| r.tool == SESSION_CREATE_TOOL)
+            .expect("the session create tool must carry a typed Ask rule");
+        assert_eq!(rule.action, codewhale_execpolicy::PermissionAction::Ask);
+        assert!(
+            rule.command.is_none(),
+            "the ask rule matches any invocation"
+        );
+        // The L0 read tools carry no Ask rule: they are read-only and must
+        // not nag the user (only the state-changing tools are gated).
+        for read_tool in [
+            "mcp_session-reader_list_sessions",
+            "mcp_session-reader_read_session",
+        ] {
+            assert!(
+                !ruleset.ask_rules.iter().any(|r| r.tool == read_tool),
+                "the L0 {read_tool} must stay ungated"
+            );
+        }
+        // Drift pin (assistant side): the composed ruleset must keep this
+        // typed Ask rule whose tool name is single-sourced in
+        // SESSION_CREATE_TOOL. The OTHER half of the drift pin — the name
+        // staying byte-identical to the session-reader manifest's registered
+        // tool and its session-creation feature mapping — lives in
+        // tests/session_message_block.test.mjs (JS↔Rust drift test), the
+        // same home as the messaging-send pin: an assistant -> marketplace
+        // reference here would add one cyclic edge past the registered
+        // architecture envelope (assistant->marketplace has no spare
+        // allowance), and a marketplace -> assistant import would close the
+        // dependency cycle.
     }
 
     /// Scheduled-task creation (docs/builtin-toolset-contract.md §5 L1, the
