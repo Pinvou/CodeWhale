@@ -2751,14 +2751,14 @@ mod tests {
             );
             return;
         }
-        let path = std::env::temp_dir().join(format!(
-            "pinvou-controlled-local-{}.txt",
-            Uuid::new_v4().simple()
-        ));
-        let session_root = std::env::temp_dir().join(format!(
-            "pinvou-controlled-session-{}",
-            Uuid::new_v4().simple()
-        ));
+        // Linux upload admission accepts user-owned home locations, not /tmp.
+        // This fixture now exercises the real path policy on both platforms.
+        let fixture = tempfile::Builder::new()
+            .prefix(".pinvou-controlled-local-")
+            .tempdir_in(crate::platform::os::user_home_dir())
+            .unwrap();
+        let path = fixture.path().join("input.txt");
+        let session_root = fixture.path().join("session");
         std::fs::create_dir_all(&session_root).unwrap();
         std::fs::write(&path, b"local attachment body").unwrap();
         let attachments = local_controlled_attachments(

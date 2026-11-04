@@ -199,7 +199,7 @@ for (const language of ['zh', 'en', 'ja']) {
   //   the key values supplied at runtime by the Rust `checkDependencies`
   //   probes (top-level dict entries).
   for (const key of [
-    'dep_pdf', 'dep_office_modern', 'dep_office_legacy', 'dep_ocr', 'dep_archive',
+    'dep_pdf', 'dep_office_modern', 'dep_office_legacy', 'dep_office_stream', 'dep_ocr', 'dep_archive',
     'dep_email', 'dep_voice_asr', 'dep_voice_asr_model', 'dep_knowledge_embedding_model',
     'depHint_email_manual',
   ]) {

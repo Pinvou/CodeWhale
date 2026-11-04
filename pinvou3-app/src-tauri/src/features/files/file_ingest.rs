@@ -28,6 +28,8 @@
 mod ingest_archive;
 #[path = "ingest_deps.rs"]
 mod ingest_deps;
+#[path = "ingest_diagnostics.rs"]
+pub(super) mod ingest_diagnostics;
 #[path = "ingest_email.rs"]
 mod ingest_email;
 #[path = "ingest_office.rs"]
@@ -171,9 +173,18 @@ pub struct IngestResult {
     pub byte_size: u64,
     /// 警告或错误消息：超大、缺工具、不支持视觉等。前端 chip 上 ⚠️ 显示。
     pub warning: Option<String>,
+    /// Process-only read authority, never accepted from IPC or persisted.
+    /// Retained through format parsing, image staging and provider reads.
+    #[serde(skip)]
+    pub(crate) read_owner: Option<std::sync::Arc<dyn AttachmentReadOwner>>,
 }
 
 impl IngestResult {
+    pub(crate) fn read_path(&self) -> &Path {
+        self.read_owner
+            .as_ref()
+            .map_or_else(|| Path::new(&self.path), |owner| owner.read_path())
+    }
     /// 缺工具/不支持时的占位结果（warning 文案，无 markdown）。
     ///
     /// 字段默认与既有字面量逐字段一致：`markdown: None`、`token_estimate: 0`、
@@ -187,6 +198,7 @@ impl IngestResult {
         warning: impl Into<String>,
     ) -> Self {
         IngestResult {
+            read_owner: None,
             kind: kind.into(),
             basename: basename.into(),
             path: path.to_string_lossy().into(),
@@ -211,6 +223,7 @@ impl IngestResult {
     ) -> Self {
         let token_estimate = estimate_tokens(&markdown);
         IngestResult {
+            read_owner: None,
             kind: kind.into(),
             basename: basename.into(),
             path: path.to_string_lossy().into(),
@@ -225,6 +238,7 @@ impl IngestResult {
     /// `warning: None`。典型用例：图片附件登记元数据（kind="image"）。
     pub fn placeholder(kind: &str, basename: &str, path: &Path, byte_size: u64) -> Self {
         IngestResult {
+            read_owner: None,
             kind: kind.into(),
             basename: basename.into(),
             path: path.to_string_lossy().into(),
@@ -276,6 +290,7 @@ pub(crate) fn ingest_staged_attachment(
         || display_name.contains(['/', '\\'])
         || display_name.chars().any(char::is_control)
         || display_name.as_bytes().get(1) == Some(&b':')
+        || staged_path.file_name() != Some(std::ffi::OsStr::new(display_name))
         || !matches!(components.next(), Some(std::path::Component::Normal(_)))
         || components.next().is_some()
         || expected_bytes > MAX_FILE_BYTES
@@ -305,20 +320,15 @@ pub(crate) fn ingest_staged_attachment(
     if !canonical_upload_root.starts_with(&canonical_session) {
         return Err("task_attachment_invalid".to_owned());
     }
-    let canonical_path =
-        std::fs::canonicalize(staged_path).map_err(|_| "task_attachment_unavailable".to_owned())?;
-    if canonical_path != owner.path()
-        || !canonical_path.starts_with(&canonical_upload_root)
-        || !std::fs::symlink_metadata(staged_path)
-            .map_err(|_| "task_attachment_unavailable".to_owned())?
-            .file_type()
-            .is_file()
-    {
+    if staged_path != owner.path() {
         return Err("task_attachment_invalid".to_owned());
     }
+    owner
+        .validate_scope(&canonical_upload_root)
+        .map_err(attachment_source_error)?;
     let bytes = owner
         .read_bounded(expected_bytes)
-        .map_err(|_| "task_attachment_invalid".to_owned())?;
+        .map_err(attachment_source_error)?;
     if bytes.len() as u64 != expected_bytes {
         return Err("task_attachment_invalid".to_owned());
     }
@@ -329,16 +339,58 @@ pub(crate) fn ingest_staged_attachment(
     if actual_sha256 != expected_sha256 {
         return Err("task_attachment_invalid".to_owned());
     }
-    // All reopening by existing format parsers is protected by the SAME
-    // publication owner: neither the leaf nor any ancestor can be replaced,
-    // and no new writer can change bytes between verification and parsing.
+    let reference_scope = if owner.read_path() != owner.path() {
+        Some(
+            super::platform::ModelReferenceScope::open(&canonical_session)
+                .map_err(|_| "task_attachment_unavailable".to_owned())?,
+        )
+    } else {
+        None
+    };
+    // Reopen only the OS-owned immutable source. A Linux logical pathname is
+    // scope metadata, never parser input; formats use the validated display name.
     let mut result =
-        ingest_attachment(&canonical_path).map_err(|_| "task_attachment_invalid".to_owned())?;
+        ingest_diagnostics::with_private(|| ingest_checked_named(owner.read_path(), display_name))
+            .map_err(|_| "task_attachment_invalid".to_owned())?;
     if result.kind == "missing" {
         return Err("task_attachment_unavailable".to_owned());
     }
     result.basename = display_name.to_owned();
+    result.path = staged_path.to_string_lossy().into_owned();
+    if let Some(scope) = reference_scope {
+        // Only parser operations may use ephemeral fd addresses. The model's
+        // history can outlive this owner and an fd number can be reused by any
+        // unrelated open, so give accepted content a named session copy. Text
+        // references contain only the extracted body: an archive's original
+        // bytes could otherwise restore members rejected during ingestion.
+        let reference = if result.kind == "image" {
+            Some((display_name, bytes.as_slice()))
+        } else {
+            result
+                .markdown
+                .as_deref()
+                .map(|body| ("content.md", body.as_bytes()))
+        };
+        if let Some((name, content)) = reference {
+            result.path = scope
+                .persist(name, content)
+                .map_err(|_| "task_attachment_unavailable".to_owned())?
+                .to_string_lossy()
+                .into_owned();
+        }
+    }
+    result.read_owner = Some(owner.clone());
     Ok(result)
+}
+
+fn attachment_source_error(error: std::io::Error) -> String {
+    match error.kind() {
+        std::io::ErrorKind::InvalidInput | std::io::ErrorKind::InvalidData => {
+            "task_attachment_invalid"
+        }
+        _ => "task_attachment_unavailable",
+    }
+    .to_owned()
 }
 
 #[cfg(test)]
@@ -421,6 +473,14 @@ fn ingest_checked(path: &Path) -> Result<IngestResult, AttachmentLimitViolation>
         .and_then(|n| n.to_str())
         .unwrap_or("(unnamed)")
         .to_string();
+    ingest_checked_named(path, &basename)
+}
+
+fn ingest_checked_named(
+    path: &Path,
+    display_name: &str,
+) -> Result<IngestResult, AttachmentLimitViolation> {
+    let basename = display_name.to_owned();
     let path_str = path.to_string_lossy().to_string();
     let meta = match std::fs::metadata(path) {
         Ok(m) => m,
@@ -442,7 +502,7 @@ fn ingest_checked(path: &Path) -> Result<IngestResult, AttachmentLimitViolation>
         });
     }
 
-    let ext = path
+    let ext = Path::new(display_name)
         .extension()
         .and_then(|e| e.to_str())
         .map(|s| s.to_ascii_lowercase())
@@ -765,6 +825,7 @@ mod tests {
         // warning()：markdown None、token_estimate 0、warning Some。
         let via_ctor = IngestResult::warning("text", &basename, &tmp, 5, "缺工具");
         let literal = IngestResult {
+            read_owner: None,
             kind: "text".into(),
             basename: basename.clone(),
             path: path_str.clone(),
@@ -788,6 +849,7 @@ mod tests {
         let md = "# 标题\n正文内容".to_string();
         let via_ctor = IngestResult::with_markdown("pdf", &basename, &tmp, 5, md.clone());
         let literal = IngestResult {
+            read_owner: None,
             kind: "pdf".into(),
             basename: basename.clone(),
             path: path_str.clone(),

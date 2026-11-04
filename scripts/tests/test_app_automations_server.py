@@ -221,6 +221,7 @@ class RruleValidationTests(unittest.TestCase):
             _, amb_error = server.validate_rrule("FREQ=ONCE;AT=2026-11-01T01:30")
             future_at = "2026-06-01T09:30"
             normalized, ok_error = server.validate_rrule("FREQ=ONCE;AT=%s" % future_at)
+            _, past_error = server.validate_rrule("FREQ=ONCE;AT=2025-12-31T09:30")
         finally:
             if old_tz is None:
                 os.environ.pop("TZ", None)
@@ -232,6 +233,7 @@ class RruleValidationTests(unittest.TestCase):
         self.assertIn("ambiguous", amb_error)
         self.assertIsNone(ok_error, "an ordinary future local minute must pass")
         self.assertEqual(normalized, "FREQ=ONCE;AT=%s" % future_at)
+        self.assertIn("not in the future", past_error)
 
     def test_out_of_range_and_unknown_fields_rejected(self):
         for rrule in [
