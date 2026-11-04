@@ -237,3 +237,103 @@ fn malformed_voice_without_operation_never_reuses_a_chat_context() {
         );
     }
 }
+
+#[test]
+fn reserved_voice_key_does_not_reuse_live_or_legacy_nonvoice_contexts() {
+    let _home = TestHome::new();
+    let runtime = test_runtime("http://localhost:1");
+    let telemetry = test_telemetry(runtime.clone(), heartbeat_state(&runtime));
+    let at = now_ms();
+    let provider_failure = |session| {
+        BehaviorEvent::new("provider_setup_failed")
+            .session(session)
+            .string("provider_key", "deepseek")
+            .string("error_category", "configuration_missing")
+    };
+
+    // An older snapshot can contain a nonvoice context under a reserved raw ID.
+    telemetry.track(provider_failure("ordinary_provider_session"));
+    let path = paths::pinvou3_home().join("failure-diagnostics.json");
+    let mut persisted: Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+    let contexts = persisted["contexts"].as_object_mut().unwrap();
+    let ordinary = contexts.remove("ordinary_provider_session").unwrap();
+    contexts.insert("voice|op|voiceop_legacy".into(), ordinary);
+    std::fs::write(&path, serde_json::to_vec(&persisted).unwrap()).unwrap();
+    *telemetry.diagnostics.lock().unwrap() = diagnostics::load();
+
+    // Even a legacy context without a voice marker must stay outside the feedback lane.
+    let mut feedback = BehaviorEvent::new("response_feedback_changed")
+        .session("voice|op|voiceop_legacy")
+        .string("feedback_action", "set")
+        .string("rating", "negative");
+    diagnostics::enrich(
+        &telemetry,
+        &mut feedback,
+        &telemetry.current_lease().unwrap(),
+    );
+    assert!(
+        feedback.fields["diagnostic_environment"]
+            .get("provider_key")
+            .is_none()
+    );
+
+    telemetry.track(preflight_failure("voice_chat", "voiceop_legacy", at));
+
+    telemetry.track(voice_event(
+        "voice_entry_clicked",
+        "voice_chat",
+        "voiceop_live",
+        at,
+    ));
+    // The desktop telemetry command accepts this raw ID before wire normalization.
+    telemetry.track(provider_failure("voice|op|voiceop_live"));
+    telemetry.track(preflight_failure("voice_chat", "voiceop_live", at + 1));
+
+    let outbox = telemetry.outbox.lock().unwrap();
+    let failures: Vec<_> = outbox
+        .records
+        .iter()
+        .filter(|record| record.event["event_name"] == "voice_recognition_failed")
+        .collect();
+    assert_eq!(failures.len(), 2);
+    for failure in failures {
+        assert_eq!(
+            failure.event["diagnostic_environment"],
+            json!({ "routing": "local", "input_type": "voice" })
+        );
+    }
+}
+
+#[test]
+fn fallback_event_id_cannot_seed_an_explicit_voice_operation() {
+    let _home = TestHome::new();
+    let runtime = test_runtime("http://localhost:1");
+    let telemetry = test_telemetry(runtime.clone(), heartbeat_state(&runtime));
+    let malformed = BehaviorEvent::new("voice_recognition_failed")
+        .session("voice_chat")
+        .string("provider_key", "deepseek")
+        .string("error_category", "configuration_missing");
+    let operation = malformed.event_id.clone();
+    telemetry.track(malformed);
+    telemetry.track(preflight_failure("voice_chat", &operation, now_ms()));
+
+    let outbox = telemetry.outbox.lock().unwrap();
+    let failures: Vec<_> = outbox
+        .records
+        .iter()
+        .filter(|record| record.event["event_name"] == "voice_recognition_failed")
+        .collect();
+    assert_eq!(failures.len(), 2);
+    assert_eq!(
+        failures[0].event["diagnostic_environment"]["provider_key"],
+        "deepseek"
+    );
+    assert_ne!(
+        failures[0].event["diagnostic_trace_id"],
+        failures[1].event["diagnostic_trace_id"]
+    );
+    assert_eq!(
+        failures[1].event["diagnostic_environment"],
+        json!({ "routing": "local", "input_type": "voice" })
+    );
+}
