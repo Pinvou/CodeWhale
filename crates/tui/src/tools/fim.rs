@@ -82,7 +82,8 @@ impl ToolSpec for FimEditTool {
          expose a fill-in-the-middle completions endpoint, and the call fails \
          otherwise. Each anchor must appear exactly once — the prefix anywhere \
          in the file, the suffix after the prefix — and ambiguous anchors are \
-         refused with their match count."
+         refused with their match count (occurrences are counted without \
+         overlap)."
     }
 
     fn input_schema(&self) -> Value {
@@ -95,11 +96,11 @@ impl ToolSpec for FimEditTool {
                 },
                 "prefix_anchor": {
                     "type": "string",
-                    "description": "Text anchor marking the end of the prefix. Everything up to and including this anchor is kept as-is before the generated middle. Must appear exactly once in the file."
+                    "description": "Text anchor marking the end of the prefix. Everything up to and including this anchor is kept as-is before the generated middle. Must appear exactly once in the file (counted without overlap)."
                 },
                 "suffix_anchor": {
                     "type": "string",
-                    "description": "Text anchor marking the start of the suffix. Everything from this anchor onward is kept as-is after the generated middle. Must appear exactly once after the prefix anchor."
+                    "description": "Text anchor marking the start of the suffix. Everything from this anchor onward is kept as-is after the generated middle. Must appear exactly once after the prefix anchor (counted without overlap)."
                 },
                 "max_tokens": {
                     "type": "integer",
@@ -355,5 +356,29 @@ mod tests {
             message.contains("Suffix anchor not found after prefix anchor"),
             "{message}"
         );
+    }
+
+    #[test]
+    fn fim_copy_pins_the_non_overlapping_counting_contract() {
+        // std matches() counts non-overlapping occurrences, so a
+        // self-similar anchor ("aa" in "aaa") passes with count 1. The
+        // copy must disclose that counting rule or "exactly once" reads
+        // as overlapping occurrences to the model.
+        let tool = FimEditTool::new(None, "fim-model".to_string());
+        let description = tool.description();
+        assert!(description.contains("exactly once"), "{description}");
+        assert!(
+            description.contains("counted without overlap"),
+            "{description}"
+        );
+        let schema = tool.input_schema();
+        let prefix = schema["properties"]["prefix_anchor"]["description"]
+            .as_str()
+            .expect("prefix_anchor description");
+        let suffix = schema["properties"]["suffix_anchor"]["description"]
+            .as_str()
+            .expect("suffix_anchor description");
+        assert!(prefix.contains("counted without overlap"), "{prefix}");
+        assert!(suffix.contains("counted without overlap"), "{suffix}");
     }
 }
