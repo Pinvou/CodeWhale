@@ -18,6 +18,24 @@ fn marker_file(tmp: &TempDir) -> std::path::PathBuf {
 /// `system.rs` is checked against the real historic bytes on every run.
 const V4_LEGACY_BODY_FIXTURE: &str = include_str!("fixtures/v4-best-practices-legacy.md");
 
+/// The generation-12 bodies the four short-description deletions replaced.
+/// Like the v4 fixture above, each is checked against its
+/// `SUPERSEDED_SHIPPED_BODY_DIGESTS` entry on every run, so a transcription
+/// error in the digest table fails the suite instead of silently
+/// fossilizing real generation-12 installs.
+const GEN12_BODY_FIXTURES: &[(&str, &str)] = &[
+    ("best-of-n", include_str!("fixtures/gen12-best-of-n.md")),
+    ("delegate", include_str!("fixtures/gen12-delegate.md")),
+    (
+        "fleet-manager",
+        include_str!("fixtures/gen12-fleet-manager.md"),
+    ),
+    (
+        "skill-creator",
+        include_str!("fixtures/gen12-skill-creator.md"),
+    ),
+];
+
 fn sha256_hex(bytes: &[u8]) -> String {
     use sha2::{Digest, Sha256};
     Sha256::digest(bytes)
@@ -607,6 +625,31 @@ fn upgrade_from_v4_installs_pack_and_retires_unchanged_v4_best_practices() {
     );
     let ver = fs::read_to_string(marker_file(&tmp)).unwrap();
     assert_eq!(ver.trim(), BUNDLED_SKILL_VERSION);
+}
+
+#[test]
+fn gen12_superseded_digests_match_the_recorded_previous_bodies() {
+    // The digest table alone cannot tell a transcription error from a
+    // correct entry (the shape test only rejects digest == current), so
+    // each generation-12 fixture is hashed against its registered entry
+    // here. A wrong hex digit now fails the suite instead of silently
+    // leaving real generation-12 installs unrefreshed.
+    for (name, fixture) in GEN12_BODY_FIXTURES {
+        let digest = SUPERSEDED_SHIPPED_BODY_DIGESTS
+            .iter()
+            .find(|(skill, _)| skill == name)
+            .map(|(_, digest)| *digest)
+            .unwrap_or_else(|| panic!("no superseded digest registered for {name}"));
+        assert_eq!(
+            sha256_hex(fixture.as_bytes()),
+            digest,
+            "{name}: embedded generation-12 body must match the superseded digest"
+        );
+        assert!(
+            is_superseded_shipped_body(name, fixture),
+            "{name}: the embedded generation-12 body must be treated as superseded"
+        );
+    }
 }
 
 #[test]

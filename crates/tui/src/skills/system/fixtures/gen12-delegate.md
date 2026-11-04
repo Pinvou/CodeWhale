@@ -1,0 +1,89 @@
+---
+name: delegate
+description: Strategic delegation for multi-step coding, research, or verification work. Use when a task can be split into parent reasoning plus focused sub-agent execution through the agent tool.
+metadata:
+  short-description: Delegate focused work to sub-agents
+---
+
+# Delegate
+
+Use sub-agents when they can do focused work in parallel while the parent keeps architectural judgment, integration, and final verification.
+
+## Keep vs Delegate
+
+Keep in the parent:
+
+- Understanding the user's actual request and constraints
+- Architecture, security, product, and release-risk decisions
+- Cross-module integration
+- Final review, test interpretation, and user-facing summary
+
+Delegate to sub-agents:
+
+- Read-only exploration over a bounded file set
+- Mechanical edits with a clear file ownership boundary
+- Focused test or lint runs
+- Boilerplate generation from an explicit spec
+- Independent checks that can run while parent work continues
+
+Do not delegate tiny one-step tasks, ambiguous product decisions, destructive operations without a clear acceptance criterion, or final verification.
+
+## Launch Focused Work
+
+Use `agent` for a focused child run. Launch independent children together so they can run in parallel.
+
+Children inherit the active model by default, including `type: "explore"`; prefer provider-neutral routing (the operator's `[subagents]` per-role model configuration) over hardcoded model ids in prompts or Fleet config:
+
+```json
+{
+  "action": "start",
+  "name": "config_audit",
+  "prompt": "Inspect crates/tui/src/config.rs and crates/tui/src/settings.rs for duplicate model-default logic. Return file/line findings only; do not edit files.",
+  "type": "explore"
+}
+```
+
+For code changes, give the child a precise write boundary and tell it not to revert unrelated edits:
+
+```json
+{
+  "action": "start",
+  "name": "docs_patch",
+  "prompt": "Update only docs/CONFIGURATION.md to document the new [tui] keys. Match the surrounding style. Do not edit other files.",
+  "type": "implement",
+  "write_roots": ["docs/CONFIGURATION.md"]
+}
+```
+
+Keep each child's `prompt` self-contained: pass only the context that child needs rather than the whole conversation.
+
+## Evaluate and Verify
+
+Sub-agent outputs are self-reports. Re-check material claims before relying on them:
+
+- Read changed files directly.
+- Run the relevant tests locally.
+- Inspect unexpected diffs before committing.
+- Verify externally visible or destructive claims against source data.
+
+## Prompt Shape
+
+A good delegation prompt includes:
+
+- The exact task
+- Files or modules owned by the child
+- Files or behavior the child must not touch
+- Expected output format
+- Acceptance criteria
+
+Weak prompt:
+
+```text
+Fix the settings bug.
+```
+
+Strong prompt:
+
+```text
+Own only crates/tui/src/settings.rs and its tests. Preserve existing config key names. Add a regression test showing that provider-specific API key changes do not restart onboarding. Return the changed paths and test command output.
+```
