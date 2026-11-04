@@ -1450,6 +1450,16 @@ fn running_as_root() -> bool {
     unsafe { libc::getuid() == 0 }
 }
 
+/// The skip note for the mode-000 root-runner guards. One shared helper so
+/// the crate-level `deny(clippy::print_stderr)` carries a single targeted
+/// exemption instead of one per test, and the wording stays identical
+/// everywhere a root runner quietly drops coverage.
+#[cfg(unix)]
+#[allow(clippy::print_stderr)]
+fn note_mode000_fixture_skipped_under_root() {
+    eprintln!("skipped: the mode-000 fixture is invisible to a root runner");
+}
+
 /// A minimal on-disk git directory git itself accepts — HEAD plus the
 /// objects/ and refs/ directories — enough for the enumeration's
 /// `git ls-files --stage` to report an empty index without a real
@@ -2685,7 +2695,7 @@ fn readonly_filter_discovery_follows_a_padded_commondir_that_resolves() {
 fn readonly_git_c_operand_refuses_unsearchable_stage_root() {
     use std::os::unix::fs::PermissionsExt as _;
     if running_as_root() {
-        eprintln!("skipped: the mode-000 fixture is invisible to a root runner");
+        note_mode000_fixture_skipped_under_root();
         return;
     }
     let workspace = tempdir().expect("workspace");
@@ -10262,11 +10272,8 @@ fn spawn_aborts_with_run_never_started_context_when_the_payload_stalls() {
          instant failure; took {elapsed:?}: {text}"
     );
 }
-/// Helper half of
-/// `sync_lane_without_stdin_data_gets_eof_not_inherited_stdin`: runs one
-/// synchronous (background=false) stdin-reading command from a process whose
-/// own stdin is a pipe the driver deliberately holds open, and records the
-/// resulting status for the driver to judge.
+#[cfg(unix)]
+#[test]
 fn readonly_operand_gate_refuses_cd_operands_the_shell_reinterprets() {
     // zsh's EQUALS expansion turns `cd =ls` into `cd /bin/ls`: the shell's
     // `cd` fails and a `;`/`||` sequence continues in the original directory,
@@ -10306,7 +10313,7 @@ fn readonly_operand_gate_refuses_cd_operands_the_shell_reinterprets() {
 fn readonly_operand_gate_refuses_cd_destinations_the_shell_cannot_enter() {
     use std::os::unix::fs::PermissionsExt;
     if running_as_root() {
-        eprintln!("skipped: the mode-000 fixture is invisible to a root runner");
+        note_mode000_fixture_skipped_under_root();
         return;
     }
     struct ChmodGuard<'a>(&'a std::path::Path);
@@ -10520,7 +10527,7 @@ async fn readonly_shell_refuses_judged_and_run_name_divergences_end_to_end() {
 async fn readonly_shell_refuses_unsearchable_cd_destinations_end_to_end() {
     use std::os::unix::fs::PermissionsExt;
     if running_as_root() {
-        eprintln!("skipped: the mode-000 fixture is invisible to a root runner");
+        note_mode000_fixture_skipped_under_root();
         return;
     }
     struct ChmodGuard<'a>(&'a std::path::Path);
@@ -12669,13 +12676,15 @@ fn readonly_git_discovery_refuses_when_the_aggregate_budget_is_spent() {
     );
 }
 
-/// The spawn-env overrides are the single pinned source of the four fixed
+/// The spawn-env overrides are the single pinned source of the six fixed
 /// key/value pairs every admitted read-only child runs under: the
-/// startup-env walls plus the CDPATH and ripgrep config clears. A dropped
-/// insertion site turns this fn dead (deny(warnings)); a changed value
-/// reds here.
+/// startup-env walls plus the CDPATH and ripgrep config clears and the
+/// BASHOPTS/SHELLOPTS clears (bash honors an inherited `BASHOPTS=dotglob`
+/// or `SHELLOPTS` at startup, widening or re-arming what the walls keep
+/// cold). A dropped insertion site turns this fn dead (deny(warnings)); a
+/// changed value reds here.
 #[test]
-fn readonly_spawn_env_overrides_carry_the_four_fixed_keys() {
+fn readonly_spawn_env_overrides_carry_the_six_fixed_keys() {
     let overrides = super::readonly_spawn_env_overrides();
     let lookup = |key: &str| {
         overrides
@@ -12688,9 +12697,11 @@ fn readonly_spawn_env_overrides_carry_the_four_fixed_keys() {
     assert_eq!(lookup("GLOBIGNORE"), "");
     assert_eq!(lookup("CDPATH"), "");
     assert_eq!(lookup("RIPGREP_CONFIG_PATH"), "");
+    assert_eq!(lookup("BASHOPTS"), "");
+    assert_eq!(lookup("SHELLOPTS"), "");
     assert_eq!(
         overrides.len(),
-        4,
+        6,
         "no unlisted key rides along: {overrides:?}"
     );
 }
